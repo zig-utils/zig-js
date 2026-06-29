@@ -32634,6 +32634,7 @@ fn temporalNowZonedDateTimeFn(ctx: *anyopaque, this: Value, args: []const Value)
 const TimeZone = struct { name: []const u8, offset_ns: i64 };
 const ZdtOffsetBehavior = enum { use, ignore, prefer, reject };
 const ZdtDisambiguation = enum { compatible, earlier, later, reject };
+const ZdtOptions = struct { reject: bool, offset_behavior: ZdtOffsetBehavior, disambiguation: ZdtDisambiguation };
 
 fn readZdtOffsetBehavior(self: *Interpreter, options: Value) EvalError!ZdtOffsetBehavior {
     if (options.isUndefined()) return .reject;
@@ -32658,6 +32659,42 @@ fn readZdtDisambiguation(self: *Interpreter, options: Value) EvalError!ZdtDisamb
     if (std.mem.eql(u8, s, "earlier")) return .earlier;
     if (std.mem.eql(u8, s, "later")) return .later;
     return .reject;
+}
+
+fn readZdtOptions(self: *Interpreter, options: Value) EvalError!ZdtOptions {
+    if (options.isUndefined()) return .{ .reject = false, .offset_behavior = .reject, .disambiguation = .compatible };
+    if (!options.isObject() or options.asObj().is_symbol or options.asObj().is_bigint)
+        return self.throwError("TypeError", "options must be an object or undefined");
+
+    const disambiguation = blk: {
+        const s = (try dtfGetStr(self, options, "disambiguation", &.{ "compatible", "earlier", "later", "reject" }, "compatible")).?;
+        if (std.mem.eql(u8, s, "compatible")) break :blk ZdtDisambiguation.compatible;
+        if (std.mem.eql(u8, s, "earlier")) break :blk ZdtDisambiguation.earlier;
+        if (std.mem.eql(u8, s, "later")) break :blk ZdtDisambiguation.later;
+        break :blk ZdtDisambiguation.reject;
+    };
+
+    const offset_behavior = blk: {
+        const v = try self.getProperty(options, "offset");
+        if (v.isUndefined()) break :blk ZdtOffsetBehavior.reject;
+        const s = try self.toStringV(v);
+        if (std.mem.eql(u8, s, "use")) break :blk ZdtOffsetBehavior.use;
+        if (std.mem.eql(u8, s, "ignore")) break :blk ZdtOffsetBehavior.ignore;
+        if (std.mem.eql(u8, s, "prefer")) break :blk ZdtOffsetBehavior.prefer;
+        if (std.mem.eql(u8, s, "reject")) break :blk ZdtOffsetBehavior.reject;
+        return self.throwError("RangeError", "invalid offset option");
+    };
+
+    const reject = blk: {
+        const ov = try self.getProperty(options, "overflow");
+        if (ov.isUndefined()) break :blk false;
+        const s = try self.toStringV(ov);
+        if (std.mem.eql(u8, s, "reject")) break :blk true;
+        if (std.mem.eql(u8, s, "constrain")) break :blk false;
+        return self.throwError("RangeError", "invalid overflow option");
+    };
+
+    return .{ .reject = reject, .offset_behavior = offset_behavior, .disambiguation = disambiguation };
 }
 
 fn roundOffsetToMinute(ns: i128) i128 {
@@ -33501,9 +33538,8 @@ fn temporalZdtWithFn(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
     if (!(try hasZonedDateTimeWithField(self, bag)))
         return self.throwError("TypeError", "Temporal.ZonedDateTime.prototype.with: property bag must contain at least one valid field");
     const options = if (args.len > 1) args[1] else Value.undef();
-    const reject = try readOverflowReject(self, options);
-    const offset_behavior = try readZdtOffsetBehavior(self, options);
-    const disambiguation = try readZdtDisambiguation(self, options);
+    const zdt_opts = try readZdtOptions(self, options);
+    const reject = zdt_opts.reject;
     const y = (try bagCalendarYear(self, bag, t.calendar)) orelse l.year;
     const m = try withCalendarMonthField(self, bag, t.calendar, y, l.year, l.month, !reject);
     const d = try withIntField(self, bag, "day", l.day);
@@ -33520,16 +33556,16 @@ fn temporalZdtWithFn(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
     const iso = calendarDateToIso(t.calendar, l.year, l.month, l.day);
     const local_ns = @as(i128, tDaysFromCivil(iso.y, iso.m, iso.d)) * 86_400_000_000_000 + timeToNs(&l);
     const tz = TimeZone{ .name = t.tz_name, .offset_ns = t.tz_offset_ns };
-    const actual_offset = try zdtOffsetForLocalDisambiguation(self, tz, local_ns, disambiguation);
+    const actual_offset = try zdtOffsetForLocalDisambiguation(self, tz, local_ns, zdt_opts.disambiguation);
     const offv = try self.getProperty(bag, "offset");
     const epoch_offset: i128 = if (!offv.isUndefined()) blk: {
         const off = try validateRelativeOffset(self, offv);
-        break :blk switch (offset_behavior) {
+        break :blk switch (zdt_opts.offset_behavior) {
             .use => off,
             .ignore, .prefer => @as(i128, actual_offset),
             .reject => if (off == @as(i128, actual_offset)) @as(i128, actual_offset) else return self.throwError("RangeError", "offset does not match time zone"),
         };
-    } else switch (offset_behavior) {
+    } else switch (zdt_opts.offset_behavior) {
         .ignore => @as(i128, actual_offset),
         .use, .prefer, .reject => @as(i128, zdtOffsetAt(t)),
     };
@@ -33602,10 +33638,10 @@ fn toZdtArg(self: *Interpreter, v: Value, constrain: bool, offset_behavior: ZdtO
         const tzv = try self.getProperty(v, "timeZone");
         if (tzv.isString()) {
             const tz = try parseTimeZone(self, tzv.asStr());
-            const f = try toPlainDateFields(self, v, constrain);
-            const tm = try toPlainTimeDataOpt(self, v, false, false);
             const offv = try self.getProperty(v, "offset");
             const offset_ns: ?i128 = if (!offv.isUndefined()) try validateRelativeOffset(self, offv) else null;
+            const f = try toPlainDateFields(self, v, constrain);
+            const tm = try toPlainTimeDataOpt(self, v, false, false);
             var l: value.TemporalData = .{ .kind = .plain_date_time };
             l.year = @intCast(f.y);
             l.month = f.m;
@@ -33682,11 +33718,16 @@ fn parseZdtString(self: *Interpreter, s: []const u8, offset_behavior: ZdtOffsetB
 fn temporalZdtFromFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const item = if (args.len > 0) args[0] else Value.undef();
+    if (item.isString()) {
+        _ = (try timeZoneAnnotation(self, item.asStr())) orelse return self.throwError("RangeError", "ZonedDateTime string requires a [TimeZone] annotation");
+        _ = try parseDateTimeNs(self, item.asStr());
+    } else if (!tIsZdt(item) and !item.isObject()) {
+        return self.throwError("TypeError", "cannot convert to a ZonedDateTime");
+    }
     const options = if (args.len > 1) args[1] else Value.undef();
-    const reject = try readOverflowReject(self, options);
-    const offset_behavior = try readZdtOffsetBehavior(self, options);
-    const disambiguation = try readZdtDisambiguation(self, options);
-    const d = try toZdtArg(self, if (args.len > 0) args[0] else Value.undef(), !reject, offset_behavior, disambiguation);
+    const zdt_opts = try readZdtOptions(self, options);
+    const d = try toZdtArg(self, item, !zdt_opts.reject, zdt_opts.offset_behavior, zdt_opts.disambiguation);
     const o = try zdtMake(self, d.epoch_ns, d.tz_name, d.tz_offset_ns);
     const t = o.asObj().temporal.?;
     t.year = d.year;
