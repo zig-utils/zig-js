@@ -27171,6 +27171,15 @@ fn roundDurationRel(self: *Interpreter, dur: [10]f64, rel: RelTo, opts: RoundOpt
         };
         try checkIsoDate(self, @floatFromInt(probe.y), @floatFromInt(probe.m), @floatFromInt(probe.d));
     }
+    if (smallest == .week and @intFromEnum(largest) < @intFromEnum(TUnit.week)) {
+        const end_floor = tCivilFromDays(@intCast(@divFloor(ep.end, DAY_NS)));
+        const exact = differenceISODate(rel.y, rel.m, rel.d, end_floor.y, end_floor.m, end_floor.d, largest);
+        const lo_date = isoDateAdd(rel.y, rel.m, rel.d, @intFromFloat(exact[0]), @intFromFloat(exact[1]), 0, 0);
+        const lo_ns = @as(i128, tDaysFromCivil(lo_date.y, lo_date.m, lo_date.d)) * DAY_NS + rel.time_ns;
+        const inc: i128 = @intFromFloat(opts.increment);
+        const rounded_weeks = applyRounding(ep.end - lo_ns, inc * 7 * DAY_NS, opts.mode) * inc;
+        return .{ exact[0], exact[1], @floatFromInt(rounded_weeks), 0, 0, 0, 0, 0, 0, 0 };
+    }
     if (@intFromEnum(largest) < @intFromEnum(smallest)) {
         const end_floor = tCivilFromDays(@intCast(@divFloor(ep.end, DAY_NS)));
         const exact = differenceISODate(rel.y, rel.m, rel.d, end_floor.y, end_floor.m, end_floor.d, largest);
