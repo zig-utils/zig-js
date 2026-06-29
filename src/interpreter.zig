@@ -29045,6 +29045,28 @@ fn twoDigits(s: []const u8, p: usize) ?u8 {
     return std.fmt.parseInt(u8, s[p .. p + 2], 10) catch null;
 }
 
+fn plainTimeStringNeedsDesignator(s: []const u8) bool {
+    if (s.len == 4) {
+        const mo = twoDigits(s, 0) orelse return false;
+        const d = twoDigits(s, 2) orelse return false;
+        return mo >= 1 and mo <= 12 and d >= 1 and d <= isoDaysInMonth(1972, mo);
+    }
+    if (s.len == 5 and s[2] == '-') {
+        const mo = twoDigits(s, 0) orelse return false;
+        const d = twoDigits(s, 3) orelse return false;
+        return mo >= 1 and mo <= 12 and d >= 1 and d <= isoDaysInMonth(1972, mo);
+    }
+    if (s.len == 6) {
+        const mo = twoDigits(s, 4) orelse return false;
+        return mo >= 1 and mo <= 12;
+    }
+    if (s.len == 7 and s[4] == '-') {
+        const mo = twoDigits(s, 5) orelse return false;
+        return mo >= 1 and mo <= 12;
+    }
+    return false;
+}
+
 /// Parse "HH[[:]MM[[:]SS[.fraction]]]" at `*i` (no leading designator). The ':'
 /// separators are optional (compact ISO form is accepted); a fraction is allowed
 /// only on seconds — the caller's full-consume check rejects fractional
@@ -29618,6 +29640,7 @@ fn temporalPlainDateTimeWithFn(ctx: *anyopaque, this: Value, args: []const Value
     o.temporal.?.day = r.d;
     o.temporal.?.calendar = t.calendar; // with() preserves the calendar
     setTimeFields(o.temporal.?, vals);
+    try checkPlainDateTimeNs(self, dateTimeToNs(o.temporal.?));
     return Value.obj(o);
 }
 
@@ -31203,6 +31226,11 @@ fn checkZdtLocalDateTimeNs(self: *Interpreter, ns: i128) EvalError!void {
         return self.throwError("RangeError", "ZonedDateTime date-time out of range");
 }
 
+fn checkPlainDateTimeNs(self: *Interpreter, ns: i128) EvalError!void {
+    if (ns < -max_temporal_instant_ns - DAY_NS + 1 or ns >= max_temporal_instant_ns + DAY_NS)
+        return self.throwError("RangeError", "PlainDateTime date-time out of range");
+}
+
 fn checkedEpochNsFromBigInt(self: *Interpreter, v: Value) EvalError!i128 {
     const bv = try self.toBigIntValueImpl(v, false);
     const big = bv.asObj();
@@ -31325,8 +31353,7 @@ fn toPlainTimeDataOpt(self: *Interpreter, v: Value, require_any: bool, reject: b
     if (v.isString()) {
         // A bare time ("HH:MM:SS.fff"), or the time portion of a full date-time
         // string. A UTC designator is rejected, as is a date-only string.
-        const ann = try stripTemporalAnnotations(self, v.asStr());
-        const s = ann.body;
+        const s = try stripInstantAnnotations(self, v.asStr());
         var tb: TBody = .{ .y = 0, .mo = 1, .d = 1, .has_time = true };
         if (s.len > 0 and (s[0] == 'T' or s[0] == 't')) {
             // Bare time with the ISO time designator: "T00:30", "T0030".
@@ -31339,6 +31366,8 @@ fn toPlainTimeDataOpt(self: *Interpreter, v: Value, require_any: bool, reject: b
             tb = try parseTemporalBody(self, s, true);
             if (!tb.has_time) return self.throwError("RangeError", "PlainTime string has no time component");
         } else {
+            if (plainTimeStringNeedsDesignator(s))
+                return self.throwError("RangeError", "ambiguous PlainTime string requires a time designator");
             var i: usize = 0;
             try parseTimeSection(self, s, &i, &tb);
             try parseOffset(self, s, &i, &tb);
@@ -31739,6 +31768,7 @@ fn temporalDateTimeWithPlainTimeFn(ctx: *anyopaque, this: Value, args: []const V
     o.temporal.?.microsecond = tm.microsecond;
     o.temporal.?.nanosecond = tm.nanosecond;
     o.temporal.?.calendar = t.calendar;
+    try checkPlainDateTimeNs(self, dateTimeToNs(o.temporal.?));
     return Value.obj(o);
 }
 
@@ -33523,7 +33553,7 @@ fn installTemporal(env: *Environment, rs: *Shape, object_proto: *value.Object) E
         try setNative(a, rs, p, "toPlainTime", 0, temporalDateTimeToPlainTimeFn);
         try setNative(a, rs, p, "toPlainYearMonth", 0, temporalDateTimeToPlainYearMonthFn);
         try setNative(a, rs, p, "toPlainMonthDay", 0, temporalDateTimeToPlainMonthDayFn);
-        try setNative(a, rs, p, "withPlainTime", 1, temporalDateTimeWithPlainTimeFn);
+        try setNative(a, rs, p, "withPlainTime", 0, temporalDateTimeWithPlainTimeFn);
         try setNative(a, rs, p, "withPlainDate", 1, temporalDateTimeWithPlainDateFn);
         try setNative(a, rs, p, "withCalendar", 1, temporalDateTimeWithCalendarFn);
         try setNative(a, rs, p, "toZonedDateTime", 1, temporalDateTimeToZonedDateTimeFn);
