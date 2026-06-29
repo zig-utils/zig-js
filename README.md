@@ -279,15 +279,15 @@ threading architecture:
   root set now also covers host-side thread queues such as `Gil.tasks`,
   per-lock async grants, async condition waiters, ThreadLocal values, and thread
   completion results. Keep maturing convergence and stress coverage for heavier
-  wait/cleanup mixes; the mid-GC fuzzer now also queues an async
-  `Condition.wait` reacquire path alongside the `Lock.asyncHold` grant, and
-  verifies exact `FinalizationRegistry` cleanup count/sum delivery after those
-  wait-pump sweeps.
+  wait/cleanup mixes; the mid-GC fuzzer now queues a FIFO `Lock.asyncHold`
+  grant chain plus an async `Condition.wait` reacquire path, and verifies exact
+  `FinalizationRegistry` cleanup count/sum delivery after those wait-pump
+  sweeps.
 - **Stress breadth** - the broad fuzzer profile now covers exceptions/finally,
   cleanup, waiters, `asyncJoin`, `Thread.restrict`, and nested thread lifecycle;
   the mid-GC profile covers sync-wait root publication during finishing
-  mid-script sweeps, async condition reacquire delivery, and deterministic
-  cleanup count/sum delivery; the lifecycle
+  mid-script sweeps, queued async-hold delivery, async condition reacquire
+  delivery, and deterministic cleanup count/sum delivery; the lifecycle
   profile adds deterministic termination storms, script Worker/thread overlap
   plus simple-import, diamond-shaped, and fanout/rejoin module Worker/thread
   overlap over retained `SharedArrayBuffer` storage, and mixed `close` /

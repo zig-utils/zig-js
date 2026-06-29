@@ -1854,9 +1854,11 @@ fn runMidScriptWaitPumpGc(gpa: std.mem.Allocator, seed: u64) !bool {
     const rounds = 8 + r.uintLessThan(usize, 8);
     const per_round = 650 + r.uintLessThan(usize, 500);
     const async_allocs = 96 + r.uintLessThan(usize, 96);
+    const async_second_allocs = 48 + r.uintLessThan(usize, 80);
     const async_cond_allocs = 48 + r.uintLessThan(usize, 80);
     const async_base = seed & 1023;
     const async_expected = async_base + async_allocs;
+    const async_second_expected = async_base + 1024 + async_second_allocs;
     const async_cond_expected = async_base + 2048 + async_cond_allocs;
     const spin_iters = 4000 + r.uintLessThan(usize, 6000);
     const wait_timeout_ms = 1200 + r.uintLessThan(usize, 900);
@@ -1876,7 +1878,7 @@ fn runMidScriptWaitPumpGc(gpa: std.mem.Allocator, seed: u64) !bool {
     const src = try std.fmt.allocPrint(
         gpa,
         \\(() => {{
-        \\  const gate = {{ state: 0, propReady: 0, condReady: 0, holderReady: 0, lockReady: 0, releaseLock: 0, lockDone: 0, asyncDone: 0, asyncCondReady: 0, asyncCondDone: 0 }};
+        \\  const gate = {{ state: 0, propReady: 0, condReady: 0, holderReady: 0, lockReady: 0, releaseLock: 0, lockDone: 0, asyncDone: 0, asyncSecondDone: 0, asyncCondReady: 0, asyncCondDone: 0 }};
         \\  const condLock = new Lock();
         \\  const cond = new Condition();
         \\  const heldLock = new Lock();
@@ -1886,6 +1888,8 @@ fn runMidScriptWaitPumpGc(gpa: std.mem.Allocator, seed: u64) !bool {
         \\  const asyncRoot = {{ nested: {{ base: {d} }}, label: 'async-midgc-root' }};
         \\  let asyncScore = 0;
         \\  let asyncThen = 0;
+        \\  let asyncSecondScore = 0;
+        \\  let asyncSecondThen = 0;
         \\  let asyncCondScore = 0;
         \\  let asyncCondThen = 0;
         \\  const asyncGrant = asyncTaskLock.asyncHold(() => {{
@@ -1900,6 +1904,18 @@ fn runMidScriptWaitPumpGc(gpa: std.mem.Allocator, seed: u64) !bool {
         \\  asyncGrant.then(
         \\    (v) => {{ asyncThen = v; }},
         \\    () => {{ asyncThen = -1; }});
+        \\  const asyncSecondGrant = asyncTaskLock.asyncHold(() => {{
+        \\    const taskKeep = [];
+        \\    for (let a = 0; a < {d}; a++)
+        \\      taskKeep.push({{ a, root: asyncRoot, payload: 'async-grant-second-' + a }});
+        \\    asyncSecondScore = asyncRoot.nested.base + 1024 + taskKeep.length;
+        \\    Atomics.store(gate, 'asyncSecondDone', 1);
+        \\    Atomics.notify(gate, 'asyncSecondDone');
+        \\    return asyncSecondScore;
+        \\  }});
+        \\  asyncSecondGrant.then(
+        \\    (v) => {{ asyncSecondThen = v; }},
+        \\    () => {{ asyncSecondThen = -1; }});
         \\  const asyncCondTicket = asyncCondLock.asyncHold().then((release) => {{
         \\    if (typeof release !== 'function')
         \\      throw new Error('bad async condition initial release');
@@ -1990,6 +2006,12 @@ fn runMidScriptWaitPumpGc(gpa: std.mem.Allocator, seed: u64) !bool {
         \\    throw new Error('asyncHold grant was not pumped during mid-script GC pressure');
         \\  if (asyncScore !== {d} || asyncThen !== {d})
         \\    throw new Error('bad asyncHold midgc score: ' + asyncScore + '/' + asyncThen);
+        \\  let asyncSecondSpins = 0;
+        \\  while (Atomics.load(gate, 'asyncSecondDone') === 0 && asyncSecondSpins++ < 10000000) ;
+        \\  if (Atomics.load(gate, 'asyncSecondDone') !== 1)
+        \\    throw new Error('queued asyncHold grant was not pumped during mid-script GC pressure');
+        \\  if (asyncSecondScore !== {d} || asyncSecondThen !== {d})
+        \\    throw new Error('bad queued asyncHold midgc score: ' + asyncSecondScore + '/' + asyncSecondThen);
         \\  condLock.hold(() => {{
         \\    Atomics.store(gate, 'state', 1);
         \\    Atomics.notify(gate, 'state');
@@ -2019,7 +2041,7 @@ fn runMidScriptWaitPumpGc(gpa: std.mem.Allocator, seed: u64) !bool {
         \\}})();
         \\
     ,
-        .{ async_base, async_allocs, async_cond_allocs, wait_timeout_ms, wait_timeout_ms, rounds, per_round, per_round, spin_iters, async_expected, async_expected, async_cond_expected, async_cond_expected },
+        .{ async_base, async_allocs, async_second_allocs, async_cond_allocs, wait_timeout_ms, wait_timeout_ms, rounds, per_round, per_round, spin_iters, async_expected, async_expected, async_second_expected, async_second_expected, async_cond_expected, async_cond_expected },
     );
     defer gpa.free(src);
 

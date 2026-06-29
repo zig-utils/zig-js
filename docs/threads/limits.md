@@ -112,9 +112,9 @@ context APIs.
   tracing those peers as frozen parked stacks. Host-side thread queues are part
   of the root set too: `Gil.tasks`, `LockRecord.pending`, async condition
   waiters, ThreadLocal maps, and thread completion results now trace or barrier
-  their hidden JS values. The mid-GC fuzzer now queues a `Lock.asyncHold` grant
-  plus an async `Condition.wait` reacquire path with captured JS roots, and
-  requires sync-wait pump points to execute them during the same
+  their hidden JS values. The mid-GC fuzzer now queues a FIFO `Lock.asyncHold`
+  grant chain plus an async `Condition.wait` reacquire path with captured JS
+  roots, and requires sync-wait pump points to execute them during the same
   allocation-pressure window that produces a finishing parallel sweep.
   Keep quiescent collection as the fallback for cycles that still cannot
   converge, and keep widening wait/cleanup stress around this protocol.
@@ -123,8 +123,8 @@ context APIs.
   `wait`/`waitAsync`, `Condition`, `Thread.restrict`, and
   `FinalizationRegistry` cleanup under GC-backed parallel contexts. The mid-GC
   profile now hammers sync-wait root publication during finishing
-  `parallel_midscript_gc` sweeps, executes async-hold and async condition
-  reacquire grants from those pump points, and verifies exact
+  `parallel_midscript_gc` sweeps, executes a queued async-hold grant chain and
+  async condition reacquire grants from those pump points, and verifies exact
   `FinalizationRegistry` cleanup count/sum delivery afterward. The lifecycle
   profile now adds deterministic termination storms,
   script Worker/thread retained-`SharedArrayBuffer` overlap, simple-import,

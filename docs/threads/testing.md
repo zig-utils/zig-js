@@ -111,9 +111,10 @@ thread lifecycle, `asyncJoin`, property `wait` / `waitAsync`, `Condition`
 wakeups, `Thread.restrict`, and `FinalizationRegistry` cleanup sidecars. The
 mid-script GC profile (`-Dfuzz-midgc=true`) uses the internal testing context to
 enable `parallel_midscript_gc`, blocks peers in property `Atomics.wait`,
-`Condition.wait`, and contended `Lock` acquisition, queues async-hold and async
-condition reacquire grants through those pump points, then requires exact script
-completion plus at least one finishing parallel sweep and exact
+`Condition.wait`, and contended `Lock` acquisition, queues a FIFO async-hold
+grant chain plus async condition reacquire grants through those pump points,
+then requires exact script completion plus at least one finishing parallel sweep
+and exact
 `FinalizationRegistry` cleanup count/sum delivery after a quiescent collect. The
 lifecycle profile
 (`-Dfuzz-lifecycle=true`) adds expected-throw termination storms for
