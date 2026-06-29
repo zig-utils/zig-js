@@ -29487,7 +29487,7 @@ fn temporalPlainDateTimeConstructorFn(ctx: *anyopaque, this: Value, args: []cons
     var vals: [6]f64 = .{ 0, 0, 0, 0, 0, 0 };
     const maxes = [_]f64{ 23, 59, 59, 999, 999, 999 };
     for (0..6) |i| {
-        const v = if (args.len > 3 + i) args[3 + i] else Value.num(0);
+        const v = if (args.len > 3 + i and !args[3 + i].isUndefined()) args[3 + i] else Value.num(0);
         const n = try temporalIntArg(self, v, "time component");
         if (n < 0 or n > maxes[i]) return self.throwError("RangeError", "time component out of range");
         vals[i] = n;
