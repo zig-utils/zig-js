@@ -27158,7 +27158,7 @@ fn roundDurationRel(self: *Interpreter, dur: [10]f64, rel: RelTo, opts: RoundOpt
                 break;
             }
         }
-        if (!has_lower) return dur;
+        if (!has_lower and @intFromEnum(largest) >= @intFromEnum(smallest)) return dur;
     }
     if (opts.increment != 1) {
         const dir: i64 = if (ep.end >= ep.start) 1 else -1;
@@ -27170,6 +27170,20 @@ fn roundDurationRel(self: *Interpreter, dur: [10]f64, rel: RelTo, opts: RoundOpt
             else => unreachable,
         };
         try checkIsoDate(self, @floatFromInt(probe.y), @floatFromInt(probe.m), @floatFromInt(probe.d));
+    }
+    if (@intFromEnum(largest) < @intFromEnum(smallest)) {
+        const end_floor = tCivilFromDays(@intCast(@divFloor(ep.end, DAY_NS)));
+        const exact = differenceISODate(rel.y, rel.m, rel.d, end_floor.y, end_floor.m, end_floor.d, largest);
+        const lower_start: usize = @intFromEnum(largest) + 1;
+        var has_lower = false;
+        for (lower_start..4) |i| {
+            if (exact[i] != 0) {
+                has_lower = true;
+                break;
+            }
+        }
+        if (!has_lower and @rem(ep.end - rel.time_ns, DAY_NS) == 0)
+            return .{ exact[0], exact[1], exact[2], exact[3], 0, 0, 0, 0, 0, 0 };
     }
     const total = try totalDurationRel(self, dur, rel, smallest);
     const inc = opts.increment;
@@ -27183,7 +27197,11 @@ fn roundDurationRel(self: *Interpreter, dur: [10]f64, rel: RelTo, opts: RoundOpt
         .month => isoDateAdd(rel.y, rel.m, rel.d, 0, rounded_units, 0, 0),
         else => isoDateAdd(rel.y, rel.m, rel.d, 0, 0, rounded_units, 0), // week
     };
-    const diff = differenceISODate(rel.y, rel.m, rel.d, placed.y, placed.m, placed.d, largest);
+    var diff = differenceISODate(rel.y, rel.m, rel.d, placed.y, placed.m, placed.d, largest);
+    if (smallest == .week and @intFromEnum(largest) < @intFromEnum(TUnit.week)) {
+        diff[2] += @floatFromInt(applyRounding(@intFromFloat(diff[3]), 7, opts.mode));
+        diff[3] = 0;
+    }
     return .{ diff[0], diff[1], diff[2], diff[3], 0, 0, 0, 0, 0, 0 };
 }
 
