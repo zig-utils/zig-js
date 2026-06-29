@@ -5992,38 +5992,42 @@ pub const Interpreter = struct {
     pub fn awaitValue(self: *Interpreter, v: Value) EvalError!Value {
         const wrapped = try promiseResolveValue(self, v);
         const p = promise.promiseOf(wrapped).?;
-        const q = self.microtasks;
         while (promise.snapshot(p).state == .pending) {
-            const queue = q orelse break;
-            if (queue.items.len == 0) {
-                // Threads mode: another thread can settle this shared promise
-                // (asyncJoin, cross-thread resolve) — hand the GIL over and
-                // re-check instead of bailing. A promise nothing will ever
-                // settle hangs the awaiting thread, as in any real engine;
-                // the host watchdog is the backstop.
-                if (self.gil) |g| {
-                    jsthread.pumpTasks(self);
-                    jsthread.pollPropAsync(self); // expire property waitAsync deadlines
+            if (self.microtaskDequeue()) |job| {
+                self.current_microtask = job;
+                promise.runJob(self, job) catch |err| {
+                    self.current_microtask = null;
+                    return err;
+                };
+                self.current_microtask = null;
+                continue;
+            }
+            if (self.microtasks == null) break;
+            // Threads mode: another thread can settle this shared promise
+            // (asyncJoin, cross-thread resolve, asyncHold task delivery). In
+            // serialized mode the current interpreter owns the context GIL and
+            // must hand it over while waiting. Under `parallel_js`, the GIL
+            // object still exists for bookkeeping but this interpreter does not
+            // hold it, so yielding is enough after pumping realm tasks.
+            if (self.gil) |g| {
+                jsthread.pumpTasks(self);
+                jsthread.pollPropAsync(self); // expire property waitAsync deadlines
+                if (self.use_thread_gil) {
                     g.release();
                     std.Thread.yield() catch {};
                     g.acquire();
+                } else {
+                    std.Thread.yield() catch {};
+                }
+                continue;
+            }
+            if (self.async_waiters) |waiters| {
+                if (waiters.items.len > 0) {
+                    self.settleAsyncWaiters();
                     continue;
                 }
-                if (self.async_waiters) |waiters| {
-                    if (waiters.items.len > 0) {
-                        self.settleAsyncWaiters();
-                        continue;
-                    }
-                }
-                break; // nothing left to settle it
             }
-            const job = queue.orderedRemove(0);
-            self.current_microtask = job;
-            promise.runJob(self, job) catch |err| {
-                self.current_microtask = null;
-                return err;
-            };
-            self.current_microtask = null;
+            break; // nothing left to settle it
         }
         const done = promise.snapshot(p);
         return switch (done.state) {

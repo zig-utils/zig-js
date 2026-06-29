@@ -8397,6 +8397,46 @@ test "parallel_js (M3 GIL-removal slice): Lock.asyncHold grants serialize withou
     try std.testing.expectEqual(@as(f64, 200), result.asNum());
 }
 
+test "parallel_js: await joined asyncHold promise without releasing absent GIL" {
+    // Regression for the PR-249 `api/lock-async-hold.js` barging path: a
+    // spawned no-GIL thread returns a promise from `lock.asyncHold()` while the
+    // main thread still owns the sync hold. The main thread joins to get that
+    // promise, then awaits it after a legal sync-hold barge. `awaitValue` must
+    // pump task delivery without trying to release a GIL it does not hold.
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_threads = true,
+        .enable_gc = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+    });
+    defer ctx.destroy();
+
+    const promise_value = try ctx.evaluate(
+        \\(async () => {
+        \\  const lock = new Lock();
+        \\  let ticket;
+        \\  const t = new Thread(() => lock.asyncHold());
+        \\  lock.hold(() => {
+        \\    ticket = t.join();
+        \\    if (!(ticket instanceof Promise)) throw new Error("join did not return promise");
+        \\  });
+        \\  let barged = false;
+        \\  lock.hold(() => { barged = true; });
+        \\  if (!barged) throw new Error("sync hold did not barge");
+        \\  const release = await ticket;
+        \\  if (typeof release !== "function") throw new Error("bad release");
+        \\  if (!lock.locked) throw new Error("grant not held");
+        \\  release();
+        \\  if (lock.locked) throw new Error("release did not unlock");
+        \\  return 37;
+        \\})()
+    );
+    var machine = ctx.interpreter();
+    const result = try machine.awaitValue(promise_value);
+    try std.testing.expectEqual(@as(f64, 37), result.asNum());
+}
+
 test "parallel_js (M3 GIL-removal slice): property Atomics waiters notify without context GIL" {
     // Property-mode Atomics wait/notify owns an independent waiter-table mutex.
     // With the execution-path GIL dropped, several real JS threads park on the
