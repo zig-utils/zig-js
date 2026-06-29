@@ -123,14 +123,14 @@ as embedders exercise more threaded host patterns.
   JS throws with parked/unjoined `Thread`s, exact-counter oracles for script
   and module `Worker`s overlapping shared-realm `Thread`s on one retained
   `SharedArrayBuffer`, and mixed `close` / `terminate` / `postMessage`
-  ordering coverage.
+  ordering coverage plus worker handler-exception recovery.
 - CI runs the fuzzer in several modes: default seeded, TSan, high-contention
   amplified, broad semantic, mid-script GC wait-pump, lifecycle, ReleaseSafe,
   and deterministic-result verification.
 
 Remaining: keep extending the lifecycle profile toward more cross-realm
 scheduling, worker module-graph shapes, cleanup/finalization interleavings, and
-teardown race variants.
+additional teardown race variants.
 
 ## 6. CI Gating
 

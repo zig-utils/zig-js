@@ -763,6 +763,138 @@ fn runWorkerCloseTerminateRace(gpa: std.mem.Allocator, seed: u64) !bool {
     return true;
 }
 
+fn runWorkerExceptionRecovery(gpa: std.mem.Allocator, seed: u64) !bool {
+    var prng = std.Random.DefaultPrng.init(seed ^ 0x6578_776f_726b_6572);
+    const r = prng.random();
+    const pings = 2 + r.uintLessThan(usize, 4);
+
+    const ctx = js.Context.createWith(gpa, .{ .enable_gc = true }) catch {
+        std.debug.print("seed {d}: worker exception context creation failed\n", .{seed});
+        return false;
+    };
+    defer ctx.destroy();
+    var machine = ctx.interpreter();
+
+    _ = ctx.evaluate(
+        \\globalThis.__workerExceptionSab = new SharedArrayBuffer(16);
+        \\globalThis.__workerExceptionMsg = function(cmd, id) {
+        \\  return { sab: globalThis.__workerExceptionSab, cmd: cmd, id: id };
+        \\};
+    ) catch |err| {
+        std.debug.print("seed {d}: cannot create worker exception messages: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+
+    const worker_src =
+        \\globalThis.onmessage = (e) => {
+        \\  const v = new Int32Array(e.data.sab);
+        \\  if (e.data.cmd === 'throw') {
+        \\    Atomics.add(v, 0, 1);
+        \\    throw new Error('expected worker handler throw');
+        \\  }
+        \\  if (e.data.cmd === 'ping') {
+        \\    const after = Atomics.add(v, 0, e.data.id) + e.data.id;
+        \\    postMessage({ ack: e.data.id, after });
+        \\    return;
+        \\  }
+        \\  if (e.data.cmd === 'close') {
+        \\    postMessage({ closed: true, total: Atomics.load(v, 0) });
+        \\    close();
+        \\  }
+        \\};
+    ;
+
+    const w = Worker.spawn(worker_src) catch {
+        std.debug.print("seed {d}: worker exception spawn failed\n", .{seed});
+        return false;
+    };
+    var cleanup_worker = true;
+    defer if (cleanup_worker) {
+        w.terminate();
+        w.join();
+        w.destroy();
+    };
+
+    const throw_msg = ctx.evaluate("__workerExceptionMsg('throw', 1)") catch |err| {
+        std.debug.print("seed {d}: cannot make worker throw message: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    w.postMessage(&machine, throw_msg) catch |err| {
+        std.debug.print("seed {d}: post worker throw failed: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+
+    var expected_total: i64 = 1;
+    var i: usize = 0;
+    while (i < pings) : (i += 1) {
+        const id: i64 = @intCast(10 + i);
+        expected_total += id;
+        const src = try std.fmt.allocPrint(gpa, "__workerExceptionMsg('ping', {d})", .{id});
+        defer gpa.free(src);
+        const msg = ctx.evaluate(src) catch |err| {
+            std.debug.print("seed {d}: cannot make worker ping message: {s}\n", .{ seed, @errorName(err) });
+            return false;
+        };
+        w.postMessage(&machine, msg) catch |err| {
+            std.debug.print("seed {d}: post worker ping failed: {s}\n", .{ seed, @errorName(err) });
+            return false;
+        };
+    }
+    const close_msg = ctx.evaluate("__workerExceptionMsg('close', 0)") catch |err| {
+        std.debug.print("seed {d}: cannot make worker close message: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    w.postMessage(&machine, close_msg) catch |err| {
+        std.debug.print("seed {d}: post worker close failed: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    w.close();
+
+    var replies: usize = 0;
+    var saw_close = false;
+    while (true) {
+        const reply = w.receive(&machine, 10_000) catch |err| {
+            std.debug.print("seed {d}: worker exception receive failed: {s}\n", .{ seed, @errorName(err) });
+            return false;
+        } orelse break;
+        const closed = machine.getProperty(reply, "closed") catch js.Value.undef();
+        if (closed.isBoolean() and closed.asBool()) {
+            const total = machine.getProperty(reply, "total") catch |err| {
+                std.debug.print("seed {d}: cannot read worker close total: {s}\n", .{ seed, @errorName(err) });
+                return false;
+            };
+            if (!total.isNumber() or total.asNum() != @as(f64, @floatFromInt(expected_total))) {
+                std.debug.print("seed {d}: worker close total got {d}, expected {d}\n", .{ seed, if (total.isNumber()) total.asNum() else -1, expected_total });
+                return false;
+            }
+            saw_close = true;
+            continue;
+        }
+        const ack = machine.getProperty(reply, "ack") catch |err| {
+            std.debug.print("seed {d}: cannot read worker exception ack: {s}\n", .{ seed, @errorName(err) });
+            return false;
+        };
+        const after = machine.getProperty(reply, "after") catch |err| {
+            std.debug.print("seed {d}: cannot read worker exception counter: {s}\n", .{ seed, @errorName(err) });
+            return false;
+        };
+        if (!ack.isNumber() or !after.isNumber()) {
+            std.debug.print("seed {d}: worker exception reply missing numeric fields\n", .{seed});
+            return false;
+        }
+        replies += 1;
+    }
+    if (replies != pings or !saw_close) {
+        std.debug.print("seed {d}: worker exception replies={d}/{d} saw_close={}\n", .{ seed, replies, pings, saw_close });
+        return false;
+    }
+
+    w.join();
+    w.destroy();
+    cleanup_worker = false;
+    return true;
+}
+
 fn runMidScriptWaitPumpGc(gpa: std.mem.Allocator, seed: u64) !bool {
     var prng = std.Random.DefaultPrng.init(seed ^ 0x6d69_6467_635f_7761);
     const r = prng.random();
@@ -957,12 +1089,14 @@ pub fn main(init: std.process.Init) !void {
         return;
     };
     // `threadfuzz lifecycle <iters> <seed>`: deterministic termination storms,
-    // Worker/thread SAB overlap, module-worker/thread overlap, and mixed
-    // close/terminate/postMessage ordering. The oracle is not "no throw":
+    // Worker/thread SAB overlap, module-worker/thread overlap, mixed
+    // close/terminate/postMessage ordering, and worker handler exception
+    // recovery. The oracle is not "no throw":
     // termination storms must throw from the main script and still tear down
     // cleanly, overlap must produce exact synchronized counter values, and
     // close/terminate races must drain/drop messages according to channel
-    // lifetime rules without deadlock or UAF.
+    // lifetime rules, and thrown worker handlers must not poison later
+    // deliveries.
     if (first) |a| if (std.mem.eql(u8, a, "lifecycle")) {
         iters = 60;
         if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch iters;
@@ -975,8 +1109,9 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runWorkerThreadOverlap(gpa, seed))) lfail += 1;
             if (!(try runModuleWorkerThreadOverlap(gpa, seed))) lfail += 1;
             if (!(try runWorkerCloseTerminateRace(gpa, seed))) lfail += 1;
+            if (!(try runWorkerExceptionRecovery(gpa, seed))) lfail += 1;
         }
-        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 4, base_seed, lfail });
+        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 5, base_seed, lfail });
         if (lfail != 0) std.process.exit(1);
         return;
     };

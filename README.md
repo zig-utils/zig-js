@@ -269,8 +269,8 @@ threading architecture:
   mid-script sweeps; the lifecycle profile adds deterministic termination
   storms, script and module Worker/thread overlap over retained
   `SharedArrayBuffer` storage, and mixed `close` / `terminate` / `postMessage`
-  ordering. Keep extending the fuzzers toward more teardown and cross-realm
-  scheduling oracles.
+  ordering plus worker handler-exception recovery. Keep extending the fuzzers
+  toward more teardown and cross-realm scheduling oracles.
 - **Reference-only PR-249 files** - promote only when the needed engine feature
   exists, especially WebAssembly/JIT shell hooks, deep recursive VM-stack
   behavior, heap caps/OOM semantics, and unsupported `$vm` controls.
