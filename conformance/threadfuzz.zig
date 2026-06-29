@@ -1894,6 +1894,151 @@ fn runFinalizationAsyncJoinCleanupInterleaving(gpa: std.mem.Allocator, seed: u64
     return true;
 }
 
+fn runThreadRestrictLifecycleInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
+    var prng = std.Random.DefaultPrng.init(seed ^ 0x7265_7374_7269_6374);
+    const r = prng.random();
+    const nthreads = 3 + r.uintLessThan(usize, 4);
+    const per_thread = 8 + r.uintLessThan(usize, 12);
+
+    var expected_success_sum: usize = 0;
+    var expected_reject_sum: usize = 0;
+    var id: usize = 0;
+    while (id < nthreads) : (id += 1) {
+        if ((id & 1) == 0) {
+            expected_success_sum += per_thread + id * 10_000;
+        } else {
+            expected_reject_sum += per_thread + id;
+        }
+    }
+
+    const ctx = js.Context.createWith(gpa, .{ .enable_threads = true, .enable_gc = true }) catch {
+        std.debug.print("seed {d}: Thread.restrict lifecycle context creation failed\n", .{seed});
+        return false;
+    };
+    defer ctx.destroy();
+
+    const src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  globalThis.__restrictLifecycleOracle = 0;
+        \\  const mainBox = {{ seed: {d}, owner: 'main' }};
+        \\  Thread.restrict(mainBox);
+        \\  let asyncSuccess = 0;
+        \\  let asyncReject = 0;
+        \\  const threads = [];
+        \\  for (let id = 0; id < {d}; id++) {{
+        \\    const t = new Thread((id, per) => {{
+        \\      let rejectedMain = 0;
+        \\      try {{
+        \\        mainBox.seed;
+        \\      }} catch (e) {{
+        \\        if (e instanceof ConcurrentAccessError)
+        \\          rejectedMain = 1;
+        \\        else
+        \\          throw e;
+        \\      }}
+        \\      if (rejectedMain !== 1)
+        \\        throw new Error('restricted main object was readable from worker ' + id);
+        \\      const local = {{ id, count: 0, tag: 'restrict-' + id }};
+        \\      Thread.restrict(local);
+        \\      for (let i = 0; i < per; i++)
+        \\        local.count = local.count + 1;
+        \\      const nested = new Thread((box) => {{
+        \\        try {{
+        \\          box.count;
+        \\          return -1;
+        \\        }} catch (e) {{
+        \\          return e instanceof ConcurrentAccessError ? 1 : -2;
+        \\        }}
+        \\      }}, local);
+        \\      if (nested.join() !== 1)
+        \\        throw new Error('nested thread read restricted local ' + id);
+        \\      if ((id & 1) === 1)
+        \\        throw {{ id, count: local.count, score: local.count + id, tag: 'restrict-reject' }};
+        \\      return local.count + id * 10000;
+        \\    }}, id, {d});
+        \\    t.asyncJoin().then(
+        \\      (v) => {{ asyncSuccess += v; }},
+        \\      (e) => {{
+        \\        if (e && e.tag === 'restrict-reject' && e.count === {d})
+        \\          asyncReject += e.score;
+        \\        else
+        \\          asyncReject = -1000000;
+        \\      }});
+        \\    threads.push(t);
+        \\  }}
+        \\  if (mainBox.seed !== {d})
+        \\    throw new Error('main restricted object changed');
+        \\  let joinSuccess = 0;
+        \\  let joinReject = 0;
+        \\  for (let id = 0; id < threads.length; id++) {{
+        \\    try {{
+        \\      const v = threads[id].join();
+        \\      if ((id & 1) !== 0)
+        \\        throw new Error('odd restricted worker returned normally');
+        \\      joinSuccess += v;
+        \\    }} catch (e) {{
+        \\      if ((id & 1) === 0)
+        \\        throw e;
+        \\      if (!e || e.id !== id || e.count !== {d} || e.tag !== 'restrict-reject')
+        \\        throw new Error('bad restricted worker rejection for ' + id);
+        \\      joinReject += e.score;
+        \\    }}
+        \\  }}
+        \\  if (joinSuccess !== {d})
+        \\    throw new Error('bad Thread.restrict join success sum ' + joinSuccess);
+        \\  if (joinReject !== {d})
+        \\    throw new Error('bad Thread.restrict join reject sum ' + joinReject);
+        \\  Promise.resolve().then(() => {{
+        \\    if (asyncSuccess !== {d})
+        \\      throw new Error('bad Thread.restrict async success sum ' + asyncSuccess);
+        \\    if (asyncReject !== {d})
+        \\      throw new Error('bad Thread.restrict async reject sum ' + asyncReject);
+        \\    globalThis.__restrictLifecycleOracle = 1;
+        \\  }});
+        \\  return joinSuccess + joinReject;
+        \\}})();
+        \\
+    ,
+        .{
+            seed,
+            nthreads,
+            per_thread,
+            per_thread,
+            seed,
+            per_thread,
+            expected_success_sum,
+            expected_reject_sum,
+            expected_success_sum,
+            expected_reject_sum,
+        },
+    );
+    defer gpa.free(src);
+
+    const result = ctx.evaluate(src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: Thread.restrict lifecycle JS threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    const expected_return = expected_success_sum + expected_reject_sum;
+    if (!result.isNumber() or result.asNum() != @as(f64, @floatFromInt(expected_return))) {
+        std.debug.print("seed {d}: Thread.restrict lifecycle got {d}, expected {d}\n", .{ seed, if (result.isNumber()) result.asNum() else -1, expected_return });
+        return false;
+    }
+    const oracle = ctx.evaluate("globalThis.__restrictLifecycleOracle") catch |err| {
+        std.debug.print("seed {d}: cannot read Thread.restrict lifecycle oracle: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    if (!oracle.isNumber() or oracle.asNum() != 1) {
+        std.debug.print("seed {d}: Thread.restrict lifecycle oracle got {d}\n", .{ seed, if (oracle.isNumber()) oracle.asNum() else -1 });
+        return false;
+    }
+    return true;
+}
+
 fn runThreadLocalLifecycleInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
     var prng = std.Random.DefaultPrng.init(seed ^ 0x746c_735f_6c69_6665);
     const r = prng.random();
@@ -2355,13 +2500,12 @@ pub fn main(init: std.process.Init) !void {
     // `threadfuzz lifecycle <iters> <seed>`: deterministic termination storms,
     // Worker/thread SAB overlap, simple, diamond, and fanout/rejoin
     // module-worker/thread overlap, mixed close/terminate/postMessage ordering,
-    // worker handler
-    // exception recovery, Thread exception identity and returned waitAsync
-    // promise assimilation across join/asyncJoin while waiters are parked,
-    // cross-thread FinalizationRegistry cleanup, FinalizationRegistry cleanup
-    // interleaved with join/asyncJoin and unregister tokens, and ThreadLocal
-    // isolation across nested threads plus throwing and async-joined workers. The oracle
-    // is not "no
+    // worker handler exception recovery, Thread exception identity and returned
+    // waitAsync promise assimilation across join/asyncJoin while waiters are
+    // parked, cross-thread FinalizationRegistry cleanup, FinalizationRegistry
+    // cleanup interleaved with join/asyncJoin and unregister tokens,
+    // Thread.restrict lifecycle isolation, and ThreadLocal isolation across
+    // nested threads plus throwing and async-joined workers. The oracle is not "no
     // throw":
     // termination storms must throw from the main script and still tear down
     // cleanly, overlap must produce exact synchronized counter values, and
@@ -2392,9 +2536,10 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runReturnedWaitAsyncLifecycleInterleaving(gpa, seed))) lfail += 1;
             if (!(try runFinalizationCleanupInterleaving(gpa, seed))) lfail += 1;
             if (!(try runFinalizationAsyncJoinCleanupInterleaving(gpa, seed))) lfail += 1;
+            if (!(try runThreadRestrictLifecycleInterleaving(gpa, seed))) lfail += 1;
             if (!(try runThreadLocalLifecycleInterleaving(gpa, seed))) lfail += 1;
         }
-        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 12, base_seed, lfail });
+        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 13, base_seed, lfail });
         if (lfail != 0) std.process.exit(1);
         return;
     };

@@ -130,8 +130,9 @@ context APIs.
   script Worker/thread retained-`SharedArrayBuffer` overlap, simple-import,
   diamond-shaped, and fanout/rejoin module Worker/thread overlap with exact
   Atomics counter oracles, mixed terminate/close/postMessage races, and worker
-  handler-exception recovery plus Thread exception identity through `join()` /
-  `asyncJoin()` while property and condition waiters are parked,
+  handler-exception recovery plus `Thread.restrict` lifecycle isolation, Thread
+  exception identity through `join()` / `asyncJoin()` while property and
+  condition waiters are parked,
   thread-returned typed-array `waitAsync` promise assimilation through `join()` /
   `asyncJoin()` while waiters are parked, cross-thread `FinalizationRegistry`
   cleanup count/sum oracles, and cleanup delivery interleaved with `join()` /

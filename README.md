@@ -292,8 +292,9 @@ threading architecture:
   plus simple-import, diamond-shaped, and fanout/rejoin module Worker/thread
   overlap over retained `SharedArrayBuffer` storage, and mixed `close` /
   `terminate` / `postMessage` ordering plus worker handler-exception recovery,
-  Thread exception identity through `join()` / `asyncJoin()` while property and
-  condition waiters are parked, thread-returned typed-array `waitAsync` promise
+  `Thread.restrict` lifecycle isolation, Thread exception identity through
+  `join()` / `asyncJoin()` while property and condition waiters are parked,
+  thread-returned typed-array `waitAsync` promise
   assimilation through `join()` / `asyncJoin()` while waiters are parked,
   cross-thread `FinalizationRegistry` cleanup count/sum oracles, cleanup
   delivery interleaved with `join()` / `asyncJoin()` and unregister-token
