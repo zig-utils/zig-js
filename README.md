@@ -262,7 +262,9 @@ threading architecture:
   sync-wait pump path now skips the shared run-loop task lock entirely when no
   async hold jobs are queued, and async-hold delivery now dequeues both the
   per-lock pending list and the realm task queue through FIFO head cursors
-  instead of front-shifting task lists; continue using the profile for the
+  instead of front-shifting task lists. Realm task pumps also copy bounded FIFO
+  bursts under the shared API lock before running grants outside it, so delivery
+  no longer takes that lock once per job; continue using the profile for the
   remaining contended-lock and lifecycle hot spots.
 - **Memory-model maintenance** - keep
   [docs/threads/memory-model.md](docs/threads/memory-model.md) aligned with the

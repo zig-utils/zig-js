@@ -98,7 +98,9 @@ Known performance/maturity work:
 - Async-hold delivery also dequeues both the per-lock pending grant list and the
   realm task queue with FIFO head cursors instead of front-shifting lists,
   keeping delivery cost proportional to delivered jobs rather than pending queue
-  length.
+  length. Task pumps now copy bounded FIFO bursts under the shared threading API
+  lock and run every grant outside it, reducing delivery lock acquisitions from
+  one per job to one per burst.
 - Measured speedup shows real parallelism: roughly 1.8x at 2 threads and 2.5x
   at 4 threads in the recorded checkpoint.
 

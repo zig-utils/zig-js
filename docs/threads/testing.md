@@ -145,6 +145,8 @@ fast-path hits and real async-hold job delivery. Run it before and after
 synchronization or lifecycle changes so performance work has an attributed
 baseline instead of only elapsed time. Empty sync-wait task pumps now have a
 lock-free fast path;
+real async-hold delivery drains bounded FIFO bursts from the realm task queue
+under one API-lock acquisition before running grants outside that lock;
 `threads-profile` remains the check that this kind of targeted optimization does
 not merely move overhead elsewhere.
 

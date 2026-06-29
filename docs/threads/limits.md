@@ -94,8 +94,10 @@ context APIs.
   overhead is empty fast-path churn or real async-hold delivery. Empty sync-wait
   task pumps no longer take the shared run-loop task lock, reducing one measured
   cost in contended lock/lifecycle paths; real async-hold delivery now uses FIFO
-  head cursors for both per-lock pending grants and realm task delivery, so
-  queue drains do not front-shift remaining jobs.
+  head cursors for both per-lock pending grants and realm task delivery, and
+  copies bounded FIFO bursts under the shared API lock before running grants
+  outside it, so queue drains do not front-shift remaining jobs or lock once per
+  delivered job.
 - **Memory model maintenance.** Keep [Memory Model](./memory-model.md) aligned
   with the TSan suppression witness, new synchronization primitives, and any
   promoted PR-249 coverage that exercises JS-defined races.

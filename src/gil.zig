@@ -141,6 +141,31 @@ pub const Gil = struct {
         return item;
     }
 
+    pub fn dequeueTaskBurst(g: *Gil, out: []*anyopaque) usize {
+        if (out.len == 0) return 0;
+        g.lockApi();
+        defer g.unlockApi();
+
+        if (g.tasks_head >= g.tasks.items.len) {
+            g.tasks.clearRetainingCapacity();
+            g.tasks_head = 0;
+            g.tasks_queued.store(0, .release);
+            return 0;
+        }
+
+        const available = g.tasks.items.len - g.tasks_head;
+        const n = @min(out.len, available);
+        @memcpy(out[0..n], g.tasks.items[g.tasks_head..][0..n]);
+        @memset(g.tasks.items[g.tasks_head..][0..n], undefined);
+        g.tasks_head += n;
+        _ = g.tasks_queued.fetchSub(n, .release);
+        if (g.tasks_head == g.tasks.items.len) {
+            g.tasks.clearRetainingCapacity();
+            g.tasks_head = 0;
+        }
+        return n;
+    }
+
     /// Lock/unlock the property-mode Atomics waiter table. No JS or promise
     /// settlement runs while this mutex is held.
     pub fn lockPropWaiters(g: *Gil) void {
@@ -318,4 +343,20 @@ test "gil: task queue is FIFO without front shifts" {
     try std.testing.expectEqual(@as(usize, 0), g.tasks_head);
     try std.testing.expectEqual(@as(usize, 0), g.tasks.items.len);
     try std.testing.expectEqual(@as(?*anyopaque, null), g.dequeueTask());
+
+    try g.enqueueTask(a, @ptrCast(&one));
+    try g.enqueueTask(a, @ptrCast(&two));
+    try g.enqueueTask(a, @ptrCast(&three));
+
+    var burst: [2]*anyopaque = undefined;
+    try std.testing.expectEqual(@as(usize, 2), g.dequeueTaskBurst(&burst));
+    try std.testing.expectEqual(@intFromPtr(&one), @intFromPtr(burst[0]));
+    try std.testing.expectEqual(@intFromPtr(&two), @intFromPtr(burst[1]));
+    try std.testing.expectEqual(@as(usize, 1), g.tasks_queued.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 1), g.dequeueTaskBurst(&burst));
+    try std.testing.expectEqual(@intFromPtr(&three), @intFromPtr(burst[0]));
+    try std.testing.expectEqual(@as(usize, 0), g.tasks_queued.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), g.tasks_head);
+    try std.testing.expectEqual(@as(usize, 0), g.tasks.items.len);
+    try std.testing.expectEqual(@as(usize, 0), g.dequeueTaskBurst(&burst));
 }

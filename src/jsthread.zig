@@ -2133,20 +2133,24 @@ fn enqueueHoldJob(self: *Interpreter, job: *HoldJob) value.HostError!void {
 /// from the drain tail and from every parking point.
 pub fn pumpTasks(self: *Interpreter) void {
     const g = self.gil orelse return;
+    var burst: [64]*anyopaque = undefined;
     while (true) {
         if (g.tasks_queued.load(.acquire) == 0) {
             bumpContention("task_pump_empty");
             return;
         }
-        // Dequeue under api_lock (consistent with `enqueueHoldJob`), but run the
-        // job OUTSIDE the lock — runHoldJob executes JS and takes per-structure
-        // locks, so holding api_lock across it would invert lock order.
-        const raw = g.dequeueTask();
-        const r = raw orelse break;
-        bumpContention("task_pump_jobs");
-        const job: *HoldJob = @ptrCast(@alignCast(r));
-        runHoldJob(self, job) catch {};
-        self.drainMicrotasks() catch {};
+        // Copy a bounded FIFO burst under api_lock, but run every job OUTSIDE the
+        // lock — runHoldJob executes JS and takes per-structure locks, so holding
+        // api_lock across it would invert lock order. Batching keeps asyncHold
+        // delivery from taking the shared API lock once per queued grant.
+        const n = g.dequeueTaskBurst(&burst);
+        if (n == 0) break;
+        for (burst[0..n]) |r| {
+            bumpContention("task_pump_jobs");
+            const job: *HoldJob = @ptrCast(@alignCast(r));
+            runHoldJob(self, job) catch {};
+            self.drainMicrotasks() catch {};
+        }
     }
 }
 
