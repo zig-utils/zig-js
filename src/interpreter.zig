@@ -28800,6 +28800,12 @@ fn readOverflowReject(self: *Interpreter, options: Value) EvalError!bool {
     return self.throwError("RangeError", "invalid overflow option");
 }
 
+fn readOverflowRejectIfOptionsObject(self: *Interpreter, options: Value) EvalError!?bool {
+    if (options.isUndefined()) return false;
+    if (!options.isObject() or options.asObj().is_symbol or options.asObj().is_bigint) return null;
+    return try readOverflowReject(self, options);
+}
+
 /// Read year/month/day (and the calendar) from a PlainDate, a PlainDateTime, or
 /// a fields object.
 const IsoYMD = struct { y: i64, m: u8, d: u8, cal: []const u8 = "iso8601" };
@@ -29588,6 +29594,27 @@ fn rejectPlainTimeLikeInvalidFields(self: *Interpreter, bag: Value) EvalError!vo
         return self.throwError("TypeError", "timeZone is not valid for a PlainTime-like bag");
 }
 
+fn rejectObjectWithCalendarOrTimeZone(self: *Interpreter, bag: Value) EvalError!void {
+    if (isAnyTemporal(bag)) return self.throwError("TypeError", "Temporal object is not valid as a with() property bag");
+    if (try hasBagField(self, bag, "calendar")) return self.throwError("TypeError", "calendar is not valid in a with() property bag");
+    if (try hasBagField(self, bag, "timeZone")) return self.throwError("TypeError", "timeZone is not valid in a with() property bag");
+}
+
+fn hasPlainDateLikeField(self: *Interpreter, bag: Value) EvalError!bool {
+    inline for (.{ "day", "era", "eraYear", "month", "monthCode", "year" }) |name| {
+        if (try hasBagField(self, bag, name)) return true;
+    }
+    return false;
+}
+
+fn hasPlainDateTimeLikeField(self: *Interpreter, bag: Value) EvalError!bool {
+    if (try hasPlainDateLikeField(self, bag)) return true;
+    inline for (.{ "hour", "microsecond", "millisecond", "minute", "nanosecond", "second" }) |name| {
+        if (try hasBagField(self, bag, name)) return true;
+    }
+    return false;
+}
+
 /// `monthCode` override → month number, falling back to the `month` field.
 fn withMonthField(self: *Interpreter, bag: Value, cal: []const u8, year: i64, cur: u8, constrain: bool) EvalError!u8 {
     const mc = try self.getProperty(bag, "monthCode");
@@ -29631,12 +29658,20 @@ fn temporalPlainDateWithFn(ctx: *anyopaque, this: Value, args: []const Value) va
     if (!tIsTemporal(this, .plain_date)) return self.throwError("TypeError", "non-PlainDate");
     const t = this.asObj().temporal.?;
     const bag = if (args.len > 0) args[0] else Value.undef();
-    if (!bag.isObject()) return self.throwError("TypeError", "Temporal.PlainDate.prototype.with: argument must be an object");
-    const reject = try readOverflowReject(self, if (args.len > 1) args[1] else Value.undef());
+    if (!isObjectLike(bag)) return self.throwError("TypeError", "Temporal.PlainDate.prototype.with: argument must be a PlainDate-like object");
+    try rejectObjectWithCalendarOrTimeZone(self, bag);
+    if (!(try hasPlainDateLikeField(self, bag))) return self.throwError("TypeError", "Temporal.PlainDate.prototype.with: no supported fields");
+    const options = if (args.len > 1) args[1] else Value.undef();
     const y = (try bagCalendarYear(self, bag, t.calendar)) orelse t.year;
-    const m = try withCalendarMonthField(self, bag, t.calendar, y, t.year, t.month, !reject);
+    const object_options_reject = try readOverflowRejectIfOptionsObject(self, options);
+    const constrained_m = try withCalendarMonthField(self, bag, t.calendar, y, t.year, t.month, true);
     const d = try withIntField(self, bag, "day", t.day);
-    const r = try regulateCalendarDate(self, t.calendar, @floatFromInt(y), @floatFromInt(@as(i64, m)), @floatFromInt(d), !reject);
+    const constrained = try regulateCalendarDate(self, t.calendar, @floatFromInt(y), @floatFromInt(@as(i64, constrained_m)), @floatFromInt(d), true);
+    const reject = object_options_reject orelse try readOverflowReject(self, options);
+    const r = if (reject) blk: {
+        const reject_m = try withCalendarMonthField(self, bag, t.calendar, y, t.year, t.month, false);
+        break :blk try regulateCalendarDate(self, t.calendar, @floatFromInt(y), @floatFromInt(@as(i64, reject_m)), @floatFromInt(d), false);
+    } else constrained;
     const o = try makeTemporal(self, .plain_date, "\x00T.PlainDate");
     o.temporal.?.year = @intCast(r.y);
     o.temporal.?.month = r.m;
@@ -29666,12 +29701,20 @@ fn temporalPlainDateTimeWithFn(ctx: *anyopaque, this: Value, args: []const Value
     if (!tIsTemporal(this, .plain_date_time)) return self.throwError("TypeError", "non-PlainDateTime");
     const t = this.asObj().temporal.?;
     const bag = if (args.len > 0) args[0] else Value.undef();
-    if (!isObjectLike(bag)) return self.throwError("TypeError", "Temporal.PlainDateTime.prototype.with: argument must be an object");
-    const reject = try readOverflowReject(self, if (args.len > 1) args[1] else Value.undef());
+    if (!isObjectLike(bag)) return self.throwError("TypeError", "Temporal.PlainDateTime.prototype.with: argument must be a PlainDateTime-like object");
+    try rejectObjectWithCalendarOrTimeZone(self, bag);
+    if (!(try hasPlainDateTimeLikeField(self, bag))) return self.throwError("TypeError", "Temporal.PlainDateTime.prototype.with: no supported fields");
+    const options = if (args.len > 1) args[1] else Value.undef();
     const y = (try bagCalendarYear(self, bag, t.calendar)) orelse t.year;
-    const m = try withCalendarMonthField(self, bag, t.calendar, y, t.year, t.month, !reject);
+    const object_options_reject = try readOverflowRejectIfOptionsObject(self, options);
+    const constrained_m = try withCalendarMonthField(self, bag, t.calendar, y, t.year, t.month, true);
     const d = try withIntField(self, bag, "day", t.day);
-    const r = try regulateCalendarDate(self, t.calendar, @floatFromInt(y), @floatFromInt(@as(i64, m)), @floatFromInt(d), !reject);
+    const constrained = try regulateCalendarDate(self, t.calendar, @floatFromInt(y), @floatFromInt(@as(i64, constrained_m)), @floatFromInt(d), true);
+    const reject = object_options_reject orelse try readOverflowReject(self, options);
+    const r = if (reject) blk: {
+        const reject_m = try withCalendarMonthField(self, bag, t.calendar, y, t.year, t.month, false);
+        break :blk try regulateCalendarDate(self, t.calendar, @floatFromInt(y), @floatFromInt(@as(i64, reject_m)), @floatFromInt(d), false);
+    } else constrained;
     const names = [_][]const u8{ "hour", "minute", "second", "millisecond", "microsecond", "nanosecond" };
     const maxes = [_]i64{ 23, 59, 59, 999, 999, 999 };
     const cur = [_]i64{ t.hour, t.minute, t.second, t.millisecond, t.microsecond, t.nanosecond };
