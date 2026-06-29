@@ -6957,10 +6957,8 @@ pub const Interpreter = struct {
 
     fn regexpSplit(self: *Interpreter, rx: Value, s: []const u8, limit_value: Value) EvalError!Value {
         if (!isRegExpObjectValue(rx)) return self.throwError("TypeError", "RegExp.prototype[Symbol.split] called on a non-object");
-        const lim: usize = if (limit_value.isUndefined()) std.math.maxInt(u32) else value.Value.uint32FromF64(try self.toNumberV(limit_value));
         const result = try self.newArray();
         const out = &result.asObj().elements;
-        if (lim == 0) return result;
 
         const default_ctor = self.env.get("RegExp") orelse Value.undef();
         const ctor = try self.speciesConstructor(rx, default_ctor);
@@ -6968,6 +6966,8 @@ pub const Interpreter = struct {
         const full_unicode = std.mem.indexOfScalar(u8, flags, 'u') != null or std.mem.indexOfScalar(u8, flags, 'v') != null;
         const splitter_flags = if (std.mem.indexOfScalar(u8, flags, 'y') != null) flags else try std.mem.concat(self.arena, u8, &.{ flags, "y" });
         const splitter = try self.construct(ctor, &.{ rx, Value.str(splitter_flags) });
+        const lim: usize = if (limit_value.isUndefined()) std.math.maxInt(u32) else value.Value.uint32FromF64(try self.toNumberV(limit_value));
+        if (lim == 0) return result;
 
         const size = utf16LenOfString(s);
         if (size == 0) {
