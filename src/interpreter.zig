@@ -32557,10 +32557,10 @@ fn temporalZdtGetTimeZoneTransitionFn(ctx: *anyopaque, this: Value, args: []cons
     const d = if (args.len > 0) args[0] else Value.undef();
     if (d.isUndefined()) return self.throwError("TypeError", "getTimeZoneTransition requires a direction");
     const dir: []const u8 = if (d.isString()) d.asStr() else blk: {
-        if (d.isObject()) {
+        if (d.isObject() and !d.asObj().is_symbol and !d.asObj().is_bigint) {
             const dv = try self.getProperty(d, "direction");
             if (dv.isUndefined()) return self.throwError("RangeError", "direction is required");
-            break :blk if (dv.isString()) dv.asStr() else "";
+            break :blk try self.toStringV(dv);
         }
         return self.throwError("TypeError", "invalid direction");
     };
