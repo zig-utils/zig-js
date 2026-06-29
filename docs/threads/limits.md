@@ -69,11 +69,12 @@ context APIs.
 
 - **GC allocation fast path / nursery.** The first cell-allocation fast path has
   landed: GC cells use a reusable size-class slab backing instead of calling the
-  backing allocator for every cell. Correctness is gated, but tight-loop
-  block-scope allocation and create/destroy-heavy context lifecycles are still
-  slower under the GC path than under the old arena model. `zig build gc-profile`
-  remains the repeatable baseline before nursery/generational or lifecycle
-  pooling work lands.
+  backing allocator for every cell, and slab ownership checks are bucket-local
+  so frees do not scan unrelated size-class chunks during collection or teardown.
+  Correctness is gated, but tight-loop block-scope allocation and
+  create/destroy-heavy context lifecycles are still slower under the GC path than
+  under the old arena model. `zig build gc-profile` remains the repeatable
+  baseline before nursery/generational or lifecycle pooling work lands.
 - **Context lifecycle cost.** Long-lived embedders amortize the GC setup and
   teardown costs, but create-per-unit-of-work embedders need either cheaper
   context lifecycle or clearer guidance.

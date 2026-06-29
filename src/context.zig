@@ -95,7 +95,7 @@ pub const GcCellBacking = struct {
     inner: std.mem.Allocator,
     parallel: bool = false,
     lock: std.atomic.Value(u32) = .init(0),
-    chunks: std.ArrayListUnmanaged([]align(16) u8) = .empty,
+    bucket_chunks: [bucket_count]std.ArrayListUnmanaged([]align(16) u8) = .{ .empty, .empty, .empty, .empty, .empty, .empty },
     free_lists: [bucket_count]?*FreeNode = .{ null, null, null, null, null, null },
 
     inline fn acquire(self: *GcCellBacking) void {
@@ -119,7 +119,7 @@ pub const GcCellBacking = struct {
         const slots = @max(@as(usize, 1), chunk_bytes / slot_size);
         const chunk_len = slots * slot_size;
         const chunk = self.inner.alignedAlloc(u8, .@"16", chunk_len) catch return false;
-        self.chunks.append(self.inner, chunk) catch {
+        self.bucket_chunks[idx].append(self.inner, chunk) catch {
             self.inner.free(chunk);
             return false;
         };
@@ -132,9 +132,9 @@ pub const GcCellBacking = struct {
         return true;
     }
 
-    fn ownsPtrLocked(self: *GcCellBacking, ptr: [*]u8) bool {
+    fn ownsPtrLocked(self: *GcCellBacking, idx: usize, ptr: [*]u8) bool {
         const addr = @intFromPtr(ptr);
-        for (self.chunks.items) |chunk| {
+        for (self.bucket_chunks[idx].items) |chunk| {
             const start = @intFromPtr(chunk.ptr);
             const end = start + chunk.len;
             if (addr >= start and addr < end) return true;
@@ -162,7 +162,7 @@ pub const GcCellBacking = struct {
         if (bucketIndex(mem.len, alignment)) |idx| {
             self.acquire();
             defer self.unlock();
-            if (self.ownsPtrLocked(mem.ptr)) return new_len <= bucket_sizes[idx];
+            if (self.ownsPtrLocked(idx, mem.ptr)) return new_len <= bucket_sizes[idx];
         }
         self.acquire();
         defer self.unlock();
@@ -174,7 +174,7 @@ pub const GcCellBacking = struct {
         if (bucketIndex(mem.len, alignment)) |idx| {
             self.acquire();
             defer self.unlock();
-            if (self.ownsPtrLocked(mem.ptr)) {
+            if (self.ownsPtrLocked(idx, mem.ptr)) {
                 if (new_len <= bucket_sizes[idx]) return mem.ptr;
                 return null;
             }
@@ -189,7 +189,7 @@ pub const GcCellBacking = struct {
         if (bucketIndex(mem.len, alignment)) |idx| {
             self.acquire();
             defer self.unlock();
-            if (self.ownsPtrLocked(mem.ptr)) {
+            if (self.ownsPtrLocked(idx, mem.ptr)) {
                 const node: *FreeNode = @ptrCast(@alignCast(mem.ptr));
                 node.next = self.free_lists[idx];
                 self.free_lists[idx] = node;
@@ -213,8 +213,11 @@ pub const GcCellBacking = struct {
     }
 
     pub fn deinit(self: *GcCellBacking) void {
-        for (self.chunks.items) |chunk| self.inner.free(chunk);
-        self.chunks.deinit(self.inner);
+        for (&self.bucket_chunks) |*chunks| {
+            for (chunks.items) |chunk| self.inner.free(chunk);
+            chunks.deinit(self.inner);
+            chunks.* = .empty;
+        }
         self.free_lists = .{ null, null, null, null, null, null };
     }
 };
@@ -230,6 +233,20 @@ test "GC cell backing recycles aligned cell slabs and delegates side storage" {
     const reused = try a.alignedAlloc(u8, .@"16", 200);
     try std.testing.expectEqual(first_ptr, reused.ptr);
     a.free(reused);
+
+    const small = try a.alignedAlloc(u8, .@"16", 48);
+    const small_ptr = small.ptr;
+    const large = try a.alignedAlloc(u8, .@"16", 1500);
+    const large_ptr = large.ptr;
+    a.free(small);
+    a.free(large);
+    const small_reused = try a.alignedAlloc(u8, .@"16", 48);
+    const large_reused = try a.alignedAlloc(u8, .@"16", 1500);
+    try std.testing.expectEqual(small_ptr, small_reused.ptr);
+    try std.testing.expectEqual(large_ptr, large_reused.ptr);
+    try std.testing.expect(@intFromPtr(small_reused.ptr) != @intFromPtr(large_reused.ptr));
+    a.free(small_reused);
+    a.free(large_reused);
 
     const side = try a.alignedAlloc(u8, .@"8", 200);
     try std.testing.expect(@intFromPtr(side.ptr) != @intFromPtr(first_ptr));

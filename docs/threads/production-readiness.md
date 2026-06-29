@@ -47,8 +47,10 @@ Known performance/maturity work:
 
 - GC cells now use `Context.GcCellBacking`, a reusable size-class slab backing
   that recycles 16-byte-aligned cell allocations and delegates non-cell heap side
-  storage unchanged. This cuts the old one-general-allocator-call-per-cell
-  profile without changing the collector API.
+  storage unchanged. Ownership classification is now bucket-local too, so
+  collection and context teardown do not scan unrelated size-class chunks when
+  freeing a cell. This cuts the old one-general-allocator-call-per-cell profile
+  without changing the collector API.
 - Tight-loop block-scoped allocation is still slower under the GC path compared
   with arena bulk allocation. This still needs a nursery/generational strategy
   or an engine optimization for non-captured per-iteration bindings.

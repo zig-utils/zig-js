@@ -152,7 +152,9 @@ treats those as non-cells. This keeps the trace surface to runtime values only.
   size classes are few. In zig-js this first ships as `Context.GcCellBacking`:
   the `zig-gc` heap still sees a normal allocator, while 16-byte-aligned cell
   slabs are recycled from 64 KiB size-class chunks and non-cell heap side storage
-  delegates unchanged.
+  delegates unchanged. Chunk ownership is tracked per size class, so free/remap
+  classification for a 128-byte cell only scans 128-byte chunks instead of the
+  entire backing.
 - **Mark:** explicit mark stack (no recursion — JS graphs are deep). Tri-color:
   white = unmarked, grey = on stack, black = traced.
 - **Weak processing:** after the strong mark stack drains, an ephemeron
