@@ -27116,6 +27116,22 @@ fn roundDurationRel(self: *Interpreter, dur: [10]f64, rel: RelTo, opts: RoundOpt
         return out;
     }
     // Case 2: smallestUnit is year/month/week — round the fractional calendar total.
+    if (opts.increment == 1) {
+        const first_lower: usize = switch (smallest) {
+            .year => 1,
+            .month => 2,
+            .week => 3,
+            else => 10,
+        };
+        var has_lower = false;
+        for (first_lower..10) |i| {
+            if (dur[i] != 0) {
+                has_lower = true;
+                break;
+            }
+        }
+        if (!has_lower) return dur;
+    }
     const total = totalDurationRel(self, dur, rel, smallest);
     const inc = opts.increment;
     const scale: i128 = 1_000_000_000;
@@ -31751,6 +31767,14 @@ fn calendarMonthsBetween(cal: []const u8, y1: i64, m1: u8, d1: u8, start_day: i6
 
 fn calendarDateDiff(cal: []const u8, y1: i64, m1: u8, d1: u8, y2: i64, m2: u8, d2: u8, largest: TUnit) [10]f64 {
     var out: [10]f64 = .{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+    if (std.mem.eql(u8, cal, "iso8601")) {
+        const iso = differenceISODate(y1, m1, d1, y2, m2, d2, largest);
+        out[0] = iso[0];
+        out[1] = iso[1];
+        out[2] = iso[2];
+        out[3] = iso[3];
+        return out;
+    }
     if (largest == .day or largest == .week) {
         var days = calendarEpochDay(cal, y2, m2, d2) - calendarEpochDay(cal, y1, m1, d1);
         if (largest == .week) {
@@ -32008,6 +32032,13 @@ fn temporalPlainDateUntilFn(comptime sign: f64) value.NativeFn {
             const largest = if (!opts.largest_set and @intFromEnum(opts.smallest) < @intFromEnum(TUnit.day)) opts.smallest else opts.largest;
             if (@intFromEnum(largest) > @intFromEnum(TUnit.day)) return self.throwError("RangeError", "PlainDate largestUnit cannot be a time unit");
             if (@intFromEnum(opts.smallest) > @intFromEnum(TUnit.day)) return self.throwError("RangeError", "PlainDate smallestUnit cannot be a time unit");
+            if (!(@intFromEnum(opts.smallest) < @intFromEnum(TUnit.day) or opts.increment != 1)) {
+                var dd = calendarDateDiff(t.calendar, t.year, t.month, t.day, b.y, b.m, b.d, largest);
+                if (sign < 0) for (&dd) |*c| {
+                    c.* = -c.*;
+                };
+                return makeDuration(self, dd);
+            }
             const fwd = calendarEpochDay(t.calendar, t.year, t.month, t.day) <= calendarEpochDay(t.calendar, b.y, b.m, b.d);
             const e = if (fwd) IsoYMD{ .y = t.year, .m = t.month, .d = t.day } else b;
             const l = if (fwd) b else IsoYMD{ .y = t.year, .m = t.month, .d = t.day };
