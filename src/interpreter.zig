@@ -20176,7 +20176,7 @@ fn dtfProcessOptionsKind(self: *Interpreter, raw_in: Value, required: DtfRequire
     // relevant component group was supplied), and the defaults that get added
     // are governed by `defaults`. So e.g. toLocaleDateString (required=date,
     // defaults=date) with only time components still adds the date defaults.
-    const has_date_comp = r.weekday.len + r.year.len + r.month.len + r.day.len + r.era.len > 0;
+    const has_date_comp = r.weekday.len + r.year.len + r.month.len + r.day.len > 0;
     const has_time_comp = r.hour.len + r.minute.len + r.second.len + r.day_period.len > 0 or r.frac_sec != null;
     var need_defaults = true;
     if ((required == .any or required == .date) and has_date_comp) need_defaults = false;
@@ -20990,6 +20990,7 @@ fn dtfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Hos
 
     // Read the component options (or the default: numeric year/month/day).
     var o_weekday: []const u8 = "";
+    var o_era: []const u8 = "";
     var o_year: []const u8 = "";
     var o_month: []const u8 = "";
     var o_day: []const u8 = "";
@@ -21013,6 +21014,7 @@ fn dtfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Hos
             }
         }.s;
         o_weekday = try get(self, ov, "weekday");
+        o_era = try get(self, ov, "era");
         o_year = try get(self, ov, "year");
         o_month = try get(self, ov, "month");
         o_day = try get(self, ov, "day");
@@ -21027,7 +21029,7 @@ fn dtfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Hos
             o_frac = @intFromFloat(f.asNum());
         };
         if (ov.asObj().getOwn("\x00defaultsApplied")) |d| defaults_applied = d.toBoolean();
-        any_comp = o_weekday.len + o_year.len + o_month.len + o_day.len + o_hour.len + o_minute.len + o_second.len + o_day_period.len + o_tzname.len + o_frac > 0;
+        any_comp = o_weekday.len + o_era.len + o_year.len + o_month.len + o_day.len + o_hour.len + o_minute.len + o_second.len + o_day_period.len + o_tzname.len + o_frac > 0;
         const hc = try get(self, ov, "hourCycle");
         hour_cycle = hc;
         const h12 = try self.getProperty(ov, "hour12");
@@ -21070,9 +21072,11 @@ fn dtfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Hos
         o_month = "numeric";
         o_day = "numeric";
     }
+    const requested_era = o_era;
     const requested_tzname = o_tzname;
     if (defaults_applied) if (temporal_kind) |tk| {
         o_weekday = "";
+        o_era = "";
         o_year = "";
         o_month = "";
         o_day = "";
@@ -21084,11 +21088,13 @@ fn dtfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Hos
         o_tzname = "";
         switch (tk) {
             .plain_date => {
+                o_era = requested_era;
                 o_year = "numeric";
                 o_month = "numeric";
                 o_day = "numeric";
             },
             .plain_date_time, .instant => {
+                o_era = requested_era;
                 o_year = "numeric";
                 o_month = "numeric";
                 o_day = "numeric";
@@ -21103,6 +21109,7 @@ fn dtfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Hos
                 o_second = "numeric";
             },
             .zoned_date_time => {
+                o_era = requested_era;
                 o_year = "numeric";
                 o_month = "numeric";
                 o_day = "numeric";
@@ -21112,6 +21119,7 @@ fn dtfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Hos
                 o_tzname = if (requested_tzname.len > 0) requested_tzname else "short";
             },
             .plain_year_month => {
+                o_era = requested_era;
                 o_year = "numeric";
                 o_month = "numeric";
             },
@@ -21152,6 +21160,7 @@ fn dtfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Hos
             }
         }.f;
         F(a_year, &o_year, &req, &kept);
+        F(a_year, &o_era, &req, &kept);
         F(a_month, &o_month, &req, &kept);
         F(a_day, &o_day, &req, &kept);
         F(has_date, &o_weekday, &req, &kept);
@@ -21188,6 +21197,8 @@ fn dtfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Hos
     // Date part. Numeric month → "M/D/YYYY"; long/short month → "Month D, YYYY".
     const have_date = o_year.len > 0 or o_month.len > 0 or o_day.len > 0;
     if (have_date) {
+        const era_info = calEraOf(o_calendar, civ.y, civ.m, civ.d);
+        const display_year = if (o_era.len > 0 and era_info.era != null) era_info.era_year else civ.y;
         if (parts.items.len > 0) try P.lit(self, &parts, ", ");
         const month_textual = o_month.len > 0 and !eq(o_month, "numeric") and !eq(o_month, "2-digit");
         if (month_textual) {
@@ -21199,7 +21210,7 @@ fn dtfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Hos
             }
             if (o_year.len > 0) {
                 try P.lit(self, &parts, ", ");
-                try parts.append(self.arena, .{ .typ = "year", .value = try fmtYear(self, civ.y, o_year) });
+                try parts.append(self.arena, .{ .typ = "year", .value = try fmtYear(self, display_year, o_year) });
             }
         } else {
             // All-numeric "M/D/Y" (only the requested parts, slash-separated).
@@ -21216,9 +21227,13 @@ fn dtfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Hos
             if (o_year.len > 0) {
                 if (!first) try P.lit(self, &parts, "/");
                 first = false;
-                try parts.append(self.arena, .{ .typ = "year", .value = try fmtYear(self, civ.y, o_year) });
+                try parts.append(self.arena, .{ .typ = "year", .value = try fmtYear(self, display_year, o_year) });
             }
         }
+        if (o_era.len > 0) if (era_info.era) |raw_era| {
+            try P.lit(self, &parts, " ");
+            try parts.append(self.arena, .{ .typ = "era", .value = if (asciiEqlIgnoreCase(raw_era, "ce")) "AD" else if (asciiEqlIgnoreCase(raw_era, "bce")) "BC" else raw_era });
+        };
     }
     // Time part: "h:mm:ss AM/PM" (or 24-hour).
     const have_clock = o_hour.len > 0 or o_minute.len > 0 or o_second.len > 0;
