@@ -6412,15 +6412,18 @@ pub const Interpreter = struct {
             return Value.boolVal(!r.isNull());
         }
         if (eq(name, "compile")) {
+            if (regExpAccessorData(self)) |data| {
+                if (o.protoAtomic() != data.proto)
+                    return throwErrorInRealm(self, data.realm, "TypeError", "RegExp.prototype.compile called on an incompatible RegExp");
+            }
             var pattern: []const u8 = "";
             var flags: []const u8 = "";
             const pattern_v = if (args.len > 0) args[0] else Value.undef();
             const flags_v = if (args.len > 1) args[1] else Value.undef();
-            const pattern_is_regexp = try self.isRegExp(pattern_v);
-            if (pattern_is_regexp) {
+            if (pattern_v.isObject() and pattern_v.asObj().is_regex) {
                 if (!flags_v.isUndefined()) return self.throwError("TypeError", "flags supplied with a RegExp pattern");
-                pattern = try self.toStringV(try self.getProperty(pattern_v, "source"));
-                flags = try self.toStringV(try self.getProperty(pattern_v, "flags"));
+                pattern = pattern_v.asObj().regex_source;
+                flags = pattern_v.asObj().regex_flags;
             } else {
                 if (!pattern_v.isUndefined()) pattern = try self.toStringV(pattern_v);
                 if (!flags_v.isUndefined()) flags = try self.toStringV(flags_v);
@@ -26621,7 +26624,7 @@ fn installRegExpProto(env: *Environment, rs: *Shape) EvalError!void {
     try setNativeGetterWithData(a, rs, p, "hasIndices", regexFlagGetter('d'), @ptrCast(accessor_data));
     try setNative(a, rs, p, "exec", 1, regexProtoMethod("exec"));
     try setNative(a, rs, p, "test", 1, regexProtoMethod("test"));
-    try setNative(a, rs, p, "compile", 2, regexProtoMethod("compile"));
+    try setNativeWithData(a, rs, p, "compile", 2, regexProtoMethod("compile"), @ptrCast(accessor_data));
     try setNative(a, rs, p, "toString", 0, regexProtoMethod("toString"));
     // Legacy static RegExp accessors (Annex B) on the constructor itself — each a
     // {enumerable:false, configurable:true} accessor that brand-checks %RegExp%.
