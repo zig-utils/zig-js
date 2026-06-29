@@ -161,6 +161,12 @@ under one API-lock acquisition before running grants outside that lock;
 `threads-profile` remains the check that this kind of targeted optimization does
 not merely move overhead elsewhere.
 
+`zig build gc-profile` also includes an embedder task-lifecycle table. It
+compares create/evaluate/destroy per task against evaluating the same task
+repeatedly in one long-lived context with periodic `collectGarbage()` calls, so
+context-heavy embedders can quantify the cost of create-per-unit-of-work designs
+while the GC allocator and lifecycle paths continue to mature.
+
 ## Focused Runs
 
 Use `-Dthreads-case=<path>` to run one vendored thread test. A comma-separated

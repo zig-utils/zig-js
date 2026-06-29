@@ -83,7 +83,9 @@ context APIs.
   Correctness is gated, but tight-loop block-scope allocation and
   create/destroy-heavy context lifecycles are still slower under the GC path than
   under the old arena model. `zig build gc-profile` remains the repeatable
-  baseline before nursery/generational or lifecycle pooling work lands.
+  baseline before nursery/generational or lifecycle pooling work lands, and now
+  includes a create-per-task versus long-lived-context reuse table with periodic
+  collection to quantify the embedder lifecycle tradeoff.
 - **Context lifecycle cost.** Long-lived embedders amortize the GC setup and
   teardown costs, but create-per-unit-of-work embedders need either cheaper
   context lifecycle or clearer guidance.
