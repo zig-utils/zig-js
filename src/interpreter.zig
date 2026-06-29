@@ -28809,6 +28809,52 @@ fn readOverflowRejectIfOptionsObject(self: *Interpreter, options: Value) EvalErr
 /// Read year/month/day (and the calendar) from a PlainDate, a PlainDateTime, or
 /// a fields object.
 const IsoYMD = struct { y: i64, m: u8, d: u8, cal: []const u8 = "iso8601" };
+const PlainDateBagFields = struct { y: i64, m: ?f64, mc: ?MonthCodeInfo, d: f64, cal: []const u8 };
+
+fn resolvePlainDateBagMonth(self: *Interpreter, cal: []const u8, year: i64, month: ?f64, month_code: ?MonthCodeInfo, constrain: bool) EvalError!f64 {
+    if (month) |m| {
+        if (month_code) |info| {
+            const max_month = calMonthsInYear(cal, year);
+            const code_month = calMonthFromCodeMaybe(cal, year, info) orelse
+                if (constrain and info.leap)
+                    (constrainInvalidLeapMonthCode(cal, year, max_month, info) orelse return self.throwError("RangeError", "bad monthCode"))
+                else
+                    return self.throwError("RangeError", "bad monthCode");
+            if (@as(i64, @intFromFloat(m)) != @as(i64, code_month))
+                return self.throwError("RangeError", "month and monthCode mismatch");
+        }
+        return m;
+    }
+    const info = month_code orelse return self.throwError("TypeError", "month or monthCode required");
+    const max_month = calMonthsInYear(cal, year);
+    const code_month = calMonthFromCodeMaybe(cal, year, info) orelse
+        if (constrain and info.leap)
+            (constrainInvalidLeapMonthCode(cal, year, max_month, info) orelse return self.throwError("RangeError", "bad monthCode"))
+        else
+            return self.throwError("RangeError", "bad monthCode");
+    return @floatFromInt(code_month);
+}
+
+fn readPlainDateBagFields(self: *Interpreter, v: Value) EvalError!PlainDateBagFields {
+    const bag_cal = try readCalendarField(self, v);
+    const dv = try self.getProperty(v, "day");
+    if (dv.isUndefined()) return self.throwError("TypeError", "PlainDate fields require year and day");
+    const d = try temporalIntArg(self, dv, "day");
+    const mv = try self.getProperty(v, "month");
+    const month: ?f64 = if (mv.isUndefined()) null else try temporalIntArg(self, mv, "month");
+    const mcv = try self.getProperty(v, "monthCode");
+    const month_code: ?MonthCodeInfo = if (mcv.isUndefined()) null else try readMonthCodeInfo(self, mcv);
+    const cal_year = try bagCalendarYear(self, v, bag_cal) orelse return self.throwError("TypeError", "PlainDate fields require year and day");
+    return .{ .y = cal_year, .m = month, .mc = month_code, .d = d, .cal = bag_cal };
+}
+
+fn finishPlainDateBagFields(self: *Interpreter, f: PlainDateBagFields, constrain: bool) EvalError!IsoYMD {
+    const m = try resolvePlainDateBagMonth(self, f.cal, f.y, f.m, f.mc, constrain);
+    var r = try regulateCalendarDate(self, f.cal, @floatFromInt(f.y), m, f.d, constrain);
+    r.cal = f.cal;
+    return r;
+}
+
 fn toPlainDateFields(self: *Interpreter, v: Value, constrain: bool) EvalError!IsoYMD {
     if (tIsTemporal(v, .plain_date) or tIsTemporal(v, .plain_date_time)) {
         const t = v.asObj().temporal.?;
@@ -28819,44 +28865,8 @@ fn toPlainDateFields(self: *Interpreter, v: Value, constrain: bool) EvalError!Is
         return .{ .y = t.year, .m = t.month, .d = t.day, .cal = t.calendar };
     }
     if (v.isObject()) {
-        const bag_cal = try readCalendarField(self, v);
-        const mcv = try self.getProperty(v, "monthCode");
-        if (!mcv.isUndefined()) _ = try readMonthCodeInfo(self, mcv);
-        // The displayed `year` (or an `{era, eraYear}` pair) resolves to the
-        // calendar year stored on Temporal date slots.
-        const cal_year = try bagCalendarYear(self, v, bag_cal);
-        const dv = try self.getProperty(v, "day");
-        if (cal_year == null or dv.isUndefined()) return self.throwError("TypeError", "PlainDate fields require year and day");
-        const mv = try self.getProperty(v, "month");
-        var m: f64 = undefined;
-        if (!mv.isUndefined()) {
-            m = try temporalIntArg(self, mv, "month");
-            if (!mcv.isUndefined()) {
-                const info = try readMonthCodeInfo(self, mcv);
-                const max_month = calMonthsInYear(bag_cal, cal_year.?);
-                const month_code = calMonthFromCodeMaybe(bag_cal, cal_year.?, info) orelse
-                    if (constrain and info.leap)
-                        (constrainInvalidLeapMonthCode(bag_cal, cal_year.?, max_month, info) orelse return self.throwError("RangeError", "bad monthCode"))
-                    else
-                        return self.throwError("RangeError", "bad monthCode");
-                if (@as(i64, @intFromFloat(m)) != @as(i64, month_code))
-                    return self.throwError("RangeError", "month and monthCode mismatch");
-            }
-        } else {
-            if (mcv.isUndefined()) return self.throwError("TypeError", "month or monthCode required");
-            const info = try readMonthCodeInfo(self, mcv);
-            const max_month = calMonthsInYear(bag_cal, cal_year.?);
-            const month_code = calMonthFromCodeMaybe(bag_cal, cal_year.?, info) orelse
-                if (constrain and info.leap)
-                    (constrainInvalidLeapMonthCode(bag_cal, cal_year.?, max_month, info) orelse return self.throwError("RangeError", "bad monthCode"))
-                else
-                    return self.throwError("RangeError", "bad monthCode");
-            m = @floatFromInt(month_code);
-        }
-        const d = try temporalIntArg(self, dv, "day");
-        var r = try regulateCalendarDate(self, bag_cal, @floatFromInt(cal_year.?), m, d, constrain);
-        r.cal = bag_cal;
-        return r;
+        const f = try readPlainDateBagFields(self, v);
+        return try finishPlainDateBagFields(self, f, constrain);
     }
     if (v.isString()) return parseIsoDate(self, v.asStr());
     return self.throwError("TypeError", "cannot convert to a PlainDate");
@@ -29246,8 +29256,9 @@ fn temporalPlainDateFromFn(ctx: *anyopaque, this: Value, args: []const Value) va
     const item = if (args.len > 0) args[0] else Value.undef();
     const options = if (args.len > 1) args[1] else Value.undef();
     const f = if (isObjectLike(item) and !isAnyTemporal(item)) blk: {
+        const raw = try readPlainDateBagFields(self, item);
         const reject = try readOverflowReject(self, options);
-        break :blk try toPlainDateFields(self, item, !reject);
+        break :blk try finishPlainDateBagFields(self, raw, !reject);
     } else blk: {
         const parsed = try toPlainDateFields(self, item, true);
         _ = try readOverflowReject(self, options);
@@ -29661,6 +29672,34 @@ fn withCalendarMonthField(self: *Interpreter, bag: Value, cal: []const u8, year:
             return self.throwError("RangeError", "bad monthCode");
 }
 
+const PlainDateWithFields = struct { y: ?i64, m: ?f64, mc: ?MonthCodeInfo, d: ?i64, any: bool };
+
+fn readPlainDateWithFields(self: *Interpreter, bag: Value, cal: []const u8) EvalError!PlainDateWithFields {
+    const dv = try self.getProperty(bag, "day");
+    const d: ?i64 = if (dv.isUndefined()) null else @intFromFloat(try temporalIntArg(self, dv, "day"));
+    const mv = try self.getProperty(bag, "month");
+    const m: ?f64 = if (mv.isUndefined()) null else try temporalIntArg(self, mv, "month");
+    const mcv = try self.getProperty(bag, "monthCode");
+    const mc: ?MonthCodeInfo = if (mcv.isUndefined()) null else try readMonthCodeInfo(self, mcv);
+    const y = try bagCalendarYear(self, bag, cal);
+    return .{ .y = y, .m = m, .mc = mc, .d = d, .any = d != null or m != null or mc != null or y != null };
+}
+
+fn resolvePlainDateWithMonth(self: *Interpreter, cal: []const u8, fields: PlainDateWithFields, year: i64, cur_year: i64, cur_month: u8, constrain: bool) EvalError!u8 {
+    if (fields.m != null or fields.mc != null) {
+        const raw = try resolvePlainDateBagMonth(self, cal, year, fields.m, fields.mc, constrain);
+        return @intCast(@max(0, @min(255, @as(i64, @intFromFloat(raw)))));
+    }
+    if (fields.y == null) return cur_month;
+    const info = calMonthCodeInfo(cal, cur_year, cur_month);
+    const max_month = calMonthsInYear(cal, year);
+    return calMonthFromCodeMaybe(cal, year, info) orelse
+        if (constrain and info.leap)
+            (constrainInvalidLeapMonthCode(cal, year, max_month, info) orelse return self.throwError("RangeError", "bad monthCode"))
+        else
+            return self.throwError("RangeError", "bad monthCode");
+}
+
 fn temporalPlainDateWithFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_date)) return self.throwError("TypeError", "non-PlainDate");
@@ -29668,16 +29707,17 @@ fn temporalPlainDateWithFn(ctx: *anyopaque, this: Value, args: []const Value) va
     const bag = if (args.len > 0) args[0] else Value.undef();
     if (!isObjectLike(bag)) return self.throwError("TypeError", "Temporal.PlainDate.prototype.with: argument must be a PlainDate-like object");
     try rejectObjectWithCalendarOrTimeZone(self, bag);
-    if (!(try hasPlainDateLikeField(self, bag))) return self.throwError("TypeError", "Temporal.PlainDate.prototype.with: no supported fields");
+    const fields = try readPlainDateWithFields(self, bag, t.calendar);
+    if (!fields.any) return self.throwError("TypeError", "Temporal.PlainDate.prototype.with: no supported fields");
     const options = if (args.len > 1) args[1] else Value.undef();
-    const y = (try bagCalendarYear(self, bag, t.calendar)) orelse t.year;
+    const y = fields.y orelse t.year;
+    const d = fields.d orelse t.day;
     const object_options_reject = try readOverflowRejectIfOptionsObject(self, options);
-    const constrained_m = try withCalendarMonthField(self, bag, t.calendar, y, t.year, t.month, true);
-    const d = try withIntField(self, bag, "day", t.day);
+    const constrained_m = try resolvePlainDateWithMonth(self, t.calendar, fields, y, t.year, t.month, true);
     const constrained = try regulateCalendarDate(self, t.calendar, @floatFromInt(y), @floatFromInt(@as(i64, constrained_m)), @floatFromInt(d), true);
     const reject = object_options_reject orelse try readOverflowReject(self, options);
     const r = if (reject) blk: {
-        const reject_m = try withCalendarMonthField(self, bag, t.calendar, y, t.year, t.month, false);
+        const reject_m = try resolvePlainDateWithMonth(self, t.calendar, fields, y, t.year, t.month, false);
         break :blk try regulateCalendarDate(self, t.calendar, @floatFromInt(y), @floatFromInt(@as(i64, reject_m)), @floatFromInt(d), false);
     } else constrained;
     const o = try makeTemporal(self, .plain_date, "\x00T.PlainDate");
