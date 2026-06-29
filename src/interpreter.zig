@@ -32058,7 +32058,11 @@ fn temporalPlainDateUntilFn(comptime sign: f64) value.NativeFn {
             var dd = calendarDateDiff(t.calendar, e.y, e.m, e.d, l.y, l.m, l.d, largest);
             const s2 = sign * (if (fwd) @as(f64, 1) else -1);
             const mode = if (s2 < 0) negateRoundMode(opts.mode) else opts.mode;
-            dd = try roundDurationRel(self, dd, .{ .y = e.y, .m = e.m, .d = e.d, .time_ns = 0 }, .{ .largest = largest, .smallest = opts.smallest, .mode = mode, .increment = opts.increment });
+            const rel = if (opts.smallest == .month and switch (mode) {
+                .half_ceil, .half_floor, .half_expand, .half_trunc, .half_even => true,
+                else => false,
+            }) IsoYMD{ .y = t.year, .m = t.month, .d = t.day } else e;
+            dd = try roundDurationRel(self, dd, .{ .y = rel.y, .m = rel.m, .d = rel.d, .time_ns = 0 }, .{ .largest = largest, .smallest = opts.smallest, .mode = mode, .increment = opts.increment });
             if (s2 < 0) for (&dd) |*c| {
                 c.* = -c.*;
             };
