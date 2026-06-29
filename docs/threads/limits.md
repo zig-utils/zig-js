@@ -91,7 +91,8 @@ context APIs.
   allocation. Its `empty`/`jobs` columns now show whether run-loop task-pump
   overhead is empty fast-path churn or real async-hold delivery. Empty sync-wait
   task pumps no longer take the shared run-loop task lock, reducing one measured
-  cost in contended lock/lifecycle paths.
+  cost in contended lock/lifecycle paths; real async-hold delivery now uses a
+  FIFO head cursor so queue drains do not front-shift remaining jobs.
 - **Memory model maintenance.** Keep [Memory Model](./memory-model.md) aligned
   with the TSan suppression witness, new synchronization primitives, and any
   promoted PR-249 coverage that exercises JS-defined races.

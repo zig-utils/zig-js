@@ -27,7 +27,10 @@ pub const Gil = struct {
     /// thread's run loop still serves tasks; each pumped task drains
     /// microtasks as its own turn) — the semantics the threads corpus pins.
     /// Entries are type-erased `*jsthread.HoldJob` (owned by their arena).
+    /// `tasks_head` is the first pending entry; dequeue advances it and clears
+    /// the list when the queue drains, avoiding O(n) front-removal shifts.
     tasks: std.ArrayListUnmanaged(*anyopaque) = .empty,
+    tasks_head: usize = 0,
     /// Cheap empty-queue signal for park/pump hot paths. The authoritative
     /// queue remains `tasks` under `api_lock`; this lets sync waiters skip the
     /// lock entirely when no task has been enqueued.
@@ -107,6 +110,35 @@ pub const Gil = struct {
     }
     pub fn unlockApi(g: *Gil) void {
         g.api_lock.unlock();
+    }
+
+    pub fn enqueueTask(g: *Gil, a: std.mem.Allocator, task: *anyopaque) !void {
+        g.lockApi();
+        defer g.unlockApi();
+        try g.tasks.append(a, task);
+        _ = g.tasks_queued.fetchAdd(1, .release);
+    }
+
+    pub fn dequeueTask(g: *Gil) ?*anyopaque {
+        g.lockApi();
+        defer g.unlockApi();
+
+        if (g.tasks_head >= g.tasks.items.len) {
+            g.tasks.clearRetainingCapacity();
+            g.tasks_head = 0;
+            g.tasks_queued.store(0, .release);
+            return null;
+        }
+
+        const item = g.tasks.items[g.tasks_head];
+        g.tasks.items[g.tasks_head] = undefined;
+        g.tasks_head += 1;
+        _ = g.tasks_queued.fetchSub(1, .release);
+        if (g.tasks_head == g.tasks.items.len) {
+            g.tasks.clearRetainingCapacity();
+            g.tasks_head = 0;
+        }
+        return item;
     }
 
     /// Lock/unlock the property-mode Atomics waiter table. No JS or promise
@@ -256,4 +288,34 @@ test "gil: mutual exclusion and contended yield handover" {
     g.release();
     try std.testing.expect(!g.holds());
     t5.join();
+}
+
+test "gil: task queue is FIFO without front shifts" {
+    var g = Gil{};
+    const a = std.testing.allocator;
+
+    var one: u8 = 1;
+    var two: u8 = 2;
+    var three: u8 = 3;
+
+    try g.enqueueTask(a, @ptrCast(&one));
+    try g.enqueueTask(a, @ptrCast(&two));
+    try g.enqueueTask(a, @ptrCast(&three));
+    defer g.tasks.deinit(a);
+
+    try std.testing.expectEqual(@as(usize, 3), g.tasks_queued.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), g.tasks_head);
+    try std.testing.expectEqual(@as(usize, 3), g.tasks.items.len);
+
+    try std.testing.expectEqual(@intFromPtr(&one), @intFromPtr(g.dequeueTask().?));
+    try std.testing.expectEqual(@as(usize, 2), g.tasks_queued.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 1), g.tasks_head);
+    try std.testing.expectEqual(@as(usize, 3), g.tasks.items.len);
+
+    try std.testing.expectEqual(@intFromPtr(&two), @intFromPtr(g.dequeueTask().?));
+    try std.testing.expectEqual(@intFromPtr(&three), @intFromPtr(g.dequeueTask().?));
+    try std.testing.expectEqual(@as(usize, 0), g.tasks_queued.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), g.tasks_head);
+    try std.testing.expectEqual(@as(usize, 0), g.tasks.items.len);
+    try std.testing.expectEqual(@as(?*anyopaque, null), g.dequeueTask());
 }

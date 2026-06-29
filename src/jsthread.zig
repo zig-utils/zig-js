@@ -1964,13 +1964,7 @@ fn lockReleaseLocked(rec: *LockRecord) ?*HoldJob {
 /// waitUntil/sleepMs rendezvous depend on it).
 fn enqueueHoldJob(self: *Interpreter, job: *HoldJob) value.HostError!void {
     const g = self.gil orelse return;
-    // The run-loop task queue is shared across threads; guard the append with
-    // api_lock so it stays consistent once the GIL is dropped (a granting thread
-    // enqueues while a pumping thread dequeues). No JS runs under the lock.
-    g.lockApi();
-    defer g.unlockApi();
-    try g.tasks.append(self.arena, @ptrCast(job));
-    _ = g.tasks_queued.fetchAdd(1, .release);
+    try g.enqueueTask(self.arena, @ptrCast(job));
 }
 
 /// Pump the realm's run-loop tasks: run each pending grant delivery as its
@@ -1986,13 +1980,7 @@ pub fn pumpTasks(self: *Interpreter) void {
         // Dequeue under api_lock (consistent with `enqueueHoldJob`), but run the
         // job OUTSIDE the lock — runHoldJob executes JS and takes per-structure
         // locks, so holding api_lock across it would invert lock order.
-        g.lockApi();
-        const raw: ?*anyopaque = if (g.tasks.items.len > 0) blk: {
-            const item = g.tasks.orderedRemove(0);
-            _ = g.tasks_queued.fetchSub(1, .release);
-            break :blk item;
-        } else null;
-        g.unlockApi();
+        const raw = g.dequeueTask();
         const r = raw orelse break;
         bumpContention("task_pump_jobs");
         const job: *HoldJob = @ptrCast(@alignCast(r));

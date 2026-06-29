@@ -88,6 +88,9 @@ Known performance/maturity work:
 - Parked sync waiters still pump the realm run-loop so async-hold grants make
   progress, but empty pumps now use an atomic queue-count fast path and avoid
   taking the shared threading API lock.
+- Async-hold delivery also dequeues with a FIFO head cursor instead of
+  front-shifting the task list, keeping delivery cost proportional to delivered
+  jobs rather than pending queue length.
 - Measured speedup shows real parallelism: roughly 1.8x at 2 threads and 2.5x
   at 4 threads in the recorded checkpoint.
 

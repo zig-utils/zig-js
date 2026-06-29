@@ -5816,9 +5816,7 @@ pub const Interpreter = struct {
                 self.lockMicrotasks();
                 const q_empty = if (self.microtasks) |q| q.items.len == 0 else true;
                 self.unlockMicrotasks();
-                g.lockApi();
-                const tasks_empty = g.tasks.items.len == 0;
-                g.unlockApi();
+                const tasks_empty = g.tasks_queued.load(.acquire) == 0;
                 if (q_empty and tasks_empty) {
                     if (jsthread.nextPropAsyncDeadline(self)) |deadline| {
                         const now = std.Io.Timestamp.now(agent.engineIo(), .awake).nanoseconds;

@@ -258,8 +258,9 @@ threading architecture:
   delivery, object/element storage contention, and GC allocation costs under
   high thread counts. The
   sync-wait pump path now skips the shared run-loop task lock entirely when no
-  async hold jobs are queued; continue using the profile for the remaining
-  contended-lock and lifecycle hot spots.
+  async hold jobs are queued, and async-hold delivery now dequeues through a
+  FIFO head cursor instead of front-shifting the task list; continue using the
+  profile for the remaining contended-lock and lifecycle hot spots.
 - **Memory-model maintenance** - keep
   [docs/threads/memory-model.md](docs/threads/memory-model.md) aligned with the
   TSan suppression witness, synchronization primitives, and promoted corpus
