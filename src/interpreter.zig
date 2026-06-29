@@ -29508,8 +29508,8 @@ fn temporalPlainDateTimeToStringFn(ctx: *anyopaque, this: Value, args: []const V
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_date_time)) return self.throwError("TypeError", "non-PlainDateTime");
     const options = if (args.len > 0) args[0] else Value.undef();
-    const precision = try readTemporalStringPrecision(self, options, .minute);
     const cal = try readCalendarName(self, options);
+    const precision = try readTemporalStringPrecision(self, options, .minute);
     const t = this.asObj().temporal.?;
     const rounded_time = roundNsForString(timeToNs(t), precision);
     const day_delta = @divFloor(rounded_time, 86_400_000_000_000);
@@ -33004,21 +33004,67 @@ fn temporalZdtOffsetGetter(ctx: *anyopaque, this: Value, args: []const Value) va
     return Value.str(try offsetNsToString(self, zdtOffsetAt(this.asObj().temporal.?)));
 }
 
+const ZdtToStringOptions = struct {
+    precision: TemporalStringPrecision = .{},
+    cal: CalName = .auto,
+    show_offset: bool = true,
+    time_zone_name: []const u8 = "auto",
+};
+
+fn readZdtToStringOptions(self: *Interpreter, options: Value) EvalError!ZdtToStringOptions {
+    var out = ZdtToStringOptions{};
+    out.cal = try readCalendarName(self, options);
+    if (options.isUndefined()) return out;
+
+    const fdv = try self.getProperty(options, "fractionalSecondDigits");
+    if (!fdv.isUndefined()) {
+        if (try readFractionalSecondDigits(self, fdv)) |d| {
+            out.precision.digits = d;
+            out.precision.unit = digitUnit(d);
+            out.precision.auto = false;
+        }
+    }
+
+    const off = (try dtfGetStr(self, options, "offset", &.{ "auto", "never" }, "auto")).?;
+    out.show_offset = !std.mem.eql(u8, off, "never");
+
+    const rmv = try self.getProperty(options, "roundingMode");
+    if (!rmv.isUndefined())
+        out.precision.mode = roundModeFromStr(try self.toStringV(rmv)) orelse
+            return self.throwError("RangeError", "invalid roundingMode");
+
+    var smallest: ?TUnit = null;
+    const suv = try self.getProperty(options, "smallestUnit");
+    if (!suv.isUndefined()) {
+        smallest = tUnitFromStr(try self.toStringV(suv)) orelse
+            return self.throwError("RangeError", "invalid smallestUnit");
+    }
+
+    out.time_zone_name = (try dtfGetStr(self, options, "timeZoneName", &.{ "auto", "never", "critical" }, "auto")).?;
+
+    if (smallest) |su| {
+        if (@intFromEnum(su) < @intFromEnum(TUnit.minute))
+            return self.throwError("RangeError", "invalid smallestUnit");
+        out.precision.unit = su;
+        out.precision.auto = false;
+        out.precision.digits = switch (su) {
+            .minute, .second => 0,
+            .millisecond => 3,
+            .microsecond => 6,
+            .nanosecond => 9,
+            else => unreachable,
+        };
+    }
+    return out;
+}
+
 fn temporalZdtToStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsZdt(this)) return self.throwError("TypeError", "non-ZonedDateTime");
     const options = if (args.len > 0) args[0] else Value.undef();
-    const precision = try readTemporalStringPrecision(self, options, .minute);
-    const cal = try readCalendarName(self, options);
-    var show_offset = true;
-    var time_zone_name: []const u8 = "auto";
-    if (!options.isUndefined()) {
-        const off = (try dtfGetStr(self, options, "offset", &.{ "auto", "never" }, "auto")).?;
-        show_offset = !std.mem.eql(u8, off, "never");
-        time_zone_name = (try dtfGetStr(self, options, "timeZoneName", &.{ "auto", "never", "critical" }, "auto")).?;
-    }
+    const opts = try readZdtToStringOptions(self, options);
     const t = this.asObj().temporal.?;
-    const rounded_epoch = roundInstantNsForString(t.epoch_ns, precision);
+    const rounded_epoch = roundInstantNsForString(t.epoch_ns, opts.precision);
     const render_offset = timeZoneOffsetAtEpoch(t.tz_name, rounded_epoch, t.tz_offset_ns);
     const local_ns = rounded_epoch + @as(i128, render_offset);
     const days = @divFloor(local_ns, 86_400_000_000_000);
@@ -33026,14 +33072,14 @@ fn temporalZdtToStringFn(ctx: *anyopaque, this: Value, args: []const Value) valu
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     try isoYearStr(self, &buf, c.y);
     try tfmt(self, &buf, "-{d:0>2}-{d:0>2}T", .{ c.m, c.d });
-    try appendIsoTimeFromNs(self, &buf, local_ns, precision);
-    if (show_offset) try buf.appendSlice(self.arena, try offsetNsToString(self, render_offset));
-    if (!std.mem.eql(u8, time_zone_name, "never")) {
-        try buf.appendSlice(self.arena, if (std.mem.eql(u8, time_zone_name, "critical")) "[!" else "[");
+    try appendIsoTimeFromNs(self, &buf, local_ns, opts.precision);
+    if (opts.show_offset) try buf.appendSlice(self.arena, try offsetNsToString(self, render_offset));
+    if (!std.mem.eql(u8, opts.time_zone_name, "never")) {
+        try buf.appendSlice(self.arena, if (std.mem.eql(u8, opts.time_zone_name, "critical")) "[!" else "[");
         try buf.appendSlice(self.arena, t.tz_name);
         try buf.append(self.arena, ']');
     }
-    try appendCalAnnotation(self, &buf, cal, t.calendar);
+    try appendCalAnnotation(self, &buf, opts.cal, t.calendar);
     return Value.str(try buf.toOwnedSlice(self.arena));
 }
 
