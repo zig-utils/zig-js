@@ -31692,19 +31692,21 @@ fn temporalPlainDateTimeUntilFn(comptime sign: f64) value.NativeFn {
             if (!tIsTemporal(this, .plain_date_time)) return self.throwError("TypeError", "non-PlainDateTime");
             const other = try toPlainDateTimeData(self, if (args.len > 0) args[0] else Value.undef(), true);
             const opts = try readRoundOpts(self, if (args.len > 1) args[1] else Value.undef(), .{ .largest = .day, .smallest = .nanosecond, .mode = .trunc, .increment = 1 }, false);
+            try validateDurationRoundingIncrement(self, opts.smallest, opts.increment);
+            const largest = if (!opts.largest_set and @intFromEnum(opts.smallest) < @intFromEnum(TUnit.day)) opts.smallest else opts.largest;
             const a = this.asObj().temporal.?;
             const b = &other;
             if (!temporalCalendarIdsEqual(a.calendar, b.calendar)) return self.throwError("RangeError", "calendar mismatch");
-            if (@intFromEnum(opts.largest) >= @intFromEnum(TUnit.day)) {
+            if (@intFromEnum(largest) >= @intFromEnum(TUnit.day)) {
                 // Exact nanosecond difference balanced into days and below.
                 var diff = @as(i128, @intFromFloat(sign)) * (dateTimeToNs(b) - dateTimeToNs(a));
                 diff = roundNs(diff, opts.smallest, opts.increment, opts.mode);
-                return makeDuration(self, balanceTimeNs(diff, opts.largest));
+                return makeDuration(self, balanceTimeNs(diff, largest));
             }
             // Calendar largestUnit: diff the dates (years/months), then the time.
             const earlier = if (dateTimeToNs(a) <= dateTimeToNs(b)) a else b;
             const later = if (dateTimeToNs(a) <= dateTimeToNs(b)) b else a;
-            var dd = calendarDateDiff(earlier.calendar, earlier.year, earlier.month, earlier.day, later.year, later.month, later.day, opts.largest);
+            var dd = calendarDateDiff(earlier.calendar, earlier.year, earlier.month, earlier.day, later.year, later.month, later.day, largest);
             // Time component (may borrow a day).
             var time_diff = timeToNs(later) - timeToNs(earlier);
             if (time_diff < 0) {
@@ -31718,7 +31720,7 @@ fn temporalPlainDateTimeUntilFn(comptime sign: f64) value.NativeFn {
             // earlier datetime; a negative result (since/backward) flips the mode.
             if (@intFromEnum(opts.smallest) < @intFromEnum(TUnit.day) or opts.increment != 1) {
                 const mode = if (s2 < 0) negateRoundMode(opts.mode) else opts.mode;
-                dd = try roundDurationRel(self, dd, .{ .y = earlier.year, .m = earlier.month, .d = earlier.day, .time_ns = timeToNs(earlier) }, .{ .largest = opts.largest, .smallest = opts.smallest, .mode = mode, .increment = opts.increment });
+                dd = try roundDurationRel(self, dd, .{ .y = earlier.year, .m = earlier.month, .d = earlier.day, .time_ns = timeToNs(earlier) }, .{ .largest = largest, .smallest = opts.smallest, .mode = mode, .increment = opts.increment });
             }
             if (s2 < 0) for (&dd) |*c| {
                 c.* = -c.*;
