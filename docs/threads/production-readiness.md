@@ -126,8 +126,9 @@ as embedders exercise more threaded host patterns.
   JS throws with parked/unjoined `Thread`s, exact-counter oracles for script
   and module `Worker`s overlapping shared-realm `Thread`s on one retained
   `SharedArrayBuffer`, and mixed `close` / `terminate` / `postMessage`
-  ordering coverage plus worker handler-exception recovery and cross-thread
-  `FinalizationRegistry` cleanup count/sum oracles.
+  ordering coverage plus worker handler-exception recovery, Thread exception
+  identity through `join()` / `asyncJoin()` while property and condition waiters
+  are parked, and cross-thread `FinalizationRegistry` cleanup count/sum oracles.
 - CI runs the fuzzer in several modes: default seeded, TSan, high-contention
   amplified, broad semantic, mid-script GC wait-pump, lifecycle, ReleaseSafe,
   and deterministic-result verification.

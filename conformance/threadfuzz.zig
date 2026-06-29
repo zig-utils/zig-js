@@ -895,6 +895,131 @@ fn runWorkerExceptionRecovery(gpa: std.mem.Allocator, seed: u64) !bool {
     return true;
 }
 
+fn runThreadExceptionWaiterInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
+    var prng = std.Random.DefaultPrng.init(seed ^ 0x7468_7265_6164_6578);
+    const r = prng.random();
+    const wait_timeout_ms = 1500 + r.uintLessThan(usize, 1000);
+
+    const ctx = js.Context.createWith(gpa, .{ .enable_threads = true, .enable_gc = true }) catch {
+        std.debug.print("seed {d}: thread exception/waiter context creation failed\n", .{seed});
+        return false;
+    };
+    defer ctx.destroy();
+
+    const src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  globalThis.__threadExceptionWaiterOracle = 0;
+        \\  const marker = {d};
+        \\  const boom = {{ marker, nested: {{ identity: 'same object' }} }};
+        \\  const gate = {{ state: 0, propReady: 0, condReady: 0, condOpen: false }};
+        \\  const lock = new Lock();
+        \\  const cond = new Condition();
+        \\  const propWaiter = new Thread(() => {{
+        \\    Atomics.store(gate, 'propReady', 1);
+        \\    Atomics.notify(gate, 'propReady');
+        \\    return Atomics.wait(gate, 'state', 0, {d});
+        \\  }});
+        \\  const condWaiter = new Thread(() => {{
+        \\    lock.hold(() => {{
+        \\      Atomics.store(gate, 'condReady', 1);
+        \\      Atomics.notify(gate, 'condReady');
+        \\      while (!gate.condOpen) cond.wait(lock);
+        \\    }});
+        \\    return 'cond-ok';
+        \\  }});
+        \\  while (Atomics.load(gate, 'propReady') === 0)
+        \\    Atomics.wait(gate, 'propReady', 0, 1);
+        \\  while (Atomics.load(gate, 'condReady') === 0)
+        \\    Atomics.wait(gate, 'condReady', 0, 1);
+        \\
+        \\  let earlyRejectScore = 0;
+        \\  const failing = new Thread(() => {{ throw boom; }});
+        \\  const p1 = failing.asyncJoin();
+        \\  const p2 = failing.asyncJoin();
+        \\  p1.then(
+        \\    () => {{ earlyRejectScore = -1000; }},
+        \\    (e) => {{ if (e === boom && e.nested.identity === 'same object') earlyRejectScore += 1; }});
+        \\  p2.then(
+        \\    () => {{ earlyRejectScore = -1000; }},
+        \\    (e) => {{ if (e === boom && e.marker === marker) earlyRejectScore += 10; }});
+        \\
+        \\  let joinIdentity = 0;
+        \\  try {{
+        \\    failing.join();
+        \\  }} catch (e) {{
+        \\    joinIdentity = (e === boom && e.nested === boom.nested) ? 1 : -1;
+        \\  }}
+        \\  if (joinIdentity !== 1)
+        \\    throw new Error('join did not rethrow by identity');
+        \\
+        \\  const relay = new Thread(() => {{
+        \\    try {{
+        \\      failing.join();
+        \\      return 'bad';
+        \\    }} catch (e) {{
+        \\      return e;
+        \\    }}
+        \\  }});
+        \\  if (relay.join() !== boom)
+        \\    throw new Error('joiner thread did not receive the same exception object');
+        \\
+        \\  let lateReject = 0;
+        \\  failing.asyncJoin().then(
+        \\    () => {{ lateReject = -1000; }},
+        \\    (e) => {{ if (e === boom) lateReject = 1; }});
+        \\
+        \\  Atomics.store(gate, 'state', 1);
+        \\  Atomics.notify(gate, 'state');
+        \\  lock.hold(() => {{
+        \\    gate.condOpen = true;
+        \\    cond.notifyAll();
+        \\  }});
+        \\  const propResult = propWaiter.join();
+        \\  if (propResult !== 'ok' && propResult !== 'not-equal')
+        \\    throw new Error('bad property waiter result: ' + propResult);
+        \\  if (condWaiter.join() !== 'cond-ok')
+        \\    throw new Error('condition waiter did not resume cleanly');
+        \\
+        \\  Promise.resolve().then(() => {{
+        \\    if (earlyRejectScore !== 11)
+        \\      throw new Error('early asyncJoin rejection score ' + earlyRejectScore);
+        \\    if (lateReject !== 1)
+        \\      throw new Error('late asyncJoin rejection score ' + lateReject);
+        \\    globalThis.__threadExceptionWaiterOracle = 1;
+        \\  }});
+        \\  return marker;
+        \\}})();
+        \\
+    ,
+        .{ seed, wait_timeout_ms },
+    );
+    defer gpa.free(src);
+
+    const marker = ctx.evaluate(src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: thread exception/waiter JS threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!marker.isNumber() or marker.asNum() != @as(f64, @floatFromInt(seed))) {
+        std.debug.print("seed {d}: thread exception/waiter marker got {d}\n", .{ seed, if (marker.isNumber()) marker.asNum() else -1 });
+        return false;
+    }
+
+    const oracle = ctx.evaluate("globalThis.__threadExceptionWaiterOracle") catch |err| {
+        std.debug.print("seed {d}: cannot read thread exception/waiter oracle: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    if (!oracle.isNumber() or oracle.asNum() != 1) {
+        std.debug.print("seed {d}: thread exception/waiter oracle got {d}\n", .{ seed, if (oracle.isNumber()) oracle.asNum() else -1 });
+        return false;
+    }
+    return true;
+}
+
 fn runFinalizationCleanupInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
     var prng = std.Random.DefaultPrng.init(seed ^ 0x6669_6e61_6c69_7a65);
     const r = prng.random();
@@ -1199,13 +1324,16 @@ pub fn main(init: std.process.Init) !void {
     // `threadfuzz lifecycle <iters> <seed>`: deterministic termination storms,
     // Worker/thread SAB overlap, module-worker/thread overlap, mixed
     // close/terminate/postMessage ordering, worker handler exception recovery,
+    // Thread exception identity across join/asyncJoin while waiters are parked,
     // and cross-thread FinalizationRegistry cleanup. The oracle is not "no
     // throw":
     // termination storms must throw from the main script and still tear down
     // cleanly, overlap must produce exact synchronized counter values, and
     // close/terminate races must drain/drop messages according to channel
     // lifetime rules, thrown worker handlers must not poison later deliveries,
-    // and cleanup delivery must match exact count/sum oracles.
+    // thread exceptions must keep identity through blocking and async joiners
+    // while waiters resume cleanly, and cleanup delivery must match exact
+    // count/sum oracles.
     if (first) |a| if (std.mem.eql(u8, a, "lifecycle")) {
         iters = 60;
         if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch iters;
@@ -1219,9 +1347,10 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runModuleWorkerThreadOverlap(gpa, seed))) lfail += 1;
             if (!(try runWorkerCloseTerminateRace(gpa, seed))) lfail += 1;
             if (!(try runWorkerExceptionRecovery(gpa, seed))) lfail += 1;
+            if (!(try runThreadExceptionWaiterInterleaving(gpa, seed))) lfail += 1;
             if (!(try runFinalizationCleanupInterleaving(gpa, seed))) lfail += 1;
         }
-        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 6, base_seed, lfail });
+        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 7, base_seed, lfail });
         if (lfail != 0) std.process.exit(1);
         return;
     };
