@@ -333,7 +333,7 @@ export fn JSValueUnprotect(ctx: JSContextRef, v: JSValueRef) callconv(.c) void {
         if (h.count > 1) {
             h.count -= 1;
         } else {
-            _ = c.c_api_handles.orderedRemove(i);
+            _ = c.c_api_handles.swapRemove(i);
         }
         return;
     }

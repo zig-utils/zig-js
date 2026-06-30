@@ -134,7 +134,12 @@ Known performance/maturity work:
   message queues, so Worker-heavy lifecycle and receive loops do not pay one
   front shift per delivered message. Empty internal `Worker.receive(..., 0)`
   polls now return from the channel while holding the queue lock instead of
-  entering a timed condition wait.
+  entering a timed condition wait, and skip drained-queue compaction on the
+  empty fast path.
+- Active interpreter roots, protected C-API handles, and GIL park records are
+  unordered root sets, so their removals now use swap removal instead of
+  order-preserving list shifts on evaluate, handle-unprotect, and thread
+  teardown paths.
 - The same `threads-profile` run now includes a separate isolated `Worker`
   section for structured-clone inbox/outbox round-trips, empty receive polling,
   spawn/post/receive/join/destroy lifecycle cost. It is reported outside the

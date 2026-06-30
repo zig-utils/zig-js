@@ -239,7 +239,9 @@ timed-out or terminated sync condition waiters are marked canceled and skipped
 by that cursor instead of being removed from the middle of the queue;
 Worker inbox/outbox channels use the same shape for structured-clone message
 delivery, and empty internal `Worker.receive(..., 0)` polls skip timed condition
-wait setup. `worker channel pops FIFO without front shifts` keeps that queue
+wait setup and drained-queue compaction. Active interpreter roots, protected
+C-API handles, and GIL park records remove with swap semantics because those
+root sets have no observable order. `worker channel pops FIFO without front shifts` keeps that queue
 shape and zero-timeout polling behavior under a direct unit guard, while
 `condition queue head cursor skips canceled sync waiters` covers the condition
 timeout/termination queue shape directly and

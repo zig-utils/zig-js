@@ -72,8 +72,8 @@ const Channel = struct {
         defer ch.mutex.unlock(io);
         while (!ch.hasQueued()) {
             if (ch.closed) return null;
-            ch.clearQueue();
             if (timeout_ms) |ms| if (ms == 0) return null;
+            ch.clearQueue();
             const tmo: std.Io.Timeout = if (timeout_ms) |ms| .{ .duration = .{
                 .raw = .fromMilliseconds(@intCast(ms)),
                 .clock = .awake,

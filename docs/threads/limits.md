@@ -127,7 +127,11 @@ context APIs.
   inbox/outbox channels now drain
   structured-clone messages with FIFO head cursors as well, avoiding front
   shifts in receive-heavy Worker loops. Empty internal `Worker.receive(..., 0)`
-  polls return under the channel lock without entering a timed condition wait.
+  polls return under the channel lock without entering a timed condition wait
+  or touching drained-queue compaction. Active interpreter roots, protected
+  C-API handles, and GIL park records are unordered root sets, so removal now
+  uses swap semantics instead of order-preserving list shifts on evaluate,
+  handle-unprotect, and thread teardown paths.
   The profile now includes a separate isolated `Worker` section for
   structured-clone inbox/outbox round-trips, empty receive polling, and
   spawn/post/receive/join/destroy lifecycle cost, so Worker-heavy follow-up

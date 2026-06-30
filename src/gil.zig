@@ -201,7 +201,7 @@ pub const Gil = struct {
         while (i > 0) {
             i -= 1;
             if (g.park_records.items[i] == rec) {
-                _ = g.park_records.orderedRemove(i);
+                _ = g.park_records.swapRemove(i);
                 return;
             }
         }

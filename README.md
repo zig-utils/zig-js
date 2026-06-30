@@ -291,7 +291,11 @@ threading architecture:
   expired/abandoned ticket. Worker inbox/outbox channels now drain
   through the same FIFO head-cursor shape instead of front-shifting
   structured-clone message queues, and empty internal `Worker.receive(..., 0)`
-  polls return under the channel lock without entering timed condition waits.
+  polls return under the channel lock without entering timed condition waits or
+  touching drained-queue compaction. Active interpreter roots, protected C-API
+  handles, and GIL park records are unordered root sets, so their removals now
+  use swap removal instead of preserving order with list shifts on evaluate,
+  unprotect, and thread teardown paths.
   Promise microtask drains now use a FIFO head cursor too, so observed
   `Lock.asyncHold` callbacks and no-fn release-function reactions do not pay one
   front shift per pending reaction while preserving checkpoint order.

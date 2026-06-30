@@ -1076,7 +1076,7 @@ pub const Context = struct {
         while (i > 0) {
             i -= 1;
             if (self.active_interpreters.items[i] == machine) {
-                _ = self.active_interpreters.orderedRemove(i);
+                _ = self.active_interpreters.swapRemove(i);
                 return;
             }
         }
