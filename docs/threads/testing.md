@@ -206,6 +206,8 @@ while property and condition waiters are parked, thread-returned typed-array
 `join()` / `asyncJoin()` while waiters are parked,
 typed-array `waitAsync` settlement interleaved with `asyncJoin` reactions and
 exact `FinalizationRegistry` cleanup delivery, deterministic
+`Condition.asyncWait` reacquire delivery interleaved with `join()` /
+`asyncJoin()` reactions and exact `FinalizationRegistry` cleanup delivery,
 `Lock.asyncHold()` barging where a sync hold legally overtakes a queued no-fn
 async ticket before `await` delivers its release function, teardown termination
 with pending `asyncJoin` rejection reactions and
@@ -228,7 +230,7 @@ property/condition waiters resume, plus `ThreadLocal` isolation across normal,
 throwing, nested, and async-joined thread lifecycles, plus
 `ThreadLocal` values registered with `FinalizationRegistry` across
 park/resume/clear/join cleanup lifecycles with exact cleanup count/sum delivery
-after quiescent collection. Each seed currently runs 30 deterministic lifecycle
+after quiescent collection. Each seed currently runs 31 deterministic lifecycle
 subprograms.
 
 `zig build test262 -Dtest262-parallel-js=true` runs test262 programs in

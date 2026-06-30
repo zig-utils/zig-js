@@ -4088,6 +4088,201 @@ fn runWaitAsyncFinalizationCleanupInterleaving(gpa: std.mem.Allocator, seed: u64
     return true;
 }
 
+fn runConditionAsyncFinalizationCleanupInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
+    var prng = std.Random.DefaultPrng.init(seed ^ 0x636f_6e64_6173_796e);
+    const r = prng.random();
+    const nthreads = 3 + r.uintLessThan(usize, 4);
+    const per_thread = 6 + r.uintLessThan(usize, 8);
+
+    var expected_join_sum: usize = 0;
+    var expected_reacquire_score: usize = 0;
+    var expected_async_join_score: usize = 0;
+    var expected_cleanup_count: usize = 0;
+    var expected_cleanup_sum: usize = 0;
+    var id: usize = 0;
+    while (id < nthreads) : (id += 1) {
+        const base = (id + 1) * 40_000;
+        var local_sum: usize = 0;
+        var i: usize = 0;
+        while (i < per_thread) : (i += 1) {
+            local_sum += base + i;
+            expected_cleanup_sum += base + i;
+        }
+        expected_join_sum += local_sum + id + 1;
+        expected_reacquire_score += base + 1_000 + id;
+        expected_async_join_score += base + 2_000 + id;
+        expected_cleanup_count += per_thread;
+    }
+
+    const ctx = js.Context.createWith(gpa, .{ .enable_threads = true, .enable_gc = true }) catch {
+        std.debug.print("seed {d}: condition async/finalization context creation failed\n", .{seed});
+        return false;
+    };
+    defer ctx.destroy();
+
+    const src = try std.fmt.allocPrint(
+        gpa,
+        \\(async () => {{
+        \\  globalThis.__condAsyncFinCleanupCount = 0;
+        \\  globalThis.__condAsyncFinCleanupSum = 0;
+        \\  globalThis.__condAsyncFinReacquireScore = 0;
+        \\  globalThis.__condAsyncFinAsyncJoinScore = 0;
+        \\  globalThis.__condAsyncFinAsyncJoinCount = 0;
+        \\  globalThis.__condAsyncFinRegistry = new FinalizationRegistry((held) => {{
+        \\    globalThis.__condAsyncFinCleanupCount++;
+        \\    globalThis.__condAsyncFinCleanupSum += held;
+        \\  }});
+        \\  const registry = globalThis.__condAsyncFinRegistry;
+        \\  const lock = new Lock();
+        \\  const cond = new Condition();
+        \\  const gate = {{ ready: 0 }};
+        \\  const threads = [];
+        \\  const joined = [];
+        \\  for (let id = 0; id < {d}; id++) {{
+        \\    const base = (id + 1) * 40000;
+        \\    const reacquireRoot = {{ marker: base + 1000 + id, nested: {{ seed: {d}, label: 'condition-async-finalization-reacquire' }} }};
+        \\    const asyncJoinRoot = {{ marker: base + 2000 + id, nested: {{ seed: {d}, label: 'condition-async-finalization-asyncJoin' }} }};
+        \\    const t = new Thread((id, per, registry, gate) => {{
+        \\      const base = (id + 1) * 40000;
+        \\      let localSum = 0;
+        \\      for (let i = 0; i < per; i++) {{
+        \\        let target = {{ id, i, payload: 'condition-async-finalization-' + id + '-' + i }};
+        \\        registry.register(target, base + i);
+        \\        localSum += base + i;
+        \\        target = null;
+        \\      }}
+        \\      return lock.asyncHold().then((release) => {{
+        \\        if (typeof release !== 'function')
+        \\          throw new Error('condition async/finalization initial grant did not deliver release');
+        \\        const ticket = cond.asyncWait(lock);
+        \\        Atomics.add(gate, 'ready', 1);
+        \\        Atomics.notify(gate, 'ready');
+        \\        return ticket;
+        \\      }}).then((release) => {{
+        \\        if (typeof release !== 'function')
+        \\          throw new Error('condition async/finalization reacquire did not deliver release');
+        \\        if (reacquireRoot.marker !== base + 1000 + id || reacquireRoot.nested.seed !== {d})
+        \\          globalThis.__condAsyncFinReacquireScore = -1000000;
+        \\        else
+        \\          globalThis.__condAsyncFinReacquireScore += reacquireRoot.marker;
+        \\        release();
+        \\        return localSum + id + 1;
+        \\      }});
+        \\    }}, id, {d}, registry, gate);
+        \\    t.asyncJoin().then(
+        \\      (v) => {{
+        \\        if (v === ((base * {d}) + (({d} * ({d} - 1)) / 2) + id + 1) &&
+        \\            asyncJoinRoot.marker === base + 2000 + id &&
+        \\            asyncJoinRoot.nested.seed === {d}) {{
+        \\          globalThis.__condAsyncFinAsyncJoinScore += asyncJoinRoot.marker;
+        \\          globalThis.__condAsyncFinAsyncJoinCount++;
+        \\        }} else {{
+        \\          globalThis.__condAsyncFinAsyncJoinScore = -1000000;
+        \\        }}
+        \\      }},
+        \\      () => {{ globalThis.__condAsyncFinAsyncJoinScore = -1000000; }});
+        \\    const joinedPromise = t.join();
+        \\    if (!(joinedPromise instanceof Promise))
+        \\      throw new Error('condition async/finalization join did not return child promise');
+        \\    joined.push(joinedPromise);
+        \\    threads.push(t);
+        \\  }}
+        \\  while (Atomics.load(gate, 'ready') < {d})
+        \\    Atomics.wait(gate, 'ready', Atomics.load(gate, 'ready'), 1);
+        \\  lock.hold(() => cond.notifyAll());
+        \\  const values = await Promise.all(joined);
+        \\  let joinSum = 0;
+        \\  for (let i = 0; i < values.length; i++)
+        \\    joinSum += values[i];
+        \\  if (joinSum !== {d})
+        \\    throw new Error('bad condition async/finalization join sum ' + joinSum);
+        \\  for (let spin = 0; globalThis.__condAsyncFinAsyncJoinCount < {d} && spin < 2000; spin++) {{
+        \\    $drainRunLoop();
+        \\    drainMicrotasks();
+        \\    await Promise.resolve();
+        \\  }}
+        \\  if (globalThis.__condAsyncFinReacquireScore !== {d})
+        \\    throw new Error('bad condition async/finalization reacquire score ' + globalThis.__condAsyncFinReacquireScore);
+        \\  if (globalThis.__condAsyncFinAsyncJoinScore !== {d})
+        \\    throw new Error('bad condition async/finalization asyncJoin score ' + globalThis.__condAsyncFinAsyncJoinScore);
+        \\  threads.length = 0;
+        \\  joined.length = 0;
+        \\  return joinSum;
+        \\}})()
+        \\
+    ,
+        .{
+            nthreads,
+            seed,
+            seed,
+            seed,
+            per_thread,
+            per_thread,
+            per_thread,
+            per_thread,
+            seed,
+            nthreads,
+            expected_join_sum,
+            nthreads,
+            expected_reacquire_score,
+            expected_async_join_score,
+        },
+    );
+    defer gpa.free(src);
+
+    const promise_value = ctx.evaluate(src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: condition async/finalization JS threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    var machine = ctx.interpreter();
+    const joined = machine.awaitValue(promise_value) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: condition async/finalization await failed {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!joined.isNumber() or joined.asNum() != @as(f64, @floatFromInt(expected_join_sum))) {
+        std.debug.print("seed {d}: condition async/finalization joined got {d}, expected {d}\n", .{ seed, if (joined.isNumber()) joined.asNum() else -1, expected_join_sum });
+        return false;
+    }
+
+    ctx.collectGarbage();
+    const cleanup_src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  globalThis.__condAsyncFinRegistry.cleanupSome();
+        \\  if (globalThis.__condAsyncFinCleanupCount !== {d})
+        \\    throw new Error('bad condition async/finalization cleanup count ' + globalThis.__condAsyncFinCleanupCount);
+        \\  if (globalThis.__condAsyncFinCleanupSum !== {d})
+        \\    throw new Error('bad condition async/finalization cleanup sum ' + globalThis.__condAsyncFinCleanupSum);
+        \\  return globalThis.__condAsyncFinCleanupCount;
+        \\}})();
+        \\
+    ,
+        .{ expected_cleanup_count, expected_cleanup_sum },
+    );
+    defer gpa.free(cleanup_src);
+    const cleaned = ctx.evaluate(cleanup_src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: condition async/finalization cleanup JS threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!cleaned.isNumber() or cleaned.asNum() != @as(f64, @floatFromInt(expected_cleanup_count))) {
+        std.debug.print("seed {d}: condition async/finalization cleanup got {d}, expected {d}\n", .{ seed, if (cleaned.isNumber()) cleaned.asNum() else -1, expected_cleanup_count });
+        return false;
+    }
+    return true;
+}
+
 fn runMicrotaskChurnLifecycleInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
     var prng = std.Random.DefaultPrng.init(seed ^ 0x6d69_6372_6f74_6173);
     const r = prng.random();
@@ -8847,6 +9042,21 @@ pub fn main(init: std.process.Init) !void {
         if (wfail != 0) std.process.exit(1);
         return;
     };
+    // `threadfuzz condasyncfinal <iters> <seed>`: focused lifecycle repro for
+    // Condition.asyncWait reacquire delivery plus asyncJoin and cleanup roots.
+    if (first) |a| if (std.mem.eql(u8, a, "condasyncfinal")) {
+        if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch 1;
+        if (args.next()) |b| base_seed = std.fmt.parseInt(u64, b, 10) catch 1;
+        var cfail: usize = 0;
+        var ci: usize = 0;
+        while (ci < iters) : (ci += 1) {
+            const seed = base_seed +% ci;
+            if (!(try runConditionAsyncFinalizationCleanupInterleaving(gpa, seed))) cfail += 1;
+        }
+        std.debug.print("threadfuzz condasyncfinal: {d} programs from seed {d}, {d} failures\n", .{ iters, base_seed, cfail });
+        if (cfail != 0) std.process.exit(1);
+        return;
+    };
     // `threadfuzz microtaskchurn <iters> <seed>`: focused lifecycle repro for
     // Promise reaction queue churn across asyncHold, waitAsync, asyncJoin, and
     // finalization cleanup.
@@ -9272,6 +9482,8 @@ pub fn main(init: std.process.Init) !void {
     // with join/asyncJoin and unregister tokens, cleanup
     // delivery after parked property/condition waiters resume, typed-array
     // waitAsync settlement interleaved with asyncJoin and finalization cleanup,
+    // Condition.asyncWait reacquire delivery interleaved with asyncJoin and
+    // finalization cleanup,
     // Promise reaction queue churn from asyncHold, waitAsync, asyncJoin, and
     // finalization cleanup,
     // creator-owned SAB/ArrayBuffer storage crossing isolated Worker
@@ -9350,6 +9562,7 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runFinalizationAsyncJoinCleanupInterleaving(gpa, seed))) lfail += 1;
             if (!(try runFinalizationWaiterCleanupInterleaving(gpa, seed))) lfail += 1;
             if (!(try runWaitAsyncFinalizationCleanupInterleaving(gpa, seed))) lfail += 1;
+            if (!(try runConditionAsyncFinalizationCleanupInterleaving(gpa, seed))) lfail += 1;
             if (!(try runMicrotaskChurnLifecycleInterleaving(gpa, seed))) lfail += 1;
             if (!(try runCreatorOwnedBufferLifecycleInterleaving(gpa, seed))) lfail += 1;
             if (!(try runWorkerCreatorOwnedBufferLifecycleInterleaving(gpa, seed))) lfail += 1;
@@ -9361,7 +9574,7 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runThreadLocalLifecycleInterleaving(gpa, seed))) lfail += 1;
             if (!(try runThreadLocalFinalizationCleanupInterleaving(gpa, seed))) lfail += 1;
         }
-        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 30, base_seed, lfail });
+        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 31, base_seed, lfail });
         if (lfail != 0) std.process.exit(1);
         return;
     };

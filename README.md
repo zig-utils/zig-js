@@ -457,6 +457,8 @@ threading architecture:
   assimilation through `join()` / `asyncJoin()` while waiters are parked,
   typed-array `waitAsync` settlement interleaved with `asyncJoin` reactions and
   exact `FinalizationRegistry` cleanup delivery,
+  `Condition.asyncWait` reacquire delivery interleaved with `join()` /
+  `asyncJoin()` reactions and exact `FinalizationRegistry` cleanup delivery,
   teardown termination with pending `asyncJoin` rejection reactions and
   child-owned typed-array `waitAsync` tickets that must be abandoned before the
   child exits,
