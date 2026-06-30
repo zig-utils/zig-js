@@ -67,7 +67,7 @@ buffers, property-mode Atomics, `Thread`, `Lock`, `Condition`, `ThreadLocal`,
 parallel-GC witnesses, C embedder threading, and the main can-block gate.
 
 `zig build threads-test` runs the green WebKit PR-249 allowlist from
-`reference/webkit-249/threads-tests`. The current allowlist is 224/224 and
+`reference/webkit-249/threads-tests`. The current allowlist is 225/225 and
 covers:
 
 - `api/` and `lifecycle/`: constructor shape, lifecycle, ids, constructor

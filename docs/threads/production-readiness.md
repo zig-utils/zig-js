@@ -26,7 +26,7 @@ than new correctness architecture.
   the mid-script parallel-GC use-after-free found by the fuzzer.
 - `-Dtest262-parallel-js` runs a broad language-surface slice in GIL-free
   parallel contexts and asserts no new failures versus the baseline.
-- The PR-249 allowlist remains 224/224 in normal mode and is covered by the
+- The PR-249 allowlist remains 225/225 in normal mode and is covered by the
   sharded no-GIL ThreadSanitizer corpus gate.
 - The reference-only PR-249 tail is checked by
   `zig build threads-reference-audit`, so unsupported shell hooks, JIT,

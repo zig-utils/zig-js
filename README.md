@@ -189,7 +189,7 @@ Requires Zig **0.17.0-dev**.
 zig build                       # builds libzig-js.a (the JSC drop-in)
 zig build test                  # runs the unit + C-API test suite
 zig build conformance           # runs the always-green smoke suite (33/33)
-zig build threads-test          # runs the green WebKit PR-249 threads corpus (224/224)
+zig build threads-test          # runs the green WebKit PR-249 threads corpus (225/225)
 zig build threads-reference-audit # classifies the remaining reference-only PR-249 files
 python3 tools/threads-reference-audit.py --probe-candidates # prints closest promotion probes
 zig build test -Dtsan=true      # unit suite under ThreadSanitizer
@@ -227,7 +227,7 @@ docs under `docs/threads`. Current coverage includes isolated agents, retained
 `SharedArrayBuffer` storage, typed-array and property-mode `Atomics.wait` /
 `notify` / `waitAsync`, structured clone, ArrayBuffer transfer/detach, Worker
 message passing, and the shared-realm `Thread` API. The vendored WebKit PR-249
-allowlist is **224/224** green.
+allowlist is **225/225** green.
 
 Correctness is now gated by the ordinary unit/corpus suite plus no-GIL coverage:
 ThreadSanitizer unit tests, a sharded no-GIL PR-249 corpus TSan sweep, a

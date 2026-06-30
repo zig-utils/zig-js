@@ -102,6 +102,7 @@ const allowlist = [_][]const u8{
     "cve/mc-tear-date-cache.js",
     "cve/mc-tear-generator-resume.js",
     "cve/mc-tear-rope-resolve-race.js",
+    "cve/mc-tear-typedarray-detach-grow-shrink.js",
     "cve/mc-val-atom-identity.js",
     "cve/mc-val-llint-cache-storm.js",
     "cve/mc-val-multislot-clone.js",

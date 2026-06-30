@@ -30,7 +30,6 @@ HELPERS = {
 PROMOTION_PROBES = (
     "cve/mc-df-arraycopy-relabel.js",
     "cve/mc-life-creator-thread-dies.js",
-    "cve/mc-tear-typedarray-detach-grow-shrink.js",
     "dw2-marklistset-storm.js",
     "w16-c1-prevent-collection.js",
     "semantics/oom-one-thread.js",
