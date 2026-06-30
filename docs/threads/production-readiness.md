@@ -284,7 +284,8 @@ as embedders exercise more threaded host patterns.
   `postMessage` lifecycles,
   plus worker
   handler-exception recovery, Worker handler-exception recovery composed with
-  shared-realm Thread finalization cleanup on one retained SAB,
+  shared-realm Thread finalization cleanup on one retained SAB, module Worker
+  handler-exception recovery composed with the same retained-SAB cleanup oracle,
   `Thread.restrict` lifecycle isolation,
   Thread exception identity through `join()` / `asyncJoin()` while
   property and condition waiters are parked,

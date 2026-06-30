@@ -187,7 +187,8 @@ Worker `close` /
 `terminate` / `postMessage` lifecycles, plus worker handler-exception recovery
 after a thrown `onmessage`,
 Worker handler-exception recovery composed with shared-realm Thread
-finalization cleanup on one retained SAB,
+finalization cleanup on one retained SAB, module Worker handler-exception
+recovery composed with the same retained-SAB cleanup oracle,
 `Thread.restrict` lifecycle isolation,
 Thread exception identity through `join()` / `asyncJoin()`
 while property and condition waiters are parked, thread-returned typed-array
@@ -217,7 +218,7 @@ property/condition waiters resume, plus `ThreadLocal` isolation across normal,
 throwing, nested, and async-joined thread lifecycles, plus
 `ThreadLocal` values registered with `FinalizationRegistry` across
 park/resume/clear/join cleanup lifecycles with exact cleanup count/sum delivery
-after quiescent collection. Each seed currently runs 27 deterministic lifecycle
+after quiescent collection. Each seed currently runs 28 deterministic lifecycle
 subprograms.
 
 `zig build test262 -Dtest262-parallel-js=true` runs test262 programs in

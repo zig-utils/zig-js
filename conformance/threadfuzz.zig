@@ -64,6 +64,68 @@ const ModuleFuzzHost = struct {
     }
 };
 
+const ModuleExceptionFuzzHost = struct {
+    const Entry = struct { path: []const u8, source: []const u8 };
+    var host_ctx: u8 = 0;
+    const entries = [_]Entry{
+        .{
+            .path = "ops.js",
+            .source =
+            \\export function applyCommand(sab, cmd, id) {
+            \\  const v = new Int32Array(sab);
+            \\  if (cmd === 'throw') {
+            \\    Atomics.add(v, 0, 1);
+            \\    Atomics.notify(v, 0);
+            \\    throw new Error('expected module worker exception/finalization throw');
+            \\  }
+            \\  if (cmd === 'ping') {
+            \\    return Atomics.add(v, 0, id) + id;
+            \\  }
+            \\  if (cmd === 'close') {
+            \\    return Atomics.load(v, 0);
+            \\  }
+            \\  throw new Error('unknown module worker command');
+            \\}
+            ,
+        },
+        .{
+            .path = "entry.js",
+            .source =
+            \\import { applyCommand } from "./ops.js";
+            \\globalThis.onmessage = (e) => {
+            \\  if (e.data.cmd === 'ping') {
+            \\    const after = applyCommand(e.data.sab, e.data.cmd, e.data.id);
+            \\    postMessage({ ack: e.data.id, after, module: true });
+            \\    return;
+            \\  }
+            \\  if (e.data.cmd === 'close') {
+            \\    const total = applyCommand(e.data.sab, e.data.cmd, e.data.id);
+            \\    postMessage({ closed: true, total, module: true });
+            \\    close();
+            \\    return;
+            \\  }
+            \\  applyCommand(e.data.sab, e.data.cmd, e.data.id);
+            \\};
+            ,
+        },
+    };
+
+    fn load(_: *anyopaque, _: []const u8, specifier: []const u8, out_path: *[]const u8) ?[]const u8 {
+        const name = if (std.mem.startsWith(u8, specifier, "./")) specifier[2..] else specifier;
+        for (entries) |e| {
+            if (std.mem.eql(u8, e.path, name)) {
+                out_path.* = e.path;
+                return e.source;
+            }
+        }
+        return null;
+    }
+
+    fn host() js.Context.ModuleHost {
+        return .{ .ctx = &host_ctx, .load = load };
+    }
+};
+
 const ModuleMidGcCleanupHost = struct {
     const Entry = struct { path: []const u8, source: []const u8 };
     var host_ctx: u8 = 0;
@@ -1761,6 +1823,253 @@ fn runWorkerExceptionFinalizationCleanupInterleaving(gpa: std.mem.Allocator, see
     };
     if (!cleaned.isNumber() or cleaned.asNum() != @as(f64, @floatFromInt(expected_cleanup_count))) {
         std.debug.print("seed {d}: worker exception/finalization cleanup got {d}, expected {d}\n", .{ seed, if (cleaned.isNumber()) cleaned.asNum() else -1, expected_cleanup_count });
+        return false;
+    }
+    return true;
+}
+
+fn runModuleWorkerExceptionFinalizationCleanupInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
+    var prng = std.Random.DefaultPrng.init(seed ^ 0x6d65_7863_6669_6e63);
+    const r = prng.random();
+    const nthreads = 2 + r.uintLessThan(usize, 4);
+    const per_thread = 6 + r.uintLessThan(usize, 8);
+    const pings = 2 + r.uintLessThan(usize, 5);
+
+    var expected_join_sum: usize = 0;
+    var expected_cleanup_count: usize = 0;
+    var expected_cleanup_sum: usize = 0;
+    var id: usize = 0;
+    while (id < nthreads) : (id += 1) {
+        const base = (id + 1) * 57_000;
+        expected_join_sum += base + per_thread + id;
+        expected_cleanup_count += per_thread;
+        var i: usize = 0;
+        while (i < per_thread) : (i += 1) expected_cleanup_sum += base + i;
+    }
+    var expected_worker_total: i64 = 1; // handler-throw message increments once.
+    var pi: usize = 0;
+    while (pi < pings) : (pi += 1) expected_worker_total += @intCast(30 + pi);
+    const expected_thread_counter = nthreads * per_thread;
+
+    const ctx = js.Context.createWith(gpa, .{ .enable_threads = true, .enable_gc = true }) catch {
+        std.debug.print("seed {d}: module worker exception/finalization context creation failed\n", .{seed});
+        return false;
+    };
+    defer ctx.destroy();
+    var machine = ctx.interpreter();
+
+    _ = ctx.evaluate(
+        \\globalThis.__moduleWorkerExcFinSab = new SharedArrayBuffer(32);
+        \\globalThis.__moduleWorkerExcFinMsg = function(cmd, id) {
+        \\  return { sab: globalThis.__moduleWorkerExcFinSab, cmd, id };
+        \\};
+        \\1
+    ) catch |err| {
+        std.debug.print("seed {d}: cannot create module worker exception/finalization message factory: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+
+    const w = Worker.spawnModule("entry.js", ModuleExceptionFuzzHost.entries[1].source, ModuleExceptionFuzzHost.host()) catch {
+        std.debug.print("seed {d}: module worker exception/finalization spawn failed\n", .{seed});
+        return false;
+    };
+    var cleanup_worker = true;
+    defer if (cleanup_worker) {
+        w.terminate();
+        w.join();
+        w.destroy();
+    };
+
+    const throw_msg = ctx.evaluate("__moduleWorkerExcFinMsg('throw', 0)") catch |err| {
+        std.debug.print("seed {d}: cannot make module worker exception/finalization throw message: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    w.postMessage(&machine, throw_msg) catch |err| {
+        std.debug.print("seed {d}: module worker exception/finalization throw post failed: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    pi = 0;
+    while (pi < pings) : (pi += 1) {
+        const msg_src = try std.fmt.allocPrint(gpa, "__moduleWorkerExcFinMsg('ping', {d})", .{30 + pi});
+        defer gpa.free(msg_src);
+        const ping_msg = ctx.evaluate(msg_src) catch |err| {
+            std.debug.print("seed {d}: cannot make module worker exception/finalization ping message: {s}\n", .{ seed, @errorName(err) });
+            return false;
+        };
+        w.postMessage(&machine, ping_msg) catch |err| {
+            std.debug.print("seed {d}: module worker exception/finalization ping post failed: {s}\n", .{ seed, @errorName(err) });
+            return false;
+        };
+    }
+    const close_msg = ctx.evaluate("__moduleWorkerExcFinMsg('close', 0)") catch |err| {
+        std.debug.print("seed {d}: cannot make module worker exception/finalization close message: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    w.postMessage(&machine, close_msg) catch |err| {
+        std.debug.print("seed {d}: module worker exception/finalization close post failed: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    w.close();
+
+    const js_src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  globalThis.__moduleWorkerExcFinCleanupCount = 0;
+        \\  globalThis.__moduleWorkerExcFinCleanupSum = 0;
+        \\  globalThis.__moduleWorkerExcFinOracle = 0;
+        \\  globalThis.__moduleWorkerExcFinRegistry = new FinalizationRegistry((held) => {{
+        \\    globalThis.__moduleWorkerExcFinCleanupCount++;
+        \\    globalThis.__moduleWorkerExcFinCleanupSum += held;
+        \\  }});
+        \\  const registry = globalThis.__moduleWorkerExcFinRegistry;
+        \\  const v = new Int32Array(globalThis.__moduleWorkerExcFinSab);
+        \\  const threads = [];
+        \\  let asyncSum = 0;
+        \\  for (let id = 0; id < {d}; id++) {{
+        \\    const t = new Thread((id, per) => {{
+        \\      const local = new Int32Array(globalThis.__moduleWorkerExcFinSab);
+        \\      const base = (id + 1) * 57000;
+        \\      for (let i = 0; i < per; i++) {{
+        \\        Atomics.add(local, 1, 1);
+        \\        let target = {{ id, i, payload: 'module-worker-exception-finalization-' + id + '-' + i }};
+        \\        registry.register(target, base + i);
+        \\        target = null;
+        \\      }}
+        \\      Atomics.add(local, 2, 1);
+        \\      return base + per + id;
+        \\    }}, id, {d});
+        \\    t.asyncJoin().then(
+        \\      (value) => {{ asyncSum += value; }},
+        \\      () => {{ asyncSum = -1000000; }});
+        \\    threads.push(t);
+        \\  }}
+        \\  let joinSum = 0;
+        \\  for (const t of threads) joinSum += t.join();
+        \\  if (joinSum !== {d})
+        \\    throw new Error('bad module worker exception/finalization join sum ' + joinSum);
+        \\  if (Atomics.load(v, 1) !== {d})
+        \\    throw new Error('bad module worker exception/finalization thread counter ' + Atomics.load(v, 1));
+        \\  if (Atomics.load(v, 2) !== {d})
+        \\    throw new Error('bad module worker exception/finalization done count ' + Atomics.load(v, 2));
+        \\  threads.length = 0;
+        \\  Promise.resolve().then(() => {{
+        \\    if (asyncSum !== {d})
+        \\      throw new Error('bad module worker exception/finalization async sum ' + asyncSum);
+        \\    globalThis.__moduleWorkerExcFinOracle = 1;
+        \\  }});
+        \\  return joinSum;
+        \\}})();
+        \\
+    ,
+        .{ nthreads, per_thread, expected_join_sum, expected_thread_counter, nthreads, expected_join_sum },
+    );
+    defer gpa.free(js_src);
+    const joined = ctx.evaluate(js_src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: module worker exception/finalization JS threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!joined.isNumber() or joined.asNum() != @as(f64, @floatFromInt(expected_join_sum))) {
+        std.debug.print("seed {d}: module worker exception/finalization joined got {d}, expected {d}\n", .{ seed, if (joined.isNumber()) joined.asNum() else -1, expected_join_sum });
+        return false;
+    }
+    const oracle = ctx.evaluate("globalThis.__moduleWorkerExcFinOracle") catch |err| {
+        std.debug.print("seed {d}: cannot read module worker exception/finalization oracle: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    if (!oracle.isNumber() or oracle.asNum() != 1) {
+        std.debug.print("seed {d}: module worker exception/finalization oracle got {d}\n", .{ seed, if (oracle.isNumber()) oracle.asNum() else -1 });
+        return false;
+    }
+
+    var replies: usize = 0;
+    var saw_close = false;
+    while (true) {
+        const reply = w.receive(&machine, 10_000) catch |err| {
+            std.debug.print("seed {d}: module worker exception/finalization receive failed: {s}\n", .{ seed, @errorName(err) });
+            return false;
+        } orelse break;
+        const closed = machine.getProperty(reply, "closed") catch js.Value.undef();
+        if (closed.isBoolean() and closed.asBool()) {
+            const total = machine.getProperty(reply, "total") catch |err| {
+                std.debug.print("seed {d}: cannot read module worker exception/finalization close total: {s}\n", .{ seed, @errorName(err) });
+                return false;
+            };
+            const module = machine.getProperty(reply, "module") catch |err| {
+                std.debug.print("seed {d}: cannot read module worker exception/finalization close module flag: {s}\n", .{ seed, @errorName(err) });
+                return false;
+            };
+            if (!total.isNumber() or total.asNum() != @as(f64, @floatFromInt(expected_worker_total)) or !module.isBoolean() or !module.asBool()) {
+                std.debug.print("seed {d}: module worker exception/finalization close reply was wrong\n", .{seed});
+                return false;
+            }
+            saw_close = true;
+            continue;
+        }
+        const ack = machine.getProperty(reply, "ack") catch |err| {
+            std.debug.print("seed {d}: cannot read module worker exception/finalization ack: {s}\n", .{ seed, @errorName(err) });
+            return false;
+        };
+        const after = machine.getProperty(reply, "after") catch |err| {
+            std.debug.print("seed {d}: cannot read module worker exception/finalization after: {s}\n", .{ seed, @errorName(err) });
+            return false;
+        };
+        const module = machine.getProperty(reply, "module") catch |err| {
+            std.debug.print("seed {d}: cannot read module worker exception/finalization module flag: {s}\n", .{ seed, @errorName(err) });
+            return false;
+        };
+        if (!ack.isNumber() or !after.isNumber() or !module.isBoolean() or !module.asBool()) {
+            std.debug.print("seed {d}: module worker exception/finalization reply missing expected fields\n", .{seed});
+            return false;
+        }
+        replies += 1;
+    }
+    if (replies != pings or !saw_close) {
+        std.debug.print("seed {d}: module worker exception/finalization replies={d}/{d} saw_close={}\n", .{ seed, replies, pings, saw_close });
+        return false;
+    }
+    w.join();
+    w.destroy();
+    cleanup_worker = false;
+
+    const worker_total = ctx.evaluate("Atomics.load(new Int32Array(globalThis.__moduleWorkerExcFinSab), 0)") catch |err| {
+        std.debug.print("seed {d}: cannot read module worker exception/finalization worker counter: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    if (!worker_total.isNumber() or worker_total.asNum() != @as(f64, @floatFromInt(expected_worker_total))) {
+        std.debug.print("seed {d}: module worker exception/finalization worker counter got {d}, expected {d}\n", .{ seed, if (worker_total.isNumber()) worker_total.asNum() else -1, expected_worker_total });
+        return false;
+    }
+
+    ctx.collectGarbage();
+    const cleanup_src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  globalThis.__moduleWorkerExcFinRegistry.cleanupSome();
+        \\  if (globalThis.__moduleWorkerExcFinCleanupCount !== {d})
+        \\    throw new Error('bad module worker exception/finalization cleanup count: ' + globalThis.__moduleWorkerExcFinCleanupCount);
+        \\  if (globalThis.__moduleWorkerExcFinCleanupSum !== {d})
+        \\    throw new Error('bad module worker exception/finalization cleanup sum: ' + globalThis.__moduleWorkerExcFinCleanupSum);
+        \\  return globalThis.__moduleWorkerExcFinCleanupCount;
+        \\}})();
+        \\
+    ,
+        .{ expected_cleanup_count, expected_cleanup_sum },
+    );
+    defer gpa.free(cleanup_src);
+    const cleaned = ctx.evaluate(cleanup_src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: module worker exception/finalization cleanup JS threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!cleaned.isNumber() or cleaned.asNum() != @as(f64, @floatFromInt(expected_cleanup_count))) {
+        std.debug.print("seed {d}: module worker exception/finalization cleanup got {d}, expected {d}\n", .{ seed, if (cleaned.isNumber()) cleaned.asNum() else -1, expected_cleanup_count });
         return false;
     }
     return true;
@@ -7672,6 +7981,22 @@ pub fn main(init: std.process.Init) !void {
         if (wcfail != 0) std.process.exit(1);
         return;
     };
+    // `threadfuzz moduleworkercleanup <iters> <seed>`: focused lifecycle repro
+    // for module Worker handler exception recovery while shared-realm Threads
+    // register FinalizationRegistry records on the same retained SAB.
+    if (first) |a| if (std.mem.eql(u8, a, "moduleworkercleanup")) {
+        if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch 1;
+        if (args.next()) |b| base_seed = std.fmt.parseInt(u64, b, 10) catch 1;
+        var mwcfail: usize = 0;
+        var mwci: usize = 0;
+        while (mwci < iters) : (mwci += 1) {
+            const seed = base_seed +% mwci;
+            if (!(try runModuleWorkerExceptionFinalizationCleanupInterleaving(gpa, seed))) mwcfail += 1;
+        }
+        std.debug.print("threadfuzz moduleworkercleanup: {d} programs from seed {d}, {d} failures\n", .{ iters, base_seed, mwcfail });
+        if (mwcfail != 0) std.process.exit(1);
+        return;
+    };
     // `threadfuzz workertermteardown <iters> <seed>`: focused lifecycle repro
     // for isolated Worker termination while a shared-realm top-level failure
     // tears down parked Threads, pending asyncJoin reactions, and cleanup jobs.
@@ -7879,7 +8204,8 @@ pub fn main(init: std.process.Init) !void {
     // shared-realm top-level failure tears down parked Threads, pending
     // asyncJoin reactions, and cleanup jobs, Worker handler exception recovery
     // while shared-realm Threads register finalization cleanup records on the
-    // same retained SAB,
+    // same retained SAB, module Worker handler exception recovery with the same
+    // retained-SAB cleanup oracle,
     // Thread exception identity and returned waitAsync promise assimilation
     // across join/asyncJoin while waiters are parked, cross-thread
     // FinalizationRegistry cleanup, FinalizationRegistry cleanup interleaved
@@ -7909,7 +8235,8 @@ pub fn main(init: std.process.Init) !void {
     // not disturb exact shared-realm finalization cleanup on the retained SAB
     // or top-level-failure Thread teardown with pending asyncJoin cleanup,
     // worker handler exception recovery must compose with exact shared-realm
-    // cleanup delivery on the retained SAB,
+    // cleanup delivery on the retained SAB, including the module Worker import
+    // graph variant,
     // thread exceptions must keep identity
     // through blocking and async joiners,
     // thread-returned waitAsync promises must settle through join/asyncJoin
@@ -7951,6 +8278,7 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runWorkerTerminateThreadTeardownInterleaving(gpa, seed))) lfail += 1;
             if (!(try runModuleWorkerTerminateThreadTeardownInterleaving(gpa, seed))) lfail += 1;
             if (!(try runWorkerExceptionFinalizationCleanupInterleaving(gpa, seed))) lfail += 1;
+            if (!(try runModuleWorkerExceptionFinalizationCleanupInterleaving(gpa, seed))) lfail += 1;
             if (!(try runThreadExceptionWaiterInterleaving(gpa, seed))) lfail += 1;
             if (!(try runReturnedWaitAsyncLifecycleInterleaving(gpa, seed))) lfail += 1;
             if (!(try runFinalizationCleanupInterleaving(gpa, seed))) lfail += 1;
@@ -7967,7 +8295,7 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runThreadLocalLifecycleInterleaving(gpa, seed))) lfail += 1;
             if (!(try runThreadLocalFinalizationCleanupInterleaving(gpa, seed))) lfail += 1;
         }
-        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 27, base_seed, lfail });
+        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 28, base_seed, lfail });
         if (lfail != 0) std.process.exit(1);
         return;
     };

@@ -245,7 +245,9 @@ context APIs.
   FIFO drain/drop ordering for mixed Worker terminate/close/postMessage
   lifecycles, worker
   handler-exception recovery, and Worker handler-exception recovery composed
-  with shared-realm Thread finalization cleanup on one retained SAB, plus
+  with shared-realm Thread finalization cleanup on one retained SAB, module
+  Worker handler-exception recovery composed with the same retained-SAB cleanup
+  oracle, plus
   `Thread.restrict`
   lifecycle isolation, Thread
   exception identity through `join()` / `asyncJoin()` while property and
