@@ -183,9 +183,10 @@ as embedders exercise more threaded host patterns.
   `Condition.wait`, and contended `Lock` acquisition while allocation pressure
   drives `parallel_midscript_gc`; every seed now runs a normal completion
   wait-pump subprogram, a sync-wait cleanup subprogram, a promise-publication
-  subprogram, a pending-microtask subprogram, an isolated Worker/SAB cleanup
-  subprogram, and an expected teardown-termination subprogram, and each must
-  finish at least one parallel sweep. The wait-pump subprogram queues a
+  subprogram, a pending-microtask subprogram, a creator-owned buffer
+  subprogram, an isolated Worker/SAB cleanup subprogram, and an expected
+  teardown-termination subprogram, and each must finish at least one parallel
+  sweep. The wait-pump subprogram queues a
   FIFO `Lock.asyncHold` grant chain including a root-bearing rejected grant plus
   an async `Condition.wait` reacquire with hidden captured JS roots and requires
   sync-wait pump points to deliver both during the same mid-script GC pressure
@@ -215,6 +216,12 @@ as embedders exercise more threaded host patterns.
   `FinalizationRegistry` cleanup roots queued through a finishing mid-script
   sweep, then drains the realm run loop and checks exact reaction/cleanup
   oracles.
+  The creator-owned buffer subprogram leaves child-created
+  `SharedArrayBuffer` and `ArrayBuffer` storage rooted through unjoined
+  `Thread` completion records and delayed `asyncJoin` observers across a
+  finishing sweep, then verifies blocking `join()`, post-sweep `asyncJoin()`,
+  and `ArrayBuffer.transfer()` observers see exact contents after the creating
+  thread has exited.
   The Worker/SAB cleanup subprogram runs isolated Workers on the same retained
   `SharedArrayBuffer` while shared-realm `Thread`s register cleanup targets and
   park stack roots through a finishing sweep, then verifies exact Worker
@@ -280,7 +287,7 @@ as embedders exercise more threaded host patterns.
   delivery after quiescent collection.
 - CI runs the fuzzer in several modes: default seeded, TSan, high-contention
   amplified, broad semantic,
-  mid-script GC wait-pump/microtask/sync-wait-cleanup/promise/teardown/Worker-SAB,
+  mid-script GC wait-pump/microtask/creator-buffer/sync-wait-cleanup/promise/teardown/Worker-SAB,
   lifecycle, ReleaseSafe, and deterministic-result verification.
 
 Remaining: keep extending the lifecycle profile toward more cross-realm
@@ -300,7 +307,7 @@ Every pull request and push to `main` runs:
 - TSan `threadfuzz`,
 - amplified `threadfuzz`,
 - broad semantic `threadfuzz`,
-- mid-script GC wait-pump/microtask/sync-wait-cleanup/promise/teardown/Worker-SAB
+- mid-script GC wait-pump/microtask/creator-buffer/sync-wait-cleanup/promise/teardown/Worker-SAB
   `threadfuzz`,
 - lifecycle `threadfuzz`,
 - ReleaseSafe `threadfuzz`,

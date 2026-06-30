@@ -6015,6 +6015,216 @@ fn runMidScriptMicrotaskChurnGc(gpa: std.mem.Allocator, seed: u64) !bool {
     return true;
 }
 
+fn runMidScriptCreatorOwnedBufferGc(gpa: std.mem.Allocator, seed: u64) !bool {
+    var prng = std.Random.DefaultPrng.init(seed ^ 0x6d69_6467_6362_7566);
+    const r = prng.random();
+    const ncreators = 2 + r.uintLessThan(usize, 3);
+    const per_buffer = 12 + r.uintLessThan(usize, 12);
+    const rounds = 8 + r.uintLessThan(usize, 5);
+    const per_round = 650 + r.uintLessThan(usize, 350);
+    const spin_iters = 2200 + r.uintLessThan(usize, 3000);
+    const seed_marker = seed % 10_000;
+
+    var payload_sum: usize = 0;
+    var id: usize = 0;
+    while (id < ncreators) : (id += 1) {
+        const base = 530_000 + seed_marker + id * 10_000;
+        var i: usize = 0;
+        while (i < per_buffer) : (i += 1) payload_sum += base + i;
+    }
+    const expected_total = payload_sum * 3;
+    const expected_async_score = payload_sum * 2;
+
+    const ctx = js.Context.createWithTestingOptions(gpa, .{
+        .enable_threads = true,
+        .enable_gc = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+        .parallel_midscript_gc = true,
+    }) catch {
+        std.debug.print("seed {d}: midgc creator-owned buffer context creation failed\n", .{seed});
+        return false;
+    };
+    defer ctx.destroy();
+
+    const src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  globalThis.__midgcCreatorBufferAsyncScore = 0;
+        \\  globalThis.__midgcCreatorBufferAsyncCount = 0;
+        \\  const gate = {{ ready: 0 }};
+        \\  const root = {{ seed: {d}, tag: 'midgc-creator-owned-buffer-root' }};
+        \\  const threads = [];
+        \\  for (let id = 0; id < {d}; id++) {{
+        \\    const t = new Thread((gate, id, per, seedMarker) => {{
+        \\      const base = 530000 + seedMarker + id * 10000;
+        \\      const sab = new SharedArrayBuffer(per * 4);
+        \\      const ab = new ArrayBuffer(per * 4);
+        \\      const movable = new ArrayBuffer(per * 4);
+        \\      const sv = new Int32Array(sab);
+        \\      const av = new Int32Array(ab);
+        \\      const mv = new Int32Array(movable);
+        \\      let sum = 0;
+        \\      for (let i = 0; i < per; i++) {{
+        \\        const v = base + i;
+        \\        sv[i] = v;
+        \\        av[i] = v;
+        \\        mv[i] = v;
+        \\        sum += v;
+        \\      }}
+        \\      Atomics.add(gate, 'ready', 1);
+        \\      Atomics.notify(gate, 'ready');
+        \\      return {{ id, sab, ab, movable, sum, base, root: {{ seed: seedMarker, label: 'midgc-creator-buffer-result' }} }};
+        \\    }}, gate, id, {d}, {d});
+        \\    t.asyncJoin().then(
+        \\      (bundle) => {{
+        \\        const sv = new Int32Array(bundle.sab);
+        \\        const av = new Int32Array(bundle.ab);
+        \\        let local = 0;
+        \\        for (let i = 0; i < {d}; i++) {{
+        \\          const expected = bundle.base + i;
+        \\          if (sv[i] !== expected || av[i] !== expected || bundle.root.seed !== {d}) {{
+        \\            globalThis.__midgcCreatorBufferAsyncScore = -1000000;
+        \\            return;
+        \\          }}
+        \\          local += sv[i] + av[i];
+        \\        }}
+        \\        globalThis.__midgcCreatorBufferAsyncScore += local;
+        \\        globalThis.__midgcCreatorBufferAsyncCount++;
+        \\      }},
+        \\      () => {{ globalThis.__midgcCreatorBufferAsyncScore = -1000000; }});
+        \\    threads.push(t);
+        \\  }}
+        \\  while (Atomics.load(gate, 'ready') < {d})
+        \\    Atomics.wait(gate, 'ready', Atomics.load(gate, 'ready'), 1);
+        \\  const keep = [];
+        \\  for (let round = 0; round < {d}; round++) {{
+        \\    for (let i = 0; i < {d}; i++) {{
+        \\      keep.push({{
+        \\        round,
+        \\        i,
+        \\        nested: {{ root, seed: {d}, value: i + round }},
+        \\        text: 'midgc-creator-buffer-' + round + '-' + i,
+        \\      }});
+        \\    }}
+        \\    let spin = 0;
+        \\    for (let j = 0; j < {d}; j++) spin = (spin + j + round) & 0x3fffffff;
+        \\    if (spin < 0) keep.push({{ impossible: true }});
+        \\  }}
+        \\  if (typeof gc === 'function') gc();
+        \\  let total = 0;
+        \\  for (const t of threads) {{
+        \\    const bundle = t.join();
+        \\    const sv = new Int32Array(bundle.sab);
+        \\    const av = new Int32Array(bundle.ab);
+        \\    let local = 0;
+        \\    for (let i = 0; i < {d}; i++) {{
+        \\      const expected = bundle.base + i;
+        \\      if (sv[i] !== expected)
+        \\        throw new Error('midgc creator-owned SAB lost word ' + i + '/' + sv[i] + '/' + expected);
+        \\      if (av[i] !== expected)
+        \\        throw new Error('midgc creator-owned AB lost word ' + i + '/' + av[i] + '/' + expected);
+        \\      local += sv[i] + av[i];
+        \\    }}
+        \\    if (local !== bundle.sum * 2)
+        \\      throw new Error('bad midgc creator-owned main checksum ' + local + '/' + (bundle.sum * 2));
+        \\    total += local;
+        \\    const copy = bundle.movable.transfer();
+        \\    if (bundle.movable.byteLength !== 0)
+        \\      throw new Error('midgc creator-owned movable buffer did not detach');
+        \\    const cv = new Int32Array(copy);
+        \\    let copySum = 0;
+        \\    for (let i = 0; i < {d}; i++) {{
+        \\      const expected = bundle.base + i;
+        \\      if (cv[i] !== expected)
+        \\        throw new Error('midgc creator-owned transferred copy lost word');
+        \\      copySum += cv[i];
+        \\    }}
+        \\    if (copySum !== bundle.sum)
+        \\      throw new Error('bad midgc creator-owned transferred checksum ' + copySum + '/' + bundle.sum);
+        \\    total += copySum;
+        \\  }}
+        \\  globalThis.__midgcCreatorBufferCheck = function(expectedScore, expectedCount) {{
+        \\    if (globalThis.__midgcCreatorBufferAsyncScore !== expectedScore)
+        \\      throw new Error('bad midgc creator-owned async score ' + globalThis.__midgcCreatorBufferAsyncScore + '/' + expectedScore);
+        \\    if (globalThis.__midgcCreatorBufferAsyncCount !== expectedCount)
+        \\      throw new Error('bad midgc creator-owned async count ' + globalThis.__midgcCreatorBufferAsyncCount + '/' + expectedCount);
+        \\    return 1;
+        \\  }};
+        \\  return total;
+        \\}})();
+        \\
+    ,
+        .{
+            seed_marker,
+            ncreators,
+            per_buffer,
+            seed_marker,
+            per_buffer,
+            seed_marker,
+            ncreators,
+            rounds,
+            per_round,
+            seed_marker,
+            spin_iters,
+            per_buffer,
+            per_buffer,
+        },
+    );
+    defer gpa.free(src);
+
+    const before_attempts = ctx.gc_par_attempts.load(.monotonic);
+    const before_collections = ctx.gc_par_collections.load(.monotonic);
+    const result = ctx.evaluate(src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: midgc creator-owned buffer JS threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!result.isNumber() or result.asNum() != @as(f64, @floatFromInt(expected_total))) {
+        std.debug.print("seed {d}: midgc creator-owned buffer got {d}, expected {d}\n", .{ seed, if (result.isNumber()) result.asNum() else -1, expected_total });
+        return false;
+    }
+    if (ctx.gc_par_attempts.load(.monotonic) <= before_attempts) {
+        std.debug.print("seed {d}: midgc creator-owned buffer did not attempt a parallel collection\n", .{seed});
+        return false;
+    }
+    if (ctx.gc_par_collections.load(.monotonic) <= before_collections) {
+        std.debug.print("seed {d}: midgc creator-owned buffer did not finish a parallel collection\n", .{seed});
+        return false;
+    }
+
+    _ = ctx.evaluate("$drainRunLoop()") catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: midgc creator-owned buffer drain loop threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    const check_src = try std.fmt.allocPrint(
+        gpa,
+        "globalThis.__midgcCreatorBufferCheck({d}, {d})",
+        .{ expected_async_score, ncreators },
+    );
+    defer gpa.free(check_src);
+    const checked = ctx.evaluate(check_src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: midgc creator-owned buffer check threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!checked.isNumber() or checked.asNum() != 1) {
+        std.debug.print("seed {d}: midgc creator-owned buffer check got {d}\n", .{ seed, if (checked.isNumber()) checked.asNum() else -1 });
+        return false;
+    }
+    return true;
+}
+
 fn runMidScriptWorkerCleanupGc(gpa: std.mem.Allocator, seed: u64) !bool {
     var prng = std.Random.DefaultPrng.init(seed ^ 0x6d69_6477_6f72_6b63);
     const r = prng.random();
@@ -6575,6 +6785,23 @@ pub fn main(init: std.process.Init) !void {
         if (mmfail != 0) std.process.exit(1);
         return;
     };
+    // `threadfuzz midgccreatorbuffers <iters> <seed>`: focused mid-script
+    // parallel-GC repro for child-created SAB/ArrayBuffer storage rooted
+    // through unjoined Thread completion records and delayed asyncJoin
+    // observers across a finishing sweep.
+    if (first) |a| if (std.mem.eql(u8, a, "midgccreatorbuffers")) {
+        if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch 1;
+        if (args.next()) |b| base_seed = std.fmt.parseInt(u64, b, 10) catch 1;
+        var mcbfail: usize = 0;
+        var mcbi: usize = 0;
+        while (mcbi < iters) : (mcbi += 1) {
+            const seed = base_seed +% mcbi;
+            if (!(try runMidScriptCreatorOwnedBufferGc(gpa, seed))) mcbfail += 1;
+        }
+        std.debug.print("threadfuzz midgccreatorbuffers: {d} programs from seed {d}, {d} failures\n", .{ iters, base_seed, mcbfail });
+        if (mcbfail != 0) std.process.exit(1);
+        return;
+    };
     // `threadfuzz midgcworker <iters> <seed>`: focused mid-script
     // parallel-GC repro for isolated Workers running on a retained SAB while
     // shared-realm Threads publish cleanup roots through a finishing sweep.
@@ -6728,6 +6955,8 @@ pub fn main(init: std.process.Init) !void {
     // asyncJoin reactions, child-returned waitAsync/rejected-promise/user-
     // thenable assimilation, pending Promise/microtask reaction roots across
     // asyncHold, waitAsync, asyncJoin, and cleanup delivery,
+    // child-created SAB/ArrayBuffer storage rooted through unjoined Thread
+    // completion records and delayed asyncJoin observers,
     // completed-but-unjoined Thread results and thrown
     // objects, sync-wait peer stack roots with finalization cleanup, isolated
     // Worker/SAB progress while shared-realm cleanup roots are swept, and
@@ -6746,10 +6975,11 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runMidScriptTerminationReactionGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptPromisePublicationGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptMicrotaskChurnGc(gpa, seed))) mfail += 1;
+            if (!(try runMidScriptCreatorOwnedBufferGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptSyncWaitCleanupGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptWorkerCleanupGc(gpa, seed))) mfail += 1;
         }
-        std.debug.print("threadfuzz midgc: {d} programs from seed {d}, {d} failures\n", .{ iters * 6, base_seed, mfail });
+        std.debug.print("threadfuzz midgc: {d} programs from seed {d}, {d} failures\n", .{ iters * 7, base_seed, mfail });
         if (mfail != 0) std.process.exit(1);
         return;
     };

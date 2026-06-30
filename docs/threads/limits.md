@@ -170,10 +170,15 @@ context APIs.
   pending-microtask subprogram where Promise, typed-array `waitAsync`,
   `Thread.asyncJoin`, with-fn `Lock.asyncHold`, no-fn release-function, and
   `FinalizationRegistry` cleanup roots stay queued through a finishing sweep
-  until exact post-drain reaction/cleanup checks pass, plus a Worker/SAB
-  cleanup subprogram where isolated Workers keep progressing on a retained
-  `SharedArrayBuffer` while shared-realm `Thread`s publish cleanup targets and
-  parked stack roots through a finishing sweep. Sync-wait pump points
+  until exact post-drain reaction/cleanup checks pass, plus a sibling
+  creator-owned buffer subprogram where child-created `SharedArrayBuffer` and
+  `ArrayBuffer` storage stays rooted through unjoined `Thread` completion
+  records and delayed `asyncJoin` observers until blocking `join()`,
+  post-sweep `asyncJoin()`, and `ArrayBuffer.transfer()` observers verify exact
+  contents after the creator exits, plus a Worker/SAB cleanup subprogram where
+  isolated Workers keep progressing on a retained `SharedArrayBuffer` while
+  shared-realm `Thread`s publish cleanup targets and parked stack roots through
+  a finishing sweep. Sync-wait pump points
   must execute the async grants during the
   same allocation-pressure window that produces a finishing parallel sweep, and
   the `waitAsync` reaction must run intact after notification. Join-side
@@ -200,8 +205,10 @@ context APIs.
   asyncHold callback/release delivery, typed-array `waitAsync`,
   `Thread.asyncJoin`, and cleanup reactions, keeps completed-but-unjoined
   Thread result and thrown exception objects live through the thread completion
-  record, verifies isolated Worker/SAB progress while shared-realm cleanup roots
-  are swept, and verifies exact `FinalizationRegistry` cleanup count/sum delivery
+  record, keeps creator-owned `SharedArrayBuffer` and `ArrayBuffer` storage live
+  through unjoined Thread completion records and delayed `asyncJoin` observers,
+  verifies isolated Worker/SAB progress while shared-realm cleanup roots are
+  swept, and verifies exact `FinalizationRegistry` cleanup count/sum delivery
   afterward. The lifecycle
   profile now adds deterministic termination storms,
   script Worker/thread retained-`SharedArrayBuffer` overlap, simple-import,
