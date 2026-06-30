@@ -350,7 +350,9 @@ fn timeScenario(gpa: std.mem.Allocator, io: std.Io, scenario: Scenario, workers:
 
 fn printScenario(gpa: std.mem.Allocator, io: std.Io, scenario: Scenario, workers: []const usize) !void {
     std.debug.print("\n{s}\n", .{scenario.name});
-    std.debug.print("{s:>8} {s:>14} {s:>14} {s:>12} {s:>12} {s:>10} {s:>10} {s:>10} {s:>10} {s:>10} {s:>10} {s:>10} {s:>10} {s:>10} {s:>10} {s:>10} {s:>10} {s:>10} {s:>10}\n", .{
+    std.debug.print("{s:>8} {s:>14} {s:>14} {s:>12} {s:>12}" ++
+        " {s:>10} {s:>10} {s:>10} {s:>9} {s:>9} {s:>9} {s:>10} {s:>10} {s:>10} {s:>10}" ++
+        " {s:>10} {s:>10} {s:>10} {s:>9} {s:>9} {s:>9} {s:>10} {s:>10} {s:>10} {s:>10}\n", .{
         "threads",
         "no-gil ns",
         "gil ns",
@@ -359,6 +361,9 @@ fn printScenario(gpa: std.mem.Allocator, io: std.Io, scenario: Scenario, workers
         "ng events",
         "ng parks",
         "ng joins",
+        "ng lock",
+        "ng cond",
+        "ng prop",
         "ng async",
         "ng done",
         "ng empty",
@@ -366,6 +371,9 @@ fn printScenario(gpa: std.mem.Allocator, io: std.Io, scenario: Scenario, workers
         "gil events",
         "gil parks",
         "gil joins",
+        "gil lock",
+        "gil cond",
+        "gil prop",
         "gil async",
         "gil done",
         "gil empty",
@@ -386,7 +394,9 @@ fn printScenario(gpa: std.mem.Allocator, io: std.Io, scenario: Scenario, workers
         const vs_gil = @as(f64, @floatFromInt(gil_ns)) /
             @as(f64, @floatFromInt(@max(parallel_ns, 1)));
 
-        std.debug.print("{d:>8} {d:>14} {d:>14} {d:>11.2}x {d:>11.2}x {d:>10} {d:>10} {d:>10} {d:>10} {d:>10} {d:>10} {d:>10} {d:>10} {d:>10} {d:>10} {d:>10} {d:>10} {d:>10} {d:>10}\n", .{
+        std.debug.print("{d:>8} {d:>14} {d:>14} {d:>11.2}x {d:>11.2}x" ++
+            " {d:>10} {d:>10} {d:>10} {d:>9} {d:>9} {d:>9} {d:>10} {d:>10} {d:>10} {d:>10}" ++
+            " {d:>10} {d:>10} {d:>10} {d:>9} {d:>9} {d:>9} {d:>10} {d:>10} {d:>10} {d:>10}\n", .{
             n,
             parallel_ns,
             gil_ns,
@@ -395,6 +405,9 @@ fn printScenario(gpa: std.mem.Allocator, io: std.Io, scenario: Scenario, workers
             parallel.stats.events(),
             parallel.stats.parks(),
             parallel.stats.thread_join_parks,
+            parallel.stats.lock_wait_parks,
+            parallel.stats.condition_wait_parks,
+            parallel.stats.property_wait_parks,
             parallel.stats.asyncWaits(),
             parallel.stats.asyncSettled(),
             parallel.stats.task_pump_empty,
@@ -402,6 +415,9 @@ fn printScenario(gpa: std.mem.Allocator, io: std.Io, scenario: Scenario, workers
             gil.stats.events(),
             gil.stats.parks(),
             gil.stats.thread_join_parks,
+            gil.stats.lock_wait_parks,
+            gil.stats.condition_wait_parks,
+            gil.stats.property_wait_parks,
             gil.stats.asyncWaits(),
             gil.stats.asyncSettled(),
             gil.stats.task_pump_empty,
@@ -600,6 +616,7 @@ pub fn main() !void {
     std.debug.print("cores: {d}; no-GIL is Context.createWith(.{{ .enable_threads = true }}), serialized is .gil = true\n", .{cores});
     std.debug.print("events = logical contention (Lock/Condition/property wait/asyncHold); parks = timed wait/pump iterations including Thread.join\n", .{});
     std.debug.print("joins = Thread.join timed wait/pump iterations, separated from other park sources for lifecycle attribution\n", .{});
+    std.debug.print("lock/cond/prop = park iterations attributed to contended Lock.hold, Condition.wait, and property Atomics.wait\n", .{});
     std.debug.print("async/done = Condition.asyncWait and property waitAsync registrations / completed condition reacquires plus settled property waitAsync tickets\n", .{});
     std.debug.print("empty/jobs = run-loop task-pump empty fast-path hits / delivered asyncHold jobs\n", .{});
 

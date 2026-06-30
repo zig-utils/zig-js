@@ -271,6 +271,9 @@ queued `asyncHold` grants, and `parks` count timed wait/pump iterations
 including `Thread.join`. The `joins` columns split the `Thread.join` subset out
 of aggregate parks so lifecycle churn can be attributed separately from lock,
 condition, and property wait pressure.
+The `lock`/`cond`/`prop` columns split the remaining sync park pressure by
+contended `Lock.hold`, `Condition.wait`, and property `Atomics.wait`, so
+source-specific waiter regressions do not hide inside aggregate parks.
 The `async`/`done` columns split `Condition.asyncWait` plus property
 `waitAsync` registration from completed async-condition reacquires plus settled
 property `waitAsync` tickets, making timeout-settlement parity and async

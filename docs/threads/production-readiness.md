@@ -114,7 +114,9 @@ Known performance/maturity work:
   `events` count logical contention (`Lock`/`Condition`/property wait and
   queued `asyncHold` grants), `parks` count timed wait/pump iterations
   including `Thread.join`, `joins` split the `Thread.join` subset out of
-  aggregate parks for lifecycle attribution, `async`/`done` split
+  aggregate parks for lifecycle attribution, `lock`/`cond`/`prop` split the
+  remaining sync park pressure by contended `Lock.hold`, `Condition.wait`, and
+  property `Atomics.wait`, `async`/`done` split
   `Condition.asyncWait` plus property `waitAsync` registration from completed
   async-condition reacquires plus settled property `waitAsync` tickets, and
   `empty`/`jobs` split the
