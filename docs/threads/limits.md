@@ -125,7 +125,10 @@ context APIs.
   stable-compacts the waiter table in one pass instead of shifting the remaining
   waiters. Timeout polling now uses the same one-pass compaction shape for
   expired property `waitAsync` tickets, and realm teardown frees abandoned
-  property `waitAsync` tickets by linear scan. Worker
+  property `waitAsync` tickets by linear scan. Typed-array `Atomics.notify`
+  unlinks notified sync stack tickets before signal, and typed-array
+  `waitAsync` harvest/abandon paths stable-compact settled or owner tickets in
+  one pass while preserving FIFO order for remaining waiters. Worker
   inbox/outbox channels now drain
   structured-clone messages with FIFO head cursors as well, avoiding front
   shifts in receive-heavy Worker loops. Empty internal `Worker.receive(..., 0)`

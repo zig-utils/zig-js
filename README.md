@@ -290,7 +290,11 @@ threading architecture:
   cleanup also stable-compacts the waiter table in one pass instead of
   front-shifting the remaining waiters, and timeout polling plus realm teardown
   now scan property `waitAsync` tickets once instead of removing one middle
-  entry per expired/abandoned ticket. Worker inbox/outbox channels now drain
+  entry per expired/abandoned ticket. Typed-array `Atomics.notify` now unlinks
+  notified sync stack tickets before signaling, so awakened waiters do not each
+  rescan and shift the process-wide waiter list; typed-array `waitAsync`
+  harvest and abandon paths stable-compact settled/owner tickets in one pass
+  while preserving FIFO order for remaining waiters. Worker inbox/outbox channels now drain
   through the same FIFO head-cursor shape instead of front-shifting
   structured-clone message queues, and empty internal `Worker.receive(..., 0)`
   polls return under the channel lock without entering timed condition waits or

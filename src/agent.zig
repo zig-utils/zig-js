@@ -270,6 +270,7 @@ const WaitKey = struct { storage: *SharedBufferStorage, offset: usize };
 const Ticket = struct {
     cond: std.Io.Condition = .init,
     woken: bool = false,
+    linked: bool = false,
     /// Async (`Atomics.waitAsync`) tickets are heap-allocated, carry their
     /// owner realm and deadline, and are harvested by the owner's drain loop
     /// rather than parking a thread. Sync tickets live on the waiter's stack.
@@ -336,6 +337,7 @@ pub fn wait(storage: *SharedBufferStorage, offset: usize, comptime T: type, expe
         waiters_mutex.unlock(io);
         return .timed_out;
     };
+    ticket.linked = true;
     const deadline: std.Io.Timeout = if (timeout_ns) |ns| (std.Io.Timeout{ .duration = .{
         .raw = .fromNanoseconds(ns),
         .clock = .awake,
@@ -354,15 +356,28 @@ pub fn wait(storage: *SharedBufferStorage, offset: usize, comptime T: type, expe
             error.Canceled => continue,
         };
     }
-    // Unlink before returning — the ticket is stack memory.
-    for (list.tickets.items, 0..) |t, i| {
-        if (t == &ticket) {
-            _ = list.tickets.orderedRemove(i);
-            break;
-        }
-    }
+    // Unlink before returning — unless notify/teardown already unlinked the
+    // stack ticket before signaling us.
+    if (ticket.linked) unlinkTicket(list, &ticket);
     waiters_mutex.unlock(io);
     return outcome;
+}
+
+fn unlinkTicket(list: *WaiterList, ticket: *Ticket) void {
+    var removed = false;
+    var write: usize = 0;
+    for (list.tickets.items, 0..) |t, read| {
+        if (t == ticket) {
+            removed = true;
+            continue;
+        }
+        if (write != read) list.tickets.items[write] = t;
+        write += 1;
+    }
+    if (removed) {
+        ticket.linked = false;
+        list.tickets.shrinkRetainingCapacity(write);
+    }
 }
 
 /// `Atomics.notify` core: wake up to `count` FIFO waiters (sync and async
@@ -375,14 +390,26 @@ pub fn notify(storage: *SharedBufferStorage, offset: usize, count: usize) usize 
     const list = waiters.get(.{ .storage = storage, .offset = offset }) orelse return 0;
     var n: usize = 0;
     var any_async = false;
-    for (list.tickets.items) |t| {
-        if (n >= count) break;
-        if (!t.woken) {
+    var write: usize = 0;
+    for (list.tickets.items, 0..) |t, read| {
+        var keep = true;
+        if (n < count and !t.woken) {
             t.woken = true;
-            if (t.is_async) any_async = true else t.cond.signal(io);
+            if (t.is_async) {
+                any_async = true;
+            } else {
+                t.linked = false;
+                t.cond.signal(io);
+                keep = false;
+            }
             n += 1;
         }
+        if (keep) {
+            if (write != read) list.tickets.items[write] = t;
+            write += 1;
+        }
     }
+    if (write != list.tickets.items.len) list.tickets.shrinkRetainingCapacity(write);
     if (any_async) waiters_cond.broadcast(io);
     return n;
 }
@@ -414,6 +441,7 @@ pub fn waitAsyncEnqueue(storage: *SharedBufferStorage, offset: usize, comptime T
     const id = async_id_counter.fetchAdd(1, .monotonic);
     const now = std.Io.Timestamp.now(io, .awake).nanoseconds;
     t.* = .{
+        .linked = true,
         .is_async = true,
         .owner = owner,
         .async_id = id,
@@ -445,23 +473,28 @@ pub fn harvestAsync(owner: *const anyopaque, out: []Settled) usize {
         var it = waiters.valueIterator();
         while (it.next()) |listp| {
             const list = listp.*;
-            var i: usize = 0;
-            while (i < list.tickets.items.len) {
-                const t = list.tickets.items[i];
+            var write: usize = 0;
+            for (list.tickets.items, 0..) |t, read| {
+                var keep = true;
                 if (t.is_async and t.owner == owner) {
                     const expired = t.deadline_ns != null and t.deadline_ns.? <= now;
                     if ((t.woken or expired or group.stopping) and n < out.len) {
                         out[n] = .{ .id = t.async_id, .outcome = if (t.woken) .ok else .timed_out };
                         n += 1;
-                        _ = list.tickets.orderedRemove(i);
+                        t.linked = false;
                         alloc.destroy(t);
-                        continue;
+                        keep = false;
+                    } else {
+                        outstanding += 1;
+                        if (t.deadline_ns) |d| nearest = if (nearest) |m| @min(m, d) else d;
                     }
-                    outstanding += 1;
-                    if (t.deadline_ns) |d| nearest = if (nearest) |m| @min(m, d) else d;
                 }
-                i += 1;
+                if (keep) {
+                    if (write != read) list.tickets.items[write] = t;
+                    write += 1;
+                }
             }
+            if (write != list.tickets.items.len) list.tickets.shrinkRetainingCapacity(write);
         }
         if (n > 0 or outstanding == 0) return n;
         if (!group.stopping and nearest == null and live_agents.load(.monotonic) == 0) return 0;
@@ -484,16 +517,20 @@ pub fn abandonAsync(owner: *const anyopaque) void {
     var it = waiters.valueIterator();
     while (it.next()) |listp| {
         const list = listp.*;
-        var i: usize = 0;
-        while (i < list.tickets.items.len) {
-            const t = list.tickets.items[i];
+        var write: usize = 0;
+        for (list.tickets.items, 0..) |t, read| {
+            var keep = true;
             if (t.is_async and t.owner == owner) {
-                _ = list.tickets.orderedRemove(i);
+                t.linked = false;
                 alloc.destroy(t);
-                continue;
+                keep = false;
             }
-            i += 1;
+            if (keep) {
+                if (write != read) list.tickets.items[write] = t;
+                write += 1;
+            }
         }
+        if (write != list.tickets.items.len) list.tickets.shrinkRetainingCapacity(write);
     }
 }
 
@@ -507,11 +544,18 @@ fn wakeAllWaiters() void {
     defer waiters_mutex.unlock(io);
     var it = waiters.valueIterator();
     while (it.next()) |list| {
-        for (list.*.tickets.items) |t| {
-            if (t.is_async) continue; // harvest sees group.stopping
+        var write: usize = 0;
+        for (list.*.tickets.items, 0..) |t, read| {
+            if (t.is_async) {
+                if (write != read) list.*.tickets.items[write] = t;
+                write += 1;
+                continue; // harvest sees group.stopping
+            }
             t.woken = true;
+            t.linked = false;
             t.cond.signal(io);
         }
+        if (write != list.*.tickets.items.len) list.*.tickets.shrinkRetainingCapacity(write);
     }
     waiters_cond.broadcast(io);
 }
@@ -541,4 +585,128 @@ test "waiter table: wait blocks until notify; not-equal early-out" {
     const t = try std.Thread.spawn(.{}, Waker.run, .{s});
     try std.testing.expectEqual(WaitOutcome.ok, wait(s, 0, i32, 7, 2 * std.time.ns_per_s));
     t.join();
+}
+
+test "waiter table notify unlinks sync tickets and preserves async FIFO tail" {
+    const s = try SharedBufferStorage.create(8, null);
+    defer s.release();
+    const key = WaitKey{ .storage = s, .offset = 4 };
+    var owner: u8 = 0;
+    var sync1 = Ticket{ .linked = true };
+    var async1 = Ticket{ .linked = true, .is_async = true, .owner = &owner, .async_id = 1 };
+    var sync2 = Ticket{ .linked = true };
+
+    const io = engineIo();
+    waiters_used.store(true, .monotonic);
+    waiters_mutex.lockUncancelable(io);
+    const list = listFor(key) orelse {
+        waiters_mutex.unlock(io);
+        return error.TestUnexpectedResult;
+    };
+    list.tickets.append(alloc, &sync1) catch {
+        waiters_mutex.unlock(io);
+        return error.OutOfMemory;
+    };
+    list.tickets.append(alloc, &async1) catch {
+        waiters_mutex.unlock(io);
+        return error.OutOfMemory;
+    };
+    list.tickets.append(alloc, &sync2) catch {
+        waiters_mutex.unlock(io);
+        return error.OutOfMemory;
+    };
+    waiters_mutex.unlock(io);
+
+    try std.testing.expectEqual(@as(usize, 2), notify(s, key.offset, 2));
+
+    waiters_mutex.lockUncancelable(io);
+    defer waiters_mutex.unlock(io);
+    const kept = waiters.get(key) orelse return error.TestUnexpectedResult;
+    defer {
+        kept.tickets.deinit(alloc);
+        _ = waiters.remove(key);
+        alloc.destroy(kept);
+    }
+    try std.testing.expect(sync1.woken);
+    try std.testing.expect(!sync1.linked);
+    try std.testing.expect(async1.woken);
+    try std.testing.expect(async1.linked);
+    try std.testing.expect(!sync2.woken);
+    try std.testing.expect(sync2.linked);
+    try std.testing.expectEqual(@as(usize, 2), kept.tickets.items.len);
+    try std.testing.expect(kept.tickets.items[0] == &async1);
+    try std.testing.expect(kept.tickets.items[1] == &sync2);
+}
+
+test "waiter table harvestAsync stable-compacts settled owner tickets" {
+    const s = try SharedBufferStorage.create(8, null);
+    defer s.release();
+    const key = WaitKey{ .storage = s, .offset = 8 };
+    var owner: u8 = 0;
+    var other_owner: u8 = 0;
+    var sync_tail = Ticket{ .linked = true };
+
+    const io = engineIo();
+    const now = std.Io.Timestamp.now(io, .awake).nanoseconds;
+    const settled = try alloc.create(Ticket);
+    const other = try alloc.create(Ticket);
+    const expired = try alloc.create(Ticket);
+    const pending = try alloc.create(Ticket);
+    settled.* = .{ .linked = true, .is_async = true, .owner = &owner, .async_id = 11, .woken = true };
+    other.* = .{ .linked = true, .is_async = true, .owner = &other_owner, .async_id = 22, .woken = true };
+    expired.* = .{ .linked = true, .is_async = true, .owner = &owner, .async_id = 33, .deadline_ns = now - 1 };
+    pending.* = .{ .linked = true, .is_async = true, .owner = &owner, .async_id = 44, .deadline_ns = now + std.time.ns_per_s };
+
+    waiters_used.store(true, .monotonic);
+    waiters_mutex.lockUncancelable(io);
+    const list = listFor(key) orelse {
+        waiters_mutex.unlock(io);
+        return error.TestUnexpectedResult;
+    };
+    list.tickets.append(alloc, settled) catch {
+        waiters_mutex.unlock(io);
+        return error.OutOfMemory;
+    };
+    list.tickets.append(alloc, other) catch {
+        waiters_mutex.unlock(io);
+        return error.OutOfMemory;
+    };
+    list.tickets.append(alloc, expired) catch {
+        waiters_mutex.unlock(io);
+        return error.OutOfMemory;
+    };
+    list.tickets.append(alloc, pending) catch {
+        waiters_mutex.unlock(io);
+        return error.OutOfMemory;
+    };
+    list.tickets.append(alloc, &sync_tail) catch {
+        waiters_mutex.unlock(io);
+        return error.OutOfMemory;
+    };
+    waiters_mutex.unlock(io);
+
+    var out: [4]Settled = undefined;
+    const n = harvestAsync(&owner, out[0..]);
+    try std.testing.expectEqual(@as(usize, 2), n);
+    try std.testing.expectEqual(@as(u64, 11), out[0].id);
+    try std.testing.expectEqual(WaitOutcome.ok, out[0].outcome);
+    try std.testing.expectEqual(@as(u64, 33), out[1].id);
+    try std.testing.expectEqual(WaitOutcome.timed_out, out[1].outcome);
+
+    waiters_mutex.lockUncancelable(io);
+    defer waiters_mutex.unlock(io);
+    const kept = waiters.get(key) orelse return error.TestUnexpectedResult;
+    defer {
+        alloc.destroy(other);
+        alloc.destroy(pending);
+        kept.tickets.deinit(alloc);
+        _ = waiters.remove(key);
+        alloc.destroy(kept);
+    }
+    try std.testing.expectEqual(@as(usize, 3), kept.tickets.items.len);
+    try std.testing.expect(kept.tickets.items[0] == other);
+    try std.testing.expect(kept.tickets.items[1] == pending);
+    try std.testing.expect(kept.tickets.items[2] == &sync_tail);
+    try std.testing.expect(other.linked);
+    try std.testing.expect(pending.linked);
 }

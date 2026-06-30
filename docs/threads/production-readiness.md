@@ -132,6 +132,10 @@ Known performance/maturity work:
   Timeout polling now also compacts all expired property `waitAsync` tickets in
   one pass and realm teardown frees abandoned property `waitAsync` tickets by
   linear scan.
+- Typed-array `Atomics.notify` now unlinks sync stack tickets before signaling,
+  so awakened waiters do not each rescan and shift the process-wide waiter list.
+  Typed-array `waitAsync` harvest and abandon paths stable-compact matching
+  tickets in one pass while preserving FIFO order for other waiters.
 - Worker inbox/outbox channels now use FIFO head cursors for structured-clone
   message queues, so Worker-heavy lifecycle and receive loops do not pay one
   front shift per delivered message. Empty internal `Worker.receive(..., 0)`

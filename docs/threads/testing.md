@@ -256,6 +256,9 @@ timed-out or terminated sync condition waiters are marked canceled and skipped
 by that cursor instead of being removed from the middle of the queue;
 property-mode `Atomics.wait` timeout/termination cleanup stable-compacts the
 sync waiter table in one pass instead of shifting the remaining waiters;
+typed-array `Atomics.notify` unlinks sync stack tickets before signal, and
+typed-array `waitAsync` harvest/abandon paths stable-compact matching tickets
+in one pass while preserving FIFO order for other waiters;
 Worker inbox/outbox channels use the same shape for structured-clone message
 delivery, and empty internal `Worker.receive(..., 0)` polls skip timed condition
 wait setup and drained-queue compaction. Active interpreter roots, protected
@@ -265,7 +268,9 @@ shape and zero-timeout polling behavior under a direct unit guard, while
 `condition queue head cursor skips canceled sync waiters` covers the condition
 timeout/termination queue shape directly, `property waiter removal
 stable-compacts timed-out sync ticket` covers the property waiter cleanup shape,
-and
+`waiter table notify unlinks sync tickets and preserves async FIFO tail` plus
+`waiter table harvestAsync stable-compacts settled owner tickets` cover the
+typed-array waiter-table shapes, and
 `api/condition-wait-termination.js` keeps the JS termination path exercised.
 Promise microtask drains now use the same FIFO head-cursor pattern, with
 `microtask queue is FIFO with a head cursor` guarding the direct queue shape and
