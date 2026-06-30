@@ -255,6 +255,48 @@ const ModuleFanoutFuzzHost = struct {
     }
 };
 
+const ModuleTerminateFuzzHost = struct {
+    const Entry = struct { path: []const u8, source: []const u8 };
+    var host_ctx: u8 = 0;
+    const entries = [_]Entry{
+        .{
+            .path = "spin.js",
+            .source =
+            \\export function spin(v) {
+            \\  for (;;) Atomics.add(v, 1, 1);
+            \\}
+            ,
+        },
+        .{
+            .path = "entry.js",
+            .source =
+            \\import { spin } from "./spin.js";
+            \\globalThis.onmessage = (e) => {
+            \\  const v = new Int32Array(e.data.sab);
+            \\  Atomics.add(v, 0, 1);
+            \\  Atomics.notify(v, 0);
+            \\  spin(v);
+            \\};
+            ,
+        },
+    };
+
+    fn load(_: *anyopaque, _: []const u8, specifier: []const u8, out_path: *[]const u8) ?[]const u8 {
+        const name = if (std.mem.startsWith(u8, specifier, "./")) specifier[2..] else specifier;
+        for (entries) |e| {
+            if (std.mem.eql(u8, e.path, name)) {
+                out_path.* = e.path;
+                return e.source;
+            }
+        }
+        return null;
+    }
+
+    fn host() js.Context.ModuleHost {
+        return .{ .ctx = &host_ctx, .load = load };
+    }
+};
+
 /// One random shared-state operation, emitted into a worker's loop body. Every
 /// op targets the shared structures declared by `genProgram` and cannot throw.
 fn op(r: std.Random) []const u8 {
@@ -2378,6 +2420,246 @@ fn runWorkerTerminateThreadTeardownInterleaving(gpa: std.mem.Allocator, seed: u6
     };
     if (!worker_ready.isNumber() or worker_ready.asNum() != @as(f64, @floatFromInt(nworkers))) {
         std.debug.print("seed {d}: worker terminate/thread teardown worker ready got {d}, expected {d}\n", .{ seed, if (worker_ready.isNumber()) worker_ready.asNum() else -1, nworkers });
+        return false;
+    }
+    return true;
+}
+
+fn runModuleWorkerTerminateThreadTeardownInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
+    var prng = std.Random.DefaultPrng.init(seed ^ 0x6d6f_6474_6572_6d74);
+    const r = prng.random();
+    const nworkers = 1 + r.uintLessThan(usize, 2);
+    const nthreads = 2 + r.uintLessThan(usize, 4);
+    const ncleanup = 10 + r.uintLessThan(usize, 10);
+    const seed_marker = seed % 10_000;
+    const cleanup_base = 430_000 + seed_marker;
+    const reject_base = 440_000 + seed_marker;
+
+    var expected_cleanup_sum: usize = 0;
+    var ci: usize = 0;
+    while (ci < ncleanup) : (ci += 1) expected_cleanup_sum += cleanup_base + ci;
+    var expected_reject_sum: usize = 0;
+    var ti: usize = 0;
+    while (ti < nthreads) : (ti += 1) expected_reject_sum += reject_base + ti;
+
+    const ctx = js.Context.createWith(gpa, .{ .enable_threads = true, .enable_gc = true }) catch {
+        std.debug.print("seed {d}: module worker terminate/thread teardown context creation failed\n", .{seed});
+        return false;
+    };
+    defer ctx.destroy();
+    var machine = ctx.interpreter();
+
+    const setup_src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  globalThis.__moduleTermThreadMsg = {{ sab: new SharedArrayBuffer(32) }};
+        \\  globalThis.__moduleTermThreadRejectScore = 0;
+        \\  globalThis.__moduleTermThreadRejectCount = 0;
+        \\  globalThis.__moduleTermThreadCleanupCount = 0;
+        \\  globalThis.__moduleTermThreadCleanupSum = 0;
+        \\  globalThis.__moduleTermThreadRegistry = new FinalizationRegistry((held) => {{
+        \\    globalThis.__moduleTermThreadCleanupCount++;
+        \\    globalThis.__moduleTermThreadCleanupSum += held;
+        \\  }});
+        \\  const registry = globalThis.__moduleTermThreadRegistry;
+        \\  for (let i = 0; i < {d}; i++) {{
+        \\    let target = {{ i, seed: {d}, label: 'module-worker-terminate-thread-teardown-cleanup-' + i }};
+        \\    registry.register(target, {d} + i);
+        \\    target = null;
+        \\  }}
+        \\  return {d};
+        \\}})();
+        \\
+    ,
+        .{ ncleanup, seed, cleanup_base, ncleanup },
+    );
+    defer gpa.free(setup_src);
+    const setup_result = ctx.evaluate(setup_src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: module worker terminate/thread teardown setup threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!setup_result.isNumber() or setup_result.asNum() != @as(f64, @floatFromInt(ncleanup))) {
+        std.debug.print("seed {d}: module worker terminate/thread teardown setup got {d}, expected {d}\n", .{ seed, if (setup_result.isNumber()) setup_result.asNum() else -1, ncleanup });
+        return false;
+    }
+    ctx.collectGarbage();
+
+    const msg = ctx.evaluate("globalThis.__moduleTermThreadMsg") catch |err| {
+        std.debug.print("seed {d}: cannot read module worker terminate/thread teardown message: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+
+    var workers: std.ArrayListUnmanaged(*Worker) = .empty;
+    defer workers.deinit(gpa);
+    var cleanup_workers = true;
+    defer if (cleanup_workers) {
+        for (workers.items) |w| {
+            w.terminate();
+            w.join();
+            w.destroy();
+        }
+    };
+
+    var wi: usize = 0;
+    while (wi < nworkers) : (wi += 1) {
+        const w = Worker.spawnModule("entry.js", ModuleTerminateFuzzHost.entries[1].source, ModuleTerminateFuzzHost.host()) catch {
+            std.debug.print("seed {d}: module worker terminate/thread teardown worker spawn failed\n", .{seed});
+            return false;
+        };
+        try workers.append(gpa, w);
+        w.postMessage(&machine, msg) catch |err| {
+            std.debug.print("seed {d}: module worker terminate/thread teardown post failed: {s}\n", .{ seed, @errorName(err) });
+            return false;
+        };
+    }
+
+    const ready_src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  const v = new Int32Array(globalThis.__moduleTermThreadMsg.sab);
+        \\  let spins = 0;
+        \\  while (Atomics.load(v, 0) < {d} && spins++ < 10000000)
+        \\    Atomics.wait(v, 0, Atomics.load(v, 0), 1);
+        \\  if (Atomics.load(v, 0) !== {d})
+        \\    throw new Error('module worker terminate/thread teardown workers not ready: ' + Atomics.load(v, 0));
+        \\  spins = 0;
+        \\  while (Atomics.load(v, 1) <= 0 && spins++ < 10000000)
+        \\    ;
+        \\  if (Atomics.load(v, 1) <= 0)
+        \\    throw new Error('module worker terminate/thread teardown workers did not spin');
+        \\  return Atomics.load(v, 0);
+        \\}})();
+        \\
+    ,
+        .{ nworkers, nworkers },
+    );
+    defer gpa.free(ready_src);
+    const ready = ctx.evaluate(ready_src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: module worker terminate/thread teardown readiness threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!ready.isNumber() or ready.asNum() != @as(f64, @floatFromInt(nworkers))) {
+        std.debug.print("seed {d}: module worker terminate/thread teardown ready got {d}, expected {d}\n", .{ seed, if (ready.isNumber()) ready.asNum() else -1, nworkers });
+        return false;
+    }
+
+    const fail_src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  const gate = {{ ready: 0, stop: 0 }};
+        \\  const threads = [];
+        \\  for (let id = 0; id < {d}; id++) {{
+        \\    const reactionRoot = {{
+        \\      marker: {d} + id,
+        \\      nested: {{ seed: {d}, label: 'module-worker-terminate-thread-teardown-asyncJoin-root' }},
+        \\    }};
+        \\    const t = new Thread((gate) => {{
+        \\      Atomics.add(gate, 'ready', 1);
+        \\      Atomics.notify(gate, 'ready');
+        \\      while (Atomics.load(gate, 'stop') === 0)
+        \\        Atomics.wait(gate, 'stop', 0, 1000);
+        \\      return -1;
+        \\    }}, gate);
+        \\    t.asyncJoin().then(
+        \\      () => {{ globalThis.__moduleTermThreadRejectScore = -1000000; }},
+        \\      (e) => {{
+        \\        if (e && reactionRoot.marker === {d} + id && reactionRoot.nested.seed === {d}) {{
+        \\          globalThis.__moduleTermThreadRejectScore += reactionRoot.marker;
+        \\          globalThis.__moduleTermThreadRejectCount++;
+        \\        }} else {{
+        \\          globalThis.__moduleTermThreadRejectScore = -1000000;
+        \\        }}
+        \\      }});
+        \\    threads.push(t);
+        \\  }}
+        \\  while (Atomics.load(gate, 'ready') < {d})
+        \\    Atomics.wait(gate, 'ready', Atomics.load(gate, 'ready'), 1);
+        \\  throw new Error('threadfuzz module worker terminate/thread teardown {d}');
+        \\}})();
+        \\
+    ,
+        .{ nthreads, reject_base, seed, reject_base, seed, nthreads, seed },
+    );
+    defer gpa.free(fail_src);
+    if (ctx.evaluate(fail_src)) |_| {
+        std.debug.print("seed {d}: module worker terminate/thread teardown failure script returned normally\n", .{seed});
+        return false;
+    } else |err| {
+        if (err != error.Throw) {
+            std.debug.print("seed {d}: module worker terminate/thread teardown failed with {s}\n", .{ seed, @errorName(err) });
+            return false;
+        }
+    }
+
+    _ = ctx.evaluate("$drainRunLoop()") catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: module worker terminate/thread teardown drain threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    const check_src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  if (globalThis.__moduleTermThreadRejectScore !== {d})
+        \\    throw new Error('bad module worker terminate/thread teardown reject score ' + globalThis.__moduleTermThreadRejectScore);
+        \\  if (globalThis.__moduleTermThreadRejectCount !== {d})
+        \\    throw new Error('bad module worker terminate/thread teardown reject count ' + globalThis.__moduleTermThreadRejectCount);
+        \\  globalThis.__moduleTermThreadRegistry.cleanupSome();
+        \\  if (globalThis.__moduleTermThreadCleanupCount !== {d})
+        \\    throw new Error('bad module worker terminate/thread teardown cleanup count ' + globalThis.__moduleTermThreadCleanupCount);
+        \\  if (globalThis.__moduleTermThreadCleanupSum !== {d})
+        \\    throw new Error('bad module worker terminate/thread teardown cleanup sum ' + globalThis.__moduleTermThreadCleanupSum);
+        \\  return globalThis.__moduleTermThreadRejectCount + globalThis.__moduleTermThreadCleanupCount;
+        \\}})();
+        \\
+    ,
+        .{ expected_reject_sum, nthreads, ncleanup, expected_cleanup_sum },
+    );
+    defer gpa.free(check_src);
+    const checked = ctx.evaluate(check_src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: module worker terminate/thread teardown check threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!checked.isNumber() or checked.asNum() != @as(f64, @floatFromInt(nthreads + ncleanup))) {
+        std.debug.print("seed {d}: module worker terminate/thread teardown checked got {d}, expected {d}\n", .{ seed, if (checked.isNumber()) checked.asNum() else -1, nthreads + ncleanup });
+        return false;
+    }
+
+    for (workers.items) |w| {
+        w.terminate();
+        w.join();
+        const reply = w.receive(&machine, 0) catch |err| {
+            std.debug.print("seed {d}: module worker terminate/thread teardown receive after terminate failed: {s}\n", .{ seed, @errorName(err) });
+            return false;
+        };
+        if (reply != null) {
+            std.debug.print("seed {d}: module worker terminate/thread teardown delivered a post-terminate reply\n", .{seed});
+            return false;
+        }
+        w.destroy();
+    }
+    cleanup_workers = false;
+
+    const worker_ready = ctx.evaluate("Atomics.load(new Int32Array(globalThis.__moduleTermThreadMsg.sab), 0)") catch |err| {
+        std.debug.print("seed {d}: cannot read module worker terminate/thread teardown ready counter: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    if (!worker_ready.isNumber() or worker_ready.asNum() != @as(f64, @floatFromInt(nworkers))) {
+        std.debug.print("seed {d}: module worker terminate/thread teardown worker ready got {d}, expected {d}\n", .{ seed, if (worker_ready.isNumber()) worker_ready.asNum() else -1, nworkers });
         return false;
     }
     return true;
@@ -7337,6 +7619,22 @@ pub fn main(init: std.process.Init) !void {
         if (wtfail != 0) std.process.exit(1);
         return;
     };
+    // `threadfuzz moduletermteardown <iters> <seed>`: focused lifecycle repro
+    // for module Worker termination while a shared-realm top-level failure
+    // tears down parked Threads, pending asyncJoin reactions, and cleanup jobs.
+    if (first) |a| if (std.mem.eql(u8, a, "moduletermteardown")) {
+        if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch 1;
+        if (args.next()) |b| base_seed = std.fmt.parseInt(u64, b, 10) catch 1;
+        var mtfail: usize = 0;
+        var mti: usize = 0;
+        while (mti < iters) : (mti += 1) {
+            const seed = base_seed +% mti;
+            if (!(try runModuleWorkerTerminateThreadTeardownInterleaving(gpa, seed))) mtfail += 1;
+        }
+        std.debug.print("threadfuzz moduletermteardown: {d} programs from seed {d}, {d} failures\n", .{ iters, base_seed, mtfail });
+        if (mtfail != 0) std.process.exit(1);
+        return;
+    };
     // `threadfuzz midgcterm <iters> <seed>`: focused mid-script parallel-GC
     // repro for teardown termination while asyncJoin reactions and child-owned
     // typed-array waitAsync tickets are still pending.
@@ -7545,7 +7843,8 @@ pub fn main(init: std.process.Init) !void {
     // deliver a pending
     // no-fn grant after a sync hold legally overtakes it; ThreadLocal values must stay
     // per-thread across normal, throwing, nested, async-joined, and
-    // finalization-cleanup lifecycles.
+    // finalization-cleanup lifecycles; module Worker termination must compose
+    // with the same shared-realm teardown/reaction/cleanup oracle.
     if (first) |a| if (std.mem.eql(u8, a, "lifecycle")) {
         iters = 60;
         if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch iters;
@@ -7564,6 +7863,7 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runWorkerThreadFinalizationInterleaving(gpa, seed))) lfail += 1;
             if (!(try runWorkerTerminateFinalizationInterleaving(gpa, seed))) lfail += 1;
             if (!(try runWorkerTerminateThreadTeardownInterleaving(gpa, seed))) lfail += 1;
+            if (!(try runModuleWorkerTerminateThreadTeardownInterleaving(gpa, seed))) lfail += 1;
             if (!(try runWorkerExceptionFinalizationCleanupInterleaving(gpa, seed))) lfail += 1;
             if (!(try runThreadExceptionWaiterInterleaving(gpa, seed))) lfail += 1;
             if (!(try runReturnedWaitAsyncLifecycleInterleaving(gpa, seed))) lfail += 1;
@@ -7581,7 +7881,7 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runThreadLocalLifecycleInterleaving(gpa, seed))) lfail += 1;
             if (!(try runThreadLocalFinalizationCleanupInterleaving(gpa, seed))) lfail += 1;
         }
-        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 26, base_seed, lfail });
+        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 27, base_seed, lfail });
         if (lfail != 0) std.process.exit(1);
         return;
     };

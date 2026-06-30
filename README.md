@@ -403,7 +403,9 @@ threading architecture:
   shared-realm finalization cleanup on a retained SAB, Worker termination while
   top-level failure tears down parked shared-realm `Thread`s, pending
   `asyncJoin` rejection reactions, and already-ready cleanup jobs on the same
-  retained SAB, exact FIFO drain/drop ordering for mixed Worker `close` /
+  retained SAB, module Worker termination with the same shared-realm
+  teardown/reaction/cleanup oracle, exact FIFO drain/drop ordering for mixed
+  Worker `close` /
   `terminate` / `postMessage` lifecycles, plus worker
   handler-exception recovery, Worker handler-exception recovery composed with
   shared-realm Thread finalization cleanup on one retained SAB,

@@ -233,8 +233,10 @@ context APIs.
   SAB, Worker termination interleaved with exact shared-realm finalization
   cleanup on a retained SAB, Worker termination while top-level failure tears
   down parked shared-realm `Thread`s, pending `asyncJoin` rejection reactions,
-  and already-ready cleanup jobs on the same retained SAB, exact FIFO drain/drop
-  ordering for mixed Worker terminate/close/postMessage lifecycles, worker
+  and already-ready cleanup jobs on the same retained SAB, module Worker
+  termination with the same shared-realm teardown/reaction/cleanup oracle, exact
+  FIFO drain/drop ordering for mixed Worker terminate/close/postMessage
+  lifecycles, worker
   handler-exception recovery, and Worker handler-exception recovery composed
   with shared-realm Thread finalization cleanup on one retained SAB, plus
   `Thread.restrict`
