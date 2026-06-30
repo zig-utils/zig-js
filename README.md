@@ -248,7 +248,10 @@ threading architecture:
   columns before printing GC cell-backing attribution around an object-heavy
   allocation run: chunk count, total cell-slot capacity, live cells at context
   creation, live cells after script allocation, free slots after collection, and
-  live cells after collection. GC cells now allocate through a reusable
+  live cells after collection. It also prints a per-size-class bucket table for
+  the same workload, so nursery/allocation follow-up can see which slot sizes
+  own chunk count, issued cells, free cells, and surviving live cells. GC cells
+  now allocate through a reusable
   size-class slab backing instead of one backing allocator call per cell, and
   fresh slab chunks hand out cells lazily with a per-bucket bump hint instead of
   pre-linking every unused slot during short-lived context setup; a per-bucket

@@ -22,6 +22,15 @@ const modes = [_]Mode{
     .{ .name = "threaded gil", .options = .{ .enable_threads = true, .gil = true } },
 };
 
+const gc_backing_source =
+    \\(function(){
+    \\  var keep = [];
+    \\  for (var i = 0; i < 10000; i = i + 1)
+    \\    keep.push({ i: i, pair: { j: i + 1 }, text: 'gc-backing-' + i });
+    \\  return keep.length;
+    \\})()
+;
+
 fn nowNs(io: std.Io) i96 {
     return std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
 }
@@ -180,15 +189,6 @@ fn printExplicitGc(gpa: std.mem.Allocator, io: std.Io) !void {
 }
 
 fn printGcBacking(gpa: std.mem.Allocator) !void {
-    const source =
-        \\(function(){
-        \\  var keep = [];
-        \\  for (var i = 0; i < 10000; i = i + 1)
-        \\    keep.push({ i: i, pair: { j: i + 1 }, text: 'gc-backing-' + i });
-        \\  return keep.length;
-        \\})()
-    ;
-
     std.debug.print("\nGC cell backing attribution (one object-heavy script + collect)\n", .{});
     std.debug.print("{s:<18} {s:>8} {s:>10} {s:>12} {s:>12} {s:>14} {s:>12}\n", .{
         "mode",
@@ -204,7 +204,7 @@ fn printGcBacking(gpa: std.mem.Allocator) !void {
         defer ctx.destroy();
         const backing = ctx.gc_cell_backing orelse continue;
         const created = backing.stats();
-        _ = try ctx.evaluate(source);
+        _ = try ctx.evaluate(gc_backing_source);
         const after_script = backing.stats();
         ctx.collectGarbage();
         const after_collect = backing.stats();
@@ -217,6 +217,39 @@ fn printGcBacking(gpa: std.mem.Allocator) !void {
             after_collect.free_slots,
             after_collect.live_slots,
         });
+    }
+}
+
+fn printGcBackingBuckets(gpa: std.mem.Allocator) !void {
+    std.debug.print("\nGC cell backing buckets (same object-heavy script + collect)\n", .{});
+    std.debug.print("{s:<18} {s:>6} {s:>8} {s:>10} {s:>10} {s:>10} {s:>10}\n", .{
+        "mode",
+        "slot",
+        "chunks",
+        "cap",
+        "issued",
+        "free",
+        "live",
+    });
+    for (modes) |mode| {
+        const ctx = try makeContext(gpa, mode);
+        defer ctx.destroy();
+        const backing = ctx.gc_cell_backing orelse continue;
+        _ = try ctx.evaluate(gc_backing_source);
+        ctx.collectGarbage();
+        const buckets = backing.bucketStats();
+        for (buckets) |bucket| {
+            if (bucket.chunks == 0) continue;
+            std.debug.print("{s:<18} {d:>6} {d:>8} {d:>10} {d:>10} {d:>10} {d:>10}\n", .{
+                mode.name,
+                bucket.slot_size,
+                bucket.chunks,
+                bucket.capacity_slots,
+                bucket.issued_slots,
+                bucket.free_slots,
+                bucket.live_slots,
+            });
+        }
     }
 }
 
@@ -323,5 +356,6 @@ pub fn main() !void {
     try printAllocation(gpa, io);
     try printExplicitGc(gpa, io);
     try printGcBacking(gpa);
+    try printGcBackingBuckets(gpa);
     try printGcFinalizers(gpa);
 }

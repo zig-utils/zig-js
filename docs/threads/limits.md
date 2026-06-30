@@ -96,7 +96,10 @@ context APIs.
   collection to quantify the embedder lifecycle tradeoff plus GC cell-backing
   attribution for an object-heavy allocation run: chunk count, total cell-slot
   capacity, live cells at context creation, live cells after allocation, free
-  slots after collection, and live cells after collection.
+  slots after collection, and live cells after collection. The same profile now
+  follows with a per-size-class bucket table, so future nursery/generational and
+  context-lifecycle work can target the slot sizes that dominate chunk count,
+  issued cells, free cells, and surviving live cells.
 - **Context lifecycle cost.** Long-lived embedders amortize the GC setup and
   teardown costs, but create-per-unit-of-work embedders need either cheaper
   context lifecycle or clearer guidance.
