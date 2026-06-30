@@ -312,7 +312,9 @@ threading architecture:
   enqueueing do not lengthen that critical section; mixed sync/async wakeups
   keep the existing sync handoff ordering. Notify now also tracks the woken
   sync/async entries in one pre-sized wake list instead of allocating separate
-  per-kind wake lists for every notification.
+  per-kind wake lists for every notification, and sync handoff completion uses
+  a pending-waiter countdown instead of rescanning the wake list until every
+  ticket acknowledges.
   Property-mode `Atomics.notify` now stable-compacts matching waiters in one
   pass: sync stack tickets are
   unlinked before signal, and matching `waitAsync` tickets are collected without

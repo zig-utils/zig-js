@@ -148,7 +148,9 @@ context APIs.
   regrant preparation outside the condition queue mutex; mixed sync/async
   wakeups keep the existing sync handoff ordering. Notify records woken
   sync/async entries in one pre-sized wake list instead of allocating separate
-  per-kind wake lists for each notification.
+  per-kind wake lists for each notification, and sync handoff completion uses a
+  pending-waiter countdown instead of rescanning that wake list until every
+  ticket acknowledges.
   Promise microtask drains use a FIFO head cursor, so observed async-hold
   callback settlement and no-fn release-function reactions preserve FIFO order
   without shifting the remaining reaction queue on each job.

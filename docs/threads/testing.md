@@ -309,13 +309,14 @@ C-API handles, and GIL park records remove with swap semantics because those
 root sets have no observable order. `worker channel pops FIFO without front shifts` keeps that queue
 shape and zero-timeout polling behavior under a direct unit guard, while
 `condition queue head cursor skips canceled sync waiters` covers the condition
-timeout/termination queue shape directly. `jsthread lock pending async jobs are
-cursor FIFO` covers FIFO pop, consumed-slot retry, and front-stash retry without
-front shifts, while `jsthread traces queued async hold task roots` covers the
-GC roots behind both queued realm tasks and retry-front lock grants. The public
-condition corpus cases
-exercise the single wake-list notify path for async-only and sync notify-all
-wakes: `api/condition-async-wait.js`,
+timeout/termination queue shape directly, and `condition sync handoff countdown
+tracks acknowledged tickets` covers the no-rescan sync notify handoff counter.
+`jsthread lock pending async jobs are cursor FIFO` covers FIFO pop,
+consumed-slot retry, and front-stash retry without front shifts, while
+`jsthread traces queued async hold task roots` covers the GC roots behind both
+queued realm tasks and retry-front lock grants. The public condition corpus
+cases exercise the single wake-list notify path for async-only and sync
+notify-all wakes: `api/condition-async-wait.js`,
 `sync/condition-wait-notify.js`, and
 `sync/condition-notify-all-multi-waiter.js`. `property waiter removal
 stable-compacts timed-out sync ticket` covers the property waiter cleanup shape,

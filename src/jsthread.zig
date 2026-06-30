@@ -665,6 +665,11 @@ const CondRecord = struct {
     /// uniformly in arrival order — cross-kind).
     queue: std.ArrayListUnmanaged(CondEntry) = .empty,
     queue_head: usize = 0,
+    /// Number of sync tickets from the current notify operation that still
+    /// need to acknowledge re-registration on their lock. The notifier holds
+    /// `mutex` across the handoff wait, so this is a single-operation counter
+    /// rather than a durable queue field.
+    sync_handoff_pending: usize = 0,
 
     fn appendWaiter(self: *CondRecord, arena: std.mem.Allocator, entry: CondEntry) !void {
         try self.queue.append(arena, entry);
@@ -711,6 +716,23 @@ test "condition queue head cursor skips canceled sync waiters" {
     try std.testing.expectEqual(@as(?CondEntry, null), rec.popWaiter());
     try std.testing.expectEqual(@as(usize, 0), rec.queue_head);
     try std.testing.expectEqual(@as(usize, 0), rec.queue.items.len);
+}
+
+test "condition sync handoff countdown tracks acknowledged tickets" {
+    var rec = CondRecord{ .gil = undefined, .sync_handoff_pending = 2 };
+    var t0 = SyncCondTicket{};
+    var t1 = SyncCondTicket{};
+
+    ackSyncCondTicketLocked(&rec, &t0);
+    try std.testing.expect(t0.consumed);
+    try std.testing.expectEqual(@as(usize, 1), rec.sync_handoff_pending);
+
+    ackSyncCondTicketLocked(&rec, &t1);
+    try std.testing.expect(t1.consumed);
+    try std.testing.expectEqual(@as(usize, 0), rec.sync_handoff_pending);
+
+    ackSyncCondTicketLocked(&rec, &t1);
+    try std.testing.expectEqual(@as(usize, 0), rec.sync_handoff_pending);
 }
 
 const TLRecord = struct {
@@ -1204,6 +1226,12 @@ fn removeSyncCondTicketLocked(rec: *CondRecord, ticket: *SyncCondTicket) void {
     ticket.canceled = true;
 }
 
+fn ackSyncCondTicketLocked(rec: *CondRecord, ticket: *SyncCondTicket) void {
+    ticket.consumed = true;
+    if (rec.sync_handoff_pending > 0)
+        rec.sync_handoff_pending -= 1;
+}
+
 fn waitOnCondRecord(self: *Interpreter, rec: *CondRecord, timeout: std.Io.Timeout) void {
     const io = agent.engineIo();
     if (self.use_thread_gil) {
@@ -1309,7 +1337,7 @@ fn condWaitCore(self: *Interpreter, rec: *CondRecord, lock: *LockRecord, timeout
     }
     // Re-register on the lock BEFORE acking the wake, so notifyAll's
     // consume-loop guarantees FIFO against async regrants.
-    ticket.consumed = true;
+    ackSyncCondTicketLocked(rec, ticket);
     rec.cond.signal(io);
     rec.mutex.unlock(io);
     switch (try acquireLock(self, lock, null, "Condition wait cannot reacquire the lock")) {
@@ -1348,13 +1376,13 @@ fn condNotify(self: *Interpreter, rec: *CondRecord, count: usize) value.HostErro
     defer if (locked) rec.mutex.unlock(io);
     const available = rec.queue.items.len - rec.queue_head;
     try woken.ensureTotalCapacity(self.arena, @min(count, available));
-    var has_sync = false;
+    var sync_count: usize = 0;
     while (n < count) {
         const entry = rec.popWaiter() orelse break;
         switch (entry) {
             .sync => |t| {
                 t.woken = true;
-                has_sync = true;
+                sync_count += 1;
             },
             .asynchronous => {},
         }
@@ -1362,7 +1390,7 @@ fn condNotify(self: *Interpreter, rec: *CondRecord, count: usize) value.HostErro
         n += 1;
     }
 
-    if (!has_sync) {
+    if (sync_count == 0) {
         // Async-only notifications do not need the sync notifyAll handoff.
         // Deliver their lock regrants outside the condition queue mutex so
         // regrant bookkeeping and realm task enqueueing do not lengthen the
@@ -1375,6 +1403,7 @@ fn condNotify(self: *Interpreter, rec: *CondRecord, count: usize) value.HostErro
         };
         return n;
     }
+    rec.sync_handoff_pending = sync_count;
 
     // Mixed wakeups keep the old ordering shape: async regrants are prepared
     // before the sync handoff wait, while the condition mutex still serializes
@@ -1387,16 +1416,7 @@ fn condNotify(self: *Interpreter, rec: *CondRecord, count: usize) value.HostErro
     // Depth-free handoff (notify-all-shared-lock) + FIFO against
     // async regrants (condition-async-wait): loop until every woken
     // sync waiter has re-registered on its lock.
-    var pending = true;
-    while (pending) {
-        pending = false;
-        for (woken.items) |entry| switch (entry) {
-            .sync => |t| {
-                if (!t.consumed) pending = true;
-            },
-            .asynchronous => {},
-        };
-        if (!pending) break;
+    while (rec.sync_handoff_pending != 0) {
         // Woken sync waiters signal this same condition after re-registering on
         // their lock. The timeout keeps spurious or missed wakes bounded without
         // paying the old fixed 1ms sleep when the waiter acks immediately.
@@ -1405,6 +1425,7 @@ fn condNotify(self: *Interpreter, rec: *CondRecord, count: usize) value.HostErro
             .clock = .awake,
         } });
     }
+    rec.sync_handoff_pending = 0;
     return n;
 }
 
