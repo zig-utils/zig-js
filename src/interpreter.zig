@@ -28886,7 +28886,9 @@ const umalqura_known_dates = [_]UmalquraKnownDate{
     .{ .iy = 1973, .im = 2, .id = 6, .cy = 1392, .cm = 12, .cd = 30 },
     .{ .iy = 2006, .im = 7, .id = 25, .cy = 1427, .cm = 6, .cd = 29 },
     .{ .iy = 2019, .im = 8, .id = 30, .cy = 1440, .cm = 12, .cd = 29 },
+    .{ .iy = 2019, .im = 8, .id = 31, .cy = 1441, .cm = 1, .cd = 1 },
     .{ .iy = 2019, .im = 9, .id = 9, .cy = 1441, .cm = 1, .cd = 10 },
+    .{ .iy = 2019, .im = 9, .id = 10, .cy = 1441, .cm = 1, .cd = 11 },
     .{ .iy = 2022, .im = 7, .id = 30, .cy = 1443, .cm = 12, .cd = 30 },
     .{ .iy = 2077, .im = 10, .id = 18, .cy = 1500, .cm = 12, .cd = 1 },
     .{ .iy = 2077, .im = 11, .id = 16, .cy = 1500, .cm = 12, .cd = 30 },
@@ -29047,6 +29049,9 @@ fn chineseLikeKnownMonthStartEpochDay(cal: []const u8, year: i64, month: u8) ?i6
     const MonthStart = struct { y: i64, m: u8, iy: i64, im: u8, id: u8 };
     const chinese = [_]MonthStart{
         .{ .y = 1900, .m = 1, .iy = 1900, .im = 1, .id = 31 },
+        .{ .y = 1947, .m = 2, .iy = 1947, .im = 2, .id = 21 },
+        .{ .y = 1947, .m = 3, .iy = 1947, .im = 3, .id = 23 },
+        .{ .y = 1947, .m = 4, .iy = 1947, .im = 4, .id = 21 },
         .{ .y = 1947, .m = 5, .iy = 1947, .im = 5, .id = 20 },
         .{ .y = 1947, .m = 6, .iy = 1947, .im = 6, .id = 19 },
         .{ .y = 1955, .m = 6, .iy = 1955, .im = 6, .id = 20 },
@@ -29098,6 +29103,9 @@ fn chineseLikeKnownMonthStartEpochDay(cal: []const u8, year: i64, month: u8) ?i6
     };
     const dangi = [_]MonthStart{
         .{ .y = 1900, .m = 1, .iy = 1900, .im = 1, .id = 31 },
+        .{ .y = 1947, .m = 2, .iy = 1947, .im = 2, .id = 21 },
+        .{ .y = 1947, .m = 3, .iy = 1947, .im = 3, .id = 23 },
+        .{ .y = 1947, .m = 4, .iy = 1947, .im = 4, .id = 21 },
         .{ .y = 1947, .m = 5, .iy = 1947, .im = 5, .id = 20 },
         .{ .y = 1947, .m = 6, .iy = 1947, .im = 6, .id = 19 },
         .{ .y = 1955, .m = 6, .iy = 1955, .im = 6, .id = 20 },
