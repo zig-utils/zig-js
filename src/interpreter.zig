@@ -29279,6 +29279,7 @@ fn calDaysInMonth(cal: []const u8, year: i64, month: u8) u8 {
             .{ .y = 1952, .m = 6, .d = 30 }, .{ .y = 1955, .m = 4, .d = 30 },
             .{ .y = 1966, .m = 3, .d = 30 }, .{ .y = 1968, .m = 3, .d = 30 },
             .{ .y = 1970, .m = 1, .d = 30 }, .{ .y = 1970, .m = 4, .d = 30 }, .{ .y = 1970, .m = 11, .d = 30 },
+            .{ .y = 1990, .m = 3, .d = 29 },
             .{ .y = 1990, .m = 4, .d = 29 },
             .{ .y = 1998, .m = 5, .d = 29 }, .{ .y = 2017, .m = 5, .d = 29 },
             .{ .y = 2044, .m = 7, .d = 29 },
@@ -31286,14 +31287,12 @@ fn temporalYearMonthAddFn(comptime sign: f64) value.NativeFn {
             if (!durInRange(dur)) return self.throwError("RangeError", "duration out of range");
             if (dur[2] != 0 or dur[3] != 0 or dur[4] != 0 or dur[5] != 0 or dur[6] != 0 or dur[7] != 0 or dur[8] != 0 or dur[9] != 0)
                 return self.throwError("RangeError", "PlainYearMonth arithmetic only accepts years and months");
-            try checkIsoDate(self, @floatFromInt(t.year), @floatFromInt(t.month), 1);
-            var total: i64 = (@as(i64, t.year) * 12 + (t.month - 1)) + @as(i64, @intFromFloat(sign * (dur[0] * 12 + dur[1])));
-            const ny = @divFloor(total, 12);
-            total = @mod(total, 12);
-            const nm: u8 = @intCast(total + 1);
-            try checkIsoYearMonth(self, ny, nm);
-            try checkIsoDate(self, @floatFromInt(ny), @floatFromInt(nm), 1);
-            return makeYearMonth(self, ny, nm, t.calendar, t.day);
+            const year_delta: i64 = @intFromFloat(sign * dur[0]);
+            const month_delta: i64 = @intFromFloat(sign * dur[1]);
+            const ym = balanceCalendarYearMonth(t.calendar, t.year + year_delta, t.month, month_delta);
+            const iso = calendarDateToIso(t.calendar, ym.y, ym.m, t.day);
+            try checkIsoYearMonth(self, iso.y, iso.m);
+            return makeYearMonth(self, ym.y, ym.m, t.calendar, t.day);
         }
     }.call;
 }
