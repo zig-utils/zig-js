@@ -260,7 +260,10 @@ per-thread before threads stop holding the GIL):
      host-side thread queues that can hide JS values from ordinary object
      tracing: `Gil.tasks`, `LockRecord.pending`, async condition waiters,
      ThreadLocal maps, and thread completion results are traced or insertion-
-     barriered when populated. The regression case from the
+     barriered when populated. The mid-script GC fuzzer now leaves a completed
+     but unjoined child `Thread` result object in that native completion record
+     across the allocation-pressure window and verifies that `join()` receives
+     it intact. The regression case from the
      earlier naive approach (marking sync waits as frozen and sweeping the host's
      captured-env vars) stays guarded by
      `parallel_js (M3): sync wait peers publish roots for mid-script parallel GC`,

@@ -301,7 +301,8 @@ threading architecture:
   the mid-GC profile covers sync-wait root publication during finishing
   mid-script sweeps, queued async-hold delivery, async condition reacquire
   delivery, ThreadLocal-only hidden roots in parked peers, and deterministic
-  cleanup count/sum delivery; the lifecycle
+  completed-but-unjoined Thread result roots, and deterministic cleanup
+  count/sum delivery; the lifecycle
   profile adds deterministic termination storms, script Worker/thread overlap
   plus simple-import, diamond-shaped, and fanout/rejoin module Worker/thread
   overlap over retained `SharedArrayBuffer` storage, Worker/thread/finalization

@@ -2666,6 +2666,7 @@ fn runMidScriptWaitPumpGc(gpa: std.mem.Allocator, seed: u64) !bool {
     const async_second_expected = async_base + 1024 + async_second_allocs;
     const async_cond_expected = async_base + 2048 + async_cond_allocs;
     const tls_expected = async_base + 4096;
+    const thread_result_expected = async_base + 8192;
     const spin_iters = 4000 + r.uintLessThan(usize, 6000);
     const wait_timeout_ms = 1200 + r.uintLessThan(usize, 900);
 
@@ -2684,7 +2685,7 @@ fn runMidScriptWaitPumpGc(gpa: std.mem.Allocator, seed: u64) !bool {
     const src = try std.fmt.allocPrint(
         gpa,
         \\(() => {{
-        \\  const gate = {{ state: 0, propReady: 0, condReady: 0, holderReady: 0, lockReady: 0, releaseLock: 0, lockDone: 0, asyncDone: 0, asyncSecondDone: 0, asyncCondReady: 0, asyncCondDone: 0, tlsReady: 0, tlsRelease: 0 }};
+        \\  const gate = {{ state: 0, propReady: 0, condReady: 0, holderReady: 0, lockReady: 0, releaseLock: 0, lockDone: 0, asyncDone: 0, asyncSecondDone: 0, asyncCondReady: 0, asyncCondDone: 0, tlsReady: 0, tlsRelease: 0, resultReady: 0 }};
         \\  const condLock = new Lock();
         \\  const cond = new Condition();
         \\  const heldLock = new Lock();
@@ -2770,6 +2771,12 @@ fn runMidScriptWaitPumpGc(gpa: std.mem.Allocator, seed: u64) !bool {
         \\      throw new Error('ThreadLocal midgc root was not preserved');
         \\    return kept;
         \\  }});
+        \\  const resultThread = new Thread(() => {{
+        \\    const result = {{ marker: {d}, nested: {{ root: asyncRoot, label: 'thread-result-midgc-root' }} }};
+        \\    Atomics.store(gate, 'resultReady', 1);
+        \\    Atomics.notify(gate, 'resultReady');
+        \\    return result;
+        \\  }});
         \\  const propWaiter = new Thread(() => {{
         \\    Atomics.store(gate, 'propReady', 1);
         \\    Atomics.notify(gate, 'propReady');
@@ -2810,6 +2817,8 @@ fn runMidScriptWaitPumpGc(gpa: std.mem.Allocator, seed: u64) !bool {
         \\    Atomics.wait(gate, 'lockReady', 0, 1);
         \\  while (Atomics.load(gate, 'tlsReady') === 0)
         \\    Atomics.wait(gate, 'tlsReady', 0, 1);
+        \\  while (Atomics.load(gate, 'resultReady') === 0)
+        \\    Atomics.wait(gate, 'resultReady', 0, 1);
         \\  while (Atomics.load(gate, 'asyncCondReady') === 0)
         \\    Atomics.wait(gate, 'asyncCondReady', 0, 1);
         \\  const keep = [];
@@ -2865,6 +2874,11 @@ fn runMidScriptWaitPumpGc(gpa: std.mem.Allocator, seed: u64) !bool {
         \\  globalThis.__midgcTlsHold = tlsWaiter.join();
         \\  if (!globalThis.__midgcTlsHold || globalThis.__midgcTlsHold.marker !== {d})
         \\    throw new Error('bad ThreadLocal midgc return');
+        \\  globalThis.__midgcThreadResultHold = resultThread.join();
+        \\  if (!globalThis.__midgcThreadResultHold ||
+        \\      globalThis.__midgcThreadResultHold.marker !== {d} ||
+        \\      globalThis.__midgcThreadResultHold.nested.root.nested.base !== {d})
+        \\    throw new Error('bad completed Thread result midgc root');
         \\  if (asyncCondTicket instanceof Promise === false) throw new Error('bad async condition promise');
         \\  return keep.length;
         \\}})();
@@ -2879,6 +2893,7 @@ fn runMidScriptWaitPumpGc(gpa: std.mem.Allocator, seed: u64) !bool {
             tls_expected + 111,
             wait_timeout_ms,
             tls_expected,
+            thread_result_expected,
             wait_timeout_ms,
             wait_timeout_ms,
             rounds,
@@ -2892,6 +2907,8 @@ fn runMidScriptWaitPumpGc(gpa: std.mem.Allocator, seed: u64) !bool {
             async_cond_expected,
             async_cond_expected,
             tls_expected,
+            thread_result_expected,
+            async_base,
         },
     );
     defer gpa.free(src);
@@ -3094,8 +3111,10 @@ pub fn main(init: std.process.Init) !void {
     // `threadfuzz midgc <iters> <seed>`: targeted mid-script parallel-GC
     // profile. Each seed blocks peers in property `Atomics.wait`,
     // `Condition.wait`, and contended `Lock` acquisition while allocation
-    // pressure triggers the experimental collector. The oracle requires exact
-    // program completion and at least one finishing parallel sweep.
+    // pressure triggers the experimental collector. Hidden ThreadLocal values
+    // and completed-but-unjoined Thread results must survive that window. The
+    // oracle requires exact program completion and at least one finishing
+    // parallel sweep.
     if (first) |a| if (std.mem.eql(u8, a, "midgc")) {
         iters = 20;
         if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch iters;

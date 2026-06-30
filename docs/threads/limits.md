@@ -138,8 +138,10 @@ context APIs.
   profile now hammers sync-wait root publication during finishing
   `parallel_midscript_gc` sweeps, executes a queued async-hold grant chain and
   async condition reacquire grants from those pump points, keeps a
-  ThreadLocal-only hidden root live in a parked peer, and verifies exact
-  `FinalizationRegistry` cleanup count/sum delivery afterward. The lifecycle
+  ThreadLocal-only hidden root live in a parked peer, keeps a
+  completed-but-unjoined Thread result live through the thread completion record,
+  and verifies exact `FinalizationRegistry` cleanup count/sum delivery
+  afterward. The lifecycle
   profile now adds deterministic termination storms,
   script Worker/thread retained-`SharedArrayBuffer` overlap, simple-import,
   diamond-shaped, and fanout/rejoin module Worker/thread overlap with exact
