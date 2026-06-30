@@ -133,7 +133,11 @@ context APIs.
   or touching drained-queue compaction. Active interpreter roots, protected
   C-API handles, and GIL park records are unordered root sets, so removal now
   uses swap semantics instead of order-preserving list shifts on evaluate,
-  handle-unprotect, and thread teardown paths.
+  handle-unprotect, and thread teardown paths. WeakMap/WeakSet delete and GC
+  dead-key pruning now use unordered tail removal too, and
+  FinalizationRegistry `unregister` removes matching records with one stable
+  compaction pass so survivor cleanup order is preserved without repeated
+  middle shifts.
   The profile now includes a separate isolated `Worker` section for
   structured-clone inbox/outbox round-trips, empty receive polling, and
   spawn/post/receive/join/destroy lifecycle cost, so Worker-heavy follow-up

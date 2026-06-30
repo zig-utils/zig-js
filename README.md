@@ -297,7 +297,11 @@ threading architecture:
   touching drained-queue compaction. Active interpreter roots, protected C-API
   handles, and GIL park records are unordered root sets, so their removals now
   use swap removal instead of preserving order with list shifts on evaluate,
-  unprotect, and thread teardown paths.
+  unprotect, and thread teardown paths. WeakMap/WeakSet entry delete and GC
+  dead-key pruning now use the same unordered tail-removal shape, and
+  FinalizationRegistry `unregister` removes matching records with one stable
+  compaction pass so later cleanup delivery keeps survivor order without
+  repeated middle shifts.
   Promise microtask drains now use a FIFO head cursor too, so observed
   `Lock.asyncHold` callbacks and no-fn release-function reactions do not pay one
   front shift per pending reaction while preserving checkpoint order.

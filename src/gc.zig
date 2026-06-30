@@ -160,7 +160,7 @@ pub fn pruneDeadWeakEntries(o: *Object, heap: anytype) bool {
         var i: usize = 0;
         while (i < o.weak_entries.items.len) {
             if (!heap.isLive(o.weak_entries.items[i].key)) {
-                _ = o.weak_entries.orderedRemove(i);
+                _ = o.weak_entries.swapRemove(i);
             } else {
                 i += 1;
             }
@@ -958,4 +958,29 @@ test "gc binding: real Object graph — proto/slots/accessors survive, garbage s
     eng.roots.clearRetainingCapacity();
     heap.collect();
     try std.testing.expectEqual(@as(usize, 0), heap.live_cells);
+}
+
+test "gc pruneDeadWeakEntries removes dead weak keys with unordered tail removal" {
+    const a = std.testing.allocator;
+    var live_key: u8 = 1;
+    var dead_key_a: u8 = 2;
+    var dead_key_b: u8 = 3;
+
+    var o = Object{ .is_weak = true, .is_map = true };
+    defer o.weak_entries.deinit(a);
+    try o.weak_entries.append(a, .{ .key = @ptrCast(&dead_key_a), .value = Value.num(10) });
+    try o.weak_entries.append(a, .{ .key = @ptrCast(&dead_key_b), .value = Value.num(20) });
+    try o.weak_entries.append(a, .{ .key = @ptrCast(&live_key), .value = Value.num(30) });
+
+    const FakeHeap = struct {
+        live: ?*anyopaque,
+        pub fn isLive(self: *const @This(), ptr: ?*anyopaque) bool {
+            return ptr != null and ptr == self.live;
+        }
+    };
+    const heap = FakeHeap{ .live = @ptrCast(&live_key) };
+
+    try std.testing.expect(!pruneDeadWeakEntries(&o, &heap));
+    try std.testing.expectEqual(@as(usize, 1), o.weak_entries.items.len);
+    try std.testing.expectEqual(@intFromPtr(&live_key), @intFromPtr(o.weak_entries.items[0].key.?));
 }

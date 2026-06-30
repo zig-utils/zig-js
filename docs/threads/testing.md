@@ -277,6 +277,11 @@ count, total cell-slot capacity, live cells at context creation, live cells
 after allocation, free slots after collection, and live cells after collection.
 The unit suite also covers live `SharedArrayBuffer` retain release during
 context teardown across arena, no-GIL threaded, and `.gil = true` contexts.
+Collection-helper removal witnesses live in the same unit suite:
+`WeakMap and WeakSet entry delete is unordered tail removal`,
+`gc pruneDeadWeakEntries removes dead weak keys with unordered tail removal`,
+and `FinalizationRegistry unregister stable-compacts matching records` guard
+the weak-entry tail-removal and stable unregister compaction shapes.
 
 ## Focused Runs
 

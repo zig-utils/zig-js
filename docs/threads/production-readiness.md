@@ -142,6 +142,11 @@ Known performance/maturity work:
   unordered root sets, so their removals now use swap removal instead of
   order-preserving list shifts on evaluate, handle-unprotect, and thread
   teardown paths.
+- WeakMap/WeakSet entry delete and GC dead-key pruning are unordered by
+  observable JS semantics, so they now use tail removal instead of shifting
+  later entries. FinalizationRegistry `unregister` still preserves survivor
+  cleanup order, but it does so with one stable compaction pass rather than one
+  middle removal per matching record.
 - The same `threads-profile` run now includes a separate isolated `Worker`
   section for structured-clone inbox/outbox round-trips, empty receive polling,
   spawn/post/receive/join/destroy lifecycle cost. It is reported outside the

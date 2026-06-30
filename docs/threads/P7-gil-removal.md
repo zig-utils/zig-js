@@ -55,21 +55,17 @@ safety net aborts collection unless every peer is parked-and-published). See
 the full threading model with the GIL still held; lifting the GIL itself is M3
 (NaN-boxed `Value`, write barrier, concurrent mark).
 
-**M3 progress:** the NaN-boxed 8-byte `Value` (#7) has landed (the slot is now a
-single atomic word), and the collector can now **mark concurrently with a live
-mutator** — a dedicated marker thread traces while one GIL-serialized mutator
-runs, with the insertion barrier handing newly-stored cells to the marker and
-the tracer reading per-object storage under the same `property_lock`/
-`elements_lock` the mutator takes (validated TSan-clean against real `Object`
-graphs; see `P7-gc-design.md` M3). This is the GC half of GIL removal. The
-remaining ungil work is: funnel the still-GIL-coupled paths (WeakMap/WeakSet
-entries, FinalizationRegistry records, async waiter arrays; the microtask queue
-is now serialized by `Context.microtask_lock` under `parallel_js`), drive the production
-collector to mark concurrently rather than only while peers are parked, make
-cell allocation thread-safe for multiple parallel mutators, then drop the GIL
-and run the TSan campaign + serial-perf gate.
+**Current status:** the NaN-boxed 8-byte `Value` (#7) has landed, shared-realm
+`Thread` runs true-parallel by default, and `.gil = true` is the explicit
+serialized fallback. The historical blocker list below is now mostly a closure
+record: object/property/element storage, weak collections, FinalizationRegistry
+records, async waiter arrays, the microtask queue, GC roots/barriers, and
+thread lifecycle queues have synchronization/tracing paths and are covered by
+the issue #1 TSan/fuzzer/corpus gates. Remaining work in this document is
+performance and GC maturity: nursery/generational allocation, context
+create/destroy cost, contention reductions, and broader stress coverage.
 
-## Blocker map (each is GIL-protected today)
+## Historical blocker map
 
 | # | Structure | Site | Tear without the GIL | Fix direction |
 |---|---|---|---|---|
@@ -120,7 +116,7 @@ and run the TSan campaign + serial-perf gate.
   safepoints. Do not add heap mutation paths that can run for an unbounded
   number of steps without hitting a checkpoint.
 
-## Bring-up ladder (when a GC lands)
+## Bring-up ladder (completed, retained as history)
 
 Mirror PR-249's phase-2 ladder, already proven for the serialized baseline:
 1. Per-shape + per-object locks (coarse), GIL still present, prove correctness.
@@ -134,10 +130,11 @@ Mirror PR-249's phase-2 ladder, already proven for the serialized baseline:
 
 This note began as the prerequisite record. The tracing GC (M1/M2),
 NaN-boxed `Value` (#7), and concurrent marking (M3 GC half) have since landed,
-and the **heap is now parallel-safe and proven** (see below). The remaining work
-is the execution-path GIL drop, specified next.
+and the **heap is now parallel-safe and proven** (see below). The execution-path
+GIL drop is complete for shared-realm `Thread`: `enable_threads` is no-GIL by
+default, and `.gil = true` remains the supported serialized fallback.
 
-## Execution-path GIL removal — the remaining campaign
+## Execution-path GIL removal — completed campaign and maturity notes
 
 The GC half of M3 is complete and the heap-mutation foundations for GIL removal
 are done and validated:
@@ -156,14 +153,17 @@ are done and validated:
   Backing-store accounting counters are atomic.
 - **Per-structure locks** (the object model + collections): `Object.property_lock`
   / `elements_lock`, `Shape.transition_lock`, `Environment.binding_lock`,
-  `Promise.lock`; weak collections use isMarked-based clearing.
+  `Promise.lock`; weak collections use isMarked-based clearing plus unordered
+  tail removal for dead entries, and FinalizationRegistry unregister uses stable
+  one-pass compaction.
 - **Proven:** the `parallel_gc` bring-up test runs 4 threads creating +
   shape-transitioning + writing 4,000 disjoint objects **with no GIL** — intact
   and TSan-clean.
 
-What remains is dropping the GIL from the **execution path** so the `Thread` API
-actually runs JS in parallel. The touchpoints (each must be synchronized or made
-per-thread before threads stop holding the GIL):
+The `Thread` API now runs JS in parallel by default. The touchpoints below are
+the original execution-path audit plus current maturity notes; treat any
+"needs" language in older subsections as historical unless a current issue #1
+roadmap item repeats it.
 
 1. **`evaluate` / `evaluateModule` realm state.** Good news from the audit: the
    *executing* state is already per-thread — each `Thread` runs its own

@@ -1142,7 +1142,7 @@ pub const Object = struct {
         defer self.unlockElements();
         for (self.weak_entries.items, 0..) |entry, i| {
             if (entry.key == key) {
-                _ = self.weak_entries.orderedRemove(i);
+                _ = self.weak_entries.swapRemove(i);
                 return true;
             }
         }
@@ -1163,13 +1163,16 @@ pub const Object = struct {
         self.lockElements();
         defer self.unlockElements();
         var removed = false;
-        var i: usize = 0;
-        while (i < self.finalization_records.items.len) {
-            if (self.finalization_records.items[i].token == token) {
-                _ = self.finalization_records.orderedRemove(i);
+        var write: usize = 0;
+        for (self.finalization_records.items, 0..) |record, read| {
+            if (record.token == token) {
                 removed = true;
-            } else i += 1;
+                continue;
+            }
+            if (write != read) self.finalization_records.items[write] = record;
+            write += 1;
         }
+        if (removed) self.finalization_records.shrinkRetainingCapacity(write);
         return removed;
     }
 
@@ -2490,4 +2493,57 @@ test "Object.restricted_to CAS lets exactly one concurrent claimer win" {
     for (threads) |t| t.join();
     try std.testing.expectEqual(@as(u32, 1), won.load(.acquire));
     try std.testing.expect(o.restricted_to.load(.acquire) != 0);
+}
+
+test "WeakMap and WeakSet entry delete is unordered tail removal" {
+    const a = std.testing.allocator;
+    var o = Object{ .is_weak = true, .is_map = true };
+    defer o.weak_entries.deinit(a);
+
+    var key1: u8 = 1;
+    var key2: u8 = 2;
+    var key3: u8 = 3;
+    try o.weakEntrySet(a, @ptrCast(&key1), Value.num(1));
+    try o.weakEntrySet(a, @ptrCast(&key2), Value.num(2));
+    try o.weakEntrySet(a, @ptrCast(&key3), Value.num(3));
+
+    try std.testing.expect(o.weakEntryDelete(@ptrCast(&key1)));
+    try std.testing.expectEqual(@as(usize, 2), o.weak_entries.items.len);
+    try std.testing.expect(!o.weakEntryHas(@ptrCast(&key1)));
+    try std.testing.expect(o.weakEntryHas(@ptrCast(&key2)));
+    try std.testing.expect(o.weakEntryHas(@ptrCast(&key3)));
+    try std.testing.expectEqual(@intFromPtr(&key3), @intFromPtr(o.weak_entries.items[0].key.?));
+}
+
+test "FinalizationRegistry unregister stable-compacts matching records" {
+    const a = std.testing.allocator;
+    var o = Object{ .is_finalization_registry = true };
+    defer o.finalization_records.deinit(a);
+
+    var token_a: u8 = 1;
+    var token_b: u8 = 2;
+    var token_c: u8 = 3;
+    var target1: u8 = 11;
+    var target2: u8 = 12;
+    var target3: u8 = 13;
+    var target4: u8 = 14;
+    var target5: u8 = 15;
+    try o.finRecordAppend(a, .{ .target = @ptrCast(&target1), .held = Value.num(1), .token = @ptrCast(&token_a) });
+    try o.finRecordAppend(a, .{ .target = @ptrCast(&target2), .held = Value.num(2), .token = @ptrCast(&token_b) });
+    try o.finRecordAppend(a, .{ .target = @ptrCast(&target3), .held = Value.num(3), .token = @ptrCast(&token_a) });
+    try o.finRecordAppend(a, .{ .target = @ptrCast(&target4), .held = Value.num(4), .token = @ptrCast(&token_c) });
+    try o.finRecordAppend(a, .{ .target = @ptrCast(&target5), .held = Value.num(5), .token = @ptrCast(&token_a) });
+
+    try std.testing.expect(o.finRecordUnregister(@ptrCast(&token_a)));
+    try std.testing.expectEqual(@as(usize, 2), o.finalization_records.items.len);
+    try std.testing.expectEqual(@as(f64, 2), o.finalization_records.items[0].held.asNum());
+    try std.testing.expectEqual(@as(f64, 4), o.finalization_records.items[1].held.asNum());
+    try std.testing.expectEqual(@intFromPtr(&token_b), @intFromPtr(o.finalization_records.items[0].token.?));
+    try std.testing.expectEqual(@intFromPtr(&token_c), @intFromPtr(o.finalization_records.items[1].token.?));
+
+    var missing: u8 = 4;
+    try std.testing.expect(!o.finRecordUnregister(@ptrCast(&missing)));
+    try std.testing.expect(o.finRecordUnregister(@ptrCast(&token_b)));
+    try std.testing.expectEqual(@as(usize, 1), o.finalization_records.items.len);
+    try std.testing.expectEqual(@as(f64, 4), o.finalization_records.items[0].held.asNum());
 }
