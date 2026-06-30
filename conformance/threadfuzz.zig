@@ -3025,6 +3025,7 @@ fn runMidScriptWaitPumpGc(gpa: std.mem.Allocator, seed: u64) !bool {
     const wait_async_expected = async_base + 16384;
     const async_join_result_expected = async_base + 20480;
     const async_join_throw_expected = async_base + 24576;
+    const async_hold_throw_expected = async_base + 28672;
     const spin_iters = 4000 + r.uintLessThan(usize, 6000);
     const wait_timeout_ms = 1200 + r.uintLessThan(usize, 900);
 
@@ -3043,7 +3044,7 @@ fn runMidScriptWaitPumpGc(gpa: std.mem.Allocator, seed: u64) !bool {
     const src = try std.fmt.allocPrint(
         gpa,
         \\(() => {{
-        \\  const gate = {{ state: 0, propReady: 0, condReady: 0, holderReady: 0, lockReady: 0, releaseLock: 0, lockDone: 0, asyncDone: 0, asyncSecondDone: 0, asyncCondReady: 0, asyncCondDone: 0, tlsReady: 0, tlsRelease: 0, resultReady: 0, thrownReady: 0, joinResultReady: 0, joinResultRelease: 0, joinThrowReady: 0, joinThrowRelease: 0 }};
+        \\  const gate = {{ state: 0, propReady: 0, condReady: 0, holderReady: 0, lockReady: 0, releaseLock: 0, lockDone: 0, asyncDone: 0, asyncSecondDone: 0, asyncRejectDone: 0, asyncCondReady: 0, asyncCondDone: 0, tlsReady: 0, tlsRelease: 0, resultReady: 0, thrownReady: 0, joinResultReady: 0, joinResultRelease: 0, joinThrowReady: 0, joinThrowRelease: 0 }};
         \\  const condLock = new Lock();
         \\  const cond = new Condition();
         \\  const heldLock = new Lock();
@@ -3082,6 +3083,36 @@ fn runMidScriptWaitPumpGc(gpa: std.mem.Allocator, seed: u64) !bool {
         \\  asyncSecondGrant.then(
         \\    (v) => {{ asyncSecondThen = v; }},
         \\    () => {{ asyncSecondThen = -1; }});
+        \\  globalThis.__midgcAsyncHoldRejectScore = 0;
+        \\  let asyncRejectThen = 0;
+        \\  let asyncRejectSeen = 0;
+        \\  const asyncThrowAllocs = 32 + (asyncRoot.nested.base & 63);
+        \\  const asyncRejectGrant = asyncTaskLock.asyncHold(() => {{
+        \\    const throwKeep = [];
+        \\    for (let a = 0; a < asyncThrowAllocs; a++)
+        \\      throwKeep.push({{ a, root: asyncRoot, payload: 'async-grant-throw-' + a }});
+        \\    asyncRejectSeen = throwKeep.length;
+        \\    throw {{ marker: asyncRoot.nested.base + 28672, nested: {{ root: asyncRoot, label: 'async-grant-throw-midgc-root' }}, count: throwKeep.length }};
+        \\  }});
+        \\  asyncRejectGrant.then(
+        \\    () => {{
+        \\      asyncRejectThen = -1;
+        \\      globalThis.__midgcAsyncHoldRejectScore = -1;
+        \\      Atomics.store(gate, 'asyncRejectDone', 1);
+        \\      Atomics.notify(gate, 'asyncRejectDone');
+        \\    }},
+        \\    (e) => {{
+        \\      if (!e || e.marker !== asyncRoot.nested.base + 28672 || e.nested.root.nested.base !== asyncRoot.nested.base ||
+        \\          e.count !== asyncThrowAllocs || asyncRejectSeen !== asyncThrowAllocs) {{
+        \\        asyncRejectThen = -2;
+        \\        globalThis.__midgcAsyncHoldRejectScore = -2;
+        \\      }} else {{
+        \\        asyncRejectThen = e.marker;
+        \\        globalThis.__midgcAsyncHoldRejectScore = e.marker;
+        \\      }}
+        \\      Atomics.store(gate, 'asyncRejectDone', 1);
+        \\      Atomics.notify(gate, 'asyncRejectDone');
+        \\    }});
         \\  const asyncCondTicket = asyncCondLock.asyncHold().then((release) => {{
         \\    if (typeof release !== 'function')
         \\      throw new Error('bad async condition initial release');
@@ -3285,6 +3316,12 @@ fn runMidScriptWaitPumpGc(gpa: std.mem.Allocator, seed: u64) !bool {
         \\    throw new Error('queued asyncHold grant was not pumped during mid-script GC pressure');
         \\  if (asyncSecondScore !== {d} || asyncSecondThen !== {d})
         \\    throw new Error('bad queued asyncHold midgc score: ' + asyncSecondScore + '/' + asyncSecondThen);
+        \\  let asyncRejectSpins = 0;
+        \\  while (Atomics.load(gate, 'asyncRejectDone') === 0 && asyncRejectSpins++ < 10000000) ;
+        \\  if (Atomics.load(gate, 'asyncRejectDone') !== 1)
+        \\    throw new Error('rejected asyncHold grant was not pumped during mid-script GC pressure');
+        \\  if (asyncRejectThen !== asyncRoot.nested.base + 28672)
+        \\    throw new Error('bad rejected asyncHold midgc score: ' + asyncRejectThen);
         \\  condLock.hold(() => {{
         \\    Atomics.store(gate, 'state', 1);
         \\    Atomics.notify(gate, 'state');
@@ -3450,6 +3487,14 @@ fn runMidScriptWaitPumpGc(gpa: std.mem.Allocator, seed: u64) !bool {
     };
     if (!async_join_reject_score.isNumber() or async_join_reject_score.asNum() != @as(f64, @floatFromInt(async_join_throw_expected))) {
         std.debug.print("seed {d}: midgc asyncJoin reject score got {d}, expected {d}\n", .{ seed, if (async_join_reject_score.isNumber()) async_join_reject_score.asNum() else -1, async_join_throw_expected });
+        return false;
+    }
+    const async_hold_reject_score = ctx.evaluate("globalThis.__midgcAsyncHoldRejectScore") catch |err| {
+        std.debug.print("seed {d}: cannot read midgc asyncHold reject score: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    if (!async_hold_reject_score.isNumber() or async_hold_reject_score.asNum() != @as(f64, @floatFromInt(async_hold_throw_expected))) {
+        std.debug.print("seed {d}: midgc asyncHold reject score got {d}, expected {d}\n", .{ seed, if (async_hold_reject_score.isNumber()) async_hold_reject_score.asNum() else -1, async_hold_throw_expected });
         return false;
     }
     ctx.collectGarbage();
@@ -3642,8 +3687,9 @@ pub fn main(init: std.process.Init) !void {
     // profile. Each seed blocks peers in property `Atomics.wait`,
     // `Condition.wait`, and contended `Lock` acquisition while allocation
     // pressure triggers the experimental collector. Hidden ThreadLocal values,
-    // typed-array waitAsync reactions, pending asyncJoin reactions, and
-    // completed-but-unjoined Thread results must survive that window. The oracle
+    // typed-array waitAsync reactions, rejected asyncHold reactions, pending
+    // asyncJoin reactions, and completed-but-unjoined Thread results must
+    // survive that window. The oracle
     // requires exact program completion and at least one finishing parallel
     // sweep.
     if (first) |a| if (std.mem.eql(u8, a, "midgc")) {

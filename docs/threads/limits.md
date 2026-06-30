@@ -134,10 +134,11 @@ context APIs.
   results, release-function lock records, and contended `Lock.hold`
   receiver/callback pairs now trace, barrier, or temp-root their hidden JS
   values. The mid-GC fuzzer now queues a FIFO `Lock.asyncHold` grant
-  chain, an async `Condition.wait` reacquire path with captured JS roots, a
-  typed-array `waitAsync` reaction graph reachable only through the native
-  waiter queue, and pending `Thread.asyncJoin` fulfillment/rejection reaction
-  graphs reachable only through native completion records; sync-wait pump points
+  chain including a root-bearing rejected grant, an async `Condition.wait`
+  reacquire path with captured JS roots, a typed-array `waitAsync` reaction
+  graph reachable only through the native waiter queue, and pending
+  `Thread.asyncJoin` fulfillment/rejection reaction graphs reachable only
+  through native completion records; sync-wait pump points
   must execute the async grants during the
   same allocation-pressure window that produces a finishing parallel sweep, and
   the `waitAsync` reaction must run intact after notification. Join-side
@@ -151,9 +152,10 @@ context APIs.
   `wait`/`waitAsync`, `Condition`, `Thread.restrict`, and
   `FinalizationRegistry` cleanup under GC-backed parallel contexts. The mid-GC
   profile now hammers sync-wait root publication during finishing
-  `parallel_midscript_gc` sweeps, executes a queued async-hold grant chain and
-  async condition reacquire grants from those pump points, keeps a typed-array
-  `waitAsync` promise/reaction graph live only through the native waiter queue,
+  `parallel_midscript_gc` sweeps, executes a queued async-hold grant chain
+  including rejected grant reactions and async condition reacquire grants from
+  those pump points, keeps a typed-array `waitAsync` promise/reaction graph live
+  only through the native waiter queue,
   keeps pending `Thread.asyncJoin` fulfillment/rejection reactions live only
   through native completion records, keeps a ThreadLocal-only hidden root live
   in a parked peer, keeps completed-but-unjoined

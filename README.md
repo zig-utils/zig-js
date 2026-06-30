@@ -301,9 +301,10 @@ threading architecture:
   and contended `Lock.hold` receiver/callback pairs. Keep maturing convergence
   and stress coverage for heavier
   wait/cleanup mixes; the mid-GC fuzzer now queues a FIFO `Lock.asyncHold`
-  grant chain, an async `Condition.wait` reacquire path, and a typed-array
-  `waitAsync` reaction graph reachable only through the native waiter queue,
-  and pending `Thread.asyncJoin` fulfillment/rejection reaction graphs
+  grant chain including a root-bearing rejected grant, an async
+  `Condition.wait` reacquire path, and a typed-array `waitAsync` reaction graph
+  reachable only through the native waiter queue, and pending
+  `Thread.asyncJoin` fulfillment/rejection reaction graphs
   reachable only through native completion records while allocation pressure
   collects. It also verifies exact
   `FinalizationRegistry` cleanup count/sum delivery plus unregister-token
@@ -317,10 +318,10 @@ threading architecture:
 - **Stress breadth** - the broad fuzzer profile now covers exceptions/finally,
   cleanup, waiters, `asyncJoin`, `Thread.restrict`, and nested thread lifecycle;
   the mid-GC profile covers sync-wait root publication during finishing
-  mid-script sweeps, queued async-hold delivery, async condition reacquire
-  delivery, typed-array `waitAsync` native waiter/reaction roots, pending
-  `Thread.asyncJoin` reaction roots, ThreadLocal-only hidden roots in parked
-  peers, and deterministic
+  mid-script sweeps, queued async-hold delivery including rejected grant
+  reactions, async condition reacquire delivery, typed-array `waitAsync` native
+  waiter/reaction roots, pending `Thread.asyncJoin` reaction roots,
+  ThreadLocal-only hidden roots in parked peers, and deterministic
   completed-but-unjoined Thread result and thrown exception roots, and
   deterministic cleanup count/sum delivery plus unregister-token suppression;
   the lifecycle

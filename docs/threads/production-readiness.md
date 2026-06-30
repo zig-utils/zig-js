@@ -166,9 +166,10 @@ as embedders exercise more threaded host patterns.
   `Condition.wait`, and contended `Lock` acquisition while allocation pressure
   drives `parallel_midscript_gc`; every seed must complete exactly and finish at
   least one parallel sweep. It also queues a FIFO `Lock.asyncHold` grant chain
-  plus an async `Condition.wait` reacquire with hidden captured JS roots and
-  requires sync-wait pump points to deliver both during the same mid-script GC
-  pressure window, keeps a typed-array `waitAsync` promise/reaction graph
+  including a root-bearing rejected grant plus an async `Condition.wait`
+  reacquire with hidden captured JS roots and requires sync-wait pump points to
+  deliver both during the same mid-script GC pressure window, keeps a typed-array
+  `waitAsync` promise/reaction graph
   reachable only through the native waiter queue until notification, keeps
   pending `Thread.asyncJoin` fulfillment/rejection promise reactions reachable
   only through native completion records until the child threads are released,
