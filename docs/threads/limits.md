@@ -98,9 +98,12 @@ context APIs.
   against the `.gil = true` fallback for independent compute, shared object
   properties, shared array append, typed-array Atomics, property
   `Atomics.wait` / `notify`, `Condition.wait` / `notifyAll`,
-  `Lock.asyncHold` delivery, and lifecycle churn. Use it to drive contention
-  reductions in global/environment bindings, property/element locks, sync
-  waiters, async-hold delivery, collection helpers, and GC allocation. Its
+  `Lock.asyncHold` delivery, observed `Lock.asyncHold` callback settlement,
+  no-fn `Lock.asyncHold` release-function delivery, and lifecycle churn. Use it
+  to drive contention reductions in global/environment bindings,
+  property/element locks, sync waiters, unobserved async-hold grant delivery,
+  promise-observed callback settlement, no-fn release-function delivery,
+  collection helpers, and GC allocation. Its
   `empty`/`jobs` columns now show whether run-loop task-pump
   overhead is empty fast-path churn or real async-hold delivery. Empty sync-wait
   task pumps no longer take the shared run-loop task lock, reducing one measured

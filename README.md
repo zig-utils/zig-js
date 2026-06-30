@@ -262,12 +262,15 @@ threading architecture:
   default against `.gil = true` across independent compute, shared object
   properties, array append, typed-array Atomics, property `Atomics.wait` /
   `notify`, `Condition.wait` / `notifyAll`, contended `Lock.hold`, and
-  `Lock.asyncHold` delivery plus lifecycle churn. It now enables and prints
-  internal contention events, timed wait/pump parks, and run-loop task-pump
-  empty/job counts beside wall-clock time, so follow-up optimization can separate
+  `Lock.asyncHold` delivery plus observed callback and no-fn release-function
+  variants, along with lifecycle churn. It now enables and prints internal
+  contention events, timed wait/pump parks, and run-loop task-pump empty/job
+  counts beside wall-clock time, so follow-up optimization can separate
   property waiters, condition waiters, user-level lock pressure,
-  thread-join/lifecycle waiting, async-hold delivery, object/element storage
-  contention, and GC allocation costs under high thread counts. It also prints
+  thread-join/lifecycle waiting, unobserved async-hold grant delivery,
+  promise-observed callback settlement, no-fn release-function delivery,
+  object/element storage contention, and GC allocation costs under high thread
+  counts. It also prints
   a separate isolated `Worker` section for structured-clone inbox/outbox
   round-trips and spawn/post/receive/join/destroy lifecycle cost; that section
   has no `.gil = true` comparison because each Worker owns its own `Context`.

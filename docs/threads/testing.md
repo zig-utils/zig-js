@@ -208,7 +208,9 @@ scaling and contention profiler for issue #1. The wall-clock columns compare the
 no-GIL default with `.gil = true` across independent compute, shared object
 properties, shared array append, typed-array Atomics, property `Atomics.wait` /
 `notify`, `Condition.wait` / `notifyAll`, contended `Lock.hold`,
-`Lock.asyncHold` delivery, and thread lifecycle churn. Its opt-in counters let
+`Lock.asyncHold` delivery, observed `Lock.asyncHold` callback settlement,
+no-fn `Lock.asyncHold` release-function delivery, and thread lifecycle churn.
+Its opt-in counters let
 `events` count logical contention in `Lock`/`Condition`/property waits and
 queued `asyncHold` grants, and `parks` count timed wait/pump iterations
 including `Thread.join`.

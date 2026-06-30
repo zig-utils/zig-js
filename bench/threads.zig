@@ -193,6 +193,42 @@ const scenarios = [_]Scenario{
         .rounds = 10,
     },
     .{
+        .name = "asyncHold observed callbacks",
+        .setup =
+        \\globalThis.asyncLock = new Lock();
+        \\globalThis.asyncBox = { n: 0, seen: 0 };
+        \\globalThis.worker = function(id) {
+        \\  for (var i = 0; i < 35; i = i + 1) {
+        \\    asyncLock.asyncHold(function() {
+        \\      asyncBox.n = (asyncBox.n | 0) + 1;
+        \\      return asyncBox.n;
+        \\    }).then(function(v) {
+        \\      asyncBox.seen = (asyncBox.seen | 0) + (v > 0 ? 1 : 0);
+        \\    });
+        \\  }
+        \\  return id + 1;
+        \\};
+        ,
+        .rounds = 10,
+    },
+    .{
+        .name = "asyncHold release functions",
+        .setup =
+        \\globalThis.asyncLock = new Lock();
+        \\globalThis.asyncBox = { n: 0 };
+        \\globalThis.worker = function(id) {
+        \\  for (var i = 0; i < 35; i = i + 1) {
+        \\    asyncLock.asyncHold().then(function(release) {
+        \\      asyncBox.n = (asyncBox.n | 0) + 1;
+        \\      release();
+        \\    });
+        \\  }
+        \\  return id + 1;
+        \\};
+        ,
+        .rounds = 10,
+    },
+    .{
         .name = "thread lifecycle",
         .setup =
         \\globalThis.worker = function(id) { return id + 1; };
