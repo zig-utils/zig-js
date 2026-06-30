@@ -110,6 +110,10 @@ pub const GcCellBacking = struct {
     bucket_next_offsets: [bucket_count]std.ArrayListUnmanaged(usize) = .{ .empty, .empty, .empty, .empty, .empty, .empty },
     free_lists: [bucket_count]?*FreeNode = .{ null, null, null, null, null, null },
     bucket_free_counts: [bucket_count]usize = .{ 0, 0, 0, 0, 0, 0 },
+    bucket_chunk_counts: [bucket_count]usize = .{ 0, 0, 0, 0, 0, 0 },
+    bucket_capacity_bytes: [bucket_count]usize = .{ 0, 0, 0, 0, 0, 0 },
+    bucket_capacity_slots: [bucket_count]usize = .{ 0, 0, 0, 0, 0, 0 },
+    bucket_issued_slots: [bucket_count]usize = .{ 0, 0, 0, 0, 0, 0 },
     /// Last chunk with unbumped fresh slots for each bucket. Lazy allocation
     /// keeps this hot so object-heavy scripts do not rescan filled chunks.
     bucket_bump_hint: [bucket_count]?usize = .{ null, null, null, null, null, null },
@@ -165,6 +169,9 @@ pub const GcCellBacking = struct {
         const end = start + chunk.len;
         self.bucket_addr_min[idx] = @min(self.bucket_addr_min[idx], start);
         self.bucket_addr_max[idx] = @max(self.bucket_addr_max[idx], end);
+        self.bucket_chunk_counts[idx] += 1;
+        self.bucket_capacity_bytes[idx] += chunk_len;
+        self.bucket_capacity_slots[idx] += slots;
         self.bucket_owns_hint[idx] = chunk_idx;
         self.bucket_bump_hint[idx] = chunk_idx;
         return true;
@@ -172,6 +179,7 @@ pub const GcCellBacking = struct {
 
     fn recordFreshBump(self: *GcCellBacking, idx: usize, chunk_idx: usize, off: usize) void {
         const slot_size = bucket_sizes[idx];
+        self.bucket_issued_slots[idx] += 1;
         self.bucket_owns_hint[idx] = chunk_idx;
         self.bucket_bump_hint[idx] = chunk_idx;
         if (off + slot_size >= self.bucket_chunks[idx].items[chunk_idx].len and self.bucket_bump_start[idx] <= chunk_idx) {
@@ -317,14 +325,11 @@ pub const GcCellBacking = struct {
         self.acquire();
         defer self.unlock();
         var out = Stats{};
-        inline for (bucket_sizes, 0..) |slot_size, idx| {
-            for (self.bucket_chunks[idx].items, 0..) |chunk, chunk_idx| {
-                out.chunks += 1;
-                out.capacity_bytes += chunk.len;
-                out.capacity_slots += chunk.len / slot_size;
-                const used = self.bucket_next_offsets[idx].items[chunk_idx] / slot_size;
-                out.free_slots += (chunk.len / slot_size) - used;
-            }
+        inline for (0..bucket_count) |idx| {
+            out.chunks += self.bucket_chunk_counts[idx];
+            out.capacity_bytes += self.bucket_capacity_bytes[idx];
+            out.capacity_slots += self.bucket_capacity_slots[idx];
+            out.free_slots += self.bucket_capacity_slots[idx] - self.bucket_issued_slots[idx];
             out.free_slots += self.bucket_free_counts[idx];
         }
         out.live_slots = out.capacity_slots - out.free_slots;
@@ -354,6 +359,10 @@ pub const GcCellBacking = struct {
         }
         self.free_lists = .{ null, null, null, null, null, null };
         self.bucket_free_counts = .{ 0, 0, 0, 0, 0, 0 };
+        self.bucket_chunk_counts = .{ 0, 0, 0, 0, 0, 0 };
+        self.bucket_capacity_bytes = .{ 0, 0, 0, 0, 0, 0 };
+        self.bucket_capacity_slots = .{ 0, 0, 0, 0, 0, 0 };
+        self.bucket_issued_slots = .{ 0, 0, 0, 0, 0, 0 };
         self.bucket_owns_hint = .{ null, null, null, null, null, null };
         self.bucket_bump_hint = .{ null, null, null, null, null, null };
         self.bucket_bump_start = .{ 0, 0, 0, 0, 0, 0 };
@@ -498,11 +507,57 @@ test "GC cell backing stats report chunk capacity and live/free slots" {
     const after_one_free = backing.stats();
     try std.testing.expectEqual(slots - 1, after_one_free.free_slots);
     try std.testing.expectEqual(@as(usize, 1), after_one_free.live_slots);
+    try std.testing.expectEqual(@as(usize, 1), backing.bucket_chunk_counts[idx]);
+    try std.testing.expectEqual(GcCellBacking.chunk_bytes, backing.bucket_capacity_bytes[idx]);
+    try std.testing.expectEqual(slots, backing.bucket_capacity_slots[idx]);
+    try std.testing.expectEqual(@as(usize, 2), backing.bucket_issued_slots[idx]);
 
     a.free(two);
     empty = backing.stats();
     try std.testing.expectEqual(slots, empty.free_slots);
     try std.testing.expectEqual(@as(usize, 0), empty.live_slots);
+}
+
+test "GC cell backing stats use maintained counters across chunks" {
+    var backing = GcCellBacking{ .inner = std.testing.allocator };
+    defer backing.deinit();
+    const a = backing.allocator();
+
+    const idx = GcCellBacking.bucketIndex(200, .@"16").?;
+    const slots = GcCellBacking.chunk_bytes / GcCellBacking.bucket_sizes[idx];
+    var cells = try std.testing.allocator.alloc([]align(16) u8, slots + 1);
+    defer std.testing.allocator.free(cells);
+
+    var allocated: usize = 0;
+    errdefer for (cells[0..allocated]) |cell| a.free(cell);
+    for (cells) |*cell| {
+        cell.* = try a.alignedAlloc(u8, .@"16", 200);
+        allocated += 1;
+    }
+    defer for (cells[0..allocated]) |cell| a.free(cell);
+
+    var s = backing.stats();
+    try std.testing.expectEqual(@as(usize, 2), s.chunks);
+    try std.testing.expectEqual(@as(usize, 2), backing.bucket_chunk_counts[idx]);
+    try std.testing.expectEqual(@as(usize, 2 * GcCellBacking.chunk_bytes), backing.bucket_capacity_bytes[idx]);
+    try std.testing.expectEqual(@as(usize, 2 * slots), backing.bucket_capacity_slots[idx]);
+    try std.testing.expectEqual(slots + 1, backing.bucket_issued_slots[idx]);
+    try std.testing.expectEqual(slots + 1, s.live_slots);
+    try std.testing.expectEqual(slots - 1, s.free_slots);
+
+    a.free(cells[0]);
+    s = backing.stats();
+    try std.testing.expectEqual(slots, s.live_slots);
+    try std.testing.expectEqual(slots, s.free_slots);
+    try std.testing.expectEqual(@as(usize, 1), backing.bucket_free_counts[idx]);
+
+    const reused = try a.alignedAlloc(u8, .@"16", 200);
+    try std.testing.expectEqual(cells[0].ptr, reused.ptr);
+    cells[0] = reused;
+    s = backing.stats();
+    try std.testing.expectEqual(slots + 1, backing.bucket_issued_slots[idx]);
+    try std.testing.expectEqual(slots + 1, s.live_slots);
+    try std.testing.expectEqual(slots - 1, s.free_slots);
 }
 
 test "GC cell backing bulk teardown skips freelist rebuilds and still delegates side storage" {

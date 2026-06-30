@@ -253,9 +253,10 @@ threading architecture:
   pre-linking every unused slot during short-lived context setup; a per-bucket
   fresh-chunk cursor skips chunks whose bump range is already exhausted. Freed
   cells are still recycled through the per-bucket free lists, with exact
-  per-bucket free counts so profile/stat snapshots do not walk every freed cell,
-  and classified against per-size-class address spans plus a recent-chunk hint
-  before scanning chunk lists to keep collection/destroy lookup costs bounded.
+  per-bucket free, capacity, and issued-slot counters so profile/stat snapshots
+  do not walk every freed cell or slab chunk, and classified against
+  per-size-class address spans plus a recent-chunk hint before scanning chunk
+  lists to keep collection/destroy lookup costs bounded.
   Single-mutator GC object side stores now allocate directly from the context
   allocator instead of round-tripping through that cell-slab
   classifier, while true-parallel contexts keep the synchronized backing wrapper.
