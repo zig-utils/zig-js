@@ -4020,7 +4020,12 @@ fn runMidScriptPromisePublicationGc(gpa: std.mem.Allocator, seed: u64) !bool {
     const return_join_marker = 220_000 + seed_marker;
     const throw_reject_marker = 230_000 + seed_marker;
     const throw_join_marker = 240_000 + seed_marker;
-    const expected_score = return_async_marker + return_join_marker + throw_reject_marker;
+    const reject_async_marker = 250_000 + seed_marker;
+    const reject_join_marker = 260_000 + seed_marker;
+    const then_async_marker = 270_000 + seed_marker;
+    const then_join_marker = 280_000 + seed_marker;
+    const expected_score = return_async_marker + return_join_marker + throw_reject_marker +
+        reject_async_marker + reject_join_marker + then_async_marker + then_join_marker;
 
     const ctx = js.Context.createWithTestingOptions(gpa, .{
         .enable_threads = true,
@@ -4040,12 +4045,19 @@ fn runMidScriptPromisePublicationGc(gpa: std.mem.Allocator, seed: u64) !bool {
         \\  globalThis.__midgcPromiseScore = 0;
         \\  globalThis.__midgcPromiseJoinThrow = 0;
         \\  globalThis.__midgcPromiseThrowPromiseSeen = 0;
+        \\  globalThis.__midgcPromiseRejectPromiseSeen = 0;
+        \\  globalThis.__midgcPromiseThenableCalls = 0;
         \\  const sab = new SharedArrayBuffer(8);
         \\  const view = new Int32Array(sab);
-        \\  const gate = {{ prop: 0, propReady: 0, condReady: 0, condOpen: false, returnReady: 0, throwReady: 0 }};
+        \\  const gate = {{ prop: 0, propReady: 0, condReady: 0, condOpen: false, returnReady: 0, throwReady: 0, rejectReady: 0, releaseReject: 0, thenReady: 0, releaseThen: 0 }};
         \\  const lock = new Lock();
         \\  const cond = new Condition();
         \\  const root = {{ seed: {d}, tag: 'midgc-promise-publication-root' }};
+        \\  const rejectAsyncMarker = 250000 + root.seed;
+        \\  const rejectJoinMarker = 260000 + root.seed;
+        \\  const thenAsyncMarker = 270000 + root.seed;
+        \\  const thenJoinMarker = 280000 + root.seed;
+        \\  const thenableValueMarker = 290000 + root.seed;
         \\  const propWaiter = new Thread(() => {{
         \\    Atomics.store(gate, 'propReady', 1);
         \\    Atomics.notify(gate, 'propReady');
@@ -4103,10 +4115,82 @@ fn runMidScriptPromisePublicationGc(gpa: std.mem.Allocator, seed: u64) !bool {
         \\    Atomics.notify(gate, 'throwReady');
         \\    throw reason;
         \\  }}, gate, {d}, {d});
+        \\  const rejectedThread = new Thread((gate, marker, seedMarker) => {{
+        \\    const reason = {{
+        \\      marker,
+        \\      nested: {{ seed: seedMarker, label: 'midgc-rejected-return-root' }},
+        \\      promise: Promise.resolve(marker + 7),
+        \\    }};
+        \\    Atomics.store(gate, 'rejectReady', 1);
+        \\    Atomics.notify(gate, 'rejectReady');
+        \\    while (Atomics.load(gate, 'releaseReject') === 0)
+        \\      Atomics.wait(gate, 'releaseReject', 0, 10000);
+        \\    return Promise.reject(reason);
+        \\  }}, gate, rejectJoinMarker, root.seed);
+        \\  const rejectAsyncRoot = {{
+        \\    marker: rejectAsyncMarker,
+        \\    nested: {{ root, label: 'midgc-rejected-return-asyncJoin-root' }},
+        \\  }};
+        \\  rejectedThread.asyncJoin().then(
+        \\    () => {{ globalThis.__midgcPromiseScore = -1000000; }},
+        \\    (e) => {{
+        \\      if (e && e.marker === rejectJoinMarker && e.nested.seed === root.seed &&
+        \\          rejectAsyncRoot.marker === rejectAsyncMarker &&
+        \\          rejectAsyncRoot.nested.root.seed === root.seed) {{
+        \\        globalThis.__midgcPromiseScore += rejectAsyncRoot.marker;
+        \\        e.promise.then((v) => {{
+        \\          if (v === rejectJoinMarker + 7)
+        \\            globalThis.__midgcPromiseRejectPromiseSeen++;
+        \\          else
+        \\            globalThis.__midgcPromiseScore = -1000000;
+        \\        }});
+        \\      }} else {{
+        \\        globalThis.__midgcPromiseScore = -1000000;
+        \\      }}
+        \\    }});
+        \\  const thenableThread = new Thread((gate, valueMarker, seedMarker) => {{
+        \\    const localRoot = {{
+        \\      marker: valueMarker,
+        \\      nested: {{ seed: seedMarker, label: 'midgc-user-thenable-root' }},
+        \\    }};
+        \\    const thenable = {{
+        \\      marker: valueMarker,
+        \\      nested: {{ seed: seedMarker, label: 'midgc-user-thenable-result' }},
+        \\      then(resolve, reject) {{
+        \\        globalThis.__midgcPromiseThenableCalls++;
+        \\        if (localRoot.marker === valueMarker && localRoot.nested.seed === seedMarker)
+        \\          resolve(valueMarker);
+        \\        else
+        \\          reject({{ marker: -1 }});
+        \\      }},
+        \\    }};
+        \\    Atomics.store(gate, 'thenReady', 1);
+        \\    Atomics.notify(gate, 'thenReady');
+        \\    while (Atomics.load(gate, 'releaseThen') === 0)
+        \\      Atomics.wait(gate, 'releaseThen', 0, 10000);
+        \\    return thenable;
+        \\  }}, gate, thenableValueMarker, root.seed);
+        \\  const thenAsyncRoot = {{
+        \\    marker: thenAsyncMarker,
+        \\    nested: {{ root, label: 'midgc-user-thenable-asyncJoin-root' }},
+        \\  }};
+        \\  thenableThread.asyncJoin().then(
+        \\    (v) => {{
+        \\      if (v === thenableValueMarker && thenAsyncRoot.marker === thenAsyncMarker &&
+        \\          thenAsyncRoot.nested.root.seed === root.seed)
+        \\        globalThis.__midgcPromiseScore += thenAsyncRoot.marker;
+        \\      else
+        \\        globalThis.__midgcPromiseScore = -1000000;
+        \\    }},
+        \\    () => {{ globalThis.__midgcPromiseScore = -1000000; }});
         \\  while (Atomics.load(gate, 'returnReady') === 0)
         \\    Atomics.wait(gate, 'returnReady', 0, 1);
         \\  while (Atomics.load(gate, 'throwReady') === 0)
         \\    Atomics.wait(gate, 'throwReady', 0, 1);
+        \\  while (Atomics.load(gate, 'rejectReady') === 0)
+        \\    Atomics.wait(gate, 'rejectReady', 0, 1);
+        \\  while (Atomics.load(gate, 'thenReady') === 0)
+        \\    Atomics.wait(gate, 'thenReady', 0, 1);
         \\  const keep = [];
         \\  for (let round = 0; round < {d}; round++) {{
         \\    for (let i = 0; i < {d}; i++) {{
@@ -4166,6 +4250,52 @@ fn runMidScriptPromisePublicationGc(gpa: std.mem.Allocator, seed: u64) !bool {
         \\      throw new Error('bad midgc thrown publication join root');
         \\    globalThis.__midgcPromiseJoinThrow = e.marker;
         \\  }}
+        \\  Atomics.store(gate, 'releaseReject', 1);
+        \\  Atomics.notify(gate, 'releaseReject');
+        \\  const rejectedJoined = rejectedThread.join();
+        \\  if (!(rejectedJoined instanceof Promise))
+        \\    throw new Error('midgc join did not return rejected child promise');
+        \\  const rejectJoinRoot = {{
+        \\    marker: rejectJoinMarker,
+        \\    nested: {{ root, label: 'midgc-rejected-return-join-root' }},
+        \\  }};
+        \\  rejectedJoined.then(
+        \\    () => {{ globalThis.__midgcPromiseScore = -1000000; }},
+        \\    (e) => {{
+        \\      if (e && e.marker === rejectJoinMarker && e.nested.seed === root.seed &&
+        \\          rejectJoinRoot.marker === rejectJoinMarker &&
+        \\          rejectJoinRoot.nested.root.seed === root.seed) {{
+        \\        globalThis.__midgcPromiseScore += rejectJoinRoot.marker;
+        \\        e.promise.then((v) => {{
+        \\          if (v === rejectJoinMarker + 7)
+        \\            globalThis.__midgcPromiseRejectPromiseSeen++;
+        \\          else
+        \\            globalThis.__midgcPromiseScore = -1000000;
+        \\        }});
+        \\      }} else {{
+        \\        globalThis.__midgcPromiseScore = -1000000;
+        \\      }}
+        \\    }});
+        \\  Atomics.store(gate, 'releaseThen', 1);
+        \\  Atomics.notify(gate, 'releaseThen');
+        \\  const joinedThenable = thenableThread.join();
+        \\  if (!joinedThenable || typeof joinedThenable.then !== 'function' ||
+        \\      joinedThenable.marker !== thenableValueMarker ||
+        \\      joinedThenable.nested.seed !== root.seed)
+        \\    throw new Error('midgc join did not return child thenable');
+        \\  const thenJoinRoot = {{
+        \\    marker: thenJoinMarker,
+        \\    nested: {{ root, label: 'midgc-user-thenable-join-root' }},
+        \\  }};
+        \\  Promise.resolve(joinedThenable).then(
+        \\    (v) => {{
+        \\      if (v === thenableValueMarker && thenJoinRoot.marker === thenJoinMarker &&
+        \\          thenJoinRoot.nested.root.seed === root.seed)
+        \\        globalThis.__midgcPromiseScore += thenJoinRoot.marker;
+        \\      else
+        \\        globalThis.__midgcPromiseScore = -1000000;
+        \\    }},
+        \\    () => {{ globalThis.__midgcPromiseScore = -1000000; }});
         \\  Atomics.store(gate, 'prop', 1);
         \\  Atomics.notify(gate, 'prop');
         \\  lock.hold(() => {{
@@ -4255,6 +4385,22 @@ fn runMidScriptPromisePublicationGc(gpa: std.mem.Allocator, seed: u64) !bool {
     };
     if (!promise_seen.isNumber() or promise_seen.asNum() != 1) {
         std.debug.print("seed {d}: midgc promise-publication thrown promise marker got {d}\n", .{ seed, if (promise_seen.isNumber()) promise_seen.asNum() else -1 });
+        return false;
+    }
+    const reject_promise_seen = ctx.evaluate("globalThis.__midgcPromiseRejectPromiseSeen") catch |err| {
+        std.debug.print("seed {d}: cannot read midgc promise-publication rejected promise marker: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    if (!reject_promise_seen.isNumber() or reject_promise_seen.asNum() != 2) {
+        std.debug.print("seed {d}: midgc promise-publication rejected promise marker got {d}\n", .{ seed, if (reject_promise_seen.isNumber()) reject_promise_seen.asNum() else -1 });
+        return false;
+    }
+    const thenable_calls = ctx.evaluate("globalThis.__midgcPromiseThenableCalls") catch |err| {
+        std.debug.print("seed {d}: cannot read midgc promise-publication thenable calls: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    if (!thenable_calls.isNumber() or thenable_calls.asNum() != 2) {
+        std.debug.print("seed {d}: midgc promise-publication thenable calls got {d}\n", .{ seed, if (thenable_calls.isNumber()) thenable_calls.asNum() else -1 });
         return false;
     }
     return true;
@@ -4356,8 +4502,9 @@ pub fn main(init: std.process.Init) !void {
         return;
     };
     // `threadfuzz midgcpromise <iters> <seed>`: focused mid-script
-    // parallel-GC repro for child-returned waitAsync promise assimilation and
-    // thrown-object publication through thread completion records.
+    // parallel-GC repro for child-returned waitAsync/rejected-promise/user-
+    // thenable assimilation and thrown-object publication through thread
+    // completion records.
     if (first) |a| if (std.mem.eql(u8, a, "midgcpromise")) {
         if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch 1;
         if (args.next()) |b| base_seed = std.fmt.parseInt(u64, b, 10) catch 1;
@@ -4484,7 +4631,8 @@ pub fn main(init: std.process.Init) !void {
     // `Condition.wait`, and contended `Lock` acquisition while allocation
     // pressure triggers the experimental collector. Hidden ThreadLocal values,
     // typed-array waitAsync reactions, rejected asyncHold reactions, pending
-    // asyncJoin reactions, child-returned waitAsync promise assimilation,
+    // asyncJoin reactions, child-returned waitAsync/rejected-promise/user-
+    // thenable assimilation,
     // completed-but-unjoined Thread results and thrown objects, and teardown
     // termination with pending asyncJoin/waitAsync roots must survive that
     // window. The oracle requires exact program completion or expected

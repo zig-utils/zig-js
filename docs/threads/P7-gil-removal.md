@@ -245,16 +245,19 @@ per-thread before threads stop holding the GIL):
      made race-free too: `markConservativeWord` claims via the atomic
      `claimMark`, and `buildAddrIndex` snapshots the all-list under `alloc_lock`.
    - **Publication.** Running peers publish precise roots
-     (`publishInterpreterRoots`) at their safepoint; a peer blocked in `join` is
-     flagged `gc_parked` and traced directly (frozen). The redundant park-record
-     conservative scan is skipped under a parallel collection (it raced the
-     joiner's `beginPark`/`endPark` and is covered precisely by `gc_parked`).
+     (`publishInterpreterRoots`) at their safepoint; a peer blocked in the
+     native wait inside `join` is flagged `gc_parked` and traced directly
+     (frozen). The flag is cleared while the joiner pumps tasks between waits,
+     because that interpreter is moving again and must publish at ordinary
+     safepoints. The redundant park-record conservative scan is skipped under a
+     parallel collection (it raced the joiner's `beginPark`/`endPark` and is
+     covered precisely by `gc_parked` during the actual park).
      Peers blocked on property `Atomics.wait`, `Condition.wait`, or contended
      `Lock` acquisition under `parallel_js` are deliberately **not** flagged
-     `gc_parked`: unlike `join`, those loops wake every ~5 ms to `pumpTasks` and
-     can run JS/microtasks before re-parking. Instead, their lock-free pump
-     points service the same root-publication hook as ordinary bytecode
-     safepoints, before re-entering the bounded native park. The collector's
+     `gc_parked`: those loops wake every ~5 ms to `pumpTasks` and can run
+     JS/microtasks before re-parking. Instead, their lock-free pump points
+     service the same root-publication hook as ordinary bytecode safepoints,
+     before re-entering the bounded native park. The collector's
      per-generation wait now has a short time floor so those peers get at least
      one wake/publish opportunity under load. The root set also includes
      host-side thread queues that can hide JS values from ordinary object
@@ -272,14 +275,21 @@ per-thread before threads stop holding the GIL):
      `Thread.asyncJoin` fulfillment/rejection reactions reachable only through
      native completion records until the child threads are released, a sibling
      promise-publication case where a child-returned typed-array `waitAsync`
-     promise and a child-thrown object remain rooted through completion/native
-     waiter state until post-sweep `join()`/`asyncJoin()` publication, and a
-     sibling teardown case where parked children hold child-owned typed-array
+     promise, a child-returned rejected promise, a child-returned user thenable,
+     and a child-thrown object remain rooted through completion/native waiter
+     state until post-sweep `join()`/`asyncJoin()` fulfillment, rejection,
+     thenable assimilation, and thrown-object publication, and a sibling
+     teardown case where parked children hold child-owned typed-array
      `waitAsync` tickets through a finishing mid-script sweep before parent
      failure terminates them. The
      `Thread.join()` park path now clears its `gc_parked` publication and
-     rebalances the completion mutex on termination/error unwinds, so a failed
-     join cannot leave stale frozen-peer state. The
+     rebalances the completion mutex on termination/error unwinds, and it only
+     publishes `gc_parked` for the actual native condition wait rather than
+     join-time task pumping, so a failed or active join cannot leave stale or
+     moving frozen-peer state. Requested shell/host GC leaves an elected
+     mid-script parallel collector alone while threads are live; a later
+     quiescent collection aborts stale parallel mark state before starting a
+     fresh precise mark. The
      regression case from the
      earlier naive approach (marking sync waits as frozen and sweeping the host's
      captured-env vars) stays guarded by

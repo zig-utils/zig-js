@@ -185,11 +185,13 @@ as embedders exercise more threaded host patterns.
   reachable only through the thread completion record, then delivers the
   expected `FinalizationRegistry` cleanup count/sum after a quiescent collect.
   The promise-publication subprogram keeps a child-returned typed-array
-  `waitAsync` promise pending through the sweep and verifies both
-  `Thread.asyncJoin()` thenable assimilation and `Thread.join()` returning the
-  original promise after notification; it also keeps a child-thrown object with a
-  nested promise rooted through completion state until post-sweep
-  `asyncJoin()`/`join()` publication.
+  `waitAsync` promise pending through the sweep, keeps a child-returned rejected
+  promise and a child-returned user thenable parked behind pre-completion
+  `asyncJoin()` observers, and verifies post-sweep `Thread.asyncJoin()`
+  fulfillment/rejection/thenable assimilation plus `Thread.join()` returning the
+  original promise/thenable for post-completion observers; it also keeps a
+  child-thrown object with a nested promise rooted through completion state
+  until post-sweep `asyncJoin()`/`join()` publication.
   The teardown subprogram parks children after installing child-owned typed-array
   `waitAsync` tickets, verifies pending `asyncJoin` rejection reactions with
   captured roots after the parent throws, and proves post-termination notify
@@ -201,8 +203,13 @@ as embedders exercise more threaded host patterns.
   release-function lock records, and contended `Lock.hold` receiver/callback
   pairs trace or temp-root their hidden JS values instead of relying on a JS
   property path or native stack scan. Join-side parked-root state now clears
-  and releases the completion mutex on termination/error unwinds, so failed
-  `Thread.join()` calls do not leave stale frozen-peer state behind.
+  and releases the completion mutex on termination/error unwinds, and joiners
+  only publish `gc_parked` for the actual native condition wait rather than
+  while pumping tasks, so failed or active `Thread.join()` calls do not leave
+  stale or moving frozen-peer state behind. Requested shell/host GC leaves an
+  elected mid-script parallel collector untouched while threads are live, and a
+  later quiescent collection aborts stale parallel mark state before starting a
+  fresh precise mark.
 - The lifecycle fuzzer profile adds deterministic termination storms where main
   JS throws with parked/unjoined `Thread`s, exact-counter oracles for script
   `Worker`s plus simple-import, diamond-shaped, and fanout/rejoin module

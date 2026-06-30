@@ -148,15 +148,20 @@ context APIs.
   tickets through a finishing mid-script sweep, then teardown `asyncJoin`
   rejection reactions run and post-termination notify sees zero leaked waitAsync
   tickets, plus a sibling promise-publication subprogram where a child-returned
-  typed-array `waitAsync` promise and a child-thrown object remain rooted
-  through thread completion/native waiter state until post-sweep
-  `join()`/`asyncJoin()` publication. Sync-wait pump points
+  typed-array `waitAsync` promise, a child-returned rejected promise, a
+  child-returned user thenable, and a child-thrown object remain rooted through
+  thread completion/native waiter state until post-sweep
+  `join()`/`asyncJoin()` fulfillment, rejection, thenable assimilation, and
+  thrown-object publication. Sync-wait pump points
   must execute the async grants during the
   same allocation-pressure window that produces a finishing parallel sweep, and
   the `waitAsync` reaction must run intact after notification. Join-side
-  `gc_parked` state is balanced on termination/error unwinds, so a failed
-  `Thread.join()` cannot leave the interpreter looking like a permanently
-  frozen parked peer.
+  `gc_parked` state is balanced on termination/error unwinds and scoped to the
+  actual native condition wait rather than join-time task pumping, so a failed
+  or active `Thread.join()` cannot leave the interpreter looking like a stale or
+  moving frozen parked peer. Requested shell/host GC does not disturb an elected
+  mid-script parallel collector while threads are live; later quiescent
+  collection aborts stale parallel mark state before a fresh precise mark.
   Keep quiescent collection as the fallback for cycles that still cannot
   converge, and keep widening wait/cleanup stress around this protocol.
 - **Fuzzer breadth.** The broad `threadfuzz` profile now covers caught

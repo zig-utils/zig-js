@@ -311,9 +311,12 @@ threading architecture:
   `Thread.asyncJoin` fulfillment/rejection reaction graphs
   reachable only through native completion records while allocation pressure
   collects. A sibling promise-publication subprogram leaves a child-returned
-  typed-array `waitAsync` promise and a child-thrown object parked in thread
+  typed-array `waitAsync` promise, a child-returned rejected promise, a
+  child-returned user thenable, and a child-thrown object parked in thread
   completion/native waiter state through a finishing sweep, then verifies
-  `join()` / `asyncJoin()` promise assimilation and thrown-object publication.
+  `join()` / `asyncJoin()` fulfillment, rejection, thenable assimilation, and
+  thrown-object publication from observers registered both before and after
+  child completion.
   A sibling mid-GC teardown subprogram parks children after installing
   child-owned typed-array `waitAsync` tickets, verifies pending `asyncJoin`
   rejection reactions after parent failure, and proves later notify wakes zero
@@ -325,16 +328,20 @@ threading architecture:
   native ThreadLocal roots survive the mid-script collection window. Join-side
   parked-root state is now balanced across termination/error unwinds, so a
   failed `Thread.join()` cannot leave the interpreter permanently marked as a
-  frozen parked peer.
+  frozen parked peer, and joiners now publish that parked state only for the
+  actual native condition wait, not while pumping tasks. Requested shell/host
+  GC now leaves active mid-script parallel marks alone until the realm is
+  quiescent, then aborts stale parallel mark state before a fresh precise
+  collection.
 - **Stress breadth** - the broad fuzzer profile now covers exceptions/finally,
   cleanup, waiters, `asyncJoin`, `Thread.restrict`, and nested thread lifecycle;
   the mid-GC profile covers sync-wait root publication during finishing
   mid-script sweeps, queued async-hold delivery including rejected grant
   reactions, async condition reacquire delivery, typed-array `waitAsync` native
   waiter/reaction roots, pending `Thread.asyncJoin` reaction roots,
-  child-returned `waitAsync` promise assimilation and thrown-object publication
-  through `join()` / `asyncJoin()`, teardown termination with pending
-  asyncJoin/waitAsync roots,
+  child-returned `waitAsync` promise fulfillment/rejection, user thenable
+  assimilation, and thrown-object publication through `join()` / `asyncJoin()`,
+  teardown termination with pending asyncJoin/waitAsync roots,
   ThreadLocal-only hidden roots in parked peers, and deterministic
   completed-but-unjoined Thread result and thrown exception roots, and
   deterministic cleanup count/sum delivery plus unregister-token suppression;

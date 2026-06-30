@@ -131,10 +131,13 @@ reachable only through `ThreadLocal.value` while the
 owning thread is parked, keeps a completed-but-unjoined `Thread` result object
 and a completed-but-unjoined thrown exception object reachable only through the
 thread completion record, adds a promise-publication subprogram that leaves a
-child-returned typed-array `waitAsync` promise and a child-thrown object rooted
+child-returned typed-array `waitAsync` promise, a child-returned rejected
+promise, a child-returned user thenable, and a child-thrown object rooted
 through thread completion/native waiter state until after a finishing sweep,
-then verifies `join()` / `asyncJoin()` promise assimilation and thrown-object
-publication, and adds an expected-termination subprogram that parks
+then verifies `join()` / `asyncJoin()` fulfillment, rejection, thenable
+assimilation, and thrown-object publication from observers registered both
+before and after child completion, and adds an expected-termination subprogram
+that parks
 children after installing child-owned typed-array `waitAsync` tickets, drives a
 finishing mid-script parallel sweep, then verifies teardown `asyncJoin`
 rejection reactions and zero leaked waitAsync tickets. It also has a focused

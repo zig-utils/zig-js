@@ -1092,10 +1092,18 @@ pub const Context = struct {
     /// the GC is off.
     pub fn collectGarbage(self: *Context) void {
         const h = self.gc orelse return;
-        self.finishConcurrentGCIfActive(); // close any in-flight concurrent mark first
+        // A requested shell/host collection is precise only at a realm
+        // quiescent point. If spawned threads are still alive, or a
+        // mid-script parallel collector is currently elected, leave the request
+        // pending for a later checkpoint rather than disturbing its scratch
+        // buffers from a joining/draining thread.
         if (self.hasRunningJsThreads()) {
             return;
         }
+        if (self.gc_par_collector.load(.acquire) != null) {
+            return;
+        }
+        self.finishConcurrentGCIfActive(); // close or abort any in-flight mark first
         h.collect();
         self.gc_requested = false;
     }
@@ -1146,6 +1154,15 @@ pub const Context = struct {
             self.gc_marker = null;
         }
         if (h.concurrent.load(.acquire)) {
+            if (h.parallel) {
+                // Parallel mid-script cycles are finished only by the elected
+                // driver after its root-publication handshake. A quiescent
+                // boundary can safely discard leftover mark state, then run a
+                // fresh precise collection if the caller still wants one.
+                if (self.gc_par_collector.load(.acquire) != null) return;
+                h.abortConcurrentMarkParallel();
+                return;
+            }
             self.gc_scan_native_stack = true;
             defer self.gc_scan_native_stack = false;
             h.finishConcurrentMark();
@@ -8278,10 +8295,10 @@ test "parallel_js (M3): mid-script parallel collector reclaims garbage while thr
 
 test "parallel_js (M3): sync wait peers publish roots for mid-script parallel GC" {
     // Sync property waits, Condition waits, and contended Lock acquisition are
-    // not frozen `gc_parked` joiners: they periodically pump tasks between
-    // short parks. Those pump points now service the root-publication hook, so
-    // an in-flight collector can converge while the waiters remain blocked
-    // instead of treating them as an abort-only case.
+    // not frozen `gc_parked` peers: they periodically pump tasks between short
+    // parks. Those pump points now service the root-publication hook, so an
+    // in-flight collector can converge while the waiters remain blocked instead
+    // of treating them as an abort-only case.
     if (builtin.single_threaded) return error.SkipZigTest;
     const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
         .enable_threads = true,

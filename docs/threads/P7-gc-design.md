@@ -293,13 +293,20 @@ Do this once the engine's `context.zig`/`interpreter.zig` surface is settled
   queue until notification, pending `Thread.asyncJoin` fulfillment/rejection
   reactions reachable only through native completion records until the child
   threads are released, a sibling promise-publication case where a
-  child-returned typed-array `waitAsync` promise and a child-thrown object remain
+  child-returned typed-array `waitAsync` promise, a child-returned rejected
+  promise, a child-returned user thenable, and a child-thrown object remain
   rooted through completion/native waiter state until post-sweep
-  `join()`/`asyncJoin()` publication, and a sibling teardown case where parked
-  children hold child-owned typed-array `waitAsync` tickets through a finishing
+  `join()`/`asyncJoin()` fulfillment, rejection, thenable assimilation, and
+  thrown-object publication, and a sibling teardown case where parked children
+  hold child-owned typed-array `waitAsync` tickets through a finishing
   mid-script sweep before parent failure terminates them.
   `Thread.join()` park unwinds now clear `gc_parked` and leave the completion
-  mutex balanced, preventing stale frozen-peer state after termination/errors.
+  mutex balanced, and `gc_parked` is published only for the actual native
+  condition wait rather than join-time task pumping, preventing stale or moving
+  frozen-peer state after termination/errors. Requested shell/host GC also
+  refuses to disturb an elected mid-script parallel collector while threads are
+  live; later quiescent collection aborts stale parallel mark state before a
+  fresh precise mark.
   *Dependency root helper landed:* `zig-gc` now exposes optional conservative
   word marking for native stack or register-spill ranges, with dependency-local
   tests covering exact and interior payload pointers. zig-js still needs
