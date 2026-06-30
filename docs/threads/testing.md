@@ -150,8 +150,11 @@ async ticket before `await` delivers its release function, and cross-thread
 `FinalizationRegistry` cleanup count/sum oracles, cleanup delivery interleaved
 with `join()` / `asyncJoin()` and unregister-token suppression, cleanup delivery
 after parked property/condition waiters resume, plus `ThreadLocal` isolation
-across normal, throwing, nested, and async-joined thread lifecycles. Each seed
-currently runs 17 deterministic lifecycle subprograms.
+across normal, throwing, nested, and async-joined thread lifecycles, plus
+`ThreadLocal` values registered with `FinalizationRegistry` across
+park/resume/clear/join cleanup lifecycles with exact cleanup count/sum delivery
+after quiescent collection. Each seed currently runs 18 deterministic lifecycle
+subprograms.
 
 `zig build test262 -Dtest262-parallel-js=true` runs test262 programs in
 GIL-free parallel contexts. The full corpus is too slow for every PR, so CI

@@ -202,7 +202,10 @@ as embedders exercise more threaded host patterns.
   property/condition waiters resume, deterministic `Lock.asyncHold()` barging
   where a sync hold legally overtakes a queued no-fn async ticket before
   `await` delivers its release function, and `ThreadLocal` isolation across
-  normal, throwing, nested, and async-joined thread lifecycles.
+  normal, throwing, nested, and async-joined thread lifecycles, plus
+  `ThreadLocal` values registered with `FinalizationRegistry` across
+  park/resume/clear/join cleanup lifecycles with exact cleanup count/sum
+  delivery after quiescent collection.
 - CI runs the fuzzer in several modes: default seeded, TSan, high-contention
   amplified, broad semantic, mid-script GC wait-pump, lifecycle, ReleaseSafe,
   and deterministic-result verification.

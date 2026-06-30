@@ -174,9 +174,11 @@ context APIs.
   sync hold legally overtakes a queued no-fn async ticket before `await`
   delivers its release function, and cleanup delivery interleaved with `join()` /
   `asyncJoin()` plus unregister-token suppression, plus cleanup delivery after
-  parked property/condition waiters resume. Keep extending it toward more
-  teardown ordering, broader cross-realm scheduling, and richer
-  cleanup/finalization interleavings.
+  parked property/condition waiters resume, plus `ThreadLocal` values registered
+  with `FinalizationRegistry` across park/resume/clear/join cleanup lifecycles
+  with exact cleanup count/sum delivery after quiescent collection. Keep
+  extending it toward more teardown ordering, broader cross-realm scheduling,
+  and richer cleanup/finalization interleavings.
 - **Reference-only PR-249 files.** Promote only when the engine implements the
   behavior and the file is reliable under Zig `0.17-dev`, especially the
   WebAssembly-required files, JIT/shell-hook witnesses, deep stack-overflow

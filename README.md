@@ -335,8 +335,10 @@ threading architecture:
   cross-thread `FinalizationRegistry` cleanup count/sum oracles, cleanup
   delivery interleaved with `join()` / `asyncJoin()` and unregister-token
   suppression, cleanup delivery after parked property/condition waiters resume,
-  and `ThreadLocal` isolation across normal, throwing, nested, and async-joined
-  thread lifecycles.
+  `ThreadLocal` isolation across normal, throwing, nested, and async-joined
+  thread lifecycles, and `ThreadLocal` values registered with
+  `FinalizationRegistry` across park/resume/clear/join cleanup lifecycles with
+  exact cleanup count/sum delivery after quiescent collection.
   Keep extending the fuzzers toward more teardown and cross-realm scheduling
   oracles.
 - **Reference-only PR-249 files** - promote only when the needed engine feature

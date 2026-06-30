@@ -2815,6 +2815,124 @@ fn runThreadLocalLifecycleInterleaving(gpa: std.mem.Allocator, seed: u64) !bool 
     return true;
 }
 
+fn runThreadLocalFinalizationCleanupInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
+    var prng = std.Random.DefaultPrng.init(seed ^ 0x746c_735f_6669_6e61);
+    const r = prng.random();
+    const nthreads = 2 + r.uintLessThan(usize, 4);
+    const held_base = 50_000 + r.uintLessThan(usize, 10_000);
+
+    var expected_join_sum: usize = 0;
+    var expected_cleanup_sum: usize = 0;
+    var id: usize = 0;
+    while (id < nthreads) : (id += 1) {
+        expected_join_sum += id + 1;
+        expected_cleanup_sum += held_base + id;
+    }
+
+    const ctx = js.Context.createWith(gpa, .{ .enable_threads = true, .enable_gc = true }) catch {
+        std.debug.print("seed {d}: ThreadLocal finalization context creation failed\n", .{seed});
+        return false;
+    };
+    defer ctx.destroy();
+
+    const setup_src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  globalThis.__tlsFinCleanupCount = 0;
+        \\  globalThis.__tlsFinCleanupSum = 0;
+        \\  globalThis.__tlsFinRegistry = new FinalizationRegistry((held) => {{
+        \\    globalThis.__tlsFinCleanupCount++;
+        \\    globalThis.__tlsFinCleanupSum += held;
+        \\  }});
+        \\  const registry = globalThis.__tlsFinRegistry;
+        \\  const tls = new ThreadLocal();
+        \\  const gate = globalThis.__tlsFinGate = {{ go: 0, ready: 0 }};
+        \\  const threads = globalThis.__tlsFinThreads = [];
+        \\  for (let id = 0; id < {d}; id++) {{
+        \\    threads.push(new Thread((id) => {{
+        \\      let target = {{ id, seed: {d}, payload: 'threadlocal-finalization-' + id }};
+        \\      tls.value = target;
+        \\      registry.register(target, {d} + id);
+        \\      target = null;
+        \\      Atomics.add(gate, 'ready', 1);
+        \\      Atomics.notify(gate, 'ready');
+        \\      while (Atomics.load(gate, 'go') === 0)
+        \\        Atomics.wait(gate, 'go', 0, 100);
+        \\      const held = tls.value;
+        \\      if (!held || held.id !== id || held.seed !== {d})
+        \\        throw new Error('ThreadLocal finalization root lost for ' + id);
+        \\      tls.value = undefined;
+        \\      return held.id + 1;
+        \\    }}, id));
+        \\  }}
+        \\  let spins = 0;
+        \\  while (Atomics.load(gate, 'ready') < {d}) {{
+        \\    if (++spins > 10000000)
+        \\      throw new Error('ThreadLocal finalization workers not ready: ' + Atomics.load(gate, 'ready'));
+        \\  }}
+        \\  globalThis.__tlsFinRegistry.cleanupSome();
+        \\  if (globalThis.__tlsFinCleanupCount !== 0)
+        \\    throw new Error('ThreadLocal finalization cleanup was queued before resume: ' + globalThis.__tlsFinCleanupCount);
+        \\  Atomics.store(gate, 'go', 1);
+        \\  Atomics.notify(gate, 'go', {d});
+        \\  let joinSum = 0;
+        \\  for (const t of threads)
+        \\    joinSum += t.join();
+        \\  if (joinSum !== {d})
+        \\    throw new Error('bad ThreadLocal finalization join sum ' + joinSum);
+        \\  globalThis.__tlsFinThreads = null;
+        \\  return joinSum;
+        \\}})();
+        \\
+    ,
+        .{ nthreads, seed, held_base, seed, nthreads, nthreads, expected_join_sum },
+    );
+    defer gpa.free(setup_src);
+
+    const joined = ctx.evaluate(setup_src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: ThreadLocal finalization JS threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!joined.isNumber() or joined.asNum() != @as(f64, @floatFromInt(expected_join_sum))) {
+        std.debug.print("seed {d}: ThreadLocal finalization join got {d}, expected {d}\n", .{ seed, if (joined.isNumber()) joined.asNum() else -1, expected_join_sum });
+        return false;
+    }
+
+    ctx.collectGarbage();
+    const cleanup_src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  globalThis.__tlsFinRegistry.cleanupSome();
+        \\  if (globalThis.__tlsFinCleanupCount !== {d})
+        \\    throw new Error('bad ThreadLocal finalization cleanup count ' + globalThis.__tlsFinCleanupCount);
+        \\  if (globalThis.__tlsFinCleanupSum !== {d})
+        \\    throw new Error('bad ThreadLocal finalization cleanup sum ' + globalThis.__tlsFinCleanupSum);
+        \\  return globalThis.__tlsFinCleanupCount;
+        \\}})();
+        \\
+    ,
+        .{ nthreads, expected_cleanup_sum },
+    );
+    defer gpa.free(cleanup_src);
+    const cleaned = ctx.evaluate(cleanup_src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: ThreadLocal finalization cleanup JS threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!cleaned.isNumber() or cleaned.asNum() != @as(f64, @floatFromInt(nthreads))) {
+        std.debug.print("seed {d}: ThreadLocal finalization cleanup got {d}, expected {d}\n", .{ seed, if (cleaned.isNumber()) cleaned.asNum() else -1, nthreads });
+        return false;
+    }
+    return true;
+}
+
 fn runAsyncHoldBargingLifecycleInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
     const ctx = js.Context.createWithTestingOptions(gpa, .{
         .enable_threads = true,
@@ -3384,6 +3502,21 @@ pub fn main(init: std.process.Init) !void {
         }
         return;
     };
+    // `threadfuzz tlsfinal <iters> <seed>`: focused lifecycle repro for
+    // ThreadLocal values registered for finalization across park/resume/cleanup.
+    if (first) |a| if (std.mem.eql(u8, a, "tlsfinal")) {
+        if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch 1;
+        if (args.next()) |b| base_seed = std.fmt.parseInt(u64, b, 10) catch 1;
+        var tfail: usize = 0;
+        var ti: usize = 0;
+        while (ti < iters) : (ti += 1) {
+            const seed = base_seed +% ti;
+            if (!(try runThreadLocalFinalizationCleanupInterleaving(gpa, seed))) tfail += 1;
+        }
+        std.debug.print("threadfuzz tlsfinal: {d} programs from seed {d}, {d} failures\n", .{ iters, base_seed, tfail });
+        if (tfail != 0) std.process.exit(1);
+        return;
+    };
     // `threadfuzz verify <iters> <seed>`: deterministic-correctness mode — each
     // generated program's exact result is predicted and checked, catching
     // wrong-value (lost/torn atomic) bugs the no-throw oracle misses.
@@ -3429,6 +3562,7 @@ pub fn main(init: std.process.Init) !void {
     // FinalizationRegistry cleanup, FinalizationRegistry cleanup interleaved
     // with join/asyncJoin and unregister tokens, cleanup
     // delivery after parked property/condition waiters resume,
+    // ThreadLocal-stored FinalizationRegistry records across park/resume/cleanup,
     // asyncHold barging delivery after a deterministic queued ticket,
     // Thread.restrict lifecycle isolation, and ThreadLocal isolation across
     // nested threads plus throwing and async-joined workers. The oracle is not "no
@@ -3449,7 +3583,8 @@ pub fn main(init: std.process.Init) !void {
     // unregister tokens suppress some records, and after parked property and
     // condition waiters resume; asyncHold barging must deliver a pending
     // no-fn grant after a sync hold legally overtakes it; ThreadLocal values must stay
-    // per-thread across normal, throwing, nested, and async-joined lifecycles.
+    // per-thread across normal, throwing, nested, async-joined, and
+    // finalization-cleanup lifecycles.
     if (first) |a| if (std.mem.eql(u8, a, "lifecycle")) {
         iters = 60;
         if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch iters;
@@ -3475,8 +3610,9 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runAsyncHoldBargingLifecycleInterleaving(gpa, seed))) lfail += 1;
             if (!(try runThreadRestrictLifecycleInterleaving(gpa, seed))) lfail += 1;
             if (!(try runThreadLocalLifecycleInterleaving(gpa, seed))) lfail += 1;
+            if (!(try runThreadLocalFinalizationCleanupInterleaving(gpa, seed))) lfail += 1;
         }
-        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 17, base_seed, lfail });
+        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 18, base_seed, lfail });
         if (lfail != 0) std.process.exit(1);
         return;
     };
