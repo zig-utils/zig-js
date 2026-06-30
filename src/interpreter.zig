@@ -28927,6 +28927,43 @@ fn umalquraKnownDaysInMonth(year: i64, month: u8) ?u8 {
     return if (max_day != 0) max_day else null;
 }
 
+fn umalquraKnownYearStartEpochDay(year: i64) ?i64 {
+    return switch (year) {
+        1436 => tDaysFromCivil(2014, 10, 25),
+        1437 => tDaysFromCivil(2015, 10, 14),
+        1438 => tDaysFromCivil(2016, 10, 2),
+        1439 => tDaysFromCivil(2017, 9, 21),
+        1449 => tDaysFromCivil(2027, 6, 6),
+        else => null,
+    };
+}
+
+fn umalquraKnownToEpochDay(year: i64, month: u8, day: u8) ?i64 {
+    var epoch_day = umalquraKnownYearStartEpochDay(year) orelse return null;
+    var m: u8 = 1;
+    while (m < month) : (m += 1) epoch_day += calDaysInMonth("islamic-umalqura", year, m);
+    return epoch_day + @as(i64, day) - 1;
+}
+
+fn umalquraKnownFromEpochDay(epoch_day: i64) ?Civil {
+    const known_years = [_]i64{ 1436, 1437, 1438, 1439, 1449 };
+    for (known_years) |year| {
+        const start = umalquraKnownYearStartEpochDay(year) orelse continue;
+        const end = start + calDaysInYear("islamic-umalqura", year);
+        if (epoch_day < start or epoch_day >= end) continue;
+        var month: u8 = 1;
+        var day_of_year = epoch_day - start;
+        while (true) {
+            const dim = calDaysInMonth("islamic-umalqura", year, month);
+            if (dim == 0 or day_of_year < dim) break;
+            day_of_year -= dim;
+            month += 1;
+        }
+        return .{ .y = year, .m = month, .d = @intCast(day_of_year + 1) };
+    }
+    return null;
+}
+
 fn persianFromEpochDay(epoch_day: i64) Civil {
     if (epoch_day == tDaysFromCivil(-271821, 4, 19))
         return .{ .y = -272442, .m = 1, .d = 9 };
@@ -28975,6 +29012,8 @@ fn calendarDateFromIso(cal: []const u8, iso_year: i64, iso_month: u8, iso_day: u
         return chineseLikeFromEpochDay(cal, tDaysFromCivil(iso_year, iso_month, iso_day));
     }
     if (std.mem.eql(u8, cal, "islamic-umalqura"))
+        if (umalquraKnownFromEpochDay(tDaysFromCivil(iso_year, iso_month, iso_day))) |known| return known;
+    if (std.mem.eql(u8, cal, "islamic-umalqura"))
         if (umalquraKnownIsoToCalendar(iso_year, iso_month, iso_day)) |known| return known;
     if (std.mem.eql(u8, cal, "persian"))
         return persianFromEpochDay(tDaysFromCivil(iso_year, iso_month, iso_day));
@@ -28994,6 +29033,8 @@ fn calendarDateFromIso(cal: []const u8, iso_year: i64, iso_month: u8, iso_day: u
 fn calendarDateToIso(cal: []const u8, year: i64, month: u8, day: u8) Civil {
     if (std.mem.eql(u8, cal, "chinese") or std.mem.eql(u8, cal, "dangi"))
         return tCivilFromDays(chineseLikeToEpochDay(cal, year, month, day));
+    if (std.mem.eql(u8, cal, "islamic-umalqura"))
+        if (umalquraKnownToEpochDay(year, month, day)) |known| return tCivilFromDays(known);
     if (std.mem.eql(u8, cal, "islamic-umalqura"))
         if (umalquraKnownCalendarToIso(year, month, day)) |known| return known;
     if (std.mem.eql(u8, cal, "persian"))
@@ -29318,15 +29359,25 @@ fn calDaysInMonth(cal: []const u8, year: i64, month: u8) u8 {
         const y1442 = [_]u8{ 29, 30, 29, 30, 29, 30, 29, 30, 30, 29, 30, 29 };
         const y1443 = [_]u8{ 30, 29, 30, 29, 30, 29, 30, 29, 30, 29, 30, 30 };
         const y1444 = [_]u8{ 29, 30, 29, 30, 30, 29, 29, 30, 29, 30, 29, 30 };
+        const y1436 = [_]u8{ 29, 30, 29, 30, 29, 30, 29, 30, 29, 30, 29, 30 };
+        const y1437 = [_]u8{ 30, 29, 30, 30, 29, 29, 30, 29, 30, 29, 29, 30 };
+        const y1438 = [_]u8{ 30, 29, 30, 30, 30, 29, 29, 30, 29, 29, 30, 29 };
+        const y1439 = [_]u8{ 30, 29, 30, 30, 30, 29, 30, 29, 30, 29, 29, 30 };
         const y1440 = [_]u8{ 29, 30, 29, 30, 29, 30, 29, 30, 29, 30, 29, 29 };
         const y1441 = [_]u8{ 30, 29, 30, 30, 29, 30, 29, 29, 30, 29, 30, 30 };
+        const y1449 = [_]u8{ 29, 29, 30, 29, 30, 29, 30, 30, 29, 30, 30, 29 };
         const y1390 = [_]u8{ 29, 30, 29, 30, 30, 30, 29, 30, 29, 30, 29, 30 };
         const y1391 = [_]u8{ 29, 29, 30, 29, 30, 30, 29, 30, 30, 29, 30, 29 };
+        if (year == 1436 and month <= y1436.len) return y1436[month - 1];
+        if (year == 1437 and month <= y1437.len) return y1437[month - 1];
+        if (year == 1438 and month <= y1438.len) return y1438[month - 1];
+        if (year == 1439 and month <= y1439.len) return y1439[month - 1];
         if (year == 1440 and month <= y1440.len) return y1440[month - 1];
         if (year == 1441 and month <= y1441.len) return y1441[month - 1];
         if (year == 1442 and month <= y1442.len) return y1442[month - 1];
         if (year == 1443 and month <= y1443.len) return y1443[month - 1];
         if (year == 1444 and month <= y1444.len) return y1444[month - 1];
+        if (year == 1449 and month <= y1449.len) return y1449[month - 1];
         return tableMonthDays(year, month, 1390, &y1390, 1391, &y1391) orelse
             (if (month == 12 and islamicTabularLeapYear(year)) 30 else if (month >= 1 and month <= 12) (if ((month % 2) == 1) 30 else 29) else 0);
     }
