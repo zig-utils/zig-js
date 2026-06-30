@@ -121,12 +121,15 @@ Known performance/maturity work:
 - Async-hold delivery also dequeues both the per-lock pending grant list and the
   realm task queue with FIFO head cursors instead of front-shifting lists,
   keeping delivery cost proportional to delivered jobs rather than pending queue
-  length. Task pumps now copy bounded FIFO bursts under the shared threading API
-  lock and run every grant outside it, reducing delivery lock acquisitions from
-  once per job to once per burst; they also snapshot the microtask enqueue
-  generation around each delivered grant, so unobserved grants that enqueue no
-  reactions skip an otherwise-empty no-GIL microtask drain while preserving
-  checkpoint order for grants that do enqueue reactions.
+  length. Retry-front async-hold grants use an amortized O(1) front stash when
+  no consumed head slot is available, so failed grant delivery does not shift
+  the whole per-lock pending list. Task pumps now copy bounded FIFO bursts under
+  the shared threading API lock and run every grant outside it, reducing
+  delivery lock acquisitions from once per job to once per burst; they also
+  snapshot the microtask enqueue generation around each delivered grant, so
+  unobserved grants that enqueue no reactions skip an otherwise-empty no-GIL
+  microtask drain while preserving checkpoint order for grants that do enqueue
+  reactions.
 - Promise microtask drains now use a FIFO head cursor instead of
   `orderedRemove(0)`, so observed async-hold callback settlement and no-fn
   release-function reactions do not shift the remaining reaction queue on every

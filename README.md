@@ -287,7 +287,10 @@ threading architecture:
   The sync-wait pump path now skips the shared run-loop task lock entirely when
   no async hold jobs are queued, and async-hold delivery now dequeues both the
   per-lock pending list and the realm task queue through FIFO head cursors
-  instead of front-shifting task lists. Realm task pumps also copy bounded FIFO
+  instead of front-shifting task lists. Retry-front async-hold grants use an
+  amortized O(1) front stash when no consumed head slot is available, so failed
+  grant delivery does not fall back to shifting the whole pending list. Realm
+  task pumps also copy bounded FIFO
   bursts under the shared API lock before running grants outside it, so delivery
   no longer takes that lock once per job. `Condition.notify` / `notifyAll` now
   use the same FIFO head-cursor shape for their mixed sync/async waiter queue,

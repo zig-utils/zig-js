@@ -276,7 +276,9 @@ intentionally has no `.gil = true` column because each Worker owns its own
 Empty sync-wait task pumps now have a
 lock-free fast path;
 real async-hold delivery drains bounded FIFO bursts from the realm task queue
-under one API-lock acquisition before running grants outside that lock; condition
+under one API-lock acquisition before running grants outside that lock, and
+retry-front async-hold grants use a front stash instead of shifting the
+per-lock pending list when no consumed head slot is available; condition
 notify/notifyAll uses a FIFO head cursor for the mixed sync/async waiter queue;
 timed-out or terminated sync condition waiters are marked canceled and skipped
 by that cursor instead of being removed from the middle of the queue; sync
@@ -294,7 +296,11 @@ C-API handles, and GIL park records remove with swap semantics because those
 root sets have no observable order. `worker channel pops FIFO without front shifts` keeps that queue
 shape and zero-timeout polling behavior under a direct unit guard, while
 `condition queue head cursor skips canceled sync waiters` covers the condition
-timeout/termination queue shape directly. The public condition corpus cases
+timeout/termination queue shape directly. `jsthread lock pending async jobs are
+cursor FIFO` covers FIFO pop, consumed-slot retry, and front-stash retry without
+front shifts, while `jsthread traces queued async hold task roots` covers the
+GC roots behind both queued realm tasks and retry-front lock grants. The public
+condition corpus cases
 exercise the single wake-list notify path for async-only and sync notify-all
 wakes: `api/condition-async-wait.js`,
 `sync/condition-wait-notify.js`, and

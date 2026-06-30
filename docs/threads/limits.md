@@ -120,9 +120,12 @@ context APIs.
   task pumps no longer take the shared run-loop task lock, reducing one measured
   cost in contended lock/lifecycle paths; real async-hold delivery now uses FIFO
   head cursors for both per-lock pending grants and realm task delivery, and
-  copies bounded FIFO bursts under the shared API lock before running grants
-  outside it, so queue drains do not front-shift remaining jobs or lock once per
-  delivered job. The async-hold task pump also snapshots the microtask enqueue
+  retry-front grants use an amortized O(1) front stash when no consumed head
+  slot is available, so failed grant delivery does not fall back to shifting the
+  whole pending list. Realm task delivery copies bounded FIFO bursts under the
+  shared API lock before running grants outside it, so queue drains do not
+  front-shift remaining jobs or lock once per delivered job. The async-hold task
+  pump also snapshots the microtask enqueue
   generation around each grant, so unobserved grants that settle without queued
   reactions skip an otherwise-empty no-GIL microtask drain while preserving
   checkpoint order for grants that do enqueue reactions. No-fn async-hold grants

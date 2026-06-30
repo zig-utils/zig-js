@@ -579,6 +579,11 @@ const LockRecord = struct {
     /// Queued asyncHold jobs, granted FIFO at release time.
     pending: std.ArrayListUnmanaged(*HoldJob) = .empty,
     pending_head: usize = 0,
+    /// Jobs that were already granted as realm tasks but could not run yet
+    /// (for example because a sync waiter took the handoff first). They must be
+    /// retried before ordinary pending jobs, but keeping them in a small front
+    /// stack avoids shifting `pending` when `pending_head == 0`.
+    pending_front: std.ArrayListUnmanaged(*HoldJob) = .empty,
     /// An async grant exists but its job hasn't run yet. The grant already
     /// excludes sync `hold`, but it is not delivered enough for
     /// `Condition.asyncWait` to consume.
@@ -601,7 +606,7 @@ const LockRecord = struct {
     sync_generation: u64 = 0,
 
     fn hasPending(self: *const LockRecord) bool {
-        return self.pending_head < self.pending.items.len;
+        return self.pending_front.items.len > 0 or self.pending_head < self.pending.items.len;
     }
 
     fn appendPending(self: *LockRecord, arena: std.mem.Allocator, job: *HoldJob) !void {
@@ -609,15 +614,16 @@ const LockRecord = struct {
     }
 
     fn pushFrontPending(self: *LockRecord, arena: std.mem.Allocator, job: *HoldJob) !void {
-        if (self.pending_head > 0) {
+        if (self.pending_front.items.len == 0 and self.pending_head > 0) {
             self.pending_head -= 1;
             self.pending.items[self.pending_head] = job;
             return;
         }
-        try self.pending.insert(arena, 0, job);
+        try self.pending_front.append(arena, job);
     }
 
     fn popPending(self: *LockRecord) ?*HoldJob {
+        if (self.pending_front.pop()) |job| return job;
         if (!self.hasPending()) {
             self.pending.clearRetainingCapacity();
             self.pending_head = 0;
@@ -750,6 +756,7 @@ fn barrierHoldJob(job: *HoldJob) void {
 fn traceLockRecordRoots(rec: *LockRecord, v: anytype) void {
     rec.mutex.lockUncancelable(agent.engineIo());
     defer rec.mutex.unlock(agent.engineIo());
+    for (rec.pending_front.items) |job| traceHoldJob(job, v);
     for (rec.pending.items[rec.pending_head..]) |job| traceHoldJob(job, v);
 }
 
@@ -2326,16 +2333,19 @@ const HoldJob = struct {
 test "jsthread lock pending async jobs are cursor FIFO" {
     var rec = LockRecord{ .gil = undefined };
     const a = std.testing.allocator;
+    defer rec.pending_front.deinit(a);
+    defer rec.pending.deinit(a);
 
     var one = HoldJob{ .lock = &rec, .outer = undefined, .cb = null, .release_state = .{ .lock = &rec } };
     var two = HoldJob{ .lock = &rec, .outer = undefined, .cb = null, .release_state = .{ .lock = &rec } };
     var three = HoldJob{ .lock = &rec, .outer = undefined, .cb = null, .release_state = .{ .lock = &rec } };
     var front = HoldJob{ .lock = &rec, .outer = undefined, .cb = null, .release_state = .{ .lock = &rec } };
+    var fallback_front = HoldJob{ .lock = &rec, .outer = undefined, .cb = null, .release_state = .{ .lock = &rec } };
+    var fallback_front2 = HoldJob{ .lock = &rec, .outer = undefined, .cb = null, .release_state = .{ .lock = &rec } };
 
     try rec.appendPending(a, &one);
     try rec.appendPending(a, &two);
     try rec.appendPending(a, &three);
-    defer rec.pending.deinit(a);
 
     try std.testing.expect(rec.hasPending());
     try std.testing.expectEqual(@as(usize, 0), rec.pending_head);
@@ -2353,6 +2363,21 @@ test "jsthread lock pending async jobs are cursor FIFO" {
     try std.testing.expect(!rec.hasPending());
     try std.testing.expectEqual(@as(usize, 0), rec.pending_head);
     try std.testing.expectEqual(@as(usize, 0), rec.pending.items.len);
+    try std.testing.expectEqual(@as(?*HoldJob, null), rec.popPending());
+
+    try rec.appendPending(a, &one);
+    try rec.appendPending(a, &two);
+    try rec.appendPending(a, &three);
+    try rec.pushFrontPending(a, &fallback_front);
+    try rec.pushFrontPending(a, &fallback_front2);
+    try std.testing.expectEqual(@as(usize, 0), rec.pending_head);
+    try std.testing.expectEqual(@as(usize, 3), rec.pending.items.len);
+    try std.testing.expectEqual(@as(usize, 2), rec.pending_front.items.len);
+    try std.testing.expectEqual(@intFromPtr(&fallback_front2), @intFromPtr(rec.popPending().?));
+    try std.testing.expectEqual(@intFromPtr(&fallback_front), @intFromPtr(rec.popPending().?));
+    try std.testing.expectEqual(@intFromPtr(&one), @intFromPtr(rec.popPending().?));
+    try std.testing.expectEqual(@intFromPtr(&two), @intFromPtr(rec.popPending().?));
+    try std.testing.expectEqual(@intFromPtr(&three), @intFromPtr(rec.popPending().?));
     try std.testing.expectEqual(@as(?*HoldJob, null), rec.popPending());
 }
 
@@ -2373,6 +2398,8 @@ test "jsthread traces queued async hold task roots" {
     var g = gil_mod.Gil{};
     defer g.tasks.deinit(std.testing.allocator);
     var rec = LockRecord{ .gil = &g };
+    defer rec.pending_front.deinit(std.testing.allocator);
+    defer rec.pending.deinit(std.testing.allocator);
     var outer = value.Object{};
     var cb = value.Object{};
     var job = HoldJob{ .lock = &rec, .outer = &outer, .cb = Value.obj(&cb), .release_state = .{ .lock = &rec } };
@@ -2380,6 +2407,14 @@ test "jsthread traces queued async hold task roots" {
     try g.enqueueTask(std.testing.allocator, @ptrCast(&job));
     var visitor = Visitor{ .outer = &outer, .cb = &cb };
     traceGilTaskRoots(&g, &visitor);
+    try std.testing.expect(visitor.saw_outer);
+    try std.testing.expect(visitor.saw_cb);
+
+    var front_job = HoldJob{ .lock = &rec, .outer = &outer, .cb = Value.obj(&cb), .release_state = .{ .lock = &rec } };
+    try rec.pushFrontPending(std.testing.allocator, &front_job);
+    visitor.saw_outer = false;
+    visitor.saw_cb = false;
+    traceLockRecordRoots(&rec, &visitor);
     try std.testing.expect(visitor.saw_outer);
     try std.testing.expect(visitor.saw_cb);
 }
