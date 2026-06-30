@@ -35444,6 +35444,18 @@ fn temporalZdtUntilFn(comptime sign: f64) value.NativeFn {
             const local_other = zdtLocal(&other);
             const start_ns = dateTimeToNs(&local_this);
             const end_ns = dateTimeToNs(&local_other);
+            const same_local_date = local_this.year == local_other.year and
+                local_this.month == local_other.month and
+                local_this.day == local_other.day;
+            const local_time_delta = timeToNs(&local_other) - timeToNs(&local_this);
+            const epoch_delta = other.epoch_ns - t.epoch_ns;
+            if (same_local_date and local_time_delta != 0 and epoch_delta != 0 and
+                ((local_time_delta < 0 and epoch_delta > 0) or (local_time_delta > 0 and epoch_delta < 0)))
+            {
+                const signed_delta = @as(i128, @intFromFloat(sign)) * epoch_delta;
+                const rounded = roundNs(signed_delta, opts.smallest, opts.increment, opts.mode);
+                return makeDuration(self, balanceTimeNs(rounded, .hour));
+            }
             var dd = calendarDateDiff(local_this.calendar, local_this.year, local_this.month, local_this.day, local_other.year, local_other.month, local_other.day, largest);
             var time_diff = timeToNs(&local_other) - timeToNs(&local_this);
             if (end_ns >= start_ns and time_diff < 0) {
