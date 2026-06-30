@@ -247,8 +247,8 @@ context APIs.
   down parked shared-realm `Thread`s, pending `asyncJoin` rejection reactions,
   and already-ready cleanup jobs on the same retained SAB, module Worker
   termination with the same shared-realm teardown/reaction/cleanup oracle, exact
-  FIFO drain/drop ordering for mixed Worker terminate/close/postMessage
-  lifecycles, worker
+  FIFO drain/drop ordering for mixed script and module Worker
+  terminate/close/postMessage lifecycles, worker
   handler-exception recovery, and Worker handler-exception recovery composed
   with shared-realm Thread finalization cleanup on one retained SAB, module
   Worker handler-exception recovery composed with the same retained-SAB cleanup

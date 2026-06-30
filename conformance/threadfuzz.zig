@@ -126,6 +126,54 @@ const ModuleExceptionFuzzHost = struct {
     }
 };
 
+const ModuleCloseTerminateFuzzHost = struct {
+    const Entry = struct { path: []const u8, source: []const u8 };
+    var host_ctx: u8 = 0;
+    const entries = [_]Entry{
+        .{
+            .path = "ops.js",
+            .source =
+            \\export function handleRace(sab, cmd, id) {
+            \\  const v = new Int32Array(sab);
+            \\  if (cmd === 'spin') {
+            \\    Atomics.add(v, 1, 1);
+            \\    Atomics.notify(v, 1);
+            \\    for (;;) {}
+            \\  }
+            \\  Atomics.add(v, 0, 1);
+            \\  return { ack: id, cmd, module: true };
+            \\}
+            ,
+        },
+        .{
+            .path = "entry.js",
+            .source =
+            \\import { handleRace } from "./ops.js";
+            \\globalThis.onmessage = (e) => {
+            \\  const reply = handleRace(e.data.sab, e.data.cmd, e.data.id);
+            \\  postMessage(reply);
+            \\  if (e.data.cmd === 'close') close();
+            \\};
+            ,
+        },
+    };
+
+    fn load(_: *anyopaque, _: []const u8, specifier: []const u8, out_path: *[]const u8) ?[]const u8 {
+        const name = if (std.mem.startsWith(u8, specifier, "./")) specifier[2..] else specifier;
+        for (entries) |e| {
+            if (std.mem.eql(u8, e.path, name)) {
+                out_path.* = e.path;
+                return e.source;
+            }
+        }
+        return null;
+    }
+
+    fn host() js.Context.ModuleHost {
+        return .{ .ctx = &host_ctx, .load = load };
+    }
+};
+
 const ModuleMidGcCleanupHost = struct {
     const Entry = struct { path: []const u8, source: []const u8 };
     var host_ctx: u8 = 0;
@@ -1436,6 +1484,177 @@ fn runWorkerCloseTerminateRace(gpa: std.mem.Allocator, seed: u64) !bool {
     };
     if (!delivered.isNumber() or delivered.asNum() != @as(f64, @floatFromInt(expected_replies))) {
         std.debug.print("seed {d}: worker race delivery counter got {d}, expected {d}\n", .{ seed, if (delivered.isNumber()) delivered.asNum() else -1, expected_replies });
+        return false;
+    }
+
+    return true;
+}
+
+fn runModuleWorkerCloseTerminateRace(gpa: std.mem.Allocator, seed: u64) !bool {
+    var prng = std.Random.DefaultPrng.init(seed ^ 0x6d63_7465_726d_7263);
+    const r = prng.random();
+    const extra_pings = 1 + r.uintLessThan(usize, 4);
+
+    const ctx = js.Context.createWith(gpa, .{ .enable_gc = true }) catch {
+        std.debug.print("seed {d}: module worker race context creation failed\n", .{seed});
+        return false;
+    };
+    defer ctx.destroy();
+    var machine = ctx.interpreter();
+
+    _ = ctx.evaluate(
+        \\globalThis.__moduleRaceSab = new SharedArrayBuffer(16);
+        \\globalThis.__moduleRaceMsg = function(cmd, id) {
+        \\  return { sab: globalThis.__moduleRaceSab, cmd: cmd, id: id };
+        \\};
+    ) catch |err| {
+        std.debug.print("seed {d}: cannot create module worker race messages: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+
+    const graceful = Worker.spawnModule("entry.js", ModuleCloseTerminateFuzzHost.entries[1].source, ModuleCloseTerminateFuzzHost.host()) catch {
+        std.debug.print("seed {d}: graceful module worker spawn failed\n", .{seed});
+        return false;
+    };
+    var cleanup_graceful = true;
+    defer if (cleanup_graceful) {
+        graceful.terminate();
+        graceful.join();
+        graceful.destroy();
+    };
+    const terminator = Worker.spawnModule("entry.js", ModuleCloseTerminateFuzzHost.entries[1].source, ModuleCloseTerminateFuzzHost.host()) catch {
+        std.debug.print("seed {d}: terminator module worker spawn failed\n", .{seed});
+        return false;
+    };
+    var cleanup_terminator = true;
+    defer if (cleanup_terminator) {
+        terminator.terminate();
+        terminator.join();
+        terminator.destroy();
+    };
+
+    var i: usize = 0;
+    while (i < extra_pings) : (i += 1) {
+        const src = try std.fmt.allocPrint(gpa, "__moduleRaceMsg('ping', {d})", .{i});
+        defer gpa.free(src);
+        const msg = ctx.evaluate(src) catch |err| {
+            std.debug.print("seed {d}: cannot make module ping message: {s}\n", .{ seed, @errorName(err) });
+            return false;
+        };
+        graceful.postMessage(&machine, msg) catch |err| {
+            std.debug.print("seed {d}: graceful module post ping failed: {s}\n", .{ seed, @errorName(err) });
+            return false;
+        };
+    }
+    const close_msg = ctx.evaluate("__moduleRaceMsg('close', 1000)") catch |err| {
+        std.debug.print("seed {d}: cannot make module close message: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    graceful.postMessage(&machine, close_msg) catch |err| {
+        std.debug.print("seed {d}: graceful module post close failed: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    graceful.close();
+    const dropped_msg = ctx.evaluate("__moduleRaceMsg('dropped', 2000)") catch |err| {
+        std.debug.print("seed {d}: cannot make module dropped message: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    graceful.postMessage(&machine, dropped_msg) catch |err| {
+        std.debug.print("seed {d}: graceful module post after close failed: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+
+    var replies: usize = 0;
+    var ack_sum: f64 = 0;
+    while (true) {
+        const reply = graceful.receive(&machine, 10_000) catch |err| {
+            std.debug.print("seed {d}: graceful module receive failed: {s}\n", .{ seed, @errorName(err) });
+            return false;
+        } orelse break;
+        const ack = machine.getProperty(reply, "ack") catch |err| {
+            std.debug.print("seed {d}: cannot read graceful module ack: {s}\n", .{ seed, @errorName(err) });
+            return false;
+        };
+        const module = machine.getProperty(reply, "module") catch |err| {
+            std.debug.print("seed {d}: cannot read graceful module flag: {s}\n", .{ seed, @errorName(err) });
+            return false;
+        };
+        if (!ack.isNumber() or !module.isBoolean() or !module.asBool()) {
+            std.debug.print("seed {d}: graceful module reply without numeric ack/module flag\n", .{seed});
+            return false;
+        }
+        const expected_ack: f64 = if (replies < extra_pings) @floatFromInt(replies) else 1000;
+        if (ack.asNum() != expected_ack) {
+            std.debug.print("seed {d}: graceful module FIFO ack got {d}, expected {d}\n", .{ seed, ack.asNum(), expected_ack });
+            return false;
+        }
+        ack_sum += ack.asNum();
+        replies += 1;
+    }
+    const expected_replies = extra_pings + 1;
+    if (replies != expected_replies) {
+        std.debug.print("seed {d}: graceful module worker drain/drop reply count got {d}, expected {d}\n", .{ seed, replies, expected_replies });
+        return false;
+    }
+    const expected_ack_sum = 1000 + (@as(f64, @floatFromInt(extra_pings * (extra_pings - 1))) / 2);
+    if (ack_sum != expected_ack_sum) {
+        std.debug.print("seed {d}: graceful module worker ack sum got {d}, expected {d}\n", .{ seed, ack_sum, expected_ack_sum });
+        return false;
+    }
+
+    const spin_msg = ctx.evaluate("__moduleRaceMsg('spin', 3000)") catch |err| {
+        std.debug.print("seed {d}: cannot make module spin message: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    terminator.postMessage(&machine, spin_msg) catch |err| {
+        std.debug.print("seed {d}: terminator module post spin failed: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    _ = ctx.evaluate(
+        \\{
+        \\  const v = new Int32Array(globalThis.__moduleRaceSab);
+        \\  let spins = 0;
+        \\  while (Atomics.load(v, 1) === 0 && spins++ < 10000000) ;
+        \\  if (Atomics.load(v, 1) === 0) throw new Error('terminator module worker did not enter spin');
+        \\}
+    ) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: terminator module readiness failed {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    terminator.terminate();
+    const after_term = ctx.evaluate("__moduleRaceMsg('after-terminate', 4000)") catch |err| {
+        std.debug.print("seed {d}: cannot make module after-terminate message: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    terminator.postMessage(&machine, after_term) catch |err| {
+        std.debug.print("seed {d}: terminator module post after terminate failed: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    terminator.join();
+    const after_term_reply = terminator.receive(&machine, 0) catch |err| {
+        std.debug.print("seed {d}: terminator module receive after join failed: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    if (after_term_reply != null) {
+        std.debug.print("seed {d}: terminator module delivered a post-terminate reply\n", .{seed});
+        return false;
+    }
+    terminator.destroy();
+    cleanup_terminator = false;
+    graceful.join();
+    graceful.destroy();
+    cleanup_graceful = false;
+
+    const delivered = ctx.evaluate("new Int32Array(globalThis.__moduleRaceSab)[0]") catch |err| {
+        std.debug.print("seed {d}: cannot read module worker race delivery counter: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    if (!delivered.isNumber() or delivered.asNum() != @as(f64, @floatFromInt(expected_replies))) {
+        std.debug.print("seed {d}: module worker race delivery counter got {d}, expected {d}\n", .{ seed, if (delivered.isNumber()) delivered.asNum() else -1, expected_replies });
         return false;
     }
 
@@ -8055,6 +8274,21 @@ pub fn main(init: std.process.Init) !void {
         if (mwcfail != 0) std.process.exit(1);
         return;
     };
+    // `threadfuzz moduleworkerclose <iters> <seed>`: focused lifecycle repro
+    // for module Worker close/terminate/postMessage FIFO drain/drop ordering.
+    if (first) |a| if (std.mem.eql(u8, a, "moduleworkerclose")) {
+        if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch 1;
+        if (args.next()) |b| base_seed = std.fmt.parseInt(u64, b, 10) catch 1;
+        var mwcrfail: usize = 0;
+        var mwcri: usize = 0;
+        while (mwcri < iters) : (mwcri += 1) {
+            const seed = base_seed +% mwcri;
+            if (!(try runModuleWorkerCloseTerminateRace(gpa, seed))) mwcrfail += 1;
+        }
+        std.debug.print("threadfuzz moduleworkerclose: {d} programs from seed {d}, {d} failures\n", .{ iters, base_seed, mwcrfail });
+        if (mwcrfail != 0) std.process.exit(1);
+        return;
+    };
     // `threadfuzz workertermteardown <iters> <seed>`: focused lifecycle repro
     // for isolated Worker termination while a shared-realm top-level failure
     // tears down parked Threads, pending asyncJoin reactions, and cleanup jobs.
@@ -8288,7 +8522,8 @@ pub fn main(init: std.process.Init) !void {
     // `threadfuzz lifecycle <iters> <seed>`: deterministic termination storms,
     // Worker/thread SAB overlap, simple, diamond, and fanout/rejoin
     // module-worker/thread overlap, exact Worker close/terminate/postMessage
-    // FIFO drain/drop ordering, worker handler exception recovery,
+    // FIFO drain/drop ordering for script and module Workers, worker handler
+    // exception recovery,
     // Worker/thread/finalization scheduling plus Worker termination interleaved
     // with finalization cleanup on a retained SAB, Worker termination while
     // shared-realm top-level failure tears down parked Threads, pending
@@ -8317,8 +8552,9 @@ pub fn main(init: std.process.Init) !void {
     // throw":
     // termination storms must throw from the main script and still tear down
     // cleanly, overlap must produce exact synchronized counter values, and
-    // close/terminate races must drain queued messages in FIFO order, drop
-    // post-close messages, and keep post-terminate receives closed; thrown
+    // script and module close/terminate races must drain queued messages in
+    // FIFO order, drop post-close messages, and keep post-terminate receives
+    // closed; thrown
     // worker handlers must not poison later deliveries,
     // Worker/thread/finalization scheduling must preserve the retained-SAB
     // counter plus exact cleanup delivery, terminating spinning Workers must
@@ -8362,6 +8598,7 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runModuleWorkerGraphOverlap(gpa, seed))) lfail += 1;
             if (!(try runModuleWorkerFanoutOverlap(gpa, seed))) lfail += 1;
             if (!(try runWorkerCloseTerminateRace(gpa, seed))) lfail += 1;
+            if (!(try runModuleWorkerCloseTerminateRace(gpa, seed))) lfail += 1;
             if (!(try runWorkerExceptionRecovery(gpa, seed))) lfail += 1;
             if (!(try runWorkerThreadFinalizationInterleaving(gpa, seed))) lfail += 1;
             if (!(try runWorkerTerminateFinalizationInterleaving(gpa, seed))) lfail += 1;
@@ -8385,7 +8622,7 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runThreadLocalLifecycleInterleaving(gpa, seed))) lfail += 1;
             if (!(try runThreadLocalFinalizationCleanupInterleaving(gpa, seed))) lfail += 1;
         }
-        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 28, base_seed, lfail });
+        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 29, base_seed, lfail });
         if (lfail != 0) std.process.exit(1);
         return;
     };
