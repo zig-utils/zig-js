@@ -5428,6 +5428,336 @@ fn runMidScriptSyncWaitCleanupGc(gpa: std.mem.Allocator, seed: u64) !bool {
     return true;
 }
 
+fn runMidScriptWeakCollectionGc(gpa: std.mem.Allocator, seed: u64) !bool {
+    var prng = std.Random.DefaultPrng.init(seed ^ 0x6d69_6477_6561_6b63);
+    const r = prng.random();
+    const rounds = 7 + r.uintLessThan(usize, 5);
+    const per_round = 480 + r.uintLessThan(usize, 320);
+    const spin_iters = 2200 + r.uintLessThan(usize, 3600);
+    const wait_timeout_ms = 1100 + r.uintLessThan(usize, 700);
+    const seed_marker = seed % 10_000;
+    const prop_marker = 350_000 + seed_marker;
+    const cond_marker = 360_000 + seed_marker;
+    const lock_marker = 370_000 + seed_marker;
+    const live_base = 380_000 + seed_marker;
+    const dead_map_base = 390_000 + seed_marker;
+    const dead_set_base = 400_000 + seed_marker;
+    const direct_cleanup_base = 410_000 + seed_marker;
+    const unregister_base = 420_000 + seed_marker;
+
+    var expected_live_count: usize = 0;
+    var expected_live_sum: usize = 0;
+    var expected_cleanup_count: usize = 0;
+    var expected_cleanup_sum: usize = 0;
+    var expected_unregister_count: usize = 0;
+    var expected_unregister_sum: usize = 0;
+    var round_i: usize = 0;
+    while (round_i < rounds) : (round_i += 1) {
+        var i: usize = 0;
+        while (i < per_round) : (i += 1) {
+            const idx = round_i * per_round + i;
+            if (((i + round_i) & 7) == 0) {
+                expected_live_count += 1;
+                expected_live_sum += live_base + idx;
+            } else {
+                expected_cleanup_count += 2;
+                expected_cleanup_sum += dead_map_base + idx;
+                expected_cleanup_sum += dead_set_base + idx;
+            }
+            if (((i + round_i) & 15) == 3) {
+                expected_cleanup_count += 1;
+                expected_cleanup_sum += direct_cleanup_base + idx;
+            }
+            if (((i + round_i) & 31) == 5) {
+                expected_unregister_count += 1;
+                expected_unregister_sum += unregister_base + idx;
+            }
+        }
+    }
+
+    const ctx = js.Context.createWithTestingOptions(gpa, .{
+        .enable_threads = true,
+        .enable_gc = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+        .parallel_midscript_gc = true,
+    }) catch {
+        std.debug.print("seed {d}: midgc weak collection context creation failed\n", .{seed});
+        return false;
+    };
+    defer ctx.destroy();
+
+    const src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  globalThis.__midgcWeakCleanupCount = 0;
+        \\  globalThis.__midgcWeakCleanupSum = 0;
+        \\  globalThis.__midgcWeakUnregisterCount = 0;
+        \\  globalThis.__midgcWeakUnregisterSum = 0;
+        \\  globalThis.__midgcWeakDeadRefs = [];
+        \\  globalThis.__midgcWeakLiveRefs = [];
+        \\  globalThis.__midgcWeakKeys = [];
+        \\  const registry = new FinalizationRegistry((held) => {{
+        \\    globalThis.__midgcWeakCleanupCount++;
+        \\    globalThis.__midgcWeakCleanupSum += held;
+        \\  }});
+        \\  globalThis.__midgcWeakRegistry = registry;
+        \\  const wm = new WeakMap();
+        \\  const ws = new WeakSet();
+        \\  globalThis.__midgcWeakMap = wm;
+        \\  globalThis.__midgcWeakSet = ws;
+        \\  const gate = {{ prop: 0, propReady: 0, condReady: 0, condOpen: false, lockHeld: 0, lockReady: 0, lockRelease: 0, lockDone: 0 }};
+        \\  const condLock = new Lock();
+        \\  const cond = new Condition();
+        \\  const heldLock = new Lock();
+        \\  const root = {{ seed: {d}, tag: 'midgc-weak-collection-root' }};
+        \\  const propThread = new Thread((gate, marker, seedMarker, timeout) => {{
+        \\    const localRoot = {{ marker, nested: {{ seed: seedMarker, label: 'midgc-weak-property-root' }} }};
+        \\    Atomics.store(gate, 'propReady', 1);
+        \\    Atomics.notify(gate, 'propReady');
+        \\    const r = Atomics.wait(gate, 'prop', 0, timeout);
+        \\    if (r !== 'ok' && r !== 'not-equal' && r !== 'timed-out')
+        \\      throw new Error('bad midgc weak property wait result ' + r);
+        \\    return localRoot;
+        \\  }}, gate, {d}, {d}, {d});
+        \\  const condThread = new Thread((gate, marker, seedMarker) => {{
+        \\    const localRoot = {{ marker, nested: {{ seed: seedMarker, label: 'midgc-weak-condition-root' }} }};
+        \\    condLock.hold(() => {{
+        \\      Atomics.store(gate, 'condReady', 1);
+        \\      Atomics.notify(gate, 'condReady');
+        \\      while (!gate.condOpen)
+        \\        cond.wait(condLock);
+        \\    }});
+        \\    return localRoot;
+        \\  }}, gate, {d}, {d});
+        \\  const holder = new Thread((gate) => {{
+        \\    heldLock.hold(() => {{
+        \\      Atomics.store(gate, 'lockHeld', 1);
+        \\      Atomics.notify(gate, 'lockHeld');
+        \\      while (Atomics.load(gate, 'lockRelease') === 0)
+        \\        Atomics.wait(gate, 'lockRelease', 0, {d});
+        \\    }});
+        \\    return 1;
+        \\  }}, gate);
+        \\  while (Atomics.load(gate, 'lockHeld') === 0)
+        \\    Atomics.wait(gate, 'lockHeld', 0, 1);
+        \\  const lockThread = new Thread((gate, marker, seedMarker) => {{
+        \\    const localRoot = {{ marker, nested: {{ seed: seedMarker, label: 'midgc-weak-lock-root' }} }};
+        \\    Atomics.store(gate, 'lockReady', 1);
+        \\    Atomics.notify(gate, 'lockReady');
+        \\    heldLock.hold(() => {{
+        \\      Atomics.store(gate, 'lockDone', 1);
+        \\    }});
+        \\    return localRoot;
+        \\  }}, gate, {d}, {d});
+        \\  while (Atomics.load(gate, 'propReady') === 0)
+        \\    Atomics.wait(gate, 'propReady', 0, 1);
+        \\  while (Atomics.load(gate, 'condReady') === 0)
+        \\    Atomics.wait(gate, 'condReady', 0, 1);
+        \\  while (Atomics.load(gate, 'lockReady') === 0)
+        \\    Atomics.wait(gate, 'lockReady', 0, 1);
+        \\  const keep = [];
+        \\  let liveSum = 0;
+        \\  for (let round = 0; round < {d}; round++) {{
+        \\    for (let i = 0; i < {d}; i++) {{
+        \\      const idx = round * {d} + i;
+        \\      keep.push({{ round, i, nested: {{ root, value: i + round }}, text: 'midgc-weak-' + round + '-' + i }});
+        \\      if (((i + round) & 7) === 0) {{
+        \\        const key = {{ kind: 'live-key', idx, root }};
+        \\        const value = {{ marker: {d} + idx, nested: {{ root, label: 'live-weakmap-value' }} }};
+        \\        wm.set(key, value);
+        \\        ws.add(key);
+        \\        globalThis.__midgcWeakKeys.push(key);
+        \\        globalThis.__midgcWeakLiveRefs.push(new WeakRef(value));
+        \\        liveSum += value.marker;
+        \\      }} else {{
+        \\        const deadMapKey = {{ kind: 'dead-map-key', idx, root }};
+        \\        const deadMapValue = {{ marker: {d} + idx, nested: {{ root, label: 'dead-weakmap-value' }} }};
+        \\        wm.set(deadMapKey, deadMapValue);
+        \\        registry.register(deadMapValue, deadMapValue.marker);
+        \\        globalThis.__midgcWeakDeadRefs.push(new WeakRef(deadMapValue));
+        \\        const deadSetValue = {{ marker: {d} + idx, nested: {{ root, label: 'dead-weakset-value' }} }};
+        \\        ws.add(deadSetValue);
+        \\        registry.register(deadSetValue, deadSetValue.marker);
+        \\        globalThis.__midgcWeakDeadRefs.push(new WeakRef(deadSetValue));
+        \\      }}
+        \\      if (((i + round) & 15) === 3)
+        \\        registry.register({{ kind: 'direct-cleanup', idx, root }}, {d} + idx);
+        \\      if (((i + round) & 31) === 5) {{
+        \\        const token = {{ kind: 'unregister-token', idx, root }};
+        \\        registry.register({{ kind: 'unregistered-target', idx, root }}, {d} + idx, token);
+        \\        if (!registry.unregister(token))
+        \\          throw new Error('midgc weak unregister token was not found ' + idx);
+        \\        globalThis.__midgcWeakUnregisterCount++;
+        \\        globalThis.__midgcWeakUnregisterSum += {d} + idx;
+        \\      }}
+        \\    }}
+        \\    let spin = 0;
+        \\    for (let j = 0; j < {d}; j++) spin = (spin + j + round) & 0x3fffffff;
+        \\    if (spin < 0) keep.push({{ impossible: true }});
+        \\  }}
+        \\  if (liveSum !== {d})
+        \\    throw new Error('bad midgc weak live construction sum ' + liveSum + '/' + {d});
+        \\  if (typeof gc === 'function') gc();
+        \\  Atomics.store(gate, 'prop', 1);
+        \\  Atomics.notify(gate, 'prop');
+        \\  condLock.hold(() => {{
+        \\    gate.condOpen = true;
+        \\    cond.notifyAll();
+        \\  }});
+        \\  Atomics.store(gate, 'lockRelease', 1);
+        \\  Atomics.notify(gate, 'lockRelease');
+        \\  const propRoot = propThread.join();
+        \\  const condRoot = condThread.join();
+        \\  if (holder.join() !== 1)
+        \\    throw new Error('bad midgc weak lock holder');
+        \\  const lockRoot = lockThread.join();
+        \\  if (!propRoot || propRoot.marker !== {d} || propRoot.nested.seed !== {d})
+        \\    throw new Error('bad midgc weak property root');
+        \\  if (!condRoot || condRoot.marker !== {d} || condRoot.nested.seed !== {d})
+        \\    throw new Error('bad midgc weak condition root');
+        \\  if (!lockRoot || lockRoot.marker !== {d} || lockRoot.nested.seed !== {d} ||
+        \\      Atomics.load(gate, 'lockDone') !== 1)
+        \\    throw new Error('bad midgc weak contended-lock root');
+        \\  let postSweepLiveSum = 0;
+        \\  for (let k = 0; k < globalThis.__midgcWeakKeys.length; k++) {{
+        \\    const key = globalThis.__midgcWeakKeys[k];
+        \\    if (!ws.has(key))
+        \\      throw new Error('live WeakSet key missing ' + k);
+        \\    const value = wm.get(key);
+        \\    const refValue = globalThis.__midgcWeakLiveRefs[k].deref();
+        \\    if (!value || !refValue || value !== refValue || value.marker !== refValue.marker)
+        \\      throw new Error('live WeakMap value missing ' + k);
+        \\    postSweepLiveSum += value.marker;
+        \\  }}
+        \\  if (postSweepLiveSum !== {d})
+        \\    throw new Error('bad midgc weak live post-sweep sum ' + postSweepLiveSum + '/' + {d});
+        \\  return globalThis.__midgcWeakKeys.length;
+        \\}})();
+        \\
+    ,
+        .{
+            seed_marker,
+            prop_marker,
+            seed_marker,
+            wait_timeout_ms,
+            cond_marker,
+            seed_marker,
+            wait_timeout_ms,
+            lock_marker,
+            seed_marker,
+            rounds,
+            per_round,
+            per_round,
+            live_base,
+            dead_map_base,
+            dead_set_base,
+            direct_cleanup_base,
+            unregister_base,
+            unregister_base,
+            spin_iters,
+            expected_live_sum,
+            expected_live_sum,
+            prop_marker,
+            seed_marker,
+            cond_marker,
+            seed_marker,
+            lock_marker,
+            seed_marker,
+            expected_live_sum,
+            expected_live_sum,
+        },
+    );
+    defer gpa.free(src);
+
+    const before_attempts = ctx.gc_par_attempts.load(.monotonic);
+    const before_collections = ctx.gc_par_collections.load(.monotonic);
+    const result = ctx.evaluate(src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: midgc weak collection JS threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!result.isNumber() or result.asNum() != @as(f64, @floatFromInt(expected_live_count))) {
+        std.debug.print("seed {d}: midgc weak collection live count got {d}, expected {d}\n", .{ seed, if (result.isNumber()) result.asNum() else -1, expected_live_count });
+        return false;
+    }
+    if (ctx.gc_par_attempts.load(.monotonic) <= before_attempts) {
+        std.debug.print("seed {d}: midgc weak collection did not attempt a parallel collection\n", .{seed});
+        return false;
+    }
+    if (ctx.gc_par_collections.load(.monotonic) <= before_collections) {
+        std.debug.print("seed {d}: midgc weak collection did not finish a parallel collection\n", .{seed});
+        return false;
+    }
+
+    ctx.collectGarbage();
+    const cleanup_src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  globalThis.__midgcWeakRegistry.cleanupSome();
+        \\  let liveSum = 0;
+        \\  for (let k = 0; k < globalThis.__midgcWeakKeys.length; k++) {{
+        \\    const key = globalThis.__midgcWeakKeys[k];
+        \\    const value = globalThis.__midgcWeakMap.get(key);
+        \\    const refValue = globalThis.__midgcWeakLiveRefs[k].deref();
+        \\    if (!globalThis.__midgcWeakSet.has(key) || !value || !refValue || value !== refValue)
+        \\      throw new Error('midgc weak live value missing after quiescent GC ' + k);
+        \\    liveSum += value.marker;
+        \\  }}
+        \\  let cleared = 0;
+        \\  for (let k = 0; k < globalThis.__midgcWeakDeadRefs.length; k++) {{
+        \\    if (globalThis.__midgcWeakDeadRefs[k].deref() === undefined)
+        \\      cleared++;
+        \\  }}
+        \\  if (liveSum !== {d})
+        \\    throw new Error('midgc weak live sum after cleanup ' + liveSum + '/' + {d});
+        \\  if (cleared !== globalThis.__midgcWeakDeadRefs.length)
+        \\    throw new Error('midgc weak dead refs cleared ' + cleared + '/' + globalThis.__midgcWeakDeadRefs.length);
+        \\  if (globalThis.__midgcWeakCleanupCount !== {d})
+        \\    throw new Error('midgc weak cleanup count ' + globalThis.__midgcWeakCleanupCount + '/' + {d});
+        \\  if (globalThis.__midgcWeakCleanupSum !== {d})
+        \\    throw new Error('midgc weak cleanup sum ' + globalThis.__midgcWeakCleanupSum + '/' + {d});
+        \\  if (globalThis.__midgcWeakUnregisterCount !== {d})
+        \\    throw new Error('midgc weak unregister count ' + globalThis.__midgcWeakUnregisterCount + '/' + {d});
+        \\  if (globalThis.__midgcWeakUnregisterSum !== {d})
+        \\    throw new Error('midgc weak unregister sum ' + globalThis.__midgcWeakUnregisterSum + '/' + {d});
+        \\  return cleared;
+        \\}})();
+        \\
+    ,
+        .{
+            expected_live_sum,
+            expected_live_sum,
+            expected_cleanup_count,
+            expected_cleanup_count,
+            expected_cleanup_sum,
+            expected_cleanup_sum,
+            expected_unregister_count,
+            expected_unregister_count,
+            expected_unregister_sum,
+            expected_unregister_sum,
+        },
+    );
+    defer gpa.free(cleanup_src);
+    const cleaned = ctx.evaluate(cleanup_src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: midgc weak collection cleanup check threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    const expected_dead_refs = (rounds * per_round - expected_live_count) * 2;
+    if (!cleaned.isNumber() or cleaned.asNum() != @as(f64, @floatFromInt(expected_dead_refs))) {
+        std.debug.print("seed {d}: midgc weak collection cleared got {d}, expected {d}\n", .{ seed, if (cleaned.isNumber()) cleaned.asNum() else -1, expected_dead_refs });
+        return false;
+    }
+    return true;
+}
+
 fn runMidScriptTerminationReactionGc(gpa: std.mem.Allocator, seed: u64) !bool {
     var prng = std.Random.DefaultPrng.init(seed ^ 0x6d69_6474_6572_6d72);
     const r = prng.random();
@@ -7106,6 +7436,22 @@ pub fn main(init: std.process.Init) !void {
         if (mwfail != 0) std.process.exit(1);
         return;
     };
+    // `threadfuzz midgcweak <iters> <seed>`: focused mid-script parallel-GC
+    // repro for WeakMap/WeakSet dead-key pruning, live ephemeron values, and
+    // FinalizationRegistry unregister compaction while sync peers are parked.
+    if (first) |a| if (std.mem.eql(u8, a, "midgcweak")) {
+        if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch 1;
+        if (args.next()) |b| base_seed = std.fmt.parseInt(u64, b, 10) catch 1;
+        var mwcfail: usize = 0;
+        var mwci: usize = 0;
+        while (mwci < iters) : (mwci += 1) {
+            const seed = base_seed +% mwci;
+            if (!(try runMidScriptWeakCollectionGc(gpa, seed))) mwcfail += 1;
+        }
+        std.debug.print("threadfuzz midgcweak: {d} programs from seed {d}, {d} failures\n", .{ iters, base_seed, mwcfail });
+        if (mwcfail != 0) std.process.exit(1);
+        return;
+    };
     // `threadfuzz verify <iters> <seed>`: deterministic-correctness mode — each
     // generated program's exact result is predicted and checked, catching
     // wrong-value (lost/torn atomic) bugs the no-throw oracle misses.
@@ -7250,8 +7596,9 @@ pub fn main(init: std.process.Init) !void {
     // child-created SAB/ArrayBuffer storage rooted through unjoined Thread
     // completion records and delayed asyncJoin observers,
     // completed-but-unjoined Thread results and thrown
-    // objects, sync-wait peer stack roots with finalization cleanup, isolated
-    // Worker/SAB progress while shared-realm cleanup roots are swept, and
+    // objects, sync-wait peer stack roots with finalization cleanup, WeakMap/
+    // WeakSet dead-key cleanup with live ephemeron values and unregister-token
+    // suppression, isolated Worker/SAB progress while shared-realm cleanup roots are swept, and
     // teardown termination with pending asyncJoin/waitAsync roots must survive
     // that window. The oracle requires exact program completion or expected
     // termination and at least one finishing parallel sweep.
@@ -7270,8 +7617,9 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runMidScriptCreatorOwnedBufferGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptSyncWaitCleanupGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptWorkerCleanupGc(gpa, seed))) mfail += 1;
+            if (!(try runMidScriptWeakCollectionGc(gpa, seed))) mfail += 1;
         }
-        std.debug.print("threadfuzz midgc: {d} programs from seed {d}, {d} failures\n", .{ iters * 7, base_seed, mfail });
+        std.debug.print("threadfuzz midgc: {d} programs from seed {d}, {d} failures\n", .{ iters * 8, base_seed, mfail });
         if (mfail != 0) std.process.exit(1);
         return;
     };

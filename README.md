@@ -193,7 +193,7 @@ zig build threads-test          # runs the green WebKit PR-249 threads corpus (2
 zig build threads-reference-audit # classifies the remaining reference-only PR-249 files
 zig build test -Dtsan=true      # unit suite under ThreadSanitizer
 zig build threadfuzz            # seeded concurrent-JS fuzzer
-zig build threadfuzz -Dfuzz-midgc=true # mid-script GC wait-pump + microtask + creator buffers + sync-wait cleanup + teardown + promise + Worker/SAB fuzzer
+zig build threadfuzz -Dfuzz-midgc=true # mid-script GC wait-pump + microtask + creator buffers + sync-wait cleanup + teardown + promise + Worker/SAB + weak-collection fuzzer
 zig build test262               # runs the real tc39/test262 corpus, prints pass %
 zig build test262 -Dtest262=DIR # …with an explicit corpus root
 zig build bench                 # times the bytecode VM against the tree-walker
@@ -233,7 +233,7 @@ ThreadSanitizer unit tests, a sharded no-GIL PR-249 corpus TSan sweep, a
 suppression-narrowness witness for JS-defined program-byte races,
 `test262-parallel`, and seeded concurrent-JS fuzzing (`threadfuzz`, TSan
 fuzzing, amplified fuzzing, broad semantic fuzzing,
-mid-script-GC wait-pump/microtask/creator-buffer/sync-wait-cleanup/promise/teardown/Worker-SAB fuzzing, lifecycle
+mid-script-GC wait-pump/microtask/creator-buffer/sync-wait-cleanup/promise/teardown/Worker-SAB/weak-collection fuzzing, lifecycle
 fuzzing, ReleaseSafe fuzzing, and deterministic-result verification).
 
 Remaining work is concentrated in production hardening rather than the core
@@ -351,6 +351,13 @@ threading architecture:
   and delayed `asyncJoin` observers across a finishing sweep, then verifies
   blocking `join()`, post-sweep `asyncJoin()`, and `ArrayBuffer.transfer()`
   observers see exact contents after the creating thread has exited.
+  A weak-collection subprogram parks property `Atomics.wait`,
+  `Condition.wait`, and contended `Lock.hold` peers while allocation pressure
+  leaves live WeakMap values reachable only through live weak keys, dead
+  WeakMap/WeakSet targets reachable only through weak structures and WeakRefs,
+  and FinalizationRegistry unregister-token records queued through a finishing
+  sweep; it then verifies live ephemeron values, cleared dead refs, exact
+  cleanup count/sum, and exact unregister-token suppression.
   A sibling mid-GC teardown subprogram parks children after installing
   child-owned typed-array `waitAsync` tickets, verifies pending `asyncJoin`
   rejection reactions after parent failure, and proves later notify wakes zero
