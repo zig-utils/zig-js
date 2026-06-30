@@ -329,10 +329,11 @@ table splits total time into create and destroy columns so teardown reductions
 are visible separately from global setup costs. The profile also prints GC
 cell-backing attribution for an object-heavy allocation run: chunk count, total
 cell-slot capacity, live cells at context creation, live cells after allocation,
-free slots after collection, and live cells after collection.
+free slots after collection, and live cells after collection. The snapshot path
+uses exact per-bucket free counts rather than walking every free-list node.
 Direct `GcCellBacking` unit tests cover lazy fresh-slot bumping, free-list
-recycling, ownership span/hint classification, stats accounting, and
-bulk-teardown behavior.
+recycling, fresh-chunk cursor advancement, ownership span/hint classification,
+stats accounting, and bulk-teardown behavior.
 The unit suite also covers live `SharedArrayBuffer` retain release during
 context teardown across arena, no-GIL threaded, and `.gil = true` contexts.
 Collection-helper removal witnesses live in the same unit suite:

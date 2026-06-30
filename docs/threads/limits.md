@@ -71,9 +71,12 @@ context APIs.
   landed: GC cells use a reusable size-class slab backing instead of calling the
   backing allocator for every cell. Fresh chunks now use lazy bump cursors with
   a per-bucket bump hint instead of pre-linking every unused slot during
-  short-lived context setup, and slab ownership checks are bucket-local
-  with an address-span reject before chunk-list scans, so frees do not scan
-  unrelated size-class chunks during collection or teardown. Ownership lookups
+  short-lived context setup, and a per-bucket fresh-chunk cursor skips chunks
+  whose bump range is already exhausted. Freed-cell accounting is maintained per
+  bucket, so GC cell-backing stats no longer walk every free-list node after a
+  collection. Slab ownership checks are bucket-local with an address-span reject
+  before chunk-list scans, so frees do not scan unrelated size-class chunks
+  during collection or teardown. Ownership lookups
   also keep a per-bucket recent-chunk hint, avoiding repeated full bucket walks
   when GC frees/remaps arrive from the same slab chunk. Context teardown also
   skips rebuilding slab freelists and reclassifying bucket ownership for cells
