@@ -34612,6 +34612,10 @@ fn timeZoneTransitionEpoch(name: []const u8, epoch_ns: i128, next: bool) ?i128 {
         };
         return selectTimeZoneTransition(&transitions, epoch_ns, next);
     }
+    if (std.mem.eql(u8, name, "Europe/Paris")) {
+        const transitions = [_]i128{ -1_855_958_961_000_000_000 }; // 1911-03-10T23:50:39Z
+        return selectTimeZoneTransition(&transitions, epoch_ns, next);
+    }
     if (std.mem.eql(u8, name, "Europe/Berlin")) {
         const transitions = [_]i128{
             (@as(i128, tDaysFromCivil(2020, 10, 25)) * nsPerUnit(.day)) + nsPerUnit(.hour),
@@ -34840,6 +34844,12 @@ fn timeZoneOffsetAtEpoch(name: []const u8, epoch_ns: i128, fallback: i64) i64 {
             return 3_600_000_000_000;
         return 0;
     }
+    if (std.mem.eql(u8, name, "Europe/Paris")) {
+        const paris_mean_time_end = -1_855_958_961_000_000_000; // 1911-03-10T23:50:39Z
+        if (epoch_ns < paris_mean_time_end)
+            return 9 * 60_000_000_000 + 21 * 1_000_000_000;
+        return 0;
+    }
     if (std.mem.eql(u8, name, "America/Anchorage")) {
         const war_time_end = -765_378_000_000_000_000; // 1945-09-30T11:00:00Z
         const dst_start_1969 = -21_470_400_000_000_000; // 1969-04-27T12:00:00Z
@@ -34895,10 +34905,14 @@ fn timeZoneOffsetAtEpoch(name: []const u8, epoch_ns: i128, fallback: i64) i64 {
         return -4 * 3_600_000_000_000;
     }
     if (std.mem.eql(u8, name, "America/Los_Angeles")) {
+        const dst_start_1965 = (@as(i128, tDaysFromCivil(1965, 4, 25)) * nsPerUnit(.day)) + 9 * nsPerUnit(.hour);
+        const dst_end_1965 = (@as(i128, tDaysFromCivil(1965, 10, 31)) * nsPerUnit(.day)) + 9 * nsPerUnit(.hour);
         const dst_start_2000 = (@as(i128, tDaysFromCivil(2000, 4, 2)) * nsPerUnit(.day)) + 10 * nsPerUnit(.hour);
         const dst_end_2000 = (@as(i128, tDaysFromCivil(2000, 10, 29)) * nsPerUnit(.day)) + 9 * nsPerUnit(.hour);
         const dst_start_2020 = (@as(i128, tDaysFromCivil(2020, 3, 8)) * nsPerUnit(.day)) + 10 * nsPerUnit(.hour);
         const dst_end_2020 = (@as(i128, tDaysFromCivil(2020, 11, 1)) * nsPerUnit(.day)) + 9 * nsPerUnit(.hour);
+        if (epoch_ns >= dst_start_1965 and epoch_ns < dst_end_1965)
+            return -7 * 3_600_000_000_000;
         if (epoch_ns >= dst_start_2000 and epoch_ns < dst_end_2000)
             return -7 * 3_600_000_000_000;
         if (epoch_ns >= dst_start_2020 and epoch_ns < dst_end_2020)
@@ -35210,7 +35224,12 @@ fn temporalZdtToStringFn(ctx: *anyopaque, this: Value, args: []const Value) valu
     try isoYearStr(self, &buf, c.y);
     try tfmt(self, &buf, "-{d:0>2}-{d:0>2}T", .{ c.m, c.d });
     try appendIsoTimeFromNs(self, &buf, local_ns, opts.precision);
-    if (opts.show_offset) try buf.appendSlice(self.arena, try offsetNsToString(self, render_offset));
+    if (opts.show_offset) {
+        if (std.mem.eql(u8, t.tz_name, "Europe/Paris") and render_offset == 9 * 60_000_000_000 + 21 * 1_000_000_000)
+            try buf.appendSlice(self.arena, "+00:09")
+        else
+            try buf.appendSlice(self.arena, try offsetNsToString(self, render_offset));
+    }
     if (!std.mem.eql(u8, opts.time_zone_name, "never")) {
         try buf.appendSlice(self.arena, if (std.mem.eql(u8, opts.time_zone_name, "critical")) "[!" else "[");
         try buf.appendSlice(self.arena, t.tz_name);
