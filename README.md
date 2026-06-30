@@ -353,7 +353,8 @@ threading architecture:
   shared-realm finalization cleanup on a retained SAB, exact FIFO drain/drop
   ordering for mixed Worker `close` / `terminate` / `postMessage` lifecycles,
   plus worker
-  handler-exception recovery,
+  handler-exception recovery, Worker handler-exception recovery composed with
+  shared-realm Thread finalization cleanup on one retained SAB,
   `Thread.restrict` lifecycle isolation, Thread exception identity through
   `join()` / `asyncJoin()` while property and condition waiters are parked,
   thread-returned typed-array `waitAsync` promise

@@ -218,7 +218,8 @@ as embedders exercise more threaded host patterns.
   SAB, Worker termination interleaved with exact shared-realm finalization
   cleanup on a retained SAB, exact FIFO drain/drop ordering for mixed Worker
   `close` / `terminate` / `postMessage` lifecycles, plus worker
-  handler-exception recovery,
+  handler-exception recovery, Worker handler-exception recovery composed with
+  shared-realm Thread finalization cleanup on one retained SAB,
   `Thread.restrict` lifecycle isolation,
   Thread exception identity through `join()` / `asyncJoin()` while
   property and condition waiters are parked,

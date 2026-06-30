@@ -185,8 +185,9 @@ context APIs.
   Atomics counter oracles, Worker/thread/finalization scheduling on one retained
   SAB, Worker termination interleaved with exact shared-realm finalization
   cleanup on a retained SAB, exact FIFO drain/drop ordering for mixed Worker
-  terminate/close/postMessage lifecycles, and worker handler-exception recovery
-  plus `Thread.restrict`
+  terminate/close/postMessage lifecycles, worker handler-exception recovery,
+  and Worker handler-exception recovery composed with shared-realm Thread
+  finalization cleanup on one retained SAB, plus `Thread.restrict`
   lifecycle isolation, Thread
   exception identity through `join()` / `asyncJoin()` while property and
   condition waiters are parked,
