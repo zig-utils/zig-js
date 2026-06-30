@@ -31171,6 +31171,11 @@ fn checkIsoYearMonth(self: *Interpreter, y: i64, m: u8) EvalError!void {
     if (y == 275760 and m > 9) return self.throwError("RangeError", "year-month out of range");
 }
 
+fn checkCalendarYearMonthDate(self: *Interpreter, cal: []const u8, y: i64, m: u8, d: u8) EvalError!void {
+    const iso = calendarDateToIso(cal, y, m, d);
+    try checkIsoDate(self, @floatFromInt(iso.y), @floatFromInt(iso.m), @floatFromInt(iso.d));
+}
+
 /// Read year/month for a PlainYearMonth from an instance or a fields bag.
 const IsoYM = struct { y: i64, m: u8, d: u8 = 1, cal: []const u8 = "iso8601" };
 const RawYM = struct {
@@ -31438,6 +31443,7 @@ fn temporalYearMonthAddFn(comptime sign: f64) value.NativeFn {
             if (!durInRange(dur)) return self.throwError("RangeError", "duration out of range");
             if (dur[2] != 0 or dur[3] != 0 or dur[4] != 0 or dur[5] != 0 or dur[6] != 0 or dur[7] != 0 or dur[8] != 0 or dur[9] != 0)
                 return self.throwError("RangeError", "PlainYearMonth arithmetic only accepts years and months");
+            try checkCalendarYearMonthDate(self, t.calendar, t.year, t.month, 1);
             const year_delta: i64 = @intFromFloat(sign * dur[0]);
             const month_delta: i64 = @intFromFloat(sign * dur[1]);
             const year_result = addCalendarYearMonthYears(t.calendar, t.year, t.month, t.day, year_delta, reject) orelse return self.throwError("RangeError", "date overflow");
@@ -31485,6 +31491,21 @@ fn temporalYearMonthUntilFn(comptime sign: f64) value.NativeFn {
             if (sign < 0) total_months = -total_months;
             // Round to the requested smallest unit / increment.
             const incr: i64 = @intFromFloat(opts.increment);
+            if (opts.increment != 1) {
+                const dir: i64 = if (total_months >= 0) 1 else -1;
+                var probe_y: i64 = undefined;
+                var probe_m: u8 = undefined;
+                if (opts.smallest == .year) {
+                    const candidate = calendarYearMonthAddYearsCandidate(a.calendar, a.year, a.month, dir * incr);
+                    probe_y = candidate.y;
+                    probe_m = candidate.m;
+                } else {
+                    const candidate = balanceCalendarYearMonth(a.calendar, a.year, a.month, dir * incr);
+                    probe_y = candidate.y;
+                    probe_m = candidate.m;
+                }
+                try checkCalendarYearMonthDate(self, a.calendar, probe_y, probe_m, 1);
+            }
             var years: f64 = 0;
             var months: f64 = 0;
             if (opts.smallest == .year) {
@@ -31493,12 +31514,16 @@ fn temporalYearMonthUntilFn(comptime sign: f64) value.NativeFn {
             } else {
                 if (opts.largest == .year) {
                     const ym_diff = calendarYearMonthDiff(a.calendar, a.year, a.month, other.y, other.m);
-                    const probe_total = calendarYearMonthDistance(a.calendar, a.year, a.month, other.y, other.m);
-                    const probe = balanceCalendarYearMonth(a.calendar, a.year, a.month, probe_total);
-                    const probe_iso = calendarDateToIso(a.calendar, probe.y, probe.m, 1);
+                    const rounded_months = applyRounding(ym_diff.months, incr, opts.mode) * incr;
+                    const raw_years: i64 = @intFromFloat(sign * @as(f64, @floatFromInt(ym_diff.years)));
+                    const raw_months: i64 = @intFromFloat(sign * @as(f64, @floatFromInt(rounded_months)));
+                    const year_candidate = calendarYearMonthAddYearsCandidate(a.calendar, a.year, a.month, raw_years);
+                    const rounded = balanceCalendarYearMonth(a.calendar, year_candidate.y, year_candidate.m, raw_months);
+                    const balanced = calendarYearMonthDiff(a.calendar, a.year, a.month, rounded.y, rounded.m);
+                    const probe_iso = calendarDateToIso(a.calendar, rounded.y, rounded.m, 1);
                     try checkIsoDate(self, @floatFromInt(probe_iso.y), @floatFromInt(probe_iso.m), @floatFromInt(probe_iso.d));
-                    years = sign * @as(f64, @floatFromInt(ym_diff.years));
-                    months = sign * @as(f64, @floatFromInt(applyRounding(ym_diff.months, incr, opts.mode) * incr));
+                    years = @floatFromInt(balanced.years);
+                    months = @floatFromInt(balanced.months);
                 } else {
                     const q = applyRounding(total_months, incr, opts.mode);
                     const m_total = q * incr;
