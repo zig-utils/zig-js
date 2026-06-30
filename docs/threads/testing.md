@@ -220,6 +220,8 @@ realm turn,
 Promise reaction queue churn from with-fn `Lock.asyncHold`, no-fn release
 functions, typed-array `waitAsync`, `Thread.asyncJoin`, and exact
 `FinalizationRegistry` cleanup,
+`Lock.asyncHold(fn)` throw/release ordering with queued no-fn release grants and
+exact `FinalizationRegistry` cleanup,
 creator-owned `SharedArrayBuffer` and `ArrayBuffer` storage that survives the
 creating Thread's exit, sibling-thread reads, GC pressure, and post-creator
 `ArrayBuffer.transfer()`, child-created SAB/ArrayBuffer storage crossing
@@ -230,7 +232,7 @@ property/condition waiters resume, plus `ThreadLocal` isolation across normal,
 throwing, nested, and async-joined thread lifecycles, plus
 `ThreadLocal` values registered with `FinalizationRegistry` across
 park/resume/clear/join cleanup lifecycles with exact cleanup count/sum delivery
-after quiescent collection. Each seed currently runs 31 deterministic lifecycle
+after quiescent collection. Each seed currently runs 32 deterministic lifecycle
 subprograms.
 
 `zig build test262 -Dtest262-parallel-js=true` runs test262 programs in

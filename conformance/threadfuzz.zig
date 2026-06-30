@@ -5890,6 +5890,202 @@ fn runAsyncHoldBargingLifecycleInterleaving(gpa: std.mem.Allocator, seed: u64) !
     return true;
 }
 
+fn runAsyncHoldThrowFinalizationInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
+    var prng = std.Random.DefaultPrng.init(seed ^ 0x6173_796e_6368_7468);
+    const r = prng.random();
+    const nthreads = 3 + r.uintLessThan(usize, 4);
+    const per_thread = 4 + r.uintLessThan(usize, 5);
+    var expected_join_sum: usize = 0;
+    var expected_success_score: usize = 0;
+    var expected_reject_score: usize = 0;
+    var expected_release_score: usize = 0;
+    var expected_cleanup_sum: usize = 0;
+    var expected_cleanup_count: usize = 0;
+    var id: usize = 0;
+    while (id < nthreads) : (id += 1) {
+        const base = (id + 1) * 10_000;
+        expected_join_sum += id + 1;
+        if ((id & 1) == 0) {
+            expected_success_score += base + 1_000;
+        } else {
+            expected_reject_score += base + 2_000;
+        }
+        expected_release_score += base + 3_000;
+        var i: usize = 0;
+        while (i < per_thread) : (i += 1) {
+            expected_cleanup_sum += base + 4_000 + i;
+            expected_cleanup_count += 1;
+        }
+    }
+
+    const ctx = js.Context.createWith(gpa, .{ .enable_threads = true, .enable_gc = true }) catch {
+        std.debug.print("seed {d}: asyncHold throw/finalization context creation failed\n", .{seed});
+        return false;
+    };
+    defer ctx.destroy();
+
+    const src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  globalThis.__asyncHoldThrowSuccessScore = 0;
+        \\  globalThis.__asyncHoldThrowRejectScore = 0;
+        \\  globalThis.__asyncHoldThrowReleaseScore = 0;
+        \\  globalThis.__asyncHoldThrowCleanupCount = 0;
+        \\  globalThis.__asyncHoldThrowCleanupSum = 0;
+        \\  globalThis.__asyncHoldThrowRegistry = new FinalizationRegistry((held) => {{
+        \\    globalThis.__asyncHoldThrowCleanupCount++;
+        \\    globalThis.__asyncHoldThrowCleanupSum += held;
+        \\  }});
+        \\  const registry = globalThis.__asyncHoldThrowRegistry;
+        \\  const lock = new Lock();
+        \\  globalThis.__asyncHoldThrowLock = lock;
+        \\  const threads = [];
+        \\  const returned = [];
+        \\  lock.hold(() => {{
+        \\    for (let id = 0; id < {d}; id++) {{
+        \\      threads.push(new Thread((lock, registry, id, per, seed) => {{
+        \\        const base = (id + 1) * 10000;
+        \\        const p = lock.asyncHold(() => {{
+        \\          for (let i = 0; i < per; i++) {{
+        \\            let target = {{ id, i, seed, payload: 'asyncHold-throw-finalization-' + id + '-' + i }};
+        \\            registry.register(target, base + 4000 + i);
+        \\            target = null;
+        \\          }}
+        \\          if ((id & 1) !== 0)
+        \\            throw {{ marker: base + 2000, seed, label: 'asyncHold-throw-finalization-reject' }};
+        \\          return {{ marker: base + 1000, seed, label: 'asyncHold-throw-finalization-fulfill' }};
+        \\        }});
+        \\        const releasePromise = lock.asyncHold();
+        \\        return {{ id, p, releasePromise }};
+        \\      }}, lock, registry, id, {d}, {d}));
+        \\    }}
+        \\  }});
+        \\  let joinScore = 0;
+        \\  for (const t of threads) {{
+        \\    const rec = t.join();
+        \\    joinScore += rec.id + 1;
+        \\    returned.push(rec);
+        \\  }}
+        \\  if (joinScore !== {d})
+        \\    throw new Error('bad asyncHold throw/finalization join score ' + joinScore);
+        \\  for (const rec of returned) {{
+        \\    const base = (rec.id + 1) * 10000;
+        \\    rec.p.then(
+        \\      (v) => {{
+        \\        if (v.seed === {d} && v.marker === base + 1000)
+        \\          globalThis.__asyncHoldThrowSuccessScore += v.marker;
+        \\        else
+        \\          globalThis.__asyncHoldThrowSuccessScore = -1000000;
+        \\      }},
+        \\      (e) => {{
+        \\        if (e.seed === {d} && e.marker === base + 2000)
+        \\          globalThis.__asyncHoldThrowRejectScore += e.marker;
+        \\        else
+        \\          globalThis.__asyncHoldThrowRejectScore = -1000000;
+        \\      }});
+        \\    rec.releasePromise.then(
+        \\      (release) => {{
+        \\        if (typeof release !== 'function') {{
+        \\          globalThis.__asyncHoldThrowReleaseScore = -1000000;
+        \\        }} else {{
+        \\          globalThis.__asyncHoldThrowReleaseScore += base + 3000;
+        \\          release();
+        \\        }}
+        \\      }},
+        \\      () => {{ globalThis.__asyncHoldThrowReleaseScore = -1000000; }});
+        \\  }}
+        \\  returned.length = 0;
+        \\  threads.length = 0;
+        \\  globalThis.__asyncHoldThrowCheck = function(expectedSuccess, expectedReject, expectedRelease) {{
+        \\    if (globalThis.__asyncHoldThrowSuccessScore !== expectedSuccess)
+        \\      throw new Error('bad asyncHold throw/finalization success score ' + globalThis.__asyncHoldThrowSuccessScore + '/' + expectedSuccess);
+        \\    if (globalThis.__asyncHoldThrowRejectScore !== expectedReject)
+        \\      throw new Error('bad asyncHold throw/finalization reject score ' + globalThis.__asyncHoldThrowRejectScore + '/' + expectedReject);
+        \\    if (globalThis.__asyncHoldThrowReleaseScore !== expectedRelease)
+        \\      throw new Error('bad asyncHold throw/finalization release score ' + globalThis.__asyncHoldThrowReleaseScore + '/' + expectedRelease);
+        \\    if (globalThis.__asyncHoldThrowLock.locked)
+        \\      throw new Error('asyncHold throw/finalization lock left locked');
+        \\    return 1;
+        \\  }};
+        \\  return joinScore;
+        \\}})();
+        \\
+    ,
+        .{ nthreads, per_thread, seed, expected_join_sum, seed, seed },
+    );
+    defer gpa.free(src);
+
+    const joined = ctx.evaluate(src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: asyncHold throw/finalization JS threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!joined.isNumber() or joined.asNum() != @as(f64, @floatFromInt(expected_join_sum))) {
+        std.debug.print("seed {d}: asyncHold throw/finalization join got {d}, expected {d}\n", .{ seed, if (joined.isNumber()) joined.asNum() else -1, expected_join_sum });
+        return false;
+    }
+
+    _ = ctx.evaluate("$drainRunLoop()") catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: asyncHold throw/finalization drain loop threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    const check_src = try std.fmt.allocPrint(
+        gpa,
+        "globalThis.__asyncHoldThrowCheck({d}, {d}, {d})",
+        .{ expected_success_score, expected_reject_score, expected_release_score },
+    );
+    defer gpa.free(check_src);
+    const checked = ctx.evaluate(check_src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: asyncHold throw/finalization check threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!checked.isNumber() or checked.asNum() != 1) {
+        std.debug.print("seed {d}: asyncHold throw/finalization check got {d}\n", .{ seed, if (checked.isNumber()) checked.asNum() else -1 });
+        return false;
+    }
+
+    ctx.collectGarbage();
+    const cleanup_src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  globalThis.__asyncHoldThrowRegistry.cleanupSome();
+        \\  if (globalThis.__asyncHoldThrowCleanupCount !== {d})
+        \\    throw new Error('bad asyncHold throw/finalization cleanup count ' + globalThis.__asyncHoldThrowCleanupCount + '/' + {d});
+        \\  if (globalThis.__asyncHoldThrowCleanupSum !== {d})
+        \\    throw new Error('bad asyncHold throw/finalization cleanup sum ' + globalThis.__asyncHoldThrowCleanupSum + '/' + {d});
+        \\  return globalThis.__asyncHoldThrowCleanupCount;
+        \\}})()
+        \\
+    ,
+        .{ expected_cleanup_count, expected_cleanup_count, expected_cleanup_sum, expected_cleanup_sum },
+    );
+    defer gpa.free(cleanup_src);
+    const cleaned = ctx.evaluate(cleanup_src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: asyncHold throw/finalization cleanup JS threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!cleaned.isNumber() or cleaned.asNum() != @as(f64, @floatFromInt(expected_cleanup_count))) {
+        std.debug.print("seed {d}: asyncHold throw/finalization cleanup got {d}, expected {d}\n", .{ seed, if (cleaned.isNumber()) cleaned.asNum() else -1, expected_cleanup_count });
+        return false;
+    }
+    return true;
+}
+
 fn runMidScriptWaitPumpGc(gpa: std.mem.Allocator, seed: u64) !bool {
     var prng = std.Random.DefaultPrng.init(seed ^ 0x6d69_6467_635f_7761);
     const r = prng.random();
@@ -9057,6 +9253,21 @@ pub fn main(init: std.process.Init) !void {
         if (cfail != 0) std.process.exit(1);
         return;
     };
+    // `threadfuzz asyncholdthrow <iters> <seed>`: focused lifecycle repro for
+    // asyncHold(fn) throw/release ordering plus exact finalization cleanup.
+    if (first) |a| if (std.mem.eql(u8, a, "asyncholdthrow")) {
+        if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch 1;
+        if (args.next()) |b| base_seed = std.fmt.parseInt(u64, b, 10) catch 1;
+        var ahfail: usize = 0;
+        var ahi: usize = 0;
+        while (ahi < iters) : (ahi += 1) {
+            const seed = base_seed +% ahi;
+            if (!(try runAsyncHoldThrowFinalizationInterleaving(gpa, seed))) ahfail += 1;
+        }
+        std.debug.print("threadfuzz asyncholdthrow: {d} programs from seed {d}, {d} failures\n", .{ iters, base_seed, ahfail });
+        if (ahfail != 0) std.process.exit(1);
+        return;
+    };
     // `threadfuzz microtaskchurn <iters> <seed>`: focused lifecycle repro for
     // Promise reaction queue churn across asyncHold, waitAsync, asyncJoin, and
     // finalization cleanup.
@@ -9520,6 +9731,8 @@ pub fn main(init: std.process.Init) !void {
     // condition waiters resume, and while typed-array waitAsync promise
     // reactions and asyncJoin reactions settle together, while asyncHold
     // callback and release-function reactions churn the same queue, when
+    // asyncHold callbacks throw while queued no-fn release grants and exact
+    // finalization cleanup share the same delivery window, when
     // child-created SAB/ArrayBuffer storage outlives its creator Thread and is
     // read/transferred under GC pressure and crosses isolated Worker
     // structured-clone after creator exit, plus when teardown
@@ -9564,6 +9777,7 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runWaitAsyncFinalizationCleanupInterleaving(gpa, seed))) lfail += 1;
             if (!(try runConditionAsyncFinalizationCleanupInterleaving(gpa, seed))) lfail += 1;
             if (!(try runMicrotaskChurnLifecycleInterleaving(gpa, seed))) lfail += 1;
+            if (!(try runAsyncHoldThrowFinalizationInterleaving(gpa, seed))) lfail += 1;
             if (!(try runCreatorOwnedBufferLifecycleInterleaving(gpa, seed))) lfail += 1;
             if (!(try runWorkerCreatorOwnedBufferLifecycleInterleaving(gpa, seed))) lfail += 1;
             if (!(try runTerminationPendingReactionInterleaving(gpa, seed))) lfail += 1;
@@ -9574,7 +9788,7 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runThreadLocalLifecycleInterleaving(gpa, seed))) lfail += 1;
             if (!(try runThreadLocalFinalizationCleanupInterleaving(gpa, seed))) lfail += 1;
         }
-        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 31, base_seed, lfail });
+        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 32, base_seed, lfail });
         if (lfail != 0) std.process.exit(1);
         return;
     };
