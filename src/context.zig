@@ -9204,6 +9204,27 @@ test "enable_gc: SharedArrayBuffer retain releases when wrapper is collected" {
     try std.testing.expectEqual(true, cleared.asBool());
 }
 
+test "SharedArrayBuffer live retain releases during context teardown" {
+    const cases = [_]Context.Options{
+        .{},
+        .{ .enable_threads = true },
+        .{ .enable_threads = true, .gil = true },
+    };
+
+    for (cases) |options| {
+        const ctx = try Context.createWith(std.testing.allocator, options);
+        errdefer ctx.destroy();
+
+        const result = try ctx.evaluate(
+            "globalThis.keepSab = new SharedArrayBuffer(24); globalThis.keepSab.byteLength",
+        );
+        try std.testing.expectEqual(@as(f64, 24), result.asNum());
+        try std.testing.expectEqual(@as(usize, 1), ctx.sab_retains.items.items.len);
+
+        ctx.destroy();
+    }
+}
+
 test "enable_gc: ArrayBuffer bytes release when wrapper is collected" {
     const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
     defer ctx.destroy();

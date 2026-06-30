@@ -254,9 +254,10 @@ threading architecture:
   classifier, while true-parallel contexts keep the synchronized backing wrapper.
   Context teardown now enters a slab bulk-teardown mode so per-cell frees do not
   rebuild freelists or reclassify bucket ownership immediately before whole
-  chunks are released; keep using the profile attribution to drive
-  nursery/generational work and further lifecycle reductions for create-per-task
-  embedders.
+  chunks are released. Live `SharedArrayBuffer` retain teardown is regression
+  covered across arena, no-GIL threaded, and `.gil = true` contexts. Keep using
+  the profile attribution to drive nursery/generational work and further
+  lifecycle reductions for create-per-task embedders.
 - **Parallel scaling** - `zig build threads-profile` compares the no-GIL
   default against `.gil = true` across independent compute, shared object
   properties, array append, typed-array Atomics, property `Atomics.wait` /

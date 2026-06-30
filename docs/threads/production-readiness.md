@@ -56,6 +56,9 @@ Known performance/maturity work:
   per-cell frees do not rebuild freelists or reclassify bucket ownership
   immediately before the backing releases whole chunks. This cuts the old
   one-general-allocator-call-per-cell profile without changing the collector API.
+  Live `SharedArrayBuffer` retain teardown is also regression covered across the
+  arena path, the no-GIL threaded path, and the `.gil = true` serialized
+  fallback.
 - Single-mutator GC contexts now allocate object side stores directly from the
   context allocator instead of going through the cell-slab classifier only to
   delegate. True-parallel JS contexts keep the synchronized backing wrapper for
