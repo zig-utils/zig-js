@@ -232,7 +232,11 @@ property/condition waiters resume, plus `ThreadLocal` isolation across normal,
 throwing, nested, and async-joined thread lifecycles, plus
 `ThreadLocal` values registered with `FinalizationRegistry` across
 park/resume/clear/join cleanup lifecycles with exact cleanup count/sum delivery
-after quiescent collection. Each seed currently runs 32 deterministic lifecycle
+after quiescent collection. It also parks child Threads behind parent-created
+`asyncJoin()` promises that outlive the parent Thread's local microtask queue,
+then verifies child release, nested `ThreadLocal` roots, rerouted async
+settlement, and exact finalization cleanup after both thread layers exit. Each
+seed currently runs 33 deterministic lifecycle
 subprograms.
 
 `zig build test262 -Dtest262-parallel-js=true` runs test262 programs in

@@ -298,7 +298,11 @@ context APIs.
   suppression, plus cleanup delivery after
   parked property/condition waiters resume, plus `ThreadLocal` values registered
   with `FinalizationRegistry` across park/resume/clear/join cleanup lifecycles
-  with exact cleanup count/sum delivery after quiescent collection. Keep
+  with exact cleanup count/sum delivery after quiescent collection, plus
+  parent-created child `Thread`s whose `asyncJoin()` promises outlive the parent
+  Thread's local queue before child release, nested `ThreadLocal` roots,
+  rerouted async settlement, and exact finalization cleanup after both thread
+  layers exit. Keep
   extending it toward more teardown ordering, broader cross-realm scheduling,
   and richer cleanup/finalization interleavings.
 - **Reference-only PR-249 files.** Promote only when the engine implements the

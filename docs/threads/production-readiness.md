@@ -347,9 +347,12 @@ as embedders exercise more threaded host patterns.
   normal, throwing, nested, and async-joined thread lifecycles, plus
   `ThreadLocal` values registered with `FinalizationRegistry` across
   park/resume/clear/join cleanup lifecycles with exact cleanup count/sum
-  delivery after quiescent collection, plus child-created SAB/ArrayBuffer
-  storage crossing isolated Worker structured-clone after the creator Thread
-  exits.
+  delivery after quiescent collection, plus parent-created child `Thread`s
+  whose `asyncJoin()` promises outlive the parent Thread's local microtask
+  queue before child release, nested `ThreadLocal` root checks, rerouted async
+  settlement, and exact finalization cleanup after both thread layers exit,
+  plus child-created SAB/ArrayBuffer storage crossing isolated Worker
+  structured-clone after the creator Thread exits.
 - CI runs the fuzzer in several modes: default seeded, TSan, high-contention
   amplified, broad semantic,
   mid-script GC wait-pump/microtask/creator-buffer/sync-wait-cleanup/promise/teardown/Worker-SAB/Worker-exception/Worker-close/weak-collection,

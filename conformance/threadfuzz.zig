@@ -5816,6 +5816,204 @@ fn runThreadLocalFinalizationCleanupInterleaving(gpa: std.mem.Allocator, seed: u
     return true;
 }
 
+fn runNestedThreadAsyncJoinCleanupInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
+    var prng = std.Random.DefaultPrng.init(seed ^ 0x6e65_7374_6173_796e);
+    const r = prng.random();
+    const nparents = 2 + r.uintLessThan(usize, 4);
+    const per_child = 5 + r.uintLessThan(usize, 6);
+    const held_base = 70_000 + r.uintLessThan(usize, 10_000);
+
+    var expected_join_sum: usize = 0;
+    var expected_async_score: usize = 0;
+    var expected_cleanup_sum: usize = 0;
+    var pid: usize = 0;
+    while (pid < nparents) : (pid += 1) {
+        const marker = pid + 1;
+        const child_base = (pid + 1) * 10_000;
+        var child_sum = marker;
+        var i: usize = 0;
+        while (i < per_child) : (i += 1) {
+            child_sum += child_base + i;
+            expected_cleanup_sum += held_base + pid * 100 + i;
+        }
+        expected_join_sum += marker + child_sum;
+        expected_async_score += marker + child_sum;
+    }
+    const expected_cleanup_count = nparents * per_child;
+
+    const ctx = js.Context.createWith(gpa, .{ .enable_threads = true, .enable_gc = true }) catch {
+        std.debug.print("seed {d}: nested thread asyncJoin cleanup context creation failed\n", .{seed});
+        return false;
+    };
+    defer ctx.destroy();
+
+    const src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  globalThis.__nestedThreadAsyncScore = 0;
+        \\  globalThis.__nestedThreadCleanupCount = 0;
+        \\  globalThis.__nestedThreadCleanupSum = 0;
+        \\  globalThis.__nestedThreadRegistry = new FinalizationRegistry((held) => {{
+        \\    globalThis.__nestedThreadCleanupCount++;
+        \\    globalThis.__nestedThreadCleanupSum += held;
+        \\  }});
+        \\  const registry = globalThis.__nestedThreadRegistry;
+        \\  const tls = new ThreadLocal();
+        \\  const gate = {{ parentReady: 0, childReady: 0, releaseParents: 0, releaseChildren: 0 }};
+        \\  const parents = [];
+        \\  for (let pid = 0; pid < {d}; pid++) {{
+        \\    parents.push(new Thread((pid, tls, registry, gate, perChild, heldBase, seed) => {{
+        \\      const marker = pid + 1;
+        \\      tls.value = {{ role: 'parent', pid, seed, marker }};
+        \\      const child = new Thread((pid, tls, registry, gate, perChild, heldBase, seed) => {{
+        \\        const marker = pid + 1;
+        \\        const childBase = (pid + 1) * 10000;
+        \\        tls.value = {{ role: 'child', pid, seed, marker }};
+        \\        let childSum = marker;
+        \\        for (let i = 0; i < perChild; i++) {{
+        \\          let target = {{ pid, i, seed, payload: 'nested-thread-cleanup-' + pid + '-' + i }};
+        \\          registry.register(target, heldBase + pid * 100 + i);
+        \\          target = null;
+        \\          childSum += childBase + i;
+        \\        }}
+        \\        Atomics.add(gate, 'childReady', 1);
+        \\        Atomics.notify(gate, 'childReady');
+        \\        while (Atomics.load(gate, 'releaseChildren') === 0)
+        \\          Atomics.wait(gate, 'releaseChildren', 0, 100);
+        \\        const held = tls.value;
+        \\        if (!held || held.role !== 'child' || held.pid !== pid || held.seed !== seed)
+        \\          throw new Error('nested child ThreadLocal root lost for ' + pid);
+        \\        tls.value = undefined;
+        \\        return childSum;
+        \\      }}, pid, tls, registry, gate, perChild, heldBase, seed);
+        \\      const pendingChild = child.asyncJoin();
+        \\      while (Atomics.load(gate, 'childReady') <= pid)
+        \\        Atomics.wait(gate, 'childReady', Atomics.load(gate, 'childReady'), 1);
+        \\      Atomics.add(gate, 'parentReady', 1);
+        \\      Atomics.notify(gate, 'parentReady');
+        \\      while (Atomics.load(gate, 'releaseParents') === 0)
+        \\        Atomics.wait(gate, 'releaseParents', 0, 100);
+        \\      const held = tls.value;
+        \\      if (!held || held.role !== 'parent' || held.pid !== pid || held.seed !== seed)
+        \\        throw new Error('nested parent ThreadLocal root lost for ' + pid);
+        \\      tls.value = undefined;
+        \\      return {{ pid, marker, child, pendingChild }};
+        \\    }}, pid, tls, registry, gate, {d}, {d}, {d}));
+        \\  }}
+        \\  while (Atomics.load(gate, 'parentReady') < {d})
+        \\    Atomics.wait(gate, 'parentReady', Atomics.load(gate, 'parentReady'), 1);
+        \\  while (Atomics.load(gate, 'childReady') < {d})
+        \\    Atomics.wait(gate, 'childReady', Atomics.load(gate, 'childReady'), 1);
+        \\  globalThis.__nestedThreadRegistry.cleanupSome();
+        \\  if (globalThis.__nestedThreadCleanupCount !== 0)
+        \\    throw new Error('nested thread cleanup ran before child release');
+        \\  Atomics.store(gate, 'releaseParents', 1);
+        \\  Atomics.notify(gate, 'releaseParents', {d});
+        \\  const records = [];
+        \\  let joinSum = 0;
+        \\  for (const parent of parents) {{
+        \\    const record = parent.join();
+        \\    if (!record || record.marker !== record.pid + 1 || !(record.pendingChild instanceof Promise))
+        \\      throw new Error('bad nested parent record');
+        \\    joinSum += record.marker;
+        \\    records.push(record);
+        \\  }}
+        \\  parents.length = 0;
+        \\  Atomics.store(gate, 'releaseChildren', 1);
+        \\  Atomics.notify(gate, 'releaseChildren', {d});
+        \\  for (const record of records) {{
+        \\    const childValue = record.child.join();
+        \\    joinSum += childValue;
+        \\    record.pendingChild.then(
+        \\      (v) => {{
+        \\        if (v !== childValue)
+        \\          globalThis.__nestedThreadAsyncScore = -1000000;
+        \\        else
+        \\          globalThis.__nestedThreadAsyncScore += v + record.marker;
+        \\      }},
+        \\      () => {{ globalThis.__nestedThreadAsyncScore = -1000000; }});
+        \\  }}
+        \\  records.length = 0;
+        \\  globalThis.__nestedThreadCheck = function(expectedAsync) {{
+        \\    if (globalThis.__nestedThreadAsyncScore !== expectedAsync)
+        \\      throw new Error('bad nested asyncJoin score ' + globalThis.__nestedThreadAsyncScore + '/' + expectedAsync);
+        \\    return 1;
+        \\  }};
+        \\  return joinSum;
+        \\}})();
+        \\
+    ,
+        .{ nparents, per_child, held_base, seed, nparents, nparents, nparents, nparents },
+    );
+    defer gpa.free(src);
+
+    const joined = ctx.evaluate(src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: nested thread asyncJoin cleanup JS threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!joined.isNumber() or joined.asNum() != @as(f64, @floatFromInt(expected_join_sum))) {
+        std.debug.print("seed {d}: nested thread asyncJoin cleanup join got {d}, expected {d}\n", .{ seed, if (joined.isNumber()) joined.asNum() else -1, expected_join_sum });
+        return false;
+    }
+
+    _ = ctx.evaluate("$drainRunLoop()") catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: nested thread asyncJoin cleanup drain loop threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    const check_src = try std.fmt.allocPrint(gpa, "globalThis.__nestedThreadCheck({d})", .{expected_async_score});
+    defer gpa.free(check_src);
+    const checked = ctx.evaluate(check_src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: nested thread asyncJoin cleanup check threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!checked.isNumber() or checked.asNum() != 1) {
+        std.debug.print("seed {d}: nested thread asyncJoin cleanup check got {d}\n", .{ seed, if (checked.isNumber()) checked.asNum() else -1 });
+        return false;
+    }
+
+    ctx.collectGarbage();
+    const cleanup_src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  globalThis.__nestedThreadRegistry.cleanupSome();
+        \\  if (globalThis.__nestedThreadCleanupCount !== {d})
+        \\    throw new Error('bad nested thread cleanup count ' + globalThis.__nestedThreadCleanupCount + '/' + {d});
+        \\  if (globalThis.__nestedThreadCleanupSum !== {d})
+        \\    throw new Error('bad nested thread cleanup sum ' + globalThis.__nestedThreadCleanupSum + '/' + {d});
+        \\  return globalThis.__nestedThreadCleanupCount;
+        \\}})();
+        \\
+    ,
+        .{ expected_cleanup_count, expected_cleanup_count, expected_cleanup_sum, expected_cleanup_sum },
+    );
+    defer gpa.free(cleanup_src);
+    const cleaned = ctx.evaluate(cleanup_src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: nested thread asyncJoin cleanup cleanup JS threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!cleaned.isNumber() or cleaned.asNum() != @as(f64, @floatFromInt(expected_cleanup_count))) {
+        std.debug.print("seed {d}: nested thread asyncJoin cleanup got {d}, expected {d}\n", .{ seed, if (cleaned.isNumber()) cleaned.asNum() else -1, expected_cleanup_count });
+        return false;
+    }
+    return true;
+}
+
 fn runAsyncHoldBargingLifecycleInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
     const ctx = js.Context.createWithTestingOptions(gpa, .{
         .enable_threads = true,
@@ -9207,6 +9405,22 @@ pub fn main(init: std.process.Init) !void {
         if (tfail != 0) std.process.exit(1);
         return;
     };
+    // `threadfuzz nestedasyncfinal <iters> <seed>`: focused lifecycle repro for
+    // parent-created child Threads whose asyncJoin promises outlive the parent
+    // thread's local queue, plus ThreadLocal roots and exact cleanup.
+    if (first) |a| if (std.mem.eql(u8, a, "nestedasyncfinal")) {
+        if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch 1;
+        if (args.next()) |b| base_seed = std.fmt.parseInt(u64, b, 10) catch 1;
+        var nafail: usize = 0;
+        var nai: usize = 0;
+        while (nai < iters) : (nai += 1) {
+            const seed = base_seed +% nai;
+            if (!(try runNestedThreadAsyncJoinCleanupInterleaving(gpa, seed))) nafail += 1;
+        }
+        std.debug.print("threadfuzz nestedasyncfinal: {d} programs from seed {d}, {d} failures\n", .{ iters, base_seed, nafail });
+        if (nafail != 0) std.process.exit(1);
+        return;
+    };
     // `threadfuzz restrictfinal <iters> <seed>`: focused lifecycle repro for
     // Thread.restrict ownership isolation composed with FinalizationRegistry
     // cleanup after the owning thread exits.
@@ -9705,6 +9919,8 @@ pub fn main(init: std.process.Init) !void {
     // cleanup jobs pending together,
     // Thread.restrict-stored FinalizationRegistry records across owner exit,
     // ThreadLocal-stored FinalizationRegistry records across park/resume/cleanup,
+    // parent-created child Threads whose asyncJoin promises outlive the parent
+    // thread's local queue plus ThreadLocal roots and exact cleanup,
     // asyncHold barging delivery after a deterministic queued ticket,
     // Thread.restrict lifecycle isolation, and ThreadLocal isolation across
     // nested threads plus throwing and async-joined workers. The oracle is not "no
@@ -9743,7 +9959,9 @@ pub fn main(init: std.process.Init) !void {
     // deliver a pending
     // no-fn grant after a sync hold legally overtakes it; ThreadLocal values must stay
     // per-thread across normal, throwing, nested, async-joined, and
-    // finalization-cleanup lifecycles; Thread.restrict-owned objects must reject
+    // finalization-cleanup lifecycles; nested child asyncJoin promises created
+    // by exiting parent Threads must reroute into the realm queue and settle
+    // with exact cleanup after the child is released; Thread.restrict-owned objects must reject
     // foreign access, survive through owner-thread execution, and then deliver
     // exact cleanup after the owner exits; module Worker termination must compose
     // with the same shared-realm teardown/reaction/cleanup oracle.
@@ -9787,8 +10005,9 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runThreadRestrictFinalizationCleanupInterleaving(gpa, seed))) lfail += 1;
             if (!(try runThreadLocalLifecycleInterleaving(gpa, seed))) lfail += 1;
             if (!(try runThreadLocalFinalizationCleanupInterleaving(gpa, seed))) lfail += 1;
+            if (!(try runNestedThreadAsyncJoinCleanupInterleaving(gpa, seed))) lfail += 1;
         }
-        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 32, base_seed, lfail });
+        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 33, base_seed, lfail });
         if (lfail != 0) std.process.exit(1);
         return;
     };

@@ -480,7 +480,10 @@ threading architecture:
   `ThreadLocal` isolation across normal, throwing, nested, and async-joined
   thread lifecycles, and `ThreadLocal` values registered with
   `FinalizationRegistry` across park/resume/clear/join cleanup lifecycles with
-  exact cleanup count/sum delivery after quiescent collection.
+  exact cleanup count/sum delivery after quiescent collection, plus
+  parent-created child `Thread`s whose `asyncJoin()` promises outlive the
+  parent Thread's local queue before child release, nested `ThreadLocal` root
+  checks, and exact finalization cleanup after both thread layers exit.
   Keep extending the fuzzers toward more teardown and cross-realm scheduling
   oracles.
 - **Reference-only PR-249 files** - promote only when the needed engine feature
