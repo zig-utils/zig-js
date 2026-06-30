@@ -4006,6 +4006,260 @@ fn runMidScriptTerminationReactionGc(gpa: std.mem.Allocator, seed: u64) !bool {
     return true;
 }
 
+fn runMidScriptPromisePublicationGc(gpa: std.mem.Allocator, seed: u64) !bool {
+    var prng = std.Random.DefaultPrng.init(seed ^ 0x6d69_6470_726f_6d67);
+    const r = prng.random();
+    const rounds = 9 + r.uintLessThan(usize, 7);
+    const per_round = 850 + r.uintLessThan(usize, 450);
+    const spin_iters = 3000 + r.uintLessThan(usize, 5000);
+    const wait_timeout_ms = 1200 + r.uintLessThan(usize, 900);
+    const return_wait_timeout_ms = 500 + r.uintLessThan(usize, 400);
+    const seed_marker = seed % 10_000;
+    const return_child_marker = 200_000 + seed_marker;
+    const return_async_marker = 210_000 + seed_marker;
+    const return_join_marker = 220_000 + seed_marker;
+    const throw_reject_marker = 230_000 + seed_marker;
+    const throw_join_marker = 240_000 + seed_marker;
+    const expected_score = return_async_marker + return_join_marker + throw_reject_marker;
+
+    const ctx = js.Context.createWithTestingOptions(gpa, .{
+        .enable_threads = true,
+        .enable_gc = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+        .parallel_midscript_gc = true,
+    }) catch {
+        std.debug.print("seed {d}: midgc promise-publication context creation failed\n", .{seed});
+        return false;
+    };
+    defer ctx.destroy();
+
+    const src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  globalThis.__midgcPromiseScore = 0;
+        \\  globalThis.__midgcPromiseJoinThrow = 0;
+        \\  globalThis.__midgcPromiseThrowPromiseSeen = 0;
+        \\  const sab = new SharedArrayBuffer(8);
+        \\  const view = new Int32Array(sab);
+        \\  const gate = {{ prop: 0, propReady: 0, condReady: 0, condOpen: false, returnReady: 0, throwReady: 0 }};
+        \\  const lock = new Lock();
+        \\  const cond = new Condition();
+        \\  const root = {{ seed: {d}, tag: 'midgc-promise-publication-root' }};
+        \\  const propWaiter = new Thread(() => {{
+        \\    Atomics.store(gate, 'propReady', 1);
+        \\    Atomics.notify(gate, 'propReady');
+        \\    return Atomics.wait(gate, 'prop', 0, {d});
+        \\  }});
+        \\  const condWaiter = new Thread(() => {{
+        \\    lock.hold(() => {{
+        \\      Atomics.store(gate, 'condReady', 1);
+        \\      Atomics.notify(gate, 'condReady');
+        \\      while (!gate.condOpen) cond.wait(lock);
+        \\    }});
+        \\    return 'cond-ok';
+        \\  }});
+        \\  while (Atomics.load(gate, 'propReady') === 0)
+        \\    Atomics.wait(gate, 'propReady', 0, 1);
+        \\  while (Atomics.load(gate, 'condReady') === 0)
+        \\    Atomics.wait(gate, 'condReady', 0, 1);
+        \\  const returnedThread = new Thread((sab, gate, marker, seedMarker) => {{
+        \\    const view = new Int32Array(sab);
+        \\    const localRoot = {{
+        \\      marker,
+        \\      nested: {{ seed: seedMarker, label: 'midgc-returned-promise-child-root' }},
+        \\    }};
+        \\    const waiter = Atomics.waitAsync(view, 0, 0, {d});
+        \\    if (waiter.async !== true || !(waiter.value instanceof Promise))
+        \\      throw new Error('bad midgc returned waitAsync pending shape');
+        \\    Atomics.store(gate, 'returnReady', 1);
+        \\    Atomics.notify(gate, 'returnReady');
+        \\    return waiter.value.then((v) => {{
+        \\      if (v !== 'timed-out' || localRoot.marker !== marker || localRoot.nested.seed !== seedMarker)
+        \\        throw new Error('bad midgc returned promise child root');
+        \\      return v;
+        \\    }});
+        \\  }}, sab, gate, {d}, {d});
+        \\  const asyncJoinRoot = {{
+        \\    marker: {d},
+        \\    nested: {{ root, label: 'midgc-returned-promise-asyncJoin-root' }},
+        \\  }};
+        \\  returnedThread.asyncJoin().then(
+        \\    (v) => {{
+        \\      if (v === 'timed-out' && asyncJoinRoot.marker === {d} &&
+        \\          asyncJoinRoot.nested.root.seed === {d})
+        \\        globalThis.__midgcPromiseScore += asyncJoinRoot.marker;
+        \\      else
+        \\        globalThis.__midgcPromiseScore = -1000000;
+        \\    }},
+        \\    () => {{ globalThis.__midgcPromiseScore = -1000000; }});
+        \\  const throwThread = new Thread((gate, marker, seedMarker) => {{
+        \\    const reason = {{
+        \\      marker,
+        \\      nested: {{ seed: seedMarker, label: 'midgc-thrown-publication-root' }},
+        \\      promise: Promise.resolve(marker + 7),
+        \\    }};
+        \\    Atomics.store(gate, 'throwReady', 1);
+        \\    Atomics.notify(gate, 'throwReady');
+        \\    throw reason;
+        \\  }}, gate, {d}, {d});
+        \\  while (Atomics.load(gate, 'returnReady') === 0)
+        \\    Atomics.wait(gate, 'returnReady', 0, 1);
+        \\  while (Atomics.load(gate, 'throwReady') === 0)
+        \\    Atomics.wait(gate, 'throwReady', 0, 1);
+        \\  const keep = [];
+        \\  for (let round = 0; round < {d}; round++) {{
+        \\    for (let i = 0; i < {d}; i++) {{
+        \\      keep.push({{
+        \\        round,
+        \\        i,
+        \\        nested: {{ root, value: i + round }},
+        \\        text: 'midgc-promise-publication-' + round + '-' + i,
+        \\      }});
+        \\    }}
+        \\    let spin = 0;
+        \\    for (let j = 0; j < {d}; j++) spin = (spin + j + round) & 0x3fffffff;
+        \\    if (spin < 0) keep.push({{ never: true }});
+        \\  }}
+        \\  if (typeof gc === 'function') gc();
+        \\  const joinedPromise = returnedThread.join();
+        \\  if (!(joinedPromise instanceof Promise))
+        \\    throw new Error('midgc join did not return child promise');
+        \\  const joinRoot = {{
+        \\    marker: {d},
+        \\    nested: {{ root, label: 'midgc-returned-promise-join-root' }},
+        \\  }};
+        \\  joinedPromise.then(
+        \\    (v) => {{
+        \\      if (v === 'timed-out' && joinRoot.marker === {d} &&
+        \\          joinRoot.nested.root.seed === {d})
+        \\        globalThis.__midgcPromiseScore += joinRoot.marker;
+        \\      else
+        \\        globalThis.__midgcPromiseScore = -1000000;
+        \\    }},
+        \\    () => {{ globalThis.__midgcPromiseScore = -1000000; }});
+        \\  const rejectRoot = {{
+        \\    marker: {d},
+        \\    nested: {{ root, label: 'midgc-throw-asyncJoin-root' }},
+        \\  }};
+        \\  throwThread.asyncJoin().then(
+        \\    () => {{ globalThis.__midgcPromiseScore = -1000000; }},
+        \\    (e) => {{
+        \\      if (e && e.marker === {d} && e.nested.seed === {d} &&
+        \\          rejectRoot.marker === {d} && rejectRoot.nested.root.seed === {d}) {{
+        \\        globalThis.__midgcPromiseScore += rejectRoot.marker;
+        \\        e.promise.then((v) => {{
+        \\          if (v === {d})
+        \\            globalThis.__midgcPromiseThrowPromiseSeen = 1;
+        \\          else
+        \\            globalThis.__midgcPromiseScore = -1000000;
+        \\        }});
+        \\      }} else {{
+        \\        globalThis.__midgcPromiseScore = -1000000;
+        \\      }}
+        \\    }});
+        \\  try {{
+        \\    throwThread.join();
+        \\    throw new Error('midgc throw thread completed normally');
+        \\  }} catch (e) {{
+        \\    if (!e || e.marker !== {d} || e.nested.seed !== {d})
+        \\      throw new Error('bad midgc thrown publication join root');
+        \\    globalThis.__midgcPromiseJoinThrow = e.marker;
+        \\  }}
+        \\  Atomics.store(gate, 'prop', 1);
+        \\  Atomics.notify(gate, 'prop');
+        \\  lock.hold(() => {{
+        \\    gate.condOpen = true;
+        \\    cond.notifyAll();
+        \\  }});
+        \\  const propResult = propWaiter.join();
+        \\  if (propResult !== 'ok' && propResult !== 'not-equal' && propResult !== 'timed-out')
+        \\    throw new Error('bad midgc promise-publication property result: ' + propResult);
+        \\  if (condWaiter.join() !== 'cond-ok')
+        \\    throw new Error('midgc promise-publication condition waiter did not resume');
+        \\  return keep.length;
+        \\}})();
+        \\
+    ,
+        .{
+            seed_marker,
+            wait_timeout_ms,
+            return_wait_timeout_ms,
+            return_child_marker,
+            seed_marker,
+            return_async_marker,
+            return_async_marker,
+            seed_marker,
+            throw_join_marker,
+            seed_marker,
+            rounds,
+            per_round,
+            spin_iters,
+            return_join_marker,
+            return_join_marker,
+            seed_marker,
+            throw_reject_marker,
+            throw_join_marker,
+            seed_marker,
+            throw_reject_marker,
+            seed_marker,
+            throw_join_marker + 7,
+            throw_join_marker,
+            seed_marker,
+        },
+    );
+    defer gpa.free(src);
+
+    const before_attempts = ctx.gc_par_attempts.load(.monotonic);
+    const before_collections = ctx.gc_par_collections.load(.monotonic);
+    const expected: f64 = @floatFromInt(rounds * per_round);
+    const result = ctx.evaluate(src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: midgc promise-publication JS threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!result.isNumber() or result.asNum() != expected) {
+        std.debug.print("seed {d}: midgc promise-publication result got {d}, expected {d}\n", .{ seed, if (result.isNumber()) result.asNum() else -1, expected });
+        return false;
+    }
+    if (ctx.gc_par_attempts.load(.monotonic) <= before_attempts) {
+        std.debug.print("seed {d}: midgc promise-publication did not attempt a parallel collection\n", .{seed});
+        return false;
+    }
+    if (ctx.gc_par_collections.load(.monotonic) <= before_collections) {
+        std.debug.print("seed {d}: midgc promise-publication did not finish a parallel collection\n", .{seed});
+        return false;
+    }
+    const score = ctx.evaluate("globalThis.__midgcPromiseScore") catch |err| {
+        std.debug.print("seed {d}: cannot read midgc promise-publication score: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    if (!score.isNumber() or score.asNum() != @as(f64, @floatFromInt(expected_score))) {
+        std.debug.print("seed {d}: midgc promise-publication score got {d}, expected {d}\n", .{ seed, if (score.isNumber()) score.asNum() else -1, expected_score });
+        return false;
+    }
+    const thrown = ctx.evaluate("globalThis.__midgcPromiseJoinThrow") catch |err| {
+        std.debug.print("seed {d}: cannot read midgc promise-publication thrown marker: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    if (!thrown.isNumber() or thrown.asNum() != @as(f64, @floatFromInt(throw_join_marker))) {
+        std.debug.print("seed {d}: midgc promise-publication thrown marker got {d}, expected {d}\n", .{ seed, if (thrown.isNumber()) thrown.asNum() else -1, throw_join_marker });
+        return false;
+    }
+    const promise_seen = ctx.evaluate("globalThis.__midgcPromiseThrowPromiseSeen") catch |err| {
+        std.debug.print("seed {d}: cannot read midgc promise-publication thrown promise marker: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    if (!promise_seen.isNumber() or promise_seen.asNum() != 1) {
+        std.debug.print("seed {d}: midgc promise-publication thrown promise marker got {d}\n", .{ seed, if (promise_seen.isNumber()) promise_seen.asNum() else -1 });
+        return false;
+    }
+    return true;
+}
+
 pub fn main(init: std.process.Init) !void {
     const gpa = std.heap.page_allocator; // thread-safe; contexts manage their own GC
     var iters: usize = 200;
@@ -4099,6 +4353,22 @@ pub fn main(init: std.process.Init) !void {
         }
         std.debug.print("threadfuzz midgcterm: {d} programs from seed {d}, {d} failures\n", .{ iters, base_seed, mtfail });
         if (mtfail != 0) std.process.exit(1);
+        return;
+    };
+    // `threadfuzz midgcpromise <iters> <seed>`: focused mid-script
+    // parallel-GC repro for child-returned waitAsync promise assimilation and
+    // thrown-object publication through thread completion records.
+    if (first) |a| if (std.mem.eql(u8, a, "midgcpromise")) {
+        if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch 1;
+        if (args.next()) |b| base_seed = std.fmt.parseInt(u64, b, 10) catch 1;
+        var mpfail: usize = 0;
+        var mpi: usize = 0;
+        while (mpi < iters) : (mpi += 1) {
+            const seed = base_seed +% mpi;
+            if (!(try runMidScriptPromisePublicationGc(gpa, seed))) mpfail += 1;
+        }
+        std.debug.print("threadfuzz midgcpromise: {d} programs from seed {d}, {d} failures\n", .{ iters, base_seed, mpfail });
+        if (mpfail != 0) std.process.exit(1);
         return;
     };
     // `threadfuzz verify <iters> <seed>`: deterministic-correctness mode — each
@@ -4214,7 +4484,8 @@ pub fn main(init: std.process.Init) !void {
     // `Condition.wait`, and contended `Lock` acquisition while allocation
     // pressure triggers the experimental collector. Hidden ThreadLocal values,
     // typed-array waitAsync reactions, rejected asyncHold reactions, pending
-    // asyncJoin reactions, completed-but-unjoined Thread results, and teardown
+    // asyncJoin reactions, child-returned waitAsync promise assimilation,
+    // completed-but-unjoined Thread results and thrown objects, and teardown
     // termination with pending asyncJoin/waitAsync roots must survive that
     // window. The oracle requires exact program completion or expected
     // termination and at least one finishing parallel sweep.
@@ -4228,8 +4499,9 @@ pub fn main(init: std.process.Init) !void {
             const seed = base_seed +% mi;
             if (!(try runMidScriptWaitPumpGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptTerminationReactionGc(gpa, seed))) mfail += 1;
+            if (!(try runMidScriptPromisePublicationGc(gpa, seed))) mfail += 1;
         }
-        std.debug.print("threadfuzz midgc: {d} programs from seed {d}, {d} failures\n", .{ iters * 2, base_seed, mfail });
+        std.debug.print("threadfuzz midgc: {d} programs from seed {d}, {d} failures\n", .{ iters * 3, base_seed, mfail });
         if (mfail != 0) std.process.exit(1);
         return;
     };

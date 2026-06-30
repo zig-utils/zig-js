@@ -147,7 +147,10 @@ context APIs.
   subprogram where parked children hold child-owned typed-array `waitAsync`
   tickets through a finishing mid-script sweep, then teardown `asyncJoin`
   rejection reactions run and post-termination notify sees zero leaked waitAsync
-  tickets. Sync-wait pump points
+  tickets, plus a sibling promise-publication subprogram where a child-returned
+  typed-array `waitAsync` promise and a child-thrown object remain rooted
+  through thread completion/native waiter state until post-sweep
+  `join()`/`asyncJoin()` publication. Sync-wait pump points
   must execute the async grants during the
   same allocation-pressure window that produces a finishing parallel sweep, and
   the `waitAsync` reaction must run intact after notification. Join-side

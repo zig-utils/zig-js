@@ -292,9 +292,12 @@ Do this once the engine's `context.zig`/`interpreter.zig` surface is settled
   `waitAsync` promise/reaction graph reachable only through the native waiter
   queue until notification, pending `Thread.asyncJoin` fulfillment/rejection
   reactions reachable only through native completion records until the child
-  threads are released, and a sibling teardown case where parked children hold
-  child-owned typed-array `waitAsync` tickets through a finishing mid-script
-  sweep before parent failure terminates them.
+  threads are released, a sibling promise-publication case where a
+  child-returned typed-array `waitAsync` promise and a child-thrown object remain
+  rooted through completion/native waiter state until post-sweep
+  `join()`/`asyncJoin()` publication, and a sibling teardown case where parked
+  children hold child-owned typed-array `waitAsync` tickets through a finishing
+  mid-script sweep before parent failure terminates them.
   `Thread.join()` park unwinds now clear `gc_parked` and leave the completion
   mutex balanced, preventing stale frozen-peer state after termination/errors.
   *Dependency root helper landed:* `zig-gc` now exposes optional conservative

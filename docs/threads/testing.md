@@ -130,7 +130,11 @@ records until the child threads are released, keeps a registered object
 reachable only through `ThreadLocal.value` while the
 owning thread is parked, keeps a completed-but-unjoined `Thread` result object
 and a completed-but-unjoined thrown exception object reachable only through the
-thread completion record, and adds an expected-termination subprogram that parks
+thread completion record, adds a promise-publication subprogram that leaves a
+child-returned typed-array `waitAsync` promise and a child-thrown object rooted
+through thread completion/native waiter state until after a finishing sweep,
+then verifies `join()` / `asyncJoin()` promise assimilation and thrown-object
+publication, and adds an expected-termination subprogram that parks
 children after installing child-owned typed-array `waitAsync` tickets, drives a
 finishing mid-script parallel sweep, then verifies teardown `asyncJoin`
 rejection reactions and zero leaked waitAsync tickets. It also has a focused
@@ -138,7 +142,7 @@ join-termination unit witness that checks parked-state/mutex cleanup, then
 requires exact script completion or exact expected termination plus at least one
 finishing parallel sweep and exact
 `FinalizationRegistry` cleanup count/sum delivery plus unregister-token
-suppression after a quiescent collect. Each seed currently runs 2 deterministic
+suppression after a quiescent collect. Each seed currently runs 3 deterministic
 mid-GC subprograms. The
 lifecycle profile
 (`-Dfuzz-lifecycle=true`) adds expected-throw termination storms for
