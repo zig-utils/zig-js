@@ -155,10 +155,13 @@ lifecycle profile
 parked/unjoined shared-realm `Thread`s, exact Atomics counter oracles for script
 `Worker` plus simple-import, diamond-shaped, and fanout/rejoin module `Worker`
 overlap with shared-realm `Thread`s on one retained `SharedArrayBuffer`,
-Worker/thread/finalization scheduling on one retained SAB, exact FIFO
-cleanup after terminating spinning Workers that share the retained SAB, exact
-FIFO drain/drop ordering for mixed Worker `close` / `terminate` / `postMessage`
-lifecycles, plus worker handler-exception recovery after a thrown `onmessage`,
+Worker/thread/finalization scheduling on one retained SAB, exact cleanup after
+terminating spinning Workers that share the retained SAB, Worker termination
+while top-level failure tears down parked shared-realm `Thread`s, pending
+`asyncJoin` rejection reactions, and already-ready cleanup jobs on the same
+retained SAB, exact FIFO drain/drop ordering for mixed Worker `close` /
+`terminate` / `postMessage` lifecycles, plus worker handler-exception recovery
+after a thrown `onmessage`,
 Worker handler-exception recovery composed with shared-realm Thread
 finalization cleanup on one retained SAB,
 `Thread.restrict` lifecycle isolation,
@@ -183,7 +186,7 @@ property/condition waiters resume, plus `ThreadLocal` isolation across normal,
 throwing, nested, and async-joined thread lifecycles, plus
 `ThreadLocal` values registered with `FinalizationRegistry` across
 park/resume/clear/join cleanup lifecycles with exact cleanup count/sum delivery
-after quiescent collection. Each seed currently runs 22 deterministic lifecycle
+after quiescent collection. Each seed currently runs 23 deterministic lifecycle
 subprograms.
 
 `zig build test262 -Dtest262-parallel-js=true` runs test262 programs in

@@ -188,10 +188,13 @@ context APIs.
   diamond-shaped, and fanout/rejoin module Worker/thread overlap with exact
   Atomics counter oracles, Worker/thread/finalization scheduling on one retained
   SAB, Worker termination interleaved with exact shared-realm finalization
-  cleanup on a retained SAB, exact FIFO drain/drop ordering for mixed Worker
-  terminate/close/postMessage lifecycles, worker handler-exception recovery,
-  and Worker handler-exception recovery composed with shared-realm Thread
-  finalization cleanup on one retained SAB, plus `Thread.restrict`
+  cleanup on a retained SAB, Worker termination while top-level failure tears
+  down parked shared-realm `Thread`s, pending `asyncJoin` rejection reactions,
+  and already-ready cleanup jobs on the same retained SAB, exact FIFO drain/drop
+  ordering for mixed Worker terminate/close/postMessage lifecycles, worker
+  handler-exception recovery, and Worker handler-exception recovery composed
+  with shared-realm Thread finalization cleanup on one retained SAB, plus
+  `Thread.restrict`
   lifecycle isolation, Thread
   exception identity through `join()` / `asyncJoin()` while property and
   condition waiters are parked,
