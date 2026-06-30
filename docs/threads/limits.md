@@ -87,7 +87,8 @@ context APIs.
   create/destroy-heavy context lifecycles are still slower under the GC path than
   under the old arena model. `zig build gc-profile` remains the repeatable
   baseline before nursery/generational or lifecycle pooling work lands, and now
-  includes a create-per-task versus long-lived-context reuse table with periodic
+  splits context lifecycle time into create and destroy columns while also
+  including a create-per-task versus long-lived-context reuse table with periodic
   collection to quantify the embedder lifecycle tradeoff plus GC cell-backing
   attribution for an object-heavy allocation run: chunk count, total cell-slot
   capacity, live cells at context creation, live cells after allocation, free

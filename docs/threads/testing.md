@@ -288,10 +288,12 @@ does not merely move overhead elsewhere.
 compares create/evaluate/destroy per task against evaluating the same task
 repeatedly in one long-lived context with periodic `collectGarbage()` calls, so
 context-heavy embedders can quantify the cost of create-per-unit-of-work designs
-while the GC allocator and lifecycle paths continue to mature. The profile also
-prints GC cell-backing attribution for an object-heavy allocation run: chunk
-count, total cell-slot capacity, live cells at context creation, live cells
-after allocation, free slots after collection, and live cells after collection.
+while the GC allocator and lifecycle paths continue to mature. The lifecycle
+table splits total time into create and destroy columns so teardown reductions
+are visible separately from global setup costs. The profile also prints GC
+cell-backing attribution for an object-heavy allocation run: chunk count, total
+cell-slot capacity, live cells at context creation, live cells after allocation,
+free slots after collection, and live cells after collection.
 Direct `GcCellBacking` unit tests cover lazy fresh-slot bumping, free-list
 recycling, ownership span/hint classification, stats accounting, and
 bulk-teardown behavior.

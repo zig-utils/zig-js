@@ -242,7 +242,8 @@ threading architecture:
 - **GC performance** - `zig build gc-profile` compares arena, explicit-GC,
   no-GIL threaded GC, and `.gil = true` lifecycle/allocation costs, including a
   create-per-task versus long-lived-context reuse section with periodic
-  collection, and now prints GC cell-backing attribution around an object-heavy
+  collection, and now splits context lifecycle time into create and destroy
+  columns before printing GC cell-backing attribution around an object-heavy
   allocation run: chunk count, total cell-slot capacity, live cells at context
   creation, live cells after script allocation, free slots after collection, and
   live cells after collection. GC cells now allocate through a reusable

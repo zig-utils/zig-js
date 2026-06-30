@@ -77,7 +77,8 @@ Known performance/maturity work:
   arena, explicit-GC, no-GIL threaded GC, and `.gil = true` contexts across
   create/destroy, create-per-task versus long-lived-context reuse with periodic
   collection, object-heavy allocation, block-scoped `let` allocation, and
-  explicit `collectGarbage()`. It also prints GC cell-backing attribution for an
+  explicit `collectGarbage()`. The lifecycle row now breaks create and destroy
+  apart, and the profile also prints GC cell-backing attribution for an
   object-heavy allocation run: chunk count, total cell-slot capacity, live cells
   at context creation, live cells after allocation, free slots after collection,
   and live cells after collection.

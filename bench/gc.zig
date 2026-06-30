@@ -30,14 +30,27 @@ fn makeContext(gpa: std.mem.Allocator, mode: Mode) !*js.Context {
     return js.Context.createWith(gpa, mode.options);
 }
 
-fn timeLifecycle(gpa: std.mem.Allocator, io: std.Io, mode: Mode, rounds: usize) !u64 {
-    const t0 = nowNs(io);
+const LifecycleTimes = struct {
+    create_ns: u64 = 0,
+    destroy_ns: u64 = 0,
+
+    fn total(self: LifecycleTimes) u64 {
+        return self.create_ns + self.destroy_ns;
+    }
+};
+
+fn timeLifecycle(gpa: std.mem.Allocator, io: std.Io, mode: Mode, rounds: usize) !LifecycleTimes {
+    var times: LifecycleTimes = .{};
     var i: usize = 0;
     while (i < rounds) : (i += 1) {
+        const create_t0 = nowNs(io);
         const ctx = try makeContext(gpa, mode);
+        times.create_ns += @intCast(nowNs(io) - create_t0);
+        const destroy_t0 = nowNs(io);
         ctx.destroy();
+        times.destroy_ns += @intCast(nowNs(io) - destroy_t0);
     }
-    return @intCast(nowNs(io) - t0);
+    return times;
 }
 
 fn timeScript(gpa: std.mem.Allocator, io: std.Io, mode: Mode, source: []const u8, rounds: usize) !u64 {
@@ -99,10 +112,23 @@ fn timeExplicitGc(gpa: std.mem.Allocator, io: std.Io, mode: Mode, rounds: usize)
 fn printLifecycle(gpa: std.mem.Allocator, io: std.Io) !void {
     const rounds: usize = 60;
     std.debug.print("\nContext create/destroy ({d} rounds)\n", .{rounds});
-    std.debug.print("{s:<18} {s:>14} {s:>14}\n", .{ "mode", "total ns", "ns/context" });
+    std.debug.print("{s:<18} {s:>14} {s:>14} {s:>14} {s:>14}\n", .{
+        "mode",
+        "total ns",
+        "ns/context",
+        "create ns",
+        "destroy ns",
+    });
     for (modes) |mode| {
-        const ns = try timeLifecycle(gpa, io, mode, rounds);
-        std.debug.print("{s:<18} {d:>14} {d:>14}\n", .{ mode.name, ns, ns / rounds });
+        const times = try timeLifecycle(gpa, io, mode, rounds);
+        const total = times.total();
+        std.debug.print("{s:<18} {d:>14} {d:>14} {d:>14} {d:>14}\n", .{
+            mode.name,
+            total,
+            total / rounds,
+            times.create_ns / rounds,
+            times.destroy_ns / rounds,
+        });
     }
 }
 

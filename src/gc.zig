@@ -63,6 +63,21 @@ inline fn markManaged(v: anytype, cell: anytype) void {
     if (v.isManaged(cell)) v.mark(cell);
 }
 
+inline fn hasObjectBacking(flags: value.ObjectBackingFlags) bool {
+    return flags.slots or
+        flags.elements or
+        flags.accessors or
+        flags.key_order or
+        flags.attrs or
+        flags.holes or
+        flags.weak_entries or
+        flags.finalization_records or
+        flags.typed_array or
+        flags.data_view or
+        flags.temporal or
+        flags.arg_map_names;
+}
+
 // ---- Per-kind tracers (public so a test binding can reuse them) -----------
 
 /// Trace every strong reference out of an `Object`. WeakRef and WeakMap/WeakSet
@@ -698,9 +713,11 @@ pub const Binding = struct {
         switch (kind) {
             .object => {
                 const o: *Object = @ptrCast(@alignCast(cell));
-                const released = finalizeObjectBacking(o, o.backing_allocator orelse self.context.gpa);
-                if (released > 0) {
-                    _ = @atomicRmw(usize, &self.context.gc_object_backing_stores_live, .Sub, released, .monotonic);
+                if (hasObjectBacking(o.backing_flags) or o.private_brands != null) {
+                    const released = finalizeObjectBacking(o, o.backing_allocator orelse self.context.gpa);
+                    if (released > 0) {
+                        _ = @atomicRmw(usize, &self.context.gc_object_backing_stores_live, .Sub, released, .monotonic);
+                    }
                 }
                 if (o.array_buffer) |ab| {
                     if (ab.shared) |storage| {
