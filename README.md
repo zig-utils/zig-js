@@ -192,6 +192,7 @@ zig build conformance           # runs the always-green smoke suite (33/33)
 zig build threads-test          # runs the green WebKit PR-249 threads corpus (225/225)
 zig build threads-reference-audit # classifies the remaining reference-only PR-249 files
 python3 tools/threads-reference-audit.py --probe-candidates # prints closest promotion probes
+python3 tools/threads-reference-audit.py --run-probes # executes closest probes with timeouts
 zig build test -Dtsan=true      # unit suite under ThreadSanitizer
 zig build threadfuzz            # seeded concurrent-JS fuzzer
 zig build threadfuzz -Dfuzz-midgc=true # mid-script GC wait-pump + microtask + creator buffers + sync-wait cleanup + teardown + promise + script/module Worker/SAB + Worker exception + Worker close/terminate + weak-collection fuzzer
@@ -508,6 +509,8 @@ threading architecture:
   of those blocker categories, and
   `python3 tools/threads-reference-audit.py --probe-candidates` lists the
   closest focused `-Dthreads-case=...` probes before any allowlist promotion.
+  Add `--run-probes` to execute those closest probes with per-case timeouts and
+  fail unless every candidate passes.
 
 The [TC39 structs proposal](https://github.com/tc39/proposal-structs) remains a
 tracked future layer. Shared structs, `Atomics.Mutex`, and

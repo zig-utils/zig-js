@@ -429,7 +429,13 @@ Run the reference audit after promotion attempts:
 zig build threads-reference-audit
 python3 tools/threads-reference-audit.py --format markdown
 python3 tools/threads-reference-audit.py --probe-candidates
+python3 tools/threads-reference-audit.py --run-probes --probe-timeout 60
 ```
+
+`--run-probes` executes the closest reference-only candidates with focused
+`threads-test` commands and returns nonzero on any failure or timeout. A timed
+out or failing probe is not promotion evidence; keep the file reference-only
+until the underlying behavior lands and the focused run passes reliably.
 
 ## Docs Checks
 

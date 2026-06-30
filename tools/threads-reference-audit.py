@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import subprocess
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -197,6 +198,61 @@ def print_probe_candidates(
             print(f"    {command}")
 
 
+def print_probe_output_tail(output: str | bytes, *, prefix: str = "      ") -> None:
+    if isinstance(output, bytes):
+        output = output.decode(errors="replace")
+    lines = [line for line in output.splitlines() if line.strip()]
+    for line in lines[-8:]:
+        print(f"{prefix}{line}")
+
+
+def run_probe_candidates(
+    classified: dict[str, list[str]],
+    uncategorized: dict[str, list[str]],
+    *,
+    timeout_s: float,
+) -> int:
+    print()
+    print(f"running promotion probes (timeout {timeout_s:g}s each):")
+    failures = 0
+    for case in PROMOTION_PROBES:
+        cats = classified.get(case) or uncategorized.get(case)
+        if cats is None:
+            continue
+        reason = ", ".join(cats) if cats else "uncategorized"
+        cmd = [
+            "zig",
+            "build",
+            "threads-test",
+            f"-Dthreads-case={case}",
+            "--summary",
+            "all",
+        ]
+        print(f"  - {case}: {reason}")
+        try:
+            proc = subprocess.run(
+                cmd,
+                cwd=REPO,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                timeout=timeout_s,
+            )
+        except subprocess.TimeoutExpired as exc:
+            failures += 1
+            print("    TIMEOUT")
+            if exc.stdout:
+                print_probe_output_tail(exc.stdout)
+            continue
+        if proc.returncode == 0:
+            print("    PASS")
+        else:
+            failures += 1
+            print(f"    FAIL exit={proc.returncode}")
+            print_probe_output_tail(proc.stdout)
+    return failures
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--format", choices=("text", "markdown"), default="text")
@@ -205,6 +261,17 @@ def main(argv: list[str]) -> int:
         "--probe-candidates",
         action="store_true",
         help="Also print the reference-only files closest to allowlist promotion and their focused run commands.",
+    )
+    parser.add_argument(
+        "--run-probes",
+        action="store_true",
+        help="Run the closest promotion probes with per-case timeouts and report pass/fail/timeout evidence.",
+    )
+    parser.add_argument(
+        "--probe-timeout",
+        type=float,
+        default=60.0,
+        help="Timeout in seconds for each --run-probes focused case (default: 60).",
     )
     args = parser.parse_args(argv)
 
@@ -215,10 +282,15 @@ def main(argv: list[str]) -> int:
         print_text(remaining, classified, uncategorized, missing_allowlist)
     if args.probe_candidates:
         print_probe_candidates(classified, uncategorized, markdown=args.format == "markdown")
+    probe_failures = 0
+    if args.run_probes:
+        probe_failures = run_probe_candidates(classified, uncategorized, timeout_s=args.probe_timeout)
 
     if missing_allowlist:
         return 1
     if args.fail_on_uncategorized and uncategorized:
+        return 1
+    if args.run_probes and probe_failures:
         return 1
     return 0
 
