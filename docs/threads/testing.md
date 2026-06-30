@@ -140,7 +140,11 @@ before and after child completion, adds a sync-wait cleanup subprogram that
 parks peers in property `Atomics.wait`, `Condition.wait`, and contended
 `Lock.hold` acquisition through a finishing sweep before verifying their stack
 roots after resume plus exact `FinalizationRegistry` cleanup count/sum delivery,
-and adds an expected-termination subprogram that parks
+adds a Worker/SAB cleanup subprogram that runs isolated Workers on the same
+retained `SharedArrayBuffer` while shared-realm `Thread`s register cleanup
+targets and park stack roots through a finishing sweep, then verifies exact
+Worker progress, joined thread roots, asyncJoin reactions, and cleanup
+count/sum, and adds an expected-termination subprogram that parks
 children after installing child-owned typed-array `waitAsync` tickets, drives a
 finishing mid-script parallel sweep, then verifies teardown `asyncJoin`
 rejection reactions and zero leaked waitAsync tickets. It also has a focused
@@ -148,7 +152,7 @@ join-termination unit witness that checks parked-state/mutex cleanup, then
 requires exact script completion or exact expected termination plus at least one
 finishing parallel sweep and exact
 `FinalizationRegistry` cleanup count/sum delivery plus unregister-token
-suppression after a quiescent collect. Each seed currently runs 4 deterministic
+suppression after a quiescent collect. Each seed currently runs 5 deterministic
 mid-GC subprograms. The
 lifecycle profile
 (`-Dfuzz-lifecycle=true`) adds expected-throw termination storms for

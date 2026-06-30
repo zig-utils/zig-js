@@ -156,7 +156,10 @@ context APIs.
   thrown-object publication, plus a sibling sync-wait cleanup subprogram where
   property `Atomics.wait`, `Condition.wait`, and contended `Lock.hold` peers
   stay parked through a finishing sweep before their stack roots and exact
-  `FinalizationRegistry` cleanup count/sum are verified. Sync-wait pump points
+  `FinalizationRegistry` cleanup count/sum are verified, plus a Worker/SAB
+  cleanup subprogram where isolated Workers keep progressing on a retained
+  `SharedArrayBuffer` while shared-realm `Thread`s publish cleanup targets and
+  parked stack roots through a finishing sweep. Sync-wait pump points
   must execute the async grants during the
   same allocation-pressure window that produces a finishing parallel sweep, and
   the `waitAsync` reaction must run intact after notification. Join-side
@@ -181,7 +184,8 @@ context APIs.
   through native completion records, keeps a ThreadLocal-only hidden root live
   in a parked peer, keeps completed-but-unjoined
   Thread result and thrown exception objects live through the thread completion
-  record, and verifies exact `FinalizationRegistry` cleanup count/sum delivery
+  record, verifies isolated Worker/SAB progress while shared-realm cleanup roots
+  are swept, and verifies exact `FinalizationRegistry` cleanup count/sum delivery
   afterward. The lifecycle
   profile now adds deterministic termination storms,
   script Worker/thread retained-`SharedArrayBuffer` overlap, simple-import,

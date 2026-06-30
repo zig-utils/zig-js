@@ -5373,6 +5373,340 @@ fn runMidScriptPromisePublicationGc(gpa: std.mem.Allocator, seed: u64) !bool {
     return true;
 }
 
+fn runMidScriptWorkerCleanupGc(gpa: std.mem.Allocator, seed: u64) !bool {
+    var prng = std.Random.DefaultPrng.init(seed ^ 0x6d69_6477_6f72_6b63);
+    const r = prng.random();
+    const nworkers = 1 + r.uintLessThan(usize, 2);
+    const nthreads = 2 + r.uintLessThan(usize, 3);
+    const per_thread = 6 + r.uintLessThan(usize, 8);
+    const worker_iters = 700 + r.uintLessThan(usize, 500);
+    const rounds = 8 + r.uintLessThan(usize, 5);
+    const per_round = 650 + r.uintLessThan(usize, 350);
+    const spin_iters = 2200 + r.uintLessThan(usize, 3000);
+    const seed_marker = seed % 10_000;
+    const cleanup_base = 450_000 + seed_marker;
+
+    var expected_join_sum: usize = 0;
+    var expected_cleanup_count: usize = 0;
+    var expected_cleanup_sum: usize = 0;
+    var id: usize = 0;
+    while (id < nthreads) : (id += 1) {
+        const base = (id + 1) * 460_000 + seed_marker;
+        expected_join_sum += base + per_thread + id;
+        expected_cleanup_count += per_thread;
+        var i: usize = 0;
+        while (i < per_thread) : (i += 1) expected_cleanup_sum += base + i;
+    }
+    var round_i: usize = 0;
+    while (round_i < rounds) : (round_i += 1) {
+        var i: usize = 0;
+        while (i < per_round) : (i += 1) {
+            if (((i + round_i) & 31) == 11) {
+                expected_cleanup_count += 1;
+                expected_cleanup_sum += cleanup_base + round_i * per_round + i;
+            }
+        }
+    }
+
+    const ctx = js.Context.createWithTestingOptions(gpa, .{
+        .enable_threads = true,
+        .enable_gc = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+        .parallel_midscript_gc = true,
+    }) catch {
+        std.debug.print("seed {d}: midgc worker-cleanup context creation failed\n", .{seed});
+        return false;
+    };
+    defer ctx.destroy();
+    var machine = ctx.interpreter();
+
+    const msg_src = try std.fmt.allocPrint(
+        gpa,
+        "globalThis.__midgcWorkerCleanupMsg = {{ sab: new SharedArrayBuffer(32), iters: {d} }}; globalThis.__midgcWorkerCleanupMsg",
+        .{worker_iters},
+    );
+    defer gpa.free(msg_src);
+    const msg = ctx.evaluate(msg_src) catch |err| {
+        std.debug.print("seed {d}: cannot create midgc worker-cleanup message: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+
+    const worker_src =
+        \\globalThis.onmessage = (e) => {
+        \\  const v = new Int32Array(e.data.sab);
+        \\  Atomics.add(v, 0, 1);
+        \\  Atomics.notify(v, 0);
+        \\  while (Atomics.load(v, 1) === 0)
+        \\    Atomics.wait(v, 1, 0, 100);
+        \\  let local = 0;
+        \\  for (let i = 0; i < e.data.iters; i++) {
+        \\    local += i & 1;
+        \\    Atomics.add(v, 2, 1);
+        \\    if ((i & 127) === 0)
+        \\      Atomics.add(v, 3, 1);
+        \\  }
+        \\  postMessage({ done: true, local, after: Atomics.add(v, 4, 1) + 1 });
+        \\  close();
+        \\};
+    ;
+
+    var workers: std.ArrayListUnmanaged(*Worker) = .empty;
+    defer workers.deinit(gpa);
+    var cleanup_workers = true;
+    defer if (cleanup_workers) {
+        for (workers.items) |w| {
+            w.terminate();
+            w.join();
+            w.destroy();
+        }
+    };
+
+    var wi: usize = 0;
+    while (wi < nworkers) : (wi += 1) {
+        const w = Worker.spawn(worker_src) catch {
+            std.debug.print("seed {d}: midgc worker-cleanup worker spawn failed\n", .{seed});
+            return false;
+        };
+        try workers.append(gpa, w);
+        w.postMessage(&machine, msg) catch |err| {
+            std.debug.print("seed {d}: midgc worker-cleanup post failed: {s}\n", .{ seed, @errorName(err) });
+            return false;
+        };
+    }
+
+    const src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  globalThis.__midgcWorkerCleanupCount = 0;
+        \\  globalThis.__midgcWorkerCleanupSum = 0;
+        \\  globalThis.__midgcWorkerCleanupOracle = 0;
+        \\  globalThis.__midgcWorkerCleanupRegistry = new FinalizationRegistry((held) => {{
+        \\    globalThis.__midgcWorkerCleanupCount++;
+        \\    globalThis.__midgcWorkerCleanupSum += held;
+        \\  }});
+        \\  const registry = globalThis.__midgcWorkerCleanupRegistry;
+        \\  const v = new Int32Array(globalThis.__midgcWorkerCleanupMsg.sab);
+        \\  const gate = {{ ready: 0, release: 0 }};
+        \\  const threads = [];
+        \\  let asyncSum = 0;
+        \\  for (let id = 0; id < {d}; id++) {{
+        \\    const t = new Thread((id, per, seedMarker) => {{
+        \\      const local = new Int32Array(globalThis.__midgcWorkerCleanupMsg.sab);
+        \\      const base = (id + 1) * 460000 + seedMarker;
+        \\      const root = {{
+        \\        marker: base + per + id,
+        \\        nested: {{ seed: seedMarker, label: 'midgc-worker-cleanup-thread-root' }},
+        \\      }};
+        \\      for (let i = 0; i < per; i++) {{
+        \\        Atomics.add(local, 2, 1);
+        \\        let target = {{ id, i, root, payload: 'midgc-worker-cleanup-thread-' + id + '-' + i }};
+        \\        registry.register(target, base + i);
+        \\        target = null;
+        \\      }}
+        \\      Atomics.add(gate, 'ready', 1);
+        \\      Atomics.notify(gate, 'ready');
+        \\      while (Atomics.load(gate, 'release') === 0)
+        \\        Atomics.wait(gate, 'release', 0, 1000);
+        \\      if (root.nested.seed !== seedMarker)
+        \\        throw new Error('bad midgc worker-cleanup thread root seed');
+        \\      return root;
+        \\    }}, id, {d}, {d});
+        \\    t.asyncJoin().then(
+        \\      (root) => {{
+        \\        if (root && root.nested && root.nested.seed === {d})
+        \\          asyncSum += root.marker;
+        \\        else
+        \\          asyncSum = -1000000;
+        \\      }},
+        \\      () => {{ asyncSum = -1000000; }});
+        \\    threads.push(t);
+        \\  }}
+        \\  while (Atomics.load(gate, 'ready') < {d})
+        \\    Atomics.wait(gate, 'ready', Atomics.load(gate, 'ready'), 1);
+        \\  while (Atomics.load(v, 0) < {d})
+        \\    Atomics.wait(v, 0, Atomics.load(v, 0), 1);
+        \\  Atomics.store(v, 1, 1);
+        \\  Atomics.notify(v, 1, {d});
+        \\  let activeSpins = 0;
+        \\  while (Atomics.load(v, 3) === 0 && activeSpins++ < 10000000)
+        \\    ;
+        \\  if (Atomics.load(v, 3) === 0)
+        \\    throw new Error('midgc worker-cleanup workers did not run concurrently');
+        \\  const keep = [];
+        \\  const root = {{ seed: {d}, tag: 'midgc-worker-cleanup-main-root' }};
+        \\  for (let round = 0; round < {d}; round++) {{
+        \\    for (let i = 0; i < {d}; i++) {{
+        \\      keep.push({{
+        \\        round,
+        \\        i,
+        \\        nested: {{ root, value: i + round }},
+        \\        text: 'midgc-worker-cleanup-' + round + '-' + i,
+        \\      }});
+        \\      if (((i + round) & 31) === 11)
+        \\        registry.register({{ ephemeral: i, round, root }}, {d} + round * {d} + i);
+        \\    }}
+        \\    let spin = 0;
+        \\    for (let j = 0; j < {d}; j++) spin = (spin + j + round) & 0x3fffffff;
+        \\    if (spin < 0) keep.push({{ impossible: true }});
+        \\  }}
+        \\  if (typeof gc === 'function') gc();
+        \\  Atomics.store(gate, 'release', 1);
+        \\  Atomics.notify(gate, 'release', {d});
+        \\  let joinSum = 0;
+        \\  for (const t of threads) {{
+        \\    const rootResult = t.join();
+        \\    if (!rootResult || rootResult.nested.seed !== {d})
+        \\      throw new Error('bad midgc worker-cleanup joined root');
+        \\    joinSum += rootResult.marker;
+        \\  }}
+        \\  if (joinSum !== {d})
+        \\    throw new Error('bad midgc worker-cleanup join sum ' + joinSum);
+        \\  Promise.resolve().then(() => {{
+        \\    if (asyncSum !== {d})
+        \\      throw new Error('bad midgc worker-cleanup async sum ' + asyncSum);
+        \\    globalThis.__midgcWorkerCleanupOracle = 1;
+        \\  }});
+        \\  return keep.length;
+        \\}})();
+        \\
+    ,
+        .{
+            nthreads,
+            per_thread,
+            seed_marker,
+            seed_marker,
+            nthreads,
+            nworkers,
+            nworkers + nthreads + 4,
+            seed_marker,
+            rounds,
+            per_round,
+            cleanup_base,
+            per_round,
+            spin_iters,
+            nthreads + 4,
+            seed_marker,
+            expected_join_sum,
+            expected_join_sum,
+        },
+    );
+    defer gpa.free(src);
+
+    const before_attempts = ctx.gc_par_attempts.load(.monotonic);
+    const before_collections = ctx.gc_par_collections.load(.monotonic);
+    const expected: f64 = @floatFromInt(rounds * per_round);
+    const result = ctx.evaluate(src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: midgc worker-cleanup JS threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!result.isNumber() or result.asNum() != expected) {
+        std.debug.print("seed {d}: midgc worker-cleanup result got {d}, expected {d}\n", .{ seed, if (result.isNumber()) result.asNum() else -1, expected });
+        return false;
+    }
+    if (ctx.gc_par_attempts.load(.monotonic) <= before_attempts) {
+        std.debug.print("seed {d}: midgc worker-cleanup did not attempt a parallel collection\n", .{seed});
+        return false;
+    }
+    if (ctx.gc_par_collections.load(.monotonic) <= before_collections) {
+        std.debug.print("seed {d}: midgc worker-cleanup did not finish a parallel collection\n", .{seed});
+        return false;
+    }
+    const oracle = ctx.evaluate("globalThis.__midgcWorkerCleanupOracle") catch |err| {
+        std.debug.print("seed {d}: cannot read midgc worker-cleanup oracle: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    if (!oracle.isNumber() or oracle.asNum() != 1) {
+        std.debug.print("seed {d}: midgc worker-cleanup oracle got {d}\n", .{ seed, if (oracle.isNumber()) oracle.asNum() else -1 });
+        return false;
+    }
+
+    const expected_worker_local: f64 = @floatFromInt(worker_iters / 2);
+    var replies: usize = 0;
+    while (replies < nworkers) : (replies += 1) {
+        const reply = (workers.items[replies].receive(&machine, 10_000) catch |err| {
+            std.debug.print("seed {d}: midgc worker-cleanup receive failed: {s}\n", .{ seed, @errorName(err) });
+            return false;
+        }) orelse {
+            std.debug.print("seed {d}: midgc worker-cleanup receive timed out\n", .{seed});
+            return false;
+        };
+        const done = machine.getProperty(reply, "done") catch |err| {
+            std.debug.print("seed {d}: cannot read midgc worker-cleanup done: {s}\n", .{ seed, @errorName(err) });
+            return false;
+        };
+        const local = machine.getProperty(reply, "local") catch |err| {
+            std.debug.print("seed {d}: cannot read midgc worker-cleanup local: {s}\n", .{ seed, @errorName(err) });
+            return false;
+        };
+        const after = machine.getProperty(reply, "after") catch |err| {
+            std.debug.print("seed {d}: cannot read midgc worker-cleanup after: {s}\n", .{ seed, @errorName(err) });
+            return false;
+        };
+        if (!done.isBoolean() or !done.asBool() or !local.isNumber() or local.asNum() != expected_worker_local or !after.isNumber() or after.asNum() < 1 or after.asNum() > @as(f64, @floatFromInt(nworkers))) {
+            std.debug.print("seed {d}: bad midgc worker-cleanup reply\n", .{seed});
+            return false;
+        }
+    }
+    for (workers.items) |w| {
+        w.join();
+        w.destroy();
+    }
+    cleanup_workers = false;
+
+    const expected_counter: f64 = @floatFromInt(nworkers * worker_iters + nthreads * per_thread);
+    const counter = ctx.evaluate("Atomics.load(new Int32Array(globalThis.__midgcWorkerCleanupMsg.sab), 2)") catch |err| {
+        std.debug.print("seed {d}: cannot read midgc worker-cleanup counter: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    if (!counter.isNumber() or counter.asNum() != expected_counter) {
+        std.debug.print("seed {d}: midgc worker-cleanup counter got {d}, expected {d}\n", .{ seed, if (counter.isNumber()) counter.asNum() else -1, expected_counter });
+        return false;
+    }
+    const worker_done = ctx.evaluate("Atomics.load(new Int32Array(globalThis.__midgcWorkerCleanupMsg.sab), 4)") catch |err| {
+        std.debug.print("seed {d}: cannot read midgc worker-cleanup worker done: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    if (!worker_done.isNumber() or worker_done.asNum() != @as(f64, @floatFromInt(nworkers))) {
+        std.debug.print("seed {d}: midgc worker-cleanup worker done got {d}, expected {d}\n", .{ seed, if (worker_done.isNumber()) worker_done.asNum() else -1, nworkers });
+        return false;
+    }
+
+    ctx.collectGarbage();
+    const cleanup_src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  globalThis.__midgcWorkerCleanupRegistry.cleanupSome();
+        \\  if (globalThis.__midgcWorkerCleanupCount !== {d})
+        \\    throw new Error('bad midgc worker-cleanup cleanup count: ' + globalThis.__midgcWorkerCleanupCount);
+        \\  if (globalThis.__midgcWorkerCleanupSum !== {d})
+        \\    throw new Error('bad midgc worker-cleanup cleanup sum: ' + globalThis.__midgcWorkerCleanupSum);
+        \\  return globalThis.__midgcWorkerCleanupCount;
+        \\}})();
+        \\
+    ,
+        .{ expected_cleanup_count, expected_cleanup_sum },
+    );
+    defer gpa.free(cleanup_src);
+    const cleaned = ctx.evaluate(cleanup_src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: midgc worker-cleanup cleanup JS threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!cleaned.isNumber() or cleaned.asNum() != @as(f64, @floatFromInt(expected_cleanup_count))) {
+        std.debug.print("seed {d}: midgc worker-cleanup cleaned got {d}, expected {d}\n", .{ seed, if (cleaned.isNumber()) cleaned.asNum() else -1, expected_cleanup_count });
+        return false;
+    }
+    return true;
+}
+
 pub fn main(init: std.process.Init) !void {
     const gpa = std.heap.page_allocator; // thread-safe; contexts manage their own GC
     var iters: usize = 200;
@@ -5550,6 +5884,22 @@ pub fn main(init: std.process.Init) !void {
         if (mpfail != 0) std.process.exit(1);
         return;
     };
+    // `threadfuzz midgcworker <iters> <seed>`: focused mid-script
+    // parallel-GC repro for isolated Workers running on a retained SAB while
+    // shared-realm Threads publish cleanup roots through a finishing sweep.
+    if (first) |a| if (std.mem.eql(u8, a, "midgcworker")) {
+        if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch 1;
+        if (args.next()) |b| base_seed = std.fmt.parseInt(u64, b, 10) catch 1;
+        var mwfail: usize = 0;
+        var mwi: usize = 0;
+        while (mwi < iters) : (mwi += 1) {
+            const seed = base_seed +% mwi;
+            if (!(try runMidScriptWorkerCleanupGc(gpa, seed))) mwfail += 1;
+        }
+        std.debug.print("threadfuzz midgcworker: {d} programs from seed {d}, {d} failures\n", .{ iters, base_seed, mwfail });
+        if (mwfail != 0) std.process.exit(1);
+        return;
+    };
     // `threadfuzz verify <iters> <seed>`: deterministic-correctness mode — each
     // generated program's exact result is predicted and checked, catching
     // wrong-value (lost/torn atomic) bugs the no-throw oracle misses.
@@ -5679,7 +6029,8 @@ pub fn main(init: std.process.Init) !void {
     // typed-array waitAsync reactions, rejected asyncHold reactions, pending
     // asyncJoin reactions, child-returned waitAsync/rejected-promise/user-
     // thenable assimilation, completed-but-unjoined Thread results and thrown
-    // objects, sync-wait peer stack roots with finalization cleanup, and
+    // objects, sync-wait peer stack roots with finalization cleanup, isolated
+    // Worker/SAB progress while shared-realm cleanup roots are swept, and
     // teardown termination with pending asyncJoin/waitAsync roots must survive
     // that window. The oracle requires exact program completion or expected
     // termination and at least one finishing parallel sweep.
@@ -5695,8 +6046,9 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runMidScriptTerminationReactionGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptPromisePublicationGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptSyncWaitCleanupGc(gpa, seed))) mfail += 1;
+            if (!(try runMidScriptWorkerCleanupGc(gpa, seed))) mfail += 1;
         }
-        std.debug.print("threadfuzz midgc: {d} programs from seed {d}, {d} failures\n", .{ iters * 4, base_seed, mfail });
+        std.debug.print("threadfuzz midgc: {d} programs from seed {d}, {d} failures\n", .{ iters * 5, base_seed, mfail });
         if (mfail != 0) std.process.exit(1);
         return;
     };
