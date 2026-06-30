@@ -35042,58 +35042,36 @@ fn temporalZdtWithFn(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
     var l = zdtLocal(t);
     try rejectObjectWithCalendarOrTimeZone(self, bag);
 
-    const day_v = try self.getProperty(bag, "day");
-    const day_field: ?i64 = if (day_v.isUndefined()) null else @intFromFloat(try temporalIntArg(self, day_v, "day"));
-    const hour_v = try self.getProperty(bag, "hour");
-    const hour_field: ?f64 = if (hour_v.isUndefined()) null else try temporalIntArg(self, hour_v, "hour");
-    const microsecond_v = try self.getProperty(bag, "microsecond");
-    const microsecond_field: ?f64 = if (microsecond_v.isUndefined()) null else try temporalIntArg(self, microsecond_v, "microsecond");
-    const millisecond_v = try self.getProperty(bag, "millisecond");
-    const millisecond_field: ?f64 = if (millisecond_v.isUndefined()) null else try temporalIntArg(self, millisecond_v, "millisecond");
-    const minute_v = try self.getProperty(bag, "minute");
-    const minute_field: ?f64 = if (minute_v.isUndefined()) null else try temporalIntArg(self, minute_v, "minute");
-    const month_v = try self.getProperty(bag, "month");
-    const month_field: ?f64 = if (month_v.isUndefined()) null else try temporalIntArg(self, month_v, "month");
-    const month_code_v = try self.getProperty(bag, "monthCode");
-    const month_code_field: ?MonthCodeInfo = if (month_code_v.isUndefined()) null else try readMonthCodeInfo(self, month_code_v);
-    const nanosecond_v = try self.getProperty(bag, "nanosecond");
-    const nanosecond_field: ?f64 = if (nanosecond_v.isUndefined()) null else try temporalIntArg(self, nanosecond_v, "nanosecond");
+    const cur_time = [_]i64{ l.hour, l.minute, l.second, l.millisecond, l.microsecond, l.nanosecond };
+    const fields = try readPlainDateTimeWithFields(self, bag, t.calendar, cur_time);
     const offset_v = try self.getProperty(bag, "offset");
     const offset_field: ?i128 = if (offset_v.isUndefined()) null else try validateRelativeOffset(self, offset_v);
-    const second_v = try self.getProperty(bag, "second");
-    const second_field: ?f64 = if (second_v.isUndefined()) null else try temporalIntArg(self, second_v, "second");
-    const year_v = try self.getProperty(bag, "year");
-    const year_field: ?i64 = if (year_v.isUndefined()) null else @intFromFloat(try temporalIntArg(self, year_v, "year"));
-
-    const any_field = day_field != null or hour_field != null or microsecond_field != null or millisecond_field != null or minute_field != null or month_field != null or month_code_field != null or nanosecond_field != null or offset_field != null or second_field != null or year_field != null;
-    if (!any_field) return self.throwError("TypeError", "Temporal.ZonedDateTime.prototype.with: property bag must contain at least one valid field");
+    if (!fields.any and offset_field == null)
+        return self.throwError("TypeError", "Temporal.ZonedDateTime.prototype.with: property bag must contain at least one valid field");
 
     const options = if (args.len > 1) args[1] else Value.undef();
     if (!options.isUndefined() and (!options.isObject() or options.asObj().is_symbol or options.asObj().is_bigint)) {
-        const y0 = year_field orelse l.year;
-        const m0 = try resolveZdtWithMonth(self, t.calendar, y0, l.year, l.month, month_field, month_code_field, true);
-        const d0 = day_field orelse l.day;
+        const y0 = fields.date.y orelse l.year;
+        const m0 = try resolvePlainDateWithMonth(self, t.calendar, fields.date, y0, l.year, l.month, true);
+        const d0 = fields.date.d orelse l.day;
         _ = try regulateCalendarDate(self, t.calendar, @floatFromInt(y0), @floatFromInt(@as(i64, m0)), @floatFromInt(d0), true);
     }
     const zdt_opts = try readZdtOptions(self, options);
     const reject = zdt_opts.reject;
-    const y = year_field orelse l.year;
-    const m = try resolveZdtWithMonth(self, t.calendar, y, l.year, l.month, month_field, month_code_field, !reject);
-    const d = day_field orelse l.day;
+    const y = fields.date.y orelse l.year;
+    const m = try resolvePlainDateWithMonth(self, t.calendar, fields.date, y, l.year, l.month, !reject);
+    const d = fields.date.d orelse l.day;
     const r = try regulateCalendarDate(self, t.calendar, @floatFromInt(y), @floatFromInt(@as(i64, m)), @floatFromInt(d), !reject);
-    var vals: [6]f64 = .{
-        hour_field orelse @as(f64, @floatFromInt(l.hour)),
-        minute_field orelse @as(f64, @floatFromInt(l.minute)),
-        second_field orelse @as(f64, @floatFromInt(l.second)),
-        millisecond_field orelse @as(f64, @floatFromInt(l.millisecond)),
-        microsecond_field orelse @as(f64, @floatFromInt(l.microsecond)),
-        nanosecond_field orelse @as(f64, @floatFromInt(l.nanosecond)),
-    };
-    try regulateTimeFields(self, &vals, reject);
+    const tm = try regulatePlainTimeRawFields(self, fields.time, reject);
     l.year = @intCast(r.y);
     l.month = r.m;
     l.day = r.d;
-    setTimeFields(&l, vals);
+    l.hour = tm.hour;
+    l.minute = tm.minute;
+    l.second = tm.second;
+    l.millisecond = tm.millisecond;
+    l.microsecond = tm.microsecond;
+    l.nanosecond = tm.nanosecond;
     const iso = calendarDateToIso(t.calendar, l.year, l.month, l.day);
     const local_ns = @as(i128, tDaysFromCivil(iso.y, iso.m, iso.d)) * 86_400_000_000_000 + timeToNs(&l);
     const tz = TimeZone{ .name = t.tz_name, .offset_ns = t.tz_offset_ns };
@@ -35141,7 +35119,7 @@ fn temporalZdtWithTimeZoneFn(ctx: *anyopaque, this: Value, args: []const Value) 
     const t = this.asObj().temporal.?;
     if (args.len == 0 or !args[0].isString()) return self.throwError("TypeError", "withTimeZone requires a time-zone string");
     const tz = try parseTimeZone(self, args[0].asStr());
-    return zdtMake(self, t.epoch_ns, tz.name, tz.offset_ns);
+    return zdtMakeWithCalendar(self, t.epoch_ns, tz.name, tz.offset_ns, t.calendar);
 }
 
 fn temporalZdtWithCalendarFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
