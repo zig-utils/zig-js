@@ -264,7 +264,9 @@ no-fn `Lock.asyncHold` release-function delivery, and thread lifecycle churn.
 Its opt-in counters let
 `events` count logical contention in `Lock`/`Condition`/property waits and
 queued `asyncHold` grants, and `parks` count timed wait/pump iterations
-including `Thread.join`.
+including `Thread.join`. The `joins` columns split the `Thread.join` subset out
+of aggregate parks so lifecycle churn can be attributed separately from lock,
+condition, and property wait pressure.
 The `async`/`done` columns split `Condition.asyncWait` plus property
 `waitAsync` registration from completed async-condition reacquires plus settled
 property `waitAsync` tickets, making timeout-settlement parity and async

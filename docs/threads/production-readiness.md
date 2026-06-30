@@ -111,9 +111,11 @@ Known performance/maturity work:
   lifecycle churn. Each row enables and includes internal contention counters:
   `events` count logical contention (`Lock`/`Condition`/property wait and
   queued `asyncHold` grants), `parks` count timed wait/pump iterations
-  including `Thread.join`, `async`/`done` split `Condition.asyncWait` plus
-  property `waitAsync` registration from completed async-condition reacquires
-  plus settled property `waitAsync` tickets, and `empty`/`jobs` split the
+  including `Thread.join`, `joins` split the `Thread.join` subset out of
+  aggregate parks for lifecycle attribution, `async`/`done` split
+  `Condition.asyncWait` plus property `waitAsync` registration from completed
+  async-condition reacquires plus settled property `waitAsync` tickets, and
+  `empty`/`jobs` split the
   run-loop task pump into empty fast-path hits and delivered async-hold jobs.
 - Parked sync waiters still pump the realm run-loop so async-hold grants make
   progress, but empty pumps now use an atomic queue-count fast path and avoid
