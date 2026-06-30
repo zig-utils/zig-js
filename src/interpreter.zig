@@ -15024,11 +15024,28 @@ fn shadowRealmEvaluateFn(ctx: *anyopaque, this: Value, args: []const Value) valu
     const s_this = self.this_value;
     const s_glob = self.global_object;
     const s_strict = self.strict;
-    self.env = genv;
+    const s_deletable = self.eval_decl_deletable;
+    const eval_env = try gc_mod.allocEnv(self.arena);
+    self.initEnvironment(eval_env, genv, prog_strict);
+    eval_env.fn_body = !prog_strict;
+    self.env = eval_env;
     self.strict = prog_strict;
+    self.eval_decl_deletable = !prog_strict;
+    errdefer {
+        self.env = s_env;
+        self.this_value = s_this;
+        self.global_object = s_glob;
+        self.strict = s_strict;
+        self.eval_decl_deletable = s_deletable;
+    }
     if (gobj) |go| {
         self.this_value = Value.obj(go);
         self.global_object = go;
+    }
+    if (prog.* == .program) {
+        try self.checkGlobalEvalDeclarable(prog.program);
+        if (!prog_strict) try self.checkEvalLexicalConflicts(prog.program);
+        try self.hoistVarNames(prog.program);
     }
     const eval_result = self.eval(prog);
     // Restore the CALLER realm before converting an abrupt completion / wrapping
@@ -15038,6 +15055,7 @@ fn shadowRealmEvaluateFn(ctx: *anyopaque, this: Value, args: []const Value) valu
     self.this_value = s_this;
     self.global_object = s_glob;
     self.strict = s_strict;
+    self.eval_decl_deletable = s_deletable;
     const result = eval_result catch |e| {
         // A throw inside the child realm surfaces as a TypeError in the caller
         // (the thrown value can't cross the boundary).
