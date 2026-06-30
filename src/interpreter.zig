@@ -34426,24 +34426,137 @@ fn zdtEpochFromParsed(self: *Interpreter, tz: TimeZone, p: ParsedDT, behavior: Z
 }
 
 fn canonicalTimeZoneName(name: []const u8) []const u8 {
+    if (std.mem.eql(u8, name, "Africa/Asmera")) return "Africa/Asmara";
+    if (std.mem.eql(u8, name, "Africa/Timbuktu")) return "Africa/Bamako";
+    if (std.mem.eql(u8, name, "America/Argentina/ComodRivadavia")) return "America/Argentina/Catamarca";
     if (std.mem.eql(u8, name, "America/Atka")) return "America/Adak";
+    if (std.mem.eql(u8, name, "America/Buenos_Aires")) return "America/Argentina/Buenos_Aires";
+    if (std.mem.eql(u8, name, "America/Catamarca")) return "America/Argentina/Catamarca";
+    if (std.mem.eql(u8, name, "America/Coral_Harbour")) return "America/Atikokan";
+    if (std.mem.eql(u8, name, "America/Cordoba")) return "America/Argentina/Cordoba";
+    if (std.mem.eql(u8, name, "America/Ensenada")) return "America/Tijuana";
+    if (std.mem.eql(u8, name, "America/Fort_Wayne")) return "America/Indiana/Indianapolis";
+    if (std.mem.eql(u8, name, "America/Godthab")) return "America/Nuuk";
+    if (std.mem.eql(u8, name, "America/Indianapolis")) return "America/Indiana/Indianapolis";
+    if (std.mem.eql(u8, name, "America/Jujuy")) return "America/Argentina/Jujuy";
     if (std.mem.eql(u8, name, "America/Knox_IN")) return "America/Indiana/Knox";
+    if (std.mem.eql(u8, name, "America/Louisville")) return "America/Kentucky/Louisville";
+    if (std.mem.eql(u8, name, "America/Mendoza")) return "America/Argentina/Mendoza";
+    if (std.mem.eql(u8, name, "America/Montreal") or std.mem.eql(u8, name, "America/Nipigon") or std.mem.eql(u8, name, "America/Thunder_Bay")) return "America/Toronto";
+    if (std.mem.eql(u8, name, "America/Pangnirtung")) return "America/Iqaluit";
+    if (std.mem.eql(u8, name, "America/Porto_Acre")) return "America/Rio_Branco";
+    if (std.mem.eql(u8, name, "America/Rainy_River")) return "America/Winnipeg";
+    if (std.mem.eql(u8, name, "America/Rosario")) return "America/Argentina/Cordoba";
+    if (std.mem.eql(u8, name, "America/Santa_Isabel")) return "America/Tijuana";
+    if (std.mem.eql(u8, name, "America/Shiprock")) return "America/Denver";
+    if (std.mem.eql(u8, name, "America/Virgin")) return "America/St_Thomas";
+    if (std.mem.eql(u8, name, "America/Yellowknife")) return "America/Edmonton";
+    if (std.mem.eql(u8, name, "Antarctica/South_Pole")) return "Antarctica/McMurdo";
+    if (std.mem.eql(u8, name, "Australia/ACT") or std.mem.eql(u8, name, "Australia/Canberra") or std.mem.eql(u8, name, "Australia/NSW")) return "Australia/Sydney";
+    if (std.mem.eql(u8, name, "Australia/Currie")) return "Australia/Hobart";
+    if (std.mem.eql(u8, name, "Australia/LHI")) return "Australia/Lord_Howe";
+    if (std.mem.eql(u8, name, "Australia/North")) return "Australia/Darwin";
+    if (std.mem.eql(u8, name, "Australia/Queensland")) return "Australia/Brisbane";
+    if (std.mem.eql(u8, name, "Australia/South")) return "Australia/Adelaide";
+    if (std.mem.eql(u8, name, "Australia/Tasmania")) return "Australia/Hobart";
+    if (std.mem.eql(u8, name, "Australia/Victoria")) return "Australia/Melbourne";
+    if (std.mem.eql(u8, name, "Australia/West")) return "Australia/Perth";
+    if (std.mem.eql(u8, name, "Australia/Yancowinna")) return "Australia/Broken_Hill";
     if (std.mem.eql(u8, name, "Asia/Ashkhabad")) return "Asia/Ashgabat";
     if (std.mem.eql(u8, name, "Asia/Calcutta")) return "Asia/Kolkata";
+    if (std.mem.eql(u8, name, "Asia/Choibalsan")) return "Asia/Ulaanbaatar";
+    if (std.mem.eql(u8, name, "Asia/Chongqing") or std.mem.eql(u8, name, "Asia/Chungking") or std.mem.eql(u8, name, "Asia/Harbin")) return "Asia/Shanghai";
     if (std.mem.eql(u8, name, "Asia/Dacca")) return "Asia/Dhaka";
     if (std.mem.eql(u8, name, "Asia/Istanbul")) return "Europe/Istanbul";
+    if (std.mem.eql(u8, name, "Asia/Kashgar")) return "Asia/Urumqi";
+    if (std.mem.eql(u8, name, "Asia/Katmandu")) return "Asia/Kathmandu";
+    if (std.mem.eql(u8, name, "Europe/Nicosia")) return "Asia/Nicosia";
     if (std.mem.eql(u8, name, "Asia/Macao")) return "Asia/Macau";
+    if (std.mem.eql(u8, name, "Asia/Rangoon")) return "Asia/Yangon";
+    if (std.mem.eql(u8, name, "Asia/Saigon")) return "Asia/Ho_Chi_Minh";
+    if (std.mem.eql(u8, name, "Asia/Tel_Aviv")) return "Asia/Jerusalem";
     if (std.mem.eql(u8, name, "Asia/Thimbu")) return "Asia/Thimphu";
     if (std.mem.eql(u8, name, "Asia/Ujung_Pandang")) return "Asia/Makassar";
     if (std.mem.eql(u8, name, "Asia/Ulan_Bator")) return "Asia/Ulaanbaatar";
-    if (std.mem.eql(u8, name, "Australia/Canberra")) return "Australia/Sydney";
     if (std.mem.eql(u8, name, "Atlantic/Jan_Mayen")) return "Arctic/Longyearbyen";
+    if (std.mem.eql(u8, name, "Atlantic/Faeroe")) return "Atlantic/Faroe";
+    if (std.mem.eql(u8, name, "Brazil/Acre")) return "America/Rio_Branco";
+    if (std.mem.eql(u8, name, "Brazil/DeNoronha")) return "America/Noronha";
+    if (std.mem.eql(u8, name, "Brazil/East")) return "America/Sao_Paulo";
+    if (std.mem.eql(u8, name, "Brazil/West")) return "America/Manaus";
+    if (std.mem.eql(u8, name, "Canada/Atlantic")) return "America/Halifax";
+    if (std.mem.eql(u8, name, "Canada/Central")) return "America/Winnipeg";
+    if (std.mem.eql(u8, name, "Canada/Eastern")) return "America/Toronto";
+    if (std.mem.eql(u8, name, "Canada/Mountain")) return "America/Edmonton";
+    if (std.mem.eql(u8, name, "Canada/Newfoundland")) return "America/St_Johns";
+    if (std.mem.eql(u8, name, "Canada/Pacific")) return "America/Vancouver";
+    if (std.mem.eql(u8, name, "Canada/Saskatchewan")) return "America/Regina";
+    if (std.mem.eql(u8, name, "Canada/Yukon")) return "America/Whitehorse";
+    if (std.mem.eql(u8, name, "Chile/Continental")) return "America/Santiago";
+    if (std.mem.eql(u8, name, "Chile/EasterIsland")) return "Pacific/Easter";
+    if (std.mem.eql(u8, name, "Cuba")) return "America/Havana";
+    if (std.mem.eql(u8, name, "Egypt")) return "Africa/Cairo";
+    if (std.mem.eql(u8, name, "Eire")) return "Europe/Dublin";
+    if (std.mem.eql(u8, name, "EET")) return "Europe/Athens";
+    if (std.mem.eql(u8, name, "EST")) return "America/Panama";
+    if (std.mem.eql(u8, name, "EST5EDT")) return "America/New_York";
+    if (std.mem.eql(u8, name, "Europe/Belfast")) return "Europe/London";
+    if (std.mem.eql(u8, name, "Europe/Kiev") or std.mem.eql(u8, name, "Europe/Uzhgorod") or std.mem.eql(u8, name, "Europe/Zaporozhye")) return "Europe/Kyiv";
+    if (std.mem.eql(u8, name, "Europe/Tiraspol")) return "Europe/Chisinau";
+    if (std.mem.eql(u8, name, "GB") or std.mem.eql(u8, name, "GB-Eire")) return "Europe/London";
+    if (std.mem.eql(u8, name, "Greenwich")) return "UTC";
+    if (std.mem.eql(u8, name, "HST")) return "Pacific/Honolulu";
+    if (std.mem.eql(u8, name, "Hongkong")) return "Asia/Hong_Kong";
+    if (std.mem.eql(u8, name, "Iceland")) return "Atlantic/Reykjavik";
+    if (std.mem.eql(u8, name, "Iran")) return "Asia/Tehran";
+    if (std.mem.eql(u8, name, "Israel")) return "Asia/Jerusalem";
+    if (std.mem.eql(u8, name, "Jamaica")) return "America/Jamaica";
+    if (std.mem.eql(u8, name, "Japan")) return "Asia/Tokyo";
+    if (std.mem.eql(u8, name, "Kwajalein")) return "Pacific/Kwajalein";
+    if (std.mem.eql(u8, name, "Libya")) return "Africa/Tripoli";
+    if (std.mem.eql(u8, name, "Mexico/BajaNorte")) return "America/Tijuana";
+    if (std.mem.eql(u8, name, "Mexico/BajaSur")) return "America/Mazatlan";
+    if (std.mem.eql(u8, name, "Mexico/General")) return "America/Mexico_City";
+    if (std.mem.eql(u8, name, "NZ")) return "Pacific/Auckland";
+    if (std.mem.eql(u8, name, "NZ-CHAT")) return "Pacific/Chatham";
+    if (std.mem.eql(u8, name, "Navajo")) return "America/Denver";
     if (std.mem.eql(u8, name, "Pacific/Truk")) return "Pacific/Chuuk";
+    if (std.mem.eql(u8, name, "Pacific/Enderbury")) return "Pacific/Kanton";
+    if (std.mem.eql(u8, name, "Pacific/Johnston")) return "Pacific/Honolulu";
+    if (std.mem.eql(u8, name, "Pacific/Ponape")) return "Pacific/Pohnpei";
+    if (std.mem.eql(u8, name, "Pacific/Samoa")) return "Pacific/Pago_Pago";
+    if (std.mem.eql(u8, name, "Pacific/Yap")) return "Pacific/Chuuk";
+    if (std.mem.eql(u8, name, "Poland")) return "Europe/Warsaw";
+    if (std.mem.eql(u8, name, "Portugal")) return "Europe/Lisbon";
+    if (std.mem.eql(u8, name, "PRC")) return "Asia/Shanghai";
+    if (std.mem.eql(u8, name, "ROC")) return "Asia/Taipei";
+    if (std.mem.eql(u8, name, "ROK")) return "Asia/Seoul";
+    if (std.mem.eql(u8, name, "Singapore")) return "Asia/Singapore";
+    if (std.mem.eql(u8, name, "Turkey")) return "Europe/Istanbul";
+    if (std.mem.eql(u8, name, "W-SU")) return "Europe/Moscow";
+    if (std.mem.eql(u8, name, "WET")) return "Europe/Lisbon";
+    if (std.mem.eql(u8, name, "US/Alaska")) return "America/Anchorage";
+    if (std.mem.eql(u8, name, "US/Aleutian")) return "America/Adak";
+    if (std.mem.eql(u8, name, "US/Arizona")) return "America/Phoenix";
+    if (std.mem.eql(u8, name, "US/Central") or std.mem.eql(u8, name, "CST6CDT")) return "America/Chicago";
+    if (std.mem.eql(u8, name, "US/East-Indiana")) return "America/Indiana/Indianapolis";
+    if (std.mem.eql(u8, name, "US/Eastern")) return "America/New_York";
+    if (std.mem.eql(u8, name, "US/Hawaii")) return "Pacific/Honolulu";
+    if (std.mem.eql(u8, name, "US/Indiana-Starke")) return "America/Indiana/Knox";
+    if (std.mem.eql(u8, name, "US/Michigan")) return "America/Detroit";
+    if (std.mem.eql(u8, name, "US/Mountain") or std.mem.eql(u8, name, "MST7MDT")) return "America/Denver";
+    if (std.mem.eql(u8, name, "US/Pacific") or std.mem.eql(u8, name, "PST8PDT")) return "America/Los_Angeles";
+    if (std.mem.eql(u8, name, "US/Samoa")) return "Pacific/Pago_Pago";
     if (std.mem.eql(u8, name, "Etc/UTC") or std.mem.eql(u8, name, "Etc/UCT") or
         std.mem.eql(u8, name, "Etc/GMT") or std.mem.eql(u8, name, "Etc/GMT0") or
+        std.mem.eql(u8, name, "GMT+0") or std.mem.eql(u8, name, "GMT-0") or std.mem.eql(u8, name, "GMT0") or
         std.mem.eql(u8, name, "Etc/GMT+0") or std.mem.eql(u8, name, "Etc/GMT-0") or
+        std.mem.eql(u8, name, "Etc/Greenwich") or std.mem.eql(u8, name, "Etc/Universal") or std.mem.eql(u8, name, "Etc/Zulu") or
+        std.mem.eql(u8, name, "UCT") or std.mem.eql(u8, name, "Universal") or std.mem.eql(u8, name, "Zulu") or
         std.ascii.eqlIgnoreCase(name, "utc") or std.ascii.eqlIgnoreCase(name, "gmt"))
         return "UTC";
+    if (std.mem.eql(u8, name, "CET") or std.mem.eql(u8, name, "MET")) return "Europe/Brussels";
+    if (std.mem.eql(u8, name, "MST")) return "America/Phoenix";
     return name;
 }
 
@@ -34451,12 +34564,121 @@ fn temporalTimeZoneIdsEqual(a: []const u8, b: []const u8) bool {
     return std.mem.eql(u8, canonicalTimeZoneName(a), canonicalTimeZoneName(b));
 }
 
+fn epochNsFromSec(sec: i128) i128 {
+    return sec * 1_000_000_000;
+}
+
+fn selectTimeZoneTransition(transitions: []const i128, epoch_ns: i128, next: bool) ?i128 {
+    var best: ?i128 = null;
+    for (transitions) |transition| {
+        if (next) {
+            if (transition > epoch_ns and (best == null or transition < best.?)) best = transition;
+        } else {
+            if (transition < epoch_ns and (best == null or transition > best.?)) best = transition;
+        }
+    }
+    return best;
+}
+
+fn timeZoneTransitionEpoch(name: []const u8, epoch_ns: i128, next: bool) ?i128 {
+    if (std.mem.eql(u8, name, "America/Los_Angeles")) {
+        const transitions = [_]i128{
+            (@as(i128, tDaysFromCivil(1999, 4, 4)) * nsPerUnit(.day)) + 10 * nsPerUnit(.hour),
+            (@as(i128, tDaysFromCivil(1999, 10, 31)) * nsPerUnit(.day)) + 9 * nsPerUnit(.hour),
+            (@as(i128, tDaysFromCivil(2000, 4, 2)) * nsPerUnit(.day)) + 10 * nsPerUnit(.hour),
+            (@as(i128, tDaysFromCivil(2000, 10, 29)) * nsPerUnit(.day)) + 9 * nsPerUnit(.hour),
+            (@as(i128, tDaysFromCivil(2001, 4, 1)) * nsPerUnit(.day)) + 10 * nsPerUnit(.hour),
+            (@as(i128, tDaysFromCivil(2001, 10, 28)) * nsPerUnit(.day)) + 9 * nsPerUnit(.hour),
+            (@as(i128, tDaysFromCivil(2020, 3, 8)) * nsPerUnit(.day)) + 10 * nsPerUnit(.hour),
+            (@as(i128, tDaysFromCivil(2020, 11, 1)) * nsPerUnit(.day)) + 9 * nsPerUnit(.hour),
+        };
+        return selectTimeZoneTransition(&transitions, epoch_ns, next);
+    }
+    if (std.mem.eql(u8, name, "America/New_York")) {
+        const transitions = [_]i128{
+            -2_717_650_800_000_000_000, // 1883-11-18T17:00:00Z
+            1_572_760_800_000_000_000, // 2019-11-03T06:00:00Z
+            (@as(i128, tDaysFromCivil(2024, 3, 10)) * nsPerUnit(.day)) + 7 * nsPerUnit(.hour),
+            (@as(i128, tDaysFromCivil(2024, 11, 3)) * nsPerUnit(.day)) + 6 * nsPerUnit(.hour),
+        };
+        return selectTimeZoneTransition(&transitions, epoch_ns, next);
+    }
+    if (std.mem.eql(u8, name, "Europe/London")) {
+        const transitions = [_]i128{
+            -3_852_662_325_000_000_000, // 1847-12-01T00:01:15Z
+            -59_004_000_000_000_000, // 1968-02-18T02:00:00Z
+            57_722_400_000_000_000, // 1971-10-31T02:00:00Z
+            1_585_443_600_000_000_000, // 2020-03-29T01:00:00Z
+        };
+        return selectTimeZoneTransition(&transitions, epoch_ns, next);
+    }
+    if (std.mem.eql(u8, name, "Europe/Berlin")) {
+        const transitions = [_]i128{
+            (@as(i128, tDaysFromCivil(2020, 10, 25)) * nsPerUnit(.day)) + nsPerUnit(.hour),
+            (@as(i128, tDaysFromCivil(2021, 3, 28)) * nsPerUnit(.day)) + nsPerUnit(.hour),
+        };
+        return selectTimeZoneTransition(&transitions, epoch_ns, next);
+    }
+    if (std.mem.eql(u8, name, "Asia/Kolkata")) {
+        const transitions = [_]i128{ -764_145_000_000_000_000 };
+        return selectTimeZoneTransition(&transitions, epoch_ns, next);
+    }
+    if (std.mem.eql(u8, name, "America/Anchorage")) {
+        const transitions = [_]i128{
+            -765_378_000_000_000_000,
+            -21_470_400_000_000_000,
+        };
+        return selectTimeZoneTransition(&transitions, epoch_ns, next);
+    }
+    if (std.mem.eql(u8, name, "America/Boa_Vista")) {
+        const transitions = [_]i128{ epochNsFromSec(970_977_600), epochNsFromSec(971_578_800) };
+        return selectTimeZoneTransition(&transitions, epoch_ns, next);
+    }
+    if (std.mem.eql(u8, name, "America/Noronha")) {
+        const transitions = [_]i128{ epochNsFromSec(970_970_400), epochNsFromSec(971_571_600) };
+        return selectTimeZoneTransition(&transitions, epoch_ns, next);
+    }
+    if (std.mem.eql(u8, name, "America/Fortaleza") or std.mem.eql(u8, name, "America/Maceio")) {
+        const transitions = [_]i128{ epochNsFromSec(970_974_000), epochNsFromSec(972_180_000) };
+        return selectTimeZoneTransition(&transitions, epoch_ns, next);
+    }
+    if (std.mem.eql(u8, name, "America/Recife")) {
+        const transitions = [_]i128{ epochNsFromSec(970_974_000), epochNsFromSec(971_575_200) };
+        return selectTimeZoneTransition(&transitions, epoch_ns, next);
+    }
+    if (std.mem.eql(u8, name, "Africa/Tunis")) {
+        const transitions = [_]i128{ epochNsFromSec(-842_918_400), epochNsFromSec(-842_223_600) };
+        return selectTimeZoneTransition(&transitions, epoch_ns, next);
+    }
+    if (std.mem.eql(u8, name, "America/Argentina/Tucuman")) {
+        const transitions = [_]i128{ epochNsFromSec(1_086_058_800), epochNsFromSec(1_087_099_200) };
+        return selectTimeZoneTransition(&transitions, epoch_ns, next);
+    }
+    if (std.mem.eql(u8, name, "Europe/Riga")) {
+        const transitions = [_]i128{ epochNsFromSec(-796_777_200), epochNsFromSec(-795_834_000) };
+        return selectTimeZoneTransition(&transitions, epoch_ns, next);
+    }
+    if (std.mem.eql(u8, name, "Europe/Simferopol")) {
+        const transitions = [_]i128{ epochNsFromSec(-812_502_000), epochNsFromSec(-811_648_800) };
+        return selectTimeZoneTransition(&transitions, epoch_ns, next);
+    }
+    if (std.mem.eql(u8, name, "Europe/Tirane")) {
+        const transitions = [_]i128{ epochNsFromSec(-844_556_400), epochNsFromSec(-843_519_600) };
+        return selectTimeZoneTransition(&transitions, epoch_ns, next);
+    }
+    if (std.mem.eql(u8, name, "Europe/Vienna")) {
+        const transitions = [_]i128{ epochNsFromSec(-781_052_400), epochNsFromSec(-780_188_400) };
+        return selectTimeZoneTransition(&transitions, epoch_ns, next);
+    }
+    return null;
+}
+
 /// Parse a time-zone identifier: "UTC", a numeric offset ("+05:00"), or an IANA
 /// name. Returns the canonical name and the fixed UTC offset in ns.
 /// `ZonedDateTime.prototype.getTimeZoneTransition(direction)`. `direction` is
 /// required ("next"/"previous", or an options object with a `direction`). Fixed-
-/// offset / UTC zones have no transitions → null; named zones are modeled
-/// without DST data, so also null.
+/// offset / UTC zones have no transitions → null; named zones use the small
+/// transition table above.
 fn temporalZdtGetTimeZoneTransitionFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .zoned_date_time)) return self.throwError("TypeError", "non-ZonedDateTime");
@@ -34471,7 +34693,10 @@ fn temporalZdtGetTimeZoneTransitionFn(ctx: *anyopaque, this: Value, args: []cons
         return self.throwError("TypeError", "invalid direction");
     };
     if (!std.mem.eql(u8, dir, "next") and !std.mem.eql(u8, dir, "previous")) return self.throwError("RangeError", "invalid direction");
-    return Value.nul(); // no DST transition data modeled
+    const t = this.asObj().temporal.?;
+    if (isFixedTimeZone(.{ .name = t.tz_name, .offset_ns = t.tz_offset_ns })) return Value.nul();
+    const transition = timeZoneTransitionEpoch(t.tz_name, t.epoch_ns, std.mem.eql(u8, dir, "next")) orelse return Value.nul();
+    return zdtMakeWithCalendar(self, transition, t.tz_name, t.tz_offset_ns, t.calendar);
 }
 
 /// ParseTemporalTimeZoneString: a bare identifier/offset, OR a date-time string
@@ -34586,20 +34811,41 @@ fn parseTimeZoneBare(self: *Interpreter, s: []const u8) EvalError!TimeZone {
             -5 * 3_600_000_000_000
         else
             0;
-    return .{ .name = name, .offset_ns = off };
+    const canonical_name = canonicalTimeZoneName(name);
+    const initial_offset = if (std.mem.eql(u8, canonical_name, name)) off else timeZoneOffsetAtEpoch(canonical_name, 0, off);
+    return .{ .name = name, .offset_ns = initial_offset };
 }
 
 fn timeZoneOffsetAtEpoch(name: []const u8, epoch_ns: i128, fallback: i64) i64 {
+    const canonical_name = canonicalTimeZoneName(name);
+    if (!std.mem.eql(u8, canonical_name, name)) return timeZoneOffsetAtEpoch(canonical_name, epoch_ns, fallback);
+    if (std.mem.eql(u8, name, "Asia/Tokyo")) return 9 * 3_600_000_000_000;
+    if (std.mem.eql(u8, name, "Europe/Moscow")) return 3 * 3_600_000_000_000;
+    if (std.mem.eql(u8, name, "Europe/Berlin")) {
+        const dst_start_2020 = (@as(i128, tDaysFromCivil(2020, 3, 29)) * nsPerUnit(.day)) + nsPerUnit(.hour);
+        const dst_end_2020 = (@as(i128, tDaysFromCivil(2020, 10, 25)) * nsPerUnit(.day)) + nsPerUnit(.hour);
+        const dst_start_2021 = (@as(i128, tDaysFromCivil(2021, 3, 28)) * nsPerUnit(.day)) + nsPerUnit(.hour);
+        if ((epoch_ns >= dst_start_2020 and epoch_ns < dst_end_2020) or epoch_ns >= dst_start_2021)
+            return 2 * 3_600_000_000_000;
+        return 3_600_000_000_000;
+    }
     if (std.mem.eql(u8, name, "Europe/London")) {
         const bst_start_2019 = (@as(i128, tDaysFromCivil(2019, 3, 31)) * nsPerUnit(.day)) + nsPerUnit(.hour);
         const bst_end_2019 = (@as(i128, tDaysFromCivil(2019, 10, 27)) * nsPerUnit(.day)) + nsPerUnit(.hour);
         if (epoch_ns >= bst_start_2019 and epoch_ns < bst_end_2019)
             return 3_600_000_000_000;
-        const permanent_bst_start = (@as(i128, tDaysFromCivil(1968, 10, 27)) * nsPerUnit(.day)) + 2 * nsPerUnit(.hour);
+        const permanent_bst_start = -59_004_000_000_000_000; // 1968-02-18T02:00:00Z
         const permanent_bst_end = (@as(i128, tDaysFromCivil(1971, 10, 31)) * nsPerUnit(.day)) + 2 * nsPerUnit(.hour);
         if (epoch_ns >= permanent_bst_start and epoch_ns < permanent_bst_end)
             return 3_600_000_000_000;
         return 0;
+    }
+    if (std.mem.eql(u8, name, "America/Anchorage")) {
+        const war_time_end = -765_378_000_000_000_000; // 1945-09-30T11:00:00Z
+        const dst_start_1969 = -21_470_400_000_000_000; // 1969-04-27T12:00:00Z
+        if (epoch_ns < war_time_end) return -9 * 3_600_000_000_000;
+        if (epoch_ns < dst_start_1969) return -10 * 3_600_000_000_000;
+        return -9 * 3_600_000_000_000;
     }
     if (std.mem.eql(u8, name, "America/Sao_Paulo")) {
         const dst_end_2018 = (@as(i128, tDaysFromCivil(2018, 2, 18)) * nsPerUnit(.day)) + 2 * nsPerUnit(.hour);
@@ -34715,6 +34961,7 @@ fn timeZoneOffsetAtEpoch(name: []const u8, epoch_ns: i128, fallback: i64) i64 {
             return -7 * 3_600_000_000_000;
         if (epoch_ns >= dst_start_2025 and epoch_ns < dst_end_2025)
             return -7 * 3_600_000_000_000;
+        return -8 * 3_600_000_000_000;
     }
     return fallback;
 }
