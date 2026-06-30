@@ -257,7 +257,10 @@ as embedders exercise more threaded host patterns.
   `asyncJoin()` and unregister-token suppression, cleanup delivery after parked
   property/condition waiters resume, deterministic `Lock.asyncHold()` barging
   where a sync hold legally overtakes a queued no-fn async ticket before
-  `await` delivers its release function, and `ThreadLocal` isolation across
+  `await` delivers its release function, Promise reaction queue churn from
+  with-fn `Lock.asyncHold`, no-fn release functions, typed-array `waitAsync`,
+  `Thread.asyncJoin`, and exact `FinalizationRegistry` cleanup, and
+  `ThreadLocal` isolation across
   normal, throwing, nested, and async-joined thread lifecycles, plus
   `ThreadLocal` values registered with `FinalizationRegistry` across
   park/resume/clear/join cleanup lifecycles with exact cleanup count/sum

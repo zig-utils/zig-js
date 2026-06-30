@@ -3219,6 +3219,217 @@ fn runWaitAsyncFinalizationCleanupInterleaving(gpa: std.mem.Allocator, seed: u64
     return true;
 }
 
+fn runMicrotaskChurnLifecycleInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
+    var prng = std.Random.DefaultPrng.init(seed ^ 0x6d69_6372_6f74_6173);
+    const r = prng.random();
+    const nthreads = 3 + r.uintLessThan(usize, 3);
+    const per_thread = 8 + r.uintLessThan(usize, 8);
+
+    var expected_join_sum: usize = 0;
+    var expected_wait_score: usize = 0;
+    var expected_async_hold_score: usize = 0;
+    var expected_release_score: usize = 0;
+    var expected_cleanup_count: usize = 0;
+    var expected_cleanup_sum: usize = 0;
+    var id: usize = 0;
+    while (id < nthreads) : (id += 1) {
+        const base = (id + 1) * 20_000;
+        var i: usize = 0;
+        var local_sum: usize = 0;
+        while (i < per_thread) : (i += 1) {
+            local_sum += base + i;
+            expected_cleanup_sum += base + 3_000 + i;
+            expected_async_hold_score += base + 1_000 + i;
+            expected_release_score += base + 2_000 + i;
+        }
+        expected_join_sum += local_sum + id + 1;
+        expected_wait_score += base + 5_000 + id;
+        expected_cleanup_count += per_thread;
+    }
+
+    const ctx = js.Context.createWith(gpa, .{ .enable_threads = true, .enable_gc = true }) catch {
+        std.debug.print("seed {d}: microtask churn lifecycle context creation failed\n", .{seed});
+        return false;
+    };
+    defer ctx.destroy();
+
+    const src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  globalThis.__microtaskChurnJoinScore = 0;
+        \\  globalThis.__microtaskChurnWaitScore = 0;
+        \\  globalThis.__microtaskChurnAsyncHoldScore = 0;
+        \\  globalThis.__microtaskChurnReleaseScore = 0;
+        \\  globalThis.__microtaskChurnCleanupCount = 0;
+        \\  globalThis.__microtaskChurnCleanupSum = 0;
+        \\  globalThis.__microtaskChurnRegistry = new FinalizationRegistry((held) => {{
+        \\    globalThis.__microtaskChurnCleanupCount++;
+        \\    globalThis.__microtaskChurnCleanupSum += held;
+        \\  }});
+        \\  const registry = globalThis.__microtaskChurnRegistry;
+        \\  const view = new Int32Array(new SharedArrayBuffer({d} * 4));
+        \\  const lock = new Lock();
+        \\  const threads = [];
+        \\  for (let id = 0; id < {d}; id++) {{
+        \\    const base = (id + 1) * 20000;
+        \\    const waitRoot = {{ marker: base + 5000 + id, seed: {d}, label: 'microtask-churn-wait-root' }};
+        \\    const waiter = Atomics.waitAsync(view, id, 0, 2000);
+        \\    if (waiter.async !== true || !(waiter.value instanceof Promise))
+        \\      throw new Error('bad microtask churn waitAsync shape');
+        \\    waiter.value.then(
+        \\      (v) => {{
+        \\        if (v === 'ok' && waitRoot.seed === {d})
+        \\          globalThis.__microtaskChurnWaitScore += waitRoot.marker;
+        \\        else
+        \\          globalThis.__microtaskChurnWaitScore = -1000000;
+        \\      }},
+        \\      () => {{ globalThis.__microtaskChurnWaitScore = -1000000; }});
+        \\    const t = new Thread((view, id, per, registry) => {{
+        \\      const base = (id + 1) * 20000;
+        \\      let localSum = 0;
+        \\      for (let i = 0; i < per; i++) {{
+        \\        let target = {{ id, i, payload: 'microtask-churn-cleanup-' + id + '-' + i }};
+        \\        registry.register(target, base + 3000 + i);
+        \\        target = null;
+        \\        localSum += base + i;
+        \\      }}
+        \\      Atomics.store(view, id, 1);
+        \\      const notified = Atomics.notify(view, id);
+        \\      if (notified !== 1)
+        \\        throw new Error('microtask churn notify got ' + notified);
+        \\      return localSum + id + notified;
+        \\    }}, view, id, {d}, registry);
+        \\    t.asyncJoin().then(
+        \\      (v) => {{ globalThis.__microtaskChurnJoinScore += v; }},
+        \\      () => {{ globalThis.__microtaskChurnJoinScore = -1000000; }});
+        \\    threads.push(t);
+        \\    for (let i = 0; i < {d}; i++) {{
+        \\      const cbMarker = base + 1000 + i;
+        \\      lock.asyncHold(() => cbMarker).then(
+        \\        (v) => {{
+        \\          if (v === cbMarker)
+        \\            globalThis.__microtaskChurnAsyncHoldScore += v;
+        \\          else
+        \\            globalThis.__microtaskChurnAsyncHoldScore = -1000000;
+        \\        }},
+        \\        () => {{ globalThis.__microtaskChurnAsyncHoldScore = -1000000; }});
+        \\      const releaseMarker = base + 2000 + i;
+        \\      lock.asyncHold().then(
+        \\        (release) => {{
+        \\          if (typeof release !== 'function') {{
+        \\            globalThis.__microtaskChurnReleaseScore = -1000000;
+        \\          }} else {{
+        \\            globalThis.__microtaskChurnReleaseScore += releaseMarker;
+        \\            release();
+        \\          }}
+        \\        }},
+        \\        () => {{ globalThis.__microtaskChurnReleaseScore = -1000000; }});
+        \\    }}
+        \\  }}
+        \\  let joinSum = 0;
+        \\  for (const t of threads)
+        \\    joinSum += t.join();
+        \\  if (joinSum !== {d})
+        \\    throw new Error('bad microtask churn join sum ' + joinSum);
+        \\  threads.length = 0;
+        \\  globalThis.__microtaskChurnCheck = function(expectedJoin, expectedWait, expectedAsyncHold, expectedRelease) {{
+        \\    if (globalThis.__microtaskChurnJoinScore !== expectedJoin)
+        \\      throw new Error('bad microtask churn asyncJoin score ' + globalThis.__microtaskChurnJoinScore + '/' + expectedJoin);
+        \\    if (globalThis.__microtaskChurnWaitScore !== expectedWait)
+        \\      throw new Error('bad microtask churn waitAsync score ' + globalThis.__microtaskChurnWaitScore + '/' + expectedWait);
+        \\    if (globalThis.__microtaskChurnAsyncHoldScore !== expectedAsyncHold)
+        \\      throw new Error('bad microtask churn asyncHold score ' + globalThis.__microtaskChurnAsyncHoldScore + '/' + expectedAsyncHold);
+        \\    if (globalThis.__microtaskChurnReleaseScore !== expectedRelease)
+        \\      throw new Error('bad microtask churn release score ' + globalThis.__microtaskChurnReleaseScore + '/' + expectedRelease);
+        \\    return 1;
+        \\  }};
+        \\  return joinSum;
+        \\}})();
+        \\
+    ,
+        .{
+            nthreads,
+            nthreads,
+            seed,
+            seed,
+            per_thread,
+            per_thread,
+            expected_join_sum,
+        },
+    );
+    defer gpa.free(src);
+
+    const joined = ctx.evaluate(src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: microtask churn lifecycle JS threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!joined.isNumber() or joined.asNum() != @as(f64, @floatFromInt(expected_join_sum))) {
+        std.debug.print("seed {d}: microtask churn lifecycle join got {d}, expected {d}\n", .{ seed, if (joined.isNumber()) joined.asNum() else -1, expected_join_sum });
+        return false;
+    }
+
+    _ = ctx.evaluate("$drainRunLoop()") catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: microtask churn drain loop threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    const check_src = try std.fmt.allocPrint(
+        gpa,
+        "globalThis.__microtaskChurnCheck({d}, {d}, {d}, {d})",
+        .{ expected_join_sum, expected_wait_score, expected_async_hold_score, expected_release_score },
+    );
+    defer gpa.free(check_src);
+    const checked = ctx.evaluate(check_src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: microtask churn check threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!checked.isNumber() or checked.asNum() != 1) {
+        std.debug.print("seed {d}: microtask churn check got {d}\n", .{ seed, if (checked.isNumber()) checked.asNum() else -1 });
+        return false;
+    }
+
+    ctx.collectGarbage();
+    const cleanup_src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  globalThis.__microtaskChurnRegistry.cleanupSome();
+        \\  if (globalThis.__microtaskChurnCleanupCount !== {d})
+        \\    throw new Error('bad microtask churn cleanup count ' + globalThis.__microtaskChurnCleanupCount + '/' + {d});
+        \\  if (globalThis.__microtaskChurnCleanupSum !== {d})
+        \\    throw new Error('bad microtask churn cleanup sum ' + globalThis.__microtaskChurnCleanupSum + '/' + {d});
+        \\  return globalThis.__microtaskChurnCleanupCount;
+        \\}})();
+        \\
+    ,
+        .{ expected_cleanup_count, expected_cleanup_count, expected_cleanup_sum, expected_cleanup_sum },
+    );
+    defer gpa.free(cleanup_src);
+    const cleaned = ctx.evaluate(cleanup_src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: microtask churn cleanup JS threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!cleaned.isNumber() or cleaned.asNum() != @as(f64, @floatFromInt(expected_cleanup_count))) {
+        std.debug.print("seed {d}: microtask churn cleanup got {d}, expected {d}\n", .{ seed, if (cleaned.isNumber()) cleaned.asNum() else -1, expected_cleanup_count });
+        return false;
+    }
+    return true;
+}
+
 fn runTerminationPendingReactionInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
     var prng = std.Random.DefaultPrng.init(seed ^ 0x7465_726d_7265_6163);
     const r = prng.random();
@@ -5770,6 +5981,22 @@ pub fn main(init: std.process.Init) !void {
         if (wfail != 0) std.process.exit(1);
         return;
     };
+    // `threadfuzz microtaskchurn <iters> <seed>`: focused lifecycle repro for
+    // Promise reaction queue churn across asyncHold, waitAsync, asyncJoin, and
+    // finalization cleanup.
+    if (first) |a| if (std.mem.eql(u8, a, "microtaskchurn")) {
+        if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch 1;
+        if (args.next()) |b| base_seed = std.fmt.parseInt(u64, b, 10) catch 1;
+        var mcfail: usize = 0;
+        var mci: usize = 0;
+        while (mci < iters) : (mci += 1) {
+            const seed = base_seed +% mci;
+            if (!(try runMicrotaskChurnLifecycleInterleaving(gpa, seed))) mcfail += 1;
+        }
+        std.debug.print("threadfuzz microtaskchurn: {d} programs from seed {d}, {d} failures\n", .{ iters, base_seed, mcfail });
+        if (mcfail != 0) std.process.exit(1);
+        return;
+    };
     // `threadfuzz termreact <iters> <seed>`: focused lifecycle repro for
     // teardown termination while asyncJoin reactions and child-owned typed-array
     // waitAsync tickets are still pending.
@@ -5950,6 +6177,8 @@ pub fn main(init: std.process.Init) !void {
     // with join/asyncJoin and unregister tokens, cleanup
     // delivery after parked property/condition waiters resume, typed-array
     // waitAsync settlement interleaved with asyncJoin and finalization cleanup,
+    // Promise reaction queue churn from asyncHold, waitAsync, asyncJoin, and
+    // finalization cleanup,
     // teardown termination with pending asyncJoin reactions and child-owned
     // typed-array waitAsync tickets, teardown termination with property
     // waitAsync timeouts, async condition reacquire, asyncJoin rejection, and
@@ -5977,7 +6206,8 @@ pub fn main(init: std.process.Init) !void {
     // oracles when thread results are observed through both join paths, when
     // unregister tokens suppress some records, after parked property and
     // condition waiters resume, and while typed-array waitAsync promise
-    // reactions and asyncJoin reactions settle together, plus when teardown
+    // reactions and asyncJoin reactions settle together, while asyncHold
+    // callback and release-function reactions churn the same queue, plus when teardown
     // termination rejects pending asyncJoin reactions and abandons child-owned
     // typed-array waitAsync tickets, and when teardown termination overlaps
     // property waitAsync timeout compaction, async condition reacquire,
@@ -6011,6 +6241,7 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runFinalizationAsyncJoinCleanupInterleaving(gpa, seed))) lfail += 1;
             if (!(try runFinalizationWaiterCleanupInterleaving(gpa, seed))) lfail += 1;
             if (!(try runWaitAsyncFinalizationCleanupInterleaving(gpa, seed))) lfail += 1;
+            if (!(try runMicrotaskChurnLifecycleInterleaving(gpa, seed))) lfail += 1;
             if (!(try runTerminationPendingReactionInterleaving(gpa, seed))) lfail += 1;
             if (!(try runTerminationWaiterCleanupInterleaving(gpa, seed))) lfail += 1;
             if (!(try runAsyncHoldBargingLifecycleInterleaving(gpa, seed))) lfail += 1;
@@ -6018,7 +6249,7 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runThreadLocalLifecycleInterleaving(gpa, seed))) lfail += 1;
             if (!(try runThreadLocalFinalizationCleanupInterleaving(gpa, seed))) lfail += 1;
         }
-        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 23, base_seed, lfail });
+        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 24, base_seed, lfail });
         if (lfail != 0) std.process.exit(1);
         return;
     };

@@ -386,6 +386,9 @@ threading architecture:
   already-ready `FinalizationRegistry` cleanup jobs share the same realm turn,
   deterministic `Lock.asyncHold()` barging where a sync hold legally overtakes
   a queued no-fn async ticket before `await` delivers its release function,
+  Promise reaction queue churn from with-fn `Lock.asyncHold`, no-fn
+  release-function delivery, typed-array `waitAsync`, `Thread.asyncJoin`, and
+  exact `FinalizationRegistry` cleanup,
   cross-thread `FinalizationRegistry` cleanup count/sum oracles, cleanup
   delivery interleaved with `join()` / `asyncJoin()` and unregister-token
   suppression, cleanup delivery after parked property/condition waiters resume,

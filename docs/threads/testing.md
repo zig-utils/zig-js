@@ -184,13 +184,16 @@ cleanup count/sum oracles, teardown termination while property `waitAsync`
 timeout compaction, async condition reacquire, a pending `asyncJoin` rejection
 reaction, and already-ready `FinalizationRegistry` cleanup jobs share the same
 realm turn,
+Promise reaction queue churn from with-fn `Lock.asyncHold`, no-fn release
+functions, typed-array `waitAsync`, `Thread.asyncJoin`, and exact
+`FinalizationRegistry` cleanup,
 cleanup delivery interleaved with `join()` /
 `asyncJoin()` and unregister-token suppression, cleanup delivery after parked
 property/condition waiters resume, plus `ThreadLocal` isolation across normal,
 throwing, nested, and async-joined thread lifecycles, plus
 `ThreadLocal` values registered with `FinalizationRegistry` across
 park/resume/clear/join cleanup lifecycles with exact cleanup count/sum delivery
-after quiescent collection. Each seed currently runs 23 deterministic lifecycle
+after quiescent collection. Each seed currently runs 24 deterministic lifecycle
 subprograms.
 
 `zig build test262 -Dtest262-parallel-js=true` runs test262 programs in

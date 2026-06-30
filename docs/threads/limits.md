@@ -220,8 +220,11 @@ context APIs.
   share the same realm turn,
   deterministic `Lock.asyncHold()` barging where a
   sync hold legally overtakes a queued no-fn async ticket before `await`
-  delivers its release function, and cleanup delivery interleaved with `join()` /
-  `asyncJoin()` plus unregister-token suppression, plus cleanup delivery after
+  delivers its release function, Promise reaction queue churn from with-fn
+  `Lock.asyncHold`, no-fn release functions, typed-array `waitAsync`,
+  `Thread.asyncJoin`, and exact `FinalizationRegistry` cleanup, and cleanup
+  delivery interleaved with `join()` / `asyncJoin()` plus unregister-token
+  suppression, plus cleanup delivery after
   parked property/condition waiters resume, plus `ThreadLocal` values registered
   with `FinalizationRegistry` across park/resume/clear/join cleanup lifecycles
   with exact cleanup count/sum delivery after quiescent collection. Keep
