@@ -530,6 +530,7 @@ const sync_brand_lock: SyncBrand = 0x6a73_7468_6c6f_636b;
 const sync_brand_condition: SyncBrand = 0x6a73_7468_636f_6e64;
 const sync_brand_thread_local: SyncBrand = 0x6a73_7468_746c_736c;
 const sync_brand_unlock_token: SyncBrand = 0x6a73_7468_7574_6f6b;
+const sync_brand_release_state: SyncBrand = 0x6a73_7468_7265_6c73;
 
 const LockRecord = struct {
     brand: SyncBrand = sync_brand_lock,
@@ -736,6 +737,10 @@ pub fn traceNativePrivateData(o: *value.Object, v: anytype) void {
         sync_brand_lock => traceLockRecordRoots(@ptrCast(@alignCast(pd)), v),
         sync_brand_condition => traceCondRecordRoots(@ptrCast(@alignCast(pd)), v),
         sync_brand_thread_local => traceThreadLocalRoots(@ptrCast(@alignCast(pd)), v),
+        sync_brand_release_state => {
+            const st: *ReleaseState = @ptrCast(@alignCast(pd));
+            traceLockRecordRoots(st.lock, v);
+        },
         sync_brand_unlock_token => {},
         else => {},
     }
@@ -1115,6 +1120,9 @@ fn lockHoldFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.HostE
     const rec = recOf(LockRecord, this) orelse return self.throwError("TypeError", "Lock.prototype.hold called on incompatible receiver");
     const cb = if (args.len > 0) args[0] else Value.undef();
     if (!cb.isCallable()) return self.throwError("TypeError", "Lock.prototype.hold requires a callable argument");
+    const root_mark = try self.pushTempRoot(this);
+    defer self.restoreTempRoots(root_mark);
+    _ = try self.pushTempRoot(cb);
     rec.mutex.lockUncancelable(agent.engineIo());
     const recursive = rec.locked and (rec.holder == currentTid() or rec.async_runner == currentTid());
     rec.mutex.unlock(agent.engineIo());
@@ -2169,7 +2177,11 @@ const HoldJob = struct {
     cb: ?Value,
 };
 
-const ReleaseState = struct { lock: *LockRecord, used: bool = false };
+const ReleaseState = struct {
+    brand: SyncBrand = sync_brand_release_state,
+    lock: *LockRecord,
+    used: bool = false,
+};
 
 test "jsthread lock pending async jobs are cursor FIFO" {
     var rec = LockRecord{ .gil = undefined };
@@ -2369,6 +2381,7 @@ fn runHoldJob(self: *Interpreter, job: *HoldJob) value.HostError!void {
         st.* = .{ .lock = job.lock };
         const rel = try gc_mod.allocObj(self.arena);
         rel.* = .{ .native = releaseFnNative, .private_data = st };
+        gc_mod.barrierValue(Value.obj(rel));
         release_state = st;
         release_fn = rel;
     }

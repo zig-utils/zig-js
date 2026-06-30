@@ -124,11 +124,13 @@ context APIs.
   `Atomics.wait`, `Condition.wait`, and contended `Lock` acquisition without
   tracing those peers as frozen parked stacks. Host-side thread queues are part
   of the root set too: `Gil.tasks`, `LockRecord.pending`, async condition
-  waiters, ThreadLocal maps, and thread completion results now trace or barrier
-  their hidden JS values. The mid-GC fuzzer now queues a FIFO `Lock.asyncHold`
-  grant chain plus an async `Condition.wait` reacquire path with captured JS
-  roots, and requires sync-wait pump points to execute them during the same
-  allocation-pressure window that produces a finishing parallel sweep.
+  waiters, ThreadLocal maps, thread completion results, release-function lock
+  records, and contended `Lock.hold` receiver/callback pairs now trace, barrier,
+  or temp-root their hidden JS values. The mid-GC fuzzer now queues a FIFO
+  `Lock.asyncHold` grant chain plus an async `Condition.wait` reacquire path
+  with captured JS roots, and requires sync-wait pump points to execute them
+  during the same allocation-pressure window that produces a finishing parallel
+  sweep.
   Keep quiescent collection as the fallback for cycles that still cannot
   converge, and keep widening wait/cleanup stress around this protocol.
 - **Fuzzer breadth.** The broad `threadfuzz` profile now covers caught
@@ -138,9 +140,9 @@ context APIs.
   profile now hammers sync-wait root publication during finishing
   `parallel_midscript_gc` sweeps, executes a queued async-hold grant chain and
   async condition reacquire grants from those pump points, keeps a
-  ThreadLocal-only hidden root live in a parked peer, keeps a
-  completed-but-unjoined Thread result live through the thread completion record,
-  and verifies exact `FinalizationRegistry` cleanup count/sum delivery
+  ThreadLocal-only hidden root live in a parked peer, keeps completed-but-unjoined
+  Thread result and thrown exception objects live through the thread completion
+  record, and verifies exact `FinalizationRegistry` cleanup count/sum delivery
   afterward. The lifecycle
   profile now adds deterministic termination storms,
   script Worker/thread retained-`SharedArrayBuffer` overlap, simple-import,

@@ -288,8 +288,9 @@ threading architecture:
   property `Atomics.wait`, `Condition.wait`, and contended `Lock` acquisition,
   so the abort-safe collector can finish while those peers are blocked. The GC
   root set now also covers host-side thread queues such as `Gil.tasks`,
-  per-lock async grants, async condition waiters, ThreadLocal values, and thread
-  completion results. Keep maturing convergence and stress coverage for heavier
+  per-lock async grants, async condition waiters, ThreadLocal values, thread
+  completion results, release-function lock records, and contended `Lock.hold`
+  receiver/callback pairs. Keep maturing convergence and stress coverage for heavier
   wait/cleanup mixes; the mid-GC fuzzer now queues a FIFO `Lock.asyncHold`
   grant chain plus an async `Condition.wait` reacquire path, and verifies exact
   `FinalizationRegistry` cleanup count/sum delivery after those wait-pump
@@ -301,8 +302,8 @@ threading architecture:
   the mid-GC profile covers sync-wait root publication during finishing
   mid-script sweeps, queued async-hold delivery, async condition reacquire
   delivery, ThreadLocal-only hidden roots in parked peers, and deterministic
-  completed-but-unjoined Thread result roots, and deterministic cleanup
-  count/sum delivery; the lifecycle
+  completed-but-unjoined Thread result and thrown exception roots, and
+  deterministic cleanup count/sum delivery; the lifecycle
   profile adds deterministic termination storms, script Worker/thread overlap
   plus simple-import, diamond-shaped, and fanout/rejoin module Worker/thread
   overlap over retained `SharedArrayBuffer` storage, Worker/thread/finalization

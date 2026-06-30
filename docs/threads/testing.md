@@ -122,8 +122,9 @@ enable `parallel_midscript_gc`, blocks peers in property `Atomics.wait`,
 grant chain plus async condition reacquire grants through those pump points,
 keeps a registered object reachable only through `ThreadLocal.value` while the
 owning thread is parked, keeps a completed-but-unjoined `Thread` result object
-reachable only through the thread completion record, then requires exact script
-completion plus at least one finishing parallel sweep and exact
+and a completed-but-unjoined thrown exception object reachable only through the
+thread completion record, then requires exact script completion plus at least
+one finishing parallel sweep and exact
 `FinalizationRegistry` cleanup count/sum delivery after a quiescent collect. The
 lifecycle profile
 (`-Dfuzz-lifecycle=true`) adds expected-throw termination storms for

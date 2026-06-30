@@ -2667,6 +2667,7 @@ fn runMidScriptWaitPumpGc(gpa: std.mem.Allocator, seed: u64) !bool {
     const async_cond_expected = async_base + 2048 + async_cond_allocs;
     const tls_expected = async_base + 4096;
     const thread_result_expected = async_base + 8192;
+    const thread_throw_expected = async_base + 12288;
     const spin_iters = 4000 + r.uintLessThan(usize, 6000);
     const wait_timeout_ms = 1200 + r.uintLessThan(usize, 900);
 
@@ -2685,7 +2686,7 @@ fn runMidScriptWaitPumpGc(gpa: std.mem.Allocator, seed: u64) !bool {
     const src = try std.fmt.allocPrint(
         gpa,
         \\(() => {{
-        \\  const gate = {{ state: 0, propReady: 0, condReady: 0, holderReady: 0, lockReady: 0, releaseLock: 0, lockDone: 0, asyncDone: 0, asyncSecondDone: 0, asyncCondReady: 0, asyncCondDone: 0, tlsReady: 0, tlsRelease: 0, resultReady: 0 }};
+        \\  const gate = {{ state: 0, propReady: 0, condReady: 0, holderReady: 0, lockReady: 0, releaseLock: 0, lockDone: 0, asyncDone: 0, asyncSecondDone: 0, asyncCondReady: 0, asyncCondDone: 0, tlsReady: 0, tlsRelease: 0, resultReady: 0, thrownReady: 0 }};
         \\  const condLock = new Lock();
         \\  const cond = new Condition();
         \\  const heldLock = new Lock();
@@ -2777,6 +2778,12 @@ fn runMidScriptWaitPumpGc(gpa: std.mem.Allocator, seed: u64) !bool {
         \\    Atomics.notify(gate, 'resultReady');
         \\    return result;
         \\  }});
+        \\  const thrownThread = new Thread(() => {{
+        \\    const reason = {{ marker: {d}, nested: {{ root: asyncRoot, label: 'thread-throw-midgc-root' }} }};
+        \\    Atomics.store(gate, 'thrownReady', 1);
+        \\    Atomics.notify(gate, 'thrownReady');
+        \\    throw reason;
+        \\  }});
         \\  const propWaiter = new Thread(() => {{
         \\    Atomics.store(gate, 'propReady', 1);
         \\    Atomics.notify(gate, 'propReady');
@@ -2819,6 +2826,8 @@ fn runMidScriptWaitPumpGc(gpa: std.mem.Allocator, seed: u64) !bool {
         \\    Atomics.wait(gate, 'tlsReady', 0, 1);
         \\  while (Atomics.load(gate, 'resultReady') === 0)
         \\    Atomics.wait(gate, 'resultReady', 0, 1);
+        \\  while (Atomics.load(gate, 'thrownReady') === 0)
+        \\    Atomics.wait(gate, 'thrownReady', 0, 1);
         \\  while (Atomics.load(gate, 'asyncCondReady') === 0)
         \\    Atomics.wait(gate, 'asyncCondReady', 0, 1);
         \\  const keep = [];
@@ -2879,8 +2888,15 @@ fn runMidScriptWaitPumpGc(gpa: std.mem.Allocator, seed: u64) !bool {
         \\      globalThis.__midgcThreadResultHold.marker !== {d} ||
         \\      globalThis.__midgcThreadResultHold.nested.root.nested.base !== {d})
         \\    throw new Error('bad completed Thread result midgc root');
-        \\  if (asyncCondTicket instanceof Promise === false) throw new Error('bad async condition promise');
-        \\  return keep.length;
+        \\  try {{
+        \\    thrownThread.join();
+        \\  }} catch (e) {{
+        \\    if (e.marker !== {d} || e.nested.root.nested.base !== {d})
+        \\      throw new Error('bad thrown Thread completion midgc root');
+        \\    globalThis.__midgcThreadThrowHold = e;
+        \\    return keep.length;
+        \\  }}
+        \\  throw new Error('thrown Thread completed normally');
         \\}})();
         \\
     ,
@@ -2894,6 +2910,7 @@ fn runMidScriptWaitPumpGc(gpa: std.mem.Allocator, seed: u64) !bool {
             wait_timeout_ms,
             tls_expected,
             thread_result_expected,
+            thread_throw_expected,
             wait_timeout_ms,
             wait_timeout_ms,
             rounds,
@@ -2908,6 +2925,8 @@ fn runMidScriptWaitPumpGc(gpa: std.mem.Allocator, seed: u64) !bool {
             async_cond_expected,
             tls_expected,
             thread_result_expected,
+            async_base,
+            thread_throw_expected,
             async_base,
         },
     );

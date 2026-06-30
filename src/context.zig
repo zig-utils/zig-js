@@ -8322,6 +8322,60 @@ test "parallel_js (M3): sync wait peers publish roots for mid-script parallel GC
     try std.testing.expect(ctx.gc_par_collections.load(.monotonic) > before_collections);
 }
 
+test "parallel_js (M3): thrown Thread completion roots survive mid-script parallel GC" {
+    // A completed-but-unjoined thread's thrown value is reachable only through
+    // its native ThreadRecord until join() rethrows it. Keep it parked there
+    // while the main thread allocates enough to elect the parallel collector.
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_threads = true,
+        .enable_gc = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+        .parallel_midscript_gc = true,
+    });
+    defer ctx.destroy();
+
+    const src =
+        \\(() => {
+        \\  const gate = { thrownReady: 0 };
+        \\  const root = { nested: { base: 73 }, label: 'thrown-midgc-root' };
+        \\  const thrownThread = new Thread(() => {
+        \\    const reason = { marker: 901, nested: { root: root, label: 'thread-throw-midgc-root' } };
+        \\    Atomics.store(gate, 'thrownReady', 1);
+        \\    Atomics.notify(gate, 'thrownReady');
+        \\    throw reason;
+        \\  });
+        \\  while (Atomics.load(gate, 'thrownReady') === 0)
+        \\    Atomics.wait(gate, 'thrownReady', 0, 1);
+        \\  const keep = [];
+        \\  for (let round = 0; round < 12; round++) {
+        \\    for (let i = 0; i < 900; i++)
+        \\      keep.push({ round: round, i: i, nested: { v: i + round } });
+        \\    let spin = 0;
+        \\    for (let j = 0; j < 8000; j++) spin = (spin + j + round) & 0x3fffffff;
+        \\    if (spin < 0) keep.push({ never: true });
+        \\  }
+        \\  try {
+        \\    thrownThread.join();
+        \\  } catch (e) {
+        \\    if (e.marker !== 901 || e.nested.root.nested.base !== 73)
+        \\      throw new Error('bad thrown Thread completion midgc root');
+        \\    globalThis.__midgcThrownHold = e;
+        \\    return keep.length;
+        \\  }
+        \\  throw new Error('thrown Thread completed normally');
+        \\})();
+    ;
+
+    const before_attempts = ctx.gc_par_attempts.load(.monotonic);
+    const before_collections = ctx.gc_par_collections.load(.monotonic);
+    const result = try ctx.evaluate(src);
+    try std.testing.expectEqual(@as(f64, 10800), result.asNum());
+    try std.testing.expect(ctx.gc_par_attempts.load(.monotonic) > before_attempts);
+    try std.testing.expect(ctx.gc_par_collections.load(.monotonic) > before_collections);
+}
+
 test "parallel_gc soak: sustained parallel allocation reclaims across rounds, no leak/UAF" {
     // GC-maturity (#2): a *sustained-load soak*. Each outer round spawns 4 GIL-free
     // workers that build and discard heavy object graphs in parallel, then join.

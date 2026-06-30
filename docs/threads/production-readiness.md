@@ -165,13 +165,14 @@ as embedders exercise more threaded host patterns.
   requires sync-wait pump points to deliver both during the same mid-script GC
   pressure window, keeps a registered object reachable only through
   `ThreadLocal.value` while that owner is parked, keeps a completed-but-unjoined
-  `Thread` result object reachable only through the thread completion record,
-  then deliver the expected `FinalizationRegistry` cleanup count/sum after a
-  quiescent collect.
+  `Thread` result object and a completed-but-unjoined thrown exception object
+  reachable only through the thread completion record, then delivers the
+  expected `FinalizationRegistry` cleanup count/sum after a quiescent collect.
 - Host-side thread queues are now explicit GC roots: queued `Lock.asyncHold`
   tasks in `Gil.tasks`, per-lock pending grants, async condition waiters,
-  ThreadLocal values, and thread completion results trace or barrier their
-  hidden JS values instead of relying on a JS property path.
+  ThreadLocal values, thread completion results, release-function lock records,
+  and contended `Lock.hold` receiver/callback pairs trace or temp-root their
+  hidden JS values instead of relying on a JS property path or native stack scan.
 - The lifecycle fuzzer profile adds deterministic termination storms where main
   JS throws with parked/unjoined `Thread`s, exact-counter oracles for script
   `Worker`s plus simple-import, diamond-shaped, and fanout/rejoin module
