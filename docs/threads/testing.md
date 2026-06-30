@@ -127,8 +127,9 @@ records until the child threads are released, keeps a registered object
 reachable only through `ThreadLocal.value` while the
 owning thread is parked, keeps a completed-but-unjoined `Thread` result object
 and a completed-but-unjoined thrown exception object reachable only through the
-thread completion record, then requires exact script completion plus at least
-one finishing parallel sweep and exact
+thread completion record, and has a focused join-termination unit witness that
+checks parked-state/mutex cleanup, then requires exact script completion plus
+at least one finishing parallel sweep and exact
 `FinalizationRegistry` cleanup count/sum delivery after a quiescent collect. The
 lifecycle profile
 (`-Dfuzz-lifecycle=true`) adds expected-throw termination storms for

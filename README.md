@@ -302,7 +302,10 @@ threading architecture:
   `FinalizationRegistry` cleanup count/sum delivery after those wait-pump
   sweeps and keeps a registered object reachable only through
   `ThreadLocal.value` while the owning thread is parked, proving that hidden
-  native ThreadLocal roots survive the mid-script collection window.
+  native ThreadLocal roots survive the mid-script collection window. Join-side
+  parked-root state is now balanced across termination/error unwinds, so a
+  failed `Thread.join()` cannot leave the interpreter permanently marked as a
+  frozen parked peer.
 - **Stress breadth** - the broad fuzzer profile now covers exceptions/finally,
   cleanup, waiters, `asyncJoin`, `Thread.restrict`, and nested thread lifecycle;
   the mid-GC profile covers sync-wait root publication during finishing

@@ -271,6 +271,9 @@ per-thread before threads stop holding the GIL):
      reachable only through the native waiter queue until notification, and
      pending `Thread.asyncJoin` fulfillment/rejection reactions reachable only
      through native completion records until the child threads are released. The
+     `Thread.join()` park path now clears its `gc_parked` publication and
+     rebalances the completion mutex on termination/error unwinds, so a failed
+     join cannot leave stale frozen-peer state. The
      regression case from the
      earlier naive approach (marking sync waits as frozen and sweeping the host's
      captured-env vars) stays guarded by

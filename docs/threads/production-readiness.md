@@ -178,7 +178,9 @@ as embedders exercise more threaded host patterns.
   promise/reaction roots, ThreadLocal values, thread completion results,
   release-function lock records, and contended `Lock.hold` receiver/callback
   pairs trace or temp-root their hidden JS values instead of relying on a JS
-  property path or native stack scan.
+  property path or native stack scan. Join-side parked-root state now clears
+  and releases the completion mutex on termination/error unwinds, so failed
+  `Thread.join()` calls do not leave stale frozen-peer state behind.
 - The lifecycle fuzzer profile adds deterministic termination storms where main
   JS throws with parked/unjoined `Thread`s, exact-counter oracles for script
   `Worker`s plus simple-import, diamond-shaped, and fanout/rejoin module

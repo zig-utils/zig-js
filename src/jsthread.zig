@@ -485,15 +485,19 @@ fn threadJoinFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.Hos
         rec.join_mutex.unlock(io);
         return self.throwError("TypeError", "Thread.prototype.join cannot block the current thread");
     }
+    var join_mutex_locked = true;
+    errdefer if (join_mutex_locked) rec.join_mutex.unlock(io);
     // While blocked joining (no GIL), this interpreter isn't running user JS —
     // its roots are frozen — so let the mid-script parallel collector trace it
     // directly instead of waiting for a safepoint it won't reach.
     self.gc_parked.store(true, .release);
+    errdefer self.gc_parked.store(false, .release);
     while (!rec.done) try parkPumpThreadJoin(self, rec);
     self.gc_parked.store(false, .release);
     const threw = rec.threw;
     const result = rec.result;
     rec.join_mutex.unlock(io);
+    join_mutex_locked = false;
     self.drainMicrotasks() catch {};
     if (threw) {
         self.exception = result;
@@ -2351,12 +2355,14 @@ fn parkPumpThreadJoin(self: *Interpreter, rec: *ThreadRecord) value.HostError!vo
     const io = agent.engineIo();
     rec.join_mutex.unlock(io);
     pumpTasks(self);
-    if (self.stop_flag) |sf| if (sf.load(.monotonic))
-        return self.throwError("Error", "worker terminated");
+    const stopped = if (self.stop_flag) |sf| sf.load(.monotonic) else false;
     rec.join_mutex.lockUncancelable(io);
+    if (stopped)
+        return self.throwError("Error", "worker terminated");
     if (rec.done) return;
 
     stack_scan.beginPark();
+    defer stack_scan.endPark();
     const released_gil = self.use_thread_gil;
     if (released_gil) rec.gil.release();
     bumpContention("thread_join_parks");
@@ -2369,7 +2375,33 @@ fn parkPumpThreadJoin(self: *Interpreter, rec: *ThreadRecord) value.HostError!vo
         rec.gil.acquire();
         rec.join_mutex.lockUncancelable(io);
     }
-    stack_scan.endPark();
+}
+
+test "jsthread join park termination leaves parked state and mutex balanced" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_threads = true });
+    defer ctx.destroy();
+
+    var machine = ctx.interpreter();
+    var stop = std.atomic.Value(bool).init(true);
+    machine.stop_flag = &stop;
+    machine.gc_parked.store(true, .release);
+
+    var rec = ThreadRecord{
+        .id = 999,
+        .gil = ctx.gil.?,
+        .ctx = ctx,
+    };
+    const io = agent.engineIo();
+    rec.join_mutex.lockUncancelable(io);
+    try std.testing.expectError(error.Throw, parkPumpThreadJoin(&machine, &rec));
+
+    // The helper contract is "return with join_mutex held", including error
+    // unwinds. The caller can then perform its normal cleanup without racing a
+    // finishing thread or double-unlocking.
+    try std.testing.expect(!rec.join_mutex.tryLock());
+    rec.join_mutex.unlock(io);
+    machine.gc_parked.store(false, .release);
+    try std.testing.expect(!machine.gc_parked.load(.acquire));
 }
 
 fn runHoldJob(self: *Interpreter, job: *HoldJob) value.HostError!void {

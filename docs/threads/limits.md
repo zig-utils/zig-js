@@ -135,7 +135,10 @@ context APIs.
   graphs reachable only through native completion records; sync-wait pump points
   must execute the async grants during the
   same allocation-pressure window that produces a finishing parallel sweep, and
-  the `waitAsync` reaction must run intact after notification.
+  the `waitAsync` reaction must run intact after notification. Join-side
+  `gc_parked` state is balanced on termination/error unwinds, so a failed
+  `Thread.join()` cannot leave the interpreter looking like a permanently
+  frozen parked peer.
   Keep quiescent collection as the fallback for cycles that still cannot
   converge, and keep widening wait/cleanup stress around this protocol.
 - **Fuzzer breadth.** The broad `threadfuzz` profile now covers caught

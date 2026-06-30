@@ -293,6 +293,8 @@ Do this once the engine's `context.zig`/`interpreter.zig` surface is settled
   queue until notification, and pending `Thread.asyncJoin`
   fulfillment/rejection reactions reachable only through native completion
   records until the child threads are released.
+  `Thread.join()` park unwinds now clear `gc_parked` and leave the completion
+  mutex balanced, preventing stale frozen-peer state after termination/errors.
   *Dependency root helper landed:* `zig-gc` now exposes optional conservative
   word marking for native stack or register-spill ranges, with dependency-local
   tests covering exact and interior payload pointers. zig-js still needs
