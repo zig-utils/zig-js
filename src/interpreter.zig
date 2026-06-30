@@ -33199,7 +33199,7 @@ fn calendarDateMinusDays(cal: []const u8, y: i64, m: u8, d: u8, days: i64) Civil
 fn addCalendarMonthsClamp(cal: []const u8, y0: i64, m0: u8, d0: u8, add_months: i64) Civil {
     const ym = balanceCalendarYearMonth(cal, y0, m0, add_months);
     var nd: u8 = d0;
-    const dim = calDaysInMonth(cal, calDisplayYear(cal, ym.y), ym.m);
+    const dim = calDaysInMonth(cal, ym.y, ym.m);
     if (nd > dim) nd = dim;
     return .{ .y = ym.y, .m = ym.m, .d = nd };
 }
