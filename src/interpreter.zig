@@ -31334,16 +31334,13 @@ fn temporalYearMonthUntilFn(comptime sign: f64) value.NativeFn {
                 years = @floatFromInt(q * incr);
             } else {
                 if (opts.largest == .year) {
-                    const ym_diff = if (sign < 0)
-                        calendarYearMonthDiff(a.calendar, other.y, other.m, a.year, a.month)
-                    else
-                        calendarYearMonthDiff(a.calendar, a.year, a.month, other.y, other.m);
+                    const ym_diff = calendarYearMonthDiff(a.calendar, a.year, a.month, other.y, other.m);
                     const probe_total = calendarYearMonthDistance(a.calendar, a.year, a.month, other.y, other.m);
                     const probe = balanceCalendarYearMonth(a.calendar, a.year, a.month, probe_total);
                     const probe_iso = calendarDateToIso(a.calendar, probe.y, probe.m, 1);
                     try checkIsoDate(self, @floatFromInt(probe_iso.y), @floatFromInt(probe_iso.m), @floatFromInt(probe_iso.d));
-                    years = @floatFromInt(ym_diff.years);
-                    months = @floatFromInt(applyRounding(ym_diff.months, incr, opts.mode) * incr);
+                    years = sign * @as(f64, @floatFromInt(ym_diff.years));
+                    months = sign * @as(f64, @floatFromInt(applyRounding(ym_diff.months, incr, opts.mode) * incr));
                 } else {
                     const q = applyRounding(total_months, incr, opts.mode);
                     const m_total = q * incr;
@@ -32840,21 +32837,55 @@ fn calendarYearMonthDistance(cal: []const u8, y0: i64, m0: u8, y1: i64, m1: u8) 
 }
 
 const CalendarYearMonthDiff = struct { years: i64, months: i64 };
+const CalendarYearMonthCandidate = struct { y: i64, m: u8, constrained_leap: bool = false };
+
+fn constrainedLeapYearEqualsFullYear(cal: []const u8, years: i64) bool {
+    if (std.mem.eql(u8, cal, "hebrew")) return years > 0;
+    if (std.mem.eql(u8, cal, "chinese") or std.mem.eql(u8, cal, "dangi")) return years < 0;
+    return true;
+}
+
+fn calendarYearMonthAddYearsCandidate(cal: []const u8, y0: i64, m0: u8, years: i64) CalendarYearMonthCandidate {
+    const y = y0 + years;
+    const info = calMonthCodeInfo(cal, y0, m0);
+    if (calMonthFromCodeMaybe(cal, y, info)) |m| return .{ .y = y, .m = m };
+    if (info.leap) {
+        const max_month = calMonthsInYear(cal, y);
+        if (constrainInvalidLeapMonthCode(cal, y, max_month, info)) |m| {
+            return .{ .y = y, .m = m, .constrained_leap = true };
+        }
+    }
+    const ym = balanceCalendarYearMonth(cal, y, m0, 0);
+    return .{ .y = ym.y, .m = ym.m };
+}
 
 fn calendarYearMonthDiff(cal: []const u8, y0: i64, m0: u8, y1: i64, m1: u8) CalendarYearMonthDiff {
     const total = calendarYearMonthDistance(cal, y0, m0, y1, m1);
     if (total == 0) return .{ .years = 0, .months = 0 };
     if (total < 0) {
-        const diff = calendarYearMonthDiff(cal, y1, m1, y0, m0);
-        return .{ .years = -diff.years, .months = -diff.months };
+        var years = y1 - y0;
+        var candidate = calendarYearMonthAddYearsCandidate(cal, y0, m0, years);
+        while (true) {
+            const candidate_total = calendarYearMonthDistance(cal, y0, m0, candidate.y, candidate.m);
+            if (candidate_total > total) break;
+            if (candidate_total == total and (!candidate.constrained_leap or constrainedLeapYearEqualsFullYear(cal, years))) break;
+            years += 1;
+            candidate = calendarYearMonthAddYearsCandidate(cal, y0, m0, years);
+        }
+        return .{
+            .years = years,
+            .months = calendarYearMonthDistance(cal, candidate.y, candidate.m, y1, m1),
+        };
     }
-    if (m0 == m1) return .{ .years = y1 - y0, .months = 0 };
 
     var years = y1 - y0;
-    var candidate = balanceCalendarYearMonth(cal, y0 + years, m0, 0);
-    while (calendarYearMonthDistance(cal, y0, m0, candidate.y, candidate.m) > total) {
+    var candidate = calendarYearMonthAddYearsCandidate(cal, y0, m0, years);
+    while (true) {
+        const candidate_total = calendarYearMonthDistance(cal, y0, m0, candidate.y, candidate.m);
+        if (candidate_total < total) break;
+        if (candidate_total == total and (!candidate.constrained_leap or constrainedLeapYearEqualsFullYear(cal, years))) break;
         years -= 1;
-        candidate = balanceCalendarYearMonth(cal, y0 + years, m0, 0);
+        candidate = calendarYearMonthAddYearsCandidate(cal, y0, m0, years);
     }
     return .{
         .years = years,
