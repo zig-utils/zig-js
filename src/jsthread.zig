@@ -1846,14 +1846,22 @@ pub fn abandonPropAsync(g: *gil_mod.Gil) void {
 
 fn removePropTicketLocked(g: *gil_mod.Gil, ticket: *PropTicket) void {
     if (!ticket.queued) return;
-    for (g.prop_waiters.items, 0..) |raw, i| {
+    var found = false;
+    var write: usize = 0;
+    var read: usize = 0;
+    while (read < g.prop_waiters.items.len) : (read += 1) {
+        const raw = g.prop_waiters.items[read];
         const t: *PropTicket = @ptrCast(@alignCast(raw));
         if (t == ticket) {
             ticket.queued = false;
-            _ = g.prop_waiters.orderedRemove(i);
-            return;
+            found = true;
+            continue;
         }
+        if (write != read) g.prop_waiters.items[write] = raw;
+        write += 1;
     }
+    shrinkPropWaitersLocked(g, write);
+    if (!found) ticket.queued = false;
 }
 
 fn propTicketMatches(t: anytype, obj: *value.Object, key: []const u8) bool {
@@ -1984,6 +1992,37 @@ test "property waiter notify stable-compacts matching sync tickets" {
     try std.testing.expectEqual(@as(usize, 2), g.prop_waiters.items.len);
     try std.testing.expectEqual(@intFromPtr(&t1), @intFromPtr(@as(*PropTicket, @ptrCast(@alignCast(g.prop_waiters.items[0])))));
     try std.testing.expectEqual(@intFromPtr(&t2), @intFromPtr(@as(*PropTicket, @ptrCast(@alignCast(g.prop_waiters.items[1])))));
+}
+
+test "property waiter removal stable-compacts timed-out sync ticket" {
+    var g = gil_mod.Gil{};
+    defer g.prop_waiters.deinit(std.testing.allocator);
+    var obj_a: value.Object = undefined;
+    var obj_b: value.Object = undefined;
+    var t0 = PropTicket{ .obj = &obj_a, .key = "x", .queued = true };
+    var t1 = PropTicket{ .obj = &obj_b, .key = "x", .queued = true };
+    var t2 = PropTicket{ .obj = &obj_a, .key = "y", .queued = true };
+    var t3 = PropTicket{ .obj = &obj_a, .key = "x", .queued = true };
+    try g.prop_waiters.append(std.testing.allocator, @ptrCast(&t0));
+    try g.prop_waiters.append(std.testing.allocator, @ptrCast(&t1));
+    try g.prop_waiters.append(std.testing.allocator, @ptrCast(&t2));
+    try g.prop_waiters.append(std.testing.allocator, @ptrCast(&t3));
+
+    removePropTicketLocked(&g, &t1);
+    try std.testing.expect(!t1.queued);
+    try std.testing.expect(t0.queued);
+    try std.testing.expect(t2.queued);
+    try std.testing.expect(t3.queued);
+    try std.testing.expectEqual(@as(usize, 3), g.prop_waiters.items.len);
+    try std.testing.expectEqual(@intFromPtr(&t0), @intFromPtr(@as(*PropTicket, @ptrCast(@alignCast(g.prop_waiters.items[0])))));
+    try std.testing.expectEqual(@intFromPtr(&t2), @intFromPtr(@as(*PropTicket, @ptrCast(@alignCast(g.prop_waiters.items[1])))));
+    try std.testing.expectEqual(@intFromPtr(&t3), @intFromPtr(@as(*PropTicket, @ptrCast(@alignCast(g.prop_waiters.items[2])))));
+
+    removePropTicketLocked(&g, &t0);
+    try std.testing.expect(!t0.queued);
+    try std.testing.expectEqual(@as(usize, 2), g.prop_waiters.items.len);
+    try std.testing.expectEqual(@intFromPtr(&t2), @intFromPtr(@as(*PropTicket, @ptrCast(@alignCast(g.prop_waiters.items[0])))));
+    try std.testing.expectEqual(@intFromPtr(&t3), @intFromPtr(@as(*PropTicket, @ptrCast(@alignCast(g.prop_waiters.items[1])))));
 }
 
 test "property waitAsync expiry stable-compacts expired tickets" {

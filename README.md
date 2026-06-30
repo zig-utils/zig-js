@@ -286,9 +286,11 @@ threading architecture:
   being removed from the middle of the queue. Property-mode `Atomics.notify` now
   stable-compacts matching waiters in one pass: sync stack tickets are
   unlinked before signal, and matching `waitAsync` tickets are collected without
-  repeated `orderedRemove` shifts; timeout polling and realm teardown now scan
-  property `waitAsync` tickets once instead of removing one middle entry per
-  expired/abandoned ticket. Worker inbox/outbox channels now drain
+  repeated `orderedRemove` shifts. Individual sync wait timeout/termination
+  cleanup also stable-compacts the waiter table in one pass instead of
+  front-shifting the remaining waiters, and timeout polling plus realm teardown
+  now scan property `waitAsync` tickets once instead of removing one middle
+  entry per expired/abandoned ticket. Worker inbox/outbox channels now drain
   through the same FIFO head-cursor shape instead of front-shifting
   structured-clone message queues, and empty internal `Worker.receive(..., 0)`
   polls return under the channel lock without entering timed condition waits or

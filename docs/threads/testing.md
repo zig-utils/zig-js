@@ -246,6 +246,8 @@ under one API-lock acquisition before running grants outside that lock; conditio
 notify/notifyAll uses a FIFO head cursor for the mixed sync/async waiter queue;
 timed-out or terminated sync condition waiters are marked canceled and skipped
 by that cursor instead of being removed from the middle of the queue;
+property-mode `Atomics.wait` timeout/termination cleanup stable-compacts the
+sync waiter table in one pass instead of shifting the remaining waiters;
 Worker inbox/outbox channels use the same shape for structured-clone message
 delivery, and empty internal `Worker.receive(..., 0)` polls skip timed condition
 wait setup and drained-queue compaction. Active interpreter roots, protected
@@ -253,7 +255,9 @@ C-API handles, and GIL park records remove with swap semantics because those
 root sets have no observable order. `worker channel pops FIFO without front shifts` keeps that queue
 shape and zero-timeout polling behavior under a direct unit guard, while
 `condition queue head cursor skips canceled sync waiters` covers the condition
-timeout/termination queue shape directly and
+timeout/termination queue shape directly, `property waiter removal
+stable-compacts timed-out sync ticket` covers the property waiter cleanup shape,
+and
 `api/condition-wait-termination.js` keeps the JS termination path exercised.
 Promise microtask drains now use the same FIFO head-cursor pattern, with
 `microtask queue is FIFO with a head cursor` guarding the direct queue shape and
