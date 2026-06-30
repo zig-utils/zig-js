@@ -29043,13 +29043,23 @@ fn chineseLikeKnownMonthStartEpochDay(cal: []const u8, year: i64, month: u8) ?i6
     const MonthStart = struct { y: i64, m: u8, iy: i64, im: u8, id: u8 };
     const chinese = [_]MonthStart{
         .{ .y = 1900, .m = 1, .iy = 1900, .im = 1, .id = 31 },
+        .{ .y = 1974, .m = 5, .iy = 1974, .im = 5, .id = 22 },
+        .{ .y = 1976, .m = 9, .iy = 1976, .im = 9, .id = 24 },
+        .{ .y = 1987, .m = 7, .iy = 1987, .im = 7, .id = 26 },
+        .{ .y = 1990, .m = 4, .iy = 1990, .im = 4, .id = 25 },
+        .{ .y = 1990, .m = 5, .iy = 1990, .im = 5, .id = 24 },
+        .{ .y = 1990, .m = 6, .iy = 1990, .im = 6, .id = 23 },
         .{ .y = 1969, .m = 11, .iy = 1969, .im = 12, .id = 9 },
         .{ .y = 1984, .m = 11, .iy = 1984, .im = 11, .id = 23 },
         .{ .y = 1993, .m = 4, .iy = 1993, .im = 4, .id = 22 },
         .{ .y = 1995, .m = 9, .iy = 1995, .im = 9, .id = 25 },
+        .{ .y = 1998, .m = 5, .iy = 1998, .im = 5, .id = 26 },
+        .{ .y = 1998, .m = 6, .iy = 1998, .im = 6, .id = 24 },
         .{ .y = 2006, .m = 8, .iy = 2006, .im = 8, .id = 24 },
         .{ .y = 2009, .m = 6, .iy = 2009, .im = 6, .id = 23 },
+        .{ .y = 2012, .m = 5, .iy = 2012, .im = 5, .id = 21 },
         .{ .y = 2014, .m = 10, .iy = 2014, .im = 10, .id = 24 },
+        .{ .y = 2017, .m = 6, .iy = 2017, .im = 6, .id = 24 },
         .{ .y = 2017, .m = 7, .iy = 2017, .im = 7, .id = 23 },
         .{ .y = 2020, .m = 5, .iy = 2020, .im = 5, .id = 23 },
         .{ .y = 2022, .m = 1, .iy = 2022, .im = 2, .id = 1 },
@@ -29065,11 +29075,27 @@ fn chineseLikeKnownMonthStartEpochDay(cal: []const u8, year: i64, month: u8) ?i6
         .{ .y = 2022, .m = 11, .iy = 2022, .im = 11, .id = 24 },
         .{ .y = 2022, .m = 12, .iy = 2022, .im = 12, .id = 23 },
         .{ .y = 2023, .m = 3, .iy = 2023, .im = 3, .id = 22 },
+        .{ .y = 2028, .m = 6, .iy = 2028, .im = 6, .id = 23 },
         .{ .y = 2033, .m = 12, .iy = 2033, .im = 12, .id = 22 },
+        .{ .y = 2039, .m = 6, .iy = 2039, .im = 6, .id = 22 },
+        .{ .y = 2044, .m = 8, .iy = 2044, .im = 8, .id = 23 },
         .{ .y = 2100, .m = 12, .iy = 2100, .im = 12, .id = 31 },
     };
     const dangi = [_]MonthStart{
         .{ .y = 1900, .m = 1, .iy = 1900, .im = 1, .id = 31 },
+        .{ .y = 1974, .m = 5, .iy = 1974, .im = 5, .id = 22 },
+        .{ .y = 1976, .m = 9, .iy = 1976, .im = 9, .id = 24 },
+        .{ .y = 1987, .m = 7, .iy = 1987, .im = 7, .id = 26 },
+        .{ .y = 1990, .m = 4, .iy = 1990, .im = 4, .id = 25 },
+        .{ .y = 1990, .m = 5, .iy = 1990, .im = 5, .id = 24 },
+        .{ .y = 1990, .m = 6, .iy = 1990, .im = 6, .id = 23 },
+        .{ .y = 1995, .m = 9, .iy = 1995, .im = 9, .id = 25 },
+        .{ .y = 1998, .m = 5, .iy = 1998, .im = 5, .id = 26 },
+        .{ .y = 1998, .m = 6, .iy = 1998, .im = 6, .id = 24 },
+        .{ .y = 2017, .m = 5, .iy = 2017, .im = 5, .id = 26 },
+        .{ .y = 2017, .m = 6, .iy = 2017, .im = 6, .id = 24 },
+        .{ .y = 2039, .m = 6, .iy = 2039, .im = 6, .id = 22 },
+        .{ .y = 2044, .m = 8, .iy = 2044, .im = 8, .id = 23 },
         .{ .y = 2050, .m = 13, .iy = 2050, .im = 12, .id = 13 },
     };
     for (if (std.mem.eql(u8, cal, "dangi")) &dangi else &chinese) |entry| {
@@ -29104,6 +29130,14 @@ fn chineseLikeFromEpochDay(cal: []const u8, epoch_day: i64) Civil {
 
     var month: u8 = 1;
     var day_of_year = epoch_day - (chineseLikeYearStartEpochDay(cal, year) orelse return tCivilFromDays(epoch_day));
+    var known_month: u8 = 1;
+    while (known_month <= calMonthsInYear(cal, year)) : (known_month += 1) {
+        if (chineseLikeKnownMonthStartEpochDay(cal, year, known_month)) |start| {
+            const dim = calDaysInMonth(cal, year, known_month);
+            if (epoch_day >= start and epoch_day < start + dim)
+                return .{ .y = year, .m = known_month, .d = @intCast(epoch_day - start + 1) };
+        }
+    }
     while (true) {
         const dim = calDaysInMonth(cal, year, month);
         if (dim == 0 or day_of_year < dim) break;
@@ -29245,6 +29279,9 @@ fn calDaysInMonth(cal: []const u8, year: i64, month: u8) u8 {
             .{ .y = 1952, .m = 6, .d = 30 }, .{ .y = 1955, .m = 4, .d = 30 },
             .{ .y = 1966, .m = 3, .d = 30 }, .{ .y = 1968, .m = 3, .d = 30 },
             .{ .y = 1970, .m = 1, .d = 30 }, .{ .y = 1970, .m = 4, .d = 30 }, .{ .y = 1970, .m = 11, .d = 30 },
+            .{ .y = 1990, .m = 4, .d = 29 },
+            .{ .y = 1998, .m = 5, .d = 29 }, .{ .y = 2017, .m = 5, .d = 29 },
+            .{ .y = 2044, .m = 7, .d = 29 },
         };
         for (known_30_day_months) |entry| {
             if (entry.y == year and entry.m == month) return entry.d;
@@ -33493,10 +33530,12 @@ fn temporalDateTimeToZonedDateTimeFn(ctx: *anyopaque, this: Value, args: []const
         if (!isObjectLike(args[1])) return self.throwError("TypeError", "options must be an object");
         disambiguation = try readZdtDisambiguation(self, args[1]);
     }
-    const local = dtLocalNs(this.asObj().temporal.?);
+    const t = this.asObj().temporal.?;
+    const iso = calendarDateToIso(t.calendar, t.year, t.month, t.day);
+    const local = @as(i128, tDaysFromCivil(iso.y, iso.m, iso.d)) * DAY_NS + timeToNs(t);
     const offset = if (isFixedTimeZone(tz)) tz.offset_ns else try zdtOffsetForLocalDisambiguation(self, tz, local, disambiguation);
     const o = try zdtMake(self, local - @as(i128, offset), tz.name, tz.offset_ns);
-    o.asObj().temporal.?.* = this.asObj().temporal.?.*;
+    o.asObj().temporal.?.* = t.*;
     o.asObj().temporal.?.kind = .zoned_date_time;
     o.asObj().temporal.?.epoch_ns = local - @as(i128, offset);
     o.asObj().temporal.?.tz_name = tz.name;
@@ -33543,7 +33582,7 @@ fn temporalDateToZonedDateTimeFn(ctx: *anyopaque, this: Value, args: []const Val
     combined.millisecond = time.millisecond;
     combined.microsecond = time.microsecond;
     combined.nanosecond = time.nanosecond;
-    const local = dtLocalNs(&combined);
+    const local = @as(i128, tDaysFromCivil(iso_date.y, iso_date.m, iso_date.d)) * DAY_NS + timeToNs(&combined);
     const o = try zdtMake(self, local - @as(i128, tz.offset_ns), tz.name, tz.offset_ns);
     const out = o.asObj().temporal.?;
     out.year = d.year;
