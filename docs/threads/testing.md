@@ -132,7 +132,8 @@ parked/unjoined shared-realm `Thread`s, exact Atomics counter oracles for script
 `Worker` plus simple-import, diamond-shaped, and fanout/rejoin module `Worker`
 overlap with shared-realm `Thread`s on one retained `SharedArrayBuffer`,
 Worker/thread/finalization scheduling on one retained SAB, exact FIFO
-drain/drop ordering for mixed Worker `close` / `terminate` / `postMessage`
+cleanup after terminating spinning Workers that share the retained SAB, exact
+FIFO drain/drop ordering for mixed Worker `close` / `terminate` / `postMessage`
 lifecycles, plus worker handler-exception recovery after a thrown `onmessage`,
 `Thread.restrict` lifecycle isolation,
 Thread exception identity through `join()` / `asyncJoin()`
@@ -145,7 +146,7 @@ async ticket before `await` delivers its release function, and cross-thread
 with `join()` / `asyncJoin()` and unregister-token suppression, cleanup delivery
 after parked property/condition waiters resume, plus `ThreadLocal` isolation
 across normal, throwing, nested, and async-joined thread lifecycles. Each seed
-currently runs 16 deterministic lifecycle subprograms.
+currently runs 17 deterministic lifecycle subprograms.
 
 `zig build test262 -Dtest262-parallel-js=true` runs test262 programs in
 GIL-free parallel contexts. The full corpus is too slow for every PR, so CI

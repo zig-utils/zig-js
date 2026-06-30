@@ -148,8 +148,10 @@ context APIs.
   script Worker/thread retained-`SharedArrayBuffer` overlap, simple-import,
   diamond-shaped, and fanout/rejoin module Worker/thread overlap with exact
   Atomics counter oracles, Worker/thread/finalization scheduling on one retained
-  SAB, exact FIFO drain/drop ordering for mixed Worker terminate/close/postMessage
-  lifecycles, and worker handler-exception recovery plus `Thread.restrict`
+  SAB, Worker termination interleaved with exact shared-realm finalization
+  cleanup on a retained SAB, exact FIFO drain/drop ordering for mixed Worker
+  terminate/close/postMessage lifecycles, and worker handler-exception recovery
+  plus `Thread.restrict`
   lifecycle isolation, Thread
   exception identity through `join()` / `asyncJoin()` while property and
   condition waiters are parked,
