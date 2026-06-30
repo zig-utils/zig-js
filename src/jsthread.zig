@@ -1270,6 +1270,7 @@ fn condWaitCore(self: *Interpreter, rec: *CondRecord, lock: *LockRecord, timeout
     // Re-register on the lock BEFORE acking the wake, so notifyAll's
     // consume-loop guarantees FIFO against async regrants.
     ticket.consumed = true;
+    rec.cond.signal(io);
     rec.mutex.unlock(io);
     switch (try acquireLock(self, lock, null, "Condition wait cannot reacquire the lock")) {
         .acquired => return true,
@@ -1326,19 +1327,13 @@ fn condNotify(self: *Interpreter, rec: *CondRecord, count: usize) value.HostErro
             if (!t.consumed) pending = true;
         }
         if (!pending) break;
-        rec.mutex.unlock(io);
-        if (self.use_thread_gil) {
-            const g = rec.gil;
-            g.release();
-            // A real sleep, not a bare yield: the woken waiter must
-            // win the GIL to ack, and a tight relock loop can starve
-            // it indefinitely (no mutex fairness).
-            std.Io.sleep(io, .fromMilliseconds(1), .awake) catch {};
-            g.acquire();
-        } else {
-            std.Io.sleep(io, .fromMilliseconds(1), .awake) catch {};
-        }
-        rec.mutex.lockUncancelable(io);
+        // Woken sync waiters signal this same condition after re-registering on
+        // their lock. The timeout keeps spurious or missed wakes bounded without
+        // paying the old fixed 1ms sleep when the waiter acks immediately.
+        waitOnCondRecord(self, rec, .{ .duration = .{
+            .raw = .fromMilliseconds(1),
+            .clock = .awake,
+        } });
     }
     return n;
 }

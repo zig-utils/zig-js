@@ -287,8 +287,11 @@ threading architecture:
   use the same FIFO head-cursor shape for their mixed sync/async waiter queue,
   avoiding one front shift per notified waiter; timed-out or terminated sync
   condition waiters are marked canceled and skipped by that cursor instead of
-  being removed from the middle of the queue. Property-mode `Atomics.notify` now
-  stable-compacts matching waiters in one pass: sync stack tickets are
+  being removed from the middle of the queue. Sync `notifyAll` handoff also
+  waits on the condition's ack signal instead of sleeping in fixed 1ms polling
+  chunks, so ready waiters can re-enter the lock path immediately.
+  Property-mode `Atomics.notify` now stable-compacts matching waiters in one
+  pass: sync stack tickets are
   unlinked before signal, and matching `waitAsync` tickets are collected without
   repeated `orderedRemove` shifts. Individual sync wait timeout/termination
   cleanup also stable-compacts the waiter table in one pass instead of

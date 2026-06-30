@@ -122,6 +122,9 @@ context APIs.
   waiter queue through a FIFO head cursor instead of shifting every notified
   waiter. Timed-out or terminated sync condition waiters are marked canceled and
   skipped by that cursor instead of being removed from the middle of the queue.
+  Sync notifyAll handoff now waits on the condition ack signal instead of a
+  fixed 1ms polling sleep, reducing ready-waiter latency without changing the
+  timeout fallback.
   Promise microtask drains use a FIFO head cursor, so observed async-hold
   callback settlement and no-fn release-function reactions preserve FIFO order
   without shifting the remaining reaction queue on each job.

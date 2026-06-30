@@ -129,6 +129,9 @@ Known performance/maturity work:
   mixed sync/async waiter queue, avoiding one front-shift per notified waiter.
   Timed-out or terminated sync condition waiters are marked canceled and skipped
   by the head cursor instead of being removed from the middle of the queue.
+  Sync notifyAll handoff now waits on the waiter's condition ack signal rather
+  than sleeping in fixed 1ms chunks, with the same timeout fallback for spurious
+  or missed wakes.
 - Property-mode `Atomics.notify` stable-compacts matching waiter queues in one
   pass. Sync wait stack tickets are unlinked before signal, so awakened peers no
   longer each rescan and front-shift the table on return; matching `waitAsync`
