@@ -335,7 +335,9 @@ as embedders exercise more threaded host patterns.
   cleanup count/sum oracles, teardown termination while property `waitAsync`
   timeout compaction, async condition reacquire, a pending `asyncJoin`
   rejection reaction, and already-ready `FinalizationRegistry` cleanup jobs
-  share the same realm turn,
+  share the same realm turn, Worker termination composed with condition async
+  reacquire, pending `asyncJoin` rejection cleanup, and exact
+  `FinalizationRegistry` cleanup,
   cleanup delivery interleaved with `join()` /
   `asyncJoin()` and unregister-token suppression, cleanup delivery after parked
   property/condition waiters resume, deterministic `Lock.asyncHold()` barging

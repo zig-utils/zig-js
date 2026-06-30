@@ -236,7 +236,7 @@ after quiescent collection. It also parks child Threads behind parent-created
 `asyncJoin()` promises that outlive the parent Thread's local microtask queue,
 then verifies child release, nested `ThreadLocal` roots, rerouted async
 settlement, and exact finalization cleanup after both thread layers exit. Each
-seed currently runs 33 deterministic lifecycle
+seed currently runs 34 deterministic lifecycle
 subprograms.
 
 `zig build test262 -Dtest262-parallel-js=true` runs test262 programs in

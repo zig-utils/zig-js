@@ -453,6 +453,8 @@ threading architecture:
   shared-realm Thread finalization cleanup on one retained SAB, and module
   Worker handler-exception recovery composed with the same retained-SAB cleanup
   oracle,
+  Worker termination composed with condition async reacquire, pending
+  `asyncJoin` rejection cleanup, and exact `FinalizationRegistry` cleanup,
   `Thread.restrict` lifecycle isolation plus `Thread.restrict`-owned
   `FinalizationRegistry` cleanup after owner-thread exit,
   Thread exception identity through
@@ -469,6 +471,8 @@ threading architecture:
   teardown termination while property `waitAsync` timeout compaction, async
   condition reacquire, a pending `asyncJoin` rejection reaction, and
   already-ready `FinalizationRegistry` cleanup jobs share the same realm turn,
+  isolated Worker termination composed with condition async reacquire, pending
+  `asyncJoin` rejection cleanup, and exact finalization cleanup,
   deterministic `Lock.asyncHold()` barging where a sync hold legally overtakes
   a queued no-fn async ticket before `await` delivers its release function,
   Promise reaction queue churn from with-fn `Lock.asyncHold`, no-fn
