@@ -72,7 +72,10 @@ Known performance/maturity work:
   arena, explicit-GC, no-GIL threaded GC, and `.gil = true` contexts across
   create/destroy, create-per-task versus long-lived-context reuse with periodic
   collection, object-heavy allocation, block-scoped `let` allocation, and
-  explicit `collectGarbage()`.
+  explicit `collectGarbage()`. It also prints GC cell-backing attribution for an
+  object-heavy allocation run: chunk count, total cell-slot capacity, live cells
+  at context creation, live cells after allocation, free slots after collection,
+  and live cells after collection.
 - Mid-script parallel GC remains abort-safe. Sync wait/lock/condition peers are
   not treated as frozen parked stacks; their lock-free pump points now service
   root publication, and the collector waits long enough for one bounded park

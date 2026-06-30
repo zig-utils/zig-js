@@ -91,6 +91,13 @@ pub const GcCellBacking = struct {
     const FreeNode = extern struct {
         next: ?*FreeNode,
     };
+    pub const Stats = struct {
+        chunks: usize = 0,
+        capacity_bytes: usize = 0,
+        capacity_slots: usize = 0,
+        free_slots: usize = 0,
+        live_slots: usize = 0,
+    };
 
     inner: std.mem.Allocator,
     parallel: bool = false,
@@ -248,6 +255,32 @@ pub const GcCellBacking = struct {
         return .{ .ptr = self, .vtable = &vtable };
     }
 
+    fn countFreeList(head: ?*FreeNode) usize {
+        var count: usize = 0;
+        var cur = head;
+        while (cur) |node| {
+            count += 1;
+            cur = node.next;
+        }
+        return count;
+    }
+
+    pub fn stats(self: *GcCellBacking) Stats {
+        self.acquire();
+        defer self.unlock();
+        var out = Stats{};
+        inline for (bucket_sizes, 0..) |slot_size, idx| {
+            for (self.bucket_chunks[idx].items) |chunk| {
+                out.chunks += 1;
+                out.capacity_bytes += chunk.len;
+                out.capacity_slots += chunk.len / slot_size;
+            }
+            out.free_slots += countFreeList(self.free_lists[idx]);
+        }
+        out.live_slots = out.capacity_slots - out.free_slots;
+        return out;
+    }
+
     /// During `Context.destroy`, `zig-gc` frees every live cell and then this
     /// backing immediately frees whole chunks. Rebuilding freelists in that
     /// phase is pure teardown churn, so owned cell frees become no-ops.
@@ -354,6 +387,39 @@ test "GC cell backing ownership hint avoids repeated bucket chunk scans" {
     try std.testing.expectEqual(first_hint, backing.bucket_owns_hint[idx].?);
     try std.testing.expect(backing.ownsPtrLocked(idx, cells[cells.len - 1].ptr));
     try std.testing.expect(backing.bucket_owns_hint[idx].? != first_hint);
+}
+
+test "GC cell backing stats report chunk capacity and live/free slots" {
+    var backing = GcCellBacking{ .inner = std.testing.allocator };
+    defer backing.deinit();
+    const a = backing.allocator();
+
+    var empty = backing.stats();
+    try std.testing.expectEqual(@as(usize, 0), empty.chunks);
+    try std.testing.expectEqual(@as(usize, 0), empty.capacity_slots);
+    try std.testing.expectEqual(@as(usize, 0), empty.free_slots);
+    try std.testing.expectEqual(@as(usize, 0), empty.live_slots);
+
+    const one = try a.alignedAlloc(u8, .@"16", 200);
+    const two = try a.alignedAlloc(u8, .@"16", 200);
+    const full = backing.stats();
+    const idx = GcCellBacking.bucketIndex(200, .@"16").?;
+    const slots = GcCellBacking.chunk_bytes / GcCellBacking.bucket_sizes[idx];
+    try std.testing.expectEqual(@as(usize, 1), full.chunks);
+    try std.testing.expectEqual(GcCellBacking.chunk_bytes, full.capacity_bytes);
+    try std.testing.expectEqual(slots, full.capacity_slots);
+    try std.testing.expectEqual(slots - 2, full.free_slots);
+    try std.testing.expectEqual(@as(usize, 2), full.live_slots);
+
+    a.free(one);
+    const after_one_free = backing.stats();
+    try std.testing.expectEqual(slots - 1, after_one_free.free_slots);
+    try std.testing.expectEqual(@as(usize, 1), after_one_free.live_slots);
+
+    a.free(two);
+    empty = backing.stats();
+    try std.testing.expectEqual(slots, empty.free_slots);
+    try std.testing.expectEqual(@as(usize, 0), empty.live_slots);
 }
 
 test "GC cell backing bulk teardown skips freelist rebuilds and still delegates side storage" {

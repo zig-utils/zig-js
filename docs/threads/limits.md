@@ -85,7 +85,10 @@ context APIs.
   under the old arena model. `zig build gc-profile` remains the repeatable
   baseline before nursery/generational or lifecycle pooling work lands, and now
   includes a create-per-task versus long-lived-context reuse table with periodic
-  collection to quantify the embedder lifecycle tradeoff.
+  collection to quantify the embedder lifecycle tradeoff plus GC cell-backing
+  attribution for an object-heavy allocation run: chunk count, total cell-slot
+  capacity, live cells at context creation, live cells after allocation, free
+  slots after collection, and live cells after collection.
 - **Context lifecycle cost.** Long-lived embedders amortize the GC setup and
   teardown costs, but create-per-unit-of-work embedders need either cheaper
   context lifecycle or clearer guidance.

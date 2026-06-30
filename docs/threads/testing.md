@@ -199,7 +199,10 @@ does not merely move overhead elsewhere.
 compares create/evaluate/destroy per task against evaluating the same task
 repeatedly in one long-lived context with periodic `collectGarbage()` calls, so
 context-heavy embedders can quantify the cost of create-per-unit-of-work designs
-while the GC allocator and lifecycle paths continue to mature.
+while the GC allocator and lifecycle paths continue to mature. The profile also
+prints GC cell-backing attribution for an object-heavy allocation run: chunk
+count, total cell-slot capacity, live cells at context creation, live cells
+after allocation, free slots after collection, and live cells after collection.
 
 ## Focused Runs
 

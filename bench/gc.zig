@@ -153,6 +153,47 @@ fn printExplicitGc(gpa: std.mem.Allocator, io: std.Io) !void {
     }
 }
 
+fn printGcBacking(gpa: std.mem.Allocator) !void {
+    const source =
+        \\(function(){
+        \\  var keep = [];
+        \\  for (var i = 0; i < 10000; i = i + 1)
+        \\    keep.push({ i: i, pair: { j: i + 1 }, text: 'gc-backing-' + i });
+        \\  return keep.length;
+        \\})()
+    ;
+
+    std.debug.print("\nGC cell backing attribution (one object-heavy script + collect)\n", .{});
+    std.debug.print("{s:<18} {s:>8} {s:>10} {s:>12} {s:>12} {s:>14} {s:>12}\n", .{
+        "mode",
+        "chunks",
+        "cap slots",
+        "live create",
+        "live script",
+        "free collect",
+        "live collect",
+    });
+    for (modes) |mode| {
+        const ctx = try makeContext(gpa, mode);
+        defer ctx.destroy();
+        const backing = ctx.gc_cell_backing orelse continue;
+        const created = backing.stats();
+        _ = try ctx.evaluate(source);
+        const after_script = backing.stats();
+        ctx.collectGarbage();
+        const after_collect = backing.stats();
+        std.debug.print("{s:<18} {d:>8} {d:>10} {d:>12} {d:>12} {d:>14} {d:>12}\n", .{
+            mode.name,
+            after_collect.chunks,
+            after_collect.capacity_slots,
+            created.live_slots,
+            after_script.live_slots,
+            after_collect.free_slots,
+            after_collect.live_slots,
+        });
+    }
+}
+
 fn printTaskLifecycle(gpa: std.mem.Allocator, io: std.Io) !void {
     const rounds: usize = 40;
     const task_source =
@@ -193,4 +234,5 @@ pub fn main() !void {
     try printTaskLifecycle(gpa, io);
     try printAllocation(gpa, io);
     try printExplicitGc(gpa, io);
+    try printGcBacking(gpa);
 }
