@@ -522,7 +522,8 @@ threading architecture:
   `python3 tools/threads-reference-audit.py --probe-candidates` lists the
   closest focused `-Dthreads-case=...` probes before any allowlist promotion.
   Add `--run-probes` to execute those closest probes with per-case timeouts and
-  fail unless every candidate passes.
+  fail unless every candidate passes; failures print the focused runner evidence
+  before the Zig build tail so the remaining blocker is visible.
 
 The [TC39 structs proposal](https://github.com/tc39/proposal-structs) remains a
 tracked future layer. Shared structs, `Atomics.Mutex`, and

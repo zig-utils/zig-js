@@ -198,10 +198,37 @@ def print_probe_candidates(
             print(f"    {command}")
 
 
+def probe_evidence_lines(lines: list[str]) -> list[str]:
+    evidence: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if re.match(r"^(PASS|FAIL|SKIP|MISS)\s+", stripped):
+            evidence.append(line)
+            continue
+        if re.match(r"^\d+/\d+ corpus files passed$", stripped):
+            evidence.append(line)
+            continue
+        if (
+            "RangeError:" in stripped
+            or "ReferenceError:" in stripped
+            or "SyntaxError:" in stripped
+            or "TypeError:" in stripped
+            or "CorpusFailures" in stripped
+        ):
+            evidence.append(line)
+    return evidence
+
+
 def print_probe_output_tail(output: str | bytes, *, prefix: str = "      ") -> None:
     if isinstance(output, bytes):
         output = output.decode(errors="replace")
     lines = [line for line in output.splitlines() if line.strip()]
+    evidence = probe_evidence_lines(lines)
+    if evidence:
+        print(f"{prefix}runner evidence:")
+        for line in evidence[-10:]:
+            print(f"{prefix}  {line}")
+        print(f"{prefix}build tail:")
     for line in lines[-8:]:
         print(f"{prefix}{line}")
 

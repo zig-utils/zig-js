@@ -446,7 +446,9 @@ python3 tools/threads-reference-audit.py --run-probes --probe-timeout 60
 `--run-probes` executes the closest reference-only candidates with focused
 `threads-test` commands and returns nonzero on any failure or timeout. A timed
 out or failing probe is not promotion evidence; keep the file reference-only
-until the underlying behavior lands and the focused run passes reliably.
+until the underlying behavior lands and the focused run passes reliably. Failed
+probes print focused runner evidence before the Zig build tail so the concrete
+JS error, corpus failure, or timeout is visible in one command.
 
 ## Docs Checks
 
