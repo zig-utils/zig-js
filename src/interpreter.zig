@@ -27682,6 +27682,11 @@ fn totalZonedDaysRel(self: *Interpreter, start_epoch: i128, end_epoch: i128, rel
         const next_epoch = relLocalEpochNs(rel, next_date.y, next_date.m, next_date.d, rel.time_ns);
         const span = next_epoch - cur_epoch;
         if (span == 0) {
+            const after_zero = isoDateAdd(next_date.y, next_date.m, next_date.d, 0, 0, 0, direction);
+            try checkIsoDate(self, @floatFromInt(after_zero.y), @floatFromInt(after_zero.m), @floatFromInt(after_zero.d));
+            const after_zero_epoch = relLocalEpochNs(rel, after_zero.y, after_zero.m, after_zero.d, rel.time_ns);
+            const reaches_after_zero = if (forward) end_epoch >= after_zero_epoch else end_epoch <= after_zero_epoch;
+            if (!reaches_after_zero) return @floatFromInt(whole);
             whole += direction;
             cur_y = next_date.y;
             cur_m = next_date.m;
@@ -27719,6 +27724,11 @@ fn balanceZonedDaysRel(self: *Interpreter, start_epoch: i128, span_ns: i128, rel
         try checkIsoDate(self, @floatFromInt(next_date.y), @floatFromInt(next_date.m), @floatFromInt(next_date.d));
         const next_epoch = relLocalEpochNs(rel, next_date.y, next_date.m, next_date.d, rel.time_ns);
         if (next_epoch == cur_epoch) {
+            const after_zero = isoDateAdd(next_date.y, next_date.m, next_date.d, 0, 0, 0, direction);
+            try checkIsoDate(self, @floatFromInt(after_zero.y), @floatFromInt(after_zero.m), @floatFromInt(after_zero.d));
+            const after_zero_epoch = relLocalEpochNs(rel, after_zero.y, after_zero.m, after_zero.d, rel.time_ns);
+            const reaches_after_zero = if (forward) end_epoch >= after_zero_epoch else end_epoch <= after_zero_epoch;
+            if (!reaches_after_zero) break;
             whole += direction;
             cur_y = next_date.y;
             cur_m = next_date.m;
