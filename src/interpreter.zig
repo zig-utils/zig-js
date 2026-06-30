@@ -33039,25 +33039,26 @@ fn temporalPlainDateTimeUntilFn(comptime sign: f64) value.NativeFn {
                 diff = roundNs(diff, opts.smallest, opts.increment, opts.mode);
                 return makeDuration(self, balanceTimeNs(diff, largest));
             }
-            // Calendar largestUnit: diff in the call direction, then balance the
-            // clock part across midnight in the same direction.
-            const start = if (sign > 0) a else b;
-            const end = if (sign > 0) b else a;
-            const start_ns = dateTimeToNs(start);
-            const end_ns = dateTimeToNs(end);
-            var dd = calendarDateDiff(start.calendar, start.year, start.month, start.day, end.year, end.month, end.day, largest);
-            var time_diff = timeToNs(end) - timeToNs(start);
+            // Calendar largestUnit: diff from receiver to argument, then negate
+            // for `since` after balancing any clock part across midnight.
+            const start_ns = dateTimeToNs(a);
+            const end_ns = dateTimeToNs(b);
+            var dd = calendarDateDiff(a.calendar, a.year, a.month, a.day, b.year, b.month, b.day, largest);
+            var time_diff = timeToNs(b) - timeToNs(a);
             if (end_ns >= start_ns and time_diff < 0) {
-                const adjusted_end = calendarDateMinusDays(end.calendar, end.year, end.month, end.day, 1);
-                dd = calendarDateDiff(start.calendar, start.year, start.month, start.day, adjusted_end.y, adjusted_end.m, adjusted_end.d, largest);
+                const adjusted_end = calendarDateMinusDays(b.calendar, b.year, b.month, b.day, 1);
+                dd = calendarDateDiff(a.calendar, a.year, a.month, a.day, adjusted_end.y, adjusted_end.m, adjusted_end.d, largest);
                 time_diff += 86_400_000_000_000;
             } else if (end_ns < start_ns and time_diff > 0) {
-                const adjusted_end = calendarDateMinusDays(end.calendar, end.year, end.month, end.day, -1);
-                dd = calendarDateDiff(start.calendar, start.year, start.month, start.day, adjusted_end.y, adjusted_end.m, adjusted_end.d, largest);
+                const adjusted_end = calendarDateMinusDays(b.calendar, b.year, b.month, b.day, -1);
+                dd = calendarDateDiff(a.calendar, a.year, a.month, a.day, adjusted_end.y, adjusted_end.m, adjusted_end.d, largest);
                 time_diff -= 86_400_000_000_000;
             }
             const tparts = balanceTimeNs(time_diff, .hour);
             for (4..10) |i| dd[i] = tparts[i];
+            if (sign < 0) for (&dd) |*c| {
+                c.* = -c.*;
+            };
             if (opts.smallest != .nanosecond or opts.increment != 1) {
                 dd = calendarDateDiff(a.calendar, a.year, a.month, a.day, b.year, b.month, b.day, largest);
                 time_diff = timeToNs(b) - timeToNs(a);
