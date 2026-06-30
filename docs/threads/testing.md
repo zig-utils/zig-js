@@ -200,14 +200,15 @@ functions, typed-array `waitAsync`, `Thread.asyncJoin`, and exact
 `FinalizationRegistry` cleanup,
 creator-owned `SharedArrayBuffer` and `ArrayBuffer` storage that survives the
 creating Thread's exit, sibling-thread reads, GC pressure, and post-creator
-`ArrayBuffer.transfer()`,
+`ArrayBuffer.transfer()`, child-created SAB/ArrayBuffer storage crossing
+isolated Worker structured-clone after the creator Thread exits,
 cleanup delivery interleaved with `join()` /
 `asyncJoin()` and unregister-token suppression, cleanup delivery after parked
 property/condition waiters resume, plus `ThreadLocal` isolation across normal,
 throwing, nested, and async-joined thread lifecycles, plus
 `ThreadLocal` values registered with `FinalizationRegistry` across
 park/resume/clear/join cleanup lifecycles with exact cleanup count/sum delivery
-after quiescent collection. Each seed currently runs 25 deterministic lifecycle
+after quiescent collection. Each seed currently runs 26 deterministic lifecycle
 subprograms.
 
 `zig build test262 -Dtest262-parallel-js=true` runs test262 programs in

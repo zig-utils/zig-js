@@ -411,7 +411,8 @@ threading architecture:
   exact `FinalizationRegistry` cleanup,
   creator-owned `SharedArrayBuffer` and `ArrayBuffer` storage that survives the
   creating Thread's exit, sibling-thread reads, GC pressure, and post-creator
-  `ArrayBuffer.transfer()`,
+  `ArrayBuffer.transfer()`, plus child-created SAB/ArrayBuffer storage crossing
+  isolated Worker structured-clone after the creator Thread exits,
   cross-thread `FinalizationRegistry` cleanup count/sum oracles, cleanup
   delivery interleaved with `join()` / `asyncJoin()` and unregister-token
   suppression, cleanup delivery after parked property/condition waiters resume,
