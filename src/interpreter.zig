@@ -34239,7 +34239,16 @@ fn zdtEpochFromParsed(self: *Interpreter, tz: TimeZone, p: ParsedDT, behavior: Z
 }
 
 fn canonicalTimeZoneName(name: []const u8) []const u8 {
+    if (std.mem.eql(u8, name, "America/Atka")) return "America/Adak";
+    if (std.mem.eql(u8, name, "America/Knox_IN")) return "America/Indiana/Knox";
+    if (std.mem.eql(u8, name, "Asia/Ashkhabad")) return "Asia/Ashgabat";
     if (std.mem.eql(u8, name, "Asia/Calcutta")) return "Asia/Kolkata";
+    if (std.mem.eql(u8, name, "Asia/Dacca")) return "Asia/Dhaka";
+    if (std.mem.eql(u8, name, "Asia/Istanbul")) return "Europe/Istanbul";
+    if (std.mem.eql(u8, name, "Asia/Macao")) return "Asia/Macau";
+    if (std.mem.eql(u8, name, "Asia/Thimbu")) return "Asia/Thimphu";
+    if (std.mem.eql(u8, name, "Asia/Ujung_Pandang")) return "Asia/Makassar";
+    if (std.mem.eql(u8, name, "Asia/Ulan_Bator")) return "Asia/Ulaanbaatar";
     if (std.mem.eql(u8, name, "Australia/Canberra")) return "Australia/Sydney";
     if (std.mem.eql(u8, name, "Atlantic/Jan_Mayen")) return "Arctic/Longyearbyen";
     if (std.mem.eql(u8, name, "Pacific/Truk")) return "Pacific/Chuuk";
@@ -34352,7 +34361,7 @@ fn parseTimeZoneBare(self: *Interpreter, s: []const u8) EvalError!TimeZone {
     // timeZoneId and equality.
     const name = try dtfCanonTimeZone(self, s);
     const off: i64 =
-        if (std.mem.eql(u8, name, "Europe/Berlin"))
+        if (std.mem.eql(u8, name, "Europe/Berlin") or std.mem.eql(u8, name, "Europe/Vienna"))
             3_600_000_000_000
         else if (std.mem.eql(u8, name, "America/New_York"))
             -5 * 3_600_000_000_000
