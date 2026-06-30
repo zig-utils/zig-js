@@ -192,13 +192,16 @@ realm turn,
 Promise reaction queue churn from with-fn `Lock.asyncHold`, no-fn release
 functions, typed-array `waitAsync`, `Thread.asyncJoin`, and exact
 `FinalizationRegistry` cleanup,
+creator-owned `SharedArrayBuffer` and `ArrayBuffer` storage that survives the
+creating Thread's exit, sibling-thread reads, GC pressure, and post-creator
+`ArrayBuffer.transfer()`,
 cleanup delivery interleaved with `join()` /
 `asyncJoin()` and unregister-token suppression, cleanup delivery after parked
 property/condition waiters resume, plus `ThreadLocal` isolation across normal,
 throwing, nested, and async-joined thread lifecycles, plus
 `ThreadLocal` values registered with `FinalizationRegistry` across
 park/resume/clear/join cleanup lifecycles with exact cleanup count/sum delivery
-after quiescent collection. Each seed currently runs 24 deterministic lifecycle
+after quiescent collection. Each seed currently runs 25 deterministic lifecycle
 subprograms.
 
 `zig build test262 -Dtest262-parallel-js=true` runs test262 programs in
@@ -317,6 +320,11 @@ PR-249 files stay reference-only for concrete reasons:
   and timing semantics beyond today's shell surface.
 - `semantics/oom-one-thread.js` remains out until there is a real heap cap and
   per-thread OOM handling contract.
+- `cve/mc-life-creator-thread-dies.js` still depends on reference-shell buffer
+  variants and detach assumptions that are not promotable as-is. The stable
+  subset is covered by `threadfuzz creatorbuffers`, which checks child-created
+  `SharedArrayBuffer` / `ArrayBuffer` storage after creator exit, sibling reads,
+  GC pressure, and post-creator `ArrayBuffer.transfer()`.
 - Helper/preload files such as `harness.js`, `bench/harness.js`,
   `scaling/harness.js`, `resources/assert.js`, and
   `vmstate/resources/workload.js` are not counted as standalone remaining

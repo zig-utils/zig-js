@@ -400,6 +400,9 @@ threading architecture:
   Promise reaction queue churn from with-fn `Lock.asyncHold`, no-fn
   release-function delivery, typed-array `waitAsync`, `Thread.asyncJoin`, and
   exact `FinalizationRegistry` cleanup,
+  creator-owned `SharedArrayBuffer` and `ArrayBuffer` storage that survives the
+  creating Thread's exit, sibling-thread reads, GC pressure, and post-creator
+  `ArrayBuffer.transfer()`,
   cross-thread `FinalizationRegistry` cleanup count/sum oracles, cleanup
   delivery interleaved with `join()` / `asyncJoin()` and unregister-token
   suppression, cleanup delivery after parked property/condition waiters resume,

@@ -232,7 +232,10 @@ context APIs.
   sync hold legally overtakes a queued no-fn async ticket before `await`
   delivers its release function, Promise reaction queue churn from with-fn
   `Lock.asyncHold`, no-fn release functions, typed-array `waitAsync`,
-  `Thread.asyncJoin`, and exact `FinalizationRegistry` cleanup, and cleanup
+  `Thread.asyncJoin`, and exact `FinalizationRegistry` cleanup,
+  creator-owned `SharedArrayBuffer` and `ArrayBuffer` storage that survives the
+  creating Thread's exit, sibling-thread reads, GC pressure, and post-creator
+  `ArrayBuffer.transfer()`, and cleanup
   delivery interleaved with `join()` / `asyncJoin()` plus unregister-token
   suppression, plus cleanup delivery after
   parked property/condition waiters resume, plus `ThreadLocal` values registered

@@ -3430,6 +3430,146 @@ fn runMicrotaskChurnLifecycleInterleaving(gpa: std.mem.Allocator, seed: u64) !bo
     return true;
 }
 
+fn runCreatorOwnedBufferLifecycleInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
+    var prng = std.Random.DefaultPrng.init(seed ^ 0x6372_6561_746f_7262);
+    const r = prng.random();
+    const ncreators = 2 + r.uintLessThan(usize, 3);
+    const per_buffer = 12 + r.uintLessThan(usize, 12);
+    const read_rounds = 8 + r.uintLessThan(usize, 8);
+    const seed_marker = seed % 10_000;
+
+    var payload_sum: usize = 0;
+    var id: usize = 0;
+    while (id < ncreators) : (id += 1) {
+        const base = 510_000 + seed_marker + id * 10_000;
+        var i: usize = 0;
+        while (i < per_buffer) : (i += 1) payload_sum += base + i;
+    }
+    const expected_total = payload_sum * (3 + 2 * read_rounds);
+
+    const ctx = js.Context.createWith(gpa, .{ .enable_threads = true, .enable_gc = true }) catch {
+        std.debug.print("seed {d}: creator-owned buffer lifecycle context creation failed\n", .{seed});
+        return false;
+    };
+    defer ctx.destroy();
+
+    const src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  const bundles = [];
+        \\  for (let id = 0; id < {d}; id++) {{
+        \\    const creator = new Thread((id, per, seedMarker) => {{
+        \\      const base = 510000 + seedMarker + id * 10000;
+        \\      const sab = new SharedArrayBuffer(per * 4);
+        \\      const ab = new ArrayBuffer(per * 4);
+        \\      const movable = new ArrayBuffer(per * 4);
+        \\      const sv = new Int32Array(sab);
+        \\      const av = new Int32Array(ab);
+        \\      const mv = new Int32Array(movable);
+        \\      let sum = 0;
+        \\      for (let i = 0; i < per; i++) {{
+        \\        const v = base + i;
+        \\        sv[i] = v;
+        \\        av[i] = v;
+        \\        mv[i] = v;
+        \\        sum += v;
+        \\      }}
+        \\      return {{ id, sab, ab, movable, sum, base }};
+        \\    }}, id, {d}, {d});
+        \\    bundles.push(creator.join());
+        \\  }}
+        \\  let total = 0;
+        \\  for (const b of bundles) {{
+        \\    const sv = new Int32Array(b.sab);
+        \\    const av = new Int32Array(b.ab);
+        \\    let local = 0;
+        \\    for (let i = 0; i < {d}; i++) {{
+        \\      const expected = b.base + i;
+        \\      if (sv[i] !== expected)
+        \\        throw new Error('creator-owned SAB lost word ' + i + '/' + sv[i] + '/' + expected);
+        \\      if (av[i] !== expected)
+        \\        throw new Error('creator-owned AB lost word ' + i + '/' + av[i] + '/' + expected);
+        \\      local += sv[i] + av[i];
+        \\    }}
+        \\    if (local !== b.sum * 2)
+        \\      throw new Error('bad creator-owned main checksum ' + local + '/' + (b.sum * 2));
+        \\    total += local;
+        \\  }}
+        \\  if (typeof gc === 'function') gc();
+        \\  const readers = [];
+        \\  for (const b of bundles) {{
+        \\    readers.push(new Thread((bundle, per, rounds) => {{
+        \\      const sv = new Int32Array(bundle.sab);
+        \\      const av = new Int32Array(bundle.ab);
+        \\      let seen = 0;
+        \\      for (let round = 0; round < rounds; round++) {{
+        \\        for (let i = 0; i < per; i++) {{
+        \\          const expected = bundle.base + i;
+        \\          const s = sv[i];
+        \\          const a = av[i];
+        \\          if (s !== expected || a !== expected)
+        \\            throw new Error('sibling reader saw creator-owned buffer corruption');
+        \\          seen += s + a;
+        \\        }}
+        \\        let junk = [];
+        \\        for (let j = 0; j < 32; j++)
+        \\          junk.push({{ round, j, bundle }});
+        \\        junk = null;
+        \\      }}
+        \\      return seen;
+        \\    }}, b, {d}, {d}));
+        \\  }}
+        \\  for (const reader of readers)
+        \\    total += reader.join();
+        \\  if (typeof gc === 'function') gc();
+        \\  for (const b of bundles) {{
+        \\    const copy = b.movable.transfer();
+        \\    if (b.movable.byteLength !== 0)
+        \\      throw new Error('creator-owned movable buffer did not detach');
+        \\    const cv = new Int32Array(copy);
+        \\    let copySum = 0;
+        \\    for (let i = 0; i < {d}; i++) {{
+        \\      const expected = b.base + i;
+        \\      if (cv[i] !== expected)
+        \\        throw new Error('creator-owned transferred copy lost word');
+        \\      copySum += cv[i];
+        \\    }}
+        \\    if (copySum !== b.sum)
+        \\      throw new Error('bad creator-owned transferred checksum ' + copySum + '/' + b.sum);
+        \\    total += copySum;
+        \\  }}
+        \\  return total;
+        \\}})();
+        \\
+    ,
+        .{
+            ncreators,
+            per_buffer,
+            seed_marker,
+            per_buffer,
+            per_buffer,
+            read_rounds,
+            per_buffer,
+        },
+    );
+    defer gpa.free(src);
+
+    const result = ctx.evaluate(src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: creator-owned buffer lifecycle JS threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!result.isNumber() or result.asNum() != @as(f64, @floatFromInt(expected_total))) {
+        std.debug.print("seed {d}: creator-owned buffer lifecycle got {d}, expected {d}\n", .{ seed, if (result.isNumber()) result.asNum() else -1, expected_total });
+        return false;
+    }
+    ctx.collectGarbage();
+    return true;
+}
+
 fn runTerminationPendingReactionInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
     var prng = std.Random.DefaultPrng.init(seed ^ 0x7465_726d_7265_6163);
     const r = prng.random();
@@ -6288,6 +6428,22 @@ pub fn main(init: std.process.Init) !void {
         if (mcfail != 0) std.process.exit(1);
         return;
     };
+    // `threadfuzz creatorbuffers <iters> <seed>`: focused lifecycle repro for
+    // SharedArrayBuffer and ArrayBuffer storage created by a child Thread,
+    // observed after the creator exits, then read/transferred under GC pressure.
+    if (first) |a| if (std.mem.eql(u8, a, "creatorbuffers")) {
+        if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch 1;
+        if (args.next()) |b| base_seed = std.fmt.parseInt(u64, b, 10) catch 1;
+        var cbfail: usize = 0;
+        var cbi: usize = 0;
+        while (cbi < iters) : (cbi += 1) {
+            const seed = base_seed +% cbi;
+            if (!(try runCreatorOwnedBufferLifecycleInterleaving(gpa, seed))) cbfail += 1;
+        }
+        std.debug.print("threadfuzz creatorbuffers: {d} programs from seed {d}, {d} failures\n", .{ iters, base_seed, cbfail });
+        if (cbfail != 0) std.process.exit(1);
+        return;
+    };
     // `threadfuzz termreact <iters> <seed>`: focused lifecycle repro for
     // teardown termination while asyncJoin reactions and child-owned typed-array
     // waitAsync tickets are still pending.
@@ -6515,7 +6671,9 @@ pub fn main(init: std.process.Init) !void {
     // unregister tokens suppress some records, after parked property and
     // condition waiters resume, and while typed-array waitAsync promise
     // reactions and asyncJoin reactions settle together, while asyncHold
-    // callback and release-function reactions churn the same queue, plus when teardown
+    // callback and release-function reactions churn the same queue, when
+    // child-created SAB/ArrayBuffer storage outlives its creator Thread and is
+    // read/transferred under GC pressure, plus when teardown
     // termination rejects pending asyncJoin reactions and abandons child-owned
     // typed-array waitAsync tickets, and when teardown termination overlaps
     // property waitAsync timeout compaction, async condition reacquire,
@@ -6550,6 +6708,7 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runFinalizationWaiterCleanupInterleaving(gpa, seed))) lfail += 1;
             if (!(try runWaitAsyncFinalizationCleanupInterleaving(gpa, seed))) lfail += 1;
             if (!(try runMicrotaskChurnLifecycleInterleaving(gpa, seed))) lfail += 1;
+            if (!(try runCreatorOwnedBufferLifecycleInterleaving(gpa, seed))) lfail += 1;
             if (!(try runTerminationPendingReactionInterleaving(gpa, seed))) lfail += 1;
             if (!(try runTerminationWaiterCleanupInterleaving(gpa, seed))) lfail += 1;
             if (!(try runAsyncHoldBargingLifecycleInterleaving(gpa, seed))) lfail += 1;
@@ -6557,7 +6716,7 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runThreadLocalLifecycleInterleaving(gpa, seed))) lfail += 1;
             if (!(try runThreadLocalFinalizationCleanupInterleaving(gpa, seed))) lfail += 1;
         }
-        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 24, base_seed, lfail });
+        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 25, base_seed, lfail });
         if (lfail != 0) std.process.exit(1);
         return;
     };

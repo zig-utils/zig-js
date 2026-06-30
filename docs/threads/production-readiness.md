@@ -269,7 +269,10 @@ as embedders exercise more threaded host patterns.
   where a sync hold legally overtakes a queued no-fn async ticket before
   `await` delivers its release function, Promise reaction queue churn from
   with-fn `Lock.asyncHold`, no-fn release functions, typed-array `waitAsync`,
-  `Thread.asyncJoin`, and exact `FinalizationRegistry` cleanup, and
+  `Thread.asyncJoin`, and exact `FinalizationRegistry` cleanup,
+  creator-owned `SharedArrayBuffer` and `ArrayBuffer` storage that survives the
+  creating Thread's exit, sibling-thread reads, GC pressure, and post-creator
+  `ArrayBuffer.transfer()`, and
   `ThreadLocal` isolation across
   normal, throwing, nested, and async-joined thread lifecycles, plus
   `ThreadLocal` values registered with `FinalizationRegistry` across
