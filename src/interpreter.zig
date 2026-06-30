@@ -34286,6 +34286,19 @@ fn zdtOffsetForLocalDisambiguation(self: *Interpreter, tz: TimeZone, local_ns: i
             };
         }
     }
+    if (std.mem.eql(u8, tz.name, "Pacific/Apia")) {
+        const before_skip = -10 * 3_600_000_000_000;
+        const after_skip = 14 * 3_600_000_000_000;
+        const skipped_day_start = @as(i128, tDaysFromCivil(2011, 12, 30)) * nsPerUnit(.day);
+        const skipped_day_end = skipped_day_start + nsPerUnit(.day);
+        if (local_ns >= skipped_day_start and local_ns < skipped_day_end) {
+            return switch (disambiguation) {
+                .compatible, .later => before_skip,
+                .earlier => after_skip,
+                .reject => self.throwError("RangeError", "ambiguous or nonexistent local time"),
+            };
+        }
+    }
     if (std.mem.eql(u8, tz.name, "America/Vancouver")) {
         const standard = -8 * 3_600_000_000_000;
         const daylight = -7 * 3_600_000_000_000;
@@ -34684,6 +34697,8 @@ fn timeZoneOffsetAtEpoch(name: []const u8, epoch_ns: i128, fallback: i64) i64 {
         const dst_end_1999 = (@as(i128, tDaysFromCivil(1999, 10, 31)) * nsPerUnit(.day)) + 9 * nsPerUnit(.hour);
         const dst_start_2000 = (@as(i128, tDaysFromCivil(2000, 4, 2)) * nsPerUnit(.day)) + 10 * nsPerUnit(.hour);
         const dst_end_2000 = (@as(i128, tDaysFromCivil(2000, 10, 29)) * nsPerUnit(.day)) + 9 * nsPerUnit(.hour);
+        const dst_start_2001 = (@as(i128, tDaysFromCivil(2001, 4, 1)) * nsPerUnit(.day)) + 10 * nsPerUnit(.hour);
+        const dst_end_2001 = (@as(i128, tDaysFromCivil(2001, 10, 28)) * nsPerUnit(.day)) + 9 * nsPerUnit(.hour);
         const dst_start_2019 = (@as(i128, tDaysFromCivil(2019, 3, 10)) * nsPerUnit(.day)) + 10 * nsPerUnit(.hour);
         const dst_end_2019 = (@as(i128, tDaysFromCivil(2019, 11, 3)) * nsPerUnit(.day)) + 9 * nsPerUnit(.hour);
         const dst_start_2020 = (@as(i128, tDaysFromCivil(2020, 3, 8)) * nsPerUnit(.day)) + 10 * nsPerUnit(.hour);
@@ -34695,6 +34710,8 @@ fn timeZoneOffsetAtEpoch(name: []const u8, epoch_ns: i128, fallback: i64) i64 {
         if (epoch_ns >= dst_start_1999 and epoch_ns < dst_end_1999)
             return -7 * 3_600_000_000_000;
         if (epoch_ns >= dst_start_2000 and epoch_ns < dst_end_2000)
+            return -7 * 3_600_000_000_000;
+        if (epoch_ns >= dst_start_2001 and epoch_ns < dst_end_2001)
             return -7 * 3_600_000_000_000;
         if (epoch_ns >= dst_start_2019 and epoch_ns < dst_end_2019)
             return -7 * 3_600_000_000_000;
@@ -35108,7 +35125,11 @@ fn temporalZdtAddFn(comptime sign: f64) value.NativeFn {
                 const c = addCalendarDate(t.calendar, l.year, l.month, l.day, dur[0], dur[1], dur[2], dur[3], sign, reject) orelse return self.throwError("RangeError", "date overflow");
                 const iso = calendarDateToIso(t.calendar, c.y, c.m, c.d);
                 const local_ns = @as(i128, tDaysFromCivil(iso.y, iso.m, iso.d)) * 86_400_000_000_000 + timeToNs(&l);
-                epoch = local_ns - t.tz_offset_ns;
+                const target_offset = if (isFixedTimeZone(.{ .name = t.tz_name, .offset_ns = t.tz_offset_ns }))
+                    t.tz_offset_ns
+                else
+                    try zdtOffsetForLocalDisambiguation(self, .{ .name = t.tz_name, .offset_ns = t.tz_offset_ns }, local_ns, .compatible);
+                epoch = local_ns - target_offset;
                 // Then time-of-day units.
                 const time_only = durationTimeNs(dur) - (@as(i128, @intFromFloat(dur[2])) * 7 + @as(i128, @intFromFloat(dur[3]))) * nsPerUnit(.day);
                 epoch += @as(i128, @intFromFloat(sign)) * time_only;
