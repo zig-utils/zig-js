@@ -2904,6 +2904,7 @@ fn runMidScriptWaitPumpGc(gpa: std.mem.Allocator, seed: u64) !bool {
     const tls_expected = async_base + 4096;
     const thread_result_expected = async_base + 8192;
     const thread_throw_expected = async_base + 12288;
+    const wait_async_expected = async_base + 16384;
     const spin_iters = 4000 + r.uintLessThan(usize, 6000);
     const wait_timeout_ms = 1200 + r.uintLessThan(usize, 900);
 
@@ -2985,6 +2986,22 @@ fn runMidScriptWaitPumpGc(gpa: std.mem.Allocator, seed: u64) !bool {
         \\    Atomics.store(gate, 'asyncCondDone', 1);
         \\    Atomics.notify(gate, 'asyncCondDone');
         \\  }});
+        \\  const waitAsyncView = new Int32Array(new SharedArrayBuffer(4));
+        \\  globalThis.__midgcWaitAsyncScore = 0;
+        \\  (() => {{
+        \\    const waitRoot = {{ marker: {d}, nested: {{ root: asyncRoot, label: 'waitAsync-midgc-root' }} }};
+        \\    const waiter = Atomics.waitAsync(waitAsyncView, 0, 0);
+        \\    if (waiter.async !== true || !(waiter.value instanceof Promise))
+        \\      throw new Error('bad midgc waitAsync pending shape');
+        \\    waiter.value.then((v) => {{
+        \\      if (v !== 'ok' || waitRoot.marker !== {d} || waitRoot.nested.root.nested.base !== {d})
+        \\        globalThis.__midgcWaitAsyncScore = -1;
+        \\      else
+        \\        globalThis.__midgcWaitAsyncScore = waitRoot.marker;
+        \\    }}, () => {{
+        \\      globalThis.__midgcWaitAsyncScore = -2;
+        \\    }});
+        \\  }})();
         \\  globalThis.__midgcCleanupCount = 0;
         \\  globalThis.__midgcCleanupSum = 0;
         \\  globalThis.__midgcRegistry = (typeof FinalizationRegistry === 'function')
@@ -3106,6 +3123,9 @@ fn runMidScriptWaitPumpGc(gpa: std.mem.Allocator, seed: u64) !bool {
         \\    throw new Error('async condition waiter did not reacquire during midgc test');
         \\  if (asyncCondScore !== {d} || asyncCondThen !== {d})
         \\    throw new Error('bad async condition midgc score: ' + asyncCondScore + '/' + asyncCondThen);
+        \\  Atomics.store(waitAsyncView, 0, 1);
+        \\  if (Atomics.notify(waitAsyncView, 0) !== 1)
+        \\    throw new Error('midgc waitAsync waiter was not queued');
         \\  Atomics.store(gate, 'releaseLock', 1);
         \\  Atomics.notify(gate, 'releaseLock');
         \\  Atomics.store(gate, 'tlsRelease', 1);
@@ -3141,6 +3161,9 @@ fn runMidScriptWaitPumpGc(gpa: std.mem.Allocator, seed: u64) !bool {
             async_allocs,
             async_second_allocs,
             async_cond_allocs,
+            wait_async_expected,
+            wait_async_expected,
+            async_base,
             tls_expected,
             tls_expected + 111,
             wait_timeout_ms,
@@ -3201,6 +3224,14 @@ fn runMidScriptWaitPumpGc(gpa: std.mem.Allocator, seed: u64) !bool {
     }
     if (ctx.gc_par_collections.load(.monotonic) <= before_collections) {
         std.debug.print("seed {d}: midgc did not finish a parallel collection\n", .{seed});
+        return false;
+    }
+    const wait_async_score = ctx.evaluate("globalThis.__midgcWaitAsyncScore") catch |err| {
+        std.debug.print("seed {d}: cannot read midgc waitAsync score: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    if (!wait_async_score.isNumber() or wait_async_score.asNum() != @as(f64, @floatFromInt(wait_async_expected))) {
+        std.debug.print("seed {d}: midgc waitAsync score got {d}, expected {d}\n", .{ seed, if (wait_async_score.isNumber()) wait_async_score.asNum() else -1, wait_async_expected });
         return false;
     }
     ctx.collectGarbage();

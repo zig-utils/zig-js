@@ -124,13 +124,15 @@ context APIs.
   `Atomics.wait`, `Condition.wait`, and contended `Lock` acquisition without
   tracing those peers as frozen parked stacks. Host-side thread queues are part
   of the root set too: `Gil.tasks`, `LockRecord.pending`, async condition
-  waiters, ThreadLocal maps, thread completion results, release-function lock
-  records, and contended `Lock.hold` receiver/callback pairs now trace, barrier,
-  or temp-root their hidden JS values. The mid-GC fuzzer now queues a FIFO
-  `Lock.asyncHold` grant chain plus an async `Condition.wait` reacquire path
-  with captured JS roots, and requires sync-wait pump points to execute them
-  during the same allocation-pressure window that produces a finishing parallel
-  sweep.
+  waiters, typed-array `waitAsync` waiter/reaction roots, ThreadLocal maps,
+  thread completion results, release-function lock records, and contended
+  `Lock.hold` receiver/callback pairs now trace, barrier, or temp-root their
+  hidden JS values. The mid-GC fuzzer now queues a FIFO `Lock.asyncHold` grant
+  chain, an async `Condition.wait` reacquire path with captured JS roots, and a
+  typed-array `waitAsync` reaction graph reachable only through the native
+  waiter queue; sync-wait pump points must execute the async grants during the
+  same allocation-pressure window that produces a finishing parallel sweep, and
+  the `waitAsync` reaction must run intact after notification.
   Keep quiescent collection as the fallback for cycles that still cannot
   converge, and keep widening wait/cleanup stress around this protocol.
 - **Fuzzer breadth.** The broad `threadfuzz` profile now covers caught
@@ -139,8 +141,9 @@ context APIs.
   `FinalizationRegistry` cleanup under GC-backed parallel contexts. The mid-GC
   profile now hammers sync-wait root publication during finishing
   `parallel_midscript_gc` sweeps, executes a queued async-hold grant chain and
-  async condition reacquire grants from those pump points, keeps a
-  ThreadLocal-only hidden root live in a parked peer, keeps completed-but-unjoined
+  async condition reacquire grants from those pump points, keeps a typed-array
+  `waitAsync` promise/reaction graph live only through the native waiter queue,
+  keeps a ThreadLocal-only hidden root live in a parked peer, keeps completed-but-unjoined
   Thread result and thrown exception objects live through the thread completion
   record, and verifies exact `FinalizationRegistry` cleanup count/sum delivery
   afterward. The lifecycle

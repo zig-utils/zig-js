@@ -259,13 +259,16 @@ per-thread before threads stop holding the GIL):
      one wake/publish opportunity under load. The root set also includes
      host-side thread queues that can hide JS values from ordinary object
      tracing: `Gil.tasks`, `LockRecord.pending`, async condition waiters,
-     ThreadLocal maps, thread completion results, and release-function lock
-     records are traced or insertion-barriered when populated. Contended
+     typed-array `waitAsync` waiter/reaction roots, ThreadLocal maps, thread
+     completion results, and release-function lock records are traced or
+     insertion-barriered when populated. Contended
      `Lock.hold` receiver/callback pairs are temp-rooted while native acquisition
      parks. The mid-script GC fuzzer now leaves completed but unjoined child
      `Thread` result and thrown exception objects in native completion records
      across the allocation-pressure window and verifies that `join()` receives
-     both intact. The regression case from the
+     both intact. It also keeps a typed-array `waitAsync` promise/reaction graph
+     reachable only through the native waiter queue until notification. The
+     regression case from the
      earlier naive approach (marking sync waits as frozen and sweeping the host's
      captured-env vars) stays guarded by
      `parallel_js (M3): sync wait peers publish roots for mid-script parallel GC`,

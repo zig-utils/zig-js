@@ -279,14 +279,17 @@ Do this once the engine's `context.zig`/`interpreter.zig` surface is settled
   *Thread host-queue roots landed:* shared-realm threading queues now participate
   in the root policy rather than relying on incidental JS references. Queued
   `Lock.asyncHold` tasks in `Gil.tasks`, per-lock pending grant jobs, async
-  condition waiters, ThreadLocal stored values, thread completion results, and
-  release-function lock records trace or barrier their hidden JS values,
-  covering callbacks/promises that live only in native side records. Contended
+  condition waiters, typed-array `waitAsync` waiter/reaction roots, ThreadLocal
+  stored values, thread completion results, and release-function lock records
+  trace or barrier their hidden JS values, covering callbacks/promises that live
+  only in native side records. Contended
   `Lock.hold` also temp-roots its receiver and callback while native acquisition
   parks and pumps. The mid-script GC fuzzer now leaves children completed but
   unjoined across the allocation-pressure window and verifies that both an
   object result and a thrown exception object survive until `join()`, directly
-  exercising the completion-record roots.
+  exercising the completion-record roots. It also keeps a typed-array
+  `waitAsync` promise/reaction graph reachable only through the native waiter
+  queue until notification.
   *Dependency root helper landed:* `zig-gc` now exposes optional conservative
   word marking for native stack or register-spill ranges, with dependency-local
   tests covering exact and interior payload pointers. zig-js still needs
