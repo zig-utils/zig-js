@@ -311,7 +311,10 @@ threading architecture:
   repeated middle shifts.
   Promise microtask drains now use a FIFO head cursor too, so observed
   `Lock.asyncHold` callbacks and no-fn release-function reactions do not pay one
-  front shift per pending reaction while preserving checkpoint order.
+  front shift per pending reaction while preserving checkpoint order. The
+  async-hold task pump also snapshots the microtask enqueue generation around
+  each delivered grant, so unobserved grants that settle without queuing any
+  reaction skip the otherwise-empty microtask drain lock in no-GIL mode.
   The Worker profile prints that empty-receive polling cost separately from
   real message-delivery and lifecycle cost. Continue using the profile for the
   remaining contended-lock, Worker message, and lifecycle hot spots.

@@ -113,7 +113,11 @@ context APIs.
   head cursors for both per-lock pending grants and realm task delivery, and
   copies bounded FIFO bursts under the shared API lock before running grants
   outside it, so queue drains do not front-shift remaining jobs or lock once per
-  delivered job. Condition notify/notifyAll also dequeues the mixed sync/async
+  delivered job. The async-hold task pump also snapshots the microtask enqueue
+  generation around each grant, so unobserved grants that settle without queued
+  reactions skip an otherwise-empty no-GIL microtask drain while preserving
+  checkpoint order for grants that do enqueue reactions. Condition
+  notify/notifyAll also dequeues the mixed sync/async
   waiter queue through a FIFO head cursor instead of shifting every notified
   waiter. Timed-out or terminated sync condition waiters are marked canceled and
   skipped by that cursor instead of being removed from the middle of the queue.

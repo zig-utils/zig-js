@@ -277,7 +277,10 @@ typed-array waiter-table shapes, and
 Promise microtask drains now use the same FIFO head-cursor pattern, with
 `microtask queue is FIFO with a head cursor` guarding the direct queue shape and
 the asyncHold corpus case exercising observed callback/release-function
-reactions through the public API.
+reactions through the public API. The async-hold task pump snapshots the
+microtask enqueue generation before and after each delivered grant, so
+unobserved grants that settle without queuing reactions keep the required task
+turn while skipping an otherwise-empty no-GIL microtask drain.
 `threads-profile` remains the check that this kind of targeted optimization
 does not merely move overhead elsewhere.
 

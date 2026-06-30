@@ -85,13 +85,20 @@ pub const Microtask = struct {
 pub const MicrotaskQueue = struct {
     items: std.ArrayListUnmanaged(Microtask) = .empty,
     head: usize = 0,
+    /// Monotonic enqueue generation for run-loop pumps that need to know
+    /// whether a task turn produced microtasks without taking the queue lock on
+    /// the common empty path. This is not a length; it never decreases.
+    generation: std.atomic.Value(u64) = .init(0),
 
     pub fn append(self: *MicrotaskQueue, a: std.mem.Allocator, task: Microtask) !void {
         try self.items.append(a, task);
+        _ = self.generation.fetchAdd(1, .release);
     }
 
     pub fn appendPendingSlice(self: *MicrotaskQueue, a: std.mem.Allocator, other: *MicrotaskQueue) !void {
-        try self.items.appendSlice(a, other.pendingItems());
+        const pending = other.pendingItems();
+        try self.items.appendSlice(a, pending);
+        if (pending.len > 0) _ = self.generation.fetchAdd(@intCast(pending.len), .release);
     }
 
     pub fn pendingLen(self: *const MicrotaskQueue) usize {
@@ -124,6 +131,10 @@ pub const MicrotaskQueue = struct {
         self.items.clearRetainingCapacity();
         self.head = 0;
     }
+
+    pub fn enqueueGeneration(self: *const MicrotaskQueue) u64 {
+        return self.generation.load(.acquire);
+    }
 };
 
 test "microtask queue is FIFO with a head cursor" {
@@ -135,15 +146,18 @@ test "microtask queue is FIFO with a head cursor" {
     try q.append(a, .{ .reaction = undefined, .argument = Value.num(2), .fulfilled = true });
     try q.append(a, .{ .reaction = undefined, .argument = Value.num(3), .fulfilled = true });
 
+    try std.testing.expectEqual(@as(u64, 3), q.enqueueGeneration());
     try std.testing.expectEqual(@as(usize, 3), q.pendingLen());
     try std.testing.expectEqual(@as(f64, 1), q.pop().?.argument.asNum());
     try std.testing.expectEqual(@as(usize, 2), q.pendingLen());
     try q.append(a, .{ .reaction = undefined, .argument = Value.num(4), .fulfilled = true });
+    try std.testing.expectEqual(@as(u64, 4), q.enqueueGeneration());
     try std.testing.expectEqual(@as(f64, 2), q.pop().?.argument.asNum());
     try std.testing.expectEqual(@as(f64, 3), q.pop().?.argument.asNum());
     try std.testing.expectEqual(@as(f64, 4), q.pop().?.argument.asNum());
     try std.testing.expect(q.isEmpty());
     try std.testing.expect(q.pop() == null);
+    try std.testing.expectEqual(@as(u64, 4), q.enqueueGeneration());
 }
 
 /// Shared aggregation state for the combinators (`Promise.all`/`allSettled`/

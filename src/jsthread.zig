@@ -2376,6 +2376,10 @@ fn enqueueHoldJob(self: *Interpreter, job: *HoldJob) value.HostError!void {
     try g.enqueueTask(self.arena, @ptrCast(job));
 }
 
+inline fn microtaskEnqueueGeneration(self: *Interpreter) u64 {
+    return if (self.microtasks) |q| q.enqueueGeneration() else 0;
+}
+
 /// Pump the realm's run-loop tasks: run each pending grant delivery as its
 /// own turn (draining the pumping thread's microtasks after each). Called
 /// from the drain tail and from every parking point.
@@ -2396,8 +2400,10 @@ pub fn pumpTasks(self: *Interpreter) void {
         for (burst[0..n]) |r| {
             bumpContention("task_pump_jobs");
             const job: *HoldJob = @ptrCast(@alignCast(r));
+            const microtask_gen = microtaskEnqueueGeneration(self);
             runHoldJob(self, job) catch {};
-            self.drainMicrotasks() catch {};
+            if (microtaskEnqueueGeneration(self) != microtask_gen)
+                self.drainMicrotasks() catch {};
         }
     }
 }
