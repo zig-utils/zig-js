@@ -710,16 +710,22 @@ pub const Binding = struct {
     /// slabs individually. A SharedArrayBuffer wrapper owns one realm retain
     /// that must be released when the wrapper cell dies.
     pub fn finalize(self: *Binding, cell: *anyopaque, kind: Kind) void {
+        if (self.context.gc_finalizer_stats_out) |stats| stats.addKind(kind);
         switch (kind) {
             .object => {
                 const o: *Object = @ptrCast(@alignCast(cell));
                 if (hasObjectBacking(o.backing_flags) or o.private_brands != null) {
                     const released = finalizeObjectBacking(o, o.backing_allocator orelse self.context.gpa);
                     if (released > 0) {
+                        if (self.context.gc_finalizer_stats_out) |stats| stats.object_backing_releases += released;
                         _ = @atomicRmw(usize, &self.context.gc_object_backing_stores_live, .Sub, released, .monotonic);
                     }
                 }
                 if (o.array_buffer) |ab| {
+                    if (self.context.gc_finalizer_stats_out) |stats| {
+                        stats.array_buffers += 1;
+                        if (ab.shared != null) stats.shared_array_buffers += 1;
+                    }
                     if (ab.shared) |storage| {
                         const sab_released = self.context.sab_retains.releaseTracked(storage);
                         std.debug.assert(sab_released);
@@ -745,6 +751,7 @@ pub const Binding = struct {
                 const p: *promise.Promise = @ptrCast(@alignCast(cell));
                 if (p.gc_owned) {
                     const count = p.on_fulfill.items.len + p.on_reject.items.len;
+                    if (self.context.gc_finalizer_stats_out) |stats| stats.promise_reactions += count;
                     p.on_fulfill.deinit(self.context.gpa);
                     p.on_reject.deinit(self.context.gpa);
                     p.on_fulfill = .empty;

@@ -220,6 +220,68 @@ fn printGcBacking(gpa: std.mem.Allocator) !void {
     }
 }
 
+fn modeUsesGc(mode: Mode) bool {
+    return mode.options.enable_gc or (mode.options.enable_threads and !mode.options.gil);
+}
+
+fn destroyFinalizerStats(gpa: std.mem.Allocator, mode: Mode, source: []const u8) !js.Context.GcFinalizerStats {
+    var ctx = try makeContext(gpa, mode);
+    errdefer ctx.destroy();
+    _ = try ctx.evaluate(source);
+
+    var stats = js.Context.GcFinalizerStats{};
+    ctx.gc_finalizer_stats_out = &stats;
+    ctx.destroy();
+    return stats;
+}
+
+fn printGcFinalizers(gpa: std.mem.Allocator) !void {
+    const source =
+        \\(function(){
+        \\  var keep = [];
+        \\  for (var i = 0; i < 2500; i = i + 1) {
+        \\    keep.push({
+        \\      i: i,
+        \\      pair: { j: i + 1 },
+        \\      values: [i, i + 1, i + 2],
+        \\      buffer: new ArrayBuffer(16)
+        \\    });
+        \\  }
+        \\  return keep.length;
+        \\})()
+    ;
+
+    std.debug.print("\nGC finalizer attribution (destroy after object-heavy script)\n", .{});
+    std.debug.print("{s:<18} {s:>8} {s:>8} {s:>8} {s:>8} {s:>8} {s:>9} {s:>9} {s:>8} {s:>8}\n", .{
+        "mode",
+        "cells",
+        "objects",
+        "envs",
+        "funcs",
+        "prom",
+        "backing",
+        "buffers",
+        "shared",
+        "react",
+    });
+    for (modes) |mode| {
+        if (!modeUsesGc(mode)) continue;
+        const stats = try destroyFinalizerStats(gpa, mode, source);
+        std.debug.print("{s:<18} {d:>8} {d:>8} {d:>8} {d:>8} {d:>8} {d:>9} {d:>9} {d:>8} {d:>8}\n", .{
+            mode.name,
+            stats.cells,
+            stats.objects,
+            stats.environments,
+            stats.functions + stats.bound_functions,
+            stats.promises,
+            stats.object_backing_releases,
+            stats.array_buffers,
+            stats.shared_array_buffers,
+            stats.promise_reactions,
+        });
+    }
+}
+
 fn printTaskLifecycle(gpa: std.mem.Allocator, io: std.Io) !void {
     const rounds: usize = 40;
     const task_source =
@@ -261,4 +323,5 @@ pub fn main() !void {
     try printAllocation(gpa, io);
     try printExplicitGc(gpa, io);
     try printGcBacking(gpa);
+    try printGcFinalizers(gpa);
 }

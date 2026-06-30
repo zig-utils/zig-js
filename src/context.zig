@@ -631,6 +631,10 @@ pub const Context = struct {
     /// buffers. Not an embedder API; tests use it to prove generator
     /// finalization reclaims stack/handler/request buffers before teardown.
     gc_generator_backing_stores_live: usize = 0,
+    /// Internal profiling sink for GC finalization. Benchmarks set this just
+    /// around collection/teardown to attribute lifecycle cost by cell kind
+    /// without changing embedder API or normal runtime behavior.
+    gc_finalizer_stats_out: ?*GcFinalizerStats = null,
     /// The heap's root-tracing binding (wraps this Context); freed in `destroy`.
     gc_binding: ?*GcBinding = null,
     /// Phase 7 / M3: drive `collectMidScript` as a *concurrent* mark (a dedicated
@@ -775,6 +779,35 @@ pub const Context = struct {
     pub const CApiHandle = struct {
         ref: *anyopaque,
         count: usize,
+    };
+    pub const GcFinalizerStats = struct {
+        cells: usize = 0,
+        objects: usize = 0,
+        environments: usize = 0,
+        functions: usize = 0,
+        bound_functions: usize = 0,
+        promises: usize = 0,
+        generators: usize = 0,
+        iter_helpers: usize = 0,
+        module_namespaces: usize = 0,
+        object_backing_releases: usize = 0,
+        array_buffers: usize = 0,
+        shared_array_buffers: usize = 0,
+        promise_reactions: usize = 0,
+
+        pub fn addKind(self: *GcFinalizerStats, kind: gc_mod.CellKind) void {
+            self.cells += 1;
+            switch (kind) {
+                .object => self.objects += 1,
+                .environment => self.environments += 1,
+                .function => self.functions += 1,
+                .bound_fn => self.bound_functions += 1,
+                .promise => self.promises += 1,
+                .generator => self.generators += 1,
+                .iter_helper => self.iter_helpers += 1,
+                .module_ns => self.module_namespaces += 1,
+            }
+        }
     };
 
     pub fn create(gpa: std.mem.Allocator) !*Context {
