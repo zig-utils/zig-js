@@ -31276,6 +31276,24 @@ fn temporalYearMonthCompareFn(ctx: *anyopaque, this: Value, args: []const Value)
     return Value.num(if (ka < kb) -1 else if (ka > kb) 1 else 0);
 }
 
+fn addCalendarYearMonthYears(cal: []const u8, y0: i64, m0: u8, d0: u8, years: i64, reject: bool) ?Civil {
+    const y = y0 + years;
+    const info = calMonthCodeInfo(cal, y0, m0);
+    const max_month = calMonthsInYear(cal, y);
+    const m = calMonthFromCodeMaybe(cal, y, info) orelse blk: {
+        if (reject) return null;
+        if (info.leap) if (constrainInvalidLeapMonthCode(cal, y, max_month, info)) |constrained| break :blk constrained;
+        return null;
+    };
+    var d = d0;
+    const dim = calDaysInMonth(cal, y, m);
+    if (d > dim) {
+        if (reject) return null;
+        d = dim;
+    }
+    return .{ .y = y, .m = m, .d = d };
+}
+
 fn temporalYearMonthAddFn(comptime sign: f64) value.NativeFn {
     return struct {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -31283,16 +31301,23 @@ fn temporalYearMonthAddFn(comptime sign: f64) value.NativeFn {
             if (!tIsTemporal(this, .plain_year_month)) return self.throwError("TypeError", "non-PlainYearMonth");
             const t = this.asObj().temporal.?;
             const dur = try durationFromArg(self, if (args.len > 0) args[0] else Value.undef());
-            _ = try readOverflowReject(self, if (args.len > 1) args[1] else Value.undef()); // validates the overflow option
+            const reject = try readOverflowReject(self, if (args.len > 1) args[1] else Value.undef());
             if (!durInRange(dur)) return self.throwError("RangeError", "duration out of range");
             if (dur[2] != 0 or dur[3] != 0 or dur[4] != 0 or dur[5] != 0 or dur[6] != 0 or dur[7] != 0 or dur[8] != 0 or dur[9] != 0)
                 return self.throwError("RangeError", "PlainYearMonth arithmetic only accepts years and months");
             const year_delta: i64 = @intFromFloat(sign * dur[0]);
             const month_delta: i64 = @intFromFloat(sign * dur[1]);
-            const ym = balanceCalendarYearMonth(t.calendar, t.year + year_delta, t.month, month_delta);
-            const iso = calendarDateToIso(t.calendar, ym.y, ym.m, t.day);
+            const year_result = addCalendarYearMonthYears(t.calendar, t.year, t.month, t.day, year_delta, reject) orelse return self.throwError("RangeError", "date overflow");
+            const ym = balanceCalendarYearMonth(t.calendar, year_result.y, year_result.m, month_delta);
+            var d = year_result.d;
+            const dim = calDaysInMonth(t.calendar, ym.y, ym.m);
+            if (d > dim) {
+                if (reject) return self.throwError("RangeError", "date overflow");
+                d = dim;
+            }
+            const iso = calendarDateToIso(t.calendar, ym.y, ym.m, d);
             try checkIsoYearMonth(self, iso.y, iso.m);
-            return makeYearMonth(self, ym.y, ym.m, t.calendar, t.day);
+            return makeYearMonth(self, ym.y, ym.m, t.calendar, d);
         }
     }.call;
 }
