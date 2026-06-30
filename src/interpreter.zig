@@ -27460,7 +27460,7 @@ fn differenceISODate(y1: i64, m1: u8, d1: u8, y2: i64, m2: u8, d2: u8, largest: 
 }
 
 /// A resolved `relativeTo` anchor: an ISO date plus its time-of-day in ns.
-const RelTo = struct { y: i64, m: u8, d: u8, time_ns: i128, zoned: bool = false, epoch_ns: i128 = 0, tz_name: []const u8 = "UTC", tz_offset_ns: i64 = 0 };
+const RelTo = struct { y: i64, m: u8, d: u8, time_ns: i128, zoned: bool = false, has_time_zone: bool = false, epoch_ns: i128 = 0, tz_name: []const u8 = "UTC", tz_offset_ns: i64 = 0 };
 
 /// Resolve the `relativeTo` option (a Temporal date/dateTime/zonedDateTime, an
 /// ISO string, or a property bag). Null when absent.
@@ -27476,7 +27476,7 @@ fn resolveRelativeTo(self: *Interpreter, opts: Value) EvalError!?RelTo {
             .plain_date_time => return .{ .y = t.year, .m = t.month, .d = t.day, .time_ns = timeToNs(t) },
             .zoned_date_time => {
                 const local = zdtLocal(t);
-                return .{ .y = local.year, .m = local.month, .d = local.day, .time_ns = timeToNs(&local), .zoned = true, .epoch_ns = t.epoch_ns, .tz_name = t.tz_name, .tz_offset_ns = t.tz_offset_ns };
+                return .{ .y = local.year, .m = local.month, .d = local.day, .time_ns = timeToNs(&local), .zoned = true, .has_time_zone = true, .epoch_ns = t.epoch_ns, .tz_name = t.tz_name, .tz_offset_ns = t.tz_offset_ns };
             },
             else => return self.throwError("TypeError", "relativeTo must be a PlainDate, PlainDateTime, or ZonedDateTime"),
         }
@@ -27507,7 +27507,7 @@ fn resolveRelativeTo(self: *Interpreter, opts: Value) EvalError!?RelTo {
             if (local_ns < -max_temporal_instant_ns)
                 return self.throwError("RangeError", "relativeTo date-time out of range");
         }
-        return .{ .y = p.y, .m = p.mo, .d = p.d, .time_ns = tod, .zoned = ann.has_tz and !isFixedTimeZone(rel_tz), .epoch_ns = rel_epoch_ns, .tz_name = rel_tz.name, .tz_offset_ns = rel_tz.offset_ns };
+        return .{ .y = p.y, .m = p.mo, .d = p.d, .time_ns = tod, .zoned = ann.has_tz and !isFixedTimeZone(rel_tz), .has_time_zone = ann.has_tz, .epoch_ns = rel_epoch_ns, .tz_name = rel_tz.name, .tz_offset_ns = rel_tz.offset_ns };
     }
     if (rv.isObject()) {
         const bag_cal = try readCalendarField(self, rv);
@@ -27574,6 +27574,7 @@ fn resolveRelativeTo(self: *Interpreter, opts: Value) EvalError!?RelTo {
             .d = @intFromFloat(d.?),
             .time_ns = time_ns,
             .zoned = zoned,
+            .has_time_zone = time_zone != null,
             .epoch_ns = epoch_ns,
             .tz_name = if (time_zone) |tz| tz.name else "UTC",
             .tz_offset_ns = if (time_zone) |tz| tz.offset_ns else 0,
@@ -27676,6 +27677,8 @@ fn durEndpointsNs(self: *Interpreter, dur: [10]f64, rel: RelTo) EvalError!struct
     const end = date_end + durTimeOnlyNs(dur);
     if (start < -max_temporal_instant_ns)
         return self.throwError("RangeError", "relativeTo date-time out of range");
+    if (rel.has_time_zone and (rel.epoch_ns < -max_temporal_instant_ns or rel.epoch_ns > max_temporal_instant_ns - DAY_NS))
+        return self.throwError("RangeError", "relativeTo date-time out of range");
     if (rel.zoned) {
         try checkInstantEpochNs(self, end);
     } else {
@@ -27768,11 +27771,26 @@ fn balanceZonedDaysRel(self: *Interpreter, start_epoch: i128, span_ns: i128, rel
 
 fn roundZonedDayCountRel(self: *Interpreter, start_epoch: i128, end_epoch: i128, rel: RelTo, increment: f64, mode: RoundMode) EvalError!i64 {
     const total = try totalZonedDaysRel(self, start_epoch, end_epoch, rel);
+    if (increment != 1) {
+        const dir: i64 = if (end_epoch >= start_epoch) 1 else -1;
+        const probe_days: i64 = @intFromFloat(increment);
+        const probe_date = isoDateAdd(rel.y, rel.m, rel.d, 0, 0, 0, dir * probe_days);
+        const probe_local_ns = relLocalNs(probe_date.y, probe_date.m, probe_date.d, rel.time_ns);
+        try checkZdtLocalDateTimeNs(self, probe_local_ns);
+    }
     const scale: i128 = 1_000_000_000;
     const inc_scaled: i128 = @intFromFloat(@round(increment * @as(f64, @floatFromInt(scale))));
-    const total_scaled: i128 = @intFromFloat(@round(total * @as(f64, @floatFromInt(scale))));
+    const raw_total_scaled: i128 = @intFromFloat(@round(total * @as(f64, @floatFromInt(scale))));
+    const total_scaled = if (raw_total_scaled == 0 and start_epoch != end_epoch)
+        (if (end_epoch >= start_epoch) @as(i128, 1) else @as(i128, -1))
+    else
+        raw_total_scaled;
     const rounded_scaled = applyRounding(total_scaled, inc_scaled, mode) * inc_scaled;
-    return @intFromFloat(@as(f64, @floatFromInt(rounded_scaled)) / @as(f64, @floatFromInt(scale)));
+    const rounded_days: i64 = @intFromFloat(@as(f64, @floatFromInt(rounded_scaled)) / @as(f64, @floatFromInt(scale)));
+    const end_date = isoDateAdd(rel.y, rel.m, rel.d, 0, 0, 0, rounded_days);
+    const end_local_ns = relLocalNs(end_date.y, end_date.m, end_date.d, rel.time_ns);
+    try checkZdtLocalDateTimeNs(self, end_local_ns);
+    return rounded_days;
 }
 
 fn shouldPreserveZonedCalendarTime(self: *Interpreter, dur: [10]f64, rel: RelTo) EvalError!bool {
@@ -28275,7 +28293,7 @@ fn temporalDurationTotalFn(ctx: *anyopaque, this: Value, args: []const Value) va
     const unit = (try readUnitOption(self, a0, "unit")) orelse return self.throwError("RangeError", "Temporal.Duration.prototype.total requires a unit");
     if (durIsBlank(dur)) {
         if (unit == .day) if (rel) |anchor| {
-            if (anchor.zoned and (anchor.epoch_ns < -max_temporal_instant_ns or anchor.epoch_ns > max_temporal_instant_ns - DAY_NS))
+            if ((anchor.zoned or anchor.has_time_zone) and (anchor.epoch_ns < -max_temporal_instant_ns or anchor.epoch_ns > max_temporal_instant_ns - DAY_NS))
                 return self.throwError("RangeError", "relativeTo date-time out of range");
         };
         if (@intFromEnum(unit) >= @intFromEnum(TUnit.day)) return Value.num(0);
@@ -30930,7 +30948,7 @@ fn withCalendarMonthField(self: *Interpreter, bag: Value, cal: []const u8, year:
 }
 
 const PlainDateWithFields = struct { y: ?i64, m: ?f64, mc: ?MonthCodeInfo, d: ?i64, any: bool };
-const PlainDateTimeWithFields = struct { date: PlainDateWithFields, time: [6]i64, any: bool };
+const PlainDateTimeWithFields = struct { date: PlainDateWithFields, time: [6]i64, offset: ?i128 = null, any: bool };
 
 fn readPlainDateWithFields(self: *Interpreter, bag: Value, cal: []const u8) EvalError!PlainDateWithFields {
     const dv = try self.getProperty(bag, "day");
@@ -30943,7 +30961,7 @@ fn readPlainDateWithFields(self: *Interpreter, bag: Value, cal: []const u8) Eval
     return .{ .y = y, .m = m, .mc = mc, .d = d, .any = d != null or m != null or mc != null or y != null };
 }
 
-fn readPlainDateTimeWithFields(self: *Interpreter, bag: Value, cal: []const u8, time_defaults: [6]i64) EvalError!PlainDateTimeWithFields {
+fn readPlainDateTimeWithFields(self: *Interpreter, bag: Value, cal: []const u8, time_defaults: [6]i64, read_offset: bool) EvalError!PlainDateTimeWithFields {
     const dv = try self.getProperty(bag, "day");
     const d: ?i64 = if (dv.isUndefined()) null else @intFromFloat(try temporalIntArg(self, dv, "day"));
 
@@ -30980,6 +30998,10 @@ fn readPlainDateTimeWithFields(self: *Interpreter, bag: Value, cal: []const u8, 
         time_raw[5] = @intFromFloat(try temporalIntArg(self, nsv, "nanosecond"));
         time_any = true;
     }
+    const offset_field: ?i128 = if (read_offset) blk: {
+        const offset_v = try self.getProperty(bag, "offset");
+        break :blk if (offset_v.isUndefined()) null else try validateRelativeOffset(self, offset_v);
+    } else null;
     const sv = try self.getProperty(bag, "second");
     if (!sv.isUndefined()) {
         time_raw[2] = @intFromFloat(try temporalIntArg(self, sv, "second"));
@@ -30988,7 +31010,7 @@ fn readPlainDateTimeWithFields(self: *Interpreter, bag: Value, cal: []const u8, 
 
     const y = try bagCalendarYear(self, bag, cal);
     const date_any = d != null or m != null or mc != null or y != null;
-    return .{ .date = .{ .y = y, .m = m, .mc = mc, .d = d, .any = date_any }, .time = time_raw, .any = date_any or time_any };
+    return .{ .date = .{ .y = y, .m = m, .mc = mc, .d = d, .any = date_any }, .time = time_raw, .offset = offset_field, .any = date_any or time_any };
 }
 
 fn resolvePlainDateWithMonth(self: *Interpreter, cal: []const u8, fields: PlainDateWithFields, year: i64, cur_year: i64, cur_month: u8, constrain: bool) EvalError!u8 {
@@ -31058,7 +31080,7 @@ fn temporalPlainDateTimeWithFn(ctx: *anyopaque, this: Value, args: []const Value
     if (!isObjectLike(bag)) return self.throwError("TypeError", "Temporal.PlainDateTime.prototype.with: argument must be a PlainDateTime-like object");
     try rejectObjectWithCalendarOrTimeZone(self, bag);
     const cur_time = [_]i64{ t.hour, t.minute, t.second, t.millisecond, t.microsecond, t.nanosecond };
-    const fields = try readPlainDateTimeWithFields(self, bag, t.calendar, cur_time);
+    const fields = try readPlainDateTimeWithFields(self, bag, t.calendar, cur_time, false);
     if (!fields.any) return self.throwError("TypeError", "Temporal.PlainDateTime.prototype.with: no supported fields");
     const options = if (args.len > 1) args[1] else Value.undef();
     const y = fields.date.y orelse t.year;
@@ -35700,9 +35722,8 @@ fn temporalZdtWithFn(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
     try rejectObjectWithCalendarOrTimeZone(self, bag);
 
     const cur_time = [_]i64{ l.hour, l.minute, l.second, l.millisecond, l.microsecond, l.nanosecond };
-    const fields = try readPlainDateTimeWithFields(self, bag, t.calendar, cur_time);
-    const offset_v = try self.getProperty(bag, "offset");
-    const offset_field: ?i128 = if (offset_v.isUndefined()) null else try validateRelativeOffset(self, offset_v);
+    const fields = try readPlainDateTimeWithFields(self, bag, t.calendar, cur_time, true);
+    const offset_field = fields.offset;
     if (!fields.any and offset_field == null)
         return self.throwError("TypeError", "Temporal.ZonedDateTime.prototype.with: property bag must contain at least one valid field");
 
