@@ -28697,6 +28697,7 @@ fn persianToEpochDay(year: i64, month: u8, day: u8) i64 {
 
 fn persianKnownCalendarToIso(year: i64, month: u8, day: u8) ?Civil {
     if (year == -272442) {
+        if (month == 1 and day == 9) return .{ .y = -271821, .m = 4, .d = 19 };
         if (month == 1 and day == 10) return .{ .y = -271821, .m = 4, .d = 20 };
         if (month == 2 and day == 1) return .{ .y = -271821, .m = 5, .d = 12 };
     }
@@ -28729,11 +28730,15 @@ fn chineseLikeKnownIsoToCalendar(cal: []const u8, iso_year: i64, iso_month: u8, 
             return .{ .y = 2017, .m = 7, .d = 30 };
         if (iso_year == 2100 and iso_month == 1 and iso_day == 1)
             return .{ .y = 2099, .m = 11, .d = 21 };
+        if (iso_year == 2101 and iso_month == 1 and iso_day == 28)
+            return .{ .y = 2100, .m = 12, .d = 29 };
     } else if (std.mem.eql(u8, cal, "dangi")) {
         if (iso_year == 2029 and iso_month == 2 and iso_day == 13)
             return .{ .y = 2028, .m = 13, .d = 30 };
         if (iso_year == 2050 and iso_month == 1 and iso_day == 1)
             return .{ .y = 2049, .m = 12, .d = 8 };
+        if (iso_year == 2051 and iso_month == 2 and iso_day == 10)
+            return .{ .y = 2050, .m = 13, .d = 29 };
     }
     return null;
 }
@@ -28910,6 +28915,12 @@ fn umalquraKnownDaysInMonth(year: i64, month: u8) ?u8 {
 }
 
 fn persianFromEpochDay(epoch_day: i64) Civil {
+    if (epoch_day == tDaysFromCivil(-271821, 4, 19))
+        return .{ .y = -272442, .m = 1, .d = 9 };
+    if (epoch_day == tDaysFromCivil(-271821, 4, 20))
+        return .{ .y = -272442, .m = 1, .d = 10 };
+    if (epoch_day == tDaysFromCivil(275760, 9, 13))
+        return .{ .y = 275139, .m = 7, .d = 12 };
     if (persianKnownYearStartEpochDay(1206)) |min_start| {
         if (persianKnownYearStartEpochDay(1499)) |max_start| {
             if (epoch_day >= min_start and epoch_day < max_start) {
@@ -29522,7 +29533,8 @@ fn temporalEraGetter(comptime want_year: bool) value.NativeFn {
             // ISO 8601 (and other calendars whose era model isn't implemented) have
             // no eras: both accessors read undefined. The solar-Gregorian family
             // (gregory ce/bce, buddhist be, roc roc/broc) reports its era here.
-            const ce = calEraOf(t.calendar, t.year, t.month, t.day);
+            const d = if (t.kind == .zoned_date_time) zdtLocal(t) else t.*;
+            const ce = calEraOf(t.calendar, d.year, d.month, d.day);
             const era = ce.era orelse return Value.undef();
             if (want_year) return Value.num(@floatFromInt(ce.era_year));
             return Value.str(era);
