@@ -293,7 +293,11 @@ threading architecture:
   condition waiters are marked canceled and skipped by that cursor instead of
   being removed from the middle of the queue. Sync `notifyAll` handoff also
   waits on the condition's ack signal instead of sleeping in fixed 1ms polling
-  chunks, so ready waiters can re-enter the lock path immediately.
+  chunks, so ready waiters can re-enter the lock path immediately. Async-only
+  condition notifications now deliver their lock regrants after releasing the
+  condition queue mutex, so no-fn release-function creation and realm task
+  enqueueing do not lengthen that critical section; mixed sync/async wakeups
+  keep the existing sync handoff ordering.
   Property-mode `Atomics.notify` now stable-compacts matching waiters in one
   pass: sync stack tickets are
   unlinked before signal, and matching `waitAsync` tickets are collected without
@@ -332,7 +336,8 @@ threading architecture:
   parity during local performance work.
   The Worker profile prints that empty-receive polling cost separately from
   real message-delivery and lifecycle cost. Continue using the profile for the
-  remaining async-condition, contended-lock, Worker message, and lifecycle hot spots.
+  remaining async-condition delivery, contended-lock, Worker message, and
+  lifecycle hot spots.
 - **Memory-model maintenance** - keep
   [docs/threads/memory-model.md](docs/threads/memory-model.md) aligned with the
   TSan suppression witness, synchronization primitives, and promoted corpus

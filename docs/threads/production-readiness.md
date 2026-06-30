@@ -143,7 +143,10 @@ Known performance/maturity work:
   by the head cursor instead of being removed from the middle of the queue.
   Sync notifyAll handoff now waits on the waiter's condition ack signal rather
   than sleeping in fixed 1ms chunks, with the same timeout fallback for spurious
-  or missed wakes.
+  or missed wakes. Async-only condition notifications now release the condition
+  queue mutex before preparing no-fn async regrants, so release-function
+  creation and realm task enqueueing no longer run inside that queue critical
+  section; mixed sync/async wakeups keep the existing sync handoff ordering.
 - Property-mode `Atomics.notify` stable-compacts matching waiter queues in one
   pass. Sync wait stack tickets are unlinked before signal, so awakened peers no
   longer each rescan and front-shift the table on return; matching `waitAsync`
