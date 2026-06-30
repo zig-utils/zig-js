@@ -109,8 +109,9 @@ context APIs.
   settlement, async condition regrant delivery, unobserved async-hold grant
   delivery, promise-observed callback settlement, no-fn release-function
   delivery, collection helpers, and GC allocation. Its `async`/`done` columns
-  now split async condition/property-waitAsync registration from settled
-  property `waitAsync` tickets, and its `empty`/`jobs` columns show whether
+  now split async condition/property-waitAsync registration from completed
+  async-condition reacquires plus settled property `waitAsync` tickets, and its
+  `empty`/`jobs` columns show whether
   run-loop task-pump overhead is empty fast-path churn or real async-hold
   delivery. Empty sync-wait
   task pumps no longer take the shared run-loop task lock, reducing one measured

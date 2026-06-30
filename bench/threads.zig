@@ -16,6 +16,7 @@ const Scenario = struct {
     name: []const u8,
     setup: []const u8,
     rounds: usize,
+    flush_tasks_after: bool = false,
 };
 
 const Timing = struct {
@@ -196,9 +197,10 @@ const scenarios = [_]Scenario{
         \\  }
         \\  for (var j = 0; j < rounds; j = j + 1) {
         \\    asyncCondLock.asyncHold(function() {
+        \\      var wait = asyncCond.asyncWait(asyncCondLock);
         \\      Atomics.add(asyncCondBox, 'ready', 1);
         \\      Atomics.notify(asyncCondBox, 'ready');
-        \\      return asyncCond.asyncWait(asyncCondLock).then(function(release) {
+        \\      return wait.then(function(release) {
         \\        asyncCondBox.seen = (asyncCondBox.seen | 0) + 1;
         \\        release();
         \\      });
@@ -206,8 +208,14 @@ const scenarios = [_]Scenario{
         \\  }
         \\  return id + 1;
         \\};
+        \\globalThis.__profileFlush = function() {
+        \\  var workers = globalThis.__profileWorkers | 0;
+        \\  for (var i = 0; i < workers * 30; i = i + 1)
+        \\    asyncCond.notifyAll();
+        \\};
         ,
         .rounds = 5,
+        .flush_tasks_after = true,
     },
     .{
         .name = "lock contention",
@@ -325,6 +333,12 @@ fn timeScenario(gpa: std.mem.Allocator, io: std.Io, scenario: Scenario, workers:
     var round: usize = 0;
     while (round < scenario.rounds) : (round += 1) {
         _ = try ctx.evaluate(src);
+    }
+    if (scenario.flush_tasks_after) {
+        _ = try ctx.evaluate("if (typeof __profileFlush === 'function') __profileFlush();");
+        var machine = ctx.interpreter();
+        js.jsthread.pumpTasks(&machine);
+        try machine.drainMicrotasks();
     }
     const stats = js.jsthread.contentionStats();
     js.jsthread.disableContentionStats();
@@ -581,7 +595,7 @@ pub fn main() !void {
     std.debug.print("zig-js shared-realm Thread contention profile\n", .{});
     std.debug.print("cores: {d}; no-GIL is Context.createWith(.{{ .enable_threads = true }}), serialized is .gil = true\n", .{cores});
     std.debug.print("events = logical contention (Lock/Condition/property wait/asyncHold); parks = timed wait/pump iterations including Thread.join\n", .{});
-    std.debug.print("async/done = Condition.asyncWait and property waitAsync registrations / settled property waitAsync tickets\n", .{});
+    std.debug.print("async/done = Condition.asyncWait and property waitAsync registrations / completed condition reacquires plus settled property waitAsync tickets\n", .{});
     std.debug.print("empty/jobs = run-loop task-pump empty fast-path hits / delivered asyncHold jobs\n", .{});
 
     for (scenarios) |scenario| try printScenario(gpa, io, scenario, worker_counts);

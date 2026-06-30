@@ -109,9 +109,9 @@ Known performance/maturity work:
   `events` count logical contention (`Lock`/`Condition`/property wait and
   queued `asyncHold` grants), `parks` count timed wait/pump iterations
   including `Thread.join`, `async`/`done` split `Condition.asyncWait` plus
-  property `waitAsync` registration from settled property `waitAsync` tickets,
-  and `empty`/`jobs` split the run-loop task pump into empty fast-path hits and
-  delivered async-hold jobs.
+  property `waitAsync` registration from completed async-condition reacquires
+  plus settled property `waitAsync` tickets, and `empty`/`jobs` split the
+  run-loop task pump into empty fast-path hits and delivered async-hold jobs.
 - Parked sync waiters still pump the realm run-loop so async-hold grants make
   progress, but empty pumps now use an atomic queue-count fast path and avoid
   taking the shared threading API lock.
@@ -135,7 +135,8 @@ Known performance/maturity work:
 - The profile now has direct rows for property `Atomics.waitAsync` finite
   timeout settlement and `Condition.asyncWait` reacquire delivery, so local
   performance work can separate async waiter registration, property ticket
-  settlement, and run-loop grant delivery instead of inferring them from elapsed
+  settlement, async-condition reacquire completion, and run-loop grant delivery
+  instead of inferring them from elapsed
   time alone.
 - Condition notify/notifyAll use the same FIFO head-cursor pattern for the
   mixed sync/async waiter queue, avoiding one front-shift per notified waiter.

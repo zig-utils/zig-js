@@ -270,7 +270,7 @@ threading architecture:
   `Condition.wait` / `notifyAll`, `Condition.asyncWait`, contended `Lock.hold`, and
   `Lock.asyncHold` delivery plus observed callback and no-fn release-function
   variants, along with lifecycle churn. It now enables and prints internal
-  contention events, timed wait/pump parks, async waiter registration/settlement
+  contention events, timed wait/pump parks, async waiter registration/completion
   counts for `Condition.asyncWait` and property `waitAsync`, and run-loop
   task-pump empty/job counts beside wall-clock time, so follow-up optimization
   can separate property waiters, property `waitAsync` timeout settlement,
@@ -332,8 +332,8 @@ threading architecture:
   function.
   The profile now also has direct rows for property `waitAsync` finite-timeout
   settlement and `Condition.asyncWait` reacquire delivery, with async/done
-  columns that show ticket registration and exact property-ticket settlement
-  parity during local performance work.
+  columns that show ticket registration, completed async-condition reacquires,
+  and exact property-ticket settlement parity during local performance work.
   The Worker profile prints that empty-receive polling cost separately from
   real message-delivery and lifecycle cost. Continue using the profile for the
   remaining async-condition delivery, contended-lock, Worker message, and

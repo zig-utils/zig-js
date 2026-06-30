@@ -82,6 +82,7 @@ pub const ContentionStats = struct {
     lock_wait_parks: u64 = 0,
     async_hold_queued: u64 = 0,
     condition_async_waits: u64 = 0,
+    condition_async_settled: u64 = 0,
     condition_waits: u64 = 0,
     condition_wait_parks: u64 = 0,
     property_waits: u64 = 0,
@@ -107,7 +108,7 @@ pub const ContentionStats = struct {
     }
 
     pub fn asyncSettled(self: ContentionStats) u64 {
-        return self.property_wait_async_settled;
+        return self.condition_async_settled + self.property_wait_async_settled;
     }
 };
 
@@ -117,6 +118,7 @@ const ContentionCounters = struct {
     lock_wait_parks: std.atomic.Value(u64) = .init(0),
     async_hold_queued: std.atomic.Value(u64) = .init(0),
     condition_async_waits: std.atomic.Value(u64) = .init(0),
+    condition_async_settled: std.atomic.Value(u64) = .init(0),
     condition_waits: std.atomic.Value(u64) = .init(0),
     condition_wait_parks: std.atomic.Value(u64) = .init(0),
     property_waits: std.atomic.Value(u64) = .init(0),
@@ -137,6 +139,7 @@ pub fn resetContentionStats() void {
     contention_counters.lock_wait_parks.store(0, .release);
     contention_counters.async_hold_queued.store(0, .release);
     contention_counters.condition_async_waits.store(0, .release);
+    contention_counters.condition_async_settled.store(0, .release);
     contention_counters.condition_waits.store(0, .release);
     contention_counters.condition_wait_parks.store(0, .release);
     contention_counters.property_waits.store(0, .release);
@@ -159,6 +162,7 @@ pub fn contentionStats() ContentionStats {
         .lock_wait_parks = contention_counters.lock_wait_parks.load(.acquire),
         .async_hold_queued = contention_counters.async_hold_queued.load(.acquire),
         .condition_async_waits = contention_counters.condition_async_waits.load(.acquire),
+        .condition_async_settled = contention_counters.condition_async_settled.load(.acquire),
         .condition_waits = contention_counters.condition_waits.load(.acquire),
         .condition_wait_parks = contention_counters.condition_wait_parks.load(.acquire),
         .property_waits = contention_counters.property_waits.load(.acquire),
@@ -191,6 +195,7 @@ test "jsthread contention stats reset and snapshot" {
     bumpContention("lock_contentions");
     bumpContention("async_hold_queued");
     bumpContention("condition_async_waits");
+    bumpContention("condition_async_settled");
     bumpContention("condition_waits");
     bumpContention("property_waits");
     bumpContention("property_wait_async_enqueued");
@@ -206,7 +211,7 @@ test "jsthread contention stats reset and snapshot" {
     try std.testing.expectEqual(@as(u64, 6), stats.events());
     try std.testing.expectEqual(@as(u64, 4), stats.parks());
     try std.testing.expectEqual(@as(u64, 2), stats.asyncWaits());
-    try std.testing.expectEqual(@as(u64, 1), stats.asyncSettled());
+    try std.testing.expectEqual(@as(u64, 2), stats.asyncSettled());
     try std.testing.expectEqual(@as(u64, 1), stats.task_pump_empty);
     try std.testing.expectEqual(@as(u64, 1), stats.task_pump_jobs);
 
@@ -2300,6 +2305,9 @@ const HoldJob = struct {
     /// already one-per-grant and arena-lived, so embedding avoids a second small
     /// allocation in the release-function hot path.
     release_state: ReleaseState,
+    /// True only for Condition.asyncWait reacquire grants; this keeps the local
+    /// profile's async/done columns honest without exposing a public API knob.
+    condition_async_reacquire: bool = false,
 };
 
 test "jsthread lock pending async jobs are cursor FIFO" {
@@ -2585,6 +2593,7 @@ fn runHoldJob(self: *Interpreter, job: *HoldJob) value.HostError!void {
     job.lock.active_release = &job.release_state;
     job.lock.mutex.unlock(agent.engineIo());
     try promise.resolve(self, outer_pp, Value.obj(release_fn.?));
+    if (job.condition_async_reacquire) bumpContention("condition_async_settled");
 }
 
 fn releaseFnNative(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -2703,7 +2712,7 @@ fn condAsyncWaitFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.
 /// function (the corpus consumes `p.then(release => ...)`).
 fn wakeAsyncCondWaiter(self: *Interpreter, w: *AsyncCondWaiter) void {
     const job = self.arena.create(HoldJob) catch return;
-    job.* = .{ .lock = w.lock, .outer = w.outer, .cb = null, .release_state = .{ .lock = w.lock } };
+    job.* = .{ .lock = w.lock, .outer = w.outer, .cb = null, .release_state = .{ .lock = w.lock }, .condition_async_reacquire = true };
     barrierHoldJob(job);
     var enqueue_now = false;
     w.lock.mutex.lockUncancelable(agent.engineIo());

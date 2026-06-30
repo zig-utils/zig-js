@@ -254,9 +254,9 @@ Its opt-in counters let
 queued `asyncHold` grants, and `parks` count timed wait/pump iterations
 including `Thread.join`.
 The `async`/`done` columns split `Condition.asyncWait` plus property
-`waitAsync` registration from settled property `waitAsync` tickets, making
-timeout-settlement parity and async condition regrant pressure visible in the
-same run.
+`waitAsync` registration from completed async-condition reacquires plus settled
+property `waitAsync` tickets, making timeout-settlement parity and async
+condition regrant pressure visible in the same run.
 The `empty`/`jobs` columns split the run-loop task pump into empty atomic
 fast-path hits and real async-hold job delivery. Run it before and after
 synchronization or lifecycle changes so performance work has an attributed
