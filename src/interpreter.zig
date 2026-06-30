@@ -33162,30 +33162,12 @@ fn calendarDateDiff(cal: []const u8, y1: i64, m1: u8, d1: u8, y2: i64, m2: u8, d
     const total_months: i64 = calendarMonthsBetween(cal, y1, m1, d1, start_day, end_day);
     const inter = addCalendarMonthsClamp(cal, y1, m1, d1, total_months);
     const day_rem = calendarEpochDay(cal, y2, m2, d2) - calendarEpochDay(cal, inter.y, inter.m, inter.d);
-    var years: i64 = 0;
-    var months = total_months;
-    if (months >= 0) {
-        var split_year = y1;
-        while (months >= calMonthsInYear(cal, calDisplayYear(cal, split_year))) {
-            months -= calMonthsInYear(cal, calDisplayYear(cal, split_year));
-            years += 1;
-            split_year += 1;
-        }
-    } else {
-        var months_abs = -months;
-        var split_year = y1;
-        while (months_abs >= calMonthsInYear(cal, calDisplayYear(cal, split_year - 1))) {
-            months_abs -= calMonthsInYear(cal, calDisplayYear(cal, split_year - 1));
-            years -= 1;
-            split_year -= 1;
-        }
-        months = -months_abs;
-    }
+    const ym_diff = calendarYearMonthDiff(cal, y1, m1, inter.y, inter.m);
     if (largest == .month) {
         out[1] = @floatFromInt(total_months);
     } else {
-        out[0] = @floatFromInt(years);
-        out[1] = @floatFromInt(months);
+        out[0] = @floatFromInt(ym_diff.years);
+        out[1] = @floatFromInt(ym_diff.months);
     }
     out[3] = @floatFromInt(day_rem);
     return out;
