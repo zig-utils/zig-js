@@ -172,9 +172,9 @@ as embedders exercise more threaded host patterns.
 - The mid-script GC fuzzer profile blocks peers in property `Atomics.wait`,
   `Condition.wait`, and contended `Lock` acquisition while allocation pressure
   drives `parallel_midscript_gc`; every seed now runs a normal completion
-  wait-pump subprogram, a promise-publication subprogram, and an expected
-  teardown-termination subprogram, and each must finish at least one parallel
-  sweep. The wait-pump subprogram queues a
+  wait-pump subprogram, a sync-wait cleanup subprogram, a promise-publication
+  subprogram, and an expected teardown-termination subprogram, and each must
+  finish at least one parallel sweep. The wait-pump subprogram queues a
   FIFO `Lock.asyncHold` grant chain including a root-bearing rejected grant plus
   an async `Condition.wait` reacquire with hidden captured JS roots and requires
   sync-wait pump points to deliver both during the same mid-script GC pressure
@@ -195,6 +195,10 @@ as embedders exercise more threaded host patterns.
   original promise/thenable for post-completion observers; it also keeps a
   child-thrown object with a nested promise rooted through completion state
   until post-sweep `asyncJoin()`/`join()` publication.
+  The sync-wait cleanup subprogram parks peers in property `Atomics.wait`,
+  `Condition.wait`, and contended `Lock.hold` acquisition through a finishing
+  sweep, then verifies each resumed peer's stack root plus exact
+  `FinalizationRegistry` cleanup count/sum delivery.
   The teardown subprogram parks children after installing child-owned typed-array
   `waitAsync` tickets, verifies pending `asyncJoin` rejection reactions with
   captured roots after the parent throws, and proves post-termination notify
@@ -246,7 +250,7 @@ as embedders exercise more threaded host patterns.
   park/resume/clear/join cleanup lifecycles with exact cleanup count/sum
   delivery after quiescent collection.
 - CI runs the fuzzer in several modes: default seeded, TSan, high-contention
-  amplified, broad semantic, mid-script GC wait-pump/promise/teardown,
+  amplified, broad semantic, mid-script GC wait-pump/sync-wait-cleanup/promise/teardown,
   lifecycle, ReleaseSafe, and deterministic-result verification.
 
 Remaining: keep extending the lifecycle profile toward more cross-realm
@@ -266,7 +270,7 @@ Every pull request and push to `main` runs:
 - TSan `threadfuzz`,
 - amplified `threadfuzz`,
 - broad semantic `threadfuzz`,
-- mid-script GC wait-pump/promise/teardown `threadfuzz`,
+- mid-script GC wait-pump/sync-wait-cleanup/promise/teardown `threadfuzz`,
 - lifecycle `threadfuzz`,
 - ReleaseSafe `threadfuzz`,
 - deterministic-result `threadfuzz-verify`,

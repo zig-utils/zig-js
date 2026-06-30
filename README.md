@@ -193,7 +193,7 @@ zig build threads-test          # runs the green WebKit PR-249 threads corpus (2
 zig build threads-reference-audit # classifies the remaining reference-only PR-249 files
 zig build test -Dtsan=true      # unit suite under ThreadSanitizer
 zig build threadfuzz            # seeded concurrent-JS fuzzer
-zig build threadfuzz -Dfuzz-midgc=true # mid-script GC wait-pump + teardown + promise fuzzer
+zig build threadfuzz -Dfuzz-midgc=true # mid-script GC wait-pump + sync-wait cleanup + teardown + promise fuzzer
 zig build test262               # runs the real tc39/test262 corpus, prints pass %
 zig build test262 -Dtest262=DIR # …with an explicit corpus root
 zig build bench                 # times the bytecode VM against the tree-walker
@@ -232,9 +232,9 @@ Correctness is now gated by the ordinary unit/corpus suite plus no-GIL coverage:
 ThreadSanitizer unit tests, a sharded no-GIL PR-249 corpus TSan sweep, a
 suppression-narrowness witness for JS-defined program-byte races,
 `test262-parallel`, and seeded concurrent-JS fuzzing (`threadfuzz`, TSan
-fuzzing, amplified fuzzing, broad semantic fuzzing, mid-script-GC wait-pump/promise/teardown
-fuzzing, lifecycle fuzzing, ReleaseSafe fuzzing, and deterministic-result
-verification).
+fuzzing, amplified fuzzing, broad semantic fuzzing,
+mid-script-GC wait-pump/sync-wait-cleanup/promise/teardown fuzzing, lifecycle
+fuzzing, ReleaseSafe fuzzing, and deterministic-result verification).
 
 Remaining work is concentrated in production hardening rather than the core
 threading architecture:
@@ -317,7 +317,10 @@ threading architecture:
   completion/native waiter state through a finishing sweep, then verifies
   `join()` / `asyncJoin()` fulfillment, rejection, thenable assimilation, and
   thrown-object publication from observers registered both before and after
-  child completion.
+  child completion. Another sibling sync-wait cleanup subprogram parks peers in
+  property `Atomics.wait`, `Condition.wait`, and contended `Lock.hold`
+  acquisition, drives a finishing sweep, then verifies their stack roots after
+  resume plus exact `FinalizationRegistry` cleanup count/sum delivery.
   A sibling mid-GC teardown subprogram parks children after installing
   child-owned typed-array `waitAsync` tickets, verifies pending `asyncJoin`
   rejection reactions after parent failure, and proves later notify wakes zero

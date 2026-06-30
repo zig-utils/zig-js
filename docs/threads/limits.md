@@ -153,7 +153,10 @@ context APIs.
   child-returned user thenable, and a child-thrown object remain rooted through
   thread completion/native waiter state until post-sweep
   `join()`/`asyncJoin()` fulfillment, rejection, thenable assimilation, and
-  thrown-object publication. Sync-wait pump points
+  thrown-object publication, plus a sibling sync-wait cleanup subprogram where
+  property `Atomics.wait`, `Condition.wait`, and contended `Lock.hold` peers
+  stay parked through a finishing sweep before their stack roots and exact
+  `FinalizationRegistry` cleanup count/sum are verified. Sync-wait pump points
   must execute the async grants during the
   same allocation-pressure window that produces a finishing parallel sweep, and
   the `waitAsync` reaction must run intact after notification. Join-side

@@ -4339,6 +4339,225 @@ fn runMidScriptWaitPumpGc(gpa: std.mem.Allocator, seed: u64) !bool {
     return true;
 }
 
+fn runMidScriptSyncWaitCleanupGc(gpa: std.mem.Allocator, seed: u64) !bool {
+    var prng = std.Random.DefaultPrng.init(seed ^ 0x6d69_6473_796e_6377);
+    const r = prng.random();
+    const rounds = 8 + r.uintLessThan(usize, 6);
+    const per_round = 700 + r.uintLessThan(usize, 350);
+    const spin_iters = 2500 + r.uintLessThan(usize, 4000);
+    const wait_timeout_ms = 1100 + r.uintLessThan(usize, 700);
+    const seed_marker = seed % 10_000;
+    const prop_marker = 310_000 + seed_marker;
+    const cond_marker = 320_000 + seed_marker;
+    const lock_marker = 330_000 + seed_marker;
+    const cleanup_base = 340_000 + seed_marker;
+
+    var expected_cleanup_count: usize = 0;
+    var expected_cleanup_sum: usize = 0;
+    var round_i: usize = 0;
+    while (round_i < rounds) : (round_i += 1) {
+        var i: usize = 0;
+        while (i < per_round) : (i += 1) {
+            if (((i + round_i) & 15) == 3) {
+                expected_cleanup_count += 1;
+                expected_cleanup_sum += cleanup_base + round_i * per_round + i;
+            }
+        }
+    }
+
+    const ctx = js.Context.createWithTestingOptions(gpa, .{
+        .enable_threads = true,
+        .enable_gc = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+        .parallel_midscript_gc = true,
+    }) catch {
+        std.debug.print("seed {d}: midgc sync-wait cleanup context creation failed\n", .{seed});
+        return false;
+    };
+    defer ctx.destroy();
+
+    const src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  globalThis.__midgcSyncCleanupCount = 0;
+        \\  globalThis.__midgcSyncCleanupSum = 0;
+        \\  globalThis.__midgcSyncRegistry = new FinalizationRegistry((held) => {{
+        \\    globalThis.__midgcSyncCleanupCount++;
+        \\    globalThis.__midgcSyncCleanupSum += held;
+        \\  }});
+        \\  const registry = globalThis.__midgcSyncRegistry;
+        \\  const gate = {{ prop: 0, propReady: 0, condReady: 0, condOpen: false, lockHeld: 0, lockReady: 0, lockRelease: 0, lockDone: 0 }};
+        \\  const condLock = new Lock();
+        \\  const cond = new Condition();
+        \\  const heldLock = new Lock();
+        \\  const root = {{ seed: {d}, tag: 'midgc-sync-wait-cleanup-root' }};
+        \\  const propThread = new Thread((gate, marker, seedMarker, timeout) => {{
+        \\    const localRoot = {{ marker, nested: {{ seed: seedMarker, label: 'midgc-property-sync-wait-root' }} }};
+        \\    Atomics.store(gate, 'propReady', 1);
+        \\    Atomics.notify(gate, 'propReady');
+        \\    const r = Atomics.wait(gate, 'prop', 0, timeout);
+        \\    if (r !== 'ok' && r !== 'not-equal' && r !== 'timed-out')
+        \\      throw new Error('bad midgc property wait result ' + r);
+        \\    return localRoot;
+        \\  }}, gate, {d}, {d}, {d});
+        \\  const condThread = new Thread((gate, marker, seedMarker) => {{
+        \\    const localRoot = {{ marker, nested: {{ seed: seedMarker, label: 'midgc-condition-sync-wait-root' }} }};
+        \\    condLock.hold(() => {{
+        \\      Atomics.store(gate, 'condReady', 1);
+        \\      Atomics.notify(gate, 'condReady');
+        \\      while (!gate.condOpen)
+        \\        cond.wait(condLock);
+        \\    }});
+        \\    return localRoot;
+        \\  }}, gate, {d}, {d});
+        \\  const holder = new Thread((gate) => {{
+        \\    heldLock.hold(() => {{
+        \\      Atomics.store(gate, 'lockHeld', 1);
+        \\      Atomics.notify(gate, 'lockHeld');
+        \\      while (Atomics.load(gate, 'lockRelease') === 0)
+        \\        Atomics.wait(gate, 'lockRelease', 0, {d});
+        \\    }});
+        \\    return 1;
+        \\  }}, gate);
+        \\  while (Atomics.load(gate, 'lockHeld') === 0)
+        \\    Atomics.wait(gate, 'lockHeld', 0, 1);
+        \\  const lockThread = new Thread((gate, marker, seedMarker) => {{
+        \\    const localRoot = {{ marker, nested: {{ seed: seedMarker, label: 'midgc-contended-lock-wait-root' }} }};
+        \\    Atomics.store(gate, 'lockReady', 1);
+        \\    Atomics.notify(gate, 'lockReady');
+        \\    heldLock.hold(() => {{
+        \\      Atomics.store(gate, 'lockDone', 1);
+        \\    }});
+        \\    return localRoot;
+        \\  }}, gate, {d}, {d});
+        \\  while (Atomics.load(gate, 'propReady') === 0)
+        \\    Atomics.wait(gate, 'propReady', 0, 1);
+        \\  while (Atomics.load(gate, 'condReady') === 0)
+        \\    Atomics.wait(gate, 'condReady', 0, 1);
+        \\  while (Atomics.load(gate, 'lockReady') === 0)
+        \\    Atomics.wait(gate, 'lockReady', 0, 1);
+        \\  const keep = [];
+        \\  for (let round = 0; round < {d}; round++) {{
+        \\    for (let i = 0; i < {d}; i++) {{
+        \\      keep.push({{
+        \\        round,
+        \\        i,
+        \\        nested: {{ root, value: i + round }},
+        \\        text: 'midgc-sync-wait-cleanup-' + round + '-' + i,
+        \\      }});
+        \\      if (((i + round) & 15) === 3)
+        \\        registry.register({{ ephemeral: i, round, root }}, {d} + round * {d} + i);
+        \\    }}
+        \\    let spin = 0;
+        \\    for (let j = 0; j < {d}; j++) spin = (spin + j + round) & 0x3fffffff;
+        \\    if (spin < 0) keep.push({{ impossible: true }});
+        \\  }}
+        \\  if (typeof gc === 'function') gc();
+        \\  Atomics.store(gate, 'prop', 1);
+        \\  Atomics.notify(gate, 'prop');
+        \\  condLock.hold(() => {{
+        \\    gate.condOpen = true;
+        \\    cond.notifyAll();
+        \\  }});
+        \\  Atomics.store(gate, 'lockRelease', 1);
+        \\  Atomics.notify(gate, 'lockRelease');
+        \\  const propRoot = propThread.join();
+        \\  const condRoot = condThread.join();
+        \\  if (holder.join() !== 1)
+        \\    throw new Error('bad midgc sync-wait lock holder');
+        \\  const lockRoot = lockThread.join();
+        \\  if (!propRoot || propRoot.marker !== {d} || propRoot.nested.seed !== {d})
+        \\    throw new Error('bad midgc property sync-wait root');
+        \\  if (!condRoot || condRoot.marker !== {d} || condRoot.nested.seed !== {d})
+        \\    throw new Error('bad midgc condition sync-wait root');
+        \\  if (!lockRoot || lockRoot.marker !== {d} || lockRoot.nested.seed !== {d} ||
+        \\      Atomics.load(gate, 'lockDone') !== 1)
+        \\    throw new Error('bad midgc contended-lock sync-wait root');
+        \\  return keep.length;
+        \\}})();
+        \\
+    ,
+        .{
+            seed_marker,
+            prop_marker,
+            seed_marker,
+            wait_timeout_ms,
+            cond_marker,
+            seed_marker,
+            wait_timeout_ms,
+            lock_marker,
+            seed_marker,
+            rounds,
+            per_round,
+            cleanup_base,
+            per_round,
+            spin_iters,
+            prop_marker,
+            seed_marker,
+            cond_marker,
+            seed_marker,
+            lock_marker,
+            seed_marker,
+        },
+    );
+    defer gpa.free(src);
+
+    const before_attempts = ctx.gc_par_attempts.load(.monotonic);
+    const before_collections = ctx.gc_par_collections.load(.monotonic);
+    const expected: f64 = @floatFromInt(rounds * per_round);
+    const result = ctx.evaluate(src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: midgc sync-wait cleanup JS threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!result.isNumber() or result.asNum() != expected) {
+        std.debug.print("seed {d}: midgc sync-wait cleanup result got {d}, expected {d}\n", .{ seed, if (result.isNumber()) result.asNum() else -1, expected });
+        return false;
+    }
+    if (ctx.gc_par_attempts.load(.monotonic) <= before_attempts) {
+        std.debug.print("seed {d}: midgc sync-wait cleanup did not attempt a parallel collection\n", .{seed});
+        return false;
+    }
+    if (ctx.gc_par_collections.load(.monotonic) <= before_collections) {
+        std.debug.print("seed {d}: midgc sync-wait cleanup did not finish a parallel collection\n", .{seed});
+        return false;
+    }
+
+    ctx.collectGarbage();
+    const cleanup_src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  globalThis.__midgcSyncRegistry.cleanupSome();
+        \\  if (globalThis.__midgcSyncCleanupCount !== {d})
+        \\    throw new Error('midgc sync-wait cleanup count ' + globalThis.__midgcSyncCleanupCount + '/' + {d});
+        \\  if (globalThis.__midgcSyncCleanupSum !== {d})
+        \\    throw new Error('midgc sync-wait cleanup sum ' + globalThis.__midgcSyncCleanupSum + '/' + {d});
+        \\  return globalThis.__midgcSyncCleanupCount;
+        \\}})();
+        \\
+    ,
+        .{ expected_cleanup_count, expected_cleanup_count, expected_cleanup_sum, expected_cleanup_sum },
+    );
+    defer gpa.free(cleanup_src);
+    const cleaned = ctx.evaluate(cleanup_src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: midgc sync-wait cleanup check threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!cleaned.isNumber() or cleaned.asNum() != @as(f64, @floatFromInt(expected_cleanup_count))) {
+        std.debug.print("seed {d}: midgc sync-wait cleanup got {d}, expected {d}\n", .{ seed, if (cleaned.isNumber()) cleaned.asNum() else -1, expected_cleanup_count });
+        return false;
+    }
+    return true;
+}
+
 fn runMidScriptTerminationReactionGc(gpa: std.mem.Allocator, seed: u64) !bool {
     var prng = std.Random.DefaultPrng.init(seed ^ 0x6d69_6474_6572_6d72);
     const r = prng.random();
@@ -5035,6 +5254,22 @@ pub fn main(init: std.process.Init) !void {
         if (mtfail != 0) std.process.exit(1);
         return;
     };
+    // `threadfuzz midgcsync <iters> <seed>`: focused mid-script parallel-GC
+    // repro for parked property waits, Condition waits, and contended Lock
+    // waiters keeping stack roots alive while cleanup records are collected.
+    if (first) |a| if (std.mem.eql(u8, a, "midgcsync")) {
+        if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch 1;
+        if (args.next()) |b| base_seed = std.fmt.parseInt(u64, b, 10) catch 1;
+        var msfail: usize = 0;
+        var msi: usize = 0;
+        while (msi < iters) : (msi += 1) {
+            const seed = base_seed +% msi;
+            if (!(try runMidScriptSyncWaitCleanupGc(gpa, seed))) msfail += 1;
+        }
+        std.debug.print("threadfuzz midgcsync: {d} programs from seed {d}, {d} failures\n", .{ iters, base_seed, msfail });
+        if (msfail != 0) std.process.exit(1);
+        return;
+    };
     // `threadfuzz midgcpromise <iters> <seed>`: focused mid-script
     // parallel-GC repro for child-returned waitAsync/rejected-promise/user-
     // thenable assimilation and thrown-object publication through thread
@@ -5176,10 +5411,10 @@ pub fn main(init: std.process.Init) !void {
     // pressure triggers the experimental collector. Hidden ThreadLocal values,
     // typed-array waitAsync reactions, rejected asyncHold reactions, pending
     // asyncJoin reactions, child-returned waitAsync/rejected-promise/user-
-    // thenable assimilation,
-    // completed-but-unjoined Thread results and thrown objects, and teardown
-    // termination with pending asyncJoin/waitAsync roots must survive that
-    // window. The oracle requires exact program completion or expected
+    // thenable assimilation, completed-but-unjoined Thread results and thrown
+    // objects, sync-wait peer stack roots with finalization cleanup, and
+    // teardown termination with pending asyncJoin/waitAsync roots must survive
+    // that window. The oracle requires exact program completion or expected
     // termination and at least one finishing parallel sweep.
     if (first) |a| if (std.mem.eql(u8, a, "midgc")) {
         iters = 20;
@@ -5192,8 +5427,9 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runMidScriptWaitPumpGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptTerminationReactionGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptPromisePublicationGc(gpa, seed))) mfail += 1;
+            if (!(try runMidScriptSyncWaitCleanupGc(gpa, seed))) mfail += 1;
         }
-        std.debug.print("threadfuzz midgc: {d} programs from seed {d}, {d} failures\n", .{ iters * 3, base_seed, mfail });
+        std.debug.print("threadfuzz midgc: {d} programs from seed {d}, {d} failures\n", .{ iters * 4, base_seed, mfail });
         if (mfail != 0) std.process.exit(1);
         return;
     };
