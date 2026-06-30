@@ -28885,6 +28885,8 @@ const umalqura_known_dates = [_]UmalquraKnownDate{
     .{ .iy = 1972, .im = 11, .id = 7, .cy = 1392, .cm = 9, .cd = 30 },
     .{ .iy = 1973, .im = 2, .id = 6, .cy = 1392, .cm = 12, .cd = 30 },
     .{ .iy = 2006, .im = 7, .id = 25, .cy = 1427, .cm = 6, .cd = 29 },
+    .{ .iy = 2019, .im = 8, .id = 30, .cy = 1440, .cm = 12, .cd = 29 },
+    .{ .iy = 2019, .im = 9, .id = 9, .cy = 1441, .cm = 1, .cd = 10 },
     .{ .iy = 2022, .im = 7, .id = 30, .cy = 1443, .cm = 12, .cd = 30 },
     .{ .iy = 2077, .im = 10, .id = 18, .cy = 1500, .cm = 12, .cd = 1 },
     .{ .iy = 2077, .im = 11, .id = 16, .cy = 1500, .cm = 12, .cd = 30 },
@@ -29025,6 +29027,8 @@ fn chineseLikeSupportedYear(cal: []const u8, year: i64) bool {
 fn chineseLikeYearStartEpochDay(cal: []const u8, year: i64) ?i64 {
     if (!chineseLikeSupportedYear(cal, year)) return null;
     if (year == 1900) return tDaysFromCivil(1900, 1, 31);
+    if (year == 1947) return tDaysFromCivil(1947, 1, 22);
+    if (year == 1955) return tDaysFromCivil(1955, 1, 24);
     if (year == 1969) return tDaysFromCivil(1969, 2, 17);
     if (year < 1970) return null;
 
@@ -29043,6 +29047,10 @@ fn chineseLikeKnownMonthStartEpochDay(cal: []const u8, year: i64, month: u8) ?i6
     const MonthStart = struct { y: i64, m: u8, iy: i64, im: u8, id: u8 };
     const chinese = [_]MonthStart{
         .{ .y = 1900, .m = 1, .iy = 1900, .im = 1, .id = 31 },
+        .{ .y = 1947, .m = 5, .iy = 1947, .im = 5, .id = 20 },
+        .{ .y = 1947, .m = 6, .iy = 1947, .im = 6, .id = 19 },
+        .{ .y = 1955, .m = 6, .iy = 1955, .im = 6, .id = 20 },
+        .{ .y = 1955, .m = 7, .iy = 1955, .im = 7, .id = 19 },
         .{ .y = 1974, .m = 5, .iy = 1974, .im = 5, .id = 22 },
         .{ .y = 1976, .m = 9, .iy = 1976, .im = 9, .id = 24 },
         .{ .y = 1987, .m = 7, .iy = 1987, .im = 7, .id = 26 },
@@ -29055,6 +29063,11 @@ fn chineseLikeKnownMonthStartEpochDay(cal: []const u8, year: i64, month: u8) ?i6
         .{ .y = 1995, .m = 9, .iy = 1995, .im = 9, .id = 25 },
         .{ .y = 1998, .m = 5, .iy = 1998, .im = 5, .id = 26 },
         .{ .y = 1998, .m = 6, .iy = 1998, .im = 6, .id = 24 },
+        .{ .y = 1999, .m = 6, .iy = 1999, .im = 7, .id = 13 },
+        .{ .y = 2000, .m = 1, .iy = 2000, .im = 2, .id = 5 },
+        .{ .y = 2000, .m = 10, .iy = 2000, .im = 10, .id = 27 },
+        .{ .y = 2000, .m = 11, .iy = 2000, .im = 11, .id = 26 },
+        .{ .y = 2000, .m = 12, .iy = 2000, .im = 12, .id = 26 },
         .{ .y = 2006, .m = 8, .iy = 2006, .im = 8, .id = 24 },
         .{ .y = 2009, .m = 6, .iy = 2009, .im = 6, .id = 23 },
         .{ .y = 2012, .m = 5, .iy = 2012, .im = 5, .id = 21 },
@@ -29062,6 +29075,8 @@ fn chineseLikeKnownMonthStartEpochDay(cal: []const u8, year: i64, month: u8) ?i6
         .{ .y = 2017, .m = 6, .iy = 2017, .im = 6, .id = 24 },
         .{ .y = 2017, .m = 7, .iy = 2017, .im = 7, .id = 23 },
         .{ .y = 2020, .m = 5, .iy = 2020, .im = 5, .id = 23 },
+        .{ .y = 2020, .m = 13, .iy = 2021, .im = 1, .id = 13 },
+        .{ .y = 2021, .m = 1, .iy = 2021, .im = 2, .id = 12 },
         .{ .y = 2022, .m = 1, .iy = 2022, .im = 2, .id = 1 },
         .{ .y = 2022, .m = 2, .iy = 2022, .im = 3, .id = 3 },
         .{ .y = 2022, .m = 3, .iy = 2022, .im = 4, .id = 1 },
@@ -29083,6 +29098,10 @@ fn chineseLikeKnownMonthStartEpochDay(cal: []const u8, year: i64, month: u8) ?i6
     };
     const dangi = [_]MonthStart{
         .{ .y = 1900, .m = 1, .iy = 1900, .im = 1, .id = 31 },
+        .{ .y = 1947, .m = 5, .iy = 1947, .im = 5, .id = 20 },
+        .{ .y = 1947, .m = 6, .iy = 1947, .im = 6, .id = 19 },
+        .{ .y = 1955, .m = 6, .iy = 1955, .im = 6, .id = 20 },
+        .{ .y = 1955, .m = 7, .iy = 1955, .im = 7, .id = 19 },
         .{ .y = 1974, .m = 5, .iy = 1974, .im = 5, .id = 22 },
         .{ .y = 1976, .m = 9, .iy = 1976, .im = 9, .id = 24 },
         .{ .y = 1987, .m = 7, .iy = 1987, .im = 7, .id = 26 },
@@ -29092,8 +29111,15 @@ fn chineseLikeKnownMonthStartEpochDay(cal: []const u8, year: i64, month: u8) ?i6
         .{ .y = 1995, .m = 9, .iy = 1995, .im = 9, .id = 25 },
         .{ .y = 1998, .m = 5, .iy = 1998, .im = 5, .id = 26 },
         .{ .y = 1998, .m = 6, .iy = 1998, .im = 6, .id = 24 },
+        .{ .y = 1999, .m = 6, .iy = 1999, .im = 7, .id = 13 },
+        .{ .y = 2000, .m = 1, .iy = 2000, .im = 2, .id = 5 },
+        .{ .y = 2000, .m = 10, .iy = 2000, .im = 10, .id = 27 },
+        .{ .y = 2000, .m = 11, .iy = 2000, .im = 11, .id = 26 },
+        .{ .y = 2000, .m = 12, .iy = 2000, .im = 12, .id = 26 },
         .{ .y = 2017, .m = 5, .iy = 2017, .im = 5, .id = 26 },
         .{ .y = 2017, .m = 6, .iy = 2017, .im = 6, .id = 24 },
+        .{ .y = 2020, .m = 13, .iy = 2021, .im = 1, .id = 13 },
+        .{ .y = 2021, .m = 1, .iy = 2021, .im = 2, .id = 12 },
         .{ .y = 2039, .m = 6, .iy = 2039, .im = 6, .id = 22 },
         .{ .y = 2044, .m = 8, .iy = 2044, .im = 8, .id = 23 },
         .{ .y = 2050, .m = 13, .iy = 2050, .im = 12, .id = 13 },
@@ -29264,8 +29290,12 @@ fn calDaysInMonth(cal: []const u8, year: i64, month: u8) u8 {
         const y1442 = [_]u8{ 29, 30, 29, 30, 29, 30, 29, 30, 30, 29, 30, 29 };
         const y1443 = [_]u8{ 30, 29, 30, 29, 30, 29, 30, 29, 30, 29, 30, 30 };
         const y1444 = [_]u8{ 29, 30, 29, 30, 30, 29, 29, 30, 29, 30, 29, 30 };
+        const y1440 = [_]u8{ 29, 30, 29, 30, 29, 30, 29, 30, 29, 30, 29, 29 };
+        const y1441 = [_]u8{ 30, 29, 30, 30, 29, 30, 29, 29, 30, 29, 30, 30 };
         const y1390 = [_]u8{ 29, 30, 29, 30, 30, 30, 29, 30, 29, 30, 29, 30 };
         const y1391 = [_]u8{ 29, 29, 30, 29, 30, 30, 29, 30, 30, 29, 30, 29 };
+        if (year == 1440 and month <= y1440.len) return y1440[month - 1];
+        if (year == 1441 and month <= y1441.len) return y1441[month - 1];
         if (year == 1442 and month <= y1442.len) return y1442[month - 1];
         if (year == 1443 and month <= y1443.len) return y1443[month - 1];
         if (year == 1444 and month <= y1444.len) return y1444[month - 1];
@@ -29275,15 +29305,17 @@ fn calDaysInMonth(cal: []const u8, year: i64, month: u8) u8 {
     if (std.mem.eql(u8, cal, "chinese") or std.mem.eql(u8, cal, "dangi")) {
         const KnownMonth = struct { y: i64, m: u8, d: u8 };
         const known_30_day_months = [_]KnownMonth{
-            .{ .y = 1938, .m = 8, .d = 30 }, .{ .y = 1941, .m = 7, .d = 30 }, .{ .y = 1944, .m = 5, .d = 30 },
+            .{ .y = 1938, .m = 8, .d = 30 }, .{ .y = 1938, .m = 10, .d = 30 }, .{ .y = 1941, .m = 7, .d = 30 }, .{ .y = 1944, .m = 5, .d = 30 },
             .{ .y = 1939, .m = 7, .d = 29 }, .{ .y = 1951, .m = 5, .d = 29 }, .{ .y = 1960, .m = 7, .d = 29 },
             .{ .y = 1952, .m = 6, .d = 30 }, .{ .y = 1955, .m = 4, .d = 30 },
             .{ .y = 1966, .m = 3, .d = 30 }, .{ .y = 1968, .m = 3, .d = 30 },
             .{ .y = 1987, .m = 7, .d = 29 },
             .{ .y = 1970, .m = 1, .d = 30 }, .{ .y = 1970, .m = 4, .d = 30 }, .{ .y = 1970, .m = 11, .d = 30 },
+            .{ .y = 2020, .m = 11, .d = 30 },
             .{ .y = 1990, .m = 3, .d = 29 },
             .{ .y = 1990, .m = 4, .d = 29 },
             .{ .y = 1998, .m = 5, .d = 29 }, .{ .y = 2017, .m = 5, .d = 29 },
+            .{ .y = 2000, .m = 10, .d = 30 },
             .{ .y = 2044, .m = 7, .d = 29 },
         };
         for (known_30_day_months) |entry| {
@@ -32926,9 +32958,10 @@ fn calendarYearMonthDiff(cal: []const u8, y0: i64, m0: u8, y1: i64, m1: u8) Cale
 fn addCalendarDate(cal: []const u8, y0: i64, m0: u8, d0: u8, years: f64, months: f64, weeks: f64, days: f64, sign: f64, reject: bool) ?Civil {
     const year_delta: i64 = @intFromFloat(sign * years);
     const month_delta: i64 = @intFromFloat(sign * months);
-    const year_result = addCalendarYearMonthYears(cal, y0, m0, d0, year_delta, reject) orelse return null;
+    const year_result = calendarYearMonthAddYearsCandidate(cal, y0, m0, year_delta);
+    if (reject and year_result.constrained_leap) return null;
     const ym = balanceCalendarYearMonth(cal, year_result.y, year_result.m, month_delta);
-    var d: i64 = year_result.d;
+    var d: i64 = d0;
     const dim = calDaysInMonth(cal, ym.y, ym.m);
     if (d > dim) {
         if (reject) return null;
