@@ -29276,8 +29276,10 @@ fn calDaysInMonth(cal: []const u8, year: i64, month: u8) u8 {
         const KnownMonth = struct { y: i64, m: u8, d: u8 };
         const known_30_day_months = [_]KnownMonth{
             .{ .y = 1938, .m = 8, .d = 30 }, .{ .y = 1941, .m = 7, .d = 30 }, .{ .y = 1944, .m = 5, .d = 30 },
+            .{ .y = 1939, .m = 7, .d = 29 }, .{ .y = 1951, .m = 5, .d = 29 }, .{ .y = 1960, .m = 7, .d = 29 },
             .{ .y = 1952, .m = 6, .d = 30 }, .{ .y = 1955, .m = 4, .d = 30 },
             .{ .y = 1966, .m = 3, .d = 30 }, .{ .y = 1968, .m = 3, .d = 30 },
+            .{ .y = 1987, .m = 7, .d = 29 },
             .{ .y = 1970, .m = 1, .d = 30 }, .{ .y = 1970, .m = 4, .d = 30 }, .{ .y = 1970, .m = 11, .d = 30 },
             .{ .y = 1990, .m = 3, .d = 29 },
             .{ .y = 1990, .m = 4, .d = 29 },
@@ -32922,18 +32924,20 @@ fn calendarYearMonthDiff(cal: []const u8, y0: i64, m0: u8, y1: i64, m1: u8) Cale
 /// the receiver's calendar. `reject` reports year/month moves that would need
 /// to constrain the original day into the target month.
 fn addCalendarDate(cal: []const u8, y0: i64, m0: u8, d0: u8, years: f64, months: f64, weeks: f64, days: f64, sign: f64, reject: bool) ?Civil {
-    var y: i64 = y0 + @as(i64, @intFromFloat(sign * years));
-    const ym = balanceCalendarYearMonth(cal, y, m0, @as(i64, @intFromFloat(sign * months)));
-    y = ym.y;
-    const m = ym.m;
-    var d: i64 = d0;
-    const dim = calDaysInMonth(cal, calDisplayYear(cal, y), m);
+    const year_delta: i64 = @intFromFloat(sign * years);
+    const month_delta: i64 = @intFromFloat(sign * months);
+    const year_result = addCalendarYearMonthYears(cal, y0, m0, d0, year_delta, reject) orelse return null;
+    const ym = balanceCalendarYearMonth(cal, year_result.y, year_result.m, month_delta);
+    var d: i64 = year_result.d;
+    const dim = calDaysInMonth(cal, ym.y, ym.m);
     if (d > dim) {
         if (reject) return null;
         d = dim;
     }
-    const iso = calendarDateToIso(cal, y, m, @intCast(d));
-    const c = tCivilFromDays(tDaysFromCivil(iso.y, iso.m, iso.d) + @as(i64, @intFromFloat(sign * (weeks * 7 + days))));
+    const day_delta: i64 = @intFromFloat(sign * (weeks * 7 + days));
+    if (day_delta == 0) return .{ .y = ym.y, .m = ym.m, .d = @intCast(d) };
+    const iso = calendarDateToIso(cal, ym.y, ym.m, @intCast(d));
+    const c = tCivilFromDays(tDaysFromCivil(iso.y, iso.m, iso.d) + day_delta);
     return calendarDateFromIso(cal, c.y, c.m, c.d);
 }
 
@@ -32949,9 +32953,14 @@ fn temporalPlainDateTimeAddFn(comptime sign: f64) value.NativeFn {
             const c = addCalendarDate(t.calendar, t.year, t.month, t.day, dur[0], dur[1], dur[2], dur[3], sign, reject) orelse return self.throwError("RangeError", "date overflow");
             const time_ns = timeToNs(t) + @as(i128, @intFromFloat(sign)) * (durationTimeNs(dur) - (@as(i128, @intFromFloat(dur[2])) * 7 + @as(i128, @intFromFloat(dur[3]))) * nsPerUnit(.day));
             const day_carry = @divFloor(time_ns, 86_400_000_000_000);
-            const iso = calendarDateToIso(t.calendar, c.y, c.m, c.d);
-            const cc_iso = tCivilFromDays(tDaysFromCivil(iso.y, iso.m, iso.d) + @as(i64, @intCast(day_carry)));
-            const cc = calendarDateFromIso(t.calendar, cc_iso.y, cc_iso.m, cc_iso.d);
+            const cc, const cc_iso = if (day_carry == 0) .{
+                c,
+                calendarDateToIso(t.calendar, c.y, c.m, c.d),
+            } else blk: {
+                const iso = calendarDateToIso(t.calendar, c.y, c.m, c.d);
+                const shifted_iso = tCivilFromDays(tDaysFromCivil(iso.y, iso.m, iso.d) + @as(i64, @intCast(day_carry)));
+                break :blk .{ calendarDateFromIso(t.calendar, shifted_iso.y, shifted_iso.m, shifted_iso.d), shifted_iso };
+            };
             try checkIsoDate(self, @floatFromInt(cc_iso.y), @floatFromInt(cc_iso.m), @floatFromInt(cc_iso.d));
             const o = try makeTemporal(self, .plain_date_time, "\x00T.PlainDateTime");
             o.temporal.?.year = @intCast(cc.y);
