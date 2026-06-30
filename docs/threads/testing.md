@@ -236,8 +236,11 @@ park/resume/clear/join cleanup lifecycles with exact cleanup count/sum delivery
 after quiescent collection. It also parks child Threads behind parent-created
 `asyncJoin()` promises that outlive the parent Thread's local microtask queue,
 then verifies child release, nested `ThreadLocal` roots, rerouted async
-settlement, and exact finalization cleanup after both thread layers exit. Each
-seed currently runs 35 deterministic lifecycle
+settlement, and exact finalization cleanup after both thread layers exit. It now
+also composes isolated Worker termination with shared-realm teardown that
+abandons child-owned typed-array `waitAsync` tickets, rejects pending
+`asyncJoin` reactions, and delivers exact cleanup. Each seed currently runs 36
+deterministic lifecycle
 subprograms.
 
 `zig build test262 -Dtest262-parallel-js=true` runs test262 programs in

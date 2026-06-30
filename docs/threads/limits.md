@@ -297,7 +297,9 @@ context APIs.
   rejection reaction, and already-ready `FinalizationRegistry` cleanup jobs
   share the same realm turn, Worker termination composed with condition async
   reacquire, pending `asyncJoin` rejection cleanup, and exact
-  `FinalizationRegistry` cleanup,
+  `FinalizationRegistry` cleanup, Worker termination composed with child-owned
+  typed-array `waitAsync` ticket abandonment, pending `asyncJoin` rejection
+  cleanup, and exact `FinalizationRegistry` cleanup,
   deterministic `Lock.asyncHold()` barging where a
   sync hold legally overtakes a queued no-fn async ticket before `await`
   delivers its release function, Promise reaction queue churn from with-fn

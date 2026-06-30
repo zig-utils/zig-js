@@ -3305,6 +3305,298 @@ fn runWorkerTerminateConditionAsyncCleanupInterleaving(gpa: std.mem.Allocator, s
     return true;
 }
 
+fn runWorkerTerminateWaitAsyncCleanupInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
+    var prng = std.Random.DefaultPrng.init(seed ^ 0x7774_7761_6974_6173);
+    const r = prng.random();
+    const nworkers = 1 + r.uintLessThan(usize, 2);
+    const nthreads = 2 + r.uintLessThan(usize, 4);
+    const ncleanup = 8 + r.uintLessThan(usize, 10);
+    const seed_marker = seed % 10_000;
+    const reject_base = 460_000 + seed_marker;
+    const cleanup_base = 470_000 + seed_marker;
+
+    var expected_reject_sum: usize = 0;
+    var ti: usize = 0;
+    while (ti < nthreads) : (ti += 1) expected_reject_sum += reject_base + ti;
+    var expected_cleanup_sum: usize = 0;
+    var ci: usize = 0;
+    while (ci < ncleanup) : (ci += 1) expected_cleanup_sum += cleanup_base + ci;
+
+    const ctx = js.Context.createWith(gpa, .{ .enable_threads = true, .enable_gc = true }) catch {
+        std.debug.print("seed {d}: worker terminate/waitAsync cleanup context creation failed\n", .{seed});
+        return false;
+    };
+    defer ctx.destroy();
+    var machine = ctx.interpreter();
+
+    const setup_src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  globalThis.__workerTermWaitMsg = {{ sab: new SharedArrayBuffer(32) }};
+        \\  globalThis.__workerTermWaitThreadSab = new SharedArrayBuffer({d} * 4);
+        \\  globalThis.__workerTermWaitView = new Int32Array(globalThis.__workerTermWaitThreadSab);
+        \\  globalThis.__workerTermWaitRejectScore = 0;
+        \\  globalThis.__workerTermWaitRejectCount = 0;
+        \\  globalThis.__workerTermWaitCleanupCount = 0;
+        \\  globalThis.__workerTermWaitCleanupSum = 0;
+        \\  globalThis.__workerTermWaitRegistry = new FinalizationRegistry((held) => {{
+        \\    globalThis.__workerTermWaitCleanupCount++;
+        \\    globalThis.__workerTermWaitCleanupSum += held;
+        \\  }});
+        \\  const registry = globalThis.__workerTermWaitRegistry;
+        \\  for (let i = 0; i < {d}; i++) {{
+        \\    let target = {{ i, seed: {d}, payload: 'worker-terminate-waitAsync-cleanup-' + i }};
+        \\    registry.register(target, {d} + i);
+        \\    target = null;
+        \\  }}
+        \\  return {d};
+        \\}})();
+        \\
+    ,
+        .{ nthreads, ncleanup, seed, cleanup_base, ncleanup },
+    );
+    defer gpa.free(setup_src);
+    const setup_result = ctx.evaluate(setup_src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: worker terminate/waitAsync setup threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!setup_result.isNumber() or setup_result.asNum() != @as(f64, @floatFromInt(ncleanup))) {
+        std.debug.print("seed {d}: worker terminate/waitAsync setup got {d}, expected {d}\n", .{ seed, if (setup_result.isNumber()) setup_result.asNum() else -1, ncleanup });
+        return false;
+    }
+    ctx.collectGarbage();
+
+    const msg = ctx.evaluate("globalThis.__workerTermWaitMsg") catch |err| {
+        std.debug.print("seed {d}: cannot read worker terminate/waitAsync message: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    const worker_src =
+        \\globalThis.onmessage = (e) => {
+        \\  const v = new Int32Array(e.data.sab);
+        \\  Atomics.add(v, 0, 1);
+        \\  Atomics.notify(v, 0);
+        \\  for (;;) {
+        \\    Atomics.add(v, 1, 1);
+        \\  }
+        \\};
+    ;
+
+    var workers: std.ArrayListUnmanaged(*Worker) = .empty;
+    defer workers.deinit(gpa);
+    var cleanup_workers = true;
+    defer if (cleanup_workers) {
+        for (workers.items) |w| {
+            w.terminate();
+            w.join();
+            w.destroy();
+        }
+    };
+
+    var wi: usize = 0;
+    while (wi < nworkers) : (wi += 1) {
+        const w = Worker.spawn(worker_src) catch {
+            std.debug.print("seed {d}: worker terminate/waitAsync worker spawn failed\n", .{seed});
+            return false;
+        };
+        try workers.append(gpa, w);
+        w.postMessage(&machine, msg) catch |err| {
+            std.debug.print("seed {d}: worker terminate/waitAsync post failed: {s}\n", .{ seed, @errorName(err) });
+            return false;
+        };
+    }
+
+    const ready_src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  const v = new Int32Array(globalThis.__workerTermWaitMsg.sab);
+        \\  let spins = 0;
+        \\  while (Atomics.load(v, 0) < {d} && spins++ < 10000000)
+        \\    Atomics.wait(v, 0, Atomics.load(v, 0), 1);
+        \\  if (Atomics.load(v, 0) !== {d})
+        \\    throw new Error('worker terminate/waitAsync workers not ready: ' + Atomics.load(v, 0));
+        \\  if (Atomics.load(v, 1) <= 0)
+        \\    throw new Error('worker terminate/waitAsync workers did not spin');
+        \\  return Atomics.load(v, 0);
+        \\}})();
+        \\
+    ,
+        .{ nworkers, nworkers },
+    );
+    defer gpa.free(ready_src);
+    const ready = ctx.evaluate(ready_src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: worker terminate/waitAsync readiness threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!ready.isNumber() or ready.asNum() != @as(f64, @floatFromInt(nworkers))) {
+        std.debug.print("seed {d}: worker terminate/waitAsync ready got {d}, expected {d}\n", .{ seed, if (ready.isNumber()) ready.asNum() else -1, nworkers });
+        return false;
+    }
+
+    const fail_src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  const gate = {{ ready: 0, stop: 0 }};
+        \\  const threads = [];
+        \\  const sab = globalThis.__workerTermWaitThreadSab;
+        \\  for (let id = 0; id < {d}; id++) {{
+        \\    const joinRoot = {{
+        \\      marker: {d} + id,
+        \\      nested: {{ seed: {d}, label: 'worker-terminate-waitAsync-asyncJoin-root-' + id }},
+        \\    }};
+        \\    const t = new Thread((sab, gate, id, seedMarker) => {{
+        \\      const view = new Int32Array(sab);
+        \\      const waitRoot = {{
+        \\        marker: 480000 + seedMarker + id,
+        \\        nested: {{ seed: seedMarker, label: 'worker-terminate-child-waitAsync-root-' + id }},
+        \\      }};
+        \\      const waiter = Atomics.waitAsync(view, id, 0);
+        \\      if (waiter.async !== true || !(waiter.value instanceof Promise))
+        \\        throw new Error('bad worker terminate child waitAsync pending shape');
+        \\      waiter.value.then(
+        \\        () => {{
+        \\          if (waitRoot.marker === 480000 + seedMarker + id)
+        \\            Atomics.store(gate, 'stop', -1000000);
+        \\        }},
+        \\        () => {{ Atomics.store(gate, 'stop', -1000000); }});
+        \\      Atomics.add(gate, 'ready', 1);
+        \\      Atomics.notify(gate, 'ready');
+        \\      while (Atomics.load(gate, 'stop') === 0)
+        \\        Atomics.wait(gate, 'stop', 0, 5);
+        \\      return -1;
+        \\    }}, sab, gate, id, {d});
+        \\    t.asyncJoin().then(
+        \\      () => {{ globalThis.__workerTermWaitRejectScore = -1000000; }},
+        \\      (e) => {{
+        \\        if (e && joinRoot.marker === {d} + id && joinRoot.nested.seed === {d}) {{
+        \\          globalThis.__workerTermWaitRejectScore += joinRoot.marker;
+        \\          globalThis.__workerTermWaitRejectCount++;
+        \\        }} else {{
+        \\          globalThis.__workerTermWaitRejectScore = -1000000;
+        \\        }}
+        \\      }});
+        \\    threads.push(t);
+        \\  }}
+        \\  globalThis.__workerTermWaitThreads = threads;
+        \\  while (Atomics.load(gate, 'ready') < {d})
+        \\    Atomics.wait(gate, 'ready', Atomics.load(gate, 'ready'), 1);
+        \\  if (Atomics.load(gate, 'stop') !== 0)
+        \\    throw new Error('worker terminate child waitAsync settled before teardown');
+        \\  throw new Error('threadfuzz worker terminate waitAsync cleanup {d}');
+        \\}})();
+        \\
+    ,
+        .{
+            nthreads,
+            reject_base,
+            seed,
+            seed_marker,
+            reject_base,
+            seed,
+            nthreads,
+            seed,
+        },
+    );
+    defer gpa.free(fail_src);
+    if (ctx.evaluate(fail_src)) |_| {
+        std.debug.print("seed {d}: worker terminate/waitAsync failure script returned normally\n", .{seed});
+        return false;
+    } else |err| {
+        if (err != error.Throw) {
+            std.debug.print("seed {d}: worker terminate/waitAsync failed with {s}\n", .{ seed, @errorName(err) });
+            return false;
+        }
+    }
+
+    _ = ctx.evaluate("$drainRunLoop()") catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: worker terminate/waitAsync drain threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+
+    const check_src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  if (globalThis.__workerTermWaitRejectScore !== {d})
+        \\    throw new Error('bad worker terminate/waitAsync reject score ' + globalThis.__workerTermWaitRejectScore);
+        \\  if (globalThis.__workerTermWaitRejectCount !== {d})
+        \\    throw new Error('bad worker terminate/waitAsync reject count ' + globalThis.__workerTermWaitRejectCount);
+        \\  let joinThrew = 0;
+        \\  for (const t of globalThis.__workerTermWaitThreads) {{
+        \\    try {{
+        \\      t.join();
+        \\    }} catch (e) {{
+        \\      if (e) joinThrew++;
+        \\    }}
+        \\  }}
+        \\  if (joinThrew !== {d})
+        \\    throw new Error('worker terminate/waitAsync join threw ' + joinThrew);
+        \\  let notified = 0;
+        \\  for (let id = 0; id < {d}; id++)
+        \\    notified += Atomics.notify(globalThis.__workerTermWaitView, id);
+        \\  if (notified !== 0)
+        \\    throw new Error('worker terminate/waitAsync leaked ' + notified + ' child waitAsync tickets');
+        \\  globalThis.__workerTermWaitRegistry.cleanupSome();
+        \\  if (globalThis.__workerTermWaitCleanupCount !== {d})
+        \\    throw new Error('bad worker terminate/waitAsync cleanup count ' + globalThis.__workerTermWaitCleanupCount);
+        \\  if (globalThis.__workerTermWaitCleanupSum !== {d})
+        \\    throw new Error('bad worker terminate/waitAsync cleanup sum ' + globalThis.__workerTermWaitCleanupSum);
+        \\  return globalThis.__workerTermWaitRejectCount + globalThis.__workerTermWaitCleanupCount;
+        \\}})();
+        \\
+    ,
+        .{ expected_reject_sum, nthreads, nthreads, nthreads, ncleanup, expected_cleanup_sum },
+    );
+    defer gpa.free(check_src);
+    const checked = ctx.evaluate(check_src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: worker terminate/waitAsync check threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!checked.isNumber() or checked.asNum() != @as(f64, @floatFromInt(nthreads + ncleanup))) {
+        std.debug.print("seed {d}: worker terminate/waitAsync checked got {d}, expected {d}\n", .{ seed, if (checked.isNumber()) checked.asNum() else -1, nthreads + ncleanup });
+        return false;
+    }
+
+    for (workers.items) |w| {
+        w.terminate();
+        w.join();
+        const reply = w.receive(&machine, 0) catch |err| {
+            std.debug.print("seed {d}: worker terminate/waitAsync receive after terminate failed: {s}\n", .{ seed, @errorName(err) });
+            return false;
+        };
+        if (reply != null) {
+            std.debug.print("seed {d}: worker terminate/waitAsync delivered a post-terminate reply\n", .{seed});
+            return false;
+        }
+        w.destroy();
+    }
+    cleanup_workers = false;
+
+    const worker_ready = ctx.evaluate("Atomics.load(new Int32Array(globalThis.__workerTermWaitMsg.sab), 0)") catch |err| {
+        std.debug.print("seed {d}: cannot read worker terminate/waitAsync ready counter: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    if (!worker_ready.isNumber() or worker_ready.asNum() != @as(f64, @floatFromInt(nworkers))) {
+        std.debug.print("seed {d}: worker terminate/waitAsync worker ready got {d}, expected {d}\n", .{ seed, if (worker_ready.isNumber()) worker_ready.asNum() else -1, nworkers });
+        return false;
+    }
+    return true;
+}
+
 fn runModuleWorkerTerminateThreadTeardownInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
     var prng = std.Random.DefaultPrng.init(seed ^ 0x6d6f_6474_6572_6d74);
     const r = prng.random();
@@ -10260,6 +10552,23 @@ pub fn main(init: std.process.Init) !void {
         if (wtcafail != 0) std.process.exit(1);
         return;
     };
+    // `threadfuzz workertermwaitasync <iters> <seed>`: focused lifecycle repro
+    // for isolated Worker termination composed with shared-realm top-level
+    // teardown that abandons child-owned typed-array waitAsync tickets, rejects
+    // pending asyncJoin reactions, and delivers exact cleanup.
+    if (first) |a| if (std.mem.eql(u8, a, "workertermwaitasync")) {
+        if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch 1;
+        if (args.next()) |b| base_seed = std.fmt.parseInt(u64, b, 10) catch 1;
+        var wtwafail: usize = 0;
+        var wtwai: usize = 0;
+        while (wtwai < iters) : (wtwai += 1) {
+            const seed = base_seed +% wtwai;
+            if (!(try runWorkerTerminateWaitAsyncCleanupInterleaving(gpa, seed))) wtwafail += 1;
+        }
+        std.debug.print("threadfuzz workertermwaitasync: {d} programs from seed {d}, {d} failures\n", .{ iters, base_seed, wtwafail });
+        if (wtwafail != 0) std.process.exit(1);
+        return;
+    };
     // `threadfuzz moduletermteardown <iters> <seed>`: focused lifecycle repro
     // for module Worker termination while a shared-realm top-level failure
     // tears down parked Threads, pending asyncJoin reactions, and cleanup jobs.
@@ -10580,8 +10889,9 @@ pub fn main(init: std.process.Init) !void {
     // property waitAsync timeout compaction, async condition reacquire,
     // asyncJoin rejection, and pending cleanup jobs, and when isolated Worker
     // termination composes with condition async reacquire and pending asyncJoin
-    // cleanup after a shared-realm top-level failure; asyncHold barging must
-    // deliver a pending
+    // cleanup after a shared-realm top-level failure, and with child-owned
+    // typed-array waitAsync ticket abandonment plus pending asyncJoin rejection
+    // cleanup; asyncHold barging must deliver a pending
     // no-fn grant after a sync hold legally overtakes it; ThreadLocal values must stay
     // per-thread across normal, throwing, nested, async-joined, and
     // finalization-cleanup lifecycles; nested child asyncJoin promises created
@@ -10627,6 +10937,7 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runTerminationPendingReactionInterleaving(gpa, seed))) lfail += 1;
             if (!(try runTerminationWaiterCleanupInterleaving(gpa, seed))) lfail += 1;
             if (!(try runWorkerTerminateConditionAsyncCleanupInterleaving(gpa, seed))) lfail += 1;
+            if (!(try runWorkerTerminateWaitAsyncCleanupInterleaving(gpa, seed))) lfail += 1;
             if (!(try runAsyncHoldBargingLifecycleInterleaving(gpa, seed))) lfail += 1;
             if (!(try runThreadRestrictLifecycleInterleaving(gpa, seed))) lfail += 1;
             if (!(try runThreadRestrictFinalizationCleanupInterleaving(gpa, seed))) lfail += 1;
@@ -10634,7 +10945,7 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runThreadLocalFinalizationCleanupInterleaving(gpa, seed))) lfail += 1;
             if (!(try runNestedThreadAsyncJoinCleanupInterleaving(gpa, seed))) lfail += 1;
         }
-        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 35, base_seed, lfail });
+        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 36, base_seed, lfail });
         if (lfail != 0) std.process.exit(1);
         return;
     };

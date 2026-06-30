@@ -342,7 +342,9 @@ as embedders exercise more threaded host patterns.
   rejection reaction, and already-ready `FinalizationRegistry` cleanup jobs
   share the same realm turn, Worker termination composed with condition async
   reacquire, pending `asyncJoin` rejection cleanup, and exact
-  `FinalizationRegistry` cleanup,
+  `FinalizationRegistry` cleanup, Worker termination composed with child-owned
+  typed-array `waitAsync` ticket abandonment, pending `asyncJoin` rejection
+  cleanup, and exact `FinalizationRegistry` cleanup,
   cleanup delivery interleaved with `join()` /
   `asyncJoin()` and unregister-token suppression, cleanup delivery after parked
   property/condition waiters resume, deterministic `Lock.asyncHold()` barging

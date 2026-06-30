@@ -479,7 +479,10 @@ threading architecture:
   condition reacquire, a pending `asyncJoin` rejection reaction, and
   already-ready `FinalizationRegistry` cleanup jobs share the same realm turn,
   isolated Worker termination composed with condition async reacquire, pending
-  `asyncJoin` rejection cleanup, and exact finalization cleanup,
+  `asyncJoin` rejection cleanup, and exact finalization cleanup, isolated
+  Worker termination composed with child-owned typed-array `waitAsync` ticket
+  abandonment, pending `asyncJoin` rejection cleanup, and exact finalization
+  cleanup,
   deterministic `Lock.asyncHold()` barging where a sync hold legally overtakes
   a queued no-fn async ticket before `await` delivers its release function,
   Promise reaction queue churn from with-fn `Lock.asyncHold`, no-fn
