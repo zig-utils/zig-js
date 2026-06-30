@@ -35429,6 +35429,29 @@ fn temporalZdtUntilFn(comptime sign: f64) value.NativeFn {
             if (!temporalCalendarIdsEqual(t.calendar, other.calendar)) return self.throwError("RangeError", "calendar mismatch");
             if (!other_arg.isString() and !temporalTimeZoneIdsEqual(t.tz_name, other.tz_name)) return self.throwError("RangeError", "time zone mismatch");
             if (@intFromEnum(largest) >= @intFromEnum(TUnit.day)) {
+                if (largest == .day) {
+                    const start_zdt = if (sign < 0) &other else t;
+                    const span = if (sign < 0) t.epoch_ns - other.epoch_ns else other.epoch_ns - t.epoch_ns;
+                    const start_local = zdtLocal(start_zdt);
+                    const start_iso = calendarDateToIso(start_zdt.calendar, start_local.year, start_local.month, start_local.day);
+                    const rel: RelTo = .{
+                        .y = start_iso.y,
+                        .m = start_iso.m,
+                        .d = start_iso.d,
+                        .time_ns = timeToNs(&start_local),
+                        .zoned = true,
+                        .epoch_ns = start_zdt.epoch_ns,
+                        .tz_name = start_zdt.tz_name,
+                        .tz_offset_ns = start_zdt.tz_offset_ns,
+                    };
+                    if (opts.smallest == .day) {
+                        var out: [10]f64 = .{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+                        out[3] = @floatFromInt(try roundZonedDayCountRel(self, start_zdt.epoch_ns, start_zdt.epoch_ns + span, rel, opts.increment, opts.mode));
+                        return makeDuration(self, out);
+                    }
+                    const rounded = roundNs(span, opts.smallest, opts.increment, opts.mode);
+                    return makeDuration(self, try balanceZonedDaysRel(self, start_zdt.epoch_ns, rounded, rel));
+                }
                 var diff = @as(i128, @intFromFloat(sign)) * (other.epoch_ns - t.epoch_ns);
                 if (opts.smallest == .day and opts.increment != 1) {
                     const l = zdtLocal(t);
@@ -35467,6 +35490,14 @@ fn temporalZdtUntilFn(comptime sign: f64) value.NativeFn {
                 dd = calendarDateDiff(local_this.calendar, local_this.year, local_this.month, local_this.day, adjusted_end.y, adjusted_end.m, adjusted_end.d, largest);
                 time_diff -= 86_400_000_000_000;
             }
+            if (std.mem.eql(u8, local_this.calendar, "iso8601") and !isFixedTimeZone(.{ .name = t.tz_name, .offset_ns = t.tz_offset_ns })) {
+                const date_part = addCalendarDate(local_this.calendar, local_this.year, local_this.month, local_this.day, dd[0], dd[1], dd[2], dd[3], 1, false) orelse
+                    return self.throwError("RangeError", "date overflow");
+                const date_iso = calendarDateToIso(local_this.calendar, date_part.y, date_part.m, date_part.d);
+                const date_local_ns = @as(i128, tDaysFromCivil(date_iso.y, date_iso.m, date_iso.d)) * DAY_NS + timeToNs(&local_this);
+                const date_offset = try zdtOffsetForLocalDisambiguation(self, .{ .name = t.tz_name, .offset_ns = t.tz_offset_ns }, date_local_ns, .compatible);
+                time_diff = other.epoch_ns - (date_local_ns - @as(i128, date_offset));
+            }
             const tparts = balanceTimeNs(time_diff, .hour);
             for (4..10) |i| dd[i] = tparts[i];
             if (sign < 0) for (&dd) |*c| {
@@ -35484,10 +35515,22 @@ fn temporalZdtUntilFn(comptime sign: f64) value.NativeFn {
                     dd = calendarDateDiff(local_this.calendar, local_this.year, local_this.month, local_this.day, adjusted_end.y, adjusted_end.m, adjusted_end.d, largest);
                     time_diff -= 86_400_000_000_000;
                 }
+                if (std.mem.eql(u8, local_this.calendar, "iso8601") and !isFixedTimeZone(.{ .name = t.tz_name, .offset_ns = t.tz_offset_ns })) {
+                    const date_part = addCalendarDate(local_this.calendar, local_this.year, local_this.month, local_this.day, dd[0], dd[1], dd[2], dd[3], 1, false) orelse
+                        return self.throwError("RangeError", "date overflow");
+                    const date_iso = calendarDateToIso(local_this.calendar, date_part.y, date_part.m, date_part.d);
+                    const date_local_ns = @as(i128, tDaysFromCivil(date_iso.y, date_iso.m, date_iso.d)) * DAY_NS + timeToNs(&local_this);
+                    const date_offset = try zdtOffsetForLocalDisambiguation(self, .{ .name = t.tz_name, .offset_ns = t.tz_offset_ns }, date_local_ns, .compatible);
+                    time_diff = other.epoch_ns - (date_local_ns - @as(i128, date_offset));
+                }
                 const rounded_tparts = balanceTimeNs(time_diff, .hour);
                 for (4..10) |i| dd[i] = rounded_tparts[i];
                 const mode = if (sign < 0) negateRoundMode(opts.mode) else opts.mode;
-                dd = try roundDurationRel(self, dd, .{ .y = local_this.year, .m = local_this.month, .d = local_this.day, .time_ns = timeToNs(&local_this) }, .{ .largest = largest, .smallest = opts.smallest, .mode = mode, .increment = opts.increment });
+                const rel: RelTo = if (std.mem.eql(u8, local_this.calendar, "iso8601") and !isFixedTimeZone(.{ .name = t.tz_name, .offset_ns = t.tz_offset_ns }))
+                    .{ .y = local_this.year, .m = local_this.month, .d = local_this.day, .time_ns = timeToNs(&local_this), .zoned = true, .epoch_ns = t.epoch_ns, .tz_name = t.tz_name, .tz_offset_ns = t.tz_offset_ns }
+                else
+                    .{ .y = local_this.year, .m = local_this.month, .d = local_this.day, .time_ns = timeToNs(&local_this) };
+                dd = try roundDurationRel(self, dd, rel, .{ .largest = largest, .smallest = opts.smallest, .mode = mode, .increment = opts.increment });
                 if (sign < 0) for (&dd) |*c| {
                     c.* = -c.*;
                 };
