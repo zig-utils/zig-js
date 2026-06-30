@@ -277,8 +277,10 @@ threading architecture:
   bursts under the shared API lock before running grants outside it, so delivery
   no longer takes that lock once per job. `Condition.notify` / `notifyAll` now
   use the same FIFO head-cursor shape for their mixed sync/async waiter queue,
-  avoiding one front shift per notified waiter. Property-mode `Atomics.notify`
-  now stable-compacts matching waiters in one pass: sync stack tickets are
+  avoiding one front shift per notified waiter; timed-out or terminated sync
+  condition waiters are marked canceled and skipped by that cursor instead of
+  being removed from the middle of the queue. Property-mode `Atomics.notify` now
+  stable-compacts matching waiters in one pass: sync stack tickets are
   unlinked before signal, and matching `waitAsync` tickets are collected without
   repeated `orderedRemove` shifts; timeout polling and realm teardown now scan
   property `waitAsync` tickets once instead of removing one middle entry per

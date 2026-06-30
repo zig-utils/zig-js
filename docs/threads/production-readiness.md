@@ -113,6 +113,8 @@ Known performance/maturity work:
   one per job to one per burst.
 - Condition notify/notifyAll use the same FIFO head-cursor pattern for the
   mixed sync/async waiter queue, avoiding one front-shift per notified waiter.
+  Timed-out or terminated sync condition waiters are marked canceled and skipped
+  by the head cursor instead of being removed from the middle of the queue.
 - Property-mode `Atomics.notify` stable-compacts matching waiter queues in one
   pass. Sync wait stack tickets are unlinked before signal, so awakened peers no
   longer each rescan and front-shift the table on return; matching `waitAsync`

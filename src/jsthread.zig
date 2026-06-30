@@ -603,10 +603,12 @@ const LockRecord = struct {
     }
 };
 
-/// A parked sync waiter's ticket (on the waiting thread's stack; unlinked
-/// before wait returns).
+/// A parked sync waiter's ticket. Timed-out/terminated waiters are marked
+/// canceled and skipped by the FIFO head cursor instead of being removed from
+/// the middle of the condition queue.
 const SyncCondTicket = struct {
     woken: bool = false,
+    canceled: bool = false,
     /// Set once the woken waiter has re-registered on the lock — notifyAll's
     /// handoff loops until every wake is consumed.
     consumed: bool = false,
@@ -632,23 +634,27 @@ const CondRecord = struct {
     }
 
     fn popWaiter(self: *CondRecord) ?CondEntry {
-        if (self.queue_head >= self.queue.items.len) {
-            self.queue.clearRetainingCapacity();
-            self.queue_head = 0;
-            return null;
+        while (self.queue_head < self.queue.items.len) {
+            const entry = self.queue.items[self.queue_head];
+            self.queue.items[self.queue_head] = undefined;
+            self.queue_head += 1;
+            if (self.queue_head == self.queue.items.len) {
+                self.queue.clearRetainingCapacity();
+                self.queue_head = 0;
+            }
+            switch (entry) {
+                .sync => |t| if (t.canceled) continue,
+                else => {},
+            }
+            return entry;
         }
-        const entry = self.queue.items[self.queue_head];
-        self.queue.items[self.queue_head] = undefined;
-        self.queue_head += 1;
-        if (self.queue_head == self.queue.items.len) {
-            self.queue.clearRetainingCapacity();
-            self.queue_head = 0;
-        }
-        return entry;
+        self.queue.clearRetainingCapacity();
+        self.queue_head = 0;
+        return null;
     }
 };
 
-test "condition queue head cursor preserves FIFO and removal" {
+test "condition queue head cursor skips canceled sync waiters" {
     var rec = CondRecord{ .gil = undefined };
     defer rec.queue.deinit(std.testing.allocator);
 
@@ -662,6 +668,7 @@ test "condition queue head cursor preserves FIFO and removal" {
     const first = rec.popWaiter() orelse return error.TestExpectedEqual;
     try std.testing.expectEqual(@intFromPtr(&t0), @intFromPtr(first.sync));
     removeSyncCondTicketLocked(&rec, &t1);
+    try std.testing.expect(t1.canceled);
     const second = rec.popWaiter() orelse return error.TestExpectedEqual;
     try std.testing.expectEqual(@intFromPtr(&t2), @intFromPtr(second.sync));
     try std.testing.expectEqual(@as(?CondEntry, null), rec.popWaiter());
@@ -1155,21 +1162,8 @@ fn removeSyncCondTicket(rec: *CondRecord, ticket: *SyncCondTicket) void {
 }
 
 fn removeSyncCondTicketLocked(rec: *CondRecord, ticket: *SyncCondTicket) void {
-    var i = rec.queue_head;
-    while (i < rec.queue.items.len) : (i += 1) {
-        const entry = rec.queue.items[i];
-        switch (entry) {
-            .sync => |t| if (t == ticket) {
-                _ = rec.queue.orderedRemove(i);
-                if (rec.queue_head >= rec.queue.items.len) {
-                    rec.queue.clearRetainingCapacity();
-                    rec.queue_head = 0;
-                }
-                return;
-            },
-            else => {},
-        }
-    }
+    _ = rec;
+    ticket.canceled = true;
 }
 
 fn waitOnCondRecord(self: *Interpreter, rec: *CondRecord, timeout: std.Io.Timeout) void {

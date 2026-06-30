@@ -109,10 +109,12 @@ context APIs.
   outside it, so queue drains do not front-shift remaining jobs or lock once per
   delivered job. Condition notify/notifyAll also dequeues the mixed sync/async
   waiter queue through a FIFO head cursor instead of shifting every notified
-  waiter. Property-mode `Atomics.notify` now stable-compacts matching sync and
-  async waiters in one pass: notified sync stack tickets leave the realm waiter
-  table before signal, and matching `waitAsync` tickets are collected without
-  repeated middle removals. Timeout polling now uses the same one-pass
+  waiter. Timed-out or terminated sync condition waiters are marked canceled and
+  skipped by that cursor instead of being removed from the middle of the queue.
+  Property-mode `Atomics.notify` now stable-compacts matching sync and async
+  waiters in one pass: notified sync stack tickets leave the realm waiter table
+  before signal, and matching `waitAsync` tickets are collected without repeated
+  middle removals. Timeout polling now uses the same one-pass
   compaction shape for expired property `waitAsync` tickets, and realm teardown
   frees abandoned property `waitAsync` tickets by linear scan. Worker
   inbox/outbox channels now drain

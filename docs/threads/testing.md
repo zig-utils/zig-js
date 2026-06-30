@@ -194,10 +194,15 @@ lock-free fast path;
 real async-hold delivery drains bounded FIFO bursts from the realm task queue
 under one API-lock acquisition before running grants outside that lock; condition
 notify/notifyAll uses a FIFO head cursor for the mixed sync/async waiter queue;
+timed-out or terminated sync condition waiters are marked canceled and skipped
+by that cursor instead of being removed from the middle of the queue;
 Worker inbox/outbox channels use the same shape for structured-clone message
 delivery, and empty internal `Worker.receive(..., 0)` polls skip timed condition
 wait setup. `worker channel pops FIFO without front shifts` keeps that queue
-shape and zero-timeout polling behavior under a direct unit guard.
+shape and zero-timeout polling behavior under a direct unit guard, while
+`condition queue head cursor skips canceled sync waiters` covers the condition
+timeout/termination queue shape directly and
+`api/condition-wait-termination.js` keeps the JS termination path exercised.
 `threads-profile` remains the check that this kind of targeted optimization
 does not merely move overhead elsewhere.
 
