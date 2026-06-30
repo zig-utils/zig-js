@@ -236,6 +236,10 @@ shape and zero-timeout polling behavior under a direct unit guard, while
 `condition queue head cursor skips canceled sync waiters` covers the condition
 timeout/termination queue shape directly and
 `api/condition-wait-termination.js` keeps the JS termination path exercised.
+Promise microtask drains now use the same FIFO head-cursor pattern, with
+`microtask queue is FIFO with a head cursor` guarding the direct queue shape and
+the asyncHold corpus case exercising observed callback/release-function
+reactions through the public API.
 `threads-profile` remains the check that this kind of targeted optimization
 does not merely move overhead elsewhere.
 

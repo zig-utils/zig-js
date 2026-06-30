@@ -115,6 +115,10 @@ Known performance/maturity work:
   length. Task pumps now copy bounded FIFO bursts under the shared threading API
   lock and run every grant outside it, reducing delivery lock acquisitions from
   one per job to one per burst.
+- Promise microtask drains now use a FIFO head cursor instead of
+  `orderedRemove(0)`, so observed async-hold callback settlement and no-fn
+  release-function reactions do not shift the remaining reaction queue on every
+  delivered job while preserving checkpoint order.
 - Condition notify/notifyAll use the same FIFO head-cursor pattern for the
   mixed sync/async waiter queue, avoiding one front-shift per notified waiter.
   Timed-out or terminated sync condition waiters are marked canceled and skipped

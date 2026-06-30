@@ -463,7 +463,7 @@ pub fn traceInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
         }
     }
     if (machine.microtasks) |q| {
-        for (q.items) |mt| traceMicrotask(mt, v);
+        for (q.pendingItems()) |mt| traceMicrotask(mt, v);
     }
     if (machine.current_microtask) |mt| traceMicrotask(mt, v);
     if (machine.async_waiters) |waiters| {
@@ -586,7 +586,7 @@ pub const Binding = struct {
         traceEnv(&ctx.env, v); // the global environment is embedded by value (binding_lock)
 
         if (par != null) ctx.lockMicrotasks();
-        for (ctx.microtasks.items) |mt| traceMicrotask(mt, v);
+        for (ctx.microtasks.pendingItems()) |mt| traceMicrotask(mt, v);
         if (par != null) ctx.unlockMicrotasks();
 
         // `async_waiters` + `c_api_handles` + `finalization_cleanup_jobs` share

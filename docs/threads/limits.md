@@ -115,6 +115,9 @@ context APIs.
   waiter queue through a FIFO head cursor instead of shifting every notified
   waiter. Timed-out or terminated sync condition waiters are marked canceled and
   skipped by that cursor instead of being removed from the middle of the queue.
+  Promise microtask drains use a FIFO head cursor, so observed async-hold
+  callback settlement and no-fn release-function reactions preserve FIFO order
+  without shifting the remaining reaction queue on each job.
   Property-mode `Atomics.notify` now stable-compacts matching sync and async
   waiters in one pass: notified sync stack tickets leave the realm waiter table
   before signal, and matching `waitAsync` tickets are collected without repeated

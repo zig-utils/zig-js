@@ -481,7 +481,7 @@ pub const Context = struct {
     exception: ?value.Value = null,
     /// The microtask queue (Promise reactions) and the `print` output buffer —
     /// persistent across `evaluate` calls, shared with each `Interpreter`.
-    microtasks: std.ArrayListUnmanaged(@import("promise.zig").Microtask) = .empty,
+    microtasks: @import("promise.zig").MicrotaskQueue = .{},
     /// Serializes microtask-queue content mutation (enqueue/dequeue) when the
     /// execution-path GIL is dropped (`parallel_js`). Under the GIL exactly one
     /// thread touches the queue at a time, so the interpreter's `microtask_lock`

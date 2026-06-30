@@ -82,6 +82,70 @@ pub const Microtask = struct {
     promise: ?*Promise = null,
 };
 
+pub const MicrotaskQueue = struct {
+    items: std.ArrayListUnmanaged(Microtask) = .empty,
+    head: usize = 0,
+
+    pub fn append(self: *MicrotaskQueue, a: std.mem.Allocator, task: Microtask) !void {
+        try self.items.append(a, task);
+    }
+
+    pub fn appendPendingSlice(self: *MicrotaskQueue, a: std.mem.Allocator, other: *MicrotaskQueue) !void {
+        try self.items.appendSlice(a, other.pendingItems());
+    }
+
+    pub fn pendingLen(self: *const MicrotaskQueue) usize {
+        if (self.head >= self.items.items.len) return 0;
+        return self.items.items.len - self.head;
+    }
+
+    pub fn isEmpty(self: *const MicrotaskQueue) bool {
+        return self.pendingLen() == 0;
+    }
+
+    pub fn pendingItems(self: *MicrotaskQueue) []Microtask {
+        if (self.head >= self.items.items.len) return self.items.items[0..0];
+        return self.items.items[self.head..];
+    }
+
+    pub fn pop(self: *MicrotaskQueue) ?Microtask {
+        if (self.head >= self.items.items.len) {
+            self.clearRetainingCapacity();
+            return null;
+        }
+        const task = self.items.items[self.head];
+        self.items.items[self.head] = undefined;
+        self.head += 1;
+        if (self.head == self.items.items.len) self.clearRetainingCapacity();
+        return task;
+    }
+
+    pub fn clearRetainingCapacity(self: *MicrotaskQueue) void {
+        self.items.clearRetainingCapacity();
+        self.head = 0;
+    }
+};
+
+test "microtask queue is FIFO with a head cursor" {
+    var q = MicrotaskQueue{};
+    const a = std.testing.allocator;
+    defer q.items.deinit(a);
+
+    try q.append(a, .{ .reaction = undefined, .argument = Value.num(1), .fulfilled = true });
+    try q.append(a, .{ .reaction = undefined, .argument = Value.num(2), .fulfilled = true });
+    try q.append(a, .{ .reaction = undefined, .argument = Value.num(3), .fulfilled = true });
+
+    try std.testing.expectEqual(@as(usize, 3), q.pendingLen());
+    try std.testing.expectEqual(@as(f64, 1), q.pop().?.argument.asNum());
+    try std.testing.expectEqual(@as(usize, 2), q.pendingLen());
+    try q.append(a, .{ .reaction = undefined, .argument = Value.num(4), .fulfilled = true });
+    try std.testing.expectEqual(@as(f64, 2), q.pop().?.argument.asNum());
+    try std.testing.expectEqual(@as(f64, 3), q.pop().?.argument.asNum());
+    try std.testing.expectEqual(@as(f64, 4), q.pop().?.argument.asNum());
+    try std.testing.expect(q.isEmpty());
+    try std.testing.expect(q.pop() == null);
+}
+
 /// Shared aggregation state for the combinators (`Promise.all`/`allSettled`/
 /// `any`). `result` is the combined promise; `values` the in-order results
 /// array; `remaining` counts inputs not yet settled; `kind` selects how each

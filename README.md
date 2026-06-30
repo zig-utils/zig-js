@@ -292,6 +292,9 @@ threading architecture:
   through the same FIFO head-cursor shape instead of front-shifting
   structured-clone message queues, and empty internal `Worker.receive(..., 0)`
   polls return under the channel lock without entering timed condition waits.
+  Promise microtask drains now use a FIFO head cursor too, so observed
+  `Lock.asyncHold` callbacks and no-fn release-function reactions do not pay one
+  front shift per pending reaction while preserving checkpoint order.
   The Worker profile prints that empty-receive polling cost separately from
   real message-delivery and lifecycle cost. Continue using the profile for the
   remaining contended-lock, Worker message, and lifecycle hot spots.

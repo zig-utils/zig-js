@@ -787,7 +787,7 @@ pub const Interpreter = struct {
     env: *Environment,
     /// The Context-owned microtask queue (Promise reactions). Drained after the
     /// main script in `Context.evaluate` and inline by `await`.
-    microtasks: ?*std.ArrayListUnmanaged(promise.Microtask) = null,
+    microtasks: ?*promise.MicrotaskQueue = null,
     /// When non-null (only under `parallel_js`), serializes content mutation of
     /// `microtasks` so a cross-thread enqueue (e.g. an `asyncJoin` settlement on
     /// the finishing thread) can't race the joiner's drain. Points at the
@@ -5758,8 +5758,7 @@ pub const Interpreter = struct {
         const q = self.microtasks orelse return null;
         self.lockMicrotasks();
         defer self.unlockMicrotasks();
-        if (q.items.len == 0) return null;
-        return q.orderedRemove(0);
+        return q.pop();
     }
 
     /// Spin-acquire the realm's microtask lock (only engaged under
@@ -5869,7 +5868,7 @@ pub const Interpreter = struct {
                 // (locked append) into this shared realm queue concurrently, so
                 // read its length under the same `microtask_lock`.
                 self.lockMicrotasks();
-                const q_empty = if (self.microtasks) |q| q.items.len == 0 else true;
+                const q_empty = if (self.microtasks) |q| q.isEmpty() else true;
                 self.unlockMicrotasks();
                 const tasks_empty = g.tasks_queued.load(.acquire) == 0;
                 if (q_empty and tasks_empty) {
@@ -14142,7 +14141,7 @@ fn drainRunLoopFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
     var rounds: usize = 0;
     while (rounds < 8) : (rounds += 1) {
         self.lockMicrotasks();
-        const before = if (self.microtasks) |q| q.items.len else 0;
+        const before = if (self.microtasks) |q| q.pendingLen() else 0;
         self.unlockMicrotasks();
         jsthread.pumpTasks(self);
         jsthread.pollPropAsync(self);
@@ -14150,7 +14149,7 @@ fn drainRunLoopFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
         try self.drainFinalizationCleanupJobs();
         try self.drainMicrotasks();
         self.lockMicrotasks();
-        const after = if (self.microtasks) |q| q.items.len else 0;
+        const after = if (self.microtasks) |q| q.pendingLen() else 0;
         self.unlockMicrotasks();
         if (before == 0 and after == 0) break;
     }
@@ -24752,7 +24751,7 @@ fn agentThreadRun(src: []const u8) void {
     };
     const tdz = gc_mod.allocObj(a) catch return;
     tdz.* = .{};
-    var microtasks: std.ArrayListUnmanaged(promise.Microtask) = .empty;
+    var microtasks = promise.MicrotaskQueue{};
     var print_buffer: std.ArrayListUnmanaged(u8) = .empty;
     // The agent realm's own SAB references (its receiveBroadcast wrapper);
     // released when the agent finishes, while the storage lives on via the

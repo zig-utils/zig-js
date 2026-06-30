@@ -40,6 +40,7 @@ before acting on one.
 | Symbol | Location | What it is | Ruling | Notes / phase |
 |---|---|---|---|---|
 | `symbol_counter` | `src/interpreter.zig:26365` | `std.atomic.Value(usize)` — monotonic id for unique `Symbol` property-key encodings (`"\x00s{d}"`). | **locked** | Completed: `makeSymbolObj` uses atomic `fetchAdd`, so cross-agent and shared-realm symbol creation cannot collide. |
+| `Context.microtasks` / `MicrotaskQueue.head` / `Context.microtask_lock` | `src/context.zig:484`, `src/promise.zig:89`, `src/context.zig:492` | Per-realm Promise reaction queue and FIFO head cursor. | **locked** | Enqueue/dequeue mutate the queue under `microtask_lock` only in `parallel_js`; `.gil = true` stays serialized. `MicrotaskQueue.head` pops FIFO in O(1) without front-shifting pending reactions, transfer paths append only pending items, and GC traces only `pendingItems()` plus `Interpreter.current_microtask`. |
 
 ## Engine: `src/agent.zig`
 

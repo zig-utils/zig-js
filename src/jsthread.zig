@@ -29,7 +29,7 @@ const Interpreter = interp.Interpreter;
 
 pub const PendingJoin = struct {
     promise: *value.Object,
-    microtasks: *std.ArrayListUnmanaged(promise.Microtask),
+    microtasks: *promise.MicrotaskQueue,
     /// The thread that registered this `asyncJoin` (the joiner), or null for the
     /// main/host thread. When the joiner is a spawned thread that has finished
     /// (`done`), its local `microtasks` queue is being abandoned, so the finishing
@@ -67,7 +67,7 @@ pub const ThreadRecord = struct {
     /// The live microtask queue for this JS thread. Worker queues are stack
     /// locals in `threadMain`; outstanding async tickets are transferred away
     /// before that stack frame exits.
-    microtasks: ?*std.ArrayListUnmanaged(promise.Microtask) = null,
+    microtasks: ?*promise.MicrotaskQueue = null,
 };
 
 threadlocal var t_current: ?*ThreadRecord = null;
@@ -370,7 +370,7 @@ fn threadMain(rec: *ThreadRecord, fn_v: Value, args: []const Value) void {
     // global object, and shapes (safe under the GIL), with its own job queues.
     // join() performs the joiner's completion checkpoint before observing the
     // result, which is the only cross-thread microtask drain point.
-    var microtasks: std.ArrayListUnmanaged(@import("promise.zig").Microtask) = .empty;
+    var microtasks = promise.MicrotaskQueue{};
     var async_waiters: std.ArrayListUnmanaged(interp.AsyncWaiterEntry) = .empty;
     rec.microtasks = &microtasks;
     var machine = rec.ctx.interpreter();
@@ -443,8 +443,8 @@ fn threadMain(rec: *ThreadRecord, fn_v: Value, args: []const Value) void {
     {
         machine.lockMicrotasks();
         defer machine.unlockMicrotasks();
-        if (microtasks.items.len > 0) {
-            rec.ctx.microtasks.appendSlice(rec.ctx.arena(), microtasks.items) catch {};
+        if (!microtasks.isEmpty()) {
+            rec.ctx.microtasks.appendPendingSlice(rec.ctx.arena(), &microtasks) catch {};
             microtasks.clearRetainingCapacity();
         }
     }
@@ -1698,7 +1698,7 @@ pub const PropAsyncTicket = struct {
     key: []const u8,
     deadline_ns: ?i96,
     promise: *value.Object,
-    microtasks: *std.ArrayListUnmanaged(promise.Microtask),
+    microtasks: *promise.MicrotaskQueue,
     /// The realm's gil pointer — the abandon token at Context.destroy.
     owner: *const anyopaque,
 };
@@ -1778,7 +1778,7 @@ fn settlePropAsync(self: *Interpreter, t: *PropAsyncTicket, outcome: []const u8)
     prop_alloc.destroy(t);
 }
 
-fn transferPropAsyncQueue(g: *gil_mod.Gil, from: *std.ArrayListUnmanaged(promise.Microtask), to: *std.ArrayListUnmanaged(promise.Microtask)) void {
+fn transferPropAsyncQueue(g: *gil_mod.Gil, from: *promise.MicrotaskQueue, to: *promise.MicrotaskQueue) void {
     g.lockPropWaiters();
     defer g.unlockPropWaiters();
     for (g.prop_async.items) |raw| {
@@ -1787,7 +1787,7 @@ fn transferPropAsyncQueue(g: *gil_mod.Gil, from: *std.ArrayListUnmanaged(promise
     }
 }
 
-fn transferPendingJoinQueue(ctx: *Context, from: *std.ArrayListUnmanaged(promise.Microtask), to: *std.ArrayListUnmanaged(promise.Microtask)) void {
+fn transferPendingJoinQueue(ctx: *Context, from: *promise.MicrotaskQueue, to: *promise.MicrotaskQueue) void {
     const g = ctx.gil orelse return;
     const io = agent.engineIo();
     g.lockApi();
