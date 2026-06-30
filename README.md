@@ -343,6 +343,9 @@ threading architecture:
   assimilation through `join()` / `asyncJoin()` while waiters are parked,
   typed-array `waitAsync` settlement interleaved with `asyncJoin` reactions and
   exact `FinalizationRegistry` cleanup delivery,
+  teardown termination with pending `asyncJoin` rejection reactions and
+  child-owned typed-array `waitAsync` tickets that must be abandoned before the
+  child exits,
   deterministic `Lock.asyncHold()` barging where a sync hold legally overtakes
   a queued no-fn async ticket before `await` delivers its release function,
   cross-thread `FinalizationRegistry` cleanup count/sum oracles, cleanup

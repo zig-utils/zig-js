@@ -396,6 +396,10 @@ fn threadMain(rec: *ThreadRecord, fn_v: Value, args: []const Value) void {
         result = out;
     } else |_| {
         machine.drainMicrotasks() catch {};
+        if (async_waiters.items.len > 0) {
+            agent.abandonAsync(@ptrCast(&async_waiters));
+            async_waiters.clearRetainingCapacity();
+        }
         threw = true;
         result = machine.exception;
     }

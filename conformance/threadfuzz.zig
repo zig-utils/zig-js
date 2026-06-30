@@ -2713,6 +2713,141 @@ fn runWaitAsyncFinalizationCleanupInterleaving(gpa: std.mem.Allocator, seed: u64
     return true;
 }
 
+fn runTerminationPendingReactionInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
+    var prng = std.Random.DefaultPrng.init(seed ^ 0x7465_726d_7265_6163);
+    const r = prng.random();
+    const nthreads = 2 + r.uintLessThan(usize, 4);
+    const seed_marker = seed % 10_000;
+    var expected_reject_score: usize = 0;
+    var id: usize = 0;
+    while (id < nthreads) : (id += 1) {
+        expected_reject_score += (id + 1) * 90_000 + seed_marker;
+    }
+
+    const ctx = js.Context.createWith(gpa, .{ .enable_threads = true, .enable_gc = true }) catch {
+        std.debug.print("seed {d}: termination pending-reaction context creation failed\n", .{seed});
+        return false;
+    };
+    defer ctx.destroy();
+
+    const src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  globalThis.__termPendingRejectScore = 0;
+        \\  globalThis.__termPendingRejectCount = 0;
+        \\  const sab = new SharedArrayBuffer({d} * 4);
+        \\  const view = new Int32Array(sab);
+        \\  globalThis.__termPendingView = view;
+        \\  const gate = {{ ready: 0, waitSettled: 0 }};
+        \\  globalThis.__termPendingGate = gate;
+        \\  const threads = [];
+        \\  for (let id = 0; id < {d}; id++) {{
+        \\    const joinRoot = {{
+        \\      marker: (id + 1) * 90000 + {d},
+        \\      nested: {{ seed: {d}, label: 'termination-asyncJoin-reaction-root' }},
+        \\    }};
+        \\    const t = new Thread((sab, gate, id, seedMarker) => {{
+        \\      const view = new Int32Array(sab);
+        \\      const waitRoot = {{
+        \\        marker: (id + 1) * 70000 + seedMarker,
+        \\        nested: {{ label: 'termination-waitAsync-reaction-root' }},
+        \\      }};
+        \\      const waiter = Atomics.waitAsync(view, id, 0);
+        \\      if (waiter.async !== true || !(waiter.value instanceof Promise))
+        \\        throw new Error('bad termination waitAsync pending shape');
+        \\      waiter.value.then(
+        \\        () => {{
+        \\          if (waitRoot.marker === (id + 1) * 70000 + seedMarker)
+        \\            Atomics.add(gate, 'waitSettled', 1);
+        \\          else
+        \\            Atomics.store(gate, 'waitSettled', -1000000);
+        \\        }},
+        \\        () => {{ Atomics.store(gate, 'waitSettled', -1000000); }});
+        \\      Atomics.add(gate, 'ready', 1);
+        \\      Atomics.notify(gate, 'ready');
+        \\      for (;;) {{}}
+        \\    }}, sab, gate, id, {d});
+        \\    t.asyncJoin().then(
+        \\      () => {{ globalThis.__termPendingRejectScore = -1000000; }},
+        \\      (e) => {{
+        \\        if (e && joinRoot.marker === (id + 1) * 90000 + {d} &&
+        \\            joinRoot.nested.seed === {d}) {{
+        \\          globalThis.__termPendingRejectScore += joinRoot.marker;
+        \\          globalThis.__termPendingRejectCount++;
+        \\        }} else {{
+        \\          globalThis.__termPendingRejectScore = -1000000;
+        \\        }}
+        \\      }});
+        \\    threads.push(t);
+        \\  }}
+        \\  while (Atomics.load(gate, 'ready') < {d})
+        \\    Atomics.wait(gate, 'ready', Atomics.load(gate, 'ready'), 1);
+        \\  if (typeof gc === 'function') gc();
+        \\  throw new Error('threadfuzz termination pending reactions {d}');
+        \\}})();
+        \\
+    ,
+        .{ nthreads, nthreads, seed_marker, seed, seed_marker, seed_marker, seed, nthreads, seed },
+    );
+    defer gpa.free(src);
+
+    if (ctx.evaluate(src)) |_| {
+        std.debug.print("seed {d}: termination pending-reaction script returned normally\n", .{seed});
+        return false;
+    } else |err| {
+        if (err != error.Throw) {
+            std.debug.print("seed {d}: termination pending-reaction failed with {s}\n", .{ seed, @errorName(err) });
+            return false;
+        }
+    }
+
+    const score = ctx.evaluate("globalThis.__termPendingRejectScore") catch |err| {
+        std.debug.print("seed {d}: cannot read termination pending-reaction score: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    if (!score.isNumber() or score.asNum() != @as(f64, @floatFromInt(expected_reject_score))) {
+        std.debug.print("seed {d}: termination pending-reaction score got {d}, expected {d}\n", .{ seed, if (score.isNumber()) score.asNum() else -1, expected_reject_score });
+        return false;
+    }
+    const count = ctx.evaluate("globalThis.__termPendingRejectCount") catch |err| {
+        std.debug.print("seed {d}: cannot read termination pending-reaction count: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    if (!count.isNumber() or count.asNum() != @as(f64, @floatFromInt(nthreads))) {
+        std.debug.print("seed {d}: termination pending-reaction count got {d}, expected {d}\n", .{ seed, if (count.isNumber()) count.asNum() else -1, nthreads });
+        return false;
+    }
+
+    const notify_src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  let notified = 0;
+        \\  for (let id = 0; id < {d}; id++)
+        \\    notified += Atomics.notify(globalThis.__termPendingView, id);
+        \\  if (Atomics.load(globalThis.__termPendingGate, 'waitSettled') !== 0)
+        \\    throw new Error('termination waitAsync reaction ran unexpectedly');
+        \\  return notified;
+        \\}})();
+        \\
+    ,
+        .{nthreads},
+    );
+    defer gpa.free(notify_src);
+    const notified = ctx.evaluate(notify_src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: termination pending-reaction notify check threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!notified.isNumber() or notified.asNum() != 0) {
+        std.debug.print("seed {d}: termination pending-reaction leaked {d} waitAsync tickets\n", .{ seed, if (notified.isNumber()) notified.asNum() else -1 });
+        return false;
+    }
+    return true;
+}
+
 fn runThreadRestrictLifecycleInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
     var prng = std.Random.DefaultPrng.init(seed ^ 0x7265_7374_7269_6374);
     const r = prng.random();
@@ -3766,6 +3901,22 @@ pub fn main(init: std.process.Init) !void {
         if (wfail != 0) std.process.exit(1);
         return;
     };
+    // `threadfuzz termreact <iters> <seed>`: focused lifecycle repro for
+    // teardown termination while asyncJoin reactions and child-owned typed-array
+    // waitAsync tickets are still pending.
+    if (first) |a| if (std.mem.eql(u8, a, "termreact")) {
+        if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch 1;
+        if (args.next()) |b| base_seed = std.fmt.parseInt(u64, b, 10) catch 1;
+        var trfail: usize = 0;
+        var tri: usize = 0;
+        while (tri < iters) : (tri += 1) {
+            const seed = base_seed +% tri;
+            if (!(try runTerminationPendingReactionInterleaving(gpa, seed))) trfail += 1;
+        }
+        std.debug.print("threadfuzz termreact: {d} programs from seed {d}, {d} failures\n", .{ iters, base_seed, trfail });
+        if (trfail != 0) std.process.exit(1);
+        return;
+    };
     // `threadfuzz verify <iters> <seed>`: deterministic-correctness mode — each
     // generated program's exact result is predicted and checked, catching
     // wrong-value (lost/torn atomic) bugs the no-throw oracle misses.
@@ -3812,6 +3963,8 @@ pub fn main(init: std.process.Init) !void {
     // with join/asyncJoin and unregister tokens, cleanup
     // delivery after parked property/condition waiters resume, typed-array
     // waitAsync settlement interleaved with asyncJoin and finalization cleanup,
+    // teardown termination with pending asyncJoin reactions and child-owned
+    // typed-array waitAsync tickets,
     // ThreadLocal-stored FinalizationRegistry records across park/resume/cleanup,
     // asyncHold barging delivery after a deterministic queued ticket,
     // Thread.restrict lifecycle isolation, and ThreadLocal isolation across
@@ -3832,7 +3985,9 @@ pub fn main(init: std.process.Init) !void {
     // oracles when thread results are observed through both join paths, when
     // unregister tokens suppress some records, after parked property and
     // condition waiters resume, and while typed-array waitAsync promise
-    // reactions and asyncJoin reactions settle together; asyncHold barging must
+    // reactions and asyncJoin reactions settle together, plus when teardown
+    // termination rejects pending asyncJoin reactions and abandons child-owned
+    // typed-array waitAsync tickets; asyncHold barging must
     // deliver a pending
     // no-fn grant after a sync hold legally overtakes it; ThreadLocal values must stay
     // per-thread across normal, throwing, nested, async-joined, and
@@ -3860,12 +4015,13 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runFinalizationAsyncJoinCleanupInterleaving(gpa, seed))) lfail += 1;
             if (!(try runFinalizationWaiterCleanupInterleaving(gpa, seed))) lfail += 1;
             if (!(try runWaitAsyncFinalizationCleanupInterleaving(gpa, seed))) lfail += 1;
+            if (!(try runTerminationPendingReactionInterleaving(gpa, seed))) lfail += 1;
             if (!(try runAsyncHoldBargingLifecycleInterleaving(gpa, seed))) lfail += 1;
             if (!(try runThreadRestrictLifecycleInterleaving(gpa, seed))) lfail += 1;
             if (!(try runThreadLocalLifecycleInterleaving(gpa, seed))) lfail += 1;
             if (!(try runThreadLocalFinalizationCleanupInterleaving(gpa, seed))) lfail += 1;
         }
-        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 19, base_seed, lfail });
+        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 20, base_seed, lfail });
         if (lfail != 0) std.process.exit(1);
         return;
     };
