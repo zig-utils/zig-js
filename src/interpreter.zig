@@ -31312,21 +31312,19 @@ fn temporalYearMonthUntilFn(comptime sign: f64) value.NativeFn {
             if (@intFromEnum(opts.smallest) > @intFromEnum(TUnit.month)) return self.throwError("RangeError", "PlainYearMonth difference smallestUnit must be year or month");
             if (@intFromEnum(opts.largest) > @intFromEnum(opts.smallest)) return self.throwError("RangeError", "largestUnit cannot be smaller than smallestUnit");
             const a = this.asObj().temporal.?;
+            if (!temporalCalendarIdsEqual(a.calendar, other.cal))
+                return self.throwError("RangeError", "calendar mismatch");
             if (a.year == other.y and a.month == other.m and temporalCalendarIdsEqual(a.calendar, other.cal)) {
                 const zero: [10]f64 = .{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
                 return makeDuration(self, zero);
             }
-            try checkIsoDate(self, @floatFromInt(a.year), @floatFromInt(a.month), 1);
-            try checkIsoDate(self, @floatFromInt(other.y), @floatFromInt(other.m), 1);
-            const earlier_first = (@as(i64, a.year) * 12 + a.month) <= (other.y * 12 + other.m);
-            const e_y = if (earlier_first) a.year else other.y;
-            const e_m: u8 = if (earlier_first) a.month else other.m;
-            const l_y = if (earlier_first) other.y else a.year;
-            const l_m: u8 = if (earlier_first) other.m else a.month;
+            const a_iso = calendarDateToIso(a.calendar, a.year, a.month, 1);
+            const other_iso = calendarDateToIso(other.cal, other.y, other.m, 1);
+            try checkIsoDate(self, @floatFromInt(a_iso.y), @floatFromInt(a_iso.m), @floatFromInt(a_iso.d));
+            try checkIsoDate(self, @floatFromInt(other_iso.y), @floatFromInt(other_iso.m), @floatFromInt(other_iso.d));
             // Whole months between the two first-of-month dates.
-            var total_months: i64 = (l_y * 12 + l_m) - (e_y * 12 + e_m);
-            const result_neg = (!earlier_first) != (sign < 0); // XOR: final sign negative?
-            if (result_neg) total_months = -total_months;
+            var total_months = calendarYearMonthDistance(a.calendar, a.year, a.month, other.y, other.m);
+            if (sign < 0) total_months = -total_months;
             // Round to the requested smallest unit / increment.
             const incr: i64 = @intFromFloat(opts.increment);
             var years: f64 = 0;
@@ -31336,25 +31334,23 @@ fn temporalYearMonthUntilFn(comptime sign: f64) value.NativeFn {
                 years = @floatFromInt(q * incr);
             } else {
                 if (opts.largest == .year) {
-                    const whole_years = @divTrunc(total_months, 12);
-                    const month_remainder = total_months - whole_years * 12;
-                    const probe_total = whole_years * 12 + (if (month_remainder >= 0) incr else -incr);
-                    const probe_abs = @as(i64, a.month) - 1 + probe_total;
-                    const probe_y = a.year + @divFloor(probe_abs, 12);
-                    const probe_m: u8 = @intCast(@mod(probe_abs, 12) + 1);
-                    try checkIsoDate(self, @floatFromInt(probe_y), @floatFromInt(probe_m), 1);
-                    years = @floatFromInt(whole_years);
-                    months = @floatFromInt(applyRounding(month_remainder, incr, opts.mode) * incr);
-                    years += @floatFromInt(@divTrunc(@as(i64, @intFromFloat(months)), 12));
-                    months = @floatFromInt(@rem(@as(i64, @intFromFloat(months)), 12));
+                    const ym_diff = if (sign < 0)
+                        calendarYearMonthDiff(a.calendar, other.y, other.m, a.year, a.month)
+                    else
+                        calendarYearMonthDiff(a.calendar, a.year, a.month, other.y, other.m);
+                    const probe_total = calendarYearMonthDistance(a.calendar, a.year, a.month, other.y, other.m);
+                    const probe = balanceCalendarYearMonth(a.calendar, a.year, a.month, probe_total);
+                    const probe_iso = calendarDateToIso(a.calendar, probe.y, probe.m, 1);
+                    try checkIsoDate(self, @floatFromInt(probe_iso.y), @floatFromInt(probe_iso.m), @floatFromInt(probe_iso.d));
+                    years = @floatFromInt(ym_diff.years);
+                    months = @floatFromInt(applyRounding(ym_diff.months, incr, opts.mode) * incr);
                 } else {
                     const q = applyRounding(total_months, incr, opts.mode);
                     const m_total = q * incr;
                     const probe_total = if (total_months >= 0) incr else -incr;
-                    const probe_abs = @as(i64, a.month) - 1 + probe_total;
-                    const probe_y = a.year + @divFloor(probe_abs, 12);
-                    const probe_m: u8 = @intCast(@mod(probe_abs, 12) + 1);
-                    try checkIsoDate(self, @floatFromInt(probe_y), @floatFromInt(probe_m), 1);
+                    const probe = balanceCalendarYearMonth(a.calendar, a.year, a.month, probe_total);
+                    const probe_iso = calendarDateToIso(a.calendar, probe.y, probe.m, 1);
+                    try checkIsoDate(self, @floatFromInt(probe_iso.y), @floatFromInt(probe_iso.m), @floatFromInt(probe_iso.d));
                     months = @floatFromInt(m_total);
                 }
             }
@@ -32831,6 +32827,39 @@ fn balanceCalendarYearMonth(cal: []const u8, y0: i64, m0: u8, month_delta: i64) 
         y += 1;
     }
     return .{ .y = y, .m = @intCast(m) };
+}
+
+fn calendarYearMonthDistance(cal: []const u8, y0: i64, m0: u8, y1: i64, m1: u8) i64 {
+    if (y0 == y1) return @as(i64, m1) - @as(i64, m0);
+    if (y0 > y1) return -calendarYearMonthDistance(cal, y1, m1, y0, m0);
+
+    var months: i64 = @as(i64, calMonthsInYear(cal, y0)) - @as(i64, m0) + 1;
+    var y = y0 + 1;
+    while (y < y1) : (y += 1) months += calMonthsInYear(cal, y);
+    return months + @as(i64, m1) - 1;
+}
+
+const CalendarYearMonthDiff = struct { years: i64, months: i64 };
+
+fn calendarYearMonthDiff(cal: []const u8, y0: i64, m0: u8, y1: i64, m1: u8) CalendarYearMonthDiff {
+    const total = calendarYearMonthDistance(cal, y0, m0, y1, m1);
+    if (total == 0) return .{ .years = 0, .months = 0 };
+    if (total < 0) {
+        const diff = calendarYearMonthDiff(cal, y1, m1, y0, m0);
+        return .{ .years = -diff.years, .months = -diff.months };
+    }
+    if (m0 == m1) return .{ .years = y1 - y0, .months = 0 };
+
+    var years = y1 - y0;
+    var candidate = balanceCalendarYearMonth(cal, y0 + years, m0, 0);
+    while (calendarYearMonthDistance(cal, y0, m0, candidate.y, candidate.m) > total) {
+        years -= 1;
+        candidate = balanceCalendarYearMonth(cal, y0 + years, m0, 0);
+    }
+    return .{
+        .years = years,
+        .months = calendarYearMonthDistance(cal, candidate.y, candidate.m, y1, m1),
+    };
 }
 
 /// Add a calendar date duration (years/months/weeks/days), returning fields in
