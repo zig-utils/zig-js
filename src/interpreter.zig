@@ -33106,7 +33106,7 @@ fn calendarMonthsBetween(cal: []const u8, y1: i64, m1: u8, d1: u8, start_day: i6
         fn f(c: []const u8, yy: i64, mm: u8, dd: u8, ed: i64, fwd: bool, k: i64) bool {
             const inter = addCalendarMonthsClamp(c, yy, mm, dd, if (fwd) k else -k);
             const e = calendarEpochDay(c, inter.y, inter.m, inter.d);
-            if (e == ed and dd > calDaysInMonth(c, inter.y, inter.m)) return true;
+            if (e == ed and dd > calDaysInMonth(c, inter.y, inter.m) and (fwd or inter.m != mm)) return true;
             return if (fwd) e > ed else e < ed;
         }
     }.f;
