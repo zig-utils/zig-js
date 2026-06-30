@@ -8274,6 +8274,21 @@ pub fn main(init: std.process.Init) !void {
         if (mwcfail != 0) std.process.exit(1);
         return;
     };
+    // `threadfuzz workerclose <iters> <seed>`: focused lifecycle repro for
+    // script Worker close/terminate/postMessage FIFO drain/drop ordering.
+    if (first) |a| if (std.mem.eql(u8, a, "workerclose")) {
+        if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch 1;
+        if (args.next()) |b| base_seed = std.fmt.parseInt(u64, b, 10) catch 1;
+        var wcrfail: usize = 0;
+        var wcri: usize = 0;
+        while (wcri < iters) : (wcri += 1) {
+            const seed = base_seed +% wcri;
+            if (!(try runWorkerCloseTerminateRace(gpa, seed))) wcrfail += 1;
+        }
+        std.debug.print("threadfuzz workerclose: {d} programs from seed {d}, {d} failures\n", .{ iters, base_seed, wcrfail });
+        if (wcrfail != 0) std.process.exit(1);
+        return;
+    };
     // `threadfuzz moduleworkerclose <iters> <seed>`: focused lifecycle repro
     // for module Worker close/terminate/postMessage FIFO drain/drop ordering.
     if (first) |a| if (std.mem.eql(u8, a, "moduleworkerclose")) {

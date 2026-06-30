@@ -191,6 +191,7 @@ zig build test                  # runs the unit + C-API test suite
 zig build conformance           # runs the always-green smoke suite (33/33)
 zig build threads-test          # runs the green WebKit PR-249 threads corpus (224/224)
 zig build threads-reference-audit # classifies the remaining reference-only PR-249 files
+python3 tools/threads-reference-audit.py --probe-candidates # prints closest promotion probes
 zig build test -Dtsan=true      # unit suite under ThreadSanitizer
 zig build threadfuzz            # seeded concurrent-JS fuzzer
 zig build threadfuzz -Dfuzz-midgc=true # mid-script GC wait-pump + microtask + creator buffers + sync-wait cleanup + teardown + promise + script/module Worker/SAB + Worker exception cleanup + weak-collection fuzzer
@@ -462,7 +463,9 @@ threading architecture:
   exists, especially WebAssembly/JIT shell hooks, deep recursive VM-stack
   behavior, heap caps/OOM semantics, and unsupported `$vm` controls.
   `zig build threads-reference-audit` keeps every non-promoted file tied to one
-  of those blocker categories.
+  of those blocker categories, and
+  `python3 tools/threads-reference-audit.py --probe-candidates` lists the
+  closest focused `-Dthreads-case=...` probes before any allowlist promotion.
 
 The [TC39 structs proposal](https://github.com/tc39/proposal-structs) remains a
 tracked future layer. Shared structs, `Atomics.Mutex`, and

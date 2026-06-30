@@ -27,6 +27,16 @@ HELPERS = {
     "vmstate/resources/workload.js",
 }
 
+PROMOTION_PROBES = (
+    "cve/mc-df-arraycopy-relabel.js",
+    "cve/mc-life-creator-thread-dies.js",
+    "cve/mc-tear-typedarray-detach-grow-shrink.js",
+    "dw2-marklistset-storm.js",
+    "w16-c1-prevent-collection.js",
+    "semantics/oom-one-thread.js",
+    "semantics/stack-overflow-per-thread.js",
+)
+
 
 def load_allowlist() -> set[str]:
     src = RUNNER.read_text()
@@ -162,10 +172,41 @@ def print_markdown(
             print(f"- `{case}`")
 
 
+def print_probe_candidates(
+    classified: dict[str, list[str]],
+    uncategorized: dict[str, list[str]],
+    *,
+    markdown: bool,
+) -> None:
+    if markdown:
+        print()
+        print("Promotion probe candidates:")
+    else:
+        print()
+        print("promotion probe candidates:")
+
+    for case in PROMOTION_PROBES:
+        cats = classified.get(case) or uncategorized.get(case)
+        if cats is None:
+            continue
+        reason = ", ".join(cats) if cats else "uncategorized"
+        command = f"zig build threads-test -Dthreads-case={case}"
+        if markdown:
+            print(f"- `{case}`: {reason}. Probe with `{command}`.")
+        else:
+            print(f"  - {case}: {reason}")
+            print(f"    {command}")
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--format", choices=("text", "markdown"), default="text")
     parser.add_argument("--fail-on-uncategorized", action="store_true")
+    parser.add_argument(
+        "--probe-candidates",
+        action="store_true",
+        help="Also print the reference-only files closest to allowlist promotion and their focused run commands.",
+    )
     args = parser.parse_args(argv)
 
     remaining, classified, uncategorized, missing_allowlist = audit()
@@ -173,6 +214,8 @@ def main(argv: list[str]) -> int:
         print_markdown(remaining, classified, uncategorized, missing_allowlist)
     else:
         print_text(remaining, classified, uncategorized, missing_allowlist)
+    if args.probe_candidates:
+        print_probe_candidates(classified, uncategorized, markdown=args.format == "markdown")
 
     if missing_allowlist:
         return 1

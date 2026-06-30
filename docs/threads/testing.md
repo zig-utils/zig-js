@@ -347,6 +347,8 @@ For fuzzer reproduction:
 ```sh
 zig build threadfuzz-bin
 ./zig-out/bin/threadfuzz file /path/to/repro.js
+./zig-out/bin/threadfuzz workerclose 5 1
+./zig-out/bin/threadfuzz moduleworkerclose 5 1
 ```
 
 ## Remaining Reference-Only Areas
@@ -385,6 +387,7 @@ Run the reference audit after promotion attempts:
 ```sh
 zig build threads-reference-audit
 python3 tools/threads-reference-audit.py --format markdown
+python3 tools/threads-reference-audit.py --probe-candidates
 ```
 
 ## Docs Checks
