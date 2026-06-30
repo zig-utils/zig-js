@@ -3031,7 +3031,6 @@ fn runTerminationWaiterCleanupInterleaving(gpa: std.mem.Allocator, seed: u64) !b
         std.debug.print("seed {d}: termination waiter/cleanup drain turn threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
         return false;
     };
-    ctx.collectGarbage();
     const check_src = try std.fmt.allocPrint(
         gpa,
         \\(() => {{
@@ -3043,6 +3042,10 @@ fn runTerminationWaiterCleanupInterleaving(gpa: std.mem.Allocator, seed: u64) !b
         \\    throw new Error('bad termination waiter cleanup condition score ' + globalThis.__termWaitCleanupCondScore);
         \\  if (globalThis.__termWaitCleanupCondCount !== 1)
         \\    throw new Error('bad termination waiter cleanup condition count ' + globalThis.__termWaitCleanupCondCount);
+        \\  if (globalThis.__termWaitCleanupRejectScore !== {d})
+        \\    throw new Error('bad termination waiter cleanup asyncJoin reject score ' + globalThis.__termWaitCleanupRejectScore);
+        \\  if (globalThis.__termWaitCleanupRejectCount !== 1)
+        \\    throw new Error('bad termination waiter cleanup asyncJoin reject count ' + globalThis.__termWaitCleanupRejectCount);
         \\  let joinThrew = 0;
         \\  try {{
         \\    globalThis.__termWaitCleanupSpinner.join();
@@ -3064,6 +3067,7 @@ fn runTerminationWaiterCleanupInterleaving(gpa: std.mem.Allocator, seed: u64) !b
             expected_wait_score,
             nwait,
             async_cond_marker,
+            reject_marker,
             ncleanup,
             ncleanup,
             expected_cleanup_sum,

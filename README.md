@@ -364,8 +364,8 @@ threading architecture:
   child-owned typed-array `waitAsync` tickets that must be abandoned before the
   child exits,
   teardown termination while property `waitAsync` timeout compaction, async
-  condition reacquire, a pending `asyncJoin`, and already-ready
-  `FinalizationRegistry` cleanup jobs share the same realm turn,
+  condition reacquire, a pending `asyncJoin` rejection reaction, and
+  already-ready `FinalizationRegistry` cleanup jobs share the same realm turn,
   deterministic `Lock.asyncHold()` barging where a sync hold legally overtakes
   a queued no-fn async ticket before `await` delivers its release function,
   cross-thread `FinalizationRegistry` cleanup count/sum oracles, cleanup
