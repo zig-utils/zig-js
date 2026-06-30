@@ -111,8 +111,10 @@ context APIs.
   table before signal, and matching `waitAsync` tickets are collected without
   repeated middle removals. Worker inbox/outbox channels now drain
   structured-clone messages with FIFO head cursors as well, avoiding front
-  shifts in receive-heavy Worker loops. The profile now includes a separate
-  isolated `Worker` section for structured-clone inbox/outbox round-trips and
+  shifts in receive-heavy Worker loops. Empty internal `Worker.receive(..., 0)`
+  polls return under the channel lock without entering a timed condition wait.
+  The profile now includes a separate isolated `Worker` section for
+  structured-clone inbox/outbox round-trips, empty receive polling, and
   spawn/post/receive/join/destroy lifecycle cost, so Worker-heavy follow-up
   optimization has its own baseline instead of being inferred from shared-realm
   `Thread` rows.

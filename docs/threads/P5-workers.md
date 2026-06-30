@@ -19,9 +19,12 @@ lives in a worker arena ever escapes it — same lifetime rule as agents.
 Messages flow over two `Channel`s (mutex + condition FIFOs of `[]u8`): `inbox`
 (main→worker) and `outbox` (worker→main). Each channel drains with a FIFO head
 cursor, so Worker-heavy receive loops do not front-shift remaining serialized
-messages on every `pop`. A channel `close()` wakes every waiter; already-queued
-messages stay poppable (drain-then-stop). `deinit` releases any bytes (and the
-SAB refs inside them) never consumed.
+messages on every `pop`. Zero-timeout internal polls return while holding the
+channel lock when the queue is empty instead of entering a timed condition wait,
+which keeps `Worker.receive(..., 0)` suitable for host-side drain probes. A
+channel `close()` wakes every waiter; already-queued messages stay poppable
+(drain-then-stop). `deinit` releases any bytes (and the SAB refs inside them)
+never consumed.
 
 ## Worker lifecycle (`src/worker.zig`)
 
@@ -90,7 +93,7 @@ context's handles are ever touched.
 `src/worker.zig` tests: 4-way SAB counter + terminate-mid-loop, module-graph
 import round-trip, exact host-hook wakes for multi-message replies plus
 graceful final outbox close, terminate final outbox close, and FIFO channel
-drain without front shifts.
+drain / zero-timeout poll behavior.
 `src/c_api.zig` test: `JSWorkerCreate` → post a number → receive the doubled
 reply. All TSan-clean. `worker.zig` and the C-API are not exercised by the
 test262 shards, so the conformance total is unaffected.

@@ -24,6 +24,7 @@ const Timing = struct {
 };
 
 const worker_message_batches = 160;
+const worker_empty_receive_polls = 3000;
 const worker_lifecycle_rounds = 12;
 
 const scenarios = [_]Scenario{
@@ -356,6 +357,41 @@ fn timeWorkerMessages(gpa: std.mem.Allocator, io: std.Io, worker_count: usize, b
     return ns;
 }
 
+fn timeWorkerEmptyReceives(gpa: std.mem.Allocator, io: std.Io, worker_count: usize, polls: usize) !u64 {
+    const src =
+        \\globalThis.onmessage = function(e) {};
+    ;
+
+    const ctx = try js.Context.createWith(gpa, .{ .enable_threads = true });
+    defer ctx.destroy();
+    var machine = ctx.interpreter();
+
+    const workers = try gpa.alloc(*js.Worker, worker_count);
+    defer gpa.free(workers);
+
+    var spawned: usize = 0;
+    errdefer cleanupWorkers(workers[0..spawned]);
+    while (spawned < worker_count) : (spawned += 1) {
+        workers[spawned] = try js.Worker.spawn(src);
+    }
+
+    const t0 = nowNs(io);
+    var round: usize = 0;
+    while (round < polls) : (round += 1) {
+        for (workers) |w| {
+            if ((try w.receive(&machine, 0)) != null) return error.UnexpectedWorkerReply;
+        }
+    }
+    const ns: u64 = @intCast(nowNs(io) - t0);
+
+    for (workers) |w| w.terminate();
+    for (workers) |w| {
+        w.join();
+        w.destroy();
+    }
+    return ns;
+}
+
 fn timeWorkerLifecycle(gpa: std.mem.Allocator, io: std.Io, worker_count: usize, rounds: usize) !u64 {
     const src =
         \\globalThis.onmessage = function(e) {
@@ -398,10 +434,12 @@ fn timeWorkerLifecycle(gpa: std.mem.Allocator, io: std.Io, worker_count: usize, 
 fn printWorkerProfile(gpa: std.mem.Allocator, io: std.Io, workers: []const usize) !void {
     std.debug.print("\nWorker message/lifecycle profile\n", .{});
     std.debug.print("isolated Worker API: one Context per OS thread, structured-clone inbox/outbox, no shared-realm .gil fallback\n", .{});
-    std.debug.print("{s:>8} {s:>14} {s:>12} {s:>14} {s:>12} {s:>12}\n", .{
+    std.debug.print("{s:>8} {s:>14} {s:>12} {s:>14} {s:>12} {s:>14} {s:>12} {s:>12}\n", .{
         "workers",
         "message ns",
         "ns/msg",
+        "empty recv ns",
+        "ns/poll",
         "lifecycle ns",
         "ns/worker",
         "spawns",
@@ -410,13 +448,17 @@ fn printWorkerProfile(gpa: std.mem.Allocator, io: std.Io, workers: []const usize
     for (workers) |n| {
         const message_ns = try timeWorkerMessages(gpa, io, n, worker_message_batches);
         const total_messages: u64 = @intCast(n * worker_message_batches);
+        const empty_receive_ns = try timeWorkerEmptyReceives(gpa, io, n, worker_empty_receive_polls);
+        const total_empty_receives: u64 = @intCast(n * worker_empty_receive_polls);
         const lifecycle_ns = try timeWorkerLifecycle(gpa, io, n, worker_lifecycle_rounds);
         const total_spawns: u64 = @intCast(n * worker_lifecycle_rounds);
 
-        std.debug.print("{d:>8} {d:>14} {d:>12} {d:>14} {d:>12} {d:>12}\n", .{
+        std.debug.print("{d:>8} {d:>14} {d:>12} {d:>14} {d:>12} {d:>14} {d:>12} {d:>12}\n", .{
             n,
             message_ns,
             message_ns / @max(total_messages, 1),
+            empty_receive_ns,
+            empty_receive_ns / @max(total_empty_receives, 1),
             lifecycle_ns,
             lifecycle_ns / @max(total_spawns, 1),
             total_spawns,

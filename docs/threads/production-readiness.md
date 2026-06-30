@@ -117,9 +117,11 @@ Known performance/maturity work:
   removals.
 - Worker inbox/outbox channels now use FIFO head cursors for structured-clone
   message queues, so Worker-heavy lifecycle and receive loops do not pay one
-  front shift per delivered message.
+  front shift per delivered message. Empty internal `Worker.receive(..., 0)`
+  polls now return from the channel while holding the queue lock instead of
+  entering a timed condition wait.
 - The same `threads-profile` run now includes a separate isolated `Worker`
-  section for structured-clone inbox/outbox round-trips and
+  section for structured-clone inbox/outbox round-trips, empty receive polling,
   spawn/post/receive/join/destroy lifecycle cost. It is reported outside the
   no-GIL versus `.gil = true` table because Workers already isolate each
   `Context` onto its own OS thread.

@@ -73,6 +73,7 @@ const Channel = struct {
         while (!ch.hasQueued()) {
             if (ch.closed) return null;
             ch.clearQueue();
+            if (timeout_ms) |ms| if (ms == 0) return null;
             const tmo: std.Io.Timeout = if (timeout_ms) |ms| .{ .duration = .{
                 .raw = .fromMilliseconds(@intCast(ms)),
                 .clock = .awake,
@@ -131,6 +132,13 @@ test "worker channel pops FIFO without front shifts" {
     try std.testing.expectEqual(@as(u8, 3), got_third[0]);
     try std.testing.expectEqual(@as(usize, 0), ch.queue_head);
     try std.testing.expectEqual(@as(usize, 0), ch.queue.items.len);
+
+    try std.testing.expect(ch.pop(0) == null);
+    const late = try alloc.dupe(u8, &.{4});
+    ch.push(late);
+    const got_late = ch.pop(0) orelse return error.TestUnexpectedResult;
+    defer alloc.free(got_late);
+    try std.testing.expectEqual(@as(u8, 4), got_late[0]);
 
     ch.close();
     try std.testing.expect(ch.pop(0) == null);

@@ -278,8 +278,11 @@ threading architecture:
   unlinked before signal, and matching `waitAsync` tickets are collected without
   repeated `orderedRemove` shifts. Worker inbox/outbox channels now drain
   through the same FIFO head-cursor shape instead of front-shifting
-  structured-clone message queues. Continue using the profile for the remaining
-  contended-lock, Worker message, and lifecycle hot spots.
+  structured-clone message queues, and empty internal `Worker.receive(..., 0)`
+  polls return under the channel lock without entering timed condition waits.
+  The Worker profile prints that empty-receive polling cost separately from
+  real message-delivery and lifecycle cost. Continue using the profile for the
+  remaining contended-lock, Worker message, and lifecycle hot spots.
 - **Memory-model maintenance** - keep
   [docs/threads/memory-model.md](docs/threads/memory-model.md) aligned with the
   TSan suppression witness, synchronization primitives, and promoted corpus
