@@ -124,13 +124,16 @@ context APIs.
   `Atomics.wait`, `Condition.wait`, and contended `Lock` acquisition without
   tracing those peers as frozen parked stacks. Host-side thread queues are part
   of the root set too: `Gil.tasks`, `LockRecord.pending`, async condition
-  waiters, typed-array `waitAsync` waiter/reaction roots, ThreadLocal maps,
-  thread completion results, release-function lock records, and contended
-  `Lock.hold` receiver/callback pairs now trace, barrier, or temp-root their
-  hidden JS values. The mid-GC fuzzer now queues a FIFO `Lock.asyncHold` grant
-  chain, an async `Condition.wait` reacquire path with captured JS roots, and a
+  waiters, typed-array `waitAsync` waiter/reaction roots, pending
+  `Thread.asyncJoin` promise/reaction roots, ThreadLocal maps, thread completion
+  results, release-function lock records, and contended `Lock.hold`
+  receiver/callback pairs now trace, barrier, or temp-root their hidden JS
+  values. The mid-GC fuzzer now queues a FIFO `Lock.asyncHold` grant
+  chain, an async `Condition.wait` reacquire path with captured JS roots, a
   typed-array `waitAsync` reaction graph reachable only through the native
-  waiter queue; sync-wait pump points must execute the async grants during the
+  waiter queue, and pending `Thread.asyncJoin` fulfillment/rejection reaction
+  graphs reachable only through native completion records; sync-wait pump points
+  must execute the async grants during the
   same allocation-pressure window that produces a finishing parallel sweep, and
   the `waitAsync` reaction must run intact after notification.
   Keep quiescent collection as the fallback for cycles that still cannot
@@ -143,7 +146,9 @@ context APIs.
   `parallel_midscript_gc` sweeps, executes a queued async-hold grant chain and
   async condition reacquire grants from those pump points, keeps a typed-array
   `waitAsync` promise/reaction graph live only through the native waiter queue,
-  keeps a ThreadLocal-only hidden root live in a parked peer, keeps completed-but-unjoined
+  keeps pending `Thread.asyncJoin` fulfillment/rejection reactions live only
+  through native completion records, keeps a ThreadLocal-only hidden root live
+  in a parked peer, keeps completed-but-unjoined
   Thread result and thrown exception objects live through the thread completion
   record, and verifies exact `FinalizationRegistry` cleanup count/sum delivery
   afterward. The lifecycle

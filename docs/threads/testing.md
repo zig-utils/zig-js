@@ -121,8 +121,10 @@ enable `parallel_midscript_gc`, blocks peers in property `Atomics.wait`,
 `Condition.wait`, and contended `Lock` acquisition, queues a FIFO async-hold
 grant chain plus async condition reacquire grants through those pump points,
 keeps a typed-array `waitAsync` promise/reaction graph reachable only through
-the native waiter queue until notification, keeps a registered object reachable
-only through `ThreadLocal.value` while the
+the native waiter queue until notification, keeps pending `Thread.asyncJoin`
+fulfillment/rejection promise reactions reachable only through native completion
+records until the child threads are released, keeps a registered object
+reachable only through `ThreadLocal.value` while the
 owning thread is parked, keeps a completed-but-unjoined `Thread` result object
 and a completed-but-unjoined thrown exception object reachable only through the
 thread completion record, then requires exact script completion plus at least

@@ -2905,6 +2905,8 @@ fn runMidScriptWaitPumpGc(gpa: std.mem.Allocator, seed: u64) !bool {
     const thread_result_expected = async_base + 8192;
     const thread_throw_expected = async_base + 12288;
     const wait_async_expected = async_base + 16384;
+    const async_join_result_expected = async_base + 20480;
+    const async_join_throw_expected = async_base + 24576;
     const spin_iters = 4000 + r.uintLessThan(usize, 6000);
     const wait_timeout_ms = 1200 + r.uintLessThan(usize, 900);
 
@@ -2923,7 +2925,7 @@ fn runMidScriptWaitPumpGc(gpa: std.mem.Allocator, seed: u64) !bool {
     const src = try std.fmt.allocPrint(
         gpa,
         \\(() => {{
-        \\  const gate = {{ state: 0, propReady: 0, condReady: 0, holderReady: 0, lockReady: 0, releaseLock: 0, lockDone: 0, asyncDone: 0, asyncSecondDone: 0, asyncCondReady: 0, asyncCondDone: 0, tlsReady: 0, tlsRelease: 0, resultReady: 0, thrownReady: 0 }};
+        \\  const gate = {{ state: 0, propReady: 0, condReady: 0, holderReady: 0, lockReady: 0, releaseLock: 0, lockDone: 0, asyncDone: 0, asyncSecondDone: 0, asyncCondReady: 0, asyncCondDone: 0, tlsReady: 0, tlsRelease: 0, resultReady: 0, thrownReady: 0, joinResultReady: 0, joinResultRelease: 0, joinThrowReady: 0, joinThrowRelease: 0 }};
         \\  const condLock = new Lock();
         \\  const cond = new Condition();
         \\  const heldLock = new Lock();
@@ -3037,6 +3039,50 @@ fn runMidScriptWaitPumpGc(gpa: std.mem.Allocator, seed: u64) !bool {
         \\    Atomics.notify(gate, 'thrownReady');
         \\    throw reason;
         \\  }});
+        \\  globalThis.__midgcAsyncJoinScore = 0;
+        \\  const asyncJoinResultMarker = asyncRoot.nested.base + 20480;
+        \\  const asyncJoinThrowMarker = asyncRoot.nested.base + 24576;
+        \\  const pendingJoinResultThread = new Thread(() => {{
+        \\    const result = {{ marker: asyncJoinResultMarker, nested: {{ root: asyncRoot, label: 'pending-asyncJoin-result-midgc-root' }} }};
+        \\    Atomics.store(gate, 'joinResultReady', 1);
+        \\    Atomics.notify(gate, 'joinResultReady');
+        \\    while (Atomics.load(gate, 'joinResultRelease') === 0)
+        \\      Atomics.wait(gate, 'joinResultRelease', 0, 1000);
+        \\    return result;
+        \\  }});
+        \\  (() => {{
+        \\    const reactionRoot = {{ marker: asyncJoinResultMarker, nested: {{ root: asyncRoot, label: 'pending-asyncJoin-result-reaction-root' }} }};
+        \\    pendingJoinResultThread.asyncJoin().then((v) => {{
+        \\      if (!v || v.marker !== asyncJoinResultMarker || v.nested.root.nested.base !== asyncRoot.nested.base ||
+        \\          reactionRoot.marker !== asyncJoinResultMarker || reactionRoot.nested.root.nested.base !== asyncRoot.nested.base)
+        \\        globalThis.__midgcAsyncJoinScore = -1;
+        \\      else
+        \\        globalThis.__midgcAsyncJoinScore = reactionRoot.marker;
+        \\    }}, () => {{
+        \\      globalThis.__midgcAsyncJoinScore = -2;
+        \\    }});
+        \\  }})();
+        \\  globalThis.__midgcAsyncJoinRejectScore = 0;
+        \\  const pendingJoinThrowThread = new Thread(() => {{
+        \\    const reason = {{ marker: asyncJoinThrowMarker, nested: {{ root: asyncRoot, label: 'pending-asyncJoin-throw-midgc-root' }} }};
+        \\    Atomics.store(gate, 'joinThrowReady', 1);
+        \\    Atomics.notify(gate, 'joinThrowReady');
+        \\    while (Atomics.load(gate, 'joinThrowRelease') === 0)
+        \\      Atomics.wait(gate, 'joinThrowRelease', 0, 1000);
+        \\    throw reason;
+        \\  }});
+        \\  (() => {{
+        \\    const reactionRoot = {{ marker: asyncJoinThrowMarker, nested: {{ root: asyncRoot, label: 'pending-asyncJoin-throw-reaction-root' }} }};
+        \\    pendingJoinThrowThread.asyncJoin().then(() => {{
+        \\      globalThis.__midgcAsyncJoinRejectScore = -1;
+        \\    }}, (e) => {{
+        \\      if (!e || e.marker !== asyncJoinThrowMarker || e.nested.root.nested.base !== asyncRoot.nested.base ||
+        \\          reactionRoot.marker !== asyncJoinThrowMarker || reactionRoot.nested.root.nested.base !== asyncRoot.nested.base)
+        \\        globalThis.__midgcAsyncJoinRejectScore = -2;
+        \\      else
+        \\        globalThis.__midgcAsyncJoinRejectScore = reactionRoot.marker;
+        \\    }});
+        \\  }})();
         \\  const propWaiter = new Thread(() => {{
         \\    Atomics.store(gate, 'propReady', 1);
         \\    Atomics.notify(gate, 'propReady');
@@ -3081,6 +3127,10 @@ fn runMidScriptWaitPumpGc(gpa: std.mem.Allocator, seed: u64) !bool {
         \\    Atomics.wait(gate, 'resultReady', 0, 1);
         \\  while (Atomics.load(gate, 'thrownReady') === 0)
         \\    Atomics.wait(gate, 'thrownReady', 0, 1);
+        \\  while (Atomics.load(gate, 'joinResultReady') === 0)
+        \\    Atomics.wait(gate, 'joinResultReady', 0, 1);
+        \\  while (Atomics.load(gate, 'joinThrowReady') === 0)
+        \\    Atomics.wait(gate, 'joinThrowReady', 0, 1);
         \\  while (Atomics.load(gate, 'asyncCondReady') === 0)
         \\    Atomics.wait(gate, 'asyncCondReady', 0, 1);
         \\  const keep = [];
@@ -3130,6 +3180,10 @@ fn runMidScriptWaitPumpGc(gpa: std.mem.Allocator, seed: u64) !bool {
         \\  Atomics.notify(gate, 'releaseLock');
         \\  Atomics.store(gate, 'tlsRelease', 1);
         \\  Atomics.notify(gate, 'tlsRelease');
+        \\  Atomics.store(gate, 'joinResultRelease', 1);
+        \\  Atomics.notify(gate, 'joinResultRelease');
+        \\  Atomics.store(gate, 'joinThrowRelease', 1);
+        \\  Atomics.notify(gate, 'joinThrowRelease');
         \\  const wr = propWaiter.join();
         \\  if (wr !== 'ok' && wr !== 'timed-out') throw new Error('bad property wait result: ' + wr);
         \\  if (condWaiter.join() !== 1) throw new Error('bad condition waiter');
@@ -3144,6 +3198,18 @@ fn runMidScriptWaitPumpGc(gpa: std.mem.Allocator, seed: u64) !bool {
         \\      globalThis.__midgcThreadResultHold.marker !== {d} ||
         \\      globalThis.__midgcThreadResultHold.nested.root.nested.base !== {d})
         \\    throw new Error('bad completed Thread result midgc root');
+        \\  globalThis.__midgcAsyncJoinResultHold = pendingJoinResultThread.join();
+        \\  if (!globalThis.__midgcAsyncJoinResultHold ||
+        \\      globalThis.__midgcAsyncJoinResultHold.marker !== asyncJoinResultMarker ||
+        \\      globalThis.__midgcAsyncJoinResultHold.nested.root.nested.base !== asyncRoot.nested.base)
+        \\    throw new Error('bad pending asyncJoin result midgc root');
+        \\  try {{
+        \\    pendingJoinThrowThread.join();
+        \\  }} catch (e) {{
+        \\    if (e.marker !== asyncJoinThrowMarker || e.nested.root.nested.base !== asyncRoot.nested.base)
+        \\      throw new Error('bad pending asyncJoin thrown midgc root');
+        \\    globalThis.__midgcAsyncJoinThrowHold = e;
+        \\  }}
         \\  try {{
         \\    thrownThread.join();
         \\  }} catch (e) {{
@@ -3232,6 +3298,22 @@ fn runMidScriptWaitPumpGc(gpa: std.mem.Allocator, seed: u64) !bool {
     };
     if (!wait_async_score.isNumber() or wait_async_score.asNum() != @as(f64, @floatFromInt(wait_async_expected))) {
         std.debug.print("seed {d}: midgc waitAsync score got {d}, expected {d}\n", .{ seed, if (wait_async_score.isNumber()) wait_async_score.asNum() else -1, wait_async_expected });
+        return false;
+    }
+    const async_join_score = ctx.evaluate("globalThis.__midgcAsyncJoinScore") catch |err| {
+        std.debug.print("seed {d}: cannot read midgc asyncJoin score: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    if (!async_join_score.isNumber() or async_join_score.asNum() != @as(f64, @floatFromInt(async_join_result_expected))) {
+        std.debug.print("seed {d}: midgc asyncJoin score got {d}, expected {d}\n", .{ seed, if (async_join_score.isNumber()) async_join_score.asNum() else -1, async_join_result_expected });
+        return false;
+    }
+    const async_join_reject_score = ctx.evaluate("globalThis.__midgcAsyncJoinRejectScore") catch |err| {
+        std.debug.print("seed {d}: cannot read midgc asyncJoin reject score: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    if (!async_join_reject_score.isNumber() or async_join_reject_score.asNum() != @as(f64, @floatFromInt(async_join_throw_expected))) {
+        std.debug.print("seed {d}: midgc asyncJoin reject score got {d}, expected {d}\n", .{ seed, if (async_join_reject_score.isNumber()) async_join_reject_score.asNum() else -1, async_join_throw_expected });
         return false;
     }
     ctx.collectGarbage();
@@ -3401,10 +3483,11 @@ pub fn main(init: std.process.Init) !void {
     // `threadfuzz midgc <iters> <seed>`: targeted mid-script parallel-GC
     // profile. Each seed blocks peers in property `Atomics.wait`,
     // `Condition.wait`, and contended `Lock` acquisition while allocation
-    // pressure triggers the experimental collector. Hidden ThreadLocal values
-    // and completed-but-unjoined Thread results must survive that window. The
-    // oracle requires exact program completion and at least one finishing
-    // parallel sweep.
+    // pressure triggers the experimental collector. Hidden ThreadLocal values,
+    // typed-array waitAsync reactions, pending asyncJoin reactions, and
+    // completed-but-unjoined Thread results must survive that window. The oracle
+    // requires exact program completion and at least one finishing parallel
+    // sweep.
     if (first) |a| if (std.mem.eql(u8, a, "midgc")) {
         iters = 20;
         if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch iters;

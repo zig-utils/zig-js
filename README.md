@@ -289,13 +289,16 @@ threading architecture:
   so the abort-safe collector can finish while those peers are blocked. The GC
   root set now also covers host-side thread queues such as `Gil.tasks`,
   per-lock async grants, async condition waiters, typed-array `waitAsync`
-  waiter/reaction roots, ThreadLocal values, thread completion results,
-  release-function lock records, and contended `Lock.hold` receiver/callback
-  pairs. Keep maturing convergence and stress coverage for heavier
+  waiter/reaction roots, pending `Thread.asyncJoin` promise/reaction roots,
+  ThreadLocal values, thread completion results, release-function lock records,
+  and contended `Lock.hold` receiver/callback pairs. Keep maturing convergence
+  and stress coverage for heavier
   wait/cleanup mixes; the mid-GC fuzzer now queues a FIFO `Lock.asyncHold`
   grant chain, an async `Condition.wait` reacquire path, and a typed-array
-  `waitAsync` reaction graph reachable only through the native waiter queue
-  while allocation pressure collects. It also verifies exact
+  `waitAsync` reaction graph reachable only through the native waiter queue,
+  and pending `Thread.asyncJoin` fulfillment/rejection reaction graphs
+  reachable only through native completion records while allocation pressure
+  collects. It also verifies exact
   `FinalizationRegistry` cleanup count/sum delivery after those wait-pump
   sweeps and keeps a registered object reachable only through
   `ThreadLocal.value` while the owning thread is parked, proving that hidden
@@ -304,8 +307,9 @@ threading architecture:
   cleanup, waiters, `asyncJoin`, `Thread.restrict`, and nested thread lifecycle;
   the mid-GC profile covers sync-wait root publication during finishing
   mid-script sweeps, queued async-hold delivery, async condition reacquire
-  delivery, typed-array `waitAsync` native waiter/reaction roots,
-  ThreadLocal-only hidden roots in parked peers, and deterministic
+  delivery, typed-array `waitAsync` native waiter/reaction roots, pending
+  `Thread.asyncJoin` reaction roots, ThreadLocal-only hidden roots in parked
+  peers, and deterministic
   completed-but-unjoined Thread result and thrown exception roots, and
   deterministic cleanup count/sum delivery; the lifecycle
   profile adds deterministic termination storms, script Worker/thread overlap
