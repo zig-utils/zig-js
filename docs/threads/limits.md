@@ -143,7 +143,11 @@ context APIs.
   reacquire path with captured JS roots, a typed-array `waitAsync` reaction
   graph reachable only through the native waiter queue, and pending
   `Thread.asyncJoin` fulfillment/rejection reaction graphs reachable only
-  through native completion records; sync-wait pump points
+  through native completion records; it also runs a sibling expected-termination
+  subprogram where parked children hold child-owned typed-array `waitAsync`
+  tickets through a finishing mid-script sweep, then teardown `asyncJoin`
+  rejection reactions run and post-termination notify sees zero leaked waitAsync
+  tickets. Sync-wait pump points
   must execute the async grants during the
   same allocation-pressure window that produces a finishing parallel sweep, and
   the `waitAsync` reaction must run intact after notification. Join-side

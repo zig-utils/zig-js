@@ -268,9 +268,12 @@ per-thread before threads stop holding the GIL):
      `Thread` result and thrown exception objects in native completion records
      across the allocation-pressure window and verifies that `join()` receives
      both intact. It also keeps a typed-array `waitAsync` promise/reaction graph
-     reachable only through the native waiter queue until notification, and
-     pending `Thread.asyncJoin` fulfillment/rejection reactions reachable only
-     through native completion records until the child threads are released. The
+     reachable only through the native waiter queue until notification, pending
+     `Thread.asyncJoin` fulfillment/rejection reactions reachable only through
+     native completion records until the child threads are released, and a
+     sibling teardown case where parked children hold child-owned typed-array
+     `waitAsync` tickets through a finishing mid-script sweep before parent
+     failure terminates them. The
      `Thread.join()` park path now clears its `gc_parked` publication and
      rebalances the completion mutex on termination/error unwinds, so a failed
      join cannot leave stale frozen-peer state. The

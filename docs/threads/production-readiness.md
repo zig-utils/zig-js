@@ -168,12 +168,13 @@ as embedders exercise more threaded host patterns.
   contexts.
 - The mid-script GC fuzzer profile blocks peers in property `Atomics.wait`,
   `Condition.wait`, and contended `Lock` acquisition while allocation pressure
-  drives `parallel_midscript_gc`; every seed must complete exactly and finish at
-  least one parallel sweep. It also queues a FIFO `Lock.asyncHold` grant chain
-  including a root-bearing rejected grant plus an async `Condition.wait`
-  reacquire with hidden captured JS roots and requires sync-wait pump points to
-  deliver both during the same mid-script GC pressure window, keeps a typed-array
-  `waitAsync` promise/reaction graph
+  drives `parallel_midscript_gc`; every seed now runs a normal completion
+  wait-pump subprogram and an expected teardown-termination subprogram, and each
+  must finish at least one parallel sweep. The wait-pump subprogram queues a
+  FIFO `Lock.asyncHold` grant chain including a root-bearing rejected grant plus
+  an async `Condition.wait` reacquire with hidden captured JS roots and requires
+  sync-wait pump points to deliver both during the same mid-script GC pressure
+  window, keeps a typed-array `waitAsync` promise/reaction graph
   reachable only through the native waiter queue until notification, keeps
   pending `Thread.asyncJoin` fulfillment/rejection promise reactions reachable
   only through native completion records until the child threads are released,
@@ -182,6 +183,10 @@ as embedders exercise more threaded host patterns.
   `Thread` result object and a completed-but-unjoined thrown exception object
   reachable only through the thread completion record, then delivers the
   expected `FinalizationRegistry` cleanup count/sum after a quiescent collect.
+  The teardown subprogram parks children after installing child-owned typed-array
+  `waitAsync` tickets, verifies pending `asyncJoin` rejection reactions with
+  captured roots after the parent throws, and proves post-termination notify
+  wakes zero leaked child waitAsync tickets.
 - Host-side thread queues are now explicit GC roots: queued `Lock.asyncHold`
   tasks in `Gil.tasks`, per-lock pending grants, async condition waiters,
   typed-array `waitAsync` waiter/reaction roots, pending `Thread.asyncJoin`
@@ -219,7 +224,7 @@ as embedders exercise more threaded host patterns.
   park/resume/clear/join cleanup lifecycles with exact cleanup count/sum
   delivery after quiescent collection.
 - CI runs the fuzzer in several modes: default seeded, TSan, high-contention
-  amplified, broad semantic, mid-script GC wait-pump, lifecycle, ReleaseSafe,
+  amplified, broad semantic, mid-script GC wait-pump/teardown, lifecycle, ReleaseSafe,
   and deterministic-result verification.
 
 Remaining: keep extending the lifecycle profile toward more cross-realm
@@ -239,7 +244,7 @@ Every pull request and push to `main` runs:
 - TSan `threadfuzz`,
 - amplified `threadfuzz`,
 - broad semantic `threadfuzz`,
-- mid-script GC wait-pump `threadfuzz`,
+- mid-script GC wait-pump/teardown `threadfuzz`,
 - lifecycle `threadfuzz`,
 - ReleaseSafe `threadfuzz`,
 - deterministic-result `threadfuzz-verify`,

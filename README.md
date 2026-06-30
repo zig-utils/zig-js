@@ -193,7 +193,7 @@ zig build threads-test          # runs the green WebKit PR-249 threads corpus (2
 zig build threads-reference-audit # classifies the remaining reference-only PR-249 files
 zig build test -Dtsan=true      # unit suite under ThreadSanitizer
 zig build threadfuzz            # seeded concurrent-JS fuzzer
-zig build threadfuzz -Dfuzz-midgc=true # mid-script GC wait-pump fuzzer
+zig build threadfuzz -Dfuzz-midgc=true # mid-script GC wait-pump + teardown fuzzer
 zig build test262               # runs the real tc39/test262 corpus, prints pass %
 zig build test262 -Dtest262=DIR # …with an explicit corpus root
 zig build bench                 # times the bytecode VM against the tree-walker
@@ -232,7 +232,7 @@ Correctness is now gated by the ordinary unit/corpus suite plus no-GIL coverage:
 ThreadSanitizer unit tests, a sharded no-GIL PR-249 corpus TSan sweep, a
 suppression-narrowness witness for JS-defined program-byte races,
 `test262-parallel`, and seeded concurrent-JS fuzzing (`threadfuzz`, TSan
-fuzzing, amplified fuzzing, broad semantic fuzzing, mid-script-GC wait-pump
+fuzzing, amplified fuzzing, broad semantic fuzzing, mid-script-GC wait-pump/teardown
 fuzzing, lifecycle fuzzing, ReleaseSafe fuzzing, and deterministic-result
 verification).
 
@@ -310,7 +310,10 @@ threading architecture:
   reachable only through the native waiter queue, and pending
   `Thread.asyncJoin` fulfillment/rejection reaction graphs
   reachable only through native completion records while allocation pressure
-  collects. It also verifies exact
+  collects. A sibling mid-GC teardown subprogram parks children after installing
+  child-owned typed-array `waitAsync` tickets, verifies pending `asyncJoin`
+  rejection reactions after parent failure, and proves later notify wakes zero
+  leaked waitAsync tickets. The profile also verifies exact
   `FinalizationRegistry` cleanup count/sum delivery plus unregister-token
   suppression after those wait-pump sweeps and keeps a registered object
   reachable only through `ThreadLocal.value` while the owning thread is parked,
@@ -325,6 +328,7 @@ threading architecture:
   mid-script sweeps, queued async-hold delivery including rejected grant
   reactions, async condition reacquire delivery, typed-array `waitAsync` native
   waiter/reaction roots, pending `Thread.asyncJoin` reaction roots,
+  teardown termination with pending asyncJoin/waitAsync roots,
   ThreadLocal-only hidden roots in parked peers, and deterministic
   completed-but-unjoined Thread result and thrown exception roots, and
   deterministic cleanup count/sum delivery plus unregister-token suppression;
