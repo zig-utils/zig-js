@@ -194,7 +194,7 @@ zig build threads-reference-audit # classifies the remaining reference-only PR-2
 python3 tools/threads-reference-audit.py --probe-candidates # prints closest promotion probes
 zig build test -Dtsan=true      # unit suite under ThreadSanitizer
 zig build threadfuzz            # seeded concurrent-JS fuzzer
-zig build threadfuzz -Dfuzz-midgc=true # mid-script GC wait-pump + microtask + creator buffers + sync-wait cleanup + teardown + promise + script/module Worker/SAB + Worker exception cleanup + weak-collection fuzzer
+zig build threadfuzz -Dfuzz-midgc=true # mid-script GC wait-pump + microtask + creator buffers + sync-wait cleanup + teardown + promise + script/module Worker/SAB + Worker exception + Worker close/terminate + weak-collection fuzzer
 zig build test262               # runs the real tc39/test262 corpus, prints pass %
 zig build test262 -Dtest262=DIR # …with an explicit corpus root
 zig build bench                 # times the bytecode VM against the tree-walker
@@ -234,7 +234,7 @@ ThreadSanitizer unit tests, a sharded no-GIL PR-249 corpus TSan sweep, a
 suppression-narrowness witness for JS-defined program-byte races,
 `test262-parallel`, and seeded concurrent-JS fuzzing (`threadfuzz`, TSan
 fuzzing, amplified fuzzing, broad semantic fuzzing,
-mid-script-GC wait-pump/microtask/creator-buffer/sync-wait-cleanup/promise/teardown/Worker-SAB/Worker-exception/weak-collection fuzzing, lifecycle
+mid-script-GC wait-pump/microtask/creator-buffer/sync-wait-cleanup/promise/teardown/Worker-SAB/Worker-exception/Worker-close/weak-collection fuzzing, lifecycle
 fuzzing, ReleaseSafe fuzzing, and deterministic-result verification).
 
 Remaining work is concentrated in production hardening rather than the core
@@ -377,6 +377,10 @@ threading architecture:
   cleanup count/sum; sibling script/module Worker handler-exception cleanup
   subprograms first recover from an expected thrown `onmessage` delivery, then
   prove the same progress and cleanup oracle through the finishing sweep.
+  Script and module Worker close/terminate subprograms now compose exact FIFO
+  drain/drop ordering, post-close drop, post-terminate receive silence, joined
+  shared-realm roots, asyncJoin reactions, and cleanup count/sum with the same
+  finishing mid-script sweep.
   A pending-microtask subprogram queues Promise, typed-array `waitAsync`,
   `Thread.asyncJoin`, with-fn `Lock.asyncHold`, no-fn release-function, and
   `FinalizationRegistry` cleanup roots through a finishing mid-script sweep,
@@ -422,8 +426,9 @@ threading architecture:
   typed-array `waitAsync`, `Thread.asyncJoin`, and cleanup reactions,
   creator-owned `SharedArrayBuffer` and `ArrayBuffer` storage rooted through
   unjoined Thread completion records and delayed `asyncJoin` observers,
-  isolated script/module Worker/SAB progress and Worker handler-exception
-  recovery while shared-realm cleanup roots are swept,
+  isolated script/module Worker/SAB progress, Worker handler-exception
+  recovery, and Worker close/terminate drain/drop while shared-realm cleanup
+  roots are swept,
   teardown termination with pending asyncJoin/waitAsync roots,
   ThreadLocal-only hidden roots in parked peers, and deterministic
   completed-but-unjoined Thread result and thrown exception roots, and

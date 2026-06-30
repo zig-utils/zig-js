@@ -7779,6 +7779,463 @@ fn runMidScriptModuleWorkerExceptionCleanupGc(gpa: std.mem.Allocator, seed: u64)
     return runMidScriptWorkerCleanupProfile(gpa, seed, true, true);
 }
 
+fn runMidScriptWorkerCloseTerminateGc(gpa: std.mem.Allocator, seed: u64) !bool {
+    return runMidScriptWorkerCloseTerminateProfile(gpa, seed, false);
+}
+
+fn runMidScriptModuleWorkerCloseTerminateGc(gpa: std.mem.Allocator, seed: u64) !bool {
+    return runMidScriptWorkerCloseTerminateProfile(gpa, seed, true);
+}
+
+fn runMidScriptWorkerCloseTerminateProfile(gpa: std.mem.Allocator, seed: u64, comptime module_worker: bool) !bool {
+    var prng = std.Random.DefaultPrng.init(seed ^ if (module_worker) 0x6d69_6467_636c_6d77 else 0x6d69_6467_636c_7377);
+    const r = prng.random();
+    const extra_pings = 1 + r.uintLessThan(usize, 4);
+    const nthreads = 2 + r.uintLessThan(usize, 3);
+    const per_thread = 5 + r.uintLessThan(usize, 7);
+    const rounds = 6 + r.uintLessThan(usize, 5);
+    const per_round = 420 + r.uintLessThan(usize, 260);
+    const spin_iters = 1600 + r.uintLessThan(usize, 2400);
+    const seed_marker = seed % 10_000;
+    const cleanup_base = 520_000 + seed_marker;
+
+    var expected_join_sum: usize = 0;
+    var expected_cleanup_count: usize = 0;
+    var expected_cleanup_sum: usize = 0;
+    var id: usize = 0;
+    while (id < nthreads) : (id += 1) {
+        const base = (id + 1) * 530_000 + seed_marker;
+        expected_join_sum += base + per_thread + id;
+        expected_cleanup_count += per_thread;
+        var i: usize = 0;
+        while (i < per_thread) : (i += 1) expected_cleanup_sum += base + i;
+    }
+    var round_i: usize = 0;
+    while (round_i < rounds) : (round_i += 1) {
+        var i: usize = 0;
+        while (i < per_round) : (i += 1) {
+            if (((i + round_i) & 31) == 19) {
+                expected_cleanup_count += 1;
+                expected_cleanup_sum += cleanup_base + round_i * per_round + i;
+            }
+        }
+    }
+
+    const ctx = js.Context.createWithTestingOptions(gpa, .{
+        .enable_threads = true,
+        .enable_gc = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+        .parallel_midscript_gc = true,
+    }) catch {
+        std.debug.print("seed {d}: midgc worker-close context creation failed\n", .{seed});
+        return false;
+    };
+    defer ctx.destroy();
+    var machine = ctx.interpreter();
+
+    const msg_prefix = if (module_worker) "__midgcModuleWorkerClose" else "__midgcWorkerClose";
+    const msg_src = try std.fmt.allocPrint(
+        gpa,
+        \\globalThis.{s}Sab = new SharedArrayBuffer(32);
+        \\globalThis.{s}Msg = function(cmd, id) {{
+        \\  return {{ sab: globalThis.{s}Sab, cmd, id }};
+        \\}};
+        \\globalThis.{s}Msg
+        \\
+    ,
+        .{ msg_prefix, msg_prefix, msg_prefix, msg_prefix },
+    );
+    defer gpa.free(msg_src);
+    _ = ctx.evaluate(msg_src) catch |err| {
+        std.debug.print("seed {d}: cannot create midgc worker-close messages: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+
+    const worker_src =
+        \\globalThis.onmessage = (e) => {
+        \\  const v = new Int32Array(e.data.sab);
+        \\  if (e.data.cmd === 'spin') {
+        \\    Atomics.add(v, 1, 1);
+        \\    Atomics.notify(v, 1);
+        \\    for (;;) {}
+        \\  }
+        \\  Atomics.add(v, 0, 1);
+        \\  postMessage({ ack: e.data.id, cmd: e.data.cmd });
+        \\  if (e.data.cmd === 'close') close();
+        \\};
+    ;
+
+    const graceful = if (module_worker)
+        Worker.spawnModule("entry.js", ModuleCloseTerminateFuzzHost.entries[1].source, ModuleCloseTerminateFuzzHost.host()) catch {
+            std.debug.print("seed {d}: midgc graceful module worker-close spawn failed\n", .{seed});
+            return false;
+        }
+    else
+        Worker.spawn(worker_src) catch {
+            std.debug.print("seed {d}: midgc graceful worker-close spawn failed\n", .{seed});
+            return false;
+        };
+    var cleanup_graceful = true;
+    defer if (cleanup_graceful) {
+        graceful.terminate();
+        graceful.join();
+        graceful.destroy();
+    };
+    const terminator = if (module_worker)
+        Worker.spawnModule("entry.js", ModuleCloseTerminateFuzzHost.entries[1].source, ModuleCloseTerminateFuzzHost.host()) catch {
+            std.debug.print("seed {d}: midgc terminator module worker-close spawn failed\n", .{seed});
+            return false;
+        }
+    else
+        Worker.spawn(worker_src) catch {
+            std.debug.print("seed {d}: midgc terminator worker-close spawn failed\n", .{seed});
+            return false;
+        };
+    var cleanup_terminator = true;
+    defer if (cleanup_terminator) {
+        terminator.terminate();
+        terminator.join();
+        terminator.destroy();
+    };
+
+    var ping_i: usize = 0;
+    while (ping_i < extra_pings) : (ping_i += 1) {
+        const ping_src = try std.fmt.allocPrint(gpa, "globalThis.{s}Msg('ping', {d})", .{ msg_prefix, ping_i });
+        defer gpa.free(ping_src);
+        const msg = ctx.evaluate(ping_src) catch |err| {
+            std.debug.print("seed {d}: cannot make midgc worker-close ping message: {s}\n", .{ seed, @errorName(err) });
+            return false;
+        };
+        graceful.postMessage(&machine, msg) catch |err| {
+            std.debug.print("seed {d}: midgc graceful worker-close post ping failed: {s}\n", .{ seed, @errorName(err) });
+            return false;
+        };
+    }
+    const close_src = try std.fmt.allocPrint(gpa, "globalThis.{s}Msg('close', 1000)", .{msg_prefix});
+    defer gpa.free(close_src);
+    const close_msg = ctx.evaluate(close_src) catch |err| {
+        std.debug.print("seed {d}: cannot make midgc worker-close close message: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    graceful.postMessage(&machine, close_msg) catch |err| {
+        std.debug.print("seed {d}: midgc graceful worker-close post close failed: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    graceful.close();
+    const dropped_src = try std.fmt.allocPrint(gpa, "globalThis.{s}Msg('dropped', 2000)", .{msg_prefix});
+    defer gpa.free(dropped_src);
+    const dropped_msg = ctx.evaluate(dropped_src) catch |err| {
+        std.debug.print("seed {d}: cannot make midgc worker-close dropped message: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    graceful.postMessage(&machine, dropped_msg) catch |err| {
+        std.debug.print("seed {d}: midgc graceful worker-close post after close failed: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+
+    const spin_src = try std.fmt.allocPrint(gpa, "globalThis.{s}Msg('spin', 3000)", .{msg_prefix});
+    defer gpa.free(spin_src);
+    const spin_msg = ctx.evaluate(spin_src) catch |err| {
+        std.debug.print("seed {d}: cannot make midgc worker-close spin message: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    terminator.postMessage(&machine, spin_msg) catch |err| {
+        std.debug.print("seed {d}: midgc terminator worker-close post spin failed: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    const ready_src = try std.fmt.allocPrint(
+        gpa,
+        \\{{
+        \\  const v = new Int32Array(globalThis.{s}Sab);
+        \\  let spins = 0;
+        \\  while (Atomics.load(v, 1) === 0 && spins++ < 10000000) ;
+        \\  if (Atomics.load(v, 1) === 0) throw new Error('midgc terminator worker did not enter spin');
+        \\}}
+    ,
+        .{msg_prefix},
+    );
+    defer gpa.free(ready_src);
+    _ = ctx.evaluate(ready_src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: midgc worker-close terminator readiness failed {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+
+    const src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  globalThis.{s}CleanupCount = 0;
+        \\  globalThis.{s}CleanupSum = 0;
+        \\  globalThis.{s}Oracle = 0;
+        \\  globalThis.{s}Registry = new FinalizationRegistry((held) => {{
+        \\    globalThis.{s}CleanupCount++;
+        \\    globalThis.{s}CleanupSum += held;
+        \\  }});
+        \\  const registry = globalThis.{s}Registry;
+        \\  const v = new Int32Array(globalThis.{s}Sab);
+        \\  if (Atomics.load(v, 1) === 0)
+        \\    throw new Error('midgc worker-close spinner was not active before sweep');
+        \\  const gate = {{ ready: 0, release: 0 }};
+        \\  const threads = [];
+        \\  let asyncSum = 0;
+        \\  for (let id = 0; id < {d}; id++) {{
+        \\    const t = new Thread((id, per, seedMarker) => {{
+        \\      const base = (id + 1) * 530000 + seedMarker;
+        \\      const root = {{
+        \\        marker: base + per + id,
+        \\        nested: {{ seed: seedMarker, label: 'midgc-worker-close-thread-root' }},
+        \\      }};
+        \\      for (let i = 0; i < per; i++) {{
+        \\        let target = {{ id, i, root, payload: 'midgc-worker-close-thread-' + id + '-' + i }};
+        \\        registry.register(target, base + i);
+        \\        target = null;
+        \\      }}
+        \\      Atomics.add(gate, 'ready', 1);
+        \\      Atomics.notify(gate, 'ready');
+        \\      while (Atomics.load(gate, 'release') === 0)
+        \\        Atomics.wait(gate, 'release', 0, 1000);
+        \\      if (root.nested.seed !== seedMarker)
+        \\        throw new Error('bad midgc worker-close thread root seed');
+        \\      return root;
+        \\    }}, id, {d}, {d});
+        \\    t.asyncJoin().then(
+        \\      (root) => {{
+        \\        if (root && root.nested && root.nested.seed === {d})
+        \\          asyncSum += root.marker;
+        \\        else
+        \\          asyncSum = -1000000;
+        \\      }},
+        \\      () => {{ asyncSum = -1000000; }});
+        \\    threads.push(t);
+        \\  }}
+        \\  while (Atomics.load(gate, 'ready') < {d})
+        \\    Atomics.wait(gate, 'ready', Atomics.load(gate, 'ready'), 1);
+        \\  const keep = [];
+        \\  const root = {{ seed: {d}, tag: 'midgc-worker-close-main-root' }};
+        \\  for (let round = 0; round < {d}; round++) {{
+        \\    for (let i = 0; i < {d}; i++) {{
+        \\      keep.push({{
+        \\        round,
+        \\        i,
+        \\        nested: {{ root, value: i + round }},
+        \\        text: 'midgc-worker-close-' + round + '-' + i,
+        \\      }});
+        \\      if (((i + round) & 31) === 19)
+        \\        registry.register({{ ephemeral: i, round, root }}, {d} + round * {d} + i);
+        \\    }}
+        \\    let spin = 0;
+        \\    for (let j = 0; j < {d}; j++) spin = (spin + j + round) & 0x3fffffff;
+        \\    if (spin < 0) keep.push({{ impossible: true }});
+        \\  }}
+        \\  if (typeof gc === 'function') gc();
+        \\  Atomics.store(gate, 'release', 1);
+        \\  Atomics.notify(gate, 'release', {d});
+        \\  let joinSum = 0;
+        \\  for (const t of threads) {{
+        \\    const rootResult = t.join();
+        \\    if (!rootResult || rootResult.nested.seed !== {d})
+        \\      throw new Error('bad midgc worker-close joined root');
+        \\    joinSum += rootResult.marker;
+        \\  }}
+        \\  if (joinSum !== {d})
+        \\    throw new Error('bad midgc worker-close join sum ' + joinSum);
+        \\  Promise.resolve().then(() => {{
+        \\    if (asyncSum !== {d})
+        \\      throw new Error('bad midgc worker-close async sum ' + asyncSum);
+        \\    globalThis.{s}Oracle = 1;
+        \\  }});
+        \\  return keep.length;
+        \\}})();
+        \\
+    ,
+        .{
+            msg_prefix,
+            msg_prefix,
+            msg_prefix,
+            msg_prefix,
+            msg_prefix,
+            msg_prefix,
+            msg_prefix,
+            msg_prefix,
+            nthreads,
+            per_thread,
+            seed_marker,
+            seed_marker,
+            nthreads,
+            seed_marker,
+            rounds,
+            per_round,
+            cleanup_base,
+            per_round,
+            spin_iters,
+            nthreads + 4,
+            seed_marker,
+            expected_join_sum,
+            expected_join_sum,
+            msg_prefix,
+        },
+    );
+    defer gpa.free(src);
+
+    const before_attempts = ctx.gc_par_attempts.load(.monotonic);
+    const before_collections = ctx.gc_par_collections.load(.monotonic);
+    const expected: f64 = @floatFromInt(rounds * per_round);
+    const result = ctx.evaluate(src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: midgc worker-close JS threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!result.isNumber() or result.asNum() != expected) {
+        std.debug.print("seed {d}: midgc worker-close result got {d}, expected {d}\n", .{ seed, if (result.isNumber()) result.asNum() else -1, expected });
+        return false;
+    }
+    if (ctx.gc_par_attempts.load(.monotonic) <= before_attempts) {
+        std.debug.print("seed {d}: midgc worker-close did not attempt a parallel collection\n", .{seed});
+        return false;
+    }
+    if (ctx.gc_par_collections.load(.monotonic) <= before_collections) {
+        std.debug.print("seed {d}: midgc worker-close did not finish a parallel collection\n", .{seed});
+        return false;
+    }
+    const oracle_src = try std.fmt.allocPrint(gpa, "globalThis.{s}Oracle", .{msg_prefix});
+    defer gpa.free(oracle_src);
+    const oracle = ctx.evaluate(oracle_src) catch |err| {
+        std.debug.print("seed {d}: cannot read midgc worker-close oracle: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    if (!oracle.isNumber() or oracle.asNum() != 1) {
+        std.debug.print("seed {d}: midgc worker-close oracle got {d}\n", .{ seed, if (oracle.isNumber()) oracle.asNum() else -1 });
+        return false;
+    }
+
+    var replies: usize = 0;
+    var ack_sum: f64 = 0;
+    while (true) {
+        const reply = graceful.receive(&machine, 10_000) catch |err| {
+            std.debug.print("seed {d}: midgc graceful worker-close receive failed: {s}\n", .{ seed, @errorName(err) });
+            return false;
+        } orelse break;
+        const ack = machine.getProperty(reply, "ack") catch |err| {
+            std.debug.print("seed {d}: cannot read midgc graceful worker-close ack: {s}\n", .{ seed, @errorName(err) });
+            return false;
+        };
+        if (!ack.isNumber()) {
+            std.debug.print("seed {d}: midgc graceful worker-close reply without numeric ack\n", .{seed});
+            return false;
+        }
+        if (module_worker) {
+            const module = machine.getProperty(reply, "module") catch |err| {
+                std.debug.print("seed {d}: cannot read midgc graceful module worker-close flag: {s}\n", .{ seed, @errorName(err) });
+                return false;
+            };
+            if (!module.isBoolean() or !module.asBool()) {
+                std.debug.print("seed {d}: midgc graceful module worker-close reply without module flag\n", .{seed});
+                return false;
+            }
+        }
+        const expected_ack: f64 = if (replies < extra_pings) @floatFromInt(replies) else 1000;
+        if (ack.asNum() != expected_ack) {
+            std.debug.print("seed {d}: midgc graceful worker-close FIFO ack got {d}, expected {d}\n", .{ seed, ack.asNum(), expected_ack });
+            return false;
+        }
+        ack_sum += ack.asNum();
+        replies += 1;
+    }
+    const expected_replies = extra_pings + 1;
+    if (replies != expected_replies) {
+        std.debug.print("seed {d}: midgc graceful worker-close reply count got {d}, expected {d}\n", .{ seed, replies, expected_replies });
+        return false;
+    }
+    const expected_ack_sum = 1000 + (@as(f64, @floatFromInt(extra_pings * (extra_pings - 1))) / 2);
+    if (ack_sum != expected_ack_sum) {
+        std.debug.print("seed {d}: midgc graceful worker-close ack sum got {d}, expected {d}\n", .{ seed, ack_sum, expected_ack_sum });
+        return false;
+    }
+
+    terminator.terminate();
+    const after_term_src = try std.fmt.allocPrint(gpa, "globalThis.{s}Msg('after-terminate', 4000)", .{msg_prefix});
+    defer gpa.free(after_term_src);
+    const after_term = ctx.evaluate(after_term_src) catch |err| {
+        std.debug.print("seed {d}: cannot make midgc worker-close after-terminate message: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    terminator.postMessage(&machine, after_term) catch |err| {
+        std.debug.print("seed {d}: midgc terminator worker-close post after terminate failed: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    terminator.join();
+    const after_term_reply = terminator.receive(&machine, 0) catch |err| {
+        std.debug.print("seed {d}: midgc terminator worker-close receive after join failed: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    if (after_term_reply != null) {
+        std.debug.print("seed {d}: midgc terminator worker-close delivered a post-terminate reply\n", .{seed});
+        return false;
+    }
+    terminator.destroy();
+    cleanup_terminator = false;
+    graceful.join();
+    graceful.destroy();
+    cleanup_graceful = false;
+
+    const delivered_src = try std.fmt.allocPrint(gpa, "Atomics.load(new Int32Array(globalThis.{s}Sab), 0)", .{msg_prefix});
+    defer gpa.free(delivered_src);
+    const delivered = ctx.evaluate(delivered_src) catch |err| {
+        std.debug.print("seed {d}: cannot read midgc worker-close delivery counter: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    if (!delivered.isNumber() or delivered.asNum() != @as(f64, @floatFromInt(expected_replies))) {
+        std.debug.print("seed {d}: midgc worker-close delivery counter got {d}, expected {d}\n", .{ seed, if (delivered.isNumber()) delivered.asNum() else -1, expected_replies });
+        return false;
+    }
+
+    ctx.collectGarbage();
+    const cleanup_src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  globalThis.{s}Registry.cleanupSome();
+        \\  if (globalThis.{s}CleanupCount !== {d})
+        \\    throw new Error('bad midgc worker-close cleanup count: ' + globalThis.{s}CleanupCount);
+        \\  if (globalThis.{s}CleanupSum !== {d})
+        \\    throw new Error('bad midgc worker-close cleanup sum: ' + globalThis.{s}CleanupSum);
+        \\  return globalThis.{s}CleanupCount;
+        \\}})();
+        \\
+    ,
+        .{
+            msg_prefix,
+            msg_prefix,
+            expected_cleanup_count,
+            msg_prefix,
+            msg_prefix,
+            expected_cleanup_sum,
+            msg_prefix,
+            msg_prefix,
+        },
+    );
+    defer gpa.free(cleanup_src);
+    const cleaned = ctx.evaluate(cleanup_src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: midgc worker-close cleanup JS threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!cleaned.isNumber() or cleaned.asNum() != @as(f64, @floatFromInt(expected_cleanup_count))) {
+        std.debug.print("seed {d}: midgc worker-close cleaned got {d}, expected {d}\n", .{ seed, if (cleaned.isNumber()) cleaned.asNum() else -1, expected_cleanup_count });
+        return false;
+    }
+    return true;
+}
+
 fn runMidScriptWorkerCleanupProfile(gpa: std.mem.Allocator, seed: u64, comptime module_worker: bool, comptime handler_exception: bool) !bool {
     const salt: u64 = if (handler_exception)
         if (module_worker) 0x6d69_6467_6d65_7863 else 0x6d69_6477_6578_6366
@@ -8551,6 +9008,40 @@ pub fn main(init: std.process.Init) !void {
         if (mmwefail != 0) std.process.exit(1);
         return;
     };
+    // `threadfuzz midgcworkerclose <iters> <seed>`: focused mid-script
+    // parallel-GC repro for script Worker close/terminate FIFO drain/drop
+    // while shared-realm Threads publish cleanup roots through the finishing
+    // sweep.
+    if (first) |a| if (std.mem.eql(u8, a, "midgcworkerclose")) {
+        if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch 1;
+        if (args.next()) |b| base_seed = std.fmt.parseInt(u64, b, 10) catch 1;
+        var mwcfail: usize = 0;
+        var mwci: usize = 0;
+        while (mwci < iters) : (mwci += 1) {
+            const seed = base_seed +% mwci;
+            if (!(try runMidScriptWorkerCloseTerminateGc(gpa, seed))) mwcfail += 1;
+        }
+        std.debug.print("threadfuzz midgcworkerclose: {d} programs from seed {d}, {d} failures\n", .{ iters, base_seed, mwcfail });
+        if (mwcfail != 0) std.process.exit(1);
+        return;
+    };
+    // `threadfuzz midgcmoduleworkerclose <iters> <seed>`: focused mid-script
+    // parallel-GC repro for module Worker close/terminate FIFO drain/drop
+    // while shared-realm Threads publish cleanup roots through the finishing
+    // sweep.
+    if (first) |a| if (std.mem.eql(u8, a, "midgcmoduleworkerclose")) {
+        if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch 1;
+        if (args.next()) |b| base_seed = std.fmt.parseInt(u64, b, 10) catch 1;
+        var mmwcfail: usize = 0;
+        var mmwci: usize = 0;
+        while (mmwci < iters) : (mmwci += 1) {
+            const seed = base_seed +% mmwci;
+            if (!(try runMidScriptModuleWorkerCloseTerminateGc(gpa, seed))) mmwcfail += 1;
+        }
+        std.debug.print("threadfuzz midgcmoduleworkerclose: {d} programs from seed {d}, {d} failures\n", .{ iters, base_seed, mmwcfail });
+        if (mmwcfail != 0) std.process.exit(1);
+        return;
+    };
     // `threadfuzz midgcweak <iters> <seed>`: focused mid-script parallel-GC
     // repro for WeakMap/WeakSet dead-key pruning, live ephemeron values, and
     // FinalizationRegistry unregister compaction while sync peers are parked.
@@ -8722,7 +9213,8 @@ pub fn main(init: std.process.Init) !void {
     // objects, sync-wait peer stack roots with finalization cleanup, WeakMap/
     // WeakSet dead-key cleanup with live ephemeron values and unregister-token
     // suppression, isolated script/module Worker/SAB progress plus handler-
-    // exception recovery while shared-realm cleanup roots are swept, and
+    // exception recovery plus close/terminate FIFO drain/drop while
+    // shared-realm cleanup roots are swept, and
     // teardown termination with pending asyncJoin/waitAsync roots must survive
     // that window. The oracle requires exact program completion or expected
     // termination and at least one finishing parallel sweep.
@@ -8744,9 +9236,11 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runMidScriptModuleWorkerCleanupGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptWorkerExceptionCleanupGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptModuleWorkerExceptionCleanupGc(gpa, seed))) mfail += 1;
+            if (!(try runMidScriptWorkerCloseTerminateGc(gpa, seed))) mfail += 1;
+            if (!(try runMidScriptModuleWorkerCloseTerminateGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptWeakCollectionGc(gpa, seed))) mfail += 1;
         }
-        std.debug.print("threadfuzz midgc: {d} programs from seed {d}, {d} failures\n", .{ iters * 11, base_seed, mfail });
+        std.debug.print("threadfuzz midgc: {d} programs from seed {d}, {d} failures\n", .{ iters * 13, base_seed, mfail });
         if (mfail != 0) std.process.exit(1);
         return;
     };

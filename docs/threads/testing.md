@@ -161,7 +161,11 @@ sweep, then verify exact Worker progress, joined thread roots, asyncJoin
 reactions, and cleanup count/sum, adds script and module Worker handler-
 exception cleanup subprograms that first recover from an expected thrown
 `onmessage` delivery and then prove the same Worker/SAB progress plus
-shared-realm cleanup oracle through the finishing sweep, adds a weak-collection subprogram that parks property
+shared-realm cleanup oracle through the finishing sweep, adds script and module
+Worker close/terminate subprograms that keep exact FIFO drain/drop ordering,
+post-close drop, post-terminate receive silence, shared-realm joined roots,
+asyncJoin reactions, and cleanup count/sum live across the finishing sweep,
+adds a weak-collection subprogram that parks property
 `Atomics.wait`, `Condition.wait`, and contended `Lock.hold` peers while live
 WeakMap values are reachable only through live weak keys, dead WeakMap/WeakSet
 targets are reachable only through weak structures and WeakRefs, and
@@ -176,7 +180,7 @@ join-termination unit witness that checks parked-state/mutex cleanup, then
 requires exact script completion or exact expected termination plus at least one
 finishing parallel sweep and exact
 `FinalizationRegistry` cleanup count/sum delivery plus unregister-token
-suppression after a quiescent collect. Each seed currently runs 11 deterministic
+suppression after a quiescent collect. Each seed currently runs 13 deterministic
 mid-GC subprograms. The
 lifecycle profile
 (`-Dfuzz-lifecycle=true`) adds expected-throw termination storms for
