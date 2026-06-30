@@ -205,7 +205,8 @@ as embedders exercise more threaded host patterns.
   wait-pump subprogram, a sync-wait cleanup subprogram, a promise-publication
   subprogram, a pending-microtask subprogram, a creator-owned buffer
   subprogram, isolated script Worker/SAB and module Worker/SAB cleanup
-  subprograms, a weak-collection cleanup subprogram, and an expected
+  subprograms, script and module Worker handler-exception cleanup subprograms,
+  a weak-collection cleanup subprogram, and an expected
   teardown-termination subprogram, and each must finish at least one parallel
   sweep. The wait-pump subprogram queues a
   FIFO `Lock.asyncHold` grant chain including a root-bearing rejected grant plus
@@ -254,7 +255,9 @@ as embedders exercise more threaded host patterns.
   Workers on the same retained `SharedArrayBuffer` while shared-realm `Thread`s
   register cleanup targets and park stack roots through a finishing sweep, then
   verify exact Worker progress, joined thread roots, asyncJoin reactions, and
-  cleanup count/sum.
+  cleanup count/sum; sibling script/module Worker handler-exception cleanup
+  subprograms first recover from an expected thrown `onmessage` delivery, then
+  prove the same Worker progress and cleanup oracle through the finishing sweep.
   The teardown subprogram parks children after installing child-owned typed-array
   `waitAsync` tickets, verifies pending `asyncJoin` rejection reactions with
   captured roots after the parent throws, and proves post-termination notify
@@ -321,7 +324,7 @@ as embedders exercise more threaded host patterns.
   exits.
 - CI runs the fuzzer in several modes: default seeded, TSan, high-contention
   amplified, broad semantic,
-  mid-script GC wait-pump/microtask/creator-buffer/sync-wait-cleanup/promise/teardown/Worker-SAB/weak-collection,
+  mid-script GC wait-pump/microtask/creator-buffer/sync-wait-cleanup/promise/teardown/Worker-SAB/Worker-exception/weak-collection,
   lifecycle, ReleaseSafe, and deterministic-result verification.
 
 Remaining: keep extending the lifecycle profile toward more cross-realm
@@ -341,7 +344,7 @@ Every pull request and push to `main` runs:
 - TSan `threadfuzz`,
 - amplified `threadfuzz`,
 - broad semantic `threadfuzz`,
-- mid-script GC wait-pump/microtask/creator-buffer/sync-wait-cleanup/promise/teardown/Worker-SAB/weak-collection
+- mid-script GC wait-pump/microtask/creator-buffer/sync-wait-cleanup/promise/teardown/Worker-SAB/Worker-exception/weak-collection
   `threadfuzz`,
 - lifecycle `threadfuzz`,
 - ReleaseSafe `threadfuzz`,

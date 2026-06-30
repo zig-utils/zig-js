@@ -204,7 +204,9 @@ context APIs.
   verified, plus script Worker/SAB and module Worker/SAB cleanup subprograms
   where isolated Workers keep progressing on a retained `SharedArrayBuffer`
   while shared-realm `Thread`s publish cleanup targets and parked stack roots
-  through a finishing sweep. Sync-wait pump points
+  through a finishing sweep, plus sibling script/module Worker handler-exception
+  cleanup subprograms that recover from an expected thrown `onmessage` before
+  proving the same Worker progress and cleanup oracle. Sync-wait pump points
   must execute the async grants during the
   same allocation-pressure window that produces a finishing parallel sweep, and
   the `waitAsync` reaction must run intact after notification. Join-side
@@ -233,9 +235,9 @@ context APIs.
   Thread result and thrown exception objects live through the thread completion
   record, keeps creator-owned `SharedArrayBuffer` and `ArrayBuffer` storage live
   through unjoined Thread completion records and delayed `asyncJoin` observers,
-  verifies isolated script/module Worker/SAB progress while shared-realm cleanup
-  roots are swept, and verifies exact `FinalizationRegistry` cleanup count/sum
-  delivery afterward. The lifecycle
+  verifies isolated script/module Worker/SAB progress plus script/module Worker
+  handler-exception recovery while shared-realm cleanup roots are swept, and
+  verifies exact `FinalizationRegistry` cleanup count/sum delivery afterward. The lifecycle
   profile now adds deterministic termination storms,
   script Worker/thread retained-`SharedArrayBuffer` overlap, simple-import,
   diamond-shaped, and fanout/rejoin module Worker/thread overlap with exact

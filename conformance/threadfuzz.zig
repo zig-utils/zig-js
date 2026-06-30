@@ -152,12 +152,17 @@ const ModuleMidGcCleanupHost = struct {
             \\import { runModuleCleanup } from "./work.js";
             \\globalThis.onmessage = (e) => {
             \\  const v = new Int32Array(e.data.sab);
+            \\  if (e.data.cmd === 'throw') {
+            \\    Atomics.add(v, 5, 1);
+            \\    Atomics.notify(v, 5);
+            \\    throw new Error('expected midgc module-worker cleanup handler throw');
+            \\  }
             \\  Atomics.add(v, 0, 1);
             \\  Atomics.notify(v, 0);
             \\  while (Atomics.load(v, 1) === 0)
             \\    Atomics.wait(v, 1, 0, 100);
             \\  const local = runModuleCleanup(e.data.sab, e.data.iters);
-            \\  postMessage({ done: true, module: true, local, after: Atomics.add(v, 4, 1) + 1 });
+            \\  postMessage({ done: true, module: true, local, after: Atomics.add(v, 4, 1) + 1, recovered: Atomics.load(v, 5) });
             \\  close();
             \\};
             ,
@@ -7473,15 +7478,28 @@ fn runMidScriptCreatorOwnedBufferGc(gpa: std.mem.Allocator, seed: u64) !bool {
 }
 
 fn runMidScriptWorkerCleanupGc(gpa: std.mem.Allocator, seed: u64) !bool {
-    return runMidScriptWorkerCleanupProfile(gpa, seed, false);
+    return runMidScriptWorkerCleanupProfile(gpa, seed, false, false);
 }
 
 fn runMidScriptModuleWorkerCleanupGc(gpa: std.mem.Allocator, seed: u64) !bool {
-    return runMidScriptWorkerCleanupProfile(gpa, seed, true);
+    return runMidScriptWorkerCleanupProfile(gpa, seed, true, false);
 }
 
-fn runMidScriptWorkerCleanupProfile(gpa: std.mem.Allocator, seed: u64, comptime module_worker: bool) !bool {
-    const salt: u64 = if (module_worker) 0x6d69_6467_636d_6f64 else 0x6d69_6477_6f72_6b63;
+fn runMidScriptWorkerExceptionCleanupGc(gpa: std.mem.Allocator, seed: u64) !bool {
+    return runMidScriptWorkerCleanupProfile(gpa, seed, false, true);
+}
+
+fn runMidScriptModuleWorkerExceptionCleanupGc(gpa: std.mem.Allocator, seed: u64) !bool {
+    return runMidScriptWorkerCleanupProfile(gpa, seed, true, true);
+}
+
+fn runMidScriptWorkerCleanupProfile(gpa: std.mem.Allocator, seed: u64, comptime module_worker: bool, comptime handler_exception: bool) !bool {
+    const salt: u64 = if (handler_exception)
+        if (module_worker) 0x6d69_6467_6d65_7863 else 0x6d69_6477_6578_6366
+    else if (module_worker)
+        0x6d69_6467_636d_6f64
+    else
+        0x6d69_6477_6f72_6b63;
     var prng = std.Random.DefaultPrng.init(seed ^ salt);
     const r = prng.random();
     const nworkers = 1 + r.uintLessThan(usize, 2);
@@ -7531,7 +7549,11 @@ fn runMidScriptWorkerCleanupProfile(gpa: std.mem.Allocator, seed: u64, comptime 
 
     const msg_src = try std.fmt.allocPrint(
         gpa,
-        "globalThis.__midgcWorkerCleanupMsg = {{ sab: new SharedArrayBuffer(32), iters: {d} }}; globalThis.__midgcWorkerCleanupMsg",
+        \\globalThis.__midgcWorkerCleanupMsg = {{ sab: new SharedArrayBuffer(32), iters: {d} }};
+        \\globalThis.__midgcWorkerCleanupThrowMsg = {{ sab: globalThis.__midgcWorkerCleanupMsg.sab, cmd: 'throw' }};
+        \\globalThis.__midgcWorkerCleanupMsg
+        \\
+    ,
         .{worker_iters},
     );
     defer gpa.free(msg_src);
@@ -7543,6 +7565,11 @@ fn runMidScriptWorkerCleanupProfile(gpa: std.mem.Allocator, seed: u64, comptime 
     const worker_src =
         \\globalThis.onmessage = (e) => {
         \\  const v = new Int32Array(e.data.sab);
+        \\  if (e.data.cmd === 'throw') {
+        \\    Atomics.add(v, 5, 1);
+        \\    Atomics.notify(v, 5);
+        \\    throw new Error('expected midgc worker cleanup handler throw');
+        \\  }
         \\  Atomics.add(v, 0, 1);
         \\  Atomics.notify(v, 0);
         \\  while (Atomics.load(v, 1) === 0)
@@ -7554,10 +7581,18 @@ fn runMidScriptWorkerCleanupProfile(gpa: std.mem.Allocator, seed: u64, comptime 
         \\    if ((i & 127) === 0)
         \\      Atomics.add(v, 3, 1);
         \\  }
-        \\  postMessage({ done: true, local, after: Atomics.add(v, 4, 1) + 1 });
+        \\  postMessage({ done: true, local, after: Atomics.add(v, 4, 1) + 1, recovered: Atomics.load(v, 5) });
         \\  close();
         \\};
     ;
+
+    const throw_msg = if (handler_exception)
+        ctx.evaluate("globalThis.__midgcWorkerCleanupThrowMsg") catch |err| {
+            std.debug.print("seed {d}: cannot create midgc worker-cleanup throw message: {s}\n", .{ seed, @errorName(err) });
+            return false;
+        }
+    else
+        js.Value.undef();
 
     var workers: std.ArrayListUnmanaged(*Worker) = .empty;
     defer workers.deinit(gpa);
@@ -7583,6 +7618,12 @@ fn runMidScriptWorkerCleanupProfile(gpa: std.mem.Allocator, seed: u64, comptime 
                 return false;
             };
         try workers.append(gpa, w);
+        if (handler_exception) {
+            w.postMessage(&machine, throw_msg) catch |err| {
+                std.debug.print("seed {d}: midgc worker-cleanup throw post failed: {s}\n", .{ seed, @errorName(err) });
+                return false;
+            };
+        }
         w.postMessage(&machine, msg) catch |err| {
             std.debug.print("seed {d}: midgc worker-cleanup post failed: {s}\n", .{ seed, @errorName(err) });
             return false;
@@ -7761,7 +7802,15 @@ fn runMidScriptWorkerCleanupProfile(gpa: std.mem.Allocator, seed: u64, comptime 
             std.debug.print("seed {d}: cannot read midgc worker-cleanup after: {s}\n", .{ seed, @errorName(err) });
             return false;
         };
-        if (!done.isBoolean() or !done.asBool() or !local.isNumber() or local.asNum() != expected_worker_local or !after.isNumber() or after.asNum() < 1 or after.asNum() > @as(f64, @floatFromInt(nworkers))) {
+        const recovered = machine.getProperty(reply, "recovered") catch |err| {
+            std.debug.print("seed {d}: cannot read midgc worker-cleanup recovery count: {s}\n", .{ seed, @errorName(err) });
+            return false;
+        };
+        const recovered_ok = recovered.isNumber() and if (handler_exception)
+            (recovered.asNum() >= 1 and recovered.asNum() <= @as(f64, @floatFromInt(nworkers)))
+        else
+            recovered.asNum() == 0;
+        if (!done.isBoolean() or !done.asBool() or !local.isNumber() or local.asNum() != expected_worker_local or !after.isNumber() or after.asNum() < 1 or after.asNum() > @as(f64, @floatFromInt(nworkers)) or !recovered_ok) {
             std.debug.print("seed {d}: bad midgc worker-cleanup reply\n", .{seed});
             return false;
         }
@@ -7787,6 +7836,15 @@ fn runMidScriptWorkerCleanupProfile(gpa: std.mem.Allocator, seed: u64, comptime 
     };
     if (!worker_done.isNumber() or worker_done.asNum() != @as(f64, @floatFromInt(nworkers))) {
         std.debug.print("seed {d}: midgc worker-cleanup worker done got {d}, expected {d}\n", .{ seed, if (worker_done.isNumber()) worker_done.asNum() else -1, nworkers });
+        return false;
+    }
+    const worker_recovered = ctx.evaluate("Atomics.load(new Int32Array(globalThis.__midgcWorkerCleanupMsg.sab), 5)") catch |err| {
+        std.debug.print("seed {d}: cannot read midgc worker-cleanup recovery counter: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    const expected_recovered: f64 = if (handler_exception) @floatFromInt(nworkers) else 0;
+    if (!worker_recovered.isNumber() or worker_recovered.asNum() != expected_recovered) {
+        std.debug.print("seed {d}: midgc worker-cleanup recovery counter got {d}, expected {d}\n", .{ seed, if (worker_recovered.isNumber()) worker_recovered.asNum() else -1, expected_recovered });
         return false;
     }
 
@@ -8145,6 +8203,38 @@ pub fn main(init: std.process.Init) !void {
         if (mmwfail != 0) std.process.exit(1);
         return;
     };
+    // `threadfuzz midgcworkerexception <iters> <seed>`: focused mid-script
+    // parallel-GC repro for Worker handler-exception recovery while shared-
+    // realm Threads publish cleanup roots through a finishing sweep.
+    if (first) |a| if (std.mem.eql(u8, a, "midgcworkerexception")) {
+        if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch 1;
+        if (args.next()) |b| base_seed = std.fmt.parseInt(u64, b, 10) catch 1;
+        var mwefail: usize = 0;
+        var mwei: usize = 0;
+        while (mwei < iters) : (mwei += 1) {
+            const seed = base_seed +% mwei;
+            if (!(try runMidScriptWorkerExceptionCleanupGc(gpa, seed))) mwefail += 1;
+        }
+        std.debug.print("threadfuzz midgcworkerexception: {d} programs from seed {d}, {d} failures\n", .{ iters, base_seed, mwefail });
+        if (mwefail != 0) std.process.exit(1);
+        return;
+    };
+    // `threadfuzz midgcmoduleworkerexception <iters> <seed>`: focused
+    // mid-script parallel-GC repro for module Worker handler-exception recovery
+    // while shared-realm Threads publish cleanup roots through a finishing sweep.
+    if (first) |a| if (std.mem.eql(u8, a, "midgcmoduleworkerexception")) {
+        if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch 1;
+        if (args.next()) |b| base_seed = std.fmt.parseInt(u64, b, 10) catch 1;
+        var mmwefail: usize = 0;
+        var mmwei: usize = 0;
+        while (mmwei < iters) : (mmwei += 1) {
+            const seed = base_seed +% mmwei;
+            if (!(try runMidScriptModuleWorkerExceptionCleanupGc(gpa, seed))) mmwefail += 1;
+        }
+        std.debug.print("threadfuzz midgcmoduleworkerexception: {d} programs from seed {d}, {d} failures\n", .{ iters, base_seed, mmwefail });
+        if (mmwefail != 0) std.process.exit(1);
+        return;
+    };
     // `threadfuzz midgcweak <iters> <seed>`: focused mid-script parallel-GC
     // repro for WeakMap/WeakSet dead-key pruning, live ephemeron values, and
     // FinalizationRegistry unregister compaction while sync peers are parked.
@@ -8312,11 +8402,11 @@ pub fn main(init: std.process.Init) !void {
     // completed-but-unjoined Thread results and thrown
     // objects, sync-wait peer stack roots with finalization cleanup, WeakMap/
     // WeakSet dead-key cleanup with live ephemeron values and unregister-token
-    // suppression, isolated script/module Worker/SAB progress while
-    // shared-realm cleanup roots are swept, and teardown termination with
-    // pending asyncJoin/waitAsync roots must survive that window. The oracle
-    // requires exact program completion or expected termination and at least one
-    // finishing parallel sweep.
+    // suppression, isolated script/module Worker/SAB progress plus handler-
+    // exception recovery while shared-realm cleanup roots are swept, and
+    // teardown termination with pending asyncJoin/waitAsync roots must survive
+    // that window. The oracle requires exact program completion or expected
+    // termination and at least one finishing parallel sweep.
     if (first) |a| if (std.mem.eql(u8, a, "midgc")) {
         iters = 20;
         if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch iters;
@@ -8333,9 +8423,11 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runMidScriptSyncWaitCleanupGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptWorkerCleanupGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptModuleWorkerCleanupGc(gpa, seed))) mfail += 1;
+            if (!(try runMidScriptWorkerExceptionCleanupGc(gpa, seed))) mfail += 1;
+            if (!(try runMidScriptModuleWorkerExceptionCleanupGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptWeakCollectionGc(gpa, seed))) mfail += 1;
         }
-        std.debug.print("threadfuzz midgc: {d} programs from seed {d}, {d} failures\n", .{ iters * 9, base_seed, mfail });
+        std.debug.print("threadfuzz midgc: {d} programs from seed {d}, {d} failures\n", .{ iters * 11, base_seed, mfail });
         if (mfail != 0) std.process.exit(1);
         return;
     };
