@@ -130,7 +130,8 @@ and a completed-but-unjoined thrown exception object reachable only through the
 thread completion record, and has a focused join-termination unit witness that
 checks parked-state/mutex cleanup, then requires exact script completion plus
 at least one finishing parallel sweep and exact
-`FinalizationRegistry` cleanup count/sum delivery after a quiescent collect. The
+`FinalizationRegistry` cleanup count/sum delivery plus unregister-token
+suppression after a quiescent collect. The
 lifecycle profile
 (`-Dfuzz-lifecycle=true`) adds expected-throw termination storms for
 parked/unjoined shared-realm `Thread`s, exact Atomics counter oracles for script

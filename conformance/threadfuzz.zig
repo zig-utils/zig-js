@@ -3124,6 +3124,8 @@ fn runMidScriptWaitPumpGc(gpa: std.mem.Allocator, seed: u64) !bool {
         \\  }})();
         \\  globalThis.__midgcCleanupCount = 0;
         \\  globalThis.__midgcCleanupSum = 0;
+        \\  globalThis.__midgcUnregisterCount = 0;
+        \\  globalThis.__midgcUnregisterSum = 0;
         \\  globalThis.__midgcRegistry = (typeof FinalizationRegistry === 'function')
         \\    ? new FinalizationRegistry(function(held) {{
         \\        globalThis.__midgcCleanupCount = globalThis.__midgcCleanupCount + 1;
@@ -3258,6 +3260,14 @@ fn runMidScriptWaitPumpGc(gpa: std.mem.Allocator, seed: u64) !bool {
         \\      keep.push(cell);
         \\      if (globalThis.__midgcRegistry && ((i + round) & 31) === 0)
         \\        globalThis.__midgcRegistry.register({{ ephemeral: i, round }}, round * {d} + i + 1);
+        \\      if (globalThis.__midgcRegistry && ((i + round) & 63) === 7) {{
+        \\        const token = {{ token: 'midgc-unregister', round, i }};
+        \\        globalThis.__midgcRegistry.register({{ ephemeral: 'unregistered', i, round }}, 1000000 + round * {d} + i + 1, token);
+        \\        if (!globalThis.__midgcRegistry.unregister(token))
+        \\          throw new Error('midgc unregister token was not found');
+        \\        globalThis.__midgcUnregisterCount = globalThis.__midgcUnregisterCount + 1;
+        \\        globalThis.__midgcUnregisterSum = globalThis.__midgcUnregisterSum + round * {d} + i + 1;
+        \\      }}
         \\    }}
         \\    let spin = 0;
         \\    for (let j = 0; j < {d}; j++) spin = (spin + j + round) & 0x3fffffff;
@@ -3359,6 +3369,8 @@ fn runMidScriptWaitPumpGc(gpa: std.mem.Allocator, seed: u64) !bool {
             rounds,
             per_round,
             per_round,
+            per_round,
+            per_round,
             spin_iters,
             async_expected,
             async_expected,
@@ -3380,6 +3392,8 @@ fn runMidScriptWaitPumpGc(gpa: std.mem.Allocator, seed: u64) !bool {
     const expected: f64 = @floatFromInt(rounds * per_round);
     var expected_cleanup_count: usize = 0;
     var expected_cleanup_sum: usize = 0;
+    var expected_unregister_count: usize = 0;
+    var expected_unregister_sum: usize = 0;
     var round: usize = 0;
     while (round < rounds) : (round += 1) {
         var i: usize = 0;
@@ -3387,6 +3401,10 @@ fn runMidScriptWaitPumpGc(gpa: std.mem.Allocator, seed: u64) !bool {
             if (((i + round) & 31) == 0) {
                 expected_cleanup_count += 1;
                 expected_cleanup_sum += round * per_round + i + 1;
+            }
+            if (((i + round) & 63) == 7) {
+                expected_unregister_count += 1;
+                expected_unregister_sum += round * per_round + i + 1;
             }
         }
     }
@@ -3447,11 +3465,15 @@ fn runMidScriptWaitPumpGc(gpa: std.mem.Allocator, seed: u64) !bool {
         \\    throw new Error('midgc cleanup count ' + globalThis.__midgcCleanupCount);
         \\  if (globalThis.__midgcCleanupSum !== {d})
         \\    throw new Error('midgc cleanup sum ' + globalThis.__midgcCleanupSum);
+        \\  if (globalThis.__midgcUnregisterCount !== {d})
+        \\    throw new Error('midgc unregister count ' + globalThis.__midgcUnregisterCount);
+        \\  if (globalThis.__midgcUnregisterSum !== {d})
+        \\    throw new Error('midgc unregister sum ' + globalThis.__midgcUnregisterSum);
         \\  return globalThis.__midgcCleanupCount;
         \\}})();
         \\
     ,
-        .{ expected_cleanup_count, expected_cleanup_sum },
+        .{ expected_cleanup_count, expected_cleanup_sum, expected_unregister_count, expected_unregister_sum },
     );
     defer gpa.free(cleanup_src);
     const cleaned = ctx.evaluate(cleanup_src) catch |err| {

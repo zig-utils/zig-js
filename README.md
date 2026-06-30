@@ -306,9 +306,10 @@ threading architecture:
   and pending `Thread.asyncJoin` fulfillment/rejection reaction graphs
   reachable only through native completion records while allocation pressure
   collects. It also verifies exact
-  `FinalizationRegistry` cleanup count/sum delivery after those wait-pump
-  sweeps and keeps a registered object reachable only through
-  `ThreadLocal.value` while the owning thread is parked, proving that hidden
+  `FinalizationRegistry` cleanup count/sum delivery plus unregister-token
+  suppression after those wait-pump sweeps and keeps a registered object
+  reachable only through `ThreadLocal.value` while the owning thread is parked,
+  proving that hidden
   native ThreadLocal roots survive the mid-script collection window. Join-side
   parked-root state is now balanced across termination/error unwinds, so a
   failed `Thread.join()` cannot leave the interpreter permanently marked as a
@@ -321,7 +322,8 @@ threading architecture:
   `Thread.asyncJoin` reaction roots, ThreadLocal-only hidden roots in parked
   peers, and deterministic
   completed-but-unjoined Thread result and thrown exception roots, and
-  deterministic cleanup count/sum delivery; the lifecycle
+  deterministic cleanup count/sum delivery plus unregister-token suppression;
+  the lifecycle
   profile adds deterministic termination storms, script Worker/thread overlap
   plus simple-import, diamond-shaped, and fanout/rejoin module Worker/thread
   overlap over retained `SharedArrayBuffer` storage, Worker/thread/finalization
