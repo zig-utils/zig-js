@@ -35112,6 +35112,20 @@ fn temporalZdtAddFn(comptime sign: f64) value.NativeFn {
                 // Then time-of-day units.
                 const time_only = durationTimeNs(dur) - (@as(i128, @intFromFloat(dur[2])) * 7 + @as(i128, @intFromFloat(dur[3]))) * nsPerUnit(.day);
                 epoch += @as(i128, @intFromFloat(sign)) * time_only;
+                if (time_only == 0 and !std.mem.eql(u8, t.calendar, "iso8601")) {
+                    const v = try zdtMakeWithCalendar(self, epoch, t.tz_name, t.tz_offset_ns, t.calendar);
+                    const out = v.asObj().temporal.?;
+                    out.year = @intCast(c.y);
+                    out.month = c.m;
+                    out.day = c.d;
+                    out.hour = l.hour;
+                    out.minute = l.minute;
+                    out.second = l.second;
+                    out.millisecond = l.millisecond;
+                    out.microsecond = l.microsecond;
+                    out.nanosecond = l.nanosecond;
+                    return v;
+                }
             } else {
                 epoch += @as(i128, @intFromFloat(sign)) * durationTimeNs(dur);
             }
