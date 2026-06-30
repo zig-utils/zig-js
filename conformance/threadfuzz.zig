@@ -2546,6 +2546,173 @@ fn runFinalizationWaiterCleanupInterleaving(gpa: std.mem.Allocator, seed: u64) !
     return true;
 }
 
+fn runWaitAsyncFinalizationCleanupInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
+    var prng = std.Random.DefaultPrng.init(seed ^ 0x7761_6669_6e61_6c73);
+    const r = prng.random();
+    const nthreads = 3 + r.uintLessThan(usize, 4);
+    const per_thread = 6 + r.uintLessThan(usize, 8);
+    const wait_timeout_ms = 1200 + r.uintLessThan(usize, 800);
+
+    var expected_wait_score: usize = 0;
+    var expected_join_sum: usize = 0;
+    var expected_cleanup_count: usize = 0;
+    var expected_cleanup_sum: usize = 0;
+    var id: usize = 0;
+    while (id < nthreads) : (id += 1) {
+        const base = (id + 1) * 30_000;
+        expected_wait_score += base + id;
+        expected_cleanup_count += per_thread + 1;
+        expected_cleanup_sum += base + 100_000;
+        var local_sum: usize = 0;
+        var i: usize = 0;
+        while (i < per_thread) : (i += 1) {
+            local_sum += base + i;
+            expected_cleanup_sum += base + i;
+        }
+        expected_join_sum += local_sum + id + 1;
+    }
+
+    const ctx = js.Context.createWith(gpa, .{ .enable_threads = true, .enable_gc = true }) catch {
+        std.debug.print("seed {d}: waitAsync/finalization context creation failed\n", .{seed});
+        return false;
+    };
+    defer ctx.destroy();
+
+    const src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  globalThis.__waitAsyncFinCleanupCount = 0;
+        \\  globalThis.__waitAsyncFinCleanupSum = 0;
+        \\  globalThis.__waitAsyncFinWaitScore = 0;
+        \\  globalThis.__waitAsyncFinAsyncJoinScore = 0;
+        \\  globalThis.__waitAsyncFinRegistry = new FinalizationRegistry((held) => {{
+        \\    globalThis.__waitAsyncFinCleanupCount++;
+        \\    globalThis.__waitAsyncFinCleanupSum += held;
+        \\  }});
+        \\  const registry = globalThis.__waitAsyncFinRegistry;
+        \\  const view = new Int32Array(new SharedArrayBuffer({d} * 4));
+        \\  const threads = [];
+        \\  for (let id = 0; id < {d}; id++) {{
+        \\    const base = (id + 1) * 30000;
+        \\    let mainTarget = {{ id, kind: 'main-waitAsync-finalization' }};
+        \\    registry.register(mainTarget, base + 100000);
+        \\    mainTarget = null;
+        \\    const reactionRoot = {{ marker: base + id, nested: {{ label: 'waitAsync-finalization-root', seed: {d} }} }};
+        \\    const waiter = Atomics.waitAsync(view, id, 0, {d});
+        \\    if (waiter.async !== true || !(waiter.value instanceof Promise))
+        \\      throw new Error('bad waitAsync/finalization pending shape');
+        \\    waiter.value.then(
+        \\      (v) => {{
+        \\        if (v === 'ok' && reactionRoot.marker === base + id && reactionRoot.nested.seed === {d})
+        \\          globalThis.__waitAsyncFinWaitScore += reactionRoot.marker;
+        \\        else
+        \\          globalThis.__waitAsyncFinWaitScore = -1000000;
+        \\      }},
+        \\      () => {{ globalThis.__waitAsyncFinWaitScore = -1000000; }});
+        \\    const t = new Thread((view, id, per, registry) => {{
+        \\      const base = (id + 1) * 30000;
+        \\      let localSum = 0;
+        \\      for (let i = 0; i < per; i++) {{
+        \\        let target = {{ id, i, payload: 'waitAsync-finalization-' + id + '-' + i }};
+        \\        registry.register(target, base + i);
+        \\        localSum += base + i;
+        \\        target = null;
+        \\      }}
+        \\      Atomics.store(view, id, 1);
+        \\      const notified = Atomics.notify(view, id);
+        \\      if (notified !== 1)
+        \\        throw new Error('waitAsync/finalization notify got ' + notified);
+        \\      return localSum + id + notified;
+        \\    }}, view, id, {d}, registry);
+        \\    t.asyncJoin().then(
+        \\      (v) => {{ globalThis.__waitAsyncFinAsyncJoinScore += v; }},
+        \\      () => {{ globalThis.__waitAsyncFinAsyncJoinScore = -1000000; }});
+        \\    threads.push(t);
+        \\  }}
+        \\  let joinSum = 0;
+        \\  for (const t of threads)
+        \\    joinSum += t.join();
+        \\  if (joinSum !== {d})
+        \\    throw new Error('bad waitAsync/finalization join sum ' + joinSum);
+        \\  threads.length = 0;
+        \\  globalThis.__waitAsyncFinCheck = function(expectedWait, expectedJoin) {{
+        \\    if (globalThis.__waitAsyncFinWaitScore !== expectedWait)
+        \\      throw new Error('bad waitAsync/finalization wait score ' + globalThis.__waitAsyncFinWaitScore);
+        \\    if (globalThis.__waitAsyncFinAsyncJoinScore !== expectedJoin)
+        \\      throw new Error('bad waitAsync/finalization asyncJoin score ' + globalThis.__waitAsyncFinAsyncJoinScore);
+        \\    return 1;
+        \\  }};
+        \\  return joinSum;
+        \\}})();
+        \\
+    ,
+        .{ nthreads, nthreads, seed, wait_timeout_ms, seed, per_thread, expected_join_sum },
+    );
+    defer gpa.free(src);
+
+    const joined = ctx.evaluate(src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: waitAsync/finalization JS threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!joined.isNumber() or joined.asNum() != @as(f64, @floatFromInt(expected_join_sum))) {
+        std.debug.print("seed {d}: waitAsync/finalization joined got {d}, expected {d}\n", .{ seed, if (joined.isNumber()) joined.asNum() else -1, expected_join_sum });
+        return false;
+    }
+
+    const check_src = try std.fmt.allocPrint(
+        gpa,
+        "globalThis.__waitAsyncFinCheck({d}, {d})",
+        .{ expected_wait_score, expected_join_sum },
+    );
+    defer gpa.free(check_src);
+    const checked = ctx.evaluate(check_src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: waitAsync/finalization check threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!checked.isNumber() or checked.asNum() != 1) {
+        std.debug.print("seed {d}: waitAsync/finalization check got {d}\n", .{ seed, if (checked.isNumber()) checked.asNum() else -1 });
+        return false;
+    }
+
+    ctx.collectGarbage();
+    const cleanup_src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  globalThis.__waitAsyncFinRegistry.cleanupSome();
+        \\  if (globalThis.__waitAsyncFinCleanupCount !== {d})
+        \\    throw new Error('bad waitAsync/finalization cleanup count ' + globalThis.__waitAsyncFinCleanupCount);
+        \\  if (globalThis.__waitAsyncFinCleanupSum !== {d})
+        \\    throw new Error('bad waitAsync/finalization cleanup sum ' + globalThis.__waitAsyncFinCleanupSum);
+        \\  return globalThis.__waitAsyncFinCleanupCount;
+        \\}})();
+        \\
+    ,
+        .{ expected_cleanup_count, expected_cleanup_sum },
+    );
+    defer gpa.free(cleanup_src);
+    const cleaned = ctx.evaluate(cleanup_src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: waitAsync/finalization cleanup JS threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!cleaned.isNumber() or cleaned.asNum() != @as(f64, @floatFromInt(expected_cleanup_count))) {
+        std.debug.print("seed {d}: waitAsync/finalization cleanup got {d}, expected {d}\n", .{ seed, if (cleaned.isNumber()) cleaned.asNum() else -1, expected_cleanup_count });
+        return false;
+    }
+    return true;
+}
+
 fn runThreadRestrictLifecycleInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
     var prng = std.Random.DefaultPrng.init(seed ^ 0x7265_7374_7269_6374);
     const r = prng.random();
@@ -3584,6 +3751,21 @@ pub fn main(init: std.process.Init) !void {
         if (tfail != 0) std.process.exit(1);
         return;
     };
+    // `threadfuzz waitasyncfinal <iters> <seed>`: focused lifecycle repro for
+    // typed-array waitAsync settlement plus asyncJoin and finalization cleanup.
+    if (first) |a| if (std.mem.eql(u8, a, "waitasyncfinal")) {
+        if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch 1;
+        if (args.next()) |b| base_seed = std.fmt.parseInt(u64, b, 10) catch 1;
+        var wfail: usize = 0;
+        var wi: usize = 0;
+        while (wi < iters) : (wi += 1) {
+            const seed = base_seed +% wi;
+            if (!(try runWaitAsyncFinalizationCleanupInterleaving(gpa, seed))) wfail += 1;
+        }
+        std.debug.print("threadfuzz waitasyncfinal: {d} programs from seed {d}, {d} failures\n", .{ iters, base_seed, wfail });
+        if (wfail != 0) std.process.exit(1);
+        return;
+    };
     // `threadfuzz verify <iters> <seed>`: deterministic-correctness mode — each
     // generated program's exact result is predicted and checked, catching
     // wrong-value (lost/torn atomic) bugs the no-throw oracle misses.
@@ -3628,7 +3810,8 @@ pub fn main(init: std.process.Init) !void {
     // across join/asyncJoin while waiters are parked, cross-thread
     // FinalizationRegistry cleanup, FinalizationRegistry cleanup interleaved
     // with join/asyncJoin and unregister tokens, cleanup
-    // delivery after parked property/condition waiters resume,
+    // delivery after parked property/condition waiters resume, typed-array
+    // waitAsync settlement interleaved with asyncJoin and finalization cleanup,
     // ThreadLocal-stored FinalizationRegistry records across park/resume/cleanup,
     // asyncHold barging delivery after a deterministic queued ticket,
     // Thread.restrict lifecycle isolation, and ThreadLocal isolation across
@@ -3647,8 +3830,10 @@ pub fn main(init: std.process.Init) !void {
     // thread-returned waitAsync promises must settle through join/asyncJoin
     // while waiters resume cleanly, cleanup delivery must match exact count/sum
     // oracles when thread results are observed through both join paths, when
-    // unregister tokens suppress some records, and after parked property and
-    // condition waiters resume; asyncHold barging must deliver a pending
+    // unregister tokens suppress some records, after parked property and
+    // condition waiters resume, and while typed-array waitAsync promise
+    // reactions and asyncJoin reactions settle together; asyncHold barging must
+    // deliver a pending
     // no-fn grant after a sync hold legally overtakes it; ThreadLocal values must stay
     // per-thread across normal, throwing, nested, async-joined, and
     // finalization-cleanup lifecycles.
@@ -3674,12 +3859,13 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runFinalizationCleanupInterleaving(gpa, seed))) lfail += 1;
             if (!(try runFinalizationAsyncJoinCleanupInterleaving(gpa, seed))) lfail += 1;
             if (!(try runFinalizationWaiterCleanupInterleaving(gpa, seed))) lfail += 1;
+            if (!(try runWaitAsyncFinalizationCleanupInterleaving(gpa, seed))) lfail += 1;
             if (!(try runAsyncHoldBargingLifecycleInterleaving(gpa, seed))) lfail += 1;
             if (!(try runThreadRestrictLifecycleInterleaving(gpa, seed))) lfail += 1;
             if (!(try runThreadLocalLifecycleInterleaving(gpa, seed))) lfail += 1;
             if (!(try runThreadLocalFinalizationCleanupInterleaving(gpa, seed))) lfail += 1;
         }
-        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 18, base_seed, lfail });
+        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 19, base_seed, lfail });
         if (lfail != 0) std.process.exit(1);
         return;
     };

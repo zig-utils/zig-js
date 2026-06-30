@@ -200,9 +200,11 @@ as embedders exercise more threaded host patterns.
   Thread exception identity through `join()` / `asyncJoin()` while
   property and condition waiters are parked,
   thread-returned typed-array `waitAsync` promise assimilation through `join()` /
-  `asyncJoin()` while waiters are parked, cross-thread `FinalizationRegistry`
-  cleanup count/sum oracles, cleanup delivery interleaved with `join()` /
-  `asyncJoin()` and unregister-token suppression, cleanup delivery after parked
+  `asyncJoin()` while waiters are parked, typed-array `waitAsync` settlement
+  interleaved with `asyncJoin` reactions and exact `FinalizationRegistry`
+  cleanup delivery, cross-thread `FinalizationRegistry` cleanup count/sum
+  oracles, cleanup delivery interleaved with `join()` / `asyncJoin()` and
+  unregister-token suppression, cleanup delivery after parked
   property/condition waiters resume, deterministic `Lock.asyncHold()` barging
   where a sync hold legally overtakes a queued no-fn async ticket before
   `await` delivers its release function, and `ThreadLocal` isolation across

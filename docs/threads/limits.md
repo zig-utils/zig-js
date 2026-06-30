@@ -174,11 +174,13 @@ context APIs.
   exception identity through `join()` / `asyncJoin()` while property and
   condition waiters are parked,
   thread-returned typed-array `waitAsync` promise assimilation through `join()` /
-  `asyncJoin()` while waiters are parked, cross-thread `FinalizationRegistry`
-  cleanup count/sum oracles, deterministic `Lock.asyncHold()` barging where a
-  sync hold legally overtakes a queued no-fn async ticket before `await`
-  delivers its release function, and cleanup delivery interleaved with `join()` /
-  `asyncJoin()` plus unregister-token suppression, plus cleanup delivery after
+  `asyncJoin()` while waiters are parked, typed-array `waitAsync` settlement
+  interleaved with `asyncJoin` reactions and exact `FinalizationRegistry`
+  cleanup delivery, cross-thread `FinalizationRegistry` cleanup count/sum
+  oracles, deterministic `Lock.asyncHold()` barging where a sync hold legally
+  overtakes a queued no-fn async ticket before `await` delivers its release
+  function, and cleanup delivery interleaved with `join()` / `asyncJoin()` plus
+  unregister-token suppression, plus cleanup delivery after
   parked property/condition waiters resume, plus `ThreadLocal` values registered
   with `FinalizationRegistry` across park/resume/clear/join cleanup lifecycles
   with exact cleanup count/sum delivery after quiescent collection. Keep
