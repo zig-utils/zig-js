@@ -1187,6 +1187,7 @@ fn runWorkerCloseTerminateRace(gpa: std.mem.Allocator, seed: u64) !bool {
     };
 
     var replies: usize = 0;
+    var ack_sum: f64 = 0;
     while (true) {
         const reply = graceful.receive(&machine, 10_000) catch |err| {
             std.debug.print("seed {d}: graceful receive failed: {s}\n", .{ seed, @errorName(err) });
@@ -1200,10 +1201,22 @@ fn runWorkerCloseTerminateRace(gpa: std.mem.Allocator, seed: u64) !bool {
             std.debug.print("seed {d}: graceful reply without numeric ack\n", .{seed});
             return false;
         }
+        const expected_ack: f64 = if (replies < extra_pings) @floatFromInt(replies) else 1000;
+        if (ack.asNum() != expected_ack) {
+            std.debug.print("seed {d}: graceful FIFO ack got {d}, expected {d}\n", .{ seed, ack.asNum(), expected_ack });
+            return false;
+        }
+        ack_sum += ack.asNum();
         replies += 1;
     }
-    if (replies < extra_pings + 1) {
-        std.debug.print("seed {d}: graceful worker lost queued replies ({d} < {d})\n", .{ seed, replies, extra_pings + 1 });
+    const expected_replies = extra_pings + 1;
+    if (replies != expected_replies) {
+        std.debug.print("seed {d}: graceful worker drain/drop reply count got {d}, expected {d}\n", .{ seed, replies, expected_replies });
+        return false;
+    }
+    const expected_ack_sum = 1000 + (@as(f64, @floatFromInt(extra_pings * (extra_pings - 1))) / 2);
+    if (ack_sum != expected_ack_sum) {
+        std.debug.print("seed {d}: graceful worker ack sum got {d}, expected {d}\n", .{ seed, ack_sum, expected_ack_sum });
         return false;
     }
 
@@ -1240,11 +1253,28 @@ fn runWorkerCloseTerminateRace(gpa: std.mem.Allocator, seed: u64) !bool {
         return false;
     };
     terminator.join();
+    const after_term_reply = terminator.receive(&machine, 0) catch |err| {
+        std.debug.print("seed {d}: terminator receive after join failed: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    if (after_term_reply != null) {
+        std.debug.print("seed {d}: terminator delivered a post-terminate reply\n", .{seed});
+        return false;
+    }
     terminator.destroy();
     cleanup_terminator = false;
     graceful.join();
     graceful.destroy();
     cleanup_graceful = false;
+
+    const delivered = ctx.evaluate("new Int32Array(globalThis.__raceSab)[0]") catch |err| {
+        std.debug.print("seed {d}: cannot read worker race delivery counter: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    if (!delivered.isNumber() or delivered.asNum() != @as(f64, @floatFromInt(expected_replies))) {
+        std.debug.print("seed {d}: worker race delivery counter got {d}, expected {d}\n", .{ seed, if (delivered.isNumber()) delivered.asNum() else -1, expected_replies });
+        return false;
+    }
 
     return true;
 }
@@ -3005,8 +3035,9 @@ pub fn main(init: std.process.Init) !void {
     };
     // `threadfuzz lifecycle <iters> <seed>`: deterministic termination storms,
     // Worker/thread SAB overlap, simple, diamond, and fanout/rejoin
-    // module-worker/thread overlap, mixed close/terminate/postMessage ordering,
-    // worker handler exception recovery, Worker/thread/finalization scheduling,
+    // module-worker/thread overlap, exact Worker close/terminate/postMessage
+    // FIFO drain/drop ordering, worker handler exception recovery,
+    // Worker/thread/finalization scheduling,
     // Thread exception identity and returned waitAsync promise assimilation
     // across join/asyncJoin while waiters are parked, cross-thread
     // FinalizationRegistry cleanup, FinalizationRegistry cleanup interleaved
@@ -3018,8 +3049,9 @@ pub fn main(init: std.process.Init) !void {
     // throw":
     // termination storms must throw from the main script and still tear down
     // cleanly, overlap must produce exact synchronized counter values, and
-    // close/terminate races must drain/drop messages according to channel
-    // lifetime rules, thrown worker handlers must not poison later deliveries,
+    // close/terminate races must drain queued messages in FIFO order, drop
+    // post-close messages, and keep post-terminate receives closed; thrown
+    // worker handlers must not poison later deliveries,
     // Worker/thread/finalization scheduling must preserve the retained-SAB
     // counter plus exact cleanup delivery, thread exceptions must keep identity
     // through blocking and async joiners,

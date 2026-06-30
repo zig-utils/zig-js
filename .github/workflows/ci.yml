@@ -84,7 +84,8 @@ jobs:
           # Thread overlap on one SharedArrayBuffer with an exact counter oracle,
           # Worker/thread/finalization scheduling on one retained SAB,
           # Worker handler exception recovery, Thread.restrict lifecycle
-          # isolation, deterministic asyncHold barging, and cross-thread
+          # isolation, deterministic asyncHold barging, exact Worker FIFO
+          # close/terminate drain/drop ordering, and cross-thread
           # finalization cleanup count/sum oracles including parked-waiter
           # delivery and unregister-token suppression.
           - name: threadfuzz-lifecycle

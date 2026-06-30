@@ -305,8 +305,9 @@ threading architecture:
   profile adds deterministic termination storms, script Worker/thread overlap
   plus simple-import, diamond-shaped, and fanout/rejoin module Worker/thread
   overlap over retained `SharedArrayBuffer` storage, Worker/thread/finalization
-  scheduling on one retained SAB, and mixed `close` / `terminate` /
-  `postMessage` ordering plus worker handler-exception recovery,
+  scheduling on one retained SAB, exact FIFO drain/drop ordering for mixed
+  Worker `close` / `terminate` / `postMessage` lifecycles, plus worker
+  handler-exception recovery,
   `Thread.restrict` lifecycle isolation, Thread exception identity through
   `join()` / `asyncJoin()` while property and condition waiters are parked,
   thread-returned typed-array `waitAsync` promise

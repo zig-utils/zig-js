@@ -129,9 +129,10 @@ lifecycle profile
 parked/unjoined shared-realm `Thread`s, exact Atomics counter oracles for script
 `Worker` plus simple-import, diamond-shaped, and fanout/rejoin module `Worker`
 overlap with shared-realm `Thread`s on one retained `SharedArrayBuffer`,
-Worker/thread/finalization scheduling on one retained SAB, and mixed `close` /
-`terminate` / `postMessage` ordering coverage plus worker handler-exception
-recovery after a thrown `onmessage`, `Thread.restrict` lifecycle isolation,
+Worker/thread/finalization scheduling on one retained SAB, exact FIFO
+drain/drop ordering for mixed Worker `close` / `terminate` / `postMessage`
+lifecycles, plus worker handler-exception recovery after a thrown `onmessage`,
+`Thread.restrict` lifecycle isolation,
 Thread exception identity through `join()` / `asyncJoin()`
 while property and condition waiters are parked, thread-returned typed-array
 `waitAsync` promise assimilation through
