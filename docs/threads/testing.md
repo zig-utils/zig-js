@@ -341,6 +341,9 @@ Collection-helper removal witnesses live in the same unit suite:
 `gc pruneDeadWeakEntries removes dead weak keys with unordered tail removal`,
 and `FinalizationRegistry unregister stable-compacts matching records` guard
 the weak-entry tail-removal and stable unregister compaction shapes.
+`agent reports drain FIFO with a head cursor` guards `$262.agent` report queue
+FIFO order, cursor compaction, and teardown cleanup for report-heavy Atomics
+agent tests.
 
 ## Focused Runs
 

@@ -59,6 +59,7 @@ const Group = struct {
     cond: std.Io.Condition = .init,
     agents: std.ArrayListUnmanaged(*Agent) = .empty,
     reports: std.ArrayListUnmanaged([]const u8) = .empty,
+    reports_head: usize = 0,
     bcast: ?*SharedBufferStorage = null, // holds its own reference while set
     bcast_gen: u64 = 0,
     stopping: bool = false,
@@ -195,10 +196,29 @@ pub fn takeReport(into: std.mem.Allocator) ?[]const u8 {
     const io = engineIo();
     group.mutex.lockUncancelable(io);
     defer group.mutex.unlock(io);
-    if (group.reports.items.len == 0) return null;
-    const r = group.reports.orderedRemove(0);
+    if (group.reports_head >= group.reports.items.len) {
+        compactReportsLocked();
+        return null;
+    }
+    const r = group.reports.items[group.reports_head];
+    group.reports_head += 1;
     defer alloc.free(r);
+    compactReportsLocked();
     return into.dupe(u8, r) catch null;
+}
+
+fn compactReportsLocked() void {
+    if (group.reports_head == 0) return;
+    if (group.reports_head >= group.reports.items.len) {
+        group.reports.clearRetainingCapacity();
+        group.reports_head = 0;
+        return;
+    }
+    if (group.reports_head < 32 or group.reports_head * 2 < group.reports.items.len) return;
+    const remaining = group.reports.items[group.reports_head..];
+    std.mem.copyForwards([]const u8, group.reports.items[0..remaining.len], remaining);
+    group.reports.shrinkRetainingCapacity(remaining.len);
+    group.reports_head = 0;
 }
 
 /// Tear down the group between tests (called when a fresh main realm installs
@@ -223,8 +243,9 @@ pub fn reset() void {
         alloc.destroy(a);
     }
     group.agents.clearAndFree(alloc);
-    for (group.reports.items) |r| alloc.free(r);
+    for (group.reports.items[group.reports_head..]) |r| alloc.free(r);
     group.reports.clearAndFree(alloc);
+    group.reports_head = 0;
     if (group.bcast) |s| s.release();
     group.bcast = null;
     group.bcast_gen = 0;
@@ -585,6 +606,47 @@ test "waiter table: wait blocks until notify; not-equal early-out" {
     const t = try std.Thread.spawn(.{}, Waker.run, .{s});
     try std.testing.expectEqual(WaitOutcome.ok, wait(s, 0, i32, 7, 2 * std.time.ns_per_s));
     t.join();
+}
+
+test "agent reports drain FIFO with a head cursor" {
+    reset();
+    defer reset();
+
+    var buf: [32]u8 = undefined;
+    for (0..40) |i| {
+        const msg = try std.fmt.bufPrint(&buf, "report-{d}", .{i});
+        report(msg);
+    }
+
+    for (0..32) |i| {
+        const got = takeReport(std.testing.allocator) orelse return error.TestUnexpectedResult;
+        defer std.testing.allocator.free(got);
+        const expected = try std.fmt.bufPrint(&buf, "report-{d}", .{i});
+        try std.testing.expectEqualStrings(expected, got);
+    }
+
+    const io = engineIo();
+    group.mutex.lockUncancelable(io);
+    const after_compact_head = group.reports_head;
+    const after_compact_len = group.reports.items.len;
+    group.mutex.unlock(io);
+    try std.testing.expectEqual(@as(usize, 0), after_compact_head);
+    try std.testing.expectEqual(@as(usize, 8), after_compact_len);
+
+    for (32..40) |i| {
+        const got = takeReport(std.testing.allocator) orelse return error.TestUnexpectedResult;
+        defer std.testing.allocator.free(got);
+        const expected = try std.fmt.bufPrint(&buf, "report-{d}", .{i});
+        try std.testing.expectEqualStrings(expected, got);
+    }
+    try std.testing.expect(takeReport(std.testing.allocator) == null);
+
+    group.mutex.lockUncancelable(io);
+    const drained_head = group.reports_head;
+    const drained_len = group.reports.items.len;
+    group.mutex.unlock(io);
+    try std.testing.expectEqual(@as(usize, 0), drained_head);
+    try std.testing.expectEqual(@as(usize, 0), drained_len);
 }
 
 test "waiter table notify unlinks sync tickets and preserves async FIFO tail" {

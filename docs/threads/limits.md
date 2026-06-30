@@ -155,9 +155,11 @@ context APIs.
   one pass while preserving FIFO order for remaining waiters. Worker
   inbox/outbox channels now drain
   structured-clone messages with FIFO head cursors as well, avoiding front
-  shifts in receive-heavy Worker loops. Empty internal `Worker.receive(..., 0)`
-  polls return under the channel lock without entering a timed condition wait
-  or touching drained-queue compaction. Active interpreter roots, protected
+  shifts in receive-heavy Worker loops. `$262.agent` report delivery uses the
+  same FIFO head-cursor shape, so report-heavy Atomics/test262 agent cases do
+  not shift the whole report queue on each `getReport()`. Empty internal
+  `Worker.receive(..., 0)` polls return under the channel lock without entering
+  a timed condition wait or touching drained-queue compaction. Active interpreter roots, protected
   C-API handles, and GIL park records are unordered root sets, so removal now
   uses swap semantics instead of order-preserving list shifts on evaluate,
   handle-unprotect, and thread teardown paths. WeakMap/WeakSet delete and GC

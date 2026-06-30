@@ -315,9 +315,11 @@ threading architecture:
   harvest and abandon paths stable-compact settled/owner tickets in one pass
   while preserving FIFO order for remaining waiters. Worker inbox/outbox channels now drain
   through the same FIFO head-cursor shape instead of front-shifting
-  structured-clone message queues, and empty internal `Worker.receive(..., 0)`
-  polls return under the channel lock without entering timed condition waits or
-  touching drained-queue compaction. Active interpreter roots, protected C-API
+  structured-clone message queues, and `$262.agent` report delivery now uses a
+  FIFO head cursor instead of removing the first report on every
+  `getReport()`. Empty internal `Worker.receive(..., 0)` polls return under
+  the channel lock without entering timed condition waits or touching
+  drained-queue compaction. Active interpreter roots, protected C-API
   handles, and GIL park records are unordered root sets, so their removals now
   use swap removal instead of preserving order with list shifts on evaluate,
   unprotect, and thread teardown paths. WeakMap/WeakSet entry delete and GC
