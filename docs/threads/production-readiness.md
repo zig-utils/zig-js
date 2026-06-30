@@ -125,6 +125,10 @@ Known performance/maturity work:
   `orderedRemove(0)`, so observed async-hold callback settlement and no-fn
   release-function reactions do not shift the remaining reaction queue on every
   delivered job while preserving checkpoint order.
+- No-fn `Lock.asyncHold` grants embed their once-only release state in the
+  already arena-lived hold job, avoiding an extra small allocation per delivered
+  release function while preserving the release-function object and existing
+  lock/GC ordering.
 - Condition notify/notifyAll use the same FIFO head-cursor pattern for the
   mixed sync/async waiter queue, avoiding one front-shift per notified waiter.
   Timed-out or terminated sync condition waiters are marked canceled and skipped

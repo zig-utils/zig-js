@@ -319,6 +319,9 @@ threading architecture:
   async-hold task pump also snapshots the microtask enqueue generation around
   each delivered grant, so unobserved grants that settle without queuing any
   reaction skip the otherwise-empty microtask drain lock in no-GIL mode.
+  No-fn async-hold grants embed their once-only release state in the already
+  arena-lived hold job, avoiding an extra small allocation per delivered release
+  function.
   The Worker profile prints that empty-receive polling cost separately from
   real message-delivery and lifecycle cost. Continue using the profile for the
   remaining contended-lock, Worker message, and lifecycle hot spots.

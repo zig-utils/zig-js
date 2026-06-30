@@ -285,7 +285,10 @@ the asyncHold corpus case exercising observed callback/release-function
 reactions through the public API. The async-hold task pump snapshots the
 microtask enqueue generation before and after each delivered grant, so
 unobserved grants that settle without queuing reactions keep the required task
-turn while skipping an otherwise-empty no-GIL microtask drain.
+turn while skipping an otherwise-empty no-GIL microtask drain. No-fn async-hold
+release states are embedded in their already arena-lived hold jobs, so the same
+public asyncHold corpus case also covers the release-function path after that
+allocation reduction.
 `threads-profile` remains the check that this kind of targeted optimization
 does not merely move overhead elsewhere.
 

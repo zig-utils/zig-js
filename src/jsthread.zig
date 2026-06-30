@@ -2238,27 +2238,31 @@ fn threadRestrictFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value
 // Settlement runs on the granting thread (the registrant when uncontended,
 // the releaser when contended) — the settling-thread rule.
 
-const HoldJob = struct {
-    lock: *LockRecord,
-    outer: *value.Object,
-    /// User fn (with-fn arity), or null = resolve with a release() function.
-    cb: ?Value,
-};
-
 const ReleaseState = struct {
     brand: SyncBrand = sync_brand_release_state,
     lock: *LockRecord,
     used: bool = false,
 };
 
+const HoldJob = struct {
+    lock: *LockRecord,
+    outer: *value.Object,
+    /// User fn (with-fn arity), or null = resolve with a release() function.
+    cb: ?Value,
+    /// No-fn asyncHold grants need a once-only native release() state. The job is
+    /// already one-per-grant and arena-lived, so embedding avoids a second small
+    /// allocation in the release-function hot path.
+    release_state: ReleaseState,
+};
+
 test "jsthread lock pending async jobs are cursor FIFO" {
     var rec = LockRecord{ .gil = undefined };
     const a = std.testing.allocator;
 
-    var one = HoldJob{ .lock = &rec, .outer = undefined, .cb = null };
-    var two = HoldJob{ .lock = &rec, .outer = undefined, .cb = null };
-    var three = HoldJob{ .lock = &rec, .outer = undefined, .cb = null };
-    var front = HoldJob{ .lock = &rec, .outer = undefined, .cb = null };
+    var one = HoldJob{ .lock = &rec, .outer = undefined, .cb = null, .release_state = .{ .lock = &rec } };
+    var two = HoldJob{ .lock = &rec, .outer = undefined, .cb = null, .release_state = .{ .lock = &rec } };
+    var three = HoldJob{ .lock = &rec, .outer = undefined, .cb = null, .release_state = .{ .lock = &rec } };
+    var front = HoldJob{ .lock = &rec, .outer = undefined, .cb = null, .release_state = .{ .lock = &rec } };
 
     try rec.appendPending(a, &one);
     try rec.appendPending(a, &two);
@@ -2303,7 +2307,7 @@ test "jsthread traces queued async hold task roots" {
     var rec = LockRecord{ .gil = &g };
     var outer = value.Object{};
     var cb = value.Object{};
-    var job = HoldJob{ .lock = &rec, .outer = &outer, .cb = Value.obj(&cb) };
+    var job = HoldJob{ .lock = &rec, .outer = &outer, .cb = Value.obj(&cb), .release_state = .{ .lock = &rec } };
 
     try g.enqueueTask(std.testing.allocator, @ptrCast(&job));
     var visitor = Visitor{ .outer = &outer, .cb = &cb };
@@ -2479,15 +2483,13 @@ test "jsthread join park termination leaves parked state and mutex balanced" {
 
 fn runHoldJob(self: *Interpreter, job: *HoldJob) value.HostError!void {
     const outer_pp = promise.promiseOf(Value.obj(job.outer)).?;
-    var release_state: ?*ReleaseState = null;
     var release_fn: ?*value.Object = null;
     if (job.cb == null) {
-        const st = try self.arena.create(ReleaseState);
-        st.* = .{ .lock = job.lock };
+        job.release_state.used = false;
+        job.release_state.lock = job.lock;
         const rel = try gc_mod.allocObj(self.arena);
-        rel.* = .{ .native = releaseFnNative, .private_data = st };
+        rel.* = .{ .native = releaseFnNative, .private_data = &job.release_state };
         gc_mod.barrierValue(Value.obj(rel));
-        release_state = st;
         release_fn = rel;
     }
     const tid = currentTid();
@@ -2533,7 +2535,7 @@ fn runHoldJob(self: *Interpreter, job: *HoldJob) value.HostError!void {
         return;
     }
     // no-fn arity: resolve with a once-only release() function.
-    job.lock.active_release = release_state.?;
+    job.lock.active_release = &job.release_state;
     job.lock.mutex.unlock(agent.engineIo());
     try promise.resolve(self, outer_pp, Value.obj(release_fn.?));
 }
@@ -2569,7 +2571,7 @@ fn lockAsyncHoldFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.
         return self.throwError("TypeError", "Lock.prototype.asyncHold requires a callable argument when one is provided");
     const outer = try promise.newPromise(self);
     const job = try self.arena.create(HoldJob);
-    job.* = .{ .lock = rec, .outer = outer, .cb = if (cb.isUndefined()) null else cb };
+    job.* = .{ .lock = rec, .outer = outer, .cb = if (cb.isUndefined()) null else cb, .release_state = .{ .lock = rec } };
     barrierHoldJob(job);
     var enqueue_now = false;
     rec.mutex.lockUncancelable(agent.engineIo());
@@ -2653,7 +2655,7 @@ fn condAsyncWaitFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.
 /// function (the corpus consumes `p.then(release => ...)`).
 fn wakeAsyncCondWaiter(self: *Interpreter, w: *AsyncCondWaiter) void {
     const job = self.arena.create(HoldJob) catch return;
-    job.* = .{ .lock = w.lock, .outer = w.outer, .cb = null };
+    job.* = .{ .lock = w.lock, .outer = w.outer, .cb = null, .release_state = .{ .lock = w.lock } };
     barrierHoldJob(job);
     var enqueue_now = false;
     w.lock.mutex.lockUncancelable(agent.engineIo());

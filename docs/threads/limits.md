@@ -117,7 +117,9 @@ context APIs.
   delivered job. The async-hold task pump also snapshots the microtask enqueue
   generation around each grant, so unobserved grants that settle without queued
   reactions skip an otherwise-empty no-GIL microtask drain while preserving
-  checkpoint order for grants that do enqueue reactions. Condition
+  checkpoint order for grants that do enqueue reactions. No-fn async-hold grants
+  embed their once-only release state in the already arena-lived hold job, so
+  delivered release functions avoid a second small state allocation. Condition
   notify/notifyAll also dequeues the mixed sync/async
   waiter queue through a FIFO head cursor instead of shifting every notified
   waiter. Timed-out or terminated sync condition waiters are marked canceled and
