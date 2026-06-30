@@ -258,7 +258,9 @@ context APIs.
   only through the native waiter queue,
   keeps pending `Thread.asyncJoin` fulfillment/rejection reactions live only
   through native completion records, keeps a ThreadLocal-only hidden root live
-  in a parked peer, keeps pending Promise/microtask roots live across
+  in a parked peer and now parks ThreadLocal-only `FinalizationRegistry` targets
+  through a finishing sweep before clearing them with an exact cleanup oracle,
+  keeps pending Promise/microtask roots live across
   asyncHold callback/release delivery, typed-array `waitAsync`,
   `Thread.asyncJoin`, and cleanup reactions, keeps completed-but-unjoined
   Thread result and thrown exception objects live through the thread completion

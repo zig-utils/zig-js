@@ -7976,6 +7976,171 @@ fn runMidScriptSyncWaitCleanupGc(gpa: std.mem.Allocator, seed: u64) !bool {
     return true;
 }
 
+fn runMidScriptThreadLocalFinalizationGc(gpa: std.mem.Allocator, seed: u64) !bool {
+    var prng = std.Random.DefaultPrng.init(seed ^ 0x6d69_6474_6c66_696e);
+    const r = prng.random();
+    const nthreads = 2 + r.uintLessThan(usize, 4);
+    const rounds = 7 + r.uintLessThan(usize, 5);
+    const per_round = 520 + r.uintLessThan(usize, 320);
+    const spin_iters = 1800 + r.uintLessThan(usize, 3600);
+    const wait_timeout_ms = 1000 + r.uintLessThan(usize, 700);
+    const seed_marker = seed % 10_000;
+    const held_base = 370_000 + seed_marker;
+
+    var expected_join_sum: usize = 0;
+    var expected_cleanup_sum: usize = 0;
+    var id: usize = 0;
+    while (id < nthreads) : (id += 1) {
+        expected_join_sum += id + 1;
+        expected_cleanup_sum += held_base + id;
+    }
+
+    const ctx = js.Context.createWithTestingOptions(gpa, .{
+        .enable_threads = true,
+        .enable_gc = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+        .parallel_midscript_gc = true,
+    }) catch {
+        std.debug.print("seed {d}: midgc ThreadLocal finalization context creation failed\n", .{seed});
+        return false;
+    };
+    defer ctx.destroy();
+
+    const src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  globalThis.__midgcTlsFinCleanupCount = 0;
+        \\  globalThis.__midgcTlsFinCleanupSum = 0;
+        \\  globalThis.__midgcTlsFinRegistry = new FinalizationRegistry((held) => {{
+        \\    globalThis.__midgcTlsFinCleanupCount++;
+        \\    globalThis.__midgcTlsFinCleanupSum += held;
+        \\  }});
+        \\  const registry = globalThis.__midgcTlsFinRegistry;
+        \\  const tls = new ThreadLocal();
+        \\  const gate = {{ ready: 0, release: 0 }};
+        \\  const threads = globalThis.__midgcTlsFinThreads = [];
+        \\  const seedMarker = {d};
+        \\  const heldBase = {d};
+        \\  for (let id = 0; id < {d}; id++) {{
+        \\    threads.push(new Thread((id, seedMarker, heldBase, timeout) => {{
+        \\      let target = {{ id, seed: seedMarker, payload: 'midgc-threadlocal-finalization-' + id }};
+        \\      tls.value = target;
+        \\      registry.register(target, heldBase + id);
+        \\      target = null;
+        \\      Atomics.add(gate, 'ready', 1);
+        \\      Atomics.notify(gate, 'ready');
+        \\      while (Atomics.load(gate, 'release') === 0)
+        \\        Atomics.wait(gate, 'release', 0, timeout);
+        \\      const held = tls.value;
+        \\      if (!held || held.id !== id || held.seed !== seedMarker)
+        \\        throw new Error('midgc ThreadLocal finalization root lost for ' + id);
+        \\      tls.value = undefined;
+        \\      return held.id + 1;
+        \\    }}, id, seedMarker, heldBase, {d}));
+        \\  }}
+        \\  let spins = 0;
+        \\  while (Atomics.load(gate, 'ready') < {d}) {{
+        \\    if (++spins > 10000000)
+        \\      throw new Error('midgc ThreadLocal finalization workers not ready: ' + Atomics.load(gate, 'ready'));
+        \\  }}
+        \\  globalThis.__midgcTlsFinRegistry.cleanupSome();
+        \\  if (globalThis.__midgcTlsFinCleanupCount !== 0)
+        \\    throw new Error('midgc ThreadLocal cleanup fired before parked roots released');
+        \\  const keep = [];
+        \\  for (let round = 0; round < {d}; round++) {{
+        \\    for (let i = 0; i < {d}; i++)
+        \\      keep.push({{ round, i, nested: {{ seed: seedMarker, id: i & 7 }}, text: 'midgc-threadlocal-finalization-' + round + '-' + i }});
+        \\    let spin = 0;
+        \\    for (let j = 0; j < {d}; j++) spin = (spin + j + round) & 0x3fffffff;
+        \\    if (spin < 0) keep.push({{ impossible: true }});
+        \\  }}
+        \\  if (typeof gc === 'function') gc();
+        \\  globalThis.__midgcTlsFinRegistry.cleanupSome();
+        \\  if (globalThis.__midgcTlsFinCleanupCount !== 0)
+        \\    throw new Error('midgc ThreadLocal cleanup fired during parked sweep');
+        \\  Atomics.store(gate, 'release', 1);
+        \\  Atomics.notify(gate, 'release', {d});
+        \\  let joinSum = 0;
+        \\  for (const t of threads)
+        \\    joinSum += t.join();
+        \\  if (joinSum !== {d})
+        \\    throw new Error('bad midgc ThreadLocal finalization join sum ' + joinSum);
+        \\  globalThis.__midgcTlsFinThreads = null;
+        \\  return keep.length + joinSum;
+        \\}})();
+        \\
+    ,
+        .{
+            seed_marker,
+            held_base,
+            nthreads,
+            wait_timeout_ms,
+            nthreads,
+            rounds,
+            per_round,
+            spin_iters,
+            nthreads,
+            expected_join_sum,
+        },
+    );
+    defer gpa.free(src);
+
+    const before_attempts = ctx.gc_par_attempts.load(.monotonic);
+    const before_collections = ctx.gc_par_collections.load(.monotonic);
+    const expected: f64 = @floatFromInt(rounds * per_round + expected_join_sum);
+    const result = ctx.evaluate(src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: midgc ThreadLocal finalization JS threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!result.isNumber() or result.asNum() != expected) {
+        std.debug.print("seed {d}: midgc ThreadLocal finalization result got {d}, expected {d}\n", .{ seed, if (result.isNumber()) result.asNum() else -1, expected });
+        return false;
+    }
+    if (ctx.gc_par_attempts.load(.monotonic) <= before_attempts) {
+        std.debug.print("seed {d}: midgc ThreadLocal finalization did not attempt a parallel collection\n", .{seed});
+        return false;
+    }
+    if (ctx.gc_par_collections.load(.monotonic) <= before_collections) {
+        std.debug.print("seed {d}: midgc ThreadLocal finalization did not finish a parallel collection\n", .{seed});
+        return false;
+    }
+
+    ctx.collectGarbage();
+    const cleanup_src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  globalThis.__midgcTlsFinRegistry.cleanupSome();
+        \\  if (globalThis.__midgcTlsFinCleanupCount !== {d})
+        \\    throw new Error('bad midgc ThreadLocal finalization cleanup count ' + globalThis.__midgcTlsFinCleanupCount + '/' + {d});
+        \\  if (globalThis.__midgcTlsFinCleanupSum !== {d})
+        \\    throw new Error('bad midgc ThreadLocal finalization cleanup sum ' + globalThis.__midgcTlsFinCleanupSum + '/' + {d});
+        \\  return globalThis.__midgcTlsFinCleanupCount;
+        \\}})();
+        \\
+    ,
+        .{ nthreads, nthreads, expected_cleanup_sum, expected_cleanup_sum },
+    );
+    defer gpa.free(cleanup_src);
+    const cleaned = ctx.evaluate(cleanup_src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: midgc ThreadLocal finalization cleanup JS threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!cleaned.isNumber() or cleaned.asNum() != @as(f64, @floatFromInt(nthreads))) {
+        std.debug.print("seed {d}: midgc ThreadLocal finalization cleanup got {d}, expected {d}\n", .{ seed, if (cleaned.isNumber()) cleaned.asNum() else -1, nthreads });
+        return false;
+    }
+    return true;
+}
+
 fn runMidScriptWeakCollectionGc(gpa: std.mem.Allocator, seed: u64) !bool {
     var prng = std.Random.DefaultPrng.init(seed ^ 0x6d69_6477_6561_6b63);
     const r = prng.random();
@@ -10617,6 +10782,23 @@ pub fn main(init: std.process.Init) !void {
         if (msfail != 0) std.process.exit(1);
         return;
     };
+    // `threadfuzz midgctlsfinal <iters> <seed>`: focused mid-script
+    // parallel-GC repro for ThreadLocal-only roots registered with
+    // FinalizationRegistry while owner threads are parked through a finishing
+    // sweep, then cleared and delivered with an exact cleanup oracle.
+    if (first) |a| if (std.mem.eql(u8, a, "midgctlsfinal")) {
+        if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch 1;
+        if (args.next()) |b| base_seed = std.fmt.parseInt(u64, b, 10) catch 1;
+        var mtffail: usize = 0;
+        var mtfi: usize = 0;
+        while (mtfi < iters) : (mtfi += 1) {
+            const seed = base_seed +% mtfi;
+            if (!(try runMidScriptThreadLocalFinalizationGc(gpa, seed))) mtffail += 1;
+        }
+        std.debug.print("threadfuzz midgctlsfinal: {d} programs from seed {d}, {d} failures\n", .{ iters, base_seed, mtffail });
+        if (mtffail != 0) std.process.exit(1);
+        return;
+    };
     // `threadfuzz midgcpromise <iters> <seed>`: focused mid-script
     // parallel-GC repro for child-returned waitAsync/rejected-promise/user-
     // thenable assimilation and thrown-object publication through thread
@@ -10959,6 +11141,8 @@ pub fn main(init: std.process.Init) !void {
     // asyncHold, waitAsync, asyncJoin, and cleanup delivery,
     // child-created SAB/ArrayBuffer storage rooted through unjoined Thread
     // completion records and delayed asyncJoin observers,
+    // ThreadLocal-only FinalizationRegistry targets parked through a finishing
+    // sweep before their owners clear the values,
     // completed-but-unjoined Thread results and thrown
     // objects, sync-wait peer stack roots with finalization cleanup, WeakMap/
     // WeakSet dead-key cleanup with live ephemeron values and unregister-token
@@ -10982,6 +11166,7 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runMidScriptMicrotaskChurnGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptCreatorOwnedBufferGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptSyncWaitCleanupGc(gpa, seed))) mfail += 1;
+            if (!(try runMidScriptThreadLocalFinalizationGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptWorkerCleanupGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptModuleWorkerCleanupGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptWorkerExceptionCleanupGc(gpa, seed))) mfail += 1;
@@ -10990,7 +11175,7 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runMidScriptModuleWorkerCloseTerminateGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptWeakCollectionGc(gpa, seed))) mfail += 1;
         }
-        std.debug.print("threadfuzz midgc: {d} programs from seed {d}, {d} failures\n", .{ iters * 13, base_seed, mfail });
+        std.debug.print("threadfuzz midgc: {d} programs from seed {d}, {d} failures\n", .{ iters * 14, base_seed, mfail });
         if (mfail != 0) std.process.exit(1);
         return;
     };

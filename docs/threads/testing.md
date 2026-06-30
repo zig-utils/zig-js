@@ -143,6 +143,10 @@ roots after resume plus exact `FinalizationRegistry` cleanup count/sum delivery,
 settles expired property `waitAsync` tickets while those peers are still
 parked, keeps a live property `waitAsync` ticket rooted through the finishing
 sweep, and then notifies it with an exact captured-root score oracle,
+adds a ThreadLocal-finalization subprogram that parks owner threads with
+targets reachable only through `ThreadLocal.value`, drives a finishing
+mid-script sweep, verifies cleanup is not delivered while those hidden roots are
+live, then clears the values and requires exact cleanup count/sum delivery,
 adds a pending-microtask subprogram that queues Promise, typed-array
 `waitAsync`, `Thread.asyncJoin`, with-fn `Lock.asyncHold`, no-fn
 release-function, and `FinalizationRegistry` cleanup roots through a finishing
@@ -180,7 +184,7 @@ join-termination unit witness that checks parked-state/mutex cleanup, then
 requires exact script completion or exact expected termination plus at least one
 finishing parallel sweep and exact
 `FinalizationRegistry` cleanup count/sum delivery plus unregister-token
-suppression after a quiescent collect. Each seed currently runs 13 deterministic
+suppression after a quiescent collect. Each seed currently runs 14 deterministic
 mid-GC subprograms. The
 lifecycle profile
 (`-Dfuzz-lifecycle=true`) adds expected-throw termination storms for

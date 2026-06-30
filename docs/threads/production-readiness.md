@@ -234,10 +234,11 @@ as embedders exercise more threaded host patterns.
   drives `parallel_midscript_gc`; every seed now runs a normal completion
   wait-pump subprogram, a sync-wait cleanup subprogram, a promise-publication
   subprogram, a pending-microtask subprogram, a creator-owned buffer
-  subprogram, isolated script Worker/SAB and module Worker/SAB cleanup
-  subprograms, script and module Worker handler-exception cleanup subprograms,
-  script and module Worker close/terminate drain/drop subprograms,
-  a weak-collection cleanup subprogram, and an expected
+  subprogram, a ThreadLocal-finalization subprogram, isolated script Worker/SAB
+  and module Worker/SAB cleanup subprograms, script and module Worker
+  handler-exception cleanup subprograms, script and module Worker
+  close/terminate drain/drop subprograms, a weak-collection cleanup subprogram,
+  and an expected
   teardown-termination subprogram, and each must finish at least one parallel
   sweep. The wait-pump subprogram queues a
   FIFO `Lock.asyncHold` grant chain including a root-bearing rejected grant plus
@@ -252,6 +253,11 @@ as embedders exercise more threaded host patterns.
   `Thread` result object and a completed-but-unjoined thrown exception object
   reachable only through the thread completion record, then delivers the
   expected `FinalizationRegistry` cleanup count/sum after a quiescent collect.
+  The ThreadLocal-finalization subprogram parks owner threads with registry
+  targets reachable only through `ThreadLocal.value`, drives a finishing
+  mid-script sweep, rejects any early cleanup delivery while those hidden roots
+  are live, then clears the values and verifies exact cleanup count/sum after a
+  quiescent collection.
   The promise-publication subprogram keeps a child-returned typed-array
   `waitAsync` promise pending through the sweep, keeps a child-returned rejected
   promise and a child-returned user thenable parked behind pre-completion
