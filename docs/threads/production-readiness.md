@@ -200,9 +200,10 @@ as embedders exercise more threaded host patterns.
   drives `parallel_midscript_gc`; every seed now runs a normal completion
   wait-pump subprogram, a sync-wait cleanup subprogram, a promise-publication
   subprogram, a pending-microtask subprogram, a creator-owned buffer
-  subprogram, an isolated Worker/SAB cleanup subprogram, a weak-collection
-  cleanup subprogram, and an expected teardown-termination subprogram, and each
-  must finish at least one parallel sweep. The wait-pump subprogram queues a
+  subprogram, isolated script Worker/SAB and module Worker/SAB cleanup
+  subprograms, a weak-collection cleanup subprogram, and an expected
+  teardown-termination subprogram, and each must finish at least one parallel
+  sweep. The wait-pump subprogram queues a
   FIFO `Lock.asyncHold` grant chain including a root-bearing rejected grant plus
   an async `Condition.wait` reacquire with hidden captured JS roots and requires
   sync-wait pump points to deliver both during the same mid-script GC pressure
@@ -245,10 +246,11 @@ as embedders exercise more threaded host patterns.
   finishing sweep, then verifies blocking `join()`, post-sweep `asyncJoin()`,
   and `ArrayBuffer.transfer()` observers see exact contents after the creating
   thread has exited.
-  The Worker/SAB cleanup subprogram runs isolated Workers on the same retained
-  `SharedArrayBuffer` while shared-realm `Thread`s register cleanup targets and
-  park stack roots through a finishing sweep, then verifies exact Worker
-  progress, joined thread roots, asyncJoin reactions, and cleanup count/sum.
+  The script Worker/SAB and module Worker/SAB cleanup subprograms run isolated
+  Workers on the same retained `SharedArrayBuffer` while shared-realm `Thread`s
+  register cleanup targets and park stack roots through a finishing sweep, then
+  verify exact Worker progress, joined thread roots, asyncJoin reactions, and
+  cleanup count/sum.
   The teardown subprogram parks children after installing child-owned typed-array
   `waitAsync` tickets, verifies pending `asyncJoin` rejection reactions with
   captured roots after the parent throws, and proves post-termination notify

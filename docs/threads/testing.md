@@ -151,11 +151,11 @@ completion records and delayed `asyncJoin` observers across a finishing sweep,
 then verifies blocking `join()`, post-sweep `asyncJoin()`, and
 `ArrayBuffer.transfer()` observers see exact contents after the creating thread
 has exited,
-adds a Worker/SAB cleanup subprogram that runs isolated Workers on the same
-retained `SharedArrayBuffer` while shared-realm `Thread`s register cleanup
-targets and park stack roots through a finishing sweep, then verifies exact
-Worker progress, joined thread roots, asyncJoin reactions, and cleanup
-count/sum, adds a weak-collection subprogram that parks property
+adds script Worker/SAB and module Worker/SAB cleanup subprograms that run
+isolated Workers on the same retained `SharedArrayBuffer` while shared-realm
+`Thread`s register cleanup targets and park stack roots through a finishing
+sweep, then verify exact Worker progress, joined thread roots, asyncJoin
+reactions, and cleanup count/sum, adds a weak-collection subprogram that parks property
 `Atomics.wait`, `Condition.wait`, and contended `Lock.hold` peers while live
 WeakMap values are reachable only through live weak keys, dead WeakMap/WeakSet
 targets are reachable only through weak structures and WeakRefs, and
@@ -170,7 +170,7 @@ join-termination unit witness that checks parked-state/mutex cleanup, then
 requires exact script completion or exact expected termination plus at least one
 finishing parallel sweep and exact
 `FinalizationRegistry` cleanup count/sum delivery plus unregister-token
-suppression after a quiescent collect. Each seed currently runs 8 deterministic
+suppression after a quiescent collect. Each seed currently runs 9 deterministic
 mid-GC subprograms. The
 lifecycle profile
 (`-Dfuzz-lifecycle=true`) adds expected-throw termination storms for

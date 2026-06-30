@@ -64,6 +64,60 @@ const ModuleFuzzHost = struct {
     }
 };
 
+const ModuleMidGcCleanupHost = struct {
+    const Entry = struct { path: []const u8, source: []const u8 };
+    var host_ctx: u8 = 0;
+    const entries = [_]Entry{
+        .{
+            .path = "work.js",
+            .source =
+            \\export function runModuleCleanup(sab, iters) {
+            \\  const v = new Int32Array(sab);
+            \\  let local = 0;
+            \\  for (let i = 0; i < iters; i++) {
+            \\    local += i & 1;
+            \\    Atomics.add(v, 2, 1);
+            \\    if ((i & 127) === 0)
+            \\      Atomics.add(v, 3, 1);
+            \\  }
+            \\  return local;
+            \\}
+            ,
+        },
+        .{
+            .path = "entry.js",
+            .source =
+            \\import { runModuleCleanup } from "./work.js";
+            \\globalThis.onmessage = (e) => {
+            \\  const v = new Int32Array(e.data.sab);
+            \\  Atomics.add(v, 0, 1);
+            \\  Atomics.notify(v, 0);
+            \\  while (Atomics.load(v, 1) === 0)
+            \\    Atomics.wait(v, 1, 0, 100);
+            \\  const local = runModuleCleanup(e.data.sab, e.data.iters);
+            \\  postMessage({ done: true, module: true, local, after: Atomics.add(v, 4, 1) + 1 });
+            \\  close();
+            \\};
+            ,
+        },
+    };
+
+    fn load(_: *anyopaque, _: []const u8, specifier: []const u8, out_path: *[]const u8) ?[]const u8 {
+        const name = if (std.mem.startsWith(u8, specifier, "./")) specifier[2..] else specifier;
+        for (entries) |e| {
+            if (std.mem.eql(u8, e.path, name)) {
+                out_path.* = e.path;
+                return e.source;
+            }
+        }
+        return null;
+    }
+
+    fn host() js.Context.ModuleHost {
+        return .{ .ctx = &host_ctx, .load = load };
+    }
+};
+
 const ModuleGraphFuzzHost = struct {
     const Entry = struct { path: []const u8, source: []const u8 };
     var host_ctx: u8 = 0;
@@ -7110,7 +7164,16 @@ fn runMidScriptCreatorOwnedBufferGc(gpa: std.mem.Allocator, seed: u64) !bool {
 }
 
 fn runMidScriptWorkerCleanupGc(gpa: std.mem.Allocator, seed: u64) !bool {
-    var prng = std.Random.DefaultPrng.init(seed ^ 0x6d69_6477_6f72_6b63);
+    return runMidScriptWorkerCleanupProfile(gpa, seed, false);
+}
+
+fn runMidScriptModuleWorkerCleanupGc(gpa: std.mem.Allocator, seed: u64) !bool {
+    return runMidScriptWorkerCleanupProfile(gpa, seed, true);
+}
+
+fn runMidScriptWorkerCleanupProfile(gpa: std.mem.Allocator, seed: u64, comptime module_worker: bool) !bool {
+    const salt: u64 = if (module_worker) 0x6d69_6467_636d_6f64 else 0x6d69_6477_6f72_6b63;
+    var prng = std.Random.DefaultPrng.init(seed ^ salt);
     const r = prng.random();
     const nworkers = 1 + r.uintLessThan(usize, 2);
     const nthreads = 2 + r.uintLessThan(usize, 3);
@@ -7200,10 +7263,16 @@ fn runMidScriptWorkerCleanupGc(gpa: std.mem.Allocator, seed: u64) !bool {
 
     var wi: usize = 0;
     while (wi < nworkers) : (wi += 1) {
-        const w = Worker.spawn(worker_src) catch {
-            std.debug.print("seed {d}: midgc worker-cleanup worker spawn failed\n", .{seed});
-            return false;
-        };
+        const w = if (module_worker)
+            Worker.spawnModule("entry.js", ModuleMidGcCleanupHost.entries[1].source, ModuleMidGcCleanupHost.host()) catch {
+                std.debug.print("seed {d}: midgc module-worker-cleanup worker spawn failed\n", .{seed});
+                return false;
+            }
+        else
+            Worker.spawn(worker_src) catch {
+                std.debug.print("seed {d}: midgc worker-cleanup worker spawn failed\n", .{seed});
+                return false;
+            };
         try workers.append(gpa, w);
         w.postMessage(&machine, msg) catch |err| {
             std.debug.print("seed {d}: midgc worker-cleanup post failed: {s}\n", .{ seed, @errorName(err) });
@@ -7734,6 +7803,23 @@ pub fn main(init: std.process.Init) !void {
         if (mwfail != 0) std.process.exit(1);
         return;
     };
+    // `threadfuzz midgcmoduleworker <iters> <seed>`: focused mid-script
+    // parallel-GC repro for module Workers evaluating a small import graph on a
+    // retained SAB while shared-realm Threads publish cleanup roots through a
+    // finishing sweep.
+    if (first) |a| if (std.mem.eql(u8, a, "midgcmoduleworker")) {
+        if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch 1;
+        if (args.next()) |b| base_seed = std.fmt.parseInt(u64, b, 10) catch 1;
+        var mmwfail: usize = 0;
+        var mmwi: usize = 0;
+        while (mmwi < iters) : (mmwi += 1) {
+            const seed = base_seed +% mmwi;
+            if (!(try runMidScriptModuleWorkerCleanupGc(gpa, seed))) mmwfail += 1;
+        }
+        std.debug.print("threadfuzz midgcmoduleworker: {d} programs from seed {d}, {d} failures\n", .{ iters, base_seed, mmwfail });
+        if (mmwfail != 0) std.process.exit(1);
+        return;
+    };
     // `threadfuzz midgcweak <iters> <seed>`: focused mid-script parallel-GC
     // repro for WeakMap/WeakSet dead-key pruning, live ephemeron values, and
     // FinalizationRegistry unregister compaction while sync peers are parked.
@@ -7898,10 +7984,11 @@ pub fn main(init: std.process.Init) !void {
     // completed-but-unjoined Thread results and thrown
     // objects, sync-wait peer stack roots with finalization cleanup, WeakMap/
     // WeakSet dead-key cleanup with live ephemeron values and unregister-token
-    // suppression, isolated Worker/SAB progress while shared-realm cleanup roots are swept, and
-    // teardown termination with pending asyncJoin/waitAsync roots must survive
-    // that window. The oracle requires exact program completion or expected
-    // termination and at least one finishing parallel sweep.
+    // suppression, isolated script/module Worker/SAB progress while
+    // shared-realm cleanup roots are swept, and teardown termination with
+    // pending asyncJoin/waitAsync roots must survive that window. The oracle
+    // requires exact program completion or expected termination and at least one
+    // finishing parallel sweep.
     if (first) |a| if (std.mem.eql(u8, a, "midgc")) {
         iters = 20;
         if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch iters;
@@ -7917,9 +8004,10 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runMidScriptCreatorOwnedBufferGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptSyncWaitCleanupGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptWorkerCleanupGc(gpa, seed))) mfail += 1;
+            if (!(try runMidScriptModuleWorkerCleanupGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptWeakCollectionGc(gpa, seed))) mfail += 1;
         }
-        std.debug.print("threadfuzz midgc: {d} programs from seed {d}, {d} failures\n", .{ iters * 8, base_seed, mfail });
+        std.debug.print("threadfuzz midgc: {d} programs from seed {d}, {d} failures\n", .{ iters * 9, base_seed, mfail });
         if (mfail != 0) std.process.exit(1);
         return;
     };

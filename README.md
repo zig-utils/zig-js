@@ -193,7 +193,7 @@ zig build threads-test          # runs the green WebKit PR-249 threads corpus (2
 zig build threads-reference-audit # classifies the remaining reference-only PR-249 files
 zig build test -Dtsan=true      # unit suite under ThreadSanitizer
 zig build threadfuzz            # seeded concurrent-JS fuzzer
-zig build threadfuzz -Dfuzz-midgc=true # mid-script GC wait-pump + microtask + creator buffers + sync-wait cleanup + teardown + promise + Worker/SAB + weak-collection fuzzer
+zig build threadfuzz -Dfuzz-midgc=true # mid-script GC wait-pump + microtask + creator buffers + sync-wait cleanup + teardown + promise + script/module Worker/SAB + weak-collection fuzzer
 zig build test262               # runs the real tc39/test262 corpus, prints pass %
 zig build test262 -Dtest262=DIR # …with an explicit corpus root
 zig build bench                 # times the bytecode VM against the tree-walker
@@ -347,10 +347,11 @@ threading architecture:
   property `Atomics.wait`, `Condition.wait`, and contended `Lock.hold`
   acquisition, drives a finishing sweep, then verifies their stack roots after
   resume plus exact `FinalizationRegistry` cleanup count/sum delivery.
-  A Worker/SAB cleanup subprogram runs isolated Workers on the same retained
-  `SharedArrayBuffer` while shared-realm `Thread`s register cleanup targets and
-  park stack roots through a finishing sweep, then verifies exact Worker
-  progress, joined thread roots, asyncJoin reactions, and cleanup count/sum.
+  Script Worker/SAB and module Worker/SAB cleanup subprograms run isolated
+  Workers on the same retained `SharedArrayBuffer` while shared-realm `Thread`s
+  register cleanup targets and park stack roots through a finishing sweep, then
+  verify exact Worker progress, joined thread roots, asyncJoin reactions, and
+  cleanup count/sum.
   A pending-microtask subprogram queues Promise, typed-array `waitAsync`,
   `Thread.asyncJoin`, with-fn `Lock.asyncHold`, no-fn release-function, and
   `FinalizationRegistry` cleanup roots through a finishing mid-script sweep,
@@ -396,7 +397,8 @@ threading architecture:
   typed-array `waitAsync`, `Thread.asyncJoin`, and cleanup reactions,
   creator-owned `SharedArrayBuffer` and `ArrayBuffer` storage rooted through
   unjoined Thread completion records and delayed `asyncJoin` observers,
-  isolated Worker/SAB progress while shared-realm cleanup roots are swept,
+  isolated script/module Worker/SAB progress while shared-realm cleanup roots
+  are swept,
   teardown termination with pending asyncJoin/waitAsync roots,
   ThreadLocal-only hidden roots in parked peers, and deterministic
   completed-but-unjoined Thread result and thrown exception roots, and
