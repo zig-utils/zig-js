@@ -482,6 +482,24 @@ test "workers: host hook wakes on message and on outbox close" {
     try std.testing.expectEqual(@as(u32, pings + 2), sink.woken.load(.acquire));
 }
 
+test "workers: host hook wakes on terminate outbox close" {
+    const ctx = try Context.create(std.testing.allocator);
+    defer ctx.destroy();
+    var machine = ctx.interpreter();
+
+    var sink = HookSink{};
+    var hooks = HostHooks{ .ctx = &sink, .notify = HookSink.notify };
+
+    const w = try Worker.spawn("for (;;) {}");
+    w.setHostHooks(&hooks);
+    w.terminate();
+    w.join();
+    try std.testing.expect((try w.receive(&machine, 0)) == null);
+    w.destroy();
+
+    try std.testing.expectEqual(@as(u32, 1), sink.woken.load(.acquire));
+}
+
 test "workers: module-graph worker resolves imports and round-trips a message" {
     const ctx = try Context.create(std.testing.allocator);
     defer ctx.destroy();
