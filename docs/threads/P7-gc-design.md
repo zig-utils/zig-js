@@ -152,7 +152,9 @@ treats those as non-cells. This keeps the trace surface to runtime values only.
   size classes are few. In zig-js this first ships as `Context.GcCellBacking`:
   the `zig-gc` heap still sees a normal allocator, while 16-byte-aligned cell
   slabs are recycled from 64 KiB size-class chunks and non-cell heap side storage
-  delegates unchanged. Chunk ownership is tracked per size class, so free/remap
+  delegates unchanged. Fresh chunks hand out cells lazily through bump cursors
+  and a per-bucket bump hint rather than pre-linking every slot up front. Chunk
+  ownership is tracked per size class, so free/remap
   classification first rejects pointers outside the bucket address span, tries a
   per-bucket recent-chunk hint, and only then scans the matching-size chunks
   instead of the entire backing. At context teardown the backing switches to

@@ -289,6 +289,9 @@ while the GC allocator and lifecycle paths continue to mature. The profile also
 prints GC cell-backing attribution for an object-heavy allocation run: chunk
 count, total cell-slot capacity, live cells at context creation, live cells
 after allocation, free slots after collection, and live cells after collection.
+Direct `GcCellBacking` unit tests cover lazy fresh-slot bumping, free-list
+recycling, ownership span/hint classification, stats accounting, and
+bulk-teardown behavior.
 The unit suite also covers live `SharedArrayBuffer` retain release during
 context teardown across arena, no-GIL threaded, and `.gil = true` contexts.
 Collection-helper removal witnesses live in the same unit suite:

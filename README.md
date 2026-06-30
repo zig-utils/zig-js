@@ -247,9 +247,12 @@ threading architecture:
   creation, live cells after script allocation, free slots after collection, and
   live cells after collection. GC cells now allocate through a reusable
   size-class slab backing instead of one backing allocator call per cell, and
-  freed cells are classified against per-size-class address spans plus a
-  recent-chunk hint before scanning chunk lists to keep collection/destroy lookup
-  costs bounded. Single-mutator GC object side stores now allocate directly from
+  fresh slab chunks hand out cells lazily with a per-bucket bump hint instead of
+  pre-linking every unused slot during short-lived context setup. Freed cells are
+  still recycled through the per-bucket free lists and classified against
+  per-size-class address spans plus a recent-chunk hint before scanning chunk
+  lists to keep collection/destroy lookup costs bounded. Single-mutator GC object
+  side stores now allocate directly from
   the context allocator instead of round-tripping through that cell-slab
   classifier, while true-parallel contexts keep the synchronized backing wrapper.
   Context teardown now enters a slab bulk-teardown mode so per-cell frees do not

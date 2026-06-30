@@ -47,7 +47,9 @@ Known performance/maturity work:
 
 - GC cells now use `Context.GcCellBacking`, a reusable size-class slab backing
   that recycles 16-byte-aligned cell allocations and delegates non-cell heap side
-  storage unchanged. Ownership classification is now bucket-local too, so
+  storage unchanged. Fresh chunks hand out cells through lazy bump cursors with a
+  per-bucket bump hint, so short-lived contexts do not pre-link every unused slot
+  before teardown. Ownership classification is now bucket-local too, so
   collection and context teardown first reject pointers outside each bucket's
   address span and do not scan unrelated size-class chunks when freeing a cell.
   A per-bucket recent-chunk hint keeps repeated frees/remaps from the same slab

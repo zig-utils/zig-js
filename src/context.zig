@@ -82,8 +82,11 @@ pub const LockedArena = struct {
 /// the page/general allocator made GC-mode object allocation and context teardown
 /// pay an OS/general-allocator round trip per cell. This allocator intercepts
 /// those fixed-shape cell slabs, serves them from size-class chunks, and recycles
-/// freed cells for later allocations/collections. Non-cell heap side storage
-/// (weak-slot arrays, address indexes, etc.) delegates to `inner` unchanged.
+/// freed cells for later allocations/collections. Fresh chunks allocate lazily
+/// through per-chunk bump cursors instead of pre-linking every slot, so a short-
+/// lived context no longer pays to initialize unused cell slots. Non-cell heap
+/// side storage (weak-slot arrays, address indexes, etc.) delegates to `inner`
+/// unchanged.
 pub const GcCellBacking = struct {
     const bucket_count = 6;
     const bucket_sizes = [_]usize{ 64, 128, 256, 512, 1024, 2048 };
@@ -104,7 +107,11 @@ pub const GcCellBacking = struct {
     bulk_teardown: bool = false,
     lock: std.atomic.Value(u32) = .init(0),
     bucket_chunks: [bucket_count]std.ArrayListUnmanaged([]align(16) u8) = .{ .empty, .empty, .empty, .empty, .empty, .empty },
+    bucket_next_offsets: [bucket_count]std.ArrayListUnmanaged(usize) = .{ .empty, .empty, .empty, .empty, .empty, .empty },
     free_lists: [bucket_count]?*FreeNode = .{ null, null, null, null, null, null },
+    /// Last chunk with unbumped fresh slots for each bucket. Lazy allocation
+    /// keeps this hot so object-heavy scripts do not rescan filled chunks.
+    bucket_bump_hint: [bucket_count]?usize = .{ null, null, null, null, null, null },
     /// Last chunk that classified an owned pointer for each bucket. GC frees
     /// and teardown usually arrive in chunk-local runs, so this avoids restarting
     /// the chunk walk for every cell while preserving exact ownership checks.
@@ -145,18 +152,48 @@ pub const GcCellBacking = struct {
             self.inner.free(chunk);
             return false;
         };
+        self.bucket_next_offsets[idx].append(self.inner, 0) catch {
+            _ = self.bucket_chunks[idx].pop();
+            self.inner.free(chunk);
+            return false;
+        };
         const start = @intFromPtr(chunk.ptr);
         const end = start + chunk.len;
         self.bucket_addr_min[idx] = @min(self.bucket_addr_min[idx], start);
         self.bucket_addr_max[idx] = @max(self.bucket_addr_max[idx], end);
-        var off: usize = 0;
-        while (off < chunk.len) : (off += slot_size) {
-            const node: *FreeNode = @ptrCast(@alignCast(chunk.ptr + off));
-            node.next = self.free_lists[idx];
-            self.free_lists[idx] = node;
-        }
         self.bucket_owns_hint[idx] = chunk_idx;
+        self.bucket_bump_hint[idx] = chunk_idx;
         return true;
+    }
+
+    fn bumpFreshSlotLocked(self: *GcCellBacking, idx: usize) ?[*]u8 {
+        const slot_size = bucket_sizes[idx];
+        if (self.bucket_bump_hint[idx]) |hint| {
+            const chunks = self.bucket_chunks[idx].items;
+            if (hint < chunks.len) {
+                const chunk = chunks[hint];
+                const off = self.bucket_next_offsets[idx].items[hint];
+                if (off + slot_size <= chunk.len) {
+                    self.bucket_next_offsets[idx].items[hint] = off + slot_size;
+                    self.bucket_owns_hint[idx] = hint;
+                    return chunk.ptr + off;
+                }
+            }
+        }
+        for (self.bucket_chunks[idx].items, 0..) |chunk, chunk_idx| {
+            const off = self.bucket_next_offsets[idx].items[chunk_idx];
+            if (off + slot_size > chunk.len) continue;
+            self.bucket_next_offsets[idx].items[chunk_idx] = off + slot_size;
+            self.bucket_owns_hint[idx] = chunk_idx;
+            self.bucket_bump_hint[idx] = chunk_idx;
+            return chunk.ptr + off;
+        }
+        if (!self.addChunk(idx)) return null;
+        const new_idx = self.bucket_chunks[idx].items.len - 1;
+        const chunk = self.bucket_chunks[idx].items[new_idx];
+        self.bucket_next_offsets[idx].items[new_idx] = slot_size;
+        self.bucket_bump_hint[idx] = new_idx;
+        return chunk.ptr;
     }
 
     inline fn chunkOwnsPtr(chunk: []align(16) u8, addr: usize) bool {
@@ -186,10 +223,11 @@ pub const GcCellBacking = struct {
             self.acquire();
             defer self.unlock();
             if (self.bulk_teardown) return null;
-            if (self.free_lists[idx] == null and !self.addChunk(idx)) return null;
-            const node = self.free_lists[idx].?;
-            self.free_lists[idx] = node.next;
-            return @ptrCast(node);
+            if (self.free_lists[idx]) |node| {
+                self.free_lists[idx] = node.next;
+                return @ptrCast(node);
+            }
+            return self.bumpFreshSlotLocked(idx);
         }
         self.acquire();
         defer self.unlock();
@@ -270,10 +308,12 @@ pub const GcCellBacking = struct {
         defer self.unlock();
         var out = Stats{};
         inline for (bucket_sizes, 0..) |slot_size, idx| {
-            for (self.bucket_chunks[idx].items) |chunk| {
+            for (self.bucket_chunks[idx].items, 0..) |chunk, chunk_idx| {
                 out.chunks += 1;
                 out.capacity_bytes += chunk.len;
                 out.capacity_slots += chunk.len / slot_size;
+                const used = self.bucket_next_offsets[idx].items[chunk_idx] / slot_size;
+                out.free_slots += (chunk.len / slot_size) - used;
             }
             out.free_slots += countFreeList(self.free_lists[idx]);
         }
@@ -295,12 +335,15 @@ pub const GcCellBacking = struct {
         for (&self.bucket_chunks, 0..) |*chunks, idx| {
             for (chunks.items) |chunk| self.inner.free(chunk);
             chunks.deinit(self.inner);
+            self.bucket_next_offsets[idx].deinit(self.inner);
+            self.bucket_next_offsets[idx] = .empty;
             chunks.* = .empty;
             self.bucket_addr_min[idx] = std.math.maxInt(usize);
             self.bucket_addr_max[idx] = 0;
         }
         self.free_lists = .{ null, null, null, null, null, null };
         self.bucket_owns_hint = .{ null, null, null, null, null, null };
+        self.bucket_bump_hint = .{ null, null, null, null, null, null };
         self.bulk_teardown = false;
     }
 };
@@ -334,6 +377,30 @@ test "GC cell backing recycles aligned cell slabs and delegates side storage" {
     const side = try a.alignedAlloc(u8, .@"8", 200);
     try std.testing.expect(@intFromPtr(side.ptr) != @intFromPtr(first_ptr));
     a.free(side);
+}
+
+test "GC cell backing lazily bumps fresh chunk slots before using the free list" {
+    var backing = GcCellBacking{ .inner = std.testing.allocator };
+    defer backing.deinit();
+    const a = backing.allocator();
+
+    const idx = GcCellBacking.bucketIndex(200, .@"16").?;
+    const one = try a.alignedAlloc(u8, .@"16", 200);
+    const two = try a.alignedAlloc(u8, .@"16", 200);
+
+    try std.testing.expectEqual(@as(usize, 1), backing.bucket_chunks[idx].items.len);
+    try std.testing.expectEqual(@as(usize, 2 * GcCellBacking.bucket_sizes[idx]), backing.bucket_next_offsets[idx].items[0]);
+    try std.testing.expectEqual(@as(?*GcCellBacking.FreeNode, null), backing.free_lists[idx]);
+    try std.testing.expectEqual(@as(?usize, 0), backing.bucket_bump_hint[idx]);
+
+    a.free(one);
+    try std.testing.expect(backing.free_lists[idx] != null);
+    const recycled = try a.alignedAlloc(u8, .@"16", 200);
+    try std.testing.expectEqual(one.ptr, recycled.ptr);
+    try std.testing.expectEqual(@as(?*GcCellBacking.FreeNode, null), backing.free_lists[idx]);
+
+    a.free(two);
+    a.free(recycled);
 }
 
 test "GC cell backing rejects pointers outside bucket address spans before scanning chunks" {
