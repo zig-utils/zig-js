@@ -5199,6 +5199,298 @@ fn runWorkerCreatorOwnedBufferLifecycleInterleaving(gpa: std.mem.Allocator, seed
     return true;
 }
 
+fn runWorkerCreatorOwnedBufferCleanupInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
+    var prng = std.Random.DefaultPrng.init(seed ^ 0x776f_726b_6372_6669);
+    const r = prng.random();
+    const ncreators = 2 + r.uintLessThan(usize, 3);
+    const nworkers = 1 + r.uintLessThan(usize, 2);
+    const per_buffer = 10 + r.uintLessThan(usize, 10);
+    const seed_marker = seed % 10_000;
+
+    var payload_sum: usize = 0;
+    var cleanup_sum: usize = 0;
+    var expected_by_worker = [_]usize{ 0, 0 };
+    var assigned_by_worker = [_]usize{ 0, 0 };
+    var id: usize = 0;
+    while (id < ncreators) : (id += 1) {
+        const base = 570_000 + seed_marker + id * 10_000;
+        var local: usize = 0;
+        var i: usize = 0;
+        while (i < per_buffer) : (i += 1) local += base + i;
+        payload_sum += local;
+        cleanup_sum += base + 7_000;
+        expected_by_worker[id % nworkers] += local * 3;
+        assigned_by_worker[id % nworkers] += 1;
+    }
+    const expected_main_total = payload_sum * 3;
+    const expected_worker_total = payload_sum * 3;
+    const expected_finish_total = payload_sum + ncreators;
+
+    const ctx = js.Context.createWith(gpa, .{ .enable_threads = true, .enable_gc = true }) catch {
+        std.debug.print("seed {d}: worker creator-owned cleanup context creation failed\n", .{seed});
+        return false;
+    };
+    defer ctx.destroy();
+    var machine = ctx.interpreter();
+
+    const src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  globalThis.__workerCreatorCleanupCount = 0;
+        \\  globalThis.__workerCreatorCleanupSum = 0;
+        \\  globalThis.__workerCreatorCleanupRegistry = new FinalizationRegistry((held) => {{
+        \\    globalThis.__workerCreatorCleanupCount++;
+        \\    globalThis.__workerCreatorCleanupSum += held;
+        \\  }});
+        \\  const registry = globalThis.__workerCreatorCleanupRegistry;
+        \\  globalThis.__workerCreatorCleanupBundles = [];
+        \\  const bundles = globalThis.__workerCreatorCleanupBundles;
+        \\  for (let id = 0; id < {d}; id++) {{
+        \\    const creator = new Thread((id, per, seedMarker) => {{
+        \\      const base = 570000 + seedMarker + id * 10000;
+        \\      const sab = new SharedArrayBuffer(per * 4);
+        \\      const ab = new ArrayBuffer(per * 4);
+        \\      const movable = new ArrayBuffer(per * 4);
+        \\      const sv = new Int32Array(sab);
+        \\      const av = new Int32Array(ab);
+        \\      const mv = new Int32Array(movable);
+        \\      let sum = 0;
+        \\      for (let i = 0; i < per; i++) {{
+        \\        const v = base + i;
+        \\        sv[i] = v;
+        \\        av[i] = v;
+        \\        mv[i] = v;
+        \\        sum += v;
+        \\      }}
+        \\      return {{ id, sab, ab, movable, sum, base }};
+        \\    }}, id, {d}, {d});
+        \\    bundles.push(creator.join());
+        \\  }}
+        \\  let total = 0;
+        \\  for (const b of bundles) {{
+        \\    const sv = new Int32Array(b.sab);
+        \\    const av = new Int32Array(b.ab);
+        \\    const mv = new Int32Array(b.movable);
+        \\    let local = 0;
+        \\    for (let i = 0; i < {d}; i++) {{
+        \\      const expected = b.base + i;
+        \\      if (sv[i] !== expected || av[i] !== expected || mv[i] !== expected)
+        \\        throw new Error('worker creator-owned cleanup lost word before Worker clone');
+        \\      local += sv[i] + av[i] + mv[i];
+        \\    }}
+        \\    if (local !== b.sum * 3)
+        \\      throw new Error('bad worker creator-owned cleanup main checksum ' + local + '/' + (b.sum * 3));
+        \\    let target = {{ id: b.id, bundle: b, root: {{ seed: {d}, label: 'worker-creator-cleanup-root' }} }};
+        \\    registry.register(target, b.base + 7000);
+        \\    target = null;
+        \\    total += local;
+        \\  }}
+        \\  if (typeof gc === 'function') gc();
+        \\  globalThis.__workerCreatorCleanupMsg = function(index) {{
+        \\    const b = bundles[index];
+        \\    return {{ cmd: 'check', id: b.id, sab: b.sab, ab: b.ab, movable: b.movable, sum: b.sum, base: b.base, per: {d} }};
+        \\  }};
+        \\  globalThis.__workerCreatorCleanupFinish = function(expectedCount, expectedSum) {{
+        \\    globalThis.__workerCreatorCleanupRegistry.cleanupSome();
+        \\    if (globalThis.__workerCreatorCleanupCount !== expectedCount)
+        \\      throw new Error('worker creator-owned cleanup count ' + globalThis.__workerCreatorCleanupCount + '/' + expectedCount);
+        \\    if (globalThis.__workerCreatorCleanupSum !== expectedSum)
+        \\      throw new Error('worker creator-owned cleanup sum ' + globalThis.__workerCreatorCleanupSum + '/' + expectedSum);
+        \\    let transferTotal = 0;
+        \\    for (const b of bundles) {{
+        \\      const copy = b.movable.transfer();
+        \\      if (b.movable.byteLength !== 0)
+        \\        throw new Error('worker creator-owned cleanup movable buffer did not detach');
+        \\      const cv = new Int32Array(copy);
+        \\      let copySum = 0;
+        \\      for (let i = 0; i < {d}; i++) {{
+        \\        const expected = b.base + i;
+        \\        if (cv[i] !== expected)
+        \\          throw new Error('worker creator-owned cleanup transferred copy lost word');
+        \\        copySum += cv[i];
+        \\      }}
+        \\      if (copySum !== b.sum)
+        \\        throw new Error('bad worker creator-owned cleanup transferred checksum ' + copySum + '/' + b.sum);
+        \\      transferTotal += copySum;
+        \\    }}
+        \\    return transferTotal + globalThis.__workerCreatorCleanupCount;
+        \\  }};
+        \\  return total;
+        \\}})();
+        \\
+    ,
+        .{
+            ncreators,
+            per_buffer,
+            seed_marker,
+            per_buffer,
+            seed_marker,
+            per_buffer,
+            per_buffer,
+        },
+    );
+    defer gpa.free(src);
+
+    const main_total = ctx.evaluate(src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: worker creator-owned cleanup JS threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!main_total.isNumber() or main_total.asNum() != @as(f64, @floatFromInt(expected_main_total))) {
+        std.debug.print("seed {d}: worker creator-owned cleanup main got {d}, expected {d}\n", .{ seed, if (main_total.isNumber()) main_total.asNum() else -1, expected_main_total });
+        return false;
+    }
+
+    const worker_src =
+        \\globalThis.onmessage = (e) => {
+        \\  if (e.data.cmd === 'close') {
+        \\    postMessage({ closed: true });
+        \\    close();
+        \\    return;
+        \\  }
+        \\  const b = e.data;
+        \\  const sv = new Int32Array(b.sab);
+        \\  const av = new Int32Array(b.ab);
+        \\  const mv = new Int32Array(b.movable);
+        \\  let seen = 0;
+        \\  for (let i = 0; i < b.per; i++) {
+        \\    const expected = b.base + i;
+        \\    if (sv[i] !== expected || av[i] !== expected || mv[i] !== expected)
+        \\      throw new Error('Worker saw creator-owned cleanup buffer corruption');
+        \\    seen += sv[i] + av[i] + mv[i];
+        \\  }
+        \\  if (seen !== b.sum * 3)
+        \\    throw new Error('bad Worker creator-owned cleanup checksum ' + seen + '/' + (b.sum * 3));
+        \\  postMessage({ id: b.id, seen, sabBytes: b.sab.byteLength, abBytes: b.ab.byteLength, movableBytes: b.movable.byteLength });
+        \\};
+    ;
+
+    var workers: std.ArrayListUnmanaged(*Worker) = .empty;
+    defer workers.deinit(gpa);
+    var cleanup_workers = true;
+    defer if (cleanup_workers) {
+        for (workers.items) |w| {
+            w.terminate();
+            w.join();
+            w.destroy();
+        }
+    };
+    var wi: usize = 0;
+    while (wi < nworkers) : (wi += 1) {
+        const w = Worker.spawn(worker_src) catch {
+            std.debug.print("seed {d}: worker creator-owned cleanup spawn failed\n", .{seed});
+            return false;
+        };
+        try workers.append(gpa, w);
+    }
+
+    id = 0;
+    while (id < ncreators) : (id += 1) {
+        const msg_src = try std.fmt.allocPrint(gpa, "globalThis.__workerCreatorCleanupMsg({d})", .{id});
+        defer gpa.free(msg_src);
+        const msg = ctx.evaluate(msg_src) catch |err| {
+            std.debug.print("seed {d}: cannot make worker creator-owned cleanup message: {s}\n", .{ seed, @errorName(err) });
+            return false;
+        };
+        workers.items[id % nworkers].postMessage(&machine, msg) catch |err| {
+            std.debug.print("seed {d}: worker creator-owned cleanup post failed: {s}\n", .{ seed, @errorName(err) });
+            return false;
+        };
+    }
+    const close_msg = ctx.evaluate("({ cmd: 'close' })") catch |err| {
+        std.debug.print("seed {d}: cannot make worker creator-owned cleanup close message: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    for (workers.items) |w| {
+        w.postMessage(&machine, close_msg) catch |err| {
+            std.debug.print("seed {d}: worker creator-owned cleanup close post failed: {s}\n", .{ seed, @errorName(err) });
+            return false;
+        };
+    }
+
+    var worker_total: usize = 0;
+    wi = 0;
+    while (wi < nworkers) : (wi += 1) {
+        var replies: usize = 0;
+        var closed = false;
+        var local_seen: usize = 0;
+        const expected_replies = assigned_by_worker[wi] + 1;
+        while (replies < expected_replies) : (replies += 1) {
+            const reply = (workers.items[wi].receive(&machine, 10_000) catch |err| {
+                std.debug.print("seed {d}: worker creator-owned cleanup receive failed: {s}\n", .{ seed, @errorName(err) });
+                return false;
+            }) orelse {
+                std.debug.print("seed {d}: worker creator-owned cleanup receive timed out\n", .{seed});
+                return false;
+            };
+            const closed_value = machine.getProperty(reply, "closed") catch js.Value.undef();
+            if (closed_value.isBoolean() and closed_value.asBool()) {
+                closed = true;
+                continue;
+            }
+            const seen = machine.getProperty(reply, "seen") catch |err| {
+                std.debug.print("seed {d}: cannot read worker creator-owned cleanup seen: {s}\n", .{ seed, @errorName(err) });
+                return false;
+            };
+            const sab_bytes = machine.getProperty(reply, "sabBytes") catch |err| {
+                std.debug.print("seed {d}: cannot read worker creator-owned cleanup sab bytes: {s}\n", .{ seed, @errorName(err) });
+                return false;
+            };
+            const ab_bytes = machine.getProperty(reply, "abBytes") catch |err| {
+                std.debug.print("seed {d}: cannot read worker creator-owned cleanup ab bytes: {s}\n", .{ seed, @errorName(err) });
+                return false;
+            };
+            const movable_bytes = machine.getProperty(reply, "movableBytes") catch |err| {
+                std.debug.print("seed {d}: cannot read worker creator-owned cleanup movable bytes: {s}\n", .{ seed, @errorName(err) });
+                return false;
+            };
+            if (!seen.isNumber() or !sab_bytes.isNumber() or !ab_bytes.isNumber() or !movable_bytes.isNumber() or
+                sab_bytes.asNum() != @as(f64, @floatFromInt(per_buffer * 4)) or
+                ab_bytes.asNum() != @as(f64, @floatFromInt(per_buffer * 4)) or
+                movable_bytes.asNum() != @as(f64, @floatFromInt(per_buffer * 4)))
+            {
+                std.debug.print("seed {d}: bad worker creator-owned cleanup reply shape\n", .{seed});
+                return false;
+            }
+            local_seen += @intFromFloat(seen.asNum());
+        }
+        if (!closed or local_seen != expected_by_worker[wi]) {
+            std.debug.print("seed {d}: worker creator-owned cleanup local seen={d}/{d} closed={}\n", .{ seed, local_seen, expected_by_worker[wi], closed });
+            return false;
+        }
+        worker_total += local_seen;
+    }
+    if (worker_total != expected_worker_total) {
+        std.debug.print("seed {d}: worker creator-owned cleanup total got {d}, expected {d}\n", .{ seed, worker_total, expected_worker_total });
+        return false;
+    }
+    for (workers.items) |w| {
+        w.join();
+        w.destroy();
+    }
+    cleanup_workers = false;
+
+    ctx.collectGarbage();
+    const finish_src = try std.fmt.allocPrint(gpa, "globalThis.__workerCreatorCleanupFinish({d}, {d})", .{ ncreators, cleanup_sum });
+    defer gpa.free(finish_src);
+    const finish_total = ctx.evaluate(finish_src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: worker creator-owned cleanup finish threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!finish_total.isNumber() or finish_total.asNum() != @as(f64, @floatFromInt(expected_finish_total))) {
+        std.debug.print("seed {d}: worker creator-owned cleanup finish got {d}, expected {d}\n", .{ seed, if (finish_total.isNumber()) finish_total.asNum() else -1, expected_finish_total });
+        return false;
+    }
+    return true;
+}
+
 fn runTerminationPendingReactionInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
     var prng = std.Random.DefaultPrng.init(seed ^ 0x7465_726d_7265_6163);
     const r = prng.random();
@@ -9823,6 +10115,23 @@ pub fn main(init: std.process.Init) !void {
         if (wcbfail != 0) std.process.exit(1);
         return;
     };
+    // `threadfuzz workercreatorcleanup <iters> <seed>`: focused lifecycle
+    // repro for child-created SAB/ArrayBuffer storage crossing isolated Worker
+    // structured-clone after creator Thread exit while FinalizationRegistry
+    // cleanup and transfer observers run afterward.
+    if (first) |a| if (std.mem.eql(u8, a, "workercreatorcleanup")) {
+        if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch 1;
+        if (args.next()) |b| base_seed = std.fmt.parseInt(u64, b, 10) catch 1;
+        var wccfail: usize = 0;
+        var wcci: usize = 0;
+        while (wcci < iters) : (wcci += 1) {
+            const seed = base_seed +% wcci;
+            if (!(try runWorkerCreatorOwnedBufferCleanupInterleaving(gpa, seed))) wccfail += 1;
+        }
+        std.debug.print("threadfuzz workercreatorcleanup: {d} programs from seed {d}, {d} failures\n", .{ iters, base_seed, wccfail });
+        if (wccfail != 0) std.process.exit(1);
+        return;
+    };
     // `threadfuzz termreact <iters> <seed>`: focused lifecycle repro for
     // teardown termination while asyncJoin reactions and child-owned typed-array
     // waitAsync tickets are still pending.
@@ -10222,7 +10531,9 @@ pub fn main(init: std.process.Init) !void {
     // Promise reaction queue churn from asyncHold, waitAsync, asyncJoin, and
     // finalization cleanup,
     // creator-owned SAB/ArrayBuffer storage crossing isolated Worker
-    // structured-clone after creator Thread exit,
+    // structured-clone after creator Thread exit, including the sibling cleanup
+    // variant where FinalizationRegistry cleanup and transfer observers run
+    // after Worker close,
     // teardown termination with pending asyncJoin reactions and child-owned
     // typed-array waitAsync tickets, teardown termination with property
     // waitAsync timeouts, async condition reacquire, asyncJoin rejection, and
@@ -10262,7 +10573,8 @@ pub fn main(init: std.process.Init) !void {
     // finalization cleanup share the same delivery window, when
     // child-created SAB/ArrayBuffer storage outlives its creator Thread and is
     // read/transferred under GC pressure and crosses isolated Worker
-    // structured-clone after creator exit, plus when teardown
+    // structured-clone after creator exit, including a cleanup/transfer sibling,
+    // plus when teardown
     // termination rejects pending asyncJoin reactions and abandons child-owned
     // typed-array waitAsync tickets, and when teardown termination overlaps
     // property waitAsync timeout compaction, async condition reacquire,
@@ -10311,6 +10623,7 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runAsyncHoldThrowFinalizationInterleaving(gpa, seed))) lfail += 1;
             if (!(try runCreatorOwnedBufferLifecycleInterleaving(gpa, seed))) lfail += 1;
             if (!(try runWorkerCreatorOwnedBufferLifecycleInterleaving(gpa, seed))) lfail += 1;
+            if (!(try runWorkerCreatorOwnedBufferCleanupInterleaving(gpa, seed))) lfail += 1;
             if (!(try runTerminationPendingReactionInterleaving(gpa, seed))) lfail += 1;
             if (!(try runTerminationWaiterCleanupInterleaving(gpa, seed))) lfail += 1;
             if (!(try runWorkerTerminateConditionAsyncCleanupInterleaving(gpa, seed))) lfail += 1;
@@ -10321,7 +10634,7 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runThreadLocalFinalizationCleanupInterleaving(gpa, seed))) lfail += 1;
             if (!(try runNestedThreadAsyncJoinCleanupInterleaving(gpa, seed))) lfail += 1;
         }
-        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 34, base_seed, lfail });
+        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 35, base_seed, lfail });
         if (lfail != 0) std.process.exit(1);
         return;
     };

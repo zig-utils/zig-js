@@ -306,7 +306,8 @@ context APIs.
   creator-owned `SharedArrayBuffer` and `ArrayBuffer` storage that survives the
   creating Thread's exit, sibling-thread reads, GC pressure, and post-creator
   `ArrayBuffer.transfer()`, child-created SAB/ArrayBuffer storage crossing
-  isolated Worker structured-clone after creator exit, and cleanup
+  isolated Worker structured-clone after creator exit plus a sibling Worker
+  clone/finalization cleanup/transfer observer variant, and cleanup
   delivery interleaved with `join()` / `asyncJoin()` plus unregister-token
   suppression, plus cleanup delivery after
   parked property/condition waiters resume, plus `ThreadLocal` values registered
