@@ -81,21 +81,33 @@ pub const ContentionStats = struct {
     lock_contentions: u64 = 0,
     lock_wait_parks: u64 = 0,
     async_hold_queued: u64 = 0,
+    condition_async_waits: u64 = 0,
     condition_waits: u64 = 0,
     condition_wait_parks: u64 = 0,
     property_waits: u64 = 0,
     property_wait_parks: u64 = 0,
+    property_wait_async_enqueued: u64 = 0,
+    property_wait_async_settled: u64 = 0,
     task_pump_empty: u64 = 0,
     task_pump_jobs: u64 = 0,
 
     pub fn events(self: ContentionStats) u64 {
         return self.lock_contentions + self.async_hold_queued +
-            self.condition_waits + self.property_waits;
+            self.condition_waits + self.condition_async_waits +
+            self.property_waits + self.property_wait_async_enqueued;
     }
 
     pub fn parks(self: ContentionStats) u64 {
         return self.thread_join_parks + self.lock_wait_parks +
             self.condition_wait_parks + self.property_wait_parks;
+    }
+
+    pub fn asyncWaits(self: ContentionStats) u64 {
+        return self.condition_async_waits + self.property_wait_async_enqueued;
+    }
+
+    pub fn asyncSettled(self: ContentionStats) u64 {
+        return self.property_wait_async_settled;
     }
 };
 
@@ -104,10 +116,13 @@ const ContentionCounters = struct {
     lock_contentions: std.atomic.Value(u64) = .init(0),
     lock_wait_parks: std.atomic.Value(u64) = .init(0),
     async_hold_queued: std.atomic.Value(u64) = .init(0),
+    condition_async_waits: std.atomic.Value(u64) = .init(0),
     condition_waits: std.atomic.Value(u64) = .init(0),
     condition_wait_parks: std.atomic.Value(u64) = .init(0),
     property_waits: std.atomic.Value(u64) = .init(0),
     property_wait_parks: std.atomic.Value(u64) = .init(0),
+    property_wait_async_enqueued: std.atomic.Value(u64) = .init(0),
+    property_wait_async_settled: std.atomic.Value(u64) = .init(0),
     task_pump_empty: std.atomic.Value(u64) = .init(0),
     task_pump_jobs: std.atomic.Value(u64) = .init(0),
 };
@@ -121,10 +136,13 @@ pub fn resetContentionStats() void {
     contention_counters.lock_contentions.store(0, .release);
     contention_counters.lock_wait_parks.store(0, .release);
     contention_counters.async_hold_queued.store(0, .release);
+    contention_counters.condition_async_waits.store(0, .release);
     contention_counters.condition_waits.store(0, .release);
     contention_counters.condition_wait_parks.store(0, .release);
     contention_counters.property_waits.store(0, .release);
     contention_counters.property_wait_parks.store(0, .release);
+    contention_counters.property_wait_async_enqueued.store(0, .release);
+    contention_counters.property_wait_async_settled.store(0, .release);
     contention_counters.task_pump_empty.store(0, .release);
     contention_counters.task_pump_jobs.store(0, .release);
     contention_stats_enabled.store(true, .release);
@@ -140,10 +158,13 @@ pub fn contentionStats() ContentionStats {
         .lock_contentions = contention_counters.lock_contentions.load(.acquire),
         .lock_wait_parks = contention_counters.lock_wait_parks.load(.acquire),
         .async_hold_queued = contention_counters.async_hold_queued.load(.acquire),
+        .condition_async_waits = contention_counters.condition_async_waits.load(.acquire),
         .condition_waits = contention_counters.condition_waits.load(.acquire),
         .condition_wait_parks = contention_counters.condition_wait_parks.load(.acquire),
         .property_waits = contention_counters.property_waits.load(.acquire),
         .property_wait_parks = contention_counters.property_wait_parks.load(.acquire),
+        .property_wait_async_enqueued = contention_counters.property_wait_async_enqueued.load(.acquire),
+        .property_wait_async_settled = contention_counters.property_wait_async_settled.load(.acquire),
         .task_pump_empty = contention_counters.task_pump_empty.load(.acquire),
         .task_pump_jobs = contention_counters.task_pump_jobs.load(.acquire),
     };
@@ -169,8 +190,11 @@ test "jsthread contention stats reset and snapshot" {
 
     bumpContention("lock_contentions");
     bumpContention("async_hold_queued");
+    bumpContention("condition_async_waits");
     bumpContention("condition_waits");
     bumpContention("property_waits");
+    bumpContention("property_wait_async_enqueued");
+    bumpContention("property_wait_async_settled");
     bumpContention("thread_join_parks");
     bumpContention("lock_wait_parks");
     bumpContention("condition_wait_parks");
@@ -179,14 +203,18 @@ test "jsthread contention stats reset and snapshot" {
     bumpContention("task_pump_jobs");
 
     const stats = contentionStats();
-    try std.testing.expectEqual(@as(u64, 4), stats.events());
+    try std.testing.expectEqual(@as(u64, 6), stats.events());
     try std.testing.expectEqual(@as(u64, 4), stats.parks());
+    try std.testing.expectEqual(@as(u64, 2), stats.asyncWaits());
+    try std.testing.expectEqual(@as(u64, 1), stats.asyncSettled());
     try std.testing.expectEqual(@as(u64, 1), stats.task_pump_empty);
     try std.testing.expectEqual(@as(u64, 1), stats.task_pump_jobs);
 
     resetContentionStats();
     try std.testing.expectEqual(@as(u64, 0), contentionStats().events());
     try std.testing.expectEqual(@as(u64, 0), contentionStats().parks());
+    try std.testing.expectEqual(@as(u64, 0), contentionStats().asyncWaits());
+    try std.testing.expectEqual(@as(u64, 0), contentionStats().asyncSettled());
     try std.testing.expectEqual(@as(u64, 0), contentionStats().task_pump_empty);
     try std.testing.expectEqual(@as(u64, 0), contentionStats().task_pump_jobs);
     disableContentionStats();
@@ -1757,12 +1785,14 @@ pub fn propWaitAsync(self: *Interpreter, args: []const Value, timeout_ns: ?u64) 
         return error.OutOfMemory;
     };
     queued = true;
+    bumpContention("property_wait_async_enqueued");
     try self.setProp(res, "async", Value.boolVal(true));
     try self.setProp(res, "value", Value.obj(p_obj));
     return Value.obj(res);
 }
 
 fn settlePropAsync(self: *Interpreter, t: *PropAsyncTicket, outcome: []const u8) void {
+    bumpContention("property_wait_async_settled");
     if (promise.promiseOf(Value.obj(t.promise))) |pp| {
         const saved_microtasks = self.microtasks;
         self.microtasks = t.microtasks;
@@ -2643,6 +2673,7 @@ fn condAsyncWaitFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.
         rec.mutex.unlock(io);
         return err;
     };
+    bumpContention("condition_async_waits");
     job_to_enqueue = lockReleaseLocked(lock);
     lock.mutex.unlock(io);
     rec.mutex.unlock(io);

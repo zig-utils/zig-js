@@ -255,7 +255,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const run_threads_profile = b.addRunArtifact(threads_profile);
-    const threads_profile_step = b.step("threads-profile", "Profile no-GIL Thread contention against the .gil fallback");
+    const threads_profile_step = b.step("threads-profile", "Profile no-GIL Thread contention, async waits, and .gil fallback cost");
     threads_profile_step.dependOn(&run_threads_profile.step);
 
     // GC allocation/lifecycle profile: compare arena, explicit-GC, no-GIL

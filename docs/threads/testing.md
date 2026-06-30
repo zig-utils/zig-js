@@ -240,13 +240,18 @@ heap-cap gaps visible without inflating the green allowlist with no-op passes.
 scaling and contention profiler for issue #1. The wall-clock columns compare the
 no-GIL default with `.gil = true` across independent compute, shared object
 properties, shared array append, typed-array Atomics, property `Atomics.wait` /
-`notify`, `Condition.wait` / `notifyAll`, contended `Lock.hold`,
+`notify`, property `Atomics.waitAsync` timeout settlement,
+`Condition.wait` / `notifyAll`, `Condition.asyncWait`, contended `Lock.hold`,
 `Lock.asyncHold` delivery, observed `Lock.asyncHold` callback settlement,
 no-fn `Lock.asyncHold` release-function delivery, and thread lifecycle churn.
 Its opt-in counters let
 `events` count logical contention in `Lock`/`Condition`/property waits and
 queued `asyncHold` grants, and `parks` count timed wait/pump iterations
 including `Thread.join`.
+The `async`/`done` columns split `Condition.asyncWait` plus property
+`waitAsync` registration from settled property `waitAsync` tickets, making
+timeout-settlement parity and async condition regrant pressure visible in the
+same run.
 The `empty`/`jobs` columns split the run-loop task pump into empty atomic
 fast-path hits and real async-hold job delivery. Run it before and after
 synchronization or lifecycle changes so performance work has an attributed
@@ -292,6 +297,9 @@ turn while skipping an otherwise-empty no-GIL microtask drain. No-fn async-hold
 release states are embedded in their already arena-lived hold jobs, so the same
 public asyncHold corpus case also covers the release-function path after that
 allocation reduction.
+The property `waitAsync` timeout row should keep `async` and `done` equal after
+finite tickets settle; the `Condition.asyncWait` row exposes async waiter
+registration and the paired run-loop job delivery pressure separately.
 `threads-profile` remains the check that this kind of targeted optimization
 does not merely move overhead elsewhere.
 

@@ -100,15 +100,19 @@ context APIs.
   is sub-linear. `zig build threads-profile` now provides a repeatable baseline
   against the `.gil = true` fallback for independent compute, shared object
   properties, shared array append, typed-array Atomics, property
-  `Atomics.wait` / `notify`, `Condition.wait` / `notifyAll`,
+  `Atomics.wait` / `notify`, property `Atomics.waitAsync` timeout settlement,
+  `Condition.wait` / `notifyAll`, `Condition.asyncWait`,
   `Lock.asyncHold` delivery, observed `Lock.asyncHold` callback settlement,
   no-fn `Lock.asyncHold` release-function delivery, and lifecycle churn. Use it
   to drive contention reductions in global/environment bindings,
-  property/element locks, sync waiters, unobserved async-hold grant delivery,
-  promise-observed callback settlement, no-fn release-function delivery,
-  collection helpers, and GC allocation. Its
-  `empty`/`jobs` columns now show whether run-loop task-pump
-  overhead is empty fast-path churn or real async-hold delivery. Empty sync-wait
+  property/element locks, sync waiters, property `waitAsync` timeout
+  settlement, async condition regrant delivery, unobserved async-hold grant
+  delivery, promise-observed callback settlement, no-fn release-function
+  delivery, collection helpers, and GC allocation. Its `async`/`done` columns
+  now split async condition/property-waitAsync registration from settled
+  property `waitAsync` tickets, and its `empty`/`jobs` columns show whether
+  run-loop task-pump overhead is empty fast-path churn or real async-hold
+  delivery. Empty sync-wait
   task pumps no longer take the shared run-loop task lock, reducing one measured
   cost in contended lock/lifecycle paths; real async-hold delivery now uses FIFO
   head cursors for both per-lock pending grants and realm task delivery, and

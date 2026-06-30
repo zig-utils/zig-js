@@ -266,12 +266,15 @@ threading architecture:
 - **Parallel scaling** - `zig build threads-profile` compares the no-GIL
   default against `.gil = true` across independent compute, shared object
   properties, array append, typed-array Atomics, property `Atomics.wait` /
-  `notify`, `Condition.wait` / `notifyAll`, contended `Lock.hold`, and
+  `notify`, property `Atomics.waitAsync` timeout settlement,
+  `Condition.wait` / `notifyAll`, `Condition.asyncWait`, contended `Lock.hold`, and
   `Lock.asyncHold` delivery plus observed callback and no-fn release-function
   variants, along with lifecycle churn. It now enables and prints internal
-  contention events, timed wait/pump parks, and run-loop task-pump empty/job
-  counts beside wall-clock time, so follow-up optimization can separate
-  property waiters, condition waiters, user-level lock pressure,
+  contention events, timed wait/pump parks, async waiter registration/settlement
+  counts for `Condition.asyncWait` and property `waitAsync`, and run-loop
+  task-pump empty/job counts beside wall-clock time, so follow-up optimization
+  can separate property waiters, property `waitAsync` timeout settlement,
+  condition waiters, async condition regrant delivery, user-level lock pressure,
   thread-join/lifecycle waiting, unobserved async-hold grant delivery,
   promise-observed callback settlement, no-fn release-function delivery,
   object/element storage contention, and GC allocation costs under high thread
@@ -323,9 +326,13 @@ threading architecture:
   No-fn async-hold grants embed their once-only release state in the already
   arena-lived hold job, avoiding an extra small allocation per delivered release
   function.
+  The profile now also has direct rows for property `waitAsync` finite-timeout
+  settlement and `Condition.asyncWait` reacquire delivery, with async/done
+  columns that show ticket registration and exact property-ticket settlement
+  parity during local performance work.
   The Worker profile prints that empty-receive polling cost separately from
   real message-delivery and lifecycle cost. Continue using the profile for the
-  remaining contended-lock, Worker message, and lifecycle hot spots.
+  remaining async-condition, contended-lock, Worker message, and lifecycle hot spots.
 - **Memory-model maintenance** - keep
   [docs/threads/memory-model.md](docs/threads/memory-model.md) aligned with the
   TSan suppression witness, synchronization primitives, and promoted corpus

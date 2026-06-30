@@ -102,13 +102,16 @@ Known performance/maturity work:
   the no-GIL default with `.gil = true` across independent compute, shared
   object properties, shared array append, typed-array Atomics, contended
   property `Atomics.wait` / `notify`, `Condition.wait` / `notifyAll`,
+  property `Atomics.waitAsync` timeout settlement, `Condition.asyncWait`,
   `Lock.hold`, `Lock.asyncHold` delivery, observed `Lock.asyncHold` callback
   settlement, no-fn `Lock.asyncHold` release-function delivery, and thread
   lifecycle churn. Each row enables and includes internal contention counters:
   `events` count logical contention (`Lock`/`Condition`/property wait and
   queued `asyncHold` grants), `parks` count timed wait/pump iterations
-  including `Thread.join`, and `empty`/`jobs` split the run-loop task pump into
-  empty fast-path hits and delivered async-hold jobs.
+  including `Thread.join`, `async`/`done` split `Condition.asyncWait` plus
+  property `waitAsync` registration from settled property `waitAsync` tickets,
+  and `empty`/`jobs` split the run-loop task pump into empty fast-path hits and
+  delivered async-hold jobs.
 - Parked sync waiters still pump the realm run-loop so async-hold grants make
   progress, but empty pumps now use an atomic queue-count fast path and avoid
   taking the shared threading API lock.
@@ -129,6 +132,11 @@ Known performance/maturity work:
   already arena-lived hold job, avoiding an extra small allocation per delivered
   release function while preserving the release-function object and existing
   lock/GC ordering.
+- The profile now has direct rows for property `Atomics.waitAsync` finite
+  timeout settlement and `Condition.asyncWait` reacquire delivery, so local
+  performance work can separate async waiter registration, property ticket
+  settlement, and run-loop grant delivery instead of inferring them from elapsed
+  time alone.
 - Condition notify/notifyAll use the same FIFO head-cursor pattern for the
   mixed sync/async waiter queue, avoiding one front-shift per notified waiter.
   Timed-out or terminated sync condition waiters are marked canceled and skipped
