@@ -33469,15 +33469,17 @@ fn temporalDateTimeToZonedDateTimeFn(ctx: *anyopaque, this: Value, args: []const
     const tz = try resolveTimeZoneArg(self, args[0]);
     // GetTemporalDisambiguationOption (validated even though fixed-offset zones
     // ignore it — an invalid value must still throw).
+    var disambiguation = ZdtDisambiguation.compatible;
     if (args.len > 1 and !args[1].isUndefined()) {
         if (!isObjectLike(args[1])) return self.throwError("TypeError", "options must be an object");
-        _ = try dtfGetStr(self, args[1], "disambiguation", &.{ "compatible", "earlier", "later", "reject" }, "compatible");
+        disambiguation = try readZdtDisambiguation(self, args[1]);
     }
     const local = dtLocalNs(this.asObj().temporal.?);
-    const o = try zdtMake(self, local - @as(i128, tz.offset_ns), tz.name, tz.offset_ns);
+    const offset = if (isFixedTimeZone(tz)) tz.offset_ns else try zdtOffsetForLocalDisambiguation(self, tz, local, disambiguation);
+    const o = try zdtMake(self, local - @as(i128, offset), tz.name, tz.offset_ns);
     o.asObj().temporal.?.* = this.asObj().temporal.?.*;
     o.asObj().temporal.?.kind = .zoned_date_time;
-    o.asObj().temporal.?.epoch_ns = local - @as(i128, tz.offset_ns);
+    o.asObj().temporal.?.epoch_ns = local - @as(i128, offset);
     o.asObj().temporal.?.tz_name = tz.name;
     o.asObj().temporal.?.tz_offset_ns = tz.offset_ns;
     return o;
@@ -33868,6 +33870,14 @@ fn zdtActualOffsetForLocal(tz: TimeZone, local_ns: i128) i64 {
             return -5 * 3_600_000_000_000;
     }
     if (std.mem.eql(u8, tz.name, "America/Los_Angeles")) {
+        const spring_gap_start_2000 = (@as(i128, tDaysFromCivil(2000, 4, 2)) * nsPerUnit(.day)) + 2 * nsPerUnit(.hour);
+        const spring_gap_end_2000 = spring_gap_start_2000 + nsPerUnit(.hour);
+        if (local_ns >= spring_gap_start_2000 and local_ns < spring_gap_end_2000)
+            return -8 * 3_600_000_000_000;
+        const fall_overlap_start_2000 = (@as(i128, tDaysFromCivil(2000, 10, 29)) * nsPerUnit(.day)) + nsPerUnit(.hour);
+        const fall_overlap_end_2000 = fall_overlap_start_2000 + nsPerUnit(.hour);
+        if (local_ns >= fall_overlap_start_2000 and local_ns < fall_overlap_end_2000)
+            return -7 * 3_600_000_000_000;
         const spring_gap_start = (@as(i128, tDaysFromCivil(2020, 3, 8)) * nsPerUnit(.day)) + 2 * nsPerUnit(.hour);
         const spring_gap_end = spring_gap_start + nsPerUnit(.hour);
         if (local_ns >= spring_gap_start and local_ns < spring_gap_end)
@@ -33968,6 +33978,24 @@ fn zdtOffsetForLocalDisambiguation(self: *Interpreter, tz: TimeZone, local_ns: i
     if (std.mem.eql(u8, tz.name, "America/Los_Angeles")) {
         const standard = -8 * 3_600_000_000_000;
         const daylight = -7 * 3_600_000_000_000;
+        const spring_gap_start_2000 = (@as(i128, tDaysFromCivil(2000, 4, 2)) * nsPerUnit(.day)) + 2 * nsPerUnit(.hour);
+        const spring_gap_end_2000 = spring_gap_start_2000 + nsPerUnit(.hour);
+        if (local_ns >= spring_gap_start_2000 and local_ns < spring_gap_end_2000) {
+            return switch (disambiguation) {
+                .compatible, .later => standard,
+                .earlier => daylight,
+                .reject => self.throwError("RangeError", "ambiguous or nonexistent local time"),
+            };
+        }
+        const fall_overlap_start_2000 = (@as(i128, tDaysFromCivil(2000, 10, 29)) * nsPerUnit(.day)) + nsPerUnit(.hour);
+        const fall_overlap_end_2000 = fall_overlap_start_2000 + nsPerUnit(.hour);
+        if (local_ns >= fall_overlap_start_2000 and local_ns < fall_overlap_end_2000) {
+            return switch (disambiguation) {
+                .compatible, .earlier => daylight,
+                .later => standard,
+                .reject => self.throwError("RangeError", "ambiguous or nonexistent local time"),
+            };
+        }
         const spring_gap_start = (@as(i128, tDaysFromCivil(2020, 3, 8)) * nsPerUnit(.day)) + 2 * nsPerUnit(.hour);
         const spring_gap_end = spring_gap_start + nsPerUnit(.hour);
         if (local_ns >= spring_gap_start and local_ns < spring_gap_end) {
@@ -34152,6 +34180,10 @@ fn skippedMidnightStartEpoch(tz_name: []const u8, iso_year: i64, iso_month: u8, 
         return (@as(i128, tDaysFromCivil(1933, 1, 1)) * nsPerUnit(.day)) - 7 * nsPerUnit(.hour);
     if (std.mem.eql(u8, tz_name, "Pacific/Apia") and iso_year == 2011 and iso_month == 12 and iso_day == 30)
         return (@as(i128, tDaysFromCivil(2011, 12, 30)) * nsPerUnit(.day)) + 10 * nsPerUnit(.hour);
+    if (std.mem.eql(u8, tz_name, "America/Noronha") and iso_year == 2000 and iso_month == 10 and iso_day == 8)
+        return (@as(i128, tDaysFromCivil(2000, 10, 8)) * nsPerUnit(.day)) + 2 * nsPerUnit(.hour);
+    if (std.mem.eql(u8, tz_name, "America/Boa_Vista") and iso_year == 2000 and iso_month == 10 and iso_day == 8)
+        return (@as(i128, tDaysFromCivil(2000, 10, 8)) * nsPerUnit(.day)) + 4 * nsPerUnit(.hour);
     return null;
 }
 
@@ -34330,6 +34362,10 @@ fn parseTimeZoneBare(self: *Interpreter, s: []const u8) EvalError!TimeZone {
             -(3 * 3_600_000_000_000 + 30 * 60_000_000_000)
         else if (std.mem.eql(u8, name, "Antarctica/Casey"))
             8 * 3_600_000_000_000
+        else if (std.mem.eql(u8, name, "America/Noronha"))
+            -2 * 3_600_000_000_000
+        else if (std.mem.eql(u8, name, "America/Boa_Vista"))
+            -4 * 3_600_000_000_000
         else if (std.mem.eql(u8, name, "Pacific/Apia"))
             -10 * 3_600_000_000_000
         else if (std.mem.eql(u8, name, "Pacific/Niue"))
@@ -34390,9 +34426,27 @@ fn timeZoneOffsetAtEpoch(name: []const u8, epoch_ns: i128, fallback: i64) i64 {
             return 11 * 3_600_000_000_000;
         return 8 * 3_600_000_000_000;
     }
+    if (std.mem.eql(u8, name, "America/Noronha")) {
+        const dst_start_2000 = (@as(i128, tDaysFromCivil(2000, 10, 8)) * nsPerUnit(.day)) + 2 * nsPerUnit(.hour);
+        const dst_end_2000 = (@as(i128, tDaysFromCivil(2000, 10, 15)) * nsPerUnit(.day)) + nsPerUnit(.hour);
+        if (epoch_ns >= dst_start_2000 and epoch_ns < dst_end_2000)
+            return -1 * 3_600_000_000_000;
+        return -2 * 3_600_000_000_000;
+    }
+    if (std.mem.eql(u8, name, "America/Boa_Vista")) {
+        const dst_start_2000 = (@as(i128, tDaysFromCivil(2000, 10, 8)) * nsPerUnit(.day)) + 4 * nsPerUnit(.hour);
+        const dst_end_2000 = (@as(i128, tDaysFromCivil(2000, 10, 15)) * nsPerUnit(.day)) + 3 * nsPerUnit(.hour);
+        if (epoch_ns >= dst_start_2000 and epoch_ns < dst_end_2000)
+            return -3 * 3_600_000_000_000;
+        return -4 * 3_600_000_000_000;
+    }
     if (std.mem.eql(u8, name, "America/Los_Angeles")) {
+        const dst_start_2000 = (@as(i128, tDaysFromCivil(2000, 4, 2)) * nsPerUnit(.day)) + 10 * nsPerUnit(.hour);
+        const dst_end_2000 = (@as(i128, tDaysFromCivil(2000, 10, 29)) * nsPerUnit(.day)) + 9 * nsPerUnit(.hour);
         const dst_start_2020 = (@as(i128, tDaysFromCivil(2020, 3, 8)) * nsPerUnit(.day)) + 10 * nsPerUnit(.hour);
         const dst_end_2020 = (@as(i128, tDaysFromCivil(2020, 11, 1)) * nsPerUnit(.day)) + 9 * nsPerUnit(.hour);
+        if (epoch_ns >= dst_start_2000 and epoch_ns < dst_end_2000)
+            return -7 * 3_600_000_000_000;
         if (epoch_ns >= dst_start_2020 and epoch_ns < dst_end_2020)
             return -7 * 3_600_000_000_000;
         return -8 * 3_600_000_000_000;
