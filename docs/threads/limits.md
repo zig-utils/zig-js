@@ -112,7 +112,10 @@ context APIs.
   waiter. Property-mode `Atomics.notify` now stable-compacts matching sync and
   async waiters in one pass: notified sync stack tickets leave the realm waiter
   table before signal, and matching `waitAsync` tickets are collected without
-  repeated middle removals. Worker inbox/outbox channels now drain
+  repeated middle removals. Timeout polling now uses the same one-pass
+  compaction shape for expired property `waitAsync` tickets, and realm teardown
+  frees abandoned property `waitAsync` tickets by linear scan. Worker
+  inbox/outbox channels now drain
   structured-clone messages with FIFO head cursors as well, avoiding front
   shifts in receive-heavy Worker loops. Empty internal `Worker.receive(..., 0)`
   polls return under the channel lock without entering a timed condition wait.

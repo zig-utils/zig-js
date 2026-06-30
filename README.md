@@ -280,7 +280,9 @@ threading architecture:
   avoiding one front shift per notified waiter. Property-mode `Atomics.notify`
   now stable-compacts matching waiters in one pass: sync stack tickets are
   unlinked before signal, and matching `waitAsync` tickets are collected without
-  repeated `orderedRemove` shifts. Worker inbox/outbox channels now drain
+  repeated `orderedRemove` shifts; timeout polling and realm teardown now scan
+  property `waitAsync` tickets once instead of removing one middle entry per
+  expired/abandoned ticket. Worker inbox/outbox channels now drain
   through the same FIFO head-cursor shape instead of front-shifting
   structured-clone message queues, and empty internal `Worker.receive(..., 0)`
   polls return under the channel lock without entering timed condition waits.

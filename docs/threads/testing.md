@@ -115,7 +115,9 @@ thread lifecycle, `asyncJoin`, property `wait` / `waitAsync`, `Condition`
 wakeups, `Thread.restrict`, and `FinalizationRegistry` cleanup sidecars. The
 focused unit suite also locks in property-mode `Atomics.notify` queue
 compaction: matching sync waiters are unlinked before signal, unmatched waiters
-keep FIFO order, and async tickets are collected without repeated removals. The
+keep FIFO order, and async tickets are collected without repeated removals.
+Property `waitAsync` timeout polling now has a direct unit witness for
+one-pass expired-ticket compaction that preserves unexpired FIFO order. The
 mid-script GC profile (`-Dfuzz-midgc=true`) uses the internal testing context to
 enable `parallel_midscript_gc`, blocks peers in property `Atomics.wait`,
 `Condition.wait`, and contended `Lock` acquisition, queues a FIFO async-hold

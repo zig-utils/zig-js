@@ -117,7 +117,9 @@ Known performance/maturity work:
   pass. Sync wait stack tickets are unlinked before signal, so awakened peers no
   longer each rescan and front-shift the table on return; matching `waitAsync`
   tickets are collected for post-unlock settlement without repeated middle
-  removals.
+  removals. Timeout polling now also compacts all expired property `waitAsync`
+  tickets in one pass and realm teardown frees abandoned property `waitAsync`
+  tickets by linear scan.
 - Worker inbox/outbox channels now use FIFO head cursors for structured-clone
   message queues, so Worker-heavy lifecycle and receive loops do not pay one
   front shift per delivered message. Empty internal `Worker.receive(..., 0)`

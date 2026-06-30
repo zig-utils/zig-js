@@ -1813,26 +1813,13 @@ fn transferPendingJoinQueue(ctx: *Context, from: *std.ArrayListUnmanaged(promise
 /// poll points (awaitValue's GIL-handover loop, the drain tail).
 pub fn pollPropAsync(self: *Interpreter) void {
     const g = self.gil orelse return;
-    while (true) {
-        const now = std.Io.Timestamp.now(agent.engineIo(), .awake).nanoseconds;
-        var expired: ?*PropAsyncTicket = null;
-        g.lockPropWaiters();
-        var i: usize = 0;
-        while (i < g.prop_async.items.len) : (i += 1) {
-            const t: *PropAsyncTicket = @ptrCast(@alignCast(g.prop_async.items[i]));
-            if (t.deadline_ns != null and t.deadline_ns.? <= now) {
-                expired = t;
-                _ = g.prop_async.orderedRemove(i);
-                break;
-            }
-        }
-        g.unlockPropWaiters();
-        if (expired) |t| {
-            settlePropAsync(self, t, "timed-out");
-            continue;
-        }
-        break;
-    }
+    const now = std.Io.Timestamp.now(agent.engineIo(), .awake).nanoseconds;
+    var expired: std.ArrayListUnmanaged(*PropAsyncTicket) = .empty;
+    defer expired.deinit(prop_alloc);
+    g.lockPropWaiters();
+    collectPropAsyncExpiredLocked(g, now, &expired);
+    g.unlockPropWaiters();
+    for (expired.items) |t| settlePropAsync(self, t, "timed-out");
 }
 
 /// Earliest finite property `Atomics.waitAsync` deadline in this realm, or
@@ -1853,16 +1840,12 @@ pub fn nextPropAsyncDeadline(self: *Interpreter) ?i96 {
 pub fn abandonPropAsync(g: *gil_mod.Gil) void {
     const owner: *const anyopaque = @ptrCast(g);
     g.lockPropWaiters();
-    var i: usize = 0;
-    while (i < g.prop_async.items.len) {
-        const t: *PropAsyncTicket = @ptrCast(@alignCast(g.prop_async.items[i]));
+    for (g.prop_async.items) |raw| {
+        const t: *PropAsyncTicket = @ptrCast(@alignCast(raw));
         if (t.owner == owner) {
             prop_alloc.free(t.key);
             prop_alloc.destroy(t);
-            _ = g.prop_async.orderedRemove(i);
-            continue;
         }
-        i += 1;
     }
     g.prop_async.deinit(prop_alloc);
     g.prop_waiters.deinit(prop_alloc);
@@ -1956,6 +1939,26 @@ fn collectPropAsyncNotifyLocked(
     shrinkPropAsyncLocked(g, write);
 }
 
+fn collectPropAsyncExpiredLocked(g: *gil_mod.Gil, now: i96, settle: *std.ArrayListUnmanaged(*PropAsyncTicket)) void {
+    var write: usize = 0;
+    var read: usize = 0;
+    while (read < g.prop_async.items.len) : (read += 1) {
+        const raw = g.prop_async.items[read];
+        const t: *PropAsyncTicket = @ptrCast(@alignCast(raw));
+        if (t.deadline_ns != null and t.deadline_ns.? <= now) {
+            settle.append(prop_alloc, t) catch {
+                if (write != read) g.prop_async.items[write] = raw;
+                write += 1;
+                continue;
+            };
+            continue;
+        }
+        if (write != read) g.prop_async.items[write] = raw;
+        write += 1;
+    }
+    shrinkPropAsyncLocked(g, write);
+}
+
 test "property waiter notify stable-compacts matching sync tickets" {
     var g = gil_mod.Gil{};
     defer g.prop_waiters.deinit(std.testing.allocator);
@@ -1989,6 +1992,41 @@ test "property waiter notify stable-compacts matching sync tickets" {
     try std.testing.expectEqual(@as(usize, 2), g.prop_waiters.items.len);
     try std.testing.expectEqual(@intFromPtr(&t1), @intFromPtr(@as(*PropTicket, @ptrCast(@alignCast(g.prop_waiters.items[0])))));
     try std.testing.expectEqual(@intFromPtr(&t2), @intFromPtr(@as(*PropTicket, @ptrCast(@alignCast(g.prop_waiters.items[1])))));
+}
+
+test "property waitAsync expiry stable-compacts expired tickets" {
+    var g = gil_mod.Gil{};
+    defer g.prop_async.deinit(prop_alloc);
+    var expired: std.ArrayListUnmanaged(*PropAsyncTicket) = .empty;
+    defer expired.deinit(prop_alloc);
+    var obj: value.Object = undefined;
+    var t0 = PropAsyncTicket{ .obj = &obj, .key = "a", .deadline_ns = 10, .promise = undefined, .microtasks = undefined, .owner = undefined };
+    var t1 = PropAsyncTicket{ .obj = &obj, .key = "b", .deadline_ns = 40, .promise = undefined, .microtasks = undefined, .owner = undefined };
+    var t2 = PropAsyncTicket{ .obj = &obj, .key = "c", .deadline_ns = 20, .promise = undefined, .microtasks = undefined, .owner = undefined };
+    var t3 = PropAsyncTicket{ .obj = &obj, .key = "d", .deadline_ns = null, .promise = undefined, .microtasks = undefined, .owner = undefined };
+    var t4 = PropAsyncTicket{ .obj = &obj, .key = "e", .deadline_ns = 30, .promise = undefined, .microtasks = undefined, .owner = undefined };
+
+    try g.prop_async.append(prop_alloc, @ptrCast(&t0));
+    try g.prop_async.append(prop_alloc, @ptrCast(&t1));
+    try g.prop_async.append(prop_alloc, @ptrCast(&t2));
+    try g.prop_async.append(prop_alloc, @ptrCast(&t3));
+    try g.prop_async.append(prop_alloc, @ptrCast(&t4));
+
+    collectPropAsyncExpiredLocked(&g, 25, &expired);
+    try std.testing.expectEqual(@as(usize, 2), expired.items.len);
+    try std.testing.expectEqual(@intFromPtr(&t0), @intFromPtr(expired.items[0]));
+    try std.testing.expectEqual(@intFromPtr(&t2), @intFromPtr(expired.items[1]));
+    try std.testing.expectEqual(@as(usize, 3), g.prop_async.items.len);
+    try std.testing.expectEqual(@intFromPtr(&t1), @intFromPtr(@as(*PropAsyncTicket, @ptrCast(@alignCast(g.prop_async.items[0])))));
+    try std.testing.expectEqual(@intFromPtr(&t3), @intFromPtr(@as(*PropAsyncTicket, @ptrCast(@alignCast(g.prop_async.items[1])))));
+    try std.testing.expectEqual(@intFromPtr(&t4), @intFromPtr(@as(*PropAsyncTicket, @ptrCast(@alignCast(g.prop_async.items[2])))));
+
+    collectPropAsyncExpiredLocked(&g, 40, &expired);
+    try std.testing.expectEqual(@as(usize, 4), expired.items.len);
+    try std.testing.expectEqual(@intFromPtr(&t1), @intFromPtr(expired.items[2]));
+    try std.testing.expectEqual(@intFromPtr(&t4), @intFromPtr(expired.items[3]));
+    try std.testing.expectEqual(@as(usize, 1), g.prop_async.items.len);
+    try std.testing.expectEqual(@intFromPtr(&t3), @intFromPtr(@as(*PropAsyncTicket, @ptrCast(@alignCast(g.prop_async.items[0])))));
 }
 
 fn waitPropTicketTimeout(self: *Interpreter, g: *gil_mod.Gil, ticket: *PropTicket, timeout: std.Io.Timeout) error{Timeout}!void {
