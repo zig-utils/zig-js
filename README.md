@@ -297,7 +297,9 @@ threading architecture:
   condition notifications now deliver their lock regrants after releasing the
   condition queue mutex, so no-fn release-function creation and realm task
   enqueueing do not lengthen that critical section; mixed sync/async wakeups
-  keep the existing sync handoff ordering.
+  keep the existing sync handoff ordering. Notify now also tracks the woken
+  sync/async entries in one pre-sized wake list instead of allocating separate
+  per-kind wake lists for every notification.
   Property-mode `Atomics.notify` now stable-compacts matching waiters in one
   pass: sync stack tickets are
   unlinked before signal, and matching `waitAsync` tickets are collected without

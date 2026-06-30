@@ -1334,47 +1334,61 @@ fn condNotify(self: *Interpreter, rec: *CondRecord, count: usize) value.HostErro
     // ONE FIFO domain: wake in arrival order regardless of kind.
     const io = agent.engineIo();
     var n: usize = 0;
-    var woken_sync: std.ArrayListUnmanaged(*SyncCondTicket) = .empty;
-    defer woken_sync.deinit(self.arena);
-    var woken_async: std.ArrayListUnmanaged(*AsyncCondWaiter) = .empty;
-    defer woken_async.deinit(self.arena);
+    var woken: std.ArrayListUnmanaged(CondEntry) = .empty;
+    defer woken.deinit(self.arena);
     rec.mutex.lockUncancelable(io);
+    var locked = true;
+    defer if (locked) rec.mutex.unlock(io);
+    const available = rec.queue.items.len - rec.queue_head;
+    try woken.ensureTotalCapacity(self.arena, @min(count, available));
+    var has_sync = false;
     while (n < count) {
         const entry = rec.popWaiter() orelse break;
         switch (entry) {
             .sync => |t| {
                 t.woken = true;
-                woken_sync.append(self.arena, t) catch {};
+                has_sync = true;
             },
-            .asynchronous => |w| woken_async.append(self.arena, w) catch wakeAsyncCondWaiter(self, w),
+            .asynchronous => {},
         }
+        woken.appendAssumeCapacity(entry);
         n += 1;
     }
 
-    if (woken_sync.items.len == 0) {
+    if (!has_sync) {
         // Async-only notifications do not need the sync notifyAll handoff.
         // Deliver their lock regrants outside the condition queue mutex so
         // regrant bookkeeping and realm task enqueueing do not lengthen the
         // condition critical section.
         rec.mutex.unlock(io);
-        for (woken_async.items) |w| wakeAsyncCondWaiter(self, w);
+        locked = false;
+        for (woken.items) |entry| switch (entry) {
+            .sync => unreachable,
+            .asynchronous => |w| wakeAsyncCondWaiter(self, w),
+        };
         return n;
     }
 
     // Mixed wakeups keep the old ordering shape: async regrants are prepared
     // before the sync handoff wait, while the condition mutex still serializes
     // the notify operation.
-    for (woken_async.items) |w| wakeAsyncCondWaiter(self, w);
-    if (woken_sync.items.len > 0) rec.cond.broadcast(io);
+    for (woken.items) |entry| switch (entry) {
+        .sync => {},
+        .asynchronous => |w| wakeAsyncCondWaiter(self, w),
+    };
+    rec.cond.broadcast(io);
     // Depth-free handoff (notify-all-shared-lock) + FIFO against
     // async regrants (condition-async-wait): loop until every woken
     // sync waiter has re-registered on its lock.
     var pending = true;
     while (pending) {
         pending = false;
-        for (woken_sync.items) |t| {
-            if (!t.consumed) pending = true;
-        }
+        for (woken.items) |entry| switch (entry) {
+            .sync => |t| {
+                if (!t.consumed) pending = true;
+            },
+            .asynchronous => {},
+        };
         if (!pending) break;
         // Woken sync waiters signal this same condition after re-registering on
         // their lock. The timeout keeps spurious or missed wakes bounded without
@@ -1384,7 +1398,6 @@ fn condNotify(self: *Interpreter, rec: *CondRecord, count: usize) value.HostErro
             .clock = .awake,
         } });
     }
-    rec.mutex.unlock(io);
     return n;
 }
 

@@ -148,6 +148,8 @@ Known performance/maturity work:
   queue mutex before preparing no-fn async regrants, so release-function
   creation and realm task enqueueing no longer run inside that queue critical
   section; mixed sync/async wakeups keep the existing sync handoff ordering.
+  Notify also records woken sync/async entries in one pre-sized wake list rather
+  than allocating separate per-kind lists for each notification.
 - Property-mode `Atomics.notify` stable-compacts matching waiter queues in one
   pass. Sync wait stack tickets are unlinked before signal, so awakened peers no
   longer each rescan and front-shift the table on return; matching `waitAsync`

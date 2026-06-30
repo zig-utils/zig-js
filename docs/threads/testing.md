@@ -294,12 +294,16 @@ C-API handles, and GIL park records remove with swap semantics because those
 root sets have no observable order. `worker channel pops FIFO without front shifts` keeps that queue
 shape and zero-timeout polling behavior under a direct unit guard, while
 `condition queue head cursor skips canceled sync waiters` covers the condition
-timeout/termination queue shape directly, `property waiter removal
+timeout/termination queue shape directly. The public condition corpus cases
+exercise the single wake-list notify path for async-only and sync notify-all
+wakes: `api/condition-async-wait.js`,
+`sync/condition-wait-notify.js`, and
+`sync/condition-notify-all-multi-waiter.js`. `property waiter removal
 stable-compacts timed-out sync ticket` covers the property waiter cleanup shape,
 `waiter table notify unlinks sync tickets and preserves async FIFO tail` plus
 `waiter table harvestAsync stable-compacts settled owner tickets` cover the
-typed-array waiter-table shapes, and
-`api/condition-wait-termination.js` keeps the JS termination path exercised.
+typed-array waiter-table shapes, and `api/condition-wait-termination.js` keeps
+the JS termination path exercised.
 Promise microtask drains now use the same FIFO head-cursor pattern, with
 `microtask queue is FIFO with a head cursor` guarding the direct queue shape and
 the asyncHold corpus case exercising observed callback/release-function

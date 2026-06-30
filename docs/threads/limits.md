@@ -133,7 +133,9 @@ context APIs.
   fixed 1ms polling sleep, reducing ready-waiter latency without changing the
   timeout fallback. Async-only condition notifications now move no-fn async
   regrant preparation outside the condition queue mutex; mixed sync/async
-  wakeups keep the existing sync handoff ordering.
+  wakeups keep the existing sync handoff ordering. Notify records woken
+  sync/async entries in one pre-sized wake list instead of allocating separate
+  per-kind wake lists for each notification.
   Promise microtask drains use a FIFO head cursor, so observed async-hold
   callback settlement and no-fn release-function reactions preserve FIFO order
   without shifting the remaining reaction queue on each job.
