@@ -449,7 +449,9 @@ threading architecture:
   shared-realm Thread finalization cleanup on one retained SAB, and module
   Worker handler-exception recovery composed with the same retained-SAB cleanup
   oracle,
-  `Thread.restrict` lifecycle isolation, Thread exception identity through
+  `Thread.restrict` lifecycle isolation plus `Thread.restrict`-owned
+  `FinalizationRegistry` cleanup after owner-thread exit,
+  Thread exception identity through
   `join()` / `asyncJoin()` while property and condition waiters are parked,
   thread-returned typed-array `waitAsync` promise
   assimilation through `join()` / `asyncJoin()` while waiters are parked,

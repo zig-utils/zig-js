@@ -268,7 +268,8 @@ context APIs.
   Worker handler-exception recovery composed with the same retained-SAB cleanup
   oracle, plus
   `Thread.restrict`
-  lifecycle isolation, Thread
+  lifecycle isolation plus `Thread.restrict`-owned `FinalizationRegistry`
+  cleanup after owner-thread exit, Thread
   exception identity through `join()` / `asyncJoin()` while property and
   condition waiters are parked,
   thread-returned typed-array `waitAsync` promise assimilation through `join()` /

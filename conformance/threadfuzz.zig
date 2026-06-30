@@ -5233,6 +5233,152 @@ fn runThreadRestrictLifecycleInterleaving(gpa: std.mem.Allocator, seed: u64) !bo
     return true;
 }
 
+fn runThreadRestrictFinalizationCleanupInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
+    var prng = std.Random.DefaultPrng.init(seed ^ 0x7265_7374_6669_6e61);
+    const r = prng.random();
+    const nthreads = 2 + r.uintLessThan(usize, 4);
+    const per_thread = 6 + r.uintLessThan(usize, 10);
+    const held_base = 70_000 + r.uintLessThan(usize, 20_000);
+
+    var expected_join_sum: usize = 0;
+    var expected_cleanup_sum: usize = 0;
+    var id: usize = 0;
+    while (id < nthreads) : (id += 1) {
+        expected_join_sum += per_thread + id * 70_000;
+        expected_cleanup_sum += held_base + id;
+    }
+
+    const ctx = js.Context.createWith(gpa, .{ .enable_threads = true, .enable_gc = true }) catch {
+        std.debug.print("seed {d}: Thread.restrict finalization context creation failed\n", .{seed});
+        return false;
+    };
+    defer ctx.destroy();
+
+    const src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  globalThis.__restrictFinCleanupCount = 0;
+        \\  globalThis.__restrictFinCleanupSum = 0;
+        \\  globalThis.__restrictFinOracle = 0;
+        \\  globalThis.__restrictFinRegistry = new FinalizationRegistry((held) => {{
+        \\    globalThis.__restrictFinCleanupCount++;
+        \\    globalThis.__restrictFinCleanupSum += held;
+        \\  }});
+        \\  const registry = globalThis.__restrictFinRegistry;
+        \\  const mainBox = {{ seed: {d}, owner: 'main' }};
+        \\  Thread.restrict(mainBox);
+        \\  let asyncSum = 0;
+        \\  const threads = [];
+        \\  for (let id = 0; id < {d}; id++) {{
+        \\    const t = new Thread((id, per, heldBase) => {{
+        \\      let rejectedMain = 0;
+        \\      try {{
+        \\        mainBox.owner;
+        \\      }} catch (e) {{
+        \\        if (e instanceof ConcurrentAccessError)
+        \\          rejectedMain = 1;
+        \\        else
+        \\          throw e;
+        \\      }}
+        \\      if (rejectedMain !== 1)
+        \\        throw new Error('restricted main object was readable from restrict/finalization worker ' + id);
+        \\      let local = {{ id, count: 0, tag: 'restrict-finalization-' + id }};
+        \\      Thread.restrict(local);
+        \\      registry.register(local, heldBase + id);
+        \\      for (let i = 0; i < per; i++)
+        \\        local.count++;
+        \\      const nested = new Thread((box) => {{
+        \\        try {{
+        \\          box.count;
+        \\          return -1;
+        \\        }} catch (e) {{
+        \\          return e instanceof ConcurrentAccessError ? 1 : -2;
+        \\        }}
+        \\      }}, local);
+        \\      if (nested.join() !== 1)
+        \\        throw new Error('nested thread read restricted finalization object ' + id);
+        \\      const score = local.count + id * 70000;
+        \\      local = null;
+        \\      return score;
+        \\    }}, id, {d}, {d});
+        \\    t.asyncJoin().then(
+        \\      (v) => {{ asyncSum += v; }},
+        \\      () => {{ asyncSum = -1000000; }});
+        \\    threads.push(t);
+        \\  }}
+        \\  let joinSum = 0;
+        \\  for (const t of threads)
+        \\    joinSum += t.join();
+        \\  if (joinSum !== {d})
+        \\    throw new Error('bad Thread.restrict finalization join sum ' + joinSum);
+        \\  threads.length = 0;
+        \\  if (globalThis.__restrictFinCleanupCount !== 0)
+        \\    throw new Error('restricted object cleanup ran before explicit collect');
+        \\  Promise.resolve().then(() => {{
+        \\    if (asyncSum !== {d})
+        \\      throw new Error('bad Thread.restrict finalization async sum ' + asyncSum);
+        \\    globalThis.__restrictFinOracle = 1;
+        \\  }});
+        \\  return joinSum;
+        \\}})();
+        \\
+    ,
+        .{ seed, nthreads, per_thread, held_base, expected_join_sum, expected_join_sum },
+    );
+    defer gpa.free(src);
+
+    const joined = ctx.evaluate(src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: Thread.restrict finalization JS threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!joined.isNumber() or joined.asNum() != @as(f64, @floatFromInt(expected_join_sum))) {
+        std.debug.print("seed {d}: Thread.restrict finalization join got {d}, expected {d}\n", .{ seed, if (joined.isNumber()) joined.asNum() else -1, expected_join_sum });
+        return false;
+    }
+    const oracle = ctx.evaluate("globalThis.__restrictFinOracle") catch |err| {
+        std.debug.print("seed {d}: cannot read Thread.restrict finalization oracle: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    if (!oracle.isNumber() or oracle.asNum() != 1) {
+        std.debug.print("seed {d}: Thread.restrict finalization oracle got {d}\n", .{ seed, if (oracle.isNumber()) oracle.asNum() else -1 });
+        return false;
+    }
+
+    ctx.collectGarbage();
+    const cleanup_src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  globalThis.__restrictFinRegistry.cleanupSome();
+        \\  if (globalThis.__restrictFinCleanupCount !== {d})
+        \\    throw new Error('bad Thread.restrict finalization cleanup count ' + globalThis.__restrictFinCleanupCount);
+        \\  if (globalThis.__restrictFinCleanupSum !== {d})
+        \\    throw new Error('bad Thread.restrict finalization cleanup sum ' + globalThis.__restrictFinCleanupSum);
+        \\  return globalThis.__restrictFinCleanupCount;
+        \\}})();
+        \\
+    ,
+        .{ nthreads, expected_cleanup_sum },
+    );
+    defer gpa.free(cleanup_src);
+    const cleaned = ctx.evaluate(cleanup_src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: Thread.restrict finalization cleanup JS threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!cleaned.isNumber() or cleaned.asNum() != @as(f64, @floatFromInt(nthreads))) {
+        std.debug.print("seed {d}: Thread.restrict finalization cleanup got {d}, expected {d}\n", .{ seed, if (cleaned.isNumber()) cleaned.asNum() else -1, nthreads });
+        return false;
+    }
+    return true;
+}
+
 fn runThreadLocalLifecycleInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
     var prng = std.Random.DefaultPrng.init(seed ^ 0x746c_735f_6c69_6665);
     const r = prng.random();
@@ -8670,6 +8816,22 @@ pub fn main(init: std.process.Init) !void {
         if (tfail != 0) std.process.exit(1);
         return;
     };
+    // `threadfuzz restrictfinal <iters> <seed>`: focused lifecycle repro for
+    // Thread.restrict ownership isolation composed with FinalizationRegistry
+    // cleanup after the owning thread exits.
+    if (first) |a| if (std.mem.eql(u8, a, "restrictfinal")) {
+        if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch 1;
+        if (args.next()) |b| base_seed = std.fmt.parseInt(u64, b, 10) catch 1;
+        var rffail: usize = 0;
+        var rfi: usize = 0;
+        while (rfi < iters) : (rfi += 1) {
+            const seed = base_seed +% rfi;
+            if (!(try runThreadRestrictFinalizationCleanupInterleaving(gpa, seed))) rffail += 1;
+        }
+        std.debug.print("threadfuzz restrictfinal: {d} programs from seed {d}, {d} failures\n", .{ iters, base_seed, rffail });
+        if (rffail != 0) std.process.exit(1);
+        return;
+    };
     // `threadfuzz waitasyncfinal <iters> <seed>`: focused lifecycle repro for
     // typed-array waitAsync settlement plus asyncJoin and finalization cleanup.
     if (first) |a| if (std.mem.eql(u8, a, "waitasyncfinal")) {
@@ -9118,6 +9280,7 @@ pub fn main(init: std.process.Init) !void {
     // typed-array waitAsync tickets, teardown termination with property
     // waitAsync timeouts, async condition reacquire, asyncJoin rejection, and
     // cleanup jobs pending together,
+    // Thread.restrict-stored FinalizationRegistry records across owner exit,
     // ThreadLocal-stored FinalizationRegistry records across park/resume/cleanup,
     // asyncHold barging delivery after a deterministic queued ticket,
     // Thread.restrict lifecycle isolation, and ThreadLocal isolation across
@@ -9155,7 +9318,9 @@ pub fn main(init: std.process.Init) !void {
     // deliver a pending
     // no-fn grant after a sync hold legally overtakes it; ThreadLocal values must stay
     // per-thread across normal, throwing, nested, async-joined, and
-    // finalization-cleanup lifecycles; module Worker termination must compose
+    // finalization-cleanup lifecycles; Thread.restrict-owned objects must reject
+    // foreign access, survive through owner-thread execution, and then deliver
+    // exact cleanup after the owner exits; module Worker termination must compose
     // with the same shared-realm teardown/reaction/cleanup oracle.
     if (first) |a| if (std.mem.eql(u8, a, "lifecycle")) {
         iters = 60;
@@ -9192,10 +9357,11 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runTerminationWaiterCleanupInterleaving(gpa, seed))) lfail += 1;
             if (!(try runAsyncHoldBargingLifecycleInterleaving(gpa, seed))) lfail += 1;
             if (!(try runThreadRestrictLifecycleInterleaving(gpa, seed))) lfail += 1;
+            if (!(try runThreadRestrictFinalizationCleanupInterleaving(gpa, seed))) lfail += 1;
             if (!(try runThreadLocalLifecycleInterleaving(gpa, seed))) lfail += 1;
             if (!(try runThreadLocalFinalizationCleanupInterleaving(gpa, seed))) lfail += 1;
         }
-        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 29, base_seed, lfail });
+        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 30, base_seed, lfail });
         if (lfail != 0) std.process.exit(1);
         return;
     };
