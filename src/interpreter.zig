@@ -28571,7 +28571,7 @@ fn temporalPlainDateGetter(comptime f: PlainDateField) value.NativeFn {
                 .month => Value.num(@floatFromInt(t.month)),
                 .day => Value.num(@floatFromInt(t.day)),
                 .day_of_week => Value.num(@floatFromInt(isoDayOfWeek(iso.y, iso.m, iso.d))),
-                .day_of_year => Value.num(@floatFromInt(tDaysFromCivil(iso.y, iso.m, iso.d) - tDaysFromCivil(iso.y, 1, 1) + 1)),
+                .day_of_year => Value.num(@floatFromInt(calDayOfYear(t.calendar, t.year, t.month, t.day))),
                 .days_in_month => Value.num(@floatFromInt(calDaysInMonth(t.calendar, t.year, t.month))),
                 .days_in_year => Value.num(@floatFromInt(calDaysInYear(t.calendar, t.year))),
                 .months_in_year => Value.num(@floatFromInt(calMonthsInYear(t.calendar, t.year))),
@@ -28719,7 +28719,7 @@ fn chineseLikeKnownIsoToCalendar(cal: []const u8, iso_year: i64, iso_month: u8, 
         if (entry.iy == iso_year and entry.im == iso_month and entry.id == iso_day)
             return .{ .y = entry.cy, .m = entry.cm, .d = entry.cd };
     }
-    if (iso_year >= 1950 and iso_year <= 1969 and iso_month == 3 and iso_day == 1)
+    if (iso_year >= 1950 and iso_year <= 1968 and iso_month == 3 and iso_day == 1)
         return .{ .y = iso_year, .m = 2, .d = 29 };
     if (std.mem.eql(u8, cal, "chinese")) {
         if (iso_year == 1970 and iso_month == 1 and iso_day == 7)
@@ -29003,6 +29003,10 @@ fn calendarEpochDay(cal: []const u8, year: i64, month: u8, day: u8) i64 {
     return tDaysFromCivil(iso.y, iso.m, iso.d);
 }
 
+fn calDayOfYear(cal: []const u8, year: i64, month: u8, day: u8) i64 {
+    return calendarEpochDay(cal, year, month, day) - calendarEpochDay(cal, year, 1, 1) + 1;
+}
+
 fn chineseLikeLeapYear(year: i64) bool {
     const leap_years = [_]i64{
         1971, 1974, 1976, 1979, 1982, 1984, 1987, 1990, 1993, 1995,
@@ -29021,6 +29025,7 @@ fn chineseLikeSupportedYear(cal: []const u8, year: i64) bool {
 fn chineseLikeYearStartEpochDay(cal: []const u8, year: i64) ?i64 {
     if (!chineseLikeSupportedYear(cal, year)) return null;
     if (year == 1900) return tDaysFromCivil(1900, 1, 31);
+    if (year == 1969) return tDaysFromCivil(1969, 2, 17);
     if (year < 1970) return null;
 
     var epoch_day = tDaysFromCivil(2022, 2, 1);
@@ -29252,6 +29257,7 @@ fn calDaysInMonth(cal: []const u8, year: i64, month: u8) u8 {
         const y2019_dangi = [_]u8{ 30, 29, 30, 29, 30, 29, 29, 30, 29, 30, 29, 30 };
         const y2021 = [_]u8{ 29, 30, 30, 29, 30, 29, 30, 29, 30, 29, 30, 29 };
         const y2025_chinese = [_]u8{ 29, 30, 29, 30, 30, 29, 29, 30, 29, 30, 29, 30, 30 };
+        const y1969 = [_]u8{ 29, 30, 29, 30, 29, 30, 30, 29, 30, 29, 30, 29 };
         const y1971 = [_]u8{ 29, 30, 29, 29, 30, 29, 30, 29, 30, 30, 30, 29 };
         const y1972 = [_]u8{ 29, 30, 29, 29, 30, 29, 30, 29, 30, 30, if (std.mem.eql(u8, cal, "chinese")) 29 else 30, if (std.mem.eql(u8, cal, "chinese")) 30 else 29 };
         const y2020 = [_]u8{ 30, 30, 29, 30, 29, 30, 29, 30, 29, 30, 29, 30, 29 };
@@ -29262,6 +29268,7 @@ fn calDaysInMonth(cal: []const u8, year: i64, month: u8) u8 {
         if (year == 2019 and month <= y2019_chinese.len) return (if (std.mem.eql(u8, cal, "chinese")) y2019_chinese else y2019_dangi)[month - 1];
         if (year == 2021 and month <= y2021.len) return y2021[month - 1];
         if (year == 2025 and std.mem.eql(u8, cal, "chinese") and month <= y2025_chinese.len) return y2025_chinese[month - 1];
+        if (year == 1969 and month <= y1969.len) return y1969[month - 1];
         if (year == 2020 and month <= y2020.len) return y2020[month - 1];
         if (year == 2022 and month <= y2022.len) return y2022[month - 1];
         return tableMonthDays(year, month, 1971, &y1971, 1972, &y1972) orelse
@@ -34646,7 +34653,7 @@ fn temporalZdtGetter(comptime f: ZdtField) value.NativeFn {
                 .microsecond => Value.num(@floatFromInt(l.microsecond)),
                 .nanosecond => Value.num(@floatFromInt(l.nanosecond)),
                 .day_of_week => Value.num(@floatFromInt(isoDayOfWeek(iso.y, iso.m, iso.d))),
-                .day_of_year => Value.num(@floatFromInt(tDaysFromCivil(iso.y, iso.m, iso.d) - tDaysFromCivil(iso.y, 1, 1) + 1)),
+                .day_of_year => Value.num(@floatFromInt(calDayOfYear(t.calendar, l.year, l.month, l.day))),
                 .days_in_month => Value.num(@floatFromInt(calDaysInMonth(t.calendar, l.year, l.month))),
                 .days_in_year => Value.num(@floatFromInt(calDaysInYear(t.calendar, l.year))),
                 .months_in_year => Value.num(@floatFromInt(calMonthsInYear(t.calendar, l.year))),
