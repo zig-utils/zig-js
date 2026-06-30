@@ -1477,13 +1477,13 @@ pub const Context = struct {
                 if (self.parallel_js) {
                     const io = agent.engineIo();
                     rec.join_mutex.lockUncancelable(io);
-                    while (!rec.done) {
+                    while (!rec.exited) {
                         // Parked keepalive still serves run-loop tasks: a waiting
                         // thread may need a grant delivery pumped to finish.
                         rec.join_mutex.unlock(io);
                         jsthread.pumpTasks(&machine);
                         rec.join_mutex.lockUncancelable(io);
-                        if (rec.done) break;
+                        if (rec.exited) break;
                         stack_scan.beginPark();
                         io_compat.conditionWaitTimeout(&rec.done_cond, io, &rec.join_mutex, .{ .duration = .{
                             .raw = .fromMilliseconds(5),
@@ -1493,11 +1493,11 @@ pub const Context = struct {
                     }
                     rec.join_mutex.unlock(io);
                 } else {
-                    while (!rec.done) {
+                    while (!rec.exited) {
                         // Parked keepalive still serves run-loop tasks: a waiting
                         // thread may need a grant delivery pumped to finish.
                         jsthread.pumpTasks(&machine);
-                        if (rec.done) break;
+                        if (rec.exited) break;
                         g.waitTimeout(&rec.done_cond, .{ .duration = .{
                             .raw = .fromMilliseconds(5),
                             .clock = .awake,

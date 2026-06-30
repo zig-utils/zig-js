@@ -2848,6 +2848,244 @@ fn runTerminationPendingReactionInterleaving(gpa: std.mem.Allocator, seed: u64) 
     return true;
 }
 
+fn runTerminationWaiterCleanupInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
+    var prng = std.Random.DefaultPrng.init(seed ^ 0x7465_726d_7763_6c6e);
+    const r = prng.random();
+    const nwait = 4 + r.uintLessThan(usize, 5);
+    const ncleanup = 10 + r.uintLessThan(usize, 10);
+    const seed_marker = seed % 10_000;
+    const wait_base = 330_000 + seed_marker;
+    const async_cond_marker = 340_000 + seed_marker;
+    const reject_marker = 350_000 + seed_marker;
+    const cleanup_base = 360_000 + seed_marker;
+
+    var expected_wait_score: usize = 0;
+    var wi: usize = 0;
+    while (wi < nwait) : (wi += 1) expected_wait_score += wait_base + wi;
+    var expected_cleanup_sum: usize = 0;
+    var ci: usize = 0;
+    while (ci < ncleanup) : (ci += 1) expected_cleanup_sum += cleanup_base + ci;
+
+    const ctx = js.Context.createWith(gpa, .{ .enable_threads = true, .enable_gc = true }) catch {
+        std.debug.print("seed {d}: termination waiter/cleanup context creation failed\n", .{seed});
+        return false;
+    };
+    defer ctx.destroy();
+
+    const setup_src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  globalThis.__termWaitCleanupWaitScore = 0;
+        \\  globalThis.__termWaitCleanupWaitCount = 0;
+        \\  globalThis.__termWaitCleanupCondScore = 0;
+        \\  globalThis.__termWaitCleanupCondCount = 0;
+        \\  globalThis.__termWaitCleanupRejectScore = 0;
+        \\  globalThis.__termWaitCleanupRejectCount = 0;
+        \\  globalThis.__termWaitCleanupCount = 0;
+        \\  globalThis.__termWaitCleanupSum = 0;
+        \\  globalThis.__termWaitCleanupRegistry = new FinalizationRegistry((held) => {{
+        \\    globalThis.__termWaitCleanupCount++;
+        \\    globalThis.__termWaitCleanupSum += held;
+        \\  }});
+        \\  const registry = globalThis.__termWaitCleanupRegistry;
+        \\  (() => {{
+        \\    for (let i = 0; i < {d}; i++) {{
+        \\      let target = {{ i, seed: {d}, payload: 'termination-waiter-cleanup-' + i }};
+        \\      registry.register(target, {d} + i);
+        \\      target = null;
+        \\    }}
+        \\  }})();
+        \\  return {d};
+        \\}})();
+        \\
+    ,
+        .{ ncleanup, seed, cleanup_base, ncleanup },
+    );
+    defer gpa.free(setup_src);
+    const setup_result = ctx.evaluate(setup_src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: termination waiter/cleanup setup JS threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!setup_result.isNumber() or setup_result.asNum() != @as(f64, @floatFromInt(ncleanup))) {
+        std.debug.print("seed {d}: termination waiter/cleanup setup got {d}, expected {d}\n", .{ seed, if (setup_result.isNumber()) setup_result.asNum() else -1, ncleanup });
+        return false;
+    }
+    ctx.collectGarbage();
+
+    const src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  const gate = {{ spinReady: 0, asyncCondReady: 0, stop: 0 }};
+        \\  const waitBox = {{ prop: 0 }};
+        \\  const condLock = new Lock();
+        \\  const cond = new Condition();
+        \\  const asyncCondRoot = {{ marker: {d}, nested: {{ seed: {d}, label: 'termination-async-condition-root' }} }};
+        \\  condLock.asyncHold().then((release) => {{
+        \\    if (typeof release !== 'function')
+        \\      throw new Error('bad termination waiter cleanup initial async hold');
+        \\    const ticket = cond.asyncWait(condLock);
+        \\    Atomics.store(gate, 'asyncCondReady', 1);
+        \\    Atomics.notify(gate, 'asyncCondReady');
+        \\    return ticket;
+        \\  }}).then((release) => {{
+        \\    if (typeof release !== 'function')
+        \\      throw new Error('bad termination waiter cleanup async condition reacquire');
+        \\    if (asyncCondRoot.marker === {d} && asyncCondRoot.nested.seed === {d}) {{
+        \\      globalThis.__termWaitCleanupCondScore += asyncCondRoot.marker;
+        \\      globalThis.__termWaitCleanupCondCount++;
+        \\    }} else {{
+        \\      globalThis.__termWaitCleanupCondScore = -1000000;
+        \\    }}
+        \\    release();
+        \\  }}, () => {{
+        \\    globalThis.__termWaitCleanupCondScore = -1000000;
+        \\  }});
+        \\  for (let i = 0; i < {d}; i++) {{
+        \\    const marker = {d} + i;
+        \\    const waitRoot = {{ marker, nested: {{ seed: {d}, label: 'termination-property-waitAsync-root-' + i }} }};
+        \\    const waiter = Atomics.waitAsync(waitBox, 'prop', 0, 2 + (i % 4));
+        \\    if (waiter.async !== true || !(waiter.value instanceof Promise))
+        \\      throw new Error('bad termination property waitAsync pending shape');
+        \\    waiter.value.then(
+        \\      (v) => {{
+        \\        if (v === 'timed-out' && waitRoot.marker === marker && waitRoot.nested.seed === {d}) {{
+        \\          globalThis.__termWaitCleanupWaitScore += waitRoot.marker;
+        \\          globalThis.__termWaitCleanupWaitCount++;
+        \\        }} else {{
+        \\          globalThis.__termWaitCleanupWaitScore = -1000000;
+        \\        }}
+        \\      }},
+        \\      () => {{ globalThis.__termWaitCleanupWaitScore = -1000000; }});
+        \\  }}
+        \\  const spinnerRoot = {{ marker: {d}, nested: {{ seed: {d}, label: 'termination-asyncJoin-cleanup-root' }} }};
+        \\  const spinner = new Thread((gate) => {{
+        \\    Atomics.store(gate, 'spinReady', 1);
+        \\    Atomics.notify(gate, 'spinReady');
+        \\    while (Atomics.load(gate, 'stop') === 0)
+        \\      Atomics.wait(gate, 'stop', 0, 5);
+        \\    return -1;
+        \\  }}, gate);
+        \\  globalThis.__termWaitCleanupSpinner = spinner;
+        \\  globalThis.__termWaitCleanupJoinPromise = spinner.asyncJoin();
+        \\  globalThis.__termWaitCleanupJoinReaction = globalThis.__termWaitCleanupJoinPromise.then(
+        \\    () => {{ globalThis.__termWaitCleanupRejectScore = -1000000; }},
+        \\    (e) => {{
+        \\      if (e && spinnerRoot.marker === {d} && spinnerRoot.nested.seed === {d}) {{
+        \\        globalThis.__termWaitCleanupRejectScore += spinnerRoot.marker;
+        \\        globalThis.__termWaitCleanupRejectCount++;
+        \\      }} else {{
+        \\        globalThis.__termWaitCleanupRejectScore = -1000000;
+        \\      }}
+        \\    }});
+        \\  while (Atomics.load(gate, 'asyncCondReady') === 0)
+        \\    Atomics.wait(gate, 'asyncCondReady', 0, 1);
+        \\  while (Atomics.load(gate, 'spinReady') === 0)
+        \\    Atomics.wait(gate, 'spinReady', 0, 1);
+        \\  drainMicrotasks();
+        \\  condLock.hold(() => {{
+        \\    const notified = cond.notifyAll();
+        \\    if (notified !== 1)
+        \\      throw new Error('termination waiter cleanup cond notify got ' + notified);
+        \\  }});
+        \\  throw new Error('threadfuzz termination waiter cleanup {d}');
+        \\}})();
+        \\
+    ,
+        .{
+            async_cond_marker,
+            seed,
+            async_cond_marker,
+            seed,
+            nwait,
+            wait_base,
+            seed,
+            seed,
+            reject_marker,
+            seed,
+            reject_marker,
+            seed,
+            seed,
+        },
+    );
+    defer gpa.free(src);
+
+    if (ctx.evaluate(src)) |_| {
+        std.debug.print("seed {d}: termination waiter/cleanup script returned normally\n", .{seed});
+        return false;
+    } else |err| {
+        if (err != error.Throw) {
+            std.debug.print("seed {d}: termination waiter/cleanup failed with {s}\n", .{ seed, @errorName(err) });
+            return false;
+        }
+    }
+
+    _ = ctx.evaluate("$drainRunLoop()") catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: termination waiter/cleanup drain turn threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    ctx.collectGarbage();
+    const check_src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  if (globalThis.__termWaitCleanupWaitScore !== {d})
+        \\    throw new Error('bad termination waiter cleanup waitAsync score ' + globalThis.__termWaitCleanupWaitScore);
+        \\  if (globalThis.__termWaitCleanupWaitCount !== {d})
+        \\    throw new Error('bad termination waiter cleanup waitAsync count ' + globalThis.__termWaitCleanupWaitCount);
+        \\  if (globalThis.__termWaitCleanupCondScore !== {d})
+        \\    throw new Error('bad termination waiter cleanup condition score ' + globalThis.__termWaitCleanupCondScore);
+        \\  if (globalThis.__termWaitCleanupCondCount !== 1)
+        \\    throw new Error('bad termination waiter cleanup condition count ' + globalThis.__termWaitCleanupCondCount);
+        \\  let joinThrew = 0;
+        \\  try {{
+        \\    globalThis.__termWaitCleanupSpinner.join();
+        \\  }} catch (e) {{
+        \\    if (e) joinThrew = 1;
+        \\  }}
+        \\  if (joinThrew !== 1)
+        \\    throw new Error('termination waiter cleanup spinner was not terminated');
+        \\  globalThis.__termWaitCleanupRegistry.cleanupSome();
+        \\  if (globalThis.__termWaitCleanupCount !== {d})
+        \\    throw new Error('bad termination waiter cleanup finalization count ' + globalThis.__termWaitCleanupCount + '/' + {d});
+        \\  if (globalThis.__termWaitCleanupSum !== {d})
+        \\    throw new Error('bad termination waiter cleanup finalization sum ' + globalThis.__termWaitCleanupSum + '/' + {d});
+        \\  return globalThis.__termWaitCleanupCount;
+        \\}})();
+        \\
+    ,
+        .{
+            expected_wait_score,
+            nwait,
+            async_cond_marker,
+            ncleanup,
+            ncleanup,
+            expected_cleanup_sum,
+            expected_cleanup_sum,
+        },
+    );
+    defer gpa.free(check_src);
+    const checked = ctx.evaluate(check_src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: termination waiter/cleanup check JS threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!checked.isNumber() or checked.asNum() != @as(f64, @floatFromInt(ncleanup))) {
+        std.debug.print("seed {d}: termination waiter/cleanup got {d}, expected {d}\n", .{ seed, if (checked.isNumber()) checked.asNum() else -1, ncleanup });
+        return false;
+    }
+    return true;
+}
+
 fn runThreadRestrictLifecycleInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
     var prng = std.Random.DefaultPrng.init(seed ^ 0x7265_7374_7269_6374);
     const r = prng.random();
@@ -4485,6 +4723,23 @@ pub fn main(init: std.process.Init) !void {
         if (trfail != 0) std.process.exit(1);
         return;
     };
+    // `threadfuzz termcleanup <iters> <seed>`: focused lifecycle repro for
+    // teardown termination while property waitAsync timeouts, async condition
+    // reacquire, pending asyncJoin rejection, and finalization cleanup jobs are
+    // all live in the same realm.
+    if (first) |a| if (std.mem.eql(u8, a, "termcleanup")) {
+        if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch 1;
+        if (args.next()) |b| base_seed = std.fmt.parseInt(u64, b, 10) catch 1;
+        var tcfail: usize = 0;
+        var tci: usize = 0;
+        while (tci < iters) : (tci += 1) {
+            const seed = base_seed +% tci;
+            if (!(try runTerminationWaiterCleanupInterleaving(gpa, seed))) tcfail += 1;
+        }
+        std.debug.print("threadfuzz termcleanup: {d} programs from seed {d}, {d} failures\n", .{ iters, base_seed, tcfail });
+        if (tcfail != 0) std.process.exit(1);
+        return;
+    };
     // `threadfuzz midgcterm <iters> <seed>`: focused mid-script parallel-GC
     // repro for teardown termination while asyncJoin reactions and child-owned
     // typed-array waitAsync tickets are still pending.
@@ -4565,7 +4820,9 @@ pub fn main(init: std.process.Init) !void {
     // delivery after parked property/condition waiters resume, typed-array
     // waitAsync settlement interleaved with asyncJoin and finalization cleanup,
     // teardown termination with pending asyncJoin reactions and child-owned
-    // typed-array waitAsync tickets,
+    // typed-array waitAsync tickets, teardown termination with property
+    // waitAsync timeouts, async condition reacquire, asyncJoin rejection, and
+    // cleanup jobs pending together,
     // ThreadLocal-stored FinalizationRegistry records across park/resume/cleanup,
     // asyncHold barging delivery after a deterministic queued ticket,
     // Thread.restrict lifecycle isolation, and ThreadLocal isolation across
@@ -4588,7 +4845,9 @@ pub fn main(init: std.process.Init) !void {
     // condition waiters resume, and while typed-array waitAsync promise
     // reactions and asyncJoin reactions settle together, plus when teardown
     // termination rejects pending asyncJoin reactions and abandons child-owned
-    // typed-array waitAsync tickets; asyncHold barging must
+    // typed-array waitAsync tickets, and when teardown termination overlaps
+    // property waitAsync timeout compaction, async condition reacquire,
+    // asyncJoin rejection, and pending cleanup jobs; asyncHold barging must
     // deliver a pending
     // no-fn grant after a sync hold legally overtakes it; ThreadLocal values must stay
     // per-thread across normal, throwing, nested, async-joined, and
@@ -4617,12 +4876,13 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runFinalizationWaiterCleanupInterleaving(gpa, seed))) lfail += 1;
             if (!(try runWaitAsyncFinalizationCleanupInterleaving(gpa, seed))) lfail += 1;
             if (!(try runTerminationPendingReactionInterleaving(gpa, seed))) lfail += 1;
+            if (!(try runTerminationWaiterCleanupInterleaving(gpa, seed))) lfail += 1;
             if (!(try runAsyncHoldBargingLifecycleInterleaving(gpa, seed))) lfail += 1;
             if (!(try runThreadRestrictLifecycleInterleaving(gpa, seed))) lfail += 1;
             if (!(try runThreadLocalLifecycleInterleaving(gpa, seed))) lfail += 1;
             if (!(try runThreadLocalFinalizationCleanupInterleaving(gpa, seed))) lfail += 1;
         }
-        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 20, base_seed, lfail });
+        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 21, base_seed, lfail });
         if (lfail != 0) std.process.exit(1);
         return;
     };

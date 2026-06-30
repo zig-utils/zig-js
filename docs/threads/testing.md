@@ -168,13 +168,16 @@ async ticket before `await` delivers its release function, teardown termination
 with pending `asyncJoin` rejection reactions and
 child-owned typed-array `waitAsync` tickets that must be abandoned before the
 child's stack-owned waiter token disappears, cross-thread `FinalizationRegistry`
-cleanup count/sum oracles, cleanup delivery interleaved with `join()` /
+cleanup count/sum oracles, teardown termination while property `waitAsync`
+timeout compaction, async condition reacquire, a pending `asyncJoin`, and
+already-ready `FinalizationRegistry` cleanup jobs share the same realm turn,
+cleanup delivery interleaved with `join()` /
 `asyncJoin()` and unregister-token suppression, cleanup delivery after parked
 property/condition waiters resume, plus `ThreadLocal` isolation across normal,
 throwing, nested, and async-joined thread lifecycles, plus
 `ThreadLocal` values registered with `FinalizationRegistry` across
 park/resume/clear/join cleanup lifecycles with exact cleanup count/sum delivery
-after quiescent collection. Each seed currently runs 20 deterministic lifecycle
+after quiescent collection. Each seed currently runs 21 deterministic lifecycle
 subprograms.
 
 `zig build test262 -Dtest262-parallel-js=true` runs test262 programs in

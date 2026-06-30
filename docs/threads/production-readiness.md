@@ -228,7 +228,10 @@ as embedders exercise more threaded host patterns.
   cleanup delivery, teardown termination with pending `asyncJoin` rejection
   reactions and child-owned typed-array `waitAsync` tickets that must be
   abandoned before the child exits, cross-thread `FinalizationRegistry`
-  cleanup count/sum oracles, cleanup delivery interleaved with `join()` /
+  cleanup count/sum oracles, teardown termination while property `waitAsync`
+  timeout compaction, async condition reacquire, a pending `asyncJoin`, and
+  already-ready `FinalizationRegistry` cleanup jobs share the same realm turn,
+  cleanup delivery interleaved with `join()` /
   `asyncJoin()` and unregister-token suppression, cleanup delivery after parked
   property/condition waiters resume, deterministic `Lock.asyncHold()` barging
   where a sync hold legally overtakes a queued no-fn async ticket before
