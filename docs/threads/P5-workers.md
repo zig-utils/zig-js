@@ -88,7 +88,8 @@ context's handles are ever touched.
 ## Verification
 
 `src/worker.zig` tests: 4-way SAB counter + terminate-mid-loop, module-graph
-import round-trip, host-hook wake, and FIFO channel drain without front shifts.
+import round-trip, exact host-hook wakes for multi-message replies plus final
+outbox close, and FIFO channel drain without front shifts.
 `src/c_api.zig` test: `JSWorkerCreate` → post a number → receive the doubled
 reply. All TSan-clean. `worker.zig` and the C-API are not exercised by the
 test262 shards, so the conformance total is unaffected.

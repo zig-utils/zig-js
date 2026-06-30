@@ -451,17 +451,35 @@ test "workers: host hook wakes on message and on outbox close" {
     var hooks = HostHooks{ .ctx = &sink, .notify = HookSink.notify };
 
     const w = try Worker.spawn(
-        \\globalThis.onmessage = (e) => { postMessage(e.data * 2); close(); };
+        \\globalThis.onmessage = (e) => {
+        \\  postMessage(e.data);
+        \\  if (e.data < 0) close();
+        \\};
     );
     w.setHostHooks(&hooks);
-    try w.postMessage(&machine, Value.num(21));
 
-    // The worker fires the hook for the reply message and again at outbox close.
-    const reply = (try w.receive(&machine, 10_000)) orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(f64, 42), reply.asNum());
+    const pings = 4;
+    var i: usize = 0;
+    while (i < pings) : (i += 1) {
+        try w.postMessage(&machine, Value.num(@floatFromInt(i)));
+    }
+    try w.postMessage(&machine, Value.num(-1));
+
+    var replies: usize = 0;
+    while (true) {
+        const reply = (try w.receive(&machine, 10_000)) orelse break;
+        const expected: f64 = if (replies < pings) @floatFromInt(replies) else -1;
+        try std.testing.expect(reply.isNumber());
+        try std.testing.expectEqual(expected, reply.asNum());
+        replies += 1;
+    }
     w.join();
     w.destroy();
-    try std.testing.expect(sink.woken.load(.acquire) >= 1);
+
+    try std.testing.expectEqual(@as(usize, pings + 1), replies);
+    // The worker fires the hook once per reply message and once more when the
+    // outbox closes, so embedders using an event loop get a final drain wake.
+    try std.testing.expectEqual(@as(u32, pings + 2), sink.woken.load(.acquire));
 }
 
 test "workers: module-graph worker resolves imports and round-trips a message" {
