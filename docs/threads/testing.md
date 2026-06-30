@@ -140,6 +140,9 @@ before and after child completion, adds a sync-wait cleanup subprogram that
 parks peers in property `Atomics.wait`, `Condition.wait`, and contended
 `Lock.hold` acquisition through a finishing sweep before verifying their stack
 roots after resume plus exact `FinalizationRegistry` cleanup count/sum delivery,
+settles expired property `waitAsync` tickets while those peers are still
+parked, keeps a live property `waitAsync` ticket rooted through the finishing
+sweep, and then notifies it with an exact captured-root score oracle,
 adds a pending-microtask subprogram that queues Promise, typed-array
 `waitAsync`, `Thread.asyncJoin`, with-fn `Lock.asyncHold`, no-fn
 release-function, and `FinalizationRegistry` cleanup roots through a finishing

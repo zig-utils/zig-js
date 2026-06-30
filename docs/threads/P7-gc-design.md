@@ -302,7 +302,10 @@ Do this once the engine's `context.zig`/`interpreter.zig` surface is settled
   thrown-object publication, a sibling sync-wait cleanup case where property
   `Atomics.wait`, `Condition.wait`, and contended `Lock.hold` peers stay parked
   through a finishing sweep before their stack roots and exact
-  `FinalizationRegistry` cleanup count/sum are verified, and a sibling teardown
+  `FinalizationRegistry` cleanup count/sum are verified, expired property
+  `waitAsync` tickets compact while those peers are parked, and one live
+  property `waitAsync` ticket remains rooted through the sweep until
+  notification, and a sibling teardown
   case where parked children hold child-owned typed-array `waitAsync` tickets
   through a finishing mid-script sweep before parent failure terminates them.
   `Thread.join()` park unwinds now clear `gc_parked` and leave the completion

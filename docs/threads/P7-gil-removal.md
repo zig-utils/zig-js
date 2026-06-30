@@ -300,7 +300,10 @@ roadmap item repeats it.
      captured-env vars) stays guarded by
      `parallel_js (M3): sync wait peers publish roots for mid-script parallel GC`,
      which exercises property waits, `Condition.wait`, and contended `Lock`
-     acquisition while requiring a finishing mid-script sweep. Non-converging
+     acquisition while requiring a finishing mid-script sweep. The mid-GC
+     sync-wait fuzzer also compacts expired property `waitAsync` tickets while
+     those peers stay parked and keeps one live property `waitAsync` ticket
+     rooted through the sweep until notification. Non-converging
      cycles still abort safely and fall back to quiescent collection.
    - **Terminate or abort.** The collector drives root-publication generations,
      marking between, until a *born-cell-stable, nothing-deferred* quiescent

@@ -187,7 +187,9 @@ context APIs.
   thrown-object publication, plus a sibling sync-wait cleanup subprogram where
   property `Atomics.wait`, `Condition.wait`, and contended `Lock.hold` peers
   stay parked through a finishing sweep before their stack roots and exact
-  `FinalizationRegistry` cleanup count/sum are verified, plus a sibling
+  `FinalizationRegistry` cleanup count/sum are verified, where expired property
+  `waitAsync` tickets compact while those peers are parked and a live property
+  `waitAsync` ticket stays rooted through the sweep until notification, plus a sibling
   pending-microtask subprogram where Promise, typed-array `waitAsync`,
   `Thread.asyncJoin`, with-fn `Lock.asyncHold`, no-fn release-function, and
   `FinalizationRegistry` cleanup roots stay queued through a finishing sweep

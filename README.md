@@ -354,7 +354,10 @@ threading architecture:
   child completion. Another sibling sync-wait cleanup subprogram parks peers in
   property `Atomics.wait`, `Condition.wait`, and contended `Lock.hold`
   acquisition, drives a finishing sweep, then verifies their stack roots after
-  resume plus exact `FinalizationRegistry` cleanup count/sum delivery.
+  resume plus exact `FinalizationRegistry` cleanup count/sum delivery; the same
+  subprogram now settles expired property `waitAsync` tickets while those peers
+  are parked, keeps a live property `waitAsync` ticket rooted through the
+  finishing sweep, then notifies it and verifies the exact captured-root score.
   Script Worker/SAB and module Worker/SAB cleanup subprograms run isolated
   Workers on the same retained `SharedArrayBuffer` while shared-realm `Thread`s
   register cleanup targets and park stack roots through a finishing sweep, then

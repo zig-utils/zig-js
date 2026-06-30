@@ -236,7 +236,10 @@ as embedders exercise more threaded host patterns.
   The sync-wait cleanup subprogram parks peers in property `Atomics.wait`,
   `Condition.wait`, and contended `Lock.hold` acquisition through a finishing
   sweep, then verifies each resumed peer's stack root plus exact
-  `FinalizationRegistry` cleanup count/sum delivery.
+  `FinalizationRegistry` cleanup count/sum delivery; it also lets property
+  `waitAsync` timeout tickets expire while those sync peers are parked, keeps a
+  live property `waitAsync` ticket rooted through the finishing sweep, notifies
+  it, and verifies exact captured-root scoring after the sweep.
   The pending-microtask subprogram keeps Promise, typed-array `waitAsync`,
   `Thread.asyncJoin`, with-fn `Lock.asyncHold`, no-fn release-function, and
   `FinalizationRegistry` cleanup roots queued through a finishing mid-script

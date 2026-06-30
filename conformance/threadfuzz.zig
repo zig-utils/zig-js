@@ -6090,6 +6090,9 @@ fn runMidScriptSyncWaitCleanupGc(gpa: std.mem.Allocator, seed: u64) !bool {
     const cond_marker = 320_000 + seed_marker;
     const lock_marker = 330_000 + seed_marker;
     const cleanup_base = 340_000 + seed_marker;
+    const wait_async_base = 350_000 + seed_marker;
+    const wait_async_pending_marker = 360_000 + seed_marker;
+    const n_wait_async = 4 + r.uintLessThan(usize, 5);
 
     var expected_cleanup_count: usize = 0;
     var expected_cleanup_sum: usize = 0;
@@ -6103,6 +6106,9 @@ fn runMidScriptSyncWaitCleanupGc(gpa: std.mem.Allocator, seed: u64) !bool {
             }
         }
     }
+    var expected_wait_async_score: usize = wait_async_pending_marker;
+    var wai: usize = 0;
+    while (wai < n_wait_async) : (wai += 1) expected_wait_async_score += wait_async_base + wai;
 
     const ctx = js.Context.createWithTestingOptions(gpa, .{
         .enable_threads = true,
@@ -6121,16 +6127,23 @@ fn runMidScriptSyncWaitCleanupGc(gpa: std.mem.Allocator, seed: u64) !bool {
         \\(() => {{
         \\  globalThis.__midgcSyncCleanupCount = 0;
         \\  globalThis.__midgcSyncCleanupSum = 0;
+        \\  globalThis.__midgcSyncWaitAsyncScore = 0;
+        \\  globalThis.__midgcSyncWaitAsyncCount = 0;
         \\  globalThis.__midgcSyncRegistry = new FinalizationRegistry((held) => {{
         \\    globalThis.__midgcSyncCleanupCount++;
         \\    globalThis.__midgcSyncCleanupSum += held;
         \\  }});
         \\  const registry = globalThis.__midgcSyncRegistry;
         \\  const gate = {{ prop: 0, propReady: 0, condReady: 0, condOpen: false, lockHeld: 0, lockReady: 0, lockRelease: 0, lockDone: 0 }};
+        \\  const waitBox = {{ prop: 0, live: 0 }};
         \\  const condLock = new Lock();
         \\  const cond = new Condition();
         \\  const heldLock = new Lock();
         \\  const root = {{ seed: {d}, tag: 'midgc-sync-wait-cleanup-root' }};
+        \\  const waitAsyncTimeoutCount = {d};
+        \\  const waitAsyncBase = {d};
+        \\  const waitAsyncPendingMarker = {d};
+        \\  const waitAsyncExpectedScore = {d};
         \\  const propThread = new Thread((gate, marker, seedMarker, timeout) => {{
         \\    const localRoot = {{ marker, nested: {{ seed: seedMarker, label: 'midgc-property-sync-wait-root' }} }};
         \\    Atomics.store(gate, 'propReady', 1);
@@ -6176,6 +6189,44 @@ fn runMidScriptSyncWaitCleanupGc(gpa: std.mem.Allocator, seed: u64) !bool {
         \\    Atomics.wait(gate, 'condReady', 0, 1);
         \\  while (Atomics.load(gate, 'lockReady') === 0)
         \\    Atomics.wait(gate, 'lockReady', 0, 1);
+        \\  for (let i = 0; i < waitAsyncTimeoutCount; i++) {{
+        \\    const marker = waitAsyncBase + i;
+        \\    const waitRoot = {{ marker, nested: {{ seed: root.seed, label: 'midgc-sync-waitAsync-timeout-' + i }} }};
+        \\    const waiter = Atomics.waitAsync(waitBox, 'prop', 0, 1 + (i % 3));
+        \\    if (waiter.async !== true || !(waiter.value instanceof Promise))
+        \\      throw new Error('bad midgc sync waitAsync timeout shape');
+        \\    waiter.value.then(
+        \\      (v) => {{
+        \\        if (v === 'timed-out' && waitRoot.marker === marker && waitRoot.nested.seed === root.seed) {{
+        \\          globalThis.__midgcSyncWaitAsyncScore += waitRoot.marker;
+        \\          globalThis.__midgcSyncWaitAsyncCount++;
+        \\        }} else {{
+        \\          globalThis.__midgcSyncWaitAsyncScore = -1000000;
+        \\        }}
+        \\      }},
+        \\      () => {{ globalThis.__midgcSyncWaitAsyncScore = -1000000; }});
+        \\  }}
+        \\  const pendingRoot = {{ marker: waitAsyncPendingMarker, nested: {{ seed: root.seed, label: 'midgc-sync-waitAsync-live' }} }};
+        \\  const pendingWaiter = Atomics.waitAsync(waitBox, 'live', 0, 10000);
+        \\  if (pendingWaiter.async !== true || !(pendingWaiter.value instanceof Promise))
+        \\    throw new Error('bad midgc sync pending waitAsync shape');
+        \\  pendingWaiter.value.then(
+        \\    (v) => {{
+        \\      if (v === 'ok' && pendingRoot.marker === waitAsyncPendingMarker && pendingRoot.nested.seed === root.seed) {{
+        \\        globalThis.__midgcSyncWaitAsyncScore += pendingRoot.marker;
+        \\        globalThis.__midgcSyncWaitAsyncCount++;
+        \\      }} else {{
+        \\        globalThis.__midgcSyncWaitAsyncScore = -1000000;
+        \\      }}
+        \\    }},
+        \\    () => {{ globalThis.__midgcSyncWaitAsyncScore = -1000000; }});
+        \\  for (let spin = 0; globalThis.__midgcSyncWaitAsyncCount < waitAsyncTimeoutCount && spin < 2000; spin++) {{
+        \\    $drainRunLoop();
+        \\    drainMicrotasks();
+        \\    Atomics.wait(gate, 'propReady', 1, 1);
+        \\  }}
+        \\  if (globalThis.__midgcSyncWaitAsyncCount !== waitAsyncTimeoutCount)
+        \\    throw new Error('midgc sync waitAsync timeouts did not settle before sweep: ' + globalThis.__midgcSyncWaitAsyncCount);
         \\  const keep = [];
         \\  for (let round = 0; round < {d}; round++) {{
         \\    for (let i = 0; i < {d}; i++) {{
@@ -6193,6 +6244,18 @@ fn runMidScriptSyncWaitCleanupGc(gpa: std.mem.Allocator, seed: u64) !bool {
         \\    if (spin < 0) keep.push({{ impossible: true }});
         \\  }}
         \\  if (typeof gc === 'function') gc();
+        \\  Atomics.store(waitBox, 'live', 1);
+        \\  if (Atomics.notify(waitBox, 'live') !== 1)
+        \\    throw new Error('midgc sync waitAsync live waiter was not queued');
+        \\  for (let spin = 0; globalThis.__midgcSyncWaitAsyncCount < waitAsyncTimeoutCount + 1 && spin < 2000; spin++) {{
+        \\    $drainRunLoop();
+        \\    drainMicrotasks();
+        \\    Atomics.wait(gate, 'propReady', 1, 1);
+        \\  }}
+        \\  if (globalThis.__midgcSyncWaitAsyncCount !== waitAsyncTimeoutCount + 1)
+        \\    throw new Error('midgc sync waitAsync live waiter did not settle after sweep: ' + globalThis.__midgcSyncWaitAsyncCount);
+        \\  if (globalThis.__midgcSyncWaitAsyncScore !== waitAsyncExpectedScore)
+        \\    throw new Error('midgc sync waitAsync score ' + globalThis.__midgcSyncWaitAsyncScore + '/' + waitAsyncExpectedScore);
         \\  Atomics.store(gate, 'prop', 1);
         \\  Atomics.notify(gate, 'prop');
         \\  condLock.hold(() => {{
@@ -6219,6 +6282,10 @@ fn runMidScriptSyncWaitCleanupGc(gpa: std.mem.Allocator, seed: u64) !bool {
     ,
         .{
             seed_marker,
+            n_wait_async,
+            wait_async_base,
+            wait_async_pending_marker,
+            expected_wait_async_score,
             prop_marker,
             seed_marker,
             wait_timeout_ms,
