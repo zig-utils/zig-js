@@ -149,7 +149,7 @@ pub fn build(b: *std.Build) void {
     const fuzz_seed = b.option(usize, "fuzz-seed", "threadfuzz: base RNG seed") orelse 1;
     const fuzz_amplify = b.option(bool, "fuzz-amplify", "threadfuzz: high-contention profile (more threads, longer loops)") orelse false;
     const fuzz_broad = b.option(bool, "fuzz-broad", "threadfuzz: broad semantic profile (exceptions, waiters, cleanup, lifecycle)") orelse false;
-    const fuzz_midgc = b.option(bool, "fuzz-midgc", "threadfuzz: mid-script parallel GC wait-pump, sync-wait cleanup, teardown-termination, promise-publication, and Worker/SAB cleanup profile") orelse false;
+    const fuzz_midgc = b.option(bool, "fuzz-midgc", "threadfuzz: mid-script parallel GC wait-pump, microtask churn, sync-wait cleanup, teardown-termination, promise-publication, and Worker/SAB cleanup profile") orelse false;
     const fuzz_lifecycle = b.option(bool, "fuzz-lifecycle", "threadfuzz: deterministic termination, pending reaction teardown, Worker/module-worker graph overlap, Worker/thread/finalization scheduling, Worker terminate/thread teardown, asyncHold barging, Promise microtask churn, Thread.restrict/ThreadLocal isolation, ThreadLocal finalization cleanup, waitAsync/finalization cleanup, finalization cleanup/waiter/unregister, and exact Worker close/terminate drain/drop lifecycle profile") orelse false;
     const fuzz_verify = b.option(bool, "fuzz-verify", "threadfuzz: deterministic-correctness mode (predict + check each result)") orelse false;
     const threadfuzz = b.addExecutable(.{

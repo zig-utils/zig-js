@@ -162,7 +162,11 @@ context APIs.
   thrown-object publication, plus a sibling sync-wait cleanup subprogram where
   property `Atomics.wait`, `Condition.wait`, and contended `Lock.hold` peers
   stay parked through a finishing sweep before their stack roots and exact
-  `FinalizationRegistry` cleanup count/sum are verified, plus a Worker/SAB
+  `FinalizationRegistry` cleanup count/sum are verified, plus a sibling
+  pending-microtask subprogram where Promise, typed-array `waitAsync`,
+  `Thread.asyncJoin`, with-fn `Lock.asyncHold`, no-fn release-function, and
+  `FinalizationRegistry` cleanup roots stay queued through a finishing sweep
+  until exact post-drain reaction/cleanup checks pass, plus a Worker/SAB
   cleanup subprogram where isolated Workers keep progressing on a retained
   `SharedArrayBuffer` while shared-realm `Thread`s publish cleanup targets and
   parked stack roots through a finishing sweep. Sync-wait pump points
@@ -188,7 +192,9 @@ context APIs.
   only through the native waiter queue,
   keeps pending `Thread.asyncJoin` fulfillment/rejection reactions live only
   through native completion records, keeps a ThreadLocal-only hidden root live
-  in a parked peer, keeps completed-but-unjoined
+  in a parked peer, keeps pending Promise/microtask roots live across
+  asyncHold callback/release delivery, typed-array `waitAsync`,
+  `Thread.asyncJoin`, and cleanup reactions, keeps completed-but-unjoined
   Thread result and thrown exception objects live through the thread completion
   record, verifies isolated Worker/SAB progress while shared-realm cleanup roots
   are swept, and verifies exact `FinalizationRegistry` cleanup count/sum delivery

@@ -5584,6 +5584,297 @@ fn runMidScriptPromisePublicationGc(gpa: std.mem.Allocator, seed: u64) !bool {
     return true;
 }
 
+fn runMidScriptMicrotaskChurnGc(gpa: std.mem.Allocator, seed: u64) !bool {
+    var prng = std.Random.DefaultPrng.init(seed ^ 0x6d69_6467_636d_7175);
+    const r = prng.random();
+    const nthreads = 2 + r.uintLessThan(usize, 3);
+    const per_thread = 6 + r.uintLessThan(usize, 7);
+    const rounds = 8 + r.uintLessThan(usize, 5);
+    const per_round = 650 + r.uintLessThan(usize, 350);
+    const spin_iters = 2200 + r.uintLessThan(usize, 3000);
+    const seed_marker = seed % 10_000;
+    const root_marker = 470_000 + seed_marker;
+
+    var expected_promise_score: usize = 0;
+    var expected_wait_score: usize = 0;
+    var expected_join_score: usize = 0;
+    var expected_async_hold_score: usize = 0;
+    var expected_release_score: usize = 0;
+    var expected_join_sum: usize = 0;
+    var expected_cleanup_count: usize = 0;
+    var expected_cleanup_sum: usize = 0;
+    var id: usize = 0;
+    while (id < nthreads) : (id += 1) {
+        const base = 480_000 + seed_marker + id * 20_000;
+        expected_promise_score += base + 100;
+        expected_wait_score += base + 200;
+        expected_join_score += base + 300;
+        expected_join_sum += base + 300;
+        expected_cleanup_count += per_thread;
+        var i: usize = 0;
+        while (i < per_thread) : (i += 1) {
+            expected_async_hold_score += base + 1_000 + i;
+            expected_release_score += base + 2_000 + i;
+            expected_cleanup_sum += base + 3_000 + i;
+        }
+    }
+
+    const ctx = js.Context.createWithTestingOptions(gpa, .{
+        .enable_threads = true,
+        .enable_gc = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+        .parallel_midscript_gc = true,
+    }) catch {
+        std.debug.print("seed {d}: midgc microtask-churn context creation failed\n", .{seed});
+        return false;
+    };
+    defer ctx.destroy();
+
+    const src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  globalThis.__midgcMicrotaskPromiseScore = 0;
+        \\  globalThis.__midgcMicrotaskWaitScore = 0;
+        \\  globalThis.__midgcMicrotaskJoinScore = 0;
+        \\  globalThis.__midgcMicrotaskAsyncHoldScore = 0;
+        \\  globalThis.__midgcMicrotaskReleaseScore = 0;
+        \\  globalThis.__midgcMicrotaskJoinObserved = 0;
+        \\  globalThis.__midgcMicrotaskCleanupCount = 0;
+        \\  globalThis.__midgcMicrotaskCleanupSum = 0;
+        \\  globalThis.__midgcMicrotaskRegistry = new FinalizationRegistry((held) => {{
+        \\    globalThis.__midgcMicrotaskCleanupCount++;
+        \\    globalThis.__midgcMicrotaskCleanupSum += held;
+        \\  }});
+        \\  const registry = globalThis.__midgcMicrotaskRegistry;
+        \\  const root = {{ marker: {d}, nested: {{ seed: {d}, label: 'midgc-microtask-root' }} }};
+        \\  const view = new Int32Array(new SharedArrayBuffer({d} * 4));
+        \\  const lock = new Lock();
+        \\  const gate = {{ ready: 0 }};
+        \\  const threads = [];
+        \\  for (let id = 0; id < {d}; id++) {{
+        \\    const base = 480000 + {d} + id * 20000;
+        \\    const promiseMarker = base + 100;
+        \\    Promise.resolve(root).then(
+        \\      (v) => {{
+        \\        if (v.marker === {d} && v.nested.seed === {d})
+        \\          globalThis.__midgcMicrotaskPromiseScore += promiseMarker;
+        \\        else
+        \\          globalThis.__midgcMicrotaskPromiseScore = -1000000;
+        \\      }},
+        \\      () => {{ globalThis.__midgcMicrotaskPromiseScore = -1000000; }});
+        \\    const waitRoot = {{ marker: base + 200, nested: {{ root, label: 'midgc-microtask-wait-root' }} }};
+        \\    const waiter = Atomics.waitAsync(view, id, 0, 10000);
+        \\    if (waiter.async !== true || !(waiter.value instanceof Promise))
+        \\      throw new Error('bad midgc microtask waitAsync pending shape');
+        \\    waiter.value.then(
+        \\      (v) => {{
+        \\        if (v === 'ok' && waitRoot.nested.root.marker === {d})
+        \\          globalThis.__midgcMicrotaskWaitScore += waitRoot.marker;
+        \\        else
+        \\          globalThis.__midgcMicrotaskWaitScore = -1000000;
+        \\      }},
+        \\      () => {{ globalThis.__midgcMicrotaskWaitScore = -1000000; }});
+        \\    const joinRoot = {{ marker: base + 300, nested: {{ root, label: 'midgc-microtask-asyncJoin-root' }} }};
+        \\    const t = new Thread((view, gate, id, per, seedMarker, registry) => {{
+        \\      const base = 480000 + seedMarker + id * 20000;
+        \\      let local = {{ marker: base + 300, nested: {{ seed: seedMarker, label: 'midgc-microtask-thread-root' }} }};
+        \\      for (let i = 0; i < per; i++) {{
+        \\        let target = {{ id, i, local, payload: 'midgc-microtask-cleanup-' + id + '-' + i }};
+        \\        registry.register(target, base + 3000 + i);
+        \\        target = null;
+        \\      }}
+        \\      Atomics.add(gate, 'ready', 1);
+        \\      Atomics.notify(gate, 'ready');
+        \\      Atomics.store(view, id, 1);
+        \\      const notified = Atomics.notify(view, id);
+        \\      if (notified !== 1)
+        \\        throw new Error('midgc microtask notify got ' + notified);
+        \\      return local;
+        \\    }}, view, gate, id, {d}, {d}, registry);
+        \\    t.asyncJoin().then(
+        \\      (v) => {{
+        \\        if (v && v.marker === joinRoot.marker &&
+        \\            joinRoot.nested.root.marker === {d} &&
+        \\            v.nested.seed === {d})
+        \\          globalThis.__midgcMicrotaskJoinScore += joinRoot.marker;
+        \\        else
+        \\          globalThis.__midgcMicrotaskJoinScore = -1000000;
+        \\      }},
+        \\      () => {{ globalThis.__midgcMicrotaskJoinScore = -1000000; }});
+        \\    threads.push(t);
+        \\    for (let i = 0; i < {d}; i++) {{
+        \\      const cbRoot = {{ marker: base + 1000 + i, nested: {{ root, label: 'midgc-microtask-asyncHold-root' }} }};
+        \\      lock.asyncHold(() => cbRoot).then(
+        \\        (v) => {{
+        \\          if (v.marker === cbRoot.marker && v.nested.root.marker === {d})
+        \\            globalThis.__midgcMicrotaskAsyncHoldScore += v.marker;
+        \\          else
+        \\            globalThis.__midgcMicrotaskAsyncHoldScore = -1000000;
+        \\        }},
+        \\        () => {{ globalThis.__midgcMicrotaskAsyncHoldScore = -1000000; }});
+        \\      const releaseRoot = {{ marker: base + 2000 + i, nested: {{ root, label: 'midgc-microtask-release-root' }} }};
+        \\      lock.asyncHold().then(
+        \\        (release) => {{
+        \\          if (typeof release !== 'function' || releaseRoot.nested.root.marker !== {d}) {{
+        \\            globalThis.__midgcMicrotaskReleaseScore = -1000000;
+        \\          }} else {{
+        \\            globalThis.__midgcMicrotaskReleaseScore += releaseRoot.marker;
+        \\            release();
+        \\          }}
+        \\        }},
+        \\        () => {{ globalThis.__midgcMicrotaskReleaseScore = -1000000; }});
+        \\    }}
+        \\  }}
+        \\  while (Atomics.load(gate, 'ready') < {d})
+        \\    Atomics.wait(gate, 'ready', Atomics.load(gate, 'ready'), 1);
+        \\  const keep = [];
+        \\  for (let round = 0; round < {d}; round++) {{
+        \\    for (let i = 0; i < {d}; i++) {{
+        \\      keep.push({{
+        \\        round,
+        \\        i,
+        \\        nested: {{ root, value: i + round }},
+        \\        text: 'midgc-microtask-churn-' + round + '-' + i,
+        \\      }});
+        \\    }}
+        \\    let spin = 0;
+        \\    for (let j = 0; j < {d}; j++) spin = (spin + j + round) & 0x3fffffff;
+        \\    if (spin < 0) keep.push({{ impossible: true }});
+        \\  }}
+        \\  if (typeof gc === 'function') gc();
+        \\  for (const t of threads) {{
+        \\    const joined = t.join();
+        \\    if (!joined || joined.nested.seed !== {d})
+        \\      throw new Error('bad midgc microtask joined root');
+        \\    globalThis.__midgcMicrotaskJoinObserved += joined.marker;
+        \\  }}
+        \\  globalThis.__midgcMicrotaskCheck = function(expectedPromise, expectedWait, expectedJoin, expectedAsyncHold, expectedRelease, expectedJoinObserved) {{
+        \\    if (globalThis.__midgcMicrotaskPromiseScore !== expectedPromise)
+        \\      throw new Error('bad midgc microtask promise score ' + globalThis.__midgcMicrotaskPromiseScore + '/' + expectedPromise);
+        \\    if (globalThis.__midgcMicrotaskWaitScore !== expectedWait)
+        \\      throw new Error('bad midgc microtask waitAsync score ' + globalThis.__midgcMicrotaskWaitScore + '/' + expectedWait);
+        \\    if (globalThis.__midgcMicrotaskJoinScore !== expectedJoin)
+        \\      throw new Error('bad midgc microtask asyncJoin score ' + globalThis.__midgcMicrotaskJoinScore + '/' + expectedJoin);
+        \\    if (globalThis.__midgcMicrotaskAsyncHoldScore !== expectedAsyncHold)
+        \\      throw new Error('bad midgc microtask asyncHold score ' + globalThis.__midgcMicrotaskAsyncHoldScore + '/' + expectedAsyncHold);
+        \\    if (globalThis.__midgcMicrotaskReleaseScore !== expectedRelease)
+        \\      throw new Error('bad midgc microtask release score ' + globalThis.__midgcMicrotaskReleaseScore + '/' + expectedRelease);
+        \\    if (globalThis.__midgcMicrotaskJoinObserved !== expectedJoinObserved)
+        \\      throw new Error('bad midgc microtask joined score ' + globalThis.__midgcMicrotaskJoinObserved + '/' + expectedJoinObserved);
+        \\    return 1;
+        \\  }};
+        \\  return keep.length;
+        \\}})();
+        \\
+    ,
+        .{
+            root_marker,
+            seed_marker,
+            nthreads,
+            nthreads,
+            seed_marker,
+            root_marker,
+            seed_marker,
+            root_marker,
+            per_thread,
+            seed_marker,
+            root_marker,
+            seed_marker,
+            per_thread,
+            root_marker,
+            root_marker,
+            nthreads,
+            rounds,
+            per_round,
+            spin_iters,
+            seed_marker,
+        },
+    );
+    defer gpa.free(src);
+
+    const before_attempts = ctx.gc_par_attempts.load(.monotonic);
+    const before_collections = ctx.gc_par_collections.load(.monotonic);
+    const expected: f64 = @floatFromInt(rounds * per_round);
+    const result = ctx.evaluate(src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: midgc microtask-churn JS threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!result.isNumber() or result.asNum() != expected) {
+        std.debug.print("seed {d}: midgc microtask-churn result got {d}, expected {d}\n", .{ seed, if (result.isNumber()) result.asNum() else -1, expected });
+        return false;
+    }
+    if (ctx.gc_par_attempts.load(.monotonic) <= before_attempts) {
+        std.debug.print("seed {d}: midgc microtask-churn did not attempt a parallel collection\n", .{seed});
+        return false;
+    }
+    if (ctx.gc_par_collections.load(.monotonic) <= before_collections) {
+        std.debug.print("seed {d}: midgc microtask-churn did not finish a parallel collection\n", .{seed});
+        return false;
+    }
+
+    _ = ctx.evaluate("$drainRunLoop()") catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: midgc microtask-churn drain loop threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    const check_src = try std.fmt.allocPrint(
+        gpa,
+        "globalThis.__midgcMicrotaskCheck({d}, {d}, {d}, {d}, {d}, {d})",
+        .{ expected_promise_score, expected_wait_score, expected_join_score, expected_async_hold_score, expected_release_score, expected_join_sum },
+    );
+    defer gpa.free(check_src);
+    const checked = ctx.evaluate(check_src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: midgc microtask-churn check threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!checked.isNumber() or checked.asNum() != 1) {
+        std.debug.print("seed {d}: midgc microtask-churn check got {d}\n", .{ seed, if (checked.isNumber()) checked.asNum() else -1 });
+        return false;
+    }
+
+    ctx.collectGarbage();
+    const cleanup_src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  globalThis.__midgcMicrotaskRegistry.cleanupSome();
+        \\  if (globalThis.__midgcMicrotaskCleanupCount !== {d})
+        \\    throw new Error('bad midgc microtask cleanup count ' + globalThis.__midgcMicrotaskCleanupCount + '/' + {d});
+        \\  if (globalThis.__midgcMicrotaskCleanupSum !== {d})
+        \\    throw new Error('bad midgc microtask cleanup sum ' + globalThis.__midgcMicrotaskCleanupSum + '/' + {d});
+        \\  return globalThis.__midgcMicrotaskCleanupCount;
+        \\}})();
+        \\
+    ,
+        .{ expected_cleanup_count, expected_cleanup_count, expected_cleanup_sum, expected_cleanup_sum },
+    );
+    defer gpa.free(cleanup_src);
+    const cleaned = ctx.evaluate(cleanup_src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: midgc microtask-churn cleanup JS threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!cleaned.isNumber() or cleaned.asNum() != @as(f64, @floatFromInt(expected_cleanup_count))) {
+        std.debug.print("seed {d}: midgc microtask-churn cleanup got {d}, expected {d}\n", .{ seed, if (cleaned.isNumber()) cleaned.asNum() else -1, expected_cleanup_count });
+        return false;
+    }
+    return true;
+}
+
 fn runMidScriptWorkerCleanupGc(gpa: std.mem.Allocator, seed: u64) !bool {
     var prng = std.Random.DefaultPrng.init(seed ^ 0x6d69_6477_6f72_6b63);
     const r = prng.random();
@@ -6111,6 +6402,23 @@ pub fn main(init: std.process.Init) !void {
         if (mpfail != 0) std.process.exit(1);
         return;
     };
+    // `threadfuzz midgcmicrotask <iters> <seed>`: focused mid-script
+    // parallel-GC repro for pending Promise, waitAsync, asyncJoin, asyncHold
+    // callback/release, and cleanup roots that all settle after a finishing
+    // sweep.
+    if (first) |a| if (std.mem.eql(u8, a, "midgcmicrotask")) {
+        if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch 1;
+        if (args.next()) |b| base_seed = std.fmt.parseInt(u64, b, 10) catch 1;
+        var mmfail: usize = 0;
+        var mmi: usize = 0;
+        while (mmi < iters) : (mmi += 1) {
+            const seed = base_seed +% mmi;
+            if (!(try runMidScriptMicrotaskChurnGc(gpa, seed))) mmfail += 1;
+        }
+        std.debug.print("threadfuzz midgcmicrotask: {d} programs from seed {d}, {d} failures\n", .{ iters, base_seed, mmfail });
+        if (mmfail != 0) std.process.exit(1);
+        return;
+    };
     // `threadfuzz midgcworker <iters> <seed>`: focused mid-script
     // parallel-GC repro for isolated Workers running on a retained SAB while
     // shared-realm Threads publish cleanup roots through a finishing sweep.
@@ -6259,7 +6567,9 @@ pub fn main(init: std.process.Init) !void {
     // pressure triggers the experimental collector. Hidden ThreadLocal values,
     // typed-array waitAsync reactions, rejected asyncHold reactions, pending
     // asyncJoin reactions, child-returned waitAsync/rejected-promise/user-
-    // thenable assimilation, completed-but-unjoined Thread results and thrown
+    // thenable assimilation, pending Promise/microtask reaction roots across
+    // asyncHold, waitAsync, asyncJoin, and cleanup delivery,
+    // completed-but-unjoined Thread results and thrown
     // objects, sync-wait peer stack roots with finalization cleanup, isolated
     // Worker/SAB progress while shared-realm cleanup roots are swept, and
     // teardown termination with pending asyncJoin/waitAsync roots must survive
@@ -6276,10 +6586,11 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runMidScriptWaitPumpGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptTerminationReactionGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptPromisePublicationGc(gpa, seed))) mfail += 1;
+            if (!(try runMidScriptMicrotaskChurnGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptSyncWaitCleanupGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptWorkerCleanupGc(gpa, seed))) mfail += 1;
         }
-        std.debug.print("threadfuzz midgc: {d} programs from seed {d}, {d} failures\n", .{ iters * 5, base_seed, mfail });
+        std.debug.print("threadfuzz midgc: {d} programs from seed {d}, {d} failures\n", .{ iters * 6, base_seed, mfail });
         if (mfail != 0) std.process.exit(1);
         return;
     };
