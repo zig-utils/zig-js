@@ -4254,6 +4254,7 @@ test "Function constructor builds callable functions from source" {
     )).asBool());
     // Spec name + arity of the synthesized function.
     try expectEvalStr("anonymous", "Function('return 1').name");
+    try expectEvalStr("undefined", "new Function('return typeof anonymous')()");
     try std.testing.expectEqual(@as(f64, 2), (try evalIn("Function('a', 'b', 'return 0').length")).asNum());
     try expectEvalStr("function", "typeof Function('return 1')");
     // A syntactically invalid body throws SyntaxError.
@@ -4437,6 +4438,9 @@ test "Function.prototype.toString returns source (decl/expr) or native syntax" {
     try expectEvalStr("function* gen() { yield 1; }",
         \\var gen = function* gen() { yield 1; };
         \\gen.toString()
+    );
+    try expectEvalStr("function anonymous(a, /* a */ b\n) {\n/* body */ return a + b;\n}",
+        \\Function("a, /* a */ b", "/* body */ return a + b;").toString()
     );
     // A native function uses the NativeFunction syntax.
     try expectEvalStr("function valueOf() { [native code] }", "Object.prototype.valueOf.toString()");

@@ -4586,11 +4586,11 @@ pub const Interpreter = struct {
         return list.items;
     }
 
-    /// Expand an iterable into `list` — for `...spread`. Arrays take a fast
-    /// path; everything else (strings, generators, Sets/Maps, user objects with
-    /// `[Symbol.iterator]`) goes through the iterator protocol.
+    /// Expand an iterable into `list` — for `...spread`. Plain arrays take a fast
+    /// path; everything else (strings, generators, Sets/Maps, arguments objects,
+    /// user objects with `[Symbol.iterator]`) goes through the iterator protocol.
     pub fn spreadInto(self: *Interpreter, list: *std.ArrayListUnmanaged(Value), v: Value) EvalError!void {
-        if (v.isObject() and v.asObj().is_array and self.arrayIterIntact()) {
+        if (v.isObject() and v.asObj().is_array and !v.asObj().is_arguments and self.arrayIterIntact()) {
             for (v.asObj().elements.items) |e| try list.append(self.arena, e);
             return;
         }
@@ -8712,15 +8712,13 @@ pub const Interpreter = struct {
                     return moduleNsGet(self, ns, key);
                 }
                 // Legacy `caller`: a *non-strict ordinary* function (not strict,
-                // arrow, generator, async, or bound) reads `undefined` for `.caller`
-                // (we don't expose the live call stack — the "extension not
-                // supported" answer test262 accepts), shadowing the inherited
-                // %ThrowTypeError% poison pill — which still fires for strict/bound
-                // functions and for `.arguments`. (Not `null`: `fn.caller` is never
-                // null in the legacy extension; code does `caller === undefined`.)
+                // arrow, generator, async, or bound) reads `null` for `.caller`
+                // when the live caller is unavailable or restricted, shadowing
+                // the inherited %ThrowTypeError% poison pill — which still fires
+                // for strict/bound functions and for `.arguments`.
                 if (std.mem.eql(u8, key, "caller") and o.bound == null and o.getOwn(key) == null) {
                     if (funcOf(recv)) |f| {
-                        if (!f.is_strict and !f.is_arrow and !f.is_generator and !f.is_async) return Value.undef();
+                        if (!f.is_strict and !f.is_arrow and !f.is_generator and !f.is_async) return Value.nul();
                     }
                 }
                 // A (non-arrow) function's `.prototype` is an own data property,
@@ -37664,6 +37662,10 @@ test "interpreter function declaration and call" {
         \\for (var forInHead = function () {} in {}) {}
         \\forInHead.name === "forInHead"
     )).asBool());
+    try std.testing.expect((try evalSource(arena.allocator(),
+        \\function caller() { return caller.caller; }
+        \\caller() === null
+    )).asBool());
 }
 
 test "interpreter recursion (factorial)" {
@@ -38162,6 +38164,13 @@ test "interpreter arguments object and Array/Object statics" {
     const a = arena.allocator();
     // arguments object
     try std.testing.expectEqual(@as(f64, 6), (try evalSource(a, "function sum() { let s = 0; for (let i = 0; i < arguments.length; i++) { s += arguments[i]; } return s; } sum(1, 2, 3)")).asNum());
+    try std.testing.expectEqualStrings("10,40,30", (try evalSource(a,
+        \\function f(a, b, c) {
+        \\  b = 40;
+        \\  return [...arguments].join(",");
+        \\}
+        \\f(10, 20, 30)
+    )).asStr());
     // arrows have no own arguments (inherit) — here referencing arguments at top level is fine
     try std.testing.expectEqual(@as(f64, 3), (try evalSource(a, "function f() { return arguments.length; } f(7, 8, 9)")).asNum());
     // Array.of / from

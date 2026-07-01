@@ -106,7 +106,7 @@ pub fn functionConstructor(ctx: *anyopaque, this: Value, args: []const Value) Ho
         }
         body = try self.toStringV(args[args.len - 1]);
     }
-    const source = try std.fmt.allocPrint(self.arena, "(function anonymous({s}\n) {{\n{s}\n}})", .{ params.items, body });
+    const source = try std.fmt.allocPrint(self.arena, "(function({s}\n) {{\n{s}\n}})", .{ params.items, body });
     var parser = Parser.init(self.arena, source) catch
         return self.throwError("SyntaxError", "Function: invalid parameters or body");
     const prog = parser.parseProgram() catch
@@ -131,6 +131,12 @@ pub fn functionConstructor(ctx: *anyopaque, this: Value, args: []const Value) Ho
     };
     const fn_v = try self.eval(prog);
     if (fn_v.isObject() and fn_v.asObj().js_func != null) {
+        try fn_v.asObj().setOwn(self.arena, self.root_shape, "name", Value.str("anonymous"));
+        try fn_v.asObj().setAttr(self.arena, "name", .{ .writable = false, .enumerable = false, .configurable = true });
+        if (Interpreter.funcOf(fn_v)) |f| {
+            f.name = "anonymous";
+            f.source = try std.fmt.allocPrint(self.arena, "function anonymous({s}\n) {{\n{s}\n}}", .{ params.items, body });
+        }
         if (nt.isObject()) fn_v.asObj().proto = try self.ctorRealmIntrinsicProto(nt.asObj(), "Function");
         _ = try self.protoObject(fn_v.asObj());
         try fn_v.asObj().setAttr(self.arena, "prototype", .{ .writable = true, .enumerable = false, .configurable = false });
