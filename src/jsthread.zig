@@ -1446,9 +1446,14 @@ fn lockFromToken(self: *Interpreter, token_v: Value, name: []const u8) value.Hos
 fn conditionStaticWaitFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx_ptr));
-    const rec = recOf(CondRecord, if (args.len > 0) args[0] else Value.undef()) orelse
+    const cond_v = if (args.len > 0) args[0] else Value.undef();
+    const token_v = if (args.len > 1) args[1] else Value.undef();
+    const rec = recOf(CondRecord, cond_v) orelse
         return self.throwError("TypeError", "Atomics.Condition.wait requires a Condition argument");
-    const lock = try lockFromToken(self, if (args.len > 1) args[1] else Value.undef(), "Atomics.Condition.wait requires a locked UnlockToken");
+    const lock = try lockFromToken(self, token_v, "Atomics.Condition.wait requires a locked UnlockToken");
+    const root_mark = try self.pushTempRoot(cond_v);
+    defer self.restoreTempRoots(root_mark);
+    _ = try self.pushTempRoot(token_v);
     _ = try condWaitCore(self, rec, lock, null);
     return Value.undef();
 }
@@ -1456,9 +1461,11 @@ fn conditionStaticWaitFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) 
 fn conditionStaticWaitForFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx_ptr));
-    const rec = recOf(CondRecord, if (args.len > 0) args[0] else Value.undef()) orelse
+    const cond_v = if (args.len > 0) args[0] else Value.undef();
+    const token_v = if (args.len > 1) args[1] else Value.undef();
+    const rec = recOf(CondRecord, cond_v) orelse
         return self.throwError("TypeError", "Atomics.Condition.waitFor requires a Condition argument");
-    const lock = try lockFromToken(self, if (args.len > 1) args[1] else Value.undef(), "Atomics.Condition.waitFor requires a locked UnlockToken");
+    const lock = try lockFromToken(self, token_v, "Atomics.Condition.waitFor requires a locked UnlockToken");
     const timeout_v = if (args.len > 2) args[2] else Value.undef();
     if (timeout_v.isUndefined())
         return self.throwError("TypeError", "Atomics.Condition.waitFor requires a timeout");
@@ -1466,6 +1473,10 @@ fn conditionStaticWaitForFn(ctx_ptr: *anyopaque, this: Value, args: []const Valu
     const pred = if (args.len > 3) args[3] else Value.undef();
     if (!pred.isUndefined() and !pred.isCallable())
         return self.throwError("TypeError", "Atomics.Condition.waitFor predicate must be callable");
+    const root_mark = try self.pushTempRoot(cond_v);
+    defer self.restoreTempRoots(root_mark);
+    _ = try self.pushTempRoot(token_v);
+    if (!pred.isUndefined()) _ = try self.pushTempRoot(pred);
 
     const start = std.Io.Timestamp.now(agent.engineIo(), .awake).nanoseconds;
     while (true) {

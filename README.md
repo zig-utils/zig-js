@@ -195,7 +195,7 @@ python3 tools/threads-reference-audit.py --probe-candidates # prints closest pro
 python3 tools/threads-reference-audit.py --run-probes # executes closest probes with timeouts
 zig build test -Dtsan=true      # unit suite under ThreadSanitizer
 zig build threadfuzz            # seeded concurrent-JS fuzzer
-zig build threadfuzz -Dfuzz-midgc=true # mid-script GC wait-pump + microtask + creator buffers + nested asyncJoin + ThreadLocal/Thread.restrict finalization + sync-wait cleanup + asyncHold release cleanup + teardown + promise + script/module Worker/SAB + Worker exception + Worker close/terminate + weak-collection fuzzer
+zig build threadfuzz -Dfuzz-midgc=true # mid-script GC wait-pump + microtask + creator buffers + nested asyncJoin + ThreadLocal/Thread.restrict finalization + sync-wait cleanup + sync timeout exit + asyncHold release cleanup + teardown + promise + script/module Worker/SAB + Worker exception + Worker close/terminate + weak-collection fuzzer
 zig build test262               # runs the real tc39/test262 corpus, prints pass %
 zig build test262 -Dtest262=DIR # …with an explicit corpus root
 zig build bench                 # times the bytecode VM against the tree-walker
@@ -405,6 +405,10 @@ threading architecture:
   subprogram now settles expired property `waitAsync` tickets while those peers
   are parked, keeps a live property `waitAsync` ticket rooted through the
   finishing sweep, then notifies it and verifies the exact captured-root score.
+  A sibling sync-timeout subprogram parks property `Atomics.wait` peers and
+  static `Atomics.Condition.waitFor` peers through a finishing sweep, rejects
+  early cleanup while their stack roots are live, then requires timeout results,
+  `UnlockToken` reacquisition/unlock, and exact cleanup after quiescence.
   Another sibling async-hold release cleanup subprogram delivers no-fn
   `Lock.asyncHold()` release functions while property and condition waiters
   stay parked, drives a finishing mid-script parallel sweep before those waiters

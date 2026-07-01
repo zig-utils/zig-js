@@ -225,6 +225,10 @@ context APIs.
   `FinalizationRegistry` cleanup count/sum are verified, where expired property
   `waitAsync` tickets compact while those peers are parked and a live property
   `waitAsync` ticket stays rooted through the sweep until notification, plus a sibling
+  sync-timeout subprogram where property `Atomics.wait` and static
+  `Atomics.Condition.waitFor` peers stay parked through a finishing sweep,
+  reject early cleanup while their stack roots are live, then time out with
+  exact `UnlockToken` reacquisition/unlock and finalization cleanup, plus a sibling
   async-hold release cleanup subprogram where no-fn `Lock.asyncHold()` release
   functions are delivered while property and condition waiters stay parked
   through a finishing sweep before exact cleanup count/sum is verified, plus a sibling
