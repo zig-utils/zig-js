@@ -82,18 +82,20 @@ Known performance/maturity work:
 - `zig build gc-profile` is the local baseline for those costs. It compares
   arena, explicit-GC, no-GIL threaded GC, and `.gil = true` contexts across
   create/destroy, create-per-task versus long-lived-context reuse with periodic
-  collection, object-heavy allocation, block-scoped `let` allocation, and
-  explicit `collectGarbage()`. The lifecycle row now breaks create and destroy
-  apart, and the profile also prints GC cell-backing attribution for the
-  intrinsic empty-context footprint and for an object-heavy allocation run: chunk
-  count, total cell-slot capacity, live cells at context creation, live cells
-  after allocation, free slots after collection, and live cells after collection,
-  followed by per-size-class bucket tables for the empty context and the same
-  workload. The bucket tables show slot size, chunks, capacity, issued cells,
-  free cells, and live cells, using exact per-bucket free, capacity, and
-  issued-slot counters so profiling a collection no longer walks every freed
-  cell or slab chunk. Finalizer attribution is likewise split between
-  empty-context destroy and destroy after the object workload. Fresh-slot
+  collection, workload destroy attribution with and without a prior quiescent
+  `collectGarbage()`, object-heavy allocation, block-scoped `let` allocation,
+  and explicit `collectGarbage()`. The lifecycle row now breaks create and
+  destroy apart, the workload destroy row separates finalizer/collection work
+  from post-collection teardown, and the profile also prints GC cell-backing
+  attribution for the intrinsic empty-context footprint and for an object-heavy
+  allocation run: chunk count, total cell-slot capacity, live cells at context
+  creation, live cells after allocation, free slots after collection, and live
+  cells after collection, followed by per-size-class bucket tables for the empty
+  context and the same workload. The bucket tables show slot size, chunks,
+  capacity, issued cells, free cells, and live cells, using exact per-bucket
+  free, capacity, and issued-slot counters so profiling a collection no longer
+  walks every freed cell or slab chunk. Finalizer attribution is likewise split
+  between empty-context destroy and destroy after the object workload. Fresh-slot
   allocation skips slab chunks whose bump range is already exhausted, and the
   object-sized 1024/2048-byte buckets use larger chunks so the profile exposes
   reduced object-cell chunk churn separately from remaining create/destroy

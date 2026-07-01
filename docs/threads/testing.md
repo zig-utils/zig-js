@@ -382,14 +382,18 @@ repeatedly in one long-lived context with periodic `collectGarbage()` calls, so
 context-heavy embedders can quantify the cost of create-per-unit-of-work designs
 while the GC allocator and lifecycle paths continue to mature. The lifecycle
 table splits total time into create and destroy columns so teardown reductions
-are visible separately from global setup costs. The profile also prints GC
-cell-backing attribution for the intrinsic empty-context footprint and for an
-object-heavy allocation run: chunk count, total cell-slot capacity, live cells at
-context creation, live cells after allocation, free slots after collection, and
-live cells after collection. It then prints per-size-class bucket tables for the
-empty context and the same object workload, showing slot size, chunks, capacity,
-issued cells, free cells, and surviving live cells. GC finalizer attribution is
-also split between empty-context destroy and destroy after the object workload.
+are visible separately from global setup costs. The workload destroy table
+compares destroying the same object-heavy context while the workload is still
+live with a quiescent `collectGarbage()` followed by destroy, so finalizer
+draining and post-collection teardown costs can be tracked separately. The
+profile also prints GC cell-backing attribution for the intrinsic empty-context
+footprint and for an object-heavy allocation run: chunk count, total cell-slot
+capacity, live cells at context creation, live cells after allocation, free
+slots after collection, and live cells after collection. It then prints
+per-size-class bucket tables for the empty context and the same object workload,
+showing slot size, chunks, capacity, issued cells, free cells, and surviving
+live cells. GC finalizer attribution is also split between empty-context destroy
+and destroy after the object workload.
 These snapshot paths use exact per-bucket free, capacity, and issued-slot
 counters rather than walking every free-list node or slab chunk. The
 object-sized 1024/2048-byte buckets use larger slab chunks than the small

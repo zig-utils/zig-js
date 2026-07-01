@@ -245,11 +245,14 @@ threading architecture:
 - **GC performance** - `zig build gc-profile` compares arena, explicit-GC,
   no-GIL threaded GC, and `.gil = true` lifecycle/allocation costs, including a
   create-per-task versus long-lived-context reuse section with periodic
-  collection, and now splits context lifecycle time into create and destroy
-  columns before printing GC cell-backing attribution for both the intrinsic
-  empty-context footprint and an object-heavy allocation run: chunk count, total
-  cell-slot capacity, live cells at context creation, live cells after script
-  allocation, free slots after collection, and live cells after collection. It
+  collection, a workload destroy attribution table that compares destroying a
+  live object-heavy context with quiescent `collectGarbage()` plus
+  post-collection destroy, and now splits context lifecycle time into create and
+  destroy columns before printing GC cell-backing attribution for both the
+  intrinsic empty-context footprint and an object-heavy allocation run: chunk
+  count, total cell-slot capacity, live cells at context creation, live cells
+  after script allocation, free slots after collection, and live cells after
+  collection. It
   also prints per-size-class bucket tables for the empty context and the same
   object workload, so nursery/allocation follow-up can separate global setup
   pressure from workload pressure and see which slot sizes own chunk count,
@@ -278,8 +281,8 @@ threading architecture:
   wrapped allocator, so teardown only elides frees for owned cell slots. Live
   `SharedArrayBuffer` retain teardown is regression
   covered across arena, no-GIL threaded, and `.gil = true` contexts. Keep using
-  the profile attribution to drive nursery/generational work and further
-  lifecycle reductions for create-per-task embedders.
+  the profile attribution to drive nursery/generational work, finalizer
+  draining, and further lifecycle reductions for create-per-task embedders.
 - **Parallel scaling** - `zig build threads-profile` compares the no-GIL
   default against `.gil = true` across independent compute, shared object
   properties, array append, typed-array Atomics, property `Atomics.wait` /

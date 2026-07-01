@@ -48,6 +48,12 @@ const LifecycleTimes = struct {
     }
 };
 
+const WorkloadDestroyTimes = struct {
+    destroy_live_ns: u64 = 0,
+    precollect_ns: u64 = 0,
+    destroy_after_collect_ns: u64 = 0,
+};
+
 fn timeLifecycle(gpa: std.mem.Allocator, io: std.Io, mode: Mode, rounds: usize) !LifecycleTimes {
     var times: LifecycleTimes = .{};
     var i: usize = 0;
@@ -58,6 +64,36 @@ fn timeLifecycle(gpa: std.mem.Allocator, io: std.Io, mode: Mode, rounds: usize) 
         const destroy_t0 = nowNs(io);
         ctx.destroy();
         times.destroy_ns += @intCast(nowNs(io) - destroy_t0);
+    }
+    return times;
+}
+
+fn timeWorkloadDestroy(gpa: std.mem.Allocator, io: std.Io, mode: Mode, source: []const u8, rounds: usize) !WorkloadDestroyTimes {
+    var times: WorkloadDestroyTimes = .{};
+    var i: usize = 0;
+    while (i < rounds) : (i += 1) {
+        {
+            const ctx = try makeContext(gpa, mode);
+            errdefer ctx.destroy();
+            _ = try ctx.evaluate(source);
+            const t0 = nowNs(io);
+            ctx.destroy();
+            times.destroy_live_ns += @intCast(nowNs(io) - t0);
+        }
+
+        if (!modeUsesGc(mode)) continue;
+
+        {
+            const ctx = try makeContext(gpa, mode);
+            errdefer ctx.destroy();
+            _ = try ctx.evaluate(source);
+            const collect_t0 = nowNs(io);
+            ctx.collectGarbage();
+            times.precollect_ns += @intCast(nowNs(io) - collect_t0);
+            const destroy_t0 = nowNs(io);
+            ctx.destroy();
+            times.destroy_after_collect_ns += @intCast(nowNs(io) - destroy_t0);
+        }
     }
     return times;
 }
@@ -137,6 +173,44 @@ fn printLifecycle(gpa: std.mem.Allocator, io: std.Io) !void {
             total / rounds,
             times.create_ns / rounds,
             times.destroy_ns / rounds,
+        });
+    }
+}
+
+fn printWorkloadDestroy(gpa: std.mem.Allocator, io: std.Io) !void {
+    const rounds: usize = 20;
+    std.debug.print("\nWorkload destroy attribution ({d} rounds, same object-heavy script)\n", .{rounds});
+    std.debug.print("{s:<18} {s:>18} {s:>18} {s:>22} {s:>10}\n", .{
+        "mode",
+        "live destroy ns",
+        "precollect ns",
+        "post-collect destroy ns",
+        "ratio",
+    });
+    for (modes) |mode| {
+        const times = try timeWorkloadDestroy(gpa, io, mode, gc_backing_source, rounds);
+        const live_per = times.destroy_live_ns / rounds;
+        if (!modeUsesGc(mode)) {
+            std.debug.print("{s:<18} {d:>18} {s:>18} {s:>22} {s:>10}\n", .{
+                mode.name,
+                live_per,
+                "-",
+                "-",
+                "-",
+            });
+            continue;
+        }
+
+        const collect_per = times.precollect_ns / rounds;
+        const post_per = times.destroy_after_collect_ns / rounds;
+        const ratio_x100 = if (post_per == 0) @as(u64, 0) else (live_per * 100) / post_per;
+        std.debug.print("{s:<18} {d:>18} {d:>18} {d:>22} {d:>6}.{d:0>2}x\n", .{
+            mode.name,
+            live_per,
+            collect_per,
+            post_per,
+            ratio_x100 / 100,
+            ratio_x100 % 100,
         });
     }
 }
@@ -413,6 +487,7 @@ pub fn main() !void {
     std.debug.print("zig-js GC allocation/context lifecycle profile\n", .{});
     try printLifecycle(gpa, io);
     try printTaskLifecycle(gpa, io);
+    try printWorkloadDestroy(gpa, io);
     try printAllocation(gpa, io);
     try printExplicitGc(gpa, io);
     try printGcBackingBaseline(gpa);
