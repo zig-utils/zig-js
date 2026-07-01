@@ -3291,9 +3291,9 @@ pub const Parser = struct {
             // followed, with no LineTerminator, by a property name — otherwise it
             // is itself the element name (`accessor;`, `accessor = 1`,
             // `accessor(){}`). Accepted and parsed as a field.
-            if (!async_method and !gen_method and isKeyword(self.cur(), "accessor") and
-                !self.cur().escaped_identifier and self.noNewlineBefore(1) and self.propNameAhead())
-            {
+            const saw_auto_accessor = !async_method and !gen_method and isKeyword(self.cur(), "accessor") and
+                !self.cur().escaped_identifier and self.noNewlineBefore(1) and self.propNameAhead();
+            if (saw_auto_accessor) {
                 _ = self.advance(); // accessor
             }
             const pn = try self.parsePropertyName();
@@ -3318,7 +3318,14 @@ pub const Parser = struct {
                     defer self.scan_descend_class_expr = saved_class_scan;
                     try self.scanSuperAndArgs(ie);
                 }
-                try members.append(self.arena, .{ .key = pn.key, .key_expr = pn.expr, .field_init = init_expr, .is_static = is_static, .is_field = true });
+                try members.append(self.arena, .{
+                    .key = pn.key,
+                    .key_expr = pn.expr,
+                    .field_init = init_expr,
+                    .is_static = is_static,
+                    .is_field = true,
+                    .is_auto_accessor = saw_auto_accessor and !(pn.expr == null and pn.key.len > 0 and pn.key[0] == '#'),
+                });
             }
         }
         try self.expect(.rbrace);

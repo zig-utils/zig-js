@@ -107,6 +107,7 @@ pub const ClassMember = struct {
     is_static: bool = false,
     is_ctor: bool = false,
     is_field: bool = false,
+    is_auto_accessor: bool = false,
     accessor: AccessorKind = .none,
     /// `static { ... }` initialization block (run at class definition with
     /// `this` = the class).

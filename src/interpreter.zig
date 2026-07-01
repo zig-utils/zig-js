@@ -3991,7 +3991,7 @@ pub const Interpreter = struct {
     fn deepCopyClassMembers(self: *Interpreter, members: []const ast.ClassMember) EvalError![]ast.ClassMember {
         const out = try self.arena.alloc(ast.ClassMember, members.len);
         for (members, 0..) |m, i| {
-            out[i] = m; // scalars (key, flags, accessor)
+            out[i] = m; // scalars (key, flags, accessor/auto-accessor)
             out[i].key_expr = try self.deepCopyOpt(m.key_expr);
             out[i].func = try self.deepCopyOpt(m.func);
             out[i].field_init = try self.deepCopyOpt(m.field_init);
@@ -4188,6 +4188,13 @@ pub const Interpreter = struct {
 
         // Instance field initializers, prepended to the constructor body.
         var field_inits: std.ArrayListUnmanaged(*Node) = .empty;
+        const auto_storage_keys = try self.arena.alloc([]const u8, members.len);
+        for (members, 0..) |m, i| {
+            auto_storage_keys[i] = if (m.is_auto_accessor)
+                try self.nextPrivateStorageKey("#<auto-accessor>")
+            else
+                "";
+        }
         // The desugared `this.<name> = init` member node of each PUBLIC instance
         // field with a computed name, by member index. A computed field name is
         // evaluated ONCE (at class definition, in source order); the member loop
@@ -4217,7 +4224,9 @@ pub const Interpreter = struct {
             const stmt = try self.arena.create(Node);
             // A private field is *defined* (PrivateFieldAdd) on `this`, not
             // assigned via PrivateSet; a public field is an ordinary assignment.
-            if (m.key_expr == null and value.isPrivateKey(m.key)) {
+            if (m.is_auto_accessor) {
+                stmt.* = .{ .private_field_def = .{ .name = auto_storage_keys[i], .value = value_node } };
+            } else if (m.key_expr == null and value.isPrivateKey(m.key)) {
                 stmt.* = .{ .private_field_def = .{ .name = m.key, .value = value_node } };
             } else {
                 const assign_node = try self.arena.create(Node);
@@ -4380,6 +4389,11 @@ pub const Interpreter = struct {
             if (m.is_static and !m.is_ctor and !value.isPrivateKey(key) and eq(key, "prototype"))
                 return self.throwError("TypeError", "Classes may not have a static property named 'prototype'");
             if (m.is_field) {
+                if (m.is_auto_accessor) {
+                    const home = if (m.is_static) class_obj else proto;
+                    try self.defineAutoAccessor(home, key, auto_storage_keys[i], name_str);
+                    try home.setAttr(self.arena, key, .{ .writable = false, .enumerable = false, .configurable = true });
+                }
                 // A static field's name is now resolved; its initializer (DefineField)
                 // is deferred to pass 2 so every element's name is evaluated first.
                 if (m.is_static) {
@@ -4470,8 +4484,15 @@ pub const Interpreter = struct {
             self.home_object = saved_home;
             self.in_field_initializer = saved_fi;
             if (m.field_init) |fi| try self.maybeNameAnon(fv2, fi, name_str);
-            if (value.isPrivateKey(key)) try self.addPrivateBrandChecked(class_obj, key);
-            try self.setProp(class_obj, key, fv2);
+            if (m.is_auto_accessor) {
+                const storage_key = auto_storage_keys[i];
+                try self.addPrivateBrandChecked(class_obj, storage_key);
+                try class_obj.setOwn(self.arena, self.root_shape, storage_key, fv2);
+                try class_obj.setAttr(self.arena, storage_key, .{ .writable = true, .enumerable = false, .configurable = false });
+            } else {
+                if (value.isPrivateKey(key)) try self.addPrivateBrandChecked(class_obj, key);
+                try self.setProp(class_obj, key, fv2);
+            }
         }
         return class_val;
     }
@@ -9573,6 +9594,39 @@ pub const Interpreter = struct {
     /// Define an accessor (get/set) on an object via its `setAccessor`.
     fn defineAccessor(self: *Interpreter, obj: *value.Object, name: []const u8, get: ?Value, set: ?Value) EvalError!void {
         try obj.setAccessor(self.arena, name, get, set);
+    }
+
+    const AutoAccessorData = struct { storage_key: []const u8 };
+
+    fn autoAccessorGetFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+        _ = args;
+        const self: *Interpreter = @ptrCast(@alignCast(ctx));
+        const fnobj = self.active_native orelse return Value.undef();
+        const data: *AutoAccessorData = @ptrCast(@alignCast(fnobj.private_data.?));
+        return self.privateGet(this, data.storage_key);
+    }
+
+    fn autoAccessorSetFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+        const self: *Interpreter = @ptrCast(@alignCast(ctx));
+        const fnobj = self.active_native orelse return Value.undef();
+        const data: *AutoAccessorData = @ptrCast(@alignCast(fnobj.private_data.?));
+        try self.privateSet(this, data.storage_key, if (args.len > 0) args[0] else Value.undef());
+        return Value.undef();
+    }
+
+    fn defineAutoAccessor(self: *Interpreter, obj: *value.Object, name: []const u8, storage_key: []const u8, display: []const u8) EvalError!void {
+        const data = try self.arena.create(AutoAccessorData);
+        data.* = .{ .storage_key = storage_key };
+
+        const getter = try gc_mod.allocObj(self.arena);
+        getter.* = .{ .native = autoAccessorGetFn, .private_data = @ptrCast(data) };
+        try installNativeProps(self.arena, self.root_shape, getter, try std.fmt.allocPrint(self.arena, "get {s}", .{display}), 0);
+
+        const setter = try gc_mod.allocObj(self.arena);
+        setter.* = .{ .native = autoAccessorSetFn, .private_data = @ptrCast(data) };
+        try installNativeProps(self.arena, self.root_shape, setter, try std.fmt.allocPrint(self.arena, "set {s}", .{display}), 1);
+
+        try obj.setAccessor(self.arena, name, Value.obj(getter), Value.obj(setter));
     }
 
     /// Call `recv[name](args)` with `this = recv`. Dispatches the builtin
