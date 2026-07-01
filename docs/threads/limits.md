@@ -268,8 +268,11 @@ context APIs.
   only through the native waiter queue,
   keeps pending `Thread.asyncJoin` fulfillment/rejection reactions live only
   through native completion records, keeps a ThreadLocal-only hidden root live
-  in a parked peer and now parks ThreadLocal-only `FinalizationRegistry` targets
+  in a parked peer, parks ThreadLocal-only `FinalizationRegistry` targets
   through a finishing sweep before clearing them with an exact cleanup oracle,
+  and parks Thread.restrict-owned finalization targets through a finishing sweep
+  while nested foreign access still throws `ConcurrentAccessError` before owner
+  release,
   keeps pending Promise/microtask roots live across
   asyncHold callback/release delivery, typed-array `waitAsync`,
   `Thread.asyncJoin`, and cleanup reactions, keeps completed-but-unjoined

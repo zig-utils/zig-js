@@ -243,8 +243,9 @@ as embedders exercise more threaded host patterns.
   drives `parallel_midscript_gc`; every seed now runs a normal completion
   wait-pump subprogram, a sync-wait cleanup subprogram, a promise-publication
   subprogram, a pending-microtask subprogram, a creator-owned buffer
-  subprogram, a ThreadLocal-finalization subprogram, isolated script Worker/SAB
-  and module Worker/SAB cleanup subprograms, script and module Worker
+  subprogram, a ThreadLocal-finalization subprogram, a
+  Thread.restrict-finalization subprogram, isolated script Worker/SAB and module
+  Worker/SAB cleanup subprograms, script and module Worker
   handler-exception cleanup subprograms, script and module Worker
   close/terminate drain/drop subprograms, a weak-collection cleanup subprogram,
   and an expected
@@ -270,6 +271,12 @@ as embedders exercise more threaded host patterns.
   mid-script sweep, rejects any early cleanup delivery while those hidden roots
   are live, then clears the values and verifies exact cleanup count/sum after a
   quiescent collection.
+  The Thread.restrict-finalization subprogram parks owner threads with
+  restricted owner-local objects registered for finalization, verifies nested
+  foreign reads still throw `ConcurrentAccessError`, drives a finishing
+  mid-script sweep, rejects early cleanup while those owner-thread roots are
+  live, then releases the owners and verifies exact asyncJoin plus cleanup
+  oracles after a quiescent collection.
   The promise-publication subprogram keeps a child-returned typed-array
   `waitAsync` promise pending through the sweep, keeps a child-returned rejected
   promise and a child-returned user thenable parked behind pre-completion

@@ -147,6 +147,11 @@ adds a ThreadLocal-finalization subprogram that parks owner threads with
 targets reachable only through `ThreadLocal.value`, drives a finishing
 mid-script sweep, verifies cleanup is not delivered while those hidden roots are
 live, then clears the values and requires exact cleanup count/sum delivery,
+adds a Thread.restrict-finalization subprogram that parks owner threads with
+restricted owner-local objects registered for finalization, verifies nested
+foreign reads still throw `ConcurrentAccessError`, drives a finishing
+mid-script sweep, rejects early cleanup while those owner-thread roots are live,
+then releases the owners and requires exact asyncJoin and cleanup oracles,
 adds a pending-microtask subprogram that queues Promise, typed-array
 `waitAsync`, `Thread.asyncJoin`, with-fn `Lock.asyncHold`, no-fn
 release-function, and `FinalizationRegistry` cleanup roots through a finishing
@@ -184,7 +189,7 @@ join-termination unit witness that checks parked-state/mutex cleanup, then
 requires exact script completion or exact expected termination plus at least one
 finishing parallel sweep and exact
 `FinalizationRegistry` cleanup count/sum delivery plus unregister-token
-suppression after a quiescent collect. Each seed currently runs 14 deterministic
+suppression after a quiescent collect. Each seed currently runs 15 deterministic
 mid-GC subprograms. The
 lifecycle profile
 (`-Dfuzz-lifecycle=true`) adds expected-throw termination storms for
