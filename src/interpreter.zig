@@ -11105,7 +11105,7 @@ pub const Interpreter = struct {
         if (eq(name, "reverse")) {
             // Dense fast path: a plain array with no holes, no accessors, and no
             // sparse tail is a contiguous value slice — swap in place.
-            if (o.is_array and o.accessors == null and o.reversePackedDenseElements()) {
+            if (o.is_array and o.accessors == null and o.attrs == null and o.reversePackedDenseElements()) {
                 return Value.obj(o);
             }
             // Generic Array.prototype.reverse: Get/Set/HasProperty/Delete keyed by
@@ -11512,8 +11512,7 @@ pub const Interpreter = struct {
                 // (running accessor setters) and DeleteProperty the trailing slots.
                 var k: usize = 0;
                 while (k < ilen) : (k += 1) {
-                    const ks = try std.fmt.allocPrint(self.arena, "{d}", .{k});
-                    if (k < ps.len) try self.setMember(Value.obj(o), ks, ps[k]) else _ = try self.deleteOwn(o, ks);
+                    if (k < ps.len) try self.arrIndexSetOrThrow(o, k, ps[k]) else try self.arrIndexDeleteOrThrow(o, k);
                 }
             }
             return Value.obj(o);
