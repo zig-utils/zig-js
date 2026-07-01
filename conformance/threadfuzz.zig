@@ -5436,6 +5436,255 @@ fn runAtomicsConditionFinalizationInterleaving(gpa: std.mem.Allocator, seed: u64
     return true;
 }
 
+fn runAtomicsMutexLockIfAvailableFinalizationInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
+    var prng = std.Random.DefaultPrng.init(seed ^ 0x6c6f_636b_6966_6176);
+    const r = prng.random();
+    const n_acquire = 2 + r.uintLessThan(usize, 3);
+    const n_timeout = 2 + r.uintLessThan(usize, 3);
+    const total_waiters = n_acquire + n_timeout;
+    const timeout_ms = 35 + r.uintLessThan(usize, 35);
+    const acquire_timeout_ms = 2000;
+    const seed_marker = seed % 10_000;
+    const holder_marker = 640_000 + seed_marker;
+    const acquire_base = 650_000 + seed_marker;
+    const timeout_base = 660_000 + seed_marker;
+    const cleanup_base = 670_000 + seed_marker;
+
+    var expected_join_sum: usize = holder_marker;
+    var expected_cleanup_sum: usize = cleanup_base;
+    var i: usize = 0;
+    while (i < n_acquire) : (i += 1) {
+        expected_join_sum += acquire_base + i;
+        expected_cleanup_sum += cleanup_base + 1 + i;
+    }
+    i = 0;
+    while (i < n_timeout) : (i += 1) {
+        expected_join_sum += timeout_base + i;
+        expected_cleanup_sum += cleanup_base + 1 + n_acquire + i;
+    }
+    const expected_cleanup_count = total_waiters + 1;
+
+    const ctx = js.Context.createWith(gpa, .{ .enable_threads = true, .enable_gc = true }) catch {
+        std.debug.print("seed {d}: Atomics.Mutex lockIfAvailable lifecycle context creation failed\n", .{seed});
+        return false;
+    };
+    defer ctx.destroy();
+
+    const src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  globalThis.__atomicsMutexLiaCleanupCount = 0;
+        \\  globalThis.__atomicsMutexLiaCleanupSum = 0;
+        \\  globalThis.__atomicsMutexLiaAsyncScore = 0;
+        \\  globalThis.__atomicsMutexLiaAsyncCount = 0;
+        \\  globalThis.__atomicsMutexLiaRegistry = new FinalizationRegistry((held) => {{
+        \\    globalThis.__atomicsMutexLiaCleanupCount++;
+        \\    globalThis.__atomicsMutexLiaCleanupSum += held;
+        \\  }});
+        \\  const registry = globalThis.__atomicsMutexLiaRegistry;
+        \\  const mutex = new Atomics.Mutex();
+        \\  const gate = {{ holderReady: 0, ready: 0, timeoutDone: 0, release: 0 }};
+        \\  const seedMarker = {d};
+        \\  const threads = [];
+        \\  function observe(t, marker, label) {{
+        \\    const reactionRoot = {{ marker, nested: {{ seed: seedMarker, label }} }};
+        \\    t.asyncJoin().then(
+        \\      (v) => {{
+        \\        if (v === marker && reactionRoot.marker === marker &&
+        \\            reactionRoot.nested.seed === seedMarker) {{
+        \\          globalThis.__atomicsMutexLiaAsyncScore += v;
+        \\          globalThis.__atomicsMutexLiaAsyncCount++;
+        \\        }} else {{
+        \\          globalThis.__atomicsMutexLiaAsyncScore = -1000000;
+        \\        }}
+        \\      }},
+        \\      () => {{ globalThis.__atomicsMutexLiaAsyncScore = -1000000; }});
+        \\  }}
+        \\  let holder = new Thread((mutex, gate, registry, marker, held, seedMarker) => {{
+        \\    let target = {{ marker, seed: seedMarker, kind: 'atomics-mutex-lia-holder' }};
+        \\    registry.register(target, held);
+        \\    const root = {{ target, nested: {{ seed: seedMarker, label: 'atomics-mutex-lia-holder-root' }} }};
+        \\    const token = Atomics.Mutex.lock(mutex);
+        \\    Atomics.add(gate, 'holderReady', 1);
+        \\    Atomics.notify(gate, 'holderReady');
+        \\    while (Atomics.load(gate, 'release') === 0)
+        \\      Atomics.wait(gate, 'release', 0, 100);
+        \\    if (!root.target || root.target.marker !== marker || root.nested.seed !== seedMarker)
+        \\      throw new Error('Atomics.Mutex.lockIfAvailable holder root lost');
+        \\    if (!token.unlock() || token.unlock())
+        \\      throw new Error('Atomics.Mutex holder unlock once invariant failed');
+        \\    target = null;
+        \\    root.target = null;
+        \\    return marker;
+        \\  }}, mutex, gate, registry, {d}, {d}, seedMarker);
+        \\  observe(holder, {d}, 'atomics-mutex-lia-holder-asyncJoin');
+        \\  while (Atomics.load(gate, 'holderReady') < 1)
+        \\    Atomics.wait(gate, 'holderReady', 0, 1);
+        \\  for (let id = 0; id < {d}; id++) {{
+        \\    const marker = {d} + id;
+        \\    const t = new Thread((mutex, gate, registry, id, marker, held, timeout, seedMarker) => {{
+        \\      let target = {{ id, marker, seed: seedMarker, kind: 'atomics-mutex-lia-acquire' }};
+        \\      registry.register(target, held);
+        \\      const root = {{ target, nested: {{ seed: seedMarker, label: 'atomics-mutex-lia-acquire-root' }} }};
+        \\      const reused = new Atomics.Mutex.UnlockToken();
+        \\      Atomics.add(gate, 'ready', 1);
+        \\      Atomics.notify(gate, 'ready');
+        \\      const token = Atomics.Mutex.lockIfAvailable(mutex, timeout, reused);
+        \\      if (token !== reused || !reused.locked || !mutex.locked)
+        \\        throw new Error('Atomics.Mutex.lockIfAvailable did not acquire with reused token');
+        \\      if (!root.target || root.target.marker !== marker || root.nested.seed !== seedMarker)
+        \\        throw new Error('Atomics.Mutex.lockIfAvailable acquire root lost');
+        \\      if (!token.unlock() || token.unlock())
+        \\        throw new Error('Atomics.Mutex.lockIfAvailable acquire unlock once invariant failed');
+        \\      target = null;
+        \\      root.target = null;
+        \\      return marker;
+        \\    }}, mutex, gate, registry, id, marker, {d} + 1 + id, {d}, seedMarker);
+        \\    observe(t, marker, 'atomics-mutex-lia-acquire-asyncJoin');
+        \\    threads.push(t);
+        \\  }}
+        \\  for (let id = 0; id < {d}; id++) {{
+        \\    const marker = {d} + id;
+        \\    const t = new Thread((mutex, gate, registry, id, marker, held, timeout, seedMarker) => {{
+        \\      let target = {{ id, marker, seed: seedMarker, kind: 'atomics-mutex-lia-timeout' }};
+        \\      registry.register(target, held);
+        \\      const root = {{ target, nested: {{ seed: seedMarker, label: 'atomics-mutex-lia-timeout-root' }} }};
+        \\      const reused = new Atomics.Mutex.UnlockToken();
+        \\      Atomics.add(gate, 'ready', 1);
+        \\      Atomics.notify(gate, 'ready');
+        \\      const token = Atomics.Mutex.lockIfAvailable(mutex, timeout, reused);
+        \\      if (token !== null)
+        \\        throw new Error('Atomics.Mutex.lockIfAvailable timeout path acquired the mutex');
+        \\      if (reused.locked)
+        \\        throw new Error('Atomics.Mutex.lockIfAvailable timeout path locked reused token');
+        \\      if (!root.target || root.target.marker !== marker || root.nested.seed !== seedMarker)
+        \\        throw new Error('Atomics.Mutex.lockIfAvailable timeout root lost');
+        \\      Atomics.add(gate, 'timeoutDone', 1);
+        \\      Atomics.notify(gate, 'timeoutDone');
+        \\      target = null;
+        \\      root.target = null;
+        \\      return marker;
+        \\    }}, mutex, gate, registry, id, marker, {d} + 1 + {d} + id, {d}, seedMarker);
+        \\    observe(t, marker, 'atomics-mutex-lia-timeout-asyncJoin');
+        \\    threads.push(t);
+        \\  }}
+        \\  while (Atomics.load(gate, 'ready') < {d})
+        \\    Atomics.wait(gate, 'ready', Atomics.load(gate, 'ready'), 1);
+        \\  while (Atomics.load(gate, 'timeoutDone') < {d})
+        \\    Atomics.wait(gate, 'timeoutDone', Atomics.load(gate, 'timeoutDone'), 1);
+        \\  Atomics.store(gate, 'release', 1);
+        \\  Atomics.notify(gate, 'release');
+        \\  let joinSum = holder.join();
+        \\  holder = null;
+        \\  for (const t of threads)
+        \\    joinSum += t.join();
+        \\  if (joinSum !== {d})
+        \\    throw new Error('bad Atomics.Mutex.lockIfAvailable lifecycle join sum ' + joinSum + '/' + {d});
+        \\  threads.length = 0;
+        \\  globalThis.__atomicsMutexLiaCheck = function(expectedSum, expectedCount) {{
+        \\    if (globalThis.__atomicsMutexLiaAsyncScore !== expectedSum)
+        \\      throw new Error('bad Atomics.Mutex.lockIfAvailable async score ' + globalThis.__atomicsMutexLiaAsyncScore + '/' + expectedSum);
+        \\    if (globalThis.__atomicsMutexLiaAsyncCount !== expectedCount)
+        \\      throw new Error('bad Atomics.Mutex.lockIfAvailable async count ' + globalThis.__atomicsMutexLiaAsyncCount + '/' + expectedCount);
+        \\    return 1;
+        \\  }};
+        \\  return joinSum;
+        \\}})();
+        \\
+    ,
+        .{
+            seed_marker,
+            holder_marker,
+            cleanup_base,
+            holder_marker,
+            n_acquire,
+            acquire_base,
+            cleanup_base,
+            acquire_timeout_ms,
+            n_timeout,
+            timeout_base,
+            cleanup_base,
+            n_acquire,
+            timeout_ms,
+            total_waiters,
+            n_timeout,
+            expected_join_sum,
+            expected_join_sum,
+        },
+    );
+    defer gpa.free(src);
+
+    const joined = ctx.evaluate(src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: Atomics.Mutex lockIfAvailable lifecycle JS threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!joined.isNumber() or joined.asNum() != @as(f64, @floatFromInt(expected_join_sum))) {
+        std.debug.print("seed {d}: Atomics.Mutex lockIfAvailable lifecycle joined got {d}, expected {d}\n", .{ seed, if (joined.isNumber()) joined.asNum() else -1, expected_join_sum });
+        return false;
+    }
+
+    _ = ctx.evaluate("$drainRunLoop()") catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: Atomics.Mutex lockIfAvailable lifecycle drain loop threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    const check_src = try std.fmt.allocPrint(
+        gpa,
+        "globalThis.__atomicsMutexLiaCheck({d}, {d})",
+        .{ expected_join_sum, expected_cleanup_count },
+    );
+    defer gpa.free(check_src);
+    const checked = ctx.evaluate(check_src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: Atomics.Mutex lockIfAvailable lifecycle check threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!checked.isNumber() or checked.asNum() != 1) {
+        std.debug.print("seed {d}: Atomics.Mutex lockIfAvailable lifecycle check got {d}\n", .{ seed, if (checked.isNumber()) checked.asNum() else -1 });
+        return false;
+    }
+
+    ctx.collectGarbage();
+    const cleanup_src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  globalThis.__atomicsMutexLiaRegistry.cleanupSome();
+        \\  if (globalThis.__atomicsMutexLiaCleanupCount !== {d})
+        \\    throw new Error('bad Atomics.Mutex.lockIfAvailable cleanup count ' + globalThis.__atomicsMutexLiaCleanupCount + '/' + {d});
+        \\  if (globalThis.__atomicsMutexLiaCleanupSum !== {d})
+        \\    throw new Error('bad Atomics.Mutex.lockIfAvailable cleanup sum ' + globalThis.__atomicsMutexLiaCleanupSum + '/' + {d});
+        \\  return globalThis.__atomicsMutexLiaCleanupCount;
+        \\}})();
+        \\
+    ,
+        .{ expected_cleanup_count, expected_cleanup_count, expected_cleanup_sum, expected_cleanup_sum },
+    );
+    defer gpa.free(cleanup_src);
+    const cleaned = ctx.evaluate(cleanup_src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: Atomics.Mutex lockIfAvailable lifecycle cleanup JS threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!cleaned.isNumber() or cleaned.asNum() != @as(f64, @floatFromInt(expected_cleanup_count))) {
+        std.debug.print("seed {d}: Atomics.Mutex lockIfAvailable lifecycle cleaned got {d}, expected {d}\n", .{ seed, if (cleaned.isNumber()) cleaned.asNum() else -1, expected_cleanup_count });
+        return false;
+    }
+    return true;
+}
+
 fn runMicrotaskChurnLifecycleInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
     var prng = std.Random.DefaultPrng.init(seed ^ 0x6d69_6372_6f74_6173);
     const r = prng.random();
@@ -12236,6 +12485,23 @@ pub fn main(init: std.process.Init) !void {
         if (acfail != 0) std.process.exit(1);
         return;
     };
+    // `threadfuzz atomicsmutexliafinal <iters> <seed>`: focused lifecycle
+    // repro for proposal-style Atomics.Mutex.lockIfAvailable contended acquire
+    // and timeout paths with reused tokens, asyncJoin observers, and exact
+    // finalization cleanup.
+    if (first) |a| if (std.mem.eql(u8, a, "atomicsmutexliafinal")) {
+        if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch 1;
+        if (args.next()) |b| base_seed = std.fmt.parseInt(u64, b, 10) catch 1;
+        var amfail: usize = 0;
+        var ami: usize = 0;
+        while (ami < iters) : (ami += 1) {
+            const seed = base_seed +% ami;
+            if (!(try runAtomicsMutexLockIfAvailableFinalizationInterleaving(gpa, seed))) amfail += 1;
+        }
+        std.debug.print("threadfuzz atomicsmutexliafinal: {d} programs from seed {d}, {d} failures\n", .{ iters, base_seed, amfail });
+        if (amfail != 0) std.process.exit(1);
+        return;
+    };
     // `threadfuzz asyncholdthrow <iters> <seed>`: focused lifecycle repro for
     // asyncHold(fn) throw/release ordering plus exact finalization cleanup.
     if (first) |a| if (std.mem.eql(u8, a, "asyncholdthrow")) {
@@ -12828,7 +13094,8 @@ pub fn main(init: std.process.Init) !void {
     // waitAsync settlement interleaved with asyncJoin and finalization cleanup,
     // Condition.asyncWait reacquire delivery interleaved with asyncJoin and
     // finalization cleanup, proposal-style Atomics.Mutex/Condition token
-    // waitFor notify/timeout paths interleaved with asyncJoin and cleanup,
+    // waitFor notify/timeout paths plus Atomics.Mutex.lockIfAvailable
+    // acquire/timeout token paths interleaved with asyncJoin and cleanup,
     // Promise reaction queue churn from asyncHold, waitAsync, asyncJoin, and
     // finalization cleanup,
     // creator-owned SAB/ArrayBuffer storage crossing isolated Worker
@@ -12875,8 +13142,9 @@ pub fn main(init: std.process.Init) !void {
     // reactions and asyncJoin reactions settle together, while asyncHold
     // callback and release-function reactions churn the same queue, when
     // proposal-style Atomics.Mutex/Condition token waiters take both notify and
-    // timeout paths while asyncJoin observers and exact cleanup share the same
-    // lifecycle window, when
+    // timeout paths and Atomics.Mutex.lockIfAvailable token waiters take both
+    // acquire and timeout paths while asyncJoin observers and exact cleanup
+    // share the same lifecycle window, when
     // asyncHold callbacks throw while queued no-fn release grants and exact
     // finalization cleanup share the same delivery window, when
     // child-created SAB/ArrayBuffer storage outlives its creator Thread and is
@@ -12932,6 +13200,7 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runWaitAsyncFinalizationCleanupInterleaving(gpa, seed))) lfail += 1;
             if (!(try runConditionAsyncFinalizationCleanupInterleaving(gpa, seed))) lfail += 1;
             if (!(try runAtomicsConditionFinalizationInterleaving(gpa, seed))) lfail += 1;
+            if (!(try runAtomicsMutexLockIfAvailableFinalizationInterleaving(gpa, seed))) lfail += 1;
             if (!(try runMicrotaskChurnLifecycleInterleaving(gpa, seed))) lfail += 1;
             if (!(try runAsyncHoldThrowFinalizationInterleaving(gpa, seed))) lfail += 1;
             if (!(try runCreatorOwnedBufferLifecycleInterleaving(gpa, seed))) lfail += 1;
@@ -12949,7 +13218,7 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runThreadLocalFinalizationCleanupInterleaving(gpa, seed))) lfail += 1;
             if (!(try runNestedThreadAsyncJoinCleanupInterleaving(gpa, seed))) lfail += 1;
         }
-        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 39, base_seed, lfail });
+        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 40, base_seed, lfail });
         if (lfail != 0) std.process.exit(1);
         return;
     };

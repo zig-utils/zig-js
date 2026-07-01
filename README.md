@@ -196,7 +196,7 @@ python3 tools/threads-reference-audit.py --run-probes # executes closest probes 
 zig build test -Dtsan=true      # unit suite under ThreadSanitizer
 zig build threadfuzz            # seeded concurrent-JS fuzzer
 zig build threadfuzz -Dfuzz-midgc=true # mid-script GC wait-pump + microtask + creator buffers + nested asyncJoin + ThreadLocal/Thread.restrict finalization + sync-wait cleanup + sync timeout exit + asyncHold release cleanup + teardown + promise + script/module Worker/SAB + Worker exception + Worker close/terminate + weak-collection fuzzer
-zig build threadfuzz -Dfuzz-lifecycle=true # deterministic lifecycle/teardown/finalization fuzzer, including Atomics.Mutex/Condition token waits
+zig build threadfuzz -Dfuzz-lifecycle=true # deterministic lifecycle/teardown/finalization fuzzer, including Atomics.Mutex/Condition token waits and lockIfAvailable paths
 zig build test262               # runs the real tc39/test262 corpus, prints pass %
 zig build test262 -Dtest262=DIR # …with an explicit corpus root
 zig build bench                 # times the bytecode VM against the tree-walker
@@ -515,7 +515,9 @@ threading architecture:
   `asyncJoin()` reactions and exact `FinalizationRegistry` cleanup delivery,
   proposal-style `Atomics.Mutex` / `Atomics.Condition.waitFor` token waiters
   that take both notify and timeout paths while `asyncJoin` observers and exact
-  cleanup share the same lifecycle window,
+  cleanup share the same lifecycle window, and `Atomics.Mutex.lockIfAvailable`
+  token waiters that take both acquire-after-release and timeout paths with
+  reused tokens in that same cleanup window,
   teardown termination with pending `asyncJoin` rejection reactions and
   child-owned typed-array `waitAsync` tickets that must be abandoned before the
   child exits,

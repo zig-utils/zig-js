@@ -381,7 +381,9 @@ as embedders exercise more threaded host patterns.
   `join()` / `asyncJoin()` reactions and exact `FinalizationRegistry` cleanup
   delivery, proposal-style `Atomics.Mutex` / `Atomics.Condition.waitFor` token
   waiters that take both notify and timeout paths while `asyncJoin` observers
-  and exact cleanup share the same lifecycle window, teardown termination with
+  and exact cleanup share the same lifecycle window, `Atomics.Mutex.lockIfAvailable`
+  token waiters that take both acquire-after-release and timeout paths with
+  reused tokens in that same cleanup window, teardown termination with
   pending `asyncJoin` rejection reactions
   and child-owned typed-array `waitAsync` tickets that must be
   abandoned before the child exits, cross-thread `FinalizationRegistry`

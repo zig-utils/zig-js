@@ -224,7 +224,9 @@ exact `FinalizationRegistry` cleanup delivery, deterministic
 `asyncJoin()` reactions and exact `FinalizationRegistry` cleanup delivery,
 proposal-style `Atomics.Mutex` / `Atomics.Condition.waitFor` token waiters
 that take both notify and timeout paths while `asyncJoin` observers and exact
-cleanup share the same lifecycle window,
+cleanup share the same lifecycle window, `Atomics.Mutex.lockIfAvailable`
+token waiters that take both acquire-after-release and timeout paths with
+reused tokens in that same cleanup window,
 `Lock.asyncHold()` barging where a sync hold legally overtakes a queued no-fn
 async ticket before `await` delivers its release function, no-fn
 `Lock.asyncHold()` release-function delivery while property and condition
