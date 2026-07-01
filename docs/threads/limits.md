@@ -75,11 +75,10 @@ context APIs.
   whose bump range is already exhausted. Freed-cell, capacity, and issued-slot
   accounting is maintained per bucket, so GC cell-backing stats no longer walk
   every free-list node or slab chunk after a collection. Slab ownership checks
-  are bucket-local with an address-span reject before chunk-list scans, so frees
-  do not scan unrelated size-class chunks
-  during collection or teardown. Ownership lookups
-  also keep a per-bucket recent-chunk hint, avoiding repeated full bucket walks
-  when GC frees/remaps arrive from the same slab chunk. Context teardown also
+  are bucket-local with an address-span reject before the recent-chunk hint and
+  sorted per-bucket chunk address index, so frees do not scan unrelated
+  size-class chunks or linearly walk a large bucket during collection or
+  teardown. Context teardown also
   skips rebuilding slab freelists for owned cells that will be released by the
   following whole-chunk free, while bucket-shaped delegated side allocations
   still classify once and free through the wrapped allocator. Non-owned

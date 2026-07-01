@@ -271,8 +271,9 @@ threading architecture:
   cells are still recycled through the per-bucket free lists, with exact
   per-bucket free, capacity, and issued-slot counters so profile/stat snapshots
   do not walk every freed cell or slab chunk, and classified against
-  per-size-class address spans plus a recent-chunk hint before scanning chunk
-  lists to keep collection/destroy lookup costs bounded.
+  per-size-class address spans plus a recent-chunk hint before falling back to
+  a sorted chunk address index, so collection/destroy lookup costs stay bounded
+  even when a bucket owns many slab chunks.
   Single-mutator GC object side stores now allocate directly from the context
   allocator instead of round-tripping through that cell-slab
   classifier, while true-parallel contexts keep the synchronized backing wrapper.

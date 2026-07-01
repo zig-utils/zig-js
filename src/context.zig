@@ -95,6 +95,11 @@ pub const GcCellBacking = struct {
     const FreeNode = extern struct {
         next: ?*FreeNode,
     };
+    const ChunkAddr = struct {
+        start: usize,
+        end: usize,
+        chunk_idx: usize,
+    };
     pub const Stats = struct {
         chunks: usize = 0,
         capacity_bytes: usize = 0,
@@ -117,6 +122,7 @@ pub const GcCellBacking = struct {
     lock: std.atomic.Value(u32) = .init(0),
     bucket_chunks: [bucket_count]std.ArrayListUnmanaged([]align(16) u8) = .{ .empty, .empty, .empty, .empty, .empty, .empty },
     bucket_next_offsets: [bucket_count]std.ArrayListUnmanaged(usize) = .{ .empty, .empty, .empty, .empty, .empty, .empty },
+    bucket_addr_index: [bucket_count]std.ArrayListUnmanaged(ChunkAddr) = .{ .empty, .empty, .empty, .empty, .empty, .empty },
     free_lists: [bucket_count]?*FreeNode = .{ null, null, null, null, null, null },
     bucket_free_counts: [bucket_count]usize = .{ 0, 0, 0, 0, 0, 0 },
     bucket_chunk_counts: [bucket_count]usize = .{ 0, 0, 0, 0, 0, 0 },
@@ -180,6 +186,17 @@ pub const GcCellBacking = struct {
         };
         const start = @intFromPtr(chunk.ptr);
         const end = start + chunk.len;
+        const addr_entry = ChunkAddr{ .start = start, .end = end, .chunk_idx = chunk_idx };
+        var insert_at: usize = 0;
+        while (insert_at < self.bucket_addr_index[idx].items.len and
+            self.bucket_addr_index[idx].items[insert_at].start < start) : (insert_at += 1)
+        {}
+        self.bucket_addr_index[idx].insert(self.inner, insert_at, addr_entry) catch {
+            _ = self.bucket_next_offsets[idx].pop();
+            _ = self.bucket_chunks[idx].pop();
+            self.inner.free(chunk);
+            return false;
+        };
         self.bucket_addr_min[idx] = @min(self.bucket_addr_min[idx], start);
         self.bucket_addr_max[idx] = @max(self.bucket_addr_max[idx], end);
         self.bucket_chunk_counts[idx] += 1;
@@ -240,6 +257,23 @@ pub const GcCellBacking = struct {
         return addr >= start and addr < start + chunk.len;
     }
 
+    fn findChunkAddrLocked(self: *GcCellBacking, idx: usize, addr: usize) ?ChunkAddr {
+        const entries = self.bucket_addr_index[idx].items;
+        var lo: usize = 0;
+        var hi: usize = entries.len;
+        while (lo < hi) {
+            const mid = lo + (hi - lo) / 2;
+            if (entries[mid].start <= addr) {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        if (lo == 0) return null;
+        const entry = entries[lo - 1];
+        return if (addr < entry.end) entry else null;
+    }
+
     fn ownsPtrLocked(self: *GcCellBacking, idx: usize, ptr: [*]u8) bool {
         const addr = @intFromPtr(ptr);
         if (addr < self.bucket_addr_min[idx] or addr >= self.bucket_addr_max[idx]) return false;
@@ -247,11 +281,9 @@ pub const GcCellBacking = struct {
             const chunks = self.bucket_chunks[idx].items;
             if (hint < chunks.len and chunkOwnsPtr(chunks[hint], addr)) return true;
         }
-        for (self.bucket_chunks[idx].items, 0..) |chunk, chunk_idx| {
-            if (chunkOwnsPtr(chunk, addr)) {
-                self.bucket_owns_hint[idx] = chunk_idx;
-                return true;
-            }
+        if (self.findChunkAddrLocked(idx, addr)) |entry| {
+            self.bucket_owns_hint[idx] = entry.chunk_idx;
+            return true;
         }
         return false;
     }
@@ -391,7 +423,9 @@ pub const GcCellBacking = struct {
             for (chunks.items) |chunk| self.inner.free(chunk);
             chunks.deinit(self.inner);
             self.bucket_next_offsets[idx].deinit(self.inner);
+            self.bucket_addr_index[idx].deinit(self.inner);
             self.bucket_next_offsets[idx] = .empty;
+            self.bucket_addr_index[idx] = .empty;
             chunks.* = .empty;
             self.bucket_addr_min[idx] = std.math.maxInt(usize);
             self.bucket_addr_max[idx] = 0;
@@ -518,6 +552,43 @@ test "GC cell backing ownership hint avoids repeated bucket chunk scans" {
     try std.testing.expectEqual(first_hint, backing.bucket_owns_hint[idx].?);
     try std.testing.expect(backing.ownsPtrLocked(idx, cells[cells.len - 1].ptr));
     try std.testing.expect(backing.bucket_owns_hint[idx].? != first_hint);
+}
+
+test "GC cell backing ownership fallback uses sorted chunk address index" {
+    var backing = GcCellBacking{ .inner = std.testing.allocator };
+    defer backing.deinit();
+    const a = backing.allocator();
+
+    const idx = GcCellBacking.bucketIndex(200, .@"16").?;
+    const slots_per_chunk = GcCellBacking.chunk_bytes / GcCellBacking.bucket_sizes[idx];
+    var cells = try std.testing.allocator.alloc([]align(16) u8, slots_per_chunk + 1);
+    defer std.testing.allocator.free(cells);
+
+    var allocated: usize = 0;
+    errdefer for (cells[0..allocated]) |cell| a.free(cell);
+    for (cells) |*cell| {
+        cell.* = try a.alignedAlloc(u8, .@"16", 200);
+        allocated += 1;
+    }
+    defer for (cells[0..allocated]) |cell| a.free(cell);
+
+    try std.testing.expectEqual(@as(usize, 2), backing.bucket_addr_index[idx].items.len);
+    var prev_end: usize = 0;
+    for (backing.bucket_addr_index[idx].items) |entry| {
+        try std.testing.expect(entry.start >= prev_end);
+        try std.testing.expect(entry.end > entry.start);
+        try std.testing.expect(entry.chunk_idx < backing.bucket_chunks[idx].items.len);
+        prev_end = entry.end;
+    }
+
+    backing.acquire();
+    defer backing.unlock();
+    backing.bucket_owns_hint[idx] = null;
+    try std.testing.expect(backing.ownsPtrLocked(idx, cells[cells.len - 1].ptr));
+    try std.testing.expectEqual(@as(usize, 1), backing.bucket_owns_hint[idx].?);
+    backing.bucket_owns_hint[idx] = null;
+    try std.testing.expect(backing.ownsPtrLocked(idx, cells[0].ptr));
+    try std.testing.expectEqual(@as(usize, 0), backing.bucket_owns_hint[idx].?);
 }
 
 test "GC cell backing stats report chunk capacity and live/free slots" {
