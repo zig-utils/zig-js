@@ -1592,6 +1592,13 @@ pub const Object = struct {
         gop.value_ptr.* = a;
     }
 
+    fn deleteAttrUnlocked(self: *Object, name: []const u8) void {
+        const m = self.attrs orelse return;
+        if (m.fetchRemove(name)) |removed| {
+            if (self.backing_flags.attrs) self.backing_allocator.?.free(removed.key);
+        }
+    }
+
     /// Own named data + accessor keys whose [[Enumerable]] is true, in insertion
     /// order (for `Object.keys`/`values`/`entries`, `for-in`, JSON).
     pub fn enumerableKeys(self: *const Object, arena: std.mem.Allocator) std.mem.Allocator.Error![]const []const u8 {
@@ -1838,6 +1845,7 @@ pub const Object = struct {
         const old_key_order = self.key_order;
         self.shape = root;
         self.resetSlotsForRebuildUnlocked();
+        self.deleteAttrUnlocked(key);
         self.key_order = null;
         for (saved.items) |entry| {
             try self.setOwnUnlocked(arena, root, entry.k, entry.v);

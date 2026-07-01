@@ -2058,7 +2058,7 @@ pub const Interpreter = struct {
                     const name = a.target.identifier;
                     if (try self.assignWithObject(name)) |wo| {
                         const v = try self.eval(a.value);
-                        try self.maybeNameAnon(v, a.value, name);
+                        if (!a.target_parenthesized) try self.maybeNameAnon(v, a.value, name);
                         // SetMutableBinding: step 2 HasProperty (always — observable
                         // on a proxy env), step 3 throws only if absent and strict.
                         const still = try self.hasPropertyResult(wo, name);
@@ -2077,7 +2077,7 @@ pub const Interpreter = struct {
                         e.unlockBindings();
                         if (eligible and !self.isTdz(cur)) {
                             const v = try self.eval(a.value);
-                            try self.maybeNameAnon(v, a.value, name);
+                            if (!a.target_parenthesized) try self.maybeNameAnon(v, a.value, name);
                             try e.assign(name, v); // write to the captured binding
                             break :blk v;
                         }
@@ -37653,6 +37653,14 @@ test "interpreter function declaration and call" {
         \\inParen.name === ""
     )).asBool());
     try std.testing.expect((try evalSource(arena.allocator(),
+        \\function outer() {
+        \\  var inParen;
+        \\  eval("(inParen) = function () {};");
+        \\  return inParen.name === "";
+        \\}
+        \\outer()
+    )).asBool());
+    try std.testing.expect((try evalSource(arena.allocator(),
         \\for (var forInHead = function () {} in {}) {}
         \\forInHead.name === "forInHead"
     )).asBool());
@@ -38289,6 +38297,16 @@ test "interpreter JSON, Object, Number builtins" {
     // Object.defineProperty (data + accessor)
     try std.testing.expectEqual(@as(f64, 5), (try evalSource(a, "let o = {}; Object.defineProperty(o, 'k', { value: 5 }); o.k")).asNum());
     try std.testing.expectEqual(@as(f64, 9), (try evalSource(a, "let o = { _v: 9 }; Object.defineProperty(o, 'v', { get: function () { return this._v; } }); o.v")).asNum());
+    try std.testing.expect((try evalSource(a,
+        \\function mkfun() { return function fun(a1, a2, a3, a4, a5) {}; }
+        \\Object.defineProperty(Function.prototype, "length", { value: 0, configurable: true });
+        \\let g = mkfun();
+        \\delete g.length;
+        \\delete Function.prototype.length;
+        \\g.length = 13;
+        \\let d = Object.getOwnPropertyDescriptor(g, "length");
+        \\d.value === 13 && d.configurable === true && d.enumerable === true && d.writable === true
+    )).asBool());
     // Number statics
     try std.testing.expect((try evalSource(a, "Number.isInteger(5)")).asBool());
     try std.testing.expect(!(try evalSource(a, "Number.isInteger(5.5)")).asBool());
