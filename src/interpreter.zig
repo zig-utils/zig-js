@@ -4847,6 +4847,12 @@ pub const Interpreter = struct {
         const msg_i: usize = if (aggregate) 1 else if (suppressed) 2 else 0;
         const opt_i: usize = if (aggregate) 2 else if (suppressed) 3 else 1;
 
+        const ctor_realm_array_proto = if (aggregate and new_target.isObject())
+            try self.functionRealmIntrinsicProto(new_target.asObj(), "Array")
+        else
+            null;
+        const proto = if (new_target.isObject()) try self.ctorRealmIntrinsicProto(new_target.asObj(), name) else null;
+
         // The message is ToString'd (via ToPrimitive(string), so an object's
         // toString/valueOf runs); a Symbol message throws a TypeError.
         const has_msg = args.len > msg_i and !args[msg_i].isUndefined();
@@ -4856,7 +4862,6 @@ pub const Interpreter = struct {
                 return self.throwError("TypeError", "Cannot convert a Symbol value to a string");
             break :blk try prim.toString(self.arena);
         } else "";
-        const proto = if (new_target.isObject()) try self.ctorRealmIntrinsicProto(new_target.asObj(), name) else null;
         const err = try self.makeErrorWithProto(name, msg, proto);
         if (has_msg and msg.len == 0) {
             try self.setProp(err.asObj(), "message", Value.str(""));
@@ -4865,7 +4870,7 @@ pub const Interpreter = struct {
 
         if (aggregate) {
             // `errors` is a fresh Array built from the (iterable) first argument.
-            const errs = try self.iterableToArray(if (args.len > 0) args[0] else Value.undef());
+            const errs = try self.iterableToArray(if (args.len > 0) args[0] else Value.undef(), ctor_realm_array_proto);
             try self.setProp(err.asObj(), "errors", errs);
             try err.asObj().setAttr(self.arena, "errors", .{ .enumerable = false, .configurable = true, .writable = true });
         }
@@ -4893,8 +4898,8 @@ pub const Interpreter = struct {
         return err;
     }
 
-    fn iterableToArray(self: *Interpreter, v: Value) EvalError!Value {
-        const arr = try self.newArray();
+    fn iterableToArray(self: *Interpreter, v: Value, proto: ?*value.Object) EvalError!Value {
+        const arr = try self.newArrayWithProto(proto);
         const it = try self.iteratorOf(v);
         while (true) {
             const step = try self.iterStep(it);
@@ -6360,8 +6365,12 @@ pub const Interpreter = struct {
 
     /// Allocate a fresh array object.
     pub fn newArray(self: *Interpreter) EvalError!Value {
+        return self.newArrayWithProto(null);
+    }
+
+    fn newArrayWithProto(self: *Interpreter, proto: ?*value.Object) EvalError!Value {
         const obj = try gc_mod.allocObj(self.arena);
-        obj.* = .{ .is_array = true, .proto = self.arrayProto() };
+        obj.* = .{ .is_array = true, .proto = proto orelse self.arrayProto() };
         return Value.obj(obj);
     }
 
