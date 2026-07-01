@@ -1879,11 +1879,13 @@ pub const Parser = struct {
     fn parseFunctionParamList(self: *Parser, is_gen: bool, is_async: bool) ParseError![]const ast.Param {
         const saved_async = self.in_async;
         const saved_gen = self.in_generator;
+        self.new_target_depth += 1;
         self.in_async = is_async;
         self.in_generator = is_gen;
         defer {
             self.in_async = saved_async;
             self.in_generator = saved_gen;
+            self.new_target_depth -= 1;
         }
         const params = try self.parseParamList();
         if (is_gen or is_async) {
@@ -4392,6 +4394,10 @@ test "parser rejects top-level new target" {
     var nested_arrow = try Parser.init(arena.allocator(), "function f() { return () => new.target; }");
     const arrow_prog = try nested_arrow.parseProgram();
     try std.testing.expectEqual(@as(usize, 1), arrow_prog.program.len);
+
+    var default_param = try Parser.init(arena.allocator(), "function f(x = new.target) { return x; }");
+    const default_prog = try default_param.parseProgram();
+    try std.testing.expectEqual(@as(usize, 1), default_prog.program.len);
 
     var top_level_arrow = try Parser.init(arena.allocator(), "() => new.target;");
     try std.testing.expectError(ParseError.UnexpectedToken, top_level_arrow.parseProgram());

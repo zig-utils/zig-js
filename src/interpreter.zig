@@ -700,6 +700,10 @@ pub const Function = struct {
     /// `new F()` activation, even when the arrow is called later. Only meaningful
     /// when `is_arrow` is set.
     arrow_new_target: Value = Value.undef(),
+    /// A direct eval inside an arrow inherits whether `new.target` is
+    /// syntactically allowed from the arrow's defining context. The captured
+    /// value may be undefined, so this is separate from `arrow_new_target`.
+    arrow_direct_eval_new_target_allowed: bool = false,
     // Whether this arrow is lexically inside a derived constructor — so `super()`
     // is legal in it (captured at creation; an arrow's super()-validity is
     // lexical, not the dynamic caller's, e.g. an arrow invoked by an iterator's
@@ -3674,6 +3678,7 @@ pub const Interpreter = struct {
             func.super_ctor = self.super_ctor;
             func.arrow_this = self.this_value; // captured lexically; used on every call
             func.arrow_new_target = self.new_target; // new.target is lexical for arrows too
+            func.arrow_direct_eval_new_target_allowed = self.direct_eval_new_target_allowed;
             func.arrow_in_derived_ctor = self.in_derived_ctor; // super()-legality is lexical
             func.this_cell = self.this_cell; // share the enclosing derived ctor's `this` binding
             func.field_init_ctx = self.in_field_initializer; // field-init eval restrictions are lexical
@@ -5024,7 +5029,7 @@ pub const Interpreter = struct {
         self.home_object = func.home_object;
         self.super_ctor = func.super_ctor;
         self.new_target = if (func.is_arrow) func.arrow_new_target else new_target; // arrows capture lexically at creation
-        self.direct_eval_new_target_allowed = !func.is_arrow;
+        self.direct_eval_new_target_allowed = if (func.is_arrow) func.arrow_direct_eval_new_target_allowed else true;
         // A non-arrow function call is a fresh context that is not a field
         // initializer; an arrow carries the field-initializer context LEXICALLY from
         // where it was defined (so `field = () => eval('arguments')` keeps the
@@ -37681,6 +37686,13 @@ test "interpreter direct eval new target early errors" {
         \\let plain = seen === undefined;
         \\new f();
         \\plain && seen === f
+    )).asBool());
+    try std.testing.expect((try evalSource(a,
+        \\function f(expected) {
+        \\  return eval('eval("new.target")') === expected &&
+        \\    eval("eval('eval(`new.target`)')") === expected;
+        \\}
+        \\f(undefined) && new f(f)
     )).asBool());
     try std.testing.expectEqualStrings("SyntaxError", (try evalSource(a,
         \\let name = "";
