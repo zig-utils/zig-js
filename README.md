@@ -245,14 +245,17 @@ threading architecture:
   no-GIL threaded GC, and `.gil = true` lifecycle/allocation costs, including a
   create-per-task versus long-lived-context reuse section with periodic
   collection, and now splits context lifecycle time into create and destroy
-  columns before printing GC cell-backing attribution around an object-heavy
-  allocation run: chunk count, total cell-slot capacity, live cells at context
-  creation, live cells after script allocation, free slots after collection, and
-  live cells after collection. It also prints a per-size-class bucket table for
-  the same workload, so nursery/allocation follow-up can see which slot sizes
-  own chunk count, issued cells, free cells, and surviving live cells. GC cells
-  now allocate through a reusable
-  size-class slab backing instead of one backing allocator call per cell, and
+  columns before printing GC cell-backing attribution for both the intrinsic
+  empty-context footprint and an object-heavy allocation run: chunk count, total
+  cell-slot capacity, live cells at context creation, live cells after script
+  allocation, free slots after collection, and live cells after collection. It
+  also prints per-size-class bucket tables for the empty context and the same
+  object workload, so nursery/allocation follow-up can separate global setup
+  pressure from workload pressure and see which slot sizes own chunk count,
+  issued cells, free cells, and surviving live cells. The finalizer attribution
+  is split the same way between empty-context destroy and destroy after the
+  object workload. GC cells now allocate through a reusable size-class slab
+  backing instead of one backing allocator call per cell, and
   fresh slab chunks hand out cells lazily with a per-bucket bump hint instead of
   pre-linking every unused slot during short-lived context setup; a per-bucket
   fresh-chunk cursor skips chunks whose bump range is already exhausted. Freed

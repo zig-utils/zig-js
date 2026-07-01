@@ -78,15 +78,17 @@ Known performance/maturity work:
   create/destroy, create-per-task versus long-lived-context reuse with periodic
   collection, object-heavy allocation, block-scoped `let` allocation, and
   explicit `collectGarbage()`. The lifecycle row now breaks create and destroy
-  apart, and the profile also prints GC cell-backing attribution for an
-  object-heavy allocation run: chunk count, total cell-slot capacity, live cells
-  at context creation, live cells after allocation, free slots after collection,
-  and live cells after collection, followed by a per-size-class bucket table for
-  the same workload. The bucket table shows slot size, chunks, capacity, issued
-  cells, free cells, and live cells, using exact per-bucket free, capacity, and
+  apart, and the profile also prints GC cell-backing attribution for the
+  intrinsic empty-context footprint and for an object-heavy allocation run: chunk
+  count, total cell-slot capacity, live cells at context creation, live cells
+  after allocation, free slots after collection, and live cells after collection,
+  followed by per-size-class bucket tables for the empty context and the same
+  workload. The bucket tables show slot size, chunks, capacity, issued cells,
+  free cells, and live cells, using exact per-bucket free, capacity, and
   issued-slot counters so profiling a collection no longer walks every freed
-  cell or slab chunk. Fresh-slot allocation skips slab chunks whose bump range
-  is already exhausted.
+  cell or slab chunk. Finalizer attribution is likewise split between
+  empty-context destroy and destroy after the object workload. Fresh-slot
+  allocation skips slab chunks whose bump range is already exhausted.
 - Mid-script parallel GC remains abort-safe. Sync wait/lock/condition peers are
   not treated as frozen parked stacks; their lock-free pump points now service
   root publication, and the collector waits long enough for one bounded park

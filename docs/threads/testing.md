@@ -351,13 +351,15 @@ context-heavy embedders can quantify the cost of create-per-unit-of-work designs
 while the GC allocator and lifecycle paths continue to mature. The lifecycle
 table splits total time into create and destroy columns so teardown reductions
 are visible separately from global setup costs. The profile also prints GC
-cell-backing attribution for an object-heavy allocation run: chunk count, total
-cell-slot capacity, live cells at context creation, live cells after allocation,
-free slots after collection, and live cells after collection. It then prints a
-per-size-class bucket table for the same workload, showing slot size, chunks,
-capacity, issued cells, free cells, and surviving live cells. Both snapshot
-paths use exact per-bucket free, capacity, and issued-slot counters rather than
-walking every free-list node or slab chunk.
+cell-backing attribution for the intrinsic empty-context footprint and for an
+object-heavy allocation run: chunk count, total cell-slot capacity, live cells at
+context creation, live cells after allocation, free slots after collection, and
+live cells after collection. It then prints per-size-class bucket tables for the
+empty context and the same object workload, showing slot size, chunks, capacity,
+issued cells, free cells, and surviving live cells. GC finalizer attribution is
+also split between empty-context destroy and destroy after the object workload.
+These snapshot paths use exact per-bucket free, capacity, and issued-slot
+counters rather than walking every free-list node or slab chunk.
 Direct `GcCellBacking` unit tests cover lazy fresh-slot bumping, free-list
 recycling, fresh-chunk cursor advancement, ownership span/hint classification,
 stats accounting, multi-chunk maintained-counter snapshots, bucket attribution,

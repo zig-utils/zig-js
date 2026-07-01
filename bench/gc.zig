@@ -188,6 +188,61 @@ fn printExplicitGc(gpa: std.mem.Allocator, io: std.Io) !void {
     }
 }
 
+fn printGcBackingBaseline(gpa: std.mem.Allocator) !void {
+    std.debug.print("\nGC cell backing baseline (empty context)\n", .{});
+    std.debug.print("{s:<18} {s:>8} {s:>10} {s:>10} {s:>12}\n", .{
+        "mode",
+        "chunks",
+        "cap slots",
+        "free slots",
+        "live create",
+    });
+    for (modes) |mode| {
+        const ctx = try makeContext(gpa, mode);
+        defer ctx.destroy();
+        const backing = ctx.gc_cell_backing orelse continue;
+        const created = backing.stats();
+        std.debug.print("{s:<18} {d:>8} {d:>10} {d:>10} {d:>12}\n", .{
+            mode.name,
+            created.chunks,
+            created.capacity_slots,
+            created.free_slots,
+            created.live_slots,
+        });
+    }
+}
+
+fn printGcBackingBaselineBuckets(gpa: std.mem.Allocator) !void {
+    std.debug.print("\nGC cell backing baseline buckets (empty context)\n", .{});
+    std.debug.print("{s:<18} {s:>6} {s:>8} {s:>10} {s:>10} {s:>10} {s:>10}\n", .{
+        "mode",
+        "slot",
+        "chunks",
+        "cap",
+        "issued",
+        "free",
+        "live",
+    });
+    for (modes) |mode| {
+        const ctx = try makeContext(gpa, mode);
+        defer ctx.destroy();
+        const backing = ctx.gc_cell_backing orelse continue;
+        const buckets = backing.bucketStats();
+        for (buckets) |bucket| {
+            if (bucket.chunks == 0) continue;
+            std.debug.print("{s:<18} {d:>6} {d:>8} {d:>10} {d:>10} {d:>10} {d:>10}\n", .{
+                mode.name,
+                bucket.slot_size,
+                bucket.chunks,
+                bucket.capacity_slots,
+                bucket.issued_slots,
+                bucket.free_slots,
+                bucket.live_slots,
+            });
+        }
+    }
+}
+
 fn printGcBacking(gpa: std.mem.Allocator) !void {
     std.debug.print("\nGC cell backing attribution (one object-heavy script + collect)\n", .{});
     std.debug.print("{s:<18} {s:>8} {s:>10} {s:>12} {s:>12} {s:>14} {s:>12}\n", .{
@@ -257,10 +312,10 @@ fn modeUsesGc(mode: Mode) bool {
     return mode.options.enable_gc or (mode.options.enable_threads and !mode.options.gil);
 }
 
-fn destroyFinalizerStats(gpa: std.mem.Allocator, mode: Mode, source: []const u8) !js.Context.GcFinalizerStats {
+fn destroyFinalizerStats(gpa: std.mem.Allocator, mode: Mode, source: ?[]const u8) !js.Context.GcFinalizerStats {
     var ctx = try makeContext(gpa, mode);
     errdefer ctx.destroy();
-    _ = try ctx.evaluate(source);
+    if (source) |script| _ = try ctx.evaluate(script);
 
     var stats = js.Context.GcFinalizerStats{};
     ctx.gc_finalizer_stats_out = &stats;
@@ -268,23 +323,8 @@ fn destroyFinalizerStats(gpa: std.mem.Allocator, mode: Mode, source: []const u8)
     return stats;
 }
 
-fn printGcFinalizers(gpa: std.mem.Allocator) !void {
-    const source =
-        \\(function(){
-        \\  var keep = [];
-        \\  for (var i = 0; i < 2500; i = i + 1) {
-        \\    keep.push({
-        \\      i: i,
-        \\      pair: { j: i + 1 },
-        \\      values: [i, i + 1, i + 2],
-        \\      buffer: new ArrayBuffer(16)
-        \\    });
-        \\  }
-        \\  return keep.length;
-        \\})()
-    ;
-
-    std.debug.print("\nGC finalizer attribution (destroy after object-heavy script)\n", .{});
+fn printGcFinalizerTable(gpa: std.mem.Allocator, title: []const u8, source: ?[]const u8) !void {
+    std.debug.print("\n{s}\n", .{title});
     std.debug.print("{s:<18} {s:>8} {s:>8} {s:>8} {s:>8} {s:>8} {s:>9} {s:>9} {s:>8} {s:>8}\n", .{
         "mode",
         "cells",
@@ -313,6 +353,26 @@ fn printGcFinalizers(gpa: std.mem.Allocator) !void {
             stats.promise_reactions,
         });
     }
+}
+
+fn printGcFinalizers(gpa: std.mem.Allocator) !void {
+    const source =
+        \\(function(){
+        \\  var keep = [];
+        \\  for (var i = 0; i < 2500; i = i + 1) {
+        \\    keep.push({
+        \\      i: i,
+        \\      pair: { j: i + 1 },
+        \\      values: [i, i + 1, i + 2],
+        \\      buffer: new ArrayBuffer(16)
+        \\    });
+        \\  }
+        \\  return keep.length;
+        \\})()
+    ;
+
+    try printGcFinalizerTable(gpa, "GC finalizer attribution (destroy empty context)", null);
+    try printGcFinalizerTable(gpa, "GC finalizer attribution (destroy after object-heavy script)", source);
 }
 
 fn printTaskLifecycle(gpa: std.mem.Allocator, io: std.Io) !void {
@@ -355,6 +415,8 @@ pub fn main() !void {
     try printTaskLifecycle(gpa, io);
     try printAllocation(gpa, io);
     try printExplicitGc(gpa, io);
+    try printGcBackingBaseline(gpa);
+    try printGcBackingBaselineBuckets(gpa);
     try printGcBacking(gpa);
     try printGcBackingBuckets(gpa);
     try printGcFinalizers(gpa);

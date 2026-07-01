@@ -94,12 +94,16 @@ context APIs.
   splits context lifecycle time into create and destroy columns while also
   including a create-per-task versus long-lived-context reuse table with periodic
   collection to quantify the embedder lifecycle tradeoff plus GC cell-backing
-  attribution for an object-heavy allocation run: chunk count, total cell-slot
-  capacity, live cells at context creation, live cells after allocation, free
-  slots after collection, and live cells after collection. The same profile now
-  follows with a per-size-class bucket table, so future nursery/generational and
-  context-lifecycle work can target the slot sizes that dominate chunk count,
-  issued cells, free cells, and surviving live cells.
+  attribution for both the intrinsic empty-context footprint and an object-heavy
+  allocation run: chunk count, total cell-slot capacity, live cells at context
+  creation, live cells after allocation, free slots after collection, and live
+  cells after collection. The same profile now follows with per-size-class bucket
+  tables for the empty context and the object workload, so future
+  nursery/generational and context-lifecycle work can separate global setup
+  pressure from workload pressure while targeting the slot sizes that dominate
+  chunk count, issued cells, free cells, and surviving live cells. It also splits
+  GC finalizer attribution between empty-context destroy and destroy after the
+  object workload.
 - **Context lifecycle cost.** Long-lived embedders amortize the GC setup and
   teardown costs, but create-per-unit-of-work embedders need either cheaper
   context lifecycle or clearer guidance.
