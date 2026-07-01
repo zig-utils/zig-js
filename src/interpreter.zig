@@ -9384,7 +9384,7 @@ pub const Interpreter = struct {
                 // A per-index descriptor (recorded in `attrs`) may mark the
                 // element non-writable: sloppy ignores the write, strict throws.
                 if (o.attrs != null and !o.getAttr(key).writable) return false;
-                if (o.denseElementPresent(i)) {
+                if (receiver.isObject() and receiver.asObj() == o and o.denseElementPresent(i)) {
                     _ = o.setDenseElement(i, v); // an assignment fills a hole
                     return true;
                 }
