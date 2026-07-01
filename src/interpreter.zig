@@ -12830,12 +12830,14 @@ pub const Interpreter = struct {
             // "if F is abrupt, return F").
             const saved_signal = self.signal;
             const saved_label = self.signal_label;
+            const saved_ret = self.ret_value;
             self.signal = .none;
             self.signal_label = null;
             if (self.eval(fb)) |fval| {
                 if (self.signal == .none) {
                     self.signal = saved_signal;
                     self.signal_label = saved_label;
+                    self.ret_value = saved_ret;
                     if (held_err) |e| {
                         // Restore the held exception value: finally may have run
                         // its own throw-and-catch, leaving `self.exception` stale.
@@ -37854,6 +37856,20 @@ test "interpreter throw / try / catch / finally" {
         \\}
         \\before === "exception" && during === "loop initializer" && after === "increment"
     )).asBool());
+    try std.testing.expectEqual(@as(f64, 42), (try evalSource(a,
+        \\function f() {
+        \\  try {
+        \\    return 42;
+        \\  } finally {
+        \\    do try {
+        \\      return 43;
+        \\    } finally {
+        \\      break;
+        \\    } while (false);
+        \\  }
+        \\}
+        \\f()
+    )).asNum());
     // an uncaught throw propagates as error.Throw
     try std.testing.expectError(error.Throw, evalSource(a, "throw 'boom';"));
 }
