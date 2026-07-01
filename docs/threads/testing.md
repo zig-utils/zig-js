@@ -250,7 +250,9 @@ child's stack-owned waiter token disappears, cross-thread `FinalizationRegistry`
 cleanup count/sum oracles, teardown termination while property `waitAsync`
 timeout compaction, async condition reacquire, a pending `asyncJoin` rejection
 reaction, and already-ready `FinalizationRegistry` cleanup jobs share the same
-realm turn,
+realm turn, module Worker termination composed with the same child-owned
+typed-array `waitAsync` ticket abandonment, pending `asyncJoin` rejection
+cleanup, and exact `FinalizationRegistry` cleanup,
 Promise reaction queue churn from with-fn `Lock.asyncHold`, no-fn release
 functions, typed-array `waitAsync`, `Thread.asyncJoin`, and exact
 `FinalizationRegistry` cleanup,

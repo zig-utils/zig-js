@@ -561,7 +561,9 @@ threading architecture:
   `asyncJoin` rejection cleanup, and exact finalization cleanup, isolated
   Worker termination composed with child-owned typed-array `waitAsync` ticket
   abandonment, pending `asyncJoin` rejection cleanup, and exact finalization
-  cleanup,
+  cleanup, module Worker termination composed with the same child-owned
+  typed-array `waitAsync` ticket abandonment, pending `asyncJoin` rejection
+  cleanup, and exact finalization cleanup,
   deterministic `Lock.asyncHold()` barging where a sync hold legally overtakes
   a queued no-fn async ticket before `await` delivers its release function,
   no-fn `Lock.asyncHold()` release-function delivery while property and

@@ -428,7 +428,10 @@ as embedders exercise more threaded host patterns.
   reacquire, pending `asyncJoin` rejection cleanup, and exact
   `FinalizationRegistry` cleanup, Worker termination composed with child-owned
   typed-array `waitAsync` ticket abandonment, pending `asyncJoin` rejection
-  cleanup, and exact `FinalizationRegistry` cleanup,
+  cleanup, and exact `FinalizationRegistry` cleanup, module Worker termination
+  composed with the same child-owned typed-array `waitAsync` ticket
+  abandonment, pending `asyncJoin` rejection cleanup, and exact
+  `FinalizationRegistry` cleanup,
   cleanup delivery interleaved with `join()` /
   `asyncJoin()` and unregister-token suppression, cleanup delivery after parked
   property/condition waiters resume, deterministic `Lock.asyncHold()` barging

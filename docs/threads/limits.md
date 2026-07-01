@@ -365,7 +365,10 @@ context APIs.
   reacquire, pending `asyncJoin` rejection cleanup, and exact
   `FinalizationRegistry` cleanup, Worker termination composed with child-owned
   typed-array `waitAsync` ticket abandonment, pending `asyncJoin` rejection
-  cleanup, and exact `FinalizationRegistry` cleanup,
+  cleanup, and exact `FinalizationRegistry` cleanup, module Worker termination
+  composed with the same child-owned typed-array `waitAsync` ticket
+  abandonment, pending `asyncJoin` rejection cleanup, and exact
+  `FinalizationRegistry` cleanup,
   deterministic `Lock.asyncHold()` barging where a
   sync hold legally overtakes a queued no-fn async ticket before `await`
   delivers its release function, no-fn `Lock.asyncHold()` release-function
