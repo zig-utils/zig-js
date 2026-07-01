@@ -393,8 +393,12 @@ threading architecture:
   root set now also covers host-side thread queues such as `Gil.tasks`,
   per-lock async grants, async condition waiters, typed-array `waitAsync`
   waiter/reaction roots, pending `Thread.asyncJoin` promise/reaction roots,
-  ThreadLocal values, thread completion results, release-function lock records,
-  and contended `Lock.hold` receiver/callback pairs. Keep maturing convergence
+  ThreadLocal values, thread completion results, protected C-API handles,
+  release-function lock records, and contended `Lock.hold` receiver/callback
+  pairs. A focused C-API unit witness now protects an otherwise-unrooted object
+  while shared-realm `Thread`s drive a finishing mid-script parallel sweep, then
+  proves the protected object survives until the final `JSValueUnprotect`.
+  Keep maturing convergence
   and stress coverage for heavier
   wait/cleanup mixes; the mid-GC fuzzer now queues a FIFO `Lock.asyncHold`
   grant chain including a root-bearing rejected grant, an async

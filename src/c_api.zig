@@ -27,6 +27,7 @@
 //! be created, retained, and released on any thread.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const gc_mod = @import("gc.zig");
 const value = @import("value.zig");
 const ContextMod = @import("context.zig");
@@ -719,6 +720,94 @@ test "C-API: JSGarbageCollect honors JSValueProtect/Unprotect (GC on)" {
     JSValueUnprotect(ctx, held);
     JSGarbageCollect(ctx);
     try std.testing.expectEqual(with_protection, ctx_obj.gc.?.live_cells);
+    JSValueUnprotect(ctx, held);
+    JSGarbageCollect(ctx);
+    try std.testing.expect(ctx_obj.gc.?.live_cells < with_protection);
+}
+
+test "C-API: JSValueProtect roots survive mid-script parallel GC" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+
+    const ctx_obj = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_threads = true,
+        .enable_gc = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+        .parallel_midscript_gc = true,
+    });
+    defer ctx_obj.destroy();
+    const ctx: JSContextRef = @ptrCast(ctx_obj);
+
+    const mk = JSStringCreateWithUTF8CString("({ tag: 456, nested: { marker: 789 } })") orelse return error.StringInitFailed;
+    defer JSStringRelease(mk);
+    const held = JSEvaluateScript(ctx, mk, null, null, 0, null) orelse return error.EvalFailed;
+    JSValueProtect(ctx, held);
+
+    const src = JSStringCreateWithUTF8CString(
+        \\(() => {
+        \\  const N = 3;
+        \\  const gate = { ready: 0, go: 0 };
+        \\  const threads = [];
+        \\  for (let t = 0; t < N; t++) {
+        \\    threads.push(new Thread((gate, id) => {
+        \\      Atomics.add(gate, 'ready', 1);
+        \\      Atomics.notify(gate, 'ready');
+        \\      while (Atomics.load(gate, 'go') === 0)
+        \\        Atomics.wait(gate, 'go', 0, 1);
+        \\      const keep = [];
+        \\      for (let round = 0; round < 6; round++) {
+        \\        for (let i = 0; i < 500; i++)
+        \\          ({ id, round, i, payload: 'c-api-midgc-worker-' + id + '-' + round + '-' + i });
+        \\        keep.push({ id, round, marker: id * 100 + round });
+        \\        let spin = 0;
+        \\        for (let j = 0; j < 5000; j++) spin = (spin + j + round) & 0x3fffffff;
+        \\        if (spin < 0) keep.push({ impossible: true });
+        \\      }
+        \\      return keep.length;
+        \\    }, gate, t));
+        \\  }
+        \\  while (Atomics.load(gate, 'ready') < N)
+        \\    Atomics.wait(gate, 'ready', Atomics.load(gate, 'ready'), 1);
+        \\  Atomics.store(gate, 'go', 1);
+        \\  Atomics.notify(gate, 'go', Infinity);
+        \\  const keep = [];
+        \\  for (let round = 0; round < 12; round++) {
+        \\    for (let i = 0; i < 900; i++)
+        \\      keep.push({ round, i, nested: { value: round + i }, text: 'c-api-midgc-main-' + round + '-' + i });
+        \\    let spin = 0;
+        \\    for (let j = 0; j < 8000; j++) spin = (spin + j + round) & 0x3fffffff;
+        \\    if (spin < 0) keep.push({ impossible: true });
+        \\  }
+        \\  let joined = 0;
+        \\  for (const t of threads) joined += t.join();
+        \\  return keep.length + joined;
+        \\})();
+    ) orelse return error.StringInitFailed;
+    defer JSStringRelease(src);
+
+    const before_collections = ctx_obj.gc_par_collections.load(.monotonic);
+    var attempt: usize = 0;
+    while (attempt < 10 and ctx_obj.gc_par_collections.load(.monotonic) == before_collections) : (attempt += 1) {
+        const result = JSEvaluateScript(ctx, src, null, null, 0, null) orelse return error.EvalFailed;
+        try std.testing.expectEqual(@as(f64, 10818), JSValueToNumber(ctx, result, null));
+    }
+    try std.testing.expect(ctx_obj.gc_par_collections.load(.monotonic) > before_collections);
+
+    const key = JSStringCreateWithUTF8CString("tag") orelse return error.StringInitFailed;
+    defer JSStringRelease(key);
+    const tag = JSObjectGetProperty(ctx, held, key, null) orelse return error.PropFailed;
+    try std.testing.expectEqual(@as(f64, 456), JSValueToNumber(ctx, tag, null));
+
+    const nested_key = JSStringCreateWithUTF8CString("nested") orelse return error.StringInitFailed;
+    defer JSStringRelease(nested_key);
+    const marker_key = JSStringCreateWithUTF8CString("marker") orelse return error.StringInitFailed;
+    defer JSStringRelease(marker_key);
+    const nested = JSObjectGetProperty(ctx, held, nested_key, null) orelse return error.PropFailed;
+    const marker = JSObjectGetProperty(ctx, nested, marker_key, null) orelse return error.PropFailed;
+    try std.testing.expectEqual(@as(f64, 789), JSValueToNumber(ctx, marker, null));
+
+    JSGarbageCollect(ctx);
+    const with_protection = ctx_obj.gc.?.live_cells;
     JSValueUnprotect(ctx, held);
     JSGarbageCollect(ctx);
     try std.testing.expect(ctx_obj.gc.?.live_cells < with_protection);

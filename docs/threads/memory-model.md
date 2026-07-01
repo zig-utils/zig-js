@@ -55,6 +55,10 @@ that must remain correct regardless of JavaScript interleavings. This includes:
 Races in that state are engine bugs. They must be fixed with locks, atomics,
 publication protocols, or ownership changes. They must not be hidden by
 ThreadSanitizer suppressions.
+The protected-handle table is covered by a focused mid-script parallel-GC unit
+witness: `JSValueProtect` keeps an otherwise-unrooted C-API object alive while
+shared-realm `Thread`s drive a finishing sweep, and `JSValueUnprotect` releases
+that root afterward.
 
 Program state is the mutable data that JavaScript code intentionally shares:
 

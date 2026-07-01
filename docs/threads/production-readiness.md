@@ -288,6 +288,11 @@ as embedders exercise more threaded host patterns.
   `Thread` result object and a completed-but-unjoined thrown exception object
   reachable only through the thread completion record, then delivers the
   expected `FinalizationRegistry` cleanup count/sum after a quiescent collect.
+  The focused `C-API: JSValueProtect roots survive mid-script parallel GC` unit
+  witness directly covers the protected-handle table as a parallel mid-script
+  root: an otherwise unrooted C-API object stays alive through a finishing sweep
+  driven by concurrently running shared-realm `Thread`s and is reclaimed after
+  the final `JSValueUnprotect`.
   The ThreadLocal-finalization subprogram parks owner threads with registry
   targets reachable only through `ThreadLocal.value`, drives a finishing
   mid-script sweep, rejects any early cleanup delivery while those hidden roots

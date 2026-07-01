@@ -211,9 +211,13 @@ context APIs.
   of the root set too: `Gil.tasks`, `LockRecord.pending`, async condition
   waiters, typed-array `waitAsync` waiter/reaction roots, pending
   `Thread.asyncJoin` promise/reaction roots, ThreadLocal maps, thread completion
-  results, release-function lock records, and contended `Lock.hold`
-  receiver/callback pairs now trace, barrier, or temp-root their hidden JS
-  values. The mid-GC fuzzer now queues a FIFO `Lock.asyncHold` grant
+  results, protected C-API handles, release-function lock records, and
+  contended `Lock.hold` receiver/callback pairs now trace, barrier, or
+  temp-root their hidden JS values. A focused C-API unit witness now protects an
+  otherwise-unrooted object while shared-realm `Thread`s drive a finishing
+  mid-script parallel sweep, then proves that `JSValueProtect` keeps the object
+  alive until the final `JSValueUnprotect`. The mid-GC fuzzer now queues a FIFO
+  `Lock.asyncHold` grant
   chain including a root-bearing rejected grant, an async `Condition.wait`
   reacquire path with captured JS roots, a typed-array `waitAsync` reaction
   graph reachable only through the native waiter queue, and pending
