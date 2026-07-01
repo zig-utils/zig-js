@@ -586,6 +586,10 @@ pub const Object = struct {
     /// instance's proto is its constructor's `.prototype`; a class's `.prototype`
     /// protos to its superclass's `.prototype`.
     proto: ?*Object = null,
+    /// Callable built-ins may leave `proto` null and inherit %Function.prototype%
+    /// implicitly. Once [[SetPrototypeOf]] explicitly sets null, that null must be
+    /// observable through [[GetPrototypeOf]] instead of falling back again.
+    proto_explicit_null: bool = false,
     /// Accessor (get/set) properties, lazily allocated. Checked before the data
     /// slot at each level of the prototype walk.
     accessors: ?*std.StringHashMapUnmanaged(Accessor) = null,

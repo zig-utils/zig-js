@@ -8117,7 +8117,7 @@ pub const Interpreter = struct {
     /// honoring a target that is itself a Proxy.
     fn ordinaryProtoValue(self: *Interpreter, o: *value.Object) EvalError!Value {
         if (o.proxy_handler != null or o.proxy_revoked) return self.proxyGetProto(o);
-        return if (o.protoAtomic()) |p| Value.obj(p) else Value.nul();
+        return if (self.effectiveProto(o)) |p| Value.obj(p) else Value.nul();
     }
 
     fn sameProtoValue(proto: ?*value.Object, v: Value) bool {
@@ -8125,7 +8125,7 @@ pub const Interpreter = struct {
     }
 
     fn ordinarySetPrototypeOf(self: *Interpreter, o: *value.Object, new_proto: ?*value.Object) EvalError!bool {
-        const current = if (o.protoAtomic()) |p| Value.obj(p) else Value.nul();
+        const current = try self.ordinaryProtoValue(o);
         if (sameProtoValue(new_proto, current)) return true;
         if (self.objectProto()) |op| {
             if (o == op) return false;
@@ -8146,6 +8146,7 @@ pub const Interpreter = struct {
             gc_mod.barrierCell(@ptrCast(np)); // proto reparent on a live object
         }
         o.setProtoAtomic(new_proto);
+        o.proto_explicit_null = new_proto == null;
         return true;
     }
 
@@ -13366,7 +13367,7 @@ pub const Interpreter = struct {
     /// which every function inherits.
     pub fn effectiveProto(self: *Interpreter, o: *value.Object) ?*value.Object {
         if (o.protoAtomic()) |p| return p;
-        if (o.native != null or o.js_func != null or o.bound != null) return self.functionProto();
+        if (!o.proto_explicit_null and (o.native != null or o.js_func != null or o.bound != null)) return self.functionProto();
         return null;
     }
 
