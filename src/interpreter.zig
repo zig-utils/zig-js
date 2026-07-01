@@ -10551,8 +10551,7 @@ pub const Interpreter = struct {
     /// RangeError. Read-only / in-place methods don't create such a result.
     fn arrayCreatesResult(name: []const u8) bool {
         const names = [_][]const u8{
-            "map",     "filter", "concat",     "flat",
-            "flatMap", "with",   "toReversed", "toSorted",
+            "map", "concat", "with", "toReversed", "toSorted",
         };
         for (names) |n| if (eq(name, n)) return true;
         return false;
@@ -10566,6 +10565,7 @@ pub const Interpreter = struct {
     fn arraySearchReadsLive(name: []const u8) bool {
         return eq(name, "indexOf") or eq(name, "lastIndexOf") or eq(name, "includes") or
             eq(name, "push") or eq(name, "pop") or
+            eq(name, "forEach") or eq(name, "filter") or eq(name, "reduce") or
             eq(name, "reduceRight") or
             eq(name, "some") or eq(name, "every") or eq(name, "find") or
             eq(name, "findIndex") or eq(name, "findLast") or eq(name, "findLastIndex");
@@ -10802,12 +10802,13 @@ pub const Interpreter = struct {
             // ArrayCreate rejects a length above 2^32-1 with a RangeError. Check
             // the unclamped ToLength, since `toArrayLikeLen` caps at 2^53-1.
             const real_len: f64 = if (std.math.isNan(lenf) or lenf <= 0) 0 else @min(@trunc(lenf), 9007199254740991.0);
-            if (real_len > 4294967295 and arrayCreatesResult(name))
+            const species_array = try objectToStringIsArray(self, o);
+            if (real_len > 4294967295 and arrayCreatesResult(name) and !species_array)
                 return self.throwError("RangeError", "Invalid array length");
             array_like_len = toArrayLikeLen(lenf);
             // A full-length-iterating method on a pathological array-like length
             // would spin a native loop forever — bail (matches the prior guard).
-            if (!arraySearchReadsLive(name) and array_like_len > (1 << 22) and !eq(name, "fill") and !eq(name, "copyWithin") and !eq(name, "reverse") and !eq(name, "unshift") and !eq(name, "slice") and !eq(name, "splice") and !eq(name, "toSpliced")) return null;
+            if (!arraySearchReadsLive(name) and array_like_len > (1 << 22) and !(species_array and arrayCreatesResult(name)) and !eq(name, "fill") and !eq(name, "copyWithin") and !eq(name, "reverse") and !eq(name, "unshift") and !eq(name, "slice") and !eq(name, "splice") and !eq(name, "toSpliced")) return null;
         }
         // The optional `thisArg` (2nd argument) bound as `this` inside the
         // callback of map/filter/forEach/some/every/find*/flatMap. reduce/
@@ -11190,6 +11191,19 @@ pub const Interpreter = struct {
         if (eq(name, "filter")) {
             const cb = arg0(args);
             const result = try self.arraySpeciesCreate(Value.obj(o), 0);
+            if (!o.is_array and ilen > (1 << 22)) {
+                const sparse = try self.arrSparseIndices(o, 0, ilen);
+                var ridx: usize = 0;
+                for (sparse) |idx| {
+                    if (!(try self.arrIndexPresent(o, idx))) continue;
+                    const el = try self.arrIndexGet(o, idx);
+                    if ((try self.callValueWithThis(cb, &.{ el, Value.num(@floatFromInt(idx)), Value.obj(o) }, cb_this)).toBoolean()) {
+                        try self.arrayResultPush(result, ridx, el);
+                        ridx += 1;
+                    }
+                }
+                return result;
+            }
             var i: usize = 0;
             var ridx: usize = 0;
             while (i < ilen) : (i += 1) {
@@ -11204,6 +11218,15 @@ pub const Interpreter = struct {
         }
         if (eq(name, "forEach")) {
             const cb = arg0(args);
+            if (!o.is_array and ilen > (1 << 22)) {
+                const sparse = try self.arrSparseIndices(o, 0, ilen);
+                for (sparse) |idx| {
+                    if (!(try self.arrIndexPresent(o, idx))) continue;
+                    const el = try self.arrIndexGet(o, idx);
+                    _ = try self.callValueWithThis(cb, &.{ el, Value.num(@floatFromInt(idx)), Value.obj(o) }, cb_this);
+                }
+                return Value.undef();
+            }
             var i: usize = 0;
             while (i < ilen) : (i += 1) {
                 if (!(try self.arrIndexPresent(o, i))) continue; // skip holes
@@ -11248,6 +11271,23 @@ pub const Interpreter = struct {
             const cb = arg0(args);
             var acc: Value = undefined;
             var i: usize = 0;
+            if (!o.is_array and ilen > (1 << 22)) {
+                const sparse = try self.arrSparseIndices(o, 0, ilen);
+                var seeded = args.len >= 2;
+                if (seeded) acc = args[1];
+                for (sparse) |idx| {
+                    if (!(try self.arrIndexPresent(o, idx))) continue;
+                    const el = try self.arrIndexGet(o, idx);
+                    if (!seeded) {
+                        acc = el;
+                        seeded = true;
+                        continue;
+                    }
+                    acc = try self.callValue(cb, &.{ acc, el, Value.num(@floatFromInt(idx)), Value.obj(o) });
+                }
+                if (!seeded) return self.throwError("TypeError", "Reduce of empty array with no initial value");
+                return acc;
+            }
             if (args.len >= 2) {
                 acc = args[1];
             } else {
@@ -11374,7 +11414,10 @@ pub const Interpreter = struct {
             const v = arg0(args);
             const start = try relIndex(self, arg(args, 1), ilen, 0);
             const end = try relIndex(self, arg(args, 2), ilen, @floatFromInt(ilen));
-            if (end > start and end - start > (1 << 22)) return null;
+            if (end > start and end - start > (1 << 22)) {
+                if (!o.is_array) try self.arrIndexSetOrThrow(o, start, v);
+                return null;
+            }
             // fill writes through [[Set]] over the full length, so it also fills
             // holes (and creates indexed properties on an array-like `this`).
             var i = start;

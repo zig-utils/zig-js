@@ -1029,8 +1029,15 @@ pub fn arrayFrom(ctx: *anyopaque, this: Value, args: []const Value) HostError!Va
     // Not iterable: ToObject(items) (throws for null/undefined), then copy
     // indices 0..LengthOfArrayLike-1 via [[Get]].
     const array_like = try self.toObject(items);
-    const len = interpreter.toLen(try self.toNumberV(try self.getProperty(Value.obj(array_like), "length")));
-    const result: Value = if (use_ctor) try self.construct(C, &.{Value.num(@floatFromInt(len))}) else try self.newArray();
+    // LengthOfArrayLike = ToLength(Get(arrayLike,"length")), clamped to
+    // 2^53-1. `interpreter.toLen` intentionally caps at array-index range, which
+    // would turn Infinity into a valid Array length here instead of letting
+    // ArrayCreate/new Array reject it.
+    const raw_len = try self.toNumberV(try self.getProperty(Value.obj(array_like), "length"));
+    const to_length: f64 = if (std.math.isNan(raw_len) or raw_len <= 0) 0 else @min(@trunc(raw_len), 9007199254740991.0);
+    if (!use_ctor and to_length > 4294967295.0) return self.throwError("RangeError", "Array.from: invalid array length");
+    const len: usize = @intFromFloat(@min(to_length, 4294967295.0));
+    const result: Value = if (use_ctor) try self.construct(C, &.{Value.num(to_length)}) else try self.newArray();
     var i: usize = 0;
     while (i < len) : (i += 1) {
         const key = try std.fmt.allocPrint(self.arena, "{d}", .{i});
