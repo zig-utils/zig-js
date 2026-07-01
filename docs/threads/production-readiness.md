@@ -256,7 +256,8 @@ as embedders exercise more threaded host patterns.
   Thread.restrict-finalization subprogram, isolated script Worker/SAB and module
   Worker/SAB cleanup subprograms, script and module Worker
   handler-exception cleanup subprograms, script and module Worker
-  close/terminate drain/drop subprograms, a weak-collection cleanup subprogram,
+  close/terminate drain/drop subprograms, an async-hold release/waiter cleanup
+  subprogram, a weak-collection cleanup subprogram,
   and an expected
   teardown-termination subprogram, and each must finish at least one parallel
   sweep. The wait-pump subprogram queues a
@@ -411,7 +412,7 @@ as embedders exercise more threaded host patterns.
   structured-clone after the creator Thread exits.
 - CI runs the fuzzer in several modes: default seeded, TSan, high-contention
   amplified, broad semantic,
-  mid-script GC wait-pump/microtask/creator-buffer/sync-wait-cleanup/promise/teardown/Worker-SAB/Worker-exception/Worker-close/weak-collection,
+  mid-script GC wait-pump/microtask/creator-buffer/sync-wait-cleanup/asyncHold-release-cleanup/promise/teardown/Worker-SAB/Worker-exception/Worker-close/weak-collection,
   lifecycle, ReleaseSafe, and deterministic-result verification.
 
 Remaining: keep extending the lifecycle profile toward more cross-realm
@@ -431,7 +432,7 @@ Every pull request and push to `main` runs:
 - TSan `threadfuzz`,
 - amplified `threadfuzz`,
 - broad semantic `threadfuzz`,
-- mid-script GC wait-pump/microtask/creator-buffer/sync-wait-cleanup/promise/teardown/Worker-SAB/Worker-exception/Worker-close/weak-collection
+- mid-script GC wait-pump/microtask/creator-buffer/sync-wait-cleanup/asyncHold-release-cleanup/promise/teardown/Worker-SAB/Worker-exception/Worker-close/weak-collection
   `threadfuzz`,
 - lifecycle `threadfuzz`,
 - ReleaseSafe `threadfuzz`,

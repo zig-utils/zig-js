@@ -225,6 +225,9 @@ context APIs.
   `FinalizationRegistry` cleanup count/sum are verified, where expired property
   `waitAsync` tickets compact while those peers are parked and a live property
   `waitAsync` ticket stays rooted through the sweep until notification, plus a sibling
+  async-hold release cleanup subprogram where no-fn `Lock.asyncHold()` release
+  functions are delivered while property and condition waiters stay parked
+  through a finishing sweep before exact cleanup count/sum is verified, plus a sibling
   pending-microtask subprogram where Promise, typed-array `waitAsync`,
   `Thread.asyncJoin`, with-fn `Lock.asyncHold`, no-fn release-function, and
   `FinalizationRegistry` cleanup roots stay queued through a finishing sweep

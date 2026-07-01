@@ -195,7 +195,7 @@ python3 tools/threads-reference-audit.py --probe-candidates # prints closest pro
 python3 tools/threads-reference-audit.py --run-probes # executes closest probes with timeouts
 zig build test -Dtsan=true      # unit suite under ThreadSanitizer
 zig build threadfuzz            # seeded concurrent-JS fuzzer
-zig build threadfuzz -Dfuzz-midgc=true # mid-script GC wait-pump + microtask + creator buffers + ThreadLocal/Thread.restrict finalization + sync-wait cleanup + teardown + promise + script/module Worker/SAB + Worker exception + Worker close/terminate + weak-collection fuzzer
+zig build threadfuzz -Dfuzz-midgc=true # mid-script GC wait-pump + microtask + creator buffers + ThreadLocal/Thread.restrict finalization + sync-wait cleanup + asyncHold release cleanup + teardown + promise + script/module Worker/SAB + Worker exception + Worker close/terminate + weak-collection fuzzer
 zig build test262               # runs the real tc39/test262 corpus, prints pass %
 zig build test262 -Dtest262=DIR # …with an explicit corpus root
 zig build bench                 # times the bytecode VM against the tree-walker
@@ -235,7 +235,7 @@ ThreadSanitizer unit tests, a sharded no-GIL PR-249 corpus TSan sweep, a
 suppression-narrowness witness for JS-defined program-byte races,
 `test262-parallel`, and seeded concurrent-JS fuzzing (`threadfuzz`, TSan
 fuzzing, amplified fuzzing, broad semantic fuzzing,
-mid-script-GC wait-pump/microtask/creator-buffer/ThreadLocal-finalization/Thread.restrict-finalization/sync-wait-cleanup/promise/teardown/Worker-SAB/Worker-exception/Worker-close/weak-collection fuzzing, lifecycle
+mid-script-GC wait-pump/microtask/creator-buffer/ThreadLocal-finalization/Thread.restrict-finalization/sync-wait-cleanup/asyncHold-release-cleanup/promise/teardown/Worker-SAB/Worker-exception/Worker-close/weak-collection fuzzing, lifecycle
 fuzzing, ReleaseSafe fuzzing, and deterministic-result verification).
 
 Remaining work is concentrated in production hardening rather than the core
@@ -405,6 +405,11 @@ threading architecture:
   subprogram now settles expired property `waitAsync` tickets while those peers
   are parked, keeps a live property `waitAsync` ticket rooted through the
   finishing sweep, then notifies it and verifies the exact captured-root score.
+  Another sibling async-hold release cleanup subprogram delivers no-fn
+  `Lock.asyncHold()` release functions while property and condition waiters
+  stay parked, drives a finishing mid-script parallel sweep before those waiters
+  resume, and then requires exact `FinalizationRegistry` cleanup count/sum
+  delivery after quiescence.
   Script Worker/SAB and module Worker/SAB cleanup subprograms run isolated
   Workers on the same retained `SharedArrayBuffer` while shared-realm `Thread`s
   register cleanup targets and park stack roots through a finishing sweep, then

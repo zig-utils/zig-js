@@ -7489,6 +7489,247 @@ fn runAsyncHoldReleaseWaiterCleanupInterleaving(gpa: std.mem.Allocator, seed: u6
     return true;
 }
 
+fn runMidScriptAsyncHoldReleaseWaiterCleanupGc(gpa: std.mem.Allocator, seed: u64) !bool {
+    var prng = std.Random.DefaultPrng.init(seed ^ 0x6d69_6461_6872_656c);
+    const r = prng.random();
+    const nthreads = 3 + r.uintLessThan(usize, 4);
+    const per_thread = 4 + r.uintLessThan(usize, 6);
+    const rounds = 7 + r.uintLessThan(usize, 5);
+    const per_round = 620 + r.uintLessThan(usize, 360);
+    const spin_iters = 2200 + r.uintLessThan(usize, 3400);
+    const wait_timeout_ms = 1200 + r.uintLessThan(usize, 800);
+    const seed_marker = seed % 10_000;
+    const prop_marker = 920_000 + seed_marker;
+    const cond_marker = 930_000 + seed_marker;
+
+    var expected_release_score: usize = 0;
+    var expected_join_sum: usize = 0;
+    var expected_cleanup_sum: usize = 0;
+    var id: usize = 0;
+    while (id < nthreads) : (id += 1) {
+        const base = (id + 1) * 70_000;
+        expected_release_score += base + 1_000 + id;
+        expected_join_sum += id + 1;
+        var i: usize = 0;
+        while (i < per_thread) : (i += 1) {
+            expected_cleanup_sum += base + 2_000 + i;
+        }
+    }
+    const expected_cleanup_count = nthreads * per_thread;
+    const expected_total = rounds * per_round + expected_join_sum + prop_marker + cond_marker;
+
+    const ctx = js.Context.createWithTestingOptions(gpa, .{
+        .enable_threads = true,
+        .enable_gc = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+        .parallel_midscript_gc = true,
+    }) catch {
+        std.debug.print("seed {d}: midgc asyncHold release/waiter cleanup context creation failed\n", .{seed});
+        return false;
+    };
+    defer ctx.destroy();
+
+    const src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  globalThis.__midgcAsyncHoldReleaseCleanupScore = 0;
+        \\  globalThis.__midgcAsyncHoldReleaseCleanupCount = 0;
+        \\  globalThis.__midgcAsyncHoldReleaseCleanupSum = 0;
+        \\  globalThis.__midgcAsyncHoldReleaseRegistry = new FinalizationRegistry((held) => {{
+        \\    globalThis.__midgcAsyncHoldReleaseCleanupCount++;
+        \\    globalThis.__midgcAsyncHoldReleaseCleanupSum += held;
+        \\  }});
+        \\  const registry = globalThis.__midgcAsyncHoldReleaseRegistry;
+        \\  const gate = {{ prop: 0, propReady: 0, condReady: 0, condOpen: false }};
+        \\  const lock = new Lock();
+        \\  const condLock = new Lock();
+        \\  const cond = new Condition();
+        \\  const propWaiter = new Thread((gate, marker, timeout) => {{
+        \\    const root = {{ marker, nested: {{ seed: {d}, label: 'midgc-asyncHold-release-property-waiter' }} }};
+        \\    Atomics.store(gate, 'propReady', 1);
+        \\    Atomics.notify(gate, 'propReady');
+        \\    const r = Atomics.wait(gate, 'prop', 0, timeout);
+        \\    if (r !== 'ok' && r !== 'not-equal')
+        \\      throw new Error('bad midgc asyncHold release property waiter result ' + r);
+        \\    return root.marker;
+        \\  }}, gate, {d}, {d});
+        \\  const condWaiter = new Thread((gate, condLock, cond, marker) => {{
+        \\    const root = {{ marker, nested: {{ seed: {d}, label: 'midgc-asyncHold-release-condition-waiter' }} }};
+        \\    condLock.hold(() => {{
+        \\      Atomics.store(gate, 'condReady', 1);
+        \\      Atomics.notify(gate, 'condReady');
+        \\      while (!gate.condOpen)
+        \\        cond.wait(condLock);
+        \\    }});
+        \\    return root.marker;
+        \\  }}, gate, condLock, cond, {d});
+        \\  while (Atomics.load(gate, 'propReady') === 0)
+        \\    Atomics.wait(gate, 'propReady', 0, 1);
+        \\  while (Atomics.load(gate, 'condReady') === 0)
+        \\    Atomics.wait(gate, 'condReady', 0, 1);
+        \\
+        \\  const threads = [];
+        \\  lock.hold(() => {{
+        \\    for (let id = 0; id < {d}; id++) {{
+        \\      threads.push(new Thread((lock, registry, id, per, seed) => {{
+        \\        const base = (id + 1) * 70000;
+        \\        for (let i = 0; i < per; i++) {{
+        \\          let target = {{ id, i, seed, payload: 'midgc-asyncHold-release-cleanup-' + id + '-' + i }};
+        \\          registry.register(target, base + 2000 + i);
+        \\          target = null;
+        \\        }}
+        \\        const releaseRoot = {{ marker: base + 1000 + id, nested: {{ seed, label: 'midgc-asyncHold-release-function-root' }} }};
+        \\        return lock.asyncHold().then((release) => {{
+        \\          if (typeof release !== 'function')
+        \\            throw new Error('midgc asyncHold release grant did not deliver release');
+        \\          if (releaseRoot.nested.seed !== seed)
+        \\            globalThis.__midgcAsyncHoldReleaseCleanupScore = -1000000;
+        \\          else
+        \\            globalThis.__midgcAsyncHoldReleaseCleanupScore += releaseRoot.marker;
+        \\          release();
+        \\          return id + 1;
+        \\        }});
+        \\      }}, lock, registry, id, {d}, {d}));
+        \\    }}
+        \\  }});
+        \\  const joined = [];
+        \\  let joinSum = 0;
+        \\  let joinCount = 0;
+        \\  for (const t of threads) {{
+        \\    const p = t.join();
+        \\    if (!(p instanceof Promise))
+        \\      throw new Error('midgc asyncHold release join did not return child promise');
+        \\    p.then(
+        \\      (v) => {{
+        \\        joinSum += v;
+        \\        joinCount++;
+        \\      }},
+        \\      () => {{
+        \\        joinSum = -1000000;
+        \\        joinCount = {d};
+        \\      }});
+        \\    joined.push(p);
+        \\  }}
+        \\  for (let spin = 0; joinCount < {d} && spin < 100000; spin++) {{
+        \\    $drainRunLoop();
+        \\    drainMicrotasks();
+        \\    Atomics.wait(gate, 'propReady', 1, 1);
+        \\  }}
+        \\  if (joinCount !== {d})
+        \\    throw new Error('midgc asyncHold release promises did not settle ' + joinCount);
+        \\  if (joinSum !== {d})
+        \\    throw new Error('bad midgc asyncHold release join sum ' + joinSum);
+        \\  if (globalThis.__midgcAsyncHoldReleaseCleanupScore !== {d})
+        \\    throw new Error('bad midgc asyncHold release score ' + globalThis.__midgcAsyncHoldReleaseCleanupScore);
+        \\  if (lock.locked)
+        \\    throw new Error('midgc asyncHold release lock left locked');
+        \\
+        \\  const keep = [];
+        \\  for (let round = 0; round < {d}; round++) {{
+        \\    for (let i = 0; i < {d}; i++)
+        \\      keep.push({{ round, i, nested: {{ seed: {d}, joinSum }}, text: 'midgc-asyncHold-release-' + round + '-' + i }});
+        \\    let spin = 0;
+        \\    for (let j = 0; j < {d}; j++) spin = (spin + j + round) & 0x3fffffff;
+        \\    if (spin < 0) keep.push({{ impossible: true }});
+        \\  }}
+        \\
+        \\  Atomics.store(gate, 'prop', 1);
+        \\  Atomics.notify(gate, 'prop');
+        \\  condLock.hold(() => {{
+        \\    gate.condOpen = true;
+        \\    cond.notifyAll();
+        \\  }});
+        \\  const propResult = propWaiter.join();
+        \\  const condResult = condWaiter.join();
+        \\  if (propResult !== {d})
+        \\    throw new Error('bad midgc asyncHold release property waiter marker ' + propResult);
+        \\  if (condResult !== {d})
+        \\    throw new Error('bad midgc asyncHold release condition waiter marker ' + condResult);
+        \\  threads.length = 0;
+        \\  joined.length = 0;
+        \\  return keep.length + joinSum + propResult + condResult;
+        \\}})()
+        \\
+    ,
+        .{
+            seed,
+            prop_marker,
+            wait_timeout_ms,
+            seed,
+            cond_marker,
+            nthreads,
+            per_thread,
+            seed,
+            nthreads,
+            nthreads,
+            nthreads,
+            expected_join_sum,
+            expected_release_score,
+            rounds,
+            per_round,
+            seed_marker,
+            spin_iters,
+            prop_marker,
+            cond_marker,
+        },
+    );
+    defer gpa.free(src);
+
+    const before_attempts = ctx.gc_par_attempts.load(.monotonic);
+    const before_collections = ctx.gc_par_collections.load(.monotonic);
+    const joined = ctx.evaluate(src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: midgc asyncHold release/waiter cleanup JS threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!joined.isNumber() or joined.asNum() != @as(f64, @floatFromInt(expected_total))) {
+        std.debug.print("seed {d}: midgc asyncHold release/waiter cleanup got {d}, expected {d}\n", .{ seed, if (joined.isNumber()) joined.asNum() else -1, expected_total });
+        return false;
+    }
+    if (ctx.gc_par_attempts.load(.monotonic) <= before_attempts) {
+        std.debug.print("seed {d}: midgc asyncHold release/waiter cleanup did not attempt a parallel collection\n", .{seed});
+        return false;
+    }
+    if (ctx.gc_par_collections.load(.monotonic) <= before_collections) {
+        std.debug.print("seed {d}: midgc asyncHold release/waiter cleanup did not finish a parallel collection\n", .{seed});
+        return false;
+    }
+
+    ctx.collectGarbage();
+    const cleanup_src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  globalThis.__midgcAsyncHoldReleaseRegistry.cleanupSome();
+        \\  if (globalThis.__midgcAsyncHoldReleaseCleanupCount !== {d})
+        \\    throw new Error('bad midgc asyncHold release cleanup count ' + globalThis.__midgcAsyncHoldReleaseCleanupCount + '/' + {d});
+        \\  if (globalThis.__midgcAsyncHoldReleaseCleanupSum !== {d})
+        \\    throw new Error('bad midgc asyncHold release cleanup sum ' + globalThis.__midgcAsyncHoldReleaseCleanupSum + '/' + {d});
+        \\  return globalThis.__midgcAsyncHoldReleaseCleanupCount;
+        \\}})()
+        \\
+    ,
+        .{ expected_cleanup_count, expected_cleanup_count, expected_cleanup_sum, expected_cleanup_sum },
+    );
+    defer gpa.free(cleanup_src);
+    const cleaned = ctx.evaluate(cleanup_src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: midgc asyncHold release/waiter cleanup cleanup JS threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!cleaned.isNumber() or cleaned.asNum() != @as(f64, @floatFromInt(expected_cleanup_count))) {
+        std.debug.print("seed {d}: midgc asyncHold release/waiter cleanup cleaned got {d}, expected {d}\n", .{ seed, if (cleaned.isNumber()) cleaned.asNum() else -1, expected_cleanup_count });
+        return false;
+    }
+    return true;
+}
+
 fn runAsyncHoldThrowFinalizationInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
     var prng = std.Random.DefaultPrng.init(seed ^ 0x6173_796e_6368_7468);
     const r = prng.random();
@@ -11570,6 +11811,22 @@ pub fn main(init: std.process.Init) !void {
         if (msfail != 0) std.process.exit(1);
         return;
     };
+    // `threadfuzz midgcasyncholdrelease <iters> <seed>`: focused mid-script
+    // parallel-GC repro for no-fn asyncHold release-function delivery while
+    // property and condition waiters stay parked, followed by exact cleanup.
+    if (first) |a| if (std.mem.eql(u8, a, "midgcasyncholdrelease")) {
+        if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch 1;
+        if (args.next()) |b| base_seed = std.fmt.parseInt(u64, b, 10) catch 1;
+        var marfail: usize = 0;
+        var mari: usize = 0;
+        while (mari < iters) : (mari += 1) {
+            const seed = base_seed +% mari;
+            if (!(try runMidScriptAsyncHoldReleaseWaiterCleanupGc(gpa, seed))) marfail += 1;
+        }
+        std.debug.print("threadfuzz midgcasyncholdrelease: {d} programs from seed {d}, {d} failures\n", .{ iters, base_seed, marfail });
+        if (marfail != 0) std.process.exit(1);
+        return;
+    };
     // `threadfuzz midgctlsfinal <iters> <seed>`: focused mid-script
     // parallel-GC repro for ThreadLocal-only roots registered with
     // FinalizationRegistry while owner threads are parked through a finishing
@@ -11956,6 +12213,8 @@ pub fn main(init: std.process.Init) !void {
     // completion records and delayed asyncJoin observers,
     // ThreadLocal-only and Thread.restrict-owned FinalizationRegistry targets
     // parked through a finishing sweep before their owners clear the values,
+    // no-fn asyncHold release-function delivery plus exact cleanup while
+    // property/condition waiters stay parked through the finishing sweep,
     // completed-but-unjoined Thread results and thrown
     // objects, sync-wait peer stack roots with finalization cleanup, WeakMap/
     // WeakSet dead-key cleanup with live ephemeron values and unregister-token
@@ -11979,6 +12238,7 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runMidScriptMicrotaskChurnGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptCreatorOwnedBufferGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptSyncWaitCleanupGc(gpa, seed))) mfail += 1;
+            if (!(try runMidScriptAsyncHoldReleaseWaiterCleanupGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptThreadLocalFinalizationGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptThreadRestrictFinalizationGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptWorkerCleanupGc(gpa, seed))) mfail += 1;
@@ -11989,7 +12249,7 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runMidScriptModuleWorkerCloseTerminateGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptWeakCollectionGc(gpa, seed))) mfail += 1;
         }
-        std.debug.print("threadfuzz midgc: {d} programs from seed {d}, {d} failures\n", .{ iters * 15, base_seed, mfail });
+        std.debug.print("threadfuzz midgc: {d} programs from seed {d}, {d} failures\n", .{ iters * 16, base_seed, mfail });
         if (mfail != 0) std.process.exit(1);
         return;
     };
