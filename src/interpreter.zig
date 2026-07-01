@@ -2109,8 +2109,8 @@ pub const Interpreter = struct {
                     const m = a.target.super_member;
                     const home = self.home_object orelse return self.throwError("SyntaxError", "'super' outside a method");
                     if (!self.this_initialized) return self.throwError("ReferenceError", "Must call super constructor before using 'this'");
-                    const parent = home.protoAtomic();
                     const key_val: ?Value = if (m.computed) |ce| try self.eval(ce) else null;
+                    const parent = home.protoAtomic();
                     const v = try self.eval(a.value);
                     const parent_obj = parent orelse return self.throwError("TypeError", "Cannot set property of null (super)");
                     const key = if (key_val) |kv| try self.keyOf(kv) else m.property;
@@ -2217,6 +2217,20 @@ pub const Interpreter = struct {
                         const rhs = try self.eval(oa.value);
                         const new = try self.applyBinary(oa.op, old, rhs);
                         try self.setMember(obj, key, new);
+                        break :blk new;
+                    },
+                    .super_member => |m| {
+                        const home = self.home_object orelse return self.throwError("SyntaxError", "'super' outside a method");
+                        if (!self.this_initialized) return self.throwError("ReferenceError", "Must call super constructor before using 'this'");
+                        const key_val: ?Value = if (m.computed) |ce| try self.eval(ce) else null;
+                        const parent = home.protoAtomic() orelse return self.throwError("TypeError", "Cannot read property of null (super)");
+                        const key = if (key_val) |kv| try self.keyOf(kv) else m.property;
+                        const old = try self.getPropertyWithReceiver(Value.obj(parent), key, self.this_value);
+                        const rhs = try self.eval(oa.value);
+                        const new = try self.applyBinary(oa.op, old, rhs);
+                        if (!try self.setMemberResult(Value.obj(parent), key, new, self.this_value)) {
+                            if (self.strict) return self.throwError("TypeError", "Cannot set property");
+                        }
                         break :blk new;
                     },
                     else => {
@@ -2372,13 +2386,12 @@ pub const Interpreter = struct {
                 // property key (step 3): in a derived constructor before `super()`,
                 // `super[expr]` / `super.x` is a ReferenceError and `expr` never runs.
                 if (!self.this_initialized) return self.throwError("ReferenceError", "Must call super constructor before using 'this'");
-                // GetSuperBase is captured BEFORE ToPropertyKey of the computed key,
-                // so a key whose `toString` mutates the home object's prototype
-                // can't change which base the lookup uses (RequireObjectCoercible:
-                // a null/absent prototype is a TypeError). The receiver is `this`,
-                // so an inherited accessor observes the current instance.
+                const key_val: ?Value = if (m.computed) |ce| try self.eval(ce) else null;
+                // Computed SuperProperty evaluates the key expression before
+                // MakeSuperPropertyReference checks the current super base, but
+                // ToPropertyKey is deferred until GetValue below.
                 const parent = home.protoAtomic() orelse return self.throwError("TypeError", "Cannot read property of null (super)");
-                const key = try self.memberKey(m.property, m.computed);
+                const key = if (key_val) |kv| try self.keyOf(kv) else m.property;
                 break :blk try self.getPropertyWithReceiver(Value.obj(parent), key, self.this_value);
             },
 
@@ -3222,6 +3235,31 @@ pub const Interpreter = struct {
             const o = ov.toNumber();
             const up = if (inc) o + 1 else o - 1;
             try self.setMember(recv, key, Value.num(up));
+            return Value.num(if (prefix) up else o);
+        }
+        if (target.* == .super_member) {
+            const m = target.super_member;
+            const home = self.home_object orelse return self.throwError("SyntaxError", "'super' outside a method");
+            if (!self.this_initialized) return self.throwError("ReferenceError", "Must call super constructor before using 'this'");
+            const key_val: ?Value = if (m.computed) |ce| try self.eval(ce) else null;
+            const parent = home.protoAtomic() orelse return self.throwError("TypeError", "Cannot read property of null (super)");
+            const key = if (key_val) |kv| try self.keyOf(kv) else m.property;
+            var ov = try self.getPropertyWithReceiver(Value.obj(parent), key, self.this_value);
+            if (ov.isObject() and !ov.asObj().is_bigint and !ov.asObj().is_symbol)
+                ov = try self.toPrimitive(ov, .number);
+            if (ov.isObject() and ov.asObj().is_bigint) {
+                const b = ov.asObj().bigint;
+                const up = try self.makeBigInt(if (inc) b +% 1 else b -% 1);
+                if (!try self.setMemberResult(Value.obj(parent), key, up, self.this_value)) {
+                    if (self.strict) return self.throwError("TypeError", "Cannot set property");
+                }
+                return if (prefix) up else ov;
+            }
+            const o = ov.toNumber();
+            const up = if (inc) o + 1 else o - 1;
+            if (!try self.setMemberResult(Value.obj(parent), key, Value.num(up), self.this_value)) {
+                if (self.strict) return self.throwError("TypeError", "Cannot set property");
+            }
             return Value.num(if (prefix) up else o);
         }
         if (target.* == .call) {
@@ -4591,9 +4629,10 @@ pub const Interpreter = struct {
             // GetThisBinding precedes the key/lookup (see the super read path): a
             // derived-ctor `super.m()` before `super()` is a ReferenceError.
             if (!self.this_initialized) return self.throwError("ReferenceError", "Must call super constructor before using 'this'");
+            const key_val: ?Value = if (sm.computed) |ce| try self.eval(ce) else null;
             const parent = home.protoAtomic() orelse
                 return self.throwError("TypeError", "no superclass method");
-            const key = try self.memberKey(sm.property, sm.computed);
+            const key = if (key_val) |kv| try self.keyOf(kv) else sm.property;
             const method = try self.getProperty(Value.obj(parent), key);
             const args = try self.evalArgs(arg_nodes);
             return self.callValueWithThis(method, args, self.this_value);
