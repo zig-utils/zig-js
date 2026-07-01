@@ -224,9 +224,11 @@ Known performance/maturity work:
   middle removal per matching record.
 - The same `threads-profile` run now includes a separate isolated `Worker`
   section for structured-clone inbox/outbox round-trips, empty receive polling,
-  spawn/post/receive/join/destroy lifecycle cost. It is reported outside the
-  no-GIL versus `.gil = true` table because Workers already isolate each
-  `Context` onto its own OS thread.
+  and spawn/post/receive/join/destroy lifecycle cost, with separate script and
+  module Worker rows so import-graph startup/lifecycle pressure is visible
+  beside plain source Workers. It is reported outside the no-GIL versus
+  `.gil = true` table because Workers already isolate each `Context` onto its
+  own OS thread.
 - Measured speedup shows real parallelism: roughly 1.8x at 2 threads and 2.5x
   at 4 threads in the recorded checkpoint.
 

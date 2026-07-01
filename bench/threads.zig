@@ -28,6 +28,81 @@ const worker_message_batches = 160;
 const worker_empty_receive_polls = 3000;
 const worker_lifecycle_rounds = 12;
 
+const ModuleMessageProfileHost = struct {
+    const Entry = struct { path: []const u8, source: []const u8 };
+    var host_ctx: u8 = 0;
+    const entries = [_]Entry{
+        .{
+            .path = "ops.js",
+            .source =
+            \\export function reply(v) { return v + 1; }
+            ,
+        },
+        .{
+            .path = "entry.js",
+            .source =
+            \\import { reply } from "./ops.js";
+            \\globalThis.onmessage = function(e) {
+            \\  postMessage(reply(e.data));
+            \\};
+            ,
+        },
+    };
+
+    fn load(_: *anyopaque, _: []const u8, specifier: []const u8, out_path: *[]const u8) ?[]const u8 {
+        const name = if (std.mem.startsWith(u8, specifier, "./")) specifier[2..] else specifier;
+        for (entries) |entry| {
+            if (std.mem.eql(u8, entry.path, name)) {
+                out_path.* = entry.path;
+                return entry.source;
+            }
+        }
+        return null;
+    }
+
+    fn host() js.Context.ModuleHost {
+        return .{ .ctx = &host_ctx, .load = load };
+    }
+};
+
+const ModuleLifecycleProfileHost = struct {
+    const Entry = struct { path: []const u8, source: []const u8 };
+    var host_ctx: u8 = 0;
+    const entries = [_]Entry{
+        .{
+            .path = "ops.js",
+            .source =
+            \\export function reply(v) { return v + 1; }
+            ,
+        },
+        .{
+            .path = "entry.js",
+            .source =
+            \\import { reply } from "./ops.js";
+            \\globalThis.onmessage = function(e) {
+            \\  postMessage(reply(e.data));
+            \\  close();
+            \\};
+            ,
+        },
+    };
+
+    fn load(_: *anyopaque, _: []const u8, specifier: []const u8, out_path: *[]const u8) ?[]const u8 {
+        const name = if (std.mem.startsWith(u8, specifier, "./")) specifier[2..] else specifier;
+        for (entries) |entry| {
+            if (std.mem.eql(u8, entry.path, name)) {
+                out_path.* = entry.path;
+                return entry.source;
+            }
+        }
+        return null;
+    }
+
+    fn host() js.Context.ModuleHost {
+        return .{ .ctx = &host_ctx, .load = load };
+    }
+};
+
 const scenarios = [_]Scenario{
     .{
         .name = "independent compute",
@@ -488,12 +563,33 @@ fn expectWorkerReply(reply: js.Value, expected: f64) !void {
     if (!reply.isNumber() or reply.asNum() != expected) return error.UnexpectedWorkerReply;
 }
 
-fn timeWorkerMessages(gpa: std.mem.Allocator, io: std.Io, worker_count: usize, batches: usize) !u64 {
+fn spawnProfileWorker(comptime module_worker: bool, src: []const u8) !*js.Worker {
+    return if (module_worker)
+        try js.Worker.spawnModule("entry.js", src, ModuleMessageProfileHost.host())
+    else
+        try js.Worker.spawn(src);
+}
+
+fn spawnLifecycleWorker(comptime module_worker: bool, src: []const u8) !*js.Worker {
+    return if (module_worker)
+        try js.Worker.spawnModule("entry.js", src, ModuleLifecycleProfileHost.host())
+    else
+        try js.Worker.spawn(src);
+}
+
+fn timeWorkerMessagesKind(
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    worker_count: usize,
+    batches: usize,
+    comptime module_worker: bool,
+) !u64 {
     const src =
         \\globalThis.onmessage = function(e) {
         \\  postMessage(e.data + 1);
         \\};
     ;
+    const worker_src = if (module_worker) ModuleMessageProfileHost.entries[1].source else src;
 
     const ctx = try js.Context.createWith(gpa, .{ .enable_threads = true });
     defer ctx.destroy();
@@ -505,7 +601,7 @@ fn timeWorkerMessages(gpa: std.mem.Allocator, io: std.Io, worker_count: usize, b
     var spawned: usize = 0;
     errdefer cleanupWorkers(workers[0..spawned]);
     while (spawned < worker_count) : (spawned += 1) {
-        workers[spawned] = try js.Worker.spawn(src);
+        workers[spawned] = try spawnProfileWorker(module_worker, worker_src);
     }
 
     // Warm each worker so the timed section is dominated by message traffic,
@@ -539,10 +635,25 @@ fn timeWorkerMessages(gpa: std.mem.Allocator, io: std.Io, worker_count: usize, b
     return ns;
 }
 
-fn timeWorkerEmptyReceives(gpa: std.mem.Allocator, io: std.Io, worker_count: usize, polls: usize) !u64 {
+fn timeWorkerMessages(gpa: std.mem.Allocator, io: std.Io, worker_count: usize, batches: usize) !u64 {
+    return timeWorkerMessagesKind(gpa, io, worker_count, batches, false);
+}
+
+fn timeModuleWorkerMessages(gpa: std.mem.Allocator, io: std.Io, worker_count: usize, batches: usize) !u64 {
+    return timeWorkerMessagesKind(gpa, io, worker_count, batches, true);
+}
+
+fn timeWorkerEmptyReceivesKind(
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    worker_count: usize,
+    polls: usize,
+    comptime module_worker: bool,
+) !u64 {
     const src =
         \\globalThis.onmessage = function(e) {};
     ;
+    const worker_src = if (module_worker) ModuleMessageProfileHost.entries[1].source else src;
 
     const ctx = try js.Context.createWith(gpa, .{ .enable_threads = true });
     defer ctx.destroy();
@@ -554,7 +665,7 @@ fn timeWorkerEmptyReceives(gpa: std.mem.Allocator, io: std.Io, worker_count: usi
     var spawned: usize = 0;
     errdefer cleanupWorkers(workers[0..spawned]);
     while (spawned < worker_count) : (spawned += 1) {
-        workers[spawned] = try js.Worker.spawn(src);
+        workers[spawned] = try spawnProfileWorker(module_worker, worker_src);
     }
 
     const t0 = nowNs(io);
@@ -574,13 +685,28 @@ fn timeWorkerEmptyReceives(gpa: std.mem.Allocator, io: std.Io, worker_count: usi
     return ns;
 }
 
-fn timeWorkerLifecycle(gpa: std.mem.Allocator, io: std.Io, worker_count: usize, rounds: usize) !u64 {
+fn timeWorkerEmptyReceives(gpa: std.mem.Allocator, io: std.Io, worker_count: usize, polls: usize) !u64 {
+    return timeWorkerEmptyReceivesKind(gpa, io, worker_count, polls, false);
+}
+
+fn timeModuleWorkerEmptyReceives(gpa: std.mem.Allocator, io: std.Io, worker_count: usize, polls: usize) !u64 {
+    return timeWorkerEmptyReceivesKind(gpa, io, worker_count, polls, true);
+}
+
+fn timeWorkerLifecycleKind(
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    worker_count: usize,
+    rounds: usize,
+    comptime module_worker: bool,
+) !u64 {
     const src =
         \\globalThis.onmessage = function(e) {
         \\  postMessage(e.data + 1);
         \\  close();
         \\};
     ;
+    const worker_src = if (module_worker) ModuleLifecycleProfileHost.entries[1].source else src;
 
     const ctx = try js.Context.createWith(gpa, .{ .enable_threads = true });
     defer ctx.destroy();
@@ -595,7 +721,7 @@ fn timeWorkerLifecycle(gpa: std.mem.Allocator, io: std.Io, worker_count: usize, 
         var spawned: usize = 0;
         errdefer cleanupWorkers(workers[0..spawned]);
         while (spawned < worker_count) : (spawned += 1) {
-            workers[spawned] = try js.Worker.spawn(src);
+            workers[spawned] = try spawnLifecycleWorker(module_worker, worker_src);
         }
 
         const base = round * worker_count;
@@ -613,11 +739,21 @@ fn timeWorkerLifecycle(gpa: std.mem.Allocator, io: std.Io, worker_count: usize, 
     return @intCast(nowNs(io) - t0);
 }
 
+fn timeWorkerLifecycle(gpa: std.mem.Allocator, io: std.Io, worker_count: usize, rounds: usize) !u64 {
+    return timeWorkerLifecycleKind(gpa, io, worker_count, rounds, false);
+}
+
+fn timeModuleWorkerLifecycle(gpa: std.mem.Allocator, io: std.Io, worker_count: usize, rounds: usize) !u64 {
+    return timeWorkerLifecycleKind(gpa, io, worker_count, rounds, true);
+}
+
 fn printWorkerProfile(gpa: std.mem.Allocator, io: std.Io, workers: []const usize) !void {
     std.debug.print("\nWorker message/lifecycle profile\n", .{});
     std.debug.print("isolated Worker API: one Context per OS thread, structured-clone inbox/outbox, no shared-realm .gil fallback\n", .{});
-    std.debug.print("{s:>8} {s:>14} {s:>12} {s:>14} {s:>12} {s:>14} {s:>12} {s:>12}\n", .{
+    std.debug.print("script rows use Worker.spawn(source); module rows use Worker.spawnModule(entry.js) with a tiny import graph\n", .{});
+    std.debug.print("{s:>8} {s:>8} {s:>14} {s:>12} {s:>14} {s:>12} {s:>14} {s:>12} {s:>12}\n", .{
         "workers",
+        "kind",
         "message ns",
         "ns/msg",
         "empty recv ns",
@@ -628,21 +764,37 @@ fn printWorkerProfile(gpa: std.mem.Allocator, io: std.Io, workers: []const usize
     });
 
     for (workers) |n| {
-        const message_ns = try timeWorkerMessages(gpa, io, n, worker_message_batches);
         const total_messages: u64 = @intCast(n * worker_message_batches);
-        const empty_receive_ns = try timeWorkerEmptyReceives(gpa, io, n, worker_empty_receive_polls);
         const total_empty_receives: u64 = @intCast(n * worker_empty_receive_polls);
-        const lifecycle_ns = try timeWorkerLifecycle(gpa, io, n, worker_lifecycle_rounds);
         const total_spawns: u64 = @intCast(n * worker_lifecycle_rounds);
 
-        std.debug.print("{d:>8} {d:>14} {d:>12} {d:>14} {d:>12} {d:>14} {d:>12} {d:>12}\n", .{
+        const script_message_ns = try timeWorkerMessages(gpa, io, n, worker_message_batches);
+        const script_empty_receive_ns = try timeWorkerEmptyReceives(gpa, io, n, worker_empty_receive_polls);
+        const script_lifecycle_ns = try timeWorkerLifecycle(gpa, io, n, worker_lifecycle_rounds);
+        std.debug.print("{d:>8} {s:>8} {d:>14} {d:>12} {d:>14} {d:>12} {d:>14} {d:>12} {d:>12}\n", .{
             n,
-            message_ns,
-            message_ns / @max(total_messages, 1),
-            empty_receive_ns,
-            empty_receive_ns / @max(total_empty_receives, 1),
-            lifecycle_ns,
-            lifecycle_ns / @max(total_spawns, 1),
+            "script",
+            script_message_ns,
+            script_message_ns / @max(total_messages, 1),
+            script_empty_receive_ns,
+            script_empty_receive_ns / @max(total_empty_receives, 1),
+            script_lifecycle_ns,
+            script_lifecycle_ns / @max(total_spawns, 1),
+            total_spawns,
+        });
+
+        const module_message_ns = try timeModuleWorkerMessages(gpa, io, n, worker_message_batches);
+        const module_empty_receive_ns = try timeModuleWorkerEmptyReceives(gpa, io, n, worker_empty_receive_polls);
+        const module_lifecycle_ns = try timeModuleWorkerLifecycle(gpa, io, n, worker_lifecycle_rounds);
+        std.debug.print("{d:>8} {s:>8} {d:>14} {d:>12} {d:>14} {d:>12} {d:>14} {d:>12} {d:>12}\n", .{
+            n,
+            "module",
+            module_message_ns,
+            module_message_ns / @max(total_messages, 1),
+            module_empty_receive_ns,
+            module_empty_receive_ns / @max(total_empty_receives, 1),
+            module_lifecycle_ns,
+            module_lifecycle_ns / @max(total_spawns, 1),
             total_spawns,
         });
     }

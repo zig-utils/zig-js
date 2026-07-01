@@ -311,8 +311,10 @@ threading architecture:
   object/element storage contention, and GC allocation costs under high thread
   counts. It also prints
   a separate isolated `Worker` section for structured-clone inbox/outbox
-  round-trips and spawn/post/receive/join/destroy lifecycle cost; that section
-  has no `.gil = true` comparison because each Worker owns its own `Context`.
+  round-trips and spawn/post/receive/join/destroy lifecycle cost, with separate
+  script and module Worker rows so import-graph startup/lifecycle pressure is
+  visible beside plain source Workers; that section has no `.gil = true`
+  comparison because each Worker owns its own `Context`.
   The sync-wait pump path now skips the shared run-loop task lock entirely when
   no async hold jobs are queued, and async-hold delivery now dequeues both the
   per-lock pending list and the realm task queue through FIFO head cursors
@@ -388,9 +390,9 @@ threading architecture:
   by source, so lifecycle churn can be distinguished from lock, condition, and
   property wait pressure in the same table.
   The Worker profile prints that empty-receive polling cost separately from
-  real message-delivery and lifecycle cost. Continue using the profile for the
-  remaining async-condition delivery, contended-lock, Worker message, and
-  lifecycle hot spots.
+  real message-delivery and lifecycle cost, split by script versus module
+  Worker kind. Continue using the profile for the remaining async-condition
+  delivery, contended-lock, Worker message, and lifecycle hot spots.
 - **Memory-model maintenance** - keep
   [docs/threads/memory-model.md](docs/threads/memory-model.md) aligned with the
   TSan suppression witness, synchronization primitives, and promoted corpus

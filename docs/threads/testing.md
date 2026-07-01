@@ -322,8 +322,9 @@ or lifecycle changes so performance work has an attributed baseline instead of
 only elapsed time. The profile also prints a separate isolated `Worker` table
 for structured-clone inbox/outbox round-trips, empty
 receive polling, and spawn/post/receive/join/destroy lifecycle churn; it
-intentionally has no `.gil = true` column because each Worker owns its own
-`Context`.
+now emits separate script and module Worker rows so import-graph startup and
+lifecycle cost can be compared with plain source Workers. It intentionally has
+no `.gil = true` column because each Worker owns its own `Context`.
 Empty sync-wait task pumps now have a
 lock-free fast path;
 real async-hold delivery drains larger bounded FIFO bursts from the realm task

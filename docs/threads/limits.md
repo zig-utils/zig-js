@@ -203,9 +203,9 @@ context APIs.
   middle shifts.
   The profile now includes a separate isolated `Worker` section for
   structured-clone inbox/outbox round-trips, empty receive polling, and
-  spawn/post/receive/join/destroy lifecycle cost, so Worker-heavy follow-up
-  optimization has its own baseline instead of being inferred from shared-realm
-  `Thread` rows.
+  spawn/post/receive/join/destroy lifecycle cost, with separate script and
+  module Worker rows so import-graph startup/lifecycle pressure has its own
+  baseline instead of being inferred from shared-realm `Thread` rows.
 - **Memory model maintenance.** Keep [Memory Model](./memory-model.md) aligned
   with the TSan suppression witness, new synchronization primitives, and any
   promoted PR-249 coverage that exercises JS-defined races.
