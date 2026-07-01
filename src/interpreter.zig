@@ -16317,9 +16317,24 @@ fn iterDropFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError
 
 // --- the eager helper methods (consume `this`) -----------------------
 
+fn enterNativeMethodRealm(self: *Interpreter) ?*Environment {
+    const saved = self.env;
+    if (self.active_native) |callee| {
+        if (callee.private_data) |pd| {
+            self.env = @ptrCast(@alignCast(pd));
+            return saved;
+        }
+    }
+    return null;
+}
+
 fn iterToArrayFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const saved_env = enterNativeMethodRealm(self);
+    defer if (saved_env) |env| {
+        self.env = env;
+    };
     if (!this.isObject()) return self.throwError("TypeError", "Iterator.prototype.toArray called on a non-object");
     // GetIteratorDirect captures `next` once (a `next` accessor runs a single time).
     const next_method = try self.getProperty(this, "next");
@@ -16333,6 +16348,10 @@ fn iterToArrayFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
 }
 fn iterForEachFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const saved_env = enterNativeMethodRealm(self);
+    defer if (saved_env) |env| {
+        self.env = env;
+    };
     if (!this.isObject()) return self.throwError("TypeError", "Iterator.prototype.forEach called on a non-object");
     const f = if (args.len > 0) args[0] else Value.undef();
     if (!f.isCallable()) {
@@ -16384,6 +16403,10 @@ fn iterSomeEveryFindFn(comptime which: enum { some, every, find }) value.NativeF
     return struct {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
+            const saved_env = enterNativeMethodRealm(self);
+            defer if (saved_env) |env| {
+                self.env = env;
+            };
             if (!this.isObject()) return self.throwError("TypeError", "Iterator.prototype method called on a non-object");
             const f = if (args.len > 0) args[0] else Value.undef();
             if (!f.isCallable()) {
@@ -16879,11 +16902,11 @@ fn installIterator(env: *Environment, rs: *Shape, object_proto: *value.Object) E
         .{ "take", iterTakeFn },       .{ "drop", iterDropFn },
         .{ "flatMap", iterFlatMapFn }, .{ "reduce", iterReduceFn },
         .{ "forEach", iterForEachFn },
-    }) |m| try setNative(a, rs, iter_proto, m[0], 1, m[1]);
-    try setNative(a, rs, iter_proto, "toArray", 0, iterToArrayFn); // toArray() takes no args
-    try setNative(a, rs, iter_proto, "some", 1, iterSomeEveryFindFn(.some));
-    try setNative(a, rs, iter_proto, "every", 1, iterSomeEveryFindFn(.every));
-    try setNative(a, rs, iter_proto, "find", 1, iterSomeEveryFindFn(.find));
+    }) |m| try setNativeWithData(a, rs, iter_proto, m[0], 1, m[1], @ptrCast(env));
+    try setNativeWithData(a, rs, iter_proto, "toArray", 0, iterToArrayFn, @ptrCast(env)); // toArray() takes no args
+    try setNativeWithData(a, rs, iter_proto, "some", 1, iterSomeEveryFindFn(.some), @ptrCast(env));
+    try setNativeWithData(a, rs, iter_proto, "every", 1, iterSomeEveryFindFn(.every), @ptrCast(env));
+    try setNativeWithData(a, rs, iter_proto, "find", 1, iterSomeEveryFindFn(.find), @ptrCast(env));
     try env.put("\x00IterProto", Value.obj(iter_proto));
 
     // %GeneratorPrototype% (proto %IteratorPrototype%): the shared prototype of
