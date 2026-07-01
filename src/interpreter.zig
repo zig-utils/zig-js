@@ -5449,6 +5449,17 @@ pub const Interpreter = struct {
         return true;
     }
 
+    fn arrayProtoMayAffectIndexedHas(self: *Interpreter, o: *value.Object) bool {
+        var cur = self.effectiveProto(o);
+        while (cur) |c| {
+            if (c.proxy_handler != null or c.proxy_revoked or c.typed_array != null or c.has_indexed_property.load(.monotonic))
+                return true;
+            if (c.indexed_own_seen.load(.acquire)) return true;
+            cur = self.effectiveProto(c);
+        }
+        return false;
+    }
+
     fn setFastArrayNumericIndex(self: *Interpreter, recv: Value, index: usize, v: Value) EvalError!bool {
         if (!recv.isObject()) return false;
         const o = recv.asObj();
@@ -10937,7 +10948,7 @@ pub const Interpreter = struct {
             // also what keeps a huge sparse array from being walked element by
             // element.
             const k = if (args.len > 1) try self.fromIndexForward(args[1], ilen) else 0;
-            if (!o.is_array and ilen <= (1 << 22)) {
+            if ((!o.is_array or self.arrayProtoMayAffectIndexedHas(o)) and ilen <= (1 << 22)) {
                 var i = k;
                 while (i < ilen) : (i += 1) {
                     if (try self.arrIndexPresent(o, i) and value.strictEquals(try self.arrIndexGet(o, i), target))
@@ -11372,7 +11383,7 @@ pub const Interpreter = struct {
                     start = if (fl > flen_1) ilen - 1 else @intFromFloat(fl);
                 }
             }
-            if (!o.is_array and ilen <= (1 << 22)) {
+            if ((!o.is_array or self.arrayProtoMayAffectIndexedHas(o)) and ilen <= (1 << 22)) {
                 var i = start + 1;
                 while (i > 0) {
                     i -= 1;
