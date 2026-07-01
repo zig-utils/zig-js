@@ -7794,12 +7794,29 @@ pub const Interpreter = struct {
         if (is_setop) {
             const rec = try self.getSetRecord(arg0(args));
             if (eq(name, "union")) {
+                var other_iter: Value = Value.undef();
+                var other_next: Value = Value.undef();
+                const other_keys = if (rec.is_set) try self.collectSetKeys(rec) else blk: {
+                    other_iter = try self.callValueWithThis(rec.keys, &.{}, Value.obj(rec.obj));
+                    if (!builtins.isRealObject(other_iter)) return self.throwError("TypeError", "iterator.next() did not return an object");
+                    other_next = try self.getProperty(other_iter, "next");
+                    break :blk &[_]Value{};
+                };
                 const result = (try self.makeSet(Value.undef())).asObj();
                 for (o.elements.items) |e| {
                     const entry = liveSetEntry(e) orelse continue;
                     _ = try self.setMethod(result, "add", &.{entry});
                 }
-                for (try self.collectSetKeys(rec)) |k| _ = try self.setMethod(result, "add", &.{k});
+                if (rec.is_set) {
+                    for (other_keys) |k| _ = try self.setMethod(result, "add", &.{k});
+                } else {
+                    while (true) {
+                        const r = try self.callValueWithThis(other_next, &.{}, other_iter);
+                        if (!builtins.isRealObject(r)) return self.throwError("TypeError", "iterator.next() did not return an object");
+                        if ((try self.getProperty(r, "done")).toBoolean()) break;
+                        _ = try self.setMethod(result, "add", &.{try self.getProperty(r, "value")});
+                    }
+                }
                 return Value.obj(result);
             }
             const this_size: f64 = @floatFromInt(liveSetEntryCount(o));
@@ -7807,14 +7824,27 @@ pub const Interpreter = struct {
                 const result = (try self.makeSet(Value.undef())).asObj();
                 if (this_size <= rec.size) {
                     // Smaller `this`: walk this, probe the other set's `has`.
-                    for (o.elements.items) |e| {
-                        const entry = liveSetEntry(e) orelse continue;
+                    var i: usize = 0;
+                    while (i < o.elements.items.len) : (i += 1) {
+                        const entry = liveSetEntry(o.elements.items[i]) orelse continue;
                         if (try self.recordHas(rec, entry)) _ = try self.setMethod(result, "add", &.{entry});
                     }
                 } else {
                     // Smaller other: walk the other set's keys, keep those in this.
-                    for (try self.collectSetKeys(rec)) |k| {
-                        if (setContains(o, k)) _ = try self.setMethod(result, "add", &.{k});
+                    if (rec.is_set) {
+                        for (try self.collectSetKeys(rec)) |k| {
+                            if (setContains(o, k)) _ = try self.setMethod(result, "add", &.{k});
+                        }
+                    } else {
+                        const iter = try self.callValueWithThis(rec.keys, &.{}, Value.obj(rec.obj));
+                        const next_m = try self.getProperty(iter, "next");
+                        while (true) {
+                            const r = try self.callValueWithThis(next_m, &.{}, iter);
+                            if (!builtins.isRealObject(r)) return self.throwError("TypeError", "iterator.next() did not return an object");
+                            if ((try self.getProperty(r, "done")).toBoolean()) break;
+                            const k = try self.getProperty(r, "value");
+                            if (setContains(o, k)) _ = try self.setMethod(result, "add", &.{k});
+                        }
                     }
                 }
                 return Value.obj(result);
@@ -7827,8 +7857,9 @@ pub const Interpreter = struct {
                     _ = try self.setMethod(result, "add", &.{entry});
                 }
                 if (this_size <= rec.size) {
-                    for (o.elements.items) |e| {
-                        const entry = liveSetEntry(e) orelse continue;
+                    var i: usize = 0;
+                    while (i < result.elements.items.len) : (i += 1) {
+                        const entry = liveSetEntry(result.elements.items[i]) orelse continue;
                         if (try self.recordHas(rec, entry)) _ = try self.setMethod(result, "delete", &.{entry});
                     }
                 } else {
@@ -7839,16 +7870,37 @@ pub const Interpreter = struct {
                 return Value.obj(result);
             }
             if (eq(name, "symmetricDifference")) {
+                var other_iter: Value = Value.undef();
+                var other_next: Value = Value.undef();
+                const other_keys = if (rec.is_set) try self.collectSetKeys(rec) else blk: {
+                    other_iter = try self.callValueWithThis(rec.keys, &.{}, Value.obj(rec.obj));
+                    if (!builtins.isRealObject(other_iter)) return self.throwError("TypeError", "iterator.next() did not return an object");
+                    other_next = try self.getProperty(other_iter, "next");
+                    break :blk &[_]Value{};
+                };
                 const result = (try self.makeSet(Value.undef())).asObj();
                 for (o.elements.items) |e| {
                     const entry = liveSetEntry(e) orelse continue;
                     _ = try self.setMethod(result, "add", &.{entry});
                 }
-                for (try self.collectSetKeys(rec)) |k| {
-                    if ((try self.setMethod(o, "has", &.{k})).?.asBool())
-                        _ = try self.setMethod(result, "delete", &.{k})
-                    else
-                        _ = try self.setMethod(result, "add", &.{k});
+                if (rec.is_set) {
+                    for (other_keys) |k| {
+                        if (setContains(o, k))
+                            _ = try self.setMethod(result, "delete", &.{k})
+                        else if (!setContains(result, k))
+                            _ = try self.setMethod(result, "add", &.{k});
+                    }
+                } else {
+                    while (true) {
+                        const r = try self.callValueWithThis(other_next, &.{}, other_iter);
+                        if (!builtins.isRealObject(r)) return self.throwError("TypeError", "iterator.next() did not return an object");
+                        if ((try self.getProperty(r, "done")).toBoolean()) break;
+                        const k = try self.getProperty(r, "value");
+                        if (setContains(o, k))
+                            _ = try self.setMethod(result, "delete", &.{k})
+                        else if (!setContains(result, k))
+                            _ = try self.setMethod(result, "add", &.{k});
+                    }
                 }
                 return Value.obj(result);
             }
