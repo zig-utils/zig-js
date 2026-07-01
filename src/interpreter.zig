@@ -15,6 +15,7 @@ const gil_mod = @import("gil.zig");
 const stack_scan = @import("stack_scan.zig");
 const gc_mod = @import("gc.zig");
 const jsthread = @import("jsthread.zig");
+const iana_zones = @import("iana_zones.zig");
 const Compiler = @import("compiler.zig").Compiler;
 const Shape = @import("shape.zig").Shape;
 const unicode_case = @import("unicode_case.zig");
@@ -19879,14 +19880,7 @@ fn intlSupportedValuesOfFn(ctx: *anyopaque, this: Value, args: []const Value) va
     else if (std.mem.eql(u8, key, "currency"))
         &supported_currencies
     else if (std.mem.eql(u8, key, "timeZone"))
-        &.{
-            "Etc/GMT+1",  "Etc/GMT+10", "Etc/GMT+11", "Etc/GMT+12", "Etc/GMT+2",
-            "Etc/GMT+3",  "Etc/GMT+4",  "Etc/GMT+5",  "Etc/GMT+6",  "Etc/GMT+7",
-            "Etc/GMT+8",  "Etc/GMT+9",  "Etc/GMT-1",  "Etc/GMT-10", "Etc/GMT-11",
-            "Etc/GMT-12", "Etc/GMT-13", "Etc/GMT-14", "Etc/GMT-2",  "Etc/GMT-3",
-            "Etc/GMT-4",  "Etc/GMT-5",  "Etc/GMT-6",  "Etc/GMT-7",  "Etc/GMT-8",
-            "Etc/GMT-9",  "UTC",
-        }
+        &iana_zones.ids
     else if (std.mem.eql(u8, key, "collation"))
         &.{ "emoji", "eor", "phonebk" }
     else if (std.mem.eql(u8, key, "unit"))
