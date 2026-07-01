@@ -16058,7 +16058,13 @@ fn iterHelperNextFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
                     };
                     h.inner_next = if (h.inner.?.isObject()) try self.getProperty(h.inner.?, "next") else Value.undef();
                 }
-                const is = try self.iterStepM(h.inner.?, h.inner_next);
+                const is = self.iterStepM(h.inner.?, h.inner_next) catch |e| {
+                    if (e == error.Throw) {
+                        h.done = true;
+                        self.iteratorCloseKeepingThrow(h.src);
+                    }
+                    return e;
+                };
                 if (is.done) {
                     h.inner = null;
                     continue;
@@ -16282,7 +16288,7 @@ fn iterHelperReturnFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
 
 fn iterMapFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject()) return self.throwError("TypeError", "Iterator.prototype.map called on a non-object");
+    if (!builtins.isRealObject(this)) return self.throwError("TypeError", "Iterator.prototype.map called on a non-object");
     const f = if (args.len > 0) args[0] else Value.undef();
     if (!f.isCallable()) {
         self.iteratorClose(this) catch {};
@@ -16292,7 +16298,7 @@ fn iterMapFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!
 }
 fn iterFilterFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject()) return self.throwError("TypeError", "Iterator.prototype.filter called on a non-object");
+    if (!builtins.isRealObject(this)) return self.throwError("TypeError", "Iterator.prototype.filter called on a non-object");
     const f = if (args.len > 0) args[0] else Value.undef();
     if (!f.isCallable()) {
         self.iteratorClose(this) catch {};
@@ -16302,7 +16308,7 @@ fn iterFilterFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostErr
 }
 fn iterFlatMapFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject()) return self.throwError("TypeError", "Iterator.prototype.flatMap called on a non-object");
+    if (!builtins.isRealObject(this)) return self.throwError("TypeError", "Iterator.prototype.flatMap called on a non-object");
     const f = if (args.len > 0) args[0] else Value.undef();
     if (!f.isCallable()) {
         self.iteratorClose(this) catch {};
@@ -16332,13 +16338,13 @@ fn iterLimitArg(self: *Interpreter, this: Value, arg_v: Value, comptime who: []c
 }
 fn iterTakeFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject()) return self.throwError("TypeError", "Iterator.prototype.take called on a non-object");
+    if (!builtins.isRealObject(this)) return self.throwError("TypeError", "Iterator.prototype.take called on a non-object");
     const lim = try iterLimitArg(self, this, if (args.len > 0) args[0] else Value.undef(), "Iterator.prototype.take");
     return makeIterHelper(self, this, .take, Value.undef(), lim);
 }
 fn iterDropFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject()) return self.throwError("TypeError", "Iterator.prototype.drop called on a non-object");
+    if (!builtins.isRealObject(this)) return self.throwError("TypeError", "Iterator.prototype.drop called on a non-object");
     const lim = try iterLimitArg(self, this, if (args.len > 0) args[0] else Value.undef(), "Iterator.prototype.drop");
     return makeIterHelper(self, this, .drop, Value.undef(), lim);
 }
@@ -16400,6 +16406,10 @@ fn iterForEachFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
 }
 fn iterReduceFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const saved_env = enterNativeMethodRealm(self);
+    defer if (saved_env) |env| {
+        self.env = env;
+    };
     if (!this.isObject()) return self.throwError("TypeError", "Iterator.prototype.reduce called on a non-object");
     const f = if (args.len > 0) args[0] else Value.undef();
     if (!f.isCallable()) {
