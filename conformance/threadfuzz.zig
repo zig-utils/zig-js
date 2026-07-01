@@ -4072,6 +4072,329 @@ fn runReturnedWaitAsyncLifecycleInterleaving(gpa: std.mem.Allocator, seed: u64) 
     return true;
 }
 
+fn runPromisePublicationLifecycleInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
+    const seed_marker = seed % 10_000;
+    const fulfilled_value_marker = 100_000 + seed_marker;
+    const fulfilled_async_marker = 110_000 + seed_marker;
+    const fulfilled_join_marker = 120_000 + seed_marker;
+    const reject_reason_marker = 130_000 + seed_marker;
+    const reject_async_marker = 140_000 + seed_marker;
+    const reject_join_marker = 150_000 + seed_marker;
+    const thenable_value_marker = 160_000 + seed_marker;
+    const thenable_async_marker = 170_000 + seed_marker;
+    const thenable_join_marker = 180_000 + seed_marker;
+    const throw_reason_marker = 190_000 + seed_marker;
+    const throw_async_marker = 200_000 + seed_marker;
+    const expected_score = fulfilled_async_marker + fulfilled_join_marker +
+        reject_async_marker + reject_join_marker +
+        thenable_async_marker + thenable_join_marker +
+        throw_async_marker;
+
+    const ctx = js.Context.createWith(gpa, .{ .enable_threads = true, .enable_gc = true }) catch {
+        std.debug.print("seed {d}: promise-publication lifecycle context creation failed\n", .{seed});
+        return false;
+    };
+    defer ctx.destroy();
+
+    const src_a = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  globalThis.__promisePublicationScore = 0;
+        \\  globalThis.__promisePublicationJoinThrow = 0;
+        \\  globalThis.__promisePublicationThrowPromiseSeen = 0;
+        \\  globalThis.__promisePublicationRejectPromiseSeen = 0;
+        \\  globalThis.__promisePublicationThenableCalls = 0;
+        \\  const gate = {{ rejectReady: 0, releaseReject: 0, thenReady: 0, releaseThen: 0 }};
+        \\  const root = {{ seed: {d}, tag: 'promise-publication-lifecycle-root' }};
+        \\
+        \\  const fulfilled = new Thread((marker, seedMarker) => {{
+        \\    const value = {{
+        \\      marker,
+        \\      nested: {{ seed: seedMarker, label: 'fulfilled-child-promise-value' }},
+        \\      payload: marker + 1,
+        \\    }};
+        \\    return Promise.resolve(value);
+        \\  }}, {d}, {d});
+        \\  const fulfilledAsyncRoot = {{ marker: {d}, nested: {{ root, label: 'fulfilled-asyncJoin-root' }} }};
+        \\  fulfilled.asyncJoin().then(
+        \\    (v) => {{
+        \\      if (v && v.marker === {d} && v.nested.seed === {d} &&
+        \\          fulfilledAsyncRoot.marker === {d} && fulfilledAsyncRoot.nested.root.seed === {d})
+        \\        globalThis.__promisePublicationScore += fulfilledAsyncRoot.marker;
+        \\      else
+        \\        globalThis.__promisePublicationScore = -1000000;
+        \\    }},
+        \\    () => {{ globalThis.__promisePublicationScore = -1000000; }});
+        \\  const fulfilledJoined = fulfilled.join();
+        \\  if (!(fulfilledJoined instanceof Promise))
+        \\    throw new Error('join did not return fulfilled child Promise');
+        \\  const fulfilledJoinRoot = {{ marker: {d}, nested: {{ root, label: 'fulfilled-join-root' }} }};
+        \\  fulfilledJoined.then(
+        \\    (v) => {{
+        \\      if (v && v.marker === {d} && v.nested.seed === {d} &&
+        \\          fulfilledJoinRoot.marker === {d} && fulfilledJoinRoot.nested.root.seed === {d})
+        \\        globalThis.__promisePublicationScore += fulfilledJoinRoot.marker;
+        \\      else
+        \\        globalThis.__promisePublicationScore = -1000000;
+        \\    }},
+        \\    () => {{ globalThis.__promisePublicationScore = -1000000; }});
+        \\
+        \\  const rejected = new Thread((gate, marker, seedMarker) => {{
+        \\    const reason = {{
+        \\      marker,
+        \\      nested: {{ seed: seedMarker, label: 'rejected-child-promise-reason' }},
+        \\      promise: Promise.resolve(marker + 7),
+        \\    }};
+        \\    Atomics.store(gate, 'rejectReady', 1);
+        \\    Atomics.notify(gate, 'rejectReady');
+        \\    while (Atomics.load(gate, 'releaseReject') === 0)
+        \\      Atomics.wait(gate, 'releaseReject', 0, 10);
+        \\    return Promise.reject(reason);
+        \\  }}, gate, {d}, {d});
+        \\  const rejectAsyncRoot = {{ marker: {d}, nested: {{ root, label: 'rejected-asyncJoin-root' }} }};
+        \\  rejected.asyncJoin().then(
+        \\    () => {{ globalThis.__promisePublicationScore = -1000000; }},
+        \\    (e) => {{
+        \\      if (e && e.marker === {d} && e.nested.seed === {d} &&
+        \\          rejectAsyncRoot.marker === {d} && rejectAsyncRoot.nested.root.seed === {d}) {{
+        \\        globalThis.__promisePublicationScore += rejectAsyncRoot.marker;
+        \\        e.promise.then((v) => {{
+        \\          if (v === {d})
+        \\            globalThis.__promisePublicationRejectPromiseSeen++;
+        \\          else
+        \\            globalThis.__promisePublicationScore = -1000000;
+        \\        }});
+        \\      }} else {{
+        \\        globalThis.__promisePublicationScore = -1000000;
+        \\      }}
+        \\    }});
+        \\  while (Atomics.load(gate, 'rejectReady') === 0)
+        \\    Atomics.wait(gate, 'rejectReady', 0, 1);
+        \\  Atomics.store(gate, 'releaseReject', 1);
+        \\  Atomics.notify(gate, 'releaseReject');
+        \\  const rejectedJoined = rejected.join();
+        \\  if (!(rejectedJoined instanceof Promise))
+        \\    throw new Error('join did not return rejected child Promise');
+        \\  const rejectJoinRoot = {{ marker: {d}, nested: {{ root, label: 'rejected-join-root' }} }};
+        \\  rejectedJoined.then(
+        \\    () => {{ globalThis.__promisePublicationScore = -1000000; }},
+        \\    (e) => {{
+        \\      if (e && e.marker === {d} && e.nested.seed === {d} &&
+        \\          rejectJoinRoot.marker === {d} && rejectJoinRoot.nested.root.seed === {d}) {{
+        \\        globalThis.__promisePublicationScore += rejectJoinRoot.marker;
+        \\        e.promise.then((v) => {{
+        \\          if (v === {d})
+        \\            globalThis.__promisePublicationRejectPromiseSeen++;
+        \\          else
+        \\            globalThis.__promisePublicationScore = -1000000;
+        \\        }});
+        \\      }} else {{
+        \\        globalThis.__promisePublicationScore = -1000000;
+        \\      }}
+        \\    }});
+        \\
+    ,
+        .{
+            seed_marker,
+            fulfilled_value_marker,
+            seed_marker,
+            fulfilled_async_marker,
+            fulfilled_value_marker,
+            seed_marker,
+            fulfilled_async_marker,
+            seed_marker,
+            fulfilled_join_marker,
+            fulfilled_value_marker,
+            seed_marker,
+            fulfilled_join_marker,
+            seed_marker,
+            reject_reason_marker,
+            seed_marker,
+            reject_async_marker,
+            reject_reason_marker,
+            seed_marker,
+            reject_async_marker,
+            seed_marker,
+            reject_reason_marker + 7,
+            reject_join_marker,
+            reject_reason_marker,
+            seed_marker,
+            reject_join_marker,
+            seed_marker,
+            reject_reason_marker + 7,
+        },
+    );
+    defer gpa.free(src_a);
+
+    const src_b = try std.fmt.allocPrint(
+        gpa,
+        \\  const thenable = new Thread((gate, marker, seedMarker) => {{
+        \\    const localRoot = {{ marker, nested: {{ seed: seedMarker, label: 'thenable-child-root' }} }};
+        \\    const result = {{
+        \\      marker,
+        \\      nested: {{ seed: seedMarker, label: 'thenable-child-result' }},
+        \\      then(resolve, reject) {{
+        \\        globalThis.__promisePublicationThenableCalls++;
+        \\        if (localRoot.marker === marker && localRoot.nested.seed === seedMarker)
+        \\          resolve(marker);
+        \\        else
+        \\          reject({{ marker: -1 }});
+        \\      }},
+        \\    }};
+        \\    Atomics.store(gate, 'thenReady', 1);
+        \\    Atomics.notify(gate, 'thenReady');
+        \\    while (Atomics.load(gate, 'releaseThen') === 0)
+        \\      Atomics.wait(gate, 'releaseThen', 0, 10);
+        \\    return result;
+        \\  }}, gate, {d}, {d});
+        \\  const thenAsyncRoot = {{ marker: {d}, nested: {{ root, label: 'thenable-asyncJoin-root' }} }};
+        \\  thenable.asyncJoin().then(
+        \\    (v) => {{
+        \\      if (v === {d} && thenAsyncRoot.marker === {d} && thenAsyncRoot.nested.root.seed === {d})
+        \\        globalThis.__promisePublicationScore += thenAsyncRoot.marker;
+        \\      else
+        \\        globalThis.__promisePublicationScore = -1000000;
+        \\    }},
+        \\    () => {{ globalThis.__promisePublicationScore = -1000000; }});
+        \\  while (Atomics.load(gate, 'thenReady') === 0)
+        \\    Atomics.wait(gate, 'thenReady', 0, 1);
+        \\  Atomics.store(gate, 'releaseThen', 1);
+        \\  Atomics.notify(gate, 'releaseThen');
+        \\  const thenJoined = thenable.join();
+        \\  if (!thenJoined || typeof thenJoined.then !== 'function' ||
+        \\      thenJoined.marker !== {d} || thenJoined.nested.seed !== {d})
+        \\    throw new Error('join did not return child thenable');
+        \\  const thenJoinRoot = {{ marker: {d}, nested: {{ root, label: 'thenable-join-root' }} }};
+        \\  Promise.resolve(thenJoined).then(
+        \\    (v) => {{
+        \\      if (v === {d} && thenJoinRoot.marker === {d} && thenJoinRoot.nested.root.seed === {d})
+        \\        globalThis.__promisePublicationScore += thenJoinRoot.marker;
+        \\      else
+        \\        globalThis.__promisePublicationScore = -1000000;
+        \\    }},
+        \\    () => {{ globalThis.__promisePublicationScore = -1000000; }});
+        \\
+        \\  const thrown = new Thread((marker, seedMarker) => {{
+        \\    throw {{
+        \\      marker,
+        \\      nested: {{ seed: seedMarker, label: 'thrown-child-object' }},
+        \\      promise: Promise.resolve(marker + 7),
+        \\    }};
+        \\  }}, {d}, {d});
+        \\  const throwAsyncRoot = {{ marker: {d}, nested: {{ root, label: 'throw-asyncJoin-root' }} }};
+        \\  thrown.asyncJoin().then(
+        \\    () => {{ globalThis.__promisePublicationScore = -1000000; }},
+        \\    (e) => {{
+        \\      if (e && e.marker === {d} && e.nested.seed === {d} &&
+        \\          throwAsyncRoot.marker === {d} && throwAsyncRoot.nested.root.seed === {d}) {{
+        \\        globalThis.__promisePublicationScore += throwAsyncRoot.marker;
+        \\        e.promise.then((v) => {{
+        \\          if (v === {d})
+        \\            globalThis.__promisePublicationThrowPromiseSeen = 1;
+        \\          else
+        \\            globalThis.__promisePublicationScore = -1000000;
+        \\        }});
+        \\      }} else {{
+        \\        globalThis.__promisePublicationScore = -1000000;
+        \\      }}
+        \\    }});
+        \\  try {{
+        \\    thrown.join();
+        \\    throw new Error('throwing child returned normally');
+        \\  }} catch (e) {{
+        \\    if (!e || e.marker !== {d} || e.nested.seed !== {d})
+        \\      throw new Error('bad thrown child publication through join');
+        \\    globalThis.__promisePublicationJoinThrow = e.marker;
+        \\  }}
+        \\  return 1;
+        \\}})();
+        \\
+    ,
+        .{
+            thenable_value_marker,
+            seed_marker,
+            thenable_async_marker,
+            thenable_value_marker,
+            thenable_async_marker,
+            seed_marker,
+            thenable_value_marker,
+            seed_marker,
+            thenable_join_marker,
+            thenable_value_marker,
+            thenable_join_marker,
+            seed_marker,
+            throw_reason_marker,
+            seed_marker,
+            throw_async_marker,
+            throw_reason_marker,
+            seed_marker,
+            throw_async_marker,
+            seed_marker,
+            throw_reason_marker + 7,
+            throw_reason_marker,
+            seed_marker,
+        },
+    );
+    defer gpa.free(src_b);
+
+    const src = try std.mem.concat(gpa, u8, &.{ src_a, src_b });
+    defer gpa.free(src);
+
+    const result = ctx.evaluate(src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: promise-publication lifecycle JS threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!result.isNumber() or result.asNum() != 1) {
+        std.debug.print("seed {d}: promise-publication lifecycle result got {d}\n", .{ seed, if (result.isNumber()) result.asNum() else -1 });
+        return false;
+    }
+    const score = ctx.evaluate("globalThis.__promisePublicationScore") catch |err| {
+        std.debug.print("seed {d}: cannot read promise-publication score: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    if (!score.isNumber() or score.asNum() != @as(f64, @floatFromInt(expected_score))) {
+        std.debug.print("seed {d}: promise-publication score got {d}, expected {d}\n", .{ seed, if (score.isNumber()) score.asNum() else -1, expected_score });
+        return false;
+    }
+    const thrown = ctx.evaluate("globalThis.__promisePublicationJoinThrow") catch |err| {
+        std.debug.print("seed {d}: cannot read promise-publication thrown marker: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    if (!thrown.isNumber() or thrown.asNum() != @as(f64, @floatFromInt(throw_reason_marker))) {
+        std.debug.print("seed {d}: promise-publication thrown marker got {d}, expected {d}\n", .{ seed, if (thrown.isNumber()) thrown.asNum() else -1, throw_reason_marker });
+        return false;
+    }
+    const throw_promise_seen = ctx.evaluate("globalThis.__promisePublicationThrowPromiseSeen") catch |err| {
+        std.debug.print("seed {d}: cannot read promise-publication thrown promise marker: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    if (!throw_promise_seen.isNumber() or throw_promise_seen.asNum() != 1) {
+        std.debug.print("seed {d}: promise-publication thrown promise marker got {d}\n", .{ seed, if (throw_promise_seen.isNumber()) throw_promise_seen.asNum() else -1 });
+        return false;
+    }
+    const reject_promise_seen = ctx.evaluate("globalThis.__promisePublicationRejectPromiseSeen") catch |err| {
+        std.debug.print("seed {d}: cannot read promise-publication rejected promise marker: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    if (!reject_promise_seen.isNumber() or reject_promise_seen.asNum() != 2) {
+        std.debug.print("seed {d}: promise-publication rejected promise marker got {d}\n", .{ seed, if (reject_promise_seen.isNumber()) reject_promise_seen.asNum() else -1 });
+        return false;
+    }
+    const thenable_calls = ctx.evaluate("globalThis.__promisePublicationThenableCalls") catch |err| {
+        std.debug.print("seed {d}: cannot read promise-publication thenable calls: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    if (!thenable_calls.isNumber() or thenable_calls.asNum() != 2) {
+        std.debug.print("seed {d}: promise-publication thenable calls got {d}\n", .{ seed, if (thenable_calls.isNumber()) thenable_calls.asNum() else -1 });
+        return false;
+    }
+    return true;
+}
+
 fn runFinalizationCleanupInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
     var prng = std.Random.DefaultPrng.init(seed ^ 0x6669_6e61_6c69_7a65);
     const r = prng.random();
@@ -10494,6 +10817,22 @@ pub fn main(init: std.process.Init) !void {
         if (wfail != 0) std.process.exit(1);
         return;
     };
+    // `threadfuzz promisepub <iters> <seed>`: focused lifecycle repro for
+    // child-returned fulfilled/rejected promises, user thenables, and thrown
+    // objects published through join/asyncJoin.
+    if (first) |a| if (std.mem.eql(u8, a, "promisepub")) {
+        if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch 1;
+        if (args.next()) |b| base_seed = std.fmt.parseInt(u64, b, 10) catch 1;
+        var ppfail: usize = 0;
+        var ppi: usize = 0;
+        while (ppi < iters) : (ppi += 1) {
+            const seed = base_seed +% ppi;
+            if (!(try runPromisePublicationLifecycleInterleaving(gpa, seed))) ppfail += 1;
+        }
+        std.debug.print("threadfuzz promisepub: {d} programs from seed {d}, {d} failures\n", .{ iters, base_seed, ppfail });
+        if (ppfail != 0) std.process.exit(1);
+        return;
+    };
     // `threadfuzz condasyncfinal <iters> <seed>`: focused lifecycle repro for
     // Condition.asyncWait reacquire delivery plus asyncJoin and cleanup roots.
     if (first) |a| if (std.mem.eql(u8, a, "condasyncfinal")) {
@@ -11054,7 +11393,9 @@ pub fn main(init: std.process.Init) !void {
     // thread exceptions must keep identity
     // through blocking and async joiners,
     // thread-returned waitAsync promises must settle through join/asyncJoin
-    // while waiters resume cleanly, cleanup delivery must match exact count/sum
+    // while waiters resume cleanly, child-returned fulfilled/rejected promises
+    // and user thenables must publish through join/asyncJoin with correct
+    // assimilation, cleanup delivery must match exact count/sum
     // oracles when thread results are observed through both join paths, when
     // unregister tokens suppress some records, after parked property and
     // condition waiters resume, and while typed-array waitAsync promise
@@ -11106,6 +11447,7 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runModuleWorkerExceptionFinalizationCleanupInterleaving(gpa, seed))) lfail += 1;
             if (!(try runThreadExceptionWaiterInterleaving(gpa, seed))) lfail += 1;
             if (!(try runReturnedWaitAsyncLifecycleInterleaving(gpa, seed))) lfail += 1;
+            if (!(try runPromisePublicationLifecycleInterleaving(gpa, seed))) lfail += 1;
             if (!(try runFinalizationCleanupInterleaving(gpa, seed))) lfail += 1;
             if (!(try runFinalizationAsyncJoinCleanupInterleaving(gpa, seed))) lfail += 1;
             if (!(try runFinalizationWaiterCleanupInterleaving(gpa, seed))) lfail += 1;
@@ -11127,7 +11469,7 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runThreadLocalFinalizationCleanupInterleaving(gpa, seed))) lfail += 1;
             if (!(try runNestedThreadAsyncJoinCleanupInterleaving(gpa, seed))) lfail += 1;
         }
-        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 36, base_seed, lfail });
+        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 37, base_seed, lfail });
         if (lfail != 0) std.process.exit(1);
         return;
     };

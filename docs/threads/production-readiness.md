@@ -252,6 +252,9 @@ as embedders exercise more threaded host patterns.
   reachable only through the native waiter queue until notification, keeps
   pending `Thread.asyncJoin` fulfillment/rejection promise reactions reachable
   only through native completion records until the child threads are released,
+  keeps child-returned fulfilled/rejected promises, user thenables, and thrown
+  objects published through both `join()` and `asyncJoin()` in the lifecycle
+  profile,
   keeps a registered object reachable only through
   `ThreadLocal.value` while that owner is parked, keeps a completed-but-unjoined
   `Thread` result object and a completed-but-unjoined thrown exception object

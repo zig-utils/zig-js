@@ -233,8 +233,10 @@ isolated Worker structured-clone after the creator Thread exits, plus a sibling
 Worker clone/finalization cleanup/transfer observer variant,
 cleanup delivery interleaved with `join()` /
 `asyncJoin()` and unregister-token suppression, cleanup delivery after parked
-property/condition waiters resume, plus `ThreadLocal` isolation across normal,
-throwing, nested, and async-joined thread lifecycles, plus
+property/condition waiters resume, child-returned fulfilled/rejected promises
+and user thenables published through both `join()` and `asyncJoin()`, plus
+`ThreadLocal` isolation across normal, throwing, nested, and async-joined
+thread lifecycles, plus
 `ThreadLocal` values registered with `FinalizationRegistry` across
 park/resume/clear/join cleanup lifecycles with exact cleanup count/sum delivery
 after quiescent collection. It also parks child Threads behind parent-created
@@ -243,7 +245,7 @@ then verifies child release, nested `ThreadLocal` roots, rerouted async
 settlement, and exact finalization cleanup after both thread layers exit. It now
 also composes isolated Worker termination with shared-realm teardown that
 abandons child-owned typed-array `waitAsync` tickets, rejects pending
-`asyncJoin` reactions, and delivers exact cleanup. Each seed currently runs 36
+`asyncJoin` reactions, and delivers exact cleanup. Each seed currently runs 37
 deterministic lifecycle
 subprograms.
 
