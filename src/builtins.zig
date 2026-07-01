@@ -253,29 +253,25 @@ fn digitValue(c: u8) ?u8 {
 
 // ---- Math --------------------------------------------------------------
 
-fn num1(args: []const Value) f64 {
-    return arg(args, 0).toNumber();
+fn num1(ctx: *anyopaque, args: []const Value) HostError!f64 {
+    return interp(ctx).toNumberV(arg(args, 0));
 }
 
 pub fn mathFloor(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
-    _ = ctx;
     _ = this;
-    return Value.num(@floor(num1(args)));
+    return Value.num(@floor(try num1(ctx, args)));
 }
 pub fn mathCeil(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
-    _ = ctx;
     _ = this;
-    return Value.num(@ceil(num1(args)));
+    return Value.num(@ceil(try num1(ctx, args)));
 }
 pub fn mathTrunc(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
-    _ = ctx;
     _ = this;
-    return Value.num(@trunc(num1(args)));
+    return Value.num(@trunc(try num1(ctx, args)));
 }
 pub fn mathRound(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
-    _ = ctx;
     _ = this;
-    const n = num1(args);
+    const n = try num1(ctx, args);
     if (std.math.isNan(n) or std.math.isInf(n) or n == 0) return Value.num(n); // preserves ±0
     if (@abs(n) >= 0x1.0p52) return Value.num(n);
     // Halves round toward +Infinity, but a value rounding to zero keeps the
@@ -285,19 +281,16 @@ pub fn mathRound(ctx: *anyopaque, this: Value, args: []const Value) HostError!Va
     return Value.num(@floor(n + 0.5));
 }
 pub fn mathAbs(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
-    _ = ctx;
     _ = this;
-    return Value.num(@abs(num1(args)));
+    return Value.num(@abs(try num1(ctx, args)));
 }
 pub fn mathSqrt(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
-    _ = ctx;
     _ = this;
-    return Value.num(@sqrt(num1(args)));
+    return Value.num(@sqrt(try num1(ctx, args)));
 }
 pub fn mathSign(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
-    _ = ctx;
     _ = this;
-    const n = num1(args);
+    const n = try num1(ctx, args);
     if (std.math.isNan(n)) return Value.num(n);
     if (n > 0) return Value.num(1);
     if (n < 0) return Value.num(-1);
@@ -354,9 +347,8 @@ pub fn mathMin(ctx: *anyopaque, this: Value, args: []const Value) HostError!Valu
 pub fn unaryMath(comptime f: fn (f64) f64) value.NativeFn {
     return struct {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
-            _ = ctx;
             _ = this;
-            return Value.num(f(arg(args, 0).toNumber()));
+            return Value.num(f(try interp(ctx).toNumberV(arg(args, 0))));
         }
     }.call;
 }
@@ -401,6 +393,8 @@ pub const mfns = struct {
         return std.math.atanh(x);
     }
     pub fn exp(x: f64) f64 {
+        if (x == 1) return std.math.e;
+        if (x == -1) return 1.0 / std.math.e;
         return @exp(x);
     }
     pub fn expm1(x: f64) f64 {
@@ -410,6 +404,7 @@ pub const mfns = struct {
         return @log(x);
     }
     pub fn log2(x: f64) f64 {
+        if (exactLog2Power(x)) |e| return @floatFromInt(e);
         return @log2(x);
     }
     pub fn log10(x: f64) f64 {
@@ -429,10 +424,25 @@ pub const mfns = struct {
     }
 };
 
+fn exactLog2Power(x: f64) ?i32 {
+    if (x <= 0 or !std.math.isFinite(x)) return null;
+    const bits: u64 = @bitCast(x);
+    const exp_bits: u11 = @intCast((bits >> 52) & 0x7ff);
+    const mant = bits & ((@as(u64, 1) << 52) - 1);
+    if (exp_bits != 0) {
+        if (mant != 0) return null;
+        return @as(i32, @intCast(exp_bits)) - 1023;
+    }
+    if (mant == 0 or (mant & (mant - 1)) != 0) return null;
+    return @as(i32, @intCast(@ctz(mant))) - 1074;
+}
+
 pub fn mathAtan2(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
-    _ = ctx;
     _ = this;
-    return Value.num(std.math.atan2(arg(args, 0).toNumber(), arg(args, 1).toNumber()));
+    const self = interp(ctx);
+    const y = try self.toNumberV(arg(args, 0));
+    const x = try self.toNumberV(arg(args, 1));
+    return Value.num(std.math.atan2(y, x));
 }
 
 pub fn mathHypot(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
@@ -630,16 +640,16 @@ pub fn mathSumPrecise(ctx: *anyopaque, this: Value, args: []const Value) HostErr
 }
 
 pub fn mathClz32(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
-    _ = ctx;
     _ = this;
-    return Value.num(@floatFromInt(@clz(arg(args, 0).toUint32())));
+    const n = try interp(ctx).toNumberV(arg(args, 0));
+    return Value.num(@floatFromInt(@clz(Value.uint32FromF64(n))));
 }
 
 pub fn mathImul(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
-    _ = ctx;
     _ = this;
-    const a: i32 = arg(args, 0).toInt32();
-    const b: i32 = arg(args, 1).toInt32();
+    const self = interp(ctx);
+    const a: i32 = @bitCast(Value.uint32FromF64(try self.toNumberV(arg(args, 0))));
+    const b: i32 = @bitCast(Value.uint32FromF64(try self.toNumberV(arg(args, 1))));
     return Value.num(@floatFromInt(a *% b));
 }
 
