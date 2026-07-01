@@ -2080,8 +2080,11 @@ pub const Context = struct {
         // linking errors in sibling imports.
         for (m.items) |item| switch (item.*) {
             .import_decl => |imp| for (imp.entries) |entry| {
-                if (isSourceImport(entry) and !isHostModuleSourceSpecifier(imp.specifier))
-                    return self.moduleTypeError("source phase import is not available");
+                if (isSourceImport(entry) and !isHostModuleSourceSpecifier(imp.specifier)) {
+                    if (std.mem.startsWith(u8, imp.specifier, "<"))
+                        return self.moduleTypeError("source phase import is not available");
+                    return self.moduleError("source phase import is not available");
+                }
             },
             else => {},
         };
