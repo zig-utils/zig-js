@@ -327,7 +327,10 @@ queued realm tasks and retry-front lock grants. The public condition corpus
 cases exercise the single wake-list notify path for async-only and sync
 notify-all wakes: `api/condition-async-wait.js`,
 `sync/condition-wait-notify.js`, and
-`sync/condition-notify-all-multi-waiter.js`. `property waiter removal
+`sync/condition-notify-all-multi-waiter.js`. The same notify path batches
+contiguous same-lock async condition regrants under one lock acquisition per
+fixed-size stack batch instead of retaking that lock once per async waiter.
+`property waiter removal
 stable-compacts timed-out sync ticket` covers the property waiter cleanup shape,
 `waiter table notify unlinks sync tickets and preserves async FIFO tail` plus
 `waiter table harvestAsync stable-compacts settled owner tickets` cover the

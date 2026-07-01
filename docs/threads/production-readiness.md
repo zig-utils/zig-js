@@ -166,8 +166,11 @@ Known performance/maturity work:
   creation and realm task enqueueing no longer run inside that queue critical
   section; mixed sync/async wakeups keep the existing sync handoff ordering.
   Notify also records woken sync/async entries in one pre-sized wake list rather
-  than allocating separate per-kind lists for each notification, and sync
-  handoff completion uses a pending-waiter countdown instead of rescanning the
+  than allocating separate per-kind lists for each notification. Contiguous
+  async condition regrants for the same lock are prepared in fixed-size stack
+  batches and applied under one lock acquisition per batch, so `notifyAll()`
+  no longer retakes that lock once per async waiter, and sync handoff completion
+  uses a pending-waiter countdown instead of rescanning the
   wake list until every ticket acknowledges.
 - Property-mode `Atomics.notify` stable-compacts matching waiter queues in one
   pass. Sync wait stack tickets are unlinked before signal, so awakened peers no

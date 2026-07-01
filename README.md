@@ -315,7 +315,10 @@ threading architecture:
   condition notifications now deliver their lock regrants after releasing the
   condition queue mutex, so no-fn release-function creation and realm task
   enqueueing do not lengthen that critical section; mixed sync/async wakeups
-  keep the existing sync handoff ordering. Notify now also tracks the woken
+  keep the existing sync handoff ordering. Contiguous async condition regrants
+  for the same lock are prepared in fixed-size stack batches and applied under
+  one lock acquisition per batch, so `notifyAll()` no longer retakes that lock
+  once per async waiter. Notify now also tracks the woken
   sync/async entries in one pre-sized wake list instead of allocating separate
   per-kind wake lists for every notification, and sync handoff completion uses
   a pending-waiter countdown instead of rescanning the wake list until every

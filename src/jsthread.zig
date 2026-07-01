@@ -1399,10 +1399,7 @@ fn condNotify(self: *Interpreter, rec: *CondRecord, count: usize) value.HostErro
         // condition critical section.
         rec.mutex.unlock(io);
         locked = false;
-        for (woken.items) |entry| switch (entry) {
-            .sync => unreachable,
-            .asynchronous => |w| wakeAsyncCondWaiter(self, w),
-        };
+        wakeAsyncCondWaiters(self, woken.items);
         return n;
     }
     rec.sync_handoff_pending = sync_count;
@@ -1410,10 +1407,7 @@ fn condNotify(self: *Interpreter, rec: *CondRecord, count: usize) value.HostErro
     // Mixed wakeups keep the old ordering shape: async regrants are prepared
     // before the sync handoff wait, while the condition mutex still serializes
     // the notify operation.
-    for (woken.items) |entry| switch (entry) {
-        .sync => {},
-        .asynchronous => |w| wakeAsyncCondWaiter(self, w),
-    };
+    wakeAsyncCondWaiters(self, woken.items);
     rec.cond.broadcast(io);
     // Depth-free handoff (notify-all-shared-lock) + FIFO against
     // async regrants (condition-async-wait): loop until every woken
@@ -2781,23 +2775,59 @@ fn condAsyncWaitFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.
 /// Notify-side wake of an async cond waiter: the wake is a no-fn asyncHold
 /// grant — the promise resolves holding the lock again, with a release()
 /// function (the corpus consumes `p.then(release => ...)`).
-fn wakeAsyncCondWaiter(self: *Interpreter, w: *AsyncCondWaiter) void {
-    const job = self.arena.create(HoldJob) catch return;
+fn createAsyncCondReacquireJob(self: *Interpreter, w: *AsyncCondWaiter) ?*HoldJob {
+    const job = self.arena.create(HoldJob) catch return null;
     job.* = .{ .lock = w.lock, .outer = w.outer, .cb = null, .release_state = .{ .lock = w.lock }, .condition_async_reacquire = true };
     barrierHoldJob(job);
-    var enqueue_now = false;
-    w.lock.mutex.lockUncancelable(agent.engineIo());
-    if (!w.lock.locked and w.lock.sync_waiting == 0) {
-        w.lock.locked = true;
-        w.lock.holder = async_holder;
-        w.lock.grant_pending = true;
-        enqueue_now = true;
-    } else {
-        w.lock.appendPending(self.arena, job) catch {
-            w.lock.mutex.unlock(agent.engineIo());
-            return;
-        };
+    return job;
+}
+
+fn grantAsyncCondReacquireLocked(lock: *LockRecord, arena: std.mem.Allocator, job: *HoldJob) bool {
+    if (!lock.locked and lock.sync_waiting == 0) {
+        lock.locked = true;
+        lock.holder = async_holder;
+        lock.grant_pending = true;
+        return true;
     }
-    w.lock.mutex.unlock(agent.engineIo());
-    if (enqueue_now) enqueueHoldJob(self, job) catch {};
+    lock.appendPending(arena, job) catch return false;
+    return false;
+}
+
+fn wakeAsyncCondWaiters(self: *Interpreter, entries: []const CondEntry) void {
+    var batch: [256]*HoldJob = undefined;
+    var i: usize = 0;
+    const io = agent.engineIo();
+    while (i < entries.len) {
+        const first = switch (entries[i]) {
+            .sync => {
+                i += 1;
+                continue;
+            },
+            .asynchronous => |w| w,
+        };
+        const lock = first.lock;
+        var batch_len: usize = 0;
+        while (i < entries.len and batch_len < batch.len) {
+            const w = switch (entries[i]) {
+                .sync => break,
+                .asynchronous => |w| w,
+            };
+            if (w.lock != lock) break;
+            if (createAsyncCondReacquireJob(self, w)) |job| {
+                batch[batch_len] = job;
+                batch_len += 1;
+            }
+            i += 1;
+        }
+        if (batch_len == 0) continue;
+
+        var ready: ?*HoldJob = null;
+        lock.mutex.lockUncancelable(io);
+        for (batch[0..batch_len]) |job| {
+            if (grantAsyncCondReacquireLocked(lock, self.arena, job))
+                ready = job;
+        }
+        lock.mutex.unlock(io);
+        if (ready) |job| enqueueHoldJob(self, job) catch {};
+    }
 }
