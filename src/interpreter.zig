@@ -6252,10 +6252,29 @@ pub const Interpreter = struct {
         return Value.obj(obj);
     }
 
+    fn newArrayInRealm(self: *Interpreter, env: *Environment) EvalError!Value {
+        const obj = try gc_mod.allocObj(self.arena);
+        const proto: ?*value.Object = blk: {
+            const av = env.get("Array") orelse break :blk null;
+            if (!av.isObject()) break :blk null;
+            const p = av.asObj().getOwn("prototype") orelse break :blk null;
+            break :blk if (p.isObject()) p.asObj() else null;
+        };
+        obj.* = .{ .is_array = true, .proto = proto };
+        return Value.obj(obj);
+    }
+
     /// ArrayCreate(length): allocate a fresh array with a logical length.
     fn newArrayWithLength(self: *Interpreter, len: usize) EvalError!Value {
         if (len > 4294967295) return self.throwError("RangeError", "Invalid array length");
         const arr = try self.newArray();
+        arr.asObj().extendArrayLengthFloor(len);
+        return arr;
+    }
+
+    fn newArrayWithLengthInRealm(self: *Interpreter, env: *Environment, len: usize) EvalError!Value {
+        if (len > 4294967295) return self.throwError("RangeError", "Invalid array length");
+        const arr = try self.newArrayInRealm(env);
         arr.asObj().extendArrayLengthFloor(len);
         return arr;
     }
@@ -9783,7 +9802,11 @@ pub const Interpreter = struct {
     /// non-constructor species throws a TypeError, and any other constructor is
     /// `new`-ed with the length (its abrupt completion propagates).
     pub fn arraySpeciesCreate(self: *Interpreter, original: Value, len: usize) EvalError!Value {
-        if (!original.isObject() or !try objectToStringIsArray(self, original.asObj())) return self.newArrayWithLength(len);
+        const default_realm: *Environment = if (self.active_native) |nat| blk: {
+            if (nat.private_data) |pd| break :blk @ptrCast(@alignCast(pd));
+            break :blk self.env;
+        } else self.env;
+        if (!original.isObject() or !try objectToStringIsArray(self, original.asObj())) return self.newArrayWithLengthInRealm(default_realm, len);
         const c = try self.getProperty(original, "constructor");
         if (c.isObject() and (c.asObj().is_symbol or c.asObj().is_bigint))
             return self.throwError("TypeError", "Array species is not a constructor");
@@ -9791,22 +9814,22 @@ pub const Interpreter = struct {
         // realm's %Array% is treated as the default — ArrayCreate, WITHOUT
         // consulting its @@species (so a cross-realm species getter is untouched).
         if (c.isObject() and c.asObj().native == builtins.arrayConstructor) {
-            const cur = self.env.get("Array");
-            if (cur == null or !cur.?.isObject() or c.asObj() != cur.?.asObj()) return self.newArrayWithLength(len);
+            const cur = default_realm.get("Array");
+            if (cur == null or !cur.?.isObject() or c.asObj() != cur.?.asObj()) return self.newArrayWithLengthInRealm(default_realm, len);
         }
         var ctor: Value = c;
         if (c.isObject()) {
-            const skey = self.wellKnownSymbolKey("species") orelse return self.newArrayWithLength(len);
+            const skey = self.wellKnownSymbolKey("species") orelse return self.newArrayWithLengthInRealm(default_realm, len);
             const s = try self.getProperty(c, skey);
-            if (s.isNull() or s.isUndefined()) return self.newArrayWithLength(len);
+            if (s.isNull() or s.isUndefined()) return self.newArrayWithLengthInRealm(default_realm, len);
             ctor = s;
         } else if (c.isUndefined()) {
-            return self.newArrayWithLength(len);
+            return self.newArrayWithLengthInRealm(default_realm, len);
         }
         // The intrinsic Array constructor → a plain array (fast path, matching
         // `new Array(len)` then filling in 0..len).
-        if (self.env.get("Array")) |arr| {
-            if (ctor.isObject() and arr.isObject() and ctor.asObj() == arr.asObj()) return self.newArrayWithLength(len);
+        if (default_realm.get("Array")) |arr| {
+            if (ctor.isObject() and arr.isObject() and ctor.asObj() == arr.asObj()) return self.newArrayWithLengthInRealm(default_realm, len);
         }
         if (!isConstructorValue(ctor)) return self.throwError("TypeError", "Array species is not a constructor");
         return self.construct(ctor, &.{Value.num(@floatFromInt(len))});
@@ -10805,7 +10828,7 @@ pub const Interpreter = struct {
         // no materialized snapshot (which would double-read getters). For a real
         // array the dense element store is used directly.
         var array_like_len: usize = 0;
-        if (!o.is_array) {
+        if (!o.is_array and !eq(name, "concat")) {
             // ToLength(ToNumber(obj.length)) — `toNumberV` runs valueOf/toString
             // and throws a TypeError for a Symbol/BigInt `length`.
             const lenf = try self.toNumberV(try self.getProperty(Value.obj(o), "length"));
@@ -11057,6 +11080,7 @@ pub const Interpreter = struct {
                 }
                 k += 1;
             }
+            if (!dense) try self.setMember(result, "length", Value.num(@floatFromInt(k)));
             return result;
         }
         if (eq(name, "concat")) {
@@ -25912,7 +25936,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     array_proto.* = .{ .proto = object_proto, .is_array = true };
     try array_proto.setOwn(a, root_shape, "length", Value.num(0));
     try array_proto.setAttr(a, "length", .{ .writable = true, .enumerable = false, .configurable = false });
-    try setArrayProtoMethods(a, root_shape, array_proto, .{
+    try setArrayProtoMethods(a, root_shape, array_proto, env, .{
         .{ "join", 1 },        .{ "push", 1 },           .{ "pop", 0 },           .{ "shift", 0 },
         .{ "unshift", 1 },     .{ "slice", 2 },          .{ "splice", 2 },        .{ "concat", 1 },
         .{ "reverse", 0 },     .{ "indexOf", 1 },        .{ "lastIndexOf", 1 },   .{ "includes", 1 },
@@ -26633,8 +26657,8 @@ fn setProtoMethods(a: std.mem.Allocator, rs: *Shape, proto: *value.Object, compt
 /// name-keyed dispatch) makes a *borrowed* generic method work — e.g. `obj.slice
 /// = Array.prototype.slice; obj.slice(0, 3)` — where `obj` has an own property of
 /// that name (which would otherwise suppress the array-generic path).
-fn setArrayProtoMethods(a: std.mem.Allocator, rs: *Shape, proto: *value.Object, comptime specs: anytype) EvalError!void {
-    inline for (specs) |s| try setNative(a, rs, proto, s[0], s[1], arrayProtoMethod(s[0]));
+fn setArrayProtoMethods(a: std.mem.Allocator, rs: *Shape, proto: *value.Object, env: *Environment, comptime specs: anytype) EvalError!void {
+    inline for (specs) |s| try setNativeWithData(a, rs, proto, s[0], s[1], arrayProtoMethod(s[0]), @ptrCast(env));
 }
 
 fn arrayProtoMethod(comptime name: []const u8) value.NativeFn {
