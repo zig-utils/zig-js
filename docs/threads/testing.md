@@ -503,6 +503,7 @@ Run the reference audit after promotion attempts:
 ```sh
 zig build threads-reference-audit
 python3 tools/threads-reference-audit.py --format markdown
+python3 tools/threads-reference-audit.py --format json
 python3 tools/threads-reference-audit.py --probe-candidates
 python3 tools/threads-reference-audit.py --run-probes --probe-timeout 60
 python3 tools/threads-reference-audit.py --run-probes --expect-current-blockers --probe-timeout 60
@@ -514,6 +515,9 @@ out or failing probe is not promotion evidence; keep the file reference-only
 until the underlying behavior lands and the focused run passes reliably. Failed
 probes print focused runner evidence before the Zig build tail so the concrete
 JS error, corpus failure, or timeout is visible in one command.
+`--format json` emits the same allowlist counts, reference-only categories,
+closest probe commands, and expected current blocker evidence in a stable
+machine-readable form for CI reports, dashboards, or issue-tracker updates.
 `--expect-current-blockers` flips that maintenance check into a negative gate:
 it succeeds only while the nearest probes still fail or time out with the
 documented blocker evidence. If it starts failing because a probe passes, or

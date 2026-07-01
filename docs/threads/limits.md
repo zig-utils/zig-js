@@ -397,7 +397,10 @@ context APIs.
   `python3 tools/threads-reference-audit.py --run-probes --expect-current-blockers --probe-timeout 60`
   to keep the nearest-probe negative baseline honest: it passes only while
   those files still fail or time out with their documented blocker evidence,
-  and fails when a candidate starts passing or changes failure shape.
+  and fails when a candidate starts passing or changes failure shape. Use
+  `python3 tools/threads-reference-audit.py --format json` when automation needs
+  the same counts, blocker categories, promotion probes, and expected blocker
+  evidence without scraping human-readable output.
 - **TC39 structs tracking.** Keep `proposal-structs` tracking in
   [P8-structs.md](./P8-structs.md) and this issue; do not split it into a
   parallel tracker.

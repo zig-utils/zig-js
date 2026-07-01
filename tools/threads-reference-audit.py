@@ -9,6 +9,7 @@ outside the allowlist to have an explicit blocker category.
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import subprocess
 import sys
@@ -201,6 +202,65 @@ def print_markdown(
             print(f"- `{case}`")
 
 
+def probe_candidates(
+    classified: dict[str, list[str]],
+    uncategorized: dict[str, list[str]],
+) -> list[dict[str, object]]:
+    candidates: list[dict[str, object]] = []
+    for case in PROMOTION_PROBES:
+        cats = classified.get(case) or uncategorized.get(case)
+        if cats is None:
+            continue
+        expected = PROMOTION_PROBE_EXPECTATIONS.get(case)
+        candidates.append({
+            "case": case,
+            "categories": cats,
+            "command": [
+                "zig",
+                "build",
+                "threads-test",
+                f"-Dthreads-case={case}",
+            ],
+            "expected_current_blocker": None if expected is None else {
+                "status": expected.status,
+                "evidence": list(expected.evidence),
+            },
+        })
+    return candidates
+
+
+def audit_json_summary(
+    remaining: list[str],
+    classified: dict[str, list[str]],
+    uncategorized: dict[str, list[str]],
+    missing_allowlist: list[str],
+) -> dict[str, object]:
+    by_category: dict[str, list[str]] = defaultdict(list)
+    for case, cats in classified.items():
+        for cat in cats:
+            by_category[cat].append(case)
+
+    helpers = sum(1 for case in remaining if case in HELPERS)
+    executable_total = len(all_cases()) - helpers
+    reference_executable = len(remaining) - helpers
+    return {
+        "allowlist": {
+            "executable_passed": len(load_allowlist()),
+            "executable_total": executable_total,
+        },
+        "reference_only": {
+            "total": len(remaining),
+            "executable": reference_executable,
+            "helper_preload": helpers,
+            "cases": remaining,
+        },
+        "categories": {cat: sorted(cases) for cat, cases in sorted(by_category.items())},
+        "uncategorized": sorted(uncategorized),
+        "missing_allowlist_entries": missing_allowlist,
+        "promotion_probe_candidates": probe_candidates(classified, uncategorized),
+    }
+
+
 def print_probe_candidates(
     classified: dict[str, list[str]],
     uncategorized: dict[str, list[str]],
@@ -214,12 +274,11 @@ def print_probe_candidates(
         print()
         print("promotion probe candidates:")
 
-    for case in PROMOTION_PROBES:
-        cats = classified.get(case) or uncategorized.get(case)
-        if cats is None:
-            continue
+    for candidate in probe_candidates(classified, uncategorized):
+        case = candidate["case"]
+        cats = candidate["categories"]
         reason = ", ".join(cats) if cats else "uncategorized"
-        command = f"zig build threads-test -Dthreads-case={case}"
+        command = " ".join(candidate["command"])
         if markdown:
             print(f"- `{case}`: {reason}. Probe with `{command}`.")
         else:
@@ -248,17 +307,26 @@ def probe_evidence_lines(lines: list[str]) -> list[str]:
     return evidence
 
 
-def print_probe_output_tail(output: str | bytes, *, prefix: str = "      ") -> None:
+def probe_output_summary(output: str | bytes) -> dict[str, list[str]]:
     if isinstance(output, bytes):
         output = output.decode(errors="replace")
     lines = [line for line in output.splitlines() if line.strip()]
     evidence = probe_evidence_lines(lines)
+    return {
+        "evidence": evidence[-10:],
+        "tail": lines[-8:],
+    }
+
+
+def print_probe_output_tail(output: str | bytes, *, prefix: str = "      ") -> None:
+    summary = probe_output_summary(output)
+    evidence = summary["evidence"]
     if evidence:
         print(f"{prefix}runner evidence:")
-        for line in evidence[-10:]:
+        for line in evidence:
             print(f"{prefix}  {line}")
         print(f"{prefix}build tail:")
-    for line in lines[-8:]:
+    for line in summary["tail"]:
         print(f"{prefix}{line}")
 
 
@@ -266,26 +334,32 @@ def check_probe_expectation(
     case: str,
     status: str,
     output: str | bytes | None,
+    *,
+    emit: bool = True,
 ) -> bool:
     expected = PROMOTION_PROBE_EXPECTATIONS.get(case)
     if expected is None:
         return True
     if status != expected.status:
-        print(f"    UNEXPECTED: expected {expected.status}, got {status}")
+        if emit:
+            print(f"    UNEXPECTED: expected {expected.status}, got {status}")
         return False
     if not expected.evidence:
-        print("    expected blocker confirmed")
+        if emit:
+            print("    expected blocker confirmed")
         return True
     if isinstance(output, bytes):
         output = output.decode(errors="replace")
     haystack = output or ""
     missing = [needle for needle in expected.evidence if needle not in haystack]
     if missing:
-        print("    UNEXPECTED: missing expected blocker evidence:")
-        for needle in missing:
-            print(f"      - {needle}")
+        if emit:
+            print("    UNEXPECTED: missing expected blocker evidence:")
+            for needle in missing:
+                print(f"      - {needle}")
         return False
-    print("    expected blocker confirmed")
+    if emit:
+        print("    expected blocker confirmed")
     return True
 
 
@@ -295,10 +369,13 @@ def run_probe_candidates(
     *,
     timeout_s: float,
     expect_current_blockers: bool,
-) -> int:
-    print()
-    print(f"running promotion probes (timeout {timeout_s:g}s each):")
+    emit: bool = True,
+) -> tuple[int, list[dict[str, object]]]:
+    if emit:
+        print()
+        print(f"running promotion probes (timeout {timeout_s:g}s each):")
     failures = 0
+    results: list[dict[str, object]] = []
     for case in PROMOTION_PROBES:
         cats = classified.get(case) or uncategorized.get(case)
         if cats is None:
@@ -312,7 +389,8 @@ def run_probe_candidates(
             "--summary",
             "all",
         ]
-        print(f"  - {case}: {reason}")
+        if emit:
+            print(f"  - {case}: {reason}")
         try:
             proc = subprocess.run(
                 cmd,
@@ -323,34 +401,71 @@ def run_probe_candidates(
                 timeout=timeout_s,
             )
         except subprocess.TimeoutExpired as exc:
-            print("    TIMEOUT")
-            if exc.stdout:
-                print_probe_output_tail(exc.stdout)
+            if emit:
+                print("    TIMEOUT")
+            output = exc.stdout or ""
+            result = {
+                "case": case,
+                "status": "timeout",
+                "exit_code": None,
+                "expected_current_blocker": expect_current_blockers,
+                "output": probe_output_summary(output),
+            }
+            if emit and exc.stdout:
+                print_probe_output_tail(output)
             if expect_current_blockers:
-                if not check_probe_expectation(case, "timeout", exc.stdout):
+                ok = check_probe_expectation(case, "timeout", output, emit=emit)
+                result["expectation_matched"] = ok
+                if not ok:
                     failures += 1
             else:
+                result["expectation_matched"] = None
                 failures += 1
+            results.append(result)
             continue
         if proc.returncode == 0:
-            print("    PASS")
+            if emit:
+                print("    PASS")
+            result = {
+                "case": case,
+                "status": "pass",
+                "exit_code": proc.returncode,
+                "expected_current_blocker": expect_current_blockers,
+                "output": probe_output_summary(proc.stdout),
+            }
             if expect_current_blockers:
-                if not check_probe_expectation(case, "pass", proc.stdout):
-                    failures += 1
-        else:
-            print(f"    FAIL exit={proc.returncode}")
-            print_probe_output_tail(proc.stdout)
-            if expect_current_blockers:
-                if not check_probe_expectation(case, "fail", proc.stdout):
+                ok = check_probe_expectation(case, "pass", proc.stdout, emit=emit)
+                result["expectation_matched"] = ok
+                if not ok:
                     failures += 1
             else:
+                result["expectation_matched"] = None
+        else:
+            if emit:
+                print(f"    FAIL exit={proc.returncode}")
+                print_probe_output_tail(proc.stdout)
+            result = {
+                "case": case,
+                "status": "fail",
+                "exit_code": proc.returncode,
+                "expected_current_blocker": expect_current_blockers,
+                "output": probe_output_summary(proc.stdout),
+            }
+            if expect_current_blockers:
+                ok = check_probe_expectation(case, "fail", proc.stdout, emit=emit)
+                result["expectation_matched"] = ok
+                if not ok:
+                    failures += 1
+            else:
+                result["expectation_matched"] = None
                 failures += 1
-    return failures
+        results.append(result)
+    return failures, results
 
 
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--format", choices=("text", "markdown"), default="text")
+    parser.add_argument("--format", choices=("text", "markdown", "json"), default="text")
     parser.add_argument("--fail-on-uncategorized", action="store_true")
     parser.add_argument(
         "--probe-candidates",
@@ -381,18 +496,28 @@ def main(argv: list[str]) -> int:
     remaining, classified, uncategorized, missing_allowlist = audit()
     if args.format == "markdown":
         print_markdown(remaining, classified, uncategorized, missing_allowlist)
+    elif args.format == "json":
+        pass
     else:
         print_text(remaining, classified, uncategorized, missing_allowlist)
-    if args.probe_candidates:
+    if args.probe_candidates and args.format != "json":
         print_probe_candidates(classified, uncategorized, markdown=args.format == "markdown")
     probe_failures = 0
+    probe_results: list[dict[str, object]] = []
     if args.run_probes:
-        probe_failures = run_probe_candidates(
+        probe_failures, probe_results = run_probe_candidates(
             classified,
             uncategorized,
             timeout_s=args.probe_timeout,
             expect_current_blockers=args.expect_current_blockers,
+            emit=args.format != "json",
         )
+    if args.format == "json":
+        summary = audit_json_summary(remaining, classified, uncategorized, missing_allowlist)
+        if args.run_probes:
+            summary["probe_results"] = probe_results
+            summary["probe_failures"] = probe_failures
+        print(json.dumps(summary, indent=2, sort_keys=True))
 
     if missing_allowlist:
         return 1
