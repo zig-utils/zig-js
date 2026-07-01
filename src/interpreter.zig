@@ -1578,7 +1578,13 @@ pub const Interpreter = struct {
             const found_var: ?Value = if (alias == null) e.vars.get(name) else null;
             e.unlockBindings();
             if (alias) |a| return a.env.get(a.name);
-            if (found_var) |v| return v;
+            if (found_var) |v| {
+                if (e.parent == null and !e.consts.contains(name)) {
+                    const g = self.currentGlobalObject() orelse return v;
+                    if (objectHasOwn(g, name)) return try self.getProperty(Value.obj(g), name);
+                }
+                return v;
+            }
             if (e.with_object) |wo| {
                 if (try self.withHasBinding(wo, name)) {
                     // Record the WithBaseObject so a call with this identifier as
@@ -2898,6 +2904,7 @@ pub const Interpreter = struct {
     /// existing identifier / member / pattern.
     fn bindLoopTarget(self: *Interpreter, decl_kind: ?ast.DeclKind, target: *Node, v: Value) EvalError!void {
         if (decl_kind) |k| {
+            if (k == .@"var") return self.assignTo(target, v);
             const saved = self.binding_const;
             self.binding_const = (k == .@"const");
             defer self.binding_const = saved;
@@ -25767,9 +25774,9 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     array_ns.* = .{ .native = builtins.arrayConstructor, .native_ctor = true, .private_data = @ptrCast(env) };
     try installNativeProps(a, root_shape, array_ns, "Array", 1);
     try setNative(a, root_shape, array_ns, "isArray", 1, builtins.arrayIsArray);
-    try setNative(a, root_shape, array_ns, "of", 0, builtins.arrayOf);
-    try setNative(a, root_shape, array_ns, "from", 1, builtins.arrayFrom);
-    try setNative(a, root_shape, array_ns, "fromAsync", 1, builtins.arrayFromAsync);
+    try setNativeWithData(a, root_shape, array_ns, "of", 0, builtins.arrayOf, @ptrCast(env));
+    try setNativeWithData(a, root_shape, array_ns, "from", 1, builtins.arrayFrom, @ptrCast(env));
+    try setNativeWithData(a, root_shape, array_ns, "fromAsync", 1, builtins.arrayFromAsync, @ptrCast(env));
     try env.put("Array", Value.obj(array_ns));
 
     // ---- Real prototype objects ----------------------------------------
@@ -26665,6 +26672,11 @@ fn arrayProtoMethod(comptime name: []const u8) value.NativeFn {
     return struct {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
+            const saved_env = self.env;
+            if (self.active_native) |callee| {
+                if (callee.private_data) |pd| self.env = @ptrCast(@alignCast(pd));
+            }
+            defer self.env = saved_env;
             if (this.isNull() or this.isUndefined())
                 return self.throwError("TypeError", "Array.prototype." ++ name ++ " called on null or undefined");
             const o = try self.toObject(this);

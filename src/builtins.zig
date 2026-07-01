@@ -880,6 +880,17 @@ pub fn objectFromEntries(ctx: *anyopaque, this: Value, args: []const Value) Host
 
 pub fn arrayOf(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
     const self = interp(ctx);
+    const saved_env = self.env;
+    var swapped_env = false;
+    if (self.active_native) |callee| {
+        if (callee.private_data) |pd| {
+            self.env = @ptrCast(@alignCast(pd));
+            swapped_env = true;
+        }
+    }
+    defer if (swapped_env) {
+        self.env = saved_env;
+    };
     // Array.of uses `this` as a constructor when it is one (so a subclass's
     // Array.of produces a subclass instance), via Construct(C, « len »).
     const len = args.len;
@@ -980,6 +991,17 @@ fn setLengthOrThrow(self: *Interpreter, target: Value, len: usize) HostError!voi
 
 pub fn arrayFrom(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
     const self = interp(ctx);
+    const saved_env = self.env;
+    var swapped_env = false;
+    if (self.active_native) |callee| {
+        if (callee.private_data) |pd| {
+            self.env = @ptrCast(@alignCast(pd));
+            swapped_env = true;
+        }
+    }
+    defer if (swapped_env) {
+        self.env = saved_env;
+    };
     const C = this; // the receiver: a constructor when called as Array.from / subclass.use_ctor below
     const items = arg(args, 0);
     const map_fn = arg(args, 1);
