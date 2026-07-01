@@ -37647,6 +37647,15 @@ test "interpreter function declaration and call" {
         \\add(40, 2)
     );
     try std.testing.expectEqual(@as(f64, 42), v.asNum());
+    try std.testing.expect((try evalSource(arena.allocator(),
+        \\var inParen;
+        \\(inParen) = function () {};
+        \\inParen.name === ""
+    )).asBool());
+    try std.testing.expect((try evalSource(arena.allocator(),
+        \\for (var forInHead = function () {} in {}) {}
+        \\forInHead.name === "forInHead"
+    )).asBool());
 }
 
 test "interpreter recursion (factorial)" {

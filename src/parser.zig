@@ -93,11 +93,18 @@ pub const Parser = struct {
     /// is refined to a pattern (where `__proto__` is just a property key).
     /// Same lifecycle as `pending_cover_inits`.
     pending_proto_dup: std.AutoHashMapUnmanaged(*Node, void) = .empty,
-    /// Expression nodes that were wrapped in parentheses. A parenthesized
+    /// Expression nodes that were wrapped in parentheses, keyed by node address
+    /// so the mark is true pointer identity rather than any structural hashing.
+    /// A parenthesized
     /// array/object literal is not a valid destructuring assignment target
     /// (`({}) = 1`, `([a]) = b`), so `litToPattern` rejects one; a parenthesized
     /// identifier/member stays a valid target and is routed around litToPattern.
-    paren_wrapped: std.AutoHashMapUnmanaged(*Node, void) = .empty,
+    paren_wrapped: std.AutoHashMapUnmanaged(usize, void) = .empty,
+    /// Identifier name for the just-parsed parenthesized target in `(... ) =`.
+    /// This feeds NamedEvaluation, where `(f) = function(){}` must not name the
+    /// anonymous function even though the parenthesized identifier remains a valid
+    /// assignment target.
+    paren_assign_target_name: ?[]const u8 = null,
     /// The `[~In]` grammar parameter: true while parsing a classic `for (init;…)`
     /// init expression, where a top-level `in` (binary or `#x in obj`) is
     /// forbidden so it can't be confused with a for-in head. Reset to `[+In]`
@@ -349,6 +356,41 @@ pub const Parser = struct {
         const p = try self.arena.create(Node);
         p.* = node;
         return p;
+    }
+
+    fn markParenWrapped(self: *Parser, node: *Node) ParseError!void {
+        try self.paren_wrapped.put(self.arena, @intFromPtr(node), {});
+    }
+
+    fn isParenWrapped(self: *Parser, node: *Node) bool {
+        return self.paren_wrapped.contains(@intFromPtr(node));
+    }
+
+    fn parenWrappedIdentifierBefore(self: *Parser, pos: usize, name: []const u8) bool {
+        if (pos == 0 or self.tokens[pos - 1].kind != .rparen) return false;
+        var i = pos;
+        var depth: usize = 0;
+        var saw_ident = false;
+        var ident_matches = false;
+        while (i > 0) {
+            i -= 1;
+            const t = self.tokens[i];
+            switch (t.kind) {
+                .rparen => depth += 1,
+                .lparen => {
+                    if (depth == 0) return false;
+                    depth -= 1;
+                    if (depth == 0) return saw_ident and ident_matches;
+                },
+                .identifier => {
+                    if (depth != 1 or saw_ident) return false;
+                    saw_ident = true;
+                    ident_matches = std.mem.eql(u8, t.text, name);
+                },
+                else => if (depth == 1) return false,
+            }
+        }
+        return false;
     }
 
     /// NamedEvaluation (applied at parse time): an *anonymous* function/class
@@ -1274,7 +1316,7 @@ pub const Parser = struct {
     /// pattern (the cover-grammar reinterpretation).
     fn litToPattern(self: *Parser, node: *Node) ParseError!*Node {
         // A parenthesized array/object literal can't be a destructuring target.
-        if (self.paren_wrapped.contains(node)) return ParseError.InvalidAssignmentTarget;
+        if (self.isParenWrapped(node)) return ParseError.InvalidAssignmentTarget;
         switch (node.*) {
             .array_lit => |elems| {
                 // `[...x,]` — a trailing comma after the rest element is invalid in
@@ -1607,6 +1649,7 @@ pub const Parser = struct {
                 self.no_in = true;
                 var_init = try self.parseExpression();
                 self.no_in = saved_no_in;
+                nameAnon(var_init.?, target.identifier);
             }
             // `in`/`of` written with a Unicode escape (`of`) is never the
             // contextual keyword, so it cannot introduce an iteration head.
@@ -2292,11 +2335,15 @@ pub const Parser = struct {
             // Strict mode forbids assigning to `eval`/`arguments`.
             if (self.strict and target.* == .identifier and isEvalOrArguments(target.identifier))
                 return ParseError.UnexpectedToken;
-            _ = self.advance();
-            const value = try self.parseAssignment();
             // A parenthesized LHS (`(f) = function(){}`) is not an IdentifierRef,
             // so NamedEvaluation does not apply — the function stays anonymous.
-            const lhs_paren = self.paren_wrapped.contains(target);
+            const assign_pos = self.pos;
+            const lhs_paren = self.isParenWrapped(target) or
+                (target.* == .identifier and self.paren_assign_target_name != null and std.mem.eql(u8, target.identifier, self.paren_assign_target_name.?)) or
+                (target.* == .identifier and self.parenWrappedIdentifierBefore(assign_pos, target.identifier));
+            self.paren_assign_target_name = null;
+            _ = self.advance();
+            const value = try self.parseAssignment();
             if (target.* == .identifier and !lhs_paren) nameAnon(value, target.identifier); // `f = function(){}`
             return self.alloc(.{ .assign = .{ .target = target, .value = value, .target_parenthesized = lhs_paren } });
         }
@@ -3949,7 +3996,8 @@ pub const Parser = struct {
                 // Record the parenthesization: a parenthesized array/object
                 // literal is not a valid destructuring assignment target
                 // (`({}) = 1`), even though a parenthesized identifier/member is.
-                try self.paren_wrapped.put(self.arena, e, {});
+                try self.markParenWrapped(e);
+                self.paren_assign_target_name = if (self.check(.assign) and e.* == .identifier) e.identifier else null;
                 return e;
             },
             .identifier => {
