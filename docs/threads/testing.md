@@ -222,6 +222,9 @@ typed-array `waitAsync` settlement interleaved with `asyncJoin` reactions and
 exact `FinalizationRegistry` cleanup delivery, deterministic
 `Condition.asyncWait` reacquire delivery interleaved with `join()` /
 `asyncJoin()` reactions and exact `FinalizationRegistry` cleanup delivery,
+proposal-style `Atomics.Mutex` / `Atomics.Condition.waitFor` token waiters
+that take both notify and timeout paths while `asyncJoin` observers and exact
+cleanup share the same lifecycle window,
 `Lock.asyncHold()` barging where a sync hold legally overtakes a queued no-fn
 async ticket before `await` delivers its release function, no-fn
 `Lock.asyncHold()` release-function delivery while property and condition

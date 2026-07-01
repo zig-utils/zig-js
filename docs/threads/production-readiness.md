@@ -379,7 +379,10 @@ as embedders exercise more threaded host patterns.
   interleaved with `asyncJoin` reactions and exact `FinalizationRegistry`
   cleanup delivery, `Condition.asyncWait` reacquire delivery interleaved with
   `join()` / `asyncJoin()` reactions and exact `FinalizationRegistry` cleanup
-  delivery, teardown termination with pending `asyncJoin` rejection reactions
+  delivery, proposal-style `Atomics.Mutex` / `Atomics.Condition.waitFor` token
+  waiters that take both notify and timeout paths while `asyncJoin` observers
+  and exact cleanup share the same lifecycle window, teardown termination with
+  pending `asyncJoin` rejection reactions
   and child-owned typed-array `waitAsync` tickets that must be
   abandoned before the child exits, cross-thread `FinalizationRegistry`
   cleanup count/sum oracles, teardown termination while property `waitAsync`

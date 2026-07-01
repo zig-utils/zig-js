@@ -5191,6 +5191,251 @@ fn runConditionAsyncFinalizationCleanupInterleaving(gpa: std.mem.Allocator, seed
     return true;
 }
 
+fn runAtomicsConditionFinalizationInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
+    var prng = std.Random.DefaultPrng.init(seed ^ 0x6174_6f6d_636f_6e64);
+    const r = prng.random();
+    const n_notify = 2 + r.uintLessThan(usize, 3);
+    const n_timeout = 2 + r.uintLessThan(usize, 3);
+    const total = n_notify + n_timeout;
+    const timeout_ms = 70 + r.uintLessThan(usize, 40);
+    const seed_marker = seed % 10_000;
+    const notify_base = 610_000 + seed_marker;
+    const timeout_base = 620_000 + seed_marker;
+    const cleanup_base = 630_000 + seed_marker;
+
+    var expected_join_sum: usize = 0;
+    var expected_cleanup_sum: usize = 0;
+    var i: usize = 0;
+    while (i < n_notify) : (i += 1) {
+        expected_join_sum += notify_base + i;
+        expected_cleanup_sum += cleanup_base + i;
+    }
+    i = 0;
+    while (i < n_timeout) : (i += 1) {
+        expected_join_sum += timeout_base + i;
+        expected_cleanup_sum += cleanup_base + n_notify + i;
+    }
+
+    const ctx = js.Context.createWith(gpa, .{ .enable_threads = true, .enable_gc = true }) catch {
+        std.debug.print("seed {d}: Atomics.Condition lifecycle context creation failed\n", .{seed});
+        return false;
+    };
+    defer ctx.destroy();
+
+    const src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  globalThis.__atomicsCondCleanupCount = 0;
+        \\  globalThis.__atomicsCondCleanupSum = 0;
+        \\  globalThis.__atomicsCondAsyncScore = 0;
+        \\  globalThis.__atomicsCondAsyncCount = 0;
+        \\  globalThis.__atomicsCondRegistry = new FinalizationRegistry((held) => {{
+        \\    globalThis.__atomicsCondCleanupCount++;
+        \\    globalThis.__atomicsCondCleanupSum += held;
+        \\  }});
+        \\  const registry = globalThis.__atomicsCondRegistry;
+        \\  const cond = new Atomics.Condition();
+        \\  const mutex = new Atomics.Mutex();
+        \\  const gate = {{ ready: 0, notified: 0 }};
+        \\  for (let id = 0; id < {d}; id++)
+        \\    gate['open' + id] = false;
+        \\  const threads = [];
+        \\  const seedMarker = {d};
+        \\  function observe(t, marker, label) {{
+        \\    const reactionRoot = {{ marker, nested: {{ seed: seedMarker, label }} }};
+        \\    t.asyncJoin().then(
+        \\      (v) => {{
+        \\        if (v === marker && reactionRoot.marker === marker &&
+        \\            reactionRoot.nested.seed === seedMarker) {{
+        \\          globalThis.__atomicsCondAsyncScore += v;
+        \\          globalThis.__atomicsCondAsyncCount++;
+        \\        }} else {{
+        \\          globalThis.__atomicsCondAsyncScore = -1000000;
+        \\        }}
+        \\      }},
+        \\      () => {{ globalThis.__atomicsCondAsyncScore = -1000000; }});
+        \\  }}
+        \\  for (let id = 0; id < {d}; id++) {{
+        \\    const marker = {d} + id;
+        \\    const t = new Thread((cond, mutex, gate, registry, id, marker, held, seedMarker) => {{
+        \\      let target = {{ id, marker, seed: seedMarker, kind: 'atomics-cond-notify' }};
+        \\      registry.register(target, held);
+        \\      const root = {{ target, nested: {{ seed: seedMarker, label: 'atomics-cond-notify-root' }} }};
+        \\      const reused = new Atomics.Mutex.UnlockToken();
+        \\      const token = Atomics.Mutex.lock(mutex, reused);
+        \\      if (token !== reused || !token.locked)
+        \\        throw new Error('Atomics.Mutex.lock did not reuse token');
+        \\      Atomics.add(gate, 'ready', 1);
+        \\      Atomics.notify(gate, 'ready');
+        \\      const ok = Atomics.Condition.waitFor(cond, token, 2000, () => gate['open' + id] === true);
+        \\      if (ok !== true)
+        \\        throw new Error('Atomics.Condition.waitFor notify path timed out');
+        \\      if (!token.locked)
+        \\        throw new Error('Atomics.Condition.waitFor notify path did not reacquire token');
+        \\      if (!root.target || root.target.marker !== marker || root.nested.seed !== seedMarker)
+        \\        throw new Error('Atomics.Condition notify root lost');
+        \\      if (!token.unlock() || token.unlock())
+        \\        throw new Error('Atomics.Mutex.UnlockToken notify unlock once invariant failed');
+        \\      target = null;
+        \\      root.target = null;
+        \\      return marker;
+        \\    }}, cond, mutex, gate, registry, id, marker, {d} + id, seedMarker);
+        \\    observe(t, marker, 'atomics-cond-notify-asyncJoin');
+        \\    threads.push(t);
+        \\  }}
+        \\  for (let id = 0; id < {d}; id++) {{
+        \\    const marker = {d} + id;
+        \\    const t = new Thread((cond, mutex, gate, registry, id, marker, held, timeout, seedMarker) => {{
+        \\      let target = {{ id, marker, seed: seedMarker, kind: 'atomics-cond-timeout' }};
+        \\      registry.register(target, held);
+        \\      const root = {{ target, nested: {{ seed: seedMarker, label: 'atomics-cond-timeout-root' }} }};
+        \\      const reused = new Atomics.Mutex.UnlockToken();
+        \\      const token = Atomics.Mutex.lock(mutex, reused);
+        \\      if (token !== reused || !token.locked)
+        \\        throw new Error('Atomics.Mutex.lock timeout path did not reuse token');
+        \\      Atomics.add(gate, 'ready', 1);
+        \\      Atomics.notify(gate, 'ready');
+        \\      let predicateCalls = 0;
+        \\      const ok = Atomics.Condition.waitFor(cond, token, timeout, () => {{
+        \\        predicateCalls++;
+        \\        return false;
+        \\      }});
+        \\      if (ok !== false)
+        \\        throw new Error('Atomics.Condition.waitFor timeout path was notified');
+        \\      if (predicateCalls < 1)
+        \\        throw new Error('Atomics.Condition.waitFor timeout predicate was not called');
+        \\      if (!token.locked)
+        \\        throw new Error('Atomics.Condition.waitFor timeout path did not reacquire token');
+        \\      if (!root.target || root.target.marker !== marker || root.nested.seed !== seedMarker)
+        \\        throw new Error('Atomics.Condition timeout root lost');
+        \\      if (!token.unlock() || token.unlock())
+        \\        throw new Error('Atomics.Mutex.UnlockToken timeout unlock once invariant failed');
+        \\      target = null;
+        \\      root.target = null;
+        \\      return marker;
+        \\    }}, cond, mutex, gate, registry, id, marker, {d} + {d} + id, {d}, seedMarker);
+        \\    observe(t, marker, 'atomics-cond-timeout-asyncJoin');
+        \\    threads.push(t);
+        \\  }}
+        \\  while (Atomics.load(gate, 'ready') < {d})
+        \\    Atomics.wait(gate, 'ready', Atomics.load(gate, 'ready'), 1);
+        \\  const token = Atomics.Mutex.lock(mutex);
+        \\  for (let id = 0; id < {d}; id++)
+        \\    gate['open' + id] = true;
+        \\  const woke = Atomics.Condition.notify(cond, {d});
+        \\  if (woke !== {d})
+        \\    throw new Error('Atomics.Condition.notify woke ' + woke);
+        \\  if (!token.unlock())
+        \\    throw new Error('main token failed to unlock');
+        \\  let joinSum = 0;
+        \\  for (const t of threads)
+        \\    joinSum += t.join();
+        \\  if (joinSum !== {d})
+        \\    throw new Error('bad Atomics.Condition lifecycle join sum ' + joinSum + '/' + {d});
+        \\  threads.length = 0;
+        \\  globalThis.__atomicsCondCheck = function(expectedSum, expectedCount) {{
+        \\    if (globalThis.__atomicsCondAsyncScore !== expectedSum)
+        \\      throw new Error('bad Atomics.Condition async score ' + globalThis.__atomicsCondAsyncScore + '/' + expectedSum);
+        \\    if (globalThis.__atomicsCondAsyncCount !== expectedCount)
+        \\      throw new Error('bad Atomics.Condition async count ' + globalThis.__atomicsCondAsyncCount + '/' + expectedCount);
+        \\    return 1;
+        \\  }};
+        \\  return joinSum;
+        \\}})();
+        \\
+    ,
+        .{
+            n_notify,
+            seed_marker,
+            n_notify,
+            notify_base,
+            cleanup_base,
+            n_timeout,
+            timeout_base,
+            cleanup_base,
+            n_notify,
+            timeout_ms,
+            total,
+            n_notify,
+            n_notify,
+            n_notify,
+            expected_join_sum,
+            expected_join_sum,
+        },
+    );
+    defer gpa.free(src);
+
+    const joined = ctx.evaluate(src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: Atomics.Condition lifecycle JS threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!joined.isNumber() or joined.asNum() != @as(f64, @floatFromInt(expected_join_sum))) {
+        std.debug.print("seed {d}: Atomics.Condition lifecycle joined got {d}, expected {d}\n", .{ seed, if (joined.isNumber()) joined.asNum() else -1, expected_join_sum });
+        return false;
+    }
+
+    _ = ctx.evaluate("$drainRunLoop()") catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: Atomics.Condition lifecycle drain loop threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    const check_src = try std.fmt.allocPrint(
+        gpa,
+        "globalThis.__atomicsCondCheck({d}, {d})",
+        .{ expected_join_sum, total },
+    );
+    defer gpa.free(check_src);
+    const checked = ctx.evaluate(check_src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: Atomics.Condition lifecycle check threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!checked.isNumber() or checked.asNum() != 1) {
+        std.debug.print("seed {d}: Atomics.Condition lifecycle check got {d}\n", .{ seed, if (checked.isNumber()) checked.asNum() else -1 });
+        return false;
+    }
+
+    ctx.collectGarbage();
+    const cleanup_src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  globalThis.__atomicsCondRegistry.cleanupSome();
+        \\  if (globalThis.__atomicsCondCleanupCount !== {d})
+        \\    throw new Error('bad Atomics.Condition cleanup count ' + globalThis.__atomicsCondCleanupCount + '/' + {d});
+        \\  if (globalThis.__atomicsCondCleanupSum !== {d})
+        \\    throw new Error('bad Atomics.Condition cleanup sum ' + globalThis.__atomicsCondCleanupSum + '/' + {d});
+        \\  return globalThis.__atomicsCondCleanupCount;
+        \\}})();
+        \\
+    ,
+        .{ total, total, expected_cleanup_sum, expected_cleanup_sum },
+    );
+    defer gpa.free(cleanup_src);
+    const cleaned = ctx.evaluate(cleanup_src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: Atomics.Condition lifecycle cleanup JS threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!cleaned.isNumber() or cleaned.asNum() != @as(f64, @floatFromInt(total))) {
+        std.debug.print("seed {d}: Atomics.Condition lifecycle cleaned got {d}, expected {d}\n", .{ seed, if (cleaned.isNumber()) cleaned.asNum() else -1, total });
+        return false;
+    }
+    return true;
+}
+
 fn runMicrotaskChurnLifecycleInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
     var prng = std.Random.DefaultPrng.init(seed ^ 0x6d69_6372_6f74_6173);
     const r = prng.random();
@@ -11975,6 +12220,22 @@ pub fn main(init: std.process.Init) !void {
         if (cfail != 0) std.process.exit(1);
         return;
     };
+    // `threadfuzz atomicscondfinal <iters> <seed>`: focused lifecycle repro for
+    // proposal-style Atomics.Mutex/Condition token waits, notify/timeout paths,
+    // asyncJoin observers, and exact finalization cleanup.
+    if (first) |a| if (std.mem.eql(u8, a, "atomicscondfinal")) {
+        if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch 1;
+        if (args.next()) |b| base_seed = std.fmt.parseInt(u64, b, 10) catch 1;
+        var acfail: usize = 0;
+        var aci: usize = 0;
+        while (aci < iters) : (aci += 1) {
+            const seed = base_seed +% aci;
+            if (!(try runAtomicsConditionFinalizationInterleaving(gpa, seed))) acfail += 1;
+        }
+        std.debug.print("threadfuzz atomicscondfinal: {d} programs from seed {d}, {d} failures\n", .{ iters, base_seed, acfail });
+        if (acfail != 0) std.process.exit(1);
+        return;
+    };
     // `threadfuzz asyncholdthrow <iters> <seed>`: focused lifecycle repro for
     // asyncHold(fn) throw/release ordering plus exact finalization cleanup.
     if (first) |a| if (std.mem.eql(u8, a, "asyncholdthrow")) {
@@ -12566,7 +12827,8 @@ pub fn main(init: std.process.Init) !void {
     // delivery after parked property/condition waiters resume, typed-array
     // waitAsync settlement interleaved with asyncJoin and finalization cleanup,
     // Condition.asyncWait reacquire delivery interleaved with asyncJoin and
-    // finalization cleanup,
+    // finalization cleanup, proposal-style Atomics.Mutex/Condition token
+    // waitFor notify/timeout paths interleaved with asyncJoin and cleanup,
     // Promise reaction queue churn from asyncHold, waitAsync, asyncJoin, and
     // finalization cleanup,
     // creator-owned SAB/ArrayBuffer storage crossing isolated Worker
@@ -12612,6 +12874,9 @@ pub fn main(init: std.process.Init) !void {
     // condition waiters resume, and while typed-array waitAsync promise
     // reactions and asyncJoin reactions settle together, while asyncHold
     // callback and release-function reactions churn the same queue, when
+    // proposal-style Atomics.Mutex/Condition token waiters take both notify and
+    // timeout paths while asyncJoin observers and exact cleanup share the same
+    // lifecycle window, when
     // asyncHold callbacks throw while queued no-fn release grants and exact
     // finalization cleanup share the same delivery window, when
     // child-created SAB/ArrayBuffer storage outlives its creator Thread and is
@@ -12666,6 +12931,7 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runFinalizationWaiterCleanupInterleaving(gpa, seed))) lfail += 1;
             if (!(try runWaitAsyncFinalizationCleanupInterleaving(gpa, seed))) lfail += 1;
             if (!(try runConditionAsyncFinalizationCleanupInterleaving(gpa, seed))) lfail += 1;
+            if (!(try runAtomicsConditionFinalizationInterleaving(gpa, seed))) lfail += 1;
             if (!(try runMicrotaskChurnLifecycleInterleaving(gpa, seed))) lfail += 1;
             if (!(try runAsyncHoldThrowFinalizationInterleaving(gpa, seed))) lfail += 1;
             if (!(try runCreatorOwnedBufferLifecycleInterleaving(gpa, seed))) lfail += 1;
@@ -12683,7 +12949,7 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runThreadLocalFinalizationCleanupInterleaving(gpa, seed))) lfail += 1;
             if (!(try runNestedThreadAsyncJoinCleanupInterleaving(gpa, seed))) lfail += 1;
         }
-        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 38, base_seed, lfail });
+        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 39, base_seed, lfail });
         if (lfail != 0) std.process.exit(1);
         return;
     };
