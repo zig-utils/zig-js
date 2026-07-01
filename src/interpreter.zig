@@ -1902,7 +1902,10 @@ pub const Interpreter = struct {
             // `super()` initializes it — reading it (e.g. `super(this.x)`) is a
             // ReferenceError. `this_initialized` is true everywhere else (base
             // ctors, methods, ordinary functions), so this only fires before super().
-            .this_expr => if (self.this_initialized) self.this_value else return self.throwError("ReferenceError", "Must call super constructor before using 'this'"),
+            .this_expr => if (self.this_cell) |c| blk: {
+                if (!c.initialized) return self.throwError("ReferenceError", "Must call super constructor before using 'this'");
+                break :blk c.value;
+            } else if (self.this_initialized) self.this_value else return self.throwError("ReferenceError", "Must call super constructor before using 'this'"),
             // A class field initializer / static block is run as a method-like
             // function (it is [[Call]]ed, never [[Construct]]ed), so `new.target`
             // inside it — including inside a direct `eval` in it — is undefined.
@@ -4798,6 +4801,7 @@ pub const Interpreter = struct {
             break :blk if (p.isObject()) p.asObj() else null;
         } else self.effectiveProto(target);
         obj.* = .{ .bound = @ptrCast(bf), .proto = target_proto };
+        obj.proto_explicit_null = target_proto == null;
         // Per spec: a bound function's `length` is max(0, target.length - args)
         // and its `name` is "bound " + target.name. Both are
         // { writable: false, enumerable: false, configurable: true }.
@@ -37749,6 +37753,24 @@ test "interpreter direct eval super early errors run before side effects" {
         \\class Derived extends Base { constructor() { eval('super(42);'); } }
         \\new Derived().v
     )).asNum());
+    try std.testing.expect((try evalSource(a,
+        \\new class extends class {} {
+        \\  constructor() {
+        \\    if (eval("super(); this") !== this) return false;
+        \\    if (eval("this") !== this) return false;
+        \\  }
+        \\}();
+        \\true
+    )).asBool());
+    try std.testing.expect((try evalSource(a,
+        \\new class extends class {} {
+        \\  constructor() {
+        \\    (() => super())();
+        \\    if (eval("this") !== this) return false;
+        \\  }
+        \\}();
+        \\true
+    )).asBool());
     try std.testing.expectEqual(@as(f64, 7), (try evalSource(a,
         \\class Base { get value() { return 7; } }
         \\class Derived extends Base { method() { return eval('super.value;'); } }
@@ -38686,6 +38708,15 @@ test "interpreter class extends and super" {
         \\class B extends A {}
         \\let b = new B();
         \\b instanceof B && b instanceof A
+    )).asBool());
+    try std.testing.expect((try evalSource(a,
+        \\class F extends Function {}
+        \\let inst = new F("x", "return this.bar + x");
+        \\let bound = inst.bind({ bar: 3 }, 4);
+        \\let ok = bound instanceof F && bound() === 7;
+        \\Object.setPrototypeOf(inst, null);
+        \\bound = Function.prototype.bind.call(inst, { bar: 1 }, 3);
+        \\ok && Object.getPrototypeOf(bound) === null && bound() === 4
     )).asBool());
     // default derived constructor forwards args
     try std.testing.expectEqual(@as(f64, 42), (try evalSource(a,
