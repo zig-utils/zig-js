@@ -395,7 +395,7 @@ allocation or lifecycle changes.
 Direct `GcCellBacking` unit tests cover lazy fresh-slot bumping, free-list
 recycling, fresh-chunk cursor advancement, ownership span/hint classification,
 stats accounting, multi-chunk maintained-counter snapshots, bucket attribution,
-and bulk-teardown behavior.
+bulk-teardown behavior, and bucket-shaped delegated side frees during teardown.
 The unit suite also covers live `SharedArrayBuffer` retain release during
 context teardown across arena, no-GIL threaded, and `.gil = true` contexts.
 Collection-helper removal witnesses live in the same unit suite:

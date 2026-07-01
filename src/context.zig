@@ -280,6 +280,7 @@ pub const GcCellBacking = struct {
             self.acquire();
             defer self.unlock();
             if (self.ownsPtrLocked(idx, mem.ptr)) return new_len <= bucket_sizes[idx];
+            return self.inner.vtable.resize(self.inner.ptr, mem, alignment, new_len, ret_addr);
         }
         self.acquire();
         defer self.unlock();
@@ -295,6 +296,7 @@ pub const GcCellBacking = struct {
                 if (new_len <= bucket_sizes[idx]) return mem.ptr;
                 return null;
             }
+            return self.inner.vtable.remap(self.inner.ptr, mem, alignment, new_len, ret_addr);
         }
         self.acquire();
         defer self.unlock();
@@ -304,19 +306,22 @@ pub const GcCellBacking = struct {
     fn freeFn(ctx: *anyopaque, mem: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
         const self: *GcCellBacking = @ptrCast(@alignCast(ctx));
         if (bucketIndex(mem.len, alignment)) |idx| {
-            // Context teardown frees every bucket chunk wholesale immediately
-            // after `zig-gc` walks live cells. Avoid re-locking and re-checking
-            // ownership for each cell/side slab in that one-way phase.
-            if (self.bulk_teardown) return;
             self.acquire();
             defer self.unlock();
             if (self.ownsPtrLocked(idx, mem.ptr)) {
+                // Context teardown frees owned bucket chunks wholesale
+                // immediately after `zig-gc` walks live cells. Avoid rebuilding
+                // freelists in that one-way phase, but still delegate any
+                // bucket-shaped allocation that never belonged to a cell slab.
+                if (self.bulk_teardown) return;
                 const node: *FreeNode = @ptrCast(@alignCast(mem.ptr));
                 node.next = self.free_lists[idx];
                 self.free_lists[idx] = node;
                 self.bucket_free_counts[idx] += 1;
                 return;
             }
+            self.inner.vtable.free(self.inner.ptr, mem, alignment, ret_addr);
+            return;
         }
         self.acquire();
         defer self.unlock();
@@ -658,10 +663,12 @@ test "GC cell backing bulk teardown skips freelist rebuilds and still delegates 
     const idx = GcCellBacking.bucketIndex(200, .@"16").?;
     const cell = try a.alignedAlloc(u8, .@"16", 200);
     const side = try a.alignedAlloc(u8, .@"8", 200);
+    const bucket_shaped_side = try backing.inner.alignedAlloc(u8, .@"16", 200);
 
     backing.beginBulkTeardown();
     a.free(cell);
     a.free(side);
+    a.free(bucket_shaped_side);
 
     try std.testing.expect(backing.bulk_teardown);
     try std.testing.expectEqual(@as(?*GcCellBacking.FreeNode, null), backing.free_lists[idx]);

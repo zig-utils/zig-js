@@ -160,7 +160,10 @@ treats those as non-cells. This keeps the trace surface to runtime values only.
   instead of the entire backing. At context teardown the backing switches to
   bulk-teardown mode: `zig-gc` still finalizes every live cell, but owned cell
   frees skip freelist rebuilds because the backing releases all chunks
-  immediately afterward. Single-mutator object side stores now bypass the
+  immediately afterward. Bucket-shaped delegated side allocations are still
+  classified once and freed through the wrapped allocator, and non-owned
+  bucket-shaped resize/remap/free paths do not retake the backing lock after
+  classification. Single-mutator object side stores now bypass the
   `GcCellBacking` wrapper and allocate directly from the context allocator;
   true-parallel JS keeps the synchronized wrapper for those stores so no-GIL
   embedders are not required to provide a thread-safe allocator.

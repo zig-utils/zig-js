@@ -55,9 +55,12 @@ Known performance/maturity work:
   A per-bucket recent-chunk hint keeps repeated frees/remaps from the same slab
   on the fast path instead of restarting the bucket chunk walk each time.
   During `Context.destroy`, the backing enters bulk-teardown mode so `zig-gc`'s
-  per-cell frees do not rebuild freelists or reclassify bucket ownership
-  immediately before the backing releases whole chunks. This cuts the old
-  one-general-allocator-call-per-cell profile without changing the collector API.
+  owned-cell frees do not rebuild freelists immediately before the backing
+  releases whole chunks. Bucket-shaped delegated side allocations still classify
+  once and free through the wrapped allocator, and the non-owned bucket-shaped
+  resize/remap/free paths avoid retaking the backing lock after classification.
+  This cuts the old one-general-allocator-call-per-cell profile without
+  changing the collector API.
   The object-sized 1024/2048-byte buckets now use larger slab chunks than the
   small cell buckets, so empty-context and object-heavy profiles allocate many
   fewer object-cell chunks while preserving the small-bucket footprint.

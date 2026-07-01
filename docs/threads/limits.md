@@ -80,12 +80,15 @@ context APIs.
   during collection or teardown. Ownership lookups
   also keep a per-bucket recent-chunk hint, avoiding repeated full bucket walks
   when GC frees/remaps arrive from the same slab chunk. Context teardown also
-  skips rebuilding slab freelists and reclassifying bucket ownership for cells
-  that will be released by the following whole-chunk free. Single-mutator GC
-  object side stores bypass the cell-slab classifier and allocate from the
-  context allocator directly; true-parallel JS contexts still route side stores
-  through the synchronized backing wrapper because an embedder allocator may not
-  be thread-safe. Live `SharedArrayBuffer` retain teardown is covered for arena,
+  skips rebuilding slab freelists for owned cells that will be released by the
+  following whole-chunk free, while bucket-shaped delegated side allocations
+  still classify once and free through the wrapped allocator. Non-owned
+  bucket-shaped resize/remap/free paths also reuse the classification lock
+  instead of retaking it before delegation. Single-mutator GC object side stores
+  bypass the cell-slab classifier and allocate from the context allocator
+  directly; true-parallel JS contexts still route side stores through the
+  synchronized backing wrapper because an embedder allocator may not be
+  thread-safe. Live `SharedArrayBuffer` retain teardown is covered for arena,
   no-GIL threaded, and `.gil = true` contexts.
   Correctness is gated, but tight-loop block-scope allocation and
   create/destroy-heavy context lifecycles are still slower under the GC path than

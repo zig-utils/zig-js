@@ -273,8 +273,10 @@ threading architecture:
   allocator instead of round-tripping through that cell-slab
   classifier, while true-parallel contexts keep the synchronized backing wrapper.
   Context teardown now enters a slab bulk-teardown mode so per-cell frees do not
-  rebuild freelists or reclassify bucket ownership immediately before whole
-  chunks are released. Live `SharedArrayBuffer` retain teardown is regression
+  rebuild freelists immediately before whole chunks are released; bucket-shaped
+  delegated side allocations are still classified once and freed through the
+  wrapped allocator, so teardown only elides frees for owned cell slots. Live
+  `SharedArrayBuffer` retain teardown is regression
   covered across arena, no-GIL threaded, and `.gil = true` contexts. Keep using
   the profile attribution to drive nursery/generational work and further
   lifecycle reductions for create-per-task embedders.
