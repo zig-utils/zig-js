@@ -228,6 +228,10 @@ context APIs.
   async-hold release cleanup subprogram where no-fn `Lock.asyncHold()` release
   functions are delivered while property and condition waiters stay parked
   through a finishing sweep before exact cleanup count/sum is verified, plus a sibling
+  nested parent/child `Thread.asyncJoin` cleanup subprogram where parent
+  `ThreadLocal` roots, child `ThreadLocal` roots, child completion records, and
+  asyncJoin reactions stay live through a finishing sweep before exact cleanup
+  count/sum is verified, plus a sibling
   pending-microtask subprogram where Promise, typed-array `waitAsync`,
   `Thread.asyncJoin`, with-fn `Lock.asyncHold`, no-fn release-function, and
   `FinalizationRegistry` cleanup roots stay queued through a finishing sweep

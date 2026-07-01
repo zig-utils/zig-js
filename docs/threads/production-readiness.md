@@ -252,7 +252,8 @@ as embedders exercise more threaded host patterns.
   drives `parallel_midscript_gc`; every seed now runs a normal completion
   wait-pump subprogram, a sync-wait cleanup subprogram, a promise-publication
   subprogram, a pending-microtask subprogram, a creator-owned buffer
-  subprogram, a ThreadLocal-finalization subprogram, a
+  subprogram, a nested parent/child `Thread.asyncJoin` cleanup subprogram, a
+  ThreadLocal-finalization subprogram, a
   Thread.restrict-finalization subprogram, isolated script Worker/SAB and module
   Worker/SAB cleanup subprograms, script and module Worker
   handler-exception cleanup subprograms, script and module Worker
@@ -412,7 +413,7 @@ as embedders exercise more threaded host patterns.
   structured-clone after the creator Thread exits.
 - CI runs the fuzzer in several modes: default seeded, TSan, high-contention
   amplified, broad semantic,
-  mid-script GC wait-pump/microtask/creator-buffer/sync-wait-cleanup/asyncHold-release-cleanup/promise/teardown/Worker-SAB/Worker-exception/Worker-close/weak-collection,
+  mid-script GC wait-pump/microtask/creator-buffer/nested-asyncJoin/sync-wait-cleanup/asyncHold-release-cleanup/promise/teardown/Worker-SAB/Worker-exception/Worker-close/weak-collection,
   lifecycle, ReleaseSafe, and deterministic-result verification.
 
 Remaining: keep extending the lifecycle profile toward more cross-realm
@@ -432,7 +433,7 @@ Every pull request and push to `main` runs:
 - TSan `threadfuzz`,
 - amplified `threadfuzz`,
 - broad semantic `threadfuzz`,
-- mid-script GC wait-pump/microtask/creator-buffer/sync-wait-cleanup/asyncHold-release-cleanup/promise/teardown/Worker-SAB/Worker-exception/Worker-close/weak-collection
+- mid-script GC wait-pump/microtask/creator-buffer/nested-asyncJoin/sync-wait-cleanup/asyncHold-release-cleanup/promise/teardown/Worker-SAB/Worker-exception/Worker-close/weak-collection
   `threadfuzz`,
 - lifecycle `threadfuzz`,
 - ReleaseSafe `threadfuzz`,

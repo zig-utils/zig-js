@@ -7214,6 +7214,250 @@ fn runNestedThreadAsyncJoinCleanupInterleaving(gpa: std.mem.Allocator, seed: u64
     return true;
 }
 
+fn runMidScriptNestedThreadAsyncJoinCleanupGc(gpa: std.mem.Allocator, seed: u64) !bool {
+    var prng = std.Random.DefaultPrng.init(seed ^ 0x6d69_646e_6573_7461);
+    const r = prng.random();
+    const nparents = 2 + r.uintLessThan(usize, 4);
+    const per_child = 5 + r.uintLessThan(usize, 6);
+    const held_base = 120_000 + r.uintLessThan(usize, 20_000);
+    const rounds = 7 + r.uintLessThan(usize, 5);
+    const per_round = 580 + r.uintLessThan(usize, 360);
+    const spin_iters = 1800 + r.uintLessThan(usize, 3200);
+    const wait_timeout_ms = 1100 + r.uintLessThan(usize, 700);
+
+    var expected_join_sum: usize = 0;
+    var expected_async_score: usize = 0;
+    var expected_cleanup_sum: usize = 0;
+    var pid: usize = 0;
+    while (pid < nparents) : (pid += 1) {
+        const marker = pid + 1;
+        const child_base = (pid + 1) * 12_000;
+        var child_sum = marker;
+        var i: usize = 0;
+        while (i < per_child) : (i += 1) {
+            child_sum += child_base + i;
+            expected_cleanup_sum += held_base + pid * 100 + i;
+        }
+        expected_join_sum += marker + child_sum;
+        expected_async_score += marker + child_sum;
+    }
+    const expected_cleanup_count = nparents * per_child;
+    const expected_total = rounds * per_round + expected_join_sum;
+
+    const ctx = js.Context.createWithTestingOptions(gpa, .{
+        .enable_threads = true,
+        .enable_gc = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+        .parallel_midscript_gc = true,
+    }) catch {
+        std.debug.print("seed {d}: midgc nested thread asyncJoin cleanup context creation failed\n", .{seed});
+        return false;
+    };
+    defer ctx.destroy();
+
+    const src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  globalThis.__midgcNestedThreadAsyncScore = 0;
+        \\  globalThis.__midgcNestedThreadCleanupCount = 0;
+        \\  globalThis.__midgcNestedThreadCleanupSum = 0;
+        \\  globalThis.__midgcNestedThreadRegistry = new FinalizationRegistry((held) => {{
+        \\    globalThis.__midgcNestedThreadCleanupCount++;
+        \\    globalThis.__midgcNestedThreadCleanupSum += held;
+        \\  }});
+        \\  const registry = globalThis.__midgcNestedThreadRegistry;
+        \\  const tls = new ThreadLocal();
+        \\  const gate = {{ parentReady: 0, childReady: 0, releaseParents: 0, releaseChildren: 0 }};
+        \\  const parents = [];
+        \\  const root = {{ seed: {d}, label: 'midgc-nested-thread-root' }};
+        \\  for (let pid = 0; pid < {d}; pid++) {{
+        \\    parents.push(new Thread((pid, tls, registry, gate, perChild, heldBase, seed, root, timeout) => {{
+        \\      const marker = pid + 1;
+        \\      tls.value = {{ role: 'parent', pid, seed, marker, root }};
+        \\      const child = new Thread((pid, tls, registry, gate, perChild, heldBase, seed, root, timeout) => {{
+        \\        const marker = pid + 1;
+        \\        const childBase = (pid + 1) * 12000;
+        \\        tls.value = {{ role: 'child', pid, seed, marker, root }};
+        \\        let childSum = marker;
+        \\        for (let i = 0; i < perChild; i++) {{
+        \\          let target = {{ pid, i, seed, root, payload: 'midgc-nested-thread-cleanup-' + pid + '-' + i }};
+        \\          registry.register(target, heldBase + pid * 100 + i);
+        \\          target = null;
+        \\          childSum += childBase + i;
+        \\        }}
+        \\        Atomics.add(gate, 'childReady', 1);
+        \\        Atomics.notify(gate, 'childReady');
+        \\        while (Atomics.load(gate, 'releaseChildren') === 0)
+        \\          Atomics.wait(gate, 'releaseChildren', 0, timeout);
+        \\        const held = tls.value;
+        \\        if (!held || held.role !== 'child' || held.pid !== pid || held.seed !== seed || held.root !== root)
+        \\          throw new Error('midgc nested child ThreadLocal root lost for ' + pid);
+        \\        tls.value = undefined;
+        \\        return childSum;
+        \\      }}, pid, tls, registry, gate, perChild, heldBase, seed, root, timeout);
+        \\      const pendingChild = child.asyncJoin();
+        \\      while (Atomics.load(gate, 'childReady') <= pid)
+        \\        Atomics.wait(gate, 'childReady', Atomics.load(gate, 'childReady'), 1);
+        \\      Atomics.add(gate, 'parentReady', 1);
+        \\      Atomics.notify(gate, 'parentReady');
+        \\      while (Atomics.load(gate, 'releaseParents') === 0)
+        \\        Atomics.wait(gate, 'releaseParents', 0, timeout);
+        \\      const held = tls.value;
+        \\      if (!held || held.role !== 'parent' || held.pid !== pid || held.seed !== seed || held.root !== root)
+        \\        throw new Error('midgc nested parent ThreadLocal root lost for ' + pid);
+        \\      tls.value = undefined;
+        \\      return {{ pid, marker, child, pendingChild, root }};
+        \\    }}, pid, tls, registry, gate, {d}, {d}, {d}, root, {d}));
+        \\  }}
+        \\  while (Atomics.load(gate, 'parentReady') < {d})
+        \\    Atomics.wait(gate, 'parentReady', Atomics.load(gate, 'parentReady'), 1);
+        \\  while (Atomics.load(gate, 'childReady') < {d})
+        \\    Atomics.wait(gate, 'childReady', Atomics.load(gate, 'childReady'), 1);
+        \\  globalThis.__midgcNestedThreadRegistry.cleanupSome();
+        \\  if (globalThis.__midgcNestedThreadCleanupCount !== 0)
+        \\    throw new Error('midgc nested thread cleanup ran before child release');
+        \\  const keep = [];
+        \\  for (let round = 0; round < {d}; round++) {{
+        \\    for (let i = 0; i < {d}; i++)
+        \\      keep.push({{ round, i, nested: {{ root, seed: {d}, value: i + round }}, text: 'midgc-nested-thread-' + round + '-' + i }});
+        \\    let spin = 0;
+        \\    for (let j = 0; j < {d}; j++) spin = (spin + j + round) & 0x3fffffff;
+        \\    if (spin < 0) keep.push({{ impossible: true }});
+        \\  }}
+        \\  if (typeof gc === 'function') gc();
+        \\  Atomics.store(gate, 'releaseParents', 1);
+        \\  Atomics.notify(gate, 'releaseParents', {d});
+        \\  const records = [];
+        \\  let joinSum = 0;
+        \\  for (const parent of parents) {{
+        \\    const record = parent.join();
+        \\    if (!record || record.marker !== record.pid + 1 || !(record.pendingChild instanceof Promise) || record.root !== root)
+        \\      throw new Error('bad midgc nested parent record');
+        \\    joinSum += record.marker;
+        \\    records.push(record);
+        \\  }}
+        \\  parents.length = 0;
+        \\  Atomics.store(gate, 'releaseChildren', 1);
+        \\  Atomics.notify(gate, 'releaseChildren', {d});
+        \\  for (const record of records) {{
+        \\    const childValue = record.child.join();
+        \\    joinSum += childValue;
+        \\    record.pendingChild.then(
+        \\      (v) => {{
+        \\        if (v !== childValue || record.root !== root)
+        \\          globalThis.__midgcNestedThreadAsyncScore = -1000000;
+        \\        else
+        \\          globalThis.__midgcNestedThreadAsyncScore += v + record.marker;
+        \\      }},
+        \\      () => {{ globalThis.__midgcNestedThreadAsyncScore = -1000000; }});
+        \\  }}
+        \\  records.length = 0;
+        \\  globalThis.__midgcNestedThreadCheck = function(expectedAsync) {{
+        \\    if (globalThis.__midgcNestedThreadAsyncScore !== expectedAsync)
+        \\      throw new Error('bad midgc nested asyncJoin score ' + globalThis.__midgcNestedThreadAsyncScore + '/' + expectedAsync);
+        \\    return 1;
+        \\  }};
+        \\  return keep.length + joinSum;
+        \\}})();
+        \\
+    ,
+        .{
+            seed,
+            nparents,
+            per_child,
+            held_base,
+            seed,
+            wait_timeout_ms,
+            nparents,
+            nparents,
+            rounds,
+            per_round,
+            seed,
+            spin_iters,
+            nparents,
+            nparents,
+        },
+    );
+    defer gpa.free(src);
+
+    const before_attempts = ctx.gc_par_attempts.load(.monotonic);
+    const before_collections = ctx.gc_par_collections.load(.monotonic);
+    const joined = ctx.evaluate(src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: midgc nested thread asyncJoin cleanup JS threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!joined.isNumber() or joined.asNum() != @as(f64, @floatFromInt(expected_total))) {
+        std.debug.print("seed {d}: midgc nested thread asyncJoin cleanup join got {d}, expected {d}\n", .{ seed, if (joined.isNumber()) joined.asNum() else -1, expected_total });
+        return false;
+    }
+    if (ctx.gc_par_attempts.load(.monotonic) <= before_attempts) {
+        std.debug.print("seed {d}: midgc nested thread asyncJoin cleanup did not attempt a parallel collection\n", .{seed});
+        return false;
+    }
+    if (ctx.gc_par_collections.load(.monotonic) <= before_collections) {
+        std.debug.print("seed {d}: midgc nested thread asyncJoin cleanup did not finish a parallel collection\n", .{seed});
+        return false;
+    }
+
+    _ = ctx.evaluate("$drainRunLoop()") catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: midgc nested thread asyncJoin cleanup drain loop threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    const check_src = try std.fmt.allocPrint(gpa, "globalThis.__midgcNestedThreadCheck({d})", .{expected_async_score});
+    defer gpa.free(check_src);
+    const checked = ctx.evaluate(check_src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: midgc nested thread asyncJoin cleanup check threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!checked.isNumber() or checked.asNum() != 1) {
+        std.debug.print("seed {d}: midgc nested thread asyncJoin cleanup check got {d}\n", .{ seed, if (checked.isNumber()) checked.asNum() else -1 });
+        return false;
+    }
+
+    ctx.collectGarbage();
+    const cleanup_src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  globalThis.__midgcNestedThreadRegistry.cleanupSome();
+        \\  if (globalThis.__midgcNestedThreadCleanupCount !== {d})
+        \\    throw new Error('bad midgc nested thread cleanup count ' + globalThis.__midgcNestedThreadCleanupCount + '/' + {d});
+        \\  if (globalThis.__midgcNestedThreadCleanupSum !== {d})
+        \\    throw new Error('bad midgc nested thread cleanup sum ' + globalThis.__midgcNestedThreadCleanupSum + '/' + {d});
+        \\  return globalThis.__midgcNestedThreadCleanupCount;
+        \\}})();
+        \\
+    ,
+        .{ expected_cleanup_count, expected_cleanup_count, expected_cleanup_sum, expected_cleanup_sum },
+    );
+    defer gpa.free(cleanup_src);
+    const cleaned = ctx.evaluate(cleanup_src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: midgc nested thread asyncJoin cleanup cleanup JS threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!cleaned.isNumber() or cleaned.asNum() != @as(f64, @floatFromInt(expected_cleanup_count))) {
+        std.debug.print("seed {d}: midgc nested thread asyncJoin cleanup got {d}, expected {d}\n", .{ seed, if (cleaned.isNumber()) cleaned.asNum() else -1, expected_cleanup_count });
+        return false;
+    }
+    return true;
+}
+
 fn runAsyncHoldBargingLifecycleInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
     const ctx = js.Context.createWithTestingOptions(gpa, .{
         .enable_threads = true,
@@ -11827,6 +12071,22 @@ pub fn main(init: std.process.Init) !void {
         if (marfail != 0) std.process.exit(1);
         return;
     };
+    // `threadfuzz midgcnestedasync <iters> <seed>`: focused mid-script
+    // parallel-GC repro for nested parent/child Thread.asyncJoin cleanup,
+    // ThreadLocal roots, parked waits, and exact finalization delivery.
+    if (first) |a| if (std.mem.eql(u8, a, "midgcnestedasync")) {
+        if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch 1;
+        if (args.next()) |b| base_seed = std.fmt.parseInt(u64, b, 10) catch 1;
+        var mnafail: usize = 0;
+        var mnai: usize = 0;
+        while (mnai < iters) : (mnai += 1) {
+            const seed = base_seed +% mnai;
+            if (!(try runMidScriptNestedThreadAsyncJoinCleanupGc(gpa, seed))) mnafail += 1;
+        }
+        std.debug.print("threadfuzz midgcnestedasync: {d} programs from seed {d}, {d} failures\n", .{ iters, base_seed, mnafail });
+        if (mnafail != 0) std.process.exit(1);
+        return;
+    };
     // `threadfuzz midgctlsfinal <iters> <seed>`: focused mid-script
     // parallel-GC repro for ThreadLocal-only roots registered with
     // FinalizationRegistry while owner threads are parked through a finishing
@@ -12215,6 +12475,8 @@ pub fn main(init: std.process.Init) !void {
     // parked through a finishing sweep before their owners clear the values,
     // no-fn asyncHold release-function delivery plus exact cleanup while
     // property/condition waiters stay parked through the finishing sweep,
+    // nested parent/child asyncJoin cleanup roots and ThreadLocal values
+    // parked through a finishing sweep before child release,
     // completed-but-unjoined Thread results and thrown
     // objects, sync-wait peer stack roots with finalization cleanup, WeakMap/
     // WeakSet dead-key cleanup with live ephemeron values and unregister-token
@@ -12239,6 +12501,7 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runMidScriptCreatorOwnedBufferGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptSyncWaitCleanupGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptAsyncHoldReleaseWaiterCleanupGc(gpa, seed))) mfail += 1;
+            if (!(try runMidScriptNestedThreadAsyncJoinCleanupGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptThreadLocalFinalizationGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptThreadRestrictFinalizationGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptWorkerCleanupGc(gpa, seed))) mfail += 1;
@@ -12249,7 +12512,7 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runMidScriptModuleWorkerCloseTerminateGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptWeakCollectionGc(gpa, seed))) mfail += 1;
         }
-        std.debug.print("threadfuzz midgc: {d} programs from seed {d}, {d} failures\n", .{ iters * 16, base_seed, mfail });
+        std.debug.print("threadfuzz midgc: {d} programs from seed {d}, {d} failures\n", .{ iters * 17, base_seed, mfail });
         if (mfail != 0) std.process.exit(1);
         return;
     };
