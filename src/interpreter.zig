@@ -6968,7 +6968,7 @@ pub const Interpreter = struct {
         const replace_string = if (functional_replace) "" else try self.toStringV(replace_value);
         const flags = try self.toStringV(try self.getProperty(rx, "flags"));
         const global = std.mem.indexOfScalar(u8, flags, 'g') != null;
-        const full_unicode = global and (try self.getProperty(rx, "unicode")).toBoolean();
+        const full_unicode = global and (std.mem.indexOfScalar(u8, flags, 'u') != null or std.mem.indexOfScalar(u8, flags, 'v') != null);
 
         if (global) try self.setRegExpLikeLastIndex(rx, 0);
 
