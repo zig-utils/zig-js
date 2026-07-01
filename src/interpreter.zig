@@ -10344,7 +10344,7 @@ pub const Interpreter = struct {
             try self.callValueWithThis(next_method, &.{}, it)
         else
             try self.callMethod(it, "next", &.{});
-        if (!r.isObject()) return self.throwError("TypeError", "iterator result is not an object");
+        if (!builtins.isRealObject(r)) return self.throwError("TypeError", "iterator result is not an object");
         const done = (try self.getProperty(r, "done")).toBoolean();
         const val = if (done) Value.undef() else try self.getProperty(r, "value");
         return .{ .done = done, .value = val };
@@ -10354,7 +10354,7 @@ pub const Interpreter = struct {
     /// (the `value` is not read). Used by `Iterator.zip` strict-mode checking.
     fn iterStepDoneOnly(self: *Interpreter, it: Value) EvalError!bool {
         const r = try self.callMethod(it, "next", &.{});
-        if (!r.isObject()) return self.throwError("TypeError", "iterator result is not an object");
+        if (!builtins.isRealObject(r)) return self.throwError("TypeError", "iterator result is not an object");
         return (try self.getProperty(r, "done")).toBoolean();
     }
 
@@ -13256,7 +13256,7 @@ pub const Interpreter = struct {
     /// `x instanceof C`: OrdinaryHasInstance walks the live prototype chain.
     /// Spec [[HasProperty]]: own property first, then prototype chain, invoking
     /// Proxy `has` traps at whichever object in the chain provides them.
-    fn hasPropertyResult(self: *Interpreter, o: *value.Object, key: []const u8) EvalError!bool {
+    pub fn hasPropertyResult(self: *Interpreter, o: *value.Object, key: []const u8) EvalError!bool {
         // Integer-Indexed Exotic [[HasProperty]]: a canonical numeric key resolves
         // purely to index validity — it never consults the prototype chain.
         if (o.typed_array) |ta| {

@@ -1455,7 +1455,7 @@ pub fn reflectDefineProperty(ctx: *anyopaque, this: Value, args: []const Value) 
 /// HasProperty (own *or inherited*), value via Get (so an inherited or accessor
 /// descriptor field is honored). Returns null when absent.
 fn descField(self: *Interpreter, d: *value.Object, name: []const u8) HostError!?Value {
-    if (!interpreter.hasProperty(d, name)) return null;
+    if (!try self.hasPropertyResult(d, name)) return null;
     return try self.getProperty(Value.obj(d), name);
 }
 
@@ -2076,10 +2076,14 @@ pub fn objectGetOwnPropertyDescriptors(ctx: *anyopaque, this: Value, args: []con
 /// descriptor object — fills omitted fields with their defaults and returns a
 /// fresh, fully-populated data or accessor descriptor object.
 fn completeDescriptor(self: *Interpreter, desc_obj: *value.Object) HostError!Value {
+    const enumerable = try descField(self, desc_obj, "enumerable");
+    const configurable = try descField(self, desc_obj, "configurable");
+    const valuef = try descField(self, desc_obj, "value");
+    const writable = try descField(self, desc_obj, "writable");
     const getf = try descField(self, desc_obj, "get");
     const setf = try descField(self, desc_obj, "set");
     const is_accessor = getf != null or setf != null;
-    const is_data = (try descField(self, desc_obj, "value")) != null or (try descField(self, desc_obj, "writable")) != null;
+    const is_data = valuef != null or writable != null;
     if (is_accessor and is_data)
         return self.throwError("TypeError", "Invalid property descriptor: cannot both specify accessors and a value or writable attribute");
     if (getf) |g| {
@@ -2095,11 +2099,11 @@ fn completeDescriptor(self: *Interpreter, desc_obj: *value.Object) HostError!Val
         try self.setMember(Value.obj(out), "get", getf orelse Value.undef());
         try self.setMember(Value.obj(out), "set", setf orelse Value.undef());
     } else {
-        try self.setMember(Value.obj(out), "value", (try descField(self, desc_obj, "value")) orelse Value.undef());
-        try self.setMember(Value.obj(out), "writable", Value.boolVal(if (try descField(self, desc_obj, "writable")) |w| w.toBoolean() else false));
+        try self.setMember(Value.obj(out), "value", valuef orelse Value.undef());
+        try self.setMember(Value.obj(out), "writable", Value.boolVal(if (writable) |w| w.toBoolean() else false));
     }
-    try self.setMember(Value.obj(out), "enumerable", Value.boolVal(if (try descField(self, desc_obj, "enumerable")) |e| e.toBoolean() else false));
-    try self.setMember(Value.obj(out), "configurable", Value.boolVal(if (try descField(self, desc_obj, "configurable")) |c| c.toBoolean() else false));
+    try self.setMember(Value.obj(out), "enumerable", Value.boolVal(if (enumerable) |e| e.toBoolean() else false));
+    try self.setMember(Value.obj(out), "configurable", Value.boolVal(if (configurable) |c| c.toBoolean() else false));
     return Value.obj(out);
 }
 
