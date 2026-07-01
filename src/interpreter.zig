@@ -1504,16 +1504,17 @@ pub const Interpreter = struct {
     /// accessor properties, not just data ones.
     pub fn globalProp(self: *Interpreter, name: []const u8) EvalError!?Value {
         const g = self.currentGlobalObject() orelse return null;
-        if (objectHasOwn(g, name)) return try self.getProperty(Value.obj(g), name);
+        if (try self.hasPropertyResult(g, name))
+            return try self.getPropertyWithReceiver(Value.obj(g), name, Value.obj(g));
         return null;
     }
 
-    /// Whether the global object has an own binding `name` (data OR accessor),
+    /// Whether the global object has a binding `name` (own or inherited),
     /// without invoking a getter — the existence test behind strict
     /// "assignment to an undeclared global" and `typeof <unresolved>`.
-    pub fn globalHasOwn(self: *Interpreter, name: []const u8) bool {
+    pub fn globalHasBinding(self: *Interpreter, name: []const u8) EvalError!bool {
         const g = self.currentGlobalObject() orelse return false;
-        return objectHasOwn(g, name);
+        return try self.hasPropertyResult(g, name);
     }
 
     fn globalBindingObject(self: *Interpreter, name: []const u8) ?*value.Object {
@@ -1913,9 +1914,7 @@ pub const Interpreter = struct {
                 }
                 // A property added to the global object (e.g. `this.x = 1` at top
                 // level) is reachable as a bare global reference.
-                if (self.global_object) |g| {
-                    if (objectHasOwn(g, name)) break :blk try self.getProperty(Value.obj(g), name);
-                }
+                if (try self.globalProp(name)) |v| break :blk v;
                 return self.throwError("ReferenceError", name);
             },
 
@@ -2135,7 +2134,7 @@ pub const Interpreter = struct {
                         has_with = true;
                         break;
                     };
-                    if (!has_with and self.env.get(name) == null and !self.globalHasOwn(name)) {
+                    if (!has_with and self.env.get(name) == null and !try self.globalHasBinding(name)) {
                         _ = try self.eval(a.value); // RHS still runs for its side effects
                         return self.throwError("ReferenceError", name);
                     }
@@ -5623,23 +5622,38 @@ pub const Interpreter = struct {
     pub fn ctorRealmProto(self: *Interpreter, ctor: *value.Object, service: []const u8) EvalError!*value.Object {
         const p = try self.getProperty(Value.obj(ctor), "prototype");
         if (p.isObject() and !p.asObj().is_symbol) return p.asObj();
-        if (ctor.js_func) |jf| {
-            const fnp: *Function = @ptrCast(@alignCast(jf));
-            var env: ?*Environment = fnp.closure;
-            while (env) |e| {
-                // The realm's intrinsics live on its global object (globalThis).
-                const g: ?*value.Object = if (e.get("globalThis")) |gt| (if (gt.isObject()) gt.asObj() else null) else null;
-                if (g) |gobj| {
-                    if (gobj.getOwn("Intl")) |intl| if (intl.isObject())
-                        if (intl.asObj().getOwn(service)) |sv| if (sv.isObject())
-                            if (sv.asObj().getOwn("prototype")) |pp| if (pp.isObject()) return pp.asObj();
-                    break;
+        if (try self.functionRealmIntlProto(ctor, service)) |proto| return proto;
+        return try self.protoObject(ctor);
+    }
+
+    fn envIntlServiceProto(env: *Environment, service: []const u8) ?*value.Object {
+        if (env.get("globalThis")) |gt| {
+            if (gt.isObject()) {
+                if (gt.asObj().getOwn("Intl")) |intl| {
+                    if (intl.isObject()) {
+                        if (intl.asObj().getOwn(service)) |svc_v| {
+                            if (svc_v.isObject()) {
+                                if (svc_v.asObj().getOwn("prototype")) |proto_v| {
+                                    if (proto_v.isObject()) return proto_v.asObj();
+                                }
+                            }
+                        }
+                    }
                 }
-                if (e.parent == null) break;
-                env = e.parent;
             }
         }
-        return try self.protoObject(ctor);
+        if (env.get("Intl")) |intl| {
+            if (intl.isObject()) {
+                if (intl.asObj().getOwn(service)) |svc_v| {
+                    if (svc_v.isObject()) {
+                        if (svc_v.asObj().getOwn("prototype")) |proto_v| {
+                            if (proto_v.isObject()) return proto_v.asObj();
+                        }
+                    }
+                }
+            }
+        }
+        return null;
     }
 
     fn envIntrinsicProto(env: *Environment, intrinsic: []const u8) ?*value.Object {
@@ -5692,6 +5706,31 @@ pub const Interpreter = struct {
         if (ctor.bound) |erased| {
             const bf: *BoundFn = @ptrCast(@alignCast(erased));
             if (bf.target.isObject()) return try self.functionRealmIntrinsicProto(bf.target.asObj(), intrinsic);
+        }
+        return null;
+    }
+
+    fn functionRealmIntlProto(self: *Interpreter, ctor: *value.Object, service: []const u8) EvalError!?*value.Object {
+        if (ctor.proxy_handler != null or ctor.proxy_revoked) {
+            const target = ctor.proxy_target orelse return self.throwError("TypeError", "Cannot get function realm from a revoked proxy");
+            return try self.functionRealmIntlProto(target, service);
+        }
+        if ((ctor.native_ctor or ctor.error_ctor != null) and ctor.private_data != null) {
+            const env: *Environment = @ptrCast(@alignCast(ctor.private_data.?));
+            if (envIntlServiceProto(env, service)) |proto| return proto;
+        }
+        if (ctor.js_func) |jf| {
+            const fnp: *Function = @ptrCast(@alignCast(jf));
+            var env: ?*Environment = fnp.closure;
+            while (env) |e| {
+                if (envIntlServiceProto(e, service)) |proto| return proto;
+                if (e.parent == null) break;
+                env = e.parent;
+            }
+        }
+        if (ctor.bound) |erased| {
+            const bf: *BoundFn = @ptrCast(@alignCast(erased));
+            if (bf.target.isObject()) return try self.functionRealmIntlProto(bf.target.asObj(), service);
         }
         return null;
     }
@@ -9266,7 +9305,7 @@ pub const Interpreter = struct {
             return;
         }
         if (self.env.get(name) == null) {
-            if (self.strict and !self.globalHasOwn(name))
+            if (self.strict and !try self.globalHasBinding(name))
                 return self.throwError("ReferenceError", name);
             if (self.currentGlobalObject()) |g| return self.setMember(Value.obj(g), name, v);
         }
@@ -9313,7 +9352,7 @@ pub const Interpreter = struct {
                 // undeclared binding. Sloppy mode creates/configures a global
                 // object property, not a non-deletable `var` binding.
                 if (self.env.get(name) == null) {
-                    if (self.strict and !self.globalHasOwn(name))
+                    if (self.strict and !try self.globalHasBinding(name))
                         return self.throwError("ReferenceError", name);
                     if (self.global_object) |g| return self.setMember(Value.obj(g), name, v);
                 }
@@ -12755,7 +12794,7 @@ pub const Interpreter = struct {
     fn evalUnary(self: *Interpreter, op: ast.UnaryOp, operand: *Node) EvalError!Value {
         // `typeof <unresolved identifier>` is "undefined" rather than a thrown
         // ReferenceError — the one context where an unbound name doesn't throw.
-        if (op == .typeof and operand.* == .identifier and self.env.get(operand.identifier) == null and !self.globalHasOwn(operand.identifier))
+        if (op == .typeof and operand.* == .identifier and self.env.get(operand.identifier) == null and !try self.globalHasBinding(operand.identifier))
             return Value.str("undefined");
         const v = try self.eval(operand);
         // `-`/`+`/`~` begin with ToNumeric: reduce a wrapper object to a numeric
