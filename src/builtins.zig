@@ -1598,7 +1598,10 @@ pub fn defineOneResult(self: *Interpreter, target: *value.Object, key: []const u
                 } else if (!within and !target.extensible) {
                     return false;
                 }
+                const gap_start = target.elements.items.len;
                 while (target.elements.items.len <= i) try target.elements.append(target.elementsAllocator(self.arena), Value.undef());
+                var gap = gap_start;
+                while (gap < i) : (gap += 1) try target.markHole(self.arena, gap);
                 // Defining the index makes it a present own element (clear any hole).
                 target.clearHole(i);
                 const am_mapped = target.is_arguments and interpreter.argMapName(target, i) != null;
