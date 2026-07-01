@@ -148,6 +148,10 @@ static `Atomics.Condition.waitFor` peers through a finishing sweep, rejects
 early cleanup while their stack roots are still live, then requires timeout
 results, `Atomics.Mutex.UnlockToken` reacquisition/unlock, and exact
 `FinalizationRegistry` cleanup after quiescence,
+adds a sync-wait burst subprogram that parks multiple waiters on the same
+property, the same `Condition`, and the same contended `Lock` through a
+finishing sweep, rejects early cleanup while those stack roots are still live,
+then releases all three wait sets and verifies exact cleanup after quiescence,
 adds an `Atomics.Mutex.lockIfAvailable` subprogram that parks
 acquire-after-release and timeout token waiters behind a holder through a
 finishing sweep, rejects early cleanup while those roots are live, then requires
@@ -203,7 +207,7 @@ join-termination unit witness that checks parked-state/mutex cleanup, then
 requires exact script completion or exact expected termination plus at least one
 finishing parallel sweep and exact
 `FinalizationRegistry` cleanup count/sum delivery plus unregister-token
-suppression after a quiescent collect. Each seed currently runs 20 deterministic
+suppression after a quiescent collect. Each seed currently runs 21 deterministic
 mid-GC subprograms. The
 lifecycle profile
 (`-Dfuzz-lifecycle=true`) adds expected-throw termination storms for

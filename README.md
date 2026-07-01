@@ -195,7 +195,7 @@ python3 tools/threads-reference-audit.py --probe-candidates # prints closest pro
 python3 tools/threads-reference-audit.py --run-probes # executes closest probes with timeouts
 zig build test -Dtsan=true      # unit suite under ThreadSanitizer
 zig build threadfuzz            # seeded concurrent-JS fuzzer
-zig build threadfuzz -Dfuzz-midgc=true # mid-script GC wait-pump + microtask + creator buffers + nested asyncJoin + ThreadLocal/Thread.restrict finalization + sync-wait cleanup + sync timeout exit + lockIfAvailable/Condition.wait cleanup + asyncHold release cleanup + teardown + promise + script/module Worker/SAB + Worker exception + Worker close/terminate + weak-collection fuzzer
+zig build threadfuzz -Dfuzz-midgc=true # mid-script GC wait-pump + microtask + creator buffers + nested asyncJoin + ThreadLocal/Thread.restrict finalization + sync-wait cleanup/burst release + sync timeout exit + lockIfAvailable/Condition.wait cleanup + asyncHold release cleanup + teardown + promise + script/module Worker/SAB + Worker exception + Worker close/terminate + weak-collection fuzzer
 zig build threadfuzz -Dfuzz-lifecycle=true # deterministic lifecycle/teardown/finalization fuzzer, including Atomics.Mutex/Condition token waits and lockIfAvailable paths
 zig build test262               # runs the real tc39/test262 corpus, prints pass %
 zig build test262 -Dtest262=DIR # …with an explicit corpus root
@@ -236,7 +236,7 @@ ThreadSanitizer unit tests, a sharded no-GIL PR-249 corpus TSan sweep, a
 suppression-narrowness witness for JS-defined program-byte races,
 `test262-parallel`, and seeded concurrent-JS fuzzing (`threadfuzz`, TSan
 fuzzing, amplified fuzzing, broad semantic fuzzing,
-mid-script-GC wait-pump/microtask/creator-buffer/nested-asyncJoin/ThreadLocal-finalization/Thread.restrict-finalization/sync-wait-cleanup/asyncHold-release-cleanup/promise/teardown/Worker-SAB/Worker-exception/Worker-close/weak-collection fuzzing, lifecycle
+mid-script-GC wait-pump/microtask/creator-buffer/nested-asyncJoin/ThreadLocal-finalization/Thread.restrict-finalization/sync-wait-cleanup/sync-wait-burst/asyncHold-release-cleanup/promise/teardown/Worker-SAB/Worker-exception/Worker-close/weak-collection fuzzing, lifecycle
 fuzzing, ReleaseSafe fuzzing, and deterministic-result verification).
 
 Remaining work is concentrated in production hardening rather than the core
@@ -415,6 +415,10 @@ threading architecture:
   subprogram now settles expired property `waitAsync` tickets while those peers
   are parked, keeps a live property `waitAsync` ticket rooted through the
   finishing sweep, then notifies it and verifies the exact captured-root score.
+  A sibling sync-wait burst subprogram parks multiple waiters on the same
+  property, the same `Condition`, and the same contended `Lock` through a
+  finishing sweep, rejects early cleanup while those stack roots are live, then
+  releases all three wait sets and verifies exact cleanup after quiescence.
   A sibling sync-timeout subprogram parks property `Atomics.wait` peers and
   static `Atomics.Condition.waitFor` peers through a finishing sweep, rejects
   early cleanup while their stack roots are live, then requires timeout results,

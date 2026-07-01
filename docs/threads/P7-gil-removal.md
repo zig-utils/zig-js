@@ -284,6 +284,9 @@ roadmap item repeats it.
      cleanup case where property `Atomics.wait`, `Condition.wait`, and contended
      `Lock.hold` peers stay parked through a finishing sweep before their stack
      roots and exact `FinalizationRegistry` cleanup count/sum are verified, a
+     sibling sync-wait burst case where multiple same-property, same-`Condition`,
+     and same-`Lock` waiters stay parked through a finishing sweep before burst
+     release and exact finalization cleanup are verified, a
      sibling `Atomics.Mutex.lockIfAvailable` case where acquire-after-release
      and timeout token waiters stay parked behind a holder through a finishing
      sweep before reused-token acquire/timeout results and exact finalization
@@ -309,8 +312,10 @@ roadmap item repeats it.
      which exercises property waits, `Condition.wait`, and contended `Lock`
      acquisition while requiring a finishing mid-script sweep. The mid-GC
      sync-wait fuzzer also compacts expired property `waitAsync` tickets while
-     those peers stay parked and keeps one live property `waitAsync` ticket
-     rooted through the sweep until notification. Non-converging
+     those peers stay parked, keeps one live property `waitAsync` ticket
+     rooted through the sweep until notification, and now parks multiple
+     same-primitive property/condition/lock waiters through a burst release
+     cleanup oracle. Non-converging
      cycles still abort safely and fall back to quiescent collection.
    - **Terminate or abort.** The collector drives root-publication generations,
      marking between, until a *born-cell-stable, nothing-deferred* quiescent

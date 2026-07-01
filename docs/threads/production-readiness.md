@@ -266,8 +266,9 @@ as embedders exercise more threaded host patterns.
   Worker/SAB cleanup subprograms, script and module Worker
   handler-exception cleanup subprograms, script and module Worker
   close/terminate drain/drop subprograms, an async-hold release/waiter cleanup
-  subprogram, a sync-timeout exit subprogram, an `Atomics.Mutex.lockIfAvailable`
-  acquire/timeout cleanup subprogram, an `Atomics.Condition.wait`
+  subprogram, a sync-wait burst cleanup subprogram, a sync-timeout exit
+  subprogram, an `Atomics.Mutex.lockIfAvailable` acquire/timeout cleanup
+  subprogram, an `Atomics.Condition.wait`
   notify/reacquire cleanup subprogram, a weak-collection cleanup subprogram,
   and an expected
   teardown-termination subprogram, and each must finish at least one parallel
@@ -313,6 +314,10 @@ as embedders exercise more threaded host patterns.
   `waitAsync` timeout tickets expire while those sync peers are parked, keeps a
   live property `waitAsync` ticket rooted through the finishing sweep, notifies
   it, and verifies exact captured-root scoring after the sweep.
+  The sync-wait burst subprogram parks multiple waiters on the same property,
+  the same `Condition`, and the same contended `Lock` through a finishing sweep,
+  verifies cleanup is not delivered while those stack roots are live, then
+  releases all three wait sets and verifies exact cleanup after quiescence.
   The sync-timeout exit subprogram parks property `Atomics.wait` peers and
   static `Atomics.Condition.waitFor` peers through a finishing sweep, verifies
   cleanup is not delivered while their stack roots are live, then requires
@@ -441,7 +446,7 @@ as embedders exercise more threaded host patterns.
   structured-clone after the creator Thread exits.
 - CI runs the fuzzer in several modes: default seeded, TSan, high-contention
   amplified, broad semantic,
-  mid-script GC wait-pump/microtask/creator-buffer/nested-asyncJoin/sync-wait-cleanup/asyncHold-release-cleanup/promise/teardown/Worker-SAB/Worker-exception/Worker-close/weak-collection,
+  mid-script GC wait-pump/microtask/creator-buffer/nested-asyncJoin/sync-wait-cleanup/sync-wait-burst/asyncHold-release-cleanup/promise/teardown/Worker-SAB/Worker-exception/Worker-close/weak-collection,
   lifecycle, ReleaseSafe, and deterministic-result verification.
 
 Remaining: keep extending the lifecycle profile toward more cross-realm
@@ -461,7 +466,7 @@ Every pull request and push to `main` runs:
 - TSan `threadfuzz`,
 - amplified `threadfuzz`,
 - broad semantic `threadfuzz`,
-- mid-script GC wait-pump/microtask/creator-buffer/nested-asyncJoin/sync-wait-cleanup/asyncHold-release-cleanup/promise/teardown/Worker-SAB/Worker-exception/Worker-close/weak-collection
+- mid-script GC wait-pump/microtask/creator-buffer/nested-asyncJoin/sync-wait-cleanup/sync-wait-burst/asyncHold-release-cleanup/promise/teardown/Worker-SAB/Worker-exception/Worker-close/weak-collection
   `threadfuzz`,
 - lifecycle `threadfuzz`,
 - ReleaseSafe `threadfuzz`,
