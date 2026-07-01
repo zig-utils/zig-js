@@ -1470,7 +1470,15 @@ pub fn defineOneResult(self: *Interpreter, target: *value.Object, key: []const u
     // rest of this function reads via `getOwn`.
     const d = (try self.newObject()).asObj();
     for ([_][]const u8{ "enumerable", "configurable", "value", "writable", "get", "set" }) |f| {
-        if (try descField(self, d_obj, f)) |v| try d.setOwn(self.arena, self.root_shape, f, v);
+        if (try descField(self, d_obj, f)) |v| {
+            const field_value = if (std.mem.eql(u8, f, "enumerable") or
+                std.mem.eql(u8, f, "configurable") or
+                std.mem.eql(u8, f, "writable"))
+                Value.boolVal(v.toBoolean())
+            else
+                v;
+            try d.setOwn(self.arena, self.root_shape, f, field_value);
+        }
     }
     const get = d.getOwn("get");
     const set = d.getOwn("set");

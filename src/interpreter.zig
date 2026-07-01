@@ -9582,7 +9582,7 @@ pub const Interpreter = struct {
         if (o.getOwn(key)) |_| {
             if (!o.getAttr(key).writable) return false;
         }
-        if (!receiver.isObject()) return false;
+        if (!builtins.isRealObject(receiver)) return false;
         const ro = receiver.asObj();
         if (ro.proxy_handler != null or ro.proxy_revoked) {
             const existing = try builtins.objectGetOwnPropertyDescriptor(@ptrCast(self), Value.undef(), &.{ Value.obj(ro), self.keyToValue(key) });
@@ -13333,8 +13333,6 @@ pub const Interpreter = struct {
         const o = r.asObj();
         const key = try self.keyOf(l);
         if (try self.hasPropertyResult(o, key)) return true;
-        // The global object carries the installed globals as properties.
-        if (self.global_object != null and o == self.global_object.? and rootEnv(self.env).get(key) != null) return true;
         return false;
     }
 
