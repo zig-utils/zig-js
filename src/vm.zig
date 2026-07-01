@@ -473,6 +473,7 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
             },
 
             .load_this => try stack.append(stack_alloc, vm.this_value),
+            .load_new_target => try stack.append(stack_alloc, vm.new_target),
             .new_object => try stack.append(stack_alloc, try vm.newObject()),
             .new_array => try stack.append(stack_alloc, try vm.newArray()),
             .init_prop => {
@@ -969,17 +970,23 @@ pub fn makeGenerator(vm: *Interpreter, func: *Function, args: []const Value, thi
     const saved_home = vm.home_object;
     const saved_super = vm.super_ctor;
     const saved_this_initialized = vm.this_initialized;
+    const saved_nt = vm.new_target;
+    const saved_eval_nt = vm.direct_eval_new_target_allowed;
     vm.env = genv;
     vm.this_value = bound_this;
     vm.home_object = func.home_object;
     vm.super_ctor = func.super_ctor;
     vm.this_initialized = true;
+    vm.new_target = Value.undef();
+    vm.direct_eval_new_target_allowed = true;
     defer {
         vm.env = saved_env;
         vm.this_value = saved_this;
         vm.home_object = saved_home;
         vm.super_ctor = saved_super;
         vm.this_initialized = saved_this_initialized;
+        vm.new_target = saved_nt;
+        vm.direct_eval_new_target_allowed = saved_eval_nt;
     }
     try vm.bindParams2(func.params, args, func.is_arrow);
 
@@ -1130,12 +1137,16 @@ fn genResume(vm: *Interpreter, gen_obj: *value.Object, kind: ResumeKind, val: Va
     const s_super = vm.super_ctor;
     const s_import_meta_slot = vm.import_meta_slot;
     const s_import_meta_obj = vm.import_meta_obj;
+    const s_nt = vm.new_target;
+    const s_eval_nt = vm.direct_eval_new_target_allowed;
     vm.env = g.env;
     vm.this_value = g.this_value;
     vm.home_object = g.home_object;
     vm.super_ctor = g.super_ctor;
     vm.import_meta_slot = g.import_meta_slot;
     vm.import_meta_obj = if (g.import_meta_slot) |slot| slot.obj else null;
+    vm.new_target = Value.undef();
+    vm.direct_eval_new_target_allowed = true;
     defer {
         vm.env = s_env;
         vm.this_value = s_this;
@@ -1143,6 +1154,8 @@ fn genResume(vm: *Interpreter, gen_obj: *value.Object, kind: ResumeKind, val: Va
         vm.super_ctor = s_super;
         vm.import_meta_slot = s_import_meta_slot;
         vm.import_meta_obj = s_import_meta_obj;
+        vm.new_target = s_nt;
+        vm.direct_eval_new_target_allowed = s_eval_nt;
     }
 
     if (vm.depth >= interp.max_call_depth) return vm.throwError("RangeError", "Maximum call stack size exceeded");
@@ -1248,17 +1261,23 @@ pub fn runAsync(vm: *Interpreter, func: *Function, args: []const Value, this_val
     const saved_home = vm.home_object;
     const saved_super = vm.super_ctor;
     const saved_this_initialized = vm.this_initialized;
+    const saved_nt = vm.new_target;
+    const saved_eval_nt = vm.direct_eval_new_target_allowed;
     vm.env = genv;
     vm.this_value = bound_this;
     vm.home_object = func.home_object;
     vm.super_ctor = func.super_ctor;
     vm.this_initialized = true;
+    vm.new_target = Value.undef();
+    vm.direct_eval_new_target_allowed = true;
     defer {
         vm.env = saved_env;
         vm.this_value = saved_this;
         vm.home_object = saved_home;
         vm.super_ctor = saved_super;
         vm.this_initialized = saved_this_initialized;
+        vm.new_target = saved_nt;
+        vm.direct_eval_new_target_allowed = saved_eval_nt;
     }
     // An error thrown synchronously while evaluating parameter defaults (or
     // binding `this`) of an async function must settle the result promise as a
@@ -1423,15 +1442,21 @@ fn asyncDrive(vm: *Interpreter, g: *Generator, kind: ResumeKind, val: Value) Eva
     const s_this = vm.this_value;
     const s_home = vm.home_object;
     const s_super = vm.super_ctor;
+    const s_nt = vm.new_target;
+    const s_eval_nt = vm.direct_eval_new_target_allowed;
     vm.env = g.env;
     vm.this_value = g.this_value;
     vm.home_object = g.home_object;
     vm.super_ctor = g.super_ctor;
+    vm.new_target = Value.undef();
+    vm.direct_eval_new_target_allowed = true;
     defer {
         vm.env = s_env;
         vm.this_value = s_this;
         vm.home_object = s_home;
         vm.super_ctor = s_super;
+        vm.new_target = s_nt;
+        vm.direct_eval_new_target_allowed = s_eval_nt;
     }
     if (vm.depth >= interp.max_call_depth) return vm.throwError("RangeError", "Maximum call stack size exceeded");
     vm.depth += 1;
@@ -1511,11 +1536,31 @@ pub fn makeAsyncGenerator(vm: *Interpreter, func: *Function, args: []const Value
     const genv = try gc_mod.allocEnv(vm.arena);
     vm.initEnvironment(genv, func.closure, true);
     try genv.put("arguments", try vm.createArgumentsObject(func, args, genv));
-    const saved_env = vm.env;
-    vm.env = genv;
-    defer vm.env = saved_env;
-    try vm.bindParams2(func.params, args, func.is_arrow);
     const bound_this = try bindThisForCall(vm, func, this_val);
+    const saved_env = vm.env;
+    const saved_this = vm.this_value;
+    const saved_home = vm.home_object;
+    const saved_super = vm.super_ctor;
+    const saved_this_initialized = vm.this_initialized;
+    const saved_nt = vm.new_target;
+    const saved_eval_nt = vm.direct_eval_new_target_allowed;
+    vm.env = genv;
+    vm.this_value = bound_this;
+    vm.home_object = func.home_object;
+    vm.super_ctor = func.super_ctor;
+    vm.this_initialized = true;
+    vm.new_target = Value.undef();
+    vm.direct_eval_new_target_allowed = true;
+    defer {
+        vm.env = saved_env;
+        vm.this_value = saved_this;
+        vm.home_object = saved_home;
+        vm.super_ctor = saved_super;
+        vm.this_initialized = saved_this_initialized;
+        vm.new_target = saved_nt;
+        vm.direct_eval_new_target_allowed = saved_eval_nt;
+    }
+    try vm.bindParams2(func.params, args, func.is_arrow);
     // Separate body var-env when the params contain a default (see makeGenerator).
     const body_env = try paramsBodyVarEnv(vm, func, genv);
     const lexical_env = try bodyLexicalEnv(vm, body_env);
@@ -1649,12 +1694,16 @@ fn agResume(vm: *Interpreter, g: *Generator, kind: ResumeKind, val: Value) EvalE
     const s_super = vm.super_ctor;
     const s_import_meta_slot = vm.import_meta_slot;
     const s_import_meta_obj = vm.import_meta_obj;
+    const s_nt = vm.new_target;
+    const s_eval_nt = vm.direct_eval_new_target_allowed;
     vm.env = g.env;
     vm.this_value = g.this_value;
     vm.home_object = g.home_object;
     vm.super_ctor = g.super_ctor;
     vm.import_meta_slot = g.import_meta_slot;
     vm.import_meta_obj = if (g.import_meta_slot) |slot| slot.obj else null;
+    vm.new_target = Value.undef();
+    vm.direct_eval_new_target_allowed = true;
     defer {
         vm.env = s_env;
         vm.this_value = s_this;
@@ -1662,6 +1711,8 @@ fn agResume(vm: *Interpreter, g: *Generator, kind: ResumeKind, val: Value) EvalE
         vm.super_ctor = s_super;
         vm.import_meta_slot = s_import_meta_slot;
         vm.import_meta_obj = s_import_meta_obj;
+        vm.new_target = s_nt;
+        vm.direct_eval_new_target_allowed = s_eval_nt;
     }
     if (vm.depth >= interp.max_call_depth) return vm.throwError("RangeError", "Maximum call stack size exceeded");
     vm.depth += 1;
@@ -1982,6 +2033,7 @@ fn makeClosure(vm: *Interpreter, tmpl: *bc.FnTemplate, frame: ?*Frame) EvalError
         .is_arrow = tmpl.is_arrow,
         .arrow_this = if (tmpl.is_arrow) vm.this_value else Value.undef(),
         .arrow_new_target = if (tmpl.is_arrow) vm.new_target else Value.undef(),
+        .arrow_direct_eval_new_target_allowed = tmpl.is_arrow and vm.direct_eval_new_target_allowed,
         .arrow_in_derived_ctor = tmpl.is_arrow and vm.in_derived_ctor,
         .home_object = if (tmpl.is_arrow) vm.home_object else null,
         .super_ctor = if (tmpl.is_arrow) vm.super_ctor else null,
@@ -2019,7 +2071,7 @@ fn callValue(vm: *Interpreter, callee: Value, args: []const Value, this_val: Val
         if (callee.asObj().js_func) |erased| {
             const func: *Function = @ptrCast(@alignCast(erased));
             if (!func.is_generator and !func.is_async) {
-                if (func.chunk) |fchunk| return runFunction(vm, func, fchunk, args, this_val);
+                if (func.chunk) |fchunk| return runFunction(vm, func, fchunk, args, this_val, Value.undef());
             }
         }
     }
@@ -2047,7 +2099,7 @@ fn construct(vm: *Interpreter, callee: Value, args: []const Value) EvalError!Val
             const func: *Function = @ptrCast(@alignCast(erased));
             if (func.chunk) |fchunk| {
                 const this_val = try vm.newInstance(callee.asObj());
-                const ret = try runFunction(vm, func, fchunk, args, this_val);
+                const ret = try runFunction(vm, func, fchunk, args, this_val, callee);
                 return if (ret.isObject()) ret else this_val;
             }
         }
@@ -2055,7 +2107,7 @@ fn construct(vm: *Interpreter, callee: Value, args: []const Value) EvalError!Val
     return vm.construct(callee, args);
 }
 
-pub fn runFunction(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []const Value, this_val: Value) EvalError!Value {
+pub fn runFunction(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []const Value, this_val: Value, new_target: Value) EvalError!Value {
     if (vm.depth >= interp.max_call_depth) return vm.throwError("RangeError", "Maximum call stack size exceeded");
     vm.depth += 1;
     defer vm.depth -= 1;
@@ -2076,8 +2128,10 @@ pub fn runFunction(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
     const saved_this = vm.this_value;
     const saved_strict = vm.strict;
     const saved_env = vm.env;
+    const saved_nt = vm.new_target;
     const saved_import_meta_slot = vm.import_meta_slot;
     const saved_import_meta_obj = vm.import_meta_obj;
+    const saved_eval_nt = vm.direct_eval_new_target_allowed;
     const saved_pm = vm.current_private_map;
     if (!func.is_arrow) vm.current_private_map = func.private_map; // a direct eval here resolves the class's private names
     vm.strict = func.is_strict;
@@ -2087,14 +2141,18 @@ pub fn runFunction(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
     // For ordinary functions `func.closure` is the global env (unchanged).
     vm.env = func.closure;
     vm.this_value = try bindThisForCall(vm, func, this_val);
+    vm.new_target = if (func.is_arrow) func.arrow_new_target else new_target;
+    vm.direct_eval_new_target_allowed = if (func.is_arrow) func.arrow_direct_eval_new_target_allowed else true;
     vm.import_meta_slot = func.import_meta_slot;
     vm.import_meta_obj = if (func.import_meta_slot) |slot| slot.obj else null;
     defer {
         vm.this_value = saved_this;
         vm.strict = saved_strict;
         vm.env = saved_env;
+        vm.new_target = saved_nt;
         vm.import_meta_slot = saved_import_meta_slot;
         vm.import_meta_obj = saved_import_meta_obj;
+        vm.direct_eval_new_target_allowed = saved_eval_nt;
         vm.current_private_map = saved_pm;
     }
     return run(vm, fchunk, frame);
@@ -2170,6 +2228,22 @@ test "vm: generator calls from bytecode are lazy" {
         \\function *g() { throw new Error("body ran"); }
         \\typeof g()
     )).asStr());
+}
+
+test "vm: generator new.target is undefined across eval and arrows" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expect((try vmRun(a,
+        \\function *g() {
+        \\  if (new.target !== undefined) yield "bad-new";
+        \\  if (eval("new.target") !== undefined) yield "bad-eval";
+        \\  if ((() => new.target)() !== undefined) yield "bad-arrow";
+        \\  yield (() => new.target);
+        \\}
+        \\let f = g().next().value;
+        \\typeof f === "function" && f() === undefined
+    )).asBool());
 }
 
 test "vm: if/else and short-circuit value" {

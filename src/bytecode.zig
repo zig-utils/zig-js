@@ -161,6 +161,7 @@ pub const Op = enum(u8) {
 
     // --- objects, arrays, members ---
     load_this, // push the current `this`
+    load_new_target, // push the current `new.target`
     new_object, // push a fresh {}
     new_array, // push a fresh []
     init_prop, // operand a: name index; pop value, define own data prop on object at top, leave object

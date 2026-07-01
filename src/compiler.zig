@@ -1294,6 +1294,7 @@ pub const Compiler = struct {
                 }
             },
             .this_expr => _ = try self.chunk.emit(.load_this, 0),
+            .new_target_expr => _ = try self.chunk.emit(.load_new_target, 0),
             .member => |m| {
                 try self.compileExpr(m.object);
                 if (m.computed) |ce| {

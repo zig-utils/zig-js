@@ -4941,12 +4941,13 @@ pub const Interpreter = struct {
         // `Thread`'s `callValueWithThis`, or any host call that lands here while
         // the top-level ran on the VM), tree-walking the body raises a spurious
         // `ReferenceError`. `vm.callValue` already dispatches chunk functions to
-        // the VM; mirror that here so the two entry paths agree. Constructors
-        // (`new_target` set) keep the tree-walk path — `construct` threads
-        // `new.target`, which `runFunction` does not. (A surfaced concurrent-JS
-        // fuzzer regression: a shared closure read across threads.)
+        // the VM; mirror that here so the two entry paths agree. Constructor
+        // entries from this interpreter path still keep the tree-walk path; the
+        // VM's own construct opcode threads `new.target` when it stays on bytecode.
+        // (A surfaced concurrent-JS fuzzer regression: a shared closure read
+        // across threads.)
         if (new_target.isUndefined() and !func.is_generator and !func.is_async) {
-            if (func.chunk) |fchunk| return vm.runFunction(self, func, fchunk, args, this_val);
+            if (func.chunk) |fchunk| return vm.runFunction(self, func, fchunk, args, this_val, new_target);
         }
         return self.callPlain(func, args, this_val, new_target);
     }
