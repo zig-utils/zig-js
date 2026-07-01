@@ -4140,6 +4140,9 @@ pub const Interpreter = struct {
         self.initEnvironment(class_env, outer_env, false);
         self.env = class_env;
         defer self.env = outer_env;
+        const saved_strict = self.strict;
+        self.strict = true;
+        defer self.strict = saved_strict;
         if (name.len > 0) try class_env.put(name, self.tdzVal());
         if (superclass) |sc| {
             const sv = try self.eval(sc);
@@ -4291,12 +4294,6 @@ pub const Interpreter = struct {
         };
         const class_val = try self.makeFunction(fnode, self.env);
         const class_obj = class_val.asObj();
-        // Now that the constructor exists, bind the class name in the class-body
-        // scope so the body can reference it. It is a STRICT immutable (const)
-        // binding — assigning to the class name inside the body throws a TypeError
-        // even in sloppy code (unlike a named function expression's name). An
-        // anonymous class (`class {}` / `var X = class {}`) has no inner binding.
-        if (name.len > 0) try class_env.putConst(name, class_val);
         const proto = try self.protoObject(class_obj);
         // A class's `prototype` is non-writable, non-enumerable, non-configurable.
         try class_obj.setAttr(self.arena, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
@@ -4441,6 +4438,11 @@ pub const Interpreter = struct {
         }
         if (computed_keys) |keys| if (computed_i != keys.len)
             return self.throwError("TypeError", "too many computed class names");
+
+        // Computed element names run while the inner class binding is still in
+        // TDZ. Once names/methods are installed, initialize the immutable
+        // binding so static elements and later method bodies can reference it.
+        if (name.len > 0) try class_env.putConst(name, class_val);
 
         // Pass 2 (step 34): run the static elements — `static { }` blocks and
         // static-field initializers — in source order, now that EVERY computed
