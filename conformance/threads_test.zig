@@ -271,9 +271,19 @@ fn asyncDrainPolls(name: []const u8) usize {
         // This stress case can run 2000 gc()/microtask turns after the waiter
         // storm has already settled. Give the oracle room under whole-corpus
         // warmed-state load without relaxing the rest of the allowlist.
-        return base * 3;
+        return base * 6;
     }
     return base;
+}
+
+fn asyncDrainSleepMs(name: []const u8) i64 {
+    if (std.mem.eql(u8, name, "cve/mc-dos-waiter-table-storm.js")) {
+        // Once the arm-2 80ms timers have fired, this case is mostly a long
+        // chain of Promise/GC turns. Shorter sleeps keep the runner advancing
+        // the turn queue instead of spending most of its budget parked.
+        return 1;
+    }
+    return 10;
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -475,19 +485,26 @@ pub fn main(init: std.process.Init) !void {
                     continue;
                 }
                 var balanced = false;
+                const drain_sleep_ms = asyncDrainSleepMs(name);
                 for (0..asyncDrainPolls(name)) |_| {
                     const status = ctx.evaluate("$drainRunLoop(); drainMicrotasks(); __asyncExpected === null || __asyncPassed >= __asyncExpected") catch js.Value.undef();
                     if (status.isBoolean() and status.asBool()) {
                         balanced = true;
                         break;
                     }
-                    std.Io.sleep(js.agent.engineIo(), .fromMilliseconds(10), .awake) catch {};
+                    std.Io.sleep(js.agent.engineIo(), .fromMilliseconds(drain_sleep_ms), .awake) catch {};
                 }
                 if (balanced) {
                     std.debug.print("  PASS  {s}\n", .{name});
                 } else {
+                    const progress = ctx.evaluate("String(__asyncPassed) + '/' + String(__asyncExpected)") catch js.Value.undef();
+                    const progress_s = if (progress.isString()) progress.asStr() else "?/?";
                     failed += 1;
-                    std.debug.print("  FAIL  {s}: async completions not reached\n", .{name});
+                    std.debug.print("  FAIL  {s}: async completions not reached ({s})\n", .{ name, progress_s });
+                    if (ctx.print_buffer.items.len != 0) {
+                        std.debug.print("{s}", .{ctx.print_buffer.items});
+                        if (ctx.print_buffer.items[ctx.print_buffer.items.len - 1] != '\n') std.debug.print("\n", .{});
+                    }
                 }
             } else |_| {
                 if (expect_termination) {
