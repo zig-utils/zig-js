@@ -1161,7 +1161,7 @@ fn genResume(vm: *Interpreter, gen_obj: *value.Object, kind: ResumeKind, val: Va
         vm.direct_eval_new_target_allowed = s_eval_nt;
     }
 
-    if (vm.depth >= interp.max_call_depth) return vm.throwError("RangeError", "Maximum call stack size exceeded");
+    try vm.stackGuard();
     vm.depth += 1;
     defer vm.depth -= 1;
 
@@ -1461,7 +1461,7 @@ fn asyncDrive(vm: *Interpreter, g: *Generator, kind: ResumeKind, val: Value) Eva
         vm.new_target = s_nt;
         vm.direct_eval_new_target_allowed = s_eval_nt;
     }
-    if (vm.depth >= interp.max_call_depth) return vm.throwError("RangeError", "Maximum call stack size exceeded");
+    try vm.stackGuard();
     vm.depth += 1;
     defer vm.depth -= 1;
 
@@ -1717,7 +1717,7 @@ fn agResume(vm: *Interpreter, g: *Generator, kind: ResumeKind, val: Value) EvalE
         vm.new_target = s_nt;
         vm.direct_eval_new_target_allowed = s_eval_nt;
     }
-    if (vm.depth >= interp.max_call_depth) return vm.throwError("RangeError", "Maximum call stack size exceeded");
+    try vm.stackGuard();
     vm.depth += 1;
     defer vm.depth -= 1;
 
@@ -2111,7 +2111,7 @@ fn construct(vm: *Interpreter, callee: Value, args: []const Value) EvalError!Val
 }
 
 pub fn runFunction(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []const Value, this_val: Value, new_target: Value) EvalError!Value {
-    if (vm.depth >= interp.max_call_depth) return vm.throwError("RangeError", "Maximum call stack size exceeded");
+    try vm.stackGuard();
     vm.depth += 1;
     defer vm.depth -= 1;
 
@@ -2221,6 +2221,28 @@ test "vm: functions, recursion, closures" {
         \\function mk(x) { return function (y) { return x + y; }; }
         \\mk(10)(5)
     )).asNum());
+}
+
+test "vm: recursive calls throw a catchable RangeError before native stack overflow" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var parser = try Parser.init(a,
+        \\function recurse(n) { return recurse(n + 1); }
+        \\recurse(0)
+    );
+    const prog = try parser.parseProgram();
+    const chunk = try Compiler.compileProgram(a, prog);
+    var env = Environment{ .arena = a, .fn_scope = true };
+    const root_shape = try @import("shape.zig").Shape.createRoot(a);
+    try interp.installGlobals(&env, root_shape);
+    var machine = Interpreter{ .arena = a, .env = &env, .root_shape = root_shape };
+
+    try std.testing.expectError(error.Throw, run(&machine, chunk, null));
+    const exception = machine.exception;
+    try std.testing.expect(!exception.isUndefined());
+    try std.testing.expect(exception.isObject());
+    try std.testing.expectEqualStrings("RangeError", exception.asObj().error_name);
 }
 
 test "vm: generator calls from bytecode are lazy" {

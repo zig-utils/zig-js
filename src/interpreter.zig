@@ -1084,7 +1084,7 @@ pub const Interpreter = struct {
     /// recursing, so a deep-recursing peer throws instead of crashing the
     /// process. Each spawned `Thread` registered its stack bounds on entry
     /// (`stack_scan.enter` → `registerThreadBounds`).
-    inline fn stackGuard(self: *Interpreter) EvalError!void {
+    pub inline fn stackGuard(self: *Interpreter) EvalError!void {
         // Shallow-call hot path: a single compare, identical to the old guard.
         // Only once a chain is already deep do we pay the logical-limit check
         // plus the native stack-pointer probe (the latter matters for

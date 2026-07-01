@@ -43,8 +43,9 @@ tests as the matching engine features land.
   ThreadSanitizer suppressions are deliberately limited to those program-byte
   frames and are guarded by a suppression-narrowness witness. See
   [Memory Model](./memory-model.md).
-- Treating deep recursive call behavior as a finished VM-stack feature. The
-  tree-walker still uses native recursion for calls, so tests requiring
+- Treating deep recursive call behavior as a finished VM-stack feature. VM and
+  tree-walker calls both throw catchable `RangeError`s before native stack
+  overflow, but they still consume native stack per call, so tests requiring
   thousands of pre-overflow calls remain future work.
 - Treating remaining WebAssembly/JIT-specific PR-249 files as implemented when
   the required WebAssembly surface, JIT artifact hooks, or JSC shell controls do

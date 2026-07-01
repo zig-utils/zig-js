@@ -483,8 +483,10 @@ PR-249 files stay reference-only for concrete reasons:
   stop counters, disassembly controls, or retired-artifact machinery remain out
   until real engine behavior backs those hooks.
 - `semantics/stack-overflow-per-thread.js` expects thousands of recursive calls
-  before catchable overflow. The tree-walker still uses native recursion, so
-  this needs iterative/trampolined calls or a VM-stack execution path.
+  before catchable overflow. VM-recursive calls now use the same catchable stack
+  guard as the tree-walker, but both still consume native stack per call, so the
+  reference witness needs iterative/trampolined calls or a real VM-stack
+  execution path before promotion.
 - `cve/mc-spec-timer-capability.js` needs SharedArrayBuffer-off option modeling
   and timing semantics beyond today's shell surface.
 - `semantics/oom-one-thread.js` remains out until there is a real heap cap and

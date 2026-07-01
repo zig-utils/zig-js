@@ -22,6 +22,10 @@ than new correctness architecture.
   closure-escaped frames serialize on a gated per-frame lock.
 - Tree-walker entry into VM-compiled closures now dispatches through the VM,
   so spawned `Thread` entry and normal calls agree on upvalue resolution.
+- VM-recursive calls use the same catchable stack guard as tree-walker calls,
+  so bytecode recursion raises `RangeError` before native stack overflow. The
+  deeper PR-249 thousands-of-frames witness still needs a trampolined/VM-stack
+  call path before promotion.
 - Active VM frame slots are traced as GC roots, not only operand stacks, closing
   the mid-script parallel-GC use-after-free found by the fuzzer.
 - `-Dtest262-parallel-js` runs a broad language-surface slice in GIL-free
