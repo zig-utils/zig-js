@@ -3,10 +3,11 @@
 //! oven-sh/WebKit#249, design in docs/threads/P6-thread-api.md).
 //!
 //! `new Thread(fn, ...args)` runs `fn` on another OS thread **in the same
-//! realm** — same globalThis, same heap, same closures — serialized by the
-//! Context's GIL (src/gil.zig). `t.join()` releases the GIL while parked and
-//! returns fn's value or rethrows its actual exception object; each thread
-//! drains its own microtask queue before publishing its result.
+//! realm** — same globalThis, same heap, same closures. `enable_threads` is
+//! no-GIL/parallel by default; `.gil = true` opts into the legacy serialized
+//! fallback. `t.join()` parks without holding that legacy GIL when the fallback
+//! is enabled and returns fn's value or rethrows its actual exception object;
+//! each thread drains its own microtask queue before publishing its result.
 //! `Thread.current` is the calling thread's Thread object (main has id 0).
 //! Installed only on `enable_threads` Contexts.
 
@@ -557,8 +558,9 @@ fn threadCurrentGetter(ctx_ptr: *anyopaque, this: Value, args: []const Value) va
 // PR-249 semantics: Lock is non-recursive with a `hold(fn)` discipline
 // (release is finally-equivalent); Condition.wait(lock) atomically releases
 // the lock and parks (spurious wakeups allowed); ThreadLocal.value is
-// per-thread storage for any JS value. All parking goes through `Gil.wait`,
-// so the VM lock is never held while blocked.
+// per-thread storage for any JS value. In `.gil = true` mode, blocking paths
+// release the legacy VM lock while parked; in the default no-GIL mode, the
+// same operations use their per-structure mutexes and publish roots for GC.
 
 const SyncBrand = usize;
 const sync_brand_lock: SyncBrand = 0x6a73_7468_6c6f_636b;

@@ -298,7 +298,9 @@ threading architecture:
   instead of front-shifting task lists. Retry-front async-hold grants use an
   amortized O(1) front stash when no consumed head slot is available, so failed
   grant delivery does not fall back to shifting the whole pending list. Realm
-  task pumps also copy bounded FIFO
+  task-queue writers publish the atomic empty/pending hint from the queue length
+  while holding the shared API lock, avoiding writer-side atomic RMW in the
+  async-grant hot path. Realm task pumps also copy bounded FIFO
   bursts under the shared API lock before running grants outside it, so delivery
   no longer takes that lock once per job. `Condition.notify` / `notifyAll` now
   use the same FIFO head-cursor shape for their mixed sync/async waiter queue,

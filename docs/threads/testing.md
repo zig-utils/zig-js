@@ -291,10 +291,12 @@ intentionally has no `.gil = true` column because each Worker owns its own
 Empty sync-wait task pumps now have a
 lock-free fast path;
 real async-hold delivery drains bounded FIFO bursts from the realm task queue
-under one API-lock acquisition before running grants outside that lock, and
-retry-front async-hold grants use a front stash instead of shifting the
-per-lock pending list when no consumed head slot is available; condition
-notify/notifyAll uses a FIFO head cursor for the mixed sync/async waiter queue;
+under one API-lock acquisition before running grants outside that lock,
+task-queue writers publish the atomic pending hint from the locked queue length
+instead of writer-side atomic RMW, and retry-front async-hold grants use a front
+stash instead of shifting the per-lock pending list when no consumed head slot
+is available; condition notify/notifyAll uses a FIFO head cursor for the mixed
+sync/async waiter queue;
 timed-out or terminated sync condition waiters are marked canceled and skipped
 by that cursor instead of being removed from the middle of the queue; sync
 notifyAll handoff now waits on the waiter's condition ack signal instead of a

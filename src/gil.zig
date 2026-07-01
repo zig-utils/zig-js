@@ -1,12 +1,9 @@
-//! The VM lock for shared-Context threads (Phase 6 of
+//! Shared-realm thread coordination state (Phase 6/7 of
 //! https://github.com/zig-utils/zig-js/issues/1, design in
-//! docs/threads/P6-thread-api.md). One mutex serializes all heap and
-//! interpreter access in an `enable_threads` Context: exactly one thread
-//! runs JS at a time (concurrency, not parallelism), which is what makes
-//! arena allocation, shape transitions, and every existing invariant safe
-//! with zero changes. Threads interleave at the engines' step checkpoints
-//! (`yieldIfContended`) and at every blocking point (join, Condition.wait,
-//! Atomics.wait, Lock contention), which release the lock while parked.
+//! docs/threads/P6-thread-api.md). `Context.createWith(.{ .enable_threads =
+//! true })` runs no-GIL/parallel by default; `.gil = true` uses the legacy VM
+//! lock path. The same struct also owns per-realm task queues, waiter tables,
+//! API bookkeeping locks, and park records used by both modes.
 
 const std = @import("std");
 const io_compat = @import("io_compat.zig");
@@ -116,7 +113,7 @@ pub const Gil = struct {
         g.lockApi();
         defer g.unlockApi();
         try g.tasks.append(a, task);
-        _ = g.tasks_queued.fetchAdd(1, .release);
+        g.tasks_queued.store(g.queuedTaskCountLocked(), .release);
     }
 
     pub fn dequeueTask(g: *Gil) ?*anyopaque {
@@ -133,11 +130,11 @@ pub const Gil = struct {
         const item = g.tasks.items[g.tasks_head];
         g.tasks.items[g.tasks_head] = undefined;
         g.tasks_head += 1;
-        _ = g.tasks_queued.fetchSub(1, .release);
         if (g.tasks_head == g.tasks.items.len) {
             g.tasks.clearRetainingCapacity();
             g.tasks_head = 0;
         }
+        g.tasks_queued.store(g.queuedTaskCountLocked(), .release);
         return item;
     }
 
@@ -158,12 +155,17 @@ pub const Gil = struct {
         @memcpy(out[0..n], g.tasks.items[g.tasks_head..][0..n]);
         @memset(g.tasks.items[g.tasks_head..][0..n], undefined);
         g.tasks_head += n;
-        _ = g.tasks_queued.fetchSub(n, .release);
         if (g.tasks_head == g.tasks.items.len) {
             g.tasks.clearRetainingCapacity();
             g.tasks_head = 0;
         }
+        g.tasks_queued.store(g.queuedTaskCountLocked(), .release);
         return n;
+    }
+
+    fn queuedTaskCountLocked(g: *const Gil) usize {
+        if (g.tasks_head >= g.tasks.items.len) return 0;
+        return g.tasks.items.len - g.tasks_head;
     }
 
     /// Lock/unlock the property-mode Atomics waiter table. No JS or promise
