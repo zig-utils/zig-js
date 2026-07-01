@@ -13024,7 +13024,7 @@ pub const Interpreter = struct {
                         // produces the boxed primitive at this position in the
                         // OrdinaryToPrimitive order, so do not continue to a later
                         // user toString accessor for default/number hints.
-                    else if (std.mem.eql(u8, m, "valueOf") and o.prim != null and fv.isCallable()) builtin_wrapper_value_of = true
+                    else if (std.mem.eql(u8, m, "valueOf") and o.prim != null and c.prim != null and fv.isCallable()) builtin_wrapper_value_of = true
                         // A callable native `toString` thunk yields a primitive string
                         // (the built-in coercion below); it must run at *this* position
                         // in the hint order — so stop here rather than trying a later
@@ -13063,10 +13063,7 @@ pub const Interpreter = struct {
         if (o.prim) |p| {
             if (builtin_wrapper_value_of) return p;
             if (builtin_to_string) {
-                if (p.isObject() and p.asObj().is_symbol) {
-                    const ds = p.asObj().sym_desc orelse "";
-                    return Value.str(try std.mem.concat(self.arena, u8, &.{ "Symbol(", ds, ")" }));
-                }
+                if (builtin_to_string_method) |m| return try self.callValueWithThis(m, &.{}, v);
                 return Value.str(try p.toString(self.arena));
             }
             return self.throwError("TypeError", "Cannot convert object to primitive value");

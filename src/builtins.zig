@@ -2631,13 +2631,13 @@ const Stringifier = struct {
     fn serializeObject(st: *Stringifier, buf: *std.ArrayListUnmanaged(u8), v: Value, shape: *value.Object) HostError!void {
         const self = st.self;
         const a = self.arena;
-        const keys = if (st.allow) |al| al else try self.objectOwnKeysList(v.asObj());
+        const keys = if (st.allow) |al| al else try st.jsonObjectKeys(v.asObj(), shape);
         const outer = st.indent.items.len;
         try st.indent.appendSlice(a, st.gap);
         var tmp: std.ArrayListUnmanaged(u8) = .empty;
         var count: usize = 0;
         for (keys) |k| {
-            if (value.isSymbolKey(k) or (st.allow == null and !shape.getAttr(k).enumerable)) continue;
+            if (jsonHiddenKey(k) or (st.allow == null and !shape.getAttr(k).enumerable)) continue;
             var member: std.ArrayListUnmanaged(u8) = .empty;
             if (!try st.serialize(&member, v, k)) continue; // omitted property
             if (count != 0) try tmp.append(a, ',');
@@ -2659,6 +2659,12 @@ const Stringifier = struct {
         try buf.append(a, '}');
     }
 
+    fn jsonObjectKeys(st: *Stringifier, object: *value.Object, shape: *value.Object) HostError![]const []const u8 {
+        if (object.proxy_handler != null or object.proxy_revoked or shape.module_ns != null or shape.prim != null or shape.typed_array != null or shape.is_array)
+            return st.self.objectOwnKeysList(object);
+        return shape.ownKeys(st.self.arena);
+    }
+
     /// Emit a newline + the current indent when pretty-printing (no-op for the
     /// compact form).
     fn newlineIndent(st: *Stringifier, buf: *std.ArrayListUnmanaged(u8)) HostError!void {
@@ -2670,6 +2676,12 @@ const Stringifier = struct {
         try buf.appendSlice(st.self.arena, ind);
     }
 };
+
+fn jsonHiddenKey(k: []const u8) bool {
+    if (value.isPrivateKey(k)) return true;
+    if (value.isRealSymbolKey(k)) return true;
+    return k.len > 1 and k[0] == 0 and std.ascii.isAlphabetic(k[1]);
+}
 
 fn wtf8SurrogateAt(s: []const u8, i: usize) ?u21 {
     if (i + 2 >= s.len or s[i] != 0xED) return null;
@@ -2685,6 +2697,24 @@ fn appendJsonHex4(a: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), cp: u2
     try buf.append(a, digits[(cp >> 8) & 0x0f]);
     try buf.append(a, digits[(cp >> 4) & 0x0f]);
     try buf.append(a, digits[cp & 0x0f]);
+}
+
+fn appendUtf8Codepoint(a: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), cp: u21) HostError!void {
+    if (cp <= 0x7F) {
+        try buf.append(a, @intCast(cp));
+    } else if (cp <= 0x7FF) {
+        try buf.append(a, @intCast(0xC0 | (cp >> 6)));
+        try buf.append(a, @intCast(0x80 | (cp & 0x3F)));
+    } else if (cp <= 0xFFFF) {
+        try buf.append(a, @intCast(0xE0 | (cp >> 12)));
+        try buf.append(a, @intCast(0x80 | ((cp >> 6) & 0x3F)));
+        try buf.append(a, @intCast(0x80 | (cp & 0x3F)));
+    } else {
+        try buf.append(a, @intCast(0xF0 | (cp >> 18)));
+        try buf.append(a, @intCast(0x80 | ((cp >> 12) & 0x3F)));
+        try buf.append(a, @intCast(0x80 | ((cp >> 6) & 0x3F)));
+        try buf.append(a, @intCast(0x80 | (cp & 0x3F)));
+    }
 }
 
 fn writeJsonString(a: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), s: []const u8) HostError!void {
@@ -2950,11 +2980,22 @@ const JsonParser = struct {
                     '"' => '"',
                     '\\' => '\\',
                     'u' => {
-                        // \uXXXX — emit the low byte (ASCII subset for v1).
+                        // \uXXXX — decode the UTF-16 code unit(s) and store UTF-8.
                         if (p.i + 4 >= p.s.len) return error.Invalid;
                         const code = std.fmt.parseInt(u16, p.s[p.i + 1 .. p.i + 5], 16) catch return error.Invalid;
                         p.i += 4;
-                        try buf.append(a, @intCast(code & 0xff));
+                        if (code >= 0xD800 and code <= 0xDBFF) {
+                            if (p.i + 6 >= p.s.len or p.s[p.i + 1] != '\\' or p.s[p.i + 2] != 'u') return error.Invalid;
+                            const low = std.fmt.parseInt(u16, p.s[p.i + 3 .. p.i + 7], 16) catch return error.Invalid;
+                            if (low < 0xDC00 or low > 0xDFFF) return error.Invalid;
+                            const cp: u21 = 0x10000 + ((@as(u21, code) - 0xD800) << 10) + (@as(u21, low) - 0xDC00);
+                            try appendUtf8Codepoint(a, &buf, cp);
+                            p.i += 6;
+                        } else if (code >= 0xDC00 and code <= 0xDFFF) {
+                            return error.Invalid;
+                        } else {
+                            try appendUtf8Codepoint(a, &buf, code);
+                        }
                         p.i += 1;
                         continue;
                     },
