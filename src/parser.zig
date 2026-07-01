@@ -1948,6 +1948,15 @@ pub const Parser = struct {
         return params;
     }
 
+    /// Validate a dynamic Function constructor's joined parameter string as a
+    /// standalone FormalParameters parse. The caller supplies source shaped like
+    /// `(params)`; requiring EOF prevents comments/templates in `params` from
+    /// consuming the constructor-inserted boundary before the body parse.
+    pub fn parseDynamicFunctionParams(self: *Parser, is_gen: bool, is_async: bool) ParseError!void {
+        _ = try self.parseFunctionParamList(is_gen, is_async);
+        if (!self.check(.eof)) return ParseError.UnexpectedToken;
+    }
+
     fn isEvalOrArguments(name: []const u8) bool {
         return std.mem.eql(u8, name, "eval") or std.mem.eql(u8, name, "arguments");
     }

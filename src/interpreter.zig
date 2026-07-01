@@ -5206,6 +5206,9 @@ pub const Interpreter = struct {
                 self.initEnvironment(body_env, call_env, true);
                 self.env = body_env;
                 try self.hoistVarNames(func.body.block);
+                if (body_env.vars.contains("arguments")) {
+                    if (call_env.get("arguments")) |av| try body_env.put("arguments", av);
+                }
                 for (func.params) |p| {
                     if (p.pattern == null and !p.is_rest and body_env.vars.contains(p.name)) {
                         if (call_env.get(p.name)) |pv| try body_env.put(p.name, pv);
@@ -17611,6 +17614,11 @@ fn dynamicFunctionFn(comptime kind: DynFnKind) value.NativeFn {
                     return self.throwError("SyntaxError", "Function: invalid parameters or body");
                 if (has_yield) return self.throwError("SyntaxError", "Function: invalid parameters or body");
             }
+            const param_source = try std.fmt.allocPrint(self.arena, "({s})", .{params.items});
+            var param_parser = Parser.init(self.arena, param_source) catch
+                return self.throwError("SyntaxError", "Function: invalid parameters or body");
+            param_parser.parseDynamicFunctionParams(kind == .generator or kind == .async_generator, kind == .async_fn or kind == .async_generator) catch
+                return self.throwError("SyntaxError", "Function: invalid parameters or body");
             const prefix = switch (kind) {
                 .generator => "function* anonymous",
                 .async_fn => "async function anonymous",
@@ -38171,6 +38179,19 @@ test "interpreter arguments object and Array/Object statics" {
         \\}
         \\f(10, 20, 30)
     )).asStr());
+    try std.testing.expect((try evalSource(a,
+        \\function g8(h = () => arguments) {
+        \\  var arguments = 0;
+        \\  return arguments === 0 && arguments !== h();
+        \\}
+        \\function g9(h = () => arguments) {
+        \\  var arguments;
+        \\  let before = arguments === h() && arguments !== undefined;
+        \\  arguments = 0;
+        \\  return before && arguments === 0 && arguments !== h();
+        \\}
+        \\g8() && g9()
+    )).asBool());
     // arrows have no own arguments (inherit) — here referencing arguments at top level is fine
     try std.testing.expectEqual(@as(f64, 3), (try evalSource(a, "function f() { return arguments.length; } f(7, 8, 9)")).asNum());
     // Array.of / from

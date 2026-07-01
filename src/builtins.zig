@@ -106,6 +106,11 @@ pub fn functionConstructor(ctx: *anyopaque, this: Value, args: []const Value) Ho
         }
         body = try self.toStringV(args[args.len - 1]);
     }
+    const param_source = try std.fmt.allocPrint(self.arena, "({s})", .{params.items});
+    var param_parser = Parser.init(self.arena, param_source) catch
+        return self.throwError("SyntaxError", "Function: invalid parameters or body");
+    param_parser.parseDynamicFunctionParams(false, false) catch
+        return self.throwError("SyntaxError", "Function: invalid parameters or body");
     const source = try std.fmt.allocPrint(self.arena, "(function({s}\n) {{\n{s}\n}})", .{ params.items, body });
     var parser = Parser.init(self.arena, source) catch
         return self.throwError("SyntaxError", "Function: invalid parameters or body");

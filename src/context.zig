@@ -4263,6 +4263,19 @@ test "Function constructor builds callable functions from source" {
         \\try { Function("return )("); } catch (e) { t = e.name === "SyntaxError"; }
         \\t
     )).asBool());
+    try std.testing.expect((try evalIn(
+        \\let tests = [
+        \\  ["/*", "*/) {"],
+        \\  ["//", ") {"],
+        \\  ["a = `", "` ) {"],
+        \\  [") { var x = function (", "} "],
+        \\  ["x = function (", "}) {"]
+        \\];
+        \\tests.every(function (test) {
+        \\  try { new Function(test[0], test[1]); } catch (e) { return e instanceof SyntaxError; }
+        \\  return false;
+        \\})
+    )).asBool());
 }
 
 test "String.prototype.split: limit + regex separators" {

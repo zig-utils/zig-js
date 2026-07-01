@@ -936,6 +936,9 @@ fn paramsBodyVarEnv(vm: *Interpreter, func: *Function, param_env: *Environment) 
     vm.initEnvironment(be, param_env, true);
     vm.env = be;
     try vm.hoistVarNames(func.body.block);
+    if (be.vars.contains("arguments")) {
+        if (param_env.get("arguments")) |av| try be.put("arguments", av);
+    }
     // A body `var` that names a simple parameter inherits the parameter's value.
     for (func.params) |p| {
         if (p.pattern == null and !p.is_rest and be.vars.contains(p.name)) {
