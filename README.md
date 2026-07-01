@@ -429,7 +429,10 @@ threading architecture:
   resume plus exact `FinalizationRegistry` cleanup count/sum delivery; the same
   subprogram now settles expired property `waitAsync` tickets while those peers
   are parked, keeps a live property `waitAsync` ticket rooted through the
-  finishing sweep, then notifies it and verifies the exact captured-root score.
+  finishing sweep, keeps an isolated Worker parked on a retained
+  `SharedArrayBuffer` through the same sweep, then notifies both the live
+  waitAsync ticket and Worker and verifies the exact captured-root score plus
+  Worker reply.
   A sibling sync-wait burst subprogram parks multiple waiters on the same
   property, the same `Condition`, and the same contended `Lock` through a
   finishing sweep, rejects early cleanup while those stack roots are live, then

@@ -240,7 +240,9 @@ context APIs.
   stay parked through a finishing sweep before their stack roots and exact
   `FinalizationRegistry` cleanup count/sum are verified, where expired property
   `waitAsync` tickets compact while those peers are parked and a live property
-  `waitAsync` ticket stays rooted through the sweep until notification, plus a sibling
+  `waitAsync` ticket stays rooted through the sweep until notification, and
+  where an isolated Worker stays parked on a retained `SharedArrayBuffer`
+  through the same sweep before its reply is verified, plus a sibling
   sync-wait burst subprogram where multiple waiters on the same property, the
   same `Condition`, and the same contended `Lock` stay parked through a
   finishing sweep before burst release and exact finalization cleanup, plus a sibling

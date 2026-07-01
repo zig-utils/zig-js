@@ -307,8 +307,9 @@ Do this once the engine's `context.zig`/`interpreter.zig` surface is settled
   through a finishing sweep before their stack roots and exact
   `FinalizationRegistry` cleanup count/sum are verified, expired property
   `waitAsync` tickets compact while those peers are parked, and one live
-  property `waitAsync` ticket remains rooted through the sweep until
-  notification, a sibling sync-wait burst case where multiple same-property,
+  property `waitAsync` ticket plus an isolated Worker parked on a retained
+  `SharedArrayBuffer` remain live through the sweep until notification/release,
+  a sibling sync-wait burst case where multiple same-property,
   same-`Condition`, and same-`Lock` waiters stay parked through a finishing
   sweep before burst release and exact finalization cleanup, a sibling
   `Atomics.Mutex.lockIfAvailable` case where
