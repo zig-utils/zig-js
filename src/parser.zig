@@ -1315,7 +1315,7 @@ pub const Parser = struct {
                         // An object rest target must be a simple assignment target
                         // (an identifier or member) — `({...import.meta} = x)`,
                         // `({...(a+b)} = x)`, `({...[a]} = x)` are SyntaxErrors.
-                        if (p.value.* != .identifier and p.value.* != .member) return ParseError.InvalidAssignmentTarget;
+                        if (p.value.* != .identifier and p.value.* != .member and p.value.* != .super_member) return ParseError.InvalidAssignmentTarget;
                         if (p.value.* == .identifier and self.isForbiddenBindingName(p.value.identifier)) return ParseError.UnexpectedToken;
                         rest_target = try self.exprToTarget(p.value);
                     } else if (p.value.* == .assign) {
@@ -1336,7 +1336,7 @@ pub const Parser = struct {
                 if (self.isForbiddenBindingName(node.identifier)) return ParseError.UnexpectedToken;
                 return node;
             },
-            .member => node,
+            .member, .super_member => node,
             .array_lit, .object_lit => try self.litToPattern(node),
             // Already a destructuring pattern — e.g. a nested assignment element
             // `[ {} = yield ]` whose inner `{} = …` was converted on the way up.

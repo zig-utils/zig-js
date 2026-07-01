@@ -8829,9 +8829,20 @@ pub const Interpreter = struct {
                 const key = try self.memberKey(m.property, m.computed);
                 try self.setMember(recv, key, val);
             },
+            .super_member => try self.assignTo(target, val),
             .obj_pattern => |p| try self.destructureObject(p.props, p.rest, val, declare),
             .arr_pattern => |p| try self.destructureArray(p.elems, p.rest, val, declare),
             else => return self.throwError("SyntaxError", "invalid destructuring target"),
+        }
+    }
+
+    fn setSuperMemberResolved(self: *Interpreter, property: []const u8, computed: ?*Node, computed_key: Value, v: Value) EvalError!void {
+        const home = self.home_object orelse return self.throwError("SyntaxError", "'super' outside a method");
+        if (!self.this_initialized) return self.throwError("ReferenceError", "Must call super constructor before using 'this'");
+        const parent = home.protoAtomic() orelse return self.throwError("TypeError", "Cannot set property of null (super)");
+        const key = if (computed != null) try self.keyOf(computed_key) else property;
+        if (!try self.setMemberResult(Value.obj(parent), key, v, self.this_value)) {
+            if (self.strict) return self.throwError("TypeError", "Cannot set property");
         }
     }
 
@@ -8846,13 +8857,20 @@ pub const Interpreter = struct {
             // member reference (assignment form), its reference (base, then the key
             // EXPRESSION) is evaluated BEFORE GetV(value, key) — and ToPropertyKey of
             // the target's computed key is deferred to PutValue, after GetV.
-            const member_assign = !declare and prop.target.* == .member;
+            const member_assign = !declare and (prop.target.* == .member or prop.target.* == .super_member);
             var m_base: Value = undefined;
             var m_keyval: Value = undefined;
             if (member_assign) {
-                const m = prop.target.member;
-                m_base = try self.eval(m.object);
-                if (m.computed) |ce| m_keyval = try self.eval(ce);
+                switch (prop.target.*) {
+                    .member => |m| {
+                        m_base = try self.eval(m.object);
+                        if (m.computed) |ce| m_keyval = try self.eval(ce);
+                    },
+                    .super_member => |m| {
+                        if (m.computed) |ce| m_keyval = try self.eval(ce);
+                    },
+                    else => unreachable,
+                }
             }
             // KeyedBindingInitialization for a SingleNameBinding resolves the
             // target binding (step 2) BEFORE GetV(value, P) (step 3). Inside a
@@ -8869,9 +8887,14 @@ pub const Interpreter = struct {
                 }
             }
             if (member_assign) {
-                const m = prop.target.member;
-                const tkey = if (m.computed != null) try self.keyOf(m_keyval) else m.property;
-                try self.setMember(m_base, tkey, v);
+                switch (prop.target.*) {
+                    .member => |m| {
+                        const tkey = if (m.computed != null) try self.keyOf(m_keyval) else m.property;
+                        try self.setMember(m_base, tkey, v);
+                    },
+                    .super_member => |m| try self.setSuperMemberResolved(m.property, m.computed, m_keyval, v),
+                    else => unreachable,
+                }
             } else {
                 try self.bindPattern(prop.target, v, declare);
             }
@@ -8994,11 +9017,18 @@ pub const Interpreter = struct {
             // `next()`. ToPropertyKey of the computed key is deferred to PutValue.
             var member_recv: Value = Value.undef();
             var member_keyval: Value = Value.undef();
-            var is_member = false;
-            if (!declare) if (elem.target) |t| if (t.* == .member) {
-                is_member = true;
-                member_recv = try self.eval(t.member.object);
-                if (t.member.computed) |ce| member_keyval = try self.eval(ce);
+            var member_kind: enum { none, member, super_member } = .none;
+            if (!declare) if (elem.target) |t| switch (t.*) {
+                .member => |m| {
+                    member_kind = .member;
+                    member_recv = try self.eval(m.object);
+                    if (m.computed) |ce| member_keyval = try self.eval(ce);
+                },
+                .super_member => |m| {
+                    member_kind = .super_member;
+                    if (m.computed) |ce| member_keyval = try self.eval(ce);
+                },
+                else => {},
             };
             var v: Value = Value.undef();
             if (!done) {
@@ -9023,10 +9053,18 @@ pub const Interpreter = struct {
                 if (v.isUndefined()) {
                     if (elem.default) |d| v = try self.eval(d);
                 }
-                if (is_member) {
-                    const tkey = if (t.member.computed != null) try self.keyOf(member_keyval) else t.member.property;
-                    try self.setMember(member_recv, tkey, v);
-                } else try self.bindPattern(t, v, declare);
+                switch (member_kind) {
+                    .member => {
+                        const m = t.member;
+                        const tkey = if (m.computed != null) try self.keyOf(member_keyval) else m.property;
+                        try self.setMember(member_recv, tkey, v);
+                    },
+                    .super_member => {
+                        const m = t.super_member;
+                        try self.setSuperMemberResolved(m.property, m.computed, member_keyval, v);
+                    },
+                    .none => try self.bindPattern(t, v, declare),
+                }
             }
         }
         if (rest) |rest_target| {
@@ -9035,10 +9073,19 @@ pub const Interpreter = struct {
             // for the preceding elements).
             var rest_recv: Value = Value.undef();
             var rest_key: ?[]const u8 = null;
-            if (!declare and rest_target.* == .member) {
-                rest_recv = try self.eval(rest_target.member.object);
-                rest_key = try self.memberKey(rest_target.member.property, rest_target.member.computed);
-            }
+            var rest_super: ?struct { property: []const u8, computed: ?*Node, keyval: Value } = null;
+            if (!declare) switch (rest_target.*) {
+                .member => |m| {
+                    rest_recv = try self.eval(m.object);
+                    rest_key = try self.memberKey(m.property, m.computed);
+                },
+                .super_member => |m| {
+                    var keyval: Value = Value.undef();
+                    if (m.computed) |ce| keyval = try self.eval(ce);
+                    rest_super = .{ .property = m.property, .computed = m.computed, .keyval = keyval };
+                },
+                else => {},
+            };
             const rest_arr = try self.newArray();
             while (!done) {
                 const res = self.callValueWithThis(next_method, &.{}, iter_obj) catch |e| {
@@ -9058,7 +9105,12 @@ pub const Interpreter = struct {
                 }
                 try rest_arr.asObj().elements.append(rest_arr.asObj().elementsAllocator(self.arena), try self.getProperty(res, "value"));
             }
-            if (rest_key) |k| try self.setMember(rest_recv, k, rest_arr) else try self.bindPattern(rest_target, rest_arr, declare); // iterator already exhausted
+            if (rest_key) |k|
+                try self.setMember(rest_recv, k, rest_arr)
+            else if (rest_super) |s|
+                try self.setSuperMemberResolved(s.property, s.computed, s.keyval, rest_arr)
+            else
+                try self.bindPattern(rest_target, rest_arr, declare); // iterator already exhausted
             return;
         }
         // IteratorClose: if destructuring finished before the iterator was
