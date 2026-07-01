@@ -8980,6 +8980,7 @@ pub const Interpreter = struct {
         // TypeError for a genuinely non-iterable value (e.g. a number or a
         // plain object), so destructuring those still fails the right way.
         const iter_obj = try self.iteratorOf(val);
+        const next_method = try self.getProperty(iter_obj, "next");
         var done = false;
         // IteratorClose on an abrupt completion: if any element step (target
         // reference, default expression, assignment, or pattern) throws while the
@@ -9001,10 +9002,14 @@ pub const Interpreter = struct {
             };
             var v: Value = Value.undef();
             if (!done) {
-                const res = self.callMethod(iter_obj, "next", &.{}) catch |e| {
+                const res = self.callValueWithThis(next_method, &.{}, iter_obj) catch |e| {
                     done = true;
                     return e;
                 };
+                if (!res.isObject() or res.asObj().is_symbol or res.asObj().is_bigint) {
+                    done = true;
+                    return self.throwError("TypeError", "iterator result is not an object");
+                }
                 const is_done = (self.getProperty(res, "done") catch |e| {
                     done = true;
                     return e;
@@ -9036,10 +9041,14 @@ pub const Interpreter = struct {
             }
             const rest_arr = try self.newArray();
             while (!done) {
-                const res = self.callMethod(iter_obj, "next", &.{}) catch |e| {
+                const res = self.callValueWithThis(next_method, &.{}, iter_obj) catch |e| {
                     done = true;
                     return e;
                 };
+                if (!res.isObject() or res.asObj().is_symbol or res.asObj().is_bigint) {
+                    done = true;
+                    return self.throwError("TypeError", "iterator result is not an object");
+                }
                 if ((self.getProperty(res, "done") catch |e| {
                     done = true;
                     return e;
@@ -9699,7 +9708,7 @@ pub const Interpreter = struct {
                     const itfn = try self.getProperty(v, ik);
                     if (!itfn.isUndefined() and !itfn.isNull()) {
                         if (itfn.isObject() and itfn.asObj().isCallableObject())
-                            return try self.callValueWithThis(itfn, &.{}, v);
+                            return try self.requireIteratorObject(try self.callValueWithThis(itfn, &.{}, v));
                         return self.throwError("TypeError", "value is not iterable");
                     }
                 }
@@ -9710,7 +9719,7 @@ pub const Interpreter = struct {
                         .deleted => return self.throwError("TypeError", "value is not iterable"),
                         .custom => |m| {
                             if (!m.isCallable()) return self.throwError("TypeError", "value is not iterable");
-                            return try self.callValueWithThis(m, &.{}, v);
+                            return try self.requireIteratorObject(try self.callValueWithThis(m, &.{}, v));
                         },
                     }
                 }
@@ -9725,7 +9734,7 @@ pub const Interpreter = struct {
                     const itfn = try self.getProperty(v, ik);
                     if (!itfn.isUndefined() and !itfn.isNull()) {
                         if (itfn.isObject() and itfn.asObj().isCallableObject())
-                            return try self.callValueWithThis(itfn, &.{}, v);
+                            return try self.requireIteratorObject(try self.callValueWithThis(itfn, &.{}, v));
                         return self.throwError("TypeError", "value is not iterable");
                     }
                     return self.throwError("TypeError", "value is not iterable");
@@ -9735,6 +9744,12 @@ pub const Interpreter = struct {
             },
             else => return self.throwError("TypeError", "value is not iterable"),
         }
+    }
+
+    fn requireIteratorObject(self: *Interpreter, it: Value) EvalError!Value {
+        if (!it.isObject() or it.asObj().is_symbol or it.asObj().is_bigint)
+            return self.throwError("TypeError", "iterator is not an object");
+        return it;
     }
 
     /// Whether `v` is iterable: a string, array, generator, or an object with a
