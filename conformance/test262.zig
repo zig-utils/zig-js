@@ -214,13 +214,7 @@ fn parseMeta(src: []const u8) Meta {
     if (std.mem.indexOf(u8, front, "tail-call-optimization") != null)
         meta.unsupported_flag = true;
     if (std.mem.indexOf(u8, front, "flags:")) |fi| {
-        const line_end = std.mem.indexOfScalarPos(u8, front, fi, '\n') orelse front.len;
-        const line = front[fi..line_end];
-        const flags_end = if (std.mem.indexOfScalar(u8, line, '[') != null and std.mem.indexOfScalar(u8, line, ']') == null)
-            (std.mem.indexOfScalarPos(u8, front, line_end, ']') orelse line_end) + 1
-        else
-            line_end;
-        const flags = front[fi..flags_end];
+        const flags = flagsRegion(front, fi);
         if (std.mem.indexOf(u8, flags, "raw")) |_| meta.raw = true;
         if (std.mem.indexOf(u8, flags, "onlyStrict")) |_| meta.only_strict = true;
         if (std.mem.indexOf(u8, flags, "async")) |_| meta.is_async = true;
@@ -251,6 +245,38 @@ fn parseMeta(src: []const u8) Meta {
             meta.negative_resolution = true;
     }
     return meta;
+}
+
+fn flagsRegion(front: []const u8, fi: usize) []const u8 {
+    const line_end = std.mem.indexOfScalarPos(u8, front, fi, '\n') orelse front.len;
+    const line = front[fi..line_end];
+    if (std.mem.indexOfScalar(u8, line, '[') != null) {
+        const flags_end = if (std.mem.indexOfScalar(u8, line, ']') == null)
+            (std.mem.indexOfScalarPos(u8, front, line_end, ']') orelse line_end) + 1
+        else
+            line_end;
+        return front[fi..flags_end];
+    }
+
+    var end = line_end;
+    var pos = if (line_end < front.len) line_end + 1 else line_end;
+    while (pos < front.len) {
+        const next = std.mem.indexOfScalarPos(u8, front, pos, '\n') orelse front.len;
+        const trimmed = trimFlagsLineLeft(front[pos..next]);
+        if (trimmed.len == 0 or trimmed[0] == '-') {
+            end = next;
+            pos = if (next < front.len) next + 1 else next;
+            continue;
+        }
+        break;
+    }
+    return front[fi..end];
+}
+
+fn trimFlagsLineLeft(line: []const u8) []const u8 {
+    var i: usize = 0;
+    while (i < line.len and (line[i] == ' ' or line[i] == '\t' or line[i] == '\r')) : (i += 1) {}
+    return line[i..];
 }
 
 fn negativeMatched(meta: Meta, err: anyerror) bool {

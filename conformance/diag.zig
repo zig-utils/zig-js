@@ -43,8 +43,7 @@ fn parseMeta(src: []const u8) Meta {
     const end_rel = std.mem.indexOf(u8, src[start..], "---*/") orelse return meta;
     const front = src[start .. start + end_rel];
     if (std.mem.indexOf(u8, front, "flags:")) |fi| {
-        const le = std.mem.indexOfScalarPos(u8, front, fi, '\n') orelse front.len;
-        const flags = front[fi..le];
+        const flags = flagsRegion(front, fi);
         if (std.mem.indexOf(u8, flags, "module") != null or
             std.mem.indexOf(u8, flags, "async") != null) meta.skip = true;
         if (std.mem.indexOf(u8, flags, "raw") != null) meta.raw = true;
@@ -68,6 +67,38 @@ fn parseMeta(src: []const u8) Meta {
         }
     }
     return meta;
+}
+
+fn flagsRegion(front: []const u8, fi: usize) []const u8 {
+    const line_end = std.mem.indexOfScalarPos(u8, front, fi, '\n') orelse front.len;
+    const line = front[fi..line_end];
+    if (std.mem.indexOfScalar(u8, line, '[') != null) {
+        const flags_end = if (std.mem.indexOfScalar(u8, line, ']') == null)
+            (std.mem.indexOfScalarPos(u8, front, line_end, ']') orelse line_end) + 1
+        else
+            line_end;
+        return front[fi..flags_end];
+    }
+
+    var end = line_end;
+    var pos = if (line_end < front.len) line_end + 1 else line_end;
+    while (pos < front.len) {
+        const next = std.mem.indexOfScalarPos(u8, front, pos, '\n') orelse front.len;
+        const trimmed = trimFlagsLineLeft(front[pos..next]);
+        if (trimmed.len == 0 or trimmed[0] == '-') {
+            end = next;
+            pos = if (next < front.len) next + 1 else next;
+            continue;
+        }
+        break;
+    }
+    return front[fi..end];
+}
+
+fn trimFlagsLineLeft(line: []const u8) []const u8 {
+    var i: usize = 0;
+    while (i < line.len and (line[i] == ' ' or line[i] == '\t' or line[i] == '\r')) : (i += 1) {}
+    return line[i..];
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -129,8 +160,7 @@ fn fmeta(src: []const u8) Meta {
     const end_rel = std.mem.indexOf(u8, src[start..], "---*/") orelse return r;
     const front = src[start .. start + end_rel];
     if (std.mem.indexOf(u8, front, "flags:")) |fi| {
-        const le = std.mem.indexOfScalarPos(u8, front, fi, '\n') orelse front.len;
-        const flags = front[fi..le];
+        const flags = flagsRegion(front, fi);
         if (std.mem.indexOf(u8, flags, "async") != null) r.async_ = true;
         if (std.mem.indexOf(u8, flags, "module") != null) r.module = true;
         if (std.mem.indexOf(u8, flags, "raw") != null) r.raw = true;

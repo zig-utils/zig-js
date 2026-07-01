@@ -10701,7 +10701,7 @@ pub const Interpreter = struct {
     /// cached `Symbol.isConcatSpreadable` property key.
     fn concatProcessOne(self: *Interpreter, dst: Value, v: Value, ck: ?[]const u8, n: *usize) EvalError!void {
         var spread: bool = false;
-        if (v.isObject()) {
+        if (v.isObject() and !v.asObj().is_symbol and !v.asObj().is_bigint) {
             if (ck) |k| {
                 const flag = try self.getProperty(v, k);
                 spread = if (!flag.isUndefined()) flag.toBoolean() else try objectToStringIsArray(self, v.asObj());
