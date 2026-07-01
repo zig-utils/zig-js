@@ -15913,6 +15913,39 @@ fn makeIterHelper(self: *Interpreter, src: Value, kind: value.IterHelper.Kind, f
     return Value.obj(o);
 }
 
+fn makeIterWrapHelper(self: *Interpreter, src: Value, next_method: Value) EvalError!Value {
+    const o = (try self.newObject()).asObj();
+    const h = try gc_mod.allocIterHelper(self.arena);
+    h.* = .{ .src = src, .kind = .wrap, .next_method = next_method };
+    o.iter_helper = h;
+    if (self.env.get("\x00IterHelperProto")) |p| if (p.isObject()) {
+        o.setProtoAtomic(p.asObj());
+    };
+    return Value.obj(o);
+}
+
+fn iteratorPrototypeForFrom(self: *Interpreter, receiver: Value) ?Value {
+    if (receiver.isObject()) {
+        if (receiver.asObj().getOwn("prototype")) |proto| if (proto.isObject()) return proto;
+    }
+    const ctor = self.env.get("Iterator") orelse return null;
+    if (!ctor.isObject()) return null;
+    const proto = ctor.asObj().getOwn("prototype") orelse return null;
+    if (!proto.isObject()) return null;
+    return proto;
+}
+
+fn iteratorInheritsPrototype(self: *Interpreter, iterator: Value, proto: Value) EvalError!bool {
+    if (!proto.isObject()) return false;
+
+    var cur = try self.objectGetPrototypeValue(iterator.asObj());
+    while (cur.isObject()) {
+        if (cur.asObj() == proto.asObj()) return true;
+        cur = try self.objectGetPrototypeValue(cur.asObj());
+    }
+    return false;
+}
+
 /// `next` for a lazy iterator helper: pulls from the underlying iterator and
 /// applies the helper's transform.
 fn iterHelperNextFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -15928,12 +15961,7 @@ fn iterHelperNextFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
     defer h.running = false;
     switch (h.kind) {
         .wrap => {
-            const s = try self.iterStepM(h.src, h.next_method);
-            if (s.done) {
-                h.done = true;
-                return self.iterResultObj(Value.undef(), true);
-            }
-            return self.iterResultObj(s.value, false);
+            return try self.callValueWithThis(h.next_method, &.{}, h.src);
         },
         .map => {
             const s = try self.iterStepM(h.src, h.next_method);
@@ -16203,17 +16231,17 @@ fn iterHelperReturnFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
     // GeneratorValidate: a re-entrant return() while the helper is mid-close
     // (state "executing") is a TypeError.
     if (h.running) return self.throwError("TypeError", "Iterator Helper is already running");
-    const was_done = h.done;
-    h.done = true;
     // A WrapForValidIterator forwards return() to its underlying iterator and
     // returns THAT result (or {undefined, done:true} when there is no return()).
     if (h.kind == .wrap) {
-        if (was_done or !h.src.isObject()) return self.iterResultObj(Value.undef(), true);
+        if (!h.src.isObject()) return self.iterResultObj(Value.undef(), true);
         const ret = try self.getProperty(h.src, "return");
         if (ret.isUndefined() or ret.isNull()) return self.iterResultObj(Value.undef(), true);
         if (!ret.isCallable()) return self.throwError("TypeError", "iterator return is not callable");
         return try self.callValueWithThis(ret, &.{}, h.src);
     }
+    const was_done = h.done;
+    h.done = true;
     // An IteratorHelper closes its source iterator(s) and yields {undefined, done}.
     if (!was_done) {
         switch (h.kind) {
@@ -16501,7 +16529,6 @@ fn installSymbolMethod(a: std.mem.Allocator, rs: *Shape, obj: *value.Object, key
 
 /// `Iterator.from(O)`: wrap an iterator/iterable so the helper methods apply.
 fn iteratorFromFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
-    _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const o = if (args.len > 0) args[0] else Value.undef();
     // GetIteratorFlattenable(O, iterate-string-primitives): among primitives only a
@@ -16524,15 +16551,13 @@ fn iteratorFromFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
     }
     if (!iterator.isObject() or iterator.asObj().is_symbol or iterator.asObj().is_bigint)
         return self.throwError("TypeError", "Iterator.from: the iterator is not an object");
-    // If the iterator already inherits from %Iterator.prototype%, return it as-is;
-    // otherwise wrap it (WrapForValidIteratorPrototype).
-    if (self.env.get("Iterator")) |ic| if (ic.isObject()) {
-        if (ic.asObj().getOwn("prototype")) |ip| if (ip.isObject()) {
-            var cur: ?*value.Object = iterator.asObj().proto;
-            while (cur) |c| : (cur = c.protoAtomic()) if (c == ip.asObj()) return iterator;
-        };
-    };
-    return makeIterHelper(self, iterator, .wrap, Value.undef(), 0);
+    const next_method = try self.getProperty(iterator, "next");
+    // If the iterator already inherits from this realm's %Iterator.prototype%,
+    // return it as-is; otherwise wrap it (WrapForValidIteratorPrototype).
+    if (iteratorPrototypeForFrom(self, this)) |proto| {
+        if (try iteratorInheritsPrototype(self, iterator, proto)) return iterator;
+    }
+    return makeIterWrapHelper(self, iterator, next_method);
 }
 
 /// `Iterator.concat(...items)` — an iterator yielding all values of each
