@@ -1810,10 +1810,19 @@ pub const Object = struct {
     }
 
     pub fn deleteNamedDataOwn(self: *Object, arena: std.mem.Allocator, root: *Shape, key: []const u8) std.mem.Allocator.Error!bool {
+        return self.deleteNamedDataOwnInternal(arena, root, key, false);
+    }
+
+    pub fn deleteNamedDataOwnPreserveOrder(self: *Object, arena: std.mem.Allocator, root: *Shape, key: []const u8) std.mem.Allocator.Error!bool {
+        return self.deleteNamedDataOwnInternal(arena, root, key, true);
+    }
+
+    fn deleteNamedDataOwnInternal(self: *Object, arena: std.mem.Allocator, root: *Shape, key: []const u8, preserve_order: bool) std.mem.Allocator.Error!bool {
         self.lockProperties();
         defer self.unlockProperties();
         if (self.getOwnUnlocked(key) == null) return true;
         if (!self.getAttrUnlocked(key).configurable) return false;
+        if (preserve_order) try self.ensureKeyOrderUnlocked(arena);
 
         const keys = try self.ownKeysUnlocked(arena);
         const Entry = struct { k: []const u8, v: Value, a: PropAttr };
@@ -1835,7 +1844,10 @@ pub const Object = struct {
             try self.setAttrUnlocked(arena, entry.k, entry.a);
         }
         self.key_order = old_key_order;
-        if (self.accessors != null) {
+        if (preserve_order) {
+            // Data->accessor conversion keeps the property's original creation
+            // position; `setAccessor` will reuse this existing key-order entry.
+        } else if (self.accessors != null) {
             try self.replaceKeyOrderUnlocked(arena, survived.items);
         } else {
             self.deinitKeyOrderUnlocked();

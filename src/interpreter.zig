@@ -4459,14 +4459,22 @@ pub const Interpreter = struct {
                     // Name a computed/symbol-keyed method ("[desc]"); a plain
                     // `m(){}` already carries its parser-assigned name.
                     try self.maybeNameAnon(fv, m.func.?, name_str);
+                    if (!value.isPrivateKey(key)) switch (try home.deleteAccessorOwn(self.arena, key)) {
+                        .absent, .deleted, .removed_continue => {},
+                        .blocked => return self.throwError("TypeError", "Cannot redefine class element"),
+                    };
                     try self.setProp(home, key, fv);
                 },
                 .get => {
                     try self.nameAccessor(fv, "get", name_str);
+                    if (!value.isPrivateKey(key) and !(try home.deleteNamedDataOwnPreserveOrder(self.arena, self.root_shape, key)))
+                        return self.throwError("TypeError", "Cannot redefine class element");
                     try self.defineAccessor(home, key, fv, null);
                 },
                 .set => {
                     try self.nameAccessor(fv, "set", name_str);
+                    if (!value.isPrivateKey(key) and !(try home.deleteNamedDataOwnPreserveOrder(self.arena, self.root_shape, key)))
+                        return self.throwError("TypeError", "Cannot redefine class element");
                     try self.defineAccessor(home, key, null, fv);
                 },
             }
@@ -10549,6 +10557,7 @@ pub const Interpreter = struct {
             if (desc.asObj().getOwn("enumerable")) |enumerable| return enumerable.toBoolean();
             return false;
         }
+        if (isLazyFunctionPrototypeSlot(o, key)) return false;
         return objectHasOwn(o, key) and o.getAttr(key).enumerable and
             !(o.is_array and std.mem.eql(u8, key, "length"));
     }
@@ -37343,6 +37352,7 @@ pub fn objectHasOwn(o: *value.Object, name: []const u8) bool {
         if (canonicalNumericIndexString(name)) |n| return isValidIntegerIndex(ta, n);
     }
     if (o.getOwn(name) != null or o.getAccessor(name) != null) return true;
+    if (isLazyFunctionPrototypeSlot(o, name)) return true;
     if (o.prim) |p| {
         if (p.isString()) {
             if (std.mem.eql(u8, name, "length")) return true;
@@ -37358,6 +37368,14 @@ pub fn objectHasOwn(o: *value.Object, name: []const u8) bool {
     }
     if (Interpreter.arrayElementIndex(name)) |i| return o.denseElementPresent(i);
     return false;
+}
+
+fn isLazyFunctionPrototypeSlot(o: *value.Object, name: []const u8) bool {
+    return std.mem.eql(u8, name, "prototype") and
+        o.js_func != null and
+        Interpreter.jsFunctionHasOwnPrototypeSlot(o) and
+        o.getOwn("prototype") == null and
+        o.getAccessor("prototype") == null;
 }
 
 fn arg0(args: []const Value) Value {
