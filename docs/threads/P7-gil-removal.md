@@ -287,7 +287,10 @@ roadmap item repeats it.
      sibling `Atomics.Mutex.lockIfAvailable` case where acquire-after-release
      and timeout token waiters stay parked behind a holder through a finishing
      sweep before reused-token acquire/timeout results and exact finalization
-     cleanup are verified, and a
+     cleanup are verified, a sibling static `Atomics.Condition.wait` case where
+     notify/reacquire token waiters stay parked through a finishing sweep before
+     exact notify counts, token reacquisition, `asyncJoin` observers, and
+     finalization cleanup are verified, and a
      sibling teardown case where parked children hold child-owned typed-array
      `waitAsync` tickets through a finishing mid-script sweep before parent
      failure terminates them. The

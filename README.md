@@ -195,7 +195,7 @@ python3 tools/threads-reference-audit.py --probe-candidates # prints closest pro
 python3 tools/threads-reference-audit.py --run-probes # executes closest probes with timeouts
 zig build test -Dtsan=true      # unit suite under ThreadSanitizer
 zig build threadfuzz            # seeded concurrent-JS fuzzer
-zig build threadfuzz -Dfuzz-midgc=true # mid-script GC wait-pump + microtask + creator buffers + nested asyncJoin + ThreadLocal/Thread.restrict finalization + sync-wait cleanup + sync timeout exit + lockIfAvailable cleanup + asyncHold release cleanup + teardown + promise + script/module Worker/SAB + Worker exception + Worker close/terminate + weak-collection fuzzer
+zig build threadfuzz -Dfuzz-midgc=true # mid-script GC wait-pump + microtask + creator buffers + nested asyncJoin + ThreadLocal/Thread.restrict finalization + sync-wait cleanup + sync timeout exit + lockIfAvailable/Condition.wait cleanup + asyncHold release cleanup + teardown + promise + script/module Worker/SAB + Worker exception + Worker close/terminate + weak-collection fuzzer
 zig build threadfuzz -Dfuzz-lifecycle=true # deterministic lifecycle/teardown/finalization fuzzer, including Atomics.Mutex/Condition token waits and lockIfAvailable paths
 zig build test262               # runs the real tc39/test262 corpus, prints pass %
 zig build test262 -Dtest262=DIR # …with an explicit corpus root
@@ -414,6 +414,10 @@ threading architecture:
   and timeout token waiters behind a holder through a finishing sweep, rejects
   early cleanup while those roots are live, then requires reused-token acquire
   and timeout results plus exact cleanup after quiescence.
+  A sibling static `Atomics.Condition.wait` subprogram parks notify/reacquire
+  token waiters through a finishing sweep, rejects early cleanup while their
+  stack roots are live, then requires exact notify counts, token reacquisition,
+  `asyncJoin` observers, and cleanup after quiescence.
   Another sibling async-hold release cleanup subprogram delivers no-fn
   `Lock.asyncHold()` release functions while property and condition waiters
   stay parked, drives a finishing mid-script parallel sweep before those waiters

@@ -233,6 +233,10 @@ context APIs.
   timeout token waiters stay parked behind a holder through a finishing sweep,
   reject early cleanup while their roots are live, then verify reused-token
   acquire/timeout results and exact finalization cleanup, plus a sibling
+  static `Atomics.Condition.wait` subprogram where notify/reacquire token
+  waiters stay parked through a finishing sweep, reject early cleanup while
+  their roots are live, then verify exact notify counts, token reacquisition,
+  `asyncJoin` observers, and finalization cleanup, plus a sibling
   async-hold release cleanup subprogram where no-fn `Lock.asyncHold()` release
   functions are delivered while property and condition waiters stay parked
   through a finishing sweep before exact cleanup count/sum is verified, plus a sibling

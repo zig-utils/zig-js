@@ -9948,6 +9948,217 @@ fn runMidScriptAtomicsMutexLockIfAvailableGc(gpa: std.mem.Allocator, seed: u64) 
     return true;
 }
 
+fn runMidScriptAtomicsConditionWaitGc(gpa: std.mem.Allocator, seed: u64) !bool {
+    var prng = std.Random.DefaultPrng.init(seed ^ 0x6d69_6461_636f_6e77);
+    const r = prng.random();
+    const n_waiters = 2 + r.uintLessThan(usize, 4);
+    const rounds = 6 + r.uintLessThan(usize, 4);
+    const per_round = 460 + r.uintLessThan(usize, 260);
+    const spin_iters = 1600 + r.uintLessThan(usize, 3200);
+    const seed_marker = seed % 10_000;
+    const marker_base = 710_000 + seed_marker;
+    const cleanup_base = 720_000 + seed_marker;
+
+    var expected_join_sum: usize = 0;
+    var expected_cleanup_sum: usize = 0;
+    var id: usize = 0;
+    while (id < n_waiters) : (id += 1) {
+        expected_join_sum += marker_base + id;
+        expected_cleanup_sum += cleanup_base + id;
+    }
+
+    const ctx = js.Context.createWithTestingOptions(gpa, .{
+        .enable_threads = true,
+        .enable_gc = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+        .parallel_midscript_gc = true,
+    }) catch {
+        std.debug.print("seed {d}: midgc Atomics.Condition.wait context creation failed\n", .{seed});
+        return false;
+    };
+    defer ctx.destroy();
+
+    const src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  globalThis.__midgcCondWaitCleanupCount = 0;
+        \\  globalThis.__midgcCondWaitCleanupSum = 0;
+        \\  globalThis.__midgcCondWaitAsyncScore = 0;
+        \\  globalThis.__midgcCondWaitAsyncCount = 0;
+        \\  globalThis.__midgcCondWaitRegistry = new FinalizationRegistry((held) => {{
+        \\    globalThis.__midgcCondWaitCleanupCount++;
+        \\    globalThis.__midgcCondWaitCleanupSum += held;
+        \\  }});
+        \\  const registry = globalThis.__midgcCondWaitRegistry;
+        \\  const cond = new Atomics.Condition();
+        \\  const mutex = new Atomics.Mutex();
+        \\  const gate = {{ ready: 0 }};
+        \\  const seedMarker = {d};
+        \\  const threads = [];
+        \\  function observe(t, marker, label) {{
+        \\    const reactionRoot = {{ marker, nested: {{ seed: seedMarker, label }} }};
+        \\    t.asyncJoin().then(
+        \\      (v) => {{
+        \\        if (v === marker && reactionRoot.marker === marker &&
+        \\            reactionRoot.nested.seed === seedMarker) {{
+        \\          globalThis.__midgcCondWaitAsyncScore += v;
+        \\          globalThis.__midgcCondWaitAsyncCount++;
+        \\        }} else {{
+        \\          globalThis.__midgcCondWaitAsyncScore = -1000000;
+        \\        }}
+        \\      }},
+        \\      () => {{ globalThis.__midgcCondWaitAsyncScore = -1000000; }});
+        \\  }}
+        \\  for (let id = 0; id < {d}; id++) {{
+        \\    const marker = {d} + id;
+        \\    const t = new Thread((cond, mutex, gate, registry, id, marker, held, seedMarker) => {{
+        \\      let target = {{ id, marker, seed: seedMarker, payload: 'midgc-condition-wait-' + id }};
+        \\      registry.register(target, held);
+        \\      const root = {{ target, nested: {{ seed: seedMarker, label: 'midgc-condition-wait-root' }} }};
+        \\      const reused = new Atomics.Mutex.UnlockToken();
+        \\      const token = Atomics.Mutex.lock(mutex, reused);
+        \\      if (token !== reused || !token.locked)
+        \\        throw new Error('midgc Condition.wait lock did not reuse token');
+        \\      Atomics.add(gate, 'ready', 1);
+        \\      Atomics.notify(gate, 'ready');
+        \\      const result = Atomics.Condition.wait(cond, token);
+        \\      if (result !== undefined)
+        \\        throw new Error('midgc Condition.wait returned non-undefined');
+        \\      if (!token.locked)
+        \\        throw new Error('midgc Condition.wait did not reacquire token');
+        \\      if (!root.target || root.target.marker !== marker || root.nested.seed !== seedMarker)
+        \\        throw new Error('midgc Condition.wait root lost ' + id);
+        \\      if (!token.unlock() || token.unlock())
+        \\        throw new Error('midgc Condition.wait unlock once invariant failed');
+        \\      target = null;
+        \\      root.target = null;
+        \\      return marker;
+        \\    }}, cond, mutex, gate, registry, id, marker, {d} + id, seedMarker);
+        \\    observe(t, marker, 'midgc-condition-wait-asyncJoin');
+        \\    threads.push(t);
+        \\  }}
+        \\  while (Atomics.load(gate, 'ready') < {d})
+        \\    Atomics.wait(gate, 'ready', Atomics.load(gate, 'ready'), 1);
+        \\  Atomics.wait(gate, 'ready', {d}, 8);
+        \\  globalThis.__midgcCondWaitRegistry.cleanupSome();
+        \\  if (globalThis.__midgcCondWaitCleanupCount !== 0)
+        \\    throw new Error('midgc Condition.wait cleanup fired before parked sweep');
+        \\  const keep = [];
+        \\  const root = {{ seed: seedMarker, tag: 'midgc-condition-wait-main-root' }};
+        \\  for (let round = 0; round < {d}; round++) {{
+        \\    for (let i = 0; i < {d}; i++)
+        \\      keep.push({{ round, i, nested: {{ root, value: i + round }}, text: 'midgc-condition-wait-' + round + '-' + i }});
+        \\    let spin = 0;
+        \\    for (let j = 0; j < {d}; j++) spin = (spin + j + round) & 0x3fffffff;
+        \\    if (spin < 0) keep.push({{ impossible: true }});
+        \\  }}
+        \\  if (typeof gc === 'function') gc();
+        \\  globalThis.__midgcCondWaitRegistry.cleanupSome();
+        \\  if (globalThis.__midgcCondWaitCleanupCount !== 0)
+        \\    throw new Error('midgc Condition.wait cleanup fired while peers were parked');
+        \\  const woke = Atomics.Condition.notify(cond, {d});
+        \\  if (woke !== {d})
+        \\    throw new Error('midgc Condition.wait notify woke ' + woke + '/' + {d});
+        \\  let joinSum = 0;
+        \\  for (const t of threads)
+        \\    joinSum += t.join();
+        \\  if (joinSum !== {d})
+        \\    throw new Error('bad midgc Condition.wait join sum ' + joinSum + '/' + {d});
+        \\  threads.length = 0;
+        \\  for (let spin = 0; globalThis.__midgcCondWaitAsyncCount < {d} && spin < 2000; spin++) {{
+        \\    $drainRunLoop();
+        \\    drainMicrotasks();
+        \\    Atomics.wait(gate, 'ready', {d}, 1);
+        \\  }}
+        \\  if (globalThis.__midgcCondWaitAsyncScore !== {d})
+        \\    throw new Error('bad midgc Condition.wait async score ' + globalThis.__midgcCondWaitAsyncScore + '/' + {d});
+        \\  if (globalThis.__midgcCondWaitAsyncCount !== {d})
+        \\    throw new Error('bad midgc Condition.wait async count ' + globalThis.__midgcCondWaitAsyncCount + '/' + {d});
+        \\  return keep.length + joinSum;
+        \\}})();
+        \\
+    ,
+        .{
+            seed_marker,
+            n_waiters,
+            marker_base,
+            cleanup_base,
+            n_waiters,
+            n_waiters,
+            rounds,
+            per_round,
+            spin_iters,
+            n_waiters,
+            n_waiters,
+            n_waiters,
+            expected_join_sum,
+            expected_join_sum,
+            n_waiters,
+            n_waiters,
+            expected_join_sum,
+            expected_join_sum,
+            n_waiters,
+            n_waiters,
+        },
+    );
+    defer gpa.free(src);
+
+    const before_attempts = ctx.gc_par_attempts.load(.monotonic);
+    const before_collections = ctx.gc_par_collections.load(.monotonic);
+    const expected: f64 = @floatFromInt(rounds * per_round + expected_join_sum);
+    const result = ctx.evaluate(src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: midgc Atomics.Condition.wait JS threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!result.isNumber() or result.asNum() != expected) {
+        std.debug.print("seed {d}: midgc Atomics.Condition.wait result got {d}, expected {d}\n", .{ seed, if (result.isNumber()) result.asNum() else -1, expected });
+        return false;
+    }
+    if (ctx.gc_par_attempts.load(.monotonic) <= before_attempts) {
+        std.debug.print("seed {d}: midgc Atomics.Condition.wait did not attempt a parallel collection\n", .{seed});
+        return false;
+    }
+    if (ctx.gc_par_collections.load(.monotonic) <= before_collections) {
+        std.debug.print("seed {d}: midgc Atomics.Condition.wait did not finish a parallel collection\n", .{seed});
+        return false;
+    }
+
+    ctx.collectGarbage();
+    const cleanup_src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  globalThis.__midgcCondWaitRegistry.cleanupSome();
+        \\  if (globalThis.__midgcCondWaitCleanupCount !== {d})
+        \\    throw new Error('bad midgc Condition.wait cleanup count ' + globalThis.__midgcCondWaitCleanupCount + '/' + {d});
+        \\  if (globalThis.__midgcCondWaitCleanupSum !== {d})
+        \\    throw new Error('bad midgc Condition.wait cleanup sum ' + globalThis.__midgcCondWaitCleanupSum + '/' + {d});
+        \\  return globalThis.__midgcCondWaitCleanupCount;
+        \\}})();
+        \\
+    ,
+        .{ n_waiters, n_waiters, expected_cleanup_sum, expected_cleanup_sum },
+    );
+    defer gpa.free(cleanup_src);
+    const cleaned = ctx.evaluate(cleanup_src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: midgc Atomics.Condition.wait cleanup JS threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!cleaned.isNumber() or cleaned.asNum() != @as(f64, @floatFromInt(n_waiters))) {
+        std.debug.print("seed {d}: midgc Atomics.Condition.wait cleaned got {d}, expected {d}\n", .{ seed, if (cleaned.isNumber()) cleaned.asNum() else -1, n_waiters });
+        return false;
+    }
+    return true;
+}
+
 fn runMidScriptThreadLocalFinalizationGc(gpa: std.mem.Allocator, seed: u64) !bool {
     var prng = std.Random.DefaultPrng.init(seed ^ 0x6d69_6474_6c66_696e);
     const r = prng.random();
@@ -12778,6 +12989,22 @@ pub fn main(init: std.process.Init) !void {
         if (amgcfail != 0) std.process.exit(1);
         return;
     };
+    // `threadfuzz atomicscondwaitmidgc <iters> <seed>`: focused mid-script GC
+    // repro for proposal-style Atomics.Condition.wait token waiters that
+    // reacquire after notify following a finishing parallel sweep.
+    if (first) |a| if (std.mem.eql(u8, a, "atomicscondwaitmidgc")) {
+        if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch 1;
+        if (args.next()) |b| base_seed = std.fmt.parseInt(u64, b, 10) catch 1;
+        var acwgcfail: usize = 0;
+        var acwgci: usize = 0;
+        while (acwgci < iters) : (acwgci += 1) {
+            const seed = base_seed +% acwgci;
+            if (!(try runMidScriptAtomicsConditionWaitGc(gpa, seed))) acwgcfail += 1;
+        }
+        std.debug.print("threadfuzz atomicscondwaitmidgc: {d} programs from seed {d}, {d} failures\n", .{ iters, base_seed, acwgcfail });
+        if (acwgcfail != 0) std.process.exit(1);
+        return;
+    };
     // `threadfuzz asyncholdthrow <iters> <seed>`: focused lifecycle repro for
     // asyncHold(fn) throw/release ordering plus exact finalization cleanup.
     if (first) |a| if (std.mem.eql(u8, a, "asyncholdthrow")) {
@@ -13514,8 +13741,9 @@ pub fn main(init: std.process.Init) !void {
     // property/condition waiters stay parked through the finishing sweep,
     // property `Atomics.wait` and static `Atomics.Condition.waitFor` timeout
     // peers plus static `Atomics.Mutex.lockIfAvailable` acquire/timeout token
-    // peers that stay parked through the sweep and leave by timeout or
-    // acquire-after-release,
+    // peers and static `Atomics.Condition.wait` notify/reacquire token peers
+    // that stay parked through the sweep and leave by timeout,
+    // acquire-after-release, or notification,
     // nested parent/child asyncJoin cleanup roots and ThreadLocal values
     // parked through a finishing sweep before child release,
     // completed-but-unjoined Thread results and thrown
@@ -13543,6 +13771,7 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runMidScriptSyncWaitCleanupGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptSyncTimeoutGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptAtomicsMutexLockIfAvailableGc(gpa, seed))) mfail += 1;
+            if (!(try runMidScriptAtomicsConditionWaitGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptAsyncHoldReleaseWaiterCleanupGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptNestedThreadAsyncJoinCleanupGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptThreadLocalFinalizationGc(gpa, seed))) mfail += 1;
@@ -13555,7 +13784,7 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runMidScriptModuleWorkerCloseTerminateGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptWeakCollectionGc(gpa, seed))) mfail += 1;
         }
-        std.debug.print("threadfuzz midgc: {d} programs from seed {d}, {d} failures\n", .{ iters * 19, base_seed, mfail });
+        std.debug.print("threadfuzz midgc: {d} programs from seed {d}, {d} failures\n", .{ iters * 20, base_seed, mfail });
         if (mfail != 0) std.process.exit(1);
         return;
     };
