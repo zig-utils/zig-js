@@ -12673,6 +12673,15 @@ pub const Interpreter = struct {
                 if (!res.isObject() or res.asObj().is_bigint or res.asObj().is_symbol) return res;
                 continue;
             }
+            if (o.proxy_handler != null or o.proxy_revoked) {
+                const method = try self.getProperty(v, m);
+                if (method.isUndefined() or method.isNull()) continue;
+                if (!method.isCallable()) break :outer;
+                user_tried += 1;
+                const res = try self.callValueWithThis(method, &.{}, v);
+                if (!res.isObject() or res.asObj().is_bigint or res.asObj().is_symbol) return res;
+                continue;
+            }
             // OrdinaryToPrimitive resolves each method via `Get(O, name)`, so an
             // *accessor* `valueOf`/`toString` getter is run (and its abrupt
             // completion must propagate — `{ get valueOf() { throw } }`). A data
