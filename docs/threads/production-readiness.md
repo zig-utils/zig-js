@@ -444,7 +444,8 @@ as embedders exercise more threaded host patterns.
   creating Thread's exit, sibling-thread reads, GC pressure, and post-creator
   `ArrayBuffer.transfer()`, child-created SAB/ArrayBuffer storage crossing
   isolated Worker structured-clone after creator Thread exit plus a sibling
-  Worker clone/finalization cleanup/transfer observer variant, and
+  script Worker clone/finalization cleanup/transfer observer variant plus a
+  module Worker clone/finalization cleanup/transfer observer variant, and
   `ThreadLocal` isolation across
   normal, throwing, nested, and async-joined thread lifecycles, plus
   `ThreadLocal` values registered with `FinalizationRegistry` across

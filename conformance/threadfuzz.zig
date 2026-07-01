@@ -174,6 +174,70 @@ const ModuleCloseTerminateFuzzHost = struct {
     }
 };
 
+const ModuleCreatorOwnedCleanupFuzzHost = struct {
+    const Entry = struct { path: []const u8, source: []const u8 };
+    var host_ctx: u8 = 0;
+    const entries = [_]Entry{
+        .{
+            .path = "check.js",
+            .source =
+            \\export function checkBundle(b) {
+            \\  const sv = new Int32Array(b.sab);
+            \\  const av = new Int32Array(b.ab);
+            \\  const mv = new Int32Array(b.movable);
+            \\  let seen = 0;
+            \\  for (let i = 0; i < b.per; i++) {
+            \\    const expected = b.base + i;
+            \\    if (sv[i] !== expected || av[i] !== expected || mv[i] !== expected)
+            \\      throw new Error('Module Worker saw creator-owned cleanup buffer corruption');
+            \\    seen += sv[i] + av[i] + mv[i];
+            \\  }
+            \\  if (seen !== b.sum * 3)
+            \\    throw new Error('bad Module Worker creator-owned cleanup checksum ' + seen + '/' + (b.sum * 3));
+            \\  return seen;
+            \\}
+            ,
+        },
+        .{
+            .path = "entry.js",
+            .source =
+            \\import { checkBundle } from "./check.js";
+            \\globalThis.onmessage = (e) => {
+            \\  if (e.data.cmd === 'close') {
+            \\    postMessage({ closed: true, module: true });
+            \\    close();
+            \\    return;
+            \\  }
+            \\  const seen = checkBundle(e.data);
+            \\  postMessage({
+            \\    id: e.data.id,
+            \\    seen,
+            \\    module: true,
+            \\    sabBytes: e.data.sab.byteLength,
+            \\    abBytes: e.data.ab.byteLength,
+            \\    movableBytes: e.data.movable.byteLength,
+            \\  });
+            \\};
+            ,
+        },
+    };
+
+    fn load(_: *anyopaque, _: []const u8, specifier: []const u8, out_path: *[]const u8) ?[]const u8 {
+        const name = if (std.mem.startsWith(u8, specifier, "./")) specifier[2..] else specifier;
+        for (entries) |e| {
+            if (std.mem.eql(u8, e.path, name)) {
+                out_path.* = e.path;
+                return e.source;
+            }
+        }
+        return null;
+    }
+
+    fn host() js.Context.ModuleHost {
+        return .{ .ctx = &host_ctx, .load = load };
+    }
+};
+
 const ModuleMidGcCleanupHost = struct {
     const Entry = struct { path: []const u8, source: []const u8 };
     var host_ctx: u8 = 0;
@@ -6309,7 +6373,15 @@ fn runWorkerCreatorOwnedBufferLifecycleInterleaving(gpa: std.mem.Allocator, seed
 }
 
 fn runWorkerCreatorOwnedBufferCleanupInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
-    var prng = std.Random.DefaultPrng.init(seed ^ 0x776f_726b_6372_6669);
+    return runWorkerCreatorOwnedBufferCleanupProfile(gpa, seed, false);
+}
+
+fn runModuleWorkerCreatorOwnedBufferCleanupInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
+    return runWorkerCreatorOwnedBufferCleanupProfile(gpa, seed, true);
+}
+
+fn runWorkerCreatorOwnedBufferCleanupProfile(gpa: std.mem.Allocator, seed: u64, comptime module_worker: bool) !bool {
+    var prng = std.Random.DefaultPrng.init(seed ^ if (module_worker) 0x6d6f_6463_7266_696e else 0x776f_726b_6372_6669);
     const r = prng.random();
     const ncreators = 2 + r.uintLessThan(usize, 3);
     const nworkers = 1 + r.uintLessThan(usize, 2);
@@ -6335,8 +6407,9 @@ fn runWorkerCreatorOwnedBufferCleanupInterleaving(gpa: std.mem.Allocator, seed: 
     const expected_worker_total = payload_sum * 3;
     const expected_finish_total = payload_sum + ncreators;
 
+    const label = if (module_worker) "module worker creator-owned cleanup" else "worker creator-owned cleanup";
     const ctx = js.Context.createWith(gpa, .{ .enable_threads = true, .enable_gc = true }) catch {
-        std.debug.print("seed {d}: worker creator-owned cleanup context creation failed\n", .{seed});
+        std.debug.print("seed {d}: {s} context creation failed\n", .{ seed, label });
         return false;
     };
     defer ctx.destroy();
@@ -6489,10 +6562,16 @@ fn runWorkerCreatorOwnedBufferCleanupInterleaving(gpa: std.mem.Allocator, seed: 
     };
     var wi: usize = 0;
     while (wi < nworkers) : (wi += 1) {
-        const w = Worker.spawn(worker_src) catch {
-            std.debug.print("seed {d}: worker creator-owned cleanup spawn failed\n", .{seed});
-            return false;
-        };
+        const w = if (module_worker)
+            Worker.spawnModule("entry.js", ModuleCreatorOwnedCleanupFuzzHost.entries[1].source, ModuleCreatorOwnedCleanupFuzzHost.host()) catch {
+                std.debug.print("seed {d}: module worker creator-owned cleanup spawn failed\n", .{seed});
+                return false;
+            }
+        else
+            Worker.spawn(worker_src) catch {
+                std.debug.print("seed {d}: worker creator-owned cleanup spawn failed\n", .{seed});
+                return false;
+            };
         try workers.append(gpa, w);
     }
 
@@ -13363,6 +13442,23 @@ pub fn main(init: std.process.Init) !void {
         if (wccfail != 0) std.process.exit(1);
         return;
     };
+    // `threadfuzz moduleworkercreatorcleanup <iters> <seed>`: focused
+    // lifecycle repro for child-created SAB/ArrayBuffer storage crossing
+    // module Worker structured-clone after creator Thread exit while
+    // FinalizationRegistry cleanup and transfer observers run afterward.
+    if (first) |a| if (std.mem.eql(u8, a, "moduleworkercreatorcleanup")) {
+        if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch 1;
+        if (args.next()) |b| base_seed = std.fmt.parseInt(u64, b, 10) catch 1;
+        var mwccfail: usize = 0;
+        var mwcci: usize = 0;
+        while (mwcci < iters) : (mwcci += 1) {
+            const seed = base_seed +% mwcci;
+            if (!(try runModuleWorkerCreatorOwnedBufferCleanupInterleaving(gpa, seed))) mwccfail += 1;
+        }
+        std.debug.print("threadfuzz moduleworkercreatorcleanup: {d} programs from seed {d}, {d} failures\n", .{ iters, base_seed, mwccfail });
+        if (mwccfail != 0) std.process.exit(1);
+        return;
+    };
     // `threadfuzz termreact <iters> <seed>`: focused lifecycle repro for
     // teardown termination while asyncJoin reactions and child-owned typed-array
     // waitAsync tickets are still pending.
@@ -13883,7 +13979,8 @@ pub fn main(init: std.process.Init) !void {
     // creator-owned SAB/ArrayBuffer storage crossing isolated Worker
     // structured-clone after creator Thread exit, including the sibling cleanup
     // variant where FinalizationRegistry cleanup and transfer observers run
-    // after Worker close,
+    // after Worker close, plus the same cleanup/transfer observer through a
+    // module Worker import graph,
     // teardown termination with pending asyncJoin reactions and child-owned
     // typed-array waitAsync tickets, teardown termination with property
     // waitAsync timeouts, async condition reacquire, asyncJoin rejection, and
@@ -13931,7 +14028,8 @@ pub fn main(init: std.process.Init) !void {
     // finalization cleanup share the same delivery window, when
     // child-created SAB/ArrayBuffer storage outlives its creator Thread and is
     // read/transferred under GC pressure and crosses isolated Worker
-    // structured-clone after creator exit, including a cleanup/transfer sibling,
+    // structured-clone after creator exit, including script and module
+    // cleanup/transfer siblings,
     // plus when teardown
     // termination rejects pending asyncJoin reactions and abandons child-owned
     // typed-array waitAsync tickets, and when teardown termination overlaps
@@ -13988,6 +14086,7 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runCreatorOwnedBufferLifecycleInterleaving(gpa, seed))) lfail += 1;
             if (!(try runWorkerCreatorOwnedBufferLifecycleInterleaving(gpa, seed))) lfail += 1;
             if (!(try runWorkerCreatorOwnedBufferCleanupInterleaving(gpa, seed))) lfail += 1;
+            if (!(try runModuleWorkerCreatorOwnedBufferCleanupInterleaving(gpa, seed))) lfail += 1;
             if (!(try runTerminationPendingReactionInterleaving(gpa, seed))) lfail += 1;
             if (!(try runTerminationWaiterCleanupInterleaving(gpa, seed))) lfail += 1;
             if (!(try runWorkerTerminateConditionAsyncCleanupInterleaving(gpa, seed))) lfail += 1;
@@ -14000,7 +14099,7 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runThreadLocalFinalizationCleanupInterleaving(gpa, seed))) lfail += 1;
             if (!(try runNestedThreadAsyncJoinCleanupInterleaving(gpa, seed))) lfail += 1;
         }
-        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 40, base_seed, lfail });
+        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 41, base_seed, lfail });
         if (lfail != 0) std.process.exit(1);
         return;
     };

@@ -572,7 +572,8 @@ threading architecture:
   creating Thread's exit, sibling-thread reads, GC pressure, and post-creator
   `ArrayBuffer.transfer()`, plus child-created SAB/ArrayBuffer storage crossing
   isolated Worker structured-clone after the creator Thread exits, including a
-  sibling Worker clone/finalization cleanup/transfer observer variant,
+  sibling script Worker clone/finalization cleanup/transfer observer variant
+  and a module Worker clone/finalization cleanup/transfer observer variant,
   cross-thread `FinalizationRegistry` cleanup count/sum oracles, cleanup
   delivery interleaved with `join()` / `asyncJoin()` and unregister-token
   suppression, cleanup delivery after parked property/condition waiters resume,
