@@ -209,7 +209,7 @@ pub const Node = union(enum) {
     yield_expr: struct { argument: ?*Node = null, delegate: bool = false },
     /// `await expr` — only valid inside an async function body.
     await_expr: struct { argument: *Node },
-    class_expr: struct { name: []const u8, superclass: ?*Node, members: []ClassMember, source: []const u8 = "" },
+    class_expr: struct { name: []const u8, inferred_name: []const u8 = "", superclass: ?*Node, members: []ClassMember, source: []const u8 = "" },
     /// `super(args)` — call the superclass constructor on the current `this`.
     super_call: []*Node,
     /// `super.prop` / `super[expr]` — look up on the home object's prototype.

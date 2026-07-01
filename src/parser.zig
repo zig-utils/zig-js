@@ -364,7 +364,7 @@ pub const Parser = struct {
                 if (f.name.len == 0) f.name = name;
             },
             .class_expr => {
-                if (node.class_expr.name.len == 0) node.class_expr.name = name;
+                if (node.class_expr.name.len == 0) node.class_expr.inferred_name = name;
             },
             else => {},
         }

@@ -2291,7 +2291,7 @@ pub const Interpreter = struct {
                 }
                 break :blk try self.makeFunction(fnode, self.env);
             },
-            .class_expr => |c| try self.evalClass(c.name, c.superclass, c.members, c.source),
+            .class_expr => |c| try self.evalClass(c.name, c.inferred_name, c.superclass, c.members, c.source),
 
             // `yield` only executes inside a compiled generator body (on the
             // suspendable VM). Reaching it in the tree-walker means a generator
@@ -2538,7 +2538,8 @@ pub const Interpreter = struct {
                         // (and its own name, when present, for self-reference).
                         .func_decl => |fnode| try self.makeFunction(fnode, self.env),
                         .class_expr => |c| try self.evalClass(
-                            if (c.name.len > 0) c.name else "default",
+                            c.name,
+                            if (c.name.len > 0 or c.inferred_name.len > 0) c.inferred_name else "default",
                             c.superclass,
                             c.members,
                             c.source,
@@ -4026,7 +4027,7 @@ pub const Interpreter = struct {
             .function => |f| .{ .function = try self.deepCopyFunction(f) },
             .yield_expr => |y| .{ .yield_expr = .{ .argument = try self.deepCopyOpt(y.argument), .delegate = y.delegate } },
             .await_expr => |a| .{ .await_expr = .{ .argument = try self.deepCopyNode(a.argument) } },
-            .class_expr => |c| .{ .class_expr = .{ .name = c.name, .superclass = try self.deepCopyOpt(c.superclass), .members = try self.deepCopyClassMembers(c.members), .source = c.source } },
+            .class_expr => |c| .{ .class_expr = .{ .name = c.name, .inferred_name = c.inferred_name, .superclass = try self.deepCopyOpt(c.superclass), .members = try self.deepCopyClassMembers(c.members), .source = c.source } },
             .super_call => |args| .{ .super_call = try self.deepCopyNodes(args) },
             .super_member => |sm| .{ .super_member = .{ .property = sm.property, .computed = try self.deepCopyOpt(sm.computed) } },
             .call => |c| .{ .call = .{ .callee = try self.deepCopyNode(c.callee), .args = try self.deepCopyNodes(c.args), .optional = c.optional } },
@@ -4115,11 +4116,11 @@ pub const Interpreter = struct {
     /// fields are desugared into the constructor (`this.f = init`). With
     /// `extends`, the prototypes are linked and methods get a home object so
     /// `super.x` / `super(...)` resolve. (Accessors are still deferred.)
-    fn evalClass(self: *Interpreter, name: []const u8, superclass: ?*Node, members: []ast.ClassMember, source: []const u8) EvalError!Value {
-        return self.evalClassWithComputedKeys(name, superclass, members, source, null);
+    fn evalClass(self: *Interpreter, name: []const u8, inferred_name: []const u8, superclass: ?*Node, members: []ast.ClassMember, source: []const u8) EvalError!Value {
+        return self.evalClassWithComputedKeys(name, inferred_name, superclass, members, source, null);
     }
 
-    pub fn evalClassWithComputedKeys(self: *Interpreter, name: []const u8, superclass: ?*Node, members: []ast.ClassMember, source: []const u8, computed_keys: ?[]const Value) EvalError!Value {
+    pub fn evalClassWithComputedKeys(self: *Interpreter, name: []const u8, inferred_name: []const u8, superclass: ?*Node, members: []ast.ClassMember, source: []const u8, computed_keys: ?[]const Value) EvalError!Value {
         var super_obj: ?*value.Object = null;
         var super_proto: ?*value.Object = null;
         // A class with ClassHeritage is a *derived* class even when the heritage
@@ -4163,10 +4164,10 @@ pub const Interpreter = struct {
                 return self.throwError("TypeError", "class extends value is not a constructor");
             }
         }
-        return self.buildClass(name, members, super_obj, super_proto, source, derived, class_env, computed_keys);
+        return self.buildClass(name, inferred_name, members, super_obj, super_proto, source, derived, class_env, computed_keys);
     }
 
-    fn buildClass(self: *Interpreter, name: []const u8, members_arg: []ast.ClassMember, super_obj: ?*value.Object, super_proto: ?*value.Object, source: []const u8, derived: bool, class_env: *Environment, computed_keys: ?[]const Value) EvalError!Value {
+    fn buildClass(self: *Interpreter, name: []const u8, inferred_name: []const u8, members_arg: []ast.ClassMember, super_obj: ?*value.Object, super_proto: ?*value.Object, source: []const u8, derived: bool, class_env: *Environment, computed_keys: ?[]const Value) EvalError!Value {
         // A class with private names is rewritten (`#x` → a unique storage key) in
         // place. Deep-copy the member ASTs first so EACH evaluation rewrites its
         // own copy — two evaluations of the same class source then have distinct
@@ -4275,8 +4276,9 @@ pub const Interpreter = struct {
         const body = try self.arena.create(Node);
         body.* = .{ .block = body_stmts };
         const fnode = try self.arena.create(ast.FunctionNode);
+        const display_name = if (inferred_name.len > 0) inferred_name else name;
         fnode.* = .{
-            .name = name,
+            .name = display_name,
             .params = if (ctor_node) |cf| cf.params else default_params,
             .body = body,
             .source = source,

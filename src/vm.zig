@@ -834,7 +834,7 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                     i -= 1;
                     keys[i] = stack.pop().?;
                 }
-                try stack.append(stack_alloc, try vm.evalClassWithComputedKeys(c.name, c.superclass, c.members, c.source, keys));
+                try stack.append(stack_alloc, try vm.evalClassWithComputedKeys(c.name, c.inferred_name, c.superclass, c.members, c.source, keys));
             },
             .array_spread => {
                 const iterable = stack.pop().?;
