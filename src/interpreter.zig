@@ -355,13 +355,15 @@ pub const EvalError = error{ OutOfMemory, Throw, OptShortCircuit };
 /// A `using`/`await using` resource registered for disposal at scope exit:
 /// its value and the (pre-resolved) `[Symbol.dispose]`/`[Symbol.asyncDispose]`
 /// method. `method == undefined` is the async null/undefined no-op sentinel.
-pub const Disposable = struct { value: Value, method: Value, is_async: bool };
+pub const Disposable = struct { value: Value, method: Value, is_async: bool, await_result: bool = false };
 
 pub const Environment = struct {
     vars: std.StringHashMapUnmanaged(Value) = .{},
     /// `using` resources declared in this scope, in declaration order (disposed
     /// in reverse when the scope exits).
     disposables: std.ArrayListUnmanaged(Disposable) = .empty,
+    /// Pending error while a VM async-disposal step is suspended at an await.
+    dispose_pending: ?Value = null,
     /// Names in `vars` declared `const` — assigning to them is a TypeError.
     consts: std.StringHashMapUnmanaged(void) = .{},
     /// Names that are *non-strict* immutable bindings — a named function
@@ -1674,13 +1676,15 @@ pub const Interpreter = struct {
             if (!is_async) return;
             self.env.lockBindings(); // traceEnv reads disposables; serialize the append
             defer self.env.unlockBindings();
-            try self.env.disposables.append(self.env.bindingAllocator(), .{ .value = Value.undef(), .method = Value.undef(), .is_async = true });
+            try self.env.disposables.append(self.env.bindingAllocator(), .{ .value = Value.undef(), .method = Value.undef(), .is_async = true, .await_result = true });
             return;
         }
         if (!val.isObject()) return self.throwError("TypeError", "a 'using' declaration value must be an object or null/undefined");
         var method: Value = Value.undef();
+        var await_result = false;
         if (is_async) {
             if (self.wellKnownSymbolKey("asyncDispose")) |k| method = try self.getProperty(val, k);
+            await_result = !(method.isUndefined() or method.isNull());
             if (method.isUndefined() or method.isNull()) {
                 if (self.wellKnownSymbolKey("dispose")) |k| method = try self.getProperty(val, k);
             }
@@ -1692,7 +1696,7 @@ pub const Interpreter = struct {
         gc_mod.barrierValue(method);
         self.env.lockBindings(); // traceEnv reads disposables; serialize the append
         defer self.env.unlockBindings();
-        try self.env.disposables.append(self.env.bindingAllocator(), .{ .value = val, .method = method, .is_async = is_async });
+        try self.env.disposables.append(self.env.bindingAllocator(), .{ .value = val, .method = method, .is_async = is_async, .await_result = await_result });
     }
 
     /// Dispose a scope's `using` resources in reverse declaration order, threading
@@ -1700,7 +1704,8 @@ pub const Interpreter = struct {
     /// becomes the pending completion, wrapping any earlier one in a
     /// SuppressedError. Returns the value to re-throw, or null on clean exit.
     pub fn disposeScope(self: *Interpreter, env: *Environment, body_err: ?Value) EvalError!?Value {
-        var pending = body_err;
+        var pending = body_err orelse env.dispose_pending;
+        env.dispose_pending = null;
         var i = env.disposables.items.len;
         while (i > 0) {
             i -= 1;
@@ -1742,6 +1747,47 @@ pub const Interpreter = struct {
             env.disposables.clearRetainingCapacity();
         }
         return pending;
+    }
+
+    pub fn disposeScopeAsyncStep(self: *Interpreter, env: *Environment) EvalError!?Value {
+        var pending: ?Value = env.dispose_pending;
+        env.dispose_pending = null;
+        while (env.disposables.items.len > 0) {
+            const idx = env.disposables.items.len - 1;
+            const d = env.disposables.items[idx];
+            env.disposables.shrinkRetainingCapacity(idx);
+            var dispose_err: ?Value = null;
+            if (d.method.isUndefined()) {
+                if (d.is_async and d.await_result) return Value.undef();
+            } else if (self.callValueWithThis(d.method, &.{}, d.value)) |rv| {
+                if (d.is_async and d.await_result) return rv;
+            } else |e| {
+                if (e != error.Throw) return e;
+                dispose_err = self.exception;
+                self.exception = Value.undef();
+            }
+            if (dispose_err) |this_err| {
+                pending = if (pending) |prev|
+                    (self.makeErrorWithArgs("SuppressedError", &.{ this_err, prev }) catch this_err)
+                else
+                    this_err;
+            }
+            env.dispose_pending = pending;
+        }
+        clear: {
+            if (env.bindings_allocator != null) {
+                env.disposables.deinit(env.bindingAllocator());
+                env.disposables = .empty;
+                break :clear;
+            }
+            env.disposables.clearRetainingCapacity();
+        }
+        if (pending) |err| {
+            env.dispose_pending = null;
+            self.exception = err;
+            return error.Throw;
+        }
+        return null;
     }
 
     pub fn initEnvironment(self: *Interpreter, env: *Environment, parent: ?*Environment, fn_scope: bool) void {
@@ -4699,7 +4745,7 @@ pub const Interpreter = struct {
         return out;
     }
 
-    fn makeErrorWithArgs(self: *Interpreter, name: []const u8, args: []const Value) EvalError!Value {
+    pub fn makeErrorWithArgs(self: *Interpreter, name: []const u8, args: []const Value) EvalError!Value {
         return self.makeErrorWithArgsNT(name, args, Value.undef());
     }
 

@@ -183,6 +183,20 @@ fn stmtListHasAwaitUsingDecl(stmts: []*Node) bool {
     return false;
 }
 
+fn stmtAwaitUsingDeclCount(node: *const ast.Node) usize {
+    return switch (node.*) {
+        .var_decl => |d| if (d.dispose == 2) 1 else 0,
+        .decl_group => |stmts| stmtListAwaitUsingDeclCount(stmts),
+        else => 0,
+    };
+}
+
+fn stmtListAwaitUsingDeclCount(stmts: []*Node) usize {
+    var count: usize = 0;
+    for (stmts) |s| count += stmtAwaitUsingDeclCount(s);
+    return count;
+}
+
 fn stmtListCanEscapeAbruptly(stmts: []*Node) bool {
     for (stmts) |s| if (stmtCanEscapeAbruptly(s)) return true;
     return false;
@@ -435,11 +449,17 @@ pub const Compiler = struct {
                 }
                 try self.compileStmtList(stmts);
                 if (disposable_scope) {
-                    _ = try self.chunk.emit(.dispose_scope, 0);
-                    if (self.in_async and stmtListHasAwaitUsingDecl(stmts)) {
-                        _ = try self.chunk.emit(.load_undefined, 0);
-                        _ = try self.chunk.emit(.await_op, 0);
-                        _ = try self.chunk.emit(.pop, 0);
+                    const await_using_count = if (self.in_async) stmtListAwaitUsingDeclCount(stmts) else 0;
+                    if (await_using_count == 0) {
+                        _ = try self.chunk.emit(.dispose_scope, 0);
+                    } else {
+                        var i: usize = 0;
+                        while (i < await_using_count) : (i += 1) {
+                            _ = try self.chunk.emit(.dispose_scope, 1);
+                            _ = try self.chunk.emit(.await_op, 0);
+                            _ = try self.chunk.emit(.pop, 0);
+                        }
+                        _ = try self.chunk.emit(.dispose_scope, 0);
                     }
                     _ = try self.chunk.emit(.exit_block, 0);
                 }

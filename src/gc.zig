@@ -209,6 +209,7 @@ pub fn traceEnv(e: *Environment, v: anytype) void {
         markValue(v, d.value);
         markValue(v, d.method);
     }
+    if (e.dispose_pending) |pending| markValue(v, pending);
     var ait = e.aliases.valueIterator();
     while (ait.next()) |a| markManaged(v, a.env);
     if (concurrent) e.unlockBindings();

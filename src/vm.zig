@@ -590,7 +590,17 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 if (gen) |g| g.env = vm.env;
             },
             .dispose_scope => {
-                if (vm.env.disposables.items.len > 0) {
+                if (inst.a == 1) {
+                    if (vm.env.disposables.items.len > 0) {
+                        if (try vm.disposeScopeAsyncStep(vm.env)) |awaited| {
+                            try stack.append(stack_alloc, awaited);
+                        } else {
+                            try stack.append(stack_alloc, Value.undef());
+                        }
+                    } else {
+                        try stack.append(stack_alloc, Value.undef());
+                    }
+                } else if (vm.env.disposables.items.len > 0 or vm.env.dispose_pending != null) {
                     if (try vm.disposeScope(vm.env, null)) |err| {
                         vm.exception = err;
                         return error.Throw;
@@ -1287,6 +1297,105 @@ fn resultPromise(g: *Generator) *promise.Promise {
     return @ptrCast(@alignCast(g.result.?.promise.?));
 }
 
+const AsyncDisposeCompletion = struct {
+    gen: *Generator,
+    index: usize,
+    pending: ?Value,
+    result_value: Value,
+};
+
+fn clearDisposables(env: *Environment) void {
+    if (env.bindings_allocator != null) {
+        env.disposables.deinit(env.bindingAllocator());
+        env.disposables = .empty;
+    } else {
+        env.disposables.clearRetainingCapacity();
+    }
+}
+
+fn suppressDisposeError(vm: *Interpreter, pending: ?Value, this_err: Value) EvalError!Value {
+    return if (pending) |prev|
+        try vm.makeErrorWithArgs("SuppressedError", &.{ this_err, prev })
+    else
+        this_err;
+}
+
+fn asyncDisposeResumeFulfilled(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    _ = args;
+    const vm: *Interpreter = @ptrCast(@alignCast(ctx));
+    const state: *AsyncDisposeCompletion = @ptrCast(@alignCast(vm.active_native.?.private_data.?));
+    try continueAsyncDisposal(vm, state, null);
+    return Value.undef();
+}
+
+fn asyncDisposeResumeRejected(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const vm: *Interpreter = @ptrCast(@alignCast(ctx));
+    const state: *AsyncDisposeCompletion = @ptrCast(@alignCast(vm.active_native.?.private_data.?));
+    try continueAsyncDisposal(vm, state, if (args.len > 0) args[0] else Value.undef());
+    return Value.undef();
+}
+
+fn scheduleAsyncDisposeContinuation(vm: *Interpreter, state: *AsyncDisposeCompletion, awaited_value: Value) EvalError!void {
+    const wrapped = interp.promiseResolveValue(vm, awaited_value) catch |err| {
+        if (err != error.Throw) return err;
+        const reason = vm.exception;
+        vm.exception = Value.undef();
+        state.pending = try suppressDisposeError(vm, state.pending, reason);
+        try continueAsyncDisposal(vm, state, null);
+        return;
+    };
+    const onf = try gc_mod.allocObj(vm.arena);
+    onf.* = .{ .native = asyncDisposeResumeFulfilled, .private_data = @ptrCast(state) };
+    const onr = try gc_mod.allocObj(vm.arena);
+    onr.* = .{ .native = asyncDisposeResumeRejected, .private_data = @ptrCast(state) };
+    _ = try promise.then(vm, @ptrCast(@alignCast(wrapped.asObj().promise.?)), Value.obj(onf), Value.obj(onr));
+}
+
+fn continueAsyncDisposal(vm: *Interpreter, state: *AsyncDisposeCompletion, rejected: ?Value) EvalError!void {
+    if (rejected) |reason| state.pending = try suppressDisposeError(vm, state.pending, reason);
+    const env = state.gen.env;
+    while (state.index > 0) {
+        state.index -= 1;
+        const d = env.disposables.items[state.index];
+        var dispose_err: ?Value = null;
+        if (d.method.isUndefined()) {
+            if (d.is_async and d.await_result) {
+                try scheduleAsyncDisposeContinuation(vm, state, Value.undef());
+                return;
+            }
+        } else if (vm.callValueWithThis(d.method, &.{}, d.value)) |rv| {
+            if (d.is_async and d.await_result) {
+                try scheduleAsyncDisposeContinuation(vm, state, rv);
+                return;
+            }
+        } else |e| {
+            if (e != error.Throw) return e;
+            dispose_err = vm.exception;
+            vm.exception = Value.undef();
+        }
+        if (dispose_err) |this_err| state.pending = try suppressDisposeError(vm, state.pending, this_err);
+    }
+    clearDisposables(env);
+    if (state.pending) |err| {
+        try promise.reject(vm, resultPromise(state.gen), err);
+    } else {
+        try promise.resolve(vm, resultPromise(state.gen), state.result_value);
+    }
+}
+
+fn completeAsyncWithDisposal(vm: *Interpreter, g: *Generator, result_value: Value, pending: ?Value) EvalError!void {
+    const state = try vm.arena.create(AsyncDisposeCompletion);
+    state.* = .{
+        .gen = g,
+        .index = g.env.disposables.items.len,
+        .pending = pending,
+        .result_value = result_value,
+    };
+    try continueAsyncDisposal(vm, state, null);
+}
+
 /// Run the async activation until its next `await` or completion, then settle
 /// its result promise (on return/throw) or wire resume reactions (on await).
 fn asyncDrive(vm: *Interpreter, g: *Generator, kind: ResumeKind, val: Value) EvalError!void {
@@ -1331,11 +1440,12 @@ fn asyncDrive(vm: *Interpreter, g: *Generator, kind: ResumeKind, val: Value) Eva
     const v = execLoop(vm, &g.exec, g.chunk, null, g) catch |e| {
         if (e != error.Throw) return e;
         g.done = true;
-        var reason = vm.exception;
+        const reason = vm.exception;
         vm.exception = Value.undef();
         // DisposeResources for the body's `using` resources, threading the error.
         if (g.env.disposables.items.len > 0) {
-            if (vm.disposeScope(g.env, reason) catch null) |de| reason = de;
+            try completeAsyncWithDisposal(vm, g, Value.undef(), reason);
+            return;
         }
         try promise.reject(vm, resultPromise(g), reason);
         return;
@@ -1363,10 +1473,8 @@ fn asyncDrive(vm: *Interpreter, g: *Generator, kind: ResumeKind, val: Value) Eva
     g.done = true;
     // DisposeResources for the body's top-level `using` resources at completion.
     if (g.env.disposables.items.len > 0) {
-        if (vm.disposeScope(g.env, null) catch null) |de| {
-            try promise.reject(vm, resultPromise(g), de);
-            return;
-        }
+        try completeAsyncWithDisposal(vm, g, v, null);
+        return;
     }
     try promise.resolve(vm, resultPromise(g), v);
 }
