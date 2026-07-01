@@ -299,9 +299,11 @@ threading architecture:
   counts for `Condition.asyncWait` and property `waitAsync`, explicit
   `Thread.join` park counts for lifecycle attribution, source-specific
   `Lock.hold` / `Condition.wait` / property `Atomics.wait` park counts, and
-  run-loop task-pump empty/job counts beside wall-clock time, so follow-up
-  optimization can separate property waiters, property `waitAsync` timeout
-  settlement, condition waiters, async condition regrant delivery,
+  run-loop task-pump empty/job counts split into ordinary `Lock.asyncHold`
+  deliveries versus `Condition.asyncWait` reacquire deliveries beside
+  wall-clock time, so follow-up optimization can separate property waiters,
+  property `waitAsync` timeout settlement, condition waiters, async condition
+  regrant delivery,
   user-level lock pressure, thread-join/lifecycle waiting,
   unobserved async-hold grant delivery,
   promise-observed callback settlement, no-fn release-function delivery,
@@ -318,9 +320,10 @@ threading architecture:
   grant delivery does not fall back to shifting the whole pending list. Realm
   task-queue writers publish the atomic empty/pending hint from the queue length
   while holding the shared API lock, avoiding writer-side atomic RMW in the
-  async-grant hot path. Realm task pumps also copy bounded FIFO
-  bursts under the shared API lock before running grants outside it, so delivery
-  no longer takes that lock once per job. `Condition.notify` / `notifyAll` now
+  async-grant hot path. Realm task pumps also copy larger bounded FIFO bursts
+  under the shared API lock before running grants outside it, so delivery no
+  longer takes that lock once per job and already-queued grant storms need fewer
+  shared-lock acquisitions. `Condition.notify` / `notifyAll` now
   use the same FIFO head-cursor shape for their mixed sync/async waiter queue,
   avoiding one front shift per notified waiter; timed-out or terminated sync
   condition waiters are marked canceled and skipped by that cursor instead of

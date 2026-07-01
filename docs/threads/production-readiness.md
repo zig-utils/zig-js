@@ -137,8 +137,9 @@ Known performance/maturity work:
   property `Atomics.wait`, `async`/`done` split
   `Condition.asyncWait` plus property `waitAsync` registration from completed
   async-condition reacquires plus settled property `waitAsync` tickets, and
-  `empty`/`jobs` split the
-  run-loop task pump into empty fast-path hits and delivered async-hold jobs.
+  `empty`/`jobs` split the run-loop task pump into empty fast-path hits and
+  delivered grant jobs while `hold`/`cjob` split those delivered jobs into
+  ordinary `Lock.asyncHold` grants and `Condition.asyncWait` reacquire grants.
 - Parked sync waiters still pump the realm run-loop so async-hold grants make
   progress, but empty pumps now use an atomic queue-count fast path and avoid
   taking the shared threading API lock.
@@ -150,9 +151,10 @@ Known performance/maturity work:
   the whole per-lock pending list. Task-queue writers publish the
   `tasks_queued` empty/pending hint from the locked queue length instead of
   doing writer-side atomic RMW, reducing one shared counter cost in async-grant
-  registration and delivery. Task pumps now copy bounded FIFO bursts under the
-  shared threading API lock and run every grant outside it, reducing
-  delivery lock acquisitions from once per job to once per burst; they also
+  registration and delivery. Task pumps now copy larger bounded FIFO bursts
+  under the shared threading API lock and run every grant outside it, reducing
+  delivery lock acquisitions from once per job to once per burst and needing
+  fewer shared-lock acquisitions for already-queued grant storms; they also
   snapshot the microtask enqueue generation around each delivered grant, so
   unobserved grants that enqueue no reactions skip an otherwise-empty no-GIL
   microtask drain while preserving checkpoint order for grants that do enqueue

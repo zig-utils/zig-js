@@ -312,17 +312,19 @@ The `async`/`done` columns split `Condition.asyncWait` plus property
 property `waitAsync` tickets, making timeout-settlement parity and async
 condition regrant pressure visible in the same run.
 The `empty`/`jobs` columns split the run-loop task pump into empty atomic
-fast-path hits and real async-hold job delivery. Run it before and after
-synchronization or lifecycle changes so performance work has an attributed
-baseline instead of only elapsed time. The profile also prints a separate
-isolated `Worker` table for structured-clone inbox/outbox round-trips, empty
+fast-path hits and real grant-job delivery, and the paired `hold`/`cjob`
+columns split those delivered jobs into ordinary `Lock.asyncHold` grants versus
+`Condition.asyncWait` reacquire grants. Run it before and after synchronization
+or lifecycle changes so performance work has an attributed baseline instead of
+only elapsed time. The profile also prints a separate isolated `Worker` table
+for structured-clone inbox/outbox round-trips, empty
 receive polling, and spawn/post/receive/join/destroy lifecycle churn; it
 intentionally has no `.gil = true` column because each Worker owns its own
 `Context`.
 Empty sync-wait task pumps now have a
 lock-free fast path;
-real async-hold delivery drains bounded FIFO bursts from the realm task queue
-under one API-lock acquisition before running grants outside that lock,
+real async-hold delivery drains larger bounded FIFO bursts from the realm task
+queue under one API-lock acquisition before running grants outside that lock,
 task-queue writers publish the atomic pending hint from the locked queue length
 instead of writer-side atomic RMW, and retry-front async-hold grants use a front
 stash instead of shifting the per-lock pending list when no consumed head slot
@@ -380,7 +382,7 @@ The property `waitAsync` timeout row should keep `async` and `done` equal after
 finite tickets settle; the single-lock `Condition.asyncWait` row exposes
 same-lock regrant batching, while the multi-lock row exercises FIFO-bursted
 realm task enqueue across lock groups and the paired run-loop job delivery
-pressure separately.
+pressure separately through the `hold` versus `cjob` split.
 `threads-profile` remains the check that this kind of targeted optimization
 does not merely move overhead elsewhere.
 

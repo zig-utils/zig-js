@@ -92,6 +92,8 @@ pub const ContentionStats = struct {
     property_wait_async_settled: u64 = 0,
     task_pump_empty: u64 = 0,
     task_pump_jobs: u64 = 0,
+    task_pump_async_hold_jobs: u64 = 0,
+    task_pump_condition_jobs: u64 = 0,
 
     pub fn events(self: ContentionStats) u64 {
         return self.lock_contentions + self.async_hold_queued +
@@ -128,6 +130,8 @@ const ContentionCounters = struct {
     property_wait_async_settled: std.atomic.Value(u64) = .init(0),
     task_pump_empty: std.atomic.Value(u64) = .init(0),
     task_pump_jobs: std.atomic.Value(u64) = .init(0),
+    task_pump_async_hold_jobs: std.atomic.Value(u64) = .init(0),
+    task_pump_condition_jobs: std.atomic.Value(u64) = .init(0),
 };
 
 var contention_counters: ContentionCounters = .{};
@@ -149,6 +153,8 @@ pub fn resetContentionStats() void {
     contention_counters.property_wait_async_settled.store(0, .release);
     contention_counters.task_pump_empty.store(0, .release);
     contention_counters.task_pump_jobs.store(0, .release);
+    contention_counters.task_pump_async_hold_jobs.store(0, .release);
+    contention_counters.task_pump_condition_jobs.store(0, .release);
     contention_stats_enabled.store(true, .release);
 }
 
@@ -172,6 +178,8 @@ pub fn contentionStats() ContentionStats {
         .property_wait_async_settled = contention_counters.property_wait_async_settled.load(.acquire),
         .task_pump_empty = contention_counters.task_pump_empty.load(.acquire),
         .task_pump_jobs = contention_counters.task_pump_jobs.load(.acquire),
+        .task_pump_async_hold_jobs = contention_counters.task_pump_async_hold_jobs.load(.acquire),
+        .task_pump_condition_jobs = contention_counters.task_pump_condition_jobs.load(.acquire),
     };
 }
 
@@ -207,6 +215,8 @@ test "jsthread contention stats reset and snapshot" {
     bumpContention("property_wait_parks");
     bumpContention("task_pump_empty");
     bumpContention("task_pump_jobs");
+    bumpContention("task_pump_async_hold_jobs");
+    bumpContention("task_pump_condition_jobs");
 
     const stats = contentionStats();
     try std.testing.expectEqual(@as(u64, 6), stats.events());
@@ -215,6 +225,8 @@ test "jsthread contention stats reset and snapshot" {
     try std.testing.expectEqual(@as(u64, 2), stats.asyncSettled());
     try std.testing.expectEqual(@as(u64, 1), stats.task_pump_empty);
     try std.testing.expectEqual(@as(u64, 1), stats.task_pump_jobs);
+    try std.testing.expectEqual(@as(u64, 1), stats.task_pump_async_hold_jobs);
+    try std.testing.expectEqual(@as(u64, 1), stats.task_pump_condition_jobs);
 
     resetContentionStats();
     try std.testing.expectEqual(@as(u64, 0), contentionStats().events());
@@ -223,6 +235,8 @@ test "jsthread contention stats reset and snapshot" {
     try std.testing.expectEqual(@as(u64, 0), contentionStats().asyncSettled());
     try std.testing.expectEqual(@as(u64, 0), contentionStats().task_pump_empty);
     try std.testing.expectEqual(@as(u64, 0), contentionStats().task_pump_jobs);
+    try std.testing.expectEqual(@as(u64, 0), contentionStats().task_pump_async_hold_jobs);
+    try std.testing.expectEqual(@as(u64, 0), contentionStats().task_pump_condition_jobs);
     disableContentionStats();
 }
 
@@ -2527,7 +2541,7 @@ inline fn microtaskEnqueueGeneration(self: *Interpreter) u64 {
 /// from the drain tail and from every parking point.
 pub fn pumpTasks(self: *Interpreter) void {
     const g = self.gil orelse return;
-    var burst: [64]*anyopaque = undefined;
+    var burst: [256]*anyopaque = undefined;
     while (true) {
         if (g.tasks_queued.load(.acquire) == 0) {
             bumpContention("task_pump_empty");
@@ -2542,6 +2556,10 @@ pub fn pumpTasks(self: *Interpreter) void {
         for (burst[0..n]) |r| {
             bumpContention("task_pump_jobs");
             const job: *HoldJob = @ptrCast(@alignCast(r));
+            if (job.condition_async_reacquire)
+                bumpContention("task_pump_condition_jobs")
+            else
+                bumpContention("task_pump_async_hold_jobs");
             const microtask_gen = microtaskEnqueueGeneration(self);
             runHoldJob(self, job) catch {};
             if (microtaskEnqueueGeneration(self) != microtask_gen)

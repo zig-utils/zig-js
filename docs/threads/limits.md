@@ -134,9 +134,10 @@ context APIs.
   `Condition.wait`, and property `Atomics.wait`, its `async`/`done` columns
   now split async condition/property-waitAsync registration from completed
   async-condition reacquires plus settled property `waitAsync` tickets, and its
-  `empty`/`jobs` columns show whether
-  run-loop task-pump overhead is empty fast-path churn or real async-hold
-  delivery. Empty sync-wait
+  `empty`/`jobs` columns show whether run-loop task-pump overhead is empty
+  fast-path churn or real grant delivery, with `hold`/`cjob` splitting the
+  delivered jobs into ordinary `Lock.asyncHold` grants versus
+  `Condition.asyncWait` reacquire grants. Empty sync-wait
   task pumps no longer take the shared run-loop task lock, reducing one measured
   cost in contended lock/lifecycle paths; task-queue writers publish the
   pending-count hint from the locked queue length instead of writer-side atomic
@@ -144,9 +145,10 @@ context APIs.
   head cursors for both per-lock pending grants and realm task delivery, and
   retry-front grants use an amortized O(1) front stash when no consumed head
   slot is available, so failed grant delivery does not fall back to shifting the
-  whole pending list. Realm task delivery copies bounded FIFO bursts under the
-  shared API lock before running grants outside it, so queue drains do not
-  front-shift remaining jobs or lock once per delivered job. The async-hold task
+  whole pending list. Realm task delivery copies larger bounded FIFO bursts
+  under the shared API lock before running grants outside it, so queue drains do
+  not front-shift remaining jobs and already-queued grant storms need fewer
+  shared-lock acquisitions. The async-hold task
   pump also snapshots the microtask enqueue
   generation around each grant, so unobserved grants that settle without queued
   reactions skip an otherwise-empty no-GIL microtask drain while preserving
