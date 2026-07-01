@@ -369,7 +369,8 @@ public asyncHold corpus case also covers the release-function path after that
 allocation reduction.
 The property `waitAsync` timeout row should keep `async` and `done` equal after
 finite tickets settle; the `Condition.asyncWait` row exposes async waiter
-registration and the paired run-loop job delivery pressure separately.
+registration, same-lock regrant batching, FIFO-bursted realm task enqueue, and
+the paired run-loop job delivery pressure separately.
 `threads-profile` remains the check that this kind of targeted optimization
 does not merely move overhead elsewhere.
 

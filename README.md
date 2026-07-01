@@ -325,7 +325,9 @@ threading architecture:
   keep the existing sync handoff ordering. Contiguous async condition regrants
   for the same lock are prepared in fixed-size stack batches and applied under
   one lock acquisition per batch, so `notifyAll()` no longer retakes that lock
-  once per async waiter. Notify now also tracks the woken
+  once per async waiter. Ready async-condition reacquire jobs are also appended
+  to the realm task queue in FIFO bursts, amortizing the shared API lock on
+  notify paths that wake multiple locks. Notify now also tracks the woken
   sync/async entries in one pre-sized wake list instead of allocating separate
   per-kind wake lists for every notification, and sync handoff completion uses
   a pending-waiter countdown instead of rescanning the wake list until every

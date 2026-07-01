@@ -116,6 +116,14 @@ pub const Gil = struct {
         g.tasks_queued.store(g.queuedTaskCountLocked(), .release);
     }
 
+    pub fn enqueueTaskBurst(g: *Gil, a: std.mem.Allocator, tasks: []const *anyopaque) !void {
+        if (tasks.len == 0) return;
+        g.lockApi();
+        defer g.unlockApi();
+        try g.tasks.appendSlice(a, tasks);
+        g.tasks_queued.store(g.queuedTaskCountLocked(), .release);
+    }
+
     pub fn dequeueTask(g: *Gil) ?*anyopaque {
         g.lockApi();
         defer g.unlockApi();
@@ -186,6 +194,30 @@ pub const Gil = struct {
 
     fn currentId() u64 {
         return @intCast(std.Thread.getCurrentId());
+    }
+
+    test "Gil task burst enqueue preserves FIFO and queued hint" {
+        var g = Gil{};
+        defer g.tasks.deinit(std.testing.allocator);
+
+        var one: u8 = 1;
+        var two: u8 = 2;
+        var three: u8 = 3;
+        try g.enqueueTaskBurst(std.testing.allocator, &.{
+            @ptrCast(&one),
+            @ptrCast(&two),
+        });
+        try std.testing.expectEqual(@as(usize, 2), g.tasks_queued.load(.acquire));
+        try g.enqueueTaskBurst(std.testing.allocator, &.{@ptrCast(&three)});
+        try std.testing.expectEqual(@as(usize, 3), g.tasks_queued.load(.acquire));
+
+        var out: [4]*anyopaque = undefined;
+        const n = g.dequeueTaskBurst(&out);
+        try std.testing.expectEqual(@as(usize, 3), n);
+        try std.testing.expectEqual(@intFromPtr(&one), @intFromPtr(out[0]));
+        try std.testing.expectEqual(@intFromPtr(&two), @intFromPtr(out[1]));
+        try std.testing.expectEqual(@intFromPtr(&three), @intFromPtr(out[2]));
+        try std.testing.expectEqual(@as(usize, 0), g.tasks_queued.load(.acquire));
     }
 
     /// Register this thread's park record. Call under the GIL once per thread

@@ -160,9 +160,11 @@ context APIs.
   per-kind wake lists for each notification. Contiguous async condition
   regrants for the same lock are prepared in fixed-size stack batches and
   applied under one lock acquisition per batch, so `notifyAll()` no longer
-  retakes that lock once per async waiter, and sync handoff completion uses a
-  pending-waiter countdown instead of rescanning that wake list until every
-  ticket acknowledges.
+  retakes that lock once per async waiter. Ready async-condition reacquire jobs
+  are appended to the realm task queue in FIFO bursts, amortizing the shared API
+  lock when a notification wakes multiple lock groups, and sync handoff
+  completion uses a pending-waiter countdown instead of rescanning that wake
+  list until every ticket acknowledges.
   Promise microtask drains use a FIFO head cursor, so observed async-hold
   callback settlement and no-fn release-function reactions preserve FIFO order
   without shifting the remaining reaction queue on each job.

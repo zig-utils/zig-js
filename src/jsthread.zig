@@ -2506,6 +2506,18 @@ fn enqueueHoldJob(self: *Interpreter, job: *HoldJob) value.HostError!void {
     try g.enqueueTask(self.arena, @ptrCast(job));
 }
 
+fn enqueueHoldJobs(self: *Interpreter, jobs: []const *HoldJob) value.HostError!void {
+    const g = self.gil orelse return;
+    var erased: [256]*anyopaque = undefined;
+    var i: usize = 0;
+    while (i < jobs.len) {
+        const n = @min(erased.len, jobs.len - i);
+        for (jobs[i..][0..n], 0..) |job, j| erased[j] = @ptrCast(job);
+        try g.enqueueTaskBurst(self.arena, erased[0..n]);
+        i += n;
+    }
+}
+
 inline fn microtaskEnqueueGeneration(self: *Interpreter) u64 {
     return if (self.microtasks) |q| q.enqueueGeneration() else 0;
 }
@@ -2806,6 +2818,8 @@ fn grantAsyncCondReacquireLocked(lock: *LockRecord, arena: std.mem.Allocator, jo
 
 fn wakeAsyncCondWaiters(self: *Interpreter, entries: []const CondEntry) void {
     var batch: [256]*HoldJob = undefined;
+    var ready_batch: [256]*HoldJob = undefined;
+    var ready_len: usize = 0;
     var i: usize = 0;
     const io = agent.engineIo();
     while (i < entries.len) {
@@ -2839,6 +2853,14 @@ fn wakeAsyncCondWaiters(self: *Interpreter, entries: []const CondEntry) void {
                 ready = job;
         }
         lock.mutex.unlock(io);
-        if (ready) |job| enqueueHoldJob(self, job) catch {};
+        if (ready) |job| {
+            ready_batch[ready_len] = job;
+            ready_len += 1;
+            if (ready_len == ready_batch.len) {
+                enqueueHoldJobs(self, ready_batch[0..ready_len]) catch {};
+                ready_len = 0;
+            }
+        }
     }
+    if (ready_len > 0) enqueueHoldJobs(self, ready_batch[0..ready_len]) catch {};
 }

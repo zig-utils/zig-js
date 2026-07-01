@@ -178,8 +178,10 @@ Known performance/maturity work:
   than allocating separate per-kind lists for each notification. Contiguous
   async condition regrants for the same lock are prepared in fixed-size stack
   batches and applied under one lock acquisition per batch, so `notifyAll()`
-  no longer retakes that lock once per async waiter, and sync handoff completion
-  uses a pending-waiter countdown instead of rescanning the
+  no longer retakes that lock once per async waiter. Ready async-condition
+  reacquire jobs are appended to the realm task queue in FIFO bursts, amortizing
+  the shared API lock when a notification wakes multiple lock groups, and sync
+  handoff completion uses a pending-waiter countdown instead of rescanning the
   wake list until every ticket acknowledges.
 - Property-mode `Atomics.notify` stable-compacts matching waiter queues in one
   pass. Sync wait stack tickets are unlinked before signal, so awakened peers no
