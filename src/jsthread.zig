@@ -483,11 +483,23 @@ fn threadMain(rec: *ThreadRecord, fn_v: Value, args: []const Value) void {
     machine.drainMicrotasks() catch {};
     transferPendingJoinQueue(rec.ctx, &microtasks, &rec.ctx.microtasks);
     transferPropAsyncQueue(g, &microtasks, &rec.ctx.microtasks);
+    // Pending prop-async tickets now target the realm queue, but another peer
+    // may already have removed one of this thread's tickets from the global
+    // table and be about to settle it. Publish "local queue closed" before the
+    // final flush, under the same mutex that late settlement checks, so such a
+    // peer either appends before this flush or reroutes to the realm queue.
+    {
+        const io = agent.engineIo();
+        rec.join_mutex.lockUncancelable(io);
+        rec.microtasks = null;
+        rec.join_mutex.unlock(io);
+    }
     // Flush any reactions a peer routed into this thread's local queue after the
-    // final drain above (e.g. a nested-asyncJoin settling here in the teardown
-    // window) into the realm queue, which the host keeps draining — otherwise
-    // they strand when this queue is abandoned below. Serialized with peer
-    // enqueues by `microtask_lock` (no-op when null, i.e. GIL mode).
+    // final drain above (e.g. a nested-asyncJoin or removed prop-async ticket
+    // settling here in the teardown window) into the realm queue, which the host
+    // keeps draining — otherwise they strand when this queue is abandoned below.
+    // Serialized with peer enqueues by `microtask_lock` (no-op when null, i.e.
+    // GIL mode).
     {
         machine.lockMicrotasks();
         defer machine.unlockMicrotasks();
@@ -496,7 +508,6 @@ fn threadMain(rec: *ThreadRecord, fn_v: Value, args: []const Value) void {
             microtasks.clearRetainingCapacity();
         }
     }
-    rec.microtasks = null;
 }
 
 fn publishThreadCompletion(rec: *ThreadRecord, threw: bool, result: Value) std.ArrayListUnmanaged(PendingJoin) {
@@ -1806,6 +1817,11 @@ pub const PropAsyncTicket = struct {
     deadline_ns: ?i96,
     promise: *value.Object,
     microtasks: *promise.MicrotaskQueue,
+    /// The JS thread whose local queue was captured at registration time. When
+    /// a peer removes this ticket from the global table and settles it after the
+    /// owner has begun teardown, settlement reroutes to the realm queue instead
+    /// of appending to the owner's stack-local queue after its final flush.
+    thread: ?*ThreadRecord,
     /// The realm's gil pointer — the abandon token at Context.destroy.
     owner: *const anyopaque,
 };
@@ -1849,6 +1865,7 @@ pub fn propWaitAsync(self: *Interpreter, args: []const Value, timeout_ns: ?u64) 
         .deadline_ns = if (timeout_ns) |ns| now + ns else null,
         .promise = p_obj,
         .microtasks = microtasks,
+        .thread = t_current,
         .owner = @ptrCast(self.gil.?),
     };
     const g = self.gil.?;
@@ -1879,9 +1896,19 @@ fn settlePropAsync(self: *Interpreter, t: *PropAsyncTicket, outcome: []const u8)
     bumpContention("property_wait_async_settled");
     if (promise.promiseOf(Value.obj(t.promise))) |pp| {
         const saved_microtasks = self.microtasks;
-        self.microtasks = t.microtasks;
-        defer self.microtasks = saved_microtasks;
-        promise.resolve(self, pp, Value.str(outcome)) catch {};
+        if (t.thread) |rec| {
+            const io = agent.engineIo();
+            rec.join_mutex.lockUncancelable(io);
+            const target = if (rec.microtasks == t.microtasks) t.microtasks else &rec.ctx.microtasks;
+            self.microtasks = target;
+            promise.resolve(self, pp, Value.str(outcome)) catch {};
+            self.microtasks = saved_microtasks;
+            rec.join_mutex.unlock(io);
+        } else {
+            self.microtasks = t.microtasks;
+            promise.resolve(self, pp, Value.str(outcome)) catch {};
+            self.microtasks = saved_microtasks;
+        }
     }
     prop_alloc.free(t.key);
     prop_alloc.destroy(t);
@@ -2140,11 +2167,11 @@ test "property waitAsync expiry stable-compacts expired tickets" {
     var expired: std.ArrayListUnmanaged(*PropAsyncTicket) = .empty;
     defer expired.deinit(prop_alloc);
     var obj: value.Object = undefined;
-    var t0 = PropAsyncTicket{ .obj = &obj, .key = "a", .deadline_ns = 10, .promise = undefined, .microtasks = undefined, .owner = undefined };
-    var t1 = PropAsyncTicket{ .obj = &obj, .key = "b", .deadline_ns = 40, .promise = undefined, .microtasks = undefined, .owner = undefined };
-    var t2 = PropAsyncTicket{ .obj = &obj, .key = "c", .deadline_ns = 20, .promise = undefined, .microtasks = undefined, .owner = undefined };
-    var t3 = PropAsyncTicket{ .obj = &obj, .key = "d", .deadline_ns = null, .promise = undefined, .microtasks = undefined, .owner = undefined };
-    var t4 = PropAsyncTicket{ .obj = &obj, .key = "e", .deadline_ns = 30, .promise = undefined, .microtasks = undefined, .owner = undefined };
+    var t0 = PropAsyncTicket{ .obj = &obj, .key = "a", .deadline_ns = 10, .promise = undefined, .microtasks = undefined, .thread = null, .owner = undefined };
+    var t1 = PropAsyncTicket{ .obj = &obj, .key = "b", .deadline_ns = 40, .promise = undefined, .microtasks = undefined, .thread = null, .owner = undefined };
+    var t2 = PropAsyncTicket{ .obj = &obj, .key = "c", .deadline_ns = 20, .promise = undefined, .microtasks = undefined, .thread = null, .owner = undefined };
+    var t3 = PropAsyncTicket{ .obj = &obj, .key = "d", .deadline_ns = null, .promise = undefined, .microtasks = undefined, .thread = null, .owner = undefined };
+    var t4 = PropAsyncTicket{ .obj = &obj, .key = "e", .deadline_ns = 30, .promise = undefined, .microtasks = undefined, .thread = null, .owner = undefined };
 
     try g.prop_async.append(prop_alloc, @ptrCast(&t0));
     try g.prop_async.append(prop_alloc, @ptrCast(&t1));

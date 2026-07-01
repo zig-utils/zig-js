@@ -98,6 +98,11 @@ covers:
 `zig build threads-test -Dthreads-parallel-js=true` runs the allowlist through
 the same no-GIL path that `enable_threads` uses by default. CI's TSan sweep uses
 `threads-test-bin -Dtsan=true` and invokes each case with `parallel-js one`.
+`cve/mc-dos-waiter-table-storm.js` is a focused no-GIL lifecycle witness for
+property `Atomics.waitAsync` tickets that are removed from the global table by a
+peer just as their owning spawned thread tears down its stack-local microtask
+queue; keep the focused `-Dthreads-parallel-js=true` case green when changing
+property waiter settlement, thread queue transfer, or microtask teardown.
 The `api/lock-async-hold.js` barging witness now starts its child `Thread`
 inside the setup `lock.hold`, so the async ticket is deterministically queued
 against an already-active sync hold instead of racing with immediate no-fn
@@ -450,6 +455,7 @@ Add `-Dthreads-parallel-js=true` to force the no-GIL path explicitly:
 
 ```sh
 zig build threads-test -Dthreads-parallel-js=true -Dthreads-case=sync/condition-wait-notify.js
+zig build threads-test -Dthreads-parallel-js=true -Dthreads-case=cve/mc-dos-waiter-table-storm.js
 ```
 
 Use `-Dthreads-sweep=true` to run every file in the original default-gate

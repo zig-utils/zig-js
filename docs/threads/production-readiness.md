@@ -32,6 +32,10 @@ than new correctness architecture.
   parallel contexts and asserts no new failures versus the baseline.
 - The PR-249 allowlist remains 225/225 in normal mode and is covered by the
   sharded no-GIL ThreadSanitizer corpus gate.
+- The no-GIL `cve/mc-dos-waiter-table-storm.js` focused gate covers property
+  `Atomics.waitAsync` tickets removed by a peer while their owning spawned
+  thread is closing its stack-local microtask queue; late settlements reroute to
+  the realm queue instead of stranding reactions after the owner's final flush.
 - The reference-only PR-249 tail is checked by
   `zig build threads-reference-audit`, so unsupported shell hooks, JIT,
   WebAssembly, deep-stack, and heap-cap/OOM witnesses stay explicit instead of
