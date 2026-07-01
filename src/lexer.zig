@@ -1257,9 +1257,9 @@ fn functionExprAllowed(prev_kind: TokenKind, prev_text: []const u8) bool {
 
 fn isOperandKeyword(text: []const u8) bool {
     const words = [_][]const u8{
-        "return", "typeof", "instanceof", "in",    "new",
-        "delete", "void",   "throw",      "case",  "do",    "else",
-        "yield",  "await",  "default",
+        "return", "typeof",  "instanceof", "in",   "new",
+        "delete", "void",    "throw",      "case", "do",
+        "else",   "default",
     };
     for (words) |w| {
         if (std.mem.eql(u8, text, w)) return true;

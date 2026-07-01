@@ -2145,8 +2145,47 @@ pub const Parser = struct {
         // plain `yield` ends it (the next line is a separate statement), so
         // `yield \n x` yields undefined. `yield*` always takes an operand (its
         // newline restriction, before the `*`, was already enforced above).
-        if (delegate or (self.noNewlineBefore(0) and self.startsExpression())) arg = try self.parseAssignment();
+        if (delegate or (self.noNewlineBefore(0) and self.startsExpression())) {
+            arg = if (self.check(.slash)) try self.parseRegexLiteralFromSlash() else try self.parseAssignment();
+        }
         return self.alloc(.{ .yield_expr = .{ .argument = arg, .delegate = delegate } });
+    }
+
+    fn parseRegexLiteralFromSlash(self: *Parser) ParseError!*Node {
+        const start = self.cur().pos;
+        var i = start + 1;
+        var in_class = false;
+        while (i < self.source.len) : (i += 1) {
+            const c = self.source[i];
+            if (c == '\n' or c == '\r') return ParseError.UnexpectedToken;
+            if (c == '\\') {
+                i += 1;
+                if (i >= self.source.len) return ParseError.UnexpectedToken;
+                continue;
+            }
+            if (c == '[') {
+                in_class = true;
+                continue;
+            }
+            if (c == ']') {
+                in_class = false;
+                continue;
+            }
+            if (c == '/' and !in_class) {
+                const pattern = self.source[start + 1 .. i];
+                var end = i + 1;
+                while (end < self.source.len and isIdentifierPartByte(self.source[end])) : (end += 1) {}
+                const flags = self.source[i + 1 .. end];
+                try validateRegexLiteral(self.arena, pattern, flags);
+                while (self.pos < self.tokens.len and self.tokens[self.pos].pos < end) self.pos += 1;
+                return self.alloc(.{ .regex_literal = .{ .pattern = pattern, .flags = flags } });
+            }
+        }
+        return ParseError.UnexpectedToken;
+    }
+
+    fn isIdentifierPartByte(c: u8) bool {
+        return std.ascii.isAlphanumeric(c) or c == '_' or c == '$';
     }
 
     /// Whether the current token can begin an expression (used to decide if a
@@ -2539,7 +2578,7 @@ pub const Parser = struct {
         // identifier is then rejected as a reserved reference in its context).
         if (self.in_async and !self.cur().escaped_identifier and isKeyword(self.cur(), "await")) {
             _ = self.advance();
-            const operand = try self.parseUnary();
+            const operand = if (self.check(.slash)) try self.parseRegexLiteralFromSlash() else try self.parseUnary();
             try self.rejectExponentAfterUnary();
             return self.alloc(.{ .await_expr = .{ .argument = operand } });
         }
@@ -3531,6 +3570,7 @@ pub const Parser = struct {
             // their own bindings and are not descended into.
             .function => |f| if (f.is_arrow) {
                 for (f.params) |p| if (p.default) |d| try self.scanSuperAndArgs(d);
+                if (self.scan_forbid_await or self.scan_forbid_yield) return;
                 try self.scanSuperAndArgs(f.body);
             },
             .class_expr => |c| if (self.scan_descend_class_expr) {
