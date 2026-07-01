@@ -11516,7 +11516,8 @@ pub const Interpreter = struct {
             const inserts: []const Value = if (args.len > 2) args[2..] else &.{};
             // Dense fast path: an ordinary array with no holes/accessors/sparse
             // tail can splice its contiguous value store directly.
-            if (o.is_array and arrayLenWritable(o) and o.accessors == null and
+            if (o.is_array and arrayLenWritable(o) and o.accessors == null and o.attrs == null and
+                !o.has_indexed_property.load(.monotonic) and self.arrayProtoChainCleanForIndexedSet(o) and
                 try o.splicePackedDenseElements(self.arena, start, del, inserts))
             {
                 return removed;
