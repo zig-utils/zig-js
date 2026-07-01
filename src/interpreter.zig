@@ -37449,35 +37449,28 @@ fn numberToRadix(arena: std.mem.Allocator, n: f64, radix: usize) ![]const u8 {
     return buf.items;
 }
 
-/// `n.toFixed(d)` — fixed-point with `d` decimals (d ≤ 18; no exponent forms).
-/// Falls back to the default number string when the scaled value would overflow.
+/// `n.toFixed(d)` — fixed-point with `d` decimals (d ≤ 100; no exponent forms).
 fn toFixed(arena: std.mem.Allocator, n: f64, d: usize) ![]const u8 {
     if (std.math.isNan(n)) return "NaN";
     if (std.math.isInf(n)) return if (n < 0) "-Infinity" else "Infinity";
-    const neg = n < 0;
     const abs_n = @abs(n);
-    const u64_max_f = @as(f64, @floatFromInt(std.math.maxInt(u64)));
     if (abs_n >= 1e21) return value.numberToString(arena, n);
-    if (d > 18 and @trunc(n) == n and abs_n < u64_max_f) {
-        var out: std.ArrayListUnmanaged(u8) = .empty;
-        if (neg) try out.append(arena, '-');
-        try out.print(arena, "{d}", .{@as(u64, @intFromFloat(abs_n))});
-        try out.append(arena, '.');
-        try out.appendNTimes(arena, '0', d);
-        return out.items;
+    if (n == 0) {
+        var z: std.ArrayListUnmanaged(u8) = .empty;
+        try z.append(arena, '0');
+        if (d > 0) {
+            try z.append(arena, '.');
+            try z.appendNTimes(arena, '0', d);
+        }
+        return z.items;
     }
-    const scale = std.math.pow(f64, 10, @floatFromInt(d));
-    if (std.math.isInf(scale) or scale >= u64_max_f) return value.numberToString(arena, n);
-    const scaled_f = @round(@abs(n) * scale);
-    if (std.math.isInf(scaled_f) or scaled_f >= u64_max_f) return value.numberToString(arena, n); // too big for fixed-point
-    const scaled: u64 = @intFromFloat(scaled_f);
-    const scale_u: u64 = @intFromFloat(scale);
+
+    var raw: [512]u8 = undefined;
+    const len = snprintf(raw[0..].ptr, raw.len, "%.*f", @as(c_int, @intCast(d)), abs_n);
+    if (len < 0 or @as(usize, @intCast(len)) >= raw.len) return error.OutOfMemory;
     var buf: std.ArrayListUnmanaged(u8) = .empty;
-    if (neg) try buf.append(arena, '-');
-    try buf.print(arena, "{d}", .{scaled / scale_u});
-    if (d > 0) {
-        try buf.print(arena, ".{d:0>[1]}", .{ scaled % scale_u, d });
-    }
+    if (n < 0) try buf.append(arena, '-');
+    try buf.appendSlice(arena, raw[0..@intCast(len)]);
     return buf.items;
 }
 
@@ -37518,7 +37511,7 @@ fn toExponentialStr(arena: std.mem.Allocator, n: f64, frac: ?usize) ![]const u8 
         return out.items;
     }
     var buf: [512]u8 = undefined;
-    if (frac) |f| if (f >= 16) return renderScientificFixed(arena, n, f);
+    if (frac) |f| if (f >= 16 or @abs(n) < std.math.floatMin(f64)) return renderScientificFixed(arena, n, f);
     const s = std.fmt.float.render(&buf, n, .{ .mode = .scientific, .precision = frac }) catch return error.OutOfMemory;
     return jsExpFix(arena, s);
 }
