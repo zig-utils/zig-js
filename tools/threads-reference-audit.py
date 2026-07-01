@@ -13,6 +13,7 @@ import re
 import subprocess
 import sys
 from collections import defaultdict
+from dataclasses import dataclass
 from pathlib import Path
 
 
@@ -36,6 +37,34 @@ PROMOTION_PROBES = (
     "semantics/oom-one-thread.js",
     "semantics/stack-overflow-per-thread.js",
 )
+
+
+@dataclass(frozen=True)
+class ProbeExpectation:
+    status: str
+    evidence: tuple[str, ...] = ()
+
+
+PROMOTION_PROBE_EXPECTATIONS = {
+    "cve/mc-df-arraycopy-relabel.js": ProbeExpectation(
+        "fail",
+        ("RangeError: offset is out of bounds",),
+    ),
+    "cve/mc-life-creator-thread-dies.js": ProbeExpectation(
+        "fail",
+        ("TypeError: Cannot construct a TypedArray on a detached buffer",),
+    ),
+    "dw2-marklistset-storm.js": ProbeExpectation("timeout"),
+    "w16-c1-prevent-collection.js": ProbeExpectation("timeout"),
+    "semantics/oom-one-thread.js": ProbeExpectation(
+        "fail",
+        ("heap cap fired on at least one thread", "zero OOMs"),
+    ),
+    "semantics/stack-overflow-per-thread.js": ProbeExpectation(
+        "fail",
+        ("RangeError: Maximum call stack size exceeded",),
+    ),
+}
 
 
 def load_allowlist() -> set[str]:
@@ -233,11 +262,39 @@ def print_probe_output_tail(output: str | bytes, *, prefix: str = "      ") -> N
         print(f"{prefix}{line}")
 
 
+def check_probe_expectation(
+    case: str,
+    status: str,
+    output: str | bytes | None,
+) -> bool:
+    expected = PROMOTION_PROBE_EXPECTATIONS.get(case)
+    if expected is None:
+        return True
+    if status != expected.status:
+        print(f"    UNEXPECTED: expected {expected.status}, got {status}")
+        return False
+    if not expected.evidence:
+        print("    expected blocker confirmed")
+        return True
+    if isinstance(output, bytes):
+        output = output.decode(errors="replace")
+    haystack = output or ""
+    missing = [needle for needle in expected.evidence if needle not in haystack]
+    if missing:
+        print("    UNEXPECTED: missing expected blocker evidence:")
+        for needle in missing:
+            print(f"      - {needle}")
+        return False
+    print("    expected blocker confirmed")
+    return True
+
+
 def run_probe_candidates(
     classified: dict[str, list[str]],
     uncategorized: dict[str, list[str]],
     *,
     timeout_s: float,
+    expect_current_blockers: bool,
 ) -> int:
     print()
     print(f"running promotion probes (timeout {timeout_s:g}s each):")
@@ -266,17 +323,28 @@ def run_probe_candidates(
                 timeout=timeout_s,
             )
         except subprocess.TimeoutExpired as exc:
-            failures += 1
             print("    TIMEOUT")
             if exc.stdout:
                 print_probe_output_tail(exc.stdout)
+            if expect_current_blockers:
+                if not check_probe_expectation(case, "timeout", exc.stdout):
+                    failures += 1
+            else:
+                failures += 1
             continue
         if proc.returncode == 0:
             print("    PASS")
+            if expect_current_blockers:
+                if not check_probe_expectation(case, "pass", proc.stdout):
+                    failures += 1
         else:
-            failures += 1
             print(f"    FAIL exit={proc.returncode}")
             print_probe_output_tail(proc.stdout)
+            if expect_current_blockers:
+                if not check_probe_expectation(case, "fail", proc.stdout):
+                    failures += 1
+            else:
+                failures += 1
     return failures
 
 
@@ -300,6 +368,14 @@ def main(argv: list[str]) -> int:
         default=60.0,
         help="Timeout in seconds for each --run-probes focused case (default: 60).",
     )
+    parser.add_argument(
+        "--expect-current-blockers",
+        action="store_true",
+        help=(
+            "With --run-probes, succeed only when the closest probes still fail "
+            "or time out with the documented current blocker evidence."
+        ),
+    )
     args = parser.parse_args(argv)
 
     remaining, classified, uncategorized, missing_allowlist = audit()
@@ -311,7 +387,12 @@ def main(argv: list[str]) -> int:
         print_probe_candidates(classified, uncategorized, markdown=args.format == "markdown")
     probe_failures = 0
     if args.run_probes:
-        probe_failures = run_probe_candidates(classified, uncategorized, timeout_s=args.probe_timeout)
+        probe_failures = run_probe_candidates(
+            classified,
+            uncategorized,
+            timeout_s=args.probe_timeout,
+            expect_current_blockers=args.expect_current_blockers,
+        )
 
     if missing_allowlist:
         return 1

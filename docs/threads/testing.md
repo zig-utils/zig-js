@@ -494,6 +494,7 @@ zig build threads-reference-audit
 python3 tools/threads-reference-audit.py --format markdown
 python3 tools/threads-reference-audit.py --probe-candidates
 python3 tools/threads-reference-audit.py --run-probes --probe-timeout 60
+python3 tools/threads-reference-audit.py --run-probes --expect-current-blockers --probe-timeout 60
 ```
 
 `--run-probes` executes the closest reference-only candidates with focused
@@ -502,6 +503,12 @@ out or failing probe is not promotion evidence; keep the file reference-only
 until the underlying behavior lands and the focused run passes reliably. Failed
 probes print focused runner evidence before the Zig build tail so the concrete
 JS error, corpus failure, or timeout is visible in one command.
+`--expect-current-blockers` flips that maintenance check into a negative gate:
+it succeeds only while the nearest probes still fail or time out with the
+documented blocker evidence. If it starts failing because a probe passes, or
+because the failure shape changed, re-run that single `-Dthreads-case=...`
+probe, promote the file only when the underlying behavior is implemented, and
+update the docs/issue tracker in the same change.
 
 ## Docs Checks
 

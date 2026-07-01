@@ -383,7 +383,11 @@ context APIs.
 - **Reference-only PR-249 files.** Promote only when the engine implements the
   behavior and the file is reliable under Zig `0.17-dev`, especially the
   WebAssembly-required files, JIT/shell-hook witnesses, deep stack-overflow
-  cases, and real heap cap / per-thread OOM semantics.
+  cases, and real heap cap / per-thread OOM semantics. Run
+  `python3 tools/threads-reference-audit.py --run-probes --expect-current-blockers --probe-timeout 60`
+  to keep the nearest-probe negative baseline honest: it passes only while
+  those files still fail or time out with their documented blocker evidence,
+  and fails when a candidate starts passing or changes failure shape.
 - **TC39 structs tracking.** Keep `proposal-structs` tracking in
   [P8-structs.md](./P8-structs.md) and this issue; do not split it into a
   parallel tracker.

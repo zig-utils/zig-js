@@ -583,7 +583,11 @@ threading architecture:
   closest focused `-Dthreads-case=...` probes before any allowlist promotion.
   Add `--run-probes` to execute those closest probes with per-case timeouts and
   fail unless every candidate passes; failures print the focused runner evidence
-  before the Zig build tail so the remaining blocker is visible.
+  before the Zig build tail so the remaining blocker is visible. Add
+  `--expect-current-blockers` when checking the maintained negative baseline:
+  the command succeeds only while the nearest probes still fail or time out with
+  the documented current blocker evidence, and fails if a probe unexpectedly
+  passes or changes failure shape.
 
 The [TC39 structs proposal](https://github.com/tc39/proposal-structs) remains a
 tracked future layer. Shared structs, `Atomics.Mutex`, and
