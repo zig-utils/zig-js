@@ -3751,7 +3751,9 @@ pub const Interpreter = struct {
         if (funcOf(Value.obj(o))) |func| {
             if (func.source.len > 0) return Value.str(func.source);
         }
-        const raw_name: []const u8 = if (o.getOwn("name")) |n| (if (n.isString()) n.asStr() else "") else "";
+        // Bound function exotics have a public `.name` like "bound f", but their
+        // NativeFunction source form is anonymous (`function () { [native code] }`).
+        const raw_name: []const u8 = if (o.bound != null) "" else if (o.getOwn("name")) |n| (if (n.isString()) n.asStr() else "") else "";
         const nm: []const u8 = if (raw_name.len > 0 and raw_name[0] == 0) "" else raw_name;
         return Value.str(try std.mem.concat(self.arena, u8, &.{ "function ", nm, "() { [native code] }" }));
     }
@@ -4806,7 +4808,7 @@ pub const Interpreter = struct {
         // and its `name` is "bound " + target.name. Both are
         // { writable: false, enumerable: false, configurable: true }.
         const ro_attr: value.PropAttr = .{ .writable = false, .enumerable = false, .configurable = true };
-        const bound_len: f64 = if (objectHasOwn(target, "length")) blk: {
+        const bound_len: f64 = if (try self.objectProtoHasOwn(target, "length")) blk: {
             const tgt_len_v = try self.getProperty(Value.obj(target), "length");
             if (!tgt_len_v.isNumber()) break :blk 0;
             const len_int = if (std.math.isNan(tgt_len_v.asNum())) @as(f64, 0) else @trunc(tgt_len_v.asNum());
@@ -38282,6 +38284,24 @@ test "interpreter JSON, Object, Number builtins" {
         \\names[names.indexOf("length") + 1] === "name" &&
         \\lengthDesc.writable === false && lengthDesc.enumerable === false && lengthDesc.configurable === true &&
         \\nameDesc.writable === false && nameDesc.enumerable === false && nameDesc.configurable === true
+    )).asBool());
+    try std.testing.expect((try evalSource(a,
+        \\let seen = "";
+        \\let proxy = new Proxy(function () {}, {
+        \\  getOwnPropertyDescriptor(target, key) {
+        \\    seen += key;
+        \\    if (key === "length") return { value: 3, configurable: true };
+        \\  },
+        \\  get(target, key) {
+        \\    if (key === "length") return 3;
+        \\    if (key === "name") return "target";
+        \\  }
+        \\});
+        \\let bound = Function.prototype.bind.call(proxy, null);
+        \\bound.length === 3 &&
+        \\bound.name === "bound target" &&
+        \\seen === "length" &&
+        \\bound.toString() === "function () { [native code] }"
     )).asBool());
     try std.testing.expect((try evalSource(a,
         \\let target = {};
