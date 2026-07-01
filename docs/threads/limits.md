@@ -229,6 +229,10 @@ context APIs.
   `Atomics.Condition.waitFor` peers stay parked through a finishing sweep,
   reject early cleanup while their stack roots are live, then time out with
   exact `UnlockToken` reacquisition/unlock and finalization cleanup, plus a sibling
+  `Atomics.Mutex.lockIfAvailable` subprogram where acquire-after-release and
+  timeout token waiters stay parked behind a holder through a finishing sweep,
+  reject early cleanup while their roots are live, then verify reused-token
+  acquire/timeout results and exact finalization cleanup, plus a sibling
   async-hold release cleanup subprogram where no-fn `Lock.asyncHold()` release
   functions are delivered while property and condition waiters stay parked
   through a finishing sweep before exact cleanup count/sum is verified, plus a sibling

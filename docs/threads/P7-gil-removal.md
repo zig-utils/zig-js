@@ -283,7 +283,11 @@ roadmap item repeats it.
      thenable assimilation, and thrown-object publication, a sibling sync-wait
      cleanup case where property `Atomics.wait`, `Condition.wait`, and contended
      `Lock.hold` peers stay parked through a finishing sweep before their stack
-     roots and exact `FinalizationRegistry` cleanup count/sum are verified, and a
+     roots and exact `FinalizationRegistry` cleanup count/sum are verified, a
+     sibling `Atomics.Mutex.lockIfAvailable` case where acquire-after-release
+     and timeout token waiters stay parked behind a holder through a finishing
+     sweep before reused-token acquire/timeout results and exact finalization
+     cleanup are verified, and a
      sibling teardown case where parked children hold child-owned typed-array
      `waitAsync` tickets through a finishing mid-script sweep before parent
      failure terminates them. The

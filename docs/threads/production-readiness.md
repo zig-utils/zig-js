@@ -258,7 +258,8 @@ as embedders exercise more threaded host patterns.
   Worker/SAB cleanup subprograms, script and module Worker
   handler-exception cleanup subprograms, script and module Worker
   close/terminate drain/drop subprograms, an async-hold release/waiter cleanup
-  subprogram, a sync-timeout exit subprogram, a weak-collection cleanup subprogram,
+  subprogram, a sync-timeout exit subprogram, an `Atomics.Mutex.lockIfAvailable`
+  acquire/timeout cleanup subprogram, a weak-collection cleanup subprogram,
   and an expected
   teardown-termination subprogram, and each must finish at least one parallel
   sweep. The wait-pump subprogram queues a
@@ -308,6 +309,10 @@ as embedders exercise more threaded host patterns.
   cleanup is not delivered while their stack roots are live, then requires
   timeout results, `Atomics.Mutex.UnlockToken` reacquisition/unlock, and exact
   cleanup after quiescence.
+  The `Atomics.Mutex.lockIfAvailable` subprogram parks acquire-after-release
+  and timeout token waiters behind a holder through a finishing sweep, verifies
+  cleanup is not delivered while their stack roots are live, then requires
+  reused-token acquire and timeout results plus exact cleanup after quiescence.
   The pending-microtask subprogram keeps Promise, typed-array `waitAsync`,
   `Thread.asyncJoin`, with-fn `Lock.asyncHold`, no-fn release-function, and
   `FinalizationRegistry` cleanup roots queued through a finishing mid-script
