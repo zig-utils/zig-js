@@ -88,8 +88,11 @@ context APIs.
   bypass the cell-slab classifier and allocate from the context allocator
   directly; true-parallel JS contexts still route side stores through the
   synchronized backing wrapper because an embedder allocator may not be
-  thread-safe. Live `SharedArrayBuffer` retain teardown is covered for arena,
-  no-GIL threaded, and `.gil = true` contexts.
+  thread-safe. GC-enabled context creation now groups the heap, root-tracing
+  binding, and cell backing in one stable lifecycle state allocation instead of
+  three separate GPA objects, reducing create/destroy allocator churn while
+  keeping the existing internal pointers stable. Live `SharedArrayBuffer` retain
+  teardown is covered for arena, no-GIL threaded, and `.gil = true` contexts.
   Correctness is gated, but tight-loop block-scope allocation and
   create/destroy-heavy context lifecycles are still slower under the GC path than
   under the old arena model. `zig build gc-profile` remains the repeatable

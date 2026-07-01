@@ -72,6 +72,10 @@ Known performance/maturity work:
   delegate. True-parallel JS contexts keep the synchronized backing wrapper for
   those side stores because the embedder-provided allocator may not be
   thread-safe.
+- GC-enabled contexts now allocate the heap, root-tracing binding, and cell
+  backing as one stable lifecycle state object instead of three separate GPA
+  objects. Existing internal pointers still target the same subobjects, but
+  create/destroy-heavy embedders pay fewer allocator calls per GC context.
 - Tight-loop block-scoped allocation is still slower under the GC path compared
   with arena bulk allocation. This still needs a nursery/generational strategy
   or an engine optimization for non-captured per-iteration bindings.

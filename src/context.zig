@@ -703,6 +703,10 @@ pub const Context = struct {
     /// internally locked under `parallel_gc`, so multiple mutators can allocate
     /// cells concurrently. Freed after `gc.deinit()` in `destroy`.
     gc_cell_backing: ?*GcCellBacking = null,
+    /// Single allocation that owns `gc`, `gc_binding`, and `gc_cell_backing`
+    /// when the GC is enabled. The public/internal fields above still hold
+    /// stable pointers into this allocation for existing call sites.
+    gc_state: ?*GcState = null,
     /// A Context is single-thread-affine: every mutating entry point (evaluate,
     /// evaluateModule, the C API) must run on the thread that created it. The
     /// arena, environments, shapes, and microtask queue are unsynchronized by
@@ -948,6 +952,14 @@ pub const Context = struct {
         ref: *anyopaque,
         count: usize,
     };
+    /// Heap, root binding, and cell backing are allocated together so
+    /// GC-enabled context creation/destruction pays one GPA allocation instead
+    /// of three while keeping each subobject's address stable.
+    pub const GcState = struct {
+        binding: GcBinding,
+        heap: GcHeap,
+        backing: GcCellBacking,
+    };
     pub const GcFinalizerStats = struct {
         cells: usize = 0,
         objects: usize = 0,
@@ -1044,20 +1056,19 @@ pub const Context = struct {
         };
         self.gc_par_enabled = options.parallel_midscript_gc;
         if (options.enable_gc) {
-            // GC cells are gpa-backed (the collector frees them individually);
-            // the binding wraps this Context, whose roots it traces.
-            const bind = try gpa.create(GcBinding);
-            bind.* = .{ .context = self };
-            const h = try gpa.create(GcHeap);
+            // GC cells are gpa-backed (the collector frees them individually).
+            // Keep the heap, binding, and cell backing in one stable allocation
+            // to reduce GC-enabled context lifecycle churn.
+            const gc_state = try gpa.create(GcState);
+            gc_state.binding = .{ .context = self };
             // GC cells are individually collectable, but their allocation shape
             // is regular: one 16-byte-aligned slab per cell. Use the reusable
             // size-class backing for every GC mode. Under parallel_gc it locks
             // internally, so multiple no-GIL mutators can allocate cells at once.
-            const cell_backing_state = try gpa.create(GcCellBacking);
-            cell_backing_state.* = .{ .inner = gpa, .parallel = options.parallel_gc };
-            self.gc_cell_backing = cell_backing_state;
-            const cell_backing = cell_backing_state.allocator();
-            h.* = GcHeap.init(cell_backing, bind);
+            gc_state.backing = .{ .inner = gpa, .parallel = options.parallel_gc };
+            const cell_backing = gc_state.backing.allocator();
+            gc_state.heap = GcHeap.init(cell_backing, &gc_state.binding);
+            const h = &gc_state.heap;
             if (options.parallel_gc) h.setParallel(true);
             // GC scratch (`mark_stack`/`barrier_buf`) is touched by both a
             // concurrent marker thread and the mutator under M3, so it must use
@@ -1068,7 +1079,9 @@ pub const Context = struct {
             // allocator. See zig-gc `Heap.setAuxAllocator`.
             h.setAuxAllocator(std.heap.page_allocator);
             self.gc = h;
-            self.gc_binding = bind;
+            self.gc_binding = &gc_state.binding;
+            self.gc_cell_backing = &gc_state.backing;
+            self.gc_state = gc_state;
             // Single-mutator only for now: concurrent marking + no peer mutators.
             self.gc_concurrent = options.concurrent_gc and !options.enable_threads;
             // Turn on the parallel/concurrent synchronization protocols process-
@@ -1229,17 +1242,16 @@ pub const Context = struct {
         if (self.gc) |h| {
             if (self.gc_cell_backing) |backing| backing.beginBulkTeardown();
             h.deinit(); // frees logical cells back into gc_cell_backing
-            self.gpa.destroy(h);
             self.gc = null;
         }
         if (self.gc_cell_backing) |backing| {
             backing.deinit(); // safe now: heap.deinit() is done using it
-            self.gpa.destroy(backing);
             self.gc_cell_backing = null;
         }
-        if (self.gc_binding) |b| {
-            self.gpa.destroy(b);
-            self.gc_binding = null;
+        self.gc_binding = null;
+        if (self.gc_state) |state| {
+            self.gpa.destroy(state);
+            self.gc_state = null;
         }
         if (self.locked_arena) |la| {
             self.gpa.destroy(la);
@@ -9670,6 +9682,17 @@ test "enable_gc: Object backing allocator avoids cell classifier outside paralle
     const backing = o.backing_allocator.?;
     try std.testing.expectEqual(ctx.gpa.ptr, backing.ptr);
     try std.testing.expectEqual(ctx.gpa.vtable, backing.vtable);
+}
+
+test "enable_gc: heap binding and cell backing share one lifecycle allocation" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    defer ctx.destroy();
+
+    const state = ctx.gc_state orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@intFromPtr(&state.heap), @intFromPtr(ctx.gc.?));
+    try std.testing.expectEqual(@intFromPtr(&state.binding), @intFromPtr(ctx.gc_binding.?));
+    try std.testing.expectEqual(@intFromPtr(&state.backing), @intFromPtr(ctx.gc_cell_backing.?));
+    try std.testing.expectEqual(@intFromPtr(ctx), @intFromPtr(state.binding.context));
 }
 
 test "enable_threads: Object backing allocator stays synchronized under parallel_js" {

@@ -275,6 +275,10 @@ threading architecture:
   Single-mutator GC object side stores now allocate directly from the context
   allocator instead of round-tripping through that cell-slab
   classifier, while true-parallel contexts keep the synchronized backing wrapper.
+  GC-enabled context creation now groups the heap, root-tracing binding, and
+  cell backing in one stable lifecycle allocation instead of three separate GPA
+  allocations, shaving create/destroy churn without changing the existing
+  internal pointers.
   Context teardown now enters a slab bulk-teardown mode so per-cell frees do not
   rebuild freelists immediately before whole chunks are released; bucket-shaped
   delegated side allocations are still classified once and freed through the
