@@ -218,6 +218,48 @@ const scenarios = [_]Scenario{
         .flush_tasks_after = true,
     },
     .{
+        .name = "condition asyncWait multi-lock",
+        .setup =
+        \\globalThis.asyncMultiCond = new Condition();
+        \\globalThis.asyncMultiLocks = [new Lock(), new Lock(), new Lock(), new Lock()];
+        \\globalThis.asyncMultiBox = { ready: 0, seen: 0 };
+        \\globalThis.worker = function(id) {
+        \\  var workers = globalThis.__profileWorkers | 0;
+        \\  if (workers <= 1) return id + 1;
+        \\  var rounds = 24;
+        \\  if (id === 0) {
+        \\    for (var i = 0; i < rounds; i = i + 1) {
+        \\      var need = (workers - 1) * (i + 1);
+        \\      while (Atomics.load(asyncMultiBox, 'ready') < need)
+        \\        ;
+        \\      asyncMultiCond.notifyAll();
+        \\    }
+        \\    return rounds;
+        \\  }
+        \\  var lock = asyncMultiLocks[id & 3];
+        \\  for (var j = 0; j < rounds; j = j + 1) {
+        \\    lock.asyncHold(function() {
+        \\      var wait = asyncMultiCond.asyncWait(lock);
+        \\      Atomics.add(asyncMultiBox, 'ready', 1);
+        \\      Atomics.notify(asyncMultiBox, 'ready');
+        \\      return wait.then(function(release) {
+        \\        asyncMultiBox.seen = (asyncMultiBox.seen | 0) + 1;
+        \\        release();
+        \\      });
+        \\    });
+        \\  }
+        \\  return id + 1;
+        \\};
+        \\globalThis.__profileFlush = function() {
+        \\  var workers = globalThis.__profileWorkers | 0;
+        \\  for (var i = 0; i < workers * 24; i = i + 1)
+        \\    asyncMultiCond.notifyAll();
+        \\};
+        ,
+        .rounds = 5,
+        .flush_tasks_after = true,
+    },
+    .{
         .name = "lock contention",
         .setup =
         \\globalThis.lock = new Lock();

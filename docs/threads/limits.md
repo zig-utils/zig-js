@@ -115,7 +115,7 @@ context APIs.
   against the `.gil = true` fallback for independent compute, shared object
   properties, shared array append, typed-array Atomics, property
   `Atomics.wait` / `notify`, property `Atomics.waitAsync` timeout settlement,
-  `Condition.wait` / `notifyAll`, `Condition.asyncWait`,
+  `Condition.wait` / `notifyAll`, single-lock and multi-lock `Condition.asyncWait`,
   `Lock.asyncHold` delivery, observed `Lock.asyncHold` callback settlement,
   no-fn `Lock.asyncHold` release-function delivery, and lifecycle churn. Use it
   to drive contention reductions in global/environment bindings,

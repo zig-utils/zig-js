@@ -118,10 +118,11 @@ Known performance/maturity work:
   the no-GIL default with `.gil = true` across independent compute, shared
   object properties, shared array append, typed-array Atomics, contended
   property `Atomics.wait` / `notify`, `Condition.wait` / `notifyAll`,
-  property `Atomics.waitAsync` timeout settlement, `Condition.asyncWait`,
-  `Lock.hold`, `Lock.asyncHold` delivery, observed `Lock.asyncHold` callback
-  settlement, no-fn `Lock.asyncHold` release-function delivery, and thread
-  lifecycle churn. Each row enables and includes internal contention counters:
+  property `Atomics.waitAsync` timeout settlement, single-lock and multi-lock
+  `Condition.asyncWait`, `Lock.hold`, `Lock.asyncHold` delivery, observed
+  `Lock.asyncHold` callback settlement, no-fn `Lock.asyncHold`
+  release-function delivery, and thread lifecycle churn. Each row enables and
+  includes internal contention counters:
   `events` count logical contention (`Lock`/`Condition`/property wait and
   queued `asyncHold` grants), `parks` count timed wait/pump iterations
   including `Thread.join`, `joins` split the `Thread.join` subset out of
@@ -159,11 +160,11 @@ Known performance/maturity work:
   release function while preserving the release-function object and existing
   lock/GC ordering.
 - The profile now has direct rows for property `Atomics.waitAsync` finite
-  timeout settlement and `Condition.asyncWait` reacquire delivery, so local
-  performance work can separate async waiter registration, property ticket
-  settlement, async-condition reacquire completion, and run-loop grant delivery
-  instead of inferring them from elapsed
-  time alone.
+  timeout settlement plus single-lock and multi-lock `Condition.asyncWait`
+  reacquire delivery, so local performance work can separate async waiter
+  registration, property ticket settlement, async-condition reacquire completion,
+  FIFO-bursted task enqueue pressure, and run-loop grant delivery instead of
+  inferring them from elapsed time alone.
 - Condition notify/notifyAll use the same FIFO head-cursor pattern for the
   mixed sync/async waiter queue, avoiding one front-shift per notified waiter.
   Timed-out or terminated sync condition waiters are marked canceled and skipped

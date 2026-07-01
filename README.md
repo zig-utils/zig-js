@@ -284,9 +284,10 @@ threading architecture:
   default against `.gil = true` across independent compute, shared object
   properties, array append, typed-array Atomics, property `Atomics.wait` /
   `notify`, property `Atomics.waitAsync` timeout settlement,
-  `Condition.wait` / `notifyAll`, `Condition.asyncWait`, contended `Lock.hold`, and
-  `Lock.asyncHold` delivery plus observed callback and no-fn release-function
-  variants, along with lifecycle churn. It now enables and prints internal
+  `Condition.wait` / `notifyAll`, single-lock and multi-lock
+  `Condition.asyncWait`, contended `Lock.hold`, and `Lock.asyncHold` delivery
+  plus observed callback and no-fn release-function variants, along with
+  lifecycle churn. It now enables and prints internal
   contention events, timed wait/pump parks, async waiter registration/completion
   counts for `Condition.asyncWait` and property `waitAsync`, explicit
   `Thread.join` park counts for lifecycle attribution, source-specific
@@ -367,9 +368,10 @@ threading architecture:
   arena-lived hold job, avoiding an extra small allocation per delivered release
   function.
   The profile now also has direct rows for property `waitAsync` finite-timeout
-  settlement and `Condition.asyncWait` reacquire delivery, with async/done
-  columns that show ticket registration, completed async-condition reacquires,
-  and exact property-ticket settlement parity during local performance work.
+  settlement plus single-lock and multi-lock `Condition.asyncWait` reacquire
+  delivery, with async/done columns that show ticket registration, completed
+  async-condition reacquires, FIFO-bursted task enqueue pressure, and exact
+  property-ticket settlement parity during local performance work.
   The join columns split `Thread.join` park/pump iterations out of aggregate
   parks, and the lock/cond/prop columns split the remaining sync park pressure
   by source, so lifecycle churn can be distinguished from lock, condition, and
