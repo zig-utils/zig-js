@@ -7288,6 +7288,207 @@ fn runAsyncHoldBargingLifecycleInterleaving(gpa: std.mem.Allocator, seed: u64) !
     return true;
 }
 
+fn runAsyncHoldReleaseWaiterCleanupInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
+    var prng = std.Random.DefaultPrng.init(seed ^ 0x6173_796e_7265_6c63);
+    const r = prng.random();
+    const nthreads = 3 + r.uintLessThan(usize, 4);
+    const per_thread = 4 + r.uintLessThan(usize, 6);
+    const wait_timeout_ms = 1200 + r.uintLessThan(usize, 800);
+    const seed_marker = seed % 10_000;
+    const prop_marker = 900_000 + seed_marker;
+    const cond_marker = 910_000 + seed_marker;
+
+    var expected_release_score: usize = 0;
+    var expected_join_sum: usize = 0;
+    var expected_cleanup_sum: usize = 0;
+    var id: usize = 0;
+    while (id < nthreads) : (id += 1) {
+        const base = (id + 1) * 60_000;
+        expected_release_score += base + 1_000 + id;
+        expected_join_sum += id + 1;
+        var i: usize = 0;
+        while (i < per_thread) : (i += 1) {
+            expected_cleanup_sum += base + 2_000 + i;
+        }
+    }
+    const expected_cleanup_count = nthreads * per_thread;
+    const expected_total = expected_join_sum + prop_marker + cond_marker;
+
+    const ctx = js.Context.createWith(gpa, .{ .enable_threads = true, .enable_gc = true }) catch {
+        std.debug.print("seed {d}: asyncHold release/waiter cleanup context creation failed\n", .{seed});
+        return false;
+    };
+    defer ctx.destroy();
+
+    const src = try std.fmt.allocPrint(
+        gpa,
+        \\(async () => {{
+        \\  globalThis.__asyncHoldReleaseCleanupScore = 0;
+        \\  globalThis.__asyncHoldReleaseCleanupCount = 0;
+        \\  globalThis.__asyncHoldReleaseCleanupSum = 0;
+        \\  globalThis.__asyncHoldReleaseRegistry = new FinalizationRegistry((held) => {{
+        \\    globalThis.__asyncHoldReleaseCleanupCount++;
+        \\    globalThis.__asyncHoldReleaseCleanupSum += held;
+        \\  }});
+        \\  const registry = globalThis.__asyncHoldReleaseRegistry;
+        \\  const gate = {{ prop: 0, propReady: 0, condReady: 0, condOpen: false }};
+        \\  const lock = new Lock();
+        \\  const condLock = new Lock();
+        \\  const cond = new Condition();
+        \\  const propWaiter = new Thread((gate, marker, timeout) => {{
+        \\    const root = {{ marker, nested: {{ seed: {d}, label: 'asyncHold-release-property-waiter' }} }};
+        \\    Atomics.store(gate, 'propReady', 1);
+        \\    Atomics.notify(gate, 'propReady');
+        \\    const r = Atomics.wait(gate, 'prop', 0, timeout);
+        \\    if (r !== 'ok' && r !== 'not-equal')
+        \\      throw new Error('bad asyncHold release property waiter result ' + r);
+        \\    return root.marker;
+        \\  }}, gate, {d}, {d});
+        \\  const condWaiter = new Thread((gate, condLock, cond, marker) => {{
+        \\    const root = {{ marker, nested: {{ seed: {d}, label: 'asyncHold-release-condition-waiter' }} }};
+        \\    condLock.hold(() => {{
+        \\      Atomics.store(gate, 'condReady', 1);
+        \\      Atomics.notify(gate, 'condReady');
+        \\      while (!gate.condOpen)
+        \\        cond.wait(condLock);
+        \\    }});
+        \\    return root.marker;
+        \\  }}, gate, condLock, cond, {d});
+        \\  while (Atomics.load(gate, 'propReady') === 0)
+        \\    Atomics.wait(gate, 'propReady', 0, 1);
+        \\  while (Atomics.load(gate, 'condReady') === 0)
+        \\    Atomics.wait(gate, 'condReady', 0, 1);
+        \\
+        \\  const threads = [];
+        \\  lock.hold(() => {{
+        \\    for (let id = 0; id < {d}; id++) {{
+        \\      threads.push(new Thread((lock, registry, id, per, seed) => {{
+        \\        const base = (id + 1) * 60000;
+        \\        for (let i = 0; i < per; i++) {{
+        \\          let target = {{ id, i, seed, payload: 'asyncHold-release-cleanup-' + id + '-' + i }};
+        \\          registry.register(target, base + 2000 + i);
+        \\          target = null;
+        \\        }}
+        \\        const releaseRoot = {{ marker: base + 1000 + id, nested: {{ seed, label: 'asyncHold-release-function-root' }} }};
+        \\        return lock.asyncHold().then((release) => {{
+        \\          if (typeof release !== 'function')
+        \\            throw new Error('asyncHold release cleanup grant did not deliver release');
+        \\          if (releaseRoot.nested.seed !== seed)
+        \\            globalThis.__asyncHoldReleaseCleanupScore = -1000000;
+        \\          else
+        \\            globalThis.__asyncHoldReleaseCleanupScore += releaseRoot.marker;
+        \\          release();
+        \\          return id + 1;
+        \\        }});
+        \\      }}, lock, registry, id, {d}, {d}));
+        \\    }}
+        \\  }});
+        \\  const joined = [];
+        \\  for (const t of threads) {{
+        \\    const p = t.join();
+        \\    if (!(p instanceof Promise))
+        \\      throw new Error('asyncHold release cleanup join did not return child promise');
+        \\    joined.push(p);
+        \\  }}
+        \\  const values = await Promise.all(joined);
+        \\  let joinSum = 0;
+        \\  for (const v of values)
+        \\    joinSum += v;
+        \\  if (joinSum !== {d})
+        \\    throw new Error('bad asyncHold release cleanup join sum ' + joinSum);
+        \\  if (globalThis.__asyncHoldReleaseCleanupScore !== {d})
+        \\    throw new Error('bad asyncHold release cleanup score ' + globalThis.__asyncHoldReleaseCleanupScore);
+        \\  if (lock.locked)
+        \\    throw new Error('asyncHold release cleanup lock left locked');
+        \\
+        \\  Atomics.store(gate, 'prop', 1);
+        \\  Atomics.notify(gate, 'prop');
+        \\  condLock.hold(() => {{
+        \\    gate.condOpen = true;
+        \\    cond.notifyAll();
+        \\  }});
+        \\  const propResult = propWaiter.join();
+        \\  const condResult = condWaiter.join();
+        \\  if (propResult !== {d})
+        \\    throw new Error('bad asyncHold release property waiter marker ' + propResult);
+        \\  if (condResult !== {d})
+        \\    throw new Error('bad asyncHold release condition waiter marker ' + condResult);
+        \\  threads.length = 0;
+        \\  joined.length = 0;
+        \\  return joinSum + propResult + condResult;
+        \\}})()
+        \\
+    ,
+        .{
+            seed,
+            prop_marker,
+            wait_timeout_ms,
+            seed,
+            cond_marker,
+            nthreads,
+            per_thread,
+            seed,
+            expected_join_sum,
+            expected_release_score,
+            prop_marker,
+            cond_marker,
+        },
+    );
+    defer gpa.free(src);
+
+    const promise_value = ctx.evaluate(src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: asyncHold release/waiter cleanup JS threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    var machine = ctx.interpreter();
+    const joined = machine.awaitValue(promise_value) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: asyncHold release/waiter cleanup await failed {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!joined.isNumber() or joined.asNum() != @as(f64, @floatFromInt(expected_total))) {
+        std.debug.print("seed {d}: asyncHold release/waiter cleanup got {d}, expected {d}\n", .{ seed, if (joined.isNumber()) joined.asNum() else -1, expected_total });
+        return false;
+    }
+
+    ctx.collectGarbage();
+    const cleanup_src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  globalThis.__asyncHoldReleaseRegistry.cleanupSome();
+        \\  if (globalThis.__asyncHoldReleaseCleanupCount !== {d})
+        \\    throw new Error('bad asyncHold release cleanup count ' + globalThis.__asyncHoldReleaseCleanupCount + '/' + {d});
+        \\  if (globalThis.__asyncHoldReleaseCleanupSum !== {d})
+        \\    throw new Error('bad asyncHold release cleanup sum ' + globalThis.__asyncHoldReleaseCleanupSum + '/' + {d});
+        \\  return globalThis.__asyncHoldReleaseCleanupCount;
+        \\}})()
+        \\
+    ,
+        .{ expected_cleanup_count, expected_cleanup_count, expected_cleanup_sum, expected_cleanup_sum },
+    );
+    defer gpa.free(cleanup_src);
+    const cleaned = ctx.evaluate(cleanup_src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: asyncHold release/waiter cleanup cleanup JS threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!cleaned.isNumber() or cleaned.asNum() != @as(f64, @floatFromInt(expected_cleanup_count))) {
+        std.debug.print("seed {d}: asyncHold release/waiter cleanup cleaned got {d}, expected {d}\n", .{ seed, if (cleaned.isNumber()) cleaned.asNum() else -1, expected_cleanup_count });
+        return false;
+    }
+    return true;
+}
+
 fn runAsyncHoldThrowFinalizationInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
     var prng = std.Random.DefaultPrng.init(seed ^ 0x6173_796e_6368_7468);
     const r = prng.random();
@@ -11095,6 +11296,22 @@ pub fn main(init: std.process.Init) !void {
         if (ahfail != 0) std.process.exit(1);
         return;
     };
+    // `threadfuzz asyncholdreleasecleanup <iters> <seed>`: focused lifecycle
+    // repro for no-fn asyncHold release functions while property/condition
+    // waiters are parked, followed by exact finalization cleanup.
+    if (first) |a| if (std.mem.eql(u8, a, "asyncholdreleasecleanup")) {
+        if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch 1;
+        if (args.next()) |b| base_seed = std.fmt.parseInt(u64, b, 10) catch 1;
+        var arcfail: usize = 0;
+        var arci: usize = 0;
+        while (arci < iters) : (arci += 1) {
+            const seed = base_seed +% arci;
+            if (!(try runAsyncHoldReleaseWaiterCleanupInterleaving(gpa, seed))) arcfail += 1;
+        }
+        std.debug.print("threadfuzz asyncholdreleasecleanup: {d} programs from seed {d}, {d} failures\n", .{ iters, base_seed, arcfail });
+        if (arcfail != 0) std.process.exit(1);
+        return;
+    };
     // `threadfuzz microtaskchurn <iters> <seed>`: focused lifecycle repro for
     // Promise reaction queue churn across asyncHold, waitAsync, asyncJoin, and
     // finalization cleanup.
@@ -11623,6 +11840,8 @@ pub fn main(init: std.process.Init) !void {
     // parent-created child Threads whose asyncJoin promises outlive the parent
     // thread's local queue plus ThreadLocal roots and exact cleanup,
     // asyncHold barging delivery after a deterministic queued ticket,
+    // asyncHold no-fn release-function delivery while property and condition
+    // waiters are parked, with exact cleanup after those waiters resume,
     // Thread.restrict lifecycle isolation, and ThreadLocal isolation across
     // nested threads plus throwing and async-joined workers. The oracle is not "no
     // throw":
@@ -11664,7 +11883,9 @@ pub fn main(init: std.process.Init) !void {
     // cleanup after a shared-realm top-level failure, and with child-owned
     // typed-array waitAsync ticket abandonment plus pending asyncJoin rejection
     // cleanup; asyncHold barging must deliver a pending
-    // no-fn grant after a sync hold legally overtakes it; ThreadLocal values must stay
+    // no-fn grant after a sync hold legally overtakes it; asyncHold release
+    // functions must unlock while property/condition waiters stay parked and
+    // then permit exact cleanup after those waiters resume; ThreadLocal values must stay
     // per-thread across normal, throwing, nested, async-joined, and
     // finalization-cleanup lifecycles; nested child asyncJoin promises created
     // by exiting parent Threads must reroute into the realm queue and settle
@@ -11712,13 +11933,14 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runWorkerTerminateConditionAsyncCleanupInterleaving(gpa, seed))) lfail += 1;
             if (!(try runWorkerTerminateWaitAsyncCleanupInterleaving(gpa, seed))) lfail += 1;
             if (!(try runAsyncHoldBargingLifecycleInterleaving(gpa, seed))) lfail += 1;
+            if (!(try runAsyncHoldReleaseWaiterCleanupInterleaving(gpa, seed))) lfail += 1;
             if (!(try runThreadRestrictLifecycleInterleaving(gpa, seed))) lfail += 1;
             if (!(try runThreadRestrictFinalizationCleanupInterleaving(gpa, seed))) lfail += 1;
             if (!(try runThreadLocalLifecycleInterleaving(gpa, seed))) lfail += 1;
             if (!(try runThreadLocalFinalizationCleanupInterleaving(gpa, seed))) lfail += 1;
             if (!(try runNestedThreadAsyncJoinCleanupInterleaving(gpa, seed))) lfail += 1;
         }
-        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 37, base_seed, lfail });
+        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 38, base_seed, lfail });
         if (lfail != 0) std.process.exit(1);
         return;
     };

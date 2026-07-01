@@ -387,7 +387,9 @@ as embedders exercise more threaded host patterns.
   `asyncJoin()` and unregister-token suppression, cleanup delivery after parked
   property/condition waiters resume, deterministic `Lock.asyncHold()` barging
   where a sync hold legally overtakes a queued no-fn async ticket before
-  `await` delivers its release function, Promise reaction queue churn from
+  `await` delivers its release function, no-fn `Lock.asyncHold()`
+  release-function delivery while property and condition waiters stay parked
+  before exact cleanup after they resume, Promise reaction queue churn from
   with-fn `Lock.asyncHold`, no-fn release functions, typed-array `waitAsync`,
   `Thread.asyncJoin`, and exact `FinalizationRegistry` cleanup,
   `Lock.asyncHold(fn)` throw/release ordering with queued no-fn release grants

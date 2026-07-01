@@ -324,7 +324,9 @@ context APIs.
   cleanup, and exact `FinalizationRegistry` cleanup,
   deterministic `Lock.asyncHold()` barging where a
   sync hold legally overtakes a queued no-fn async ticket before `await`
-  delivers its release function, Promise reaction queue churn from with-fn
+  delivers its release function, no-fn `Lock.asyncHold()` release-function
+  delivery while property and condition waiters stay parked before exact cleanup
+  after they resume, Promise reaction queue churn from with-fn
   `Lock.asyncHold`, no-fn release functions, typed-array `waitAsync`,
   `Thread.asyncJoin`, and exact `FinalizationRegistry` cleanup,
   creator-owned `SharedArrayBuffer` and `ArrayBuffer` storage that survives the

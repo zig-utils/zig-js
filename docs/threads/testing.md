@@ -218,7 +218,9 @@ exact `FinalizationRegistry` cleanup delivery, deterministic
 `Condition.asyncWait` reacquire delivery interleaved with `join()` /
 `asyncJoin()` reactions and exact `FinalizationRegistry` cleanup delivery,
 `Lock.asyncHold()` barging where a sync hold legally overtakes a queued no-fn
-async ticket before `await` delivers its release function, teardown termination
+async ticket before `await` delivers its release function, no-fn
+`Lock.asyncHold()` release-function delivery while property and condition
+waiters stay parked before exact cleanup after they resume, teardown termination
 with pending `asyncJoin` rejection reactions and
 child-owned typed-array `waitAsync` tickets that must be abandoned before the
 child's stack-owned waiter token disappears, cross-thread `FinalizationRegistry`
@@ -250,7 +252,7 @@ then verifies child release, nested `ThreadLocal` roots, rerouted async
 settlement, and exact finalization cleanup after both thread layers exit. It now
 also composes isolated Worker termination with shared-realm teardown that
 abandons child-owned typed-array `waitAsync` tickets, rejects pending
-`asyncJoin` reactions, and delivers exact cleanup. Each seed currently runs 37
+`asyncJoin` reactions, and delivers exact cleanup. Each seed currently runs 38
 deterministic lifecycle
 subprograms.
 
