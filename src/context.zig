@@ -91,6 +91,7 @@ pub const GcCellBacking = struct {
     const bucket_count = 6;
     const bucket_sizes = [_]usize{ 64, 128, 256, 512, 1024, 2048 };
     const chunk_bytes: usize = 64 * 1024;
+    const large_chunk_bytes: usize = 256 * 1024;
     const FreeNode = extern struct {
         next: ?*FreeNode,
     };
@@ -158,9 +159,13 @@ pub const GcCellBacking = struct {
         return null;
     }
 
+    inline fn bucketChunkBytes(idx: usize) usize {
+        return if (bucket_sizes[idx] >= 1024) large_chunk_bytes else chunk_bytes;
+    }
+
     fn addChunk(self: *GcCellBacking, idx: usize) bool {
         const slot_size = bucket_sizes[idx];
-        const slots = @max(@as(usize, 1), chunk_bytes / slot_size);
+        const slots = @max(@as(usize, 1), bucketChunkBytes(idx) / slot_size);
         const chunk_len = slots * slot_size;
         const chunk = self.inner.alignedAlloc(u8, .@"16", chunk_len) catch return false;
         const chunk_idx = self.bucket_chunks[idx].items.len;
@@ -622,6 +627,27 @@ test "GC cell backing bucket stats attribute size-class pressure" {
     try std.testing.expectEqual(@as(usize, 1), buckets[object_idx].issued_slots);
     try std.testing.expectEqual(object_slots - 1, buckets[object_idx].free_slots);
     try std.testing.expectEqual(@as(usize, 1), buckets[object_idx].live_slots);
+}
+
+test "GC cell backing uses larger chunks for object-sized buckets" {
+    var backing = GcCellBacking{ .inner = std.testing.allocator };
+    defer backing.deinit();
+    const a = backing.allocator();
+
+    const object_idx = GcCellBacking.bucketIndex(900, .@"16").?;
+    try std.testing.expectEqual(@as(usize, 1024), GcCellBacking.bucket_sizes[object_idx]);
+    try std.testing.expectEqual(GcCellBacking.large_chunk_bytes, GcCellBacking.bucketChunkBytes(object_idx));
+
+    const object = try a.alignedAlloc(u8, .@"16", 900);
+    defer a.free(object);
+
+    const stats = backing.bucketStats()[object_idx];
+    const slots = GcCellBacking.large_chunk_bytes / GcCellBacking.bucket_sizes[object_idx];
+    try std.testing.expectEqual(@as(usize, 1), stats.chunks);
+    try std.testing.expectEqual(slots, stats.capacity_slots);
+    try std.testing.expectEqual(@as(usize, 1), stats.issued_slots);
+    try std.testing.expectEqual(slots - 1, stats.free_slots);
+    try std.testing.expectEqual(@as(usize, 1), stats.live_slots);
 }
 
 test "GC cell backing bulk teardown skips freelist rebuilds and still delegates side storage" {

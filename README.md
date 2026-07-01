@@ -258,7 +258,11 @@ threading architecture:
   backing instead of one backing allocator call per cell, and
   fresh slab chunks hand out cells lazily with a per-bucket bump hint instead of
   pre-linking every unused slot during short-lived context setup; a per-bucket
-  fresh-chunk cursor skips chunks whose bump range is already exhausted. Freed
+  fresh-chunk cursor skips chunks whose bump range is already exhausted. The
+  object-sized 1024/2048-byte buckets now use larger slab chunks than the small
+  cell buckets, cutting the empty-context object-cell bucket from 17 chunks to 5
+  and the object-heavy profile from roughly 330 chunks to 84 while keeping the
+  smaller buckets' footprint unchanged. Freed
   cells are still recycled through the per-bucket free lists, with exact
   per-bucket free, capacity, and issued-slot counters so profile/stat snapshots
   do not walk every freed cell or slab chunk, and classified against

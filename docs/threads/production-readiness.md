@@ -58,6 +58,9 @@ Known performance/maturity work:
   per-cell frees do not rebuild freelists or reclassify bucket ownership
   immediately before the backing releases whole chunks. This cuts the old
   one-general-allocator-call-per-cell profile without changing the collector API.
+  The object-sized 1024/2048-byte buckets now use larger slab chunks than the
+  small cell buckets, so empty-context and object-heavy profiles allocate many
+  fewer object-cell chunks while preserving the small-bucket footprint.
   Live `SharedArrayBuffer` retain teardown is also regression covered across the
   arena path, the no-GIL threaded path, and the `.gil = true` serialized
   fallback.
@@ -88,7 +91,10 @@ Known performance/maturity work:
   issued-slot counters so profiling a collection no longer walks every freed
   cell or slab chunk. Finalizer attribution is likewise split between
   empty-context destroy and destroy after the object workload. Fresh-slot
-  allocation skips slab chunks whose bump range is already exhausted.
+  allocation skips slab chunks whose bump range is already exhausted, and the
+  object-sized 1024/2048-byte buckets use larger chunks so the profile exposes
+  reduced object-cell chunk churn separately from remaining create/destroy
+  wall-clock costs.
 - Mid-script parallel GC remains abort-safe. Sync wait/lock/condition peers are
   not treated as frozen parked stacks; their lock-free pump points now service
   root publication, and the collector waits long enough for one bounded park

@@ -367,7 +367,10 @@ empty context and the same object workload, showing slot size, chunks, capacity,
 issued cells, free cells, and surviving live cells. GC finalizer attribution is
 also split between empty-context destroy and destroy after the object workload.
 These snapshot paths use exact per-bucket free, capacity, and issued-slot
-counters rather than walking every free-list node or slab chunk.
+counters rather than walking every free-list node or slab chunk. The
+object-sized 1024/2048-byte buckets use larger slab chunks than the small
+buckets, so compare chunk counts alongside wall-clock timings when evaluating GC
+allocation or lifecycle changes.
 Direct `GcCellBacking` unit tests cover lazy fresh-slot bumping, free-list
 recycling, fresh-chunk cursor advancement, ownership span/hint classification,
 stats accounting, multi-chunk maintained-counter snapshots, bucket attribution,
