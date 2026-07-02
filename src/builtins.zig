@@ -119,7 +119,10 @@ pub fn functionConstructor(ctx: *anyopaque, this: Value, args: []const Value) Ho
         }
         body = try self.toStringV(args[args.len - 1]);
     }
-    const param_source = try std.fmt.allocPrint(self.arena, "({s})", .{params.items});
+    // The `)` goes on its OWN line (matching the assembled source below): a
+    // trailing Annex B HTML-open-comment param (`Function("<!--", "")`) comments
+    // out to end-of-line, so without the newline it would swallow the `)`.
+    const param_source = try std.fmt.allocPrint(self.arena, "({s}\n)", .{params.items});
     var param_parser = Parser.init(self.arena, param_source) catch
         return self.throwError("SyntaxError", "Function: invalid parameters or body");
     param_parser.parseDynamicFunctionParams(false, false) catch

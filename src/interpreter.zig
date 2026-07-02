@@ -17858,7 +17858,9 @@ fn dynamicFunctionFn(comptime kind: DynFnKind) value.NativeFn {
                     return self.throwError("SyntaxError", "Function: invalid parameters or body");
                 if (has_yield) return self.throwError("SyntaxError", "Function: invalid parameters or body");
             }
-            const param_source = try std.fmt.allocPrint(self.arena, "({s})", .{params.items});
+            // `)` on its own line (matching the assembled source below) so a
+            // trailing Annex B HTML-open-comment param doesn't comment out the `)`.
+            const param_source = try std.fmt.allocPrint(self.arena, "({s}\n)", .{params.items});
             var param_parser = Parser.init(self.arena, param_source) catch
                 return self.throwError("SyntaxError", "Function: invalid parameters or body");
             param_parser.parseDynamicFunctionParams(kind == .generator or kind == .async_generator, kind == .async_fn or kind == .async_generator) catch
