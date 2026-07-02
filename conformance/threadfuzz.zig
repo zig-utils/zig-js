@@ -2705,6 +2705,7 @@ fn runWorkerTerminateFinalizationInterleaving(gpa: std.mem.Allocator, seed: u64)
         \\  const registry = globalThis.__workerTermFinRegistry;
         \\  const v = new Int32Array(globalThis.__workerTermFinMsg.sab);
         \\  const threads = [];
+        \\  const asyncJoins = [];
         \\  let asyncSum = 0;
         \\  for (let id = 0; id < {d}; id++) {{
         \\    const t = new Thread((id, per) => {{
@@ -2719,9 +2720,9 @@ fn runWorkerTerminateFinalizationInterleaving(gpa: std.mem.Allocator, seed: u64)
         \\      Atomics.add(local, 3, 1);
         \\      return base + per + id;
         \\    }}, id, {d});
-        \\    t.asyncJoin().then(
+        \\    asyncJoins.push(t.asyncJoin().then(
         \\      (value) => {{ asyncSum += value; }},
-        \\      () => {{ asyncSum = -1000000; }});
+        \\      () => {{ asyncSum = -1000000; }}));
         \\    threads.push(t);
         \\  }}
         \\  let joinSum = 0;
@@ -2733,7 +2734,12 @@ fn runWorkerTerminateFinalizationInterleaving(gpa: std.mem.Allocator, seed: u64)
         \\  if (Atomics.load(v, 3) !== {d})
         \\    throw new Error('bad worker terminate/finalization thread done count ' + Atomics.load(v, 3));
         \\  threads.length = 0;
-        \\  Promise.resolve().then(() => {{
+        \\  // Gate the async-sum oracle on the asyncJoin settlements themselves
+        \\  // (not an arbitrary Promise.resolve microtask): an asyncJoin promise
+        \\  // can settle just after the sync join() returns, so a trailing
+        \\  // Promise.resolve().then() may run before the accumulations complete
+        \\  // (intermittent `oracle got 0`). Promise.all runs strictly after them.
+        \\  Promise.all(asyncJoins).then(() => {{
         \\    if (asyncSum !== {d})
         \\      throw new Error('bad worker terminate/finalization async sum ' + asyncSum);
         \\    globalThis.__workerTermFinOracle = 1;
