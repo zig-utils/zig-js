@@ -1641,12 +1641,12 @@ fn isLockedNamedAtomicsKey(key: []const u8) bool {
 
 fn denseAtomicsIndex(o: *value.Object, key: []const u8) ?usize {
     const i = value.canonicalIndex(key) orelse return null;
-    if (!o.is_array or o.is_arguments or o.accessors != null or o.attrs != null) return null;
+    if (!o.is_array or o.is_arguments or o.accessors != null or o.attrsMap() != null) return null;
     return i;
 }
 
 fn attrUnlocked(o: *const value.Object, key: []const u8) value.PropAttr {
-    if (o.attrs) |m| {
+    if (o.attrsMap()) |m| {
         if (m.get(key)) |a| return a;
     }
     return .{};

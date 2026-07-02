@@ -1573,6 +1573,17 @@ pub const Object = struct {
         return out.items;
     }
 
+    /// Atomic view of the `attrs` map pointer. Hot fast-path guards read
+    /// `attrs != null` off-lock while `setAttr` publishes the map under
+    /// `lockProperties`; a peer thread's defineProperty then races those raw
+    /// reads (Linux tsan-nogil-corpus). A monotonic atomic load is a plain `mov`
+    /// (perf-neutral) that gives those unlocked readers a defined synchronization
+    /// with the atomic publish in `setAttrUnlocked`. Map *contents* stay guarded
+    /// by `lockProperties`.
+    pub inline fn attrsMap(self: *const Object) ?*std.StringHashMapUnmanaged(PropAttr) {
+        return @atomicLoad(?*std.StringHashMapUnmanaged(PropAttr), &self.attrs, .monotonic);
+    }
+
     /// The attributes of own property `name` (all-true default if no override).
     pub fn getAttr(self: *const Object, name: []const u8) PropAttr {
         self.lockProperties();
@@ -1581,7 +1592,7 @@ pub const Object = struct {
     }
 
     fn getAttrUnlocked(self: *const Object, name: []const u8) PropAttr {
-        if (self.attrs) |m| {
+        if (self.attrsMap()) |m| {
             if (m.get(name)) |a| return a;
         }
         return .{};
@@ -1596,17 +1607,20 @@ pub const Object = struct {
 
     fn setAttrUnlocked(self: *Object, arena: std.mem.Allocator, name: []const u8, a: PropAttr) std.mem.Allocator.Error!void {
         const alloc = self.attrsAllocator(arena);
-        if (self.attrs == null) {
-            self.attrs = try alloc.create(std.StringHashMapUnmanaged(PropAttr));
-            self.attrs.?.* = .{};
+        if (self.attrsMap() == null) {
+            const m = try alloc.create(std.StringHashMapUnmanaged(PropAttr));
+            m.* = .{};
+            // Publish the map pointer atomically so off-lock `attrsMap()` readers
+            // (fast-path guards) synchronize with it; content stays under the lock.
+            @atomicStore(?*std.StringHashMapUnmanaged(PropAttr), &self.attrs, m, .release);
         }
-        const gop = try self.attrs.?.getOrPut(alloc, name);
+        const gop = try self.attrsMap().?.getOrPut(alloc, name);
         if (!gop.found_existing) gop.key_ptr.* = try alloc.dupe(u8, name);
         gop.value_ptr.* = a;
     }
 
     fn deleteAttrUnlocked(self: *Object, name: []const u8) void {
-        const m = self.attrs orelse return;
+        const m = self.attrsMap() orelse return;
         if (m.fetchRemove(name)) |removed| {
             if (self.backing_flags.attrs) self.backing_allocator.?.free(removed.key);
         }

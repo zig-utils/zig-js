@@ -543,7 +543,7 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                         const o = obj.asObj();
                         o.lockProperties();
                         defer o.unlockProperties();
-                        if (!o.is_array and o.accessors == null and o.attrs == null) {
+                        if (!o.is_array and o.accessors == null and o.attrsMap() == null) {
                             const ic = &chunk.ics[ip - 1];
                             if (ic.lookupSlot(o.shape)) |sl| {
                                 result = o.slots.items[sl];
@@ -651,7 +651,7 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                         const o = obj.asObj();
                         o.lockProperties();
                         defer o.unlockProperties();
-                        if (!o.is_array and o.accessors == null and o.attrs == null) {
+                        if (!o.is_array and o.accessors == null and o.attrsMap() == null) {
                             const ic = &chunk.ics[ip - 1];
                             if (ic.lookupSlot(o.shape)) |sl| {
                                 gc_mod.barrierValue(v); // IC fast-path slot store

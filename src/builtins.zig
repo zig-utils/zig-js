@@ -1617,7 +1617,7 @@ pub fn defineOneResult(self: *Interpreter, target: *value.Object, key: []const u
         if (d.getOwn("value")) |val| {
             new_len_opt = try self.arrayLengthFromValue(val);
         }
-        const cur_writable = if (target.attrs != null) target.getAttr("length").writable else true;
+        const cur_writable = if (target.attrsMap() != null) target.getAttr("length").writable else true;
         const old_len = @max(target.elements.items.len, target.array_len);
         if (d.getOwn("configurable")) |c| {
             if (c.toBoolean()) return false;
@@ -1652,7 +1652,7 @@ pub fn defineOneResult(self: *Interpreter, target: *value.Object, key: []const u
         if (arrayIndexOf(key)) |i| {
             if (i <= target.elements.items.len + 1024 and i < (1 << 24)) {
                 const old_len = @max(target.elements.items.len, target.array_len);
-                if (i >= old_len and target.attrs != null and !target.getAttr("length").writable) return false;
+                if (i >= old_len and target.attrsMap() != null and !target.getAttr("length").writable) return false;
                 // A hole within bounds is NOT an existing property — treat it as a
                 // new definition (so attributes default correctly and the hole is
                 // materialized below), not a redefinition of a present element.
@@ -1715,7 +1715,7 @@ pub fn defineOneResult(self: *Interpreter, target: *value.Object, key: []const u
     if (target.is_array and !std.mem.eql(u8, key, "length")) {
         if (arrayIndexOf(key)) |i| {
             const old_len = target.arrayLength();
-            if (i >= old_len and target.attrs != null and !target.getAttr("length").writable) return false;
+            if (i >= old_len and target.attrsMap() != null and !target.getAttr("length").writable) return false;
         }
     }
     const cur_data = target.getOwn(key) orelse (if (dense_elem_index) |i| target.denseElement(i) else null);
@@ -2303,7 +2303,7 @@ pub fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, this: Value, args: []cons
         // ordinary own property handled by the getOwn path above (so a deleted
         // one is absent), so exclude it here.
         if (!o.is_arguments and std.mem.eql(u8, key, "length")) {
-            const w = if (o.attrs != null) o.getAttr("length").writable else true;
+            const w = if (o.attrsMap() != null) o.getAttr("length").writable else true;
             return dataDescriptor(self, Value.num(@floatFromInt(@max(o.elements.items.len, o.array_len))), .{ .writable = w, .enumerable = false, .configurable = false });
         }
         if (arrayIndexOf(key)) |i| {
