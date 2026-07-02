@@ -37913,7 +37913,7 @@ test "interpreter function declaration and call" {
     )).asBool());
     try std.testing.expect((try evalSource(arena.allocator(),
         \\function caller() { return caller.caller; }
-        \\caller() === null
+        \\caller() === undefined
     )).asBool());
 }
 
