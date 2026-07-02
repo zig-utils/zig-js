@@ -35556,7 +35556,20 @@ fn selectTimeZoneTransition(transitions: []const i128, epoch_ns: i128, next: boo
 
 fn timeZoneTransitionEpoch(name: []const u8, epoch_ns: i128, next: bool) ?i128 {
     // Authoritative: the generated tzdata transition table (aliases resolved).
-    if (iana_offsets.transitionAt(canonicalTimeZoneName(name), @intCast(@divFloor(epoch_ns, 1_000_000_000)), next)) |t_s|
+    // Transitions are stored at whole-second granularity; the query instant is
+    // nanosecond-precise. transitionAt compares strictly (`t > s` / `t < s`), so
+    // we must pick the second-granular `s` that preserves the strict ns compare:
+    //   next     -> smallest transition with t*1e9 > epoch_ns  ==  t > floor(ns/1e9)
+    //   previous -> largest  transition with t*1e9 < epoch_ns  ==  t < floor((ns-1)/1e9)+1
+    // The previous case must round up past a sub-second remainder, otherwise an
+    // instant a fraction of a second after a transition truncates onto that
+    // transition's second and the strict `<` wrongly skips it (see
+    // getTimeZoneTransition DST-transition-plus-one-nanosecond).
+    const query_s: i64 = if (next)
+        @intCast(@divFloor(epoch_ns, 1_000_000_000))
+    else
+        @intCast(@divFloor(epoch_ns - 1, 1_000_000_000) + 1);
+    if (iana_offsets.transitionAt(canonicalTimeZoneName(name), query_s, next)) |t_s|
         return @as(i128, t_s) * 1_000_000_000;
     if (std.mem.eql(u8, name, "America/Los_Angeles")) {
         const transitions = [_]i128{
