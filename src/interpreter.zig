@@ -887,6 +887,10 @@ pub const Interpreter = struct {
     /// live only in Zig locals. VM values are covered by `gc_execs`; this stack
     /// covers interpreter paths such as iterator records/results in `for...of`.
     gc_temp_roots: std.ArrayListUnmanaged(Value) = .empty,
+    /// GC-owned lexical environments that are live for spec cleanup but no
+    /// longer reachable through `self.env`'s parent chain, such as a `for` head
+    /// environment that keeps `using` resources until loop exit.
+    gc_env_roots: std.ArrayListUnmanaged(*Environment) = .empty,
     /// Context-owned serial used to mint per-class private-name storage keys.
     /// Null only in isolated interpreter unit helpers.
     private_name_serial: ?*u64 = null,
@@ -3041,6 +3045,9 @@ pub const Interpreter = struct {
         const lexical = names.items.len > 0;
 
         const outer = self.env;
+        const env_root_mark = self.gc_env_roots.items.len;
+        var loop_env_rooted = false;
+        defer if (loop_env_rooted) self.gc_env_roots.shrinkRetainingCapacity(env_root_mark);
         defer if (lexical) {
             self.env = outer;
         };
@@ -3068,6 +3075,14 @@ pub const Interpreter = struct {
         }
         // CreatePerIterationEnvironment (initial copy, before the first test).
         if (lexical) self.env = try self.perIterEnv(outer, names.items, self.env);
+        if (loop_env) |le| {
+            if (le.disposables.items.len == 0) {
+                loop_env = null;
+            } else {
+                try self.gc_env_roots.append(self.arena, le);
+                loop_env_rooted = true;
+            }
+        }
 
         const last = self.runForBody(cond, update, body, my_label, lexical, outer, names.items) catch |e| {
             // DisposeResources runs on an abrupt completion too, threading the error.

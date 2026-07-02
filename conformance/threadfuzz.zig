@@ -12081,6 +12081,242 @@ fn runMidScriptPromisePublicationGc(gpa: std.mem.Allocator, seed: u64) !bool {
     return true;
 }
 
+fn runMidScriptPropertyWaitAsyncLateSettlementGc(gpa: std.mem.Allocator, seed: u64) !bool {
+    var prng = std.Random.DefaultPrng.init(seed ^ 0x6d69_6470_7761_6c73);
+    const r = prng.random();
+    const nthreads = 3 + r.uintLessThan(usize, 3);
+    const keys = 16 + r.uintLessThan(usize, 17);
+    const timeout_ms = 8 + r.uintLessThan(usize, 15);
+    const rounds = 8 + r.uintLessThan(usize, 5);
+    const per_round = 650 + r.uintLessThan(usize, 350);
+    const spin_iters = 2200 + r.uintLessThan(usize, 3000);
+    const seed_marker = seed % 10_000;
+
+    var expected_async_score: usize = 0;
+    var expected_join_score: usize = 0;
+    var id: usize = 0;
+    while (id < nthreads) : (id += 1) {
+        const marker = 620_000 + seed_marker + id;
+        expected_async_score += marker + keys;
+        expected_join_score += marker + keys * 2;
+    }
+
+    const ctx = js.Context.createWithTestingOptions(gpa, .{
+        .enable_threads = true,
+        .enable_gc = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+        .parallel_midscript_gc = true,
+    }) catch {
+        std.debug.print("seed {d}: midgc property waitAsync late-settlement context creation failed\n", .{seed});
+        return false;
+    };
+    defer ctx.destroy();
+
+    const src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  globalThis.__midgcPropWaitAsyncLateAsyncScore = 0;
+        \\  globalThis.__midgcPropWaitAsyncLateJoinScore = 0;
+        \\  globalThis.__midgcPropWaitAsyncLateAsyncCount = 0;
+        \\  globalThis.__midgcPropWaitAsyncLateJoinCount = 0;
+        \\  var threads = [];
+        \\  var shared = {{}};
+        \\  var gate = {{ ready: 0 }};
+        \\  var root = {{ seed: {d}, tag: 'midgc-property-waitAsync-late-root' }};
+        \\  for (var tid = 0; tid < {d}; tid++) {{
+        \\    for (var k = 0; k < {d}; k++) shared['k' + tid + '_' + k] = 0;
+        \\  }}
+        \\  function verifyBundle(bundle, expectedTid, keys, seedMarker) {{
+        \\    if (!bundle || bundle.tid !== expectedTid || bundle.marker !== 620000 + seedMarker + expectedTid)
+        \\      throw new Error('bad midgc property waitAsync late bundle identity');
+        \\    if (!bundle.root || bundle.root.seed !== seedMarker)
+        \\      throw new Error('bad midgc property waitAsync late bundle root');
+        \\    if (!bundle.values || bundle.values.length !== keys)
+        \\      throw new Error('bad midgc property waitAsync late bundle length');
+        \\    for (var i = 0; i < bundle.values.length; i++) {{
+        \\      var v = bundle.values[i];
+        \\      if (v !== 'timed-out')
+        \\        throw new Error('midgc property waitAsync late value was ' + v);
+        \\    }}
+        \\    return bundle.marker + bundle.values.length;
+        \\  }}
+        \\  for (var tid = 0; tid < {d}; tid++) {{
+        \\    (function(tid) {{
+        \\      var t = new Thread((obj, gate, tid, keys, timeout, seedMarker) => {{
+        \\        var values = [];
+        \\        var remaining = keys;
+        \\        var childRoot = {{ seed: seedMarker, label: 'midgc-property-waitAsync-late-child-root-' + tid }};
+        \\        return new Promise((resolve, reject) => {{
+        \\          for (var k = 0; k < keys; k++) {{
+        \\            (function(slot) {{
+        \\              var r = Atomics.waitAsync(obj, 'k' + tid + '_' + slot, 0, timeout);
+        \\              if (r.async !== true || !(r.value instanceof Promise))
+        \\                throw new Error('bad midgc property waitAsync late pending shape');
+        \\              r.value.then(
+        \\                (v) => {{
+        \\                  if (childRoot.seed !== seedMarker)
+        \\                    throw new Error('midgc property waitAsync late child root lost');
+        \\                  values[slot] = v;
+        \\                  remaining--;
+        \\                  if (remaining === 0)
+        \\                    resolve({{ tid, values, marker: 620000 + seedMarker + tid, root: childRoot }});
+        \\                }},
+        \\                reject);
+        \\            }})(k);
+        \\          }}
+        \\          Atomics.add(gate, 'ready', 1);
+        \\          Atomics.notify(gate, 'ready');
+        \\        }});
+        \\      }}, shared, gate, tid, {d}, {d}, {d});
+        \\      t.asyncJoin().then(
+        \\        (bundle) => {{
+        \\          globalThis.__midgcPropWaitAsyncLateAsyncScore += verifyBundle(bundle, tid, {d}, {d});
+        \\          globalThis.__midgcPropWaitAsyncLateAsyncCount++;
+        \\        }},
+        \\        () => {{ globalThis.__midgcPropWaitAsyncLateAsyncScore = -1000000; }});
+        \\      threads.push(t);
+        \\    }})(tid);
+        \\  }}
+        \\  while (Atomics.load(gate, 'ready') < {d})
+        \\    Atomics.wait(gate, 'ready', Atomics.load(gate, 'ready'), 1);
+        \\  var keep = [];
+        \\  for (var round = 0; round < {d}; round++) {{
+        \\    for (var i = 0; i < {d}; i++) {{
+        \\      keep.push({{
+        \\        round,
+        \\        i,
+        \\        nested: {{ root, value: i + round }},
+        \\        text: 'midgc-property-waitAsync-late-' + round + '-' + i,
+        \\      }});
+        \\    }}
+        \\    var spin = 0;
+        \\    for (var j = 0; j < {d}; j++) spin = (spin + j + round) & 0x3fffffff;
+        \\    if (spin < 0) keep.push({{ impossible: true }});
+        \\  }}
+        \\  if (typeof gc === 'function') gc();
+        \\  for (var tid = 0; tid < threads.length; tid++) {{
+        \\    (function(tid) {{
+        \\      var joined = threads[tid].join();
+        \\      if (!(joined instanceof Promise))
+        \\        throw new Error('midgc property waitAsync late join did not return the child promise');
+        \\      joined.then(
+        \\        (bundle) => {{
+        \\          globalThis.__midgcPropWaitAsyncLateJoinScore += verifyBundle(bundle, tid, {d}, {d}) + {d};
+        \\          globalThis.__midgcPropWaitAsyncLateJoinCount++;
+        \\        }},
+        \\        () => {{ globalThis.__midgcPropWaitAsyncLateJoinScore = -1000000; }});
+        \\    }})(tid);
+        \\  }}
+        \\  globalThis.__midgcPropWaitAsyncLateReady = function(expectedAsync, expectedJoin, expectedCount) {{
+        \\    return globalThis.__midgcPropWaitAsyncLateAsyncScore === expectedAsync &&
+        \\      globalThis.__midgcPropWaitAsyncLateJoinScore === expectedJoin &&
+        \\      globalThis.__midgcPropWaitAsyncLateAsyncCount === expectedCount &&
+        \\      globalThis.__midgcPropWaitAsyncLateJoinCount === expectedCount;
+        \\  }};
+        \\  globalThis.__midgcPropWaitAsyncLateCheck = function(expectedAsync, expectedJoin, expectedCount) {{
+        \\    if (!globalThis.__midgcPropWaitAsyncLateReady(expectedAsync, expectedJoin, expectedCount))
+        \\      throw new Error('bad midgc property waitAsync late scores async=' +
+        \\        globalThis.__midgcPropWaitAsyncLateAsyncScore + '/' + expectedAsync +
+        \\        ' join=' + globalThis.__midgcPropWaitAsyncLateJoinScore + '/' + expectedJoin +
+        \\        ' counts=' + globalThis.__midgcPropWaitAsyncLateAsyncCount + ',' +
+        \\        globalThis.__midgcPropWaitAsyncLateJoinCount + '/' + expectedCount);
+        \\    return 1;
+        \\  }};
+        \\  return keep.length;
+        \\}})();
+        \\
+    ,
+        .{
+            seed_marker,
+            nthreads,
+            keys,
+            nthreads,
+            keys,
+            timeout_ms,
+            seed_marker,
+            keys,
+            seed_marker,
+            nthreads,
+            rounds,
+            per_round,
+            spin_iters,
+            keys,
+            seed_marker,
+            keys,
+        },
+    );
+    defer gpa.free(src);
+
+    const before_attempts = ctx.gc_par_attempts.load(.monotonic);
+    const before_collections = ctx.gc_par_collections.load(.monotonic);
+    const expected: f64 = @floatFromInt(rounds * per_round);
+    const result = ctx.evaluate(src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: midgc property waitAsync late-settlement JS threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!result.isNumber() or result.asNum() != expected) {
+        std.debug.print("seed {d}: midgc property waitAsync late-settlement result got {d}, expected {d}\n", .{ seed, if (result.isNumber()) result.asNum() else -1, expected });
+        return false;
+    }
+    if (ctx.gc_par_attempts.load(.monotonic) <= before_attempts) {
+        std.debug.print("seed {d}: midgc property waitAsync late-settlement did not attempt a parallel collection\n", .{seed});
+        return false;
+    }
+    if (ctx.gc_par_collections.load(.monotonic) <= before_collections) {
+        std.debug.print("seed {d}: midgc property waitAsync late-settlement did not finish a parallel collection\n", .{seed});
+        return false;
+    }
+
+    const ready_src = try std.fmt.allocPrint(
+        gpa,
+        "$drainRunLoop(); drainMicrotasks(); globalThis.__midgcPropWaitAsyncLateReady({d}, {d}, {d})",
+        .{ expected_async_score, expected_join_score, nthreads },
+    );
+    defer gpa.free(ready_src);
+    var ready = false;
+    var poll: usize = 0;
+    while (poll < 4000) : (poll += 1) {
+        const status = ctx.evaluate(ready_src) catch |err| {
+            std.debug.print("seed {d}: midgc property waitAsync late-settlement ready poll threw {s}\n", .{ seed, @errorName(err) });
+            return false;
+        };
+        if (status.isBoolean() and status.asBool()) {
+            ready = true;
+            break;
+        }
+        std.Io.sleep(js.agent.engineIo(), .fromMilliseconds(1), .awake) catch {};
+    }
+    if (!ready) {
+        std.debug.print("seed {d}: midgc property waitAsync late-settlement did not reach expected async/join scores\n", .{seed});
+        return false;
+    }
+
+    const check_src = try std.fmt.allocPrint(
+        gpa,
+        "globalThis.__midgcPropWaitAsyncLateCheck({d}, {d}, {d})",
+        .{ expected_async_score, expected_join_score, nthreads },
+    );
+    defer gpa.free(check_src);
+    const checked = ctx.evaluate(check_src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: midgc property waitAsync late-settlement check threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!checked.isNumber() or checked.asNum() != 1) {
+        std.debug.print("seed {d}: midgc property waitAsync late-settlement check got {d}\n", .{ seed, if (checked.isNumber()) checked.asNum() else -1 });
+        return false;
+    }
+    return true;
+}
+
 fn runMidScriptMicrotaskChurnGc(gpa: std.mem.Allocator, seed: u64) !bool {
     var prng = std.Random.DefaultPrng.init(seed ^ 0x6d69_6467_636d_7175);
     const r = prng.random();
@@ -14088,6 +14324,23 @@ pub fn main(init: std.process.Init) !void {
         if (mpfail != 0) std.process.exit(1);
         return;
     };
+    // `threadfuzz midgcpropwaitasynclate <iters> <seed>`: focused
+    // mid-script parallel-GC repro for property waitAsync timeout tickets that
+    // settle after the registering Thread's local queue has closed, with
+    // asyncJoin/join promise observers surviving the finishing sweep.
+    if (first) |a| if (std.mem.eql(u8, a, "midgcpropwaitasynclate")) {
+        if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch 1;
+        if (args.next()) |b| base_seed = std.fmt.parseInt(u64, b, 10) catch 1;
+        var mpwafail: usize = 0;
+        var mpwai: usize = 0;
+        while (mpwai < iters) : (mpwai += 1) {
+            const seed = base_seed +% mpwai;
+            if (!(try runMidScriptPropertyWaitAsyncLateSettlementGc(gpa, seed))) mpwafail += 1;
+        }
+        std.debug.print("threadfuzz midgcpropwaitasynclate: {d} programs from seed {d}, {d} failures\n", .{ iters, base_seed, mpwafail });
+        if (mpwafail != 0) std.process.exit(1);
+        return;
+    };
     // `threadfuzz midgcmicrotask <iters> <seed>`: focused mid-script
     // parallel-GC repro for pending Promise, waitAsync, asyncJoin, asyncHold
     // callback/release, and cleanup roots that all settle after a finishing
@@ -14435,7 +14688,8 @@ pub fn main(init: std.process.Init) !void {
     // typed-array waitAsync reactions, rejected asyncHold reactions, pending
     // asyncJoin reactions, child-returned waitAsync/rejected-promise/user-
     // thenable assimilation, pending Promise/microtask reaction roots across
-    // asyncHold, waitAsync, asyncJoin, and cleanup delivery,
+    // asyncHold, waitAsync, asyncJoin, and cleanup delivery, property
+    // waitAsync late-settlement rerouting after owner queues close,
     // child-created SAB/ArrayBuffer storage rooted through unjoined Thread
     // completion records and delayed asyncJoin observers,
     // ThreadLocal-only and Thread.restrict-owned FinalizationRegistry targets
@@ -14472,6 +14726,7 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runMidScriptWaitPumpGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptTerminationReactionGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptPromisePublicationGc(gpa, seed))) mfail += 1;
+            if (!(try runMidScriptPropertyWaitAsyncLateSettlementGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptMicrotaskChurnGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptCreatorOwnedBufferGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptSyncWaitCleanupGc(gpa, seed))) mfail += 1;
@@ -14491,7 +14746,7 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runMidScriptModuleWorkerCloseTerminateGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptWeakCollectionGc(gpa, seed))) mfail += 1;
         }
-        std.debug.print("threadfuzz midgc: {d} programs from seed {d}, {d} failures\n", .{ iters * 21, base_seed, mfail });
+        std.debug.print("threadfuzz midgc: {d} programs from seed {d}, {d} failures\n", .{ iters * 22, base_seed, mfail });
         if (mfail != 0) std.process.exit(1);
         return;
     };

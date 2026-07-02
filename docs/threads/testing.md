@@ -141,7 +141,12 @@ promise, a child-returned user thenable, and a child-thrown object rooted
 through thread completion/native waiter state until after a finishing sweep,
 then verifies `join()` / `asyncJoin()` fulfillment, rejection, thenable
 assimilation, and thrown-object publication from observers registered both
-before and after child completion, adds a sync-wait cleanup subprogram that
+before and after child completion, adds a property `Atomics.waitAsync`
+late-settlement subprogram that registers finite-timeout property tickets in
+child threads, drives a finishing mid-script sweep after the child local queues
+have closed, then requires rerouted timeout settlement to reach both
+`asyncJoin()` and `join()` promise observers with exact root/score oracles,
+adds a sync-wait cleanup subprogram that
 parks peers in property `Atomics.wait`, `Condition.wait`, and contended
 `Lock.hold` acquisition through a finishing sweep before verifying their stack
 roots after resume plus exact `FinalizationRegistry` cleanup count/sum delivery,
@@ -214,7 +219,7 @@ join-termination unit witness that checks parked-state/mutex cleanup, then
 requires exact script completion or exact expected termination plus at least one
 finishing parallel sweep and exact
 `FinalizationRegistry` cleanup count/sum delivery plus unregister-token
-suppression after a quiescent collect. Each seed currently runs 21 deterministic
+suppression after a quiescent collect. Each seed currently runs 22 deterministic
 mid-GC subprograms. The
 lifecycle profile
 (`-Dfuzz-lifecycle=true`) adds expected-throw termination storms for
