@@ -367,6 +367,14 @@ pub const Environment = struct {
     dispose_pending: ?Value = null,
     /// Names in `vars` declared `const` — assigning to them is a TypeError.
     consts: std.StringHashMapUnmanaged(void) = .{},
+    /// Names in the GLOBAL (root) `vars` that are lexical declarations
+    /// (`let`/`const`/`class`). A global lexical shadows a like-named global-object
+    /// property (`let Array` reads `undefined`, not %Array%), so its read must NOT
+    /// defer to the global object — unlike a global `var`, which shares storage
+    /// with its own-property. Inferring lexical-ness from "the global object lacks
+    /// an own property" is wrong when the name shadows a pre-existing builtin, so
+    /// this set records it explicitly. Only populated on the root environment.
+    lexicals: std.StringHashMapUnmanaged(void) = .{},
     /// Names that are *non-strict* immutable bindings — a named function
     /// expression's own name. Reassignment throws in strict code but is a silent
     /// no-op in sloppy code (unlike `const`, which always throws).
@@ -468,6 +476,18 @@ pub const Environment = struct {
         self.lockBindings(); // serialize the consts table vs a concurrent isConst read
         defer self.unlockBindings();
         const gop = try self.consts.getOrPut(a, name);
+        if (!gop.found_existing) gop.key_ptr.* = try self.dupeBindingName(name);
+    }
+
+    /// Record `name` as a global lexical declaration (see `lexicals`). The binding
+    /// value itself is stored via the normal `put`/`putConst`; this only tags it so
+    /// an identifier read resolves the declarative binding, not a shadowed
+    /// global-object property.
+    pub fn markLexical(self: *Environment, name: []const u8) EvalError!void {
+        const a = self.bindingAllocator();
+        self.lockBindings();
+        defer self.unlockBindings();
+        const gop = try self.lexicals.getOrPut(a, name);
         if (!gop.found_existing) gop.key_ptr.* = try self.dupeBindingName(name);
     }
 
@@ -1641,7 +1661,13 @@ pub const Interpreter = struct {
             // holding that lock, so reading it after `unlockBindings` is the same
             // no-GIL Environment data race (Linux-TSan `tsan-parallel-js`). Only
             // meaningful for a resolved global binding, so guard on that first.
-            const global_shadowable = found_var != null and e.parent == null and !e.consts.contains(name);
+            // A global `var`/function shares storage with its own-property on the
+            // global object, so its read reflects the current property value; a
+            // global lexical (`let`/`const`/`class`) is a distinct declarative
+            // binding and shadows any like-named global property. `consts`/`lexicals`
+            // are read under the SAME `binding_lock` as `vars` (no-GIL race).
+            const global_shadowable = found_var != null and e.parent == null and
+                !e.consts.contains(name) and !e.lexicals.contains(name);
             e.unlockBindings();
             if (alias) |a| return a.env.get(a.name);
             if (found_var) |v| {
@@ -3748,14 +3774,27 @@ pub const Interpreter = struct {
         // its declaration runs throws a ReferenceError.
         if (self.tdz_marker) |_| {
             const tdz = self.tdzVal();
+            // At the global scope, record each lexical name so its read resolves to
+            // the declarative binding rather than a like-named global-object
+            // property (`let Array` reads undefined, not %Array%).
+            const mark_global = self.env.parent == null;
             for (stmts) |s| switch (s.*) {
-                .var_decl => |d| if (d.kind != .@"var") try self.env.put(d.name, tdz),
+                .var_decl => |d| if (d.kind != .@"var") {
+                    try self.env.put(d.name, tdz);
+                    if (mark_global) try self.env.markLexical(d.name);
+                },
                 .decl_group => |group| for (group) |gs| switch (gs.*) {
-                    .var_decl => |d| if (d.kind != .@"var") try self.env.put(d.name, tdz),
+                    .var_decl => |d| if (d.kind != .@"var") {
+                        try self.env.put(d.name, tdz);
+                        if (mark_global) try self.env.markLexical(d.name);
+                    },
                     else => {},
                 },
                 .destructure_decl => |d| if (d.kind != .@"var") self.tdzBindPattern(d.pattern, tdz),
-                .class_expr => |c| if (c.name.len > 0) try self.env.put(c.name, tdz),
+                .class_expr => |c| if (c.name.len > 0) {
+                    try self.env.put(c.name, tdz);
+                    if (mark_global) try self.env.markLexical(c.name);
+                },
                 else => {},
             };
         }
