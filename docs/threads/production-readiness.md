@@ -27,11 +27,22 @@ than new correctness architecture.
   Recursion depth is native-stack-bound (the `stack_scan` redzone probe, not the
   16384 logical cap), so spawned `Thread`s now run on a 64 MiB stack — lifting
   worker recursion from ~577 to ~2337 frames (release), into the thousands the
-  PR-249 deep-stack case needs. Still open: the main realm inherits the
-  embedder's caller-thread stack (~576 frames), and *unbounded* recursion needs
-  a trampolined/VM-stack call path; a `never_inline` frame-shrink of `callPlain`
-  was measured to help negligibly (LLVM already colors the skipped slots), so
-  those two need the larger execution-model / trampoline work, not frame tweaks.
+  PR-249 deep-stack case needs. The main realm's depth is not a fixed cap: the
+  guard is native-stack-bound (`stack_scan.nearLimit` probes the running thread's
+  registered OS bounds), so it **auto-adapts to whatever stack the embedder's
+  owner thread has** — a context created on a small (~8 MiB default) owner thread
+  gets ~576 frames, one created on a large owner thread gets proportionally more,
+  with no library change. The library cannot resize the embedder's own thread
+  (the owner-thread affinity model binds `evaluate` to it via
+  `assertOwnerThread`), so deep *main-realm* recursion is an embedder choice:
+  create the context on a thread spawned with a larger `stack_size`, or run the
+  deep-recursing code inside a `new Thread(...)` (spawned workers already get the
+  64 MiB stack). Genuinely still open: *unbounded* recursion (beyond any native
+  stack) needs a trampolined/VM-stack call path — an execution-model rewrite, not
+  a frame tweak (a `never_inline` frame-shrink of `callPlain` measured negligible;
+  LLVM already colors the skipped slots). This is beyond what V8/JSC do (they cap
+  and throw `RangeError`, as this engine already does), so it is a roadmap item,
+  not a correctness gap.
 - Active VM frame slots are traced as GC roots, not only operand stacks, closing
   the mid-script parallel-GC use-after-free found by the fuzzer.
 - `-Dtest262-parallel-js` runs a broad language-surface slice in GIL-free

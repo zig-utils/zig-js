@@ -7655,6 +7655,41 @@ test "catch scope: optional catch binding skips the catch-scope env, params stil
     try std.testing.expectEqualStrings("bind-less,inner,outer,14,7,99", v.asStr());
 }
 
+test "deep stack: main-realm recursion depth adapts to the owner thread's stack" {
+    // Item-1 witness: the main realm's recursion guard is native-stack-bound
+    // (`stack_scan.nearLimit` probes the running owner thread's registered OS
+    // bounds), so main-realm recursion depth scales with whatever stack the
+    // embedder's owner thread has — no library change, no execution-model rewrite.
+    // A context created on a 64 MiB owner thread recurses far deeper than one on a
+    // small stack. Confirms the documented embedder path for deep main-realm
+    // recursion (docs/threads/production-readiness.md): run the owner thread big.
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const Runner = struct {
+        depth: usize = 0,
+        fn run(self: *@This()) void {
+            const ctx = Context.createWith(std.testing.allocator, .{}) catch return;
+            defer ctx.destroy();
+            const v = ctx.evaluate(
+                \\function depth(n) { try { return depth(n + 1); } catch (e) { return n; } }
+                \\depth(0)
+            ) catch return;
+            if (v.isNumber()) self.depth = @intFromFloat(v.asNum());
+        }
+    };
+    // Sequential (join before the next spawn) so the shared testing allocator is
+    // never touched by two threads at once.
+    var small = Runner{};
+    const ts = try std.Thread.spawn(.{ .stack_size = 8 << 20 }, Runner.run, .{&small}); // 8 MiB
+    ts.join();
+    var big = Runner{};
+    const tb = try std.Thread.spawn(.{ .stack_size = 64 << 20 }, Runner.run, .{&big}); // 64 MiB
+    tb.join();
+    // 8× the stack reaches substantially deeper. Relative (not an absolute floor)
+    // to stay robust across optimize modes / platforms / frame sizes.
+    try std.testing.expect(small.depth > 0);
+    try std.testing.expect(big.depth > small.depth + (small.depth / 2));
+}
+
 test "deep stack: spawned JS threads get a large native stack for deep recursion" {
     // Coverage (deep-stack witness): a spawned `Thread` runs on a 64 MiB stack,
     // so a worker can recurse *at least as deep* as the main realm, which only
