@@ -2068,7 +2068,7 @@ pub const Parser = struct {
         if (is_gen or is_async or hasNonSimpleParams(params)) try self.checkDuplicateParams(params);
         try self.checkParamBodyConflict(params, body);
         const fnode = try self.arena.create(ast.FunctionNode);
-        fnode.* = .{ .name = name_tok.text, .params = params, .body = body, .source = self.sourceFrom(start), .is_expr_body = false, .is_generator = is_gen, .is_async = is_async, .is_strict = fn_strict };
+        fnode.* = .{ .name = name_tok.text, .params = params, .body = body, .source = self.sourceFrom(start), .is_expr_body = false, .is_generator = is_gen, .is_async = is_async, .is_strict = fn_strict, .uses_arguments = ast.sourceMayUseArguments(self.sourceFrom(start)) };
         return self.alloc(.{ .func_decl = fnode });
     }
 
@@ -2113,7 +2113,7 @@ pub const Parser = struct {
         if (is_gen or is_async or hasNonSimpleParams(params)) try self.checkDuplicateParams(params);
         try self.checkParamBodyConflict(params, body);
         const fnode = try self.arena.create(ast.FunctionNode);
-        fnode.* = .{ .name = name, .params = params, .body = body, .source = self.sourceFrom(start), .is_expr_body = false, .has_name_binding = name.len > 0, .is_generator = is_gen, .is_async = is_async, .is_strict = fn_strict };
+        fnode.* = .{ .name = name, .params = params, .body = body, .source = self.sourceFrom(start), .is_expr_body = false, .has_name_binding = name.len > 0, .is_generator = is_gen, .is_async = is_async, .is_strict = fn_strict, .uses_arguments = ast.sourceMayUseArguments(self.sourceFrom(start)) };
         return self.alloc(.{ .function = fnode });
     }
 
@@ -3920,7 +3920,7 @@ pub const Parser = struct {
         if (fn_strict) try validateStrictParams(params);
         try self.checkParamBodyConflict(params, body);
         const fnode = try self.arena.create(ast.FunctionNode);
-        fnode.* = .{ .name = name, .params = params, .body = body, .source = self.sourceFrom(start), .is_expr_body = false, .is_generator = is_gen, .is_async = is_async, .is_strict = fn_strict, .is_method = true };
+        fnode.* = .{ .name = name, .params = params, .body = body, .source = self.sourceFrom(start), .is_expr_body = false, .is_generator = is_gen, .is_async = is_async, .is_strict = fn_strict, .is_method = true, .uses_arguments = ast.sourceMayUseArguments(self.sourceFrom(start)) };
         return self.alloc(.{ .function = fnode });
     }
 

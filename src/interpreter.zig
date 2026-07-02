@@ -686,6 +686,10 @@ pub const Function = struct {
     body: *ast.Node,
     is_expr_body: bool,
     is_arrow: bool = false,
+    /// Whether a call must materialize the `arguments` object (see
+    /// `ast.FunctionNode.uses_arguments`). Defaults true so a closure built
+    /// without a source-derived flag (e.g. VM templates) stays correct.
+    uses_arguments: bool = true,
     closure: *Environment,
     name: []const u8 = "",
     /// Exact source text of the function definition, for `Function.prototype.
@@ -3805,6 +3809,7 @@ pub const Interpreter = struct {
             .body = fnode.body,
             .is_expr_body = fnode.is_expr_body,
             .is_arrow = fnode.is_arrow,
+            .uses_arguments = fnode.uses_arguments,
             .closure = closure,
             .name = fnode.name,
             .source = fnode.source,
@@ -5271,8 +5276,14 @@ pub const Interpreter = struct {
         if (func.is_class_constructor and new_target.isUndefined())
             return self.throwError("TypeError", "Class constructor cannot be invoked without 'new'");
 
-        // Non-arrow functions get an `arguments` array-like over the call args.
-        if (!func.is_arrow) {
+        // Non-arrow functions get an `arguments` array-like over the call args —
+        // but only if the body could reference it. When `uses_arguments` is false
+        // the source provably never names `arguments` (and has no `eval`/`var
+        // arguments`), so nothing looks it up: skip building the exotic object
+        // (and its element copy + parameter map) entirely. The later
+        // `body_env.vars.contains("arguments")` copy degrades gracefully when the
+        // binding is absent.
+        if (!func.is_arrow and func.uses_arguments) {
             const args_obj = try self.newArray();
             args_obj.asObj().is_arguments = true;
             // The arguments exotic object's [[Prototype]] is %Object.prototype%

@@ -62,6 +62,16 @@ pub const ArrPatElem = struct {
     default: ?*Node = null,
 };
 
+/// Conservative test for whether a function's source could reference its
+/// `arguments` object: true if the text contains "arguments" (the only way to
+/// name it) or "eval" (a direct eval could reference it dynamically). False
+/// positives (e.g. "arguments" in a string/comment, "eval" in "retrieval") only
+/// forgo an optimization; a false negative is impossible because the identifier
+/// must appear literally in the source to be resolved.
+pub fn sourceMayUseArguments(source: []const u8) bool {
+    return std.mem.indexOf(u8, source, "arguments") != null or std.mem.indexOf(u8, source, "eval") != null;
+}
+
 pub const FunctionNode = struct {
     name: []const u8 = "",
     params: []const Param,
@@ -71,6 +81,12 @@ pub const FunctionNode = struct {
     /// Empty when not captured (toString then falls back to native syntax).
     source: []const u8 = "",
     is_expr_body: bool = false,
+    /// Whether the (non-arrow) function might reference its `arguments` object —
+    /// conservatively true if the source text contains "arguments" or "eval"
+    /// (a direct eval could reference it dynamically). When false the source
+    /// provably cannot name `arguments`, so the tree-walker skips materializing
+    /// the arguments exotic object on each call. Defaults true (create it).
+    uses_arguments: bool = true,
     /// Arrow functions don't get their own `arguments` (or `this`).
     is_arrow: bool = false,
     /// Explicit named function expressions have an internal immutable self-name

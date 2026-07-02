@@ -7626,6 +7626,30 @@ test "block scope: no env allocated when a block binds nothing at its own scope"
     try std.testing.expectEqualStrings("3,number,20,10,42,99,4950", v.asStr());
 }
 
+test "arguments elision: functions that never name arguments skip building it, others correct" {
+    // Perf (#2): the tree-walker builds the `arguments` exotic object on every
+    // non-arrow call; when the source contains neither "arguments" nor "eval" it
+    // provably can't be referenced, so creation is skipped. This checks every way
+    // `arguments` can actually be reached still works — direct use, a nested arrow
+    // capturing it, `eval`, the sloppy mapped write-through, `arguments.callee`,
+    // and for-of — plus a function that doesn't use it (skips creation).
+    const ctx = try Context.createWith(std.testing.allocator, .{});
+    defer ctx.destroy();
+    const v = try ctx.evaluate(
+        \\var out = [];
+        \\function f(){ return arguments.length + ":" + arguments[0]; } out.push(f(7,8));   // 2:7
+        \\function g(a,b){ return a+b; } out.push(g(3,4));                                   // 7 (skipped)
+        \\function h(){ return eval("arguments.length"); } out.push(h(1,2,3));               // 3
+        \\function k(){ return (() => arguments[1])(); } out.push(k("x","y"));               // y
+        \\function m(a){ arguments[0]=99; return a; } out.push(m(1));                        // 99 (mapped)
+        \\function c(){ return arguments.callee === c; } out.push(c());                      // true
+        \\function it(){ var t=0; for (const x of arguments) t+=x; return t; } out.push(it(1,2,3,4)); // 10
+        \\out.join(",");
+    );
+    try std.testing.expect(v.isString());
+    try std.testing.expectEqualStrings("2:7,7,3,y,99,true,10", v.asStr());
+}
+
 test "switch scope: no env allocated when no case declares a block-scoped binding" {
     // Perf (#2): `evalSwitch` skips the CaseBlock env (and its hoisting/TDZ
     // instantiation) when no case declares a block-scoped binding, running the
