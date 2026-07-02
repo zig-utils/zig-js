@@ -566,17 +566,21 @@ pub const Environment = struct {
     pub fn assign(self: *Environment, name: []const u8, v: Value) EvalError!void {
         var env: ?*Environment = self;
         while (env) |e| {
+            // Hold `binding_lock` across BOTH the `getPtr` lookup and the value
+            // write. Under no-GIL a peer thread's `put`/`getOrPut` on this scope
+            // (e.g. globalDefine) can rehash `vars` concurrently, so an unlocked
+            // lookup here races the grow — the systemic no-GIL Environment race
+            // (Linux tsan-threadfuzz: globalDefine put vs assign getPtr). `ptr`
+            // stays valid for the write because no rehash can occur under the
+            // lock. Flag-gated, so the default engine stays lock-free.
+            e.lockBindings();
             if (e.vars.getPtr(name)) |ptr| {
                 gc_mod.barrierValue(v); // reassigned binding in a (GC-cell) env
-                // Lock `e` around the value write so it serializes with a
-                // concurrent marker reading `e.vars`. `ptr` stays valid: only a
-                // structural `put` rehashes, and a single mutator never races its
-                // own put here (the marker only reads).
-                e.lockBindings();
                 ptr.* = v;
                 e.unlockBindings();
                 return;
             }
+            e.unlockBindings();
             env = e.parent;
         }
         var root = self;
