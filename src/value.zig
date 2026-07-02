@@ -201,6 +201,21 @@ pub const ArrayBufferData = struct {
     pub fn unlockBuffer(self: *const ArrayBufferData) void {
         @constCast(self).lock.unlock();
     }
+
+    /// Whether a bulk-byte op (a `copyWithin` memmove, etc.) must hold
+    /// `lockBuffer` across pointer resolution through `bytes()` and the copy.
+    ///
+    /// A non-shared buffer's `resize` swaps `local_data` and then FREES the old
+    /// backing (interpreter `arrayBufferResizeFn`), so under no-GIL a peer
+    /// resizing mid-copy can pull the base out from under an in-flight memmove —
+    /// a use-after-free / torn copy. Locking serializes against the swap+free
+    /// exactly as `taRead`/`taWrite` do. Shared buffers never take it (storage is
+    /// page-reserved to the max and never freed on grow; the per-wrapper mutex
+    /// gives no cross-agent exclusion regardless), and the gate stays off in the
+    /// default single-threaded engine, where there is no concurrent resizer.
+    pub inline fn needsElementLock(self: *const ArrayBufferData) bool {
+        return !self.is_shared and Object.element_locks_enabled.load(.monotonic);
+    }
 };
 
 /// Read typed-array element `i` (within bounds, buffer attached) as a Number.
@@ -350,7 +365,7 @@ fn taElemPtr(ta: *const TypedArrayData, i: usize) ?[*]u8 {
 /// hardware atomic alone orders concurrent agents. The gate also stays off in
 /// the default single-threaded engine, where there is no concurrent resizer.
 inline fn atomicNeedsLock(buf: *const ArrayBufferData) bool {
-    return !buf.is_shared and Object.element_locks_enabled.load(.monotonic);
+    return buf.needsElementLock();
 }
 
 /// The element address as a typed pointer (alignment guaranteed, see above).

@@ -18774,6 +18774,17 @@ fn typedArrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args
         const target = try relIndex(self, if (args.len > 0) args[0] else Value.undef(), len, 0);
         const start = try relIndex(self, if (args.len > 1) args[1] else Value.undef(), len, 0);
         const end = try relIndex(self, if (args.len > 2) args[2] else Value.undef(), len, @floatFromInt(len));
+        // A peer thread's ArrayBuffer.resize() swaps local_data and immediately
+        // frees the old backing, so under no-GIL it could pull `bytes` out from
+        // under this bulk memmove — a use-after-free / torn copy (same class as
+        // the Atomics UAF). Hold lockBuffer across the live-length re-read and the
+        // copy so a concurrent resize/swap/free cannot occur mid-copy; the range
+        // is clamped to the length observed under the lock. Shared buffers (never
+        // freed on grow) and the single-threaded engine need no lock.
+        const abuf = ta.buffer.array_buffer.?;
+        const locked = abuf.needsElementLock();
+        if (locked) abuf.lockBuffer();
+        defer if (locked) abuf.unlockBuffer();
         const live_len = ta.currentLength() orelse return self.throwError("TypeError", "Cannot operate on a TypedArray whose buffer is detached or out of bounds");
         const count = @min(
             @min(if (end > start) end - start else 0, len - target),
@@ -18781,7 +18792,7 @@ fn typedArrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args
         );
         if (count > 0) {
             const esz = ta.kind.byteSize();
-            const bytes = ta.buffer.array_buffer.?.bytes();
+            const bytes = abuf.bytes();
             const base = ta.byte_offset;
             const dst = bytes[base + target * esz ..][0 .. count * esz];
             const src = bytes[base + start * esz ..][0 .. count * esz];

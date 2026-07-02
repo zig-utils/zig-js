@@ -86,6 +86,7 @@ const allowlist = [_][]const u8{
     "cve/mc-lock-cow-materialize-race.js",
     "cve/mc-lock-n3-install-vs-owner-add.js",
     "cve/mc-lock-stop-vs-park.js",
+    "cve/mc-prim-arraybuffer-resize-vs-copywithin.js",
     "cve/mc-prim-arraybuffer-transfer-vs-atomics.js",
     "cve/mc-prim-async-generator-resume-claim.js",
     "cve/mc-prim-generator-claim-leak-stack-overflow.js",
