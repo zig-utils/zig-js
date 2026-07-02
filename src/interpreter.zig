@@ -25721,6 +25721,17 @@ fn atomicsRawToValue(self: *Interpreter, kind: value.TAKind, raw: u64) value.Hos
 }
 
 /// A read-modify-write Atomics op (`add`/`and`/`or`/`xor`/`sub`/`exchange`).
+/// RevalidateAtomicAccess: coercing an Atomics index/value argument runs
+/// user `valueOf`/`Symbol.toPrimitive`, which may detach or shrink the buffer.
+/// Re-check just before the actual read/write — a detached (or now out-of-bounds)
+/// buffer is a TypeError.
+fn atomicsRevalidate(self: *Interpreter, ta: *value.TypedArrayData, i: usize) value.HostError!void {
+    const ab = ta.buffer.array_buffer orelse return self.throwError("TypeError", "ArrayBuffer is detached");
+    if (ab.isDetached()) return self.throwError("TypeError", "ArrayBuffer is detached");
+    const len = ta.currentLength() orelse return self.throwError("TypeError", "TypedArray is out of bounds for atomic access");
+    if (i >= len) return self.throwError("TypeError", "TypedArray is out of bounds for atomic access");
+}
+
 fn atomicsRMWFn(comptime op: enum { add, sub, and_, or_, xor, exchange }) value.NativeFn {
     return struct {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -25740,6 +25751,7 @@ fn atomicsRMWFn(comptime op: enum { add, sub, and_, or_, xor, exchange }) value.
             }
             const vd = try atomicsValidate(self, if (args.len > 0) args[0] else Value.undef(), if (args.len > 1) args[1] else Value.undef(), true, false, false);
             const operand = try atomicsCoerceRaw(self, vd.ta, if (args.len > 2) args[2] else Value.undef());
+            try atomicsRevalidate(self, vd.ta, vd.i); // the operand coercion may have detached the buffer
             // One hardware RMW — agents racing over a SharedArrayBuffer can
             // never lose an update or observe a torn element.
             const old_raw = switch (op) {
@@ -25760,6 +25772,7 @@ fn atomicsLoadFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (args.len > 0 and jsthread.isPropertyMode(self, args[0])) return jsthread.propLoad(self, args);
     const vd = try atomicsValidate(self, if (args.len > 0) args[0] else Value.undef(), if (args.len > 1) args[1] else Value.undef(), false, false, false);
+    try atomicsRevalidate(self, vd.ta, vd.i); // the index coercion may have detached the buffer
     return atomicsRawToValue(self, vd.ta.kind, value.taAtomicLoadRaw(vd.ta, vd.i));
 }
 fn atomicsStoreFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -25771,12 +25784,14 @@ fn atomicsStoreFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
     if (vd.ta.kind.isBigInt()) {
         const bv = try self.toBigIntValueImpl(arg_v, false);
         const as64: i64 = @truncate(bv.asObj().bigint);
+        try atomicsRevalidate(self, vd.ta, vd.i); // the value coercion may have detached the buffer
         value.taAtomicStoreRaw(vd.ta, vd.i, @bitCast(as64));
         return self.makeBigInt(as64);
     }
     // store returns the *integer* value written, un-reduced (ToInteger, not
     // wrapped to the element width).
     const n = try atomicsCoerce(self, vd.ta, arg_v);
+    try atomicsRevalidate(self, vd.ta, vd.i); // the value coercion may have detached the buffer
     value.taAtomicStoreRaw(vd.ta, vd.i, value.taNumToRaw(vd.ta.kind, n));
     return Value.num(n);
 }
@@ -25787,6 +25802,7 @@ fn atomicsCompareExchangeFn(ctx: *anyopaque, this: Value, args: []const Value) v
     const vd = try atomicsValidate(self, if (args.len > 0) args[0] else Value.undef(), if (args.len > 1) args[1] else Value.undef(), true, false, false);
     const expected = try atomicsCoerceRaw(self, vd.ta, if (args.len > 2) args[2] else Value.undef());
     const replacement = try atomicsCoerceRaw(self, vd.ta, if (args.len > 3) args[3] else Value.undef());
+    try atomicsRevalidate(self, vd.ta, vd.i); // the operand coercions may have detached the buffer
     const old_raw = value.taAtomicCasRaw(vd.ta, vd.i, expected, replacement);
     return atomicsRawToValue(self, vd.ta.kind, old_raw);
 }
