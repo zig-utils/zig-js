@@ -20226,7 +20226,15 @@ fn intlSupportedValuesOfFn(ctx: *anyopaque, this: Value, args: []const Value) va
         &sanctioned_units
     else
         return self.throwError("RangeError", "Intl.supportedValuesOf: invalid key");
-    for (items) |s| try arr.elements.append(arr.elementsAllocator(self.arena), Value.str(s));
+    // supportedValuesOf("timeZone") returns only PRIMARY (canonical) identifiers:
+    // an alias like `Etc/GMT`/`Etc/UTC`/`GMT` (all canonicalized to `UTC`) is
+    // omitted so the list has no two entries that would compare equal — a
+    // duplicate primary would break callers that assume distinct canonical zones.
+    const tz = std.mem.eql(u8, key, "timeZone");
+    for (items) |s| {
+        if (tz and !std.mem.eql(u8, canonicalTimeZoneName(s), s)) continue;
+        try arr.elements.append(arr.elementsAllocator(self.arena), Value.str(s));
+    }
     return Value.obj(arr);
 }
 
