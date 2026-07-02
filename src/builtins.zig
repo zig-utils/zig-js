@@ -1701,19 +1701,24 @@ pub fn defineOneResult(self: *Interpreter, target: *value.Object, key: []const u
     // this generic path only for an accessor descriptor — is a redefinition of an
     // existing data property whose implicit attributes are all true, not the
     // creation of a brand-new (all-false) property.
+    // Element-store reads go through the gated locked accessors: a peer thread's
+    // `growDenseElement` mutates `elements` under `lockElements`, so raw
+    // `elements.items` reads here race the grow on the no-GIL path (Linux
+    // tsan-nogil-corpus: main objectDefineProperty vs worker Atomics.store grow).
+    // `element_locks_enabled` is false in the default engine → these are lock-free.
     var dense_elem_index: ?usize = null;
     if (target.getAccessor(key) == null) {
         if (arrayIndexOf(key)) |i| {
-            if (i < target.elements.items.len and !target.isHole(i)) dense_elem_index = i;
+            if (target.denseElementPresent(i)) dense_elem_index = i;
         }
     }
     if (target.is_array and !std.mem.eql(u8, key, "length")) {
         if (arrayIndexOf(key)) |i| {
-            const old_len = @max(target.elements.items.len, target.array_len);
+            const old_len = target.arrayLength();
             if (i >= old_len and target.attrs != null and !target.getAttr("length").writable) return false;
         }
     }
-    const cur_data = target.getOwn(key) orelse (if (dense_elem_index) |i| target.elements.items[i] else null);
+    const cur_data = target.getOwn(key) orelse (if (dense_elem_index) |i| target.denseElement(i) else null);
     const cur_acc = target.getAccessor(key);
     const exists = cur_data != null or cur_acc != null;
     // ValidateAndApplyPropertyDescriptor: reject (TypeError) any change that the
