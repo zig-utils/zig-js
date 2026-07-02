@@ -1623,10 +1623,16 @@ pub const Interpreter = struct {
             e.lockBindings();
             const alias = e.aliases.get(name);
             const found_var: ?Value = if (alias == null) e.vars.get(name) else null;
+            // `consts` membership must be read under the SAME `binding_lock` as
+            // `vars`/`aliases`: a peer thread's `putConst` writes `consts` while
+            // holding that lock, so reading it after `unlockBindings` is the same
+            // no-GIL Environment data race (Linux-TSan `tsan-parallel-js`). Only
+            // meaningful for a resolved global binding, so guard on that first.
+            const global_shadowable = found_var != null and e.parent == null and !e.consts.contains(name);
             e.unlockBindings();
             if (alias) |a| return a.env.get(a.name);
             if (found_var) |v| {
-                if (e.parent == null and !e.consts.contains(name)) {
+                if (global_shadowable) {
                     const g = self.currentGlobalObject() orelse return v;
                     if (objectHasOwn(g, name)) return try self.getProperty(Value.obj(g), name);
                 }
