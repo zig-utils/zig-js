@@ -84,7 +84,9 @@ pub fn numberFn(ctx: *anyopaque, this: Value, args: []const Value) HostError!Val
         // operand converts to the nearest Number (Number(10n) === 10).
         if (v.isObject() and !v.asObj().is_bigint) {
             if (v.asObj().is_symbol) return ip.throwError("TypeError", "Cannot convert a Symbol value to a number");
-            break :blk (try ip.toPrimitive(v, .number)).toNumber();
+            const prim = try ip.toPrimitive(v, .number);
+            if (prim.isObject() and prim.asObj().is_symbol) return ip.throwError("TypeError", "Cannot convert a Symbol value to a number");
+            break :blk prim.toNumber();
         }
         break :blk v.toNumber();
     };

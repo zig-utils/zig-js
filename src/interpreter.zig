@@ -13057,7 +13057,11 @@ pub const Interpreter = struct {
                         // produces the boxed primitive at this position in the
                         // OrdinaryToPrimitive order, so do not continue to a later
                         // user toString accessor for default/number hints.
-                    else if (std.mem.eql(u8, m, "valueOf") and o.prim != null and c.prim != null and fv.isCallable()) builtin_wrapper_value_of = true
+                    else if (std.mem.eql(u8, m, "valueOf") and o.prim != null and fv.isCallable()) {
+                        const native_wrapper_value_of = fv.isObject() and
+                            (fv.asObj().native == symbolValueOfFn or fv.asObj().native == bigIntValueOfFn);
+                        if (c.prim != null or native_wrapper_value_of) builtin_wrapper_value_of = true;
+                    }
                         // A callable native `toString` thunk yields a primitive string
                         // (the built-in coercion below); it must run at *this* position
                         // in the hint order — so stop here rather than trying a later
@@ -15228,19 +15232,8 @@ fn host262CreateRealmFn(ctx: *anyopaque, this: Value, args: []const Value) value
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const a = self.arena;
-    const genv = try gc_mod.allocEnv(a);
-    self.initEnvironment(genv, null, true);
-    const gobj = try gc_mod.allocObj(a);
-    gobj.* = .{};
-    // Share the creating realm's well-known symbols with the new realm.
-    const parent_symbol: ?*value.Object = if (self.env.get("Symbol")) |sv| (if (sv.isObject()) sv.asObj() else null) else null;
-    try installGlobalsInner(genv, self.root_shape, parent_symbol);
-    try genv.put("globalThis", Value.obj(gobj));
-    try mirrorGlobalsOnto(genv, gobj, self.root_shape);
-    // Point the new realm's own `$262.global` at its global object.
-    if (genv.get("$262")) |d| {
-        if (d.isObject()) try self.setProp(d.asObj(), "global", Value.obj(gobj));
-    }
+    const genv = try makeChildRealm(self);
+    const gobj = (genv.get("globalThis") orelse return self.throwError("TypeError", "$262.createRealm failed")).asObj();
     // The realm record handed back to the caller (in the caller's realm).
     const realm = (try self.newObject()).asObj();
     try self.setProp(realm, "global", Value.obj(gobj));
