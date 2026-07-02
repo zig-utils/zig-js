@@ -12984,14 +12984,18 @@ pub const Interpreter = struct {
             if (err == error.Throw and t.catch_block != null) {
                 const exc = self.exception;
                 self.exception = Value.undef();
-                const catch_env = try gc_mod.allocEnv(self.arena);
-                self.initEnvironment(catch_env, self.env, false);
                 const saved = self.env;
-                self.env = catch_env;
                 // Bind the catch target (identifier or destructuring pattern)
-                // into the catch scope. A simple identifier binding is Annex
-                // B.3.5-exempt from the eval var-conflict check.
+                // into a dedicated catch scope. A simple identifier binding is
+                // Annex B.3.5-exempt from the eval var-conflict check. With an
+                // ES2019 optional catch binding (`catch { ... }`, no parameter)
+                // nothing is bound, so the catch-scope environment is pure
+                // overhead — the catch block establishes its own block scope for
+                // any lexical declarations. Skip the allocation in that case.
                 if (t.catch_param) |p| {
+                    const catch_env = try gc_mod.allocEnv(self.arena);
+                    self.initEnvironment(catch_env, self.env, false);
+                    self.env = catch_env;
                     if (p.* == .identifier) catch_env.is_catch_param = true;
                     try self.bindPattern(p, exc, true);
                 }

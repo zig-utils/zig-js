@@ -7626,6 +7626,35 @@ test "block scope: no env allocated when a block binds nothing at its own scope"
     try std.testing.expectEqualStrings("3,number,20,10,42,99,4950", v.asStr());
 }
 
+test "catch scope: optional catch binding skips the catch-scope env, params still bind" {
+    // Perf (allocation-elision family): `evalTry` allocates a dedicated catch
+    // environment only when a catch parameter is present. An ES2019 optional
+    // catch binding (`catch { ... }`) binds nothing, so the env is elided and
+    // the catch block runs in the enclosing scope — its own lexical decls still
+    // get an isolated block scope, so nothing leaks. This checks the elided path
+    // and the retained param/destructuring paths stay observationally identical.
+    // `arguments` forces the tree-walker (where catch envs live).
+    const ctx = try Context.createWith(std.testing.allocator, .{});
+    defer ctx.destroy();
+    const v = try ctx.evaluate(
+        \\function run() {
+        \\  var _tw = arguments.length; // force the tree-walker
+        \\  var out = [];
+        \\  try { throw 1; } catch { out.push("bind-less"); }          // elided env
+        \\  let leak = "outer";
+        \\  try { throw 2; } catch { let leak = "inner"; out.push(leak); } // block scope isolates
+        \\  out.push(leak);                                             // outer let untouched -> "outer"
+        \\  try { throw 7; } catch (e) { out.push(e * 2); }            // param still binds -> 14
+        \\  try { throw { a: 3, b: 4 }; } catch ({ a, b }) { out.push(a + b); } // destructuring -> 7
+        \\  let cap; try { throw 9; } catch { let z = 99; cap = () => z; } out.push(cap()); // capture in bind-less catch
+        \\  return out.join(",");
+        \\}
+        \\run();
+    );
+    try std.testing.expect(v.isString());
+    try std.testing.expectEqualStrings("bind-less,inner,outer,14,7,99", v.asStr());
+}
+
 test "deep stack: spawned JS threads get a large native stack for deep recursion" {
     // Coverage (deep-stack witness): a spawned `Thread` runs on a 64 MiB stack,
     // so JS recursion in a worker reaches the thousands-of-frames the PR-249
