@@ -1895,6 +1895,19 @@ fn applyProperties(self: *Interpreter, target: *value.Object, props: Value) Host
     }
 }
 
+/// IsTypedArrayFixedLength: false for a length-tracking view, or a view over a
+/// NON-shared resizable ArrayBuffer (its length can change). A view over a fixed
+/// buffer — or a growable SHARED buffer, which can only grow — is fixed-length.
+/// A TypedArray's [[PreventExtensions]] returns false (→ Object.preventExtensions/
+/// seal/freeze throw, Reflect.preventExtensions returns false) when this is false.
+pub fn isTypedArrayFixedLength(o: *value.Object) bool {
+    const ta = o.typed_array orelse return true;
+    if (ta.track_length) return false;
+    const ab = ta.buffer.array_buffer orelse return true;
+    if (ab.max_byte_length != null and !ab.is_shared) return false;
+    return true;
+}
+
 pub fn objectPreventExtensions(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
     _ = this;
     const self = interp(ctx);
@@ -1904,6 +1917,8 @@ pub fn objectPreventExtensions(ctx: *anyopaque, this: Value, args: []const Value
         if (o.asObj().proxy_handler != null or o.asObj().proxy_revoked) {
             if (!try self.proxyPreventExt(o.asObj()))
                 return self.throwError("TypeError", "Cannot prevent extensions on proxy target");
+        } else if (!isTypedArrayFixedLength(o.asObj())) {
+            return self.throwError("TypeError", "Cannot prevent extensions on a length-variable TypedArray");
         } else o.asObj().extensible = false;
     }
     return o;
@@ -1940,11 +1955,15 @@ pub fn objectFreeze(ctx: *anyopaque, this: Value, args: []const Value) HostError
 /// returns false — or throws — surfaces a TypeError, and the trap's reported
 /// keys drive the loop). An ordinary object uses the direct attribute path.
 fn setIntegrityLevel(ctx: *anyopaque, self: *Interpreter, o: *value.Object, freeze: bool) HostError!void {
-    if (freeze) if (o.typed_array) |ta| {
-        const ab = ta.buffer.array_buffer orelse return self.throwError("TypeError", "TypedArray has no backing ArrayBuffer");
-        if (ab.max_byte_length != null)
-            return self.throwError("TypeError", "Cannot freeze a TypedArray backed by a resizable ArrayBuffer");
-    };
+    // SetIntegrityLevel on a TypedArray throws unless the view is a FIXED-LENGTH
+    // EMPTY one: [[PreventExtensions]] fails for a length-variable view (length-
+    // tracking, or over a non-shared resizable buffer; a growable SHARED buffer's
+    // view stays fixed-length), and a non-empty view can't have its integer-indexed
+    // elements redefined non-configurable, so the per-property step throws.
+    if (o.typed_array) |ta| {
+        if (!isTypedArrayFixedLength(o) or (ta.currentLength() orelse 0) > 0)
+            return self.throwError("TypeError", "Cannot seal or freeze a TypedArray with elements");
+    }
     if (o.proxy_handler != null or o.proxy_revoked or interpreter.isModuleNs(o)) {
         if (o.proxy_handler != null or o.proxy_revoked) {
             if (!try self.proxyPreventExt(o))

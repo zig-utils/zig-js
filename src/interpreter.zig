@@ -15336,6 +15336,9 @@ fn reflectPreventExtFn(ctx: *anyopaque, this: Value, args: []const Value) value.
         return self.throwError("TypeError", "Reflect.preventExtensions called on non-object");
     if (target.asObj().proxy_handler != null or target.asObj().proxy_revoked)
         return Value.boolVal(try self.proxyPreventExt(target.asObj()));
+    // A length-variable TypedArray's [[PreventExtensions]] returns false (Reflect
+    // reports it as a boolean rather than throwing, unlike Object.preventExtensions).
+    if (!builtins.isTypedArrayFixedLength(target.asObj())) return Value.boolVal(false);
     target.asObj().extensible = false;
     return Value.boolVal(true);
 }
