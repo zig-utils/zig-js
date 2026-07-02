@@ -1827,14 +1827,14 @@ fn jsInt32(n: f64) i32 {
 
 // One FIFO of property waiters per threaded realm, stored on `Gil`.
 // `Gil.prop_mutex` serializes the lists independently from the context GIL;
-// sync tickets live on waiting thread stacks and are unlinked before wait
-// returns, while async tickets are page-allocator owned until settlement.
+// sync tickets are page-allocator owned and unlinked before wait returns,
+// while async tickets are page-allocator owned until settlement.
 const PropTicket = struct {
     obj: *value.Object,
     key: []const u8,
     cond: std.Io.Condition = .init,
     woken: bool = false,
-    /// True while `Gil.prop_waiters` owns a pointer to this stack ticket.
+    /// True while `Gil.prop_waiters` owns a pointer to this sync ticket.
     /// Notify unlinks matching tickets before signaling them; timeout and
     /// termination paths unlink their own ticket before returning.
     queued: bool = false,
@@ -2264,18 +2264,25 @@ pub fn propWait(self: *Interpreter, args: []const Value, timeout_ns: ?u64) value
     if (!self.main_can_block)
         return self.throwError("TypeError", "Atomics.wait cannot be called from the current thread.");
     const key = prop_alloc.dupe(u8, key_tmp) catch return error.OutOfMemory;
-    defer prop_alloc.free(key);
-    var ticket = PropTicket{ .obj = o, .key = key };
+    const ticket = prop_alloc.create(PropTicket) catch {
+        prop_alloc.free(key);
+        return error.OutOfMemory;
+    };
+    ticket.* = .{ .obj = o, .key = key };
+    defer {
+        prop_alloc.destroy(ticket);
+        prop_alloc.free(key);
+    }
     const g = self.gil.?;
     g.lockPropWaiters();
     var linked = false;
     defer {
-        if (linked) removePropTicketLocked(g, &ticket);
+        if (linked) removePropTicketLocked(g, ticket);
         g.unlockPropWaiters();
     }
     const cur_locked = try ownDataOrThrow(self, o, key_tmp, "Atomics.wait: object has no own data property");
     if (!sameValueZero(cur_locked, expected)) return Value.str("not-equal");
-    g.prop_waiters.append(prop_alloc, @ptrCast(&ticket)) catch return error.OutOfMemory;
+    g.prop_waiters.append(prop_alloc, @ptrCast(ticket)) catch return error.OutOfMemory;
     ticket.queued = true;
     linked = true;
     bumpContention("property_waits");
@@ -2301,7 +2308,7 @@ pub fn propWait(self: *Interpreter, args: []const Value, timeout_ns: ?u64) value
             tick_ns = @min(tick_ns, @as(u64, @intCast(d - now)));
         }
         bumpContention("property_wait_parks");
-        waitPropTicketTimeout(self, g, &ticket, .{ .duration = .{
+        waitPropTicketTimeout(self, g, ticket, .{ .duration = .{
             .raw = .fromNanoseconds(tick_ns),
             .clock = .awake,
         } }) catch {};

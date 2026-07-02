@@ -348,9 +348,9 @@ threading architecture:
   a pending-waiter countdown instead of rescanning the wake list until every
   ticket acknowledges.
   Property-mode `Atomics.notify` now stable-compacts matching waiters in one
-  pass: sync stack tickets are
-  unlinked before signal, and matching `waitAsync` tickets are collected without
-  repeated `orderedRemove` shifts. Individual sync wait timeout/termination
+  pass: heap-owned sync tickets are unlinked before signal, and matching
+  `waitAsync` tickets are collected without repeated `orderedRemove` shifts.
+  Individual sync wait timeout/termination
   cleanup also stable-compacts the waiter table in one pass instead of
   front-shifting the remaining waiters, and timeout polling plus realm teardown
   now scan property `waitAsync` tickets once instead of removing one middle

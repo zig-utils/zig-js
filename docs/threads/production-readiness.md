@@ -201,8 +201,8 @@ Known performance/maturity work:
   handoff completion uses a pending-waiter countdown instead of rescanning the
   wake list until every ticket acknowledges.
 - Property-mode `Atomics.notify` stable-compacts matching waiter queues in one
-  pass. Sync wait stack tickets are unlinked before signal, so awakened peers no
-  longer each rescan and front-shift the table on return; matching `waitAsync`
+  pass. Heap-owned sync wait tickets are unlinked before signal, so awakened
+  peers no longer each rescan and front-shift the table on return; matching `waitAsync`
   tickets are collected for post-unlock settlement without repeated middle
   removals. Individual sync wait timeout/termination cleanup now stable-compacts
   the waiter table in one pass instead of front-shifting the remaining waiters.

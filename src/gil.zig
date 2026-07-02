@@ -33,7 +33,8 @@ pub const Gil = struct {
     /// lock entirely when no task has been enqueued.
     tasks_queued: std.atomic.Value(usize) = .init(0),
     /// Property-mode `Atomics.wait` waiters for this realm. Entries are
-    /// type-erased `*jsthread.PropTicket` and live on waiting thread stacks.
+    /// type-erased `*jsthread.PropTicket` and are page-allocator owned for the
+    /// duration of the blocking wait.
     prop_waiters: std.ArrayListUnmanaged(*anyopaque) = .empty,
     /// Property-mode `Atomics.waitAsync` tickets for this realm. Entries are
     /// type-erased `*jsthread.PropAsyncTicket` and are page-allocator owned.
