@@ -7486,6 +7486,34 @@ test "enable_gc: collectGarbage reclaims unreachable objects, keeps reachable" {
     try std.testing.expectEqual(@as(f64, 4), r.asNum()); // 1 + 3
 }
 
+test "for(let) per-iteration binding: reuse fast path preserves closure-capture semantics" {
+    // Perf (#2 GC maturity): a `for (let …)` loop reuses one per-iteration
+    // environment across iterations when nothing captures it (removing the
+    // per-iteration GC-cell allocation — ~3× on a tree-walked tight loop), but
+    // must still give each iteration a fresh binding when a closure captures it.
+    // The `arguments` reference forces the tree-walker (where the per-iteration
+    // env lives; the VM uses a reused frame slot). Guards the correctness of the
+    // `Environment.captured` reuse decision.
+    const ctx = try Context.createWith(std.testing.allocator, .{});
+    defer ctx.destroy();
+    const v = try ctx.evaluate(
+        \\function run() {
+        \\  var _tw = arguments.length; // force the tree-walker
+        \\  var caps = [];
+        \\  for (let i = 0; i < 5; i++) caps.push(function(){ return i; }); // captured: distinct per iter
+        \\  var captured = caps.map(function(f){ return f(); }).join(",");
+        \\  var sum = 0;
+        \\  for (let j = 0; j < 1000; j++) sum += j; // uncaptured: reuse fast path
+        \\  var nested = [];
+        \\  for (let k = 0; k < 3; k++) { { nested.push(() => k); } } // capture through a nested block
+        \\  return captured + "|" + sum + "|" + nested.map(g => g()).join(",");
+        \\}
+        \\run();
+    );
+    try std.testing.expect(v.isString());
+    try std.testing.expectEqualStrings("0,1,2,3,4|499500|0,1,2", v.asStr());
+}
+
 test "enable_gc: mid-script collection reclaims garbage during a running loop (bounded heap)" {
     // Phase 7 / M1 item (a): the GC collects *while JS runs* (at the engine step
     // checkpoints), not just at quiescent points. A long loop allocating

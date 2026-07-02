@@ -390,6 +390,14 @@ pub const Environment = struct {
     /// Internal accounting for GC-owned duplicated binding-name bytes.
     gc_name_bytes_live: ?*usize = null,
     parent: ?*Environment = null,
+    /// Set when a closure captures this environment (or a descendant, via
+    /// `markCaptured` walking the parent chain at closure creation). A `for
+    /// (let …)` loop uses it to decide whether each iteration needs a fresh
+    /// per-iteration binding environment: the per-iteration copy is only
+    /// observable through a closure that captured that iteration's binding, so an
+    /// uncaptured loop env is reused across iterations instead of reallocated —
+    /// removing the per-iteration GC-cell allocation from the common tight loop.
+    captured: bool = false,
     /// True for a function or the global scope (a *variable* environment); false
     /// for a block `{…}` scope. `var`/function declarations hoist to the nearest
     /// variable environment, while `let`/`const`/`class` bind in the block.
@@ -527,6 +535,20 @@ pub const Environment = struct {
             env = e.parent;
         }
         return null;
+    }
+
+    /// Mark this environment and its ancestors as captured by a closure. A
+    /// closure resolves free names through its whole lexical chain, so capturing
+    /// it makes every ancestor binding reachable — including any enclosing
+    /// `for (let …)` per-iteration env, which then must not be reused. Walks up
+    /// only until an already-captured env (or the top): the first closure marks
+    /// the chain, later ones short-circuit, so it stays cheap.
+    pub fn markCaptured(self: *Environment) void {
+        var e: ?*Environment = self;
+        while (e) |env| : (e = env.parent) {
+            if (env.captured) break;
+            env.captured = true;
+        }
     }
 
     /// The nearest enclosing variable environment (function or global), where
@@ -3122,9 +3144,15 @@ pub const Interpreter = struct {
             }
             last = try self.eval(body);
             if (self.loopSignal(my_label)) |stop| if (stop) break;
-            // CreatePerIterationEnvironment: copy this iteration's bindings into a
-            // fresh env, then run the update against it.
-            if (lexical) self.env = try self.perIterEnv(outer, names, self.env);
+            // CreatePerIterationEnvironment: per spec each iteration gets a fresh
+            // copy of the loop bindings, so a closure created this iteration
+            // captures *this* iteration's value. That copy is only observable
+            // through such a closure — so when nothing captured this iteration's
+            // env (`captured` unset), reuse it in place and let the update mutate
+            // it, skipping a GC-cell allocation per iteration (the tight-loop
+            // fast path). If it was captured, allocate the fresh copy so the
+            // captured binding keeps its value.
+            if (lexical and self.env.captured) self.env = try self.perIterEnv(outer, names, self.env);
             if (update) |u| _ = try self.eval(u);
         }
         return last;
@@ -3681,6 +3709,10 @@ pub const Interpreter = struct {
     }
 
     fn makeFunction(self: *Interpreter, fnode: *const ast.FunctionNode, closure: *Environment) EvalError!Value {
+        // The closure keeps `closure` (and its whole ancestor chain) reachable, so
+        // an enclosing `for (let …)` loop must give each iteration its own binding
+        // env rather than reusing one. Record that here (see `Environment.captured`).
+        closure.markCaptured();
         const func = try gc_mod.allocFunction(self.arena);
         func.* = .{
             .params = fnode.params,
