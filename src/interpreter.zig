@@ -2775,6 +2775,9 @@ pub const Interpreter = struct {
             const next_method = try self.getProperty(iter_obj, "next");
             const next_root = try self.pushTempRoot(next_method);
             defer self.restoreTempRoots(next_root);
+            var ienv: IterEnvState = .{};
+            const iter_env_mark = self.gc_env_roots.items.len;
+            defer self.gc_env_roots.shrinkRetainingCapacity(iter_env_mark);
             while (true) {
                 const res0 = try self.callValueWithThis(next_method, &.{}, iter_obj);
                 const res0_root = try self.pushTempRoot(res0);
@@ -2789,11 +2792,12 @@ pub const Interpreter = struct {
                 const saved_env = self.env;
                 defer self.env = saved_env;
                 // The per-iteration env also holds a `for (using x of …)` resource,
-                // disposed (DisposeResources) at the END of each iteration.
+                // disposed (DisposeResources) at the END of each iteration — so a
+                // `using` loop (`dispose != 0`) must get a fresh env each iteration
+                // (no reuse); otherwise the env is reused in place while uncaptured.
                 var iter_env: ?*Environment = null;
                 if (lexical) {
-                    const e = try gc_mod.allocEnv(self.arena);
-                    self.initEnvironment(e, saved_env, false);
+                    const e = try self.iterBindingEnv(&ienv, saved_env, dispose == 0);
                     self.env = e;
                     iter_env = e;
                 }
@@ -2856,6 +2860,9 @@ pub const Interpreter = struct {
                 .undefined, .null => {}, // iterating null/undefined is a no-op
                 else => {
                     const o = try self.toObject(iter);
+                    var ienv: IterEnvState = .{};
+                    const iter_env_mark = self.gc_env_roots.items.len;
+                    defer self.gc_env_roots.shrinkRetainingCapacity(iter_env_mark);
                     // EnumerateObjectProperties: own + inherited enumerable string
                     // keys with prototype-chain shadowing (see forInKeyList).
                     for (try self.forInKeyList(o)) |k| {
@@ -2865,11 +2872,9 @@ pub const Interpreter = struct {
                         if (!try self.hasPropertyResult(o, k)) continue;
                         const saved_env = self.env;
                         defer self.env = saved_env;
-                        if (lexical) {
-                            const ie = try gc_mod.allocEnv(self.arena);
-                            self.initEnvironment(ie, saved_env, false);
-                            self.env = ie;
-                        }
+                        // for-in has no per-iteration `using` resource, so the
+                        // binding env is always reusable while uncaptured.
+                        if (lexical) self.env = try self.iterBindingEnv(&ienv, saved_env, true);
                         try self.bindLoopTarget(decl_kind, target, Value.str(k));
                         last = try self.eval(body);
                         if (self.loopSignal(my_label)) |stop| if (stop) break;
@@ -3178,6 +3183,42 @@ pub const Interpreter = struct {
             if (prev.isConst(n)) |is_const| {
                 if (is_const) try e.putConst(n, v) else try e.put(n, v);
             } else try e.put(n, v);
+        }
+        return e;
+    }
+
+    /// Per-iteration binding-env state for a `for-of`/`for-in` loop, threaded
+    /// across iterations by `iterBindingEnv`.
+    const IterEnvState = struct {
+        /// The env being reused in place (rooted once in `gc_env_roots`), or null.
+        reuse: ?*Environment = null,
+        /// Once any iteration's env is captured we stop reusing for the rest of the
+        /// loop, so a captured binding is never re-bound and its closure keeps that
+        /// iteration's value.
+        disabled: bool = false,
+    };
+
+    /// Choose this iteration's per-iteration binding environment for a
+    /// `for-of`/`for-in` loop. Reuses the same env in place while nothing captures
+    /// it (the fast path — no GC-cell allocation per iteration, as the target is
+    /// re-bound via `put`/`putConst` which overwrites the value and preserves
+    /// const-ness), and roots it once in `gc_env_roots` so it survives a
+    /// collection between iterations (unlike `for(;;)`, these loops restore
+    /// `self.env` to the outer scope each iteration, so the reused env would
+    /// otherwise be unrooted). Falls back to a fresh child of `outer` once the
+    /// reuse env is captured, or when reuse is disallowed (`allow_reuse` false —
+    /// a per-iteration `using` resource must get its own env to dispose).
+    fn iterBindingEnv(self: *Interpreter, state: *IterEnvState, outer: *Environment, allow_reuse: bool) EvalError!*Environment {
+        if (state.reuse) |r| {
+            if (!r.captured) return r; // reuse in place — no allocation
+            state.reuse = null; // captured: abandon it (kept alive by its closure) and stop reusing
+            state.disabled = true;
+        }
+        const e = try gc_mod.allocEnv(self.arena);
+        self.initEnvironment(e, outer, false);
+        if (allow_reuse and !state.disabled) {
+            state.reuse = e;
+            try self.gc_env_roots.append(self.arena, e); // root across iterations (shrunk at loop exit)
         }
         return e;
     }

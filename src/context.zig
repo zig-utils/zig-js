@@ -7514,6 +7514,31 @@ test "for(let) per-iteration binding: reuse fast path preserves closure-capture 
     try std.testing.expectEqualStrings("0,1,2,3,4|499500|0,1,2", v.asStr());
 }
 
+test "for-of/for-in per-iteration binding: reuse fast path preserves closure-capture semantics" {
+    // Perf (#2): the same per-iteration-env reuse extended to `for-of`/`for-in`.
+    // These restore `self.env` to the outer scope each iteration, so a reused env
+    // is rooted in `gc_env_roots` to survive a mid-iteration collection; once an
+    // iteration's env is captured the loop stops reusing it so the captured
+    // binding keeps its value. `arguments` forces the tree-walker.
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    defer ctx.destroy();
+    const v = try ctx.evaluate(
+        \\function run() {
+        \\  var _tw = arguments.length; // force the tree-walker
+        \\  var a = []; for (let x of [10, 20, 30]) a.push(() => x);          // let capture: distinct
+        \\  var b = []; for (const y of [1, 2, 3]) b.push(() => y);           // const capture: distinct
+        \\  var s = 0; for (const z of [1, 2, 3, 4, 5]) s += z;               // uncaptured: reuse fast path
+        \\  var o = { p: 1, q: 2, r: 3 }; var k = []; for (let key in o) k.push(() => key); // for-in capture
+        \\  var m = []; for (let i of [0, 1, 2, 3]) { if (i % 2 === 0) m.push(() => i); }    // mixed capture
+        \\  return a.map(f=>f()).join(",") + "|" + b.map(f=>f()).join(",") + "|" + s + "|" +
+        \\         k.map(f=>f()).sort().join(",") + "|" + m.map(f=>f()).join(",");
+        \\}
+        \\run();
+    );
+    try std.testing.expect(v.isString());
+    try std.testing.expectEqualStrings("10,20,30|1,2,3|15|p,q,r|0,2", v.asStr());
+}
+
 test "enable_gc: mid-script collection reclaims garbage during a running loop (bounded heap)" {
     // Phase 7 / M1 item (a): the GC collects *while JS runs* (at the engine step
     // checkpoints), not just at quiescent points. A long loop allocating
