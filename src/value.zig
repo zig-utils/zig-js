@@ -333,6 +333,26 @@ fn taElemPtr(ta: *const TypedArrayData, i: usize) ?[*]u8 {
     return b.ptr + off;
 }
 
+/// Whether an atomic op on `buf` must hold `lockBuffer` around the WHOLE op
+/// (element-pointer resolution through `bytes()` plus the hardware atomic).
+///
+/// A non-shared ArrayBuffer's `resize` swaps `local_data` and then FREES the old
+/// backing (interpreter `arrayBufferResizeFn`), so a peer thread resizing under
+/// no-GIL can otherwise pull the base out from under an atomic that already
+/// resolved its element pointer — a use-after-free that reads a stale/foreign
+/// value. Serializing against the swap+free (exactly as `taRead`/`taWrite` do)
+/// closes the window: an atomic holding the lock blocks the resize's swap, and
+/// once the resize has swapped every later atomic resolves the fresh base.
+///
+/// Shared buffers never take this lock: their storage is page-reserved to the
+/// maximum and never freed on grow, and each agent holds a distinct wrapper (so
+/// this per-wrapper mutex gives no cross-agent exclusion regardless) — the
+/// hardware atomic alone orders concurrent agents. The gate also stays off in
+/// the default single-threaded engine, where there is no concurrent resizer.
+inline fn atomicNeedsLock(buf: *const ArrayBufferData) bool {
+    return !buf.is_shared and Object.element_locks_enabled.load(.monotonic);
+}
+
 /// The element address as a typed pointer (alignment guaranteed, see above).
 fn elemAs(comptime T: type, p: [*]u8) *T {
     return @ptrCast(@alignCast(p));
@@ -369,6 +389,12 @@ pub fn taNumToRaw(kind: TAKind, num: f64) u64 {
 }
 
 pub fn taAtomicLoadRaw(ta: *const TypedArrayData, i: usize) u64 {
+    const buf = ta.buffer.array_buffer.?;
+    const locked = atomicNeedsLock(buf);
+    if (locked) buf.lockBuffer();
+    defer {
+        if (locked) buf.unlockBuffer();
+    }
     const p = taElemPtr(ta, i) orelse return 0;
     return switch (ta.kind.byteSize()) {
         1 => @atomicLoad(u8, elemAs(u8, p), .seq_cst),
@@ -379,6 +405,12 @@ pub fn taAtomicLoadRaw(ta: *const TypedArrayData, i: usize) u64 {
 }
 
 pub fn taAtomicStoreRaw(ta: *const TypedArrayData, i: usize, raw: u64) void {
+    const buf = ta.buffer.array_buffer.?;
+    const locked = atomicNeedsLock(buf);
+    if (locked) buf.lockBuffer();
+    defer {
+        if (locked) buf.unlockBuffer();
+    }
     const p = taElemPtr(ta, i) orelse return;
     switch (ta.kind.byteSize()) {
         1 => @atomicStore(u8, elemAs(u8, p), @truncate(raw), .seq_cst),
@@ -391,6 +423,12 @@ pub fn taAtomicStoreRaw(ta: *const TypedArrayData, i: usize, raw: u64) void {
 /// One atomic read-modify-write; returns the previous raw bits. Integer ops
 /// wrap modulo the element width, matching the spec's modular arithmetic.
 pub fn taAtomicRmwRaw(comptime op: std.builtin.AtomicRmwOp, ta: *const TypedArrayData, i: usize, raw: u64) u64 {
+    const buf = ta.buffer.array_buffer.?;
+    const locked = atomicNeedsLock(buf);
+    if (locked) buf.lockBuffer();
+    defer {
+        if (locked) buf.unlockBuffer();
+    }
     const p = taElemPtr(ta, i) orelse return 0;
     return switch (ta.kind.byteSize()) {
         1 => @atomicRmw(u8, elemAs(u8, p), op, @truncate(raw), .seq_cst),
@@ -403,6 +441,12 @@ pub fn taAtomicRmwRaw(comptime op: std.builtin.AtomicRmwOp, ta: *const TypedArra
 /// One atomic compare-exchange; returns the previous raw bits (== `expected`
 /// when the swap happened, per `Atomics.compareExchange` semantics).
 pub fn taAtomicCasRaw(ta: *const TypedArrayData, i: usize, expected: u64, replacement: u64) u64 {
+    const buf = ta.buffer.array_buffer.?;
+    const locked = atomicNeedsLock(buf);
+    if (locked) buf.lockBuffer();
+    defer {
+        if (locked) buf.unlockBuffer();
+    }
     const p = taElemPtr(ta, i) orelse return 0;
     switch (ta.kind.byteSize()) {
         1 => {
