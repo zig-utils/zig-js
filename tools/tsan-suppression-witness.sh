@@ -60,7 +60,15 @@ for c in $CASES; do
 
   if ! TSAN_OPTIONS="halt_on_error=1 suppressions=$TSAN_SUPPRESSIONS" timeout "$WITNESS_TIMEOUT" "$BIN" parallel-js one "$c" > "$supp_log" 2>&1; then
     echo "::error::$c still fails WITH suppressions"
-    tail -8 "$supp_log"
+    # Surface the unsuppressed race report (frames + both accesses), not just the
+    # abort backtrace `tail` shows — this names which engine frame escaped the
+    # suppressions, the diagnostic needed to fix the underlying race.
+    if grep -q "WARNING: ThreadSanitizer" "$supp_log"; then
+      echo "--- unsuppressed ThreadSanitizer report (suppressions active) ---"
+      awk '/WARNING: ThreadSanitizer/{p=1} p{print} /^.*SUMMARY: ThreadSanitizer/{if(p){exit}}' "$supp_log"
+    else
+      tail -20 "$supp_log"
+    fi
     fail=1
   fi
 done
