@@ -6507,6 +6507,16 @@ pub const Interpreter = struct {
         return Value.obj(o);
     }
 
+    pub fn makeBigIntFromNumber(self: *Interpreter, n: f64) EvalError!Value {
+        var managed = try std.math.big.int.Managed.init(self.arena);
+        const limb_bits = @bitSizeOf(std.math.big.Limb);
+        try managed.ensureCapacity((1076 + limb_bits - 1) / limb_bits);
+        var mutable = managed.toMutable();
+        _ = mutable.setFloat(n, .trunc);
+        managed.setMetadata(mutable.positive, mutable.len);
+        return makeBigIntFromManaged(self, &managed);
+    }
+
     fn finishBigInt(self: *Interpreter, o: *value.Object) EvalError!void {
         if (self.env.get("BigInt")) |c| {
             if (c.isObject()) o.setProtoAtomic(try self.protoObject(c.asObj()));
@@ -6539,6 +6549,8 @@ pub const Interpreter = struct {
                 if (!number_ok) return self.throwError("TypeError", "Cannot convert a Number to a BigInt; use BigInt()");
                 if (std.math.isNan(n) or std.math.isInf(n) or @trunc(n) != n)
                     return self.throwError("RangeError", "The number is not a safe integer");
+                const i128_limit = std.math.pow(f64, 2.0, 127.0);
+                if (n >= i128_limit or n < -i128_limit) return self.makeBigIntFromNumber(n);
                 return self.makeBigInt(@intFromFloat(n));
             },
             .string => {
@@ -9300,39 +9312,21 @@ pub const Interpreter = struct {
         if (rest) |rest_target| {
             const rest_obj = try self.newObject();
             if (val.isObject()) {
-                // Object rest copies only the *enumerable* own properties. A Proxy
-                // source goes through [[OwnPropertyKeys]] + per-key
-                // [[GetOwnProperty]] (the `ownKeys`/`getOwnPropertyDescriptor`
-                // traps), since its raw key set is empty.
+                // Object rest copies only enumerable own properties, in
+                // [[OwnPropertyKeys]] order. That includes dense array indexes and
+                // symbol keys, not just named shape slots.
                 const vo = val.asObj();
-                const is_proxy = vo.proxy_handler != null or vo.proxy_revoked;
-                const keys = if (is_proxy) try self.objectOwnKeysList(vo) else try vo.enumerableKeys(self.arena);
+                const keys = try self.objectOwnKeysList(vo);
                 outer: for (keys) |k| {
                     if (value.isPrivateKey(k)) continue;
                     for (consumed.items) |c| {
                         if (std.mem.eql(u8, c, k)) continue :outer;
                     }
-                    if (is_proxy) {
-                        const desc = try builtins.objectGetOwnPropertyDescriptor(self, Value.undef(), &.{ val, self.keyToValue(k) });
-                        if (!(desc.isObject() and (try self.getProperty(desc, "enumerable")).toBoolean())) continue;
-                    }
+                    const desc = try builtins.objectGetOwnPropertyDescriptor(self, Value.undef(), &.{ val, self.keyToValue(k) });
+                    if (!(desc.isObject() and (try self.getProperty(desc, "enumerable")).toBoolean())) continue;
                     // Copy via [[Get]] so an accessor's getter runs (and a data
                     // property's value is read), landing as a plain data prop.
                     try self.setProp(rest_obj.asObj(), k, try self.getProperty(val, k));
-                }
-                // CopyDataProperties copies own enumerable *symbol* keys too,
-                // ordered after the string keys. `enumerableKeys` (above) drops
-                // them, so enumerate them here. (A Proxy source already surfaces
-                // its symbol keys through `objectOwnKeysList` in the loop above.)
-                if (!is_proxy) {
-                    outer_sym: for (try vo.ownKeys(self.arena)) |k| {
-                        if (!value.isSymbolKey(k) or !value.isRealSymbolKey(k)) continue;
-                        if (!vo.getAttr(k).enumerable) continue;
-                        for (consumed.items) |c| {
-                            if (std.mem.eql(u8, c, k)) continue :outer_sym;
-                        }
-                        try self.setProp(rest_obj.asObj(), k, try self.getProperty(val, k));
-                    }
                 }
             } else if (val.isString()) {
                 // ToObject(string): a String exotic object whose own *enumerable*
