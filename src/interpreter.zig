@@ -9598,6 +9598,12 @@ pub const Interpreter = struct {
             .object => {
                 const o = val.asObj();
                 if (!o.is_array) return self.throwError("TypeError", "value is not iterable");
+                // A hole WITHIN the array length reads through the prototype chain:
+                // the array iterator does Get(array, index), which finds a polluted
+                // `Array.prototype[i]` (present slots return directly; past the end
+                // the iterator is done, so the target reads undefined).
+                if (i < o.elementsLen() and o.isHole(i))
+                    return try self.getProperty(val, try std.fmt.allocPrint(self.arena, "{d}", .{i}));
                 return o.elementAt(i) orelse Value.undef();
             },
             .string => {
