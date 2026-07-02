@@ -9913,20 +9913,19 @@ pub const Interpreter = struct {
                 // descriptors block creating a local dense element.
             }
         }
-        // A generator function's own `.prototype` is materialized lazily, so an
-        // assignment that arrives before any read finds no own slot. OrdinarySet
-        // would then walk up to the function's [[Prototype]]
-        // (%GeneratorFunction.prototype% / the async variant), whose own
-        // non-writable `prototype` (%GeneratorPrototype%) wrongly rejects the
-        // write. Realize the own writable slot first so it shadows that. (Plain
-        // and async functions are unaffected: their [[Prototype]] has no
-        // `prototype` property.)
+        // A function's own `.prototype` is materialized lazily, so an assignment
+        // that arrives before any read finds no own slot. Realize it first (with its
+        // correct attributes — writable, non-enumerable, NON-configurable) so the
+        // assignment updates the existing slot's VALUE rather than creating a fresh
+        // {writable,enumerable,configurable} data property. This also lets a
+        // generator's own writable slot shadow the non-writable `prototype`
+        // (%GeneratorPrototype%) its [[Prototype]] carries, which would otherwise
+        // reject the write.
         if (std.mem.eql(u8, key, "prototype") and receiver.isObject() and receiver.asObj() == o and
-            o.getOwn("prototype") == null and o.getAccessor("prototype") == null)
+            o.getOwn("prototype") == null and o.getAccessor("prototype") == null and
+            Interpreter.jsFunctionHasOwnPrototypeSlot(o))
         {
-            if (funcOf(recv)) |f| if (f.is_generator) {
-                _ = try self.getProperty(Value.obj(o), "prototype");
-            };
+            _ = try self.getProperty(Value.obj(o), "prototype");
         }
         // A setter anywhere on the prototype chain intercepts the assignment.
         var cur: ?*value.Object = o;
