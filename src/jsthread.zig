@@ -460,6 +460,16 @@ fn threadMain(rec: *ThreadRecord, fn_v: Value, args: []const Value) void {
     defer if (rec.ctx.parallel_js) g.release();
     var pending_joins = publishThreadCompletion(rec, threw, result);
     defer pending_joins.deinit(rec.ctx.arena());
+    // publishThreadCompletion emptied `rec.pending_joins` — the list the GC
+    // traces as a root (gc.traceRoots) — moving these promises into a local
+    // snapshot. Settling below runs JS (reaction and thenable `then` getters,
+    // microtask drain) that can trigger a mid-script GC, which would sweep the
+    // now-unrooted promise objects: a use-after-free that surfaces as a
+    // misaligned `Object.promise` in `promiseOf`. Keep them rooted via
+    // `gc_temp_roots` (traced per-interpreter) for the settlement's duration.
+    const temp_root_mark = machine.gc_temp_roots.items.len;
+    defer machine.gc_temp_roots.shrinkRetainingCapacity(temp_root_mark);
+    for (pending_joins.items) |pending| machine.gc_temp_roots.append(machine.arena, Value.obj(pending.promise)) catch {};
     const saved_microtasks = machine.microtasks;
     for (pending_joins.items) |pending| {
         // Route the settlement's reactions. When the joiner is a spawned thread
