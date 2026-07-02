@@ -312,7 +312,7 @@ fn installConcurrentAccessError(ctx: *Context) !void {
 fn makeWrapper(ctx: *Context, rec: *ThreadRecord) !*value.Object {
     const a = ctx.arena();
     const o = try gc_mod.allocObj(a);
-    o.* = .{ .private_data = rec };
+    o.* = .{ .private_data = rec, .private_data_tag = .jsthread_thread };
     if (ctx.env.get("Thread")) |c| if (c.isObject()) {
         if (try threadProtoOf(ctx, c.asObj())) |p| o.proto = p;
     };
@@ -328,7 +328,9 @@ fn threadProtoOf(ctx: *Context, ctor: *value.Object) !?*value.Object {
 fn recordOf(self: *Interpreter, this: Value) ?*ThreadRecord {
     _ = self;
     if (!this.isObject()) return null;
-    const pd = this.asObj().private_data orelse return null;
+    const obj = this.asObj();
+    if (obj.private_data_tag != .jsthread_thread) return null;
+    const pd = obj.private_data orelse return null;
     // Only Thread wrappers reach the Thread.prototype methods in practice;
     // the private_data brand is the check.
     if (this.asObj().proto == null) return null;
@@ -830,18 +832,36 @@ fn traceThreadLocalRoots(rec: *TLRecord, v: anytype) void {
 /// marked; this covers host-side queues that are not ordinary JS properties.
 pub fn traceNativePrivateData(o: *value.Object, v: anytype) void {
     const pd = o.private_data orelse return;
-    const brand: *const SyncBrand = @ptrCast(@alignCast(pd));
-    switch (brand.*) {
-        sync_brand_lock => traceLockRecordRoots(@ptrCast(@alignCast(pd)), v),
-        sync_brand_condition => traceCondRecordRoots(@ptrCast(@alignCast(pd)), v),
-        sync_brand_thread_local => traceThreadLocalRoots(@ptrCast(@alignCast(pd)), v),
-        sync_brand_release_state => {
+    switch (o.private_data_tag) {
+        .jsthread_lock => traceLockRecordRoots(@ptrCast(@alignCast(pd)), v),
+        .jsthread_condition => traceCondRecordRoots(@ptrCast(@alignCast(pd)), v),
+        .jsthread_thread_local => traceThreadLocalRoots(@ptrCast(@alignCast(pd)), v),
+        .jsthread_release_state => {
             const st: *ReleaseState = @ptrCast(@alignCast(pd));
             traceLockRecordRoots(st.lock, v);
         },
-        sync_brand_unlock_token => {},
-        else => {},
+        .jsthread_thread, .jsthread_unlock_token, .none => {},
     }
+}
+
+test "jsthread private-data tracer ignores unowned opaque data" {
+    const FakePrivateData = struct {
+        brand: SyncBrand = sync_brand_lock,
+    };
+    const Visitor = struct {
+        marks: usize = 0,
+
+        pub fn mark(self: *@This(), cell: ?*anyopaque) void {
+            _ = cell;
+            self.marks += 1;
+        }
+    };
+
+    var fake = FakePrivateData{};
+    var obj = value.Object{ .private_data = &fake };
+    var visitor = Visitor{};
+    traceNativePrivateData(&obj, &visitor);
+    try std.testing.expectEqual(@as(usize, 0), visitor.marks);
 }
 
 /// Trace the realm run-loop task queue (`Gil.tasks`). Entries are pending
@@ -980,7 +1000,7 @@ fn syncCtor(comptime T: type, comptime ctor_name: []const u8) value.NativeFn {
             const rec = try a.create(T);
             rec.* = if (T == TLRecord) .{ .gil = g, .arena = a } else .{ .gil = g };
             const o = try gc_mod.allocObj(a);
-            o.* = .{ .private_data = rec };
+            o.* = .{ .private_data = rec, .private_data_tag = privateDataTagOf(T) };
             const p = try self.getProperty(Value.obj(native), "prototype");
             if (p.isObject()) o.proto = p.asObj();
             return Value.obj(o);
@@ -1000,9 +1020,19 @@ fn brandOf(comptime T: type) SyncBrand {
     @compileError("unknown sync record type");
 }
 
+fn privateDataTagOf(comptime T: type) value.ObjectPrivateDataTag {
+    if (T == LockRecord) return .jsthread_lock;
+    if (T == CondRecord) return .jsthread_condition;
+    if (T == TLRecord) return .jsthread_thread_local;
+    if (T == UnlockTokenRecord) return .jsthread_unlock_token;
+    @compileError("unknown sync record type");
+}
+
 fn recOf(comptime T: type, this: Value) ?*T {
     if (!this.isObject()) return null;
-    const pd = this.asObj().private_data orelse return null;
+    const obj = this.asObj();
+    if (obj.private_data_tag != privateDataTagOf(T)) return null;
+    const pd = obj.private_data orelse return null;
     const tag: *SyncBrand = @ptrCast(@alignCast(pd));
     if (tag.* != brandOf(T)) return null;
     return @ptrCast(@alignCast(pd));
@@ -1100,7 +1130,7 @@ fn unlockTokenCreate(self: *Interpreter, token_v: Value, lock: *LockRecord) valu
         const rec = try self.arena.create(UnlockTokenRecord);
         rec.* = .{};
         const obj = try gc_mod.allocObj(self.arena);
-        obj.* = .{ .private_data = rec };
+        obj.* = .{ .private_data = rec, .private_data_tag = .jsthread_unlock_token };
         if (self.env.get("Atomics")) |atomics_v| if (atomics_v.isObject()) {
             const mutex_v = try self.getProperty(Value.obj(atomics_v.asObj()), "Mutex");
             if (mutex_v.isObject()) {
@@ -1135,7 +1165,7 @@ fn unlockTokenCtorFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) valu
     const rec = try ctx.arena().create(UnlockTokenRecord);
     rec.* = .{};
     const obj = try gc_mod.allocObj(ctx.arena());
-    obj.* = .{ .private_data = rec };
+    obj.* = .{ .private_data = rec, .private_data_tag = .jsthread_unlock_token };
     const proto = try self.getProperty(Value.obj(native), "prototype");
     if (proto.isObject()) obj.proto = proto.asObj();
     return Value.obj(obj);
@@ -2676,7 +2706,7 @@ fn runHoldJob(self: *Interpreter, job: *HoldJob) value.HostError!void {
         job.release_state.used = false;
         job.release_state.lock = job.lock;
         const rel = try gc_mod.allocObj(self.arena);
-        rel.* = .{ .native = releaseFnNative, .private_data = &job.release_state };
+        rel.* = .{ .native = releaseFnNative, .private_data = &job.release_state, .private_data_tag = .jsthread_release_state };
         gc_mod.barrierValue(Value.obj(rel));
         release_fn = rel;
     }

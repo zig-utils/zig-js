@@ -546,6 +546,16 @@ pub const ObjectBackingFlags = packed struct {
     arg_map_names: bool = false,
 };
 
+pub const ObjectPrivateDataTag = enum(u8) {
+    none,
+    jsthread_thread,
+    jsthread_lock,
+    jsthread_condition,
+    jsthread_thread_local,
+    jsthread_unlock_token,
+    jsthread_release_state,
+};
+
 /// A JavaScript object. v1 keeps this deliberately small: a string-keyed
 /// property map, an optional dense array part, and three flavors of callable:
 /// a JS-defined function (`js_func`, type-erased `*Function` to avoid an
@@ -689,6 +699,9 @@ pub const Object = struct {
     /// Opaque `data` pointer carried for `JSObjectMake(ctx, class, data)` and
     /// surfaced to host callbacks via private-data accessors later.
     private_data: ?*anyopaque = null,
+    /// Internal owner tag for engine-managed `private_data` roots. Untagged
+    /// host data stays opaque; tracers must not inspect it speculatively.
+    private_data_tag: ObjectPrivateDataTag = .none,
     /// `Thread.restrict(obj)`: the only OS thread allowed to touch this
     /// object through the enforced internal-method funnels (0 =
     /// unrestricted). Foreign access throws `ConcurrentAccessError`. Atomic: the
