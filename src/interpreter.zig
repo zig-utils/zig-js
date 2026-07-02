@@ -2371,15 +2371,19 @@ pub const Interpreter = struct {
                 // constructor is `class … extends null`: GetSuperConstructor yields
                 // %Function.prototype%, not a constructor → a runtime TypeError.
                 if (!self.in_derived_ctor) return self.throwError("SyntaxError", "'super' keyword unexpected here");
-                const sup = blk2: {
+                // GetSuperConstructor (the live [[Prototype]]) is read here, but its
+                // IsConstructor check is DEFERRED until after ArgumentListEvaluation:
+                // `super(sideEffect())` must evaluate the arguments even when the
+                // super constructor turns out not to be a constructor. The live proto
+                // is sourced dynamically: the active constructor's [[Prototype]] via
+                // `active_function` when available (spec GetActiveFunction), else the
+                // per-call `super_ctor` (set from the ctor's live proto on entry).
+                const sup_opt: ?*value.Object = blk2: {
                     if (self.active_function) |fn_obj| if (fn_obj.js_func) |erased| {
                         const active: *Function = @ptrCast(@alignCast(erased));
-                        if (active.is_derived_constructor) {
-                            break :blk2 self.effectiveProto(fn_obj) orelse
-                                return self.throwError("TypeError", "Super constructor null is not a constructor");
-                        }
+                        if (active.is_derived_constructor) break :blk2 self.effectiveProto(fn_obj);
                     };
-                    break :blk2 self.super_ctor orelse return self.throwError("TypeError", "Super constructor null is not a constructor");
+                    break :blk2 self.super_ctor;
                 };
                 // A synthesized default derived constructor forwards its arguments
                 // to the super constructor DIRECTLY — its `super(...args)` does not
@@ -2389,6 +2393,9 @@ pub const Interpreter = struct {
                     const av = self.env.get("args") orelse Value.undef();
                     break :dblk if (av.isObject() and av.asObj().is_array) av.asObj().elements.items else &[_]Value{};
                 } else try self.evalArgs(sc);
+                // IsConstructor(superConstructor) AFTER the arguments are evaluated.
+                const sup = sup_opt orelse return self.throwError("TypeError", "Super constructor null is not a constructor");
+                if (!isConstructorValue(Value.obj(sup))) return self.throwError("TypeError", "Super constructor is not a constructor");
                 // Construct the superclass with the most-derived class as NewTarget,
                 // so the produced object's prototype is the derived class's.
                 const sup_ret = try self.constructNT(Value.obj(sup), args, self.new_target);
@@ -4819,6 +4826,13 @@ pub const Interpreter = struct {
             const saved_native = self.active_native;
             self.active_native = obj;
             defer self.active_native = saved_native;
+            // A plain [[Call]] has new.target = undefined; without this reset a
+            // native that guards construction (e.g. `Symbol`, `BigInt`) called from
+            // inside a constructor would see the enclosing ctor's new.target and
+            // wrongly reject the call as `new Symbol()`. A DIRECT eval is the sole
+            // exception: it runs its code in the caller's context, so `new.target`
+            // inside `eval(...)` inherits the caller's (an indirect eval still gets
+            // undefined via the general reset).
             const saved_nt = self.new_target;
             if (!self.direct_eval_call) self.new_target = Value.undef();
             defer self.new_target = saved_nt;
@@ -5097,7 +5111,15 @@ pub const Interpreter = struct {
             break :blk this_val;
         } else this_val;
         self.home_object = func.home_object;
-        self.super_ctor = func.super_ctor;
+        // GetSuperConstructor reads the running constructor's CURRENT [[Prototype]]
+        // dynamically (e.g. after `Object.setPrototypeOf(C, …)`), not a value frozen
+        // at class definition. For a class constructor that's `func.obj`'s live
+        // proto (normally == the captured heritage); arrows keep their lexically
+        // captured super constructor.
+        self.super_ctor = if (!func.is_arrow and func.is_class_constructor)
+            (if (func.obj) |fo| fo.protoAtomic() else func.super_ctor)
+        else
+            func.super_ctor;
         self.new_target = if (func.is_arrow) func.arrow_new_target else new_target; // arrows capture lexically at creation
         self.direct_eval_new_target_allowed = if (func.is_arrow) func.arrow_direct_eval_new_target_allowed else true;
         // A non-arrow function call is a fresh context that is not a field
