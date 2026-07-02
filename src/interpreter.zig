@@ -1159,7 +1159,9 @@ pub const Interpreter = struct {
     /// name)` and reflection see them (the test262 async harness relies on this).
     pub fn globalDefine(self: *Interpreter, name: []const u8, v: Value) EvalError!void {
         const vs = self.env.varScope(); // `var`/function declarations hoist here
+        vs.lockBindings(); // `vs` may be the shared global scope; a peer's put can rehash
         const existed_local = vs.vars.contains(name);
+        vs.unlockBindings();
         try vs.put(name, v);
         if (vs.parent == null) {
             if (self.global_object) |g| {
@@ -9936,9 +9938,11 @@ pub const Interpreter = struct {
                 try self.setProp(ro, key, v);
                 if (self.global_object != null and ro == self.global_object.? and had_receiver_own) {
                     const root = rootEnv(self.env);
+                    // consts + vars read under one lock hold (a peer putConst
+                    // writes consts under it — the no-GIL Environment race class).
+                    root.lockBindings();
+                    defer root.unlockBindings();
                     if (!root.consts.contains(key)) {
-                        root.lockBindings();
-                        defer root.unlockBindings();
                         if (root.vars.getPtr(key)) |slot| slot.* = v;
                     }
                 }
@@ -9954,9 +9958,12 @@ pub const Interpreter = struct {
         try self.setProp(ro, key, v);
         if (self.global_object != null and ro == self.global_object.? and had_receiver_own) {
             const root = rootEnv(self.env);
+            // consts + vars read under one lock hold: a peer `putConst` writes
+            // consts under this lock (the no-GIL Environment race class), so the
+            // membership test must not read it unlocked.
+            root.lockBindings();
+            defer root.unlockBindings();
             if (!root.consts.contains(key)) {
-                root.lockBindings(); // serialize vs a concurrent marker reading root.vars
-                defer root.unlockBindings();
                 if (root.vars.getPtr(key)) |slot| slot.* = v;
             }
         }
