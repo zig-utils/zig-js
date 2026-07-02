@@ -1531,9 +1531,9 @@ pub fn defineOneResult(self: *Interpreter, target: *value.Object, key: []const u
         try interpreter.triggerDeferForKey(self, target, key); // `import defer`: a string [[DefineOwnProperty]] evaluates first
         return moduleNamespaceDefine(self, target, key, d);
     }
-    // [[DefineOwnProperty]] on a Proxy: invoke the `defineProperty` trap with the
-    // normalized descriptor object; a falsy result is a TypeError. An absent trap
-    // forwards to the target.
+    // [[DefineOwnProperty]] on a Proxy: invoke the `defineProperty` trap with a
+    // FromPropertyDescriptor object; a falsy result is a TypeError. An absent
+    // trap forwards to the target.
     if (target.proxy_handler != null or target.proxy_revoked) {
         if (target.proxy_revoked) return self.throwError("TypeError", "Cannot perform 'defineProperty' on a revoked proxy");
         const handler = target.proxy_handler.?;
@@ -1541,7 +1541,8 @@ pub fn defineOneResult(self: *Interpreter, target: *value.Object, key: []const u
         const trap = try self.getProperty(Value.obj(handler), "defineProperty");
         if (trap.isUndefined() or trap.isNull()) return defineOneResult(self, tgt, key, d);
         if (!trap.isCallable()) return self.throwError("TypeError", "proxy 'defineProperty' trap is not callable");
-        const res = try self.callValueWithThis(trap, &.{ Value.obj(tgt), self.keyToValue(key), Value.obj(d) }, Value.obj(handler));
+        const trap_desc = try descriptorObjectForProxyTrap(self, d);
+        const res = try self.callValueWithThis(trap, &.{ Value.obj(tgt), self.keyToValue(key), trap_desc }, Value.obj(handler));
         if (!res.toBoolean()) return false;
         // [[DefineOwnProperty]] invariants (9.5.6) for an ordinary target.
         if (tgt.proxy_handler == null and !tgt.proxy_revoked) {
@@ -1772,6 +1773,20 @@ pub fn defineOneResult(self: *Interpreter, target: *value.Object, key: []const u
     return true;
 }
 
+fn descriptorObjectForProxyTrap(self: *Interpreter, d: *value.Object) HostError!Value {
+    const out = try self.newObject();
+    if (d.getOwn("get") != null or d.getOwn("set") != null) {
+        if (d.getOwn("get")) |v| try self.setMember(out, "get", v);
+        if (d.getOwn("set")) |v| try self.setMember(out, "set", v);
+    } else {
+        if (d.getOwn("value")) |v| try self.setMember(out, "value", v);
+        if (d.getOwn("writable")) |v| try self.setMember(out, "writable", v);
+    }
+    if (d.getOwn("enumerable")) |v| try self.setMember(out, "enumerable", v);
+    if (d.getOwn("configurable")) |v| try self.setMember(out, "configurable", v);
+    return out;
+}
+
 fn moduleNamespaceDefine(self: *Interpreter, target: *value.Object, key: []const u8, d: *value.Object) HostError!bool {
     const current = try interpreter.moduleNsDesc(self, target, key);
     if (!current.isObject()) return false;
@@ -1869,9 +1884,9 @@ fn applyProperties(self: *Interpreter, target: *value.Object, props: Value) Host
 pub fn objectPreventExtensions(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
     _ = this;
     const self = interp(ctx);
-    if (args.len > 0 and args[0].isObject()) try self.checkRestricted(args[0].asObj());
+    if (args.len > 0 and isRealObject(args[0])) try self.checkRestricted(args[0].asObj());
     const o = arg(args, 0);
-    if (o.isObject()) {
+    if (isRealObject(o)) {
         if (o.asObj().proxy_handler != null or o.asObj().proxy_revoked) {
             if (!try self.proxyPreventExt(o.asObj()))
                 return self.throwError("TypeError", "Cannot prevent extensions on proxy target");
@@ -1883,9 +1898,9 @@ pub fn objectPreventExtensions(ctx: *anyopaque, this: Value, args: []const Value
 pub fn objectIsExtensible(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
     _ = this;
     const self = interp(ctx);
-    if (args.len > 0 and args[0].isObject()) try self.checkRestricted(args[0].asObj());
+    if (args.len > 0 and isRealObject(args[0])) try self.checkRestricted(args[0].asObj());
     const o = arg(args, 0);
-    if (!o.isObject()) return Value.boolVal(false);
+    if (!isRealObject(o)) return Value.boolVal(false);
     if (o.asObj().proxy_handler != null or o.asObj().proxy_revoked) return Value.boolVal(try self.proxyIsExtensible(o.asObj()));
     return Value.boolVal(o.asObj().extensible);
 }
@@ -1894,7 +1909,7 @@ pub fn objectSeal(ctx: *anyopaque, this: Value, args: []const Value) HostError!V
     const self = interp(ctx);
     _ = this;
     const o = arg(args, 0);
-    if (o.isObject()) try setIntegrityLevel(ctx, self, o.asObj(), false);
+    if (isRealObject(o)) try setIntegrityLevel(ctx, self, o.asObj(), false);
     return o;
 }
 
@@ -1902,7 +1917,7 @@ pub fn objectFreeze(ctx: *anyopaque, this: Value, args: []const Value) HostError
     const self = interp(ctx);
     _ = this;
     const o = arg(args, 0);
-    if (o.isObject()) try setIntegrityLevel(ctx, self, o.asObj(), true);
+    if (isRealObject(o)) try setIntegrityLevel(ctx, self, o.asObj(), true);
     return o;
 }
 
@@ -1993,7 +2008,7 @@ pub fn objectIsFrozen(ctx: *anyopaque, this: Value, args: []const Value) HostErr
 /// property non-configurable (and, for `frozen`, every data property
 /// non-writable). Arrays with elements can't be frozen (no per-index attrs yet).
 fn isLocked(self: *Interpreter, ov: Value, frozen: bool) HostError!bool {
-    if (!ov.isObject()) return true;
+    if (!isRealObject(ov)) return true;
     const o = ov.asObj();
     if (o.proxy_handler != null or o.proxy_revoked or interpreter.isModuleNs(o)) {
         if (o.proxy_handler != null or o.proxy_revoked) {
@@ -2067,6 +2082,10 @@ fn sameValue(a: Value, b: Value) bool {
 pub fn objectSetPrototypeOf(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
     _ = this;
     const self = interp(ctx);
+    const saved_env = enterActiveNativeRealm(self);
+    defer if (saved_env) |env| {
+        self.env = env;
+    };
     const o = arg(args, 0);
     // RequireObjectCoercible; the new prototype must be an Object or null.
     if (o.isNull() or o.isUndefined())

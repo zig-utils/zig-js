@@ -26042,7 +26042,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     try setNative(a, root_shape, object_ns, "getOwnPropertyNames", 1, builtins.objectGetOwnPropertyNames);
     try setNative(a, root_shape, object_ns, "getOwnPropertySymbols", 1, builtins.objectGetOwnPropertySymbols);
     try setNative(a, root_shape, object_ns, "is", 2, builtins.objectIs);
-    try setNative(a, root_shape, object_ns, "setPrototypeOf", 2, builtins.objectSetPrototypeOf);
+    try setNativeWithData(a, root_shape, object_ns, "setPrototypeOf", 2, builtins.objectSetPrototypeOf, @ptrCast(env));
     try setNative(a, root_shape, object_ns, "preventExtensions", 1, builtins.objectPreventExtensions);
     try setNative(a, root_shape, object_ns, "isExtensible", 1, builtins.objectIsExtensible);
     try setNative(a, root_shape, object_ns, "seal", 1, builtins.objectSeal);
