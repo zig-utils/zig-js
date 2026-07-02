@@ -124,6 +124,212 @@ fn nodeHasYield(node: *const ast.Node) bool {
     };
 }
 
+/// Does a `let`/`const` for-loop's `body` capture one of the loop's per-iteration
+/// binding names inside a nested closure? Such loops need a fresh binding created
+/// per iteration (CreatePerIterationEnvironment); the frame-slot VM lowering in
+/// `compileFor` reuses ONE slot across iterations, so every captured closure would
+/// see the final value (`var` semantics). When this returns true `compileFor`
+/// bails to the tree-walker, which binds per iteration correctly. `var` loops, and
+/// lexical loops whose closures never reference a loop name, keep the fast VM path.
+fn forLoopCapturesLexical(init_node: *const ast.Node, body: *const ast.Node) bool {
+    return switch (init_node.*) {
+        .var_decl => |d| d.kind != .@"var" and nameRefInClosure(body, d.name, false),
+        .destructure_decl => |d| d.kind != .@"var" and patternNameCaptured(d.pattern, body),
+        // `let a = 0, b = 0` — a group of declarators; any captured name bails.
+        .decl_group => |group| blk: {
+            for (group) |n| if (forLoopCapturesLexical(n, body)) break :blk true;
+            break :blk false;
+        },
+        else => false,
+    };
+}
+
+/// Are any of the binding identifiers in a destructuring loop head (`for (let
+/// [a, b] = …)`) captured by a closure in `body`?
+fn patternNameCaptured(pat: *const ast.Node, body: *const ast.Node) bool {
+    return switch (pat.*) {
+        .identifier => |nm| nameRefInClosure(body, nm, false),
+        .obj_pattern => |p| blk: {
+            for (p.props) |pp| if (patternNameCaptured(pp.target, body)) break :blk true;
+            if (p.rest) |r| if (patternNameCaptured(r, body)) break :blk true;
+            break :blk false;
+        },
+        .arr_pattern => |p| blk: {
+            for (p.elems) |e| if (e.target) |t| if (patternNameCaptured(t, body)) break :blk true;
+            if (p.rest) |r| if (patternNameCaptured(r, body)) break :blk true;
+            break :blk false;
+        },
+        else => false,
+    };
+}
+
+/// Recursion core for `forLoopCapturesLexical`: is there an identifier reference
+/// to `name` inside a nested function/arrow within `node`? `in_fn` tracks whether
+/// the current subtree already sits (transitively) inside a function boundary —
+/// only references there capture the loop variable, so a plain `body` read that is
+/// NOT inside a closure does not force a bail. Unlike `nodeHasYield` this descends
+/// INTO nested functions. The switch is exhaustive (no `else`) so a newly added
+/// node kind can't silently become a false negative that reinstates the bug.
+/// Deliberately ignores shadowing (an inner binding also named `name`) and treats
+/// deferred class bodies as closures: over-matching only forces the correct-but-
+/// slower tree-walker path, never a wrong VM lowering.
+fn nameRefInClosure(node: *const ast.Node, name: []const u8, in_fn: bool) bool {
+    return switch (node.*) {
+        .identifier => |id| in_fn and std.mem.eql(u8, id, name),
+
+        .number, .bigint_lit, .string, .boolean, .null_lit, .undefined_lit, .elision, .this_expr, .new_target_expr, .regex_literal, .import_meta, .import_decl, .break_stmt, .continue_stmt => false,
+
+        // A nested function/arrow (expression or declaration): everything it (and
+        // any deeper closure) references is captured — descend with `in_fn = true`.
+        .function, .func_decl => |fnode| fnCaptures(fnode, name),
+
+        .unary => |u| nameRefInClosure(u.operand, name, in_fn),
+        .delete_expr => |d| nameRefInClosure(d, name, in_fn),
+        .update => |u| nameRefInClosure(u.target, name, in_fn),
+        .binary => |b| nameRefInClosure(b.left, name, in_fn) or nameRefInClosure(b.right, name, in_fn),
+        .logical => |b| nameRefInClosure(b.left, name, in_fn) or nameRefInClosure(b.right, name, in_fn),
+        .sequence => |s| nameRefInClosure(s.first, name, in_fn) or nameRefInClosure(s.second, name, in_fn),
+        .assign => |a| nameRefInClosure(a.target, name, in_fn) or nameRefInClosure(a.value, name, in_fn),
+        .op_assign => |a| nameRefInClosure(a.target, name, in_fn) or nameRefInClosure(a.value, name, in_fn),
+        .logical_assign => |a| nameRefInClosure(a.target, name, in_fn) or nameRefInClosure(a.value, name, in_fn),
+        .conditional => |c| nameRefInClosure(c.cond, name, in_fn) or nameRefInClosure(c.consequent, name, in_fn) or nameRefInClosure(c.alternate, name, in_fn),
+        .yield_expr => |y| y.argument != null and nameRefInClosure(y.argument.?, name, in_fn),
+        .await_expr => |a| nameRefInClosure(a.argument, name, in_fn),
+        .class_expr => |c| blk: {
+            // The superclass and computed member keys evaluate eagerly (current
+            // `in_fn`); method bodies, field initializers, and static blocks run
+            // deferred and so capture (`in_fn = true`).
+            if (c.superclass) |sc| if (nameRefInClosure(sc, name, in_fn)) break :blk true;
+            for (c.members) |m| {
+                if (m.key_expr) |ke| if (nameRefInClosure(ke, name, in_fn)) break :blk true;
+                if (m.func) |f| if (nameRefInClosure(f, name, in_fn)) break :blk true;
+                if (m.field_init) |fi| if (nameRefInClosure(fi, name, true)) break :blk true;
+                if (m.static_block) |sb| if (nameRefInClosure(sb, name, true)) break :blk true;
+            }
+            break :blk false;
+        },
+        .super_call => |args| blk: {
+            for (args) |a| if (nameRefInClosure(a, name, in_fn)) break :blk true;
+            break :blk false;
+        },
+        .super_member => |m| m.computed != null and nameRefInClosure(m.computed.?, name, in_fn),
+        .call => |c| blk: {
+            if (nameRefInClosure(c.callee, name, in_fn)) break :blk true;
+            for (c.args) |a| if (nameRefInClosure(a, name, in_fn)) break :blk true;
+            break :blk false;
+        },
+        .new_expr => |c| blk: {
+            if (nameRefInClosure(c.callee, name, in_fn)) break :blk true;
+            for (c.args) |a| if (nameRefInClosure(a, name, in_fn)) break :blk true;
+            break :blk false;
+        },
+        .tagged_template => |t| blk: {
+            if (nameRefInClosure(t.tag, name, in_fn)) break :blk true;
+            for (t.exprs) |e| if (nameRefInClosure(e, name, in_fn)) break :blk true;
+            break :blk false;
+        },
+        .member => |m| nameRefInClosure(m.object, name, in_fn) or (m.computed != null and nameRefInClosure(m.computed.?, name, in_fn)),
+        .optional_chain => |c| nameRefInClosure(c, name, in_fn),
+        .field_init_value => |v| nameRefInClosure(v, name, in_fn),
+        .private_field_def => |p| nameRefInClosure(p.value, name, in_fn),
+        .object_lit => |props| blk: {
+            for (props) |p| {
+                if (p.key_expr) |ke| if (nameRefInClosure(ke, name, in_fn)) break :blk true;
+                if (nameRefInClosure(p.value, name, in_fn)) break :blk true;
+            }
+            break :blk false;
+        },
+        .array_lit => |elems| blk: {
+            for (elems) |e| if (nameRefInClosure(e, name, in_fn)) break :blk true;
+            break :blk false;
+        },
+        .spread => |s| nameRefInClosure(s, name, in_fn),
+        .obj_pattern => |p| blk: {
+            for (p.props) |pp| {
+                if (pp.key_expr) |ke| if (nameRefInClosure(ke, name, in_fn)) break :blk true;
+                if (nameRefInClosure(pp.target, name, in_fn)) break :blk true;
+                if (pp.default) |d| if (nameRefInClosure(d, name, in_fn)) break :blk true;
+            }
+            if (p.rest) |r| if (nameRefInClosure(r, name, in_fn)) break :blk true;
+            break :blk false;
+        },
+        .arr_pattern => |p| blk: {
+            for (p.elems) |e| {
+                if (e.target) |t| if (nameRefInClosure(t, name, in_fn)) break :blk true;
+                if (e.default) |d| if (nameRefInClosure(d, name, in_fn)) break :blk true;
+            }
+            if (p.rest) |r| if (nameRefInClosure(r, name, in_fn)) break :blk true;
+            break :blk false;
+        },
+        .var_decl => |d| d.init != null and nameRefInClosure(d.init.?, name, in_fn),
+        .destructure_decl => |d| nameRefInClosure(d.pattern, name, in_fn) or nameRefInClosure(d.init, name, in_fn),
+        .return_stmt => |r| r != null and nameRefInClosure(r.?, name, in_fn),
+        .throw_stmt => |t| nameRefInClosure(t, name, in_fn),
+        .try_stmt => |t| blk: {
+            if (nameRefInClosure(t.block, name, in_fn)) break :blk true;
+            if (t.catch_param) |cp| if (nameRefInClosure(cp, name, in_fn)) break :blk true;
+            if (t.catch_block) |cb| if (nameRefInClosure(cb, name, in_fn)) break :blk true;
+            if (t.finally_block) |fb| if (nameRefInClosure(fb, name, in_fn)) break :blk true;
+            break :blk false;
+        },
+        .labeled_stmt => |l| nameRefInClosure(l.body, name, in_fn),
+        .expr_stmt => |e| nameRefInClosure(e, name, in_fn),
+        .block => |stmts| blk: {
+            for (stmts) |s| if (nameRefInClosure(s, name, in_fn)) break :blk true;
+            break :blk false;
+        },
+        .decl_group => |stmts| blk: {
+            for (stmts) |s| if (nameRefInClosure(s, name, in_fn)) break :blk true;
+            break :blk false;
+        },
+        .program => |stmts| blk: {
+            for (stmts) |s| if (nameRefInClosure(s, name, in_fn)) break :blk true;
+            break :blk false;
+        },
+        .if_stmt => |i| nameRefInClosure(i.cond, name, in_fn) or nameRefInClosure(i.consequent, name, in_fn) or (i.alternate != null and nameRefInClosure(i.alternate.?, name, in_fn)),
+        .while_stmt => |s| nameRefInClosure(s.cond, name, in_fn) or nameRefInClosure(s.body, name, in_fn),
+        .do_while_stmt => |s| nameRefInClosure(s.body, name, in_fn) or nameRefInClosure(s.cond, name, in_fn),
+        .for_stmt => |f| blk: {
+            if (f.init) |ini| if (nameRefInClosure(ini, name, in_fn)) break :blk true;
+            if (f.cond) |c| if (nameRefInClosure(c, name, in_fn)) break :blk true;
+            if (f.update) |u| if (nameRefInClosure(u, name, in_fn)) break :blk true;
+            break :blk nameRefInClosure(f.body, name, in_fn);
+        },
+        .for_in => |f| blk: {
+            if (nameRefInClosure(f.target, name, in_fn)) break :blk true;
+            if (f.var_init) |vi| if (nameRefInClosure(vi, name, in_fn)) break :blk true;
+            if (nameRefInClosure(f.iterable, name, in_fn)) break :blk true;
+            break :blk nameRefInClosure(f.body, name, in_fn);
+        },
+        .switch_stmt => |sw| blk: {
+            if (nameRefInClosure(sw.disc, name, in_fn)) break :blk true;
+            for (sw.cases) |c| {
+                if (c.@"test") |t| if (nameRefInClosure(t, name, in_fn)) break :blk true;
+                for (c.body) |s| if (nameRefInClosure(s, name, in_fn)) break :blk true;
+            }
+            break :blk false;
+        },
+        .with_stmt => |w| nameRefInClosure(w.obj, name, in_fn) or nameRefInClosure(w.body, name, in_fn),
+        .export_decl => |e| blk: {
+            if (e.declaration) |d| if (nameRefInClosure(d, name, in_fn)) break :blk true;
+            if (e.default_expr) |d| if (nameRefInClosure(d, name, in_fn)) break :blk true;
+            break :blk false;
+        },
+        .import_call => |ic| nameRefInClosure(ic.specifier, name, in_fn) or (ic.options != null and nameRefInClosure(ic.options.?, name, in_fn)),
+    };
+}
+
+/// A nested function/arrow captures `name` if its body — or any parameter default
+/// or destructuring-pattern parameter (which execute in the function's own scope)
+/// — references it. Always searched with `in_fn = true`.
+fn fnCaptures(fnode: *const ast.FunctionNode, name: []const u8) bool {
+    for (fnode.params) |p| {
+        if (p.default) |d| if (nameRefInClosure(d, name, true)) return true;
+        if (p.pattern) |pat| if (nameRefInClosure(pat, name, true)) return true;
+    }
+    return nameRefInClosure(fnode.body, name, true);
+}
+
 /// Conservatively, does a statement subtree contain a construct that could leave a
 /// `with` block ABRUPTLY (skipping the matching `exit_with`, which would leave the
 /// VM's environment pointing at the popped with-record)? `with` bodies that might
@@ -655,6 +861,12 @@ pub const Compiler = struct {
     }
 
     fn compileFor(self: *Compiler, init_node: ?*Node, cond: ?*Node, update: ?*Node, body: *Node) CompileError!void {
+        // A `let`/`const` loop variable captured by a body closure needs a fresh
+        // per-iteration binding (CreatePerIterationEnvironment). The frame-slot
+        // lowering below reuses one slot, so bail such loops to the tree-walker,
+        // which binds per iteration. Uncaptured lexical (and all `var`) loops keep
+        // the fast VM path.
+        if (init_node) |ini| if (forLoopCapturesLexical(ini, body)) return error.Unsupported;
         const disposable_scope = self.scope == null and init_node != null and stmtHasDisposableDecl(init_node.?);
         if (disposable_scope) {
             if (stmtCanEscapeAbruptly(body)) return error.Unsupported;
@@ -744,6 +956,15 @@ pub const Compiler = struct {
     }
 
     fn compileForOf(self: *Compiler, decl_kind: ?ast.DeclKind, target: *Node, var_init: ?*Node, iterable: *Node, body: *Node, keys_first: bool, await_each: bool) CompileError!void {
+        // A `let`/`const` loop binding captured by a body closure needs a fresh
+        // per-iteration binding (ForIn/OfBodyEvaluation, like `compileFor`); the
+        // single loop-target slot bound below is reused across iterations, so bail
+        // to the tree-walker (which binds per iteration). Only when a fallback
+        // exists — a generator body can't tree-walk, so its (rare) captured for-of
+        // keeps the pre-existing behavior rather than failing to compile at all.
+        if (!self.in_generator) if (decl_kind) |k| if (k != .@"var") {
+            if (patternNameCaptured(target, body)) return error.Unsupported;
+        };
         const it_name = try self.freshTemp();
         const r_name = try self.freshTemp();
 

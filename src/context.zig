@@ -3246,6 +3246,64 @@ test "for-of / for-in with destructuring + member targets" {
     );
 }
 
+test "per-iteration lexical bindings survive closure capture (VM lowering)" {
+    // A `let`/`const` loop variable captured by a body closure must get a FRESH
+    // binding each iteration (CreatePerIterationEnvironment). The bytecode VM
+    // lowers such loops to one reused frame slot; `compileFor`/`compileForOf` bail
+    // captured loops to the tree-walker so the captures stay distinct. Each case
+    // runs inside an IIFE to force the frame-slot (function-scope) VM path.
+
+    // classic for: each closure sees its own `i`, not the final value.
+    try expectEvalStr("0,1,2,3",
+        \\(function () {
+        \\  var L = [];
+        \\  for (let i = 0; i < 4; i++) L.push(function () { return i; });
+        \\  return L.map(function (f) { return f(); }).join(",");
+        \\})()
+    );
+    // Multiple declarators: `j` is captured and per-iteration too.
+    try expectEvalStr("10,9,8",
+        \\(function () {
+        \\  var L = [];
+        \\  for (let i = 0, j = 10; i < 3; i++, j--) L.push(function () { return j; });
+        \\  return L.map(function (f) { return f(); }).join(",");
+        \\})()
+    );
+    // for-of: same per-iteration binding, plain identifier target.
+    try expectEvalStr("1,2,3",
+        \\(function () {
+        \\  var L = [];
+        \\  for (const x of [1, 2, 3]) L.push(function () { return x; });
+        \\  return L.map(function (f) { return f(); }).join(",");
+        \\})()
+    );
+    // for-of with a destructuring target: both names bind per iteration.
+    try expectEvalStr("3,7",
+        \\(function () {
+        \\  var L = [];
+        \\  for (const [a, b] of [[1, 2], [3, 4]]) L.push(function () { return a + b; });
+        \\  return L.map(function (f) { return f(); }).join(",");
+        \\})()
+    );
+
+    // Uncaptured loops keep the fast frame-slot VM path (the closures below never
+    // reference the loop variable, so no bail happens) and still compute correctly.
+    try std.testing.expectEqual(@as(f64, 8), (try evalIn(
+        \\(function () {
+        \\  var s = 0;
+        \\  for (let i = 0; i < 4; i++) [0, 0].forEach(function () { s++; });
+        \\  return s;
+        \\})()
+    )).asNum());
+    try std.testing.expectEqual(@as(f64, 6), (try evalIn(
+        \\(function () {
+        \\  var s = 0;
+        \\  for (const x of [1, 2, 3]) [0, 0].forEach(function () { s++; });
+        \\  return s;
+        \\})()
+    )).asNum());
+}
+
 test "empty statements + class-declaration sequencing" {
     // A `;` after a class declaration (and stray `;`) no longer breaks the
     // following statements.
