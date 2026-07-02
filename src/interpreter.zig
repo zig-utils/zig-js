@@ -35497,6 +35497,9 @@ fn selectTimeZoneTransition(transitions: []const i128, epoch_ns: i128, next: boo
 }
 
 fn timeZoneTransitionEpoch(name: []const u8, epoch_ns: i128, next: bool) ?i128 {
+    // Authoritative: the generated tzdata transition table (aliases resolved).
+    if (iana_offsets.transitionAt(canonicalTimeZoneName(name), @intCast(@divFloor(epoch_ns, 1_000_000_000)), next)) |t_s|
+        return @as(i128, t_s) * 1_000_000_000;
     if (std.mem.eql(u8, name, "America/Los_Angeles")) {
         const transitions = [_]i128{
             (@as(i128, tDaysFromCivil(1999, 4, 4)) * nsPerUnit(.day)) + 10 * nsPerUnit(.hour),
