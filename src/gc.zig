@@ -479,7 +479,9 @@ pub fn traceInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
         }
     }
     if (machine.microtasks) |q| {
+        machine.lockMicrotasks();
         for (q.pendingItems()) |mt| traceMicrotask(mt, v);
+        machine.unlockMicrotasks();
     }
     if (machine.current_microtask) |mt| traceMicrotask(mt, v);
     if (machine.async_waiters) |waiters| {
