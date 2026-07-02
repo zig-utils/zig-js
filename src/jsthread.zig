@@ -2694,7 +2694,14 @@ fn parkPumpThreadJoin(self: *Interpreter, rec: *ThreadRecord) value.HostError!vo
     stack_scan.beginPark();
     self.gc_parked.store(true, .release);
     defer {
+        // Clear the frozen-peer flag under `gc_root_lock` so a collector that is
+        // mid-trace of this (still-parked) interpreter finishes reading its
+        // operand stack / frame slots before we resume and mutate them. Setting
+        // the flag needs no lock (the store is followed only by the native wait,
+        // no root mutation), but clearing it gates the transition back to running.
+        self.lockGcRoots();
         self.gc_parked.store(false, .release);
+        self.unlockGcRoots();
         stack_scan.endPark();
     }
     const released_gil = self.use_thread_gil;

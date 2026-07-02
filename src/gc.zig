@@ -655,7 +655,23 @@ pub const Binding = struct {
             // JS). A *running* peer's stack changes underfoot, so it publishes its
             // own roots through the barrier at a safepoint instead.
             if (par) |collector| {
-                if (machine != collector and !machine.gc_parked.load(.acquire)) continue;
+                if (machine != collector) {
+                    // Fast path: a running peer self-publishes; never read its
+                    // live stack. The unlocked load is a hint — re-checked below.
+                    if (!machine.gc_parked.load(.acquire)) continue;
+                    // Looks parked. Pin the frozen state under `gc_root_lock` and
+                    // re-check: the owner clears `gc_parked` under the same lock
+                    // before it resumes, so if it still reads `true` here the peer
+                    // cannot wake and mutate its operand stack / frame slots until
+                    // we release. Without this pin the direct read races the
+                    // owner's `store_local`/operand-stack writes on wake — the data
+                    // race behind the red TSan gate. See `Interpreter.gc_root_lock`.
+                    machine.lockGcRoots();
+                    defer machine.unlockGcRoots();
+                    if (!machine.gc_parked.load(.acquire)) continue; // raced to running
+                    traceInterpreterRoots(machine, v);
+                    continue;
+                }
             }
             traceInterpreterRoots(machine, v);
         }

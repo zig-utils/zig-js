@@ -927,6 +927,18 @@ pub const Interpreter = struct {
     /// publish at a safepoint it won't reach. Set by the park sites, read by the
     /// collector. Atomic for the cross-thread read.
     gc_parked: std.atomic.Value(bool) = .init(false),
+    /// Serializes the collector's *direct* read of this interpreter's frozen
+    /// roots (operand stacks, frame slots, env) against the owner thread waking
+    /// from a `gc_parked` wait and resuming mutation. The `gc_parked` flag alone
+    /// is a TOCTOU: the collector can observe it `true`, then the owner clears it
+    /// and runs — writing frame slots (`store_local`) and the operand stack while
+    /// the collector still reads them (the data race behind the red TSan gate).
+    /// The owner takes this lock to clear `gc_parked` before it resumes, and the
+    /// collector takes it (re-checking `gc_parked` underneath) around the direct
+    /// trace, so a parked peer cannot wake and mutate mid-read. Only ever
+    /// contended under a parallel mid-script collection; uncontended (a single
+    /// predicted `tryLock`) otherwise. See `gc.traceInterpreterRoots` callers.
+    gc_root_lock: std.atomic.Mutex = .unlocked,
     /// Active VM `Exec` frames on this interpreter, innermost last. The VM
     /// operand stack is arena-backed (not a GC cell), so its live `Value`s are
     /// invisible to both the precise tracer and a conservative native-stack
@@ -6248,6 +6260,20 @@ pub const Interpreter = struct {
         const f = self.gc_safepoint_fn orelse return;
         const ctx = self.gc_safepoint_ctx orelse return;
         f(ctx, self);
+    }
+
+    /// Pin this interpreter's frozen-root state for a collector's direct read, or
+    /// (from the owner thread) hold it across the `gc_parked` clear on wake. See
+    /// `gc_root_lock`. A spin lock: the critical sections are short (the owner's
+    /// is a single store; the collector's is one root trace of a stalled peer).
+    pub fn lockGcRoots(self: *Interpreter) void {
+        var spins: usize = 0;
+        while (!self.gc_root_lock.tryLock()) : (spins += 1) {
+            if ((spins & 0xff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
+        }
+    }
+    pub fn unlockGcRoots(self: *Interpreter) void {
+        self.gc_root_lock.unlock();
     }
 
     /// Host cleanup jobs for FinalizationRegistry. Explicit `cleanupSome()` and
