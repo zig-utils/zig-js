@@ -1851,12 +1851,37 @@ pub const Interpreter = struct {
 
     /// Evaluate a `{…}` block in its own lexical scope, disposing any `using`
     /// resources declared in it when it exits (normally or abruptly).
+    /// Whether a block statement list binds anything at its OWN scope and so needs
+    /// its own declarative environment. Only `let`/`const`/`class`, block-scoped
+    /// function declarations, and `using` resources bind here; `var` hoists to the
+    /// variable scope, and nested constructs (if / loops / switch / try / with /
+    /// inner blocks) establish their own scopes. Conservative by construction: the
+    /// allowlist holds only statements that provably do not bind here, so any
+    /// unrecognized or declaration statement returns `true` (allocate an env, the
+    /// original behavior) — a mistake can only cost an allocation, never misroute a
+    /// binding.
+    fn blockNeedsOwnScope(stmts: []const *Node) bool {
+        for (stmts) |s| switch (s.*) {
+            .expr_stmt, .if_stmt, .while_stmt, .do_while_stmt, .for_stmt, .for_in, .switch_stmt, .return_stmt, .throw_stmt, .break_stmt, .continue_stmt, .block, .try_stmt, .with_stmt => {},
+            .var_decl => |d| if (d.kind != .@"var" or d.dispose != 0) return true, // let/const/using bind here; plain var hoists out
+            .destructure_decl => |d| if (d.kind != .@"var") return true,
+            else => return true, // func_decl, class (a lexical var_decl), decl_group, labeled (maybe a function), import/export, …
+        };
+        return false;
+    }
+
     fn evalBlockScope(self: *Interpreter, stmts: []*Node) EvalError!Value {
         // A label on a block (`L: { … }`) labels the BLOCK, not a loop nested inside
         // it — so consume the pending label here, keeping it from being adopted by an
         // inner loop (`L: { do { break L; } while (true); … }` must break the block).
         // The matching break is consumed at the `.labeled_stmt` level.
         _ = self.takeLabel();
+        // A block that binds nothing at its own scope needs no environment — run its
+        // statements in the current scope, skipping the per-entry GC-cell allocation
+        // (common in hot loop bodies like `{ acc += x; }`). A function-body block
+        // keeps the slow path: its env carries the `fn_body` marker used by
+        // declaration hoisting / Annex B analysis.
+        if (!self.mark_fn_body and !blockNeedsOwnScope(stmts)) return self.evalStatements(stmts);
         const block_env = try gc_mod.allocEnv(self.arena);
         self.initEnvironment(block_env, self.env, false);
         if (self.mark_fn_body) {

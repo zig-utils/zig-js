@@ -7597,6 +7597,35 @@ test "for-of/for-in per-iteration binding: reuse fast path preserves closure-cap
     try std.testing.expectEqualStrings("10,20,30|1,2,3|15|p,q,r|0,2", v.asStr());
 }
 
+test "block scope: no env allocated when a block binds nothing at its own scope" {
+    // Perf (#2): `evalBlockScope` skips the per-entry env allocation for a block
+    // that declares no block-scoped binding (only `var`/expressions/nested
+    // constructs), running its statements in the current scope — common in hot
+    // loop bodies. `let`/`const`/`class`/block-functions/`using` still get their
+    // own env. This checks the fast path stays observationally identical:
+    // var-hoisting, let shadowing, block-scoped functions, TDZ, and closure
+    // capture of a block `let` all remain correct. `arguments` forces the
+    // tree-walker (where block envs live).
+    const ctx = try Context.createWith(std.testing.allocator, .{});
+    defer ctx.destroy();
+    const v = try ctx.evaluate(
+        \\function run() {
+        \\  var _tw = arguments.length; // force the tree-walker
+        \\  var out = [];
+        \\  var x = 1; { var y = 2; out.push(x + y); }               // fast path; var hoists -> 3
+        \\  out.push(typeof y);                                       // "number" (y visible outside block)
+        \\  let a = 10; { let a = 20; out.push(a); } out.push(a);     // slow path; shadow -> 20, 10
+        \\  { function f() { return 42; } out.push(f()); }            // block-scoped function -> 42
+        \\  let fns = []; { let z = 99; fns.push(() => z); } out.push(fns[0]()); // capture -> 99
+        \\  let s = 0; for (let i = 0; i < 100; i++) { s += i; } out.push(s);    // fast-path body -> 4950
+        \\  return out.join(",");
+        \\}
+        \\run();
+    );
+    try std.testing.expect(v.isString());
+    try std.testing.expectEqualStrings("3,number,20,10,42,99,4950", v.asStr());
+}
+
 test "enable_gc: mid-script collection reclaims garbage during a running loop (bounded heap)" {
     // Phase 7 / M1 item (a): the GC collects *while JS runs* (at the engine step
     // checkpoints), not just at quiescent points. A long loop allocating
