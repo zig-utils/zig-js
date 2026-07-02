@@ -379,7 +379,7 @@ fn threadCtorFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.Hos
     const call_args = try a.dupe(Value, if (args.len > 1) args[1..] else &.{});
     try ctx.js_threads.append(ctx.gpa, rec);
 
-    rec.thread = std.Thread.spawn(.{}, threadMain, .{ rec, fn_v, call_args }) catch {
+    rec.thread = std.Thread.spawn(.{ .stack_size = 64 << 20 }, threadMain, .{ rec, fn_v, call_args }) catch {
         rec.done = true;
         rec.exited = true;
         return self.throwError("Error", "Thread: could not spawn OS thread");

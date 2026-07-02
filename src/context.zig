@@ -7626,6 +7626,31 @@ test "block scope: no env allocated when a block binds nothing at its own scope"
     try std.testing.expectEqualStrings("3,number,20,10,42,99,4950", v.asStr());
 }
 
+test "deep stack: spawned JS threads get a large native stack for deep recursion" {
+    // Coverage (deep-stack witness): a spawned `Thread` runs on a 64 MiB stack,
+    // so JS recursion in a worker reaches the thousands-of-frames the PR-249
+    // deep-stack case needs — well beyond the caller-thread stack the main
+    // realm inherits. Asserted as a build-robust ratio (frame size varies by
+    // optimize mode/platform, but the worker must recurse substantially deeper
+    // than the main thread) plus an absolute floor. The GC's stack scan only
+    // walks the used portion, so the larger reservation is free until recursed.
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_threads = true });
+    defer ctx.destroy();
+    const v = try ctx.evaluate(
+        \\function depth(n) { try { return depth(n + 1); } catch (e) { return n; } }
+        \\var main_depth = depth(0);
+        \\var t = new Thread(function () { return depth(0); });
+        \\var thread_depth = t.join();
+        \\(thread_depth > main_depth * 2) ? 1 : (-thread_depth);
+    );
+    // 1 on success; a negative (the observed worker depth) pinpoints a regression.
+    // Ratio, not an absolute floor: frame size varies by optimize mode/platform
+    // (locally ~481 Debug / ~2337 release on the worker vs ~118 / ~576 on main —
+    // a consistent ~4x), so the worker must recurse at least 2x deeper.
+    try std.testing.expectEqual(@as(f64, 1), v.asNum());
+}
+
 test "arguments elision: functions that never name arguments skip building it, others correct" {
     // Perf (#2): the tree-walker builds the `arguments` exotic object on every
     // non-arrow call; when the source contains neither "arguments" nor "eval" it
