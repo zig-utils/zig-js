@@ -485,6 +485,16 @@ fn threadMain(rec: *ThreadRecord, fn_v: Value, args: []const Value) void {
         // the shared realm, which is what asyncJoin's await observers need; no
         // liveness race remains.)
         machine.microtasks = if (pending.owner != null) &rec.ctx.microtasks else pending.microtasks;
+        // Re-shade the result and the pending promise on each iteration: a prior
+        // iteration's `resolve` runs JS (thenable `then` getters, reaction
+        // enqueue) that can begin *and* advance a mid-script parallel GC, and
+        // `resolve` immediately reads the result value's shape (`promiseOf`). The
+        // gc_temp_roots rooting above is captured by the self-publish handshake at
+        // safepoints, but this barrier closes the narrow window where a mark
+        // starts within a reaction chain between safepoints — shading is
+        // idempotent and cheap (a no-op when no mark is active).
+        gc_mod.barrierValue(result);
+        gc_mod.barrierValue(Value.obj(pending.promise));
         if (promise.promiseOf(Value.obj(pending.promise))) |pp| {
             if (threw)
                 promise.reject(&machine, pp, result) catch {}
