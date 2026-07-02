@@ -25967,10 +25967,10 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     // JSON namespace.
     const json_ns = try gc_mod.allocObj(a);
     json_ns.* = .{};
-    try setNative(a, root_shape, json_ns, "stringify", 3, builtins.jsonStringify);
-    try setNative(a, root_shape, json_ns, "parse", 2, builtins.jsonParse);
-    try setNative(a, root_shape, json_ns, "rawJSON", 1, builtins.jsonRawJSON);
-    try setNative(a, root_shape, json_ns, "isRawJSON", 1, builtins.jsonIsRawJSON);
+    try setNativeWithData(a, root_shape, json_ns, "stringify", 3, builtins.jsonStringify, @ptrCast(env));
+    try setNativeWithData(a, root_shape, json_ns, "parse", 2, builtins.jsonParse, @ptrCast(env));
+    try setNativeWithData(a, root_shape, json_ns, "rawJSON", 1, builtins.jsonRawJSON, @ptrCast(env));
+    try setNativeWithData(a, root_shape, json_ns, "isRawJSON", 1, builtins.jsonIsRawJSON, @ptrCast(env));
     try env.put("JSON", Value.obj(json_ns));
 
     // Math namespace.

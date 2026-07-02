@@ -18,6 +18,17 @@ fn interp(ctx: *anyopaque) *Interpreter {
     return @ptrCast(@alignCast(ctx));
 }
 
+fn enterActiveNativeRealm(self: *Interpreter) ?*interpreter.Environment {
+    const saved = self.env;
+    if (self.active_native) |callee| {
+        if (callee.private_data) |pd| {
+            self.env = @ptrCast(@alignCast(pd));
+            return saved;
+        }
+    }
+    return null;
+}
+
 fn arg(args: []const Value, i: usize) Value {
     return if (i < args.len) args[i] else Value.undef();
 }
@@ -2435,6 +2446,10 @@ pub fn stringRaw(ctx: *anyopaque, this: Value, args: []const Value) HostError!Va
 pub fn jsonStringify(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
     _ = this;
     const self = interp(ctx);
+    const saved_env = enterActiveNativeRealm(self);
+    defer if (saved_env) |env| {
+        self.env = env;
+    };
     const a = self.arena;
     var st = Stringifier{ .self = self };
 
@@ -2749,6 +2764,10 @@ fn writeJsonString(a: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), s: []
 pub fn jsonRawJSON(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
     _ = this;
     const self = interp(ctx);
+    const saved_env = enterActiveNativeRealm(self);
+    defer if (saved_env) |env| {
+        self.env = env;
+    };
     const s = try self.toStringV(arg(args, 0));
     const isJsonWs = struct {
         fn f(c: u8) bool {
@@ -2785,6 +2804,10 @@ pub fn jsonIsRawJSON(ctx: *anyopaque, this: Value, args: []const Value) HostErro
 pub fn jsonParse(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
     _ = this;
     const self = interp(ctx);
+    const saved_env = enterActiveNativeRealm(self);
+    defer if (saved_env) |env| {
+        self.env = env;
+    };
     // ToString(text) — a value object's @@toPrimitive/toString/valueOf runs (and
     // a Symbol throws) before parsing.
     const text = try self.toStringV(arg(args, 0));
