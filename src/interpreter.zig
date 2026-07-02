@@ -8952,13 +8952,16 @@ pub const Interpreter = struct {
                     return moduleNsGet(self, ns, key);
                 }
                 // Legacy `caller`: a *non-strict ordinary* function (not strict,
-                // arrow, generator, async, or bound) reads `null` for `.caller`
-                // when the live caller is unavailable or restricted, shadowing
-                // the inherited %ThrowTypeError% poison pill — which still fires
-                // for strict/bound functions and for `.arguments`.
+                // arrow, generator, async, or bound) reads `undefined` for `.caller`
+                // (we don't expose the live caller), shadowing the inherited
+                // %ThrowTypeError% poison pill — which still fires for strict/bound
+                // functions and for `.arguments`. `undefined` (not `null`) is the
+                // "extension not supported" value test262 accepts: code that does
+                // `fn.caller === undefined` to feature-detect then calls it must see
+                // undefined, or `arguments.callee.caller(...)` throws on a null.
                 if (std.mem.eql(u8, key, "caller") and o.bound == null and o.getOwn(key) == null) {
                     if (funcOf(recv)) |f| {
-                        if (!f.is_strict and !f.is_arrow and !f.is_generator and !f.is_async) return Value.nul();
+                        if (!f.is_strict and !f.is_arrow and !f.is_generator and !f.is_async) return Value.undef();
                     }
                 }
                 // A (non-arrow) function's `.prototype` is an own data property,
