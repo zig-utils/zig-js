@@ -1571,7 +1571,14 @@ pub const Interpreter = struct {
         const g = self.currentGlobalObject() orelse return null;
         var env: ?*Environment = self.env;
         while (env) |e| {
-            if (e.vars.contains(name))
+            // Read `vars` under the binding lock: a peer thread's put/getOrPut on
+            // this scope can rehash it concurrently (no-GIL Environment race,
+            // Linux tsan-threadfuzz: globalDefine put vs this contains). Flag-
+            // gated, so the default engine stays lock-free.
+            e.lockBindings();
+            const has = e.vars.contains(name);
+            e.unlockBindings();
+            if (has)
                 return if (e.parent == null and objectHasOwn(g, name)) g else null;
             env = e.parent;
         }
