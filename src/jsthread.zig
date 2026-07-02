@@ -435,6 +435,16 @@ fn threadMain(rec: *ThreadRecord, fn_v: Value, args: []const Value) void {
     var result: Value = Value.undef();
     var threw = false;
     if (machine.callValueWithThis(fn_v, args, Value.undef())) |out| {
+        // Root the return value before the drains below. They run JS that can
+        // trigger a mid-script parallel GC, and until `publishThreadCompletion`
+        // records `out` in `rec.result` it lives ONLY on this thread's native
+        // stack — which the collector does not conservatively scan for a running
+        // peer (only parked peers' frozen stacks and self-published precise
+        // roots). Without a precise root here `out` is swept during the drain,
+        // and every later root/barrier then holds a dangling pointer, surfacing
+        // as the `promiseOf` alignment panic in thread settlement. `gc_temp_roots`
+        // is a precise per-interpreter root, published at every safepoint.
+        machine.gc_temp_roots.append(machine.arena, out) catch {};
         machine.drainMicrotasks() catch {};
         // Thread-local async waiters are owned by this interpreter. If a thread
         // returns a pending Atomics.waitAsync promise, asyncJoin can assimilate
