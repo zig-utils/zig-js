@@ -1749,7 +1749,11 @@ pub fn defineOneResult(self: *Interpreter, target: *value.Object, key: []const u
         // A data property: either explicit data fields, or a generic descriptor on
         // a non-accessor (brand-new / existing data property).
         if (cur_acc != null) _ = try self.deleteOwn(target, key);
-        if (d.getOwn("writable")) |w| attr.writable = w.toBoolean();
+        if (d.getOwn("writable")) |w| {
+            attr.writable = w.toBoolean();
+        } else if (cur_acc != null) {
+            attr.writable = false;
+        }
         // An omitted `value` keeps the existing data property's value on a
         // redefine (a partial descriptor like `{enumerable:false}` must not reset
         // it); a brand-new property defaults to undefined.

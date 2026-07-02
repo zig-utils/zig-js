@@ -1111,6 +1111,17 @@ pub const Interpreter = struct {
         try obj.setOwn(self.arena, self.root_shape, key, v);
     }
 
+    /// Object-literal data initialization is CreateDataProperty: it defines an
+    /// own data property even when an earlier duplicate literal entry made the
+    /// same key an accessor.
+    pub fn defineLiteralDataProp(self: *Interpreter, obj: *value.Object, key: []const u8, v: Value) EvalError!void {
+        switch (try obj.deleteAccessorOwn(self.arena, key)) {
+            .absent, .removed_continue, .deleted => {},
+            .blocked => return self.throwError("TypeError", "Cannot redefine non-configurable accessor"),
+        }
+        try obj.setOwn(self.arena, self.root_shape, key, v);
+    }
+
     /// Bind `name` in the current scope; at global scope (no enclosing
     /// function), also surface it as an own property of the global object —
     /// global `var`/function declarations are own properties of `globalThis`
@@ -6547,7 +6558,7 @@ pub const Interpreter = struct {
                             f.home_object = v.asObj();
                         };
                     try self.maybeNameAnon(pv, p.value, name_str); // `{ x: function(){} }` ⇒ name "x"
-                    try self.setProp(v.asObj(), key, pv);
+                    try self.defineLiteralDataProp(v.asObj(), key, pv);
                 },
                 .get => {
                     const gv = try self.eval(p.value);
@@ -9872,6 +9883,10 @@ pub const Interpreter = struct {
 
     /// Define an accessor (get/set) on an object via its `setAccessor`.
     fn defineAccessor(self: *Interpreter, obj: *value.Object, name: []const u8, get: ?Value, set: ?Value) EvalError!void {
+        if (obj.getOwn(name) != null) {
+            if (!try obj.deleteNamedDataOwnPreserveOrder(self.arena, self.root_shape, name))
+                return self.throwError("TypeError", "Cannot redefine non-configurable data property");
+        }
         try obj.setAccessor(self.arena, name, get, set);
     }
 

@@ -485,7 +485,7 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 if (Interpreter.funcOf(v)) |f| {
                     if (f.is_method) f.home_object = obj.asObj();
                 }
-                try vm.setProp(obj.asObj(), chunk.names.items[inst.a], v);
+                try vm.defineLiteralDataProp(obj.asObj(), chunk.names.items[inst.a], v);
             },
             .init_proto => {
                 const v = stack.pop().?;
@@ -503,7 +503,7 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 if (Interpreter.funcOf(v)) |f| {
                     if (f.is_method) f.home_object = obj.asObj();
                 }
-                try vm.setProp(obj.asObj(), try propKey(vm, key), v); // CreateDataProperty (a computed `__proto__` is a normal own prop)
+                try vm.defineLiteralDataProp(obj.asObj(), try propKey(vm, key), v); // CreateDataProperty (a computed `__proto__` is a normal own prop)
             },
             .init_spread => {
                 const src = stack.pop().?;
