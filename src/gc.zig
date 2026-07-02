@@ -469,13 +469,24 @@ pub fn traceInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
         // The activation's frame slots (and its captured-frame parent chain for
         // upvalues) are arena-backed locals — invisible to both the precise
         // object graph and the native-stack scan, exactly like the operand stack
-        // above. A parked worker's slots are stable (it is at a safepoint), so an
-        // unlocked read is current. Without this an object live only through a VM
-        // local is swept mid-collection (a use-after-free that surfaces as a
-        // garbage `restricted_to` ⇒ spurious ConcurrentAccessError).
+        // above. Without tracing them an object live only through a VM local is
+        // swept mid-collection (a use-after-free that surfaces as a garbage
+        // `restricted_to` ⇒ spurious ConcurrentAccessError).
+        //
+        // Once a closure captures a frame it is marked `escaped`, and the VM
+        // serializes its slots with `slot_lock` (see `store_local`/`load_upval`).
+        // A cross-thread closure makes this parent-chain walk reach a *running*
+        // peer's live escaped frame, so under a concurrent/parallel trace the
+        // read must take that same lock or it races the mutator's slot store.
+        // Gated on `v.concurrent()` + `escaped`: a stop-the-world trace (no
+        // mutator running) and never-captured frames (the vast majority) lock
+        // nothing.
+        const lock_slots = v.concurrent();
         var fr: ?*vm.Frame = exec.frame;
         while (fr) |f| : (fr = f.parent) {
+            const held = f.lockSlots(lock_slots);
             for (f.slots) |slot| markValue(v, slot);
+            f.unlockSlots(held);
         }
     }
     if (machine.microtasks) |q| {

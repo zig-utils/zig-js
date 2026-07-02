@@ -57,7 +57,10 @@ pub const Frame = struct {
     escaped: std.atomic.Value(bool) = .init(false),
     slot_lock: std.atomic.Mutex = .unlocked,
 
-    inline fn lockSlots(self: *Frame, enabled: bool) bool {
+    // `pub` so the GC's parallel root trace can take the same lock when it reads
+    // an escaped frame's slots via a cross-thread captured-frame walk; see
+    // `gc.traceInterpreterRoots`.
+    pub inline fn lockSlots(self: *Frame, enabled: bool) bool {
         // `enabled` is the parallel-mode flag, hoisted out of the opcode loop by
         // the caller. When false (default engine) this is a single register branch.
         // Monotonic `escaped` is enough: a closure reaching this frame on another
@@ -69,7 +72,7 @@ pub const Frame = struct {
         }
         return true;
     }
-    fn unlockSlots(self: *Frame, held: bool) void {
+    pub fn unlockSlots(self: *Frame, held: bool) void {
         if (held) self.slot_lock.unlock();
     }
 
