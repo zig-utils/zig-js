@@ -16,6 +16,7 @@ const stack_scan = @import("stack_scan.zig");
 const gc_mod = @import("gc.zig");
 const jsthread = @import("jsthread.zig");
 const iana_zones = @import("iana_zones.zig");
+const iana_offsets = @import("iana_offsets.zig");
 const Compiler = @import("compiler.zig").Compiler;
 const Shape = @import("shape.zig").Shape;
 const unicode_case = @import("unicode_case.zig");
@@ -35738,6 +35739,11 @@ fn parseTimeZoneBare(self: *Interpreter, s: []const u8) EvalError!TimeZone {
 fn timeZoneOffsetAtEpoch(name: []const u8, epoch_ns: i128, fallback: i64) i64 {
     const canonical_name = canonicalTimeZoneName(name);
     if (!std.mem.eql(u8, canonical_name, name)) return timeZoneOffsetAtEpoch(canonical_name, epoch_ns, fallback);
+    // Authoritative: the generated tzdata transition table (DST-aware). Covers
+    // the canonical IANA zones; the hardcoded fall-throughs below remain only
+    // for anything not tabulated.
+    if (iana_offsets.offsetAt(name, @intCast(@divFloor(epoch_ns, 1_000_000_000)))) |off_s|
+        return @as(i64, off_s) * 1_000_000_000;
     if (std.mem.eql(u8, name, "Asia/Tokyo")) return 9 * 3_600_000_000_000;
     if (std.mem.eql(u8, name, "Europe/Moscow")) return 3 * 3_600_000_000_000;
     if (std.mem.eql(u8, name, "Europe/Berlin")) {
