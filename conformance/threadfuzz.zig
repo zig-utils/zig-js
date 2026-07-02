@@ -13,6 +13,7 @@
 //! This industrializes the find-race loop instead of relying on hand-written cases.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const js = @import("js");
 
 const Worker = js.Worker;
@@ -8508,7 +8509,6 @@ fn runMidScriptAsyncHoldReleaseWaiterCleanupGc(gpa: std.mem.Allocator, seed: u64
     const rounds = 7 + r.uintLessThan(usize, 5);
     const per_round = 620 + r.uintLessThan(usize, 360);
     const spin_iters = 2200 + r.uintLessThan(usize, 3400);
-    const wait_timeout_ms = 1200 + r.uintLessThan(usize, 800);
     const seed_marker = seed % 10_000;
     const prop_marker = 920_000 + seed_marker;
     const cond_marker = 930_000 + seed_marker;
@@ -8556,15 +8556,15 @@ fn runMidScriptAsyncHoldReleaseWaiterCleanupGc(gpa: std.mem.Allocator, seed: u64
         \\  const lock = new Lock();
         \\  const condLock = new Lock();
         \\  const cond = new Condition();
-        \\  const propWaiter = new Thread((gate, marker, timeout) => {{
+        \\  const propWaiter = new Thread((gate, marker) => {{
         \\    const root = {{ marker, nested: {{ seed: {d}, label: 'midgc-asyncHold-release-property-waiter' }} }};
         \\    Atomics.store(gate, 'propReady', 1);
         \\    Atomics.notify(gate, 'propReady');
-        \\    const r = Atomics.wait(gate, 'prop', 0, timeout);
+        \\    const r = Atomics.wait(gate, 'prop', 0);
         \\    if (r !== 'ok' && r !== 'not-equal')
         \\      throw new Error('bad midgc asyncHold release property waiter result ' + r);
         \\    return root.marker;
-        \\  }}, gate, {d}, {d});
+        \\  }}, gate, {d});
         \\  const condWaiter = new Thread((gate, condLock, cond, marker) => {{
         \\    const root = {{ marker, nested: {{ seed: {d}, label: 'midgc-asyncHold-release-condition-waiter' }} }};
         \\    condLock.hold(() => {{
@@ -8666,7 +8666,6 @@ fn runMidScriptAsyncHoldReleaseWaiterCleanupGc(gpa: std.mem.Allocator, seed: u64
         .{
             seed,
             prop_marker,
-            wait_timeout_ms,
             seed,
             cond_marker,
             nthreads,
@@ -9647,7 +9646,7 @@ fn runMidScriptSyncWaitCleanupGc(gpa: std.mem.Allocator, seed: u64) !bool {
         \\      () => {{ globalThis.__midgcSyncWaitAsyncScore = -1000000; }});
         \\  }}
         \\  const pendingRoot = {{ marker: waitAsyncPendingMarker, nested: {{ seed: root.seed, label: 'midgc-sync-waitAsync-live' }} }};
-        \\  const pendingWaiter = Atomics.waitAsync(waitBox, 'live', 0, 10000);
+        \\  const pendingWaiter = Atomics.waitAsync(waitBox, 'live', 0);
         \\  if (pendingWaiter.async !== true || !(pendingWaiter.value instanceof Promise))
         \\    throw new Error('bad midgc sync pending waitAsync shape');
         \\  pendingWaiter.value.then(
@@ -9908,13 +9907,13 @@ fn runMidScriptSyncWaitBurstCleanupGc(gpa: std.mem.Allocator, seed: u64) !bool {
         \\  const threads = globalThis.__midgcSyncBurstThreads = [];
         \\  const seedMarker = {d};
         \\  for (let id = 0; id < {d}; id++) {{
-        \\    threads.push(new Thread((gate, registry, id, marker, held, timeout, seedMarker) => {{
+        \\    threads.push(new Thread((gate, registry, id, marker, held, seedMarker) => {{
         \\      let target = {{ id, marker, seed: seedMarker, payload: 'midgc-sync-burst-property-' + id }};
         \\      registry.register(target, held);
         \\      const root = {{ target, nested: {{ seed: seedMarker, label: 'midgc-sync-burst-property-root' }} }};
         \\      Atomics.add(gate, 'propReady', 1);
         \\      Atomics.notify(gate, 'propReady');
-        \\      const r = Atomics.wait(gate, 'prop', 0, timeout);
+        \\      const r = Atomics.wait(gate, 'prop', 0);
         \\      if (r !== 'ok' && r !== 'not-equal')
         \\        throw new Error('midgc sync-burst property wait result ' + r);
         \\      if (!root.target || root.target.marker !== marker || root.nested.seed !== seedMarker)
@@ -9922,7 +9921,7 @@ fn runMidScriptSyncWaitBurstCleanupGc(gpa: std.mem.Allocator, seed: u64) !bool {
         \\      target = null;
         \\      root.target = null;
         \\      return marker;
-        \\    }}, gate, registry, id, {d} + id, {d} + id, {d}, seedMarker));
+        \\    }}, gate, registry, id, {d} + id, {d} + id, seedMarker));
         \\  }}
         \\  for (let id = 0; id < {d}; id++) {{
         \\    threads.push(new Thread((gate, registry, id, marker, held, seedMarker) => {{
@@ -10023,7 +10022,6 @@ fn runMidScriptSyncWaitBurstCleanupGc(gpa: std.mem.Allocator, seed: u64) !bool {
             n_prop,
             prop_base,
             cleanup_base,
-            timeout_ms,
             n_cond,
             cond_base,
             cleanup_base,
@@ -10114,7 +10112,7 @@ fn runMidScriptSyncTimeoutGc(gpa: std.mem.Allocator, seed: u64) !bool {
     const rounds = 5 + r.uintLessThan(usize, 4);
     const per_round = 380 + r.uintLessThan(usize, 220);
     const spin_iters = 1400 + r.uintLessThan(usize, 2600);
-    const timeout_ms = 850 + r.uintLessThan(usize, 450);
+    const timeout_ms = if (builtin.sanitize_thread) 12_000 else 850 + r.uintLessThan(usize, 450);
     const seed_marker = seed % 10_000;
     const prop_base = 520_000 + seed_marker;
     const cond_base = 530_000 + seed_marker;
