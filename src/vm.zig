@@ -262,6 +262,14 @@ pub fn run(vm: *Interpreter, chunk: *Chunk, frame: ?*Frame) EvalError!Value {
 /// to snapshot `exec` and suspend. For a normal call `gen` is null and
 /// `gen_yield` never appears (the compiler emits it only into generator chunks).
 fn execLoop(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?*Generator) EvalError!Value {
+    // The trampoline is off inside `execLoop`: the top-level program and
+    // generator/async bodies keep native `.call` dispatch (the `.call` opcode
+    // only pushes activations when `driver_active`). A JS call made here still
+    // enters `runFunction` → `runDriver`, so the *called* function's deep
+    // recursion is trampolined; only this frame itself stays native.
+    const saved_active = vm.driver_active;
+    vm.driver_active = false;
+    defer vm.driver_active = saved_active;
     // Register this operand stack as a precise GC root while it runs, so a
     // mid-script collection at a step checkpoint traces its live `Value`s (the
     // operand stack is arena-backed, invisible to the conservative native-stack
@@ -694,6 +702,21 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 const argc = inst.a;
                 const base = stack.items.len - argc;
                 const callee = stack.items[base - 1];
+                // Trampoline plain JS→JS calls under the driver: build the callee
+                // activation, clear callee+args off this stack (the result lands
+                // where the callee was), flush acc/ip, and yield to `runDriver`
+                // via `pending_activation` instead of recursing natively.
+                if (vm.driver_active) {
+                    if (jsChunkFn(callee)) |func| {
+                        const act = try buildActivation(vm, func, func.chunk.?, stack.items[base..], Value.undef(), Value.undef());
+                        act.result_base = base - 1;
+                        stack.shrinkRetainingCapacity(base - 1);
+                        exec.acc = acc;
+                        exec.ip = ip;
+                        vm.pending_activation = act;
+                        return acc; // driver reads `pending_activation` and ignores this value
+                    }
+                }
                 const result = try callValue(vm, callee, stack.items[base..], Value.undef());
                 stack.shrinkRetainingCapacity(base - 1);
                 try stack.append(stack_alloc, result);
@@ -2113,13 +2136,35 @@ fn construct(vm: *Interpreter, callee: Value, args: []const Value) EvalError!Val
     return vm.construct(callee, args);
 }
 
-pub fn runFunction(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []const Value, this_val: Value, new_target: Value) EvalError!Value {
-    try vm.stackGuard();
-    vm.depth += 1;
-    defer vm.depth -= 1;
+/// A single JS-chunk activation for the call trampoline: its own operand
+/// `exec`, the bytecode `chunk`/`frame` it runs, and the *caller* VM state to
+/// restore when it is popped. Deep JS→JS recursion pushes these onto an explicit
+/// heap stack (`runDriver`) instead of the native call stack, so recursion is
+/// bounded by the logical `max_call_depth` cap / heap rather than the OS stack.
+const Activation = struct {
+    exec: Exec = .{},
+    chunk: *Chunk,
+    frame: *Frame,
+    // The operand-stack index in the *caller* where this call's result lands
+    // (callee + args were popped off before the call ran). Unused for the
+    // driver's initial activation.
+    result_base: usize = 0,
+    // Caller VM state, restored by `popActivation`.
+    saved_this: Value,
+    saved_strict: bool,
+    saved_env: *Environment,
+    saved_nt: Value,
+    saved_ims: ?*interp.ImportMetaSlot,
+    saved_imo: ?*value.Object,
+    saved_eval_nt: bool,
+    saved_pm: ?*const std.StringHashMapUnmanaged([]const u8),
+};
 
-    // Allocate the activation frame: slots default to undefined, the first
-    // `params.len` are filled from the arguments. Globals stay in `vm.env`.
+/// Allocate a callee activation (frame + slots from `args`), capture the caller
+/// VM state into it, and install the callee's VM state. Does not run anything.
+/// On a throw from `bindThisForCall` the caller state is restored before
+/// propagating, so the caller is never left with the callee's state.
+fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []const Value, this_val: Value, new_target: Value) EvalError!*Activation {
     const slots = try vm.arena.alloc(Value, func.local_count);
     @memset(slots, Value.undef());
     for (func.params, 0..) |_, i| {
@@ -2130,38 +2175,158 @@ pub fn runFunction(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
         .slots = slots,
         .parent = if (func.frame) |fp| @ptrCast(@alignCast(fp)) else null,
     };
-
-    const saved_this = vm.this_value;
-    const saved_strict = vm.strict;
-    const saved_env = vm.env;
-    const saved_nt = vm.new_target;
-    const saved_import_meta_slot = vm.import_meta_slot;
-    const saved_import_meta_obj = vm.import_meta_obj;
-    const saved_eval_nt = vm.direct_eval_new_target_allowed;
-    const saved_pm = vm.current_private_map;
+    const act = try vm.arena.create(Activation);
+    act.* = .{
+        .chunk = fchunk,
+        .frame = frame,
+        .saved_this = vm.this_value,
+        .saved_strict = vm.strict,
+        .saved_env = vm.env,
+        .saved_nt = vm.new_target,
+        .saved_ims = vm.import_meta_slot,
+        .saved_imo = vm.import_meta_obj,
+        .saved_eval_nt = vm.direct_eval_new_target_allowed,
+        .saved_pm = vm.current_private_map,
+    };
     if (!func.is_arrow) vm.current_private_map = func.private_map; // a direct eval here resolves the class's private names
     vm.strict = func.is_strict;
     // Free variables (globals, and a named function expression's self name)
-    // resolve through `vm.env`; install the closure's defining environment so a
-    // named function expression's own immutable binding is visible in its body.
-    // For ordinary functions `func.closure` is the global env (unchanged).
+    // resolve through `vm.env`; install the closure's defining environment.
     vm.env = func.closure;
-    vm.this_value = try bindThisForCall(vm, func, this_val);
     vm.new_target = if (func.is_arrow) func.arrow_new_target else new_target;
     vm.direct_eval_new_target_allowed = if (func.is_arrow) func.arrow_direct_eval_new_target_allowed else true;
     vm.import_meta_slot = func.import_meta_slot;
     vm.import_meta_obj = if (func.import_meta_slot) |slot| slot.obj else null;
-    defer {
-        vm.this_value = saved_this;
-        vm.strict = saved_strict;
-        vm.env = saved_env;
-        vm.new_target = saved_nt;
-        vm.import_meta_slot = saved_import_meta_slot;
-        vm.import_meta_obj = saved_import_meta_obj;
-        vm.direct_eval_new_target_allowed = saved_eval_nt;
-        vm.current_private_map = saved_pm;
+    vm.this_value = bindThisForCall(vm, func, this_val) catch |e| {
+        popActivation(vm, act);
+        return e;
+    };
+    return act;
+}
+
+/// Restore the caller VM state captured by `buildActivation`.
+fn popActivation(vm: *Interpreter, act: *Activation) void {
+    vm.this_value = act.saved_this;
+    vm.strict = act.saved_strict;
+    vm.env = act.saved_env;
+    vm.new_target = act.saved_nt;
+    vm.import_meta_slot = act.saved_ims;
+    vm.import_meta_obj = act.saved_imo;
+    vm.direct_eval_new_target_allowed = act.saved_eval_nt;
+    vm.current_private_map = act.saved_pm;
+}
+
+/// If `callee` is a plain JS-chunk function (not generator/async/native/bound/
+/// proxy), return it — those are the calls the trampoline pushes onto its
+/// activation stack. Everything else takes the native call path.
+inline fn jsChunkFn(callee: Value) ?*Function {
+    if (!callee.isObject()) return null;
+    const erased = callee.asObj().js_func orelse return null;
+    const func: *Function = @ptrCast(@alignCast(erased));
+    if (func.is_generator or func.is_async) return null;
+    if (func.chunk == null) return null;
+    return func;
+}
+
+/// Unwind a throw over the activation stack: pop activations that have no
+/// matching handler (restoring caller VM state and logical depth), and resume
+/// the first that does at its catch/finally. Returns true when a handler was
+/// found (the top activation is now positioned there), false when uncaught.
+fn unwindThrow(vm: *Interpreter, acts: *std.ArrayListUnmanaged(*Activation)) EvalError!bool {
+    while (acts.items.len > 0) {
+        const cur = acts.items[acts.items.len - 1];
+        if (cur.exec.handlers.items.len > 0) {
+            const h = cur.exec.handlers.pop().?;
+            cur.exec.stack.shrinkRetainingCapacity(h.stack_depth);
+            try cur.exec.stack.append(vm.arena, vm.exception); // bind target for the catch
+            if (h.catch_pc != Handler.none) {
+                cur.exec.ip = h.catch_pc;
+            } else {
+                // No catch: run the finally carrying a "throw" completion.
+                try cur.exec.stack.append(vm.arena, Value.num(@floatFromInt(@intFromEnum(Completion.throw))));
+                cur.exec.ip = h.finally_pc;
+            }
+            return true;
+        }
+        vm.popExecRoot(&cur.exec);
+        popActivation(vm, cur);
+        _ = acts.pop();
+        if (acts.items.len == 0) return false; // uncaught; initial depth owned by runFunction
+        vm.depth -= 1; // a nested activation was discarded
     }
-    return run(vm, fchunk, frame);
+    return false;
+}
+
+/// Drive an explicit stack of JS-chunk activations for `initial` and any nested
+/// plain JS→JS calls it makes, so deep recursion lives on the heap instead of
+/// the OS call stack. Native-fn boundaries still recurse natively (bounded) and
+/// re-enter here via a nested `runFunction`. Mirrors `execLoop`'s GC-root
+/// registration and throw→handler unwinding, but over the activation stack.
+/// `initial`'s logical depth is owned by `runFunction`; nested activations
+/// account for their own here (and hit the `max_call_depth` ceiling, no longer
+/// the native stack — the trampoline's whole point).
+fn runDriver(vm: *Interpreter, initial: *Activation) EvalError!Value {
+    const saved_active = vm.driver_active;
+    vm.driver_active = true;
+    defer vm.driver_active = saved_active;
+
+    var acts: std.ArrayListUnmanaged(*Activation) = .empty;
+    defer acts.deinit(vm.arena);
+    initial.exec.frame = initial.frame;
+    vm.pushExecRoot(&initial.exec);
+    try acts.append(vm.arena, initial);
+
+    while (acts.items.len > 0) {
+        const cur = acts.items[acts.items.len - 1];
+        const rv = runChunk(vm, &cur.exec, cur.chunk, cur.frame, null) catch |e| {
+            if (e != error.Throw) {
+                // OOM / OptShortCircuit: tear down all activations and propagate.
+                while (acts.items.len > 0) {
+                    const a = acts.items[acts.items.len - 1];
+                    vm.popExecRoot(&a.exec);
+                    popActivation(vm, a);
+                    _ = acts.pop();
+                    if (acts.items.len > 0) vm.depth -= 1;
+                }
+                return e;
+            }
+            if (try unwindThrow(vm, &acts)) continue; // resumed at a handler
+            return error.Throw; // uncaught → propagate to the native caller
+        };
+        if (vm.pending_activation) |raw| {
+            // A nested plain JS→JS call: push it instead of recursing natively.
+            vm.pending_activation = null;
+            if (vm.depth >= interp.max_call_depth) {
+                _ = vm.throwError("RangeError", "Maximum call stack size exceeded") catch {};
+                if (try unwindThrow(vm, &acts)) continue;
+                return error.Throw;
+            }
+            vm.depth += 1;
+            const callee: *Activation = @ptrCast(@alignCast(raw));
+            callee.exec.frame = callee.frame;
+            vm.pushExecRoot(&callee.exec);
+            try acts.append(vm.arena, callee);
+            continue;
+        }
+        // A real return with value `rv`.
+        vm.popExecRoot(&cur.exec);
+        popActivation(vm, cur);
+        _ = acts.pop();
+        if (acts.items.len == 0) return rv; // initial returned; runFunction owns its depth
+        vm.depth -= 1; // a nested activation completed
+        const caller = acts.items[acts.items.len - 1];
+        try caller.exec.stack.append(vm.arena, rv); // deliver result to the caller's operand stack
+        // loop: resume `caller` at its flushed ip with `rv` on its stack
+    }
+    unreachable;
+}
+
+pub fn runFunction(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []const Value, this_val: Value, new_target: Value) EvalError!Value {
+    try vm.stackGuard();
+    vm.depth += 1;
+    defer vm.depth -= 1;
+    const act = try buildActivation(vm, func, fchunk, args, this_val, new_target);
+    return runDriver(vm, act);
 }
 
 // ---------------------------------------------------------------------------

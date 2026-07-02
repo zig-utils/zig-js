@@ -1139,6 +1139,15 @@ pub const Interpreter = struct {
     /// Robustness counters: function call depth and total evaluation steps.
     depth: u32 = 0,
     steps: u64 = 0,
+    /// VM call trampoline (see `vm.runDriver`): true while an explicit
+    /// activation-stack driver is running, so the `.call` family pushes a new
+    /// JS-chunk activation instead of recursing natively — lifting deep JS→JS
+    /// recursion off the OS stack. False under `execLoop` (top-level program and
+    /// generator/async bodies keep native calls). `pending_activation` carries
+    /// the built callee activation from the `.call` opcode up to the driver
+    /// (typed `?*vm.Activation`, held opaque to avoid a module cycle).
+    driver_active: bool = false,
+    pending_activation: ?*anyopaque = null,
 
     /// Guard a function call against native-stack exhaustion: throw a catchable
     /// `RangeError` when either the logical call-depth limit or the real OS

@@ -7655,6 +7655,44 @@ test "catch scope: optional catch binding skips the catch-scope env, params stil
     try std.testing.expectEqualStrings("bind-less,inner,outer,14,7,99", v.asStr());
 }
 
+test "vm trampoline: deep VM recursion is heap-bounded, lifting past the native stack" {
+    // A simple recursive VM-compiled function (no try/catch in the body, so the
+    // compiler keeps it on the bytecode VM) recurses far past the native-stack
+    // ceiling: runDriver pushes each JS→JS call onto an explicit heap activation
+    // stack instead of the OS stack, so depth is bounded by max_call_depth /
+    // heap, not the thread stack. The program-scope try/catch catches the
+    // eventual RangeError; the global counter records the depth reached. On an
+    // 8 MiB thread a purely native path caps in the hundreds; the trampoline
+    // reaches into the thousands (toward the 16384 logical ceiling).
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const Runner = struct {
+        result: f64 = -1,
+        ok: bool = false,
+        fn run(self: *@This()) void {
+            const ctx = Context.createWith(std.testing.allocator, .{}) catch return;
+            defer ctx.destroy();
+            // VM-compilable (ternary/arith/recursion only — no try/catch, let, or
+            // global store, which fall back to the tree-walker). r(8000) recurses
+            // 8000 deep and returns 0. On an 8 MiB thread a native VM path
+            // RangeErrors well before 8000; the trampoline pushes each JS→JS call
+            // onto the heap activation stack, reaching 8000 (< the 16384 cap).
+            const v = ctx.evaluate(
+                \\function r(n) { return n <= 0 ? 0 : r(n - 1); }
+                \\r(8000)
+            ) catch return; // a native RangeError would leave ok=false → test fails
+            if (v.isNumber()) {
+                self.result = v.asNum();
+                self.ok = true;
+            }
+        }
+    };
+    var r = Runner{};
+    const t = try std.Thread.spawn(.{ .stack_size = 8 << 20 }, Runner.run, .{&r});
+    t.join();
+    try std.testing.expect(r.ok); // reached depth 8000 without a native RangeError
+    try std.testing.expectEqual(@as(f64, 0), r.result);
+}
+
 test "deep stack: main-realm recursion depth adapts to the owner thread's stack" {
     // Item-1 witness: the main realm's recursion guard is native-stack-bound
     // (`stack_scan.nearLimit` probes the running owner thread's registered OS
