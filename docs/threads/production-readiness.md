@@ -455,6 +455,9 @@ as embedders exercise more threaded host patterns.
   `Thread.asyncJoin`, and exact `FinalizationRegistry` cleanup,
   `Lock.asyncHold(fn)` throw/release ordering with queued no-fn release grants
   and exact `FinalizationRegistry` cleanup,
+  property `Atomics.waitAsync` late-settlement races where a peer removes
+  timeout tickets from the global table while the owning Thread closes its
+  stack-local microtask queue, with both `join()` and `asyncJoin()` observers,
   creator-owned `SharedArrayBuffer` and `ArrayBuffer` storage that survives the
   creating Thread's exit, sibling-thread reads, GC pressure, and post-creator
   `ArrayBuffer.transfer()`, child-created SAB/ArrayBuffer storage crossing

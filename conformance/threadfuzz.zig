@@ -4158,6 +4158,178 @@ fn runReturnedWaitAsyncLifecycleInterleaving(gpa: std.mem.Allocator, seed: u64) 
     return true;
 }
 
+fn runPropertyWaitAsyncLateSettlementLifecycleInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
+    var prng = std.Random.DefaultPrng.init(seed ^ 0x7072_6f70_7761_6c73);
+    const r = prng.random();
+    const nthreads = 3 + r.uintLessThan(usize, 3);
+    const keys = 24 + r.uintLessThan(usize, 25);
+    const timeout_ms = 8 + r.uintLessThan(usize, 15);
+    const seed_marker = seed % 10_000;
+
+    var expected_async_score: usize = 0;
+    var expected_join_score: usize = 0;
+    var id: usize = 0;
+    while (id < nthreads) : (id += 1) {
+        const marker = 610_000 + seed_marker + id;
+        expected_async_score += marker + keys;
+        expected_join_score += marker + keys * 2;
+    }
+
+    const ctx = js.Context.createWith(gpa, .{ .enable_threads = true, .enable_gc = true }) catch {
+        std.debug.print("seed {d}: property waitAsync late-settlement context creation failed\n", .{seed});
+        return false;
+    };
+    defer ctx.destroy();
+
+    const src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  globalThis.__propWaitAsyncLateAsyncScore = 0;
+        \\  globalThis.__propWaitAsyncLateJoinScore = 0;
+        \\  globalThis.__propWaitAsyncLateAsyncCount = 0;
+        \\  globalThis.__propWaitAsyncLateJoinCount = 0;
+        \\  const threads = [];
+        \\  const shared = {{}};
+        \\  for (let tid = 0; tid < {d}; tid++) {{
+        \\    for (let k = 0; k < {d}; k++) shared['k' + tid + '_' + k] = 0;
+        \\  }}
+        \\  function verifyBundle(bundle, expectedTid, keys, seedMarker) {{
+        \\    if (!bundle || bundle.tid !== expectedTid || bundle.marker !== 610000 + seedMarker + expectedTid)
+        \\      throw new Error('bad property waitAsync late bundle identity');
+        \\    if (!bundle.values || bundle.values.length !== keys)
+        \\      throw new Error('bad property waitAsync late bundle length');
+        \\    for (const v of bundle.values) {{
+        \\      if (v !== 'timed-out')
+        \\        throw new Error('property waitAsync late value was ' + v);
+        \\    }}
+        \\    return bundle.marker + bundle.values.length;
+        \\  }}
+        \\  for (let tid = 0; tid < {d}; tid++) {{
+        \\    const t = new Thread((obj, tid, keys, timeout, seedMarker) => {{
+        \\      const ps = [];
+        \\      for (let k = 0; k < keys; k++) {{
+        \\        const r = Atomics.waitAsync(obj, 'k' + tid + '_' + k, 0, timeout);
+        \\        if (r.async !== true || !(r.value instanceof Promise))
+        \\          throw new Error('bad property waitAsync late pending shape');
+        \\        ps.push(r.value);
+        \\      }}
+        \\      return Promise.all(ps).then((values) => {{
+        \\        return {{ tid, values, marker: 610000 + seedMarker + tid }};
+        \\      }});
+        \\    }}, shared, tid, {d}, {d}, {d});
+        \\    t.asyncJoin().then(
+        \\      (bundle) => {{
+        \\        globalThis.__propWaitAsyncLateAsyncScore += verifyBundle(bundle, tid, {d}, {d});
+        \\        globalThis.__propWaitAsyncLateAsyncCount++;
+        \\      }},
+        \\      () => {{ globalThis.__propWaitAsyncLateAsyncScore = -1000000; }});
+        \\    threads.push(t);
+        \\  }}
+        \\  for (let tid = 0; tid < threads.length; tid++) {{
+        \\    const joined = threads[tid].join();
+        \\    if (!(joined instanceof Promise))
+        \\      throw new Error('property waitAsync late join did not return the child promise');
+        \\    joined.then(
+        \\      (bundle) => {{
+        \\        globalThis.__propWaitAsyncLateJoinScore += verifyBundle(bundle, tid, {d}, {d}) + {d};
+        \\        globalThis.__propWaitAsyncLateJoinCount++;
+        \\      }},
+        \\      () => {{ globalThis.__propWaitAsyncLateJoinScore = -1000000; }});
+        \\  }}
+        \\  if (typeof gc === 'function') gc();
+        \\  globalThis.__propWaitAsyncLateReady = function(expectedAsync, expectedJoin, expectedCount) {{
+        \\    return globalThis.__propWaitAsyncLateAsyncScore === expectedAsync &&
+        \\      globalThis.__propWaitAsyncLateJoinScore === expectedJoin &&
+        \\      globalThis.__propWaitAsyncLateAsyncCount === expectedCount &&
+        \\      globalThis.__propWaitAsyncLateJoinCount === expectedCount;
+        \\  }};
+        \\  globalThis.__propWaitAsyncLateCheck = function(expectedAsync, expectedJoin, expectedCount) {{
+        \\    if (!globalThis.__propWaitAsyncLateReady(expectedAsync, expectedJoin, expectedCount))
+        \\      throw new Error('bad property waitAsync late scores async=' +
+        \\        globalThis.__propWaitAsyncLateAsyncScore + '/' + expectedAsync +
+        \\        ' join=' + globalThis.__propWaitAsyncLateJoinScore + '/' + expectedJoin +
+        \\        ' counts=' + globalThis.__propWaitAsyncLateAsyncCount + ',' +
+        \\        globalThis.__propWaitAsyncLateJoinCount + '/' + expectedCount);
+        \\    return 1;
+        \\  }};
+        \\  return 1;
+        \\}})();
+        \\
+    ,
+        .{
+            nthreads,
+            keys,
+            nthreads,
+            keys,
+            timeout_ms,
+            seed_marker,
+            keys,
+            seed_marker,
+            keys,
+            seed_marker,
+            keys,
+        },
+    );
+    defer gpa.free(src);
+
+    const result = ctx.evaluate(src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: property waitAsync late-settlement JS threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!result.isNumber() or result.asNum() != 1) {
+        std.debug.print("seed {d}: property waitAsync late-settlement result got {d}\n", .{ seed, if (result.isNumber()) result.asNum() else -1 });
+        return false;
+    }
+
+    const ready_src = try std.fmt.allocPrint(
+        gpa,
+        "$drainRunLoop(); drainMicrotasks(); globalThis.__propWaitAsyncLateReady({d}, {d}, {d})",
+        .{ expected_async_score, expected_join_score, nthreads },
+    );
+    defer gpa.free(ready_src);
+    var ready = false;
+    var poll: usize = 0;
+    while (poll < 4000) : (poll += 1) {
+        const status = ctx.evaluate(ready_src) catch |err| {
+            std.debug.print("seed {d}: property waitAsync late-settlement ready poll threw {s}\n", .{ seed, @errorName(err) });
+            return false;
+        };
+        if (status.isBoolean() and status.asBool()) {
+            ready = true;
+            break;
+        }
+        std.Io.sleep(js.agent.engineIo(), .fromMilliseconds(1), .awake) catch {};
+    }
+    if (!ready) {
+        std.debug.print("seed {d}: property waitAsync late-settlement did not reach expected async/join scores\n", .{seed});
+        return false;
+    }
+
+    const check_src = try std.fmt.allocPrint(
+        gpa,
+        "globalThis.__propWaitAsyncLateCheck({d}, {d}, {d})",
+        .{ expected_async_score, expected_join_score, nthreads },
+    );
+    defer gpa.free(check_src);
+    const checked = ctx.evaluate(check_src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: property waitAsync late-settlement check threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!checked.isNumber() or checked.asNum() != 1) {
+        std.debug.print("seed {d}: property waitAsync late-settlement check got {d}\n", .{ seed, if (checked.isNumber()) checked.asNum() else -1 });
+        return false;
+    }
+    return true;
+}
+
 fn runPromisePublicationLifecycleInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
     const seed_marker = seed % 10_000;
     const fulfilled_value_marker = 100_000 + seed_marker;
@@ -13364,6 +13536,22 @@ pub fn main(init: std.process.Init) !void {
         if (wfail != 0) std.process.exit(1);
         return;
     };
+    // `threadfuzz propwaitasynclate <iters> <seed>`: focused lifecycle repro
+    // for property waitAsync tickets that a peer removes from the global table
+    // while the owning thread closes its stack-local microtask queue.
+    if (first) |a| if (std.mem.eql(u8, a, "propwaitasynclate")) {
+        if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch 1;
+        if (args.next()) |b| base_seed = std.fmt.parseInt(u64, b, 10) catch 1;
+        var pwafail: usize = 0;
+        var pwai: usize = 0;
+        while (pwai < iters) : (pwai += 1) {
+            const seed = base_seed +% pwai;
+            if (!(try runPropertyWaitAsyncLateSettlementLifecycleInterleaving(gpa, seed))) pwafail += 1;
+        }
+        std.debug.print("threadfuzz propwaitasynclate: {d} programs from seed {d}, {d} failures\n", .{ iters, base_seed, pwafail });
+        if (pwafail != 0) std.process.exit(1);
+        return;
+    };
     // `threadfuzz promisepub <iters> <seed>`: focused lifecycle repro for
     // child-returned fulfilled/rejected promises, user thenables, and thrown
     // objects published through join/asyncJoin.
@@ -14095,8 +14283,9 @@ pub fn main(init: std.process.Init) !void {
     // while shared-realm Threads register finalization cleanup records on the
     // same retained SAB, module Worker handler exception recovery with the same
     // retained-SAB cleanup oracle,
-    // Thread exception identity and returned waitAsync promise assimilation
-    // across join/asyncJoin while waiters are parked, cross-thread
+    // Thread exception identity, returned waitAsync promise assimilation, and
+    // property waitAsync late settlement across join/asyncJoin while waiters are
+    // parked, cross-thread
     // FinalizationRegistry cleanup, FinalizationRegistry cleanup interleaved
     // with join/asyncJoin and unregister tokens, cleanup
     // delivery after parked property/condition waiters resume, typed-array
@@ -14207,6 +14396,7 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runModuleWorkerExceptionFinalizationCleanupInterleaving(gpa, seed))) lfail += 1;
             if (!(try runThreadExceptionWaiterInterleaving(gpa, seed))) lfail += 1;
             if (!(try runReturnedWaitAsyncLifecycleInterleaving(gpa, seed))) lfail += 1;
+            if (!(try runPropertyWaitAsyncLateSettlementLifecycleInterleaving(gpa, seed))) lfail += 1;
             if (!(try runPromisePublicationLifecycleInterleaving(gpa, seed))) lfail += 1;
             if (!(try runFinalizationCleanupInterleaving(gpa, seed))) lfail += 1;
             if (!(try runFinalizationAsyncJoinCleanupInterleaving(gpa, seed))) lfail += 1;
@@ -14234,7 +14424,7 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runThreadLocalFinalizationCleanupInterleaving(gpa, seed))) lfail += 1;
             if (!(try runNestedThreadAsyncJoinCleanupInterleaving(gpa, seed))) lfail += 1;
         }
-        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 42, base_seed, lfail });
+        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 43, base_seed, lfail });
         if (lfail != 0) std.process.exit(1);
         return;
     };

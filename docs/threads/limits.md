@@ -378,6 +378,8 @@ context APIs.
   after they resume, Promise reaction queue churn from with-fn
   `Lock.asyncHold`, no-fn release functions, typed-array `waitAsync`,
   `Thread.asyncJoin`, and exact `FinalizationRegistry` cleanup,
+  property `Atomics.waitAsync` late settlement where peer timeout polling races
+  an owning Thread closing its stack-local microtask queue,
   creator-owned `SharedArrayBuffer` and `ArrayBuffer` storage that survives the
   creating Thread's exit, sibling-thread reads, GC pressure, and post-creator
   `ArrayBuffer.transfer()`, child-created SAB/ArrayBuffer storage crossing

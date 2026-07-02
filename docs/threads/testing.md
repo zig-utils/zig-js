@@ -237,7 +237,9 @@ recovery composed with the same retained-SAB cleanup oracle,
 Thread exception identity through `join()` / `asyncJoin()`
 while property and condition waiters are parked, thread-returned typed-array
 `waitAsync` promise assimilation through
-`join()` / `asyncJoin()` while waiters are parked,
+`join()` / `asyncJoin()` while waiters are parked, property
+`Atomics.waitAsync` late settlement where a peer removes timeout tickets from
+the global table while the owning thread closes its stack-local microtask queue,
 typed-array `waitAsync` settlement interleaved with `asyncJoin` reactions and
 exact `FinalizationRegistry` cleanup delivery, deterministic
 `Condition.asyncWait` reacquire delivery interleaved with `join()` /
@@ -285,7 +287,7 @@ then verifies child release, nested `ThreadLocal` roots, rerouted async
 settlement, and exact finalization cleanup after both thread layers exit. It now
 also composes isolated Worker termination with shared-realm teardown that
 abandons child-owned typed-array `waitAsync` tickets, rejects pending
-`asyncJoin` reactions, and delivers exact cleanup. Each seed currently runs 38
+`asyncJoin` reactions, and delivers exact cleanup. Each seed currently runs 43
 deterministic lifecycle
 subprograms.
 
@@ -474,6 +476,7 @@ For fuzzer reproduction:
 ```sh
 zig build threadfuzz-bin
 ./zig-out/bin/threadfuzz file /path/to/repro.js
+./zig-out/bin/threadfuzz propwaitasynclate 5 1
 ./zig-out/bin/threadfuzz workerclose 5 1
 ./zig-out/bin/threadfuzz moduleworkerclose 5 1
 ```
