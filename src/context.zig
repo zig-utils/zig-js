@@ -7626,6 +7626,31 @@ test "block scope: no env allocated when a block binds nothing at its own scope"
     try std.testing.expectEqualStrings("3,number,20,10,42,99,4950", v.asStr());
 }
 
+test "switch scope: no env allocated when no case declares a block-scoped binding" {
+    // Perf (#2): `evalSwitch` skips the CaseBlock env (and its hoisting/TDZ
+    // instantiation) when no case declares a block-scoped binding, running the
+    // cases in the enclosing scope — the same conservative `blockNeedsOwnScope`
+    // allowlist as blocks. A case with `let`/`const`/`class`/a block function
+    // still gets the env. Checks fallthrough, `var` hoisting out of the switch,
+    // block/case-level `let`, and a block-scoped function all stay correct.
+    const ctx = try Context.createWith(std.testing.allocator, .{});
+    defer ctx.destroy();
+    const v = try ctx.evaluate(
+        \\function run() {
+        \\  var _tw = arguments.length; // tree-walker
+        \\  function s1(n){ var r=""; switch(n){ case 1: r+="a"; case 2: r+="b"; break; default: r+="d"; } return r; }
+        \\  function s2(n){ switch(n){ case 1: { let x=10; return x; } default: return -1; } }
+        \\  function s3(n){ switch(n){ case 1: let y=5; return y; default: return 0; } }
+        \\  function s4(n){ switch(n){ case 1: function f(){return 7;} return f(); default: return 0; } }
+        \\  function s5(){ switch(1){ case 1: var z=3; } return z; }
+        \\  return [s1(1), s1(2), s1(9), s2(1), s2(9), s3(1), s3(9), s4(1), s5()].join(",");
+        \\}
+        \\run();
+    );
+    try std.testing.expect(v.isString());
+    try std.testing.expectEqualStrings("ab,b,d,10,-1,5,0,7,3", v.asStr());
+}
+
 test "enable_gc: mid-script collection reclaims garbage during a running loop (bounded heap)" {
     // Phase 7 / M1 item (a): the GC collects *while JS runs* (at the engine step
     // checkpoints), not just at quiescent points. A long loop allocating

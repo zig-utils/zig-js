@@ -3015,34 +3015,47 @@ pub const Interpreter = struct {
         // in any case is block-scoped to the switch (and case-test expressions
         // evaluate within it).
         const disc = try self.eval(disc_node);
-        const block_env = try gc_mod.allocEnv(self.arena);
-        self.initEnvironment(block_env, self.env, false);
-        const saved_env = self.env;
-        self.env = block_env;
-        defer self.env = saved_env;
-        // Instantiate the CaseBlock's lexical declarations (across all cases):
-        // function declarations are block-scoped (with the Annex B B.3.3 legacy
-        // copy), and let/const/class get the temporal-dead-zone sentinel.
-        for (cases) |c| for (c.body) |s| switch (s.*) {
-            .func_decl => |fnode| {
-                const fnv = try self.makeFunction(fnode, self.env);
-                try self.env.put(fnode.name, fnv);
-                if (self.annexb_legacy_nodes) |set| if (set.contains(s)) try self.globalDefineDeletable(fnode.name, fnv);
-            },
-            else => {},
+        // The CaseBlock is its own lexical environment only if some case declares a
+        // block-scoped binding (let/const/class/function/using). When none does,
+        // the cases run in the enclosing scope with no per-switch env allocation
+        // (the hoisting/TDZ instantiation below would be a no-op anyway).
+        var switch_needs_env = false;
+        for (cases) |c| if (blockNeedsOwnScope(c.body)) {
+            switch_needs_env = true;
+            break;
         };
-        if (self.tdz_marker) |_| {
-            const tdz = self.tdzVal();
+        const saved_env = self.env;
+        defer self.env = saved_env;
+        var block_env: ?*Environment = null;
+        if (switch_needs_env) {
+            const be = try gc_mod.allocEnv(self.arena);
+            self.initEnvironment(be, self.env, false);
+            self.env = be;
+            block_env = be;
+            // Instantiate the CaseBlock's lexical declarations (across all cases):
+            // function declarations are block-scoped (with the Annex B B.3.3 legacy
+            // copy), and let/const/class get the temporal-dead-zone sentinel.
             for (cases) |c| for (c.body) |s| switch (s.*) {
-                .var_decl => |d| if (d.kind != .@"var") try self.env.put(d.name, tdz),
-                .decl_group => |g| for (g) |gs| switch (gs.*) {
-                    .var_decl => |d| if (d.kind != .@"var") try self.env.put(d.name, tdz),
-                    else => {},
+                .func_decl => |fnode| {
+                    const fnv = try self.makeFunction(fnode, self.env);
+                    try self.env.put(fnode.name, fnv);
+                    if (self.annexb_legacy_nodes) |set| if (set.contains(s)) try self.globalDefineDeletable(fnode.name, fnv);
                 },
-                .destructure_decl => |d| if (d.kind != .@"var") self.tdzBindPattern(d.pattern, tdz),
-                .class_expr => |c2| if (c2.name.len > 0) try self.env.put(c2.name, tdz),
                 else => {},
             };
+            if (self.tdz_marker) |_| {
+                const tdz = self.tdzVal();
+                for (cases) |c| for (c.body) |s| switch (s.*) {
+                    .var_decl => |d| if (d.kind != .@"var") try self.env.put(d.name, tdz),
+                    .decl_group => |g| for (g) |gs| switch (gs.*) {
+                        .var_decl => |d| if (d.kind != .@"var") try self.env.put(d.name, tdz),
+                        else => {},
+                    },
+                    .destructure_decl => |d| if (d.kind != .@"var") self.tdzBindPattern(d.pattern, tdz),
+                    .class_expr => |c2| if (c2.name.len > 0) try self.env.put(c2.name, tdz),
+                    else => {},
+                };
+            }
         }
         var start: ?usize = null;
         for (cases, 0..) |c, i| {
@@ -3083,12 +3096,12 @@ pub const Interpreter = struct {
             // enclosing loop and must keep propagating.
             if (self.signal == .brk and self.signal_label == null) self.signal = .none;
         }
-        if (block_env.disposables.items.len != 0) {
-            if (try self.disposeScope(block_env, null)) |err| {
+        if (block_env) |be| if (be.disposables.items.len != 0) {
+            if (try self.disposeScope(be, null)) |err| {
                 self.exception = err;
                 return error.Throw;
             }
-        }
+        };
         // CaseBlockEvaluation returns NormalCompletion(undefined) when no case
         // statement produced a value — a concrete value, never an empty completion.
         self.completion_empty = false;
