@@ -37,12 +37,19 @@ than new correctness architecture.
   `assertOwnerThread`), so deep *main-realm* recursion is an embedder choice:
   create the context on a thread spawned with a larger `stack_size`, or run the
   deep-recursing code inside a `new Thread(...)` (spawned workers already get the
-  64 MiB stack). Genuinely still open: *unbounded* recursion (beyond any native
-  stack) needs a trampolined/VM-stack call path — an execution-model rewrite, not
-  a frame tweak (a `never_inline` frame-shrink of `callPlain` measured negligible;
-  LLVM already colors the skipped slots). This is beyond what V8/JSC do (they cap
-  and throw `RangeError`, as this engine already does), so it is a roadmap item,
-  not a correctness gap.
+  64 MiB stack). Deep recursion beyond the native stack is now handled on the
+  bytecode VM by a **call trampoline** (`vm.runDriver`): a JS→JS `.call` under
+  the driver pushes an explicit heap `Activation` (frame + operand `exec` + saved
+  caller state) instead of recursing natively, so a VM-compiled recursive
+  function is bounded by the `max_call_depth` (16384) logical ceiling / heap, not
+  the OS stack — e.g. `r(8000)` returns on an 8 MiB thread where a native path
+  RangeErrors far earlier. Throws unwind the activation stack; each activation's
+  `exec` is a precise GC root; `execLoop` (top-level program and generator/async
+  bodies) and method/`new`/spread calls keep native dispatch (a method's *own*
+  internal recursion still trampolines via its nested driver). Validated across
+  the full Linux TSan gate. Tree-walked functions (constructs outside the
+  compiler's lowering subset) still recurse natively, adapting to the owner
+  thread stack as above.
 - Active VM frame slots are traced as GC roots, not only operand stacks, closing
   the mid-script parallel-GC use-after-free found by the fuzzer.
 - `-Dtest262-parallel-js` runs a broad language-surface slice in GIL-free
