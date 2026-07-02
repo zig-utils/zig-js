@@ -10610,6 +10610,9 @@ pub const Interpreter = struct {
             return false;
         }
         if (isLazyFunctionPrototypeSlot(o, key)) return false;
+        if (o.prim) |p| {
+            if (p.isString() and std.mem.eql(u8, key, "length")) return false;
+        }
         return objectHasOwn(o, key) and o.getAttr(key).enumerable and
             !(o.is_array and std.mem.eql(u8, key, "length"));
     }
@@ -13098,14 +13101,11 @@ pub const Interpreter = struct {
             }
             return self.throwError("TypeError", "Cannot convert object to primitive value");
         }
-        // A Date with the built-in coercion: a number hint (`Number(date)`,
-        // `+date`, `date - date`) yields its time value; string/default hints
-        // (Date's default hint is "string": `\`${date}\``, `date + ""`) yield the
-        // built-in Date toString, which OrdinaryToPrimitive above skipped as a
-        // native thunk.
+        // A Date with no @@toPrimitive falls back to ordinary conversion: string
+        // hints use toString, while number/default hints use the time value.
         if (o.is_date) {
-            if (hint == .number) return Value.num(o.dateMs());
-            return (try self.dateMethod(o, "toString", &.{})) orelse Value.str("Invalid Date");
+            if (hint == .string) return (try self.dateMethod(o, "toString", &.{})) orelse Value.str("Invalid Date");
+            return Value.num(o.dateMs());
         }
         // The built-in "[object …]" / array-join / Date / error fallback is the
         // result of the *built-in* `toString`; it is only reachable when
