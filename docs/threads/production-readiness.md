@@ -23,9 +23,15 @@ than new correctness architecture.
 - Tree-walker entry into VM-compiled closures now dispatches through the VM,
   so spawned `Thread` entry and normal calls agree on upvalue resolution.
 - VM-recursive calls use the same catchable stack guard as tree-walker calls,
-  so bytecode recursion raises `RangeError` before native stack overflow. The
-  deeper PR-249 thousands-of-frames witness still needs a trampolined/VM-stack
-  call path before promotion.
+  so bytecode recursion raises `RangeError` before native stack overflow.
+  Recursion depth is native-stack-bound (the `stack_scan` redzone probe, not the
+  16384 logical cap), so spawned `Thread`s now run on a 64 MiB stack — lifting
+  worker recursion from ~577 to ~2337 frames (release), into the thousands the
+  PR-249 deep-stack case needs. Still open: the main realm inherits the
+  embedder's caller-thread stack (~576 frames), and *unbounded* recursion needs
+  a trampolined/VM-stack call path; a `never_inline` frame-shrink of `callPlain`
+  was measured to help negligibly (LLVM already colors the skipped slots), so
+  those two need the larger execution-model / trampoline work, not frame tweaks.
 - Active VM frame slots are traced as GC roots, not only operand stacks, closing
   the mid-script parallel-GC use-after-free found by the fuzzer.
 - `-Dtest262-parallel-js` runs a broad language-surface slice in GIL-free
@@ -84,9 +90,15 @@ Known performance/maturity work:
   backing as one stable lifecycle state object instead of three separate GPA
   objects. Existing internal pointers still target the same subobjects, but
   create/destroy-heavy embedders pay fewer allocator calls per GC context.
-- Tight-loop block-scoped allocation is still slower under the GC path compared
-  with arena bulk allocation. This still needs a nursery/generational strategy
-  or an engine optimization for non-captured per-iteration bindings.
+- Tight-loop per-scope allocation in the tree-walker is largely addressed: a
+  `for`/`for-of`/`for-in` loop reuses one per-iteration binding environment when
+  no closure captures it (keyed off `Environment.captured`), a block or a switch
+  CaseBlock allocates no environment when it declares nothing block-scoped, and a
+  non-arrow call skips building the `arguments` object unless the body could name
+  it. A 4M-iteration tree-walked loop with a block body dropped ~74s→15s. What
+  remains here is the genuinely per-iteration-allocating case (a captured loop
+  binding, or a block that does declare a `let`), which still wants a
+  nursery/generational fast path rather than an environment-reuse trick.
 - Context create/destroy remains more expensive than the arena model because
   global setup and GC finalization still touch many cells. Long-lived contexts
   amortize this; create-per-task embedders still need additional lifecycle
