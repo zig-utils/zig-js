@@ -2011,8 +2011,21 @@ pub const Interpreter = struct {
             try self.globalDefineFunc(fnode.name, fnv);
         } else {
             try self.env.put(fnode.name, fnv);
-            if (self.annexb_legacy_nodes) |set| {
-                if (set.contains(fn_node)) try self.globalDefineDeletable(fnode.name, fnv);
+        }
+        return true;
+    }
+
+    fn evalHoistedFunctionDecl(self: *Interpreter, stmt: *Node) EvalError!bool {
+        const fn_node = switch (stmt.*) {
+            .func_decl => stmt,
+            .labeled_stmt => labeledFunctionDeclNode(stmt) orelse return false,
+            else => return false,
+        };
+        if (self.annexb_legacy_nodes) |set| {
+            if (set.contains(fn_node)) {
+                const name = fn_node.func_decl.name;
+                const fnv = self.env.get(name) orelse Value.undef();
+                try self.globalDefineDeletable(name, fnv);
             }
         }
         return true;
@@ -3172,7 +3185,7 @@ pub const Interpreter = struct {
             var i = si;
             outer: while (i < cases.len) : (i += 1) {
                 for (cases[i].body) |stmt| {
-                    if (stmt.* == .func_decl or labeledFunctionDeclNode(stmt) != null) continue; // hoisted above
+                    if (try self.evalHoistedFunctionDecl(stmt)) continue; // lexical function was hoisted above; Annex B update runs now
                     const r = try self.eval(stmt);
                     if (self.signal != .none) {
                         // UpdateEmpty: a raw break/continue is empty (keep `last`);
@@ -3706,6 +3719,7 @@ pub const Interpreter = struct {
             },
             .while_stmt => |w| try self.annexbScanBranch(w.body, stack, depth, out, nodes),
             .do_while_stmt => |w| try self.annexbScanBranch(w.body, stack, depth, out, nodes),
+            .with_stmt => |w| try self.annexbScanBranch(w.body, stack, depth, out, nodes),
             .for_stmt => |f| {
                 const base = stack.items.len;
                 if (f.init) |ini| try self.annexbPushLexical(ini, stack);
@@ -3857,7 +3871,7 @@ pub const Interpreter = struct {
         var last: Value = Value.undef();
         var seen_value = false; // any non-empty completion accumulated yet
         for (stmts) |s| {
-            if (s.* == .func_decl or labeledFunctionDeclNode(s) != null) continue; // already hoisted above
+            if (try self.evalHoistedFunctionDecl(s)) continue; // lexical function was hoisted above; Annex B update runs now
             // An exported function declaration was hoisted above too (preserving
             // its identity); skip it so it isn't rebuilt with a fresh identity.
             if (s.* == .export_decl) {
@@ -38445,6 +38459,28 @@ test "interpreter for loop + ++ + compound assignment" {
     // postfix vs prefix
     try std.testing.expectEqual(@as(f64, 5), (try evalSource(a, "let x = 5; let y = x++; y")).asNum());
     try std.testing.expectEqual(@as(f64, 6), (try evalSource(a, "let x = 5; let y = ++x; y")).asNum());
+}
+
+test "interpreter mixed lexical declarators in for head" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    try std.testing.expect((try evalSource(a,
+        \\let x = 0;
+        \\for (let i = 0, a = () => i; i < 4; i++) {
+        \\  if (i !== x++ || a() !== 0) throw "bad";
+        \\}
+        \\x === 4
+    )).asBool());
+    try std.testing.expect((try evalSource(a,
+        \\let x = 11;
+        \\let q = 0;
+        \\for (let {[++q]: r} = [0, 11, 22], s = () => r; r < 13; r++) {
+        \\  if (r !== x++ || s() !== 11) throw "bad";
+        \\}
+        \\x === 13 && q === 1
+    )).asBool());
 }
 
 test "interpreter compound assignments, nullish, and in" {

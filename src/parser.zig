@@ -1499,40 +1499,38 @@ pub const Parser = struct {
     /// `dispose`: 0 = ordinary `var`/`let`/`const`, 1 = `using`, 2 = `await using`.
     fn parseVarDeclDispose(self: *Parser, kind: ast.DeclKind, dispose: u8) ParseError!*Node {
         _ = self.advance(); // var/let/const/using
-        // Destructuring declaration: `let {a, b} = obj` / `let [x, y] = arr`.
-        // A `using` binding must be a plain identifier (no pattern).
-        if (self.check(.lbrace) or self.check(.lbracket)) {
-            if (dispose != 0) return ParseError.UnexpectedToken;
-            const pattern = try self.parseBindingTarget();
-            try self.expect(.assign);
-            const init_expr = try self.parseAssignment();
-            try self.consumeStatementTerminator();
-            return self.alloc(.{ .destructure_decl = .{ .kind = kind, .pattern = pattern, .init = init_expr } });
-        }
-        // One or more comma-separated declarators: `let a, b = 1, c`.
+        // One or more comma-separated declarators: `let a, {b} = obj, c = 1`.
         var decls: std.ArrayListUnmanaged(*Node) = .empty;
         while (true) {
-            const name_tok = self.advance();
-            if (name_tok.kind != .identifier) return ParseError.UnexpectedToken;
-            // A reserved word may not be a binding name — including when spelled
-            // with `\u` escapes (the lexer hands us the decoded text).
-            if (self.isForbiddenBindingName(name_tok.text)) return ParseError.UnexpectedToken;
-            // A lexical declaration's (let/const/using) BoundNames may not contain
-            // `let`, in every mode — `let let`, `const x, let`.
-            if (kind != .@"var" and std.mem.eql(u8, name_tok.text, "let")) return ParseError.UnexpectedToken;
-            var init_expr: ?*Node = null;
-            if (self.match(.assign)) {
-                init_expr = try self.parseAssignment();
-                nameAnon(init_expr.?, name_tok.text);
-            } else if (kind == .@"const" or dispose != 0) {
-                // `const` and `using` declarations require an initializer.
-                return ParseError.UnexpectedToken;
+            if (self.check(.lbrace) or self.check(.lbracket)) {
+                if (dispose != 0) return ParseError.UnexpectedToken;
+                const pattern = try self.parseBindingTarget();
+                try self.expect(.assign);
+                const init_expr = try self.parseAssignment();
+                try decls.append(self.arena, try self.alloc(.{ .destructure_decl = .{ .kind = kind, .pattern = pattern, .init = init_expr } }));
+            } else {
+                const name_tok = self.advance();
+                if (name_tok.kind != .identifier) return ParseError.UnexpectedToken;
+                // A reserved word may not be a binding name — including when spelled
+                // with `\u` escapes (the lexer hands us the decoded text).
+                if (self.isForbiddenBindingName(name_tok.text)) return ParseError.UnexpectedToken;
+                // A lexical declaration's (let/const/using) BoundNames may not contain
+                // `let`, in every mode — `let let`, `const x, let`.
+                if (kind != .@"var" and std.mem.eql(u8, name_tok.text, "let")) return ParseError.UnexpectedToken;
+                var init_expr: ?*Node = null;
+                if (self.match(.assign)) {
+                    init_expr = try self.parseAssignment();
+                    nameAnon(init_expr.?, name_tok.text);
+                } else if (kind == .@"const" or dispose != 0) {
+                    // `const` and `using` declarations require an initializer.
+                    return ParseError.UnexpectedToken;
+                }
+                try decls.append(self.arena, try self.alloc(.{ .var_decl = .{ .kind = kind, .name = name_tok.text, .init = init_expr, .dispose = dispose } }));
             }
-            try decls.append(self.arena, try self.alloc(.{ .var_decl = .{ .kind = kind, .name = name_tok.text, .init = init_expr, .dispose = dispose } }));
             if (!self.match(.comma)) break;
         }
         try self.consumeStatementTerminator();
-        // A single declarator stays a bare var_decl; multiples become a
+        // A single declarator stays a bare declaration; multiples become a
         // transparent declaration group (NOT a block — no new scope).
         if (decls.items.len == 1) return decls.items[0];
         return self.alloc(.{ .decl_group = decls.items });

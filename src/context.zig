@@ -3349,6 +3349,26 @@ test "context persists globals across evaluations" {
     try std.testing.expect((try ctx.evaluate("Object.getPrototypeOf(globalThis).isPrototypeOf(globalThis)")).asBool());
 }
 
+test "Annex B block function in with creates variable binding" {
+    const ctx = try Context.create(std.testing.allocator);
+    defer ctx.destroy();
+
+    try std.testing.expectEqualStrings("object|true|true|true|string-f|fun-f", (try ctx.evaluate(
+        \\var o = { f: "string-f" };
+        \\with (o) {
+        \\  var desc = Object.getOwnPropertyDescriptor(this, "f");
+        \\  var observed = [
+        \\    typeof desc,
+        \\    desc && desc.value === undefined,
+        \\    desc && desc.writable === true,
+        \\    desc && desc.enumerable === true
+        \\  ].join("|");
+        \\  function f() { return "fun-f"; }
+        \\}
+        \\observed + "|" + o.f + "|" + f()
+    )).asStr());
+}
+
 test "direct eval keeps lexical declarations local but hoists var" {
     const ctx = try Context.create(std.testing.allocator);
     defer ctx.destroy();

@@ -363,6 +363,32 @@ fn stmtCanEscapeAbruptly(node: *const ast.Node) bool {
     };
 }
 
+fn stmtContainsFuncDecl(node: *const ast.Node) bool {
+    return switch (node.*) {
+        .func_decl => true,
+        .function => false,
+        .block => |b| blk: {
+            for (b) |s| if (stmtContainsFuncDecl(s)) break :blk true;
+            break :blk false;
+        },
+        .if_stmt => |i| stmtContainsFuncDecl(i.consequent) or (i.alternate != null and stmtContainsFuncDecl(i.alternate.?)),
+        .while_stmt => |s| stmtContainsFuncDecl(s.body),
+        .do_while_stmt => |s| stmtContainsFuncDecl(s.body),
+        .for_stmt => |f| stmtContainsFuncDecl(f.body),
+        .for_in => |f| stmtContainsFuncDecl(f.body),
+        .with_stmt => |w| stmtContainsFuncDecl(w.body),
+        .labeled_stmt => |l| stmtContainsFuncDecl(l.body),
+        .try_stmt => |t| stmtContainsFuncDecl(t.block) or
+            (t.catch_block != null and stmtContainsFuncDecl(t.catch_block.?)) or
+            (t.finally_block != null and stmtContainsFuncDecl(t.finally_block.?)),
+        .switch_stmt => |sw| blk: {
+            for (sw.cases) |c| for (c.body) |s| if (stmtContainsFuncDecl(s)) break :blk true;
+            break :blk false;
+        },
+        else => false,
+    };
+}
+
 fn stmtHasDisposableDecl(node: *const ast.Node) bool {
     return switch (node.*) {
         .var_decl => |d| d.dispose != 0,
@@ -708,9 +734,10 @@ pub const Compiler = struct {
                 // `with (obj) body`: push an object Environment Record, run the body,
                 // pop it. Only safe when the body can't leave abruptly (which would
                 // skip exit_with) — otherwise keep the whole generator on the
-                // tree-walker. The object expression itself may `yield` (evaluated
-                // before the push).
-                if (stmtCanEscapeAbruptly(w.body)) return error.Unsupported;
+                // tree-walker. Annex B block function declarations inside `with`
+                // also need tree-walker source-order legacy binding updates.
+                // The object expression itself may `yield` (evaluated before the push).
+                if (stmtCanEscapeAbruptly(w.body) or stmtContainsFuncDecl(w.body)) return error.Unsupported;
                 try self.compileExpr(w.obj);
                 _ = try self.chunk.emit(.enter_with, 0);
                 try self.compileStmt(w.body);
