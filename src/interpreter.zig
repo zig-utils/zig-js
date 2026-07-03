@@ -2076,25 +2076,10 @@ pub const Interpreter = struct {
                 }
                 // `delete obj.prop` / `delete obj[expr]`: remove an own property
                 // (honoring [[Configurable]]). `delete <non-reference>` is true.
+                if (target.* == .optional_chain and target.optional_chain.* == .member)
+                    break :blk try self.deleteMemberExpression(target.optional_chain.member);
                 if (target.* == .member) {
-                    const m = target.member;
-                    const obj = try self.eval(m.object);
-                    if (obj.isNull() or obj.isUndefined()) {
-                        // `delete a?.b` with a nullish base short-circuits to true;
-                        // otherwise `delete null.x` / `delete undefined[e]` performs
-                        // ToObject on the base, which throws a TypeError (the key
-                        // expression is still evaluated first, for its side effects).
-                        if (m.optional) break :blk Value.boolVal(true);
-                        if (m.computed) |ce| _ = try self.eval(ce);
-                        return self.throwError("TypeError", "Cannot convert undefined or null to object");
-                    }
-                    if (!obj.isObject()) break :blk Value.boolVal(true);
-                    const key = try self.memberKey(m.property, m.computed);
-                    const ok = try self.deleteOwn(obj.asObj(), key);
-                    // Strict mode: a failed delete (a non-configurable property)
-                    // is a TypeError rather than a `false` result.
-                    if (!ok and self.strict) return self.throwError("TypeError", "Cannot delete property");
-                    break :blk Value.boolVal(ok);
+                    break :blk try self.deleteMemberExpression(target.member);
                 }
                 // `delete <name>` inside a `with` deletes from the binding object
                 // (an object environment record); elsewhere a bare-name delete
@@ -4829,6 +4814,27 @@ pub const Interpreter = struct {
             if ((try self.getProperty(res, "done")).toBoolean()) break;
             try list.append(self.arena, try self.getProperty(res, "value"));
         }
+    }
+
+    fn deleteMemberExpression(self: *Interpreter, m: anytype) EvalError!Value {
+        const obj = self.eval(m.object) catch |e|
+            if (e == error.OptShortCircuit) return Value.boolVal(true) else return e;
+        if (obj.isNull() or obj.isUndefined()) {
+            // `delete a?.b` with a nullish base short-circuits to true; otherwise
+            // `delete null.x` / `delete undefined[e]` performs ToObject on the base,
+            // which throws a TypeError (the key expression is still evaluated
+            // first, for its side effects).
+            if (m.optional) return Value.boolVal(true);
+            if (m.computed) |ce| _ = try self.eval(ce);
+            return self.throwError("TypeError", "Cannot convert undefined or null to object");
+        }
+        if (!obj.isObject()) return Value.boolVal(true);
+        const key = try self.memberKey(m.property, m.computed);
+        const ok = try self.deleteOwn(obj.asObj(), key);
+        // Strict mode: a failed delete (a non-configurable property) is a
+        // TypeError rather than a `false` result.
+        if (!ok and self.strict) return self.throwError("TypeError", "Cannot delete property");
+        return Value.boolVal(ok);
     }
 
     fn evalCall(self: *Interpreter, callee_node: *Node, arg_nodes: []*Node, optional: bool) EvalError!Value {

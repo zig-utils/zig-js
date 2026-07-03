@@ -2846,6 +2846,10 @@ pub const Parser = struct {
                 const name = self.advance();
                 if (name.kind != .identifier) return ParseError.UnexpectedToken;
                 callee = try self.alloc(.{ .member = .{ .object = callee, .property = name.text } });
+            } else if (self.check(.question_dot)) {
+                // `new o?.C()` / `new C?.()` is syntactically invalid; callers
+                // must parenthesize the optional chain (`new (o?.C)()`).
+                return ParseError.UnexpectedToken;
             } else if (self.match(.lbracket)) {
                 const idx = try self.parseExpression();
                 try self.expect(.rbracket);
