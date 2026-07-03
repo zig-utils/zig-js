@@ -19285,6 +19285,29 @@ fn uint8ArrayBytes(o: *value.Object) ?[]u8 {
     return buf.bytes()[ta.byte_offset .. ta.byte_offset + n];
 }
 
+/// Snapshot a Uint8Array's live bytes into a fresh arena copy so a subsequent
+/// (potentially long, allocating) base64/hex encode can read a stable buffer:
+/// `uint8ArrayBytes` returns a live slice, but a peer thread's resize()+free
+/// would dangle it mid-encode (UAF). Returns null if the buffer is detached.
+///
+/// The copy is allocated OUTSIDE `lockBuffer` — we never hold the buffer mutex
+/// across an allocation (which could trigger a GC and stall parallel-collection
+/// convergence) — then the live bytes are memcpy'd in under the lock and clamped
+/// to the length observed there, so a concurrent shrink copies fewer bytes and a
+/// concurrent resize can neither read out of bounds nor use a freed base.
+fn uint8SnapshotBytes(self: *Interpreter, o: *value.Object) EvalError!?[]u8 {
+    const hint = uint8ArrayBytes(o) orelse return null;
+    const copy = try self.arena.alloc(u8, hint.len);
+    const buf = o.typed_array.?.buffer.array_buffer.?;
+    const locked = buf.needsElementLock();
+    if (locked) buf.lockBuffer();
+    defer if (locked) buf.unlockBuffer();
+    const live = uint8ArrayBytes(o) orelse return null;
+    const nn = @min(hint.len, live.len);
+    @memcpy(copy[0..nn], live[0..nn]);
+    return copy[0..nn];
+}
+
 fn requireUint8Array(self: *Interpreter, this: Value) EvalError!*value.Object {
     if (this.isObject()) if (this.asObj().typed_array) |ta| if (ta.kind == .u8) return this.asObj();
     return self.throwError("TypeError", "method requires a Uint8Array receiver");
@@ -19323,7 +19346,7 @@ fn uint8ToBase64Fn(ctx: *anyopaque, this: Value, args: []const Value) value.Host
     const opts = try getOptionsObject(self, arg(args, 0));
     const url = std.mem.eql(u8, try getStringOption(self, opts, "alphabet", &.{ "base64", "base64url" }, "base64"), "base64url");
     const omit = try getBoolOption(self, opts, "omitPadding");
-    const bytes = uint8ArrayBytes(o) orelse return self.throwError("TypeError", "Uint8Array buffer is detached");
+    const bytes = (try uint8SnapshotBytes(self, o)) orelse return self.throwError("TypeError", "Uint8Array buffer is detached");
     return Value.str(try encodeBase64(self, bytes, url, omit));
 }
 
@@ -19331,7 +19354,7 @@ fn uint8ToHexFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostErr
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     _ = args;
     const o = try requireUint8Array(self, this);
-    const bytes = uint8ArrayBytes(o) orelse return self.throwError("TypeError", "Uint8Array buffer is detached");
+    const bytes = (try uint8SnapshotBytes(self, o)) orelse return self.throwError("TypeError", "Uint8Array buffer is detached");
     const hex = "0123456789abcdef";
     var out: std.ArrayListUnmanaged(u8) = .empty;
     for (bytes) |b| {
@@ -19350,9 +19373,22 @@ fn uint8SetFromBase64Fn(ctx: *anyopaque, this: Value, args: []const Value) value
     const opts = try getOptionsObject(self, arg(args, 1));
     const url = std.mem.eql(u8, try getStringOption(self, opts, "alphabet", &.{ "base64", "base64url" }, "base64"), "base64url");
     const lch = lastChunkFromName(try getStringOption(self, opts, "lastChunkHandling", &.{ "loose", "strict", "stop-before-partial" }, "loose"));
-    const target = uint8ArrayBytes(o) orelse return self.throwError("TypeError", "Uint8Array buffer is detached");
-    const r = try decodeBase64(self, sv.asStr(), url, lch, target.len);
-    @memcpy(target[0..r.bytes.len], r.bytes);
+    // Bound the decode by the current writable length (racy read, re-clamped
+    // under the lock below); `decodeBase64` allocates `r.bytes` OUTSIDE the lock.
+    const cap = (uint8ArrayBytes(o) orelse return self.throwError("TypeError", "Uint8Array buffer is detached")).len;
+    const r = try decodeBase64(self, sv.asStr(), url, lch, cap);
+    // Write into the live buffer under the lock so a peer resize()+free can't
+    // dangle the target mid-copy (UAF); re-resolve + clamp to the live length.
+    {
+        const buf = o.typed_array.?.buffer.array_buffer.?;
+        const locked = buf.needsElementLock();
+        if (locked) buf.lockBuffer();
+        defer if (locked) buf.unlockBuffer();
+        if (uint8ArrayBytes(o)) |target| {
+            const n = @min(r.bytes.len, target.len);
+            @memcpy(target[0..n], r.bytes[0..n]);
+        }
+    }
     if (r.err) return self.throwError("SyntaxError", "invalid base64-encoded string");
     return try self.readWrittenResult(r.read, r.bytes.len);
 }
@@ -19363,9 +19399,22 @@ fn uint8SetFromHexFn(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
     if (o.typed_array.?.buffer.array_buffer.?.immutable) return self.throwError("TypeError", "Cannot write to a Uint8Array backed by an immutable ArrayBuffer");
     const sv = arg(args, 0);
     if (!sv.isString()) return self.throwError("TypeError", "setFromHex requires a string argument");
-    const target = uint8ArrayBytes(o) orelse return self.throwError("TypeError", "Uint8Array buffer is detached");
-    const r = try decodeHex(self, sv.asStr(), target.len);
-    @memcpy(target[0..r.bytes.len], r.bytes);
+    // Bound the decode by the current writable length (racy read, re-clamped
+    // under the lock below); `decodeHex` allocates `r.bytes` OUTSIDE the lock.
+    const cap = (uint8ArrayBytes(o) orelse return self.throwError("TypeError", "Uint8Array buffer is detached")).len;
+    const r = try decodeHex(self, sv.asStr(), cap);
+    // Write into the live buffer under the lock so a peer resize()+free can't
+    // dangle the target mid-copy (UAF); re-resolve + clamp to the live length.
+    {
+        const buf = o.typed_array.?.buffer.array_buffer.?;
+        const locked = buf.needsElementLock();
+        if (locked) buf.lockBuffer();
+        defer if (locked) buf.unlockBuffer();
+        if (uint8ArrayBytes(o)) |target| {
+            const n = @min(r.bytes.len, target.len);
+            @memcpy(target[0..n], r.bytes[0..n]);
+        }
+    }
     if (r.err) return self.throwError("SyntaxError", "invalid hex-encoded string");
     return try self.readWrittenResult(r.read, r.bytes.len);
 }
