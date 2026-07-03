@@ -1993,6 +1993,31 @@ pub const Interpreter = struct {
         return val;
     }
 
+    fn labeledFunctionDeclNode(node: *Node) ?*Node {
+        var n = node;
+        while (n.* == .labeled_stmt) n = n.labeled_stmt.body;
+        return if (n.* == .func_decl) n else null;
+    }
+
+    fn hoistStatementFunctionDecl(self: *Interpreter, stmt: *Node, at_fn_top: bool) EvalError!bool {
+        const fn_node = switch (stmt.*) {
+            .func_decl => stmt,
+            .labeled_stmt => labeledFunctionDeclNode(stmt) orelse return false,
+            else => return false,
+        };
+        const fnode = fn_node.func_decl;
+        const fnv = try self.makeFunction(fnode, self.env);
+        if (at_fn_top) {
+            try self.globalDefineFunc(fnode.name, fnv);
+        } else {
+            try self.env.put(fnode.name, fnv);
+            if (self.annexb_legacy_nodes) |set| {
+                if (set.contains(fn_node)) try self.globalDefineDeletable(fnode.name, fnv);
+            }
+        }
+        return true;
+    }
+
     fn makeErrorWithProto(self: *Interpreter, name: []const u8, message: []const u8, proto: ?*value.Object) EvalError!Value {
         const obj = try gc_mod.allocObj(self.arena);
         obj.* = .{ .is_error = true, .error_name = name };
@@ -3108,11 +3133,7 @@ pub const Interpreter = struct {
             // function declarations are block-scoped (with the Annex B B.3.3 legacy
             // copy), and let/const/class get the temporal-dead-zone sentinel.
             for (cases) |c| for (c.body) |s| switch (s.*) {
-                .func_decl => |fnode| {
-                    const fnv = try self.makeFunction(fnode, self.env);
-                    try self.env.put(fnode.name, fnv);
-                    if (self.annexb_legacy_nodes) |set| if (set.contains(s)) try self.globalDefineDeletable(fnode.name, fnv);
-                },
+                .func_decl, .labeled_stmt => _ = try self.hoistStatementFunctionDecl(s, false),
                 else => {},
             };
             if (self.tdz_marker) |_| {
@@ -3151,7 +3172,7 @@ pub const Interpreter = struct {
             var i = si;
             outer: while (i < cases.len) : (i += 1) {
                 for (cases[i].body) |stmt| {
-                    if (stmt.* == .func_decl) continue; // hoisted above
+                    if (stmt.* == .func_decl or labeledFunctionDeclNode(stmt) != null) continue; // hoisted above
                     const r = try self.eval(stmt);
                     if (self.signal != .none) {
                         // UpdateEmpty: a raw break/continue is empty (keep `last`);
@@ -3647,10 +3668,18 @@ pub const Interpreter = struct {
         if (depth >= 1) {
             for (stmts) |s| switch (s.*) {
                 .func_decl => |f| if (!f.is_generator and !f.is_async and !annexbStackHas(stack.*, f.name)) try self.annexbAddCandidate(s, f.name, out, nodes),
+                .labeled_stmt => if (labeledFunctionDeclNode(s)) |fn_node| {
+                    const f = fn_node.func_decl;
+                    if (!f.is_generator and !f.is_async and !annexbStackHas(stack.*, f.name)) try self.annexbAddCandidate(fn_node, f.name, out, nodes);
+                },
                 else => {},
             };
             for (stmts) |s| switch (s.*) {
                 .func_decl => |f| if (!f.is_generator and !f.is_async) try stack.append(self.arena, f.name),
+                .labeled_stmt => if (labeledFunctionDeclNode(s)) |fn_node| {
+                    const f = fn_node.func_decl;
+                    if (!f.is_generator and !f.is_async) try stack.append(self.arena, f.name);
+                },
                 else => {},
             };
         }
@@ -3689,17 +3718,25 @@ pub const Interpreter = struct {
                 try self.annexbScanBranch(f.body, stack, depth, out, nodes);
                 stack.shrinkRetainingCapacity(base);
             },
-            .labeled_stmt => |l| try self.annexbScanStmt(l.body, stack, depth, out, nodes),
+            .labeled_stmt => |l| try self.annexbScanBranch(l.body, stack, depth, out, nodes),
             .switch_stmt => |sw| {
                 const base = stack.items.len;
                 // The whole switch is one lexical (CaseBlock) scope across all cases.
                 for (sw.cases) |c| for (c.body) |cs| try self.annexbPushLexical(cs, stack);
                 for (sw.cases) |c| for (c.body) |cs| switch (cs.*) {
                     .func_decl => |fd| if (!fd.is_generator and !fd.is_async and !annexbStackHas(stack.*, fd.name)) try self.annexbAddCandidate(cs, fd.name, out, nodes),
+                    .labeled_stmt => if (labeledFunctionDeclNode(cs)) |fn_node| {
+                        const fd = fn_node.func_decl;
+                        if (!fd.is_generator and !fd.is_async and !annexbStackHas(stack.*, fd.name)) try self.annexbAddCandidate(fn_node, fd.name, out, nodes);
+                    },
                     else => {},
                 };
                 for (sw.cases) |c| for (c.body) |cs| switch (cs.*) {
                     .func_decl => |fd| if (!fd.is_generator and !fd.is_async) try stack.append(self.arena, fd.name),
+                    .labeled_stmt => if (labeledFunctionDeclNode(cs)) |fn_node| {
+                        const fd = fn_node.func_decl;
+                        if (!fd.is_generator and !fd.is_async) try stack.append(self.arena, fd.name);
+                    },
                     else => {},
                 };
                 for (sw.cases) |c| for (c.body) |cs| try self.annexbScanStmt(cs, stack, depth + 1, out, nodes);
@@ -3752,19 +3789,7 @@ pub const Interpreter = struct {
         // once here; the main loop then skips them, preserving function identity
         // (`var g = bar; function bar() {}` ⇒ `g === bar`).
         for (stmts) |s| switch (s.*) {
-            .func_decl => |fnode| {
-                const fnv = try self.makeFunction(fnode, self.env);
-                if (at_fn_top) {
-                    try self.globalDefineFunc(fnode.name, fnv);
-                } else {
-                    // Block-scoped function declaration: bind in this block...
-                    try self.env.put(fnode.name, fnv);
-                    // ...and (Annex B) copy to the var scope when eligible.
-                    if (self.annexb_legacy_nodes) |set| {
-                        if (set.contains(s)) try self.globalDefineDeletable(fnode.name, fnv);
-                    }
-                }
-            },
+            .func_decl, .labeled_stmt => _ = try self.hoistStatementFunctionDecl(s, at_fn_top),
             // `export function f(){}` / direct `export default function f(){}`
             // hoist just like bare function declarations. Parenthesized
             // `export default (function(){})` is an expression and must wait for
@@ -3832,7 +3857,7 @@ pub const Interpreter = struct {
         var last: Value = Value.undef();
         var seen_value = false; // any non-empty completion accumulated yet
         for (stmts) |s| {
-            if (s.* == .func_decl) continue; // already hoisted above
+            if (s.* == .func_decl or labeledFunctionDeclNode(s) != null) continue; // already hoisted above
             // An exported function declaration was hoisted above too (preserving
             // its identity); skip it so it isn't rebuilt with a fresh identity.
             if (s.* == .export_decl) {
@@ -39522,6 +39547,41 @@ test "interpreter labeled break and continue" {
         \\outer2: for (let i = 0; i < 5; i++) { n = n + 1; continue outer2; }
         \\n
     )).asNum());
+}
+
+test "Annex B labeled block function updates legacy binding" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    try std.testing.expect((try evalSource(a,
+        \\eval("fe(); l: function fe() { return 7; }");
+        \\fe() === 7
+    )).asBool());
+    try std.testing.expect((try evalSource(a,
+        \\{ f(); l: function f() { return 4; } }
+        \\f() === 4
+    )).asBool());
+    try std.testing.expect((try evalSource(a,
+        \\{
+        \\  f();
+        \\  function f() { return 3; }
+        \\  f();
+        \\  function f() { return 4; }
+        \\  f();
+        \\}
+        \\f() === 4
+    )).asBool());
+    try std.testing.expect((try evalSource(a,
+        \\{
+        \\  f();
+        \\  function f() { return 3; }
+        \\  f();
+        \\  l: function f() { return 4; }
+        \\  f();
+        \\}
+        \\f() === 4
+    )).asBool());
 }
 
 test "interpreter do-while and comma operator" {
