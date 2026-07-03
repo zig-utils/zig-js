@@ -4007,6 +4007,7 @@ pub const Parser = struct {
             try self.parseDecorators();
             return self.parseClassExpr();
         }
+        if (self.check(.slash)) return self.parseRegexLiteralFromSlash();
         if (self.check(.lbrace)) return self.parseObjectLiteral();
         if (self.check(.lbracket)) return self.parseArrayLiteral();
         const t = self.advance();
