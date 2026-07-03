@@ -38749,6 +38749,15 @@ test "interpreter JSON, Object, Number builtins" {
     try std.testing.expectEqualStrings("[1,\"x\",true,null]", (try evalSource(a, "JSON.stringify([1, 'x', true, null])")).asStr());
     try std.testing.expectEqual(@as(f64, 3), (try evalSource(a, "let o = JSON.parse('{\"n\": 3}'); o.n")).asNum());
     try std.testing.expectEqual(@as(f64, 6), (try evalSource(a, "let v = JSON.parse('[1,2,3]'); v[0] + v[1] + v[2]")).asNum());
+    try std.testing.expectEqual(@as(f64, 1), (try evalSource(a,
+        \\let seen = 0;
+        \\JSON.parse('[0,1]', function(k, v) {
+        \\  if (k === '0' && Array.isArray(this)) this[1] = new Int8Array(1);
+        \\  if (this instanceof Int8Array) seen++;
+        \\  return v;
+        \\});
+        \\seen
+    )).asNum());
     // Object.create + getPrototypeOf
     try std.testing.expectEqual(@as(f64, 7), (try evalSource(a, "let p = { x: 7 }; let o = Object.create(p); o.x")).asNum());
     // Object.defineProperty (data + accessor)

@@ -685,42 +685,19 @@ pub fn mathRandom(ctx: *anyopaque, this: Value, args: []const Value) HostError!V
 
 // ---- Object / Array ----------------------------------------------------
 
-/// Own enumerable string keys of `o`, in spec order: integer array indices
-/// ascending first, then named keys in insertion order. Array element indices
-/// live in the dense `elements` store (not the shape), so they're added here;
-/// a per-index `enumerable:false` (from defineProperty) hides one.
+/// Own enumerable string keys of `o`, in spec order. Use the full
+/// [[OwnPropertyKeys]] path so exotic own keys (String and TypedArray indices,
+/// module namespace exports, Proxy traps, array dense elements) are included,
+/// then filter through [[GetOwnProperty]] for the live enumerable bit.
 pub fn ownEnumerableKeys(self: *Interpreter, o: *value.Object) HostError![]const []const u8 {
     try self.checkRestricted(o);
     var list: std.ArrayListUnmanaged([]const u8) = .empty;
-    // A module namespace's enumerable own keys are exactly its (sorted) string
-    // export names; the @@toStringTag is non-enumerable.
-    if (interpreter.isModuleNs(o)) {
-        for (interpreter.moduleNsNames(o)) |k| {
-            const desc = try interpreter.moduleNsDesc(self, o, k);
-            if (desc.isObject() and descBool(desc.asObj(), "enumerable", false))
-                try list.append(self.arena, k);
-        }
-        return list.items;
+    for (try self.objectOwnKeysList(o)) |k| {
+        if (value.isSymbolKey(k) or value.isPrivateKey(k)) continue;
+        const desc = try objectGetOwnPropertyDescriptor(self, Value.undef(), &.{ Value.obj(o), self.keyToValue(k) });
+        if (desc.isObject() and (try self.getProperty(desc, "enumerable")).toBoolean())
+            try list.append(self.arena, k);
     }
-    // A Proxy's enumerable own string keys: [[OwnPropertyKeys]] (ownKeys trap)
-    // filtered by [[GetOwnProperty]] (getOwnPropertyDescriptor trap) enumerable.
-    if (o.proxy_handler != null or o.proxy_revoked) {
-        for (try self.proxyOwnKeys(o)) |k| {
-            if (value.isSymbolKey(k) or value.isPrivateKey(k)) continue;
-            const desc = try objectGetOwnPropertyDescriptor(self, Value.undef(), &.{ Value.obj(o), self.keyToValue(k) });
-            if (desc.isObject() and (try self.getProperty(desc, "enumerable")).toBoolean())
-                try list.append(self.arena, k);
-        }
-        return list.items;
-    }
-    if (o.is_array) {
-        var i: usize = 0;
-        while (i < o.elements.items.len) : (i += 1) {
-            const k = try std.fmt.allocPrint(self.arena, "{d}", .{i});
-            if (o.getAttr(k).enumerable) try list.append(self.arena, k);
-        }
-    }
-    for (try o.enumerableKeys(self.arena)) |k| try list.append(self.arena, k);
     return list.items;
 }
 
