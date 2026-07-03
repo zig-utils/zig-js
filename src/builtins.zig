@@ -119,21 +119,8 @@ pub fn functionConstructor(ctx: *anyopaque, this: Value, args: []const Value) Ho
         }
         body = try self.toStringV(args[args.len - 1]);
     }
-    // The `)` goes on its OWN line (matching the assembled source below): a
-    // trailing Annex B HTML-open-comment param (`Function("<!--", "")`) comments
-    // out to end-of-line, so without the newline it would swallow the `)`.
-    const param_source = try std.fmt.allocPrint(self.arena, "({s}\n)", .{params.items});
-    var param_parser = Parser.init(self.arena, param_source) catch
-        return self.throwError("SyntaxError", "Function: invalid parameters or body");
-    param_parser.parseDynamicFunctionParams(false, false) catch
-        return self.throwError("SyntaxError", "Function: invalid parameters or body");
-    const source = try std.fmt.allocPrint(self.arena, "(function({s}\n) {{\n{s}\n}})", .{ params.items, body });
-    var parser = Parser.init(self.arena, source) catch
-        return self.throwError("SyntaxError", "Function: invalid parameters or body");
-    const prog = parser.parseProgram() catch
-        return self.throwError("SyntaxError", "Function: invalid parameters or body");
-    // Create the function in the Function constructor's own realm (so its
-    // closure — and thus [[Realm]] — is that realm), then restore.
+    // CreateDynamicFunction uses the constructor's realm for parsing and for
+    // any SyntaxError it creates, not the caller's current realm.
     const nt = self.new_target;
     const saved_env = self.env;
     var swapped = false;
@@ -150,6 +137,21 @@ pub fn functionConstructor(ctx: *anyopaque, this: Value, args: []const Value) Ho
     defer if (swapped) {
         self.env = saved_env;
     };
+    // The `)` goes on its OWN line (matching the assembled source below): a
+    // trailing Annex B HTML-open-comment param (`Function("<!--", "")`) comments
+    // out to end-of-line, so without the newline it would swallow the `)`.
+    const param_source = try std.fmt.allocPrint(self.arena, "({s}\n)", .{params.items});
+    var param_parser = Parser.init(self.arena, param_source) catch
+        return self.throwError("SyntaxError", "Function: invalid parameters or body");
+    param_parser.parseDynamicFunctionParams(false, false) catch
+        return self.throwError("SyntaxError", "Function: invalid parameters or body");
+    const source = try std.fmt.allocPrint(self.arena, "(function({s}\n) {{\n{s}\n}})", .{ params.items, body });
+    var parser = Parser.init(self.arena, source) catch
+        return self.throwError("SyntaxError", "Function: invalid parameters or body");
+    const prog = parser.parseProgram() catch
+        return self.throwError("SyntaxError", "Function: invalid parameters or body");
+    // Create the function in the Function constructor's own realm (so its
+    // closure — and thus [[Realm]] — is that realm).
     const fn_v = try self.eval(prog);
     if (fn_v.isObject() and fn_v.asObj().js_func != null) {
         try fn_v.asObj().setOwn(self.arena, self.root_shape, "name", Value.str("anonymous"));

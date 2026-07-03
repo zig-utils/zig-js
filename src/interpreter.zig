@@ -17920,6 +17920,20 @@ fn dynamicFunctionFn(comptime kind: DynFnKind) value.NativeFn {
                 }
                 body = try self.toStringV(args[args.len - 1]);
             }
+            // CreateDynamicFunction parses in the constructor's realm, so
+            // SyntaxError instances are from that realm too.
+            const nt = self.new_target;
+            const saved_env = self.env;
+            var swapped = false;
+            if (self.active_native) |callee| {
+                if (callee.private_data) |pd| {
+                    self.env = @ptrCast(@alignCast(pd));
+                    swapped = true;
+                }
+            }
+            defer if (swapped) {
+                self.env = saved_env;
+            };
             if (kind == .generator or kind == .async_generator) {
                 const has_yield = dynamicGeneratorParamsContainYield(self.arena, params.items) catch
                     return self.throwError("SyntaxError", "Function: invalid parameters or body");
@@ -17942,18 +17956,6 @@ fn dynamicFunctionFn(comptime kind: DynFnKind) value.NativeFn {
                 return self.throwError("SyntaxError", "Function: invalid parameters or body");
             const prog = parser.parseProgram() catch
                 return self.throwError("SyntaxError", "Function: invalid parameters or body");
-            const nt = self.new_target;
-            const saved_env = self.env;
-            var swapped = false;
-            if (self.active_native) |callee| {
-                if (callee.private_data) |pd| {
-                    self.env = @ptrCast(@alignCast(pd));
-                    swapped = true;
-                }
-            }
-            defer if (swapped) {
-                self.env = saved_env;
-            };
             const fnval = try self.eval(prog);
             // GetPrototypeFromConstructor: a real new.target subclass overrides
             // the function object's [[Prototype]] (the default kind-prototype is
