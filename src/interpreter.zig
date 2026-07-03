@@ -7071,6 +7071,16 @@ pub const Interpreter = struct {
         return units;
     }
 
+    fn utf16IndexFromByteOffset(s: []const u8, offset: usize) usize {
+        var units: usize = 0;
+        var i: usize = 0;
+        while (i < s.len and i < offset) {
+            units += utf16LenOfSeq(s, i);
+            i += jsStringSeqLen(s, i);
+        }
+        return units;
+    }
+
     const StringCodeUnit = struct {
         unit: u16,
         astral: ?u21 = null,
@@ -12647,16 +12657,22 @@ pub const Interpreter = struct {
             while (from <= s.len) { // `from` stays in-bounds so the search never reads past the end
                 const idx = std.mem.indexOfPos(u8, s, from, pat) orelse break;
                 try buf.appendSlice(a, s[from..idx]);
+                const position = utf16IndexFromByteOffset(s, idx);
                 if (is_func) {
-                    const r = try self.callValue(repl_val, &.{ Value.str(pat), Value.num(@floatFromInt(idx)), Value.str(s) });
+                    const r = try self.callValue(repl_val, &.{ Value.str(pat), Value.num(@floatFromInt(position)), Value.str(s) });
                     try buf.appendSlice(a, try self.toStringV(r));
                 } else {
-                    try self.getSubstitution(&buf, template, pat, s, idx, &.{}, null);
+                    try self.getSubstitutionValues(&buf, template, pat, s, position, &.{}, Value.undef());
                 }
                 from = idx + pat.len;
                 if (pat.len == 0) { // empty pattern: copy one char and step past it
-                    if (from < s.len) try buf.append(a, s[from]);
-                    from += 1;
+                    if (from < s.len) {
+                        const n = utf8SeqLen(s, from);
+                        try buf.appendSlice(a, s[from..@min(from + n, s.len)]);
+                        from += n;
+                    } else {
+                        from += 1;
+                    }
                 }
                 if (!all) break;
             }

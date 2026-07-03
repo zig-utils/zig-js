@@ -19,9 +19,11 @@ const Decomp = struct {
 const decomp_table = [_]Decomp{
     .{ .cp = 0x00C5, .canonical = &.{ 'A', 0x030A } },
     .{ .cp = 0x00C7, .canonical = &.{ 'C', 0x0327 } },
+    .{ .cp = 0x00E1, .canonical = &.{ 'a', 0x0301 } },
     .{ .cp = 0x00E4, .canonical = &.{ 'a', 0x0308 } },
     .{ .cp = 0x00F4, .canonical = &.{ 'o', 0x0302 } },
     .{ .cp = 0x00F6, .canonical = &.{ 'o', 0x0308 } },
+    .{ .cp = 0x0100, .canonical = &.{ 'A', 0x0304 } },
     .{ .cp = 0x0103, .canonical = &.{ 'a', 0x0306 } },
     .{ .cp = 0x01B0, .canonical = &.{ 'u', 0x031B } },
     .{ .cp = 0x0344, .canonical = &.{ 0x0308, 0x0301 } },
@@ -47,6 +49,7 @@ const Compose = struct { a: Codepoint, b: Codepoint, to: Codepoint };
 
 const compose_table = [_]Compose{
     .{ .a = 'A', .b = 0x030A, .to = 0x00C5 },
+    .{ .a = 'a', .b = 0x0301, .to = 0x00E1 },
     .{ .a = 's', .b = 0x0323, .to = 0x1E63 },
     .{ .a = 0x017F, .b = 0x0307, .to = 0x1E9B },
     .{ .a = 0x1E61, .b = 0x0323, .to = 0x1E69 },
@@ -60,7 +63,7 @@ fn canonicalCombiningClass(cp: Codepoint) u8 {
         0x0327 => 202,
         0x031B => 216,
         0x0323 => 220,
-        0x0301, 0x0302, 0x0306, 0x0307, 0x0308, 0x030A => 230,
+        0x0301, 0x0302, 0x0304, 0x0306, 0x0307, 0x0308, 0x030A => 230,
         else => 0,
     };
 }
