@@ -2153,8 +2153,28 @@ pub const Context = struct {
     /// sources. Distinguishes the spec's "ambiguous" result from "not found",
     /// because indirect exports/imports must reject both while namespace objects
     /// merely omit ambiguous star names.
+    const ResolveEntry = struct { module: *Module, name: []const u8 };
+
     fn resolveExport(self: *Context, module: *Module, name: []const u8, depth: u32) ExportResolution {
-        if (depth > 64) return .not_found;
+        _ = depth; // superseded by the resolveSet threaded through resolveExportSet
+        var set: std.ArrayListUnmanaged(ResolveEntry) = .empty;
+        defer set.deinit(self.gpa);
+        return self.resolveExportSet(module, name, &set);
+    }
+
+    /// ResolveExport with the spec's `resolveSet` (sec-resolveexport): re-entering
+    /// a (module, exportName) already in progress returns not_found. A plain depth
+    /// cap does not prevent the `export *` / indirect-re-export recursion from
+    /// re-walking the same nodes along every cyclic path — an exponential blow-up
+    /// that hangs on multi-cycle graphs. The resolveSet prunes that to a finite,
+    /// linear traversal while still detecting genuine ambiguity (distinct
+    /// (module, name) targets are never pruned, so two different source bindings
+    /// still resolve to `.ambiguous`).
+    fn resolveExportSet(self: *Context, module: *Module, name: []const u8, set: *std.ArrayListUnmanaged(ResolveEntry)) ExportResolution {
+        for (set.items) |e| {
+            if (e.module == module and std.mem.eql(u8, e.name, name)) return .not_found;
+        }
+        set.append(self.gpa, .{ .module = module, .name = name }) catch return .not_found;
         if (module.exports.get(name)) |kind| switch (kind) {
             .local => |local| {
                 if (module.env.aliases.get(local)) |alias|
@@ -2163,13 +2183,13 @@ pub const Context = struct {
             },
             .indirect => |ind| {
                 if (std.mem.eql(u8, ind.name, "*namespace*")) return .not_found; // namespace handled separately
-                return self.resolveExport(ind.module, ind.name, depth + 1);
+                return self.resolveExportSet(ind.module, ind.name, set);
             },
         };
         // `export *` sources: a name not directly exported may come from one.
         var star_resolution: ?interp.Environment.Alias = null;
         for (module.star_sources.items) |src| {
-            switch (self.resolveExport(src, name, depth + 1)) {
+            switch (self.resolveExportSet(src, name, set)) {
                 .not_found => {},
                 .ambiguous => return .ambiguous,
                 .found => |r| {
