@@ -21471,7 +21471,7 @@ fn prProcessOptions(self: *Interpreter, raw: Value) EvalError!*value.Object {
             try s.setProp(dst, name, Value.num(n));
         }
     };
-    _ = try self.getProperty(raw, "localeMatcher"); // read & discard
+    _ = try H.str(self, raw, ro, "localeMatcher", &.{ "lookup", "best fit" }); // validate, then discard
     _ = try H.str(self, raw, ro, "type", &.{ "cardinal", "ordinal" });
     _ = try H.str(self, raw, ro, "notation", &.{ "standard", "scientific", "engineering", "compact" });
     _ = try H.str(self, raw, ro, "compactDisplay", &.{ "short", "long" });
@@ -38753,6 +38753,20 @@ test "DataView cross-realm brand errors use the method realm" {
         \\let getterRealm = false;
         \\try { av.buffer; } catch (e) { getterRealm = e.constructor === alien.TypeError; }
         \\methodRealm && getterRealm
+    )).asBool());
+}
+
+test "Intl.PluralRules validates localeMatcher option" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expect((try evalSource(a,
+        \\let invalid = false;
+        \\try { new Intl.PluralRules("en", { localeMatcher: "bad" }); } catch (e) { invalid = e instanceof RangeError; }
+        \\let nul = false;
+        \\try { new Intl.PluralRules("en", { localeMatcher: "lookup\0cookie" }); } catch (e) { nul = e instanceof RangeError; }
+        \\let valid = new Intl.PluralRules("en", { localeMatcher: "lookup" }).select(1) === "one";
+        \\invalid && nul && valid
     )).asBool());
 }
 
