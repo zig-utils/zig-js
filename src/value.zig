@@ -681,8 +681,13 @@ pub const Object = struct {
     /// all-true default (a plain-assignment property). See `PropAttr`.
     attrs: ?*std.StringHashMapUnmanaged(PropAttr) = null,
     /// When false (set by `Object.preventExtensions`/`seal`/`freeze`), new own
-    /// properties can't be added.
-    extensible: bool = true,
+    /// properties can't be added. Accessed atomically via `isExtensible`/
+    /// `setExtensible`: under `parallel_js` a peer can seal/freeze a shared object
+    /// while another thread reads extensibility to add a property, which on a
+    /// plain bool is a data race. `.monotonic` is a plain byte load/store that
+    /// just marks the access synchronized for ThreadSanitizer (the freeze-vs-add
+    /// outcome is racy-by-spec regardless of who wins).
+    extensible_flag: std.atomic.Value(bool) = .init(true),
     /// A Symbol (a tagged object so identity `===` and storage reuse the object
     /// machinery; `typeof` reports "symbol"). `sym_key` is its unique property-key
     /// encoding (used when a symbol is an object property key).
@@ -920,6 +925,15 @@ pub const Object = struct {
             return a;
         }
         return self.activateBacking(field) orelse fallback;
+    }
+
+    /// Whether new own properties may be added (see `extensible_flag`).
+    pub inline fn isExtensible(self: *const Object) bool {
+        return @constCast(self).extensible_flag.load(.monotonic);
+    }
+    /// Set by `Object.preventExtensions`/`seal`/`freeze`.
+    pub inline fn setExtensible(self: *Object, v: bool) void {
+        self.extensible_flag.store(v, .monotonic);
     }
 
     pub fn slotsAllocator(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator {

@@ -1210,7 +1210,7 @@ pub const Interpreter = struct {
                 const existed = g.getOwn(name) != null;
                 // CanDeclareGlobalVar: a new global var binding requires the global
                 // object to be extensible (an existing property may be reused).
-                if (!existed and !g.extensible)
+                if (!existed and !g.isExtensible())
                     return self.throwError("TypeError", "cannot declare global variable (global object is not extensible)");
                 try self.setProp(g, name, v);
                 // EvalDeclarationInstantiation makes new global bindings deletable
@@ -1235,7 +1235,7 @@ pub const Interpreter = struct {
         if (vs.parent == null) {
             if (self.global_object) |g| {
                 if (objectHasOwn(g, name)) return;
-                if (!g.extensible)
+                if (!g.isExtensible())
                     return self.throwError("TypeError", "cannot declare global variable (global object is not extensible)");
                 try vs.put(name, Value.undef());
                 try self.setProp(g, name, Value.undef());
@@ -1265,7 +1265,7 @@ pub const Interpreter = struct {
             if (g.getAccessor(name) != null or !a.writable or !a.enumerable) return false;
             return true;
         }
-        return g.extensible;
+        return g.isExtensible();
     }
 
     /// EvalDeclarationInstantiation does all the CanDeclareGlobalFunction /
@@ -1280,7 +1280,7 @@ pub const Interpreter = struct {
             if (nm.len != 0 and !canDeclareGlobalFunction(g, nm))
                 return self.throwError("TypeError", "cannot declare global function (existing property is not configurable)");
         };
-        if (!g.extensible) {
+        if (!g.isExtensible()) {
             var vars: std.ArrayListUnmanaged([]const u8) = .empty;
             try self.collectEvalVarNames(stmts, &vars);
             for (vars.items) |nm| {
@@ -1475,7 +1475,7 @@ pub const Interpreter = struct {
                 try self.setProp(g, name, v); // keep the existing attributes
                 return;
             }
-        } else if (!g.extensible) {
+        } else if (!g.isExtensible()) {
             return self.throwError("TypeError", "cannot declare global function (global object is not extensible)");
         }
         try vs.put(name, v);
@@ -1519,7 +1519,7 @@ pub const Interpreter = struct {
     fn addPrivateBrandChecked(self: *Interpreter, o: *value.Object, name: []const u8) EvalError!void {
         // PrivateFieldAdd / PrivateMethodOrAccessorAdd step 1: a private member
         // cannot be added to a non-extensible object.
-        if (!o.extensible)
+        if (!o.isExtensible())
             return self.throwError("TypeError", "Cannot add a private member to a non-extensible object");
         if (o.hasPrivateBrand(name))
             return self.throwError("TypeError", "Cannot initialize a private member twice on the same object");
@@ -2173,7 +2173,7 @@ pub const Interpreter = struct {
                             try self.setProp(desc, "configurable", Value.boolVal(true));
                             try builtins.defineOne(self, o, key, desc);
                         } else {
-                            if (!objectHasOwn(o, key) and !o.extensible)
+                            if (!objectHasOwn(o, key) and !o.isExtensible())
                                 return self.throwError("TypeError", "Cannot define class field on a non-extensible object");
                             try self.setProp(o, key, v);
                         }
@@ -4953,7 +4953,7 @@ pub const Interpreter = struct {
             try obj.setAttr(self.arena, key, .{ .writable = false, .enumerable = true, .configurable = false });
         }
         try obj.setAttr(self.arena, "length", .{ .writable = false, .enumerable = false, .configurable = false });
-        obj.extensible = false;
+        obj.setExtensible(false);
     }
 
     /// Invoke a callable value with `this = undefined`.
@@ -5793,7 +5793,7 @@ pub const Interpreter = struct {
         const o = recv.asObj();
         try self.checkRestricted(o);
         if (!o.is_array or o.is_arguments or o.accessors != null or o.attrsMap() != null or
-            o.has_indexed_property.load(.monotonic) or !o.extensible or !self.arrayProtoChainCleanForIndexedSet(o))
+            o.has_indexed_property.load(.monotonic) or !o.isExtensible() or !self.arrayProtoChainCleanForIndexedSet(o))
             return false;
         const dense_cap: usize = 1 << 24;
         return try o.setOrGrowDenseElement(self.arena, index, v, dense_cap);
@@ -8521,7 +8521,7 @@ pub const Interpreter = struct {
         if (self.objectProto()) |op| {
             if (o == op) return false;
         }
-        if (!o.extensible) return false;
+        if (!o.isExtensible()) return false;
         var cur = new_proto;
         while (cur) |c| {
             if (c == o) return false;
@@ -8569,7 +8569,7 @@ pub const Interpreter = struct {
     fn ordinaryIsExtensible(self: *Interpreter, o: *value.Object) EvalError!bool {
         if (o.proxy_handler != null or o.proxy_revoked) return self.proxyIsExtensible(o);
         if (o.module_ns != null) return false; // a module namespace is never extensible
-        return o.extensible;
+        return o.isExtensible();
     }
 
     /// [[IsExtensible]] for a Proxy (9.5.3): the boolean trap result must equal
@@ -8591,7 +8591,7 @@ pub const Interpreter = struct {
         const target = o.proxy_target orelse return self.throwError("TypeError", "Cannot perform 'preventExtensions' on a proxy that has been revoked");
         const trap = (try self.proxyTrap(o, "preventExtensions")) orelse {
             if (target.proxy_handler != null) return self.proxyPreventExt(target);
-            target.extensible = false;
+            target.setExtensible(false);
             return true;
         };
         const res = (try self.callValueWithThis(trap, &.{Value.obj(target)}, Value.obj(o.proxy_handler.?))).toBoolean();
@@ -8876,7 +8876,7 @@ pub const Interpreter = struct {
                 if (seen.contains(k)) return self.throwError("TypeError", "ownKeys trap result contains duplicate keys");
                 try seen.put(self.arena, k, {});
             }
-            const extensible = target.extensible;
+            const extensible = target.isExtensible();
             const tkeys = try self.objectOwnKeysList(target);
             var has_nonconfig = false;
             for (tkeys) |tk| {
@@ -9839,7 +9839,7 @@ pub const Interpreter = struct {
                     try self.setProp(rcv, key, v);
                     return true;
                 }
-                if (!rcv.extensible) return false;
+                if (!rcv.isExtensible()) return false;
                 const desc = (try self.newObject()).asObj();
                 try desc.setOwn(self.arena, self.root_shape, "value", v);
                 try desc.setOwn(self.arena, self.root_shape, "writable", Value.boolVal(true));
@@ -9994,7 +9994,7 @@ pub const Interpreter = struct {
             (if (arrayElementIndex(key)) |i| ro.denseElementPresent(i) else false);
         if (had_receiver_own) {
             if (!ro.getAttr(key).writable) return false;
-        } else if (!ro.extensible) return false;
+        } else if (!ro.isExtensible()) return false;
         if (ro.is_array and !ro.is_arguments) {
             if (arrayElementIndex(key)) |i| {
                 const old_len = ro.arrayLength();
@@ -11393,7 +11393,7 @@ pub const Interpreter = struct {
             if (@as(f64, @floatFromInt(len)) + @as(f64, @floatFromInt(args.len)) > 9007199254740991.0)
                 return self.throwError("TypeError", "push would exceed the maximum array length 2**53-1");
             if (o.is_array and !o.is_arguments and o.accessors == null and o.attrsMap() == null and
-                !o.has_indexed_property.load(.monotonic) and o.extensible and self.arrayProtoChainCleanForDenseAppend(o))
+                !o.has_indexed_property.load(.monotonic) and o.isExtensible() and self.arrayProtoChainCleanForDenseAppend(o))
             {
                 if (try o.appendPackedDenseElements(self.arena, args)) |new_len|
                     return Value.num(@floatFromInt(new_len));
@@ -15353,7 +15353,7 @@ fn reflectPreventExtFn(ctx: *anyopaque, this: Value, args: []const Value) value.
     // A length-variable TypedArray's [[PreventExtensions]] returns false (Reflect
     // reports it as a boolean rather than throwing, unlike Object.preventExtensions).
     if (!builtins.isTypedArrayFixedLength(target.asObj())) return Value.boolVal(false);
-    target.asObj().extensible = false;
+    target.asObj().setExtensible(false);
     return Value.boolVal(true);
 }
 
@@ -26556,7 +26556,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
         const tte = try gc_mod.allocObj(a);
         tte.* = .{ .native = throwTypeErrorFn, .private_data = @ptrCast(env) };
         try installFunctionProps(a, root_shape, tte, &.{}, "");
-        tte.extensible = false;
+        tte.setExtensible(false);
         // %ThrowTypeError% is itself frozen: length/name non-writable & non-configurable.
         try tte.setAttr(a, "length", .{ .writable = false, .enumerable = false, .configurable = false });
         try tte.setAttr(a, "name", .{ .writable = false, .enumerable = false, .configurable = false });

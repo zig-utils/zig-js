@@ -2579,7 +2579,7 @@ pub const Context = struct {
         };
         ns.module_ns = @ptrCast(modns);
         ns.proto = null; // a module namespace has a null [[Prototype]]
-        ns.extensible = false;
+        ns.setExtensible(false);
     }
 };
 

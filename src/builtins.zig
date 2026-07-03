@@ -1554,7 +1554,7 @@ pub fn defineOneResult(self: *Interpreter, target: *value.Object, key: []const u
             const setting_nonconfig = if (d.getOwn("configurable")) |c| !c.toBoolean() else false;
             const has_own = tgt.getOwn(key) != null or tgt.getAccessor(key) != null;
             if (!has_own) {
-                if (!tgt.extensible) return self.throwError("TypeError", "proxy 'defineProperty' cannot add a property to a non-extensible target");
+                if (!tgt.isExtensible()) return self.throwError("TypeError", "proxy 'defineProperty' cannot add a property to a non-extensible target");
                 if (setting_nonconfig) return self.throwError("TypeError", "proxy 'defineProperty' cannot define a non-configurable property absent from the target");
             } else {
                 // Reporting a property as non-configurable that the target still
@@ -1663,7 +1663,7 @@ pub fn defineOneResult(self: *Interpreter, target: *value.Object, key: []const u
                 const cur_attr = target.getAttr(key);
                 if (within and !cur_attr.configurable) {
                     if (!try compatibleRedefine(cur_attr, target.elements.items[i], null, d)) return false;
-                } else if (!within and !target.extensible) {
+                } else if (!within and !target.isExtensible()) {
                     return false;
                 }
                 const gap_start = target.elements.items.len;
@@ -1728,7 +1728,7 @@ pub fn defineOneResult(self: *Interpreter, target: *value.Object, key: []const u
     // current state forbids — adding to a non-extensible object, or altering a
     // non-configurable property in an incompatible way.
     if (!exists) {
-        if (!target.extensible) return false;
+        if (!target.isExtensible()) return false;
     } else if (!target.getAttr(key).configurable) {
         if (!try compatibleRedefine(target.getAttr(key), cur_data, cur_acc, d)) return false;
     }
@@ -1919,7 +1919,7 @@ pub fn objectPreventExtensions(ctx: *anyopaque, this: Value, args: []const Value
                 return self.throwError("TypeError", "Cannot prevent extensions on proxy target");
         } else if (!isTypedArrayFixedLength(o.asObj())) {
             return self.throwError("TypeError", "Cannot prevent extensions on a length-variable TypedArray");
-        } else o.asObj().extensible = false;
+        } else o.asObj().setExtensible(false);
     }
     return o;
 }
@@ -1931,7 +1931,7 @@ pub fn objectIsExtensible(ctx: *anyopaque, this: Value, args: []const Value) Hos
     const o = arg(args, 0);
     if (!isRealObject(o)) return Value.boolVal(false);
     if (o.asObj().proxy_handler != null or o.asObj().proxy_revoked) return Value.boolVal(try self.proxyIsExtensible(o.asObj()));
-    return Value.boolVal(o.asObj().extensible);
+    return Value.boolVal(o.asObj().isExtensible());
 }
 
 pub fn objectSeal(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
@@ -1969,7 +1969,7 @@ fn setIntegrityLevel(ctx: *anyopaque, self: *Interpreter, o: *value.Object, free
             if (!try self.proxyPreventExt(o))
                 return self.throwError("TypeError", "Object.seal/freeze: [[PreventExtensions]] returned false");
         } else {
-            o.extensible = false;
+            o.setExtensible(false);
         }
         for (try self.objectOwnKeysList(o)) |k| {
             const cur = try objectGetOwnPropertyDescriptor(ctx, Value.undef(), &.{ Value.obj(o), self.keyToValue(k) });
@@ -1985,7 +1985,7 @@ fn setIntegrityLevel(ctx: *anyopaque, self: *Interpreter, o: *value.Object, free
         }
         return;
     }
-    o.extensible = false;
+    o.setExtensible(false);
     try lockKeys(self, o, freeze);
 }
 
@@ -2046,7 +2046,7 @@ fn isLocked(self: *Interpreter, ov: Value, frozen: bool) HostError!bool {
     if (o.proxy_handler != null or o.proxy_revoked or interpreter.isModuleNs(o)) {
         if (o.proxy_handler != null or o.proxy_revoked) {
             if (try self.proxyIsExtensible(o)) return false;
-        } else if (o.extensible) return false;
+        } else if (o.isExtensible()) return false;
         const ov_obj: Value = Value.obj(o);
         for (try self.objectOwnKeysList(o)) |k| {
             const desc = try objectGetOwnPropertyDescriptor(self, Value.undef(), &.{ ov_obj, self.keyToValue(k) });
@@ -2060,7 +2060,7 @@ fn isLocked(self: *Interpreter, ov: Value, frozen: bool) HostError!bool {
         }
         return true;
     }
-    if (o.extensible) return false;
+    if (o.isExtensible()) return false;
     // Dense element indices must each be non-configurable (and, for frozen,
     // non-writable). A frozen array additionally needs non-writable `length`.
     // Holes carry no property, so they don't block.
@@ -2215,7 +2215,7 @@ fn completedDescAccessor(d: *value.Object) ?value.Accessor {
 fn proxyTargetExtensible(self: *Interpreter, target: *value.Object) HostError!bool {
     if (target.proxy_handler != null or target.proxy_revoked) return self.proxyIsExtensible(target);
     if (interpreter.isModuleNs(target)) return false;
-    return target.extensible;
+    return target.isExtensible();
 }
 
 pub fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
@@ -2841,7 +2841,7 @@ pub fn jsonRawJSON(ctx: *anyopaque, this: Value, args: []const Value) HostError!
     o.* = .{ .proto = null, .is_raw_json = true };
     try o.setOwn(self.arena, self.root_shape, "rawJSON", Value.str(s));
     try o.setAttr(self.arena, "rawJSON", .{ .writable = false, .enumerable = true, .configurable = false });
-    o.extensible = false; // SetIntegrityLevel(frozen)
+    o.setExtensible(false); // SetIntegrityLevel(frozen)
     return Value.obj(o);
 }
 

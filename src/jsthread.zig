@@ -1729,7 +1729,7 @@ pub fn propStore(self: *Interpreter, args: []const Value) value.HostError!Value 
         if (accessorUnlocked(o, key)) return self.throwError("TypeError", "Atomics.store: property is an accessor");
         if (namedSlotUnlocked(o, key) != null) {
             if (!attrUnlocked(o, key).writable) return self.throwError("TypeError", "Atomics.store: property is not writable");
-        } else if (!o.extensible) {
+        } else if (!o.isExtensible()) {
             return self.throwError("TypeError", "Atomics.store: cannot add a property to a non-extensible object");
         }
         try o.setOwnUnlocked(self.arena, self.root_shape, key, v);
@@ -1738,7 +1738,7 @@ pub fn propStore(self: *Interpreter, args: []const Value) value.HostError!Value 
     if (isAccessor(o, key)) return self.throwError("TypeError", "Atomics.store: property is an accessor");
     if (interp.objectHasOwn(o, key)) {
         try writableOrThrow(self, o, key, "Atomics.store: property is not writable");
-    } else if (!o.extensible) {
+    } else if (!o.isExtensible()) {
         return self.throwError("TypeError", "Atomics.store: cannot add a property to a non-extensible object");
     }
     // [[Set]] writes shape props and index elements alike, preserving
