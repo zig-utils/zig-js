@@ -900,7 +900,7 @@ pub const Interpreter = struct {
     /// Context-owned pending collection request set by the JS shell `gc()`
     /// helper. M1 collection is precise and quiescent-only, so the request is
     /// serviced by `Context` at the next safe entry point.
-    gc_requested: ?*bool = null,
+    gc_requested: ?*std.atomic.Value(bool) = null,
     /// Optional Context callback used by microtask checkpoints to service a
     /// pending shell GC request after a job has unwound but before the next job
     /// runs. The callback owns the full safety policy: no active thread stacks,
@@ -6225,7 +6225,7 @@ pub const Interpreter = struct {
 
     fn serviceRequestedGcCheckpoint(self: *Interpreter) void {
         const requested = self.gc_requested orelse return;
-        if (!requested.*) return;
+        if (!requested.load(.monotonic)) return;
         const f = self.gc_checkpoint_fn orelse return;
         const ctx = self.gc_checkpoint_ctx orelse return;
         f(ctx);
@@ -14750,7 +14750,7 @@ fn gcFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (self.gc != null) {
-        if (self.gc_requested) |requested| requested.* = true;
+        if (self.gc_requested) |requested| requested.store(true, .monotonic);
     }
     return Value.undef();
 }

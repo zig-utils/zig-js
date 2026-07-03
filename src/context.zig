@@ -817,7 +817,7 @@ pub const Context = struct {
     /// collector is only sound at quiescent points. The request is serviced at
     /// the next evaluate/evaluateModule entry rather than inside live Zig
     /// interpreter recursion.
-    gc_requested: bool = false,
+    gc_requested: std.atomic.Value(bool) = .init(false),
     /// Set only for the duration of a guarded mid-script collection so the GC
     /// binding (`gc.zig` `traceRoots`) conservatively scans the collecting
     /// thread's live native stack + spilled registers. Quiescent collection
@@ -1456,11 +1456,11 @@ pub const Context = struct {
         }
         self.finishConcurrentGCIfActive(); // close or abort any in-flight mark first
         h.collect();
-        self.gc_requested = false;
+        self.gc_requested.store(false, .monotonic);
     }
 
     fn collectRequestedGarbage(self: *Context) void {
-        if (!self.gc_requested) return;
+        if (!self.gc_requested.load(.monotonic)) return;
         self.collectGarbage();
     }
 
@@ -9769,7 +9769,7 @@ test "enable_gc: shell gc request runs at the evaluate-tail quiescent point" {
         \\}
         \\0
     );
-    try std.testing.expect(!ctx.gc_requested);
+    try std.testing.expect(!ctx.gc_requested.load(.monotonic));
     try std.testing.expect(ctx.gc.?.collections > collections_before);
 }
 
@@ -9804,7 +9804,7 @@ test "$vm exposes only supported shell hooks" {
         \\$vm.edenGC();
         \\if (globalThis.ref.deref().tag !== 31) throw new Error("gc ran mid-stack");
     );
-    try std.testing.expect(!threaded.gc_requested);
+    try std.testing.expect(!threaded.gc_requested.load(.monotonic));
 
     const gc_ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
     defer gc_ctx.destroy();
@@ -9815,7 +9815,7 @@ test "$vm exposes only supported shell hooks" {
         \\$vm.gc();
         \\if (globalThis.ref.deref().tag !== 41) throw new Error("gc ran mid-stack");
     );
-    try std.testing.expect(!gc_ctx.gc_requested);
+    try std.testing.expect(!gc_ctx.gc_requested.load(.monotonic));
     try std.testing.expect(gc_ctx.gc.?.collections > before);
 }
 
@@ -9844,7 +9844,7 @@ test "enable_gc: requested GC runs between microtasks after joined threads" {
         \\  });
         \\0
     );
-    try std.testing.expect(!ctx.gc_requested);
+    try std.testing.expect(!ctx.gc_requested.load(.monotonic));
     try std.testing.expect(ctx.gc.?.collections > before);
     const collected = try ctx.evaluate("globalThis.__microtaskGcCollected");
     try std.testing.expect(collected.isBoolean() and collected.asBool());
