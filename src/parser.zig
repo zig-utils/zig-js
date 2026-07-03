@@ -1473,6 +1473,17 @@ pub const Parser = struct {
         return self.parseVarDeclDispose(kind, 0);
     }
 
+    fn parseForInitVarDecl(self: *Parser, kind: ast.DeclKind) ParseError!*Node {
+        return self.parseForInitVarDeclDispose(kind, 0);
+    }
+
+    fn parseForInitVarDeclDispose(self: *Parser, kind: ast.DeclKind, dispose: u8) ParseError!*Node {
+        const saved_no_in = self.no_in;
+        self.no_in = true;
+        defer self.no_in = saved_no_in;
+        return self.parseVarDeclDispose(kind, dispose);
+    }
+
     /// `dispose`: 0 = ordinary `var`/`let`/`const`, 1 = `using`, 2 = `await using`.
     fn parseVarDeclDispose(self: *Parser, kind: ast.DeclKind, dispose: u8) ParseError!*Node {
         _ = self.advance(); // var/let/const/using
@@ -1691,20 +1702,20 @@ pub const Parser = struct {
         if (self.match(.semicolon)) {
             // empty initializer
         } else if (isKeyword(self.cur(), "var")) {
-            init_node = try self.parseVarDecl(.@"var"); // consumes the ';'
+            init_node = try self.parseForInitVarDecl(.@"var"); // consumes the ';'
         } else if (self.letDeclAhead()) {
-            init_node = try self.parseVarDecl(.let);
+            init_node = try self.parseForInitVarDecl(.let);
         } else if (isKeyword(self.cur(), "const")) {
-            init_node = try self.parseVarDecl(.@"const");
+            init_node = try self.parseForInitVarDecl(.@"const");
         } else if (isKeyword(self.cur(), "using") and self.peekKind(1) == .identifier and self.noNewlineBefore(1)) {
             // `for (using x = e; …)` — a using declaration head (the `using of`
             // lookahead restriction applies only to for-of, not the classic for).
-            init_node = try self.parseVarDeclDispose(.@"const", 1);
+            init_node = try self.parseForInitVarDeclDispose(.@"const", 1);
         } else if (isKeyword(self.cur(), "await") and self.peekIsKeyword(1, "using") and
             self.peekKind(2) == .identifier and self.noNewlineBefore(1) and self.noNewlineBefore(2))
         {
             _ = self.advance(); // await
-            init_node = try self.parseVarDeclDispose(.@"const", 2);
+            init_node = try self.parseForInitVarDeclDispose(.@"const", 2);
         } else {
             // A classic for-init is `[~In]`: a top-level `in` is forbidden here.
             self.no_in = true;
@@ -2520,12 +2531,11 @@ pub const Parser = struct {
         const saved_strict = self.strict;
         const saved_iter = self.iter_depth;
         const saved_switch = self.switch_depth;
-        const saved_no_in = self.no_in; // an arrow body is `[+In]`
+        const saved_no_in = self.no_in;
         self.in_async = is_async;
         self.fn_depth += 1;
         self.iter_depth = 0;
         self.switch_depth = 0;
-        self.no_in = false;
         defer {
             self.in_async = saved_async;
             self.strict = saved_strict;
@@ -2535,6 +2545,9 @@ pub const Parser = struct {
             self.no_in = saved_no_in;
         }
         if (self.check(.lbrace)) {
+            // A block-bodied arrow is a FunctionBody, not an AssignmentExpression,
+            // so `in` is available again even inside a classic for initializer.
+            self.no_in = false;
             const own_use_strict = self.peekUseStrict();
             if (own_use_strict and hasNonSimpleParams(params)) return ParseError.UnexpectedToken;
             self.strict = saved_strict or own_use_strict;
