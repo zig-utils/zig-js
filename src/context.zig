@@ -1245,6 +1245,7 @@ pub const Context = struct {
             // also come from `interpreter()`) thus shares one lock for the
             // realm's queue.
             .microtask_lock = if (self.parallel_js) &self.microtask_lock else null,
+            .realm_lock = if (self.parallel_js) &self.realm_lock else null,
             .print_buffer = &self.print_buffer,
             .tdz_marker = self.tdz_marker,
             .sab_retains = &self.sab_retains,

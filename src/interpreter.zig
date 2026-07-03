@@ -857,6 +857,12 @@ pub const Interpreter = struct {
     /// the finishing thread) can't race the joiner's drain. Points at the
     /// Context's `microtask_lock`; null on the default GIL-serialized path.
     microtask_lock: ?*std.atomic.Mutex = null,
+    /// When non-null (only under `parallel_js`), the Context's `realm_lock`,
+    /// serializing this interpreter's mutation of the shared realm queues it can
+    /// touch off-collector — currently `finalization_cleanup_jobs`, which the
+    /// mid-script parallel collector reads under the same lock. Null on the
+    /// GIL-serialized path.
+    realm_lock: ?*std.atomic.Mutex = null,
     /// Microtask currently popped from the queue and executing. It is no longer
     /// present in `microtasks`, so GC must trace it separately.
     current_microtask: ?promise.Microtask = null,
@@ -6293,6 +6299,18 @@ pub const Interpreter = struct {
         if (self.microtask_lock) |m| m.unlock();
     }
 
+    pub fn lockRealm(self: *Interpreter) void {
+        const m = self.realm_lock orelse return;
+        var spins: usize = 0;
+        while (!m.tryLock()) : (spins += 1) {
+            if ((spins & 0xff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
+        }
+    }
+
+    pub fn unlockRealm(self: *Interpreter) void {
+        if (self.realm_lock) |m| m.unlock();
+    }
+
     fn serviceRequestedGcCheckpoint(self: *Interpreter) void {
         const requested = self.gc_requested orelse return;
         if (!requested.load(.monotonic)) return;
@@ -6361,12 +6379,27 @@ pub const Interpreter = struct {
     pub fn drainFinalizationCleanupJobs(self: *Interpreter) EvalError!void {
         const q = self.finalization_cleanup_jobs orelse return;
         var i: usize = 0;
-        while (i < q.items.len) : (i += 1) {
+        while (true) {
+            // `q` is the shared realm queue: the mid-script parallel collector
+            // reads it (and `queueFinalizationRegistryCleanup` appends to it)
+            // under `realm_lock`, so every access to its slice header here must
+            // take the same lock. Read one registry per turn under the lock, then
+            // run its callback UNLOCKED — the callback executes JS that can queue
+            // more jobs (re-entering this drain) or trigger a collection. The
+            // check-and-clear is atomic under the lock so no append is lost.
+            self.lockRealm();
+            if (i >= q.items.len) {
+                q.clearRetainingCapacity();
+                self.unlockRealm();
+                return;
+            }
             const registry = q.items[i];
+            i += 1;
+            self.unlockRealm();
             if (!registry.is_finalization_registry) continue;
             const cb = registry.finalization_callback;
             if (!cb.isCallable()) continue;
-            // Pop each ready record under the lock; run its callback unlocked.
+            // Pop each ready record (registry-internal lock); run its callback unlocked.
             while (registry.finRecordTakeReady()) |record| {
                 if (self.callValue(cb, &.{record.held})) |_| {} else |err| {
                     if (err == error.Throw) {
@@ -6375,7 +6408,6 @@ pub const Interpreter = struct {
                 }
             }
         }
-        q.clearRetainingCapacity();
     }
 
     /// Event-loop tail for `Atomics.waitAsync`: while this realm has

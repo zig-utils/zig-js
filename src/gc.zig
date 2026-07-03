@@ -498,9 +498,14 @@ pub fn traceInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
     if (machine.async_waiters) |waiters| {
         for (waiters.items) |aw| markValue(v, aw.promise);
     }
-    if (machine.finalization_cleanup_jobs) |jobs| {
-        for (jobs.items) |registry| v.mark(registry);
-    }
+    // NOTE: the shared realm `finalization_cleanup_jobs` is intentionally NOT
+    // traced here. Unlike the per-thread lists above, every interpreter's
+    // `finalization_cleanup_jobs` aliases the one Context-owned queue, which the
+    // collector already traces under `realm_lock` in `Binding.traceRoots` at
+    // begin + every `concurrentMarkRound` re-scan + finish. Reading it here (off
+    // the collector thread, at a mutator's publish safepoint) took no lock and
+    // raced `drainFinalizationCleanupJobs`'s clear — a crash the parallel marker
+    // only reaches once collections actually converge. See `Binding.traceRoots`.
     for (machine.gc_env_roots.items) |env| {
         markManaged(v, env);
         traceEnv(env, v);
