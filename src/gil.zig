@@ -266,6 +266,17 @@ pub const Gil = struct {
         g.holder.store(currentId(), .monotonic);
     }
 
+    /// Non-blocking acquire: on success records ownership and returns true; on
+    /// contention returns false without touching `holder`. Lets a caller that
+    /// must stay GC-cooperative (the terminating-thread teardown pump) retry
+    /// while servicing the parallel-collector root handshake between attempts,
+    /// instead of blocking opaque in `acquire` where it would publish nothing.
+    pub fn tryAcquire(g: *Gil) bool {
+        if (!g.mutex.tryLock()) return false;
+        g.holder.store(currentId(), .monotonic);
+        return true;
+    }
+
     pub fn release(g: *Gil) void {
         g.holder.store(0, .monotonic);
         g.mutex.unlock(agent.engineIo());

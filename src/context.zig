@@ -1833,6 +1833,18 @@ pub const Context = struct {
                         // thread may need a grant delivery pumped to finish.
                         rec.join_mutex.unlock(io);
                         jsthread.pumpTasks(&machine);
+                        // This host frame is a registered active interpreter, so a
+                        // terminating peer that wins the collector election counts
+                        // it in `allParallelPublished`. Between these bounded parks
+                        // the host runs no JS safepoint, so publish its precise
+                        // roots for the collector's current generation here — else
+                        // the collector spins out its budget waiting on a peer that
+                        // will not reach a safepoint until every thread has exited,
+                        // and aborts the very collection that must finish during
+                        // termination (threadfuzz-midgc "did not finish a parallel
+                        // collection"). The host stack is stable across the park, so
+                        // the published set stays current. No-op when the GC is off.
+                        machine.serviceGcSafepoint();
                         rec.join_mutex.lockUncancelable(io);
                         if (rec.exited) break;
                         stack_scan.beginPark();

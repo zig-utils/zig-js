@@ -387,6 +387,32 @@ fn threadCtorFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.Hos
     return Value.obj(rec.js_obj.?);
 }
 
+/// Acquire the realm GIL for a terminating thread's completion/settlement
+/// section (`publishThreadCompletion` + asyncJoin reaction routing) without
+/// stalling a mid-script parallel collector. `Gil.acquire` blocks in native
+/// mutex code, publishing no roots; when several threads terminate together
+/// (the termination-reaction profile) they serialize here, and a blocked one
+/// that never republishes its precise roots for the collector's next
+/// generation makes `driveParallelCollection` exhaust its budget and abort —
+/// the low-frequency threadfuzz-midgc "did not finish a parallel collection"
+/// flake. This thread's interpreter roots are stable at this point (it runs no
+/// JS until the lock is held, and its live values — `result`/`exception`, and
+/// `rec.pending_joins` traced via `ctx.js_threads` — are already in the
+/// collector-visible precise set), so servicing the same root-publication hook
+/// the sync-wait parkers use between short backoffs lets the collector count
+/// this thread and converge, rather than blocking it out. Mirrors the
+/// lock/property-wait pump loops.
+fn acquireGilForTeardown(self: *Interpreter, g: *gil_mod.Gil) void {
+    while (!g.tryAcquire()) {
+        // No waiter/lock state held here, so publishing precise roots for any
+        // open collector generation is safe. Back off briefly rather than
+        // yield-spinning so the GIL holder and the collector keep a core under
+        // the oversubscription that makes this path flake in CI.
+        self.serviceGcSafepoint();
+        std.Io.sleep(agent.engineIo(), .fromMilliseconds(1), .awake) catch {};
+    }
+}
+
 fn threadMain(rec: *ThreadRecord, fn_v: Value, args: []const Value) void {
     const g = rec.gil;
     defer markThreadExited(rec);
@@ -479,7 +505,7 @@ fn threadMain(rec: *ThreadRecord, fn_v: Value, args: []const Value) void {
     // Settle asyncJoin promises on this (the settling) thread, then drain
     // the reactions it just queued. `publishThreadCompletion` snapshots the
     // pending join list under `join_mutex`; JS/promise work runs after release.
-    if (rec.ctx.parallel_js) g.acquire();
+    if (rec.ctx.parallel_js) acquireGilForTeardown(&machine, g);
     defer if (rec.ctx.parallel_js) g.release();
     var pending_joins = publishThreadCompletion(rec, threw, result);
     defer pending_joins.deinit(rec.ctx.arena());
