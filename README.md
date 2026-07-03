@@ -157,9 +157,9 @@ Implemented C-API symbols:
 ## Architecture
 
 ```
-                          ┌─► compiler ─► bytecode ─► VM ──┐  (hot subset + generators/async)
+                           ┌─► compiler ─► bytecode ─► VM ──┐   (hot subset + generators/async)
 source ─► lexer ─► parser ─┤                                ├─► Value
-              (AST)        └─► tree-walk interpreter ───────┘  (oracle + fallback)
+               (AST)       └─► tree-walk interpreter ───────┘   (oracle + fallback)
                                                      │
                                           c_api.zig (JSC drop-in exports)
 ```
