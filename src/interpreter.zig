@@ -1621,6 +1621,12 @@ pub const Interpreter = struct {
         return try self.hasPropertyResult(g, name);
     }
 
+    pub fn isDirectEvalCallee(self: *Interpreter, callee: Value) bool {
+        if (!callee.isObject()) return false;
+        const intrinsic = rootEnv(self.env).get("\x00evalIntrinsic") orelse return false;
+        return intrinsic.isObject() and intrinsic.asObj() == callee.asObj();
+    }
+
     fn globalBindingObject(self: *Interpreter, name: []const u8) ?*value.Object {
         const g = self.currentGlobalObject() orelse return null;
         var env: ?*Environment = self.env;
@@ -4955,10 +4961,7 @@ pub const Interpreter = struct {
         // (or a reassigned `eval`) is an *indirect* eval — it runs as global code
         // in that eval's own realm, not in the caller's scope.
         const eval_named = !optional and callee_node.* == .identifier and std.mem.eql(u8, callee_node.identifier, "eval");
-        self.direct_eval_call = eval_named and callee.isObject() and blk: {
-            const realm_eval = rootEnv(self.env).get("eval") orelse break :blk false;
-            break :blk realm_eval.isObject() and realm_eval.asObj() == callee.asObj();
-        };
+        self.direct_eval_call = eval_named and self.isDirectEvalCallee(callee);
         defer self.direct_eval_call = saved_direct_eval;
         if (with_this) |wo| return self.callValueWithThis(callee, args, Value.obj(wo));
         return self.callValue(callee, args);
@@ -26256,6 +26259,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     try defineGlobalFn(env, root_shape, "eval", 1, evalFn);
     if (env.get("eval")) |ev| {
         if (ev.isObject()) ev.asObj().private_data = @ptrCast(env);
+        try env.put("\x00evalIntrinsic", ev);
     }
     try defineGlobalFn(env, root_shape, "parseInt", 2, builtins.parseIntFn);
     try defineGlobalFn(env, root_shape, "parseFloat", 1, builtins.parseFloatFn);

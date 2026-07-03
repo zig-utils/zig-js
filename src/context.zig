@@ -3402,6 +3402,25 @@ test "indirect eval uses the callee realm global" {
     )).asBool());
 }
 
+test "reassigned eval is indirect by intrinsic identity" {
+    try std.testing.expect((try evalIn(
+        \\var x = "global";
+        \\function sameRealm() {
+        \\  var x = "local";
+        \\  var e = eval;
+        \\  return e("x");
+        \\}
+        \\var other = $262.createRealm().global;
+        \\other.x = "other";
+        \\function crossRealm() {
+        \\  var x = "local";
+        \\  eval = other.eval;
+        \\  return eval("x") === "other" && eval("this") === other;
+        \\}
+        \\sameRealm() === "global" && crossRealm()
+    )).asBool());
+}
+
 test "delete distinguishes var bindings from sloppy global properties" {
     try std.testing.expect((try evalIn(
         \\var declared = {};

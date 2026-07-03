@@ -729,7 +729,7 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 const base = stack.items.len - argc;
                 const callee = stack.items[base - 1];
                 const saved = vm.direct_eval_call;
-                vm.direct_eval_call = true;
+                vm.direct_eval_call = vm.isDirectEvalCallee(callee);
                 const result = callValue(vm, callee, stack.items[base..], Value.undef()) catch |e| {
                     vm.direct_eval_call = saved;
                     return e;
