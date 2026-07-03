@@ -18529,7 +18529,21 @@ fn arrayBufferSliceImpl(self: *Interpreter, this: Value, args: []const Value, co
     if (new_v.asObj() == this.asObj()) return self.throwError("TypeError", "ArrayBuffer species constructor returned the same buffer");
     if (nb.bytes().len < safe_count) return self.throwError("TypeError", "ArrayBuffer species constructor returned too small a buffer");
     if (!want_shared and ab.isDetached()) return self.throwError("TypeError", "ArrayBuffer is detached");
-    @memcpy(nb.bytes()[0..safe_count], ab.bytes()[start .. start + safe_count]);
+    {
+        // Hold the source across the bulk copy: the species constructor above ran
+        // user code and a peer may resize()+free `ab`'s base concurrently, which
+        // would dangle mid-memcpy — a use-after-free (same class as the Atomics /
+        // copyWithin UAF). Re-clamp to the live length under the lock so the copy
+        // can neither read out of bounds nor use a freed base; `nb` is freshly
+        // constructed, so its unfilled tail simply stays zero on a concurrent
+        // shrink. Shared sources never lock (storage never freed on grow).
+        const locked = ab.needsElementLock();
+        if (locked) ab.lockBuffer();
+        defer if (locked) ab.unlockBuffer();
+        const src = ab.bytes();
+        const copy_n = @min(safe_count, if (start < src.len) src.len - start else 0);
+        @memcpy(nb.bytes()[0..copy_n], src[start .. start + copy_n]);
+    }
     return new_v;
 }
 
