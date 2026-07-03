@@ -519,6 +519,11 @@ pub fn traceInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
     markValue(v, machine.new_target);
     if (machine.active_native) |o| v.mark(o);
     if (machine.active_function) |o| v.mark(o);
+    var call_frame = machine.active_call_frame;
+    while (call_frame) |fr| : (call_frame = fr.caller) {
+        v.mark(fr.func_obj);
+        if (fr.arguments) |args| markValue(v, args);
+    }
     if (machine.home_object) |o| v.mark(o);
     if (machine.super_ctor) |o| v.mark(o);
     for (machine.with_stack.items) |o| v.mark(o);

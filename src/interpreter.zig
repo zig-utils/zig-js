@@ -823,6 +823,12 @@ pub const Function = struct {
     with_stack: []*value.Object = &.{},
 };
 
+const LegacyCallFrame = struct {
+    func_obj: *value.Object,
+    arguments: ?Value = null,
+    caller: ?*LegacyCallFrame = null,
+};
+
 /// Non-local control flow the tree-walker propagates up the statement list:
 /// `ret` unwinds to the enclosing function, `brk`/`cont` to the enclosing loop.
 const Signal = enum { none, ret, brk, cont };
@@ -969,6 +975,10 @@ pub const Interpreter = struct {
     /// function object's current [[Prototype]] (GetSuperConstructor), which can
     /// be mutated after class definition.
     active_function: ?*value.Object = null,
+    /// Active non-arrow JS calls for Annex B `Function.prototype.caller` and
+    /// `.arguments`. Direct eval does not push a frame, so those lookups skip eval
+    /// frames naturally.
+    active_call_frame: ?*LegacyCallFrame = null,
     /// Context-owned buffer the global `print` appends to (the async harness's
     /// `$DONE` reports completion through `print`).
     print_buffer: ?*std.ArrayListUnmanaged(u8) = null,
@@ -3956,6 +3966,27 @@ pub const Interpreter = struct {
         return null;
     }
 
+    fn legacyCallerArgumentsAllowed(f: *const Function) bool {
+        return !f.is_strict and !f.is_arrow and !f.is_generator and !f.is_async and !f.is_method and !f.is_class_constructor;
+    }
+
+    fn legacyCallFrameFor(self: *Interpreter, obj: *value.Object) ?*LegacyCallFrame {
+        var frame = self.active_call_frame;
+        while (frame) |fr| : (frame = fr.caller) {
+            if (fr.func_obj == obj) return fr;
+        }
+        return null;
+    }
+
+    fn legacyCallerValue(frame: *LegacyCallFrame) Value {
+        if (frame.caller) |caller_frame| {
+            if (funcOf(Value.obj(caller_frame.func_obj))) |caller_func| {
+                if (legacyCallerArgumentsAllowed(caller_func)) return Value.obj(caller_frame.func_obj);
+            }
+        }
+        return Value.nul();
+    }
+
     pub fn jsFunctionHasOwnPrototypeSlot(o: *value.Object) bool {
         const erased = o.js_func orelse return false;
         const f: *Function = @ptrCast(@alignCast(erased));
@@ -5266,8 +5297,16 @@ pub const Interpreter = struct {
         const saved_idc = self.in_derived_ctor;
         const saved_dfc = self.in_default_ctor;
         const saved_pm = self.current_private_map;
+        const saved_call_frame = self.active_call_frame;
+        var call_frame: LegacyCallFrame = undefined;
         if (!func.is_arrow) self.current_private_map = func.private_map; // arrows inherit the enclosing class's map
-        if (!func.is_arrow) self.active_function = func.obj;
+        if (!func.is_arrow) {
+            self.active_function = func.obj;
+            if (func.obj) |fo| {
+                call_frame = .{ .func_obj = fo, .caller = saved_call_frame };
+                self.active_call_frame = &call_frame;
+            }
+        }
         const saved_pfi = self.pending_field_inits;
         const saved_pbn = self.pending_brand_names;
         // A derived constructor's field initializers + private brands wait for its
@@ -5358,6 +5397,7 @@ pub const Interpreter = struct {
             self.this_initialized = saved_this_initialized;
             self.this_cell = saved_this_cell;
             self.active_function = saved_active_function;
+            self.active_call_frame = saved_call_frame;
             // Re-sync the ambient this-state from the (restored) enclosing derived
             // ctor's shared cell: a `super()` that ran during this call — possibly
             // via an arrow invoked from an unrelated context — initialized the
@@ -5387,68 +5427,12 @@ pub const Interpreter = struct {
         // (and its element copy + parameter map) entirely. The later
         // `body_env.vars.contains("arguments")` copy degrades gracefully when the
         // binding is absent.
-        if (!func.is_arrow and func.uses_arguments) {
-            const args_obj = try self.newArray();
-            args_obj.asObj().is_arguments = true;
-            // The arguments exotic object's [[Prototype]] is %Object.prototype%
-            // (not Array.prototype): it has no inherited array methods, and
-            // `arguments.toString()` is Object.prototype.toString → "[object
-            // Arguments]". Index storage and for-of still use the `is_array` path.
-            if (self.objectProto()) |op| args_obj.asObj().proto = op;
-            // It does have an own @@iterator = %Array.prototype.values% (so
-            // `arguments[Symbol.iterator]()` yields an Array Iterator).
-            if (self.arrayProtoObj()) |ap| if (self.symbolIteratorKey()) |ik| {
-                if (ap.getOwn(ik)) |it| {
-                    try args_obj.asObj().setOwn(self.arena, self.root_shape, ik, it);
-                    try args_obj.asObj().setAttr(self.arena, ik, .{ .writable = true, .enumerable = false, .configurable = true });
-                }
-            };
-            try args_obj.asObj().setOwn(self.arena, self.root_shape, "length", Value.num(@floatFromInt(args.len)));
-            try args_obj.asObj().setAttr(self.arena, "length", .{ .writable = true, .enumerable = false, .configurable = true });
-            for (args) |av| try args_obj.asObj().elements.append(args_obj.asObj().elementsAllocator(self.arena), av);
-            // Strict mode's `arguments.callee` is a poison-pill accessor whose
-            // get and set are both `%ThrowTypeError%`. Reading or writing it
-            // throws, but `Object.getOwnPropertyDescriptor(arguments, "callee").
-            // get` returns the shared intrinsic (its identity and properties are
-            // what test262 probes).
-            var non_simple_params = false;
-            for (func.params) |p| {
-                if (p.default != null or p.is_rest or p.pattern != null) {
-                    non_simple_params = true;
-                    break;
-                }
+        if (!func.is_arrow and (func.uses_arguments or legacyCallerArgumentsAllowed(func))) {
+            const args_obj = try self.createArgumentsObject(func, args, call_env);
+            if (self.active_call_frame) |fr| {
+                if (func.obj != null and fr.func_obj == func.obj.?) fr.arguments = args_obj;
             }
-            if (func.is_strict or non_simple_params) {
-                if (self.throwTypeError()) |tte| {
-                    try args_obj.asObj().setAccessor(self.arena, "callee", Value.obj(tte), Value.obj(tte));
-                    try args_obj.asObj().setAttr(self.arena, "callee", .{ .enumerable = false, .configurable = false });
-                }
-            } else if (func.obj) |fo| {
-                // A mapped (sloppy, simple-parameter) arguments object's `callee` is
-                // an own data property = the callee function itself, {writable: true,
-                // enumerable: false, configurable: true}.
-                try args_obj.asObj().setOwn(self.arena, self.root_shape, "callee", Value.obj(fo));
-                try args_obj.asObj().setAttr(self.arena, "callee", .{ .writable = true, .enumerable = false, .configurable = true });
-            }
-            // Mapped arguments [[ParameterMap]]: in sloppy mode with simple
-            // parameters, each in-range index aliases its parameter binding (a
-            // two-way live link; reads/writes go to `call_env`).
-            if (!func.is_strict and !non_simple_params and func.params.len > 0) {
-                const n = @min(args.len, func.params.len);
-                const names = try args_obj.asObj().argMapNamesAllocator(self.arena).alloc([]const u8, n);
-                for (names, 0..) |*nm, i| nm.* = func.params[i].name;
-                // A duplicated parameter name maps only its last index.
-                for (names, 0..) |nm, i| {
-                    var j = i + 1;
-                    while (j < n) : (j += 1) if (std.mem.eql(u8, nm, names[j])) {
-                        names[i] = "";
-                        break;
-                    };
-                }
-                args_obj.asObj().arg_map_env = @ptrCast(call_env);
-                args_obj.asObj().arg_map_names = names;
-            }
-            try call_env.put("arguments", args_obj);
+            if (func.uses_arguments) try call_env.put("arguments", args_obj);
         }
         // A base class initializes its instance elements before parameter
         // default evaluation. A derived class waits until `super()` returns.
@@ -9034,14 +9018,17 @@ pub const Interpreter = struct {
                     try triggerDeferIfString(self, ns, key); // `import defer`: a string [[Get]] evaluates first
                     return moduleNsGet(self, ns, key);
                 }
-                // Legacy `caller`: a *non-strict ordinary* function (not strict,
-                // arrow, generator, async, or bound) reads `null` for `.caller`
-                // when the live caller is not exposed, shadowing the inherited
-                // %ThrowTypeError% poison pill. Strict/bound functions and
-                // `.arguments` still walk to the poison-pill accessor.
-                if (std.mem.eql(u8, key, "caller") and o.bound == null and o.getOwn(key) == null) {
+                // Annex B legacy `caller`/`arguments`: sloppy ordinary functions
+                // expose their active caller/arguments state. Newer function kinds
+                // (methods, arrows, classes, async/generator functions, bound
+                // functions, built-ins) fall through to %ThrowTypeError%.
+                if ((std.mem.eql(u8, key, "caller") or std.mem.eql(u8, key, "arguments")) and o.bound == null and o.getOwn(key) == null) {
                     if (funcOf(recv)) |f| {
-                        if (!f.is_strict and !f.is_arrow and !f.is_generator and !f.is_async) return Value.nul();
+                        if (legacyCallerArgumentsAllowed(f)) {
+                            const frame = self.legacyCallFrameFor(o) orelse return Value.nul();
+                            if (std.mem.eql(u8, key, "caller")) return legacyCallerValue(frame);
+                            return frame.arguments orelse Value.nul();
+                        }
                     }
                 }
                 // A (non-arrow) function's `.prototype` is an own data property,
@@ -38767,6 +38754,26 @@ test "Intl.PluralRules validates localeMatcher option" {
         \\try { new Intl.PluralRules("en", { localeMatcher: "lookup\0cookie" }); } catch (e) { nul = e instanceof RangeError; }
         \\let valid = new Intl.PluralRules("en", { localeMatcher: "lookup" }).select(1) === "one";
         \\invalid && nul && valid
+    )).asBool());
+}
+
+test "legacy function caller and arguments access" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expect((try evalSource(a,
+        \\function outer(x) { return inner(x); }
+        \\function inner() { return inner.caller === outer && inner.arguments[0] === 1; }
+        \\let outside = inner.caller === null && inner.arguments === null;
+        \\outside && outer(1)
+    )).asBool());
+    try std.testing.expect((try evalSource(a,
+        \\let o = { method() {} };
+        \\let methodRestricted = false;
+        \\try { o.method.caller; } catch (e) { methodRestricted = e instanceof TypeError; }
+        \\let arrowRestricted = false;
+        \\try { (() => {}).arguments; } catch (e) { arrowRestricted = e instanceof TypeError; }
+        \\methodRestricted && arrowRestricted
     )).asBool());
 }
 
