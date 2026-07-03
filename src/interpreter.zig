@@ -4825,7 +4825,20 @@ pub const Interpreter = struct {
             if (m.computed) |ce| _ = try self.eval(ce);
             return self.throwError("TypeError", "Cannot convert undefined or null to object");
         }
-        if (!obj.isObject()) return Value.boolVal(true);
+        if (!obj.isObject()) {
+            if (obj.isString()) {
+                if (std.mem.eql(u8, m.property, "length") and m.computed == null) {
+                    if (self.strict) return self.throwError("TypeError", "Cannot delete property");
+                    return Value.boolVal(false);
+                }
+                const key = try self.memberKey(m.property, m.computed);
+                if (arrayIndex(key)) |i| if (i < utf16LenOfString(obj.asStr())) {
+                    if (self.strict) return self.throwError("TypeError", "Cannot delete property");
+                    return Value.boolVal(false);
+                };
+            }
+            return Value.boolVal(true);
+        }
         const key = try self.memberKey(m.property, m.computed);
         const ok = try self.deleteOwn(obj.asObj(), key);
         // Strict mode: a failed delete (a non-configurable property) is a
