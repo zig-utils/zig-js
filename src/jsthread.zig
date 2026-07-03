@@ -420,9 +420,22 @@ fn threadMain(rec: *ThreadRecord, fn_v: Value, args: []const Value) void {
     // global object, and shapes (safe under the GIL), with its own job queues.
     // join() performs the joiner's completion checkpoint before observing the
     // result, which is the only cross-thread microtask drain point.
-    var microtasks = promise.MicrotaskQueue{};
+    // Heap-allocate the per-thread microtask queue (arena-owned, freed at realm
+    // teardown) instead of putting it on this thread's native stack. A peer
+    // settling a cross-thread promise appends into this queue under
+    // `microtask_lock`, growing its ArrayList header; on the stack that write
+    // races the collector's CONSERVATIVE scan of this thread's stack (the blind
+    // word scan can't take `microtask_lock`). Off the stack the header is never
+    // conservatively scanned, and the queued tasks stay precisely rooted via
+    // `machine.microtasks` in `traceInterpreterRoots` (which holds the lock).
+    const microtasks = rec.ctx.arena().create(promise.MicrotaskQueue) catch {
+        var pj = publishThreadCompletion(rec, true, Value.undef());
+        pj.deinit(rec.ctx.arena());
+        return;
+    };
+    microtasks.* = .{};
     var async_waiters: std.ArrayListUnmanaged(interp.AsyncWaiterEntry) = .empty;
-    rec.microtasks = &microtasks;
+    rec.microtasks = microtasks;
     var machine = rec.ctx.interpreter();
     rec.ctx.pushActiveInterpreter(&machine) catch {
         var pending_joins = publishThreadCompletion(rec, true, Value.undef());
@@ -430,7 +443,7 @@ fn threadMain(rec: *ThreadRecord, fn_v: Value, args: []const Value) void {
         return;
     };
     defer rec.ctx.popActiveInterpreter(&machine);
-    machine.microtasks = &microtasks;
+    machine.microtasks = microtasks;
     machine.async_waiters = &async_waiters;
     var result: Value = Value.undef();
     var threw = false;
@@ -514,8 +527,8 @@ fn threadMain(rec: *ThreadRecord, fn_v: Value, args: []const Value) void {
     }
     machine.microtasks = saved_microtasks;
     machine.drainMicrotasks() catch {};
-    transferPendingJoinQueue(rec.ctx, &microtasks, &rec.ctx.microtasks);
-    transferPropAsyncQueue(g, &microtasks, &rec.ctx.microtasks);
+    transferPendingJoinQueue(rec.ctx, microtasks, &rec.ctx.microtasks);
+    transferPropAsyncQueue(g, microtasks, &rec.ctx.microtasks);
     // Pending prop-async tickets now target the realm queue, but another peer
     // may already have removed one of this thread's tickets from the global
     // table and be about to settle it. Publish "local queue closed" before the
@@ -537,7 +550,7 @@ fn threadMain(rec: *ThreadRecord, fn_v: Value, args: []const Value) void {
         machine.lockMicrotasks();
         defer machine.unlockMicrotasks();
         if (!microtasks.isEmpty()) {
-            rec.ctx.microtasks.appendPendingSlice(rec.ctx.arena(), &microtasks) catch {};
+            rec.ctx.microtasks.appendPendingSlice(rec.ctx.arena(), microtasks) catch {};
             microtasks.clearRetainingCapacity();
         }
     }
