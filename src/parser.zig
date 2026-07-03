@@ -1413,6 +1413,7 @@ pub const Parser = struct {
             }
             var key: []const u8 = "";
             var key_expr: ?*Node = null;
+            var key_is_ident = false;
             if (self.match(.lbracket)) {
                 key_expr = try self.parseAssignment();
                 try self.expect(.rbracket);
@@ -1423,15 +1424,18 @@ pub const Parser = struct {
                     .number => try std.fmt.allocPrint(self.arena, "{d}", .{kt.number}),
                     else => return ParseError.UnexpectedToken,
                 };
+                key_is_ident = kt.kind == .identifier;
             }
             // `{ key }` shorthand, or `{ key: target }`. A shorthand binds the
-            // key as a BindingIdentifier, so it must not be a reserved word
-            // (`{ break }`, `{ this }`, …) — including one spelled with a Unicode
-            // escape, since `key` holds the decoded text.
+            // key as a BindingIdentifier, so the key must be an identifier token —
+            // NOT a string/number literal (`{ '' }`, `{ 0 }`) or a computed key —
+            // and must not be a reserved word (`{ break }`, `{ this }`, …),
+            // including one spelled with a Unicode escape (`key` holds the decoded
+            // text). A literal/computed key REQUIRES a `: target`.
             const target = if (self.match(.colon))
                 try self.parseBindingTarget()
             else blk: {
-                if (self.isForbiddenBindingName(key)) return ParseError.UnexpectedToken;
+                if (!key_is_ident or self.isForbiddenBindingName(key)) return ParseError.UnexpectedToken;
                 break :blk try self.alloc(.{ .identifier = key });
             };
             const default = if (self.match(.assign)) try self.parseAssignment() else null;
