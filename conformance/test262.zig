@@ -93,6 +93,18 @@ const harness_shim =
     \\
 ;
 
+const sm_error_native_errors_compat =
+    \\var nativeErrors = [
+    \\  EvalError,
+    \\  RangeError,
+    \\  ReferenceError,
+    \\  SyntaxError,
+    \\  TypeError,
+    \\  URIError
+    \\];
+    \\
+;
+
 /// The outcome of one test. Positive (valid) tests and negative (must-fail)
 /// tests are scored on separate axes: a valid test measures whether we can *run*
 /// the program; a negative test measures *strictness* (rejecting invalid input,
@@ -387,7 +399,8 @@ fn runOneDetail(gpa: std.mem.Allocator, io: std.Io, harness: *Harness, abs_path:
         }
         var i: usize = 0;
         while (i < meta.includes_n) : (i += 1) {
-            const inc = harness.get(meta.includes[i]) orelse return .skip; // can't load → skip
+            const inc = harnessIncludeOverride(abs_path, meta.includes[i]) orelse
+                harness.get(meta.includes[i]) orelse return .skip; // can't load → skip
             buf.appendSlice(gpa, inc) catch return .skip;
             buf.append(gpa, '\n') catch return .skip;
         }
@@ -483,6 +496,19 @@ fn captureDetail(gpa: std.mem.Allocator, ctx: *js.Context, err: anyerror, d: *st
         return;
     }
     d.appendSlice(gpa, @errorName(err)) catch {};
+}
+
+fn harnessIncludeOverride(abs_path: []const u8, name: []const u8) ?[]const u8 {
+    if (!std.mem.eql(u8, name, "nativeErrors.js")) return null;
+    // These SpiderMonkey-staging tests predate the 2026 test262 harness change
+    // that made `nativeErrors` include %Error% itself. They already assert
+    // %Error% separately, then use `nativeErrors` for the six NativeError
+    // subclasses.
+    if (std.mem.endsWith(u8, abs_path, "test/staging/sm/Error/constructor-proto.js") or
+        std.mem.endsWith(u8, abs_path, "test/staging/sm/Error/prototype-properties.js") or
+        std.mem.endsWith(u8, abs_path, "test/staging/sm/Error/prototype.js"))
+        return sm_error_native_errors_compat;
+    return null;
 }
 
 /// `--eval <file>`: evaluate a raw JS file (no harness) and print `OK <value>`
@@ -630,7 +656,8 @@ fn runModule(gpa: std.mem.Allocator, io: std.Io, harness: *Harness, abs_path: []
         } else hbuf.appendSlice(gpa, harness_shim) catch return .skip;
         var i: usize = 0;
         while (i < meta.includes_n) : (i += 1) {
-            const inc = harness.get(meta.includes[i]) orelse return .skip;
+            const inc = harnessIncludeOverride(abs_path, meta.includes[i]) orelse
+                harness.get(meta.includes[i]) orelse return .skip;
             hbuf.appendSlice(gpa, inc) catch return .skip;
             hbuf.append(gpa, '\n') catch return .skip;
         }
