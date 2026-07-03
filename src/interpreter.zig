@@ -5249,6 +5249,25 @@ pub const Interpreter = struct {
     /// `callFunction` with an explicit `new.target` (set by `construct`; a plain
     /// call passes undefined). Arrow functions inherit the enclosing new.target.
     fn callFunctionNT(self: *Interpreter, func: *Function, args: []const Value, this_val: Value, new_target: Value) EvalError!Value {
+        // Under `parallel_js` the concurrent parallel marker does NOT conservatively
+        // scan a running peer's native stack, so `func` — reachable only through this
+        // thread's stack while the call is in flight — can be swept mid-call and its
+        // GC cell reused by a peer's `makeFunction`, a use-after-free that surfaces
+        // as a torn read of `func.is_class_constructor` back in `callPlain`. Publish
+        // the callee's wrapping object (which marks the `Function` through
+        // `Object.js_func`) as a precise root for the call's duration. `microtask_lock`
+        // is non-null iff `parallel_js` (which the parallel marker requires), so the
+        // single-threaded hot path pays nothing.
+        const callee_rooted = self.microtask_lock != null and func.obj != null;
+        const callee_root_mark = if (callee_rooted) mark: {
+            const m = try self.pushTempRoot(Value.obj(func.obj.?));
+            // Shade the callee now: a concurrent mark may begin before this root is
+            // republished at the next safepoint, and the marker would otherwise miss
+            // it (idempotent, a no-op when no mark is active).
+            gc_mod.barrierValue(Value.obj(func.obj.?));
+            break :mark m;
+        } else 0;
+        defer if (callee_rooted) self.restoreTempRoots(callee_root_mark);
         // An async (non-generator) function runs its body synchronously and wraps
         // the completion in a Promise: a normal return resolves it, a throw
         // rejects it. `await` inside drives the microtask queue inline until the
