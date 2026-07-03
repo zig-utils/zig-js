@@ -16194,6 +16194,16 @@ const dv_types = [_]DVType{
     .{ .name = "BigUint64", .bytes = 8, .signed = false, .float = false, .big = true },
 };
 
+fn dataViewNativeRealm(self: *Interpreter) ?*Environment {
+    const native = self.active_native orelse return null;
+    return @ptrCast(@alignCast(native.private_data orelse return null));
+}
+
+fn throwDataViewTypeError(self: *Interpreter, message: []const u8) EvalError {
+    if (dataViewNativeRealm(self)) |realm| return throwErrorInRealm(self, realm, "TypeError", message);
+    return self.throwError("TypeError", message);
+}
+
 /// `new DataView(buffer, byteOffset?, byteLength?)`.
 fn dataViewConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
@@ -16236,12 +16246,12 @@ fn dataViewGetFn(comptime t: DVType) value.NativeFn {
     return struct {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
-            if (!this.isObject() or this.asObj().data_view == null) return self.throwError("TypeError", "DataView.prototype.get" ++ t.name ++ " requires a DataView receiver");
+            if (!this.isObject() or this.asObj().data_view == null) return throwDataViewTypeError(self, "DataView.prototype.get" ++ t.name ++ " requires a DataView receiver");
             const dv = this.asObj().data_view.?;
             const get_index = try toIndexArg(self, if (args.len > 0) args[0] else Value.undef());
             const little = if (args.len > 1) args[1].toBoolean() else false;
             const ab = dv.buffer.array_buffer.?;
-            const view_len = dv.currentByteLength() orelse return self.throwError("TypeError", "DataView is detached or out of bounds");
+            const view_len = dv.currentByteLength() orelse return throwDataViewTypeError(self, "DataView is detached or out of bounds");
             if (get_index + t.bytes > view_len) return self.throwError("RangeError", "Offset is outside the bounds of the DataView");
             const off = dv.byte_offset + @as(usize, @intCast(get_index));
             const endian: std.builtin.Endian = if (little) .little else .big;
@@ -16280,10 +16290,10 @@ fn dataViewSetFn(comptime t: DVType) value.NativeFn {
     return struct {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
-            if (!this.isObject() or this.asObj().data_view == null) return self.throwError("TypeError", "DataView.prototype.set" ++ t.name ++ " requires a DataView receiver");
+            if (!this.isObject() or this.asObj().data_view == null) return throwDataViewTypeError(self, "DataView.prototype.set" ++ t.name ++ " requires a DataView receiver");
             const dv = this.asObj().data_view.?;
             // SetViewValue checks IsImmutableBuffer before coercing the index/value.
-            if (dv.buffer.array_buffer.?.immutable) return self.throwError("TypeError", "Cannot modify a DataView backed by an immutable ArrayBuffer");
+            if (dv.buffer.array_buffer.?.immutable) return throwDataViewTypeError(self, "Cannot modify a DataView backed by an immutable ArrayBuffer");
             const get_index = try toIndexArg(self, if (args.len > 0) args[0] else Value.undef());
             const val = if (args.len > 1) args[1] else Value.undef();
             // Coerce the value (ToBigInt for the Big types, else ToNumber) before
@@ -16298,7 +16308,7 @@ fn dataViewSetFn(comptime t: DVType) value.NativeFn {
             }
             const little = if (args.len > 2) args[2].toBoolean() else false;
             const ab = dv.buffer.array_buffer.?;
-            const view_len = dv.currentByteLength() orelse return self.throwError("TypeError", "DataView is detached or out of bounds");
+            const view_len = dv.currentByteLength() orelse return throwDataViewTypeError(self, "DataView is detached or out of bounds");
             if (get_index + t.bytes > view_len) return self.throwError("RangeError", "Offset is outside the bounds of the DataView");
             const off = dv.byte_offset + @as(usize, @intCast(get_index));
             const endian: std.builtin.Endian = if (little) .little else .big;
@@ -16342,27 +16352,27 @@ fn numToRaw(comptime UInt: type, num: f64) UInt {
 fn dataViewBufferGetter(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject() or this.asObj().data_view == null) return self.throwError("TypeError", "DataView.prototype.buffer requires a DataView receiver");
+    if (!this.isObject() or this.asObj().data_view == null) return throwDataViewTypeError(self, "DataView.prototype.buffer requires a DataView receiver");
     return Value.obj(this.asObj().data_view.?.buffer);
 }
 
 fn dataViewByteLengthGetter(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject() or this.asObj().data_view == null) return self.throwError("TypeError", "DataView.prototype.byteLength requires a DataView receiver");
+    if (!this.isObject() or this.asObj().data_view == null) return throwDataViewTypeError(self, "DataView.prototype.byteLength requires a DataView receiver");
     const dv = this.asObj().data_view.?;
     // get byteLength throws when the view is detached or out of bounds.
-    const cur = dv.currentByteLength() orelse return self.throwError("TypeError", "DataView is detached or out of bounds");
+    const cur = dv.currentByteLength() orelse return throwDataViewTypeError(self, "DataView is detached or out of bounds");
     return Value.num(@floatFromInt(cur));
 }
 
 fn dataViewByteOffsetGetter(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject() or this.asObj().data_view == null) return self.throwError("TypeError", "DataView.prototype.byteOffset requires a DataView receiver");
+    if (!this.isObject() or this.asObj().data_view == null) return throwDataViewTypeError(self, "DataView.prototype.byteOffset requires a DataView receiver");
     const dv = this.asObj().data_view.?;
     // get byteOffset throws when the view is detached or out of bounds.
-    if (dv.currentByteLength() == null) return self.throwError("TypeError", "DataView is detached or out of bounds");
+    if (dv.currentByteLength() == null) return throwDataViewTypeError(self, "DataView is detached or out of bounds");
     return Value.num(@floatFromInt(dv.byte_offset));
 }
 
@@ -18498,12 +18508,12 @@ fn installDataView(env: *Environment, rs: *Shape, object_proto: *value.Object) E
     const proto = try gc_mod.allocObj(a);
     proto.* = .{ .proto = object_proto };
     inline for (dv_types) |t| {
-        try setNative(a, rs, proto, "get" ++ t.name, 1, dataViewGetFn(t));
-        try setNative(a, rs, proto, "set" ++ t.name, 2, dataViewSetFn(t));
+        try setNativeWithData(a, rs, proto, "get" ++ t.name, 1, dataViewGetFn(t), @ptrCast(env));
+        try setNativeWithData(a, rs, proto, "set" ++ t.name, 2, dataViewSetFn(t), @ptrCast(env));
     }
-    try setNativeGetter(a, rs, proto, "buffer", dataViewBufferGetter);
-    try setNativeGetter(a, rs, proto, "byteLength", dataViewByteLengthGetter);
-    try setNativeGetter(a, rs, proto, "byteOffset", dataViewByteOffsetGetter);
+    try setNativeGetterWithData(a, rs, proto, "buffer", dataViewBufferGetter, @ptrCast(env));
+    try setNativeGetterWithData(a, rs, proto, "byteLength", dataViewByteLengthGetter, @ptrCast(env));
+    try setNativeGetterWithData(a, rs, proto, "byteOffset", dataViewByteOffsetGetter, @ptrCast(env));
     // DataView.prototype[Symbol.toStringTag] = "DataView" {configurable}.
     if (env.get("Symbol")) |sym| if (sym.isObject()) {
         if (sym.asObj().getOwn("toStringTag")) |tt| if (tt.isObject() and tt.asObj().is_symbol) {
@@ -38727,6 +38737,22 @@ test "interpreter TypedArray iterators" {
         \\$262.detachArrayBuffer(ta.buffer);
         \\try { it.next(); ok = false; } catch (e) { ok = ok && e.name === 'TypeError'; }
         \\ok
+    )).asBool());
+}
+
+test "DataView cross-realm brand errors use the method realm" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expect((try evalSource(a,
+        \\let alien = $262.createRealm().global;
+        \\alien.eval("view = new DataView(new ArrayBuffer(16))");
+        \\let av = Object.create(alien.view);
+        \\let methodRealm = false;
+        \\try { av.getUint8(4); } catch (e) { methodRealm = e.constructor === alien.TypeError; }
+        \\let getterRealm = false;
+        \\try { av.buffer; } catch (e) { getterRealm = e.constructor === alien.TypeError; }
+        \\methodRealm && getterRealm
     )).asBool());
 }
 
