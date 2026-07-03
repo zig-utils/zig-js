@@ -598,6 +598,18 @@ pub const Parser = struct {
         }
     }
 
+    fn checkNoDuplicateLexicalDeclNames(self: *Parser, decl: *Node) ParseError!void {
+        var names: std.ArrayListUnmanaged([]const u8) = .empty;
+        try self.collectLexicalDeclNames(decl, &names);
+        var seen: std.StringHashMapUnmanaged(void) = .empty;
+        for (names.items) |n| {
+            if (n.len == 0) continue;
+            if (std.mem.eql(u8, n, "let")) return ParseError.UnexpectedToken;
+            if (seen.contains(n)) return ParseError.UnexpectedToken;
+            try seen.put(self.arena, n, {});
+        }
+    }
+
     /// A lexical for-in/of head's BoundNames must not also appear among the
     /// VarDeclaredNames of the loop body — `for (const x of []) { var x; }` is an
     /// early error (the body's `var` would redeclare the per-iteration lexical
@@ -1730,7 +1742,10 @@ pub const Parser = struct {
         if (!self.check(.rparen)) update = try self.parseExpression();
         try self.expect(.rparen);
         const body = try self.parseLoopBody();
-        if (init_node) |ini| try self.checkForHeadDeclVarConflict(ini, body);
+        if (init_node) |ini| {
+            try self.checkNoDuplicateLexicalDeclNames(ini);
+            try self.checkForHeadDeclVarConflict(ini, body);
+        }
         return self.alloc(.{ .for_stmt = .{ .init = init_node, .cond = cond, .update = update, .body = body } });
     }
 
@@ -3437,7 +3452,14 @@ pub const Parser = struct {
                 try members.append(self.arena, .{ .key = pn.key, .key_expr = pn.expr, .func = func, .is_static = is_static, .is_ctor = is_ctor });
             } else {
                 // Field: `x;` or `x = init;`.
-                const init_expr = if (self.match(.assign)) try self.parseAssignment() else null;
+                const init_expr = if (self.match(.assign)) blk: {
+                    // Field initializers do not inherit an enclosing async
+                    // function's Await context; computed keys above still do.
+                    const saved_async = self.in_async;
+                    self.in_async = false;
+                    defer self.in_async = saved_async;
+                    break :blk try self.parseAssignment();
+                } else null;
                 // A FieldDefinition must be terminated by `;`, the closing `}`, or
                 // ASI (a LineTerminator before the next element): `class C { x y }`
                 // and `class C { #x #y }` are SyntaxErrors.
@@ -4225,6 +4247,31 @@ test "parser requires statement boundary between same-line tokens" {
 
     var adjacent_expr = try Parser.init(arena.allocator(), "a b");
     try std.testing.expectError(ParseError.UnexpectedToken, adjacent_expr.parseProgram());
+}
+
+test "parser rejects duplicate lexical names in classic for heads" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var dup_names = try Parser.init(arena.allocator(), "for (let x, x; ; ) ;");
+    try std.testing.expectError(ParseError.UnexpectedToken, dup_names.parseProgram());
+
+    var dup_pattern = try Parser.init(arena.allocator(), "for (const [z, z] = [0, 1]; ; ) ;");
+    try std.testing.expectError(ParseError.UnexpectedToken, dup_pattern.parseProgram());
+
+    var valid_pattern = try Parser.init(arena.allocator(), "for (let [z] = [0]; ; ) ;");
+    _ = try valid_pattern.parseProgram();
+}
+
+test "parser keeps class field initializers out of enclosing await context" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var await_ident = try Parser.init(arena.allocator(), "var await = 1; async function f() { return class { x = await; }; }");
+    _ = try await_ident.parseProgram();
+
+    var await_expr = try Parser.init(arena.allocator(), "async () => class { x = await 1 };");
+    try std.testing.expectError(ParseError.UnexpectedToken, await_expr.parseProgram());
 }
 
 test "parser rejects malformed untagged template escapes" {
