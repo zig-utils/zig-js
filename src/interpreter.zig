@@ -3536,7 +3536,15 @@ pub const Interpreter = struct {
     fn hoistPatternVars(self: *Interpreter, pat: *Node) EvalError!void {
         switch (pat.*) {
             .identifier => |name| try self.hoistOneVar(name),
-            else => {}, // destructuring patterns bind on execution (rare to forward-ref)
+            .obj_pattern => |p| {
+                for (p.props) |prop| try self.hoistPatternVars(prop.target);
+                if (p.rest) |r| try self.hoistPatternVars(r);
+            },
+            .arr_pattern => |p| {
+                for (p.elems) |elem| if (elem.target) |target| try self.hoistPatternVars(target);
+                if (p.rest) |r| try self.hoistPatternVars(r);
+            },
+            else => {},
         }
     }
 
@@ -39356,6 +39364,21 @@ test "interpreter destructuring declarations" {
     try std.testing.expectEqualStrings("1|3,4", (try evalSource(a, "let [first, , ...rest] = [1, 2, 3, 4]; first + '|' + rest")).asStr());
     // nested pattern
     try std.testing.expectEqual(@as(f64, 7), (try evalSource(a, "let { p: { x, y } } = { p: { x: 3, y: 4 } }; x + y")).asNum());
+    // var destructuring names are hoisted before assignment patterns run
+    try std.testing.expectEqual(@as(f64, 17), (try evalSource(a,
+        \\function objectWithProtoProperty(v) {
+        \\  var obj = {};
+        \\  return Object.defineProperty(obj, "__proto__", {
+        \\    enumerable: true,
+        \\    configurable: true,
+        \\    writable: true,
+        \\    value: v,
+        \\  });
+        \\}
+        \\({ __proto__ } = objectWithProtoProperty(17));
+        \\var { __proto__ } = objectWithProtoProperty(42);
+        \\__proto__ - 25
+    )).asNum());
     // object rest collects the remaining own properties
     try std.testing.expectEqual(@as(f64, 5), (try evalSource(a, "let { a, ...others } = { a: 1, b: 2, c: 3 }; others.b + others.c")).asNum());
 }
