@@ -1993,6 +1993,7 @@ fn setIntegrityLevel(ctx: *anyopaque, self: *Interpreter, o: *value.Object, free
 /// property non-writable). Backs `seal`/`freeze`.
 fn lockKeys(self: *Interpreter, o: *value.Object, freeze: bool) HostError!void {
     for (try o.ownKeys(self.arena)) |k| {
+        if (value.isPrivateKey(k)) continue;
         var a = o.getAttr(k);
         a.configurable = false;
         if (freeze) a.writable = false;
@@ -2003,6 +2004,7 @@ fn lockKeys(self: *Interpreter, o: *value.Object, freeze: bool) HostError!void {
     // `StringHashMap` mid-iteration (the "grow vs lookup" panic). See
     // `Object.accessorKeysSnapshot`.
     for (try o.accessorKeysSnapshot(self.arena)) |k| {
+        if (value.isPrivateKey(k)) continue;
         var a = o.getAttr(k);
         a.configurable = false;
         try o.setAttr(self.arena, k, a);
@@ -2079,6 +2081,10 @@ fn isLocked(self: *Interpreter, ov: Value, frozen: bool) HostError!bool {
     var s = o.shape;
     while (s) |sh| {
         if (sh.name) |n| {
+            if (value.isPrivateKey(n)) {
+                s = sh.parent;
+                continue;
+            }
             const a = o.getAttr(n);
             if (a.configurable) return false;
             if (frozen and a.writable) return false;
@@ -2089,6 +2095,7 @@ fn isLocked(self: *Interpreter, ov: Value, frozen: bool) HostError!bool {
     // object under `parallel_js` may grow this map mid-walk. See
     // `Object.accessorKeysSnapshot`.
     for (try o.accessorKeysSnapshot(self.arena)) |k| {
+        if (value.isPrivateKey(k)) continue;
         if (o.getAttr(k).configurable) return false;
     }
     return true;

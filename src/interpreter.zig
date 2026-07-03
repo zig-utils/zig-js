@@ -4532,13 +4532,10 @@ pub const Interpreter = struct {
             default_params = try self.arena.dupe(ast.Param, &.{.{ .name = "args", .is_rest = true }});
         }
         const orig: []*Node = if (ctor_node) |cf| cf.body.block else default_super;
-        // A base class runs its field initializers at the start of the
-        // constructor (prepend); a derived class runs them when `super()` returns,
-        // so they are stored on the constructor and not prepended here.
-        const body_stmts = if (derived)
-            orig
-        else
-            try std.mem.concat(self.arena, *Node, &.{ field_inits.items, orig });
+        // Instance elements are not ordinary constructor-body statements. A base
+        // class initializes them before parameter default evaluation; a derived
+        // class initializes them when `super()` returns.
+        const body_stmts = orig;
         const body = try self.arena.create(Node);
         body.* = .{ .block = body_stmts };
         const fnode = try self.arena.create(ast.FunctionNode);
@@ -4582,7 +4579,7 @@ pub const Interpreter = struct {
             cf.is_class_constructor = true;
             cf.is_derived_constructor = derived;
             cf.is_default_ctor = derived and ctor_node == null;
-            if (derived) cf.field_inits = field_inits.items;
+            cf.field_inits = field_inits.items;
             // Private brands. Methods/accessors are added all at once before field
             // initializers run, so they brand the instance up front; *fields* are
             // added in declaration order, so each field brands the instance at its
@@ -5432,16 +5429,17 @@ pub const Interpreter = struct {
             }
             try call_env.put("arguments", args_obj);
         }
+        // A base class initializes its instance elements before parameter
+        // default evaluation. A derived class waits until `super()` returns.
+        if (func.is_class_constructor and !func.is_derived_constructor and self.this_value.isObject()) {
+            for (func.private_brand_names) |bn| try self.addPrivateMethodOrAccessorChecked(self.this_value.asObj(), func.home_object, bn);
+            for (func.field_inits) |fi| _ = try self.eval(fi);
+        }
+
         // Bind parameters in `call_env` (so a default can reference earlier
         // params). A non-arrow parameter scope owns `arguments`, so a direct eval
         // in a default expression may not redeclare it (checked in evalFn).
         try self.bindParams2(func.params, args, func.is_arrow);
-
-        // A base class brands `this` with its private names at the start of the
-        // constructor (a derived class does so when `super()` returns).
-        if (func.is_class_constructor and !func.is_derived_constructor and self.this_value.isObject()) {
-            for (func.private_brand_names) |bn| try self.addPrivateMethodOrAccessorChecked(self.this_value.asObj(), func.home_object, bn);
-        }
 
         // Async generator: params have now bound (propagating any side-effect
         // throws). We can't run the body yet, so hand back an inert object
