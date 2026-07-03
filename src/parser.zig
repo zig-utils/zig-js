@@ -2397,15 +2397,30 @@ pub const Parser = struct {
             if (left.* != .identifier and left.* != .member and left.* != .super_member) return ParseError.InvalidAssignmentTarget;
             if (self.strict and left.* == .identifier and isEvalOrArguments(left.identifier))
                 return ParseError.UnexpectedToken;
+            // A parenthesized LHS (`(a) ||= function(){}`) is not an IdentifierRef,
+            // so NamedEvaluation does not apply (mirrors the plain-`=` check above).
+            const assign_pos = self.pos;
+            const lhs_paren = self.isParenWrapped(left) or
+                (left.* == .identifier and self.paren_assign_target_name != null and std.mem.eql(u8, left.identifier, self.paren_assign_target_name.?)) or
+                (left.* == .identifier and self.parenWrappedIdentifierBefore(assign_pos, left.identifier));
+            self.paren_assign_target_name = null;
             _ = self.advance();
             const rhs = try self.parseAssignment();
             // A member target must resolve its reference (base + computed key)
             // exactly once, so it gets a dedicated node. An identifier target has
-            // no such hazard, so it keeps the `a && (a = b)` desugaring (which
-            // also gives the anonymous-RHS NamedEvaluation for free).
+            // no such hazard, so it keeps the `a && (a = b)` desugaring.
             if (left.* != .identifier)
                 return self.alloc(.{ .logical_assign = .{ .target = left, .op = op, .value = rhs } });
-            const set = try self.alloc(.{ .assign = .{ .target = left, .value = rhs } });
+            // NamedEvaluation: `a ||= function(){}` names the anonymous RHS "a".
+            // The desugared `a = b` node below is synthetic, so — unlike a source
+            // `a = b`, named at its own parse site — it must be named here (the
+            // runtime `.assign` handler names `??=` because that op tree-walks, but
+            // the VM-compiled `&&`/`||` desugaring would otherwise leave it anonymous).
+            if (!lhs_paren) nameAnon(rhs, left.identifier);
+            // Carry the parenthesization onto the synthetic assign so the runtime
+            // `.assign` handler (which re-runs NamedEvaluation for the tree-walked
+            // `??=`) also skips naming a parenthesized target.
+            const set = try self.alloc(.{ .assign = .{ .target = left, .value = rhs, .target_parenthesized = lhs_paren } });
             return self.alloc(.{ .logical = .{ .op = op, .left = left, .right = set } });
         }
         return left;
