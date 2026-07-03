@@ -660,8 +660,14 @@ pub const Object = struct {
     /// observable through [[GetPrototypeOf]] instead of falling back again.
     proto_explicit_null: bool = false,
     /// Accessor (get/set) properties, lazily allocated. Checked before the data
-    /// slot at each level of the prototype walk.
-    accessors: ?*std.StringHashMapUnmanaged(Accessor) = null,
+    /// slot at each level of the prototype walk. The POINTER is accessed atomically
+    /// (`.load`/`.store(.monotonic)`, a plain mov — zero cost): under `parallel_js`
+    /// a peer's `setAccessor` publishes the map (null -> non-null) under
+    /// `lockProperties` while other threads read the many unlocked `accessors ==
+    /// null` fast-path guards, which on a plain field ThreadSanitizer flags as a
+    /// race. The map CONTENTS are only ever grown under `lockProperties`, so the
+    /// pointer is the only unsynchronized access.
+    accessors: std.atomic.Value(?*std.StringHashMapUnmanaged(Accessor)) = .init(null),
     /// The set of private names this object was *branded* with at construction
     /// (its class's private fields/methods/accessors). PrivateGet/PrivateSet check
     /// brand membership here rather than via prototype inheritance, so an object
@@ -1571,7 +1577,7 @@ pub const Object = struct {
         var insertion: std.ArrayListUnmanaged([]const u8) = .empty;
         const has_own = struct {
             fn f(o: *const Object, k: []const u8) bool {
-                return o.getOwnUnlocked(k) != null or (o.accessors != null and o.accessors.?.get(k) != null);
+                return o.getOwnUnlocked(k) != null or (o.accessors.load(.monotonic) != null and o.accessors.load(.monotonic).?.get(k) != null);
             }
         }.f;
         const contains = struct {
@@ -1601,7 +1607,7 @@ pub const Object = struct {
                 if (sh.name) |n| if (!contains(insertion.items, n)) try insertion.append(arena, n);
                 s2 = sh.parent;
             }
-            if (self.accessors) |m| {
+            if (self.accessors.load(.monotonic)) |m| {
                 var it = m.iterator();
                 while (it.next()) |entry| {
                     const k = entry.key_ptr.*;
@@ -1747,7 +1753,7 @@ pub const Object = struct {
     }
 
     fn getAccessorUnlocked(self: *const Object, name: []const u8) ?Accessor {
-        const m = self.accessors orelse return null;
+        const m = self.accessors.load(.monotonic) orelse return null;
         return m.get(name);
     }
 
@@ -1762,7 +1768,7 @@ pub const Object = struct {
     pub fn accessorKeysSnapshot(self: *const Object, arena: std.mem.Allocator) std.mem.Allocator.Error![]const []const u8 {
         self.lockProperties();
         defer self.unlockProperties();
-        const m = self.accessors orelse return &.{};
+        const m = self.accessors.load(.monotonic) orelse return &.{};
         var list: std.ArrayListUnmanaged([]const u8) = .empty;
         try list.ensureTotalCapacityPrecise(arena, m.count());
         var it = m.iterator();
@@ -1776,11 +1782,12 @@ pub const Object = struct {
         self.lockProperties();
         defer self.unlockProperties();
         const alloc = self.accessorsAllocator(arena);
-        if (self.accessors == null) {
-            self.accessors = try alloc.create(std.StringHashMapUnmanaged(Accessor));
-            self.accessors.?.* = .{};
+        if (self.accessors.load(.monotonic) == null) {
+            const nm = try alloc.create(std.StringHashMapUnmanaged(Accessor));
+            nm.* = .{};
+            self.accessors.store(nm, .monotonic); // publish under lockProperties
         }
-        const gop = try self.accessors.?.getOrPut(alloc, name);
+        const gop = try self.accessors.load(.monotonic).?.getOrPut(alloc, name);
         if (!gop.found_existing) {
             gop.key_ptr.* = try alloc.dupe(u8, name);
             gop.value_ptr.* = .{};
@@ -1900,7 +1907,7 @@ pub const Object = struct {
     pub fn deleteAccessorOwn(self: *Object, arena: std.mem.Allocator, key: []const u8) std.mem.Allocator.Error!AccessorDeleteResult {
         self.lockProperties();
         defer self.unlockProperties();
-        const m = self.accessors orelse return .absent;
+        const m = self.accessors.load(.monotonic) orelse return .absent;
         if (m.getPtr(key) == null) return .absent;
         if (!self.getAttrUnlocked(key).configurable) return .blocked;
         if (m.fetchRemove(key)) |removed| {
@@ -1955,7 +1962,7 @@ pub const Object = struct {
         if (preserve_order) {
             // Data->accessor conversion keeps the property's original creation
             // position; `setAccessor` will reuse this existing key-order entry.
-        } else if (self.accessors != null) {
+        } else if (self.accessors.load(.monotonic) != null) {
             try self.replaceKeyOrderUnlocked(arena, survived.items);
         } else {
             self.deinitKeyOrderUnlocked();

@@ -1000,7 +1000,7 @@ pub fn objectConstructor(ctx: *anyopaque, this: Value, args: []const Value) Host
 /// CreateDataPropertyOrThrow(O, ToString(k), v) — define an own enumerable,
 /// writable, configurable data property; throw if [[DefineOwnProperty]] fails.
 fn createDataIndexOrThrow(self: *Interpreter, target: Value, k: usize, v: Value) HostError!void {
-    if (target.isObject() and target.asObj().is_array and target.asObj().accessors == null and
+    if (target.isObject() and target.asObj().is_array and target.asObj().accessors.load(.monotonic) == null and
         target.asObj().holes == null and k == target.asObj().elements.items.len and
         k == target.asObj().array_len)
     {
