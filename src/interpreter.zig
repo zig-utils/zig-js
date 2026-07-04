@@ -10847,10 +10847,12 @@ pub const Interpreter = struct {
 
         const src_bytes = src_ab.bytes();
         const dst_bytes = dst_ab.bytes();
-        const n = count * esz;
         const src_off = src.byte_offset + start * esz;
         const dst_off = dst.byte_offset;
-        if (src_off + n > src_bytes.len or dst_off + n > dst_bytes.len) return;
+        const src_avail = if (src_off < src_bytes.len) (src_bytes.len - src_off) / esz else 0;
+        const dst_avail = if (dst_off < dst_bytes.len) (dst_bytes.len - dst_off) / esz else 0;
+        const n = @min(count, @min(src_avail, dst_avail)) * esz;
+        if (n == 0) return;
         const from = src_bytes[src_off..][0..n];
         const to = dst_bytes[dst_off..][0..n];
         if (src_ab == dst_ab and dst_off > src_off)

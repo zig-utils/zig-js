@@ -7129,6 +7129,28 @@ test "TypedArray slice preserves same-kind floating NaN bits" {
     )).asBool());
 }
 
+test "TypedArray slice preserves readable prefix after length-tracking shrink" {
+    try std.testing.expect((try evalIn(
+        \\var rab = new ArrayBuffer(4, { maxByteLength: 8 });
+        \\var ta = new Uint8Array(rab);
+        \\ta.set([1, 2, 3, 4]);
+        \\var evil = { valueOf() { rab.resize(2); return 0; } };
+        \\var out = ta.slice(evil);
+        \\out.length === 4 && String(out) === "1,2,0,0";
+    )).asBool());
+    try std.testing.expect((try evalIn(
+        \\var rab = new ArrayBuffer(4, { maxByteLength: 8 });
+        \\var ta = new Uint8Array(rab);
+        \\ta.set([1, 2, 3, 4]);
+        \\ta.constructor = { [Symbol.species]: function(len) {
+        \\  rab.resize(2);
+        \\  return new Uint8Array(len);
+        \\} };
+        \\var out = ta.slice();
+        \\out.length === 4 && String(out) === "1,2,0,0";
+    )).asBool());
+}
+
 test "TypedArray subarray omits species length for length-tracking views" {
     try std.testing.expect((try evalIn(
         \\var rab = new ArrayBuffer(16, { maxByteLength: 32 });
