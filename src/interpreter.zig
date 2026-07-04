@@ -19143,6 +19143,15 @@ fn typedArrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args
     if (eq(name, "sort") or eq(name, "toSorted")) {
         const cmp = if (args.len > 0) args[0] else Value.undef();
         if (!cmp.isUndefined() and !cmp.isCallable()) return self.throwError("TypeError", "The comparison function must be either a function or undefined");
+        if (cmp.isUndefined()) {
+            if (eq(name, "toSorted")) {
+                const result = try newTypedArray(self, ta.kind, len);
+                try taSortDefault(self, ta, result.typed_array.?, len);
+                return Value.obj(result);
+            }
+            try taSortDefault(self, ta, ta, len);
+            return recv;
+        }
         const buf = try self.arena.alloc(Value, len);
         var i: usize = 0;
         while (i < len) : (i += 1) buf[i] = try self.taLoad(ta, i);
@@ -19198,10 +19207,129 @@ fn typedArrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args
     return null;
 }
 
-/// Sort `buf` in place per %TypedArray%.prototype.sort: with a user `cmp`
-/// function (ToNumber of its result, NaN→0; stable insertion sort so the
-/// comparator is honored exactly), or the default numeric/BigInt ascending
-/// order (NaN sorts last). Used by `sort` and `toSorted`.
+/// Sort a TypedArray snapshot when a user comparator is supplied. The default
+/// comparator has raw numeric fast paths in `taSortDefault`.
+fn taSortDefault(self: *Interpreter, src: *const value.TypedArrayData, dst: *value.TypedArrayData, len: usize) EvalError!void {
+    if (len < 2) {
+        if (len == 1 and dst != src) try self.taStore(dst, 0, try self.taLoad(src, 0));
+        return;
+    }
+    if (try taSortDefaultTwoByte(self, src, dst, len)) return;
+    if (src.kind.isBigInt()) {
+        var items = try self.arena.alloc(i128, len);
+        var i: usize = 0;
+        while (i < len) : (i += 1) items[i] = value.taReadBig(src, i);
+        std.sort.block(i128, items, {}, struct {
+            fn lessThan(_: void, a: i128, b: i128) bool {
+                return a < b;
+            }
+        }.lessThan);
+        const live_len = dst.currentLength() orelse return;
+        for (items[0..@min(items.len, live_len)], 0..) |v, k| value.taWriteBig(dst, k, v);
+        return;
+    }
+
+    var items = try self.arena.alloc(f64, len);
+    var i: usize = 0;
+    while (i < len) : (i += 1) items[i] = value.taRead(src, i).asNum();
+    std.sort.block(f64, items, {}, taDefaultNumberLess);
+    const live_len = dst.currentLength() orelse return;
+    for (items[0..@min(items.len, live_len)], 0..) |v, k| value.taWrite(dst, k, v);
+}
+
+fn taSortDefaultTwoByte(self: *Interpreter, src: *const value.TypedArrayData, dst: *value.TypedArrayData, len: usize) EvalError!bool {
+    switch (src.kind) {
+        .i16, .u16, .f16 => {},
+        else => return false,
+    }
+
+    const counts = try self.arena.alloc(usize, 65536);
+    @memset(counts, 0);
+    var i: usize = 0;
+    while (i < len) : (i += 1) counts[taReadRawU16(src, i)] += 1;
+
+    const live_len = dst.currentLength() orelse return true;
+    var out_i: usize = 0;
+    switch (src.kind) {
+        .u16 => {
+            var raw_i: usize = 0;
+            while (raw_i < counts.len and out_i < live_len) : (raw_i += 1)
+                taWriteRawU16Run(dst, @intCast(raw_i), counts[raw_i], live_len, &out_i);
+        },
+        .i16 => {
+            var raw_i: usize = 0;
+            while (raw_i < counts.len and out_i < live_len) : (raw_i += 1) {
+                const raw: u16 = @truncate(raw_i + 0x8000);
+                taWriteRawU16Run(dst, raw, counts[raw], live_len, &out_i);
+            }
+        },
+        .f16 => {
+            var raw_i: usize = 0xfc00; // -Infinity down through -0.
+            while (raw_i >= 0x8000 and out_i < live_len) : (raw_i -= 1) {
+                const raw: u16 = @intCast(raw_i);
+                taWriteRawU16Run(dst, raw, counts[raw], live_len, &out_i);
+                if (raw_i == 0x8000) break;
+            }
+            raw_i = 0; // +0 up through +Infinity.
+            while (raw_i <= 0x7c00 and out_i < live_len) : (raw_i += 1) {
+                const raw: u16 = @intCast(raw_i);
+                taWriteRawU16Run(dst, raw, counts[raw], live_len, &out_i);
+            }
+            raw_i = 0x7c01; // Positive NaNs, then negative NaNs.
+            while (raw_i <= 0x7fff and out_i < live_len) : (raw_i += 1) {
+                const raw: u16 = @intCast(raw_i);
+                taWriteRawU16Run(dst, raw, counts[raw], live_len, &out_i);
+            }
+            raw_i = 0xfc01;
+            while (raw_i <= 0xffff and out_i < live_len) : (raw_i += 1) {
+                const raw: u16 = @intCast(raw_i);
+                taWriteRawU16Run(dst, raw, counts[raw], live_len, &out_i);
+            }
+        },
+        else => unreachable,
+    }
+    return true;
+}
+
+fn taReadRawU16(ta: *const value.TypedArrayData, i: usize) u16 {
+    const buf = ta.buffer.array_buffer.?;
+    buf.lockBuffer();
+    defer buf.unlockBuffer();
+    const bytes = buf.bytes();
+    const off = ta.byte_offset + i * 2;
+    if (off + 2 > bytes.len) return 0;
+    return std.mem.readInt(u16, bytes[off..][0..2], .little);
+}
+
+fn taWriteRawU16(ta: *value.TypedArrayData, i: usize, raw: u16) void {
+    const buf = ta.buffer.array_buffer.?;
+    buf.lockBuffer();
+    defer buf.unlockBuffer();
+    const bytes = buf.bytes();
+    const off = ta.byte_offset + i * 2;
+    if (off + 2 > bytes.len) return;
+    std.mem.writeInt(u16, bytes[off..][0..2], raw, .little);
+}
+
+fn taWriteRawU16Run(ta: *value.TypedArrayData, raw: u16, count: usize, live_len: usize, out_i: *usize) void {
+    var n = count;
+    while (n > 0 and out_i.* < live_len) : (n -= 1) {
+        taWriteRawU16(ta, out_i.*, raw);
+        out_i.* += 1;
+    }
+}
+
+fn taDefaultNumberLess(_: void, a: f64, b: f64) bool {
+    if (std.math.isNan(a)) return false;
+    if (std.math.isNan(b)) return true;
+    if (a == 0 and b == 0) {
+        const a_neg = std.math.signbit(a);
+        const b_neg = std.math.signbit(b);
+        return a_neg and !b_neg;
+    }
+    return a < b;
+}
+
 fn taSort(self: *Interpreter, buf: []Value, cmp: Value) EvalError!void {
     if (buf.len < 2) return;
     const tmp = try self.arena.alloc(Value, buf.len);

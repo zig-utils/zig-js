@@ -4824,6 +4824,22 @@ test "WeakMap/WeakSet reject non-weakly-holdable keys; collection toStringTag" {
     try expectEvalStr("WeakSet", "WeakSet.prototype[Symbol.toStringTag]");
 }
 
+test "WeakMap handles deep linked object chains efficiently" {
+    try std.testing.expect((try evalIn(
+        \\var wm = new WeakMap();
+        \\var head = {};
+        \\var key = head;
+        \\for (var i = 0; i < 10000; i++, key = wm.get(key)) {
+        \\  wm.set(key, {});
+        \\}
+        \\var count = 0;
+        \\for (key = head; key !== undefined; key = wm.get(key)) {
+        \\  count++;
+        \\}
+        \\count === 10001;
+    )).asBool());
+}
+
 test "reserved words may not be binding identifiers" {
     try expectParseError("var if = 1;");
     try expectParseError("var return = 2;");

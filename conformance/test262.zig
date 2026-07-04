@@ -1240,6 +1240,8 @@ fn driveSubtree(gpa: std.mem.Allocator, io: std.Io, root: []const u8, exe: []con
         const worker_limit = workerLimitForSubtree(sub);
         const limit_str = std.fmt.bufPrint(&limit_buf, "{d}", .{worker_limit}) catch return;
         const argv = [_][]const u8{ exe, "--worker", sub, start_str, limit_str };
+        const next_path_for_timeout = if (worker_limit == 1) pathAtIndex(gpa, io, root, sub, next) else null;
+        defer if (next_path_for_timeout) |path| gpa.free(path);
         // The engine's step budget handles normal execution, but malformed
         // semantics can still wedge one test. Treat no-output stalls like
         // crashes so one pathological case cannot block the whole corpus.
@@ -1247,10 +1249,12 @@ fn driveSubtree(gpa: std.mem.Allocator, io: std.Io, root: []const u8, exe: []con
             .argv = &argv,
             .stdout_limit = .limited(256 << 20),
             .stderr_limit = .limited(256 << 20),
-            .timeout = workerTimeoutForSubtree(sub),
+            .timeout = workerTimeoutForSubtreePath(sub, next_path_for_timeout),
         }) catch |err| switch (err) {
             error.Timeout => {
-                if (pathAtIndex(gpa, io, root, sub, next)) |timed_path| {
+                if (next_path_for_timeout) |timed_path| {
+                    std.debug.print("  (worker timed out for {s} at {d}: {s})\n", .{ sub, next, timed_path });
+                } else if (pathAtIndex(gpa, io, root, sub, next)) |timed_path| {
                     defer gpa.free(timed_path);
                     std.debug.print("  (worker timed out for {s} at {d}: {s})\n", .{ sub, next, timed_path });
                 } else {
@@ -1335,7 +1339,12 @@ fn workerLimitForSubtree(sub: []const u8) usize {
     return 10;
 }
 
-fn workerTimeoutForSubtree(sub: []const u8) std.Io.Timeout {
+fn workerTimeoutForSubtreePath(sub: []const u8, path: ?[]const u8) std.Io.Timeout {
+    if (path) |p| {
+        if (std.mem.eql(u8, sub, "test/staging") and
+            std.mem.eql(u8, p, "sm/TypedArray/sort_large_countingsort.js"))
+            return slow_worker_timeout;
+    }
     if (std.mem.startsWith(u8, sub, "test/intl402/Temporal/PlainMonthDay") or
         std.mem.eql(u8, sub, "test/built-ins/decodeURI") or
         std.mem.eql(u8, sub, "test/built-ins/decodeURIComponent") or

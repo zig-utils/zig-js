@@ -175,7 +175,7 @@ pub fn pruneDeadWeakEntries(o: *Object, heap: anytype) bool {
         var i: usize = 0;
         while (i < o.weak_entries.items.len) {
             if (!heap.isLive(o.weak_entries.items[i].key)) {
-                _ = o.weak_entries.swapRemove(i);
+                o.weakEntrySwapRemoveAtUnlocked(i);
             } else {
                 i += 1;
             }
@@ -316,6 +316,8 @@ fn finalizeObjectBacking(o: *Object, a: std.mem.Allocator) usize {
     if (flags.weak_entries) {
         o.weak_entries.deinit(a);
         o.weak_entries = .empty;
+        o.weak_index.deinit(a);
+        o.weak_index = .empty;
         released += 1;
     }
     if (flags.finalization_records) {

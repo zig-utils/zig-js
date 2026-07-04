@@ -812,6 +812,10 @@ pub const Object = struct {
     /// WeakMap/WeakSet entries. Keys are weak GC edges; for WeakMap, `value`
     /// becomes live iff `key` is live during the ephemeron fixed-point pass.
     weak_entries: std.ArrayListUnmanaged(WeakCollectionEntry) = .empty,
+    /// Pointer identity -> `weak_entries` index. This keeps WeakMap/WeakSet
+    /// operations O(1) while the entry list remains the GC-visible ephemeron
+    /// storage. Stale/missing entries are tolerated and repaired by mutators.
+    weak_index: std.AutoHashMapUnmanaged(usize, usize) = .empty,
     /// For error instances, the error class name (e.g. "TypeError"); for a
     /// builtin error *constructor* object, see `error_ctor`.
     error_name: []const u8 = "",
@@ -1198,43 +1202,44 @@ pub const Object = struct {
     pub fn weakEntryGet(self: *Object, key: ?*anyopaque) ?Value {
         self.lockElements();
         defer self.unlockElements();
-        for (self.weak_entries.items) |entry| {
-            if (entry.key == key) return entry.value;
-        }
-        return null;
+        const i = self.weakEntryIndexUnlocked(key) orelse return null;
+        return self.weak_entries.items[i].value;
     }
 
     /// WeakMap/WeakSet `[[Has]]`.
     pub fn weakEntryHas(self: *Object, key: ?*anyopaque) bool {
         self.lockElements();
         defer self.unlockElements();
-        for (self.weak_entries.items) |entry| {
-            if (entry.key == key) return true;
-        }
-        return false;
+        return self.weakEntryIndexUnlocked(key) != null;
     }
 
     /// WeakMap `[[Set]]` upsert: update the entry for `key` or append a new one.
     pub fn weakEntrySet(self: *Object, fallback: std.mem.Allocator, key: ?*anyopaque, v: Value) std.mem.Allocator.Error!void {
         self.lockElements();
         defer self.unlockElements();
-        for (self.weak_entries.items) |*entry| {
-            if (entry.key == key) {
-                entry.value = v;
-                return;
-            }
+        const alloc = self.weakEntriesAllocator(fallback);
+        if (self.weakEntryIndexUnlocked(key)) |i| {
+            self.weak_entries.items[i].value = v;
+            self.weakIndexPut(alloc, key, i);
+            return;
         }
-        try self.weak_entries.append(self.weakEntriesAllocator(fallback), .{ .key = key, .value = v });
+        const i = self.weak_entries.items.len;
+        try self.weak_entries.append(alloc, .{ .key = key, .value = v });
+        self.weakIndexPut(alloc, key, i);
     }
 
     /// WeakSet `add`: append `key` if it is not already present.
     pub fn weakEntryAdd(self: *Object, fallback: std.mem.Allocator, key: ?*anyopaque) std.mem.Allocator.Error!void {
         self.lockElements();
         defer self.unlockElements();
-        for (self.weak_entries.items) |entry| {
-            if (entry.key == key) return;
+        const alloc = self.weakEntriesAllocator(fallback);
+        if (self.weakEntryIndexUnlocked(key)) |i| {
+            self.weakIndexPut(alloc, key, i);
+            return;
         }
-        try self.weak_entries.append(self.weakEntriesAllocator(fallback), .{ .key = key });
+        const i = self.weak_entries.items.len;
+        try self.weak_entries.append(alloc, .{ .key = key });
+        self.weakIndexPut(alloc, key, i);
     }
 
     /// WeakMap/WeakSet `delete`: remove the entry for `key`; returns whether one
@@ -1242,13 +1247,39 @@ pub const Object = struct {
     pub fn weakEntryDelete(self: *Object, key: ?*anyopaque) bool {
         self.lockElements();
         defer self.unlockElements();
-        for (self.weak_entries.items, 0..) |entry, i| {
-            if (entry.key == key) {
-                _ = self.weak_entries.swapRemove(i);
-                return true;
-            }
+        const i = self.weakEntryIndexUnlocked(key) orelse return false;
+        self.weakEntrySwapRemoveAtUnlocked(i);
+        return true;
+    }
+
+    fn weakIndexKey(key: ?*anyopaque) usize {
+        return if (key) |ptr| @intFromPtr(ptr) else 0;
+    }
+
+    fn weakEntryIndexUnlocked(self: *Object, key: ?*anyopaque) ?usize {
+        const k = weakIndexKey(key);
+        if (self.weak_index.get(k)) |i| {
+            if (i < self.weak_entries.items.len and self.weak_entries.items[i].key == key) return i;
         }
-        return false;
+        for (self.weak_entries.items, 0..) |entry, i| {
+            if (entry.key == key) return i;
+        }
+        return null;
+    }
+
+    fn weakIndexPut(self: *Object, alloc: std.mem.Allocator, key: ?*anyopaque, i: usize) void {
+        self.weak_index.put(alloc, weakIndexKey(key), i) catch {};
+    }
+
+    pub fn weakEntrySwapRemoveAtUnlocked(self: *Object, i: usize) void {
+        const removed_key = self.weak_entries.items[i].key;
+        const last_i = self.weak_entries.items.len - 1;
+        const moved_key = self.weak_entries.items[last_i].key;
+        _ = self.weak_entries.swapRemove(i);
+        _ = self.weak_index.remove(weakIndexKey(removed_key));
+        if (i != last_i) {
+            if (self.weak_index.getPtr(weakIndexKey(moved_key))) |slot| slot.* = i;
+        }
     }
 
     /// FinalizationRegistry `register`: append a record (the strong `held` value
@@ -2636,6 +2667,7 @@ test "WeakMap and WeakSet entry delete is unordered tail removal" {
     const a = std.testing.allocator;
     var o = Object{ .is_weak = true, .is_map = true };
     defer o.weak_entries.deinit(a);
+    defer o.weak_index.deinit(a);
 
     var key1: u8 = 1;
     var key2: u8 = 2;
