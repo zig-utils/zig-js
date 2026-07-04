@@ -22234,6 +22234,7 @@ fn dtfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Hos
     }
 
     const numbering_system = resolveNumberingSystem(this);
+    const dtf_locale = if (this.asObj().getOwn("\x00locale")) |lv| (if (lv.isString()) lv.asStr() else "en") else "en";
 
     var parts: std.ArrayListUnmanaged(DtfPart) = .empty;
     const P = struct {
@@ -22269,6 +22270,24 @@ fn dtfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Hos
             }
             if (o_year.len > 0) {
                 try P.lit(self, &parts, ", ");
+                try dtfAppendYearPart(self, &parts, part_calendar, display_year, o_year);
+            }
+        } else if (std.mem.eql(u8, parseTriple(dtf_locale).l, "de")) {
+            // German numeric dates are day.month.year, and ECMA-402 internal
+            // formatting must not observe user changes to String.prototype.split.
+            var first = true;
+            if (o_day.len > 0) {
+                try P.num(self, &parts, "day", civ.d, eq(o_day, "2-digit"));
+                first = false;
+            }
+            if (o_month.len > 0) {
+                if (!first) try P.lit(self, &parts, ".");
+                first = false;
+                try dtfAppendMonthPart(self, &parts, part_calendar, civ.y, civ.m, o_month);
+            }
+            if (o_year.len > 0) {
+                if (!first) try P.lit(self, &parts, ".");
+                first = false;
                 try dtfAppendYearPart(self, &parts, part_calendar, display_year, o_year);
             }
         } else {
@@ -38889,6 +38908,21 @@ test "Intl.PluralRules validates localeMatcher option" {
         \\let valid = new Intl.PluralRules("en", { localeMatcher: "lookup" }).select(1) === "one";
         \\invalid && nul && valid
     )).asBool());
+}
+
+test "Intl.DateTimeFormat German numeric date pattern" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var env = Environment{ .arena = a };
+    const root_shape = try Shape.createRoot(a);
+    try installGlobals(&env, root_shape);
+    var interp = Interpreter{ .arena = a, .env = &env, .root_shape = root_shape };
+    const dtf = (try interp.newObject()).asObj();
+    try interp.setProp(dtf, "\x00intl", Value.str("DateTimeFormat"));
+    try interp.setProp(dtf, "\x00locale", Value.str("de"));
+    const out = try intlDateTimeFormatFn(@ptrCast(&interp), Value.obj(dtf), &.{Value.num(24 * 60 * 60 * 1000)});
+    try std.testing.expectEqualStrings("2.1.1970", out.asStr());
 }
 
 test "legacy function caller and arguments access" {
