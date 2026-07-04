@@ -625,7 +625,7 @@ pub fn mathSumPrecise(ctx: *anyopaque, this: Value, args: []const Value) HostErr
     var all_neg_zero = true; // an exact-zero result is -0 only if every element was -0
     while (true) {
         const r = try self.callMethod(iter, "next", &.{});
-        if (!r.isObject()) return self.throwError("TypeError", "iterator.next() did not return an object");
+        if (!isRealObject(r)) return self.throwError("TypeError", "iterator.next() did not return an object");
         if ((try self.getProperty(r, "done")).toBoolean()) break;
         const v = try self.getProperty(r, "value");
         if (!v.isNumber()) {
@@ -1047,7 +1047,7 @@ pub fn arrayFrom(ctx: *anyopaque, this: Value, args: []const Value) HostError!Va
         var k: usize = 0;
         while (true) {
             const res = try self.callMethod(it, "next", &.{});
-            if (!res.isObject()) return self.throwError("TypeError", "iterator result is not an object");
+            if (!isRealObject(res)) return self.throwError("TypeError", "iterator result is not an object");
             if ((try self.getProperty(res, "done")).toBoolean()) break;
             const v = try self.getProperty(res, "value");
             const mapped: Value = if (mapping) self.callValueWithThis(map_fn, &.{ v, Value.num(@floatFromInt(k)) }, this_arg) catch |e| {
@@ -1168,7 +1168,7 @@ fn arrayFromAsyncImpl(self: *Interpreter, out_promise: Value, C: Value, items: V
         while (true) {
             var res = try self.callMethod(it, "next", &.{});
             if (is_async) res = try self.awaitValue(res); // async next() yields a promise
-            if (!res.isObject()) return self.throwError("TypeError", "Array.fromAsync: iterator result is not an object");
+            if (!isRealObject(res)) return self.throwError("TypeError", "Array.fromAsync: iterator result is not an object");
             if ((try self.getProperty(res, "done")).toBoolean()) break;
             var v = try self.getProperty(res, "value");
             // A sync iterable is wrapped as an async-from-sync iterator, which
@@ -1223,7 +1223,7 @@ fn arrayFromAsyncImpl(self: *Interpreter, out_promise: Value, C: Value, items: V
 
 fn arrayFromAsyncSyncStep(self: *Interpreter, it: Value, mapfn: Value, this_arg: Value, mapping: bool, k: usize) HostError!?Value {
     const res = try self.callMethod(it, "next", &.{});
-    if (!res.isObject()) return self.throwError("TypeError", "Array.fromAsync: iterator result is not an object");
+    if (!isRealObject(res)) return self.throwError("TypeError", "Array.fromAsync: iterator result is not an object");
     if ((try self.getProperty(res, "done")).toBoolean()) return null;
     var v = try self.getProperty(res, "value");
     v = self.awaitValue(v) catch |e| {

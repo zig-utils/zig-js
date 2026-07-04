@@ -125,6 +125,13 @@ pub const Handler = struct {
 /// stack for `end_finally`): fall through, re-throw, or return.
 const Completion = enum(u8) { normal = 0, throw = 1, ret = 2, break_ = 3, continue_ = 4 };
 
+fn looksLikeCompletionKind(v: Value) bool {
+    if (!v.isNumber()) return false;
+    const n = v.asNum();
+    if (@trunc(n) != n) return false;
+    return n >= 0 and n <= @as(f64, @floatFromInt(@intFromEnum(Completion.continue_)));
+}
+
 /// Unwind `exec.handlers` (innermost-first) to the next `finally`, carrying an
 /// abrupt completion `[cval, kind]` so the finally runs and `end_finally`
 /// re-propagates it. Returns the finally's PC, or null if none remains (the
@@ -795,7 +802,17 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 // target PC rides through as the completion value.
                 const kind: Completion = if (inst.op == .abrupt_break) .break_ else .continue_;
                 const target: Value = Value.num(@floatFromInt(inst.a));
-                if (try unwindToFinally(vm, gen, exec, target, kind)) |fpc| ip = fpc else ip = inst.a;
+                if (try unwindToFinally(vm, gen, exec, target, kind)) |fpc| {
+                    ip = fpc;
+                } else {
+                    // A break/continue *inside* a finally overrides that
+                    // finally's active completion. With no outer finally to
+                    // re-enter, discard the current [value, kind] record before
+                    // jumping to the loop/label target.
+                    if (stack.items.len >= 2 and looksLikeCompletionKind(stack.items[stack.items.len - 1]))
+                        stack.shrinkRetainingCapacity(stack.items.len - 2);
+                    ip = inst.a;
+                }
             },
 
             .gen_yield, .await_op, .gen_yield_star => {
@@ -2483,6 +2500,37 @@ test "vm: generator return closes suspended for-of iterator" {
         \\var finished = it.return("stop");
         \\first.value === 10 && finished.value === "stop" && finished.done === true && returnCalled === 1
     )).asBool());
+}
+
+test "vm: generator finally break preserves outer return completion" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expectEqual(@as(f64, 42), (try vmRun(a,
+        \\function *g() {
+        \\  try {
+        \\    return 42;
+        \\  } finally {
+        \\    do try {
+        \\      return 43;
+        \\    } finally {
+        \\      break;
+        \\    } while (0);
+        \\  }
+        \\}
+        \\g().next().value
+    )).asNum());
+    try std.testing.expectEqual(@as(f64, 43), (try vmRun(a,
+        \\function *g() {
+        \\  L: try {
+        \\    return 42;
+        \\  } finally {
+        \\    break L;
+        \\  }
+        \\  return 43;
+        \\}
+        \\g().next().value
+    )).asNum());
 }
 
 test "vm: if/else and short-circuit value" {

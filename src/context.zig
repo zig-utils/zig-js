@@ -6700,6 +6700,22 @@ test "Set/Map are iterable: for-of, spread, Array.from, destructuring" {
     try std.testing.expectEqual(@as(f64, 2), (try evalIn("Array.from(new Set([5, 5, 9])).length")).asNum());
 }
 
+test "iterator consumers reject primitive-tagged result objects" {
+    try std.testing.expect((try evalIn(
+        \\var bad = { [Symbol.iterator]() { return { next() { return Symbol.iterator; } }; } };
+        \\function throwsTypeError(fn) {
+        \\  try { fn(); return false; } catch (e) { return e instanceof TypeError; }
+        \\}
+        \\function* g() { var [x] = bad; }
+        \\throwsTypeError(function () { return [...bad]; }) &&
+        \\throwsTypeError(function () { return Array.from(bad); }) &&
+        \\throwsTypeError(function () { return new Set(bad); }) &&
+        \\throwsTypeError(function () { return new Int8Array(bad); }) &&
+        \\throwsTypeError(function () { return Int8Array.from(bad); }) &&
+        \\throwsTypeError(function () { return g().next(); })
+    )).asBool());
+}
+
 test "eval: direct eval runs in the caller's scope" {
     // Returns the completion value of the program.
     try std.testing.expectEqual(@as(f64, 3), (try evalIn("eval('1 + 2')")).asNum());

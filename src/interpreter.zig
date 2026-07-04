@@ -4916,6 +4916,7 @@ pub const Interpreter = struct {
         const iter_obj = try self.iteratorOf(v); // throws TypeError if not iterable
         while (true) {
             const res = try self.callMethod(iter_obj, "next", &.{});
+            if (!builtins.isRealObject(res)) return self.throwError("TypeError", "iterator result is not an object");
             if ((try self.getProperty(res, "done")).toBoolean()) break;
             try list.append(self.arena, try self.getProperty(res, "value"));
         }
@@ -8064,7 +8065,7 @@ pub const Interpreter = struct {
         const iter = try self.iteratorOf(iterable);
         while (true) {
             const r = try self.callMethod(iter, "next", &.{});
-            if (!r.isObject()) return self.throwError("TypeError", "iterator.next() did not return an object");
+            if (!builtins.isRealObject(r)) return self.throwError("TypeError", "iterator.next() did not return an object");
             if ((try self.getProperty(r, "done")).toBoolean()) break;
             const item = try self.getProperty(r, "value");
             self.addOneEntry(o, adder, item, is_set) catch |e| {
@@ -10754,6 +10755,7 @@ pub const Interpreter = struct {
             const it = try self.iteratorOf(v);
             while (true) {
                 const r = try self.callMethod(it, "next", &.{});
+                if (!builtins.isRealObject(r)) return self.throwError("TypeError", "iterator result is not an object");
                 if ((try self.getProperty(r, "done")).toBoolean()) break;
                 try out.append(self.arena, try self.getProperty(r, "value"));
             }
@@ -19173,13 +19175,13 @@ fn typedArrayFromFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
     if (!using_iter.isUndefined() and !using_iter.isNull()) {
         if (!using_iter.isCallable()) return self.throwError("TypeError", "%TypedArray%.from source iterator is not callable");
         const iterator = try self.callValueWithThis(using_iter, &.{}, source);
-        if (!iterator.isObject()) return self.throwError("TypeError", "%TypedArray%.from iterator is not an object");
+        if (!builtins.isRealObject(iterator)) return self.throwError("TypeError", "%TypedArray%.from iterator is not an object");
         const next = try self.getProperty(iterator, "next");
         if (!next.isCallable()) return self.throwError("TypeError", "%TypedArray%.from iterator next is not callable");
         var list: std.ArrayListUnmanaged(Value) = .empty;
         while (true) {
             const r = try self.callValueWithThis(next, &.{}, iterator);
-            if (!r.isObject()) return self.throwError("TypeError", "%TypedArray%.from iterator result is not an object");
+            if (!builtins.isRealObject(r)) return self.throwError("TypeError", "%TypedArray%.from iterator result is not an object");
             if ((try self.getProperty(r, "done")).toBoolean()) break;
             try list.append(self.arena, try self.getProperty(r, "value"));
         }

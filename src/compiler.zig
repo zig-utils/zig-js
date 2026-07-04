@@ -33,6 +33,9 @@ const Mode = enum { program, function };
 const Loop = struct {
     breaks: std.ArrayListUnmanaged(usize) = .empty,
     continues: std.ArrayListUnmanaged(usize) = .empty,
+    label: ?[]const u8 = null,
+    /// A labeled non-loop statement is breakable but not continuable.
+    is_loop: bool = true,
     /// A `switch` is breakable but not continuable: `break` targets it, but
     /// `continue` skips past it to the nearest enclosing loop.
     is_switch: bool = false,
@@ -720,8 +723,7 @@ pub const Compiler = struct {
             .do_while_stmt => |s| try self.compileDoWhile(s.body, s.cond),
             .for_stmt => |f| try self.compileFor(f.init, f.cond, f.update, f.body),
             .break_stmt => |label| {
-                if (label != null) return error.Unsupported; // labeled break → tree-walk
-                const loop = self.currentLoop() orelse return error.Unsupported;
+                const loop = self.currentBreakTarget(label) orelse return error.Unsupported;
                 // Across a finally, the finally must run before the jump:
                 // `abrupt_break` unwinds the handler stack running each enclosing
                 // finally, then jumps to the (patched) break target.
@@ -748,6 +750,12 @@ pub const Compiler = struct {
                 try self.compileForOf(f.decl_kind, f.target, f.var_init, f.iterable, f.body, !f.is_of, f.is_await);
             },
             .try_stmt => |t| try self.compileTry(t),
+            .labeled_stmt => |l| {
+                const target = try self.pushLabel(l.label);
+                try self.compileStmt(l.body);
+                for (target.breaks.items) |j| self.chunk.patchToHere(j);
+                self.popLoop();
+            },
             .with_stmt => |w| {
                 // `with (obj) body`: push an object Environment Record, run the body,
                 // pop it. Only safe when the body can't leave abruptly (which would
@@ -1245,6 +1253,9 @@ pub const Compiler = struct {
                 _ = try self.chunk.emitAB(.call_method, try self.chunk.addName("next"), 0);
                 try self.emitDefine(r);
                 try self.emitLoad(r);
+                _ = try self.chunk.emit(.assert_iter_result, 0);
+                _ = try self.chunk.emit(.pop, 0);
+                try self.emitLoad(r);
                 _ = try self.chunk.emit(.get_prop, try self.chunk.addName("done"));
                 const not_done = try self.chunk.emit(.jump_if_false, 0);
                 _ = try self.chunk.emit(.load_true, 0);
@@ -1296,6 +1307,9 @@ pub const Compiler = struct {
             try self.emitLoad(it);
             _ = try self.chunk.emitAB(.call_method, try self.chunk.addName("next"), 0);
             try self.emitDefine(r);
+            try self.emitLoad(r);
+            _ = try self.chunk.emit(.assert_iter_result, 0);
+            _ = try self.chunk.emit(.pop, 0);
             try self.emitLoad(r);
             _ = try self.chunk.emit(.get_prop, try self.chunk.addName("done"));
             const not_done = try self.chunk.emit(.jump_if_false, 0);
@@ -2077,13 +2091,29 @@ pub const Compiler = struct {
         return loop;
     }
 
+    fn pushLabel(self: *Compiler, label: []const u8) CompileError!*Loop {
+        const target = try self.arena.create(Loop);
+        target.* = .{ .label = label, .is_loop = false };
+        try self.loops.append(self.arena, target);
+        return target;
+    }
+
     fn popLoop(self: *Compiler) void {
         _ = self.loops.pop();
     }
 
-    fn currentLoop(self: *Compiler) ?*Loop {
-        if (self.loops.items.len == 0) return null;
-        return self.loops.items[self.loops.items.len - 1];
+    fn currentBreakTarget(self: *Compiler, label: ?[]const u8) ?*Loop {
+        var i = self.loops.items.len;
+        while (i > 0) {
+            i -= 1;
+            const target = self.loops.items[i];
+            if (label) |needle| {
+                if (target.label) |have| if (std.mem.eql(u8, have, needle)) return target;
+            } else {
+                return target;
+            }
+        }
+        return null;
     }
 
     /// The nearest loop a `continue` applies to — skipping any enclosing
@@ -2092,7 +2122,7 @@ pub const Compiler = struct {
         var i = self.loops.items.len;
         while (i > 0) {
             i -= 1;
-            if (!self.loops.items[i].is_switch) return self.loops.items[i];
+            if (self.loops.items[i].is_loop and !self.loops.items[i].is_switch) return self.loops.items[i];
         }
         return null;
     }
