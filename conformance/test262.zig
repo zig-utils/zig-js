@@ -54,7 +54,14 @@ const verbose_failures = false;
 // capability gap.
 const unsupported_staging_prefixes = [_][]const u8{
     "sm/Date/", // Zig-level infinite loop in Date handling (worker hangs ~#21)
-    "sm/TypedArray/", // Zig-level infinite loop (worker hangs ~#15)
+    "sm/TypedArray/set-detached.js", // runtime failure in detached set semantics
+    "sm/TypedArray/constructor-buffer-sequence.js", // runtime failure in buffer sequence construction
+    "sm/TypedArray/sort_large_countingsort.js", // Zig-level infinite loop in large TypedArray sort
+    "sm/TypedArray/sort_modifications.js", // Zig-level infinite loop while sort mutates backing state
+    "sm/TypedArray/test-integrity-level.js", // runtime failure in TypedArray integrity checks
+    "sm/TypedArray/slice-bitwise-same.js", // runtime failure in slice bitwise comparison semantics
+    "sm/TypedArray/seal-and-freeze.js", // runtime failure in TypedArray integrity checks
+    "sm/TypedArray/slice-detached.js", // runtime failure in detached slice semantics
     "sm/String/replace-math.js", // quarantined
     // These pending SpiderMonkey staging tests predate/contradict the current
     // Annex B.3.3 `arguments` skip rule covered by official test262
