@@ -3659,8 +3659,8 @@ pub const Interpreter = struct {
     }
 
     /// Entry point: collect the eligible legacy-binding function names of a
-    /// variable scope's statement list. `stack` is seeded with parameter names
-    /// and "arguments" (both block the legacy binding).
+    /// variable scope's statement list. `stack` is seeded with parameter names,
+    /// which block the legacy binding.
     fn annexbAddCandidate(self: *Interpreter, node: *const Node, name: []const u8, out: *std.StringHashMapUnmanaged(void), nodes: *std.AutoHashMapUnmanaged(*const Node, void)) EvalError!void {
         try out.put(self.arena, name, {});
         try nodes.put(self.arena, node, {});
@@ -3670,7 +3670,6 @@ pub const Interpreter = struct {
         var stack: NameStack = .empty;
         if (!self.eval_decl_deletable)
             for (self.cur_params) |pn| try stack.append(self.arena, pn);
-        try stack.append(self.arena, "arguments");
         try self.annexbScanList(stmts, &stack, depth, out, nodes);
     }
 
@@ -39669,6 +39668,33 @@ test "Annex B labeled block function updates legacy binding" {
         \\}
         \\f() === 4
     )).asBool());
+}
+
+test "Annex B block function can update implicit arguments binding" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    try std.testing.expectEqualStrings("function", (try evalSource(a,
+        \\(function() {
+        \\  { function arguments() {} }
+        \\  return typeof arguments;
+        \\})()
+    )).asStr());
+    try std.testing.expectEqualStrings("function", (try evalSource(a,
+        \\function test(arg) {
+        \\  eval(arg);
+        \\  { function arguments() { return 1; } }
+        \\  return typeof arguments;
+        \\}
+        \\test("42")
+    )).asStr());
+    try std.testing.expectEqualStrings("number", (try evalSource(a,
+        \\(function(arguments) {
+        \\  { function arguments() {} }
+        \\  return typeof arguments;
+        \\})(0)
+    )).asStr());
 }
 
 test "interpreter do-while and comma operator" {
