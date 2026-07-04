@@ -912,7 +912,20 @@ const subtrees = [_][]const u8{
     "test/built-ins/Promise",
     "test/built-ins/Proxy",
     "test/built-ins/Reflect",
-    "test/built-ins/RegExp",
+    "test/built-ins/RegExp/.",
+    "test/built-ins/RegExp/CharacterClassEscapes",
+    "test/built-ins/RegExp/dotall",
+    "test/built-ins/RegExp/escape",
+    "test/built-ins/RegExp/lookBehind",
+    "test/built-ins/RegExp/match-indices",
+    "test/built-ins/RegExp/named-groups",
+    "test/built-ins/RegExp/property-escapes/.",
+    "test/built-ins/RegExp/property-escapes/generated/.",
+    "test/built-ins/RegExp/property-escapes/generated/strings",
+    "test/built-ins/RegExp/prototype",
+    "test/built-ins/RegExp/regexp-modifiers",
+    "test/built-ins/RegExp/Symbol.species",
+    "test/built-ins/RegExp/unicodeSets",
     "test/built-ins/RegExpStringIteratorPrototype",
     "test/built-ins/Set",
     "test/built-ins/SetIteratorPrototype",
@@ -960,12 +973,22 @@ pub fn main(init: std.process.Init) !void {
     return runParent(gpa, io, root);
 }
 
+fn subtreePath(sub: []const u8) []const u8 {
+    return if (std.mem.endsWith(u8, sub, "/.")) sub[0 .. sub.len - 2] else sub;
+}
+
+fn subtreeShallow(sub: []const u8) bool {
+    return std.mem.endsWith(u8, sub, "/.");
+}
+
 /// Worker: walk `sub`, run each test from index `start`, and stream
 /// `index:outcome` lines (then `DONE`) to stdout — flushing each line so a crash
 /// loses only the in-flight test.
 fn runWorker(gpa: std.mem.Allocator, io: std.Io, root: []const u8, sub: []const u8, start: usize, limit: usize) !void {
     const out = std.Io.File.stdout();
-    const path = std.fs.path.join(gpa, &.{ root, sub }) catch return;
+    const scan_sub = subtreePath(sub);
+    const shallow = subtreeShallow(sub);
+    const path = std.fs.path.join(gpa, &.{ root, scan_sub }) catch return;
     defer gpa.free(path);
 
     const harness_path = std.fs.path.join(gpa, &.{ root, "harness" }) catch return;
@@ -974,8 +997,8 @@ fn runWorker(gpa: std.mem.Allocator, io: std.Io, root: []const u8, sub: []const 
     defer harness.deinit();
 
     var line_buf: [32]u8 = undefined;
-    if (std.mem.endsWith(u8, sub, ".js")) {
-        if (start > 0 or std.mem.endsWith(u8, sub, "_FIXTURE.js") or shouldSkipPath(sub, sub)) {
+    if (std.mem.endsWith(u8, scan_sub, ".js")) {
+        if (start > 0 or std.mem.endsWith(u8, scan_sub, "_FIXTURE.js") or shouldSkipPath(scan_sub, scan_sub)) {
             out.writeStreamingAll(io, "DONE\n") catch {};
             return;
         }
@@ -1009,6 +1032,7 @@ fn runWorker(gpa: std.mem.Allocator, io: std.Io, root: []const u8, sub: []const 
         if (entry.kind != .file) continue;
         if (!std.mem.endsWith(u8, entry.basename, ".js")) continue;
         if (std.mem.endsWith(u8, entry.basename, "_FIXTURE.js")) continue;
+        if (shallow and std.mem.indexOfScalar(u8, entry.path, '/') != null) continue;
         const current_idx = idx;
         idx += 1;
         if (current_idx < start) continue; // already done by an earlier worker
@@ -1016,7 +1040,7 @@ fn runWorker(gpa: std.mem.Allocator, io: std.Io, root: []const u8, sub: []const 
             more = true;
             break;
         }
-        if (shouldSkipPath(sub, entry.path)) {
+        if (shouldSkipPath(scan_sub, entry.path)) {
             emit(out, io, &line_buf, current_idx, .skip);
             ran += 1;
             continue;
@@ -1088,9 +1112,10 @@ fn runParent(gpa: std.mem.Allocator, io: std.Io, root: []const u8) !void {
     var total: Stats = .{};
     var any_dir = false;
     for (subtrees) |sub| {
-        const path = std.fs.path.join(gpa, &.{ root, sub }) catch continue;
+        const scan_sub = subtreePath(sub);
+        const path = std.fs.path.join(gpa, &.{ root, scan_sub }) catch continue;
         defer gpa.free(path);
-        if (std.mem.endsWith(u8, sub, ".js")) {
+        if (std.mem.endsWith(u8, scan_sub, ".js")) {
             var probe = std.Io.Dir.cwd().openFile(io, path, .{}) catch {
                 std.debug.print("  (missing: {s})\n", .{sub});
                 continue;
@@ -1230,11 +1255,13 @@ fn workerLimitForSubtree(sub: []const u8) usize {
 }
 
 fn pathAtIndex(gpa: std.mem.Allocator, io: std.Io, root: []const u8, sub: []const u8, target: usize) ?[]const u8 {
-    const path = std.fs.path.join(gpa, &.{ root, sub }) catch return null;
+    const scan_sub = subtreePath(sub);
+    const shallow = subtreeShallow(sub);
+    const path = std.fs.path.join(gpa, &.{ root, scan_sub }) catch return null;
     defer gpa.free(path);
 
-    if (std.mem.endsWith(u8, sub, ".js")) {
-        if (target == 0) return gpa.dupe(u8, sub) catch null;
+    if (std.mem.endsWith(u8, scan_sub, ".js")) {
+        if (target == 0) return gpa.dupe(u8, scan_sub) catch null;
         return null;
     }
 
@@ -1249,6 +1276,7 @@ fn pathAtIndex(gpa: std.mem.Allocator, io: std.Io, root: []const u8, sub: []cons
         if (entry.kind != .file) continue;
         if (!std.mem.endsWith(u8, entry.basename, ".js")) continue;
         if (std.mem.endsWith(u8, entry.basename, "_FIXTURE.js")) continue;
+        if (shallow and std.mem.indexOfScalar(u8, entry.path, '/') != null) continue;
         if (idx == target) return gpa.dupe(u8, entry.path) catch null;
         idx += 1;
     }
