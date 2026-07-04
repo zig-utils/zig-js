@@ -37171,10 +37171,7 @@ fn installTemporal(env: *Environment, rs: *Shape, object_proto: *value.Object) E
         try setNative(a, rs, p, "equals", 1, temporalPlainDateTimeEqualsFn);
         try setNative(a, rs, p, "toPlainDate", 0, temporalDateTimeToPlainDateFn);
         try setNative(a, rs, p, "toPlainTime", 0, temporalDateTimeToPlainTimeFn);
-        try setNative(a, rs, p, "toPlainYearMonth", 0, temporalDateTimeToPlainYearMonthFn);
-        try setNative(a, rs, p, "toPlainMonthDay", 0, temporalDateTimeToPlainMonthDayFn);
         try setNative(a, rs, p, "withPlainTime", 0, temporalDateTimeWithPlainTimeFn);
-        try setNative(a, rs, p, "withPlainDate", 1, temporalDateTimeWithPlainDateFn);
         try setNative(a, rs, p, "withCalendar", 1, temporalDateTimeWithCalendarFn);
         try setNative(a, rs, p, "toZonedDateTime", 1, temporalDateTimeToZonedDateTimeFn);
         if (ns.getOwn("PlainDateTime")) |c| if (c.isObject()) {
@@ -37233,8 +37230,6 @@ fn installTemporal(env: *Environment, rs: *Shape, object_proto: *value.Object) E
         const p = try temporalType(a, rs, env, ns, object_proto, "Instant", "\x00T.Instant", 1, temporalInstantConstructorFn, tag);
         try setNativeGetter(a, rs, p, "epochMilliseconds", temporalInstantEpochGetter(true));
         try setNativeGetter(a, rs, p, "epochNanoseconds", temporalInstantEpochGetter(false));
-        try setNativeGetter(a, rs, p, "epochSeconds", temporalInstantExtraEpochGetter(1_000_000_000));
-        try setNativeGetter(a, rs, p, "epochMicroseconds", temporalInstantExtraEpochGetter(1_000));
         try setNative(a, rs, p, "toString", 0, temporalInstantToStringFn);
         try setNative(a, rs, p, "valueOf", 0, temporalValueOfFn);
         try setNative(a, rs, p, "toLocaleString", 0, temporalToLocaleStringFn);
@@ -37249,8 +37244,6 @@ fn installTemporal(env: *Environment, rs: *Shape, object_proto: *value.Object) E
         if (ns.getOwn("Instant")) |c| if (c.isObject()) {
             try setNative(a, rs, c.asObj(), "fromEpochMilliseconds", 1, temporalInstantFromEpochFn(1_000_000));
             try setNative(a, rs, c.asObj(), "fromEpochNanoseconds", 1, temporalInstantFromEpochFn(1));
-            try setNative(a, rs, c.asObj(), "fromEpochSeconds", 1, temporalInstantFromEpochFn(1_000_000_000));
-            try setNative(a, rs, c.asObj(), "fromEpochMicroseconds", 1, temporalInstantFromEpochFn(1_000));
             try setNative(a, rs, c.asObj(), "from", 1, temporalInstantFromFn);
             try setNative(a, rs, c.asObj(), "compare", 2, temporalInstantCompareFn);
         };
@@ -37295,8 +37288,6 @@ fn installTemporal(env: *Environment, rs: *Shape, object_proto: *value.Object) E
         try setNative(a, rs, p, "toPlainDateTime", 0, temporalZdtToPlainDateTimeFn);
         try setNative(a, rs, p, "toPlainDate", 0, temporalZdtToPlainDateFn);
         try setNative(a, rs, p, "toPlainTime", 0, temporalZdtToPlainTimeFn);
-        try setNative(a, rs, p, "toPlainYearMonth", 0, temporalZdtToYearMonthFn);
-        try setNative(a, rs, p, "toPlainMonthDay", 0, temporalZdtToMonthDayFn);
         try setNative(a, rs, p, "add", 1, temporalZdtAddFn(1));
         try setNative(a, rs, p, "subtract", 1, temporalZdtAddFn(-1));
         try setNative(a, rs, p, "until", 1, temporalZdtUntilFn(1));

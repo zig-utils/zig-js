@@ -10432,6 +10432,34 @@ test "enable_gc: typed-array and DataView metadata release when collected" {
     try std.testing.expectEqual(baseline, ctx.gc_object_backing_stores_live);
 }
 
+test "Temporal June 2024 removed API surface is absent" {
+    try std.testing.expect((try evalIn(
+        \\const removed = [
+        \\  [Temporal.Instant, "fromEpochMicroseconds"],
+        \\  [Temporal.Instant, "fromEpochSeconds"],
+        \\  [Temporal.Instant.prototype, "epochMicroseconds"],
+        \\  [Temporal.Instant.prototype, "epochSeconds"],
+        \\  [Temporal.PlainDateTime.prototype, "toPlainMonthDay"],
+        \\  [Temporal.PlainDateTime.prototype, "toPlainYearMonth"],
+        \\  [Temporal.PlainDateTime.prototype, "withPlainDate"],
+        \\  [Temporal.ZonedDateTime.prototype, "toPlainMonthDay"],
+        \\  [Temporal.ZonedDateTime.prototype, "toPlainYearMonth"],
+        \\];
+        \\const removedAbsent = removed.every(([obj, name]) => !(name in obj));
+        \\removedAbsent &&
+        \\("fromEpochMilliseconds" in Temporal.Instant) &&
+        \\("fromEpochNanoseconds" in Temporal.Instant) &&
+        \\("epochMilliseconds" in Temporal.Instant.prototype) &&
+        \\("epochNanoseconds" in Temporal.Instant.prototype) &&
+        \\("toZonedDateTimeISO" in Temporal.Instant.prototype) &&
+        \\("toPlainDate" in Temporal.PlainDateTime.prototype) &&
+        \\("toPlainTime" in Temporal.PlainDateTime.prototype) &&
+        \\("withPlainTime" in Temporal.PlainDateTime.prototype) &&
+        \\("toPlainDate" in Temporal.ZonedDateTime.prototype) &&
+        \\("toPlainTime" in Temporal.ZonedDateTime.prototype)
+    )).asBool());
+}
+
 test "enable_gc: Temporal metadata releases when collected" {
     const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
     defer ctx.destroy();
