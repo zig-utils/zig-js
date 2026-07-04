@@ -7020,6 +7020,23 @@ test "TypedArray constructor processes arguments before prototype allocation" {
     )).asBool());
 }
 
+test "TypedArray buffer constructor allocates before offset coercion" {
+    try std.testing.expect((try evalIn(
+        \\class ExpectedError extends Error {}
+        \\var buffer = new ArrayBuffer(8);
+        \\var newTarget = function() {}.bind(null);
+        \\Object.defineProperty(newTarget, "prototype", {
+        \\  get() { throw new ExpectedError(); }
+        \\});
+        \\try {
+        \\  Reflect.construct(Int32Array, [buffer, new Proxy({}, { get() { throw new Error("poison"); } }), 0], newTarget);
+        \\  false;
+        \\} catch (e) {
+        \\  e instanceof ExpectedError;
+        \\}
+    )).asBool());
+}
+
 test "TypedArray constructor copies live source typed array length" {
     try std.testing.expect((try evalIn(
         \\var rab = new ArrayBuffer(16, { maxByteLength: 32 });
@@ -7165,6 +7182,32 @@ test "TypedArray set skips writes after source getters shrink target" {
         \\});
         \\fixed.set(source);
         \\full.length === 3 && full[0] === 1 && full[1] === 2 && full[2] === 4;
+    )).asBool());
+}
+
+test "TypedArray set coerces offset before detached buffer checks" {
+    try std.testing.expect((try evalIn(
+        \\class ExpectedError extends Error {}
+        \\var target = new Int32Array(1);
+        \\$262.detachArrayBuffer(target.buffer);
+        \\try {
+        \\  target.set(null, { valueOf() { throw new ExpectedError(); } });
+        \\  false;
+        \\} catch (e) {
+        \\  e instanceof ExpectedError;
+        \\}
+    )).asBool());
+    try std.testing.expect((try evalIn(
+        \\class ExpectedError extends Error {}
+        \\var target = new Int32Array(1);
+        \\var source = new Int32Array(1);
+        \\$262.detachArrayBuffer(source.buffer);
+        \\try {
+        \\  target.set(source, { valueOf() { throw new ExpectedError(); } });
+        \\  false;
+        \\} catch (e) {
+        \\  e instanceof ExpectedError;
+        \\}
     )).asBool());
 }
 

@@ -10691,9 +10691,11 @@ pub const Interpreter = struct {
         const a0 = if (args.len > 0) args[0] else Value.undef();
         const o = (try self.newObject()).asObj();
         const ta = try o.typedArrayAllocator(self.arena).create(value.TypedArrayData);
-        o.typed_array = ta;
 
         if (a0.isObject() and a0.asObj().array_buffer != null) {
+            // AllocateTypedArray runs before byteOffset/length coercion, so a
+            // throwing newTarget.prototype getter wins over poisoned arguments.
+            try self.initTypedArrayProto(o, kind);
             // new TA(buffer, byteOffset?, length?). byteOffset/length are ToIndex
             // (a negative or non-integer-huge value is a RangeError), the offset
             // alignment is checked before the length coerces, and the buffer is
@@ -10728,8 +10730,8 @@ pub const Interpreter = struct {
                 length = (buflen - byte_offset) / size;
             }
             if (byte_offset + length * size > buflen) return self.throwError("RangeError", "invalid typed array length");
-            try self.initTypedArrayProto(o, kind);
             ta.* = .{ .buffer = buffer, .byte_offset = byte_offset, .length = length, .kind = kind, .track_length = track };
+            o.typed_array = ta;
             return Value.obj(o);
         }
         if (a0.isObject() and a0.asObj().typed_array != null) {
@@ -10740,6 +10742,7 @@ pub const Interpreter = struct {
             const length = src.currentLength() orelse return self.throwError("TypeError", "Cannot construct from an out-of-bounds TypedArray");
             try self.initTypedArrayProto(o, kind);
             ta.* = .{ .buffer = try self.makeArrayBuffer(length * size), .byte_offset = 0, .length = length, .kind = kind };
+            o.typed_array = ta;
             var i: usize = 0;
             while (i < length) : (i += 1) {
                 if (kind.isBigInt()) value.taWriteBig(ta, i, value.taReadBig(src, i)) else value.taWrite(ta, i, value.taRead(src, i).asNum());
@@ -10763,6 +10766,7 @@ pub const Interpreter = struct {
             if (list.len > typedArrayLengthLimit(size)) return self.throwError("RangeError", "invalid typed array length");
             try self.initTypedArrayProto(o, kind);
             ta.* = .{ .buffer = try self.makeArrayBuffer(list.len * size), .byte_offset = 0, .length = list.len, .kind = kind };
+            o.typed_array = ta;
             var i: usize = 0;
             while (i < list.len) : (i += 1) try self.taStore(ta, i, list[i]);
             return Value.obj(o);
@@ -10774,6 +10778,7 @@ pub const Interpreter = struct {
         const length: usize = @intCast(len_idx);
         try self.initTypedArrayProto(o, kind);
         ta.* = .{ .buffer = try self.makeArrayBuffer(length * size), .byte_offset = 0, .length = length, .kind = kind };
+        o.typed_array = ta;
         return Value.obj(o);
     }
 
@@ -18794,10 +18799,11 @@ fn typedArrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args
         return self.throwError("TypeError", "Cannot modify a TypedArray backed by an immutable ArrayBuffer");
     // ValidateTypedArray throws when the buffer is detached or the view is out
     // of bounds (a resizable buffer shrank below it), before any argument is
-    // coerced. `subarray` is the lone method that tolerates this (it just builds
-    // a zero-length view).
+    // coerced. `subarray` is allowed to tolerate this (it just builds a
+    // zero-length view). `set` has its own ordering: it coerces the offset before
+    // checking detached target/source buffers.
     const cur_len = ta.currentLength();
-    if (cur_len == null and !eq(name, "subarray"))
+    if (cur_len == null and !eq(name, "subarray") and !eq(name, "set"))
         return self.throwError("TypeError", "Cannot operate on a TypedArray whose buffer is detached or out of bounds");
     const len = cur_len orelse 0;
     const recv = Value.obj(o);

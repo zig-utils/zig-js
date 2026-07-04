@@ -54,8 +54,6 @@ const verbose_failures = false;
 // capability gap.
 const unsupported_staging_prefixes = [_][]const u8{
     "sm/Date/", // Zig-level infinite loop in Date handling (worker hangs ~#21)
-    "sm/TypedArray/set-detached.js", // runtime failure in detached set semantics
-    "sm/TypedArray/constructor-buffer-sequence.js", // runtime failure in buffer sequence construction
     "sm/TypedArray/sort_large_countingsort.js", // Zig-level infinite loop in large TypedArray sort
     "sm/TypedArray/sort_modifications.js", // Zig-level infinite loop while sort mutates backing state
     "sm/TypedArray/slice-bitwise-same.js", // runtime failure in slice bitwise comparison semantics
