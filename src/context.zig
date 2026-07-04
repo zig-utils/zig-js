@@ -2952,6 +2952,29 @@ test "Date basics" {
     try std.testing.expect((try evalIn("typeof new Date() === 'object'")).asBool());
 }
 
+test "Date parses W3C NOTE space-separated date-times" {
+    try std.testing.expect((try evalIn(
+        \\new Date("1997-03-08 1:1:1.01").getTime() === new Date("1997-03-08T01:01:01.01").getTime()
+    )).asBool());
+    try std.testing.expect((try evalIn(
+        \\new Date("+001997-3-8 11:19:20").getTime() === new Date("1997-03-08T11:19:20").getTime()
+    )).asBool());
+    try std.testing.expect((try evalIn(
+        \\new Date("1997-03-08 11:19:10-07").getTime() === new Date("1997-03-08 11:19:10-0700").getTime()
+    )).asBool());
+}
+
+test "Date keeps non-NOTE ISO date-times strict" {
+    try std.testing.expect((try evalIn(
+        \\var t = new Date("1997-3-8T11:19:20").getTime();
+        \\t !== t;
+    )).asBool());
+    try std.testing.expect((try evalIn(
+        \\var t = new Date("1997-03-08T1:1:1").getTime();
+        \\t !== t;
+    )).asBool());
+}
+
 test "Date.now progresses for host timers" {
     const ctx = try Context.create(std.testing.allocator);
     defer ctx.destroy();

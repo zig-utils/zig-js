@@ -53,7 +53,14 @@ const verbose_failures = false;
 // now scored; it had been bulk-skipped as a stale time decision, not a real
 // capability gap.
 const unsupported_staging_prefixes = [_][]const u8{
-    "sm/Date/", // Zig-level infinite loop in Date handling (worker hangs ~#21)
+    "sm/Date/dst-offset-caching-1-of-8.js", // Zig-level timeout in Date DST offset cache stress
+    "sm/Date/dst-offset-caching-2-of-8.js", // Zig-level timeout in Date DST offset cache stress
+    "sm/Date/dst-offset-caching-3-of-8.js", // Zig-level timeout in Date DST offset cache stress
+    "sm/Date/dst-offset-caching-4-of-8.js", // Zig-level timeout in Date DST offset cache stress
+    "sm/Date/dst-offset-caching-5-of-8.js", // Zig-level timeout in Date DST offset cache stress
+    "sm/Date/dst-offset-caching-6-of-8.js", // Zig-level timeout in Date DST offset cache stress
+    "sm/Date/dst-offset-caching-7-of-8.js", // Zig-level timeout in Date DST offset cache stress
+    "sm/Date/dst-offset-caching-8-of-8.js", // Zig-level timeout in Date DST offset cache stress
     // These pending SpiderMonkey staging tests predate/contradict the current
     // Annex B.3.3 `arguments` skip rule covered by official test262
     // annexB/language/function-code/block-decl-func-skip-arguments.js.

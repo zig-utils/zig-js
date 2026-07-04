@@ -37624,6 +37624,7 @@ fn dateParseISO(s_in: []const u8) f64 {
     if (s[0] < '0' or s[0] > '9') {
         if (s[0] != '+' and s[0] != '-') return dateParseLegacyUTC(s);
     }
+    if (dateParseW3CNoteUTC(s)) |v| return v;
     var i: usize = 0;
     const readN = struct {
         fn f(str: []const u8, idx: *usize, count: usize) ?i64 {
@@ -37701,6 +37702,113 @@ fn dateParseISO(s_in: []const u8) f64 {
     if (i != s.len) return nan;
     if (month < 1 or month > 12 or day < 1 or day > 31) return nan;
     if (hour > 24 or sec > 59) return nan;
+    if (hour == 24 and (minute != 0 or sec != 0 or ms != 0)) return nan;
+    const days = Interpreter.daysFromCivil(year, month, day);
+    const total = days * 86_400_000 + hour * 3_600_000 + minute * 60_000 + sec * 1000 + ms;
+    const f: f64 = @floatFromInt(total);
+    if (std.math.isNan(f) or @abs(f) > 8.64e15) return nan;
+    return f;
+}
+
+/// Browser-compatible W3C NOTE-datetime extension used by SpiderMonkey staging:
+/// `YYYY-M-D HH:mm[:ss[.sss]][Z|±HH[:mm]|±HHmm]`. The relaxed one/two-digit
+/// fields apply only to the space separator form; the ISO `T` form remains strict.
+fn dateParseW3CNoteUTC(s: []const u8) ?f64 {
+    if (std.mem.indexOfScalar(u8, s, ' ') == null) return null;
+    const nan = std.math.nan(f64);
+    var i: usize = 0;
+    const readFixed = struct {
+        fn f(str: []const u8, idx: *usize, count: usize) ?i64 {
+            if (idx.* + count > str.len) return null;
+            var v: i64 = 0;
+            for (str[idx.* .. idx.* + count]) |c| {
+                if (c < '0' or c > '9') return null;
+                v = v * 10 + (c - '0');
+            }
+            idx.* += count;
+            return v;
+        }
+    }.f;
+    const readOneOrTwo = struct {
+        fn f(str: []const u8, idx: *usize) ?i64 {
+            if (idx.* >= str.len or str[idx.*] < '0' or str[idx.*] > '9') return null;
+            var v: i64 = str[idx.*] - '0';
+            idx.* += 1;
+            if (idx.* < str.len and str[idx.*] >= '0' and str[idx.*] <= '9') {
+                v = v * 10 + (str[idx.*] - '0');
+                idx.* += 1;
+            }
+            return v;
+        }
+    }.f;
+
+    var ysign: i64 = 1;
+    var ylen: usize = 4;
+    if (s[0] == '+') {
+        i += 1;
+        ylen = 6;
+    } else if (s[0] == '-') {
+        ysign = -1;
+        i += 1;
+        ylen = 6;
+    }
+    const yv = readFixed(s, &i, ylen) orelse return null;
+    if (ysign < 0 and yv == 0) return nan;
+    const year = ysign * yv;
+    if (i >= s.len or s[i] != '-') return null;
+    i += 1;
+    const month = readOneOrTwo(s, &i) orelse return null;
+    if (i >= s.len or s[i] != '-') return null;
+    i += 1;
+    const day = readOneOrTwo(s, &i) orelse return null;
+    if (i >= s.len or s[i] != ' ') return null;
+    i += 1;
+
+    const hour = readOneOrTwo(s, &i) orelse return null;
+    if (i >= s.len or s[i] != ':') return null;
+    i += 1;
+    var minute = readOneOrTwo(s, &i) orelse return null;
+    if (minute > 59) return nan;
+    var sec: i64 = 0;
+    var ms: i64 = 0;
+    if (i < s.len and s[i] == ':') {
+        i += 1;
+        sec = readOneOrTwo(s, &i) orelse return null;
+        if (sec > 59) return nan;
+        if (i < s.len and s[i] == '.') {
+            i += 1;
+            var fcount: usize = 0;
+            while (i < s.len and s[i] >= '0' and s[i] <= '9') : (i += 1) {
+                if (fcount < 3) {
+                    ms = ms * 10 + (s[i] - '0');
+                    fcount += 1;
+                }
+            }
+            if (fcount == 0) return nan;
+            while (fcount < 3) : (fcount += 1) ms *= 10;
+        }
+    }
+
+    if (i < s.len and (s[i] == 'Z' or s[i] == 'z')) {
+        i += 1;
+    } else if (i < s.len and (s[i] == '+' or s[i] == '-')) {
+        const osign: i64 = if (s[i] == '-') -1 else 1;
+        i += 1;
+        const oh = readFixed(s, &i, 2) orelse return nan;
+        var om: i64 = 0;
+        if (i < s.len and s[i] == ':') {
+            i += 1;
+            om = readFixed(s, &i, 2) orelse return nan;
+        } else if (i < s.len and s[i] >= '0' and s[i] <= '9') {
+            om = readFixed(s, &i, 2) orelse return nan;
+        }
+        if (oh > 23 or om > 59) return nan;
+        minute -= osign * (oh * 60 + om);
+    }
+
+    if (i != s.len) return null;
+    if (month < 1 or month > 12 or day < 1 or day > 31) return nan;
+    if (hour > 24) return nan;
     if (hour == 24 and (minute != 0 or sec != 0 or ms != 0)) return nan;
     const days = Interpreter.daysFromCivil(year, month, day);
     const total = days * 86_400_000 + hour * 3_600_000 + minute * 60_000 + sec * 1000 + ms;
