@@ -10818,6 +10818,47 @@ pub const Interpreter = struct {
         return self.taLoad(ta, i);
     }
 
+    /// Copy same-kind TypedArray slice bytes directly. This preserves floating
+    /// NaN payload bits, unlike the numeric read/write path used for conversions.
+    fn taSliceRawCopy(self: *Interpreter, src: *const value.TypedArrayData, dst: *value.TypedArrayData, start: usize, count: usize) EvalError!void {
+        _ = self;
+        if (count == 0) return;
+        const esz = src.kind.byteSize();
+        const src_ab = src.buffer.array_buffer.?;
+        const dst_ab = dst.buffer.array_buffer.?;
+        const lock_src = src_ab.needsElementLock();
+        const lock_dst = dst_ab.needsElementLock() and dst_ab != src_ab;
+        if (lock_src and lock_dst) {
+            if (@intFromPtr(src_ab) < @intFromPtr(dst_ab)) {
+                src_ab.lockBuffer();
+                dst_ab.lockBuffer();
+            } else {
+                dst_ab.lockBuffer();
+                src_ab.lockBuffer();
+            }
+        } else {
+            if (lock_src) src_ab.lockBuffer();
+            if (lock_dst) dst_ab.lockBuffer();
+        }
+        defer {
+            if (lock_dst) dst_ab.unlockBuffer();
+            if (lock_src) src_ab.unlockBuffer();
+        }
+
+        const src_bytes = src_ab.bytes();
+        const dst_bytes = dst_ab.bytes();
+        const n = count * esz;
+        const src_off = src.byte_offset + start * esz;
+        const dst_off = dst.byte_offset;
+        if (src_off + n > src_bytes.len or dst_off + n > dst_bytes.len) return;
+        const from = src_bytes[src_off..][0..n];
+        const to = dst_bytes[dst_off..][0..n];
+        if (src_ab == dst_ab and dst_off > src_off)
+            std.mem.copyBackwards(u8, to, from)
+        else
+            std.mem.copyForwards(u8, to, from);
+    }
+
     /// Collect an iterable's values (via `Symbol.iterator`) or an array-like's
     /// `0..length` elements into a freshly-allocated slice.
     fn iterableOrArrayLikeToList(self: *Interpreter, v: Value) EvalError![]Value {
@@ -19064,6 +19105,10 @@ fn typedArrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args
         if (count > 0 and ta.currentLength() == null)
             return self.throwError("TypeError", "Cannot slice a TypedArray whose buffer is detached or out of bounds");
         const aliases_immutable = result.typed_array.?.buffer == ta.buffer and ta.buffer.array_buffer.?.immutable;
+        if (result.typed_array.?.kind == ta.kind and result.typed_array.?.buffer != ta.buffer) {
+            try self.taSliceRawCopy(ta, result.typed_array.?, start, count);
+            return Value.obj(result);
+        }
         var i: usize = 0;
         while (i < count) : (i += 1) try self.taStoreInternal(result.typed_array.?, i, try self.taLoad(ta, start + i), aliases_immutable);
         return Value.obj(result);

@@ -56,7 +56,6 @@ const unsupported_staging_prefixes = [_][]const u8{
     "sm/Date/", // Zig-level infinite loop in Date handling (worker hangs ~#21)
     "sm/TypedArray/sort_large_countingsort.js", // Zig-level infinite loop in large TypedArray sort
     "sm/TypedArray/sort_modifications.js", // Zig-level infinite loop while sort mutates backing state
-    "sm/TypedArray/slice-bitwise-same.js", // runtime failure in slice bitwise comparison semantics
     // These pending SpiderMonkey staging tests predate/contradict the current
     // Annex B.3.3 `arguments` skip rule covered by official test262
     // annexB/language/function-code/block-decl-func-skip-arguments.js.

@@ -7087,6 +7087,25 @@ test "TypedArray slice rechecks detached source after user code" {
     )).asBool());
 }
 
+test "TypedArray slice preserves same-kind floating NaN bits" {
+    try std.testing.expect((try evalIn(
+        \\var f32 = new Float32Array(1);
+        \\var i32 = new Int32Array(f32.buffer);
+        \\i32[0] = 0x7F800001;
+        \\var out = f32.slice(0);
+        \\new Int32Array(out.buffer)[0] === 0x7F800001;
+    )).asBool());
+    try std.testing.expect((try evalIn(
+        \\var f64 = new Float64Array(1);
+        \\var i32 = new Int32Array(f64.buffer);
+        \\i32[0] = 0x00000001;
+        \\i32[1] = 0x7FF00000;
+        \\var out = f64.slice(0);
+        \\var raw = new Int32Array(out.buffer);
+        \\raw[0] === 0x00000001 && raw[1] === 0x7FF00000;
+    )).asBool());
+}
+
 test "TypedArray subarray omits species length for length-tracking views" {
     try std.testing.expect((try evalIn(
         \\var rab = new ArrayBuffer(16, { maxByteLength: 32 });
