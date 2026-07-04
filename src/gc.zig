@@ -287,11 +287,11 @@ fn finalizeObjectBacking(o: *Object, a: std.mem.Allocator) usize {
         released += 1;
     }
     if (flags.key_order) {
-        if (o.key_order) |ord| {
+        if (o.key_order.load(.monotonic)) |ord| {
             for (ord.items) |key| a.free(key);
             ord.deinit(a);
             a.destroy(ord);
-            o.key_order = null;
+            o.key_order.store(null, .monotonic);
         }
         released += 1;
     }

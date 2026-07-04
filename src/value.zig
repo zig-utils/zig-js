@@ -681,7 +681,13 @@ pub const Object = struct {
     /// data and accessor keys by creation order (the shape can't, as accessors
     /// live in a side map). May hold stale/duplicate entries (deleted or re-added
     /// keys) — readers re-check membership and keep each key's LAST occurrence.
-    key_order: ?*std.ArrayListUnmanaged([]const u8) = null,
+    /// The POINTER is accessed atomically (`.load`/`.store(.monotonic)`, a plain
+    /// mov): under `parallel_js` a peer publishes it null->non-null under
+    /// `lockProperties` (`ensureKeyOrderUnlocked`, first accessor) while other
+    /// threads read the unlocked `key_order == null` fast-path guards — a data race
+    /// on a plain field. The list CONTENTS are only mutated under `lockProperties`,
+    /// so the pointer is the only unsynchronized access (mirrors `accessors`).
+    key_order: std.atomic.Value(?*std.ArrayListUnmanaged([]const u8)) = .init(null),
     elements: std.ArrayListUnmanaged(Value) = .empty,
     /// Per-property attribute overrides, lazily allocated. Absent name = the
     /// all-true default (a plain-assignment property). See `PropAttr`.
@@ -1479,7 +1485,7 @@ pub const Object = struct {
     }
 
     fn deinitKeyOrderUnlocked(self: *Object) void {
-        if (self.key_order) |ord| {
+        if (self.key_order.load(.monotonic)) |ord| {
             if (self.backing_flags.key_order) {
                 const a = self.backing_allocator.?;
                 for (ord.items) |key| a.free(key);
@@ -1488,7 +1494,7 @@ pub const Object = struct {
                 self.deactivateBacking("key_order");
             }
         }
-        self.key_order = null;
+        self.key_order.store(null, .monotonic);
     }
 
     pub fn replaceKeyOrder(self: *Object, arena: std.mem.Allocator, names: []const []const u8) std.mem.Allocator.Error!void {
@@ -1506,7 +1512,7 @@ pub const Object = struct {
         // call `deinitKeyOrderUnlocked` for the swap: it deactivates the backing
         // flag, but the replacement list uses that same backing store and still
         // needs to be visible to the GC finalizer.
-        const old_key_order = self.key_order;
+        const old_key_order = self.key_order.load(.monotonic);
         const old_uses_backing = self.backing_flags.key_order;
         const old_backing_allocator = self.backing_allocator;
         const alloc = self.keyOrderAllocator(arena);
@@ -1527,7 +1533,7 @@ pub const Object = struct {
                 a.destroy(ord);
             }
         }
-        self.key_order = ko;
+        self.key_order.store(ko, .monotonic);
     }
 
     /// Whether dense array index `i` is a hole (absent).
@@ -1586,7 +1592,7 @@ pub const Object = struct {
                 return false;
             }
         }.f;
-        if (self.key_order) |ord| {
+        if (self.key_order.load(.monotonic)) |ord| {
             // Creation order across data + accessor keys. Keep each present key's
             // LAST occurrence (a deleted-then-re-added key sorts to its new spot).
             for (ord.items, 0..) |k, i| {
@@ -1821,7 +1827,7 @@ pub const Object = struct {
     }
 
     fn recordKeyOrderUnlocked(self: *Object, arena: std.mem.Allocator, name: []const u8) std.mem.Allocator.Error!void {
-        const ko = self.key_order orelse return;
+        const ko = self.key_order.load(.monotonic) orelse return;
         for (ko.items) |e| if (std.mem.eql(u8, e, name)) return;
         const alloc = self.keyOrderAllocator(arena);
         try ko.append(alloc, try alloc.dupe(u8, name));
@@ -1836,7 +1842,7 @@ pub const Object = struct {
     }
 
     fn ensureKeyOrderUnlocked(self: *Object, arena: std.mem.Allocator) std.mem.Allocator.Error!void {
-        if (self.key_order != null) return;
+        if (self.key_order.load(.monotonic) != null) return;
         const alloc = self.keyOrderAllocator(arena);
         const ko = try alloc.create(std.ArrayListUnmanaged([]const u8));
         ko.* = .empty;
@@ -1849,7 +1855,7 @@ pub const Object = struct {
         }
         std.mem.reverse([]const u8, seed.items); // newest-first → insertion order
         for (seed.items) |n| try ko.append(alloc, try alloc.dupe(u8, n));
-        self.key_order = ko;
+        self.key_order.store(ko, .monotonic);
     }
 
     /// Read an own named property, or null if absent. No allocation.
@@ -1894,7 +1900,7 @@ pub const Object = struct {
         // A new data key on an accessor-bearing object records its creation order
         // (a data↔accessor conversion keeps its position; deleteOwn drops stale
         // entries so a genuinely re-added key lands at the end).
-        if (self.key_order != null) try self.recordKeyOrderUnlocked(arena, name);
+        if (self.key_order.load(.monotonic) != null) try self.recordKeyOrderUnlocked(arena, name);
     }
 
     pub const AccessorDeleteResult = enum {
@@ -1949,16 +1955,16 @@ pub const Object = struct {
             try saved.append(arena, .{ .k = k, .v = v, .a = self.getAttrUnlocked(k) });
         }
 
-        const old_key_order = self.key_order;
+        const old_key_order = self.key_order.load(.monotonic);
         self.shape = root;
         self.resetSlotsForRebuildUnlocked();
         self.deleteAttrUnlocked(key);
-        self.key_order = null;
+        self.key_order.store(null, .monotonic);
         for (saved.items) |entry| {
             try self.setOwnUnlocked(arena, root, entry.k, entry.v);
             try self.setAttrUnlocked(arena, entry.k, entry.a);
         }
-        self.key_order = old_key_order;
+        self.key_order.store(old_key_order, .monotonic);
         if (preserve_order) {
             // Data->accessor conversion keeps the property's original creation
             // position; `setAccessor` will reuse this existing key-order entry.
