@@ -864,10 +864,21 @@ fn shouldSkipPath(sub: []const u8, rel_path: []const u8) bool {
     for (unsupported_path_prefixes) |unsupported| {
         if (std.mem.eql(u8, sub, unsupported.sub) and std.mem.startsWith(u8, path, unsupported.prefix)) return true;
     }
-    if (!std.mem.eql(u8, sub, "test/staging")) return false;
     for (unsupported_staging_prefixes) |prefix| {
-        if (std.mem.startsWith(u8, path, prefix)) return true;
+        if (stagingPathMatches(sub, path, prefix)) return true;
     }
+    return false;
+}
+
+fn stagingPathMatches(sub: []const u8, path: []const u8, prefix: []const u8) bool {
+    const staging = "test/staging";
+    if (std.mem.eql(u8, sub, staging)) return std.mem.startsWith(u8, path, prefix);
+    if (!std.mem.startsWith(u8, sub, staging ++ "/")) return false;
+
+    const tail = sub[(staging ++ "/").len..];
+    if (std.mem.startsWith(u8, tail, prefix)) return true;
+    if (std.mem.startsWith(u8, prefix, tail) and prefix.len > tail.len and prefix[tail.len] == '/')
+        return std.mem.startsWith(u8, path, prefix[tail.len + 1 ..]);
     return false;
 }
 
