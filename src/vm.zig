@@ -2463,6 +2463,28 @@ test "vm: generator destructuring declaration defaults" {
     )).asStr());
 }
 
+test "vm: generator return closes suspended for-of iterator" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expect((try vmRun(a,
+        \\var returnCalled = 0;
+        \\var iter = {};
+        \\iter[Symbol.iterator] = function () { return this; };
+        \\iter.next = function () { return { value: 10, done: false }; };
+        \\iter.return = function () { returnCalled++; return {}; };
+        \\function *g() {
+        \\  for (const x of iter) {
+        \\    yield x;
+        \\  }
+        \\}
+        \\var it = g();
+        \\var first = it.next();
+        \\var finished = it.return("stop");
+        \\first.value === 10 && finished.value === "stop" && finished.done === true && returnCalled === 1
+    )).asBool());
+}
+
 test "vm: if/else and short-circuit value" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

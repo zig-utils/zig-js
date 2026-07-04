@@ -1031,6 +1031,12 @@ pub const Compiler = struct {
         _ = try self.chunk.emit(.get_prop, try self.chunk.addName("next"));
         try self.emitDefine(next_name);
 
+        const done_name = try self.freshTemp();
+        _ = try self.chunk.emit(.load_false, 0);
+        try self.emitDefine(done_name);
+
+        const none = std.math.maxInt(u32);
+        const ph = try self.chunk.emitAB(.push_handler, none, none);
         const loop = try self.pushLoop();
         const top = self.chunk.here();
         // r = it.next()  (for-await: r = await it.next()) — the cached `next`,
@@ -1057,6 +1063,9 @@ pub const Compiler = struct {
         // Normal completion (the iterator reported `done`): it is already
         // exhausted, so it is NOT closed — control just exits the loop.
         self.chunk.patchToHere(to_end);
+        _ = try self.chunk.emit(.load_true, 0);
+        try self.emitStore(done_name);
+        _ = try self.chunk.emit(.pop, 0);
         // `break` is an abrupt completion, so it must run IteratorClose (which
         // throws if `return` is present-but-non-callable or returns a non-object).
         // The normal-done path above jumps over this close block.
@@ -1068,6 +1077,18 @@ pub const Compiler = struct {
             self.chunk.patchToHere(skip_close);
         }
         self.popLoop();
+        _ = try self.chunk.emit(.pop_handler, 0);
+
+        const after_finally = try self.chunk.emit(.jump, 0);
+        self.chunk.code.items[ph].b = @intCast(self.chunk.here());
+        try self.emitLoad(done_name);
+        _ = try self.chunk.emit(.not, 0);
+        const skip_close = try self.chunk.emit(.jump_if_false, 0);
+        try self.emitLoad(it_name);
+        _ = try self.chunk.emit(.iter_close, 0);
+        self.chunk.patchToHere(skip_close);
+        _ = try self.chunk.emit(.end_finally, 0);
+        self.chunk.patchToHere(after_finally);
     }
 
     // ---- destructuring assignment (generator, yield-aware) ----------------
