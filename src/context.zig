@@ -3499,6 +3499,25 @@ test "delete distinguishes var bindings from sloppy global properties" {
         \\delete undeclared === true &&
         \\typeof undeclared === "undefined"
     )).asBool());
+    try std.testing.expect((try evalIn(
+        \\var ev = eval;
+        \\ev("var evalGlobalDelete = 2;");
+        \\var before = evalGlobalDelete;
+        \\var deleted = delete evalGlobalDelete;
+        \\var after;
+        \\try { evalGlobalDelete; after = "present"; } catch (e) { after = e.name; }
+        \\before === 2 && deleted === true && after === "ReferenceError"
+    )).asBool());
+    try std.testing.expect((try evalIn(
+        \\var shadowed = 42;
+        \\function f() {
+        \\  eval("var shadowed = 2;");
+        \\  var before = shadowed;
+        \\  var deleted = delete shadowed;
+        \\  return before === 2 && deleted === true && shadowed === 42;
+        \\}
+        \\f() && shadowed === 42
+    )).asBool());
 }
 
 test "RegExp.escape escapes pattern text" {

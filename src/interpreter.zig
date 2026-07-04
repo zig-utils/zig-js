@@ -2163,24 +2163,35 @@ pub const Interpreter = struct {
                         if (!ok and self.strict) return self.throwError("TypeError", "Cannot delete property");
                         break :blk Value.boolVal(ok);
                     }
+                    if (bindingEnvOf(self.env, target.identifier)) |e| {
+                        // A deletable binding (a sloppy eval-created var/function) is
+                        // removed and `delete` is true; a later reference is then
+                        // unresolvable. At the global variable environment, the
+                        // binding is mirrored by a global-object property, whose
+                        // [[Configurable]] decides deletability.
+                        if (e.deletable.contains(target.identifier)) {
+                            _ = e.removeVar(target.identifier);
+                            break :blk Value.boolVal(true);
+                        }
+                        if (e.parent == null) {
+                            if (self.global_object) |g| {
+                                if (objectHasOwn(g, target.identifier)) {
+                                    const ok = try self.deleteOwn(g, target.identifier);
+                                    if (ok) _ = e.removeVar(target.identifier);
+                                    if (!ok and self.strict) return self.throwError("TypeError", "Cannot delete property");
+                                    break :blk Value.boolVal(ok);
+                                }
+                            }
+                        }
+                        if (self.strict) return self.throwError("TypeError", "Cannot delete binding");
+                        break :blk Value.boolVal(false);
+                    }
                     if (self.global_object) |g| {
                         if (objectHasOwn(g, target.identifier)) {
                             const ok = try self.deleteOwn(g, target.identifier);
                             if (!ok and self.strict) return self.throwError("TypeError", "Cannot delete property");
                             break :blk Value.boolVal(ok);
                         }
-                    }
-                    if (bindingEnvOf(self.env, target.identifier)) |e| {
-                        // A deletable binding (a sloppy eval-created var/function in a
-                        // function variable env) is removed and `delete` is true; a
-                        // later reference is then unresolvable. Any other declarative
-                        // binding (`let`/`const`/param/ordinary var) is non-deletable.
-                        if (e.deletable.contains(target.identifier)) {
-                            _ = e.removeVar(target.identifier);
-                            break :blk Value.boolVal(true);
-                        }
-                        if (self.strict) return self.throwError("TypeError", "Cannot delete binding");
-                        break :blk Value.boolVal(false);
                     }
                     break :blk Value.boolVal(true);
                 }
