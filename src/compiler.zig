@@ -1040,7 +1040,10 @@ pub const Compiler = struct {
         try self.emitDefine(next_name);
 
         const done_name = try self.freshTemp();
-        _ = try self.chunk.emit(.load_false, 0);
+        // This flag tracks whether an abrupt completion must close the iterator.
+        // It becomes false only after a successful `{ done:false }` result; a
+        // throw from `next()`/`await next()` itself does not perform IteratorClose.
+        _ = try self.chunk.emit(.load_true, 0);
         try self.emitDefine(done_name);
 
         const none = std.math.maxInt(u32);
@@ -1060,14 +1063,22 @@ pub const Compiler = struct {
         _ = try self.chunk.emit(.get_prop, try self.chunk.addName("done"));
         _ = try self.chunk.emit(.not, 0);
         const to_end = try self.chunk.emit(.jump_if_false, 0);
+        _ = try self.chunk.emit(.load_false, 0);
+        try self.emitStore(done_name);
+        _ = try self.chunk.emit(.pop, 0);
         // bind r.value to the loop target (identifier or destructuring pattern)
         try self.emitLoad(r_name);
         _ = try self.chunk.emit(.get_prop, try self.chunk.addName("value"));
         try self.compileLoopBind(decl_kind, target);
         try self.compileStmt(body);
+        const continue_target = self.chunk.here();
+        _ = try self.chunk.emit(.load_true, 0);
+        try self.emitStore(done_name);
+        _ = try self.chunk.emit(.pop, 0);
         _ = try self.chunk.emit(.jump, @intCast(top));
-        // `continue` re-enters the loop at the top (next .next()).
-        for (loop.continues.items) |j| self.chunk.patchTo(j, top);
+        // `continue` re-enters the loop at the top (next .next()) without
+        // closing; clear the active-close flag first.
+        for (loop.continues.items) |j| self.chunk.patchTo(j, continue_target);
         // Normal completion (the iterator reported `done`): it is already
         // exhausted, so it is NOT closed — control just exits the loop.
         self.chunk.patchToHere(to_end);

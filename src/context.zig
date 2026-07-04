@@ -6062,6 +6062,34 @@ test "for-await: throw completion suppresses async iterator return lookup errors
     );
 }
 
+test "for-await: next rejection does not close iterator" {
+    const ctx = try Context.create(std.testing.allocator);
+    defer ctx.destroy();
+    _ = try ctx.evaluate(
+        \\var actual = [];
+        \\async function f() {
+        \\  var p = Promise.resolve(0);
+        \\  Object.defineProperty(p, "constructor", {
+        \\    get() {
+        \\      throw new Error("constructor");
+        \\    }
+        \\  });
+        \\  actual.push("start");
+        \\  for await (var x of [p]);
+        \\  actual.push("never reached");
+        \\}
+        \\Promise.resolve(0)
+        \\  .then(function() { actual.push("tick 1"); })
+        \\  .then(function() { actual.push("tick 2"); })
+        \\  .then(function() { actual.push("assert"); });
+        \\f().catch(function() { actual.push("catch"); });
+    );
+    try std.testing.expectEqualStrings(
+        "start|tick 1|tick 2|catch|assert",
+        (try ctx.evaluate("actual.join('|')")).asStr(),
+    );
+}
+
 test "generators: BigInt literal yields feed BigInt typed arrays" {
     try std.testing.expect((try evalIn(
         \\function* g() { yield 7n; yield 42n; }
