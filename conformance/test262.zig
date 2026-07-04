@@ -55,8 +55,6 @@ const verbose_failures = false;
 const unsupported_staging_prefixes = [_][]const u8{
     "sm/Date/", // Zig-level infinite loop in Date handling (worker hangs ~#21)
     "sm/TypedArray/", // Zig-level infinite loop (worker hangs ~#15)
-    "sm/BigInt/", // worker crash / host-fail
-    "sm/regress/regress-1507322-deep-weakmap.js", // quarantined deep-WeakMap test
     "sm/String/replace-math.js", // quarantined
     // These pending SpiderMonkey staging tests predate/contradict the current
     // Annex B.3.3 `arguments` skip rule covered by official test262
