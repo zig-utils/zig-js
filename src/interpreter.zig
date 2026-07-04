@@ -655,9 +655,11 @@ pub const Environment = struct {
             // nested (the alias recursion runs after unlock), so no deadlock; and
             // `get` is never called while a `binding_lock` is held.
             e.lockBindings();
-            if (e.aliases.get(name)) |a| {
-                e.unlockBindings();
-                return a.env.get(a.name);
+            if (e.aliases.count() != 0) {
+                if (e.aliases.get(name)) |a| {
+                    e.unlockBindings();
+                    return a.env.get(a.name);
+                }
             }
             if (e.vars.get(name)) |v| {
                 e.unlockBindings();
@@ -829,6 +831,13 @@ const LegacyCallFrame = struct {
     func_obj: *value.Object,
     arguments: ?Value = null,
     caller: ?*LegacyCallFrame = null,
+    // For a non-strict function that does NOT reference `arguments`, the exotic
+    // object is built lazily — only if the legacy `fn.arguments` property is ever
+    // read (rare). These hold what `createArgumentsObject` needs; valid for the
+    // call's duration (the frame is popped when the call returns).
+    lazy_func: ?*Function = null,
+    lazy_args: []const Value = &.{},
+    lazy_env: ?*Environment = null,
 };
 
 /// Non-local control flow the tree-walker propagates up the statement list:
@@ -1708,7 +1717,11 @@ pub const Interpreter = struct {
         var env: ?*Environment = self.env;
         while (env) |e| {
             e.lockBindings();
-            const alias = e.aliases.get(name);
+            // Skip the `aliases` hash (which would still hash `name`) when the map
+            // is empty — the common case for ordinary scopes (aliases exist only for
+            // `arguments`/`with`/eval-mapped bindings). Halves the per-identifier
+            // hashing on the hot resolution path.
+            const alias = if (e.aliases.count() != 0) e.aliases.get(name) else null;
             const found_var: ?Value = if (alias == null) e.vars.get(name) else null;
             // `consts` membership must be read under the SAME `binding_lock` as
             // `vars`/`aliases`: a peer thread's `putConst` writes `consts` while
@@ -5518,12 +5531,26 @@ pub const Interpreter = struct {
         // (and its element copy + parameter map) entirely. The later
         // `body_env.vars.contains("arguments")` copy degrades gracefully when the
         // binding is absent.
-        if (!func.is_arrow and (func.uses_arguments or legacyCallerArgumentsAllowed(func))) {
+        if (!func.is_arrow and func.uses_arguments) {
+            // The body references `arguments`: build eagerly and bind it.
             const args_obj = try self.createArgumentsObject(func, args, call_env);
             if (self.active_call_frame) |fr| {
                 if (func.obj != null and fr.func_obj == func.obj.?) fr.arguments = args_obj;
             }
-            if (func.uses_arguments) try call_env.put("arguments", args_obj);
+            try call_env.put("arguments", args_obj);
+        } else if (!func.is_arrow and legacyCallerArgumentsAllowed(func)) {
+            // Non-strict function that does NOT name `arguments`: the exotic object
+            // is observable ONLY through the legacy `fn.arguments` property, which
+            // is rarely read. Defer the alloc + element copy + parameter map to
+            // that read (see `.arguments` getter) so the common non-strict call —
+            // e.g. a hot sort comparator — pays nothing per call.
+            if (self.active_call_frame) |fr| {
+                if (func.obj != null and fr.func_obj == func.obj.?) {
+                    fr.lazy_func = func;
+                    fr.lazy_args = args;
+                    fr.lazy_env = call_env;
+                }
+            }
         }
         // A base class initializes its instance elements before parameter
         // default evaluation. A derived class waits until `super()` returns.
@@ -9188,7 +9215,15 @@ pub const Interpreter = struct {
                         if (legacyCallerArgumentsAllowed(f)) {
                             const frame = self.legacyCallFrameFor(o) orelse return Value.nul();
                             if (std.mem.eql(u8, key, "caller")) return legacyCallerValue(frame);
-                            return frame.arguments orelse Value.nul();
+                            if (frame.arguments) |a| return a;
+                            // Legacy-only case: build the exotic object on demand
+                            // (deferred from the call) and cache it for repeat reads.
+                            if (frame.lazy_func) |lf| {
+                                const obj = try self.createArgumentsObject(lf, frame.lazy_args, frame.lazy_env.?);
+                                frame.arguments = obj;
+                                return obj;
+                            }
+                            return Value.nul();
                         }
                     }
                 }
