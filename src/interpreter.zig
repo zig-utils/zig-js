@@ -3648,15 +3648,18 @@ pub const Interpreter = struct {
         }
     }
 
-    /// Bound names of a parameter list (used to exclude parameter-shadowing
-    /// function names from the Annex B legacy var binding).
-    fn collectParamNames(arena: std.mem.Allocator, params: []const ast.Param) EvalError![]const []const u8 {
+    /// FunctionDeclarationInstantiation's parameterNames list for Annex B.3.3:
+    /// formal BoundNames plus "arguments" when an arguments object is created.
+    /// Names in this list block the legacy var binding for block functions.
+    fn collectAnnexBParameterNames(arena: std.mem.Allocator, params: []const ast.Param, arguments_object_needed: bool) EvalError![]const []const u8 {
         var list: NameStack = .empty;
         for (params) |p| {
             if (p.pattern) |pat| {
                 try appendPatternNames(arena, pat, &list);
             } else if (p.name.len > 0) try list.append(arena, p.name);
         }
+        if (arguments_object_needed and !annexbStackHas(list, "arguments"))
+            try list.append(arena, "arguments");
         return list.items;
     }
 
@@ -5573,7 +5576,7 @@ pub const Interpreter = struct {
         // Expose this activation's parameter names + tag the body block as the
         // function-body scope, for Annex B B.3.3 block-function analysis.
         const saved_params = self.cur_params;
-        self.cur_params = collectParamNames(self.arena, func.params) catch &.{};
+        self.cur_params = collectAnnexBParameterNames(self.arena, func.params, func.uses_arguments) catch &.{};
         defer self.cur_params = saved_params;
         self.mark_fn_body = true;
         _ = try self.eval(func.body);
@@ -39748,17 +39751,17 @@ test "Annex B block function can update implicit arguments binding" {
     defer arena.deinit();
     const a = arena.allocator();
 
-    try std.testing.expectEqualStrings("function", (try evalSource(a,
+    try std.testing.expectEqualStrings("[object Arguments]", (try evalSource(a,
         \\(function() {
         \\  { function arguments() {} }
-        \\  return typeof arguments;
+        \\  return arguments.toString();
         \\})()
     )).asStr());
-    try std.testing.expectEqualStrings("function", (try evalSource(a,
+    try std.testing.expectEqualStrings("[object Arguments]", (try evalSource(a,
         \\function test(arg) {
         \\  eval(arg);
         \\  { function arguments() { return 1; } }
-        \\  return typeof arguments;
+        \\  return arguments.toString();
         \\}
         \\test("42")
     )).asStr());

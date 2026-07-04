@@ -54,6 +54,11 @@ const unsupported_staging_prefixes = [_][]const u8{
     "sm/BigInt/", // worker crash / host-fail
     "sm/regress/regress-1507322-deep-weakmap.js", // quarantined deep-WeakMap test
     "sm/String/replace-math.js", // quarantined
+    // These pending SpiderMonkey staging tests predate/contradict the current
+    // Annex B.3.3 `arguments` skip rule covered by official test262
+    // annexB/language/function-code/block-decl-func-skip-arguments.js.
+    "sm/regress/regress-602621.js",
+    "sm/lexical-environment/block-scoped-functions-annex-b-arguments.js",
 };
 const unsupported_subtrees = [_][]const u8{};
 const UnsupportedPathPrefix = struct { sub: []const u8, prefix: []const u8 };
