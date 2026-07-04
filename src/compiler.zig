@@ -2086,10 +2086,11 @@ pub const Compiler = struct {
         const tmpl = try self.arena.create(bc.FnTemplate);
         tmpl.* = .{
             .name = fnode.name,
-            // A *named function expression* (not a declaration, not anonymous,
-            // not an arrow) self-binds its own name in an enclosing immutable
-            // scope — recorded here so `make_closure` wraps the closure env.
-            .self_name = if (named_expr and !fnode.is_arrow) fnode.name else "",
+            // A *named function expression* (not a declaration, not an inferred
+            // name, not a method, not an arrow) self-binds its own name in an
+            // enclosing immutable scope — recorded here so `make_closure` wraps
+            // the closure env.
+            .self_name = if (named_expr and fnode.has_name_binding and !fnode.is_arrow) fnode.name else "",
             .params = fnode.params,
             .is_expr_body = fnode.is_expr_body,
             .body = fnode.body,

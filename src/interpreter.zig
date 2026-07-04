@@ -39766,6 +39766,25 @@ test "interpreter object method shorthand and computed keys" {
         \\let o = { ['a' + 'b']: 'ok' };
         \\o.ab
     )).asStr());
+    // VM-created concise methods still close over outer bindings instead of
+    // self-binding their display name.
+    try std.testing.expectEqualStrings("outer", (try evalSource(a,
+        \\function* g() {
+        \\  let buffer = 'outer';
+        \\  yield { buffer() { return buffer; } };
+        \\}
+        \\let { buffer } = g().next().value;
+        \\buffer()
+    )).asStr());
+    // NamedEvaluation sets Function.name, but must not create a lexical
+    // self-binding for an anonymous function.
+    try std.testing.expectEqualStrings("outer", (try evalSource(a,
+        \\let f = 'outer';
+        \\function* g() {
+        \\  yield { f: function() { return f; } };
+        \\}
+        \\g().next().value.f()
+    )).asStr());
 }
 
 test "interpreter labeled break and continue" {

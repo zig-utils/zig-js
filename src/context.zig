@@ -7031,6 +7031,45 @@ test "TypedArray constructor copies live source typed array length" {
     )).asBool());
 }
 
+test "TypedArray slice rechecks detached source after user code" {
+    try std.testing.expect((try evalIn(
+        \\var zero = new Int32Array(0);
+        \\var zeroStartRan = false;
+        \\zero.slice({ valueOf() { zeroStartRan = true; $262.detachArrayBuffer(zero.buffer); return 0; } }).length === 0 &&
+        \\zeroStartRan
+    )).asBool());
+    try std.testing.expect((try evalIn(
+        \\var ta = new Int32Array(1);
+        \\var threw = false;
+        \\try {
+        \\  ta.slice({ valueOf() { $262.detachArrayBuffer(ta.buffer); return 0; } });
+        \\} catch (e) {
+        \\  threw = e instanceof TypeError;
+        \\}
+        \\threw
+    )).asBool());
+    try std.testing.expect((try evalIn(
+        \\var ta = new Int32Array(1);
+        \\var threw = false;
+        \\try {
+        \\  ta.slice(0, { valueOf() { $262.detachArrayBuffer(ta.buffer); return 1; } });
+        \\} catch (e) {
+        \\  threw = e instanceof TypeError;
+        \\}
+        \\threw
+    )).asBool());
+    try std.testing.expect((try evalIn(
+        \\var ta = new Int32Array(1);
+        \\var threw = false;
+        \\ta.constructor = { [Symbol.species]: function(len) {
+        \\  $262.detachArrayBuffer(ta.buffer);
+        \\  return new Int32Array(len);
+        \\} };
+        \\try { ta.slice(0); } catch (e) { threw = e instanceof TypeError; }
+        \\threw
+    )).asBool());
+}
+
 test "TypedArray subarray omits species length for length-tracking views" {
     try std.testing.expect((try evalIn(
         \\var rab = new ArrayBuffer(16, { maxByteLength: 32 });
