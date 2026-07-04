@@ -1345,6 +1345,7 @@ pub const Parser = struct {
                     } else if (e.* == .spread) {
                         rest = try self.exprToTarget(e.spread);
                     } else if (e.* == .assign) {
+                        if (self.isParenWrapped(e)) return ParseError.InvalidAssignmentTarget;
                         try out.append(self.arena, .{ .target = try self.exprToTarget(e.assign.target), .default = e.assign.value });
                     } else {
                         try out.append(self.arena, .{ .target = try self.exprToTarget(e) });
@@ -1373,6 +1374,7 @@ pub const Parser = struct {
                         if (p.value.* == .identifier and self.isForbiddenBindingName(p.value.identifier)) return ParseError.UnexpectedToken;
                         rest_target = try self.exprToTarget(p.value);
                     } else if (p.value.* == .assign) {
+                        if (self.isParenWrapped(p.value)) return ParseError.InvalidAssignmentTarget;
                         try out.append(self.arena, .{ .key = p.key, .key_expr = p.key_expr, .target = try self.exprToTarget(p.value.assign.target), .default = p.value.assign.value });
                     } else {
                         try out.append(self.arena, .{ .key = p.key, .key_expr = p.key_expr, .target = try self.exprToTarget(p.value) });
@@ -1685,6 +1687,7 @@ pub const Parser = struct {
                 // and must have no duplicates: `for (let [x, x] of …)` is an error.
                 if (decl_kind) |k| if (k != .@"var") try self.checkNoDuplicateBindings(target);
                 const is_of = isKeyword(self.advance(), "of"); // consume in/of
+                if (is_await and !is_of) return ParseError.UnexpectedToken;
                 // A `using`/`await using` head is valid only in a for-of/-await-of,
                 // never a for-in: `for (using x in obj)` is a SyntaxError.
                 if (is_using and !is_of) return ParseError.UnexpectedToken;
@@ -1706,6 +1709,7 @@ pub const Parser = struct {
                 } });
             }
         };
+        if (is_await) return ParseError.UnexpectedToken;
         self.pos = save; // not an iteration form — rewind and parse a classic for
 
         var init_node: ?*Node = null;
@@ -4561,6 +4565,45 @@ test "parser validates module string export names" {
 
     var good_reexport = try Parser.init(arena.allocator(), "export { \"foo\" as \"bar\" } from './m.js';");
     const prog = try good_reexport.parseModule();
+    try std.testing.expectEqual(@as(usize, 1), prog.program.len);
+}
+
+test "parser rejects parenthesized destructuring pattern targets" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var top_arr = try Parser.init(arena.allocator(), "var a, b; ([a, b]) = [1, 2];");
+    try std.testing.expectError(ParseError.InvalidAssignmentTarget, top_arr.parseProgram());
+
+    var top_obj = try Parser.init(arena.allocator(), "var a, b; ({a, b}) = { a: 1, b: 2 };");
+    try std.testing.expectError(ParseError.InvalidAssignmentTarget, top_obj.parseProgram());
+
+    var nested_arr = try Parser.init(arena.allocator(), "var a, b; ({ a: ([b]) } = { a: [42] });");
+    try std.testing.expectError(ParseError.InvalidAssignmentTarget, nested_arr.parseProgram());
+
+    var nested_default = try Parser.init(arena.allocator(), "var a, b; [(a = 5)] = [1];");
+    try std.testing.expectError(ParseError.InvalidAssignmentTarget, nested_default.parseProgram());
+
+    var valid = try Parser.init(arena.allocator(), "var a, b; [(a), b] = [1, 2]; ({ a: (a) = 5, b} = { a: 1, b: 2 });");
+    const prog = try valid.parseProgram();
+    try std.testing.expectEqual(@as(usize, 3), prog.program.len);
+}
+
+test "parser rejects malformed for-await heads" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var classic = try Parser.init(arena.allocator(), "async function* f() { for await (;;) ; }");
+    try std.testing.expectError(ParseError.UnexpectedToken, classic.parseProgram());
+
+    var classic_decl = try Parser.init(arena.allocator(), "async function* f() { for await (let a ;;) ; }");
+    try std.testing.expectError(ParseError.UnexpectedToken, classic_decl.parseProgram());
+
+    var for_in = try Parser.init(arena.allocator(), "async function* f() { for await (a in null) ; }");
+    try std.testing.expectError(ParseError.UnexpectedToken, for_in.parseProgram());
+
+    var valid = try Parser.init(arena.allocator(), "async function* f() { for await (a of b) ; }");
+    const prog = try valid.parseProgram();
     try std.testing.expectEqual(@as(usize, 1), prog.program.len);
 }
 
