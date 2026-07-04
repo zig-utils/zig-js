@@ -62,7 +62,6 @@ const unsupported_staging_prefixes = [_][]const u8{
     "sm/TypedArray/slice-bitwise-same.js", // runtime failure in slice bitwise comparison semantics
     "sm/TypedArray/seal-and-freeze.js", // runtime failure in TypedArray integrity checks
     "sm/TypedArray/slice-detached.js", // runtime failure in detached slice semantics
-    "sm/String/replace-math.js", // quarantined
     // These pending SpiderMonkey staging tests predate/contradict the current
     // Annex B.3.3 `arguments` skip rule covered by official test262
     // annexB/language/function-code/block-decl-func-skip-arguments.js.

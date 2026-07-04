@@ -69,6 +69,7 @@ const stack_check_floor: u32 = 32;
 /// frames inflate ~10×, so the redzone does too; a normal build keeps it small
 /// so the reserve doesn't needlessly cap recursion depth.
 const stack_redzone: usize = if (builtin.sanitize_thread) 1 << 20 else 1 << 18; // 1 MiB TSan / 256 KiB normal
+const max_string_bytes: usize = 1 << 26;
 const max_typed_array_bytes: usize = 1 << 30;
 const max_temporal_instant_ns: i128 = 8_640_000_000_000_000_000_000;
 
@@ -7297,6 +7298,21 @@ pub const Interpreter = struct {
         return Value.str(try self.stringFromCodeUnit(cu.unit));
     }
 
+    fn ensureStringAppend(self: *Interpreter, buf: *const std.ArrayListUnmanaged(u8), add_len: usize) EvalError!void {
+        if (add_len > max_string_bytes or buf.items.len > max_string_bytes - add_len)
+            return self.throwError("RangeError", "Invalid string length");
+    }
+
+    fn appendStringByte(self: *Interpreter, buf: *std.ArrayListUnmanaged(u8), byte: u8) EvalError!void {
+        try self.ensureStringAppend(buf, 1);
+        try buf.append(self.arena, byte);
+    }
+
+    fn appendStringSlice(self: *Interpreter, buf: *std.ArrayListUnmanaged(u8), bytes: []const u8) EvalError!void {
+        try self.ensureStringAppend(buf, bytes.len);
+        try buf.appendSlice(self.arena, bytes);
+    }
+
     fn appendStringUtf16Prefix(self: *Interpreter, buf: *std.ArrayListUnmanaged(u8), s: []const u8, units: usize) EvalError!void {
         var copied: usize = 0;
         var i: usize = 0;
@@ -7621,7 +7637,7 @@ pub const Interpreter = struct {
 
             if (position >= accumulated) {
                 try appendUtf16Slice(&out, self.arena, s, accumulated, position);
-                try out.appendSlice(self.arena, replacement);
+                try self.appendStringSlice(&out, replacement);
                 accumulated = @min(position + utf16LenOfString(matched), string_len);
             }
         }
@@ -13127,43 +13143,42 @@ pub const Interpreter = struct {
         captures: []const []const u8,
         groups: ?*value.Object,
     ) EvalError!void {
-        const a = self.arena;
         var i: usize = 0;
         while (i < template.len) : (i += 1) {
             if (template[i] != '$' or i + 1 >= template.len) {
-                try buf.append(a, template[i]);
+                try self.appendStringByte(buf, template[i]);
                 continue;
             }
             switch (template[i + 1]) {
                 '$' => {
-                    try buf.append(a, '$');
+                    try self.appendStringByte(buf, '$');
                     i += 1;
                 },
                 '&' => {
-                    try buf.appendSlice(a, matched);
+                    try self.appendStringSlice(buf, matched);
                     i += 1;
                 },
                 '`' => {
-                    try buf.appendSlice(a, str[0..position]);
+                    try self.appendStringSlice(buf, str[0..position]);
                     i += 1;
                 },
                 '\'' => {
                     const end = position + matched.len;
-                    try buf.appendSlice(a, if (end <= str.len) str[end..] else "");
+                    try self.appendStringSlice(buf, if (end <= str.len) str[end..] else "");
                     i += 1;
                 },
                 '<' => {
                     // `$<name>` — only when the pattern had named groups.
                     if (groups == null) {
-                        try buf.append(a, '$');
+                        try self.appendStringByte(buf, '$');
                         continue;
                     }
                     const close = std.mem.indexOfScalarPos(u8, template, i + 2, '>') orelse {
-                        try buf.append(a, '$');
+                        try self.appendStringByte(buf, '$');
                         continue;
                     };
                     const gv = groups.?.getOwn(template[i + 2 .. close]) orelse Value.undef();
-                    if (gv.isString()) try buf.appendSlice(a, gv.asStr());
+                    if (gv.isString()) try self.appendStringSlice(buf, gv.asStr());
                     i = close;
                 },
                 '0'...'9' => {
@@ -13177,13 +13192,13 @@ pub const Interpreter = struct {
                         }
                     }
                     if (idx >= 1 and idx <= captures.len) {
-                        try buf.appendSlice(a, captures[idx - 1]);
+                        try self.appendStringSlice(buf, captures[idx - 1]);
                         i += consumed;
                     } else {
-                        try buf.append(a, '$'); // not a valid group reference → literal `$`
+                        try self.appendStringByte(buf, '$'); // not a valid group reference → literal `$`
                     }
                 },
-                else => try buf.append(a, '$'),
+                else => try self.appendStringByte(buf, '$'),
             }
         }
     }
@@ -13202,16 +13217,16 @@ pub const Interpreter = struct {
         var i: usize = 0;
         while (i < template.len) : (i += 1) {
             if (template[i] != '$' or i + 1 >= template.len) {
-                try buf.append(a, template[i]);
+                try self.appendStringByte(buf, template[i]);
                 continue;
             }
             switch (template[i + 1]) {
                 '$' => {
-                    try buf.append(a, '$');
+                    try self.appendStringByte(buf, '$');
                     i += 1;
                 },
                 '&' => {
-                    try buf.appendSlice(a, matched);
+                    try self.appendStringSlice(buf, matched);
                     i += 1;
                 },
                 '`' => {
@@ -13225,15 +13240,15 @@ pub const Interpreter = struct {
                 },
                 '<' => {
                     if (groups.isUndefined()) {
-                        try buf.append(a, '$');
+                        try self.appendStringByte(buf, '$');
                         continue;
                     }
                     const close = std.mem.indexOfScalarPos(u8, template, i + 2, '>') orelse {
-                        try buf.append(a, '$');
+                        try self.appendStringByte(buf, '$');
                         continue;
                     };
                     const gv = try self.getProperty(groups, template[i + 2 .. close]);
-                    if (!gv.isUndefined()) try buf.appendSlice(a, try self.toStringV(gv));
+                    if (!gv.isUndefined()) try self.appendStringSlice(buf, try self.toStringV(gv));
                     i = close;
                 },
                 '0'...'9' => {
@@ -13247,13 +13262,13 @@ pub const Interpreter = struct {
                         }
                     }
                     if (idx >= 1 and idx <= captures.len) {
-                        if (!captures[idx - 1].isUndefined()) try buf.appendSlice(a, captures[idx - 1].asStr());
+                        if (!captures[idx - 1].isUndefined()) try self.appendStringSlice(buf, captures[idx - 1].asStr());
                         i += consumed;
                     } else {
-                        try buf.append(a, '$');
+                        try self.appendStringByte(buf, '$');
                     }
                 },
-                else => try buf.append(a, '$'),
+                else => try self.appendStringByte(buf, '$'),
             }
         }
     }
