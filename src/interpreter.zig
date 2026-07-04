@@ -6,6 +6,7 @@ const value = @import("value.zig");
 const bc = @import("bytecode.zig");
 const builtins = @import("builtins.zig");
 const regex = @import("regex");
+const regexp_compat = @import("regexp_compat.zig");
 const vm = @import("vm.zig");
 const promise = @import("promise.zig");
 const shared_buffer = @import("shared_buffer.zig");
@@ -7014,7 +7015,8 @@ pub const Interpreter = struct {
         const raw_src = o.regex_source;
         const flags = o.regex_flags;
         const unicode = std.mem.indexOfScalar(u8, flags, 'u') != null or std.mem.indexOfScalar(u8, flags, 'v') != null;
-        const src = if (unicode) raw_src else try self.regexpSearchInput(raw_src, false);
+        const compat_src = if (unicode) raw_src else try regexp_compat.normalizeAnnexBClassRanges(self.arena, raw_src);
+        const src = if (unicode) compat_src else try self.regexpSearchInput(compat_src, false);
         const cf = regex.common.CompileFlags{
             .case_insensitive = std.mem.indexOfScalar(u8, flags, 'i') != null,
             .multiline = std.mem.indexOfScalar(u8, flags, 'm') != null,
@@ -38948,6 +38950,11 @@ test "interpreter regex literals (zig-regex backed)" {
     try std.testing.expectEqualStrings("a.c", (try evalSource(a, "/a.c/.source")).asStr());
     // case-insensitive flag honored via zig-regex
     try std.testing.expect((try evalSource(a, "/abc/i.test('ABC')")).asBool());
+    try std.testing.expect((try evalSource(a,
+        \\/[\d-a]+/.exec(':a0123456789-:')[0] === 'a0123456789-' &&
+        \\/[%-\d]+/.exec('&%0123456789-&')[0] === '%0123456789-' &&
+        \\/[\s-\d]+/.exec('& \t0123456789-&')[0] === ' \t0123456789-'
+    )).asBool());
     // exec returns the match with index
     try std.testing.expectEqual(@as(f64, 1), (try evalSource(a, "let m = /b/.exec('abc'); m.index")).asNum());
     // RegExp constructor

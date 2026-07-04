@@ -3,6 +3,7 @@ const lex = @import("lexer.zig");
 const ast = @import("ast.zig");
 const value_mod = @import("value.zig");
 const regex = @import("regex");
+const regexp_compat = @import("regexp_compat.zig");
 
 const Token = lex.Token;
 const TokenKind = lex.TokenKind;
@@ -4113,7 +4114,8 @@ fn validateRegexLiteral(arena: std.mem.Allocator, pattern: []const u8, flags: []
         .unicode_sets = seen['v'],
         .ecmascript = true,
     };
-    _ = regex.Regex.compileWithFlags(arena, pattern, cf) catch return ParseError.UnexpectedToken;
+    const src = if (cf.unicode) pattern else regexp_compat.normalizeAnnexBClassRanges(arena, pattern) catch return ParseError.UnexpectedToken;
+    _ = regex.Regex.compileWithFlags(arena, src, cf) catch return ParseError.UnexpectedToken;
 }
 
 fn substRegexAllowed(last: u8) bool {
