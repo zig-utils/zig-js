@@ -2969,13 +2969,13 @@ pub const Interpreter = struct {
                 // `.value` get — does NOT close, so it stays outside the catch.)
                 const next_value = try self.getProperty(res, "value");
                 self.bindLoopTarget(decl_kind, target, next_value) catch |e| {
-                    self.iteratorCloseKeepingThrow(iter_obj);
+                    if (is_await) self.asyncIteratorCloseKeepingThrow(iter_obj) else self.iteratorCloseKeepingThrow(iter_obj);
                     return e;
                 };
                 // `for (using/await using x of …)`: register the bound resource for
                 // disposal at the end of this iteration.
                 if (dispose != 0) self.addDisposable(next_value, dispose == 2) catch |e| {
-                    self.iteratorCloseKeepingThrow(iter_obj);
+                    if (is_await) self.asyncIteratorCloseKeepingThrow(iter_obj) else self.iteratorCloseKeepingThrow(iter_obj);
                     return e;
                 };
                 // A throw in the body closes the iterator before propagating. On a
@@ -2987,7 +2987,7 @@ pub const Interpreter = struct {
                         const body_err = self.exception;
                         if (self.disposeScope(ie, body_err) catch null) |de| self.exception = de;
                     };
-                    self.iteratorCloseKeepingThrow(iter_obj);
+                    if (is_await) self.asyncIteratorCloseKeepingThrow(iter_obj) else self.iteratorCloseKeepingThrow(iter_obj);
                     return e;
                 };
                 // DisposeResources at the end of a normal iteration; a disposal error
@@ -2995,7 +2995,7 @@ pub const Interpreter = struct {
                 if (iter_env) |ie| if (ie.disposables.items.len > 0) {
                     if (try self.disposeScope(ie, null)) |de| {
                         self.exception = de;
-                        self.iteratorCloseKeepingThrow(iter_obj);
+                        if (is_await) self.asyncIteratorCloseKeepingThrow(iter_obj) else self.iteratorCloseKeepingThrow(iter_obj);
                         return error.Throw;
                     }
                 };
@@ -3008,7 +3008,7 @@ pub const Interpreter = struct {
                     const ss = self.signal;
                     const sr = self.ret_value;
                     self.signal = .none;
-                    try self.iteratorClose(iter_obj);
+                    if (is_await) try self.asyncIteratorClose(iter_obj) else try self.iteratorClose(iter_obj);
                     self.signal = ss;
                     self.ret_value = sr;
                     break;
@@ -9707,6 +9707,26 @@ pub const Interpreter = struct {
     pub fn iteratorCloseKeepingThrow(self: *Interpreter, iter: Value) void {
         const saved = self.exception;
         self.iteratorClose(iter) catch {};
+        self.exception = saved;
+    }
+
+    /// AsyncIteratorClose: invoke and await `iterator.return()` if present. Used
+    /// by `for await` for normal/break/return completions, where close errors
+    /// replace the original completion.
+    fn asyncIteratorClose(self: *Interpreter, iter: Value) EvalError!void {
+        const ret = try self.getProperty(iter, "return");
+        if (ret.isUndefined() or ret.isNull()) return;
+        if (!ret.isCallable()) return self.throwError("TypeError", "async iterator 'return' is not a function");
+        const r = try self.awaitValue(try self.callValueWithThis(ret, &.{}, iter));
+        if (!builtins.isRealObject(r)) return self.throwError("TypeError", "async iterator 'return' did not return an object");
+    }
+
+    /// AsyncIteratorClose over an existing throw completion: suppress any close
+    /// failure (including return lookup, call, await rejection, or result-shape
+    /// error) and restore the original thrown value.
+    fn asyncIteratorCloseKeepingThrow(self: *Interpreter, iter: Value) void {
+        const saved = self.exception;
+        self.asyncIteratorClose(iter) catch {};
         self.exception = saved;
     }
 

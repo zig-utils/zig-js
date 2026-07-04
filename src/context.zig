@@ -6024,6 +6024,44 @@ test "for-await: Await observes PromiseResolve constructor lookups" {
     }
 }
 
+test "for-await: throw completion suppresses async iterator return lookup errors" {
+    const ctx = try Context.create(std.testing.allocator);
+    defer ctx.destroy();
+    _ = try ctx.evaluate(
+        \\var out = [];
+        \\var bodyError = { name: "body" };
+        \\function makeIterable(mode) {
+        \\  return {
+        \\    [Symbol.asyncIterator]() {
+        \\      return {
+        \\        next() { return { done: false, value: null }; },
+        \\        get return() {
+        \\          out.push("get return " + mode);
+        \\          if (mode === "throw") throw { name: "inner" };
+        \\          return true;
+        \\        }
+        \\      };
+        \\    }
+        \\  };
+        \\}
+        \\async function run(mode) {
+        \\  try {
+        \\    for await (var x of makeIterable(mode)) {
+        \\      out.push("body " + mode);
+        \\      throw bodyError;
+        \\    }
+        \\  } catch (e) {
+        \\    out.push(e === bodyError ? "body error " + mode : "other " + mode);
+        \\  }
+        \\}
+        \\run("noncallable").then(function() { return run("throw"); });
+    );
+    try std.testing.expectEqualStrings(
+        "body noncallable|get return noncallable|body error noncallable|body throw|get return throw|body error throw",
+        (try ctx.evaluate("out.join('|')")).asStr(),
+    );
+}
+
 test "generators: BigInt literal yields feed BigInt typed arrays" {
     try std.testing.expect((try evalIn(
         \\function* g() { yield 7n; yield 42n; }

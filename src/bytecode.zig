@@ -215,6 +215,9 @@ pub const Op = enum(u8) {
     async_iter_of, // pop iterable -> push its async iterator (Symbol.asyncIterator, else a sync iterator); for `for await`
     enum_keys, // pop object -> push an array of its for-in keys (own enumerable + array indices)
     iter_close, // pop iterator; normal-completion IteratorClose (call return() if present, validate result is Object)
+    iter_close_completion, // pop iterator; IteratorClose while [completion-value, kind] is beneath it, preserving throw completions
+    async_iter_close, // pop async iterator -> push return result and has-return flag; caller awaits/validates when present
+    async_iter_close_completion, // async_iter_close while [completion-value, kind] is beneath it, preserving throw completions during GetMethod/Call
     eval_class, // operand a: class AST index, b: computed-name count; pop raw computed-name values, evaluate the class
 
     throw_op, // pop -> set as the in-flight exception and unwind (error.Throw)

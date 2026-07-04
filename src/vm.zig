@@ -132,6 +132,13 @@ fn looksLikeCompletionKind(v: Value) bool {
     return n >= 0 and n <= @as(f64, @floatFromInt(@intFromEnum(Completion.continue_)));
 }
 
+fn completionKindBelowTop(stack: *const std.ArrayListUnmanaged(Value)) ?Completion {
+    if (stack.items.len == 0) return null;
+    const v = stack.items[stack.items.len - 1];
+    if (!looksLikeCompletionKind(v)) return null;
+    return @enumFromInt(@as(u8, @intFromFloat(v.asNum())));
+}
+
 /// Unwind `exec.handlers` (innermost-first) to the next `finally`, carrying an
 /// abrupt completion `[cval, kind]` so the finally runs and `end_finally`
 /// re-propagates it. Returns the finally's PC, or null if none remains (the
@@ -867,6 +874,48 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
             .iter_close => {
                 const it = stack.pop().?;
                 try vm.iteratorClose(it);
+            },
+            .iter_close_completion => {
+                const it = stack.pop().?;
+                const is_throw = completionKindBelowTop(stack) == .throw;
+                vm.iteratorClose(it) catch |e| {
+                    if (!is_throw or e != error.Throw) return e;
+                    vm.exception = stack.items[stack.items.len - 2];
+                };
+            },
+            .async_iter_close, .async_iter_close_completion => {
+                const it = stack.pop().?;
+                const is_throw = inst.op == .async_iter_close_completion and completionKindBelowTop(stack) == .throw;
+                const ret = vm.getProperty(it, "return") catch |e| {
+                    if (!is_throw or e != error.Throw) return e;
+                    vm.exception = stack.items[stack.items.len - 2];
+                    try stack.append(stack_alloc, Value.undef());
+                    try stack.append(stack_alloc, Value.boolVal(false));
+                    continue;
+                };
+                if (ret.isUndefined() or ret.isNull()) {
+                    try stack.append(stack_alloc, Value.undef());
+                    try stack.append(stack_alloc, Value.boolVal(false));
+                    continue;
+                }
+                if (!ret.isCallable()) {
+                    if (is_throw) {
+                        vm.exception = stack.items[stack.items.len - 2];
+                        try stack.append(stack_alloc, Value.undef());
+                        try stack.append(stack_alloc, Value.boolVal(false));
+                        continue;
+                    }
+                    return vm.throwError("TypeError", "async iterator 'return' is not a function");
+                }
+                const r = vm.callValueWithThis(ret, &.{}, it) catch |e| {
+                    if (!is_throw or e != error.Throw) return e;
+                    vm.exception = stack.items[stack.items.len - 2];
+                    try stack.append(stack_alloc, Value.undef());
+                    try stack.append(stack_alloc, Value.boolVal(false));
+                    continue;
+                };
+                try stack.append(stack_alloc, r);
+                try stack.append(stack_alloc, Value.boolVal(true));
             },
             .eval_class => {
                 const node = chunk.classes.items[inst.a];

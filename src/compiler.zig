@@ -1081,7 +1081,7 @@ pub const Compiler = struct {
             const skip_close = try self.chunk.emit(.jump, 0);
             for (loop.breaks.items) |j| self.chunk.patchToHere(j);
             try self.emitLoad(it_name);
-            _ = try self.chunk.emit(.iter_close, 0);
+            if (await_each) try self.emitAsyncIteratorClose(false) else _ = try self.chunk.emit(.iter_close, 0);
             self.chunk.patchToHere(skip_close);
         }
         self.popLoop();
@@ -1093,10 +1093,22 @@ pub const Compiler = struct {
         _ = try self.chunk.emit(.not, 0);
         const skip_close = try self.chunk.emit(.jump_if_false, 0);
         try self.emitLoad(it_name);
-        _ = try self.chunk.emit(.iter_close, 0);
+        if (await_each) try self.emitAsyncIteratorClose(true) else _ = try self.chunk.emit(.iter_close_completion, 0);
         self.chunk.patchToHere(skip_close);
         _ = try self.chunk.emit(.end_finally, 0);
         self.chunk.patchToHere(after_finally);
+    }
+
+    fn emitAsyncIteratorClose(self: *Compiler, completion_aware: bool) CompileError!void {
+        _ = try self.chunk.emit(if (completion_aware) .async_iter_close_completion else .async_iter_close, 0);
+        const absent = try self.chunk.emit(.jump_if_false, 0);
+        _ = try self.chunk.emit(.await_op, 0);
+        _ = try self.chunk.emit(.assert_iter_result, 0);
+        _ = try self.chunk.emit(.pop, 0);
+        const after = try self.chunk.emit(.jump, 0);
+        self.chunk.patchToHere(absent);
+        _ = try self.chunk.emit(.pop, 0);
+        self.chunk.patchToHere(after);
     }
 
     // ---- destructuring assignment (generator, yield-aware) ----------------
