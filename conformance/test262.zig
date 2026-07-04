@@ -933,7 +933,28 @@ const subtrees = [_][]const u8{
     "test/built-ins/RegExp/match-indices",
     "test/built-ins/RegExp/named-groups",
     "test/built-ins/RegExp/property-escapes/.",
-    "test/built-ins/RegExp/property-escapes/generated/.",
+    "test/built-ins/RegExp/property-escapes/generated/.#0:20",
+    "test/built-ins/RegExp/property-escapes/generated/.#20:20",
+    "test/built-ins/RegExp/property-escapes/generated/.#40:20",
+    "test/built-ins/RegExp/property-escapes/generated/.#60:20",
+    "test/built-ins/RegExp/property-escapes/generated/.#80:20",
+    "test/built-ins/RegExp/property-escapes/generated/.#100:20",
+    "test/built-ins/RegExp/property-escapes/generated/.#120:20",
+    "test/built-ins/RegExp/property-escapes/generated/.#140:20",
+    "test/built-ins/RegExp/property-escapes/generated/.#160:20",
+    "test/built-ins/RegExp/property-escapes/generated/.#180:20",
+    "test/built-ins/RegExp/property-escapes/generated/.#200:20",
+    "test/built-ins/RegExp/property-escapes/generated/.#220:20",
+    "test/built-ins/RegExp/property-escapes/generated/.#240:20",
+    "test/built-ins/RegExp/property-escapes/generated/.#260:20",
+    "test/built-ins/RegExp/property-escapes/generated/.#280:20",
+    "test/built-ins/RegExp/property-escapes/generated/.#300:20",
+    "test/built-ins/RegExp/property-escapes/generated/.#320:20",
+    "test/built-ins/RegExp/property-escapes/generated/.#340:20",
+    "test/built-ins/RegExp/property-escapes/generated/.#360:20",
+    "test/built-ins/RegExp/property-escapes/generated/.#380:20",
+    "test/built-ins/RegExp/property-escapes/generated/.#400:20",
+    "test/built-ins/RegExp/property-escapes/generated/.#420:25",
     "test/built-ins/RegExp/property-escapes/generated/strings",
     "test/built-ins/RegExp/prototype",
     "test/built-ins/RegExp/regexp-modifiers",
@@ -986,12 +1007,39 @@ pub fn main(init: std.process.Init) !void {
     return runParent(gpa, io, root);
 }
 
+const SubtreeSpec = struct {
+    scan_sub: []const u8,
+    shallow: bool,
+    shard_start: usize = 0,
+    shard_limit: usize = 0,
+};
+
+fn subtreeSpec(sub: []const u8) SubtreeSpec {
+    const path_part, const shard_part = if (std.mem.lastIndexOfScalar(u8, sub, '#')) |hash|
+        .{ sub[0..hash], sub[hash + 1 ..] }
+    else
+        .{ sub, "" };
+    var spec = SubtreeSpec{
+        .scan_sub = if (std.mem.endsWith(u8, path_part, "/.")) path_part[0 .. path_part.len - 2] else path_part,
+        .shallow = std.mem.endsWith(u8, path_part, "/."),
+    };
+    if (shard_part.len != 0) {
+        if (std.mem.indexOfScalar(u8, shard_part, ':')) |colon| {
+            spec.shard_start = std.fmt.parseInt(usize, shard_part[0..colon], 10) catch 0;
+            spec.shard_limit = std.fmt.parseInt(usize, shard_part[colon + 1 ..], 10) catch 0;
+        } else {
+            spec.shard_start = std.fmt.parseInt(usize, shard_part, 10) catch 0;
+        }
+    }
+    return spec;
+}
+
 fn subtreePath(sub: []const u8) []const u8 {
-    return if (std.mem.endsWith(u8, sub, "/.")) sub[0 .. sub.len - 2] else sub;
+    return subtreeSpec(sub).scan_sub;
 }
 
 fn subtreeShallow(sub: []const u8) bool {
-    return std.mem.endsWith(u8, sub, "/.");
+    return subtreeSpec(sub).shallow;
 }
 
 /// Worker: walk `sub`, run each test from index `start`, and stream
@@ -999,8 +1047,9 @@ fn subtreeShallow(sub: []const u8) bool {
 /// loses only the in-flight test.
 fn runWorker(gpa: std.mem.Allocator, io: std.Io, root: []const u8, sub: []const u8, start: usize, limit: usize) !void {
     const out = std.Io.File.stdout();
-    const scan_sub = subtreePath(sub);
-    const shallow = subtreeShallow(sub);
+    const spec = subtreeSpec(sub);
+    const scan_sub = spec.scan_sub;
+    const shallow = spec.shallow;
     const path = std.fs.path.join(gpa, &.{ root, scan_sub }) catch return;
     defer gpa.free(path);
 
@@ -1038,6 +1087,7 @@ fn runWorker(gpa: std.mem.Allocator, io: std.Io, root: []const u8, sub: []const 
     };
     defer walker.deinit();
 
+    var global_idx: usize = 0;
     var idx: usize = 0;
     var ran: usize = 0;
     var more = false;
@@ -1046,6 +1096,10 @@ fn runWorker(gpa: std.mem.Allocator, io: std.Io, root: []const u8, sub: []const 
         if (!std.mem.endsWith(u8, entry.basename, ".js")) continue;
         if (std.mem.endsWith(u8, entry.basename, "_FIXTURE.js")) continue;
         if (shallow and std.mem.indexOfScalar(u8, entry.path, '/') != null) continue;
+        const current_global_idx = global_idx;
+        global_idx += 1;
+        if (current_global_idx < spec.shard_start) continue;
+        if (spec.shard_limit != 0 and current_global_idx >= spec.shard_start + spec.shard_limit) break;
         const current_idx = idx;
         idx += 1;
         if (current_idx < start) continue; // already done by an earlier worker
@@ -1272,20 +1326,25 @@ fn workerLimitForSubtree(sub: []const u8) usize {
     // Batch them singly so the one slow sweep does not lose nearby quick passes.
     if (std.mem.eql(u8, sub, "test/built-ins/decodeURI") or
         std.mem.eql(u8, sub, "test/built-ins/decodeURIComponent")) return 1;
+    // Generated Unicode property RegExp tests are large but finite. One-test
+    // workers keep parent progress granular and timeout blame exact.
+    if (std.mem.startsWith(u8, sub, "test/built-ins/RegExp/property-escapes/generated/.#")) return 1;
     return 10;
 }
 
 fn workerTimeoutForSubtree(sub: []const u8) std.Io.Timeout {
     if (std.mem.startsWith(u8, sub, "test/intl402/Temporal/PlainMonthDay") or
         std.mem.eql(u8, sub, "test/built-ins/decodeURI") or
-        std.mem.eql(u8, sub, "test/built-ins/decodeURIComponent"))
+        std.mem.eql(u8, sub, "test/built-ins/decodeURIComponent") or
+        std.mem.startsWith(u8, sub, "test/built-ins/RegExp/property-escapes/generated/.#"))
         return slow_worker_timeout;
     return worker_timeout;
 }
 
 fn pathAtIndex(gpa: std.mem.Allocator, io: std.Io, root: []const u8, sub: []const u8, target: usize) ?[]const u8 {
-    const scan_sub = subtreePath(sub);
-    const shallow = subtreeShallow(sub);
+    const spec = subtreeSpec(sub);
+    const scan_sub = spec.scan_sub;
+    const shallow = spec.shallow;
     const path = std.fs.path.join(gpa, &.{ root, scan_sub }) catch return null;
     defer gpa.free(path);
 
@@ -1300,12 +1359,17 @@ fn pathAtIndex(gpa: std.mem.Allocator, io: std.Io, root: []const u8, sub: []cons
     var walker = dir.walk(gpa) catch return null;
     defer walker.deinit();
 
+    var global_idx: usize = 0;
     var idx: usize = 0;
     while (walker.next(io) catch null) |entry| {
         if (entry.kind != .file) continue;
         if (!std.mem.endsWith(u8, entry.basename, ".js")) continue;
         if (std.mem.endsWith(u8, entry.basename, "_FIXTURE.js")) continue;
         if (shallow and std.mem.indexOfScalar(u8, entry.path, '/') != null) continue;
+        const current_global_idx = global_idx;
+        global_idx += 1;
+        if (current_global_idx < spec.shard_start) continue;
+        if (spec.shard_limit != 0 and current_global_idx >= spec.shard_start + spec.shard_limit) break;
         if (idx == target) return gpa.dupe(u8, entry.path) catch null;
         idx += 1;
     }
