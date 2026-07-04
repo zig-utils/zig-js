@@ -19201,17 +19201,44 @@ fn typedArrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args
 /// comparator is honored exactly), or the default numeric/BigInt ascending
 /// order (NaN sorts last). Used by `sort` and `toSorted`.
 fn taSort(self: *Interpreter, buf: []Value, cmp: Value) EvalError!void {
-    var i: usize = 1;
-    while (i < buf.len) : (i += 1) {
-        const x = buf[i];
-        var j: usize = i;
-        while (j > 0) : (j -= 1) {
-            const ord = try taSortCompare(self, buf[j - 1], x, cmp);
-            if (ord <= 0) break;
-            buf[j] = buf[j - 1];
+    if (buf.len < 2) return;
+    const tmp = try self.arena.alloc(Value, buf.len);
+    var from = buf;
+    var to = tmp;
+    var width: usize = 1;
+    var in_tmp = false;
+    while (width < buf.len) {
+        var start: usize = 0;
+        while (start < buf.len) : (start += width * 2) {
+            const mid = @min(start + width, buf.len);
+            const end = @min(start + width * 2, buf.len);
+            try taSortMerge(self, from[start..mid], from[mid..end], to[start..end], cmp);
         }
-        buf[j] = x;
+        const old = from;
+        from = to;
+        to = old;
+        in_tmp = !in_tmp;
+        width = if (width > buf.len / 2) buf.len else width * 2;
     }
+    if (in_tmp) std.mem.copyForwards(Value, buf, from);
+}
+
+fn taSortMerge(self: *Interpreter, left: []Value, right: []Value, out: []Value, cmp: Value) EvalError!void {
+    var li: usize = 0;
+    var ri: usize = 0;
+    var oi: usize = 0;
+    while (li < left.len and ri < right.len) : (oi += 1) {
+        const ord = try taSortCompare(self, left[li], right[ri], cmp);
+        if (ord <= 0) {
+            out[oi] = left[li];
+            li += 1;
+        } else {
+            out[oi] = right[ri];
+            ri += 1;
+        }
+    }
+    if (li < left.len) std.mem.copyForwards(Value, out[oi..], left[li..]);
+    if (ri < right.len) std.mem.copyForwards(Value, out[oi..], right[ri..]);
 }
 
 fn taSortCompare(self: *Interpreter, a: Value, b: Value, cmp: Value) EvalError!f64 {

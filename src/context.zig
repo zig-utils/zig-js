@@ -7153,6 +7153,34 @@ test "TypedArray default sort orders negative zero before positive zero" {
     )).asBool());
 }
 
+test "TypedArray sort snapshots values before comparator side effects" {
+    try std.testing.expect((try evalIn(
+        \\var ta = new Int32Array([4, 3, 2, 1]);
+        \\var called = false;
+        \\ta.sort(function(a, b) {
+        \\  if (!called) {
+        \\    called = true;
+        \\    ta.fill(0);
+        \\  }
+        \\  return a - b;
+        \\});
+        \\called && String(ta) === "1,2,3,4";
+    )).asBool());
+}
+
+test "TypedArray default sort handles large two-byte arrays" {
+    try std.testing.expect((try evalIn(
+        \\var ta = new Int16Array(4096);
+        \\for (var i = 0; i < ta.length; i++) ta[i] = 2048 - (i % 4096);
+        \\ta.sort();
+        \\var ok = true;
+        \\for (var i = 1; i < ta.length; i++) {
+        \\  if (ta[i - 1] > ta[i]) { ok = false; break; }
+        \\}
+        \\ok;
+    )).asBool());
+}
+
 test "TypedArray sort skips writeback when comparator shrinks fixed view out of bounds" {
     try std.testing.expect((try evalIn(
         \\var rab = new ArrayBuffer(4, { maxByteLength: 8 });
