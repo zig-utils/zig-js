@@ -1210,6 +1210,15 @@ pub const Interpreter = struct {
         try obj.setOwn(self.arena, self.root_shape, key, v);
     }
 
+    fn defineOwnDataProp(self: *Interpreter, obj: *value.Object, key: []const u8, v: Value, attr: value.PropAttr) EvalError!void {
+        switch (try obj.deleteAccessorOwn(self.arena, key)) {
+            .absent, .removed_continue, .deleted => {},
+            .blocked => return self.throwError("TypeError", "Cannot redefine non-configurable accessor"),
+        }
+        try obj.setOwn(self.arena, self.root_shape, key, v);
+        try obj.setAttr(self.arena, key, attr);
+    }
+
     /// Bind `name` in the current scope; at global scope (no enclosing
     /// function), also surface it as an own property of the global object —
     /// global `var`/function declarations are own properties of `globalThis`
@@ -1495,8 +1504,7 @@ pub const Interpreter = struct {
             return self.throwError("TypeError", "cannot declare global function (global object is not extensible)");
         }
         try vs.put(name, v);
-        try self.setProp(g, name, v);
-        try g.setAttr(self.arena, name, .{ .writable = true, .enumerable = true, .configurable = self.eval_decl_deletable });
+        try self.defineOwnDataProp(g, name, v, .{ .writable = true, .enumerable = true, .configurable = self.eval_decl_deletable });
     }
 
     /// Create the global var binding for an Annex B B.3.3 legacy block-level

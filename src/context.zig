@@ -3362,6 +3362,42 @@ test "context persists globals across evaluations" {
     try std.testing.expect((try ctx.evaluate("Object.getPrototypeOf(globalThis).isPrototypeOf(globalThis)")).asBool());
 }
 
+test "direct eval global function replaces configurable properties" {
+    const ctx = try Context.create(std.testing.allocator);
+    defer ctx.destroy();
+
+    try std.testing.expect((try ctx.evaluate(
+        \\var getCalled = false, setCalled = false;
+        \\Object.defineProperty(globalThis, "evalGlobalFnAccessor", {
+        \\  get() { getCalled = true; throw "get"; },
+        \\  set() { setCalled = true; throw "set"; },
+        \\  configurable: true,
+        \\  enumerable: false
+        \\});
+        \\eval("function evalGlobalFnAccessor() { return 42; }");
+        \\var accDesc = Object.getOwnPropertyDescriptor(globalThis, "evalGlobalFnAccessor");
+        \\Object.defineProperty(globalThis, "evalGlobalFnData", {
+        \\  value: 1,
+        \\  writable: false,
+        \\  enumerable: false,
+        \\  configurable: true
+        \\});
+        \\eval("function evalGlobalFnData() { return 17; }");
+        \\var dataDesc = Object.getOwnPropertyDescriptor(globalThis, "evalGlobalFnData");
+        \\!getCalled && !setCalled &&
+        \\  typeof evalGlobalFnAccessor === "function" &&
+        \\  evalGlobalFnAccessor() === 42 &&
+        \\  accDesc.value === evalGlobalFnAccessor &&
+        \\  accDesc.writable === true &&
+        \\  accDesc.enumerable === true &&
+        \\  accDesc.configurable === true &&
+        \\  dataDesc.value === evalGlobalFnData &&
+        \\  dataDesc.writable === true &&
+        \\  dataDesc.enumerable === true &&
+        \\  dataDesc.configurable === true
+    )).asBool());
+}
+
 test "Annex B block function in with creates variable binding" {
     const ctx = try Context.create(std.testing.allocator);
     defer ctx.destroy();
