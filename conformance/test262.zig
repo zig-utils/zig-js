@@ -701,7 +701,75 @@ const subtrees = [_][]const u8{
     "test/language/directive-prologue",
     "test/language/eval-code",
     "test/language/export",
-    "test/language/expressions",
+    "test/language/expressions/addition",
+    "test/language/expressions/array",
+    "test/language/expressions/arrow-function",
+    "test/language/expressions/assignment",
+    "test/language/expressions/assignmenttargettype",
+    "test/language/expressions/async-arrow-function",
+    "test/language/expressions/async-function",
+    "test/language/expressions/async-generator",
+    "test/language/expressions/await",
+    "test/language/expressions/bitwise-and",
+    "test/language/expressions/bitwise-not",
+    "test/language/expressions/bitwise-or",
+    "test/language/expressions/bitwise-xor",
+    "test/language/expressions/call",
+    "test/language/expressions/class",
+    "test/language/expressions/coalesce",
+    "test/language/expressions/comma",
+    "test/language/expressions/compound-assignment",
+    "test/language/expressions/concatenation",
+    "test/language/expressions/conditional",
+    "test/language/expressions/delete",
+    "test/language/expressions/division",
+    "test/language/expressions/does-not-equals",
+    "test/language/expressions/dynamic-import",
+    "test/language/expressions/equals",
+    "test/language/expressions/exponentiation",
+    "test/language/expressions/function",
+    "test/language/expressions/generators",
+    "test/language/expressions/greater-than",
+    "test/language/expressions/greater-than-or-equal",
+    "test/language/expressions/grouping",
+    "test/language/expressions/import.meta",
+    "test/language/expressions/in",
+    "test/language/expressions/instanceof",
+    "test/language/expressions/left-shift",
+    "test/language/expressions/less-than",
+    "test/language/expressions/less-than-or-equal",
+    "test/language/expressions/logical-and",
+    "test/language/expressions/logical-assignment",
+    "test/language/expressions/logical-not",
+    "test/language/expressions/logical-or",
+    "test/language/expressions/member-expression",
+    "test/language/expressions/modulus",
+    "test/language/expressions/multiplication",
+    "test/language/expressions/new",
+    "test/language/expressions/new.target",
+    "test/language/expressions/object",
+    "test/language/expressions/optional-chaining",
+    "test/language/expressions/postfix-decrement",
+    "test/language/expressions/postfix-increment",
+    "test/language/expressions/prefix-decrement",
+    "test/language/expressions/prefix-increment",
+    "test/language/expressions/property-accessors",
+    "test/language/expressions/relational",
+    "test/language/expressions/right-shift",
+    "test/language/expressions/strict-does-not-equals",
+    "test/language/expressions/strict-equals",
+    "test/language/expressions/subtraction",
+    "test/language/expressions/super",
+    "test/language/expressions/tagged-template",
+    "test/language/expressions/tco-pos.js",
+    "test/language/expressions/template-literal",
+    "test/language/expressions/this",
+    "test/language/expressions/typeof",
+    "test/language/expressions/unary-minus",
+    "test/language/expressions/unary-plus",
+    "test/language/expressions/unsigned-right-shift",
+    "test/language/expressions/void",
+    "test/language/expressions/yield",
     "test/language/function-code",
     "test/language/future-reserved-words",
     "test/language/global-code",
@@ -717,7 +785,35 @@ const subtrees = [_][]const u8{
     "test/language/rest-parameters",
     "test/language/source-text",
     "test/language/statementList",
-    "test/language/statements",
+    "test/language/statements/async-function",
+    "test/language/statements/async-generator",
+    "test/language/statements/await-using",
+    "test/language/statements/block",
+    "test/language/statements/break",
+    "test/language/statements/class",
+    "test/language/statements/const",
+    "test/language/statements/continue",
+    "test/language/statements/debugger",
+    "test/language/statements/do-while",
+    "test/language/statements/empty",
+    "test/language/statements/expression",
+    "test/language/statements/for",
+    "test/language/statements/for-await-of",
+    "test/language/statements/for-in",
+    "test/language/statements/for-of",
+    "test/language/statements/function",
+    "test/language/statements/generators",
+    "test/language/statements/if",
+    "test/language/statements/labeled",
+    "test/language/statements/let",
+    "test/language/statements/return",
+    "test/language/statements/switch",
+    "test/language/statements/throw",
+    "test/language/statements/try",
+    "test/language/statements/using",
+    "test/language/statements/variable",
+    "test/language/statements/while",
+    "test/language/statements/with",
     "test/language/types",
     "test/language/white-space",
     "test/annexB",
@@ -823,16 +919,34 @@ fn runWorker(gpa: std.mem.Allocator, io: std.Io, root: []const u8, sub: []const 
     const out = std.Io.File.stdout();
     const path = std.fs.path.join(gpa, &.{ root, sub }) catch return;
     defer gpa.free(path);
-    var dir = std.Io.Dir.cwd().openDir(io, path, .{ .iterate = true }) catch {
-        out.writeStreamingAll(io, "DONE\n") catch {};
-        return;
-    };
-    defer dir.close(io);
 
     const harness_path = std.fs.path.join(gpa, &.{ root, "harness" }) catch return;
     defer gpa.free(harness_path);
     var harness = Harness{ .io = io, .gpa = gpa, .dir = std.Io.Dir.cwd().openDir(io, harness_path, .{}) catch null };
     defer harness.deinit();
+
+    var line_buf: [32]u8 = undefined;
+    if (std.mem.endsWith(u8, sub, ".js")) {
+        if (start > 0 or std.mem.endsWith(u8, sub, "_FIXTURE.js") or shouldSkipPath(sub, sub)) {
+            out.writeStreamingAll(io, "DONE\n") catch {};
+            return;
+        }
+        const src = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 20)) catch {
+            emit(out, io, &line_buf, 0, .skip);
+            out.writeStreamingAll(io, "DONE\n") catch {};
+            return;
+        };
+        defer gpa.free(src);
+        emit(out, io, &line_buf, 0, runOne(gpa, io, &harness, path, src));
+        out.writeStreamingAll(io, "DONE\n") catch {};
+        return;
+    }
+
+    var dir = std.Io.Dir.cwd().openDir(io, path, .{ .iterate = true }) catch {
+        out.writeStreamingAll(io, "DONE\n") catch {};
+        return;
+    };
+    defer dir.close(io);
 
     var walker = dir.walk(gpa) catch {
         out.writeStreamingAll(io, "DONE\n") catch {};
@@ -843,7 +957,6 @@ fn runWorker(gpa: std.mem.Allocator, io: std.Io, root: []const u8, sub: []const 
     var idx: usize = 0;
     var ran: usize = 0;
     var more = false;
-    var line_buf: [32]u8 = undefined;
     while (walker.next(io) catch null) |entry| {
         if (entry.kind != .file) continue;
         if (!std.mem.endsWith(u8, entry.basename, ".js")) continue;
@@ -929,11 +1042,19 @@ fn runParent(gpa: std.mem.Allocator, io: std.Io, root: []const u8) !void {
     for (subtrees) |sub| {
         const path = std.fs.path.join(gpa, &.{ root, sub }) catch continue;
         defer gpa.free(path);
-        var probe = std.Io.Dir.cwd().openDir(io, path, .{}) catch {
-            std.debug.print("  (missing: {s})\n", .{sub});
-            continue;
-        };
-        probe.close(io);
+        if (std.mem.endsWith(u8, sub, ".js")) {
+            var probe = std.Io.Dir.cwd().openFile(io, path, .{}) catch {
+                std.debug.print("  (missing: {s})\n", .{sub});
+                continue;
+            };
+            probe.close(io);
+        } else {
+            var probe = std.Io.Dir.cwd().openDir(io, path, .{}) catch {
+                std.debug.print("  (missing: {s})\n", .{sub});
+                continue;
+            };
+            probe.close(io);
+        }
         any_dir = true;
 
         var stats: Stats = .{};
@@ -1063,6 +1184,11 @@ fn workerLimitForSubtree(sub: []const u8) usize {
 fn pathAtIndex(gpa: std.mem.Allocator, io: std.Io, root: []const u8, sub: []const u8, target: usize) ?[]const u8 {
     const path = std.fs.path.join(gpa, &.{ root, sub }) catch return null;
     defer gpa.free(path);
+
+    if (std.mem.endsWith(u8, sub, ".js")) {
+        if (target == 0) return gpa.dupe(u8, sub) catch null;
+        return null;
+    }
 
     var dir = std.Io.Dir.cwd().openDir(io, path, .{ .iterate = true }) catch return null;
     defer dir.close(io);
