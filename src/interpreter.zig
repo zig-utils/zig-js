@@ -1020,7 +1020,8 @@ pub const Interpreter = struct {
     annexb_legacy_nodes: ?*std.AutoHashMapUnmanaged(*const Node, void) = null,
     /// The formal-parameter names of the current function activation (used by the
     /// Annex B B.3.3 eligibility analysis to exclude parameter-shadowing names).
-    cur_params: []const []const u8 = &.{},
+    cur_func_params: []const ast.Param = &.{},
+    cur_func_args_needed: bool = false,
     /// Sentinel object for a `let`/`const` binding in its temporal dead zone
     /// (hoisted into scope but not yet initialized). Reading it throws.
     tdz_marker: ?*value.Object = null,
@@ -3665,16 +3666,18 @@ pub const Interpreter = struct {
     /// FunctionDeclarationInstantiation's parameterNames list for Annex B.3.3:
     /// formal BoundNames plus "arguments" when an arguments object is created.
     /// Names in this list block the legacy var binding for block functions.
-    fn collectAnnexBParameterNames(arena: std.mem.Allocator, params: []const ast.Param, arguments_object_needed: bool) EvalError![]const []const u8 {
-        var list: NameStack = .empty;
+    /// Append the parameter bound-names (plus a legacy `arguments` entry when
+    /// the activation needs one) directly onto `list`. Used to seed the Annex B
+    /// B.3.3 name stack from the raw `ast.Param` slice, avoiding a per-call
+    /// intermediate allocation on the hot function-call path.
+    fn appendParameterNames(arena: std.mem.Allocator, params: []const ast.Param, arguments_object_needed: bool, list: *NameStack) EvalError!void {
         for (params) |p| {
             if (p.pattern) |pat| {
-                try appendPatternNames(arena, pat, &list);
+                try appendPatternNames(arena, pat, list);
             } else if (p.name.len > 0) try list.append(arena, p.name);
         }
-        if (arguments_object_needed and !annexbStackHas(list, "arguments"))
+        if (arguments_object_needed and !annexbStackHas(list.*, "arguments"))
             try list.append(arena, "arguments");
-        return list.items;
     }
 
     /// Push the lexically-declared (let/const/class) names of one statement.
@@ -3706,7 +3709,7 @@ pub const Interpreter = struct {
     fn collectAnnexBLegacy(self: *Interpreter, stmts: []*Node, depth: u32, out: *std.StringHashMapUnmanaged(void), nodes: *std.AutoHashMapUnmanaged(*const Node, void)) EvalError!void {
         var stack: NameStack = .empty;
         if (!self.eval_decl_deletable)
-            for (self.cur_params) |pn| try stack.append(self.arena, pn);
+            try appendParameterNames(self.arena, self.cur_func_params, self.cur_func_args_needed, &stack);
         try self.annexbScanList(stmts, &stack, depth, out, nodes);
     }
 
@@ -5603,9 +5606,14 @@ pub const Interpreter = struct {
         }
         // Expose this activation's parameter names + tag the body block as the
         // function-body scope, for Annex B B.3.3 block-function analysis.
-        const saved_params = self.cur_params;
-        self.cur_params = collectAnnexBParameterNames(self.arena, func.params, func.uses_arguments) catch &.{};
-        defer self.cur_params = saved_params;
+        const saved_params = self.cur_func_params;
+        const saved_args_needed = self.cur_func_args_needed;
+        self.cur_func_params = func.params;
+        self.cur_func_args_needed = func.uses_arguments;
+        defer {
+            self.cur_func_params = saved_params;
+            self.cur_func_args_needed = saved_args_needed;
+        }
         self.mark_fn_body = true;
         _ = try self.eval(func.body);
         self.mark_fn_body = false;
