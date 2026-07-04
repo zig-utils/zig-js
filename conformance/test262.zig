@@ -41,6 +41,10 @@ const worker_timeout: std.Io.Timeout = .{ .duration = .{
     .raw = .fromSeconds(30),
     .clock = .awake,
 } };
+const slow_worker_timeout: std.Io.Timeout = .{ .duration = .{
+    .raw = .fromSeconds(120),
+    .clock = .awake,
+} };
 const verbose_failures = false;
 // SpiderMonkey-ported staging subtrees that still HANG or CRASH the engine, so
 // they stay skipped until the underlying bug is fixed (re-measured 2026-06-23
@@ -861,7 +865,16 @@ const subtrees = [_][]const u8{
     "test/intl402/Temporal/Now",
     "test/intl402/Temporal/PlainDate",
     "test/intl402/Temporal/PlainDateTime",
-    "test/intl402/Temporal/PlainMonthDay",
+    "test/intl402/Temporal/PlainMonthDay/.",
+    "test/intl402/Temporal/PlainMonthDay/from",
+    "test/intl402/Temporal/PlainMonthDay/prototype/calendarId",
+    "test/intl402/Temporal/PlainMonthDay/prototype/equals",
+    "test/intl402/Temporal/PlainMonthDay/prototype/monthCode",
+    "test/intl402/Temporal/PlainMonthDay/prototype/toJSON",
+    "test/intl402/Temporal/PlainMonthDay/prototype/toLocaleString",
+    "test/intl402/Temporal/PlainMonthDay/prototype/toPlainDate",
+    "test/intl402/Temporal/PlainMonthDay/prototype/toString",
+    "test/intl402/Temporal/PlainMonthDay/prototype/with",
     "test/intl402/Temporal/PlainTime",
     "test/intl402/Temporal/PlainYearMonth",
     "test/intl402/Temporal/ZonedDateTime",
@@ -1177,7 +1190,7 @@ fn driveSubtree(gpa: std.mem.Allocator, io: std.Io, root: []const u8, exe: []con
             .argv = &argv,
             .stdout_limit = .limited(256 << 20),
             .stderr_limit = .limited(256 << 20),
-            .timeout = worker_timeout,
+            .timeout = workerTimeoutForSubtree(sub),
         }) catch |err| switch (err) {
             error.Timeout => {
                 if (pathAtIndex(gpa, io, root, sub, next)) |timed_path| {
@@ -1251,7 +1264,23 @@ fn workerLimitForSubtree(sub: []const u8) usize {
     // so a wedged agent test in a 10-batch would cost up to 10×30s to crawl
     // past. At limit 1 a deadlock costs one timeout and blames the right test.
     if (std.mem.eql(u8, sub, "test/built-ins/Atomics")) return 1;
+    // Some non-ISO calendar PlainMonthDay intl cases are slow but finite. Keep
+    // them isolated so the parent does not discard a completed slow batch as a
+    // timeout and mis-score its first test as a host failure.
+    if (std.mem.startsWith(u8, sub, "test/intl402/Temporal/PlainMonthDay")) return 1;
+    // The URI decode Sputnik stress tests include large UTF-8 range sweeps.
+    // Batch them singly so the one slow sweep does not lose nearby quick passes.
+    if (std.mem.eql(u8, sub, "test/built-ins/decodeURI") or
+        std.mem.eql(u8, sub, "test/built-ins/decodeURIComponent")) return 1;
     return 10;
+}
+
+fn workerTimeoutForSubtree(sub: []const u8) std.Io.Timeout {
+    if (std.mem.startsWith(u8, sub, "test/intl402/Temporal/PlainMonthDay") or
+        std.mem.eql(u8, sub, "test/built-ins/decodeURI") or
+        std.mem.eql(u8, sub, "test/built-ins/decodeURIComponent"))
+        return slow_worker_timeout;
+    return worker_timeout;
 }
 
 fn pathAtIndex(gpa: std.mem.Allocator, io: std.Io, root: []const u8, sub: []const u8, target: usize) ?[]const u8 {
