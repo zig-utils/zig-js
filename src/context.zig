@@ -5772,6 +5772,25 @@ test "Object.freeze / seal / preventExtensions" {
     )).asBool());
     // empty frozen object is frozen.
     try std.testing.expect((try evalIn("Object.isFrozen(Object.freeze({}))")).asBool());
+    // Non-empty TypedArrays throw during seal/freeze after becoming non-extensible;
+    // their integer-indexed elements still prevent sealed/frozen status.
+    try std.testing.expect((try evalIn(
+        \\var ta = new Int32Array(2);
+        \\var sealThrow = false;
+        \\try { Object.seal(ta); } catch (e) { sealThrow = e instanceof TypeError; }
+        \\sealThrow && !Object.isExtensible(ta) && !Object.isSealed(ta) && !Object.isFrozen(ta)
+    )).asBool());
+    try std.testing.expect((try evalIn(
+        \\var ta = new Int32Array(1);
+        \\var freezeThrow = false;
+        \\try { Object.freeze(ta); } catch (e) { freezeThrow = e instanceof TypeError; }
+        \\freezeThrow && !Object.isExtensible(ta) && !Object.isFrozen(ta)
+    )).asBool());
+    try std.testing.expect((try evalIn(
+        \\var ta = new Int32Array(0);
+        \\Object.preventExtensions(ta);
+        \\Object.isSealed(ta) && Object.isFrozen(ta)
+    )).asBool());
 }
 
 test "Object.prototype: hasOwnProperty / isPrototypeOf" {

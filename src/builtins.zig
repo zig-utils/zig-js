@@ -1940,8 +1940,12 @@ fn setIntegrityLevel(ctx: *anyopaque, self: *Interpreter, o: *value.Object, free
     // view stays fixed-length), and a non-empty view can't have its integer-indexed
     // elements redefined non-configurable, so the per-property step throws.
     if (o.typed_array) |ta| {
-        if (!isTypedArrayFixedLength(o) or (ta.currentLength() orelse 0) > 0)
+        if (!isTypedArrayFixedLength(o))
             return self.throwError("TypeError", "Cannot seal or freeze a TypedArray with elements");
+        if ((ta.currentLength() orelse 0) > 0) {
+            o.setExtensible(false);
+            return self.throwError("TypeError", "Cannot seal or freeze a TypedArray with elements");
+        }
     }
     if (o.proxy_handler != null or o.proxy_revoked or interpreter.isModuleNs(o)) {
         if (o.proxy_handler != null or o.proxy_revoked) {
@@ -2042,6 +2046,9 @@ fn isLocked(self: *Interpreter, ov: Value, frozen: bool) HostError!bool {
         return true;
     }
     if (o.isExtensible()) return false;
+    if (o.typed_array) |ta| {
+        if ((ta.currentLength() orelse 0) > 0) return false;
+    }
     // Dense element indices must each be non-configurable (and, for frozen,
     // non-writable). A frozen array additionally needs non-writable `length`.
     // Holes carry no property, so they don't block.

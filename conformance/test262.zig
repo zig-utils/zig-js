@@ -58,9 +58,7 @@ const unsupported_staging_prefixes = [_][]const u8{
     "sm/TypedArray/constructor-buffer-sequence.js", // runtime failure in buffer sequence construction
     "sm/TypedArray/sort_large_countingsort.js", // Zig-level infinite loop in large TypedArray sort
     "sm/TypedArray/sort_modifications.js", // Zig-level infinite loop while sort mutates backing state
-    "sm/TypedArray/test-integrity-level.js", // runtime failure in TypedArray integrity checks
     "sm/TypedArray/slice-bitwise-same.js", // runtime failure in slice bitwise comparison semantics
-    "sm/TypedArray/seal-and-freeze.js", // runtime failure in TypedArray integrity checks
     "sm/TypedArray/slice-detached.js", // runtime failure in detached slice semantics
     // These pending SpiderMonkey staging tests predate/contradict the current
     // Annex B.3.3 `arguments` skip rule covered by official test262
