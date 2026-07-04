@@ -639,6 +639,24 @@ pub const Compiler = struct {
                 try self.emitDefineKind(d.name, d.kind, d.init != null);
                 if (d.dispose != 0) _ = try self.chunk.emit(.register_disposable, if (d.dispose == 2) 1 else 0);
             },
+            .destructure_decl => |d| {
+                if (self.scope != null) return error.Unsupported;
+                if (nodeHasYield(d.pattern)) {
+                    if (d.kind != .@"var") return error.Unsupported;
+                    try self.emitPatternVarDecls(d.pattern);
+                    try self.compileDestructuringAssign(d.pattern, d.init);
+                    _ = try self.chunk.emit(.pop, 0);
+                    return;
+                }
+                try self.compileExpr(d.init);
+                const pi = try self.chunk.addPattern(d.pattern);
+                const mode: u32 = switch (d.kind) {
+                    .@"var" => 0,
+                    .let => 1,
+                    .@"const" => 2,
+                };
+                _ = try self.chunk.emitAB(.bind_pattern, pi, mode);
+            },
             .func_decl => |fnode| {
                 const fi = try self.compileFunction(fnode, false);
                 _ = try self.chunk.emit(.make_closure, fi);
@@ -1063,6 +1081,24 @@ pub const Compiler = struct {
         try self.emitDefine(src); // [v]   (define consumes one copy)
         try self.compileAssignPattern(pattern, src);
         // `src` (the rhs value) remains on the stack as the expression result.
+    }
+
+    fn emitPatternVarDecls(self: *Compiler, pattern: *Node) CompileError!void {
+        switch (pattern.*) {
+            .identifier => |name| {
+                _ = try self.chunk.emit(.load_undefined, 0);
+                try self.emitDefineKind(name, .@"var", false);
+            },
+            .arr_pattern => |p| {
+                for (p.elems) |elem| if (elem.target) |target| try self.emitPatternVarDecls(target);
+                if (p.rest) |rest| try self.emitPatternVarDecls(rest);
+            },
+            .obj_pattern => |p| {
+                for (p.props) |prop| try self.emitPatternVarDecls(prop.target);
+                if (p.rest) |rest| try self.emitPatternVarDecls(rest);
+            },
+            else => {},
+        }
     }
 
     fn compileAssignPattern(self: *Compiler, pattern: *Node, src: []const u8) CompileError!void {

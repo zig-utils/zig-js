@@ -2439,6 +2439,30 @@ test "vm: generator new.target is undefined across eval and arrows" {
     )).asBool());
 }
 
+test "vm: generator destructuring declaration defaults" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expectEqualStrings("foo|bar|0,2", (try vmRun(a,
+        \\function *g() {
+        \\  var [a = "foo", b = `bar`, ...rest] = [];
+        \\  yield a + "|" + b + "|" + rest.length;
+        \\  var [{ x: [c = "no"] }] = [{ x: [2, 3] }];
+        \\  yield c;
+        \\}
+        \\let it = g();
+        \\it.next().value + "," + it.next().value
+    )).asStr());
+    try std.testing.expectEqualStrings("need|got", (try vmRun(a,
+        \\function *g() {
+        \\  var [a = yield "need"] = [];
+        \\  yield a;
+        \\}
+        \\let it = g();
+        \\it.next().value + "|" + it.next("got").value
+    )).asStr());
+}
+
 test "vm: if/else and short-circuit value" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
