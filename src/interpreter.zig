@@ -7050,8 +7050,7 @@ pub const Interpreter = struct {
 
     fn regexMethod(self: *Interpreter, o: *value.Object, name: []const u8, args: []const Value) EvalError!?Value {
         if (eq(name, "test")) {
-            const r = (try self.regexMethod(o, "exec", args)).?;
-            return Value.boolVal(!r.isNull());
+            return Value.boolVal(try self.regexpTestBuiltin(o, arg0(args)));
         }
         if (eq(name, "compile")) {
             if (regExpAccessorData(self)) |data| {
@@ -7134,6 +7133,35 @@ pub const Interpreter = struct {
             return try self.regexpToString(Value.obj(o));
         }
         return null;
+    }
+
+    fn regexpTestBuiltin(self: *Interpreter, o: *value.Object, input_arg: Value) EvalError!bool {
+        const input = try self.toStringV(input_arg);
+        const li = toLen(try self.toNumberV(try self.getProperty(Value.obj(o), "lastIndex")));
+        const flags = o.regex_flags;
+        const global = std.mem.indexOfScalar(u8, flags, 'g') != null;
+        const sticky = std.mem.indexOfScalar(u8, flags, 'y') != null;
+        const unicode = std.mem.indexOfScalar(u8, flags, 'u') != null or std.mem.indexOfScalar(u8, flags, 'v') != null;
+        const search_input = try self.regexpSearchInput(input, unicode);
+        const start_units = if (global or sticky) li else 0;
+        if (start_units > utf16LenOfString(input)) {
+            if (global or sticky) try self.setRegExpLastIndex(o, 0);
+            return false;
+        }
+        const start = byteOffsetForUtf16Index(search_input, start_units);
+        const re = try self.compileRegex(o);
+        const found = re.findFrom(search_input, start) catch null;
+        if (found) |m| {
+            if (sticky and m.start != start) {
+                try self.setRegExpLastIndex(o, 0);
+                return false;
+            }
+            if (global or sticky) try self.setRegExpLastIndex(o, @floatFromInt(utf16IndexForByteOffset(search_input, m.end)));
+            recordRegexpLegacy(self, search_input, m.start, m.end, m.captures);
+            return true;
+        }
+        if (global or sticky) try self.setRegExpLastIndex(o, 0);
+        return false;
     }
 
     /// RegExpExec(R, S): use a callable `exec` method when present, validate its
@@ -39007,6 +39035,26 @@ test "interpreter regex literals (zig-regex backed)" {
     // RegExp constructor
     try std.testing.expect((try evalSource(a, "new RegExp('a+').test('baaa')")).asBool());
     try std.testing.expect((try evalSource(a, "Object.getPrototypeOf(RegExp.prototype) === Object.prototype")).asBool());
+    try std.testing.expect((try evalSource(a,
+        \\let r = /a/g;
+        \\r.lastIndex = 1;
+        \\let first = r.test("ba");
+        \\let afterFirst = r.lastIndex;
+        \\let second = r.test("ba");
+        \\first === true && afterFirst === 2 && second === false && r.lastIndex === 0
+    )).asBool());
+    try std.testing.expect((try evalSource(a,
+        \\let r = /a/y;
+        \\r.lastIndex = 1;
+        \\let first = r.test("ba");
+        \\let afterFirst = r.lastIndex;
+        \\r.lastIndex = 0;
+        \\let second = r.test("ba");
+        \\first === true && afterFirst === 2 && second === false && r.lastIndex === 0
+    )).asBool());
+    try std.testing.expect((try evalSource(a,
+        \\/(a)(b)/.test("zab") && RegExp.lastMatch === "ab" && RegExp.$1 === "a" && RegExp.$2 === "b"
+    )).asBool());
     // division still lexes correctly after a value
     try std.testing.expectEqual(@as(f64, 4), (try evalSource(a, "let x = 8; x / 2")).asNum());
 }
