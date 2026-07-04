@@ -320,11 +320,12 @@ pub const Node = union(enum) {
 
 /// One binding introduced by an `import` declaration.
 ///   `import d from "m"`            → { imported: "default",  local: "d" }
-///   `import * as ns from "m"`      → { imported: "*",        local: "ns" }
+///   `import * as ns from "m"`      → { imported: "*",        local: "ns", namespace: true }
 ///   `import { a as b } from "m"`   → { imported: "a",        local: "b" }
 pub const ImportEntry = struct {
     imported: []const u8,
     local: []const u8,
+    namespace: bool = false,
 };
 
 /// An `export` declaration. Exactly one shape is populated:

@@ -980,7 +980,7 @@ pub const Parser = struct {
             try self.expectContextual("as");
             const ns = self.advance().text;
             if (self.isForbiddenBindingName(ns)) return ParseError.UnexpectedToken;
-            try entries.append(self.arena, .{ .imported = "*", .local = ns });
+            try entries.append(self.arena, .{ .imported = "*", .local = ns, .namespace = true });
         } else if (self.check(.lbrace)) {
             try self.parseNamedImports(&entries);
         }

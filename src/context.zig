@@ -2259,7 +2259,7 @@ pub const Context = struct {
                 for (imp.entries) |entry| {
                     if (isSourceImport(entry)) {
                         try m.env.putConst(entry.local, Value.obj(try self.newModuleSourceObject()));
-                    } else if (std.mem.eql(u8, entry.imported, "*")) {
+                    } else if (entry.namespace) {
                         const nsobj = if (imp.deferred) try self.deferredNamespaceObject(dep.?) else try self.namespaceObject(dep.?);
                         try m.env.putConst(entry.local, Value.obj(nsobj));
                     } else {
@@ -2695,6 +2695,13 @@ test "modules expose namespace re-exports and evaluate dependencies in source or
     , &.{
         .{ .path = "dep.js", .source = "export { mark as \"not-id\" }; function mark() {} globalThis.mark = mark;" },
     });
+
+    try evaluateSelfModule(
+        \\var x = "ok";
+        \\export { x as "*" };
+        \\import { "*" as y } from "./entry.js";
+        \\if (y !== "ok") throw new Error("missing string star export");
+    );
 
     try evaluateModuleWithFixtures(
         \\if (globalThis.order !== "123") throw new Error(globalThis.order);
