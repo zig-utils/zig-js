@@ -38928,6 +38928,30 @@ test "Intl.PluralRules validates localeMatcher option" {
     )).asBool());
 }
 
+test "Intl.supportedValuesOf timeZone values are code-unit sorted" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expect((try evalSource(a,
+        \\const zones = Intl.supportedValuesOf("timeZone");
+        \\let ok = zones.includes("America/Port-au-Prince") && zones.includes("America/Port_of_Spain");
+        \\ok &&= zones.includes("Etc/GMT+1") && zones.includes("Etc/GMT-1") && zones.includes("UTC");
+        \\for (let i = 1; i < zones.length; i++) {
+        \\  if (zones[i - 1] > zones[i]) ok = false;
+        \\}
+        \\ok
+    )).asBool());
+}
+
+test "RegExp constructor treats escaped class hyphen as literal" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expect((try evalSource(a,
+        \\new RegExp("[A-Za-z.\\-_]+").test("Porto-Novo")
+    )).asBool());
+}
+
 test "Intl.DateTimeFormat German numeric date pattern" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

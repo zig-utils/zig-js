@@ -18,6 +18,12 @@ pub fn normalizeAnnexBClassRanges(arena: std.mem.Allocator, pattern: []const u8)
     while (i < pattern.len) {
         const c = pattern[i];
         if (c == '\\') {
+            if (in_class and i + 1 < pattern.len and pattern[i + 1] == '-') {
+                try out.appendSlice(arena, "\\x2d");
+                changed = true;
+                i += 2;
+                continue;
+            }
             if (in_class and i + 2 < pattern.len and isLegacyClassEscape(pattern[i + 1]) and pattern[i + 2] == '-') {
                 try out.appendSlice(arena, pattern[i .. i + 2]);
                 try out.appendSlice(arena, "\\x2d");
