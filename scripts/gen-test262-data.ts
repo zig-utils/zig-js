@@ -49,10 +49,9 @@ function parse(text: string) {
   if (!validLine)
     throw new Error('Could not find VALID summary line in test262 output. Pass --from <file> with the run output.')
 
-  // Suite lines are either a top-level aggregate (`test/language:`) or a
-  // per-leaf built-in (`test/built-ins/Array:`); capture the last path segment
-  // as the name so both shapes are recorded.
-  const suiteRe = /test\/(?:[\w-]+\/)*([\w-]+):\s*valid\s*(\d+)\/(\d+)\s*\(([\d.]+)%\)(?:\s*\[parse-fail\s*(\d+)[^\]]*runtime-fail\s*(\d+)[^\]]*host-fail\s*(\d+)\])?/gi
+  // Keep the exact path after `test/` so similarly named leaves in different
+  // suites (`built-ins/Array`, `intl402/Array`) stay distinguishable.
+  const suiteRe = /test\/(.+?):\s*valid\s*(\d+)\/(\d+)\s*\(([\d.]+)%\)(?:\s*\[parse-fail\s*(\d+)[^\]]*runtime-fail\s*(\d+)[^\]]*host-fail\s*(\d+)\])?/gi
   const suites: Array<Record<string, unknown>> = []
   for (const m of text.matchAll(suiteRe)) {
     suites.push({

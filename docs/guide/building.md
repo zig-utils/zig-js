@@ -36,7 +36,7 @@ The runner prints a per-subtree breakdown and a totals summary:
 <span class="cm">----------------------------------------------</span>
 <span class="cy">VALID</span> (can we run it):  <span class="ok">{{ data.test262.valid.passing }}/{{ data.test262.valid.total }}</span> (<span class="hl">{{ data.test262.valid.percentage }}%</span>)   parse-fail {{ data.test262.valid.parseFail }} · runtime-fail {{ data.test262.valid.runtimeFail }} · host-fail {{ data.test262.valid.hostFail }}
 <span class="cy">NEGATIVE</span> (strictness):  {{ data.test262.negative.passing }}/{{ data.test262.negative.total }} (<span class="hl">{{ data.test262.negative.percentage }}%</span>)
-skipped (module/async/unloadable-includes): {{ data.test262.skipped }}
+skipped (unsupported harness/path metadata): {{ data.test262.skipped }}
 </Terminal>
 
 > [!NOTE]
@@ -59,3 +59,10 @@ bun run docs:data -- --from run.txt    # or parse a saved run's output
 ```
 
 Every page that reads `data.test262` (the homepage bar, the [conformance](/conformance) page) updates automatically on the next `bun run docs:build`.
+
+To inspect what is still outside the denominator:
+
+```bash
+zig build test262-bin
+./zig-out/bin/test262 --list-skips > docs/.data/test262-skips.tsv
+```

@@ -26,7 +26,11 @@
 //!
 //! Frontmatter handling (the `/*--- … ---*/` YAML block):
 //!   - `flags: [raw]`        → run the body with no harness prepended
-//!   - `flags: [module|async|CanBlockIsFalse]` → skip (unsupported runtime)
+//!   - `flags: [module]`     → run as an ES module through the module loader
+//!   - `flags: [async]`      → run with the `$DONE`/doneprint async sentinel
+//!   - `flags: [module, async]` → skip until top-level-await harness support
+//!   - tail-call-optimization metadata → skip until proper-tail-call support
+//!   - `flags: [CanBlockIsFalse]` → run with the main agent's [[CanBlock]] false
 //!   - `includes: [...]`     → prepend the named harness files
 //!   - `negative: { type, phase }` → expect a parse/resolution error or throw
 //!
@@ -46,6 +50,7 @@ const slow_worker_timeout: std.Io.Timeout = .{ .duration = .{
     .clock = .awake,
 } };
 const verbose_failures = false;
+const max_test_source_bytes: usize = 8 << 20;
 // SpiderMonkey-ported staging subtrees that still HANG or CRASH the engine, so
 // they stay skipped until the underlying bug is fixed (re-measured 2026-06-23
 // per category). The rest of the sm/ tree — Array, Iterator, generators,
@@ -207,6 +212,7 @@ const Stats = struct {
 const Meta = struct {
     raw: bool = false,
     unsupported_flag: bool = false,
+    unsupported_reason: ?[]const u8 = null,
     negative: bool = false,
     negative_parse: bool = false,
     negative_resolution: bool = false,
@@ -235,25 +241,24 @@ fn parseMeta(src: []const u8) Meta {
     const front = src[start .. start + end_rel];
 
     if (std.mem.indexOf(u8, front, "includes:")) |ii| parseIncludes(&meta, front[ii + "includes:".len ..]);
-    if (std.mem.indexOf(u8, front, "tail-call-optimization") != null)
+    if (std.mem.indexOf(u8, front, "tail-call-optimization") != null) {
         meta.unsupported_flag = true;
+        meta.unsupported_reason = "tail-call-optimization";
+    }
     if (std.mem.indexOf(u8, front, "flags:")) |fi| {
         const flags = flagsRegion(front, fi);
         if (std.mem.indexOf(u8, flags, "raw")) |_| meta.raw = true;
         if (std.mem.indexOf(u8, flags, "onlyStrict")) |_| meta.only_strict = true;
         if (std.mem.indexOf(u8, flags, "async")) |_| meta.is_async = true;
-        // The async/async-generator corpus needs machinery beyond the current
-        // synchronous-settling runtime (async generators, for-await, Promise
-        // combinators, exact ordering), so it stays skipped like modules; the
-        // runtime is exercised by the unit tests and the Promise built-ins.
-        // Modules run via a dedicated path (`runModule`). Async modules
-        // (module+async) additionally need top-level-await/$DONE-in-module
-        // machinery, so those stay skipped; CanBlockIsFalse needs Atomics.
-        // module+async needs top-level-await/$DONE-in-module machinery, so it
-        // stays unsupported; a plain async test runs via the $DONE / @@Async
-        // sentinel path in runOne (the synchronous-settling async runtime).
+        // Plain modules run via `runModule`. Plain async tests run via the
+        // $DONE / doneprint sentinel path in `runOne`. The combined
+        // module+async shape needs top-level-await/$DONE-in-module machinery,
+        // so it remains outside the scored denominator for now.
         if (std.mem.indexOf(u8, flags, "module") != null) {
-            if (meta.is_async) meta.unsupported_flag = true else meta.is_module = true;
+            if (meta.is_async) {
+                meta.unsupported_flag = true;
+                meta.unsupported_reason = "module+async/top-level-await harness";
+            } else meta.is_module = true;
         }
         if (std.mem.indexOf(u8, flags, "CanBlockIsFalse") != null)
             meta.can_block_false = true;
@@ -527,7 +532,7 @@ fn harnessIncludeOverride(abs_path: []const u8, name: []const u8) ?[]const u8 {
 /// or `<ErrName>: <message>` / `<ParseError>` — a quick probe during development.
 fn runEval(gpa: std.mem.Allocator, io: std.Io, path: []const u8) !void {
     const out = std.Io.File.stdout();
-    const src = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 20)) catch return;
+    const src = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(max_test_source_bytes)) catch return;
     const ctx = js.Context.create(gpa) catch return;
     defer ctx.destroy();
     var buf: [4096]u8 = undefined;
@@ -569,7 +574,7 @@ fn runDiag(gpa: std.mem.Allocator, io: std.Io, root: []const u8, sub: []const u8
         if (std.mem.endsWith(u8, entry.basename, "_FIXTURE.js")) continue;
         if (filter) |f| if (std.mem.indexOf(u8, entry.path, f) == null) continue;
         if (shouldSkipPath(sub, entry.path)) continue;
-        const src = entry.dir.readFileAlloc(io, entry.basename, gpa, .limited(1 << 20)) catch continue;
+        const src = entry.dir.readFileAlloc(io, entry.basename, gpa, .limited(max_test_source_bytes)) catch continue;
         defer gpa.free(src);
         const maybe_abs = std.fs.path.join(gpa, &.{ path, entry.path }) catch null;
         defer if (maybe_abs) |a| gpa.free(a);
@@ -1006,6 +1011,9 @@ pub fn main(init: std.process.Init) !void {
             const path = args.next() orelse return;
             return runEval(gpa, io, path);
         }
+        if (std.mem.eql(u8, mode, "--list-skips")) {
+            return runListSkips(gpa, io, root);
+        }
     }
     return runParent(gpa, io, root);
 }
@@ -1067,7 +1075,7 @@ fn runWorker(gpa: std.mem.Allocator, io: std.Io, root: []const u8, sub: []const 
             out.writeStreamingAll(io, "DONE\n") catch {};
             return;
         }
-        const src = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 20)) catch {
+        const src = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(max_test_source_bytes)) catch {
             emit(out, io, &line_buf, 0, .skip);
             out.writeStreamingAll(io, "DONE\n") catch {};
             return;
@@ -1116,7 +1124,7 @@ fn runWorker(gpa: std.mem.Allocator, io: std.Io, root: []const u8, sub: []const 
             continue;
         }
 
-        const src = entry.dir.readFileAlloc(io, entry.basename, gpa, .limited(1 << 20)) catch {
+        const src = entry.dir.readFileAlloc(io, entry.basename, gpa, .limited(max_test_source_bytes)) catch {
             emit(out, io, &line_buf, current_idx, .skip);
             ran += 1;
             continue;
@@ -1138,18 +1146,120 @@ fn runWorker(gpa: std.mem.Allocator, io: std.Io, root: []const u8, sub: []const 
     out.writeStreamingAll(io, if (more) "MORE\n" else "DONE\n") catch {};
 }
 
+fn runListSkips(gpa: std.mem.Allocator, io: std.Io, root: []const u8) !void {
+    const out = std.Io.File.stdout();
+    out.writeStreamingAll(io, "subtree\tindex\tpath\treason\n") catch {};
+    var total: usize = 0;
+    for (subtrees) |sub| {
+        try listSkipsForSubtree(gpa, io, root, sub, &total);
+    }
+    var buf: [64]u8 = undefined;
+    const line = std.fmt.bufPrint(&buf, "# total\t{d}\n", .{total}) catch return;
+    out.writeStreamingAll(io, line) catch {};
+}
+
+fn listSkipsForSubtree(gpa: std.mem.Allocator, io: std.Io, root: []const u8, sub: []const u8, total: *usize) !void {
+    const out = std.Io.File.stdout();
+    const spec = subtreeSpec(sub);
+    const scan_sub = spec.scan_sub;
+    const shallow = spec.shallow;
+    const path = std.fs.path.join(gpa, &.{ root, scan_sub }) catch return;
+    defer gpa.free(path);
+
+    const harness_path = std.fs.path.join(gpa, &.{ root, "harness" }) catch return;
+    defer gpa.free(harness_path);
+    var harness = Harness{ .io = io, .gpa = gpa, .dir = std.Io.Dir.cwd().openDir(io, harness_path, .{}) catch null };
+    defer harness.deinit();
+
+    if (std.mem.endsWith(u8, scan_sub, ".js")) {
+        if (skipPathReason(scan_sub, scan_sub)) |reason| {
+            emitSkipRow(gpa, io, out, total, sub, 0, scan_sub, reason);
+            return;
+        }
+        const src = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(max_test_source_bytes)) catch {
+            emitSkipRow(gpa, io, out, total, sub, 0, scan_sub, "unreadable test source");
+            return;
+        };
+        defer gpa.free(src);
+        if (skipReasonForSource(&harness, scan_sub, src)) |reason|
+            emitSkipRow(gpa, io, out, total, sub, 0, scan_sub, reason);
+        return;
+    }
+
+    var dir = std.Io.Dir.cwd().openDir(io, path, .{ .iterate = true }) catch return;
+    defer dir.close(io);
+    var walker = dir.walk(gpa) catch return;
+    defer walker.deinit();
+
+    var global_idx: usize = 0;
+    var idx: usize = 0;
+    while (walker.next(io) catch null) |entry| {
+        if (entry.kind != .file) continue;
+        if (!std.mem.endsWith(u8, entry.basename, ".js")) continue;
+        if (std.mem.endsWith(u8, entry.basename, "_FIXTURE.js")) continue;
+        if (shallow and std.mem.indexOfScalar(u8, entry.path, '/') != null) continue;
+        const current_global_idx = global_idx;
+        global_idx += 1;
+        if (current_global_idx < spec.shard_start) continue;
+        if (spec.shard_limit != 0 and current_global_idx >= spec.shard_start + spec.shard_limit) break;
+        const current_idx = idx;
+        idx += 1;
+
+        if (skipPathReason(scan_sub, entry.path)) |reason| {
+            emitSkipRow(gpa, io, out, total, sub, current_idx, entry.path, reason);
+            continue;
+        }
+
+        const src = entry.dir.readFileAlloc(io, entry.basename, gpa, .limited(max_test_source_bytes)) catch {
+            emitSkipRow(gpa, io, out, total, sub, current_idx, entry.path, "unreadable test source");
+            continue;
+        };
+        const maybe_abs_path = std.fs.path.join(gpa, &.{ path, entry.path }) catch null;
+        const abs_path = maybe_abs_path orelse entry.basename;
+        const maybe_reason = skipReasonForSource(&harness, abs_path, src);
+        if (maybe_abs_path) |owned_abs_path| gpa.free(owned_abs_path);
+        gpa.free(src);
+        if (maybe_reason) |reason|
+            emitSkipRow(gpa, io, out, total, sub, current_idx, entry.path, reason);
+    }
+}
+
+fn emitSkipRow(gpa: std.mem.Allocator, io: std.Io, out: std.Io.File, total: *usize, sub: []const u8, idx: usize, path: []const u8, reason: []const u8) void {
+    const row = std.fmt.allocPrint(gpa, "{s}\t{d}\t{s}\t{s}\n", .{ sub, idx, path, reason }) catch return;
+    defer gpa.free(row);
+    out.writeStreamingAll(io, row) catch {};
+    total.* += 1;
+}
+
+fn skipReasonForSource(harness: *Harness, abs_path: []const u8, src: []const u8) ?[]const u8 {
+    const meta = parseMeta(src);
+    if (meta.unsupported_flag) return meta.unsupported_reason orelse "unsupported metadata";
+    if (!meta.raw) {
+        var i: usize = 0;
+        while (i < meta.includes_n) : (i += 1) {
+            _ = harnessIncludeOverride(abs_path, meta.includes[i]) orelse
+                harness.get(meta.includes[i]) orelse return "missing harness include";
+        }
+    }
+    return null;
+}
+
 fn shouldSkipPath(sub: []const u8, rel_path: []const u8) bool {
+    return skipPathReason(sub, rel_path) != null;
+}
+
+fn skipPathReason(sub: []const u8, rel_path: []const u8) ?[]const u8 {
     const path = if (std.mem.startsWith(u8, rel_path, "./")) rel_path[2..] else rel_path;
     for (unsupported_subtrees) |unsupported| {
-        if (std.mem.eql(u8, sub, unsupported)) return true;
+        if (std.mem.eql(u8, sub, unsupported)) return "unsupported subtree";
     }
     for (unsupported_path_prefixes) |unsupported| {
-        if (std.mem.eql(u8, sub, unsupported.sub) and std.mem.startsWith(u8, path, unsupported.prefix)) return true;
+        if (std.mem.eql(u8, sub, unsupported.sub) and std.mem.startsWith(u8, path, unsupported.prefix)) return "unsupported path prefix";
     }
     for (unsupported_staging_prefixes) |prefix| {
-        if (stagingPathMatches(sub, path, prefix)) return true;
+        if (stagingPathMatches(sub, path, prefix)) return "unsupported SpiderMonkey staging prefix";
     }
-    return false;
+    return null;
 }
 
 fn stagingPathMatches(sub: []const u8, path: []const u8, prefix: []const u8) bool {
@@ -1224,7 +1334,7 @@ fn runParent(gpa: std.mem.Allocator, io: std.Io, root: []const u8) !void {
     std.debug.print("NEGATIVE (strictness):  {d}/{d} ({d:.1}%)   [early-error rejection — mostly unimplemented]\n", .{
         total.pass_negative, total.negTotal(), Stats.pct(total.pass_negative, total.negTotal()),
     });
-    std.debug.print("skipped (module/async/unloadable-includes): {d}\n", .{total.skip});
+    std.debug.print("skipped (unsupported harness/path metadata): {d}\n", .{total.skip});
 }
 
 /// Run one subtree to completion across worker (re)spawns. Each worker streams

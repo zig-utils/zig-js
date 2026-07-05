@@ -17,7 +17,7 @@ Home (`~/Code/Home/lang`) is the Bun-parity runtime. Its `home` binary does
 | Generated-class C++ bindings (`*Prototype__*`, `*Class__*`, `__construct`, `__finalize`) | **~4,325** |
 | **Public JSC C API** (what zig-js exposes today) | **only ~17** |
 
-zig-js's `src/c_api.zig` exports ~44 *public* JSC C-API functions
+zig-js's `src/c_api.zig` exports 50 C-API functions
 (`JSGlobalContextCreate`, `JSEvaluateScript`, `JSObjectMake`,
 `JSObjectMakeFunctionWithCallback`, `JSValueMakeNumber`, …). The overlap with
 what Home actually links is ~17 symbols. **zig-js is therefore not a drop-in for
@@ -45,7 +45,9 @@ The rest of this doc assumes **Path A**.
 zig-js already has (verified in `src/c_api.zig`): context lifecycle, evaluate,
 value predicates/conversions, `JSObjectMake`, property get/set/index,
 call/construct, `JSObjectMakeFunctionWithCallback` (host functions),
-`JSObjectMakeDeferredPromise`, `JSValueProtect/Unprotect`, string create/get.
+`JSValueProtect`/`JSValueUnprotect`, string create/get, and the `JSWorker*`
+extension. `JSObjectMakeDeferredPromise` is exported for ABI coverage, but it
+currently returns null and raises a `NotImplemented` exception.
 
 Missing primitives Home depends on heavily (each blocks a large class of corpus
 tests):

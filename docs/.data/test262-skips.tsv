@@ -1,0 +1,141 @@
+subtree	index	path	reason
+test/language/expressions/call	11	tco-member-args.js	tail-call-optimization
+test/language/expressions/call	28	tco-non-eval-with.js	tail-call-optimization
+test/language/expressions/call	36	tco-non-eval-function-dynamic.js	tail-call-optimization
+test/language/expressions/call	44	tco-non-eval-global.js	tail-call-optimization
+test/language/expressions/call	64	tco-call-args.js	tail-call-optimization
+test/language/expressions/call	72	tco-non-eval-function.js	tail-call-optimization
+test/language/expressions/class	48	cpn-class-expr-accessors-computed-property-name-from-await-expression.js	module+async/top-level-await harness
+test/language/expressions/class	96	cpn-class-expr-fields-methods-computed-property-name-from-await-expression.js	module+async/top-level-await harness
+test/language/expressions/class	1886	cpn-class-expr-fields-computed-property-name-from-await-expression.js	module+async/top-level-await harness
+test/language/expressions/class	4058	cpn-class-expr-computed-property-name-from-await-expression.js	module+async/top-level-await harness
+test/language/expressions/coalesce	5	tco-pos-undefined.js	tail-call-optimization
+test/language/expressions/coalesce	20	tco-pos-null.js	tail-call-optimization
+test/language/expressions/comma	2	tco-final.js	tail-call-optimization
+test/language/expressions/conditional	19	tco-pos.js	tail-call-optimization
+test/language/expressions/conditional	21	tco-cond.js	tail-call-optimization
+test/language/expressions/dynamic-import	0	eval-export-dflt-cls-named.js	module+async/top-level-await harness
+test/language/expressions/dynamic-import	4	assignment-expression/import-meta.js	module+async/top-level-await harness
+test/language/expressions/dynamic-import	29	reuse-namespace-object-from-import.js	module+async/top-level-await harness
+test/language/expressions/dynamic-import	31	eval-export-dflt-expr-cls-named.js	module+async/top-level-await harness
+test/language/expressions/dynamic-import	33	eval-export-dflt-expr-fn-anon.js	module+async/top-level-await harness
+test/language/expressions/dynamic-import	34	eval-export-dflt-expr-in.js	module+async/top-level-await harness
+test/language/expressions/dynamic-import	35	imported-self-update.js	module+async/top-level-await harness
+test/language/expressions/dynamic-import	39	namespace/promise-then-ns-get-nested-namespace-dflt-indirect.js	module+async/top-level-await harness
+test/language/expressions/dynamic-import	84	namespace/await-ns-get-nested-namespace-dflt-indirect.js	module+async/top-level-await harness
+test/language/expressions/dynamic-import	239	eval-export-dflt-expr-cls-name-meth.js	module+async/top-level-await harness
+test/language/expressions/dynamic-import	241	eval-export-dflt-expr-fn-named.js	module+async/top-level-await harness
+test/language/expressions/dynamic-import	242	eval-self-once-module.js	module+async/top-level-await harness
+test/language/expressions/dynamic-import	244	import-defer/import-defer-transitive-async-module/main.js	module+async/top-level-await harness
+test/language/expressions/dynamic-import	245	import-defer/import-defer-transitive-async-module/promise-prototype-then-not-called.js	module+async/top-level-await harness
+test/language/expressions/dynamic-import	246	import-defer/sync-dependency-of-deferred-async-module/main.js	module+async/top-level-await harness
+test/language/expressions/dynamic-import	247	import-defer/sync/main.js	module+async/top-level-await harness
+test/language/expressions/dynamic-import	248	import-defer/import-defer-async-module/main.js	module+async/top-level-await harness
+test/language/expressions/dynamic-import	251	catch/nested-async-function-await-eval-script-code-target.js	module+async/top-level-await harness
+test/language/expressions/dynamic-import	264	catch/nested-async-function-eval-script-code-target.js	module+async/top-level-await harness
+test/language/expressions/dynamic-import	265	catch/nested-do-while-eval-script-code-target.js	module+async/top-level-await harness
+test/language/expressions/dynamic-import	287	catch/nested-async-gen-await-eval-script-code-target.js	module+async/top-level-await harness
+test/language/expressions/dynamic-import	310	catch/nested-async-arrow-function-await-eval-script-code-target.js	module+async/top-level-await harness
+test/language/expressions/dynamic-import	330	catch/nested-block-labeled-eval-script-code-target.js	module+async/top-level-await harness
+test/language/expressions/dynamic-import	342	catch/nested-async-arrow-function-return-await-eval-script-code-target.js	module+async/top-level-await harness
+test/language/expressions/dynamic-import	363	catch/nested-function-import-catch-eval-script-code-target.js	module+async/top-level-await harness
+test/language/expressions/dynamic-import	364	catch/top-level-import-catch-eval-script-code-target.js	module+async/top-level-await harness
+test/language/expressions/dynamic-import	374	catch/nested-while-import-catch-eval-script-code-target.js	module+async/top-level-await harness
+test/language/expressions/dynamic-import	395	catch/nested-block-import-catch-eval-script-code-target.js	module+async/top-level-await harness
+test/language/expressions/dynamic-import	398	catch/nested-arrow-import-catch-eval-script-code-target.js	module+async/top-level-await harness
+test/language/expressions/dynamic-import	402	catch/nested-else-import-catch-eval-script-code-target.js	module+async/top-level-await harness
+test/language/expressions/dynamic-import	413	catch/nested-if-import-catch-eval-script-code-target.js	module+async/top-level-await harness
+test/language/expressions/dynamic-import	414	catch/nested-async-gen-return-await-eval-script-code-target.js	module+async/top-level-await harness
+test/language/expressions/dynamic-import	415	catch/nested-async-function-return-await-eval-script-code-target.js	module+async/top-level-await harness
+test/language/expressions/dynamic-import	426	eval-export-dflt-expr-gen-named.js	module+async/top-level-await harness
+test/language/expressions/dynamic-import	427	eval-export-dflt-cls-name-meth.js	module+async/top-level-await harness
+test/language/expressions/dynamic-import	937	eval-export-dflt-expr-cls-anon.js	module+async/top-level-await harness
+test/language/expressions/dynamic-import	939	eval-export-dflt-cls-anon.js	module+async/top-level-await harness
+test/language/expressions/dynamic-import	940	eval-export-dflt-expr-gen-anon.js	module+async/top-level-await harness
+test/language/expressions/logical-and	6	tco-right.js	tail-call-optimization
+test/language/expressions/logical-or	5	tco-right.js	tail-call-optimization
+test/language/expressions/object	264	cpn-obj-lit-computed-property-name-from-await-expression.js	module+async/top-level-await harness
+test/language/expressions/tagged-template	16	tco-call.js	tail-call-optimization
+test/language/expressions/tagged-template	22	tco-member.js	tail-call-optimization
+test/language/expressions/tco-pos.js	0	test/language/expressions/tco-pos.js	tail-call-optimization
+test/language/import	16	import-attributes/json-idempotency.js	module+async/top-level-await harness
+test/language/import	21	import-defer/evaluation-top-level-await/flattening-order/main.js	module+async/top-level-await harness
+test/language/import	22	import-defer/evaluation-top-level-await/import-defer-transitive-async-module/main.js	module+async/top-level-await harness
+test/language/import	23	import-defer/evaluation-top-level-await/sync-dependency-of-deferred-async-module/main.js	module+async/top-level-await harness
+test/language/import	24	import-defer/evaluation-top-level-await/import-defer-async-module/main.js	module+async/top-level-await harness
+test/language/import	102	import-defer/errors/get-other-while-dep-evaluating-async/main.js	module+async/top-level-await harness
+test/language/import	103	import-defer/errors/get-other-while-evaluating-async/main.js	module+async/top-level-await harness
+test/language/import	105	import-defer/errors/resolution-error/import-defer-of-missing-module-fails.js	module+async/top-level-await harness
+test/language/import	107	import-defer/errors/module-throws/defer-import-after-evaluation.js	module+async/top-level-await harness
+test/language/import	108	import-defer/errors/module-throws/third-party-evaluation-after-defer-import.js	module+async/top-level-await harness
+test/language/import	110	import-defer/errors/get-self-while-evaluating-async/main.js	module+async/top-level-await harness
+test/language/module-code	111	top-level-await/top-level-ticks-2.js	module+async/top-level-await harness
+test/language/module-code	112	top-level-await/top-level-ticks.js	module+async/top-level-await harness
+test/language/module-code	114	top-level-await/await-awaits-thenable-not-callable.js	module+async/top-level-await harness
+test/language/module-code	115	top-level-await/module-sync-import-async-resolution-ticks.js	module+async/top-level-await harness
+test/language/module-code	117	top-level-await/await-expr-new-expr-reject.js	module+async/top-level-await harness
+test/language/module-code	118	top-level-await/await-expr-regexp.js	module+async/top-level-await harness
+test/language/module-code	119	top-level-await/await-expr-resolution.js	module+async/top-level-await harness
+test/language/module-code	120	top-level-await/await-awaits-thenables.js	module+async/top-level-await harness
+test/language/module-code	121	top-level-await/dynamic-import-rejection.js	module+async/top-level-await harness
+test/language/module-code	123	top-level-await/await-expr-reject-throws.js	module+async/top-level-await harness
+test/language/module-code	124	top-level-await/module-import-unwrapped.js	module+async/top-level-await harness
+test/language/module-code	125	top-level-await/await-expr-new-expr.js	module+async/top-level-await harness
+test/language/module-code	127	top-level-await/await-awaits-thenables-that-throw.js	module+async/top-level-await harness
+test/language/module-code	128	top-level-await/rejection-order.js	module+async/top-level-await harness
+test/language/module-code	130	top-level-await/await-void-expr.js	module+async/top-level-await harness
+test/language/module-code	131	top-level-await/pending-async-dep-from-cycle.js	module+async/top-level-await harness
+test/language/module-code	132	top-level-await/if-await-expr.js	module+async/top-level-await harness
+test/language/module-code	133	top-level-await/dynamic-import-resolution.js	module+async/top-level-await harness
+test/language/module-code	136	top-level-await/unobservable-global-async-evaluation-count-reset.js	module+async/top-level-await harness
+test/language/module-code	137	top-level-await/module-graphs-does-not-hang.js	module+async/top-level-await harness
+test/language/module-code	138	top-level-await/async-module-does-not-block-sibling-modules.js	module+async/top-level-await harness
+test/language/module-code	139	top-level-await/void-await-expr.js	module+async/top-level-await harness
+test/language/module-code	141	top-level-await/new-await-parens.js	module+async/top-level-await harness
+test/language/module-code	143	top-level-await/fulfillment-order.js	module+async/top-level-await harness
+test/language/module-code	144	top-level-await/await-dynamic-import-resolution.js	module+async/top-level-await harness
+test/language/module-code	145	top-level-await/await-expr-func-expression.js	module+async/top-level-await harness
+test/language/module-code	146	top-level-await/while-dynamic-evaluation.js	module+async/top-level-await harness
+test/language/module-code	147	top-level-await/module-import-resolution.js	module+async/top-level-await harness
+test/language/module-code	360	top-level-await/module-async-import-async-resolution-ticks.js	module+async/top-level-await harness
+test/language/module-code	361	top-level-await/module-self-import-async-resolution-ticks.js	module+async/top-level-await harness
+test/language/module-code	454	verify-dfs.js	module+async/top-level-await harness
+test/language/statements/block	0	tco-stmt-list.js	tail-call-optimization
+test/language/statements/block	3	tco-stmt.js	tail-call-optimization
+test/language/statements/class	7	cpn-class-decl-fields-computed-property-name-from-await-expression.js	module+async/top-level-await harness
+test/language/statements/class	9	cpn-class-decl-fields-methods-computed-property-name-from-await-expression.js	module+async/top-level-await harness
+test/language/statements/class	459	cpn-class-decl-accessors-computed-property-name-from-await-expression.js	module+async/top-level-await harness
+test/language/statements/class	2147	cpn-class-decl-computed-property-name-from-await-expression.js	module+async/top-level-await harness
+test/language/statements/do-while	8	tco-body.js	tail-call-optimization
+test/language/statements/for	31	tco-lhs-body.js	tail-call-optimization
+test/language/statements/for	32	tco-var-body.js	tail-call-optimization
+test/language/statements/for	56	tco-let-body.js	tail-call-optimization
+test/language/statements/for	376	tco-const-body.js	tail-call-optimization
+test/language/statements/if	15	tco-if-body.js	tail-call-optimization
+test/language/statements/if	52	tco-else-body.js	tail-call-optimization
+test/language/statements/labeled	3	tco.js	tail-call-optimization
+test/language/statements/return	2	tco.js	tail-call-optimization
+test/language/statements/switch	1	tco-case-body.js	tail-call-optimization
+test/language/statements/switch	20	tco-dftl-body.js	tail-call-optimization
+test/language/statements/switch	24	tco-case-body-dflt.js	tail-call-optimization
+test/language/statements/try	60	tco-catch-finally.js	tail-call-optimization
+test/language/statements/try	86	tco-finally.js	tail-call-optimization
+test/language/statements/try	199	tco-catch.js	tail-call-optimization
+test/language/statements/while	14	tco-body.js	tail-call-optimization
+test/staging	343	sm/regress/regress-602621.js	unsupported SpiderMonkey staging prefix
+test/staging	476	sm/Date/dst-offset-caching-3-of-8.js	unsupported SpiderMonkey staging prefix
+test/staging	477	sm/Date/dst-offset-caching-2-of-8.js	unsupported SpiderMonkey staging prefix
+test/staging	482	sm/Date/dst-offset-caching-8-of-8.js	unsupported SpiderMonkey staging prefix
+test/staging	485	sm/Date/dst-offset-caching-1-of-8.js	unsupported SpiderMonkey staging prefix
+test/staging	488	sm/Date/dst-offset-caching-4-of-8.js	unsupported SpiderMonkey staging prefix
+test/staging	491	sm/Date/dst-offset-caching-5-of-8.js	unsupported SpiderMonkey staging prefix
+test/staging	496	sm/Date/dst-offset-caching-7-of-8.js	unsupported SpiderMonkey staging prefix
+test/staging	497	sm/Date/dst-offset-caching-6-of-8.js	unsupported SpiderMonkey staging prefix
+test/staging	936	sm/lexical-environment/block-scoped-functions-annex-b-arguments.js	unsupported SpiderMonkey staging prefix
+test/staging	1428	top-level-await/tla-hang-entry.js	module+async/top-level-await harness
+test/built-ins/Proxy	27	revocable/tco-fn-realm.js	tail-call-optimization
+test/built-ins/ShadowRealm	47	prototype/importValue/throws-if-import-value-does-not-exist.js	module+async/top-level-await harness
+test/built-ins/ShadowRealm	48	prototype/importValue/throws-typeerror-import-throws.js	module+async/top-level-await harness
+test/built-ins/ShadowRealm	49	prototype/importValue/import-value.js	module+async/top-level-await harness
+test/built-ins/ShadowRealm	54	prototype/importValue/throws-typeerror-import-syntax-error.js	module+async/top-level-await harness
+# total	139

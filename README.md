@@ -4,7 +4,7 @@ A **JavaScript engine written in pure Zig**, with a **JavaScriptCore C-API-compa
 
 `zig-js` is a small, embeddable engine for Zig applications, tools, and runtimes that want to own their JS stack. Use it directly as a Zig module, or link it in place of `JavaScriptCore.framework` for hosts that only need the implemented JSC C API subset.
 
-It tracks the ECMAScript spec closely and is graded against the **real [tc39/test262](https://github.com/tc39/test262) corpus**. The current configured runner passes every scored test it runs: **48,368 / 48,368 valid** and **4,669 / 4,669 negative**, with **0 parse**, **0 runtime**, and **0 host** failures. See [Conformance](#conformance) for the exact scope and the remaining skipped tests.
+It tracks the ECMAScript spec closely and is graded against the **real [tc39/test262](https://github.com/tc39/test262) corpus**. The current configured runner passes every scored test it runs: **48,369 / 48,369 valid** and **4,669 / 4,669 negative**, with **0 parse**, **0 runtime**, and **0 host** failures. See [Conformance](#conformance) for the exact scope and the remaining skipped tests.
 
 ```zig
 const js = @import("js");
@@ -38,27 +38,27 @@ The engine has **two execution tiers that share one object model**, so behavior 
 
 Top-level and function code compiles to bytecode and runs on the VM; any construct the compiler can't yet lower transparently falls back to the tree-walker. A shared microtask queue drives Promises and async jobs.
 
-> **Status: maturing.** The configured test262 corpus is green, including the core language, built-ins, `Intl`, `Temporal`, RegExp, modules, typed arrays, Atomics, and weak-reference surfaces that the runner currently exercises. That is not the same as "every ECMAScript corner is done": the runner still excludes unsupported harness shapes such as some module+async/top-level-await paths, `CanBlockIsFalse` tests, tail-call-optimization tests, and tests whose harness includes cannot be loaded.
+> **Status: maturing.** The configured test262 corpus is green, including the core language, built-ins, `Intl`, `Temporal`, RegExp, modules, typed arrays, Atomics, and weak-reference surfaces that the runner currently exercises. That is not the same as "every ECMAScript corner is done": the runner still excludes unsupported categories such as module+async/top-level-await harness cases, tail-call-optimization tests, and a small set of unsupported SpiderMonkey staging paths.
 
 ## Conformance
 
 Measured by `zig build test262` against the pinned tc39/test262 submodule. The score is split on two axes so a weak parser can't flatter itself — **valid** tests measure whether we can *run* a program, **negative** tests measure *strictness* (rejecting invalid input). Mixing them lets a parser "pass" negatives by failing to parse valid code too, so they're kept apart.
 
-Latest full parent run, after commit `8cd93bb9`:
+Latest full parent run, saved in `docs/.data/test262-run-2026-07-04.txt`:
 
 | axis | meaning | passing |
 | ---- | ------- | ------: |
-| **valid** | can we run the program? (scored configured corpus) | **48,368 / 48,368 (100.0%)** |
+| **valid** | can we run the program? (scored configured corpus) | **48,369 / 48,369 (100.0%)** |
 | negative | do we reject invalid input? (early errors) | **4,669 / 4,669 (100.0%)** |
 
-Failure shape on the valid axis: **0 parse failures**, **0 runtime failures**, **0 host failures**. The runner reported **140 skipped tests** for unsupported or unloadable harness shapes; those are excluded from the denominators above and should be treated as the next conformance frontier, not as implemented behavior.
+Failure shape on the valid axis: **0 parse failures**, **0 runtime failures**, **0 host failures**. The runner reported **139 skipped tests**; those are excluded from the denominators above and should be treated as the next conformance frontier, not as implemented behavior. The exact skip inventory is generated at `docs/.data/test262-skips.tsv`.
 
 Representative fully green areas from the same run include:
 
 | area | passing | area | passing |
 | ---- | ------: | ---- | ------: |
 | `test/language` | all listed subtrees 100% | `test/annexB` | 1,071 / 1,071 |
-| `test/intl402` | all listed subtrees 100% | `test/staging` | 1,466 / 1,466 |
+| `test/intl402` | all listed subtrees 100% | `test/staging` | 1,467 / 1,467 |
 | `Array` | 3,081 / 3,081 | `Object` | 3,411 / 3,411 |
 | `RegExp` | all listed subtrees 100% | `String` | 1,223 / 1,223 |
 | `Temporal` | 4,603 / 4,603 | `TypedArray` | 1,446 / 1,446 |
@@ -132,10 +132,11 @@ Implemented C-API symbols:
 - **Context lifecycle** — `JSGlobalContextCreate`, `ZJSGlobalContextCreateThreaded(gil)`, `JSGlobalContextRelease`/`Retain`, `JSContextGetGlobalObject`, `JSEvaluateScript`, `JSGarbageCollect`.
 - **Value inspection** — `JSValueGetType`, `JSValueIs*`, `JSValueIsEqual`/`StrictEqual`.
 - **Constructors & coercion** — `JSValueMake*`, `JSValueTo*`, `JSValueProtect`/`Unprotect`.
-- **Objects** — `JSObjectMake`, `JSObjectMakeArray`, `JSObjectGet`/`SetProperty`, `JSObjectGetPropertyAtIndex`, `JSObjectCallAsFunction`, `JSObjectCallAsConstructor`, `JSObjectMakeFunctionWithCallback`, `JSObjectIsFunction`/`IsConstructor`.
+- **Objects** — `JSObjectMake`, `JSObjectMakeArray`, `JSObjectMakeDeferredPromise`, `JSObjectGetProperty`/`SetProperty`, `JSObjectGetPropertyAtIndex`, `JSObjectCallAsFunction`, `JSObjectCallAsConstructor`, `JSObjectMakeFunctionWithCallback`, `JSObjectIsFunction`/`IsConstructor`.
 - **Strings** — `JSStringCreateWithUTF8CString`, `JSStringRetain`/`Release`, `JSStringGetLength`, `JSStringGetUTF8CString`.
+- **Worker extension** — `JSWorkerCreate`, `JSWorkerPostMessage`, `JSWorkerReceive`, `JSWorkerTerminate`, `JSWorkerRelease`.
 
-`JSObjectCallAsFunction`/`CallAsConstructor` drive the interpreter, so JS functions and the built-in `Error` constructors are callable across the C boundary; thrown JS values surface as the C-API `exception` out-param. `JSObjectMakeDeferredPromise` raises a `NotImplemented` exception until the deferred-promise plumbing lands.
+`JSObjectCallAsFunction`/`CallAsConstructor` drive the interpreter, so JS functions and the built-in `Error` constructors are callable across the C boundary; thrown JS values surface as the C-API `exception` out-param. `ZJSGlobalContextCreateThreaded` and `JSWorker*` are zig-js extensions rather than public JSC symbols. `JSObjectMakeDeferredPromise` is exported but raises a `NotImplemented` exception until the deferred-promise plumbing lands.
 
 ### Used by
 
