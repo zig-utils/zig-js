@@ -57,15 +57,24 @@ zig build threads-test-bin -Dtsan=true
 ./zig-out/bin/threads-test parallel-js one <allowlisted-case>
 ```
 
+Nightly and manual CI also run deeper TSan fuzz sweeps:
+
+```sh
+zig build threadfuzz -Dtsan=true -Dfuzz-iters=120
+zig build threadfuzz -Dtsan=true -Dfuzz-midgc=true -Dfuzz-iters=5
+zig build threadfuzz -Dtsan=true -Dfuzz-lifecycle=true -Dfuzz-iters=5
+```
+
 The corpus TSan sweep is sharded in CI and runs each allowlisted case in its own
 process to avoid TSan shadow-memory growth across a single long run. CI also
 runs TSan smoke seeds for the specialized mid-script-GC and lifecycle fuzzer
 profiles, so their hidden-root, parked-waiter, Worker, cleanup, termination,
 and async-join paths are covered by sanitizer instead of only by non-TSan
-breadth runs. These gates fail on engine-state races. JS-defined program-byte
-races are covered by narrow suppressions plus a suppression witness that proves
-the suppressions are both load-bearing and not hiding engine-state frames. The
-witness is
+breadth runs; the nightly/manual sweeps extend that same sanitizer coverage to
+more generated programs without making every PR pay the full cost. These gates
+fail on engine-state races. JS-defined program-byte races are covered by narrow
+suppressions plus a suppression witness that proves the suppressions are both
+load-bearing and not hiding engine-state frames. The witness is
 `tools/tsan-suppression-witness.sh`; run it after building
 `threads-test-bin -Dtsan=true` when changing `tsan-suppressions.txt`, raw
 TypedArray/shared-buffer access helpers, or the memory-model boundary.

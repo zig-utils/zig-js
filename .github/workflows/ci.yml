@@ -241,6 +241,42 @@ jobs:
         working-directory: zig-js
         run: tools/tsan-suppression-witness.sh
 
+  nightly-threadfuzz-tsan:
+    name: nightly-threadfuzz-tsan (${{ matrix.name }})
+    # Higher-iteration sanitizer expansion for issue #1's remaining roadmap.
+    # PRs/main pushes run the fast TSan smoke legs above; nightly/manual runs
+    # spend more time on the same default, mid-GC, and lifecycle profiles.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: default-120
+            cmd: zig build threadfuzz -Dtsan=true -Dfuzz-iters=120
+          - name: midgc-5
+            cmd: zig build threadfuzz -Dtsan=true -Dfuzz-midgc=true -Dfuzz-iters=5
+          - name: lifecycle-5
+            cmd: zig build threadfuzz -Dtsan=true -Dfuzz-lifecycle=true -Dfuzz-iters=5
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          path: zig-js
+      - uses: actions/checkout@v6
+        with:
+          repository: zig-utils/zig-regex
+          path: zig-regex
+      - uses: actions/checkout@v6
+        with:
+          repository: zig-utils/zig-gc
+          path: zig-gc
+      - uses: pantry-pm/pantry/packages/action@main
+        with:
+          packages: zig@0.17.0-dev
+      - name: ${{ matrix.name }}
+        working-directory: zig-js
+        run: ${{ matrix.cmd }}
+
   # Runs a curated test262 cross-section in GIL-free parallel contexts and asserts
   # it introduces no NEW failures vs the baseline (arena) engine — i.e. the
   # parallel-mode locked paths + GC-managed allocator are correct across a broad

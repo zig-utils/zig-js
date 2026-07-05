@@ -542,3 +542,6 @@ Every pull request and push to `main` runs:
 The no-GIL corpus TSan gate and specialized mid-GC/lifecycle TSan fuzzer smokes
 hard-block on engine-state races. The suppression
 witness proves the program-byte suppressions are both load-bearing and narrow.
+Nightly/manual CI additionally runs higher-iteration TSan fuzzer sweeps for the
+default, mid-script-GC, and lifecycle profiles so sanitizer depth keeps growing
+without making every PR pay the full runtime.
