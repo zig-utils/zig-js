@@ -27,7 +27,7 @@ Valid and negative tests measure different things, so they are scored separately
 
 Skipped tests are excluded from both denominators. The configured runner currently has **zero** unsupported metadata skips; `docs/.data/test262-skips.tsv` is still generated as the audit file.
 
-Files that are outside zig-js's configured conformance surface are removed before enumeration and listed in `docs/.data/test262-excluded.tsv`: exact async-module/TLA graph-ordering tests and non-normative SpiderMonkey staging stress/stale/pending files. Proper-tail-call coverage, dynamic-import catch-target behavior, import-defer async-module behavior outside the exact flattening-order probe, plain modules, most module+async/top-level-await tests, plain async tests, and `CanBlockIsFalse` tests are part of the runner where supported.
+Files that are outside zig-js's configured conformance surface are removed before enumeration and listed in `docs/.data/test262-excluded.tsv`: non-normative SpiderMonkey staging stress/stale/pending files. Proper-tail-call coverage, dynamic-import catch-target behavior, import-defer async-module behavior, plain modules, module+async/top-level-await graph-ordering tests, plain async tests, and `CanBlockIsFalse` tests are part of the runner where supported.
 
 ## Current numbers
 

@@ -4,7 +4,7 @@ A JavaScript engine written in pure Zig, with a JavaScriptCore C-API-compatible 
 
 `zig-js` is a small embeddable engine for Zig applications, tools, experiments, and runtimes that want to own their JavaScript stack. Use it directly as a Zig module, or link `libzig-js.a` for hosts that only need the implemented public JavaScriptCore C API subset.
 
-The configured conformance runner is green against the pinned tc39/test262 corpus it scores: **48,486 / 48,486 valid** and **4,669 / 4,669 negative**, with **0 parse**, **0 runtime**, **0 host**, and **0 skipped** failures. That is a scoped result, not a claim of full ECMAScript completion: **22 non-goal files are excluded from enumeration** and tracked separately.
+The configured conformance runner is green against the pinned tc39/test262 corpus it scores: **48,497 / 48,497 valid** and **4,669 / 4,669 negative**, with **0 parse**, **0 runtime**, **0 host**, and **0 skipped** failures. That is a scoped result, not a claim of full ECMAScript completion: **11 non-goal files are excluded from enumeration** and tracked separately.
 
 ```zig
 const js = @import("js");
@@ -71,9 +71,8 @@ Some files are excluded before enumeration because they are outside zig-js's con
 
 | category | count |
 | -------- | ----: |
-| exact async-module/TLA graph-ordering tests | 11 |
 | non-normative SpiderMonkey staging stress/stale/pending tests | 11 |
-| **total excluded** | **22** |
+| **total excluded** | **11** |
 
 Representative green areas from the saved run:
 
@@ -126,9 +125,9 @@ The configured test262 coverage for these surfaces is green unless a case is exp
 
 **Control flow** - `if`, loops, `for-in`, `for-of`, `for await`, `switch`, labels, `break`, `continue`, `throw`, `try`, `catch`, `finally`, and using/disposal syntax covered by the configured runner.
 
-**Generators and async** - `function*`, `yield`, `yield*`, async functions, async generators, `await`, Promise jobs, microtask ordering, proper tail calls in strict return-position calls, and most module+async/top-level-await tests in the configured surface.
+**Generators and async** - `function*`, `yield`, `yield*`, async functions, async generators, `await`, Promise jobs, microtask ordering, proper tail calls in strict return-position calls, and module+async/top-level-await tests in the configured surface.
 
-**Modules** - imports, exports, default/named/namespace re-exports, `export *`, live bindings, namespace objects, `import.meta`, dynamic `import()`, dynamic-import catch-target behavior, `import defer` async-module behavior, and broad top-level-await coverage. Exact async-module/TLA graph ordering remains excluded.
+**Modules** - imports, exports, default/named/namespace re-exports, `export *`, live bindings, namespace objects, `import.meta`, dynamic `import()`, dynamic-import catch-target behavior, `import defer` async-module behavior, and top-level-await graph ordering covered by the configured runner.
 
 **Built-ins** - `Object`, `Function`, `Array`, `String`, `RegExp` via [`zig-regex`](../zig-regex), `Number`, `Boolean`, `Math`, `JSON`, `Symbol`, `Map`, `Set`, `WeakMap`, `WeakSet`, `Promise`, `Date`, errors, `Proxy`, `Reflect`, `globalThis`, typed arrays, `ArrayBuffer`, `SharedArrayBuffer`, `DataView`, `Atomics`, `WeakRef`, `FinalizationRegistry`, broad `Temporal`, and `Intl` coverage.
 
@@ -246,7 +245,6 @@ The README intentionally avoids duplicating the detailed thread/GC implementatio
 
 Do not read the green configured runner as "the whole JavaScript universe is finished." Known non-implemented or non-scored areas include:
 
-- exact async-module/TLA graph ordering listed in the exclusion TSV;
 - non-normative SpiderMonkey staging stress/stale/pending files listed in the exclusion TSV;
 - `JSObjectMakeDeferredPromise` behavior behind its exported C symbol;
 - full JavaScriptCore framework/private internals, Objective-C bridge, inspector/debugger APIs, and Bun/Home private JSC ABI;

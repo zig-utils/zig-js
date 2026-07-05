@@ -31,6 +31,8 @@ const cldr_tzalias = @import("cldr_tzalias.zig");
 
 const Node = ast.Node;
 const Value = value.Value;
+pub const DynamicImportResult = enum { success, failure, pending };
+const DynamicImportHook = *const fn (ctx: *anyopaque, self: *Interpreter, referrer: []const u8, specifier: []const u8, phase: []const u8, module_type: []const u8, out: *Value, capability: ?*promise.Promise) DynamicImportResult;
 
 extern "c" fn snprintf(noalias s: [*c]u8, maxlen: usize, noalias format: [*:0]const u8, ...) c_int;
 
@@ -1054,7 +1056,7 @@ pub const Interpreter = struct {
     /// script evaluation (where `import(...)` rejects).
     cur_module: []const u8 = "",
     dyn_import_ctx: ?*anyopaque = null,
-    dyn_import: ?*const fn (ctx: *anyopaque, self: *Interpreter, referrer: []const u8, specifier: []const u8, phase: []const u8, module_type: []const u8, out: *Value) bool = null,
+    dyn_import: ?DynamicImportHook = null,
     /// Deferred-evaluation trigger (set by the module driver): evaluates the
     /// `import defer` module identified by `module` (an opaque `*Context.Module`)
     /// the first time a binding of its deferred namespace is accessed. Idempotent
@@ -2793,6 +2795,7 @@ pub const Interpreter = struct {
                         // declaration whose value binds to the synthetic "*default*"
                         // (and its own name, when present, for self-reference).
                         .func_decl => |fnode| try self.makeFunction(fnode, self.env),
+                        .function => |fnode| if (fnode.is_default_export_decl) try self.makeFunction(fnode, self.env) else try self.eval(dx),
                         .class_expr => |c| try self.evalClass(
                             c.name,
                             if (c.name.len > 0 or c.inferred_name.len > 0) c.inferred_name else "default",
@@ -3995,7 +3998,7 @@ pub const Interpreter = struct {
         };
     }
 
-    fn makeFunction(self: *Interpreter, fnode: *const ast.FunctionNode, closure: *Environment) EvalError!Value {
+    pub fn makeFunction(self: *Interpreter, fnode: *const ast.FunctionNode, closure: *Environment) EvalError!Value {
         // The closure keeps `closure` (and its whole ancestor chain) reachable, so
         // an enclosing `for (let …)` loop must give each iteration its own binding
         // env rather than reusing one. Record that here (see `Environment.captured`).
@@ -4179,7 +4182,7 @@ pub const Interpreter = struct {
         return self.toStringV(kv);
     }
 
-    fn maybeNameAnon(self: *Interpreter, val: Value, init_node: *Node, name: []const u8) EvalError!void {
+    pub fn maybeNameAnon(self: *Interpreter, val: Value, init_node: *Node, name: []const u8) EvalError!void {
         if (name.len == 0) return;
         if (!isAnonFnDef(init_node)) return;
         if (!val.isObject() or !val.asObj().isCallableObject()) return;
@@ -6613,12 +6616,8 @@ pub const Interpreter = struct {
         listp.clearRetainingCapacity();
     }
 
-    /// `await expr` (synchronous-settling): if the awaited value is a promise,
-    /// drive the microtask queue until it settles, then return its value (or
-    /// throw its rejection). A non-promise (or thenable-free value) is returned
-    /// as-is. Not spec-faithful on ordering, but correct on values.
     fn evalAwait(self: *Interpreter, arg_node: *Node) EvalError!Value {
-        return self.awaitValue(try self.eval(arg_node));
+        return self.awaitValueSpec(try self.eval(arg_node));
     }
 
     /// `import.meta` — the surrounding module's meta-object (an ordinary
@@ -6649,6 +6648,31 @@ pub const Interpreter = struct {
         return self.finishImportCall(specv, optionsv, phase);
     }
 
+    const DynamicImportJob = struct {
+        hook: DynamicImportHook,
+        hook_ctx: *anyopaque,
+        referrer: []const u8,
+        specifier: []const u8,
+        phase: []const u8,
+        module_type: []const u8,
+        promise: *promise.Promise,
+    };
+
+    fn dynamicImportJobFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+        _ = this;
+        _ = args;
+        const self: *Interpreter = @ptrCast(@alignCast(ctx));
+        const fnobj = self.active_native orelse return Value.undef();
+        const data: *DynamicImportJob = @ptrCast(@alignCast(fnobj.private_data.?));
+        var out: Value = Value.undef();
+        switch (data.hook(data.hook_ctx, self, data.referrer, data.specifier, data.phase, data.module_type, &out, data.promise)) {
+            .success => try promise.resolve(self, data.promise, out),
+            .pending => {},
+            .failure => try promise.reject(self, data.promise, self.exception),
+        }
+        return Value.undef();
+    }
+
     /// Finish `import(specifier [, options])` after the argument expressions have
     /// already evaluated. Shared by the tree-walker and the bytecode VM so a
     /// `yield` inside a generator argument suspends before the import promise is
@@ -6668,15 +6692,27 @@ pub const Interpreter = struct {
             try promise.reject(self, p, self.exception);
             return Value.obj(pobj);
         };
-        // Resolve+load the module synchronously through the host (set by the
-        // module driver). With no host (plain script), reject with a TypeError.
+        // Resolve+load the module from the PromiseJobs queue. Argument
+        // evaluation/coercion above is immediate, but the module graph itself
+        // cannot preempt the currently evaluating module.
         if (self.dyn_import) |f| {
-            var out: Value = Value.undef();
-            if (f(self.dyn_import_ctx.?, self, self.cur_module, spec, phase, module_type, &out)) {
-                try promise.resolve(self, p, out);
-            } else {
-                try promise.reject(self, p, self.exception);
-            }
+            const data = try self.arena.create(DynamicImportJob);
+            data.* = .{
+                .hook = f,
+                .hook_ctx = self.dyn_import_ctx.?,
+                .referrer = self.cur_module,
+                .specifier = spec,
+                .phase = phase,
+                .module_type = module_type,
+                .promise = p,
+            };
+            const job = try gc_mod.allocObj(self.arena);
+            job.* = .{ .native = dynamicImportJobFn, .private_data = @ptrCast(data) };
+            try installNativeProps(self.arena, self.root_shape, job, "", 1);
+            const tick_obj = try promise.newPromise(self);
+            const tick = promise.promiseOf(Value.obj(tick_obj)).?;
+            _ = try promise.then(self, tick, Value.obj(job), Value.undef());
+            try promise.resolve(self, tick, Value.undef());
         } else {
             const err = try self.makeError("TypeError", "dynamic import is not available in this context");
             try promise.reject(self, p, err);
@@ -6718,14 +6754,36 @@ pub const Interpreter = struct {
     pub fn awaitValue(self: *Interpreter, v: Value) EvalError!Value {
         const wrapped = try promiseResolveValue(self, v);
         const p = promise.promiseOf(wrapped).?;
-        while (promise.snapshot(p).state == .pending) {
-            if (self.microtaskDequeue()) |job| {
-                self.current_microtask = job;
-                promise.runJob(self, job) catch |err| {
-                    self.current_microtask = null;
-                    return err;
-                };
+        return self.awaitPromiseSettledValue(p);
+    }
+
+    fn runOneMicrotask(self: *Interpreter) EvalError!bool {
+        if (self.microtaskDequeue()) |job| {
+            self.current_microtask = job;
+            promise.runJob(self, job) catch |err| {
                 self.current_microtask = null;
+                return err;
+            };
+            self.current_microtask = null;
+            return true;
+        }
+        return false;
+    }
+
+    /// Spec-facing `await`: Await always resumes through the PromiseJobs queue,
+    /// even when the wrapped value is already fulfilled. Run one queued job before
+    /// observing the wrapped promise's state, then use the legacy settling loop
+    /// for pending promises.
+    pub fn awaitValueSpec(self: *Interpreter, v: Value) EvalError!Value {
+        const wrapped = try promiseResolveValue(self, v);
+        const p = promise.promiseOf(wrapped).?;
+        _ = try self.runOneMicrotask();
+        return self.awaitPromiseSettledValue(p);
+    }
+
+    fn awaitPromiseSettledValue(self: *Interpreter, p: *promise.Promise) EvalError!Value {
+        while (promise.snapshot(p).state == .pending) {
+            if (try self.runOneMicrotask()) {
                 continue;
             }
             if (self.microtasks == null) break;
@@ -16087,8 +16145,12 @@ fn shadowRealmImportValueFn(ctx: *anyopaque, this: Value, args: []const Value) v
     const out_p = promise.promiseOf(Value.obj(out_obj)).?;
     if (self.dyn_import) |f| {
         var ns: Value = Value.undef();
-        if (f(self.dyn_import_ctx.?, self, self.cur_module, spec, "evaluation", "", &ns)) {
-            if (ns.isObject()) {
+        switch (f(self.dyn_import_ctx.?, self, self.cur_module, spec, "evaluation", "", &ns, null)) {
+            .success => {
+                if (!ns.isObject()) {
+                    try promise.reject(self, out_p, try self.makeError("TypeError", "ShadowRealm importValue did not produce a namespace"));
+                    return Value.obj(out_obj);
+                }
                 const has = try self.hasPropertyResult(ns.asObj(), export_name.asStr());
                 if (!has) {
                     try promise.reject(self, out_p, try self.makeError("TypeError", "ShadowRealm importValue export not found"));
@@ -16107,9 +16169,12 @@ fn shadowRealmImportValueFn(ctx: *anyopaque, this: Value, args: []const Value) v
                 };
                 try promise.resolve(self, out_p, wrapped);
                 return Value.obj(out_obj);
-            }
-            try promise.reject(self, out_p, try self.makeError("TypeError", "ShadowRealm importValue did not produce a namespace"));
-            return Value.obj(out_obj);
+            },
+            .pending => {
+                try promise.reject(self, out_p, try self.makeError("TypeError", "ShadowRealm importValue cannot wait for a pending module graph"));
+                return Value.obj(out_obj);
+            },
+            .failure => {},
         }
         try promise.reject(self, out_p, try self.makeError("TypeError", "ShadowRealm importValue module import failed"));
         self.exception = Value.undef();

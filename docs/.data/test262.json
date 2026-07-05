@@ -1,7 +1,7 @@
 {
   "valid": {
-    "passing": 48486,
-    "total": 48486,
+    "passing": 48497,
+    "total": 48497,
     "percentage": 100,
     "parseFail": 0,
     "runtimeFail": 0,
@@ -306,8 +306,8 @@
     },
     {
       "name": "language/expressions/dynamic-import",
-      "passing": 627,
-      "total": 627,
+      "passing": 628,
+      "total": 628,
       "percentage": 100,
       "parseFail": 0,
       "runtimeFail": 0,
@@ -765,8 +765,8 @@
     },
     {
       "name": "language/import",
-      "passing": 113,
-      "total": 113,
+      "passing": 114,
+      "total": 114,
       "percentage": 100,
       "parseFail": 0,
       "runtimeFail": 0,
@@ -801,8 +801,8 @@
     },
     {
       "name": "language/module-code",
-      "passing": 385,
-      "total": 385,
+      "passing": 394,
+      "total": 394,
       "percentage": 100,
       "parseFail": 0,
       "runtimeFail": 0,

@@ -28,9 +28,7 @@
 //!   - `flags: [raw]`        → run the body with no harness prepended
 //!   - `flags: [module]`     → run as an ES module through the module loader
 //!   - `flags: [async]`      → run with the `$DONE`/doneprint async sentinel
-//!   - `flags: [module, async]` → run with the module `$DONE` harness; exact
-//!     async-module/TLA graph-ordering cases outside zig-js's configured surface
-//!     are excluded before enumeration
+//!   - `flags: [module, async]` → run with the module `$DONE` harness
 //!   - tail-call-optimization metadata → run as part of the configured surface
 //!   - `flags: [CanBlockIsFalse]` → run with the main agent's [[CanBlock]] false
 //!   - `includes: [...]`     → prepend the named harness files
@@ -68,20 +66,6 @@ const excluded_path_prefixes = [_]ExcludedPathPrefix{
     .{ .sub = "test/staging", .prefix = "sm/lexical-environment/block-scoped-functions-annex-b-arguments.js", .reason = "stale-spidermonkey-annex-b" },
     .{ .sub = "test/staging", .prefix = "sm/lexical-environment/block-scoped-functions-strict.js", .reason = "stale-spidermonkey-pending" },
 
-    // Remaining async-module cases that require exact TLA graph ordering not
-    // implemented by zig-js's synchronous module driver. Dynamic-import
-    // catch-target coverage and all import-defer async-module cases except the
-    // flattening-order probe are scored.
-    .{ .sub = "test/language/module-code", .prefix = "top-level-await/top-level-ticks", .reason = "async-module-ordering" },
-    .{ .sub = "test/language/module-code", .prefix = "top-level-await/rejection-order.js", .reason = "async-module-ordering" },
-    .{ .sub = "test/language/module-code", .prefix = "top-level-await/unobservable-global-async-evaluation-count-reset.js", .reason = "async-module-ordering" },
-    .{ .sub = "test/language/module-code", .prefix = "top-level-await/async-module-does-not-block-sibling-modules.js", .reason = "async-module-ordering" },
-    .{ .sub = "test/language/module-code", .prefix = "top-level-await/fulfillment-order.js", .reason = "async-module-ordering" },
-    .{ .sub = "test/language/module-code", .prefix = "top-level-await/module-async-import-async-resolution-ticks.js", .reason = "async-module-ordering" },
-    .{ .sub = "test/language/module-code", .prefix = "top-level-await/module-self-import-async-resolution-ticks.js", .reason = "async-module-ordering" },
-    .{ .sub = "test/language/module-code", .prefix = "verify-dfs.js", .reason = "async-module-ordering" },
-    .{ .sub = "test/language/expressions/dynamic-import", .prefix = "eval-self-once-module.js", .reason = "async-module-ordering" },
-    .{ .sub = "test/language/import", .prefix = "import-defer/evaluation-top-level-await/flattening-order/main.js", .reason = "async-module-ordering" },
 };
 // The Iterator-helper subtrees used to be excluded here because a `next`-accessor
 // that returned a fresh generator each read caused unbounded iteration. With

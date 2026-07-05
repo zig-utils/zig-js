@@ -17,6 +17,7 @@ const gil_mod = @import("gil.zig");
 const jsthread = @import("jsthread.zig");
 const stack_scan = @import("stack_scan.zig");
 const agent = @import("agent.zig");
+const promise = @import("promise.zig");
 
 pub const RunError = interp.EvalError || @import("parser.zig").ParseError;
 
@@ -954,6 +955,11 @@ pub const Context = struct {
     /// (dynamic import) can resolve+load+evaluate further modules on demand.
     mod_host: ?ModuleHost = null,
     mod_cache: ?*std.StringHashMapUnmanaged(*Module) = null,
+    module_dependency_depth: usize = 0,
+    deferred_async_queue: std.ArrayListUnmanaged(*Module) = .empty,
+    deferred_async_started: std.ArrayListUnmanaged(*Module) = .empty,
+    parent_resume_depth: usize = 0,
+    completed_parent_queue: std.ArrayListUnmanaged(*Module) = .empty,
     /// Referrer path for runtime `import()` issued from top-level *script* code
     /// (a `flags:[module]`-free test). When `mod_host` is set, `evaluate` wires
     /// the dynamic-import hook using this as the importing script's path, so
@@ -1954,12 +1960,43 @@ pub const Context = struct {
         evaluated: bool = false, // [[Status]] reached ~evaluated~ (completed, even if it threw)
         eval_error: ?Value = null, // cached evaluation error for repeated Evaluate()
         has_tla: bool = false,
+        eval_index: usize = 0,
+        body_hoisted: bool = false,
+        async_suspended: bool = false,
+        waiting_on_deps: bool = false,
+        pending_await: ModuleAwait = .none,
+        async_parents: std.ArrayListUnmanaged(*Module) = .empty,
+        dynamic_waiters: std.ArrayListUnmanaged(ModuleNamespaceWaiter) = .empty,
+        completion_promise: ?*promise.Promise = null,
+        cycle_root: ?*Module = null,
         // A synthetic module (`import x from "m" with { type: "json"|"text" }`):
         // its raw source, turned into the sole `default` export at evaluation
         // time per `syn_type` ("json" → JSON.parse, "text" → the string itself).
         // Null for an ordinary JS module (`items` holds its AST instead).
         syn_source: ?[]const u8 = null,
         syn_type: []const u8 = "",
+    };
+
+    const ModuleAwait = union(enum) {
+        none,
+        discard,
+        binding: struct { name: []const u8, kind: ast.DeclKind },
+        default_export,
+    };
+
+    const ModuleAwaitResume = struct {
+        ctx: *Context,
+        module: *Module,
+        rejected: bool,
+    };
+
+    const ModuleNamespaceResume = struct {
+        namespace: *value.Object,
+    };
+
+    const ModuleNamespaceWaiter = struct {
+        capability: *promise.Promise,
+        namespace: *value.Object,
     };
 
     fn isSyntheticModuleType(module_type: []const u8) bool {
@@ -2004,6 +2041,10 @@ pub const Context = struct {
         defer {
             self.mod_cache = null;
             self.mod_host = null;
+            self.deferred_async_queue.clearRetainingCapacity();
+            self.deferred_async_started.clearRetainingCapacity();
+            self.completed_parent_queue.clearRetainingCapacity();
+            self.parent_resume_depth = 0;
         }
         machine.dyn_import = dynImportHook;
         machine.dyn_import_ctx = self;
@@ -2012,6 +2053,8 @@ pub const Context = struct {
         // Populate any namespace objects after the whole graph has evaluated, so
         // every exported binding holds its final value.
         const outcome = self.evalModule(&machine, root);
+        const module_started = if (outcome) |_| true else |_| false;
+        if (module_started) try self.drainUntilModuleSettled(&machine, root);
         machine.drainMicrotasks() catch {};
         machine.settleAsyncWaiters();
         machine.drainFinalizationCleanupJobs() catch {};
@@ -2237,7 +2280,27 @@ pub const Context = struct {
         switch (d.*) {
             .func_decl => |f| try m.exports.put(a, f.name, .{ .local = f.name }),
             .var_decl => |v| try m.exports.put(a, v.name, .{ .local = v.name }),
+            .destructure_decl => |dd| {
+                var names: std.ArrayListUnmanaged([]const u8) = .empty;
+                try modulePatternBoundNames(a, dd.pattern, &names);
+                for (names.items) |name| try m.exports.put(a, name, .{ .local = name });
+            },
             .decl_group => |group| for (group) |g| try declaredExportNames(self, m, g),
+            else => {},
+        }
+    }
+
+    fn modulePatternBoundNames(a: std.mem.Allocator, node: *const ast.Node, out: *std.ArrayListUnmanaged([]const u8)) !void {
+        switch (node.*) {
+            .identifier => |name| try out.append(a, name),
+            .obj_pattern => |p| {
+                for (p.props) |prop| try modulePatternBoundNames(a, prop.target, out);
+                if (p.rest) |rest| try modulePatternBoundNames(a, rest, out);
+            },
+            .arr_pattern => |p| {
+                for (p.elems) |elem| if (elem.target) |target| try modulePatternBoundNames(a, target, out);
+                if (p.rest) |rest| try modulePatternBoundNames(a, rest, out);
+            },
             else => {},
         }
     }
@@ -2397,6 +2460,7 @@ pub const Context = struct {
         // runs, so observing them through the namespace (e.g. a circular or self
         // import) throws a ReferenceError until they are initialized.
         for (m.items) |item| self.instantiateLexical(m, item);
+        try self.instantiateModuleFunctions(m);
         // A synthetic module's sole `default` binding is in TDZ until its
         // evaluation materializes it (so observing it before then is a
         // ReferenceError).
@@ -2409,6 +2473,11 @@ pub const Context = struct {
         const tdz = Value.obj(self.tdz_marker);
         switch (item.*) {
             .var_decl => |v| if (v.kind != .@"var") m.env.put(v.name, tdz) catch {},
+            .destructure_decl => |d| if (d.kind != .@"var") {
+                var names: std.ArrayListUnmanaged([]const u8) = .empty;
+                modulePatternBoundNames(self.arena(), d.pattern, &names) catch return;
+                for (names.items) |name| m.env.put(name, tdz) catch {};
+            },
             .decl_group => |g| for (g) |s| self.instantiateLexical(m, s),
             .export_decl => |e| {
                 if (e.declaration) |d| self.instantiateLexical(m, d);
@@ -2418,6 +2487,44 @@ pub const Context = struct {
                         if (e.default_name.len > 0) m.env.put(e.default_name, tdz) catch {};
                     },
                     else => m.env.put("*default*", tdz) catch {},
+                };
+            },
+            else => {},
+        }
+    }
+
+    fn instantiateModuleFunctions(self: *Context, m: *Module) RunError!void {
+        var machine = self.interpreter();
+        machine.env = m.env;
+        machine.strict = true;
+        machine.cur_module = m.path;
+        machine.import_meta_slot = &m.import_meta_slot;
+        machine.import_meta_obj = m.import_meta_slot.obj;
+        for (m.items) |item| try self.instantiateModuleFunctionItem(&machine, m, item);
+    }
+
+    fn instantiateModuleFunctionItem(self: *Context, machine: *interp.Interpreter, m: *Module, item: *ast.Node) interp.EvalError!void {
+        switch (item.*) {
+            .func_decl => |fnode| try m.env.put(fnode.name, try machine.makeFunction(fnode, m.env)),
+            .decl_group => |group| for (group) |g| try self.instantiateModuleFunctionItem(machine, m, g),
+            .export_decl => |e| {
+                if (e.declaration) |d| try self.instantiateModuleFunctionItem(machine, m, d);
+                if (e.default_expr) |dx| switch (dx.*) {
+                    .func_decl => |fnode| {
+                        const v = try machine.makeFunction(fnode, m.env);
+                        try m.env.put("*default*", v);
+                        if (e.default_name.len > 0) try m.env.put(e.default_name, v);
+                    },
+                    .function => |fnode| if (fnode.is_default_export_decl) {
+                        const v = try machine.makeFunction(fnode, m.env);
+                        if (e.default_name.len > 0) {
+                            try m.env.put(e.default_name, v);
+                        } else {
+                            try machine.maybeNameAnon(v, dx, "default");
+                        }
+                        try m.env.put("*default*", v);
+                    },
+                    else => {},
                 };
             },
             else => {},
@@ -2437,17 +2544,45 @@ pub const Context = struct {
         }
         if (m.eval_started) return;
         m.eval_started = true;
-        defer m.evaluated = true; // reaches ~evaluated~ on completion, even on a throw
-        self.evalModuleBody(machine, m) catch |err| {
+        self.evalModuleDependencies(machine, m) catch |err| {
             if (err == error.Throw) {
                 m.eval_error = machine.exception;
                 self.exception = machine.exception;
+                m.evaluated = true;
             }
             return err;
         };
+        if (!try self.waitModuleDependencies(machine, m)) return;
+        try self.evalModuleBody(machine, m);
     }
 
-    fn evalModuleBody(self: *Context, machine: *interp.Interpreter, m: *Module) interp.EvalError!void {
+    fn finishModuleError(self: *Context, machine: *interp.Interpreter, m: *Module, err: interp.EvalError) interp.EvalError {
+        if (err == error.Throw) {
+            m.eval_error = machine.exception;
+            self.exception = machine.exception;
+            m.evaluated = true;
+            self.rejectModuleNamespaceWaiters(machine, m, machine.exception) catch {};
+            if (m.completion_promise) |p| promise.reject(machine, p, machine.exception) catch {};
+            self.rejectModuleParents(machine, m, machine.exception) catch {};
+        }
+        return err;
+    }
+
+    fn finishModuleSuccess(self: *Context, machine: *interp.Interpreter, m: *Module) interp.EvalError!void {
+        if (m.evaluated) return;
+        m.evaluated = true;
+        try self.resolveModuleNamespaceWaiters(machine, m);
+        if (m.completion_promise) |p| try promise.resolve(machine, p, Value.undef());
+        if (self.parent_resume_depth > 0) {
+            try self.appendUniqueModule(&self.completed_parent_queue, m);
+            return;
+        }
+        try self.resumeModuleParents(machine, m);
+    }
+
+    fn evalModuleDependencies(self: *Context, machine: *interp.Interpreter, m: *Module) interp.EvalError!void {
+        self.module_dependency_depth += 1;
+        defer self.module_dependency_depth -= 1;
         if (m.syn_source) |src| {
             // The synthetic module's `default` export: JSON.parse(source) for a
             // JSON module, the raw source string for text, or an immutable
@@ -2459,6 +2594,7 @@ pub const Context = struct {
             else
                 Value.str(src);
             try m.env.put("*default*", def);
+            try self.finishModuleSuccess(machine, m);
             return;
         }
         for (m.items) |item| switch (item.*) {
@@ -2477,7 +2613,65 @@ pub const Context = struct {
             .export_decl => |e| if (e.from.len > 0) try self.evalModule(machine, m.deps.get(e.from).?),
             else => {},
         };
+        if (self.module_dependency_depth == 1) try self.drainDeferredAsyncWork(machine);
+    }
 
+    fn waitModuleDependencies(self: *Context, machine: *interp.Interpreter, m: *Module) interp.EvalError!bool {
+        for (m.items) |item| switch (item.*) {
+            .import_decl => |imp| {
+                if (imp.deferred) continue;
+                const source_only = imp.entries.len == 1 and isSourceImport(imp.entries[0]);
+                if (source_only and isHostModuleSourceSpecifier(imp.specifier)) continue;
+                if (!try self.waitModuleDependency(machine, m, m.deps.get(imp.specifier).?)) return false;
+            },
+            .export_decl => |e| if (e.from.len > 0) {
+                if (!try self.waitModuleDependency(machine, m, m.deps.get(e.from).?)) return false;
+            },
+            else => {},
+        };
+        m.waiting_on_deps = false;
+        return true;
+    }
+
+    fn waitModuleDependency(self: *Context, machine: *interp.Interpreter, parent: *Module, dep0: *Module) interp.EvalError!bool {
+        if (dep0 == parent) return true;
+        if (!dep0.evaluated and (dep0.async_suspended or dep0.waiting_on_deps)) {
+            try self.appendUniqueModule(&dep0.async_parents, parent);
+            parent.waiting_on_deps = true;
+            return false;
+        }
+        var dep = dep0;
+        if (dep0.cycle_root) |root| {
+            if (!root.evaluated) dep = root;
+        }
+        if (dep.eval_started and !dep.evaluated and !dep.async_suspended and !dep.waiting_on_deps) {
+            parent.cycle_root = dep;
+            return true;
+        }
+        if (!dep.evaluated and (dep.async_suspended or dep.waiting_on_deps)) {
+            try self.appendUniqueModule(&dep.async_parents, parent);
+            parent.waiting_on_deps = true;
+            return false;
+        }
+        try self.drainUntilModuleSettled(machine, dep);
+        if (dep.evaluated) {
+            if (dep.eval_error) |err| {
+                machine.exception = err;
+                self.exception = err;
+                return error.Throw;
+            }
+            return true;
+        }
+        if (dep.async_suspended or dep.waiting_on_deps) {
+            try self.appendUniqueModule(&dep.async_parents, parent);
+            parent.waiting_on_deps = true;
+            return false;
+        }
+        return true;
+    }
+
+    fn evalModuleBody(self: *Context, machine: *interp.Interpreter, m: *Module) interp.EvalError!void {
+        if (m.evaluated or m.async_suspended) return;
         const saved_env = machine.env;
         const saved_this = machine.this_value;
         const saved_mod = machine.cur_module;
@@ -2495,7 +2689,135 @@ pub const Context = struct {
             machine.import_meta_slot = saved_import_meta_slot;
             machine.import_meta_obj = saved_import_meta_obj;
         }
-        _ = try machine.evalStatements(m.items);
+        if (!m.body_hoisted) {
+            try machine.hoistVarNames(m.items);
+            m.body_hoisted = true;
+        }
+        while (m.eval_index < m.items.len) {
+            const item = m.items[m.eval_index];
+            if (try self.trySuspendModuleItem(machine, m, item)) return;
+            _ = machine.eval(item) catch |err| return self.finishModuleError(machine, m, err);
+            m.eval_index += 1;
+        }
+        try self.finishModuleSuccess(machine, m);
+    }
+
+    fn trySuspendModuleItem(self: *Context, machine: *interp.Interpreter, m: *Module, item: *ast.Node) interp.EvalError!bool {
+        switch (item.*) {
+            .expr_stmt => |expr| if (expr.* == .await_expr) {
+                try self.suspendModuleAwait(machine, m, expr.await_expr.argument, .discard);
+                return true;
+            },
+            .var_decl => |v| if (v.init) |init| if (init.* == .await_expr) {
+                try self.suspendModuleAwait(machine, m, init.await_expr.argument, .{ .binding = .{ .name = v.name, .kind = v.kind } });
+                return true;
+            },
+            .export_decl => |e| {
+                if (e.default_expr) |dx| if (dx.* == .await_expr) {
+                    try self.suspendModuleAwait(machine, m, dx.await_expr.argument, .default_export);
+                    return true;
+                };
+                if (e.declaration) |decl| if (decl.* == .var_decl) {
+                    const v = decl.var_decl;
+                    if (v.init) |init| if (init.* == .await_expr) {
+                        try self.suspendModuleAwait(machine, m, init.await_expr.argument, .{ .binding = .{ .name = v.name, .kind = v.kind } });
+                        return true;
+                    };
+                };
+            },
+            else => {},
+        }
+        return false;
+    }
+
+    fn suspendModuleAwait(self: *Context, machine: *interp.Interpreter, m: *Module, arg: *ast.Node, kind: ModuleAwait) interp.EvalError!void {
+        const awaited_value = try machine.eval(arg);
+        const wrapped = interp.promiseResolveValue(machine, awaited_value) catch |err| return self.finishModuleError(machine, m, err);
+        const p = promise.promiseOf(wrapped).?;
+        const onf = try gc_mod.allocObj(self.arena());
+        const fdata = try self.arena().create(ModuleAwaitResume);
+        fdata.* = .{ .ctx = self, .module = m, .rejected = false };
+        onf.* = .{ .native = moduleAwaitResume, .private_data = @ptrCast(fdata) };
+        try interp.installNativeProps(self.arena(), machine.root_shape, onf, "", 1);
+        const onr = try gc_mod.allocObj(self.arena());
+        const rdata = try self.arena().create(ModuleAwaitResume);
+        rdata.* = .{ .ctx = self, .module = m, .rejected = true };
+        onr.* = .{ .native = moduleAwaitResume, .private_data = @ptrCast(rdata) };
+        try interp.installNativeProps(self.arena(), machine.root_shape, onr, "", 1);
+        m.pending_await = kind;
+        m.async_suspended = true;
+        _ = try promise.then(machine, p, Value.obj(onf), Value.obj(onr));
+    }
+
+    fn moduleAwaitResume(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+        _ = this;
+        const machine: *interp.Interpreter = @ptrCast(@alignCast(ctx));
+        const data: *ModuleAwaitResume = @ptrCast(@alignCast(machine.active_native.?.private_data.?));
+        const value_arg = if (args.len > 0) args[0] else Value.undef();
+        try data.ctx.resumeModuleAwait(machine, data.module, data.rejected, value_arg);
+        return Value.undef();
+    }
+
+    fn resumeModuleAwait(self: *Context, machine: *interp.Interpreter, m: *Module, rejected: bool, value_arg: Value) interp.EvalError!void {
+        if (m.evaluated) return;
+        m.async_suspended = false;
+        if (rejected) {
+            machine.exception = value_arg;
+            m.eval_error = value_arg;
+            self.exception = value_arg;
+            m.evaluated = true;
+            try self.rejectModuleNamespaceWaiters(machine, m, value_arg);
+            if (m.completion_promise) |p| try promise.reject(machine, p, value_arg);
+            try self.rejectModuleParents(machine, m, value_arg);
+            return;
+        }
+        try self.completeModuleAwait(machine, m, value_arg);
+        m.pending_await = .none;
+        m.eval_index += 1;
+        try self.evalModuleBody(machine, m);
+    }
+
+    fn completeModuleAwait(self: *Context, machine: *interp.Interpreter, m: *Module, value_arg: Value) interp.EvalError!void {
+        _ = self;
+        switch (m.pending_await) {
+            .none, .discard => {},
+            .binding => |b| switch (b.kind) {
+                .@"const" => try m.env.putConst(b.name, value_arg),
+                else => try m.env.put(b.name, value_arg),
+            },
+            .default_export => try m.env.put("*default*", value_arg),
+        }
+        _ = machine;
+    }
+
+    fn drainUntilModuleSettled(self: *Context, machine: *interp.Interpreter, m: *Module) interp.EvalError!void {
+        var rounds: usize = 0;
+        while (!m.evaluated and rounds < 10_000) : (rounds += 1) {
+            if (m.eval_error) |err| {
+                machine.exception = err;
+                self.exception = err;
+                return error.Throw;
+            }
+            const before = self.microtaskPendingLen(machine);
+            if (before == 0 and !m.async_suspended) return;
+            try machine.drainMicrotasks();
+            machine.settleAsyncWaiters();
+            const after = self.microtaskPendingLen(machine);
+            if (after == 0 and before == 0) return;
+        }
+        if (m.eval_error) |err| {
+            machine.exception = err;
+            self.exception = err;
+            return error.Throw;
+        }
+    }
+
+    fn microtaskPendingLen(self: *Context, machine: *interp.Interpreter) usize {
+        _ = self;
+        const q = machine.microtasks orelse return 0;
+        machine.lockMicrotasks();
+        defer machine.unlockMicrotasks();
+        return q.pendingLen();
     }
 
     /// Build (or return) the namespace exotic object for `module`. Created empty
@@ -2556,7 +2878,160 @@ pub const Context = struct {
         var seen: std.ArrayListUnmanaged(*Module) = .empty;
         var deps: std.ArrayListUnmanaged(*Module) = .empty;
         try self.gatherDeferredAsyncDependencies(module, &seen, &deps);
-        for (deps.items) |dep| try self.evalModule(machine, dep);
+        for (deps.items) |dep| {
+            if (try self.moduleHasPendingStartedDependency(dep)) {
+                try self.appendUniqueModule(&self.deferred_async_queue, dep);
+            } else {
+                try self.evalModule(machine, dep);
+                try self.appendUniqueModule(&self.deferred_async_started, dep);
+            }
+        }
+    }
+
+    fn appendUniqueModule(self: *Context, list: *std.ArrayListUnmanaged(*Module), module: *Module) !void {
+        for (list.items) |m| if (m == module) return;
+        try list.append(self.arena(), module);
+    }
+
+    fn moduleHasPendingStartedDependency(self: *Context, module: *Module) interp.EvalError!bool {
+        var seen: std.ArrayListUnmanaged(*Module) = .empty;
+        return self.moduleHasPendingStartedDependencyInner(module, &seen);
+    }
+
+    fn moduleHasPendingStartedDependencyInner(self: *Context, module: *Module, seen: *std.ArrayListUnmanaged(*Module)) interp.EvalError!bool {
+        for (seen.items) |m| if (m == module) return false;
+        try seen.append(self.arena(), module);
+        for (module.items) |item| switch (item.*) {
+            .import_decl => |imp| {
+                if (imp.deferred) continue;
+                if (imp.entries.len == 1 and isSourceImport(imp.entries[0])) continue;
+                const dep = module.deps.get(imp.specifier).?;
+                if (dep.eval_started and !dep.evaluated) return true;
+                if (try self.moduleHasPendingStartedDependencyInner(dep, seen)) return true;
+            },
+            .export_decl => |e| if (e.from.len > 0) {
+                const dep = module.deps.get(e.from).?;
+                if (dep.eval_started and !dep.evaluated) return true;
+                if (try self.moduleHasPendingStartedDependencyInner(dep, seen)) return true;
+            },
+            else => {},
+        };
+        return false;
+    }
+
+    fn resumeModuleParents(self: *Context, machine: *interp.Interpreter, m: *Module) interp.EvalError!void {
+        self.parent_resume_depth += 1;
+        for (m.async_parents.items) |parent| {
+            if (parent.evaluated) continue;
+            parent.waiting_on_deps = false;
+            if (try self.waitModuleDependencies(machine, parent)) {
+                try self.evalModuleBody(machine, parent);
+            }
+        }
+        m.async_parents.clearRetainingCapacity();
+        self.parent_resume_depth -= 1;
+        if (self.parent_resume_depth == 0) {
+            while (self.completed_parent_queue.items.len > 0) {
+                const completed = self.completed_parent_queue.orderedRemove(0);
+                try self.resumeModuleParents(machine, completed);
+            }
+        }
+    }
+
+    fn rejectModuleParents(self: *Context, machine: *interp.Interpreter, m: *Module, reason: Value) interp.EvalError!void {
+        for (m.async_parents.items) |parent| {
+            if (parent.evaluated) continue;
+            parent.eval_error = reason;
+            parent.evaluated = true;
+            try self.rejectModuleNamespaceWaiters(machine, parent, reason);
+            if (parent.completion_promise) |p| try promise.reject(machine, p, reason);
+            try self.rejectModuleParents(machine, parent, reason);
+        }
+        m.async_parents.clearRetainingCapacity();
+    }
+
+    fn appendModuleNamespaceWaiter(self: *Context, m: *Module, capability: *promise.Promise, ns: *value.Object) interp.EvalError!void {
+        try m.dynamic_waiters.append(self.arena(), .{ .capability = capability, .namespace = ns });
+    }
+
+    fn resolveModuleNamespaceWaiters(self: *Context, machine: *interp.Interpreter, m: *Module) interp.EvalError!void {
+        _ = self;
+        for (m.dynamic_waiters.items) |w| try promise.resolve(machine, w.capability, Value.obj(w.namespace));
+        m.dynamic_waiters.clearRetainingCapacity();
+    }
+
+    fn rejectModuleNamespaceWaiters(self: *Context, machine: *interp.Interpreter, m: *Module, reason: Value) interp.EvalError!void {
+        _ = self;
+        for (m.dynamic_waiters.items) |w| try promise.reject(machine, w.capability, reason);
+        m.dynamic_waiters.clearRetainingCapacity();
+    }
+
+    fn ensureModuleCompletionPromise(self: *Context, machine: *interp.Interpreter, m: *Module) interp.EvalError!*promise.Promise {
+        _ = self;
+        if (m.completion_promise) |p| return p;
+        const obj = try promise.newPromise(machine);
+        const p = promise.promiseOf(Value.obj(obj)).?;
+        m.completion_promise = p;
+        if (m.evaluated) {
+            if (m.eval_error) |err| try promise.reject(machine, p, err) else try promise.resolve(machine, p, Value.undef());
+        }
+        return p;
+    }
+
+    fn moduleNamespaceResume(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+        _ = this;
+        _ = args;
+        const machine: *interp.Interpreter = @ptrCast(@alignCast(ctx));
+        const fnobj = machine.active_native orelse return Value.undef();
+        const data: *ModuleNamespaceResume = @ptrCast(@alignCast(fnobj.private_data.?));
+        return Value.obj(data.namespace);
+    }
+
+    fn moduleNamespaceAfterCompletion(self: *Context, machine: *interp.Interpreter, m: *Module, ns: *value.Object) interp.EvalError!Value {
+        const p = try self.ensureModuleCompletionPromise(machine, m);
+        const onf = try gc_mod.allocObj(self.arena());
+        const data = try self.arena().create(ModuleNamespaceResume);
+        data.* = .{ .namespace = ns };
+        onf.* = .{ .native = moduleNamespaceResume, .private_data = @ptrCast(data) };
+        try interp.installNativeProps(self.arena(), machine.root_shape, onf, "", 0);
+        return try promise.then(machine, p, Value.obj(onf), Value.undef());
+    }
+
+    fn resolveModuleNamespaceAfterCompletion(self: *Context, machine: *interp.Interpreter, m: *Module, ns: *value.Object, capability: *promise.Promise) interp.EvalError!void {
+        const p = try self.ensureModuleCompletionPromise(machine, m);
+        const onf = try gc_mod.allocObj(self.arena());
+        const data = try self.arena().create(ModuleNamespaceResume);
+        data.* = .{ .namespace = ns };
+        onf.* = .{ .native = moduleNamespaceResume, .private_data = @ptrCast(data) };
+        try interp.installNativeProps(self.arena(), machine.root_shape, onf, "", 0);
+        const nr = try promise.nativeResolveReject(machine, capability);
+        try promise.performThen(machine, p, Value.obj(onf), Value.undef(), nr.resolve, nr.reject);
+    }
+
+    fn drainDeferredAsyncWork(self: *Context, machine: *interp.Interpreter) interp.EvalError!void {
+        while (self.deferred_async_queue.items.len > 0) {
+            var progressed = false;
+            var i: usize = 0;
+            while (i < self.deferred_async_queue.items.len) {
+                const dep = self.deferred_async_queue.items[i];
+                if (try self.moduleHasPendingStartedDependency(dep)) {
+                    i += 1;
+                    continue;
+                }
+                _ = self.deferred_async_queue.orderedRemove(i);
+                try self.evalModule(machine, dep);
+                try self.appendUniqueModule(&self.deferred_async_started, dep);
+                progressed = true;
+            }
+            if (progressed) continue;
+            if (self.microtaskPendingLen(machine) == 0) break;
+            try machine.drainMicrotasks();
+            machine.settleAsyncWaiters();
+        }
+        for (self.deferred_async_started.items) |dep| {
+            try self.drainUntilModuleSettled(machine, dep);
+        }
+        self.deferred_async_started.clearRetainingCapacity();
     }
 
     fn readyForSyncExecution(module: *Module, seen: *std.ArrayListUnmanaged(*Module), a: std.mem.Allocator) !bool {
@@ -2588,9 +3063,9 @@ pub const Context = struct {
     /// Runtime `import(specifier)` driver (wired into the interpreter as
     /// `dyn_import`): resolve the specifier relative to `referrer`, then load,
     /// link, and evaluate the target module, writing its namespace into `out`.
-    /// Returns false (leaving the reason in `machine.exception`) on any failure,
-    /// so the caller rejects the dynamic-import promise.
-    fn dynImportHook(ctx: *anyopaque, machine: *interp.Interpreter, referrer: []const u8, specifier: []const u8, phase: []const u8, module_type: []const u8, out: *value.Value) bool {
+    /// Returns `.failure` (leaving the reason in `machine.exception`) on any
+    /// failure, so the caller rejects the dynamic-import promise.
+    fn dynImportHook(ctx: *anyopaque, machine: *interp.Interpreter, referrer: []const u8, specifier: []const u8, phase: []const u8, module_type: []const u8, out: *value.Value, capability: ?*promise.Promise) interp.DynamicImportResult {
         const self: *Context = @ptrCast(@alignCast(ctx));
         if (std.mem.eql(u8, phase, "source"))
             return self.dynImportFailKind(machine, "SyntaxError", "source phase dynamic import is not available");
@@ -2610,33 +3085,42 @@ pub const Context = struct {
             self.evalDeferredAsyncDependencies(machine, dep) catch return self.surfaceFail(machine);
             const dns = self.deferredNamespaceObject(dep) catch return self.surfaceFail(machine);
             out.* = Value.obj(dns);
-            return true;
+            return .success;
         }
         self.evalModule(machine, dep) catch return self.surfaceFail(machine);
+        if (!dep.evaluated) {
+            const ns = self.namespaceObject(dep) catch return self.surfaceFail(machine);
+            if (capability) |cap| {
+                self.appendModuleNamespaceWaiter(dep, cap, ns) catch return self.surfaceFail(machine);
+                return .pending;
+            }
+            out.* = self.moduleNamespaceAfterCompletion(machine, dep, ns) catch return self.surfaceFail(machine);
+            return .success;
+        }
         const ns = self.namespaceObject(dep) catch return self.surfaceFail(machine);
         self.fillNamespace(machine, dep, ns) catch return self.surfaceFail(machine);
         out.* = Value.obj(ns);
-        return true;
+        return .success;
     }
 
-    fn dynImportFail(self: *Context, machine: *interp.Interpreter, msg: []const u8) bool {
+    fn dynImportFail(self: *Context, machine: *interp.Interpreter, msg: []const u8) interp.DynamicImportResult {
         return self.dynImportFailKind(machine, "TypeError", msg);
     }
 
-    fn dynImportFailKind(self: *Context, machine: *interp.Interpreter, kind: []const u8, msg: []const u8) bool {
+    fn dynImportFailKind(self: *Context, machine: *interp.Interpreter, kind: []const u8, msg: []const u8) interp.DynamicImportResult {
         _ = self;
         machine.throwError(kind, msg) catch {};
-        return false;
+        return .failure;
     }
 
     /// A load/link/eval step already threw; surface its reason for rejection.
-    fn surfaceFail(self: *Context, machine: *interp.Interpreter) bool {
+    fn surfaceFail(self: *Context, machine: *interp.Interpreter) interp.DynamicImportResult {
         if (self.exception) |ex| {
             machine.exception = ex;
         } else {
             machine.throwError("SyntaxError", "Cannot parse module") catch {};
         }
-        return false;
+        return .failure;
     }
 
     /// A module namespace binding behind a live accessor: reads `name` in module

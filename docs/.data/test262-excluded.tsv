@@ -1,15 +1,4 @@
 subtree	index	path	reason
-test/language/expressions/dynamic-import	242	eval-self-once-module.js	async-module-ordering
-test/language/import	21	import-defer/evaluation-top-level-await/flattening-order/main.js	async-module-ordering
-test/language/module-code	111	top-level-await/top-level-ticks-2.js	async-module-ordering
-test/language/module-code	111	top-level-await/top-level-ticks.js	async-module-ordering
-test/language/module-code	126	top-level-await/rejection-order.js	async-module-ordering
-test/language/module-code	133	top-level-await/unobservable-global-async-evaluation-count-reset.js	async-module-ordering
-test/language/module-code	134	top-level-await/async-module-does-not-block-sibling-modules.js	async-module-ordering
-test/language/module-code	138	top-level-await/fulfillment-order.js	async-module-ordering
-test/language/module-code	354	top-level-await/module-async-import-async-resolution-ticks.js	async-module-ordering
-test/language/module-code	354	top-level-await/module-self-import-async-resolution-ticks.js	async-module-ordering
-test/language/module-code	446	verify-dfs.js	async-module-ordering
 test/staging	343	sm/regress/regress-602621.js	stale-spidermonkey-annex-b
 test/staging	475	sm/Date/dst-offset-caching-3-of-8.js	spidermonkey-date-stress
 test/staging	475	sm/Date/dst-offset-caching-2-of-8.js	spidermonkey-date-stress
@@ -21,4 +10,4 @@ test/staging	489	sm/Date/dst-offset-caching-7-of-8.js	spidermonkey-date-stress
 test/staging	489	sm/Date/dst-offset-caching-6-of-8.js	spidermonkey-date-stress
 test/staging	927	sm/lexical-environment/block-scoped-functions-annex-b-arguments.js	stale-spidermonkey-annex-b
 test/staging	927	sm/lexical-environment/block-scoped-functions-strict.js	stale-spidermonkey-pending
-# total	22
+# total	11
