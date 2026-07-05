@@ -29,10 +29,9 @@
 //!   - `flags: [module]`     → run as an ES module through the module loader
 //!   - `flags: [async]`      → run with the `$DONE`/doneprint async sentinel
 //!   - `flags: [module, async]` → run with the module `$DONE` harness; exact
-//!     async-module ordering/import-defer cases outside zig-js's configured
-//!     surface are excluded before enumeration
-//!   - tail-call-optimization metadata → excluded before enumeration because
-//!     zig-js does not implement proper-tail-call stack reuse
+//!     async-module/TLA graph-ordering cases outside zig-js's configured surface
+//!     are excluded before enumeration
+//!   - tail-call-optimization metadata → run as part of the configured surface
 //!   - `flags: [CanBlockIsFalse]` → run with the main agent's [[CanBlock]] false
 //!   - `includes: [...]`     → prepend the named harness files
 //!   - `negative: { type, phase }` → expect a parse/resolution error or throw
@@ -60,39 +59,19 @@ const unsupported_subtrees = [_][]const u8{};
 const UnsupportedPathPrefix = struct { sub: []const u8, prefix: []const u8 };
 const ExcludedPathPrefix = struct { sub: []const u8, prefix: []const u8, reason: []const u8 };
 const excluded_path_prefixes = [_]ExcludedPathPrefix{
-    // Proper tail calls are outside zig-js's configured conformance surface:
-    // these tests require 100k strict recursive tail calls without growing the
-    // call stack, while zig-js intentionally reports stack exhaustion today.
-    .{ .sub = "test/language/expressions/call", .prefix = "tco-", .reason = "proper-tail-calls" },
-    .{ .sub = "test/language/expressions/coalesce", .prefix = "tco-", .reason = "proper-tail-calls" },
-    .{ .sub = "test/language/expressions/comma", .prefix = "tco-", .reason = "proper-tail-calls" },
-    .{ .sub = "test/language/expressions/conditional", .prefix = "tco-", .reason = "proper-tail-calls" },
-    .{ .sub = "test/language/expressions/logical-and", .prefix = "tco-", .reason = "proper-tail-calls" },
-    .{ .sub = "test/language/expressions/logical-or", .prefix = "tco-", .reason = "proper-tail-calls" },
-    .{ .sub = "test/language/expressions/tagged-template", .prefix = "tco-", .reason = "proper-tail-calls" },
-    .{ .sub = "test/language/expressions/tco-pos.js", .prefix = "test/language/expressions/tco-pos.js", .reason = "proper-tail-calls" },
-    .{ .sub = "test/language/statements/block", .prefix = "tco-", .reason = "proper-tail-calls" },
-    .{ .sub = "test/language/statements/do-while", .prefix = "tco-", .reason = "proper-tail-calls" },
-    .{ .sub = "test/language/statements/for", .prefix = "tco-", .reason = "proper-tail-calls" },
-    .{ .sub = "test/language/statements/if", .prefix = "tco-", .reason = "proper-tail-calls" },
-    .{ .sub = "test/language/statements/labeled", .prefix = "tco", .reason = "proper-tail-calls" },
-    .{ .sub = "test/language/statements/return", .prefix = "tco", .reason = "proper-tail-calls" },
-    .{ .sub = "test/language/statements/switch", .prefix = "tco-", .reason = "proper-tail-calls" },
-    .{ .sub = "test/language/statements/try", .prefix = "tco-", .reason = "proper-tail-calls" },
-    .{ .sub = "test/language/statements/while", .prefix = "tco-", .reason = "proper-tail-calls" },
-    .{ .sub = "test/built-ins/Proxy", .prefix = "revocable/tco-", .reason = "proper-tail-calls" },
-
     // These SpiderMonkey staging files are not current normative test262
-    // coverage: the Date files are slow stress probes, and the two Annex-B
-    // `arguments` expectations conflict with the official Annex B test that is
-    // scored under test/annexB.
+    // coverage: the Date files are slow stress probes; the Annex-B `arguments`
+    // expectations conflict with the official Annex B tests scored under
+    // test/annexB; and the strict block-function case is marked `esid: pending`.
     .{ .sub = "test/staging", .prefix = "sm/Date/dst-offset-caching-", .reason = "spidermonkey-date-stress" },
     .{ .sub = "test/staging", .prefix = "sm/regress/regress-602621.js", .reason = "stale-spidermonkey-annex-b" },
     .{ .sub = "test/staging", .prefix = "sm/lexical-environment/block-scoped-functions-annex-b-arguments.js", .reason = "stale-spidermonkey-annex-b" },
+    .{ .sub = "test/staging", .prefix = "sm/lexical-environment/block-scoped-functions-strict.js", .reason = "stale-spidermonkey-pending" },
 
-    // Remaining async-module cases that require exact TLA ordering,
-    // import-defer/async-module graph semantics, or dynamic-import catch-target
-    // behavior not implemented by zig-js's synchronous module driver.
+    // Remaining async-module cases that require exact TLA graph ordering not
+    // implemented by zig-js's synchronous module driver. Dynamic-import
+    // catch-target coverage and all import-defer async-module cases except the
+    // flattening-order probe are scored.
     .{ .sub = "test/language/module-code", .prefix = "top-level-await/top-level-ticks", .reason = "async-module-ordering" },
     .{ .sub = "test/language/module-code", .prefix = "top-level-await/rejection-order.js", .reason = "async-module-ordering" },
     .{ .sub = "test/language/module-code", .prefix = "top-level-await/unobservable-global-async-evaluation-count-reset.js", .reason = "async-module-ordering" },
@@ -102,27 +81,7 @@ const excluded_path_prefixes = [_]ExcludedPathPrefix{
     .{ .sub = "test/language/module-code", .prefix = "top-level-await/module-self-import-async-resolution-ticks.js", .reason = "async-module-ordering" },
     .{ .sub = "test/language/module-code", .prefix = "verify-dfs.js", .reason = "async-module-ordering" },
     .{ .sub = "test/language/expressions/dynamic-import", .prefix = "eval-self-once-module.js", .reason = "async-module-ordering" },
-    .{ .sub = "test/language/expressions/dynamic-import", .prefix = "import-defer/import-defer-transitive-async-module/", .reason = "import-defer-async-module" },
-    .{ .sub = "test/language/expressions/dynamic-import", .prefix = "import-defer/sync-dependency-of-deferred-async-module/", .reason = "import-defer-async-module" },
-    .{ .sub = "test/language/expressions/dynamic-import", .prefix = "import-defer/import-defer-async-module/", .reason = "import-defer-async-module" },
-    .{ .sub = "test/language/expressions/dynamic-import", .prefix = "catch/nested-async-function-await-eval-script-code-target.js", .reason = "dynamic-import-catch-target" },
-    .{ .sub = "test/language/expressions/dynamic-import", .prefix = "catch/nested-async-function-eval-script-code-target.js", .reason = "dynamic-import-catch-target" },
-    .{ .sub = "test/language/expressions/dynamic-import", .prefix = "catch/nested-do-while-eval-script-code-target.js", .reason = "dynamic-import-catch-target" },
-    .{ .sub = "test/language/expressions/dynamic-import", .prefix = "catch/nested-async-gen-await-eval-script-code-target.js", .reason = "dynamic-import-catch-target" },
-    .{ .sub = "test/language/expressions/dynamic-import", .prefix = "catch/nested-async-arrow-function-await-eval-script-code-target.js", .reason = "dynamic-import-catch-target" },
-    .{ .sub = "test/language/expressions/dynamic-import", .prefix = "catch/nested-block-labeled-eval-script-code-target.js", .reason = "dynamic-import-catch-target" },
-    .{ .sub = "test/language/expressions/dynamic-import", .prefix = "catch/nested-async-arrow-function-return-await-eval-script-code-target.js", .reason = "dynamic-import-catch-target" },
-    .{ .sub = "test/language/expressions/dynamic-import", .prefix = "catch/nested-function-import-catch-eval-script-code-target.js", .reason = "dynamic-import-catch-target" },
-    .{ .sub = "test/language/expressions/dynamic-import", .prefix = "catch/top-level-import-catch-eval-script-code-target.js", .reason = "dynamic-import-catch-target" },
-    .{ .sub = "test/language/expressions/dynamic-import", .prefix = "catch/nested-while-import-catch-eval-script-code-target.js", .reason = "dynamic-import-catch-target" },
-    .{ .sub = "test/language/expressions/dynamic-import", .prefix = "catch/nested-block-import-catch-eval-script-code-target.js", .reason = "dynamic-import-catch-target" },
-    .{ .sub = "test/language/expressions/dynamic-import", .prefix = "catch/nested-arrow-import-catch-eval-script-code-target.js", .reason = "dynamic-import-catch-target" },
-    .{ .sub = "test/language/expressions/dynamic-import", .prefix = "catch/nested-else-import-catch-eval-script-code-target.js", .reason = "dynamic-import-catch-target" },
-    .{ .sub = "test/language/expressions/dynamic-import", .prefix = "catch/nested-if-import-catch-eval-script-code-target.js", .reason = "dynamic-import-catch-target" },
-    .{ .sub = "test/language/expressions/dynamic-import", .prefix = "catch/nested-async-gen-return-await-eval-script-code-target.js", .reason = "dynamic-import-catch-target" },
-    .{ .sub = "test/language/expressions/dynamic-import", .prefix = "catch/nested-async-function-return-await-eval-script-code-target.js", .reason = "dynamic-import-catch-target" },
-    .{ .sub = "test/language/import", .prefix = "import-defer/evaluation-top-level-await/", .reason = "import-defer-async-module" },
-    .{ .sub = "test/language/import", .prefix = "import-defer/errors/get-self-while-evaluating-async/", .reason = "import-defer-async-module" },
+    .{ .sub = "test/language/import", .prefix = "import-defer/evaluation-top-level-await/flattening-order/main.js", .reason = "async-module-ordering" },
 };
 // The Iterator-helper subtrees used to be excluded here because a `next`-accessor
 // that returned a fresh generator each read caused unbounded iteration. With
@@ -428,7 +387,7 @@ fn runOne(gpa: std.mem.Allocator, io: std.Io, harness: *Harness, abs_path: []con
 fn runOneDetail(gpa: std.mem.Allocator, io: std.Io, harness: *Harness, abs_path: []const u8, src: []const u8, detail: ?*std.ArrayListUnmanaged(u8)) Outcome {
     const meta = parseMeta(src);
     if (meta.unsupported_flag) return .skip;
-    if (meta.is_module) return runModule(gpa, io, harness, abs_path, src, meta);
+    if (meta.is_module) return runModule(gpa, io, harness, abs_path, src, meta, detail);
 
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(gpa);
@@ -506,7 +465,10 @@ fn runOneDetail(gpa: std.mem.Allocator, io: std.Io, harness: *Harness, abs_path:
         if (meta.is_async) {
             const out = ctx.print_buffer.items;
             const done = std.mem.indexOf(u8, out, "Test262:AsyncTestComplete") != null;
-            return if (done) .pass else .fail_runtime;
+            if (!done) {
+                if (detail) |d| appendAsyncPrintDetail(gpa, out, d);
+                return .fail_runtime;
+            }
         }
         return .pass;
     } else |err| {
@@ -682,7 +644,7 @@ fn modLoad(ctx: *anyopaque, referrer: []const u8, specifier: []const u8, out_pat
 
 /// Run a `flags: [module]` test: install the harness in the global scope, then
 /// link + evaluate the test body as a Module against its sibling fixtures.
-fn runModule(gpa: std.mem.Allocator, io: std.Io, harness: *Harness, abs_path: []const u8, src: []const u8, meta: Meta) Outcome {
+fn runModule(gpa: std.mem.Allocator, io: std.Io, harness: *Harness, abs_path: []const u8, src: []const u8, meta: Meta, detail: ?*std.ArrayListUnmanaged(u8)) Outcome {
     if (meta.negative_resolution and !moduleRootParses(gpa, src)) return .fail_negative;
     // `-Dtest262-parallel-js` runs every test in a GIL-free parallel context:
     // the test JS is single-threaded, so this doesn't probe concurrency races,
@@ -733,19 +695,39 @@ fn runModule(gpa: std.mem.Allocator, io: std.Io, harness: *Harness, abs_path: []
         if (meta.is_async) {
             const out = ctx.print_buffer.items;
             const done = std.mem.indexOf(u8, out, "Test262:AsyncTestComplete") != null;
-            if (!done) return .fail_runtime;
+            if (!done) {
+                if (detail) |d| appendAsyncPrintDetail(gpa, out, d);
+                return .fail_runtime;
+            }
         }
         return if (meta.negative) .fail_negative else .pass;
     } else |err| {
         if (meta.negative) {
             return if (negativeMatched(meta, err)) .pass_negative else .fail_negative;
         }
+        if (detail) |d| captureDetail(gpa, ctx, err, d);
         return switch (err) {
             error.Throw => .fail_runtime,
             error.OutOfMemory => .fail_other,
             else => .fail_parse,
         };
     }
+}
+
+fn appendAsyncPrintDetail(gpa: std.mem.Allocator, out: []const u8, d: *std.ArrayListUnmanaged(u8)) void {
+    const marker = "Test262:AsyncTestFailure:";
+    if (std.mem.indexOf(u8, out, marker)) |pos| {
+        const start = pos + marker.len;
+        const rel_end = std.mem.indexOfScalar(u8, out[start..], '\n') orelse out[start..].len;
+        d.appendSlice(gpa, out[start .. start + rel_end]) catch {};
+        return;
+    }
+    if (out.len != 0) {
+        const rel_end = std.mem.indexOfScalar(u8, out, '\n') orelse out.len;
+        d.appendSlice(gpa, out[0..rel_end]) catch {};
+        return;
+    }
+    d.appendSlice(gpa, "<async module did not complete>") catch {};
 }
 
 // The ENTIRE test262 corpus: `language`, `annexB`, `intl402`, `staging`, and

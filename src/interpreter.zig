@@ -708,6 +708,11 @@ pub const ImportMetaSlot = struct {
     obj: ?*value.Object = null,
 };
 
+const TreeTailCall = struct {
+    callee: Value,
+    args: []const Value,
+};
+
 /// A JS-defined function value: parameter names, body AST, and the environment
 /// captured at definition (the closure). Stored type-erased on `Object.js_func`.
 pub const Function = struct {
@@ -820,6 +825,10 @@ pub const Function = struct {
     /// The module-local `import.meta` cell captured at function creation. Null in
     /// Script code, where `import.meta` is a syntax error.
     import_meta_slot: ?*ImportMetaSlot = null,
+    /// The module path captured at function creation. Dynamic `import()` uses
+    /// the lexical referrer, including after an async function resumes from an
+    /// `await`, rather than the caller's ambient module.
+    module_referrer: []const u8 = "",
     /// The `with`-scope chain captured at definition (object environment records
     /// enclosing the function). A function called from inside a `with` does NOT
     /// see the caller's `with` object — only the ones lexically enclosing its own
@@ -1117,6 +1126,11 @@ pub const Interpreter = struct {
     /// Set only while invoking a syntactic `eval(...)` call. The eval native
     /// uses this to distinguish direct eval from member/indirect eval.
     direct_eval_call: bool = false,
+    /// A strict tree-walked function return-position call that can reuse the
+    /// current activation. Used only for cases the slot VM cannot safely lower
+    /// (notably functions whose source contains syntactic `eval`).
+    tree_tail_allowed: bool = false,
+    tree_tail_call: ?TreeTailCall = null,
     /// Whether the current syntactic function body permits a direct eval to
     /// contain `new.target`. Ordinary functions/methods do; arrows, scripts,
     /// modules, class fields, and indirect eval do not introduce that context.
@@ -1176,6 +1190,7 @@ pub const Interpreter = struct {
     /// (typed `?*vm.Activation`, held opaque to avoid a module cycle).
     driver_active: bool = false,
     pending_activation: ?*anyopaque = null,
+    pending_tail_call: bool = false,
 
     /// Guard a function call against native-stack exhaustion: throw a catchable
     /// `RangeError` when either the logical call-depth limit or the real OS
@@ -2814,6 +2829,15 @@ pub const Interpreter = struct {
             },
 
             .return_stmt => |maybe| blk: {
+                if (maybe) |e| {
+                    if (self.tree_tail_allowed) {
+                        if (try self.prepareTreeTailCall(e)) |v| {
+                            self.ret_value = v;
+                            self.signal = .ret;
+                            break :blk v;
+                        }
+                    }
+                }
                 const v: Value = if (maybe) |e| try self.eval(e) else Value.undef();
                 self.ret_value = v;
                 self.signal = .ret;
@@ -3991,6 +4015,7 @@ pub const Interpreter = struct {
             .is_strict = fnode.is_strict,
             .is_method = fnode.is_method,
             .import_meta_slot = self.import_meta_slot,
+            .module_referrer = self.cur_module,
         };
         // A `with` block's object Environment Record is part of the lexical chain
         // (`Environment.with_object`), so a function defined inside a `with`
@@ -4023,6 +4048,15 @@ pub const Interpreter = struct {
                 error.Unsupported => null,
                 error.OutOfMemory => return error.OutOfMemory,
             };
+        } else if (fnode.is_strict and !fnode.is_method and !fnode.uses_arguments and sourceMayHaveTailCall(fnode.source)) {
+            const compiled = Compiler.compilePlainFunction(self.arena, fnode) catch |e| switch (e) {
+                error.Unsupported => null,
+                error.OutOfMemory => return error.OutOfMemory,
+            };
+            if (compiled) |code| {
+                func.chunk = code.chunk;
+                func.local_count = code.local_count;
+            }
         }
         // A function object's [[Prototype]] is the kind-specific function
         // prototype intrinsic: %GeneratorFunction.prototype% for `function*`,
@@ -4047,6 +4081,10 @@ pub const Interpreter = struct {
         func.obj = obj;
         try installFunctionProps(self.arena, self.root_shape, obj, fnode.params, func.name);
         return Value.obj(obj);
+    }
+
+    fn sourceMayHaveTailCall(source: []const u8) bool {
+        return std.mem.indexOf(u8, source, "return") != null and std.mem.indexOfScalar(u8, source, '(') != null;
     }
 
     pub fn funcOf(v: Value) ?*Function {
@@ -5052,6 +5090,20 @@ pub const Interpreter = struct {
         return self.callValue(callee, args);
     }
 
+    fn prepareTreeTailCall(self: *Interpreter, node: *Node) EvalError!?Value {
+        if (node.* != .call) return null;
+        const c = node.call;
+        if (c.optional or c.callee.* != .identifier) return null;
+        const eval_named = std.mem.eql(u8, c.callee.identifier, "eval");
+        if (!eval_named) return null;
+        self.with_this_pending = null;
+        const callee = try self.eval(c.callee);
+        if (self.isDirectEvalCallee(callee)) return null;
+        const args = try self.evalArgs(c.args);
+        self.tree_tail_call = .{ .callee = callee, .args = args };
+        return Value.undef();
+    }
+
     /// `tag`a${x}b`` → `tag(strings, x)` where `strings` is the frozen cooked
     /// array carrying a frozen `raw` array. The tag's `this` is the member
     /// receiver for `obj.tag`...`` (e.g. `String.raw`...``), else undefined.
@@ -5354,7 +5406,26 @@ pub const Interpreter = struct {
         if (new_target.isUndefined() and !func.is_generator and !func.is_async) {
             if (func.chunk) |fchunk| return vm.runFunction(self, func, fchunk, args, this_val, new_target);
         }
-        return self.callPlain(func, args, this_val, new_target);
+        var cur_func = func;
+        var cur_args = args;
+        var cur_this = this_val;
+        var cur_new_target = new_target;
+        while (true) {
+            const rv = try self.callPlain(cur_func, cur_args, cur_this, cur_new_target);
+            const tail = self.tree_tail_call orelse return rv;
+            self.tree_tail_call = null;
+            if (!tail.callee.isObject()) return self.callValue(tail.callee, tail.args);
+            const obj = tail.callee.asObj();
+            const erased = obj.js_func orelse return self.callValue(tail.callee, tail.args);
+            const next_func: *Function = @ptrCast(@alignCast(erased));
+            if (next_func.is_generator or next_func.is_async or next_func.is_class_constructor)
+                return self.callValue(tail.callee, tail.args);
+            if (next_func.chunk) |fchunk| return vm.runFunction(self, next_func, fchunk, tail.args, Value.undef(), Value.undef());
+            cur_func = next_func;
+            cur_args = tail.args;
+            cur_this = Value.undef();
+            cur_new_target = Value.undef();
+        }
     }
 
     /// The body of a plain (sync) function call: scope setup, param binding, and
@@ -5391,6 +5462,7 @@ pub const Interpreter = struct {
         const saved_global = self.global_object;
         const saved_import_meta_slot = self.import_meta_slot;
         const saved_import_meta_obj = self.import_meta_obj;
+        const saved_cur_module = self.cur_module;
         const saved_this_initialized = self.this_initialized;
         const saved_this_cell = self.this_cell;
         const saved_active_function = self.active_function;
@@ -5405,6 +5477,7 @@ pub const Interpreter = struct {
         const saved_dfc = self.in_default_ctor;
         const saved_pm = self.current_private_map;
         const saved_call_frame = self.active_call_frame;
+        const saved_tree_tail_allowed = self.tree_tail_allowed;
         var call_frame: LegacyCallFrame = undefined;
         if (!func.is_arrow) self.current_private_map = func.private_map; // arrows inherit the enclosing class's map
         if (!func.is_arrow) {
@@ -5423,8 +5496,12 @@ pub const Interpreter = struct {
         self.env = call_env;
         self.signal = .none;
         self.strict = func.is_strict;
+        self.tree_tail_allowed = func.is_strict and new_target.isUndefined() and
+            std.mem.indexOf(u8, func.source, "eval") != null;
+        self.tree_tail_call = null;
         self.import_meta_slot = func.import_meta_slot;
         self.import_meta_obj = if (func.import_meta_slot) |slot| slot.obj else null;
+        self.cur_module = func.module_referrer;
         if (self.env.get("globalThis")) |gt| {
             if (gt.isObject()) self.global_object = gt.asObj();
         }
@@ -5500,11 +5577,13 @@ pub const Interpreter = struct {
             self.global_object = saved_global;
             self.import_meta_slot = saved_import_meta_slot;
             self.import_meta_obj = saved_import_meta_obj;
+            self.cur_module = saved_cur_module;
             self.this_value = saved_this;
             self.this_initialized = saved_this_initialized;
             self.this_cell = saved_this_cell;
             self.active_function = saved_active_function;
             self.active_call_frame = saved_call_frame;
+            self.tree_tail_allowed = saved_tree_tail_allowed;
             // Re-sync the ambient this-state from the (restored) enclosing derived
             // ctor's shared cell: a `super()` that ran during this call — possibly
             // via an arrow invoked from an unrelated context — initialized the

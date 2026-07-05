@@ -158,6 +158,8 @@ pub const Op = enum(u8) {
     jump_if_false, // pop cond; jump when falsy
     jump_if_true_peek, // peek cond (leave on stack); jump when truthy  [for ||]
     jump_if_false_peek, // peek cond (leave on stack); jump when falsy   [for &&]
+    jump_if_nullish_peek, // peek cond; jump when null/undefined         [for ??]
+    jump_if_not_nullish_peek, // peek cond; jump when not null/undefined [for ??]
 
     // --- objects, arrays, members ---
     load_this, // push the current `this`
@@ -195,6 +197,10 @@ pub const Op = enum(u8) {
     make_closure, // operand: fn-template index; push a Function value capturing env
     call, // operand a: argc; stack: callee, arg0..argN-1 -> push result
     call_method, // operand a: name index, b: argc; stack: recv, args... -> push result
+    tail_call, // operand a: argc; stack: callee, arg0..argN-1 -> replace current activation
+    tail_call_eval, // operand a: argc; direct-eval aware tail-position call
+    tail_call_method, // operand a: name index, b: argc; stack: recv, args... -> tail call recv.name
+    tail_call_with_this, // operand a: argc; stack: func, this, args... -> tail call func with this
     new_call, // operand a: argc; stack: callee, args... -> push constructed object
     // Spread-argument variants: the arguments are pre-collected into one array
     // (built with new_array/array_append/array_spread), so the call is variadic.

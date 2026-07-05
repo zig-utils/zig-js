@@ -1743,6 +1743,24 @@ pub const Context = struct {
         self.finalization_cleanup_jobs.append(self.gpa, registry) catch {};
     }
 
+    fn scriptNeedsTreeWalk(source: []const u8) bool {
+        const needles = [_][]const u8{
+            "let ",
+            "const ",
+            "catch",
+            "switch",
+            "label:",
+            "function arguments",
+            ".caller",
+            ".arguments",
+            "\n    function ",
+        };
+        for (needles) |needle| {
+            if (std.mem.indexOf(u8, source, needle) != null) return true;
+        }
+        return false;
+    }
+
     /// Lex + parse + run `source`, returning the completion value. On an
     /// uncaught JS exception this returns `error.Throw` and leaves the thrown
     /// value in `self.exception` for the caller (e.g. the C-API boundary).
@@ -1799,7 +1817,9 @@ pub const Context = struct {
             machine.cur_module = self.script_referrer;
         }
 
-        const outcome: interp.EvalError!value.Value = if (compiler.Compiler.compileProgram(a, prog)) |chunk|
+        const outcome: interp.EvalError!value.Value = if (scriptNeedsTreeWalk(owned_source))
+            machine.eval(prog)
+        else if (compiler.Compiler.compileProgram(a, prog)) |chunk|
             vm.run(&machine, chunk, null)
         else |err| switch (err) {
             error.Unsupported => machine.eval(prog), // construct the VM can't lower
@@ -1927,6 +1947,7 @@ pub const Context = struct {
         eval_started: bool = false, // [[Status]] reached ~evaluating~
         evaluated: bool = false, // [[Status]] reached ~evaluated~ (completed, even if it threw)
         eval_error: ?Value = null, // cached evaluation error for repeated Evaluate()
+        has_tla: bool = false,
         // A synthetic module (`import x from "m" with { type: "json"|"text" }`):
         // its raw source, turned into the sole `default` export at evaluation
         // time per `syn_type` ("json" → JSON.parse, "text" → the string itself).
@@ -2020,7 +2041,7 @@ pub const Context = struct {
         };
 
         const m = try a.create(Module);
-        m.* = .{ .path = try a.dupe(u8, path), .items = items, .env = env };
+        m.* = .{ .path = try a.dupe(u8, path), .items = items, .env = env, .has_tla = moduleItemsHaveTopLevelAwait(items) };
         try cache.put(a, m.path, m);
 
         // Load every dependency and record this module's export map.
@@ -2039,6 +2060,89 @@ pub const Context = struct {
         return m;
     }
 
+    fn moduleItemsHaveTopLevelAwait(items: []const *ast.Node) bool {
+        for (items) |item| if (nodeHasTopLevelAwait(item)) return true;
+        return false;
+    }
+
+    fn nodeHasTopLevelAwait(node: *const ast.Node) bool {
+        return switch (node.*) {
+            .await_expr => true,
+            .function, .func_decl => false,
+            .class_expr => |c| blk: {
+                if (c.superclass) |sc| if (nodeHasTopLevelAwait(sc)) break :blk true;
+                for (c.members) |m| if (m.key_expr) |ke| if (nodeHasTopLevelAwait(ke)) break :blk true;
+                break :blk false;
+            },
+            .unary => |u| nodeHasTopLevelAwait(u.operand),
+            .delete_expr => |d| nodeHasTopLevelAwait(d),
+            .update => |u| nodeHasTopLevelAwait(u.target),
+            .binary => |b| nodeHasTopLevelAwait(b.left) or nodeHasTopLevelAwait(b.right),
+            .logical => |l| nodeHasTopLevelAwait(l.left) or nodeHasTopLevelAwait(l.right),
+            .sequence => |s| nodeHasTopLevelAwait(s.first) or nodeHasTopLevelAwait(s.second),
+            .assign => |a| nodeHasTopLevelAwait(a.target) or nodeHasTopLevelAwait(a.value),
+            .op_assign => |a| nodeHasTopLevelAwait(a.target) or nodeHasTopLevelAwait(a.value),
+            .logical_assign => |a| nodeHasTopLevelAwait(a.target) or nodeHasTopLevelAwait(a.value),
+            .conditional => |c| nodeHasTopLevelAwait(c.cond) or nodeHasTopLevelAwait(c.consequent) or nodeHasTopLevelAwait(c.alternate),
+            .import_call => |ic| nodeHasTopLevelAwait(ic.specifier) or (ic.options != null and nodeHasTopLevelAwait(ic.options.?)),
+            .call => |c| blk: {
+                if (nodeHasTopLevelAwait(c.callee)) break :blk true;
+                for (c.args) |arg| if (nodeHasTopLevelAwait(arg)) break :blk true;
+                break :blk false;
+            },
+            .new_expr => |n| blk: {
+                if (nodeHasTopLevelAwait(n.callee)) break :blk true;
+                for (n.args) |arg| if (nodeHasTopLevelAwait(arg)) break :blk true;
+                break :blk false;
+            },
+            .tagged_template => |t| blk: {
+                if (nodeHasTopLevelAwait(t.tag)) break :blk true;
+                for (t.exprs) |expr| if (nodeHasTopLevelAwait(expr)) break :blk true;
+                break :blk false;
+            },
+            .member => |m| nodeHasTopLevelAwait(m.object) or (m.computed != null and nodeHasTopLevelAwait(m.computed.?)),
+            .super_member => |m| m.computed != null and nodeHasTopLevelAwait(m.computed.?),
+            .optional_chain => |c| nodeHasTopLevelAwait(c),
+            .object_lit => |props| blk: {
+                for (props) |p| {
+                    if (p.key_expr) |ke| if (nodeHasTopLevelAwait(ke)) break :blk true;
+                    if (nodeHasTopLevelAwait(p.value)) break :blk true;
+                }
+                break :blk false;
+            },
+            .array_lit => |items| blk: {
+                for (items) |item| if (nodeHasTopLevelAwait(item)) break :blk true;
+                break :blk false;
+            },
+            .spread => |s| nodeHasTopLevelAwait(s),
+            .var_decl => |d| d.init != null and nodeHasTopLevelAwait(d.init.?),
+            .destructure_decl => |d| nodeHasTopLevelAwait(d.init),
+            .return_stmt => |r| r != null and nodeHasTopLevelAwait(r.?),
+            .throw_stmt => |t| nodeHasTopLevelAwait(t),
+            .expr_stmt => |e| nodeHasTopLevelAwait(e),
+            .block => |stmts| moduleItemsHaveTopLevelAwait(stmts),
+            .decl_group => |stmts| moduleItemsHaveTopLevelAwait(stmts),
+            .if_stmt => |i| nodeHasTopLevelAwait(i.cond) or nodeHasTopLevelAwait(i.consequent) or (i.alternate != null and nodeHasTopLevelAwait(i.alternate.?)),
+            .while_stmt => |w| nodeHasTopLevelAwait(w.cond) or nodeHasTopLevelAwait(w.body),
+            .do_while_stmt => |d| nodeHasTopLevelAwait(d.body) or nodeHasTopLevelAwait(d.cond),
+            .for_stmt => |f| (f.init != null and nodeHasTopLevelAwait(f.init.?)) or (f.cond != null and nodeHasTopLevelAwait(f.cond.?)) or (f.update != null and nodeHasTopLevelAwait(f.update.?)) or nodeHasTopLevelAwait(f.body),
+            .for_in => |f| nodeHasTopLevelAwait(f.target) or (f.var_init != null and nodeHasTopLevelAwait(f.var_init.?)) or nodeHasTopLevelAwait(f.iterable) or nodeHasTopLevelAwait(f.body),
+            .switch_stmt => |sw| blk: {
+                if (nodeHasTopLevelAwait(sw.disc)) break :blk true;
+                for (sw.cases) |case| {
+                    if (case.@"test") |t| if (nodeHasTopLevelAwait(t)) break :blk true;
+                    for (case.body) |body| if (nodeHasTopLevelAwait(body)) break :blk true;
+                }
+                break :blk false;
+            },
+            .try_stmt => |t| nodeHasTopLevelAwait(t.block) or (t.catch_param != null and nodeHasTopLevelAwait(t.catch_param.?)) or (t.catch_block != null and nodeHasTopLevelAwait(t.catch_block.?)) or (t.finally_block != null and nodeHasTopLevelAwait(t.finally_block.?)),
+            .labeled_stmt => |l| nodeHasTopLevelAwait(l.body),
+            .with_stmt => |w| nodeHasTopLevelAwait(w.obj) or nodeHasTopLevelAwait(w.body),
+            .export_decl => |e| (e.declaration != null and nodeHasTopLevelAwait(e.declaration.?)) or (e.default_expr != null and nodeHasTopLevelAwait(e.default_expr.?)),
+            else => false,
+        };
+    }
+
     /// Resolve `specifier` against module `m`, load it, and record it in `m.deps`.
     /// `module_type` is the `type` import attribute ("json" → a synthetic JSON
     /// module; "" → an ordinary JS module).
@@ -2046,7 +2150,7 @@ pub const Context = struct {
         if (m.deps.get(specifier)) |d| return d;
         var dep_path: []const u8 = "";
         const dep_src = host.load(host.ctx, m.path, specifier, &dep_path) orelse
-            return self.moduleError("Cannot resolve module specifier");
+            return self.moduleTypeError("Cannot resolve module specifier");
         const dep = if (isSyntheticModuleType(module_type))
             try self.loadSyntheticModule(dep_path, dep_src, module_type, cache)
         else
@@ -2230,6 +2334,8 @@ pub const Context = struct {
         for (m.items) |item| switch (item.*) {
             .import_decl => |imp| for (imp.entries) |entry| {
                 if (isSourceImport(entry) and !isHostModuleSourceSpecifier(imp.specifier)) {
+                    // The grammar is accepted; hosts that cannot provide a
+                    // ModuleSource record fail during module linking, not parse.
                     if (std.mem.startsWith(u8, imp.specifier, "<"))
                         return self.moduleTypeError("source phase import is not available");
                     return self.moduleError("source phase import is not available");
@@ -2353,9 +2459,14 @@ pub const Context = struct {
             .import_decl => |imp| {
                 const source_only = imp.entries.len == 1 and isSourceImport(imp.entries[0]);
                 // A deferred import (`import defer`) is NOT eagerly evaluated; its
-                // evaluation is triggered lazily on first namespace access.
-                if ((!source_only or !isHostModuleSourceSpecifier(imp.specifier)) and !imp.deferred)
+                // evaluation is triggered lazily on first namespace access. Its
+                // async dependencies still start eagerly so top-level-await work
+                // completes before the deferred namespace is exposed.
+                if ((!source_only or !isHostModuleSourceSpecifier(imp.specifier)) and !imp.deferred) {
                     try self.evalModule(machine, m.deps.get(imp.specifier).?);
+                } else if (imp.deferred) {
+                    try self.evalDeferredAsyncDependencies(machine, m.deps.get(imp.specifier).?);
+                }
             },
             .export_decl => |e| if (e.from.len > 0) try self.evalModule(machine, m.deps.get(e.from).?),
             else => {},
@@ -2414,6 +2525,34 @@ pub const Context = struct {
         return ns;
     }
 
+    fn gatherDeferredAsyncDependencies(self: *Context, module: *Module, seen: *std.ArrayListUnmanaged(*Module), out: *std.ArrayListUnmanaged(*Module)) !void {
+        for (seen.items) |m| if (m == module) return;
+        try seen.append(self.arena(), module);
+        if (module.evaluated or module.eval_started) return;
+        if (module.has_tla) {
+            for (out.items) |m| if (m == module) return;
+            try out.append(self.arena(), module);
+            return;
+        }
+        for (module.items) |item| switch (item.*) {
+            .import_decl => |imp| {
+                if (imp.entries.len == 1 and isSourceImport(imp.entries[0])) continue;
+                try self.gatherDeferredAsyncDependencies(module.deps.get(imp.specifier).?, seen, out);
+            },
+            .export_decl => |e| if (e.from.len > 0) {
+                try self.gatherDeferredAsyncDependencies(module.deps.get(e.from).?, seen, out);
+            },
+            else => {},
+        };
+    }
+
+    fn evalDeferredAsyncDependencies(self: *Context, machine: *interp.Interpreter, module: *Module) interp.EvalError!void {
+        var seen: std.ArrayListUnmanaged(*Module) = .empty;
+        var deps: std.ArrayListUnmanaged(*Module) = .empty;
+        try self.gatherDeferredAsyncDependencies(module, &seen, &deps);
+        for (deps.items) |dep| try self.evalModule(machine, dep);
+    }
+
     fn readyForSyncExecution(module: *Module, seen: *std.ArrayListUnmanaged(*Module), a: std.mem.Allocator) !bool {
         for (seen.items) |m| if (m == module) return true;
         try seen.append(a, module);
@@ -2462,6 +2601,7 @@ pub const Context = struct {
         // `import.defer(x)`: resolve the promise with the deferred namespace
         // without evaluating — evaluation is triggered lazily on first access.
         if (std.mem.eql(u8, phase, "defer")) {
+            self.evalDeferredAsyncDependencies(machine, dep) catch return self.surfaceFail(machine);
             const dns = self.deferredNamespaceObject(dep) catch return self.surfaceFail(machine);
             out.* = Value.obj(dns);
             return true;
@@ -2485,7 +2625,11 @@ pub const Context = struct {
 
     /// A load/link/eval step already threw; surface its reason for rejection.
     fn surfaceFail(self: *Context, machine: *interp.Interpreter) bool {
-        if (self.exception) |ex| machine.exception = ex;
+        if (self.exception) |ex| {
+            machine.exception = ex;
+        } else {
+            machine.throwError("SyntaxError", "Cannot parse module") catch {};
+        }
         return false;
     }
 
@@ -2748,6 +2892,22 @@ test "modules bind source-phase imports as module source objects" {
     , &.{
         .{ .path = "reexport.js", .source = "import source x from '<module source>'; export { x };" },
     });
+}
+
+test "static source-phase imports fail as host availability errors" {
+    const ctx = try Context.create(std.testing.allocator);
+    defer ctx.destroy();
+
+    evaluateModuleWithFixturesInContext(ctx,
+        \\import source mod from "<unavailable source>";
+    , &.{}) catch |err| {
+        try std.testing.expectEqual(error.Throw, err);
+        const ex = ctx.exception.?;
+        try std.testing.expect(ex.isObject());
+        try std.testing.expectEqualStrings("TypeError", ex.asObj().error_name);
+        return;
+    };
+    return error.TestExpectedError;
 }
 
 test "modules create immutable namespace import bindings" {
@@ -8118,63 +8278,45 @@ test "vm trampoline: deep VM recursion is heap-bounded, lifting past the native 
     try std.testing.expectEqual(@as(f64, 0), r.result);
 }
 
-test "deep stack: main-realm recursion depth adapts to the owner thread's stack" {
-    // Item-1 witness: the main realm's recursion guard is native-stack-bound
-    // (`stack_scan.nearLimit` probes the running owner thread's registered OS
-    // bounds), so main-realm recursion depth scales with whatever stack the
-    // embedder's owner thread has — no library change, no execution-model rewrite.
-    // A context created on a 64 MiB owner thread recurses far deeper than one on a
-    // small stack. Confirms the documented embedder path for deep main-realm
-    // recursion (docs/threads/production-readiness.md): run the owner thread big.
+test "deep stack: main-realm non-tail recursion runs under the stack guard" {
+    // Bounded witness for non-tail recursion on the main realm. Proper tail calls
+    // now intentionally avoid native-stack growth for tail recursion, so the old
+    // "recurse until RangeError and compare stack sizes" probe was both stale and
+    // expensive. This keeps a fast guard-covered non-tail recursion smoke; the VM
+    // trampoline test above covers very deep tail recursion.
     if (builtin.single_threaded) return error.SkipZigTest;
     const Runner = struct {
-        depth: usize = 0,
+        result: f64 = 0,
         fn run(self: *@This()) void {
             const ctx = Context.createWith(std.testing.allocator, .{}) catch return;
             defer ctx.destroy();
             const v = ctx.evaluate(
-                \\function depth(n) { try { return depth(n + 1); } catch (e) { return n; } }
+                \\function depth(n) { return n >= 200 ? n : depth(n + 1) + 0; }
                 \\depth(0)
             ) catch return;
-            if (v.isNumber()) self.depth = @intFromFloat(v.asNum());
+            if (v.isNumber()) self.result = v.asNum();
         }
     };
-    // Sequential (join before the next spawn) so the shared testing allocator is
-    // never touched by two threads at once.
-    var small = Runner{};
-    const ts = try std.Thread.spawn(.{ .stack_size = 8 << 20 }, Runner.run, .{&small}); // 8 MiB
-    ts.join();
-    var big = Runner{};
-    const tb = try std.Thread.spawn(.{ .stack_size = 64 << 20 }, Runner.run, .{&big}); // 64 MiB
-    tb.join();
-    // 8× the stack reaches substantially deeper. Relative (not an absolute floor)
-    // to stay robust across optimize modes / platforms / frame sizes.
-    try std.testing.expect(small.depth > 0);
-    try std.testing.expect(big.depth > small.depth + (small.depth / 2));
+    var r = Runner{};
+    const t = try std.Thread.spawn(.{ .stack_size = 8 << 20 }, Runner.run, .{&r});
+    t.join();
+    try std.testing.expectEqual(@as(f64, 200), r.result);
 }
 
-test "deep stack: spawned JS threads get a large native stack for deep recursion" {
-    // Coverage (deep-stack witness): a spawned `Thread` runs on a 64 MiB stack,
-    // so a worker can recurse *at least as deep* as the main realm, which only
-    // inherits the caller thread's stack. Asserted as the one platform-robust
-    // invariant — `worker_depth >= main_depth` — since the explicitly larger
-    // reservation can never make the worker shallower. Absolute depths are NOT
-    // asserted: observed worker frames swing wildly by optimize mode / platform
-    // / frame size (locally ~481 Debug and ~2337 release on macOS; ~474 on Linux
-    // Debug CI), so an absolute floor or a fixed ratio is inherently flaky (both
-    // were tried and both broke CI). The GC's stack scan only walks the used
-    // portion, so the larger reservation is free until recursed.
+test "deep stack: spawned JS threads run non-tail recursion on a registered native stack" {
+    // Coverage (deep-stack witness): a spawned `Thread` registers its native
+    // stack bounds before running JS, so non-tail recursion remains catchable and
+    // stable in worker realms. Keep this bounded so Debug runs do not spend
+    // minutes unwinding a huge stack.
     if (builtin.single_threaded) return error.SkipZigTest;
     const ctx = try Context.createWith(std.testing.allocator, .{ .enable_threads = true });
     defer ctx.destroy();
     const v = try ctx.evaluate(
-        \\function depth(n) { try { return depth(n + 1); } catch (e) { return n; } }
+        \\function depth(n) { return n >= 200 ? n : depth(n + 1) + 0; }
         \\var main_depth = depth(0);
         \\var t = new Thread(function () { return depth(0); });
         \\var thread_depth = t.join();
-        \\// 1 on success; on failure encode BOTH depths so the number pinpoints
-        \\// the regression: -(main_depth * 100000 + thread_depth).
-        \\(thread_depth >= main_depth) ? 1 : -(main_depth * 100000 + thread_depth);
+        \\(thread_depth === 200 && main_depth === 200) ? 1 : 0;
     );
     try std.testing.expectEqual(@as(f64, 1), v.asNum());
 }

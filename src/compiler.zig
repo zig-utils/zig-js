@@ -521,6 +521,34 @@ pub const Compiler = struct {
         return chunk;
     }
 
+    pub const PlainFunctionCode = struct {
+        chunk: *Chunk,
+        local_count: u32,
+    };
+
+    pub fn compilePlainFunction(arena: std.mem.Allocator, fnode: *const ast.FunctionNode) CompileError!PlainFunctionCode {
+        if (fnode.is_generator or fnode.is_async) return error.Unsupported;
+        const scope = try arena.create(FnScope);
+        scope.* = .{ .parent = null };
+        for (fnode.params) |p| {
+            if (p.default != null or p.is_rest or p.pattern != null) return error.Unsupported;
+            _ = try scope.addLocal(arena, p.name);
+        }
+        if (!fnode.is_expr_body) try collectLocals(arena, scope, fnode.body);
+
+        const chunk = try arena.create(Chunk);
+        chunk.* = Chunk.init(arena);
+        var c = Compiler{ .arena = arena, .chunk = chunk, .mode = .function, .scope = scope };
+        if (fnode.is_expr_body) {
+            try c.compileTailExpr(fnode.body);
+        } else {
+            try c.compileStmt(fnode.body);
+            _ = try chunk.emit(.ret_undef, 0);
+        }
+        try chunk.finalize();
+        return .{ .chunk = chunk, .local_count = scope.count };
+    }
+
     // ---- name resolution --------------------------------------------------
 
     fn resolve(self: *Compiler, name: []const u8) Resolved {
@@ -671,7 +699,7 @@ pub const Compiler = struct {
                 // the handler stack, runs each finally carrying a return
                 // completion, and returns once they finish (only reachable inside
                 // a generator, since compileTry is generator-only).
-                if (self.finally_depth > 0) {
+                if (self.finally_depth > 0 and (self.in_generator or self.in_async)) {
                     if (maybe) |e| {
                         try self.compileExpr(e);
                         if (self.in_generator and self.in_async) _ = try self.chunk.emit(.await_op, 0);
@@ -680,9 +708,13 @@ pub const Compiler = struct {
                     }
                     _ = try self.chunk.emit(.abrupt_return, 0);
                 } else if (maybe) |e| {
-                    try self.compileExpr(e);
-                    if (self.in_generator and self.in_async) _ = try self.chunk.emit(.await_op, 0);
-                    _ = try self.chunk.emit(.ret, 0);
+                    if (!self.in_generator and !self.in_async) {
+                        try self.compileTailExpr(e);
+                    } else {
+                        try self.compileExpr(e);
+                        if (self.in_generator and self.in_async) _ = try self.chunk.emit(.await_op, 0);
+                        _ = try self.chunk.emit(.ret, 0);
+                    }
                 } else {
                     _ = try self.chunk.emit(.ret_undef, 0);
                 }
@@ -777,7 +809,6 @@ pub const Compiler = struct {
     /// handler records the catch and/or finally targets; the VM unwinds to it
     /// on a throw. Only an identifier/elided catch binding is lowered.
     fn compileTry(self: *Compiler, t: *const ast.TryNode) CompileError!void {
-        if (!self.in_generator) return error.Unsupported;
         if (t.catch_param) |p| {
             if (p.* != .identifier) return error.Unsupported; // destructuring catch → unsupported
         }
@@ -834,7 +865,6 @@ pub const Compiler = struct {
     /// (fall-through preserved). `break` exits via the switch's break list;
     /// `default` is taken only after every case test fails.
     fn compileSwitch(self: *Compiler, disc: *Node, cases: []const ast.SwitchCase) CompileError!void {
-        if (!self.in_generator) return error.Unsupported; // non-generator switch keeps tree-walking
         try self.compileExpr(disc);
         const d = try self.freshTemp();
         try self.emitDefine(d); // d = the discriminant value
@@ -1392,6 +1422,115 @@ pub const Compiler = struct {
     }
 
     // ---- expressions ------------------------------------------------------
+
+    fn compileTailExpr(self: *Compiler, node: *Node) CompileError!void {
+        switch (node.*) {
+            .call => |c| {
+                try self.compileTailCall(c);
+            },
+            .sequence => |s| {
+                try self.compileExpr(s.first);
+                _ = try self.chunk.emit(.pop, 0);
+                try self.compileTailExpr(s.second);
+            },
+            .logical => |l| {
+                try self.compileExpr(l.left);
+                switch (l.op) {
+                    .@"and" => {
+                        const short = try self.chunk.emit(.jump_if_false_peek, 0);
+                        _ = try self.chunk.emit(.pop, 0);
+                        try self.compileTailExpr(l.right);
+                        self.chunk.patchToHere(short);
+                        _ = try self.chunk.emit(.ret, 0);
+                    },
+                    .@"or" => {
+                        const short = try self.chunk.emit(.jump_if_true_peek, 0);
+                        _ = try self.chunk.emit(.pop, 0);
+                        try self.compileTailExpr(l.right);
+                        self.chunk.patchToHere(short);
+                        _ = try self.chunk.emit(.ret, 0);
+                    },
+                    .nullish => {
+                        const short = try self.chunk.emit(.jump_if_not_nullish_peek, 0);
+                        _ = try self.chunk.emit(.pop, 0);
+                        try self.compileTailExpr(l.right);
+                        self.chunk.patchToHere(short);
+                        _ = try self.chunk.emit(.ret, 0);
+                    },
+                }
+            },
+            .conditional => |c| {
+                try self.compileExpr(c.cond);
+                const to_else = try self.chunk.emit(.jump_if_false, 0);
+                try self.compileTailExpr(c.consequent);
+                self.chunk.patchToHere(to_else);
+                try self.compileTailExpr(c.alternate);
+            },
+            .tagged_template => |t| try self.compileTailTaggedTemplate(t.tag, t.cooked, t.raw, t.exprs),
+            else => {
+                try self.compileExpr(node);
+                _ = try self.chunk.emit(.ret, 0);
+            },
+        }
+    }
+
+    fn compileTailCall(self: *Compiler, c: anytype) CompileError!void {
+        const spread = hasSpread(c.args);
+        if (spread) return error.Unsupported;
+        if (c.callee.* == .member and c.callee.member.computed == null) {
+            const m = c.callee.member;
+            try self.compileExpr(m.object);
+            const ni = try self.chunk.addName(m.property);
+            for (c.args) |arg| try self.compileExpr(arg);
+            _ = try self.chunk.emitAB(.tail_call_method, ni, @intCast(c.args.len));
+            return;
+        }
+        if (c.callee.* == .member) {
+            const m = c.callee.member;
+            if (m.optional or m.computed == null) return error.Unsupported;
+            const recv = try self.freshTemp();
+            try self.compileExpr(m.object);
+            try self.emitDefine(recv);
+            try self.emitLoad(recv);
+            try self.compileExpr(m.computed.?);
+            _ = try self.chunk.emit(.get_index, 0);
+            try self.emitLoad(recv);
+            for (c.args) |arg| try self.compileExpr(arg);
+            _ = try self.chunk.emit(.tail_call_with_this, @intCast(c.args.len));
+            return;
+        }
+        if (c.callee.* == .super_member) return error.Unsupported;
+        const is_eval = c.callee.* == .identifier and std.mem.eql(u8, c.callee.identifier, "eval");
+        try self.compileExpr(c.callee);
+        for (c.args) |arg| try self.compileExpr(arg);
+        _ = try self.chunk.emit(if (is_eval) .tail_call_eval else .tail_call, @intCast(c.args.len));
+    }
+
+    fn compileTailTaggedTemplate(self: *Compiler, tag: *Node, cooked: []?[]const u8, raw: [][]const u8, exprs: []*Node) CompileError!void {
+        if (tag.* == .member) return error.Unsupported;
+        try self.compileExpr(tag);
+        try self.compileTemplateStrings(cooked, raw);
+        for (exprs) |e| try self.compileExpr(e);
+        _ = try self.chunk.emit(.tail_call, @intCast(exprs.len + 1));
+    }
+
+    fn compileTemplateStrings(self: *Compiler, cooked: []?[]const u8, raw: [][]const u8) CompileError!void {
+        _ = try self.chunk.emit(.new_array, 0);
+        for (cooked) |part| {
+            const ci = try self.chunk.addConst(if (part) |s| Value.str(s) else Value.undef());
+            _ = try self.chunk.emit(.load_const, ci);
+            _ = try self.chunk.emit(.array_append, 0);
+        }
+        _ = try self.chunk.emit(.dup, 0);
+        _ = try self.chunk.emit(.new_array, 0);
+        for (raw) |part| {
+            const ci = try self.chunk.addConst(Value.str(part));
+            _ = try self.chunk.emit(.load_const, ci);
+            _ = try self.chunk.emit(.array_append, 0);
+        }
+        _ = try self.chunk.emit(.set_prop, try self.chunk.addName("raw"));
+        _ = try self.chunk.emit(.pop, 0);
+    }
 
     fn compileExpr(self: *Compiler, node: *Node) CompileError!void {
         switch (node.*) {
@@ -2031,7 +2170,6 @@ pub const Compiler = struct {
         // Async functions tree-walk (the Promise runtime isn't lowered yet), so
         // bail here to force the fallback for any program that defines one.
         if (fnode.is_async) return error.Unsupported;
-
         // Build this function's slot namespace: parameters first, then every
         // function-scoped declaration in the body (not descending into nested
         // functions). The scope chains to the enclosing function for upvalues.

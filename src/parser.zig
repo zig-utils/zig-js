@@ -969,7 +969,7 @@ pub const Parser = struct {
         const deferred = self.checkContextual("defer") and self.peekKind(1) == .star;
         if (deferred) _ = self.advance(); // consume `defer`
         // Default binding: `import name ...`
-        if (self.check(.identifier) and !std.mem.eql(u8, self.cur().text, "from")) {
+        if (self.check(.identifier)) {
             const name = self.advance().text;
             if (self.isForbiddenBindingName(name)) return ParseError.UnexpectedToken;
             try entries.append(self.arena, .{ .imported = "default", .local = name });
@@ -4502,6 +4502,11 @@ test "parser accepts source-phase import bindings" {
     const default_prog = try default_source.parseModule();
     try std.testing.expectEqualStrings("default", default_prog.program[0].import_decl.entries[0].imported);
     try std.testing.expectEqualStrings("source", default_prog.program[0].import_decl.entries[0].local);
+
+    var default_from = try Parser.init(arena.allocator(), "import from from './m.js';");
+    const default_from_prog = try default_from.parseModule();
+    try std.testing.expectEqualStrings("default", default_from_prog.program[0].import_decl.entries[0].imported);
+    try std.testing.expectEqualStrings("from", default_from_prog.program[0].import_decl.entries[0].local);
 }
 
 test "parser validates module label early errors" {

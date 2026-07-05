@@ -182,6 +182,7 @@ pub const Generator = struct {
     home_object: ?*value.Object = null,
     super_ctor: ?*value.Object = null,
     import_meta_slot: ?*interp.ImportMetaSlot = null,
+    module_referrer: []const u8 = "",
     started: bool = false,
     done: bool = false,
     suspended: bool = false,
@@ -496,6 +497,14 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
             .jump_if_false_peek => if (!stack.items[stack.items.len - 1].toBoolean()) {
                 ip = inst.a;
             },
+            .jump_if_nullish_peek => {
+                const v = stack.items[stack.items.len - 1];
+                if (v.isNull() or v.isUndefined()) ip = inst.a;
+            },
+            .jump_if_not_nullish_peek => {
+                const v = stack.items[stack.items.len - 1];
+                if (!v.isNull() and !v.isUndefined()) ip = inst.a;
+            },
 
             .load_this => try stack.append(stack_alloc, vm.this_value),
             .load_new_target => try stack.append(stack_alloc, vm.new_target),
@@ -735,6 +744,47 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 stack.shrinkRetainingCapacity(base - 1);
                 try stack.append(stack_alloc, result);
             },
+            .tail_call => {
+                const argc = inst.a;
+                const base = stack.items.len - argc;
+                const callee = stack.items[base - 1];
+                if (vm.driver_active) {
+                    if (jsChunkFn(callee)) |func| {
+                        const act = try buildActivation(vm, func, func.chunk.?, stack.items[base..], Value.undef(), Value.undef());
+                        stack.shrinkRetainingCapacity(base - 1);
+                        exec.acc = acc;
+                        exec.ip = ip;
+                        vm.pending_activation = act;
+                        vm.pending_tail_call = true;
+                        return acc;
+                    }
+                }
+                return try callValue(vm, callee, stack.items[base..], Value.undef());
+            },
+            .tail_call_eval => {
+                const argc = inst.a;
+                const base = stack.items.len - argc;
+                const callee = stack.items[base - 1];
+                if (vm.driver_active and !vm.isDirectEvalCallee(callee)) {
+                    if (jsChunkFn(callee)) |func| {
+                        const act = try buildActivation(vm, func, func.chunk.?, stack.items[base..], Value.undef(), Value.undef());
+                        stack.shrinkRetainingCapacity(base - 1);
+                        exec.acc = acc;
+                        exec.ip = ip;
+                        vm.pending_activation = act;
+                        vm.pending_tail_call = true;
+                        return acc;
+                    }
+                }
+                const saved = vm.direct_eval_call;
+                vm.direct_eval_call = vm.isDirectEvalCallee(callee);
+                const result = callValue(vm, callee, stack.items[base..], Value.undef()) catch |e| {
+                    vm.direct_eval_call = saved;
+                    return e;
+                };
+                vm.direct_eval_call = saved;
+                return result;
+            },
             .call_eval => {
                 // A bare `eval(args)` call: mark it a DIRECT eval so, if the callee
                 // is the eval intrinsic, the eval'd code runs in this body's scope
@@ -766,6 +816,26 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 const result = try invokeMethod(vm, recv, name, args);
                 stack.shrinkRetainingCapacity(base - 1);
                 try stack.append(stack_alloc, result);
+            },
+            .tail_call_method => {
+                const argc = inst.b;
+                const base = stack.items.len - argc;
+                const recv = stack.items[base - 1];
+                const args = stack.items[base..];
+                const name = chunk.names.items[inst.a];
+                const method = try vm.getProperty(recv, name);
+                if (vm.driver_active) {
+                    if (jsChunkFn(method)) |func| {
+                        const act = try buildActivation(vm, func, func.chunk.?, args, recv, Value.undef());
+                        stack.shrinkRetainingCapacity(base - 1);
+                        exec.acc = acc;
+                        exec.ip = ip;
+                        vm.pending_activation = act;
+                        vm.pending_tail_call = true;
+                        return acc;
+                    }
+                }
+                return try invokeMethod(vm, recv, name, args);
             },
             .new_call => {
                 const argc = inst.a;
@@ -851,6 +921,25 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 const res = try callValue(vm, callee, args, this_val);
                 stack.shrinkRetainingCapacity(base - 2);
                 try stack.append(stack_alloc, res);
+            },
+            .tail_call_with_this => {
+                const argc = inst.a;
+                const base = stack.items.len - argc;
+                const args = stack.items[base..];
+                const this_val = stack.items[base - 1];
+                const callee = stack.items[base - 2];
+                if (vm.driver_active) {
+                    if (jsChunkFn(callee)) |func| {
+                        const act = try buildActivation(vm, func, func.chunk.?, args, this_val, Value.undef());
+                        stack.shrinkRetainingCapacity(base - 2);
+                        exec.acc = acc;
+                        exec.ip = ip;
+                        vm.pending_activation = act;
+                        vm.pending_tail_call = true;
+                        return acc;
+                    }
+                }
+                return try callValue(vm, callee, args, this_val);
             },
             .assert_iter_result => {
                 // Type(result) must be Object — a Symbol/BigInt is object-tagged here
@@ -1067,6 +1156,7 @@ pub fn makeGenerator(vm: *Interpreter, func: *Function, args: []const Value, thi
     const saved_this_initialized = vm.this_initialized;
     const saved_nt = vm.new_target;
     const saved_eval_nt = vm.direct_eval_new_target_allowed;
+    const saved_cur_module = vm.cur_module;
     vm.env = genv;
     vm.this_value = bound_this;
     vm.home_object = func.home_object;
@@ -1074,6 +1164,7 @@ pub fn makeGenerator(vm: *Interpreter, func: *Function, args: []const Value, thi
     vm.this_initialized = true;
     vm.new_target = Value.undef();
     vm.direct_eval_new_target_allowed = true;
+    vm.cur_module = func.module_referrer;
     defer {
         vm.env = saved_env;
         vm.this_value = saved_this;
@@ -1082,6 +1173,7 @@ pub fn makeGenerator(vm: *Interpreter, func: *Function, args: []const Value, thi
         vm.this_initialized = saved_this_initialized;
         vm.new_target = saved_nt;
         vm.direct_eval_new_target_allowed = saved_eval_nt;
+        vm.cur_module = saved_cur_module;
     }
     try vm.bindParams2(func.params, args, func.is_arrow);
 
@@ -1399,6 +1491,7 @@ pub fn runAsync(vm: *Interpreter, func: *Function, args: []const Value, this_val
         .this_value = bound_this,
         .home_object = func.home_object,
         .super_ctor = func.super_ctor,
+        .module_referrer = func.module_referrer,
         .is_async = true,
         .result = result,
     };
@@ -1539,12 +1632,14 @@ fn asyncDrive(vm: *Interpreter, g: *Generator, kind: ResumeKind, val: Value) Eva
     const s_super = vm.super_ctor;
     const s_nt = vm.new_target;
     const s_eval_nt = vm.direct_eval_new_target_allowed;
+    const s_cur_module = vm.cur_module;
     vm.env = g.env;
     vm.this_value = g.this_value;
     vm.home_object = g.home_object;
     vm.super_ctor = g.super_ctor;
     vm.new_target = Value.undef();
     vm.direct_eval_new_target_allowed = true;
+    vm.cur_module = g.module_referrer;
     defer {
         vm.env = s_env;
         vm.this_value = s_this;
@@ -1552,6 +1647,7 @@ fn asyncDrive(vm: *Interpreter, g: *Generator, kind: ResumeKind, val: Value) Eva
         vm.super_ctor = s_super;
         vm.new_target = s_nt;
         vm.direct_eval_new_target_allowed = s_eval_nt;
+        vm.cur_module = s_cur_module;
     }
     try vm.stackGuard();
     vm.depth += 1;
@@ -2118,6 +2214,7 @@ fn makeClosure(vm: *Interpreter, tmpl: *bc.FnTemplate, frame: ?*Frame) EvalError
         .is_async = tmpl.is_async,
         .is_strict = tmpl.is_strict,
         .import_meta_slot = vm.import_meta_slot,
+        .module_referrer = vm.cur_module,
         .chunk = if (tmpl.is_generator or tmpl.is_async) null else tmpl.chunk,
         .gen_chunk = if (tmpl.is_generator) tmpl.chunk else null,
         .frame = frame,
@@ -2222,6 +2319,7 @@ const Activation = struct {
     saved_nt: Value,
     saved_ims: ?*interp.ImportMetaSlot,
     saved_imo: ?*value.Object,
+    saved_cur_module: []const u8,
     saved_eval_nt: bool,
     saved_pm: ?*const std.StringHashMapUnmanaged([]const u8),
 };
@@ -2251,6 +2349,7 @@ fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
         .saved_nt = vm.new_target,
         .saved_ims = vm.import_meta_slot,
         .saved_imo = vm.import_meta_obj,
+        .saved_cur_module = vm.cur_module,
         .saved_eval_nt = vm.direct_eval_new_target_allowed,
         .saved_pm = vm.current_private_map,
     };
@@ -2263,6 +2362,7 @@ fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
     vm.direct_eval_new_target_allowed = if (func.is_arrow) func.arrow_direct_eval_new_target_allowed else true;
     vm.import_meta_slot = func.import_meta_slot;
     vm.import_meta_obj = if (func.import_meta_slot) |slot| slot.obj else null;
+    vm.cur_module = func.module_referrer;
     vm.this_value = bindThisForCall(vm, func, this_val) catch |e| {
         popActivation(vm, act);
         return e;
@@ -2278,8 +2378,21 @@ fn popActivation(vm: *Interpreter, act: *Activation) void {
     vm.new_target = act.saved_nt;
     vm.import_meta_slot = act.saved_ims;
     vm.import_meta_obj = act.saved_imo;
+    vm.cur_module = act.saved_cur_module;
     vm.direct_eval_new_target_allowed = act.saved_eval_nt;
     vm.current_private_map = act.saved_pm;
+}
+
+fn inheritCallerState(dst: *Activation, src: *const Activation) void {
+    dst.saved_this = src.saved_this;
+    dst.saved_strict = src.saved_strict;
+    dst.saved_env = src.saved_env;
+    dst.saved_nt = src.saved_nt;
+    dst.saved_ims = src.saved_ims;
+    dst.saved_imo = src.saved_imo;
+    dst.saved_cur_module = src.saved_cur_module;
+    dst.saved_eval_nt = src.saved_eval_nt;
+    dst.saved_pm = src.saved_pm;
 }
 
 /// If `callee` is a plain JS-chunk function (not generator/async/native/bound/
@@ -2362,13 +2475,22 @@ fn runDriver(vm: *Interpreter, initial: *Activation) EvalError!Value {
         if (vm.pending_activation) |raw| {
             // A nested plain JS→JS call: push it instead of recursing natively.
             vm.pending_activation = null;
-            if (vm.depth >= interp.max_call_depth) {
-                _ = vm.throwError("RangeError", "Maximum call stack size exceeded") catch {};
-                if (try unwindThrow(vm, &acts)) continue;
-                return error.Throw;
-            }
-            vm.depth += 1;
+            const tail_call = vm.pending_tail_call;
+            vm.pending_tail_call = false;
             const callee: *Activation = @ptrCast(@alignCast(raw));
+            if (tail_call) {
+                const current = acts.items[acts.items.len - 1];
+                inheritCallerState(callee, current);
+                vm.popExecRoot(&current.exec);
+                _ = acts.pop();
+            } else {
+                if (vm.depth >= interp.max_call_depth) {
+                    _ = vm.throwError("RangeError", "Maximum call stack size exceeded") catch {};
+                    if (try unwindThrow(vm, &acts)) continue;
+                    return error.Throw;
+                }
+                vm.depth += 1;
+            }
             callee.exec.frame = callee.frame;
             vm.pushExecRoot(&callee.exec);
             try acts.append(vm.arena, callee);
@@ -2642,11 +2764,13 @@ test "vm: `var x = init` inside `with` resolves the binding through the with obj
     )).asNum());
 }
 
-test "vm: compiler still falls back for try/catch" {
+test "vm: compiler lowers try/catch" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var parser = try Parser.init(a, "try { throw 1; } catch (e) {}");
-    const prog = try parser.parseProgram();
-    try std.testing.expectError(error.Unsupported, Compiler.compileProgram(a, prog));
+    try std.testing.expectEqual(@as(f64, 3), (try vmRun(a,
+        \\let x = 0;
+        \\try { throw 3; } catch (e) { x = e; }
+        \\x
+    )).asNum());
 }
