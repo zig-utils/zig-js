@@ -4,7 +4,7 @@ title: zig-js — a JavaScript engine in pure Zig
 hero:
   name: zig-js
   text: A JavaScript engine in pure Zig
-  tagline: A tree-walking interpreter and a tiered bytecode VM with zero C dependencies — plus a drop-in JavaScriptCore C-API. Measured against the real test262 corpus.
+  tagline: A tree-walking interpreter and a tiered bytecode VM with zero C dependencies — plus a JavaScriptCore C-API-compatible subset. Measured against the real test262 corpus.
   actions:
     - theme: brand
       text: Get Started →
@@ -21,7 +21,7 @@ hero:
 ## Run it yourself
 
 <Terminal title="zig build test262 -Doptimize=ReleaseFast">
-<span class="cm"># Build the engine and run the real WebKit test262 corpus</span>
+<span class="cm"># Build the engine and run the pinned tc39/test262 corpus</span>
 <span class="pr">❯</span> zig build test262 -Doptimize=ReleaseFast
 <span class="cm">----------------------------------------------</span>
 <span class="cy">VALID</span> (can we run it):  <span class="ok">{{ data.test262.valid.passing }}/{{ data.test262.valid.total }}</span> (<span class="hl">{{ data.test262.valid.percentage }}%</span>)   parse-fail {{ data.test262.valid.parseFail }} · runtime-fail {{ data.test262.valid.runtimeFail }} · host-fail {{ data.test262.valid.hostFail }}
@@ -33,8 +33,8 @@ hero:
 <div class="cards">
 <FeatureCard tag="// pure-zig" title="No C dependencies">Lexer, parser, interpreter, bytecode VM, and every builtin are written from scratch in Zig. One static library, no system JavaScriptCore.</FeatureCard>
 <FeatureCard tag="// tiered" title="Tree-walk → VM → shapes">A correct tree-walking evaluator with a tier-1 stack VM on top: slot-allocated locals, frame-linked closures, object shapes, and inline caches.</FeatureCard>
-<FeatureCard tag="// drop-in" title="JavaScriptCore C-API">Exports the JSC C-ABI — <code>JSGlobalContextCreate</code>, <code>JSEvaluateScript</code>, and friends — so existing embedders link <code>libzig-js.a</code> unchanged.</FeatureCard>
-<FeatureCard tag="// conformance" title="Measured, not guessed">Scored against the real test262 suite with a crash-proof subprocess harness. Progress is data, not vibes.</FeatureCard>
+<FeatureCard tag="// c-api" title="JavaScriptCore C-API subset">Exports the implemented public JSC C-API surface — <code>JSGlobalContextCreate</code>, <code>JSEvaluateScript</code>, and friends — for hosts that only need that subset.</FeatureCard>
+<FeatureCard tag="// conformance" title="Measured, scoped">Scored against the real test262 suite with a crash-proof subprocess harness. The configured runner is green; skipped harness categories remain explicit.</FeatureCard>
 </div>
 
 ## Per-suite breakdown

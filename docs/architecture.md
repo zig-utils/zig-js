@@ -42,6 +42,6 @@ Constructs the VM hasn't learned yet (e.g. `throw`/`try` in some paths) transpar
 
 A default `Context` owns an **arena allocator**: values and objects are bump-allocated and freed wholesale when the context is released. Opt-in contexts created with `Context.createWith(.{ .enable_gc = true })` route heap cells through the Phase-7 precise collector and can run quiescent `collectGarbage()`; this already reclaims unreachable cells, clears `WeakRef` targets, prunes WeakMap/WeakSet weak keys, makes FinalizationRegistry records available to `cleanupSome()`, and drains automatic FinalizationRegistry cleanup jobs at host checkpoints. Arbitrary mid-script collection remains future GC work.
 
-## Why a C-API drop-in?
+## Why a C-API-compatible subset?
 
-By exporting the exact JavaScriptCore C-ABI from `c_api.zig`, existing embedders swap `JavaScriptCore.framework` for `libzig-js.a` and keep calling `JSGlobalContextCreate`, `JSEvaluateScript`, `JSObjectCallAsFunction`, and friends unchanged. See the [C-API guide](/api).
+By exporting the implemented public JavaScriptCore C-API subset from `c_api.zig`, embedders that only use that surface can swap `JavaScriptCore.framework` for `libzig-js.a` and keep calling `JSGlobalContextCreate`, `JSEvaluateScript`, `JSObjectCallAsFunction`, and friends unchanged. See the [C-API guide](/api).

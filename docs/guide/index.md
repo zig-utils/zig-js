@@ -1,6 +1,6 @@
 ---
 title: What is zig-js?
-description: A JavaScript engine written in pure Zig — standalone interpreter and JavaScriptCore C-API drop-in.
+description: A JavaScript engine written in pure Zig — standalone interpreter and JavaScriptCore C-API-compatible subset.
 ---
 
 # What is zig-js?
@@ -8,13 +8,13 @@ description: A JavaScript engine written in pure Zig — standalone interpreter 
 **zig-js** is a JavaScript engine written from scratch in [Zig](https://ziglang.org), with **no external C dependencies**. It is two things at once:
 
 - a **standalone JavaScript interpreter** — a tree-walking evaluator backed by a tiered bytecode VM; and
-- a **drop-in replacement for the JavaScriptCore C-API** — link `libzig-js.a` in place of the system `JavaScriptCore.framework` and call the same `JSGlobalContextCreate` / `JSEvaluateScript` symbols unchanged.
+- a **JavaScriptCore C-API-compatible subset** — link `libzig-js.a` in place of the system `JavaScriptCore.framework` when your host uses the implemented public C-API surface.
 
 It is built as a general embeddable JavaScript engine for Zig applications, language runtimes, tools, and hosts that want to own their JS stack.
 
 ## Status
 
-zig-js is an early but capable v1: a correct tree-walking interpreter over a broad language subset, a tier-1 bytecode VM, object shapes, and inline caches. It is scored continuously against the **real** WebKit `test262` corpus.
+zig-js is an early but capable v1: a correct tree-walking interpreter over a broad language subset, a tier-1 bytecode VM, object shapes, and inline caches. It is scored continuously against the **real** pinned tc39/test262 corpus.
 
 <Test262Progress :stats="data.test262" />
 
@@ -28,8 +28,8 @@ zig-js is an early but capable v1: a correct tree-walking interpreter over a bro
 `Object`, `Array`, `String`, `Number`, `Boolean`, `Math`, `JSON`, `Map`, `Set`, `WeakMap`, `WeakSet`, `Symbol`, `Function`, `Date`, the `Error` family, `Promise`, `Proxy`, `Reflect`, and `RegExp` — including modern surface like ES2024 `Set` operations, `Object.groupBy`, `Array` hole/sparse semantics, and well-known symbols.
 :::
 
-::: warning Not yet
-Generators / async generators · `async`/`await` (Promises settle synchronously today) · ES modules · `TypedArray` / `ArrayBuffer` · the more exotic `RegExp` features (lookbehind, Unicode property escapes). These are tracked subsystems, not loose ends.
+::: warning Scope caveat
+The configured test262 runner is green, but skipped harness categories remain outside the denominator. Do not treat module+async/top-level-await, `CanBlockIsFalse`, tail-call-optimization, or unloadable-include cases as implemented until they are promoted into the runner and pass.
 :::
 
 ## Next steps

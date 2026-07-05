@@ -5,7 +5,7 @@ description: How zig-js is measured against the real test262 corpus.
 
 # test262 Conformance
 
-zig-js is scored against the **real** [tc39/test262](https://github.com/tc39/test262) corpus (as vendored in WebKit's `JSTests/test262`) — not a hand-picked subset. Progress is a number, not a vibe.
+zig-js is scored against the **real** [tc39/test262](https://github.com/tc39/test262) corpus from the pinned `test262/` submodule — not a hand-picked subset. Progress is a number, not a vibe, but the number only covers tests the configured runner actually scores.
 
 <Test262Progress :stats="data.test262" />
 
@@ -23,9 +23,9 @@ The harness (`conformance/test262.zig`) walks the corpus and, for each `.js` fil
 Valid and negative tests measure different things, so they are scored separately:
 
 - **VALID — "can we run it?"** `pass + parse-fail + runtime-fail + host-fail`. This is the headline metric.
-- **NEGATIVE — "do we reject bad input?"** `pass-negative + fail-negative`. Early-error rejection is largely unimplemented, so this number is intentionally low.
+- **NEGATIVE — "do we reject bad input?"** `pass-negative + fail-negative`.
 
-Tests flagged `module`, `async`, or with unloadable `includes:` are **skipped** and excluded from the denominator.
+Skipped tests are excluded from both denominators. Current skipped categories include unsupported harness shapes such as module+async / top-level-await machinery, `CanBlockIsFalse`, tail-call-optimization tests, and tests whose `includes:` cannot be loaded. Plain modules and plain async tests are part of the runner where supported.
 
 ## Current numbers
 
@@ -38,6 +38,8 @@ Failure shape on the VALID axis: **{{ data.test262.valid.parseFail }}** parse-fa
 
 ## Per-suite breakdown
 
+The table below is populated only when `docs/.data/test262.json` was regenerated from a saved run that includes subtree lines. If the suite list is empty, do not invent rows; rerun or parse a saved transcript with `bun run docs:data -- --from run.txt`.
+
 <table class="suites"><thead><tr><th>Suite</th><th>Passing</th><th>Total</th><th>Rate</th></tr></thead><tbody>
 @foreach (data.test262.suites as suite)
 <tr><td>test/{{ suite.name }}</td><td>{{ suite.passing }}</td><td>{{ suite.total }}</td><td>{{ suite.percentage }}%<span class="mini"><i style="width: {{ suite.percentage }}%"></i></span></td></tr>
@@ -48,9 +50,9 @@ Failure shape on the VALID axis: **{{ data.test262.valid.parseFail }}** parse-fa
 
 ## Remaining high-impact work
 
-The cheap wins are gone; what's left are genuine subsystems:
+The configured runner is green, so the next work is not a bucket of known valid failures. It is an audit of what is outside the denominator:
 
-- **Generators / async generators + `for await`** — needs a VM exception-handler stack.
-- **ES modules** — `import`/`export` (currently skipped).
-- **`TypedArray` / `ArrayBuffer`** — needs resizable buffers.
-- **Early-error strictness** — the bulk of the NEGATIVE axis.
+- Save and parse a full `zig build test262` transcript so per-suite docs are generated from evidence.
+- Classify the 140 skipped cases by exact reason and path.
+- Promote skipped cases only after the underlying harness/runtime feature is implemented and the focused worker passes.
+- Keep README/docs claims tied to either `docs/.data/test262.json`, `conformance/test262.zig`, or a committed run transcript.

@@ -18,10 +18,6 @@ const OUT = join(ROOT, 'docs/.data/test262.json')
 // Zig 0.17-dev is required (system 0.16 will not work). See project memory.
 const ZIG = `${homedir()}/.local/share/zig-0.17-dev/zig`
 
-function pct(passing: number, total: number): number {
-  return total === 0 ? 0 : Math.round((passing / total) * 1000) / 10
-}
-
 async function getOutput(): Promise<string> {
   const fromIdx = process.argv.indexOf('--from')
   if (fromIdx !== -1 && process.argv[fromIdx + 1])
@@ -86,8 +82,8 @@ function parse(text: string) {
       : { passing: 0, total: 0, percentage: 0 },
     skipped: skipLine ? Number(skipLine[1]) : 0,
     generatedAt: todayIso,
-    harness: 'real (WebKit JSTests/test262 corpus)',
-    suites: suites.length ? suites : [{ name: 'language', ...{ passing: valid.passing, total: valid.total, percentage: pct(valid.passing, valid.total) } }],
+    harness: 'real (pinned tc39/test262 submodule)',
+    suites,
   }
 }
 

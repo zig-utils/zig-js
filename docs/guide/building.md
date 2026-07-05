@@ -23,7 +23,7 @@ zig build conformance     # fast smoke suite (must stay green)
 ## Run the real test262 suite
 
 ```bash
-# Runs the full WebKit test262 corpus with a crash-proof subprocess harness.
+# Runs the pinned tc39/test262 corpus with a crash-proof subprocess harness.
 zig build test262 -Doptimize=ReleaseFast
 
 # Point at an explicit corpus root:

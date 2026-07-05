@@ -1,11 +1,11 @@
 ---
 title: JavaScriptCore C-API
-description: Embed zig-js by linking it in place of JavaScriptCore.
+description: Embed zig-js through its implemented JavaScriptCore C-API subset.
 ---
 
 # JavaScriptCore C-API
 
-zig-js exports the JavaScriptCore C-ABI from `c_api.zig`. Existing embedders link `libzig-js.a` in place of the system `JavaScriptCore.framework` and keep their JSC calls unchanged.
+zig-js exports an implemented subset of the public JavaScriptCore C-ABI from `c_api.zig`. Hosts that only use this subset can link `libzig-js.a` in place of the system `JavaScriptCore.framework` and keep those calls unchanged.
 
 ## Minimal embedding
 
@@ -26,7 +26,7 @@ int main(void) {
 }
 ```
 
-Link against `libzig-js.a` instead of JavaScriptCore — no source changes.
+Link against `libzig-js.a` instead of JavaScriptCore when your host only uses the implemented surface below.
 
 ## Implemented surface
 
@@ -65,9 +65,9 @@ void        JSStringRelease(JSStringRef);
 ```
 :::
 
-Native callbacks use JSC's `HostCallback` calling convention, so functions you expose to JavaScript are registered exactly as they are with JavaScriptCore.
+Native callbacks use JSC's `HostCallback` calling convention, so functions you expose to JavaScript through this subset are registered as they are with JavaScriptCore.
 
 ## Caveats
 
 > [!WARNING]
-> The drop-in covers the common evaluation, value, object, and string surface. Engine-specific extensions (the JSC inspector/debugger protocol, the Objective-C `JSValue`/`JSContext` bridge) are out of scope. The language subset is whatever the engine currently implements — see [Conformance](/conformance).
+> The implemented subset covers the common evaluation, value, object, and string surface. Engine-specific extensions (the JSC inspector/debugger protocol, the Objective-C `JSValue`/`JSContext` bridge) are out of scope. The language/runtime scope is whatever the configured conformance runner currently proves — see [Conformance](/conformance).
