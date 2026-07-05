@@ -1325,6 +1325,13 @@ fn workerLimitForSubtree(sub: []const u8) usize {
     // so a wedged agent test in a 10-batch would cost up to 10×30s to crawl
     // past. At limit 1 a deadlock costs one timeout and blames the right test.
     if (std.mem.eql(u8, sub, "test/built-ins/Atomics")) return 1;
+    // These large built-ins contain clusters of individually quick constructor,
+    // regexp, coercion, and resizable-buffer stress tests whose 10-test batches
+    // can exceed the 30s backstop on a long parent run. Keep them single-test
+    // so a finite slow cluster cannot be mis-scored as several host failures.
+    if (std.mem.eql(u8, sub, "test/built-ins/RegExp/.") or
+        std.mem.eql(u8, sub, "test/built-ins/String") or
+        std.mem.eql(u8, sub, "test/built-ins/TypedArray")) return 1;
     // Some non-ISO calendar PlainMonthDay intl cases are slow but finite. Keep
     // them isolated so the parent does not discard a completed slow batch as a
     // timeout and mis-score its first test as a host failure.
