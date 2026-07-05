@@ -69,6 +69,10 @@ pub const ThreadRecord = struct {
     /// locals in `threadMain`; outstanding async tickets are transferred away
     /// before that stack frame exits.
     microtasks: ?*promise.MicrotaskQueue = null,
+    /// ThreadLocal records this thread has stored into. The records are
+    /// arena-lived host data; this list lets thread exit remove the OS-thread
+    /// keyed entries so ThreadLocal-only JS roots do not survive termination.
+    touched_thread_locals: std.ArrayListUnmanaged(*TLRecord) = .empty,
 };
 
 threadlocal var t_current: ?*ThreadRecord = null;
@@ -442,6 +446,7 @@ fn threadMain(rec: *ThreadRecord, fn_v: Value, args: []const Value) void {
         if (rec.ctx.parallel_js) g.release();
     }
     t_current = rec;
+    defer clearThreadLocalValuesForCurrentThread(rec);
     // A per-thread interpreter over the SHARED realm: same arena, environment,
     // global object, and shapes (safe under the GIL), with its own job queues.
     // join() performs the joiner's completion checkpoint before observing the
@@ -854,6 +859,26 @@ const TLRecord = struct {
         self.map_lock.unlock();
     }
 };
+
+fn rememberThreadLocalForCurrentThread(rec: *TLRecord) !void {
+    const thread_rec = t_current orelse return;
+    if (thread_rec.id == 0) return;
+    for (thread_rec.touched_thread_locals.items) |seen| {
+        if (seen == rec) return;
+    }
+    try thread_rec.touched_thread_locals.append(thread_rec.ctx.arena(), rec);
+}
+
+fn clearThreadLocalValuesForCurrentThread(thread_rec: *ThreadRecord) void {
+    if (thread_rec.touched_thread_locals.items.len == 0) return;
+    const tid = currentTid();
+    for (thread_rec.touched_thread_locals.items) |rec| {
+        rec.lockMap();
+        _ = rec.map.remove(tid);
+        rec.unlockMap();
+    }
+    thread_rec.touched_thread_locals.clearRetainingCapacity();
+}
 
 const UnlockTokenRecord = struct {
     brand: SyncBrand = sync_brand_unlock_token,
@@ -1651,6 +1676,13 @@ fn tlValueSetFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.Hos
     const self: *Interpreter = @ptrCast(@alignCast(ctx_ptr));
     const rec = recOf(TLRecord, this) orelse return self.throwError("TypeError", "ThreadLocal.prototype.value called on incompatible receiver");
     const v = if (args.len > 0) args[0] else Value.undef();
+    if (v.isUndefined()) {
+        rec.lockMap();
+        _ = rec.map.remove(currentTid());
+        rec.unlockMap();
+        return Value.undef();
+    }
+    try rememberThreadLocalForCurrentThread(rec);
     rec.lockMap();
     defer rec.unlockMap();
     try rec.map.put(rec.arena, currentTid(), v);

@@ -317,13 +317,15 @@ and user thenables published through both `join()` and `asyncJoin()`, plus
 thread lifecycles, plus
 `ThreadLocal` values registered with `FinalizationRegistry` across
 park/resume/clear/join cleanup lifecycles with exact cleanup count/sum delivery
-after quiescent collection. It also parks child Threads behind parent-created
+after quiescent collection, plus `ThreadLocal`-only targets held by owners that
+are forcibly terminated by top-level failure and must be released before exact
+cleanup after teardown. It also parks child Threads behind parent-created
 `asyncJoin()` promises that outlive the parent Thread's local microtask queue,
 then verifies child release, nested `ThreadLocal` roots, rerouted async
 settlement, and exact finalization cleanup after both thread layers exit. It now
 also composes isolated Worker termination with shared-realm teardown that
 abandons child-owned typed-array `waitAsync` tickets, rejects pending
-`asyncJoin` reactions, and delivers exact cleanup. Each seed currently runs 45
+`asyncJoin` reactions, and delivers exact cleanup. Each seed currently runs 46
 deterministic lifecycle
 subprograms.
 

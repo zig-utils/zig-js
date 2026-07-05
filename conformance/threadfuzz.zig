@@ -8730,6 +8730,186 @@ fn runThreadLocalFinalizationCleanupInterleaving(gpa: std.mem.Allocator, seed: u
     return true;
 }
 
+fn runThreadLocalTerminationCleanupInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
+    var prng = std.Random.DefaultPrng.init(seed ^ 0x746c_735f_7465_726d);
+    const r = prng.random();
+    const nthreads = 2 + r.uintLessThan(usize, 4);
+    const held_base = 52_000 + r.uintLessThan(usize, 10_000);
+    const reject_base = 62_000 + r.uintLessThan(usize, 10_000);
+
+    var expected_cleanup_sum: usize = 0;
+    var expected_reject_sum: usize = 0;
+    var id: usize = 0;
+    while (id < nthreads) : (id += 1) {
+        expected_cleanup_sum += held_base + id;
+        expected_reject_sum += reject_base + id;
+    }
+
+    const ctx = js.Context.createWith(gpa, .{ .enable_threads = true, .enable_gc = true }) catch {
+        std.debug.print("seed {d}: ThreadLocal termination cleanup context creation failed\n", .{seed});
+        return false;
+    };
+    defer ctx.destroy();
+
+    const src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  globalThis.__tlsTermCleanupCount = 0;
+        \\  globalThis.__tlsTermCleanupSum = 0;
+        \\  globalThis.__tlsTermRejectScore = 0;
+        \\  globalThis.__tlsTermRejectCount = 0;
+        \\  globalThis.__tlsTermRegistry = new FinalizationRegistry((held) => {{
+        \\    globalThis.__tlsTermCleanupCount++;
+        \\    globalThis.__tlsTermCleanupSum += held;
+        \\  }});
+        \\  const registry = globalThis.__tlsTermRegistry;
+        \\  const tls = new ThreadLocal();
+        \\  const gate = {{ ready: 0, stop: 0 }};
+        \\  const threads = globalThis.__tlsTermThreads = [];
+        \\  for (let id = 0; id < {d}; id++) {{
+        \\    const reactionRoot = {{
+        \\      marker: {d} + id,
+        \\      nested: {{ seed: {d}, label: 'threadlocal-termination-asyncJoin-root-' + id }},
+        \\    }};
+        \\    const t = new Thread((id, heldBase, seed) => {{
+        \\      let target = {{
+        \\        id,
+        \\        seed,
+        \\        payload: 'threadlocal-termination-cleanup-' + id,
+        \\        nested: {{ marker: heldBase + id }},
+        \\      }};
+        \\      tls.value = target;
+        \\      registry.register(target, heldBase + id);
+        \\      target = null;
+        \\      Atomics.add(gate, 'ready', 1);
+        \\      Atomics.notify(gate, 'ready');
+        \\      while (Atomics.load(gate, 'stop') === 0)
+        \\        Atomics.wait(gate, 'stop', 0, 1000);
+        \\      return -1;
+        \\    }}, id, {d}, {d});
+        \\    t.asyncJoin().then(
+        \\      () => {{ globalThis.__tlsTermRejectScore = -1000000; }},
+        \\      (e) => {{
+        \\        if (e && reactionRoot.marker === {d} + id && reactionRoot.nested.seed === {d}) {{
+        \\          globalThis.__tlsTermRejectScore += reactionRoot.marker;
+        \\          globalThis.__tlsTermRejectCount++;
+        \\        }} else {{
+        \\          globalThis.__tlsTermRejectScore = -1000000;
+        \\        }}
+        \\      }});
+        \\    threads.push(t);
+        \\  }}
+        \\  while (Atomics.load(gate, 'ready') < {d})
+        \\    Atomics.wait(gate, 'ready', Atomics.load(gate, 'ready'), 1);
+        \\  globalThis.__tlsTermRegistry.cleanupSome();
+        \\  if (globalThis.__tlsTermCleanupCount !== 0)
+        \\    throw new Error('ThreadLocal termination cleanup ran before teardown: ' + globalThis.__tlsTermCleanupCount);
+        \\  throw new Error('threadfuzz ThreadLocal termination cleanup {d}');
+        \\}})();
+        \\
+    ,
+        .{
+            nthreads,
+            reject_base,
+            seed,
+            held_base,
+            seed,
+            reject_base,
+            seed,
+            nthreads,
+            seed,
+        },
+    );
+    defer gpa.free(src);
+
+    if (ctx.evaluate(src)) |_| {
+        std.debug.print("seed {d}: ThreadLocal termination cleanup script returned normally\n", .{seed});
+        return false;
+    } else |err| {
+        if (err != error.Throw) {
+            std.debug.print("seed {d}: ThreadLocal termination cleanup failed with {s}\n", .{ seed, @errorName(err) });
+            return false;
+        }
+    }
+
+    _ = ctx.evaluate("$drainRunLoop()") catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: ThreadLocal termination cleanup drain threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+
+    const check_src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  if (globalThis.__tlsTermRejectScore !== {d})
+        \\    throw new Error('bad ThreadLocal termination reject score ' + globalThis.__tlsTermRejectScore);
+        \\  if (globalThis.__tlsTermRejectCount !== {d})
+        \\    throw new Error('bad ThreadLocal termination reject count ' + globalThis.__tlsTermRejectCount);
+        \\  let joinThrew = 0;
+        \\  for (const t of globalThis.__tlsTermThreads) {{
+        \\    try {{
+        \\      t.join();
+        \\    }} catch (e) {{
+        \\      if (e) joinThrew++;
+        \\    }}
+        \\  }}
+        \\  if (joinThrew !== {d})
+        \\    throw new Error('ThreadLocal termination join threw ' + joinThrew);
+        \\  globalThis.__tlsTermThreads = null;
+        \\  return globalThis.__tlsTermRejectCount;
+        \\}})();
+        \\
+    ,
+        .{ expected_reject_sum, nthreads, nthreads },
+    );
+    defer gpa.free(check_src);
+    const checked = ctx.evaluate(check_src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: ThreadLocal termination cleanup check threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!checked.isNumber() or checked.asNum() != @as(f64, @floatFromInt(nthreads))) {
+        std.debug.print("seed {d}: ThreadLocal termination cleanup checked got {d}, expected {d}\n", .{ seed, if (checked.isNumber()) checked.asNum() else -1, nthreads });
+        return false;
+    }
+
+    ctx.collectGarbage();
+    const cleanup_src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  globalThis.__tlsTermRegistry.cleanupSome();
+        \\  if (globalThis.__tlsTermCleanupCount !== {d})
+        \\    throw new Error('bad ThreadLocal termination cleanup count ' + globalThis.__tlsTermCleanupCount);
+        \\  if (globalThis.__tlsTermCleanupSum !== {d})
+        \\    throw new Error('bad ThreadLocal termination cleanup sum ' + globalThis.__tlsTermCleanupSum);
+        \\  return globalThis.__tlsTermCleanupCount;
+        \\}})();
+        \\
+    ,
+        .{ nthreads, expected_cleanup_sum },
+    );
+    defer gpa.free(cleanup_src);
+    const cleaned = ctx.evaluate(cleanup_src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: ThreadLocal termination cleanup cleanup JS threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!cleaned.isNumber() or cleaned.asNum() != @as(f64, @floatFromInt(nthreads))) {
+        std.debug.print("seed {d}: ThreadLocal termination cleanup got {d}, expected {d}\n", .{ seed, if (cleaned.isNumber()) cleaned.asNum() else -1, nthreads });
+        return false;
+    }
+    return true;
+}
+
 fn runNestedThreadAsyncJoinCleanupInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
     var prng = std.Random.DefaultPrng.init(seed ^ 0x6e65_7374_6173_796e);
     const r = prng.random();
@@ -14669,6 +14849,21 @@ pub fn main(init: std.process.Init) !void {
         if (tfail != 0) std.process.exit(1);
         return;
     };
+    // `threadfuzz tlstermcleanup <iters> <seed>`: focused lifecycle repro for
+    // ThreadLocal-only roots released by top-level-failure thread teardown.
+    if (first) |a| if (std.mem.eql(u8, a, "tlstermcleanup")) {
+        if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch 1;
+        if (args.next()) |b| base_seed = std.fmt.parseInt(u64, b, 10) catch 1;
+        var ttcfail: usize = 0;
+        var ttci: usize = 0;
+        while (ttci < iters) : (ttci += 1) {
+            const seed = base_seed +% ttci;
+            if (!(try runThreadLocalTerminationCleanupInterleaving(gpa, seed))) ttcfail += 1;
+        }
+        std.debug.print("threadfuzz tlstermcleanup: {d} programs from seed {d}, {d} failures\n", .{ iters, base_seed, ttcfail });
+        if (ttcfail != 0) std.process.exit(1);
+        return;
+    };
     // `threadfuzz nestedasyncfinal <iters> <seed>`: focused lifecycle repro for
     // parent-created child Threads whose asyncJoin promises outlive the parent
     // thread's local queue, plus ThreadLocal roots and exact cleanup.
@@ -15574,6 +15769,7 @@ pub fn main(init: std.process.Init) !void {
     // waitAsync ticket abandonment and pending asyncJoin rejection cleanup,
     // Thread.restrict-stored FinalizationRegistry records across owner exit,
     // ThreadLocal-stored FinalizationRegistry records across park/resume/cleanup,
+    // ThreadLocal-only roots released by top-level-failure teardown,
     // parent-created child Threads whose asyncJoin promises outlive the parent
     // thread's local queue plus ThreadLocal roots and exact cleanup,
     // asyncHold barging delivery after a deterministic queued ticket,
@@ -15635,7 +15831,8 @@ pub fn main(init: std.process.Init) !void {
     // functions must unlock while property/condition waiters stay parked and
     // then permit exact cleanup after those waiters resume; ThreadLocal values must stay
     // per-thread across normal, throwing, nested, async-joined, and
-    // finalization-cleanup lifecycles; nested child asyncJoin promises created
+    // finalization-cleanup lifecycles, and ThreadLocal-only cleanup targets
+    // held by forcibly terminated owners must release after teardown; nested child asyncJoin promises created
     // by exiting parent Threads must reroute into the realm queue and settle
     // with exact cleanup after the child is released; Thread.restrict-owned objects must reject
     // foreign access, survive through owner-thread execution, and then deliver
@@ -15693,9 +15890,10 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runThreadRestrictFinalizationCleanupInterleaving(gpa, seed))) lfail += 1;
             if (!(try runThreadLocalLifecycleInterleaving(gpa, seed))) lfail += 1;
             if (!(try runThreadLocalFinalizationCleanupInterleaving(gpa, seed))) lfail += 1;
+            if (!(try runThreadLocalTerminationCleanupInterleaving(gpa, seed))) lfail += 1;
             if (!(try runNestedThreadAsyncJoinCleanupInterleaving(gpa, seed))) lfail += 1;
         }
-        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 45, base_seed, lfail });
+        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 46, base_seed, lfail });
         if (lfail != 0) std.process.exit(1);
         return;
     };
