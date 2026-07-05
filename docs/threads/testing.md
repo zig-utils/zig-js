@@ -17,6 +17,8 @@ python3 tools/threads-reference-audit.py --run-probes --expect-current-blockers 
 zig build test -Dtsan=true
 zig build test -Dtsan=true -Dtest-filter=parallel_js
 zig build threadfuzz -Dfuzz-iters=20
+zig build threadfuzz -Dtsan=true -Dfuzz-midgc=true -Dfuzz-iters=2
+zig build threadfuzz -Dtsan=true -Dfuzz-lifecycle=true -Dfuzz-iters=2
 zig build threadfuzz -Dfuzz-midgc=true -Dfuzz-iters=5
 zig build threadfuzz -Dfuzz-lifecycle=true -Dfuzz-iters=20
 zig build threadfuzz -Dfuzz-verify=true -Dfuzz-iters=300
@@ -43,6 +45,8 @@ push to `main`:
 ```sh
 zig build threadfuzz -Dfuzz-iters=400
 zig build threadfuzz -Dtsan=true -Dfuzz-iters=60
+zig build threadfuzz -Dtsan=true -Dfuzz-midgc=true -Dfuzz-iters=2
+zig build threadfuzz -Dtsan=true -Dfuzz-lifecycle=true -Dfuzz-iters=2
 zig build threadfuzz -Dfuzz-amplify=true -Dfuzz-iters=30
 zig build threadfuzz -Dfuzz-broad=true -Dfuzz-iters=80
 zig build threadfuzz -Dfuzz-midgc=true -Dfuzz-iters=20
@@ -54,10 +58,14 @@ zig build threads-test-bin -Dtsan=true
 ```
 
 The corpus TSan sweep is sharded in CI and runs each allowlisted case in its own
-process to avoid TSan shadow-memory growth across a single long run. It fails on
-engine-state races. JS-defined program-byte races are covered by narrow
-suppressions plus a suppression witness that proves the suppressions are both
-load-bearing and not hiding engine-state frames. The witness is
+process to avoid TSan shadow-memory growth across a single long run. CI also
+runs TSan smoke seeds for the specialized mid-script-GC and lifecycle fuzzer
+profiles, so their hidden-root, parked-waiter, Worker, cleanup, termination,
+and async-join paths are covered by sanitizer instead of only by non-TSan
+breadth runs. These gates fail on engine-state races. JS-defined program-byte
+races are covered by narrow suppressions plus a suppression witness that proves
+the suppressions are both load-bearing and not hiding engine-state frames. The
+witness is
 `tools/tsan-suppression-witness.sh`; run it after building
 `threads-test-bin -Dtsan=true` when changing `tsan-suppressions.txt`, raw
 TypedArray/shared-buffer access helpers, or the memory-model boundary.

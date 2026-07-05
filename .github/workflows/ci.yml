@@ -65,6 +65,16 @@ jobs:
           # engine access the seeded programs exercise (TSan is ~10× slower).
           - name: tsan-threadfuzz
             cmd: zig build threadfuzz -Dtsan=true -Dfuzz-iters=60
+          # Specialized TSan smoke for the mid-script-GC profile. The larger
+          # non-TSan leg owns breadth; this leg proves the hidden root/parked
+          # waiter/microtask paths are also free of unsuppressed engine races.
+          - name: tsan-threadfuzz-midgc
+            cmd: zig build threadfuzz -Dtsan=true -Dfuzz-midgc=true -Dfuzz-iters=2
+          # Specialized TSan smoke for lifecycle teardown. It keeps the Worker,
+          # asyncJoin, waitAsync, cleanup, and termination combinations under
+          # sanitizer instead of relying only on the default-profile TSan leg.
+          - name: tsan-threadfuzz-lifecycle
+            cmd: zig build threadfuzz -Dtsan=true -Dfuzz-lifecycle=true -Dfuzz-iters=2
           # Stress amplification: the high-contention profile (6–14 threads,
           # 5000-iter loops) drives rare interleavings far harder — a throw, UAF,
           # hang, or torn read fails the leg. Run without TSan (its ~10× slowdown

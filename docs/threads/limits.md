@@ -398,9 +398,12 @@ context APIs.
   parent-created child `Thread`s whose `asyncJoin()` promises outlive the parent
   Thread's local queue before child release, nested `ThreadLocal` roots,
   rerouted async settlement, and exact finalization cleanup after both thread
-  layers exit. Keep
-  extending it toward more teardown ordering, broader cross-realm scheduling,
-  and richer cleanup/finalization interleavings.
+  layers exit. CI now runs small TSan smoke seeds for both the mid-script-GC
+  and lifecycle profiles in addition to their larger non-TSan breadth gates, so
+  hidden-root, parked-waiter, Worker, cleanup, termination, and async-join
+  combinations remain race-gated while higher-iteration sanitizer expansion
+  continues. Keep extending it toward more teardown ordering, broader
+  cross-realm scheduling, and richer cleanup/finalization interleavings.
 - **Reference-only PR-249 files.** Promote only when the engine implements the
   behavior and the file is reliable under Zig `0.17-dev`, especially the
   WebAssembly-required files, JIT/shell-hook witnesses, deep stack-overflow

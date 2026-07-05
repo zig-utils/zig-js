@@ -525,6 +525,8 @@ Every pull request and push to `main` runs:
 - TSan `parallel_js` unit slice,
 - `threadfuzz`,
 - TSan `threadfuzz`,
+- TSan mid-script-GC `threadfuzz` smoke,
+- TSan lifecycle `threadfuzz` smoke,
 - amplified `threadfuzz`,
 - broad semantic `threadfuzz`,
 - mid-script GC wait-pump/microtask/property-waitAsync-late-settlement/creator-buffer/nested-asyncJoin/sync-wait-cleanup/sync-wait-burst/asyncHold-release-cleanup/promise/teardown/Worker-SAB/Worker-exception/Worker-close/weak-collection
@@ -537,5 +539,6 @@ Every pull request and push to `main` runs:
   (`tools/tsan-suppression-witness.sh`),
 - test262-parallel representative slice.
 
-The no-GIL corpus TSan gate hard-blocks on engine-state races. The suppression
+The no-GIL corpus TSan gate and specialized mid-GC/lifecycle TSan fuzzer smokes
+hard-block on engine-state races. The suppression
 witness proves the program-byte suppressions are both load-bearing and narrow.
