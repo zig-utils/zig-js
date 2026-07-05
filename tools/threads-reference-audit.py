@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
+import signal
 import subprocess
 import sys
 from collections import defaultdict
@@ -330,6 +332,34 @@ def print_probe_output_tail(output: str | bytes, *, prefix: str = "      ") -> N
         print(f"{prefix}{line}")
 
 
+def run_probe_command(cmd: list[str], timeout_s: float) -> tuple[str, int | None, str]:
+    proc = subprocess.Popen(
+        cmd,
+        cwd=REPO,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+    )
+    try:
+        stdout, _ = proc.communicate(timeout=timeout_s)
+        return "done", proc.returncode, stdout or ""
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            stdout, _ = proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            stdout, _ = proc.communicate()
+        return "timeout", None, stdout or ""
+
+
 def check_probe_expectation(
     case: str,
     status: str,
@@ -391,19 +421,10 @@ def run_probe_candidates(
         ]
         if emit:
             print(f"  - {case}: {reason}")
-        try:
-            proc = subprocess.run(
-                cmd,
-                cwd=REPO,
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                timeout=timeout_s,
-            )
-        except subprocess.TimeoutExpired as exc:
+        run_status, returncode, output = run_probe_command(cmd, timeout_s)
+        if run_status == "timeout":
             if emit:
                 print("    TIMEOUT")
-            output = exc.stdout or ""
             result = {
                 "case": case,
                 "status": "timeout",
@@ -411,7 +432,7 @@ def run_probe_candidates(
                 "expected_current_blocker": expect_current_blockers,
                 "output": probe_output_summary(output),
             }
-            if emit and exc.stdout:
+            if emit and output:
                 print_probe_output_tail(output)
             if expect_current_blockers:
                 ok = check_probe_expectation(case, "timeout", output, emit=emit)
@@ -423,18 +444,18 @@ def run_probe_candidates(
                 failures += 1
             results.append(result)
             continue
-        if proc.returncode == 0:
+        if returncode == 0:
             if emit:
                 print("    PASS")
             result = {
                 "case": case,
                 "status": "pass",
-                "exit_code": proc.returncode,
+                "exit_code": returncode,
                 "expected_current_blocker": expect_current_blockers,
-                "output": probe_output_summary(proc.stdout),
+                "output": probe_output_summary(output),
             }
             if expect_current_blockers:
-                ok = check_probe_expectation(case, "pass", proc.stdout, emit=emit)
+                ok = check_probe_expectation(case, "pass", output, emit=emit)
                 result["expectation_matched"] = ok
                 if not ok:
                     failures += 1
@@ -442,17 +463,17 @@ def run_probe_candidates(
                 result["expectation_matched"] = None
         else:
             if emit:
-                print(f"    FAIL exit={proc.returncode}")
-                print_probe_output_tail(proc.stdout)
+                print(f"    FAIL exit={returncode}")
+                print_probe_output_tail(output)
             result = {
                 "case": case,
                 "status": "fail",
-                "exit_code": proc.returncode,
+                "exit_code": returncode,
                 "expected_current_blocker": expect_current_blockers,
-                "output": probe_output_summary(proc.stdout),
+                "output": probe_output_summary(output),
             }
             if expect_current_blockers:
-                ok = check_probe_expectation(case, "fail", proc.stdout, emit=emit)
+                ok = check_probe_expectation(case, "fail", output, emit=emit)
                 result["expectation_matched"] = ok
                 if not ok:
                     failures += 1

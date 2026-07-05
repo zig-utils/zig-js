@@ -54,8 +54,9 @@ than new correctness architecture.
   the mid-script parallel-GC use-after-free found by the fuzzer.
 - `-Dtest262-parallel-js` runs a broad language-surface slice in GIL-free
   parallel contexts and asserts no new failures versus the baseline.
-- The PR-249 allowlist remains 225/225 in normal mode and is covered by the
-  sharded no-GIL ThreadSanitizer corpus gate.
+- The PR-249 allowlist contains 226 promoted files out of 259 executable
+  PR-249 files in normal mode and is covered by the sharded no-GIL
+  ThreadSanitizer corpus gate.
 - The no-GIL `cve/mc-dos-waiter-table-storm.js` focused gate covers property
   `Atomics.waitAsync` tickets removed by a peer while their owning spawned
   thread is closing its stack-local microtask queue; late settlements reroute to

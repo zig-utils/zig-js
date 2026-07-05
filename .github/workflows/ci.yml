@@ -45,6 +45,12 @@ jobs:
             cmd: zig build threads-test
           - name: threads-nogil-witness
             cmd: zig build threads-test -Dthreads-parallel-js=true -Dthreads-case=sync/condition-wait-notify.js
+          # Reference-only corpus hygiene: fail if a non-promoted PR-249 file
+          # loses its blocker classification or if one of the nearest
+          # promotion probes starts passing or changes failure shape without the
+          # allowlist/docs being updated in the same change.
+          - name: threads-reference-audit
+            cmd: zig build threads-reference-audit && python3 tools/threads-reference-audit.py --run-probes --expect-current-blockers --probe-timeout 60
           - name: tsan-unit
             cmd: zig build test -Dtsan=true
           - name: tsan-parallel-js

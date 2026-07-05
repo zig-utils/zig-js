@@ -12,6 +12,8 @@ zig build test
 zig build threads-test
 zig build threads-test -Dthreads-case=atomics/property-waitasync-timeout.js
 zig build threads-test -Dthreads-parallel-js=true -Dthreads-case=sync/condition-wait-notify.js
+zig build threads-reference-audit
+python3 tools/threads-reference-audit.py --run-probes --expect-current-blockers --probe-timeout 60
 zig build test -Dtsan=true
 zig build test -Dtsan=true -Dtest-filter=parallel_js
 zig build threadfuzz -Dfuzz-iters=20
@@ -67,8 +69,8 @@ buffers, property-mode Atomics, `Thread`, `Lock`, `Condition`, `ThreadLocal`,
 parallel-GC witnesses, C embedder threading, and the main can-block gate.
 
 `zig build threads-test` runs the green WebKit PR-249 allowlist from
-`reference/webkit-249/threads-tests`. The current allowlist is 225/225 and
-covers:
+`reference/webkit-249/threads-tests`. The current allowlist contains 226
+promoted files out of 259 executable PR-249 files and covers:
 
 - `api/` and `lifecycle/`: constructor shape, lifecycle, ids, constructor
   errors, exceptions, restriction, return values, join semantics, blocking

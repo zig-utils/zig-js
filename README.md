@@ -210,6 +210,7 @@ zig build bench                   # VM/tree-walk and thread-scaling benchmark
 zig build threads-test            # WebKit PR-249 thread allowlist
 zig build threads-reference-audit # classify non-promoted PR-249 files
 python3 tools/threads-reference-audit.py --probe-candidates
+python3 tools/threads-reference-audit.py --run-probes --expect-current-blockers --probe-timeout 60
 
 zig build threadfuzz
 zig build threadfuzz -Dfuzz-midgc=true
