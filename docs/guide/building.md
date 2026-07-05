@@ -65,4 +65,5 @@ To inspect what is still outside the denominator:
 ```bash
 zig build test262-bin
 ./zig-out/bin/test262 --list-skips > docs/.data/test262-skips.tsv
+./zig-out/bin/test262 --list-excluded > docs/.data/test262-excluded.tsv
 ```

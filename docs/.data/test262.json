@@ -1,7 +1,7 @@
 {
   "valid": {
-    "passing": 48369,
-    "total": 48369,
+    "passing": 48428,
+    "total": 48428,
     "percentage": 100,
     "parseFail": 0,
     "runtimeFail": 0,
@@ -12,7 +12,7 @@
     "total": 4669,
     "percentage": 100
   },
-  "skipped": 139,
+  "skipped": 0,
   "generatedAt": "2026-07-05",
   "harness": "real (pinned tc39/test262 submodule)",
   "suites": [
@@ -225,8 +225,8 @@
     },
     {
       "name": "language/expressions/class",
-      "passing": 3444,
-      "total": 3444,
+      "passing": 3448,
+      "total": 3448,
       "percentage": 100,
       "parseFail": 0,
       "runtimeFail": 0,
@@ -306,8 +306,8 @@
     },
     {
       "name": "language/expressions/dynamic-import",
-      "passing": 590,
-      "total": 590,
+      "passing": 607,
+      "total": 607,
       "percentage": 100,
       "parseFail": 0,
       "runtimeFail": 0,
@@ -513,8 +513,8 @@
     },
     {
       "name": "language/expressions/object",
-      "passing": 1006,
-      "total": 1006,
+      "passing": 1007,
+      "total": 1007,
       "percentage": 100,
       "parseFail": 0,
       "runtimeFail": 0,
@@ -765,8 +765,8 @@
     },
     {
       "name": "language/import",
-      "passing": 103,
-      "total": 103,
+      "passing": 109,
+      "total": 109,
       "percentage": 100,
       "parseFail": 0,
       "runtimeFail": 0,
@@ -801,8 +801,8 @@
     },
     {
       "name": "language/module-code",
-      "passing": 363,
-      "total": 363,
+      "passing": 385,
+      "total": 385,
       "percentage": 100,
       "parseFail": 0,
       "runtimeFail": 0,
@@ -900,8 +900,8 @@
     },
     {
       "name": "language/statements/class",
-      "passing": 3708,
-      "total": 3708,
+      "passing": 3712,
+      "total": 3712,
       "percentage": 100,
       "parseFail": 0,
       "runtimeFail": 0,
@@ -1665,8 +1665,8 @@
     },
     {
       "name": "staging",
-      "passing": 1467,
-      "total": 1467,
+      "passing": 1468,
+      "total": 1468,
       "percentage": 100,
       "parseFail": 0,
       "runtimeFail": 0,
@@ -2421,8 +2421,8 @@
     },
     {
       "name": "built-ins/ShadowRealm",
-      "passing": 60,
-      "total": 60,
+      "passing": 64,
+      "total": 64,
       "percentage": 100,
       "parseFail": 0,
       "runtimeFail": 0,

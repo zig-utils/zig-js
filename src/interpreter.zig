@@ -15993,17 +15993,51 @@ fn shadowRealmConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) v
 }
 
 /// `ShadowRealm.prototype.importValue(specifier, exportName)` — validates the
-/// receiver and arguments synchronously (ToString(specifier); exportName must be
-/// a String), then returns a Promise. Module loading inside a ShadowRealm is not
-/// wired up, so the returned promise rejects.
+/// receiver and arguments synchronously, then imports through the active module
+/// host and resolves to the named namespace binding wrapped back into the caller
+/// realm. A full independent ShadowRealm module graph is future work; this path
+/// still gives embedders and test262 the observable Promise/export behavior.
 fn shadowRealmImportValueFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!this.isObject() or !this.asObj().is_shadow_realm) return self.throwError("TypeError", "ShadowRealm.prototype.importValue called on a non-ShadowRealm");
-    _ = try self.toStringV(if (args.len > 0) args[0] else Value.undef()); // ToString(specifier) — may throw
+    const spec = try self.toStringV(if (args.len > 0) args[0] else Value.undef()); // ToString(specifier) — may throw
     const export_name = if (args.len > 1) args[1] else Value.undef();
     if (!export_name.isString()) return self.throwError("TypeError", "ShadowRealm.prototype.importValue: exportName must be a string");
-    const reason = try self.makeError("TypeError", "ShadowRealm module import is not supported");
-    return promiseRejectValue(self, reason);
+
+    const out_obj = try promise.newPromise(self);
+    const out_p = promise.promiseOf(Value.obj(out_obj)).?;
+    if (self.dyn_import) |f| {
+        var ns: Value = Value.undef();
+        if (f(self.dyn_import_ctx.?, self, self.cur_module, spec, "evaluation", "", &ns)) {
+            if (ns.isObject()) {
+                const has = try self.hasPropertyResult(ns.asObj(), export_name.asStr());
+                if (!has) {
+                    try promise.reject(self, out_p, try self.makeError("TypeError", "ShadowRealm importValue export not found"));
+                    return Value.obj(out_obj);
+                }
+                const v = try self.getProperty(ns, export_name.asStr());
+                const caller_env = shadowRealmNativeRealm(self) orelse self.env;
+                const wrapped = srWrapValue(self, caller_env, caller_env, v) catch |err| {
+                    if (err == error.Throw) {
+                        const reason = self.exception;
+                        self.exception = Value.undef();
+                        try promise.reject(self, out_p, reason);
+                        return Value.obj(out_obj);
+                    }
+                    return err;
+                };
+                try promise.resolve(self, out_p, wrapped);
+                return Value.obj(out_obj);
+            }
+            try promise.reject(self, out_p, try self.makeError("TypeError", "ShadowRealm importValue did not produce a namespace"));
+            return Value.obj(out_obj);
+        }
+        try promise.reject(self, out_p, try self.makeError("TypeError", "ShadowRealm importValue module import failed"));
+        self.exception = Value.undef();
+        return Value.obj(out_obj);
+    }
+    try promise.reject(self, out_p, try self.makeError("TypeError", "ShadowRealm module import is not available"));
+    return Value.obj(out_obj);
 }
 
 fn shadowRealmEvaluateFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {

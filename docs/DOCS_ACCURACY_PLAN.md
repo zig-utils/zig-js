@@ -13,7 +13,7 @@ inventing implementation status.
   ```
 
 - **test262 runner scope** comes from `conformance/test262.zig`, especially the
-  skip rules, unsupported flags, subtree list, worker limits, and timeout rules.
+  skip rules, excluded-file rules, unsupported flags, subtree list, worker limits, and timeout rules.
 - **C API scope** comes from exported symbols and tests in `src/c_api.zig`.
 - **Threading status** comes from `docs/threads/*`, `conformance/threads_test.zig`,
   and the current `zig build threads-test` result.
@@ -26,8 +26,9 @@ inventing implementation status.
 - Do not write a per-suite row unless the suite line appeared in a saved
   `zig build test262` transcript. If only the final summary is available,
   leave `docs/.data/test262.json.suites` empty.
-- Do not describe skipped test262 categories as implemented. Say they are
-  outside the denominator until focused workers pass and the skip is removed.
+- Do not describe skipped or excluded test262 categories as implemented. Say
+  they are outside the denominator until focused workers pass and the skip or
+  exclusion is removed.
 - Do not describe the C API as the whole JavaScriptCore framework. It is an
   implemented public C-API subset.
 - Historical design notes may keep old numbers only when they are clearly

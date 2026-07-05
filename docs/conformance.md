@@ -5,7 +5,7 @@ description: How zig-js is measured against the real test262 corpus.
 
 # test262 Conformance
 
-zig-js is scored against the **real** [tc39/test262](https://github.com/tc39/test262) corpus from the pinned `test262/` submodule — not a hand-picked subset. Progress is a number, not a vibe, but the number only covers tests the configured runner actually scores.
+zig-js is scored against the **real** [tc39/test262](https://github.com/tc39/test262) corpus from the pinned `test262/` submodule through the configured runner. Progress is a number, not a vibe, but the number only covers tests the configured runner actually scores.
 
 <Test262Progress :stats="data.test262" />
 
@@ -25,7 +25,9 @@ Valid and negative tests measure different things, so they are scored separately
 - **VALID — "can we run it?"** `pass + parse-fail + runtime-fail + host-fail`. This is the headline metric.
 - **NEGATIVE — "do we reject bad input?"** `pass-negative + fail-negative`.
 
-Skipped tests are excluded from both denominators. Current skipped categories are listed exactly in `docs/.data/test262-skips.tsv`: module+async / top-level-await harness cases, tail-call-optimization tests, and a small set of unsupported SpiderMonkey staging paths. Plain modules, plain async tests, and `CanBlockIsFalse` tests are part of the runner where supported.
+Skipped tests are excluded from both denominators. The configured runner currently has **zero** unsupported metadata skips; `docs/.data/test262-skips.tsv` is still generated as the audit file.
+
+Files that are outside zig-js's configured conformance surface are removed before enumeration and listed in `docs/.data/test262-excluded.tsv`: proper-tail-call stack-reuse tests, exact async-module/import-defer/dynamic-import catch-target ordering tests, and non-normative SpiderMonkey staging stress/stale files. Plain modules, most module+async/top-level-await tests, plain async tests, and `CanBlockIsFalse` tests are part of the runner where supported.
 
 ## Current numbers
 
@@ -52,7 +54,8 @@ The table below is populated only when `docs/.data/test262.json` was regenerated
 
 The configured runner is green, so the next work is not a bucket of known valid failures. It is an audit of what is outside the denominator:
 
-- Keep `docs/.data/test262-run-*.txt` and `docs/.data/test262.json` paired so per-suite docs are generated from evidence.
+- When using a saved transcript, keep `docs/.data/test262-run-*.txt` and `docs/.data/test262.json` paired. Otherwise regenerate `docs/.data/test262.json` directly with `bun run docs:data`.
 - Keep `docs/.data/test262-skips.tsv` in sync with `zig-out/bin/test262 --list-skips`.
-- Promote skipped cases only after the underlying harness/runtime feature is implemented and the focused worker passes.
+- Keep `docs/.data/test262-excluded.tsv` in sync with `zig-out/bin/test262 --list-excluded`.
+- Promote excluded cases only after the underlying runtime feature is implemented and the focused worker passes.
 - Keep README/docs claims tied to either `docs/.data/test262.json`, `conformance/test262.zig`, or a committed run transcript.
