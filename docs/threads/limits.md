@@ -388,9 +388,9 @@ context APIs.
   `Thread.asyncJoin`, and exact `FinalizationRegistry` cleanup,
   property `Atomics.waitAsync` late settlement where peer timeout polling races
   an owning Thread closing its stack-local microtask queue,
-  post-completion `Thread.asyncJoin()` promises plus sibling cleanup roots
-  staying live after blocking joins while property waiters stay parked through
-  a finishing sweep,
+  post-completion `Thread.asyncJoin()` fulfillment and rejection promises plus
+  sibling cleanup roots staying live after blocking joins while property
+  waiters stay parked through a finishing sweep,
   creator-owned `SharedArrayBuffer` and `ArrayBuffer` storage that survives the
   creating Thread's exit, sibling-thread reads, GC pressure, and post-creator
   `ArrayBuffer.transfer()`, child-created SAB/ArrayBuffer storage crossing
