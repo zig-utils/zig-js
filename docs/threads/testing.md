@@ -443,9 +443,12 @@ live cells. GC finalizer attribution is also split between empty-context destroy
 and destroy after the object workload.
 These snapshot paths use exact per-bucket free, capacity, and issued-slot
 counters rather than walking every free-list node or slab chunk. The
-object-sized 1024/2048-byte buckets use larger slab chunks than the small
-buckets, so compare chunk counts alongside wall-clock timings when evaluating GC
-allocation or lifecycle changes.
+object-sized 1024/2048-byte buckets use 384 KiB slab chunks rather than the
+small buckets' 64 KiB chunks, so compare chunk counts alongside wall-clock
+timings when evaluating GC allocation or lifecycle changes. A healthy local
+profile should show the empty context at three object-cell chunks and the
+object-heavy script around 55 object-cell chunks instead of the older 83-chunk
+baseline.
 Direct `GcCellBacking` unit tests cover lazy fresh-slot bumping, free-list
 recycling, fresh-chunk cursor advancement, ownership span/hint classification,
 stats accounting, multi-chunk maintained-counter snapshots, bucket attribution,

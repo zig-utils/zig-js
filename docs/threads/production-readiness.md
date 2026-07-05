@@ -94,9 +94,11 @@ Known performance/maturity work:
   resize/remap/free paths avoid retaking the backing lock after classification.
   This cuts the old one-general-allocator-call-per-cell profile without
   changing the collector API.
-  The object-sized 1024/2048-byte buckets now use larger slab chunks than the
-  small cell buckets, so empty-context and object-heavy profiles allocate many
-  fewer object-cell chunks while preserving the small-bucket footprint.
+  The object-sized 1024/2048-byte buckets now use 384 KiB slab chunks, larger
+  than the small cell buckets but smaller than the over-reserving 512 KiB
+  alternative. The empty-context profile stays at three object-cell chunks with
+  1152 slots, and the object-heavy profile drops to roughly 55 object-cell
+  chunks, down from the former 83, while preserving the small-bucket footprint.
   Live `SharedArrayBuffer` retain teardown is also regression covered across the
   arena path, the no-GIL threaded path, and the `.gil = true` serialized
   fallback.

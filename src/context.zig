@@ -91,7 +91,13 @@ pub const GcCellBacking = struct {
     const bucket_count = 6;
     const bucket_sizes = [_]usize{ 64, 128, 256, 512, 1024, 2048 };
     const chunk_bytes: usize = 64 * 1024;
-    const large_chunk_bytes: usize = 256 * 1024;
+    /// Object cells dominate GC-backed contexts. Use larger chunks for the
+    /// 1024/2048-byte buckets so create/destroy-heavy workloads free fewer
+    /// backing chunks and maintain smaller address indexes for the hot object
+    /// bucket. 384 KiB keeps empty-context object chunks at three without the
+    /// larger reserved-slot overhang of a 512 KiB chunk. The lazy bump cursor
+    /// means unused slots are not prelinked.
+    const large_chunk_bytes: usize = 384 * 1024;
     const FreeNode = extern struct {
         next: ?*FreeNode,
     };

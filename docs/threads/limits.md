@@ -110,8 +110,12 @@ context APIs.
   per-size-class bucket tables for the empty context and the object workload, so
   future nursery/generational and context-lifecycle work can separate global
   setup pressure from workload pressure while targeting the slot sizes that
-  dominate chunk count, issued cells, free cells, and surviving live cells. It
-  also splits GC finalizer attribution between empty-context destroy and destroy
+  dominate chunk count, issued cells, free cells, and surviving live cells. The
+  object-sized 1024/2048-byte buckets now use 384 KiB chunks: the local profile
+  keeps the intrinsic empty context at three object-cell chunks with 1152 slots,
+  and the object-heavy profile at roughly 55 object-cell chunks instead of the
+  former 83, without the reserved-slot overhang of a 512 KiB chunk. It also
+  splits GC finalizer attribution between empty-context destroy and destroy
   after the object workload.
 - **Context lifecycle cost.** Long-lived embedders amortize the GC setup and
   teardown costs, but create-per-unit-of-work embedders need either cheaper
