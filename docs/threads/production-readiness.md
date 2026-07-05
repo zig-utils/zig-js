@@ -511,7 +511,7 @@ as embedders exercise more threaded host patterns.
   structured-clone after the creator Thread exits.
 - CI runs the fuzzer in several modes: default seeded, TSan, high-contention
   amplified, broad semantic,
-  mid-script GC wait-pump/microtask/property-waitAsync-late-settlement/creator-buffer/nested-asyncJoin/sync-wait-cleanup/sync-wait-burst/asyncHold-release-cleanup/promise/teardown/Worker-SAB/Worker-exception/Worker-close/weak-collection,
+  mid-script GC wait-pump/microtask/property-waitAsync-late-settlement/late-asyncJoin-cleanup/creator-buffer/nested-asyncJoin/sync-wait-cleanup/sync-wait-burst/asyncHold-release-cleanup/promise/teardown/Worker-SAB/Worker-exception/Worker-close/weak-collection,
   lifecycle, ReleaseSafe, and deterministic-result verification.
 
 Remaining: keep extending the lifecycle profile toward more cross-realm
@@ -533,7 +533,7 @@ Every pull request and push to `main` runs:
 - TSan lifecycle `threadfuzz` smoke,
 - amplified `threadfuzz`,
 - broad semantic `threadfuzz`,
-- mid-script GC wait-pump/microtask/property-waitAsync-late-settlement/creator-buffer/nested-asyncJoin/sync-wait-cleanup/sync-wait-burst/asyncHold-release-cleanup/promise/teardown/Worker-SAB/Worker-exception/Worker-close/weak-collection
+- mid-script GC wait-pump/microtask/property-waitAsync-late-settlement/late-asyncJoin-cleanup/creator-buffer/nested-asyncJoin/sync-wait-cleanup/sync-wait-burst/asyncHold-release-cleanup/promise/teardown/Worker-SAB/Worker-exception/Worker-close/weak-collection
   `threadfuzz`,
 - lifecycle `threadfuzz`,
 - ReleaseSafe `threadfuzz`,

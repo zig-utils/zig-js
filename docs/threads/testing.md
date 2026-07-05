@@ -206,6 +206,11 @@ adds a pending-microtask subprogram that queues Promise, typed-array
 release-function, and `FinalizationRegistry` cleanup roots through a finishing
 mid-script sweep before draining the realm run loop and verifying exact
 reaction/cleanup oracles,
+adds a late-asyncJoin cleanup subprogram that first observes child completion
+through blocking `join()`, then keeps post-completion `Thread.asyncJoin()`
+promises plus sibling cleanup roots live while property waiters stay parked
+through a finishing sweep, rejects early cleanup during that window, attaches
+late observers, and requires exact cleanup after those records are released,
 adds a creator-owned buffer subprogram that leaves child-created
 `SharedArrayBuffer` and `ArrayBuffer` storage rooted through unjoined `Thread`
 completion records and delayed `asyncJoin` observers across a finishing sweep,
@@ -238,7 +243,7 @@ join-termination unit witness that checks parked-state/mutex cleanup, then
 requires exact script completion or exact expected termination plus at least one
 finishing parallel sweep and exact
 `FinalizationRegistry` cleanup count/sum delivery plus unregister-token
-suppression after a quiescent collect. Each seed currently runs 22 deterministic
+suppression after a quiescent collect. Each seed currently runs 23 deterministic
 mid-GC subprograms. The
 lifecycle profile
 (`-Dfuzz-lifecycle=true`) adds expected-throw termination storms for

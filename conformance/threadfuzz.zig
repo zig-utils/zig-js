@@ -6366,6 +6366,262 @@ fn runLateAsyncJoinCleanupInterleaving(gpa: std.mem.Allocator, seed: u64) !bool 
     return true;
 }
 
+fn runMidScriptLateAsyncJoinCleanupGc(gpa: std.mem.Allocator, seed: u64) !bool {
+    var prng = std.Random.DefaultPrng.init(seed ^ 0x6d69_646c_6174_6561);
+    const r = prng.random();
+    const nthreads = 3 + r.uintLessThan(usize, 3);
+    const waiters = 2 + r.uintLessThan(usize, 2);
+    const per_thread = 4 + r.uintLessThan(usize, 5);
+    const rounds = 7 + r.uintLessThan(usize, 5);
+    const per_round = 620 + r.uintLessThan(usize, 420);
+    const spin_iters = 1800 + r.uintLessThan(usize, 3200);
+    const wait_timeout_ms = if (builtin.sanitize_thread) 12_000 else 1500 + r.uintLessThan(usize, 800);
+    const seed_marker = seed % 10_000;
+
+    var expected_join_score: usize = 0;
+    var expected_late_score: usize = 0;
+    var expected_waiter_score: usize = 0;
+    var expected_cleanup_count: usize = 0;
+    var expected_cleanup_sum: usize = 0;
+    var id: usize = 0;
+    while (id < nthreads) : (id += 1) {
+        const marker = 780_000 + seed_marker * 10 + id;
+        expected_join_score += marker + id;
+        expected_late_score += marker + per_thread;
+        expected_cleanup_count += per_thread;
+        var i: usize = 0;
+        while (i < per_thread) : (i += 1) {
+            expected_cleanup_sum += marker + i;
+        }
+    }
+    var w: usize = 0;
+    while (w < waiters) : (w += 1) {
+        expected_waiter_score += 890_000 + seed_marker * 10 + w;
+    }
+    const expected_total = rounds * per_round + expected_join_score + expected_waiter_score;
+
+    const ctx = js.Context.createWithTestingOptions(gpa, .{
+        .enable_threads = true,
+        .enable_gc = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+        .parallel_midscript_gc = true,
+    }) catch {
+        std.debug.print("seed {d}: midgc late asyncJoin cleanup context creation failed\n", .{seed});
+        return false;
+    };
+    defer ctx.destroy();
+
+    const src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  globalThis.__midgcLateAsyncJoinScore = 0;
+        \\  globalThis.__midgcLateAsyncJoinCount = 0;
+        \\  globalThis.__midgcLateAsyncJoinCleanupCount = 0;
+        \\  globalThis.__midgcLateAsyncJoinCleanupSum = 0;
+        \\  globalThis.__midgcLateAsyncJoinRegistry = new FinalizationRegistry((held) => {{
+        \\    globalThis.__midgcLateAsyncJoinCleanupCount++;
+        \\    globalThis.__midgcLateAsyncJoinCleanupSum += held;
+        \\  }});
+        \\  const registry = globalThis.__midgcLateAsyncJoinRegistry;
+        \\  const gate = {{ state: 0, ready: 0 }};
+        \\  const waiters = [];
+        \\  for (let w = 0; w < {d}; w++) {{
+        \\    const marker = 890000 + {d} * 10 + w;
+        \\    waiters.push(new Thread((gate, marker, timeout) => {{
+        \\      const root = {{ marker, nested: {{ label: 'midgc-late-asyncjoin-waiter-root' }} }};
+        \\      Atomics.add(gate, 'ready', 1);
+        \\      Atomics.notify(gate, 'ready');
+        \\      const r = Atomics.wait(gate, 'state', 0, timeout);
+        \\      if (r !== 'ok' && r !== 'not-equal')
+        \\        throw new Error('midgc late asyncJoin waiter result ' + r);
+        \\      return root.marker;
+        \\    }}, gate, marker, {d}));
+        \\  }}
+        \\  while (Atomics.load(gate, 'ready') < {d})
+        \\    Atomics.wait(gate, 'ready', Atomics.load(gate, 'ready'), 1);
+        \\
+        \\  const threads = [];
+        \\  const lateRecords = [];
+        \\  let joinScore = 0;
+        \\  for (let id = 0; id < {d}; id++) {{
+        \\    const marker = 780000 + {d} * 10 + id;
+        \\    const t = new Thread((id, marker, seed) => {{
+        \\      return {{ id, marker, nested: {{ seed, label: 'midgc-late-asyncjoin-result' }} }};
+        \\    }}, id, marker, {d});
+        \\    let result = t.join();
+        \\    if (!result || result.id !== id || result.marker !== marker ||
+        \\        result.nested.seed !== {d})
+        \\      throw new Error('bad midgc late asyncJoin blocking result');
+        \\    joinScore += result.marker + result.id;
+        \\    const roots = [];
+        \\    for (let i = 0; i < {d}; i++) {{
+        \\      let target = {{ id, i, marker, seed: {d}, payload: 'midgc-late-asyncjoin-record-root-' + id + '-' + i }};
+        \\      registry.register(target, marker + i);
+        \\      roots.push(target);
+        \\      target = null;
+        \\    }}
+        \\    lateRecords.push({{ id, marker, promise: t.asyncJoin(), roots }});
+        \\    result = null;
+        \\    threads.push(t);
+        \\  }}
+        \\  if (joinScore !== {d})
+        \\    throw new Error('bad midgc late asyncJoin blocking join score ' + joinScore);
+        \\  globalThis.__midgcLateAsyncJoinRegistry.cleanupSome();
+        \\  if (globalThis.__midgcLateAsyncJoinCleanupCount !== 0)
+        \\    throw new Error('midgc late asyncJoin cleanup ran before collection window');
+        \\
+        \\  const keep = [];
+        \\  for (let round = 0; round < {d}; round++) {{
+        \\    for (let i = 0; i < {d}; i++)
+        \\      keep.push({{ round, i, nested: {{ seed: {d}, joinScore }}, text: 'midgc-late-asyncjoin-' + round + '-' + i }});
+        \\    let spin = 0;
+        \\    for (let j = 0; j < {d}; j++) spin = (spin + j + round) & 0x3fffffff;
+        \\    if (spin < 0) keep.push({{ impossible: true }});
+        \\  }}
+        \\  globalThis.__midgcLateAsyncJoinRegistry.cleanupSome();
+        \\  if (globalThis.__midgcLateAsyncJoinCleanupCount !== 0)
+        \\    throw new Error('midgc late asyncJoin cleanup ran while late promise records were live');
+        \\
+        \\  Atomics.store(gate, 'state', 1);
+        \\  Atomics.notify(gate, 'state');
+        \\  let waiterScore = 0;
+        \\  for (const waiter of waiters)
+        \\    waiterScore += waiter.join();
+        \\  if (waiterScore !== {d})
+        \\    throw new Error('bad midgc late asyncJoin waiter score ' + waiterScore);
+        \\  for (const rec of lateRecords) {{
+        \\    rec.promise.then(
+        \\      (v) => {{
+        \\        if (!v || v.id !== rec.id || v.marker !== rec.marker ||
+        \\            !rec.roots || rec.roots.length !== {d} ||
+        \\            v.nested.label !== 'midgc-late-asyncjoin-result') {{
+        \\          globalThis.__midgcLateAsyncJoinScore = -1000000;
+        \\        }} else {{
+        \\          globalThis.__midgcLateAsyncJoinScore += v.marker + rec.roots.length;
+        \\          globalThis.__midgcLateAsyncJoinCount++;
+        \\        }}
+        \\      }},
+        \\      () => {{ globalThis.__midgcLateAsyncJoinScore = -1000000; }});
+        \\  }}
+        \\  threads.length = 0;
+        \\  waiters.length = 0;
+        \\  lateRecords.length = 0;
+        \\
+        \\  globalThis.__midgcLateAsyncJoinCheck = function(expectedScore, expectedCount) {{
+        \\    if (globalThis.__midgcLateAsyncJoinScore !== expectedScore)
+        \\      throw new Error('bad midgc late asyncJoin score ' + globalThis.__midgcLateAsyncJoinScore + '/' + expectedScore);
+        \\    if (globalThis.__midgcLateAsyncJoinCount !== expectedCount)
+        \\      throw new Error('bad midgc late asyncJoin count ' + globalThis.__midgcLateAsyncJoinCount + '/' + expectedCount);
+        \\    return 1;
+        \\  }};
+        \\  return keep.length + joinScore + waiterScore;
+        \\}})();
+        \\
+    ,
+        .{
+            waiters,
+            seed_marker,
+            wait_timeout_ms,
+            waiters,
+            nthreads,
+            seed_marker,
+            seed,
+            seed,
+            per_thread,
+            seed,
+            expected_join_score,
+            rounds,
+            per_round,
+            seed,
+            spin_iters,
+            expected_waiter_score,
+            per_thread,
+        },
+    );
+    defer gpa.free(src);
+
+    const before_attempts = ctx.gc_par_attempts.load(.monotonic);
+    const before_collections = ctx.gc_par_collections.load(.monotonic);
+    const total = ctx.evaluate(src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: midgc late asyncJoin cleanup JS threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!total.isNumber() or total.asNum() != @as(f64, @floatFromInt(expected_total))) {
+        std.debug.print("seed {d}: midgc late asyncJoin cleanup total got {d}, expected {d}\n", .{ seed, if (total.isNumber()) total.asNum() else -1, expected_total });
+        return false;
+    }
+    if (ctx.gc_par_attempts.load(.monotonic) <= before_attempts) {
+        std.debug.print("seed {d}: midgc late asyncJoin cleanup did not attempt a parallel collection\n", .{seed});
+        return false;
+    }
+    if (ctx.gc_par_collections.load(.monotonic) <= before_collections) {
+        std.debug.print("seed {d}: midgc late asyncJoin cleanup did not finish a parallel collection\n", .{seed});
+        return false;
+    }
+
+    _ = ctx.evaluate("$drainRunLoop()") catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: midgc late asyncJoin drain loop threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    const check_src = try std.fmt.allocPrint(
+        gpa,
+        "globalThis.__midgcLateAsyncJoinCheck({d}, {d})",
+        .{ expected_late_score, nthreads },
+    );
+    defer gpa.free(check_src);
+    const checked = ctx.evaluate(check_src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: midgc late asyncJoin check threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!checked.isNumber() or checked.asNum() != 1) {
+        std.debug.print("seed {d}: midgc late asyncJoin check got {d}\n", .{ seed, if (checked.isNumber()) checked.asNum() else -1 });
+        return false;
+    }
+
+    ctx.collectGarbage();
+    const cleanup_src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  globalThis.__midgcLateAsyncJoinRegistry.cleanupSome();
+        \\  if (globalThis.__midgcLateAsyncJoinCleanupCount !== {d})
+        \\    throw new Error('bad midgc late asyncJoin cleanup count ' + globalThis.__midgcLateAsyncJoinCleanupCount + '/' + {d});
+        \\  if (globalThis.__midgcLateAsyncJoinCleanupSum !== {d})
+        \\    throw new Error('bad midgc late asyncJoin cleanup sum ' + globalThis.__midgcLateAsyncJoinCleanupSum + '/' + {d});
+        \\  return globalThis.__midgcLateAsyncJoinCleanupCount;
+        \\}})();
+        \\
+    ,
+        .{ expected_cleanup_count, expected_cleanup_count, expected_cleanup_sum, expected_cleanup_sum },
+    );
+    defer gpa.free(cleanup_src);
+    const cleaned = ctx.evaluate(cleanup_src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: midgc late asyncJoin cleanup cleanup JS threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!cleaned.isNumber() or cleaned.asNum() != @as(f64, @floatFromInt(expected_cleanup_count))) {
+        std.debug.print("seed {d}: midgc late asyncJoin cleanup got {d}, expected {d}\n", .{ seed, if (cleaned.isNumber()) cleaned.asNum() else -1, expected_cleanup_count });
+        return false;
+    }
+    return true;
+}
+
 fn runCreatorOwnedBufferLifecycleInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
     var prng = std.Random.DefaultPrng.init(seed ^ 0x6372_6561_746f_7262);
     const r = prng.random();
@@ -14583,6 +14839,23 @@ pub fn main(init: std.process.Init) !void {
         if (mmfail != 0) std.process.exit(1);
         return;
     };
+    // `threadfuzz midgclateasyncjoincleanup <iters> <seed>`: focused
+    // mid-script parallel-GC repro for post-completion asyncJoin promises plus
+    // cleanup roots while property waiters stay parked, followed by exact
+    // cleanup.
+    if (first) |a| if (std.mem.eql(u8, a, "midgclateasyncjoincleanup")) {
+        if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch 1;
+        if (args.next()) |b| base_seed = std.fmt.parseInt(u64, b, 10) catch 1;
+        var mlajfail: usize = 0;
+        var mlaji: usize = 0;
+        while (mlaji < iters) : (mlaji += 1) {
+            const seed = base_seed +% mlaji;
+            if (!(try runMidScriptLateAsyncJoinCleanupGc(gpa, seed))) mlajfail += 1;
+        }
+        std.debug.print("threadfuzz midgclateasyncjoincleanup: {d} programs from seed {d}, {d} failures\n", .{ iters, base_seed, mlajfail });
+        if (mlajfail != 0) std.process.exit(1);
+        return;
+    };
     // `threadfuzz midgccreatorbuffers <iters> <seed>`: focused mid-script
     // parallel-GC repro for child-created SAB/ArrayBuffer storage rooted
     // through unjoined Thread completion records and delayed asyncJoin
@@ -14826,8 +15099,8 @@ pub fn main(init: std.process.Init) !void {
     // share the same lifecycle window, when
     // asyncHold callbacks throw while queued no-fn release grants and exact
     // finalization cleanup share the same delivery window, when
-    // post-completion asyncJoin observers settle after blocking joins while
-    // property waiters are parked and exact cleanup runs afterward, when
+    // post-completion asyncJoin promises and sibling cleanup roots stay live
+    // after blocking joins while property waiters are parked, when
     // child-created SAB/ArrayBuffer storage outlives its creator Thread and is
     // read/transferred under GC pressure and crosses isolated Worker
     // structured-clone after creator exit, including script and module
@@ -14918,6 +15191,9 @@ pub fn main(init: std.process.Init) !void {
     // thenable assimilation, pending Promise/microtask reaction roots across
     // asyncHold, waitAsync, asyncJoin, and cleanup delivery, property
     // waitAsync late-settlement rerouting after owner queues close,
+    // post-completion asyncJoin promises and sibling cleanup roots staying live
+    // after blocking joins while property waiters stay parked through a
+    // finishing sweep,
     // child-created SAB/ArrayBuffer storage rooted through unjoined Thread
     // completion records and delayed asyncJoin observers,
     // ThreadLocal-only and Thread.restrict-owned FinalizationRegistry targets
@@ -14956,6 +15232,7 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runMidScriptPromisePublicationGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptPropertyWaitAsyncLateSettlementGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptMicrotaskChurnGc(gpa, seed))) mfail += 1;
+            if (!(try runMidScriptLateAsyncJoinCleanupGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptCreatorOwnedBufferGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptSyncWaitCleanupGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptSyncWaitBurstCleanupGc(gpa, seed))) mfail += 1;
@@ -14974,7 +15251,7 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runMidScriptModuleWorkerCloseTerminateGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptWeakCollectionGc(gpa, seed))) mfail += 1;
         }
-        std.debug.print("threadfuzz midgc: {d} programs from seed {d}, {d} failures\n", .{ iters * 22, base_seed, mfail });
+        std.debug.print("threadfuzz midgc: {d} programs from seed {d}, {d} failures\n", .{ iters * 23, base_seed, mfail });
         if (mfail != 0) std.process.exit(1);
         return;
     };
