@@ -6366,6 +6366,227 @@ fn runLateAsyncJoinCleanupInterleaving(gpa: std.mem.Allocator, seed: u64) !bool 
     return true;
 }
 
+fn runLateAsyncJoinRejectCleanupInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
+    var prng = std.Random.DefaultPrng.init(seed ^ 0x6c61_7465_7265_6a63);
+    const r = prng.random();
+    const nthreads = 3 + r.uintLessThan(usize, 3);
+    const waiters = 2 + r.uintLessThan(usize, 2);
+    const per_thread = 4 + r.uintLessThan(usize, 5);
+    const wait_timeout_ms = 1500 + r.uintLessThan(usize, 800);
+    const seed_marker = seed % 10_000;
+
+    var expected_blocking_score: usize = 0;
+    var expected_late_score: usize = 0;
+    var expected_waiter_score: usize = 0;
+    var expected_cleanup_count: usize = 0;
+    var expected_cleanup_sum: usize = 0;
+    var id: usize = 0;
+    while (id < nthreads) : (id += 1) {
+        const marker = 790_000 + seed_marker * 10 + id;
+        expected_blocking_score += marker + id;
+        expected_late_score += marker + per_thread;
+        expected_cleanup_count += per_thread * 2;
+        var i: usize = 0;
+        while (i < per_thread) : (i += 1) {
+            expected_cleanup_sum += marker + i;
+            expected_cleanup_sum += marker + 5_000 + i;
+        }
+    }
+    var w: usize = 0;
+    while (w < waiters) : (w += 1) {
+        expected_waiter_score += 895_000 + seed_marker * 10 + w;
+    }
+
+    const ctx = js.Context.createWith(gpa, .{ .enable_threads = true, .enable_gc = true }) catch {
+        std.debug.print("seed {d}: late asyncJoin reject cleanup context creation failed\n", .{seed});
+        return false;
+    };
+    defer ctx.destroy();
+
+    const src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  globalThis.__lateAsyncJoinRejectScore = 0;
+        \\  globalThis.__lateAsyncJoinRejectCount = 0;
+        \\  globalThis.__lateAsyncJoinRejectCleanupCount = 0;
+        \\  globalThis.__lateAsyncJoinRejectCleanupSum = 0;
+        \\  globalThis.__lateAsyncJoinRejectRegistry = new FinalizationRegistry((held) => {{
+        \\    globalThis.__lateAsyncJoinRejectCleanupCount++;
+        \\    globalThis.__lateAsyncJoinRejectCleanupSum += held;
+        \\  }});
+        \\  const registry = globalThis.__lateAsyncJoinRejectRegistry;
+        \\  const gate = {{ state: 0, ready: 0 }};
+        \\  const waiters = [];
+        \\  for (let w = 0; w < {d}; w++) {{
+        \\    const marker = 895000 + {d} * 10 + w;
+        \\    waiters.push(new Thread((gate, marker, timeout) => {{
+        \\      const root = {{ marker, nested: {{ label: 'late-asyncjoin-reject-waiter-root' }} }};
+        \\      Atomics.add(gate, 'ready', 1);
+        \\      Atomics.notify(gate, 'ready');
+        \\      const r = Atomics.wait(gate, 'state', 0, timeout);
+        \\      if (r !== 'ok' && r !== 'not-equal')
+        \\        throw new Error('late asyncJoin reject waiter result ' + r);
+        \\      return root.marker;
+        \\    }}, gate, marker, {d}));
+        \\  }}
+        \\  while (Atomics.load(gate, 'ready') < {d})
+        \\    Atomics.wait(gate, 'ready', Atomics.load(gate, 'ready'), 1);
+        \\
+        \\  const threads = [];
+        \\  let blockingScore = 0;
+        \\  for (let id = 0; id < {d}; id++) {{
+        \\    const marker = 790000 + {d} * 10 + id;
+        \\    const t = new Thread((id, marker, per, registry, seed) => {{
+        \\      for (let i = 0; i < per; i++) {{
+        \\        let target = {{ id, i, marker, seed, payload: 'late-asyncjoin-reject-child-cleanup-' + id + '-' + i }};
+        \\        registry.register(target, marker + i);
+        \\        target = null;
+        \\      }}
+        \\      throw {{ id, marker, nested: {{ seed, label: 'late-asyncjoin-reject-reason' }} }};
+        \\    }}, id, marker, {d}, registry, {d});
+        \\    try {{
+        \\      t.join();
+        \\      throw new Error('late asyncJoin reject child returned normally');
+        \\    }} catch (e) {{
+        \\      if (!e || e.id !== id || e.marker !== marker || e.nested.seed !== {d})
+        \\        throw new Error('bad late asyncJoin blocking rejection');
+        \\      blockingScore += e.marker + e.id;
+        \\    }}
+        \\    const reactionRoots = [];
+        \\    for (let i = 0; i < {d}; i++) {{
+        \\      let target = {{ id, i, marker, seed: {d}, payload: 'late-asyncjoin-reject-reaction-cleanup-' + id + '-' + i }};
+        \\      registry.register(target, marker + 5000 + i);
+        \\      reactionRoots.push(target);
+        \\      target = null;
+        \\    }}
+        \\    t.asyncJoin().then(
+        \\      () => {{ globalThis.__lateAsyncJoinRejectScore = -1000000; }},
+        \\      (e) => {{
+        \\        if (!e || e.id !== id || e.marker !== marker ||
+        \\            !reactionRoots || reactionRoots.length !== {d} ||
+        \\            e.nested.label !== 'late-asyncjoin-reject-reason') {{
+        \\          globalThis.__lateAsyncJoinRejectScore = -1000000;
+        \\        }} else {{
+        \\          globalThis.__lateAsyncJoinRejectScore += e.marker + reactionRoots.length;
+        \\          globalThis.__lateAsyncJoinRejectCount++;
+        \\        }}
+        \\      }});
+        \\    threads.push(t);
+        \\  }}
+        \\  if (blockingScore !== {d})
+        \\    throw new Error('bad late asyncJoin reject blocking score ' + blockingScore);
+        \\  threads.length = 0;
+        \\
+        \\  Atomics.store(gate, 'state', 1);
+        \\  Atomics.notify(gate, 'state');
+        \\  let waiterScore = 0;
+        \\  for (const waiter of waiters)
+        \\    waiterScore += waiter.join();
+        \\  if (waiterScore !== {d})
+        \\    throw new Error('bad late asyncJoin reject waiter score ' + waiterScore);
+        \\
+        \\  globalThis.__lateAsyncJoinRejectCheck = function(expectedScore, expectedCount) {{
+        \\    if (globalThis.__lateAsyncJoinRejectScore !== expectedScore)
+        \\      throw new Error('bad late asyncJoin reject score ' + globalThis.__lateAsyncJoinRejectScore + '/' + expectedScore);
+        \\    if (globalThis.__lateAsyncJoinRejectCount !== expectedCount)
+        \\      throw new Error('bad late asyncJoin reject count ' + globalThis.__lateAsyncJoinRejectCount + '/' + expectedCount);
+        \\    return 1;
+        \\  }};
+        \\  return blockingScore + waiterScore;
+        \\}})();
+        \\
+    ,
+        .{
+            waiters,
+            seed_marker,
+            wait_timeout_ms,
+            waiters,
+            nthreads,
+            seed_marker,
+            per_thread,
+            seed,
+            seed,
+            per_thread,
+            seed,
+            per_thread,
+            expected_blocking_score,
+            expected_waiter_score,
+        },
+    );
+    defer gpa.free(src);
+
+    const total = ctx.evaluate(src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: late asyncJoin reject cleanup JS threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    const expected_total = expected_blocking_score + expected_waiter_score;
+    if (!total.isNumber() or total.asNum() != @as(f64, @floatFromInt(expected_total))) {
+        std.debug.print("seed {d}: late asyncJoin reject cleanup total got {d}, expected {d}\n", .{ seed, if (total.isNumber()) total.asNum() else -1, expected_total });
+        return false;
+    }
+
+    _ = ctx.evaluate("$drainRunLoop()") catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: late asyncJoin reject drain loop threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    const check_src = try std.fmt.allocPrint(
+        gpa,
+        "globalThis.__lateAsyncJoinRejectCheck({d}, {d})",
+        .{ expected_late_score, nthreads },
+    );
+    defer gpa.free(check_src);
+    const checked = ctx.evaluate(check_src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: late asyncJoin reject check threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!checked.isNumber() or checked.asNum() != 1) {
+        std.debug.print("seed {d}: late asyncJoin reject check got {d}\n", .{ seed, if (checked.isNumber()) checked.asNum() else -1 });
+        return false;
+    }
+
+    ctx.collectGarbage();
+    const cleanup_src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  globalThis.__lateAsyncJoinRejectRegistry.cleanupSome();
+        \\  if (globalThis.__lateAsyncJoinRejectCleanupCount !== {d})
+        \\    throw new Error('bad late asyncJoin reject cleanup count ' + globalThis.__lateAsyncJoinRejectCleanupCount + '/' + {d});
+        \\  if (globalThis.__lateAsyncJoinRejectCleanupSum !== {d})
+        \\    throw new Error('bad late asyncJoin reject cleanup sum ' + globalThis.__lateAsyncJoinRejectCleanupSum + '/' + {d});
+        \\  return globalThis.__lateAsyncJoinRejectCleanupCount;
+        \\}})();
+        \\
+    ,
+        .{ expected_cleanup_count, expected_cleanup_count, expected_cleanup_sum, expected_cleanup_sum },
+    );
+    defer gpa.free(cleanup_src);
+    const cleaned = ctx.evaluate(cleanup_src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: late asyncJoin reject cleanup JS threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!cleaned.isNumber() or cleaned.asNum() != @as(f64, @floatFromInt(expected_cleanup_count))) {
+        std.debug.print("seed {d}: late asyncJoin reject cleanup got {d}, expected {d}\n", .{ seed, if (cleaned.isNumber()) cleaned.asNum() else -1, expected_cleanup_count });
+        return false;
+    }
+    return true;
+}
+
 fn runMidScriptLateAsyncJoinCleanupGc(gpa: std.mem.Allocator, seed: u64) !bool {
     var prng = std.Random.DefaultPrng.init(seed ^ 0x6d69_646c_6174_6561);
     const r = prng.random();
@@ -14412,6 +14633,23 @@ pub fn main(init: std.process.Init) !void {
         if (lajfail != 0) std.process.exit(1);
         return;
     };
+    // `threadfuzz lateasyncjoinrejectcleanup <iters> <seed>`: focused
+    // lifecycle repro for post-completion asyncJoin rejection observers while
+    // property waiters are parked, followed by exact FinalizationRegistry
+    // cleanup.
+    if (first) |a| if (std.mem.eql(u8, a, "lateasyncjoinrejectcleanup")) {
+        if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch 1;
+        if (args.next()) |b| base_seed = std.fmt.parseInt(u64, b, 10) catch 1;
+        var lajrfail: usize = 0;
+        var lajri: usize = 0;
+        while (lajri < iters) : (lajri += 1) {
+            const seed = base_seed +% lajri;
+            if (!(try runLateAsyncJoinRejectCleanupInterleaving(gpa, seed))) lajrfail += 1;
+        }
+        std.debug.print("threadfuzz lateasyncjoinrejectcleanup: {d} programs from seed {d}, {d} failures\n", .{ iters, base_seed, lajrfail });
+        if (lajrfail != 0) std.process.exit(1);
+        return;
+    };
     // `threadfuzz creatorbuffers <iters> <seed>`: focused lifecycle repro for
     // SharedArrayBuffer and ArrayBuffer storage created by a child Thread,
     // observed after the creator exits, then read/transferred under GC pressure.
@@ -15101,6 +15339,9 @@ pub fn main(init: std.process.Init) !void {
     // finalization cleanup share the same delivery window, when
     // post-completion asyncJoin promises and sibling cleanup roots stay live
     // after blocking joins while property waiters are parked, when
+    // late asyncJoin rejection observers preserve thrown-object identity and
+    // cleanup roots after blocking joins while property waiters are parked,
+    // when
     // child-created SAB/ArrayBuffer storage outlives its creator Thread and is
     // read/transferred under GC pressure and crosses isolated Worker
     // structured-clone after creator exit, including script and module
@@ -15160,6 +15401,7 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runAtomicsMutexLockIfAvailableFinalizationInterleaving(gpa, seed))) lfail += 1;
             if (!(try runMicrotaskChurnLifecycleInterleaving(gpa, seed))) lfail += 1;
             if (!(try runLateAsyncJoinCleanupInterleaving(gpa, seed))) lfail += 1;
+            if (!(try runLateAsyncJoinRejectCleanupInterleaving(gpa, seed))) lfail += 1;
             if (!(try runAsyncHoldThrowFinalizationInterleaving(gpa, seed))) lfail += 1;
             if (!(try runCreatorOwnedBufferLifecycleInterleaving(gpa, seed))) lfail += 1;
             if (!(try runWorkerCreatorOwnedBufferLifecycleInterleaving(gpa, seed))) lfail += 1;
@@ -15178,7 +15420,7 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runThreadLocalFinalizationCleanupInterleaving(gpa, seed))) lfail += 1;
             if (!(try runNestedThreadAsyncJoinCleanupInterleaving(gpa, seed))) lfail += 1;
         }
-        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 44, base_seed, lfail });
+        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 45, base_seed, lfail });
         if (lfail != 0) std.process.exit(1);
         return;
     };

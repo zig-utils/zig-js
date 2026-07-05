@@ -505,8 +505,9 @@ as embedders exercise more threaded host patterns.
   whose `asyncJoin()` promises outlive the parent Thread's local microtask
   queue before child release, nested `ThreadLocal` root checks, rerouted async
   settlement, and exact finalization cleanup after both thread layers exit,
-  plus post-completion `Thread.asyncJoin()` observers settling after blocking
-  joins while property waiters stay parked before exact cleanup,
+  plus post-completion `Thread.asyncJoin()` fulfillment and rejection
+  observers settling after blocking joins while property waiters stay parked
+  before exact cleanup,
   plus child-created SAB/ArrayBuffer storage crossing isolated Worker
   structured-clone after the creator Thread exits.
 - CI runs the fuzzer in several modes: default seeded, TSan, high-contention

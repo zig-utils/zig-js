@@ -405,8 +405,9 @@ context APIs.
   parent-created child `Thread`s whose `asyncJoin()` promises outlive the parent
   Thread's local queue before child release, nested `ThreadLocal` roots,
   rerouted async settlement, and exact finalization cleanup after both thread
-  layers exit, plus post-completion `Thread.asyncJoin()` observers settling
-  after blocking joins while property waiters stay parked before exact cleanup.
+  layers exit, plus post-completion `Thread.asyncJoin()` fulfillment and
+  rejection observers settling after blocking joins while property waiters stay
+  parked before exact cleanup.
   CI now runs small TSan smoke seeds for both the mid-script-GC
   and lifecycle profiles in addition to their larger non-TSan breadth gates, and
   nightly/manual CI extends sanitizer depth with higher-iteration default,

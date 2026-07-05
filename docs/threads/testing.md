@@ -297,6 +297,9 @@ functions, typed-array `waitAsync`, `Thread.asyncJoin`, and exact
 post-completion `Thread.asyncJoin()` observers settling after blocking joins
 while property waiters stay parked, followed by exact
 `FinalizationRegistry` cleanup,
+post-completion `Thread.asyncJoin()` rejection observers preserving
+thrown-object identity after blocking joins while property waiters stay parked,
+followed by exact child and reaction cleanup,
 `Lock.asyncHold(fn)` throw/release ordering with queued no-fn release grants and
 exact `FinalizationRegistry` cleanup,
 creator-owned `SharedArrayBuffer` and `ArrayBuffer` storage that survives the
@@ -319,7 +322,7 @@ then verifies child release, nested `ThreadLocal` roots, rerouted async
 settlement, and exact finalization cleanup after both thread layers exit. It now
 also composes isolated Worker termination with shared-realm teardown that
 abandons child-owned typed-array `waitAsync` tickets, rejects pending
-`asyncJoin` reactions, and delivers exact cleanup. Each seed currently runs 44
+`asyncJoin` reactions, and delivers exact cleanup. Each seed currently runs 45
 deterministic lifecycle
 subprograms.
 
