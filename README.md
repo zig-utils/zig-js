@@ -1,10 +1,10 @@
 # zig-js
 
-A **JavaScript engine written in pure Zig**, with a **JavaScriptCore C-API-compatible subset**. No JSC, no V8, no external C libraries — just Zig.
+A JavaScript engine written in pure Zig, with a JavaScriptCore C-API-compatible subset. No JSC, no V8, no external C libraries.
 
-`zig-js` is a small, embeddable engine for Zig applications, tools, and runtimes that want to own their JS stack. Use it directly as a Zig module, or link it in place of `JavaScriptCore.framework` for hosts that only need the implemented JSC C API subset.
+`zig-js` is a small embeddable engine for Zig applications, tools, experiments, and runtimes that want to own their JavaScript stack. Use it directly as a Zig module, or link `libzig-js.a` for hosts that only need the implemented public JavaScriptCore C API subset.
 
-It tracks the ECMAScript spec closely and is graded against the **real [tc39/test262](https://github.com/tc39/test262) corpus**. The current configured runner passes every scored test it runs: **48,369 / 48,369 valid** and **4,669 / 4,669 negative**, with **0 parse**, **0 runtime**, and **0 host** failures. See [Conformance](#conformance) for the exact scope and the remaining skipped tests.
+The configured conformance runner is green against the pinned tc39/test262 corpus it scores: **48,369 / 48,369 valid** and **4,669 / 4,669 negative**, with **0 parse**, **0 runtime**, and **0 host** failures. That is a scoped result, not a claim of full ECMAScript completion: **139 tests remain skipped** outside the denominator.
 
 ```zig
 const js = @import("js");
@@ -18,107 +18,134 @@ const v = try ctx.evaluate("let x = 40; x + 2");
 
 ## Contents
 
-- [How it works](#how-it-works)
+- [Status](#status)
+- [How It Works](#how-it-works)
 - [Conformance](#conformance)
 - [Performance](#performance)
-- [Language & runtime coverage](#language--runtime-coverage)
-- [Using it](#using-it)
-- [Used by](#used-by)
+- [Language And Runtime Coverage](#language-and-runtime-coverage)
+- [Using It](#using-it)
 - [Architecture](#architecture)
-- [Build & test](#build--test)
-- [Multithreading roadmap](#multithreading-roadmap)
+- [Build And Test](#build-and-test)
+- [Threads And GC](#threads-and-gc)
+- [What Is Not Implemented](#what-is-not-implemented)
 - [License](#license)
 
-## How it works
+## Status
 
-The engine has **two execution tiers that share one object model**, so behavior is identical no matter which runs:
+Current public status is evidence-scoped:
 
-- A **tree-walking interpreter** — the correctness oracle and the fallback for anything not yet lowered.
-- A **suspendable stack bytecode VM** — lowers the hot subset of the language plus generators, async functions, and async generators (their bodies must suspend/resume, so they run *only* on the VM).
+- test262 totals come from [docs/.data/test262.json](docs/.data/test262.json), regenerated from [docs/.data/test262-run-2026-07-04.txt](docs/.data/test262-run-2026-07-04.txt).
+- The exact skipped-test inventory is [docs/.data/test262-skips.tsv](docs/.data/test262-skips.tsv).
+- Benchmark numbers below come from [docs/.data/bench-2026-07-04.txt](docs/.data/bench-2026-07-04.txt).
+- C API scope comes from the exported symbols in [src/c_api.zig](src/c_api.zig).
+- Threading and GC status are documented under [docs/threads](docs/threads) and [docs/architecture.md](docs/architecture.md).
 
-Top-level and function code compiles to bytecode and runs on the VM; any construct the compiler can't yet lower transparently falls back to the tree-walker. A shared microtask queue drives Promises and async jobs.
+The documentation guardrails live in [docs/DOCS_ACCURACY_PLAN.md](docs/DOCS_ACCURACY_PLAN.md). Public claims should be tied to a run transcript, generated data file, source file, or current command output.
 
-> **Status: maturing.** The configured test262 corpus is green, including the core language, built-ins, `Intl`, `Temporal`, RegExp, modules, typed arrays, Atomics, and weak-reference surfaces that the runner currently exercises. That is not the same as "every ECMAScript corner is done": the runner still excludes unsupported categories such as module+async/top-level-await harness cases, tail-call-optimization tests, and a small set of unsupported SpiderMonkey staging paths.
+## How It Works
+
+The engine has two execution paths sharing one object model:
+
+- **Tree-walking interpreter** - the semantic baseline and fallback path.
+- **Suspendable stack bytecode VM** - the compiled path for supported top-level code, functions, generators, async functions, and async generators.
+
+The compiler lowers the subset it knows. Unsupported constructs fall back to the tree-walker where that is semantically safe, so VM coverage can grow without sacrificing correctness. Object shapes and inline caches are implemented for property access, and function activations use frame slots/upvalues for compiled code.
+
+Default contexts use arena lifetime: values and objects are released when the context is destroyed. Opt-in GC contexts (`Context.createWith(.{ .enable_gc = true })`) use the precise collector described in [docs/architecture.md](docs/architecture.md) and [docs/threads/P7-gc-design.md](docs/threads/P7-gc-design.md).
 
 ## Conformance
 
-Measured by `zig build test262` against the pinned tc39/test262 submodule. The score is split on two axes so a weak parser can't flatter itself — **valid** tests measure whether we can *run* a program, **negative** tests measure *strictness* (rejecting invalid input). Mixing them lets a parser "pass" negatives by failing to parse valid code too, so they're kept apart.
-
-Latest full parent run, saved in `docs/.data/test262-run-2026-07-04.txt`:
+Measured by `zig build test262` against the pinned `test262/` submodule. The runner scores two axes separately:
 
 | axis | meaning | passing |
 | ---- | ------- | ------: |
-| **valid** | can we run the program? (scored configured corpus) | **48,369 / 48,369 (100.0%)** |
-| negative | do we reject invalid input? (early errors) | **4,669 / 4,669 (100.0%)** |
+| **valid** | can the engine run the program? | **48,369 / 48,369 (100.0%)** |
+| **negative** | does the engine reject invalid input? | **4,669 / 4,669 (100.0%)** |
 
-Failure shape on the valid axis: **0 parse failures**, **0 runtime failures**, **0 host failures**. The runner reported **139 skipped tests**; those are excluded from the denominators above and should be treated as the next conformance frontier, not as implemented behavior. The exact skip inventory is generated at `docs/.data/test262-skips.tsv`.
+Failure shape on the valid axis: **0 parse failures**, **0 runtime failures**, **0 host failures**.
 
-Representative fully green areas from the same run include:
+Skipped tests are excluded from both denominators. Current skipped categories:
+
+| category | count |
+| -------- | ----: |
+| module+async / top-level-await harness cases | 94 |
+| tail-call-optimization tests | 35 |
+| unsupported SpiderMonkey staging paths | 10 |
+| **total** | **139** |
+
+Representative green areas from the saved run:
 
 | area | passing | area | passing |
 | ---- | ------: | ---- | ------: |
-| `test/language` | all listed subtrees 100% | `test/annexB` | 1,071 / 1,071 |
-| `test/intl402` | all listed subtrees 100% | `test/staging` | 1,467 / 1,467 |
+| `test/language` | saved-run subtrees 100% | `test/annexB` | 1,071 / 1,071 |
+| `test/intl402` | saved-run subtrees 100% | `test/staging` | 1,467 / 1,467 |
 | `Array` | 3,081 / 3,081 | `Object` | 3,411 / 3,411 |
-| `RegExp` | all listed subtrees 100% | `String` | 1,223 / 1,223 |
+| `RegExp` | saved-run subtrees 100% | `String` | 1,223 / 1,223 |
 | `Temporal` | 4,603 / 4,603 | `TypedArray` | 1,446 / 1,446 |
 | `Atomics` | 390 / 390 | `SharedArrayBuffer` | 104 / 104 |
 | `Map` | 204 / 204 | `Set` | 383 / 383 |
 | `WeakMap` | 141 / 141 | `WeakSet` | 85 / 85 |
 | `WeakRef` | 29 / 29 | `FinalizationRegistry` | 47 / 47 |
 
-> `zig build test262` prints each subtree's pass rate plus `parse-fail` / `runtime-fail` / `host-fail` counts, so the work stays data-driven. `zig build conformance` keeps a separate 33/33 always-green smoke suite for fast iteration. Refresh the corpus with `git submodule update --remote test262`.
+`zig build conformance` is a separate fast smoke suite; the July 4, 2026 verification run passed 33/33 cases. Use `zig build test262` for the full configured corpus.
 
 ## Performance
 
-Each tier is gated by test262 (never regress correctness for speed) and timed by `zig build bench`:
+`zig build bench` currently times the bytecode VM against the tree-walker on a small set of microbenchmarks. The latest saved local run is [docs/.data/bench-2026-07-04.txt](docs/.data/bench-2026-07-04.txt):
 
-| tier | what | status | vs tree-walk |
-| ---- | ---- | :----: | -----------: |
-| 0 | tree-walk interpreter | ✅ | 1× (baseline) |
-| 1 | **stack bytecode VM** — lowers nearly the whole language (objects, arrays, members, `new`, methods, `++`, `instanceof`) | ✅ | ~1.1× |
-| 2 | **slot-allocated locals + frame-linked closures** — params/locals resolved to a flat frame array at compile time | ✅ | 1.3–1.85× |
-| 3 | **object shapes (hidden classes) + inline caches** — shared shape-transition tree, flat slots, monomorphic IC per property site | ✅ | **1.6–1.7×** |
-| 4 | NaN-boxed values | next | — |
-| 5 | generational GC (replaces the arena) | planned | — |
-| 6 | baseline → optimizing JIT | planned | — |
+| case | VM ns/op | tree ns/op | VM/tree |
+| ---- | -------: | ---------: | ------: |
+| `fib(27)` recursion | 172,360,029 | 166,933,604 | 0.97x |
+| tight loop sum to 100k | 8,614,833 | 8,547,850 | 0.99x |
+| object property churn | 7,563,963 | 7,356,334 | 0.97x |
+| array push/sum | 8,484,360 | 8,475,588 | 1.00x |
+| deep recursion, depth 500 | 112,897 | 115,296 | 1.02x |
 
-Tier-2 nearly doubled compute/call-heavy code; tier-3 brought object-property churn from a 1.33× laggard up to 1.73× (objects no longer allocate a per-instance hashmap, and repeat property access is an inline-cache hit). The tree-walker remains the oracle and the fallback for not-yet-lowered constructs.
+Those numbers show current VM/tree-walk parity on these microbenchmarks, not a broad speedup claim. The same benchmark run also prints no-shared-state thread throughput scaling:
 
-## Language & runtime coverage
+| threads | wall ns | scaling |
+| ------: | ------: | ------: |
+| 1 | 258,529,500 | 1.00x |
+| 2 | 297,057,916 | 1.74x |
+| 4 | 315,458,875 | 3.28x |
+| 8 | 362,099,959 | 5.71x |
 
-**Literals & operators** — numbers (int/float/hex/octal/binary/exp, spec `ToString`), strings (full escape set incl. `\u{…}`), `true`/`false`/`null`/`undefined`, objects (shorthand, computed keys, getters/setters, spread), arrays (incl. holes/sparse), regex literals, template literals + tagged templates; the full operator set incl. `**`, `??`, `?.`, `&&=`/`||=`/`??=`, bitwise/shift, `in`/`instanceof`/`typeof`/`delete`/`void`, comma.
+Implemented performance machinery includes the bytecode VM, frame slots/upvalues, object shapes, inline caches, and GC slab backing. Future performance work includes tighter VM/codegen coverage, NaN-boxed `Value` integration, nursery/generational GC work, and possible baseline/JIT exploration. There is no optimizing JIT today.
 
-**Bindings & scope** — `var`/`let`/`const`, block scoping + TDZ, destructuring (array/object, defaults, rest) in declarations, parameters, and assignment; `with`; `eval` (direct & indirect).
+## Language And Runtime Coverage
 
-**Functions** — declarations/expressions (incl. named-expression self-binding), arrows, default/rest params (including destructuring rest), `arguments` (mapped & unmapped), closures, `new`, `new.target`, getters/setters; `Function.prototype` `call`/`apply`/`bind`/`toString`.
+The configured test262 coverage for these surfaces is green unless a case falls into the skipped categories above.
 
-**Classes** — fields, private members + methods, `static` members + blocks, accessors, `super` (calls and member access), derived constructors, `extends`.
+**Syntax and operators** - literals, strings, regex literals, template literals, objects, arrays, destructuring, spread/rest, optional chaining, nullish coalescing, logical assignment, exponentiation, bitwise/shift operators, `in`, `instanceof`, `typeof`, `delete`, `void`, and comma.
 
-**Generators & async** — `function*` + `yield`/`yield*` (with throw/return delegation, destructuring-assignment-with-yield), `async` functions + `await`, `async function*` + `for await … of` — all driven on the suspendable VM. Some async/module harness shapes remain skipped by the test262 runner.
+**Bindings and scope** - `var`/`let`/`const`, TDZ, block scope, closures, direct and indirect `eval`, `with`, destructuring in declarations/parameters/assignment, and mapped/unmapped `arguments`.
 
-**Control flow** — `if`/`else`, `while`/`do…while`, `for`/`for-in`/`for-of`, `switch`, labels, `break`/`continue`, `throw`/`try`/`catch`/`finally`.
+**Functions and classes** - declarations, expressions, arrows, default/rest parameters, `this`, `new`, `new.target`, getters/setters, class fields, private members, static members/blocks, `super`, derived constructors, and `extends`.
 
-**Modules** — `import`/`export` (default, named, namespace, re-export, `export *`), graph linking with live bindings and live namespace objects. Top-level-await/module+async test262 cases are not yet part of the scored runner.
+**Control flow** - `if`, loops, `for-in`, `for-of`, `for await`, `switch`, labels, `break`, `continue`, `throw`, `try`, `catch`, `finally`, and using/disposal syntax covered by the configured runner.
 
-**Built-in library** — `Object`, `Function`, `Array` (incl. holes/sparse, `fromAsync`, freeze/seal), `String` + a homegrown `RegExp` backed by [`zig-regex`](../zig-regex), `Number`, `Boolean`, `Math`, `JSON`, `Symbol` (+ well-known symbols), `Map`/`Set`/`WeakMap`/`WeakSet`, `Promise` (combinators, subclassing/species, microtask ordering), `Date`, the `Error` family, `Proxy`/`Reflect`, `globalThis`, typed arrays + `ArrayBuffer`/`SharedArrayBuffer`/`DataView`/`Atomics`, `WeakRef`/`FinalizationRegistry`, and broad `Temporal` + `Intl` coverage. The configured test262 coverage for these surfaces is green, but skipped harness categories still need separate implementation/audit before calling the engine spec-complete.
+**Generators and async** - `function*`, `yield`, `yield*`, async functions, async generators, `await`, Promise jobs, and microtask ordering. Combined module+async/top-level-await harness cases remain outside the scored denominator.
 
-## Using it
+**Modules** - imports, exports, default/named/namespace re-exports, `export *`, live bindings, namespace objects, `import.meta`, and dynamic `import()` covered by the configured runner. Top-level-await harness work remains in the skipped inventory.
 
-### As a Zig module
+**Built-ins** - `Object`, `Function`, `Array`, `String`, `RegExp` via [`zig-regex`](../zig-regex), `Number`, `Boolean`, `Math`, `JSON`, `Symbol`, `Map`, `Set`, `WeakMap`, `WeakSet`, `Promise`, `Date`, errors, `Proxy`, `Reflect`, `globalThis`, typed arrays, `ArrayBuffer`, `SharedArrayBuffer`, `DataView`, `Atomics`, `WeakRef`, `FinalizationRegistry`, broad `Temporal`, and `Intl` coverage.
+
+## Using It
+
+### As A Zig Module
 
 ```zig
 const js = @import("js");
 
 const ctx = try js.Context.create(allocator);
 defer ctx.destroy();
+
 const v = try ctx.evaluate("let x = 40; x + 2");
-// v == .{ .number = 42 }
 ```
 
-### As a JavaScriptCore C-API subset
+### As A JavaScriptCore C-API Subset
 
-Link `libzig-js.a` in place of `JavaScriptCore.framework` for hosts that use the implemented subset of Apple's `<JavaScriptCore/JSValueRef.h>` / `<JSObjectRef.h>` surface:
+Link `libzig-js.a` for hosts that use the implemented subset of Apple's public `<JavaScriptCore/JSValueRef.h>` / `<JSObjectRef.h>` surface:
 
 ```c
 JSGlobalContextRef ctx = JSGlobalContextCreate(NULL);
@@ -127,485 +154,106 @@ JSValueRef result = JSEvaluateScript(ctx, script, NULL, NULL, 0, NULL);
 double n = JSValueToNumber(ctx, result, NULL); // 2.0
 ```
 
-Implemented C-API symbols:
+The current exported C surface has 50 functions:
 
-- **Context lifecycle** — `JSGlobalContextCreate`, `ZJSGlobalContextCreateThreaded(gil)`, `JSGlobalContextRelease`/`Retain`, `JSContextGetGlobalObject`, `JSEvaluateScript`, `JSGarbageCollect`.
-- **Value inspection** — `JSValueGetType`, `JSValueIs*`, `JSValueIsEqual`/`StrictEqual`.
-- **Constructors & coercion** — `JSValueMake*`, `JSValueTo*`, `JSValueProtect`/`Unprotect`.
-- **Objects** — `JSObjectMake`, `JSObjectMakeArray`, `JSObjectMakeDeferredPromise`, `JSObjectGetProperty`/`SetProperty`, `JSObjectGetPropertyAtIndex`, `JSObjectCallAsFunction`, `JSObjectCallAsConstructor`, `JSObjectMakeFunctionWithCallback`, `JSObjectIsFunction`/`IsConstructor`.
-- **Strings** — `JSStringCreateWithUTF8CString`, `JSStringRetain`/`Release`, `JSStringGetLength`, `JSStringGetUTF8CString`.
-- **Worker extension** — `JSWorkerCreate`, `JSWorkerPostMessage`, `JSWorkerReceive`, `JSWorkerTerminate`, `JSWorkerRelease`.
+- **Context lifecycle** - `JSGlobalContextCreate`, `ZJSGlobalContextCreateThreaded(gil)`, `JSGlobalContextRelease`, `JSGlobalContextRetain`, `JSContextGetGlobalObject`, `JSEvaluateScript`, `JSGarbageCollect`.
+- **Values** - `JSValueGetType`, `JSValueIs*`, `JSValueIsEqual`, `JSValueIsStrictEqual`, `JSValueMake*`, `JSValueTo*`, `JSValueProtect`, `JSValueUnprotect`.
+- **Objects** - `JSObjectMake`, `JSObjectMakeArray`, `JSObjectMakeDeferredPromise`, `JSObjectGetProperty`, `JSObjectSetProperty`, `JSObjectGetPropertyAtIndex`, `JSObjectCallAsFunction`, `JSObjectCallAsConstructor`, `JSObjectMakeFunctionWithCallback`, `JSObjectIsFunction`, `JSObjectIsConstructor`.
+- **Strings** - `JSStringCreateWithUTF8CString`, `JSStringRetain`, `JSStringRelease`, `JSStringGetLength`, `JSStringGetUTF8CString`.
+- **Worker extension** - `JSWorkerCreate`, `JSWorkerPostMessage`, `JSWorkerReceive`, `JSWorkerTerminate`, `JSWorkerRelease`.
 
-`JSObjectCallAsFunction`/`CallAsConstructor` drive the interpreter, so JS functions and the built-in `Error` constructors are callable across the C boundary; thrown JS values surface as the C-API `exception` out-param. `ZJSGlobalContextCreateThreaded` and `JSWorker*` are zig-js extensions rather than public JSC symbols. `JSObjectMakeDeferredPromise` is exported but raises a `NotImplemented` exception until the deferred-promise plumbing lands.
+`ZJSGlobalContextCreateThreaded` and `JSWorker*` are zig-js extensions, not public JSC symbols. `JSObjectMakeDeferredPromise` is exported for ABI coverage but currently returns null and raises `NotImplemented: JSObjectMakeDeferredPromise`.
 
-### Used by
-
-- [home-lang/craft](https://github.com/home-lang/craft)
+See [docs/api.md](docs/api.md) and [docs/HOME_INTEGRATION.md](docs/HOME_INTEGRATION.md) for the fuller embedding story and the important warning that zig-js is not a drop-in replacement for Bun/Home's private JSC internals.
 
 ## Architecture
 
-```
-                           ┌─► compiler ─► bytecode ─► VM ──┐   (hot subset + generators/async)
-source ─► lexer ─► parser ─┤                                ├─► Value
-               (AST)       └─► tree-walk interpreter ───────┘   (oracle + fallback)
-                                                     │
-                                          c_api.zig (JSC C-API subset exports)
-```
-
 | file | responsibility |
 | ---- | -------------- |
-| `src/value.zig` | `Value` union + `ToBoolean`/`ToNumber`/`ToString`/`typeof`, equality, `Object` (shapes, per-index attrs, accessors, array elements/holes) |
-| `src/lexer.zig` | single-pass tokenizer |
-| `src/ast.zig` | unified expression/statement/module node |
-| `src/parser.zig` | recursive-descent + precedence climbing (`parseProgram` / `parseModule`) |
-| `src/interpreter.zig` | tree-walking evaluator, environments, and the built-in library |
-| `src/compiler.zig` | AST → stack bytecode (functions, generators, async) |
-| `src/bytecode.zig` | instruction set + chunk/function templates |
-| `src/vm.zig` | the suspendable bytecode VM (frames, generators, async drivers) |
-| `src/shape.zig` | hidden-class (shape) transition tree |
-| `src/promise.zig` | Promise state machine + microtask queue |
-| `src/context.zig` | engine instance (arena, persistent global env, module loader/linker) |
-| `src/jsstring.zig` | refcounted `JSStringRef` backing |
-| `src/c_api.zig` | the exported JavaScriptCore C-API symbols |
-| `src/root.zig` | `@import("js")` entry point |
+| [src/value.zig](src/value.zig) | `Value`, `Object`, coercions, equality, object slots/elements/accessors |
+| [src/lexer.zig](src/lexer.zig) | tokenizer |
+| [src/ast.zig](src/ast.zig) | AST node model |
+| [src/parser.zig](src/parser.zig) | recursive-descent parser |
+| [src/interpreter.zig](src/interpreter.zig) | tree-walking evaluator and built-in library |
+| [src/compiler.zig](src/compiler.zig) | AST to bytecode compiler |
+| [src/bytecode.zig](src/bytecode.zig) | bytecode instruction and template definitions |
+| [src/vm.zig](src/vm.zig) | suspendable bytecode VM |
+| [src/shape.zig](src/shape.zig) | hidden-class/shape transition tree |
+| [src/promise.zig](src/promise.zig) | Promise state and microtask queue |
+| [src/context.zig](src/context.zig) | context lifecycle, module loader/cache, GC/thread options |
+| [src/gc.zig](src/gc.zig) | opt-in precise GC |
+| [src/jsthread.zig](src/jsthread.zig) | shared-realm `Thread` API |
+| [src/worker.zig](src/worker.zig) | isolated worker agents |
+| [src/jsstring.zig](src/jsstring.zig) | refcounted `JSStringRef` backing |
+| [src/c_api.zig](src/c_api.zig) | exported C API |
+| [src/root.zig](src/root.zig) | `@import("js")` entry point |
 
-## Build & test
+## Build And Test
 
-Requires Zig **0.17.0-dev**.
+Requires Zig 0.17.0-dev.
 
 ```sh
-zig build                       # builds libzig-js.a (the JSC C-API subset)
-zig build test                  # runs the unit + C-API test suite
-zig build conformance           # runs the always-green smoke suite (33/33)
-zig build threads-test          # runs the green WebKit PR-249 threads corpus (225/225)
-zig build threads-reference-audit # classifies the remaining reference-only PR-249 files
-python3 tools/threads-reference-audit.py --probe-candidates # prints closest promotion probes
-python3 tools/threads-reference-audit.py --run-probes # executes closest probes with timeouts
-python3 tools/threads-reference-audit.py --format json # machine-readable counts/blockers/probes
-zig build test -Dtsan=true      # unit suite under ThreadSanitizer
-zig build threadfuzz            # seeded concurrent-JS fuzzer
-zig build threadfuzz -Dfuzz-midgc=true # mid-script GC wait-pump + microtask + property waitAsync late settlement + creator buffers + nested asyncJoin + ThreadLocal/Thread.restrict finalization + sync-wait cleanup/burst release + sync timeout exit + lockIfAvailable/Condition.wait cleanup + asyncHold release cleanup + teardown + promise + script/module Worker/SAB + Worker exception + Worker close/terminate + weak-collection fuzzer
-zig build threadfuzz -Dfuzz-lifecycle=true # deterministic lifecycle/teardown/finalization fuzzer, including Atomics.Mutex/Condition token waits and lockIfAvailable paths
-zig build test262               # runs the real tc39/test262 corpus, prints pass %
-zig build test262 -Dtest262=DIR # …with an explicit corpus root
-zig build bench                 # times the bytecode VM against the tree-walker
-zig build threads-profile       # profiles no-GIL Thread scaling/lock contention
-zig build gc-profile            # profiles GC allocation/context lifecycle costs
+zig build                         # builds libzig-js.a
+zig build test                    # unit + C-API tests
+zig build conformance             # fast smoke suite
+zig build test262                 # configured tc39/test262 corpus
+zig build test262-bin             # build the test262 runner only
+./zig-out/bin/test262 --list-skips > docs/.data/test262-skips.tsv
+
+bun run docs:data -- --from docs/.data/test262-run-2026-07-04.txt
+bun run docs:build
+
+zig build bench                   # VM/tree-walk and thread-scaling benchmark
+zig build threads-test            # WebKit PR-249 thread allowlist
+zig build threads-reference-audit # classify non-promoted PR-249 files
+python3 tools/threads-reference-audit.py --probe-candidates
+
+zig build threadfuzz
+zig build threadfuzz -Dfuzz-midgc=true
+zig build threadfuzz -Dfuzz-lifecycle=true
+zig build test -Dtsan=true
+zig build threads-profile
+zig build gc-profile
 ```
 
-The test262 corpus is vendored as the `test262/` git submodule (`git submodule update --init`); `zig build test262` uses it by default and skips cleanly if it isn't present. For speed it runs `ReleaseFast` under subprocess isolation, so a single pathological test can't abort the run.
+The test262 corpus is vendored as the `test262/` git submodule. `zig build test262` uses it by default and skips cleanly if it is absent.
 
-## Multithreading roadmap
+## Threads And GC
 
-`Context.createWith(.{ .enable_threads = true })` installs the shared-realm
-`Thread`, `Lock`, `Condition`, `ThreadLocal`, `ConcurrentAccessError`,
-property-mode `Atomics.*`, and proposal-aligned `Atomics.Mutex` /
-`Atomics.Condition` surface. Shared-realm `Thread`s now run true-parallel by
-default on the GC-managed, thread-safe heap:
+`Context.createWith(.{ .enable_threads = true })` installs the shared-realm `Thread`, `Lock`, `Condition`, `ThreadLocal`, property-mode `Atomics.*`, proposal-aligned `Atomics.Mutex` / `Atomics.Condition`, and related surfaces. Shared-realm threads run true-parallel by default; `.gil = true` is available as a serialized compatibility mode.
 
 ```zig
 const parallel = try js.Context.createWith(gpa, .{ .enable_threads = true });
 const serialized = try js.Context.createWith(gpa, .{ .enable_threads = true, .gil = true });
 ```
 
-The `.gil = true` path remains a supported opt-out for strict serialized
-interleavings and compatibility testing. The C API exposes the same choice with
-`ZJSGlobalContextCreateThreaded(gil)`.
+The isolated `Worker` implementation lives in [src/worker.zig](src/worker.zig) and is exposed to C embedders through the `JSWorker*` extension functions.
 
-Thread support is tracked in the canonical
-[issue #1](https://github.com/zig-utils/zig-js/issues/1) and the design/status
-docs under `docs/threads`. Current coverage includes isolated agents, retained
-`SharedArrayBuffer` storage, typed-array and property-mode `Atomics.wait` /
-`notify` / `waitAsync`, structured clone, ArrayBuffer transfer/detach, Worker
-message passing, and the shared-realm `Thread` API. The vendored WebKit PR-249
-allowlist is **225/225** green.
+Current thread status is tracked in:
 
-Correctness is now gated by the ordinary unit/corpus suite plus no-GIL coverage:
-ThreadSanitizer unit tests, a sharded no-GIL PR-249 corpus TSan sweep, a
-suppression-narrowness witness for JS-defined program-byte races,
-`test262-parallel`, and seeded concurrent-JS fuzzing (`threadfuzz`, TSan
-fuzzing, amplified fuzzing, broad semantic fuzzing,
-mid-script-GC wait-pump/microtask/property-waitAsync-late-settlement/creator-buffer/nested-asyncJoin/ThreadLocal-finalization/Thread.restrict-finalization/sync-wait-cleanup/sync-wait-burst/asyncHold-release-cleanup/promise/teardown/Worker-SAB/Worker-exception/Worker-close/weak-collection fuzzing, lifecycle
-fuzzing, ReleaseSafe fuzzing, and deterministic-result verification).
+- [docs/threads/index.md](docs/threads/index.md)
+- [docs/threads/testing.md](docs/threads/testing.md)
+- [docs/threads/memory-model.md](docs/threads/memory-model.md)
+- [issue #1](https://github.com/zig-utils/zig-js/issues/1)
 
-Remaining work is concentrated in production hardening rather than the core
-threading architecture:
+The README intentionally avoids duplicating the detailed thread/GC implementation log; those docs and the commands above are the source of truth.
 
-- **GC performance** - `zig build gc-profile` compares arena, explicit-GC,
-  no-GIL threaded GC, and `.gil = true` lifecycle/allocation costs, including a
-  create-per-task versus long-lived-context reuse section with periodic
-  collection, a workload destroy attribution table that compares destroying a
-  live object-heavy context with quiescent `collectGarbage()` plus
-  post-collection destroy, and now splits context lifecycle time into create and
-  destroy columns before printing GC cell-backing attribution for both the
-  intrinsic empty-context footprint and an object-heavy allocation run: chunk
-  count, total cell-slot capacity, live cells at context creation, live cells
-  after script allocation, free slots after collection, and live cells after
-  collection. It
-  also prints per-size-class bucket tables for the empty context and the same
-  object workload, so nursery/allocation follow-up can separate global setup
-  pressure from workload pressure and see which slot sizes own chunk count,
-  issued cells, free cells, and surviving live cells. The finalizer attribution
-  is split the same way between empty-context destroy and destroy after the
-  object workload. GC cells now allocate through a reusable size-class slab
-  backing instead of one backing allocator call per cell, and
-  fresh slab chunks hand out cells lazily with a per-bucket bump hint instead of
-  pre-linking every unused slot during short-lived context setup; a per-bucket
-  fresh-chunk cursor skips chunks whose bump range is already exhausted. The
-  object-sized 1024/2048-byte buckets now use larger slab chunks than the small
-  cell buckets, cutting the empty-context object-cell bucket from 17 chunks to 5
-  and the object-heavy profile from roughly 330 chunks to 84 while keeping the
-  smaller buckets' footprint unchanged. Freed
-  cells are still recycled through the per-bucket free lists, with exact
-  per-bucket free, capacity, and issued-slot counters so profile/stat snapshots
-  do not walk every freed cell or slab chunk, and classified against
-  per-size-class address spans plus a recent-chunk hint before falling back to
-  a sorted chunk address index, so collection/destroy lookup costs stay bounded
-  even when a bucket owns many slab chunks.
-  Single-mutator GC object side stores now allocate directly from the context
-  allocator instead of round-tripping through that cell-slab
-  classifier, while true-parallel contexts keep the synchronized backing wrapper.
-  GC-enabled context creation now groups the heap, root-tracing binding, and
-  cell backing in one stable lifecycle allocation instead of three separate GPA
-  allocations, shaving create/destroy churn without changing the existing
-  internal pointers.
-  Context teardown now enters a slab bulk-teardown mode so per-cell frees do not
-  rebuild freelists immediately before whole chunks are released; bucket-shaped
-  delegated side allocations are still classified once and freed through the
-  wrapped allocator, so teardown only elides frees for owned cell slots. Live
-  `SharedArrayBuffer` retain teardown is regression
-  covered across arena, no-GIL threaded, and `.gil = true` contexts. Keep using
-  the profile attribution to drive nursery/generational work, finalizer
-  draining, and further lifecycle reductions for create-per-task embedders.
-- **Parallel scaling** - `zig build threads-profile` compares the no-GIL
-  default against `.gil = true` across independent compute, shared object
-  properties, array append, typed-array Atomics, property `Atomics.wait` /
-  `notify`, property `Atomics.waitAsync` timeout settlement,
-  `Condition.wait` / `notifyAll`, single-lock and multi-lock
-  `Condition.asyncWait`, contended `Lock.hold`, and `Lock.asyncHold` delivery
-  plus observed callback and no-fn release-function variants, along with
-  lifecycle churn. It now enables and prints internal
-  contention events, timed wait/pump parks, async waiter registration/completion
-  counts for `Condition.asyncWait` and property `waitAsync`, explicit
-  `Thread.join` park counts for lifecycle attribution, source-specific
-  `Lock.hold` / `Condition.wait` / property `Atomics.wait` park counts, and
-  run-loop task-pump empty/job counts split into ordinary `Lock.asyncHold`
-  deliveries versus `Condition.asyncWait` reacquire deliveries beside
-  wall-clock time, so follow-up optimization can separate property waiters,
-  property `waitAsync` timeout settlement, condition waiters, async condition
-  regrant delivery,
-  user-level lock pressure, thread-join/lifecycle waiting,
-  unobserved async-hold grant delivery,
-  promise-observed callback settlement, no-fn release-function delivery,
-  object/element storage contention, and GC allocation costs under high thread
-  counts. It also prints
-  a separate isolated `Worker` section for structured-clone inbox/outbox
-  round-trips and spawn/post/receive/join/destroy lifecycle cost, with separate
-  script and module Worker rows so import-graph startup/lifecycle pressure is
-  visible beside plain source Workers; that section has no `.gil = true`
-  comparison because each Worker owns its own `Context`.
-  The sync-wait pump path now skips the shared run-loop task lock entirely when
-  no async hold jobs are queued, and async-hold delivery now dequeues both the
-  per-lock pending list and the realm task queue through FIFO head cursors
-  instead of front-shifting task lists. Retry-front async-hold grants use an
-  amortized O(1) front stash when no consumed head slot is available, so failed
-  grant delivery does not fall back to shifting the whole pending list. Realm
-  task-queue writers publish the atomic empty/pending hint from the queue length
-  while holding the shared API lock, avoiding writer-side atomic RMW in the
-  async-grant hot path. Realm task pumps also copy larger bounded FIFO bursts
-  under the shared API lock before running grants outside it, so delivery no
-  longer takes that lock once per job and already-queued grant storms need fewer
-  shared-lock acquisitions. `Condition.notify` / `notifyAll` now
-  use the same FIFO head-cursor shape for their mixed sync/async waiter queue,
-  avoiding one front shift per notified waiter; timed-out or terminated sync
-  condition waiters are marked canceled and skipped by that cursor instead of
-  being removed from the middle of the queue. Sync `notifyAll` handoff also
-  waits on the condition's ack signal instead of sleeping in fixed 1ms polling
-  chunks, so ready waiters can re-enter the lock path immediately. Async-only
-  condition notifications now deliver their lock regrants after releasing the
-  condition queue mutex, so no-fn release-function creation and realm task
-  enqueueing do not lengthen that critical section; mixed sync/async wakeups
-  keep the existing sync handoff ordering. Contiguous async condition regrants
-  for the same lock are prepared in fixed-size stack batches and applied under
-  one lock acquisition per batch, so `notifyAll()` no longer retakes that lock
-  once per async waiter. Ready async-condition reacquire jobs are also appended
-  to the realm task queue in FIFO bursts, amortizing the shared API lock on
-  notify paths that wake multiple locks. Notify now also tracks the woken
-  sync/async entries in one pre-sized wake list instead of allocating separate
-  per-kind wake lists for every notification, and sync handoff completion uses
-  a pending-waiter countdown instead of rescanning the wake list until every
-  ticket acknowledges.
-  Property-mode `Atomics.notify` now stable-compacts matching waiters in one
-  pass: heap-owned sync tickets are unlinked before signal, and matching
-  `waitAsync` tickets are collected without repeated `orderedRemove` shifts.
-  Individual sync wait timeout/termination
-  cleanup also stable-compacts the waiter table in one pass instead of
-  front-shifting the remaining waiters, and timeout polling plus realm teardown
-  now scan property `waitAsync` tickets once instead of removing one middle
-  entry per expired/abandoned ticket. Typed-array `Atomics.notify` now unlinks
-  notified sync stack tickets before signaling, so awakened waiters do not each
-  rescan and shift the process-wide waiter list; typed-array `waitAsync`
-  harvest and abandon paths stable-compact settled/owner tickets in one pass
-  while preserving FIFO order for remaining waiters. Worker inbox/outbox channels now drain
-  through the same FIFO head-cursor shape instead of front-shifting
-  structured-clone message queues, and `$262.agent` report delivery now uses a
-  FIFO head cursor instead of removing the first report on every
-  `getReport()`. Empty internal `Worker.receive(..., 0)` polls return under
-  the channel lock without entering timed condition waits or touching
-  drained-queue compaction. Active interpreter roots, protected C-API
-  handles, and GIL park records are unordered root sets, so their removals now
-  use swap removal instead of preserving order with list shifts on evaluate,
-  unprotect, and thread teardown paths. WeakMap/WeakSet entry delete and GC
-  dead-key pruning now use the same unordered tail-removal shape, and
-  FinalizationRegistry `unregister` removes matching records with one stable
-  compaction pass so later cleanup delivery keeps survivor order without
-  repeated middle shifts.
-  Promise microtask drains now use a FIFO head cursor too, so observed
-  `Lock.asyncHold` callbacks and no-fn release-function reactions do not pay one
-  front shift per pending reaction while preserving checkpoint order. The
-  async-hold task pump also snapshots the microtask enqueue generation around
-  each delivered grant, so unobserved grants that settle without queuing any
-  reaction skip the otherwise-empty microtask drain lock in no-GIL mode.
-  No-fn async-hold grants embed their once-only release state in the already
-  arena-lived hold job, avoiding an extra small allocation per delivered release
-  function.
-  The profile now also has direct rows for property `waitAsync` finite-timeout
-  settlement plus single-lock and multi-lock `Condition.asyncWait` reacquire
-  delivery, with async/done columns that show ticket registration, completed
-  async-condition reacquires, FIFO-bursted task enqueue pressure, and exact
-  property-ticket settlement parity during local performance work.
-  The join columns split `Thread.join` park/pump iterations out of aggregate
-  parks, and the lock/cond/prop columns split the remaining sync park pressure
-  by source, so lifecycle churn can be distinguished from lock, condition, and
-  property wait pressure in the same table.
-  The Worker profile prints that empty-receive polling cost separately from
-  real message-delivery and lifecycle cost, split by script versus module
-  Worker kind. Continue using the profile for the remaining async-condition
-  delivery, contended-lock, Worker message, and lifecycle hot spots.
-- **Memory-model maintenance** - keep
-  [docs/threads/memory-model.md](docs/threads/memory-model.md) aligned with the
-  TSan suppression witness, synchronization primitives, and promoted corpus
-  coverage.
-- **Mid-script parallel GC** - sync-wait pump points now publish roots for
-  property `Atomics.wait`, `Condition.wait`, and contended `Lock` acquisition,
-  so the abort-safe collector can finish while those peers are blocked. The GC
-  root set now also covers host-side thread queues such as `Gil.tasks`,
-  per-lock async grants, async condition waiters, typed-array `waitAsync`
-  waiter/reaction roots, pending `Thread.asyncJoin` promise/reaction roots,
-  ThreadLocal values, thread completion results, protected C-API handles,
-  release-function lock records, and contended `Lock.hold` receiver/callback
-  pairs. A focused C-API unit witness now protects an otherwise-unrooted object
-  while shared-realm `Thread`s drive a finishing mid-script parallel sweep, then
-  proves the protected object survives until the final `JSValueUnprotect`.
-  Keep maturing convergence
-  and stress coverage for heavier
-  wait/cleanup mixes; the mid-GC fuzzer now queues a FIFO `Lock.asyncHold`
-  grant chain including a root-bearing rejected grant, an async
-  `Condition.wait` reacquire path, and a typed-array `waitAsync` reaction graph
-  reachable only through the native waiter queue, and pending
-  `Thread.asyncJoin` fulfillment/rejection reaction graphs
-  reachable only through native completion records while allocation pressure
-  collects. A sibling promise-publication subprogram leaves a child-returned
-  typed-array `waitAsync` promise, a child-returned rejected promise, a
-  child-returned user thenable, and a child-thrown object parked in thread
-  completion/native waiter state through a finishing sweep, then verifies
-  `join()` / `asyncJoin()` fulfillment, rejection, thenable assimilation, and
-  thrown-object publication from observers registered both before and after
-  child completion. Another sibling sync-wait cleanup subprogram parks peers in
-  property `Atomics.wait`, `Condition.wait`, and contended `Lock.hold`
-  acquisition, drives a finishing sweep, then verifies their stack roots after
-  resume plus exact `FinalizationRegistry` cleanup count/sum delivery; the same
-  subprogram now settles expired property `waitAsync` tickets while those peers
-  are parked, keeps a live property `waitAsync` ticket rooted through the
-  finishing sweep, keeps an isolated Worker parked on a retained
-  `SharedArrayBuffer` through the same sweep, then notifies both the live
-  waitAsync ticket and Worker and verifies the exact captured-root score plus
-  Worker reply.
-  A sibling sync-wait burst subprogram parks multiple waiters on the same
-  property, the same `Condition`, and the same contended `Lock` through a
-  finishing sweep, rejects early cleanup while those stack roots are live, then
-  releases all three wait sets and verifies exact cleanup after quiescence.
-  A sibling sync-timeout subprogram parks property `Atomics.wait` peers and
-  static `Atomics.Condition.waitFor` peers through a finishing sweep, rejects
-  early cleanup while their stack roots are live, then requires timeout results,
-  `UnlockToken` reacquisition/unlock, and exact cleanup after quiescence.
-  A sibling `Atomics.Mutex.lockIfAvailable` subprogram parks acquire-after-release
-  and timeout token waiters behind a holder through a finishing sweep, rejects
-  early cleanup while those roots are live, then requires reused-token acquire
-  and timeout results plus exact cleanup after quiescence.
-  A sibling static `Atomics.Condition.wait` subprogram parks notify/reacquire
-  token waiters through a finishing sweep, rejects early cleanup while their
-  stack roots are live, then requires exact notify counts, token reacquisition,
-  `asyncJoin` observers, and cleanup after quiescence.
-  Another sibling async-hold release cleanup subprogram delivers no-fn
-  `Lock.asyncHold()` release functions while property and condition waiters
-  stay parked, drives a finishing mid-script parallel sweep before those waiters
-  resume, and then requires exact `FinalizationRegistry` cleanup count/sum
-  delivery after quiescence.
-  Another sibling nested-thread subprogram parks parent and child `Thread`s
-  with `ThreadLocal` roots, child `asyncJoin()` promises, child `Thread`
-  completion records, and exact cleanup targets live through a finishing sweep,
-  then verifies parent release, child release, rerouted asyncJoin reactions, and
-  exact cleanup count/sum delivery after quiescence.
-  Script Worker/SAB and module Worker/SAB cleanup subprograms run isolated
-  Workers on the same retained `SharedArrayBuffer` while shared-realm `Thread`s
-  register cleanup targets and park stack roots through a finishing sweep, then
-  verify exact Worker progress, joined thread roots, asyncJoin reactions, and
-  cleanup count/sum; sibling script/module Worker handler-exception cleanup
-  subprograms first recover from an expected thrown `onmessage` delivery, then
-  prove the same progress and cleanup oracle through the finishing sweep.
-  Script and module Worker close/terminate subprograms now compose exact FIFO
-  drain/drop ordering, post-close drop, post-terminate receive silence, joined
-  shared-realm roots, asyncJoin reactions, and cleanup count/sum with the same
-  finishing mid-script sweep.
-  A pending-microtask subprogram queues Promise, typed-array `waitAsync`,
-  `Thread.asyncJoin`, with-fn `Lock.asyncHold`, no-fn release-function, and
-  `FinalizationRegistry` cleanup roots through a finishing mid-script sweep,
-  then drains the realm run loop and verifies exact reaction and cleanup
-  oracles.
-  A creator-owned buffer subprogram leaves child-created `SharedArrayBuffer`
-  and `ArrayBuffer` storage rooted through unjoined `Thread` completion records
-  and delayed `asyncJoin` observers across a finishing sweep, then verifies
-  blocking `join()`, post-sweep `asyncJoin()`, and `ArrayBuffer.transfer()`
-  observers see exact contents after the creating thread has exited.
-  A weak-collection subprogram parks property `Atomics.wait`,
-  `Condition.wait`, and contended `Lock.hold` peers while allocation pressure
-  leaves live WeakMap values reachable only through live weak keys, dead
-  WeakMap/WeakSet targets reachable only through weak structures and WeakRefs,
-  and FinalizationRegistry unregister-token records queued through a finishing
-  sweep; it then verifies live ephemeron values, cleared dead refs, exact
-  cleanup count/sum, and exact unregister-token suppression.
-  A sibling mid-GC teardown subprogram parks children after installing
-  child-owned typed-array `waitAsync` tickets, verifies pending `asyncJoin`
-  rejection reactions after parent failure, and proves later notify wakes zero
-  leaked waitAsync tickets. The profile also verifies exact
-  `FinalizationRegistry` cleanup count/sum delivery plus unregister-token
-  suppression after those wait-pump sweeps and keeps a registered object
-  reachable only through `ThreadLocal.value` while the owning thread is parked,
-  proving that hidden
-  native ThreadLocal roots survive the mid-script collection window. Join-side
-  parked-root state is now balanced across termination/error unwinds, so a
-  failed `Thread.join()` cannot leave the interpreter permanently marked as a
-  frozen parked peer, and joiners now publish that parked state only for the
-  actual native condition wait, not while pumping tasks. Requested shell/host
-  GC now leaves active mid-script parallel marks alone until the realm is
-  quiescent, then aborts stale parallel mark state before a fresh precise
-  collection.
-- **Stress breadth** - the broad fuzzer profile now covers exceptions/finally,
-  cleanup, waiters, `asyncJoin`, `Thread.restrict`, and nested thread lifecycle;
-  the mid-GC profile covers sync-wait root publication during finishing
-  mid-script sweeps, queued async-hold delivery including rejected grant
-  reactions, async condition reacquire delivery, typed-array `waitAsync` native
-  waiter/reaction roots, pending `Thread.asyncJoin` reaction roots,
-  child-returned `waitAsync` promise fulfillment/rejection, user thenable
-  assimilation, and thrown-object publication through `join()` / `asyncJoin()`,
-  pending Promise/microtask roots across asyncHold callback/release delivery,
-  typed-array `waitAsync`, `Thread.asyncJoin`, and cleanup reactions,
-  creator-owned `SharedArrayBuffer` and `ArrayBuffer` storage rooted through
-  unjoined Thread completion records and delayed `asyncJoin` observers,
-  ThreadLocal-only and Thread.restrict-owned `FinalizationRegistry` targets
-  parked through a finishing sweep before owner threads clear their values,
-  isolated script/module Worker/SAB progress, Worker handler-exception
-  recovery, and Worker close/terminate drain/drop while shared-realm cleanup
-  roots are swept,
-  teardown termination with pending asyncJoin/waitAsync roots,
-  ThreadLocal-only hidden roots in parked peers, and deterministic
-  completed-but-unjoined Thread result and thrown exception roots, and
-  deterministic cleanup count/sum delivery plus unregister-token suppression;
-  the lifecycle
-  profile adds deterministic termination storms, script Worker/thread overlap
-  plus simple-import, diamond-shaped, and fanout/rejoin module Worker/thread
-  overlap over retained `SharedArrayBuffer` storage, Worker/thread/finalization
-  scheduling on one retained SAB, Worker termination interleaved with exact
-  shared-realm finalization cleanup on a retained SAB, Worker termination while
-  top-level failure tears down parked shared-realm `Thread`s, pending
-  `asyncJoin` rejection reactions, and already-ready cleanup jobs on the same
-  retained SAB, module Worker termination with the same shared-realm
-  teardown/reaction/cleanup oracle, exact FIFO drain/drop ordering for mixed
-  script and module Worker `close` /
-  `terminate` / `postMessage` lifecycles, plus worker
-  handler-exception recovery, Worker handler-exception recovery composed with
-  shared-realm Thread finalization cleanup on one retained SAB, and module
-  Worker handler-exception recovery composed with the same retained-SAB cleanup
-  oracle,
-  Worker termination composed with condition async reacquire, pending
-  `asyncJoin` rejection cleanup, and exact `FinalizationRegistry` cleanup,
-  `Thread.restrict` lifecycle isolation plus `Thread.restrict`-owned
-  `FinalizationRegistry` cleanup after owner-thread exit,
-  Thread exception identity through
-  `join()` / `asyncJoin()` while property and condition waiters are parked,
-  thread-returned typed-array `waitAsync` promise
-  assimilation through `join()` / `asyncJoin()` while waiters are parked,
-  typed-array `waitAsync` settlement interleaved with `asyncJoin` reactions and
-  exact `FinalizationRegistry` cleanup delivery,
-  `Condition.asyncWait` reacquire delivery interleaved with `join()` /
-  `asyncJoin()` reactions and exact `FinalizationRegistry` cleanup delivery,
-  proposal-style `Atomics.Mutex` / `Atomics.Condition.waitFor` token waiters
-  that take both notify and timeout paths while `asyncJoin` observers and exact
-  cleanup share the same lifecycle window, and `Atomics.Mutex.lockIfAvailable`
-  token waiters that take both acquire-after-release and timeout paths with
-  reused tokens in that same cleanup window,
-  teardown termination with pending `asyncJoin` rejection reactions and
-  child-owned typed-array `waitAsync` tickets that must be abandoned before the
-  child exits,
-  teardown termination while property `waitAsync` timeout compaction, async
-  condition reacquire, a pending `asyncJoin` rejection reaction, and
-  already-ready `FinalizationRegistry` cleanup jobs share the same realm turn,
-  isolated Worker termination composed with condition async reacquire, pending
-  `asyncJoin` rejection cleanup, and exact finalization cleanup, isolated
-  Worker termination composed with child-owned typed-array `waitAsync` ticket
-  abandonment, pending `asyncJoin` rejection cleanup, and exact finalization
-  cleanup, module Worker termination composed with the same child-owned
-  typed-array `waitAsync` ticket abandonment, pending `asyncJoin` rejection
-  cleanup, and exact finalization cleanup,
-  deterministic `Lock.asyncHold()` barging where a sync hold legally overtakes
-  a queued no-fn async ticket before `await` delivers its release function,
-  no-fn `Lock.asyncHold()` release-function delivery while property and
-  condition waiters stay parked before exact cleanup after they resume,
-  Promise reaction queue churn from with-fn `Lock.asyncHold`, no-fn
-  release-function delivery, typed-array `waitAsync`, `Thread.asyncJoin`, and
-  exact `FinalizationRegistry` cleanup,
-  creator-owned `SharedArrayBuffer` and `ArrayBuffer` storage that survives the
-  creating Thread's exit, sibling-thread reads, GC pressure, and post-creator
-  `ArrayBuffer.transfer()`, plus child-created SAB/ArrayBuffer storage crossing
-  isolated Worker structured-clone after the creator Thread exits, including a
-  sibling script Worker clone/finalization cleanup/transfer observer variant
-  and a module Worker clone/finalization cleanup/transfer observer variant,
-  cross-thread `FinalizationRegistry` cleanup count/sum oracles, cleanup
-  delivery interleaved with `join()` / `asyncJoin()` and unregister-token
-  suppression, cleanup delivery after parked property/condition waiters resume,
-  `ThreadLocal` isolation across normal, throwing, nested, and async-joined
-  thread lifecycles, and `ThreadLocal` values registered with
-  `FinalizationRegistry` across park/resume/clear/join cleanup lifecycles with
-  exact cleanup count/sum delivery after quiescent collection, plus
-  parent-created child `Thread`s whose `asyncJoin()` promises outlive the
-  parent Thread's local queue before child release, nested `ThreadLocal` root
-  checks, and exact finalization cleanup after both thread layers exit.
-  Keep extending the fuzzers toward more teardown and cross-realm scheduling
-  oracles.
-- **Reference-only PR-249 files** - promote only when the needed engine feature
-  exists, especially WebAssembly/JIT shell hooks, deep recursive VM-stack
-  behavior, heap caps/OOM semantics, and unsupported `$vm` controls.
-  `zig build threads-reference-audit` keeps every non-promoted file tied to one
-  of those blocker categories, and
-  `python3 tools/threads-reference-audit.py --probe-candidates` lists the
-  closest focused `-Dthreads-case=...` probes before any allowlist promotion.
-  Use `--format json` when CI, dashboards, or issue updates need the same
-  counts, blocker categories, probe commands, and expected blocker evidence in
-  a parseable form.
-  Add `--run-probes` to execute those closest probes with per-case timeouts and
-  fail unless every candidate passes; failures print the focused runner evidence
-  before the Zig build tail so the remaining blocker is visible. Add
-  `--expect-current-blockers` when checking the maintained negative baseline:
-  the command succeeds only while the nearest probes still fail or time out with
-  the documented current blocker evidence, and fails if a probe unexpectedly
-  passes or changes failure shape.
+## What Is Not Implemented
 
-The [TC39 structs proposal](https://github.com/tc39/proposal-structs) remains a
-tracked future layer. Shared structs, `Atomics.Mutex`, and
-`Atomics.Condition` should build on this existing worker, structured clone,
-`SharedArrayBuffer`, Atomics, and shared-realm thread foundation.
+Do not read the green configured runner as "the whole JavaScript universe is finished." Known non-implemented or non-scored areas include:
+
+- module+async/top-level-await harness support in the test262 runner;
+- proper tail calls / tail-call optimization;
+- the 10 unsupported SpiderMonkey staging paths listed in the skip TSV;
+- `JSObjectMakeDeferredPromise` behavior behind its exported C symbol;
+- full JavaScriptCore framework/private internals, Objective-C bridge, inspector/debugger APIs, and Bun/Home private JSC ABI;
+- WebAssembly and JIT shell hooks from the PR-249 reference corpus;
+- engine-wide NaN-boxed `Value` integration, nursery/generational GC, and any optimizing JIT.
+
+## Used By
+
+- [home-lang/craft](https://github.com/home-lang/craft)
 
 ## License
 
-MIT — see [LICENSE](./LICENSE).
+MIT - see [LICENSE](LICENSE).

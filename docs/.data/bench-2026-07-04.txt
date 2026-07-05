@@ -1,0 +1,15 @@
+zig-js benchmarks - bytecode VM vs tree-walk
+============================================
+case                             vm ns/op   tree ns/op   speedup
+fib(27) recursion               172360029    166933604     0.97x
+tight loop sum to 100k            8614833      8547850     0.99x
+object property churn             7563963      7356334     0.97x
+array push/sum                    8484360      8475588     1.00x
+deep recursion (depth 500)         112897       115296     1.02x
+
+parallel throughput scaling - 11 cores, each thread a 4M-iter loop (no shared state)
+ threads        wall ns    scaling
+       1      258529500      1.00x
+       2      297057916      1.74x
+       4      315458875      3.28x
+       8      362099959      5.71x

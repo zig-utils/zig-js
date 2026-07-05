@@ -1,22 +1,22 @@
 ---
 title: Architecture
-description: The tiered execution model and source map of zig-js.
+description: The execution model and source map of zig-js.
 ---
 
 # Architecture
 
-zig-js runs JavaScript through progressively faster tiers. Everything is correct at tier 0; the higher tiers exist purely to go faster without changing semantics.
+zig-js runs JavaScript through a tree-walking interpreter and a suspendable bytecode VM that share the same object model. The tree-walker is the semantic baseline and fallback; the VM is the compiled path for constructs it can lower safely.
 
-## Execution tiers
+## Execution paths
 
-| Tier | What it is | What it buys |
+| Path | What it is | What it buys |
 | ---- | ---------- | ------------ |
-| **0 — Tree-walk** | A direct AST evaluator (`interpreter.zig`). The semantic source of truth. | Correctness; the fallback for any construct the VM doesn't cover yet. |
-| **1 — Bytecode VM** | AST lowered to a linear instruction stream (`compiler.zig`) run on a stack machine (`vm.zig`). | ~1.1–1.7× on compute-heavy code. |
-| **2 — Slots & closures** | Slot-allocated locals and frame-linked closures. | Removes hash lookups for locals and captured variables. |
-| **3 — Shapes & inline caches** | Hidden classes (`shape.zig`) + monomorphic property-access caches. | Object property access without per-access hashmap cost. |
+| **Tree-walk** | A direct AST evaluator (`interpreter.zig`). | Correctness baseline; fallback for constructs the VM does not cover yet. |
+| **Bytecode VM** | AST lowered to a linear instruction stream (`compiler.zig`) run on a stack machine (`vm.zig`). | Suspend/resume support for generators, async functions, and async generators; compiled execution for supported code. |
+| **Slots & closures** | Slot-allocated locals and frame-linked closures. | Removes hash lookups for locals and captured variables in compiled code. |
+| **Shapes & inline caches** | Hidden classes (`shape.zig`) + monomorphic property-access caches. | Object property access without per-access hashmap cost. |
 
-Constructs the VM hasn't learned yet (e.g. `throw`/`try` in some paths) transparently fall back to the tree-walker.
+`zig build bench` currently shows VM/tree-walk parity on the saved microbenchmarks, not a broad VM speedup claim. See `docs/.data/bench-2026-07-04.txt` and the README performance table for the current numbers.
 
 ## Source map
 
