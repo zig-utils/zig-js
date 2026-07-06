@@ -359,6 +359,9 @@ context APIs.
   registers child-thread cleanup targets with unregister tokens while fulfilled
   and rejected `Thread.asyncJoin` observers plus sync-wait peers stay live
   through a finishing sweep,
+  keeps typed-array `waitAsync` reaction roots pending while notifying child
+  threads stay parked through a finishing sweep before exact `asyncJoin` and
+  cleanup verification,
   and parks Thread.restrict-owned finalization targets through a finishing sweep
   while nested foreign access still throws `ConcurrentAccessError` before owner
   release,

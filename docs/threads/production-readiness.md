@@ -324,6 +324,7 @@ as embedders exercise more threaded host patterns.
   subprogram, script and module Worker creator-owned cleanup subprograms, a
   nested parent/child `Thread.asyncJoin` cleanup subprogram, a
   finalization/`Thread.asyncJoin` unregister-token cleanup subprogram, a
+  typed-array `waitAsync`/finalization cleanup subprogram, a
   ThreadLocal lifecycle subprogram, a ThreadLocal-finalization subprogram, a
   ThreadLocal-termination cleanup subprogram, a
   Thread.restrict lifecycle subprogram, a Thread.restrict-finalization
@@ -355,6 +356,9 @@ as embedders exercise more threaded host patterns.
   registers child-thread finalization targets with unregister tokens while
   fulfilled and rejected `asyncJoin` observers plus sync-wait peers remain live
   through the finishing sweep,
+  keeps typed-array `waitAsync` reaction roots pending while notifying child
+  threads stay parked through the finishing sweep before exact asyncJoin and
+  cleanup verification,
   keeps a registered object reachable only through
   `ThreadLocal.value` while that owner is parked, keeps a completed-but-unjoined
   `Thread` result object and a completed-but-unjoined thrown exception object
