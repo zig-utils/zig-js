@@ -457,6 +457,22 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                     return vm.throwError("TypeError", "Cannot convert a BigInt value to a number");
                 try stack.append(stack_alloc, Value.num(try vm.toNumberV(v)));
             },
+            .to_numeric => {
+                try stack.append(stack_alloc, try vm.toNumericPrimitive(stack.pop().?));
+            },
+            .inc, .dec => {
+                // ToNumeric then ±1 of the operand's own numeric type, matching
+                // the tree-walker's evalUpdate (so `"5"++` is 6, not "51", and a
+                // BigInt increments as a BigInt rather than TypeError-ing on `+1`).
+                const v = try vm.toNumericPrimitive(stack.pop().?);
+                if (v.isObject() and v.asObj().is_bigint) {
+                    const one = try vm.makeBigInt(1);
+                    try stack.append(stack_alloc, try vm.applyBinary(if (inst.op == .inc) .add else .sub, v, one));
+                } else {
+                    const n = try vm.toNumberV(v);
+                    try stack.append(stack_alloc, Value.num(if (inst.op == .inc) n + 1 else n - 1));
+                }
+            },
             .not => {
                 const v = stack.pop().?;
                 try stack.append(stack_alloc, Value.boolVal(!v.toBoolean()));

@@ -129,6 +129,9 @@ pub const Op = enum(u8) {
     bit_not,
     void_op,
     to_string,
+    to_numeric, // ToNumeric(pop) -> Number or BigInt (the postfix `x++` old value)
+    inc, // ToNumeric(pop) then +1 of the matching numeric type
+    dec, // ToNumeric(pop) then -1 of the matching numeric type
 
     // --- binary (pop rhs, pop lhs, push result) ---
     add,

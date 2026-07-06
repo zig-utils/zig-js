@@ -2021,18 +2021,20 @@ pub const Compiler = struct {
     fn compileUpdate(self: *Compiler, inc: bool, prefix: bool, target: *Node) CompileError!void {
         if (target.* != .identifier) return error.Unsupported;
         const name = target.identifier;
-        const one = try self.chunk.addConst(Value.num(1));
-        const delta: bc.Op = if (inc) .add else .sub;
+        // `++`/`--` are ToNumeric(old) ± 1, not `old + 1`: a raw `.add` with a
+        // Number 1 would string-concatenate a string operand and TypeError a
+        // BigInt. The inc/dec opcodes ToNumeric first and add 1 of the operand's
+        // own numeric type (Number or BigInt).
+        const step: bc.Op = if (inc) .inc else .dec;
         if (prefix) {
             try self.emitLoad(name);
-            _ = try self.chunk.emit(.load_const, one);
-            _ = try self.chunk.emit(delta, 0);
+            _ = try self.chunk.emit(step, 0);
             try self.emitStore(name); // leaves the new value
         } else {
             try self.emitLoad(name);
-            _ = try self.chunk.emit(.dup, 0); // keep the old value
-            _ = try self.chunk.emit(.load_const, one);
-            _ = try self.chunk.emit(delta, 0);
+            _ = try self.chunk.emit(.to_numeric, 0); // postfix result is the numeric old value
+            _ = try self.chunk.emit(.dup, 0); // keep the numeric old value
+            _ = try self.chunk.emit(step, 0);
             try self.emitStore(name);
             _ = try self.chunk.emit(.pop, 0); // discard the new value, leave the old
         }
