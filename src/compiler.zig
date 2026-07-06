@@ -473,10 +473,15 @@ pub const Compiler = struct {
     in_async: bool = false,
     /// Counter for synthesized temp names (`yield*` iterator/result holders).
     tmp_counter: u32 = 0,
-    /// >0 while compiling inside a `try` that has a `finally`. Abrupt control
-    /// flow (return/break/continue) that would cross the finally isn't lowered
-    /// yet, so it falls back rather than skipping the finally.
+    /// >0 while compiling inside a `try` that has a `finally`. A `return`/`break`/
+    /// `continue` crossing it is lowered as `abrupt_*` so the finally still runs.
     finally_depth: u32 = 0,
+    /// >0 while compiling the body of a `try` whose catch handler is still live on
+    /// the VM handler stack (the no-finally case). A call in tail position there
+    /// must NOT be a tail call: the handler has to survive the call so a throw from
+    /// the callee is caught, but the tail-pop would discard it. Suppresses TCO in
+    /// compileTailExpr. (The finally case keeps the handler live via abrupt_return.)
+    try_depth: u32 = 0,
 
     /// Compile a whole program into a fresh chunk. The chunk ends with `halt`;
     /// the VM returns its completion accumulator. Program scope is null, so all
@@ -836,7 +841,9 @@ pub const Compiler = struct {
             // try/catch (no finally) — handler with a catch arm only.
             const catch_block = t.catch_block orelse return error.Unsupported;
             const ph = try self.chunk.emitAB(.push_handler, none, none);
+            self.try_depth += 1;
             try self.compileStmt(t.block);
+            self.try_depth -= 1;
             _ = try self.chunk.emit(.pop_handler, 0);
             const skip = try self.chunk.emit(.jump, 0);
             self.chunk.code.items[ph].a = @intCast(self.chunk.here());
@@ -1442,6 +1449,16 @@ pub const Compiler = struct {
     // ---- expressions ------------------------------------------------------
 
     fn compileTailExpr(self: *Compiler, node: *Node) CompileError!void {
+        // A live catch handler (still on the VM handler stack) must survive the
+        // call, so nothing here is in tail position: evaluate normally and return
+        // rather than emitting a tail call that would discard the handler and let a
+        // throw from the callee escape the enclosing catch. (The finally case is
+        // already routed through abrupt_return by return_stmt.)
+        if (self.try_depth > 0) {
+            try self.compileExpr(node);
+            _ = try self.chunk.emit(.ret, 0);
+            return;
+        }
         switch (node.*) {
             .call => |c| {
                 try self.compileTailCall(c);
