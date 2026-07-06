@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Audit non-promoted WebKit PR-249 thread corpus files.
 
-The green allowlist is the authoritative executable corpus. This helper keeps
-the remaining reference-only set honest by requiring every non-helper JS file
-outside the allowlist to have an explicit blocker category.
+The green allowlists are the authoritative executable corpus: the default
+allowlist plus any parallel_js-only witnesses. This helper keeps the remaining
+reference-only set honest by requiring every non-helper JS file outside that
+promoted coverage to have an explicit blocker category.
 """
 
 from __future__ import annotations
@@ -160,7 +161,7 @@ def print_text(
 
     helpers = sum(1 for case in remaining if case in HELPERS)
     executable = len(remaining) - helpers
-    print(f"PR-249 allowlist: {len(load_allowlist())}/{len(all_cases()) - helpers} executable files")
+    print(f"PR-249 promoted coverage: {len(load_allowlist())}/{len(all_cases()) - helpers} executable files")
     print(f"reference-only: {len(remaining)} total ({executable} executable, {helpers} helper/preload)")
     print()
     for cat in sorted(by_category):
@@ -187,7 +188,7 @@ def print_markdown(
 ) -> None:
     helpers = sum(1 for case in remaining if case in HELPERS)
     executable = len(remaining) - helpers
-    print(f"- Allowlist: `{len(load_allowlist())}/{len(all_cases()) - helpers}` executable PR-249 files.")
+    print(f"- Promoted coverage: `{len(load_allowlist())}/{len(all_cases()) - helpers}` executable PR-249 files.")
     print(f"- Reference-only: `{executable}` executable files plus `{helpers}` helper/preload files.")
     print()
     for case in sorted(classified):

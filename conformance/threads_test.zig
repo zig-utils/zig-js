@@ -248,6 +248,13 @@ const allowlist = [_][]const u8{
     "vmstate/vmlite-single-thread-identity.js",
 };
 
+const parallel_only_allowlist = [_][]const u8{
+    // This witness is written for the post-ungil execution pass: under the
+    // cooperative GIL the worker can starve the observer, while parallel_js
+    // exercises the intended haveBadTime/checktraps park window.
+    "checktraps-havebadtime-park.js",
+};
+
 fn runsWithoutThreadGlobal(name: []const u8) bool {
     return std.mem.eql(u8, name, "objectmodel/i03-single-threaded-no-change.js") or
         std.mem.eql(u8, name, "vmstate/flags-off-baseline.js") or
@@ -317,6 +324,7 @@ pub fn main(init: std.process.Init) !void {
     // sidesteps the cumulative-load OOM of a single all-in-one-process TSan run.
     if (list_mode) {
         for (allowlist) |name| std.debug.print("{s}\n", .{name});
+        if (parallel_js) for (parallel_only_allowlist) |name| std.debug.print("{s}\n", .{name});
         return;
     }
 
@@ -367,6 +375,7 @@ pub fn main(init: std.process.Init) !void {
         }
     } else {
         try names.appendSlice(gpa, &allowlist);
+        if (parallel_js) try names.appendSlice(gpa, &parallel_only_allowlist);
     }
 
     var failed: usize = 0;
