@@ -327,9 +327,10 @@ as embedders exercise more threaded host patterns.
   Thread.restrict-finalization subprogram, isolated script Worker/SAB and module
   Worker/SAB cleanup subprograms, script and module Worker
   handler-exception cleanup subprograms, script and module Worker
-  close/terminate drain/drop subprograms, an async-hold release/waiter cleanup
-  subprogram, script and module Worker/Condition.asyncWait teardown cleanup
-  subprograms, script and module Worker/ThreadLocal/asyncHold teardown cleanup
+  close/terminate drain/drop subprograms, script and module Worker
+  terminate/finalization cleanup subprograms, an async-hold release/waiter
+  cleanup subprogram, script and module Worker/Condition.asyncWait teardown
+  cleanup subprograms, script and module Worker/ThreadLocal/asyncHold teardown cleanup
   subprograms, a sync-wait burst
   cleanup subprogram, a sync-timeout exit
   subprogram, an `Atomics.Mutex.lockIfAvailable` acquire/timeout cleanup
@@ -435,6 +436,10 @@ as embedders exercise more threaded host patterns.
   Script/module Worker close/terminate subprograms now preserve exact FIFO
   drain/drop, post-close drop, post-terminate receive silence, joined roots,
   asyncJoin reactions, and cleanup count/sum through the same finishing sweep.
+  Script/module Worker terminate/finalization subprograms keep spinning Workers
+  alive on one retained `SharedArrayBuffer` while shared-realm `Thread`s publish
+  cleanup roots, asyncJoin observers, joined roots, and exact cleanup count/sum
+  through the same finishing sweep before Worker termination.
   The script and module Worker/Condition.asyncWait teardown cleanup subprograms
   keep a condition async reacquire ticket, parked `Thread`, isolated Worker
   progress, and cleanup jobs live through a finishing sweep before notification,

@@ -306,7 +306,10 @@ context APIs.
   proving the same Worker progress and cleanup oracle, plus script/module
   Worker close/terminate subprograms that preserve exact FIFO drain/drop,
   post-close drop, post-terminate silence, joined roots, asyncJoin reactions,
-  and cleanup count/sum through the finishing sweep, plus script and module
+  and cleanup count/sum through the finishing sweep, plus script/module Worker
+  terminate/finalization subprograms where spinning Workers share one retained
+  SAB with shared-realm cleanup roots, asyncJoin observers, joined roots, and
+  exact cleanup count/sum through the finishing sweep, plus script and module
   Worker/Condition.asyncWait teardown subprograms where a condition async
   reacquire ticket, parked `Thread`, isolated Worker progress, and cleanup jobs
   stay live through a finishing sweep before notification and top-level failure

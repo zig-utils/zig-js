@@ -2595,24 +2595,37 @@ fn runWorkerThreadFinalizationInterleaving(gpa: std.mem.Allocator, seed: u64) !b
 }
 
 fn runWorkerTerminateFinalizationInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
-    return runWorkerTerminateFinalizationInterleavingKind(gpa, seed, false);
+    return runWorkerTerminateFinalizationInterleavingKind(gpa, seed, false, false);
 }
 
 fn runModuleWorkerTerminateFinalizationInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
-    return runWorkerTerminateFinalizationInterleavingKind(gpa, seed, true);
+    return runWorkerTerminateFinalizationInterleavingKind(gpa, seed, true, false);
+}
+
+fn runMidScriptWorkerTerminateFinalizationGc(gpa: std.mem.Allocator, seed: u64) !bool {
+    return runWorkerTerminateFinalizationInterleavingKind(gpa, seed, false, true);
+}
+
+fn runMidScriptModuleWorkerTerminateFinalizationGc(gpa: std.mem.Allocator, seed: u64) !bool {
+    return runWorkerTerminateFinalizationInterleavingKind(gpa, seed, true, true);
 }
 
 fn runWorkerTerminateFinalizationInterleavingKind(
     gpa: std.mem.Allocator,
     seed: u64,
     comptime module_worker: bool,
+    comptime midgc: bool,
 ) !bool {
-    const salt: u64 = if (module_worker) 0x6d77_7465_726d_6669 else 0x7377_7465_726d_6669;
+    const salt: u64 = (if (module_worker) 0x6d77_7465_726d_6669 else 0x7377_7465_726d_6669) ^ (if (midgc) 0x6d69_6467_6374_6669 else 0);
     var prng = std.Random.DefaultPrng.init(seed ^ salt);
     const r = prng.random();
     const nworkers = 1 + r.uintLessThan(usize, 3);
     const nthreads = 2 + r.uintLessThan(usize, 4);
     const per_thread = 7 + r.uintLessThan(usize, 12);
+    const gc_rounds = if (midgc) 6 + r.uintLessThan(usize, 5) else 0;
+    const gc_per_round = if (midgc) 560 + r.uintLessThan(usize, 360) else 0;
+    const gc_spin_iters = if (midgc) 1700 + r.uintLessThan(usize, 2800) else 0;
+    const seed_marker = seed % 10_000;
 
     var expected_join_sum: usize = 0;
     var expected_cleanup_count: usize = 0;
@@ -2626,7 +2639,16 @@ fn runWorkerTerminateFinalizationInterleavingKind(
         while (i < per_thread) : (i += 1) expected_cleanup_sum += base + i;
     }
 
-    const ctx = js.Context.createWith(gpa, .{ .enable_threads = true, .enable_gc = true }) catch {
+    const ctx = (if (midgc)
+        js.Context.createWithTestingOptions(gpa, .{
+            .enable_threads = true,
+            .enable_gc = true,
+            .parallel_gc = true,
+            .parallel_js = true,
+            .parallel_midscript_gc = true,
+        })
+    else
+        js.Context.createWith(gpa, .{ .enable_threads = true, .enable_gc = true })) catch {
         std.debug.print("seed {d}: worker terminate/finalization context creation failed\n", .{seed});
         return false;
     };
@@ -2711,6 +2733,37 @@ fn runWorkerTerminateFinalizationInterleavingKind(
         return false;
     }
 
+    const midgc_pressure_src: []const u8 = if (midgc)
+        try std.fmt.allocPrint(
+            gpa,
+            \\  while (Atomics.load(v, 3) < {d})
+            \\    Atomics.wait(v, 3, Atomics.load(v, 3), 1);
+            \\  {{
+            \\    const keep = [];
+            \\    const midRoot = {{ seed: {d}, label: 'midgc-worker-terminate-finalization-root' }};
+            \\    for (let round = 0; round < {d}; round++) {{
+            \\      for (let i = 0; i < {d}; i++) {{
+            \\        keep.push({{
+            \\          round,
+            \\          i,
+            \\          nested: {{ midRoot, value: i + round }},
+            \\          text: 'midgc-worker-terminate-finalization-' + round + '-' + i,
+            \\        }});
+            \\      }}
+            \\      let spin = 0;
+            \\      for (let j = 0; j < {d}; j++) spin = (spin + j + round) & 0x3fffffff;
+            \\      if (spin < 0) keep.push({{ impossible: true }});
+            \\    }}
+            \\    if (typeof gc === 'function') gc();
+            \\  }}
+            \\
+        ,
+            .{ nthreads, seed_marker, gc_rounds, gc_per_round, gc_spin_iters },
+        )
+    else
+        "";
+    defer if (midgc) gpa.free(midgc_pressure_src);
+
     const js_src = try std.fmt.allocPrint(
         gpa,
         \\(() => {{
@@ -2744,6 +2797,7 @@ fn runWorkerTerminateFinalizationInterleavingKind(
         \\      () => {{ asyncSum = -1000000; }}));
         \\    threads.push(t);
         \\  }}
+        \\{s}
         \\  let joinSum = 0;
         \\  for (const t of threads) joinSum += t.join();
         \\  if (joinSum !== {d})
@@ -2767,10 +2821,12 @@ fn runWorkerTerminateFinalizationInterleavingKind(
         \\}})();
         \\
     ,
-        .{ nthreads, per_thread, expected_join_sum, nthreads * per_thread, nthreads, expected_join_sum },
+        .{ nthreads, per_thread, midgc_pressure_src, expected_join_sum, nthreads * per_thread, nthreads, expected_join_sum },
     );
     defer gpa.free(js_src);
 
+    const before_attempts = if (midgc) ctx.gc_par_attempts.load(.monotonic) else 0;
+    const before_collections = if (midgc) ctx.gc_par_collections.load(.monotonic) else 0;
     const joined = ctx.evaluate(js_src) catch |err| {
         const msg_txt = if (ctx.exception) |ex| blk: {
             var render = ctx.interpreter();
@@ -2781,6 +2837,14 @@ fn runWorkerTerminateFinalizationInterleavingKind(
     };
     if (!joined.isNumber() or joined.asNum() != @as(f64, @floatFromInt(expected_join_sum))) {
         std.debug.print("seed {d}: worker terminate/finalization joined got {d}, expected {d}\n", .{ seed, if (joined.isNumber()) joined.asNum() else -1, expected_join_sum });
+        return false;
+    }
+    if (midgc and ctx.gc_par_attempts.load(.monotonic) <= before_attempts) {
+        std.debug.print("seed {d}: worker terminate/finalization did not attempt a parallel collection\n", .{seed});
+        return false;
+    }
+    if (midgc and ctx.gc_par_collections.load(.monotonic) <= before_collections) {
+        std.debug.print("seed {d}: worker terminate/finalization did not finish a parallel collection\n", .{seed});
         return false;
     }
     const oracle = ctx.evaluate("globalThis.__workerTermFinOracle") catch |err| {
@@ -17070,6 +17134,40 @@ pub fn main(init: std.process.Init) !void {
         if (mmwcfail != 0) std.process.exit(1);
         return;
     };
+    // `threadfuzz midgcworkertermfin <iters> <seed>`: focused mid-script
+    // parallel-GC repro for script Worker termination while shared-realm
+    // Threads publish FinalizationRegistry cleanup roots through a finishing
+    // sweep on the same retained SAB.
+    if (first) |a| if (std.mem.eql(u8, a, "midgcworkertermfin")) {
+        if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch 1;
+        if (args.next()) |b| base_seed = std.fmt.parseInt(u64, b, 10) catch 1;
+        var mwtffail: usize = 0;
+        var mwtfi: usize = 0;
+        while (mwtfi < iters) : (mwtfi += 1) {
+            const seed = base_seed +% mwtfi;
+            if (!(try runMidScriptWorkerTerminateFinalizationGc(gpa, seed))) mwtffail += 1;
+        }
+        std.debug.print("threadfuzz midgcworkertermfin: {d} programs from seed {d}, {d} failures\n", .{ iters, base_seed, mwtffail });
+        if (mwtffail != 0) std.process.exit(1);
+        return;
+    };
+    // `threadfuzz midgcmoduleworkertermfin <iters> <seed>`: focused
+    // mid-script parallel-GC repro for module Worker termination while
+    // shared-realm Threads publish FinalizationRegistry cleanup roots through a
+    // finishing sweep on the same retained SAB.
+    if (first) |a| if (std.mem.eql(u8, a, "midgcmoduleworkertermfin")) {
+        if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch 1;
+        if (args.next()) |b| base_seed = std.fmt.parseInt(u64, b, 10) catch 1;
+        var mmwtffail: usize = 0;
+        var mmwtfi: usize = 0;
+        while (mmwtfi < iters) : (mmwtfi += 1) {
+            const seed = base_seed +% mmwtfi;
+            if (!(try runMidScriptModuleWorkerTerminateFinalizationGc(gpa, seed))) mmwtffail += 1;
+        }
+        std.debug.print("threadfuzz midgcmoduleworkertermfin: {d} programs from seed {d}, {d} failures\n", .{ iters, base_seed, mmwtffail });
+        if (mmwtffail != 0) std.process.exit(1);
+        return;
+    };
     // `threadfuzz midgcworkertlsasyncholdcleanup <iters> <seed>`: focused
     // mid-script parallel-GC repro for isolated Worker termination overlapping
     // ThreadLocal hidden roots, no-fn asyncHold release delivery, parked
@@ -17414,13 +17512,15 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runMidScriptModuleWorkerExceptionCleanupGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptWorkerCloseTerminateGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptModuleWorkerCloseTerminateGc(gpa, seed))) mfail += 1;
+            if (!(try runMidScriptWorkerTerminateFinalizationGc(gpa, seed))) mfail += 1;
+            if (!(try runMidScriptModuleWorkerTerminateFinalizationGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptWorkerTerminateConditionAsyncCleanupGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptModuleWorkerTerminateConditionAsyncCleanupGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptWorkerTerminateThreadLocalAsyncHoldCleanupGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptModuleWorkerTerminateThreadLocalAsyncHoldCleanupGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptWeakCollectionGc(gpa, seed))) mfail += 1;
         }
-        std.debug.print("threadfuzz midgc: {d} programs from seed {d}, {d} failures\n", .{ iters * 29, base_seed, mfail });
+        std.debug.print("threadfuzz midgc: {d} programs from seed {d}, {d} failures\n", .{ iters * 31, base_seed, mfail });
         if (mfail != 0) std.process.exit(1);
         return;
     };

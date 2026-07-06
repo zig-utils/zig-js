@@ -234,6 +234,10 @@ shared-realm cleanup oracle through the finishing sweep, adds script and module
 Worker close/terminate subprograms that keep exact FIFO drain/drop ordering,
 post-close drop, post-terminate receive silence, shared-realm joined roots,
 asyncJoin reactions, and cleanup count/sum live across the finishing sweep,
+adds script and module Worker terminate/finalization subprograms where spinning
+Workers share one retained SAB with shared-realm Threads that publish cleanup
+roots, asyncJoin observers, joined roots, and exact cleanup count/sum through a
+finishing sweep before Worker termination,
 adds script and module Worker/Condition.asyncWait teardown subprograms that keep
 a condition async reacquire ticket, parked `Thread`, isolated Worker progress,
 and cleanup jobs live through a finishing sweep before notification and
@@ -258,7 +262,7 @@ join-termination unit witness that checks parked-state/mutex cleanup, then
 requires exact script completion or exact expected termination plus at least one
 finishing parallel sweep and exact
 `FinalizationRegistry` cleanup count/sum delivery plus unregister-token
-suppression after a quiescent collect. Each seed currently runs 29 deterministic
+suppression after a quiescent collect. Each seed currently runs 31 deterministic
 mid-GC subprograms. The
 lifecycle profile
 (`-Dfuzz-lifecycle=true`) adds deterministic resizable `ArrayBuffer` /
