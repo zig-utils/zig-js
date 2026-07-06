@@ -4051,7 +4051,7 @@ pub const Interpreter = struct {
                 error.Unsupported => null,
                 error.OutOfMemory => return error.OutOfMemory,
             };
-        } else if (fnode.is_strict and !fnode.is_method and !fnode.uses_arguments and sourceMayHaveTailCall(fnode.source)) {
+        } else if (plainFunctionMayUseBytecode(fnode)) {
             const compiled = Compiler.compilePlainFunction(self.arena, fnode) catch |e| switch (e) {
                 error.Unsupported => null,
                 error.OutOfMemory => return error.OutOfMemory,
@@ -4088,6 +4088,33 @@ pub const Interpreter = struct {
 
     fn sourceMayHaveTailCall(source: []const u8) bool {
         return std.mem.indexOf(u8, source, "return") != null and std.mem.indexOfScalar(u8, source, '(') != null;
+    }
+
+    fn sourceMayObserveLegacyCallFrame(source: []const u8) bool {
+        return std.mem.indexOf(u8, source, "caller") != null or
+            std.mem.indexOf(u8, source, ".arguments") != null;
+    }
+
+    fn sourceHasNamedSelfCall(source: []const u8, name: []const u8) bool {
+        if (name.len == 0) return false;
+        var search: usize = 0;
+        var call_count: usize = 0;
+        while (std.mem.indexOfPos(u8, source, search, name)) |at| {
+            const after = at + name.len;
+            if (after < source.len and source[after] == '(') {
+                call_count += 1;
+                if (call_count >= 2) return true;
+            }
+            search = after;
+        }
+        return false;
+    }
+
+    fn plainFunctionMayUseBytecode(fnode: *const ast.FunctionNode) bool {
+        if (fnode.is_method or fnode.is_generator or fnode.is_async or fnode.uses_arguments) return false;
+        if (fnode.is_strict) return sourceMayHaveTailCall(fnode.source);
+        return !sourceMayObserveLegacyCallFrame(fnode.source) and
+            sourceHasNamedSelfCall(fnode.source, fnode.name);
     }
 
     pub fn funcOf(v: Value) ?*Function {

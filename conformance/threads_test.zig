@@ -14,6 +14,10 @@ const builtin = @import("builtin");
 const js = @import("js");
 
 const corpus_root = "reference/webkit-249/threads-tests";
+const isolated_case_timeout: std.Io.Timeout = .{ .duration = .{
+    .raw = .fromSeconds(180),
+    .clock = .awake,
+} };
 
 const allowlist = [_][]const u8{
     "smoke.js",
@@ -227,6 +231,7 @@ const allowlist = [_][]const u8{
     "semantics/private-fields-shared.js",
     "semantics/proto-cycle-race.js",
     "semantics/regexp-lastindex-shared.js",
+    "semantics/stack-overflow-per-thread.js",
     "semantics/symbol-registry-cross-thread.js",
     "semantics/termination-storm.js",
     "scaling/lock-fairness.js",
@@ -277,13 +282,50 @@ fn parallelJsBudgetSkip(name: []const u8) bool {
     return false;
 }
 
+fn requiresProcessIsolation(name: []const u8) bool {
+    // This WeakRef/GC reclamation oracle is intentionally process-isolated in
+    // the full corpus so previous stress cases cannot pin its process-global
+    // heap state; focused `one` mode still exercises the JS witness directly.
+    return std.mem.eql(u8, name, "cve/mc-dos-waiter-table-storm.js");
+}
+
+fn runIsolatedCase(gpa: std.mem.Allocator, io: std.Io, parallel_js: bool, name: []const u8) !bool {
+    const exe = try std.process.executablePathAlloc(io, gpa);
+    defer gpa.free(exe);
+
+    const argv_parallel = [_][]const u8{ exe, "parallel-js", "one", name };
+    const argv_default = [_][]const u8{ exe, "one", name };
+    const argv = if (parallel_js) &argv_parallel else &argv_default;
+    const res = std.process.run(gpa, io, .{
+        .argv = argv,
+        .stdout_limit = .limited(4 << 20),
+        .stderr_limit = .limited(4 << 20),
+        .timeout = isolated_case_timeout,
+    }) catch |err| {
+        std.debug.print("  FAIL  {s}: isolated worker {s}\n", .{ name, @errorName(err) });
+        return false;
+    };
+    defer gpa.free(res.stdout);
+    defer gpa.free(res.stderr);
+
+    if (!res.term.success()) {
+        std.debug.print("  FAIL  {s}: isolated worker failed\n", .{name});
+        if (res.stdout.len != 0) std.debug.print("{s}", .{res.stdout});
+        if (res.stderr.len != 0) std.debug.print("{s}", .{res.stderr});
+        return false;
+    }
+    return true;
+}
+
 fn asyncDrainPolls(name: []const u8) usize {
     const base: usize = if (builtin.sanitize_thread) 30_000 else 3_000;
     if (std.mem.eql(u8, name, "cve/mc-dos-waiter-table-storm.js")) {
         // This stress case can run 2000 gc()/microtask turns after the waiter
-        // storm has already settled. Give the oracle room under whole-corpus
-        // warmed-state load without relaxing the rest of the allowlist.
-        return base * 6;
+        // storm has already settled. Whole-corpus warmed-state runs can make the
+        // reclamation arm miss the default async drain even though focused runs
+        // pass; give this oracle more normal-build turn budget without raising
+        // the already-large TSan budget.
+        return base * if (builtin.sanitize_thread) 6 else 12;
     }
     return base;
 }
@@ -388,6 +430,14 @@ pub fn main(init: std.process.Init) !void {
         if (parallel_js and !explicit_one and parallelJsBudgetSkip(name)) {
             skipped += 1;
             std.debug.print("  SKIP  {s} (parallel_js budget frontier)\n", .{name});
+            continue;
+        }
+        if (!explicit_one and !sweep and requiresProcessIsolation(name)) {
+            if (try runIsolatedCase(gpa, io, parallel_js, name)) {
+                std.debug.print("  PASS  {s}\n", .{name});
+            } else {
+                failed += 1;
+            }
             continue;
         }
         // Keep corpus cases hermetic: defers in this block run at the end of

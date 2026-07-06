@@ -40,7 +40,7 @@ rules.
 | `$262.agent` and typed-array `Atomics.wait` / `notify` / `waitAsync` | Implemented in `src/agent.zig` with hooks in the interpreter and VM. | Unit tests and real test262 agent cases. |
 | Structured clone and ArrayBuffer transfer/detach | Implemented in `src/structured_clone.zig`. | Unit tests, workers, and agents. |
 | Embedder `Worker` API | Implemented in `src/worker.zig` with C-API hooks in `src/c_api.zig`. | Worker unit tests, exact host-hook wake coverage, and C-API round trips. |
-| Shared-realm `Thread` API | Implemented in `src/jsthread.zig`, `src/gil.zig`, and `src/context.zig`; parallel by default, GIL opt-out available. | PR-249 green coverage: 228 promoted files out of 259 executable files (226 default `zig build threads-test`, plus 2 `parallel_js`-only witnesses); `zig build threads-reference-audit` classifies the remaining reference-only files; negative promotion probes keep nearest blockers honest; no-GIL TSan corpus sweep; fuzzer gates. |
+| Shared-realm `Thread` API | Implemented in `src/jsthread.zig`, `src/gil.zig`, and `src/context.zig`; parallel by default, GIL opt-out available. | PR-249 green coverage: 229 promoted files out of 259 executable files (227 default `zig build threads-test`, plus 2 `parallel_js`-only witnesses); `zig build threads-reference-audit` classifies the remaining reference-only files; negative promotion probes keep nearest blockers honest; no-GIL TSan corpus sweep; fuzzer gates. |
 | Concurrent GC / root safety | GC-managed parallel contexts use thread-safe allocation, write barriers, per-structure locks, precise VM frame roots, and conservative native-stack rooting where applicable. | Unit tests, `parallel_gc` soak, no-GIL corpus TSan, test262-parallel. |
 
 ## Core Rules

@@ -8800,6 +8800,37 @@ test "vm trampoline: deep VM recursion is heap-bounded, lifting past the native 
     try std.testing.expectEqual(@as(f64, 0), r.result);
 }
 
+test "vm trampoline: safe sloppy functions can use heap-bounded recursion" {
+    // A tree-walked script (because of the top-level catch) can still create a
+    // simple named self-recursive sloppy function whose body is safe for
+    // per-function bytecode. That function must run on the VM trampoline when
+    // called from the tree-walker so PR-249-style helper probes can burn
+    // thousands of JS frames without consuming the host stack.
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const Runner = struct {
+        result: f64 = -1,
+        ok: bool = false,
+        fn run(self: *@This()) void {
+            const ctx = Context.createWith(std.testing.allocator, .{}) catch return;
+            defer ctx.destroy();
+            const v = ctx.evaluate(
+                \\function depth(n) { return n === 0 ? 0 : 1 + depth(n - 1); }
+                \\try { var marker = 1; } catch (e) {}
+                \\depth(2000)
+            ) catch return;
+            if (v.isNumber()) {
+                self.result = v.asNum();
+                self.ok = true;
+            }
+        }
+    };
+    var r = Runner{};
+    const t = try std.Thread.spawn(.{ .stack_size = 8 << 20 }, Runner.run, .{&r});
+    t.join();
+    try std.testing.expect(r.ok);
+    try std.testing.expectEqual(@as(f64, 2000), r.result);
+}
+
 test "deep stack: main-realm non-tail recursion runs under the stack guard" {
     // Bounded witness for non-tail recursion on the main realm. Proper tail calls
     // now intentionally avoid native-stack growth for tail recursion, so the old
