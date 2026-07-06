@@ -3030,6 +3030,8 @@ fn runWorkerTerminateThreadTeardownInterleaving(gpa: std.mem.Allocator, seed: u6
         \\    Atomics.wait(v, 0, Atomics.load(v, 0), 1);
         \\  if (Atomics.load(v, 0) !== {d})
         \\    throw new Error('worker terminate/thread teardown workers not ready: ' + Atomics.load(v, 0));
+        \\  for (let spinPoll = 0; Atomics.load(v, 1) <= 0 && spinPoll < 2000; spinPoll++)
+        \\    Atomics.wait(v, 0, Atomics.load(v, 0), 1);
         \\  if (Atomics.load(v, 1) <= 0)
         \\    throw new Error('worker terminate/thread teardown workers did not spin');
         \\  return Atomics.load(v, 0);
@@ -3316,6 +3318,8 @@ fn runWorkerTerminateConditionAsyncCleanupInterleavingKind(
         \\    Atomics.wait(v, 0, Atomics.load(v, 0), 1);
         \\  if (Atomics.load(v, 0) !== {d})
         \\    throw new Error('worker terminate/condition workers not ready: ' + Atomics.load(v, 0));
+        \\  for (let spinPoll = 0; Atomics.load(v, 1) <= 0 && spinPoll < 2000; spinPoll++)
+        \\    Atomics.wait(v, 0, Atomics.load(v, 0), 1);
         \\  if (Atomics.load(v, 1) <= 0)
         \\    throw new Error('worker terminate/condition workers did not spin');
         \\  return Atomics.load(v, 0);
@@ -3674,9 +3678,8 @@ fn runWorkerTerminateWaitAsyncCleanupInterleavingKind(
         \\    Atomics.wait(v, 0, Atomics.load(v, 0), 1);
         \\  if (Atomics.load(v, 0) !== {d})
         \\    throw new Error('worker terminate/waitAsync workers not ready: ' + Atomics.load(v, 0));
-        \\  spins = 0;
-        \\  while (Atomics.load(v, 1) <= 0 && spins++ < 10000000)
-        \\    ;
+        \\  for (let spinPoll = 0; Atomics.load(v, 1) <= 0 && spinPoll < 2000; spinPoll++)
+        \\    Atomics.wait(v, 0, Atomics.load(v, 0), 1);
         \\  if (Atomics.load(v, 1) <= 0)
         \\    throw new Error('worker terminate/waitAsync workers did not spin');
         \\  return Atomics.load(v, 0);
@@ -3957,9 +3960,8 @@ fn runModuleWorkerTerminateThreadTeardownInterleaving(gpa: std.mem.Allocator, se
         \\    Atomics.wait(v, 0, Atomics.load(v, 0), 1);
         \\  if (Atomics.load(v, 0) !== {d})
         \\    throw new Error('module worker terminate/thread teardown workers not ready: ' + Atomics.load(v, 0));
-        \\  spins = 0;
-        \\  while (Atomics.load(v, 1) <= 0 && spins++ < 10000000)
-        \\    ;
+        \\  for (let spinPoll = 0; Atomics.load(v, 1) <= 0 && spinPoll < 2000; spinPoll++)
+        \\    Atomics.wait(v, 0, Atomics.load(v, 0), 1);
         \\  if (Atomics.load(v, 1) <= 0)
         \\    throw new Error('module worker terminate/thread teardown workers did not spin');
         \\  return Atomics.load(v, 0);
@@ -10794,6 +10796,8 @@ fn runWorkerTerminateThreadLocalAsyncHoldCleanupInterleavingKind(
         \\    Atomics.wait(v, 0, Atomics.load(v, 0), 1);
         \\  if (Atomics.load(v, 0) !== {d})
         \\    throw new Error('worker terminate/ThreadLocal asyncHold workers not ready: ' + Atomics.load(v, 0));
+        \\  for (let spinPoll = 0; Atomics.load(v, 1) <= 0 && spinPoll < 2000; spinPoll++)
+        \\    Atomics.wait(v, 0, Atomics.load(v, 0), 1);
         \\  if (Atomics.load(v, 1) <= 0)
         \\    throw new Error('worker terminate/ThreadLocal asyncHold worker did not spin');
         \\  return Atomics.load(v, 0);
