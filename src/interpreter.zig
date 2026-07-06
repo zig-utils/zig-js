@@ -16687,26 +16687,37 @@ fn dataViewConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) valu
     if (!buf_v.isObject() or buf_v.asObj().array_buffer == null) return self.throwError("TypeError", "First argument to DataView must be an ArrayBuffer");
     const ab = buf_v.asObj().array_buffer.?;
     const offset = try toIndexArg(self, if (args.len > 1) args[1] else Value.undef());
-    if (ab.isDetached()) return self.throwError("TypeError", "ArrayBuffer is detached");
-    const buf_len = ab.bytes().len;
-    if (offset > buf_len) return self.throwError("RangeError", "Start offset is outside the bounds of the buffer");
+    ab.lockBuffer();
+    const initial_detached = ab.isDetached();
+    const buf_len = if (initial_detached) 0 else ab.bytes().len;
+    ab.unlockBuffer();
+    if (initial_detached) return self.throwError("TypeError", "ArrayBuffer is detached");
+    if (offset > @as(u64, @intCast(buf_len))) return self.throwError("RangeError", "Start offset is outside the bounds of the buffer");
     var view_len: usize = buf_len - @as(usize, @intCast(offset));
     // Omitting byteLength on a resizable buffer makes the view length-tracking.
     const track = (args.len <= 2 or args[2].isUndefined()) and ab.max_byte_length != null;
     if (args.len > 2 and !args[2].isUndefined()) {
         const vl = try toIndexArg(self, args[2]);
-        if (ab.isDetached()) return self.throwError("TypeError", "ArrayBuffer is detached");
-        if (offset + vl > @as(u64, @intCast(ab.bytes().len))) return self.throwError("RangeError", "Invalid DataView length");
+        ab.lockBuffer();
+        const length_detached = ab.isDetached();
+        const length_buf_len = if (length_detached) 0 else ab.bytes().len;
+        ab.unlockBuffer();
+        if (length_detached) return self.throwError("TypeError", "ArrayBuffer is detached");
+        if (offset + vl > @as(u64, @intCast(length_buf_len))) return self.throwError("RangeError", "Invalid DataView length");
         view_len = @intCast(vl);
     }
     const o = (try self.newObject()).asObj();
     if (self.new_target.isObject()) o.setProtoAtomic(try self.ctorRealmIntrinsicProto(self.new_target.asObj(), "DataView"));
     // The detached/out-of-bounds re-check after OrdinaryCreateFromConstructor is
     // spec'd: reading newTarget.prototype can run user code that detaches or
-    // resizes the buffer.
-    if (ab.isDetached()) return self.throwError("TypeError", "ArrayBuffer is detached");
-    const live_len = ab.bytes().len;
-    if (offset > live_len) return self.throwError("RangeError", "Start offset is outside the bounds of the buffer");
+    // resizes the buffer. Snapshot under the buffer lock so no-GIL peers cannot
+    // swap the backing slice while this constructor reads its length.
+    ab.lockBuffer();
+    const final_detached = ab.isDetached();
+    const live_len = if (final_detached) 0 else ab.bytes().len;
+    ab.unlockBuffer();
+    if (final_detached) return self.throwError("TypeError", "ArrayBuffer is detached");
+    if (offset > @as(u64, @intCast(live_len))) return self.throwError("RangeError", "Start offset is outside the bounds of the buffer");
     if (!track and offset + @as(u64, @intCast(view_len)) > @as(u64, @intCast(live_len)))
         return self.throwError("RangeError", "Invalid DataView length");
     const dv = try o.dataViewAllocator(self.arena).create(value.DataViewData);
@@ -19075,8 +19086,12 @@ fn arrayBufferSliceImpl(self: *Interpreter, this: Value, args: []const Value, co
 fn newTypedArray(self: *Interpreter, kind: value.TAKind, len: usize) EvalError!*value.Object {
     const o = (try self.newObject()).asObj();
     const ta = try o.typedArrayAllocator(self.arena).create(value.TypedArrayData);
+    var ta_installed = false;
+    errdefer if (!ta_installed) o.destroyUninstalledTypedArray(self.arena, ta);
+
     ta.* = .{ .buffer = try self.makeArrayBuffer(len * kind.byteSize()), .byte_offset = 0, .length = len, .kind = kind };
     o.typed_array = ta;
+    ta_installed = true;
     if (self.env.get(kind.ctorName())) |c| {
         if (c.isObject()) o.setProtoAtomic(try self.protoObject(c.asObj()));
     }

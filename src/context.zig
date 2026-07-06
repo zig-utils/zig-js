@@ -6165,6 +6165,58 @@ test "DataView constructor observes NewTarget prototype side effects" {
     )).asBool());
 }
 
+test "parallel_js: DataView constructor snapshots resizable buffer under no-GIL resize" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_threads = true,
+        .enable_gc = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+    });
+    defer ctx.destroy();
+
+    const result = try ctx.evaluate(
+        \\(() => {
+        \\  if ($vm.useThreadGIL() !== false) throw new Error("main still holds the thread GIL");
+        \\  const buffer = new ArrayBuffer(64, { maxByteLength: 128 });
+        \\  const gate = { go: 0, done: 0, resizes: 0 };
+        \\  const worker = new Thread(() => {
+        \\    if ($vm.useThreadGIL() !== false) throw new Error("worker still holds the thread GIL");
+        \\    while (Atomics.load(gate, "go") === 0)
+        \\      Atomics.wait(gate, "go", 0, 100);
+        \\    for (let i = 0; i < 4000; i++) {
+        \\      buffer.resize((i & 1) === 0 ? 64 : 32);
+        \\      if ((i & 31) === 0) {
+        \\        Atomics.store(gate, "resizes", i + 1);
+        \\        Atomics.notify(gate, "resizes");
+        \\      }
+        \\    }
+        \\    Atomics.store(gate, "resizes", 4000);
+        \\    Atomics.store(gate, "done", 1);
+        \\    Atomics.notify(gate, "done");
+        \\    return true;
+        \\  });
+        \\  Atomics.store(gate, "go", 1);
+        \\  Atomics.notify(gate, "go");
+        \\  while (Atomics.load(gate, "resizes") === 0)
+        \\    Atomics.wait(gate, "resizes", 0, 100);
+        \\  let constructed = 0;
+        \\  while (Atomics.load(gate, "done") === 0) {
+        \\    const view = new DataView(buffer, 0);
+        \\    const length = view.byteLength;
+        \\    if (length !== 32 && length !== 64)
+        \\      throw new Error("unexpected DataView length: " + length);
+        \\    constructed++;
+        \\  }
+        \\  if (worker.join() !== true) throw new Error("bad worker result");
+        \\  if (Atomics.load(gate, "resizes") !== 4000)
+        \\    throw new Error("resize loop did not finish");
+        \\  return constructed;
+        \\})()
+    );
+    try std.testing.expect(result.asNum() > 0);
+}
+
 test "isFinite / isNaN coerce via ToNumber (Symbol throws, strings convert)" {
     // `Let num be ? ToNumber(number)`: strings/booleans convert, a Symbol throws.
     try std.testing.expect((try evalIn("isFinite('0')")).asBool());
