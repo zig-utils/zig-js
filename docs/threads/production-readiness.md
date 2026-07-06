@@ -323,8 +323,8 @@ as embedders exercise more threaded host patterns.
   subprogram, a pending-microtask subprogram, a creator-owned buffer
   subprogram, script and module Worker creator-owned cleanup subprograms, a
   nested parent/child `Thread.asyncJoin` cleanup subprogram, a
-  ThreadLocal-finalization subprogram, a ThreadLocal-termination cleanup
-  subprogram, a
+  ThreadLocal lifecycle subprogram, a ThreadLocal-finalization subprogram, a
+  ThreadLocal-termination cleanup subprogram, a
   Thread.restrict-finalization subprogram, isolated script Worker/SAB and module
   Worker/SAB cleanup subprograms, script and module Worker
   handler-exception cleanup subprograms, script and module Worker
@@ -360,6 +360,10 @@ as embedders exercise more threaded host patterns.
   root: an otherwise unrooted C-API object stays alive through a finishing sweep
   driven by concurrently running shared-realm `Thread`s and is reclaimed after
   the final `JSValueUnprotect`.
+  The ThreadLocal lifecycle subprogram parks owner threads with per-thread
+  `ThreadLocal.value` objects through a finishing sweep before verifying
+  per-thread isolation, nested-thread isolation, thrown-object identity, and
+  `asyncJoin` observers.
   The ThreadLocal-finalization subprogram parks owner threads with registry
   targets reachable only through `ThreadLocal.value`, drives a finishing
   mid-script sweep, rejects any early cleanup delivery while those hidden roots

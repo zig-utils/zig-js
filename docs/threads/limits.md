@@ -241,7 +241,11 @@ context APIs.
   subprogram where parked children hold child-owned typed-array `waitAsync`
   tickets through a finishing mid-script sweep, then teardown `asyncJoin`
   rejection reactions run and post-termination notify sees zero leaked waitAsync
-  tickets, plus a sibling ThreadLocal-termination cleanup subprogram where
+  tickets, plus a sibling ThreadLocal lifecycle subprogram where per-thread
+  `ThreadLocal.value` objects stay parked through a finishing sweep before
+  per-thread isolation, nested-thread isolation, thrown-object identity, and
+  `asyncJoin` observers are verified,
+  plus a sibling ThreadLocal-termination cleanup subprogram where
   ThreadLocal-only cleanup targets stay live through a finishing sweep until
   top-level-failure teardown releases the owner-thread entries and exact cleanup
   is verified, plus a sibling promise-publication subprogram where a child-returned

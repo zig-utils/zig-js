@@ -8734,10 +8734,26 @@ fn runThreadRestrictFinalizationCleanupInterleaving(gpa: std.mem.Allocator, seed
 }
 
 fn runThreadLocalLifecycleInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
-    var prng = std.Random.DefaultPrng.init(seed ^ 0x746c_735f_6c69_6665);
+    return runThreadLocalLifecycleInterleavingKind(gpa, seed, false);
+}
+
+fn runMidScriptThreadLocalLifecycleGc(gpa: std.mem.Allocator, seed: u64) !bool {
+    return runThreadLocalLifecycleInterleavingKind(gpa, seed, true);
+}
+
+fn runThreadLocalLifecycleInterleavingKind(
+    gpa: std.mem.Allocator,
+    seed: u64,
+    comptime midgc: bool,
+) !bool {
+    var prng = std.Random.DefaultPrng.init(seed ^ 0x746c_735f_6c69_6665 ^ if (midgc) 0x6d69_6467_6374_6c73 else 0);
     const r = prng.random();
     const nthreads = 3 + r.uintLessThan(usize, 4);
     const per_thread = 8 + r.uintLessThan(usize, 12);
+    const gc_rounds = if (midgc) 6 + r.uintLessThan(usize, 5) else 0;
+    const gc_per_round = if (midgc) 560 + r.uintLessThan(usize, 360) else 0;
+    const gc_spin_iters = if (midgc) 1700 + r.uintLessThan(usize, 2800) else 0;
+    const seed_marker = seed % 10_000;
 
     var expected_success_sum: usize = 0;
     var expected_reject_sum: usize = 0;
@@ -8750,11 +8766,55 @@ fn runThreadLocalLifecycleInterleaving(gpa: std.mem.Allocator, seed: u64) !bool 
         }
     }
 
-    const ctx = js.Context.createWith(gpa, .{ .enable_threads = true, .enable_gc = true }) catch {
+    const ctx = (if (midgc)
+        js.Context.createWithTestingOptions(gpa, .{
+            .enable_threads = true,
+            .enable_gc = true,
+            .parallel_gc = true,
+            .parallel_js = true,
+            .parallel_midscript_gc = true,
+        })
+    else
+        js.Context.createWith(gpa, .{ .enable_threads = true, .enable_gc = true })) catch {
         std.debug.print("seed {d}: ThreadLocal lifecycle context creation failed\n", .{seed});
         return false;
     };
     defer ctx.destroy();
+
+    const midgc_bool = if (midgc) "true" else "false";
+    const midgc_pressure_src: []const u8 = if (midgc)
+        try std.fmt.allocPrint(
+            gpa,
+            \\  while (Atomics.load(gate, 'ready') < {d})
+            \\    Atomics.wait(gate, 'ready', Atomics.load(gate, 'ready'), 1);
+            \\  {{
+            \\    const keep = [];
+            \\    const midRoot = {{ seed: {d}, label: 'midgc-threadlocal-lifecycle-root' }};
+            \\    for (let round = 0; round < {d}; round++) {{
+            \\      for (let i = 0; i < {d}; i++) {{
+            \\        keep.push({{
+            \\          round,
+            \\          i,
+            \\          mainMarker,
+            \\          nested: {{ midRoot, value: i + round }},
+            \\          text: 'midgc-threadlocal-lifecycle-' + round + '-' + i,
+            \\        }});
+            \\      }}
+            \\      let spin = 0;
+            \\      for (let j = 0; j < {d}; j++) spin = (spin + j + round) & 0x3fffffff;
+            \\      if (spin < 0) keep.push({{ impossible: true }});
+            \\    }}
+            \\    if (typeof gc === 'function') gc();
+            \\  }}
+            \\  Atomics.store(gate, 'release', 1);
+            \\  Atomics.notify(gate, 'release', {d});
+            \\
+        ,
+            .{ nthreads, seed_marker, gc_rounds, gc_per_round, gc_spin_iters, nthreads + 4 },
+        )
+    else
+        "";
+    defer if (midgc) gpa.free(midgc_pressure_src);
 
     const src = try std.fmt.allocPrint(
         gpa,
@@ -8762,6 +8822,7 @@ fn runThreadLocalLifecycleInterleaving(gpa: std.mem.Allocator, seed: u64) !bool 
         \\  globalThis.__tlsLifecycleOracle = 0;
         \\  const tls = new ThreadLocal();
         \\  const mainMarker = {{ seed: {d}, owner: 'main' }};
+        \\  const gate = {{ ready: 0, release: 0 }};
         \\  tls.value = mainMarker;
         \\  let asyncScore = 0;
         \\  let rejectScore = 0;
@@ -8772,6 +8833,14 @@ fn runThreadLocalLifecycleInterleaving(gpa: std.mem.Allocator, seed: u64) !bool 
         \\        throw new Error('fresh thread inherited ThreadLocal value');
         \\      const local = {{ id, count: 0, tag: 'tls-' + id }};
         \\      tls.value = local;
+        \\      if ({s}) {{
+        \\        Atomics.add(gate, 'ready', 1);
+        \\        Atomics.notify(gate, 'ready');
+        \\        while (Atomics.load(gate, 'release') === 0)
+        \\          Atomics.wait(gate, 'release', 0, 1000);
+        \\        if (tls.value !== local)
+        \\          throw new Error('ThreadLocal changed while parked ' + id);
+        \\      }}
         \\      for (let i = 0; i < per; i++) {{
         \\        if (tls.value !== local)
         \\          throw new Error('ThreadLocal changed under thread ' + id);
@@ -8796,6 +8865,7 @@ fn runThreadLocalLifecycleInterleaving(gpa: std.mem.Allocator, seed: u64) !bool 
         \\      }});
         \\    threads.push(t);
         \\  }}
+        \\{s}
         \\  let successSum = 0;
         \\  let caughtRejectSum = 0;
         \\  for (let id = 0; id < threads.length; id++) {{
@@ -8829,10 +8899,12 @@ fn runThreadLocalLifecycleInterleaving(gpa: std.mem.Allocator, seed: u64) !bool 
         \\}})();
         \\
     ,
-        .{ seed, nthreads, per_thread, per_thread, per_thread, expected_success_sum, expected_reject_sum, expected_success_sum, expected_reject_sum },
+        .{ seed, nthreads, midgc_bool, per_thread, per_thread, midgc_pressure_src, per_thread, expected_success_sum, expected_reject_sum, expected_success_sum, expected_reject_sum },
     );
     defer gpa.free(src);
 
+    const before_attempts = if (midgc) ctx.gc_par_attempts.load(.monotonic) else 0;
+    const before_collections = if (midgc) ctx.gc_par_collections.load(.monotonic) else 0;
     const result = ctx.evaluate(src) catch |err| {
         const msg_txt = if (ctx.exception) |ex| blk: {
             var render = ctx.interpreter();
@@ -8844,6 +8916,14 @@ fn runThreadLocalLifecycleInterleaving(gpa: std.mem.Allocator, seed: u64) !bool 
     const expected_return = expected_success_sum + expected_reject_sum;
     if (!result.isNumber() or result.asNum() != @as(f64, @floatFromInt(expected_return))) {
         std.debug.print("seed {d}: ThreadLocal lifecycle got {d}, expected {d}\n", .{ seed, if (result.isNumber()) result.asNum() else -1, expected_return });
+        return false;
+    }
+    if (midgc and ctx.gc_par_attempts.load(.monotonic) <= before_attempts) {
+        std.debug.print("seed {d}: ThreadLocal lifecycle did not attempt a parallel collection\n", .{seed});
+        return false;
+    }
+    if (midgc and ctx.gc_par_collections.load(.monotonic) <= before_collections) {
+        std.debug.print("seed {d}: ThreadLocal lifecycle did not finish a parallel collection\n", .{seed});
         return false;
     }
     const oracle = ctx.evaluate("globalThis.__tlsLifecycleOracle") catch |err| {
@@ -16962,6 +17042,23 @@ pub fn main(init: std.process.Init) !void {
         if (mnafail != 0) std.process.exit(1);
         return;
     };
+    // `threadfuzz midgctlslife <iters> <seed>`: focused mid-script
+    // parallel-GC repro for ThreadLocal per-thread isolation, nested-thread
+    // isolation, thrown-object publication, and asyncJoin observers while owner
+    // ThreadLocal values stay parked through a finishing sweep.
+    if (first) |a| if (std.mem.eql(u8, a, "midgctlslife")) {
+        if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch 1;
+        if (args.next()) |b| base_seed = std.fmt.parseInt(u64, b, 10) catch 1;
+        var mtlfail: usize = 0;
+        var mtli: usize = 0;
+        while (mtli < iters) : (mtli += 1) {
+            const seed = base_seed +% mtli;
+            if (!(try runMidScriptThreadLocalLifecycleGc(gpa, seed))) mtlfail += 1;
+        }
+        std.debug.print("threadfuzz midgctlslife: {d} programs from seed {d}, {d} failures\n", .{ iters, base_seed, mtlfail });
+        if (mtlfail != 0) std.process.exit(1);
+        return;
+    };
     // `threadfuzz midgctlsfinal <iters> <seed>`: focused mid-script
     // parallel-GC repro for ThreadLocal-only roots registered with
     // FinalizationRegistry while owner threads are parked through a finishing
@@ -17616,6 +17713,7 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runMidScriptAtomicsConditionWaitGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptAsyncHoldReleaseWaiterCleanupGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptNestedThreadAsyncJoinCleanupGc(gpa, seed))) mfail += 1;
+            if (!(try runMidScriptThreadLocalLifecycleGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptThreadLocalFinalizationGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptThreadLocalTerminationCleanupGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptThreadRestrictFinalizationGc(gpa, seed))) mfail += 1;
@@ -17635,7 +17733,7 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runMidScriptModuleWorkerTerminateThreadLocalAsyncHoldCleanupGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptWeakCollectionGc(gpa, seed))) mfail += 1;
         }
-        std.debug.print("threadfuzz midgc: {d} programs from seed {d}, {d} failures\n", .{ iters * 33, base_seed, mfail });
+        std.debug.print("threadfuzz midgc: {d} programs from seed {d}, {d} failures\n", .{ iters * 34, base_seed, mfail });
         if (mfail != 0) std.process.exit(1);
         return;
     };

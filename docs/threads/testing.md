@@ -193,6 +193,10 @@ adds a static `Atomics.Condition.wait` subprogram that parks notify/reacquire
 token waiters through a finishing sweep, rejects early cleanup while their stack
 roots are live, then requires exact notify counts, token reacquisition,
 `asyncJoin` observers, and cleanup after quiescence,
+adds a ThreadLocal lifecycle subprogram that parks owner threads with
+per-thread `ThreadLocal.value` objects through a finishing sweep before checking
+per-thread isolation, nested-thread isolation, thrown-object identity, and
+`asyncJoin` observers,
 adds a ThreadLocal-finalization subprogram that parks owner threads with
 targets reachable only through `ThreadLocal.value`, drives a finishing
 mid-script sweep, verifies cleanup is not delivered while those hidden roots are
@@ -265,7 +269,7 @@ join-termination unit witness that checks parked-state/mutex cleanup, then
 requires exact script completion or exact expected termination plus at least one
 finishing parallel sweep and exact
 `FinalizationRegistry` cleanup count/sum delivery plus unregister-token
-suppression after a quiescent collect. Each seed currently runs 33 deterministic
+suppression after a quiescent collect. Each seed currently runs 34 deterministic
 mid-GC subprograms. The
 lifecycle profile
 (`-Dfuzz-lifecycle=true`) adds deterministic resizable `ArrayBuffer` /
