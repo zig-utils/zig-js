@@ -39,6 +39,12 @@ const Loop = struct {
     /// A `switch` is breakable but not continuable: `break` targets it, but
     /// `continue` skips past it to the nearest enclosing loop.
     is_switch: bool = false,
+    /// The `finally_depth` in effect where this loop/switch was entered. A
+    /// `break`/`continue` targeting it needs an `abrupt_*` unwind only when it
+    /// CROSSES a finally — i.e. the current finally_depth is deeper than this one.
+    /// A loop that lives entirely inside a finally (same depth) breaks with a
+    /// plain jump, so it does not disturb that finally's in-flight completion.
+    finally_depth: u32 = 0,
 };
 
 /// A function's local namespace: name → frame slot. Built once, up front, from
@@ -782,13 +788,13 @@ pub const Compiler = struct {
                 // Across a finally, the finally must run before the jump:
                 // `abrupt_break` unwinds the handler stack running each enclosing
                 // finally, then jumps to the (patched) break target.
-                const j = try self.chunk.emit(if (self.finally_depth > 0) .abrupt_break else .jump, 0);
+                const j = try self.chunk.emit(if (self.finally_depth > loop.finally_depth) .abrupt_break else .jump, 0);
                 try loop.breaks.append(self.arena, j);
             },
             .continue_stmt => |label| {
                 if (label != null) return error.Unsupported; // labeled continue → tree-walk
                 const loop = self.currentContinueLoop() orelse return error.Unsupported;
-                const j = try self.chunk.emit(if (self.finally_depth > 0) .abrupt_continue else .jump, 0);
+                const j = try self.chunk.emit(if (self.finally_depth > loop.finally_depth) .abrupt_continue else .jump, 0);
                 try loop.continues.append(self.arena, j);
             },
             .switch_stmt => |sw| try self.compileSwitch(sw.disc, sw.cases),
@@ -2284,14 +2290,14 @@ pub const Compiler = struct {
 
     fn pushLoop(self: *Compiler) CompileError!*Loop {
         const loop = try self.arena.create(Loop);
-        loop.* = .{};
+        loop.* = .{ .finally_depth = self.finally_depth };
         try self.loops.append(self.arena, loop);
         return loop;
     }
 
     fn pushLabel(self: *Compiler, label: []const u8) CompileError!*Loop {
         const target = try self.arena.create(Loop);
-        target.* = .{ .label = label, .is_loop = false };
+        target.* = .{ .label = label, .is_loop = false, .finally_depth = self.finally_depth };
         try self.loops.append(self.arena, target);
         return target;
     }
