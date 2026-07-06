@@ -266,6 +266,10 @@ adds script and module Worker/Condition.asyncWait teardown subprograms that keep
 a condition async reacquire ticket, parked `Thread`, isolated Worker progress,
 and cleanup jobs live through a finishing sweep before notification and
 top-level failure teardown,
+adds script and module Worker/waitAsync teardown subprograms that keep
+child-owned typed-array `waitAsync` tickets pending through a finishing sweep
+while isolated Workers spin, then force top-level failure teardown and require
+pending `asyncJoin` rejection reactions plus zero leaked child waiter tickets,
 adds script and module Worker/ThreadLocal/asyncHold teardown subprograms that
 compose isolated Worker termination with `ThreadLocal` hidden roots, no-fn
 `Lock.asyncHold()` release-function delivery, parked property/condition waiters,
@@ -286,7 +290,7 @@ join-termination unit witness that checks parked-state/mutex cleanup, then
 requires exact script completion or exact expected termination plus at least one
 finishing parallel sweep and exact
 `FinalizationRegistry` cleanup count/sum delivery plus unregister-token
-suppression after a quiescent collect. Each seed currently runs 39 deterministic
+suppression after a quiescent collect. Each seed currently runs 41 deterministic
 mid-GC subprograms. The
 lifecycle profile
 (`-Dfuzz-lifecycle=true`) adds deterministic resizable `ArrayBuffer` /

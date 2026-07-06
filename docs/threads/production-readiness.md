@@ -336,7 +336,8 @@ as embedders exercise more threaded host patterns.
   close/terminate drain/drop subprograms, script and module Worker
   terminate/finalization cleanup subprograms, an async-hold release/waiter
   cleanup subprogram, script and module Worker/Condition.asyncWait teardown
-  cleanup subprograms, script and module Worker/ThreadLocal/asyncHold teardown cleanup
+  cleanup subprograms, script and module Worker/waitAsync teardown cleanup
+  subprograms, script and module Worker/ThreadLocal/asyncHold teardown cleanup
   subprograms, a sync-wait burst
   cleanup subprogram, a sync-timeout exit
   subprogram, an `Atomics.Mutex.lockIfAvailable` acquire/timeout cleanup
@@ -473,6 +474,10 @@ as embedders exercise more threaded host patterns.
   keep a condition async reacquire ticket, parked `Thread`, isolated Worker
   progress, and cleanup jobs live through a finishing sweep before notification,
   top-level failure, rejected `asyncJoin` observation, and exact cleanup.
+  The script and module Worker/waitAsync teardown cleanup subprograms keep
+  child-owned typed-array `waitAsync` tickets pending through a finishing sweep
+  while isolated Workers spin, then force top-level failure teardown and verify
+  rejected `asyncJoin` observers plus zero leaked child waiter tickets.
   The script and module Worker/ThreadLocal/asyncHold teardown cleanup
   subprograms compose isolated Worker termination with `ThreadLocal` hidden
   roots, no-fn `Lock.asyncHold()` release-function delivery, parked
