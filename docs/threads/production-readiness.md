@@ -64,7 +64,7 @@ than new correctness architecture.
   the realm queue instead of stranding reactions after the owner's final flush.
 - The reference-only PR-249 tail is checked by
   `zig build threads-reference-audit`, so unsupported shell hooks, JIT,
-  WebAssembly, deep-stack, and heap-cap/OOM witnesses stay explicit instead of
+  WebAssembly, and heap-cap/OOM witnesses stay explicit instead of
   becoming accidental no-op passes.
 
 Remaining: keep widening generated and hand-written stress toward exceptions,

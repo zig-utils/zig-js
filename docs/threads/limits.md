@@ -43,10 +43,11 @@ tests as the matching engine features land.
   ThreadSanitizer suppressions are deliberately limited to those program-byte
   frames and are guarded by a suppression-narrowness witness. See
   [Memory Model](./memory-model.md).
-- Treating deep recursive call behavior as a finished VM-stack feature. VM and
-  tree-walker calls both throw catchable `RangeError`s before native stack
-  overflow, but they still consume native stack per call, so tests requiring
-  thousands of pre-overflow calls remain future work.
+- Treating deep recursive call behavior as a finished VM-stack architecture.
+  VM and tree-walker calls both throw catchable `RangeError`s before native
+  stack overflow, and the promoted PR-249 stack-overflow witness is green, but
+  calls still consume native stack per call until a future iterative or
+  trampolined call path exists.
 - Treating remaining WebAssembly/JIT-specific PR-249 files as implemented when
   the required WebAssembly surface, JIT artifact hooks, or JSC shell controls do
   not exist in this engine.
@@ -444,8 +445,8 @@ context APIs.
   cleanup/finalization interleavings.
 - **Reference-only PR-249 files.** Promote only when the engine implements the
   behavior and the file is reliable under Zig `0.17-dev`, especially the
-  WebAssembly-required files, JIT/shell-hook witnesses, deep stack-overflow
-  cases, and real heap cap / per-thread OOM semantics. Run
+  WebAssembly-required files, JIT/shell-hook witnesses, and real heap cap /
+  per-thread OOM semantics. Run
   `python3 tools/threads-reference-audit.py --run-probes --expect-current-blockers --probe-timeout 60`
   to keep the nearest-probe negative baseline honest: it passes only while
   those files still fail or time out with their documented blocker evidence,

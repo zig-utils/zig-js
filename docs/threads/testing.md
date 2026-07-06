@@ -360,8 +360,8 @@ baseline arena engine.
 
 `zig build threads-reference-audit` scans the vendored PR-249 corpus and fails
 if any non-allowlisted executable file lacks an explicit reference-only blocker
-classification. This keeps shell-hook, WebAssembly, JIT, deep-stack, and
-heap-cap gaps visible without inflating the green allowlist with no-op passes.
+classification. This keeps shell-hook, WebAssembly, JIT, and heap-cap gaps
+visible without inflating the green allowlist with no-op passes.
 
 `zig build threads-profile` is not a pass/fail correctness gate. It is the local
 scaling and contention profiler for issue #1. The wall-clock columns compare the

@@ -39,7 +39,6 @@ PROMOTION_PROBES = (
     "dw2-marklistset-storm.js",
     "w16-c1-prevent-collection.js",
     "semantics/oom-one-thread.js",
-    "semantics/stack-overflow-per-thread.js",
 )
 
 
@@ -64,10 +63,6 @@ PROMOTION_PROBE_EXPECTATIONS = {
         "fail",
         ("heap cap fired on at least one thread", "zero OOMs"),
     ),
-    "semantics/stack-overflow-per-thread.js": ProbeExpectation(
-        "fail",
-        ("RangeError: Maximum call stack size exceeded",),
-    ),
 }
 
 
@@ -90,9 +85,6 @@ def classify(case: str, src: str) -> list[str]:
 
     if case in HELPERS:
         return ["helper/preload"]
-
-    if case == "semantics/stack-overflow-per-thread.js":
-        categories.append("deep recursion / VM stack")
 
     if case == "semantics/oom-one-thread.js":
         categories.append("heap cap / per-thread OOM")
