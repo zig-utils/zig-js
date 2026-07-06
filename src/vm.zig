@@ -484,7 +484,39 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
             .add, .sub, .mul, .div, .mod, .pow, .lt, .le, .gt, .ge, .eq, .neq, .eq_strict, .neq_strict, .in_op, .bit_and, .bit_or, .bit_xor, .shl, .shr, .ushr => {
                 const r = stack.pop().?;
                 const l = stack.pop().?;
-                try stack.append(stack_alloc, try vm.applyBinary(binOp(inst.op), l, r));
+                // Number-number fast path: when both operands are numbers the
+                // result is computed inline, bit-for-bit identical to
+                // Interpreter.applyBinary (interpreter.zig:13944-13967), skipping
+                // its ToPrimitive / BigInt / string-concat dispatch. Bitwise,
+                // shift, and `in` need ToInt32/object semantics, so they fall
+                // through to the general path.
+                const result: Value = fast: {
+                    if (l.isNumber() and r.isNumber()) {
+                        const a = l.asNum();
+                        const b = r.asNum();
+                        break :fast switch (inst.op) {
+                            .add => Value.num(a + b),
+                            .sub => Value.num(a - b),
+                            .mul => Value.num(a * b),
+                            .div => Value.num(a / b),
+                            .mod => Value.num(@rem(a, b)),
+                            .pow => if (std.math.isInf(b) and @abs(a) == 1)
+                                Value.num(std.math.nan(f64))
+                            else
+                                Value.num(std.math.pow(f64, a, b)),
+                            .lt => Value.boolVal(a < b),
+                            .le => Value.boolVal(a <= b),
+                            .gt => Value.boolVal(a > b),
+                            .ge => Value.boolVal(a >= b),
+                            .eq, .eq_strict => Value.boolVal(a == b),
+                            .neq, .neq_strict => Value.boolVal(a != b),
+                            // in_op / bit_and / bit_or / bit_xor / shl / shr / ushr
+                            else => try vm.applyBinary(binOp(inst.op), l, r),
+                        };
+                    }
+                    break :fast try vm.applyBinary(binOp(inst.op), l, r);
+                };
+                try stack.append(stack_alloc, result);
             },
 
             .jump => ip = inst.a,
