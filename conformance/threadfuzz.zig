@@ -14991,6 +14991,96 @@ fn runMidScriptWorkerCleanupProfile(gpa: std.mem.Allocator, seed: u64, comptime 
     return true;
 }
 
+fn runResizableDataViewResizeInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
+    var prng = std.Random.DefaultPrng.init(seed);
+    const r = prng.random();
+    const resize_iters = 3000 + r.uintLessThan(usize, 3000);
+    const spin_iters = 16 + r.uintLessThan(usize, 64);
+
+    const ctx = js.Context.createWith(gpa, .{ .enable_threads = true }) catch {
+        std.debug.print("seed {d}: dataview-resize context creation failed\n", .{seed});
+        return false;
+    };
+    defer ctx.destroy();
+
+    const src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  if ($vm.useThreadGIL() !== false)
+        \\    throw new Error('dataview resize fuzz did not enter no-GIL mode');
+        \\  const buffer = new ArrayBuffer(64, {{ maxByteLength: 128 }});
+        \\  const gate = {{ go: 0, done: 0, resizes: 0 }};
+        \\  const worker = new Thread(() => {{
+        \\    if ($vm.useThreadGIL() !== false)
+        \\      throw new Error('dataview resize worker still holds the GIL');
+        \\    while (Atomics.load(gate, 'go') === 0)
+        \\      Atomics.wait(gate, 'go', 0, 100);
+        \\    let checksum = 0;
+        \\    for (let i = 0; i < {d}; i++) {{
+        \\      buffer.resize((i & 1) === 0 ? 64 : 32);
+        \\      if ((i & 15) === 0) {{
+        \\        Atomics.add(gate, 'resizes', 1);
+        \\        Atomics.notify(gate, 'resizes');
+        \\      }}
+        \\      for (let j = 0; j < {d}; j++)
+        \\        checksum = (checksum + j + i) & 0xffff;
+        \\    }}
+        \\    Atomics.store(gate, 'done', 1);
+        \\    Atomics.notify(gate, 'done');
+        \\    return checksum + Atomics.load(gate, 'resizes');
+        \\  }});
+        \\  Atomics.store(gate, 'go', 1);
+        \\  Atomics.notify(gate, 'go');
+        \\  while (Atomics.load(gate, 'resizes') === 0)
+        \\    Atomics.wait(gate, 'resizes', 0, 100);
+        \\  let tracking = 0;
+        \\  let explicitOk = 0;
+        \\  let explicitRejected = 0;
+        \\  while (Atomics.load(gate, 'done') === 0) {{
+        \\    const trackingView = new DataView(buffer, 0);
+        \\    const n = trackingView.byteLength;
+        \\    if (n !== 32 && n !== 64)
+        \\      throw new Error('bad length-tracking DataView length: ' + n);
+        \\    tracking++;
+        \\    try {{
+        \\      const fixedView = new DataView(buffer, 32, 16);
+        \\      if (fixedView.byteLength !== 16)
+        \\        throw new Error('bad fixed DataView length: ' + fixedView.byteLength);
+        \\      explicitOk++;
+        \\    }} catch (e) {{
+        \\      if (!(e instanceof RangeError) && !(e instanceof TypeError))
+        \\        throw e;
+        \\      explicitRejected++;
+        \\    }}
+        \\  }}
+        \\  const workerScore = worker.join();
+        \\  if (tracking === 0)
+        \\    throw new Error('dataview resize fuzz made no tracking views');
+        \\  if (Atomics.load(gate, 'resizes') === 0 || workerScore <= 0)
+        \\    throw new Error('dataview resize worker did not run');
+        \\  return tracking + explicitOk + explicitRejected + workerScore;
+        \\}})()
+        \\
+    ,
+        .{ resize_iters, spin_iters },
+    );
+    defer gpa.free(src);
+
+    const result = ctx.evaluate(src) catch |err| {
+        const msg = if (ctx.exception) |ex| blk: {
+            var machine = ctx.interpreter();
+            break :blk machine.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: dataview-resize threw {s}: {s}\n", .{ seed, @errorName(err), msg });
+        return false;
+    };
+    if (!result.isNumber() or result.asNum() <= 0) {
+        std.debug.print("seed {d}: dataview-resize bad result\n", .{seed});
+        return false;
+    }
+    return true;
+}
+
 pub fn main(init: std.process.Init) !void {
     const gpa = std.heap.page_allocator; // thread-safe; contexts manage their own GC
     var iters: usize = 200;
@@ -15022,6 +15112,22 @@ pub fn main(init: std.process.Init) !void {
             std.debug.print("throw {s}: {s}\n", .{ @errorName(e), msg });
             std.process.exit(1);
         }
+        return;
+    };
+    // `threadfuzz dataviewresize <iters> <seed>`: focused no-GIL backing-store
+    // repro for DataView constructor snapshots while a peer repeatedly resizes
+    // the same resizable ArrayBuffer.
+    if (first) |a| if (std.mem.eql(u8, a, "dataviewresize")) {
+        if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch 1;
+        if (args.next()) |b| base_seed = std.fmt.parseInt(u64, b, 10) catch 1;
+        var dvfail: usize = 0;
+        var dvi: usize = 0;
+        while (dvi < iters) : (dvi += 1) {
+            const seed = base_seed +% dvi;
+            if (!(try runResizableDataViewResizeInterleaving(gpa, seed))) dvfail += 1;
+        }
+        std.debug.print("threadfuzz dataviewresize: {d} programs from seed {d}, {d} failures\n", .{ iters, base_seed, dvfail });
+        if (dvfail != 0) std.process.exit(1);
         return;
     };
     // `threadfuzz tlsfinal <iters> <seed>`: focused lifecycle repro for
@@ -15936,7 +16042,8 @@ pub fn main(init: std.process.Init) !void {
         if (vfail != 0) std.process.exit(1);
         return;
     };
-    // `threadfuzz lifecycle <iters> <seed>`: deterministic termination storms,
+    // `threadfuzz lifecycle <iters> <seed>`: deterministic resizable
+    // ArrayBuffer/DataView constructor races, termination storms,
     // Worker/thread SAB overlap, simple, diamond, and fanout/rejoin
     // module-worker/thread overlap, exact Worker close/terminate/postMessage
     // FIFO drain/drop ordering for script and module Workers, worker handler
@@ -16052,6 +16159,7 @@ pub fn main(init: std.process.Init) !void {
         var li: usize = 0;
         while (li < iters) : (li += 1) {
             const seed = base_seed +% li;
+            if (!(try runResizableDataViewResizeInterleaving(gpa, seed))) lfail += 1;
             if (!(try runTerminationStorm(gpa, seed))) lfail += 1;
             if (!(try runWorkerThreadOverlap(gpa, seed))) lfail += 1;
             if (!(try runModuleWorkerThreadOverlap(gpa, seed))) lfail += 1;
@@ -16099,7 +16207,7 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runThreadLocalTerminationCleanupInterleaving(gpa, seed))) lfail += 1;
             if (!(try runNestedThreadAsyncJoinCleanupInterleaving(gpa, seed))) lfail += 1;
         }
-        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 46, base_seed, lfail });
+        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 47, base_seed, lfail });
         if (lfail != 0) std.process.exit(1);
         return;
     };

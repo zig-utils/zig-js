@@ -252,8 +252,11 @@ finishing parallel sweep and exact
 suppression after a quiescent collect. Each seed currently runs 25 deterministic
 mid-GC subprograms. The
 lifecycle profile
-(`-Dfuzz-lifecycle=true`) adds expected-throw termination storms for
-parked/unjoined shared-realm `Thread`s, exact Atomics counter oracles for script
+(`-Dfuzz-lifecycle=true`) adds deterministic resizable `ArrayBuffer` /
+`DataView` constructor races where one no-GIL peer repeatedly resizes a backing
+buffer while another constructs both length-tracking and explicit-length views,
+expected-throw termination storms for parked/unjoined shared-realm `Thread`s,
+exact Atomics counter oracles for script
 `Worker` plus simple-import, diamond-shaped, and fanout/rejoin module `Worker`
 overlap with shared-realm `Thread`s on one retained `SharedArrayBuffer`,
 Worker/thread/finalization scheduling on one retained SAB, exact cleanup after
@@ -330,7 +333,7 @@ then verifies child release, nested `ThreadLocal` roots, rerouted async
 settlement, and exact finalization cleanup after both thread layers exit. It now
 also composes isolated Worker termination with shared-realm teardown that
 abandons child-owned typed-array `waitAsync` tickets, rejects pending
-`asyncJoin` reactions, and delivers exact cleanup. Each seed currently runs 46
+`asyncJoin` reactions, and delivers exact cleanup. Each seed currently runs 47
 deterministic lifecycle
 subprograms.
 

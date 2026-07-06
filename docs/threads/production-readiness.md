@@ -439,8 +439,9 @@ as embedders exercise more threaded host patterns.
   elected mid-script parallel collector untouched while threads are live, and a
   later quiescent collection aborts stale parallel mark state before starting a
   fresh precise mark.
-- The lifecycle fuzzer profile adds deterministic termination storms where main
-  JS throws with parked/unjoined `Thread`s, exact-counter oracles for script
+- The lifecycle fuzzer profile adds deterministic resizable `ArrayBuffer` /
+  `DataView` constructor races under no-GIL resize pressure, termination storms
+  where main JS throws with parked/unjoined `Thread`s, exact-counter oracles for script
   `Worker`s plus simple-import, diamond-shaped, and fanout/rejoin module
   `Worker`s overlapping shared-realm `Thread`s on one retained
   `SharedArrayBuffer`, Worker/thread/finalization scheduling on one retained
