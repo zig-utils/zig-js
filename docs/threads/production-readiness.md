@@ -311,7 +311,8 @@ as embedders exercise more threaded host patterns.
   wait-pump subprogram, a sync-wait cleanup subprogram, a promise-publication
   subprogram, a pending-microtask subprogram, a creator-owned buffer
   subprogram, a nested parent/child `Thread.asyncJoin` cleanup subprogram, a
-  ThreadLocal-finalization subprogram, a
+  ThreadLocal-finalization subprogram, a ThreadLocal-termination cleanup
+  subprogram, a
   Thread.restrict-finalization subprogram, isolated script Worker/SAB and module
   Worker/SAB cleanup subprograms, script and module Worker
   handler-exception cleanup subprograms, script and module Worker
@@ -348,6 +349,10 @@ as embedders exercise more threaded host patterns.
   mid-script sweep, rejects any early cleanup delivery while those hidden roots
   are live, then clears the values and verifies exact cleanup count/sum after a
   quiescent collection.
+  The ThreadLocal-termination cleanup subprogram keeps ThreadLocal-only cleanup
+  targets live through a finishing sweep, then forces top-level-failure thread
+  teardown, requires blocking joins to observe termination, and verifies exact
+  cleanup after the owner-thread entries are released.
   The Thread.restrict-finalization subprogram parks owner threads with
   restricted owner-local objects registered for finalization, verifies nested
   foreign reads still throw `ConcurrentAccessError`, drives a finishing

@@ -12075,6 +12075,196 @@ fn runMidScriptThreadLocalFinalizationGc(gpa: std.mem.Allocator, seed: u64) !boo
     return true;
 }
 
+fn runMidScriptThreadLocalTerminationCleanupGc(gpa: std.mem.Allocator, seed: u64) !bool {
+    var prng = std.Random.DefaultPrng.init(seed ^ 0x6d69_6474_6c74_6572);
+    const r = prng.random();
+    const nthreads = 2 + r.uintLessThan(usize, 4);
+    const rounds = 7 + r.uintLessThan(usize, 5);
+    const per_round = 520 + r.uintLessThan(usize, 320);
+    const spin_iters = 1800 + r.uintLessThan(usize, 3600);
+    const wait_timeout_ms = if (builtin.sanitize_thread) 12_000 else 1000 + r.uintLessThan(usize, 700);
+    const seed_marker = seed % 10_000;
+    const held_base = 372_000 + seed_marker;
+
+    var expected_cleanup_sum: usize = 0;
+    var id: usize = 0;
+    while (id < nthreads) : (id += 1) {
+        expected_cleanup_sum += held_base + id;
+    }
+
+    const ctx = js.Context.createWithTestingOptions(gpa, .{
+        .enable_threads = true,
+        .enable_gc = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+        .parallel_midscript_gc = true,
+    }) catch {
+        std.debug.print("seed {d}: midgc ThreadLocal termination cleanup context creation failed\n", .{seed});
+        return false;
+    };
+    defer ctx.destroy();
+
+    const src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  globalThis.__midgcTlsTermCleanup = {{ count: 0, sum: 0 }};
+        \\  globalThis.__midgcTlsTermRegistry = new FinalizationRegistry((held) => {{
+        \\    Atomics.add(globalThis.__midgcTlsTermCleanup, 'sum', held);
+        \\    Atomics.add(globalThis.__midgcTlsTermCleanup, 'count', 1);
+        \\  }});
+        \\  const registry = globalThis.__midgcTlsTermRegistry;
+        \\  const tls = new ThreadLocal();
+        \\  const gate = {{ ready: 0, stop: 0 }};
+        \\  const threads = globalThis.__midgcTlsTermThreads = [];
+        \\  const seedMarker = {d};
+        \\  const heldBase = {d};
+        \\  for (let id = 0; id < {d}; id++) {{
+        \\    const t = new Thread((id, seedMarker, heldBase, timeout) => {{
+        \\      let target = {{
+        \\        id,
+        \\        seed: seedMarker,
+        \\        payload: 'midgc-threadlocal-termination-cleanup-' + id,
+        \\        nested: {{ marker: heldBase + id }},
+        \\      }};
+        \\      tls.value = target;
+        \\      registry.register(target, heldBase + id);
+        \\      target = null;
+        \\      Atomics.add(gate, 'ready', 1);
+        \\      Atomics.notify(gate, 'ready');
+        \\      while (Atomics.load(gate, 'stop') === 0)
+        \\        Atomics.wait(gate, 'stop', 0, timeout);
+        \\      return -1;
+        \\    }}, id, seedMarker, heldBase, {d});
+        \\    threads.push(t);
+        \\  }}
+        \\  let spins = 0;
+        \\  while (Atomics.load(gate, 'ready') < {d}) {{
+        \\    if (++spins > 10000000)
+        \\      throw new Error('midgc ThreadLocal termination workers not ready: ' + Atomics.load(gate, 'ready'));
+        \\  }}
+        \\  globalThis.__midgcTlsTermRegistry.cleanupSome();
+        \\  if (Atomics.load(globalThis.__midgcTlsTermCleanup, 'count') !== 0)
+        \\    throw new Error('midgc ThreadLocal termination cleanup fired before sweep');
+        \\  const keep = [];
+        \\  for (let round = 0; round < {d}; round++) {{
+        \\    for (let i = 0; i < {d}; i++)
+        \\      keep.push({{ round, i, nested: {{ seed: seedMarker, id: i & 7 }}, text: 'midgc-threadlocal-termination-' + round + '-' + i }});
+        \\    let spin = 0;
+        \\    for (let j = 0; j < {d}; j++) spin = (spin + j + round) & 0x3fffffff;
+        \\    if (spin < 0) keep.push({{ impossible: true }});
+        \\  }}
+        \\  if (keep.length !== {d})
+        \\    throw new Error('bad midgc ThreadLocal termination keep length ' + keep.length);
+        \\  if (typeof gc === 'function') gc();
+        \\  globalThis.__midgcTlsTermRegistry.cleanupSome();
+        \\  if (Atomics.load(globalThis.__midgcTlsTermCleanup, 'count') !== 0)
+        \\    throw new Error('midgc ThreadLocal termination cleanup fired while owners were parked');
+        \\  throw new Error('threadfuzz midgc ThreadLocal termination cleanup {d}');
+        \\}})();
+        \\
+    ,
+        .{
+            seed_marker,
+            held_base,
+            nthreads,
+            wait_timeout_ms,
+            nthreads,
+            rounds,
+            per_round,
+            spin_iters,
+            rounds * per_round,
+            seed,
+        },
+    );
+    defer gpa.free(src);
+
+    const before_attempts = ctx.gc_par_attempts.load(.monotonic);
+    const before_collections = ctx.gc_par_collections.load(.monotonic);
+    if (ctx.evaluate(src)) |_| {
+        std.debug.print("seed {d}: midgc ThreadLocal termination cleanup script returned normally\n", .{seed});
+        return false;
+    } else |err| {
+        if (err != error.Throw) {
+            std.debug.print("seed {d}: midgc ThreadLocal termination cleanup failed with {s}\n", .{ seed, @errorName(err) });
+            return false;
+        }
+    }
+    if (ctx.gc_par_attempts.load(.monotonic) <= before_attempts) {
+        std.debug.print("seed {d}: midgc ThreadLocal termination cleanup did not attempt a parallel collection\n", .{seed});
+        return false;
+    }
+    if (ctx.gc_par_collections.load(.monotonic) <= before_collections) {
+        std.debug.print("seed {d}: midgc ThreadLocal termination cleanup did not finish a parallel collection\n", .{seed});
+        return false;
+    }
+
+    const check_src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  let joinThrew = 0;
+        \\  for (const t of globalThis.__midgcTlsTermThreads) {{
+        \\    try {{
+        \\      t.join();
+        \\    }} catch (e) {{
+        \\      if (e) joinThrew++;
+        \\    }}
+        \\  }}
+        \\  if (joinThrew !== {d})
+        \\    throw new Error('midgc ThreadLocal termination join threw ' + joinThrew);
+        \\  globalThis.__midgcTlsTermThreads = null;
+        \\  return joinThrew;
+        \\}})();
+        \\
+    ,
+        .{nthreads},
+    );
+    defer gpa.free(check_src);
+    const checked = ctx.evaluate(check_src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: midgc ThreadLocal termination cleanup check threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!checked.isNumber() or checked.asNum() != @as(f64, @floatFromInt(nthreads))) {
+        std.debug.print("seed {d}: midgc ThreadLocal termination cleanup checked got {d}, expected {d}\n", .{ seed, if (checked.isNumber()) checked.asNum() else -1, nthreads });
+        return false;
+    }
+
+    ctx.collectGarbage();
+    const cleanup_src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  globalThis.__midgcTlsTermRegistry.cleanupSome();
+        \\  const cleanupCount = Atomics.load(globalThis.__midgcTlsTermCleanup, 'count');
+        \\  const cleanupSum = Atomics.load(globalThis.__midgcTlsTermCleanup, 'sum');
+        \\  if (cleanupCount !== {d})
+        \\    throw new Error('bad midgc ThreadLocal termination cleanup count ' + cleanupCount + '/' + {d});
+        \\  if (cleanupSum !== {d})
+        \\    throw new Error('bad midgc ThreadLocal termination cleanup sum ' + cleanupSum + '/' + {d});
+        \\  return cleanupCount;
+        \\}})();
+        \\
+    ,
+        .{ nthreads, nthreads, expected_cleanup_sum, expected_cleanup_sum },
+    );
+    defer gpa.free(cleanup_src);
+    const cleaned = ctx.evaluate(cleanup_src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: midgc ThreadLocal termination cleanup cleanup JS threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!cleaned.isNumber() or cleaned.asNum() != @as(f64, @floatFromInt(nthreads))) {
+        std.debug.print("seed {d}: midgc ThreadLocal termination cleanup got {d}, expected {d}\n", .{ seed, if (cleaned.isNumber()) cleaned.asNum() else -1, nthreads });
+        return false;
+    }
+    return true;
+}
+
 fn runMidScriptThreadRestrictFinalizationGc(gpa: std.mem.Allocator, seed: u64) !bool {
     var prng = std.Random.DefaultPrng.init(seed ^ 0x6d69_6472_6573_7466);
     const r = prng.random();
@@ -15462,6 +15652,22 @@ pub fn main(init: std.process.Init) !void {
         if (mtffail != 0) std.process.exit(1);
         return;
     };
+    // `threadfuzz midgctlstermcleanup <iters> <seed>`: focused mid-script
+    // parallel-GC repro for ThreadLocal-only roots held through a finishing
+    // sweep, then released by top-level-failure thread teardown.
+    if (first) |a| if (std.mem.eql(u8, a, "midgctlstermcleanup")) {
+        if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch 1;
+        if (args.next()) |b| base_seed = std.fmt.parseInt(u64, b, 10) catch 1;
+        var mttcfail: usize = 0;
+        var mttci: usize = 0;
+        while (mttci < iters) : (mttci += 1) {
+            const seed = base_seed +% mttci;
+            if (!(try runMidScriptThreadLocalTerminationCleanupGc(gpa, seed))) mttcfail += 1;
+        }
+        std.debug.print("threadfuzz midgctlstermcleanup: {d} programs from seed {d}, {d} failures\n", .{ iters, base_seed, mttcfail });
+        if (mttcfail != 0) std.process.exit(1);
+        return;
+    };
     // `threadfuzz midgcrestrictfinal <iters> <seed>`: focused mid-script
     // parallel-GC repro for Thread.restrict-owned objects registered with
     // FinalizationRegistry while owner threads are parked through a finishing
@@ -15916,6 +16122,8 @@ pub fn main(init: std.process.Init) !void {
     // completion records and delayed asyncJoin observers,
     // ThreadLocal-only and Thread.restrict-owned FinalizationRegistry targets
     // parked through a finishing sweep before their owners clear the values,
+    // and ThreadLocal-only targets parked through a sweep before top-level
+    // failure forces owner-thread teardown and exact cleanup,
     // no-fn asyncHold release-function delivery plus exact cleanup while
     // property/condition waiters stay parked through the finishing sweep,
     // property `Atomics.wait` and static `Atomics.Condition.waitFor` timeout
@@ -15961,6 +16169,7 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runMidScriptAsyncHoldReleaseWaiterCleanupGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptNestedThreadAsyncJoinCleanupGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptThreadLocalFinalizationGc(gpa, seed))) mfail += 1;
+            if (!(try runMidScriptThreadLocalTerminationCleanupGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptThreadRestrictFinalizationGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptWorkerCleanupGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptModuleWorkerCleanupGc(gpa, seed))) mfail += 1;
@@ -15970,7 +16179,7 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runMidScriptModuleWorkerCloseTerminateGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptWeakCollectionGc(gpa, seed))) mfail += 1;
         }
-        std.debug.print("threadfuzz midgc: {d} programs from seed {d}, {d} failures\n", .{ iters * 24, base_seed, mfail });
+        std.debug.print("threadfuzz midgc: {d} programs from seed {d}, {d} failures\n", .{ iters * 25, base_seed, mfail });
         if (mfail != 0) std.process.exit(1);
         return;
     };

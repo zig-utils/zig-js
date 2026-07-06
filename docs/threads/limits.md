@@ -235,7 +235,10 @@ context APIs.
   subprogram where parked children hold child-owned typed-array `waitAsync`
   tickets through a finishing mid-script sweep, then teardown `asyncJoin`
   rejection reactions run and post-termination notify sees zero leaked waitAsync
-  tickets, plus a sibling promise-publication subprogram where a child-returned
+  tickets, plus a sibling ThreadLocal-termination cleanup subprogram where
+  ThreadLocal-only cleanup targets stay live through a finishing sweep until
+  top-level-failure teardown releases the owner-thread entries and exact cleanup
+  is verified, plus a sibling promise-publication subprogram where a child-returned
   typed-array `waitAsync` promise, a child-returned rejected promise, a
   child-returned user thenable, and a child-thrown object remain rooted through
   thread completion/native waiter state until post-sweep
@@ -322,6 +325,8 @@ context APIs.
   through native completion records, keeps a ThreadLocal-only hidden root live
   in a parked peer, parks ThreadLocal-only `FinalizationRegistry` targets
   through a finishing sweep before clearing them with an exact cleanup oracle,
+  keeps ThreadLocal-only cleanup targets live through a finishing sweep until
+  top-level-failure teardown releases their owner-thread entries,
   and parks Thread.restrict-owned finalization targets through a finishing sweep
   while nested foreign access still throws `ConcurrentAccessError` before owner
   release,

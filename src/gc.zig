@@ -170,6 +170,10 @@ pub fn traceObjectEphemeron(o: *Object, v: anytype) void {
 /// identical to the old markWeak-then-null-then-prune for the stop-the-world and
 /// GIL-held paths (a dead key/target is exactly an unmarked managed cell).
 pub fn pruneDeadWeakEntries(o: *Object, heap: anytype) bool {
+    if (!(o.is_weak and (o.is_map or o.is_set)) and !o.is_finalization_registry) return false;
+    o.lockElements();
+    defer o.unlockElements();
+
     var cleanup_ready = false;
     if (o.is_weak and (o.is_map or o.is_set)) {
         var i: usize = 0;
