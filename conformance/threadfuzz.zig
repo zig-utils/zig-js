@@ -9869,12 +9869,27 @@ fn runThreadLocalAsyncHoldReleaseCleanupInterleaving(gpa: std.mem.Allocator, see
 }
 
 fn runWorkerTerminateThreadLocalAsyncHoldCleanupInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
+    return runWorkerTerminateThreadLocalAsyncHoldCleanupInterleavingKind(gpa, seed, false);
+}
+
+fn runMidScriptWorkerTerminateThreadLocalAsyncHoldCleanupGc(gpa: std.mem.Allocator, seed: u64) !bool {
+    return runWorkerTerminateThreadLocalAsyncHoldCleanupInterleavingKind(gpa, seed, true);
+}
+
+fn runWorkerTerminateThreadLocalAsyncHoldCleanupInterleavingKind(
+    gpa: std.mem.Allocator,
+    seed: u64,
+    comptime midgc: bool,
+) !bool {
     var prng = std.Random.DefaultPrng.init(seed ^ 0x7774_6c61_6872_656c);
     const r = prng.random();
     const nworkers = 1 + r.uintLessThan(usize, 2);
     const ntls_threads = 2 + r.uintLessThan(usize, 3);
     const nrelease_threads = 2 + r.uintLessThan(usize, 3);
     const wait_timeout_ms = 1200 + r.uintLessThan(usize, 800);
+    const gc_rounds = if (midgc) 7 + r.uintLessThan(usize, 5) else 0;
+    const gc_per_round = if (midgc) 650 + r.uintLessThan(usize, 350) else 0;
+    const gc_spin_iters = if (midgc) 2200 + r.uintLessThan(usize, 3000) else 0;
     const seed_marker = seed % 10_000;
     const tls_base = 960_000 + seed_marker;
     const release_base = 970_000 + seed_marker;
@@ -9894,7 +9909,16 @@ fn runWorkerTerminateThreadLocalAsyncHoldCleanupInterleaving(gpa: std.mem.Alloca
     while (id < nrelease_threads) : (id += 1) expected_release_score += release_base + id;
     const expected_reject_count = ntls_threads + 2;
 
-    const ctx = js.Context.createWith(gpa, .{ .enable_threads = true, .enable_gc = true }) catch {
+    const ctx = (if (midgc)
+        js.Context.createWithTestingOptions(gpa, .{
+            .enable_threads = true,
+            .enable_gc = true,
+            .parallel_gc = true,
+            .parallel_js = true,
+            .parallel_midscript_gc = true,
+        })
+    else
+        js.Context.createWith(gpa, .{ .enable_threads = true, .enable_gc = true })) catch {
         std.debug.print("seed {d}: worker terminate/ThreadLocal asyncHold cleanup context creation failed\n", .{seed});
         return false;
     };
@@ -10008,12 +10032,66 @@ fn runWorkerTerminateThreadLocalAsyncHoldCleanupInterleaving(gpa: std.mem.Alloca
         return false;
     }
 
+    const midgc_pressure_src: []const u8 = if (midgc)
+        try std.fmt.allocPrint(
+            gpa,
+            \\  if ({d} > 0) {{
+            \\    const keep = [];
+            \\    const midRoot = {{ seed: {d}, label: 'midgc-worker-tls-asynchold-root' }};
+            \\    for (let round = 0; round < {d}; round++) {{
+            \\      for (let i = 0; i < {d}; i++) {{
+            \\        keep.push({{
+            \\          round,
+            \\          i,
+            \\          nested: {{ midRoot, value: i + round }},
+            \\          text: 'midgc-worker-tls-asynchold-' + round + '-' + i,
+            \\        }});
+            \\      }}
+            \\      let spin = 0;
+            \\      for (let j = 0; j < {d}; j++) spin = (spin + j + round) & 0x3fffffff;
+            \\      if (spin < 0) keep.push({{ impossible: true }});
+            \\    }}
+            \\    if (typeof gc === 'function') gc();
+            \\    const beforeWaiterReject = globalThis.__workerTlsAsyncHoldRejectCount;
+            \\    gate.propFail = true;
+            \\    Atomics.store(gate, 'prop', 1);
+            \\    Atomics.notify(gate, 'prop');
+            \\    condLock.hold(() => {{
+            \\      gate.condFail = true;
+            \\      gate.condOpen = true;
+            \\      cond.notifyAll();
+            \\    }});
+            \\    for (let spins = 0; globalThis.__workerTlsAsyncHoldRejectCount < beforeWaiterReject + 2 && spins < 2000; spins++) {{
+            \\      $drainRunLoop();
+            \\      drainMicrotasks();
+            \\    }}
+            \\    if (globalThis.__workerTlsAsyncHoldRejectCount < beforeWaiterReject + 2)
+            \\      throw new Error('worker terminate/ThreadLocal asyncHold waiters did not reject after midgc release');
+            \\    const expectedAfterTlsRelease = beforeWaiterReject + 2 + {d};
+            \\    gate.tlsFail = true;
+            \\    Atomics.store(gate, 'release', 1);
+            \\    Atomics.notify(gate, 'release');
+            \\    for (let spins = 0; globalThis.__workerTlsAsyncHoldRejectCount < expectedAfterTlsRelease && spins < 2000; spins++) {{
+            \\      $drainRunLoop();
+            \\      drainMicrotasks();
+            \\    }}
+            \\    if (globalThis.__workerTlsAsyncHoldRejectCount < expectedAfterTlsRelease)
+            \\      throw new Error('worker terminate/ThreadLocal asyncHold TLS owners did not reject after midgc release');
+            \\  }}
+            \\
+        ,
+            .{ gc_rounds, seed_marker, gc_rounds, gc_per_round, gc_spin_iters, ntls_threads },
+        )
+    else
+        "";
+    defer if (midgc) gpa.free(midgc_pressure_src);
+
     const fail_src = try std.fmt.allocPrint(
         gpa,
         \\(() => {{
         \\  const registry = globalThis.__workerTlsAsyncHoldRegistry;
         \\  const tls = new ThreadLocal();
-        \\  const gate = {{ tlsReady: 0, release: 0, prop: 0, propReady: 0, condReady: 0, condOpen: false }};
+        \\  const gate = {{ tlsReady: 0, release: 0, tlsFail: false, prop: 0, propReady: 0, propFail: false, condReady: 0, condOpen: false, condFail: false }};
         \\  const releaseLock = new Lock();
         \\  const condLock = new Lock();
         \\  const cond = new Condition();
@@ -10034,6 +10112,8 @@ fn runWorkerTerminateThreadLocalAsyncHoldCleanupInterleaving(gpa: std.mem.Alloca
         \\      Atomics.notify(gate, 'tlsReady');
         \\      while (Atomics.load(gate, 'release') === 0)
         \\        Atomics.wait(gate, 'release', 0, timeout);
+        \\      if (gate.tlsFail)
+        \\        throw new Error('worker terminate/ThreadLocal asyncHold TLS midgc release');
         \\      return -1;
         \\    }}, id, {d}, {d}, {d});
         \\    t.asyncJoin().then(
@@ -10062,6 +10142,8 @@ fn runWorkerTerminateThreadLocalAsyncHoldCleanupInterleaving(gpa: std.mem.Alloca
         \\    const r = Atomics.wait(gate, 'prop', 0, timeout);
         \\    if (r !== 'ok' && r !== 'not-equal')
         \\      throw new Error('bad worker terminate/ThreadLocal asyncHold property wait result ' + r);
+        \\    if (gate.propFail)
+        \\      throw new Error('worker terminate/ThreadLocal asyncHold property midgc release');
         \\    return root.marker;
         \\  }}, gate, {d});
         \\  propWaiter.asyncJoin().then(
@@ -10083,6 +10165,8 @@ fn runWorkerTerminateThreadLocalAsyncHoldCleanupInterleaving(gpa: std.mem.Alloca
         \\      while (!gate.condOpen)
         \\        cond.wait(condLock);
         \\    }});
+        \\    if (gate.condFail)
+        \\      throw new Error('worker terminate/ThreadLocal asyncHold condition midgc release');
         \\    return root.marker;
         \\  }}, gate, condLock, cond);
         \\  condWaiter.asyncJoin().then(
@@ -10145,6 +10229,7 @@ fn runWorkerTerminateThreadLocalAsyncHoldCleanupInterleaving(gpa: std.mem.Alloca
         \\    throw new Error('bad worker terminate/ThreadLocal asyncHold release join sum ' + globalThis.__workerTlsAsyncHoldReleaseJoinSum);
         \\  if (releaseLock.locked)
         \\    throw new Error('worker terminate/ThreadLocal asyncHold release lock left locked');
+        \\{s}
         \\  registry.cleanupSome();
         \\  if (globalThis.__workerTlsAsyncHoldCleanupCount !== 0)
         \\    throw new Error('worker terminate/ThreadLocal asyncHold cleanup fired before top-level teardown');
@@ -10184,16 +10269,29 @@ fn runWorkerTerminateThreadLocalAsyncHoldCleanupInterleaving(gpa: std.mem.Alloca
             expected_release_score,
             nrelease_threads,
             expected_release_score,
+            midgc_pressure_src,
             seed,
         },
     );
     defer gpa.free(fail_src);
+    const before_attempts = if (midgc) ctx.gc_par_attempts.load(.monotonic) else 0;
+    const before_collections = if (midgc) ctx.gc_par_collections.load(.monotonic) else 0;
     if (ctx.evaluate(fail_src)) |_| {
         std.debug.print("seed {d}: worker terminate/ThreadLocal asyncHold failure script returned normally\n", .{seed});
         return false;
     } else |err| {
         if (err != error.Throw) {
             std.debug.print("seed {d}: worker terminate/ThreadLocal asyncHold failed with {s}\n", .{ seed, @errorName(err) });
+            return false;
+        }
+    }
+    if (midgc) {
+        if (ctx.gc_par_attempts.load(.monotonic) <= before_attempts) {
+            std.debug.print("seed {d}: midgc worker terminate/ThreadLocal asyncHold cleanup did not attempt a parallel collection\n", .{seed});
+            return false;
+        }
+        if (ctx.gc_par_collections.load(.monotonic) <= before_collections) {
+            std.debug.print("seed {d}: midgc worker terminate/ThreadLocal asyncHold cleanup did not finish a parallel collection\n", .{seed});
             return false;
         }
     }
@@ -10206,6 +10304,33 @@ fn runWorkerTerminateThreadLocalAsyncHoldCleanupInterleaving(gpa: std.mem.Alloca
         std.debug.print("seed {d}: worker terminate/ThreadLocal asyncHold drain threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
         return false;
     };
+
+    const settle_src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  for (let spins = 0; globalThis.__workerTlsAsyncHoldRejectCount < {d} && spins < 2000; spins++) {{
+        \\    $drainRunLoop();
+        \\    drainMicrotasks();
+        \\  }}
+        \\  return globalThis.__workerTlsAsyncHoldRejectCount;
+        \\}})()
+        \\
+    ,
+        .{expected_reject_count},
+    );
+    defer gpa.free(settle_src);
+    const settled = ctx.evaluate(settle_src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: worker terminate/ThreadLocal asyncHold settle threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!settled.isNumber() or settled.asNum() != @as(f64, @floatFromInt(expected_reject_count))) {
+        std.debug.print("seed {d}: worker terminate/ThreadLocal asyncHold settled got {d}, expected {d}\n", .{ seed, if (settled.isNumber()) settled.asNum() else -1, expected_reject_count });
+        return false;
+    }
 
     const check_src = try std.fmt.allocPrint(
         gpa,
@@ -10251,7 +10376,29 @@ fn runWorkerTerminateThreadLocalAsyncHoldCleanupInterleaving(gpa: std.mem.Alloca
         return false;
     }
 
-    ctx.collectGarbage();
+    var cleanup_attempt: usize = 0;
+    while (cleanup_attempt < 4) : (cleanup_attempt += 1) {
+        ctx.collectGarbage();
+        const observed = ctx.evaluate(
+            "globalThis.__workerTlsAsyncHoldRegistry.cleanupSome(); globalThis.__workerTlsAsyncHoldCleanupCount",
+        ) catch |err| {
+            const msg_txt = if (ctx.exception) |ex| blk: {
+                var render = ctx.interpreter();
+                break :blk render.toStringV(ex) catch "<unstringifiable>";
+            } else "<none>";
+            std.debug.print("seed {d}: worker terminate/ThreadLocal asyncHold cleanup poll threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+            return false;
+        };
+        if (observed.isNumber() and observed.asNum() == @as(f64, @floatFromInt(ntls_threads))) break;
+        _ = ctx.evaluate("$drainRunLoop()") catch |err| {
+            const msg_txt = if (ctx.exception) |ex| blk: {
+                var render = ctx.interpreter();
+                break :blk render.toStringV(ex) catch "<unstringifiable>";
+            } else "<none>";
+            std.debug.print("seed {d}: worker terminate/ThreadLocal asyncHold cleanup poll drain threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+            return false;
+        };
+    }
     const cleanup_src = try std.fmt.allocPrint(
         gpa,
         \\(() => {{
@@ -16705,6 +16852,24 @@ pub fn main(init: std.process.Init) !void {
         if (mmwcfail != 0) std.process.exit(1);
         return;
     };
+    // `threadfuzz midgcworkertlsasyncholdcleanup <iters> <seed>`: focused
+    // mid-script parallel-GC repro for isolated Worker termination overlapping
+    // ThreadLocal hidden roots, no-fn asyncHold release delivery, parked
+    // property/condition waiters, post-sweep rejection release, top-level
+    // failure, and exact cleanup through a finishing sweep.
+    if (first) |a| if (std.mem.eql(u8, a, "midgcworkertlsasyncholdcleanup")) {
+        if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch 1;
+        if (args.next()) |b| base_seed = std.fmt.parseInt(u64, b, 10) catch 1;
+        var mtahfail: usize = 0;
+        var mtahi: usize = 0;
+        while (mtahi < iters) : (mtahi += 1) {
+            const seed = base_seed +% mtahi;
+            if (!(try runMidScriptWorkerTerminateThreadLocalAsyncHoldCleanupGc(gpa, seed))) mtahfail += 1;
+        }
+        std.debug.print("threadfuzz midgcworkertlsasyncholdcleanup: {d} programs from seed {d}, {d} failures\n", .{ iters, base_seed, mtahfail });
+        if (mtahfail != 0) std.process.exit(1);
+        return;
+    };
     // `threadfuzz midgcweak <iters> <seed>`: focused mid-script parallel-GC
     // repro for WeakMap/WeakSet dead-key pruning, live ephemeron values, and
     // FinalizationRegistry unregister compaction while sync peers are parked.
@@ -17009,9 +17174,10 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runMidScriptModuleWorkerExceptionCleanupGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptWorkerCloseTerminateGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptModuleWorkerCloseTerminateGc(gpa, seed))) mfail += 1;
+            if (!(try runMidScriptWorkerTerminateThreadLocalAsyncHoldCleanupGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptWeakCollectionGc(gpa, seed))) mfail += 1;
         }
-        std.debug.print("threadfuzz midgc: {d} programs from seed {d}, {d} failures\n", .{ iters * 25, base_seed, mfail });
+        std.debug.print("threadfuzz midgc: {d} programs from seed {d}, {d} failures\n", .{ iters * 26, base_seed, mfail });
         if (mfail != 0) std.process.exit(1);
         return;
     };

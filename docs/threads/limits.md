@@ -305,7 +305,12 @@ context APIs.
   proving the same Worker progress and cleanup oracle, plus script/module
   Worker close/terminate subprograms that preserve exact FIFO drain/drop,
   post-close drop, post-terminate silence, joined roots, asyncJoin reactions,
-  and cleanup count/sum through the finishing sweep. Sync-wait pump points
+  and cleanup count/sum through the finishing sweep, plus a Worker/ThreadLocal/
+  asyncHold teardown subprogram where isolated Worker termination overlaps
+  `ThreadLocal` hidden roots, no-fn `Lock.asyncHold()` release delivery, parked
+  property/condition waiters, post-sweep rejection release, top-level failure,
+  rejected `asyncJoin` observers, and exact cleanup through a finishing sweep.
+  Sync-wait pump points
   must execute the async grants during the
   same allocation-pressure window that produces a finishing parallel sweep, and
   the `waitAsync` reaction must run intact after notification. Join-side
@@ -342,8 +347,9 @@ context APIs.
   record, keeps creator-owned `SharedArrayBuffer` and `ArrayBuffer` storage live
   through unjoined Thread completion records and delayed `asyncJoin` observers,
   verifies isolated script/module Worker/SAB progress plus script/module Worker
-  handler-exception recovery and close/terminate drain/drop while shared-realm
-  cleanup roots are swept, and
+  handler-exception recovery, close/terminate drain/drop, and
+  Worker/ThreadLocal/asyncHold teardown while shared-realm cleanup roots are
+  swept, and
   verifies exact `FinalizationRegistry` cleanup count/sum delivery afterward. The lifecycle
   profile now adds deterministic termination storms,
   script Worker/thread retained-`SharedArrayBuffer` overlap, simple-import,

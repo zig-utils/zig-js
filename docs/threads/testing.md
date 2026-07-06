@@ -234,6 +234,11 @@ shared-realm cleanup oracle through the finishing sweep, adds script and module
 Worker close/terminate subprograms that keep exact FIFO drain/drop ordering,
 post-close drop, post-terminate receive silence, shared-realm joined roots,
 asyncJoin reactions, and cleanup count/sum live across the finishing sweep,
+adds a Worker/ThreadLocal/asyncHold teardown subprogram that composes isolated
+Worker termination with `ThreadLocal` hidden roots, no-fn `Lock.asyncHold()`
+release-function delivery, parked property/condition waiters, post-sweep
+rejection release, top-level failure, rejected `asyncJoin` observers, and exact
+cleanup through a finishing sweep,
 adds a weak-collection subprogram that parks property
 `Atomics.wait`, `Condition.wait`, and contended `Lock.hold` peers while live
 WeakMap values are reachable only through live weak keys, dead WeakMap/WeakSet
@@ -249,7 +254,7 @@ join-termination unit witness that checks parked-state/mutex cleanup, then
 requires exact script completion or exact expected termination plus at least one
 finishing parallel sweep and exact
 `FinalizationRegistry` cleanup count/sum delivery plus unregister-token
-suppression after a quiescent collect. Each seed currently runs 25 deterministic
+suppression after a quiescent collect. Each seed currently runs 26 deterministic
 mid-GC subprograms. The
 lifecycle profile
 (`-Dfuzz-lifecycle=true`) adds deterministic resizable `ArrayBuffer` /
