@@ -112,6 +112,14 @@ Known performance/maturity work:
   backing as one stable lifecycle state object instead of three separate GPA
   objects. Existing internal pointers still target the same subobjects, but
   create/destroy-heavy embedders pay fewer allocator calls per GC context.
+- No-GIL context bootstrap now keeps the GC heap and cell backing in their
+  single-mutator allocation mode until all globals and the `Thread` API are
+  installed, then enables parallel heap/allocation locking immediately before
+  returning the context. The realm is still unobservable during bootstrap, so
+  public semantics are unchanged; locally this moved the `gc-profile`
+  `threaded no-gil` create column from roughly 14.2 ms/context to roughly
+  12.5 ms/context while the returned context still reports parallel heap and
+  backing mode.
 - Tight-loop per-scope allocation in the tree-walker is largely addressed: a
   `for`/`for-of`/`for-in` loop reuses one per-iteration binding environment when
   no closure captures it (keyed off `Environment.captured`), a block or a switch
@@ -145,7 +153,10 @@ Known performance/maturity work:
   allocation skips slab chunks whose bump range is already exhausted, and the
   object-sized 1024/2048-byte buckets use larger chunks so the profile exposes
   reduced object-cell chunk churn separately from remaining create/destroy
-  wall-clock costs.
+  wall-clock costs. The no-GIL bootstrap row should also be read against the
+  explicit parallel-lock deferral above: returned contexts are fully parallel,
+  but private global/API installation no longer measures the atomic allocator
+  lock on every cell allocation.
 - Mid-script parallel GC remains abort-safe. Sync wait/lock/condition peers are
   not treated as frozen parked stacks; their lock-free pump points now service
   root publication, and the collector waits long enough for one bounded park

@@ -1149,13 +1149,16 @@ pub const Context = struct {
             gc_state.binding = .{ .context = self };
             // GC cells are individually collectable, but their allocation shape
             // is regular: one 16-byte-aligned slab per cell. Use the reusable
-            // size-class backing for every GC mode. Under parallel_gc it locks
-            // internally, so multiple no-GIL mutators can allocate cells at once.
-            gc_state.backing = .{ .inner = gpa, .parallel = options.parallel_gc };
+            // size-class backing for every GC mode. Keep the heap/backing in
+            // single-mutator mode during private context bootstrap; no Thread
+            // can observe the realm until createWithTestingOptions returns, and
+            // delaying these locks keeps no-GIL context creation on the fast
+            // allocation path. Parallel mode is enabled immediately before
+            // returning below.
+            gc_state.backing = .{ .inner = gpa, .parallel = false };
             const cell_backing = gc_state.backing.allocator();
             gc_state.heap = GcHeap.init(cell_backing, &gc_state.binding);
             const h = &gc_state.heap;
-            if (options.parallel_gc) h.setParallel(true);
             // GC scratch (`mark_stack`/`barrier_buf`) is touched by both a
             // concurrent marker thread and the mutator under M3, so it must use
             // a thread-safe allocator distinct from the (mutator-only) cell
@@ -1170,11 +1173,6 @@ pub const Context = struct {
             self.gc_state = gc_state;
             // Single-mutator only for now: concurrent marking + no peer mutators.
             self.gc_concurrent = options.concurrent_gc and !options.enable_threads;
-            // Turn on the parallel/concurrent synchronization protocols process-
-            // wide as one unit, so they can never drift: needed only when the
-            // marker runs concurrently (concurrent_gc) or mutators run in parallel
-            // (parallel_gc). The default engine leaves them no-ops (relaxed loads).
-            if (options.concurrent_gc or options.parallel_gc) setParallelSyncEnabled(true);
         }
         // Route all cell allocation (the global object + TDZ sentinel,
         // installGlobals, and the mirror loop below) through the GC when
@@ -1243,6 +1241,17 @@ pub const Context = struct {
             g.registerPark(stack_scan.parkRecord());
             try jsthread.installThreadAPI(self);
         }
+        if (options.parallel_gc) {
+            if (self.gc) |h| h.setParallel(true);
+            if (self.gc_cell_backing) |backing| backing.parallel = true;
+        }
+        // Turn on the parallel/concurrent synchronization protocols process-wide
+        // as one unit, so they can never drift: needed only when the marker runs
+        // concurrently (concurrent_gc) or mutators run in parallel (parallel_gc).
+        // The default engine leaves them no-ops (relaxed loads). Creation itself
+        // is private, so enable these after installing all builtins and before the
+        // context can be observed by user code.
+        if (options.concurrent_gc or options.parallel_gc) setParallelSyncEnabled(true);
         return self;
     }
 
@@ -8559,6 +8568,8 @@ test "Context threads run parallel by default; gil option opts into serialized m
         const v = try ctx.evaluate("let s = 0; for (let i = 0; i < 100; i++) s += i; s");
         try std.testing.expectEqual(@as(f64, 4950), v.asNum());
         try std.testing.expect(ctx.parallel_js); // parallel is the default
+        try std.testing.expect(ctx.gc.?.parallel);
+        try std.testing.expect(ctx.gc_cell_backing.?.parallel);
     }
     // Opt-out: gil => the serialized (GIL) path.
     {

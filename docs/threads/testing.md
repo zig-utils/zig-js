@@ -477,8 +477,11 @@ stats accounting, multi-chunk maintained-counter snapshots, bucket attribution,
 bulk-teardown behavior, and bucket-shaped delegated side frees during teardown.
 `enable_gc: heap binding and cell backing share one lifecycle allocation` covers
 the context-lifecycle reduction where the GC heap, root-tracing binding, and cell
-backing live in one stable state allocation instead of three separate GPA
-objects.
+backing live in one stable state object instead of three separate GPA
+allocations. The public thread-semantics unit also asserts that
+`Context.createWith(.{ .enable_threads = true })` returns with both the GC heap
+and cell backing in parallel mode, so the bootstrap fast path that delays those
+locks until the context is observable cannot silently weaken no-GIL semantics.
 The unit suite also covers live `SharedArrayBuffer` retain release during
 context teardown across arena, no-GIL threaded, and `.gil = true` contexts.
 Collection-helper removal witnesses live in the same unit suite:

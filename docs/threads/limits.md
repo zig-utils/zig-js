@@ -91,8 +91,12 @@ context APIs.
   thread-safe. GC-enabled context creation now groups the heap, root-tracing
   binding, and cell backing in one stable lifecycle state allocation instead of
   three separate GPA objects, reducing create/destroy allocator churn while
-  keeping the existing internal pointers stable. Live `SharedArrayBuffer` retain
-  teardown is covered for arena, no-GIL threaded, and `.gil = true` contexts.
+  keeping the existing internal pointers stable. No-GIL context bootstrap also
+  defers GC heap and cell-backing parallel locking until the fully initialized
+  context is about to be returned; the context is private during bootstrap, and
+  the returned no-GIL context still has parallel heap/backing mode enabled.
+  Live `SharedArrayBuffer` retain teardown is covered for arena, no-GIL
+  threaded, and `.gil = true` contexts.
   Correctness is gated, but tight-loop block-scope allocation and
   create/destroy-heavy context lifecycles are still slower under the GC path than
   under the old arena model. `zig build gc-profile` remains the repeatable
