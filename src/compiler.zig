@@ -548,6 +548,81 @@ pub const Compiler = struct {
         return chunk;
     }
 
+    const ShadowBind = struct { count: u32 = 0, lexical: bool = false };
+
+    fn shadowAdd(arena: std.mem.Allocator, m: *std.StringHashMapUnmanaged(ShadowBind), name: []const u8, lexical: bool) CompileError!void {
+        if (name.len == 0) return;
+        const gop = try m.getOrPut(arena, name);
+        if (!gop.found_existing) gop.value_ptr.* = .{};
+        gop.value_ptr.count += 1;
+        if (lexical) gop.value_ptr.lexical = true;
+    }
+
+    fn shadowScanPattern(arena: std.mem.Allocator, m: *std.StringHashMapUnmanaged(ShadowBind), pattern: *Node, lexical: bool) CompileError!void {
+        switch (pattern.*) {
+            .identifier => |name| try shadowAdd(arena, m, name, lexical),
+            .obj_pattern => |p| {
+                for (p.props) |prop| try shadowScanPattern(arena, m, prop.target, lexical);
+                if (p.rest) |r| if (r.* == .identifier) try shadowAdd(arena, m, r.identifier, lexical);
+            },
+            .arr_pattern => |p| {
+                for (p.elems) |elem| if (elem.target) |t| try shadowScanPattern(arena, m, t, lexical);
+                if (p.rest) |rest| try shadowScanPattern(arena, m, rest, lexical);
+            },
+            else => {},
+        }
+    }
+
+    fn shadowScanStmt(arena: std.mem.Allocator, m: *std.StringHashMapUnmanaged(ShadowBind), node: *Node) CompileError!void {
+        switch (node.*) {
+            .var_decl => |d| try shadowAdd(arena, m, d.name, d.kind != .@"var"),
+            .destructure_decl => |d| try shadowScanPattern(arena, m, d.pattern, d.kind != .@"var"),
+            .func_decl => |f| try shadowAdd(arena, m, f.name, false), // nested fn has its own scope; don't descend
+            .block => |stmts| for (stmts) |s| try shadowScanStmt(arena, m, s),
+            .decl_group => |stmts| for (stmts) |s| try shadowScanStmt(arena, m, s),
+            .if_stmt => |s| {
+                try shadowScanStmt(arena, m, s.consequent);
+                if (s.alternate) |a| try shadowScanStmt(arena, m, a);
+            },
+            .while_stmt => |s| try shadowScanStmt(arena, m, s.body),
+            .do_while_stmt => |s| try shadowScanStmt(arena, m, s.body),
+            .for_stmt => |f| {
+                if (f.init) |i| try shadowScanStmt(arena, m, i);
+                try shadowScanStmt(arena, m, f.body);
+            },
+            .for_in => |f| {
+                if (f.decl_kind) |k| try shadowScanPattern(arena, m, f.target, k != .@"var");
+                try shadowScanStmt(arena, m, f.body);
+            },
+            .switch_stmt => |s| for (s.cases) |c| for (c.body) |st| try shadowScanStmt(arena, m, st),
+            .labeled_stmt => |s| try shadowScanStmt(arena, m, s.body),
+            .try_stmt => |t| {
+                try shadowScanStmt(arena, m, t.block);
+                if (t.catch_param) |p| try shadowScanPattern(arena, m, p, true); // catch binding is lexical
+                if (t.catch_block) |cb| try shadowScanStmt(arena, m, cb);
+                if (t.finally_block) |fb| try shadowScanStmt(arena, m, fb);
+            },
+            else => {},
+        }
+    }
+
+    /// The VM's `FnScope` keys locals by name across ALL block scopes (flat,
+    /// block-transparent slots), so two DIFFERENT bindings that share a name —
+    /// nested `let` shadowing, a catch param shadowing an outer binding, a `let`
+    /// shadowing a `var`/param — would collapse onto one slot and clobber each
+    /// other (and there is no TDZ). Detect any name introduced by a lexical
+    /// binding that also appears as another binding, and keep such a function on
+    /// the tree-walker, which scopes blocks correctly. Conservative: also bails
+    /// harmless same-name sibling blocks, which only forgoes tiering.
+    fn functionHasShadowableLexical(arena: std.mem.Allocator, fnode: *const ast.FunctionNode) CompileError!bool {
+        var m: std.StringHashMapUnmanaged(ShadowBind) = .empty;
+        for (fnode.params) |p| try shadowAdd(arena, &m, p.name, false);
+        if (!fnode.is_expr_body) try shadowScanStmt(arena, &m, fnode.body);
+        var it = m.iterator();
+        while (it.next()) |e| if (e.value_ptr.lexical and e.value_ptr.count >= 2) return true;
+        return false;
+    }
+
     pub const PlainFunctionCode = struct {
         chunk: *Chunk,
         local_count: u32,
@@ -556,6 +631,9 @@ pub const Compiler = struct {
     pub fn compilePlainFunction(arena: std.mem.Allocator, fnode: *const ast.FunctionNode) CompileError!PlainFunctionCode {
         if (fnode.is_generator or fnode.is_async) return error.Unsupported;
         if (fnode.is_strict and functionHasBlockNestedFuncDecl(fnode)) return error.Unsupported;
+        // The flat slot model can't represent a lexical binding shadowing another
+        // same-named binding; keep those on the tree-walker (correct block scopes).
+        if (try functionHasShadowableLexical(arena, fnode)) return error.Unsupported;
         const scope = try arena.create(FnScope);
         scope.* = .{ .parent = null };
         for (fnode.params) |p| {
