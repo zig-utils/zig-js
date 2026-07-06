@@ -714,9 +714,10 @@ pub const Compiler = struct {
                 // A `return` lexically inside a `try`/`catch`/`finally` must run
                 // the enclosing finally block(s) first: `abrupt_return` unwinds
                 // the handler stack, runs each finally carrying a return
-                // completion, and returns once they finish (only reachable inside
-                // a generator, since compileTry is generator-only).
-                if (self.finally_depth > 0 and (self.in_generator or self.in_async)) {
+                // completion, and returns once they finish. This applies to plain
+                // functions too (a return in a `finally`-guarded try is not a tail
+                // call), not only generators — a bare `ret` would skip the finally.
+                if (self.finally_depth > 0) {
                     if (maybe) |e| {
                         try self.compileExpr(e);
                         if (self.in_generator and self.in_async) _ = try self.chunk.emit(.await_op, 0);
