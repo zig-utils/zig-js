@@ -360,8 +360,8 @@ context APIs.
   script Worker/thread retained-`SharedArrayBuffer` overlap, simple-import,
   diamond-shaped, and fanout/rejoin module Worker/thread overlap with exact
   Atomics counter oracles, Worker/thread/finalization scheduling on one retained
-  SAB, Worker termination interleaved with exact shared-realm finalization
-  cleanup on a retained SAB, Worker termination while top-level failure tears
+  SAB, script and module Worker termination interleaved with exact shared-realm
+  finalization cleanup on a retained SAB, Worker termination while top-level failure tears
   down parked shared-realm `Thread`s, pending `asyncJoin` rejection reactions,
   and already-ready cleanup jobs on the same retained SAB, module Worker
   termination with the same shared-realm teardown/reaction/cleanup oracle, exact

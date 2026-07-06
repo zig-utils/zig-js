@@ -269,8 +269,8 @@ exact Atomics counter oracles for script
 `Worker` plus simple-import, diamond-shaped, and fanout/rejoin module `Worker`
 overlap with shared-realm `Thread`s on one retained `SharedArrayBuffer`,
 Worker/thread/finalization scheduling on one retained SAB, exact cleanup after
-terminating spinning Workers that share the retained SAB, Worker termination
-while top-level failure tears down parked shared-realm `Thread`s, pending
+terminating spinning script and module Workers that share the retained SAB,
+Worker termination while top-level failure tears down parked shared-realm `Thread`s, pending
 `asyncJoin` rejection reactions, and already-ready cleanup jobs on the same
 retained SAB, module Worker termination with the same shared-realm
 teardown/reaction/cleanup oracle, exact FIFO drain/drop ordering for mixed
