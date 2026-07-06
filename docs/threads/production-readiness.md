@@ -236,15 +236,15 @@ Known performance/maturity work:
   queue mutex before preparing no-fn async regrants, so release-function
   creation and realm task enqueueing no longer run inside that queue critical
   section; mixed sync/async wakeups keep the existing sync handoff ordering.
-  Notify also records woken sync/async entries in one pre-sized wake list rather
-  than allocating separate per-kind lists for each notification. Contiguous
-  async condition regrants for the same lock are prepared in fixed-size stack
-  batches and applied under one lock acquisition per batch, so `notifyAll()`
-  no longer retakes that lock once per async waiter. Ready async-condition
-  reacquire jobs are appended to the realm task queue in FIFO bursts, amortizing
-  the shared API lock when a notification wakes multiple lock groups, and sync
-  handoff completion uses a pending-waiter countdown instead of rescanning the
-  wake list until every ticket acknowledges.
+  Notify records woken sync/async entries in one FIFO wake list; the common
+  small-wake path uses a fixed stack buffer, and only larger notifications
+  allocate a pre-sized heap list. Contiguous async condition regrants for the
+  same lock are prepared in fixed-size stack batches and applied under one lock
+  acquisition per batch, so `notifyAll()` no longer retakes that lock once per
+  async waiter. Ready async-condition reacquire jobs are appended to the realm
+  task queue in FIFO bursts, amortizing the shared API lock when a notification
+  wakes multiple lock groups, and sync handoff completion uses a pending-waiter
+  countdown instead of rescanning the wake list until every ticket acknowledges.
 - Property-mode `Atomics.notify` stable-compacts matching waiter queues in one
   pass. Heap-owned sync wait tickets are unlinked before signal, so awakened
   peers no longer each rescan and front-shift the table on return; matching `waitAsync`

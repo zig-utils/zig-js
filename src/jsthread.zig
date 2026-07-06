@@ -1521,13 +1521,17 @@ fn condNotify(self: *Interpreter, rec: *CondRecord, count: usize) value.HostErro
     // ONE FIFO domain: wake in arrival order regardless of kind.
     const io = agent.engineIo();
     var n: usize = 0;
-    var woken: std.ArrayListUnmanaged(CondEntry) = .empty;
-    defer woken.deinit(self.arena);
+    var woken_stack: [64]CondEntry = undefined;
+    var woken_stack_len: usize = 0;
+    var woken_heap: std.ArrayListUnmanaged(CondEntry) = .empty;
+    defer woken_heap.deinit(self.arena);
     rec.mutex.lockUncancelable(io);
     var locked = true;
     defer if (locked) rec.mutex.unlock(io);
     const available = rec.queue.items.len - rec.queue_head;
-    try woken.ensureTotalCapacity(self.arena, @min(count, available));
+    const wake_cap = @min(count, available);
+    const use_heap_woken = wake_cap > woken_stack.len;
+    if (use_heap_woken) try woken_heap.ensureTotalCapacity(self.arena, wake_cap);
     var sync_count: usize = 0;
     while (n < count) {
         const entry = rec.popWaiter() orelse break;
@@ -1538,9 +1542,15 @@ fn condNotify(self: *Interpreter, rec: *CondRecord, count: usize) value.HostErro
             },
             .asynchronous => {},
         }
-        woken.appendAssumeCapacity(entry);
+        if (use_heap_woken) {
+            woken_heap.appendAssumeCapacity(entry);
+        } else {
+            woken_stack[woken_stack_len] = entry;
+            woken_stack_len += 1;
+        }
         n += 1;
     }
+    const woken: []const CondEntry = if (use_heap_woken) woken_heap.items else woken_stack[0..woken_stack_len];
 
     if (sync_count == 0) {
         // Async-only notifications do not need the sync notifyAll handoff.
@@ -1549,7 +1559,7 @@ fn condNotify(self: *Interpreter, rec: *CondRecord, count: usize) value.HostErro
         // condition critical section.
         rec.mutex.unlock(io);
         locked = false;
-        wakeAsyncCondWaiters(self, woken.items);
+        wakeAsyncCondWaiters(self, woken);
         return n;
     }
     rec.sync_handoff_pending = sync_count;
@@ -1557,7 +1567,7 @@ fn condNotify(self: *Interpreter, rec: *CondRecord, count: usize) value.HostErro
     // Mixed wakeups keep the old ordering shape: async regrants are prepared
     // before the sync handoff wait, while the condition mutex still serializes
     // the notify operation.
-    wakeAsyncCondWaiters(self, woken.items);
+    wakeAsyncCondWaiters(self, woken);
     rec.cond.broadcast(io);
     // Depth-free handoff (notify-all-shared-lock) + FIFO against
     // async regrants (condition-async-wait): loop until every woken

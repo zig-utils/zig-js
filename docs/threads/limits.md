@@ -172,12 +172,13 @@ context APIs.
   timeout fallback. Async-only condition notifications now move no-fn async
   regrant preparation outside the condition queue mutex; mixed sync/async
   wakeups keep the existing sync handoff ordering. Notify records woken
-  sync/async entries in one pre-sized wake list instead of allocating separate
-  per-kind wake lists for each notification. Contiguous async condition
-  regrants for the same lock are prepared in fixed-size stack batches and
-  applied under one lock acquisition per batch, so `notifyAll()` no longer
-  retakes that lock once per async waiter. Ready async-condition reacquire jobs
-  are appended to the realm task queue in FIFO bursts, amortizing the shared API
+  sync/async entries in one FIFO wake list; small notifications use a fixed
+  stack buffer and only larger notifications allocate a pre-sized heap list.
+  Contiguous async condition regrants for the same lock are prepared in
+  fixed-size stack batches and applied under one lock acquisition per batch, so
+  `notifyAll()` no longer retakes that lock once per async waiter. Ready
+  async-condition reacquire jobs are appended to the realm task queue in FIFO
+  bursts, amortizing the shared API
   lock when a notification wakes multiple lock groups, and sync handoff
   completion uses a pending-waiter countdown instead of rescanning that wake
   list until every ticket acknowledges.

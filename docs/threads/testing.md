@@ -415,7 +415,7 @@ tracks acknowledged tickets` covers the no-rescan sync notify handoff counter.
 consumed-slot retry, and front-stash retry without front shifts, while
 `jsthread traces queued async hold task roots` covers the GC roots behind both
 queued realm tasks and retry-front lock grants. The public condition corpus
-cases exercise the single wake-list notify path for async-only and sync
+cases exercise the stack-buffered wake-list notify path for async-only and sync
 notify-all wakes: `api/condition-async-wait.js`,
 `sync/condition-wait-notify.js`, and
 `sync/condition-notify-all-multi-waiter.js`. The same notify path batches
