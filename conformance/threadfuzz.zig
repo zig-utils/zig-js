@@ -2920,11 +2920,26 @@ fn runWorkerTerminateFinalizationInterleavingKind(
 }
 
 fn runWorkerTerminateThreadTeardownInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
+    return runWorkerTerminateThreadTeardownInterleavingKind(gpa, seed, false);
+}
+
+fn runMidScriptWorkerTerminateThreadTeardownGc(gpa: std.mem.Allocator, seed: u64) !bool {
+    return runWorkerTerminateThreadTeardownInterleavingKind(gpa, seed, true);
+}
+
+fn runWorkerTerminateThreadTeardownInterleavingKind(
+    gpa: std.mem.Allocator,
+    seed: u64,
+    comptime midgc: bool,
+) !bool {
     var prng = std.Random.DefaultPrng.init(seed ^ 0x7774_6572_6d5f_7464);
     const r = prng.random();
     const nworkers = 1 + r.uintLessThan(usize, 2);
     const nthreads = 2 + r.uintLessThan(usize, 4);
     const ncleanup = 10 + r.uintLessThan(usize, 10);
+    const gc_rounds = if (midgc) 6 + r.uintLessThan(usize, 5) else 0;
+    const gc_per_round = if (midgc) 600 + r.uintLessThan(usize, 400) else 0;
+    const gc_spin_iters = if (midgc) 1800 + r.uintLessThan(usize, 3000) else 0;
     const seed_marker = seed % 10_000;
     const cleanup_base = 410_000 + seed_marker;
     const reject_base = 420_000 + seed_marker;
@@ -2936,7 +2951,16 @@ fn runWorkerTerminateThreadTeardownInterleaving(gpa: std.mem.Allocator, seed: u6
     var ti: usize = 0;
     while (ti < nthreads) : (ti += 1) expected_reject_sum += reject_base + ti;
 
-    const ctx = js.Context.createWith(gpa, .{ .enable_threads = true, .enable_gc = true }) catch {
+    const ctx = (if (midgc)
+        js.Context.createWithTestingOptions(gpa, .{
+            .enable_threads = true,
+            .enable_gc = true,
+            .parallel_gc = true,
+            .parallel_js = true,
+            .parallel_midscript_gc = true,
+        })
+    else
+        js.Context.createWith(gpa, .{ .enable_threads = true, .enable_gc = true })) catch {
         std.debug.print("seed {d}: worker terminate/thread teardown context creation failed\n", .{seed});
         return false;
     };
@@ -3054,6 +3078,35 @@ fn runWorkerTerminateThreadTeardownInterleaving(gpa: std.mem.Allocator, seed: u6
         return false;
     }
 
+    const midgc_pressure_src: []const u8 = if (midgc)
+        try std.fmt.allocPrint(
+            gpa,
+            \\  if ({d} > 0) {{
+            \\    const keep = [];
+            \\    const midRoot = {{ seed: {d}, label: 'midgc-worker-terminate-thread-teardown-root' }};
+            \\    for (let round = 0; round < {d}; round++) {{
+            \\      for (let i = 0; i < {d}; i++) {{
+            \\        keep.push({{
+            \\          round,
+            \\          i,
+            \\          nested: {{ midRoot, value: i + round }},
+            \\          text: 'midgc-worker-terminate-thread-teardown-' + round + '-' + i,
+            \\        }});
+            \\      }}
+            \\      let spin = 0;
+            \\      for (let j = 0; j < {d}; j++) spin = (spin + j + round) & 0x3fffffff;
+            \\      if (spin < 0) keep.push({{ impossible: true }});
+            \\    }}
+            \\    if (typeof gc === 'function') gc();
+            \\  }}
+            \\
+        ,
+            .{ gc_rounds, seed_marker, gc_rounds, gc_per_round, gc_spin_iters },
+        )
+    else
+        "";
+    defer if (midgc) gpa.free(midgc_pressure_src);
+
     const fail_src = try std.fmt.allocPrint(
         gpa,
         \\(() => {{
@@ -3085,19 +3138,32 @@ fn runWorkerTerminateThreadTeardownInterleaving(gpa: std.mem.Allocator, seed: u6
         \\  }}
         \\  while (Atomics.load(gate, 'ready') < {d})
         \\    Atomics.wait(gate, 'ready', Atomics.load(gate, 'ready'), 1);
+        \\{s}
         \\  throw new Error('threadfuzz worker terminate/thread teardown {d}');
         \\}})();
         \\
     ,
-        .{ nthreads, reject_base, seed, reject_base, seed, nthreads, seed },
+        .{ nthreads, reject_base, seed, reject_base, seed, nthreads, midgc_pressure_src, seed },
     );
     defer gpa.free(fail_src);
+    const before_attempts = if (midgc) ctx.gc_par_attempts.load(.monotonic) else 0;
+    const before_collections = if (midgc) ctx.gc_par_collections.load(.monotonic) else 0;
     if (ctx.evaluate(fail_src)) |_| {
         std.debug.print("seed {d}: worker terminate/thread teardown failure script returned normally\n", .{seed});
         return false;
     } else |err| {
         if (err != error.Throw) {
             std.debug.print("seed {d}: worker terminate/thread teardown failed with {s}\n", .{ seed, @errorName(err) });
+            return false;
+        }
+    }
+    if (midgc) {
+        if (ctx.gc_par_attempts.load(.monotonic) <= before_attempts) {
+            std.debug.print("seed {d}: midgc worker terminate/thread teardown did not attempt a parallel collection\n", .{seed});
+            return false;
+        }
+        if (ctx.gc_par_collections.load(.monotonic) <= before_collections) {
+            std.debug.print("seed {d}: midgc worker terminate/thread teardown did not finish a parallel collection\n", .{seed});
             return false;
         }
     }
@@ -3110,6 +3176,32 @@ fn runWorkerTerminateThreadTeardownInterleaving(gpa: std.mem.Allocator, seed: u6
         std.debug.print("seed {d}: worker terminate/thread teardown drain threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
         return false;
     };
+    const settle_src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  for (let spins = 0; globalThis.__workerTermThreadRejectCount < {d} && spins < 2000; spins++) {{
+        \\    $drainRunLoop();
+        \\    drainMicrotasks();
+        \\  }}
+        \\  return globalThis.__workerTermThreadRejectCount;
+        \\}})();
+        \\
+    ,
+        .{nthreads},
+    );
+    defer gpa.free(settle_src);
+    const settled = ctx.evaluate(settle_src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: worker terminate/thread teardown settle threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!settled.isNumber() or settled.asNum() != @as(f64, @floatFromInt(nthreads))) {
+        std.debug.print("seed {d}: worker terminate/thread teardown settled got {d}, expected {d}\n", .{ seed, if (settled.isNumber()) settled.asNum() else -1, nthreads });
+        return false;
+    }
     const check_src = try std.fmt.allocPrint(
         gpa,
         \\(() => {{
@@ -3924,11 +4016,26 @@ fn runWorkerTerminateWaitAsyncCleanupInterleavingKind(
 }
 
 fn runModuleWorkerTerminateThreadTeardownInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
+    return runModuleWorkerTerminateThreadTeardownInterleavingKind(gpa, seed, false);
+}
+
+fn runMidScriptModuleWorkerTerminateThreadTeardownGc(gpa: std.mem.Allocator, seed: u64) !bool {
+    return runModuleWorkerTerminateThreadTeardownInterleavingKind(gpa, seed, true);
+}
+
+fn runModuleWorkerTerminateThreadTeardownInterleavingKind(
+    gpa: std.mem.Allocator,
+    seed: u64,
+    comptime midgc: bool,
+) !bool {
     var prng = std.Random.DefaultPrng.init(seed ^ 0x6d6f_6474_6572_6d74);
     const r = prng.random();
     const nworkers = 1 + r.uintLessThan(usize, 2);
     const nthreads = 2 + r.uintLessThan(usize, 4);
     const ncleanup = 10 + r.uintLessThan(usize, 10);
+    const gc_rounds = if (midgc) 6 + r.uintLessThan(usize, 5) else 0;
+    const gc_per_round = if (midgc) 600 + r.uintLessThan(usize, 400) else 0;
+    const gc_spin_iters = if (midgc) 1800 + r.uintLessThan(usize, 3000) else 0;
     const seed_marker = seed % 10_000;
     const cleanup_base = 430_000 + seed_marker;
     const reject_base = 440_000 + seed_marker;
@@ -3940,7 +4047,16 @@ fn runModuleWorkerTerminateThreadTeardownInterleaving(gpa: std.mem.Allocator, se
     var ti: usize = 0;
     while (ti < nthreads) : (ti += 1) expected_reject_sum += reject_base + ti;
 
-    const ctx = js.Context.createWith(gpa, .{ .enable_threads = true, .enable_gc = true }) catch {
+    const ctx = (if (midgc)
+        js.Context.createWithTestingOptions(gpa, .{
+            .enable_threads = true,
+            .enable_gc = true,
+            .parallel_gc = true,
+            .parallel_js = true,
+            .parallel_midscript_gc = true,
+        })
+    else
+        js.Context.createWith(gpa, .{ .enable_threads = true, .enable_gc = true })) catch {
         std.debug.print("seed {d}: module worker terminate/thread teardown context creation failed\n", .{seed});
         return false;
     };
@@ -4048,6 +4164,35 @@ fn runModuleWorkerTerminateThreadTeardownInterleaving(gpa: std.mem.Allocator, se
         return false;
     }
 
+    const midgc_pressure_src: []const u8 = if (midgc)
+        try std.fmt.allocPrint(
+            gpa,
+            \\  if ({d} > 0) {{
+            \\    const keep = [];
+            \\    const midRoot = {{ seed: {d}, label: 'midgc-module-worker-terminate-thread-teardown-root' }};
+            \\    for (let round = 0; round < {d}; round++) {{
+            \\      for (let i = 0; i < {d}; i++) {{
+            \\        keep.push({{
+            \\          round,
+            \\          i,
+            \\          nested: {{ midRoot, value: i + round }},
+            \\          text: 'midgc-module-worker-terminate-thread-teardown-' + round + '-' + i,
+            \\        }});
+            \\      }}
+            \\      let spin = 0;
+            \\      for (let j = 0; j < {d}; j++) spin = (spin + j + round) & 0x3fffffff;
+            \\      if (spin < 0) keep.push({{ impossible: true }});
+            \\    }}
+            \\    if (typeof gc === 'function') gc();
+            \\  }}
+            \\
+        ,
+            .{ gc_rounds, seed_marker, gc_rounds, gc_per_round, gc_spin_iters },
+        )
+    else
+        "";
+    defer if (midgc) gpa.free(midgc_pressure_src);
+
     const fail_src = try std.fmt.allocPrint(
         gpa,
         \\(() => {{
@@ -4079,19 +4224,32 @@ fn runModuleWorkerTerminateThreadTeardownInterleaving(gpa: std.mem.Allocator, se
         \\  }}
         \\  while (Atomics.load(gate, 'ready') < {d})
         \\    Atomics.wait(gate, 'ready', Atomics.load(gate, 'ready'), 1);
+        \\{s}
         \\  throw new Error('threadfuzz module worker terminate/thread teardown {d}');
         \\}})();
         \\
     ,
-        .{ nthreads, reject_base, seed, reject_base, seed, nthreads, seed },
+        .{ nthreads, reject_base, seed, reject_base, seed, nthreads, midgc_pressure_src, seed },
     );
     defer gpa.free(fail_src);
+    const before_attempts = if (midgc) ctx.gc_par_attempts.load(.monotonic) else 0;
+    const before_collections = if (midgc) ctx.gc_par_collections.load(.monotonic) else 0;
     if (ctx.evaluate(fail_src)) |_| {
         std.debug.print("seed {d}: module worker terminate/thread teardown failure script returned normally\n", .{seed});
         return false;
     } else |err| {
         if (err != error.Throw) {
             std.debug.print("seed {d}: module worker terminate/thread teardown failed with {s}\n", .{ seed, @errorName(err) });
+            return false;
+        }
+    }
+    if (midgc) {
+        if (ctx.gc_par_attempts.load(.monotonic) <= before_attempts) {
+            std.debug.print("seed {d}: midgc module worker terminate/thread teardown did not attempt a parallel collection\n", .{seed});
+            return false;
+        }
+        if (ctx.gc_par_collections.load(.monotonic) <= before_collections) {
+            std.debug.print("seed {d}: midgc module worker terminate/thread teardown did not finish a parallel collection\n", .{seed});
             return false;
         }
     }
@@ -4104,6 +4262,32 @@ fn runModuleWorkerTerminateThreadTeardownInterleaving(gpa: std.mem.Allocator, se
         std.debug.print("seed {d}: module worker terminate/thread teardown drain threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
         return false;
     };
+    const settle_src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  for (let spins = 0; globalThis.__moduleTermThreadRejectCount < {d} && spins < 2000; spins++) {{
+        \\    $drainRunLoop();
+        \\    drainMicrotasks();
+        \\  }}
+        \\  return globalThis.__moduleTermThreadRejectCount;
+        \\}})();
+        \\
+    ,
+        .{nthreads},
+    );
+    defer gpa.free(settle_src);
+    const settled = ctx.evaluate(settle_src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: module worker terminate/thread teardown settle threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!settled.isNumber() or settled.asNum() != @as(f64, @floatFromInt(nthreads))) {
+        std.debug.print("seed {d}: module worker terminate/thread teardown settled got {d}, expected {d}\n", .{ seed, if (settled.isNumber()) settled.asNum() else -1, nthreads });
+        return false;
+    }
     const check_src = try std.fmt.allocPrint(
         gpa,
         \\(() => {{
@@ -10731,9 +10915,9 @@ fn runWorkerTerminateThreadLocalAsyncHoldCleanupInterleavingKind(
     const ntls_threads = 2 + r.uintLessThan(usize, 3);
     const nrelease_threads = 2 + r.uintLessThan(usize, 3);
     const wait_timeout_ms = 1200 + r.uintLessThan(usize, 800);
-    const gc_rounds = if (midgc) 7 + r.uintLessThan(usize, 5) else 0;
-    const gc_per_round = if (midgc) 650 + r.uintLessThan(usize, 350) else 0;
-    const gc_spin_iters = if (midgc) 2200 + r.uintLessThan(usize, 3000) else 0;
+    const gc_rounds = if (midgc) 14 + r.uintLessThan(usize, 5) else 0;
+    const gc_per_round = if (midgc) 1200 + r.uintLessThan(usize, 500) else 0;
+    const gc_spin_iters = if (midgc) 2600 + r.uintLessThan(usize, 3200) else 0;
     const seed_marker = seed % 10_000;
     const tls_base = 960_000 + seed_marker;
     const release_base = 970_000 + seed_marker;
@@ -17410,6 +17594,23 @@ pub fn main(init: std.process.Init) !void {
         if (wtfail != 0) std.process.exit(1);
         return;
     };
+    // `threadfuzz midgcworkertermteardown <iters> <seed>`: focused
+    // mid-script parallel-GC repro for isolated Worker termination while
+    // shared-realm Threads, asyncJoin rejection reactions, and cleanup jobs
+    // survive a finishing sweep before top-level failure teardown.
+    if (first) |a| if (std.mem.eql(u8, a, "midgcworkertermteardown")) {
+        if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch 1;
+        if (args.next()) |b| base_seed = std.fmt.parseInt(u64, b, 10) catch 1;
+        var mwtfail: usize = 0;
+        var mwti: usize = 0;
+        while (mwti < iters) : (mwti += 1) {
+            const seed = base_seed +% mwti;
+            if (!(try runMidScriptWorkerTerminateThreadTeardownGc(gpa, seed))) mwtfail += 1;
+        }
+        std.debug.print("threadfuzz midgcworkertermteardown: {d} programs from seed {d}, {d} failures\n", .{ iters, base_seed, mwtfail });
+        if (mwtfail != 0) std.process.exit(1);
+        return;
+    };
     // `threadfuzz workertermcondasync <iters> <seed>`: focused lifecycle repro
     // for isolated Worker termination while a shared-realm top-level failure
     // tears down a parked Thread and condition async reacquire plus cleanup
@@ -17560,6 +17761,23 @@ pub fn main(init: std.process.Init) !void {
         }
         std.debug.print("threadfuzz moduletermteardown: {d} programs from seed {d}, {d} failures\n", .{ iters, base_seed, mtfail });
         if (mtfail != 0) std.process.exit(1);
+        return;
+    };
+    // `threadfuzz midgcmoduletermteardown <iters> <seed>`: focused
+    // mid-script parallel-GC repro for module Worker termination while
+    // shared-realm Threads, asyncJoin rejection reactions, and cleanup jobs
+    // survive a finishing sweep before top-level failure teardown.
+    if (first) |a| if (std.mem.eql(u8, a, "midgcmoduletermteardown")) {
+        if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch 1;
+        if (args.next()) |b| base_seed = std.fmt.parseInt(u64, b, 10) catch 1;
+        var mmtfail: usize = 0;
+        var mmti: usize = 0;
+        while (mmti < iters) : (mmti += 1) {
+            const seed = base_seed +% mmti;
+            if (!(try runMidScriptModuleWorkerTerminateThreadTeardownGc(gpa, seed))) mmtfail += 1;
+        }
+        std.debug.print("threadfuzz midgcmoduletermteardown: {d} programs from seed {d}, {d} failures\n", .{ iters, base_seed, mmtfail });
+        if (mmtfail != 0) std.process.exit(1);
         return;
     };
     // `threadfuzz midgcterm <iters> <seed>`: focused mid-script parallel-GC
@@ -18402,10 +18620,11 @@ pub fn main(init: std.process.Init) !void {
     // suppression, isolated script/module Worker/SAB progress plus handler-
     // exception recovery plus close/terminate FIFO drain/drop while
     // shared-realm cleanup roots are swept, and
-    // script/module Worker termination with child-owned typed-array waitAsync
-    // ticket abandonment plus pending asyncJoin reactions must survive that
-    // window. The oracle requires exact program completion or expected
-    // termination and at least one finishing parallel sweep.
+    // script/module Worker termination with shared-realm Thread teardown,
+    // child-owned typed-array waitAsync ticket abandonment, and pending
+    // asyncJoin reactions must survive that window. The oracle requires exact
+    // program completion or expected termination and at least one finishing
+    // parallel sweep.
     if (first) |a| if (std.mem.eql(u8, a, "midgc")) {
         iters = 20;
         if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch iters;
@@ -18448,6 +18667,8 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runMidScriptModuleWorkerCloseTerminateGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptWorkerTerminateFinalizationGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptModuleWorkerTerminateFinalizationGc(gpa, seed))) mfail += 1;
+            if (!(try runMidScriptWorkerTerminateThreadTeardownGc(gpa, seed))) mfail += 1;
+            if (!(try runMidScriptModuleWorkerTerminateThreadTeardownGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptWorkerTerminateConditionAsyncCleanupGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptModuleWorkerTerminateConditionAsyncCleanupGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptWorkerTerminateWaitAsyncCleanupGc(gpa, seed))) mfail += 1;
@@ -18456,7 +18677,7 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runMidScriptModuleWorkerTerminateThreadLocalAsyncHoldCleanupGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptWeakCollectionGc(gpa, seed))) mfail += 1;
         }
-        std.debug.print("threadfuzz midgc: {d} programs from seed {d}, {d} failures\n", .{ iters * 41, base_seed, mfail });
+        std.debug.print("threadfuzz midgc: {d} programs from seed {d}, {d} failures\n", .{ iters * 43, base_seed, mfail });
         if (mfail != 0) std.process.exit(1);
         return;
     };

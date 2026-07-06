@@ -335,7 +335,8 @@ as embedders exercise more threaded host patterns.
   handler-exception cleanup subprograms, script and module Worker
   close/terminate drain/drop subprograms, script and module Worker
   terminate/finalization cleanup subprograms, an async-hold release/waiter
-  cleanup subprogram, script and module Worker/Condition.asyncWait teardown
+  cleanup subprogram, script and module Worker/thread teardown cleanup
+  subprograms, script and module Worker/Condition.asyncWait teardown
   cleanup subprograms, script and module Worker/waitAsync teardown cleanup
   subprograms, script and module Worker/ThreadLocal/asyncHold teardown cleanup
   subprograms, a sync-wait burst
@@ -470,6 +471,10 @@ as embedders exercise more threaded host patterns.
   alive on one retained `SharedArrayBuffer` while shared-realm `Thread`s publish
   cleanup roots, asyncJoin observers, joined roots, and exact cleanup count/sum
   through the same finishing sweep before Worker termination.
+  The script and module Worker/thread teardown cleanup subprograms keep
+  shared-realm Threads, pending `asyncJoin` rejection reactions, and cleanup
+  jobs live through a finishing sweep while isolated Workers spin, then force
+  top-level failure teardown and verify exact rejection and cleanup oracles.
   The script and module Worker/Condition.asyncWait teardown cleanup subprograms
   keep a condition async reacquire ticket, parked `Thread`, isolated Worker
   progress, and cleanup jobs live through a finishing sweep before notification,
