@@ -45,9 +45,8 @@ The rest of this doc assumes **Path A**.
 zig-js already has (verified in `src/c_api.zig`): context lifecycle, evaluate,
 value predicates/conversions, `JSObjectMake`, property get/set/index,
 call/construct, `JSObjectMakeFunctionWithCallback` (host functions),
-`JSValueProtect`/`JSValueUnprotect`, string create/get, and the `JSWorker*`
-extension. `JSObjectMakeDeferredPromise` is exported for ABI coverage, but it
-currently returns null and raises a `NotImplemented` exception.
+`JSObjectMakeDeferredPromise`, `JSValueProtect`/`JSValueUnprotect`, string
+create/get, and the `JSWorker*` extension.
 
 Missing primitives Home depends on heavily (each blocks a large class of corpus
 tests):

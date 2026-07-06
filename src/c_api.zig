@@ -32,6 +32,8 @@ const gc_mod = @import("gc.zig");
 const value = @import("value.zig");
 const ContextMod = @import("context.zig");
 const interp = @import("interpreter.zig");
+const promise = @import("promise.zig");
+const strcell = @import("strcell.zig");
 const WorkerMod = @import("worker.zig");
 const JsString = @import("jsstring.zig").JsString;
 
@@ -363,11 +365,39 @@ export fn JSObjectMakeArray(ctx: JSContextRef, argc: usize, argv: [*c]const JSVa
 }
 
 export fn JSObjectMakeDeferredPromise(ctx: JSContextRef, resolve: [*c]JSObjectRef, reject: [*c]JSObjectRef, exception: ExceptionRef) callconv(.c) JSObjectRef {
-    _ = resolve;
-    _ = reject;
     const c = ctxFrom(ctx) orelse return null;
-    setException(c, exception, "NotImplemented: JSObjectMakeDeferredPromise");
-    return null;
+    const gc_saved = gc_mod.setActiveHeap(c.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(c.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+
+    var machine = c.interpreter();
+    const obj = promise.newPromise(&machine) catch |err| {
+        setException(c, exception, @errorName(err));
+        return null;
+    };
+    const p: *promise.Promise = @ptrCast(@alignCast(obj.promise.?));
+    const capability = promise.nativeResolveReject(&machine, p) catch |err| {
+        setException(c, exception, @errorName(err));
+        return null;
+    };
+
+    if (resolve != null) {
+        resolve[0] = box(c, capability.resolve) orelse {
+            setException(c, exception, "OutOfMemory");
+            return null;
+        };
+    }
+    if (reject != null) {
+        reject[0] = box(c, capability.reject) orelse {
+            setException(c, exception, "OutOfMemory");
+            return null;
+        };
+    }
+    return box(c, Value.obj(obj)) orelse {
+        setException(c, exception, "OutOfMemory");
+        return null;
+    };
 }
 
 fn objectFrom(ref: JSObjectRef) ?*Object {
@@ -647,6 +677,99 @@ test "C-API: object property get/set" {
     JSObjectSetProperty(ctx, obj, key, JSValueMakeNumber(ctx, 42), 0, null);
     const got = JSObjectGetProperty(ctx, obj, key, null);
     try std.testing.expectEqual(@as(f64, 42), JSValueToNumber(ctx, got, null));
+}
+
+test "C-API: JSObjectMakeDeferredPromise resolves and rejects through returned functions" {
+    const ctx = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
+    defer JSGlobalContextRelease(ctx);
+
+    var resolve: JSObjectRef = null;
+    var reject: JSObjectRef = null;
+    var exception: JSValueRef = null;
+    const deferred = JSObjectMakeDeferredPromise(ctx, &resolve, &reject, &exception) orelse return error.DeferredPromiseFailed;
+    try std.testing.expect(exception == null);
+    try std.testing.expect(resolve != null);
+    try std.testing.expect(reject != null);
+    try std.testing.expect(JSObjectIsFunction(ctx, resolve));
+    try std.testing.expect(JSObjectIsFunction(ctx, reject));
+
+    const global = JSContextGetGlobalObject(ctx);
+    const key = JSStringCreateWithUTF8CString("deferred") orelse return error.StringInitFailed;
+    defer JSStringRelease(key);
+    JSObjectSetProperty(ctx, global, key, deferred, 0, &exception);
+    try std.testing.expect(exception == null);
+
+    const observe = JSStringCreateWithUTF8CString(
+        \\globalThis.deferredSeen = 0;
+        \\deferred.then(v => { globalThis.deferredSeen = v; });
+        \\0
+    ) orelse return error.StringInitFailed;
+    defer JSStringRelease(observe);
+    _ = JSEvaluateScript(ctx, observe, null, null, 0, &exception) orelse return error.EvalFailed;
+    try std.testing.expect(exception == null);
+
+    var resolve_args = [_]JSValueRef{JSValueMakeNumber(ctx, 42)};
+    _ = JSObjectCallAsFunction(ctx, resolve, null, resolve_args.len, &resolve_args, &exception) orelse return error.ResolveCallFailed;
+    try std.testing.expect(exception == null);
+
+    const drain = JSStringCreateWithUTF8CString("0") orelse return error.StringInitFailed;
+    defer JSStringRelease(drain);
+    _ = JSEvaluateScript(ctx, drain, null, null, 0, &exception) orelse return error.EvalFailed;
+    try std.testing.expect(exception == null);
+
+    const seen = JSStringCreateWithUTF8CString("globalThis.deferredSeen") orelse return error.StringInitFailed;
+    defer JSStringRelease(seen);
+    const result = JSEvaluateScript(ctx, seen, null, null, 0, &exception) orelse return error.EvalFailed;
+    try std.testing.expect(exception == null);
+    try std.testing.expectEqual(@as(f64, 42), JSValueToNumber(ctx, result, null));
+
+    var reject_args = [_]JSValueRef{JSValueMakeNumber(ctx, 99)};
+    _ = JSObjectCallAsFunction(ctx, reject, null, reject_args.len, &reject_args, &exception) orelse return error.RejectCallFailed;
+    try std.testing.expect(exception == null);
+    _ = JSEvaluateScript(ctx, drain, null, null, 0, &exception) orelse return error.EvalFailed;
+    const still_seen = JSEvaluateScript(ctx, seen, null, null, 0, &exception) orelse return error.EvalFailed;
+    try std.testing.expect(exception == null);
+    try std.testing.expectEqual(@as(f64, 42), JSValueToNumber(ctx, still_seen, null));
+}
+
+test "C-API: JSObjectMakeDeferredPromise reject function settles the promise" {
+    const ctx = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
+    defer JSGlobalContextRelease(ctx);
+
+    var resolve: JSObjectRef = null;
+    var reject: JSObjectRef = null;
+    var exception: JSValueRef = null;
+    const deferred = JSObjectMakeDeferredPromise(ctx, &resolve, &reject, &exception) orelse return error.DeferredPromiseFailed;
+    try std.testing.expect(exception == null);
+
+    const global = JSContextGetGlobalObject(ctx);
+    const key = JSStringCreateWithUTF8CString("deferredReject") orelse return error.StringInitFailed;
+    defer JSStringRelease(key);
+    JSObjectSetProperty(ctx, global, key, deferred, 0, &exception);
+
+    const observe = JSStringCreateWithUTF8CString(
+        \\globalThis.deferredRejected = 0;
+        \\deferredReject.catch(e => { globalThis.deferredRejected = e; });
+        \\0
+    ) orelse return error.StringInitFailed;
+    defer JSStringRelease(observe);
+    _ = JSEvaluateScript(ctx, observe, null, null, 0, &exception) orelse return error.EvalFailed;
+    try std.testing.expect(exception == null);
+
+    var reject_args = [_]JSValueRef{JSValueMakeNumber(ctx, 7)};
+    _ = JSObjectCallAsFunction(ctx, reject, null, reject_args.len, &reject_args, &exception) orelse return error.RejectCallFailed;
+    try std.testing.expect(exception == null);
+
+    const drain = JSStringCreateWithUTF8CString("0") orelse return error.StringInitFailed;
+    defer JSStringRelease(drain);
+    _ = JSEvaluateScript(ctx, drain, null, null, 0, &exception) orelse return error.EvalFailed;
+    try std.testing.expect(exception == null);
+
+    const rejected = JSStringCreateWithUTF8CString("globalThis.deferredRejected") orelse return error.StringInitFailed;
+    defer JSStringRelease(rejected);
+    const result = JSEvaluateScript(ctx, rejected, null, null, 0, &exception) orelse return error.EvalFailed;
+    try std.testing.expect(exception == null);
+    try std.testing.expectEqual(@as(f64, 7), JSValueToNumber(ctx, result, null));
 }
 
 test "C-API: string value evaluation round-trips through JSValueToStringCopy" {

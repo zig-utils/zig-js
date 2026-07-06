@@ -158,7 +158,7 @@ The current exported C surface has 50 functions:
 - **Strings** - `JSStringCreateWithUTF8CString`, `JSStringRetain`, `JSStringRelease`, `JSStringGetLength`, `JSStringGetUTF8CString`.
 - **Worker extension** - `JSWorkerCreate`, `JSWorkerPostMessage`, `JSWorkerReceive`, `JSWorkerTerminate`, `JSWorkerRelease`.
 
-`ZJSGlobalContextCreateThreaded` and `JSWorker*` are zig-js extensions, not public JSC symbols. `JSObjectMakeDeferredPromise` is exported for ABI coverage but currently returns null and raises `NotImplemented: JSObjectMakeDeferredPromise`.
+`ZJSGlobalContextCreateThreaded` and `JSWorker*` are zig-js extensions, not public JSC symbols. `JSObjectMakeDeferredPromise` returns a pending native Promise plus paired resolving functions; callers observe settlement at the next microtask checkpoint (for example, after `JSEvaluateScript` returns).
 
 See [docs/api.md](docs/api.md) and [docs/HOME_INTEGRATION.md](docs/HOME_INTEGRATION.md) for the fuller embedding story and the important warning that zig-js is not a drop-in replacement for Bun/Home's private JSC internals.
 
@@ -240,7 +240,6 @@ The README intentionally avoids duplicating the detailed thread/GC implementatio
 
 Do not read the green configured runner as "the whole JavaScript universe is finished." Known non-implemented or non-scored areas include:
 
-- `JSObjectMakeDeferredPromise` behavior behind its exported C symbol;
 - full JavaScriptCore framework/private internals, Objective-C bridge, inspector/debugger APIs, and Bun/Home private JSC ABI;
 - WebAssembly and JIT shell hooks from the PR-249 reference corpus;
 - engine-wide NaN-boxed `Value` integration, nursery/generational GC, and any optimizing JIT.

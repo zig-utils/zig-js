@@ -107,7 +107,7 @@ void        JSWorkerRelease(JSWorkerRef);
 
 Native callbacks use JSC's `HostCallback` calling convention, so functions you expose to JavaScript through this subset are registered as they are with JavaScriptCore. `ZJSGlobalContextCreateThreaded` and `JSWorker*` are zig-js extensions rather than public JSC symbols.
 
-`JSObjectMakeDeferredPromise` is exported for ABI coverage but currently returns null and raises a `NotImplemented: JSObjectMakeDeferredPromise` exception. Do not depend on it for working deferred-promise plumbing yet.
+`JSObjectMakeDeferredPromise` returns a pending native Promise and stores callable resolve/reject functions in the provided out pointers when they are non-null. Those functions settle the promise through the normal Promise job queue; embedder-observable callbacks run at the next microtask checkpoint, such as the one performed after `JSEvaluateScript`.
 
 ## Caveats
 
