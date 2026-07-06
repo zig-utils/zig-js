@@ -1,18 +1,10 @@
 //! NaN-boxed `Value` codec — the 8-byte value representation that gates Phase 7
 //! blocker #7 (issue zig-utils/zig-js#1, docs/threads/P7-gil-removal.md).
 //!
-//! The engine's `Value` is today a ~24-byte tagged union (`value.zig`). A slot
-//! that wide cannot be read or written as one atomic machine word, so a reader
-//! tears against a concurrent writer once the GIL is gone (M3). NaN-boxing packs
-//! every value into a single `u64`, making a slot one atomic word — the design
-//! input the audit calls for *before* any ungil bring-up.
-//!
-//! This module is the **codec only**: encode/decode for every value kind, with
-//! exhaustive round-trip tests. Nothing in the engine imports it yet — swapping
-//! `Value` over is a separate, de-risked step (and depends on strings becoming a
-//! single-pointer cell, since a `[]const u8` slice is two words). Proving the
-//! encoding in isolation here is the same discipline used for the GC mechanism:
-//! get the hard, error-prone core provably correct first.
+//! The engine's `value.Value` now uses this layout directly: every value is a
+//! single `u64`, so a slot is one atomic machine word. This module remains the
+//! standalone codec proof and documentation for the bit layout, while
+//! `value.zig` carries the hot-path API used by the interpreter.
 //!
 //! ## Encoding (64-bit, ≤48-bit pointers — x86-64 / arm64 user space)
 //!
@@ -204,10 +196,10 @@ test "nanbox: pointers round-trip for object and string tags" {
 
 test "nanbox: ordinary numbers round-trip exactly" {
     const cases = [_]f64{
-        0.0,                  -0.0,                1.0,             -1.0,
-        3.14159265358979,     -2.718281828,        1e308,           -1e308,
-        1e-308,               4503599627370496.0,  -9007199254740991.0,
-        std.math.floatMin(f64), std.math.floatMax(f64),
+        0.0,                    -0.0,               1.0,                 -1.0,
+        3.14159265358979,       -2.718281828,       1e308,               -1e308,
+        1e-308,                 4503599627370496.0, -9007199254740991.0, std.math.floatMin(f64),
+        std.math.floatMax(f64),
     };
     for (cases) |n| {
         const v = NanBox.encodeNumber(n);

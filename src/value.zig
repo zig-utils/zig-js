@@ -2246,6 +2246,41 @@ pub const Value = struct {
     }
 };
 
+test "Value is an engine-wide 8-byte NaN-boxed word" {
+    try std.testing.expectEqual(@as(usize, 8), @sizeOf(Value));
+    try std.testing.expectEqual(@as(usize, 64), @bitSizeOf(Value));
+
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const prev_arena = strcell.setActiveArena(arena_state.allocator());
+    defer _ = strcell.setActiveArena(prev_arena);
+
+    var object = Object{};
+    const cases = [_]Value{
+        Value.undef(),
+        Value.nul(),
+        Value.boolVal(true),
+        Value.boolVal(false),
+        Value.num(123.5),
+        Value.num(std.math.nan(f64)),
+        Value.str("nan-boxed"),
+        Value.obj(&object),
+    };
+
+    try std.testing.expect(cases[0].isUndefined());
+    try std.testing.expect(cases[1].isNull());
+    try std.testing.expect(cases[2].isBoolean() and cases[2].asBool());
+    try std.testing.expect(cases[3].isBoolean() and !cases[3].asBool());
+    try std.testing.expect(cases[4].isNumber());
+    try std.testing.expectEqual(@as(f64, 123.5), cases[4].asNum());
+    try std.testing.expect(cases[5].isNumber());
+    try std.testing.expect(std.math.isNan(cases[5].asNum()));
+    try std.testing.expect(cases[6].isString());
+    try std.testing.expectEqualStrings("nan-boxed", cases[6].asStr());
+    try std.testing.expect(cases[7].isObject());
+    try std.testing.expectEqual(&object, cases[7].asObj());
+}
+
 pub fn bigIntIsZero(o: *Object) bool {
     if (o.bigint_text) |s| return std.mem.eql(u8, s, "0");
     return o.bigint == 0;

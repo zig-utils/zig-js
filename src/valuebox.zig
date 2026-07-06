@@ -3,13 +3,11 @@
 //! `value.Value` (issue zig-utils/zig-js#1, docs/threads/P7-gil-removal.md).
 //!
 //! `nanbox.zig` (the 8-byte encoding) and `strcell.zig` (single-pointer string
-//! cells + interning) were each proved in isolation. This module is the exact
-//! conversion the eventual engine-wide `Value` swap will use — `encode` packs a
-//! live `Value` into one word (interning its string into a `StringCell`), and
-//! `decode` recovers it — and tests round-trip equivalence over every value
-//! kind and edge case against the real `value.Value` type. It is **not** wired
-//! into the engine (the swap is a separate mechanical step); proving the bridge
-//! here is what makes that swap a representation change rather than a leap.
+//! cells + interning) were each proved in isolation before `value.Value` adopted
+//! the same one-word layout. This module remains a compatibility/proof bridge:
+//! `encode` packs a live `Value` into the standalone `NanBox` codec (interning
+//! its string into a `StringCell`), and `decode` recovers it. The tests keep the
+//! standalone codec aligned with the engine's real value representation.
 
 const std = @import("std");
 const value = @import("value.zig");
@@ -40,7 +38,7 @@ pub fn encode(intern: *strcell.InternTable, v: Value) std.mem.Allocator.Error!Na
 pub fn encodeLiteral(comptime s: []const u8) NanBox {
     // The static cell is immutable and only ever read back (on decode), so
     // dropping const to fit the opaque payload is sound.
-    return NanBox.encodeString(@constCast(@ptrCast(strcell.staticCell(s))));
+    return NanBox.encodeString(@ptrCast(@constCast(strcell.staticCell(s))));
 }
 
 /// Recover a `Value` from its NaN-boxed word. A string decodes to a slice over

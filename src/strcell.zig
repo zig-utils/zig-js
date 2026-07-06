@@ -1,22 +1,20 @@
 //! String cells + a concurrent intern table — blocker #8 of Phase 7
 //! (issue zig-utils/zig-js#1, docs/threads/P7-gil-removal.md).
 //!
-//! Two coupled facts make this a prerequisite for NaN-boxing `Value` (#7):
+//! Two coupled facts made this a prerequisite for NaN-boxing `Value` (#7):
 //!   1. A NaN-boxed value is one 64-bit word with a 48-bit pointer payload, but
-//!      today a string `Value` is a `[]const u8` slice — *two* words. So a
-//!      NaN-boxed string must be a single pointer to a **`StringCell`** holding
-//!      the {bytes, len}. That's the minimal, on-critical-path piece.
+//!      a string slice is two words. A NaN-boxed string therefore points to a
+//!      **`StringCell`** holding the {bytes, len}; `Value.str` now uses
+//!      `makeCell` for that payload.
 //!   2. Layer C (the GIL-removed shared heap) wants equal strings to be able to
 //!      share one immutable cell across threads — a **sharded intern table**.
-//!      The design note keeps strings *uninterned* until Layer C precisely so
-//!      this table can be introduced without earlier phases assuming
-//!      pointer-identity of equal strings.
+//!      Runtime strings remain uninterned by default, so the table can be used
+//!      deliberately without making pointer identity observable for ordinary
+//!      string equality.
 //!
-//! This module is the **mechanism only**, exhaustively tested in isolation
-//! (including real multi-threaded convergence) — the same discipline used for
-//! the GC and the NaN-box codec. Nothing in the engine imports it yet; wiring
-//! `Value`'s string payload to `*StringCell` is part of the mechanical `Value`
-//! swap, which is a separate step.
+//! This module is exhaustively tested in isolation (including real
+//! multi-threaded convergence) and is also used by the engine's live `Value`
+//! representation.
 
 const std = @import("std");
 
@@ -66,8 +64,8 @@ pub fn staticCell(comptime s: []const u8) *const StringCell {
 }
 
 /// Allocate a fresh (un-interned) cell that owns a copy of `bytes`. This is the
-/// minimal constructor the NaN-box `Value` swap needs; interning is optional
-/// (below). `allocator` owns both the cell and the byte copy.
+/// minimal constructor the NaN-box `Value` representation needs; interning is
+/// optional (below). `allocator` owns both the cell and the byte copy.
 pub fn createCell(allocator: std.mem.Allocator, bytes: []const u8) std.mem.Allocator.Error!*StringCell {
     const owned = try allocator.dupe(u8, bytes);
     const cell = try allocator.create(StringCell);
@@ -154,19 +152,17 @@ pub const InternTable = struct {
 };
 
 // ---------------------------------------------------------------------------
-// Threadlocal active intern table — the final rep-flip prerequisite.
+// Threadlocal active intern table — optional shared-string machinery.
 //
 // The NaN-box `Value` swap (#7) makes a string `Value` a single pointer to a
 // `StringCell`, so `Value.str(s)` must turn a `[]const u8` into a `*StringCell`.
 // But `Value.str` is a static constructor with no allocator in scope, and there
 // are ~424 such sites. Rather than thread an allocator through all of them, the
-// engine installs the current realm's `InternTable` as a *threadlocal active
-// table* at the same entry points the GC active-heap is set (`createWith`,
-// `evaluate`, `evaluateModule`, spawned-thread entry). `internActive(s)` then
-// turns a slice into a canonical cell with no per-site allocator — mirroring the
-// `gc_runtime` active-heap pattern. Null active table (the arena engine / before
-// the swap) means callers keep using the inline slice; this is inert until the
-// flip wires `Value.str` to it.
+// engine can install an `InternTable` as a *threadlocal active table* at the
+// same entry points the GC active-heap is set. `internActive(s)` then turns a
+// slice into a canonical cell with no per-site allocator, mirroring the
+// `gc_runtime` active-heap pattern. The live `Value.str` path uses the active
+// arena below, not this optional interning table.
 // ---------------------------------------------------------------------------
 
 threadlocal var active_table: ?*InternTable = null;
@@ -191,7 +187,7 @@ pub fn setActiveArena(a: ?std.mem.Allocator) ?std.mem.Allocator {
 /// Allocate a (non-interned) `StringCell` owning a copy of `s` from the active
 /// arena, or the (thread-safe, never-freed) page allocator if none is active.
 /// Never fails except on true OOM. The allocator-free string constructor
-/// `Value.str` will call this at flip time.
+/// `Value.str` calls this.
 pub fn makeCell(s: []const u8) *StringCell {
     const a = active_arena orelse std.heap.page_allocator;
     return createCell(a, s) catch @panic("strcell.makeCell OOM");

@@ -106,7 +106,7 @@ Those numbers show current VM/tree-walk parity on these microbenchmarks, not a b
 | 4 | 315,458,875 | 3.28x |
 | 8 | 362,099,959 | 5.71x |
 
-Implemented performance machinery includes the bytecode VM, frame slots/upvalues, object shapes, inline caches, and GC slab backing. Future performance work includes tighter VM/codegen coverage, NaN-boxed `Value` integration, nursery/generational GC work, and possible baseline/JIT exploration. There is no optimizing JIT today.
+Implemented performance machinery includes the bytecode VM, frame slots/upvalues, object shapes, inline caches, the engine-wide 8-byte NaN-boxed `Value`, and GC slab backing. Future performance work includes tighter VM/codegen coverage, nursery/generational GC work, and possible baseline/JIT exploration. There is no optimizing JIT today.
 
 ## Language And Runtime Coverage
 
@@ -242,7 +242,7 @@ Do not read the green configured runner as "the whole JavaScript universe is fin
 
 - full JavaScriptCore framework/private internals, Objective-C bridge, inspector/debugger APIs, and Bun/Home private JSC ABI;
 - WebAssembly and JIT shell hooks from the PR-249 reference corpus;
-- engine-wide NaN-boxed `Value` integration, nursery/generational GC, and any optimizing JIT.
+- nursery/generational GC and any optimizing JIT.
 
 ## Used By
 
