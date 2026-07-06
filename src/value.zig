@@ -988,6 +988,12 @@ pub const Object = struct {
         return self.backingFor(fallback, "typed_array");
     }
 
+    pub fn destroyUninstalledTypedArray(self: *Object, fallback: std.mem.Allocator, ta: *TypedArrayData) void {
+        const a = self.backing_allocator orelse fallback;
+        a.destroy(ta);
+        self.deactivateBacking("typed_array");
+    }
+
     pub fn dataViewAllocator(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator {
         return self.backingFor(fallback, "data_view");
     }

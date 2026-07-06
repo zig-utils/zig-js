@@ -7732,6 +7732,23 @@ test "TypedArray buffer constructor allocates before offset coercion" {
     )).asBool());
 }
 
+test "enable_gc: TypedArray constructor releases metadata when detached buffer check throws" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    defer ctx.destroy();
+
+    const result = try ctx.evaluate(
+        \\var buffer = new ArrayBuffer(8);
+        \\$262.detachArrayBuffer(buffer);
+        \\try {
+        \\  new Uint8Array(buffer);
+        \\  false;
+        \\} catch (e) {
+        \\  e instanceof TypeError;
+        \\}
+    );
+    try std.testing.expect(result.isBoolean() and result.asBool());
+}
+
 test "TypedArray constructor copies live source typed array length" {
     try std.testing.expect((try evalIn(
         \\var rab = new ArrayBuffer(16, { maxByteLength: 32 });

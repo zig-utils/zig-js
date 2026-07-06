@@ -10871,6 +10871,8 @@ pub const Interpreter = struct {
         const a0 = if (args.len > 0) args[0] else Value.undef();
         const o = (try self.newObject()).asObj();
         const ta = try o.typedArrayAllocator(self.arena).create(value.TypedArrayData);
+        var ta_installed = false;
+        errdefer if (!ta_installed) o.destroyUninstalledTypedArray(self.arena, ta);
 
         if (a0.isObject() and a0.asObj().array_buffer != null) {
             // AllocateTypedArray runs before byteOffset/length coercion, so a
@@ -10912,6 +10914,7 @@ pub const Interpreter = struct {
             if (byte_offset + length * size > buflen) return self.throwError("RangeError", "invalid typed array length");
             ta.* = .{ .buffer = buffer, .byte_offset = byte_offset, .length = length, .kind = kind, .track_length = track };
             o.typed_array = ta;
+            ta_installed = true;
             return Value.obj(o);
         }
         if (a0.isObject() and a0.asObj().typed_array != null) {
@@ -10923,6 +10926,7 @@ pub const Interpreter = struct {
             try self.initTypedArrayProto(o, kind);
             ta.* = .{ .buffer = try self.makeArrayBuffer(length * size), .byte_offset = 0, .length = length, .kind = kind };
             o.typed_array = ta;
+            ta_installed = true;
             var i: usize = 0;
             while (i < length) : (i += 1) {
                 if (kind.isBigInt()) value.taWriteBig(ta, i, value.taReadBig(src, i)) else value.taWrite(ta, i, value.taRead(src, i).asNum());
@@ -10947,6 +10951,7 @@ pub const Interpreter = struct {
             try self.initTypedArrayProto(o, kind);
             ta.* = .{ .buffer = try self.makeArrayBuffer(list.len * size), .byte_offset = 0, .length = list.len, .kind = kind };
             o.typed_array = ta;
+            ta_installed = true;
             var i: usize = 0;
             while (i < list.len) : (i += 1) try self.taStore(ta, i, list[i]);
             return Value.obj(o);
@@ -10959,6 +10964,7 @@ pub const Interpreter = struct {
         try self.initTypedArrayProto(o, kind);
         ta.* = .{ .buffer = try self.makeArrayBuffer(length * size), .byte_offset = 0, .length = length, .kind = kind };
         o.typed_array = ta;
+        ta_installed = true;
         return Value.obj(o);
     }
 
