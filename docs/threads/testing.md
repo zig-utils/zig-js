@@ -321,6 +321,9 @@ cleanup delivery interleaved with `join()` /
 `asyncJoin()` and unregister-token suppression, cleanup delivery after parked
 property/condition waiters resume, child-returned fulfilled/rejected promises
 and user thenables published through both `join()` and `asyncJoin()`, plus
+`ThreadLocal` roots kept live while no-fn `Lock.asyncHold()` release functions
+deliver with property and condition waiters parked, followed by exact cleanup,
+plus
 `ThreadLocal` isolation across normal, throwing, nested, and async-joined
 thread lifecycles, plus
 `ThreadLocal` values registered with `FinalizationRegistry` across
@@ -333,7 +336,7 @@ then verifies child release, nested `ThreadLocal` roots, rerouted async
 settlement, and exact finalization cleanup after both thread layers exit. It now
 also composes isolated Worker termination with shared-realm teardown that
 abandons child-owned typed-array `waitAsync` tickets, rejects pending
-`asyncJoin` reactions, and delivers exact cleanup. Each seed currently runs 47
+`asyncJoin` reactions, and delivers exact cleanup. Each seed currently runs 48
 deterministic lifecycle
 subprograms.
 

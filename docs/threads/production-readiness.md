@@ -469,6 +469,9 @@ as embedders exercise more threaded host patterns.
   handler-exception recovery composed with the same retained-SAB cleanup oracle,
   `Thread.restrict` lifecycle isolation plus `Thread.restrict`-owned
   `FinalizationRegistry` cleanup after owner-thread exit,
+  `ThreadLocal` roots kept live while no-fn `Lock.asyncHold()` release
+  functions deliver with property and condition waiters parked, followed by
+  exact cleanup,
   Thread exception identity through `join()` / `asyncJoin()` while
   property and condition waiters are parked,
   thread-returned typed-array `waitAsync` promise assimilation through `join()` /

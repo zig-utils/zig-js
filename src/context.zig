@@ -1923,12 +1923,20 @@ pub const Context = struct {
             machine.settleAsyncWaiters();
             if (top_level_failed) self.teardown_stop.store(false, .release);
         }
-        self.collectRequestedGarbage();
-
-        return outcome catch |err| {
+        if (outcome) |result| {
+            // A script-visible `gc()` request is serviced before returning to
+            // the host, while this interpreter is still registered as an active
+            // root source. The script completion value itself is only in this
+            // native local, so root it explicitly across that collection.
+            const result_root_mark = try machine.pushTempRoot(result);
+            defer machine.restoreTempRoots(result_root_mark);
+            self.collectRequestedGarbage();
+            return result;
+        } else |err| {
+            self.collectRequestedGarbage();
             if (err == error.Throw) self.exception = machine.exception;
             return err;
-        };
+        }
     }
 
     // ----------------------------------------------------------------------
@@ -10921,6 +10929,22 @@ test "enable_gc: active module interpreter roots import.meta during requested mi
     ctx.collectGarbage();
     const cleared = try ctx.evaluate("globalThis.ref.deref() === undefined");
     try std.testing.expectEqual(true, cleared.asBool());
+}
+
+test "enable_gc: evaluate roots completion value across requested GC" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    defer ctx.destroy();
+
+    const promise_value = try ctx.evaluate(
+        \\(async () => {
+        \\  const root = { marker: 41, nested: { live: true } };
+        \\  if (typeof gc === "function") gc();
+        \\  return root.marker;
+        \\})()
+    );
+    var machine = ctx.interpreter();
+    const result = try machine.awaitValue(promise_value);
+    try std.testing.expectEqual(@as(f64, 41), result.asNum());
 }
 
 test "enable_gc: WeakRef target clears when only weakly reachable" {
