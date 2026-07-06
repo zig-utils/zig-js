@@ -365,6 +365,9 @@ context APIs.
   keeps `Condition.asyncWait` reacquire tickets and child `asyncJoin` observers
   pending through a finishing sweep before exact reacquire, asyncJoin, and
   cleanup verification,
+  keeps queued `Lock.asyncHold(fn)` fulfillment/throw callbacks plus no-fn
+  release grants pending while the lock remains held through a finishing sweep
+  before exact reaction and cleanup verification,
   and parks Thread.restrict-owned finalization targets through a finishing sweep
   while nested foreign access still throws `ConcurrentAccessError` before owner
   release,

@@ -11477,10 +11477,21 @@ fn runMidScriptAsyncHoldReleaseWaiterCleanupGc(gpa: std.mem.Allocator, seed: u64
 }
 
 fn runAsyncHoldThrowFinalizationInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
+    return runAsyncHoldThrowFinalizationInterleavingKind(gpa, seed, false);
+}
+
+fn runMidScriptAsyncHoldThrowFinalizationGc(gpa: std.mem.Allocator, seed: u64) !bool {
+    return runAsyncHoldThrowFinalizationInterleavingKind(gpa, seed, true);
+}
+
+fn runAsyncHoldThrowFinalizationInterleavingKind(gpa: std.mem.Allocator, seed: u64, comptime midgc: bool) !bool {
     var prng = std.Random.DefaultPrng.init(seed ^ 0x6173_796e_6368_7468);
     const r = prng.random();
     const nthreads = 3 + r.uintLessThan(usize, 4);
     const per_thread = 4 + r.uintLessThan(usize, 5);
+    const pressure_rounds = if (midgc) 8 + r.uintLessThan(usize, 5) else 0;
+    const pressure_per_round = if (midgc) 620 + r.uintLessThan(usize, 440) else 0;
+    const spin_iters = if (midgc) 1800 + r.uintLessThan(usize, 3200) else 0;
     var expected_join_sum: usize = 0;
     var expected_success_score: usize = 0;
     var expected_reject_score: usize = 0;
@@ -11504,11 +11515,59 @@ fn runAsyncHoldThrowFinalizationInterleaving(gpa: std.mem.Allocator, seed: u64) 
         }
     }
 
-    const ctx = js.Context.createWith(gpa, .{ .enable_threads = true, .enable_gc = true }) catch {
+    const ctx = (if (midgc)
+        js.Context.createWithTestingOptions(gpa, .{
+            .enable_threads = true,
+            .enable_gc = true,
+            .parallel_gc = true,
+            .parallel_js = true,
+            .parallel_midscript_gc = true,
+        })
+    else
+        js.Context.createWith(gpa, .{ .enable_threads = true, .enable_gc = true })) catch {
         std.debug.print("seed {d}: asyncHold throw/finalization context creation failed\n", .{seed});
         return false;
     };
     defer ctx.destroy();
+
+    const rendered_ready_wait_src = if (midgc) try std.fmt.allocPrint(
+        gpa,
+        \\    while (Atomics.load(gate, 'ready') < {d})
+        \\      Atomics.wait(gate, 'ready', Atomics.load(gate, 'ready'), 1);
+        \\    const __asyncHoldThrowKeep = [];
+        \\    for (let round = 0; round < {d}; round++) {{
+        \\      for (let i = 0; i < {d}; i++)
+        \\        __asyncHoldThrowKeep.push({{
+        \\          round, i,
+        \\          nested: {{ seed: {d}, expectedSuccess: {d}, expectedReject: {d}, expectedRelease: {d} }},
+        \\          text: 'midgc-asyncHold-throw-finalization-' + round + '-' + i
+        \\        }});
+        \\      let spin = 0;
+        \\      for (let j = 0; j < {d}; j++)
+        \\        spin = (spin + j + round) & 0x3fffffff;
+        \\      if (spin < 0) __asyncHoldThrowKeep.push({{ impossible: true }});
+        \\    }}
+        \\
+    ,
+        .{
+            nthreads,
+            pressure_rounds,
+            pressure_per_round,
+            seed,
+            expected_success_score,
+            expected_reject_score,
+            expected_release_score,
+            spin_iters,
+        },
+    ) else try std.fmt.allocPrint(
+        gpa,
+        \\    while (Atomics.load(gate, 'ready') < {d})
+        \\      Atomics.wait(gate, 'ready', Atomics.load(gate, 'ready'), 1);
+        \\
+    ,
+        .{nthreads},
+    );
+    defer gpa.free(rendered_ready_wait_src);
 
     const src = try std.fmt.allocPrint(
         gpa,
@@ -11525,11 +11584,12 @@ fn runAsyncHoldThrowFinalizationInterleaving(gpa: std.mem.Allocator, seed: u64) 
         \\  const registry = globalThis.__asyncHoldThrowRegistry;
         \\  const lock = new Lock();
         \\  globalThis.__asyncHoldThrowLock = lock;
+        \\  const gate = {{ ready: 0 }};
         \\  const threads = [];
         \\  const returned = [];
         \\  lock.hold(() => {{
         \\    for (let id = 0; id < {d}; id++) {{
-        \\      threads.push(new Thread((lock, registry, id, per, seed) => {{
+        \\      threads.push(new Thread((lock, registry, gate, id, per, seed) => {{
         \\        const base = (id + 1) * 10000;
         \\        const p = lock.asyncHold(() => {{
         \\          for (let i = 0; i < per; i++) {{
@@ -11542,9 +11602,12 @@ fn runAsyncHoldThrowFinalizationInterleaving(gpa: std.mem.Allocator, seed: u64) 
         \\          return {{ marker: base + 1000, seed, label: 'asyncHold-throw-finalization-fulfill' }};
         \\        }});
         \\        const releasePromise = lock.asyncHold();
+        \\        Atomics.add(gate, 'ready', 1);
+        \\        Atomics.notify(gate, 'ready');
         \\        return {{ id, p, releasePromise }};
-        \\      }}, lock, registry, id, {d}, {d}));
+        \\      }}, lock, registry, gate, id, {d}, {d}));
         \\    }}
+        \\{s}
         \\  }});
         \\  let joinScore = 0;
         \\  for (const t of threads) {{
@@ -11597,10 +11660,12 @@ fn runAsyncHoldThrowFinalizationInterleaving(gpa: std.mem.Allocator, seed: u64) 
         \\}})();
         \\
     ,
-        .{ nthreads, per_thread, seed, expected_join_sum, seed, seed },
+        .{ nthreads, per_thread, seed, rendered_ready_wait_src, expected_join_sum, seed, seed },
     );
     defer gpa.free(src);
 
+    const before_attempts = if (midgc) ctx.gc_par_attempts.load(.monotonic) else 0;
+    const before_collections = if (midgc) ctx.gc_par_collections.load(.monotonic) else 0;
     const joined = ctx.evaluate(src) catch |err| {
         const msg_txt = if (ctx.exception) |ex| blk: {
             var render = ctx.interpreter();
@@ -11611,6 +11676,14 @@ fn runAsyncHoldThrowFinalizationInterleaving(gpa: std.mem.Allocator, seed: u64) 
     };
     if (!joined.isNumber() or joined.asNum() != @as(f64, @floatFromInt(expected_join_sum))) {
         std.debug.print("seed {d}: asyncHold throw/finalization join got {d}, expected {d}\n", .{ seed, if (joined.isNumber()) joined.asNum() else -1, expected_join_sum });
+        return false;
+    }
+    if (midgc and ctx.gc_par_attempts.load(.monotonic) <= before_attempts) {
+        std.debug.print("seed {d}: asyncHold throw/finalization did not attempt a parallel collection\n", .{seed});
+        return false;
+    }
+    if (midgc and ctx.gc_par_collections.load(.monotonic) <= before_collections) {
+        std.debug.print("seed {d}: asyncHold throw/finalization did not finish a parallel collection\n", .{seed});
         return false;
     }
 
@@ -17536,6 +17609,23 @@ pub fn main(init: std.process.Init) !void {
         if (mcafail != 0) std.process.exit(1);
         return;
     };
+    // `threadfuzz midgcasyncholdthrow <iters> <seed>`: focused mid-script
+    // parallel-GC repro for queued Lock.asyncHold(fn) fulfillment/throw
+    // callbacks plus no-fn release grants and exact finalization cleanup while
+    // the lock remains held through a finishing sweep.
+    if (first) |a| if (std.mem.eql(u8, a, "midgcasyncholdthrow")) {
+        if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch 1;
+        if (args.next()) |b| base_seed = std.fmt.parseInt(u64, b, 10) catch 1;
+        var mahtfail: usize = 0;
+        var mahti: usize = 0;
+        while (mahti < iters) : (mahti += 1) {
+            const seed = base_seed +% mahti;
+            if (!(try runMidScriptAsyncHoldThrowFinalizationGc(gpa, seed))) mahtfail += 1;
+        }
+        std.debug.print("threadfuzz midgcasyncholdthrow: {d} programs from seed {d}, {d} failures\n", .{ iters, base_seed, mahtfail });
+        if (mahtfail != 0) std.process.exit(1);
+        return;
+    };
     // `threadfuzz midgctlslife <iters> <seed>`: focused mid-script
     // parallel-GC repro for ThreadLocal per-thread isolation, nested-thread
     // isolation, thrown-object publication, and asyncJoin observers while owner
@@ -18192,6 +18282,8 @@ pub fn main(init: std.process.Init) !void {
     // failure forces owner-thread teardown and exact cleanup,
     // no-fn asyncHold release-function delivery plus exact cleanup while
     // property/condition waiters stay parked through the finishing sweep,
+    // queued Lock.asyncHold(fn) fulfillment/throw callbacks plus no-fn release
+    // grants and cleanup delivery while the lock stays held through a sweep,
     // property `Atomics.wait` and static `Atomics.Condition.waitFor` timeout
     // peers plus static `Atomics.Mutex.lockIfAvailable` acquire/timeout token
     // peers and static `Atomics.Condition.wait` notify/reacquire token peers
@@ -18233,6 +18325,7 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runMidScriptAtomicsMutexLockIfAvailableGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptAtomicsConditionWaitGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptAsyncHoldReleaseWaiterCleanupGc(gpa, seed))) mfail += 1;
+            if (!(try runMidScriptAsyncHoldThrowFinalizationGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptNestedThreadAsyncJoinCleanupGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptFinalizationAsyncJoinCleanupGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptWaitAsyncFinalizationGc(gpa, seed))) mfail += 1;
@@ -18258,7 +18351,7 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runMidScriptModuleWorkerTerminateThreadLocalAsyncHoldCleanupGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptWeakCollectionGc(gpa, seed))) mfail += 1;
         }
-        std.debug.print("threadfuzz midgc: {d} programs from seed {d}, {d} failures\n", .{ iters * 38, base_seed, mfail });
+        std.debug.print("threadfuzz midgc: {d} programs from seed {d}, {d} failures\n", .{ iters * 39, base_seed, mfail });
         if (mfail != 0) std.process.exit(1);
         return;
     };

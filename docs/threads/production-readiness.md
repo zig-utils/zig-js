@@ -326,6 +326,7 @@ as embedders exercise more threaded host patterns.
   finalization/`Thread.asyncJoin` unregister-token cleanup subprogram, a
   typed-array `waitAsync`/finalization cleanup subprogram, a
   `Condition.asyncWait`/finalization cleanup subprogram, a
+  `Lock.asyncHold(fn)` throw/finalization cleanup subprogram, a
   ThreadLocal lifecycle subprogram, a ThreadLocal-finalization subprogram, a
   ThreadLocal-termination cleanup subprogram, a
   Thread.restrict lifecycle subprogram, a Thread.restrict-finalization
@@ -363,6 +364,9 @@ as embedders exercise more threaded host patterns.
   keeps `Condition.asyncWait` reacquire tickets and child `asyncJoin` observers
   pending through the finishing sweep before exact reacquire, asyncJoin, and
   cleanup verification,
+  keeps queued `Lock.asyncHold(fn)` fulfillment/throw callbacks plus no-fn
+  release grants pending while the lock remains held through the finishing
+  sweep before exact reaction and cleanup verification,
   keeps a registered object reachable only through
   `ThreadLocal.value` while that owner is parked, keeps a completed-but-unjoined
   `Thread` result object and a completed-but-unjoined thrown exception object
