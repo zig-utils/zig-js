@@ -362,6 +362,9 @@ context APIs.
   keeps typed-array `waitAsync` reaction roots pending while notifying child
   threads stay parked through a finishing sweep before exact `asyncJoin` and
   cleanup verification,
+  keeps `Condition.asyncWait` reacquire tickets and child `asyncJoin` observers
+  pending through a finishing sweep before exact reacquire, asyncJoin, and
+  cleanup verification,
   and parks Thread.restrict-owned finalization targets through a finishing sweep
   while nested foreign access still throws `ConcurrentAccessError` before owner
   release,
