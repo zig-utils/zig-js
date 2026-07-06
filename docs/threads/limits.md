@@ -389,6 +389,10 @@ context APIs.
   composed with the same child-owned typed-array `waitAsync` ticket
   abandonment, pending `asyncJoin` rejection cleanup, and exact
   `FinalizationRegistry` cleanup,
+  Worker termination composed with `ThreadLocal` hidden roots, no-fn
+  `Lock.asyncHold()` release-function delivery, parked property/condition
+  waiters, top-level teardown, rejected `asyncJoin` observers, and exact
+  `FinalizationRegistry` cleanup,
   deterministic `Lock.asyncHold()` barging where a
   sync hold legally overtakes a queued no-fn async ticket before `await`
   delivers its release function, no-fn `Lock.asyncHold()` release-function

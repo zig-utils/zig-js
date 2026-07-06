@@ -9868,6 +9868,444 @@ fn runThreadLocalAsyncHoldReleaseCleanupInterleaving(gpa: std.mem.Allocator, see
     return true;
 }
 
+fn runWorkerTerminateThreadLocalAsyncHoldCleanupInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
+    var prng = std.Random.DefaultPrng.init(seed ^ 0x7774_6c61_6872_656c);
+    const r = prng.random();
+    const nworkers = 1 + r.uintLessThan(usize, 2);
+    const ntls_threads = 2 + r.uintLessThan(usize, 3);
+    const nrelease_threads = 2 + r.uintLessThan(usize, 3);
+    const wait_timeout_ms = 1200 + r.uintLessThan(usize, 800);
+    const seed_marker = seed % 10_000;
+    const tls_base = 960_000 + seed_marker;
+    const release_base = 970_000 + seed_marker;
+    const tls_reject_base = 980_000 + seed_marker;
+    const prop_reject_marker = 990_000 + seed_marker;
+    const cond_reject_marker = 1_000_000 + seed_marker;
+
+    var expected_cleanup_sum: usize = 0;
+    var expected_reject_sum: usize = prop_reject_marker + cond_reject_marker;
+    var id: usize = 0;
+    while (id < ntls_threads) : (id += 1) {
+        expected_cleanup_sum += tls_base + id;
+        expected_reject_sum += tls_reject_base + id;
+    }
+    var expected_release_score: usize = 0;
+    id = 0;
+    while (id < nrelease_threads) : (id += 1) expected_release_score += release_base + id;
+    const expected_reject_count = ntls_threads + 2;
+
+    const ctx = js.Context.createWith(gpa, .{ .enable_threads = true, .enable_gc = true }) catch {
+        std.debug.print("seed {d}: worker terminate/ThreadLocal asyncHold cleanup context creation failed\n", .{seed});
+        return false;
+    };
+    defer ctx.destroy();
+    var machine = ctx.interpreter();
+
+    const setup_src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  globalThis.__workerTlsAsyncHoldMsg = {{ sab: new SharedArrayBuffer(32) }};
+        \\  globalThis.__workerTlsAsyncHoldCleanupCount = 0;
+        \\  globalThis.__workerTlsAsyncHoldCleanupSum = 0;
+        \\  globalThis.__workerTlsAsyncHoldRejectScore = 0;
+        \\  globalThis.__workerTlsAsyncHoldRejectCount = 0;
+        \\  globalThis.__workerTlsAsyncHoldReleaseScore = 0;
+        \\  globalThis.__workerTlsAsyncHoldReleaseCount = 0;
+        \\  globalThis.__workerTlsAsyncHoldReleaseJoinSum = 0;
+        \\  globalThis.__workerTlsAsyncHoldReleaseJoinCount = 0;
+        \\  globalThis.__workerTlsAsyncHoldEarlyCleanupCount = 0;
+        \\  globalThis.__workerTlsAsyncHoldRegistry = new FinalizationRegistry((held) => {{
+        \\    globalThis.__workerTlsAsyncHoldCleanupCount++;
+        \\    globalThis.__workerTlsAsyncHoldCleanupSum += held;
+        \\  }});
+        \\  return {d};
+        \\}})();
+        \\
+    ,
+        .{nworkers},
+    );
+    defer gpa.free(setup_src);
+    const setup = ctx.evaluate(setup_src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: worker terminate/ThreadLocal asyncHold setup threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!setup.isNumber() or setup.asNum() != @as(f64, @floatFromInt(nworkers))) {
+        std.debug.print("seed {d}: worker terminate/ThreadLocal asyncHold setup got {d}, expected {d}\n", .{ seed, if (setup.isNumber()) setup.asNum() else -1, nworkers });
+        return false;
+    }
+
+    const msg = ctx.evaluate("globalThis.__workerTlsAsyncHoldMsg") catch |err| {
+        std.debug.print("seed {d}: cannot read worker terminate/ThreadLocal asyncHold message: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    const worker_src =
+        \\globalThis.onmessage = (e) => {
+        \\  const v = new Int32Array(e.data.sab);
+        \\  Atomics.add(v, 0, 1);
+        \\  Atomics.notify(v, 0);
+        \\  for (;;) {
+        \\    Atomics.add(v, 1, 1);
+        \\  }
+        \\};
+    ;
+
+    var workers: std.ArrayListUnmanaged(*Worker) = .empty;
+    defer workers.deinit(gpa);
+    var cleanup_workers = true;
+    defer if (cleanup_workers) {
+        for (workers.items) |w| {
+            w.terminate();
+            w.join();
+            w.destroy();
+        }
+    };
+
+    var wi: usize = 0;
+    while (wi < nworkers) : (wi += 1) {
+        const w = Worker.spawn(worker_src) catch {
+            std.debug.print("seed {d}: worker terminate/ThreadLocal asyncHold worker spawn failed\n", .{seed});
+            return false;
+        };
+        try workers.append(gpa, w);
+        w.postMessage(&machine, msg) catch |err| {
+            std.debug.print("seed {d}: worker terminate/ThreadLocal asyncHold post failed: {s}\n", .{ seed, @errorName(err) });
+            return false;
+        };
+    }
+
+    const ready_src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  const v = new Int32Array(globalThis.__workerTlsAsyncHoldMsg.sab);
+        \\  let spins = 0;
+        \\  while (Atomics.load(v, 0) < {d} && spins++ < 10000000)
+        \\    Atomics.wait(v, 0, Atomics.load(v, 0), 1);
+        \\  if (Atomics.load(v, 0) !== {d})
+        \\    throw new Error('worker terminate/ThreadLocal asyncHold workers not ready: ' + Atomics.load(v, 0));
+        \\  if (Atomics.load(v, 1) <= 0)
+        \\    throw new Error('worker terminate/ThreadLocal asyncHold worker did not spin');
+        \\  return Atomics.load(v, 0);
+        \\}})();
+        \\
+    ,
+        .{ nworkers, nworkers },
+    );
+    defer gpa.free(ready_src);
+    const ready = ctx.evaluate(ready_src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: worker terminate/ThreadLocal asyncHold readiness threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!ready.isNumber() or ready.asNum() != @as(f64, @floatFromInt(nworkers))) {
+        std.debug.print("seed {d}: worker terminate/ThreadLocal asyncHold ready got {d}, expected {d}\n", .{ seed, if (ready.isNumber()) ready.asNum() else -1, nworkers });
+        return false;
+    }
+
+    const fail_src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  const registry = globalThis.__workerTlsAsyncHoldRegistry;
+        \\  const tls = new ThreadLocal();
+        \\  const gate = {{ tlsReady: 0, release: 0, prop: 0, propReady: 0, condReady: 0, condOpen: false }};
+        \\  const releaseLock = new Lock();
+        \\  const condLock = new Lock();
+        \\  const cond = new Condition();
+        \\  const tlsThreads = globalThis.__workerTlsAsyncHoldTlsThreads = [];
+        \\  for (let id = 0; id < {d}; id++) {{
+        \\    const rejectRoot = {{ marker: {d} + id, nested: {{ seed: {d}, label: 'worker-tls-asynchold-tls-reject-' + id }} }};
+        \\    const t = new Thread((id, seedMarker, tlsBase, timeout) => {{
+        \\      let target = {{
+        \\        id,
+        \\        seed: seedMarker,
+        \\        marker: tlsBase + id,
+        \\        nested: {{ label: 'worker-tls-asynchold-hidden-root-' + id }},
+        \\      }};
+        \\      tls.value = target;
+        \\      registry.register(target, tlsBase + id);
+        \\      target = null;
+        \\      Atomics.add(gate, 'tlsReady', 1);
+        \\      Atomics.notify(gate, 'tlsReady');
+        \\      while (Atomics.load(gate, 'release') === 0)
+        \\        Atomics.wait(gate, 'release', 0, timeout);
+        \\      return -1;
+        \\    }}, id, {d}, {d}, {d});
+        \\    t.asyncJoin().then(
+        \\      () => {{ globalThis.__workerTlsAsyncHoldRejectScore = -1000000; }},
+        \\      (e) => {{
+        \\        if (e && rejectRoot.marker === {d} + id && rejectRoot.nested.seed === {d}) {{
+        \\          globalThis.__workerTlsAsyncHoldRejectScore += rejectRoot.marker;
+        \\          globalThis.__workerTlsAsyncHoldRejectCount++;
+        \\        }} else {{
+        \\          globalThis.__workerTlsAsyncHoldRejectScore = -1000000;
+        \\        }}
+        \\      }});
+        \\    tlsThreads.push(t);
+        \\  }}
+        \\  while (Atomics.load(gate, 'tlsReady') < {d})
+        \\    Atomics.wait(gate, 'tlsReady', Atomics.load(gate, 'tlsReady'), 1);
+        \\  registry.cleanupSome();
+        \\  if (globalThis.__workerTlsAsyncHoldCleanupCount !== 0)
+        \\    throw new Error('worker terminate/ThreadLocal asyncHold cleanup fired before teardown');
+        \\
+        \\  const propRoot = {{ marker: {d}, nested: {{ seed: {d}, label: 'worker-tls-asynchold-property-reject' }} }};
+        \\  const propWaiter = globalThis.__workerTlsAsyncHoldPropWaiter = new Thread((gate, timeout) => {{
+        \\    const root = {{ marker: {d}, nested: {{ seed: {d}, label: 'worker-tls-asynchold-property-waiter' }} }};
+        \\    Atomics.store(gate, 'propReady', 1);
+        \\    Atomics.notify(gate, 'propReady');
+        \\    const r = Atomics.wait(gate, 'prop', 0, timeout);
+        \\    if (r !== 'ok' && r !== 'not-equal')
+        \\      throw new Error('bad worker terminate/ThreadLocal asyncHold property wait result ' + r);
+        \\    return root.marker;
+        \\  }}, gate, {d});
+        \\  propWaiter.asyncJoin().then(
+        \\    () => {{ globalThis.__workerTlsAsyncHoldRejectScore = -1000000; }},
+        \\    (e) => {{
+        \\      if (e && propRoot.marker === {d} && propRoot.nested.seed === {d}) {{
+        \\        globalThis.__workerTlsAsyncHoldRejectScore += propRoot.marker;
+        \\        globalThis.__workerTlsAsyncHoldRejectCount++;
+        \\      }} else {{
+        \\        globalThis.__workerTlsAsyncHoldRejectScore = -1000000;
+        \\      }}
+        \\    }});
+        \\  const condRoot = {{ marker: {d}, nested: {{ seed: {d}, label: 'worker-tls-asynchold-condition-reject' }} }};
+        \\  const condWaiter = globalThis.__workerTlsAsyncHoldCondWaiter = new Thread((gate, condLock, cond) => {{
+        \\    const root = {{ marker: {d}, nested: {{ seed: {d}, label: 'worker-tls-asynchold-condition-waiter' }} }};
+        \\    condLock.hold(() => {{
+        \\      Atomics.store(gate, 'condReady', 1);
+        \\      Atomics.notify(gate, 'condReady');
+        \\      while (!gate.condOpen)
+        \\        cond.wait(condLock);
+        \\    }});
+        \\    return root.marker;
+        \\  }}, gate, condLock, cond);
+        \\  condWaiter.asyncJoin().then(
+        \\    () => {{ globalThis.__workerTlsAsyncHoldRejectScore = -1000000; }},
+        \\    (e) => {{
+        \\      if (e && condRoot.marker === {d} && condRoot.nested.seed === {d}) {{
+        \\        globalThis.__workerTlsAsyncHoldRejectScore += condRoot.marker;
+        \\        globalThis.__workerTlsAsyncHoldRejectCount++;
+        \\      }} else {{
+        \\        globalThis.__workerTlsAsyncHoldRejectScore = -1000000;
+        \\      }}
+        \\    }});
+        \\  while (Atomics.load(gate, 'propReady') === 0)
+        \\    Atomics.wait(gate, 'propReady', 0, 1);
+        \\  while (Atomics.load(gate, 'condReady') === 0)
+        \\    Atomics.wait(gate, 'condReady', 0, 1);
+        \\
+        \\  const releaseThreads = [];
+        \\  releaseLock.hold(() => {{
+        \\    for (let id = 0; id < {d}; id++) {{
+        \\      releaseThreads.push(new Thread((lock, id, releaseBase, seedMarker) => {{
+        \\        const releaseRoot = {{ marker: releaseBase + id, nested: {{ seed: seedMarker, label: 'worker-tls-asynchold-release-root' }} }};
+        \\        return lock.asyncHold().then((release) => {{
+        \\          if (typeof release !== 'function')
+        \\            throw new Error('worker terminate/ThreadLocal asyncHold did not deliver release');
+        \\          if (releaseRoot.nested.seed !== seedMarker)
+        \\            globalThis.__workerTlsAsyncHoldReleaseScore = -1000000;
+        \\          else {{
+        \\            globalThis.__workerTlsAsyncHoldReleaseScore += releaseRoot.marker;
+        \\            globalThis.__workerTlsAsyncHoldReleaseCount++;
+        \\          }}
+        \\          release();
+        \\          return releaseRoot.marker;
+        \\        }});
+        \\      }}, releaseLock, id, {d}, {d}));
+        \\    }}
+        \\  }});
+        \\  for (const t of releaseThreads) {{
+        \\    const p = t.join();
+        \\    if (!(p instanceof Promise))
+        \\      throw new Error('worker terminate/ThreadLocal asyncHold release join did not return a promise');
+        \\    p.then((value) => {{
+        \\      globalThis.__workerTlsAsyncHoldReleaseJoinSum += value;
+        \\      globalThis.__workerTlsAsyncHoldReleaseJoinCount++;
+        \\    }}, () => {{
+        \\      globalThis.__workerTlsAsyncHoldReleaseJoinSum = -1000000;
+        \\    }});
+        \\  }}
+        \\  for (let spins = 0; globalThis.__workerTlsAsyncHoldReleaseJoinCount < {d} && spins < 1000; spins++) {{
+        \\    $drainRunLoop();
+        \\    drainMicrotasks();
+        \\  }}
+        \\  if (globalThis.__workerTlsAsyncHoldReleaseCount !== {d})
+        \\    throw new Error('bad worker terminate/ThreadLocal asyncHold release count ' + globalThis.__workerTlsAsyncHoldReleaseCount);
+        \\  if (globalThis.__workerTlsAsyncHoldReleaseScore !== {d})
+        \\    throw new Error('bad worker terminate/ThreadLocal asyncHold release score ' + globalThis.__workerTlsAsyncHoldReleaseScore);
+        \\  if (globalThis.__workerTlsAsyncHoldReleaseJoinCount !== {d})
+        \\    throw new Error('bad worker terminate/ThreadLocal asyncHold release join count ' + globalThis.__workerTlsAsyncHoldReleaseJoinCount);
+        \\  if (globalThis.__workerTlsAsyncHoldReleaseJoinSum !== {d})
+        \\    throw new Error('bad worker terminate/ThreadLocal asyncHold release join sum ' + globalThis.__workerTlsAsyncHoldReleaseJoinSum);
+        \\  if (releaseLock.locked)
+        \\    throw new Error('worker terminate/ThreadLocal asyncHold release lock left locked');
+        \\  registry.cleanupSome();
+        \\  if (globalThis.__workerTlsAsyncHoldCleanupCount !== 0)
+        \\    throw new Error('worker terminate/ThreadLocal asyncHold cleanup fired before top-level teardown');
+        \\  globalThis.__workerTlsAsyncHoldEarlyCleanupCount = globalThis.__workerTlsAsyncHoldCleanupCount;
+        \\  throw new Error('threadfuzz worker terminate ThreadLocal asyncHold cleanup {d}');
+        \\}})();
+        \\
+    ,
+        .{
+            ntls_threads,
+            tls_reject_base,
+            seed,
+            seed_marker,
+            tls_base,
+            wait_timeout_ms,
+            tls_reject_base,
+            seed,
+            ntls_threads,
+            prop_reject_marker,
+            seed,
+            prop_reject_marker,
+            seed,
+            wait_timeout_ms,
+            prop_reject_marker,
+            seed,
+            cond_reject_marker,
+            seed,
+            cond_reject_marker,
+            seed,
+            cond_reject_marker,
+            seed,
+            nrelease_threads,
+            release_base,
+            seed_marker,
+            nrelease_threads,
+            nrelease_threads,
+            expected_release_score,
+            nrelease_threads,
+            expected_release_score,
+            seed,
+        },
+    );
+    defer gpa.free(fail_src);
+    if (ctx.evaluate(fail_src)) |_| {
+        std.debug.print("seed {d}: worker terminate/ThreadLocal asyncHold failure script returned normally\n", .{seed});
+        return false;
+    } else |err| {
+        if (err != error.Throw) {
+            std.debug.print("seed {d}: worker terminate/ThreadLocal asyncHold failed with {s}\n", .{ seed, @errorName(err) });
+            return false;
+        }
+    }
+
+    _ = ctx.evaluate("$drainRunLoop()") catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: worker terminate/ThreadLocal asyncHold drain threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+
+    const check_src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  if (globalThis.__workerTlsAsyncHoldEarlyCleanupCount !== 0)
+        \\    throw new Error('worker terminate/ThreadLocal asyncHold early cleanup count ' + globalThis.__workerTlsAsyncHoldEarlyCleanupCount);
+        \\  if (globalThis.__workerTlsAsyncHoldReleaseScore !== {d})
+        \\    throw new Error('bad worker terminate/ThreadLocal asyncHold release score ' + globalThis.__workerTlsAsyncHoldReleaseScore);
+        \\  if (globalThis.__workerTlsAsyncHoldReleaseJoinSum !== {d})
+        \\    throw new Error('bad worker terminate/ThreadLocal asyncHold release join sum ' + globalThis.__workerTlsAsyncHoldReleaseJoinSum);
+        \\  if (globalThis.__workerTlsAsyncHoldRejectScore !== {d})
+        \\    throw new Error('bad worker terminate/ThreadLocal asyncHold reject score ' + globalThis.__workerTlsAsyncHoldRejectScore);
+        \\  if (globalThis.__workerTlsAsyncHoldRejectCount !== {d})
+        \\    throw new Error('bad worker terminate/ThreadLocal asyncHold reject count ' + globalThis.__workerTlsAsyncHoldRejectCount);
+        \\  let joinThrew = 0;
+        \\  for (const t of globalThis.__workerTlsAsyncHoldTlsThreads) {{
+        \\    try {{ t.join(); }} catch (e) {{ if (e) joinThrew++; }}
+        \\  }}
+        \\  try {{ globalThis.__workerTlsAsyncHoldPropWaiter.join(); }} catch (e) {{ if (e) joinThrew++; }}
+        \\  try {{ globalThis.__workerTlsAsyncHoldCondWaiter.join(); }} catch (e) {{ if (e) joinThrew++; }}
+        \\  if (joinThrew !== {d})
+        \\    throw new Error('worker terminate/ThreadLocal asyncHold join threw ' + joinThrew);
+        \\  globalThis.__workerTlsAsyncHoldTlsThreads = null;
+        \\  globalThis.__workerTlsAsyncHoldPropWaiter = null;
+        \\  globalThis.__workerTlsAsyncHoldCondWaiter = null;
+        \\  return joinThrew + globalThis.__workerTlsAsyncHoldReleaseJoinCount;
+        \\}})();
+        \\
+    ,
+        .{ expected_release_score, expected_release_score, expected_reject_sum, expected_reject_count, expected_reject_count },
+    );
+    defer gpa.free(check_src);
+    const checked = ctx.evaluate(check_src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: worker terminate/ThreadLocal asyncHold check threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!checked.isNumber() or checked.asNum() != @as(f64, @floatFromInt(expected_reject_count + nrelease_threads))) {
+        std.debug.print("seed {d}: worker terminate/ThreadLocal asyncHold checked got {d}, expected {d}\n", .{ seed, if (checked.isNumber()) checked.asNum() else -1, expected_reject_count + nrelease_threads });
+        return false;
+    }
+
+    ctx.collectGarbage();
+    const cleanup_src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  globalThis.__workerTlsAsyncHoldRegistry.cleanupSome();
+        \\  if (globalThis.__workerTlsAsyncHoldCleanupCount !== {d})
+        \\    throw new Error('bad worker terminate/ThreadLocal asyncHold cleanup count ' + globalThis.__workerTlsAsyncHoldCleanupCount + '/' + {d});
+        \\  if (globalThis.__workerTlsAsyncHoldCleanupSum !== {d})
+        \\    throw new Error('bad worker terminate/ThreadLocal asyncHold cleanup sum ' + globalThis.__workerTlsAsyncHoldCleanupSum + '/' + {d});
+        \\  return globalThis.__workerTlsAsyncHoldCleanupCount;
+        \\}})()
+        \\
+    ,
+        .{ ntls_threads, ntls_threads, expected_cleanup_sum, expected_cleanup_sum },
+    );
+    defer gpa.free(cleanup_src);
+    const cleaned = ctx.evaluate(cleanup_src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: worker terminate/ThreadLocal asyncHold cleanup JS threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!cleaned.isNumber() or cleaned.asNum() != @as(f64, @floatFromInt(ntls_threads))) {
+        std.debug.print("seed {d}: worker terminate/ThreadLocal asyncHold cleaned got {d}, expected {d}\n", .{ seed, if (cleaned.isNumber()) cleaned.asNum() else -1, ntls_threads });
+        return false;
+    }
+
+    for (workers.items) |w| {
+        w.terminate();
+        w.join();
+        const reply = w.receive(&machine, 0) catch |err| {
+            std.debug.print("seed {d}: worker terminate/ThreadLocal asyncHold receive after terminate failed: {s}\n", .{ seed, @errorName(err) });
+            return false;
+        };
+        if (reply != null) {
+            std.debug.print("seed {d}: worker terminate/ThreadLocal asyncHold delivered a post-terminate reply\n", .{seed});
+            return false;
+        }
+        w.destroy();
+    }
+    cleanup_workers = false;
+
+    const worker_ready = ctx.evaluate("Atomics.load(new Int32Array(globalThis.__workerTlsAsyncHoldMsg.sab), 0)") catch |err| {
+        std.debug.print("seed {d}: cannot read worker terminate/ThreadLocal asyncHold ready counter: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    if (!worker_ready.isNumber() or worker_ready.asNum() != @as(f64, @floatFromInt(nworkers))) {
+        std.debug.print("seed {d}: worker terminate/ThreadLocal asyncHold worker ready got {d}, expected {d}\n", .{ seed, if (worker_ready.isNumber()) worker_ready.asNum() else -1, nworkers });
+        return false;
+    }
+    return true;
+}
+
 fn runMidScriptAsyncHoldReleaseWaiterCleanupGc(gpa: std.mem.Allocator, seed: u64) !bool {
     var prng = std.Random.DefaultPrng.init(seed ^ 0x6d69_6461_6872_656c);
     const r = prng.random();
@@ -15608,6 +16046,23 @@ pub fn main(init: std.process.Init) !void {
         if (tahfail != 0) std.process.exit(1);
         return;
     };
+    // `threadfuzz workertlsasyncholdcleanup <iters> <seed>`: focused lifecycle
+    // repro for isolated Worker termination overlapping shared-realm
+    // ThreadLocal roots, no-fn asyncHold release functions, parked
+    // property/condition waiters, top-level teardown, and exact cleanup.
+    if (first) |a| if (std.mem.eql(u8, a, "workertlsasyncholdcleanup")) {
+        if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch 1;
+        if (args.next()) |b| base_seed = std.fmt.parseInt(u64, b, 10) catch 1;
+        var wtahfail: usize = 0;
+        var wtahi: usize = 0;
+        while (wtahi < iters) : (wtahi += 1) {
+            const seed = base_seed +% wtahi;
+            if (!(try runWorkerTerminateThreadLocalAsyncHoldCleanupInterleaving(gpa, seed))) wtahfail += 1;
+        }
+        std.debug.print("threadfuzz workertlsasyncholdcleanup: {d} programs from seed {d}, {d} failures\n", .{ iters, base_seed, wtahfail });
+        if (wtahfail != 0) std.process.exit(1);
+        return;
+    };
     // `threadfuzz microtaskchurn <iters> <seed>`: focused lifecycle repro for
     // Promise reaction queue churn across asyncHold, waitAsync, asyncJoin, and
     // finalization cleanup.
@@ -16338,6 +16793,9 @@ pub fn main(init: std.process.Init) !void {
     // condition async reacquire plus pending asyncJoin rejection cleanup,
     // module Worker termination with the same child-owned typed-array
     // waitAsync ticket abandonment and pending asyncJoin rejection cleanup,
+    // isolated Worker termination overlapping ThreadLocal roots, no-fn
+    // asyncHold release-function delivery, parked property/condition waiters,
+    // top-level teardown, and exact cleanup,
     // Thread.restrict-stored FinalizationRegistry records across owner exit,
     // ThreadLocal-stored FinalizationRegistry records across park/resume/cleanup,
     // ThreadLocal-only roots released by top-level-failure teardown,
@@ -16361,6 +16819,8 @@ pub fn main(init: std.process.Init) !void {
     // counter plus exact cleanup delivery, terminating spinning Workers must
     // not disturb exact shared-realm finalization cleanup on the retained SAB
     // or top-level-failure Thread teardown with pending asyncJoin cleanup,
+    // or top-level-failure ThreadLocal/asyncHold/waiter teardown with exact
+    // cleanup,
     // worker handler exception recovery must compose with exact shared-realm
     // cleanup delivery on the retained SAB, including the module Worker import
     // graph variant,
@@ -16460,6 +16920,7 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runWorkerTerminateConditionAsyncCleanupInterleaving(gpa, seed))) lfail += 1;
             if (!(try runWorkerTerminateWaitAsyncCleanupInterleaving(gpa, seed))) lfail += 1;
             if (!(try runModuleWorkerTerminateWaitAsyncCleanupInterleaving(gpa, seed))) lfail += 1;
+            if (!(try runWorkerTerminateThreadLocalAsyncHoldCleanupInterleaving(gpa, seed))) lfail += 1;
             if (!(try runAsyncHoldBargingLifecycleInterleaving(gpa, seed))) lfail += 1;
             if (!(try runAsyncHoldReleaseWaiterCleanupInterleaving(gpa, seed))) lfail += 1;
             if (!(try runThreadLocalAsyncHoldReleaseCleanupInterleaving(gpa, seed))) lfail += 1;
@@ -16470,7 +16931,7 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runThreadLocalTerminationCleanupInterleaving(gpa, seed))) lfail += 1;
             if (!(try runNestedThreadAsyncJoinCleanupInterleaving(gpa, seed))) lfail += 1;
         }
-        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 48, base_seed, lfail });
+        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 49, base_seed, lfail });
         if (lfail != 0) std.process.exit(1);
         return;
     };

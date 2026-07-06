@@ -498,6 +498,10 @@ as embedders exercise more threaded host patterns.
   composed with the same child-owned typed-array `waitAsync` ticket
   abandonment, pending `asyncJoin` rejection cleanup, and exact
   `FinalizationRegistry` cleanup,
+  Worker termination composed with `ThreadLocal` hidden roots, no-fn
+  `Lock.asyncHold()` release-function delivery, parked property/condition
+  waiters, top-level teardown, rejected `asyncJoin` observers, and exact
+  `FinalizationRegistry` cleanup,
   cleanup delivery interleaved with `join()` /
   `asyncJoin()` and unregister-token suppression, cleanup delivery after parked
   property/condition waiters resume, deterministic `Lock.asyncHold()` barging

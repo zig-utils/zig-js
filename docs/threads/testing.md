@@ -336,7 +336,11 @@ then verifies child release, nested `ThreadLocal` roots, rerouted async
 settlement, and exact finalization cleanup after both thread layers exit. It now
 also composes isolated Worker termination with shared-realm teardown that
 abandons child-owned typed-array `waitAsync` tickets, rejects pending
-`asyncJoin` reactions, and delivers exact cleanup. Each seed currently runs 48
+`asyncJoin` reactions, and delivers exact cleanup, plus isolated Worker
+termination overlapping `ThreadLocal` hidden roots, no-fn `Lock.asyncHold()`
+release-function delivery, parked property/condition waiters, top-level
+teardown, rejected `asyncJoin` observers, and exact cleanup. Each seed
+currently runs 49
 deterministic lifecycle
 subprograms.
 
