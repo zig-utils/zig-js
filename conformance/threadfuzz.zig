@@ -8443,10 +8443,26 @@ fn runTerminationWaiterCleanupInterleaving(gpa: std.mem.Allocator, seed: u64) !b
 }
 
 fn runThreadRestrictLifecycleInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
-    var prng = std.Random.DefaultPrng.init(seed ^ 0x7265_7374_7269_6374);
+    return runThreadRestrictLifecycleInterleavingKind(gpa, seed, false);
+}
+
+fn runMidScriptThreadRestrictLifecycleGc(gpa: std.mem.Allocator, seed: u64) !bool {
+    return runThreadRestrictLifecycleInterleavingKind(gpa, seed, true);
+}
+
+fn runThreadRestrictLifecycleInterleavingKind(
+    gpa: std.mem.Allocator,
+    seed: u64,
+    comptime midgc: bool,
+) !bool {
+    var prng = std.Random.DefaultPrng.init(seed ^ 0x7265_7374_7269_6374 ^ if (midgc) 0x6d69_6467_6372_6573 else 0);
     const r = prng.random();
     const nthreads = 3 + r.uintLessThan(usize, 4);
     const per_thread = 8 + r.uintLessThan(usize, 12);
+    const gc_rounds = if (midgc) 6 + r.uintLessThan(usize, 5) else 0;
+    const gc_per_round = if (midgc) 560 + r.uintLessThan(usize, 360) else 0;
+    const gc_spin_iters = if (midgc) 1700 + r.uintLessThan(usize, 2800) else 0;
+    const seed_marker = seed % 10_000;
 
     var expected_success_sum: usize = 0;
     var expected_reject_sum: usize = 0;
@@ -8459,11 +8475,55 @@ fn runThreadRestrictLifecycleInterleaving(gpa: std.mem.Allocator, seed: u64) !bo
         }
     }
 
-    const ctx = js.Context.createWith(gpa, .{ .enable_threads = true, .enable_gc = true }) catch {
+    const ctx = (if (midgc)
+        js.Context.createWithTestingOptions(gpa, .{
+            .enable_threads = true,
+            .enable_gc = true,
+            .parallel_gc = true,
+            .parallel_js = true,
+            .parallel_midscript_gc = true,
+        })
+    else
+        js.Context.createWith(gpa, .{ .enable_threads = true, .enable_gc = true })) catch {
         std.debug.print("seed {d}: Thread.restrict lifecycle context creation failed\n", .{seed});
         return false;
     };
     defer ctx.destroy();
+
+    const midgc_bool = if (midgc) "true" else "false";
+    const midgc_pressure_src: []const u8 = if (midgc)
+        try std.fmt.allocPrint(
+            gpa,
+            \\  while (Atomics.load(gate, 'ready') < {d})
+            \\    Atomics.wait(gate, 'ready', Atomics.load(gate, 'ready'), 1);
+            \\  {{
+            \\    const keep = [];
+            \\    const midRoot = {{ seed: {d}, label: 'midgc-restrict-lifecycle-root' }};
+            \\    for (let round = 0; round < {d}; round++) {{
+            \\      for (let i = 0; i < {d}; i++) {{
+            \\        keep.push({{
+            \\          round,
+            \\          i,
+            \\          mainBox,
+            \\          nested: {{ midRoot, value: i + round }},
+            \\          text: 'midgc-restrict-lifecycle-' + round + '-' + i,
+            \\        }});
+            \\      }}
+            \\      let spin = 0;
+            \\      for (let j = 0; j < {d}; j++) spin = (spin + j + round) & 0x3fffffff;
+            \\      if (spin < 0) keep.push({{ impossible: true }});
+            \\    }}
+            \\    if (typeof gc === 'function') gc();
+            \\  }}
+            \\  Atomics.store(gate, 'release', 1);
+            \\  Atomics.notify(gate, 'release', {d});
+            \\
+        ,
+            .{ nthreads, seed_marker, gc_rounds, gc_per_round, gc_spin_iters, nthreads + 4 },
+        )
+    else
+        "";
+    defer if (midgc) gpa.free(midgc_pressure_src);
 
     const src = try std.fmt.allocPrint(
         gpa,
@@ -8471,6 +8531,7 @@ fn runThreadRestrictLifecycleInterleaving(gpa: std.mem.Allocator, seed: u64) !bo
         \\  globalThis.__restrictLifecycleOracle = 0;
         \\  const mainBox = {{ seed: {d}, owner: 'main' }};
         \\  Thread.restrict(mainBox);
+        \\  const gate = {{ ready: 0, release: 0 }};
         \\  let asyncSuccess = 0;
         \\  let asyncReject = 0;
         \\  const threads = [];
@@ -8489,6 +8550,14 @@ fn runThreadRestrictLifecycleInterleaving(gpa: std.mem.Allocator, seed: u64) !bo
         \\        throw new Error('restricted main object was readable from worker ' + id);
         \\      const local = {{ id, count: 0, tag: 'restrict-' + id }};
         \\      Thread.restrict(local);
+        \\      if ({s}) {{
+        \\        Atomics.add(gate, 'ready', 1);
+        \\        Atomics.notify(gate, 'ready');
+        \\        while (Atomics.load(gate, 'release') === 0)
+        \\          Atomics.wait(gate, 'release', 0, 1000);
+        \\        if (local.id !== id || local.tag !== 'restrict-' + id)
+        \\          throw new Error('restricted local changed while parked ' + id);
+        \\      }}
         \\      for (let i = 0; i < per; i++)
         \\        local.count = local.count + 1;
         \\      const nested = new Thread((box) => {{
@@ -8515,6 +8584,7 @@ fn runThreadRestrictLifecycleInterleaving(gpa: std.mem.Allocator, seed: u64) !bo
         \\      }});
         \\    threads.push(t);
         \\  }}
+        \\{s}
         \\  if (mainBox.seed !== {d})
         \\    throw new Error('main restricted object changed');
         \\  let joinSuccess = 0;
@@ -8551,8 +8621,10 @@ fn runThreadRestrictLifecycleInterleaving(gpa: std.mem.Allocator, seed: u64) !bo
         .{
             seed,
             nthreads,
+            midgc_bool,
             per_thread,
             per_thread,
+            midgc_pressure_src,
             seed,
             per_thread,
             expected_success_sum,
@@ -8563,6 +8635,8 @@ fn runThreadRestrictLifecycleInterleaving(gpa: std.mem.Allocator, seed: u64) !bo
     );
     defer gpa.free(src);
 
+    const before_attempts = if (midgc) ctx.gc_par_attempts.load(.monotonic) else 0;
+    const before_collections = if (midgc) ctx.gc_par_collections.load(.monotonic) else 0;
     const result = ctx.evaluate(src) catch |err| {
         const msg_txt = if (ctx.exception) |ex| blk: {
             var render = ctx.interpreter();
@@ -8574,6 +8648,14 @@ fn runThreadRestrictLifecycleInterleaving(gpa: std.mem.Allocator, seed: u64) !bo
     const expected_return = expected_success_sum + expected_reject_sum;
     if (!result.isNumber() or result.asNum() != @as(f64, @floatFromInt(expected_return))) {
         std.debug.print("seed {d}: Thread.restrict lifecycle got {d}, expected {d}\n", .{ seed, if (result.isNumber()) result.asNum() else -1, expected_return });
+        return false;
+    }
+    if (midgc and ctx.gc_par_attempts.load(.monotonic) <= before_attempts) {
+        std.debug.print("seed {d}: Thread.restrict lifecycle did not attempt a parallel collection\n", .{seed});
+        return false;
+    }
+    if (midgc and ctx.gc_par_collections.load(.monotonic) <= before_collections) {
+        std.debug.print("seed {d}: Thread.restrict lifecycle did not finish a parallel collection\n", .{seed});
         return false;
     }
     const oracle = ctx.evaluate("globalThis.__restrictLifecycleOracle") catch |err| {
@@ -17092,6 +17174,24 @@ pub fn main(init: std.process.Init) !void {
         if (mttcfail != 0) std.process.exit(1);
         return;
     };
+    // `threadfuzz midgcrestrictlife <iters> <seed>`: focused mid-script
+    // parallel-GC repro for Thread.restrict owner isolation, nested foreign
+    // access rejection, thrown-object publication, and asyncJoin observers
+    // while restricted owner-local objects stay parked through a finishing
+    // sweep.
+    if (first) |a| if (std.mem.eql(u8, a, "midgcrestrictlife")) {
+        if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch 1;
+        if (args.next()) |b| base_seed = std.fmt.parseInt(u64, b, 10) catch 1;
+        var mrlfail: usize = 0;
+        var mrli: usize = 0;
+        while (mrli < iters) : (mrli += 1) {
+            const seed = base_seed +% mrli;
+            if (!(try runMidScriptThreadRestrictLifecycleGc(gpa, seed))) mrlfail += 1;
+        }
+        std.debug.print("threadfuzz midgcrestrictlife: {d} programs from seed {d}, {d} failures\n", .{ iters, base_seed, mrlfail });
+        if (mrlfail != 0) std.process.exit(1);
+        return;
+    };
     // `threadfuzz midgcrestrictfinal <iters> <seed>`: focused mid-script
     // parallel-GC repro for Thread.restrict-owned objects registered with
     // FinalizationRegistry while owner threads are parked through a finishing
@@ -17716,6 +17816,7 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runMidScriptThreadLocalLifecycleGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptThreadLocalFinalizationGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptThreadLocalTerminationCleanupGc(gpa, seed))) mfail += 1;
+            if (!(try runMidScriptThreadRestrictLifecycleGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptThreadRestrictFinalizationGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptWorkerCreatorOwnedBufferCleanupGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptModuleWorkerCreatorOwnedBufferCleanupGc(gpa, seed))) mfail += 1;
@@ -17733,7 +17834,7 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runMidScriptModuleWorkerTerminateThreadLocalAsyncHoldCleanupGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptWeakCollectionGc(gpa, seed))) mfail += 1;
         }
-        std.debug.print("threadfuzz midgc: {d} programs from seed {d}, {d} failures\n", .{ iters * 34, base_seed, mfail });
+        std.debug.print("threadfuzz midgc: {d} programs from seed {d}, {d} failures\n", .{ iters * 35, base_seed, mfail });
         if (mfail != 0) std.process.exit(1);
         return;
     };

@@ -248,7 +248,11 @@ context APIs.
   plus a sibling ThreadLocal-termination cleanup subprogram where
   ThreadLocal-only cleanup targets stay live through a finishing sweep until
   top-level-failure teardown releases the owner-thread entries and exact cleanup
-  is verified, plus a sibling promise-publication subprogram where a child-returned
+  is verified, plus a sibling Thread.restrict lifecycle subprogram where
+  restricted owner-local objects stay parked through a finishing sweep before
+  owner isolation, nested foreign access rejection, thrown-object identity, and
+  `asyncJoin` observers are verified, plus a sibling promise-publication
+  subprogram where a child-returned
   typed-array `waitAsync` promise, a child-returned rejected promise, a
   child-returned user thenable, and a child-thrown object remain rooted through
   thread completion/native waiter state until post-sweep

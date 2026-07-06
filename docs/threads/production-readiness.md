@@ -325,7 +325,8 @@ as embedders exercise more threaded host patterns.
   nested parent/child `Thread.asyncJoin` cleanup subprogram, a
   ThreadLocal lifecycle subprogram, a ThreadLocal-finalization subprogram, a
   ThreadLocal-termination cleanup subprogram, a
-  Thread.restrict-finalization subprogram, isolated script Worker/SAB and module
+  Thread.restrict lifecycle subprogram, a Thread.restrict-finalization
+  subprogram, isolated script Worker/SAB and module
   Worker/SAB cleanup subprograms, script and module Worker
   handler-exception cleanup subprograms, script and module Worker
   close/terminate drain/drop subprograms, script and module Worker
@@ -373,6 +374,9 @@ as embedders exercise more threaded host patterns.
   targets live through a finishing sweep, then forces top-level-failure thread
   teardown, requires blocking joins to observe termination, and verifies exact
   cleanup after the owner-thread entries are released.
+  The Thread.restrict lifecycle subprogram parks restricted owner-local objects
+  through a finishing sweep before verifying owner isolation, nested foreign
+  access rejection, thrown-object identity, and `asyncJoin` observers.
   The Thread.restrict-finalization subprogram parks owner threads with
   restricted owner-local objects registered for finalization, verifies nested
   foreign reads still throw `ConcurrentAccessError`, drives a finishing
