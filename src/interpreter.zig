@@ -732,9 +732,12 @@ pub const Function = struct {
     /// toString`. Empty when the parser didn't capture it (then toString falls
     /// back to native-function syntax).
     source: []const u8 = "",
-    /// Compiled body for the bytecode VM. Set when the function was created by
-    /// the VM (`make_closure`); null for tree-walk-created closures, which are
-    /// invoked via `callFunction`.
+    /// Compiled body for the bytecode VM. Set by `makeFunction` (and the VM's
+    /// `make_closure`) via `compilePlainFunction` when a plain function's body
+    /// lowers to bytecode — see `plainFunctionMayUseBytecode` — so tree-walk-
+    /// created closures tier onto the VM too. Null when the body uses syntax the
+    /// compiler does not lower yet, in which case the function is invoked via the
+    /// tree-walker (`callFunction`). Generators/async use `gen_chunk`/`async_chunk`.
     chunk: ?*bc.Chunk = null,
     /// VM closure capture: the defining function's frame (type-erased `*vm.Frame`),
     /// for resolving upvalues. Null at the top level. The slot count to allocate
@@ -4110,6 +4113,16 @@ pub const Interpreter = struct {
         return false;
     }
 
+    /// Whether a plain function should compile to a bytecode chunk and run on the
+    /// VM instead of the tree-walker. The VM path is taken narrowly — where it
+    /// changes behaviour the tree-walker can't match, not for a general speedup
+    /// (the two are close in throughput): strict functions that may contain a
+    /// tail call (proper-tail-call semantics via the VM's call trampoline), and
+    /// non-strict functions that recurse by their own name (deep recursion, where
+    /// the VM's heap activation stack outlasts the native stack) and don't observe
+    /// the legacy call frame. Methods, generators, async, and `arguments`-using
+    /// functions always stay on the tree-walker (they have their own chunk kinds
+    /// or unsupported semantics).
     fn plainFunctionMayUseBytecode(fnode: *const ast.FunctionNode) bool {
         if (fnode.is_method or fnode.is_generator or fnode.is_async or fnode.uses_arguments) return false;
         if (fnode.is_strict) return sourceMayHaveTailCall(fnode.source);
