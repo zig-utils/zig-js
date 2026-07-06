@@ -223,6 +223,9 @@ completion records and delayed `asyncJoin` observers across a finishing sweep,
 then verifies blocking `join()`, post-sweep `asyncJoin()`, and
 `ArrayBuffer.transfer()` observers see exact contents after the creating thread
 has exited,
+adds script and module Worker creator-owned cleanup subprograms where
+child-created SAB/ArrayBuffer storage crosses Worker structured-clone while
+sibling cleanup roots and transfer observers survive a finishing sweep,
 adds script Worker/SAB and module Worker/SAB cleanup subprograms that run
 isolated Workers on the same retained `SharedArrayBuffer` while shared-realm
 `Thread`s register cleanup targets and park stack roots through a finishing
@@ -262,7 +265,7 @@ join-termination unit witness that checks parked-state/mutex cleanup, then
 requires exact script completion or exact expected termination plus at least one
 finishing parallel sweep and exact
 `FinalizationRegistry` cleanup count/sum delivery plus unregister-token
-suppression after a quiescent collect. Each seed currently runs 31 deterministic
+suppression after a quiescent collect. Each seed currently runs 33 deterministic
 mid-GC subprograms. The
 lifecycle profile
 (`-Dfuzz-lifecycle=true`) adds deterministic resizable `ArrayBuffer` /

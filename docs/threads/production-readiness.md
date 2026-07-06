@@ -321,7 +321,8 @@ as embedders exercise more threaded host patterns.
   drives `parallel_midscript_gc`; every seed now runs a normal completion
   wait-pump subprogram, a sync-wait cleanup subprogram, a promise-publication
   subprogram, a pending-microtask subprogram, a creator-owned buffer
-  subprogram, a nested parent/child `Thread.asyncJoin` cleanup subprogram, a
+  subprogram, script and module Worker creator-owned cleanup subprograms, a
+  nested parent/child `Thread.asyncJoin` cleanup subprogram, a
   ThreadLocal-finalization subprogram, a ThreadLocal-termination cleanup
   subprogram, a
   Thread.restrict-finalization subprogram, isolated script Worker/SAB and module
@@ -426,6 +427,10 @@ as embedders exercise more threaded host patterns.
   finishing sweep, then verifies blocking `join()`, post-sweep `asyncJoin()`,
   and `ArrayBuffer.transfer()` observers see exact contents after the creating
   thread has exited.
+  The script and module Worker creator-owned cleanup subprograms carry
+  child-created SAB/ArrayBuffer storage through Worker structured-clone while
+  sibling `FinalizationRegistry` cleanup roots and transfer observers survive
+  the finishing sweep.
   The script Worker/SAB and module Worker/SAB cleanup subprograms run isolated
   Workers on the same retained `SharedArrayBuffer` while shared-realm `Thread`s
   register cleanup targets and park stack roots through a finishing sweep, then

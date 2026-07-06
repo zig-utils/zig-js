@@ -7680,19 +7680,35 @@ fn runWorkerCreatorOwnedBufferLifecycleInterleaving(gpa: std.mem.Allocator, seed
 }
 
 fn runWorkerCreatorOwnedBufferCleanupInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
-    return runWorkerCreatorOwnedBufferCleanupProfile(gpa, seed, false);
+    return runWorkerCreatorOwnedBufferCleanupProfile(gpa, seed, false, false);
 }
 
 fn runModuleWorkerCreatorOwnedBufferCleanupInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
-    return runWorkerCreatorOwnedBufferCleanupProfile(gpa, seed, true);
+    return runWorkerCreatorOwnedBufferCleanupProfile(gpa, seed, true, false);
 }
 
-fn runWorkerCreatorOwnedBufferCleanupProfile(gpa: std.mem.Allocator, seed: u64, comptime module_worker: bool) !bool {
-    var prng = std.Random.DefaultPrng.init(seed ^ if (module_worker) 0x6d6f_6463_7266_696e else 0x776f_726b_6372_6669);
+fn runMidScriptWorkerCreatorOwnedBufferCleanupGc(gpa: std.mem.Allocator, seed: u64) !bool {
+    return runWorkerCreatorOwnedBufferCleanupProfile(gpa, seed, false, true);
+}
+
+fn runMidScriptModuleWorkerCreatorOwnedBufferCleanupGc(gpa: std.mem.Allocator, seed: u64) !bool {
+    return runWorkerCreatorOwnedBufferCleanupProfile(gpa, seed, true, true);
+}
+
+fn runWorkerCreatorOwnedBufferCleanupProfile(
+    gpa: std.mem.Allocator,
+    seed: u64,
+    comptime module_worker: bool,
+    comptime midgc: bool,
+) !bool {
+    var prng = std.Random.DefaultPrng.init(seed ^ (if (module_worker) 0x6d6f_6463_7266_696e else 0x776f_726b_6372_6669) ^ (if (midgc) 0x6d69_6467_6377_636c else 0));
     const r = prng.random();
     const ncreators = 2 + r.uintLessThan(usize, 3);
     const nworkers = 1 + r.uintLessThan(usize, 2);
     const per_buffer = 10 + r.uintLessThan(usize, 10);
+    const gc_rounds = if (midgc) 6 + r.uintLessThan(usize, 5) else 0;
+    const gc_per_round = if (midgc) 560 + r.uintLessThan(usize, 360) else 0;
+    const gc_spin_iters = if (midgc) 1700 + r.uintLessThan(usize, 2800) else 0;
     const seed_marker = seed % 10_000;
 
     var payload_sum: usize = 0;
@@ -7715,7 +7731,16 @@ fn runWorkerCreatorOwnedBufferCleanupProfile(gpa: std.mem.Allocator, seed: u64, 
     const expected_finish_total = payload_sum + ncreators;
 
     const label = if (module_worker) "module worker creator-owned cleanup" else "worker creator-owned cleanup";
-    const ctx = js.Context.createWith(gpa, .{ .enable_threads = true, .enable_gc = true }) catch {
+    const ctx = (if (midgc)
+        js.Context.createWithTestingOptions(gpa, .{
+            .enable_threads = true,
+            .enable_gc = true,
+            .parallel_gc = true,
+            .parallel_js = true,
+            .parallel_midscript_gc = true,
+        })
+    else
+        js.Context.createWith(gpa, .{ .enable_threads = true, .enable_gc = true })) catch {
         std.debug.print("seed {d}: {s} context creation failed\n", .{ seed, label });
         return false;
     };
@@ -7895,6 +7920,60 @@ fn runWorkerCreatorOwnedBufferCleanupProfile(gpa: std.mem.Allocator, seed: u64, 
             return false;
         };
     }
+
+    if (midgc) {
+        const pressure_src = try std.fmt.allocPrint(
+            gpa,
+            \\(() => {{
+            \\  const keep = [];
+            \\  const root = {{ seed: {d}, tag: 'midgc-worker-creator-cleanup-root' }};
+            \\  for (let round = 0; round < {d}; round++) {{
+            \\    for (let i = 0; i < {d}; i++) {{
+            \\      keep.push({{
+            \\        round,
+            \\        i,
+            \\        bundles: globalThis.__workerCreatorCleanupBundles,
+            \\        nested: {{ root, value: i + round }},
+            \\        text: 'midgc-worker-creator-cleanup-' + round + '-' + i,
+            \\      }});
+            \\    }}
+            \\    let spin = 0;
+            \\    for (let j = 0; j < {d}; j++) spin = (spin + j + round) & 0x3fffffff;
+            \\    if (spin < 0) keep.push({{ impossible: true }});
+            \\  }}
+            \\  if (typeof gc === 'function') gc();
+            \\  return keep.length;
+            \\}})();
+            \\
+        ,
+            .{ seed_marker, gc_rounds, gc_per_round, gc_spin_iters },
+        );
+        defer gpa.free(pressure_src);
+        const before_attempts = ctx.gc_par_attempts.load(.monotonic);
+        const before_collections = ctx.gc_par_collections.load(.monotonic);
+        const pressure = ctx.evaluate(pressure_src) catch |err| {
+            const msg_txt = if (ctx.exception) |ex| blk: {
+                var render = ctx.interpreter();
+                break :blk render.toStringV(ex) catch "<unstringifiable>";
+            } else "<none>";
+            std.debug.print("seed {d}: worker creator-owned cleanup midgc pressure threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+            return false;
+        };
+        const expected_pressure: f64 = @floatFromInt(gc_rounds * gc_per_round);
+        if (!pressure.isNumber() or pressure.asNum() != expected_pressure) {
+            std.debug.print("seed {d}: worker creator-owned cleanup midgc pressure got {d}, expected {d}\n", .{ seed, if (pressure.isNumber()) pressure.asNum() else -1, expected_pressure });
+            return false;
+        }
+        if (ctx.gc_par_attempts.load(.monotonic) <= before_attempts) {
+            std.debug.print("seed {d}: worker creator-owned cleanup did not attempt a parallel collection\n", .{seed});
+            return false;
+        }
+        if (ctx.gc_par_collections.load(.monotonic) <= before_collections) {
+            std.debug.print("seed {d}: worker creator-owned cleanup did not finish a parallel collection\n", .{seed});
+            return false;
+        }
+    }
+
     const close_msg = ctx.evaluate("({ cmd: 'close' })") catch |err| {
         std.debug.print("seed {d}: cannot make worker creator-owned cleanup close message: {s}\n", .{ seed, @errorName(err) });
         return false;
@@ -17035,6 +17114,40 @@ pub fn main(init: std.process.Init) !void {
         if (mcbfail != 0) std.process.exit(1);
         return;
     };
+    // `threadfuzz midgcworkercreatorcleanup <iters> <seed>`: focused
+    // mid-script parallel-GC repro for child-created SAB/ArrayBuffer storage
+    // crossing isolated Worker structured-clone while sibling cleanup and
+    // transfer observers survive a finishing sweep.
+    if (first) |a| if (std.mem.eql(u8, a, "midgcworkercreatorcleanup")) {
+        if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch 1;
+        if (args.next()) |b| base_seed = std.fmt.parseInt(u64, b, 10) catch 1;
+        var mwccfail: usize = 0;
+        var mwcci: usize = 0;
+        while (mwcci < iters) : (mwcci += 1) {
+            const seed = base_seed +% mwcci;
+            if (!(try runMidScriptWorkerCreatorOwnedBufferCleanupGc(gpa, seed))) mwccfail += 1;
+        }
+        std.debug.print("threadfuzz midgcworkercreatorcleanup: {d} programs from seed {d}, {d} failures\n", .{ iters, base_seed, mwccfail });
+        if (mwccfail != 0) std.process.exit(1);
+        return;
+    };
+    // `threadfuzz midgcmoduleworkercreatorcleanup <iters> <seed>`: focused
+    // mid-script parallel-GC repro for child-created SAB/ArrayBuffer storage
+    // crossing module Worker structured-clone while sibling cleanup and
+    // transfer observers survive a finishing sweep.
+    if (first) |a| if (std.mem.eql(u8, a, "midgcmoduleworkercreatorcleanup")) {
+        if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch 1;
+        if (args.next()) |b| base_seed = std.fmt.parseInt(u64, b, 10) catch 1;
+        var mmwccfail: usize = 0;
+        var mmwcci: usize = 0;
+        while (mmwcci < iters) : (mmwcci += 1) {
+            const seed = base_seed +% mmwcci;
+            if (!(try runMidScriptModuleWorkerCreatorOwnedBufferCleanupGc(gpa, seed))) mmwccfail += 1;
+        }
+        std.debug.print("threadfuzz midgcmoduleworkercreatorcleanup: {d} programs from seed {d}, {d} failures\n", .{ iters, base_seed, mmwccfail });
+        if (mmwccfail != 0) std.process.exit(1);
+        return;
+    };
     // `threadfuzz midgcworker <iters> <seed>`: focused mid-script
     // parallel-GC repro for isolated Workers running on a retained SAB while
     // shared-realm Threads publish cleanup roots through a finishing sweep.
@@ -17506,6 +17619,8 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runMidScriptThreadLocalFinalizationGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptThreadLocalTerminationCleanupGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptThreadRestrictFinalizationGc(gpa, seed))) mfail += 1;
+            if (!(try runMidScriptWorkerCreatorOwnedBufferCleanupGc(gpa, seed))) mfail += 1;
+            if (!(try runMidScriptModuleWorkerCreatorOwnedBufferCleanupGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptWorkerCleanupGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptModuleWorkerCleanupGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptWorkerExceptionCleanupGc(gpa, seed))) mfail += 1;
@@ -17520,7 +17635,7 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runMidScriptModuleWorkerTerminateThreadLocalAsyncHoldCleanupGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptWeakCollectionGc(gpa, seed))) mfail += 1;
         }
-        std.debug.print("threadfuzz midgc: {d} programs from seed {d}, {d} failures\n", .{ iters * 31, base_seed, mfail });
+        std.debug.print("threadfuzz midgc: {d} programs from seed {d}, {d} failures\n", .{ iters * 33, base_seed, mfail });
         if (mfail != 0) std.process.exit(1);
         return;
     };

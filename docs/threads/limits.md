@@ -291,7 +291,10 @@ context APIs.
   `ArrayBuffer` storage stays rooted through unjoined `Thread` completion
   records and delayed `asyncJoin` observers until blocking `join()`,
   post-sweep `asyncJoin()`, and `ArrayBuffer.transfer()` observers verify exact
-  contents after the creator exits, plus a weak-collection subprogram where
+  contents after the creator exits, plus script and module Worker
+  creator-owned cleanup subprograms where child-created SAB/ArrayBuffer storage
+  crosses Worker structured-clone while sibling cleanup roots and transfer
+  observers survive the finishing sweep, plus a weak-collection subprogram where
   live WeakMap values stay reachable only through live weak keys, dead
   WeakMap/WeakSet targets are reachable only through weak structures and
   WeakRefs, and FinalizationRegistry unregister-token records compact while
