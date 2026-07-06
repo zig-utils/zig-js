@@ -392,6 +392,22 @@ fn stmtContainsFuncDecl(node: *const ast.Node) bool {
     };
 }
 
+fn stmtListContainsNestedFuncDecl(stmts: []*Node) bool {
+    for (stmts) |s| switch (s.*) {
+        .func_decl => {},
+        else => if (stmtContainsFuncDecl(s)) return true,
+    };
+    return false;
+}
+
+fn functionHasBlockNestedFuncDecl(fnode: *const ast.FunctionNode) bool {
+    if (fnode.is_expr_body) return false;
+    return switch (fnode.body.*) {
+        .block => |stmts| stmtListContainsNestedFuncDecl(stmts),
+        else => stmtContainsFuncDecl(fnode.body),
+    };
+}
+
 fn stmtHasDisposableDecl(node: *const ast.Node) bool {
     return switch (node.*) {
         .var_decl => |d| d.dispose != 0,
@@ -528,6 +544,7 @@ pub const Compiler = struct {
 
     pub fn compilePlainFunction(arena: std.mem.Allocator, fnode: *const ast.FunctionNode) CompileError!PlainFunctionCode {
         if (fnode.is_generator or fnode.is_async) return error.Unsupported;
+        if (fnode.is_strict and functionHasBlockNestedFuncDecl(fnode)) return error.Unsupported;
         const scope = try arena.create(FnScope);
         scope.* = .{ .parent = null };
         for (fnode.params) |p| {
@@ -2170,6 +2187,7 @@ pub const Compiler = struct {
         // Async functions tree-walk (the Promise runtime isn't lowered yet), so
         // bail here to force the fallback for any program that defines one.
         if (fnode.is_async) return error.Unsupported;
+        if (!fnode.is_generator and fnode.is_strict and functionHasBlockNestedFuncDecl(fnode)) return error.Unsupported;
         // Build this function's slot namespace: parameters first, then every
         // function-scoped declaration in the body (not descending into nested
         // functions). The scope chains to the enclosing function for upvalues.

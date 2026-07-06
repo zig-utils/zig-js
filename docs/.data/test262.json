@@ -1,7 +1,7 @@
 {
   "valid": {
-    "passing": 48497,
-    "total": 48497,
+    "passing": 48506,
+    "total": 48506,
     "percentage": 100,
     "parseFail": 0,
     "runtimeFail": 0,
@@ -13,7 +13,7 @@
     "percentage": 100
   },
   "skipped": 0,
-  "generatedAt": "2026-07-05",
+  "generatedAt": "2026-07-06",
   "harness": "real (pinned tc39/test262 submodule)",
   "suites": [
     {
@@ -1665,8 +1665,8 @@
     },
     {
       "name": "staging",
-      "passing": 1467,
-      "total": 1467,
+      "passing": 1476,
+      "total": 1476,
       "percentage": 100,
       "parseFail": 0,
       "runtimeFail": 0,

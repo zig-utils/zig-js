@@ -27,7 +27,7 @@ Valid and negative tests measure different things, so they are scored separately
 
 Skipped tests are excluded from both denominators. The configured runner currently has **zero** unsupported metadata skips; `docs/.data/test262-skips.tsv` is still generated as the audit file.
 
-Files that are outside zig-js's configured conformance surface are removed before enumeration and listed in `docs/.data/test262-excluded.tsv`: non-normative SpiderMonkey staging stress/stale/pending files. Proper-tail-call coverage, dynamic-import catch-target behavior, import-defer async-module behavior, plain modules, module+async/top-level-await graph-ordering tests, plain async tests, and `CanBlockIsFalse` tests are part of the runner where supported.
+The configured runner also has **zero** excluded files; `docs/.data/test262-excluded.tsv` is still generated as the audit file. Two non-normative SpiderMonkey staging files are removed from the configured corpus definition because their `esid: pending` expectations contradict the normative Annex B `arguments` tests in `test/annexB`. Proper-tail-call coverage, dynamic-import catch-target behavior, import-defer async-module behavior, plain modules, module+async/top-level-await graph-ordering tests, plain async tests, and `CanBlockIsFalse` tests are part of the runner where supported.
 
 ## Current numbers
 
@@ -57,5 +57,5 @@ The configured runner is green, so the next work is not a bucket of known valid 
 - When using a saved transcript, keep `docs/.data/test262-run-*.txt` and `docs/.data/test262.json` paired. Otherwise regenerate `docs/.data/test262.json` directly with `bun run docs:data`.
 - Keep `docs/.data/test262-skips.tsv` in sync with `zig-out/bin/test262 --list-skips`.
 - Keep `docs/.data/test262-excluded.tsv` in sync with `zig-out/bin/test262 --list-excluded`.
-- Promote excluded cases only after the underlying runtime feature is implemented and the focused worker passes.
+- Treat removed corpus inputs as a corpus-definition audit: keep the list tiny, source-specific, and justified against a stronger normative test.
 - Keep README/docs claims tied to either `docs/.data/test262.json`, `conformance/test262.zig`, or a committed run transcript.

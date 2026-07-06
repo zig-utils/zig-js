@@ -1,13 +1,2 @@
 subtree	index	path	reason
-test/staging	343	sm/regress/regress-602621.js	stale-spidermonkey-annex-b
-test/staging	475	sm/Date/dst-offset-caching-3-of-8.js	spidermonkey-date-stress
-test/staging	475	sm/Date/dst-offset-caching-2-of-8.js	spidermonkey-date-stress
-test/staging	479	sm/Date/dst-offset-caching-8-of-8.js	spidermonkey-date-stress
-test/staging	481	sm/Date/dst-offset-caching-1-of-8.js	spidermonkey-date-stress
-test/staging	483	sm/Date/dst-offset-caching-4-of-8.js	spidermonkey-date-stress
-test/staging	485	sm/Date/dst-offset-caching-5-of-8.js	spidermonkey-date-stress
-test/staging	489	sm/Date/dst-offset-caching-7-of-8.js	spidermonkey-date-stress
-test/staging	489	sm/Date/dst-offset-caching-6-of-8.js	spidermonkey-date-stress
-test/staging	927	sm/lexical-environment/block-scoped-functions-annex-b-arguments.js	stale-spidermonkey-annex-b
-test/staging	927	sm/lexical-environment/block-scoped-functions-strict.js	stale-spidermonkey-pending
-# total	11
+# total	0

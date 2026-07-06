@@ -13745,11 +13745,11 @@ pub const Interpreter = struct {
                             (fv.asObj().native == symbolValueOfFn or fv.asObj().native == bigIntValueOfFn);
                         if (c.prim != null or native_wrapper_value_of) builtin_wrapper_value_of = true;
                     }
-                        // A callable native `toString` thunk yields a primitive string
-                        // (the built-in coercion below); it must run at *this* position
-                        // in the hint order — so stop here rather than trying a later
-                        // user `valueOf` (e.g. String({ valueOf() {…} }) is
-                        // "[object Object]", not the valueOf result).
+                    // A callable native `toString` thunk yields a primitive string
+                    // (the built-in coercion below); it must run at *this* position
+                    // in the hint order — so stop here rather than trying a later
+                    // user `valueOf` (e.g. String({ valueOf() {…} }) is
+                    // "[object Object]", not the valueOf result).
                     else if (std.mem.eql(u8, m, "toString") and fv.isCallable()) {
                         builtin_to_string = true;
                         builtin_to_string_method = fv;
@@ -15894,11 +15894,14 @@ fn host262EvalScriptFn(ctx: *anyopaque, this: Value, args: []const Value) value.
     if (args.len == 0 or !args[0].isString()) return if (args.len > 0) args[0] else Value.undef();
     var parser = Parser.init(self.arena, args[0].asStr()) catch return self.throwError("SyntaxError", "evalScript: invalid source");
     const prog = parser.parseProgram() catch return self.throwError("SyntaxError", "evalScript: parse error");
+    const prog_strict = parser.strict;
     const gobj: ?*value.Object = if (genv.get("globalThis")) |g| (if (g.isObject()) g.asObj() else null) else null;
     const s_env = self.env;
     const s_this = self.this_value;
     const s_glob = self.global_object;
+    const s_strict = self.strict;
     self.env = genv;
+    self.strict = prog_strict;
     if (gobj) |go| {
         self.this_value = Value.obj(go);
         self.global_object = go;
@@ -15907,6 +15910,7 @@ fn host262EvalScriptFn(ctx: *anyopaque, this: Value, args: []const Value) value.
         self.env = s_env;
         self.this_value = s_this;
         self.global_object = s_glob;
+        self.strict = s_strict;
     }
     return self.eval(prog);
 }
@@ -27548,17 +27552,17 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     const date_proto = try gc_mod.allocObj(a);
     date_proto.* = .{ .proto = object_proto };
     try setDateProtoMethods(a, root_shape, date_proto, .{
-        .{ "getTime", 0 },            .{ "valueOf", 0 },            .{ "setTime", 1 },            .{ "toISOString", 0 },
-        .{ "toUTCString", 0 },        .{ "getFullYear", 0 },        .{ "getUTCFullYear", 0 },     .{ "getMonth", 0 },
-        .{ "getUTCMonth", 0 },        .{ "getDate", 0 },            .{ "getUTCDate", 0 },         .{ "getDay", 0 },
-        .{ "getUTCDay", 0 },          .{ "getHours", 0 },           .{ "getUTCHours", 0 },        .{ "getMinutes", 0 },
-        .{ "getUTCMinutes", 0 },      .{ "getSeconds", 0 },         .{ "getUTCSeconds", 0 },      .{ "getMilliseconds", 0 },
-        .{ "getUTCMilliseconds", 0 }, .{ "getTimezoneOffset", 0 },  .{ "setFullYear", 3 },        .{ "setUTCFullYear", 3 },
-        .{ "setMonth", 2 },           .{ "setUTCMonth", 2 },        .{ "setDate", 1 },            .{ "setUTCDate", 1 },
-        .{ "setHours", 4 },           .{ "setUTCHours", 4 },        .{ "setMinutes", 3 },         .{ "setUTCMinutes", 3 },
-        .{ "setSeconds", 2 },         .{ "setUTCSeconds", 2 },      .{ "setMilliseconds", 1 },    .{ "setUTCMilliseconds", 1 },
-        .{ "toString", 0 },           .{ "toDateString", 0 },       .{ "toTimeString", 0 },
-        .{ "toLocaleString", 0 },     .{ "toLocaleDateString", 0 }, .{ "toLocaleTimeString", 0 },
+        .{ "getTime", 0 },            .{ "valueOf", 0 },            .{ "setTime", 1 },         .{ "toISOString", 0 },
+        .{ "toUTCString", 0 },        .{ "getFullYear", 0 },        .{ "getUTCFullYear", 0 },  .{ "getMonth", 0 },
+        .{ "getUTCMonth", 0 },        .{ "getDate", 0 },            .{ "getUTCDate", 0 },      .{ "getDay", 0 },
+        .{ "getUTCDay", 0 },          .{ "getHours", 0 },           .{ "getUTCHours", 0 },     .{ "getMinutes", 0 },
+        .{ "getUTCMinutes", 0 },      .{ "getSeconds", 0 },         .{ "getUTCSeconds", 0 },   .{ "getMilliseconds", 0 },
+        .{ "getUTCMilliseconds", 0 }, .{ "getTimezoneOffset", 0 },  .{ "setFullYear", 3 },     .{ "setUTCFullYear", 3 },
+        .{ "setMonth", 2 },           .{ "setUTCMonth", 2 },        .{ "setDate", 1 },         .{ "setUTCDate", 1 },
+        .{ "setHours", 4 },           .{ "setUTCHours", 4 },        .{ "setMinutes", 3 },      .{ "setUTCMinutes", 3 },
+        .{ "setSeconds", 2 },         .{ "setUTCSeconds", 2 },      .{ "setMilliseconds", 1 }, .{ "setUTCMilliseconds", 1 },
+        .{ "toString", 0 },           .{ "toDateString", 0 },       .{ "toTimeString", 0 },    .{ "toLocaleString", 0 },
+        .{ "toLocaleDateString", 0 }, .{ "toLocaleTimeString", 0 },
         .{ "getYear", 0 }, .{ "setYear", 1 }, // Annex B B.2.4
     });
     // Date.prototype.toGMTString (Annex B B.2.4.3) is the *same function object*
@@ -36349,7 +36353,7 @@ fn timeZoneTransitionEpoch(name: []const u8, epoch_ns: i128, next: bool) ?i128 {
         return selectTimeZoneTransition(&transitions, epoch_ns, next);
     }
     if (std.mem.eql(u8, name, "Europe/Paris")) {
-        const transitions = [_]i128{ -1_855_958_961_000_000_000 }; // 1911-03-10T23:50:39Z
+        const transitions = [_]i128{-1_855_958_961_000_000_000}; // 1911-03-10T23:50:39Z
         return selectTimeZoneTransition(&transitions, epoch_ns, next);
     }
     if (std.mem.eql(u8, name, "Europe/Berlin")) {
@@ -36360,7 +36364,7 @@ fn timeZoneTransitionEpoch(name: []const u8, epoch_ns: i128, next: bool) ?i128 {
         return selectTimeZoneTransition(&transitions, epoch_ns, next);
     }
     if (std.mem.eql(u8, name, "Asia/Kolkata")) {
-        const transitions = [_]i128{ -764_145_000_000_000_000 };
+        const transitions = [_]i128{-764_145_000_000_000_000};
         return selectTimeZoneTransition(&transitions, epoch_ns, next);
     }
     if (std.mem.eql(u8, name, "America/Anchorage")) {
@@ -38760,6 +38764,7 @@ fn evalSource(arena: std.mem.Allocator, src: []const u8) !Value {
     const tdz = try arena.create(value.Object);
     tdz.* = .{};
     interp.tdz_marker = tdz;
+    interp.strict = parser.strict;
     return interp.eval(prog);
 }
 
@@ -40414,6 +40419,49 @@ test "Annex B block function can update implicit arguments binding" {
         \\  return typeof arguments;
         \\})(0)
     )).asStr());
+}
+
+test "strict block functions stay block scoped inside strict callees" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    try std.testing.expectEqualStrings("f0f1f1f0h0h1h1h0", (try evalSource(a,
+        \\"use strict";
+        \\var log = "";
+        \\function f() { return "f0"; }
+        \\log += f();
+        \\{
+        \\  log += f();
+        \\  function f() { return "f1"; }
+        \\  log += f();
+        \\}
+        \\log += f();
+        \\function g() {
+        \\  function h() { return "h0"; }
+        \\  log += h();
+        \\  {
+        \\    log += h();
+        \\    function h() { return "h1"; }
+        \\    log += h();
+        \\  }
+        \\  log += h();
+        \\}
+        \\g();
+        \\log
+    )).asStr());
+}
+
+test "functions declared in strict scripts inherit strict mode" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    try std.testing.expect((try evalSource(a,
+        \\"use strict";
+        \\function g() { return this === undefined; }
+        \\g()
+    )).asBool());
 }
 
 test "interpreter do-while and comma operator" {

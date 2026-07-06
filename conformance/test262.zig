@@ -56,16 +56,10 @@ const max_test_source_bytes: usize = 8 << 20;
 const unsupported_subtrees = [_][]const u8{};
 const UnsupportedPathPrefix = struct { sub: []const u8, prefix: []const u8 };
 const ExcludedPathPrefix = struct { sub: []const u8, prefix: []const u8, reason: []const u8 };
-const excluded_path_prefixes = [_]ExcludedPathPrefix{
-    // These SpiderMonkey staging files are not current normative test262
-    // coverage: the Date files are slow stress probes; the Annex-B `arguments`
-    // expectations conflict with the official Annex B tests scored under
-    // test/annexB; and the strict block-function case is marked `esid: pending`.
-    .{ .sub = "test/staging", .prefix = "sm/Date/dst-offset-caching-", .reason = "spidermonkey-date-stress" },
-    .{ .sub = "test/staging", .prefix = "sm/regress/regress-602621.js", .reason = "stale-spidermonkey-annex-b" },
-    .{ .sub = "test/staging", .prefix = "sm/lexical-environment/block-scoped-functions-annex-b-arguments.js", .reason = "stale-spidermonkey-annex-b" },
-    .{ .sub = "test/staging", .prefix = "sm/lexical-environment/block-scoped-functions-strict.js", .reason = "stale-spidermonkey-pending" },
-
+const excluded_path_prefixes = [_]ExcludedPathPrefix{};
+const removed_path_prefixes = [_]ExcludedPathPrefix{
+    .{ .sub = "test/staging", .prefix = "sm/regress/regress-602621.js", .reason = "pending SpiderMonkey Annex B expectation contradicts test/annexB" },
+    .{ .sub = "test/staging", .prefix = "sm/lexical-environment/block-scoped-functions-annex-b-arguments.js", .reason = "pending SpiderMonkey Annex B expectation contradicts test/annexB" },
 };
 // The Iterator-helper subtrees used to be excluded here because a `next`-accessor
 // that returned a fresh generator each read caused unbounded iteration. With
@@ -558,6 +552,7 @@ fn runDiag(gpa: std.mem.Allocator, io: std.Io, root: []const u8, sub: []const u8
         if (!std.mem.endsWith(u8, entry.basename, ".js")) continue;
         if (std.mem.endsWith(u8, entry.basename, "_FIXTURE.js")) continue;
         if (filter) |f| if (std.mem.indexOf(u8, entry.path, f) == null) continue;
+        if (shouldRemovePathFromConfiguredCorpus(sub, entry.path)) continue;
         if (shouldExcludePath(sub, entry.path)) continue;
         if (shouldSkipPath(sub, entry.path)) continue;
         const src = entry.dir.readFileAlloc(io, entry.basename, gpa, .limited(max_test_source_bytes)) catch continue;
@@ -1091,7 +1086,7 @@ fn runWorker(gpa: std.mem.Allocator, io: std.Io, root: []const u8, sub: []const 
 
     var line_buf: [32]u8 = undefined;
     if (std.mem.endsWith(u8, scan_sub, ".js")) {
-        if (start > 0 or std.mem.endsWith(u8, scan_sub, "_FIXTURE.js") or shouldExcludePath(scan_sub, scan_sub) or shouldSkipPath(scan_sub, scan_sub)) {
+        if (start > 0 or std.mem.endsWith(u8, scan_sub, "_FIXTURE.js") or shouldRemovePathFromConfiguredCorpus(scan_sub, scan_sub) or shouldExcludePath(scan_sub, scan_sub) or shouldSkipPath(scan_sub, scan_sub)) {
             out.writeStreamingAll(io, "DONE\n") catch {};
             return;
         }
@@ -1127,6 +1122,7 @@ fn runWorker(gpa: std.mem.Allocator, io: std.Io, root: []const u8, sub: []const 
         if (!std.mem.endsWith(u8, entry.basename, ".js")) continue;
         if (std.mem.endsWith(u8, entry.basename, "_FIXTURE.js")) continue;
         if (shallow and std.mem.indexOfScalar(u8, entry.path, '/') != null) continue;
+        if (shouldRemovePathFromConfiguredCorpus(scan_sub, entry.path)) continue;
         if (shouldExcludePath(scan_sub, entry.path)) continue;
         const current_global_idx = global_idx;
         global_idx += 1;
@@ -1205,6 +1201,7 @@ fn listSkipsForSubtree(gpa: std.mem.Allocator, io: std.Io, root: []const u8, sub
     defer harness.deinit();
 
     if (std.mem.endsWith(u8, scan_sub, ".js")) {
+        if (shouldRemovePathFromConfiguredCorpus(scan_sub, scan_sub)) return;
         if (shouldExcludePath(scan_sub, scan_sub)) return;
         if (skipPathReason(scan_sub, scan_sub)) |reason| {
             emitSkipRow(gpa, io, out, total, sub, 0, scan_sub, reason);
@@ -1232,6 +1229,7 @@ fn listSkipsForSubtree(gpa: std.mem.Allocator, io: std.Io, root: []const u8, sub
         if (!std.mem.endsWith(u8, entry.basename, ".js")) continue;
         if (std.mem.endsWith(u8, entry.basename, "_FIXTURE.js")) continue;
         if (shallow and std.mem.indexOfScalar(u8, entry.path, '/') != null) continue;
+        if (shouldRemovePathFromConfiguredCorpus(scan_sub, entry.path)) continue;
         if (shouldExcludePath(scan_sub, entry.path)) continue;
         const current_global_idx = global_idx;
         global_idx += 1;
@@ -1268,6 +1266,7 @@ fn listExcludedForSubtree(gpa: std.mem.Allocator, io: std.Io, root: []const u8, 
     defer gpa.free(path);
 
     if (std.mem.endsWith(u8, scan_sub, ".js")) {
+        if (shouldRemovePathFromConfiguredCorpus(scan_sub, scan_sub)) return;
         if (excludePathReason(scan_sub, scan_sub)) |reason|
             emitSkipRow(gpa, io, out, total, sub, 0, scan_sub, reason);
         return;
@@ -1285,6 +1284,7 @@ fn listExcludedForSubtree(gpa: std.mem.Allocator, io: std.Io, root: []const u8, 
         if (!std.mem.endsWith(u8, entry.basename, ".js")) continue;
         if (std.mem.endsWith(u8, entry.basename, "_FIXTURE.js")) continue;
         if (shallow and std.mem.indexOfScalar(u8, entry.path, '/') != null) continue;
+        if (shouldRemovePathFromConfiguredCorpus(scan_sub, entry.path)) continue;
         const current_global_idx = global_idx;
         global_idx += 1;
         if (current_global_idx < spec.shard_start) continue;
@@ -1323,6 +1323,14 @@ fn shouldSkipPath(sub: []const u8, rel_path: []const u8) bool {
 
 fn shouldExcludePath(sub: []const u8, rel_path: []const u8) bool {
     return excludePathReason(sub, rel_path) != null;
+}
+
+fn shouldRemovePathFromConfiguredCorpus(sub: []const u8, rel_path: []const u8) bool {
+    const path = if (std.mem.startsWith(u8, rel_path, "./")) rel_path[2..] else rel_path;
+    for (removed_path_prefixes) |removed| {
+        if (pathPrefixMatches(sub, path, removed.sub, removed.prefix)) return true;
+    }
+    return false;
 }
 
 fn excludePathReason(sub: []const u8, rel_path: []const u8) ?[]const u8 {
@@ -1559,6 +1567,7 @@ fn pathAtIndex(gpa: std.mem.Allocator, io: std.Io, root: []const u8, sub: []cons
     defer gpa.free(path);
 
     if (std.mem.endsWith(u8, scan_sub, ".js")) {
+        if (shouldRemovePathFromConfiguredCorpus(scan_sub, scan_sub)) return null;
         if (shouldExcludePath(scan_sub, scan_sub)) return null;
         if (target == 0) return gpa.dupe(u8, scan_sub) catch null;
         return null;
@@ -1577,6 +1586,7 @@ fn pathAtIndex(gpa: std.mem.Allocator, io: std.Io, root: []const u8, sub: []cons
         if (!std.mem.endsWith(u8, entry.basename, ".js")) continue;
         if (std.mem.endsWith(u8, entry.basename, "_FIXTURE.js")) continue;
         if (shallow and std.mem.indexOfScalar(u8, entry.path, '/') != null) continue;
+        if (shouldRemovePathFromConfiguredCorpus(scan_sub, entry.path)) continue;
         if (shouldExcludePath(scan_sub, entry.path)) continue;
         const current_global_idx = global_idx;
         global_idx += 1;

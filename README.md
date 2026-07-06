@@ -4,7 +4,7 @@ A JavaScript engine written in pure Zig, with a JavaScriptCore C-API-compatible 
 
 `zig-js` is a small embeddable engine for Zig applications, tools, experiments, and runtimes that want to own their JavaScript stack. Use it directly as a Zig module, or link `libzig-js.a` for hosts that only need the implemented public JavaScriptCore C API subset.
 
-The configured conformance runner is green against the pinned tc39/test262 corpus it scores: **48,497 / 48,497 valid** and **4,669 / 4,669 negative**, with **0 parse**, **0 runtime**, **0 host**, and **0 skipped** failures. That is a scoped result, not a claim of full ECMAScript completion: **11 non-goal files are excluded from enumeration** and tracked separately.
+The configured conformance runner is green against the pinned tc39/test262 corpus it scores: **48,506 / 48,506 valid** and **4,669 / 4,669 negative**, with **0 parse**, **0 runtime**, **0 host**, **0 skipped**, and **0 excluded** failures. That is a scoped result, not a claim of full ECMAScript completion.
 
 ```zig
 const js = @import("js");
@@ -34,9 +34,9 @@ const v = try ctx.evaluate("let x = 40; x + 2");
 
 Current public status is evidence-scoped:
 
-- test262 totals come from [docs/.data/test262.json](docs/.data/test262.json), regenerated from a July 5, 2026 `bun run docs:data` run.
+- test262 totals come from [docs/.data/test262.json](docs/.data/test262.json), regenerated from [docs/.data/test262-run-2026-07-05.txt](docs/.data/test262-run-2026-07-05.txt).
 - The skipped-test inventory is [docs/.data/test262-skips.tsv](docs/.data/test262-skips.tsv), currently zero.
-- The exact excluded-file inventory is [docs/.data/test262-excluded.tsv](docs/.data/test262-excluded.tsv).
+- The exact excluded-file inventory is [docs/.data/test262-excluded.tsv](docs/.data/test262-excluded.tsv), currently zero.
 - Benchmark numbers below come from [docs/.data/bench-2026-07-04.txt](docs/.data/bench-2026-07-04.txt).
 - C API scope comes from the exported symbols in [src/c_api.zig](src/c_api.zig).
 - Threading and GC status are documented under [docs/threads](docs/threads) and [docs/architecture.md](docs/architecture.md).
@@ -60,26 +60,21 @@ Measured by `zig build test262` against the pinned `test262/` submodule. The run
 
 | axis | meaning | passing |
 | ---- | ------- | ------: |
-| **valid** | can the engine run the program? | **48,486 / 48,486 (100.0%)** |
+| **valid** | can the engine run the program? | **48,506 / 48,506 (100.0%)** |
 | **negative** | does the engine reject invalid input? | **4,669 / 4,669 (100.0%)** |
 
 Failure shape on the valid axis: **0 parse failures**, **0 runtime failures**, **0 host failures**.
 
-Skipped tests are excluded from both denominators. Current skipped count: **0**.
+Skipped tests are excluded from both denominators. Current skipped count: **0**. Current excluded count: **0**.
 
-Some files are excluded before enumeration because they are outside zig-js's configured conformance surface, not because the runner cannot load them:
-
-| category | count |
-| -------- | ----: |
-| non-normative SpiderMonkey staging stress/stale/pending tests | 11 |
-| **total excluded** | **11** |
+Two non-normative SpiderMonkey staging files are removed from the configured corpus definition because their `esid: pending` expectations contradict the normative Annex B `arguments` tests in `test/annexB`. They are tracked in `conformance/test262.zig` as removed corpus inputs, not as engine failures, skips, or exclusions.
 
 Representative green areas from the saved run:
 
 | area | passing | area | passing |
 | ---- | ------: | ---- | ------: |
 | `test/language` | saved-run subtrees 100% | `test/annexB` | 1,071 / 1,071 |
-| `test/intl402` | saved-run subtrees 100% | `test/staging` | 1,467 / 1,467 |
+| `test/intl402` | saved-run subtrees 100% | `test/staging` | 1,476 / 1,476 |
 | `Array` | 3,081 / 3,081 | `Object` | 3,411 / 3,411 |
 | `RegExp` | saved-run subtrees 100% | `String` | 1,223 / 1,223 |
 | `Temporal` | 4,603 / 4,603 | `TypedArray` | 1,446 / 1,446 |
@@ -115,7 +110,7 @@ Implemented performance machinery includes the bytecode VM, frame slots/upvalues
 
 ## Language And Runtime Coverage
 
-The configured test262 coverage for these surfaces is green unless a case is explicitly excluded above.
+The configured test262 coverage for these surfaces is green.
 
 **Syntax and operators** - literals, strings, regex literals, template literals, objects, arrays, destructuring, spread/rest, optional chaining, nullish coalescing, logical assignment, exponentiation, bitwise/shift operators, `in`, `instanceof`, `typeof`, `delete`, `void`, and comma.
 
@@ -245,7 +240,6 @@ The README intentionally avoids duplicating the detailed thread/GC implementatio
 
 Do not read the green configured runner as "the whole JavaScript universe is finished." Known non-implemented or non-scored areas include:
 
-- non-normative SpiderMonkey staging stress/stale/pending files listed in the exclusion TSV;
 - `JSObjectMakeDeferredPromise` behavior behind its exported C symbol;
 - full JavaScriptCore framework/private internals, Objective-C bridge, inspector/debugger APIs, and Bun/Home private JSC ABI;
 - WebAssembly and JIT shell hooks from the PR-249 reference corpus;

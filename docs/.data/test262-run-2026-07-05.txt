@@ -184,7 +184,7 @@ root: test262
   test/intl402/Temporal/PlainYearMonth: valid 327/327 (100.0%)  [parse-fail 0 · runtime-fail 0 · host-fail 0]  neg 0/0
   test/intl402/Temporal/ZonedDateTime: valid 583/583 (100.0%)  [parse-fail 0 · runtime-fail 0 · host-fail 0]  neg 0/0
   test/intl402/TypedArray: valid 1/1 (100.0%)  [parse-fail 0 · runtime-fail 0 · host-fail 0]  neg 0/0
-  test/staging: valid 1467/1467 (100.0%)  [parse-fail 0 · runtime-fail 0 · host-fail 0]  neg 7/7
+  test/staging: valid 1476/1476 (100.0%)  [parse-fail 0 · runtime-fail 0 · host-fail 0]  neg 7/7
   test/built-ins/AbstractModuleSource: valid 8/8 (100.0%)  [parse-fail 0 · runtime-fail 0 · host-fail 0]  neg 0/0
   test/built-ins/AggregateError: valid 25/25 (100.0%)  [parse-fail 0 · runtime-fail 0 · host-fail 0]  neg 0/0
   test/built-ins/Array: valid 3081/3081 (100.0%)  [parse-fail 0 · runtime-fail 0 · host-fail 0]  neg 0/0
@@ -284,6 +284,6 @@ root: test262
   test/built-ins/WeakRef: valid 29/29 (100.0%)  [parse-fail 0 · runtime-fail 0 · host-fail 0]  neg 0/0
   test/built-ins/WeakSet: valid 85/85 (100.0%)  [parse-fail 0 · runtime-fail 0 · host-fail 0]  neg 0/0
 ----------------------------------------------
-VALID (can we run it):  48497/48497 (100.0%)   parse-fail 0 · runtime-fail 0 · host-fail 0
+VALID (can we run it):  48506/48506 (100.0%)   parse-fail 0 · runtime-fail 0 · host-fail 0
 NEGATIVE (strictness):  4669/4669 (100.0%)   [early-error rejection — mostly unimplemented]
 skipped (unsupported harness/path metadata): 0
