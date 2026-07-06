@@ -4935,15 +4935,34 @@ fn runFinalizationCleanupInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
 }
 
 fn runFinalizationAsyncJoinCleanupInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
+    return runFinalizationAsyncJoinCleanupInterleavingKind(gpa, seed, false);
+}
+
+fn runMidScriptFinalizationAsyncJoinCleanupGc(gpa: std.mem.Allocator, seed: u64) !bool {
+    return runFinalizationAsyncJoinCleanupInterleavingKind(gpa, seed, true);
+}
+
+fn runFinalizationAsyncJoinCleanupInterleavingKind(gpa: std.mem.Allocator, seed: u64, comptime midgc: bool) !bool {
     var prng = std.Random.DefaultPrng.init(seed ^ 0x6173_796e_635f_6669);
     const r = prng.random();
     const nthreads = 3 + r.uintLessThan(usize, 4);
     const per_thread = 10 + r.uintLessThan(usize, 10);
+    const waiters = if (midgc) 2 + r.uintLessThan(usize, 2) else 0;
+    const pressure_rounds = if (midgc) 8 + r.uintLessThan(usize, 5) else 0;
+    const pressure_per_round = if (midgc) 640 + r.uintLessThan(usize, 480) else 0;
+    const spin_iters = if (midgc) 1800 + r.uintLessThan(usize, 3200) else 0;
+    const wait_timeout_ms = if (builtin.sanitize_thread) 12_000 else 1500 + r.uintLessThan(usize, 800);
+    const seed_marker = seed % 10_000;
 
     var expected_cleanup_count: usize = 0;
     var expected_cleanup_sum: usize = 0;
     var expected_success_sum: usize = 0;
     var expected_reject_sum: usize = 0;
+    var expected_waiter_sum: usize = 0;
+    var w: usize = 0;
+    while (w < waiters) : (w += 1) {
+        expected_waiter_sum += 910_000 + seed_marker * 10 + w;
+    }
     var id: usize = 0;
     while (id < nthreads) : (id += 1) {
         const base = (id + 1) * 10_000;
@@ -4962,11 +4981,116 @@ fn runFinalizationAsyncJoinCleanupInterleaving(gpa: std.mem.Allocator, seed: u64
         }
     }
 
-    const ctx = js.Context.createWith(gpa, .{ .enable_threads = true, .enable_gc = true }) catch {
+    const ctx = (if (midgc)
+        js.Context.createWithTestingOptions(gpa, .{
+            .enable_threads = true,
+            .enable_gc = true,
+            .parallel_gc = true,
+            .parallel_js = true,
+            .parallel_midscript_gc = true,
+        })
+    else
+        js.Context.createWith(gpa, .{ .enable_threads = true, .enable_gc = true })) catch {
         std.debug.print("seed {d}: finalization asyncJoin context creation failed\n", .{seed});
         return false;
     };
     defer ctx.destroy();
+
+    const midgc_setup_src =
+        if (midgc)
+            \\  const __midgcFinAsyncGate = { state: 0, ready: 0 };
+            \\  const __midgcFinAsyncWaiters = [];
+            \\  for (let w = 0; w < __MIDGC_WAITERS__; w++) {
+            \\    const marker = 910000 + __MIDGC_SEED_MARKER__ * 10 + w;
+            \\    __midgcFinAsyncWaiters.push(new Thread((gate, marker, timeout) => {
+            \\      const root = { marker, nested: { label: 'midgc-finalization-asyncjoin-waiter' } };
+            \\      Atomics.add(gate, 'ready', 1);
+            \\      Atomics.notify(gate, 'ready');
+            \\      const r = Atomics.wait(gate, 'state', 0, timeout);
+            \\      if (r !== 'ok' && r !== 'not-equal')
+            \\        throw new Error('midgc finalization asyncJoin waiter result ' + r);
+            \\      return root.marker;
+            \\    }, __midgcFinAsyncGate, marker, __MIDGC_WAIT_TIMEOUT__));
+            \\  }
+            \\  while (Atomics.load(__midgcFinAsyncGate, 'ready') < __MIDGC_WAITERS__)
+            \\    Atomics.wait(__midgcFinAsyncGate, 'ready', Atomics.load(__midgcFinAsyncGate, 'ready'), 1);
+            \\
+        else
+            "";
+    const midgc_pressure_src =
+        if (midgc)
+            \\  const __midgcFinAsyncKeep = [];
+            \\  for (let round = 0; round < __MIDGC_ROUNDS__; round++) {
+            \\    for (let i = 0; i < __MIDGC_PER_ROUND__; i++)
+            \\      __midgcFinAsyncKeep.push({
+            \\        round, i,
+            \\        nested: { seed: __MIDGC_SEED__, joinExpectation: __MIDGC_EXPECTED_JOIN__ },
+            \\        text: 'midgc-finalization-asyncjoin-' + round + '-' + i
+            \\      });
+            \\    let spin = 0;
+            \\    for (let j = 0; j < __MIDGC_SPIN_ITERS__; j++)
+            \\      spin = (spin + j + round) & 0x3fffffff;
+            \\    if (spin < 0) __midgcFinAsyncKeep.push({ impossible: true });
+            \\  }
+            \\
+        else
+            "";
+    const midgc_release_src =
+        if (midgc)
+            \\  Atomics.store(__midgcFinAsyncGate, 'state', 1);
+            \\  Atomics.notify(__midgcFinAsyncGate, 'state');
+            \\  let __midgcFinAsyncWaiterSum = 0;
+            \\  for (const waiter of __midgcFinAsyncWaiters)
+            \\    __midgcFinAsyncWaiterSum += waiter.join();
+            \\  if (__midgcFinAsyncWaiterSum !== __MIDGC_EXPECTED_WAITER_SUM__)
+            \\    throw new Error('bad midgc finalization asyncJoin waiter sum ' + __midgcFinAsyncWaiterSum);
+            \\  __midgcFinAsyncWaiters.length = 0;
+            \\  __midgcFinAsyncKeep.length = 0;
+            \\
+        else
+            "";
+    const rendered_midgc_setup_src = if (midgc) try renderMidGcFinalizationAsyncJoinSnippet(
+        gpa,
+        midgc_setup_src,
+        waiters,
+        seed_marker,
+        wait_timeout_ms,
+        pressure_rounds,
+        pressure_per_round,
+        spin_iters,
+        seed,
+        expected_success_sum + expected_reject_sum,
+        expected_waiter_sum,
+    ) else "";
+    defer if (midgc) gpa.free(rendered_midgc_setup_src);
+    const rendered_midgc_pressure_src = if (midgc) try renderMidGcFinalizationAsyncJoinSnippet(
+        gpa,
+        midgc_pressure_src,
+        waiters,
+        seed_marker,
+        wait_timeout_ms,
+        pressure_rounds,
+        pressure_per_round,
+        spin_iters,
+        seed,
+        expected_success_sum + expected_reject_sum,
+        expected_waiter_sum,
+    ) else "";
+    defer if (midgc) gpa.free(rendered_midgc_pressure_src);
+    const rendered_midgc_release_src = if (midgc) try renderMidGcFinalizationAsyncJoinSnippet(
+        gpa,
+        midgc_release_src,
+        waiters,
+        seed_marker,
+        wait_timeout_ms,
+        pressure_rounds,
+        pressure_per_round,
+        spin_iters,
+        seed,
+        expected_success_sum + expected_reject_sum,
+        expected_waiter_sum,
+    ) else "";
+    defer if (midgc) gpa.free(rendered_midgc_release_src);
 
     const src = try std.fmt.allocPrint(
         gpa,
@@ -4979,6 +5103,7 @@ fn runFinalizationAsyncJoinCleanupInterleaving(gpa: std.mem.Allocator, seed: u64
         \\    globalThis.__finAsyncCleanupSum += held;
         \\  }});
         \\  const registry = globalThis.__finAsyncCleanupRegistry;
+        \\{s}
         \\  const threads = [];
         \\  let asyncSuccess = 0;
         \\  let asyncReject = 0;
@@ -5013,6 +5138,7 @@ fn runFinalizationAsyncJoinCleanupInterleaving(gpa: std.mem.Allocator, seed: u64
         \\      }});
         \\    threads.push(t);
         \\  }}
+        \\{s}
         \\  let joinSuccess = 0;
         \\  let joinReject = 0;
         \\  for (let id = 0; id < threads.length; id++) {{
@@ -5033,6 +5159,7 @@ fn runFinalizationAsyncJoinCleanupInterleaving(gpa: std.mem.Allocator, seed: u64
         \\    throw new Error('bad finalization join success sum ' + joinSuccess);
         \\  if (joinReject !== {d})
         \\    throw new Error('bad finalization join reject sum ' + joinReject);
+        \\{s}
         \\  threads.length = 0;
         \\  Promise.resolve().then(() => {{
         \\    if (asyncSuccess !== {d})
@@ -5045,10 +5172,22 @@ fn runFinalizationAsyncJoinCleanupInterleaving(gpa: std.mem.Allocator, seed: u64
         \\}})();
         \\
     ,
-        .{ nthreads, per_thread, expected_success_sum, expected_reject_sum, expected_success_sum, expected_reject_sum },
+        .{
+            rendered_midgc_setup_src,
+            nthreads,
+            per_thread,
+            rendered_midgc_pressure_src,
+            expected_success_sum,
+            expected_reject_sum,
+            rendered_midgc_release_src,
+            expected_success_sum,
+            expected_reject_sum,
+        },
     );
     defer gpa.free(src);
 
+    const before_attempts = if (midgc) ctx.gc_par_attempts.load(.monotonic) else 0;
+    const before_collections = if (midgc) ctx.gc_par_collections.load(.monotonic) else 0;
     const joined = ctx.evaluate(src) catch |err| {
         const msg_txt = if (ctx.exception) |ex| blk: {
             var render = ctx.interpreter();
@@ -5060,6 +5199,14 @@ fn runFinalizationAsyncJoinCleanupInterleaving(gpa: std.mem.Allocator, seed: u64
     const expected_joined = expected_success_sum + expected_reject_sum;
     if (!joined.isNumber() or joined.asNum() != @as(f64, @floatFromInt(expected_joined))) {
         std.debug.print("seed {d}: finalization asyncJoin joined got {d}, expected {d}\n", .{ seed, if (joined.isNumber()) joined.asNum() else -1, expected_joined });
+        return false;
+    }
+    if (midgc and ctx.gc_par_attempts.load(.monotonic) <= before_attempts) {
+        std.debug.print("seed {d}: finalization asyncJoin did not attempt a parallel collection\n", .{seed});
+        return false;
+    }
+    if (midgc and ctx.gc_par_collections.load(.monotonic) <= before_collections) {
+        std.debug.print("seed {d}: finalization asyncJoin did not finish a parallel collection\n", .{seed});
         return false;
     }
     const oracle = ctx.evaluate("globalThis.__finAsyncJoinOracle") catch |err| {
@@ -5102,6 +5249,59 @@ fn runFinalizationAsyncJoinCleanupInterleaving(gpa: std.mem.Allocator, seed: u64
         return false;
     }
     return true;
+}
+
+fn renderMidGcFinalizationAsyncJoinSnippet(
+    gpa: std.mem.Allocator,
+    template: []const u8,
+    waiters: usize,
+    seed_marker: u64,
+    wait_timeout_ms: usize,
+    rounds: usize,
+    per_round: usize,
+    spin_iters: usize,
+    seed: u64,
+    expected_join: usize,
+    expected_waiter_sum: usize,
+) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+
+    var i: usize = 0;
+    while (i < template.len) {
+        if (std.mem.startsWith(u8, template[i..], "__MIDGC_WAITERS__")) {
+            try out.print(gpa, "{d}", .{waiters});
+            i += "__MIDGC_WAITERS__".len;
+        } else if (std.mem.startsWith(u8, template[i..], "__MIDGC_SEED_MARKER__")) {
+            try out.print(gpa, "{d}", .{seed_marker});
+            i += "__MIDGC_SEED_MARKER__".len;
+        } else if (std.mem.startsWith(u8, template[i..], "__MIDGC_WAIT_TIMEOUT__")) {
+            try out.print(gpa, "{d}", .{wait_timeout_ms});
+            i += "__MIDGC_WAIT_TIMEOUT__".len;
+        } else if (std.mem.startsWith(u8, template[i..], "__MIDGC_ROUNDS__")) {
+            try out.print(gpa, "{d}", .{rounds});
+            i += "__MIDGC_ROUNDS__".len;
+        } else if (std.mem.startsWith(u8, template[i..], "__MIDGC_PER_ROUND__")) {
+            try out.print(gpa, "{d}", .{per_round});
+            i += "__MIDGC_PER_ROUND__".len;
+        } else if (std.mem.startsWith(u8, template[i..], "__MIDGC_SPIN_ITERS__")) {
+            try out.print(gpa, "{d}", .{spin_iters});
+            i += "__MIDGC_SPIN_ITERS__".len;
+        } else if (std.mem.startsWith(u8, template[i..], "__MIDGC_SEED__")) {
+            try out.print(gpa, "{d}", .{seed});
+            i += "__MIDGC_SEED__".len;
+        } else if (std.mem.startsWith(u8, template[i..], "__MIDGC_EXPECTED_JOIN__")) {
+            try out.print(gpa, "{d}", .{expected_join});
+            i += "__MIDGC_EXPECTED_JOIN__".len;
+        } else if (std.mem.startsWith(u8, template[i..], "__MIDGC_EXPECTED_WAITER_SUM__")) {
+            try out.print(gpa, "{d}", .{expected_waiter_sum});
+            i += "__MIDGC_EXPECTED_WAITER_SUM__".len;
+        } else {
+            try out.append(gpa, template[i]);
+            i += 1;
+        }
+    }
+    return out.toOwnedSlice(gpa);
 }
 
 fn runFinalizationWaiterCleanupInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
@@ -17124,6 +17324,23 @@ pub fn main(init: std.process.Init) !void {
         if (mnafail != 0) std.process.exit(1);
         return;
     };
+    // `threadfuzz midgcfinalasync <iters> <seed>`: focused mid-script
+    // parallel-GC repro for FinalizationRegistry cleanup interleaved with
+    // Thread.asyncJoin fulfillment/rejection and unregister-token suppression
+    // while sync-wait peers stay parked through a finishing sweep.
+    if (first) |a| if (std.mem.eql(u8, a, "midgcfinalasync")) {
+        if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch 1;
+        if (args.next()) |b| base_seed = std.fmt.parseInt(u64, b, 10) catch 1;
+        var mfafail: usize = 0;
+        var mfai: usize = 0;
+        while (mfai < iters) : (mfai += 1) {
+            const seed = base_seed +% mfai;
+            if (!(try runMidScriptFinalizationAsyncJoinCleanupGc(gpa, seed))) mfafail += 1;
+        }
+        std.debug.print("threadfuzz midgcfinalasync: {d} programs from seed {d}, {d} failures\n", .{ iters, base_seed, mfafail });
+        if (mfafail != 0) std.process.exit(1);
+        return;
+    };
     // `threadfuzz midgctlslife <iters> <seed>`: focused mid-script
     // parallel-GC repro for ThreadLocal per-thread isolation, nested-thread
     // isolation, thrown-object publication, and asyncJoin observers while owner
@@ -17757,6 +17974,9 @@ pub fn main(init: std.process.Init) !void {
     // thenable assimilation, pending Promise/microtask reaction roots across
     // asyncHold, waitAsync, asyncJoin, and cleanup delivery, property
     // waitAsync late-settlement rerouting after owner queues close,
+    // FinalizationRegistry cleanup interleaved with asyncJoin
+    // fulfillment/rejection and unregister-token suppression while sync-wait
+    // peers stay parked through a finishing sweep,
     // post-completion asyncJoin promises and sibling cleanup roots staying live
     // after blocking joins while property waiters stay parked through a
     // finishing sweep,
@@ -17813,6 +18033,7 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runMidScriptAtomicsConditionWaitGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptAsyncHoldReleaseWaiterCleanupGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptNestedThreadAsyncJoinCleanupGc(gpa, seed))) mfail += 1;
+            if (!(try runMidScriptFinalizationAsyncJoinCleanupGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptThreadLocalLifecycleGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptThreadLocalFinalizationGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptThreadLocalTerminationCleanupGc(gpa, seed))) mfail += 1;
@@ -17834,7 +18055,7 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runMidScriptModuleWorkerTerminateThreadLocalAsyncHoldCleanupGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptWeakCollectionGc(gpa, seed))) mfail += 1;
         }
-        std.debug.print("threadfuzz midgc: {d} programs from seed {d}, {d} failures\n", .{ iters * 35, base_seed, mfail });
+        std.debug.print("threadfuzz midgc: {d} programs from seed {d}, {d} failures\n", .{ iters * 36, base_seed, mfail });
         if (mfail != 0) std.process.exit(1);
         return;
     };

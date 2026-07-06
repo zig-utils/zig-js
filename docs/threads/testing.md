@@ -224,6 +224,10 @@ then keep post-completion `Thread.asyncJoin()` promises plus sibling cleanup
 roots live while property waiters stay parked through a finishing sweep, reject
 early cleanup during that window, attach late observers, and require exact
 cleanup after those records are released,
+adds a finalization/asyncJoin subprogram that registers child-thread cleanup
+targets with unregister tokens, mixes fulfilled and rejected `asyncJoin`
+observers, parks sync-wait peers through the finishing sweep, and requires
+exact cleanup plus unregister-token suppression,
 adds a creator-owned buffer subprogram that leaves child-created
 `SharedArrayBuffer` and `ArrayBuffer` storage rooted through unjoined `Thread`
 completion records and delayed `asyncJoin` observers across a finishing sweep,
@@ -272,7 +276,7 @@ join-termination unit witness that checks parked-state/mutex cleanup, then
 requires exact script completion or exact expected termination plus at least one
 finishing parallel sweep and exact
 `FinalizationRegistry` cleanup count/sum delivery plus unregister-token
-suppression after a quiescent collect. Each seed currently runs 35 deterministic
+suppression after a quiescent collect. Each seed currently runs 36 deterministic
 mid-GC subprograms. The
 lifecycle profile
 (`-Dfuzz-lifecycle=true`) adds deterministic resizable `ArrayBuffer` /

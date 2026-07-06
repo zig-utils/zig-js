@@ -356,6 +356,9 @@ context APIs.
   through a finishing sweep before clearing them with an exact cleanup oracle,
   keeps ThreadLocal-only cleanup targets live through a finishing sweep until
   top-level-failure teardown releases their owner-thread entries,
+  registers child-thread cleanup targets with unregister tokens while fulfilled
+  and rejected `Thread.asyncJoin` observers plus sync-wait peers stay live
+  through a finishing sweep,
   and parks Thread.restrict-owned finalization targets through a finishing sweep
   while nested foreign access still throws `ConcurrentAccessError` before owner
   release,
