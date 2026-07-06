@@ -623,6 +623,116 @@ pub const Compiler = struct {
         return false;
     }
 
+    fn tdzDeclarePattern(arena: std.mem.Allocator, declared: *std.StringHashMapUnmanaged(void), pattern: *Node) CompileError!void {
+        switch (pattern.*) {
+            .identifier => |name| try declared.put(arena, name, {}),
+            .obj_pattern => |p| {
+                for (p.props) |prop| try tdzDeclarePattern(arena, declared, prop.target);
+                if (p.rest) |r| if (r.* == .identifier) try declared.put(arena, r.identifier, {});
+            },
+            .arr_pattern => |p| {
+                for (p.elems) |elem| if (elem.target) |t| try tdzDeclarePattern(arena, declared, t);
+                if (p.rest) |rest| try tdzDeclarePattern(arena, declared, rest);
+            },
+            else => {},
+        }
+    }
+
+    /// Does `node` reference (as an identifier) any lexical name from `m` that has
+    /// not been declared yet? Such a read would hit the Temporal Dead Zone.
+    fn tdzRefsPending(node: *Node, m: *const std.StringHashMapUnmanaged(ShadowBind), declared: *const std.StringHashMapUnmanaged(void)) bool {
+        var it = m.iterator();
+        while (it.next()) |e| {
+            if (!e.value_ptr.lexical) continue;
+            if (declared.contains(e.key_ptr.*)) continue;
+            if (nameRefInClosure(node, e.key_ptr.*, true)) return true;
+        }
+        return false;
+    }
+
+    /// Walk statements in source order, growing `declared` as each lexical binding
+    /// is reached, and report a read of a still-undeclared lexical (a TDZ hazard).
+    fn tdzScanStmt(arena: std.mem.Allocator, node: *Node, m: *const std.StringHashMapUnmanaged(ShadowBind), declared: *std.StringHashMapUnmanaged(void)) CompileError!bool {
+        switch (node.*) {
+            .var_decl => |d| {
+                if (d.init) |init| if (tdzRefsPending(init, m, declared)) return true;
+                if (d.kind != .@"var") try declared.put(arena, d.name, {});
+            },
+            .destructure_decl => |d| {
+                if (tdzRefsPending(d.init, m, declared)) return true;
+                if (d.kind != .@"var") try tdzDeclarePattern(arena, declared, d.pattern);
+            },
+            .expr_stmt => |e| return tdzRefsPending(e, m, declared),
+            .return_stmt => |mb| {
+                if (mb) |e| return tdzRefsPending(e, m, declared);
+            },
+            .throw_stmt => |e| return tdzRefsPending(e, m, declared),
+            .if_stmt => |s| {
+                if (tdzRefsPending(s.cond, m, declared)) return true;
+                if (try tdzScanStmt(arena, s.consequent, m, declared)) return true;
+                if (s.alternate) |a| if (try tdzScanStmt(arena, a, m, declared)) return true;
+            },
+            .while_stmt => |s| {
+                if (tdzRefsPending(s.cond, m, declared)) return true;
+                return tdzScanStmt(arena, s.body, m, declared);
+            },
+            .do_while_stmt => |s| {
+                if (try tdzScanStmt(arena, s.body, m, declared)) return true;
+                return tdzRefsPending(s.cond, m, declared);
+            },
+            .for_stmt => |f| {
+                if (f.init) |i| if (try tdzScanStmt(arena, i, m, declared)) return true;
+                if (f.cond) |c| if (tdzRefsPending(c, m, declared)) return true;
+                if (f.update) |u| if (tdzRefsPending(u, m, declared)) return true;
+                return tdzScanStmt(arena, f.body, m, declared);
+            },
+            .for_in => |f| {
+                if (tdzRefsPending(f.iterable, m, declared)) return true;
+                if (f.decl_kind) |k| if (k != .@"var") try tdzDeclarePattern(arena, declared, f.target);
+                return tdzScanStmt(arena, f.body, m, declared);
+            },
+            .block => |stmts| for (stmts) |s| {
+                if (try tdzScanStmt(arena, s, m, declared)) return true;
+            },
+            .decl_group => |stmts| for (stmts) |s| {
+                if (try tdzScanStmt(arena, s, m, declared)) return true;
+            },
+            .switch_stmt => |sw| {
+                if (tdzRefsPending(sw.disc, m, declared)) return true;
+                for (sw.cases) |c| {
+                    if (c.@"test") |t| if (tdzRefsPending(t, m, declared)) return true;
+                    for (c.body) |st| if (try tdzScanStmt(arena, st, m, declared)) return true;
+                }
+            },
+            .labeled_stmt => |s| return tdzScanStmt(arena, s.body, m, declared),
+            .try_stmt => |t| {
+                if (try tdzScanStmt(arena, t.block, m, declared)) return true;
+                if (t.catch_param) |p| try tdzDeclarePattern(arena, declared, p);
+                if (t.catch_block) |cb| if (try tdzScanStmt(arena, cb, m, declared)) return true;
+                if (t.finally_block) |fb| if (try tdzScanStmt(arena, fb, m, declared)) return true;
+            },
+            .func_decl => {}, // hoisted; not a read site here
+            else => return tdzRefsPending(node, m, declared), // unknown node: sound fallback
+        }
+        return false;
+    }
+
+    /// The VM has no Temporal Dead Zone: an uninitialized `let`/`const` slot reads
+    /// as `undefined` instead of throwing ReferenceError. Detecting a read of a
+    /// lexical before its declaration would need a per-load check on the hot path,
+    /// so instead keep any function that could hit its TDZ on the tree-walker,
+    /// which enforces it. Runs after the shadowing check, so lexical names are
+    /// unique here. Conservative (a captured forward reference also bails).
+    fn functionHasTdzHazard(arena: std.mem.Allocator, fnode: *const ast.FunctionNode) CompileError!bool {
+        if (fnode.is_expr_body) return false;
+        var m: std.StringHashMapUnmanaged(ShadowBind) = .empty;
+        for (fnode.params) |p| try shadowAdd(arena, &m, p.name, false);
+        try shadowScanStmt(arena, &m, fnode.body);
+        // With no lexical bindings collected, tdzRefsPending never fires.
+        var declared: std.StringHashMapUnmanaged(void) = .empty;
+        return tdzScanStmt(arena, fnode.body, &m, &declared);
+    }
+
     pub const PlainFunctionCode = struct {
         chunk: *Chunk,
         local_count: u32,
@@ -634,6 +744,9 @@ pub const Compiler = struct {
         // The flat slot model can't represent a lexical binding shadowing another
         // same-named binding; keep those on the tree-walker (correct block scopes).
         if (try functionHasShadowableLexical(arena, fnode)) return error.Unsupported;
+        // The VM has no TDZ; keep functions that could read a lexical before its
+        // declaration on the tree-walker, which throws ReferenceError.
+        if (try functionHasTdzHazard(arena, fnode)) return error.Unsupported;
         const scope = try arena.create(FnScope);
         scope.* = .{ .parent = null };
         for (fnode.params) |p| {
