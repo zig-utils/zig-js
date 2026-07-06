@@ -234,10 +234,10 @@ shared-realm cleanup oracle through the finishing sweep, adds script and module
 Worker close/terminate subprograms that keep exact FIFO drain/drop ordering,
 post-close drop, post-terminate receive silence, shared-realm joined roots,
 asyncJoin reactions, and cleanup count/sum live across the finishing sweep,
-adds a Worker/Condition.asyncWait teardown subprogram that keeps a condition
-async reacquire ticket, parked `Thread`, isolated Worker progress, and cleanup
-jobs live through a finishing sweep before notification and top-level failure
-teardown,
+adds script and module Worker/Condition.asyncWait teardown subprograms that keep
+a condition async reacquire ticket, parked `Thread`, isolated Worker progress,
+and cleanup jobs live through a finishing sweep before notification and
+top-level failure teardown,
 adds a Worker/ThreadLocal/asyncHold teardown subprogram that composes isolated
 Worker termination with `ThreadLocal` hidden roots, no-fn `Lock.asyncHold()`
 release-function delivery, parked property/condition waiters, post-sweep
@@ -258,7 +258,7 @@ join-termination unit witness that checks parked-state/mutex cleanup, then
 requires exact script completion or exact expected termination plus at least one
 finishing parallel sweep and exact
 `FinalizationRegistry` cleanup count/sum delivery plus unregister-token
-suppression after a quiescent collect. Each seed currently runs 27 deterministic
+suppression after a quiescent collect. Each seed currently runs 28 deterministic
 mid-GC subprograms. The
 lifecycle profile
 (`-Dfuzz-lifecycle=true`) adds deterministic resizable `ArrayBuffer` /
@@ -306,9 +306,10 @@ child's stack-owned waiter token disappears, cross-thread `FinalizationRegistry`
 cleanup count/sum oracles, teardown termination while property `waitAsync`
 timeout compaction, async condition reacquire, a pending `asyncJoin` rejection
 reaction, and already-ready `FinalizationRegistry` cleanup jobs share the same
-realm turn, module Worker termination composed with the same child-owned
-typed-array `waitAsync` ticket abandonment, pending `asyncJoin` rejection
-cleanup, and exact `FinalizationRegistry` cleanup,
+realm turn, module Worker termination composed with the same condition async
+reacquire oracle, plus module Worker termination composed with the same
+child-owned typed-array `waitAsync` ticket abandonment, pending `asyncJoin`
+rejection cleanup, and exact `FinalizationRegistry` cleanup,
 Promise reaction queue churn from with-fn `Lock.asyncHold`, no-fn release
 functions, typed-array `waitAsync`, `Thread.asyncJoin`, and exact
 `FinalizationRegistry` cleanup,

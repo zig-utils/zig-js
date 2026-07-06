@@ -328,7 +328,8 @@ as embedders exercise more threaded host patterns.
   Worker/SAB cleanup subprograms, script and module Worker
   handler-exception cleanup subprograms, script and module Worker
   close/terminate drain/drop subprograms, an async-hold release/waiter cleanup
-  subprogram, a Worker/Condition.asyncWait teardown cleanup subprogram, a
+  subprogram, script and module Worker/Condition.asyncWait teardown cleanup
+  subprograms, a
   Worker/ThreadLocal/asyncHold teardown cleanup subprogram, a sync-wait burst
   cleanup subprogram, a sync-timeout exit
   subprogram, an `Atomics.Mutex.lockIfAvailable` acquire/timeout cleanup
@@ -434,10 +435,10 @@ as embedders exercise more threaded host patterns.
   Script/module Worker close/terminate subprograms now preserve exact FIFO
   drain/drop, post-close drop, post-terminate receive silence, joined roots,
   asyncJoin reactions, and cleanup count/sum through the same finishing sweep.
-  The Worker/Condition.asyncWait teardown cleanup subprogram keeps a condition
-  async reacquire ticket, parked `Thread`, isolated Worker progress, and cleanup
-  jobs live through a finishing sweep before notification, top-level failure,
-  rejected `asyncJoin` observation, and exact cleanup.
+  The script and module Worker/Condition.asyncWait teardown cleanup subprograms
+  keep a condition async reacquire ticket, parked `Thread`, isolated Worker
+  progress, and cleanup jobs live through a finishing sweep before notification,
+  top-level failure, rejected `asyncJoin` observation, and exact cleanup.
   The Worker/ThreadLocal/asyncHold teardown cleanup subprogram composes isolated
   Worker termination with `ThreadLocal` hidden roots, no-fn `Lock.asyncHold()`
   release-function delivery, parked property/condition waiters, post-sweep
@@ -549,7 +550,7 @@ as embedders exercise more threaded host patterns.
   structured-clone after the creator Thread exits.
 - CI runs the fuzzer in several modes: default seeded, TSan, high-contention
   amplified, broad semantic,
-  mid-script GC wait-pump/microtask/property-waitAsync-late-settlement/late-asyncJoin-fulfillment-rejection-cleanup/creator-buffer/nested-asyncJoin/sync-wait-cleanup/sync-wait-burst/asyncHold-release-cleanup/promise/teardown/Worker-SAB/Worker-exception/Worker-close/Worker-Condition-asyncWait-teardown/Worker-TLS-asyncHold-teardown/weak-collection,
+  mid-script GC wait-pump/microtask/property-waitAsync-late-settlement/late-asyncJoin-fulfillment-rejection-cleanup/creator-buffer/nested-asyncJoin/sync-wait-cleanup/sync-wait-burst/asyncHold-release-cleanup/promise/teardown/Worker-SAB/Worker-exception/Worker-close/script-module-Worker-Condition-asyncWait-teardown/Worker-TLS-asyncHold-teardown/weak-collection,
   lifecycle, ReleaseSafe, and deterministic-result verification.
 
 Remaining: keep extending the lifecycle profile toward more cross-realm
@@ -571,7 +572,7 @@ Every pull request and push to `main` runs:
 - TSan lifecycle `threadfuzz` smoke,
 - amplified `threadfuzz`,
 - broad semantic `threadfuzz`,
-- mid-script GC wait-pump/microtask/property-waitAsync-late-settlement/late-asyncJoin-fulfillment-rejection-cleanup/creator-buffer/nested-asyncJoin/sync-wait-cleanup/sync-wait-burst/asyncHold-release-cleanup/promise/teardown/Worker-SAB/Worker-exception/Worker-close/Worker-Condition-asyncWait-teardown/Worker-TLS-asyncHold-teardown/weak-collection
+- mid-script GC wait-pump/microtask/property-waitAsync-late-settlement/late-asyncJoin-fulfillment-rejection-cleanup/creator-buffer/nested-asyncJoin/sync-wait-cleanup/sync-wait-burst/asyncHold-release-cleanup/promise/teardown/Worker-SAB/Worker-exception/Worker-close/script-module-Worker-Condition-asyncWait-teardown/Worker-TLS-asyncHold-teardown/weak-collection
   `threadfuzz`,
 - lifecycle `threadfuzz`,
 - ReleaseSafe `threadfuzz`,
