@@ -1013,6 +1013,9 @@ pub const Context = struct {
         main_can_block: bool = true,
         /// Test cap for live shared-realm `Thread` objects.
         max_js_threads: ?u32 = null,
+        /// Test-shell flag model for PR-249 `--useSharedArrayBuffer=0`: leave
+        /// property Atomics installed, but hide the global SAB constructor.
+        enable_shared_array_buffer: bool = true,
         /// Experimental GIL-removal vertical slice (test-only): requires
         /// `enable_threads`, `enable_gc`, and `parallel_gc`. JS execution does
         /// not hold the context GIL; legacy blocking/result bookkeeping still
@@ -1193,6 +1196,9 @@ pub const Context = struct {
         self.tdz_marker = tdz;
 
         try interp.installGlobals(&self.env, self.root_shape);
+        if (!options.enable_shared_array_buffer) {
+            _ = self.env.removeVar("SharedArrayBuffer");
+        }
         // `globalThis` names the global object itself.
         try self.env.put("globalThis", Value.obj(global_obj));
         if (self.env.get("Object")) |object_ctor| {
@@ -8509,6 +8515,15 @@ test "Context public Options expose only stable thread controls" {
     try std.testing.expect(!@hasField(Context.Options, "parallel_gc"));
     try std.testing.expect(@hasField(Context.TestingOptions, "parallel_js"));
     try std.testing.expect(@hasField(Context.TestingOptions, "parallel_midscript_gc"));
+    try std.testing.expect(@hasField(Context.TestingOptions, "enable_shared_array_buffer"));
+}
+
+test "Context TestingOptions can hide SharedArrayBuffer while keeping Atomics" {
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{ .enable_shared_array_buffer = false });
+    defer ctx.destroy();
+
+    const result = try ctx.evaluate("typeof SharedArrayBuffer === 'undefined' && typeof Atomics === 'object' && !('SharedArrayBuffer' in globalThis)");
+    try std.testing.expect(result.toBoolean());
 }
 
 test "Thread blocking APIs respect the main can-block gate" {

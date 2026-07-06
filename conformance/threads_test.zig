@@ -253,6 +253,10 @@ const parallel_only_allowlist = [_][]const u8{
     // cooperative GIL the worker can starve the observer, while parallel_js
     // exercises the intended haveBadTime/checktraps park window.
     "checktraps-havebadtime-park.js",
+    // Models PR-249 `--useSharedArrayBuffer=0`: Thread + property Atomics stay
+    // enabled while the SAB constructor is absent. Robust only in no-GIL mode
+    // because the worker counter is a timing-capability witness.
+    "cve/mc-spec-timer-capability.js",
 };
 
 fn runsWithoutThreadGlobal(name: []const u8) bool {
@@ -454,6 +458,7 @@ pub fn main(init: std.process.Init) !void {
             // lines: blocking-gate runs can-block-is-false; thread-id-bounds runs
             // --maxJSThreads=4; *-termination runs --watchdog=500 with the
             // termination throw as its PASSING outcome.
+            const directive = test_src[0 .. std.mem.indexOfScalar(u8, test_src, '\n') orelse test_src.len];
             const enable_threads = !runsWithoutThreadGlobal(name);
             const options = js.Context.TestingOptions{
                 .enable_threads = enable_threads,
@@ -462,8 +467,8 @@ pub fn main(init: std.process.Init) !void {
                 .parallel_js = parallel_js and enable_threads,
                 .main_can_block = !std.mem.endsWith(u8, name, "blocking-gate.js"),
                 .max_js_threads = if (std.mem.endsWith(u8, name, "thread-id-bounds.js")) 4 else null,
+                .enable_shared_array_buffer = std.mem.indexOf(u8, directive, "--useSharedArrayBuffer=0") == null,
             };
-            const directive = test_src[0 .. std.mem.indexOfScalar(u8, test_src, '\n') orelse test_src.len];
             const expect_termination = std.mem.endsWith(u8, name, "-termination.js") or
                 std.mem.indexOf(u8, directive, "--watchdog-exception-ok") != null;
             const ctx = js.Context.createWithTestingOptions(gpa, options) catch {

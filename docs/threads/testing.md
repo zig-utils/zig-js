@@ -86,9 +86,9 @@ buffers, property-mode Atomics, `Thread`, `Lock`, `Condition`, `ThreadLocal`,
 parallel-GC witnesses, C embedder threading, and the main can-block gate.
 
 `zig build threads-test` runs the green WebKit PR-249 allowlist from
-`reference/webkit-249/threads-tests`. The current coverage contains 227
+`reference/webkit-249/threads-tests`. The current coverage contains 228
 promoted files out of 259 executable PR-249 files: 226 in the default
-`zig build threads-test` allowlist plus 1 `parallel_js`-only witness. It covers:
+`zig build threads-test` allowlist plus 2 `parallel_js`-only witnesses. It covers:
 
 - `api/` and `lifecycle/`: constructor shape, lifecycle, ids, constructor
   errors, exceptions, restriction, return values, join semantics, blocking
@@ -538,8 +538,6 @@ PR-249 files stay reference-only for concrete reasons:
   guard as the tree-walker, but both still consume native stack per call, so the
   reference witness needs iterative/trampolined calls or a real VM-stack
   execution path before promotion.
-- `cve/mc-spec-timer-capability.js` needs SharedArrayBuffer-off option modeling
-  and timing semantics beyond today's shell surface.
 - `semantics/oom-one-thread.js` remains out until there is a real heap cap and
   per-thread OOM handling contract.
 - `cve/mc-life-creator-thread-dies.js` still depends on reference-shell buffer

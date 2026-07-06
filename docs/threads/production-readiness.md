@@ -54,8 +54,8 @@ than new correctness architecture.
   the mid-script parallel-GC use-after-free found by the fuzzer.
 - `-Dtest262-parallel-js` runs a broad language-surface slice in GIL-free
   parallel contexts and asserts no new failures versus the baseline.
-- PR-249 coverage contains 227 promoted files out of 259 executable PR-249
-  files: 226 in normal mode plus 1 `parallel_js`-only witness, covered by the
+- PR-249 coverage contains 228 promoted files out of 259 executable PR-249
+  files: 226 in normal mode plus 2 `parallel_js`-only witnesses, covered by the
   sharded no-GIL
   ThreadSanitizer corpus gate.
 - The no-GIL `cve/mc-dos-waiter-table-storm.js` focused gate covers property
