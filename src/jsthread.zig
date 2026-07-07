@@ -717,6 +717,8 @@ const sync_brand_condition: SyncBrand = 0x6a73_7468_636f_6e64;
 const sync_brand_thread_local: SyncBrand = 0x6a73_7468_746c_736c;
 const sync_brand_unlock_token: SyncBrand = 0x6a73_7468_7574_6f6b;
 const sync_brand_release_state: SyncBrand = 0x6a73_7468_7265_6c73;
+const lock_pending_reserve_granularity = 16;
+const condition_queue_reserve_granularity = 16;
 
 const LockRecord = struct {
     brand: SyncBrand = sync_brand_lock,
@@ -760,8 +762,16 @@ const LockRecord = struct {
         return self.pending_front.items.len > 0 or self.pending_head < self.pending.items.len;
     }
 
+    fn reservePending(arena: std.mem.Allocator, list: *std.ArrayListUnmanaged(*HoldJob), additional: usize) !void {
+        const spare = list.capacity - list.items.len;
+        if (spare >= additional) return;
+        const extra = @max(additional, lock_pending_reserve_granularity);
+        try list.ensureTotalCapacity(arena, list.items.len + extra);
+    }
+
     fn appendPending(self: *LockRecord, arena: std.mem.Allocator, job: *HoldJob) !void {
-        try self.pending.append(arena, job);
+        try reservePending(arena, &self.pending, 1);
+        self.pending.appendAssumeCapacity(job);
     }
 
     fn pushFrontPending(self: *LockRecord, arena: std.mem.Allocator, job: *HoldJob) !void {
@@ -770,7 +780,8 @@ const LockRecord = struct {
             self.pending.items[self.pending_head] = job;
             return;
         }
-        try self.pending_front.append(arena, job);
+        try reservePending(arena, &self.pending_front, 1);
+        self.pending_front.appendAssumeCapacity(job);
     }
 
     fn popPending(self: *LockRecord) ?*HoldJob {
@@ -823,7 +834,11 @@ const CondRecord = struct {
     sync_handoff_pending: usize = 0,
 
     fn appendWaiter(self: *CondRecord, arena: std.mem.Allocator, entry: CondEntry) !void {
-        try self.queue.append(arena, entry);
+        const spare = self.queue.capacity - self.queue.items.len;
+        if (spare == 0) {
+            try self.queue.ensureTotalCapacity(arena, self.queue.items.len + condition_queue_reserve_granularity);
+        }
+        self.queue.appendAssumeCapacity(entry);
     }
 
     fn popWaiter(self: *CondRecord) ?CondEntry {
@@ -865,6 +880,34 @@ test "condition queue head cursor skips canceled sync waiters" {
     const second = rec.popWaiter() orelse return error.TestExpectedEqual;
     try std.testing.expectEqual(@intFromPtr(&t2), @intFromPtr(second.sync));
     try std.testing.expectEqual(@as(?CondEntry, null), rec.popWaiter());
+    try std.testing.expectEqual(@as(usize, 0), rec.queue_head);
+    try std.testing.expectEqual(@as(usize, 0), rec.queue.items.len);
+}
+
+test "condition queue reserves capacity chunks" {
+    var rec = CondRecord{ .gil = undefined };
+    const a = std.testing.allocator;
+    defer rec.queue.deinit(a);
+
+    var first = SyncCondTicket{};
+    try rec.appendWaiter(a, .{ .sync = &first });
+    try std.testing.expect(rec.queue.capacity >= condition_queue_reserve_granularity);
+
+    const first_capacity = rec.queue.capacity;
+    var tickets = try a.alloc(SyncCondTicket, first_capacity + 1);
+    defer a.free(tickets);
+    @memset(tickets, .{});
+
+    var appended: usize = 0;
+    while (rec.queue.items.len < first_capacity) : (appended += 1) {
+        try rec.appendWaiter(a, .{ .sync = &tickets[appended] });
+    }
+    try std.testing.expectEqual(first_capacity, rec.queue.capacity);
+
+    try rec.appendWaiter(a, .{ .sync = &tickets[appended] });
+    try std.testing.expect(rec.queue.capacity > first_capacity);
+
+    while (rec.popWaiter()) |_| {}
     try std.testing.expectEqual(@as(usize, 0), rec.queue_head);
     try std.testing.expectEqual(@as(usize, 0), rec.queue.items.len);
 }
@@ -2650,6 +2693,64 @@ test "jsthread lock pending async jobs are cursor FIFO" {
     try std.testing.expectEqual(@intFromPtr(&two), @intFromPtr(rec.popPending().?));
     try std.testing.expectEqual(@intFromPtr(&three), @intFromPtr(rec.popPending().?));
     try std.testing.expectEqual(@as(?*HoldJob, null), rec.popPending());
+}
+
+test "jsthread lock pending queues reserve capacity chunks" {
+    const a = std.testing.allocator;
+    var rec = LockRecord{ .gil = undefined };
+    defer rec.pending_front.deinit(a);
+    defer rec.pending.deinit(a);
+
+    var first = HoldJob{ .lock = &rec, .outer = undefined, .cb = null, .release_state = .{ .lock = &rec } };
+    try rec.appendPending(a, &first);
+    try std.testing.expect(rec.pending.capacity >= lock_pending_reserve_granularity);
+
+    const first_capacity = rec.pending.capacity;
+    var jobs = try a.alloc(HoldJob, first_capacity + 1);
+    defer a.free(jobs);
+    for (jobs) |*job| job.* = .{ .lock = &rec, .outer = undefined, .cb = null, .release_state = .{ .lock = &rec } };
+
+    var appended: usize = 0;
+    while (rec.pending.items.len < first_capacity) : (appended += 1) {
+        try rec.appendPending(a, &jobs[appended]);
+    }
+    try std.testing.expectEqual(first_capacity, rec.pending.capacity);
+
+    try rec.appendPending(a, &jobs[appended]);
+    try std.testing.expect(rec.pending.capacity > first_capacity);
+
+    while (rec.popPending()) |_| {}
+    try std.testing.expectEqual(@as(usize, 0), rec.pending_head);
+    try std.testing.expectEqual(@as(usize, 0), rec.pending.items.len);
+}
+
+test "jsthread lock retry-front queue reserves capacity chunks" {
+    const a = std.testing.allocator;
+    var rec = LockRecord{ .gil = undefined };
+    defer rec.pending_front.deinit(a);
+    defer rec.pending.deinit(a);
+
+    var first = HoldJob{ .lock = &rec, .outer = undefined, .cb = null, .release_state = .{ .lock = &rec } };
+    try rec.pushFrontPending(a, &first);
+    try std.testing.expect(rec.pending_front.capacity >= lock_pending_reserve_granularity);
+
+    const first_capacity = rec.pending_front.capacity;
+    var jobs = try a.alloc(HoldJob, first_capacity + 1);
+    defer a.free(jobs);
+    for (jobs) |*job| job.* = .{ .lock = &rec, .outer = undefined, .cb = null, .release_state = .{ .lock = &rec } };
+
+    var appended: usize = 0;
+    while (rec.pending_front.items.len < first_capacity) : (appended += 1) {
+        try rec.pushFrontPending(a, &jobs[appended]);
+    }
+    try std.testing.expectEqual(first_capacity, rec.pending_front.capacity);
+
+    try rec.pushFrontPending(a, &jobs[appended]);
+    try std.testing.expect(rec.pending_front.capacity > first_capacity);
+
+    while (rec.popPending()) |_| {}
+    try std.testing.expectEqual(@as(usize, 0), rec.pending_front.items.len);
+    try std.testing.expectEqual(@as(usize, 0), rec.pending_head);
 }
 
 test "jsthread traces queued async hold task roots" {

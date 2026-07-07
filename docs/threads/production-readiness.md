@@ -224,10 +224,14 @@ Known performance/maturity work:
   fewer shared-lock acquisitions for already-queued grant storms; they also
   reserve realm task-queue capacity in fixed chunks before capacity-assumed
   appends, so async grant storms pay fewer allocator-growth trips while holding
-  the shared API lock. The pump snapshots the microtask enqueue generation
-  around each delivered grant, so unobserved grants that enqueue no reactions
-  skip an otherwise-empty no-GIL microtask drain while preserving checkpoint
-  order for grants that do enqueue reactions.
+  the shared API lock. Per-lock pending-grant and retry-front queues also
+  reserve fixed-size capacity chunks before capacity-assumed appends, so
+  `Lock.asyncHold` and async-condition reacquire storms grow those lock-held
+  lists less often without changing FIFO or retry-front semantics. The pump
+  snapshots the microtask enqueue generation around each delivered grant, so
+  unobserved grants that enqueue no reactions skip an otherwise-empty no-GIL
+  microtask drain while preserving checkpoint order for grants that do enqueue
+  reactions.
 - Promise microtask drains now use a FIFO head cursor instead of
   `orderedRemove(0)`, so observed async-hold callback settlement and no-fn
   release-function reactions do not shift the remaining reaction queue on every
@@ -244,6 +248,9 @@ Known performance/maturity work:
   inferring them from elapsed time alone.
 - Condition notify/notifyAll use the same FIFO head-cursor pattern for the
   mixed sync/async waiter queue, avoiding one front-shift per notified waiter.
+  The waiter queue reserves fixed-size capacity chunks before capacity-assumed
+  appends, so condition waiter bursts pay fewer allocator-growth trips while
+  holding `CondRecord.mutex`.
   Timed-out or terminated sync condition waiters are marked canceled and skipped
   by the head cursor instead of being removed from the middle of the queue.
   Sync notifyAll handoff now waits on the waiter's condition ack signal rather

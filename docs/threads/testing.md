@@ -453,6 +453,8 @@ timed-out or terminated sync condition waiters are marked canceled and skipped
 by that cursor instead of being removed from the middle of the queue; sync
 notifyAll handoff now waits on the waiter's condition ack signal instead of a
 fixed 1ms polling sleep;
+per-lock async grant queues and the condition waiter queue reserve fixed-size
+capacity chunks before capacity-assumed appends;
 property-mode `Atomics.wait` timeout/termination cleanup stable-compacts the
 sync waiter table in one pass instead of shifting the remaining waiters;
 typed-array `Atomics.notify` unlinks sync stack tickets before signal, and
@@ -475,8 +477,13 @@ shape and zero-timeout polling behavior under a direct unit guard, while
 `condition queue head cursor skips canceled sync waiters` covers the condition
 timeout/termination queue shape directly, and `condition sync handoff countdown
 tracks acknowledged tickets` covers the no-rescan sync notify handoff counter.
+`condition queue reserves capacity chunks` guards the fixed-chunk waiter-queue
+growth invariant under `CondRecord.mutex`.
 `jsthread lock pending async jobs are cursor FIFO` covers FIFO pop,
 consumed-slot retry, and front-stash retry without front shifts, while
+`jsthread lock pending queues reserve capacity chunks` and
+`jsthread lock retry-front queue reserves capacity chunks` guard fixed-chunk
+growth for both per-lock async grant queues.
 `jsthread traces queued async hold task roots` covers the GC roots behind both
 queued realm tasks and retry-front lock grants. The public condition corpus
 cases exercise the stack-buffered wake-list notify path for async-only and sync

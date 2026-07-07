@@ -171,10 +171,12 @@ context APIs.
   head cursors for both per-lock pending grants and realm task delivery, and
   retry-front grants use an amortized O(1) front stash when no consumed head
   slot is available, so failed grant delivery does not fall back to shifting the
-  whole pending list. Realm task delivery copies larger bounded FIFO bursts
-  under the shared API lock before running grants outside it, so queue drains do
-  not front-shift remaining jobs and already-queued grant storms need fewer
-  shared-lock acquisitions. The async-hold task
+  whole pending list. The per-lock pending and retry-front queues also reserve
+  fixed-size capacity chunks before capacity-assumed appends, reducing
+  allocator-growth trips inside the lock-held grant queues. Realm task delivery
+  copies larger bounded FIFO bursts under the shared API lock before running
+  grants outside it, so queue drains do not front-shift remaining jobs and
+  already-queued grant storms need fewer shared-lock acquisitions. The async-hold task
   pump also snapshots the microtask enqueue
   generation around each grant, so unobserved grants that settle without queued
   reactions skip an otherwise-empty no-GIL microtask drain while preserving
@@ -185,6 +187,8 @@ context APIs.
   waiter queue through a FIFO head cursor instead of shifting every notified
   waiter. Timed-out or terminated sync condition waiters are marked canceled and
   skipped by that cursor instead of being removed from the middle of the queue.
+  The condition waiter queue reserves fixed-size capacity chunks before
+  capacity-assumed appends while holding `CondRecord.mutex`.
   Sync notifyAll handoff now waits on the condition ack signal instead of a
   fixed 1ms polling sleep, reducing ready-waiter latency without changing the
   timeout fallback. Async-only condition notifications now move no-fn async
