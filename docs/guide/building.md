@@ -12,15 +12,26 @@ zig-js requires **Zig 0.17.0-dev**. The 0.16 release will **not** build it.
 > [!IMPORTANT]
 > If your system `zig` is 0.16, use a pinned 0.17-dev toolchain (e.g. installed under `~/.local/share/zig-0.17-dev/zig`). The `bun run docs:data` script below auto-detects that path.
 
+> [!IMPORTANT]
+> zig-js resolves two sibling Zig packages by **local path** — `../zig-regex` and `../zig-gc` (see `build.zig.zon`). Both must be checked out next to your `zig-js` directory or the build cannot resolve its dependencies; CI provisions them from the `zig-utils` org.
+
 ## Build the library
 
 ```bash
 zig build                 # builds libzig-js.a
-zig build test            # unit tests
-zig build conformance     # fast smoke suite (must stay green)
+zig build test            # unit tests (-Dtest-filter=<substr> narrows; -Dtsan=true for ThreadSanitizer)
+zig build conformance     # fast local smoke suite (33/33; not a CI gate)
+zig build bench           # bytecode VM vs tree-walk microbenchmarks
+zig build threads-test    # the multithreading (issue #1) suite — this is what CI gates
 ```
 
 ## Run the real test262 suite
+
+`zig build test262` scores the pinned `test262` git submodule by default, so initialize it first (a missing corpus is skipped cleanly, not an error):
+
+```bash
+git submodule update --init test262
+```
 
 ```bash
 # Runs the pinned tc39/test262 corpus with a crash-proof subprocess harness.

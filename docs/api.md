@@ -105,7 +105,7 @@ void        JSWorkerRelease(JSWorkerRef);
 ```
 :::
 
-Native callbacks use JSC's `HostCallback` calling convention, so functions you expose to JavaScript through this subset are registered as they are with JavaScriptCore. `ZJSGlobalContextCreateThreaded` and `JSWorker*` are zig-js extensions rather than public JSC symbols.
+Native callbacks use the standard `JSObjectCallAsFunctionCallback` calling convention, so functions you expose to JavaScript through this subset are registered exactly as they are with JavaScriptCore. `ZJSGlobalContextCreateThreaded` and `JSWorker*` are zig-js extensions rather than public JSC symbols.
 
 `JSObjectMakeDeferredPromise` returns a pending native Promise and stores callable resolve/reject functions in the provided out pointers when they are non-null. Those functions settle the promise through the normal Promise job queue; embedder-observable callbacks run at the next microtask checkpoint, such as the one performed after `JSEvaluateScript`.
 
@@ -113,3 +113,7 @@ Native callbacks use JSC's `HostCallback` calling convention, so functions you e
 
 > [!WARNING]
 > The implemented subset covers the common evaluation, value, object, string, and protected-handle surface plus the zig-js worker extension. Full JavaScriptCore class definitions, Objective-C `JSValue`/`JSContext`, inspector/debugger APIs, typed-array C constructors, and other WebKit internals are out of scope. The language/runtime scope is whatever the configured conformance runner currently proves — see [Conformance](/conformance).
+
+Some functions accept their full JavaScriptCore signature for ABI compatibility but do not yet honor every argument: `JSGlobalContextRetain` does not reference-count (contexts are single-owner for now), `JSEvaluateScript` ignores `thisObject` / `sourceURL` / `startingLineNumber`, `JSObjectSetProperty` ignores the `attributes` argument, and `JSObjectMakeFunctionWithCallback` ignores the function `name`. Call sites compile and link unchanged; only those specific arguments are inert.
+
+**Threading.** Handles are affine to the thread that owns their context: a context and its `JSValueRef` / `JSObjectRef` handles must be created and used on one thread (one context per thread — the C surface asserts this). For cross-context / cross-thread work use the `JSWorker*` extension (isolated worker contexts that exchange messages); see the [threading docs](/threads/) for what may cross a thread boundary.
