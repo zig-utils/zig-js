@@ -346,6 +346,60 @@ const ModuleMidGcCleanupHost = struct {
     }
 };
 
+const ModuleSyncWaitCleanupFuzzHost = struct {
+    const Entry = struct { path: []const u8, source: []const u8 };
+    var host_ctx: u8 = 0;
+    const entries = [_]Entry{
+        .{
+            .path = "work.js",
+            .source =
+            \\export function runSyncWorker(sab, iters) {
+            \\  const v = new Int32Array(sab);
+            \\  let local = 0;
+            \\  for (let i = 0; i < iters; i++) {
+            \\    local += i & 1;
+            \\    Atomics.add(v, 2, 1);
+            \\    if ((i & 127) === 0)
+            \\      Atomics.add(v, 3, 1);
+            \\  }
+            \\  return local;
+            \\}
+            ,
+        },
+        .{
+            .path = "entry.js",
+            .source =
+            \\import { runSyncWorker } from "./work.js";
+            \\globalThis.onmessage = (e) => {
+            \\  const v = new Int32Array(e.data.sab);
+            \\  Atomics.add(v, 1, 1);
+            \\  Atomics.notify(v, 1);
+            \\  while (Atomics.load(v, 0) === 0)
+            \\    Atomics.wait(v, 0, 0, 100);
+            \\  const local = runSyncWorker(e.data.sab, e.data.iters);
+            \\  postMessage({ done: true, module: true, local, count: Atomics.load(v, 2), ready: Atomics.load(v, 1) });
+            \\  close();
+            \\};
+            ,
+        },
+    };
+
+    fn load(_: *anyopaque, _: []const u8, specifier: []const u8, out_path: *[]const u8) ?[]const u8 {
+        const name = if (std.mem.startsWith(u8, specifier, "./")) specifier[2..] else specifier;
+        for (entries) |e| {
+            if (std.mem.eql(u8, e.path, name)) {
+                out_path.* = e.path;
+                return e.source;
+            }
+        }
+        return null;
+    }
+
+    fn host() js.Context.ModuleHost {
+        return .{ .ctx = &host_ctx, .load = load };
+    }
+};
+
 const ModuleGraphFuzzHost = struct {
     const Entry = struct { path: []const u8, source: []const u8 };
     var host_ctx: u8 = 0;
@@ -12684,6 +12738,7 @@ fn runMidScriptSyncWaitCleanupGc(gpa: std.mem.Allocator, seed: u64) !bool {
     const wait_async_pending_marker = 360_000 + seed_marker;
     const n_wait_async = 4 + r.uintLessThan(usize, 5);
     const worker_iters = 520 + r.uintLessThan(usize, 360);
+    const module_worker_iters = 520 + r.uintLessThan(usize, 360);
 
     var expected_cleanup_count: usize = 0;
     var expected_cleanup_sum: usize = 0;
@@ -12727,6 +12782,19 @@ fn runMidScriptSyncWaitCleanupGc(gpa: std.mem.Allocator, seed: u64) !bool {
         std.debug.print("seed {d}: cannot create midgc sync-wait Worker message: {s}\n", .{ seed, @errorName(err) });
         return false;
     };
+    const module_worker_msg_src = try std.fmt.allocPrint(
+        gpa,
+        \\globalThis.__midgcSyncModuleWorkerMsg = {{ sab: new SharedArrayBuffer(16), iters: {d} }};
+        \\globalThis.__midgcSyncModuleWorkerMsg
+        \\
+    ,
+        .{module_worker_iters},
+    );
+    defer gpa.free(module_worker_msg_src);
+    const module_worker_msg = ctx.evaluate(module_worker_msg_src) catch |err| {
+        std.debug.print("seed {d}: cannot create midgc sync-wait module Worker message: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
 
     const worker_src =
         \\globalThis.onmessage = (e) => {
@@ -12760,6 +12828,20 @@ fn runMidScriptSyncWaitCleanupGc(gpa: std.mem.Allocator, seed: u64) !bool {
         std.debug.print("seed {d}: midgc sync-wait Worker post failed: {s}\n", .{ seed, @errorName(err) });
         return false;
     };
+    const module_worker = Worker.spawnModule("entry.js", ModuleSyncWaitCleanupFuzzHost.entries[1].source, ModuleSyncWaitCleanupFuzzHost.host()) catch {
+        std.debug.print("seed {d}: midgc sync-wait module Worker spawn failed\n", .{seed});
+        return false;
+    };
+    var cleanup_module_worker = true;
+    defer if (cleanup_module_worker) {
+        module_worker.terminate();
+        module_worker.join();
+        module_worker.destroy();
+    };
+    module_worker.postMessage(&machine, module_worker_msg) catch |err| {
+        std.debug.print("seed {d}: midgc sync-wait module Worker post failed: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
 
     const src = try std.fmt.allocPrint(
         gpa,
@@ -12780,6 +12862,7 @@ fn runMidScriptSyncWaitCleanupGc(gpa: std.mem.Allocator, seed: u64) !bool {
         \\  const heldLock = new Lock();
         \\  const root = {{ seed: {d}, tag: 'midgc-sync-wait-cleanup-root' }};
         \\  const workerView = new Int32Array(globalThis.__midgcSyncWorkerMsg.sab);
+        \\  const moduleWorkerView = new Int32Array(globalThis.__midgcSyncModuleWorkerMsg.sab);
         \\  const waitAsyncTimeoutCount = {d};
         \\  const waitAsyncBase = {d};
         \\  const waitAsyncPendingMarker = {d};
@@ -12831,6 +12914,8 @@ fn runMidScriptSyncWaitCleanupGc(gpa: std.mem.Allocator, seed: u64) !bool {
         \\    Atomics.wait(gate, 'lockReady', 0, 1);
         \\  while (Atomics.load(workerView, 1) === 0)
         \\    Atomics.wait(workerView, 1, 0, 1);
+        \\  while (Atomics.load(moduleWorkerView, 1) === 0)
+        \\    Atomics.wait(moduleWorkerView, 1, 0, 1);
         \\  for (let i = 0; i < waitAsyncTimeoutCount; i++) {{
         \\    const marker = waitAsyncBase + i;
         \\    const waitRoot = {{ marker, nested: {{ seed: root.seed, label: 'midgc-sync-waitAsync-timeout-' + i }} }};
@@ -12888,8 +12973,12 @@ fn runMidScriptSyncWaitCleanupGc(gpa: std.mem.Allocator, seed: u64) !bool {
         \\  if (typeof gc === 'function') gc();
         \\  if (Atomics.load(workerView, 1) !== 1)
         \\    throw new Error('midgc sync-wait Worker was not parked through sweep');
+        \\  if (Atomics.load(moduleWorkerView, 1) !== 1)
+        \\    throw new Error('midgc sync-wait module Worker was not parked through sweep');
         \\  Atomics.store(workerView, 0, 1);
         \\  Atomics.notify(workerView, 0);
+        \\  Atomics.store(moduleWorkerView, 0, 1);
+        \\  Atomics.notify(moduleWorkerView, 0);
         \\  Atomics.store(waitBox, 'live', 1);
         \\  if (Atomics.notify(waitBox, 'live') !== 1)
         \\    throw new Error('midgc sync waitAsync live waiter was not queued');
@@ -12922,7 +13011,7 @@ fn runMidScriptSyncWaitCleanupGc(gpa: std.mem.Allocator, seed: u64) !bool {
         \\  if (!lockRoot || lockRoot.marker !== {d} || lockRoot.nested.seed !== {d} ||
         \\      Atomics.load(gate, 'lockDone') !== 1)
         \\    throw new Error('bad midgc contended-lock sync-wait root');
-        \\  return keep.length + Atomics.load(workerView, 1);
+        \\  return keep.length + Atomics.load(workerView, 1) + Atomics.load(moduleWorkerView, 1);
         \\}})();
         \\
     ,
@@ -12957,7 +13046,7 @@ fn runMidScriptSyncWaitCleanupGc(gpa: std.mem.Allocator, seed: u64) !bool {
 
     const before_attempts = ctx.gc_par_attempts.load(.monotonic);
     const before_collections = ctx.gc_par_collections.load(.monotonic);
-    const expected: f64 = @floatFromInt(rounds * per_round + 1);
+    const expected: f64 = @floatFromInt(rounds * per_round + 2);
     const result = ctx.evaluate(src) catch |err| {
         const msg_txt = if (ctx.exception) |ex| blk: {
             var render = ctx.interpreter();
@@ -13014,6 +13103,47 @@ fn runMidScriptSyncWaitCleanupGc(gpa: std.mem.Allocator, seed: u64) !bool {
     worker.join();
     worker.destroy();
     cleanup_worker = false;
+
+    const module_worker_reply = (module_worker.receive(&machine, 10_000) catch |err| {
+        std.debug.print("seed {d}: midgc sync-wait module Worker receive failed: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    }) orelse {
+        std.debug.print("seed {d}: midgc sync-wait module Worker receive timed out\n", .{seed});
+        return false;
+    };
+    const module_worker_done = machine.getProperty(module_worker_reply, "done") catch |err| {
+        std.debug.print("seed {d}: cannot read midgc sync-wait module Worker done: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    const module_worker_module = machine.getProperty(module_worker_reply, "module") catch |err| {
+        std.debug.print("seed {d}: cannot read midgc sync-wait module Worker module flag: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    const module_worker_local = machine.getProperty(module_worker_reply, "local") catch |err| {
+        std.debug.print("seed {d}: cannot read midgc sync-wait module Worker local: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    const module_worker_count = machine.getProperty(module_worker_reply, "count") catch |err| {
+        std.debug.print("seed {d}: cannot read midgc sync-wait module Worker count: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    const module_worker_ready = machine.getProperty(module_worker_reply, "ready") catch |err| {
+        std.debug.print("seed {d}: cannot read midgc sync-wait module Worker ready: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    const expected_module_worker_local: f64 = @floatFromInt(module_worker_iters / 2);
+    if (!module_worker_done.isBoolean() or !module_worker_done.asBool() or
+        !module_worker_module.isBoolean() or !module_worker_module.asBool() or
+        !module_worker_local.isNumber() or module_worker_local.asNum() != expected_module_worker_local or
+        !module_worker_count.isNumber() or module_worker_count.asNum() != @as(f64, @floatFromInt(module_worker_iters)) or
+        !module_worker_ready.isNumber() or module_worker_ready.asNum() != 1)
+    {
+        std.debug.print("seed {d}: bad midgc sync-wait module Worker reply\n", .{seed});
+        return false;
+    }
+    module_worker.join();
+    module_worker.destroy();
+    cleanup_module_worker = false;
 
     ctx.collectGarbage();
     const cleanup_src = try std.fmt.allocPrint(

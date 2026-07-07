@@ -431,10 +431,10 @@ as embedders exercise more threaded host patterns.
   sweep, then verifies each resumed peer's stack root plus exact
   `FinalizationRegistry` cleanup count/sum delivery; it also lets property
   `waitAsync` timeout tickets expire while those sync peers are parked, keeps a
-  live property `waitAsync` ticket rooted through the finishing sweep, notifies
-  it, keeps an isolated Worker parked on a retained `SharedArrayBuffer` through
-  the same sweep, and verifies exact captured-root scoring plus the Worker reply
-  after the sweep.
+  live property `waitAsync` ticket rooted through the finishing sweep, keeps
+  isolated script and module Workers parked on retained `SharedArrayBuffer`s
+  through the same sweep, then notifies the live waiter and both Workers and
+  verifies exact captured-root scoring plus both Worker replies after the sweep.
   The sync-wait burst subprogram parks multiple waiters on the same property,
   the same `Condition`, and the same contended `Lock` through a finishing sweep,
   verifies cleanup is not delivered while those stack roots are live, then

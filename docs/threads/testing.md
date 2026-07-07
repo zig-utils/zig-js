@@ -174,9 +174,9 @@ parks peers in property `Atomics.wait`, `Condition.wait`, and contended
 roots after resume plus exact `FinalizationRegistry` cleanup count/sum delivery,
 settles expired property `waitAsync` tickets while those peers are still
 parked, keeps a live property `waitAsync` ticket rooted through the finishing
-sweep, keeps an isolated Worker parked on a retained `SharedArrayBuffer` through
-the same sweep, and then notifies both with exact captured-root and Worker-reply
-oracles,
+sweep, keeps isolated script and module Workers parked on retained
+`SharedArrayBuffer`s through the same sweep, and then notifies the live waiter
+and both Workers with exact captured-root and Worker-reply oracles,
 adds a sync-timeout subprogram that parks property `Atomics.wait` peers and
 static `Atomics.Condition.waitFor` peers through a finishing sweep, rejects
 early cleanup while their stack roots are still live, then requires timeout
