@@ -148,8 +148,9 @@ context APIs.
   property/element locks, sync waiters, property `waitAsync` timeout
   settlement, async condition regrant delivery, unobserved async-hold grant
   delivery, promise-observed callback settlement, no-fn release-function
-  delivery, collection helpers, and GC allocation. Its `joins` columns split
-  `Thread.join` parks from aggregate park pressure, its `lock`/`cond`/`prop`
+  delivery, Worker/agent queues, shared-buffer lifetime churn, collection
+  helpers, and GC allocation. Its `joins` columns split `Thread.join` parks
+  from aggregate park pressure, its `lock`/`cond`/`prop`
   columns split the remaining sync park pressure by contended `Lock.hold`,
   `Condition.wait`, and property `Atomics.wait`, its
   `waitus`/`jus`/`lus`/`cus`/`pus` columns split total native wait
@@ -221,7 +222,10 @@ context APIs.
   head-cursor shape and reserves fixed-size queue capacity chunks before
   capacity-assumed appends, so report-heavy Atomics/test262 agent cases do not
   shift the whole report queue on each `getReport()` and grow that queue less
-  often under the group mutex. Empty internal
+  often under the group mutex. SharedArrayBuffer retain lists reserve
+  fixed-size capacity chunks before capacity-assumed appends too, reducing
+  allocator-growth trips while a realm records SAB backing storage under the
+  retain-list spin lock. Empty internal
   `Worker.receive(..., 0)` polls return under the channel lock without entering
   a timed condition wait or touching drained-queue compaction. Active interpreter roots, protected
   C-API handles, and GIL park records are unordered root sets, so removal now

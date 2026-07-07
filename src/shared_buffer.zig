@@ -25,6 +25,7 @@ const std = @import("std");
 /// thread-safe, and page-aligns slabs (so every typed-array element offset is
 /// naturally aligned for its size).
 const global_alloc = std.heap.page_allocator;
+const retain_list_reserve_granularity: usize = 64;
 
 pub const SharedBufferStorage = struct {
     /// The reserved slab: `capacity` bytes, zero-initialized, fixed address.
@@ -122,15 +123,23 @@ pub const RetainList = struct {
         self.lock.unlock();
     }
 
+    fn ensureCapacityLocked(self: *RetainList, additional: usize) error{OutOfMemory}!void {
+        const spare = self.items.capacity - self.items.items.len;
+        if (spare >= additional) return;
+        const extra = @max(additional, retain_list_reserve_granularity);
+        try self.items.ensureTotalCapacity(self.gpa, self.items.items.len + extra);
+    }
+
     /// Record a reference owned by this realm. On OOM the reference is
     /// released immediately and the error propagated.
     pub fn track(self: *RetainList, s: *SharedBufferStorage) error{OutOfMemory}!void {
         self.lockList();
         defer self.unlockList();
-        self.items.append(self.gpa, s) catch |err| {
+        self.ensureCapacityLocked(1) catch |err| {
             s.release();
             return err;
         };
+        self.items.appendAssumeCapacity(s);
     }
 
     /// Release exactly one realm-owned reference. Multiple wrappers may point
@@ -200,6 +209,21 @@ test "RetainList releases exactly one tracked reference" {
     try std.testing.expect(list.releaseTracked(s));
     try std.testing.expectEqual(@as(usize, 0), list.items.items.len);
     try std.testing.expect(!list.releaseTracked(s));
+}
+
+test "RetainList reserves fixed-size capacity chunks" {
+    const a = std.testing.allocator;
+    const s = try SharedBufferStorage.create(4, null);
+    var list = RetainList{ .gpa = a };
+    defer list.deinit();
+
+    try list.track(s);
+    try std.testing.expectEqual(@as(usize, 1), list.items.items.len);
+    try std.testing.expect(list.items.capacity >= retain_list_reserve_granularity);
+
+    const capacity_after_first = list.items.capacity;
+    try list.track(s.retain());
+    try std.testing.expectEqual(capacity_after_first, list.items.capacity);
 }
 
 test "cross-thread atomic increments land; refcount survives churn" {

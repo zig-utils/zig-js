@@ -286,6 +286,12 @@ Known performance/maturity work:
   mutex. Empty internal `Worker.receive(..., 0)` polls now return from the
   channel while holding the queue lock instead of entering a timed condition
   wait, and skip drained-queue compaction on the empty fast path.
+- SharedArrayBuffer retain lists reserve fixed-size capacity chunks before
+  capacity-assumed appends, so structured-clone and shared-buffer lifetime churn
+  grows each realm's retain table less often while holding the retain-list spin
+  lock. This keeps the JS-visible SAB storage contract unchanged: backing slabs
+  stay refcounted, fixed-address, and released exactly once per retained realm
+  wrapper.
 - Active interpreter roots, protected C-API handles, and GIL park records are
   unordered root sets, so their removals now use swap removal instead of
   order-preserving list shifts on evaluate, handle-unprotect, and thread
@@ -308,8 +314,8 @@ Known performance/maturity work:
 
 Remaining: use the attribution columns to drive targeted reductions in
 contended user-level locks, Worker-heavy lifecycle and message traffic,
-join/lifecycle waiting, object/element storage contention, context lifecycle
-pooling, and nursery/generational work.
+shared-buffer lifetime churn, join/lifecycle waiting, object/element storage
+contention, context lifecycle pooling, and nursery/generational work.
 
 ## 4. Embedder API
 

@@ -557,6 +557,10 @@ and cell backing in parallel mode, so the bootstrap fast path that delays those
 locks until the context is observable cannot silently weaken no-GIL semantics.
 The unit suite also covers live `SharedArrayBuffer` retain release during
 context teardown across arena, no-GIL threaded, and `.gil = true` contexts.
+`RetainList reserves fixed-size capacity chunks` guards the SAB retain-list
+growth invariant so structured-clone/lifecycle churn does not regress to one
+allocator-growth trip per tracked backing reference under the retain-list spin
+lock.
 Collection-helper removal witnesses live in the same unit suite:
 `WeakMap and WeakSet entry delete is unordered tail removal`,
 `gc pruneDeadWeakEntries removes dead weak keys with unordered tail removal`,
