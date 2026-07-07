@@ -537,6 +537,8 @@ this is the local evidence trail for future nursery/generational allocation
 work.
 Direct `GcCellBacking` unit tests cover lazy fresh-slot bumping, free-list
 recycling, fresh-chunk cursor advancement, ownership span/hint classification,
+sorted address-index lookup with chunk/bump-offset/address metadata kept in
+sync,
 stats accounting, cumulative fresh/reused/freed allocation counters,
 multi-chunk maintained-counter snapshots, bucket attribution, bulk-teardown
 behavior, and bucket-shaped delegated side frees during teardown.

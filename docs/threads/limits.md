@@ -80,7 +80,10 @@ context APIs.
   are bucket-local with an address-span reject before the recent-chunk hint and
   sorted per-bucket chunk address index, so frees do not scan unrelated
   size-class chunks or linearly walk a large bucket during collection or
-  teardown. Context teardown also
+  teardown. New slab creation reserves per-bucket metadata before allocating the
+  backing chunk and uses a binary lower-bound insertion into the sorted address
+  index, cutting allocator churn and linear metadata scans from GC context
+  lifecycle growth. Context teardown also
   skips rebuilding slab freelists for owned cells that will be released by the
   following whole-chunk free, while bucket-shaped delegated side allocations
   still classify once and free through the wrapped allocator. Non-owned
@@ -119,7 +122,9 @@ context APIs.
   cells, free cells, and surviving live cells. The same profile now includes a
   repeated allocate-plus-collect churn table that reports fresh/reused/freed
   cells, final chunk/live counts, and reuse percentage for GC modes, giving the
-  nursery/generational roadmap a direct freelist-reuse baseline. The
+  nursery/generational roadmap a direct freelist-reuse baseline. Chunk metadata
+  reserve-before-slab allocation keeps this profile focused on cell-slab
+  pressure rather than avoidable metadata allocation churn. The
   object-sized 1024/2048-byte buckets now use 384 KiB chunks: the local profile
   keeps the intrinsic empty context at three object-cell chunks with 1152 slots,
   and the object-heavy profile at roughly 55 object-cell chunks instead of the

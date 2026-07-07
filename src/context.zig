@@ -182,34 +182,36 @@ pub const GcCellBacking = struct {
         return if (bucket_sizes[idx] >= 1024) large_chunk_bytes else chunk_bytes;
     }
 
+    fn chunkAddrInsertIndexLocked(self: *GcCellBacking, idx: usize, start: usize) usize {
+        const entries = self.bucket_addr_index[idx].items;
+        var lo: usize = 0;
+        var hi: usize = entries.len;
+        while (lo < hi) {
+            const mid = lo + (hi - lo) / 2;
+            if (entries[mid].start < start) {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        return lo;
+    }
+
     fn addChunk(self: *GcCellBacking, idx: usize) bool {
         const slot_size = bucket_sizes[idx];
         const slots = @max(@as(usize, 1), bucketChunkBytes(idx) / slot_size);
         const chunk_len = slots * slot_size;
+        self.bucket_chunks[idx].ensureUnusedCapacity(self.inner, 1) catch return false;
+        self.bucket_next_offsets[idx].ensureUnusedCapacity(self.inner, 1) catch return false;
+        self.bucket_addr_index[idx].ensureUnusedCapacity(self.inner, 1) catch return false;
         const chunk = self.inner.alignedAlloc(u8, .@"16", chunk_len) catch return false;
         const chunk_idx = self.bucket_chunks[idx].items.len;
-        self.bucket_chunks[idx].append(self.inner, chunk) catch {
-            self.inner.free(chunk);
-            return false;
-        };
-        self.bucket_next_offsets[idx].append(self.inner, 0) catch {
-            _ = self.bucket_chunks[idx].pop();
-            self.inner.free(chunk);
-            return false;
-        };
+        self.bucket_chunks[idx].appendAssumeCapacity(chunk);
+        self.bucket_next_offsets[idx].appendAssumeCapacity(0);
         const start = @intFromPtr(chunk.ptr);
         const end = start + chunk.len;
         const addr_entry = ChunkAddr{ .start = start, .end = end, .chunk_idx = chunk_idx };
-        var insert_at: usize = 0;
-        while (insert_at < self.bucket_addr_index[idx].items.len and
-            self.bucket_addr_index[idx].items[insert_at].start < start) : (insert_at += 1)
-        {}
-        self.bucket_addr_index[idx].insert(self.inner, insert_at, addr_entry) catch {
-            _ = self.bucket_next_offsets[idx].pop();
-            _ = self.bucket_chunks[idx].pop();
-            self.inner.free(chunk);
-            return false;
-        };
+        self.bucket_addr_index[idx].insertAssumeCapacity(self.chunkAddrInsertIndexLocked(idx, start), addr_entry);
         self.bucket_addr_min[idx] = @min(self.bucket_addr_min[idx], start);
         self.bucket_addr_max[idx] = @max(self.bucket_addr_max[idx], end);
         self.bucket_chunk_counts[idx] += 1;
@@ -599,6 +601,11 @@ test "GC cell backing ownership fallback uses sorted chunk address index" {
     defer for (cells[0..allocated]) |cell| a.free(cell);
 
     try std.testing.expectEqual(@as(usize, 2), backing.bucket_addr_index[idx].items.len);
+    try std.testing.expectEqual(backing.bucket_chunks[idx].items.len, backing.bucket_next_offsets[idx].items.len);
+    try std.testing.expectEqual(backing.bucket_chunks[idx].items.len, backing.bucket_addr_index[idx].items.len);
+    try std.testing.expect(backing.bucket_chunks[idx].capacity >= backing.bucket_chunks[idx].items.len);
+    try std.testing.expect(backing.bucket_next_offsets[idx].capacity >= backing.bucket_next_offsets[idx].items.len);
+    try std.testing.expect(backing.bucket_addr_index[idx].capacity >= backing.bucket_addr_index[idx].items.len);
     var prev_end: usize = 0;
     for (backing.bucket_addr_index[idx].items) |entry| {
         try std.testing.expect(entry.start >= prev_end);

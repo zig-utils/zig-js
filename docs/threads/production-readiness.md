@@ -88,6 +88,10 @@ Known performance/maturity work:
   address span and do not scan unrelated size-class chunks when freeing a cell.
   A per-bucket recent-chunk hint keeps repeated frees/remaps from the same slab
   on the fast path instead of restarting the bucket chunk walk each time.
+  New chunk creation reserves the chunk list, bump-offset list, and sorted
+  address-index metadata before allocating the slab itself, then inserts the
+  address-index entry with a binary lower-bound search, so GC context lifecycle
+  work pays fewer allocator calls and avoids a linear scan as buckets grow.
   During `Context.destroy`, the backing enters bulk-teardown mode so `zig-gc`'s
   owned-cell frees do not rebuild freelists immediately before the backing
   releases whole chunks. Bucket-shaped delegated side allocations still classify
@@ -151,10 +155,11 @@ Known performance/maturity work:
   fresh, reused, and freed counters so profiling a collection no longer walks
   every freed cell or slab chunk. Finalizer attribution is likewise split
   between empty-context destroy and destroy after the object workload. Fresh-slot
-  allocation skips slab chunks whose bump range is already exhausted, and the
-  object-sized 1024/2048-byte buckets use larger chunks so the profile exposes
-  reduced object-cell chunk churn separately from remaining create/destroy
-  wall-clock costs. A repeated allocate-plus-collect churn table now reports
+  allocation skips slab chunks whose bump range is already exhausted, chunk
+  metadata growth is reserved before each slab allocation, and the object-sized
+  1024/2048-byte buckets use larger chunks so the profile exposes reduced
+  object-cell chunk churn separately from remaining create/destroy wall-clock
+  costs. A repeated allocate-plus-collect churn table now reports
   fresh versus reused cells, freed cells, final chunk/live counts, and reuse
   percentage, giving nursery/generational work a direct freelist-reuse baseline
   instead of only a one-shot object workload. The no-GIL bootstrap row should
