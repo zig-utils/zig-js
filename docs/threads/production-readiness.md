@@ -274,6 +274,11 @@ Known performance/maturity work:
   so awakened waiters do not each rescan and shift the process-wide waiter list.
   Typed-array `waitAsync` harvest and abandon paths stable-compact matching
   tickets in one pass while preserving FIFO order for other waiters.
+- Context-owned typed-array `waitAsync` promise roots now take `realm_lock` for
+  list-header mutation, settlement removal, clearing, and interpreter-root
+  tracing, matching the lock already used by the parallel collector's
+  `Context` root scan. The list also reserves fixed-size capacity chunks before
+  capacity-assumed appends, so waitAsync bursts grow root storage less often.
 - Worker inbox/outbox channels now use FIFO head cursors for structured-clone
   message queues, so Worker-heavy lifecycle and receive loops do not pay one
   front shift per delivered message. Channel writers also reserve fixed-size

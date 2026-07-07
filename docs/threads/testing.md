@@ -458,6 +458,8 @@ sync waiter table in one pass instead of shifting the remaining waiters;
 typed-array `Atomics.notify` unlinks sync stack tickets before signal, and
 typed-array `waitAsync` harvest/abandon paths stable-compact matching tickets
 in one pass while preserving FIFO order for other waiters;
+`Atomics.waitAsync reserves async waiter capacity chunks` guards context-owned
+typed-array waitAsync root-list reserve growth and post-settlement clearing;
 Worker inbox/outbox channels use the same shape for structured-clone message
 delivery, and empty internal `Worker.receive(..., 0)` polls skip timed condition
 wait setup and drained-queue compaction. Active interpreter roots, protected

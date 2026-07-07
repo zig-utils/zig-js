@@ -502,6 +502,8 @@ pub fn traceInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
     }
     if (machine.current_microtask) |mt| traceMicrotask(mt, v);
     if (machine.async_waiters) |waiters| {
+        machine.lockRealm();
+        defer machine.unlockRealm();
         for (waiters.items) |aw| markValue(v, aw.promise);
     }
     // NOTE: the shared realm `finalization_cleanup_jobs` is intentionally NOT

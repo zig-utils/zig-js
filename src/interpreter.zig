@@ -39,6 +39,7 @@ extern "c" fn snprintf(noalias s: [*c]u8, maxlen: usize, noalias format: [*:0]co
 /// One outstanding `Atomics.waitAsync` of a realm: the waiter-table ticket id
 /// and the promise to settle with "ok"/"timed-out" (see `settleAsyncWaiters`).
 pub const AsyncWaiterEntry = struct { id: u64, promise: Value };
+pub const async_waiter_reserve_granularity = 16;
 
 /// Robustness limits so adversarial input throws a catchable error instead of
 /// crashing the process (stack overflow / runaway loop).
@@ -6502,6 +6503,39 @@ pub const Interpreter = struct {
         if (self.realm_lock) |m| m.unlock();
     }
 
+    fn asyncWaiterCount(self: *Interpreter, listp: *std.ArrayListUnmanaged(AsyncWaiterEntry)) usize {
+        self.lockRealm();
+        defer self.unlockRealm();
+        return listp.items.len;
+    }
+
+    fn appendAsyncWaiter(self: *Interpreter, entry: AsyncWaiterEntry) !void {
+        const listp = self.async_waiters orelse return error.OutOfMemory;
+        self.lockRealm();
+        defer self.unlockRealm();
+        const spare = listp.capacity - listp.items.len;
+        if (spare == 0) {
+            try listp.ensureTotalCapacity(self.arena, listp.items.len + async_waiter_reserve_granularity);
+        }
+        listp.appendAssumeCapacity(entry);
+    }
+
+    fn takeAsyncWaiter(self: *Interpreter, listp: *std.ArrayListUnmanaged(AsyncWaiterEntry), id: u64) ?AsyncWaiterEntry {
+        self.lockRealm();
+        defer self.unlockRealm();
+        var i: usize = 0;
+        while (i < listp.items.len) : (i += 1) {
+            if (listp.items[i].id == id) return listp.swapRemove(i);
+        }
+        return null;
+    }
+
+    fn clearAsyncWaiters(self: *Interpreter, listp: *std.ArrayListUnmanaged(AsyncWaiterEntry)) void {
+        self.lockRealm();
+        defer self.unlockRealm();
+        listp.clearRetainingCapacity();
+    }
+
     fn serviceRequestedGcCheckpoint(self: *Interpreter) void {
         const requested = self.gc_requested orelse return;
         if (!requested.load(.monotonic)) return;
@@ -6639,31 +6673,27 @@ pub const Interpreter = struct {
             }
         }
         const listp = self.async_waiters orelse return;
-        if (listp.items.len == 0) return;
+        if (self.asyncWaiterCount(listp) == 0) return;
         const owner: *const anyopaque = @ptrCast(listp);
         var buf: [16]agent.Settled = undefined;
-        while (listp.items.len > 0) {
+        while (self.asyncWaiterCount(listp) > 0) {
             // harvestAsync blocks; under a GIL the notifier needs the VM lock.
             if (park_with_gil) self.gil.?.release();
             const n = agent.harvestAsync(owner, &buf);
             if (park_with_gil) self.gil.?.acquire();
             if (n == 0) break;
             for (buf[0..n]) |s| {
-                var i: usize = 0;
-                while (i < listp.items.len) : (i += 1) {
-                    if (listp.items[i].id != s.id) continue;
-                    const e = listp.swapRemove(i);
+                if (self.takeAsyncWaiter(listp, s.id)) |e| {
                     if (promise.promiseOf(e.promise)) |pp| {
                         const outcome: Value = Value.str(if (s.outcome == .ok) "ok" else "timed-out");
                         promise.resolve(self, pp, outcome) catch {};
                     }
-                    break;
                 }
             }
             self.drainMicrotasks() catch {};
         }
         agent.abandonAsync(owner);
-        listp.clearRetainingCapacity();
+        self.clearAsyncWaiters(listp);
     }
 
     fn evalAwait(self: *Interpreter, arg_node: *Node) EvalError!Value {
@@ -6856,7 +6886,7 @@ pub const Interpreter = struct {
                 continue;
             }
             if (self.async_waiters) |waiters| {
-                if (waiters.items.len > 0) {
+                if (self.asyncWaiterCount(waiters) > 0) {
                     self.settleAsyncWaiters();
                     continue;
                 }
@@ -15308,7 +15338,7 @@ fn setTimeoutFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostErr
     const ms = if (args.len > 1) try self.toNumberV(args[1]) else 0;
     if (!std.math.isNan(ms) and ms > 0) agent.sleepMs(ms);
     if (self.async_waiters) |waiters| {
-        if (waiters.items.len > 0) self.settleAsyncWaiters();
+        if (self.asyncWaiterCount(waiters) > 0) self.settleAsyncWaiters();
     }
     const tick = try promise.newPromise(self);
     const pp: *promise.Promise = @ptrCast(@alignCast(tick.promise.?));
@@ -26773,7 +26803,7 @@ fn atomicsWaitAsyncFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
         },
         .enqueued => |id| {
             const cap = try newPromiseCapability(self, self.env.get("Promise") orelse Value.undef());
-            self.async_waiters.?.append(self.arena, .{ .id = id, .promise = cap.promise }) catch {
+            self.appendAsyncWaiter(.{ .id = id, .promise = cap.promise }) catch {
                 agent.abandonAsync(@ptrCast(self.async_waiters.?));
                 return error.OutOfMemory;
             };

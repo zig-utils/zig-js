@@ -8193,6 +8193,44 @@ test "Atomics.waitAsync: not-equal sync, timeout, and cross-agent notify settle"
     );
 }
 
+test "Atomics.waitAsync reserves async waiter capacity chunks" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_threads = true, .enable_gc = true });
+    defer ctx.destroy();
+
+    const runBatch = struct {
+        fn run(c: *Context, count: usize) !void {
+            const src = try std.fmt.allocPrint(std.testing.allocator,
+                \\{{
+                \\const sab = new SharedArrayBuffer(4);
+                \\const view = new Int32Array(sab);
+                \\let settled = 0;
+                \\for (let i = 0; i < {d}; i++) {{
+                \\  const r = Atomics.waitAsync(view, 0, 0, 1);
+                \\  if (r.async !== true) throw new Error("waitAsync was not async");
+                \\  r.value.then(v => {{ if (v !== "timed-out") throw new Error(v); settled++; }});
+                \\}}
+                \\globalThis.__waitAsyncSettled = () => settled;
+                \\}}
+            , .{count});
+            defer std.testing.allocator.free(src);
+            _ = try c.evaluate(src);
+            const settled = try c.evaluate("__waitAsyncSettled()");
+            try std.testing.expectEqual(@as(f64, @floatFromInt(count)), settled.asNum());
+            try std.testing.expectEqual(@as(usize, 0), c.async_waiters.items.len);
+        }
+    }.run;
+
+    try runBatch(ctx, 1);
+    try std.testing.expect(ctx.async_waiters.capacity >= interp.async_waiter_reserve_granularity);
+    const first_capacity = ctx.async_waiters.capacity;
+
+    try runBatch(ctx, first_capacity);
+    try std.testing.expectEqual(first_capacity, ctx.async_waiters.capacity);
+
+    try runBatch(ctx, first_capacity + 1);
+    try std.testing.expect(ctx.async_waiters.capacity > first_capacity);
+}
+
 test "structuredClone: identity, cycles, types, SAB sharing, transfer" {
     const ctx = try Context.create(std.testing.allocator);
     defer ctx.destroy();
