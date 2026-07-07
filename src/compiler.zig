@@ -140,6 +140,41 @@ fn nodeHasYield(node: *const ast.Node) bool {
 /// see the final value (`var` semantics). When this returns true `compileFor`
 /// bails to the tree-walker, which binds per iteration correctly. `var` loops, and
 /// lexical loops whose closures never reference a loop name, keep the fast VM path.
+/// Whether a loop `body` declares a block-scoped (`let`/`const`) binding that a
+/// closure in the body captures — which needs a fresh per-iteration binding the
+/// VM's single flat frame slot can't provide (all iterations' closures would
+/// share the last value). Descends into blocks/if/try/switch/labeled but NOT into
+/// nested functions or nested loops (which manage their own body bindings).
+fn loopBodyCapturesLexical(body: *const ast.Node) bool {
+    return bodyStmtCapturesLexical(body, body);
+}
+
+fn bodyStmtCapturesLexical(node: *const ast.Node, body: *const ast.Node) bool {
+    return switch (node.*) {
+        .var_decl => |d| d.kind != .@"var" and nameRefInClosure(body, d.name, false),
+        .destructure_decl => |d| d.kind != .@"var" and patternNameCaptured(d.pattern, body),
+        .block => |stmts| blk: {
+            for (stmts) |s| if (bodyStmtCapturesLexical(s, body)) break :blk true;
+            break :blk false;
+        },
+        .decl_group => |stmts| blk: {
+            for (stmts) |s| if (bodyStmtCapturesLexical(s, body)) break :blk true;
+            break :blk false;
+        },
+        .if_stmt => |s| bodyStmtCapturesLexical(s.consequent, body) or
+            (if (s.alternate) |a| bodyStmtCapturesLexical(a, body) else false),
+        .labeled_stmt => |s| bodyStmtCapturesLexical(s.body, body),
+        .try_stmt => |t| bodyStmtCapturesLexical(t.block, body) or
+            (if (t.catch_block) |cb| bodyStmtCapturesLexical(cb, body) else false) or
+            (if (t.finally_block) |fb| bodyStmtCapturesLexical(fb, body) else false),
+        .switch_stmt => |s| blk: {
+            for (s.cases) |c| for (c.body) |st| if (bodyStmtCapturesLexical(st, body)) break :blk true;
+            break :blk false;
+        },
+        else => false, // nested loops/functions manage their own bindings
+    };
+}
+
 fn forLoopCapturesLexical(init_node: *const ast.Node, body: *const ast.Node) bool {
     return switch (init_node.*) {
         .var_decl => |d| d.kind != .@"var" and nameRefInClosure(body, d.name, false),
@@ -1138,6 +1173,7 @@ pub const Compiler = struct {
     }
 
     fn compileWhile(self: *Compiler, cond: *Node, body: *Node) CompileError!void {
+        if (loopBodyCapturesLexical(body)) return error.Unsupported;
         const loop = try self.pushLoop();
         const cond_at = self.chunk.here();
         try self.compileExpr(cond);
@@ -1152,6 +1188,7 @@ pub const Compiler = struct {
     }
 
     fn compileDoWhile(self: *Compiler, body: *Node, cond: *Node) CompileError!void {
+        if (loopBodyCapturesLexical(body)) return error.Unsupported;
         const loop = try self.pushLoop();
         const top = self.chunk.here();
         try self.compileStmt(body);
@@ -1172,6 +1209,7 @@ pub const Compiler = struct {
         // which binds per iteration. Uncaptured lexical (and all `var`) loops keep
         // the fast VM path.
         if (init_node) |ini| if (forLoopCapturesLexical(ini, body)) return error.Unsupported;
+        if (loopBodyCapturesLexical(body)) return error.Unsupported;
         const disposable_scope = self.scope == null and init_node != null and stmtHasDisposableDecl(init_node.?);
         if (disposable_scope) {
             if (stmtCanEscapeAbruptly(body)) return error.Unsupported;
@@ -1754,29 +1792,17 @@ pub const Compiler = struct {
     }
 
     fn compileTailTaggedTemplate(self: *Compiler, tag: *Node, cooked: []?[]const u8, raw: [][]const u8, exprs: []*Node) CompileError!void {
-        if (tag.* == .member) return error.Unsupported;
-        try self.compileExpr(tag);
-        try self.compileTemplateStrings(cooked, raw);
-        for (exprs) |e| try self.compileExpr(e);
-        _ = try self.chunk.emit(.tail_call, @intCast(exprs.len + 1));
-    }
-
-    fn compileTemplateStrings(self: *Compiler, cooked: []?[]const u8, raw: [][]const u8) CompileError!void {
-        _ = try self.chunk.emit(.new_array, 0);
-        for (cooked) |part| {
-            const ci = try self.chunk.addConst(if (part) |s| Value.str(s) else Value.undef());
-            _ = try self.chunk.emit(.load_const, ci);
-            _ = try self.chunk.emit(.array_append, 0);
-        }
-        _ = try self.chunk.emit(.dup, 0);
-        _ = try self.chunk.emit(.new_array, 0);
-        for (raw) |part| {
-            const ci = try self.chunk.addConst(Value.str(part));
-            _ = try self.chunk.emit(.load_const, ci);
-            _ = try self.chunk.emit(.array_append, 0);
-        }
-        _ = try self.chunk.emit(.set_prop, try self.chunk.addName("raw"));
-        _ = try self.chunk.emit(.pop, 0);
+        _ = self;
+        _ = tag;
+        _ = cooked;
+        _ = raw;
+        _ = exprs;
+        // A tagged template's strings object must be cached per call site and
+        // frozen with a non-writable `raw` (GetTemplateObject). The VM would
+        // rebuild a fresh, mutable, uncached array on each evaluation, so keep
+        // tagged templates on the tree-walker. (Non-tail tagged templates already
+        // fall through to error.Unsupported in compileExpr.)
+        return error.Unsupported;
     }
 
     fn compileExpr(self: *Compiler, node: *Node) CompileError!void {
@@ -2545,7 +2571,10 @@ pub const Compiler = struct {
             const target = self.loops.items[i];
             if (label) |needle| {
                 if (target.label) |have| if (std.mem.eql(u8, have, needle)) return target;
-            } else {
+            } else if (target.is_loop) {
+                // An unlabeled `break` targets the innermost iteration statement or
+                // switch (both carry is_loop), NOT an enclosing labeled block/stmt
+                // wrapper (is_loop == false) — those are only labeled-break targets.
                 return target;
             }
         }
