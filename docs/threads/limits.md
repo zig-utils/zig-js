@@ -218,8 +218,10 @@ context APIs.
   shifts in receive-heavy Worker loops, and reserve fixed-size queue capacity
   chunks before capacity-assumed appends so message bursts grow the queues less
   often under the channel mutex. `$262.agent` report delivery uses the same FIFO
-  head-cursor shape, so report-heavy Atomics/test262 agent cases do not shift
-  the whole report queue on each `getReport()`. Empty internal
+  head-cursor shape and reserves fixed-size queue capacity chunks before
+  capacity-assumed appends, so report-heavy Atomics/test262 agent cases do not
+  shift the whole report queue on each `getReport()` and grow that queue less
+  often under the group mutex. Empty internal
   `Worker.receive(..., 0)` polls return under the channel lock without entering
   a timed condition wait or touching drained-queue compaction. Active interpreter roots, protected
   C-API handles, and GIL park records are unordered root sets, so removal now

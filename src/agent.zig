@@ -17,6 +17,7 @@ const shared_buffer = @import("shared_buffer.zig");
 const SharedBufferStorage = shared_buffer.SharedBufferStorage;
 
 const alloc = std.heap.page_allocator;
+const report_queue_reserve_granularity = 64;
 
 // ---- engine-global blocking Io ---------------------------------------------
 // This zig std's Mutex/Condition/sleep live behind `std.Io`; `Io.Threaded` is
@@ -185,7 +186,16 @@ pub fn report(msg: []const u8) void {
     const copy = alloc.dupe(u8, msg) catch return;
     group.mutex.lockUncancelable(io);
     group_used.store(true, .monotonic);
-    group.reports.append(alloc, copy) catch alloc.free(copy);
+    const needed = group.reports.items.len + 1;
+    if (needed > group.reports.capacity) {
+        const extra = report_queue_reserve_granularity;
+        group.reports.ensureTotalCapacity(alloc, group.reports.items.len + extra) catch {
+            alloc.free(copy);
+            group.mutex.unlock(io);
+            return;
+        };
+    }
+    group.reports.appendAssumeCapacity(copy);
     group.mutex.unlock(io);
 }
 
@@ -647,6 +657,30 @@ test "agent reports drain FIFO with a head cursor" {
     group.mutex.unlock(io);
     try std.testing.expectEqual(@as(usize, 0), drained_head);
     try std.testing.expectEqual(@as(usize, 0), drained_len);
+}
+
+test "agent reports reserve fixed-size capacity chunks" {
+    reset();
+    defer reset();
+
+    var buf: [32]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), group.reports.capacity);
+    report("report-0");
+    try std.testing.expect(group.reports.capacity >= report_queue_reserve_granularity);
+    try std.testing.expectEqual(@as(usize, 1), group.reports.items.len);
+
+    const first_capacity = group.reports.capacity;
+    var i: usize = 1;
+    while (i < first_capacity) : (i += 1) {
+        const msg = try std.fmt.bufPrint(&buf, "report-{d}", .{i});
+        report(msg);
+    }
+    try std.testing.expectEqual(first_capacity, group.reports.capacity);
+    try std.testing.expectEqual(first_capacity, group.reports.items.len);
+
+    const extra = try std.fmt.bufPrint(&buf, "report-{d}", .{first_capacity});
+    report(extra);
+    try std.testing.expect(group.reports.capacity > first_capacity);
 }
 
 test "waiter table notify unlinks sync tickets and preserves async FIFO tail" {
