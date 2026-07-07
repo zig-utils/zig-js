@@ -75,6 +75,8 @@ pub const ThreadRecord = struct {
     touched_thread_locals: std.ArrayListUnmanaged(*TLRecord) = .empty,
 };
 
+const pending_join_reserve_granularity = 16;
+
 threadlocal var t_current: ?*ThreadRecord = null;
 
 /// Internal profiling counters for issue #1's long-tail contention work.
@@ -646,6 +648,51 @@ fn publishThreadCompletion(rec: *ThreadRecord, threw: bool, result: Value) std.A
     rec.done = true;
     rec.done_cond.broadcast(io);
     return pending;
+}
+
+fn appendPendingJoinLocked(rec: *ThreadRecord, arena: std.mem.Allocator, pending: PendingJoin) !void {
+    const spare = rec.pending_joins.capacity - rec.pending_joins.items.len;
+    if (spare == 0) {
+        try rec.pending_joins.ensureTotalCapacity(arena, rec.pending_joins.items.len + pending_join_reserve_granularity);
+    }
+    rec.pending_joins.appendAssumeCapacity(pending);
+}
+
+test "Thread asyncJoin pending list reserves capacity chunks" {
+    const a = std.testing.allocator;
+    var rec = ThreadRecord{
+        .id = 1,
+        .gil = undefined,
+        .ctx = undefined,
+    };
+    defer rec.pending_joins.deinit(a);
+
+    var microtasks = promise.MicrotaskQueue{};
+    var first_promise = value.Object{};
+    try appendPendingJoinLocked(&rec, a, .{ .promise = &first_promise, .microtasks = &microtasks });
+    try std.testing.expect(rec.pending_joins.capacity >= pending_join_reserve_granularity);
+
+    const first_capacity = rec.pending_joins.capacity;
+    var promises = try a.alloc(value.Object, first_capacity + 1);
+    defer a.free(promises);
+    @memset(promises, .{});
+
+    var i: usize = 0;
+    while (rec.pending_joins.items.len < first_capacity) : (i += 1) {
+        try appendPendingJoinLocked(&rec, a, .{ .promise = &promises[i], .microtasks = &microtasks });
+    }
+    try std.testing.expectEqual(first_capacity, rec.pending_joins.items.len);
+    try std.testing.expectEqual(first_capacity, rec.pending_joins.capacity);
+
+    try appendPendingJoinLocked(&rec, a, .{ .promise = &promises[i], .microtasks = &microtasks });
+    try std.testing.expectEqual(first_capacity + 1, rec.pending_joins.items.len);
+    try std.testing.expect(rec.pending_joins.capacity > first_capacity);
+
+    var pending = publishThreadCompletion(&rec, false, Value.undef());
+    defer pending.deinit(a);
+    try std.testing.expect(rec.done);
+    try std.testing.expectEqual(first_capacity + 1, pending.items.len);
+    try std.testing.expectEqual(@as(usize, 0), rec.pending_joins.items.len);
 }
 
 fn markThreadExited(rec: *ThreadRecord) void {
@@ -2644,7 +2691,7 @@ fn threadAsyncJoinFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) valu
             rec.join_mutex.unlock(io);
             return self.throwError("Error", "Thread.prototype.asyncJoin requires a microtask queue");
         };
-        rec.pending_joins.append(self.arena, .{ .promise = p_obj, .microtasks = microtasks, .owner = t_current }) catch |err| {
+        appendPendingJoinLocked(rec, self.arena, .{ .promise = p_obj, .microtasks = microtasks, .owner = t_current }) catch |err| {
             rec.join_mutex.unlock(io);
             return err;
         };

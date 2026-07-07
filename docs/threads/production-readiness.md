@@ -320,6 +320,11 @@ Known performance/maturity work:
   thread-spawn/lifecycle storms grow the per-realm record table less often while
   holding the GIL/API lock. Thread id allocation, live-cap checks, join records,
   and teardown semantics are unchanged.
+- `Thread.asyncJoin()` pending observer lists reserve fixed-size capacity chunks
+  before capacity-assumed appends, so async-join observer storms grow each
+  target thread's pending list less often while holding `join_mutex`. Completion
+  still swaps the list out before resolving/rejecting promises, and the
+  completion path keeps snapshot promises rooted while settlement can run JS.
 - Active-interpreter root entries reserve fixed-size capacity chunks before
   capacity-assumed appends, so evaluate/drain and GC-root registration churn
   grows that root table less often while holding the active-interpreter lock.

@@ -244,7 +244,10 @@ context APIs.
   GC roots under `realm_lock`. Shared-realm `Thread` records reserve fixed-size
   capacity chunks before capacity-assumed appends, reducing allocator-growth
   trips while the main record is installed and spawned records are appended
-  under the GIL/API lock. Active-interpreter root entries reserve fixed-size
+  under the GIL/API lock. `Thread.asyncJoin()` pending observer lists reserve
+  fixed-size capacity chunks before capacity-assumed appends, reducing
+  allocator-growth trips while pending join promises are registered under the
+  target thread's `join_mutex`. Active-interpreter root entries reserve fixed-size
   capacity chunks before capacity-assumed appends, reducing allocator-growth
   trips while evaluate/drain paths register GC roots under the
   active-interpreter lock. GIL park records reserve fixed-size capacity chunks
