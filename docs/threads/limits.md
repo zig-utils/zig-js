@@ -206,7 +206,10 @@ context APIs.
   list until every ticket acknowledges.
   Promise microtask drains use a FIFO head cursor, so observed async-hold
   callback settlement and no-fn release-function reactions preserve FIFO order
-  without shifting the remaining reaction queue on each job.
+  without shifting the remaining reaction queue on each job. Microtask enqueues
+  and abandoned-thread queue transfers reserve fixed-size capacity chunks before
+  capacity-assumed appends, reducing allocator-growth trips under
+  `microtask_lock` during promise/thread lifecycle bursts.
   Property-mode `Atomics.notify` now stable-compacts matching sync and async
   waiters in one pass: notified heap-owned sync tickets leave the realm waiter
   table before signal, and matching `waitAsync` tickets are collected without

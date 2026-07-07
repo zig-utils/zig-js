@@ -503,9 +503,10 @@ both property-mode sync waiters and property `waitAsync` tickets,
 typed-array waiter-table shapes, and `api/condition-wait-termination.js` keeps
 the JS termination path exercised.
 Promise microtask drains now use the same FIFO head-cursor pattern, with
-`microtask queue is FIFO with a head cursor` guarding the direct queue shape and
-the asyncHold corpus case exercising observed callback/release-function
-reactions through the public API. The async-hold task pump snapshots the
+`microtask queue is FIFO with a head cursor` guarding the direct queue shape,
+fixed-chunk reserve growth, pending-queue transfer, and generation counter
+behavior, and the asyncHold corpus case exercising observed
+callback/release-function reactions through the public API. The async-hold task pump snapshots the
 microtask enqueue generation before and after each delivered grant, so
 unobserved grants that settle without queuing reactions keep the required task
 turn while skipping an otherwise-empty no-GIL microtask drain. No-fn async-hold

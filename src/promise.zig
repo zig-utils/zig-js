@@ -20,6 +20,8 @@ const Object = value.Object;
 const Interpreter = interp.Interpreter;
 const EvalError = interp.EvalError;
 
+const microtask_queue_reserve_granularity: usize = 32;
+
 pub const State = enum { pending, fulfilled, rejected };
 
 /// A `.then` reaction: when the source promise settles, `handler` (the
@@ -91,14 +93,24 @@ pub const MicrotaskQueue = struct {
     generation: std.atomic.Value(u64) = .init(0),
 
     pub fn append(self: *MicrotaskQueue, a: std.mem.Allocator, task: Microtask) !void {
-        try self.items.append(a, task);
+        try self.reserve(a, 1);
+        self.items.appendAssumeCapacity(task);
         _ = self.generation.fetchAdd(1, .release);
     }
 
     pub fn appendPendingSlice(self: *MicrotaskQueue, a: std.mem.Allocator, other: *MicrotaskQueue) !void {
         const pending = other.pendingItems();
-        try self.items.appendSlice(a, pending);
+        try self.reserve(a, pending.len);
+        self.items.appendSliceAssumeCapacity(pending);
         if (pending.len > 0) _ = self.generation.fetchAdd(@intCast(pending.len), .release);
+    }
+
+    fn reserve(self: *MicrotaskQueue, a: std.mem.Allocator, additional: usize) !void {
+        if (additional == 0) return;
+        const spare = self.items.capacity - self.items.items.len;
+        if (spare >= additional) return;
+        const extra = @max(additional, microtask_queue_reserve_granularity);
+        try self.items.ensureTotalCapacity(a, self.items.items.len + extra);
     }
 
     pub fn pendingLen(self: *const MicrotaskQueue) usize {
@@ -143,6 +155,8 @@ test "microtask queue is FIFO with a head cursor" {
     defer q.items.deinit(a);
 
     try q.append(a, .{ .reaction = undefined, .argument = Value.num(1), .fulfilled = true });
+    try std.testing.expect(q.items.capacity >= microtask_queue_reserve_granularity);
+    const first_capacity = q.items.capacity;
     try q.append(a, .{ .reaction = undefined, .argument = Value.num(2), .fulfilled = true });
     try q.append(a, .{ .reaction = undefined, .argument = Value.num(3), .fulfilled = true });
 
@@ -158,6 +172,17 @@ test "microtask queue is FIFO with a head cursor" {
     try std.testing.expect(q.isEmpty());
     try std.testing.expect(q.pop() == null);
     try std.testing.expectEqual(@as(u64, 4), q.enqueueGeneration());
+    try std.testing.expectEqual(first_capacity, q.items.capacity);
+
+    var source = MicrotaskQueue{};
+    defer source.items.deinit(a);
+    try source.append(a, .{ .reaction = undefined, .argument = Value.num(5), .fulfilled = true });
+    try source.append(a, .{ .reaction = undefined, .argument = Value.num(6), .fulfilled = true });
+    try std.testing.expectEqual(@as(f64, 5), source.pop().?.argument.asNum());
+    try q.appendPendingSlice(a, &source);
+    try std.testing.expectEqual(@as(u64, 5), q.enqueueGeneration());
+    try std.testing.expectEqual(@as(usize, 1), q.pendingLen());
+    try std.testing.expectEqual(@as(f64, 6), q.pop().?.argument.asNum());
 }
 
 /// Shared aggregation state for the combinators (`Promise.all`/`allSettled`/

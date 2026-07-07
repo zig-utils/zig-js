@@ -236,7 +236,10 @@ Known performance/maturity work:
 - Promise microtask drains now use a FIFO head cursor instead of
   `orderedRemove(0)`, so observed async-hold callback settlement and no-fn
   release-function reactions do not shift the remaining reaction queue on every
-  delivered job while preserving checkpoint order.
+  delivered job while preserving checkpoint order. Microtask enqueues and
+  abandoned-thread queue transfers reserve fixed-size capacity chunks before
+  capacity-assumed appends, reducing allocator-growth trips under
+  `microtask_lock` during promise/thread lifecycle bursts.
 - No-fn `Lock.asyncHold` grants embed their once-only release state in the
   already arena-lived hold job, avoiding an extra small allocation per delivered
   release function while preserving the release-function object and existing
