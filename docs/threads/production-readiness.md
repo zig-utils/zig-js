@@ -94,7 +94,10 @@ Known performance/maturity work:
   work pays fewer allocator calls and avoids a linear scan as buckets grow.
   During `Context.destroy`, the backing enters bulk-teardown mode so `zig-gc`'s
   owned-cell frees do not rebuild freelists immediately before the backing
-  releases whole chunks. Bucket-shaped delegated side allocations still classify
+  releases whole chunks. Bulk teardown also leaves the backing's parallel mode,
+  because context destroy is a single-owner phase after threads have been
+  joined/terminated, so owned live-cell frees skip the per-free spinlock while
+  chunks are being drained. Bucket-shaped delegated side allocations still classify
   once and free through the wrapped allocator, and the non-owned bucket-shaped
   resize/remap/free paths avoid retaking the backing lock after classification.
   This cuts the old one-general-allocator-call-per-cell profile without

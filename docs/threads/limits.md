@@ -85,7 +85,9 @@ context APIs.
   index, cutting allocator churn and linear metadata scans from GC context
   lifecycle growth. Context teardown also
   skips rebuilding slab freelists for owned cells that will be released by the
-  following whole-chunk free, while bucket-shaped delegated side allocations
+  following whole-chunk free, and the backing leaves parallel mode for that
+  single-owner destroy phase so owned live-cell frees skip the per-free spinlock
+  while chunks are being drained. Bucket-shaped delegated side allocations
   still classify once and free through the wrapped allocator. Non-owned
   bucket-shaped resize/remap/free paths also reuse the classification lock
   instead of retaking it before delegation. Single-mutator GC object side stores

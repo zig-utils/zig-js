@@ -430,13 +430,19 @@ pub const GcCellBacking = struct {
 
     /// During `Context.destroy`, `zig-gc` frees every live cell and then this
     /// backing immediately frees whole chunks. Rebuilding freelists in that
-    /// phase is pure teardown churn, so owned cell frees become no-ops.
+    /// phase is pure teardown churn, so owned cell frees become no-ops. Context
+    /// destroy is single-owner after threads have been joined/terminated, so the
+    /// backing also leaves parallel mode and skips a spinlock on every teardown
+    /// free.
     pub fn beginBulkTeardown(self: *GcCellBacking) void {
         self.acquire();
-        defer self.unlock();
         self.bulk_teardown = true;
         self.free_lists = .{ null, null, null, null, null, null };
         self.bucket_free_counts = .{ 0, 0, 0, 0, 0, 0 };
+        if (self.parallel) {
+            self.parallel = false;
+            self.lock.store(0, .release);
+        }
     }
 
     pub fn deinit(self: *GcCellBacking) void {
@@ -788,6 +794,25 @@ test "GC cell backing bulk teardown skips freelist rebuilds and still delegates 
     try std.testing.expect(backing.bulk_teardown);
     try std.testing.expectEqual(@as(?*GcCellBacking.FreeNode, null), backing.free_lists[idx]);
     try std.testing.expectError(error.OutOfMemory, a.alignedAlloc(u8, .@"16", 200));
+}
+
+test "GC cell backing bulk teardown leaves parallel mode for single-owner destroy" {
+    var backing = GcCellBacking{ .inner = std.testing.allocator, .parallel = true };
+    defer backing.deinit();
+    const a = backing.allocator();
+
+    const idx = GcCellBacking.bucketIndex(200, .@"16").?;
+    const cell = try a.alignedAlloc(u8, .@"16", 200);
+    try std.testing.expect(backing.parallel);
+    try std.testing.expectEqual(@as(u32, 0), backing.lock.load(.monotonic));
+
+    backing.beginBulkTeardown();
+    try std.testing.expect(backing.bulk_teardown);
+    try std.testing.expect(!backing.parallel);
+    try std.testing.expectEqual(@as(u32, 0), backing.lock.load(.monotonic));
+
+    a.free(cell);
+    try std.testing.expectEqual(@as(?*GcCellBacking.FreeNode, null), backing.free_lists[idx]);
 }
 
 /// An isolated engine instance — the homegrown analogue of a JSC

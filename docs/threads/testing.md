@@ -539,7 +539,8 @@ work.
 Direct `GcCellBacking` unit tests cover lazy fresh-slot bumping, free-list
 recycling, fresh-chunk cursor advancement, ownership span/hint classification,
 sorted address-index lookup with chunk/bump-offset/address metadata kept in
-sync,
+sync, and bulk teardown leaving parallel mode before owned live-cell frees drain
+without rebuilding freelists,
 stats accounting, cumulative fresh/reused/freed allocation counters,
 multi-chunk maintained-counter snapshots, bucket attribution, bulk-teardown
 behavior, and bucket-shaped delegated side frees during teardown.
