@@ -89,9 +89,10 @@ Known performance/maturity work:
   A per-bucket recent-chunk hint keeps repeated frees/remaps from the same slab
   on the fast path instead of restarting the bucket chunk walk each time.
   New chunk creation reserves the chunk list, bump-offset list, and sorted
-  address-index metadata before allocating the slab itself, then inserts the
-  address-index entry with a binary lower-bound search, so GC context lifecycle
-  work pays fewer allocator calls and avoids a linear scan as buckets grow.
+  address-index metadata in fixed-size capacity chunks before allocating the
+  slab itself, then inserts the address-index entry with a binary lower-bound
+  search, so GC context lifecycle work pays fewer allocator calls and avoids a
+  linear scan as buckets grow.
   During `Context.destroy`, the backing enters bulk-teardown mode so `zig-gc`'s
   owned-cell frees do not rebuild freelists immediately before the backing
   releases whole chunks. Bulk teardown also leaves the backing's parallel mode,

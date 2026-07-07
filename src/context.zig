@@ -94,6 +94,7 @@ pub const GcCellBacking = struct {
     const bucket_count = 6;
     const bucket_sizes = [_]usize{ 64, 128, 256, 512, 1024, 2048 };
     const chunk_bytes: usize = 64 * 1024;
+    const chunk_metadata_reserve_granularity: usize = 8;
     /// Object cells dominate GC-backed contexts. Use larger chunks for the
     /// 1024/2048-byte buckets so create/destroy-heavy workloads free fewer
     /// backing chunks and maintain smaller address indexes for the hot object
@@ -199,13 +200,27 @@ pub const GcCellBacking = struct {
         return lo;
     }
 
+    fn reserveChunkMetadataLocked(self: *GcCellBacking, idx: usize, additional: usize) bool {
+        const extra = @max(additional, chunk_metadata_reserve_granularity);
+        const needed = self.bucket_chunks[idx].items.len + additional;
+        const target = self.bucket_chunks[idx].items.len + extra;
+        if (self.bucket_chunks[idx].capacity < needed) {
+            self.bucket_chunks[idx].ensureTotalCapacity(self.inner, target) catch return false;
+        }
+        if (self.bucket_next_offsets[idx].capacity < needed) {
+            self.bucket_next_offsets[idx].ensureTotalCapacity(self.inner, target) catch return false;
+        }
+        if (self.bucket_addr_index[idx].capacity < needed) {
+            self.bucket_addr_index[idx].ensureTotalCapacity(self.inner, target) catch return false;
+        }
+        return true;
+    }
+
     fn addChunk(self: *GcCellBacking, idx: usize) bool {
         const slot_size = bucket_sizes[idx];
         const slots = @max(@as(usize, 1), bucketChunkBytes(idx) / slot_size);
         const chunk_len = slots * slot_size;
-        self.bucket_chunks[idx].ensureUnusedCapacity(self.inner, 1) catch return false;
-        self.bucket_next_offsets[idx].ensureUnusedCapacity(self.inner, 1) catch return false;
-        self.bucket_addr_index[idx].ensureUnusedCapacity(self.inner, 1) catch return false;
+        if (!self.reserveChunkMetadataLocked(idx, 1)) return false;
         const chunk = self.inner.alignedAlloc(u8, .@"16", chunk_len) catch return false;
         const chunk_idx = self.bucket_chunks[idx].items.len;
         self.bucket_chunks[idx].appendAssumeCapacity(chunk);
@@ -630,6 +645,40 @@ test "GC cell backing ownership fallback uses sorted chunk address index" {
     backing.bucket_owns_hint[idx] = null;
     try std.testing.expect(backing.ownsPtrLocked(idx, cells[0].ptr));
     try std.testing.expectEqual(@as(usize, 0), backing.bucket_owns_hint[idx].?);
+}
+
+test "GC cell backing reserves chunk metadata capacity chunks" {
+    var backing = GcCellBacking{ .inner = std.testing.allocator };
+    defer backing.deinit();
+
+    const idx = GcCellBacking.bucketIndex(48, .@"16").?;
+    try std.testing.expect(backing.addChunk(idx));
+    try std.testing.expectEqual(@as(usize, 1), backing.bucket_chunks[idx].items.len);
+    try std.testing.expectEqual(backing.bucket_chunks[idx].items.len, backing.bucket_next_offsets[idx].items.len);
+    try std.testing.expectEqual(backing.bucket_chunks[idx].items.len, backing.bucket_addr_index[idx].items.len);
+    try std.testing.expect(backing.bucket_chunks[idx].capacity >= GcCellBacking.chunk_metadata_reserve_granularity);
+    try std.testing.expect(backing.bucket_next_offsets[idx].capacity >= GcCellBacking.chunk_metadata_reserve_granularity);
+    try std.testing.expect(backing.bucket_addr_index[idx].capacity >= GcCellBacking.chunk_metadata_reserve_granularity);
+
+    const first_chunks_capacity = backing.bucket_chunks[idx].capacity;
+    const first_offsets_capacity = backing.bucket_next_offsets[idx].capacity;
+    const first_addr_capacity = backing.bucket_addr_index[idx].capacity;
+    const first_min_capacity = @min(first_chunks_capacity, @min(first_offsets_capacity, first_addr_capacity));
+
+    while (backing.bucket_chunks[idx].items.len < first_min_capacity) {
+        try std.testing.expect(backing.addChunk(idx));
+        try std.testing.expectEqual(first_chunks_capacity, backing.bucket_chunks[idx].capacity);
+        try std.testing.expectEqual(first_offsets_capacity, backing.bucket_next_offsets[idx].capacity);
+        try std.testing.expectEqual(first_addr_capacity, backing.bucket_addr_index[idx].capacity);
+    }
+
+    try std.testing.expect(backing.addChunk(idx));
+    try std.testing.expect(backing.bucket_chunks[idx].capacity > first_chunks_capacity or
+        backing.bucket_next_offsets[idx].capacity > first_offsets_capacity or
+        backing.bucket_addr_index[idx].capacity > first_addr_capacity);
+    try std.testing.expect(backing.bucket_chunks[idx].capacity >= backing.bucket_chunks[idx].items.len);
+    try std.testing.expect(backing.bucket_next_offsets[idx].capacity >= backing.bucket_next_offsets[idx].items.len);
+    try std.testing.expect(backing.bucket_addr_index[idx].capacity >= backing.bucket_addr_index[idx].items.len);
 }
 
 test "GC cell backing stats report chunk capacity and live/free slots" {

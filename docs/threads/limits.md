@@ -80,10 +80,10 @@ context APIs.
   are bucket-local with an address-span reject before the recent-chunk hint and
   sorted per-bucket chunk address index, so frees do not scan unrelated
   size-class chunks or linearly walk a large bucket during collection or
-  teardown. New slab creation reserves per-bucket metadata before allocating the
-  backing chunk and uses a binary lower-bound insertion into the sorted address
-  index, cutting allocator churn and linear metadata scans from GC context
-  lifecycle growth. Context teardown also
+  teardown. New slab creation reserves per-bucket metadata in fixed-size
+  capacity chunks before allocating the backing chunk and uses a binary
+  lower-bound insertion into the sorted address index, cutting allocator churn
+  and linear metadata scans from GC context lifecycle growth. Context teardown also
   skips rebuilding slab freelists for owned cells that will be released by the
   following whole-chunk free, and the backing leaves parallel mode for that
   single-owner destroy phase so owned live-cell frees skip the per-free spinlock
