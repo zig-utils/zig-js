@@ -211,11 +211,13 @@ context APIs.
   FinalizationRegistry `unregister` removes matching records with one stable
   compaction pass so survivor cleanup order is preserved without repeated
   middle shifts.
-  The profile now includes a separate isolated `Worker` section for
-  structured-clone inbox/outbox round-trips, empty receive polling, and
-  spawn/post/receive/join/destroy lifecycle cost, with separate script and
-  module Worker rows so import-graph startup/lifecycle pressure has its own
-  baseline instead of being inferred from shared-realm `Thread` rows.
+  The profile now includes isolated `Worker` sections for structured-clone
+  inbox/outbox round-trips, empty receive polling, and teardown. The teardown
+  table splits handler-driven self-close, owner-driven host-close drain of
+  queued messages, and hard `terminate()` of spinning code, with separate
+  script and module Worker rows so import-graph startup and teardown pressure
+  has its own baseline instead of being inferred from shared-realm `Thread`
+  rows.
 - **Memory model maintenance.** Keep [Memory Model](./memory-model.md) aligned
   with the TSan suppression witness, new synchronization primitives, and any
   promoted PR-249 coverage that exercises JS-defined races.

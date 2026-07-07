@@ -275,13 +275,14 @@ Known performance/maturity work:
   later entries. FinalizationRegistry `unregister` still preserves survivor
   cleanup order, but it does so with one stable compaction pass rather than one
   middle removal per matching record.
-- The same `threads-profile` run now includes a separate isolated `Worker`
-  section for structured-clone inbox/outbox round-trips, empty receive polling,
-  and spawn/post/receive/join/destroy lifecycle cost, with separate script and
-  module Worker rows so import-graph startup/lifecycle pressure is visible
-  beside plain source Workers. It is reported outside the no-GIL versus
-  `.gil = true` table because Workers already isolate each `Context` onto its
-  own OS thread.
+- The same `threads-profile` run now includes isolated `Worker` sections for
+  structured-clone inbox/outbox round-trips, empty receive polling, and
+  teardown. The teardown table splits handler-driven self-close,
+  owner-driven host-close drain of queued messages, and hard `terminate()` of
+  spinning code, with separate script and module Worker rows so import-graph
+  startup and teardown pressure are visible beside plain source Workers. It is
+  reported outside the no-GIL versus `.gil = true` table because Workers
+  already isolate each `Context` onto its own OS thread.
 - Measured speedup shows real parallelism: roughly 1.8x at 2 threads and 2.5x
   at 4 threads in the recorded checkpoint.
 

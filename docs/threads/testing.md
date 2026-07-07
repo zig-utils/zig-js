@@ -427,12 +427,14 @@ fast-path hits and real grant-job delivery, and the paired `hold`/`cjob`
 columns split those delivered jobs into ordinary `Lock.asyncHold` grants versus
 `Condition.asyncWait` reacquire grants. Run it before and after synchronization
 or lifecycle changes so performance work has an attributed baseline instead of
-only elapsed time. The profile also prints a separate isolated `Worker` table
-for structured-clone inbox/outbox round-trips, empty
-receive polling, and spawn/post/receive/join/destroy lifecycle churn; it
-now emits separate script and module Worker rows so import-graph startup and
-lifecycle cost can be compared with plain source Workers. It intentionally has
-no `.gil = true` column because each Worker owns its own `Context`.
+only elapsed time. The profile also prints isolated `Worker` tables for
+structured-clone inbox/outbox round-trips, empty receive polling, and teardown
+churn. The teardown table splits handler-driven self-close,
+owner-driven host-close drain after queuing messages, and hard `terminate()` of
+spinning code; both tables emit separate script and module Worker rows so
+import-graph startup and teardown cost can be compared with plain source
+Workers. It intentionally has no `.gil = true` column because each Worker owns
+its own `Context`.
 Empty sync-wait task pumps now have a
 lock-free fast path;
 real async-hold delivery drains larger bounded FIFO bursts from the realm task
