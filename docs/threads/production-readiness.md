@@ -292,10 +292,12 @@ Known performance/maturity work:
   linear scan. Sync waiter and waitAsync ticket tables reserve fixed-size
   capacity chunks before capacity-assumed appends, so property waiter storms grow
   table storage less often while holding `Gil.prop_mutex`.
-- Typed-array `Atomics.notify` now unlinks sync stack tickets before signaling,
-  so awakened waiters do not each rescan and shift the process-wide waiter list.
-  Typed-array `waitAsync` harvest and abandon paths stable-compact matching
-  tickets in one pass while preserving FIFO order for other waiters.
+- Typed-array `Atomics.wait` / `waitAsync` ticket-list appends reserve fixed-size
+  capacity chunks before capacity-assumed writes under `waiters_mutex`.
+  `Atomics.notify` unlinks sync stack tickets before signaling, so awakened
+  waiters do not each rescan and shift the process-wide waiter list. Typed-array
+  `waitAsync` harvest and abandon paths stable-compact matching tickets in one
+  pass while preserving FIFO order for other waiters.
 - Context-owned typed-array `waitAsync` promise roots now take `realm_lock` for
   list-header mutation, settlement removal, clearing, and interpreter-root
   tracing, matching the lock already used by the parallel collector's

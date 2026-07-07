@@ -460,8 +460,10 @@ sync waiter table in one pass instead of shifting the remaining waiters;
 property-mode sync waiter and waitAsync ticket tables reserve fixed-size
 capacity chunks before capacity-assumed appends;
 typed-array `Atomics.notify` unlinks sync stack tickets before signal, and
-typed-array `waitAsync` harvest/abandon paths stable-compact matching tickets
-in one pass while preserving FIFO order for other waiters;
+typed-array `Atomics.wait` / `waitAsync` ticket-list appends reserve fixed-size
+capacity chunks before capacity-assumed writes;
+typed-array `waitAsync` harvest/abandon paths stable-compact matching tickets in
+one pass while preserving FIFO order for other waiters;
 `Atomics.waitAsync reserves async waiter capacity chunks` guards context-owned
 typed-array waitAsync root-list reserve growth and post-settlement clearing;
 Worker inbox/outbox channels use the same shape for structured-clone message
@@ -500,8 +502,9 @@ stable-compacts timed-out sync ticket` covers the property waiter cleanup shape,
 both property-mode sync waiters and property `waitAsync` tickets,
 `waiter table notify unlinks sync tickets and preserves async FIFO tail` plus
 `waiter table harvestAsync stable-compacts settled owner tickets` cover the
-typed-array waiter-table shapes, and `api/condition-wait-termination.js` keeps
-the JS termination path exercised.
+typed-array waiter-table compaction shapes, `waiter table tickets reserve
+fixed-size capacity chunks` covers typed-array waiter-list reserve growth, and
+`api/condition-wait-termination.js` keeps the JS termination path exercised.
 Promise microtask drains now use the same FIFO head-cursor pattern, with
 `microtask queue is FIFO with a head cursor` guarding the direct queue shape,
 fixed-chunk reserve growth, pending-queue transfer, and generation counter

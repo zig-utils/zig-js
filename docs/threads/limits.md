@@ -230,12 +230,14 @@ context APIs.
   waitAsync ticket tables reserve fixed-size capacity chunks before
   capacity-assumed appends, so waiter storms grow those tables less often while
   holding `Gil.prop_mutex`. Typed-array `Atomics.notify` unlinks notified sync
-  stack tickets before signal, and typed-array
-  `waitAsync` harvest/abandon paths stable-compact settled or owner tickets in
-  one pass while preserving FIFO order for remaining waiters. Context-owned
-  typed-array `waitAsync` promise roots take `realm_lock` for list-header
-  mutation, settlement removal, clearing, and interpreter-root tracing, and
-  reserve fixed-size capacity chunks before capacity-assumed appends. Worker
+  stack tickets before signal. Typed-array `Atomics.wait` / `waitAsync` ticket
+  list appends reserve fixed-size capacity chunks before capacity-assumed writes
+  under the process-wide waiter mutex, and typed-array `waitAsync`
+  harvest/abandon paths stable-compact settled or owner tickets in one pass
+  while preserving FIFO order for remaining waiters. Context-owned typed-array
+  `waitAsync` promise roots take `realm_lock` for list-header mutation,
+  settlement removal, clearing, and interpreter-root tracing, and reserve
+  fixed-size capacity chunks before capacity-assumed appends. Worker
   inbox/outbox channels now drain
   structured-clone messages with FIFO head cursors as well, avoiding front
   shifts in receive-heavy Worker loops, and reserve fixed-size queue capacity

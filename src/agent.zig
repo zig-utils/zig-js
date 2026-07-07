@@ -18,6 +18,7 @@ const SharedBufferStorage = shared_buffer.SharedBufferStorage;
 
 const alloc = std.heap.page_allocator;
 const report_queue_reserve_granularity = 64;
+const waiter_ticket_reserve_granularity = 16;
 
 // ---- engine-global blocking Io ---------------------------------------------
 // This zig std's Mutex/Condition/sleep live behind `std.Io`; `Io.Threaded` is
@@ -340,6 +341,21 @@ fn listFor(key: WaitKey) ?*WaiterList {
     return gop.value_ptr.*;
 }
 
+fn reserveTicketsLocked(list: *WaiterList, additional: usize) bool {
+    if (additional == 0) return true;
+    const spare = list.tickets.capacity - list.tickets.items.len;
+    if (spare >= additional) return true;
+    const extra = @max(additional, waiter_ticket_reserve_granularity);
+    list.tickets.ensureTotalCapacity(alloc, list.tickets.items.len + extra) catch return false;
+    return true;
+}
+
+fn appendTicketLocked(list: *WaiterList, ticket: *Ticket) bool {
+    if (!reserveTicketsLocked(list, 1)) return false;
+    list.tickets.appendAssumeCapacity(ticket);
+    return true;
+}
+
 pub const WaitOutcome = enum { ok, not_equal, timed_out };
 
 /// Blocking `Atomics.wait` core. `T` is i32 or i64; `offset` is the element's
@@ -364,10 +380,10 @@ pub fn wait(storage: *SharedBufferStorage, offset: usize, comptime T: type, expe
         return .timed_out;
     };
     var ticket = Ticket{};
-    list.tickets.append(alloc, &ticket) catch {
+    if (!appendTicketLocked(list, &ticket)) {
         waiters_mutex.unlock(io);
         return .timed_out;
-    };
+    }
     ticket.linked = true;
     const deadline: std.Io.Timeout = if (timeout_ns) |ns| (std.Io.Timeout{ .duration = .{
         .raw = .fromNanoseconds(ns),
@@ -478,10 +494,10 @@ pub fn waitAsyncEnqueue(storage: *SharedBufferStorage, offset: usize, comptime T
         .async_id = id,
         .deadline_ns = if (timeout_ns) |ns| now + ns else null,
     };
-    list.tickets.append(alloc, t) catch {
+    if (!appendTicketLocked(list, t)) {
         alloc.destroy(t);
         return .timed_out;
-    };
+    }
     return .{ .enqueued = id };
 }
 
@@ -699,18 +715,18 @@ test "waiter table notify unlinks sync tickets and preserves async FIFO tail" {
         waiters_mutex.unlock(io);
         return error.TestUnexpectedResult;
     };
-    list.tickets.append(alloc, &sync1) catch {
+    if (!appendTicketLocked(list, &sync1)) {
         waiters_mutex.unlock(io);
         return error.OutOfMemory;
-    };
-    list.tickets.append(alloc, &async1) catch {
+    }
+    if (!appendTicketLocked(list, &async1)) {
         waiters_mutex.unlock(io);
         return error.OutOfMemory;
-    };
-    list.tickets.append(alloc, &sync2) catch {
+    }
+    if (!appendTicketLocked(list, &sync2)) {
         waiters_mutex.unlock(io);
         return error.OutOfMemory;
-    };
+    }
     waiters_mutex.unlock(io);
 
     try std.testing.expectEqual(@as(usize, 2), notify(s, key.offset, 2));
@@ -759,26 +775,26 @@ test "waiter table harvestAsync stable-compacts settled owner tickets" {
         waiters_mutex.unlock(io);
         return error.TestUnexpectedResult;
     };
-    list.tickets.append(alloc, settled) catch {
+    if (!appendTicketLocked(list, settled)) {
         waiters_mutex.unlock(io);
         return error.OutOfMemory;
-    };
-    list.tickets.append(alloc, other) catch {
+    }
+    if (!appendTicketLocked(list, other)) {
         waiters_mutex.unlock(io);
         return error.OutOfMemory;
-    };
-    list.tickets.append(alloc, expired) catch {
+    }
+    if (!appendTicketLocked(list, expired)) {
         waiters_mutex.unlock(io);
         return error.OutOfMemory;
-    };
-    list.tickets.append(alloc, pending) catch {
+    }
+    if (!appendTicketLocked(list, pending)) {
         waiters_mutex.unlock(io);
         return error.OutOfMemory;
-    };
-    list.tickets.append(alloc, &sync_tail) catch {
+    }
+    if (!appendTicketLocked(list, &sync_tail)) {
         waiters_mutex.unlock(io);
         return error.OutOfMemory;
-    };
+    }
     waiters_mutex.unlock(io);
 
     var out: [4]Settled = undefined;
@@ -805,4 +821,47 @@ test "waiter table harvestAsync stable-compacts settled owner tickets" {
     try std.testing.expect(kept.tickets.items[2] == &sync_tail);
     try std.testing.expect(other.linked);
     try std.testing.expect(pending.linked);
+}
+
+test "waiter table tickets reserve fixed-size capacity chunks" {
+    const s = try SharedBufferStorage.create(8, null);
+    defer s.release();
+    const key = WaitKey{ .storage = s, .offset = 12 };
+
+    var first_ticket = Ticket{ .linked = true };
+
+    const io = engineIo();
+    waiters_used.store(true, .monotonic);
+    waiters_mutex.lockUncancelable(io);
+    const list = listFor(key) orelse {
+        waiters_mutex.unlock(io);
+        return error.TestUnexpectedResult;
+    };
+    defer {
+        list.tickets.deinit(alloc);
+        _ = waiters.remove(key);
+        alloc.destroy(list);
+        waiters_mutex.unlock(io);
+    }
+
+    try std.testing.expectEqual(@as(usize, 0), list.tickets.capacity);
+    try std.testing.expect(appendTicketLocked(list, &first_ticket));
+    try std.testing.expect(list.tickets.capacity >= waiter_ticket_reserve_granularity);
+    try std.testing.expectEqual(@as(usize, 1), list.tickets.items.len);
+
+    const first_capacity = list.tickets.capacity;
+    var tickets = try std.testing.allocator.alloc(Ticket, first_capacity);
+    defer std.testing.allocator.free(tickets);
+    for (tickets) |*ticket| ticket.* = .{ .linked = true };
+
+    var i: usize = 1;
+    while (i < first_capacity) : (i += 1) {
+        try std.testing.expect(appendTicketLocked(list, &tickets[i - 1]));
+        try std.testing.expectEqual(first_capacity, list.tickets.capacity);
+    }
+    try std.testing.expectEqual(first_capacity, list.tickets.items.len);
+
+    try std.testing.expect(appendTicketLocked(list, &tickets[first_capacity - 1]));
+    try std.testing.expectEqual(first_capacity + 1, list.tickets.items.len);
+    try std.testing.expect(list.tickets.capacity > first_capacity);
 }
