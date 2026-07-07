@@ -2353,6 +2353,12 @@ fn construct(vm: *Interpreter, callee: Value, args: []const Value) EvalError!Val
     if (callee.isObject()) {
         if (callee.asObj().js_func) |erased| {
             const func: *Function = @ptrCast(@alignCast(erased));
+            // Arrows, concise methods, generators, and async functions have no
+            // [[Construct]] — `new` on them is a TypeError even though they carry a
+            // bytecode chunk. Mirror the tree-walker's constructNT check before the
+            // chunk shortcut (a plain-function chunk is the only constructible one).
+            if (func.is_arrow or func.is_method or func.is_generator or func.is_async)
+                return vm.throwError("TypeError", "value is not a constructor");
             if (func.chunk) |fchunk| {
                 const this_val = try vm.newInstance(callee.asObj());
                 const ret = try runFunction(vm, func, fchunk, args, this_val, callee);
