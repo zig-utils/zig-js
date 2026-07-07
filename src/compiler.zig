@@ -1300,6 +1300,13 @@ pub const Compiler = struct {
 
         const none = std.math.maxInt(u32);
         const ph = try self.chunk.emitAB(.push_handler, none, none);
+        // A `return` (or a labeled break/continue) crossing this for-of must run
+        // IteratorClose — the handler's finally_pc. Route it through abrupt_return
+        // like a finally by raising finally_depth. Bump BEFORE pushLoop so the loop
+        // records the raised depth: a plain `break`/`continue` targeting THIS loop
+        // stays a plain jump (it has its own explicit close block), while a return
+        // or an outer-targeted break unwinds to the close handler.
+        self.finally_depth += 1;
         const loop = try self.pushLoop();
         const top = self.chunk.here();
         // r = it.next()  (for-await: r = await it.next()) — the cached `next`,
@@ -1348,6 +1355,7 @@ pub const Compiler = struct {
             self.chunk.patchToHere(skip_close);
         }
         self.popLoop();
+        self.finally_depth -= 1;
         _ = try self.chunk.emit(.pop_handler, 0);
 
         const after_finally = try self.chunk.emit(.jump, 0);
@@ -2590,6 +2598,13 @@ fn collectLocals(arena: std.mem.Allocator, scope: *FnScope, node: *Node) Compile
         .labeled_stmt => |s| try collectLocals(arena, scope, s.body),
         .try_stmt => |t| {
             try collectLocals(arena, scope, t.block);
+            // The catch parameter is stored + read via store_local/load_local, so
+            // it needs a frame slot; without one it resolves to a global and
+            // def_var leaks the caught value out of the catch block (into the
+            // closure/global scope). A destructuring catch param bails elsewhere.
+            if (t.catch_param) |p| {
+                if (p.* == .identifier) _ = try scope.addLocal(arena, p.identifier);
+            }
             if (t.catch_block) |cb| try collectLocals(arena, scope, cb);
             if (t.finally_block) |fb| try collectLocals(arena, scope, fb);
         },
