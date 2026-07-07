@@ -1079,6 +1079,7 @@ pub const Context = struct {
     deferred_async_started: std.ArrayListUnmanaged(*Module) = .empty,
     parent_resume_depth: usize = 0,
     completed_parent_queue: std.ArrayListUnmanaged(*Module) = .empty,
+    completed_parent_queue_head: usize = 0,
     /// Referrer path for runtime `import()` issued from top-level *script* code
     /// (a `flags:[module]`-free test). When `mod_host` is set, `evaluate` wires
     /// the dynamic-import hook using this as the importing script's path, so
@@ -2215,7 +2216,7 @@ pub const Context = struct {
             self.mod_host = null;
             self.deferred_async_queue.clearRetainingCapacity();
             self.deferred_async_started.clearRetainingCapacity();
-            self.completed_parent_queue.clearRetainingCapacity();
+            self.clearCompletedParentQueue();
             self.parent_resume_depth = 0;
         }
         machine.dyn_import = dynImportHook;
@@ -3110,11 +3111,18 @@ pub const Context = struct {
         m.async_parents.clearRetainingCapacity();
         self.parent_resume_depth -= 1;
         if (self.parent_resume_depth == 0) {
-            while (self.completed_parent_queue.items.len > 0) {
-                const completed = self.completed_parent_queue.orderedRemove(0);
+            while (self.completed_parent_queue_head < self.completed_parent_queue.items.len) {
+                const completed = self.completed_parent_queue.items[self.completed_parent_queue_head];
+                self.completed_parent_queue_head += 1;
                 try self.resumeModuleParents(machine, completed);
             }
+            self.clearCompletedParentQueue();
         }
+    }
+
+    fn clearCompletedParentQueue(self: *Context) void {
+        self.completed_parent_queue.clearRetainingCapacity();
+        self.completed_parent_queue_head = 0;
     }
 
     fn rejectModuleParents(self: *Context, machine: *interp.Interpreter, m: *Module, reason: Value) interp.EvalError!void {
@@ -3528,6 +3536,22 @@ test "modules reserve internal queue capacity chunks" {
     try ctx.appendModuleNamespaceWaiter(&waiter_module, &promises[i], &namespaces[i]);
     try std.testing.expectEqual(first_waiter_capacity + 1, waiter_module.dynamic_waiters.items.len);
     try std.testing.expect(waiter_module.dynamic_waiters.capacity > first_waiter_capacity);
+
+    var completed_a = Context.Module{ .path = "completed-a", .items = &.{}, .env = &ctx.env };
+    var completed_b = Context.Module{ .path = "completed-b", .items = &.{}, .env = &ctx.env };
+    try ctx.appendUniqueModule(&ctx.completed_parent_queue, &completed_a);
+    try ctx.appendUniqueModule(&ctx.completed_parent_queue, &completed_b);
+    const completed_capacity = ctx.completed_parent_queue.capacity;
+    try std.testing.expect(completed_capacity >= module_queue_reserve_granularity);
+    try std.testing.expectEqual(@as(usize, 0), ctx.completed_parent_queue_head);
+    try std.testing.expectEqual(&completed_a, ctx.completed_parent_queue.items[ctx.completed_parent_queue_head]);
+    ctx.completed_parent_queue_head += 1;
+    try std.testing.expectEqual(&completed_b, ctx.completed_parent_queue.items[ctx.completed_parent_queue_head]);
+    ctx.completed_parent_queue_head += 1;
+    ctx.clearCompletedParentQueue();
+    try std.testing.expectEqual(@as(usize, 0), ctx.completed_parent_queue.items.len);
+    try std.testing.expectEqual(@as(usize, 0), ctx.completed_parent_queue_head);
+    try std.testing.expectEqual(completed_capacity, ctx.completed_parent_queue.capacity);
 }
 
 test "modules initialize default and var exports for self imports" {

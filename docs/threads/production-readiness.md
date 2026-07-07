@@ -343,7 +343,9 @@ Known performance/maturity work:
   `import defer` dependency startup, and dynamic-import namespace waiters reserve
   fixed-size capacity chunks before capacity-assumed appends. This keeps module
   graph semantics unchanged while reducing allocator-growth trips in module
-  Worker/import-graph lifecycle bursts.
+  Worker/import-graph lifecycle bursts. Completed-parent resumption also drains
+  with a FIFO head cursor and clears the retained queue after the drain, avoiding
+  one front-shift per completed parent.
 - WeakMap/WeakSet entry delete and GC dead-key pruning are unordered by
   observable JS semantics, so they now use tail removal instead of shifting
   later entries. FinalizationRegistry `unregister` still preserves survivor

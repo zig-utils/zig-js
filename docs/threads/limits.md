@@ -256,7 +256,9 @@ context APIs.
   module-graph queues for top-level-await parent resumption, `import defer`
   startup, and dynamic-import namespace waiters reserve fixed-size capacity
   chunks before capacity-assumed appends, reducing allocator-growth trips in
-  module Worker/import-graph lifecycle bursts. Empty internal
+  module Worker/import-graph lifecycle bursts. The completed-parent resumption
+  queue drains with a FIFO head cursor instead of shifting the queue for every
+  completed parent. Empty internal
   `Worker.receive(..., 0)` polls return under the channel lock without entering
   a timed condition wait or touching drained-queue compaction. Active interpreter roots, protected
   C-API handles, and GIL park records are unordered root sets, so removal now
