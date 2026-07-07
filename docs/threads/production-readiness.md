@@ -306,6 +306,10 @@ Known performance/maturity work:
   thread-spawn/lifecycle storms grow the per-realm record table less often while
   holding the GIL/API lock. Thread id allocation, live-cap checks, join records,
   and teardown semantics are unchanged.
+- Active-interpreter root entries reserve fixed-size capacity chunks before
+  capacity-assumed appends, so evaluate/drain and GC-root registration churn
+  grows that root table less often while holding the active-interpreter lock.
+  Push/pop semantics and GC root iteration are unchanged.
 - Active interpreter roots, protected C-API handles, and GIL park records are
   unordered root sets, so their removals now use swap removal instead of
   order-preserving list shifts on evaluate, handle-unprotect, and thread

@@ -567,6 +567,8 @@ lock.
 job duplicate suppression and fixed-chunk queue growth under the realm lock.
 `Thread API reserves thread record capacity chunks` guards the main-record and
 spawned-record growth invariant for shared-realm `Thread` lifecycle churn.
+`active interpreter root list reserves capacity chunks` guards evaluation/GC
+root-list reserve growth and swap-pop cleanup.
 Collection-helper removal witnesses live in the same unit suite:
 `WeakMap and WeakSet entry delete is unordered tail removal`,
 `gc pruneDeadWeakEntries removes dead weak keys with unordered tail removal`,

@@ -234,7 +234,10 @@ context APIs.
   GC roots under `realm_lock`. Shared-realm `Thread` records reserve fixed-size
   capacity chunks before capacity-assumed appends, reducing allocator-growth
   trips while the main record is installed and spawned records are appended
-  under the GIL/API lock. Empty internal
+  under the GIL/API lock. Active-interpreter root entries reserve fixed-size
+  capacity chunks before capacity-assumed appends, reducing allocator-growth
+  trips while evaluate/drain paths register GC roots under the
+  active-interpreter lock. Empty internal
   `Worker.receive(..., 0)` polls return under the channel lock without entering
   a timed condition wait or touching drained-queue compaction. Active interpreter roots, protected
   C-API handles, and GIL park records are unordered root sets, so removal now

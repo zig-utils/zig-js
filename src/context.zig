@@ -836,6 +836,7 @@ pub fn setParallelSyncEnabled(on: bool) void {
 pub const Context = struct {
     pub const c_api_handle_reserve_granularity = 16;
     pub const js_thread_reserve_granularity = 16;
+    pub const active_interpreter_reserve_granularity = 16;
 
     gpa: std.mem.Allocator,
     arena_state: *std.heap.ArenaAllocator,
@@ -1512,7 +1513,8 @@ pub const Context = struct {
     pub fn pushActiveInterpreter(self: *Context, machine: *interp.Interpreter) !void {
         self.lockActiveInterpreters();
         defer self.unlockActiveInterpreters();
-        try self.active_interpreters.append(self.gpa, machine);
+        try self.reserveActiveInterpretersLocked(1);
+        self.active_interpreters.appendAssumeCapacity(machine);
     }
 
     pub fn popActiveInterpreter(self: *Context, machine: *interp.Interpreter) void {
@@ -1857,6 +1859,13 @@ pub const Context = struct {
         if (spare >= additional) return;
         const extra = @max(additional, js_thread_reserve_granularity);
         try self.js_threads.ensureTotalCapacity(self.gpa, self.js_threads.items.len + extra);
+    }
+
+    fn reserveActiveInterpretersLocked(self: *Context, additional: usize) error{OutOfMemory}!void {
+        const spare = self.active_interpreters.capacity - self.active_interpreters.items.len;
+        if (spare >= additional) return;
+        const extra = @max(additional, active_interpreter_reserve_granularity);
+        try self.active_interpreters.ensureTotalCapacity(self.gpa, self.active_interpreters.items.len + extra);
     }
 
     fn scriptNeedsTreeWalk(source: []const u8) bool {
@@ -11041,6 +11050,35 @@ test "enable_gc: active module interpreter roots import.meta during requested mi
     ctx.collectGarbage();
     const cleared = try ctx.evaluate("globalThis.ref.deref() === undefined");
     try std.testing.expectEqual(true, cleared.asBool());
+}
+
+test "enable_gc: active interpreter root list reserves capacity chunks" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    defer ctx.destroy();
+
+    var machines: [64]interp.Interpreter = undefined;
+    machines[0] = ctx.interpreter();
+    try ctx.pushActiveInterpreter(&machines[0]);
+    try std.testing.expectEqual(@as(usize, 1), ctx.active_interpreters.items.len);
+    try std.testing.expect(ctx.active_interpreters.capacity >= Context.active_interpreter_reserve_granularity);
+    const first_capacity = ctx.active_interpreters.capacity;
+
+    var i: usize = 1;
+    while (ctx.active_interpreters.items.len < first_capacity) : (i += 1) {
+        machines[i] = ctx.interpreter();
+        try ctx.pushActiveInterpreter(&machines[i]);
+    }
+    try std.testing.expectEqual(first_capacity, ctx.active_interpreters.items.len);
+    try std.testing.expectEqual(first_capacity, ctx.active_interpreters.capacity);
+
+    machines[i] = ctx.interpreter();
+    try ctx.pushActiveInterpreter(&machines[i]);
+    try std.testing.expectEqual(first_capacity + 1, ctx.active_interpreters.items.len);
+    try std.testing.expect(ctx.active_interpreters.capacity > first_capacity);
+
+    while (i > 0) : (i -= 1) ctx.popActiveInterpreter(&machines[i]);
+    ctx.popActiveInterpreter(&machines[0]);
+    try std.testing.expectEqual(@as(usize, 0), ctx.active_interpreters.items.len);
 }
 
 test "enable_gc: evaluate roots completion value across requested GC" {
