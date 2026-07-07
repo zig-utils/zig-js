@@ -318,12 +318,15 @@ context APIs.
   verified, plus script Worker/SAB and module Worker/SAB cleanup subprograms
   where isolated Workers keep progressing on a retained `SharedArrayBuffer`
   while shared-realm `Thread`s publish cleanup targets and parked stack roots
-  through a finishing sweep, plus sibling script/module Worker handler-exception
-  cleanup subprograms that recover from an expected thrown `onmessage` before
-  proving the same Worker progress and cleanup oracle, plus script/module
-  Worker close/terminate subprograms that preserve exact FIFO drain/drop,
-  post-close drop, post-terminate silence, joined roots, asyncJoin reactions,
-  and cleanup count/sum through the finishing sweep, plus script/module Worker
+  through a finishing sweep, plus a Worker/thread finalization subprogram where
+  isolated Workers park on a retained SAB while shared-realm `Thread`s publish
+  `FinalizationRegistry` cleanup roots and `asyncJoin` observers through a
+  finishing sweep before Worker release, plus sibling script/module Worker
+  handler-exception cleanup subprograms that recover from an expected thrown
+  `onmessage` before proving the same Worker progress and cleanup oracle, plus
+  script/module Worker close/terminate subprograms that preserve exact FIFO
+  drain/drop, post-close drop, post-terminate silence, joined roots, asyncJoin
+  reactions, and cleanup count/sum through the finishing sweep, plus script/module Worker
   terminate/finalization subprograms where spinning Workers share one retained
   SAB with shared-realm cleanup roots, asyncJoin observers, joined roots, and
   exact cleanup count/sum through the finishing sweep, plus script and module
