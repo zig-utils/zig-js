@@ -1760,12 +1760,10 @@ pub const Compiler = struct {
             // args, per spec order, then tail-call with this = recv.
             const m = c.callee.member;
             const ni = try self.chunk.addName(m.property);
-            const recv = try self.freshTemp();
             try self.compileExpr(m.object);
-            try self.emitDefine(recv);
-            try self.emitLoad(recv);
+            _ = try self.chunk.emit(.dup, 0);
             _ = try self.chunk.emit(.get_prop, ni);
-            try self.emitLoad(recv);
+            _ = try self.chunk.emit(.swap, 0);
             for (c.args) |arg| try self.compileExpr(arg);
             _ = try self.chunk.emit(.tail_call_with_this, @intCast(c.args.len));
             return;
@@ -1773,13 +1771,11 @@ pub const Compiler = struct {
         if (c.callee.* == .member) {
             const m = c.callee.member;
             if (m.optional or m.computed == null) return error.Unsupported;
-            const recv = try self.freshTemp();
             try self.compileExpr(m.object);
-            try self.emitDefine(recv);
-            try self.emitLoad(recv);
+            _ = try self.chunk.emit(.dup, 0);
             try self.compileExpr(m.computed.?);
             _ = try self.chunk.emit(.get_index, 0);
-            try self.emitLoad(recv);
+            _ = try self.chunk.emit(.swap, 0);
             for (c.args) |arg| try self.compileExpr(arg);
             _ = try self.chunk.emit(.tail_call_with_this, @intCast(c.args.len));
             return;
@@ -2015,12 +2011,10 @@ pub const Compiler = struct {
                         // any getter) BEFORE the arguments, per spec order, then call
                         // with this = recv. Mirrors the computed-member path so a
                         // nullish receiver throws before an argument is evaluated.
-                        const recv = try self.freshTemp();
                         try self.compileExpr(m.object);
-                        try self.emitDefine(recv);
-                        try self.emitLoad(recv);
+                        _ = try self.chunk.emit(.dup, 0);
                         _ = try self.chunk.emit(.get_prop, ni);
-                        try self.emitLoad(recv);
+                        _ = try self.chunk.emit(.swap, 0);
                         for (c.args) |arg| try self.compileExpr(arg);
                         _ = try self.chunk.emit(.call_with_this, @intCast(c.args.len));
                     }
@@ -2028,13 +2022,11 @@ pub const Compiler = struct {
                     if (spread) return error.Unsupported;
                     const m = c.callee.member;
                     if (m.optional or m.computed == null) return error.Unsupported;
-                    const recv = try self.freshTemp();
                     try self.compileExpr(m.object);
-                    try self.emitDefine(recv);
-                    try self.emitLoad(recv);
+                    _ = try self.chunk.emit(.dup, 0);
                     try self.compileExpr(m.computed.?);
                     _ = try self.chunk.emit(.get_index, 0);
-                    try self.emitLoad(recv);
+                    _ = try self.chunk.emit(.swap, 0);
                     for (c.args) |arg| try self.compileExpr(arg);
                     _ = try self.chunk.emit(.call_with_this, @intCast(c.args.len));
                 } else {

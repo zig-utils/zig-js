@@ -105,6 +105,7 @@ pub const Op = enum(u8) {
     load_false,
     pop, // discard top of stack
     dup, // duplicate top of stack
+    swap, // swap the top two stack values
     set_acc, // pop -> completion accumulator (program-level result)
 
     // --- globals (resolved by name against the Environment) ---

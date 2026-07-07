@@ -362,6 +362,12 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
             .load_false => try stack.append(stack_alloc, Value.boolVal(false)),
             .pop => _ = stack.pop(),
             .dup => try stack.append(stack_alloc, stack.items[stack.items.len - 1]),
+            .swap => {
+                const top = stack.items.len - 1;
+                const tmp = stack.items[top];
+                stack.items[top] = stack.items[top - 1];
+                stack.items[top - 1] = tmp;
+            },
             .set_acc => acc = stack.pop().?,
 
             .load_var => {
