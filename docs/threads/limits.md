@@ -144,7 +144,10 @@ context APIs.
   delivery, collection helpers, and GC allocation. Its `joins` columns split
   `Thread.join` parks from aggregate park pressure, its `lock`/`cond`/`prop`
   columns split the remaining sync park pressure by contended `Lock.hold`,
-  `Condition.wait`, and property `Atomics.wait`, its `async`/`done` columns
+  `Condition.wait`, and property `Atomics.wait`, its
+  `waitus`/`jus`/`lus`/`cus`/`pus` columns split total native wait
+  microseconds plus join/lock/condition/property wait microseconds, its
+  `async`/`done` columns
   now split async condition/property-waitAsync registration from completed
   async-condition reacquires plus settled property `waitAsync` tickets, and its
   `empty`/`jobs` columns show whether run-loop task-pump overhead is empty

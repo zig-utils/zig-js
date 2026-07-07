@@ -34,7 +34,9 @@ zig build gc-profile
 
 These profiles are not correctness gates. `threads-profile` is the local
 contention baseline for comparing the no-GIL default against `.gil = true`
-across the hot shared structures named in the production roadmap. `gc-profile`
+across the hot shared structures named in the production roadmap; it now prints
+internal native-wait microsecond attribution for join, lock, condition, and
+property waits alongside the existing contention event counters. `gc-profile`
 is the local allocation/lifecycle baseline for comparing arena, explicit-GC,
 no-GIL threaded GC, and `.gil = true` context modes, including the reusable
 GC-cell slab backing.

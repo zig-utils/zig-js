@@ -98,6 +98,10 @@ pub const ContentionStats = struct {
     task_pump_jobs: u64 = 0,
     task_pump_async_hold_jobs: u64 = 0,
     task_pump_condition_jobs: u64 = 0,
+    thread_join_wait_ns: u64 = 0,
+    lock_wait_ns: u64 = 0,
+    condition_wait_ns: u64 = 0,
+    property_wait_ns: u64 = 0,
 
     pub fn events(self: ContentionStats) u64 {
         return self.lock_contentions + self.async_hold_queued +
@@ -116,6 +120,11 @@ pub const ContentionStats = struct {
 
     pub fn asyncSettled(self: ContentionStats) u64 {
         return self.condition_async_settled + self.property_wait_async_settled;
+    }
+
+    pub fn waitNs(self: ContentionStats) u64 {
+        return self.thread_join_wait_ns + self.lock_wait_ns +
+            self.condition_wait_ns + self.property_wait_ns;
     }
 };
 
@@ -136,6 +145,10 @@ const ContentionCounters = struct {
     task_pump_jobs: std.atomic.Value(u64) = .init(0),
     task_pump_async_hold_jobs: std.atomic.Value(u64) = .init(0),
     task_pump_condition_jobs: std.atomic.Value(u64) = .init(0),
+    thread_join_wait_ns: std.atomic.Value(u64) = .init(0),
+    lock_wait_ns: std.atomic.Value(u64) = .init(0),
+    condition_wait_ns: std.atomic.Value(u64) = .init(0),
+    property_wait_ns: std.atomic.Value(u64) = .init(0),
 };
 
 var contention_counters: ContentionCounters = .{};
@@ -159,6 +172,10 @@ pub fn resetContentionStats() void {
     contention_counters.task_pump_jobs.store(0, .release);
     contention_counters.task_pump_async_hold_jobs.store(0, .release);
     contention_counters.task_pump_condition_jobs.store(0, .release);
+    contention_counters.thread_join_wait_ns.store(0, .release);
+    contention_counters.lock_wait_ns.store(0, .release);
+    contention_counters.condition_wait_ns.store(0, .release);
+    contention_counters.property_wait_ns.store(0, .release);
     contention_stats_enabled.store(true, .release);
 }
 
@@ -184,12 +201,27 @@ pub fn contentionStats() ContentionStats {
         .task_pump_jobs = contention_counters.task_pump_jobs.load(.acquire),
         .task_pump_async_hold_jobs = contention_counters.task_pump_async_hold_jobs.load(.acquire),
         .task_pump_condition_jobs = contention_counters.task_pump_condition_jobs.load(.acquire),
+        .thread_join_wait_ns = contention_counters.thread_join_wait_ns.load(.acquire),
+        .lock_wait_ns = contention_counters.lock_wait_ns.load(.acquire),
+        .condition_wait_ns = contention_counters.condition_wait_ns.load(.acquire),
+        .property_wait_ns = contention_counters.property_wait_ns.load(.acquire),
     };
 }
 
 inline fn bumpContention(comptime field: []const u8) void {
     if (!contention_stats_enabled.load(.monotonic)) return;
     _ = @field(contention_counters, field).fetchAdd(1, .monotonic);
+}
+
+inline fn startContentionWaitTimer() ?i96 {
+    if (!contention_stats_enabled.load(.monotonic)) return null;
+    return std.Io.Timestamp.now(agent.engineIo(), .awake).nanoseconds;
+}
+
+inline fn finishContentionWaitTimer(comptime field: []const u8, start_ns: ?i96) void {
+    const start = start_ns orelse return;
+    const elapsed = @as(u64, @intCast(@max(std.Io.Timestamp.now(agent.engineIo(), .awake).nanoseconds - start, 0)));
+    _ = @field(contention_counters, field).fetchAdd(elapsed, .monotonic);
 }
 
 pub fn currentThreadId() u64 {
@@ -199,11 +231,14 @@ pub fn currentThreadId() u64 {
 test "jsthread contention stats reset and snapshot" {
     disableContentionStats();
     bumpContention("lock_contentions");
+    finishContentionWaitTimer("lock_wait_ns", startContentionWaitTimer());
     try std.testing.expectEqual(@as(u64, 0), contentionStats().events());
+    try std.testing.expectEqual(@as(u64, 0), contentionStats().waitNs());
 
     resetContentionStats();
     try std.testing.expectEqual(@as(u64, 0), contentionStats().events());
     try std.testing.expectEqual(@as(u64, 0), contentionStats().parks());
+    try std.testing.expectEqual(@as(u64, 0), contentionStats().waitNs());
 
     bumpContention("lock_contentions");
     bumpContention("async_hold_queued");
@@ -221,6 +256,10 @@ test "jsthread contention stats reset and snapshot" {
     bumpContention("task_pump_jobs");
     bumpContention("task_pump_async_hold_jobs");
     bumpContention("task_pump_condition_jobs");
+    finishContentionWaitTimer("thread_join_wait_ns", 0);
+    finishContentionWaitTimer("lock_wait_ns", 0);
+    finishContentionWaitTimer("condition_wait_ns", 0);
+    finishContentionWaitTimer("property_wait_ns", 0);
 
     const stats = contentionStats();
     try std.testing.expectEqual(@as(u64, 6), stats.events());
@@ -231,6 +270,11 @@ test "jsthread contention stats reset and snapshot" {
     try std.testing.expectEqual(@as(u64, 1), stats.task_pump_jobs);
     try std.testing.expectEqual(@as(u64, 1), stats.task_pump_async_hold_jobs);
     try std.testing.expectEqual(@as(u64, 1), stats.task_pump_condition_jobs);
+    try std.testing.expect(stats.thread_join_wait_ns > 0);
+    try std.testing.expect(stats.lock_wait_ns > 0);
+    try std.testing.expect(stats.condition_wait_ns > 0);
+    try std.testing.expect(stats.property_wait_ns > 0);
+    try std.testing.expectEqual(stats.thread_join_wait_ns + stats.lock_wait_ns + stats.condition_wait_ns + stats.property_wait_ns, stats.waitNs());
 
     resetContentionStats();
     try std.testing.expectEqual(@as(u64, 0), contentionStats().events());
@@ -241,6 +285,7 @@ test "jsthread contention stats reset and snapshot" {
     try std.testing.expectEqual(@as(u64, 0), contentionStats().task_pump_jobs);
     try std.testing.expectEqual(@as(u64, 0), contentionStats().task_pump_async_hold_jobs);
     try std.testing.expectEqual(@as(u64, 0), contentionStats().task_pump_condition_jobs);
+    try std.testing.expectEqual(@as(u64, 0), contentionStats().waitNs());
     disableContentionStats();
 }
 
@@ -1208,10 +1253,12 @@ fn acquireLock(self: *Interpreter, rec: *LockRecord, timeout_ns: ?u64, err_name:
                 return self.throwError("Error", "worker terminated");
             if (!rec.locked and rec.sync_generation != my_generation) break;
             bumpContention("lock_wait_parks");
+            const wait_start = startContentionWaitTimer();
             waitOnLockCond(self, rec, .{ .duration = .{
                 .raw = .fromNanoseconds(tick_ns),
                 .clock = .awake,
             } });
+            finishContentionWaitTimer("lock_wait_ns", wait_start);
         }
         rec.sync_waiting -= 1;
     }
@@ -1482,10 +1529,12 @@ fn condWaitCore(self: *Interpreter, rec: *CondRecord, lock: *LockRecord, timeout
             tick_ns = @min(tick_ns, @as(u64, @intCast(d - now)));
         }
         bumpContention("condition_wait_parks");
+        const wait_start = startContentionWaitTimer();
         waitOnCondRecord(self, rec, .{ .duration = .{
             .raw = .fromNanoseconds(tick_ns),
             .clock = .awake,
         } });
+        finishContentionWaitTimer("condition_wait_ns", wait_start);
     }
     // Re-register on the lock BEFORE acking the wake, so notifyAll's
     // consume-loop guarantees FIFO against async regrants.
@@ -2420,10 +2469,12 @@ pub fn propWait(self: *Interpreter, args: []const Value, timeout_ns: ?u64) value
             tick_ns = @min(tick_ns, @as(u64, @intCast(d - now)));
         }
         bumpContention("property_wait_parks");
+        const wait_start = startContentionWaitTimer();
         waitPropTicketTimeout(self, g, ticket, .{ .duration = .{
             .raw = .fromNanoseconds(tick_ns),
             .clock = .awake,
         } }) catch {};
+        finishContentionWaitTimer("property_wait_ns", wait_start);
     }
     return Value.str("ok");
 }
@@ -2788,10 +2839,12 @@ fn parkPumpThreadJoin(self: *Interpreter, rec: *ThreadRecord) value.HostError!vo
     const released_gil = self.use_thread_gil;
     if (released_gil) rec.gil.release();
     bumpContention("thread_join_parks");
+    const wait_start = startContentionWaitTimer();
     io_compat.conditionWaitTimeout(&rec.done_cond, io, &rec.join_mutex, .{ .duration = .{
         .raw = .fromMilliseconds(5),
         .clock = .awake,
     } }) catch {};
+    finishContentionWaitTimer("thread_join_wait_ns", wait_start);
     if (released_gil) {
         rec.join_mutex.unlock(io);
         rec.gil.acquire();

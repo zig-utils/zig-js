@@ -423,6 +423,10 @@ fn nowNs(io: std.Io) i96 {
     return std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
 }
 
+fn nsToUs(ns: u64) u64 {
+    return ns / 1_000;
+}
+
 fn installHarness(ctx: *js.Context, scenario: Scenario) !void {
     _ = try ctx.evaluate(scenario.setup);
     _ = try ctx.evaluate(
@@ -471,8 +475,7 @@ fn timeScenario(gpa: std.mem.Allocator, io: std.Io, scenario: Scenario, workers:
 fn printScenario(gpa: std.mem.Allocator, io: std.Io, scenario: Scenario, workers: []const usize) !void {
     std.debug.print("\n{s}\n", .{scenario.name});
     std.debug.print("{s:>8} {s:>14} {s:>14} {s:>12} {s:>12}" ++
-        " {s:>10} {s:>10} {s:>10} {s:>9} {s:>9} {s:>9} {s:>10} {s:>10} {s:>10} {s:>10} {s:>10} {s:>10}" ++
-        " {s:>10} {s:>10} {s:>10} {s:>9} {s:>9} {s:>9} {s:>10} {s:>10} {s:>10} {s:>10} {s:>10} {s:>10}\n", .{
+        " {s:>10} {s:>10} {s:>10} {s:>9} {s:>9} {s:>9} {s:>10} {s:>9} {s:>9} {s:>9} {s:>9} {s:>10} {s:>10} {s:>10} {s:>10} {s:>10} {s:>10}", .{
         "threads",
         "no-gil ns",
         "gil ns",
@@ -484,18 +487,30 @@ fn printScenario(gpa: std.mem.Allocator, io: std.Io, scenario: Scenario, workers
         "ng lock",
         "ng cond",
         "ng prop",
+        "ng waitus",
+        "ng jus",
+        "ng lus",
+        "ng cus",
+        "ng pus",
         "ng async",
         "ng done",
         "ng empty",
         "ng jobs",
         "ng hold",
         "ng cjob",
+    });
+    std.debug.print(" {s:>10} {s:>10} {s:>10} {s:>9} {s:>9} {s:>9} {s:>10} {s:>9} {s:>9} {s:>9} {s:>9} {s:>10} {s:>10} {s:>10} {s:>10} {s:>10} {s:>10}\n", .{
         "gil events",
         "gil parks",
         "gil joins",
         "gil lock",
         "gil cond",
         "gil prop",
+        "gil waitus",
+        "gil jus",
+        "gil lus",
+        "gil cus",
+        "gil pus",
         "gil async",
         "gil done",
         "gil empty",
@@ -519,8 +534,7 @@ fn printScenario(gpa: std.mem.Allocator, io: std.Io, scenario: Scenario, workers
             @as(f64, @floatFromInt(@max(parallel_ns, 1)));
 
         std.debug.print("{d:>8} {d:>14} {d:>14} {d:>11.2}x {d:>11.2}x" ++
-            " {d:>10} {d:>10} {d:>10} {d:>9} {d:>9} {d:>9} {d:>10} {d:>10} {d:>10} {d:>10} {d:>10} {d:>10}" ++
-            " {d:>10} {d:>10} {d:>10} {d:>9} {d:>9} {d:>9} {d:>10} {d:>10} {d:>10} {d:>10} {d:>10} {d:>10}\n", .{
+            " {d:>10} {d:>10} {d:>10} {d:>9} {d:>9} {d:>9} {d:>10} {d:>9} {d:>9} {d:>9} {d:>9} {d:>10} {d:>10} {d:>10} {d:>10} {d:>10} {d:>10}", .{
             n,
             parallel_ns,
             gil_ns,
@@ -532,18 +546,30 @@ fn printScenario(gpa: std.mem.Allocator, io: std.Io, scenario: Scenario, workers
             parallel.stats.lock_wait_parks,
             parallel.stats.condition_wait_parks,
             parallel.stats.property_wait_parks,
+            nsToUs(parallel.stats.waitNs()),
+            nsToUs(parallel.stats.thread_join_wait_ns),
+            nsToUs(parallel.stats.lock_wait_ns),
+            nsToUs(parallel.stats.condition_wait_ns),
+            nsToUs(parallel.stats.property_wait_ns),
             parallel.stats.asyncWaits(),
             parallel.stats.asyncSettled(),
             parallel.stats.task_pump_empty,
             parallel.stats.task_pump_jobs,
             parallel.stats.task_pump_async_hold_jobs,
             parallel.stats.task_pump_condition_jobs,
+        });
+        std.debug.print(" {d:>10} {d:>10} {d:>10} {d:>9} {d:>9} {d:>9} {d:>10} {d:>9} {d:>9} {d:>9} {d:>9} {d:>10} {d:>10} {d:>10} {d:>10} {d:>10} {d:>10}\n", .{
             gil.stats.events(),
             gil.stats.parks(),
             gil.stats.thread_join_parks,
             gil.stats.lock_wait_parks,
             gil.stats.condition_wait_parks,
             gil.stats.property_wait_parks,
+            nsToUs(gil.stats.waitNs()),
+            nsToUs(gil.stats.thread_join_wait_ns),
+            nsToUs(gil.stats.lock_wait_ns),
+            nsToUs(gil.stats.condition_wait_ns),
+            nsToUs(gil.stats.property_wait_ns),
             gil.stats.asyncWaits(),
             gil.stats.asyncSettled(),
             gil.stats.task_pump_empty,
@@ -961,6 +987,7 @@ pub fn main() !void {
     std.debug.print("events = logical contention (Lock/Condition/property wait/asyncHold); parks = timed wait/pump iterations including Thread.join\n", .{});
     std.debug.print("joins = Thread.join timed wait/pump iterations, separated from other park sources for lifecycle attribution\n", .{});
     std.debug.print("lock/cond/prop = park iterations attributed to contended Lock.hold, Condition.wait, and property Atomics.wait\n", .{});
+    std.debug.print("waitus/jus/lus/cus/pus = total native wait microseconds, then join/lock/condition/property wait microseconds\n", .{});
     std.debug.print("async/done = Condition.asyncWait and property waitAsync registrations / completed condition reacquires plus settled property waitAsync tickets\n", .{});
     std.debug.print("empty/jobs = run-loop task-pump empty fast-path hits / delivered grant jobs; hold/cjob split asyncHold vs Condition.asyncWait reacquire jobs\n", .{});
 
