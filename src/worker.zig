@@ -23,6 +23,7 @@ const agent = @import("agent.zig");
 const Context = ContextMod.Context;
 const Value = value.Value;
 const alloc = std.heap.page_allocator;
+const channel_queue_reserve_granularity = 64;
 
 /// A FIFO of serialized messages with blocking pop. Closing wakes every
 /// waiter; remaining messages are still poppable (drain-then-stop), and
@@ -47,6 +48,13 @@ const Channel = struct {
         ch.queue_head = 0;
     }
 
+    fn ensureQueueCapacityLocked(ch: *Channel, additional: usize) !void {
+        const needed = ch.queue.items.len + additional;
+        if (needed <= ch.queue.capacity) return;
+        const extra = @max(additional, channel_queue_reserve_granularity);
+        try ch.queue.ensureTotalCapacity(alloc, ch.queue.items.len + extra);
+    }
+
     fn push(ch: *Channel, bytes: []u8) void {
         const io = agent.engineIo();
         ch.mutex.lockUncancelable(io);
@@ -56,11 +64,12 @@ const Channel = struct {
             alloc.free(bytes);
             return;
         }
-        ch.queue.append(alloc, bytes) catch {
+        ch.ensureQueueCapacityLocked(1) catch {
             structured_clone.releaseSerialized(bytes);
             alloc.free(bytes);
             return;
         };
+        ch.queue.appendAssumeCapacity(bytes);
         ch.cond.signal(io);
     }
 
@@ -142,6 +151,32 @@ test "worker channel pops FIFO without front shifts" {
 
     ch.close();
     try std.testing.expect(ch.pop(0) == null);
+}
+
+test "worker channel reserves fixed-size capacity chunks" {
+    var ch = Channel{};
+    defer ch.deinit();
+
+    try std.testing.expectEqual(@as(usize, 0), ch.queue.capacity);
+    const first = try alloc.dupe(u8, &.{1});
+    ch.push(first);
+    try std.testing.expect(ch.queue.capacity >= channel_queue_reserve_granularity);
+    try std.testing.expectEqual(@as(usize, 1), ch.queue.items.len);
+
+    const first_capacity = ch.queue.capacity;
+    var i: usize = 1;
+    while (i < first_capacity) : (i += 1) {
+        const msg = try alloc.dupe(u8, &.{@intCast(i & 0xff)});
+        ch.push(msg);
+    }
+    try std.testing.expectEqual(first_capacity, ch.queue.capacity);
+    try std.testing.expectEqual(first_capacity, ch.queue.items.len);
+
+    const extra = try alloc.dupe(u8, &.{0xff});
+    ch.push(extra);
+    try std.testing.expect(ch.queue.capacity > first_capacity);
+
+    while (ch.pop(0)) |bytes| alloc.free(bytes);
 }
 
 /// A module-graph entry point for a module worker. The host's `load`

@@ -276,12 +276,14 @@ Known performance/maturity work:
   tickets in one pass while preserving FIFO order for other waiters.
 - Worker inbox/outbox channels now use FIFO head cursors for structured-clone
   message queues, so Worker-heavy lifecycle and receive loops do not pay one
-  front shift per delivered message. `$262.agent` reports use the same FIFO
-  head-cursor shape, so report-heavy Atomics/test262 agent cases avoid one
-  front shift per `getReport()`. Empty internal `Worker.receive(..., 0)` polls
-  now return from the channel while holding the queue lock instead of entering a
-  timed condition wait, and skip drained-queue compaction on the empty fast
-  path.
+  front shift per delivered message. Channel writers also reserve fixed-size
+  queue capacity chunks before capacity-assumed appends, so Worker message
+  bursts grow the inbox/outbox arrays less often while holding the channel
+  mutex. `$262.agent` reports use the same FIFO head-cursor shape, so
+  report-heavy Atomics/test262 agent cases avoid one front shift per
+  `getReport()`. Empty internal `Worker.receive(..., 0)` polls now return from
+  the channel while holding the queue lock instead of entering a timed condition
+  wait, and skip drained-queue compaction on the empty fast path.
 - Active interpreter roots, protected C-API handles, and GIL park records are
   unordered root sets, so their removals now use swap removal instead of
   order-preserving list shifts on evaluate, handle-unprotect, and thread

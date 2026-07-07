@@ -502,6 +502,10 @@ finite tickets settle; the single-lock `Condition.asyncWait` row exposes
 same-lock regrant batching, while the multi-lock row exercises FIFO-bursted
 realm task enqueue across lock groups and the paired run-loop job delivery
 pressure separately through the `hold` versus `cjob` split.
+Worker channel unit tests cover both FIFO head-cursor draining and fixed-size
+capacity chunk reservation before inbox/outbox appends; the script/module Worker
+message rows in `threads-profile` are the local signal for whether those queue
+growth reductions help or regress Worker-heavy traffic.
 `threads-profile` remains the check that this kind of targeted optimization
 does not merely move overhead elsewhere.
 
