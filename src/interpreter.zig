@@ -2339,6 +2339,16 @@ pub const Interpreter = struct {
                             try self.setMember(recv, try self.keyOf(kv), v);
                         }
                         break :blk v;
+                    } else {
+                        // `obj.name = rhs`: evaluate the object (the MemberExpression)
+                        // BEFORE the RHS, per spec order (PutValue runs after both).
+                        // assignTo's member arm does the same [[Set]] — via setMember,
+                        // so private/getter-setter/primitive semantics are unchanged —
+                        // but only after the caller already evaluated the RHS.
+                        const recv = try self.eval(m.object);
+                        const v = try self.eval(a.value);
+                        try self.setMember(recv, m.property, v);
+                        break :blk v;
                     }
                 }
                 // `super[key] = value`: the SuperReference is created before the
