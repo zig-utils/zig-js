@@ -322,7 +322,8 @@ export fn JSValueProtect(ctx: JSContextRef, v: JSValueRef) callconv(.c) void {
             return;
         }
     }
-    c.c_api_handles.append(c.gpa, .{ .ref = raw, .count = 1 }) catch {};
+    c.reserveCApiHandlesLocked(1) catch return;
+    c.c_api_handles.appendAssumeCapacity(.{ .ref = raw, .count = 1 });
 }
 
 export fn JSValueUnprotect(ctx: JSContextRef, v: JSValueRef) callconv(.c) void {
@@ -846,6 +847,35 @@ test "C-API: JSGarbageCollect honors JSValueProtect/Unprotect (GC on)" {
     JSValueUnprotect(ctx, held);
     JSGarbageCollect(ctx);
     try std.testing.expect(ctx_obj.gc.?.live_cells < with_protection);
+}
+
+test "C-API: JSValueProtect reserves handle capacity chunks" {
+    const ctx_obj = try Context.createWith(std.testing.allocator, .{ .enable_gc = true, .enable_threads = true });
+    defer ctx_obj.destroy();
+    const ctx: JSContextRef = @ptrCast(ctx_obj);
+
+    const first = JSValueToObject(ctx, JSValueMakeNumber(ctx, 1), null) orelse return error.ObjectCreateFailed;
+    JSValueProtect(ctx, first);
+    try std.testing.expectEqual(@as(usize, 1), ctx_obj.c_api_handles.items.len);
+    try std.testing.expect(ctx_obj.c_api_handles.capacity >= Context.c_api_handle_reserve_granularity);
+    const first_capacity = ctx_obj.c_api_handles.capacity;
+
+    JSValueProtect(ctx, first);
+    try std.testing.expectEqual(@as(usize, 1), ctx_obj.c_api_handles.items.len);
+    try std.testing.expectEqual(@as(usize, 2), ctx_obj.c_api_handles.items[0].count);
+    try std.testing.expectEqual(first_capacity, ctx_obj.c_api_handles.capacity);
+
+    while (ctx_obj.c_api_handles.items.len < first_capacity) {
+        const v = JSValueToObject(ctx, JSValueMakeNumber(ctx, @floatFromInt(ctx_obj.c_api_handles.items.len)), null) orelse return error.ObjectCreateFailed;
+        JSValueProtect(ctx, v);
+    }
+    try std.testing.expectEqual(first_capacity, ctx_obj.c_api_handles.items.len);
+    try std.testing.expectEqual(first_capacity, ctx_obj.c_api_handles.capacity);
+
+    const overflow = JSValueToObject(ctx, JSValueMakeNumber(ctx, 99), null) orelse return error.ObjectCreateFailed;
+    JSValueProtect(ctx, overflow);
+    try std.testing.expectEqual(first_capacity + 1, ctx_obj.c_api_handles.items.len);
+    try std.testing.expect(ctx_obj.c_api_handles.capacity > first_capacity);
 }
 
 test "C-API: JSValueProtect roots survive mid-script parallel GC" {

@@ -466,7 +466,9 @@ root sets have no observable order. `C-API: JSValueProtect roots survive
 mid-script parallel GC` protects an otherwise-unrooted C-API object while
 shared-realm `Thread`s drive a finishing mid-script parallel sweep, verifies the
 object and nested child survive while protected, then proves the final
-`JSValueUnprotect` releases it. `worker channel pops FIFO without front shifts` keeps that queue
+`JSValueUnprotect` releases it. `C-API: JSValueProtect reserves handle capacity
+chunks` guards counted-handle deduplication and fixed-chunk protected-handle
+table growth. `worker channel pops FIFO without front shifts` keeps that queue
 shape and zero-timeout polling behavior under a direct unit guard, while
 `condition queue head cursor skips canceled sync waiters` covers the condition
 timeout/termination queue shape directly, and `condition sync handoff countdown

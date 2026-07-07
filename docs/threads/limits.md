@@ -228,7 +228,10 @@ context APIs.
   retain-list spin lock. FinalizationRegistry cleanup jobs reserve fixed-size
   capacity chunks before capacity-assumed appends after duplicate suppression,
   reducing allocator-growth trips while ready cleanup registries are queued
-  under `realm_lock`. Empty internal
+  under `realm_lock`. C-API protected-handle entries reserve fixed-size
+  capacity chunks before capacity-assumed appends after counted-handle
+  deduplication, reducing allocator-growth trips while `JSValueProtect` queues
+  GC roots under `realm_lock`. Empty internal
   `Worker.receive(..., 0)` polls return under the channel lock without entering
   a timed condition wait or touching drained-queue compaction. Active interpreter roots, protected
   C-API handles, and GIL park records are unordered root sets, so removal now

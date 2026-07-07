@@ -296,6 +296,11 @@ Known performance/maturity work:
   capacity-assumed appends after duplicate suppression, so cleanup storms grow
   the realm cleanup-job queue less often while holding `realm_lock`. Cleanup job
   ordering and one-job-per-ready-registry semantics are unchanged.
+- C-API protected-handle entries reserve fixed-size capacity chunks before
+  capacity-assumed appends after counted-handle deduplication, so embedder
+  protect storms grow the root table less often while holding `realm_lock`.
+  `JSValueProtect` / `JSValueUnprotect` counting semantics and context affinity
+  are unchanged.
 - Active interpreter roots, protected C-API handles, and GIL park records are
   unordered root sets, so their removals now use swap removal instead of
   order-preserving list shifts on evaluate, handle-unprotect, and thread

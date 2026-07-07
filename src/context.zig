@@ -834,6 +834,8 @@ pub fn setParallelSyncEnabled(on: bool) void {
 /// (AST, strings, objects, boxed values) and a persistent global environment
 /// so variables survive across `evaluate` calls, like a real global context.
 pub const Context = struct {
+    pub const c_api_handle_reserve_granularity = 16;
+
     gpa: std.mem.Allocator,
     arena_state: *std.heap.ArenaAllocator,
     /// Thread-safe wrapper over `arena_state` installed when `enable_threads`
@@ -1840,6 +1842,13 @@ pub const Context = struct {
         if (spare >= additional) return;
         const extra = @max(additional, finalization_cleanup_queue_reserve_granularity);
         try self.finalization_cleanup_jobs.ensureTotalCapacity(self.gpa, self.finalization_cleanup_jobs.items.len + extra);
+    }
+
+    pub fn reserveCApiHandlesLocked(self: *Context, additional: usize) error{OutOfMemory}!void {
+        const spare = self.c_api_handles.capacity - self.c_api_handles.items.len;
+        if (spare >= additional) return;
+        const extra = @max(additional, c_api_handle_reserve_granularity);
+        try self.c_api_handles.ensureTotalCapacity(self.gpa, self.c_api_handles.items.len + extra);
     }
 
     fn scriptNeedsTreeWalk(source: []const u8) bool {
