@@ -225,7 +225,10 @@ context APIs.
   often under the group mutex. SharedArrayBuffer retain lists reserve
   fixed-size capacity chunks before capacity-assumed appends too, reducing
   allocator-growth trips while a realm records SAB backing storage under the
-  retain-list spin lock. Empty internal
+  retain-list spin lock. FinalizationRegistry cleanup jobs reserve fixed-size
+  capacity chunks before capacity-assumed appends after duplicate suppression,
+  reducing allocator-growth trips while ready cleanup registries are queued
+  under `realm_lock`. Empty internal
   `Worker.receive(..., 0)` polls return under the channel lock without entering
   a timed condition wait or touching drained-queue compaction. Active interpreter roots, protected
   C-API handles, and GIL park records are unordered root sets, so removal now

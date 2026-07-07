@@ -21,6 +21,8 @@ const promise = @import("promise.zig");
 
 pub const RunError = interp.EvalError || @import("parser.zig").ParseError;
 
+const finalization_cleanup_queue_reserve_granularity = 16;
+
 /// A mutex-guarded wrapper over the per-context arena allocator. Shapes,
 /// interned strings, AST nodes, and Environment binding tables are all
 /// arena-allocated, and `std.heap.ArenaAllocator` is not thread-safe — so once
@@ -1829,7 +1831,15 @@ pub const Context = struct {
         for (self.finalization_cleanup_jobs.items) |queued| {
             if (queued == registry) return;
         }
-        self.finalization_cleanup_jobs.append(self.gpa, registry) catch {};
+        self.reserveFinalizationCleanupJobsLocked(1) catch return;
+        self.finalization_cleanup_jobs.appendAssumeCapacity(registry);
+    }
+
+    fn reserveFinalizationCleanupJobsLocked(self: *Context, additional: usize) error{OutOfMemory}!void {
+        const spare = self.finalization_cleanup_jobs.capacity - self.finalization_cleanup_jobs.items.len;
+        if (spare >= additional) return;
+        const extra = @max(additional, finalization_cleanup_queue_reserve_granularity);
+        try self.finalization_cleanup_jobs.ensureTotalCapacity(self.gpa, self.finalization_cleanup_jobs.items.len + extra);
     }
 
     fn scriptNeedsTreeWalk(source: []const u8) bool {
@@ -11766,6 +11776,36 @@ test "enable_gc: WeakSet does not keep value alive" {
     ctx.collectGarbage();
     const cleared = try ctx.evaluate("globalThis.valueRef.deref() === undefined");
     try std.testing.expectEqual(true, cleared.asBool());
+}
+
+test "enable_gc: FinalizationRegistry cleanup queue reserves capacity chunks" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true, .enable_threads = true });
+    defer ctx.destroy();
+
+    const first = try ctx.arena().create(value.Object);
+    first.* = .{};
+    ctx.queueFinalizationRegistryCleanup(first);
+    try std.testing.expectEqual(@as(usize, 1), ctx.finalization_cleanup_jobs.items.len);
+    try std.testing.expect(ctx.finalization_cleanup_jobs.capacity >= finalization_cleanup_queue_reserve_granularity);
+    const first_capacity = ctx.finalization_cleanup_jobs.capacity;
+
+    ctx.queueFinalizationRegistryCleanup(first);
+    try std.testing.expectEqual(@as(usize, 1), ctx.finalization_cleanup_jobs.items.len);
+    try std.testing.expectEqual(first_capacity, ctx.finalization_cleanup_jobs.capacity);
+
+    while (ctx.finalization_cleanup_jobs.items.len < first_capacity) {
+        const registry = try ctx.arena().create(value.Object);
+        registry.* = .{};
+        ctx.queueFinalizationRegistryCleanup(registry);
+    }
+    try std.testing.expectEqual(first_capacity, ctx.finalization_cleanup_jobs.items.len);
+    try std.testing.expectEqual(first_capacity, ctx.finalization_cleanup_jobs.capacity);
+
+    const overflow = try ctx.arena().create(value.Object);
+    overflow.* = .{};
+    ctx.queueFinalizationRegistryCleanup(overflow);
+    try std.testing.expectEqual(first_capacity + 1, ctx.finalization_cleanup_jobs.items.len);
+    try std.testing.expect(ctx.finalization_cleanup_jobs.capacity > first_capacity);
 }
 
 test "enable_gc: FinalizationRegistry cleanupSome delivers collected holdings" {

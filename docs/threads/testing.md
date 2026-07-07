@@ -561,6 +561,8 @@ context teardown across arena, no-GIL threaded, and `.gil = true` contexts.
 growth invariant so structured-clone/lifecycle churn does not regress to one
 allocator-growth trip per tracked backing reference under the retain-list spin
 lock.
+`FinalizationRegistry cleanup queue reserves capacity chunks` guards cleanup
+job duplicate suppression and fixed-chunk queue growth under the realm lock.
 Collection-helper removal witnesses live in the same unit suite:
 `WeakMap and WeakSet entry delete is unordered tail removal`,
 `gc pruneDeadWeakEntries removes dead weak keys with unordered tail removal`,

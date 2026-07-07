@@ -292,6 +292,10 @@ Known performance/maturity work:
   lock. This keeps the JS-visible SAB storage contract unchanged: backing slabs
   stay refcounted, fixed-address, and released exactly once per retained realm
   wrapper.
+- FinalizationRegistry cleanup jobs reserve fixed-size capacity chunks before
+  capacity-assumed appends after duplicate suppression, so cleanup storms grow
+  the realm cleanup-job queue less often while holding `realm_lock`. Cleanup job
+  ordering and one-job-per-ready-registry semantics are unchanged.
 - Active interpreter roots, protected C-API handles, and GIL park records are
   unordered root sets, so their removals now use swap removal instead of
   order-preserving list shifts on evaluate, handle-unprotect, and thread
