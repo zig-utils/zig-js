@@ -247,7 +247,9 @@ context APIs.
   under the GIL/API lock. Active-interpreter root entries reserve fixed-size
   capacity chunks before capacity-assumed appends, reducing allocator-growth
   trips while evaluate/drain paths register GC roots under the
-  active-interpreter lock. Empty internal
+  active-interpreter lock. GIL park records reserve fixed-size capacity chunks
+  before capacity-assumed appends, reducing allocator-growth trips while threads
+  register their mid-script-GC stack-scan records under the GIL. Empty internal
   `Worker.receive(..., 0)` polls return under the channel lock without entering
   a timed condition wait or touching drained-queue compaction. Active interpreter roots, protected
   C-API handles, and GIL park records are unordered root sets, so removal now

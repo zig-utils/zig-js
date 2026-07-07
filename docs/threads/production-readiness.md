@@ -324,6 +324,11 @@ Known performance/maturity work:
   capacity-assumed appends, so evaluate/drain and GC-root registration churn
   grows that root table less often while holding the active-interpreter lock.
   Push/pop semantics and GC root iteration are unchanged.
+- GIL park records reserve fixed-size capacity chunks before capacity-assumed
+  appends, so thread entry/exit and mid-script-GC root-publication registration
+  grow the per-realm park table less often while holding the GIL. Duplicate
+  suppression, parked-stack publication, collector iteration, and unregister
+  semantics are unchanged.
 - Active interpreter roots, protected C-API handles, and GIL park records are
   unordered root sets, so their removals now use swap removal instead of
   order-preserving list shifts on evaluate, handle-unprotect, and thread

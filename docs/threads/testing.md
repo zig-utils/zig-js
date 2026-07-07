@@ -582,6 +582,9 @@ job duplicate suppression and fixed-chunk queue growth under the realm lock.
 spawned-record growth invariant for shared-realm `Thread` lifecycle churn.
 `active interpreter root list reserves capacity chunks` guards evaluation/GC
 root-list reserve growth and swap-pop cleanup.
+`Gil park records reserve capacity chunks and unregister by swap` guards
+threadlocal park-record registration growth, duplicate suppression, and
+swap-removal cleanup for mid-script GC stack-scan records.
 Collection-helper removal witnesses live in the same unit suite:
 `WeakMap and WeakSet entry delete is unordered tail removal`,
 `gc pruneDeadWeakEntries removes dead weak keys with unordered tail removal`,

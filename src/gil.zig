@@ -12,6 +12,7 @@ const stack_scan = @import("stack_scan.zig");
 
 pub const Gil = struct {
     const task_queue_reserve_granularity: usize = 64;
+    const park_record_reserve_granularity: usize = 16;
 
     mutex: std.Io.Mutex = .init,
     /// The holding thread (0 = unheld) — written only by the holder right
@@ -238,7 +239,15 @@ pub const Gil = struct {
     pub fn registerPark(g: *Gil, rec: *stack_scan.ParkScan) void {
         const a = g.park_alloc orelse return;
         for (g.park_records.items) |existing| if (existing == rec) return;
-        g.park_records.append(a, rec) catch {};
+        g.ensureParkRecordCapacityLocked(a, 1) catch return;
+        g.park_records.appendAssumeCapacity(rec);
+    }
+
+    fn ensureParkRecordCapacityLocked(g: *Gil, a: std.mem.Allocator, additional: usize) !void {
+        const spare = g.park_records.capacity - g.park_records.items.len;
+        if (spare >= additional) return;
+        const extra = @max(additional, park_record_reserve_granularity);
+        try g.park_records.ensureTotalCapacity(a, g.park_records.items.len + extra);
     }
 
     /// Unregister this thread's park record. Call under the GIL before the
@@ -266,6 +275,47 @@ pub const Gil = struct {
             if (!stack_scan.isParked(rec)) return false;
         }
         return true;
+    }
+
+    test "Gil park records reserve capacity chunks and unregister by swap" {
+        const a = std.testing.allocator;
+        var g = Gil{ .park_alloc = a };
+        defer g.park_records.deinit(a);
+
+        var first = stack_scan.ParkScan{};
+        g.registerPark(&first);
+        try std.testing.expectEqual(@as(usize, 1), g.park_records.items.len);
+        try std.testing.expect(g.park_records.capacity >= Gil.park_record_reserve_granularity);
+
+        g.registerPark(&first);
+        try std.testing.expectEqual(@as(usize, 1), g.park_records.items.len);
+
+        const first_capacity = g.park_records.capacity;
+        var records = try a.alloc(stack_scan.ParkScan, first_capacity + 1);
+        defer a.free(records);
+        @memset(records, .{});
+
+        var i: usize = 0;
+        while (g.park_records.items.len < first_capacity) : (i += 1) {
+            g.registerPark(&records[i]);
+        }
+        try std.testing.expectEqual(first_capacity, g.park_records.items.len);
+        try std.testing.expectEqual(first_capacity, g.park_records.capacity);
+
+        g.registerPark(&records[i]);
+        try std.testing.expectEqual(first_capacity + 1, g.park_records.items.len);
+        try std.testing.expect(g.park_records.capacity > first_capacity);
+
+        const removed = g.park_records.items[1];
+        const tail = g.park_records.items[g.park_records.items.len - 1];
+        g.unregisterPark(removed);
+        try std.testing.expectEqual(first_capacity, g.park_records.items.len);
+        try std.testing.expectEqual(@intFromPtr(tail), @intFromPtr(g.park_records.items[1]));
+
+        while (g.park_records.items.len > 0) {
+            g.unregisterPark(g.park_records.items[0]);
+        }
+        try std.testing.expectEqual(@as(usize, 0), g.park_records.items.len);
     }
 
     pub fn acquire(g: *Gil) void {
