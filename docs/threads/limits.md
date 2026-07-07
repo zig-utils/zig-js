@@ -115,7 +115,11 @@ context APIs.
   per-size-class bucket tables for the empty context and the object workload, so
   future nursery/generational and context-lifecycle work can separate global
   setup pressure from workload pressure while targeting the slot sizes that
-  dominate chunk count, issued cells, free cells, and surviving live cells. The
+  dominate chunk count, issued cells, fresh allocation, reused allocation, freed
+  cells, free cells, and surviving live cells. The same profile now includes a
+  repeated allocate-plus-collect churn table that reports fresh/reused/freed
+  cells, final chunk/live counts, and reuse percentage for GC modes, giving the
+  nursery/generational roadmap a direct freelist-reuse baseline. The
   object-sized 1024/2048-byte buckets now use 384 KiB chunks: the local profile
   keeps the intrinsic empty context at three object-cell chunks with 1152 slots,
   and the object-heavy profile at roughly 55 object-cell chunks instead of the

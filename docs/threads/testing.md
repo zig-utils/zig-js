@@ -515,21 +515,27 @@ footprint and for an object-heavy allocation run: chunk count, total cell-slot
 capacity, live cells at context creation, live cells after allocation, free
 slots after collection, and live cells after collection. It then prints
 per-size-class bucket tables for the empty context and the same object workload,
-showing slot size, chunks, capacity, issued cells, free cells, and surviving
-live cells. GC finalizer attribution is also split between empty-context destroy
-and destroy after the object workload.
-These snapshot paths use exact per-bucket free, capacity, and issued-slot
-counters rather than walking every free-list node or slab chunk. The
-object-sized 1024/2048-byte buckets use 384 KiB slab chunks rather than the
-small buckets' 64 KiB chunks, so compare chunk counts alongside wall-clock
-timings when evaluating GC allocation or lifecycle changes. A healthy local
-profile should show the empty context at three object-cell chunks and the
-object-heavy script around 55 object-cell chunks instead of the older 83-chunk
-baseline.
+showing slot size, chunks, capacity, issued cells, fresh allocations, reused
+allocations, freed cells, free cells, and surviving live cells. GC finalizer
+attribution is also split between empty-context destroy and destroy after the
+object workload.
+These snapshot paths use exact per-bucket free, capacity, issued-slot,
+fresh-allocation, reused-allocation, and freed-slot counters rather than walking
+every free-list node or slab chunk. The object-sized 1024/2048-byte buckets use
+384 KiB slab chunks rather than the small buckets' 64 KiB chunks, so compare
+chunk counts alongside wall-clock timings when evaluating GC allocation or
+lifecycle changes. A healthy local profile should show the empty context at
+three object-cell chunks and the object-heavy script around 55 object-cell
+chunks instead of the older 83-chunk baseline. The same profile now prints a
+repeated allocate-plus-collect churn table that summarizes fresh cells, reused
+cells, freed cells, final chunk/live counts, and reuse percentage for GC modes;
+this is the local evidence trail for future nursery/generational allocation
+work.
 Direct `GcCellBacking` unit tests cover lazy fresh-slot bumping, free-list
 recycling, fresh-chunk cursor advancement, ownership span/hint classification,
-stats accounting, multi-chunk maintained-counter snapshots, bucket attribution,
-bulk-teardown behavior, and bucket-shaped delegated side frees during teardown.
+stats accounting, cumulative fresh/reused/freed allocation counters,
+multi-chunk maintained-counter snapshots, bucket attribution, bulk-teardown
+behavior, and bucket-shaped delegated side frees during teardown.
 `enable_gc: heap binding and cell backing share one lifecycle allocation` covers
 the context-lifecycle reduction where the GC heap, root-tracing binding, and cell
 backing live in one stable state object instead of three separate GPA

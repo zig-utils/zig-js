@@ -119,6 +119,9 @@ pub const GcCellBacking = struct {
         chunks: usize = 0,
         capacity_slots: usize = 0,
         issued_slots: usize = 0,
+        fresh_allocs: usize = 0,
+        reused_allocs: usize = 0,
+        freed_slots: usize = 0,
         free_slots: usize = 0,
         live_slots: usize = 0,
     };
@@ -136,6 +139,9 @@ pub const GcCellBacking = struct {
     bucket_capacity_bytes: [bucket_count]usize = .{ 0, 0, 0, 0, 0, 0 },
     bucket_capacity_slots: [bucket_count]usize = .{ 0, 0, 0, 0, 0, 0 },
     bucket_issued_slots: [bucket_count]usize = .{ 0, 0, 0, 0, 0, 0 },
+    bucket_fresh_allocs: [bucket_count]usize = .{ 0, 0, 0, 0, 0, 0 },
+    bucket_reused_allocs: [bucket_count]usize = .{ 0, 0, 0, 0, 0, 0 },
+    bucket_freed_slots: [bucket_count]usize = .{ 0, 0, 0, 0, 0, 0 },
     /// Last chunk with unbumped fresh slots for each bucket. Lazy allocation
     /// keeps this hot so object-heavy scripts do not rescan filled chunks.
     bucket_bump_hint: [bucket_count]?usize = .{ null, null, null, null, null, null },
@@ -217,6 +223,7 @@ pub const GcCellBacking = struct {
     fn recordFreshBump(self: *GcCellBacking, idx: usize, chunk_idx: usize, off: usize) void {
         const slot_size = bucket_sizes[idx];
         self.bucket_issued_slots[idx] += 1;
+        self.bucket_fresh_allocs[idx] += 1;
         self.bucket_owns_hint[idx] = chunk_idx;
         self.bucket_bump_hint[idx] = chunk_idx;
         if (off + slot_size >= self.bucket_chunks[idx].items[chunk_idx].len and self.bucket_bump_start[idx] <= chunk_idx) {
@@ -304,6 +311,7 @@ pub const GcCellBacking = struct {
             if (self.free_lists[idx]) |node| {
                 self.free_lists[idx] = node.next;
                 self.bucket_free_counts[idx] -= 1;
+                self.bucket_reused_allocs[idx] += 1;
                 return @ptrCast(node);
             }
             return self.bumpFreshSlotLocked(idx);
@@ -357,6 +365,7 @@ pub const GcCellBacking = struct {
                 node.next = self.free_lists[idx];
                 self.free_lists[idx] = node;
                 self.bucket_free_counts[idx] += 1;
+                self.bucket_freed_slots[idx] += 1;
                 return;
             }
             self.inner.vtable.free(self.inner.ptr, mem, alignment, ret_addr);
@@ -407,6 +416,9 @@ pub const GcCellBacking = struct {
                 .chunks = self.bucket_chunk_counts[idx],
                 .capacity_slots = self.bucket_capacity_slots[idx],
                 .issued_slots = self.bucket_issued_slots[idx],
+                .fresh_allocs = self.bucket_fresh_allocs[idx],
+                .reused_allocs = self.bucket_reused_allocs[idx],
+                .freed_slots = self.bucket_freed_slots[idx],
                 .free_slots = free_slots,
                 .live_slots = self.bucket_issued_slots[idx] - self.bucket_free_counts[idx],
             };
@@ -443,6 +455,9 @@ pub const GcCellBacking = struct {
         self.bucket_capacity_bytes = .{ 0, 0, 0, 0, 0, 0 };
         self.bucket_capacity_slots = .{ 0, 0, 0, 0, 0, 0 };
         self.bucket_issued_slots = .{ 0, 0, 0, 0, 0, 0 };
+        self.bucket_fresh_allocs = .{ 0, 0, 0, 0, 0, 0 };
+        self.bucket_reused_allocs = .{ 0, 0, 0, 0, 0, 0 };
+        self.bucket_freed_slots = .{ 0, 0, 0, 0, 0, 0 };
         self.bucket_owns_hint = .{ null, null, null, null, null, null };
         self.bucket_bump_hint = .{ null, null, null, null, null, null };
         self.bucket_bump_start = .{ 0, 0, 0, 0, 0, 0 };
@@ -494,14 +509,18 @@ test "GC cell backing lazily bumps fresh chunk slots before using the free list"
     try std.testing.expectEqual(@as(usize, 2 * GcCellBacking.bucket_sizes[idx]), backing.bucket_next_offsets[idx].items[0]);
     try std.testing.expectEqual(@as(?*GcCellBacking.FreeNode, null), backing.free_lists[idx]);
     try std.testing.expectEqual(@as(?usize, 0), backing.bucket_bump_hint[idx]);
+    try std.testing.expectEqual(@as(usize, 2), backing.bucket_fresh_allocs[idx]);
+    try std.testing.expectEqual(@as(usize, 0), backing.bucket_reused_allocs[idx]);
 
     a.free(one);
     try std.testing.expect(backing.free_lists[idx] != null);
     try std.testing.expectEqual(@as(usize, 1), backing.bucket_free_counts[idx]);
+    try std.testing.expectEqual(@as(usize, 1), backing.bucket_freed_slots[idx]);
     const recycled = try a.alignedAlloc(u8, .@"16", 200);
     try std.testing.expectEqual(one.ptr, recycled.ptr);
     try std.testing.expectEqual(@as(?*GcCellBacking.FreeNode, null), backing.free_lists[idx]);
     try std.testing.expectEqual(@as(usize, 0), backing.bucket_free_counts[idx]);
+    try std.testing.expectEqual(@as(usize, 1), backing.bucket_reused_allocs[idx]);
 
     a.free(two);
     a.free(recycled);
@@ -659,6 +678,8 @@ test "GC cell backing stats use maintained counters across chunks" {
     try std.testing.expectEqual(@as(usize, 2 * GcCellBacking.chunk_bytes), backing.bucket_capacity_bytes[idx]);
     try std.testing.expectEqual(@as(usize, 2 * slots), backing.bucket_capacity_slots[idx]);
     try std.testing.expectEqual(slots + 1, backing.bucket_issued_slots[idx]);
+    try std.testing.expectEqual(slots + 1, backing.bucket_fresh_allocs[idx]);
+    try std.testing.expectEqual(@as(usize, 0), backing.bucket_reused_allocs[idx]);
     try std.testing.expectEqual(slots + 1, s.live_slots);
     try std.testing.expectEqual(slots - 1, s.free_slots);
 
@@ -673,6 +694,9 @@ test "GC cell backing stats use maintained counters across chunks" {
     cells[0] = reused;
     s = backing.stats();
     try std.testing.expectEqual(slots + 1, backing.bucket_issued_slots[idx]);
+    try std.testing.expectEqual(slots + 1, backing.bucket_fresh_allocs[idx]);
+    try std.testing.expectEqual(@as(usize, 1), backing.bucket_reused_allocs[idx]);
+    try std.testing.expectEqual(@as(usize, 1), backing.bucket_freed_slots[idx]);
     try std.testing.expectEqual(slots + 1, s.live_slots);
     try std.testing.expectEqual(slots - 1, s.free_slots);
 }
@@ -701,6 +725,9 @@ test "GC cell backing bucket stats attribute size-class pressure" {
     try std.testing.expectEqual(@as(usize, 1), buckets[small_idx].chunks);
     try std.testing.expectEqual(small_slots, buckets[small_idx].capacity_slots);
     try std.testing.expectEqual(@as(usize, 2), buckets[small_idx].issued_slots);
+    try std.testing.expectEqual(@as(usize, 2), buckets[small_idx].fresh_allocs);
+    try std.testing.expectEqual(@as(usize, 0), buckets[small_idx].reused_allocs);
+    try std.testing.expectEqual(@as(usize, 1), buckets[small_idx].freed_slots);
     try std.testing.expectEqual(small_slots - 1, buckets[small_idx].free_slots);
     try std.testing.expectEqual(@as(usize, 1), buckets[small_idx].live_slots);
 
@@ -708,6 +735,9 @@ test "GC cell backing bucket stats attribute size-class pressure" {
     try std.testing.expectEqual(@as(usize, 1), buckets[object_idx].chunks);
     try std.testing.expectEqual(object_slots, buckets[object_idx].capacity_slots);
     try std.testing.expectEqual(@as(usize, 1), buckets[object_idx].issued_slots);
+    try std.testing.expectEqual(@as(usize, 1), buckets[object_idx].fresh_allocs);
+    try std.testing.expectEqual(@as(usize, 0), buckets[object_idx].reused_allocs);
+    try std.testing.expectEqual(@as(usize, 0), buckets[object_idx].freed_slots);
     try std.testing.expectEqual(object_slots - 1, buckets[object_idx].free_slots);
     try std.testing.expectEqual(@as(usize, 1), buckets[object_idx].live_slots);
 }

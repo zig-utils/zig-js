@@ -288,12 +288,15 @@ fn printGcBackingBaseline(gpa: std.mem.Allocator) !void {
 
 fn printGcBackingBaselineBuckets(gpa: std.mem.Allocator) !void {
     std.debug.print("\nGC cell backing baseline buckets (empty context)\n", .{});
-    std.debug.print("{s:<18} {s:>6} {s:>8} {s:>10} {s:>10} {s:>10} {s:>10}\n", .{
+    std.debug.print("{s:<18} {s:>6} {s:>8} {s:>10} {s:>10} {s:>10} {s:>10} {s:>10} {s:>10} {s:>10}\n", .{
         "mode",
         "slot",
         "chunks",
         "cap",
         "issued",
+        "fresh",
+        "reused",
+        "freed",
         "free",
         "live",
     });
@@ -304,12 +307,15 @@ fn printGcBackingBaselineBuckets(gpa: std.mem.Allocator) !void {
         const buckets = backing.bucketStats();
         for (buckets) |bucket| {
             if (bucket.chunks == 0) continue;
-            std.debug.print("{s:<18} {d:>6} {d:>8} {d:>10} {d:>10} {d:>10} {d:>10}\n", .{
+            std.debug.print("{s:<18} {d:>6} {d:>8} {d:>10} {d:>10} {d:>10} {d:>10} {d:>10} {d:>10} {d:>10}\n", .{
                 mode.name,
                 bucket.slot_size,
                 bucket.chunks,
                 bucket.capacity_slots,
                 bucket.issued_slots,
+                bucket.fresh_allocs,
+                bucket.reused_allocs,
+                bucket.freed_slots,
                 bucket.free_slots,
                 bucket.live_slots,
             });
@@ -351,12 +357,15 @@ fn printGcBacking(gpa: std.mem.Allocator) !void {
 
 fn printGcBackingBuckets(gpa: std.mem.Allocator) !void {
     std.debug.print("\nGC cell backing buckets (same object-heavy script + collect)\n", .{});
-    std.debug.print("{s:<18} {s:>6} {s:>8} {s:>10} {s:>10} {s:>10} {s:>10}\n", .{
+    std.debug.print("{s:<18} {s:>6} {s:>8} {s:>10} {s:>10} {s:>10} {s:>10} {s:>10} {s:>10} {s:>10}\n", .{
         "mode",
         "slot",
         "chunks",
         "cap",
         "issued",
+        "fresh",
+        "reused",
+        "freed",
         "free",
         "live",
     });
@@ -369,16 +378,94 @@ fn printGcBackingBuckets(gpa: std.mem.Allocator) !void {
         const buckets = backing.bucketStats();
         for (buckets) |bucket| {
             if (bucket.chunks == 0) continue;
-            std.debug.print("{s:<18} {d:>6} {d:>8} {d:>10} {d:>10} {d:>10} {d:>10}\n", .{
+            std.debug.print("{s:<18} {d:>6} {d:>8} {d:>10} {d:>10} {d:>10} {d:>10} {d:>10} {d:>10} {d:>10}\n", .{
                 mode.name,
                 bucket.slot_size,
                 bucket.chunks,
                 bucket.capacity_slots,
                 bucket.issued_slots,
+                bucket.fresh_allocs,
+                bucket.reused_allocs,
+                bucket.freed_slots,
                 bucket.free_slots,
                 bucket.live_slots,
             });
         }
+    }
+}
+
+const ChurnTotals = struct {
+    fresh: usize = 0,
+    reused: usize = 0,
+    freed: usize = 0,
+    chunks: usize = 0,
+    live: usize = 0,
+};
+
+fn bucketChurnTotals(before: anytype, after: anytype) ChurnTotals {
+    var totals = ChurnTotals{};
+    for (before, after) |b, a| {
+        totals.fresh += a.fresh_allocs - b.fresh_allocs;
+        totals.reused += a.reused_allocs - b.reused_allocs;
+        totals.freed += a.freed_slots - b.freed_slots;
+        totals.chunks += a.chunks;
+        totals.live += a.live_slots;
+    }
+    return totals;
+}
+
+fn printGcChurnReuse(gpa: std.mem.Allocator, io: std.Io) !void {
+    const rounds: usize = 8;
+    const source =
+        \\(function(){
+        \\  for (var round = 0; round < 4; round = round + 1) {
+        \\    var keep = [];
+        \\    for (var i = 0; i < 3500; i = i + 1)
+        \\      keep.push({ i: i, pair: { j: i + 1 }, values: [i, i + 1, i + 2] });
+        \\  }
+        \\  return 1;
+        \\})()
+    ;
+
+    std.debug.print("\nGC allocation churn reuse ({d} allocate+collect rounds)\n", .{rounds});
+    std.debug.print("{s:<18} {s:>14} {s:>12} {s:>12} {s:>12} {s:>10} {s:>10} {s:>9}\n", .{
+        "mode",
+        "ns/round",
+        "fresh",
+        "reused",
+        "freed",
+        "chunks",
+        "live",
+        "reuse",
+    });
+    for (modes) |mode| {
+        if (!modeUsesGc(mode)) continue;
+        const ctx = try makeContext(gpa, mode);
+        defer ctx.destroy();
+        const backing = ctx.gc_cell_backing orelse continue;
+        const before = backing.bucketStats();
+        const t0 = nowNs(io);
+        var i: usize = 0;
+        while (i < rounds) : (i += 1) {
+            _ = try ctx.evaluate(source);
+            ctx.collectGarbage();
+        }
+        const ns: u64 = @intCast(nowNs(io) - t0);
+        const after = backing.bucketStats();
+        const totals = bucketChurnTotals(before, after);
+        const allocs = totals.fresh + totals.reused;
+        const reuse_x100 = if (allocs == 0) @as(usize, 0) else (totals.reused * 10000) / allocs;
+        std.debug.print("{s:<18} {d:>14} {d:>12} {d:>12} {d:>12} {d:>10} {d:>10} {d:>5}.{d:0>2}%\n", .{
+            mode.name,
+            ns / rounds,
+            totals.fresh,
+            totals.reused,
+            totals.freed,
+            totals.chunks,
+            totals.live,
+            reuse_x100 / 100,
+            reuse_x100 % 100,
+        });
     }
 }
 
@@ -494,5 +581,6 @@ pub fn main() !void {
     try printGcBackingBaselineBuckets(gpa);
     try printGcBacking(gpa);
     try printGcBackingBuckets(gpa);
+    try printGcChurnReuse(gpa, io);
     try printGcFinalizers(gpa);
 }

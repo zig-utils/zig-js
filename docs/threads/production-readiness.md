@@ -146,17 +146,21 @@ Known performance/maturity work:
   creation, live cells after allocation, free slots after collection, and live
   cells after collection, followed by per-size-class bucket tables for the empty
   context and the same workload. The bucket tables show slot size, chunks,
-  capacity, issued cells, free cells, and live cells, using exact per-bucket
-  free, capacity, and issued-slot counters so profiling a collection no longer
-  walks every freed cell or slab chunk. Finalizer attribution is likewise split
+  capacity, issued cells, fresh allocations, reused allocations, freed cells,
+  free cells, and live cells, using exact per-bucket free, capacity, issued,
+  fresh, reused, and freed counters so profiling a collection no longer walks
+  every freed cell or slab chunk. Finalizer attribution is likewise split
   between empty-context destroy and destroy after the object workload. Fresh-slot
   allocation skips slab chunks whose bump range is already exhausted, and the
   object-sized 1024/2048-byte buckets use larger chunks so the profile exposes
   reduced object-cell chunk churn separately from remaining create/destroy
-  wall-clock costs. The no-GIL bootstrap row should also be read against the
-  explicit parallel-lock deferral above: returned contexts are fully parallel,
-  but private global/API installation no longer measures the atomic allocator
-  lock on every cell allocation.
+  wall-clock costs. A repeated allocate-plus-collect churn table now reports
+  fresh versus reused cells, freed cells, final chunk/live counts, and reuse
+  percentage, giving nursery/generational work a direct freelist-reuse baseline
+  instead of only a one-shot object workload. The no-GIL bootstrap row should
+  also be read against the explicit parallel-lock deferral above: returned
+  contexts are fully parallel, but private global/API installation no longer
+  measures the atomic allocator lock on every cell allocation.
 - Mid-script parallel GC remains abort-safe. Sync wait/lock/condition peers are
   not treated as frozen parked stacks; their lock-free pump points now service
   root publication, and the collector waits long enough for one bounded park
