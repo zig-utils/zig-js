@@ -2365,12 +2365,29 @@ fn runModuleWorkerExceptionFinalizationCleanupInterleaving(gpa: std.mem.Allocato
 }
 
 fn runWorkerThreadFinalizationInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
-    var prng = std.Random.DefaultPrng.init(seed ^ 0x6372_6f73_735f_6669);
+    return runWorkerThreadFinalizationInterleavingKind(gpa, seed, false);
+}
+
+fn runMidScriptWorkerThreadFinalizationGc(gpa: std.mem.Allocator, seed: u64) !bool {
+    return runWorkerThreadFinalizationInterleavingKind(gpa, seed, true);
+}
+
+fn runWorkerThreadFinalizationInterleavingKind(
+    gpa: std.mem.Allocator,
+    seed: u64,
+    comptime midgc: bool,
+) !bool {
+    const salt: u64 = 0x6372_6f73_735f_6669 ^ (if (midgc) 0x6d69_6467_6377_7466 else 0);
+    var prng = std.Random.DefaultPrng.init(seed ^ salt);
     const r = prng.random();
     const nworkers = 1 + r.uintLessThan(usize, 3);
     const nthreads = 2 + r.uintLessThan(usize, 4);
     const worker_iters = 90 + r.uintLessThan(usize, 180);
     const per_thread = 8 + r.uintLessThan(usize, 10);
+    const gc_rounds = if (midgc) 6 + r.uintLessThan(usize, 5) else 0;
+    const gc_per_round = if (midgc) 520 + r.uintLessThan(usize, 320) else 0;
+    const gc_spin_iters = if (midgc) 1600 + r.uintLessThan(usize, 2600) else 0;
+    const seed_marker = seed % 10_000;
 
     var expected_join_sum: usize = 0;
     var expected_cleanup_count: usize = 0;
@@ -2385,7 +2402,16 @@ fn runWorkerThreadFinalizationInterleaving(gpa: std.mem.Allocator, seed: u64) !b
     }
     const expected_counter = nworkers * worker_iters + nthreads * per_thread;
 
-    const ctx = js.Context.createWith(gpa, .{ .enable_threads = true, .enable_gc = true }) catch {
+    const ctx = (if (midgc)
+        js.Context.createWithTestingOptions(gpa, .{
+            .enable_threads = true,
+            .enable_gc = true,
+            .parallel_gc = true,
+            .parallel_js = true,
+            .parallel_midscript_gc = true,
+        })
+    else
+        js.Context.createWith(gpa, .{ .enable_threads = true, .enable_gc = true })) catch {
         std.debug.print("seed {d}: worker/thread finalization context creation failed\n", .{seed});
         return false;
     };
@@ -2441,6 +2467,37 @@ fn runWorkerThreadFinalizationInterleaving(gpa: std.mem.Allocator, seed: u64) !b
         };
     }
 
+    const midgc_pressure_src: []const u8 = if (midgc)
+        try std.fmt.allocPrint(
+            gpa,
+            \\  while (Atomics.load(v, 4) < {d})
+            \\    Atomics.wait(v, 4, Atomics.load(v, 4), 1);
+            \\  {{
+            \\    const keep = [];
+            \\    const midRoot = {{ seed: {d}, label: 'midgc-worker-thread-finalization-root' }};
+            \\    for (let round = 0; round < {d}; round++) {{
+            \\      for (let i = 0; i < {d}; i++) {{
+            \\        keep.push({{
+            \\          round,
+            \\          i,
+            \\          nested: {{ midRoot, value: i + round }},
+            \\          text: 'midgc-worker-thread-finalization-' + round + '-' + i,
+            \\        }});
+            \\      }}
+            \\      let spin = 0;
+            \\      for (let j = 0; j < {d}; j++) spin = (spin + j + round) & 0x3fffffff;
+            \\      if (spin < 0) keep.push({{ impossible: true }});
+            \\    }}
+            \\    if (typeof gc === 'function') gc();
+            \\  }}
+            \\
+        ,
+            .{ nthreads, seed_marker, gc_rounds, gc_per_round, gc_spin_iters },
+        )
+    else
+        "";
+    defer if (midgc) gpa.free(midgc_pressure_src);
+
     const js_src = try std.fmt.allocPrint(
         gpa,
         \\(() => {{
@@ -2454,6 +2511,7 @@ fn runWorkerThreadFinalizationInterleaving(gpa: std.mem.Allocator, seed: u64) !b
         \\  const registry = globalThis.__workerThreadFinRegistry;
         \\  const v = new Int32Array(globalThis.__workerThreadFinMsg.sab);
         \\  const threads = [];
+        \\  const asyncJoins = [];
         \\  let asyncSum = 0;
         \\  for (let id = 0; id < {d}; id++) {{
         \\    const t = new Thread((id, per) => {{
@@ -2468,13 +2526,14 @@ fn runWorkerThreadFinalizationInterleaving(gpa: std.mem.Allocator, seed: u64) !b
         \\      Atomics.add(local, 4, 1);
         \\      return base + per + id;
         \\    }}, id, {d});
-        \\    t.asyncJoin().then(
+        \\    asyncJoins.push(t.asyncJoin().then(
         \\      (value) => {{ asyncSum += value; }},
-        \\      () => {{ asyncSum = -1000000; }});
+        \\      () => {{ asyncSum = -1000000; }}));
         \\    threads.push(t);
         \\  }}
         \\  while (Atomics.load(v, 2) < {d})
         \\    Atomics.wait(v, 2, Atomics.load(v, 2), 1);
+        \\{s}
         \\  Atomics.store(v, 1, 1);
         \\  Atomics.notify(v, 1, {d});
         \\  let joinSum = 0;
@@ -2484,7 +2543,7 @@ fn runWorkerThreadFinalizationInterleaving(gpa: std.mem.Allocator, seed: u64) !b
         \\  if (Atomics.load(v, 4) !== {d})
         \\    throw new Error('bad worker/thread finalization thread done count ' + Atomics.load(v, 4));
         \\  threads.length = 0;
-        \\  Promise.resolve().then(() => {{
+        \\  Promise.all(asyncJoins).then(() => {{
         \\    if (asyncSum !== {d})
         \\      throw new Error('bad worker/thread finalization async sum ' + asyncSum);
         \\    globalThis.__workerThreadFinOracle = 1;
@@ -2493,10 +2552,12 @@ fn runWorkerThreadFinalizationInterleaving(gpa: std.mem.Allocator, seed: u64) !b
         \\}})();
         \\
     ,
-        .{ nthreads, per_thread, nworkers, nworkers + nthreads + 4, expected_join_sum, nthreads, expected_join_sum },
+        .{ nthreads, per_thread, nworkers, midgc_pressure_src, nworkers + nthreads + 4, expected_join_sum, nthreads, expected_join_sum },
     );
     defer gpa.free(js_src);
 
+    const before_attempts = if (midgc) ctx.gc_par_attempts.load(.monotonic) else 0;
+    const before_collections = if (midgc) ctx.gc_par_collections.load(.monotonic) else 0;
     const joined = ctx.evaluate(js_src) catch |err| {
         const msg_txt = if (ctx.exception) |ex| blk: {
             var render = ctx.interpreter();
@@ -2507,6 +2568,14 @@ fn runWorkerThreadFinalizationInterleaving(gpa: std.mem.Allocator, seed: u64) !b
     };
     if (!joined.isNumber() or joined.asNum() != @as(f64, @floatFromInt(expected_join_sum))) {
         std.debug.print("seed {d}: worker/thread finalization joined got {d}, expected {d}\n", .{ seed, if (joined.isNumber()) joined.asNum() else -1, expected_join_sum });
+        return false;
+    }
+    if (midgc and ctx.gc_par_attempts.load(.monotonic) <= before_attempts) {
+        std.debug.print("seed {d}: worker/thread finalization did not attempt a parallel collection\n", .{seed});
+        return false;
+    }
+    if (midgc and ctx.gc_par_collections.load(.monotonic) <= before_collections) {
+        std.debug.print("seed {d}: worker/thread finalization did not finish a parallel collection\n", .{seed});
         return false;
     }
     const oracle = ctx.evaluate("globalThis.__workerThreadFinOracle") catch |err| {
@@ -18183,6 +18252,23 @@ pub fn main(init: std.process.Init) !void {
         if (mwfail != 0) std.process.exit(1);
         return;
     };
+    // `threadfuzz midgcworkerthreadfinal <iters> <seed>`: focused mid-script
+    // parallel-GC repro for isolated Workers parked on a retained SAB while
+    // shared-realm Threads publish FinalizationRegistry cleanup roots and
+    // asyncJoin observers through a finishing sweep before Worker release.
+    if (first) |a| if (std.mem.eql(u8, a, "midgcworkerthreadfinal")) {
+        if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch 1;
+        if (args.next()) |b| base_seed = std.fmt.parseInt(u64, b, 10) catch 1;
+        var mwtffail: usize = 0;
+        var mwtfi: usize = 0;
+        while (mwtfi < iters) : (mwtfi += 1) {
+            const seed = base_seed +% mwtfi;
+            if (!(try runMidScriptWorkerThreadFinalizationGc(gpa, seed))) mwtffail += 1;
+        }
+        std.debug.print("threadfuzz midgcworkerthreadfinal: {d} programs from seed {d}, {d} failures\n", .{ iters, base_seed, mwtffail });
+        if (mwtffail != 0) std.process.exit(1);
+        return;
+    };
     // `threadfuzz midgcmoduleworker <iters> <seed>`: focused mid-script
     // parallel-GC repro for module Workers evaluating a small import graph on a
     // retained SAB while shared-realm Threads publish cleanup roots through a
@@ -18619,7 +18705,9 @@ pub fn main(init: std.process.Init) !void {
     // WeakSet dead-key cleanup with live ephemeron values and unregister-token
     // suppression, isolated script/module Worker/SAB progress plus handler-
     // exception recovery plus close/terminate FIFO drain/drop while
-    // shared-realm cleanup roots are swept, and
+    // shared-realm cleanup roots are swept, isolated Workers parked on a
+    // retained SAB while shared-realm Threads publish FinalizationRegistry
+    // cleanup roots and asyncJoin observers through a finishing sweep, and
     // script/module Worker termination with shared-realm Thread teardown,
     // child-owned typed-array waitAsync ticket abandonment, and pending
     // asyncJoin reactions must survive that window. The oracle requires exact
@@ -18661,6 +18749,7 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runMidScriptModuleWorkerCreatorOwnedBufferCleanupGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptWorkerCleanupGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptModuleWorkerCleanupGc(gpa, seed))) mfail += 1;
+            if (!(try runMidScriptWorkerThreadFinalizationGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptWorkerExceptionCleanupGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptModuleWorkerExceptionCleanupGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptWorkerCloseTerminateGc(gpa, seed))) mfail += 1;
@@ -18677,7 +18766,7 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runMidScriptModuleWorkerTerminateThreadLocalAsyncHoldCleanupGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptWeakCollectionGc(gpa, seed))) mfail += 1;
         }
-        std.debug.print("threadfuzz midgc: {d} programs from seed {d}, {d} failures\n", .{ iters * 43, base_seed, mfail });
+        std.debug.print("threadfuzz midgc: {d} programs from seed {d}, {d} failures\n", .{ iters * 44, base_seed, mfail });
         if (mfail != 0) std.process.exit(1);
         return;
     };

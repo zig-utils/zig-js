@@ -294,8 +294,10 @@ join-termination unit witness that checks parked-state/mutex cleanup, then
 requires exact script completion or exact expected termination plus at least one
 finishing parallel sweep and exact
 `FinalizationRegistry` cleanup count/sum delivery plus unregister-token
-suppression after a quiescent collect. Each seed currently runs 43 deterministic
-mid-GC subprograms. The
+suppression after a quiescent collect, and parks isolated Workers on a retained
+SAB while shared-realm Threads publish `FinalizationRegistry` cleanup roots and
+`asyncJoin` observers through a finishing sweep. Each seed currently runs 44
+deterministic mid-GC subprograms. The
 lifecycle profile
 (`-Dfuzz-lifecycle=true`) adds deterministic resizable `ArrayBuffer` /
 `DataView` constructor races where one no-GIL peer repeatedly resizes a backing
