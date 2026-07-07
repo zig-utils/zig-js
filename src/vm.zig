@@ -460,6 +460,12 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
             .to_numeric => {
                 try stack.append(stack_alloc, try vm.toNumericPrimitive(stack.pop().?));
             },
+            .to_property_key => {
+                // ToPropertyKey: coerce to the property-key string once (runs the
+                // key's toString/valueOf), so a computed key's coercion happens
+                // before the property value is evaluated.
+                try stack.append(stack_alloc, Value.str(try propKey(vm, stack.pop().?)));
+            },
             .inc, .dec => {
                 // ToNumeric then ±1 of the operand's own numeric type, matching
                 // the tree-walker's evalUpdate (so `"5"++` is 6, not "51", and a
@@ -579,8 +585,10 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 else if (v.isNull()) obj.asObj().proto = null;
             },
             .init_prop_computed => {
-                const key = stack.pop().?;
+                // The key was already ToPropertyKey'd by `to_property_key` (emitted
+                // before the value), so it sits below the value on the stack.
                 const v = stack.pop().?;
+                const key = stack.pop().?;
                 const obj = stack.items[stack.items.len - 1]; // leave object on stack
                 if (Interpreter.funcOf(v)) |f| {
                     if (f.is_method) f.home_object = obj.asObj();
@@ -646,6 +654,10 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
             .get_index => {
                 const key = stack.pop().?;
                 const obj = stack.pop().?;
+                // RequireObjectCoercible before ToPropertyKey: `null[k]` is a
+                // TypeError before the key's `toString` runs (matches the tree-walker).
+                if (obj.isNull() or obj.isUndefined())
+                    return vm.throwError("TypeError", "cannot read property of null or undefined");
                 try stack.append(stack_alloc, try vm.getProperty(obj, try propKey(vm, key)));
             },
             .super_get => {
@@ -755,6 +767,10 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 const v = stack.pop().?;
                 const key = stack.pop().?;
                 const obj = stack.pop().?;
+                // RequireObjectCoercible before ToPropertyKey (the RHS is already
+                // evaluated); `null[k] = v` throws before the key's `toString` runs.
+                if (obj.isNull() or obj.isUndefined())
+                    return vm.throwError("TypeError", "Cannot set property of null or undefined");
                 try vm.setMember(obj, try propKey(vm, key), v);
                 try stack.append(stack_alloc, v);
             },

@@ -2068,14 +2068,21 @@ pub const Compiler = struct {
                         _ = try self.chunk.emit(if (p.accessor == .get) .init_getter else .init_setter, 0);
                         continue;
                     }
-                    try self.compileExpr(p.value);
-                    if (p.proto_setter) {
-                        _ = try self.chunk.emit(.init_proto, 0); // `__proto__: v` colon form
-                    } else if (p.key_expr) |ke| {
+                    if (p.key_expr) |ke| {
+                        // Computed key: evaluate the key and run ToPropertyKey (its
+                        // toString/valueOf) BEFORE the value, per the spec's
+                        // PropertyDefinitionEvaluation order.
                         try self.compileExpr(ke);
+                        _ = try self.chunk.emit(.to_property_key, 0);
+                        try self.compileExpr(p.value);
                         _ = try self.chunk.emit(.init_prop_computed, 0);
                     } else {
-                        _ = try self.chunk.emit(.init_prop, try self.chunk.addName(p.key));
+                        try self.compileExpr(p.value);
+                        if (p.proto_setter) {
+                            _ = try self.chunk.emit(.init_proto, 0); // `__proto__: v` colon form
+                        } else {
+                            _ = try self.chunk.emit(.init_prop, try self.chunk.addName(p.key));
+                        }
                     }
                 }
             },
