@@ -2565,12 +2565,30 @@ fn collectLocals(arena: std.mem.Allocator, scope: *FnScope, node: *Node) Compile
             if (s.alternate) |alt| try collectLocals(arena, scope, alt);
         },
         .while_stmt => |s| try collectLocals(arena, scope, s.body),
+        .do_while_stmt => |s| try collectLocals(arena, scope, s.body),
         .for_stmt => |f| {
             if (f.init) |ini| try collectLocals(arena, scope, ini);
             try collectLocals(arena, scope, f.body);
         },
+        .for_in => |f| {
+            // `for (var x of/in …)` hoists x as a function-scoped local (a
+            // destructuring `var` target bails to the tree-walker elsewhere).
+            if (f.decl_kind) |k| {
+                if (k == .@"var" and f.target.* == .identifier)
+                    _ = try scope.addLocal(arena, f.target.identifier);
+            }
+            try collectLocals(arena, scope, f.body);
+        },
+        .switch_stmt => |s| for (s.cases) |c| for (c.body) |st| try collectLocals(arena, scope, st),
+        .labeled_stmt => |s| try collectLocals(arena, scope, s.body),
+        .try_stmt => |t| {
+            try collectLocals(arena, scope, t.block);
+            if (t.catch_block) |cb| try collectLocals(arena, scope, cb);
+            if (t.finally_block) |fb| try collectLocals(arena, scope, fb);
+        },
         // Expressions (incl. nested function/arrow literals) declare no names in
-        // this function's scope.
+        // this function's scope. `var` inside these statement forms is hoisted to
+        // the function scope, matching the tree-walker's hoistVarsIn.
         else => {},
     }
 }
