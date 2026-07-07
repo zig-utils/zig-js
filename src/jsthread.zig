@@ -2046,6 +2046,8 @@ const PropTicket = struct {
     queued: bool = false,
 };
 const prop_alloc = std.heap.page_allocator;
+const prop_waiter_reserve_granularity = 16;
+const prop_async_reserve_granularity = 16;
 
 pub const PropAsyncTicket = struct {
     obj: *value.Object,
@@ -2061,6 +2063,28 @@ pub const PropAsyncTicket = struct {
     /// The realm's gil pointer — the abandon token at Context.destroy.
     owner: *const anyopaque,
 };
+
+fn reservePropQueueLocked(
+    queue: *std.ArrayListUnmanaged(*anyopaque),
+    additional: usize,
+    granularity: usize,
+) !void {
+    const spare = queue.capacity - queue.items.len;
+    if (spare >= additional) return;
+    const extra = @max(additional, granularity);
+    try queue.ensureTotalCapacity(prop_alloc, queue.items.len + extra);
+}
+
+fn appendPropTicketLocked(g: *gil_mod.Gil, ticket: *PropTicket) !void {
+    try reservePropQueueLocked(&g.prop_waiters, 1, prop_waiter_reserve_granularity);
+    g.prop_waiters.appendAssumeCapacity(@ptrCast(ticket));
+    ticket.queued = true;
+}
+
+fn appendPropAsyncLocked(g: *gil_mod.Gil, ticket: *PropAsyncTicket) !void {
+    try reservePropQueueLocked(&g.prop_async, 1, prop_async_reserve_granularity);
+    g.prop_async.appendAssumeCapacity(@ptrCast(ticket));
+}
 
 /// `Atomics.waitAsync(obj, key, expected, timeout)` — the property path.
 /// Settlement: a notify resolves "ok" on the notifying thread; expiry
@@ -2116,7 +2140,7 @@ pub fn propWaitAsync(self: *Interpreter, args: []const Value, timeout_ns: ?u64) 
         try self.setProp(res, "value", Value.str("not-equal"));
         return Value.obj(res);
     }
-    g.prop_async.append(prop_alloc, @ptrCast(t)) catch {
+    appendPropAsyncLocked(g, t) catch {
         g.unlockPropWaiters();
         locked = false;
         return error.OutOfMemory;
@@ -2432,6 +2456,51 @@ test "property waitAsync expiry stable-compacts expired tickets" {
     try std.testing.expectEqual(@intFromPtr(&t3), @intFromPtr(@as(*PropAsyncTicket, @ptrCast(@alignCast(g.prop_async.items[0])))));
 }
 
+test "property waiter queues reserve capacity chunks" {
+    var g = gil_mod.Gil{};
+    defer g.prop_waiters.deinit(prop_alloc);
+    defer g.prop_async.deinit(prop_alloc);
+    var obj: value.Object = undefined;
+
+    var first_waiter = PropTicket{ .obj = &obj, .key = "x" };
+    try appendPropTicketLocked(&g, &first_waiter);
+    try std.testing.expect(first_waiter.queued);
+    try std.testing.expect(g.prop_waiters.capacity >= prop_waiter_reserve_granularity);
+
+    const waiter_capacity = g.prop_waiters.capacity;
+    var waiters = try prop_alloc.alloc(PropTicket, waiter_capacity + 1);
+    defer prop_alloc.free(waiters);
+    for (waiters) |*ticket| ticket.* = .{ .obj = &obj, .key = "x" };
+
+    var waiter_i: usize = 0;
+    while (g.prop_waiters.items.len < waiter_capacity) : (waiter_i += 1) {
+        try appendPropTicketLocked(&g, &waiters[waiter_i]);
+    }
+    try std.testing.expectEqual(waiter_capacity, g.prop_waiters.capacity);
+
+    try appendPropTicketLocked(&g, &waiters[waiter_i]);
+    try std.testing.expect(waiters[waiter_i].queued);
+    try std.testing.expect(g.prop_waiters.capacity > waiter_capacity);
+
+    var first_async = PropAsyncTicket{ .obj = &obj, .key = "x", .deadline_ns = null, .promise = undefined, .microtasks = undefined, .thread = null, .owner = undefined };
+    try appendPropAsyncLocked(&g, &first_async);
+    try std.testing.expect(g.prop_async.capacity >= prop_async_reserve_granularity);
+
+    const async_capacity = g.prop_async.capacity;
+    var async = try prop_alloc.alloc(PropAsyncTicket, async_capacity + 1);
+    defer prop_alloc.free(async);
+    for (async) |*ticket| ticket.* = .{ .obj = &obj, .key = "x", .deadline_ns = null, .promise = undefined, .microtasks = undefined, .thread = null, .owner = undefined };
+
+    var async_i: usize = 0;
+    while (g.prop_async.items.len < async_capacity) : (async_i += 1) {
+        try appendPropAsyncLocked(&g, &async[async_i]);
+    }
+    try std.testing.expectEqual(async_capacity, g.prop_async.capacity);
+
+    try appendPropAsyncLocked(&g, &async[async_i]);
+    try std.testing.expect(g.prop_async.capacity > async_capacity);
+}
+
 fn waitPropTicketTimeout(self: *Interpreter, g: *gil_mod.Gil, ticket: *PropTicket, timeout: std.Io.Timeout) error{Timeout}!void {
     const io = agent.engineIo();
     if (self.use_thread_gil) {
@@ -2488,8 +2557,7 @@ pub fn propWait(self: *Interpreter, args: []const Value, timeout_ns: ?u64) value
     }
     const cur_locked = try ownDataOrThrow(self, o, key_tmp, "Atomics.wait: object has no own data property");
     if (!sameValueZero(cur_locked, expected)) return Value.str("not-equal");
-    g.prop_waiters.append(prop_alloc, @ptrCast(ticket)) catch return error.OutOfMemory;
-    ticket.queued = true;
+    appendPropTicketLocked(g, ticket) catch return error.OutOfMemory;
     linked = true;
     bumpContention("property_waits");
     const deadline_ns: ?i96 = if (timeout_ns) |ns|

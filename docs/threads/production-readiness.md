@@ -276,7 +276,9 @@ Known performance/maturity work:
   the waiter table in one pass instead of front-shifting the remaining waiters.
   Timeout polling now also compacts all expired property `waitAsync` tickets in
   one pass and realm teardown frees abandoned property `waitAsync` tickets by
-  linear scan.
+  linear scan. Sync waiter and waitAsync ticket tables reserve fixed-size
+  capacity chunks before capacity-assumed appends, so property waiter storms grow
+  table storage less often while holding `Gil.prop_mutex`.
 - Typed-array `Atomics.notify` now unlinks sync stack tickets before signaling,
   so awakened waiters do not each rescan and shift the process-wide waiter list.
   Typed-array `waitAsync` harvest and abandon paths stable-compact matching

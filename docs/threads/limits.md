@@ -214,8 +214,11 @@ context APIs.
   stable-compacts the waiter table in one pass instead of shifting the remaining
   waiters. Timeout polling now uses the same one-pass compaction shape for
   expired property `waitAsync` tickets, and realm teardown frees abandoned
-  property `waitAsync` tickets by linear scan. Typed-array `Atomics.notify`
-  unlinks notified sync stack tickets before signal, and typed-array
+  property `waitAsync` tickets by linear scan. Property sync waiter and
+  waitAsync ticket tables reserve fixed-size capacity chunks before
+  capacity-assumed appends, so waiter storms grow those tables less often while
+  holding `Gil.prop_mutex`. Typed-array `Atomics.notify` unlinks notified sync
+  stack tickets before signal, and typed-array
   `waitAsync` harvest/abandon paths stable-compact settled or owner tickets in
   one pass while preserving FIFO order for remaining waiters. Context-owned
   typed-array `waitAsync` promise roots take `realm_lock` for list-header

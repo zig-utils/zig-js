@@ -457,6 +457,8 @@ per-lock async grant queues and the condition waiter queue reserve fixed-size
 capacity chunks before capacity-assumed appends;
 property-mode `Atomics.wait` timeout/termination cleanup stable-compacts the
 sync waiter table in one pass instead of shifting the remaining waiters;
+property-mode sync waiter and waitAsync ticket tables reserve fixed-size
+capacity chunks before capacity-assumed appends;
 typed-array `Atomics.notify` unlinks sync stack tickets before signal, and
 typed-array `waitAsync` harvest/abandon paths stable-compact matching tickets
 in one pass while preserving FIFO order for other waiters;
@@ -494,6 +496,8 @@ contiguous same-lock async condition regrants under one lock acquisition per
 fixed-size stack batch instead of retaking that lock once per async waiter.
 `property waiter removal
 stable-compacts timed-out sync ticket` covers the property waiter cleanup shape,
+`property waiter queues reserve capacity chunks` guards fixed-chunk growth for
+both property-mode sync waiters and property `waitAsync` tickets,
 `waiter table notify unlinks sync tickets and preserves async FIFO tail` plus
 `waiter table harvestAsync stable-compacts settled owner tickets` cover the
 typed-array waiter-table shapes, and `api/condition-wait-termination.js` keeps
