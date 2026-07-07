@@ -209,7 +209,10 @@ context APIs.
   without shifting the remaining reaction queue on each job. Microtask enqueues
   and abandoned-thread queue transfers reserve fixed-size capacity chunks before
   capacity-assumed appends, reducing allocator-growth trips under
-  `microtask_lock` during promise/thread lifecycle bursts.
+  `microtask_lock` during promise/thread lifecycle bursts. Per-promise
+  fulfill/reject reaction lists reserve fixed-size capacity chunks before
+  capacity-assumed appends under `Promise.lock`, reducing allocator-growth trips
+  while many `.then()` observers register on one pending promise.
   Property-mode `Atomics.notify` now stable-compacts matching sync and async
   waiters in one pass: notified heap-owned sync tickets leave the realm waiter
   table before signal, and matching `waitAsync` tickets are collected without

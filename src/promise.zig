@@ -21,6 +21,7 @@ const Interpreter = interp.Interpreter;
 const EvalError = interp.EvalError;
 
 const microtask_queue_reserve_granularity: usize = 32;
+const reaction_list_reserve_granularity: usize = 16;
 
 pub const State = enum { pending, fulfilled, rejected };
 
@@ -185,6 +186,46 @@ test "microtask queue is FIFO with a head cursor" {
     try std.testing.expectEqual(@as(f64, 6), q.pop().?.argument.asNum());
 }
 
+test "Promise reaction lists reserve capacity chunks" {
+    const a = std.testing.allocator;
+    var live: usize = 0;
+    var machine = Interpreter{
+        .arena = a,
+        .env = undefined,
+        .root_shape = undefined,
+        .gc_backing = a,
+        .gc_promise_reactions_live = &live,
+    };
+    var p = Promise{ .gc_owned = true };
+    defer p.on_fulfill.deinit(reactionAllocator(&machine));
+
+    const reaction = Reaction{
+        .handler = null,
+        .resolve = Value.undef(),
+        .reject = Value.undef(),
+    };
+    try appendReactionUnlocked(&machine, &p, &p.on_fulfill, reaction);
+    try std.testing.expect(p.on_fulfill.capacity >= reaction_list_reserve_granularity);
+    try std.testing.expectEqual(@as(usize, 1), live);
+
+    const first_capacity = p.on_fulfill.capacity;
+    while (p.on_fulfill.items.len < first_capacity) {
+        try appendReactionUnlocked(&machine, &p, &p.on_fulfill, reaction);
+    }
+    try std.testing.expectEqual(first_capacity, p.on_fulfill.items.len);
+    try std.testing.expectEqual(first_capacity, p.on_fulfill.capacity);
+    try std.testing.expectEqual(first_capacity, live);
+
+    try appendReactionUnlocked(&machine, &p, &p.on_fulfill, reaction);
+    try std.testing.expectEqual(first_capacity + 1, p.on_fulfill.items.len);
+    try std.testing.expect(p.on_fulfill.capacity > first_capacity);
+    try std.testing.expectEqual(first_capacity + 1, live);
+
+    popReactionUnlocked(&machine, &p, &p.on_fulfill);
+    try std.testing.expectEqual(first_capacity, p.on_fulfill.items.len);
+    try std.testing.expectEqual(first_capacity, live);
+}
+
 /// Shared aggregation state for the combinators (`Promise.all`/`allSettled`/
 /// `any`). `result` is the combined promise; `values` the in-order results
 /// array; `remaining` counts inputs not yet settled; `kind` selects how each
@@ -284,13 +325,22 @@ fn noteReactionsRemoved(self: *Interpreter, p: *Promise, count: usize) void {
     }
 }
 
+fn reserveReactionListUnlocked(self: *Interpreter, list: *std.ArrayListUnmanaged(Reaction), additional: usize) EvalError!void {
+    if (additional == 0) return;
+    const spare = list.capacity - list.items.len;
+    if (spare >= additional) return;
+    const extra = @max(additional, reaction_list_reserve_granularity);
+    try list.ensureTotalCapacity(reactionAllocator(self), list.items.len + extra);
+}
+
 fn appendReactionUnlocked(self: *Interpreter, p: *Promise, list: *std.ArrayListUnmanaged(Reaction), r: Reaction) EvalError!void {
     // Incremental-GC barrier: the reaction's callbacks are stored into the live
     // promise cell (which may already be marked black). Shade them.
     if (r.handler) |h| gc_mod.barrierValue(h);
     gc_mod.barrierValue(r.resolve);
     gc_mod.barrierValue(r.reject);
-    try list.append(reactionAllocator(self), r);
+    try reserveReactionListUnlocked(self, list, 1);
+    list.appendAssumeCapacity(r);
     noteReactionAdded(self, p);
 }
 

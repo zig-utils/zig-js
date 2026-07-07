@@ -512,7 +512,9 @@ unobserved grants that settle without queuing reactions keep the required task
 turn while skipping an otherwise-empty no-GIL microtask drain. No-fn async-hold
 release states are embedded in their already arena-lived hold jobs, so the same
 public asyncHold corpus case also covers the release-function path after that
-allocation reduction.
+allocation reduction. `Promise reaction lists reserve capacity chunks` guards
+per-promise fulfill/reject reaction-list reserve growth plus GC-owned live-entry
+accounting.
 The property `waitAsync` timeout row should keep `async` and `done` equal after
 finite tickets settle; the single-lock `Condition.asyncWait` row exposes
 same-lock regrant batching, while the multi-lock row exercises FIFO-bursted

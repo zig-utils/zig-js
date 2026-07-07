@@ -360,9 +360,11 @@ Do this once the engine's `context.zig`/`interpreter.zig` surface is settled
   *Promise reaction-list finalization landed:* pending promise reaction buffers
   in GC-enabled contexts now allocate from the context backing allocator. They
   are released immediately when the promise settles and by the promise-cell
-  finalizer when an unreachable pending promise is collected. Validated by
-  GC-enabled tests that track reaction-entry accounting across settlement and
-  weak-only pending-promise collection.
+  finalizer when an unreachable pending promise is collected. Reaction-list
+  appends reserve fixed-size capacity chunks under `Promise.lock` before
+  capacity-assumed writes, reducing allocator growth while many observers attach
+  to one pending promise. Validated by GC-enabled tests that track reaction-entry
+  accounting across settlement and weak-only pending-promise collection.
   *Environment binding-table finalization landed:* GC-created lexical/function/
   module/realm environments now keep their binding hash tables, const/fn-name
   sets, import-alias table, disposable list, and duplicated binding-name strings
