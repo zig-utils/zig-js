@@ -835,6 +835,7 @@ pub fn setParallelSyncEnabled(on: bool) void {
 /// so variables survive across `evaluate` calls, like a real global context.
 pub const Context = struct {
     pub const c_api_handle_reserve_granularity = 16;
+    pub const js_thread_reserve_granularity = 16;
 
     gpa: std.mem.Allocator,
     arena_state: *std.heap.ArenaAllocator,
@@ -1849,6 +1850,13 @@ pub const Context = struct {
         if (spare >= additional) return;
         const extra = @max(additional, c_api_handle_reserve_granularity);
         try self.c_api_handles.ensureTotalCapacity(self.gpa, self.c_api_handles.items.len + extra);
+    }
+
+    pub fn reserveJsThreadsLocked(self: *Context, additional: usize) error{OutOfMemory}!void {
+        const spare = self.js_threads.capacity - self.js_threads.items.len;
+        if (spare >= additional) return;
+        const extra = @max(additional, js_thread_reserve_granularity);
+        try self.js_threads.ensureTotalCapacity(self.gpa, self.js_threads.items.len + extra);
     }
 
     fn scriptNeedsTreeWalk(source: []const u8) bool {
@@ -8272,6 +8280,29 @@ test "Thread API (enable_threads): shared realm, identity, exceptions, ids" {
         \\ctl.stop = true;
         \\if (spin.join() !== "done") throw new Error("spinner");
     );
+}
+
+test "Thread API reserves thread record capacity chunks" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_threads = true });
+    defer ctx.destroy();
+
+    try std.testing.expectEqual(@as(usize, 1), ctx.js_threads.items.len);
+    try std.testing.expect(ctx.js_threads.capacity >= Context.js_thread_reserve_granularity);
+    const first_capacity = ctx.js_threads.capacity;
+
+    while (ctx.js_threads.items.len < first_capacity) {
+        const v = try ctx.evaluate("new Thread(() => 1).join()");
+        try std.testing.expectEqual(@as(f64, 1), v.asNum());
+    }
+    try std.testing.expectEqual(first_capacity, ctx.js_threads.items.len);
+    try std.testing.expectEqual(first_capacity, ctx.js_threads.capacity);
+
+    const overflow = try ctx.evaluate("new Thread(() => 2).join()");
+    try std.testing.expectEqual(@as(f64, 2), overflow.asNum());
+    try std.testing.expectEqual(first_capacity + 1, ctx.js_threads.items.len);
+    try std.testing.expect(ctx.js_threads.capacity > first_capacity);
 }
 
 test "Thread API (enable_threads): abrupt top-level failure terminates parked unjoined threads" {

@@ -317,11 +317,12 @@ pub fn installThreadAPI(ctx: *Context) !void {
 
     // The main thread's record: id 0, never "joinable-blocking" (done from
     // birth, so a stray main.join() returns undefined instead of hanging).
+    try ctx.reserveJsThreadsLocked(1);
     const main_rec = try a.create(ThreadRecord);
     main_rec.* = .{ .id = 0, .gil = ctx.gil.?, .ctx = ctx, .done = true, .exited = true, .microtasks = &ctx.microtasks };
     main_rec.js_obj = try makeWrapper(ctx, main_rec);
     t_current = main_rec;
-    try ctx.js_threads.append(ctx.gpa, main_rec);
+    ctx.js_threads.appendAssumeCapacity(main_rec);
 
     try installSyncAPI(ctx);
     try installConcurrentAccessError(ctx);
@@ -421,12 +422,13 @@ fn threadCtorFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.Hos
         return self.throwError("RangeError", "too many live Threads (or thread-ID space exhausted)");
 
     const a = ctx.arena();
+    try ctx.reserveJsThreadsLocked(1);
     const rec = try a.create(ThreadRecord);
     rec.* = .{ .id = g.next_thread_id, .gil = g, .ctx = ctx };
     g.next_thread_id += 1;
     rec.js_obj = makeWrapper(ctx, rec) catch return error.OutOfMemory;
     const call_args = try a.dupe(Value, if (args.len > 1) args[1..] else &.{});
-    try ctx.js_threads.append(ctx.gpa, rec);
+    ctx.js_threads.appendAssumeCapacity(rec);
 
     rec.thread = std.Thread.spawn(.{ .stack_size = 64 << 20 }, threadMain, .{ rec, fn_v, call_args }) catch {
         rec.done = true;
