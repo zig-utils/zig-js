@@ -1710,11 +1710,18 @@ pub const Compiler = struct {
         const spread = hasSpread(c.args);
         if (spread) return error.Unsupported;
         if (c.callee.* == .member and c.callee.member.computed == null) {
+            // Fetch the method (RequireObjectCoercible on the receiver) BEFORE the
+            // args, per spec order, then tail-call with this = recv.
             const m = c.callee.member;
-            try self.compileExpr(m.object);
             const ni = try self.chunk.addName(m.property);
+            const recv = try self.freshTemp();
+            try self.compileExpr(m.object);
+            try self.emitDefine(recv);
+            try self.emitLoad(recv);
+            _ = try self.chunk.emit(.get_prop, ni);
+            try self.emitLoad(recv);
             for (c.args) |arg| try self.compileExpr(arg);
-            _ = try self.chunk.emitAB(.tail_call_method, ni, @intCast(c.args.len));
+            _ = try self.chunk.emit(.tail_call_with_this, @intCast(c.args.len));
             return;
         }
         if (c.callee.* == .member) {
@@ -1964,14 +1971,24 @@ pub const Compiler = struct {
                 } else if (c.callee.* == .member and c.callee.member.computed == null) {
                     // `recv.name(args)`: bind `this = recv` at the call site.
                     const m = c.callee.member;
-                    try self.compileExpr(m.object);
                     const ni = try self.chunk.addName(m.property);
                     if (spread) {
+                        try self.compileExpr(m.object);
                         try self.compileArgsArray(c.args);
                         _ = try self.chunk.emit(.call_method_spread, ni);
                     } else {
+                        // Fetch the method (RequireObjectCoercible on the receiver +
+                        // any getter) BEFORE the arguments, per spec order, then call
+                        // with this = recv. Mirrors the computed-member path so a
+                        // nullish receiver throws before an argument is evaluated.
+                        const recv = try self.freshTemp();
+                        try self.compileExpr(m.object);
+                        try self.emitDefine(recv);
+                        try self.emitLoad(recv);
+                        _ = try self.chunk.emit(.get_prop, ni);
+                        try self.emitLoad(recv);
                         for (c.args) |arg| try self.compileExpr(arg);
-                        _ = try self.chunk.emitAB(.call_method, ni, @intCast(c.args.len));
+                        _ = try self.chunk.emit(.call_with_this, @intCast(c.args.len));
                     }
                 } else if (c.callee.* == .member) {
                     if (spread) return error.Unsupported;
