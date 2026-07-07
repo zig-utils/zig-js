@@ -2428,6 +2428,13 @@ pub const Compiler = struct {
         // Async functions tree-walk (the Promise runtime isn't lowered yet), so
         // bail here to force the fallback for any program that defines one.
         if (fnode.is_async) return error.Unsupported;
+        // A nested generator runs env-mode and captures the enclosing scope BY
+        // NAME (load_var). If the enclosing function is frame-mode (tiered), its
+        // locals live in frame slots the generator's environment chain can't see,
+        // so the capture would read a stale/global value. Force the enclosing
+        // function to the tree-walker, where those locals live in the Environment.
+        // (An env-mode enclosing scope — self.scope == null — captures correctly.)
+        if (fnode.is_generator and self.scope != null) return error.Unsupported;
         if (!fnode.is_generator and fnode.is_strict and functionHasBlockNestedFuncDecl(fnode)) return error.Unsupported;
         // Build this function's slot namespace: parameters first, then every
         // function-scoped declaration in the body (not descending into nested
