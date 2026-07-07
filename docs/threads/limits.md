@@ -318,12 +318,12 @@ context APIs.
   verified, plus script Worker/SAB and module Worker/SAB cleanup subprograms
   where isolated Workers keep progressing on a retained `SharedArrayBuffer`
   while shared-realm `Thread`s publish cleanup targets and parked stack roots
-  through a finishing sweep, plus a Worker/thread finalization subprogram where
-  isolated Workers park on a retained SAB while shared-realm `Thread`s publish
-  `FinalizationRegistry` cleanup roots and `asyncJoin` observers through a
-  finishing sweep before Worker release, plus sibling script/module Worker
-  handler-exception cleanup subprograms that recover from an expected thrown
-  `onmessage` before proving the same Worker progress and cleanup oracle, plus
+  through a finishing sweep, plus script and module Worker/thread finalization
+  subprograms where isolated Workers park on a retained SAB while shared-realm
+  `Thread`s publish `FinalizationRegistry` cleanup roots and `asyncJoin`
+  observers through a finishing sweep before Worker release, plus sibling
+  script/module Worker handler-exception cleanup subprograms that recover from
+  an expected thrown `onmessage` before proving the same Worker progress and cleanup oracle, plus
   script/module Worker close/terminate subprograms that preserve exact FIFO
   drain/drop, post-close drop, post-terminate silence, joined roots, asyncJoin
   reactions, and cleanup count/sum through the finishing sweep, plus script/module Worker
@@ -394,10 +394,10 @@ context APIs.
   profile now adds deterministic termination storms,
   script Worker/thread retained-`SharedArrayBuffer` overlap, simple-import,
   diamond-shaped, and fanout/rejoin module Worker/thread overlap with exact
-  Atomics counter oracles, Worker/thread/finalization scheduling on one retained
-  SAB, script and module Worker termination interleaved with exact shared-realm
-  finalization cleanup on a retained SAB, Worker termination while top-level failure tears
-  down parked shared-realm `Thread`s, pending `asyncJoin` rejection reactions,
+  Atomics counter oracles, script/module Worker/thread/finalization scheduling
+  on one retained SAB, script and module Worker termination interleaved with
+  exact shared-realm finalization cleanup on a retained SAB, Worker termination
+  while top-level failure tears down parked shared-realm `Thread`s, pending `asyncJoin` rejection reactions,
   and already-ready cleanup jobs on the same retained SAB, module Worker
   termination with the same shared-realm teardown/reaction/cleanup oracle, exact
   FIFO drain/drop ordering for mixed script and module Worker

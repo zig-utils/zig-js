@@ -294,10 +294,10 @@ join-termination unit witness that checks parked-state/mutex cleanup, then
 requires exact script completion or exact expected termination plus at least one
 finishing parallel sweep and exact
 `FinalizationRegistry` cleanup count/sum delivery plus unregister-token
-suppression after a quiescent collect, and parks isolated Workers on a retained
-SAB while shared-realm Threads publish `FinalizationRegistry` cleanup roots and
-`asyncJoin` observers through a finishing sweep. Each seed currently runs 44
-deterministic mid-GC subprograms. The
+suppression after a quiescent collect, and parks script and module Workers on a
+retained SAB while shared-realm Threads publish `FinalizationRegistry` cleanup
+roots and `asyncJoin` observers through a finishing sweep. Each seed currently
+runs 45 deterministic mid-GC subprograms. The
 lifecycle profile
 (`-Dfuzz-lifecycle=true`) adds deterministic resizable `ArrayBuffer` /
 `DataView` constructor races where one no-GIL peer repeatedly resizes a backing
@@ -306,8 +306,8 @@ expected-throw termination storms for parked/unjoined shared-realm `Thread`s,
 exact Atomics counter oracles for script
 `Worker` plus simple-import, diamond-shaped, and fanout/rejoin module `Worker`
 overlap with shared-realm `Thread`s on one retained `SharedArrayBuffer`,
-Worker/thread/finalization scheduling on one retained SAB, exact cleanup after
-terminating spinning script and module Workers that share the retained SAB,
+script/module Worker/thread/finalization scheduling on one retained SAB, exact
+cleanup after terminating spinning script and module Workers that share the retained SAB,
 Worker termination while top-level failure tears down parked shared-realm `Thread`s, pending
 `asyncJoin` rejection reactions, and already-ready cleanup jobs on the same
 retained SAB, module Worker termination with the same shared-realm
@@ -388,7 +388,7 @@ abandons child-owned typed-array `waitAsync` tickets, rejects pending
 termination overlapping `ThreadLocal` hidden roots, no-fn `Lock.asyncHold()`
 release-function delivery, parked property/condition waiters, top-level
 teardown, rejected `asyncJoin` observers, and exact cleanup. Each seed
-currently runs 49
+currently runs 53
 deterministic lifecycle
 subprograms.
 

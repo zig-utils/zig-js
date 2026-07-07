@@ -65,6 +65,54 @@ const ModuleFuzzHost = struct {
     }
 };
 
+const ModuleThreadFinalizationFuzzHost = struct {
+    const Entry = struct { path: []const u8, source: []const u8 };
+    var host_ctx: u8 = 0;
+    const entries = [_]Entry{
+        .{
+            .path = "work.js",
+            .source =
+            \\export function addWorkerProgress(sab, iters) {
+            \\  const v = new Int32Array(sab);
+            \\  for (let i = 0; i < iters; i++)
+            \\    Atomics.add(v, 0, 1);
+            \\}
+            ,
+        },
+        .{
+            .path = "entry.js",
+            .source =
+            \\import { addWorkerProgress } from "./work.js";
+            \\globalThis.onmessage = (e) => {
+            \\  const v = new Int32Array(e.data.sab);
+            \\  Atomics.add(v, 2, 1);
+            \\  Atomics.notify(v, 2);
+            \\  while (Atomics.load(v, 1) === 0)
+            \\    Atomics.wait(v, 1, 0, 100);
+            \\  addWorkerProgress(e.data.sab, e.data.iters);
+            \\  postMessage({ done: true, module: true, after: Atomics.add(v, 3, 1) + 1 });
+            \\  if (e.data.close) close();
+            \\};
+            ,
+        },
+    };
+
+    fn load(_: *anyopaque, _: []const u8, specifier: []const u8, out_path: *[]const u8) ?[]const u8 {
+        const name = if (std.mem.startsWith(u8, specifier, "./")) specifier[2..] else specifier;
+        for (entries) |e| {
+            if (std.mem.eql(u8, e.path, name)) {
+                out_path.* = e.path;
+                return e.source;
+            }
+        }
+        return null;
+    }
+
+    fn host() js.Context.ModuleHost {
+        return .{ .ctx = &host_ctx, .load = load };
+    }
+};
+
 const ModuleExceptionFuzzHost = struct {
     const Entry = struct { path: []const u8, source: []const u8 };
     var host_ctx: u8 = 0;
@@ -2365,19 +2413,28 @@ fn runModuleWorkerExceptionFinalizationCleanupInterleaving(gpa: std.mem.Allocato
 }
 
 fn runWorkerThreadFinalizationInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
-    return runWorkerThreadFinalizationInterleavingKind(gpa, seed, false);
+    return runWorkerThreadFinalizationInterleavingKind(gpa, seed, false, false);
+}
+
+fn runModuleWorkerThreadFinalizationInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
+    return runWorkerThreadFinalizationInterleavingKind(gpa, seed, true, false);
 }
 
 fn runMidScriptWorkerThreadFinalizationGc(gpa: std.mem.Allocator, seed: u64) !bool {
-    return runWorkerThreadFinalizationInterleavingKind(gpa, seed, true);
+    return runWorkerThreadFinalizationInterleavingKind(gpa, seed, false, true);
+}
+
+fn runMidScriptModuleWorkerThreadFinalizationGc(gpa: std.mem.Allocator, seed: u64) !bool {
+    return runWorkerThreadFinalizationInterleavingKind(gpa, seed, true, true);
 }
 
 fn runWorkerThreadFinalizationInterleavingKind(
     gpa: std.mem.Allocator,
     seed: u64,
+    comptime module_worker: bool,
     comptime midgc: bool,
 ) !bool {
-    const salt: u64 = 0x6372_6f73_735f_6669 ^ (if (midgc) 0x6d69_6467_6377_7466 else 0);
+    const salt: u64 = 0x6372_6f73_735f_6669 ^ (if (module_worker) 0x6d6f_6477_7468_6669 else 0) ^ (if (midgc) 0x6d69_6467_6377_7466 else 0);
     var prng = std.Random.DefaultPrng.init(seed ^ salt);
     const r = prng.random();
     const nworkers = 1 + r.uintLessThan(usize, 3);
@@ -2456,10 +2513,16 @@ fn runWorkerThreadFinalizationInterleavingKind(
 
     var wi: usize = 0;
     while (wi < nworkers) : (wi += 1) {
-        const w = Worker.spawn(worker_src) catch {
-            std.debug.print("seed {d}: worker/thread finalization worker spawn failed\n", .{seed});
-            return false;
-        };
+        const w = if (module_worker)
+            Worker.spawnModule("entry.js", ModuleThreadFinalizationFuzzHost.entries[1].source, ModuleThreadFinalizationFuzzHost.host()) catch {
+                std.debug.print("seed {d}: module worker/thread finalization worker spawn failed\n", .{seed});
+                return false;
+            }
+        else
+            Worker.spawn(worker_src) catch {
+                std.debug.print("seed {d}: worker/thread finalization worker spawn failed\n", .{seed});
+                return false;
+            };
         try workers.append(gpa, w);
         w.postMessage(&machine, msg) catch |err| {
             std.debug.print("seed {d}: worker/thread finalization postMessage failed: {s}\n", .{ seed, @errorName(err) });
@@ -2607,6 +2670,16 @@ fn runWorkerThreadFinalizationInterleavingKind(
         if (!done.isBoolean() or !done.asBool() or !after.isNumber() or after.asNum() < 1 or after.asNum() > @as(f64, @floatFromInt(nworkers))) {
             std.debug.print("seed {d}: bad worker/thread finalization reply\n", .{seed});
             return false;
+        }
+        if (module_worker) {
+            const module = machine.getProperty(reply, "module") catch |err| {
+                std.debug.print("seed {d}: cannot read module worker/thread finalization marker: {s}\n", .{ seed, @errorName(err) });
+                return false;
+            };
+            if (!module.isBoolean() or !module.asBool()) {
+                std.debug.print("seed {d}: bad module worker/thread finalization marker\n", .{seed});
+                return false;
+            }
         }
     }
     for (workers.items) |w| {
@@ -17585,6 +17658,38 @@ pub fn main(init: std.process.Init) !void {
         if (mwcfail != 0) std.process.exit(1);
         return;
     };
+    // `threadfuzz workerthreadfinal <iters> <seed>`: focused lifecycle repro
+    // for isolated Workers parked on a retained SAB while shared-realm Threads
+    // publish FinalizationRegistry cleanup roots and asyncJoin observers.
+    if (first) |a| if (std.mem.eql(u8, a, "workerthreadfinal")) {
+        if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch 1;
+        if (args.next()) |b| base_seed = std.fmt.parseInt(u64, b, 10) catch 1;
+        var wtffail: usize = 0;
+        var wtfi: usize = 0;
+        while (wtfi < iters) : (wtfi += 1) {
+            const seed = base_seed +% wtfi;
+            if (!(try runWorkerThreadFinalizationInterleaving(gpa, seed))) wtffail += 1;
+        }
+        std.debug.print("threadfuzz workerthreadfinal: {d} programs from seed {d}, {d} failures\n", .{ iters, base_seed, wtffail });
+        if (wtffail != 0) std.process.exit(1);
+        return;
+    };
+    // `threadfuzz moduleworkerthreadfinal <iters> <seed>`: focused lifecycle
+    // repro for module Workers parked on a retained SAB while shared-realm
+    // Threads publish FinalizationRegistry cleanup roots and asyncJoin observers.
+    if (first) |a| if (std.mem.eql(u8, a, "moduleworkerthreadfinal")) {
+        if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch 1;
+        if (args.next()) |b| base_seed = std.fmt.parseInt(u64, b, 10) catch 1;
+        var mwtffail: usize = 0;
+        var mwtfi: usize = 0;
+        while (mwtfi < iters) : (mwtfi += 1) {
+            const seed = base_seed +% mwtfi;
+            if (!(try runModuleWorkerThreadFinalizationInterleaving(gpa, seed))) mwtffail += 1;
+        }
+        std.debug.print("threadfuzz moduleworkerthreadfinal: {d} programs from seed {d}, {d} failures\n", .{ iters, base_seed, mwtffail });
+        if (mwtffail != 0) std.process.exit(1);
+        return;
+    };
     // `threadfuzz workertermfin <iters> <seed>`: focused lifecycle repro for
     // script Worker termination while shared-realm Threads publish
     // FinalizationRegistry cleanup roots on the same retained SAB.
@@ -18269,6 +18374,23 @@ pub fn main(init: std.process.Init) !void {
         if (mwtffail != 0) std.process.exit(1);
         return;
     };
+    // `threadfuzz midgcmoduleworkerthreadfinal <iters> <seed>`: focused
+    // mid-script parallel-GC repro for module Workers parked on a retained SAB
+    // while shared-realm Threads publish FinalizationRegistry cleanup roots and
+    // asyncJoin observers through a finishing sweep before Worker release.
+    if (first) |a| if (std.mem.eql(u8, a, "midgcmoduleworkerthreadfinal")) {
+        if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch 1;
+        if (args.next()) |b| base_seed = std.fmt.parseInt(u64, b, 10) catch 1;
+        var mmwtffail: usize = 0;
+        var mmwtfi: usize = 0;
+        while (mmwtfi < iters) : (mmwtfi += 1) {
+            const seed = base_seed +% mmwtfi;
+            if (!(try runMidScriptModuleWorkerThreadFinalizationGc(gpa, seed))) mmwtffail += 1;
+        }
+        std.debug.print("threadfuzz midgcmoduleworkerthreadfinal: {d} programs from seed {d}, {d} failures\n", .{ iters, base_seed, mmwtffail });
+        if (mmwtffail != 0) std.process.exit(1);
+        return;
+    };
     // `threadfuzz midgcmoduleworker <iters> <seed>`: focused mid-script
     // parallel-GC repro for module Workers evaluating a small import graph on a
     // retained SAB while shared-realm Threads publish cleanup roots through a
@@ -18477,7 +18599,7 @@ pub fn main(init: std.process.Init) !void {
     // module-worker/thread overlap, exact Worker close/terminate/postMessage
     // FIFO drain/drop ordering for script and module Workers, worker handler
     // exception recovery,
-    // Worker/thread/finalization scheduling plus script/module Worker termination interleaved
+    // Script/module Worker/thread/finalization scheduling plus script/module Worker termination interleaved
     // with finalization cleanup on a retained SAB, Worker termination while
     // shared-realm top-level failure tears down parked Threads, pending
     // asyncJoin reactions, and cleanup jobs, Worker handler exception recovery
@@ -18532,7 +18654,7 @@ pub fn main(init: std.process.Init) !void {
     // FIFO order, drop post-close messages, and keep post-terminate receives
     // closed; thrown
     // worker handlers must not poison later deliveries,
-    // Worker/thread/finalization scheduling must preserve the retained-SAB
+    // Script/module Worker/thread/finalization scheduling must preserve the retained-SAB
     // counter plus exact cleanup delivery, terminating spinning script/module Workers must
     // not disturb exact shared-realm finalization cleanup on the retained SAB
     // or top-level-failure Thread teardown with pending asyncJoin cleanup,
@@ -18609,6 +18731,7 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runModuleWorkerCloseTerminateRace(gpa, seed))) lfail += 1;
             if (!(try runWorkerExceptionRecovery(gpa, seed))) lfail += 1;
             if (!(try runWorkerThreadFinalizationInterleaving(gpa, seed))) lfail += 1;
+            if (!(try runModuleWorkerThreadFinalizationInterleaving(gpa, seed))) lfail += 1;
             if (!(try runWorkerTerminateFinalizationInterleaving(gpa, seed))) lfail += 1;
             if (!(try runModuleWorkerTerminateFinalizationInterleaving(gpa, seed))) lfail += 1;
             if (!(try runWorkerTerminateThreadTeardownInterleaving(gpa, seed))) lfail += 1;
@@ -18652,7 +18775,7 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runThreadLocalTerminationCleanupInterleaving(gpa, seed))) lfail += 1;
             if (!(try runNestedThreadAsyncJoinCleanupInterleaving(gpa, seed))) lfail += 1;
         }
-        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 52, base_seed, lfail });
+        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 53, base_seed, lfail });
         if (lfail != 0) std.process.exit(1);
         return;
     };
@@ -18750,6 +18873,7 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runMidScriptWorkerCleanupGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptModuleWorkerCleanupGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptWorkerThreadFinalizationGc(gpa, seed))) mfail += 1;
+            if (!(try runMidScriptModuleWorkerThreadFinalizationGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptWorkerExceptionCleanupGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptModuleWorkerExceptionCleanupGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptWorkerCloseTerminateGc(gpa, seed))) mfail += 1;
@@ -18766,7 +18890,7 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runMidScriptModuleWorkerTerminateThreadLocalAsyncHoldCleanupGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptWeakCollectionGc(gpa, seed))) mfail += 1;
         }
-        std.debug.print("threadfuzz midgc: {d} programs from seed {d}, {d} failures\n", .{ iters * 44, base_seed, mfail });
+        std.debug.print("threadfuzz midgc: {d} programs from seed {d}, {d} failures\n", .{ iters * 45, base_seed, mfail });
         if (mfail != 0) std.process.exit(1);
         return;
     };
