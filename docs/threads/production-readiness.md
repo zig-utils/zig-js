@@ -219,10 +219,12 @@ Known performance/maturity work:
   under the shared threading API lock and run every grant outside it, reducing
   delivery lock acquisitions from once per job to once per burst and needing
   fewer shared-lock acquisitions for already-queued grant storms; they also
-  snapshot the microtask enqueue generation around each delivered grant, so
-  unobserved grants that enqueue no reactions skip an otherwise-empty no-GIL
-  microtask drain while preserving checkpoint order for grants that do enqueue
-  reactions.
+  reserve realm task-queue capacity in fixed chunks before capacity-assumed
+  appends, so async grant storms pay fewer allocator-growth trips while holding
+  the shared API lock. The pump snapshots the microtask enqueue generation
+  around each delivered grant, so unobserved grants that enqueue no reactions
+  skip an otherwise-empty no-GIL microtask drain while preserving checkpoint
+  order for grants that do enqueue reactions.
 - Promise microtask drains now use a FIFO head cursor instead of
   `orderedRemove(0)`, so observed async-hold callback settlement and no-fn
   release-function reactions do not shift the remaining reaction queue on every

@@ -11,6 +11,8 @@ const agent = @import("agent.zig");
 const stack_scan = @import("stack_scan.zig");
 
 pub const Gil = struct {
+    const task_queue_reserve_granularity: usize = 64;
+
     mutex: std.Io.Mutex = .init,
     /// The holding thread (0 = unheld) — written only by the holder right
     /// after acquire / before release; read by debug asserts and only
@@ -113,7 +115,8 @@ pub const Gil = struct {
     pub fn enqueueTask(g: *Gil, a: std.mem.Allocator, task: *anyopaque) !void {
         g.lockApi();
         defer g.unlockApi();
-        try g.tasks.append(a, task);
+        try g.ensureTaskCapacityLocked(a, 1);
+        g.tasks.appendAssumeCapacity(task);
         g.tasks_queued.store(g.queuedTaskCountLocked(), .release);
     }
 
@@ -121,8 +124,16 @@ pub const Gil = struct {
         if (tasks.len == 0) return;
         g.lockApi();
         defer g.unlockApi();
-        try g.tasks.appendSlice(a, tasks);
+        try g.ensureTaskCapacityLocked(a, tasks.len);
+        g.tasks.appendSliceAssumeCapacity(tasks);
         g.tasks_queued.store(g.queuedTaskCountLocked(), .release);
+    }
+
+    fn ensureTaskCapacityLocked(g: *Gil, a: std.mem.Allocator, additional: usize) !void {
+        const needed = g.tasks.items.len + additional;
+        if (needed <= g.tasks.capacity) return;
+        const extra = @max(additional, task_queue_reserve_granularity);
+        try g.tasks.ensureTotalCapacity(a, g.tasks.items.len + extra);
     }
 
     pub fn dequeueTask(g: *Gil) ?*anyopaque {
@@ -209,6 +220,7 @@ pub const Gil = struct {
             @ptrCast(&two),
         });
         try std.testing.expectEqual(@as(usize, 2), g.tasks_queued.load(.acquire));
+        try std.testing.expect(g.tasks.capacity >= Gil.task_queue_reserve_granularity);
         try g.enqueueTaskBurst(std.testing.allocator, &.{@ptrCast(&three)});
         try std.testing.expectEqual(@as(usize, 3), g.tasks_queued.load(.acquire));
 
@@ -370,6 +382,7 @@ test "gil: task queue is FIFO without front shifts" {
     var three: u8 = 3;
 
     try g.enqueueTask(a, @ptrCast(&one));
+    try std.testing.expect(g.tasks.capacity >= Gil.task_queue_reserve_granularity);
     try g.enqueueTask(a, @ptrCast(&two));
     try g.enqueueTask(a, @ptrCast(&three));
     defer g.tasks.deinit(a);

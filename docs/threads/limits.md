@@ -162,7 +162,9 @@ context APIs.
   task pumps no longer take the shared run-loop task lock, reducing one measured
   cost in contended lock/lifecycle paths; task-queue writers publish the
   pending-count hint from the locked queue length instead of writer-side atomic
-  RMW; real async-hold delivery now uses FIFO
+  RMW and reserve realm task-queue capacity in fixed chunks before
+  capacity-assumed appends, so async grant storms pay fewer allocator-growth
+  trips while holding the shared API lock; real async-hold delivery now uses FIFO
   head cursors for both per-lock pending grants and realm task delivery, and
   retry-front grants use an amortized O(1) front stash when no consumed head
   slot is available, so failed grant delivery does not fall back to shifting the
