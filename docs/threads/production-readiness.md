@@ -339,6 +339,11 @@ Known performance/maturity work:
   unordered root sets, so their removals now use swap removal instead of
   order-preserving list shifts on evaluate, handle-unprotect, and thread
   teardown paths.
+- Internal module-graph queues used by top-level-await parent resumption,
+  `import defer` dependency startup, and dynamic-import namespace waiters reserve
+  fixed-size capacity chunks before capacity-assumed appends. This keeps module
+  graph semantics unchanged while reducing allocator-growth trips in module
+  Worker/import-graph lifecycle bursts.
 - WeakMap/WeakSet entry delete and GC dead-key pruning are unordered by
   observable JS semantics, so they now use tail removal instead of shifting
   later entries. FinalizationRegistry `unregister` still preserves survivor

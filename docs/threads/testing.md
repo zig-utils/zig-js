@@ -588,6 +588,8 @@ root-list reserve growth and swap-pop cleanup.
 `Gil park records reserve capacity chunks and unregister by swap` guards
 threadlocal park-record registration growth, duplicate suppression, and
 swap-removal cleanup for mid-script GC stack-scan records.
+`modules reserve internal queue capacity chunks` guards module-list reserve
+growth, duplicate suppression, and dynamic-import namespace waiter growth.
 Collection-helper removal witnesses live in the same unit suite:
 `WeakMap and WeakSet entry delete is unordered tail removal`,
 `gc pruneDeadWeakEntries removes dead weak keys with unordered tail removal`,

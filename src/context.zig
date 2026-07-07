@@ -22,6 +22,8 @@ const promise = @import("promise.zig");
 pub const RunError = interp.EvalError || @import("parser.zig").ParseError;
 
 const finalization_cleanup_queue_reserve_granularity = 16;
+const module_queue_reserve_granularity = 16;
+const module_namespace_waiter_reserve_granularity = 16;
 
 /// A mutex-guarded wrapper over the per-context arena allocator. Shapes,
 /// interned strings, AST nodes, and Environment binding tables are all
@@ -3025,11 +3027,11 @@ pub const Context = struct {
 
     fn gatherDeferredAsyncDependencies(self: *Context, module: *Module, seen: *std.ArrayListUnmanaged(*Module), out: *std.ArrayListUnmanaged(*Module)) !void {
         for (seen.items) |m| if (m == module) return;
-        try seen.append(self.arena(), module);
+        try self.appendModuleList(seen, module);
         if (module.evaluated or module.eval_started) return;
         if (module.has_tla) {
             for (out.items) |m| if (m == module) return;
-            try out.append(self.arena(), module);
+            try self.appendModuleList(out, module);
             return;
         }
         for (module.items) |item| switch (item.*) {
@@ -3060,7 +3062,14 @@ pub const Context = struct {
 
     fn appendUniqueModule(self: *Context, list: *std.ArrayListUnmanaged(*Module), module: *Module) !void {
         for (list.items) |m| if (m == module) return;
-        try list.append(self.arena(), module);
+        try self.appendModuleList(list, module);
+    }
+
+    fn appendModuleList(self: *Context, list: *std.ArrayListUnmanaged(*Module), module: *Module) !void {
+        if (list.capacity == list.items.len) {
+            try list.ensureTotalCapacity(self.arena(), list.items.len + module_queue_reserve_granularity);
+        }
+        list.appendAssumeCapacity(module);
     }
 
     fn moduleHasPendingStartedDependency(self: *Context, module: *Module) interp.EvalError!bool {
@@ -3070,7 +3079,7 @@ pub const Context = struct {
 
     fn moduleHasPendingStartedDependencyInner(self: *Context, module: *Module, seen: *std.ArrayListUnmanaged(*Module)) interp.EvalError!bool {
         for (seen.items) |m| if (m == module) return false;
-        try seen.append(self.arena(), module);
+        try self.appendModuleList(seen, module);
         for (module.items) |item| switch (item.*) {
             .import_decl => |imp| {
                 if (imp.deferred) continue;
@@ -3121,7 +3130,10 @@ pub const Context = struct {
     }
 
     fn appendModuleNamespaceWaiter(self: *Context, m: *Module, capability: *promise.Promise, ns: *value.Object) interp.EvalError!void {
-        try m.dynamic_waiters.append(self.arena(), .{ .capability = capability, .namespace = ns });
+        if (m.dynamic_waiters.capacity == m.dynamic_waiters.items.len) {
+            try m.dynamic_waiters.ensureTotalCapacity(self.arena(), m.dynamic_waiters.items.len + module_namespace_waiter_reserve_granularity);
+        }
+        m.dynamic_waiters.appendAssumeCapacity(.{ .capability = capability, .namespace = ns });
     }
 
     fn resolveModuleNamespaceWaiters(self: *Context, machine: *interp.Interpreter, m: *Module) interp.EvalError!void {
@@ -3461,6 +3473,61 @@ fn evaluateModuleWithFixturesInContext(ctx: *Context, source: []const u8, fixtur
 
 fn evaluateSelfModule(source: []const u8) !void {
     try evaluateModuleWithFixtures(source, &.{});
+}
+
+test "modules reserve internal queue capacity chunks" {
+    const ctx = try Context.create(std.testing.allocator);
+    defer ctx.destroy();
+
+    var list: std.ArrayListUnmanaged(*Context.Module) = .empty;
+    var first_module = Context.Module{ .path = "m0", .items = &.{}, .env = &ctx.env };
+    try ctx.appendModuleList(&list, &first_module);
+    try std.testing.expect(list.capacity >= module_queue_reserve_granularity);
+
+    const first_capacity = list.capacity;
+    var modules = try ctx.arena().alloc(Context.Module, first_capacity + 1);
+    var i: usize = 0;
+    while (i < modules.len) : (i += 1) {
+        modules[i] = .{ .path = "m", .items = &.{}, .env = &ctx.env };
+    }
+
+    try ctx.appendUniqueModule(&list, &first_module);
+    try std.testing.expectEqual(@as(usize, 1), list.items.len);
+    try std.testing.expectEqual(first_capacity, list.capacity);
+
+    i = 0;
+    while (list.items.len < first_capacity) : (i += 1) {
+        try ctx.appendUniqueModule(&list, &modules[i]);
+    }
+    try std.testing.expectEqual(first_capacity, list.items.len);
+    try std.testing.expectEqual(first_capacity, list.capacity);
+
+    try ctx.appendUniqueModule(&list, &modules[i]);
+    try std.testing.expectEqual(first_capacity + 1, list.items.len);
+    try std.testing.expect(list.capacity > first_capacity);
+
+    var waiter_module = Context.Module{ .path = "waiters", .items = &.{}, .env = &ctx.env };
+    var first_promise = promise.Promise{};
+    var first_namespace = value.Object{};
+    try ctx.appendModuleNamespaceWaiter(&waiter_module, &first_promise, &first_namespace);
+    try std.testing.expect(waiter_module.dynamic_waiters.capacity >= module_namespace_waiter_reserve_granularity);
+
+    const first_waiter_capacity = waiter_module.dynamic_waiters.capacity;
+    var promises = try ctx.arena().alloc(promise.Promise, first_waiter_capacity + 1);
+    var namespaces = try ctx.arena().alloc(value.Object, first_waiter_capacity + 1);
+    @memset(promises, .{});
+    @memset(namespaces, .{});
+
+    i = 0;
+    while (waiter_module.dynamic_waiters.items.len < first_waiter_capacity) : (i += 1) {
+        try ctx.appendModuleNamespaceWaiter(&waiter_module, &promises[i], &namespaces[i]);
+    }
+    try std.testing.expectEqual(first_waiter_capacity, waiter_module.dynamic_waiters.items.len);
+    try std.testing.expectEqual(first_waiter_capacity, waiter_module.dynamic_waiters.capacity);
+
+    try ctx.appendModuleNamespaceWaiter(&waiter_module, &promises[i], &namespaces[i]);
+    try std.testing.expectEqual(first_waiter_capacity + 1, waiter_module.dynamic_waiters.items.len);
+    try std.testing.expect(waiter_module.dynamic_waiters.capacity > first_waiter_capacity);
 }
 
 test "modules initialize default and var exports for self imports" {
