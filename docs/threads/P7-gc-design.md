@@ -164,10 +164,12 @@ treats those as non-cells. This keeps the trace surface to runtime values only.
   immediately afterward. Bucket-shaped delegated side allocations are still
   classified once and freed through the wrapped allocator, and non-owned
   bucket-shaped resize/remap/free paths do not retake the backing lock after
-  classification. Single-mutator object side stores now bypass the
-  `GcCellBacking` wrapper and allocate directly from the context allocator;
-  true-parallel JS keeps the synchronized wrapper for those stores so no-GIL
-  embedders are not required to provide a thread-safe allocator.
+  classification. Explicit quiescent collection uses per-slab live counters to
+  trim fully unused tail chunks after one-off allocation spikes, while retaining
+  non-empty and empty inner chunks for reuse. Single-mutator object side stores
+  now bypass the `GcCellBacking` wrapper and allocate directly from the context
+  allocator; true-parallel JS keeps the synchronized wrapper for those stores so
+  no-GIL embedders are not required to provide a thread-safe allocator.
 - **Mark:** explicit mark stack (no recursion — JS graphs are deep). Tri-color:
   white = unmarked, grey = on stack, black = traced.
 - **Weak processing:** after the strong mark stack drains, an ephemeron

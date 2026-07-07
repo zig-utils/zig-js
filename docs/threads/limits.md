@@ -88,7 +88,11 @@ context APIs.
   following whole-chunk free, and the backing leaves parallel mode for that
   single-owner destroy phase so owned live-cell frees skip the per-free spinlock
   while chunks are being drained. Bucket-shaped delegated side allocations
-  still classify once and free through the wrapped allocator. Non-owned
+  still classify once and free through the wrapped allocator. After an explicit
+  quiescent `collectGarbage()`, the backing now uses per-slab live counters to
+  release fully unused tail chunks while retaining non-empty and inner chunks for
+  reuse, so one-off allocation spikes can return slab memory before
+  `Context.destroy()` without changing the collector API. Non-owned
   bucket-shaped resize/remap/free paths also reuse the classification lock
   instead of retaking it before delegation. Single-mutator GC object side stores
   bypass the cell-slab classifier and allocate from the context allocator
@@ -124,15 +128,17 @@ context APIs.
   cells, free cells, and surviving live cells. The same profile now includes a
   repeated allocate-plus-collect churn table that reports fresh/reused/freed
   cells, final chunk/live counts, and reuse percentage for GC modes, giving the
-  nursery/generational roadmap a direct freelist-reuse baseline. Chunk metadata
-  reserve-before-slab allocation keeps this profile focused on cell-slab
-  pressure rather than avoidable metadata allocation churn. The
+  nursery/generational roadmap a direct freelist-reuse baseline. Explicit-GC
+  tail-slab trimming keeps the post-collection chunk/free-slot columns honest
+  after one-off spikes while still preserving reuse inside retained chunks.
+  Chunk metadata reserve-before-slab allocation keeps this profile focused on
+  cell-slab pressure rather than avoidable metadata allocation churn. The
   object-sized 1024/2048-byte buckets now use 384 KiB chunks: the local profile
   keeps the intrinsic empty context at three object-cell chunks with 1152 slots,
-  and the object-heavy profile at roughly 55 object-cell chunks instead of the
-  former 83, without the reserved-slot overhang of a 512 KiB chunk. It also
-  splits GC finalizer attribution between empty-context destroy and destroy
-  after the object workload.
+  while explicit collection trims fully unused object-heavy spike chunks back to
+  that retained baseline instead of carrying the older 83-chunk post-collect
+  footprint. It also splits GC finalizer attribution between empty-context
+  destroy and destroy after the object workload.
 - **Context lifecycle cost.** Long-lived embedders amortize the GC setup and
   teardown costs, but create-per-unit-of-work embedders need either cheaper
   context lifecycle or clearer guidance.

@@ -101,13 +101,18 @@ Known performance/maturity work:
   chunks are being drained. Bucket-shaped delegated side allocations still classify
   once and free through the wrapped allocator, and the non-owned bucket-shaped
   resize/remap/free paths avoid retaking the backing lock after classification.
+  Explicit quiescent `collectGarbage()` now also trims fully unused tail slabs
+  using per-slab live counters: empty spike chunks can be released before
+  `Context.destroy()`, while non-empty chunks and empty inner chunks stay
+  retained for reuse.
   This cuts the old one-general-allocator-call-per-cell profile without
   changing the collector API.
   The object-sized 1024/2048-byte buckets now use 384 KiB slab chunks, larger
   than the small cell buckets but smaller than the over-reserving 512 KiB
   alternative. The empty-context profile stays at three object-cell chunks with
-  1152 slots, and the object-heavy profile drops to roughly 55 object-cell
-  chunks, down from the former 83, while preserving the small-bucket footprint.
+  1152 slots, and explicit collection trims fully unused object-heavy spike
+  chunks back to that retained baseline instead of carrying the former 83-chunk
+  post-collect footprint.
   Live `SharedArrayBuffer` retain teardown is also regression covered across the
   arena path, the no-GIL threaded path, and the `.gil = true` serialized
   fallback.
@@ -160,7 +165,8 @@ Known performance/maturity work:
   every freed cell or slab chunk. Finalizer attribution is likewise split
   between empty-context destroy and destroy after the object workload. Fresh-slot
   allocation skips slab chunks whose bump range is already exhausted, chunk
-  metadata growth is reserved before each slab allocation, and the object-sized
+  metadata growth is reserved before each slab allocation, explicit collection
+  trims fully unused tail slabs after object spikes, and the object-sized
   1024/2048-byte buckets use larger chunks so the profile exposes reduced
   object-cell chunk churn separately from remaining create/destroy wall-clock
   costs. A repeated allocate-plus-collect churn table now reports

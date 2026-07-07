@@ -552,21 +552,24 @@ every free-list node or slab chunk. The object-sized 1024/2048-byte buckets use
 384 KiB slab chunks rather than the small buckets' 64 KiB chunks, so compare
 chunk counts alongside wall-clock timings when evaluating GC allocation or
 lifecycle changes. A healthy local profile should show the empty context at
-three object-cell chunks and the object-heavy script around 55 object-cell
-chunks instead of the older 83-chunk baseline. The same profile now prints a
-repeated allocate-plus-collect churn table that summarizes fresh cells, reused
-cells, freed cells, final chunk/live counts, and reuse percentage for GC modes;
-this is the local evidence trail for future nursery/generational allocation
-work.
+three object-cell chunks; after explicit collection, a one-off object-heavy
+spike should trim fully unused tail slabs back toward that retained baseline
+instead of preserving the older 83-chunk post-collect footprint. The same
+profile now prints a repeated allocate-plus-collect churn table that summarizes
+fresh cells, reused cells, freed cells, final chunk/live counts, and reuse
+percentage for GC modes; this is the local evidence trail for future
+nursery/generational allocation work.
 Direct `GcCellBacking` unit tests cover lazy fresh-slot bumping, free-list
 recycling, fresh-chunk cursor advancement, ownership span/hint classification,
 sorted address-index lookup with chunk/bump-offset/address metadata kept in
-sync, fixed-size metadata reserve growth before slab allocation, and bulk
-teardown leaving parallel mode before owned live-cell frees drain without
-rebuilding freelists,
-stats accounting, cumulative fresh/reused/freed allocation counters,
+sync, fixed-size metadata reserve growth before slab allocation, empty tail-slab
+trimming, non-empty tail and empty-inner-slab retention, and bulk teardown
+leaving parallel mode before owned live-cell frees drain without rebuilding
+freelists, stats accounting, cumulative fresh/reused/freed allocation counters,
 multi-chunk maintained-counter snapshots, bucket attribution, bulk-teardown
 behavior, and bucket-shaped delegated side frees during teardown.
+`enable_gc: collectGarbage trims empty GC backing tail chunks` covers the public
+explicit-GC path that releases fully unused spike slabs before context destroy.
 `enable_gc: heap binding and cell backing share one lifecycle allocation` covers
 the context-lifecycle reduction where the GC heap, root-tracing binding, and cell
 backing live in one stable state object instead of three separate GPA
