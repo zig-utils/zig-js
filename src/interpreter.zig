@@ -5098,19 +5098,24 @@ pub const Interpreter = struct {
             const m = callee_node.member;
             const recv = try self.eval(m.object);
             if (m.optional and (recv.isNull() or recv.isUndefined())) return error.OptShortCircuit;
-            const key = try self.memberKey(m.property, m.computed);
-            // `recv.m?.(...)`: short-circuit if the method itself is nullish.
-            if (optional) {
-                const method = try self.getProperty(recv, key);
-                if (method.isNull() or method.isUndefined()) return error.OptShortCircuit;
-                return self.callValueWithThis(method, try self.evalArgs(arg_nodes), recv);
-            }
+            // Evaluate a computed key's EXPRESSION now, but defer ToPropertyKey (its
+            // toString/valueOf) until after RequireObjectCoercible — a nullish
+            // receiver throws before the key's toString runs, matching the read path
+            // and the deferred-ToPropertyKey spec (`null[{toString(){…}}]()`).
+            const kv: ?Value = if (m.computed) |ce| try self.eval(ce) else null;
             // Evaluating the callee MemberExpression does RequireObjectCoercible on
             // the base, so a nullish receiver throws BEFORE the arguments are
             // evaluated — `o.bar.gar(foo())` must not run `foo()` when `o.bar` is
             // undefined.
             if (recv.isNull() or recv.isUndefined())
                 return self.throwError("TypeError", "cannot read property of null or undefined");
+            const key = if (kv) |k| try self.keyOf(k) else m.property;
+            // `recv.m?.(...)`: short-circuit if the method itself is nullish.
+            if (optional) {
+                const method = try self.getProperty(recv, key);
+                if (method.isNull() or method.isUndefined()) return error.OptShortCircuit;
+                return self.callValueWithThis(method, try self.evalArgs(arg_nodes), recv);
+            }
             const args = try self.evalArgs(arg_nodes);
             return self.callMethod(recv, key, args);
         }
