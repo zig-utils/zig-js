@@ -308,7 +308,11 @@ fn runIsolatedCase(gpa: std.mem.Allocator, io: std.Io, parallel_js: bool, name: 
     defer gpa.free(res.stdout);
     defer gpa.free(res.stderr);
 
-    if (!res.term.success()) {
+    const exited_ok = switch (res.term) {
+        .exited => |code| code == 0,
+        else => false,
+    };
+    if (!exited_ok) {
         std.debug.print("  FAIL  {s}: isolated worker failed\n", .{name});
         if (res.stdout.len != 0) std.debug.print("{s}", .{res.stdout});
         if (res.stderr.len != 0) std.debug.print("{s}", .{res.stderr});
