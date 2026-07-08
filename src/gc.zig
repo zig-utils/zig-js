@@ -407,7 +407,7 @@ pub fn traceGenerator(g: *vm.Generator, v: anytype) void {
     v.mark(g.home_object);
     v.mark(g.super_ctor);
     v.mark(g.result);
-    for (g.requests.items) |req| {
+    for (g.pendingRequests()) |req| {
         markValue(v, req.value);
         v.mark(req.result);
     }
@@ -429,6 +429,7 @@ fn finalizeGenerator(g: *vm.Generator, a: std.mem.Allocator, live: *usize) void 
     if (flags.requests) {
         g.requests.deinit(a);
         g.requests = .empty;
+        g.requests_head = 0;
         released += 1;
     }
     if (released > 0) {

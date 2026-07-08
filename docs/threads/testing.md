@@ -518,6 +518,10 @@ public asyncHold corpus case also covers the release-function path after that
 allocation reduction. `Promise reaction lists reserve capacity chunks` guards
 per-promise fulfill/reject reaction-list reserve growth plus GC-owned live-entry
 accounting.
+Async-generator request queues use the same direct queue shape:
+`async generator request queue uses a head cursor and compacting reserve` guards
+FIFO pop, consumed-slot compaction before growth, fixed-size reserve growth, and
+GC pending-request tracing through `Generator.pendingRequests()`.
 The property `waitAsync` timeout row should keep `async` and `done` equal after
 finite tickets settle; the single-lock `Condition.asyncWait` row exposes
 same-lock regrant batching, while the multi-lock row exercises FIFO-bursted

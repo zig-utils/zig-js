@@ -221,6 +221,10 @@ context APIs.
   fulfill/reject reaction lists reserve fixed-size capacity chunks before
   capacity-assumed appends under `Promise.lock`, reducing allocator-growth trips
   while many `.then()` observers register on one pending promise.
+  Async-generator request queues now drain queued `.next()` / `.return()` /
+  `.throw()` promises through a FIFO head cursor, compact consumed head slots
+  before growing, reserve fixed-size capacity chunks before capacity-assumed
+  appends, and expose only pending requests to GC tracing.
   Property-mode `Atomics.notify` now stable-compacts matching sync and async
   waiters in one pass: notified heap-owned sync tickets leave the realm waiter
   table before signal, and matching `waitAsync` tickets are collected without

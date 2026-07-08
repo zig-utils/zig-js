@@ -27,6 +27,8 @@ const Environment = interp.Environment;
 const Function = interp.Function;
 const EvalError = interp.EvalError;
 
+const async_gen_request_reserve_granularity: usize = 16;
+
 fn bindThisForCall(vm: *Interpreter, func: *Function, this_val: Value) EvalError!Value {
     if (func.is_arrow) return func.arrow_this;
     if (func.is_strict) return this_val;
@@ -208,6 +210,7 @@ pub const Generator = struct {
     is_async_gen: bool = false,
     requests_mutex: std.Io.Mutex = .init,
     requests: std.ArrayListUnmanaged(AsyncGenRequest) = .empty,
+    requests_head: usize = 0,
     pumping: bool = false,
 
     fn backingFor(self: *Generator, fallback: std.mem.Allocator, comptime field: []const u8) std.mem.Allocator {
@@ -235,6 +238,61 @@ pub const Generator = struct {
     pub fn requestsAllocator(self: *Generator, fallback: std.mem.Allocator) std.mem.Allocator {
         return self.backingFor(fallback, "requests");
     }
+
+    pub fn pendingRequests(self: *const Generator) []const AsyncGenRequest {
+        if (self.requests_head >= self.requests.items.len) return self.requests.items[0..0];
+        return self.requests.items[self.requests_head..];
+    }
+
+    fn hasPendingRequest(self: *const Generator) bool {
+        return self.requests_head < self.requests.items.len;
+    }
+
+    fn compactRequests(self: *Generator) void {
+        if (self.requests_head == 0) return;
+        const pending = self.pendingRequests();
+        if (pending.len > 0) std.mem.copyForwards(AsyncGenRequest, self.requests.items[0..pending.len], pending);
+        self.requests.shrinkRetainingCapacity(pending.len);
+        self.requests_head = 0;
+    }
+
+    fn reserveRequests(self: *Generator, fallback: std.mem.Allocator, additional: usize) !void {
+        if (additional == 0) return;
+        var spare = self.requests.capacity - self.requests.items.len;
+        if (spare < additional and self.requests_head > 0) {
+            self.compactRequests();
+            spare = self.requests.capacity - self.requests.items.len;
+        }
+        if (spare >= additional) return;
+        const extra = @max(additional, async_gen_request_reserve_granularity);
+        try self.requests.ensureTotalCapacity(self.requestsAllocator(fallback), self.requests.items.len + extra);
+    }
+
+    fn appendRequest(self: *Generator, fallback: std.mem.Allocator, req: AsyncGenRequest) !void {
+        try self.reserveRequests(fallback, 1);
+        self.requests.appendAssumeCapacity(req);
+    }
+
+    fn frontRequest(self: *const Generator) ?AsyncGenRequest {
+        if (!self.hasPendingRequest()) return null;
+        return self.requests.items[self.requests_head];
+    }
+
+    fn popRequest(self: *Generator) ?AsyncGenRequest {
+        if (!self.hasPendingRequest()) {
+            self.requests.clearRetainingCapacity();
+            self.requests_head = 0;
+            return null;
+        }
+        const req = self.requests.items[self.requests_head];
+        self.requests.items[self.requests_head] = undefined;
+        self.requests_head += 1;
+        if (self.requests_head == self.requests.items.len) {
+            self.requests.clearRetainingCapacity();
+            self.requests_head = 0;
+        }
+        return req;
+    }
 };
 
 /// A queued async-generator request: how to resume the body and the promise to
@@ -244,6 +302,63 @@ pub const AsyncGenRequest = struct {
     value: Value,
     result: *value.Object,
 };
+
+test "async generator request queue uses a head cursor and compacting reserve" {
+    var g = Generator{
+        .chunk = undefined,
+        .env = undefined,
+    };
+    defer g.requests.deinit(std.testing.allocator);
+
+    const dummy_result: *value.Object = undefined;
+    var i: usize = 0;
+    while (i < async_gen_request_reserve_granularity) : (i += 1) {
+        try g.appendRequest(std.testing.allocator, .{
+            .kind = .send,
+            .value = Value.num(@floatFromInt(i)),
+            .result = dummy_result,
+        });
+    }
+
+    const first_capacity = g.requests.capacity;
+    try std.testing.expect(first_capacity >= async_gen_request_reserve_granularity);
+    while (i < first_capacity) : (i += 1) {
+        try g.appendRequest(std.testing.allocator, .{
+            .kind = .send,
+            .value = Value.num(@floatFromInt(i)),
+            .result = dummy_result,
+        });
+    }
+    try std.testing.expectEqual(first_capacity, g.pendingRequests().len);
+
+    const first = g.popRequest().?;
+    try std.testing.expectEqual(@as(f64, 0), first.value.asNum());
+    try std.testing.expectEqual(@as(usize, 1), g.requests_head);
+    try std.testing.expectEqual(first_capacity, g.requests.items.len);
+
+    try g.appendRequest(std.testing.allocator, .{
+        .kind = .return_,
+        .value = Value.num(99),
+        .result = dummy_result,
+    });
+    try std.testing.expectEqual(first_capacity, g.requests.capacity);
+    try std.testing.expectEqual(@as(usize, 0), g.requests_head);
+    try std.testing.expectEqual(first_capacity, g.requests.items.len);
+    try std.testing.expectEqual(@as(f64, 1), g.frontRequest().?.value.asNum());
+    try std.testing.expectEqual(@as(f64, 99), g.requests.items[g.requests.items.len - 1].value.asNum());
+
+    var expected: f64 = 1;
+    while (g.popRequest()) |req| {
+        if (g.hasPendingRequest())
+            try std.testing.expectEqual(expected, req.value.asNum())
+        else
+            try std.testing.expectEqual(@as(f64, 99), req.value.asNum());
+        expected += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 0), g.requests_head);
+    try std.testing.expectEqual(@as(usize, 0), g.requests.items.len);
+    try std.testing.expectEqual(first_capacity, g.requests.capacity);
+}
 
 /// Property-key string for a computed index: a Symbol uses its unique internal
 /// encoding (matching the tree-walker's `memberKey`); everything else coerces
@@ -1876,13 +1991,13 @@ pub fn asyncGenRequest(vm: *Interpreter, gen_obj: *value.Object, kind: ResumeKin
     g.requests_mutex.lockUncancelable(agent.engineIo());
     {
         errdefer g.requests_mutex.unlock(agent.engineIo());
-        try g.requests.append(g.requestsAllocator(vm.arena), .{ .kind = kind, .value = val, .result = rp });
+        try g.appendRequest(vm.arena, .{ .kind = kind, .value = val, .result = rp });
         if (!g.pumping) {
             g.pumping = true;
             if (g.done)
                 start_done = true
             else
-                start_req = g.requests.items[0];
+                start_req = g.frontRequest();
         }
     }
     g.requests_mutex.unlock(agent.engineIo());
@@ -2005,22 +2120,22 @@ fn agResume(vm: *Interpreter, g: *Generator, kind: ResumeKind, val: Value) EvalE
 fn agFront(g: *Generator) ?AsyncGenRequest {
     g.requests_mutex.lockUncancelable(agent.engineIo());
     defer g.requests_mutex.unlock(agent.engineIo());
-    if (g.requests.items.len == 0) {
+    if (!g.hasPendingRequest()) {
         g.pumping = false;
         return null;
     }
-    return g.requests.items[0];
+    return g.frontRequest();
 }
 
 fn agRemoveFrontAndContinue(vm: *Interpreter, g: *Generator) EvalError!void {
     var next_req: ?AsyncGenRequest = null;
     var drain_done = false;
     g.requests_mutex.lockUncancelable(agent.engineIo());
-    if (g.requests.items.len > 0) _ = g.requests.orderedRemove(0);
+    _ = g.popRequest();
     if (g.done)
         drain_done = true
-    else if (g.requests.items.len > 0)
-        next_req = g.requests.items[0]
+    else if (g.frontRequest()) |front|
+        next_req = front
     else
         g.pumping = false;
     g.requests_mutex.unlock(agent.engineIo());
@@ -2096,7 +2211,7 @@ fn agPumpNext(vm: *Interpreter, g: *Generator) EvalError!void {
         g.requests_mutex.unlock(agent.engineIo());
         return;
     }
-    if (g.requests.items.len == 0) {
+    if (!g.hasPendingRequest()) {
         g.requests_mutex.unlock(agent.engineIo());
         return;
     }
@@ -2104,7 +2219,7 @@ fn agPumpNext(vm: *Interpreter, g: *Generator) EvalError!void {
     if (g.done)
         drain_done = true
     else
-        req = g.requests.items[0];
+        req = g.frontRequest();
     g.requests_mutex.unlock(agent.engineIo());
     if (drain_done)
         try agDrainDone(vm, g)
@@ -2148,12 +2263,11 @@ fn settleAsyncGeneratorDoneReturn(vm: *Interpreter, result: *value.Object, value
 fn agDrainDone(vm: *Interpreter, g: *Generator) EvalError!void {
     while (true) {
         g.requests_mutex.lockUncancelable(agent.engineIo());
-        if (g.requests.items.len == 0) {
+        const req = g.popRequest() orelse {
             g.pumping = false;
             g.requests_mutex.unlock(agent.engineIo());
             break;
-        }
-        const req = g.requests.orderedRemove(0);
+        };
         g.requests_mutex.unlock(agent.engineIo());
         switch (req.kind) {
             .throw_ => try promise.reject(vm, @ptrCast(@alignCast(req.result.promise.?)), req.value),
@@ -2173,7 +2287,7 @@ fn agReturnFulfill(ctx: *anyopaque, this: Value, args: []const Value) value.Host
     const front = front_req.result;
     try promise.resolve(vm, @ptrCast(@alignCast(front.promise.?)), try makeIterResult(vm, if (args.len > 0) args[0] else Value.undef(), true));
     g.requests_mutex.lockUncancelable(agent.engineIo());
-    if (g.requests.items.len > 0) _ = g.requests.orderedRemove(0);
+    _ = g.popRequest();
     g.requests_mutex.unlock(agent.engineIo());
     try agDrainDone(vm, g);
     return Value.undef();
@@ -2188,7 +2302,7 @@ fn agReturnReject(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
     const front = front_req.result;
     try promise.reject(vm, @ptrCast(@alignCast(front.promise.?)), if (args.len > 0) args[0] else Value.undef());
     g.requests_mutex.lockUncancelable(agent.engineIo());
-    if (g.requests.items.len > 0) _ = g.requests.orderedRemove(0);
+    _ = g.popRequest();
     g.requests_mutex.unlock(agent.engineIo());
     try agDrainDone(vm, g);
     return Value.undef();

@@ -253,6 +253,11 @@ Known performance/maturity work:
   fulfill/reject reaction lists also reserve fixed-size capacity chunks before
   capacity-assumed appends under `Promise.lock`, while preserving GC-owned
   reaction-entry accounting and settlement/finalization cleanup.
+- Async-generator request queues now use the same FIFO head-cursor pattern for
+  queued `.next()` / `.return()` / `.throw()` requests, avoiding a front shift
+  on every request settlement or done-drain step. Request enqueue reserves
+  fixed-size capacity chunks before capacity-assumed appends and compacts
+  consumed head slots before growing, while GC traces only pending requests.
 - No-fn `Lock.asyncHold` grants embed their once-only release state in the
   already arena-lived hold job, avoiding an extra small allocation per delivered
   release function while preserving the release-function object and existing

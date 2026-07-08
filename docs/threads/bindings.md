@@ -41,6 +41,7 @@ before acting on one.
 |---|---|---|---|---|
 | `symbol_counter` | `src/interpreter.zig:26365` | `std.atomic.Value(usize)` — monotonic id for unique `Symbol` property-key encodings (`"\x00s{d}"`). | **locked** | Completed: `makeSymbolObj` uses atomic `fetchAdd`, so cross-agent and shared-realm symbol creation cannot collide. |
 | `Context.microtasks` / `MicrotaskQueue.head` / `Context.microtask_lock` | `src/context.zig:484`, `src/promise.zig:89`, `src/context.zig:492` | Per-realm Promise reaction queue and FIFO head cursor. | **locked** | Enqueue/dequeue mutate the queue under `microtask_lock` only in `parallel_js`; `.gil = true` stays serialized. `MicrotaskQueue.head` pops FIFO in O(1) without front-shifting pending reactions, enqueue and transfer paths reserve fixed-size capacity chunks before capacity-assumed appends, transfer paths append only pending items, and GC traces only `pendingItems()` plus `Interpreter.current_microtask`. |
+| `Generator.requests` / `requests_head` / `requests_mutex` | `src/vm.zig:211-213` | Per-async-generator request queue for `.next()` / `.return()` / `.throw()` promises. | **locked; traced through pending requests** | Request enqueue, front lookup, pop, and done-drain paths hold `requests_mutex`. `requests_head` drains FIFO without front-shifting remaining requests; enqueue reserves fixed-size capacity chunks before capacity-assumed appends and compacts consumed head slots before growing. GC traces only `pendingRequests()`, so consumed slots are not kept alive. |
 
 ## Engine: `src/agent.zig`
 
