@@ -4234,8 +4234,16 @@ pub const Interpreter = struct {
     }
 
     pub fn maybeNameAnon(self: *Interpreter, val: Value, init_node: *Node, name: []const u8) EvalError!void {
-        if (name.len == 0) return;
         if (!isAnonFnDef(init_node)) return;
+        try self.nameAnonValue(val, name);
+    }
+
+    /// The naming step of NamedEvaluation, without the syntactic isAnonFnDef gate.
+    /// The VM's `name_anon` opcode is emitted by the compiler only for a bare
+    /// anonymous function/class value, so the gate is applied at compile time;
+    /// `maybeNameAnon` above applies it for the tree-walker.
+    pub fn nameAnonValue(self: *Interpreter, val: Value, name: []const u8) EvalError!void {
+        if (name.len == 0) return;
         if (!val.isObject() or !val.asObj().isCallableObject()) return;
         const o = val.asObj();
         if (o.getOwn("name")) |c| {

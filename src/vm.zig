@@ -587,6 +587,11 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 // before the property value is evaluated.
                 try stack.append(stack_alloc, Value.str(try propKey(vm, stack.pop().?)));
             },
+            .name_anon => {
+                // NamedEvaluation: name the bare anonymous function/class value on
+                // top of the stack (the compiler emits this only for such a value).
+                try vm.nameAnonValue(stack.items[stack.items.len - 1], chunk.names.items[inst.a]);
+            },
             .inc, .dec => {
                 // ToNumeric then ±1 of the operand's own numeric type, matching
                 // the tree-walker's evalUpdate (so `"5"++` is 6, not "51", and a

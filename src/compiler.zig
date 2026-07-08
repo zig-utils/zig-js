@@ -910,11 +910,27 @@ pub const Compiler = struct {
         }
     }
 
+    /// NamedEvaluation: if `value_node` is a bare anonymous function/class def
+    /// (matching interpreter.isAnonFnDef), emit `name_anon` so the value now on
+    /// the stack takes `name` as its Function.name — mirroring the tree-walker's
+    /// maybeNameAnon so `var f = function(){}` / `{foo: function(){}}` / `x = () =>
+    /// {}` name their functions on the VM too.
+    fn emitNamedEval(self: *Compiler, value_node: *const Node, name: []const u8) CompileError!void {
+        const anon = switch (value_node.*) {
+            .function => |f| f.name.len == 0,
+            .func_decl => |f| f.name.len == 0,
+            .class_expr => |c| c.name.len == 0,
+            else => false,
+        };
+        if (anon) _ = try self.chunk.emit(.name_anon, try self.chunk.addName(name));
+    }
+
     fn compileStmt(self: *Compiler, node: *Node) CompileError!void {
         switch (node.*) {
             .var_decl => |d| {
                 if (d.init) |init_node| {
                     try self.compileExpr(init_node);
+                    try self.emitNamedEval(init_node, d.name);
                 } else {
                     _ = try self.chunk.emit(.load_undefined, 0);
                 }
@@ -1896,6 +1912,9 @@ pub const Compiler = struct {
             .assign => |a| switch (a.target.*) {
                 .identifier => |name| {
                     try self.compileExpr(a.value);
+                    // NamedEvaluation names `x = function(){}` (a bare, unparenthesized
+                    // identifier target); `(x) = …` is not an IdentifierRef.
+                    if (!a.target_parenthesized) try self.emitNamedEval(a.value, name);
                     try self.emitStore(name);
                 },
                 .member => |m| {
@@ -2124,6 +2143,7 @@ pub const Compiler = struct {
                         if (p.proto_setter) {
                             _ = try self.chunk.emit(.init_proto, 0); // `__proto__: v` colon form
                         } else {
+                            try self.emitNamedEval(p.value, p.key);
                             _ = try self.chunk.emit(.init_prop, try self.chunk.addName(p.key));
                         }
                     }

@@ -134,6 +134,7 @@ pub const Op = enum(u8) {
     inc, // ToNumeric(pop) then +1 of the matching numeric type
     dec, // ToNumeric(pop) then -1 of the matching numeric type
     to_property_key, // ToPropertyKey(pop) -> the property-key string (runs toString once)
+    name_anon, // NamedEvaluation: name the top-of-stack anonymous function (operand a: name)
 
     // --- binary (pop rhs, pop lhs, push result) ---
     add,
