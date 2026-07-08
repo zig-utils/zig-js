@@ -523,6 +523,12 @@ pub const Compiler = struct {
     /// the callee is caught, but the tail-pop would discard it. Suppresses TCO in
     /// compileTailExpr. (The finally case keeps the handler live via abrupt_return.)
     try_depth: u32 = 0,
+    /// True while compiling a STRICT function body. Proper tail calls
+    /// (PrepareForTailCall) are a strict-mode-only guarantee, so compileTailExpr
+    /// only reuses the frame when this is set. A sloppy tail call must grow the
+    /// stack like any call and eventually throw RangeError (matching the
+    /// tree-walker) rather than looping forever on `function f(){ return f(); }`.
+    is_strict: bool = false,
 
     /// Compile a whole program into a fresh chunk. The chunk ends with `halt`;
     /// the VM returns its completion accumulator. Program scope is null, so all
@@ -792,7 +798,7 @@ pub const Compiler = struct {
 
         const chunk = try arena.create(Chunk);
         chunk.* = Chunk.init(arena);
-        var c = Compiler{ .arena = arena, .chunk = chunk, .mode = .function, .scope = scope };
+        var c = Compiler{ .arena = arena, .chunk = chunk, .mode = .function, .scope = scope, .is_strict = fnode.is_strict };
         if (fnode.is_expr_body) {
             try c.compileTailExpr(fnode.body);
         } else {
@@ -1713,7 +1719,12 @@ pub const Compiler = struct {
         // rather than emitting a tail call that would discard the handler and let a
         // throw from the callee escape the enclosing catch. (The finally case is
         // already routed through abrupt_return by return_stmt.)
-        if (self.try_depth > 0) {
+        //
+        // Proper tail calls are also a strict-mode-only guarantee (PrepareForTailCall
+        // is not performed in sloppy mode), so a sloppy tail position grows the stack
+        // like any call and eventually throws RangeError — reusing the frame would
+        // turn `function f(){ return f(); }` into an infinite loop instead.
+        if (self.try_depth > 0 or !self.is_strict) {
             try self.compileExpr(node);
             _ = try self.chunk.emit(.ret, 0);
             return;
@@ -2507,7 +2518,7 @@ pub const Compiler = struct {
             }
             if (!fnode.is_expr_body) try collectLocals(self.arena, scope, fnode.body);
 
-            var sub_c = Compiler{ .arena = self.arena, .chunk = compiled, .mode = .function, .scope = scope };
+            var sub_c = Compiler{ .arena = self.arena, .chunk = compiled, .mode = .function, .scope = scope, .is_strict = fnode.is_strict };
             if (fnode.is_expr_body) {
                 sub_c.compileExpr(fnode.body) catch |e| switch (e) {
                     error.Unsupported => {
