@@ -781,7 +781,14 @@ pub const Compiler = struct {
 
     pub fn compilePlainFunction(arena: std.mem.Allocator, fnode: *const ast.FunctionNode) CompileError!PlainFunctionCode {
         if (fnode.is_generator or fnode.is_async) return error.Unsupported;
-        if (fnode.is_strict and functionHasBlockNestedFuncDecl(fnode)) return error.Unsupported;
+        // A function declaration nested in a block needs the tree-walker in BOTH
+        // modes: strict scopes it to the block (a binding the flat slot model
+        // can't isolate), and sloppy gives it Annex B.3.3 dual bindings — a block
+        // lexical AND a function-scope var that is assigned the block binding's
+        // value at the point the declaration is evaluated. The flat model has one
+        // slot for the name, so it reports the block's final value instead of the
+        // decl-time snapshot (e.g. a reassignment after the declaration leaks).
+        if (functionHasBlockNestedFuncDecl(fnode)) return error.Unsupported;
         // The flat slot model can't represent a lexical binding shadowing another
         // same-named binding; keep those on the tree-walker (correct block scopes).
         if (try functionHasShadowableLexical(arena, fnode)) return error.Unsupported;
@@ -2492,7 +2499,7 @@ pub const Compiler = struct {
         // function to the tree-walker, where those locals live in the Environment.
         // (An env-mode enclosing scope — self.scope == null — captures correctly.)
         if (fnode.is_generator and self.scope != null) return error.Unsupported;
-        if (!fnode.is_generator and fnode.is_strict and functionHasBlockNestedFuncDecl(fnode)) return error.Unsupported;
+        if (!fnode.is_generator and functionHasBlockNestedFuncDecl(fnode)) return error.Unsupported;
         // Build this function's slot namespace: parameters first, then every
         // function-scoped declaration in the body (not descending into nested
         // functions). The scope chains to the enclosing function for upvalues.
