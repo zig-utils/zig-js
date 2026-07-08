@@ -166,8 +166,10 @@ treats those as non-cells. This keeps the trace surface to runtime values only.
   bucket-shaped resize/remap/free paths do not retake the backing lock after
   classification. Explicit quiescent collection uses per-slab live counters to
   trim fully unused tail chunks after one-off allocation spikes, while retaining
-  non-empty and empty inner chunks for reuse. Single-mutator object side stores
-  now bypass the `GcCellBacking` wrapper and allocate directly from the context
+  non-empty and empty inner chunks for reuse. Multi-slab tail trimming compacts
+  freelist and sorted-address-index metadata once for the whole released tail
+  range rather than once per released slab. Single-mutator object side stores now
+  bypass the `GcCellBacking` wrapper and allocate directly from the context
   allocator; true-parallel JS keeps the synchronized wrapper for those stores so
   no-GIL embedders are not required to provide a thread-safe allocator.
 - **Mark:** explicit mark stack (no recursion — JS graphs are deep). Tri-color:

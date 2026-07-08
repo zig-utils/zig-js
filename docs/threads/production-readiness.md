@@ -104,7 +104,9 @@ Known performance/maturity work:
   Explicit quiescent `collectGarbage()` now also trims fully unused tail slabs
   using per-slab live counters: empty spike chunks can be released before
   `Context.destroy()`, while non-empty chunks and empty inner chunks stay
-  retained for reuse.
+  retained for reuse. When multiple tail slabs are released together, the
+  backing compacts freelist and sorted-address-index metadata once for the whole
+  tail range instead of rescanning it once per slab.
   This cuts the old one-general-allocator-call-per-cell profile without
   changing the collector API.
   The object-sized 1024/2048-byte buckets now use 384 KiB slab chunks, larger
@@ -166,10 +168,12 @@ Known performance/maturity work:
   between empty-context destroy and destroy after the object workload. Fresh-slot
   allocation skips slab chunks whose bump range is already exhausted, chunk
   metadata growth is reserved before each slab allocation, explicit collection
-  trims fully unused tail slabs after object spikes, and the object-sized
-  1024/2048-byte buckets use larger chunks so the profile exposes reduced
-  object-cell chunk churn separately from remaining create/destroy wall-clock
-  costs. A repeated allocate-plus-collect churn table now reports
+  trims fully unused tail slabs after object spikes, and multi-slab tail
+  trimming compacts freelist and sorted-address-index metadata once for the
+  whole trimmed range instead of rescanning it once per released slab. The
+  object-sized 1024/2048-byte buckets use larger chunks so the profile exposes
+  reduced object-cell chunk churn separately from remaining create/destroy
+  wall-clock costs. A repeated allocate-plus-collect churn table now reports
   fresh versus reused cells, freed cells, final chunk/live counts, and reuse
   percentage, giving nursery/generational work a direct freelist-reuse baseline
   instead of only a one-shot object workload. The no-GIL bootstrap row should

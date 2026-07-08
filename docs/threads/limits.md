@@ -137,8 +137,10 @@ context APIs.
   keeps the intrinsic empty context at three object-cell chunks with 1152 slots,
   while explicit collection trims fully unused object-heavy spike chunks back to
   that retained baseline instead of carrying the older 83-chunk post-collect
-  footprint. It also splits GC finalizer attribution between empty-context
-  destroy and destroy after the object workload.
+  footprint. Multi-slab tail trimming compacts the sorted address index and
+  freelist metadata once for the whole trimmed range instead of rescanning those
+  structures once per released slab. It also splits GC finalizer attribution
+  between empty-context destroy and destroy after the object workload.
 - **Context lifecycle cost.** Long-lived embedders amortize the GC setup and
   teardown costs, but create-per-unit-of-work embedders need either cheaper
   context lifecycle or clearer guidance.

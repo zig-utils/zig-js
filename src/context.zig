@@ -484,13 +484,13 @@ pub const GcCellBacking = struct {
         }
     }
 
-    fn removeFreeNodesForChunkLocked(self: *GcCellBacking, idx: usize, chunk_idx: usize) usize {
+    fn removeTailFreeNodesLocked(self: *GcCellBacking, idx: usize, first_trimmed_chunk: usize) usize {
         var removed: usize = 0;
         var retained: ?*FreeNode = null;
         var it = self.free_lists[idx];
         while (it) |node| {
             const next = node.next;
-            if (node.chunk_idx == chunk_idx) {
+            if (node.chunk_idx >= first_trimmed_chunk) {
                 removed += 1;
             } else {
                 node.next = retained;
@@ -503,15 +503,20 @@ pub const GcCellBacking = struct {
         return removed;
     }
 
-    fn removeAddrIndexForChunkLocked(self: *GcCellBacking, idx: usize, chunk_idx: usize) void {
-        var i: usize = 0;
-        while (i < self.bucket_addr_index[idx].items.len) : (i += 1) {
-            if (self.bucket_addr_index[idx].items[i].chunk_idx == chunk_idx) {
-                _ = self.bucket_addr_index[idx].orderedRemove(i);
-                return;
+    fn removeTailAddrIndexLocked(self: *GcCellBacking, idx: usize, first_trimmed_chunk: usize) usize {
+        var entries = self.bucket_addr_index[idx].items;
+        var write: usize = 0;
+        var removed: usize = 0;
+        for (entries) |entry| {
+            if (entry.chunk_idx >= first_trimmed_chunk) {
+                removed += 1;
+            } else {
+                entries[write] = entry;
+                write += 1;
             }
         }
-        unreachable;
+        if (write != entries.len) self.bucket_addr_index[idx].shrinkRetainingCapacity(write);
+        return removed;
     }
 
     fn refreshBucketHintsAfterTrimLocked(self: *GcCellBacking, idx: usize) void {
@@ -537,31 +542,38 @@ pub const GcCellBacking = struct {
     }
 
     fn trimEmptyTailChunksLocked(self: *GcCellBacking, idx: usize) usize {
-        var trimmed: usize = 0;
-        while (self.bucket_chunks[idx].items.len > 0) {
-            const chunk_idx = self.bucket_chunks[idx].items.len - 1;
-            if (self.bucket_live_counts[idx].items[chunk_idx] != 0) break;
+        const old_len = self.bucket_chunks[idx].items.len;
+        var first_trimmed = old_len;
+        while (first_trimmed > 0 and self.bucket_live_counts[idx].items[first_trimmed - 1] == 0) {
+            first_trimmed -= 1;
+        }
+        if (first_trimmed == old_len) return 0;
 
-            const chunk = self.bucket_chunks[idx].items[chunk_idx];
+        const trimmed = old_len - first_trimmed;
+        const removed_addr_entries = self.removeTailAddrIndexLocked(idx, first_trimmed);
+        std.debug.assert(removed_addr_entries == trimmed);
+        const removed_free = self.removeTailFreeNodesLocked(idx, first_trimmed);
+        var expected_free: usize = 0;
+
+        for (self.bucket_chunks[idx].items[first_trimmed..old_len], first_trimmed..) |chunk, chunk_idx| {
             const slot_size = bucket_sizes[idx];
             const capacity_slots = chunk.len / slot_size;
             const issued_slots = self.bucket_next_offsets[idx].items[chunk_idx] / slot_size;
-            const removed_free = self.removeFreeNodesForChunkLocked(idx, chunk_idx);
-            std.debug.assert(removed_free == issued_slots);
+            expected_free += issued_slots;
 
-            self.removeAddrIndexForChunkLocked(idx, chunk_idx);
-            _ = self.bucket_live_counts[idx].pop();
-            _ = self.bucket_next_offsets[idx].pop();
-            _ = self.bucket_chunks[idx].pop();
             self.inner.free(chunk);
 
             self.bucket_chunk_counts[idx] -= 1;
             self.bucket_capacity_bytes[idx] -= chunk.len;
             self.bucket_capacity_slots[idx] -= capacity_slots;
             self.bucket_issued_slots[idx] -= issued_slots;
-            trimmed += 1;
         }
-        if (trimmed > 0) self.refreshBucketHintsAfterTrimLocked(idx);
+        std.debug.assert(removed_free == expected_free);
+
+        self.bucket_live_counts[idx].shrinkRetainingCapacity(first_trimmed);
+        self.bucket_next_offsets[idx].shrinkRetainingCapacity(first_trimmed);
+        self.bucket_chunks[idx].shrinkRetainingCapacity(first_trimmed);
+        self.refreshBucketHintsAfterTrimLocked(idx);
         return trimmed;
     }
 
@@ -878,6 +890,62 @@ test "GC cell backing keeps non-empty tail and empty inner chunks" {
     try std.testing.expectEqual(@as(usize, 2), backing.trimEmptyTailChunks());
     try std.testing.expectEqual(@as(usize, 1), backing.bucket_chunks[idx].items.len);
     try std.testing.expectEqual(slots, backing.bucket_capacity_slots[idx]);
+}
+
+test "GC cell backing compacts tail-trim metadata in one range" {
+    var backing = GcCellBacking{ .inner = std.testing.allocator };
+    defer backing.deinit();
+    const a = backing.allocator();
+
+    const idx = GcCellBacking.bucketIndex(200, .@"16").?;
+    const slots = GcCellBacking.chunk_bytes / GcCellBacking.bucket_sizes[idx];
+    var cells = try std.testing.allocator.alloc([]align(16) u8, (4 * slots) + 1);
+    defer std.testing.allocator.free(cells);
+
+    var allocated: usize = 0;
+    errdefer for (cells[0..allocated]) |cell| a.free(cell);
+    for (cells) |*cell| {
+        cell.* = try a.alignedAlloc(u8, .@"16", 200);
+        allocated += 1;
+    }
+
+    try std.testing.expectEqual(@as(usize, 5), backing.bucket_chunks[idx].items.len);
+
+    for (cells[slots .. 2 * slots]) |cell| a.free(cell);
+    for (cells[3 * slots .. 4 * slots]) |cell| a.free(cell);
+    a.free(cells[4 * slots]);
+    try std.testing.expectEqual(@as(usize, 0), backing.bucket_live_counts[idx].items[1]);
+    try std.testing.expectEqual(@as(usize, 0), backing.bucket_live_counts[idx].items[3]);
+    try std.testing.expectEqual(@as(usize, 0), backing.bucket_live_counts[idx].items[4]);
+    try std.testing.expect(backing.bucket_free_counts[idx] > slots);
+
+    try std.testing.expectEqual(@as(usize, 2), backing.trimEmptyTailChunks());
+    try std.testing.expectEqual(@as(usize, 3), backing.bucket_chunks[idx].items.len);
+    try std.testing.expectEqual(@as(usize, 3), backing.bucket_addr_index[idx].items.len);
+    try std.testing.expectEqual(slots, backing.bucket_free_counts[idx]);
+    try std.testing.expectEqual(@as(usize, 0), backing.bucket_live_counts[idx].items[1]);
+    try std.testing.expectEqual(slots * 3, backing.bucket_capacity_slots[idx]);
+    try std.testing.expectEqual(slots * 3, backing.bucket_issued_slots[idx]);
+
+    var retained_nodes: usize = 0;
+    var it = backing.free_lists[idx];
+    while (it) |node| {
+        try std.testing.expectEqual(@as(usize, 1), node.chunk_idx);
+        retained_nodes += 1;
+        it = node.next;
+    }
+    try std.testing.expectEqual(slots, retained_nodes);
+
+    var prev_end: usize = 0;
+    for (backing.bucket_addr_index[idx].items) |entry| {
+        try std.testing.expect(entry.start >= prev_end);
+        try std.testing.expect(entry.end > entry.start);
+        try std.testing.expect(entry.chunk_idx < backing.bucket_chunks[idx].items.len);
+        prev_end = entry.end;
+    }
+
+    defer for (cells[0..slots]) |cell| a.free(cell);
+    defer for (cells[2 * slots .. 3 * slots]) |cell| a.free(cell);
 }
 
 test "GC cell backing stats report chunk capacity and live/free slots" {

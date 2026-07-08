@@ -557,8 +557,10 @@ chunk counts alongside wall-clock timings when evaluating GC allocation or
 lifecycle changes. A healthy local profile should show the empty context at
 three object-cell chunks; after explicit collection, a one-off object-heavy
 spike should trim fully unused tail slabs back toward that retained baseline
-instead of preserving the older 83-chunk post-collect footprint. The same
-profile now prints a repeated allocate-plus-collect churn table that summarizes
+instead of preserving the older 83-chunk post-collect footprint. Multi-slab
+tail trimming should compact freelist and sorted-address-index metadata once for
+the whole released tail range, not once per released slab. The same profile now
+prints a repeated allocate-plus-collect churn table that summarizes
 fresh cells, reused cells, freed cells, final chunk/live counts, and reuse
 percentage for GC modes; this is the local evidence trail for future
 nursery/generational allocation work.
@@ -566,10 +568,11 @@ Direct `GcCellBacking` unit tests cover lazy fresh-slot bumping, free-list
 recycling, fresh-chunk cursor advancement, ownership span/hint classification,
 sorted address-index lookup with chunk/bump-offset/address metadata kept in
 sync, fixed-size metadata reserve growth before slab allocation, empty tail-slab
-trimming, non-empty tail and empty-inner-slab retention, and bulk teardown
-leaving parallel mode before owned live-cell frees drain without rebuilding
-freelists, stats accounting, cumulative fresh/reused/freed allocation counters,
-multi-chunk maintained-counter snapshots, bucket attribution, bulk-teardown
+trimming, multi-slab tail-range metadata compaction, non-empty tail and
+empty-inner-slab retention, and bulk teardown leaving parallel mode before owned
+live-cell frees drain without rebuilding freelists, stats accounting, cumulative
+fresh/reused/freed allocation counters, multi-chunk maintained-counter
+snapshots, bucket attribution, bulk-teardown
 behavior, and bucket-shaped delegated side frees during teardown.
 `enable_gc: collectGarbage trims empty GC backing tail chunks` covers the public
 explicit-GC path that releases fully unused spike slabs before context destroy.
