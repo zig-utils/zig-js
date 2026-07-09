@@ -1142,7 +1142,21 @@ pub const Compiler = struct {
         self.chunk.code.items[ph].a = if (catch_start) |cs| @intCast(cs) else none; // throw → catch, else finally
         self.chunk.code.items[ph].b = @intCast(fin);
         if (ph2) |p2| self.chunk.code.items[p2].b = @intCast(fin);
-        try self.compileStmt(t.finally_block.?);
+        // The finally BLOCK runs at the OUTER finally depth: a return/break/
+        // continue lexically inside the finally does not cross THIS finally (it
+        // is already executing), only any enclosing ones. Lowering it one level
+        // shallower lets a tail `return f()` in a finally be a proper tail call
+        // (test262 tco-finally / tco-catch-finally) instead of an abrupt_return
+        // that grows the native stack, while a return that still crosses an
+        // OUTER finally keeps its abrupt_return (finally_depth stays > 0 there).
+        self.finally_depth -= 1;
+        {
+            // Restore via defer so an `error.Unsupported` bail from inside the
+            // finally (e.g. a labeled continue) still rebalances finally_depth
+            // before the outer defer runs — otherwise it underflows.
+            defer self.finally_depth += 1;
+            try self.compileStmt(t.finally_block.?);
+        }
         _ = try self.chunk.emit(.end_finally, 0);
     }
 
