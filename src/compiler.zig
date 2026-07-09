@@ -517,6 +517,14 @@ pub const Compiler = struct {
     /// >0 while compiling inside a `try` that has a `finally`. A `return`/`break`/
     /// `continue` crossing it is lowered as `abrupt_*` so the finally still runs.
     finally_depth: u32 = 0,
+    /// How many `finally` BLOCKS we are currently compiling the body of (nested).
+    /// A `return` in a finally body does not cross THAT finally (it is already
+    /// running), only enclosing ones — so a return is a tail-call candidate when
+    /// `finally_depth == active_finally` (every counted finally is one we are
+    /// inside the body of, none pending). Kept separate from `finally_depth` so
+    /// break/continue abrupt-vs-plain accounting (which compares against a loop's
+    /// captured `finally_depth`) is unaffected.
+    active_finally: u32 = 0,
     /// >0 while compiling the body of a `try` whose catch handler is still live on
     /// the VM handler stack (the no-finally case). A call in tail position there
     /// must NOT be a tail call: the handler has to survive the call so a throw from
@@ -977,13 +985,14 @@ pub const Compiler = struct {
                 try self.emitDefineForce(fnode.name);
             },
             .return_stmt => |maybe| {
-                // A `return` lexically inside a `try`/`catch`/`finally` must run
-                // the enclosing finally block(s) first: `abrupt_return` unwinds
-                // the handler stack, runs each finally carrying a return
-                // completion, and returns once they finish. This applies to plain
-                // functions too (a return in a `finally`-guarded try is not a tail
-                // call), not only generators — a bare `ret` would skip the finally.
-                if (self.finally_depth > 0) {
+                // A `return` that crosses a PENDING finally (one not currently
+                // executing) must run it first: `abrupt_return` unwinds the
+                // handler stack, runs each finally carrying a return completion,
+                // and returns once they finish — a bare `ret` would skip it. A
+                // return directly in a finally BODY crosses only enclosing
+                // finallys, so `finally_depth > active_finally` is the real
+                // "pending finally to run" test (not `finally_depth > 0`).
+                if (self.finally_depth > self.active_finally) {
                     if (maybe) |e| {
                         try self.compileExpr(e);
                         if (self.in_generator and self.in_async) _ = try self.chunk.emit(.await_op, 0);
@@ -1142,19 +1151,15 @@ pub const Compiler = struct {
         self.chunk.code.items[ph].a = if (catch_start) |cs| @intCast(cs) else none; // throw → catch, else finally
         self.chunk.code.items[ph].b = @intCast(fin);
         if (ph2) |p2| self.chunk.code.items[p2].b = @intCast(fin);
-        // The finally BLOCK runs at the OUTER finally depth: a return/break/
-        // continue lexically inside the finally does not cross THIS finally (it
-        // is already executing), only any enclosing ones. Lowering it one level
-        // shallower lets a tail `return f()` in a finally be a proper tail call
-        // (test262 tco-finally / tco-catch-finally) instead of an abrupt_return
-        // that grows the native stack, while a return that still crosses an
-        // OUTER finally keeps its abrupt_return (finally_depth stays > 0 there).
-        self.finally_depth -= 1;
+        // We are now compiling the finally BODY: mark it active (see
+        // `active_finally`) so a tail `return f()` directly in the finally is a
+        // proper tail call (test262 tco-finally / tco-catch-finally) rather than
+        // an abrupt_return that grows the native stack — WITHOUT lowering
+        // `finally_depth`, which break/continue inside the finally still need for
+        // correct abrupt-vs-plain lowering against enclosing loops.
+        self.active_finally += 1;
         {
-            // Restore via defer so an `error.Unsupported` bail from inside the
-            // finally (e.g. a labeled continue) still rebalances finally_depth
-            // before the outer defer runs — otherwise it underflows.
-            defer self.finally_depth += 1;
+            defer self.active_finally -= 1;
             try self.compileStmt(t.finally_block.?);
         }
         _ = try self.chunk.emit(.end_finally, 0);
