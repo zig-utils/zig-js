@@ -231,6 +231,7 @@ pub const Op = enum(u8) {
     async_iter_close, // pop async iterator -> push return result and has-return flag; caller awaits/validates when present
     async_iter_close_completion, // async_iter_close while [completion-value, kind] is beneath it, preserving throw completions during GetMethod/Call
     eval_class, // operand a: class AST index, b: computed-name count; pop raw computed-name values, evaluate the class
+    template_object, // operand a: template-site AST index; push the cached, frozen GetTemplateObject strings array for that tagged-template site
 
     throw_op, // pop -> set as the in-flight exception and unwind (error.Throw)
 
@@ -303,6 +304,9 @@ pub const Chunk = struct {
     /// evaluates any suspendable computed names first, then the VM delegates the
     /// actual class construction back to the interpreter.
     classes: std.ArrayListUnmanaged(*ast.Node) = .empty,
+    /// Tagged-template AST nodes referenced by `template_object`; the VM asks the
+    /// interpreter for the per-site cached+frozen strings object (GetTemplateObject).
+    templates: std.ArrayListUnmanaged(*ast.Node) = .empty,
     /// One inline cache per instruction, allocated by `finalize` once the code
     /// stream is complete. Warm across runs of the same chunk.
     ics: []InlineCache = &.{},
@@ -352,6 +356,12 @@ pub const Chunk = struct {
     pub fn addPattern(self: *Chunk, node: *ast.Node) std.mem.Allocator.Error!u32 {
         const idx: u32 = @intCast(self.patterns.items.len);
         try self.patterns.append(self.arena, node);
+        return idx;
+    }
+
+    pub fn addTemplate(self: *Chunk, node: *ast.Node) std.mem.Allocator.Error!u32 {
+        const idx: u32 = @intCast(self.templates.items.len);
+        try self.templates.append(self.arena, node);
         return idx;
     }
 

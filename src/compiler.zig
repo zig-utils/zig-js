@@ -1792,7 +1792,7 @@ pub const Compiler = struct {
                 self.chunk.patchToHere(to_else);
                 try self.compileTailExpr(c.alternate);
             },
-            .tagged_template => |t| try self.compileTailTaggedTemplate(t.tag, t.cooked, t.raw, t.exprs),
+            .tagged_template => |t| try self.compileTaggedTemplate(node, t.tag, t.exprs, true),
             else => {
                 try self.compileExpr(node);
                 _ = try self.chunk.emit(.ret, 0);
@@ -1835,18 +1835,35 @@ pub const Compiler = struct {
         _ = try self.chunk.emit(if (is_eval) .tail_call_eval else .tail_call, @intCast(c.args.len));
     }
 
-    fn compileTailTaggedTemplate(self: *Compiler, tag: *Node, cooked: []?[]const u8, raw: [][]const u8, exprs: []*Node) CompileError!void {
-        _ = self;
-        _ = tag;
-        _ = cooked;
-        _ = raw;
-        _ = exprs;
-        // A tagged template's strings object must be cached per call site and
-        // frozen with a non-writable `raw` (GetTemplateObject). The VM would
-        // rebuild a fresh, mutable, uncached array on each evaluation, so keep
-        // tagged templates on the tree-walker. (Non-tail tagged templates already
-        // fall through to error.Unsupported in compileExpr.)
-        return error.Unsupported;
+    /// `tag`a${x}b`` → `tag(strings, x)`. The `template_object` opcode pushes the
+    /// per-site cached+frozen GetTemplateObject strings array (shared with the
+    /// tree-walker via the interpreter's `template_cache`, keyed by this AST
+    /// node), so tiering no longer rebuilds/uncaches it — and a tail tagged
+    /// template becomes a proper tail call (test262 tagged-template/tco-*).
+    fn compileTaggedTemplate(self: *Compiler, site: *Node, tag: *Node, exprs: []*Node, is_tail: bool) CompileError!void {
+        const ti = try self.chunk.addTemplate(site);
+        const argc: u32 = @intCast(1 + exprs.len); // strings object + each substitution
+        if (tag.* == .member and tag.member.computed == null and !tag.member.optional) {
+            // `obj.tag`...`` → this = obj. Fetch the tag (RequireObjectCoercible +
+            // any getter) BEFORE the arguments, per spec order.
+            const m = tag.member;
+            const ni = try self.chunk.addName(m.property);
+            try self.compileExpr(m.object);
+            _ = try self.chunk.emit(.dup, 0);
+            _ = try self.chunk.emit(.get_prop, ni);
+            _ = try self.chunk.emit(.swap, 0); // [method, recv]
+            _ = try self.chunk.emit(.template_object, ti);
+            for (exprs) |e| try self.compileExpr(e);
+            _ = try self.chunk.emit(if (is_tail) .tail_call_with_this else .call_with_this, argc);
+            return;
+        }
+        // Computed/optional member tag and super tag are rare — keep on the tree-walker.
+        if (tag.* == .member or tag.* == .super_member) return error.Unsupported;
+        // Plain tag (identifier / call / …): this = undefined.
+        try self.compileExpr(tag);
+        _ = try self.chunk.emit(.template_object, ti);
+        for (exprs) |e| try self.compileExpr(e);
+        _ = try self.chunk.emit(if (is_tail) .tail_call else .call, argc);
     }
 
     fn compileExpr(self: *Compiler, node: *Node) CompileError!void {
@@ -2199,6 +2216,7 @@ pub const Compiler = struct {
                 }
             },
             .update => |u| try self.compileUpdate(u.inc, u.prefix, u.target),
+            .tagged_template => |t| try self.compileTaggedTemplate(node, t.tag, t.exprs, false),
             .yield_expr => |y| {
                 if (!self.in_generator) return error.Unsupported;
                 if (y.delegate) {

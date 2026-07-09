@@ -1208,6 +1208,10 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 }
                 try stack.append(stack_alloc, try vm.evalClassWithComputedKeys(c.name, c.inferred_name, c.superclass, c.members, c.source, keys));
             },
+            .template_object => {
+                const node = chunk.templates.items[inst.a];
+                try stack.append(stack_alloc, Value.obj(try vm.getTemplateObject(node)));
+            },
             .array_spread => {
                 const iterable = stack.pop().?;
                 // The array stays on the stack (peeked); append the iterable's
