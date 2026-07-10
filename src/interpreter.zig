@@ -5233,6 +5233,9 @@ pub const Interpreter = struct {
         const obj = callee.asObj();
         if (obj.proxy_handler != null or obj.proxy_revoked) {
             const target = obj.proxy_target orelse return self.throwError("TypeError", "Cannot perform 'apply' on a proxy that has been revoked");
+            // A Proxy has a [[Call]] method only if its target is callable; if not,
+            // calling it is a TypeError BEFORE the apply trap runs (9.5.12).
+            if (!obj.proxy_callable) return self.throwError("TypeError", "value is not a function");
             if (try self.proxyTrap(obj, "apply")) |trap| {
                 const arr = try self.newArray();
                 for (args) |a| try arr.asObj().elements.append(arr.asObj().elementsAllocator(self.arena), a);
@@ -5974,6 +5977,10 @@ pub const Interpreter = struct {
         const obj = callee.asObj();
         if (obj.proxy_handler != null or obj.proxy_revoked) {
             const target = obj.proxy_target orelse return self.throwError("TypeError", "Cannot perform 'construct' on a proxy that has been revoked");
+            // A Proxy has a [[Construct]] method only if its target is a
+            // constructor; if not, `new proxy()` is a TypeError before the
+            // construct trap runs (9.5.13).
+            if (!isConstructorValue(Value.obj(target))) return self.throwError("TypeError", "value is not a constructor");
             if (try self.proxyTrap(obj, "construct")) |trap| {
                 const arr = try self.newArray();
                 for (args) |a| try arr.asObj().elements.append(arr.asObj().elementsAllocator(self.arena), a);
