@@ -1639,7 +1639,7 @@ pub fn defineOneResult(self: *Interpreter, target: *value.Object, key: []const u
             new_len_opt = try self.arrayLengthFromValue(val);
         }
         const cur_writable = if (target.attrsMap() != null) target.getAttr("length").writable else true;
-        const old_len = @max(target.elements.items.len, target.array_len);
+        const old_len = target.arrayLength();
         if (d.getOwn("configurable")) |c| {
             if (c.toBoolean()) return false;
         }
@@ -1671,34 +1671,37 @@ pub fn defineOneResult(self: *Interpreter, target: *value.Object, key: []const u
     // gappy indices, and `length` fall through to the generic path below.
     if (target.is_array and get == null and set == null and !std.mem.eql(u8, key, "length") and target.getAccessor(key) == null) {
         if (arrayIndexOf(key)) |i| {
-            if (i <= target.elements.items.len + 1024 and i < (1 << 24)) {
-                const old_len = @max(target.elements.items.len, target.array_len);
+            if (i <= target.elementsLen() + 1024 and i < (1 << 24)) {
+                const old_len = target.arrayLength();
                 if (i >= old_len and target.attrsMap() != null and !target.getAttr("length").writable) return false;
                 // A hole within bounds is NOT an existing property — treat it as a
                 // new definition (so attributes default correctly and the hole is
                 // materialized below), not a redefinition of a present element.
-                const within = i < target.elements.items.len and !target.isHole(i);
+                const within = target.denseElementPresent(i);
                 const cur_attr = target.getAttr(key);
                 if (within and !cur_attr.configurable) {
-                    if (!try compatibleRedefine(cur_attr, target.elements.items[i], null, d)) return false;
+                    const cur_value = target.denseElement(i) orelse Value.undef();
+                    if (!try compatibleRedefine(cur_attr, cur_value, null, d)) return false;
                 } else if (!within and !target.isExtensible()) {
                     return false;
                 }
-                const gap_start = target.elements.items.len;
-                while (target.elements.items.len <= i) try target.elements.append(target.elementsAllocator(self.arena), Value.undef());
-                var gap = gap_start;
-                while (gap < i) : (gap += 1) try target.markHole(self.arena, gap);
-                // Defining the index makes it a present own element (clear any hole).
-                target.clearHole(i);
                 const am_mapped = target.is_arguments and interpreter.argMapName(target, i) != null;
-                if (d.getOwn("value")) |val| {
-                    target.elements.items[i] = val;
-                    // A mapped index also writes its parameter binding.
-                    if (am_mapped) interpreter.argMapSet(target, i, val);
-                } else if (am_mapped) {
+                const new_value = if (d.getOwn("value")) |val|
+                    val
+                else if (am_mapped)
                     // No explicit value: snapshot the binding so an unmap below
                     // leaves the current value frozen in the element.
-                    target.elements.items[i] = interpreter.argMapGet(target, i) orelse Value.undef();
+                    interpreter.argMapGet(target, i) orelse Value.undef()
+                else if (within)
+                    target.denseElement(i) orelse Value.undef()
+                else
+                    Value.undef();
+                // Defining the index makes it a present own element (clearing any
+                // hole) and materializes gaps under `elements_lock`.
+                if (!try target.setOrGrowDenseElement(self.arena, i, new_value, 1 << 24)) return false;
+                if (d.getOwn("value")) |val| {
+                    // A mapped index also writes its parameter binding.
+                    if (am_mapped) interpreter.argMapSet(target, i, val);
                 }
                 // Omitted fields keep the current value when redefining an
                 // existing element (implicitly all-true), else default to false.
@@ -1710,7 +1713,7 @@ pub fn defineOneResult(self: *Interpreter, target: *value.Object, key: []const u
                 target.has_indexed_property.store(true, .monotonic);
                 // Redefining a mapped index as non-writable severs the parameter link.
                 if (am_mapped and !attr.writable) target.arg_map_names[i] = "";
-                if (i >= target.array_len) target.array_len = i + 1;
+                target.extendArrayLengthFloor(i + 1);
                 return true;
             }
         }
@@ -1722,10 +1725,6 @@ pub fn defineOneResult(self: *Interpreter, target: *value.Object, key: []const u
     // this generic path only for an accessor descriptor — is a redefinition of an
     // existing data property whose implicit attributes are all true, not the
     // creation of a brand-new (all-false) property.
-    // Element-store reads go through the gated locked accessors: a peer thread's
-    // `growDenseElement` mutates `elements` under `lockElements`, so raw
-    // `elements.items` reads here race the grow on the no-GIL path (Linux
-    // tsan-nogil-corpus: main objectDefineProperty vs worker Atomics.store grow).
     // Element-store reads go through the locked accessors so a peer thread's
     // `growDenseElement` cannot race this generic descriptor path.
     var dense_elem_index: ?usize = null;
@@ -1798,7 +1797,7 @@ pub fn defineOneResult(self: *Interpreter, target: *value.Object, key: []const u
         if (arrayIndexOf(key)) |i| {
             // Only a valid array index (ToUint32(P) === P and < 2^32 - 1) updates
             // `length`; 2^32 - 1 and above are ordinary properties.
-            if (i < 4294967295 and i + 1 > target.array_len and i + 1 > target.elements.items.len) target.array_len = i + 1;
+            if (i < 4294967295 and i + 1 > target.arrayLength()) target.extendArrayLengthFloor(i + 1);
             // Defining a mapped arguments index as an accessor severs its link.
             if (target.is_arguments and (get != null or set != null) and i < target.arg_map_names.len) target.arg_map_names[i] = "";
         }
