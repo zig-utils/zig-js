@@ -5853,6 +5853,278 @@ fn runFinalizationCleanupInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
     return true;
 }
 
+fn runWeakCleanupOrderingInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
+    var prng = std.Random.DefaultPrng.init(seed ^ 0x7765_616b_6f72_6465);
+    const r = prng.random();
+    const rounds = 3 + r.uintLessThan(usize, 3);
+    const per_round = 12 + r.uintLessThan(usize, 9);
+    const seed_marker = seed % 10_000;
+    const map_base = 710_000 + seed_marker;
+    const set_base = 720_000 + seed_marker;
+    const direct_base = 730_000 + seed_marker;
+    const unregister_base = 740_000 + seed_marker;
+    const live_base = 750_000 + seed_marker;
+    const hash_mod: usize = 1_000_000_007;
+    const hash_mul: usize = 131;
+
+    var expected_count: usize = 0;
+    var expected_sum: usize = 0;
+    var expected_hash: usize = 0;
+    var expected_live_count: usize = 0;
+    var expected_live_sum: usize = 0;
+    var expected_unregister_count: usize = 0;
+    var expected_unregister_sum: usize = 0;
+    var expected_dead_refs: usize = 0;
+
+    var round: usize = 0;
+    while (round < rounds) : (round += 1) {
+        var i: usize = 0;
+        while (i < per_round) : (i += 1) {
+            const idx = round * per_round + i;
+            if (((i + round) & 7) == 0) {
+                expected_live_count += 1;
+                expected_live_sum += live_base + idx;
+            } else {
+                const entries = [_]usize{ map_base + idx, set_base + idx, direct_base + idx };
+                for (entries) |held| {
+                    expected_count += 1;
+                    expected_sum += held;
+                    expected_hash = (expected_hash * hash_mul + held) % hash_mod;
+                }
+                expected_dead_refs += 3;
+            }
+            if (((i + round) & 15) == 5) {
+                expected_unregister_count += 1;
+                expected_unregister_sum += unregister_base + idx;
+            }
+        }
+    }
+
+    const ctx = js.Context.createWith(gpa, .{ .enable_threads = true, .enable_gc = true }) catch {
+        std.debug.print("seed {d}: weak cleanup ordering context creation failed\n", .{seed});
+        return false;
+    };
+    defer ctx.destroy();
+
+    const src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  globalThis.__weakOrderCount = 0;
+        \\  globalThis.__weakOrderSum = 0;
+        \\  globalThis.__weakOrderHash = 0;
+        \\  globalThis.__weakOrderUnregisterCount = 0;
+        \\  globalThis.__weakOrderUnregisterSum = 0;
+        \\  globalThis.__weakOrderDeadRefs = [];
+        \\  globalThis.__weakOrderLiveKeys = [];
+        \\  globalThis.__weakOrderLiveRefs = [];
+        \\  globalThis.__weakOrderMap = new WeakMap();
+        \\  globalThis.__weakOrderSet = new WeakSet();
+        \\  const hashMod = {d};
+        \\  const hashMul = {d};
+        \\  const registry = new FinalizationRegistry((held) => {{
+        \\    globalThis.__weakOrderCount++;
+        \\    globalThis.__weakOrderSum += held;
+        \\    globalThis.__weakOrderHash = (globalThis.__weakOrderHash * hashMul + held) % hashMod;
+        \\  }});
+        \\  globalThis.__weakOrderRegistry = registry;
+        \\  const gate = {{ prop: 0, propReady: 0, condReady: 0, condOpen: false }};
+        \\  const condLock = new Lock();
+        \\  const cond = new Condition();
+        \\  const propThread = new Thread((gate, marker, seedMarker) => {{
+        \\    const localRoot = {{ marker, nested: {{ seed: seedMarker, label: 'weak-order-property-root' }} }};
+        \\    Atomics.store(gate, 'propReady', 1);
+        \\    Atomics.notify(gate, 'propReady');
+        \\    const r = Atomics.wait(gate, 'prop', 0, 5000);
+        \\    if (r !== 'ok' && r !== 'not-equal')
+        \\      throw new Error('bad weak-order property wait result ' + r);
+        \\    return localRoot;
+        \\  }}, gate, {d}, {d});
+        \\  const condThread = new Thread((gate, marker, seedMarker) => {{
+        \\    const localRoot = {{ marker, nested: {{ seed: seedMarker, label: 'weak-order-condition-root' }} }};
+        \\    condLock.hold(() => {{
+        \\      Atomics.store(gate, 'condReady', 1);
+        \\      Atomics.notify(gate, 'condReady');
+        \\      while (!gate.condOpen)
+        \\        cond.wait(condLock);
+        \\    }});
+        \\    return localRoot;
+        \\  }}, gate, {d}, {d});
+        \\  while (Atomics.load(gate, 'propReady') === 0)
+        \\    Atomics.wait(gate, 'propReady', 0, 1);
+        \\  while (Atomics.load(gate, 'condReady') === 0)
+        \\    Atomics.wait(gate, 'condReady', 0, 1);
+        \\  const root = {{ seed: {d}, tag: 'weak-order-root' }};
+        \\  for (let round = 0; round < {d}; round++) {{
+        \\    for (let i = 0; i < {d}; i++) {{
+        \\      const idx = round * {d} + i;
+        \\      if (((i + round) & 7) === 0) {{
+        \\        const key = {{ kind: 'live-key', idx, root }};
+        \\        const value = {{ marker: {d} + idx, nested: {{ root, label: 'live-weakmap-value' }} }};
+        \\        globalThis.__weakOrderMap.set(key, value);
+        \\        globalThis.__weakOrderSet.add(key);
+        \\        globalThis.__weakOrderLiveKeys.push(key);
+        \\        globalThis.__weakOrderLiveRefs.push(new WeakRef(value));
+        \\      }} else {{
+        \\        const mapKey = {{ kind: 'dead-map-key', idx, root }};
+        \\        const mapValue = {{ marker: {d} + idx, nested: {{ root, label: 'dead-weakmap-value' }} }};
+        \\        globalThis.__weakOrderMap.set(mapKey, mapValue);
+        \\        registry.register(mapValue, mapValue.marker);
+        \\        globalThis.__weakOrderDeadRefs.push(new WeakRef(mapValue));
+        \\        const setValue = {{ marker: {d} + idx, nested: {{ root, label: 'dead-weakset-value' }} }};
+        \\        globalThis.__weakOrderSet.add(setValue);
+        \\        registry.register(setValue, setValue.marker);
+        \\        globalThis.__weakOrderDeadRefs.push(new WeakRef(setValue));
+        \\        const directValue = {{ marker: {d} + idx, nested: {{ root, label: 'direct-finalization-value' }} }};
+        \\        registry.register(directValue, directValue.marker);
+        \\        globalThis.__weakOrderDeadRefs.push(new WeakRef(directValue));
+        \\      }}
+        \\      if (((i + round) & 15) === 5) {{
+        \\        const token = {{ kind: 'weak-order-token', idx, root }};
+        \\        registry.register({{ kind: 'unregistered-target', idx, root }}, {d} + idx, token);
+        \\        if (!registry.unregister(token))
+        \\          throw new Error('weak-order unregister token missing ' + idx);
+        \\        globalThis.__weakOrderUnregisterCount++;
+        \\        globalThis.__weakOrderUnregisterSum += {d} + idx;
+        \\      }}
+        \\    }}
+        \\  }}
+        \\  Atomics.store(gate, 'prop', 1);
+        \\  Atomics.notify(gate, 'prop');
+        \\  condLock.hold(() => {{
+        \\    gate.condOpen = true;
+        \\    cond.notifyAll();
+        \\  }});
+        \\  const propRoot = propThread.join();
+        \\  const condRoot = condThread.join();
+        \\  if (!propRoot || propRoot.marker !== {d} || propRoot.nested.seed !== {d})
+        \\    throw new Error('bad weak-order property root');
+        \\  if (!condRoot || condRoot.marker !== {d} || condRoot.nested.seed !== {d})
+        \\    throw new Error('bad weak-order condition root');
+        \\  let liveSum = 0;
+        \\  for (let k = 0; k < globalThis.__weakOrderLiveKeys.length; k++) {{
+        \\    const key = globalThis.__weakOrderLiveKeys[k];
+        \\    const value = globalThis.__weakOrderMap.get(key);
+        \\    const refValue = globalThis.__weakOrderLiveRefs[k].deref();
+        \\    if (!globalThis.__weakOrderSet.has(key) || !value || !refValue || value !== refValue)
+        \\      throw new Error('weak-order live ephemeron missing before GC ' + k);
+        \\    liveSum += value.marker;
+        \\  }}
+        \\  if (liveSum !== {d})
+        \\    throw new Error('weak-order live sum before GC ' + liveSum + '/{d}');
+        \\  return globalThis.__weakOrderLiveKeys.length;
+        \\}})();
+        \\
+    ,
+        .{
+            hash_mod,
+            hash_mul,
+            760_000 + seed_marker,
+            seed_marker,
+            770_000 + seed_marker,
+            seed_marker,
+            seed_marker,
+            rounds,
+            per_round,
+            per_round,
+            live_base,
+            map_base,
+            set_base,
+            direct_base,
+            unregister_base,
+            unregister_base,
+            760_000 + seed_marker,
+            seed_marker,
+            770_000 + seed_marker,
+            seed_marker,
+            expected_live_sum,
+            expected_live_sum,
+        },
+    );
+    defer gpa.free(src);
+
+    const built = ctx.evaluate(src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: weak cleanup ordering JS threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!built.isNumber() or built.asNum() != @as(f64, @floatFromInt(expected_live_count))) {
+        std.debug.print("seed {d}: weak cleanup ordering live count got {d}, expected {d}\n", .{ seed, if (built.isNumber()) built.asNum() else -1, expected_live_count });
+        return false;
+    }
+
+    ctx.collectGarbage();
+    const cleanup_src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  globalThis.__weakOrderRegistry.cleanupSome();
+        \\  if (globalThis.__weakOrderCount !== {d})
+        \\    throw new Error('weak-order cleanup count ' + globalThis.__weakOrderCount + '/{d}');
+        \\  if (globalThis.__weakOrderSum !== {d})
+        \\    throw new Error('weak-order cleanup sum ' + globalThis.__weakOrderSum + '/{d}');
+        \\  if (globalThis.__weakOrderHash !== {d})
+        \\    throw new Error('weak-order cleanup hash ' + globalThis.__weakOrderHash + '/{d}');
+        \\  if (globalThis.__weakOrderUnregisterCount !== {d})
+        \\    throw new Error('weak-order unregister count ' + globalThis.__weakOrderUnregisterCount + '/{d}');
+        \\  if (globalThis.__weakOrderUnregisterSum !== {d})
+        \\    throw new Error('weak-order unregister sum ' + globalThis.__weakOrderUnregisterSum + '/{d}');
+        \\  let cleared = 0;
+        \\  for (const ref of globalThis.__weakOrderDeadRefs) {{
+        \\    if (ref.deref() === undefined)
+        \\      cleared++;
+        \\  }}
+        \\  if (cleared !== {d})
+        \\    throw new Error('weak-order dead refs cleared ' + cleared + '/{d}');
+        \\  let liveSum = 0;
+        \\  for (let k = 0; k < globalThis.__weakOrderLiveKeys.length; k++) {{
+        \\    const key = globalThis.__weakOrderLiveKeys[k];
+        \\    const value = globalThis.__weakOrderMap.get(key);
+        \\    const refValue = globalThis.__weakOrderLiveRefs[k].deref();
+        \\    if (!globalThis.__weakOrderSet.has(key) || !value || !refValue || value !== refValue)
+        \\      throw new Error('weak-order live ephemeron missing after GC ' + k);
+        \\    liveSum += value.marker;
+        \\  }}
+        \\  if (liveSum !== {d})
+        \\    throw new Error('weak-order live sum after GC ' + liveSum + '/{d}');
+        \\  return globalThis.__weakOrderCount;
+        \\}})();
+        \\
+    ,
+        .{
+            expected_count,
+            expected_count,
+            expected_sum,
+            expected_sum,
+            expected_hash,
+            expected_hash,
+            expected_unregister_count,
+            expected_unregister_count,
+            expected_unregister_sum,
+            expected_unregister_sum,
+            expected_dead_refs,
+            expected_dead_refs,
+            expected_live_sum,
+            expected_live_sum,
+        },
+    );
+    defer gpa.free(cleanup_src);
+    const cleaned = ctx.evaluate(cleanup_src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: weak cleanup ordering check threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!cleaned.isNumber() or cleaned.asNum() != @as(f64, @floatFromInt(expected_count))) {
+        std.debug.print("seed {d}: weak cleanup ordering cleaned got {d}, expected {d}\n", .{ seed, if (cleaned.isNumber()) cleaned.asNum() else -1, expected_count });
+        return false;
+    }
+    return true;
+}
+
 fn runFinalizationAsyncJoinCleanupInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
     return runFinalizationAsyncJoinCleanupInterleavingKind(gpa, seed, false);
 }
@@ -18128,6 +18400,22 @@ pub fn main(init: std.process.Init) !void {
         if (wfail != 0) std.process.exit(1);
         return;
     };
+    // `threadfuzz weakorder <iters> <seed>`: focused lifecycle repro for exact
+    // FinalizationRegistry cleanup ordering across WeakMap, WeakSet, direct
+    // targets, WeakRefs, and unregister-suppressed records.
+    if (first) |a| if (std.mem.eql(u8, a, "weakorder")) {
+        if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch 1;
+        if (args.next()) |b| base_seed = std.fmt.parseInt(u64, b, 10) catch 1;
+        var wofail: usize = 0;
+        var woi: usize = 0;
+        while (woi < iters) : (woi += 1) {
+            const seed = base_seed +% woi;
+            if (!(try runWeakCleanupOrderingInterleaving(gpa, seed))) wofail += 1;
+        }
+        std.debug.print("threadfuzz weakorder: {d} programs from seed {d}, {d} failures\n", .{ iters, base_seed, wofail });
+        if (wofail != 0) std.process.exit(1);
+        return;
+    };
     // `threadfuzz propwaitasynclate <iters> <seed>`: focused lifecycle repro
     // for property waitAsync tickets that a peer removes from the global table
     // while the owning thread closes its stack-local microtask queue.
@@ -19614,7 +19902,8 @@ pub fn main(init: std.process.Init) !void {
     // Thread exception identity, returned waitAsync promise assimilation, and
     // property waitAsync late settlement across join/asyncJoin while waiters are
     // parked, mixed property/typed-array waitAsync notify, timeout, and teardown
-    // abandon races, cross-thread
+    // abandon races, exact weak cleanup ordering across WeakMap/WeakSet/WeakRef/
+    // FinalizationRegistry/unregister combinations, cross-thread
     // FinalizationRegistry cleanup, FinalizationRegistry cleanup interleaved
     // with join/asyncJoin and unregister tokens, cleanup
     // delivery after parked property/condition waiters resume, typed-array
@@ -19751,6 +20040,7 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runMixedWaiterRaceLifecycleInterleaving(gpa, seed))) lfail += 1;
             if (!(try runPromisePublicationLifecycleInterleaving(gpa, seed))) lfail += 1;
             if (!(try runFinalizationCleanupInterleaving(gpa, seed))) lfail += 1;
+            if (!(try runWeakCleanupOrderingInterleaving(gpa, seed))) lfail += 1;
             if (!(try runFinalizationAsyncJoinCleanupInterleaving(gpa, seed))) lfail += 1;
             if (!(try runFinalizationWaiterCleanupInterleaving(gpa, seed))) lfail += 1;
             if (!(try runWaitAsyncFinalizationCleanupInterleaving(gpa, seed))) lfail += 1;
@@ -19783,7 +20073,7 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runThreadLocalTerminationCleanupInterleaving(gpa, seed))) lfail += 1;
             if (!(try runNestedThreadAsyncJoinCleanupInterleaving(gpa, seed))) lfail += 1;
         }
-        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 55, base_seed, lfail });
+        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 56, base_seed, lfail });
         if (lfail != 0) std.process.exit(1);
         return;
     };

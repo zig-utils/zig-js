@@ -362,6 +362,8 @@ the global table while the owning thread closes its stack-local microtask queue,
 a mixed property/typed-array `waitAsync` race where notify and timeout tickets
 settle before top-level failure abandons sibling property and typed-array
 tickets,
+exact cleanup ordering across WeakMap values, WeakSet values, direct
+FinalizationRegistry targets, WeakRefs, and unregister-suppressed records,
 typed-array `waitAsync` settlement interleaved with `asyncJoin` reactions and
 exact `FinalizationRegistry` cleanup delivery, deterministic
 `Condition.asyncWait` reacquire delivery interleaved with `join()` /
@@ -427,7 +429,7 @@ abandons child-owned typed-array `waitAsync` tickets, rejects pending
 termination overlapping `ThreadLocal` hidden roots, no-fn `Lock.asyncHold()`
 release-function delivery, parked property/condition waiters, top-level
 teardown, rejected `asyncJoin` observers, and exact cleanup. Each seed
-currently runs 55
+currently runs 56
 deterministic lifecycle
 subprograms.
 
@@ -731,6 +733,7 @@ zig build threadfuzz-bin
 ./zig-out/bin/threadfuzz file /path/to/repro.js
 ./zig-out/bin/threadfuzz propwaitasynclate 5 1
 ./zig-out/bin/threadfuzz waitrace 5 1
+./zig-out/bin/threadfuzz weakorder 5 1
 ./zig-out/bin/threadfuzz workerclose 5 1
 ./zig-out/bin/threadfuzz moduleworkerclose 5 1
 ```

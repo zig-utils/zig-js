@@ -560,6 +560,8 @@ Issue #1 remains the umbrella status page.
   an owning Thread closing its stack-local microtask queue, a mixed
   property/typed-array `waitAsync` race where notify and timeout tickets settle
   before top-level failure abandons sibling property and typed-array tickets,
+  exact cleanup ordering across WeakMap values, WeakSet values, direct
+  `FinalizationRegistry` targets, WeakRefs, and unregister-suppressed records,
   post-completion `Thread.asyncJoin()` fulfillment and rejection promises plus
   sibling cleanup roots staying live after blocking joins while property
   waiters stay parked through a finishing sweep,
