@@ -553,12 +553,22 @@ fn timePromiseScenario(gpa: std.mem.Allocator, io: std.Io, workers: usize, mode:
     const src = try std.fmt.allocPrint(ctx.arena(), "spawnBatch({d})", .{workers});
     _ = try ctx.evaluate(src);
 
+    const t0 = nowNs(io);
+    var round: usize = 0;
+    while (round < promise_microtask_scenario.rounds) : (round += 1) {
+        _ = try ctx.evaluate(src);
+    }
+    const elapsed: u64 = @intCast(nowNs(io) - t0);
+
+    // Keep the timing pass free of profiler-induced cross-thread atomic
+    // contention. The count pass immediately below runs the same warmed
+    // scenario in the same Context, but its counters are used only for
+    // attribution columns, not for the `ns` columns.
     js.jsthread.resetContentionStats();
     js.promise_profile.resetPromiseStats();
     errdefer js.jsthread.disableContentionStats();
     errdefer js.promise_profile.disablePromiseStats();
-    const t0 = nowNs(io);
-    var round: usize = 0;
+    round = 0;
     while (round < promise_microtask_scenario.rounds) : (round += 1) {
         _ = try ctx.evaluate(src);
     }
@@ -567,7 +577,7 @@ fn timePromiseScenario(gpa: std.mem.Allocator, io: std.Io, workers: usize, mode:
     js.jsthread.disableContentionStats();
     js.promise_profile.disablePromiseStats();
     return .{
-        .ns = @intCast(nowNs(io) - t0),
+        .ns = elapsed,
         .contention = contention,
         .promise = promise,
     };
@@ -575,7 +585,7 @@ fn timePromiseScenario(gpa: std.mem.Allocator, io: std.Io, workers: usize, mode:
 
 fn printPromiseProfile(gpa: std.mem.Allocator, io: std.Io, workers: []const usize) !void {
     std.debug.print("\nPromise microtask profile\n", .{});
-    std.debug.print("gil+gc = serialized fallback with GC-managed cells; enq/pop/run = microtask queue enqueues, pops, and job runs; qlock/qyld = queue-lock acquisitions / yield-backed contention; rxn/thn split reaction from thenable jobs\n", .{});
+    std.debug.print("gil+gc = serialized fallback with GC-managed cells; ns columns are uninstrumented warmed timings; enq/pop/run = counted microtask queue enqueues, pops, and job runs; qlock/qyld = counted queue-lock acquisitions / yield-backed contention; rxn/thn split reaction from thenable jobs\n", .{});
     std.debug.print("{s:>8} {s:>14} {s:>14} {s:>14} {s:>12} {s:>12} {s:>12}" ++
         " {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>10}" ++
         " {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>10}\n", .{

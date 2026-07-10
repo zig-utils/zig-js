@@ -654,9 +654,12 @@ promoted `parallel_js` allowlist now runs clean. (6)
 The contention profiler now also has a focused `promise microtasks` case for
 issue #15: it keeps the default table narrow, but records Promise microtask
 enqueue/pop/run totals and splits reaction jobs from thenable-assimilation jobs
-under no-GIL versus `.gil = true`. A third `gil+gc` timing column keeps the
-serialized path on GC-managed cells, which separates GC/cell-management overhead
-from queue-lock and parallel scheduling overhead.
+under no-GIL versus `.gil = true`. Its timing columns come from an
+uninstrumented warmed pass; the counter columns come from a separate counted
+pass in the same warmed context, so profiler atomics do not masquerade as
+runtime contention. A third `gil+gc` timing column keeps the serialized path on
+GC-managed cells, which separates GC/cell-management overhead from queue-lock
+and parallel scheduling overhead.
 That profile led to one contention reduction: no-GIL interpreters now lock the
 current `MicrotaskQueue` rather than a realm-wide lock, so independent
 spawned-thread Promise drains no longer serialize on the host queue.
