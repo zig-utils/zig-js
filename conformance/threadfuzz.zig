@@ -827,6 +827,84 @@ fn genVerify(seed: u64, buf: *std.ArrayListUnmanaged(u8), gpa: std.mem.Allocator
     return total + total * 3.0 * 100000.0;
 }
 
+/// A *deterministic* higher-depth nested Thread graph (issue #13: nested
+/// Thread/asyncJoin graphs). A thread recursively spawns `branch` child Threads
+/// down `depth` levels; each of the `branch^depth` leaves applies `per`
+/// `Atomics.add(...,1)` to a shared slot, and every interior level joins its
+/// children before returning. The final slot value is exactly
+/// `branch^depth * per`, so a lost atomic update, a botched nested join, or a
+/// mis-propagated return makes the engine return a different number — a
+/// correctness bug the "no-throw" oracle can't see. Runs on the arena path
+/// (no GC), so it is fully checkable regardless of the collector.
+fn genNestedGraph(seed: u64, buf: *std.ArrayListUnmanaged(u8), gpa: std.mem.Allocator) !f64 {
+    var prng = std.Random.DefaultPrng.init(seed);
+    const r = prng.random();
+    const depth = 2 + r.uintLessThan(usize, 2); // 2..3
+    const branch = 2 + r.uintLessThan(usize, 2); // 2..3  (<= 3^3 = 27 leaves, 39 threads)
+    const per = 100 + r.uintLessThan(usize, 400); // 100..499
+    const src = try std.fmt.allocPrint(
+        gpa,
+        \\var gbuf = new ArrayBuffer(8); var gia = new Int32Array(gbuf);
+        \\function work(d) {{
+        \\  if (d === 0) {{ for (var i = 0; i < {d}; i++) Atomics.add(gia, 0, 1); return; }}
+        \\  var kids = [];
+        \\  for (var b = 0; b < {d}; b++) kids.push(new Thread(function() {{ work(d - 1); }}));
+        \\  for (var k = 0; k < kids.length; k++) kids[k].join();
+        \\}}
+        \\work({d});
+        \\Atomics.load(gia, 0)
+        \\
+    ,
+        .{ per, branch, depth },
+    );
+    defer gpa.free(src);
+    try buf.appendSlice(gpa, src);
+    var leaves: usize = 1;
+    var i: usize = 0;
+    while (i < depth) : (i += 1) leaves *= branch;
+    return @floatFromInt(leaves * per);
+}
+
+/// A *deterministic* exception-propagation + identity witness (issue #13:
+/// exception identity under termination). `n` Threads are spawned: even-indexed
+/// ones RETURN their marker's `code`, odd-indexed ones THROW their marker object.
+/// The main script joins each — an even join must yield the return value, an odd
+/// join must RE-THROW, and the caught object must be the SAME shared-realm object
+/// it was created as (`e === markers[j]`, not a copy). Every code is summed to
+/// `7 * n*(n+1)/2`; a dropped throw, a wrong propagated value, or a broken
+/// cross-thread object identity makes the sum differ. Arena path (no GC).
+fn genExcJoin(seed: u64, buf: *std.ArrayListUnmanaged(u8), gpa: std.mem.Allocator) !f64 {
+    var prng = std.Random.DefaultPrng.init(seed);
+    const r = prng.random();
+    const n = 4 + r.uintLessThan(usize, 7); // 4..10
+    const src = try std.fmt.allocPrint(
+        gpa,
+        \\var rbuf = new ArrayBuffer(8); var ria = new Int32Array(rbuf);
+        \\var markers = [];
+        \\for (var m = 0; m < {d}; m++) markers.push({{ code: (m + 1) * 7 }});
+        \\var ts = [];
+        \\for (var i = 0; i < {d}; i++) {{
+        \\  (function(idx) {{
+        \\    if (idx % 2 === 0) ts.push(new Thread(function() {{ return markers[idx].code; }}));
+        \\    else ts.push(new Thread(function() {{ throw markers[idx]; }}));
+        \\  }})(i);
+        \\}}
+        \\var sum = 0;
+        \\for (var j = 0; j < ts.length; j++) {{
+        \\  if (j % 2 === 0) {{ sum += ts[j].join(); }}
+        \\  else {{ try {{ ts[j].join(); sum += -1000000; }} catch (e) {{ sum += (e === markers[j]) ? e.code : -2000000; }} }}
+        \\}}
+        \\Atomics.store(ria, 0, sum);
+        \\Atomics.load(ria, 0)
+        \\
+    ,
+        .{ n, n },
+    );
+    defer gpa.free(src);
+    try buf.appendSlice(gpa, src);
+    return @floatFromInt(7 * n * (n + 1) / 2);
+}
+
 /// Teardown stress: every spawned Thread publishes that it reached a blocking or
 /// long-running state, then the main script throws without joining. Context
 /// teardown must request termination, wake parked peers, and join abandoned OS
@@ -18721,6 +18799,78 @@ pub fn main(init: std.process.Init) !void {
         }
         std.debug.print("threadfuzz verify: {d} programs from seed {d}, {d} failures\n", .{ iters, base_seed, vfail });
         if (vfail != 0) std.process.exit(1);
+        return;
+    };
+
+    // `threadfuzz vgraph <iters> <seed>`: deterministic higher-depth nested
+    // Thread graph — the final atomic sum is exactly computable, so a lost
+    // update / bad nested join surfaces as a WRONG RESULT (issue #13). Arena
+    // path (no GC), so it is checkable regardless of the collector.
+    if (first) |a| if (std.mem.eql(u8, a, "vgraph")) {
+        if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch 200;
+        if (args.next()) |b| base_seed = std.fmt.parseInt(u64, b, 10) catch 1;
+        var gfail: usize = 0;
+        var gi: usize = 0;
+        while (gi < iters) : (gi += 1) {
+            const seed = base_seed +% gi;
+            var gbuf: std.ArrayListUnmanaged(u8) = .empty;
+            defer gbuf.deinit(gpa);
+            const expected = try genNestedGraph(seed, &gbuf, gpa);
+            const ctx = js.Context.createWith(gpa, .{ .enable_threads = true }) catch {
+                std.debug.print("seed {d}: context creation failed\n", .{seed});
+                gfail += 1;
+                continue;
+            };
+            defer ctx.destroy();
+            if (ctx.evaluate(gbuf.items)) |v| {
+                const got = if (v.isNumber()) v.asNum() else -1;
+                if (got != expected) {
+                    std.debug.print("seed {d}: WRONG RESULT got {d} expected {d} (nested-graph atomic/join bug)\n", .{ seed, got, expected });
+                    gfail += 1;
+                }
+            } else |e| {
+                std.debug.print("seed {d}: unexpected throw {s}\n", .{ seed, @errorName(e) });
+                gfail += 1;
+            }
+        }
+        std.debug.print("threadfuzz vgraph: {d} programs from seed {d}, {d} failures\n", .{ iters, base_seed, gfail });
+        if (gfail != 0) std.process.exit(1);
+        return;
+    };
+
+    // `threadfuzz vexc <iters> <seed>`: deterministic exception-propagation +
+    // cross-thread object-identity witness (issue #13). A dropped throw, a wrong
+    // propagated value, or a broken `e === marker` identity surfaces as a WRONG
+    // RESULT. Arena path (no GC), fully checkable.
+    if (first) |a| if (std.mem.eql(u8, a, "vexc")) {
+        if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch 200;
+        if (args.next()) |b| base_seed = std.fmt.parseInt(u64, b, 10) catch 1;
+        var efail: usize = 0;
+        var ei: usize = 0;
+        while (ei < iters) : (ei += 1) {
+            const seed = base_seed +% ei;
+            var ebuf: std.ArrayListUnmanaged(u8) = .empty;
+            defer ebuf.deinit(gpa);
+            const expected = try genExcJoin(seed, &ebuf, gpa);
+            const ctx = js.Context.createWith(gpa, .{ .enable_threads = true }) catch {
+                std.debug.print("seed {d}: context creation failed\n", .{seed});
+                efail += 1;
+                continue;
+            };
+            defer ctx.destroy();
+            if (ctx.evaluate(ebuf.items)) |v| {
+                const got = if (v.isNumber()) v.asNum() else -1;
+                if (got != expected) {
+                    std.debug.print("seed {d}: WRONG RESULT got {d} expected {d} (exception propagation/identity bug)\n", .{ seed, got, expected });
+                    efail += 1;
+                }
+            } else |e| {
+                std.debug.print("seed {d}: unexpected throw {s}\n", .{ seed, @errorName(e) });
+                efail += 1;
+            }
+        }
+        std.debug.print("threadfuzz vexc: {d} programs from seed {d}, {d} failures\n", .{ iters, base_seed, efail });
+        if (efail != 0) std.process.exit(1);
         return;
     };
     // `threadfuzz lifecycle <iters> <seed>`: deterministic resizable
