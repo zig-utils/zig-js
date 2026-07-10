@@ -38844,14 +38844,42 @@ fn toPrecisionStr(arena: std.mem.Allocator, n: f64, p: usize) ![]const u8 {
         return z.items;
     }
     const neg = n < 0;
-    // Scientific with p-1 fraction digits yields exactly p significant digits.
-    const s = try renderScientificFixed(arena, @abs(n), p - 1);
-    // Parse "d.ddd...eX": collect the significant digits and the decimal exponent.
-    const ei = std.mem.indexOfScalar(u8, s, 'e').?;
+    // Exact significant digits + decimal exponent. An f64 has at most ~767
+    // significant decimal digits, so printf %e at that precision emits the TRUE
+    // digits (no rounding); we then round HALF-UP at digit p ("pick the larger
+    // n", 21.1.3.5) instead of C `%e`'s half-to-EVEN — so (2.5).toPrecision(1)
+    // is "3" and (0.125).toPrecision(2) is "0.13".
+    const high_prec: usize = 767;
+    const cap = high_prec + 32;
+    const raw = try arena.alloc(u8, cap);
+    const rlen = snprintf(raw.ptr, cap, "%.*e", @as(c_int, @intCast(high_prec)), @abs(n));
+    if (rlen < 0 or @as(usize, @intCast(rlen)) >= cap) return error.OutOfMemory;
+    const es = raw[0..@intCast(rlen)]; // "d.ffff…e±XX" — 1+high_prec significant digits
+    const eidx = std.mem.indexOfScalar(u8, es, 'e').?;
+    var allsig: std.ArrayListUnmanaged(u8) = .empty; // exact significant digits, no dot
+    for (es[0..eidx]) |c| if (c != '.') try allsig.append(arena, c);
+    var exp = std.fmt.parseInt(i32, es[eidx + 1 ..], 10) catch 0;
+
+    // Keep p significant digits, rounding half-up on the exact (p+1)th digit.
     var digits: std.ArrayListUnmanaged(u8) = .empty;
-    for (s[0..ei]) |c| if (c != '.') try digits.append(arena, c);
-    const exp = std.fmt.parseInt(i32, s[ei + 1 ..], 10) catch 0;
-    const nd: i32 = @intCast(digits.items.len);
+    try digits.appendSlice(arena, allsig.items[0..@min(p, allsig.items.len)]);
+    while (digits.items.len < p) try digits.append(arena, '0');
+    if (p < allsig.items.len and allsig.items[p] >= '5') {
+        var i: usize = digits.items.len;
+        var carry = true;
+        while (i > 0 and carry) {
+            i -= 1;
+            if (digits.items[i] == '9') digits.items[i] = '0' else {
+                digits.items[i] += 1;
+                carry = false;
+            }
+        }
+        if (carry) {
+            // "999…" -> "100…" with the same p digits and the exponent bumped up.
+            digits.items[0] = '1';
+            exp += 1;
+        }
+    }
 
     var out: std.ArrayListUnmanaged(u8) = .empty;
     if (neg) try out.append(arena, '-');
@@ -38879,7 +38907,6 @@ fn toPrecisionStr(arena: std.mem.Allocator, n: f64, p: usize) ![]const u8 {
         try out.appendNTimes(arena, '0', @intCast(-exp - 1));
         try out.appendSlice(arena, digits.items);
     }
-    _ = nd;
     return out.items;
 }
 
