@@ -1374,15 +1374,19 @@ pub const Context = struct {
     gc_par_aborts: std.atomic.Value(u64) = .init(0),
     /// Detailed test/profiling telemetry for the same collector. A generation is
     /// one root-publication request; wait iterations count failed convergence
-    /// polls (batched into the atomic after each generation); finish retries are
-    /// allocation races detected by the self-checking finish step. Peer request
-    /// counts snapshot running versus directly traceable parked peers once per
-    /// generation, while peer publications count roots actually handed off.
-    /// Pause time is collector-mutator time spent inside the driver, not a
-    /// stop-the-world pause: peer mutators continue throughout.
+    /// polls (batched into the atomic after each generation); the paired max
+    /// keeps the worst single generation visible. Finish retries are allocation
+    /// races detected by the self-checking finish step; their paired max keeps
+    /// the worst single elected attempt visible. Peer request counts snapshot
+    /// running versus directly traceable parked peers once per generation, while
+    /// peer publications count roots actually handed off. Pause time is
+    /// collector-mutator time spent inside the driver, not a stop-the-world
+    /// pause: peer mutators continue throughout.
     gc_par_generations: std.atomic.Value(u64) = .init(0),
     gc_par_publication_wait_iterations: std.atomic.Value(u64) = .init(0),
     gc_par_finish_retries: std.atomic.Value(u64) = .init(0),
+    gc_par_publication_wait_iterations_max: std.atomic.Value(u64) = .init(0),
+    gc_par_finish_retries_max: std.atomic.Value(u64) = .init(0),
     gc_par_publication_timeout_aborts: std.atomic.Value(u64) = .init(0),
     gc_par_round_limit_aborts: std.atomic.Value(u64) = .init(0),
     gc_par_running_peer_requests: std.atomic.Value(u64) = .init(0),
@@ -2177,11 +2181,15 @@ pub const Context = struct {
         const ended_ns = std.Io.Timestamp.now(agent.engineIo(), .awake).nanoseconds;
         const elapsed: u64 = @intCast(@max(ended_ns - started_ns, 0));
         _ = self.gc_par_pause_ns_total.fetchAdd(elapsed, .monotonic);
-        var observed = self.gc_par_pause_ns_max.load(.monotonic);
-        while (elapsed > observed) {
-            observed = self.gc_par_pause_ns_max.cmpxchgWeak(
+        self.recordParallelGcMax(&self.gc_par_pause_ns_max, elapsed);
+    }
+
+    fn recordParallelGcMax(_: *Context, counter: *std.atomic.Value(u64), sample: u64) void {
+        var observed = counter.load(.monotonic);
+        while (sample > observed) {
+            observed = counter.cmpxchgWeak(
                 observed,
-                elapsed,
+                sample,
                 .monotonic,
                 .monotonic,
             ) orelse break;
@@ -2227,6 +2235,7 @@ pub const Context = struct {
         const wait_budget: u64 = 50_000;
         const wait_floor_ns: i96 = 25 * std.time.ns_per_ms;
         var prev_born: usize = h.bornPendingLen();
+        var attempt_finish_retries: u64 = 0;
         var round: u32 = 0;
         while (round < max_rounds) : (round += 1) {
             // Open a fresh root-publication generation; peers catch up at their
@@ -2245,6 +2254,7 @@ pub const Context = struct {
                 const now_ns = std.Io.Timestamp.now(agent.engineIo(), .awake).nanoseconds;
                 if (waited >= wait_budget and now_ns >= deadline_ns) {
                     _ = self.gc_par_publication_wait_iterations.fetchAdd(waited, .monotonic);
+                    self.recordParallelGcMax(&self.gc_par_publication_wait_iterations_max, waited);
                     self.gc_scan_native_stack = true;
                     h.abortConcurrentMarkParallel();
                     self.gc_scan_native_stack = false;
@@ -2256,7 +2266,10 @@ pub const Context = struct {
                 // publish, rather than starving them by busy-spinning.
                 if ((waited & 0x3ff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
             }
-            if (waited != 0) _ = self.gc_par_publication_wait_iterations.fetchAdd(waited, .monotonic);
+            if (waited != 0) {
+                _ = self.gc_par_publication_wait_iterations.fetchAdd(waited, .monotonic);
+                self.recordParallelGcMax(&self.gc_par_publication_wait_iterations_max, waited);
+            }
             // Everyone published this generation. Drain to local quiescence.
             self.gc_scan_native_stack = true;
             while (!h.concurrentMarkRound()) {}
@@ -2280,6 +2293,8 @@ pub const Context = struct {
                     return;
                 }
                 _ = self.gc_par_finish_retries.fetchAdd(1, .monotonic);
+                attempt_finish_retries += 1;
+                self.recordParallelGcMax(&self.gc_par_finish_retries_max, attempt_finish_retries);
                 // Allocation happened during the finish — its born fold already
                 // ran, so refresh the baseline and keep marking.
             }
@@ -11031,6 +11046,10 @@ fn expectParallelGcTelemetryCoherent(ctx: *Context) !void {
     const round_aborts = ctx.gc_par_round_limit_aborts.load(.monotonic);
     const pause_total = ctx.gc_par_pause_ns_total.load(.monotonic);
     const pause_max = ctx.gc_par_pause_ns_max.load(.monotonic);
+    const wait_total = ctx.gc_par_publication_wait_iterations.load(.monotonic);
+    const wait_max = ctx.gc_par_publication_wait_iterations_max.load(.monotonic);
+    const finish_retries = ctx.gc_par_finish_retries.load(.monotonic);
+    const finish_retries_max = ctx.gc_par_finish_retries_max.load(.monotonic);
 
     try std.testing.expect(attempts > 0);
     try std.testing.expectEqual(attempts, collections + aborts);
@@ -11038,6 +11057,8 @@ fn expectParallelGcTelemetryCoherent(ctx: *Context) !void {
     try std.testing.expect(ctx.gc_par_generations.load(.monotonic) >= attempts);
     try std.testing.expect(pause_max <= pause_total);
     try std.testing.expect(pause_total > 0);
+    try std.testing.expect(wait_max <= wait_total);
+    try std.testing.expect(finish_retries_max <= finish_retries);
 }
 
 test "parallel_js (M3): mid-script parallel collector reclaims garbage while threads run, no GIL" {

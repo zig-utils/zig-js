@@ -333,10 +333,11 @@ roadmap item repeats it.
      pause-time.
    - **Convergence telemetry.** `zig build midgc-profile` exercises the internal
      policy and attributes attempts, sweeps, publication-timeout and round-limit
-     aborts, generations, failed publication polls, finish retries, running and
-     parked peer observations, actual peer publications, and collector-side
-     total/maximum pause. The pause is local to the collector mutator; peers are
-     not stopped. Focused tests enforce the counter accounting identities and
+     aborts, generations, total and worst-generation failed publication polls,
+     total and worst-attempt finish retries, running and parked peer
+     observations, actual peer publications, and collector-side total/maximum
+     pause. The pause is local to the collector mutator; peers are not stopped.
+     Focused tests enforce the counter accounting identities and
      execute both publication and direct parked-root paths. These counters and
      `parallel_midscript_gc` remain testing/profile implementation details, not
      stable embedder API.

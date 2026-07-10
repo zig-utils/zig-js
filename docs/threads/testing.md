@@ -55,9 +55,10 @@ diagnosing a crash; timing from that mode is not a performance baseline.
 its collector behavior is not hidden inside the broader contention matrix. It
 reports elected attempts, finishing sweeps, publication-timeout versus
 round-limit aborts, opened root-publication generations, failed publication
-polls, allocation-race finish retries, running-peer requests, parked-peer
-observations, actual peer publications, and collector-side total/maximum pause
-time. That pause is time the collector mutator spends in the driver; it is not a
+poll totals and worst-generation poll counts, allocation-race finish retries
+and worst-attempt retry counts, running-peer requests, parked-peer observations,
+actual peer publications, and collector-side total/maximum pause time. That
+pause is time the collector mutator spends in the driver; it is not a
 stop-the-world pause because peer mutators continue running. The profile is an
 attribution tool, not a stable embedder API or correctness gate.
 
@@ -492,8 +493,10 @@ the internal mid-script parallel collector. Its accounting invariants are also
 asserted by focused unit tests: every elected attempt ends in exactly one sweep
 or classified abort, abort reasons sum to total aborts, each attempt opens at
 least one publication generation, and maximum collector-side pause does not
-exceed total pause. End-to-end witnesses require both directly observed parked
-peers and roots actually published by running sync-wait peers.
+exceed total pause. The same coherence check keeps worst-generation publication
+polls and worst-attempt finish retries bounded by their aggregate totals.
+End-to-end witnesses require both directly observed parked peers and roots
+actually published by running sync-wait peers.
 
 The focused `condition asyncWait` profile is also a nursery lifetime gate. A
 Debug run exposed a GC-poisoned Promise stored only in the native condition
