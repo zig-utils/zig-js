@@ -9,6 +9,7 @@ const regex = @import("regex");
 const regexp_compat = @import("regexp_compat.zig");
 const vm = @import("vm.zig");
 const promise = @import("promise.zig");
+const promise_profile = @import("promise_profile.zig");
 const shared_buffer = @import("shared_buffer.zig");
 const agent = @import("agent.zig");
 const structured_clone = @import("structured_clone.zig");
@@ -892,6 +893,10 @@ pub const Interpreter = struct {
     /// Microtask currently popped from the queue and executing. It is no longer
     /// present in `microtasks`, so GC must trace it separately.
     current_microtask: ?promise.Microtask = null,
+    /// Microtasks dequeued as a burst by `drainMicrotasks` but not yet run.
+    /// They are no longer present in `microtasks`, so GC must trace them while
+    /// callbacks run and may trigger collection.
+    current_microtask_batch: []promise.Microtask = &.{},
     /// Run-loop `HoldJob`s currently popped from `Gil.tasks` for a bounded
     /// burst. They are no longer present in the realm task queue, so GC must
     /// trace them separately while callbacks/release promises can run JS and hit
@@ -6472,21 +6477,28 @@ pub const Interpreter = struct {
     /// checkpoint). Each job may enqueue more; the step budget bounds runaways.
     pub fn drainMicrotasks(self: *Interpreter) EvalError!void {
         if (self.microtasks == null) return;
-        // Pop one job at a time under the current queue's lock (when engaged),
-        // run it unlocked (it may enqueue more, re-entering the lock), and
-        // repeat until the queue is empty. The per-pop lock makes the dequeue
-        // atomic against a peer thread's concurrent enqueue under `parallel_js`;
-        // the previous trailing `clearRetainingCapacity()` is gone because it
-        // could discard a task a peer appended after the empties check (and the
-        // loop already leaves the queue empty).
-        while (self.microtaskDequeue()) |job| {
-            self.current_microtask = job;
-            promise.runJob(self, job) catch |err| {
+        // Move the currently pending burst out under the current queue's lock,
+        // then run that burst unlocked. This preserves FIFO (jobs enqueued while
+        // the burst runs stay in the queue for the next burst) while avoiding one
+        // lock acquire per Promise reaction in no-GIL mode.
+        var batch: std.ArrayListUnmanaged(promise.Microtask) = .empty;
+        defer batch.deinit(self.arena);
+        while (try self.microtaskDequeueBatch(&batch)) {
+            var i: usize = 0;
+            while (i < batch.items.len) : (i += 1) {
+                const job = batch.items[i];
+                self.current_microtask_batch = batch.items[i + 1 ..];
+                self.current_microtask = job;
+                promise.runJob(self, job) catch |err| {
+                    self.current_microtask = null;
+                    self.current_microtask_batch = &.{};
+                    return err;
+                };
                 self.current_microtask = null;
-                return err;
-            };
-            self.current_microtask = null;
-            self.serviceRequestedGcCheckpoint();
+                self.serviceRequestedGcCheckpoint();
+            }
+            self.current_microtask_batch = &.{};
+            batch.clearRetainingCapacity();
         }
     }
 
@@ -6499,6 +6511,25 @@ pub const Interpreter = struct {
         self.lockMicrotasks();
         defer self.unlockMicrotasks();
         return q.pop();
+    }
+
+    /// Atomically move all currently pending microtasks into `batch`. Running
+    /// the copied burst outside the queue lock avoids serializing independent
+    /// jobs on a lock while preserving per-queue FIFO: tasks enqueued by the
+    /// burst (or by a peer) remain in the queue and are drained by a later burst.
+    fn microtaskDequeueBatch(self: *Interpreter, batch: *std.ArrayListUnmanaged(promise.Microtask)) EvalError!bool {
+        const q = self.microtasks orelse return false;
+        self.lockMicrotasks();
+        defer self.unlockMicrotasks();
+        const pending = q.pendingItems();
+        if (pending.len == 0) {
+            q.clearRetainingCapacity();
+            return false;
+        }
+        try batch.appendSlice(self.arena, pending);
+        promise_profile.recordMicrotaskPops(pending.len);
+        q.clearRetainingCapacity();
+        return true;
     }
 
     /// Spin-acquire the current microtask queue's lock (only engaged under

@@ -77,6 +77,11 @@ pub inline fn recordMicrotaskPop() void {
     bump("microtask_pops");
 }
 
+pub inline fn recordMicrotaskPops(count: usize) void {
+    if (count == 0 or !enabled.load(.monotonic)) return;
+    _ = counters.microtask_pops.fetchAdd(@intCast(count), .monotonic);
+}
+
 pub inline fn recordMicrotaskLockAcquire() void {
     bump("microtask_lock_acquires");
 }
