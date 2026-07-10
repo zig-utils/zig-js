@@ -1615,6 +1615,7 @@ pub const Context = struct {
             // behavior. Set before any allocation so deinit frees with the same
             // allocator. See zig-gc `Heap.setAuxAllocator`.
             h.setAuxAllocator(std.heap.page_allocator);
+            h.setNurseryEnabled(true);
             self.gc = h;
             self.gc_binding = &gc_state.binding;
             self.gc_cell_backing = &gc_state.backing;
@@ -1942,6 +1943,24 @@ pub const Context = struct {
         h.collect();
         if (self.gc_cell_backing) |backing| _ = backing.trimEmptyTailChunks();
         self.gc_requested.store(false, .monotonic);
+    }
+
+    /// Automatic quiescent policy used at evaluation boundaries. Young space is
+    /// collected only after its nursery threshold; once tenured bytes cross the
+    /// full-heap threshold, the existing precise collector reclaims old garbage.
+    fn collectQuiescentGarbage(self: *Context) void {
+        const h = self.gc orelse return;
+        if (self.hasRunningJsThreads()) return;
+        if (self.gc_par_collector.load(.acquire) != null) return;
+        self.finishConcurrentGCIfActive();
+        if (h.shouldCollectOld()) {
+            h.collect();
+        } else if (h.shouldCollectYoung()) {
+            h.collectYoung();
+        } else {
+            return;
+        }
+        if (self.gc_cell_backing) |backing| _ = backing.trimEmptyTailChunks();
     }
 
     fn collectRequestedGarbage(self: *Context) void {
@@ -2301,7 +2320,7 @@ pub const Context = struct {
         // Quiescent point: reclaim garbage from prior evaluations on this
         // context before running (nothing is executing yet, so the Context
         // roots are complete).
-        self.collectGarbage();
+        self.collectQuiescentGarbage();
         self.collectRequestedGarbage();
         const a = self.arena();
         const owned_source = try a.dupe(u8, source);
@@ -2536,6 +2555,7 @@ pub const Context = struct {
         defer self.finishConcurrentGCIfActive(); // close any concurrent mark (see evaluate)
         // Quiescent point before module execution; a prior shell `gc()` request
         // can be serviced before the live module graph is installed.
+        self.collectQuiescentGarbage();
         self.collectRequestedGarbage();
         var cache: std.StringHashMapUnmanaged(*Module) = .{};
         const root = try self.loadModule(entry_path, entry_source, host, &cache);
@@ -9355,6 +9375,86 @@ test "enable_gc: collectGarbage reclaims unreachable objects, keeps reachable" {
     // The retained object is intact and usable after collection.
     const r = try ctx.evaluate("globalThis.keep.kept + globalThis.keep.nested.deep[2]");
     try std.testing.expectEqual(@as(f64, 4), r.asNum()); // 1 + 3
+}
+
+test "enable_gc nursery: quiescent minor collection reclaims young garbage and records promotion" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    defer ctx.destroy();
+    ctx.collectGarbage(); // tenure bootstrap roots and establish the full threshold
+
+    const heap = ctx.gc.?;
+    heap.nursery_threshold_bytes = 1;
+    const full_before = heap.full_collections;
+    const minor_before = heap.minor_collections;
+    _ = try ctx.evaluate(
+        \\(function () {
+        \\  for (let i = 0; i < 32; i++) ({ index: i, nested: { value: i } });
+        \\})()
+    );
+    try std.testing.expect(heap.young_cells > 0);
+
+    ctx.collectQuiescentGarbage();
+    try std.testing.expectEqual(@as(usize, 0), heap.young_cells);
+    try std.testing.expectEqual(minor_before + 1, heap.minor_collections);
+    try std.testing.expectEqual(full_before, heap.full_collections);
+}
+
+test "enable_gc nursery: owner barriers preserve old object, environment, and promise edges" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    defer ctx.destroy();
+    ctx.collectGarbage();
+
+    _ = try ctx.evaluate(
+        \\globalThis.holder = {};
+        \\globalThis.resolveNurseryPromise = undefined;
+        \\globalThis.nurseryPromise = new Promise(r => { resolveNurseryPromise = r; });
+    );
+    ctx.gc.?.collectYoung(); // holder/promise become old
+
+    _ = try ctx.evaluate(
+        \\holder.child = { value: 40 };
+        \\let nurseryLexicalChild = { value: 2 };
+        \\resolveNurseryPromise({ value: 7 });
+    );
+    ctx.gc.?.collectYoung();
+
+    const object_and_env = try ctx.evaluate("holder.child.value + nurseryLexicalChild.value");
+    try std.testing.expectEqual(@as(f64, 42), object_and_env.asNum());
+    _ = try ctx.evaluate("nurseryPromise.then(v => { globalThis.promiseValue = v.value; });");
+    const promise_value = try ctx.evaluate("globalThis.promiseValue");
+    try std.testing.expectEqual(@as(f64, 7), promise_value.asNum());
+}
+
+test "enable_gc nursery: weak refs, ephemerons, and finalization stay weak" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    defer ctx.destroy();
+    ctx.collectGarbage();
+
+    _ = try ctx.evaluate(
+        \\globalThis.wm = new WeakMap();
+        \\globalThis.cleaned = [];
+        \\globalThis.fr = new FinalizationRegistry(v => cleaned.push(v));
+    );
+    ctx.gc.?.collectYoung(); // weak containers become old
+
+    _ = try ctx.evaluate(
+        \\globalThis.temporaryKey = {};
+        \\globalThis.temporaryValue = { payload: 1 };
+        \\wm.set(temporaryKey, temporaryValue);
+        \\globalThis.keyRef = new WeakRef(temporaryKey);
+        \\globalThis.valueRef = new WeakRef(temporaryValue);
+        \\globalThis.directRef = new WeakRef({ direct: true });
+        \\fr.register({}, 17);
+        \\globalThis.temporaryKey = undefined;
+        \\globalThis.temporaryValue = undefined;
+    );
+    ctx.gc.?.collectYoung();
+
+    try std.testing.expect((try ctx.evaluate("keyRef.deref() === undefined")).asBool());
+    try std.testing.expect((try ctx.evaluate("valueRef.deref() === undefined")).asBool());
+    try std.testing.expect((try ctx.evaluate("directRef.deref() === undefined")).asBool());
+    _ = try ctx.evaluate("fr.cleanupSome()");
+    try std.testing.expect((try ctx.evaluate("cleaned.length === 1 && cleaned[0] === 17")).asBool());
 }
 
 test "for(let) per-iteration binding: reuse fast path preserves closure-capture semantics" {

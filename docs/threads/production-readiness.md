@@ -176,8 +176,9 @@ Known performance/maturity work:
   reduced object-cell chunk churn separately from remaining create/destroy
   wall-clock costs. A repeated allocate-plus-collect churn table now reports
   fresh versus reused cells, freed cells, final chunk/live counts, and reuse
-  percentage, giving nursery/generational work a direct freelist-reuse baseline
-  instead of only a one-shot object workload. The no-GIL bootstrap row should
+  percentage. A quiescent nursery row now reports boundary pause time, young
+  input, reclaimed cells, promoted cells/bytes, and minor/full cycle deltas
+  instead of relying only on a one-shot object workload. The no-GIL bootstrap row should
   also be read against the explicit parallel-lock deferral above: returned
   contexts are fully parallel, but private global/API installation no longer
   measures the atomic allocator lock on every cell allocation. Once parallel,
@@ -185,9 +186,10 @@ Known performance/maturity work:
   their slab/free-list fast paths concurrently. Only chunk growth, chunk
   metadata, and delegated non-cell side storage take the separate
   inner-allocator lock required for a potentially non-thread-safe embedder
-  allocator. This reduces current no-GIL allocation contention without claiming
-  the remaining nursery/generational policy work is complete. GC finalizer
-  attribution includes `skipfree`, which must equal finalized cells for the
+  allocator. The landed nursery is non-moving and quiescent-only: survivors
+  tenure after one minor cycle, explicit GC remains full-heap, and the no-GIL
+  mid-script collector remains the existing abort-safe full collector. GC
+  finalizer attribution includes `skipfree`, which must equal finalized cells for the
   slab-owned bulk teardown path.
 - Mid-script parallel GC remains abort-safe. Sync wait/lock/condition peers are
   not treated as frozen parked stacks; their lock-free pump points now service
@@ -401,7 +403,8 @@ Known performance/maturity work:
 Remaining: use the attribution columns to drive targeted reductions in
 contended user-level locks, Worker-heavy lifecycle and message traffic,
 shared-buffer lifetime churn, join/lifecycle waiting, object/element storage
-contention, context lifecycle pooling, and nursery/generational work.
+contention, context lifecycle pooling, nursery sizing/pause tuning, and deeper
+multi-age generational work.
 
 ## 4. Embedder API
 

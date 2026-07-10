@@ -1429,8 +1429,8 @@ pub fn objectCreate(ctx: *anyopaque, this: Value, args: []const Value) HostError
     const self = interp(ctx);
     const obj = (try self.newObject()).asObj();
     switch (arg(args, 0).kind()) {
-        .object => obj.proto = arg(args, 0).asObj(),
-        .null => obj.proto = null,
+        .object => obj.setProtoAtomic(arg(args, 0).asObj()),
+        .null => obj.setProtoAtomic(null),
         else => return self.throwError("TypeError", "Object prototype may only be an Object or null"),
     }
     // The optional second argument is a Properties object processed exactly like

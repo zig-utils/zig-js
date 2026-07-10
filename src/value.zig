@@ -5,14 +5,11 @@ const gc_runtime = @import("gc_runtime.zig");
 const strcell = @import("strcell.zig");
 const StringCell = strcell.StringCell;
 
-/// Incremental-GC insertion write barrier for a `Value` being stored into a
-/// live GC cell (issue #1 Phase 7 / M2). Only `.object` carries a cell; the
-/// barrier shades it grey if the heap is mid-incremental-mark, else it is a
-/// near-no-op (see `gc_runtime.barrier`). Called from the property/element
-/// store funnels below so a reference newly hidden behind an already-marked
-/// object is never missed.
-inline fn gcBarrier(v: Value) void {
-    if (v.isObject()) gc_runtime.barrier(@ptrCast(v.asObj()));
+/// GC insertion barrier for a `Value` stored into a live cell. It records an
+/// old-to-young edge for minor collection and shades the child during an active
+/// incremental/full mark. Only `.object` carries a cell.
+inline fn gcBarrier(owner: *Object, v: Value) void {
+    if (v.isObject()) gc_runtime.barrierFrom(@ptrCast(owner), @ptrCast(v.asObj()));
 }
 
 /// The C-ABI shape of a host (Zig/C) function exposed to JS via
@@ -1032,6 +1029,7 @@ pub const Object = struct {
         return @atomicLoad(?*Object, &@constCast(self).proto, .monotonic);
     }
     pub inline fn setProtoAtomic(self: *Object, p: ?*Object) void {
+        gc_runtime.barrierFrom(@ptrCast(self), if (p) |proto| @ptrCast(proto) else null);
         @atomicStore(?*Object, &self.proto, p, .monotonic);
     }
 
@@ -1095,7 +1093,7 @@ pub const Object = struct {
         self.lockElements();
         defer self.unlockElements();
         if (i >= self.elements.items.len) return false;
-        gcBarrier(v);
+        gcBarrier(self, v);
         self.elements.items[i] = v;
         return true;
     }
@@ -1103,7 +1101,7 @@ pub const Object = struct {
     pub fn appendElement(self: *Object, arena: std.mem.Allocator, v: Value) std.mem.Allocator.Error!void {
         self.lockElements();
         defer self.unlockElements();
-        gcBarrier(v);
+        gcBarrier(self, v);
         self.indexed_own_seen.store(true, .release);
         try self.elements.append(self.elementsAllocator(arena), v);
     }
@@ -1117,7 +1115,7 @@ pub const Object = struct {
         if (self.holes != null or self.array_len > self.elements.items.len) return null;
         const new_len = self.elements.items.len + values.len;
         if (new_len > 4294967295) return null;
-        for (values) |v| gcBarrier(v);
+        for (values) |v| gcBarrier(self, v);
         if (values.len != 0) self.indexed_own_seen.store(true, .release);
         try self.elements.appendSlice(self.elementsAllocator(arena), values);
         self.array_len = new_len;
@@ -1135,7 +1133,7 @@ pub const Object = struct {
         self.lockElements();
         defer self.unlockElements();
         if (i >= self.elements.items.len or self.isHoleUnlocked(i)) return null;
-        gcBarrier(v);
+        gcBarrier(self, v);
         self.elements.items[i] = v;
         return v;
     }
@@ -1145,7 +1143,7 @@ pub const Object = struct {
         defer self.unlockElements();
         if (i >= self.elements.items.len or self.isHoleUnlocked(i)) return null;
         const old = self.elements.items[i];
-        gcBarrier(v);
+        gcBarrier(self, v);
         self.elements.items[i] = v;
         return old;
     }
@@ -1156,7 +1154,7 @@ pub const Object = struct {
         if (i >= self.elements.items.len or self.isHoleUnlocked(i)) return null;
         const old = self.elements.items[i];
         if (sameValueZero(old, expected)) {
-            gcBarrier(replacement);
+            gcBarrier(self, replacement);
             self.elements.items[i] = replacement;
         }
         return old;
@@ -1220,6 +1218,8 @@ pub const Object = struct {
 
     /// WeakMap `[[Set]]` upsert: update the entry for `key` or append a new one.
     pub fn weakEntrySet(self: *Object, fallback: std.mem.Allocator, key: ?*anyopaque, v: Value) std.mem.Allocator.Error!void {
+        gc_runtime.barrierWeak(@ptrCast(self));
+        gcBarrier(self, v);
         self.lockElements();
         defer self.unlockElements();
         const alloc = self.weakEntriesAllocator(fallback);
@@ -1235,6 +1235,7 @@ pub const Object = struct {
 
     /// WeakSet `add`: append `key` if it is not already present.
     pub fn weakEntryAdd(self: *Object, fallback: std.mem.Allocator, key: ?*anyopaque) std.mem.Allocator.Error!void {
+        gc_runtime.barrierWeak(@ptrCast(self));
         self.lockElements();
         defer self.unlockElements();
         const alloc = self.weakEntriesAllocator(fallback);
@@ -1381,7 +1382,7 @@ pub const Object = struct {
         self.lockElements();
         defer self.unlockElements();
         if (i >= self.elements.items.len) return false;
-        gcBarrier(v);
+        gcBarrier(self, v);
         self.indexed_own_seen.store(true, .release);
         self.elements.items[i] = v;
         self.clearHoleUnlocked(i);
@@ -1391,7 +1392,7 @@ pub const Object = struct {
     pub fn growDenseElement(self: *Object, arena: std.mem.Allocator, i: usize, v: Value) std.mem.Allocator.Error!usize {
         self.lockElements();
         defer self.unlockElements();
-        gcBarrier(v);
+        gcBarrier(self, v);
         self.indexed_own_seen.store(true, .release);
         const gap_start = self.elements.items.len;
         while (self.elements.items.len <= i) try self.elements.append(self.elementsAllocator(arena), Value.undef());
@@ -1411,7 +1412,7 @@ pub const Object = struct {
     ) std.mem.Allocator.Error!bool {
         self.lockElements();
         defer self.unlockElements();
-        gcBarrier(v);
+        gcBarrier(self, v);
         self.indexed_own_seen.store(true, .release);
         if (i < self.elements.items.len) {
             self.elements.items[i] = v;
@@ -1467,7 +1468,7 @@ pub const Object = struct {
         self.lockElements();
         defer self.unlockElements();
         self.indexed_own_seen.store(true, .release);
-        for (values) |v| gcBarrier(v);
+        for (values) |v| gcBarrier(self, v);
         self.elements.clearRetainingCapacity();
         try self.elements.appendSlice(self.elementsAllocator(arena), values);
         if (self.holes) |h| h.clearRetainingCapacity();
@@ -1484,7 +1485,7 @@ pub const Object = struct {
         self.lockElements();
         defer self.unlockElements();
         if (self.holes != null or self.array_len > self.elements.items.len) return false;
-        for (inserts) |v| gcBarrier(v);
+        for (inserts) |v| gcBarrier(self, v);
         if (inserts.len != 0) self.indexed_own_seen.store(true, .release);
         var i: usize = 0;
         while (i < delete_count) : (i += 1) {
@@ -1844,11 +1845,11 @@ pub const Object = struct {
             try self.recordKeyOrderUnlocked(arena, gop.key_ptr.*);
         }
         if (get) |g| {
-            gcBarrier(g);
+            gcBarrier(self, g);
             gop.value_ptr.get = g;
         }
         if (set) |s| {
-            gcBarrier(s);
+            gcBarrier(self, s);
             gop.value_ptr.set = s;
         }
     }
@@ -1918,7 +1919,7 @@ pub const Object = struct {
     }
 
     pub fn setOwnUnlocked(self: *Object, arena: std.mem.Allocator, root: *Shape, name: []const u8, v: Value) std.mem.Allocator.Error!void {
-        gcBarrier(v); // stored into this cell's slots on either path below
+        gcBarrier(self, v); // stored into this cell's slots on either path below
         if (self.shape) |sh| {
             if (sh.lookup(name)) |slot| {
                 self.slots.items[slot] = v;

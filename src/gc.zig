@@ -737,6 +737,14 @@ pub const Binding = struct {
         }
     }
 
+    /// Object and Environment mutations are funneled through owner-aware
+    /// barriers. Type-erased side cells have a wider set of lifecycle writes, so
+    /// quiescent minor GC conservatively rescans those old kinds. This is still a
+    /// much smaller edge surface than retracing every old object graph.
+    pub fn traceOldOnMinor(kind: Kind) bool {
+        return kind != .object and kind != .environment;
+    }
+
     pub fn traceEphemeron(self: *Binding, cell: *anyopaque, kind: Kind, v: anytype) void {
         _ = self;
         switch (kind) {
@@ -863,32 +871,48 @@ pub fn setActiveHeap(h: ?*anyopaque) ?*anyopaque {
             .allocator = backing_allocator,
             .stores_live = &heap.ctx.context.gc_object_backing_stores_live,
         } });
-        _ = gc_runtime.setBarrier(raw, barrierThunk);
+        _ = gc_runtime.setBarrier(raw, barrierThunk, weakBarrierThunk);
     } else {
         _ = gc_runtime.setActive(.{});
-        _ = gc_runtime.setBarrier(null, null);
+        _ = gc_runtime.setBarrier(null, null, null);
     }
     return prev;
 }
 
-/// Type-erased entry the `gc_runtime` shim calls at reference-store sites; the
-/// `Heap.writeBarrier` it forwards to is a no-op unless an incremental mark is
-/// in progress (M2). See `gc_runtime.barrier`.
-fn barrierThunk(raw_heap: *anyopaque, cell: ?*anyopaque) void {
+/// Type-erased entry the `gc_runtime` shim calls at reference-store sites. The
+/// heap maintains both the nursery remembered set and the incremental/full mark
+/// invariant; see `gc_runtime.barrierFrom`.
+fn barrierThunk(raw_heap: *anyopaque, owner: ?*anyopaque, cell: ?*anyopaque) void {
     const heap: *Heap = @ptrCast(@alignCast(raw_heap));
-    heap.writeBarrier(cell);
+    heap.writeBarrierFrom(owner, cell);
+}
+
+fn weakBarrierThunk(raw_heap: *anyopaque, owner: ?*anyopaque) void {
+    const heap: *Heap = @ptrCast(@alignCast(raw_heap));
+    heap.writeBarrierWeak(owner);
 }
 
 /// Insertion write barrier for a stored `Value` (only `.object` carries a cell).
-/// Call at every post-creation store of a reference into a live GC cell. A
-/// near-no-op outside incremental marking; see docs/threads/P7-gc-design.md.
+/// Call at every post-creation store of a reference into a live GC cell.
 pub inline fn barrierValue(v: Value) void {
     if (v.isObject()) gc_runtime.barrier(@ptrCast(v.asObj()));
+}
+
+pub inline fn barrierValueFrom(owner: ?*anyopaque, v: Value) void {
+    if (v.isObject()) gc_runtime.barrierFrom(owner, @ptrCast(v.asObj()));
 }
 
 /// Insertion write barrier for a stored cell pointer (Object/Environment/…).
 pub inline fn barrierCell(cell: ?*anyopaque) void {
     gc_runtime.barrier(cell);
+}
+
+pub inline fn barrierCellFrom(owner: ?*anyopaque, cell: ?*anyopaque) void {
+    gc_runtime.barrierFrom(owner, cell);
+}
+
+pub inline fn barrierWeak(owner: ?*anyopaque) void {
+    gc_runtime.barrierWeak(owner);
 }
 
 /// Allocate an `Object` cell from the thread's active GC heap (tagged

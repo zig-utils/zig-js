@@ -871,14 +871,14 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                         if (!o.is_array and o.accessors.load(.monotonic) == null and o.attrsMap() == null) {
                             const ic = &chunk.ics[ip - 1];
                             if (ic.lookupSlot(o.shape)) |sl| {
-                                gc_mod.barrierValue(v); // IC fast-path slot store
+                                gc_mod.barrierValueFrom(o, v); // IC fast-path slot store
                                 o.slots.items[sl] = v;
                                 break :fast;
                             }
                             if (o.shape) |sh| {
                                 if (sh.lookup(name)) |slot| {
                                     ic.record(sh, slot);
-                                    gc_mod.barrierValue(v); // IC fast-path slot store
+                                    gc_mod.barrierValueFrom(o, v); // IC fast-path slot store
                                     o.slots.items[slot] = v;
                                     break :fast;
                                 }
@@ -1993,8 +1993,8 @@ pub fn asyncGenRequest(vm: *Interpreter, gen_obj: *value.Object, kind: ResumeKin
     const rp = try promise.newPromise(vm);
     // Incremental-GC barrier: the request's value + result promise are stored
     // into the live generator cell (which may already be marked).
-    gc_mod.barrierValue(val);
-    gc_mod.barrierCell(@ptrCast(rp));
+    gc_mod.barrierValueFrom(g, val);
+    gc_mod.barrierCellFrom(g, @ptrCast(rp));
     var start_req: ?AsyncGenRequest = null;
     var start_done = false;
     g.requests_mutex.lockUncancelable(agent.engineIo());

@@ -28,27 +28,45 @@ pub fn activeObjectBacking() ?ObjectBackingState {
 // reference-store sites are scattered across files that import this low-level
 // shim rather than `gc.zig` (which would be a circular import through
 // `value.zig`). So `gc.zig` installs a type-erased thunk + heap pointer here at
-// `setActiveHeap` time, and the store sites call `barrier(cell)`. The thunk is
-// a near-no-op when the heap is not incrementally marking (one bool load inside
-// `Heap.writeBarrier`); `barrier_fn == null` (GC off) is one null check.
+// `setActiveHeap` time, and store sites call `barrierFrom(owner, cell)` (or the
+// conservative child-only `barrier(cell)`). The same hook maintains the nursery
+// remembered set and the incremental/full tri-color invariant.
 // ---------------------------------------------------------------------------
 
 threadlocal var barrier_heap: ?*anyopaque = null;
-threadlocal var barrier_fn: ?*const fn (*anyopaque, ?*anyopaque) void = null;
+const BarrierFn = *const fn (*anyopaque, ?*anyopaque, ?*anyopaque) void;
+const WeakBarrierFn = *const fn (*anyopaque, ?*anyopaque) void;
+threadlocal var barrier_fn: ?BarrierFn = null;
+threadlocal var weak_barrier_fn: ?WeakBarrierFn = null;
 
 /// Install (or clear) the active heap's write-barrier thunk for this thread.
 /// Returns the previous (heap, fn) so nested entry points can restore it.
-pub fn setBarrier(heap: ?*anyopaque, f: ?*const fn (*anyopaque, ?*anyopaque) void) struct { ?*anyopaque, ?*const fn (*anyopaque, ?*anyopaque) void } {
-    const prev = .{ barrier_heap, barrier_fn };
+pub fn setBarrier(heap: ?*anyopaque, f: ?BarrierFn, weak_f: ?WeakBarrierFn) struct { ?*anyopaque, ?BarrierFn, ?WeakBarrierFn } {
+    const prev = .{ barrier_heap, barrier_fn, weak_barrier_fn };
     barrier_heap = heap;
     barrier_fn = f;
+    weak_barrier_fn = weak_f;
     return prev;
 }
 
 /// Shade `cell` grey if the active heap is incrementally marking. Safe to call
 /// with any pointer (the heap validates it) or with the GC off (no-op).
 pub inline fn barrier(cell: ?*anyopaque) void {
+    barrierFrom(null, cell);
+}
+
+/// Barrier a strong edge stored in `owner`. Supplying the owner lets nursery GC
+/// remember a dirty old container instead of conservatively retaining `cell`.
+pub inline fn barrierFrom(owner: ?*anyopaque, cell: ?*anyopaque) void {
     if (barrier_fn) |f| {
-        if (barrier_heap) |h| f(h, cell);
+        if (barrier_heap) |h| f(h, owner, cell);
+    }
+}
+
+/// Record that an owner's weak/ephemeron storage changed without making the
+/// target strong. Minor GC will revisit an old owner and apply normal weak rules.
+pub inline fn barrierWeak(owner: ?*anyopaque) void {
+    if (weak_barrier_fn) |f| {
+        if (barrier_heap) |h| f(h, owner);
     }
 }

@@ -517,9 +517,10 @@ Do this once the engine's `context.zig`/`interpreter.zig` surface is settled
   the backing-store helpers and this audit, so future additions do not silently
   fall back to reclaim-at-destroy lifetime. NaN-box `Value` (#7) has landed; the
   M2 incremental-marking + write-barrier mechanism now exists in `zig-gc` (see
-  M2 below) and now drives GC-on mid-script collections incrementally; remaining
-  maturity work is nursery/generational policy and M3 (drop the GIL, concurrent
-  mark behind the barrier).
+  M2 below) and now drives GC-on mid-script collections incrementally. M3 and the
+  no-GIL execution path have landed, as has the first quiescent one-cycle nursery;
+  remaining maturity work is nursery tuning/depth and broader parallel-GC pause
+  reduction.
 - **M2 — incremental.** Insertion write barrier; incremental mark + lazy sweep
   to bound pause times. Still GIL'd.
   *Mechanism landed in `zig-gc`* (`startMarking` / `markStep(budget)` /
@@ -687,13 +688,17 @@ Do this once the engine's `context.zig`/`interpreter.zig` surface is settled
 
 ## Open questions
 
-- **Nursery/generational policy for M3:** `Value` is already one NaN-boxed
-  8-byte word (blocker #7 closed), so the remaining allocator question is
-  whether/when to add a nursery and remembered set before broader no-GIL work.
+- **Nursery/generational policy for M3:** the first policy is implemented as a
+  non-moving one-cycle nursery. Quiescent minor collection scans roots plus dirty
+  old owners, applies weak/ephemeron processing, reclaims dead young cells, and
+  immediately tenures survivors. Parallel mid-script collection intentionally
+  remains full-heap; future work is sizing, pause tuning, and deciding whether a
+  multi-age or moving nursery earns its complexity.
 - **String ownership:** property-name strings are arena-owned today
   (`Shape.transition` dupes into the shape's arena). Decide in M1 whether
   strings become GC cells or stay in a permanent string arena (simpler; keeps
   them out of the trace surface). Default: permanent arena until M3 needs a
   sharded intern table.
-- **Generational?** A nursery would cut M1 pause times but adds a remembered
-  set + minor/major split. Defer; mark-sweep first, measure, then decide.
+- **Generational depth?** Measure the landed one-cycle nursery first. Add ages,
+  copying/moving storage, or parallel minor collection only with demonstrated
+  pause/throughput gains and equivalent weak/no-GIL correctness gates.

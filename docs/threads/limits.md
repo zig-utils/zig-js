@@ -78,8 +78,16 @@ Detailed acceptance criteria are tracked in
 [PR-249 promotions #11](https://github.com/zig-utils/zig-js/issues/11).
 Issue #1 remains the umbrella status page.
 
-- **GC allocation fast path / nursery.** The first cell-allocation fast path has
-  landed: GC cells use a reusable size-class slab backing instead of calling the
+- **GC allocation fast path / nursery.** The first generational policy has
+  landed: new GC cells enter a non-moving, one-cycle nursery; quiescent minor
+  collection reclaims unreachable young cells and immediately tenures every
+  survivor. Owner-aware strong barriers remember dirty old Object/Environment
+  containers, weak-container barriers preserve exact WeakRef/WeakMap/
+  FinalizationRegistry semantics, and mutable type-erased side-cell kinds are
+  conservatively rescanned. Remembered-set allocation failure falls back to the
+  existing precise full collector. Explicit `collectGarbage()` remains full-heap,
+  and parallel mid-script collection remains on the full concurrent protocol.
+  GC cells also use a reusable size-class slab backing instead of calling the
   backing allocator for every cell. Fresh chunks now use lazy bump cursors with
   a per-bucket bump hint instead of pre-linking every unused slot during
   short-lived context setup, and a per-bucket fresh-chunk cursor skips chunks
@@ -122,8 +130,8 @@ Issue #1 remains the umbrella status page.
   Correctness is gated, but tight-loop block-scope allocation and
   create/destroy-heavy context lifecycles are still slower under the GC path than
   under the old arena model. `zig build gc-profile` remains the repeatable
-  baseline before nursery/generational or lifecycle pooling work lands, and now
-  splits context lifecycle time into create and destroy columns while also
+  baseline for nursery tuning, deeper generational policy, and lifecycle pooling.
+  It splits context lifecycle time into create and destroy columns while also
   including a create-per-task versus long-lived-context reuse table with periodic
   collection to quantify the embedder lifecycle tradeoff, plus a workload destroy
   table that compares live object-heavy destroy against quiescent pre-collection
@@ -134,13 +142,14 @@ Issue #1 remains the umbrella status page.
   at context creation, live cells after allocation, free slots after collection,
   and live cells after collection. The same profile now follows with
   per-size-class bucket tables for the empty context and the object workload, so
-  future nursery/generational and context-lifecycle work can separate global
+  nursery and context-lifecycle work can separate global
   setup pressure from workload pressure while targeting the slot sizes that
   dominate chunk count, issued cells, fresh allocation, reused allocation, freed
   cells, free cells, and surviving live cells. The same profile now includes a
   repeated allocate-plus-collect churn table that reports fresh/reused/freed
-  cells, final chunk/live counts, and reuse percentage for GC modes, giving the
-  nursery/generational roadmap a direct freelist-reuse baseline. Explicit-GC
+  cells, final chunk/live counts, and reuse percentage for GC modes. A quiescent
+  nursery row additionally reports boundary pause time, young input, reclaimed
+  cells, promoted cells/bytes, and minor/full cycle deltas. Explicit-GC
   tail-slab trimming keeps the post-collection chunk/free-slot columns honest
   after one-off spikes while still preserving reuse inside retained chunks.
   Chunk metadata reserve-before-slab allocation keeps this profile focused on
@@ -150,8 +159,7 @@ Issue #1 remains the umbrella status page.
   on one global cell-backing lock. Chunk growth, metadata allocation, and
   non-cell side storage still pass through a separate inner-allocator lock
   because embedder allocators are not required to be thread-safe. This is a
-  contention reduction for the existing slab allocator, not the remaining
-  nursery/generational policy milestone. The
+  contention reduction for the existing slab allocator. The
   object-sized 1024/2048-byte buckets now use 384 KiB chunks: the local profile
   keeps the intrinsic empty context at three object-cell chunks with 1152 slots,
   while explicit collection trims fully unused object-heavy spike chunks back to

@@ -568,8 +568,10 @@ tail trimming should compact freelist and sorted-address-index metadata once for
 the whole released tail range, not once per released slab. The same profile now
 prints a repeated allocate-plus-collect churn table that summarizes
 fresh cells, reused cells, freed cells, final chunk/live counts, and reuse
-percentage for GC modes; this is the local evidence trail for future
-nursery/generational allocation work.
+percentage for GC modes. The quiescent nursery table reports the evaluation-entry
+pause used to collect a fixed young workload, young cells entering the cycle,
+cells reclaimed, promoted cells/bytes, and minor/full cycle deltas. This keeps
+nursery tuning tied to both reclamation quality and pause cost.
 Direct `GcCellBacking` unit tests cover lazy fresh-slot bumping, free-list
 recycling, fresh-chunk cursor advancement, ownership span/hint classification,
 sorted address-index lookup with chunk/bump-offset/address metadata kept in
@@ -594,6 +596,12 @@ embedder allocator remains serialized separately for chunk growth and delegated
 side storage.
 `enable_gc: collectGarbage trims empty GC backing tail chunks` covers the public
 explicit-GC path that releases fully unused spike slabs before context destroy.
+The `enable_gc nursery` integration tests establish old containers before adding
+young edges, then cover Object/Environment/Promise retention, young-garbage
+reclamation and promotion counters, WeakRef clearing, WeakMap ephemerons, and
+FinalizationRegistry cleanup. The sibling `zig-gc` suite independently covers
+owner and child-only barriers, weak slots, binding-selected old-cell rescanning,
+ephemerons, full fallback accounting, and normal/TSan collector builds.
 `enable_gc: heap binding and cell backing share one lifecycle allocation` covers
 the context-lifecycle reduction where the GC heap, root-tracing binding, and cell
 backing live in one stable state object instead of three separate GPA

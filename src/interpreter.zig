@@ -466,7 +466,7 @@ pub const Environment = struct {
 
     /// Define (or overwrite) a binding in *this* scope (used by let/const).
     pub fn put(self: *Environment, name: []const u8, v: Value) EvalError!void {
-        gc_mod.barrierValue(v); // binding stored into this (GC-cell) environment
+        gc_mod.barrierValueFrom(self, v); // binding stored into this GC-cell environment
         const a = self.bindingAllocator();
         self.lockBindings();
         defer self.unlockBindings();
@@ -601,7 +601,7 @@ pub const Environment = struct {
             // lock. Flag-gated, so the default engine stays lock-free.
             e.lockBindings();
             if (e.vars.getPtr(name)) |ptr| {
-                gc_mod.barrierValue(v); // reassigned binding in a (GC-cell) env
+                gc_mod.barrierValueFrom(e, v); // reassigned binding in a GC-cell env
                 ptr.* = v;
                 e.unlockBindings();
                 return;
@@ -1879,8 +1879,8 @@ pub const Interpreter = struct {
             method = try self.getProperty(val, k);
         }
         if (!method.isCallable()) return self.throwError("TypeError", "a 'using' declaration value must have a [Symbol.dispose] method");
-        gc_mod.barrierValue(val);
-        gc_mod.barrierValue(method);
+        gc_mod.barrierValueFrom(self.env, val);
+        gc_mod.barrierValueFrom(self.env, method);
         self.env.lockBindings(); // traceEnv reads disposables; serialize the append
         defer self.env.unlockBindings();
         try self.env.disposables.append(self.env.bindingAllocator(), .{ .value = val, .method = method, .is_async = is_async, .await_result = await_result });
@@ -8463,7 +8463,7 @@ pub const Interpreter = struct {
                     return self_v;
                 };
             }
-            gc_mod.barrierCell(@ptrCast(pair)); // new entry hidden behind the live map
+            gc_mod.barrierCellFrom(o, @ptrCast(pair)); // new entry hidden behind the live map
             try o.elements.append(o.elementsAllocator(self.arena), Value.obj(pair));
             return self_v;
         }
@@ -8573,7 +8573,7 @@ pub const Interpreter = struct {
             for (o.elements.items) |e| {
                 if (liveSetEntry(e)) |entry| if (value.sameValueZero(entry, key)) return self_v;
             }
-            gc_mod.barrierValue(key); // new key hidden behind the live set
+            gc_mod.barrierValueFrom(o, key); // new key hidden behind the live set
             try o.elements.append(o.elementsAllocator(self.arena), key);
             return self_v;
         }
@@ -8979,10 +8979,7 @@ pub const Interpreter = struct {
             if (c.proxy_handler != null or c.proxy_revoked) break;
             cur = self.effectiveProto(c);
         }
-        if (new_proto) |np| {
-            _ = self.preparePrototypeUse(np);
-            gc_mod.barrierCell(@ptrCast(np)); // proto reparent on a live object
-        }
+        if (new_proto) |np| _ = self.preparePrototypeUse(np);
         o.setProtoAtomic(new_proto);
         o.proto_explicit_null = new_proto == null;
         return true;
@@ -18641,6 +18638,7 @@ fn weakRefConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value
     const o = (try self.newObject()).asObj();
     o.is_weak_ref = true;
     o.weak_ref_target = target.asObj();
+    gc_mod.barrierWeak(o);
     if (try self.protoFromCtor("WeakRef")) |pr| o.setProtoAtomic(pr);
     return Value.obj(o);
 }
@@ -18675,8 +18673,10 @@ fn finRegRegisterFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
     if (value.strictEquals(target, held)) return self.throwError("TypeError", "FinalizationRegistry.register: target and held value must not be the same");
     const token = if (args.len > 2) args[2] else Value.undef();
     if (!token.isUndefined() and !canBeHeldWeakly(token)) return self.throwError("TypeError", "FinalizationRegistry.register: unregister token must be an object or a symbol");
-    gc_mod.barrierValue(held); // strong held value stored into the live registry cell
-    try this.asObj().finRecordAppend(self.arena, .{
+    const registry = this.asObj();
+    gc_mod.barrierValueFrom(registry, held); // strong held value stored into the live registry cell
+    gc_mod.barrierWeak(registry); // target/token stay weak, but an old registry must be revisited by minor GC
+    try registry.finRecordAppend(self.arena, .{
         .target = weakKeyPtr(target),
         .held = held,
         .token = if (token.isUndefined()) null else weakKeyPtr(token),

@@ -336,9 +336,9 @@ fn reserveReactionListUnlocked(self: *Interpreter, list: *std.ArrayListUnmanaged
 fn appendReactionUnlocked(self: *Interpreter, p: *Promise, list: *std.ArrayListUnmanaged(Reaction), r: Reaction) EvalError!void {
     // Incremental-GC barrier: the reaction's callbacks are stored into the live
     // promise cell (which may already be marked black). Shade them.
-    if (r.handler) |h| gc_mod.barrierValue(h);
-    gc_mod.barrierValue(r.resolve);
-    gc_mod.barrierValue(r.reject);
+    if (r.handler) |h| gc_mod.barrierValueFrom(p, h);
+    gc_mod.barrierValueFrom(p, r.resolve);
+    gc_mod.barrierValueFrom(p, r.reject);
     try reserveReactionListUnlocked(self, list, 1);
     list.appendAssumeCapacity(r);
     noteReactionAdded(self, p);
@@ -383,7 +383,7 @@ fn settle(self: *Interpreter, p: *Promise, state: State, v: Value) EvalError!voi
         return;
     }
     p.state = state;
-    gc_mod.barrierValue(v); // settlement value stored into the live promise cell
+    gc_mod.barrierValueFrom(p, v); // settlement value stored into the live promise cell
     p.value = v;
     fulfill = p.on_fulfill;
     reject_list = p.on_reject;

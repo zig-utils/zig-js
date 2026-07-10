@@ -567,6 +567,64 @@ fn printTaskLifecycle(gpa: std.mem.Allocator, io: std.Io) !void {
     }
 }
 
+fn printNursery(gpa: std.mem.Allocator, io: std.Io) !void {
+    const source =
+        \\globalThis.nurseryProfileKeep = [];
+        \\(function () {
+        \\  for (let i = 0; i < 512; i++) {
+        \\    const value = { i: i, nested: { value: i + 1 } };
+        \\    if ((i & 3) === 0) nurseryProfileKeep.push(value);
+        \\  }
+        \\})()
+    ;
+
+    std.debug.print("\nQuiescent nursery cycle (512 object graphs; 1/4 retained)\n", .{});
+    std.debug.print("{s:<18} {s:>12} {s:>10} {s:>10} {s:>10} {s:>12} {s:>10} {s:>10}\n", .{
+        "mode",
+        "pause ns",
+        "young in",
+        "reclaimed",
+        "promoted",
+        "prom bytes",
+        "minor",
+        "full",
+    });
+    for (modes) |mode| {
+        if (!modeUsesGc(mode)) continue;
+        const ctx = try makeContext(gpa, mode);
+        defer ctx.destroy();
+        ctx.collectGarbage();
+        const heap = ctx.gc.?;
+        // Isolate the nursery boundary in this row. Single-mutator mode can
+        // otherwise start a full incremental cycle mid-script when total bytes
+        // cross the old-space threshold before the quiescent minor checkpoint.
+        heap.threshold_bytes = std.math.maxInt(usize);
+        const minor_before = heap.minor_collections;
+        const full_before = heap.full_collections;
+        const promoted_before = heap.promoted_cells;
+        const promoted_bytes_before = heap.promoted_bytes;
+        _ = try ctx.evaluate(source);
+        const young_in = heap.young_cells;
+        const t0 = nowNs(io);
+        _ = try ctx.evaluate("0"); // collection runs at the quiescent entry boundary
+        const pause_ns: u64 = @intCast(nowNs(io) - t0);
+        const promoted = heap.promoted_cells - promoted_before;
+        const minor_delta = heap.minor_collections - minor_before;
+        const full_delta = heap.full_collections - full_before;
+        const reclaimed = if (minor_delta + full_delta > 0) young_in -| promoted else 0;
+        std.debug.print("{s:<18} {d:>12} {d:>10} {d:>10} {d:>10} {d:>12} {d:>10} {d:>10}\n", .{
+            mode.name,
+            pause_ns,
+            young_in,
+            reclaimed,
+            promoted,
+            heap.promoted_bytes - promoted_bytes_before,
+            minor_delta,
+            full_delta,
+        });
+    }
+}
+
 pub fn main() !void {
     const gpa = std.heap.page_allocator;
     var threaded = std.Io.Threaded.init(gpa, .{ .environ = .empty });
@@ -576,6 +634,7 @@ pub fn main() !void {
     std.debug.print("zig-js GC allocation/context lifecycle profile\n", .{});
     try printLifecycle(gpa, io);
     try printTaskLifecycle(gpa, io);
+    try printNursery(gpa, io);
     try printWorkloadDestroy(gpa, io);
     try printAllocation(gpa, io);
     try printExplicitGc(gpa, io);
