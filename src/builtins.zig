@@ -466,19 +466,34 @@ pub fn mathAtan2(ctx: *anyopaque, this: Value, args: []const Value) HostError!Va
 pub fn mathHypot(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
     _ = this;
     const self = interp(ctx);
-    var sum: f64 = 0;
+    // Scale by the running max magnitude so no square overflows or underflows:
+    // hypot(1e200) is 1e200 (naive n*n gives Infinity), hypot(5e-324, 5e-324)
+    // is ~7e-324 (naive gives 0). Every arg is still coerced in order (abrupt
+    // propagates), and ±Infinity wins over NaN per the spec.
     var any_inf = false;
     var any_nan = false;
+    var max: f64 = 0;
+    var sum: f64 = 0; // running sum of (arg / max)^2
     for (args) |v| {
-        const n = try self.toNumberV(v); // coerce every arg in order (abrupt propagates)
+        const n = try self.toNumberV(v);
         if (std.math.isInf(n)) any_inf = true;
         if (std.math.isNan(n)) any_nan = true;
-        sum += n * n;
+        const a = @abs(n);
+        if (a > max) {
+            if (max != 0) {
+                const ratio = max / a; // rescale the accumulated sum to the new max
+                sum = sum * ratio * ratio;
+            }
+            sum += 1; // the new max contributes (a/a)^2 = 1
+            max = a;
+        } else if (max != 0) {
+            const ratio = a / max;
+            sum += ratio * ratio;
+        }
     }
-    // ±Infinity in any argument wins over a NaN in another.
     if (any_inf) return Value.num(std.math.inf(f64));
     if (any_nan) return Value.num(std.math.nan(f64));
-    return Value.num(@sqrt(sum));
+    return Value.num(max * @sqrt(sum)); // max==0 (all zero / no args) -> 0
 }
 
 // ---- Math.sumPrecise (ES2025): maximally-precise summation -----------------
