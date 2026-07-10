@@ -1404,6 +1404,18 @@ pub const Object = struct {
         return self.elements.items[i];
     }
 
+    pub fn denseElementIndices(self: *const Object, arena: std.mem.Allocator) std.mem.Allocator.Error![]usize {
+        self.lockElements();
+        defer self.unlockElements();
+        var list: std.ArrayListUnmanaged(usize) = .empty;
+        errdefer list.deinit(arena);
+        for (self.elements.items, 0..) |_, i| {
+            if (self.isHoleUnlocked(i)) continue;
+            try list.append(arena, i);
+        }
+        return list.items;
+    }
+
     pub fn setDenseElement(self: *Object, i: usize, v: Value) bool {
         self.lockElements();
         defer self.unlockElements();

@@ -9224,9 +9224,8 @@ pub const Interpreter = struct {
                     try indices.append(self.arena, try std.fmt.allocPrint(self.arena, "{d}", .{i}));
                     try seen.put(self.arena, i, {});
                 }
-                var dense_i: usize = 0;
-                while (dense_i < t.elements.items.len) : (dense_i += 1) {
-                    if (t.isHole(dense_i) or seen.contains(dense_i)) continue;
+                for (try t.denseElementIndices(self.arena)) |dense_i| {
+                    if (seen.contains(dense_i)) continue;
                     try seen.put(self.arena, dense_i, {});
                     try indices.append(self.arena, try std.fmt.allocPrint(self.arena, "{d}", .{dense_i}));
                 }
@@ -9273,9 +9272,7 @@ pub const Interpreter = struct {
             // construction so it precedes any user-added string key — then symbols.
             var indices: std.ArrayListUnmanaged([]const u8) = .empty;
             var seen: std.AutoHashMapUnmanaged(usize, void) = .empty;
-            var i: usize = 0;
-            while (i < t.elements.items.len) : (i += 1) {
-                if (t.isHole(i)) continue;
+            for (try t.denseElementIndices(self.arena)) |i| {
                 try indices.append(self.arena, try std.fmt.allocPrint(self.arena, "{d}", .{i}));
                 try seen.put(self.arena, i, {});
             }
@@ -9308,9 +9305,7 @@ pub const Interpreter = struct {
         }
         var indices: std.ArrayListUnmanaged([]const u8) = .empty;
         var seen: std.AutoHashMapUnmanaged(usize, void) = .empty;
-        var dense_i: usize = 0;
-        while (dense_i < t.elements.items.len) : (dense_i += 1) {
-            if (t.isHole(dense_i)) continue;
+        for (try t.denseElementIndices(self.arena)) |dense_i| {
             try indices.append(self.arena, try std.fmt.allocPrint(self.arena, "{d}", .{dense_i}));
             try seen.put(self.arena, dense_i, {});
         }
