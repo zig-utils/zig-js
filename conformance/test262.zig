@@ -429,7 +429,9 @@ fn runOneDetail(gpa: std.mem.Allocator, io: std.Io, harness: *Harness, abs_path:
     // Enable top-level-script dynamic `import()` (resolved relative to the test
     // file), so script tests that `import('./fixture.js')` work like the engine's
     // module path. The host only does I/O if the script actually calls import().
-    var host = ModHost{ .gpa = gpa, .io = io };
+    const root_abs = std.fs.path.resolve(gpa, &.{build_options.root}) catch return .skip;
+    defer gpa.free(root_abs);
+    var host = ModHost{ .gpa = gpa, .io = io, .root = root_abs };
     defer host.deinit();
     var imp_cache: std.StringHashMapUnmanaged(*js.Context.Module) = .{};
     ctx.mod_host = .{ .ctx = &host, .load = modLoad };
@@ -587,6 +589,7 @@ fn runDiag(gpa: std.mem.Allocator, io: std.Io, root: []const u8, sub: []const u8
 const ModHost = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
+    root: []const u8,
     paths: std.ArrayListUnmanaged([]const u8) = .empty,
     sources: std.ArrayListUnmanaged([]const u8) = .empty,
 
@@ -598,10 +601,21 @@ const ModHost = struct {
     }
 };
 
+fn pathWithinRoot(root: []const u8, path: []const u8) bool {
+    if (std.mem.eql(u8, root, path)) return true;
+    if (!std.mem.startsWith(u8, path, root)) return false;
+    if (root.len != 0 and (root[root.len - 1] == '/' or root[root.len - 1] == '\\')) return true;
+    return path.len > root.len and (path[root.len] == '/' or path[root.len] == '\\');
+}
+
 fn modLoad(ctx: *anyopaque, referrer: []const u8, specifier: []const u8, out_path: *[]const u8) ?[]const u8 {
     const h: *ModHost = @ptrCast(@alignCast(ctx));
     const dir = std.fs.path.dirname(referrer) orelse ".";
     const joined = std.fs.path.resolve(h.gpa, &.{ dir, specifier }) catch return null;
+    if (!pathWithinRoot(h.root, joined)) {
+        h.gpa.free(joined);
+        return null;
+    }
     const source = std.Io.Dir.cwd().readFileAlloc(h.io, joined, h.gpa, .limited(1 << 20)) catch {
         h.gpa.free(joined);
         return null;
@@ -667,7 +681,9 @@ fn runModule(gpa: std.mem.Allocator, io: std.Io, harness: *Harness, abs_path: []
         }
         _ = ctx.evaluate(hbuf.items) catch {};
     }
-    var host = ModHost{ .gpa = gpa, .io = io };
+    const root_abs = std.fs.path.resolve(gpa, &.{build_options.root}) catch return .skip;
+    defer gpa.free(root_abs);
+    var host = ModHost{ .gpa = gpa, .io = io, .root = root_abs };
     defer host.deinit();
     const mh = js.Context.ModuleHost{ .ctx = &host, .load = modLoad };
     if (ctx.evaluateModule(abs_path, src, mh)) |_| {
