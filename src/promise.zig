@@ -99,9 +99,13 @@ pub const MicrotaskQueue = struct {
     generation: std.atomic.Value(u64) = .init(0),
 
     pub fn acquire(self: *MicrotaskQueue) void {
+        promise_profile.recordMicrotaskLockAcquire();
         var spins: usize = 0;
         while (!self.lock.tryLock()) : (spins += 1) {
-            if ((spins & 0xff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
+            if ((spins & 0xff) == 0) {
+                promise_profile.recordMicrotaskLockYield();
+                std.Thread.yield() catch {};
+            } else std.atomic.spinLoopHint();
         }
     }
 

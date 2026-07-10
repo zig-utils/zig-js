@@ -564,10 +564,10 @@ fn timePromiseScenario(gpa: std.mem.Allocator, io: std.Io, workers: usize, gil: 
 
 fn printPromiseProfile(gpa: std.mem.Allocator, io: std.Io, workers: []const usize) !void {
     std.debug.print("\nPromise microtask profile\n", .{});
-    std.debug.print("enq/pop/run = microtask queue enqueues, pops, and job runs; rxn/thn split Promise reaction jobs from thenable-assimilation jobs\n", .{});
+    std.debug.print("enq/pop/run = microtask queue enqueues, pops, and job runs; qlock/qyld = queue-lock acquisitions / yield-backed contention; rxn/thn split reaction from thenable jobs\n", .{});
     std.debug.print("{s:>8} {s:>14} {s:>14} {s:>12} {s:>12}" ++
-        " {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>10}" ++
-        " {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>10}\n", .{
+        " {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>10}" ++
+        " {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>10}\n", .{
         "threads",
         "no-gil ns",
         "gil ns",
@@ -576,12 +576,16 @@ fn printPromiseProfile(gpa: std.mem.Allocator, io: std.Io, workers: []const usiz
         "ng enq",
         "ng pop",
         "ng run",
+        "ng qlock",
+        "ng qyld",
         "ng rxn",
         "ng thn",
         "ng events",
         "gil enq",
         "gil pop",
         "gil run",
+        "gil qlock",
+        "gil qyld",
         "gil rxn",
         "gil thn",
         "gil events",
@@ -602,8 +606,8 @@ fn printPromiseProfile(gpa: std.mem.Allocator, io: std.Io, workers: []const usiz
             @as(f64, @floatFromInt(@max(parallel_ns, 1)));
 
         std.debug.print("{d:>8} {d:>14} {d:>14} {d:>11.2}x {d:>11.2}x" ++
-            " {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>10}" ++
-            " {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>10}\n", .{
+            " {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>10}" ++
+            " {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>10}\n", .{
             n,
             parallel_ns,
             gil_ns,
@@ -612,12 +616,16 @@ fn printPromiseProfile(gpa: std.mem.Allocator, io: std.Io, workers: []const usiz
             parallel.promise.microtask_enqueues,
             parallel.promise.microtask_pops,
             parallel.promise.jobsRun(),
+            parallel.promise.microtask_lock_acquires,
+            parallel.promise.microtask_lock_yields,
             parallel.promise.reaction_jobs_run,
             parallel.promise.thenable_jobs_run,
             parallel.contention.events(),
             gil.promise.microtask_enqueues,
             gil.promise.microtask_pops,
             gil.promise.jobsRun(),
+            gil.promise.microtask_lock_acquires,
+            gil.promise.microtask_lock_yields,
             gil.promise.reaction_jobs_run,
             gil.promise.thenable_jobs_run,
             gil.contention.events(),
