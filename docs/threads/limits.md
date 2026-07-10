@@ -96,8 +96,11 @@ Issue #1 remains the umbrella status page.
   skips rebuilding slab freelists for owned cells that will be released by the
   following whole-chunk free, and the backing leaves parallel mode for that
   single-owner destroy phase so owned live-cell frees skip the per-free spinlock
-  while chunks are being drained. Bucket-shaped delegated side allocations
-  still classify once and free through the wrapped allocator. After an explicit
+  while chunks are being drained. The collector's explicit bulk teardown path
+  still runs every cell finalizer and releases collector side buffers, but skips
+  one backing-allocator free per cell before `GcCellBacking` releases the slabs
+  wholesale. Bucket-shaped delegated side allocations still classify once and
+  free through the wrapped allocator while finalizers run. After an explicit
   quiescent `collectGarbage()`, the backing now uses per-slab live counters to
   release fully unused tail chunks while retaining non-empty and inner chunks for
   reuse, so one-off allocation spikes can return slab memory before
@@ -156,7 +159,10 @@ Issue #1 remains the umbrella status page.
   footprint. Multi-slab tail trimming compacts the sorted address index and
   freelist metadata once for the whole trimmed range instead of rescanning those
   structures once per released slab. It also splits GC finalizer attribution
-  between empty-context destroy and destroy after the object workload.
+  between empty-context destroy and destroy after the object workload. The
+  `skipfree` column reports the exact number of finalized cell-storage frees
+  elided by whole-slab teardown, keeping that lifecycle improvement visible even
+  when wall-clock profile rows are noisy.
 - **Context lifecycle cost.** Long-lived embedders amortize the GC setup and
   teardown costs, but create-per-unit-of-work embedders need either cheaper
   context lifecycle or clearer guidance.

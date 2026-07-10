@@ -486,9 +486,10 @@ fn destroyFinalizerStats(gpa: std.mem.Allocator, mode: Mode, source: ?[]const u8
 
 fn printGcFinalizerTable(gpa: std.mem.Allocator, title: []const u8, source: ?[]const u8) !void {
     std.debug.print("\n{s}\n", .{title});
-    std.debug.print("{s:<18} {s:>8} {s:>8} {s:>8} {s:>8} {s:>8} {s:>9} {s:>9} {s:>8} {s:>8}\n", .{
+    std.debug.print("{s:<18} {s:>8} {s:>9} {s:>8} {s:>8} {s:>8} {s:>8} {s:>9} {s:>9} {s:>8} {s:>8}\n", .{
         "mode",
         "cells",
+        "skipfree",
         "objects",
         "envs",
         "funcs",
@@ -501,9 +502,10 @@ fn printGcFinalizerTable(gpa: std.mem.Allocator, title: []const u8, source: ?[]c
     for (modes) |mode| {
         if (!modeUsesGc(mode)) continue;
         const stats = try destroyFinalizerStats(gpa, mode, source);
-        std.debug.print("{s:<18} {d:>8} {d:>8} {d:>8} {d:>8} {d:>8} {d:>9} {d:>9} {d:>8} {d:>8}\n", .{
+        std.debug.print("{s:<18} {d:>8} {d:>9} {d:>8} {d:>8} {d:>8} {d:>8} {d:>9} {d:>9} {d:>8} {d:>8}\n", .{
             mode.name,
             stats.cells,
+            stats.bulk_cell_frees_skipped,
             stats.objects,
             stats.environments,
             stats.functions + stats.bound_functions,

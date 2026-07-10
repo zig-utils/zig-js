@@ -580,6 +580,13 @@ live-cell frees drain without rebuilding freelists, stats accounting, cumulative
 fresh/reused/freed allocation counters, multi-chunk maintained-counter
 snapshots, bucket attribution, bulk-teardown
 behavior, and bucket-shaped delegated side frees during teardown.
+The sibling `zig-gc` suite covers `deinitRetainingCellStorage`: every live cell
+is finalized and heap counters reset while the backing allocator observes no
+per-cell frees. zig-js uses that API only after `GcCellBacking` enters its
+single-owner bulk mode, then releases the slabs wholesale. The
+`enable_gc: bulk destroy skips one backing free per finalized cell` integration
+test and `gc-profile`'s `skipfree` column require exact agreement between
+finalized cells and elided cell-storage free dispatches.
 `GC cell backing shards parallel allocation locks by size class` holds one
 size-class lock and proves another can be acquired independently. Focused TSan
 coverage exercises the same allocator bookkeeping and teardown paths; the

@@ -1495,6 +1495,7 @@ pub const Context = struct {
     };
     pub const GcFinalizerStats = struct {
         cells: usize = 0,
+        bulk_cell_frees_skipped: usize = 0,
         objects: usize = 0,
         environments: usize = 0,
         functions: usize = 0,
@@ -1785,8 +1786,18 @@ pub const Context = struct {
         // there when GC is enabled.
         self.finishConcurrentGCIfActive(); // join any marker before heap teardown
         if (self.gc) |h| {
-            if (self.gc_cell_backing) |backing| backing.beginBulkTeardown();
-            h.deinit(); // frees logical cells back into gc_cell_backing
+            if (self.gc_cell_backing) |backing| {
+                backing.beginBulkTeardown();
+                if (self.gc_finalizer_stats_out) |stats| {
+                    stats.bulk_cell_frees_skipped = h.live_cells;
+                }
+                // Finalize every logical cell and release collector side buffers,
+                // but skip one allocator free per cell: the backing owns those
+                // cells in whole slabs and releases the slabs immediately below.
+                h.deinitRetainingCellStorage();
+            } else {
+                h.deinit();
+            }
             self.gc = null;
         }
         if (self.gc_cell_backing) |backing| {
@@ -12414,6 +12425,21 @@ test "enable_gc: FinalizationRegistry cleanup queue reserves capacity chunks" {
     ctx.queueFinalizationRegistryCleanup(overflow);
     try std.testing.expectEqual(first_capacity + 1, ctx.finalization_cleanup_jobs.items.len);
     try std.testing.expect(ctx.finalization_cleanup_jobs.capacity > first_capacity);
+}
+
+test "enable_gc: bulk destroy skips one backing free per finalized cell" {
+    var ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    errdefer ctx.destroy();
+    _ = try ctx.evaluate(
+        \\for (var i = 0; i < 200; i = i + 1) ({ i: i, pair: { j: i + 1 } });
+    );
+
+    var stats = Context.GcFinalizerStats{};
+    ctx.gc_finalizer_stats_out = &stats;
+    ctx.destroy();
+
+    try std.testing.expect(stats.cells > 0);
+    try std.testing.expectEqual(stats.cells, stats.bulk_cell_frees_skipped);
 }
 
 test "enable_gc: FinalizationRegistry cleanupSome delivers collected holdings" {

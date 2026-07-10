@@ -93,14 +93,15 @@ Known performance/maturity work:
   slab itself, then inserts the address-index entry with a binary lower-bound
   search, so GC context lifecycle work pays fewer allocator calls and avoids a
   linear scan as buckets grow.
-  During `Context.destroy`, the backing enters bulk-teardown mode so `zig-gc`'s
-  owned-cell frees do not rebuild freelists immediately before the backing
-  releases whole chunks. Bulk teardown also leaves the backing's parallel mode,
-  because context destroy is a single-owner phase after threads have been
-  joined/terminated, so owned live-cell frees skip the per-free spinlock while
-  chunks are being drained. Bucket-shaped delegated side allocations still classify
-  once and free through the wrapped allocator, and the non-owned bucket-shaped
-  resize/remap/free paths avoid retaking the backing lock after classification.
+  During `Context.destroy`, the backing enters bulk-teardown mode and leaves
+  parallel mode because every shared-realm thread has already joined or
+  terminated. The heap then runs every cell finalizer and releases collector
+  side buffers without issuing one backing-allocator free per cell; the backing
+  releases those cells with its whole chunks immediately afterward. This removes
+  an ownership lookup/free dispatch per surviving cell. Bucket-shaped delegated
+  side allocations are still classified and freed through the wrapped allocator
+  while finalizers run, and non-owned bucket-shaped resize/remap/free paths avoid
+  retaking the backing lock after classification.
   Explicit quiescent `collectGarbage()` now also trims fully unused tail slabs
   using per-slab live counters: empty spike chunks can be released before
   `Context.destroy()`, while non-empty chunks and empty inner chunks stay
@@ -185,7 +186,9 @@ Known performance/maturity work:
   metadata, and delegated non-cell side storage take the separate
   inner-allocator lock required for a potentially non-thread-safe embedder
   allocator. This reduces current no-GIL allocation contention without claiming
-  the remaining nursery/generational policy work is complete.
+  the remaining nursery/generational policy work is complete. GC finalizer
+  attribution includes `skipfree`, which must equal finalized cells for the
+  slab-owned bulk teardown path.
 - Mid-script parallel GC remains abort-safe. Sync wait/lock/condition peers are
   not treated as frozen parked stacks; their lock-free pump points now service
   root publication, and the collector waits long enough for one bounded park

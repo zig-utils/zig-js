@@ -162,10 +162,11 @@ treats those as non-cells. This keeps the trace surface to runtime values only.
   classification first rejects pointers outside the bucket address span, tries a
   per-bucket recent-chunk hint, and only then scans the matching-size chunks
   instead of the entire backing. At context teardown the backing switches to
-  bulk-teardown mode: `zig-gc` still finalizes every live cell, but owned cell
-  frees skip freelist rebuilds because the backing releases all chunks
-  immediately afterward. Bucket-shaped delegated side allocations are still
-  classified once and freed through the wrapped allocator, and non-owned
+  bulk-teardown mode: `zig-gc` still finalizes every live cell and releases its
+  side buffers, but it does not individually free cell storage because the
+  backing releases all chunks immediately afterward. Bucket-shaped delegated
+  side allocations are still classified once and freed through the wrapped
+  allocator while finalizers run, and non-owned
   bucket-shaped resize/remap/free paths do not retake the backing lock after
   classification. Explicit quiescent collection uses per-slab live counters to
   trim fully unused tail chunks after one-off allocation spikes, while retaining
