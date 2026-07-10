@@ -1472,9 +1472,18 @@ fn runModuleWorkerFanoutOverlap(gpa: std.mem.Allocator, seed: u64) !bool {
     var prng = std.Random.DefaultPrng.init(seed ^ 0xfade_100d_5eed_2026);
     const r = prng.random();
     const nworkers = 1 + r.uintLessThan(usize, 3);
-    const nthreads = 1 + r.uintLessThan(usize, 4);
+    const nparents = 1 + r.uintLessThan(usize, 3);
+    const children_per_parent = 2 + r.uintLessThan(usize, 2);
     const worker_iters = 70 + r.uintLessThan(usize, 180);
     const thread_iters = 80 + r.uintLessThan(usize, 220);
+    const nchildren = nparents * children_per_parent;
+    var expected_join_sum: usize = 0;
+    var parent_index: usize = 0;
+    while (parent_index < nparents) : (parent_index += 1) {
+        var child_index: usize = 0;
+        while (child_index < children_per_parent) : (child_index += 1)
+            expected_join_sum += parent_index * 100 + child_index + 1;
+    }
 
     const ctx = js.Context.createWith(gpa, .{ .enable_threads = true, .enable_gc = true }) catch {
         std.debug.print("seed {d}: module fanout context creation failed\n", .{seed});
@@ -1521,14 +1530,32 @@ fn runModuleWorkerFanoutOverlap(gpa: std.mem.Allocator, seed: u64) !bool {
     const js_src = try std.fmt.allocPrint(
         gpa,
         \\const fv = new Int32Array(globalThis.__moduleFanoutMsg.sab);
-        \\const fts = [];
-        \\for (let t = 0; t < {d}; t++) {{
-        \\  fts.push(new Thread(function(){{
+        \\const parents = [];
+        \\for (let p = 0; p < {d}; p++) {{
+        \\  const parent = new Thread(function(p, childCount, iters){{
         \\    const local = new Int32Array(globalThis.__moduleFanoutMsg.sab);
         \\    while (Atomics.load(local, 1) === 0) ;
-        \\    for (let i = 0; i < {d}; i++) Atomics.add(local, 0, 1);
-        \\    return 1;
-        \\  }}));
+        \\    const children = [];
+        \\    for (let c = 0; c < childCount; c++) {{
+        \\      const marker = p * 100 + c + 1;
+        \\      const child = new Thread(function(marker, iters) {{
+        \\        const childLocal = new Int32Array(globalThis.__moduleFanoutMsg.sab);
+        \\        for (let i = 0; i < iters; i++) Atomics.add(childLocal, 0, 1);
+        \\        return marker;
+        \\      }}, marker, iters);
+        \\      child.asyncJoin().then(
+        \\        (value) => Atomics.add(local, 5, value),
+        \\        () => Atomics.store(local, 5, -1000000));
+        \\      children.push(child);
+        \\    }}
+        \\    let childSum = 0;
+        \\    for (const child of children) childSum += child.join();
+        \\    return childSum;
+        \\  }}, p, {d}, {d});
+        \\  parent.asyncJoin().then(
+        \\    (value) => Atomics.add(fv, 5, value),
+        \\    () => Atomics.store(fv, 5, -1000000));
+        \\  parents.push(parent);
         \\}}
         \\let spins = 0;
         \\while (Atomics.load(fv, 2) < {d} && spins++ < 10000000) ;
@@ -1536,11 +1563,11 @@ fn runModuleWorkerFanoutOverlap(gpa: std.mem.Allocator, seed: u64) !bool {
         \\Atomics.store(fv, 1, 1);
         \\Atomics.notify(fv, 1, {d});
         \\let joined = 0;
-        \\for (const t of fts) joined += t.join();
+        \\for (const parent of parents) joined += parent.join();
         \\joined;
         \\
     ,
-        .{ nthreads, thread_iters, nworkers, nworkers, nworkers + nthreads + 4 },
+        .{ nparents, children_per_parent, thread_iters, nworkers, nworkers, nworkers + nparents + 4 },
     );
     defer gpa.free(js_src);
 
@@ -1552,8 +1579,21 @@ fn runModuleWorkerFanoutOverlap(gpa: std.mem.Allocator, seed: u64) !bool {
         std.debug.print("seed {d}: module fanout JS threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
         return false;
     };
-    if (!joined.isNumber() or joined.asNum() != @as(f64, @floatFromInt(nthreads))) {
-        std.debug.print("seed {d}: module fanout joined {d} threads, expected {d}\n", .{ seed, if (joined.isNumber()) joined.asNum() else -1, nthreads });
+    if (!joined.isNumber() or joined.asNum() != @as(f64, @floatFromInt(expected_join_sum))) {
+        std.debug.print("seed {d}: module fanout nested Thread join sum got {d}, expected {d}\n", .{ seed, if (joined.isNumber()) joined.asNum() else -1, expected_join_sum });
+        return false;
+    }
+    _ = ctx.evaluate("$drainRunLoop()") catch |err| {
+        std.debug.print("seed {d}: module fanout asyncJoin drain failed: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    const async_score = ctx.evaluate("Atomics.load(new Int32Array(globalThis.__moduleFanoutMsg.sab), 5)") catch |err| {
+        std.debug.print("seed {d}: cannot read module fanout asyncJoin score: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    const expected_async_score: f64 = @floatFromInt(expected_join_sum * 2);
+    if (!async_score.isNumber() or async_score.asNum() != expected_async_score) {
+        std.debug.print("seed {d}: module fanout asyncJoin score got {d}, expected {d}\n", .{ seed, if (async_score.isNumber()) async_score.asNum() else -1, expected_async_score });
         return false;
     }
 
@@ -1603,7 +1643,7 @@ fn runModuleWorkerFanoutOverlap(gpa: std.mem.Allocator, seed: u64) !bool {
         return false;
     };
     const expected_worker: f64 = @floatFromInt(nworkers * (4 * worker_iters + 7));
-    const expected_total = expected_worker + @as(f64, @floatFromInt(nthreads * thread_iters));
+    const expected_total = expected_worker + @as(f64, @floatFromInt(nchildren * thread_iters));
     const expected_leaf_calls: f64 = @floatFromInt(nworkers * 4);
     if (!count.isNumber() or count.asNum() != expected_total) {
         std.debug.print("seed {d}: module fanout counter got {d}, expected {d}\n", .{ seed, if (count.isNumber()) count.asNum() else -1, expected_total });
@@ -17626,6 +17666,21 @@ pub fn main(init: std.process.Init) !void {
         }
         std.debug.print("threadfuzz multictx: {d} programs from seed {d}, {d} failures\n", .{ iters, base_seed, mcfail });
         if (mcfail != 0) std.process.exit(1);
+        return;
+    };
+    // `threadfuzz modulefanout <iters> <seed>`: focused module Worker import
+    // fanout composed with nested Thread and asyncJoin completion graphs.
+    if (first) |a| if (std.mem.eql(u8, a, "modulefanout")) {
+        if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch 1;
+        if (args.next()) |b| base_seed = std.fmt.parseInt(u64, b, 10) catch 1;
+        var mffail: usize = 0;
+        var mfi: usize = 0;
+        while (mfi < iters) : (mfi += 1) {
+            const case_seed = base_seed +% mfi;
+            if (!(try runModuleWorkerFanoutOverlap(gpa, case_seed))) mffail += 1;
+        }
+        std.debug.print("threadfuzz modulefanout: {d} programs from seed {d}, {d} failures\n", .{ iters, base_seed, mffail });
+        if (mffail != 0) std.process.exit(1);
         return;
     };
     // `threadfuzz tlsfinal <iters> <seed>`: focused lifecycle repro for

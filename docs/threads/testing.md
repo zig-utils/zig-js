@@ -337,7 +337,9 @@ buffer while another constructs both length-tracking and explicit-length views,
 expected-throw termination storms for parked/unjoined shared-realm `Thread`s,
 exact Atomics counter oracles for script
 `Worker` plus simple-import, diamond-shaped, and fanout/rejoin module `Worker`
-overlap with shared-realm `Thread`s on one retained `SharedArrayBuffer`,
+overlap with shared-realm `Thread`s on one retained `SharedArrayBuffer`; the
+fanout profile composes the seven-module Worker graph with parent/child Thread
+trees and exact child-plus-parent `asyncJoin` reaction publication,
 script/module Worker/thread/finalization scheduling on one retained SAB, exact
 cleanup after terminating spinning script and module Workers that share the retained SAB,
 Worker termination while top-level failure tears down parked shared-realm `Thread`s, pending

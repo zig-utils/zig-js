@@ -500,7 +500,9 @@ Issue #1 remains the umbrella status page.
   destroy loops from independent host threads, deterministic termination storms,
   script Worker/thread retained-`SharedArrayBuffer` overlap, simple-import,
   diamond-shaped, and fanout/rejoin module Worker/thread overlap with exact
-  Atomics counter oracles, script/module Worker/thread/finalization scheduling
+  Atomics counter oracles; the fanout case runs nested parent/child Threads and
+  verifies child and parent `asyncJoin` rerouting while the Worker import graph
+  executes, script/module Worker/thread/finalization scheduling
   on one retained SAB, script and module Worker termination interleaved with
   exact shared-realm finalization cleanup on a retained SAB, Worker termination
   while top-level failure tears down parked shared-realm `Thread`s, pending `asyncJoin` rejection reactions,
