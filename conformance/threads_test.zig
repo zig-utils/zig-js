@@ -465,8 +465,12 @@ pub fn main(init: std.process.Init) !void {
                 \\const load = () => {};
                 \\globalThis.__asyncExpected = null;
                 \\globalThis.__asyncPassed = 0;
+                \\globalThis.__asyncPassedLabels = [];
                 \\const asyncTestStart = (n) => { globalThis.__asyncExpected = n; };
-                \\const asyncTestPassed = () => { globalThis.__asyncPassed++; };
+                \\const asyncTestPassed = (label) => {
+                \\  globalThis.__asyncPassed++;
+                \\  if (label !== undefined) globalThis.__asyncPassedLabels.push(String(label));
+                \\};
                 \\
             );
             // Time-dilation factor for wall-clock waits (harness `waitUntil`,
@@ -570,6 +574,31 @@ pub fn main(init: std.process.Init) !void {
                     const progress_s = if (progress.isString()) progress.asStr() else "?/?";
                     failed += 1;
                     std.debug.print("  FAIL  {s}: async completions not reached ({s})\n", .{ name, progress_s });
+                    const labels = ctx.evaluate("__asyncPassedLabels.join(',')") catch js.Value.undef();
+                    if (labels.isString() and labels.asStr().len != 0)
+                        std.debug.print("  completed async arms: {s}\n", .{labels.asStr()});
+                    const arm3 = ctx.evaluate("typeof __arm3Turn === 'number' ? String(__arm3Cleared) + '/128 after ' + String(__arm3Turn) + ' turns' : ''") catch js.Value.undef();
+                    if (arm3.isString() and arm3.asStr().len != 0)
+                        std.debug.print("  arm3 reclamation progress: {s}\n", .{arm3.asStr()});
+                    if (std.mem.eql(u8, name, "cve/mc-dos-waiter-table-storm.js")) {
+                        if (ctx.gc) |heap| std.debug.print(
+                            "  GC cycles: full={d}, minor={d}; request pending={}\n",
+                            .{ heap.full_collections, heap.minor_collections, ctx.gc_requested.load(.monotonic) },
+                        );
+                        if (ctx.gil) |g| {
+                            g.lockPropWaiters();
+                            const pending_prop_async = g.prop_async.items.len;
+                            g.unlockPropWaiters();
+                            std.debug.print("  pending property async tickets: {d}\n", .{pending_prop_async});
+                        }
+                        var not_exited: usize = 0;
+                        for (ctx.js_threads.items) |rec| {
+                            rec.join_mutex.lockUncancelable(js.agent.engineIo());
+                            if (!rec.exited) not_exited += 1;
+                            rec.join_mutex.unlock(js.agent.engineIo());
+                        }
+                        std.debug.print("  thread records not exited: {d}\n", .{not_exited});
+                    }
                     if (ctx.print_buffer.items.len != 0) {
                         std.debug.print("{s}", .{ctx.print_buffer.items});
                         if (ctx.print_buffer.items[ctx.print_buffer.items.len - 1] != '\n') std.debug.print("\n", .{});

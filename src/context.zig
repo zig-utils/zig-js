@@ -1372,6 +1372,24 @@ pub const Context = struct {
     /// These are test/profiling counters, not embedder API.
     gc_par_attempts: std.atomic.Value(u64) = .init(0),
     gc_par_aborts: std.atomic.Value(u64) = .init(0),
+    /// Detailed test/profiling telemetry for the same collector. A generation is
+    /// one root-publication request; wait iterations count failed convergence
+    /// polls (batched into the atomic after each generation); finish retries are
+    /// allocation races detected by the self-checking finish step. Peer request
+    /// counts snapshot running versus directly traceable parked peers once per
+    /// generation, while peer publications count roots actually handed off.
+    /// Pause time is collector-mutator time spent inside the driver, not a
+    /// stop-the-world pause: peer mutators continue throughout.
+    gc_par_generations: std.atomic.Value(u64) = .init(0),
+    gc_par_publication_wait_iterations: std.atomic.Value(u64) = .init(0),
+    gc_par_finish_retries: std.atomic.Value(u64) = .init(0),
+    gc_par_publication_timeout_aborts: std.atomic.Value(u64) = .init(0),
+    gc_par_round_limit_aborts: std.atomic.Value(u64) = .init(0),
+    gc_par_running_peer_requests: std.atomic.Value(u64) = .init(0),
+    gc_par_parked_peer_observations: std.atomic.Value(u64) = .init(0),
+    gc_par_peer_publications: std.atomic.Value(u64) = .init(0),
+    gc_par_pause_ns_total: std.atomic.Value(u64) = .init(0),
+    gc_par_pause_ns_max: std.atomic.Value(u64) = .init(0),
     /// Guards the low-frequency realm-root lists that have no other lock —
     /// `async_waiters`, `c_api_handles`, `finalization_cleanup_jobs` — so the
     /// mid-script parallel collector can read them while peers mutate. Taken by
@@ -2136,6 +2154,38 @@ pub const Context = struct {
         if (machine.gc_published_gen.load(.acquire) >= req) return;
         gc_mod.publishInterpreterRoots(machine);
         machine.gc_published_gen.store(req, .release);
+        _ = self.gc_par_peer_publications.fetchAdd(1, .monotonic);
+    }
+
+    /// Snapshot peer state once for each opened publication generation. Polling
+    /// `allParallelPublished` may run thousands of times, so counting there
+    /// would turn scheduler latency into a misleading peer metric.
+    fn countParallelPeers(self: *Context, me: *interp.Interpreter) void {
+        var running: u64 = 0;
+        var parked: u64 = 0;
+        self.lockActiveInterpreters();
+        defer self.unlockActiveInterpreters();
+        for (self.active_interpreters.items) |m| {
+            if (m == me) continue;
+            if (m.gc_parked.load(.acquire)) parked += 1 else running += 1;
+        }
+        if (running != 0) _ = self.gc_par_running_peer_requests.fetchAdd(running, .monotonic);
+        if (parked != 0) _ = self.gc_par_parked_peer_observations.fetchAdd(parked, .monotonic);
+    }
+
+    fn recordParallelGcPause(self: *Context, started_ns: i96) void {
+        const ended_ns = std.Io.Timestamp.now(agent.engineIo(), .awake).nanoseconds;
+        const elapsed: u64 = @intCast(@max(ended_ns - started_ns, 0));
+        _ = self.gc_par_pause_ns_total.fetchAdd(elapsed, .monotonic);
+        var observed = self.gc_par_pause_ns_max.load(.monotonic);
+        while (elapsed > observed) {
+            observed = self.gc_par_pause_ns_max.cmpxchgWeak(
+                observed,
+                elapsed,
+                .monotonic,
+                .monotonic,
+            ) orelse break;
+        }
     }
 
     /// True once every active peer interpreter (all but the collector) has
@@ -2155,6 +2205,8 @@ pub const Context = struct {
     }
 
     fn driveParallelCollection(self: *Context, h: *GcHeap, machine: *interp.Interpreter) void {
+        const started_ns = std.Io.Timestamp.now(agent.engineIo(), .awake).nanoseconds;
+        defer self.recordParallelGcPause(started_ns);
         // BEGIN: whiten + arm the barrier under alloc_lock, then trace the
         // collector-safe roots — realm roots (lock-guarded), this collector's own
         // interpreter + native stack, and parked peers' frozen stacks. Running
@@ -2181,6 +2233,8 @@ pub const Context = struct {
             // safepoints. Mark concurrently while we wait (the collector is also
             // the marker here — no separate marker thread).
             const gen = self.gc_par_request.fetchAdd(1, .acq_rel) + 1;
+            _ = self.gc_par_generations.fetchAdd(1, .monotonic);
+            self.countParallelPeers(machine);
             const deadline_ns = std.Io.Timestamp.now(agent.engineIo(), .awake).nanoseconds + wait_floor_ns;
             var waited: u64 = 0;
             while (!self.allParallelPublished(gen, machine)) {
@@ -2190,16 +2244,19 @@ pub const Context = struct {
                 waited += 1;
                 const now_ns = std.Io.Timestamp.now(agent.engineIo(), .awake).nanoseconds;
                 if (waited >= wait_budget and now_ns >= deadline_ns) {
+                    _ = self.gc_par_publication_wait_iterations.fetchAdd(waited, .monotonic);
                     self.gc_scan_native_stack = true;
                     h.abortConcurrentMarkParallel();
                     self.gc_scan_native_stack = false;
                     _ = self.gc_par_aborts.fetchAdd(1, .monotonic);
+                    _ = self.gc_par_publication_timeout_aborts.fetchAdd(1, .monotonic);
                     return;
                 }
                 // Yield so peers get scheduled to reach their safepoints and
                 // publish, rather than starving them by busy-spinning.
                 if ((waited & 0x3ff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
             }
+            if (waited != 0) _ = self.gc_par_publication_wait_iterations.fetchAdd(waited, .monotonic);
             // Everyone published this generation. Drain to local quiescence.
             self.gc_scan_native_stack = true;
             while (!h.concurrentMarkRound()) {}
@@ -2222,6 +2279,7 @@ pub const Context = struct {
                     _ = self.gc_par_collections.fetchAdd(1, .monotonic);
                     return;
                 }
+                _ = self.gc_par_finish_retries.fetchAdd(1, .monotonic);
                 // Allocation happened during the finish — its born fold already
                 // ran, so refresh the baseline and keep marking.
             }
@@ -2233,6 +2291,7 @@ pub const Context = struct {
         h.abortConcurrentMarkParallel();
         self.gc_scan_native_stack = false;
         _ = self.gc_par_aborts.fetchAdd(1, .monotonic);
+        _ = self.gc_par_round_limit_aborts.fetchAdd(1, .monotonic);
     }
 
     pub fn queueFinalizationRegistryCleanup(self: *Context, registry: *value.Object) void {
@@ -10964,6 +11023,23 @@ test "parallel_js (M3 GIL-removal slice): real Thread contends Atomics.Mutex wit
     try std.testing.expectEqual(@as(f64, 2000), result.asNum());
 }
 
+fn expectParallelGcTelemetryCoherent(ctx: *Context) !void {
+    const attempts = ctx.gc_par_attempts.load(.monotonic);
+    const collections = ctx.gc_par_collections.load(.monotonic);
+    const aborts = ctx.gc_par_aborts.load(.monotonic);
+    const publication_aborts = ctx.gc_par_publication_timeout_aborts.load(.monotonic);
+    const round_aborts = ctx.gc_par_round_limit_aborts.load(.monotonic);
+    const pause_total = ctx.gc_par_pause_ns_total.load(.monotonic);
+    const pause_max = ctx.gc_par_pause_ns_max.load(.monotonic);
+
+    try std.testing.expect(attempts > 0);
+    try std.testing.expectEqual(attempts, collections + aborts);
+    try std.testing.expectEqual(aborts, publication_aborts + round_aborts);
+    try std.testing.expect(ctx.gc_par_generations.load(.monotonic) >= attempts);
+    try std.testing.expect(pause_max <= pause_total);
+    try std.testing.expect(pause_total > 0);
+}
+
 test "parallel_js (M3): mid-script parallel collector reclaims garbage while threads run, no GIL" {
     // The mid-script parallel GC driver end to end: real JS `Thread`s allocate
     // and retain object graphs with no execution GIL while a collector elected
@@ -11033,6 +11109,11 @@ test "parallel_js (M3): mid-script parallel collector reclaims garbage while thr
         if (ctx.gc_par_collections.load(.monotonic) > 0) break;
     }
     try std.testing.expect(ctx.gc_par_collections.load(.monotonic) > 0);
+    try expectParallelGcTelemetryCoherent(ctx);
+    // The host is parked in Thread.join while a worker reaches the allocation
+    // safepoint and drives collection, so the direct parked-peer path must be
+    // represented rather than hidden inside a generic attempt count.
+    try std.testing.expect(ctx.gc_par_parked_peer_observations.load(.monotonic) > 0);
 }
 
 test "parallel_js (M3): sync wait peers publish roots for mid-script parallel GC" {
@@ -11145,6 +11226,9 @@ test "parallel_js (M3): sync wait peers publish roots for mid-script parallel GC
     try std.testing.expectEqual(@as(f64, 10800), result.asNum());
     try std.testing.expect(ctx.gc_par_attempts.load(.monotonic) > before_attempts);
     try std.testing.expect(ctx.gc_par_collections.load(.monotonic) > before_collections);
+    try expectParallelGcTelemetryCoherent(ctx);
+    try std.testing.expect(ctx.gc_par_running_peer_requests.load(.monotonic) > 0);
+    try std.testing.expect(ctx.gc_par_peer_publications.load(.monotonic) > 0);
 }
 
 test "parallel_js (M3): thrown Thread completion roots survive mid-script parallel GC" {

@@ -62,6 +62,11 @@ than new correctness architecture.
   `Atomics.waitAsync` tickets removed by a peer while their owning spawned
   thread is closing its stack-local microtask queue; late settlements reroute to
   the realm queue instead of stranding reactions after the owner's final flush.
+  Its reclamation arm now gates the realm-quiescent full collection on final
+  synchronous joins after async results are verified, removing a scheduler race
+  between `asyncJoin` publication and native thread teardown without weakening
+  the waiter-root reclamation threshold. Arm labels and failure-only engine
+  diagnostics keep future stalls attributable.
 - The reference-only PR-249 tail is checked by
   `zig build threads-reference-audit`, so unsupported shell hooks, JIT,
   WebAssembly, and heap-cap/OOM witnesses stay explicit instead of
@@ -202,6 +207,14 @@ Known performance/maturity work:
   collection just before an abort cannot append into `barrier_buf` after the
   abort path has cleared it; the dependency has a deterministic regression test
   for that abort boundary and is covered by the local `parallel_js` TSan slice.
+- `zig build midgc-profile` now makes convergence measurable without exposing
+  the internal `parallel_midscript_gc` knob as embedder API. It separates
+  publication-timeout aborts from round-limit aborts and reports publication
+  generations/polls, self-checking finish retries, running versus parked peer
+  observations, actual peer root publications, and collector-side total/maximum
+  pause time. Focused tests assert the attempt/outcome and abort-reason accounting
+  identities and prove both running-peer publication and direct parked-peer
+  observation paths execute.
 
 ## 3. Parallel Performance
 

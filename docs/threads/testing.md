@@ -29,6 +29,7 @@ For performance work, also run:
 
 ```sh
 zig build threads-profile
+zig build midgc-profile
 zig build gc-profile
 ```
 
@@ -42,6 +43,16 @@ property waits alongside the existing contention event counters. `gc-profile`
 is the local allocation/lifecycle baseline for comparing arena, explicit-GC,
 no-GIL threaded GC, and `.gil = true` context modes, including the reusable
 GC-cell slab backing.
+
+`midgc-profile` isolates the internal `parallel_midscript_gc` testing policy so
+its collector behavior is not hidden inside the broader contention matrix. It
+reports elected attempts, finishing sweeps, publication-timeout versus
+round-limit aborts, opened root-publication generations, failed publication
+polls, allocation-race finish retries, running-peer requests, parked-peer
+observations, actual peer publications, and collector-side total/maximum pause
+time. That pause is time the collector mutator spends in the driver; it is not a
+stop-the-world pause because peer mutators continue running. The profile is an
+attribution tool, not a stable embedder API or correctness gate.
 
 CI additionally runs heavier no-GIL production gates on every pull request and
 push to `main`:
@@ -127,6 +138,13 @@ property `Atomics.waitAsync` tickets that are removed from the global table by a
 peer just as their owning spawned thread tears down its stack-local microtask
 queue; keep the focused `-Dthreads-parallel-js=true` case green when changing
 property waiter settlement, thread queue transfer, or microtask teardown.
+Its three completion arms are label-aware in runner failures, and the
+reclamation arm waits for the independent wide-key arm's native thread teardown
+before requesting a realm-quiescent full collection. This keeps the WeakRef
+oracle focused on waiter-root removal instead of racing `asyncJoin` publication
+against final OS-thread queue/park-record cleanup. Failure output also includes
+the last reclamation turn/count, GC cycle counts, pending property tickets, and
+not-yet-exited thread records.
 The `api/lock-async-hold.js` barging witness now starts its child `Thread`
 inside the setup `lock.hold`, so the async ticket is deterministically queued
 against an already-active sync hold instead of racing with immediate no-fn
@@ -441,6 +459,14 @@ spinning code; both tables emit separate script and module Worker rows so
 import-graph startup and teardown cost can be compared with plain source
 Workers. It intentionally has no `.gil = true` column because each Worker owns
 its own `Context`.
+
+`zig build midgc-profile` is the corresponding focused convergence profile for
+the internal mid-script parallel collector. Its accounting invariants are also
+asserted by focused unit tests: every elected attempt ends in exactly one sweep
+or classified abort, abort reasons sum to total aborts, each attempt opens at
+least one publication generation, and maximum collector-side pause does not
+exceed total pause. End-to-end witnesses require both directly observed parked
+peers and roots actually published by running sync-wait peers.
 Empty sync-wait task pumps now have a
 lock-free fast path;
 real async-hold delivery drains larger bounded FIFO bursts from the realm task

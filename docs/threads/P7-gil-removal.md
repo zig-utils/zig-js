@@ -331,6 +331,15 @@ roadmap item repeats it.
      garbage. So the driver collects when it catches a cheap quiescent window and
      falls back to quiescent collection otherwise, never trading correctness for
      pause-time.
+   - **Convergence telemetry.** `zig build midgc-profile` exercises the internal
+     policy and attributes attempts, sweeps, publication-timeout and round-limit
+     aborts, generations, failed publication polls, finish retries, running and
+     parked peer observations, actual peer publications, and collector-side
+     total/maximum pause. The pause is local to the collector mutator; peers are
+     not stopped. Focused tests enforce the counter accounting identities and
+     execute both publication and direct parked-root paths. These counters and
+     `parallel_midscript_gc` remain testing/profile implementation details, not
+     stable embedder API.
 
    Quiescent collection under parallel mutation is already correct and shipping,
    so this driver is purely a pause-time optimization; it is **not** on the

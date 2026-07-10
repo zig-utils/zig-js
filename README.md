@@ -211,6 +211,7 @@ zig build threadfuzz -Dfuzz-midgc=true
 zig build threadfuzz -Dfuzz-lifecycle=true
 zig build test -Dtsan=true
 zig build threads-profile
+zig build midgc-profile
 zig build gc-profile
 ```
 

@@ -258,6 +258,21 @@ pub fn build(b: *std.Build) void {
     const threads_profile_step = b.step("threads-profile", "Profile no-GIL Thread contention, async waits, and .gil fallback cost");
     threads_profile_step.dependOn(&run_threads_profile.step);
 
+    // Internal mid-script parallel-GC telemetry. Kept separate from the broad
+    // contention matrix so collector convergence can be profiled in isolation.
+    const midgc_profile = b.addExecutable(.{
+        .name = "midgc-profile",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/midgc.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+            .imports = &.{.{ .name = "js", .module = bench_js_mod }},
+        }),
+    });
+    const run_midgc_profile = b.addRunArtifact(midgc_profile);
+    const midgc_profile_step = b.step("midgc-profile", "Profile internal mid-script parallel-GC convergence and pause telemetry");
+    midgc_profile_step.dependOn(&run_midgc_profile.step);
+
     // GC allocation/lifecycle profile: compare arena, explicit-GC, no-GIL
     // threaded GC, and `.gil = true` lifecycle costs. Local performance tool.
     const gc_profile = b.addExecutable(.{

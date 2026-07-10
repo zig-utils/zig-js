@@ -31,6 +31,12 @@ load("../harness.js", "caller relative");
 
 asyncTestStart(3);
 
+// Arm 3 needs a realm-quiescent full collection. asyncJoin publishes the JS
+// completion before a worker finishes its native queue/park-record teardown,
+// so explicitly gate the reclamation probe on arm 2's final synchronous joins.
+let wideKeyTeardownResolve;
+const wideKeyTeardown = new Promise(resolve => { wideKeyTeardownResolve = resolve; });
+
 // ---- Arm 1: deep deque on few keys, exact notify accounting ----
 {
     const DEPTH = 512;
@@ -51,7 +57,7 @@ asyncTestStart(3);
     Promise.all(promises).then(values => {
         for (const v of values)
             shouldBe(v, "ok", "arm1: every notified waiter settles ok");
-        asyncTestPassed();
+        asyncTestPassed("arm1-notify");
     });
 }
 
@@ -94,7 +100,10 @@ asyncTestStart(3);
             for (let k = 0; k < KEYS; ++k)
                 residue += Atomics.notify(shared, "k" + t + "_" + k, Infinity);
         shouldBe(residue, 0, "arm2: no waiter survives its drain");
-        asyncTestPassed();
+        for (const thread of threads)
+            thread.join();
+        wideKeyTeardownResolve();
+        asyncTestPassed("arm2-timeout");
     });
 }
 
@@ -144,6 +153,7 @@ asyncTestStart(3);
     makeWaitedOnGarbage().then(async values => {
         for (const v of values)
             shouldBe(v, "ok", "arm3: notified waiters settle ok");
+        await wideKeyTeardown;
         // Every list is drained: cellProtect must be cleared and the table
         // entry removed, so the cells are garbage now. Conservative stack
         // scanning may pin a few; a MAJORITY must be collectable. Zero
@@ -155,10 +165,12 @@ asyncTestStart(3);
             gc();
             await Promise.resolve();
             cleared = countCleared();
+            globalThis.__arm3Cleared = cleared;
+            globalThis.__arm3Turn = turn + 1;
         }
         shouldBeTrue(cleared >= K / 2,
             "arm3: waited-on-then-drained cells must be collectable (got "
             + cleared + "/" + K + "; 0 means PropertyWaiterTable leaked its Strong roots)");
-        asyncTestPassed();
+        asyncTestPassed("arm3-reclaim");
     });
 }
