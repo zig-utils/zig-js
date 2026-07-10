@@ -270,9 +270,11 @@ Known performance/maturity work:
   contended `Lock.hold`, `Condition.wait`, and property `Atomics.wait`,
   `waitus`/`jus`/`lus`/`cus`/`pus` split total native
   wait microseconds plus join/lock/condition/property wait microseconds,
-  `async`/`done` split
-  `Condition.asyncWait` plus property `waitAsync` registration from completed
-  async-condition reacquires plus settled property `waitAsync` tickets, and
+  `async`/`done` aggregate
+  `Condition.asyncWait` plus property `waitAsync` registration against completed
+  async-condition reacquires plus settled property `waitAsync` tickets, while
+  `caw`/`cad` and `paw`/`pad` split those same async sources into
+  condition-async wait/done and property-waitAsync wait/done pairs, and
   `empty`/`jobs` split the run-loop task pump into empty fast-path hits and
   delivered grant jobs while `hold`/`cjob` split those delivered jobs into
   ordinary `Lock.asyncHold` grants and `Condition.asyncWait` reacquire grants.

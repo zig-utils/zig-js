@@ -497,7 +497,7 @@ fn timeScenario(gpa: std.mem.Allocator, io: std.Io, scenario: Scenario, workers:
 fn printScenario(gpa: std.mem.Allocator, io: std.Io, scenario: Scenario, workers: []const usize) !void {
     std.debug.print("\n{s}\n", .{scenario.name});
     std.debug.print("{s:>8} {s:>14} {s:>14} {s:>12} {s:>12}" ++
-        " {s:>10} {s:>9} {s:>9} {s:>10} {s:>10} {s:>9} {s:>9} {s:>9} {s:>10} {s:>9} {s:>9} {s:>9} {s:>9} {s:>10} {s:>10} {s:>10} {s:>10} {s:>10} {s:>10}", .{
+        " {s:>10} {s:>9} {s:>9} {s:>10} {s:>10} {s:>9} {s:>9} {s:>9} {s:>10} {s:>9} {s:>9} {s:>9} {s:>9} {s:>10} {s:>10} {s:>9} {s:>9} {s:>9} {s:>9} {s:>10} {s:>10} {s:>10} {s:>10}", .{
         "threads",
         "no-gil ns",
         "gil ns",
@@ -518,12 +518,16 @@ fn printScenario(gpa: std.mem.Allocator, io: std.Io, scenario: Scenario, workers
         "ng pus",
         "ng async",
         "ng done",
+        "ng caw",
+        "ng cad",
+        "ng paw",
+        "ng pad",
         "ng empty",
         "ng jobs",
         "ng hold",
         "ng cjob",
     });
-    std.debug.print(" {s:>10} {s:>9} {s:>9} {s:>10} {s:>10} {s:>9} {s:>9} {s:>9} {s:>10} {s:>9} {s:>9} {s:>9} {s:>9} {s:>10} {s:>10} {s:>10} {s:>10} {s:>10} {s:>10}\n", .{
+    std.debug.print(" {s:>10} {s:>9} {s:>9} {s:>10} {s:>10} {s:>9} {s:>9} {s:>9} {s:>10} {s:>9} {s:>9} {s:>9} {s:>9} {s:>10} {s:>10} {s:>9} {s:>9} {s:>9} {s:>9} {s:>10} {s:>10} {s:>10} {s:>10}\n", .{
         "gil events",
         "gil lcnt",
         "gil aq",
@@ -539,6 +543,10 @@ fn printScenario(gpa: std.mem.Allocator, io: std.Io, scenario: Scenario, workers
         "gil pus",
         "gil async",
         "gil done",
+        "gil caw",
+        "gil cad",
+        "gil paw",
+        "gil pad",
         "gil empty",
         "gil jobs",
         "gil hold",
@@ -560,7 +568,7 @@ fn printScenario(gpa: std.mem.Allocator, io: std.Io, scenario: Scenario, workers
             @as(f64, @floatFromInt(@max(parallel_ns, 1)));
 
         std.debug.print("{d:>8} {d:>14} {d:>14} {d:>11.2}x {d:>11.2}x" ++
-            " {d:>10} {d:>9} {d:>9} {d:>10} {d:>10} {d:>9} {d:>9} {d:>9} {d:>10} {d:>9} {d:>9} {d:>9} {d:>9} {d:>10} {d:>10} {d:>10} {d:>10} {d:>10} {d:>10}", .{
+            " {d:>10} {d:>9} {d:>9} {d:>10} {d:>10} {d:>9} {d:>9} {d:>9} {d:>10} {d:>9} {d:>9} {d:>9} {d:>9} {d:>10} {d:>10} {d:>9} {d:>9} {d:>9} {d:>9} {d:>10} {d:>10} {d:>10} {d:>10}", .{
             n,
             parallel_ns,
             gil_ns,
@@ -581,12 +589,16 @@ fn printScenario(gpa: std.mem.Allocator, io: std.Io, scenario: Scenario, workers
             nsToUs(parallel.stats.property_wait_ns),
             parallel.stats.asyncWaits(),
             parallel.stats.asyncSettled(),
+            parallel.stats.condition_async_waits,
+            parallel.stats.condition_async_settled,
+            parallel.stats.property_wait_async_enqueued,
+            parallel.stats.property_wait_async_settled,
             parallel.stats.task_pump_empty,
             parallel.stats.task_pump_jobs,
             parallel.stats.task_pump_async_hold_jobs,
             parallel.stats.task_pump_condition_jobs,
         });
-        std.debug.print(" {d:>10} {d:>9} {d:>9} {d:>10} {d:>10} {d:>9} {d:>9} {d:>9} {d:>10} {d:>9} {d:>9} {d:>9} {d:>9} {d:>10} {d:>10} {d:>10} {d:>10} {d:>10} {d:>10}\n", .{
+        std.debug.print(" {d:>10} {d:>9} {d:>9} {d:>10} {d:>10} {d:>9} {d:>9} {d:>9} {d:>10} {d:>9} {d:>9} {d:>9} {d:>9} {d:>10} {d:>10} {d:>9} {d:>9} {d:>9} {d:>9} {d:>10} {d:>10} {d:>10} {d:>10}\n", .{
             gil.stats.events(),
             gil.stats.lock_contentions,
             gil.stats.async_hold_queued,
@@ -602,6 +614,10 @@ fn printScenario(gpa: std.mem.Allocator, io: std.Io, scenario: Scenario, workers
             nsToUs(gil.stats.property_wait_ns),
             gil.stats.asyncWaits(),
             gil.stats.asyncSettled(),
+            gil.stats.condition_async_waits,
+            gil.stats.condition_async_settled,
+            gil.stats.property_wait_async_enqueued,
+            gil.stats.property_wait_async_settled,
             gil.stats.task_pump_empty,
             gil.stats.task_pump_jobs,
             gil.stats.task_pump_async_hold_jobs,
@@ -1020,7 +1036,7 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("joins = Thread.join timed wait/pump iterations, separated from other park sources for lifecycle attribution\n", .{});
     std.debug.print("lock/cond/prop = park iterations attributed to contended Lock.hold, Condition.wait, and property Atomics.wait\n", .{});
     std.debug.print("waitus/jus/lus/cus/pus = total native wait microseconds, then join/lock/condition/property wait microseconds\n", .{});
-    std.debug.print("async/done = Condition.asyncWait and property waitAsync registrations / completed condition reacquires plus settled property waitAsync tickets\n", .{});
+    std.debug.print("async/done = aggregate async waiter registrations/settlements; caw/cad and paw/pad split Condition.asyncWait versus property waitAsync\n", .{});
     std.debug.print("empty/jobs = run-loop task-pump empty fast-path hits / delivered grant jobs; hold/cjob split asyncHold vs Condition.asyncWait reacquire jobs\n", .{});
 
     var matched = scenario_filter == null;

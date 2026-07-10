@@ -467,10 +467,12 @@ can be attributed separately from lock, condition, and property wait pressure.
 The `lock`/`cond`/`prop` columns split the remaining sync park pressure by
 contended `Lock.hold`, `Condition.wait`, and property `Atomics.wait`, so
 source-specific waiter regressions do not hide inside aggregate parks.
-The `async`/`done` columns split `Condition.asyncWait` plus property
-`waitAsync` registration from completed async-condition reacquires plus settled
-property `waitAsync` tickets, making timeout-settlement parity and async
-condition regrant pressure visible in the same run.
+The `async`/`done` columns aggregate `Condition.asyncWait` plus property
+`waitAsync` registrations against completed async-condition reacquires plus
+settled property `waitAsync` tickets; `caw`/`cad` and `paw`/`pad` split those
+same async sources into condition-async wait/done and property-waitAsync
+wait/done pairs, so timeout-settlement parity and async condition regrant
+pressure stay visible without hiding behind a combined total.
 The `empty`/`jobs` columns split the run-loop task pump into empty atomic
 fast-path hits and real grant-job delivery, and the paired `hold`/`cjob`
 columns split those delivered jobs into ordinary `Lock.asyncHold` grants versus
