@@ -8904,6 +8904,10 @@ pub const Interpreter = struct {
     /// `index`-as-string -> array element index, or null if not an integer.
     pub fn arrayIndex(key: []const u8) ?usize {
         if (key.len == 0) return null;
+        // Array indices are CANONICAL numeric strings only: a leading zero
+        // ("01", "00", "007") is an ordinary string key, distinct from "1"/"0"/
+        // "7", so it must NOT alias to an element slot (CanonicalNumericIndexString).
+        if (key.len > 1 and key[0] == '0') return null;
         for (key) |c| if (!std.ascii.isDigit(c)) return null;
         return std.fmt.parseInt(usize, key, 10) catch null;
     }
