@@ -16561,8 +16561,15 @@ fn bigIntToLocaleStringFn(ctx: *anyopaque, this: Value, args: []const Value) val
 fn bigIntToStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const big = if (this.isObject() and this.asObj().is_bigint) this.asObj() else if (this.isObject() and this.asObj().prim != null and this.asObj().prim.?.isObject() and this.asObj().prim.?.asObj().is_bigint) this.asObj().prim.?.asObj() else return self.throwError("TypeError", "BigInt.prototype.toString requires that 'this' be a BigInt");
-    const radix: u8 = if (args.len > 0 and !args[0].isUndefined()) @intFromFloat(@trunc(try self.toNumberV(args[0]))) else 10;
-    if (radix < 2 or radix > 36) return self.throwError("RangeError", "toString() radix must be between 2 and 36");
+    // Validate the radix on the FLOAT before narrowing to u8: ToIntegerOrInfinity
+    // then range-check, so 256/-1/Infinity/NaN/1e100 throw RangeError instead of
+    // panicking in `@intFromFloat` on an out-of-range value.
+    var radix: u8 = 10;
+    if (args.len > 0 and !args[0].isUndefined()) {
+        const rf = @trunc(try self.toNumberV(args[0]));
+        if (!(rf >= 2 and rf <= 36)) return self.throwError("RangeError", "toString() radix must be between 2 and 36");
+        radix = @intFromFloat(rf);
+    }
     if (big.bigint_text != null and radix == 10) return Value.str(big.bigint_text.?);
     if (big.bigint_text != null) return self.throwError("RangeError", "BigInt value is too large for non-decimal radix conversion");
     return Value.str(try formatBigIntRadix(self.arena, big.bigint, radix));
