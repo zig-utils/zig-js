@@ -5,6 +5,8 @@ pub const PromiseStats = struct {
     microtask_pops: u64 = 0,
     microtask_lock_acquires: u64 = 0,
     microtask_lock_yields: u64 = 0,
+    promise_lock_acquires: u64 = 0,
+    promise_lock_yields: u64 = 0,
     reaction_jobs_enqueued: u64 = 0,
     thenable_jobs_enqueued: u64 = 0,
     reaction_jobs_run: u64 = 0,
@@ -24,6 +26,8 @@ const PromiseCounters = struct {
     microtask_pops: std.atomic.Value(u64) = .init(0),
     microtask_lock_acquires: std.atomic.Value(u64) = .init(0),
     microtask_lock_yields: std.atomic.Value(u64) = .init(0),
+    promise_lock_acquires: std.atomic.Value(u64) = .init(0),
+    promise_lock_yields: std.atomic.Value(u64) = .init(0),
     reaction_jobs_enqueued: std.atomic.Value(u64) = .init(0),
     thenable_jobs_enqueued: std.atomic.Value(u64) = .init(0),
     reaction_jobs_run: std.atomic.Value(u64) = .init(0),
@@ -39,6 +43,8 @@ pub fn resetPromiseStats() void {
     counters.microtask_pops.store(0, .release);
     counters.microtask_lock_acquires.store(0, .release);
     counters.microtask_lock_yields.store(0, .release);
+    counters.promise_lock_acquires.store(0, .release);
+    counters.promise_lock_yields.store(0, .release);
     counters.reaction_jobs_enqueued.store(0, .release);
     counters.thenable_jobs_enqueued.store(0, .release);
     counters.reaction_jobs_run.store(0, .release);
@@ -56,6 +62,8 @@ pub fn promiseStats() PromiseStats {
         .microtask_pops = counters.microtask_pops.load(.acquire),
         .microtask_lock_acquires = counters.microtask_lock_acquires.load(.acquire),
         .microtask_lock_yields = counters.microtask_lock_yields.load(.acquire),
+        .promise_lock_acquires = counters.promise_lock_acquires.load(.acquire),
+        .promise_lock_yields = counters.promise_lock_yields.load(.acquire),
         .reaction_jobs_enqueued = counters.reaction_jobs_enqueued.load(.acquire),
         .thenable_jobs_enqueued = counters.thenable_jobs_enqueued.load(.acquire),
         .reaction_jobs_run = counters.reaction_jobs_run.load(.acquire),
@@ -90,6 +98,14 @@ pub inline fn recordMicrotaskLockYield() void {
     bump("microtask_lock_yields");
 }
 
+pub inline fn recordPromiseLockAcquire() void {
+    bump("promise_lock_acquires");
+}
+
+pub inline fn recordPromiseLockYield() void {
+    bump("promise_lock_yields");
+}
+
 pub inline fn recordMicrotaskRun(thenable: bool) void {
     if (thenable) bump("thenable_jobs_run") else bump("reaction_jobs_run");
 }
@@ -102,6 +118,8 @@ test "promise profile stats reset and snapshot" {
     recordMicrotaskPop();
     recordMicrotaskLockAcquire();
     recordMicrotaskLockYield();
+    recordPromiseLockAcquire();
+    recordPromiseLockYield();
     recordMicrotaskRun(false);
     recordMicrotaskRun(true);
 
@@ -110,6 +128,8 @@ test "promise profile stats reset and snapshot" {
     try std.testing.expectEqual(@as(u64, 1), stats.microtask_pops);
     try std.testing.expectEqual(@as(u64, 1), stats.microtask_lock_acquires);
     try std.testing.expectEqual(@as(u64, 1), stats.microtask_lock_yields);
+    try std.testing.expectEqual(@as(u64, 1), stats.promise_lock_acquires);
+    try std.testing.expectEqual(@as(u64, 1), stats.promise_lock_yields);
     try std.testing.expectEqual(@as(u64, 1), stats.reaction_jobs_enqueued);
     try std.testing.expectEqual(@as(u64, 1), stats.thenable_jobs_enqueued);
     try std.testing.expectEqual(@as(u64, 2), stats.jobsEnqueued());

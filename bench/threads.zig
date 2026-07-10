@@ -585,10 +585,10 @@ fn timePromiseScenario(gpa: std.mem.Allocator, io: std.Io, workers: usize, mode:
 
 fn printPromiseProfile(gpa: std.mem.Allocator, io: std.Io, workers: []const usize) !void {
     std.debug.print("\nPromise microtask profile\n", .{});
-    std.debug.print("gil+gc = serialized fallback with GC-managed cells; ns columns are uninstrumented warmed timings; enq/pop/run = counted microtask queue enqueues, pops, and job runs; qlock/qyld = counted queue-lock acquisitions / yield-backed contention; rxn/thn split reaction from thenable jobs\n", .{});
+    std.debug.print("gil+gc = serialized fallback with GC-managed cells; ns columns are uninstrumented warmed timings; enq/pop/run = counted microtask queue enqueues, pops, and job runs; qlock/qyld = counted queue-lock acquisitions / yield-backed contention; plock/pyld = counted Promise-state lock acquisitions / yield-backed contention; rxn/thn split reaction from thenable jobs\n", .{});
     std.debug.print("{s:>8} {s:>14} {s:>14} {s:>14} {s:>12} {s:>12} {s:>12}" ++
-        " {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>10}" ++
-        " {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>10}\n", .{
+        " {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>10}" ++
+        " {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>10}\n", .{
         "threads",
         "no-gil ns",
         "gil ns",
@@ -601,6 +601,8 @@ fn printPromiseProfile(gpa: std.mem.Allocator, io: std.Io, workers: []const usiz
         "ng run",
         "ng qlock",
         "ng qyld",
+        "ng plock",
+        "ng pyld",
         "ng rxn",
         "ng thn",
         "ng events",
@@ -609,6 +611,8 @@ fn printPromiseProfile(gpa: std.mem.Allocator, io: std.Io, workers: []const usiz
         "gil run",
         "gil qlock",
         "gil qyld",
+        "gil plock",
+        "gil pyld",
         "gil rxn",
         "gil thn",
         "gil events",
@@ -633,8 +637,8 @@ fn printPromiseProfile(gpa: std.mem.Allocator, io: std.Io, workers: []const usiz
             @as(f64, @floatFromInt(@max(parallel_ns, 1)));
 
         std.debug.print("{d:>8} {d:>14} {d:>14} {d:>14} {d:>11.2}x {d:>11.2}x {d:>11.2}x" ++
-            " {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>10}" ++
-            " {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>10}\n", .{
+            " {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>10}" ++
+            " {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>10}\n", .{
             n,
             parallel_ns,
             gil_ns,
@@ -647,6 +651,8 @@ fn printPromiseProfile(gpa: std.mem.Allocator, io: std.Io, workers: []const usiz
             parallel.promise.jobsRun(),
             parallel.promise.microtask_lock_acquires,
             parallel.promise.microtask_lock_yields,
+            parallel.promise.promise_lock_acquires,
+            parallel.promise.promise_lock_yields,
             parallel.promise.reaction_jobs_run,
             parallel.promise.thenable_jobs_run,
             parallel.contention.events(),
@@ -655,6 +661,8 @@ fn printPromiseProfile(gpa: std.mem.Allocator, io: std.Io, workers: []const usiz
             gil.promise.jobsRun(),
             gil.promise.microtask_lock_acquires,
             gil.promise.microtask_lock_yields,
+            gil.promise.promise_lock_acquires,
+            gil.promise.promise_lock_yields,
             gil.promise.reaction_jobs_run,
             gil.promise.thenable_jobs_run,
             gil.contention.events(),

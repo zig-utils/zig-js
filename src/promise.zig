@@ -50,9 +50,11 @@ pub const Promise = struct {
     on_reject: std.ArrayListUnmanaged(Reaction) = .empty,
 
     pub fn lockState(self: *Promise) void {
+        promise_profile.recordPromiseLockAcquire();
         var spins: usize = 0;
         while (!self.lock.tryLock()) : (spins += 1) {
             if ((spins & 0xff) == 0) {
+                promise_profile.recordPromiseLockYield();
                 std.Thread.yield() catch {};
             } else {
                 std.atomic.spinLoopHint();

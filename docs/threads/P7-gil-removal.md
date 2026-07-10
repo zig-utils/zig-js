@@ -657,9 +657,11 @@ enqueue/pop/run totals and splits reaction jobs from thenable-assimilation jobs
 under no-GIL versus `.gil = true`. Its timing columns come from an
 uninstrumented warmed pass; the counter columns come from a separate counted
 pass in the same warmed context, so profiler atomics do not masquerade as
-runtime contention. A third `gil+gc` timing column keeps the serialized path on
-GC-managed cells, which separates GC/cell-management overhead from queue-lock
-and parallel scheduling overhead.
+runtime contention. The focused columns split microtask-queue lock traffic
+(`qlock`/`qyld`) from per-Promise state-lock traffic (`plock`/`pyld`). A third
+`gil+gc` timing column keeps the serialized path on GC-managed cells, which
+separates GC/cell-management overhead from queue-lock and parallel scheduling
+overhead.
 That profile led to one contention reduction: no-GIL interpreters now lock the
 current `MicrotaskQueue` rather than a realm-wide lock, so independent
 spawned-thread Promise drains no longer serialize on the host queue.
