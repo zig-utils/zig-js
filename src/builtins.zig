@@ -1013,13 +1013,10 @@ pub fn objectConstructor(ctx: *anyopaque, this: Value, args: []const Value) Host
 /// CreateDataPropertyOrThrow(O, ToString(k), v) — define an own enumerable,
 /// writable, configurable data property; throw if [[DefineOwnProperty]] fails.
 fn createDataIndexOrThrow(self: *Interpreter, target: Value, k: usize, v: Value) HostError!void {
-    if (target.isObject() and target.asObj().is_array and target.asObj().accessors.load(.monotonic) == null and
-        target.asObj().holes == null and k == target.asObj().elements.items.len and
-        k == target.asObj().array_len)
-    {
-        // Fast path: appending the next index of a plain dense Array.
-        try target.asObj().elements.append(target.asObj().elementsAllocator(self.arena), v);
-        return;
+    if (target.isObject() and target.asObj().is_array and target.asObj().accessors.load(.monotonic) == null) {
+        // Fast path: appending the next index of a plain dense Array. The helper
+        // does the next-index check and append under `elements_lock`.
+        if (try target.asObj().appendDataIndexIfDense(self.arena, k, v)) return;
     }
     const key = try std.fmt.allocPrint(self.arena, "{d}", .{k});
     const desc = (try self.newObject()).asObj();
@@ -1278,13 +1275,13 @@ fn arrayFromAsyncSyncStep(self: *Interpreter, it: Value, mapfn: Value, this_arg:
 fn scheduleArrayFromAsyncSyncRest(self: *Interpreter, out_promise: Value, result: Value, it: Value, mapfn: Value, this_arg: Value, mapping: bool, k: usize) HostError!void {
     const cb = try gc_mod.allocObj(self.arena);
     cb.* = .{ .native = arrayFromAsyncSyncRestFn };
-    try cb.elements.append(cb.elementsAllocator(self.arena), out_promise);
-    try cb.elements.append(cb.elementsAllocator(self.arena), result);
-    try cb.elements.append(cb.elementsAllocator(self.arena), it);
-    try cb.elements.append(cb.elementsAllocator(self.arena), mapfn);
-    try cb.elements.append(cb.elementsAllocator(self.arena), this_arg);
-    try cb.elements.append(cb.elementsAllocator(self.arena), Value.num(@floatFromInt(k)));
-    try cb.elements.append(cb.elementsAllocator(self.arena), Value.boolVal(mapping));
+    try cb.appendInternalElement(self.arena, out_promise);
+    try cb.appendInternalElement(self.arena, result);
+    try cb.appendInternalElement(self.arena, it);
+    try cb.appendInternalElement(self.arena, mapfn);
+    try cb.appendInternalElement(self.arena, this_arg);
+    try cb.appendInternalElement(self.arena, Value.num(@floatFromInt(k)));
+    try cb.appendInternalElement(self.arena, Value.boolVal(mapping));
 
     const tick_obj = try promise.newPromise(self);
     const tick = promise.promiseOf(Value.obj(tick_obj)).?;
@@ -1297,14 +1294,14 @@ fn arrayFromAsyncSyncRestFn(ctx: *anyopaque, this: Value, args: []const Value) H
     _ = args;
     const self = interp(ctx);
     const cb = self.active_native orelse return Value.undef();
-    if (cb.elements.items.len < 7) return Value.undef();
-    const out_p = promise.promiseOf(cb.elements.items[0]) orelse return Value.undef();
-    const result = cb.elements.items[1];
-    const it = cb.elements.items[2];
-    const mapfn = cb.elements.items[3];
-    const this_arg = cb.elements.items[4];
-    var k = interpreter.toLen(cb.elements.items[5].toNumber());
-    const mapping = cb.elements.items[6].toBoolean();
+    if (cb.elementsLen() < 7) return Value.undef();
+    const out_p = promise.promiseOf(cb.elementAt(0) orelse return Value.undef()) orelse return Value.undef();
+    const result = cb.elementAt(1) orelse return Value.undef();
+    const it = cb.elementAt(2) orelse return Value.undef();
+    const mapfn = cb.elementAt(3) orelse return Value.undef();
+    const this_arg = cb.elementAt(4) orelse return Value.undef();
+    var k = interpreter.toLen((cb.elementAt(5) orelse return Value.undef()).toNumber());
+    const mapping = (cb.elementAt(6) orelse return Value.undef()).toBoolean();
 
     while (true) {
         const mapped = arrayFromAsyncSyncStep(self, it, mapfn, this_arg, mapping, k) catch |e| {
@@ -1327,7 +1324,7 @@ fn arrayFromAsyncSyncRestFn(ctx: *anyopaque, this: Value, args: []const Value) H
             return e;
         };
         k += 1;
-        cb.elements.items[5] = Value.num(@floatFromInt(k));
+        _ = cb.setElementAt(5, Value.num(@floatFromInt(k)));
     }
     setLengthOrThrow(self, result, k) catch |e| {
         if (e == error.Throw) {

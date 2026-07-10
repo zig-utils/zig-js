@@ -5384,9 +5384,13 @@ test "Array.fromAsync awaits thenable elements" {
         \\var err = new Error("boom");
         \\Array.fromAsync({ length: 1, 0: { then: function () { throw err; } } })
         \\  .then(undefined, function (reason) { rejected = reason === err; });
+        \\var syncRest = "";
+        \\Array.fromAsync([Promise.resolve(1), Promise.resolve(2)], function (v) {
+        \\  return Promise.resolve(v + 1);
+        \\}).then(function (a) { syncRest = a.join(","); });
     );
-    const v = try ctx.evaluate("value + ':' + rejected");
-    try std.testing.expectEqualStrings("1:ok:true", v.asStr());
+    const v = try ctx.evaluate("value + ':' + rejected + ':' + syncRest");
+    try std.testing.expectEqualStrings("1:ok:true:2,3", v.asStr());
 }
 
 /// Evaluate `src` in a fresh context and return its completion value. Only safe

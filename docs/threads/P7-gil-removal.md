@@ -109,7 +109,8 @@ broader stress coverage.
   tracing.
 - **Keep element storage funnel-shaped.** `Object.elements_lock` is the
   synchronization point for indexed storage. Dense-array helper paths, Map/Set
-  helper paths, and cursor paths already use it, and callback paths must
+  helper paths, Set operations, structured-clone element serialization, C-API
+  indexed helpers, and cursor paths already use it, and callback paths must
   snapshot one slot or one key list before invoking JS. Do not add new direct
   `elements.items` access on shared data paths; finish moving internal engine
   tuples behind helpers.

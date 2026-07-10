@@ -1132,6 +1132,22 @@ pub const Object = struct {
         return new_len;
     }
 
+    /// Fast path for CreateDataPropertyOrThrow on a plain dense Array when the
+    /// requested index is exactly the current logical end. The check and append
+    /// are one element-lock critical section so a peer grow cannot race the
+    /// `items.len` observation.
+    pub fn appendDataIndexIfDense(self: *Object, arena: std.mem.Allocator, i: usize, v: Value) std.mem.Allocator.Error!bool {
+        self.lockElements();
+        defer self.unlockElements();
+        if (self.holes != null or i != self.elements.items.len or i != self.array_len) return false;
+        if (i >= 4294967295) return false;
+        gcBarrier(self, v);
+        self.indexed_own_seen.store(true, .release);
+        try self.elements.append(self.elementsAllocator(arena), v);
+        self.array_len = i + 1;
+        return true;
+    }
+
     pub fn atomicDenseElementLoad(self: *Object, i: usize) ?Value {
         self.lockElements();
         defer self.unlockElements();
