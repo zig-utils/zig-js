@@ -6569,6 +6569,37 @@ test "Map/Set forEach tolerate deletion during iteration" {
     )).asNum());
 }
 
+test "Set operations keep live-index semantics when set-like callbacks mutate this" {
+    try expectEvalStr("true|1|1",
+        \\var s = new Set([1, 2]);
+        \\var seen = [];
+        \\var rec = {
+        \\  size: 2,
+        \\  has(v) {
+        \\    seen.push(v);
+        \\    if (v === 1) s.delete(2);
+        \\    return true;
+        \\  },
+        \\  keys() { throw new Error("unused"); }
+        \\};
+        \\s.isSubsetOf(rec) + "|" + seen.join(",") + "|" + Array.from(s).join(",")
+    );
+    try expectEvalStr("1|1|1",
+        \\var s = new Set([1, 2]);
+        \\var seen = [];
+        \\var rec = {
+        \\  size: 2,
+        \\  has(v) {
+        \\    seen.push(v);
+        \\    if (v === 1) s.delete(2);
+        \\    return true;
+        \\  },
+        \\  keys() { throw new Error("unused"); }
+        \\};
+        \\Array.from(s.intersection(rec)).join(",") + "|" + seen.join(",") + "|" + Array.from(s).join(",")
+    );
+}
+
 test "Map getOrInsertComputed validates callback and canonicalizes keys" {
     try std.testing.expect((try evalIn(
         \\var ok = false;

@@ -8681,8 +8681,7 @@ pub const Interpreter = struct {
                     break :blk &[_]Value{};
                 };
                 const result = (try self.makeSet(Value.undef())).asObj();
-                for (o.elements.items) |e| {
-                    const entry = liveSetEntry(e) orelse continue;
+                for (try self.collectLiveSetEntries(o)) |entry| {
                     _ = try self.setMethod(result, "add", &.{entry});
                 }
                 if (rec.is_set) {
@@ -8703,8 +8702,8 @@ pub const Interpreter = struct {
                 if (this_size <= rec.size) {
                     // Smaller `this`: walk this, probe the other set's `has`.
                     var i: usize = 0;
-                    while (i < o.elements.items.len) : (i += 1) {
-                        const entry = liveSetEntry(o.elements.items[i]) orelse continue;
+                    while (i < o.elementsLen()) : (i += 1) {
+                        const entry = liveSetEntryAt(o, i) orelse continue;
                         if (try self.recordHas(rec, entry)) _ = try self.setMethod(result, "add", &.{entry});
                     }
                 } else {
@@ -8730,14 +8729,13 @@ pub const Interpreter = struct {
             if (eq(name, "difference")) {
                 // result starts as a copy of this; the smaller operand drives the walk.
                 const result = (try self.makeSet(Value.undef())).asObj();
-                for (o.elements.items) |e| {
-                    const entry = liveSetEntry(e) orelse continue;
+                for (try self.collectLiveSetEntries(o)) |entry| {
                     _ = try self.setMethod(result, "add", &.{entry});
                 }
                 if (this_size <= rec.size) {
                     var i: usize = 0;
-                    while (i < result.elements.items.len) : (i += 1) {
-                        const entry = liveSetEntry(result.elements.items[i]) orelse continue;
+                    while (i < result.elementsLen()) : (i += 1) {
+                        const entry = liveSetEntryAt(result, i) orelse continue;
                         if (try self.recordHas(rec, entry)) _ = try self.setMethod(result, "delete", &.{entry});
                     }
                 } else {
@@ -8757,8 +8755,7 @@ pub const Interpreter = struct {
                     break :blk &[_]Value{};
                 };
                 const result = (try self.makeSet(Value.undef())).asObj();
-                for (o.elements.items) |e| {
-                    const entry = liveSetEntry(e) orelse continue;
+                for (try self.collectLiveSetEntries(o)) |entry| {
                     _ = try self.setMethod(result, "add", &.{entry});
                 }
                 if (rec.is_set) {
@@ -8789,8 +8786,8 @@ pub const Interpreter = struct {
                 // (e.g. delete a trailing element), and a removed slot must be
                 // skipped rather than re-probed from a stale snapshot.
                 var i: usize = 0;
-                while (i < o.elements.items.len) : (i += 1) {
-                    const entry = liveSetEntry(o.elements.items[i]) orelse continue;
+                while (i < o.elementsLen()) : (i += 1) {
+                    const entry = liveSetEntryAt(o, i) orelse continue;
                     if (!(try self.recordHas(rec, entry)))
                         return Value.boolVal(false);
                 }
@@ -8805,8 +8802,8 @@ pub const Interpreter = struct {
             if (eq(name, "isDisjointFrom")) {
                 if (this_size <= rec.size) {
                     var i: usize = 0;
-                    while (i < o.elements.items.len) : (i += 1) {
-                        const entry = liveSetEntry(o.elements.items[i]) orelse continue;
+                    while (i < o.elementsLen()) : (i += 1) {
+                        const entry = liveSetEntryAt(o, i) orelse continue;
                         if (try self.recordHas(rec, entry)) return Value.boolVal(false);
                     }
                     return Value.boolVal(true);
@@ -8895,14 +8892,7 @@ pub const Interpreter = struct {
     /// The set-like's elements (a native Set's `elements`, else its `keys()`).
     fn collectSetKeys(self: *Interpreter, rec: SetRecord) EvalError![]Value {
         if (rec.is_set) {
-            var list: std.ArrayListUnmanaged(Value) = .empty;
-            rec.obj.lockElements();
-            defer rec.obj.unlockElements();
-            for (rec.obj.elements.items) |e| {
-                const entry = liveSetEntry(e) orelse continue;
-                try list.append(self.arena, entry);
-            }
-            return list.items;
+            return self.collectLiveSetEntries(rec.obj);
         }
         const iter = try self.callValueWithThis(rec.keys, &.{}, Value.obj(rec.obj));
         // GetIteratorDirect: capture `next` ONCE, then call it each step (the
@@ -8914,6 +8904,20 @@ pub const Interpreter = struct {
             if (!r.isObject()) return self.throwError("TypeError", "iterator.next() did not return an object");
             if ((try self.getProperty(r, "done")).toBoolean()) break;
             try list.append(self.arena, try self.getProperty(r, "value"));
+        }
+        return list.items;
+    }
+
+    /// Snapshot a native Set's live [[SetData]] entries under its element lock.
+    /// The returned slice is used before running user code or mutating other
+    /// collections, so callers never hold `elements_lock` across re-entrant JS.
+    fn collectLiveSetEntries(self: *Interpreter, o: *value.Object) EvalError![]Value {
+        var list: std.ArrayListUnmanaged(Value) = .empty;
+        o.lockElements();
+        defer o.unlockElements();
+        for (o.elements.items) |e| {
+            const entry = liveSetEntry(e) orelse continue;
+            try list.append(self.arena, entry);
         }
         return list.items;
     }
@@ -27925,6 +27929,13 @@ fn liveMapEntryCount(o: *value.Object) usize {
 fn liveSetEntry(v: Value) ?Value {
     if (v.isObject() and v.asObj().is_set_deleted) return null;
     return v;
+}
+
+fn liveSetEntryAt(o: *value.Object, i: usize) ?Value {
+    o.lockElements();
+    defer o.unlockElements();
+    if (i >= o.elements.items.len) return null;
+    return liveSetEntry(o.elements.items[i]);
 }
 
 fn liveSetEntryCount(o: *value.Object) usize {
