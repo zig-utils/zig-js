@@ -1105,6 +1105,16 @@ pub const Object = struct {
         try self.elements.append(self.elementsAllocator(arena), v);
     }
 
+    pub fn appendElementIfLen(self: *Object, arena: std.mem.Allocator, expected_len: usize, v: Value) std.mem.Allocator.Error!bool {
+        self.lockElements();
+        defer self.unlockElements();
+        if (self.elements.items.len != expected_len) return false;
+        gcBarrier(self, v);
+        self.indexed_own_seen.store(true, .release);
+        try self.elements.append(self.elementsAllocator(arena), v);
+        return true;
+    }
+
     /// Append to `elements` when it is used as engine/private side storage
     /// rather than observable indexed properties (for example Map/Set backing
     /// entries). This keeps the same lock + GC barrier discipline as

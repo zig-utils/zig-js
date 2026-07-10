@@ -11264,9 +11264,9 @@ pub const Interpreter = struct {
     fn arrayResultPush(self: *Interpreter, result: Value, idx: usize, v: Value) EvalError!void {
         if (result.isObject() and result.asObj().is_array and result.asObj().accessors.load(.monotonic) == null and
             result.asObj().attrsMap() == null and !result.asObj().proxy_revoked and result.asObj().proxy_handler == null and
-            idx == result.asObj().elements.items.len)
+            try result.asObj().appendElementIfLen(self.arena, idx, v))
         {
-            try result.asObj().appendElement(self.arena, v);
+            return;
         } else {
             // CreateDataPropertyOrThrow(result, ToString(idx), v) — a non-Array
             // species result (or one carrying accessors) takes the generic define
