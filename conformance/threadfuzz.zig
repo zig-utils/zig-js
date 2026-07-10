@@ -116,6 +116,22 @@ fn finishSeed() void {
     watchdog_active.store(false, .release);
 }
 
+fn runWatchedSeedCase(
+    comptime profile: WatchdogProfile,
+    comptime caseFn: fn (std.mem.Allocator, u64) anyerror!bool,
+    gpa: std.mem.Allocator,
+    seed: u64,
+    failures: *usize,
+) !void {
+    // The broad profiles can contain dozens of independently-reproducible
+    // subcases per seed. Under TSan, the whole seed can legitimately exceed the
+    // watchdog even though no single subcase is hung; reset the same seed window
+    // before each subcase so the watchdog remains a hang detector instead of an
+    // aggregate runtime cap.
+    noteSeed(profile, seed);
+    if (!(try caseFn(gpa, seed))) failures.* += 1;
+}
+
 const ModuleFuzzHost = struct {
     const Entry = struct { path: []const u8, source: []const u8 };
     var host_ctx: u8 = 0;
@@ -20259,51 +20275,51 @@ pub fn main(init: std.process.Init) !void {
             const seed = base_seed +% mi;
             noteSeed(.midgc, seed);
             defer finishSeed();
-            if (!(try runMidScriptWaitPumpGc(gpa, seed))) mfail += 1;
-            if (!(try runMidScriptTerminationReactionGc(gpa, seed))) mfail += 1;
-            if (!(try runMidScriptPromisePublicationGc(gpa, seed))) mfail += 1;
-            if (!(try runMidScriptPropertyWaitAsyncLateSettlementGc(gpa, seed))) mfail += 1;
-            if (!(try runMidScriptMicrotaskChurnGc(gpa, seed))) mfail += 1;
-            if (!(try runMidScriptLateAsyncJoinCleanupGc(gpa, seed))) mfail += 1;
-            if (!(try runMidScriptLateAsyncJoinRejectCleanupGc(gpa, seed))) mfail += 1;
-            if (!(try runMidScriptCreatorOwnedBufferGc(gpa, seed))) mfail += 1;
-            if (!(try runMidScriptSyncWaitCleanupGc(gpa, seed))) mfail += 1;
-            if (!(try runMidScriptSyncWaitBurstCleanupGc(gpa, seed))) mfail += 1;
-            if (!(try runMidScriptSyncTimeoutGc(gpa, seed))) mfail += 1;
-            if (!(try runMidScriptAtomicsMutexLockIfAvailableGc(gpa, seed))) mfail += 1;
-            if (!(try runMidScriptAtomicsConditionWaitGc(gpa, seed))) mfail += 1;
-            if (!(try runMidScriptAsyncHoldReleaseWaiterCleanupGc(gpa, seed))) mfail += 1;
-            if (!(try runMidScriptAsyncHoldThrowFinalizationGc(gpa, seed))) mfail += 1;
-            if (!(try runMidScriptNestedThreadAsyncJoinCleanupGc(gpa, seed))) mfail += 1;
-            if (!(try runMidScriptFinalizationAsyncJoinCleanupGc(gpa, seed))) mfail += 1;
-            if (!(try runMidScriptWaitAsyncFinalizationGc(gpa, seed))) mfail += 1;
-            if (!(try runMidScriptConditionAsyncFinalizationGc(gpa, seed))) mfail += 1;
-            if (!(try runMidScriptThreadLocalLifecycleGc(gpa, seed))) mfail += 1;
-            if (!(try runMidScriptThreadLocalFinalizationGc(gpa, seed))) mfail += 1;
-            if (!(try runMidScriptThreadLocalTerminationCleanupGc(gpa, seed))) mfail += 1;
-            if (!(try runMidScriptThreadRestrictLifecycleGc(gpa, seed))) mfail += 1;
-            if (!(try runMidScriptThreadRestrictFinalizationGc(gpa, seed))) mfail += 1;
-            if (!(try runMidScriptWorkerCreatorOwnedBufferCleanupGc(gpa, seed))) mfail += 1;
-            if (!(try runMidScriptModuleWorkerCreatorOwnedBufferCleanupGc(gpa, seed))) mfail += 1;
-            if (!(try runMidScriptWorkerCleanupGc(gpa, seed))) mfail += 1;
-            if (!(try runMidScriptModuleWorkerCleanupGc(gpa, seed))) mfail += 1;
-            if (!(try runMidScriptWorkerThreadFinalizationGc(gpa, seed))) mfail += 1;
-            if (!(try runMidScriptModuleWorkerThreadFinalizationGc(gpa, seed))) mfail += 1;
-            if (!(try runMidScriptWorkerExceptionCleanupGc(gpa, seed))) mfail += 1;
-            if (!(try runMidScriptModuleWorkerExceptionCleanupGc(gpa, seed))) mfail += 1;
-            if (!(try runMidScriptWorkerCloseTerminateGc(gpa, seed))) mfail += 1;
-            if (!(try runMidScriptModuleWorkerCloseTerminateGc(gpa, seed))) mfail += 1;
-            if (!(try runMidScriptWorkerTerminateFinalizationGc(gpa, seed))) mfail += 1;
-            if (!(try runMidScriptModuleWorkerTerminateFinalizationGc(gpa, seed))) mfail += 1;
-            if (!(try runMidScriptWorkerTerminateThreadTeardownGc(gpa, seed))) mfail += 1;
-            if (!(try runMidScriptModuleWorkerTerminateThreadTeardownGc(gpa, seed))) mfail += 1;
-            if (!(try runMidScriptWorkerTerminateConditionAsyncCleanupGc(gpa, seed))) mfail += 1;
-            if (!(try runMidScriptModuleWorkerTerminateConditionAsyncCleanupGc(gpa, seed))) mfail += 1;
-            if (!(try runMidScriptWorkerTerminateWaitAsyncCleanupGc(gpa, seed))) mfail += 1;
-            if (!(try runMidScriptModuleWorkerTerminateWaitAsyncCleanupGc(gpa, seed))) mfail += 1;
-            if (!(try runMidScriptWorkerTerminateThreadLocalAsyncHoldCleanupGc(gpa, seed))) mfail += 1;
-            if (!(try runMidScriptModuleWorkerTerminateThreadLocalAsyncHoldCleanupGc(gpa, seed))) mfail += 1;
-            if (!(try runMidScriptWeakCollectionGc(gpa, seed))) mfail += 1;
+            try runWatchedSeedCase(.midgc, runMidScriptWaitPumpGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, runMidScriptTerminationReactionGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, runMidScriptPromisePublicationGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, runMidScriptPropertyWaitAsyncLateSettlementGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, runMidScriptMicrotaskChurnGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, runMidScriptLateAsyncJoinCleanupGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, runMidScriptLateAsyncJoinRejectCleanupGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, runMidScriptCreatorOwnedBufferGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, runMidScriptSyncWaitCleanupGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, runMidScriptSyncWaitBurstCleanupGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, runMidScriptSyncTimeoutGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, runMidScriptAtomicsMutexLockIfAvailableGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, runMidScriptAtomicsConditionWaitGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, runMidScriptAsyncHoldReleaseWaiterCleanupGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, runMidScriptAsyncHoldThrowFinalizationGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, runMidScriptNestedThreadAsyncJoinCleanupGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, runMidScriptFinalizationAsyncJoinCleanupGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, runMidScriptWaitAsyncFinalizationGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, runMidScriptConditionAsyncFinalizationGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, runMidScriptThreadLocalLifecycleGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, runMidScriptThreadLocalFinalizationGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, runMidScriptThreadLocalTerminationCleanupGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, runMidScriptThreadRestrictLifecycleGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, runMidScriptThreadRestrictFinalizationGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, runMidScriptWorkerCreatorOwnedBufferCleanupGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, runMidScriptModuleWorkerCreatorOwnedBufferCleanupGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, runMidScriptWorkerCleanupGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, runMidScriptModuleWorkerCleanupGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, runMidScriptWorkerThreadFinalizationGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, runMidScriptModuleWorkerThreadFinalizationGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, runMidScriptWorkerExceptionCleanupGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, runMidScriptModuleWorkerExceptionCleanupGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, runMidScriptWorkerCloseTerminateGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, runMidScriptModuleWorkerCloseTerminateGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, runMidScriptWorkerTerminateFinalizationGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, runMidScriptModuleWorkerTerminateFinalizationGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, runMidScriptWorkerTerminateThreadTeardownGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, runMidScriptModuleWorkerTerminateThreadTeardownGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, runMidScriptWorkerTerminateConditionAsyncCleanupGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, runMidScriptModuleWorkerTerminateConditionAsyncCleanupGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, runMidScriptWorkerTerminateWaitAsyncCleanupGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, runMidScriptModuleWorkerTerminateWaitAsyncCleanupGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, runMidScriptWorkerTerminateThreadLocalAsyncHoldCleanupGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, runMidScriptModuleWorkerTerminateThreadLocalAsyncHoldCleanupGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, runMidScriptWeakCollectionGc, gpa, seed, &mfail);
         }
         std.debug.print("threadfuzz midgc: {d} programs from seed {d}, {d} failures\n", .{ iters * 45, base_seed, mfail });
         if (mfail != 0) std.process.exit(1);
