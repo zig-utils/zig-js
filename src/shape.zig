@@ -17,6 +17,50 @@
 
 const std = @import("std");
 
+pub const ShapeStats = struct {
+    transition_requests: u64 = 0,
+    transition_hits: u64 = 0,
+    transition_misses: u64 = 0,
+    transition_lock_yields: u64 = 0,
+};
+
+const ShapeCounters = struct {
+    transition_requests: std.atomic.Value(u64) = .init(0),
+    transition_hits: std.atomic.Value(u64) = .init(0),
+    transition_misses: std.atomic.Value(u64) = .init(0),
+    transition_lock_yields: std.atomic.Value(u64) = .init(0),
+};
+
+var shape_counters: ShapeCounters = .{};
+var shape_stats_enabled: std.atomic.Value(bool) = .init(false);
+
+pub fn resetShapeStats() void {
+    shape_stats_enabled.store(false, .release);
+    shape_counters.transition_requests.store(0, .release);
+    shape_counters.transition_hits.store(0, .release);
+    shape_counters.transition_misses.store(0, .release);
+    shape_counters.transition_lock_yields.store(0, .release);
+    shape_stats_enabled.store(true, .release);
+}
+
+pub fn disableShapeStats() void {
+    shape_stats_enabled.store(false, .release);
+}
+
+pub fn shapeStats() ShapeStats {
+    return .{
+        .transition_requests = shape_counters.transition_requests.load(.acquire),
+        .transition_hits = shape_counters.transition_hits.load(.acquire),
+        .transition_misses = shape_counters.transition_misses.load(.acquire),
+        .transition_lock_yields = shape_counters.transition_lock_yields.load(.acquire),
+    };
+}
+
+inline fn bumpShapeStat(comptime field: []const u8) void {
+    if (!shape_stats_enabled.load(.monotonic)) return;
+    _ = @field(shape_counters, field).fetchAdd(1, .monotonic);
+}
+
 pub const Shape = struct {
     /// The shape this one extends (null for the root/empty shape).
     parent: ?*Shape,
@@ -57,10 +101,15 @@ pub const Shape = struct {
     /// `name` added to the same shape always returns the same child, so objects
     /// share structure.
     pub fn transition(self: *Shape, name: []const u8) std.mem.Allocator.Error!*Shape {
+        bumpShapeStat("transition_requests");
         self.lockTransitions();
         defer self.transition_lock.unlock();
 
-        if (self.transitions.get(name)) |child| return child;
+        if (self.transitions.get(name)) |child| {
+            bumpShapeStat("transition_hits");
+            return child;
+        }
+        bumpShapeStat("transition_misses");
         const owned = try self.arena.dupe(u8, name);
         const child = try self.arena.create(Shape);
         child.* = .{
@@ -78,6 +127,7 @@ pub const Shape = struct {
         var spins: usize = 0;
         while (!self.transition_lock.tryLock()) : (spins += 1) {
             if ((spins & 0xff) == 0) {
+                bumpShapeStat("transition_lock_yields");
                 std.Thread.yield() catch {};
             } else {
                 std.atomic.spinLoopHint();
@@ -102,6 +152,34 @@ test "shape transitions share structure and assign sequential slots" {
     const sa2 = try root.transition("a");
     const sab2 = try sa2.transition("b");
     try std.testing.expectEqual(sab, sab2);
+}
+
+test "shape transition stats reset and snapshot" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try Shape.createRoot(a);
+
+    disableShapeStats();
+    _ = try root.transition("off");
+    try std.testing.expectEqual(@as(u64, 0), shapeStats().transition_requests);
+
+    resetShapeStats();
+    const one = try root.transition("a");
+    const two = try root.transition("a");
+    try std.testing.expectEqual(one, two);
+
+    const stats = shapeStats();
+    try std.testing.expectEqual(@as(u64, 2), stats.transition_requests);
+    try std.testing.expectEqual(@as(u64, 1), stats.transition_hits);
+    try std.testing.expectEqual(@as(u64, 1), stats.transition_misses);
+
+    resetShapeStats();
+    try std.testing.expectEqual(@as(u64, 0), shapeStats().transition_requests);
+    try std.testing.expectEqual(@as(u64, 0), shapeStats().transition_hits);
+    try std.testing.expectEqual(@as(u64, 0), shapeStats().transition_misses);
+    try std.testing.expectEqual(@as(u64, 0), shapeStats().transition_lock_yields);
+    disableShapeStats();
 }
 
 test "shape transitions converge under concurrent same-name insertion" {

@@ -201,7 +201,10 @@ Issue #1 remains the umbrella status page.
   delivery, Worker/agent queues, shared-buffer lifetime churn, collection
   helpers, and GC allocation. Its `lcnt` and `aq` columns split direct contended
   `Lock.hold` attempts from queued `Lock.asyncHold` grants inside the aggregate
-  `events` total. Its `joins` columns split `Thread.join` parks
+  `events` total, while `shape`/`newsh`/`syld` split hidden-class transition
+  requests, newly-created child shapes, and transition-lock yields so
+  object/property rows can separate cached shape convergence from later
+  slot/element work. Its `joins` columns split `Thread.join` parks
   from aggregate park pressure, its `lock`/`cond`/`prop`
   columns split the remaining sync park pressure by contended `Lock.hold`,
   `Condition.wait`, and property `Atomics.wait`, its

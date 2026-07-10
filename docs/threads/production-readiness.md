@@ -263,7 +263,9 @@ Known performance/maturity work:
   release-function delivery, and thread lifecycle churn. Each row enables and
   includes internal contention counters:
   `events` count logical contention (`Lock`/`Condition`/property wait and
-  queued `asyncHold` grants), `lcnt` and `aq` split direct contended
+  queued `asyncHold` grants), `shape`/`newsh`/`syld` report hidden-class
+  transition requests, newly-created child shapes, and transition-lock yields,
+  `lcnt` and `aq` split direct contended
   `Lock.hold` attempts from queued `Lock.asyncHold` grants inside that total,
   `parks` count timed wait/pump iterations including `Thread.join`, `joins`
   split the `Thread.join` subset out of aggregate parks for lifecycle

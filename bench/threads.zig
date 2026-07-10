@@ -24,6 +24,7 @@ const Scenario = struct {
 const Timing = struct {
     ns: u64,
     stats: js.jsthread.ContentionStats,
+    shape: js.shape.ShapeStats,
 };
 
 const WorkerTiming = struct {
@@ -479,7 +480,9 @@ fn timeScenario(gpa: std.mem.Allocator, io: std.Io, scenario: Scenario, workers:
     _ = try ctx.evaluate(src);
 
     js.jsthread.resetContentionStats();
+    js.shape.resetShapeStats();
     errdefer js.jsthread.disableContentionStats();
+    errdefer js.shape.disableShapeStats();
     const t0 = nowNs(io);
     var round: usize = 0;
     while (round < scenario.rounds) : (round += 1) {
@@ -492,23 +495,29 @@ fn timeScenario(gpa: std.mem.Allocator, io: std.Io, scenario: Scenario, workers:
         try machine.drainMicrotasks();
     }
     const stats = js.jsthread.contentionStats();
+    const shape = js.shape.shapeStats();
     js.jsthread.disableContentionStats();
+    js.shape.disableShapeStats();
     return .{
         .ns = @intCast(nowNs(io) - t0),
         .stats = stats,
+        .shape = shape,
     };
 }
 
 fn printScenario(gpa: std.mem.Allocator, io: std.Io, scenario: Scenario, workers: []const usize) !void {
     std.debug.print("\n{s}\n", .{scenario.name});
     std.debug.print("{s:>8} {s:>14} {s:>14} {s:>12} {s:>12}" ++
-        " {s:>10} {s:>9} {s:>9} {s:>10} {s:>10} {s:>9} {s:>9} {s:>9} {s:>10} {s:>9} {s:>9} {s:>9} {s:>9} {s:>10} {s:>10} {s:>9} {s:>9} {s:>9} {s:>9} {s:>10} {s:>10} {s:>10} {s:>10}", .{
+        " {s:>10} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>10} {s:>10} {s:>9} {s:>9} {s:>9} {s:>10} {s:>9} {s:>9} {s:>9} {s:>9} {s:>10} {s:>10} {s:>9} {s:>9} {s:>9} {s:>9} {s:>10} {s:>10} {s:>10} {s:>10}", .{
         "threads",
         "no-gil ns",
         "gil ns",
         "no-gil x1",
         "vs gil",
         "ng events",
+        "ng shape",
+        "ng newsh",
+        "ng syld",
         "ng lcnt",
         "ng aq",
         "ng parks",
@@ -532,8 +541,11 @@ fn printScenario(gpa: std.mem.Allocator, io: std.Io, scenario: Scenario, workers
         "ng hold",
         "ng cjob",
     });
-    std.debug.print(" {s:>10} {s:>9} {s:>9} {s:>10} {s:>10} {s:>9} {s:>9} {s:>9} {s:>10} {s:>9} {s:>9} {s:>9} {s:>9} {s:>10} {s:>10} {s:>9} {s:>9} {s:>9} {s:>9} {s:>10} {s:>10} {s:>10} {s:>10}\n", .{
+    std.debug.print(" {s:>10} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>10} {s:>10} {s:>9} {s:>9} {s:>9} {s:>10} {s:>9} {s:>9} {s:>9} {s:>9} {s:>10} {s:>10} {s:>9} {s:>9} {s:>9} {s:>9} {s:>10} {s:>10} {s:>10} {s:>10}\n", .{
         "gil events",
+        "gil shape",
+        "gil newsh",
+        "gil syld",
         "gil lcnt",
         "gil aq",
         "gil parks",
@@ -573,13 +585,16 @@ fn printScenario(gpa: std.mem.Allocator, io: std.Io, scenario: Scenario, workers
             @as(f64, @floatFromInt(@max(parallel_ns, 1)));
 
         std.debug.print("{d:>8} {d:>14} {d:>14} {d:>11.2}x {d:>11.2}x" ++
-            " {d:>10} {d:>9} {d:>9} {d:>10} {d:>10} {d:>9} {d:>9} {d:>9} {d:>10} {d:>9} {d:>9} {d:>9} {d:>9} {d:>10} {d:>10} {d:>9} {d:>9} {d:>9} {d:>9} {d:>10} {d:>10} {d:>10} {d:>10}", .{
+            " {d:>10} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>10} {d:>10} {d:>9} {d:>9} {d:>9} {d:>10} {d:>9} {d:>9} {d:>9} {d:>9} {d:>10} {d:>10} {d:>9} {d:>9} {d:>9} {d:>9} {d:>10} {d:>10} {d:>10} {d:>10}", .{
             n,
             parallel_ns,
             gil_ns,
             scaling,
             vs_gil,
             parallel.stats.events(),
+            parallel.shape.transition_requests,
+            parallel.shape.transition_misses,
+            parallel.shape.transition_lock_yields,
             parallel.stats.lock_contentions,
             parallel.stats.async_hold_queued,
             parallel.stats.parks(),
@@ -603,8 +618,11 @@ fn printScenario(gpa: std.mem.Allocator, io: std.Io, scenario: Scenario, workers
             parallel.stats.task_pump_async_hold_jobs,
             parallel.stats.task_pump_condition_jobs,
         });
-        std.debug.print(" {d:>10} {d:>9} {d:>9} {d:>10} {d:>10} {d:>9} {d:>9} {d:>9} {d:>10} {d:>9} {d:>9} {d:>9} {d:>9} {d:>10} {d:>10} {d:>9} {d:>9} {d:>9} {d:>9} {d:>10} {d:>10} {d:>10} {d:>10}\n", .{
+        std.debug.print(" {d:>10} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>10} {d:>10} {d:>9} {d:>9} {d:>9} {d:>10} {d:>9} {d:>9} {d:>9} {d:>9} {d:>10} {d:>10} {d:>9} {d:>9} {d:>9} {d:>9} {d:>10} {d:>10} {d:>10} {d:>10}\n", .{
             gil.stats.events(),
+            gil.shape.transition_requests,
+            gil.shape.transition_misses,
+            gil.shape.transition_lock_yields,
             gil.stats.lock_contentions,
             gil.stats.async_hold_queued,
             gil.stats.parks(),
@@ -1090,6 +1108,7 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("zig-js shared-realm Thread contention profile\n", .{});
     std.debug.print("cores: {d}; no-GIL is Context.createWith(.{{ .enable_threads = true }}), serialized is .gil = true\n", .{cores});
     std.debug.print("events = logical contention (Lock/Condition/property wait/asyncHold); parks = timed wait/pump iterations including Thread.join\n", .{});
+    std.debug.print("shape/newsh/syld = hidden-class transition requests / newly-created child shapes / transition-lock yields\n", .{});
     std.debug.print("lcnt/aq = direct contended Lock.hold attempts / queued Lock.asyncHold grants, split out from events\n", .{});
     std.debug.print("joins = Thread.join timed wait/pump iterations, separated from other park sources for lifecycle attribution\n", .{});
     std.debug.print("lock/cond/prop = park iterations attributed to contended Lock.hold, Condition.wait, and property Atomics.wait\n", .{});

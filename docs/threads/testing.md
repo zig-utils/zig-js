@@ -460,7 +460,10 @@ observed `Lock.asyncHold` callback settlement, no-fn `Lock.asyncHold`
 release-function delivery, and thread lifecycle churn.
 Its opt-in counters let
 `events` count logical contention in `Lock`/`Condition`/property waits and
-queued `asyncHold` grants. The `lcnt` and `aq` columns split direct contended
+queued `asyncHold` grants. The `shape`/`newsh`/`syld` columns report hidden-class
+transition requests, newly-created child shapes, and transition-lock yields, so
+object/property rows can distinguish cached shape convergence from slot/element
+work. The `lcnt` and `aq` columns split direct contended
 `Lock.hold` attempts from queued `Lock.asyncHold` grants inside that total, and
 `parks` count timed wait/pump iterations including `Thread.join`. The `joins`
 columns split the `Thread.join` subset out of aggregate parks so lifecycle churn
