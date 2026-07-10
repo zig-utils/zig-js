@@ -739,7 +739,7 @@ pub fn ownEnumerableKeys(self: *Interpreter, o: *value.Object) HostError![]const
 fn ownValueOf(o: *value.Object, key: []const u8) Value {
     if (o.is_array) {
         if (arrayIndexOf(key)) |i| {
-            if (i < o.elements.items.len) return o.elements.items[i];
+            if (o.denseElement(i)) |v| return v;
         }
     }
     return o.getOwn(key) orelse Value.undef();
@@ -786,7 +786,10 @@ fn enumerableOwnProperties(self: *Interpreter, arg0: Value, kind: EnumKind) Host
             // An Array's / TypedArray's "length" is a non-enumerable own property.
             false
         else
-            ((interpreter.objectHasOwn(o, k) or (o.is_array and arrayIndexOf(k) != null and arrayIndexOf(k).? < o.elements.items.len and !o.isHole(arrayIndexOf(k).?))) and o.getAttr(k).enumerable);
+            ((interpreter.objectHasOwn(o, k) or (if (o.is_array) blk: {
+                const idx = arrayIndexOf(k) orelse break :blk false;
+                break :blk o.denseElementPresent(idx);
+            } else false)) and o.getAttr(k).enumerable);
         if (!enumerable) continue;
         if (kind == .key) {
             try result.asObj().elements.append(result.asObj().elementsAllocator(self.arena), Value.str(k));
@@ -859,7 +862,10 @@ pub fn objectAssign(ctx: *anyopaque, this: Value, args: []const Value) HostError
             else if ((from.is_array or from.typed_array != null) and std.mem.eql(u8, k, "length"))
                 false
             else
-                ((interpreter.objectHasOwn(from, k) or (from.is_array and arrayIndexOf(k) != null and arrayIndexOf(k).? < from.elements.items.len and !from.isHole(arrayIndexOf(k).?))) and from.getAttr(k).enumerable);
+                ((interpreter.objectHasOwn(from, k) or (if (from.is_array) blk: {
+                    const idx = arrayIndexOf(k) orelse break :blk false;
+                    break :blk from.denseElementPresent(idx);
+                } else false)) and from.getAttr(k).enumerable);
             if (!enumerable) continue;
             // Get(from, key) runs a source getter, then Set(to, key, v, true) —
             // assignment to a read-only / non-extensible / setter-less target
@@ -2029,8 +2035,8 @@ fn lockKeys(self: *Interpreter, o: *value.Object, freeze: bool) HostError!void {
     // Dense element indices live in `elements` (not the shape), so they aren't
     // in `ownKeys` — lock each present one, plus Array `length` below.
     var i: usize = 0;
-    while (i < o.elements.items.len) : (i += 1) {
-        if (o.isHole(i)) continue;
+    while (i < o.elementsLen()) : (i += 1) {
+        if (!o.denseElementPresent(i)) continue;
         var kb: [24]u8 = undefined;
         const k = std.fmt.bufPrint(&kb, "{d}", .{i}) catch unreachable;
         var a = o.getAttr(k);
@@ -2087,8 +2093,8 @@ fn isLocked(self: *Interpreter, ov: Value, frozen: bool) HostError!bool {
     // non-writable). A frozen array additionally needs non-writable `length`.
     // Holes carry no property, so they don't block.
     var i: usize = 0;
-    while (i < o.elements.items.len) : (i += 1) {
-        if (o.isHole(i)) continue;
+    while (i < o.elementsLen()) : (i += 1) {
+        if (!o.denseElementPresent(i)) continue;
         var kb: [24]u8 = undefined;
         const k = std.fmt.bufPrint(&kb, "{d}", .{i}) catch unreachable;
         const a = o.getAttr(k);
@@ -2343,8 +2349,8 @@ pub fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, this: Value, args: []cons
     }
     if (!o.is_array) {
         if (arrayIndexOf(key)) |i| {
-            if (i < o.elements.items.len and !o.isHole(i))
-                return dataDescriptor(self, o.elements.items[i], o.getAttr(key));
+            if (o.denseElement(i)) |el|
+                return dataDescriptor(self, el, o.getAttr(key));
         }
     }
     if (o.is_array) {
@@ -2353,7 +2359,7 @@ pub fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, this: Value, args: []cons
         // one is absent), so exclude it here.
         if (!o.is_arguments and std.mem.eql(u8, key, "length")) {
             const w = if (o.attrsMap() != null) o.getAttr("length").writable else true;
-            return dataDescriptor(self, Value.num(@floatFromInt(@max(o.elements.items.len, o.array_len))), .{ .writable = w, .enumerable = false, .configurable = false });
+            return dataDescriptor(self, Value.num(@floatFromInt(o.arrayLength())), .{ .writable = w, .enumerable = false, .configurable = false });
         }
         if (arrayIndexOf(key)) |i| {
             // A mapped arguments index reports its current parameter binding value.
@@ -2361,8 +2367,8 @@ pub fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, this: Value, args: []cons
                 return dataDescriptor(self, bv, o.getAttr(key));
             // Per-index attributes recorded by `defineProperty` override the
             // all-true default for a dense element.
-            if (i < o.elements.items.len and !o.isHole(i))
-                return dataDescriptor(self, o.elements.items[i], o.getAttr(key));
+            if (o.denseElement(i)) |el|
+                return dataDescriptor(self, el, o.getAttr(key));
         }
     }
     return Value.undef();
