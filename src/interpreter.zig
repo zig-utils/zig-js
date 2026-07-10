@@ -1739,10 +1739,12 @@ pub const Interpreter = struct {
         // be mutating `vars`/`aliases` through `Environment.put` (which locks),
         // so an unlocked `.get` here races the grow — the systemic no-GIL
         // Environment race the Linux-TSan corpus gate surfaced (it hit even
-        // smoke.js: main defines a global while a worker resolves one). In the
-        // default engine `binding_locks_enabled` is false, so `lockBindings` is a
-        // single relaxed-ish load that returns immediately — the walk stays
-        // lock-free and full-speed.
+        // smoke.js: main defines a global while a worker resolves one). Binding
+        // locks intentionally start enabled process-wide: concurrent context
+        // creation can otherwise flip the flag between a helper's lock load and
+        // its paired unlock load. If this becomes a proven hot-path bottleneck,
+        // replace the gate with an acquisition token rather than reintroducing
+        // false→true transitions.
         var env: ?*Environment = self.env;
         while (env) |e| {
             e.lockBindings();

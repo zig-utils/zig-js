@@ -38,6 +38,20 @@ const PromiseTiming = struct {
     promise: js.promise_profile.PromiseStats,
 };
 
+const PromiseMode = enum {
+    no_gil,
+    gil,
+    gil_gc,
+
+    fn options(mode: PromiseMode) js.Context.Options {
+        return switch (mode) {
+            .no_gil => .{ .enable_threads = true },
+            .gil => .{ .enable_threads = true, .gil = true },
+            .gil_gc => .{ .enable_threads = true, .gil = true, .enable_gc = true },
+        };
+    }
+};
+
 const worker_message_batches = 160;
 const worker_empty_receive_polls = 3000;
 const worker_lifecycle_rounds = 12;
@@ -531,11 +545,8 @@ fn timeScenario(gpa: std.mem.Allocator, io: std.Io, scenario: Scenario, workers:
     };
 }
 
-fn timePromiseScenario(gpa: std.mem.Allocator, io: std.Io, workers: usize, gil: bool) !PromiseTiming {
-    const ctx = try js.Context.createWith(gpa, .{
-        .enable_threads = true,
-        .gil = gil,
-    });
+fn timePromiseScenario(gpa: std.mem.Allocator, io: std.Io, workers: usize, mode: PromiseMode) !PromiseTiming {
+    const ctx = try js.Context.createWith(gpa, mode.options());
     defer ctx.destroy();
     try installHarness(ctx, promise_microtask_scenario);
 
@@ -564,15 +575,17 @@ fn timePromiseScenario(gpa: std.mem.Allocator, io: std.Io, workers: usize, gil: 
 
 fn printPromiseProfile(gpa: std.mem.Allocator, io: std.Io, workers: []const usize) !void {
     std.debug.print("\nPromise microtask profile\n", .{});
-    std.debug.print("enq/pop/run = microtask queue enqueues, pops, and job runs; qlock/qyld = queue-lock acquisitions / yield-backed contention; rxn/thn split reaction from thenable jobs\n", .{});
-    std.debug.print("{s:>8} {s:>14} {s:>14} {s:>12} {s:>12}" ++
+    std.debug.print("gil+gc = serialized fallback with GC-managed cells; enq/pop/run = microtask queue enqueues, pops, and job runs; qlock/qyld = queue-lock acquisitions / yield-backed contention; rxn/thn split reaction from thenable jobs\n", .{});
+    std.debug.print("{s:>8} {s:>14} {s:>14} {s:>14} {s:>12} {s:>12} {s:>12}" ++
         " {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>10}" ++
         " {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>10}\n", .{
         "threads",
         "no-gil ns",
         "gil ns",
+        "gil+gc ns",
         "no-gil x1",
         "vs gil",
+        "vs gil+gc",
         "ng enq",
         "ng pop",
         "ng run",
@@ -593,10 +606,12 @@ fn printPromiseProfile(gpa: std.mem.Allocator, io: std.Io, workers: []const usiz
 
     var base_parallel: u64 = 1;
     for (workers) |n| {
-        const parallel = try timePromiseScenario(gpa, io, n, false);
-        const gil = try timePromiseScenario(gpa, io, n, true);
+        const parallel = try timePromiseScenario(gpa, io, n, .no_gil);
+        const gil = try timePromiseScenario(gpa, io, n, .gil);
+        const gil_gc = try timePromiseScenario(gpa, io, n, .gil_gc);
         const parallel_ns = parallel.ns;
         const gil_ns = gil.ns;
+        const gil_gc_ns = gil_gc.ns;
         if (n == workers[0]) base_parallel = @max(parallel_ns, 1);
 
         const scaling = @as(f64, @floatFromInt(n)) *
@@ -604,15 +619,19 @@ fn printPromiseProfile(gpa: std.mem.Allocator, io: std.Io, workers: []const usiz
             @as(f64, @floatFromInt(@max(parallel_ns, 1)));
         const vs_gil = @as(f64, @floatFromInt(gil_ns)) /
             @as(f64, @floatFromInt(@max(parallel_ns, 1)));
+        const vs_gil_gc = @as(f64, @floatFromInt(gil_gc_ns)) /
+            @as(f64, @floatFromInt(@max(parallel_ns, 1)));
 
-        std.debug.print("{d:>8} {d:>14} {d:>14} {d:>11.2}x {d:>11.2}x" ++
+        std.debug.print("{d:>8} {d:>14} {d:>14} {d:>14} {d:>11.2}x {d:>11.2}x {d:>11.2}x" ++
             " {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>10}" ++
             " {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>10}\n", .{
             n,
             parallel_ns,
             gil_ns,
+            gil_gc_ns,
             scaling,
             vs_gil,
+            vs_gil_gc,
             parallel.promise.microtask_enqueues,
             parallel.promise.microtask_pops,
             parallel.promise.jobsRun(),

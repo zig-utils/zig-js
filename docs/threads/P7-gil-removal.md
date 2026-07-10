@@ -369,13 +369,13 @@ roadmap item repeats it.
    `isConst`/`isFnName`/`isAlias` now read each scope's binding tables under
    `binding_lock` (the writers `put`/`assign`/`putAlias`/`putConst`/`putFnName`
    lock the matching tables), so a reader can't tear against or read a freed table
-   from a concurrent rehash. The hot-path perf concern is handled by **gating all
-   binding locks on `Environment.binding_locks_enabled`** — set only for a
-   `concurrent_gc`/`parallel_gc` context, so the default GIL-serialized engine
-   leaves `lockBindings`/`unlockBindings` a single relaxed load (no CAS) and is
-   byte-identical/full-speed (verified: test262 unchanged at 90.7%, same run
-   time). Validated by a concurrent reader+writer test on a shared global env,
-   TSan-clean. (A seqlock/RCU read path remains a possible future optimization if
+   from a concurrent rehash. Binding locks now start enabled process-wide:
+   concurrent context creation proved that a false→true process flag can be
+   observed differently by a lock helper and its paired unlock helper during
+   create-time global setup. The remaining parallel/concurrent safety protocols
+   are still enabled as a unit for contexts that need them. Validated by a
+   concurrent reader+writer test on a shared global env, TSan-clean. (A
+   seqlock/RCU or per-call acquisition-token read path remains a possible future optimization if
    the lock proves a parallel-throughput bottleneck, but it is no longer a
    correctness blocker.)
    *Residual instance found + fixed (the "`StringHashMap`-grow panic" in the
@@ -654,10 +654,15 @@ promoted `parallel_js` allowlist now runs clean. (6)
 The contention profiler now also has a focused `promise microtasks` case for
 issue #15: it keeps the default table narrow, but records Promise microtask
 enqueue/pop/run totals and splits reaction jobs from thenable-assimilation jobs
-under no-GIL versus `.gil = true`.
+under no-GIL versus `.gil = true`. A third `gil+gc` timing column keeps the
+serialized path on GC-managed cells, which separates GC/cell-management overhead
+from queue-lock and parallel scheduling overhead.
 That profile led to one contention reduction: no-GIL interpreters now lock the
 current `MicrotaskQueue` rather than a realm-wide lock, so independent
 spawned-thread Promise drains no longer serialize on the host queue.
+The drain path also moves the currently pending burst into an interpreter-local
+batch under one queue lock before running jobs unlocked; GC traces that active
+batch separately from the queue.
 What now gates the GIL drop is the
 whole-corpus TSan campaign +
 serial-perf gate. The two *named* remaining rare no-GIL races are now both

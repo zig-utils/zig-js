@@ -1704,7 +1704,8 @@ pub fn defineOneResult(self: *Interpreter, target: *value.Object, key: []const u
     // `growDenseElement` mutates `elements` under `lockElements`, so raw
     // `elements.items` reads here race the grow on the no-GIL path (Linux
     // tsan-nogil-corpus: main objectDefineProperty vs worker Atomics.store grow).
-    // `element_locks_enabled` is false in the default engine → these are lock-free.
+    // Element-store reads go through the locked accessors so a peer thread's
+    // `growDenseElement` cannot race this generic descriptor path.
     var dense_elem_index: ?usize = null;
     if (target.getAccessor(key) == null) {
         if (arrayIndexOf(key)) |i| {

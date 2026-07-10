@@ -1033,10 +1033,9 @@ pub const Object = struct {
         @atomicStore(?*Object, &self.proto, p, .monotonic);
     }
 
-    /// Gate for the per-object `elements_lock`, mirroring
-    /// `Environment.binding_locks_enabled`: set only for a `concurrent_gc` /
-    /// `parallel_gc` context (mutators in parallel or a concurrent marker). The
-    /// single-threaded and `.gil = true` engines leave
+    /// Gate for the per-object `elements_lock`, enabled by the
+    /// parallel/concurrent synchronization protocol (mutators in parallel or a
+    /// concurrent marker). The single-threaded and `.gil = true` engines leave
     /// `lockElements`/`unlockElements` as a single relaxed-ish load and return —
     /// the hot dense-element read/write paths stay lock-free and full-speed.
     pub var element_locks_enabled: std.atomic.Value(bool) = .init(false);
