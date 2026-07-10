@@ -445,10 +445,10 @@ const Deserializer = struct {
                 while (i < n) : (i += 1) {
                     const hole = (d.r.byte() catch return d.fail()) != 0;
                     if (hole) {
-                        try arr.elements.append(arr.elementsAllocator(a), Value.undef());
+                        try arr.appendElement(a, Value.undef());
                         try arr.markHole(a, i);
                     } else {
-                        try arr.elements.append(arr.elementsAllocator(a), try d.deser());
+                        try arr.appendElement(a, try d.deser());
                     }
                 }
                 arr.array_len = len;
@@ -486,10 +486,10 @@ const Deserializer = struct {
                     const k = try d.deser();
                     const v = try d.deser();
                     const pair = (try d.self.newArray()).asObj();
-                    try pair.elements.append(pair.elementsAllocator(a), k);
-                    try pair.elements.append(pair.elementsAllocator(a), v);
+                    try pair.appendElement(a, k);
+                    try pair.appendElement(a, v);
                     pair.array_len = 2;
-                    try o.elements.append(o.elementsAllocator(a), Value.obj(pair));
+                    try o.appendInternalElement(a, Value.obj(pair));
                 }
                 return Value.obj(o);
             },
@@ -500,7 +500,7 @@ const Deserializer = struct {
                 if (d.protoFor("Set")) |p| o.proto = p;
                 const n = d.r.int(u32) catch return d.fail();
                 var i: u32 = 0;
-                while (i < n) : (i += 1) try o.elements.append(o.elementsAllocator(a), try d.deser());
+                while (i < n) : (i += 1) try o.appendInternalElement(a, try d.deser());
                 return Value.obj(o);
             },
             .error_obj => {

@@ -1105,6 +1105,17 @@ pub const Object = struct {
         try self.elements.append(self.elementsAllocator(arena), v);
     }
 
+    /// Append to `elements` when it is used as engine/private side storage
+    /// rather than observable indexed properties (for example Map/Set backing
+    /// entries). This keeps the same lock + GC barrier discipline as
+    /// `appendElement` without changing `indexed_own_seen`.
+    pub fn appendInternalElement(self: *Object, arena: std.mem.Allocator, v: Value) std.mem.Allocator.Error!void {
+        self.lockElements();
+        defer self.unlockElements();
+        gcBarrier(self, v);
+        try self.elements.append(self.elementsAllocator(arena), v);
+    }
+
     /// Atomic fast path for `Array.prototype.push` on a packed dense Array.
     /// Returns the new logical length, or null when holes/sparse tail require
     /// the full observable `[[Set]]` path.
