@@ -17308,13 +17308,15 @@ fn iterHelperNextFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
             while (true) {
                 if (h.inner == null) {
                     const idx: usize = @intFromFloat(h.counter);
-                    if (idx >= srcs.elements.items.len) {
+                    if (idx >= srcs.elementsLen()) {
                         h.done = true;
                         return self.iterResultObj(Value.undef(), true);
                     }
                     h.counter += 1;
                     // Open the source with its pre-captured @@iterator method.
-                    const it = try self.callValueWithThis(h.func.asObj().elements.items[idx], &.{}, srcs.elements.items[idx]);
+                    const method = h.func.asObj().elementAt(idx) orelse Value.undef();
+                    const src = srcs.elementAt(idx) orelse Value.undef();
+                    const it = try self.callValueWithThis(method, &.{}, src);
                     if (!it.isObject()) return self.throwError("TypeError", "Iterator.concat: @@iterator did not return an object");
                     h.inner = it;
                 }
@@ -17332,7 +17334,7 @@ fn iterHelperNextFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
             // strict); `padding` = per-source padding (longest); `func` = key
             // array (zip_keyed). Implements the IteratorZip abstract closure.
             h.started = true; // the generator has run (→ "suspended-yield")
-            const iters = h.src.asObj().elements.items;
+            const iters = try h.src.asObj().internalElementsSnapshot(self.arena);
             const flags = h.inner.?.asObj();
             const n = iters.len;
             if (n == 0) {
@@ -17344,26 +17346,26 @@ fn iterHelperNextFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
             try results.elements.ensureTotalCapacity(results.elementsAllocator(self.arena), n);
             var i: usize = 0;
             while (i < n) : (i += 1) {
-                if (flags.elements.items[i].toBoolean()) {
+                if ((flags.elementAt(i) orelse Value.undef()).toBoolean()) {
                     // openIters[i] is null — longest padding.
-                    const pad = if (h.padding.isObject() and i < h.padding.asObj().elements.items.len) h.padding.asObj().elements.items[i] else Value.undef();
-                    try results.elements.append(results.elementsAllocator(self.arena), pad);
+                    const pad = if (h.padding.isObject()) h.padding.asObj().elementAt(i) orelse Value.undef() else Value.undef();
+                    try results.appendElement(self.arena, pad);
                     continue;
                 }
                 // IteratorStepValue(openIters[i]); an abrupt completion closes the
                 // remaining open iterators (reverse order) and propagates.
                 const s = self.iterStep(iters[i]) catch {
-                    flags.elements.items[i] = Value.boolVal(true);
+                    _ = flags.setElementAt(i, Value.boolVal(true));
                     h.done = true;
                     try zipCloseAll(self, iters, flags, true);
                     return error.Throw;
                 };
                 if (!s.done) {
-                    try results.elements.append(results.elementsAllocator(self.arena), s.value);
+                    try results.appendElement(self.arena, s.value);
                     continue;
                 }
                 // The source is done — remove it from openIters.
-                flags.elements.items[i] = Value.boolVal(true);
+                _ = flags.setElementAt(i, Value.boolVal(true));
                 switch (mode) {
                     0 => { // shortest: close the rest and finish.
                         h.done = true;
@@ -17380,9 +17382,9 @@ fn iterHelperNextFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
                         // i == 0: each remaining source must also be done now.
                         var k: usize = 1;
                         while (k < n) : (k += 1) {
-                            if (flags.elements.items[k].toBoolean()) continue;
+                            if ((flags.elementAt(k) orelse Value.undef()).toBoolean()) continue;
                             const kdone = self.iterStepDoneOnly(iters[k]) catch {
-                                flags.elements.items[k] = Value.boolVal(true);
+                                _ = flags.setElementAt(k, Value.boolVal(true));
                                 try zipCloseAll(self, iters, flags, true);
                                 return error.Throw;
                             };
@@ -17391,20 +17393,21 @@ fn iterHelperNextFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
                                 try zipCloseAll(self, iters, flags, true);
                                 return error.Throw;
                             }
-                            flags.elements.items[k] = Value.boolVal(true);
+                            _ = flags.setElementAt(k, Value.boolVal(true));
                         }
                         return self.iterResultObj(Value.undef(), true);
                     },
                     else => { // longest: pad this slot and continue.
-                        const pad = if (h.padding.isObject() and i < h.padding.asObj().elements.items.len) h.padding.asObj().elements.items[i] else Value.undef();
-                        try results.elements.append(results.elementsAllocator(self.arena), pad);
+                        const pad = if (h.padding.isObject()) h.padding.asObj().elementAt(i) orelse Value.undef() else Value.undef();
+                        try results.appendElement(self.arena, pad);
                     },
                 }
             }
             // Longest mode: finish once every source has been removed.
             var all_null = true;
-            for (flags.elements.items[0..n]) |f| {
-                if (!f.toBoolean()) {
+            var flag_i: usize = 0;
+            while (flag_i < n) : (flag_i += 1) {
+                if (!(flags.elementAt(flag_i) orelse Value.undef()).toBoolean()) {
                     all_null = false;
                     break;
                 }
@@ -17416,12 +17419,13 @@ fn iterHelperNextFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
             if (h.kind == .zip) return self.iterResultObj(Value.obj(results), false);
             // zip_keyed: OrdinaryObjectCreate(null) with one data property per
             // key (CreateDataPropertyOrThrow → writable/enumerable/configurable).
-            const keys = h.func.asObj().elements.items;
+            const keys = try h.func.asObj().internalElementsSnapshot(self.arena);
             const obj = (try self.newObject()).asObj();
             obj.setProtoAtomic(null);
             var k: usize = 0;
-            while (k < keys.len and k < results.elements.items.len) : (k += 1) {
-                try self.setProp(obj, keys[k].asStr(), results.elements.items[k]);
+            const result_len = results.elementsLen();
+            while (k < keys.len and k < result_len) : (k += 1) {
+                try self.setProp(obj, keys[k].asStr(), results.elementAt(k) orelse Value.undef());
             }
             return self.iterResultObj(Value.obj(obj), false);
         },
@@ -17439,7 +17443,7 @@ fn zipCloseAll(self: *Interpreter, iters: []Value, flags: *value.Object, pending
     var i: usize = iters.len;
     while (i > 0) {
         i -= 1;
-        if (i < flags.elements.items.len and flags.elements.items[i].toBoolean()) continue;
+        if ((flags.elementAt(i) orelse Value.undef()).toBoolean()) continue;
         if (thrown) {
             self.iteratorClose(iters[i]) catch {};
             self.exception = pending_val; // a throw completion discards close errors
@@ -17511,7 +17515,8 @@ fn iterHelperReturnFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
                     // during the close, so a re-entrant call throws TypeError.
                     // "suspended-start" (never stepped) → state is "completed",
                     // so a re-entrant call just returns {undefined, done:true}.
-                    try zipCloseAll(self, h.src.asObj().elements.items, h.inner.?.asObj(), false);
+                    const iters = try h.src.asObj().internalElementsSnapshot(self.arena);
+                    try zipCloseAll(self, iters, h.inner.?.asObj(), false);
                 }
                 return self.iterResultObj(Value.undef(), true);
             },

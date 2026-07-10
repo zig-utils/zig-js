@@ -1395,6 +1395,18 @@ pub const Object = struct {
         return out;
     }
 
+    /// Snapshot internal element-backed tuples/lists under `elements_lock`.
+    /// Unlike `packedDenseElementsSnapshot`, this does not apply Array iteration
+    /// semantics; callers use it only for engine-owned element lists such as
+    /// iterator-helper source arrays.
+    pub fn internalElementsSnapshot(self: *const Object, arena: std.mem.Allocator) std.mem.Allocator.Error![]Value {
+        self.lockElements();
+        defer self.unlockElements();
+        const out = try arena.alloc(Value, self.elements.items.len);
+        @memcpy(out, self.elements.items);
+        return out;
+    }
+
     pub fn denseElementLimit(self: *const Object, logical_len: usize) usize {
         self.lockElements();
         defer self.unlockElements();
