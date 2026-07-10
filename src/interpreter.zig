@@ -14794,8 +14794,7 @@ fn promiseResolveAfterTick(self: *Interpreter, v: Value) EvalError!Value {
     const rp: *promise.Promise = @ptrCast(@alignCast(result.promise.?));
     const tick = try promise.newPromise(self);
     const tp: *promise.Promise = @ptrCast(@alignCast(tick.promise.?));
-    const nr = try promise.nativeResolveReject(self, rp);
-    try promise.performThen(self, tp, Value.undef(), Value.undef(), nr.resolve, nr.reject);
+    try promise.performThenResult(self, tp, Value.undef(), Value.undef(), rp);
     try promise.resolve(self, tp, v);
     return Value.obj(result);
 }

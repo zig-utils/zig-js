@@ -3630,8 +3630,7 @@ pub const Context = struct {
         data.* = .{ .namespace = ns };
         onf.* = .{ .native = moduleNamespaceResume, .private_data = @ptrCast(data) };
         try interp.installNativeProps(self.arena(), machine.root_shape, onf, "", 0);
-        const nr = try promise.nativeResolveReject(machine, capability);
-        try promise.performThen(machine, p, Value.obj(onf), Value.undef(), nr.resolve, nr.reject);
+        try promise.performThenResult(machine, p, Value.obj(onf), Value.undef(), capability);
     }
 
     fn drainDeferredAsyncWork(self: *Context, machine: *interp.Interpreter) interp.EvalError!void {

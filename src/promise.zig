@@ -498,13 +498,6 @@ pub fn nativeResolveReject(self: *Interpreter, p: *Promise) EvalError!struct { r
 
 /// `p.then(...)` with an intrinsic result promise (the non-species path used
 /// internally by the combinators, `finally`, and the async drivers).
-pub fn then(self: *Interpreter, p: *Promise, on_f: Value, on_r: Value) EvalError!Value {
-    const result = try newPromise(self);
-    const rp: *Promise = @ptrCast(@alignCast(result.promise.?));
-    try performThenIntrinsic(self, p, on_f, on_r, rp);
-    return Value.obj(result);
-}
-
 /// PerformPromiseThen: register fulfill/reject reactions that settle the result
 /// capability (`resolve_fn`/`reject_fn`) when `p` settles.
 pub fn performThen(self: *Interpreter, p: *Promise, on_f: Value, on_r: Value, resolve_fn: Value, reject_fn: Value) EvalError!void {
@@ -515,12 +508,22 @@ pub fn performThen(self: *Interpreter, p: *Promise, on_f: Value, on_r: Value, re
     try performThenReactions(self, p, react_f, react_r);
 }
 
-fn performThenIntrinsic(self: *Interpreter, p: *Promise, on_f: Value, on_r: Value, result: *Promise) EvalError!void {
+/// Internal intrinsic-Promise path: register reactions that settle `result`
+/// directly. Use only when the result capability is the engine's own native
+/// Promise; custom species/external capabilities must use `performThen`.
+pub fn performThenResult(self: *Interpreter, p: *Promise, on_f: Value, on_r: Value, result: *Promise) EvalError!void {
     const fh: ?Value = if (on_f.isCallable()) on_f else null;
     const rh: ?Value = if (on_r.isCallable()) on_r else null;
     const react_f = Reaction{ .handler = fh, .result = result };
     const react_r = Reaction{ .handler = rh, .result = result };
     try performThenReactions(self, p, react_f, react_r);
+}
+
+pub fn then(self: *Interpreter, p: *Promise, on_f: Value, on_r: Value) EvalError!Value {
+    const result = try newPromise(self);
+    const rp: *Promise = @ptrCast(@alignCast(result.promise.?));
+    try performThenResult(self, p, on_f, on_r, rp);
+    return Value.obj(result);
 }
 
 fn performThenReactions(self: *Interpreter, p: *Promise, react_f: Reaction, react_r: Reaction) EvalError!void {
