@@ -10,6 +10,7 @@ const interpreter = @import("interpreter.zig");
 const Interpreter = interpreter.Interpreter;
 const Parser = @import("parser.zig").Parser;
 const promise = @import("promise.zig");
+const agent = @import("agent.zig");
 
 const Value = value.Value;
 const HostError = value.HostError;
@@ -687,15 +688,32 @@ pub fn mathImul(ctx: *anyopaque, this: Value, args: []const Value) HostError!Val
 }
 
 // Per-thread: concurrent agents each get their own PRNG stream (a shared one
-// would be a data race — bindings.md ruling). The fixed per-thread seed is
-// fine: the spec requires no particular distribution across agents.
-threadlocal var math_prng = std.Random.DefaultPrng.init(0x2545F4914F6CDD1D);
+// would be a data race — bindings.md ruling). Seed lazily from OS entropy so
+// independent processes/threads do not replay one fixed Math.random sequence.
+threadlocal var math_prng_seeded = false;
+threadlocal var math_prng = std.Random.DefaultPrng.init(0);
+
+fn mathRandomSeed() u64 {
+    var bytes: [8]u8 = undefined;
+    agent.engineIo().randomSecure(&bytes) catch {
+        return 0x2545F4914F6CDD1D ^ @as(u64, @intCast(std.Thread.getCurrentId()));
+    };
+    return std.mem.readInt(u64, &bytes, .little);
+}
+
+fn mathRandomPrng() *std.Random.DefaultPrng {
+    if (!math_prng_seeded) {
+        math_prng = std.Random.DefaultPrng.init(mathRandomSeed());
+        math_prng_seeded = true;
+    }
+    return &math_prng;
+}
 
 pub fn mathRandom(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
     _ = ctx;
     _ = this;
     _ = args;
-    return Value.num(math_prng.random().float(f64));
+    return Value.num(mathRandomPrng().random().float(f64));
 }
 
 // ---- Object / Array ----------------------------------------------------

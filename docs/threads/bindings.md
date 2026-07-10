@@ -33,7 +33,7 @@ before acting on one.
 
 | Symbol | Location | What it is | Ruling | Notes / phase |
 |---|---|---|---|---|
-| `math_prng` | `src/builtins.zig:638` | `threadlocal std.Random.DefaultPrng` seeded with a fixed constant; mutated on every `Math.random()` call. | **per-thread** | Completed: this is threadlocal, so agents/workers/threads never race the PRNG state. A future quality pass may seed per context instead of using the fixed deterministic seed. |
+| `math_prng` | `src/builtins.zig` | `threadlocal std.Random.DefaultPrng`, lazily seeded from OS entropy and mutated on every `Math.random()` call. | **per-thread** | Completed: this is threadlocal, so agents/workers/threads never race the PRNG state, and separate processes/threads no longer replay one fixed deterministic `Math.random()` stream. |
 
 ## Engine: `src/interpreter.zig`
 
@@ -170,8 +170,8 @@ RegExp is backed by the sibling zig-regex repo. Full scan of its `src/*.zig`:
 
 - Every current file-scope `var`, `pub var`, and `threadlocal` hit in `src/*.zig`
   has a ruling above.
-- The two original surprise hazards are fixed: `math_prng` is threadlocal, and
-  `symbol_counter` is atomic.
+- The two original surprise hazards are fixed: `math_prng` is threadlocal and
+  entropy-seeded, and `symbol_counter` is atomic.
 - `$262.agent` and typed-array waiter state are explicitly locked in
   `src/agent.zig`.
 - Shared-realm `Thread` state is either per-thread (`t_current`) or per-context

@@ -6453,6 +6453,22 @@ test "Math: signed-zero, pow/hypot edge cases, prototype + toStringTag" {
     try expectEvalStr("[object Math]", "Object.prototype.toString.call(Math)");
 }
 
+test "Math.random returns unit interval values and advances its stream" {
+    try std.testing.expect((try evalIn(
+        \\let changed = false;
+        \\let prev = Math.random();
+        \\if (typeof prev !== "number" || !(prev >= 0 && prev < 1)) throw new Error("bad first random");
+        \\for (let i = 0; i < 32; i++) {
+        \\  const next = Math.random();
+        \\  if (typeof next !== "number" || !(next >= 0 && next < 1))
+        \\    throw new Error("bad random " + next);
+        \\  if (next !== prev) changed = true;
+        \\  prev = next;
+        \\}
+        \\changed;
+    )).asBool());
+}
+
 test "Map/Set constructors take any iterable (AddEntriesFromIterable)" {
     // A non-array iterable (here a Set / a string) populates the collection.
     try std.testing.expectEqual(@as(f64, 3), (try evalIn("new Set('abc').size")).asNum());
