@@ -245,16 +245,19 @@ pub fn build(b: *std.Build) void {
     // Thread contention profile: compare the no-GIL shared-realm default against
     // the `.gil = true` fallback across hot shared structures. This is a local
     // performance tool, not a correctness gate.
+    const threads_profile_debug = b.option(bool, "threads-profile-debug", "Build threads-profile in Debug mode for crash diagnosis") orelse false;
     const threads_profile = b.addExecutable(.{
         .name = "threads-profile",
         .root_module = b.createModule(.{
             .root_source_file = b.path("bench/threads.zig"),
             .target = target,
-            .optimize = .ReleaseFast,
+            .optimize = if (threads_profile_debug) .Debug else .ReleaseFast,
             .imports = &.{.{ .name = "js", .module = bench_js_mod }},
         }),
     });
     const run_threads_profile = b.addRunArtifact(threads_profile);
+    const threads_profile_case = b.option([]const u8, "threads-profile-case", "Run one exact threads-profile scenario name");
+    if (threads_profile_case) |case| run_threads_profile.addArg(case);
     const threads_profile_step = b.step("threads-profile", "Profile no-GIL Thread contention, async waits, and .gil fallback cost");
     threads_profile_step.dependOn(&run_threads_profile.step);
 

@@ -29,6 +29,8 @@ For performance work, also run:
 
 ```sh
 zig build threads-profile
+zig build threads-profile -Dthreads-profile-case='condition asyncWait'
+zig build threads-profile -Dthreads-profile-debug=true -Dthreads-profile-case='condition asyncWait'
 zig build midgc-profile
 zig build gc-profile
 ```
@@ -43,6 +45,11 @@ property waits alongside the existing contention event counters. `gc-profile`
 is the local allocation/lifecycle baseline for comparing arena, explicit-GC,
 no-GIL threaded GC, and `.gil = true` context modes, including the reusable
 GC-cell slab backing.
+
+`-Dthreads-profile-case='<exact scenario name>'` runs one shared-realm row
+across the host's 1/2/4/8-thread matrix and skips Worker tables. Add
+`-Dthreads-profile-debug=true` for a symbolized safety-check build when
+diagnosing a crash; timing from that mode is not a performance baseline.
 
 `midgc-profile` isolates the internal `parallel_midscript_gc` testing policy so
 its collector behavior is not hidden inside the broader contention matrix. It
@@ -467,6 +474,18 @@ or classified abort, abort reasons sum to total aborts, each attempt opens at
 least one publication generation, and maximum collector-side pause does not
 exceed total pause. End-to-end witnesses require both directly observed parked
 peers and roots actually published by running sync-wait peers.
+
+The focused `condition asyncWait` profile is also a nursery lifetime gate. A
+Debug run exposed a GC-poisoned Promise stored only in the native condition
+queue. Lock, Condition, and ThreadLocal side records now retain their wrapper as
+the owner for generational barriers: queued lock jobs, async condition waiters,
+condition-to-lock edges, and ThreadLocal map values are remembered when an old
+wrapper receives a young target. The unit test
+`parallel_js nursery remembers native synchronization side-record edges`
+tenures those wrappers, stores young values only in native records, forces a
+minor collection, and requires condition reacquire plus ThreadLocal reads to
+survive. Run the focused profile in Debug once and ReleaseFast repeatedly after
+changing these queues.
 Empty sync-wait task pumps now have a
 lock-free fast path;
 real async-hold delivery drains larger bounded FIFO bursts from the realm task

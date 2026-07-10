@@ -990,11 +990,12 @@ fn printWorkerProfile(gpa: std.mem.Allocator, io: std.Io, workers: []const usize
     }
 }
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
     const gpa = std.heap.page_allocator;
-    var threaded = std.Io.Threaded.init(gpa, .{ .environ = .empty });
-    defer threaded.deinit();
-    const io = threaded.io();
+    const io = init.io;
+    var args = std.process.Args.Iterator.init(init.minimal.args);
+    _ = args.next();
+    const scenario_filter = args.next();
 
     const cores = std.Thread.getCpuCount() catch 4;
     const worker_counts = if (cores >= 8)
@@ -1013,6 +1014,17 @@ pub fn main() !void {
     std.debug.print("async/done = Condition.asyncWait and property waitAsync registrations / completed condition reacquires plus settled property waitAsync tickets\n", .{});
     std.debug.print("empty/jobs = run-loop task-pump empty fast-path hits / delivered grant jobs; hold/cjob split asyncHold vs Condition.asyncWait reacquire jobs\n", .{});
 
-    for (scenarios) |scenario| try printScenario(gpa, io, scenario, worker_counts);
-    try printWorkerProfile(gpa, io, worker_counts);
+    var matched = scenario_filter == null;
+    for (scenarios) |scenario| {
+        if (scenario_filter) |filter| {
+            if (!std.mem.eql(u8, scenario.name, filter)) continue;
+            matched = true;
+        }
+        try printScenario(gpa, io, scenario, worker_counts);
+    }
+    if (scenario_filter == null) try printWorkerProfile(gpa, io, worker_counts);
+    if (!matched) {
+        std.debug.print("unknown threads-profile scenario: {s}\n", .{scenario_filter.?});
+        return error.UnknownProfileScenario;
+    }
 }

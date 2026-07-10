@@ -770,6 +770,9 @@ const condition_queue_reserve_granularity = 16;
 const LockRecord = struct {
     brand: SyncBrand = sync_brand_lock,
     gil: *gil_mod.Gil,
+    /// GC wrapper that owns this native side record. Used only as the owner of
+    /// old-to-young barriers for pending jobs; the record itself is arena-lived.
+    owner: ?*value.Object = null,
     mutex: std.Io.Mutex = .init,
     locked: bool = false,
     /// Holding thread (0 = unheld) — recursion detection: a nested hold on
@@ -868,6 +871,7 @@ const CondEntry = union(enum) {
 const CondRecord = struct {
     brand: SyncBrand = sync_brand_condition,
     gil: *gil_mod.Gil,
+    owner: ?*value.Object = null,
     mutex: std.Io.Mutex = .init,
     cond: std.Io.Condition = .init,
     /// ONE FIFO domain for sync and async waiters (4.3: notify wakes them
@@ -980,6 +984,7 @@ const TLRecord = struct {
     brand: SyncBrand = sync_brand_thread_local,
     gil: *gil_mod.Gil,
     arena: std.mem.Allocator,
+    owner: ?*value.Object = null,
     map: std.AutoHashMapUnmanaged(u64, Value) = .empty,
     // Each thread keys `map` by its own tid, but they share the table: a peer's
     // `put` (which can rehash/grow) races another thread's `get`/`put` under
@@ -1027,13 +1032,15 @@ inline fn traceThreadValue(v: anytype, val: Value) void {
 }
 
 fn traceHoldJob(job: *HoldJob, v: anytype) void {
+    v.mark(job.lock.owner);
     v.mark(job.outer);
     if (job.cb) |cb| traceThreadValue(v, cb);
 }
 
 fn barrierHoldJob(job: *HoldJob) void {
-    gc_mod.barrierCell(@ptrCast(job.outer));
-    if (job.cb) |cb| gc_mod.barrierValue(cb);
+    const owner: ?*anyopaque = if (job.lock.owner) |o| @ptrCast(o) else null;
+    gc_mod.barrierCellFrom(owner, @ptrCast(job.outer));
+    if (job.cb) |cb| gc_mod.barrierValueFrom(owner, cb);
 }
 
 fn traceLockRecordRoots(rec: *LockRecord, v: anytype) void {
@@ -1048,7 +1055,10 @@ fn traceCondRecordRoots(rec: *CondRecord, v: anytype) void {
     defer rec.mutex.unlock(agent.engineIo());
     for (rec.queue.items[rec.queue_head..]) |entry| switch (entry) {
         .sync => {},
-        .asynchronous => |w| v.mark(w.outer),
+        .asynchronous => |w| {
+            v.mark(w.lock.owner);
+            v.mark(w.outer);
+        },
     };
 }
 
@@ -1070,6 +1080,7 @@ pub fn traceNativePrivateData(o: *value.Object, v: anytype) void {
         .jsthread_thread_local => traceThreadLocalRoots(@ptrCast(@alignCast(pd)), v),
         .jsthread_release_state => {
             const st: *ReleaseState = @ptrCast(@alignCast(pd));
+            v.mark(st.lock.owner);
             traceLockRecordRoots(st.lock, v);
         },
         .jsthread_thread, .jsthread_unlock_token, .none => {},
@@ -1233,6 +1244,7 @@ fn syncCtor(comptime T: type, comptime ctor_name: []const u8) value.NativeFn {
             rec.* = if (T == TLRecord) .{ .gil = g, .arena = a } else .{ .gil = g };
             const o = try gc_mod.allocObj(a);
             o.* = .{ .private_data = rec, .private_data_tag = privateDataTagOf(T) };
+            rec.owner = o;
             const p = try self.getProperty(Value.obj(native), "prototype");
             if (p.isObject()) o.proto = p.asObj();
             return Value.obj(o);
@@ -1837,6 +1849,7 @@ fn tlValueSetFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.Hos
     rec.lockMap();
     defer rec.unlockMap();
     try rec.map.put(rec.arena, currentTid(), v);
+    gc_mod.barrierValueFrom(if (rec.owner) |o| @ptrCast(o) else null, v);
     return Value.undef();
 }
 
@@ -3235,6 +3248,9 @@ fn condAsyncWaitFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.
     const outer = try promise.newPromise(self);
     const w = try self.arena.create(AsyncCondWaiter);
     w.* = .{ .lock = lock, .outer = outer };
+    const cond_owner: ?*anyopaque = if (rec.owner) |o| @ptrCast(o) else null;
+    gc_mod.barrierCellFrom(cond_owner, @ptrCast(outer));
+    gc_mod.barrierCellFrom(cond_owner, if (lock.owner) |o| @ptrCast(o) else null);
     const io = agent.engineIo();
     rec.mutex.lockUncancelable(io);
     lock.mutex.lockUncancelable(io);

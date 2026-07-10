@@ -11381,6 +11381,43 @@ test "parallel_js (M3 GIL-removal slice): Lock.asyncHold grants serialize withou
     try std.testing.expectEqual(@as(f64, 200), result.asNum());
 }
 
+test "parallel_js nursery remembers native synchronization side-record edges" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_threads = true });
+    defer ctx.destroy();
+
+    _ = try ctx.evaluate(
+        \\globalThis.nurseryLock = new Lock();
+        \\globalThis.nurseryCondition = new Condition();
+        \\globalThis.nurseryLocal = new ThreadLocal();
+        \\globalThis.nurseryConditionSeen = 0;
+    );
+    // Tenure the wrapper objects so the next stores exercise old native owner
+    // records pointing at young Promise/ThreadLocal values.
+    ctx.collectGarbage();
+
+    _ = try ctx.evaluate(
+        \\nurseryLocal.value = { marker: 31 };
+        \\nurseryLock.hold(() => {
+        \\  nurseryCondition.asyncWait(nurseryLock).then(release => {
+        \\    nurseryConditionSeen = 41;
+        \\    release();
+        \\  });
+        \\});
+    );
+    const heap = ctx.gc.?;
+    const minor_before = heap.minor_collections;
+    heap.nursery_threshold_bytes = 1;
+
+    const result = try ctx.evaluate(
+        \\nurseryCondition.notifyAll();
+        \\$drainRunLoop();
+        \\nurseryConditionSeen + nurseryLocal.value.marker;
+    );
+    try std.testing.expectEqual(@as(f64, 72), result.asNum());
+    try std.testing.expect(heap.minor_collections > minor_before);
+}
+
 test "parallel_js: await joined asyncHold promise without releasing absent GIL" {
     // Regression for the PR-249 `api/lock-async-hold.js` barging path: a
     // spawned no-GIL thread returns a promise from `lock.asyncHold()` while the

@@ -215,6 +215,12 @@ Known performance/maturity work:
   pause time. Focused tests assert the attempt/outcome and abort-reason accounting
   identities and prove both running-peer publication and direct parked-peer
   observation paths execute.
+- Native synchronization side records participate in the nursery remembered
+  set. Lock/Condition/ThreadLocal wrappers are the owner for queued async-hold
+  jobs, async condition waiters and lock edges, and ThreadLocal map values. A
+  deterministic minor-collection regression plus focused Debug/ReleaseFast
+  `condition asyncWait` profiles guard the GC-poisoned Promise failure that
+  previously surfaced when the broad contention profile reached 4 threads.
 
 ## 3. Parallel Performance
 
