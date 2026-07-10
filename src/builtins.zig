@@ -3065,21 +3065,28 @@ const JsonParser = struct {
                     '"' => '"',
                     '\\' => '\\',
                     'u' => {
-                        // \uXXXX — decode the UTF-16 code unit(s) and store UTF-8.
+                        // \uXXXX — decode the UTF-16 code unit(s) and store (W)TF-8.
                         if (p.i + 4 >= p.s.len) return error.Invalid;
                         const code = std.fmt.parseInt(u16, p.s[p.i + 1 .. p.i + 5], 16) catch return error.Invalid;
                         p.i += 4;
-                        if (code >= 0xD800 and code <= 0xDBFF) {
-                            if (p.i + 6 >= p.s.len or p.s[p.i + 1] != '\\' or p.s[p.i + 2] != 'u') return error.Invalid;
+                        // A high surrogate immediately followed by a low surrogate
+                        // combines into an astral code point. Any UNPAIRED surrogate
+                        // (lone high, lone low, or high followed by a non-low) is a
+                        // valid lone UTF-16 code unit per JSON — emit it as WTF-8,
+                        // NOT a SyntaxError (matches `JSON.parse('"\\uD834"')`).
+                        if (code >= 0xD800 and code <= 0xDBFF and
+                            p.i + 6 < p.s.len and p.s[p.i + 1] == '\\' and p.s[p.i + 2] == 'u')
+                        {
                             const low = std.fmt.parseInt(u16, p.s[p.i + 3 .. p.i + 7], 16) catch return error.Invalid;
-                            if (low < 0xDC00 or low > 0xDFFF) return error.Invalid;
-                            const cp: u21 = 0x10000 + ((@as(u21, code) - 0xD800) << 10) + (@as(u21, low) - 0xDC00);
-                            try appendUtf8Codepoint(a, &buf, cp);
-                            p.i += 6;
-                        } else if (code >= 0xDC00 and code <= 0xDFFF) {
-                            return error.Invalid;
+                            if (low >= 0xDC00 and low <= 0xDFFF) {
+                                const cp: u21 = 0x10000 + ((@as(u21, code) - 0xD800) << 10) + (@as(u21, low) - 0xDC00);
+                                try appendUtf8Codepoint(a, &buf, cp);
+                                p.i += 6;
+                            } else {
+                                try appendUtf8Codepoint(a, &buf, code); // lone high surrogate
+                            }
                         } else {
-                            try appendUtf8Codepoint(a, &buf, code);
+                            try appendUtf8Codepoint(a, &buf, code); // BMP char or lone surrogate
                         }
                         p.i += 1;
                         continue;
