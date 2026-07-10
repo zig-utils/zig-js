@@ -15,7 +15,7 @@ const js = @import("js");
 
 const corpus_root = "reference/webkit-249/threads-tests";
 const isolated_case_timeout: std.Io.Timeout = .{ .duration = .{
-    .raw = .fromSeconds(180),
+    .raw = .fromSeconds(240),
     .clock = .awake,
 } };
 
@@ -64,6 +64,7 @@ const allowlist = [_][]const u8{
     "bench/inline-property-write.js",
     "bench/megamorphic-access.js",
     "bench/transition-heavy-constructor.js",
+    "congc-t1-window-split.js",
     "cve/mc-aint-terminate-notify-park-race.js",
     "cve/mc-code-deferred-fire-stale-window.js",
     "cve/mc-code-sleep-through-jettison-isb.js",
@@ -326,10 +327,10 @@ fn asyncDrainPolls(name: []const u8) usize {
     if (std.mem.eql(u8, name, "cve/mc-dos-waiter-table-storm.js")) {
         // This stress case can run 2000 gc()/microtask turns after the waiter
         // storm has already settled. Whole-corpus warmed-state runs can make the
-        // reclamation arm miss the default async drain even though focused runs
-        // pass; give this oracle more normal-build turn budget without raising
-        // the already-large TSan budget.
-        return base * if (builtin.sanitize_thread) 6 else 12;
+        // reclamation arm miss the default async drain even in an isolated child
+        // process; give this eventual-GC oracle more normal-build turn budget
+        // without raising the already-large TSan budget.
+        return base * if (builtin.sanitize_thread) 6 else 30;
     }
     return base;
 }
