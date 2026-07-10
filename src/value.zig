@@ -891,16 +891,16 @@ pub const Object = struct {
     /// non-null on a Temporal object.
     temporal: ?*TemporalData = null,
 
-    fn lockBacking(self: *Object) void {
-        if (!element_locks_enabled.load(.acquire)) return;
+    fn lockBacking(self: *Object) bool {
+        if (!element_locks_enabled.load(.acquire)) return false;
         var spins: usize = 0;
         while (!self.backing_lock.tryLock()) : (spins += 1) {
             if ((spins & 0xff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
         }
+        return true;
     }
-    fn unlockBacking(self: *Object) void {
-        if (!element_locks_enabled.load(.acquire)) return;
-        self.backing_lock.unlock();
+    fn unlockBacking(self: *Object, held: bool) void {
+        if (held) self.backing_lock.unlock();
     }
 
     // Assumes `backing_lock` held (called only from `backingFor`).
@@ -917,8 +917,8 @@ pub const Object = struct {
     }
 
     fn deactivateBacking(self: *Object, comptime field: []const u8) void {
-        self.lockBacking();
-        defer self.unlockBacking();
+        const backing_locked = self.lockBacking();
+        defer self.unlockBacking(backing_locked);
         if (!@field(self.backing_flags, field)) return;
         @field(self.backing_flags, field) = false;
         if (gc_runtime.activeObjectBacking()) |state| {
@@ -929,8 +929,8 @@ pub const Object = struct {
     }
 
     fn backingFor(self: *Object, fallback: std.mem.Allocator, comptime field: []const u8) std.mem.Allocator {
-        self.lockBacking();
-        defer self.unlockBacking();
+        const backing_locked = self.lockBacking();
+        defer self.unlockBacking(backing_locked);
         if (self.backing_allocator) |a| {
             if (!@field(self.backing_flags, field)) {
                 if (self.activateBacking(field)) |active| return active;
@@ -2669,6 +2669,23 @@ test "ArrayBufferData.bytes seqlock stays consistent across concurrent resize sw
     const w = try std.Thread.spawn(.{}, Worker.writer, .{ &ab, sa[0..], sb[0..], &stop });
     w.join();
     for (readers) |t| t.join();
+}
+
+test "Object backing lock pairs unlock with actual acquisition" {
+    var o = Object{};
+
+    const prev = Object.element_locks_enabled.swap(false, .release);
+    const not_locked = o.lockBacking();
+    Object.element_locks_enabled.store(true, .release);
+    o.unlockBacking(not_locked);
+
+    const locked = o.lockBacking();
+    Object.element_locks_enabled.store(false, .release);
+    o.unlockBacking(locked);
+    defer Object.element_locks_enabled.store(prev, .release);
+
+    try std.testing.expect(o.backing_lock.tryLock());
+    o.backing_lock.unlock();
 }
 
 test "Object.has_indexed_property atomic flag converges under concurrent set" {
