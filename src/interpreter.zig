@@ -16861,8 +16861,20 @@ fn dataViewGetFn(comptime t: DVType) value.NativeFn {
             const get_index = try toIndexArg(self, if (args.len > 0) args[0] else Value.undef());
             const little = if (args.len > 1) args[1].toBoolean() else false;
             const ab = dv.buffer.array_buffer.?;
-            const view_len = dv.currentByteLength() orelse return throwDataViewTypeError(self, "DataView is detached or out of bounds");
-            if (get_index + t.bytes > view_len) return self.throwError("RangeError", "Offset is outside the bounds of the DataView");
+            const locked = ab.needsElementLock();
+            if (locked) ab.lockBuffer();
+            defer if (locked) ab.unlockBuffer();
+            const bytes = ab.bytes();
+            const view_len = blk: {
+                if (ab.isDetached()) return throwDataViewTypeError(self, "DataView is detached or out of bounds");
+                if (dv.byte_offset > bytes.len) return throwDataViewTypeError(self, "DataView is detached or out of bounds");
+                if (dv.track_length) break :blk bytes.len - dv.byte_offset;
+                if (dv.byte_length > bytes.len - dv.byte_offset) return throwDataViewTypeError(self, "DataView is detached or out of bounds");
+                break :blk dv.byte_length;
+            };
+            const view_len_u64: u64 = @intCast(view_len);
+            if (get_index > view_len_u64 or @as(u64, t.bytes) > view_len_u64 - get_index)
+                return self.throwError("RangeError", "Offset is outside the bounds of the DataView");
             const off = dv.byte_offset + @as(usize, @intCast(get_index));
             const endian: std.builtin.Endian = if (little) .little else .big;
             const UInt = switch (t.bytes) {
@@ -16871,7 +16883,7 @@ fn dataViewGetFn(comptime t: DVType) value.NativeFn {
                 4 => u32,
                 else => u64,
             };
-            const raw = std.mem.readInt(UInt, ab.bytes()[off..][0..t.bytes], endian);
+            const raw = std.mem.readInt(UInt, bytes[off..][0..t.bytes], endian);
             if (t.big) {
                 if (t.signed) return self.makeBigInt(@as(i64, @bitCast(@as(u64, raw))));
                 return self.makeBigInt(@as(i128, @as(u64, raw)));
@@ -16918,8 +16930,20 @@ fn dataViewSetFn(comptime t: DVType) value.NativeFn {
             }
             const little = if (args.len > 2) args[2].toBoolean() else false;
             const ab = dv.buffer.array_buffer.?;
-            const view_len = dv.currentByteLength() orelse return throwDataViewTypeError(self, "DataView is detached or out of bounds");
-            if (get_index + t.bytes > view_len) return self.throwError("RangeError", "Offset is outside the bounds of the DataView");
+            const locked = ab.needsElementLock();
+            if (locked) ab.lockBuffer();
+            defer if (locked) ab.unlockBuffer();
+            const bytes = ab.bytes();
+            const view_len = blk: {
+                if (ab.isDetached()) return throwDataViewTypeError(self, "DataView is detached or out of bounds");
+                if (dv.byte_offset > bytes.len) return throwDataViewTypeError(self, "DataView is detached or out of bounds");
+                if (dv.track_length) break :blk bytes.len - dv.byte_offset;
+                if (dv.byte_length > bytes.len - dv.byte_offset) return throwDataViewTypeError(self, "DataView is detached or out of bounds");
+                break :blk dv.byte_length;
+            };
+            const view_len_u64: u64 = @intCast(view_len);
+            if (get_index > view_len_u64 or @as(u64, t.bytes) > view_len_u64 - get_index)
+                return self.throwError("RangeError", "Offset is outside the bounds of the DataView");
             const off = dv.byte_offset + @as(usize, @intCast(get_index));
             const endian: std.builtin.Endian = if (little) .little else .big;
             const UInt = switch (t.bytes) {
@@ -16942,7 +16966,7 @@ fn dataViewSetFn(comptime t: DVType) value.NativeFn {
             } else {
                 raw = numToRaw(UInt, num);
             }
-            std.mem.writeInt(UInt, ab.bytes()[off..][0..t.bytes], raw, endian);
+            std.mem.writeInt(UInt, bytes[off..][0..t.bytes], raw, endian);
             return Value.undef();
         }
     }.call;

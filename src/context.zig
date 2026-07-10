@@ -8733,6 +8733,46 @@ test "TypedArray set coerces offset before detached buffer checks" {
     )).asBool());
 }
 
+test "DataView access serializes with parallel ArrayBuffer resize" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_threads = true });
+    defer ctx.destroy();
+
+    const result = try ctx.evaluate(
+        \\const ab = new ArrayBuffer(64, { maxByteLength: 1024 });
+        \\const dv = new DataView(ab, 0, 64);
+        \\const control = new Int32Array(new SharedArrayBuffer(8));
+        \\const t = new Thread(() => {
+        \\  let ops = 0;
+        \\  Atomics.store(control, 1, 1);
+        \\  while (Atomics.load(control, 0) === 0) {
+        \\    try {
+        \\      dv.getUint32(60, true);
+        \\      ops++;
+        \\    } catch (e) {
+        \\      if (!(e instanceof TypeError || e instanceof RangeError)) throw e;
+        \\      ops++;
+        \\    }
+        \\    try {
+        \\      dv.setUint32(60, ops, true);
+        \\      ops++;
+        \\    } catch (e) {
+        \\      if (!(e instanceof TypeError || e instanceof RangeError)) throw e;
+        \\      ops++;
+        \\    }
+        \\  }
+        \\  return ops;
+        \\});
+        \\while (Atomics.load(control, 1) === 0) {}
+        \\for (let i = 0; i < 2000; i++) {
+        \\  ab.resize((i & 1) ? 64 : 8);
+        \\}
+        \\Atomics.store(control, 0, 1);
+        \\t.join() > 0 && ab.byteLength === 64;
+    );
+    try std.testing.expect(result.asBool());
+}
+
 test "Atomics.waitAsync: not-equal sync, timeout, and cross-agent notify settle" {
     const ctx = try Context.create(std.testing.allocator);
     defer ctx.destroy();
