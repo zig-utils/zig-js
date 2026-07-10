@@ -63,11 +63,54 @@ pub fn staticCell(comptime s: []const u8) *const StringCell {
     }.cell;
 }
 
-/// Allocate a fresh (un-interned) cell that owns a copy of `bytes`. This is the
-/// minimal constructor the NaN-box `Value` representation needs; interning is
-/// optional (below). `allocator` owns both the cell and the byte copy.
+/// Combine any adjacent WTF-8 high+low surrogate pair into its 4-byte astral
+/// UTF-8 encoding, returning an owned copy. A JS string is a UTF-16 code-unit
+/// sequence; zig-js stores it as (W)TF-8, and the lexer already folds a literal
+/// `😀` (or an astral source char) into 4-byte UTF-8. But a pair formed
+/// at RUNTIME — e.g. `"\uD83D" + "\uDE00"` — arrives as two separate 3-byte WTF-8
+/// surrogates: a different byte image for the same abstract string. Since a
+/// string `Value` compares by cell bytes (`===`, Map/Set/property keys, indexOf),
+/// the two would wrongly differ. Folding pairs at cell creation gives equal
+/// strings one canonical byte image. Lone surrogates (no adjacent partner) stay
+/// WTF-8, and length/charCodeAt/codePointAt already decode astral UTF-8 into two
+/// code units, so this is transparent to every other string op.
+fn canonicalizeSurrogates(allocator: std.mem.Allocator, bytes: []const u8) std.mem.Allocator.Error![]u8 {
+    // A surrogate needs an 0xED lead byte (U+D800..U+DFFF encode as ED A0..BF xx);
+    // no 0xED means nothing to fold — the overwhelmingly common path.
+    if (std.mem.indexOfScalar(u8, bytes, 0xED) == null) return allocator.dupe(u8, bytes);
+
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.ensureTotalCapacityPrecise(allocator, bytes.len); // folding only shrinks (6->4)
+    var i: usize = 0;
+    while (i < bytes.len) {
+        // ED A0..AF xx  followed by  ED B0..BF xx  = high surrogate then low
+        // surrogate: decode both and emit the combined 4-byte astral char.
+        if (i + 6 <= bytes.len and bytes[i] == 0xED and (bytes[i + 1] & 0xF0) == 0xA0 and
+            bytes[i + 3] == 0xED and (bytes[i + 4] & 0xF0) == 0xB0)
+        {
+            const hi: u21 = (@as(u21, bytes[i] & 0x0F) << 12) | (@as(u21, bytes[i + 1] & 0x3F) << 6) | (bytes[i + 2] & 0x3F);
+            const lo: u21 = (@as(u21, bytes[i + 3] & 0x0F) << 12) | (@as(u21, bytes[i + 4] & 0x3F) << 6) | (bytes[i + 5] & 0x3F);
+            const cp: u21 = 0x10000 + ((hi - 0xD800) << 10) + (lo - 0xDC00);
+            out.appendAssumeCapacity(0xF0 | @as(u8, @intCast(cp >> 18)));
+            out.appendAssumeCapacity(0x80 | @as(u8, @intCast((cp >> 12) & 0x3F)));
+            out.appendAssumeCapacity(0x80 | @as(u8, @intCast((cp >> 6) & 0x3F)));
+            out.appendAssumeCapacity(0x80 | @as(u8, @intCast(cp & 0x3F)));
+            i += 6;
+        } else {
+            out.appendAssumeCapacity(bytes[i]);
+            i += 1;
+        }
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+/// Allocate a fresh (un-interned) cell that owns a (surrogate-canonicalized) copy
+/// of `bytes`. This is the minimal constructor the NaN-box `Value` representation
+/// needs; interning is optional (below). `allocator` owns both the cell and the
+/// byte copy.
 pub fn createCell(allocator: std.mem.Allocator, bytes: []const u8) std.mem.Allocator.Error!*StringCell {
-    const owned = try allocator.dupe(u8, bytes);
+    const owned = try canonicalizeSurrogates(allocator, bytes);
     const cell = try allocator.create(StringCell);
     cell.* = .{ .bytes = owned, .hash = hashBytes(owned) };
     return cell;
