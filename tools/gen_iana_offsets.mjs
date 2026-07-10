@@ -11,20 +11,29 @@
 // binary-search lookups. The first entry per zone is the pre-first-transition
 // (LMT) offset, so pre-1883 instants resolve correctly. Flat integer arrays
 // compile far faster than nested slice-of-struct literals for a table this size.
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 
 const zones = readFileSync(process.argv[2] || "/tmp/zones.txt", "utf8")
-  .split("\n").map((s) => s.trim()).filter(Boolean);
+  .split("\n").map((s) => s.trim()).filter((s) => s && !s.startsWith("#"));
+
+const zonePattern = /^[A-Za-z0-9_./+-]+$/;
+
+function validateZoneName(z) {
+  if (!zonePattern.test(z) || z.startsWith("-") || z.includes("..")) {
+    throw new Error(`invalid time-zone name in zone list: ${JSON.stringify(z)}`);
+  }
+}
 
 const MON = { Jan: 0, Feb: 1, Mar: 2, Apr: 3, May: 4, Jun: 5, Jul: 6, Aug: 7, Sep: 8, Oct: 9, Nov: 10, Dec: 11 };
 const WIN_HI = Date.UTC(2101, 0, 1) / 1000;
 
 const emitted = [];
 for (const z of zones) {
+  validateZoneName(z);
   let dump;
   try {
-    dump = execSync(`zdump -v ${z}`, { encoding: "utf8", maxBuffer: 1 << 28 });
+    dump = execFileSync("zdump", ["-v", z], { encoding: "utf8", maxBuffer: 1 << 28 });
   } catch {
     continue;
   }
