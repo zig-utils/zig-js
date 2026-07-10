@@ -20376,10 +20376,20 @@ fn arrayBufferSliceToImmutableFn(ctx: *anyopaque, this: Value, args: []const Val
     const end = try relIndex(self, if (args.len > 1) args[1] else Value.undef(), blen, @floatFromInt(blen));
     const count = if (end > start) end - start else 0;
     if (ab.isDetached()) return self.throwError("TypeError", "ArrayBuffer is detached");
-    const src_len = ab.bytes().len;
-    if (src_len < end) return self.throwError("RangeError", "ArrayBuffer shrank below resolved slice end");
     const out = try self.makeArrayBuffer(count);
-    @memcpy(out.array_buffer.?.bytes()[0..count], ab.bytes()[start .. start + count]);
+    {
+        // `sliceToImmutable` leaves the source buffer live, so a no-GIL peer can
+        // resize()+free its backing while this bulk copy is in flight. Re-check
+        // the resolved range and copy through the same locked slice, mirroring
+        // ArrayBuffer.prototype.slice's source-side UAF guard.
+        const locked = ab.needsElementLock();
+        if (locked) ab.lockBuffer();
+        defer if (locked) ab.unlockBuffer();
+        if (ab.isDetached()) return self.throwError("TypeError", "ArrayBuffer is detached");
+        const src = ab.bytes();
+        if (src.len < end) return self.throwError("RangeError", "ArrayBuffer shrank below resolved slice end");
+        @memcpy(out.array_buffer.?.bytes()[0..count], src[start .. start + count]);
+    }
     out.array_buffer.?.immutable = true;
     return Value.obj(out);
 }

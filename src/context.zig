@@ -8350,6 +8350,42 @@ test "ArrayBuffer immutable methods preserve spec ordering" {
     )).asBool());
 }
 
+test "ArrayBuffer sliceToImmutable serializes with parallel resize" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_threads = true, .enable_gc = true });
+    defer ctx.destroy();
+
+    const result = try ctx.evaluate(
+        \\const ab = new ArrayBuffer(64, { maxByteLength: 1024 });
+        \\new Uint8Array(ab).fill(7);
+        \\const control = new Int32Array(new SharedArrayBuffer(8));
+        \\const t = new Thread(() => {
+        \\  let ops = 0;
+        \\  Atomics.store(control, 1, 1);
+        \\  while (Atomics.load(control, 0) === 0) {
+        \\    try {
+        \\      const copy = ab.sliceToImmutable(0, 64);
+        \\      if (!(copy instanceof ArrayBuffer) || !copy.immutable)
+        \\        throw new Error("sliceToImmutable did not return immutable ArrayBuffer");
+        \\      if (copy.byteLength !== 8 && copy.byteLength !== 64)
+        \\        throw new Error("unexpected immutable copy length " + copy.byteLength);
+        \\    } catch (e) {
+        \\      if (!(e instanceof TypeError || e instanceof RangeError)) throw e;
+        \\    }
+        \\    ops++;
+        \\  }
+        \\  return ops;
+        \\});
+        \\while (Atomics.load(control, 1) === 0) {}
+        \\for (let i = 0; i < 2000; i++) {
+        \\  ab.resize((i & 1) ? 64 : 8);
+        \\}
+        \\Atomics.store(control, 0, 1);
+        \\t.join() > 0 && ab.byteLength === 64;
+    );
+    try std.testing.expect(result.asBool());
+}
+
 test "ArrayBuffer slice rejects immutable species result" {
     try std.testing.expect((try evalIn(
         \\var calls = [];
