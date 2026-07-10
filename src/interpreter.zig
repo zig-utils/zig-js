@@ -14887,10 +14887,17 @@ fn mapGroupByFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostErr
     return Value.obj(map);
 }
 
-/// Collect an iterable's elements into a slice: arrays use their dense store
-/// directly; anything else is driven through the iterator protocol.
+/// Collect an iterable's elements into a slice. Packed arrays can take a locked
+/// snapshot, but sparse/customized arrays must be driven through the iterator
+/// protocol so holes, prototype values, accessors, and custom iterators are
+/// observed before the groupBy callback runs.
 fn collectIterable(self: *Interpreter, v: Value) EvalError![]Value {
-    if (v.isObject() and v.asObj().is_array) return v.asObj().elements.items;
+    if (v.isObject()) {
+        const o = v.asObj();
+        if (o.is_array and !o.is_arguments and self.arrayIterIntact() and !self.arrayHasOwnIterator(o)) {
+            if (try o.packedDenseElementsSnapshot(self.arena)) |items| return items;
+        }
+    }
     const iter = try self.iteratorOf(v);
     var list: std.ArrayListUnmanaged(Value) = .empty;
     while (true) {
@@ -40008,10 +40015,21 @@ test "interpreter JSON, Object, Number builtins" {
         \\let grouped = Object.groupBy([1, "1", { toString() { return 1; } }], function (v) { return v; });
         \\let groupThrows = false;
         \\try { Object.groupBy([1], function () { return { toString() { throw new TypeError("key"); } }; }); } catch (e) { groupThrows = e instanceof TypeError; }
+        \\let protoGroup;
+        \\Array.prototype[1] = "proto";
+        \\try { protoGroup = Object.groupBy([1, , 3], function (v) { return String(v); }); } finally { delete Array.prototype[1]; }
+        \\let sparseGroup = Map.groupBy(new Array(2), function (v) { return v; });
+        \\let accessorCalls = 0;
+        \\let accessorArray = [0];
+        \\Object.defineProperty(accessorArray, "0", { configurable: true, get() { accessorCalls++; return 9; } });
+        \\let accessorGroup = Object.groupBy(accessorArray, function (v) { return v; });
         \\class O extends Object {}
         \\let o1 = new O({ a: 1 });
         \\let o2 = Reflect.construct(Object, [{ b: 2 }], O);
         \\grouped["1"].length === 3 && groupThrows &&
+        \\protoGroup["proto"][0] === "proto" &&
+        \\sparseGroup.get(undefined).length === 2 &&
+        \\accessorCalls === 1 && accessorGroup["9"][0] === 9 &&
         \\o1.a === undefined && o2.b === undefined &&
         \\Object.getPrototypeOf(o1) === O.prototype &&
         \\Object.getPrototypeOf(o2) === O.prototype
