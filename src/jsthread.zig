@@ -65,6 +65,12 @@ pub const ThreadRecord = struct {
     /// PR's ordinary-promise rule; awaiters elsewhere observe the shared
     /// state via awaitValue's GIL-yield loop).
     pending_joins: std.ArrayListUnmanaged(PendingJoin) = .empty,
+    /// Snapshot being settled by the finishing thread after `done` is
+    /// published. This duplicates the local settlement list solely as a GC root:
+    /// `publishThreadCompletion` must remove entries from `pending_joins` under
+    /// `join_mutex`, but a parallel collector can start before the finisher has
+    /// copied those promises into its interpreter temp roots.
+    settling_joins: std.ArrayListUnmanaged(PendingJoin) = .empty,
     /// The live microtask queue for this JS thread. Worker queues are stack
     /// locals in `threadMain`; outstanding async tickets are transferred away
     /// before that stack frame exits.
@@ -607,7 +613,13 @@ fn threadMain(rec: *ThreadRecord, fn_v: Value, args: []const Value) void {
     if (rec.ctx.parallel_js) acquireGilForTeardown(&machine, g);
     defer if (rec.ctx.parallel_js) g.release();
     var pending_joins = publishThreadCompletion(rec, threw, result);
-    defer pending_joins.deinit(rec.ctx.arena());
+    defer {
+        const io = agent.engineIo();
+        rec.join_mutex.lockUncancelable(io);
+        rec.settling_joins = .empty;
+        rec.join_mutex.unlock(io);
+        pending_joins.deinit(rec.ctx.arena());
+    }
     // publishThreadCompletion emptied `rec.pending_joins` (a GC root) into this
     // local snapshot, so settle the promises and the result value under explicit
     // roots: settlement runs JS (reaction and thenable `then` getters, microtask
@@ -716,6 +728,7 @@ fn publishThreadCompletion(rec: *ThreadRecord, threw: bool, result: Value) std.A
     rec.result = result;
     const pending = rec.pending_joins;
     rec.pending_joins = .empty;
+    rec.settling_joins = pending;
     rec.done = true;
     rec.done_cond.broadcast(io);
     return pending;

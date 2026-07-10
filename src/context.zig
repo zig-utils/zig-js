@@ -2489,12 +2489,19 @@ pub const Context = struct {
                     }
                 }
             }
+            // `teardown_stop` exists to make spawned threads leave their
+            // blocking loops after a top-level failure. Once every spawned
+            // thread has exited, the host still has to drain their asyncJoin
+            // rejection reactions. Do that with the main interpreter's stop
+            // flag cleared: otherwise a step checkpoint inside a cleanup
+            // reaction can throw "worker terminated", abort the microtask batch,
+            // and silently drop later reactions copied into that batch.
+            if (top_level_failed) self.teardown_stop.store(false, .release);
             machine.drainMicrotasks() catch {};
             machine.settleAsyncWaiters();
             machine.drainFinalizationCleanupJobs() catch {};
             machine.drainMicrotasks() catch {};
             machine.settleAsyncWaiters();
-            if (top_level_failed) self.teardown_stop.store(false, .release);
         }
         if (outcome) |result| {
             // A script-visible `gc()` request is serviced before returning to

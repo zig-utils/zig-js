@@ -665,6 +665,7 @@ pub const Binding = struct {
             markValue(v, rec.result);
             if (rec.js_obj) |o| v.mark(o);
             for (rec.pending_joins.items) |pending| v.mark(pending.promise);
+            for (rec.settling_joins.items) |pending| v.mark(pending.promise);
         }
         if (par != null) if (ctx.gil) |g| g.unlockApi();
 

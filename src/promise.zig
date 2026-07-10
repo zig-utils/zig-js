@@ -409,13 +409,21 @@ fn settle(self: *Interpreter, p: *Promise, state: State, v: Value) EvalError!voi
     fulfill = p.on_fulfill;
     reject_list = p.on_reject;
     removed_count = fulfill.items.len + reject_list.items.len;
+    p.unlockState();
+
+    errdefer {
+        p.lockState();
+        p.on_fulfill = .empty;
+        p.on_reject = .empty;
+        p.unlockState();
+        disposeMovedReactions(self, p, &fulfill, &reject_list, removed_count);
+    }
+    const selected = if (state == .fulfilled) fulfill.items else reject_list.items;
+    for (selected) |r| try enqueue(self, .{ .reaction = r, .argument = v, .fulfilled = state == .fulfilled });
+    p.lockState();
     p.on_fulfill = .empty;
     p.on_reject = .empty;
     p.unlockState();
-
-    errdefer disposeMovedReactions(self, p, &fulfill, &reject_list, removed_count);
-    const selected = if (state == .fulfilled) fulfill.items else reject_list.items;
-    for (selected) |r| try enqueue(self, .{ .reaction = r, .argument = v, .fulfilled = state == .fulfilled });
     disposeMovedReactions(self, p, &fulfill, &reject_list, removed_count);
 }
 
