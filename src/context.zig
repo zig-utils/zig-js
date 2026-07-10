@@ -4619,6 +4619,16 @@ test "object spread" {
         \\var out = { ...src };
         \\calls.join(",") === "1,z,a,sym" && out[sym] === undefined
     )).asBool());
+    try std.testing.expect((try evalIn(
+        \\var calls = [];
+        \\var src = [, 2, 3];
+        \\Object.defineProperty(src, 1, { enumerable: false });
+        \\Object.defineProperty(src, 2, { get: function() { calls.push("2"); return 9; }, enumerable: true });
+        \\src.extra = 4;
+        \\var out = { ...src };
+        \\!("0" in out) && !("1" in out) && out[2] === 9 && out.extra === 4 &&
+        \\Object.keys(out).join(",") === "2,extra" && calls.join(",") === "2"
+    )).asBool());
 }
 
 test "delete operator" {

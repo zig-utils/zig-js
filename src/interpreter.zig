@@ -7177,9 +7177,13 @@ pub const Interpreter = struct {
                     return;
                 }
                 if (so.is_array) {
-                    for (so.elements.items, 0..) |el, i| {
-                        try self.setMember(target, try std.fmt.allocPrint(self.arena, "{d}", .{i}), el);
+                    for (try self.objectOwnKeysList(so)) |k| {
+                        if (value.isPrivateKey(k)) continue;
+                        const desc = try builtins.objectGetOwnPropertyDescriptor(self, Value.undef(), &.{ src, self.keyToValue(k) });
+                        if (!(desc.isObject() and (try self.getProperty(desc, "enumerable")).toBoolean())) continue;
+                        try self.setMember(target, k, try self.getProperty(src, k));
                     }
+                    return;
                 }
                 for (try so.ownKeys(self.arena)) |k| {
                     if (value.isPrivateKey(k)) continue;
