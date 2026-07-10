@@ -1038,20 +1038,22 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
             .call_spread => {
                 const args_arr = stack.pop().?;
                 const callee = stack.pop().?;
-                try stack.append(stack_alloc, try callValue(vm, callee, args_arr.asObj().elements.items, Value.undef()));
+                const args = try args_arr.asObj().internalElementsSnapshot(vm.arena);
+                try stack.append(stack_alloc, try callValue(vm, callee, args, Value.undef()));
             },
             .call_method_spread => {
                 const args_arr = stack.pop().?;
                 const recv = stack.pop().?;
                 const name = chunk.names.items[inst.a];
-                const args = args_arr.asObj().elements.items;
+                const args = try args_arr.asObj().internalElementsSnapshot(vm.arena);
                 const result = try invokeMethod(vm, recv, name, args);
                 try stack.append(stack_alloc, result);
             },
             .new_spread => {
                 const args_arr = stack.pop().?;
                 const callee = stack.pop().?;
-                try stack.append(stack_alloc, try construct(vm, callee, args_arr.asObj().elements.items));
+                const args = try args_arr.asObj().internalElementsSnapshot(vm.arena);
+                try stack.append(stack_alloc, try construct(vm, callee, args));
             },
 
             .ret => return stack.pop().?,
