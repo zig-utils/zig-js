@@ -7020,6 +7020,50 @@ test "parallel_js: DataView constructor snapshots resizable buffer under no-GIL 
     try std.testing.expect(result.asNum() > 0);
 }
 
+test "parallel_js: Promise combinators tolerate concurrent input settlement" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_threads = true,
+        .enable_gc = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+    });
+    defer ctx.destroy();
+
+    const result = try ctx.evaluate(
+        \\const gate = new SharedArrayBuffer(4);
+        \\const flag = new Int32Array(gate);
+        \\const resolvers = [];
+        \\const promises = [];
+        \\for (let i = 0; i < 4; i++) {
+        \\  promises.push(new Promise(resolve => { resolvers[i] = resolve; }));
+        \\}
+        \\let seen = 0;
+        \\let sum = 0;
+        \\Promise.all(promises).then(values => {
+        \\  seen = values.length;
+        \\  for (const v of values) sum += v;
+        \\});
+        \\const threads = [];
+        \\for (let i = 0; i < resolvers.length; i++) {
+        \\  threads.push(new Thread(() => {
+        \\    let spins = 0;
+        \\    while (Atomics.load(flag, 0) === 0 && spins < 10000000) spins++;
+        \\    if (Atomics.load(flag, 0) === 0) throw new Error("promise gate timeout");
+        \\    resolvers[i](i + 1);
+        \\    return true;
+        \\  }));
+        \\}
+        \\Atomics.store(flag, 0, 1);
+        \\Atomics.notify(flag, 0);
+        \\for (const t of threads) {
+        \\  if (t.join() !== true) throw new Error("promise worker failed");
+        \\}
+        \\seen === 4 && sum === 10
+    );
+    try std.testing.expect(result.asBool());
+}
+
 test "isFinite / isNaN coerce via ToNumber (Symbol throws, strings convert)" {
     // `Let num be ? ToNumber(number)`: strings/booleans convert, a Symbol throws.
     try std.testing.expect((try evalIn("isFinite('0')")).asBool());
