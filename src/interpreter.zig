@@ -8177,7 +8177,7 @@ pub const Interpreter = struct {
             const dtf = (try self.newObject()).asObj();
             try self.setProp(dtf, "\x00intl", Value.str("DateTimeFormat"));
             const locs = try canonicalizeLocaleList(self, if (args.len > 0) args[0] else Value.undef());
-            const loc = if (locs.elements.items.len > 0) locs.elements.items[0].asStr() else "en";
+            const loc = localeListFirstOr(locs, "en");
             try self.setProp(dtf, "\x00locale", Value.str(loc));
             const r = try dtfProcessOptionsKind(self, if (args.len > 1) args[1] else Value.undef(), required, defaults);
             try dtfStoreOptions(self, dtf, r);
@@ -12827,7 +12827,7 @@ pub const Interpreter = struct {
             const o = (try self.newObject()).asObj();
             try self.setProp(o, "\x00intl", Value.str("NumberFormat"));
             const locs = try canonicalizeLocaleList(self, if (args.len > 0) args[0] else Value.undef());
-            const loc = if (locs.elements.items.len > 0) locs.elements.items[0].asStr() else "en";
+            const loc = localeListFirstOr(locs, "en");
             try self.setProp(o, "\x00locale", Value.str(loc));
             const ro = try nfProcessOptions(self, if (args.len > 1) args[1] else Value.undef());
             try self.setProp(o, "\x00opts", Value.obj(ro));
@@ -13029,7 +13029,7 @@ pub const Interpreter = struct {
         if (eq(name, "toUpperCase") or eq(name, "toLocaleUpperCase")) {
             if (eq(name, "toLocaleUpperCase")) {
                 const locs = try canonicalizeLocaleList(self, if (args.len > 0) args[0] else Value.undef());
-                const loc = if (locs.elements.items.len > 0) locs.elements.items[0].asStr() else "";
+                const loc = localeListFirstOr(locs, "");
                 if (localeIsLithuanian(loc)) return Value.str(try lithuanianUpper(self, s));
                 if (localeIsTurkic(loc)) return Value.str(try turkicUpper(self, s));
             }
@@ -13038,7 +13038,7 @@ pub const Interpreter = struct {
         if (eq(name, "toLowerCase") or eq(name, "toLocaleLowerCase")) {
             if (eq(name, "toLocaleLowerCase")) {
                 const locs = try canonicalizeLocaleList(self, if (args.len > 0) args[0] else Value.undef());
-                const loc = if (locs.elements.items.len > 0) locs.elements.items[0].asStr() else "";
+                const loc = localeListFirstOr(locs, "");
                 if (localeIsLithuanian(loc)) return Value.str(try lithuanianLower(self, s));
                 if (localeIsTurkic(loc)) return Value.str(try turkicLower(self, s));
             }
@@ -16693,7 +16693,7 @@ fn bigIntToLocaleStringFn(ctx: *anyopaque, this: Value, args: []const Value) val
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const big = if (this.isObject() and this.asObj().is_bigint) this.asObj() else if (this.isObject() and this.asObj().prim != null and this.asObj().prim.?.isObject() and this.asObj().prim.?.asObj().is_bigint) this.asObj().prim.?.asObj() else return self.throwError("TypeError", "BigInt.prototype.toLocaleString requires that 'this' be a BigInt");
     const locs = try canonicalizeLocaleList(self, if (args.len > 0) args[0] else Value.undef());
-    const loc = if (locs.elements.items.len > 0) locs.elements.items[0].asStr() else "en";
+    const loc = localeListFirstOr(locs, "en");
     const ro = try nfProcessOptions(self, if (args.len > 1) args[1] else Value.undef());
     return Value.str(try bigIntFormatWithOptions(self, big, loc, ro));
 }
@@ -21285,7 +21285,7 @@ fn canonicalizeLocaleList(self: *Interpreter, v: Value) EvalError!*value.Object 
     if (v.isString() or (v.isObject() and v.asObj().getOwn("\x00locale") != null)) {
         const s = if (v.isString()) v.asStr() else v.asObj().getOwn("\x00locale").?.asStr();
         const c = canonicalizeLocaleTag(self.arena, s) orelse return self.throwError("RangeError", "Incorrect locale information provided");
-        try arr.elements.append(arr.elementsAllocator(self.arena), Value.str(c));
+        try arr.appendElement(self.arena, Value.str(c));
         return arr;
     }
     // Anything else (incl. a primitive) is ToObject'd (null/undefined excluded
@@ -21307,13 +21307,34 @@ fn canonicalizeLocaleList(self: *Interpreter, v: Value) EvalError!*value.Object 
         else
             try self.toStringV(ev);
         const c = canonicalizeLocaleTag(self.arena, s) orelse return self.throwError("RangeError", "Incorrect locale information provided");
-        var dup = false;
-        for (arr.elements.items) |e| if (std.mem.eql(u8, e.asStr(), c)) {
-            dup = true;
-        };
-        if (!dup) try arr.elements.append(arr.elementsAllocator(self.arena), Value.str(c));
+        if (!localeListContains(arr, c)) try arr.appendElement(self.arena, Value.str(c));
     }
     return arr;
+}
+
+fn localeListContains(locs: *const value.Object, tag: []const u8) bool {
+    const n = locs.elementsLen();
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        const v = locs.elementAt(i) orelse continue;
+        if (v.isString() and std.mem.eql(u8, v.asStr(), tag)) return true;
+    }
+    return false;
+}
+
+fn localeListFirstOr(locs: *const value.Object, fallback: []const u8) []const u8 {
+    const v = locs.elementAt(0) orelse return fallback;
+    return if (v.isString()) v.asStr() else fallback;
+}
+
+fn localeListFirstSupportedOr(locs: *const value.Object, fallback: []const u8) []const u8 {
+    const n = locs.elementsLen();
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        const v = locs.elementAt(i) orelse continue;
+        if (v.isString() and intlLocaleSupported(v.asStr())) return v.asStr();
+    }
+    return fallback;
 }
 
 fn intlLocaleSupported(tag: []const u8) bool {
@@ -22552,13 +22573,7 @@ fn intlServiceConstructorFn(comptime service: []const u8) value.NativeFn {
             };
             // Resolve the locale (first supported requested, else "en").
             const locs = try canonicalizeLocaleList(self, if (args.len > 0) args[0] else Value.undef());
-            var resolved: []const u8 = "en";
-            for (locs.elements.items) |lv| {
-                if (lv.isString() and intlLocaleSupported(lv.asStr())) {
-                    resolved = lv.asStr();
-                    break;
-                }
-            }
+            const resolved = localeListFirstSupportedOr(locs, "en");
             try self.setProp(o, "\x00intl", Value.str(service));
             try o.setAttr(self.arena, "\x00intl", .{ .writable = false, .enumerable = false, .configurable = false });
             try self.setProp(o, "\x00locale", Value.str(resolved));
@@ -23815,7 +23830,7 @@ const CollatorOptions = struct {
 
 fn collatorOptionsFrom(self: *Interpreter, locales: Value, options: Value) EvalError!CollatorOptions {
     const locs = try canonicalizeLocaleList(self, locales);
-    const locale = if (locs.elements.items.len > 0) locs.elements.items[0].asStr() else "en";
+    const locale = localeListFirstOr(locs, "en");
     var opts = CollatorOptions{
         .locale = locale,
         .ignore_punctuation = std.mem.eql(u8, parseTriple(locale).l, "th"),
@@ -26311,10 +26326,13 @@ fn intlSupportedLocalesOfFn(ctx: *anyopaque, this: Value, args: []const Value) v
     // Report requested locales as supported only when we have basic CLDR locale
     // data for the primary language.
     const out = (try self.newArray()).asObj();
-    for (arr.elements.items) |lv| {
+    const n = arr.elementsLen();
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        const lv = arr.elementAt(i) orelse continue;
         if (!lv.isString()) continue;
         if (!intlLocaleSupported(lv.asStr())) continue;
-        try out.elements.append(out.elementsAllocator(self.arena), lv);
+        try out.appendElement(self.arena, lv);
     }
     return Value.obj(out);
 }
@@ -35572,13 +35590,7 @@ fn makeDurationFormatForLocaleString(self: *Interpreter, locales: Value, options
     try self.setProp(o, "\x00intl", Value.str("DurationFormat"));
     try o.setAttr(self.arena, "\x00intl", .{ .writable = false, .enumerable = false, .configurable = false });
     const locs = try canonicalizeLocaleList(self, locales);
-    var resolved: []const u8 = "en";
-    for (locs.elements.items) |lv| {
-        if (lv.isString() and intlLocaleSupported(lv.asStr())) {
-            resolved = lv.asStr();
-            break;
-        }
-    }
+    const resolved = localeListFirstSupportedOr(locs, "en");
     try self.setProp(o, "\x00locale", Value.str(resolved));
     try o.setAttr(self.arena, "\x00locale", .{ .writable = false, .enumerable = false, .configurable = false });
 
@@ -35630,7 +35642,7 @@ fn temporalToLocaleStringFn(ctx: *anyopaque, this: Value, args: []const Value) v
         if (t.kind == .zoned_date_time)
             try self.setProp(dtf, "\x00allowTemporalZonedDateTime", Value.boolVal(true));
         const locs = try canonicalizeLocaleList(self, if (args.len > 0) args[0] else Value.undef());
-        const loc = if (locs.elements.items.len > 0) locs.elements.items[0].asStr() else "en";
+        const loc = localeListFirstOr(locs, "en");
         try self.setProp(dtf, "\x00locale", Value.str(loc));
         if (t.kind == .zoned_date_time and args.len > 1 and !args[1].isUndefined()) {
             const raw = Value.obj(try self.toObject(args[1]));
