@@ -335,11 +335,12 @@ roots and `asyncJoin` observers through a finishing sweep. Each seed currently
 runs 45 deterministic mid-GC subprograms. The
 lifecycle profile
 (`-Dfuzz-lifecycle=true`) adds simultaneous host-thread-owned no-GIL contexts
-that repeatedly bootstrap, run exact join/exception-identity oracles, abruptly
-tear down parked children, and destroy before recreating (`threadfuzz multictx`
-is the focused seed-reproduction mode), plus deterministic resizable `ArrayBuffer` /
-`DataView` constructor races where one no-GIL peer repeatedly resizes a backing
-buffer while another constructs both length-tracking and explicit-length views,
+	that repeatedly bootstrap, run exact join/exception-identity oracles, abruptly
+	tear down parked children, and destroy before recreating (`threadfuzz multictx`
+	is the focused seed-reproduction mode), plus deterministic resizable `ArrayBuffer` /
+	`DataView` constructor, DataView access, and `sliceToImmutable` races where one
+	no-GIL peer repeatedly resizes a backing buffer while another constructs views
+	or performs locked view/bulk-copy access,
 expected-throw termination storms for parked/unjoined shared-realm `Thread`s,
 exact Atomics counter oracles for script
 `Worker` plus simple-import, diamond-shaped, and fanout/rejoin module `Worker`
