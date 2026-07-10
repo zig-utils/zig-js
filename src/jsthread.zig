@@ -110,6 +110,9 @@ pub const ContentionStats = struct {
     worker_channel_pops: u64 = 0,
     worker_channel_empty_pops: u64 = 0,
     worker_channel_closes: u64 = 0,
+    arena_lock_acquires: u64 = 0,
+    arena_lock_contentions: u64 = 0,
+    arena_lock_spins: u64 = 0,
     thread_join_wait_ns: u64 = 0,
     lock_wait_ns: u64 = 0,
     condition_wait_ns: u64 = 0,
@@ -161,6 +164,9 @@ const ContentionCounters = struct {
     worker_channel_pops: std.atomic.Value(u64) = .init(0),
     worker_channel_empty_pops: std.atomic.Value(u64) = .init(0),
     worker_channel_closes: std.atomic.Value(u64) = .init(0),
+    arena_lock_acquires: std.atomic.Value(u64) = .init(0),
+    arena_lock_contentions: std.atomic.Value(u64) = .init(0),
+    arena_lock_spins: std.atomic.Value(u64) = .init(0),
     thread_join_wait_ns: std.atomic.Value(u64) = .init(0),
     lock_wait_ns: std.atomic.Value(u64) = .init(0),
     condition_wait_ns: std.atomic.Value(u64) = .init(0),
@@ -192,6 +198,9 @@ pub fn resetContentionStats() void {
     contention_counters.worker_channel_pops.store(0, .release);
     contention_counters.worker_channel_empty_pops.store(0, .release);
     contention_counters.worker_channel_closes.store(0, .release);
+    contention_counters.arena_lock_acquires.store(0, .release);
+    contention_counters.arena_lock_contentions.store(0, .release);
+    contention_counters.arena_lock_spins.store(0, .release);
     contention_counters.thread_join_wait_ns.store(0, .release);
     contention_counters.lock_wait_ns.store(0, .release);
     contention_counters.condition_wait_ns.store(0, .release);
@@ -225,6 +234,9 @@ pub fn contentionStats() ContentionStats {
         .worker_channel_pops = contention_counters.worker_channel_pops.load(.acquire),
         .worker_channel_empty_pops = contention_counters.worker_channel_empty_pops.load(.acquire),
         .worker_channel_closes = contention_counters.worker_channel_closes.load(.acquire),
+        .arena_lock_acquires = contention_counters.arena_lock_acquires.load(.acquire),
+        .arena_lock_contentions = contention_counters.arena_lock_contentions.load(.acquire),
+        .arena_lock_spins = contention_counters.arena_lock_spins.load(.acquire),
         .thread_join_wait_ns = contention_counters.thread_join_wait_ns.load(.acquire),
         .lock_wait_ns = contention_counters.lock_wait_ns.load(.acquire),
         .condition_wait_ns = contention_counters.condition_wait_ns.load(.acquire),
@@ -235,6 +247,19 @@ pub fn contentionStats() ContentionStats {
 inline fn bumpContention(comptime field: []const u8) void {
     if (!contention_stats_enabled.load(.monotonic)) return;
     _ = @field(contention_counters, field).fetchAdd(1, .monotonic);
+}
+
+inline fn addContention(comptime field: []const u8, count: u64) void {
+    if (count == 0 or !contention_stats_enabled.load(.monotonic)) return;
+    _ = @field(contention_counters, field).fetchAdd(count, .monotonic);
+}
+
+pub inline fn recordArenaLockAcquire(spins: usize) void {
+    bumpContention("arena_lock_acquires");
+    if (spins > 0) {
+        bumpContention("arena_lock_contentions");
+        addContention("arena_lock_spins", @intCast(spins));
+    }
 }
 
 pub inline fn recordWorkerChannelPush() void {
@@ -300,6 +325,7 @@ test "jsthread contention stats reset and snapshot" {
     recordWorkerChannelPop();
     recordWorkerChannelEmptyPop();
     recordWorkerChannelClose();
+    recordArenaLockAcquire(3);
     finishContentionWaitTimer("thread_join_wait_ns", 0);
     finishContentionWaitTimer("lock_wait_ns", 0);
     finishContentionWaitTimer("condition_wait_ns", 0);
@@ -318,6 +344,9 @@ test "jsthread contention stats reset and snapshot" {
     try std.testing.expectEqual(@as(u64, 1), stats.worker_channel_pops);
     try std.testing.expectEqual(@as(u64, 1), stats.worker_channel_empty_pops);
     try std.testing.expectEqual(@as(u64, 1), stats.worker_channel_closes);
+    try std.testing.expectEqual(@as(u64, 1), stats.arena_lock_acquires);
+    try std.testing.expectEqual(@as(u64, 1), stats.arena_lock_contentions);
+    try std.testing.expectEqual(@as(u64, 3), stats.arena_lock_spins);
     try std.testing.expect(stats.thread_join_wait_ns > 0);
     try std.testing.expect(stats.lock_wait_ns > 0);
     try std.testing.expect(stats.condition_wait_ns > 0);

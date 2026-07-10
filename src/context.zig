@@ -39,7 +39,9 @@ pub const LockedArena = struct {
     lock: std.atomic.Value(u32) = .init(0),
 
     inline fn acquire(self: *LockedArena) void {
-        while (self.lock.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) std.atomic.spinLoopHint();
+        var spins: usize = 0;
+        while (self.lock.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) : (spins += 1) std.atomic.spinLoopHint();
+        jsthread.recordArenaLockAcquire(spins);
     }
     inline fn unlock(self: *LockedArena) void {
         self.lock.store(0, .release);
