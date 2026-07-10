@@ -2608,6 +2608,13 @@ const Stringifier = struct {
     /// wrapper unwrapping) into `buf`. Returns false when the value is omitted.
     fn serialize(st: *Stringifier, buf: *std.ArrayListUnmanaged(u8), holder: Value, key: []const u8) HostError!bool {
         const self = st.self;
+        // Count each nested serialize toward the call-depth limit so a replacer
+        // that fabricates ever-deeper values (`(k,v)=>[v]`) — non-circular, so the
+        // cycle check never fires — throws a catchable RangeError instead of
+        // overflowing the native stack.
+        self.depth += 1;
+        defer self.depth -= 1;
+        try self.stackGuard();
         const a = self.arena;
         var v = try self.getProperty(holder, key);
         if (v.isObject() and !v.asObj().is_symbol) {
