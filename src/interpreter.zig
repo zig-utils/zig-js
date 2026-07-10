@@ -444,14 +444,12 @@ pub const Environment = struct {
 
     /// Binding locks are only needed when a context runs the GC marker
     /// concurrently (`concurrent_gc`) or multiple mutators in parallel
-    /// (`parallel_gc`). The default engine is GIL-serialized / single-threaded,
-    /// where they would be pure overhead on the hottest paths (`get` on every
-    /// variable read, `put` on every binding). So gate every `binding_lock`
-    /// acquisition on this process-global flag — set before thread/Atomics
-    /// builtins are installed for a parallel context, then left on process-wide.
-    /// Off → `lockBindings`/`unlockBindings` are a single relaxed load and return
-    /// (no CAS), keeping the default path fast.
-    pub var binding_locks_enabled: std.atomic.Value(bool) = .init(false);
+    /// (`parallel_gc`). This is process-wide and intentionally starts enabled:
+    /// concurrent context creation can otherwise flip false→true between a
+    /// lock helper's load and its paired unlock helper, making the unlock act on
+    /// an unheld mutex. A future owner-token guard can recover the fast path;
+    /// correctness wins here.
+    pub var binding_locks_enabled: std.atomic.Value(bool) = .init(true);
 
     pub fn lockBindings(self: *Environment) void {
         if (!binding_locks_enabled.load(.acquire)) return;
