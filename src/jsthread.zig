@@ -1082,6 +1082,11 @@ fn traceHoldJob(job: *HoldJob, v: anytype) void {
     if (job.cb) |cb| traceThreadValue(v, cb);
 }
 
+pub fn traceHoldJobRoot(raw: *anyopaque, v: anytype) void {
+    const job: *HoldJob = @ptrCast(@alignCast(raw));
+    traceHoldJob(job, v);
+}
+
 fn barrierHoldJob(job: *HoldJob) void {
     const owner: ?*anyopaque = if (job.lock.owner) |o| @ptrCast(o) else null;
     gc_mod.barrierCellFrom(owner, @ptrCast(job.outer));
@@ -3107,6 +3112,7 @@ pub fn pumpTasks(self: *Interpreter) void {
         // delivery from taking the shared API lock once per queued grant.
         const n = g.dequeueTaskBurst(&burst);
         if (n == 0) break;
+        self.current_hold_jobs = burst[0..n];
         for (burst[0..n]) |r| {
             bumpContention("task_pump_jobs");
             const job: *HoldJob = @ptrCast(@alignCast(r));
@@ -3119,6 +3125,7 @@ pub fn pumpTasks(self: *Interpreter) void {
             if (microtaskEnqueueGeneration(self) != microtask_gen)
                 self.drainMicrotasks() catch {};
         }
+        self.current_hold_jobs = &.{};
     }
 }
 

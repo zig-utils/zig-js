@@ -893,6 +893,11 @@ pub const Interpreter = struct {
     /// Microtask currently popped from the queue and executing. It is no longer
     /// present in `microtasks`, so GC must trace it separately.
     current_microtask: ?promise.Microtask = null,
+    /// Run-loop `HoldJob`s currently popped from `Gil.tasks` for a bounded
+    /// burst. They are no longer present in the realm task queue, so GC must
+    /// trace them separately while callbacks/release promises can run JS and hit
+    /// safepoints.
+    current_hold_jobs: []const *anyopaque = &.{},
     /// The realm's SharedArrayBuffer storage references (Context-owned, like
     /// `microtasks`; agent realms own their own). Every SAB wrapper created in
     /// this realm tracks one reference here so the realm's teardown releases

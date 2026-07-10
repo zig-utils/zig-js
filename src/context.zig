@@ -1377,11 +1377,13 @@ pub const Context = struct {
     /// polls (batched into the atomic after each generation); the paired max
     /// keeps the worst single generation visible. Finish retries are allocation
     /// races detected by the self-checking finish step; their paired max keeps
-    /// the worst single elected attempt visible. Peer request counts snapshot
-    /// running versus directly traceable parked peers once per generation, while
-    /// peer publications count roots actually handed off. Pause time is
-    /// collector-mutator time spent inside the driver, not a stop-the-world
-    /// pause: peer mutators continue throughout.
+    /// the worst single elected attempt visible. Born-growth and deferred rounds
+    /// explain why a generation skipped finish: peers were still allocating, or
+    /// the marker still had deferred work that cannot be swept yet. Peer request
+    /// counts snapshot running versus directly traceable parked peers once per
+    /// generation, while peer publications count roots actually handed off.
+    /// Pause time is collector-mutator time spent inside the driver, not a
+    /// stop-the-world pause: peer mutators continue throughout.
     gc_par_generations: std.atomic.Value(u64) = .init(0),
     gc_par_publication_wait_iterations: std.atomic.Value(u64) = .init(0),
     gc_par_finish_retries: std.atomic.Value(u64) = .init(0),
@@ -1389,6 +1391,8 @@ pub const Context = struct {
     gc_par_finish_retries_max: std.atomic.Value(u64) = .init(0),
     gc_par_publication_timeout_aborts: std.atomic.Value(u64) = .init(0),
     gc_par_round_limit_aborts: std.atomic.Value(u64) = .init(0),
+    gc_par_born_growth_rounds: std.atomic.Value(u64) = .init(0),
+    gc_par_deferred_rounds: std.atomic.Value(u64) = .init(0),
     gc_par_running_peer_requests: std.atomic.Value(u64) = .init(0),
     gc_par_parked_peer_observations: std.atomic.Value(u64) = .init(0),
     gc_par_peer_publications: std.atomic.Value(u64) = .init(0),
@@ -2284,7 +2288,10 @@ pub const Context = struct {
             // we simply keep going. So being aggressive here is safe and lets the
             // collector converge as soon as it catches a genuine lull.
             const born = h.bornPendingLen();
-            if (born == prev_born and h.deferredPendingLen() == 0) {
+            const deferred = h.deferredPendingLen();
+            if (born != prev_born) _ = self.gc_par_born_growth_rounds.fetchAdd(1, .monotonic);
+            if (deferred != 0) _ = self.gc_par_deferred_rounds.fetchAdd(1, .monotonic);
+            if (born == prev_born and deferred == 0) {
                 self.gc_scan_native_stack = true;
                 const swept = h.finishConcurrentMarkParallel();
                 self.gc_scan_native_stack = false;
@@ -11050,15 +11057,20 @@ fn expectParallelGcTelemetryCoherent(ctx: *Context) !void {
     const wait_max = ctx.gc_par_publication_wait_iterations_max.load(.monotonic);
     const finish_retries = ctx.gc_par_finish_retries.load(.monotonic);
     const finish_retries_max = ctx.gc_par_finish_retries_max.load(.monotonic);
+    const generations = ctx.gc_par_generations.load(.monotonic);
+    const born_growth_rounds = ctx.gc_par_born_growth_rounds.load(.monotonic);
+    const deferred_rounds = ctx.gc_par_deferred_rounds.load(.monotonic);
 
     try std.testing.expect(attempts > 0);
     try std.testing.expectEqual(attempts, collections + aborts);
     try std.testing.expectEqual(aborts, publication_aborts + round_aborts);
-    try std.testing.expect(ctx.gc_par_generations.load(.monotonic) >= attempts);
+    try std.testing.expect(generations >= attempts);
     try std.testing.expect(pause_max <= pause_total);
     try std.testing.expect(pause_total > 0);
     try std.testing.expect(wait_max <= wait_total);
     try std.testing.expect(finish_retries_max <= finish_retries);
+    try std.testing.expect(born_growth_rounds <= generations);
+    try std.testing.expect(deferred_rounds <= generations);
 }
 
 test "parallel_js (M3): mid-script parallel collector reclaims garbage while threads run, no GIL" {

@@ -502,6 +502,7 @@ pub fn traceInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
         machine.unlockMicrotasks();
     }
     if (machine.current_microtask) |mt| traceMicrotask(mt, v);
+    for (machine.current_hold_jobs) |job| jsthread.traceHoldJobRoot(job, v);
     if (machine.async_waiters) |waiters| {
         machine.lockRealm();
         defer machine.unlockRealm();

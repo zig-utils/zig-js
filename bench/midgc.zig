@@ -56,11 +56,11 @@ pub fn main() !void {
 
     std.debug.print("zig-js mid-script parallel GC telemetry (internal testing policy)\n", .{});
     std.debug.print(
-        "{s:>6} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>11} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>11} {s:>11} {s:>12}\n",
-        .{ "runs", "attempts", "sweeps", "aborts", "pub-abort", "rnd-abort", "generations", "wait-poll", "wait-max", "fin-retry", "retry-max", "run-peer", "park-peer", "published", "pause-us", "pause-max-us" },
+        "{s:>6} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>11} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>11} {s:>11} {s:>12}\n",
+        .{ "runs", "attempts", "sweeps", "aborts", "pub-abort", "rnd-abort", "generations", "wait-poll", "wait-max", "fin-retry", "retry-max", "born-grow", "deferred", "run-peer", "park-peer", "published", "pause-us", "pause-max-us" },
     );
     std.debug.print(
-        "{d:>6} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>11} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>11} {d:>11} {d:>12}  wall={d} us\n",
+        "{d:>6} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>11} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>11} {d:>11} {d:>12}  wall={d} us\n",
         .{
             runs + 1,
             ctx.gc_par_attempts.load(.monotonic),
@@ -73,6 +73,8 @@ pub fn main() !void {
             ctx.gc_par_publication_wait_iterations_max.load(.monotonic),
             ctx.gc_par_finish_retries.load(.monotonic),
             ctx.gc_par_finish_retries_max.load(.monotonic),
+            ctx.gc_par_born_growth_rounds.load(.monotonic),
+            ctx.gc_par_deferred_rounds.load(.monotonic),
             ctx.gc_par_running_peer_requests.load(.monotonic),
             ctx.gc_par_parked_peer_observations.load(.monotonic),
             ctx.gc_par_peer_publications.load(.monotonic),

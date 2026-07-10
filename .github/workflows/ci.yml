@@ -68,8 +68,10 @@ jobs:
           # Specialized TSan smoke for the mid-script-GC profile. The larger
           # non-TSan leg owns breadth; this leg proves the hidden root/parked
           # waiter/microtask paths are also free of unsuppressed engine races.
+          # TSan makes this 45-case profile exceed the default 120s per-seed
+          # watchdog on loaded runners, so keep the watchdog local to this leg.
           - name: tsan-threadfuzz-midgc
-            cmd: zig build threadfuzz -Dtsan=true -Dfuzz-midgc=true -Dfuzz-iters=2
+            cmd: THREADFUZZ_SEED_TIMEOUT_MS=300000 zig build threadfuzz -Dtsan=true -Dfuzz-midgc=true -Dfuzz-iters=2
           # Specialized TSan smoke for lifecycle teardown. It keeps the Worker,
           # asyncJoin, waitAsync, cleanup, and termination combinations under
           # sanitizer instead of relying only on the default-profile TSan leg.
@@ -255,7 +257,7 @@ jobs:
           - name: default-120
             cmd: zig build threadfuzz -Dtsan=true -Dfuzz-iters=120
           - name: midgc-5
-            cmd: zig build threadfuzz -Dtsan=true -Dfuzz-midgc=true -Dfuzz-iters=5
+            cmd: THREADFUZZ_SEED_TIMEOUT_MS=300000 zig build threadfuzz -Dtsan=true -Dfuzz-midgc=true -Dfuzz-iters=5
           - name: lifecycle-5
             cmd: zig build threadfuzz -Dtsan=true -Dfuzz-lifecycle=true -Dfuzz-iters=5
     steps:

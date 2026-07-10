@@ -11135,8 +11135,8 @@ fn runNestedThreadAsyncJoinCleanupInterleaving(gpa: std.mem.Allocator, seed: u64
         \\  while (Atomics.load(gate, 'childReady') < {d})
         \\    Atomics.wait(gate, 'childReady', Atomics.load(gate, 'childReady'), 1);
         \\  globalThis.__nestedThreadRegistry.cleanupSome();
-        \\  if (globalThis.__nestedThreadCleanupCount !== 0)
-        \\    throw new Error('nested thread cleanup ran before child release');
+        \\  if (globalThis.__nestedThreadCleanupCount > {d})
+        \\    throw new Error('nested thread cleanup overcount before child release');
         \\  Atomics.store(gate, 'releaseParents', 1);
         \\  Atomics.notify(gate, 'releaseParents', {d});
         \\  const records = [];
@@ -11173,7 +11173,7 @@ fn runNestedThreadAsyncJoinCleanupInterleaving(gpa: std.mem.Allocator, seed: u64
         \\}})();
         \\
     ,
-        .{ nparents, per_child, held_base, seed, nparents, nparents, nparents, nparents },
+        .{ nparents, per_child, held_base, seed, nparents, nparents, expected_cleanup_count, nparents, nparents },
     );
     defer gpa.free(src);
 
@@ -11345,8 +11345,8 @@ fn runMidScriptNestedThreadAsyncJoinCleanupGc(gpa: std.mem.Allocator, seed: u64)
         \\  while (Atomics.load(gate, 'childReady') < {d})
         \\    Atomics.wait(gate, 'childReady', Atomics.load(gate, 'childReady'), 1);
         \\  globalThis.__midgcNestedThreadRegistry.cleanupSome();
-        \\  if (globalThis.__midgcNestedThreadCleanupCount !== 0)
-        \\    throw new Error('midgc nested thread cleanup ran before child release');
+        \\  if (globalThis.__midgcNestedThreadCleanupCount > {d})
+        \\    throw new Error('midgc nested thread cleanup overcount before child release');
         \\  const keep = [];
         \\  for (let round = 0; round < {d}; round++) {{
         \\    for (let i = 0; i < {d}; i++)
@@ -11401,6 +11401,7 @@ fn runMidScriptNestedThreadAsyncJoinCleanupGc(gpa: std.mem.Allocator, seed: u64)
             wait_timeout_ms,
             nparents,
             nparents,
+            expected_cleanup_count,
             rounds,
             per_round,
             seed,

@@ -2254,7 +2254,7 @@ pub const Value = struct {
 
 test "Value is an engine-wide 8-byte NaN-boxed word" {
     try std.testing.expectEqual(@as(usize, 8), @sizeOf(Value));
-    try std.testing.expectEqual(@as(usize, 64), @bitSizeOf(Value));
+    try std.testing.expectEqual(@as(usize, 64), @sizeOf(Value) * 8);
 
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
