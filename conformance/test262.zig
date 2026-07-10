@@ -546,7 +546,7 @@ fn runEval(gpa: std.mem.Allocator, io: std.Io, path: []const u8) !void {
 /// per *valid* failure, so failures can be clustered by cause during development.
 fn runDiag(gpa: std.mem.Allocator, io: std.Io, root: []const u8, sub: []const u8, filter: ?[]const u8) !void {
     const out = std.Io.File.stdout();
-    const path = std.fs.path.join(gpa, &.{ root, sub }) catch return;
+    const path = resolveUnderRoot(gpa, root, sub) orelse return;
     defer gpa.free(path);
     var dir = std.Io.Dir.cwd().openDir(io, path, .{ .iterate = true }) catch return;
     defer dir.close(io);
@@ -618,6 +618,17 @@ fn pathWithinRoot(root: []const u8, path: []const u8) bool {
     if (!std.mem.startsWith(u8, path, root)) return false;
     if (root.len != 0 and (root[root.len - 1] == '/' or root[root.len - 1] == '\\')) return true;
     return path.len > root.len and (path[root.len] == '/' or path[root.len] == '\\');
+}
+
+fn resolveUnderRoot(gpa: std.mem.Allocator, root: []const u8, sub: []const u8) ?[]const u8 {
+    const root_abs = std.fs.path.resolve(gpa, &.{root}) catch return null;
+    defer gpa.free(root_abs);
+    const path = std.fs.path.resolve(gpa, &.{ root_abs, sub }) catch return null;
+    if (!pathWithinRoot(root_abs, path)) {
+        gpa.free(path);
+        return null;
+    }
+    return path;
 }
 
 fn modLoad(ctx: *anyopaque, referrer: []const u8, specifier: []const u8, out_path: *[]const u8) ?[]const u8 {
@@ -1104,7 +1115,10 @@ fn runWorker(gpa: std.mem.Allocator, io: std.Io, root: []const u8, sub: []const 
     const spec = subtreeSpec(sub);
     const scan_sub = spec.scan_sub;
     const shallow = spec.shallow;
-    const path = std.fs.path.join(gpa, &.{ root, scan_sub }) catch return;
+    const path = resolveUnderRoot(gpa, root, scan_sub) orelse {
+        out.writeStreamingAll(io, "DONE\n") catch {};
+        return;
+    };
     defer gpa.free(path);
 
     const harness_path = std.fs.path.join(gpa, &.{ root, "harness" }) catch return;
@@ -1220,7 +1234,7 @@ fn listSkipsForSubtree(gpa: std.mem.Allocator, io: std.Io, root: []const u8, sub
     const spec = subtreeSpec(sub);
     const scan_sub = spec.scan_sub;
     const shallow = spec.shallow;
-    const path = std.fs.path.join(gpa, &.{ root, scan_sub }) catch return;
+    const path = resolveUnderRoot(gpa, root, scan_sub) orelse return;
     defer gpa.free(path);
 
     const harness_path = std.fs.path.join(gpa, &.{ root, "harness" }) catch return;
@@ -1290,7 +1304,7 @@ fn listExcludedForSubtree(gpa: std.mem.Allocator, io: std.Io, root: []const u8, 
     const spec = subtreeSpec(sub);
     const scan_sub = spec.scan_sub;
     const shallow = spec.shallow;
-    const path = std.fs.path.join(gpa, &.{ root, scan_sub }) catch return;
+    const path = resolveUnderRoot(gpa, root, scan_sub) orelse return;
     defer gpa.free(path);
 
     if (std.mem.endsWith(u8, scan_sub, ".js")) {
@@ -1410,7 +1424,7 @@ fn runParent(gpa: std.mem.Allocator, io: std.Io, root: []const u8) !void {
     var any_dir = false;
     for (subtrees) |sub| {
         const scan_sub = subtreePath(sub);
-        const path = std.fs.path.join(gpa, &.{ root, scan_sub }) catch continue;
+        const path = resolveUnderRoot(gpa, root, scan_sub) orelse continue;
         defer gpa.free(path);
         if (std.mem.endsWith(u8, scan_sub, ".js")) {
             var probe = std.Io.Dir.cwd().openFile(io, path, .{}) catch {
@@ -1591,7 +1605,7 @@ fn pathAtIndex(gpa: std.mem.Allocator, io: std.Io, root: []const u8, sub: []cons
     const spec = subtreeSpec(sub);
     const scan_sub = spec.scan_sub;
     const shallow = spec.shallow;
-    const path = std.fs.path.join(gpa, &.{ root, scan_sub }) catch return null;
+    const path = resolveUnderRoot(gpa, root, scan_sub) orelse return null;
     defer gpa.free(path);
 
     if (std.mem.endsWith(u8, scan_sub, ".js")) {
