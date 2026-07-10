@@ -38690,7 +38690,7 @@ pub fn hasProperty(o: *value.Object, name: []const u8) bool {
         // slot store, so [[HasProperty]] must consult them on each chain object
         // (an inherited array element makes the index present on the receiver).
         if (value.canonicalIndex(name)) |idx| {
-            if (c.is_array and idx < c.elements.items.len and !c.isHole(idx)) return true;
+            if (c.is_array and c.denseElementPresent(idx)) return true;
             if (c.typed_array) |ta| if (idx < (ta.currentLength() orelse 0)) return true;
             if (c.prim) |p| if (p.isString() and idx < Interpreter.utf16LenOfString(p.asStr())) return true;
         }
