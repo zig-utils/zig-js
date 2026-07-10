@@ -127,6 +127,66 @@ const Serializer = struct {
         return s.self.throwError("TypeError", what);
     }
 
+    const MapEntrySnapshot = struct { key: Value, val: Value };
+    const ArraySnapshot = struct { logical_len: usize, elements: []Value, holes: []bool };
+
+    fn rootSnapshotValue(s: *Serializer, v: Value) HostError!void {
+        if (v.isObject()) _ = try s.self.pushTempRoot(v);
+    }
+
+    fn snapshotSetEntries(s: *Serializer, o: *value.Object) HostError![]Value {
+        var list: std.ArrayListUnmanaged(Value) = .empty;
+        errdefer list.deinit(s.w.gpa);
+        o.lockElements();
+        defer o.unlockElements();
+        for (o.elements.items) |entry| {
+            if (entry.isObject() and entry.asObj().is_set_deleted) continue;
+            try s.rootSnapshotValue(entry);
+            try list.append(s.w.gpa, entry);
+        }
+        return list.items;
+    }
+
+    fn snapshotMapEntries(s: *Serializer, o: *value.Object) HostError![]MapEntrySnapshot {
+        var list: std.ArrayListUnmanaged(MapEntrySnapshot) = .empty;
+        errdefer list.deinit(s.w.gpa);
+        o.lockElements();
+        defer o.unlockElements();
+        for (o.elements.items) |entry_v| {
+            if (!entry_v.isObject()) return s.throwClone("DataCloneError: malformed Map entry");
+            const entry = entry_v.asObj();
+            {
+                entry.lockElements();
+                defer entry.unlockElements();
+                if (entry.elements.items.len == 0) continue; // deleted MapData slot
+                if (entry.elements.items.len < 2) return s.throwClone("DataCloneError: malformed Map entry");
+                const k = entry.elements.items[0];
+                const v = entry.elements.items[1];
+                try s.rootSnapshotValue(k);
+                try s.rootSnapshotValue(v);
+                try list.append(s.w.gpa, .{ .key = k, .val = v });
+            }
+        }
+        return list.items;
+    }
+
+    fn snapshotArrayElements(s: *Serializer, o: *value.Object) HostError!ArraySnapshot {
+        o.lockElements();
+        defer o.unlockElements();
+        const n = o.elements.items.len;
+        const elements = try s.w.gpa.alloc(Value, n);
+        errdefer s.w.gpa.free(elements);
+        const holes = try s.w.gpa.alloc(bool, n);
+        errdefer s.w.gpa.free(holes);
+        @memcpy(elements, o.elements.items);
+        for (elements, 0..) |el, i| {
+            const hole = o.holes != null and o.holes.?.contains(i);
+            holes[i] = hole;
+            if (!hole) try s.rootSnapshotValue(el);
+        }
+        return .{ .logical_len = @max(n, o.array_len), .elements = elements, .holes = holes };
+    }
+
     fn ser(s: *Serializer, v: Value) HostError!void {
         switch (v.kind()) {
             .undefined => try s.w.tag(.undef),
@@ -227,19 +287,25 @@ const Serializer = struct {
         }
         if (o.is_map) {
             try s.w.tag(.map);
-            try s.w.int(u32, @intCast(o.elements.items.len));
-            for (o.elements.items) |entry| {
-                if (!entry.isObject() or entry.asObj().elements.items.len < 2)
-                    return s.throwClone("DataCloneError: malformed Map entry");
-                try s.ser(entry.asObj().elements.items[0]);
-                try s.ser(entry.asObj().elements.items[1]);
+            const root_mark = s.self.gc_temp_roots.items.len;
+            defer s.self.restoreTempRoots(root_mark);
+            const entries = try s.snapshotMapEntries(o);
+            defer s.w.gpa.free(entries);
+            try s.w.int(u32, @intCast(entries.len));
+            for (entries) |entry| {
+                try s.ser(entry.key);
+                try s.ser(entry.val);
             }
             return;
         }
         if (o.is_set) {
             try s.w.tag(.set);
-            try s.w.int(u32, @intCast(o.elements.items.len));
-            for (o.elements.items) |entry| try s.ser(entry);
+            const root_mark = s.self.gc_temp_roots.items.len;
+            defer s.self.restoreTempRoots(root_mark);
+            const entries = try s.snapshotSetEntries(o);
+            defer s.w.gpa.free(entries);
+            try s.w.int(u32, @intCast(entries.len));
+            for (entries) |entry| try s.ser(entry);
             return;
         }
         if (o.is_error) {
@@ -262,11 +328,14 @@ const Serializer = struct {
         }
         if (o.is_array) {
             try s.w.tag(.array);
-            const len = @max(o.elements.items.len, o.array_len);
-            try s.w.int(u64, @intCast(len));
-            try s.w.int(u32, @intCast(o.elements.items.len));
-            for (o.elements.items, 0..) |el, i| {
-                const hole = o.holes != null and o.holes.?.contains(i);
+            const root_mark = s.self.gc_temp_roots.items.len;
+            defer s.self.restoreTempRoots(root_mark);
+            const snap = try s.snapshotArrayElements(o);
+            defer s.w.gpa.free(snap.elements);
+            defer s.w.gpa.free(snap.holes);
+            try s.w.int(u64, @intCast(snap.logical_len));
+            try s.w.int(u32, @intCast(snap.elements.len));
+            for (snap.elements, snap.holes) |el, hole| {
                 try s.w.byte(@intFromBool(hole));
                 if (!hole) try s.ser(el);
             }

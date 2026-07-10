@@ -8951,6 +8951,11 @@ test "structuredClone: identity, cycles, types, SAB sharing, transfer" {
         \\  e: new TypeError("boom") });
         \\if (!(t.m instanceof Map) || t.m.get(1) !== "one") throw new Error("Map");
         \\if (!(t.s instanceof Set) || !t.s.has("x")) throw new Error("Set");
+        \\const dm = new Map([[1, "live"], [2, "dead"]]); dm.delete(2);
+        \\const ds = new Set(["live", "dead"]); ds.delete("dead");
+        \\const deleted = structuredClone({ dm, ds });
+        \\if (deleted.dm.size !== 1 || deleted.dm.get(1) !== "live") throw new Error("deleted Map slot");
+        \\if (deleted.ds.size !== 1 || !deleted.ds.has("live")) throw new Error("deleted Set slot");
         \\if (!(t.d instanceof Date) || t.d.getTime() !== 123) throw new Error("Date");
         \\if (!(t.r instanceof RegExp) || t.r.source !== "ab+c" || t.r.flags !== "gi") throw new Error("RegExp");
         \\if (t.big !== 123456789012345678901234567890n) throw new Error("BigInt");
