@@ -31,12 +31,16 @@ pub const State = enum { pending, fulfilled, rejected };
 /// outcome resolves/rejects `result` (the promise `.then` returned).
 pub const Reaction = struct {
     handler: ?Value,
+    /// Intrinsic `.then` fast path: settle this result promise directly instead
+    /// of allocating native resolve/reject capability closures. Custom species
+    /// capabilities keep using `resolve`/`reject` below.
+    result: ?*Promise = null,
     /// The result capability's resolve/reject functions: running the reaction
     /// settles the dependent promise by *calling* one of these. For a plain
     /// `.then` they are native closures over a fresh promise; for a subclass
     /// (`SpeciesConstructor`) they are the functions that constructor handed out.
-    resolve: Value,
-    reject: Value,
+    resolve: Value = Value.undef(),
+    reject: Value = Value.undef(),
 };
 
 pub const Promise = struct {
@@ -360,8 +364,12 @@ fn appendReactionUnlocked(self: *Interpreter, p: *Promise, list: *std.ArrayListU
     // Incremental-GC barrier: the reaction's callbacks are stored into the live
     // promise cell (which may already be marked black). Shade them.
     if (r.handler) |h| gc_mod.barrierValueFrom(p, h);
-    gc_mod.barrierValueFrom(p, r.resolve);
-    gc_mod.barrierValueFrom(p, r.reject);
+    if (r.result) |result| {
+        gc_mod.barrierCellFrom(p, @ptrCast(result));
+    } else {
+        gc_mod.barrierValueFrom(p, r.resolve);
+        gc_mod.barrierValueFrom(p, r.reject);
+    }
     try reserveReactionListUnlocked(self, list, 1);
     list.appendAssumeCapacity(r);
     noteReactionAdded(self, p);
@@ -493,8 +501,7 @@ pub fn nativeResolveReject(self: *Interpreter, p: *Promise) EvalError!struct { r
 pub fn then(self: *Interpreter, p: *Promise, on_f: Value, on_r: Value) EvalError!Value {
     const result = try newPromise(self);
     const rp: *Promise = @ptrCast(@alignCast(result.promise.?));
-    const nr = try nativeResolveReject(self, rp);
-    try performThen(self, p, on_f, on_r, nr.resolve, nr.reject);
+    try performThenIntrinsic(self, p, on_f, on_r, rp);
     return Value.obj(result);
 }
 
@@ -505,6 +512,18 @@ pub fn performThen(self: *Interpreter, p: *Promise, on_f: Value, on_r: Value, re
     const rh: ?Value = if (on_r.isCallable()) on_r else null;
     const react_f = Reaction{ .handler = fh, .resolve = resolve_fn, .reject = reject_fn };
     const react_r = Reaction{ .handler = rh, .resolve = resolve_fn, .reject = reject_fn };
+    try performThenReactions(self, p, react_f, react_r);
+}
+
+fn performThenIntrinsic(self: *Interpreter, p: *Promise, on_f: Value, on_r: Value, result: *Promise) EvalError!void {
+    const fh: ?Value = if (on_f.isCallable()) on_f else null;
+    const rh: ?Value = if (on_r.isCallable()) on_r else null;
+    const react_f = Reaction{ .handler = fh, .result = result };
+    const react_r = Reaction{ .handler = rh, .result = result };
+    try performThenReactions(self, p, react_f, react_r);
+}
+
+fn performThenReactions(self: *Interpreter, p: *Promise, react_f: Reaction, react_r: Reaction) EvalError!void {
     p.lockState();
     errdefer p.unlockState();
     const snap = .{ .state = p.state, .value = p.value };
@@ -540,6 +559,14 @@ fn enqueue(self: *Interpreter, task: Microtask) EvalError!void {
 
 /// Run one reaction job: invoke the handler (or pass through) and settle the
 /// dependent promise. A handler that throws rejects the dependent promise.
+fn settleReaction(self: *Interpreter, r: Reaction, fulfilled: bool, arg: Value) EvalError!void {
+    if (r.result) |result| {
+        if (fulfilled) try resolve(self, result, arg) else try reject(self, result, arg);
+        return;
+    }
+    if (fulfilled) _ = try self.callValue(r.resolve, &.{arg}) else _ = try self.callValue(r.reject, &.{arg});
+}
+
 pub fn runJob(self: *Interpreter, task: Microtask) EvalError!void {
     if (task.kind == .thenable) {
         promise_profile.recordMicrotaskRun(true);
@@ -559,17 +586,17 @@ pub fn runJob(self: *Interpreter, task: Microtask) EvalError!void {
     const r = task.reaction;
     if (r.handler) |h| {
         if (self.callValueWithThis(h, &.{task.argument}, Value.undef())) |res| {
-            _ = try self.callValue(r.resolve, &.{res});
+            try settleReaction(self, r, true, res);
         } else |err| {
             if (err == error.Throw) {
                 const reason = self.exception;
                 self.exception = Value.undef();
-                _ = try self.callValue(r.reject, &.{reason});
+                try settleReaction(self, r, false, reason);
             } else return err;
         }
     } else {
         // Pass-through: a fulfill reaction with no handler forwards the value;
         // a reject reaction with no handler forwards the rejection.
-        if (task.fulfilled) _ = try self.callValue(r.resolve, &.{task.argument}) else _ = try self.callValue(r.reject, &.{task.argument});
+        try settleReaction(self, r, task.fulfilled, task.argument);
     }
 }

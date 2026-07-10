@@ -387,8 +387,12 @@ pub fn tracePromise(p: *promise.Promise, v: anytype) void {
 
 inline fn traceReaction(r: promise.Reaction, v: anytype) void {
     markValueOpt(v, r.handler);
-    markValue(v, r.resolve);
-    markValue(v, r.reject);
+    if (r.result) |result| {
+        markManaged(v, result);
+    } else {
+        markValue(v, r.resolve);
+        markValue(v, r.reject);
+    }
 }
 
 inline fn traceMicrotask(mt: promise.Microtask, v: anytype) void {

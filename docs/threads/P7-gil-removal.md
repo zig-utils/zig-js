@@ -669,6 +669,11 @@ spawned-thread Promise drains no longer serialize on the host queue.
 The drain path also moves the currently pending burst into an interpreter-local
 batch under one queue lock before running jobs unlocked; GC traces that active
 batch separately from the queue.
+Intrinsic `.then` reactions now store the result promise directly in the
+reaction record instead of allocating native resolve/reject capability closures
+per dependent promise; custom species capabilities still use the function-based
+path. The focused Promise profile tracks this through lower `LockedArena`
+traffic and unchanged reaction/thenable job counts.
 What now gates the GIL drop is the
 whole-corpus TSan campaign +
 serial-perf gate. The two *named* remaining rare no-GIL races are now both
