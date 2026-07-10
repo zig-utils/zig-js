@@ -531,7 +531,9 @@ Issue #1 remains the umbrella status page.
   reused tokens in that same cleanup window, teardown termination with
   pending `asyncJoin` rejection reactions
   and child-owned typed-array `waitAsync` tickets that must be
-  abandoned before the child exits, cross-thread `FinalizationRegistry`
+  abandoned before the child exits while completed siblings preserve thrown-
+  object identity and user-thenable publication through `join()` and
+  `asyncJoin`, cross-thread `FinalizationRegistry`
   cleanup count/sum oracles, teardown termination while property `waitAsync`
   timeout compaction, async condition reacquire, a pending `asyncJoin`
   rejection reaction, and already-ready `FinalizationRegistry` cleanup jobs

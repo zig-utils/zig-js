@@ -9078,6 +9078,53 @@ fn runTerminationPendingReactionInterleaving(gpa: std.mem.Allocator, seed: u64) 
         \\(() => {{
         \\  globalThis.__termPendingRejectScore = 0;
         \\  globalThis.__termPendingRejectCount = 0;
+        \\  globalThis.__termPendingExceptionScore = 0;
+        \\  globalThis.__termPendingThenableScore = 0;
+        \\  globalThis.__termPendingThenableCalls = 0;
+        \\  const publicationSeed = {d};
+        \\  const boom = {{ marker: 810000 + publicationSeed, nested: {{ publicationSeed }} }};
+        \\  const failing = new Thread(() => {{ throw boom; }});
+        \\  failing.asyncJoin().then(
+        \\    () => {{ globalThis.__termPendingExceptionScore = -1000000; }},
+        \\    (e) => {{
+        \\      if (e === boom && e.nested === boom.nested)
+        \\        globalThis.__termPendingExceptionScore += e.marker;
+        \\      else
+        \\        globalThis.__termPendingExceptionScore = -1000000;
+        \\    }});
+        \\  try {{
+        \\    failing.join();
+        \\    globalThis.__termPendingExceptionScore = -1000000;
+        \\  }} catch (e) {{
+        \\    if (e === boom && e.nested.publicationSeed === publicationSeed)
+        \\      globalThis.__termPendingExceptionScore += e.marker;
+        \\    else
+        \\      globalThis.__termPendingExceptionScore = -1000000;
+        \\  }}
+        \\  const thenableMarker = 820000 + publicationSeed;
+        \\  const publishing = new Thread((marker) => {{
+        \\    return {{
+        \\      marker,
+        \\      then(resolve) {{
+        \\        globalThis.__termPendingThenableCalls++;
+        \\        resolve(this.marker);
+        \\      }},
+        \\    }};
+        \\  }}, thenableMarker);
+        \\  publishing.asyncJoin().then(
+        \\    (value) => {{
+        \\      if (value === thenableMarker) globalThis.__termPendingThenableScore += value;
+        \\      else globalThis.__termPendingThenableScore = -1000000;
+        \\    }},
+        \\    () => {{ globalThis.__termPendingThenableScore = -1000000; }});
+        \\  const joinedThenable = publishing.join();
+        \\  if (!joinedThenable || joinedThenable.marker !== thenableMarker ||
+        \\      typeof joinedThenable.then !== 'function')
+        \\    throw new Error('termination publication join lost user thenable');
+        \\  Promise.resolve(joinedThenable).then((value) => {{
+        \\    if (value === thenableMarker) globalThis.__termPendingThenableScore += value;
+        \\    else globalThis.__termPendingThenableScore = -1000000;
+        \\  }});
         \\  const sab = new SharedArrayBuffer({d} * 4);
         \\  const view = new Int32Array(sab);
         \\  globalThis.__termPendingView = view;
@@ -9130,7 +9177,7 @@ fn runTerminationPendingReactionInterleaving(gpa: std.mem.Allocator, seed: u64) 
         \\}})();
         \\
     ,
-        .{ nthreads, nthreads, seed_marker, seed, seed_marker, seed_marker, seed, nthreads, seed },
+        .{ seed_marker, nthreads, nthreads, seed_marker, seed, seed_marker, seed_marker, seed, nthreads, seed },
     );
     defer gpa.free(src);
 
@@ -9143,6 +9190,38 @@ fn runTerminationPendingReactionInterleaving(gpa: std.mem.Allocator, seed: u64) 
             return false;
         }
     }
+
+    _ = ctx.evaluate("$drainRunLoop(); drainMicrotasks()") catch |err| {
+        std.debug.print("seed {d}: termination publication drain failed with {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    const publication_check_src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  const expectedException = 2 * (810000 + {d});
+        \\  const expectedThenable = 2 * (820000 + {d});
+        \\  if (globalThis.__termPendingExceptionScore !== expectedException)
+        \\    throw new Error('termination exception publication score ' + globalThis.__termPendingExceptionScore + '/' + expectedException);
+        \\  if (globalThis.__termPendingThenableScore !== expectedThenable)
+        \\    throw new Error('termination thenable publication score ' + globalThis.__termPendingThenableScore + '/' + expectedThenable);
+        \\  if (globalThis.__termPendingThenableCalls !== 2)
+        \\    throw new Error('termination thenable call count ' + globalThis.__termPendingThenableCalls + '/2');
+        \\  return 1;
+        \\}})()
+        \\
+    ,
+        .{ seed_marker, seed_marker },
+    );
+    defer gpa.free(publication_check_src);
+    const publication_check = ctx.evaluate(publication_check_src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: termination publication check threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!publication_check.isNumber() or publication_check.asNum() != 1) return false;
 
     const score = ctx.evaluate("globalThis.__termPendingRejectScore") catch |err| {
         std.debug.print("seed {d}: cannot read termination pending-reaction score: {s}\n", .{ seed, @errorName(err) });

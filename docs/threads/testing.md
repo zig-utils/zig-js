@@ -374,7 +374,9 @@ async ticket before `await` delivers its release function, no-fn
 waiters stay parked before exact cleanup after they resume, teardown termination
 with pending `asyncJoin` rejection reactions and
 child-owned typed-array `waitAsync` tickets that must be abandoned before the
-child's stack-owned waiter token disappears, cross-thread `FinalizationRegistry`
+child's stack-owned waiter token disappears; already-completed sibling Threads
+in that teardown window must also preserve thrown-object identity and user-
+thenable assimilation through blocking `join()` and `asyncJoin`, cross-thread `FinalizationRegistry`
 cleanup count/sum oracles, teardown termination while property `waitAsync`
 timeout compaction, async condition reacquire, a pending `asyncJoin` rejection
 reaction, and already-ready `FinalizationRegistry` cleanup jobs share the same
