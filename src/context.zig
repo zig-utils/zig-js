@@ -7971,6 +7971,24 @@ test "array destructuring over the iterator protocol (generator, Set, string, re
         \\function* g() { yield 1; yield 2; yield 3; }
         \\var [first, ...rest] = g(); rest.length
     )).asNum());
+    // Fast-path array destructuring still follows ArrayIterator semantics:
+    // sparse logical tail slots are collected as `undefined`, and inherited
+    // index properties are read through [[Get]].
+    try std.testing.expect((try evalIn(
+        \\var [...rest] = new Array(3);
+        \\rest.length === 3 && rest[0] === undefined && rest[2] === undefined
+    )).asBool());
+    try std.testing.expect((try evalIn(
+        \\var ok;
+        \\Array.prototype[2] = 9;
+        \\try {
+        \\  var [first, ...rest] = new Array(3);
+        \\  ok = rest.length === 2 && rest[1] === 9;
+        \\} finally {
+        \\  delete Array.prototype[2];
+        \\}
+        \\ok
+    )).asBool());
     // Default applies when the iterator runs dry.
     try std.testing.expectEqual(@as(f64, 9), (try evalIn(
         \\function* g() { yield 1; }

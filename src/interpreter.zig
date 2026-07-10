@@ -10130,13 +10130,11 @@ pub const Interpreter = struct {
             .object => {
                 const o = val.asObj();
                 if (!o.is_array) return self.throwError("TypeError", "value is not iterable");
-                // A hole WITHIN the array length reads through the prototype chain:
-                // the array iterator does Get(array, index), which finds a polluted
-                // `Array.prototype[i]` (present slots return directly; past the end
-                // the iterator is done, so the target reads undefined).
-                if (i < o.elementsLen() and o.isHole(i))
-                    return try self.getProperty(val, try std.fmt.allocPrint(self.arena, "{d}", .{i}));
-                return o.elementAt(i) orelse Value.undef();
+                // Array destructuring consumes the array iterator: indices below
+                // the logical length read through [[Get]], so holes, sparse tails,
+                // inherited index properties, and accessors are observable.
+                if (i >= o.arrayLength()) return Value.undef();
+                return self.arrIndexGet(o, i);
             },
             .string => {
                 const s = val.asStr();
@@ -10149,7 +10147,7 @@ pub const Interpreter = struct {
 
     fn iterableLen(val: Value) usize {
         return switch (val.kind()) {
-            .object => if (val.asObj().is_array) val.asObj().elementsLen() else 0,
+            .object => if (val.asObj().is_array) val.asObj().arrayLength() else 0,
             .string => val.asStr().len,
             else => 0,
         };
