@@ -14927,7 +14927,8 @@ fn combineElemFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
                 _ = try self.callValue(c.reject, &.{val}); // first rejection wins
                 return Value.undef();
             }
-            c.values.elements.items[e.index] = val;
+            if (!c.values.setElementAt(e.index, val))
+                return self.throwError("RangeError", "Promise combinator result index out of range");
         },
         .all_settled => {
             const o = (try self.newObject()).asObj();
@@ -14938,14 +14939,16 @@ fn combineElemFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
                 try self.setProp(o, "status", Value.str("fulfilled"));
                 try self.setProp(o, "value", val);
             }
-            c.values.elements.items[e.index] = Value.obj(o);
+            if (!c.values.setElementAt(e.index, Value.obj(o)))
+                return self.throwError("RangeError", "Promise combinator result index out of range");
         },
         .all_keyed => {
             if (e.is_reject) {
                 _ = try self.callValue(c.reject, &.{val}); // first rejection wins
                 return Value.undef();
             }
-            c.values.elements.items[e.index] = val;
+            if (!c.values.setElementAt(e.index, val))
+                return self.throwError("RangeError", "Promise combinator result index out of range");
         },
         .all_settled_keyed => {
             const o = (try self.newObject()).asObj();
@@ -14956,14 +14959,16 @@ fn combineElemFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
                 try self.setProp(o, "status", Value.str("fulfilled"));
                 try self.setProp(o, "value", val);
             }
-            c.values.elements.items[e.index] = Value.obj(o);
+            if (!c.values.setElementAt(e.index, Value.obj(o)))
+                return self.throwError("RangeError", "Promise combinator result index out of range");
         },
         .any => {
             if (!e.is_reject) {
                 _ = try self.callValue(c.resolve, &.{val}); // first fulfillment wins
                 return Value.undef();
             }
-            c.values.elements.items[e.index] = val; // collect the error
+            if (!c.values.setElementAt(e.index, val)) // collect the error
+                return self.throwError("RangeError", "Promise combinator result index out of range");
         },
     }
     c.remaining -= 1;
@@ -14982,7 +14987,7 @@ fn combineSettle(self: *Interpreter, c: *promise.Combine) value.HostError!void {
         const result = (try self.newObject()).asObj();
         result.setProtoAtomic(null);
         for (keys, 0..) |key, i| {
-            try self.setProp(result, key, c.values.elements.items[i]);
+            try self.setProp(result, key, c.values.elementAt(i) orelse Value.undef());
         }
         try callCapabilityResolve(self, c, Value.obj(result));
     } else try callCapabilityResolve(self, c, Value.obj(c.values));
@@ -15163,7 +15168,7 @@ fn setupCombinator(self: *Interpreter, this: Value, iterable: Value, kind: @Type
         // without closing it.
         const maybe = iterStep(self, iter) catch |err| return rejectAbrupt(self, cap, err);
         const el = maybe orelse break;
-        try values.elements.append(values.elementsAllocator(self.arena), Value.undef());
+        try values.appendElement(self.arena, Value.undef());
         combine.remaining += 1;
         // `nextPromise = Call(promiseResolve, C, «el»)` — an abrupt completion
         // here closes the (still-open) iterator before rejecting.
