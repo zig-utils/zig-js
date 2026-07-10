@@ -2607,7 +2607,7 @@ pub const Interpreter = struct {
                 // @@iterator is never invoked. (`args` is its rest-parameter array.)
                 const args = if (self.in_default_ctor) dblk: {
                     const av = self.env.get("args") orelse Value.undef();
-                    break :dblk if (av.isObject() and av.asObj().is_array) av.asObj().elements.items else &[_]Value{};
+                    break :dblk if (av.isObject() and av.asObj().is_array) try av.asObj().internalElementsSnapshot(self.arena) else &[_]Value{};
                 } else try self.evalArgs(sc);
                 // IsConstructor(superConstructor) AFTER the arguments are evaluated.
                 const sup = sup_opt orelse return self.throwError("TypeError", "Super constructor null is not a constructor");
