@@ -1244,17 +1244,13 @@ pub const Context = struct {
     /// The empty root shape every object in this context transitions from.
     root_shape: *Shape,
     exception: ?value.Value = null,
-    /// The microtask queue (Promise reactions) and the `print` output buffer —
-    /// persistent across `evaluate` calls, shared with each `Interpreter`.
+    /// The realm microtask queue (Promise reactions for the host/main thread)
+    /// and the `print` output buffer — persistent across `evaluate` calls.
+    /// Spawned shared-realm `Thread`s install their own arena-owned
+    /// `MicrotaskQueue` while running; cross-thread settlements can still route
+    /// into this realm queue when a retiring thread's local queue is no longer a
+    /// safe liveness target.
     microtasks: @import("promise.zig").MicrotaskQueue = .{},
-    /// Serializes microtask-queue content mutation (enqueue/dequeue) when the
-    /// execution-path GIL is dropped (`parallel_js`). Under the GIL exactly one
-    /// thread touches the queue at a time, so the interpreter's `microtask_lock`
-    /// pointer stays null and the enqueue/drain paths are a single relaxed null
-    /// check. Without it, a thread settling an `asyncJoin` promise enqueues a
-    /// reaction into the joiner's queue while the joiner drains it — a data race
-    /// that loses the reaction (the Layer-C "microtask queue" blocker).
-    microtask_lock: std.atomic.Mutex = .unlocked,
     print_buffer: std.ArrayListUnmanaged(u8) = .empty,
     /// SharedArrayBuffer storage references this realm holds (one per SAB
     /// wrapper created here). Released in `destroy` — shared bytes live in
@@ -1741,11 +1737,9 @@ pub const Context = struct {
             .this_value = Value.obj(self.global_object),
             .root_shape = self.root_shape,
             .microtasks = &self.microtasks,
-            // Only engage the microtask lock in no-GIL mode; single-threaded and
-            // `.gil = true` execution leave it null. Every interpreter (main +
-            // each spawned `Thread`, which also come from `interpreter()`) thus
-            // shares one lock for the realm's queue.
-            .microtask_lock = if (self.parallel_js) &self.microtask_lock else null,
+            // Only engage per-queue microtask locking in no-GIL mode;
+            // single-threaded and `.gil = true` execution stay lock-free.
+            .lock_microtasks = self.parallel_js,
             .realm_lock = if (self.parallel_js) &self.realm_lock else null,
             .print_buffer = &self.print_buffer,
             .tdz_marker = self.tdz_marker,
@@ -1914,14 +1908,13 @@ pub const Context = struct {
         if (self.parallel_js) self.realm_lock.unlock();
     }
 
-    /// Lock the realm microtask queue (`microtasks`). Peers take this via the
-    /// interpreter's `microtask_lock` pointer under parallel_js; the collector
-    /// takes it directly while tracing the queue.
+    /// Lock the realm microtask queue (`microtasks`). The collector takes this
+    /// directly while tracing the queue; interpreters lock their current queue.
     pub fn lockMicrotasks(self: *Context) void {
-        spinLockMutex(&self.microtask_lock);
+        self.microtasks.acquire();
     }
     pub fn unlockMicrotasks(self: *Context) void {
-        self.microtask_lock.unlock();
+        self.microtasks.release();
     }
 
     pub fn pushActiveInterpreter(self: *Context, machine: *interp.Interpreter) !void {

@@ -89,10 +89,25 @@ pub const Microtask = struct {
 pub const MicrotaskQueue = struct {
     items: std.ArrayListUnmanaged(Microtask) = .empty,
     head: usize = 0,
+    /// Serializes this queue's content mutation under no-GIL execution. The
+    /// queue itself owns the lock so spawned `Thread`s with independent
+    /// microtask queues do not contend on the realm queue's lock.
+    lock: std.atomic.Mutex = .unlocked,
     /// Monotonic enqueue generation for run-loop pumps that need to know
     /// whether a task turn produced microtasks without taking the queue lock on
     /// the common empty path. This is not a length; it never decreases.
     generation: std.atomic.Value(u64) = .init(0),
+
+    pub fn acquire(self: *MicrotaskQueue) void {
+        var spins: usize = 0;
+        while (!self.lock.tryLock()) : (spins += 1) {
+            if ((spins & 0xff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
+        }
+    }
+
+    pub fn release(self: *MicrotaskQueue) void {
+        self.lock.unlock();
+    }
 
     pub fn append(self: *MicrotaskQueue, a: std.mem.Allocator, task: Microtask) !void {
         try self.reserve(a, 1);

@@ -878,12 +878,11 @@ pub const Interpreter = struct {
     /// The Context-owned microtask queue (Promise reactions). Drained after the
     /// main script in `Context.evaluate` and inline by `await`.
     microtasks: ?*promise.MicrotaskQueue = null,
-    /// When non-null (only under `parallel_js`), serializes content mutation of
-    /// `microtasks` so a cross-thread enqueue (e.g. an `asyncJoin` settlement on
-    /// the finishing thread) can't race the joiner's drain. Points at the
-    /// Context's `microtask_lock`; null on single-threaded and `.gil = true`
-    /// paths.
-    microtask_lock: ?*std.atomic.Mutex = null,
+    /// True under `parallel_js`: serialize content mutation of whichever
+    /// microtask queue this interpreter is currently targeting. The lock lives
+    /// on the queue itself so independent spawned-thread queues do not contend
+    /// on a realm-wide lock.
+    lock_microtasks: bool = false,
     /// When non-null (only under `parallel_js`), the Context's `realm_lock`,
     /// serializing this interpreter's mutation of the shared realm queues it can
     /// touch off-collector — currently `finalization_cleanup_jobs`, which the
@@ -5430,10 +5429,10 @@ pub const Interpreter = struct {
         // GC cell reused by a peer's `makeFunction`, a use-after-free that surfaces
         // as a torn read of `func.is_class_constructor` back in `callPlain`. Publish
         // the callee's wrapping object (which marks the `Function` through
-        // `Object.js_func`) as a precise root for the call's duration. `microtask_lock`
-        // is non-null iff `parallel_js` (which the parallel marker requires), so the
+        // `Object.js_func`) as a precise root for the call's duration.
+        // `lock_microtasks` is true iff `parallel_js` (which the parallel marker requires), so the
         // single-threaded hot path pays nothing.
-        const callee_rooted = self.microtask_lock != null and func.obj != null;
+        const callee_rooted = self.lock_microtasks and func.obj != null;
         const callee_root_mark = if (callee_rooted) mark: {
             const m = try self.pushTempRoot(Value.obj(func.obj.?));
             // Shade the callee now: a concurrent mark may begin before this root is
@@ -6473,13 +6472,13 @@ pub const Interpreter = struct {
     /// checkpoint). Each job may enqueue more; the step budget bounds runaways.
     pub fn drainMicrotasks(self: *Interpreter) EvalError!void {
         if (self.microtasks == null) return;
-        // Pop one job at a time under `microtask_lock` (when engaged), run it
-        // unlocked (it may enqueue more, re-entering the lock), and repeat until
-        // the queue is empty. The per-pop lock makes the dequeue atomic against
-        // a peer thread's concurrent enqueue under `parallel_js`; the previous
-        // trailing `clearRetainingCapacity()` is gone because it could discard a
-        // task a peer appended after the empties check (and the loop already
-        // leaves the queue empty).
+        // Pop one job at a time under the current queue's lock (when engaged),
+        // run it unlocked (it may enqueue more, re-entering the lock), and
+        // repeat until the queue is empty. The per-pop lock makes the dequeue
+        // atomic against a peer thread's concurrent enqueue under `parallel_js`;
+        // the previous trailing `clearRetainingCapacity()` is gone because it
+        // could discard a task a peer appended after the empties check (and the
+        // loop already leaves the queue empty).
         while (self.microtaskDequeue()) |job| {
             self.current_microtask = job;
             promise.runJob(self, job) catch |err| {
@@ -6492,7 +6491,7 @@ pub const Interpreter = struct {
     }
 
     /// Atomically pop the next microtask (front of the queue), or null if empty.
-    /// Holds `microtask_lock` only across the queue mutation — never across the
+    /// Holds the current microtask queue lock only across the queue mutation — never across the
     /// job's execution — so it stays a brief leaf-lock that can't deadlock with
     /// the GIL or any per-structure lock.
     fn microtaskDequeue(self: *Interpreter) ?promise.Microtask {
@@ -6502,20 +6501,18 @@ pub const Interpreter = struct {
         return q.pop();
     }
 
-    /// Spin-acquire the realm's microtask lock (only engaged under
-    /// `parallel_js`; a single null check otherwise). Mirrors `Object`'s
-    /// `tryLock` spin since the enum mutex has no blocking `lock()`, and the
-    /// critical section is a single queue append/pop, never JS.
+    /// Spin-acquire the current microtask queue's lock (only engaged under
+    /// `parallel_js`; a single bool check otherwise). The critical section is a
+    /// single queue append/pop/length check, never JS.
     pub fn lockMicrotasks(self: *Interpreter) void {
-        const m = self.microtask_lock orelse return;
-        var spins: usize = 0;
-        while (!m.tryLock()) : (spins += 1) {
-            if ((spins & 0xff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
-        }
+        if (!self.lock_microtasks) return;
+        const q = self.microtasks orelse return;
+        q.acquire();
     }
 
     pub fn unlockMicrotasks(self: *Interpreter) void {
-        if (self.microtask_lock) |m| m.unlock();
+        if (!self.lock_microtasks) return;
+        if (self.microtasks) |q| q.release();
     }
 
     pub fn lockRealm(self: *Interpreter) void {
@@ -6680,7 +6677,7 @@ pub const Interpreter = struct {
                 self.drainMicrotasks() catch {};
                 // A peer thread settling an asyncJoin/propAsync can `enqueue`
                 // (locked append) into this shared realm queue concurrently, so
-                // read its length under the same `microtask_lock`.
+                // read its length under the same queue lock.
                 self.lockMicrotasks();
                 const q_empty = if (self.microtasks) |q| q.isEmpty() else true;
                 self.unlockMicrotasks();

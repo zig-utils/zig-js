@@ -78,7 +78,7 @@ broader stress coverage.
 | 6 | Accessor / attribute maps | `value.zig` `Object.property_lock`, `setAccessor`/`setAttr` `StringHashMapUnmanaged` puts, `deleteAccessorOwn` removes | **Closed for ordinary named properties:** accessor and attribute map lookup/mutation/removal through `Object` helpers is serialized by `property_lock`. | Keep accessor/attribute state behind `property_lock`; add tests for any future descriptor side door before ungil. |
 | 7 | **Value width** | `value.zig` `Value = struct { bits: u64 }` — pointer-width NaN-boxed word | **Closed for representation width:** a `Value` slot is one machine word (`@sizeOf(Value) == 8`), so ordinary slot copies no longer tear across multiple words. Shared mutable containers still need their own synchronization/barriers. | Keep all `Value` access through the `Value` API and the `nanbox.zig`/`valuebox.zig` proof tests; do not reintroduce slice/tag payloads into the hot representation. |
 | 8 | Strings | `value.zig` string values point at `strcell.StringCell`; `jsstring.zig` atomic `retain`/`release` refcount | **Closed for `Value` payload width:** runtime string values are one pointer to an immutable `StringCell`, allocated from the active arena. Equal runtime strings are still compared by bytes, not by required pointer identity; the sharded `InternTable` remains available for deliberate shared-string paths. | Keep `Value.str` routed through `strcell.makeCell`; use the intern table only where canonical identity is explicitly wanted. |
-| 9 | Promise settlement and reactions | `promise.zig` `Promise.lock`, `state`, `value`, `on_fulfill`, `on_reject`; `gc.zig` `tracePromise`; `interpreter.zig` `awaitValue` | **Closed for per-promise state:** resolve/reject/then registration, snapshot reads, async thenable job guards, and GC tracing lock the Promise before reading or moving settlement/reaction state. The microtask queue's cross-thread content mutation is now serialized by `Context.microtask_lock` under `parallel_js` (the one interleaving case is an `asyncJoin` settlement enqueuing into the joiner's queue); async waiter arrays remain separate GIL-protected host state. | Keep all Promise state reads through `promise.snapshot`/`isPending` or under `Promise.lock`; route microtask enqueue/dequeue through `enqueue`/`drainMicrotasks` so the `parallel_js` lock covers them. |
+| 9 | Promise settlement and reactions | `promise.zig` `Promise.lock`, `state`, `value`, `on_fulfill`, `on_reject`, `MicrotaskQueue.lock`; `gc.zig` `tracePromise`; `interpreter.zig` `awaitValue` | **Closed for per-promise state:** resolve/reject/then registration, snapshot reads, async thenable job guards, and GC tracing lock the Promise before reading or moving settlement/reaction state. Microtask-queue content mutation is now serialized by the target queue's own lock under `parallel_js`, so independent spawned-thread queues do not contend on the realm queue while cross-thread `asyncJoin`/waitAsync settlement still protects enqueue/dequeue. Async waiter arrays remain separate GIL-protected host state. | Keep all Promise state reads through `promise.snapshot`/`isPending` or under `Promise.lock`; route microtask enqueue/dequeue through `enqueue`/`drainMicrotasks` so the queue-local `parallel_js` lock covers them. |
 
 ## Design inputs to lock in now (so earlier phases don't foreclose them)
 
@@ -241,7 +241,7 @@ roadmap item repeats it.
      state, the collector's own interpreter, and **parked** peers' frozen
      stacks (park records). Running peers' `active_interpreters` are skipped —
      they self-publish. The realm-root parallel-safety audit is **done**:
-     `traceRoots` reads `microtasks` under `microtask_lock`, `js_threads` under
+     `traceRoots` reads the realm microtask queue under its queue-local lock, `js_threads` under
      the Gil `api_lock`, and `async_waiters`/`c_api_handles`/
      `finalization_cleanup_jobs` under a new `Context.realm_lock` (all taken by
      their mutators only under `parallel_js`); `ctx.exception` (redundant with
@@ -646,7 +646,7 @@ Verified GIL PASS + `parallel_js` 0/250.
 Two genuine no-GIL correctness fixes were made along the way (both correct, both
 406/406 and regression-free, though neither was this flake's cause): the
 cross-thread **microtask-queue** data race is now serialized by
-`Context.microtask_lock` (TSan-validated), and asyncJoin settlement reactions
+queue-local microtask locks (TSan-validated), and asyncJoin settlement reactions
 whose joiner is a spawned thread are routed to the realm queue rather than the
 joiner's abandoned local queue (`PendingJoin` records the joiner; exiting threads
 flush their residual queue). With the budget-cleared corpus and these fixes, the
@@ -655,6 +655,9 @@ The contention profiler now also has a focused `promise microtasks` case for
 issue #15: it keeps the default table narrow, but records Promise microtask
 enqueue/pop/run totals and splits reaction jobs from thenable-assimilation jobs
 under no-GIL versus `.gil = true`.
+That profile led to one contention reduction: no-GIL interpreters now lock the
+current `MicrotaskQueue` rather than a realm-wide lock, so independent
+spawned-thread Promise drains no longer serialize on the host queue.
 What now gates the GIL drop is the
 whole-corpus TSan campaign +
 serial-perf gate. The two *named* remaining rare no-GIL races are now both

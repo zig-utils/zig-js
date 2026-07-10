@@ -546,10 +546,10 @@ fn threadMain(rec: *ThreadRecord, fn_v: Value, args: []const Value) void {
     // result, which is the only cross-thread microtask drain point.
     // Heap-allocate the per-thread microtask queue (arena-owned, freed at realm
     // teardown) instead of putting it on this thread's native stack. A peer
-    // settling a cross-thread promise appends into this queue under
-    // `microtask_lock`, growing its ArrayList header; on the stack that write
+    // settling a cross-thread promise appends into this queue under the queue's
+    // microtask lock, growing its ArrayList header; on the stack that write
     // races the collector's CONSERVATIVE scan of this thread's stack (the blind
-    // word scan can't take `microtask_lock`). Off the stack the header is never
+    // word scan can't take that queue lock). Off the stack the header is never
     // conservatively scanned, and the queued tasks stay precisely rooted via
     // `machine.microtasks` in `traceInterpreterRoots` (which holds the lock).
     const microtasks = rec.ctx.arena().create(promise.MicrotaskQueue) catch {
@@ -669,15 +669,41 @@ fn threadMain(rec: *ThreadRecord, fn_v: Value, args: []const Value) void {
     // final drain above (e.g. a nested-asyncJoin or removed prop-async ticket
     // settling here in the teardown window) into the realm queue, which the host
     // keeps draining — otherwise they strand when this queue is abandoned below.
-    // Serialized with peer enqueues by `microtask_lock` (no-op when null, i.e.
-    // GIL mode).
-    {
-        machine.lockMicrotasks();
-        defer machine.unlockMicrotasks();
-        if (!microtasks.isEmpty()) {
-            rec.ctx.microtasks.appendPendingSlice(rec.ctx.arena(), microtasks) catch {};
-            microtasks.clearRetainingCapacity();
+    // Serialized with peer enqueues by the source and destination queue locks
+    // under no-GIL (a direct transfer in GIL mode).
+    transferMicrotasks(rec.ctx, microtasks, &rec.ctx.microtasks);
+}
+
+fn transferMicrotasks(ctx: *Context, from: *promise.MicrotaskQueue, to: *promise.MicrotaskQueue) void {
+    if (from == to) return;
+    if (ctx.parallel_js) {
+        const from_addr = @intFromPtr(from);
+        const to_addr = @intFromPtr(to);
+        const source_first = from_addr < to_addr;
+        if (source_first) {
+            from.acquire();
+            to.acquire();
+        } else {
+            to.acquire();
+            from.acquire();
         }
+        transferMicrotasksUnlocked(ctx, from, to);
+        if (source_first) {
+            to.release();
+            from.release();
+        } else {
+            from.release();
+            to.release();
+        }
+        return;
+    }
+    transferMicrotasksUnlocked(ctx, from, to);
+}
+
+fn transferMicrotasksUnlocked(ctx: *Context, from: *promise.MicrotaskQueue, to: *promise.MicrotaskQueue) void {
+    if (!from.isEmpty()) {
+        to.appendPendingSlice(ctx.arena(), from) catch {};
+        from.clearRetainingCapacity();
     }
 }
 
