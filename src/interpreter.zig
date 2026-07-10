@@ -14915,65 +14915,133 @@ fn combineElemFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const fnobj = self.active_native orelse return Value.undef();
     const e: *promise.Elem = @ptrCast(@alignCast(fnobj.private_data.?));
-    // [[AlreadyCalled]]: a resolve/reject element function settles its element at
-    // most once; subsequent calls are no-ops.
-    if (e.already.*) return Value.undef();
-    e.already.* = true;
     const c = e.combine;
     const val = if (args.len > 0) args[0] else Value.undef();
-    switch (c.kind) {
-        .all => {
-            if (e.is_reject) {
-                _ = try self.callValue(c.reject, &.{val}); // first rejection wins
-                return Value.undef();
-            }
-            if (!c.values.setElementAt(e.index, val))
-                return self.throwError("RangeError", "Promise combinator result index out of range");
-        },
-        .all_settled => {
-            const o = (try self.newObject()).asObj();
-            if (e.is_reject) {
-                try self.setProp(o, "status", Value.str("rejected"));
-                try self.setProp(o, "reason", val);
-            } else {
-                try self.setProp(o, "status", Value.str("fulfilled"));
-                try self.setProp(o, "value", val);
-            }
-            if (!c.values.setElementAt(e.index, Value.obj(o)))
-                return self.throwError("RangeError", "Promise combinator result index out of range");
-        },
-        .all_keyed => {
-            if (e.is_reject) {
-                _ = try self.callValue(c.reject, &.{val}); // first rejection wins
-                return Value.undef();
-            }
-            if (!c.values.setElementAt(e.index, val))
-                return self.throwError("RangeError", "Promise combinator result index out of range");
-        },
-        .all_settled_keyed => {
-            const o = (try self.newObject()).asObj();
-            if (e.is_reject) {
-                try self.setProp(o, "status", Value.str("rejected"));
-                try self.setProp(o, "reason", val);
-            } else {
-                try self.setProp(o, "status", Value.str("fulfilled"));
-                try self.setProp(o, "value", val);
-            }
-            if (!c.values.setElementAt(e.index, Value.obj(o)))
-                return self.throwError("RangeError", "Promise combinator result index out of range");
-        },
-        .any => {
-            if (!e.is_reject) {
-                _ = try self.callValue(c.resolve, &.{val}); // first fulfillment wins
-                return Value.undef();
-            }
-            if (!c.values.setElementAt(e.index, val)) // collect the error
-                return self.throwError("RangeError", "Promise combinator result index out of range");
-        },
+    const recorded: Value = blk: {
+        switch (c.kind) {
+            .all => {
+                if (e.is_reject) {
+                    break :blk Value.undef();
+                }
+                break :blk val;
+            },
+            .all_settled => {
+                const o = (try self.newObject()).asObj();
+                if (e.is_reject) {
+                    try self.setProp(o, "status", Value.str("rejected"));
+                    try self.setProp(o, "reason", val);
+                } else {
+                    try self.setProp(o, "status", Value.str("fulfilled"));
+                    try self.setProp(o, "value", val);
+                }
+                break :blk Value.obj(o);
+            },
+            .all_keyed => {
+                if (e.is_reject) {
+                    break :blk Value.undef();
+                }
+                break :blk val;
+            },
+            .all_settled_keyed => {
+                const o = (try self.newObject()).asObj();
+                if (e.is_reject) {
+                    try self.setProp(o, "status", Value.str("rejected"));
+                    try self.setProp(o, "reason", val);
+                } else {
+                    try self.setProp(o, "status", Value.str("fulfilled"));
+                    try self.setProp(o, "value", val);
+                }
+                break :blk Value.obj(o);
+            },
+            .any => {
+                if (!e.is_reject) {
+                    break :blk Value.undef();
+                }
+                break :blk val; // collect the error
+            },
+        }
+    };
+    const Action = union(enum) {
+        none,
+        resolve: Value,
+        reject: Value,
+        final,
+        index_oob,
+    };
+    var action: Action = .none;
+    c.lockState();
+    if (!e.already.* and !c.settled) {
+        // [[AlreadyCalled]]: a resolve/reject element function settles its
+        // element at most once; subsequent calls are no-ops. The same lock also
+        // guards `remaining` and the first-wins early-settlement state.
+        e.already.* = true;
+        switch (c.kind) {
+            .all, .all_keyed => {
+                if (e.is_reject) {
+                    c.settled = true;
+                    action = .{ .reject = val };
+                } else if (!c.values.setElementAt(e.index, recorded)) {
+                    action = .index_oob;
+                } else {
+                    c.remaining -= 1;
+                    if (c.remaining == 0) {
+                        c.settled = true;
+                        action = .final;
+                    }
+                }
+            },
+            .all_settled, .all_settled_keyed => {
+                if (!c.values.setElementAt(e.index, recorded)) {
+                    action = .index_oob;
+                } else {
+                    c.remaining -= 1;
+                    if (c.remaining == 0) {
+                        c.settled = true;
+                        action = .final;
+                    }
+                }
+            },
+            .any => {
+                if (!e.is_reject) {
+                    c.settled = true;
+                    action = .{ .resolve = val };
+                } else if (!c.values.setElementAt(e.index, recorded)) {
+                    action = .index_oob;
+                } else {
+                    c.remaining -= 1;
+                    if (c.remaining == 0) {
+                        c.settled = true;
+                        action = .final;
+                    }
+                }
+            },
+        }
     }
-    c.remaining -= 1;
-    if (c.remaining == 0) try combineSettle(self, c);
+    c.unlockState();
+    switch (action) {
+        .none => {},
+        .resolve => |v| _ = try self.callValue(c.resolve, &.{v}),
+        .reject => |v| _ = try self.callValue(c.reject, &.{v}),
+        .final => try combineSettle(self, c),
+        .index_oob => return self.throwError("RangeError", "Promise combinator result index out of range"),
+    }
     return Value.undef();
+}
+
+fn combineAddPending(c: *promise.Combine) void {
+    c.lockState();
+    defer c.unlockState();
+    if (!c.settled) c.remaining += 1;
+}
+
+fn combineDropPending(c: *promise.Combine) bool {
+    c.lockState();
+    defer c.unlockState();
+    if (c.settled) return false;
+    c.remaining -= 1;
+    if (c.remaining != 0) return false;
+    c.settled = true;
+    return true;
 }
 
 /// Settle a combinator once its `remaining` count reaches zero: `all`/
@@ -15169,7 +15237,7 @@ fn setupCombinator(self: *Interpreter, this: Value, iterable: Value, kind: @Type
         const maybe = iterStep(self, iter) catch |err| return rejectAbrupt(self, cap, err);
         const el = maybe orelse break;
         try values.appendElement(self.arena, Value.undef());
-        combine.remaining += 1;
+        combineAddPending(combine);
         // `nextPromise = Call(promiseResolve, C, «el»)` — an abrupt completion
         // here closes the (still-open) iterator before rejecting.
         const next = self.callValueWithThis(promise_resolve, &.{el}, this) catch |err| return closeAndReject(self, cap, iter, err);
@@ -15195,8 +15263,7 @@ fn setupCombinator(self: *Interpreter, this: Value, iterable: Value, kind: @Type
         _ = self.callMethod(next, "then", &.{ fulfill_element, reject_element }) catch |err| return closeAndReject(self, cap, iter, err);
         index += 1;
     }
-    combine.remaining -= 1; // the loop's own count
-    if (combine.remaining == 0) try combineSettle(self, combine);
+    if (combineDropPending(combine)) try combineSettle(self, combine);
     return cap.promise;
 }
 
@@ -15210,7 +15277,7 @@ fn addCombineElement(
     index: usize,
 ) value.HostError!bool {
     try combine.values.appendElement(self.arena, Value.undef());
-    combine.remaining += 1;
+    combineAddPending(combine);
     const next = self.callValueWithThis(promise_resolve, &.{next_value}, c) catch |err| {
         _ = try rejectAbrupt(self, cap, err);
         return false;
@@ -15259,8 +15326,7 @@ fn setupKeyedCombinator(self: *Interpreter, this: Value, promises: Value, kind: 
             return cap.promise;
     }
     combine.keys = kept_keys.items;
-    combine.remaining -= 1;
-    if (combine.remaining == 0) try combineSettle(self, combine);
+    if (combineDropPending(combine)) try combineSettle(self, combine);
     return cap.promise;
 }
 

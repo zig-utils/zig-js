@@ -258,6 +258,7 @@ test "Promise reaction lists reserve capacity chunks" {
 /// array; `remaining` counts inputs not yet settled; `kind` selects how each
 /// element's outcome is recorded.
 pub const Combine = struct {
+    lock: std.atomic.Mutex = .unlocked,
     /// The combined promise's capability resolve/reject functions (so the result
     /// can be a subclass instance, not just a native promise).
     resolve: Value,
@@ -265,7 +266,19 @@ pub const Combine = struct {
     values: *Object,
     keys: ?[]const []const u8 = null,
     remaining: usize,
+    settled: bool = false,
     kind: enum { all, all_settled, any, all_keyed, all_settled_keyed },
+
+    pub fn lockState(self: *Combine) void {
+        var spins: usize = 0;
+        while (!self.lock.tryLock()) : (spins += 1) {
+            if ((spins & 0xff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
+        }
+    }
+
+    pub fn unlockState(self: *Combine) void {
+        self.lock.unlock();
+    }
 };
 
 /// A per-element reaction's captured context: which `Combine` it belongs to and
@@ -276,7 +289,8 @@ pub const Elem = struct {
     index: usize,
     is_reject: bool,
     /// [[AlreadyCalled]] — shared between the resolve and reject element
-    /// functions of one element, so the element settles at most once.
+    /// functions of one element, so the element settles at most once. Protected
+    /// by `combine.lock`.
     already: *bool,
 };
 
