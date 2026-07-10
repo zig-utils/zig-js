@@ -32,11 +32,37 @@ const WorkerTiming = struct {
     stats: js.jsthread.ContentionStats,
 };
 
+const PromiseTiming = struct {
+    ns: u64,
+    contention: js.jsthread.ContentionStats,
+    promise: js.promise_profile.PromiseStats,
+};
+
 const worker_message_batches = 160;
 const worker_empty_receive_polls = 3000;
 const worker_lifecycle_rounds = 12;
 const worker_host_close_rounds = 12;
 const worker_terminate_rounds = 12;
+
+const promise_microtask_scenario = Scenario{
+    .name = "promise microtasks",
+    .setup =
+    \\globalThis.worker = function(id) {
+    \\  var settled = 0;
+    \\  for (var i = 0; i < 256; i = i + 1) {
+    \\    Promise.resolve(i + id).then(function(v) {
+    \\      settled = settled + (v | 0);
+    \\    });
+    \\    Promise.resolve({ then: function(resolve) { resolve(id); } }).then(function(v) {
+    \\      settled = settled + (v | 0);
+    \\    });
+    \\  }
+    \\  drainMicrotasks();
+    \\  return settled;
+    \\};
+    ,
+    .rounds = 6,
+};
 
 const ModuleMessageProfileHost = struct {
     const Entry = struct { path: []const u8, source: []const u8 };
@@ -503,6 +529,100 @@ fn timeScenario(gpa: std.mem.Allocator, io: std.Io, scenario: Scenario, workers:
         .stats = stats,
         .shape = shape,
     };
+}
+
+fn timePromiseScenario(gpa: std.mem.Allocator, io: std.Io, workers: usize, gil: bool) !PromiseTiming {
+    const ctx = try js.Context.createWith(gpa, .{
+        .enable_threads = true,
+        .gil = gil,
+    });
+    defer ctx.destroy();
+    try installHarness(ctx, promise_microtask_scenario);
+
+    const src = try std.fmt.allocPrint(ctx.arena(), "spawnBatch({d})", .{workers});
+    _ = try ctx.evaluate(src);
+
+    js.jsthread.resetContentionStats();
+    js.promise_profile.resetPromiseStats();
+    errdefer js.jsthread.disableContentionStats();
+    errdefer js.promise_profile.disablePromiseStats();
+    const t0 = nowNs(io);
+    var round: usize = 0;
+    while (round < promise_microtask_scenario.rounds) : (round += 1) {
+        _ = try ctx.evaluate(src);
+    }
+    const contention = js.jsthread.contentionStats();
+    const promise = js.promise_profile.promiseStats();
+    js.jsthread.disableContentionStats();
+    js.promise_profile.disablePromiseStats();
+    return .{
+        .ns = @intCast(nowNs(io) - t0),
+        .contention = contention,
+        .promise = promise,
+    };
+}
+
+fn printPromiseProfile(gpa: std.mem.Allocator, io: std.Io, workers: []const usize) !void {
+    std.debug.print("\nPromise microtask profile\n", .{});
+    std.debug.print("enq/pop/run = microtask queue enqueues, pops, and job runs; rxn/thn split Promise reaction jobs from thenable-assimilation jobs\n", .{});
+    std.debug.print("{s:>8} {s:>14} {s:>14} {s:>12} {s:>12}" ++
+        " {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>10}" ++
+        " {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>10}\n", .{
+        "threads",
+        "no-gil ns",
+        "gil ns",
+        "no-gil x1",
+        "vs gil",
+        "ng enq",
+        "ng pop",
+        "ng run",
+        "ng rxn",
+        "ng thn",
+        "ng events",
+        "gil enq",
+        "gil pop",
+        "gil run",
+        "gil rxn",
+        "gil thn",
+        "gil events",
+    });
+
+    var base_parallel: u64 = 1;
+    for (workers) |n| {
+        const parallel = try timePromiseScenario(gpa, io, n, false);
+        const gil = try timePromiseScenario(gpa, io, n, true);
+        const parallel_ns = parallel.ns;
+        const gil_ns = gil.ns;
+        if (n == workers[0]) base_parallel = @max(parallel_ns, 1);
+
+        const scaling = @as(f64, @floatFromInt(n)) *
+            @as(f64, @floatFromInt(base_parallel)) /
+            @as(f64, @floatFromInt(@max(parallel_ns, 1)));
+        const vs_gil = @as(f64, @floatFromInt(gil_ns)) /
+            @as(f64, @floatFromInt(@max(parallel_ns, 1)));
+
+        std.debug.print("{d:>8} {d:>14} {d:>14} {d:>11.2}x {d:>11.2}x" ++
+            " {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>10}" ++
+            " {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>10}\n", .{
+            n,
+            parallel_ns,
+            gil_ns,
+            scaling,
+            vs_gil,
+            parallel.promise.microtask_enqueues,
+            parallel.promise.microtask_pops,
+            parallel.promise.jobsRun(),
+            parallel.promise.reaction_jobs_run,
+            parallel.promise.thenable_jobs_run,
+            parallel.contention.events(),
+            gil.promise.microtask_enqueues,
+            gil.promise.microtask_pops,
+            gil.promise.jobsRun(),
+            gil.promise.reaction_jobs_run,
+            gil.promise.thenable_jobs_run,
+            gil.contention.events(),
+        });
+    }
 }
 
 fn printScenario(gpa: std.mem.Allocator, io: std.Io, scenario: Scenario, workers: []const usize) !void {
@@ -1115,6 +1235,7 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("waitus/jus/lus/cus/pus = total native wait microseconds, then join/lock/condition/property wait microseconds\n", .{});
     std.debug.print("async/done = aggregate async waiter registrations/settlements; caw/cad and paw/pad split Condition.asyncWait versus property waitAsync\n", .{});
     std.debug.print("empty/jobs = run-loop task-pump empty fast-path hits / delivered grant jobs; hold/cjob split asyncHold vs Condition.asyncWait reacquire jobs\n", .{});
+    std.debug.print("focused filters: worker messages, worker teardown, promise microtasks\n", .{});
 
     if (scenario_filter) |filter| {
         if (std.mem.eql(u8, filter, "worker messages")) {
@@ -1123,6 +1244,10 @@ pub fn main(init: std.process.Init) !void {
         }
         if (std.mem.eql(u8, filter, "worker teardown")) {
             try printWorkerTeardownProfile(gpa, io, worker_counts);
+            return;
+        }
+        if (std.mem.eql(u8, filter, "promise microtasks")) {
+            try printPromiseProfile(gpa, io, worker_counts);
             return;
         }
     }

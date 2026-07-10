@@ -651,6 +651,10 @@ whose joiner is a spawned thread are routed to the realm queue rather than the
 joiner's abandoned local queue (`PendingJoin` records the joiner; exiting threads
 flush their residual queue). With the budget-cleared corpus and these fixes, the
 promoted `parallel_js` allowlist now runs clean. (6)
+The contention profiler now also has a focused `promise microtasks` case for
+issue #15: it keeps the default table narrow, but records Promise microtask
+enqueue/pop/run totals and splits reaction jobs from thenable-assimilation jobs
+under no-GIL versus `.gil = true`.
 What now gates the GIL drop is the
 whole-corpus TSan campaign +
 serial-perf gate. The two *named* remaining rare no-GIL races are now both

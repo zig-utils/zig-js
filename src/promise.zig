@@ -14,6 +14,7 @@ const std = @import("std");
 const gc_mod = @import("gc.zig");
 const value = @import("value.zig");
 const interp = @import("interpreter.zig");
+const promise_profile = @import("promise_profile.zig");
 
 const Value = value.Value;
 const Object = value.Object;
@@ -136,6 +137,7 @@ pub const MicrotaskQueue = struct {
         const task = self.items.items[self.head];
         self.items.items[self.head] = undefined;
         self.head += 1;
+        promise_profile.recordMicrotaskPop();
         if (self.head == self.items.items.len) self.clearRetainingCapacity();
         return task;
     }
@@ -504,12 +506,14 @@ fn enqueue(self: *Interpreter, task: Microtask) EvalError!void {
     self.lockMicrotasks();
     defer self.unlockMicrotasks();
     try q.append(self.arena, task);
+    promise_profile.recordMicrotaskEnqueue(task.kind == .thenable);
 }
 
 /// Run one reaction job: invoke the handler (or pass through) and settle the
 /// dependent promise. A handler that throws rejects the dependent promise.
 pub fn runJob(self: *Interpreter, task: Microtask) EvalError!void {
     if (task.kind == .thenable) {
+        promise_profile.recordMicrotaskRun(true);
         const p = task.promise orelse return;
         if (!isPending(p)) return;
         const nr = try nativeResolveReject(self, p);
@@ -522,6 +526,7 @@ pub fn runJob(self: *Interpreter, task: Microtask) EvalError!void {
         }
         return;
     }
+    promise_profile.recordMicrotaskRun(false);
     const r = task.reaction;
     if (r.handler) |h| {
         if (self.callValueWithThis(h, &.{task.argument}, Value.undef())) |res| {

@@ -29,6 +29,7 @@ pub const Parser = @import("parser.zig").Parser;
 pub const JsString = @import("jsstring.zig").JsString;
 pub const installGlobals = @import("interpreter.zig").installGlobals;
 pub const shape = @import("shape.zig");
+pub const promise_profile = @import("promise_profile.zig");
 
 // Agent/threading infrastructure ($262.agent, Atomics waiter table). Conformance
 // runners use `Context.TestingOptions.main_can_block` to model [[CanBlock]].
@@ -72,6 +73,7 @@ test {
     _ = @import("worker.zig");
     _ = @import("gil.zig");
     _ = @import("jsthread.zig");
+    _ = @import("promise_profile.zig");
     _ = @import("jsstring.zig");
     _ = @import("lexer.zig");
     _ = @import("ast.zig");
