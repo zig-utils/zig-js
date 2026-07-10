@@ -3132,9 +3132,10 @@ pub const Interpreter = struct {
                     try out.append(self.arena, key);
                 }
             };
-            if (o.is_array or o.elements.items.len != 0) {
+            const dense_len = o.elementsLen();
+            if (o.is_array or dense_len != 0) {
                 var i: usize = 0;
-                while (i < o.elementsLen()) : (i += 1) {
+                while (i < dense_len) : (i += 1) {
                     if (!o.denseElementPresent(i)) continue;
                     const key = try std.fmt.allocPrint(self.arena, "{d}", .{i});
                     // Accessor at this index comes from ownKeys below.
@@ -28037,7 +28038,7 @@ fn cursorIterNext(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
             } else if (so.is_array) {
                 // Arrays iterate the *logical* length, reading via [[Get]] so a hole
                 // (or the sparse tail) yields `undefined` and accessor indices run.
-                if (i < @max(so.elements.items.len, so.array_len)) {
+                if (i < so.arrayLength()) {
                     val = try arrayIteratorValue(self, kind, i, try self.arrIndexGet(so, i));
                     done = false;
                 }

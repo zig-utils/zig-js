@@ -4677,6 +4677,11 @@ test "for-of / for-in with destructuring + member targets" {
     try expectEvalStr("ab",
         \\var r = ""; for (var k in { a: 1, b: 2 }) { r += k; } r
     );
+    try expectEvalStr("0,2,extra",
+        \\var a = [1, , 3]; a.extra = 4; var r = [];
+        \\for (var k in a) r.push(k);
+        \\r.join(",")
+    );
 }
 
 test "per-iteration lexical bindings survive closure capture (VM lowering)" {
@@ -8172,6 +8177,14 @@ test "Array.prototype Symbol.iterator aliases values and rejects nullish this" {
     try std.testing.expect((try evalIn(
         \\var it = Array.prototype[Symbol.iterator];
         \\try { it(); false; } catch (e) { e instanceof TypeError; }
+    )).asBool());
+    try std.testing.expect((try evalIn(
+        \\var a = new Array(2);
+        \\a[0] = 1;
+        \\var it = a.values();
+        \\it.next().value === 1 &&
+        \\it.next().value === undefined &&
+        \\it.next().done === true
     )).asBool());
 }
 
