@@ -254,6 +254,13 @@ Issue #1 remains the umbrella status page.
   lock when a notification wakes multiple lock groups, and sync handoff
   completion uses a pending-waiter countdown instead of rescanning that wake
   list until every ticket acknowledges.
+  Representative `.gil = true` guidance is now part of the profile workflow:
+  on the 2026-07-10 local 11-core run, independent compute favored no-GIL at 2,
+  4, and 8 threads (2.56x, 8.42x, and 16.63x faster than serialized), while
+  `condition asyncWait` favored `.gil = true` for coordination-heavy handoff
+  work (8 threads: 128.60 ms no-GIL versus 5.95 ms serialized). Treat those as
+  workload-shape examples, not portable thresholds; rerun the exact focused row
+  and prefer `.gil = true` when the `vs gil` column remains below 1.0x.
   Promise microtask drains use a FIFO head cursor, so observed async-hold
   callback settlement and no-fn release-function reactions preserve FIFO order
   without shifting the remaining reaction queue on each job. Microtask enqueues

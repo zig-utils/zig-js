@@ -276,6 +276,19 @@ Known performance/maturity work:
 - The mixed GC-cell allocation row explicitly enables GC in both modes, so its
   no-GIL versus `.gil = true` result measures parallel allocator behavior rather
   than comparing the no-GIL slab allocator with the serialized arena engine.
+- Use `.gil = true` deliberately for coordination-heavy workloads whose useful
+  work is mostly task delivery, async-condition reacquire, or other serialized
+  handoff rather than parallel JS execution. On the 2026-07-10 local
+  11-core profile, `condition asyncWait` was faster in serialized mode at every
+  contended width: 2 threads took 15.42 ms no-GIL versus 1.28 ms with `.gil =
+  true`, and 8 threads took 128.60 ms versus 5.95 ms. That is a representative
+  warning sign, not a portable promise; rerun the focused row on the deployment
+  host and prefer `.gil = true` when the `vs gil` column stays below 1.0x and the
+  `jobs`/`cjob` counters dominate the row. Conversely, independent compute is
+  the no-GIL-friendly shape: the same profile showed no-GIL at 2.56x, 8.42x, and
+  16.63x faster than serialized mode for 2, 4, and 8 worker threads,
+  respectively. Single-thread rows can still favor `.gil = true` because they
+  pay parallel bookkeeping without parallel work.
 - Parked sync waiters still pump the realm run-loop so async-hold grants make
   progress, but empty pumps now use an atomic queue-count fast path and avoid
   taking the shared threading API lock.
