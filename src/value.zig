@@ -560,6 +560,7 @@ pub const TemporalData = struct {
 /// State for a lazy Iterator Helper (the object returned by `map`/`filter`/…).
 pub const IterHelper = struct {
     pub const Kind = enum(u8) { map, filter, take, drop, flat_map, wrap, concat, zip, zip_keyed };
+    lock: std.atomic.Mutex = .unlocked,
     src: Value, // the underlying iterator (its `.next()` is pulled)
     next_method: Value = Value.undef(), // captured once (GetIteratorDirect); called per step
     kind: Kind,
@@ -573,6 +574,17 @@ pub const IterHelper = struct {
     started: bool = false, // drop: the initial skip has run
     is_async: bool = false, // AsyncIterator helper: `next` returns a promise
     running: bool = false, // GeneratorValidate: a re-entrant next() is a TypeError
+
+    pub fn lockState(self: *IterHelper) void {
+        var spins: usize = 0;
+        while (!self.lock.tryLock()) : (spins += 1) {
+            if ((spins & 0xff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
+        }
+    }
+
+    pub fn unlockState(self: *IterHelper) void {
+        self.lock.unlock();
+    }
 };
 
 pub const WeakCollectionEntry = struct {

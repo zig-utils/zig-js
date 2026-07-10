@@ -17171,10 +17171,22 @@ fn iterHelperNextFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
     const h = this.asObj().iter_helper.?;
     // GeneratorValidate: re-entering an already-executing helper (e.g. its
     // mapper calls back into next()) is a TypeError, not a stack RangeError.
-    if (h.running) return self.throwError("TypeError", "Iterator Helper is already running");
-    if (h.done) return self.iterResultObj(Value.undef(), true);
+    h.lockState();
+    if (h.running) {
+        h.unlockState();
+        return self.throwError("TypeError", "Iterator Helper is already running");
+    }
+    if (h.done) {
+        h.unlockState();
+        return self.iterResultObj(Value.undef(), true);
+    }
     h.running = true;
-    defer h.running = false;
+    h.unlockState();
+    defer {
+        h.lockState();
+        h.running = false;
+        h.unlockState();
+    }
     switch (h.kind) {
         .wrap => {
             return try self.callValueWithThis(h.next_method, &.{}, h.src);
@@ -17452,10 +17464,21 @@ fn iterHelperReturnFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
     const h = this.asObj().iter_helper.?;
     // GeneratorValidate: a re-entrant return() while the helper is mid-close
     // (state "executing") is a TypeError.
-    if (h.running) return self.throwError("TypeError", "Iterator Helper is already running");
+    h.lockState();
+    if (h.running) {
+        h.unlockState();
+        return self.throwError("TypeError", "Iterator Helper is already running");
+    }
     // A WrapForValidIterator forwards return() to its underlying iterator and
     // returns THAT result (or {undefined, done:true} when there is no return()).
     if (h.kind == .wrap) {
+        h.running = true;
+        h.unlockState();
+        defer {
+            h.lockState();
+            h.running = false;
+            h.unlockState();
+        }
         if (!h.src.isObject()) return self.iterResultObj(Value.undef(), true);
         const ret = try self.getProperty(h.src, "return");
         if (ret.isUndefined() or ret.isNull()) return self.iterResultObj(Value.undef(), true);
@@ -17464,6 +17487,17 @@ fn iterHelperReturnFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
     }
     const was_done = h.done;
     h.done = true;
+    const run_during_close = !was_done and switch (h.kind) {
+        .zip, .zip_keyed => h.started,
+        else => true,
+    };
+    h.running = run_during_close;
+    h.unlockState();
+    defer if (run_during_close) {
+        h.lockState();
+        h.running = false;
+        h.unlockState();
+    };
     // An IteratorHelper closes its source iterator(s) and yields {undefined, done}.
     if (!was_done) {
         switch (h.kind) {
@@ -17477,8 +17511,6 @@ fn iterHelperReturnFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
                     // during the close, so a re-entrant call throws TypeError.
                     // "suspended-start" (never stepped) → state is "completed",
                     // so a re-entrant call just returns {undefined, done:true}.
-                    h.running = h.started;
-                    defer h.running = false;
                     try zipCloseAll(self, h.src.asObj().elements.items, h.inner.?.asObj(), false);
                 }
                 return self.iterResultObj(Value.undef(), true);
@@ -17487,8 +17519,6 @@ fn iterHelperReturnFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
             // guard makes a re-entrant return() from that close a TypeError.
             .concat => {
                 if (h.inner) |inner| if (inner.isObject() and inner.asObj().iter_helper == null) {
-                    h.running = h.started;
-                    defer h.running = false;
                     try self.iteratorClose(inner);
                 };
                 return self.iterResultObj(Value.undef(), true);
