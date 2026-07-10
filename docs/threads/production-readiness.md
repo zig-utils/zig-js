@@ -154,6 +154,20 @@ Known performance/maturity work:
   global setup and GC finalization still touch many cells. Long-lived contexts
   amortize this; create-per-task embedders still need additional lifecycle
   reductions or guidance.
+- Supported pooling guidance today: prefer a bounded pool of long-lived
+  contexts per isolation domain (tenant, module-loader/global state, and host
+  capability set), run one embedder task at a time per pooled context unless the
+  application intentionally exposes shared-realm parallelism, and collect at
+  quiescent task boundaries. The `gc-profile` task row models that as one warmup
+  evaluation followed by 40 tasks in the same context with `collectGarbage()`
+  every 10 tasks. On the 2026-07-10 local profile, recreate/evaluate/destroy was
+  6.67x slower than reuse+periodic-GC for explicit GC and 6.69x slower for
+  threaded no-GIL GC. Treat those as host-specific point measurements: use the
+  ratio column on the target deployment host before setting pool size or
+  collection cadence. Destroy instead of reusing when global/module state must be
+  reset, untrusted code may have polluted the realm, protected host handles
+  cannot be released at the boundary, or live Worker/Thread activity has not
+  quiesced.
 - `zig build gc-profile` is the local baseline for those costs. It compares
   arena, explicit-GC, no-GIL threaded GC, and `.gil = true` contexts across
   create/destroy, create-per-task versus long-lived-context reuse with periodic

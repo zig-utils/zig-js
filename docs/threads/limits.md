@@ -136,7 +136,18 @@ Issue #1 remains the umbrella status page.
   collection to quantify the embedder lifecycle tradeoff, plus a workload destroy
   table that compares live object-heavy destroy against quiescent pre-collection
   and post-collection destroy. That keeps finalizer draining visible separately
-  from teardown that remains after a collection. The profile also prints GC
+  from teardown that remains after a collection.
+  Current pooling guidance is intentionally conservative: keep a bounded pool per
+  isolation domain, run one task at a time per context unless the host is
+  deliberately sharing a realm across parallel JS tasks, and call
+  `collectGarbage()` at quiescent task boundaries. The profile's reuse row uses a
+  40-task loop with collection every 10 tasks; on the 2026-07-10 local run,
+  recreate-per-task was 6.67x slower than reuse+periodic-GC for explicit GC and
+  6.69x slower for threaded no-GIL GC. Destroy rather than pool when realm
+  globals/modules must reset, host handles cannot be released cleanly, untrusted
+  code should not share state with the next task, or Worker/Thread activity is
+  still live.
+  The profile also prints GC
   cell-backing attribution for both the intrinsic empty-context footprint and an
   object-heavy allocation run: chunk count, total cell-slot capacity, live cells
   at context creation, live cells after allocation, free slots after collection,
