@@ -905,6 +905,72 @@ fn genExcJoin(seed: u64, buf: *std.ArrayListUnmanaged(u8), gpa: std.mem.Allocato
     return @floatFromInt(7 * n * (n + 1) / 2);
 }
 
+/// A *deterministic* Lock mutual-exclusion witness (issue #13). `n` Threads each
+/// take the same `Lock` and run `per` non-atomic `box.count = box.count + 1`
+/// read-modify-writes in the critical section. If the Lock is truly exclusive
+/// the final count is exactly `n*per`; a lost update from a broken/re-entrant
+/// lock makes it smaller. Arena path (no GC).
+fn genLock(seed: u64, buf: *std.ArrayListUnmanaged(u8), gpa: std.mem.Allocator) !f64 {
+    var prng = std.Random.DefaultPrng.init(seed);
+    const r = prng.random();
+    const n = 3 + r.uintLessThan(usize, 6); // 3..8
+    const per = 100 + r.uintLessThan(usize, 400); // 100..499
+    const src = try std.fmt.allocPrint(
+        gpa,
+        \\var box = {{ count: 0 }};
+        \\var lock = new Lock();
+        \\var ts = [];
+        \\for (var i = 0; i < {d}; i++) ts.push(new Thread(function() {{
+        \\  lock.hold(function() {{ for (var j = 0; j < {d}; j++) box.count = box.count + 1; }});
+        \\}}));
+        \\for (var k = 0; k < ts.length; k++) ts[k].join();
+        \\box.count
+        \\
+    ,
+        .{ n, per },
+    );
+    defer gpa.free(src);
+    try buf.appendSlice(gpa, src);
+    return @floatFromInt(n * per);
+}
+
+/// A *deterministic* property-mode waiter notify witness (issue #13: property and
+/// typed-array waiters). `n` Threads each `Atomics.wait` on their own property of
+/// a shared object; the main script sets each property to 1 and notifies it.
+/// Every waiter must then observe its slot == 1 — whether woken by the notify,
+/// timed out after the store, or short-circuited by the value check on a late
+/// park — and bump a result counter, so the total is exactly `n`. A lost notify
+/// or a spurious early wake makes it smaller. Property-mode (not typed-array)
+/// because it is the GIL-safe wait — a typed-array wait on a spawned thread under
+/// the GIL would park holding the lock (correctly rejected). Arena path (no GC).
+fn genWaitNotify(seed: u64, buf: *std.ArrayListUnmanaged(u8), gpa: std.mem.Allocator) !f64 {
+    var prng = std.Random.DefaultPrng.init(seed);
+    const r = prng.random();
+    const n = 4 + r.uintLessThan(usize, 9); // 4..12
+    const src = try std.fmt.allocPrint(
+        gpa,
+        \\var gate = {{ result: 0 }};
+        \\for (var s = 0; s < {d}; s++) gate['s' + s] = 0;
+        \\var ts = [];
+        \\for (var i = 0; i < {d}; i++) (function(idx) {{
+        \\  var key = 's' + idx;
+        \\  ts.push(new Thread(function() {{
+        \\    Atomics.wait(gate, key, 0, 60000);
+        \\    if (Atomics.load(gate, key) === 1) Atomics.add(gate, 'result', 1);
+        \\  }}));
+        \\}})(i);
+        \\for (var i = 0; i < {d}; i++) {{ Atomics.store(gate, 's' + i, 1); Atomics.notify(gate, 's' + i); }}
+        \\for (var k = 0; k < ts.length; k++) ts[k].join();
+        \\Atomics.load(gate, 'result')
+        \\
+    ,
+        .{ n, n, n },
+    );
+    defer gpa.free(src);
+    try buf.appendSlice(gpa, src);
+    return @floatFromInt(n);
+}
+
 /// Teardown stress: every spawned Thread publishes that it reached a blocking or
 /// long-running state, then the main script throws without joining. Context
 /// teardown must request termination, wake parked peers, and join abandoned OS
@@ -18871,6 +18937,78 @@ pub fn main(init: std.process.Init) !void {
         }
         std.debug.print("threadfuzz vexc: {d} programs from seed {d}, {d} failures\n", .{ iters, base_seed, efail });
         if (efail != 0) std.process.exit(1);
+        return;
+    };
+
+    // `threadfuzz vlock <iters> <seed>`: deterministic Lock mutual-exclusion —
+    // final count must be exactly n*per; a lost update is a WRONG RESULT (#13).
+    if (first) |a| if (std.mem.eql(u8, a, "vlock")) {
+        if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch 200;
+        if (args.next()) |b| base_seed = std.fmt.parseInt(u64, b, 10) catch 1;
+        var lfail: usize = 0;
+        var li: usize = 0;
+        while (li < iters) : (li += 1) {
+            const seed = base_seed +% li;
+            var lbuf: std.ArrayListUnmanaged(u8) = .empty;
+            defer lbuf.deinit(gpa);
+            const expected = try genLock(seed, &lbuf, gpa);
+            const ctx = js.Context.createWith(gpa, .{ .enable_threads = true }) catch {
+                std.debug.print("seed {d}: context creation failed\n", .{seed});
+                lfail += 1;
+                continue;
+            };
+            defer ctx.destroy();
+            if (ctx.evaluate(lbuf.items)) |v| {
+                const got = if (v.isNumber()) v.asNum() else -1;
+                if (got != expected) {
+                    std.debug.print("seed {d}: WRONG RESULT got {d} expected {d} (lock mutual-exclusion bug)\n", .{ seed, got, expected });
+                    lfail += 1;
+                }
+            } else |e| {
+                std.debug.print("seed {d}: unexpected throw {s}\n", .{ seed, @errorName(e) });
+                lfail += 1;
+            }
+        }
+        std.debug.print("threadfuzz vlock: {d} programs from seed {d}, {d} failures\n", .{ iters, base_seed, lfail });
+        if (lfail != 0) std.process.exit(1);
+        return;
+    };
+
+    // `threadfuzz vwait <iters> <seed>`: deterministic typed-array waiter notify —
+    // every waiter must observe its slot set; the result must be exactly n (#13).
+    if (first) |a| if (std.mem.eql(u8, a, "vwait")) {
+        if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch 200;
+        if (args.next()) |b| base_seed = std.fmt.parseInt(u64, b, 10) catch 1;
+        var wfail: usize = 0;
+        var wi: usize = 0;
+        while (wi < iters) : (wi += 1) {
+            const seed = base_seed +% wi;
+            var wbuf: std.ArrayListUnmanaged(u8) = .empty;
+            defer wbuf.deinit(gpa);
+            const expected = try genWaitNotify(seed, &wbuf, gpa);
+            const ctx = js.Context.createWith(gpa, .{ .enable_threads = true }) catch {
+                std.debug.print("seed {d}: context creation failed\n", .{seed});
+                wfail += 1;
+                continue;
+            };
+            defer ctx.destroy();
+            if (ctx.evaluate(wbuf.items)) |v| {
+                const got = if (v.isNumber()) v.asNum() else -1;
+                if (got != expected) {
+                    std.debug.print("seed {d}: WRONG RESULT got {d} expected {d} (waiter notify bug)\n", .{ seed, got, expected });
+                    wfail += 1;
+                }
+            } else |e| {
+                const msg_txt = if (ctx.exception) |ex| blk: {
+                    var render = ctx.interpreter();
+                    break :blk render.toStringV(ex) catch "<unstringifiable>";
+                } else "<none>";
+                std.debug.print("seed {d}: unexpected throw {s}: {s}\n", .{ seed, @errorName(e), msg_txt });
+                wfail += 1;
+            }
+        }
+        std.debug.print("threadfuzz vwait: {d} programs from seed {d}, {d} failures\n", .{ iters, base_seed, wfail });
+        if (wfail != 0) std.process.exit(1);
         return;
     };
     // `threadfuzz lifecycle <iters> <seed>`: deterministic resizable
