@@ -579,13 +579,16 @@ fn printNursery(gpa: std.mem.Allocator, io: std.Io) !void {
     ;
 
     std.debug.print("\nQuiescent nursery cycle (512 object graphs; 1/4 retained)\n", .{});
-    std.debug.print("{s:<18} {s:>12} {s:>10} {s:>10} {s:>10} {s:>12} {s:>10} {s:>10}\n", .{
+    std.debug.print("{s:<18} {s:>12} {s:>10} {s:>12} {s:>10} {s:>12} {s:>10} {s:>12} {s:>12} {s:>10} {s:>10}\n", .{
         "mode",
         "pause ns",
-        "young in",
+        "young",
+        "young bytes",
         "reclaimed",
+        "recl bytes",
         "promoted",
         "prom bytes",
+        "next thresh",
         "minor",
         "full",
     });
@@ -612,13 +615,19 @@ fn printNursery(gpa: std.mem.Allocator, io: std.Io) !void {
         const minor_delta = heap.minor_collections - minor_before;
         const full_delta = heap.full_collections - full_before;
         const reclaimed = if (minor_delta + full_delta > 0) young_in -| promoted else 0;
-        std.debug.print("{s:<18} {d:>12} {d:>10} {d:>10} {d:>10} {d:>12} {d:>10} {d:>10}\n", .{
+        const young_bytes = if (minor_delta > 0) heap.last_minor_young_bytes else 0;
+        const reclaimed_bytes = if (minor_delta > 0) heap.last_minor_reclaimed_bytes else 0;
+        const promoted_bytes = if (minor_delta > 0) heap.last_minor_promoted_bytes else heap.promoted_bytes - promoted_bytes_before;
+        std.debug.print("{s:<18} {d:>12} {d:>10} {d:>12} {d:>10} {d:>12} {d:>10} {d:>12} {d:>12} {d:>10} {d:>10}\n", .{
             mode.name,
             pause_ns,
             young_in,
+            young_bytes,
             reclaimed,
+            reclaimed_bytes,
             promoted,
-            heap.promoted_bytes - promoted_bytes_before,
+            promoted_bytes,
+            heap.nursery_threshold_bytes,
             minor_delta,
             full_delta,
         });
