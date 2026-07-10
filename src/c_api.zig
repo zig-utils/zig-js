@@ -360,7 +360,7 @@ export fn JSObjectMakeArray(ctx: JSContextRef, argc: usize, argv: [*c]const JSVa
     obj.* = .{ .is_array = true };
     var i: usize = 0;
     while (i < argc) : (i += 1) {
-        obj.elements.append(obj.elementsAllocator(c.arena()), unbox(argv[i])) catch return null;
+        obj.appendElement(c.arena(), unbox(argv[i])) catch return null;
     }
     return box(c, Value.obj(obj));
 }
@@ -427,8 +427,7 @@ export fn JSObjectGetPropertyAtIndex(ctx: JSContextRef, object: JSObjectRef, ind
     _ = exception;
     const c = ctxFrom(ctx) orelse return null;
     const obj = objectFrom(object) orelse return box(c, Value.undef());
-    if (index < obj.elements.items.len) return box(c, obj.elements.items[index]);
-    return box(c, Value.undef());
+    return box(c, obj.elementAt(index) orelse Value.undef());
 }
 
 fn collectArgs(c: *Context, argc: usize, argv: [*c]const JSValueRef) ?[]Value {
@@ -678,6 +677,24 @@ test "C-API: object property get/set" {
     JSObjectSetProperty(ctx, obj, key, JSValueMakeNumber(ctx, 42), 0, null);
     const got = JSObjectGetProperty(ctx, obj, key, null);
     try std.testing.expectEqual(@as(f64, 42), JSValueToNumber(ctx, got, null));
+}
+
+test "C-API: array construction and indexed get use element helpers" {
+    const ctx = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
+    defer JSGlobalContextRelease(ctx);
+
+    var values = [_]JSValueRef{
+        JSValueMakeNumber(ctx, 10),
+        JSValueMakeNumber(ctx, 20),
+    };
+    const arr = JSObjectMakeArray(ctx, values.len, &values, null) orelse return error.ArrayCreateFailed;
+
+    const first = JSObjectGetPropertyAtIndex(ctx, arr, 0, null);
+    const second = JSObjectGetPropertyAtIndex(ctx, arr, 1, null);
+    const missing = JSObjectGetPropertyAtIndex(ctx, arr, 2, null);
+    try std.testing.expectEqual(@as(f64, 10), JSValueToNumber(ctx, first, null));
+    try std.testing.expectEqual(@as(f64, 20), JSValueToNumber(ctx, second, null));
+    try std.testing.expect(JSValueIsUndefined(ctx, missing));
 }
 
 test "C-API: JSObjectMakeDeferredPromise resolves and rejects through returned functions" {
