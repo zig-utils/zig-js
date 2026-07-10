@@ -1401,22 +1401,24 @@ pub fn regExpFn(ctx: *anyopaque, this: Value, args: []const Value) HostError!Val
 
     if (!self.new_target.isUndefined()) _ = try self.regexpPrototypeFromNewTarget();
 
-    const pattern: []const u8 = if (internal_pattern) |p|
-        p
-    else if (pattern_is_regexp)
-        try self.toStringV(try self.getProperty(a0, "source"))
-    else if (a0.isUndefined())
-        ""
-    else
-        try self.toStringV(a0);
+    // RegExpInitialize (22.2.3.1): the pattern/flags VALUES may be undefined,
+    // which maps to "" (not ToString(undefined) = "undefined"). For a
+    // regexp-LIKE object (IsRegExp via @@match, but not an actual RegExp) the
+    // values come from Get(obj,"source")/Get(obj,"flags"), and an absent property
+    // reads undefined — so `new RegExp({[Symbol.match]:true})` is /(?:)/, not a
+    // SyntaxError from parsing the literal "undefined".
+    const pattern: []const u8 = if (internal_pattern) |p| p else blk: {
+        const pv = if (pattern_is_regexp) try self.getProperty(a0, "source") else a0;
+        break :blk if (pv.isUndefined()) "" else try self.toStringV(pv);
+    };
     const flags: []const u8 = if (!flags_arg.isUndefined())
         try self.toStringV(flags_arg)
     else if (internal_flags) |f|
         f
-    else if (pattern_is_regexp)
-        try self.toStringV(try self.getProperty(a0, "flags"))
-    else
-        "";
+    else blk: {
+        const fv = if (pattern_is_regexp) try self.getProperty(a0, "flags") else Value.undef();
+        break :blk if (fv.isUndefined()) "" else try self.toStringV(fv);
+    };
     return self.makeRegex(pattern, flags);
 }
 
