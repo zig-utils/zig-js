@@ -336,6 +336,7 @@ const Harness = struct {
     cache: std.StringHashMapUnmanaged([]const u8) = .empty,
 
     fn get(self: *Harness, name: []const u8) ?[]const u8 {
+        if (!safeHarnessIncludeName(name)) return null;
         if (self.cache.get(name)) |c| return c;
         const dir = self.dir orelse return null;
         const data = dir.readFileAlloc(self.io, name, self.gpa, .limited(1 << 20)) catch return null;
@@ -354,6 +355,17 @@ const Harness = struct {
         self.cache.deinit(self.gpa);
     }
 };
+
+fn safeHarnessIncludeName(name: []const u8) bool {
+    if (name.len == 0 or std.fs.path.isAbsolute(name)) return false;
+    var it = std.mem.splitScalar(u8, name, '/');
+    while (it.next()) |part| {
+        if (part.len == 0) return false;
+        if (std.mem.eql(u8, part, ".") or std.mem.eql(u8, part, "..")) return false;
+        if (std.mem.indexOfScalar(u8, part, '\\') != null) return false;
+    }
+    return true;
+}
 
 fn runOne(gpa: std.mem.Allocator, io: std.Io, harness: *Harness, abs_path: []const u8, src: []const u8) Outcome {
     return runOneDetail(gpa, io, harness, abs_path, src, null);
