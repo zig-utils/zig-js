@@ -5030,7 +5030,7 @@ pub const Interpreter = struct {
     /// path; everything else (strings, generators, Sets/Maps, arguments objects,
     /// user objects with `[Symbol.iterator]`) goes through the iterator protocol.
     pub fn spreadInto(self: *Interpreter, list: *std.ArrayListUnmanaged(Value), v: Value) EvalError!void {
-        if (v.isObject() and v.asObj().is_array and !v.asObj().is_arguments and self.arrayIterIntact()) {
+        if (v.isObject() and v.asObj().is_array and !v.asObj().is_arguments and self.arrayIterIntact() and !self.arrayHasOwnIterator(v.asObj())) {
             for (v.asObj().elements.items) |e| try list.append(self.arena, e);
             return;
         }
@@ -9858,10 +9858,13 @@ pub const Interpreter = struct {
         if (val.isUndefined() or val.isNull())
             return self.throwError("TypeError", "cannot destructure null or undefined");
 
-        // Fast path: a real array (whose `Array.prototype[Symbol.iterator]` is
-        // still the native one) or a string — index directly, no iterator object
-        // churn. A deleted/overridden array iterator falls to the general path.
-        if ((val.isObject() and val.asObj().is_array and self.arrayIterIntact()) or val.isString()) {
+        // Fast path: a real array whose `Array.prototype[Symbol.iterator]` is
+        // still the native one AND which has no own `[Symbol.iterator]` override
+        // — index directly, no iterator object churn. Strings go through the
+        // general path so astral chars destructure by code POINT (not the
+        // code-UNIT indexing `elementAt` would give). Overridden/deleted array
+        // iterators also fall through.
+        if (val.isObject() and val.asObj().is_array and self.arrayIterIntact() and !self.arrayHasOwnIterator(val.asObj())) {
             var idx: usize = 0;
             for (elems) |elem| {
                 var v = try self.elementAt(val, idx);
@@ -11366,6 +11369,14 @@ pub const Interpreter = struct {
             .intact => true,
             else => false,
         };
+    }
+
+    /// Does array `o` carry its OWN `[Symbol.iterator]` (data or accessor),
+    /// overriding `Array.prototype`'s? The dense fast paths (spread /
+    /// destructuring) must defer to the iterator protocol when so.
+    fn arrayHasOwnIterator(self: *Interpreter, o: *value.Object) bool {
+        const ikey = self.wellKnownSymbolKey("iterator") orelse return false;
+        return o.getOwn(ikey) != null or o.getAccessor(ikey) != null;
     }
 
     fn objectProtoHasOwn(self: *Interpreter, o: *value.Object, key: []const u8) EvalError!bool {
