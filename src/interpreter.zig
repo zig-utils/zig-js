@@ -881,7 +881,8 @@ pub const Interpreter = struct {
     /// When non-null (only under `parallel_js`), serializes content mutation of
     /// `microtasks` so a cross-thread enqueue (e.g. an `asyncJoin` settlement on
     /// the finishing thread) can't race the joiner's drain. Points at the
-    /// Context's `microtask_lock`; null on the default GIL-serialized path.
+    /// Context's `microtask_lock`; null on single-threaded and `.gil = true`
+    /// paths.
     microtask_lock: ?*std.atomic.Mutex = null,
     /// When non-null (only under `parallel_js`), the Context's `realm_lock`,
     /// serializing this interpreter's mutation of the shared realm queues it can
@@ -916,10 +917,9 @@ pub const Interpreter = struct {
     /// checkpoints yield it when contended, and blocking operations release
     /// it while parked. Null = no threads, zero cost.
     gil: ?*gil_mod.Gil = null,
-    /// Test-only Layer-C bring-up: when false, this interpreter belongs to an
-    /// `enable_threads` context but does not hold/yield the context GIL while
-    /// running JS bytecode. Blocking APIs acquire the GIL only for their legacy
-    /// waiter/result bookkeeping.
+    /// Execution-mode selector: false for the shipping no-GIL default, true for
+    /// the explicit `.gil = true` serialized fallback. Internal test options can
+    /// exercise the same paths but do not expose this as a public API.
     use_thread_gil: bool = true,
     /// Phase 7: the precise-GC heap (type-erased `Context.gc`), or null for the
     /// arena engine. Cell allocation funnels through `gc_mod.allocObject` etc.,

@@ -69,8 +69,8 @@ pub const InlineCache = struct {
     /// plain acquire/release is *not* enough — the field loads could sink past
     /// the second version load, so a torn `(shape, slot)` would slip through the
     /// bracket. A single total order over the version + field ops makes the
-    /// classic seqlock argument hold. This path is gated to the parallel modes,
-    /// so the seq_cst cost never touches the default GIL-serialized engine.
+    /// classic seqlock argument hold. This path is gated to parallel modes, so
+    /// the seq_cst cost never touches single-threaded or `.gil = true` execution.
     fn loadHit(ic: *InlineCache, obj_shape: ?*Shape) ?u32 {
         const v1 = ic.version.load(.seq_cst);
         if (v1 & 1 != 0) return null; // a writer holds the cache

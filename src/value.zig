@@ -1038,10 +1038,9 @@ pub const Object = struct {
     /// Gate for the per-object `elements_lock`, mirroring
     /// `Environment.binding_locks_enabled`: set only for a `concurrent_gc` /
     /// `parallel_gc` context (mutators in parallel or a concurrent marker). The
-    /// default GIL-serialized engine leaves `lockElements`/`unlockElements` a
-    /// single relaxed-ish load and return — the hot dense-element read/write
-    /// paths stay lock-free and full-speed (and gating is a small serial-perf win
-    /// for the write path, which previously took the lock unconditionally).
+    /// single-threaded and `.gil = true` engines leave
+    /// `lockElements`/`unlockElements` as a single relaxed-ish load and return —
+    /// the hot dense-element read/write paths stay lock-free and full-speed.
     pub var element_locks_enabled: std.atomic.Value(bool) = .init(false);
 
     pub fn lockElements(self: *const Object) void {

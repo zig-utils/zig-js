@@ -32,8 +32,8 @@ const module_namespace_waiter_reserve_granularity = 16;
 /// list would corrupt (issue #1 blocker #1). This serializes every arena
 /// alloc/resize/remap/free behind a brief atomic spinlock. Installed only when
 /// `enable_threads` (a single-thread context keeps the raw arena, no lock); the
-/// GIL still serializes today, so this is uncontended now and the readiness for
-/// GIL removal that it provides costs nothing on the single-thread path.
+/// no-GIL default may contend here, while `.gil = true` keeps it uncontended and
+/// the single-thread path pays nothing.
 pub const LockedArena = struct {
     inner: std.mem.Allocator,
     lock: std.atomic.Value(u32) = .init(0),
@@ -135,7 +135,13 @@ pub const GcCellBacking = struct {
     inner: std.mem.Allocator,
     parallel: bool = false,
     bulk_teardown: bool = false,
-    lock: std.atomic.Value(u32) = .init(0),
+    /// Fast-path cell allocation is independent by size class. Chunk growth and
+    /// delegated side-storage operations still serialize through `inner_lock`
+    /// because the embedder allocator is not required to be thread-safe.
+    bucket_locks: [bucket_count]std.atomic.Value(u32) = .{
+        .init(0), .init(0), .init(0), .init(0), .init(0), .init(0),
+    },
+    inner_lock: std.atomic.Value(u32) = .init(0),
     bucket_chunks: [bucket_count]std.ArrayListUnmanaged([]align(16) u8) = .{ .empty, .empty, .empty, .empty, .empty, .empty },
     bucket_next_offsets: [bucket_count]std.ArrayListUnmanaged(usize) = .{ .empty, .empty, .empty, .empty, .empty, .empty },
     bucket_live_counts: [bucket_count]std.ArrayListUnmanaged(usize) = .{ .empty, .empty, .empty, .empty, .empty, .empty },
@@ -169,12 +175,38 @@ pub const GcCellBacking = struct {
     },
     bucket_addr_max: [bucket_count]usize = .{ 0, 0, 0, 0, 0, 0 },
 
-    inline fn acquire(self: *GcCellBacking) void {
+    inline fn acquireLock(self: *GcCellBacking, lock: *std.atomic.Value(u32)) void {
         if (!self.parallel) return;
-        while (self.lock.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) std.atomic.spinLoopHint();
+        while (lock.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) std.atomic.spinLoopHint();
     }
-    inline fn unlock(self: *GcCellBacking) void {
-        if (self.parallel) self.lock.store(0, .release);
+    inline fn unlockLock(self: *GcCellBacking, lock: *std.atomic.Value(u32)) void {
+        if (self.parallel) lock.store(0, .release);
+    }
+    inline fn acquireBucket(self: *GcCellBacking, idx: usize) void {
+        self.acquireLock(&self.bucket_locks[idx]);
+    }
+    inline fn unlockBucket(self: *GcCellBacking, idx: usize) void {
+        self.unlockLock(&self.bucket_locks[idx]);
+    }
+    inline fn tryAcquireBucket(self: *GcCellBacking, idx: usize) bool {
+        if (!self.parallel) return true;
+        return self.bucket_locks[idx].cmpxchgStrong(0, 1, .acquire, .monotonic) == null;
+    }
+    inline fn acquireInner(self: *GcCellBacking) void {
+        self.acquireLock(&self.inner_lock);
+    }
+    inline fn unlockInner(self: *GcCellBacking) void {
+        self.unlockLock(&self.inner_lock);
+    }
+    fn acquireAllBuckets(self: *GcCellBacking) void {
+        for (0..bucket_count) |idx| self.acquireBucket(idx);
+    }
+    fn unlockAllBuckets(self: *GcCellBacking) void {
+        var idx: usize = bucket_count;
+        while (idx > 0) {
+            idx -= 1;
+            self.unlockBucket(idx);
+        }
     }
 
     fn bucketIndex(len: usize, alignment: std.mem.Alignment) ?usize {
@@ -224,6 +256,8 @@ pub const GcCellBacking = struct {
     }
 
     fn addChunk(self: *GcCellBacking, idx: usize) bool {
+        self.acquireInner();
+        defer self.unlockInner();
         const slot_size = bucket_sizes[idx];
         const slots = @max(@as(usize, 1), bucketChunkBytes(idx) / slot_size);
         const chunk_len = slots * slot_size;
@@ -343,8 +377,8 @@ pub const GcCellBacking = struct {
     fn allocFn(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
         const self: *GcCellBacking = @ptrCast(@alignCast(ctx));
         if (bucketIndex(len, alignment)) |idx| {
-            self.acquire();
-            defer self.unlock();
+            self.acquireBucket(idx);
+            defer self.unlockBucket(idx);
             if (self.bulk_teardown) return null;
             if (self.free_lists[idx]) |node| {
                 self.free_lists[idx] = node.next;
@@ -354,51 +388,53 @@ pub const GcCellBacking = struct {
             }
             return self.bumpFreshSlotLocked(idx);
         }
-        self.acquire();
-        defer self.unlock();
+        self.acquireInner();
+        defer self.unlockInner();
         return self.inner.vtable.alloc(self.inner.ptr, len, alignment, ret_addr);
     }
 
     fn resizeFn(ctx: *anyopaque, mem: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
         const self: *GcCellBacking = @ptrCast(@alignCast(ctx));
         if (bucketIndex(mem.len, alignment)) |idx| {
-            self.acquire();
-            defer self.unlock();
-            if (self.ownsPtrLocked(idx, mem.ptr)) return new_len <= bucket_sizes[idx];
-            return self.inner.vtable.resize(self.inner.ptr, mem, alignment, new_len, ret_addr);
+            self.acquireBucket(idx);
+            const owned = self.ownsPtrLocked(idx, mem.ptr);
+            self.unlockBucket(idx);
+            if (owned) return new_len <= bucket_sizes[idx];
         }
-        self.acquire();
-        defer self.unlock();
+        self.acquireInner();
+        defer self.unlockInner();
         return self.inner.vtable.resize(self.inner.ptr, mem, alignment, new_len, ret_addr);
     }
 
     fn remapFn(ctx: *anyopaque, mem: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
         const self: *GcCellBacking = @ptrCast(@alignCast(ctx));
         if (bucketIndex(mem.len, alignment)) |idx| {
-            self.acquire();
-            defer self.unlock();
-            if (self.ownsPtrLocked(idx, mem.ptr)) {
+            self.acquireBucket(idx);
+            const owned = self.ownsPtrLocked(idx, mem.ptr);
+            self.unlockBucket(idx);
+            if (owned) {
                 if (new_len <= bucket_sizes[idx]) return mem.ptr;
                 return null;
             }
-            return self.inner.vtable.remap(self.inner.ptr, mem, alignment, new_len, ret_addr);
         }
-        self.acquire();
-        defer self.unlock();
+        self.acquireInner();
+        defer self.unlockInner();
         return self.inner.vtable.remap(self.inner.ptr, mem, alignment, new_len, ret_addr);
     }
 
     fn freeFn(ctx: *anyopaque, mem: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
         const self: *GcCellBacking = @ptrCast(@alignCast(ctx));
         if (bucketIndex(mem.len, alignment)) |idx| {
-            self.acquire();
-            defer self.unlock();
+            self.acquireBucket(idx);
             if (self.ownedChunkIndexLocked(idx, mem.ptr)) |chunk_idx| {
                 // Context teardown frees owned bucket chunks wholesale
                 // immediately after `zig-gc` walks live cells. Avoid rebuilding
                 // freelists in that one-way phase, but still delegate any
                 // bucket-shaped allocation that never belonged to a cell slab.
-                if (self.bulk_teardown) return;
+                if (self.bulk_teardown) {
+                    self.unlockBucket(idx);
+                    return;
+                }
                 std.debug.assert(self.bucket_live_counts[idx].items[chunk_idx] > 0);
                 self.bucket_live_counts[idx].items[chunk_idx] -= 1;
                 const node: *FreeNode = @ptrCast(@alignCast(mem.ptr));
@@ -407,13 +443,13 @@ pub const GcCellBacking = struct {
                 self.free_lists[idx] = node;
                 self.bucket_free_counts[idx] += 1;
                 self.bucket_freed_slots[idx] += 1;
+                self.unlockBucket(idx);
                 return;
             }
-            self.inner.vtable.free(self.inner.ptr, mem, alignment, ret_addr);
-            return;
+            self.unlockBucket(idx);
         }
-        self.acquire();
-        defer self.unlock();
+        self.acquireInner();
+        defer self.unlockInner();
         self.inner.vtable.free(self.inner.ptr, mem, alignment, ret_addr);
     }
 
@@ -429,15 +465,15 @@ pub const GcCellBacking = struct {
     }
 
     pub fn stats(self: *GcCellBacking) Stats {
-        self.acquire();
-        defer self.unlock();
         var out = Stats{};
         inline for (0..bucket_count) |idx| {
+            self.acquireBucket(idx);
             out.chunks += self.bucket_chunk_counts[idx];
             out.capacity_bytes += self.bucket_capacity_bytes[idx];
             out.capacity_slots += self.bucket_capacity_slots[idx];
             out.free_slots += self.bucket_capacity_slots[idx] - self.bucket_issued_slots[idx];
             out.free_slots += self.bucket_free_counts[idx];
+            self.unlockBucket(idx);
         }
         out.live_slots = out.capacity_slots - out.free_slots;
         return out;
@@ -447,10 +483,9 @@ pub const GcCellBacking = struct {
     /// allocation/nursery roadmap tied to the exact size classes that dominate
     /// a workload without walking free-list nodes or slab chunks.
     pub fn bucketStats(self: *GcCellBacking) [bucket_count]BucketStats {
-        self.acquire();
-        defer self.unlock();
         var out: [bucket_count]BucketStats = undefined;
         inline for (0..bucket_count) |idx| {
+            self.acquireBucket(idx);
             const free_slots = self.bucket_capacity_slots[idx] - self.bucket_issued_slots[idx] + self.bucket_free_counts[idx];
             out[idx] = .{
                 .slot_size = bucket_sizes[idx],
@@ -463,6 +498,7 @@ pub const GcCellBacking = struct {
                 .free_slots = free_slots,
                 .live_slots = self.bucket_issued_slots[idx] - self.bucket_free_counts[idx],
             };
+            self.unlockBucket(idx);
         }
         return out;
     }
@@ -474,13 +510,18 @@ pub const GcCellBacking = struct {
     /// backing also leaves parallel mode and skips a spinlock on every teardown
     /// free.
     pub fn beginBulkTeardown(self: *GcCellBacking) void {
-        self.acquire();
+        const was_parallel = self.parallel;
+        if (was_parallel) {
+            self.acquireAllBuckets();
+            self.acquireInner();
+        }
         self.bulk_teardown = true;
         self.free_lists = .{ null, null, null, null, null, null };
         self.bucket_free_counts = .{ 0, 0, 0, 0, 0, 0 };
-        if (self.parallel) {
+        if (was_parallel) {
+            self.unlockInner();
+            self.unlockAllBuckets();
             self.parallel = false;
-            self.lock.store(0, .release);
         }
     }
 
@@ -549,6 +590,9 @@ pub const GcCellBacking = struct {
         }
         if (first_trimmed == old_len) return 0;
 
+        self.acquireInner();
+        defer self.unlockInner();
+
         const trimmed = old_len - first_trimmed;
         const removed_addr_entries = self.removeTailAddrIndexLocked(idx, first_trimmed);
         std.debug.assert(removed_addr_entries == trimmed);
@@ -582,12 +626,12 @@ pub const GcCellBacking = struct {
     /// one-off allocation spikes a way to return backing slabs before
     /// `Context.destroy`.
     pub fn trimEmptyTailChunks(self: *GcCellBacking) usize {
-        self.acquire();
-        defer self.unlock();
         if (self.bulk_teardown) return 0;
         var trimmed: usize = 0;
         inline for (0..bucket_count) |idx| {
+            self.acquireBucket(idx);
             trimmed += self.trimEmptyTailChunksLocked(idx);
+            self.unlockBucket(idx);
         }
         return trimmed;
     }
@@ -698,8 +742,8 @@ test "GC cell backing rejects pointers outside bucket address spans before scann
     const foreign = try std.testing.allocator.alignedAlloc(u8, .@"16", 200);
     defer std.testing.allocator.free(foreign);
 
-    backing.acquire();
-    defer backing.unlock();
+    backing.acquireBucket(idx);
+    defer backing.unlockBucket(idx);
     try std.testing.expect(backing.ownsPtrLocked(idx, cell.ptr));
     try std.testing.expect(!backing.ownsPtrLocked(idx, foreign.ptr));
     try std.testing.expect(@intFromPtr(cell.ptr) >= backing.bucket_addr_min[idx]);
@@ -729,8 +773,8 @@ test "GC cell backing ownership hint avoids repeated bucket chunk scans" {
     try std.testing.expectEqual(@as(usize, 2), backing.bucket_chunks[idx].items.len);
     try std.testing.expectEqual(@as(usize, 1), backing.bucket_bump_start[idx]);
 
-    backing.acquire();
-    defer backing.unlock();
+    backing.acquireBucket(idx);
+    defer backing.unlockBucket(idx);
     backing.bucket_owns_hint[idx] = null;
     try std.testing.expect(backing.ownsPtrLocked(idx, cells[0].ptr));
     const first_hint = backing.bucket_owns_hint[idx].?;
@@ -772,8 +816,8 @@ test "GC cell backing ownership fallback uses sorted chunk address index" {
         prev_end = entry.end;
     }
 
-    backing.acquire();
-    defer backing.unlock();
+    backing.acquireBucket(idx);
+    defer backing.unlockBucket(idx);
     backing.bucket_owns_hint[idx] = null;
     try std.testing.expect(backing.ownsPtrLocked(idx, cells[cells.len - 1].ptr));
     try std.testing.expectEqual(@as(usize, 1), backing.bucket_owns_hint[idx].?);
@@ -1122,15 +1166,36 @@ test "GC cell backing bulk teardown leaves parallel mode for single-owner destro
     const idx = GcCellBacking.bucketIndex(200, .@"16").?;
     const cell = try a.alignedAlloc(u8, .@"16", 200);
     try std.testing.expect(backing.parallel);
-    try std.testing.expectEqual(@as(u32, 0), backing.lock.load(.monotonic));
+    try std.testing.expectEqual(@as(u32, 0), backing.inner_lock.load(.monotonic));
+    for (&backing.bucket_locks) |*lock| {
+        try std.testing.expectEqual(@as(u32, 0), lock.load(.monotonic));
+    }
 
     backing.beginBulkTeardown();
     try std.testing.expect(backing.bulk_teardown);
     try std.testing.expect(!backing.parallel);
-    try std.testing.expectEqual(@as(u32, 0), backing.lock.load(.monotonic));
+    try std.testing.expectEqual(@as(u32, 0), backing.inner_lock.load(.monotonic));
+    for (&backing.bucket_locks) |*lock| {
+        try std.testing.expectEqual(@as(u32, 0), lock.load(.monotonic));
+    }
 
     a.free(cell);
     try std.testing.expectEqual(@as(?*GcCellBacking.FreeNode, null), backing.free_lists[idx]);
+}
+
+test "GC cell backing shards parallel allocation locks by size class" {
+    var backing = GcCellBacking{ .inner = std.testing.allocator, .parallel = true };
+    defer backing.deinit();
+
+    const small_idx = GcCellBacking.bucketIndex(48, .@"16").?;
+    const object_idx = GcCellBacking.bucketIndex(200, .@"16").?;
+    try std.testing.expect(small_idx != object_idx);
+
+    backing.acquireBucket(small_idx);
+    defer backing.unlockBucket(small_idx);
+    try std.testing.expect(backing.tryAcquireBucket(object_idx));
+    backing.unlockBucket(object_idx);
+    try std.testing.expect(!backing.tryAcquireBucket(small_idx));
 }
 
 /// An isolated engine instance — the homegrown analogue of a JSC
@@ -1158,7 +1223,7 @@ pub const Context = struct {
     arena_state: *std.heap.ArenaAllocator,
     /// Thread-safe wrapper over `arena_state` installed when `enable_threads`
     /// (null otherwise → raw arena). Makes parallel shape/string/AST/binding
-    /// allocation safe once the GIL is gone (#1). See `LockedArena`.
+    /// allocation safe in the no-GIL default (#1). See `LockedArena`.
     locked_arena: ?*LockedArena = null,
     /// Reusable allocator used as the GC heap's cell backing. It recycles
     /// per-cell slabs for allocation/lifecycle performance and becomes
@@ -1169,11 +1234,10 @@ pub const Context = struct {
     /// when the GC is enabled. The public/internal fields above still hold
     /// stable pointers into this allocation for existing call sites.
     gc_state: ?*GcState = null,
-    /// A Context is single-thread-affine: every mutating entry point (evaluate,
-    /// evaluateModule, the C API) must run on the thread that created it. The
-    /// arena, environments, shapes, and microtask queue are unsynchronized by
-    /// design; cross-thread sharing happens only through SharedArrayBuffer
-    /// storage (see docs/threads/bindings.md). Debug builds enforce this.
+    /// Non-threaded Contexts are creator-thread-affine. Threaded contexts admit
+    /// registered shared-realm `Thread`s and use either dedicated no-GIL
+    /// synchronization or the explicit `.gil = true` fallback. Debug builds
+    /// enforce the applicable rule (see docs/threads/bindings.md).
     owner_thread: std.Thread.Id,
     env: interp.Environment,
     global_object: *value.Object,
@@ -1230,15 +1294,16 @@ pub const Context = struct {
     /// Host policy for whether this shared VM may block in synchronous waits.
     /// Used by PR-249 and test262 `[[CanBlock]]` coverage.
     main_can_block: bool = true,
-    /// Test-only Layer-C bring-up: run shared-realm `Thread` JS without holding
-    /// the context GIL. This is deliberately excluded from public Options.
+    /// Internal execution-mode bit. Public `enable_threads` sets this for the
+    /// no-GIL default; tests can also drive it through `TestingOptions` without
+    /// exposing it as a stable embedder option.
     parallel_js: bool = false,
     /// Optional cap on live shared-realm `Thread`s. Null means only the
     /// intrinsic id-space limit applies.
     max_js_threads: ?u32 = null,
-    /// Phase 6: the VM lock for shared-Context `Thread` objects (heap-
-    /// allocated so its address is stable; null = the context stays
-    /// single-thread-affine and pays nothing).
+    /// Shared-realm coordination state and optional VM lock (heap-allocated so
+    /// its address is stable). No-GIL mode still uses its task/waiter records;
+    /// `.gil = true` additionally uses the VM lock. Null means no Thread API.
     gil: ?*gil_mod.Gil = null,
     /// Phase 7: the precise tracing GC heap (null = arena engine, today's
     /// default). When set, heap cells allocate through it and are reclaimed by
@@ -1352,16 +1417,13 @@ pub const Context = struct {
     script_referrer: []const u8 = "",
 
     pub const Options = struct {
-        /// Install the `Thread` API and the GIL: spawned threads share this
-        /// Context's realm, serialized by one VM lock (issue #1 Phase 6,
-        /// docs/threads/P6-thread-api.md).
+        /// Install the shared-realm `Thread` API. Spawned threads run in
+        /// parallel by default; set `.gil = true` for the serialized fallback.
         enable_threads: bool = false,
         /// Allocate heap cells through the precise tracing GC instead of the
-        /// arena (issue #1 Phase 7, docs/threads/P7-gc-design.md). M1 work in
-        /// progress: OFF is today's arena engine (byte-identical); ON routes
-        /// cell allocation through `Context.gc` and frees them at teardown via
-        /// the collector. Mid-run collection is gated separately until the
-        /// whole allocation surface is migrated.
+        /// arena (issue #1 Phase 7, docs/threads/P7-gc-design.md). ON routes cell
+        /// allocation through `Context.gc`; no-GIL thread contexts imply this
+        /// path. Mid-script collection policy remains independently gated.
         enable_gc: bool = false,
         /// Phase 7 / M3 (opt-in, requires `enable_gc`): mark on a dedicated
         /// thread *concurrently* with the mutator at safepoints. Single-mutator
@@ -1651,11 +1713,10 @@ pub const Context = struct {
             .this_value = Value.obj(self.global_object),
             .root_shape = self.root_shape,
             .microtasks = &self.microtasks,
-            // Only engage the microtask lock when the execution-path GIL is
-            // dropped; the default GIL-serialized engine leaves it null (no
-            // overhead). Every interpreter (main + each spawned `Thread`, which
-            // also come from `interpreter()`) thus shares one lock for the
-            // realm's queue.
+            // Only engage the microtask lock in no-GIL mode; single-threaded and
+            // `.gil = true` execution leave it null. Every interpreter (main +
+            // each spawned `Thread`, which also come from `interpreter()`) thus
+            // shares one lock for the realm's queue.
             .microtask_lock = if (self.parallel_js) &self.microtask_lock else null,
             .realm_lock = if (self.parallel_js) &self.realm_lock else null,
             .print_buffer = &self.print_buffer,
@@ -1752,11 +1813,9 @@ pub const Context = struct {
         return std.Thread.getCurrentId() == self.owner_thread;
     }
 
-    /// Debug-only affinity check: panics with a clear message when a Context
-    /// is touched from the wrong thread. For an `enable_threads` context the
-    /// invariant is GIL ownership (any thread, exactly one at a time);
-    /// otherwise it is creator-thread affinity. Compiles to nothing in
-    /// release modes, so the single-threaded hot path pays zero cost.
+    /// Debug-only access check. No-GIL registered interpreters use synchronized
+    /// realm state, `.gil = true` requires VM-lock ownership, and non-threaded
+    /// contexts require creator-thread affinity. Compiles out in release modes.
     pub fn assertOwnerThread(self: *const Context) void {
         if (comptime builtin.mode == .Debug) {
             if (self.gil) |g| {

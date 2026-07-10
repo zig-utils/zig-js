@@ -34,7 +34,9 @@ zig build gc-profile
 
 These profiles are not correctness gates. `threads-profile` is the local
 contention baseline for comparing the no-GIL default against `.gil = true`
-across the hot shared structures named in the production roadmap; it now prints
+across the hot shared structures named in the production roadmap. Its mixed
+Object/Function/Promise allocation row enables GC in both modes to isolate the
+cell-backing lock path; the profile also prints
 internal native-wait microsecond attribution for join, lock, condition, and
 property waits alongside the existing contention event counters. `gc-profile`
 is the local allocation/lifecycle baseline for comparing arena, explicit-GC,
@@ -578,6 +580,11 @@ live-cell frees drain without rebuilding freelists, stats accounting, cumulative
 fresh/reused/freed allocation counters, multi-chunk maintained-counter
 snapshots, bucket attribution, bulk-teardown
 behavior, and bucket-shaped delegated side frees during teardown.
+`GC cell backing shards parallel allocation locks by size class` holds one
+size-class lock and proves another can be acquired independently. Focused TSan
+coverage exercises the same allocator bookkeeping and teardown paths; the
+embedder allocator remains serialized separately for chunk growth and delegated
+side storage.
 `enable_gc: collectGarbage trims empty GC backing tail chunks` covers the public
 explicit-GC path that releases fully unused spike slabs before context destroy.
 `enable_gc: heap binding and cell backing share one lifecycle allocation` covers

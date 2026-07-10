@@ -179,7 +179,13 @@ Known performance/maturity work:
   instead of only a one-shot object workload. The no-GIL bootstrap row should
   also be read against the explicit parallel-lock deferral above: returned
   contexts are fully parallel, but private global/API installation no longer
-  measures the atomic allocator lock on every cell allocation.
+  measures the atomic allocator lock on every cell allocation. Once parallel,
+  cell allocation is locked per size class, so unrelated cell sizes can use
+  their slab/free-list fast paths concurrently. Only chunk growth, chunk
+  metadata, and delegated non-cell side storage take the separate
+  inner-allocator lock required for a potentially non-thread-safe embedder
+  allocator. This reduces current no-GIL allocation contention without claiming
+  the remaining nursery/generational policy work is complete.
 - Mid-script parallel GC remains abort-safe. Sync wait/lock/condition peers are
   not treated as frozen parked stacks; their lock-free pump points now service
   root publication, and the collector waits long enough for one bounded park
@@ -198,7 +204,8 @@ Known performance/maturity work:
   independent compute loops in one GIL-free context.
 - `zig build threads-profile` is the dedicated contention harness. It compares
   the no-GIL default with `.gil = true` across independent compute, shared
-  object properties, shared array append, typed-array Atomics, contended
+  object properties, mixed Object/Function/Promise GC-cell allocation, shared
+  array append, typed-array Atomics, contended
   property `Atomics.wait` / `notify`, `Condition.wait` / `notifyAll`,
   property `Atomics.waitAsync` timeout settlement, single-lock and multi-lock
   `Condition.asyncWait`, `Lock.hold`, `Lock.asyncHold` delivery, observed
@@ -218,6 +225,9 @@ Known performance/maturity work:
   `empty`/`jobs` split the run-loop task pump into empty fast-path hits and
   delivered grant jobs while `hold`/`cjob` split those delivered jobs into
   ordinary `Lock.asyncHold` grants and `Condition.asyncWait` reacquire grants.
+- The mixed GC-cell allocation row explicitly enables GC in both modes, so its
+  no-GIL versus `.gil = true` result measures parallel allocator behavior rather
+  than comparing the no-GIL slab allocator with the serialized arena engine.
 - Parked sync waiters still pump the realm run-loop so async-hold grants make
   progress, but empty pumps now use an atomic queue-count fast path and avoid
   taking the shared threading API lock.

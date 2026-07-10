@@ -69,6 +69,15 @@ context APIs.
 
 ## Remaining Roadmap
 
+Detailed acceptance criteria are tracked in
+[GC/lifecycle #16](https://github.com/zig-utils/zig-js/issues/16),
+[contention #15](https://github.com/zig-utils/zig-js/issues/15),
+[mid-script GC #14](https://github.com/zig-utils/zig-js/issues/14),
+[fuzzing #13](https://github.com/zig-utils/zig-js/issues/13),
+[memory model #12](https://github.com/zig-utils/zig-js/issues/12), and
+[PR-249 promotions #11](https://github.com/zig-utils/zig-js/issues/11).
+Issue #1 remains the umbrella status page.
+
 - **GC allocation fast path / nursery.** The first cell-allocation fast path has
   landed: GC cells use a reusable size-class slab backing instead of calling the
   backing allocator for every cell. Fresh chunks now use lazy bump cursors with
@@ -133,6 +142,13 @@ context APIs.
   after one-off spikes while still preserving reuse inside retained chunks.
   Chunk metadata reserve-before-slab allocation keeps this profile focused on
   cell-slab pressure rather than avoidable metadata allocation churn. The
+  parallel cell allocator now protects each size class with its own fast-path
+  lock; unrelated 64/128/256/512/1024/2048-byte allocations no longer contend
+  on one global cell-backing lock. Chunk growth, metadata allocation, and
+  non-cell side storage still pass through a separate inner-allocator lock
+  because embedder allocators are not required to be thread-safe. This is a
+  contention reduction for the existing slab allocator, not the remaining
+  nursery/generational policy milestone. The
   object-sized 1024/2048-byte buckets now use 384 KiB chunks: the local profile
   keeps the intrinsic empty context at three object-cell chunks with 1152 slots,
   while explicit collection trims fully unused object-heavy spike chunks back to
@@ -147,7 +163,8 @@ context APIs.
 - **Parallel scaling optimization.** Benchmarks show real speedup, but scaling
   is sub-linear. `zig build threads-profile` now provides a repeatable baseline
   against the `.gil = true` fallback for independent compute, shared object
-  properties, shared array append, typed-array Atomics, property
+  properties, mixed Object/Function/Promise GC-cell allocation, shared array
+  append, typed-array Atomics, property
   `Atomics.wait` / `notify`, property `Atomics.waitAsync` timeout settlement,
   `Condition.wait` / `notifyAll`, single-lock and multi-lock `Condition.asyncWait`,
   `Lock.asyncHold` delivery, observed `Lock.asyncHold` callback settlement,

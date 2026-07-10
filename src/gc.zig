@@ -841,8 +841,8 @@ pub fn allocObject(heap_erased: ?*anyopaque, arena: std.mem.Allocator) std.mem.A
 }
 
 /// The GC heap whose cells the *current thread* allocates into, or null for the
-/// arena. Per-thread (a shared-Context GIL thread sets it to the same heap on
-/// entry), set/restored at the realm's allocation entry points — `createWith`
+/// arena. Each shared-realm thread sets it to the same context heap on entry;
+/// it is set/restored at the realm's allocation entry points — `createWith`
 /// for intrinsics, `evaluate`/`evaluateModule` for execution. This lets every
 /// scattered `*.create(value.Object)` site funnel through `allocObj(arena)`
 /// without threading the heap pointer through hundreds of signatures.

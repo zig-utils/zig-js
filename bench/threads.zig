@@ -18,6 +18,7 @@ const Scenario = struct {
     setup: []const u8,
     rounds: usize,
     flush_tasks_after: bool = false,
+    force_gc: bool = false,
 };
 
 const Timing = struct {
@@ -118,6 +119,23 @@ const scenarios = [_]Scenario{
         \\};
         ,
         .rounds = 5,
+    },
+    .{
+        .name = "mixed GC cell allocation",
+        .setup =
+        \\globalThis.worker = function(id) {
+        \\  var keep = [];
+        \\  for (var i = 0; i < 2500; i = i + 1) {
+        \\    var box = { id: id, value: i, nested: { value: i + 1 } };
+        \\    var fn = function() { return box.value + id; };
+        \\    var promise = Promise.resolve(box);
+        \\    keep.push([box, fn, promise]);
+        \\  }
+        \\  return keep.length;
+        \\};
+        ,
+        .rounds = 3,
+        .force_gc = true,
     },
     .{
         .name = "shared object props",
@@ -444,7 +462,11 @@ fn installHarness(ctx: *js.Context, scenario: Scenario) !void {
 }
 
 fn timeScenario(gpa: std.mem.Allocator, io: std.Io, scenario: Scenario, workers: usize, gil: bool) !Timing {
-    const ctx = try js.Context.createWith(gpa, .{ .enable_threads = true, .gil = gil });
+    const ctx = try js.Context.createWith(gpa, .{
+        .enable_threads = true,
+        .gil = gil,
+        .enable_gc = scenario.force_gc,
+    });
     defer ctx.destroy();
     try installHarness(ctx, scenario);
 

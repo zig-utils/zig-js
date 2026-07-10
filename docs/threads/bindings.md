@@ -60,6 +60,7 @@ before acting on one.
 | Symbol | Location | What it is | Ruling | Notes / phase |
 |---|---|---|---|---|
 | `active_heap` | `src/gc.zig:244` | Threadlocal pointer to the currently active GC heap used by allocation shims. | **per-thread** | `Context.createWith` and evaluation set/restore it around heap-cell allocation. Threadlocal keeps nested/parallel contexts isolated. |
+| `Context.GcCellBacking.bucket_locks` / `inner_lock` | `src/context.zig` | Per-size-class slab/free-list state plus delegated embedder allocation. | **locked** | The six cell size classes have independent fast-path locks, so unrelated cell sizes allocate concurrently. Chunk growth and non-cell side storage use `inner_lock`, preserving the contract that the embedder allocator need not be thread-safe. Quiescent collection locks one bucket at a time for trimming; single-owner teardown acquires every bucket before disabling parallel locking. |
 
 ## Engine: `src/gil.zig` / `src/jsthread.zig`
 

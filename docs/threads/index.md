@@ -79,8 +79,9 @@ rules.
 - [Limits & Roadmap](./limits.md) - unsupported surfaces, test-only knobs, and
   remaining performance/coverage goals.
 - [bindings.md](./bindings.md) - mutable-state audit and contribution rule.
-- [GitHub issue #1](https://github.com/zig-utils/zig-js/issues/1) - canonical
-  tracker for thread work; do not split status across duplicate roadmap issues.
+- [GitHub issue #1](https://github.com/zig-utils/zig-js/issues/1) - concise
+  umbrella tracker. Detailed acceptance criteria live in its linked GC,
+  contention, mid-script-GC, fuzzing, PR-249, and memory-model child issues.
 - [P2-agents.md](./P2-agents.md), [P5-workers.md](./P5-workers.md), and
   [P6-thread-api.md](./P6-thread-api.md) - implementation design records.
 - [P7-gc-design.md](./P7-gc-design.md), [P7-gil-removal.md](./P7-gil-removal.md),

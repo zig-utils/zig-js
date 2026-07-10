@@ -155,7 +155,10 @@ treats those as non-cells. This keeps the trace surface to runtime values only.
   delegates unchanged. Fresh chunks reserve chunk/bump-offset/address-index
   metadata in fixed-size capacity chunks, then hand out cells lazily through
   bump cursors and a per-bucket bump hint rather than pre-linking every slot up
-  front. Chunk ownership is tracked per size class, so free/remap
+  front. Parallel allocation locks slab/free-list state independently per size
+  class, so unrelated cell sizes do not contend on one global fast-path lock;
+  slow-path chunk growth and delegated side storage retain a separate lock around
+  the embedder allocator. Chunk ownership is tracked per size class, so free/remap
   classification first rejects pointers outside the bucket address span, tries a
   per-bucket recent-chunk hint, and only then scans the matching-size chunks
   instead of the entire backing. At context teardown the backing switches to

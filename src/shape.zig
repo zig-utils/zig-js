@@ -12,8 +12,8 @@
 //! Shapes live in the owning Context's arena (their property-name strings are
 //! context-scoped), so a Context owns one root (empty) shape and every object
 //! transitions out from there. The transition map is locked per shape: the
-//! current shared-realm GIL still serializes ordinary JS mutation, but the map
-//! itself no longer depends on the GIL for convergence or hash-table integrity.
+//! no-GIL default allows ordinary JS mutation in parallel, and the map does not
+//! depend on the optional GIL fallback for convergence or hash-table integrity.
 
 const std = @import("std");
 
