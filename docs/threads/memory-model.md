@@ -95,6 +95,75 @@ When a program needs deterministic behavior, protect every shared invariant with
 one of these edges. The default no-GIL mode intentionally does not serialize all
 JavaScript execution.
 
+### Locks and conditions
+
+Releasing a `Lock` or `Atomics.Mutex` publishes the releasing thread's prior
+ordinary JavaScript writes to the next thread that successfully acquires that
+same lock. This applies to normal return, explicit unlock/release functions,
+unlock tokens, `[Symbol.dispose]`, and exception unwinding from `hold(fn)`.
+
+`Condition.wait(lock)` and the token-based `Atomics.Condition` operations
+atomically register the wait, release the associated lock, and reacquire it
+before returning. The reacquire is the publication edge. `notify`/`notifyAll`
+select current waiters but are not, by themselves, a replacement for protecting
+the predicate with the same lock. Notifications are not buffered, spurious
+wakeups are allowed, and callers must test the predicate in a loop.
+
+### Atomics
+
+Typed-array `Atomics.*` operations use the ECMAScript sequentially consistent
+atomic order for the addressed shared integer element. A reader that observes a
+published atomic flag also observes writes sequenced before the publishing
+atomic operation. Non-atomic shared-buffer byte access does not gain this edge.
+
+Property-mode `Atomics.*` operations are linearized for the addressed
+`(object, property key)` cell. A load/RMW/wait observation of a value written by
+an earlier atomic operation on that cell publishes writes sequenced before the
+writer's operation. This contract does not make a multi-property transaction
+atomic; use one `Lock` when an invariant spans several keys or objects.
+
+For both typed-array and property waiters, the value is checked again while the
+waiter-table synchronization is held before enqueue. `notify` wakes only current
+matching waiters and does not itself change the value. Correct protocols publish
+the new value atomically and then notify; waiters always re-check in a loop.
+
+### Thread completion
+
+Publishing a thread's completion synchronizes with a successful `join()` and
+with settlement of every `asyncJoin()` promise. The joiner/observer sees the
+thread body's prior side effects, the returned value by identity, or the actual
+thrown value by identity. A completed `join()` is still an ordering edge even
+when it does not need to park.
+
+A spawned thread drains its own pending microtasks before publishing completion.
+Promise reactions are FIFO within one queue, including jobs appended by an
+earlier job. Cross-thread queue handoff is synchronized, but there is no promised
+global total order between independent producers; only the order in which jobs
+were appended to the destination queue is observed there.
+
+### GC publication is not program synchronization
+
+The GC's insertion barriers, remembered old-owner set, root-publication
+handshake, and born-cell protocol ensure that reachable engine cells are not
+collected during minor, incremental, or concurrent full collection. They do not
+make unsynchronized JavaScript reads/writes deterministic and do not create a
+program-level happens-before edge. WeakRef targets and weak collection keys stay
+weak under the same rule.
+
+## Unsynchronized and restricted access
+
+Ordinary shared objects, arrays, Maps/Sets, and non-atomic shared-buffer access
+have no cross-operation ordering guarantee without one of the edges above. The
+engine preserves valid internal shapes, storage, references, and complete
+`Value` representations, but programs must not depend on which racing write
+wins, whether a read sees an earlier or later racing value, or whether a compound
+read-modify-write loses an update.
+
+`ConcurrentAccessError` is narrower and explicit: after `Thread.restrict(obj)`
+successfully claims a supported plain object or array, an enforced foreign-thread
+access throws. The engine does not automatically restrict ordinary shared
+objects, and restriction does not turn other objects into synchronized data.
+
 ## ThreadSanitizer Suppressions
 
 `tsan-suppressions.txt` is intentionally narrow. It suppresses only raw
@@ -156,6 +225,10 @@ The public contract is checked by:
   (`tools/tsan-suppression-witness.sh`),
 - `test262-parallel`,
 - `threadfuzz`, including TSan and deterministic-result verifier modes.
+
+Focused unit tests whose names begin with `memory model:` exercise lock/condition
+publication, property and typed-array Atomics message passing, join/asyncJoin
+result and exception publication, and per-thread microtask FIFO-before-completion.
 
 When local TSan sweeps are impractical, CI remains the source of truth. Do not
 claim a race class is newly verified unless the relevant gate actually passed.

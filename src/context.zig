@@ -8825,6 +8825,134 @@ test "Thread API (enable_threads): shared realm, identity, exceptions, ids" {
     );
 }
 
+test "memory model: Lock release and Condition reacquire publish ordinary writes" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_threads = true });
+    defer ctx.destroy();
+
+    const result = try ctx.evaluate(
+        \\const mmLock = new Lock();
+        \\const mmCondition = new Condition();
+        \\const mmBox = { ready: false, payload: null };
+        \\const mmConsumer = new Thread(() => {
+        \\  let observed;
+        \\  mmLock.hold(() => {
+        \\    while (!mmBox.ready) mmCondition.wait(mmLock);
+        \\    observed = mmBox.payload;
+        \\  });
+        \\  return observed;
+        \\});
+        \\const mmProducer = new Thread(() => {
+        \\  mmLock.hold(() => {
+        \\    mmBox.payload = { marker: 41, nested: { complete: true } };
+        \\    mmBox.ready = true;
+        \\    mmCondition.notify();
+        \\  });
+        \\});
+        \\mmProducer.join();
+        \\const mmObserved = mmConsumer.join();
+        \\mmObserved.marker + (mmObserved.nested.complete ? 1 : 0)
+    );
+    try std.testing.expectEqual(@as(f64, 42), result.asNum());
+}
+
+test "memory model: property Atomics publish prior ordinary writes" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_threads = true });
+    defer ctx.destroy();
+
+    const result = try ctx.evaluate(
+        \\const propertyState = { flag: 0, payload: null };
+        \\const propertyReader = new Thread(() => {
+        \\  while (Atomics.load(propertyState, "flag") === 0)
+        \\    Atomics.wait(propertyState, "flag", 0, 5);
+        \\  return propertyState.payload;
+        \\});
+        \\const propertyWriter = new Thread(() => {
+        \\  propertyState.payload = { marker: 19 };
+        \\  Atomics.store(propertyState, "flag", 1);
+        \\  Atomics.notify(propertyState, "flag");
+        \\});
+        \\propertyWriter.join();
+        \\propertyReader.join().marker
+    );
+    try std.testing.expectEqual(@as(f64, 19), result.asNum());
+}
+
+test "memory model: typed-array Atomics publish prior ordinary writes" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_threads = true });
+    defer ctx.destroy();
+
+    const result = try ctx.evaluate(
+        \\const shared = new SharedArrayBuffer(4);
+        \\const flag = new Int32Array(shared);
+        \\const typedState = { payload: null };
+        \\const typedReader = new Thread(() => {
+        \\  let spins = 0;
+        \\  while (Atomics.load(flag, 0) === 0 && spins < 10000000) spins++;
+        \\  if (Atomics.load(flag, 0) === 0) throw new Error("typed atomic publication timed out");
+        \\  return typedState.payload;
+        \\});
+        \\const typedWriter = new Thread(() => {
+        \\  typedState.payload = { marker: 23 };
+        \\  Atomics.store(flag, 0, 1);
+        \\  Atomics.notify(flag, 0);
+        \\});
+        \\typedWriter.join();
+        \\typedReader.join().marker
+    );
+    try std.testing.expectEqual(@as(f64, 23), result.asNum());
+}
+
+test "memory model: join publishes completion side effects and exception identity" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_threads = true });
+    defer ctx.destroy();
+
+    _ = try ctx.evaluate(
+        \\globalThis.mmJoinBox = { stage: 0, value: null };
+        \\globalThis.mmJoinBoom = { marker: 29 };
+        \\globalThis.mmAsyncValue = null;
+        \\globalThis.mmAsyncError = null;
+        \\const mmValueThread = new Thread(() => {
+        \\  mmJoinBox.value = { marker: 13 };
+        \\  mmJoinBox.stage = 1;
+        \\  return mmJoinBox.value;
+        \\});
+        \\mmValueThread.asyncJoin().then(v => { mmAsyncValue = v; });
+        \\const mmJoinedValue = mmValueThread.join();
+        \\if (mmJoinedValue !== mmJoinBox.value || mmJoinBox.stage !== 1) throw new Error("join publication");
+        \\const mmThrowThread = new Thread(() => {
+        \\  mmJoinBox.stage = 2;
+        \\  throw mmJoinBoom;
+        \\});
+        \\mmThrowThread.asyncJoin().catch(e => { mmAsyncError = e; });
+        \\try { mmThrowThread.join(); throw new Error("join should throw"); }
+        \\catch (e) { if (e !== mmJoinBoom) throw new Error("exception identity"); }
+    );
+    const result = try ctx.evaluate(
+        \\mmJoinBox.stage === 2 &&
+        \\mmAsyncValue === mmJoinBox.value &&
+        \\mmAsyncError === mmJoinBoom
+    );
+    try std.testing.expect(result.asBool());
+}
+
+test "memory model: spawned thread drains its FIFO microtasks before completion" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_threads = true });
+    defer ctx.destroy();
+
+    const result = try ctx.evaluate(
+        \\const mmMicrotaskThread = new Thread(() => {
+        \\  const order = ["body"];
+        \\  Promise.resolve().then(() => {
+        \\    order.push("first");
+        \\    Promise.resolve().then(() => order.push("nested"));
+        \\  }).then(() => order.push("second"));
+        \\  return order;
+        \\});
+        \\mmMicrotaskThread.join().join(",")
+    );
+    try std.testing.expectEqualStrings("body,first,nested,second", result.asStr());
+}
+
 test "Thread API reserves thread record capacity chunks" {
     if (builtin.single_threaded) return error.SkipZigTest;
 
