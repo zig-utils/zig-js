@@ -217,6 +217,9 @@ pub fn build(b: *std.Build) void {
     const run_diag = b.addRunArtifact(diag);
     const diag_step = b.step("diag", "Throwaway parse-failure diagnostic");
     diag_step.dependOn(&run_diag.step);
+    const diag_install = b.addInstallArtifact(diag, .{});
+    const diag_bin_step = b.step("diag-bin", "Build the diagnostic runner exe only (no run)");
+    diag_bin_step.dependOn(&diag_install.step);
 
     // Benchmarks: `zig build bench` times the VM against the tree-walker.
     // ReleaseFast so the numbers reflect real performance, not Debug overhead.

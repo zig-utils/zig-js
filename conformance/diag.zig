@@ -106,6 +106,8 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const root = build_options.root;
     const sub = "test/language";
+    const root_abs = try std.fs.path.resolve(gpa, &.{root});
+    defer gpa.free(root_abs);
 
     var args = std.process.Args.Iterator.init(init.minimal.args);
     _ = args.next();
@@ -117,14 +119,19 @@ pub fn main(init: std.process.Init) !void {
             std.debug.print("usage: diag file <path>\n", .{});
             return;
         };
-        try fileMode(gpa, io, root, fpath);
+        try fileMode(gpa, io, root_abs, fpath);
         return;
     }
     const run_mode = if (first) |m| std.mem.eql(u8, m, "run") else false;
     // Optional third arg overrides the subtree (e.g. `test/built-ins/Symbol`).
     const subtree = args.next() orelse sub;
 
-    const path = try std.fs.path.join(gpa, &.{ root, subtree });
+    const path = try std.fs.path.resolve(gpa, &.{ root_abs, subtree });
+    defer gpa.free(path);
+    if (!pathWithinRoot(root_abs, path)) {
+        std.debug.print("subtree escapes test262 root: {s}\n", .{subtree});
+        return;
+    }
     var dir = std.Io.Dir.cwd().openDir(io, path, .{ .iterate = true }) catch {
         std.debug.print("missing {s}\n", .{path});
         return;
@@ -147,7 +154,7 @@ pub fn main(init: std.process.Init) !void {
         if (meta.skip or meta.negative or meta.raw) continue;
 
         if (run_mode) {
-            runOne(gpa, io, root, out, &wbuf, src, meta, entry.path);
+            runOne(gpa, io, root_abs, out, &wbuf, src, meta, entry.path);
         } else {
             parseOne(gpa, out, io, &wbuf, src, entry.path);
         }
@@ -185,14 +192,53 @@ fn fmeta(src: []const u8) Meta {
     return r;
 }
 
-var g_mod_io: std.Io = undefined;
-var g_mod_gpa: std.mem.Allocator = undefined;
+const DiagModHost = struct {
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    root: []const u8,
+    paths: std.ArrayListUnmanaged([]const u8) = .empty,
+    sources: std.ArrayListUnmanaged([]const u8) = .empty,
+
+    fn deinit(self: *DiagModHost) void {
+        for (self.paths.items) |p| self.gpa.free(p);
+        for (self.sources.items) |s| self.gpa.free(s);
+        self.paths.deinit(self.gpa);
+        self.sources.deinit(self.gpa);
+    }
+};
+
+fn pathWithinRoot(root: []const u8, path: []const u8) bool {
+    if (std.mem.eql(u8, root, path)) return true;
+    if (!std.mem.startsWith(u8, path, root)) return false;
+    if (root.len != 0 and (root[root.len - 1] == '/' or root[root.len - 1] == '\\')) return true;
+    return path.len > root.len and (path[root.len] == '/' or path[root.len] == '\\');
+}
+
 fn dgModLoad(ctx: *anyopaque, referrer: []const u8, specifier: []const u8, out_path: *[]const u8) ?[]const u8 {
-    _ = ctx;
+    const h: *DiagModHost = @ptrCast(@alignCast(ctx));
     const dir = std.fs.path.dirname(referrer) orelse ".";
-    const joined = std.fs.path.resolve(g_mod_gpa, &.{ dir, specifier }) catch return null;
+    const joined = std.fs.path.resolve(h.gpa, &.{ dir, specifier }) catch return null;
+    if (!pathWithinRoot(h.root, joined)) {
+        h.gpa.free(joined);
+        return null;
+    }
+    const source = std.Io.Dir.cwd().readFileAlloc(h.io, joined, h.gpa, .limited(1 << 20)) catch {
+        h.gpa.free(joined);
+        return null;
+    };
+    h.paths.append(h.gpa, joined) catch {
+        h.gpa.free(source);
+        h.gpa.free(joined);
+        return null;
+    };
+    h.sources.append(h.gpa, source) catch {
+        h.paths.items.len -= 1;
+        h.gpa.free(source);
+        h.gpa.free(joined);
+        return null;
+    };
     out_path.* = joined;
-    return std.Io.Dir.cwd().readFileAlloc(g_mod_io, joined, g_mod_gpa, .limited(1 << 20)) catch null;
+    return source;
 }
 
 fn fileMode(gpa: std.mem.Allocator, io: std.Io, root: []const u8, fpath: []const u8) !void {
@@ -200,6 +246,7 @@ fn fileMode(gpa: std.mem.Allocator, io: std.Io, root: []const u8, fpath: []const
         std.debug.print("cannot read {s}\n", .{fpath});
         return;
     };
+    defer gpa.free(src);
     const m = fmeta(src);
     const ctx = js.Context.create(gpa) catch return;
     defer ctx.destroy();
@@ -208,26 +255,30 @@ fn fileMode(gpa: std.mem.Allocator, io: std.Io, root: []const u8, fpath: []const
         // Install harness in global scope, then evaluate as module.
         if (!m.raw) {
             var hbuf: std.ArrayListUnmanaged(u8) = .empty;
+            defer hbuf.deinit(gpa);
             if (readHarness(gpa, io, root, "sta.js")) |sta| {
+                defer gpa.free(sta);
                 hbuf.appendSlice(gpa, sta) catch {};
                 hbuf.append(gpa, '\n') catch {};
             }
             if (readHarness(gpa, io, root, "assert.js")) |ass| {
+                defer gpa.free(ass);
                 hbuf.appendSlice(gpa, ass) catch {};
                 hbuf.append(gpa, '\n') catch {};
             }
             var i: usize = 0;
             while (i < m.includes_n) : (i += 1) {
                 if (readHarness(gpa, io, root, m.includes[i])) |inc| {
+                    defer gpa.free(inc);
                     hbuf.appendSlice(gpa, inc) catch {};
                     hbuf.append(gpa, '\n') catch {};
                 }
             }
             _ = ctx.evaluate(hbuf.items) catch {};
         }
-        g_mod_io = io;
-        g_mod_gpa = gpa;
-        const mh = js.Context.ModuleHost{ .ctx = @ptrFromInt(@alignOf(usize)), .load = dgModLoad };
+        var host = DiagModHost{ .gpa = gpa, .io = io, .root = root };
+        defer host.deinit();
+        const mh = js.Context.ModuleHost{ .ctx = &host, .load = dgModLoad };
         if (ctx.evaluateModule(fpath, src, mh)) |_| {
             std.debug.print("OUTCOME: {s}\n", .{if (m.negative) "FAIL(neg-not-thrown)" else "PASS"});
         } else |err| reportErr(ctx, err, m);
@@ -236,25 +287,30 @@ fn fileMode(gpa: std.mem.Allocator, io: std.Io, root: []const u8, fpath: []const
     }
 
     var full: std.ArrayListUnmanaged(u8) = .empty;
+    defer full.deinit(gpa);
     if (m.only_strict and !m.raw) full.appendSlice(gpa, "\"use strict\";\n") catch {};
     if (!m.raw) {
         if (readHarness(gpa, io, root, "sta.js")) |sta| {
+            defer gpa.free(sta);
             full.appendSlice(gpa, sta) catch {};
             full.append(gpa, '\n') catch {};
         }
         if (readHarness(gpa, io, root, "assert.js")) |ass| {
+            defer gpa.free(ass);
             full.appendSlice(gpa, ass) catch {};
             full.append(gpa, '\n') catch {};
         }
         var i: usize = 0;
         while (i < m.includes_n) : (i += 1) {
             if (readHarness(gpa, io, root, m.includes[i])) |inc| {
+                defer gpa.free(inc);
                 full.appendSlice(gpa, inc) catch {};
                 full.append(gpa, '\n') catch {};
             }
         }
         if (m.async_) {
             if (readHarness(gpa, io, root, "doneprintHandle.js")) |dph| {
+                defer gpa.free(dph);
                 full.appendSlice(gpa, dph) catch {};
                 full.append(gpa, '\n') catch {};
             }
@@ -303,9 +359,21 @@ fn dumpBuf(ctx: *js.Context) void {
 }
 
 fn readHarness(gpa: std.mem.Allocator, io: std.Io, root: []const u8, name: []const u8) ?[]const u8 {
+    if (!safeHarnessIncludeName(name)) return null;
     const hpath = std.fs.path.join(gpa, &.{ root, "harness", name }) catch return null;
     defer gpa.free(hpath);
     return std.Io.Dir.cwd().readFileAlloc(io, hpath, gpa, .limited(1 << 20)) catch null;
+}
+
+fn safeHarnessIncludeName(name: []const u8) bool {
+    if (name.len == 0 or std.fs.path.isAbsolute(name)) return false;
+    var it = std.mem.splitScalar(u8, name, '/');
+    while (it.next()) |part| {
+        if (part.len == 0) return false;
+        if (std.mem.eql(u8, part, ".") or std.mem.eql(u8, part, "..")) return false;
+        if (std.mem.indexOfScalar(u8, part, '\\') != null) return false;
+    }
+    return true;
 }
 
 fn runOne(gpa: std.mem.Allocator, io: std.Io, root: []const u8, out: std.Io.File, buf: []u8, src: []const u8, meta: Meta, path: []const u8) void {
@@ -328,9 +396,7 @@ fn runOne(gpa: std.mem.Allocator, io: std.Io, root: []const u8, out: std.Io.File
     // Prepend any `includes:` harness files (propertyHelper, compareArray, …).
     var i: usize = 0;
     while (i < meta.includes_n) : (i += 1) {
-        const hpath = std.fs.path.join(gpa, &.{ root, "harness", meta.includes[i] }) catch return;
-        defer gpa.free(hpath);
-        const inc = std.Io.Dir.cwd().readFileAlloc(io, hpath, gpa, .limited(1 << 20)) catch return; // unloadable → skip
+        const inc = readHarness(gpa, io, root, meta.includes[i]) orelse return; // unloadable → skip
         defer gpa.free(inc);
         full.appendSlice(gpa, inc) catch return;
         full.append(gpa, '\n') catch return;
