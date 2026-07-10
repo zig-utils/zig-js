@@ -10796,7 +10796,10 @@ test "parallel_gc (M3 GIL-removal bring-up): contended parallel appends to a sha
     // {0 .. N*M-1} (checked by exact sum, since each thread wrote a distinct block).
     try std.testing.expectEqual(@as(usize, nthreads * per), shared.elementsLen());
     var sum: f64 = 0;
-    for (shared.elements.items) |el| sum += el.asNum();
+    for (0..nthreads * per) |i| {
+        const el = shared.elementAt(i) orelse return error.TestUnexpectedResult;
+        sum += el.asNum();
+    }
     const n: f64 = @floatFromInt(nthreads * per);
     try std.testing.expectEqual(n * (n - 1) / 2, sum); // sum_{0..N*M-1}
 }
@@ -10999,7 +11002,8 @@ test "parallel_gc (M3 GIL-removal bring-up): quiescent collection after a parall
     // {0 .. N*M-1}, checked by exact sum).
     try std.testing.expectEqual(@as(usize, nthreads * per), shared.elementsLen());
     var sum: f64 = 0;
-    for (shared.elements.items) |el| {
+    for (0..nthreads * per) |i| {
+        const el = shared.elementAt(i) orelse return error.TestUnexpectedResult;
         try std.testing.expect(el.isObject());
         const got = el.asObj().getOwn("id") orelse return error.TestUnexpectedResult;
         sum += got.asNum();
