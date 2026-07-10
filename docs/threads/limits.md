@@ -213,7 +213,11 @@ Issue #1 remains the umbrella status page.
   `empty`/`jobs` columns show whether run-loop task-pump overhead is empty
   fast-path churn or real grant delivery, with `hold`/`cjob` splitting the
   delivered jobs into ordinary `Lock.asyncHold` grants versus
-  `Condition.asyncWait` reacquire grants. Empty sync-wait
+  `Condition.asyncWait` reacquire grants. Its Worker message rows split
+  structured-clone channel `push`/`pop` operations from empty receive `null`
+  polls, and its Worker teardown rows report `ops` totals for channel push, pop,
+  empty-pop, and close work in self-close, host-close, and terminate modes.
+  Empty sync-wait
   task pumps no longer take the shared run-loop task lock, reducing one measured
   cost in contended lock/lifecycle paths; task-queue writers publish the
   pending-count hint from the locked queue length instead of writer-side atomic

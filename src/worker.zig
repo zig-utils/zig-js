@@ -19,6 +19,7 @@ const interp = @import("interpreter.zig");
 const ContextMod = @import("context.zig");
 const structured_clone = @import("structured_clone.zig");
 const agent = @import("agent.zig");
+const jsthread = @import("jsthread.zig");
 
 const Context = ContextMod.Context;
 const Value = value.Value;
@@ -70,6 +71,7 @@ const Channel = struct {
             return;
         };
         ch.queue.appendAssumeCapacity(bytes);
+        jsthread.recordWorkerChannelPush();
         ch.cond.signal(io);
     }
 
@@ -80,15 +82,24 @@ const Channel = struct {
         ch.mutex.lockUncancelable(io);
         defer ch.mutex.unlock(io);
         while (!ch.hasQueued()) {
-            if (ch.closed) return null;
-            if (timeout_ms) |ms| if (ms == 0) return null;
+            if (ch.closed) {
+                jsthread.recordWorkerChannelEmptyPop();
+                return null;
+            }
+            if (timeout_ms) |ms| if (ms == 0) {
+                jsthread.recordWorkerChannelEmptyPop();
+                return null;
+            };
             ch.clearQueue();
             const tmo: std.Io.Timeout = if (timeout_ms) |ms| .{ .duration = .{
                 .raw = .fromMilliseconds(@intCast(ms)),
                 .clock = .awake,
             } } else .none;
             io_compat.conditionWaitTimeout(&ch.cond, io, &ch.mutex, tmo) catch |err| switch (err) {
-                error.Timeout => if (!ch.hasQueued()) return null else break,
+                error.Timeout => if (!ch.hasQueued()) {
+                    jsthread.recordWorkerChannelEmptyPop();
+                    return null;
+                } else break,
                 error.Canceled => continue,
             };
         }
@@ -96,6 +107,7 @@ const Channel = struct {
         ch.queue.items[ch.queue_head] = undefined;
         ch.queue_head += 1;
         if (ch.queue_head == ch.queue.items.len) ch.clearQueue();
+        jsthread.recordWorkerChannelPop();
         return bytes;
     }
 
@@ -104,6 +116,7 @@ const Channel = struct {
         ch.mutex.lockUncancelable(io);
         defer ch.mutex.unlock(io);
         ch.closed = true;
+        jsthread.recordWorkerChannelClose();
         ch.cond.broadcast(io);
     }
 

@@ -481,9 +481,14 @@ columns split those delivered jobs into ordinary `Lock.asyncHold` grants versus
 or lifecycle changes so performance work has an attributed baseline instead of
 only elapsed time. The profile also prints isolated `Worker` tables for
 structured-clone inbox/outbox round-trips, empty receive polling, and teardown
-churn. The teardown table splits handler-driven self-close,
+churn. The message table now prints `push`/`pop` channel operations for the
+timed round trips and `null` empty receives for the polling row, so a timing
+change can be checked against actual inbox/outbox work. The teardown table
+splits handler-driven self-close,
 owner-driven host-close drain after queuing messages, and hard `terminate()` of
-spinning code; both tables emit separate script and module Worker rows so
+spinning code; its `self ops`/`host ops`/`term ops` columns count total Worker
+channel push, pop, empty-pop, and close operations for each teardown mode. Both
+tables emit separate script and module Worker rows so
 import-graph startup and teardown cost can be compared with plain source
 Workers. It intentionally has no `.gil = true` column because each Worker owns
 its own `Context`.

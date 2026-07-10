@@ -456,9 +456,12 @@ Known performance/maturity work:
   teardown. The teardown table splits handler-driven self-close,
   owner-driven host-close drain of queued messages, and hard `terminate()` of
   spinning code, with separate script and module Worker rows so import-graph
-  startup and teardown pressure are visible beside plain source Workers. It is
-  reported outside the no-GIL versus `.gil = true` table because Workers
-  already isolate each `Context` onto its own OS thread.
+  startup and teardown pressure are visible beside plain source Workers.
+  Message rows include channel `push`/`pop` counts and empty receive `null`
+  counts; teardown rows include per-mode `ops` totals covering channel push,
+  pop, empty-pop, and close operations. It is reported outside the no-GIL versus
+  `.gil = true` table because Workers already isolate each `Context` onto its
+  own OS thread.
 - Measured speedup shows real parallelism: roughly 1.8x at 2 threads and 2.5x
   at 4 threads in the recorded checkpoint.
 

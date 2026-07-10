@@ -100,6 +100,10 @@ pub const ContentionStats = struct {
     task_pump_jobs: u64 = 0,
     task_pump_async_hold_jobs: u64 = 0,
     task_pump_condition_jobs: u64 = 0,
+    worker_channel_pushes: u64 = 0,
+    worker_channel_pops: u64 = 0,
+    worker_channel_empty_pops: u64 = 0,
+    worker_channel_closes: u64 = 0,
     thread_join_wait_ns: u64 = 0,
     lock_wait_ns: u64 = 0,
     condition_wait_ns: u64 = 0,
@@ -147,6 +151,10 @@ const ContentionCounters = struct {
     task_pump_jobs: std.atomic.Value(u64) = .init(0),
     task_pump_async_hold_jobs: std.atomic.Value(u64) = .init(0),
     task_pump_condition_jobs: std.atomic.Value(u64) = .init(0),
+    worker_channel_pushes: std.atomic.Value(u64) = .init(0),
+    worker_channel_pops: std.atomic.Value(u64) = .init(0),
+    worker_channel_empty_pops: std.atomic.Value(u64) = .init(0),
+    worker_channel_closes: std.atomic.Value(u64) = .init(0),
     thread_join_wait_ns: std.atomic.Value(u64) = .init(0),
     lock_wait_ns: std.atomic.Value(u64) = .init(0),
     condition_wait_ns: std.atomic.Value(u64) = .init(0),
@@ -174,6 +182,10 @@ pub fn resetContentionStats() void {
     contention_counters.task_pump_jobs.store(0, .release);
     contention_counters.task_pump_async_hold_jobs.store(0, .release);
     contention_counters.task_pump_condition_jobs.store(0, .release);
+    contention_counters.worker_channel_pushes.store(0, .release);
+    contention_counters.worker_channel_pops.store(0, .release);
+    contention_counters.worker_channel_empty_pops.store(0, .release);
+    contention_counters.worker_channel_closes.store(0, .release);
     contention_counters.thread_join_wait_ns.store(0, .release);
     contention_counters.lock_wait_ns.store(0, .release);
     contention_counters.condition_wait_ns.store(0, .release);
@@ -203,6 +215,10 @@ pub fn contentionStats() ContentionStats {
         .task_pump_jobs = contention_counters.task_pump_jobs.load(.acquire),
         .task_pump_async_hold_jobs = contention_counters.task_pump_async_hold_jobs.load(.acquire),
         .task_pump_condition_jobs = contention_counters.task_pump_condition_jobs.load(.acquire),
+        .worker_channel_pushes = contention_counters.worker_channel_pushes.load(.acquire),
+        .worker_channel_pops = contention_counters.worker_channel_pops.load(.acquire),
+        .worker_channel_empty_pops = contention_counters.worker_channel_empty_pops.load(.acquire),
+        .worker_channel_closes = contention_counters.worker_channel_closes.load(.acquire),
         .thread_join_wait_ns = contention_counters.thread_join_wait_ns.load(.acquire),
         .lock_wait_ns = contention_counters.lock_wait_ns.load(.acquire),
         .condition_wait_ns = contention_counters.condition_wait_ns.load(.acquire),
@@ -213,6 +229,22 @@ pub fn contentionStats() ContentionStats {
 inline fn bumpContention(comptime field: []const u8) void {
     if (!contention_stats_enabled.load(.monotonic)) return;
     _ = @field(contention_counters, field).fetchAdd(1, .monotonic);
+}
+
+pub inline fn recordWorkerChannelPush() void {
+    bumpContention("worker_channel_pushes");
+}
+
+pub inline fn recordWorkerChannelPop() void {
+    bumpContention("worker_channel_pops");
+}
+
+pub inline fn recordWorkerChannelEmptyPop() void {
+    bumpContention("worker_channel_empty_pops");
+}
+
+pub inline fn recordWorkerChannelClose() void {
+    bumpContention("worker_channel_closes");
 }
 
 inline fn startContentionWaitTimer() ?i96 {
@@ -258,6 +290,10 @@ test "jsthread contention stats reset and snapshot" {
     bumpContention("task_pump_jobs");
     bumpContention("task_pump_async_hold_jobs");
     bumpContention("task_pump_condition_jobs");
+    recordWorkerChannelPush();
+    recordWorkerChannelPop();
+    recordWorkerChannelEmptyPop();
+    recordWorkerChannelClose();
     finishContentionWaitTimer("thread_join_wait_ns", 0);
     finishContentionWaitTimer("lock_wait_ns", 0);
     finishContentionWaitTimer("condition_wait_ns", 0);
@@ -272,6 +308,10 @@ test "jsthread contention stats reset and snapshot" {
     try std.testing.expectEqual(@as(u64, 1), stats.task_pump_jobs);
     try std.testing.expectEqual(@as(u64, 1), stats.task_pump_async_hold_jobs);
     try std.testing.expectEqual(@as(u64, 1), stats.task_pump_condition_jobs);
+    try std.testing.expectEqual(@as(u64, 1), stats.worker_channel_pushes);
+    try std.testing.expectEqual(@as(u64, 1), stats.worker_channel_pops);
+    try std.testing.expectEqual(@as(u64, 1), stats.worker_channel_empty_pops);
+    try std.testing.expectEqual(@as(u64, 1), stats.worker_channel_closes);
     try std.testing.expect(stats.thread_join_wait_ns > 0);
     try std.testing.expect(stats.lock_wait_ns > 0);
     try std.testing.expect(stats.condition_wait_ns > 0);
@@ -287,6 +327,10 @@ test "jsthread contention stats reset and snapshot" {
     try std.testing.expectEqual(@as(u64, 0), contentionStats().task_pump_jobs);
     try std.testing.expectEqual(@as(u64, 0), contentionStats().task_pump_async_hold_jobs);
     try std.testing.expectEqual(@as(u64, 0), contentionStats().task_pump_condition_jobs);
+    try std.testing.expectEqual(@as(u64, 0), contentionStats().worker_channel_pushes);
+    try std.testing.expectEqual(@as(u64, 0), contentionStats().worker_channel_pops);
+    try std.testing.expectEqual(@as(u64, 0), contentionStats().worker_channel_empty_pops);
+    try std.testing.expectEqual(@as(u64, 0), contentionStats().worker_channel_closes);
     try std.testing.expectEqual(@as(u64, 0), contentionStats().waitNs());
     disableContentionStats();
 }
