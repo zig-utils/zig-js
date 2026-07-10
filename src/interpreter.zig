@@ -5305,7 +5305,11 @@ pub const Interpreter = struct {
         const len = toLen((try self.toPrimitive(try self.getProperty(v, "length"), .number)).toNumber());
         if (len > (1 << 24)) return self.throwError("RangeError", "argument list too large");
         // Dense fast path for a plain array with no accessors.
-        if (o.is_array and o.accessors.load(.monotonic) == null and len <= o.elements.items.len) return o.elements.items[0..len];
+        if (o.is_array) {
+            if (try o.packedDenseElementsSnapshot(self.arena)) |items| {
+                if (len <= items.len) return items[0..len];
+            }
+        }
         const buf = try self.arena.alloc(Value, len);
         for (buf, 0..) |*slot, i| slot.* = try self.getProperty(v, try std.fmt.allocPrint(self.arena, "{d}", .{i}));
         return buf;
@@ -15880,12 +15884,17 @@ fn reflectGetProtoFn(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
 
 /// CreateListFromArrayLike: a non-Array argumentsList is still read via its
 /// `length` + indexed properties (a throwing `length`/index getter propagates);
-/// a non-object is a TypeError. Real arrays take the dense fast path.
+/// a non-object is a TypeError. Packed real arrays take a locked snapshot fast
+/// path; holes/sparse tails/accessor indices fall back to observable `[[Get]]`.
 fn createListFromArrayLike(self: *Interpreter, v: Value) EvalError![]const Value {
     if (!builtins.isRealObject(v)) return self.throwError("TypeError", "Reflect: arguments list is not an object");
-    if (v.asObj().is_array) return v.asObj().elements.items;
     const len = toLen((try self.toPrimitive(try self.getProperty(v, "length"), .number)).toNumber());
     if (len > (1 << 22)) return self.throwError("RangeError", "arguments list is too large");
+    if (v.asObj().is_array) {
+        if (try v.asObj().packedDenseElementsSnapshot(self.arena)) |items| {
+            if (len <= items.len) return items[0..len];
+        }
+    }
     const buf = try self.arena.alloc(Value, len);
     for (buf, 0..) |*slot, i| slot.* = try self.getProperty(v, try std.fmt.allocPrint(self.arena, "{d}", .{i}));
     return buf;

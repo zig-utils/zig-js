@@ -6078,6 +6078,27 @@ test "Function.prototype: call / apply / bind" {
         \\function add(a, b) { return a + b; }
         \\add.apply(null, [3, 4])
     )).asNum());
+    try std.testing.expectEqual(@as(f64, 21), (try evalIn(
+        \\Array.prototype[1] = 17;
+        \\function add(a, b, c) { return a + b + c; }
+        \\var a = [1, , 3];
+        \\var r = add.apply(null, a);
+        \\delete Array.prototype[1];
+        \\r
+    )).asNum());
+    try std.testing.expect((try evalIn(
+        \\var a = new Array(2);
+        \\a[0] = 1;
+        \\function count() { return arguments.length; }
+        \\count.apply(null, a) === 2
+    )).asBool());
+    try std.testing.expect((try evalIn(
+        \\var calls = 0;
+        \\var a = [1];
+        \\Object.defineProperty(a, 0, { get: function() { calls += 1; return 9; } });
+        \\function first(x) { return x; }
+        \\first.apply(null, a) === 9 && calls === 1
+    )).asBool());
     // `this` binding via call.
     try std.testing.expectEqual(@as(f64, 42), (try evalIn(
         \\function getX() { return this.x; }
@@ -6812,10 +6833,22 @@ test "Reflect: prototype, toStringTag, array-like argumentsList" {
     try std.testing.expectEqual(@as(f64, 2), (try evalIn(
         \\Reflect.apply(function () { return arguments.length; }, null, { length: 2, 0: 'a', 1: 'b' })
     )).asNum());
+    try std.testing.expectEqual(@as(f64, 2), (try evalIn(
+        \\var a = new Array(2);
+        \\a[0] = "a";
+        \\Reflect.apply(function () { return arguments.length; }, null, a)
+    )).asNum());
     try std.testing.expectEqual(@as(f64, 5), (try evalIn(
         \\function P(a, b) { this.sum = a + b; }
         \\Reflect.construct(P, { length: 2, 0: 2, 1: 3 }).sum
     )).asNum());
+    try std.testing.expect((try evalIn(
+        \\var a = new Array(2);
+        \\a[0] = 2;
+        \\function P() { this.n = arguments.length; this.second = arguments[1]; }
+        \\var p = Reflect.construct(P, a);
+        \\p.n === 2 && p.second === undefined
+    )).asBool());
     // apply on a non-callable target throws; a throwing length getter propagates.
     try std.testing.expectError(error.Throw, evalIn("Reflect.apply({}, null, [])"));
     try std.testing.expectError(error.Throw, evalIn("Reflect.apply(function(){}, null, { get length() { throw new TypeError('x'); } })"));
