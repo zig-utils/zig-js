@@ -199,7 +199,9 @@ Issue #1 remains the umbrella status page.
   settlement, async condition regrant delivery, unobserved async-hold grant
   delivery, promise-observed callback settlement, no-fn release-function
   delivery, Worker/agent queues, shared-buffer lifetime churn, collection
-  helpers, and GC allocation. Its `joins` columns split `Thread.join` parks
+  helpers, and GC allocation. Its `lcnt` and `aq` columns split direct contended
+  `Lock.hold` attempts from queued `Lock.asyncHold` grants inside the aggregate
+  `events` total. Its `joins` columns split `Thread.join` parks
   from aggregate park pressure, its `lock`/`cond`/`prop`
   columns split the remaining sync park pressure by contended `Lock.hold`,
   `Condition.wait`, and property `Atomics.wait`, its

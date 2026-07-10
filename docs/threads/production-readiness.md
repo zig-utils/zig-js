@@ -261,11 +261,13 @@ Known performance/maturity work:
   release-function delivery, and thread lifecycle churn. Each row enables and
   includes internal contention counters:
   `events` count logical contention (`Lock`/`Condition`/property wait and
-  queued `asyncHold` grants), `parks` count timed wait/pump iterations
-  including `Thread.join`, `joins` split the `Thread.join` subset out of
-  aggregate parks for lifecycle attribution, `lock`/`cond`/`prop` split the
-  remaining sync park pressure by contended `Lock.hold`, `Condition.wait`, and
-  property `Atomics.wait`, `waitus`/`jus`/`lus`/`cus`/`pus` split total native
+  queued `asyncHold` grants), `lcnt` and `aq` split direct contended
+  `Lock.hold` attempts from queued `Lock.asyncHold` grants inside that total,
+  `parks` count timed wait/pump iterations including `Thread.join`, `joins`
+  split the `Thread.join` subset out of aggregate parks for lifecycle
+  attribution, `lock`/`cond`/`prop` split the remaining sync park pressure by
+  contended `Lock.hold`, `Condition.wait`, and property `Atomics.wait`,
+  `waitus`/`jus`/`lus`/`cus`/`pus` split total native
   wait microseconds plus join/lock/condition/property wait microseconds,
   `async`/`done` split
   `Condition.asyncWait` plus property `waitAsync` registration from completed

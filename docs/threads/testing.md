@@ -459,10 +459,11 @@ observed `Lock.asyncHold` callback settlement, no-fn `Lock.asyncHold`
 release-function delivery, and thread lifecycle churn.
 Its opt-in counters let
 `events` count logical contention in `Lock`/`Condition`/property waits and
-queued `asyncHold` grants, and `parks` count timed wait/pump iterations
-including `Thread.join`. The `joins` columns split the `Thread.join` subset out
-of aggregate parks so lifecycle churn can be attributed separately from lock,
-condition, and property wait pressure.
+queued `asyncHold` grants. The `lcnt` and `aq` columns split direct contended
+`Lock.hold` attempts from queued `Lock.asyncHold` grants inside that total, and
+`parks` count timed wait/pump iterations including `Thread.join`. The `joins`
+columns split the `Thread.join` subset out of aggregate parks so lifecycle churn
+can be attributed separately from lock, condition, and property wait pressure.
 The `lock`/`cond`/`prop` columns split the remaining sync park pressure by
 contended `Lock.hold`, `Condition.wait`, and property `Atomics.wait`, so
 source-specific waiter regressions do not hide inside aggregate parks.

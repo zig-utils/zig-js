@@ -497,13 +497,15 @@ fn timeScenario(gpa: std.mem.Allocator, io: std.Io, scenario: Scenario, workers:
 fn printScenario(gpa: std.mem.Allocator, io: std.Io, scenario: Scenario, workers: []const usize) !void {
     std.debug.print("\n{s}\n", .{scenario.name});
     std.debug.print("{s:>8} {s:>14} {s:>14} {s:>12} {s:>12}" ++
-        " {s:>10} {s:>10} {s:>10} {s:>9} {s:>9} {s:>9} {s:>10} {s:>9} {s:>9} {s:>9} {s:>9} {s:>10} {s:>10} {s:>10} {s:>10} {s:>10} {s:>10}", .{
+        " {s:>10} {s:>9} {s:>9} {s:>10} {s:>10} {s:>9} {s:>9} {s:>9} {s:>10} {s:>9} {s:>9} {s:>9} {s:>9} {s:>10} {s:>10} {s:>10} {s:>10} {s:>10} {s:>10}", .{
         "threads",
         "no-gil ns",
         "gil ns",
         "no-gil x1",
         "vs gil",
         "ng events",
+        "ng lcnt",
+        "ng aq",
         "ng parks",
         "ng joins",
         "ng lock",
@@ -521,8 +523,10 @@ fn printScenario(gpa: std.mem.Allocator, io: std.Io, scenario: Scenario, workers
         "ng hold",
         "ng cjob",
     });
-    std.debug.print(" {s:>10} {s:>10} {s:>10} {s:>9} {s:>9} {s:>9} {s:>10} {s:>9} {s:>9} {s:>9} {s:>9} {s:>10} {s:>10} {s:>10} {s:>10} {s:>10} {s:>10}\n", .{
+    std.debug.print(" {s:>10} {s:>9} {s:>9} {s:>10} {s:>10} {s:>9} {s:>9} {s:>9} {s:>10} {s:>9} {s:>9} {s:>9} {s:>9} {s:>10} {s:>10} {s:>10} {s:>10} {s:>10} {s:>10}\n", .{
         "gil events",
+        "gil lcnt",
+        "gil aq",
         "gil parks",
         "gil joins",
         "gil lock",
@@ -556,13 +560,15 @@ fn printScenario(gpa: std.mem.Allocator, io: std.Io, scenario: Scenario, workers
             @as(f64, @floatFromInt(@max(parallel_ns, 1)));
 
         std.debug.print("{d:>8} {d:>14} {d:>14} {d:>11.2}x {d:>11.2}x" ++
-            " {d:>10} {d:>10} {d:>10} {d:>9} {d:>9} {d:>9} {d:>10} {d:>9} {d:>9} {d:>9} {d:>9} {d:>10} {d:>10} {d:>10} {d:>10} {d:>10} {d:>10}", .{
+            " {d:>10} {d:>9} {d:>9} {d:>10} {d:>10} {d:>9} {d:>9} {d:>9} {d:>10} {d:>9} {d:>9} {d:>9} {d:>9} {d:>10} {d:>10} {d:>10} {d:>10} {d:>10} {d:>10}", .{
             n,
             parallel_ns,
             gil_ns,
             scaling,
             vs_gil,
             parallel.stats.events(),
+            parallel.stats.lock_contentions,
+            parallel.stats.async_hold_queued,
             parallel.stats.parks(),
             parallel.stats.thread_join_parks,
             parallel.stats.lock_wait_parks,
@@ -580,8 +586,10 @@ fn printScenario(gpa: std.mem.Allocator, io: std.Io, scenario: Scenario, workers
             parallel.stats.task_pump_async_hold_jobs,
             parallel.stats.task_pump_condition_jobs,
         });
-        std.debug.print(" {d:>10} {d:>10} {d:>10} {d:>9} {d:>9} {d:>9} {d:>10} {d:>9} {d:>9} {d:>9} {d:>9} {d:>10} {d:>10} {d:>10} {d:>10} {d:>10} {d:>10}\n", .{
+        std.debug.print(" {d:>10} {d:>9} {d:>9} {d:>10} {d:>10} {d:>9} {d:>9} {d:>9} {d:>10} {d:>9} {d:>9} {d:>9} {d:>9} {d:>10} {d:>10} {d:>10} {d:>10} {d:>10} {d:>10}\n", .{
             gil.stats.events(),
+            gil.stats.lock_contentions,
+            gil.stats.async_hold_queued,
             gil.stats.parks(),
             gil.stats.thread_join_parks,
             gil.stats.lock_wait_parks,
@@ -1008,6 +1016,7 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("zig-js shared-realm Thread contention profile\n", .{});
     std.debug.print("cores: {d}; no-GIL is Context.createWith(.{{ .enable_threads = true }}), serialized is .gil = true\n", .{cores});
     std.debug.print("events = logical contention (Lock/Condition/property wait/asyncHold); parks = timed wait/pump iterations including Thread.join\n", .{});
+    std.debug.print("lcnt/aq = direct contended Lock.hold attempts / queued Lock.asyncHold grants, split out from events\n", .{});
     std.debug.print("joins = Thread.join timed wait/pump iterations, separated from other park sources for lifecycle attribution\n", .{});
     std.debug.print("lock/cond/prop = park iterations attributed to contended Lock.hold, Condition.wait, and property Atomics.wait\n", .{});
     std.debug.print("waitus/jus/lus/cus/pus = total native wait microseconds, then join/lock/condition/property wait microseconds\n", .{});
