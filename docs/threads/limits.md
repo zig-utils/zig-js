@@ -496,7 +496,8 @@ Issue #1 remains the umbrella status page.
   script/module Worker/Condition.asyncWait teardown, and script/module Worker/ThreadLocal/asyncHold
   teardown while shared-realm cleanup roots are swept, and
   verifies exact `FinalizationRegistry` cleanup count/sum delivery afterward. The lifecycle
-  profile now adds deterministic termination storms,
+  profile now adds concurrent multi-context bootstrap/execute/abrupt-teardown/
+  destroy loops from independent host threads, deterministic termination storms,
   script Worker/thread retained-`SharedArrayBuffer` overlap, simple-import,
   diamond-shaped, and fanout/rejoin module Worker/thread overlap with exact
   Atomics counter oracles, script/module Worker/thread/finalization scheduling

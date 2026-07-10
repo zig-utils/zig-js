@@ -17432,6 +17432,138 @@ fn runResizableDataViewResizeInterleaving(gpa: std.mem.Allocator, seed: u64) !bo
     return true;
 }
 
+/// Repeatedly create, execute, abruptly unwind, and destroy independent
+/// no-GIL realms from several host OS threads at once. This catches process-
+/// wide active-heap/string-arena leakage, cross-context synchronization state,
+/// and teardown records that a single long-lived Context cannot expose.
+fn runMultiContextCreateDestroyInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
+    if (builtin.single_threaded) return true;
+
+    var prng = std.Random.DefaultPrng.init(seed);
+    const random = prng.random();
+    const host_count = 3 + random.uintLessThan(usize, 2); // 3..4 simultaneous realms
+    const rounds = 3 + random.uintLessThan(usize, 3); // 3..5 lifecycles per host
+
+    const Runner = struct {
+        gpa: std.mem.Allocator,
+        seed: u64,
+        host_index: usize,
+        rounds: usize,
+        ready: *std.atomic.Value(usize),
+        go: *std.atomic.Value(bool),
+        failures: usize = 0,
+
+        fn run(self: *@This()) void {
+            _ = self.ready.fetchAdd(1, .release);
+            while (!self.go.load(.acquire)) std.atomic.spinLoopHint();
+
+            var round: usize = 0;
+            while (round < self.rounds) : (round += 1) {
+                const ctx = js.Context.createWith(self.gpa, .{ .enable_threads = true }) catch {
+                    self.failures += 1;
+                    continue;
+                };
+                defer ctx.destroy();
+
+                const marker_code = 1000 + self.host_index * 100 + round;
+                if ((round & 1) == 0) {
+                    const src = std.fmt.allocPrint(
+                        self.gpa,
+                        \\(() => {{
+                        \\  if ($vm.useThreadGIL() !== false)
+                        \\    throw new Error('multi-context realm unexpectedly serialized');
+                        \\  const state = {{ sum: 0 }};
+                        \\  const marker = {{ code: {d}, seed: {d} }};
+                        \\  const workers = [];
+                        \\  for (let i = 1; i <= 3; i++) workers.push(new Thread((n) => {{
+                        \\    for (let j = 0; j < n; j++) Atomics.add(state, 'sum', 1);
+                        \\    return n;
+                        \\  }}, i * 17));
+                        \\  const throwing = new Thread(() => {{ throw marker; }});
+                        \\  let joined = 0;
+                        \\  for (const worker of workers) joined += worker.join();
+                        \\  let identity = 0;
+                        \\  try {{ throwing.join(); }} catch (e) {{
+                        \\    if (e === marker) identity = e.code;
+                        \\  }}
+                        \\  return Atomics.load(state, 'sum') * 100000 + joined * 1000 + identity;
+                        \\}})()
+                        \\
+                    ,
+                        .{ marker_code, self.seed },
+                    ) catch {
+                        self.failures += 1;
+                        continue;
+                    };
+                    defer self.gpa.free(src);
+                    const expected: f64 = @floatFromInt(102 * 100000 + 102 * 1000 + marker_code);
+                    const value = ctx.evaluate(src) catch {
+                        self.failures += 1;
+                        continue;
+                    };
+                    if (!value.isNumber() or value.asNum() != expected) self.failures += 1;
+                } else {
+                    // The main script fails only after its child has parked.
+                    // Context evaluation and destruction must terminate and
+                    // reclaim the unjoined child before this host thread can
+                    // safely create its next realm.
+                    const src =
+                        \\(() => {
+                        \\  const gate = { ready: 0, park: 0 };
+                        \\  new Thread(() => {
+                        \\    Atomics.store(gate, 'ready', 1);
+                        \\    Atomics.notify(gate, 'ready');
+                        \\    Atomics.wait(gate, 'park', 0, 60000);
+                        \\  });
+                        \\  while (Atomics.load(gate, 'ready') === 0) {}
+                        \\  throw new Error('expected multi-context teardown');
+                        \\})()
+                        \\
+                    ;
+                    if (ctx.evaluate(src)) |_| {
+                        self.failures += 1;
+                    } else |_| {
+                        if (ctx.exception == null) self.failures += 1;
+                    }
+                }
+            }
+        }
+    };
+
+    var ready = std.atomic.Value(usize).init(0);
+    var go = std.atomic.Value(bool).init(false);
+    var runners: [4]Runner = undefined;
+    var threads: [4]std.Thread = undefined;
+    var spawned: usize = 0;
+    for (runners[0..host_count], 0..) |*runner, host_index| {
+        runner.* = .{
+            .gpa = gpa,
+            .seed = seed,
+            .host_index = host_index,
+            .rounds = rounds,
+            .ready = &ready,
+            .go = &go,
+        };
+        threads[host_index] = std.Thread.spawn(.{}, Runner.run, .{runner}) catch |err| {
+            go.store(true, .release);
+            for (threads[0..spawned]) |thread| thread.join();
+            return err;
+        };
+        spawned += 1;
+    }
+    while (ready.load(.acquire) != host_count) std.atomic.spinLoopHint();
+    go.store(true, .release);
+    for (threads[0..host_count]) |thread| thread.join();
+
+    var failures: usize = 0;
+    for (runners[0..host_count]) |runner| failures += runner.failures;
+    if (failures != 0) {
+        std.debug.print("seed {d}: multi-context create/destroy had {d} failures across {d} lifecycles\n", .{ seed, failures, host_count * rounds });
+        return false;
+    }
+    return true;
+}
+
 pub fn main(init: std.process.Init) !void {
     const gpa = std.heap.page_allocator; // thread-safe; contexts manage their own GC
     var iters: usize = 200;
@@ -17479,6 +17611,21 @@ pub fn main(init: std.process.Init) !void {
         }
         std.debug.print("threadfuzz dataviewresize: {d} programs from seed {d}, {d} failures\n", .{ iters, base_seed, dvfail });
         if (dvfail != 0) std.process.exit(1);
+        return;
+    };
+    // `threadfuzz multictx <iters> <seed>`: focused concurrent multi-context
+    // bootstrap, abrupt teardown, and repeated create/destroy reproduction.
+    if (first) |a| if (std.mem.eql(u8, a, "multictx")) {
+        if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch 1;
+        if (args.next()) |b| base_seed = std.fmt.parseInt(u64, b, 10) catch 1;
+        var mcfail: usize = 0;
+        var mci: usize = 0;
+        while (mci < iters) : (mci += 1) {
+            const case_seed = base_seed +% mci;
+            if (!(try runMultiContextCreateDestroyInterleaving(gpa, case_seed))) mcfail += 1;
+        }
+        std.debug.print("threadfuzz multictx: {d} programs from seed {d}, {d} failures\n", .{ iters, base_seed, mcfail });
+        if (mcfail != 0) std.process.exit(1);
         return;
     };
     // `threadfuzz tlsfinal <iters> <seed>`: focused lifecycle repro for
@@ -19011,8 +19158,9 @@ pub fn main(init: std.process.Init) !void {
         if (wfail != 0) std.process.exit(1);
         return;
     };
-    // `threadfuzz lifecycle <iters> <seed>`: deterministic resizable
-    // ArrayBuffer/DataView constructor races, termination storms,
+    // `threadfuzz lifecycle <iters> <seed>`: deterministic concurrent
+    // multi-context create/destroy, resizable ArrayBuffer/DataView constructor
+    // races, termination storms,
     // Worker/thread SAB overlap, simple, diamond, and fanout/rejoin
     // module-worker/thread overlap, exact Worker close/terminate/postMessage
     // FIFO drain/drop ordering for script and module Workers, worker handler
@@ -19139,6 +19287,7 @@ pub fn main(init: std.process.Init) !void {
         var li: usize = 0;
         while (li < iters) : (li += 1) {
             const seed = base_seed +% li;
+            if (!(try runMultiContextCreateDestroyInterleaving(gpa, seed))) lfail += 1;
             if (!(try runResizableDataViewResizeInterleaving(gpa, seed))) lfail += 1;
             if (!(try runTerminationStorm(gpa, seed))) lfail += 1;
             if (!(try runWorkerThreadOverlap(gpa, seed))) lfail += 1;
@@ -19193,7 +19342,7 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runThreadLocalTerminationCleanupInterleaving(gpa, seed))) lfail += 1;
             if (!(try runNestedThreadAsyncJoinCleanupInterleaving(gpa, seed))) lfail += 1;
         }
-        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 53, base_seed, lfail });
+        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 54, base_seed, lfail });
         if (lfail != 0) std.process.exit(1);
         return;
     };
