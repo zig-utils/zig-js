@@ -2714,7 +2714,7 @@ const Stringifier = struct {
         const len: usize = if (holder.isObject() and (holder.asObj().proxy_handler != null or holder.asObj().proxy_revoked))
             interpreter.toLen(try st.self.toNumberV(try st.self.getProperty(holder, "length")))
         else
-            @max(shape.elements.items.len, shape.array_len);
+            shape.arrayLength();
         if (len == 0) {
             try buf.appendSlice(a, "[]");
             return;
