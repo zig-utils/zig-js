@@ -557,7 +557,9 @@ Issue #1 remains the umbrella status page.
   `Lock.asyncHold`, no-fn release functions, typed-array `waitAsync`,
   `Thread.asyncJoin`, and exact `FinalizationRegistry` cleanup,
   property `Atomics.waitAsync` late settlement where peer timeout polling races
-  an owning Thread closing its stack-local microtask queue,
+  an owning Thread closing its stack-local microtask queue, a mixed
+  property/typed-array `waitAsync` race where notify and timeout tickets settle
+  before top-level failure abandons sibling property and typed-array tickets,
   post-completion `Thread.asyncJoin()` fulfillment and rejection promises plus
   sibling cleanup roots staying live after blocking joins while property
   waiters stay parked through a finishing sweep,

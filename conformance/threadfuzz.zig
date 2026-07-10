@@ -5133,6 +5133,295 @@ fn runPropertyWaitAsyncLateSettlementLifecycleInterleaving(gpa: std.mem.Allocato
     return true;
 }
 
+fn runMixedWaiterRaceLifecycleInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
+    var prng = std.Random.DefaultPrng.init(seed ^ 0x7761_6974_7261_6365);
+    const r = prng.random();
+    const n_prop_notify = 2 + r.uintLessThan(usize, 3);
+    const n_prop_timeout = 2 + r.uintLessThan(usize, 3);
+    const n_prop_abandon = 2 + r.uintLessThan(usize, 3);
+    const n_typed_notify = 2 + r.uintLessThan(usize, 3);
+    const n_typed_timeout = 2 + r.uintLessThan(usize, 3);
+    const n_typed_abandon = 2 + r.uintLessThan(usize, 3);
+    const total_ready = n_prop_notify + n_prop_timeout + n_prop_abandon +
+        n_typed_notify + n_typed_timeout + n_typed_abandon;
+    const expected_normal_count = n_prop_notify + n_prop_timeout + n_typed_notify + n_typed_timeout;
+    const expected_abandon_count = n_prop_abandon + n_typed_abandon;
+    const timeout_ms = 8 + r.uintLessThan(usize, 15);
+    const seed_marker = seed % 10_000;
+    const prop_notify_base = 620_000 + seed_marker;
+    const prop_timeout_base = 630_000 + seed_marker;
+    const typed_notify_base = 650_000 + seed_marker;
+    const typed_timeout_base = 660_000 + seed_marker;
+
+    var expected_normal_score: usize = 0;
+    var i: usize = 0;
+    while (i < n_prop_notify) : (i += 1) expected_normal_score += prop_notify_base + i;
+    i = 0;
+    while (i < n_prop_timeout) : (i += 1) expected_normal_score += prop_timeout_base + i;
+    i = 0;
+    while (i < n_typed_notify) : (i += 1) expected_normal_score += typed_notify_base + i;
+    i = 0;
+    while (i < n_typed_timeout) : (i += 1) expected_normal_score += typed_timeout_base + i;
+    const ctx = js.Context.createWith(gpa, .{ .enable_threads = true, .enable_gc = true }) catch {
+        std.debug.print("seed {d}: mixed waiter race context creation failed\n", .{seed});
+        return false;
+    };
+    defer ctx.destroy();
+
+    const typed_slots = n_typed_notify + n_typed_timeout + n_typed_abandon;
+    const src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  globalThis.__waitRaceNormalScore = 0;
+        \\  globalThis.__waitRaceNormalCount = 0;
+        \\  globalThis.__waitRaceExpectedThrow = 0;
+        \\  const gate = {{ ready: 0, propAbandonSettled: 0, typedAbandonSettled: 0 }};
+        \\  const sab = new SharedArrayBuffer({d} * 4);
+        \\  const view = new Int32Array(sab);
+        \\  globalThis.__waitRaceGate = gate;
+        \\  globalThis.__waitRaceView = view;
+        \\  globalThis.__waitRaceAbandonedThreads = [];
+        \\  globalThis.__waitRacePropAbandonKeys = [];
+        \\  globalThis.__waitRaceTypedAbandonSlots = [];
+        \\  function ready() {{
+        \\    Atomics.add(gate, 'ready', 1);
+        \\    Atomics.notify(gate, 'ready');
+        \\  }}
+        \\  function observeNormal(t) {{
+        \\    t.asyncJoin().then(
+        \\      (v) => {{ globalThis.__waitRaceNormalScore += v; globalThis.__waitRaceNormalCount++; }},
+        \\      () => {{ globalThis.__waitRaceNormalScore = -1000000; }});
+        \\  }}
+        \\  function observeAbandon(t) {{
+        \\    globalThis.__waitRaceAbandonedThreads.push(t);
+        \\  }}
+        \\  for (let i = 0; i < {d}; i++) {{
+        \\    const key = 'pn' + i;
+        \\    gate[key] = 0;
+        \\    const marker = {d} + i;
+        \\    observeNormal(new Thread((gate, key, marker) => {{
+        \\      const waiter = Atomics.waitAsync(gate, key, 0, 5000);
+        \\      if (waiter.async !== true || !(waiter.value instanceof Promise))
+        \\        throw new Error('bad property notify waitAsync shape');
+        \\      ready();
+        \\      return waiter.value.then((v) => {{
+        \\        if (v !== 'ok') throw new Error('property notify waitAsync got ' + v);
+        \\        return marker;
+        \\      }});
+        \\    }}, gate, key, marker));
+        \\  }}
+        \\  for (let i = 0; i < {d}; i++) {{
+        \\    const key = 'pt' + i;
+        \\    gate[key] = 0;
+        \\    const marker = {d} + i;
+        \\    observeNormal(new Thread((gate, key, marker, timeout) => {{
+        \\      const waiter = Atomics.waitAsync(gate, key, 0, timeout);
+        \\      if (waiter.async !== true || !(waiter.value instanceof Promise))
+        \\        throw new Error('bad property timeout waitAsync shape');
+        \\      ready();
+        \\      return waiter.value.then((v) => {{
+        \\        if (v !== 'timed-out') throw new Error('property timeout waitAsync got ' + v);
+        \\        return marker;
+        \\      }});
+        \\    }}, gate, key, marker, {d}));
+        \\  }}
+        \\  for (let i = 0; i < {d}; i++) {{
+        \\    const key = 'pa' + i;
+        \\    gate[key] = 0;
+        \\    globalThis.__waitRacePropAbandonKeys.push(key);
+        \\    observeAbandon(new Thread((gate, key) => {{
+        \\      const waiter = Atomics.waitAsync(gate, key, 0);
+        \\      if (waiter.async !== true || !(waiter.value instanceof Promise))
+        \\        throw new Error('bad property abandon waitAsync shape');
+        \\      waiter.value.then(
+        \\        () => {{ Atomics.add(gate, 'propAbandonSettled', 1); }},
+        \\        () => {{ Atomics.add(gate, 'propAbandonSettled', 1); }});
+        \\      ready();
+        \\      for (;;) {{}}
+        \\    }}, gate, key));
+        \\  }}
+        \\  for (let i = 0; i < {d}; i++) {{
+        \\    const slot = i;
+        \\    const marker = {d} + i;
+        \\    observeNormal(new Thread((sab, slot, marker) => {{
+        \\      const view = new Int32Array(sab);
+        \\      const waiter = Atomics.waitAsync(view, slot, 0, 5000);
+        \\      if (waiter.async !== true || !(waiter.value instanceof Promise))
+        \\        throw new Error('bad typed notify waitAsync shape');
+        \\      ready();
+        \\      return waiter.value.then((v) => {{
+        \\        if (v !== 'ok') throw new Error('typed notify waitAsync got ' + v);
+        \\        return marker;
+        \\      }});
+        \\    }}, sab, slot, marker));
+        \\  }}
+        \\  for (let i = 0; i < {d}; i++) {{
+        \\    const slot = {d} + i;
+        \\    const marker = {d} + i;
+        \\    observeNormal(new Thread((sab, slot, marker, timeout) => {{
+        \\      const view = new Int32Array(sab);
+        \\      const waiter = Atomics.waitAsync(view, slot, 0, timeout);
+        \\      if (waiter.async !== true || !(waiter.value instanceof Promise))
+        \\        throw new Error('bad typed timeout waitAsync shape');
+        \\      ready();
+        \\      return waiter.value.then((v) => {{
+        \\        if (v !== 'timed-out') throw new Error('typed timeout waitAsync got ' + v);
+        \\        return marker;
+        \\      }});
+        \\    }}, sab, slot, marker, {d}));
+        \\  }}
+        \\  for (let i = 0; i < {d}; i++) {{
+        \\    const slot = {d} + {d} + i;
+        \\    globalThis.__waitRaceTypedAbandonSlots.push(slot);
+        \\    observeAbandon(new Thread((sab, slot, gate) => {{
+        \\      const view = new Int32Array(sab);
+        \\      const waiter = Atomics.waitAsync(view, slot, 0);
+        \\      if (waiter.async !== true || !(waiter.value instanceof Promise))
+        \\        throw new Error('bad typed abandon waitAsync shape');
+        \\      waiter.value.then(
+        \\        () => {{ Atomics.add(gate, 'typedAbandonSettled', 1); }},
+        \\        () => {{ Atomics.add(gate, 'typedAbandonSettled', 1); }});
+        \\      ready();
+        \\      for (;;) {{}}
+        \\    }}, sab, slot, gate));
+        \\  }}
+        \\  while (Atomics.load(gate, 'ready') < {d})
+        \\    Atomics.wait(gate, 'ready', Atomics.load(gate, 'ready'), 1);
+        \\  for (let i = 0; i < {d}; i++) {{
+        \\    const key = 'pn' + i;
+        \\    Atomics.store(gate, key, 1);
+        \\    if (Atomics.notify(gate, key, 1) !== 1)
+        \\      throw new Error('property notify woke wrong count ' + key);
+        \\  }}
+        \\  for (let i = 0; i < {d}; i++) {{
+        \\    Atomics.store(view, i, 1);
+        \\    if (Atomics.notify(view, i, 1) !== 1)
+        \\      throw new Error('typed notify woke wrong count ' + i);
+        \\  }}
+        \\  for (let spin = 0; globalThis.__waitRaceNormalCount < {d} && spin < 4000; spin++) {{
+        \\    $drainRunLoop();
+        \\    drainMicrotasks();
+        \\    Atomics.wait(gate, 'ready', {d}, 1);
+        \\  }}
+        \\  if (globalThis.__waitRaceNormalScore !== {d})
+        \\    throw new Error('bad mixed waiter normal score ' + globalThis.__waitRaceNormalScore + '/{d}');
+        \\  if (globalThis.__waitRaceNormalCount !== {d})
+        \\    throw new Error('bad mixed waiter normal count ' + globalThis.__waitRaceNormalCount + '/{d}');
+        \\  if (Atomics.load(gate, 'propAbandonSettled') !== 0)
+        \\    throw new Error('property abandon waiter settled before teardown');
+        \\  if (Atomics.load(gate, 'typedAbandonSettled') !== 0)
+        \\    throw new Error('typed abandon waiter settled before teardown');
+        \\  globalThis.__waitRaceExpectedThrow = 1;
+        \\  throw new Error('threadfuzz mixed waiter race {d}');
+        \\}})();
+        \\
+    ,
+        .{
+            typed_slots,
+            n_prop_notify,
+            prop_notify_base,
+            n_prop_timeout,
+            prop_timeout_base,
+            timeout_ms,
+            n_prop_abandon,
+            n_typed_notify,
+            typed_notify_base,
+            n_typed_timeout,
+            n_typed_notify,
+            typed_timeout_base,
+            timeout_ms,
+            n_typed_abandon,
+            n_typed_notify,
+            n_typed_timeout,
+            total_ready,
+            n_prop_notify,
+            n_typed_notify,
+            expected_normal_count,
+            total_ready,
+            expected_normal_score,
+            expected_normal_score,
+            expected_normal_count,
+            expected_normal_count,
+            seed,
+        },
+    );
+    defer gpa.free(src);
+
+    if (ctx.evaluate(src)) |_| {
+        std.debug.print("seed {d}: mixed waiter race script returned normally\n", .{seed});
+        return false;
+    } else |err| {
+        if (err != error.Throw) {
+            std.debug.print("seed {d}: mixed waiter race failed with {s}\n", .{ seed, @errorName(err) });
+            return false;
+        }
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        const expected_throw = ctx.evaluate("globalThis.__waitRaceExpectedThrow") catch js.Value.undef();
+        if (!expected_throw.isNumber() or expected_throw.asNum() != 1) {
+            std.debug.print("seed {d}: mixed waiter race threw before teardown point: {s}\n", .{ seed, msg_txt });
+            return false;
+        }
+    }
+
+    const check_src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  if (globalThis.__waitRaceExpectedThrow !== 1)
+        \\    throw new Error('mixed waiter race threw before expected teardown point');
+        \\  let joinThrew = 0;
+        \\  for (const t of globalThis.__waitRaceAbandonedThreads) {{
+        \\    try {{ t.join(); }} catch (e) {{ if (e) joinThrew++; }}
+        \\  }}
+        \\  if (joinThrew !== {d})
+        \\    throw new Error('mixed waiter abandoned joins threw ' + joinThrew + '/{d}');
+        \\  if (globalThis.__waitRaceNormalScore !== {d})
+        \\    throw new Error('bad mixed waiter post-teardown normal score ' + globalThis.__waitRaceNormalScore + '/{d}');
+        \\  if (globalThis.__waitRaceNormalCount !== {d})
+        \\    throw new Error('bad mixed waiter post-teardown normal count ' + globalThis.__waitRaceNormalCount + '/{d}');
+        \\  let propLeaked = 0;
+        \\  for (const key of globalThis.__waitRacePropAbandonKeys)
+        \\    propLeaked += Atomics.notify(globalThis.__waitRaceGate, key);
+        \\  let typedLeaked = 0;
+        \\  for (const slot of globalThis.__waitRaceTypedAbandonSlots)
+        \\    typedLeaked += Atomics.notify(globalThis.__waitRaceView, slot);
+        \\  if (propLeaked !== 0 || typedLeaked !== 0)
+        \\    throw new Error('mixed waiter leaked abandoned tickets prop=' + propLeaked + ' typed=' + typedLeaked);
+        \\  if (Atomics.load(globalThis.__waitRaceGate, 'propAbandonSettled') !== 0)
+        \\    throw new Error('property abandon waiter settled after teardown');
+        \\  if (Atomics.load(globalThis.__waitRaceGate, 'typedAbandonSettled') !== 0)
+        \\    throw new Error('typed abandon waiter settled after teardown');
+        \\  return joinThrew;
+        \\}})();
+        \\
+    ,
+        .{
+            expected_abandon_count,
+            expected_abandon_count,
+            expected_normal_score,
+            expected_normal_score,
+            expected_normal_count,
+            expected_normal_count,
+        },
+    );
+    defer gpa.free(check_src);
+    const checked = ctx.evaluate(check_src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: mixed waiter race check threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!checked.isNumber() or checked.asNum() != @as(f64, @floatFromInt(expected_abandon_count))) {
+        std.debug.print("seed {d}: mixed waiter race checked got {d}, expected {d}\n", .{ seed, if (checked.isNumber()) checked.asNum() else -1, expected_abandon_count });
+        return false;
+    }
+    return true;
+}
+
 fn runPromisePublicationLifecycleInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
     const seed_marker = seed % 10_000;
     const fulfilled_value_marker = 100_000 + seed_marker;
@@ -17855,6 +18144,22 @@ pub fn main(init: std.process.Init) !void {
         if (pwafail != 0) std.process.exit(1);
         return;
     };
+    // `threadfuzz waitrace <iters> <seed>`: focused lifecycle repro for mixed
+    // property and typed-array waitAsync notify, timeout, and teardown-abandon
+    // races in one deterministic realm.
+    if (first) |a| if (std.mem.eql(u8, a, "waitrace")) {
+        if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch 1;
+        if (args.next()) |b| base_seed = std.fmt.parseInt(u64, b, 10) catch 1;
+        var wrfail: usize = 0;
+        var wri: usize = 0;
+        while (wri < iters) : (wri += 1) {
+            const seed = base_seed +% wri;
+            if (!(try runMixedWaiterRaceLifecycleInterleaving(gpa, seed))) wrfail += 1;
+        }
+        std.debug.print("threadfuzz waitrace: {d} programs from seed {d}, {d} failures\n", .{ iters, base_seed, wrfail });
+        if (wrfail != 0) std.process.exit(1);
+        return;
+    };
     // `threadfuzz promisepub <iters> <seed>`: focused lifecycle repro for
     // child-returned fulfilled/rejected promises, user thenables, and thrown
     // objects published through join/asyncJoin.
@@ -19308,7 +19613,8 @@ pub fn main(init: std.process.Init) !void {
     // retained-SAB cleanup oracle,
     // Thread exception identity, returned waitAsync promise assimilation, and
     // property waitAsync late settlement across join/asyncJoin while waiters are
-    // parked, cross-thread
+    // parked, mixed property/typed-array waitAsync notify, timeout, and teardown
+    // abandon races, cross-thread
     // FinalizationRegistry cleanup, FinalizationRegistry cleanup interleaved
     // with join/asyncJoin and unregister tokens, cleanup
     // delivery after parked property/condition waiters resume, typed-array
@@ -19442,6 +19748,7 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runThreadExceptionWaiterInterleaving(gpa, seed))) lfail += 1;
             if (!(try runReturnedWaitAsyncLifecycleInterleaving(gpa, seed))) lfail += 1;
             if (!(try runPropertyWaitAsyncLateSettlementLifecycleInterleaving(gpa, seed))) lfail += 1;
+            if (!(try runMixedWaiterRaceLifecycleInterleaving(gpa, seed))) lfail += 1;
             if (!(try runPromisePublicationLifecycleInterleaving(gpa, seed))) lfail += 1;
             if (!(try runFinalizationCleanupInterleaving(gpa, seed))) lfail += 1;
             if (!(try runFinalizationAsyncJoinCleanupInterleaving(gpa, seed))) lfail += 1;
@@ -19476,7 +19783,7 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runThreadLocalTerminationCleanupInterleaving(gpa, seed))) lfail += 1;
             if (!(try runNestedThreadAsyncJoinCleanupInterleaving(gpa, seed))) lfail += 1;
         }
-        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 54, base_seed, lfail });
+        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 55, base_seed, lfail });
         if (lfail != 0) std.process.exit(1);
         return;
     };

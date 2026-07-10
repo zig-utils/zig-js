@@ -553,6 +553,7 @@ fn threadMain(rec: *ThreadRecord, fn_v: Value, args: []const Value) void {
             agent.abandonAsync(@ptrCast(&async_waiters));
             async_waiters.clearRetainingCapacity();
         }
+        abandonPropAsyncQueue(g, microtasks);
         threw = true;
         result = machine.exception;
     }
@@ -2243,6 +2244,25 @@ fn transferPropAsyncQueue(g: *gil_mod.Gil, from: *promise.MicrotaskQueue, to: *p
     }
 }
 
+fn abandonPropAsyncQueue(g: *gil_mod.Gil, queue: *promise.MicrotaskQueue) void {
+    g.lockPropWaiters();
+    defer g.unlockPropWaiters();
+    var write: usize = 0;
+    var read: usize = 0;
+    while (read < g.prop_async.items.len) : (read += 1) {
+        const raw = g.prop_async.items[read];
+        const t: *PropAsyncTicket = @ptrCast(@alignCast(raw));
+        if (t.microtasks == queue) {
+            prop_alloc.free(t.key);
+            prop_alloc.destroy(t);
+            continue;
+        }
+        if (write != read) g.prop_async.items[write] = raw;
+        write += 1;
+    }
+    shrinkPropAsyncLocked(g, write);
+}
+
 fn transferPendingJoinQueue(ctx: *Context, from: *promise.MicrotaskQueue, to: *promise.MicrotaskQueue) void {
     const g = ctx.gil orelse return;
     const io = agent.engineIo();
@@ -2514,6 +2534,38 @@ test "property waitAsync expiry stable-compacts expired tickets" {
     try std.testing.expectEqual(@intFromPtr(&t4), @intFromPtr(expired.items[3]));
     try std.testing.expectEqual(@as(usize, 1), g.prop_async.items.len);
     try std.testing.expectEqual(@intFromPtr(&t3), @intFromPtr(@as(*PropAsyncTicket, @ptrCast(@alignCast(g.prop_async.items[0])))));
+}
+
+test "property waitAsync abandon removes one owner queue" {
+    var g = gil_mod.Gil{};
+    defer g.prop_async.deinit(prop_alloc);
+    var obj: value.Object = undefined;
+    var promise_obj: value.Object = undefined;
+    var q0 = promise.MicrotaskQueue{};
+    var q1 = promise.MicrotaskQueue{};
+
+    const t0 = try prop_alloc.create(PropAsyncTicket);
+    t0.* = .{ .obj = &obj, .key = try prop_alloc.dupe(u8, "a"), .deadline_ns = null, .promise = &promise_obj, .microtasks = &q0, .thread = null, .owner = undefined };
+    const t1 = try prop_alloc.create(PropAsyncTicket);
+    errdefer {
+        prop_alloc.free(t1.key);
+        prop_alloc.destroy(t1);
+    }
+    t1.* = .{ .obj = &obj, .key = try prop_alloc.dupe(u8, "b"), .deadline_ns = null, .promise = &promise_obj, .microtasks = &q1, .thread = null, .owner = undefined };
+    const t2 = try prop_alloc.create(PropAsyncTicket);
+    t2.* = .{ .obj = &obj, .key = try prop_alloc.dupe(u8, "c"), .deadline_ns = null, .promise = &promise_obj, .microtasks = &q0, .thread = null, .owner = undefined };
+
+    try g.prop_async.append(prop_alloc, @ptrCast(t0));
+    try g.prop_async.append(prop_alloc, @ptrCast(t1));
+    try g.prop_async.append(prop_alloc, @ptrCast(t2));
+
+    abandonPropAsyncQueue(&g, &q0);
+    try std.testing.expectEqual(@as(usize, 1), g.prop_async.items.len);
+    try std.testing.expectEqual(@intFromPtr(t1), @intFromPtr(@as(*PropAsyncTicket, @ptrCast(@alignCast(g.prop_async.items[0])))));
+
+    prop_alloc.free(t1.key);
+    prop_alloc.destroy(t1);
+    g.prop_async.clearRetainingCapacity();
 }
 
 test "property waiter queues reserve capacity chunks" {
