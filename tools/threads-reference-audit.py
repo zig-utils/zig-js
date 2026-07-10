@@ -33,6 +33,25 @@ HELPERS = {
     "vmstate/resources/workload.js",
 }
 
+EXPLICIT_CASE_CATEGORIES = {
+    "cve/mc-df-arraycopy-relabel.js": (
+        "JSC butterfly verification shell option",
+        "typed-array set length race semantics",
+    ),
+    "cve/mc-life-creator-thread-dies.js": (
+        "ArrayBuffer detach/resize survivor semantics",
+    ),
+    "dw2-marklistset-storm.js": (
+        "JSC shared-GC mark-list hooks",
+    ),
+    "w16-c1-prevent-collection.js": (
+        "JSC heap snapshot/preventCollection hooks",
+    ),
+    "semantics/oom-one-thread.js": (
+        "heap cap / per-thread OOM",
+    ),
+}
+
 PROMOTION_PROBES = (
     "cve/mc-df-arraycopy-relabel.js",
     "cve/mc-life-creator-thread-dies.js",
@@ -86,8 +105,8 @@ def classify(case: str, src: str) -> list[str]:
     if case in HELPERS:
         return ["helper/preload"]
 
-    if case == "semantics/oom-one-thread.js":
-        categories.append("heap cap / per-thread OOM")
+    if case in EXPLICIT_CASE_CATEGORIES:
+        return list(EXPLICIT_CASE_CATEGORIES[case])
 
     if case.startswith("checktraps-") or "checkTraps" in src or "haveBadTime" in src:
         categories.append("checktraps / haveBadTime shell controls")

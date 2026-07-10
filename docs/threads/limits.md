@@ -622,8 +622,10 @@ Issue #1 remains the umbrella status page.
   cleanup/finalization interleavings.
 - **Reference-only PR-249 files.** Promote only when the engine implements the
   behavior and the file is reliable under Zig `0.17-dev`, especially the
-  WebAssembly-required files, JIT/shell-hook witnesses, and real heap cap /
-  per-thread OOM semantics. Run
+  WebAssembly-required files, JIT/shell-hook witnesses, JSC-specific mark-list
+  or heap-snapshot/preventCollection probes, ArrayBuffer detach/resize survivor
+  assumptions, typed-array race-shape probes, and real heap cap / per-thread
+  OOM semantics. Run
   `python3 tools/threads-reference-audit.py --run-probes --expect-current-blockers --probe-timeout 60`
   to keep the nearest-probe negative baseline honest: it passes only while
   those files still fail or time out with their documented blocker evidence,

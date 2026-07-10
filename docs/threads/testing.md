@@ -762,11 +762,17 @@ PR-249 files stay reference-only for concrete reasons:
   until real engine behavior backs those hooks.
 - `semantics/oom-one-thread.js` remains out until there is a real heap cap and
   per-thread OOM handling contract.
+- `cve/mc-df-arraycopy-relabel.js` remains out because it depends on JSC's
+  butterfly verification shell option and a typed-array set length race shape
+  whose current zig-js failure is still the documented `RangeError` blocker.
 - `cve/mc-life-creator-thread-dies.js` still depends on reference-shell buffer
   variants and detach assumptions that are not promotable as-is. The stable
   subset is covered by `threadfuzz creatorbuffers`, which checks child-created
   `SharedArrayBuffer` / `ArrayBuffer` storage after creator exit, sibling reads,
   GC pressure, and post-creator `ArrayBuffer.transfer()`.
+- `dw2-marklistset-storm.js` and `w16-c1-prevent-collection.js` remain out
+  because they target JSC shared-GC mark-list and heap-snapshot
+  `preventCollection` hooks rather than portable zig-js behavior.
 - Helper/preload files such as `harness.js`, `bench/harness.js`,
   `scaling/harness.js`, `resources/assert.js`, and
   `vmstate/resources/workload.js` are not counted as standalone remaining
