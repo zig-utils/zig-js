@@ -18388,7 +18388,22 @@ fn asyncIterHelperNextFn(ctx: *anyopaque, this: Value, args: []const Value) valu
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!this.isObject() or this.asObj().iter_helper == null) return promiseRejectValue(self, try self.makeError("TypeError", "Async iterator helper next called on an incompatible receiver"));
     const h = this.asObj().iter_helper.?;
-    if (h.done) return promiseResolveValue(self, try self.iterResultObj(Value.undef(), true));
+    h.lockState();
+    if (h.running) {
+        h.unlockState();
+        return promiseRejectValue(self, try self.makeError("TypeError", "Async iterator helper is already running"));
+    }
+    if (h.done) {
+        h.unlockState();
+        return promiseResolveValue(self, try self.iterResultObj(Value.undef(), true));
+    }
+    h.running = true;
+    h.unlockState();
+    defer {
+        h.lockState();
+        h.running = false;
+        h.unlockState();
+    }
     const produced = asyncHelperProduce(self, h) catch {
         const exc = self.exception;
         self.exception = Value.undef();
@@ -18400,7 +18415,38 @@ fn asyncIterHelperNextFn(ctx: *anyopaque, this: Value, args: []const Value) valu
 fn asyncIterHelperReturnFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (this.isObject() and this.asObj().iter_helper != null) this.asObj().iter_helper.?.done = true;
+    if (!this.isObject() or this.asObj().iter_helper == null) return promiseRejectValue(self, try self.makeError("TypeError", "Async iterator helper return called on an incompatible receiver"));
+    const h = this.asObj().iter_helper.?;
+    h.lockState();
+    if (h.running) {
+        h.unlockState();
+        return promiseRejectValue(self, try self.makeError("TypeError", "Async iterator helper is already running"));
+    }
+    const was_done = h.done;
+    h.done = true;
+    h.running = !was_done;
+    h.unlockState();
+    defer if (!was_done) {
+        h.lockState();
+        h.running = false;
+        h.unlockState();
+    };
+    if (!was_done) {
+        if (h.src.isObject()) {
+            self.asyncIteratorClose(h.src) catch {
+                const exc = self.exception;
+                self.exception = Value.undef();
+                return promiseRejectValue(self, exc);
+            };
+        }
+        if (h.inner) |inner| if (inner.isObject()) {
+            self.asyncIteratorClose(inner) catch {
+                const exc = self.exception;
+                self.exception = Value.undef();
+                return promiseRejectValue(self, exc);
+            };
+        };
+    }
     return promiseResolveValue(self, try self.iterResultObj(Value.undef(), true));
 }
 

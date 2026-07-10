@@ -7105,6 +7105,56 @@ test "parallel_js: Iterator helper rejects concurrent next while running" {
     try std.testing.expect(result.asBool());
 }
 
+test "parallel_js: AsyncIterator helper rejects concurrent entry while running" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_threads = true,
+        .enable_gc = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+    });
+    defer ctx.destroy();
+
+    const promise_value = try ctx.evaluate(
+        \\(async () => {
+        \\  const gate = new SharedArrayBuffer(8);
+        \\  const flag = new Int32Array(gate);
+        \\  let yielded = false;
+        \\  const source = {
+        \\    next() {
+        \\      Atomics.store(flag, 0, 1);
+        \\      Atomics.notify(flag, 0);
+        \\      let spins = 0;
+        \\      while (Atomics.load(flag, 1) === 0 && spins < 10000000) spins++;
+        \\      if (Atomics.load(flag, 1) === 0) throw new Error("async iterator helper gate timeout");
+        \\      if (yielded) return { done: true };
+        \\      yielded = true;
+        \\      return { value: 41, done: false };
+        \\    },
+        \\    return() {
+        \\      return { done: true };
+        \\    },
+        \\    [Symbol.asyncIterator]() { return this; }
+        \\  };
+        \\  const helper = AsyncIterator.from(source).map(v => v + 1);
+        \\  const worker = new Thread(() => helper.next().then(r => r.value));
+        \\  let spins = 0;
+        \\  while (Atomics.load(flag, 0) === 0 && spins < 10000000) spins++;
+        \\  if (Atomics.load(flag, 0) === 0) throw new Error("worker did not enter async helper");
+        \\  const nextRejected = await helper.next().then(() => false, e => e instanceof TypeError);
+        \\  const returnRejected = await helper.return().then(() => false, e => e instanceof TypeError);
+        \\  Atomics.store(flag, 1, 1);
+        \\  Atomics.notify(flag, 1);
+        \\  const workerValue = await worker.join();
+        \\  const final = await helper.next();
+        \\  return nextRejected && returnRejected && workerValue === 42 && final.done === true;
+        \\})()
+    );
+    var machine = ctx.interpreter();
+    const result = try machine.awaitValue(promise_value);
+    try std.testing.expect(result.asBool());
+}
+
 test "isFinite / isNaN coerce via ToNumber (Symbol throws, strings convert)" {
     // `Let num be ? ToNumber(number)`: strings/booleans convert, a Symbol throws.
     try std.testing.expect((try evalIn("isFinite('0')")).asBool());
