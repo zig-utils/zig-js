@@ -1199,16 +1199,15 @@ test "GC cell backing shards parallel allocation locks by size class" {
 }
 
 /// An isolated engine instance — the homegrown analogue of a JSC
-/// Enable (or disable) the process-wide parallel/concurrent synchronization
-/// protocols as ONE unit, so they can never drift: Environment binding locks,
-/// Object element/backing locks + the `bytes()` seqlock, and the bytecode inline-
-/// cache seqlock. They share a single trigger (`concurrent_gc or parallel_gc`)
-/// and must always agree — routing every flip through here is the single source
-/// of truth (the default engine leaves all three a relaxed-load no-op).
-pub fn setParallelSyncEnabled(on: bool) void {
-    interp.Environment.binding_locks_enabled.store(on, .release);
-    value.Object.element_locks_enabled.store(on, .release);
-    @import("bytecode.zig").ic_seqlock_enabled.store(on, .release);
+/// Enable the process-wide parallel/concurrent synchronization protocols as ONE
+/// unit: Environment binding locks, Object element/backing locks + the `bytes()`
+/// seqlock, and the bytecode inline-cache seqlock. The helper is enable-only so
+/// production code cannot reintroduce a false→true→false race while another
+/// context is starting.
+pub fn enableParallelSync() void {
+    interp.Environment.binding_locks_enabled.store(true, .release);
+    value.Object.element_locks_enabled.store(true, .release);
+    @import("bytecode.zig").ic_seqlock_enabled.store(true, .release);
 }
 
 /// `JSGlobalContextRef`. Owns an arena for all interpreter-lived allocations
@@ -1710,19 +1709,14 @@ pub const Context = struct {
             // thread that becomes the collector roots the main thread's parked
             // stack through it (e.g. while main waits in the keepalive loop).
             g.registerPark(stack_scan.parkRecord());
+            if (options.concurrent_gc or options.parallel_gc) enableParallelSync();
             try jsthread.installThreadAPI(self);
         }
         if (options.parallel_gc) {
             if (self.gc) |h| h.setParallel(true);
             if (self.gc_cell_backing) |backing| backing.parallel = true;
         }
-        // Turn on the parallel/concurrent synchronization protocols process-wide
-        // as one unit, so they can never drift: needed only when the marker runs
-        // concurrently (concurrent_gc) or mutators run in parallel (parallel_gc).
-        // The default engine leaves them no-ops (relaxed loads). Creation itself
-        // is private, so enable these after installing all builtins and before the
-        // context can be observed by user code.
-        if (options.concurrent_gc or options.parallel_gc) setParallelSyncEnabled(true);
+        if (!options.enable_threads and (options.concurrent_gc or options.parallel_gc)) enableParallelSync();
         return self;
     }
 

@@ -447,10 +447,10 @@ pub const Environment = struct {
     /// (`parallel_gc`). The default engine is GIL-serialized / single-threaded,
     /// where they would be pure overhead on the hottest paths (`get` on every
     /// variable read, `put` on every binding). So gate every `binding_lock`
-    /// acquisition on this process-global flag — set once when such a context is
-    /// created (before any thread runs), so a lock/unlock pair always observes
-    /// the same value. Off → `lockBindings`/`unlockBindings` are a single relaxed
-    /// load and return (no CAS), keeping the default path fast.
+    /// acquisition on this process-global flag — set before thread/Atomics
+    /// builtins are installed for a parallel context, then left on process-wide.
+    /// Off → `lockBindings`/`unlockBindings` are a single relaxed load and return
+    /// (no CAS), keeping the default path fast.
     pub var binding_locks_enabled: std.atomic.Value(bool) = .init(false);
 
     pub fn lockBindings(self: *Environment) void {
