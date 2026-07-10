@@ -1869,6 +1869,9 @@ pub const Context = struct {
 
     fn hasRunningJsThreads(self: *const Context) bool {
         const io = agent.engineIo();
+        const g = self.gil;
+        if (g) |threading| threading.lockApi();
+        defer if (g) |threading| threading.unlockApi();
         for (self.js_threads.items) |rec| {
             rec.join_mutex.lockUncancelable(io);
             const exited = rec.exited;
