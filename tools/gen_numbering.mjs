@@ -5,8 +5,76 @@ import { readFileSync } from "node:fs";
 const src = readFileSync(process.argv[2] || "test262/harness/testIntl.js", "utf8");
 const m = src.match(/var numberingSystemDigits = \{([\s\S]*?)\n\};/);
 if (!m) throw new Error("numberingSystemDigits not found");
-// Evaluate the object literal body safely.
-const obj = Function(`"use strict"; return {${m[1]}};`)();
+
+function decodeJsString(raw) {
+  let out = "";
+  for (let i = 0; i < raw.length; i++) {
+    const ch = raw[i];
+    if (ch !== "\\") {
+      out += ch;
+      continue;
+    }
+    if (++i >= raw.length) throw new Error("trailing escape in numberingSystemDigits");
+    const esc = raw[i];
+    switch (esc) {
+      case '"':
+      case "\\":
+      case "/":
+        out += esc;
+        break;
+      case "b":
+        out += "\b";
+        break;
+      case "f":
+        out += "\f";
+        break;
+      case "n":
+        out += "\n";
+        break;
+      case "r":
+        out += "\r";
+        break;
+      case "t":
+        out += "\t";
+        break;
+      case "u": {
+        if (raw[i + 1] === "{") {
+          const end = raw.indexOf("}", i + 2);
+          if (end === -1) throw new Error("unterminated code point escape");
+          const hex = raw.slice(i + 2, end);
+          if (!/^[0-9a-fA-F]{1,6}$/.test(hex)) throw new Error(`bad code point escape: ${hex}`);
+          const cp = Number.parseInt(hex, 16);
+          if (cp > 0x10ffff) throw new Error(`code point out of range: ${hex}`);
+          out += String.fromCodePoint(cp);
+          i = end;
+        } else {
+          const hex = raw.slice(i + 1, i + 5);
+          if (!/^[0-9a-fA-F]{4}$/.test(hex)) throw new Error(`bad unicode escape: ${hex}`);
+          out += String.fromCharCode(Number.parseInt(hex, 16));
+          i += 4;
+        }
+        break;
+      }
+      default:
+        throw new Error(`unsupported escape in numberingSystemDigits: \\${esc}`);
+    }
+  }
+  return out;
+}
+
+function parseNumberingSystemDigits(body) {
+  const obj = {};
+  for (const line of body.split("\n")) {
+    const trimmed = line.trim();
+    if (trimmed.length === 0) continue;
+    const entry = trimmed.match(/^([A-Za-z0-9_-]+):\s*"((?:[^"\\]|\\.)*)",?$/);
+    if (!entry) throw new Error(`unsupported numberingSystemDigits entry: ${trimmed}`);
+    obj[entry[1]] = decodeJsString(entry[2]);
+  }
+  return obj;
+}
+
+const obj = parseNumberingSystemDigits(m[1]);
 
 function zstr(s) {
   const bytes = Buffer.from(s, "utf8");
@@ -35,6 +103,14 @@ for (const [name, digits] of Object.entries(obj)) {
   out += `    .{ .name = ${zstr(name)}, .digits = ${zstr(digits)} },\n`;
 }
 out += `};
+
+/// All supported numbering-system names (those with simple digit mappings), in
+/// the table's sorted order. Used by Intl.supportedValuesOf("numberingSystem").
+pub const names = blk: {
+    var arr: [table.len][]const u8 = undefined;
+    for (table, 0..) |row, i| arr[i] = row.name;
+    break :blk arr;
+};
 
 /// The ten-digit string for a numbering system, or null if unknown/unsupported.
 pub fn digits(name: []const u8) ?[]const u8 {
