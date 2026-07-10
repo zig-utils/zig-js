@@ -5039,9 +5039,14 @@ pub const Interpreter = struct {
     /// path; everything else (strings, generators, Sets/Maps, arguments objects,
     /// user objects with `[Symbol.iterator]`) goes through the iterator protocol.
     pub fn spreadInto(self: *Interpreter, list: *std.ArrayListUnmanaged(Value), v: Value) EvalError!void {
-        if (v.isObject() and v.asObj().is_array and !v.asObj().is_arguments and self.arrayIterIntact() and !self.arrayHasOwnIterator(v.asObj())) {
-            for (v.asObj().elements.items) |e| try list.append(self.arena, e);
-            return;
+        if (v.isObject()) {
+            const o = v.asObj();
+            if (o.is_array and !o.is_arguments and self.arrayIterIntact() and !self.arrayHasOwnIterator(o)) {
+                if (try o.packedDenseElementsSnapshot(self.arena)) |items| {
+                    try list.appendSlice(self.arena, items);
+                    return;
+                }
+            }
         }
         const iter_obj = try self.iteratorOf(v); // throws TypeError if not iterable
         while (true) {

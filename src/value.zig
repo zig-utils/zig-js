@@ -1361,6 +1361,18 @@ pub const Object = struct {
         return self.holes == null and self.array_len <= self.elements.items.len;
     }
 
+    /// Snapshot a plain packed dense Array's iteration values under
+    /// `elements_lock`. Returns null when Array iteration must fall back to
+    /// observable `[[Get]]` (holes, sparse logical tail, or index accessors).
+    pub fn packedDenseElementsSnapshot(self: *const Object, arena: std.mem.Allocator) std.mem.Allocator.Error!?[]Value {
+        self.lockElements();
+        defer self.unlockElements();
+        if (self.holes != null or self.array_len > self.elements.items.len or self.accessors.load(.monotonic) != null) return null;
+        const out = try arena.alloc(Value, self.elements.items.len);
+        @memcpy(out, self.elements.items);
+        return out;
+    }
+
     pub fn denseElementLimit(self: *const Object, logical_len: usize) usize {
         self.lockElements();
         defer self.unlockElements();

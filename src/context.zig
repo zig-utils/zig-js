@@ -4545,6 +4545,20 @@ test "spread of iterables (generator, string, user iterator)" {
         \\function add(a, b, c) { return a + b + c; }
         \\add(...[1, 2, 3])
     )).asNum());
+    try expectEvalStr("1,17,3", "Array.prototype[1] = 17; var a = [1, , 3]; var r = [...a].join(','); delete Array.prototype[1]; r");
+    try std.testing.expect((try evalIn(
+        \\var a = new Array(2);
+        \\a[0] = 1;
+        \\function count() { return arguments.length; }
+        \\count(...a) === 2
+    )).asBool());
+    try std.testing.expect((try evalIn(
+        \\var calls = 0;
+        \\var a = [1];
+        \\Object.defineProperty(a, 0, { get: function() { calls += 1; return 9; } });
+        \\var out = [...a];
+        \\calls === 1 && out[0] === 9
+    )).asBool());
 }
 
 test "Symbol: typeof, identity, description, property keys, iterator" {
