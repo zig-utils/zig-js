@@ -38736,28 +38736,58 @@ fn numberToRadix(arena: std.mem.Allocator, n: f64, radix: usize) ![]const u8 {
 }
 
 /// `n.toFixed(d)` — fixed-point with `d` decimals (d ≤ 100; no exponent forms).
+///
+/// The spec (21.1.3.3 step 5) rounds to the integer n minimizing |n/10^d − x|,
+/// breaking ties by "pick the LARGER n" — i.e. round HALF-UP on the magnitude
+/// (`(0.5).toFixed(0)` is "1", `(0.125).toFixed(2)` is "0.13"). C's `%.*f` rounds
+/// half-to-EVEN, which differs precisely on exact ties. So we emit the EXACT
+/// decimal digits (an f64's fractional part terminates within 1074 decimal
+/// digits, so printf at that precision does no rounding) and round half-up at
+/// position d ourselves.
 fn toFixed(arena: std.mem.Allocator, n: f64, d: usize) ![]const u8 {
     if (std.math.isNan(n)) return "NaN";
     if (std.math.isInf(n)) return if (n < 0) "-Infinity" else "Infinity";
     const abs_n = @abs(n);
     if (abs_n >= 1e21) return value.numberToString(arena, n);
-    if (n == 0) {
-        var z: std.ArrayListUnmanaged(u8) = .empty;
-        try z.append(arena, '0');
-        if (d > 0) {
-            try z.append(arena, '.');
-            try z.appendNTimes(arena, '0', d);
-        }
-        return z.items;
-    }
 
-    var raw: [512]u8 = undefined;
-    const len = snprintf(raw[0..].ptr, raw.len, "%.*f", @as(c_int, @intCast(d)), abs_n);
-    if (len < 0 or @as(usize, @intCast(len)) >= raw.len) return error.OutOfMemory;
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    if (n < 0) try buf.append(arena, '-');
-    try buf.appendSlice(arena, raw[0..@intCast(len)]);
-    return buf.items;
+    // Exact fractional digits (no rounding), zero-padded past termination.
+    const exact_prec: usize = 1074;
+    const cap = exact_prec + 40; // + integer digits (<=21) + dot/NUL headroom
+    const raw = try arena.alloc(u8, cap);
+    const len = snprintf(raw.ptr, cap, "%.*f", @as(c_int, @intCast(exact_prec)), abs_n);
+    if (len < 0 or @as(usize, @intCast(len)) >= cap) return error.OutOfMemory;
+    const s = raw[0..@intCast(len)]; // "III.FFFF…" with exact_prec fraction digits
+    const dot = std.mem.indexOfScalar(u8, s, '.') orelse s.len;
+    const int_part = s[0..dot];
+    const frac = if (dot < s.len) s[dot + 1 ..] else s[s.len..];
+
+    // Keep the integer part and the first d fraction digits; round half-up on the
+    // exact (d+1)th fraction digit (>= '5' rounds up), then propagate any carry.
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    try out.appendSlice(arena, int_part);
+    if (d > 0) {
+        try out.append(arena, '.');
+        try out.appendSlice(arena, frac[0..@min(d, frac.len)]);
+        if (d > frac.len) try out.appendNTimes(arena, '0', d - frac.len);
+    }
+    if (d < frac.len and frac[d] >= '5') {
+        var i: usize = out.items.len;
+        var carry = true;
+        while (i > 0 and carry) {
+            i -= 1;
+            const c = out.items[i];
+            if (c == '.') continue;
+            if (c == '9') out.items[i] = '0' else {
+                out.items[i] = c + 1;
+                carry = false;
+            }
+        }
+        if (carry) try out.insert(arena, 0, '1'); // carried past the leading digit
+    }
+    // Per spec step 6 the sign is set from x < 0 and always prepended (so
+    // `(-0.001).toFixed(1)` is "-0.0"); -0 is not < 0, so it stays "0.00".
+    if (n < 0) try out.insert(arena, 0, '-');
+    return out.items;
 }
 
 /// Reformat Zig's scientific output (`1.234e1`, `-9.99e-40`) to JS form, where
