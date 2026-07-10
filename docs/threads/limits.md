@@ -453,6 +453,14 @@ Issue #1 remains the umbrella status page.
   moving frozen parked peer. Requested shell/host GC does not disturb an elected
   mid-script parallel collector while threads are live; later quiescent
   collection aborts stale parallel mark state before a fresh precise mark.
+  Policy boundary: sync-wait/condition/contended-lock peers are "running" for
+  root publication while they pump tasks and safepoints, and become directly
+  traceable frozen peers only inside the bounded native wait that sets
+  `gc_parked` and is pinned by `gc_root_lock` on wake. The collector spends at
+  most 50,000 mark/poll iterations and at least 25 ms per publication
+  generation, up to 32 generations, before aborting without sweep and falling
+  back to quiescent full collection. Those budgets are implementation/testing
+  policy rather than public API.
   Keep quiescent collection as the fallback for cycles that still cannot
   converge, and keep widening wait/cleanup stress around this protocol.
 - **Fuzzer breadth.** The broad `threadfuzz` profile now covers caught

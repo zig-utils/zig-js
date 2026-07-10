@@ -22,8 +22,11 @@
 //! Each mutator scans *its own* stack rather than having the collector scan a
 //! foreign one: a running thread's stack changes underfoot, so only the owner
 //! can scan it soundly without first freezing it (which is the blocking we are
-//! avoiding). Parked threads are handled separately — their stacks are frozen
-//! and already published via `gil.zig`'s park records.
+//! avoiding). Threads are considered frozen only while they are actually inside
+//! native park code; sync-wait and contended-lock loops still pump tasks and
+//! service publication between bounded parks. Frozen peers are handled
+//! separately via `Interpreter.gc_parked`, `gc_root_lock`, and `gil.zig`'s park
+//! records.
 //!
 //! Single-collector assumption: cycle ids come from a process-global monotonic
 //! counter, so a handshake never reuses an id even across multiple `Context`s

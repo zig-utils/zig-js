@@ -207,6 +207,16 @@ Known performance/maturity work:
   collection just before an abort cannot append into `barrier_buf` after the
   abort path has cleared it; the dependency has a deterministic regression test
   for that abort boundary and is covered by the local `parallel_js` TSan slice.
+  The current internal policy treats property `Atomics.wait`,
+  `Condition.wait`, and contended `Lock` acquisition as running peers while
+  they pump tasks and GC safepoints; only the short native condition-wait region
+  sets `gc_parked`, and the collector may directly trace that frozen peer only
+  while pinning `gc_root_lock`. Each root-publication generation gives running
+  peers up to 50,000 mark/poll iterations and at least 25 ms to publish, with a
+  32-generation convergence cap. Publication-timeout or round-limit failures
+  abort without sweeping and leave reclamation to the next quiescent full
+  collection. These budgets are measured implementation policy, not stable
+  embedder API.
 - `zig build midgc-profile` now makes convergence measurable without exposing
   the internal `parallel_midscript_gc` knob as embedder API. It separates
   publication-timeout aborts from round-limit aborts and reports publication
