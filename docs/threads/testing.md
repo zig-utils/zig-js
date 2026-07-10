@@ -163,7 +163,12 @@ closures, constructors, Maps/Sets, accessors, and typed arrays across JS
 deadlock, UAF, or engine race"; `-Dtsan=true` turns unsynchronized engine access
 into a race report; `-Dfuzz-amplify=true` raises contention; `-Doptimize=ReleaseSafe`
 keeps safety checks under optimization; `-Dfuzz-verify=true` generates
-deterministic atomic programs whose exact result is predicted. The broad profile
+deterministic atomic programs whose exact result is predicted. Long sweep
+profiles also run with a per-seed watchdog by default; set
+`THREADFUZZ_SEED_TIMEOUT_MS=0` to disable it, or set a larger millisecond value
+for slow local/TSan machines. When it fires, the watchdog prints the active
+profile and seed so the stalled program is still one-command reproducible. The
+broad profile
 (`-Dfuzz-broad=true`) enables GC and adds caught exception/finally paths, nested
 thread lifecycle, `asyncJoin`, property `wait` / `waitAsync`, `Condition`
 wakeups, `Thread.restrict`, and `FinalizationRegistry` cleanup sidecars. The

@@ -18,6 +18,104 @@ const js = @import("js");
 
 const Worker = js.Worker;
 
+const WatchdogProfile = enum(usize) {
+    default,
+    amplify,
+    broad,
+    verify,
+    lifecycle,
+    midgc,
+    vexc,
+    vlock,
+    vwait,
+};
+
+const watchdog_profile_names = [_][]const u8{
+    "default",
+    "amplify",
+    "broad",
+    "verify",
+    "lifecycle",
+    "midgc",
+    "vexc",
+    "vlock",
+    "vwait",
+};
+
+var watchdog_enabled = std.atomic.Value(bool).init(false);
+var watchdog_active = std.atomic.Value(bool).init(false);
+var watchdog_profile = std.atomic.Value(usize).init(0);
+var watchdog_seed = std.atomic.Value(u64).init(0);
+var watchdog_started_ms = std.atomic.Value(i64).init(0);
+var watchdog_timeout_ms = std.atomic.Value(i64).init(0);
+
+fn watchdogNowMs() i64 {
+    var ts: std.c.timespec = undefined;
+    if (std.c.clock_gettime(.MONOTONIC, &ts) != 0) return 0;
+    return @as(i64, @intCast(ts.sec)) * std.time.ms_per_s +
+        @divTrunc(@as(i64, @intCast(ts.nsec)), std.time.ns_per_ms);
+}
+
+fn watchdogSleep() void {
+    var req: std.c.timespec = .{
+        .sec = 0,
+        .nsec = @intCast(250 * std.time.ns_per_ms),
+    };
+    _ = std.c.nanosleep(&req, null);
+}
+
+fn seedWatchdogMain() void {
+    while (watchdog_enabled.load(.acquire)) {
+        watchdogSleep();
+        if (!watchdog_active.load(.acquire)) continue;
+        const timeout_ms = watchdog_timeout_ms.load(.acquire);
+        if (timeout_ms <= 0) continue;
+        const started_ms = watchdog_started_ms.load(.acquire);
+        const elapsed_ms = watchdogNowMs() - started_ms;
+        if (elapsed_ms < timeout_ms) continue;
+        const profile_index = watchdog_profile.load(.acquire);
+        const profile_name = if (profile_index < watchdog_profile_names.len)
+            watchdog_profile_names[profile_index]
+        else
+            "unknown";
+        std.debug.print(
+            "threadfuzz {s}: seed {d} exceeded per-seed timeout {d} ms; rerun the same profile with one iteration and that seed, or set THREADFUZZ_SEED_TIMEOUT_MS=0 to disable\n",
+            .{
+                profile_name,
+                watchdog_seed.load(.acquire),
+                timeout_ms,
+            },
+        );
+        std.process.exit(124);
+    }
+}
+
+fn startSeedWatchdog(timeout_ms: i64) void {
+    if (timeout_ms <= 0) return;
+    watchdog_timeout_ms.store(timeout_ms, .release);
+    watchdog_enabled.store(true, .release);
+    const thread = std.Thread.spawn(.{}, seedWatchdogMain, .{}) catch return;
+    thread.detach();
+}
+
+fn stopSeedWatchdog() void {
+    watchdog_active.store(false, .release);
+    watchdog_enabled.store(false, .release);
+}
+
+fn noteSeed(profile: WatchdogProfile, seed: u64) void {
+    if (!watchdog_enabled.load(.acquire)) return;
+    watchdog_active.store(false, .release);
+    watchdog_profile.store(@intFromEnum(profile), .release);
+    watchdog_seed.store(seed, .release);
+    watchdog_started_ms.store(watchdogNowMs(), .release);
+    watchdog_active.store(true, .release);
+}
+
+fn finishSeed() void {
+    watchdog_active.store(false, .release);
+}
+
 const ModuleFuzzHost = struct {
     const Entry = struct { path: []const u8, source: []const u8 };
     var host_ctx: u8 = 0;
@@ -18246,6 +18344,12 @@ fn runMultiContextCreateDestroyInterleaving(gpa: std.mem.Allocator, seed: u64) !
 
 pub fn main(init: std.process.Init) !void {
     const gpa = std.heap.page_allocator; // thread-safe; contexts manage their own GC
+    var seed_timeout_ms: i64 = 120_000;
+    if (init.environ_map.get("THREADFUZZ_SEED_TIMEOUT_MS")) |raw| {
+        seed_timeout_ms = std.fmt.parseInt(i64, raw, 10) catch seed_timeout_ms;
+    }
+    startSeedWatchdog(seed_timeout_ms);
+    defer stopSeedWatchdog();
     var iters: usize = 200;
     var base_seed: u64 = 1;
     var args = std.process.Args.Iterator.init(init.minimal.args);
@@ -19717,6 +19821,8 @@ pub fn main(init: std.process.Init) !void {
         var vi: usize = 0;
         while (vi < iters) : (vi += 1) {
             const seed = base_seed +% vi;
+            noteSeed(.verify, seed);
+            defer finishSeed();
             var vbuf: std.ArrayListUnmanaged(u8) = .empty;
             defer vbuf.deinit(gpa);
             const expected = try genVerify(seed, &vbuf, gpa);
@@ -19789,6 +19895,8 @@ pub fn main(init: std.process.Init) !void {
         var ei: usize = 0;
         while (ei < iters) : (ei += 1) {
             const seed = base_seed +% ei;
+            noteSeed(.vexc, seed);
+            defer finishSeed();
             var ebuf: std.ArrayListUnmanaged(u8) = .empty;
             defer ebuf.deinit(gpa);
             const expected = try genExcJoin(seed, &ebuf, gpa);
@@ -19823,6 +19931,8 @@ pub fn main(init: std.process.Init) !void {
         var li: usize = 0;
         while (li < iters) : (li += 1) {
             const seed = base_seed +% li;
+            noteSeed(.vlock, seed);
+            defer finishSeed();
             var lbuf: std.ArrayListUnmanaged(u8) = .empty;
             defer lbuf.deinit(gpa);
             const expected = try genLock(seed, &lbuf, gpa);
@@ -19857,6 +19967,8 @@ pub fn main(init: std.process.Init) !void {
         var wi: usize = 0;
         while (wi < iters) : (wi += 1) {
             const seed = base_seed +% wi;
+            noteSeed(.vwait, seed);
+            defer finishSeed();
             var wbuf: std.ArrayListUnmanaged(u8) = .empty;
             defer wbuf.deinit(gpa);
             const expected = try genWaitNotify(seed, &wbuf, gpa);
@@ -20016,6 +20128,8 @@ pub fn main(init: std.process.Init) !void {
         var li: usize = 0;
         while (li < iters) : (li += 1) {
             const seed = base_seed +% li;
+            noteSeed(.lifecycle, seed);
+            defer finishSeed();
             if (!(try runMultiContextCreateDestroyInterleaving(gpa, seed))) lfail += 1;
             if (!(try runResizableDataViewResizeInterleaving(gpa, seed))) lfail += 1;
             if (!(try runTerminationStorm(gpa, seed))) lfail += 1;
@@ -20142,6 +20256,8 @@ pub fn main(init: std.process.Init) !void {
         var mi: usize = 0;
         while (mi < iters) : (mi += 1) {
             const seed = base_seed +% mi;
+            noteSeed(.midgc, seed);
+            defer finishSeed();
             if (!(try runMidScriptWaitPumpGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptTerminationReactionGc(gpa, seed))) mfail += 1;
             if (!(try runMidScriptPromisePublicationGc(gpa, seed))) mfail += 1;
@@ -20198,13 +20314,16 @@ pub fn main(init: std.process.Init) !void {
     // lifecycle/asyncJoin, waiters, FinalizationRegistry cleanup, and lock/cond
     // edges. It is intentionally cheaper than amplify but enables GC.
     var cfg = Cfg.default;
+    var random_profile: WatchdogProfile = .default;
     var rest = first;
     if (first) |a| if (std.mem.eql(u8, a, "amplify")) {
         cfg = Cfg.amplified;
+        random_profile = .amplify;
         iters = 60; // amplified programs are heavier; fewer per run
         rest = args.next();
     } else if (std.mem.eql(u8, a, "broad")) {
         cfg = Cfg.broad;
+        random_profile = .broad;
         iters = 80; // broader programs include sidecars + GC; keep the gate cheap
         rest = args.next();
     };
@@ -20215,6 +20334,8 @@ pub fn main(init: std.process.Init) !void {
     var i: usize = 0;
     while (i < iters) : (i += 1) {
         const seed = base_seed +% i;
+        noteSeed(random_profile, seed);
+        defer finishSeed();
         var buf: std.ArrayListUnmanaged(u8) = .empty;
         defer buf.deinit(gpa);
         try genProgram(seed, &buf, gpa, cfg);
