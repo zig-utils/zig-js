@@ -696,7 +696,8 @@ threadlocal var math_prng = std.Random.DefaultPrng.init(0);
 fn mathRandomSeed() u64 {
     var bytes: [8]u8 = undefined;
     agent.engineIo().randomSecure(&bytes) catch {
-        return 0x2545F4914F6CDD1D ^ @as(u64, @intCast(std.Thread.getCurrentId()));
+        const now: u64 = @bitCast(@as(i64, @intCast(std.Io.Timestamp.now(agent.engineIo(), .awake).nanoseconds)));
+        return 0x2545F4914F6CDD1D ^ now ^ @as(u64, @intCast(std.Thread.getCurrentId()));
     };
     return std.mem.readInt(u64, &bytes, .little);
 }
