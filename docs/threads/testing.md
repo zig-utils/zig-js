@@ -170,8 +170,10 @@ deterministic atomic programs whose exact result is predicted. Long sweep
 profiles also run with a per-seed watchdog by default; set
 `THREADFUZZ_SEED_TIMEOUT_MS=0` to disable it, or set a larger millisecond value
 for slow local/TSan machines. When it fires, the watchdog prints the active
-profile and seed so the stalled program is still one-command reproducible. The
-broad profile
+profile and seed so the stalled program is still one-command reproducible.
+Aggregate profiles print `wall-ms` alongside program count, seed, and failure
+count; use those CI/nightly timings as runtime evidence for any future depth
+increase instead of raising iteration counts blindly. The broad profile
 (`-Dfuzz-broad=true`) enables GC and adds caught exception/finally paths, nested
 thread lifecycle, `asyncJoin`, property `wait` / `waitAsync`, `Condition`
 wakeups, `Thread.restrict`, and `FinalizationRegistry` cleanup sidecars. The

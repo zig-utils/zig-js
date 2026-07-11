@@ -56,6 +56,20 @@ fn watchdogNowMs() i64 {
         @divTrunc(@as(i64, @intCast(ts.nsec)), std.time.ns_per_ms);
 }
 
+fn elapsedSinceMs(start_ms: i64) i64 {
+    return @max(watchdogNowMs() - start_ms, 0);
+}
+
+fn printProfileSummary(name: []const u8, programs: usize, base_seed: u64, failures: usize, start_ms: i64) void {
+    std.debug.print("threadfuzz {s}: {d} programs from seed {d}, {d} failures, wall-ms {d}\n", .{
+        name,
+        programs,
+        base_seed,
+        failures,
+        elapsedSinceMs(start_ms),
+    });
+}
+
 fn watchdogSleep() void {
     var req: std.c.timespec = .{
         .sec = 0,
@@ -18367,6 +18381,7 @@ pub fn main(init: std.process.Init) !void {
     }
     startSeedWatchdog(seed_timeout_ms);
     defer stopSeedWatchdog();
+    const run_started_ms = watchdogNowMs();
     var iters: usize = 200;
     var base_seed: u64 = 1;
     var args = std.process.Args.Iterator.init(init.minimal.args);
@@ -19860,7 +19875,7 @@ pub fn main(init: std.process.Init) !void {
                 vfail += 1;
             }
         }
-        std.debug.print("threadfuzz verify: {d} programs from seed {d}, {d} failures\n", .{ iters, base_seed, vfail });
+        printProfileSummary("verify", iters, base_seed, vfail, run_started_ms);
         if (vfail != 0) std.process.exit(1);
         return;
     };
@@ -19896,7 +19911,7 @@ pub fn main(init: std.process.Init) !void {
                 gfail += 1;
             }
         }
-        std.debug.print("threadfuzz vgraph: {d} programs from seed {d}, {d} failures\n", .{ iters, base_seed, gfail });
+        printProfileSummary("vgraph", iters, base_seed, gfail, run_started_ms);
         if (gfail != 0) std.process.exit(1);
         return;
     };
@@ -19934,7 +19949,7 @@ pub fn main(init: std.process.Init) !void {
                 efail += 1;
             }
         }
-        std.debug.print("threadfuzz vexc: {d} programs from seed {d}, {d} failures\n", .{ iters, base_seed, efail });
+        printProfileSummary("vexc", iters, base_seed, efail, run_started_ms);
         if (efail != 0) std.process.exit(1);
         return;
     };
@@ -19970,7 +19985,7 @@ pub fn main(init: std.process.Init) !void {
                 lfail += 1;
             }
         }
-        std.debug.print("threadfuzz vlock: {d} programs from seed {d}, {d} failures\n", .{ iters, base_seed, lfail });
+        printProfileSummary("vlock", iters, base_seed, lfail, run_started_ms);
         if (lfail != 0) std.process.exit(1);
         return;
     };
@@ -20010,7 +20025,7 @@ pub fn main(init: std.process.Init) !void {
                 wfail += 1;
             }
         }
-        std.debug.print("threadfuzz vwait: {d} programs from seed {d}, {d} failures\n", .{ iters, base_seed, wfail });
+        printProfileSummary("vwait", iters, base_seed, wfail, run_started_ms);
         if (wfail != 0) std.process.exit(1);
         return;
     };
@@ -20204,7 +20219,7 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runThreadLocalTerminationCleanupInterleaving(gpa, seed))) lfail += 1;
             if (!(try runNestedThreadAsyncJoinCleanupInterleaving(gpa, seed))) lfail += 1;
         }
-        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 56, base_seed, lfail });
+        printProfileSummary("lifecycle", iters * 56, base_seed, lfail, run_started_ms);
         if (lfail != 0) std.process.exit(1);
         return;
     };
@@ -20321,7 +20336,7 @@ pub fn main(init: std.process.Init) !void {
             try runWatchedSeedCase(.midgc, runMidScriptModuleWorkerTerminateThreadLocalAsyncHoldCleanupGc, gpa, seed, &mfail);
             try runWatchedSeedCase(.midgc, runMidScriptWeakCollectionGc, gpa, seed, &mfail);
         }
-        std.debug.print("threadfuzz midgc: {d} programs from seed {d}, {d} failures\n", .{ iters * 45, base_seed, mfail });
+        printProfileSummary("midgc", iters * 45, base_seed, mfail, run_started_ms);
         if (mfail != 0) std.process.exit(1);
         return;
     };
@@ -20373,6 +20388,6 @@ pub fn main(init: std.process.Init) !void {
             failures += 1;
         }
     }
-    std.debug.print("threadfuzz: {d} programs from seed {d}, {d} failures\n", .{ iters, base_seed, failures });
+    printProfileSummary(if (random_profile == .amplify) "amplify" else if (random_profile == .broad) "broad" else "default", iters, base_seed, failures, run_started_ms);
     if (failures != 0) std.process.exit(1);
 }
