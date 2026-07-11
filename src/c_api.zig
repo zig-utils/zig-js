@@ -805,7 +805,7 @@ export fn JSWorkerPostMessage(worker: JSWorkerRef, ctx: JSContextRef, value_ref:
     defer c.popActiveInterpreter(&machine);
     w.postMessage(&machine, unbox(value_ref)) catch |err| {
         if (err == error.Throw) {
-            if (exception != null) exception[0] = box(c, c.exception orelse Value.str("DataCloneError"));
+            if (exception != null) exception[0] = box(c, machine.exception);
         } else setException(c, exception, @errorName(err));
         return false;
     };
@@ -830,7 +830,9 @@ export fn JSWorkerReceive(worker: JSWorkerRef, ctx: JSContextRef, timeout_ms: u6
     defer c.popActiveInterpreter(&machine);
     const tmo: ?u64 = if (timeout_ms == 0) null else timeout_ms;
     const v = w.receive(&machine, tmo) catch |err| {
-        setException(c, exception, @errorName(err));
+        if (err == error.Throw) {
+            if (exception != null) exception[0] = box(c, machine.exception);
+        } else setException(c, exception, @errorName(err));
         return null;
     };
     return box(c, v orelse return null);
@@ -1687,6 +1689,34 @@ test "C-API: worker create, post a number, receive the doubled reply" {
 
     const reply = JSWorkerReceive(w, ctx, 10_000, null) orelse return error.NoReply;
     try std.testing.expectEqual(@as(f64, 42), JSValueToNumber(ctx, reply, null));
+}
+
+test "C-API: worker post rejects uncloneable values through exception" {
+    const ctx = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
+    defer JSGlobalContextRelease(ctx);
+
+    const src = JSStringCreateWithUTF8CString(
+        "globalThis.onmessage = () => {};",
+    ) orelse return error.StringInitFailed;
+    defer JSStringRelease(src);
+
+    const w = JSWorkerCreate(src) orelse return error.WorkerSpawnFailed;
+    defer JSWorkerRelease(w);
+
+    var exception: JSValueRef = null;
+    const fn_script = JSStringCreateWithUTF8CString("(function uncloneable() {})") orelse return error.StringInitFailed;
+    defer JSStringRelease(fn_script);
+    const fn_value = JSEvaluateScript(ctx, fn_script, null, null, 0, &exception) orelse return error.EvalFailed;
+    try std.testing.expect(exception == null);
+
+    try std.testing.expect(!JSWorkerPostMessage(w, ctx, fn_value, &exception));
+    try std.testing.expect(exception != null);
+
+    const msg = JSValueToStringCopy(ctx, exception, null) orelse return error.StringInitFailed;
+    defer JSStringRelease(msg);
+    var buf: [128]u8 = undefined;
+    const written = JSStringGetUTF8CString(msg, &buf, buf.len);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0 .. written - 1], "DataCloneError") != null);
 }
 
 test "C-API: JSGarbageCollect honors JSValueProtect/Unprotect (GC on)" {
