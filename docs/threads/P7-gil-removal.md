@@ -329,16 +329,19 @@ roadmap item repeats it.
      finish** (`born_concurrent` still empty under `alloc_lock`); otherwise it
      returns false and the driver **aborts**, freeing nothing. An aborted mark
      can never use-after-free; the next quiescent `collectGarbage` reclaims the
-     garbage. So the driver collects when it catches a cheap quiescent window and
-     falls back to quiescent collection otherwise, never trading correctness for
-     pause-time.
+     garbage. After an abort-safe fallback, the next safepoints observe a tiny
+     internal retry cooldown rather than immediately electing another expensive
+     doomed attempt under the same sustained allocation burst. So the driver
+     collects when it catches a cheap quiescent window and falls back to quiescent
+     collection otherwise, never trading correctness for pause-time.
    - **Convergence telemetry.** `zig build midgc-profile` exercises the internal
      policy and attributes attempts, sweeps, publication-timeout and round-limit
      aborts, generations, total and worst-generation failed publication polls,
      total and worst-attempt finish retries, born-cell-growth rounds,
      deferred-work rounds, running and parked peer observations, actual peer
-     publications, and collector-side total/maximum pause. The pause is local
-     to the collector mutator; peers are not stopped.
+     publications, post-abort retry backoff skips, and collector-side
+     total/maximum pause. The pause is local to the collector mutator; peers are
+     not stopped.
      Focused tests enforce the counter accounting identities and
      execute both publication and direct parked-root paths. These counters and
      `parallel_midscript_gc` remain testing/profile implementation details, not

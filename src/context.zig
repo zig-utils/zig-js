@@ -1396,7 +1396,10 @@ pub const Context = struct {
     /// counts snapshot running versus directly traceable parked peers once per
     /// generation, while peer publications count roots actually handed off.
     /// Pause time is collector-mutator time spent inside the driver, not a
-    /// stop-the-world pause: peer mutators continue throughout.
+    /// stop-the-world pause: peer mutators continue throughout. Backoff skips
+    /// count safepoints that avoided immediately re-electing another collector
+    /// after an abort-safe fallback, reducing churn while sustained allocation is
+    /// still unlikely to converge.
     gc_par_generations: std.atomic.Value(u64) = .init(0),
     gc_par_publication_wait_iterations: std.atomic.Value(u64) = .init(0),
     gc_par_finish_retries: std.atomic.Value(u64) = .init(0),
@@ -1411,6 +1414,8 @@ pub const Context = struct {
     gc_par_peer_publications: std.atomic.Value(u64) = .init(0),
     gc_par_pause_ns_total: std.atomic.Value(u64) = .init(0),
     gc_par_pause_ns_max: std.atomic.Value(u64) = .init(0),
+    gc_par_backoff_skips: std.atomic.Value(u64) = .init(0),
+    gc_par_retry_after_ns: std.atomic.Value(u64) = .init(0),
     /// Guards the low-frequency realm-root lists that have no other lock —
     /// `async_waiters`, `c_api_handles`, `finalization_cleanup_jobs` — so the
     /// mid-script parallel collector can read them while peers mutate. Taken by
@@ -2141,7 +2146,10 @@ pub const Context = struct {
             if (c != machine) self.publishParallelRoots(machine);
             return;
         }
-        // No collection running. Start one only under heap pressure.
+        // No collection running. Start one only under heap pressure. After an
+        // abort-safe fallback, briefly avoid immediate re-election churn; a
+        // quiescent full collection remains the reclaim fallback.
+        if (self.shouldDeferParallelGcRetry()) return;
         if (!h.shouldCollect()) return;
         // Elect a single collector; losers publish and resume.
         if (self.gc_par_collector.cmpxchgStrong(null, machine, .acq_rel, .acquire) != null) {
@@ -2208,6 +2216,28 @@ pub const Context = struct {
         }
     }
 
+    fn parallelGcNowNs() u64 {
+        return @intCast(@max(std.Io.Timestamp.now(agent.engineIo(), .awake).nanoseconds, 0));
+    }
+
+    fn shouldDeferParallelGcRetry(self: *Context) bool {
+        const retry_after = self.gc_par_retry_after_ns.load(.acquire);
+        if (retry_after == 0) return false;
+        if (parallelGcNowNs() < retry_after) {
+            _ = self.gc_par_backoff_skips.fetchAdd(1, .monotonic);
+            return true;
+        }
+        self.gc_par_retry_after_ns.store(0, .release);
+        return false;
+    }
+
+    fn deferParallelGcRetry(self: *Context) void {
+        self.gc_par_retry_after_ns.store(
+            parallelGcNowNs() + std.time.ns_per_ms,
+            .release,
+        );
+    }
+
     /// True once every active peer interpreter (all but the collector) has
     /// published generation `gen`. A peer that has exited is gone from the list;
     /// a peer that parked published via the park path. Never blocks a peer.
@@ -2272,6 +2302,7 @@ pub const Context = struct {
                     self.gc_scan_native_stack = false;
                     _ = self.gc_par_aborts.fetchAdd(1, .monotonic);
                     _ = self.gc_par_publication_timeout_aborts.fetchAdd(1, .monotonic);
+                    self.deferParallelGcRetry();
                     return;
                 }
                 // Yield so peers get scheduled to reach their safepoints and
@@ -2305,6 +2336,7 @@ pub const Context = struct {
                 self.gc_scan_native_stack = false;
                 if (swept) {
                     _ = self.gc_par_collections.fetchAdd(1, .monotonic);
+                    self.gc_par_retry_after_ns.store(0, .release);
                     return;
                 }
                 _ = self.gc_par_finish_retries.fetchAdd(1, .monotonic);
@@ -2322,6 +2354,7 @@ pub const Context = struct {
         self.gc_scan_native_stack = false;
         _ = self.gc_par_aborts.fetchAdd(1, .monotonic);
         _ = self.gc_par_round_limit_aborts.fetchAdd(1, .monotonic);
+        self.deferParallelGcRetry();
     }
 
     pub fn queueFinalizationRegistryCleanup(self: *Context, registry: *value.Object) void {
@@ -11509,6 +11542,7 @@ fn expectParallelGcTelemetryCoherent(ctx: *Context) !void {
     const generations = ctx.gc_par_generations.load(.monotonic);
     const born_growth_rounds = ctx.gc_par_born_growth_rounds.load(.monotonic);
     const deferred_rounds = ctx.gc_par_deferred_rounds.load(.monotonic);
+    const backoff_skips = ctx.gc_par_backoff_skips.load(.monotonic);
 
     try std.testing.expect(attempts > 0);
     try std.testing.expectEqual(attempts, collections + aborts);
@@ -11520,6 +11554,7 @@ fn expectParallelGcTelemetryCoherent(ctx: *Context) !void {
     try std.testing.expect(finish_retries_max <= finish_retries);
     try std.testing.expect(born_growth_rounds <= generations);
     try std.testing.expect(deferred_rounds <= generations);
+    if (aborts == 0) try std.testing.expectEqual(@as(u64, 0), backoff_skips);
 }
 
 test "parallel_js (M3): mid-script parallel collector reclaims garbage while threads run, no GIL" {

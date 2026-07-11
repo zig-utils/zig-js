@@ -57,10 +57,11 @@ reports elected attempts, finishing sweeps, publication-timeout versus
 round-limit aborts, opened root-publication generations, failed publication
 poll totals and worst-generation poll counts, allocation-race finish retries
 and worst-attempt retry counts, running-peer requests, parked-peer observations,
-actual peer publications, and collector-side total/maximum pause time. That
-pause is time the collector mutator spends in the driver; it is not a
-stop-the-world pause because peer mutators continue running. The profile is an
-attribution tool, not a stable embedder API or correctness gate.
+actual peer publications, post-abort retry backoff skips, and collector-side
+total/maximum pause time. That pause is time the collector mutator spends in the
+driver; it is not a stop-the-world pause because peer mutators continue running.
+The profile is an attribution tool, not a stable embedder API or correctness
+gate.
 
 CI additionally runs heavier no-GIL production gates on every pull request and
 push to `main`:
