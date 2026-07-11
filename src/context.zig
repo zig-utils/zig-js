@@ -1473,6 +1473,7 @@ pub const Context = struct {
     gc_par_publication_timeout_aborts: std.atomic.Value(u64) = .init(0),
     gc_par_round_limit_aborts: std.atomic.Value(u64) = .init(0),
     gc_par_born_growth_rounds: std.atomic.Value(u64) = .init(0),
+    gc_par_round_extension_rounds: std.atomic.Value(u64) = .init(0),
     gc_par_deferred_rounds: std.atomic.Value(u64) = .init(0),
     gc_par_running_peer_requests: std.atomic.Value(u64) = .init(0),
     gc_par_parked_peer_observations: std.atomic.Value(u64) = .init(0),
@@ -2336,7 +2337,8 @@ pub const Context = struct {
         h.beginConcurrentMarkParallel();
         self.gc_scan_native_stack = false;
 
-        const max_rounds: u32 = 32;
+        const base_max_rounds: u32 = 32;
+        const max_rounds: u32 = 64;
         // Per-round bound on how long to spend waiting for every running peer to
         // publish before giving up and aborting. Each iteration drains marker
         // work, so this is not pure spinning; a peer reaches its safepoint
@@ -2398,9 +2400,11 @@ pub const Context = struct {
             // collector converge as soon as it catches a genuine lull.
             const born = h.bornPendingLen();
             const deferred = h.deferredPendingLen();
-            if (born != prev_born) _ = self.gc_par_born_growth_rounds.fetchAdd(1, .monotonic);
+            const born_grew = born != prev_born;
+            var finish_raced_allocation = false;
+            if (born_grew) _ = self.gc_par_born_growth_rounds.fetchAdd(1, .monotonic);
             if (deferred != 0) _ = self.gc_par_deferred_rounds.fetchAdd(1, .monotonic);
-            if (born == prev_born and deferred == 0) {
+            if (!born_grew and deferred == 0) {
                 self.gc_scan_native_stack = true;
                 const swept = h.finishConcurrentMarkParallel();
                 self.gc_scan_native_stack = false;
@@ -2414,6 +2418,14 @@ pub const Context = struct {
                 self.recordParallelGcMax(&self.gc_par_finish_retries_max, attempt_finish_retries);
                 // Allocation happened during the finish — its born fold already
                 // ran, so refresh the baseline and keep marking.
+                finish_raced_allocation = true;
+            }
+            if (round + 1 >= base_max_rounds and round + 1 < max_rounds) {
+                if (deferred == 0 and (born_grew or finish_raced_allocation)) {
+                    _ = self.gc_par_round_extension_rounds.fetchAdd(1, .monotonic);
+                } else {
+                    break;
+                }
             }
             prev_born = h.bornPendingLen();
         }
@@ -11641,6 +11653,7 @@ fn expectParallelGcTelemetryCoherent(ctx: *Context) !void {
     const finish_retries_max = ctx.gc_par_finish_retries_max.load(.monotonic);
     const generations = ctx.gc_par_generations.load(.monotonic);
     const born_growth_rounds = ctx.gc_par_born_growth_rounds.load(.monotonic);
+    const round_extension_rounds = ctx.gc_par_round_extension_rounds.load(.monotonic);
     const deferred_rounds = ctx.gc_par_deferred_rounds.load(.monotonic);
     const backoff_skips = ctx.gc_par_backoff_skips.load(.monotonic);
 
@@ -11653,6 +11666,7 @@ fn expectParallelGcTelemetryCoherent(ctx: *Context) !void {
     try std.testing.expect(wait_max <= wait_total);
     try std.testing.expect(finish_retries_max <= finish_retries);
     try std.testing.expect(born_growth_rounds <= generations);
+    try std.testing.expect(round_extension_rounds <= generations);
     try std.testing.expect(deferred_rounds <= generations);
     if (aborts == 0) try std.testing.expectEqual(@as(u64, 0), backoff_skips);
 }

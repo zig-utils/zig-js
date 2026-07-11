@@ -340,8 +340,8 @@ roadmap item repeats it.
      policy and attributes attempts, sweeps, publication-timeout and round-limit
      aborts, generations, total and worst-generation failed publication polls,
      total and worst-attempt finish retries, born-cell-growth rounds,
-     deferred-work rounds, running and parked peer observations, actual peer
-     publications, post-abort retry backoff skips, and collector-side
+     born-growth extension rounds, deferred-work rounds, running and parked peer
+     observations, actual peer publications, post-abort retry backoff skips, and collector-side
      total/maximum pause. The pause is local to the collector mutator; peers are
      not stopped.
      Focused tests enforce the counter accounting identities and
