@@ -1,8 +1,8 @@
 # zig-js
 
-A JavaScript engine written in pure Zig, with a JavaScriptCore C-API-compatible subset. No JSC, no V8, no external C libraries.
+A JavaScript engine written in pure Zig, with an implemented JavaScriptCore-shaped C API subset. No JSC, no V8, no external C libraries.
 
-`zig-js` is a small embeddable engine for Zig applications, tools, experiments, and runtimes that want to own their JavaScript stack. Use it directly as a Zig module, or link `libzig-js.a` for hosts that only need the implemented public JavaScriptCore C API subset.
+`zig-js` is a small embeddable engine for Zig applications, tools, experiments, and runtimes that want to own their JavaScript stack. Use it directly as a Zig module, or link `libzig-js.a` for hosts that only need the implemented public C API subset. The project is still pre-stabilization, so clean zig-js semantics win over preserving inert compatibility shims.
 
 The configured conformance runner is green against the pinned tc39/test262 corpus it scores: **48,506 / 48,506 valid** and **4,669 / 4,669 negative**, with **0 parse**, **0 runtime**, **0 host**, **0 skipped**, and **0 excluded** failures. That is a scoped result, not a claim of full ECMAScript completion.
 
@@ -139,9 +139,9 @@ defer ctx.destroy();
 const v = try ctx.evaluate("let x = 40; x + 2");
 ```
 
-### As A JavaScriptCore C-API Subset
+### As A C API Subset
 
-Link `libzig-js.a` for hosts that use the implemented subset of Apple's public `<JavaScriptCore/JSValueRef.h>` / `<JSObjectRef.h>` surface:
+Link `libzig-js.a` for hosts that use the implemented subset of Apple's public `<JavaScriptCore/JSValueRef.h>` / `<JSObjectRef.h>`-shaped surface:
 
 ```c
 JSGlobalContextRef ctx = JSGlobalContextCreate(NULL);

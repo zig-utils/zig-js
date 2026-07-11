@@ -4,7 +4,7 @@ title: zig-js — a JavaScript engine in pure Zig
 hero:
   name: zig-js
   text: A JavaScript engine in pure Zig
-  tagline: A tree-walking interpreter and a tiered bytecode VM with zero C dependencies — plus a JavaScriptCore C-API-compatible subset. Measured against the real test262 corpus.
+  tagline: A tree-walking interpreter and a tiered bytecode VM with zero C dependencies — plus a JavaScriptCore-shaped C API subset. Measured against the real test262 corpus.
   actions:
     - theme: brand
       text: Get Started →
@@ -33,7 +33,7 @@ hero:
 <div class="cards">
 <FeatureCard tag="// pure-zig" title="No C dependencies">Lexer, parser, interpreter, bytecode VM, and every builtin are written from scratch in Zig. One static library, no system JavaScriptCore.</FeatureCard>
 <FeatureCard tag="// tiered" title="Tree-walk → VM → shapes">A correct tree-walking evaluator with a tier-1 stack VM on top: slot-allocated locals, frame-linked closures, object shapes, and inline caches.</FeatureCard>
-<FeatureCard tag="// c-api" title="JavaScriptCore C-API subset">Exports the implemented public JSC C-API surface — <code>JSGlobalContextCreate</code>, <code>JSEvaluateScript</code>, and friends — for hosts that only need that subset.</FeatureCard>
+<FeatureCard tag="// c-api" title="C API subset">Exports the implemented public C API surface — <code>JSGlobalContextCreate</code>, <code>JSEvaluateScript</code>, and friends — for hosts that only need that subset, without treating compatibility shims as permanent before stabilization.</FeatureCard>
 <FeatureCard tag="// conformance" title="Measured, scoped">Scored against the real test262 suite with a crash-proof subprocess harness. The configured runner is green with zero skips and zero exclusions.</FeatureCard>
 </div>
 

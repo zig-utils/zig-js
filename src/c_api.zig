@@ -1,12 +1,12 @@
-//! JavaScriptCore C-API drop-in surface, implemented in pure Zig.
+//! JavaScriptCore-shaped C API subset, implemented in pure Zig.
 //!
 //! These `export fn` symbols mirror Apple's `<JavaScriptCore/JSValueRef.h>` and
-//! `<JSObjectRef.h>` so a consumer that today links the system
+//! `<JSObjectRef.h>` names closely enough for embedders that only use the
+//! implemented public subset to try this library in place of
 //! `JavaScriptCore.framework` (e.g. `~/Code/Home/lang`'s
-//! `packages/runtime/src/jsc/extern_fns.zig`) can link this library instead
-//! with zero call-site changes. All `JSValueRef` / `JSObjectRef` /
-//! `JSContextRef` arguments are word-sized opaque pointers, so the ABI matches
-//! regardless of the concrete Zig pointee types used internally.
+//! `packages/runtime/src/jsc/extern_fns.zig`). Pre-stabilization API cleanup
+//! should prefer clear zig-js contracts over preserving inert compatibility
+//! parameters.
 //!
 //! Internally a `JSValueRef` is a pointer to a `Boxed` value living in the
 //! Context arena; a `JSStringRef` is a reference-counted `JsString`.

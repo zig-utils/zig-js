@@ -3,9 +3,9 @@
 //! Two ways to use it:
 //!   1. As a Zig module (`@import("js")`): drive the engine directly via
 //!      `Context.create` / `Context.evaluate`, working with `Value`.
-//!   2. As a JavaScriptCore C-API drop-in: link the static library and call
-//!      the exported `JSGlobalContextCreate` / `JSEvaluateScript` / ... symbols
-//!      in place of the system `JavaScriptCore.framework`. See `c_api.zig`.
+//!   2. Through the implemented JavaScriptCore-shaped C API subset: link the
+//!      static library and call the exported `JSGlobalContextCreate` /
+//!      `JSEvaluateScript` / ... symbols. See `c_api.zig`.
 //!
 //! v1 scope: expressions, `var`/`let`/`const`, `if`/`else`, `while`, blocks,
 //! string concatenation, and the JSC value/string/object C-API surface that
@@ -45,7 +45,7 @@ pub const bytecode = @import("bytecode.zig");
 pub const Compiler = @import("compiler.zig").Compiler;
 pub const vm = @import("vm.zig");
 
-// JavaScriptCore C-API drop-in (re-exported for documentation / direct use).
+// JavaScriptCore-shaped C API subset (re-exported for documentation / direct use).
 pub const c_api = @import("c_api.zig");
 
 // The precise-GC binding (issue #1 Phase 7). Opt-in contexts allocate heap

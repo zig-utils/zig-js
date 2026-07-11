@@ -48,7 +48,7 @@ The VM gives each compiled function one **flat, block-transparent slot array**: 
 | `context.zig` | The engine instance (`JSGlobalContextRef` analog): arena allocator, globals, exception state, microtask queue. |
 | `builtins.zig` | Every built-in constructor and prototype method. |
 | `promise.zig` | Promise runtime + microtask queue. |
-| `c_api.zig` | The exported JavaScriptCore C-ABI surface. |
+| `c_api.zig` | The exported JavaScriptCore-shaped C API subset. |
 | `jsstring.zig` | Refcounted `JSStringRef` backing. |
 | `root.zig` | Module entry point and `installGlobals` bootstrap. |
 
@@ -60,6 +60,6 @@ A default `Context` owns an **arena allocator**: values and objects are bump-all
 
 zig-js supports **GIL-free shared-realm parallelism**. A context created with `Context.createWith(.{ .enable_threads = true })` installs `Thread`, `Lock`, `Condition`, `ThreadLocal`, and property-mode `Atomics`; shared-realm threads run truly in parallel by default, with `.gil = true` available as a serialized compatibility mode. This is [issue #1](https://github.com/zig-utils/zig-js/issues/1) and has its own documentation set under [`docs/threads/`](/threads/) — start with [`production-readiness.md`](/threads/production-readiness) for status and [`memory-model.md`](/threads/memory-model) for the concurrency semantics.
 
-## Why a C-API-compatible subset?
+## Why a C API subset?
 
-By exporting the implemented public JavaScriptCore C-API subset from `c_api.zig`, embedders that only use that surface can swap `JavaScriptCore.framework` for `libzig-js.a` and keep calling `JSGlobalContextCreate`, `JSEvaluateScript`, `JSObjectCallAsFunction`, and friends unchanged. See the [C-API guide](/api).
+By exporting an implemented JavaScriptCore-shaped C API subset from `c_api.zig`, embedders that only use that documented surface can try `libzig-js.a` with familiar calls like `JSGlobalContextCreate`, `JSEvaluateScript`, `JSObjectCallAsFunction`, and friends. This is an adoption path, not a reason to freeze inert compatibility parameters before zig-js stabilizes. See the [C API guide](/api).

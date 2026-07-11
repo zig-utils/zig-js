@@ -23,9 +23,9 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    // A static library exposing the JavaScriptCore C-API drop-in symbols
-    // (JSGlobalContextCreate, JSEvaluateScript, ...). Linking this in place of
-    // the system `JavaScriptCore` framework makes the engine a drop-in.
+    // A static library exposing the implemented C API symbols. Some names are
+    // JavaScriptCore-shaped for embedding convenience, but pre-stabilization API
+    // cleanup should prefer clear zig-js semantics over inert compatibility shims.
     const lib = b.addLibrary(.{
         .linkage = .static,
         .name = "zig-js",

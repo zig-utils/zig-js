@@ -1,6 +1,6 @@
 ---
 title: What is zig-js?
-description: A JavaScript engine written in pure Zig — standalone interpreter and JavaScriptCore C-API-compatible subset.
+description: A JavaScript engine written in pure Zig — standalone interpreter and JavaScriptCore-shaped C API subset.
 ---
 
 # What is zig-js?
@@ -8,7 +8,7 @@ description: A JavaScript engine written in pure Zig — standalone interpreter 
 **zig-js** is a JavaScript engine written from scratch in [Zig](https://ziglang.org), with **no external C dependencies**. It is two things at once:
 
 - a **standalone JavaScript interpreter** — a tree-walking evaluator backed by a tiered bytecode VM; and
-- a **JavaScriptCore C-API-compatible subset** — link `libzig-js.a` in place of the system `JavaScriptCore.framework` when your host uses the implemented public C-API surface.
+- a **JavaScriptCore-shaped C API subset** — link `libzig-js.a` in place of the system `JavaScriptCore.framework` when your host uses the implemented public C API surface, while the pre-stabilization API keeps room to drop inert compatibility shims.
 
 It is built as a general embeddable JavaScript engine for Zig applications, language runtimes, tools, and hosts that want to own their JS stack.
 
