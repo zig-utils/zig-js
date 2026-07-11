@@ -306,9 +306,25 @@ export fn JSValueToBoolean(ctx: JSContextRef, v: JSValueRef) callconv(.c) bool {
 }
 
 export fn JSValueToNumber(ctx: JSContextRef, v: JSValueRef, exception: ExceptionRef) callconv(.c) f64 {
-    _ = ctx;
-    _ = exception;
-    return unbox(v).toNumber();
+    const c = ctxFrom(ctx) orelse return std.math.nan(f64);
+    const gc_saved = gc_mod.setActiveHeap(c.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(c.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = c.interpreter();
+    c.pushActiveInterpreter(&machine) catch {
+        setException(c, exception, "OutOfMemory");
+        return std.math.nan(f64);
+    };
+    defer c.popActiveInterpreter(&machine);
+    return machine.toNumberV(unbox(v)) catch |err| {
+        if (err == error.Throw) {
+            if (exception != null) exception[0] = box(c, machine.exception);
+        } else {
+            setException(c, exception, @errorName(err));
+        }
+        return std.math.nan(f64);
+    };
 }
 
 export fn JSValueToStringCopy(ctx: JSContextRef, v: JSValueRef, exception: ExceptionRef) callconv(.c) JSStringRef {
@@ -749,6 +765,39 @@ test "C-API: JSEvaluateScript computes 1 + 1 === 2" {
     try std.testing.expect(exception == null);
     try std.testing.expect(JSValueIsNumber(ctx, result));
     try std.testing.expectEqual(@as(f64, 2), JSValueToNumber(ctx, result, null));
+}
+
+test "C-API: JSValueToNumber uses JavaScript ToNumber semantics" {
+    const ctx = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
+    defer JSGlobalContextRelease(ctx);
+
+    var exception: JSValueRef = null;
+    try std.testing.expectEqual(@as(f64, 42), JSValueToNumber(ctx, JSValueMakeNumber(ctx, 42), &exception));
+    try std.testing.expect(exception == null);
+
+    const object_script = JSStringCreateWithUTF8CString("({ valueOf() { return 7 * 6; } })") orelse return error.StringInitFailed;
+    defer JSStringRelease(object_script);
+    const object_value = JSEvaluateScript(ctx, object_script, null, null, 0, &exception) orelse return error.EvalFailed;
+    try std.testing.expect(exception == null);
+    try std.testing.expectEqual(@as(f64, 42), JSValueToNumber(ctx, object_value, &exception));
+    try std.testing.expect(exception == null);
+
+    const throwing_script = JSStringCreateWithUTF8CString("({ valueOf() { throw new TypeError('nope'); } })") orelse return error.StringInitFailed;
+    defer JSStringRelease(throwing_script);
+    const throwing_value = JSEvaluateScript(ctx, throwing_script, null, null, 0, &exception) orelse return error.EvalFailed;
+    try std.testing.expect(exception == null);
+    const throwing_number = JSValueToNumber(ctx, throwing_value, &exception);
+    try std.testing.expect(std.math.isNan(throwing_number));
+    try std.testing.expect(exception != null);
+
+    exception = null;
+    const symbol_script = JSStringCreateWithUTF8CString("Symbol('x')") orelse return error.StringInitFailed;
+    defer JSStringRelease(symbol_script);
+    const symbol_value = JSEvaluateScript(ctx, symbol_script, null, null, 0, &exception) orelse return error.EvalFailed;
+    try std.testing.expect(exception == null);
+    const symbol_number = JSValueToNumber(ctx, symbol_value, &exception);
+    try std.testing.expect(std.math.isNan(symbol_number));
+    try std.testing.expect(exception != null);
 }
 
 test "C-API: JSValueIsDate reports Date internal slot" {
