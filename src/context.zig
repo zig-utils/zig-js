@@ -18,6 +18,7 @@ const jsthread = @import("jsthread.zig");
 const stack_scan = @import("stack_scan.zig");
 const agent = @import("agent.zig");
 const promise = @import("promise.zig");
+const parser_mod = @import("parser.zig");
 
 pub const RunError = interp.EvalError || @import("parser.zig").ParseError;
 
@@ -1325,6 +1326,10 @@ pub const Context = struct {
     /// direct single-owner `destroy()` contract; `JSGlobalContextCreate*` sets
     /// this to one and `JSGlobalContextRetain/Release` maintain it.
     c_api_ref_count: std.atomic.Value(usize) = .init(0),
+    /// Best-effort source location for the last evaluation parse failure. This
+    /// lets public embedding surfaces attach sourceURL/line metadata without
+    /// widening the compact `RunError` error set.
+    last_evaluation_diagnostic: ?parser_mod.SourceLocation = null,
     env: interp.Environment,
     global_object: *value.Object,
     /// The empty root shape every object in this context transitions from.
@@ -2561,14 +2566,24 @@ pub const Context = struct {
         self.collectRequestedGarbage();
         const a = self.arena();
         const owned_source = try a.dupe(u8, source);
-        var parser = try Parser.init(a, owned_source);
-        const prog = try parser.parseProgram();
+        self.last_evaluation_diagnostic = null;
+        var parser = Parser.init(a, owned_source) catch |err| {
+            self.last_evaluation_diagnostic = parser_mod.sourceLocationAt(owned_source, 0);
+            return err;
+        };
+        const prog = parser.parseProgram() catch |err| {
+            self.last_evaluation_diagnostic = parser.errorLocation();
+            return err;
+        };
         // Global (Script) code has no `super` binding, so a top-level SuperCall or
         // SuperProperty — including inside a top-level arrow — is an early
         // SyntaxError. (Direct/indirect `eval` runs its own context-aware scan
         // via the interpreter, so this entry is genuine global code only.) The
         // scan descends into arrows but stops at nested functions/classes/methods.
-        if (prog.* == .program) try parser.scanEvalContext(prog.program, true, true);
+        if (prog.* == .program) parser.scanEvalContext(prog.program, true, true) catch |err| {
+            self.last_evaluation_diagnostic = parser.errorLocation();
+            return err;
+        };
         var machine = self.interpreter();
         machine.this_value = this_value;
         try self.pushActiveInterpreter(&machine);

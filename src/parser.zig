@@ -11,6 +11,33 @@ const Node = ast.Node;
 
 pub const ParseError = lex.LexError || error{ UnexpectedToken, ExpectedToken, InvalidAssignmentTarget };
 
+pub const SourceLocation = struct {
+    byte_offset: usize,
+    line: usize,
+    column: usize,
+};
+
+pub fn sourceLocationAt(source: []const u8, raw_offset: usize) SourceLocation {
+    const offset = @min(raw_offset, source.len);
+    var line: usize = 1;
+    var line_start: usize = 0;
+    var i: usize = 0;
+    while (i < offset) {
+        if (lex.lineTerminatorLen(source, i)) |len| {
+            line += 1;
+            i += len;
+            line_start = i;
+        } else {
+            i += 1;
+        }
+    }
+    return .{
+        .byte_offset = offset,
+        .line = line,
+        .column = offset - line_start + 1,
+    };
+}
+
 /// Recursive-descent + precedence-climbing parser producing an arena-allocated
 /// AST for the v1 subset (expressions, var/let/const, if/else, while, blocks).
 pub const Parser = struct {
@@ -134,6 +161,10 @@ pub const Parser = struct {
     pending_labels: std.ArrayListUnmanaged([]const u8) = .empty,
     /// Labels of currently enclosing iteration statements.
     continue_labels: std.ArrayListUnmanaged([]const u8) = .empty,
+    /// Best-effort byte offset for the most recent parse failure. The parser
+    /// still returns compact Zig error tags, but embedders can combine this with
+    /// `sourceLocationAt` to report useful source diagnostics.
+    last_error_offset: ?usize = null,
 
     pub fn init(arena: std.mem.Allocator, source: []const u8) ParseError!Parser {
         var lx = lex.Lexer.init(arena, source);
@@ -179,6 +210,16 @@ pub const Parser = struct {
         return containsLineTerminator(gap);
     }
 
+    fn fail(self: *Parser, err: ParseError) ParseError {
+        self.last_error_offset = if (self.pos < self.tokens.len) self.cur().pos else self.source.len;
+        return err;
+    }
+
+    pub fn errorLocation(self: *const Parser) SourceLocation {
+        const offset = self.last_error_offset orelse if (self.pos < self.tokens.len) self.tokens[self.pos].pos else self.source.len;
+        return sourceLocationAt(self.source, offset);
+    }
+
     /// Whether no line terminator separates the token `ahead` positions away from
     /// the one just before it (the restricted-production check, e.g. `using` may
     /// not be followed by a newline before its binding identifier).
@@ -190,7 +231,7 @@ pub const Parser = struct {
         if (self.match(.semicolon)) return;
         if (self.check(.eof) or self.check(.rbrace)) return;
         if (self.hasLineTerminatorBefore(0)) return;
-        return ParseError.UnexpectedToken;
+        return self.fail(ParseError.UnexpectedToken);
     }
 
     fn advance(self: *Parser) Token {
@@ -212,7 +253,7 @@ pub const Parser = struct {
     }
 
     fn expect(self: *Parser, kind: TokenKind) ParseError!void {
-        if (!self.match(kind)) return ParseError.ExpectedToken;
+        if (!self.match(kind)) return self.fail(ParseError.ExpectedToken);
     }
 
     fn isKeyword(t: Token, word: []const u8) bool {
@@ -232,7 +273,7 @@ pub const Parser = struct {
     }
     /// Consume a contextual keyword `word` or fail.
     fn expectContextual(self: *Parser, word: []const u8) ParseError!void {
-        if (!self.isContextual(word)) return ParseError.UnexpectedToken;
+        if (!self.isContextual(word)) return self.fail(ParseError.UnexpectedToken);
         _ = self.advance();
     }
     /// The token `ahead` positions from the cursor has kind `kind`.
@@ -436,7 +477,7 @@ pub const Parser = struct {
         if (!self.eval_private_allowed) try self.checkPrivateUsesInProgram(stmts.items);
         // A CoverInitializedName (`{ a = 1 }`) never refined to a pattern is an
         // early error.
-        if (self.pending_cover_inits.count() > 0 or self.pending_proto_dup.count() > 0) return ParseError.UnexpectedToken;
+        if (self.pending_cover_inits.count() > 0 or self.pending_proto_dup.count() > 0) return self.fail(ParseError.UnexpectedToken);
         return self.alloc(.{ .program = stmts.items });
     }
 
@@ -907,7 +948,7 @@ pub const Parser = struct {
             try stmts.append(self.arena, try self.parseModuleItem());
         }
         try self.checkModuleEarlyErrors(stmts.items);
-        if (self.pending_cover_inits.count() > 0 or self.pending_proto_dup.count() > 0) return ParseError.UnexpectedToken;
+        if (self.pending_cover_inits.count() > 0 or self.pending_proto_dup.count() > 0) return self.fail(ParseError.UnexpectedToken);
         return self.alloc(.{ .program = stmts.items });
     }
 
@@ -4213,6 +4254,24 @@ fn substEnd(raw: []const u8, start: usize) usize {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+test "parser source locations map byte offsets to one-based line columns" {
+    const src = "alpha\r\nbeta\u{2028}gamma";
+    try std.testing.expectEqual(SourceLocation{ .byte_offset = 0, .line = 1, .column = 1 }, sourceLocationAt(src, 0));
+    try std.testing.expectEqual(SourceLocation{ .byte_offset = 7, .line = 2, .column = 1 }, sourceLocationAt(src, 7));
+    try std.testing.expectEqual(SourceLocation{ .byte_offset = 14, .line = 3, .column = 1 }, sourceLocationAt(src, 14));
+    try std.testing.expectEqual(SourceLocation{ .byte_offset = src.len, .line = 3, .column = 6 }, sourceLocationAt(src, src.len + 99));
+}
+
+test "parser records current token source location for expected-token failures" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var p = try Parser.init(arena.allocator(), "let ok = 1;\nlet bad = ;");
+    try std.testing.expectError(ParseError.UnexpectedToken, p.parseProgram());
+    const loc = p.errorLocation();
+    try std.testing.expectEqual(@as(usize, 2), loc.line);
+    try std.testing.expectEqual(@as(usize, 12), loc.column);
+}
 
 test "parser builds precedence-correct tree" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);

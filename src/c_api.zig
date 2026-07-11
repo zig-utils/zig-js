@@ -115,6 +115,45 @@ fn setException(ctx: *Context, exc: ExceptionRef, message: []const u8) void {
     if (exc != null) exc[0] = box(ctx, Value.str(message));
 }
 
+fn isEvaluationParseError(err: anyerror) bool {
+    return switch (err) {
+        error.UnexpectedCharacter,
+        error.UnterminatedString,
+        error.UnterminatedComment,
+        error.InvalidNumber,
+        error.UnexpectedToken,
+        error.ExpectedToken,
+        error.InvalidAssignmentTarget,
+        => true,
+        else => false,
+    };
+}
+
+fn setEvaluationException(ctx: *Context, exc: ExceptionRef, err: anyerror, source_url: JSStringRef, starting_line_number: c_int) void {
+    if (isEvaluationParseError(err)) {
+        if (ctx.last_evaluation_diagnostic) |loc| {
+            const source_name = if (strFrom(source_url)) |s|
+                if (s.bytes.len == 0) "<eval>" else s.bytes
+            else
+                "<eval>";
+            const base_line: usize = if (starting_line_number > 0) @intCast(starting_line_number) else 1;
+            const line = loc.line + base_line - 1;
+            const message = std.fmt.allocPrint(ctx.arena(), "{s}: {s}:{d}:{d}", .{
+                @errorName(err),
+                source_name,
+                line,
+                loc.column,
+            }) catch {
+                setException(ctx, exc, @errorName(err));
+                return;
+            };
+            setException(ctx, exc, message);
+            return;
+        }
+    }
+    setException(ctx, exc, @errorName(err));
+}
+
 fn propAttrFromC(attrs: c_uint) value.PropAttr {
     return .{
         .writable = (attrs & kJSPropertyAttributeReadOnly) == 0,
@@ -178,8 +217,6 @@ export fn JSEvaluateScript(
     starting_line_number: c_int,
     exception: ExceptionRef,
 ) callconv(.c) JSValueRef {
-    _ = source_url;
-    _ = starting_line_number;
     // `Context.evaluate()` acquires/releases the per-context GIL for serialized
     // threaded contexts. Fetch raw here so `ZJSGlobalContextCreateThreaded(true)`
     // is usable through the public C API in Debug builds too.
@@ -198,7 +235,7 @@ export fn JSEvaluateScript(
         if (err == error.Throw) {
             if (exception != null) exception[0] = box(c, c.exception orelse Value.str("uncaught exception"));
         } else {
-            setException(c, exception, @errorName(err));
+            setEvaluationException(c, exception, err, source_url, starting_line_number);
         }
         return null;
     };
@@ -1368,6 +1405,26 @@ test "C-API: JSEvaluateScript honors explicit thisObject" {
     try std.testing.expect(exception == null);
     try std.testing.expectEqual(@as(f64, 42), JSValueToNumber(ctx, result, &exception));
     try std.testing.expect(exception == null);
+}
+
+test "C-API: evaluation syntax exceptions include source URL and line" {
+    const ctx = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
+    defer JSGlobalContextRelease(ctx);
+
+    const script = JSStringCreateWithUTF8CString("let ok = 1;\nlet bad = ;") orelse return error.StringInitFailed;
+    defer JSStringRelease(script);
+    const url = JSStringCreateWithUTF8CString("app.js") orelse return error.StringInitFailed;
+    defer JSStringRelease(url);
+
+    var exception: JSValueRef = null;
+    try std.testing.expect(JSEvaluateScript(ctx, script, null, url, 40, &exception) == null);
+    try std.testing.expect(exception != null);
+
+    const msg = JSValueToStringCopy(ctx, exception, null) orelse return error.StringInitFailed;
+    defer JSStringRelease(msg);
+    var buf: [128]u8 = undefined;
+    const written = JSStringGetUTF8CString(msg, &buf, buf.len);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0 .. written - 1], "app.js:41:12") != null);
 }
 
 test "C-API: JSObjectSetProperty honors property attributes" {
