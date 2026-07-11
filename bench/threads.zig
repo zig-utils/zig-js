@@ -78,6 +78,40 @@ const promise_microtask_scenario = Scenario{
     .rounds = 6,
 };
 
+const promise_reaction_scenario = Scenario{
+    .name = "promise reactions",
+    .setup =
+    \\globalThis.worker = function(id) {
+    \\  var settled = 0;
+    \\  for (var i = 0; i < 512; i = i + 1) {
+    \\    Promise.resolve(i + id).then(function(v) {
+    \\      settled = settled + (v | 0);
+    \\    });
+    \\  }
+    \\  drainMicrotasks();
+    \\  return settled;
+    \\};
+    ,
+    .rounds = 6,
+};
+
+const promise_thenable_scenario = Scenario{
+    .name = "promise thenables",
+    .setup =
+    \\globalThis.worker = function(id) {
+    \\  var settled = 0;
+    \\  for (var i = 0; i < 512; i = i + 1) {
+    \\    Promise.resolve({ then: function(resolve) { resolve(id + i); } }).then(function(v) {
+    \\      settled = settled + (v | 0);
+    \\    });
+    \\  }
+    \\  drainMicrotasks();
+    \\  return settled;
+    \\};
+    ,
+    .rounds = 6,
+};
+
 const ModuleMessageProfileHost = struct {
     const Entry = struct { path: []const u8, source: []const u8 };
     var host_ctx: u8 = 0;
@@ -545,17 +579,17 @@ fn timeScenario(gpa: std.mem.Allocator, io: std.Io, scenario: Scenario, workers:
     };
 }
 
-fn timePromiseScenario(gpa: std.mem.Allocator, io: std.Io, workers: usize, mode: PromiseMode) !PromiseTiming {
+fn timePromiseScenario(gpa: std.mem.Allocator, io: std.Io, workers: usize, mode: PromiseMode, scenario: Scenario) !PromiseTiming {
     const ctx = try js.Context.createWith(gpa, mode.options());
     defer ctx.destroy();
-    try installHarness(ctx, promise_microtask_scenario);
+    try installHarness(ctx, scenario);
 
     const src = try std.fmt.allocPrint(ctx.arena(), "spawnBatch({d})", .{workers});
     _ = try ctx.evaluate(src);
 
     const t0 = nowNs(io);
     var round: usize = 0;
-    while (round < promise_microtask_scenario.rounds) : (round += 1) {
+    while (round < scenario.rounds) : (round += 1) {
         _ = try ctx.evaluate(src);
     }
     const elapsed: u64 = @intCast(nowNs(io) - t0);
@@ -569,7 +603,7 @@ fn timePromiseScenario(gpa: std.mem.Allocator, io: std.Io, workers: usize, mode:
     errdefer js.jsthread.disableContentionStats();
     errdefer js.promise_profile.disablePromiseStats();
     round = 0;
-    while (round < promise_microtask_scenario.rounds) : (round += 1) {
+    while (round < scenario.rounds) : (round += 1) {
         _ = try ctx.evaluate(src);
     }
     const contention = js.jsthread.contentionStats();
@@ -583,8 +617,8 @@ fn timePromiseScenario(gpa: std.mem.Allocator, io: std.Io, workers: usize, mode:
     };
 }
 
-fn printPromiseProfile(gpa: std.mem.Allocator, io: std.Io, workers: []const usize) !void {
-    std.debug.print("\nPromise microtask profile\n", .{});
+fn printPromiseProfile(gpa: std.mem.Allocator, io: std.Io, workers: []const usize, scenario: Scenario) !void {
+    std.debug.print("\n{s} profile\n", .{scenario.name});
     std.debug.print("gil+gc = serialized fallback with GC-managed cells; ns columns are uninstrumented warmed timings; enq/pop/run = counted microtask queue enqueues, pops, and job runs; qlock/qyld = counted queue-lock acquisitions / yield-backed contention; plock/pyld = counted Promise-state lock acquisitions / yield-backed contention; aacq/acnt/aspn = counted LockedArena acquisitions / contended acquisitions / failed spin attempts; rxn/thn split reaction from thenable jobs; rpair/cap = resolving-function pairs / NewPromiseCapability executors\n", .{});
     std.debug.print("{s:>8} {s:>14} {s:>14} {s:>14} {s:>12} {s:>12} {s:>12}", .{
         "threads",
@@ -632,9 +666,9 @@ fn printPromiseProfile(gpa: std.mem.Allocator, io: std.Io, workers: []const usiz
 
     var base_parallel: u64 = 1;
     for (workers) |n| {
-        const parallel = try timePromiseScenario(gpa, io, n, .no_gil);
-        const gil = try timePromiseScenario(gpa, io, n, .gil);
-        const gil_gc = try timePromiseScenario(gpa, io, n, .gil_gc);
+        const parallel = try timePromiseScenario(gpa, io, n, .no_gil, scenario);
+        const gil = try timePromiseScenario(gpa, io, n, .gil, scenario);
+        const gil_gc = try timePromiseScenario(gpa, io, n, .gil_gc, scenario);
         const parallel_ns = parallel.ns;
         const gil_ns = gil.ns;
         const gil_gc_ns = gil_gc.ns;
@@ -1304,7 +1338,7 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("waitus/jus/lus/cus/pus = total native wait microseconds, then join/lock/condition/property wait microseconds\n", .{});
     std.debug.print("async/done = aggregate async waiter registrations/settlements; caw/cad and paw/pad split Condition.asyncWait versus property waitAsync\n", .{});
     std.debug.print("empty/jobs = run-loop task-pump empty fast-path hits / delivered grant jobs; hold/cjob split asyncHold vs Condition.asyncWait reacquire jobs\n", .{});
-    std.debug.print("focused filters: worker messages, worker teardown, promise microtasks\n", .{});
+    std.debug.print("focused filters: worker messages, worker teardown, promise microtasks, promise reactions, promise thenables\n", .{});
 
     if (scenario_filter) |filter| {
         if (std.mem.eql(u8, filter, "worker messages")) {
@@ -1316,7 +1350,15 @@ pub fn main(init: std.process.Init) !void {
             return;
         }
         if (std.mem.eql(u8, filter, "promise microtasks")) {
-            try printPromiseProfile(gpa, io, worker_counts);
+            try printPromiseProfile(gpa, io, worker_counts, promise_microtask_scenario);
+            return;
+        }
+        if (std.mem.eql(u8, filter, "promise reactions")) {
+            try printPromiseProfile(gpa, io, worker_counts, promise_reaction_scenario);
+            return;
+        }
+        if (std.mem.eql(u8, filter, "promise thenables")) {
+            try printPromiseProfile(gpa, io, worker_counts, promise_thenable_scenario);
             return;
         }
     }

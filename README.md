@@ -213,6 +213,7 @@ zig build test -Dtsan=true
 zig build threads-profile
 zig build threads-profile -Dthreads-profile-case='condition asyncWait'
 zig build threads-profile -Dthreads-profile-case='promise microtasks'
+zig build threads-profile -Dthreads-profile-case='promise thenables'
 zig build midgc-profile
 zig build gc-profile
 ```

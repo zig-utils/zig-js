@@ -655,10 +655,11 @@ whose joiner is a spawned thread are routed to the realm queue rather than the
 joiner's abandoned local queue (`PendingJoin` records the joiner; exiting threads
 flush their residual queue). With the budget-cleared corpus and these fixes, the
 promoted `parallel_js` allowlist now runs clean. (6)
-The contention profiler now also has a focused `promise microtasks` case for
-issue #15: it keeps the default table narrow, but records Promise microtask
-enqueue/pop/run totals and splits reaction jobs from thenable-assimilation jobs
-under no-GIL versus `.gil = true`. Its timing columns come from an
+The contention profiler now also has focused `promise microtasks`,
+`promise reactions`, and `promise thenables` cases for issue #15: they keep the
+default table narrow, but record Promise microtask enqueue/pop/run totals and
+split reaction jobs from thenable-assimilation jobs under no-GIL versus
+`.gil = true`. Their timing columns come from an
 uninstrumented warmed pass; the counter columns come from a separate counted
 pass in the same warmed context, so profiler atomics do not masquerade as
 runtime contention. The focused columns split microtask-queue lock traffic
