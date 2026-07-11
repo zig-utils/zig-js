@@ -1863,6 +1863,11 @@ pub const Context = struct {
             self.gc_state = gc_state;
             // Single-mutator only for now: concurrent marking + no peer mutators.
             self.gc_concurrent = options.concurrent_gc and !options.enable_threads;
+            // A dedicated marker thread can still read the heap's payload index
+            // and all-list while the lone mutator allocates. Keep that metadata
+            // serialized without opting into the multi-mutator parallel finish
+            // protocol (`h.parallel` stays false in this mode).
+            h.setConcurrentMarkerMetadata(self.gc_concurrent);
         }
         // Route all cell allocation (the global object + TDZ sentinel,
         // installGlobals, and the mirror loop below) through the GC when
