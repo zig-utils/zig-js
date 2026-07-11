@@ -121,9 +121,11 @@ contexts can recover after unreachable pressure is collected.
 `reference/webkit-249/threads-tests`. CI shards the serialized/GIL leg with
 `-Dthreads-shard-index=N -Dthreads-shard-count=4`; local full runs still use the
 plain command, while a stuck shard prints the active `RUN` case before executing
-it. The current coverage contains 231 promoted files out of 259 executable
-PR-249 files: 229 in the default `zig build threads-test` allowlist plus 2
-`parallel_js`-only witnesses. It covers:
+it. The required matrix gate is also bounded so a true hang becomes an archived,
+diagnosable failed job instead of an opaque spinner. The current coverage
+contains 231 promoted files out of 259 executable PR-249 files: 229 in the
+default `zig build threads-test` allowlist plus 2 `parallel_js`-only witnesses.
+It covers:
 
 - `api/` and `lifecycle/`: constructor shape, lifecycle, ids, constructor
   errors, exceptions, restriction, return values, join semantics, blocking
