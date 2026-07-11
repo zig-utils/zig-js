@@ -155,7 +155,10 @@ fn strFrom(ref: JSStringRef) ?*JsString {
 }
 
 fn setException(ctx: *Context, exc: ExceptionRef, message: []const u8) void {
-    if (exc != null) exc[0] = box(ctx, Value.str(message));
+    if (exc != null) {
+        const v = Value.strAlloc(ctx.arena(), message) catch Value.staticStr("OutOfMemory");
+        exc[0] = box(ctx, v);
+    }
 }
 
 fn setExceptionValue(ctx: *Context, exc: ExceptionRef, exception_value: Value) void {
@@ -208,7 +211,7 @@ fn makeEvaluationSyntaxError(
     const err = try machine.makeError("SyntaxError", message);
     const obj = err.asObj();
     const source_name_copy = try ctx.arena().dupe(u8, source_name);
-    try setDiagnosticField(ctx, obj, "sourceURL", Value.str(source_name_copy));
+    try setDiagnosticField(ctx, obj, "sourceURL", try Value.strOwned(ctx.arena(), source_name_copy));
     try setDiagnosticField(ctx, obj, "line", Value.num(@floatFromInt(line)));
     try setDiagnosticField(ctx, obj, "column", Value.num(@floatFromInt(column)));
     try setDiagnosticField(ctx, obj, "byteOffset", Value.num(@floatFromInt(byte_offset)));
@@ -240,7 +243,7 @@ fn attachEvaluationRuntimeSourceMetadata(
 
     const source_name = evaluationSourceName(source_url);
     const source_name_copy = try ctx.arena().dupe(u8, source_name);
-    try setDiagnosticField(ctx, obj, "sourceURL", Value.str(source_name_copy));
+    try setDiagnosticField(ctx, obj, "sourceURL", try Value.strOwned(ctx.arena(), source_name_copy));
     try setDiagnosticField(ctx, obj, "startingLineNumber", Value.num(@floatFromInt(if (starting_line_number > 0) starting_line_number else 1)));
 }
 
@@ -476,7 +479,7 @@ export fn JSValueMakeString(ctx: JSContextRef, str: JSStringRef) callconv(.c) JS
     const c = ctxFrom(ctx) orelse return null;
     const s = strFrom(str) orelse return null;
     const copy = c.arena().dupe(u8, s.bytes) catch return null;
-    return box(c, Value.str(copy));
+    return box(c, Value.strOwned(c.arena(), copy) catch return null);
 }
 
 // ---- JSValue coercion -------------------------------------------------
@@ -923,7 +926,7 @@ export fn JSObjectMakeFunctionWithCallback(ctx: JSContextRef, name: JSStringRef,
     obj.* = .{ .callback = cb, .callback_context = c, .native = hostCallbackNative, .proto = machine.functionProto() };
     const name_bytes = if (strFrom(name)) |s| s.bytes else "";
     const name_copy = c.arena().dupe(u8, name_bytes) catch return null;
-    obj.setOwn(c.arena(), c.root_shape, "name", Value.str(name_copy)) catch return null;
+    obj.setOwn(c.arena(), c.root_shape, "name", Value.strOwned(c.arena(), name_copy) catch return null) catch return null;
     obj.setAttr(c.arena(), "name", .{ .writable = false, .enumerable = false, .configurable = true }) catch return null;
     return box(c, Value.obj(obj));
 }

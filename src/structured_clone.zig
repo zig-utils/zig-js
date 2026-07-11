@@ -491,7 +491,7 @@ const Deserializer = struct {
             .null_v => return Value.nul(),
             .bool_v => return Value.boolVal((d.r.byte() catch return d.fail()) != 0),
             .number => return Value.num(d.r.num() catch return d.fail()),
-            .string => return Value.str(try a.dupe(u8, d.r.str() catch return d.fail())),
+            .string => return try Value.strOwned(a, try a.dupe(u8, d.r.str() catch return d.fail())),
             .bigint => return d.self.makeBigInt(d.r.int(i128) catch return d.fail()),
             .bigint_text => return d.self.makeBigIntText(try a.dupe(u8, d.r.str() catch return d.fail())),
             .ref => {
@@ -539,7 +539,7 @@ const Deserializer = struct {
                 // compiled program and lastIndex slot are consistent.
                 const ctor = d.self.env.get("RegExp") orelse return d.fail();
                 if (!ctor.isObject()) return d.fail();
-                const re = try d.self.construct(ctor, &.{ Value.str(src), Value.str(flags) });
+                const re = try d.self.construct(ctor, &.{ try Value.strOwned(a, src), try Value.strOwned(a, flags) });
                 if (!re.isObject()) return d.fail();
                 try d.objs.append(a, re.asObj());
                 return re;
@@ -581,7 +581,7 @@ const Deserializer = struct {
                 o.proto = d.protoFor(name) orelse d.protoFor("Error");
                 if ((d.r.byte() catch return d.fail()) == 1) {
                     const msg = try a.dupe(u8, d.r.str() catch return d.fail());
-                    try o.setOwn(a, d.self.root_shape, "message", Value.str(msg));
+                    try o.setOwn(a, d.self.root_shape, "message", try Value.strOwned(a, msg));
                     try o.setAttr(a, "message", .{ .writable = true, .enumerable = false, .configurable = true });
                 }
                 return Value.obj(o);

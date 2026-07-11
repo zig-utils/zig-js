@@ -431,7 +431,7 @@ fn installConcurrentAccessError(ctx: *Context) !void {
     const proto = try gc_mod.allocObj(a);
     proto.* = .{ .proto = base_proto_v.asObj() };
     const ro = value.PropAttr{ .writable = true, .enumerable = false, .configurable = true };
-    try proto.setOwn(a, rs, "name", Value.str(name));
+    try proto.setOwn(a, rs, "name", Value.str("ConcurrentAccessError"));
     try proto.setAttr(a, "name", ro);
     try proto.setOwn(a, rs, "message", Value.str(""));
     try proto.setAttr(a, "message", ro);
@@ -1301,7 +1301,7 @@ fn setTag(ctx: *Context, proto: *value.Object, name: []const u8) !void {
     var machine = ctx.interpreter();
     const k = machine.wellKnownSymbolKey("toStringTag") orelse return;
     const a = ctx.arena();
-    try proto.setOwn(a, ctx.root_shape, k, Value.str(name));
+    try proto.setOwn(a, ctx.root_shape, k, try Value.strAlloc(a, name));
     try proto.setAttr(a, k, .{ .writable = false, .enumerable = false, .configurable = true });
 }
 
@@ -2339,6 +2339,7 @@ pub fn propWaitAsync(self: *Interpreter, args: []const Value, timeout_ns: ?u64) 
 
 fn settlePropAsync(self: *Interpreter, t: *PropAsyncTicket, outcome: []const u8) void {
     bumpContention("property_wait_async_settled");
+    const outcome_value = if (std.mem.eql(u8, outcome, "ok")) Value.str("ok") else Value.str("timed-out");
     if (promise.promiseOf(Value.obj(t.promise))) |pp| {
         const saved_microtasks = self.microtasks;
         if (t.thread) |rec| {
@@ -2346,12 +2347,12 @@ fn settlePropAsync(self: *Interpreter, t: *PropAsyncTicket, outcome: []const u8)
             rec.join_mutex.lockUncancelable(io);
             const target = if (rec.microtasks == t.microtasks) t.microtasks else &rec.ctx.microtasks;
             self.microtasks = target;
-            promise.resolve(self, pp, Value.str(outcome)) catch {};
+            promise.resolve(self, pp, outcome_value) catch {};
             self.microtasks = saved_microtasks;
             rec.join_mutex.unlock(io);
         } else {
             self.microtasks = t.microtasks;
-            promise.resolve(self, pp, Value.str(outcome)) catch {};
+            promise.resolve(self, pp, outcome_value) catch {};
             self.microtasks = saved_microtasks;
         }
     }

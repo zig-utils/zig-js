@@ -219,26 +219,18 @@ pub const InternTable = struct {
 // Threadlocal active intern table — optional shared-string machinery.
 //
 // The NaN-box `Value` swap (#7) makes a string `Value` a single pointer to a
-// `StringCell`, so `Value.str(s)` must turn a `[]const u8` into a `*StringCell`.
-// But `Value.str` is a static constructor with no allocator in scope, and there
-// are ~424 such sites. Rather than thread an allocator through all of them, the
-// engine can install an `InternTable` as a *threadlocal active table* at the
-// same entry points the GC active-heap is set. `internActive(s)` then turns a
-// slice into a canonical cell with no per-site allocator, mirroring the
-// `gc_runtime` active-heap pattern. The live `Value.str` path uses the active
-// arena below, not this optional interning table.
+// `StringCell`. Runtime strings now use fallible `Value.strAlloc`/`strOwned`,
+// while `Value.str("literal")` is a static-cell constructor. This optional
+// active intern table remains for standalone/proof paths that explicitly want
+// canonical cells without threading a table through every call.
 // ---------------------------------------------------------------------------
 
 threadlocal var active_table: ?*InternTable = null;
 
-/// Threadlocal active *arena* for non-interned string cells — the rep-flip's
-/// `Value.str(s)` backend. Set to the current realm's arena at the engine entry
-/// points (alongside the GC active-heap), so a string `Value` allocates a
-/// `StringCell` with no per-site allocator. Unlike `internActive`, this does not
-/// dedup (one cell per call) — cheaper (no hash/lock) and the cells live with
-/// the realm arena (freed at `Context.destroy`, no leak). A process-global
-/// fallback (its own allocator, invisible to per-test leak checks) covers the
-/// rare path with no active arena, so `makeCell` never fails.
+/// Threadlocal active *arena* for legacy standalone paths that still need to
+/// manufacture non-interned cells without passing an allocator. Main engine
+/// runtime strings should prefer fallible `Value.strAlloc`/`strOwned`, and
+/// literals should use `Value.str("literal")` / `Value.staticStr`.
 threadlocal var active_arena: ?std.mem.Allocator = null;
 
 /// Install `a` as this thread's active string arena; returns the previous one.

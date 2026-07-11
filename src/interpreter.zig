@@ -2114,7 +2114,7 @@ pub const Interpreter = struct {
         // `message` is an own property only when one was supplied (else inherited,
         // = "" from the prototype); `name` is always inherited from the prototype.
         if (message.len > 0) {
-            try self.setProp(obj, "message", Value.str(message));
+            try self.setProp(obj, "message", try Value.strAlloc(self.arena, message));
             try obj.setAttr(self.arena, "message", .{ .enumerable = false, .configurable = true, .writable = true });
         }
         return Value.obj(obj);
@@ -2194,7 +2194,7 @@ pub const Interpreter = struct {
         return switch (node.*) {
             .number => |n| Value.num(n),
             .bigint_lit => |b| if (b.text) |s| try self.makeBigIntText(s) else try self.makeBigInt(b.value),
-            .string => |s| Value.str(s),
+            .string => |s| try Value.strAlloc(self.arena, s),
             .boolean => |b| Value.boolVal(b),
             .null_lit => Value.nul(),
             .undefined_lit => Value.undef(),
@@ -3155,7 +3155,7 @@ pub const Interpreter = struct {
                         // for-in has no per-iteration `using` resource, so the
                         // binding env is always reusable while uncaptured.
                         if (lexical) self.env = try self.iterBindingEnv(&ienv, saved_env, true);
-                        try self.bindLoopTarget(decl_kind, target, Value.str(k));
+                        try self.bindLoopTarget(decl_kind, target, try Value.strAlloc(self.arena, k));
                         last = try self.eval(body);
                         if (self.loopSignal(my_label)) |stop| if (stop) break;
                     }
@@ -3224,7 +3224,7 @@ pub const Interpreter = struct {
                     const desc = try moduleNsDesc(self, o, k);
                     break :blk desc.isObject() and if (desc.asObj().getOwn("enumerable")) |e| e.toBoolean() else false;
                 } else if (o.proxy_handler != null or o.proxy_revoked) blk: {
-                    const desc = try builtins.objectGetOwnPropertyDescriptor(@ptrCast(self), Value.undef(), &.{ Value.obj(o), self.keyToValue(k) });
+                    const desc = try builtins.objectGetOwnPropertyDescriptor(@ptrCast(self), Value.undef(), &.{ Value.obj(o), try self.keyToValue(k) });
                     break :blk desc.isObject() and if (desc.asObj().getOwn("enumerable")) |e| e.toBoolean() else false;
                 } else o.getAttr(k).enumerable;
                 if (enumerable) try out.append(self.arena, k);
@@ -3244,7 +3244,7 @@ pub const Interpreter = struct {
         if (!v.isUndefined() and !v.isNull()) {
             const o = try self.toObject(v);
             for (try self.forInKeyList(o)) |k| {
-                try arr.appendElement(self.arena, Value.str(k));
+                try arr.appendElement(self.arena, try Value.strAlloc(self.arena, k));
             }
         }
         return Value.obj(arr);
@@ -4248,7 +4248,7 @@ pub const Interpreter = struct {
     /// NativeFunction syntax `function NAME() { [native code] }`.
     fn functionToString(self: *Interpreter, o: *value.Object) EvalError!Value {
         if (funcOf(Value.obj(o))) |func| {
-            if (func.source.len > 0) return Value.str(func.source);
+            if (func.source.len > 0) return try Value.strAlloc(self.arena, func.source);
         }
         // Bound function exotics have a public `.name` like "bound f", but their
         // NativeFunction source form is anonymous (`function () { [native code] }`).
@@ -4282,7 +4282,7 @@ pub const Interpreter = struct {
     fn nameAccessor(self: *Interpreter, fnv: Value, prefix: []const u8, name_str: []const u8) EvalError!void {
         if (!fnv.isObject() or !fnv.asObj().isCallableObject()) return;
         const nm = try std.fmt.allocPrint(self.arena, "{s} {s}", .{ prefix, name_str });
-        try fnv.asObj().setOwn(self.arena, self.root_shape, "name", Value.str(nm));
+        try fnv.asObj().setOwn(self.arena, self.root_shape, "name", try Value.strAlloc(self.arena, nm));
         try fnv.asObj().setAttr(self.arena, "name", .{ .writable = false, .enumerable = false, .configurable = true });
         if (funcOf(fnv)) |f| f.name = nm;
     }
@@ -4317,7 +4317,7 @@ pub const Interpreter = struct {
             // is overridable.
             if (!c.isString() or c.asStr().len != 0) return;
         }
-        try o.setOwn(self.arena, self.root_shape, "name", Value.str(name));
+        try o.setOwn(self.arena, self.root_shape, "name", try Value.strAlloc(self.arena, name));
         try o.setAttr(self.arena, "name", .{ .writable = false, .enumerable = false, .configurable = true });
         if (funcOf(val)) |f| f.name = name; // keep Function.name in sync
     }
@@ -5251,9 +5251,9 @@ pub const Interpreter = struct {
         if (self.template_cache.get(@ptrCast(site))) |cached| return cached.asObj();
         const t = site.tagged_template;
         const s = (try self.newArray()).asObj();
-        for (t.cooked) |c| try s.appendElement(self.arena, if (c) |cv| Value.str(cv) else Value.undef());
+        for (t.cooked) |c| try s.appendElement(self.arena, if (c) |cv| try Value.strAlloc(self.arena, cv) else Value.undef());
         const raw_arr = (try self.newArray()).asObj();
-        for (t.raw) |c| try raw_arr.appendElement(self.arena, Value.str(c));
+        for (t.raw) |c| try raw_arr.appendElement(self.arena, try Value.strAlloc(self.arena, c));
         try freezeTemplateArray(self, raw_arr);
         try s.setOwn(self.arena, self.root_shape, "raw", Value.obj(raw_arr));
         try s.setAttr(self.arena, "raw", .{ .writable = false, .enumerable = false, .configurable = false });
@@ -5396,7 +5396,7 @@ pub const Interpreter = struct {
         const tgt_name = try self.getProperty(Value.obj(target), "name");
         const base_name = if (tgt_name.isString()) tgt_name.asStr() else "";
         const bound_name = try std.fmt.allocPrint(self.arena, "bound {s}", .{base_name});
-        try obj.setOwn(self.arena, self.root_shape, "name", Value.str(bound_name));
+        try obj.setOwn(self.arena, self.root_shape, "name", try Value.strAlloc(self.arena, bound_name));
         try obj.setAttr(self.arena, "name", ro_attr);
         return Value.obj(obj);
     }
@@ -6805,7 +6805,7 @@ pub const Interpreter = struct {
             for (buf[0..n]) |s| {
                 if (self.takeAsyncWaiter(listp, s.id)) |e| {
                     if (promise.promiseOf(e.promise)) |pp| {
-                        const outcome: Value = Value.str(if (s.outcome == .ok) "ok" else "timed-out");
+                        const outcome: Value = if (s.outcome == .ok) Value.str("ok") else Value.str("timed-out");
                         promise.resolve(self, pp, outcome) catch {};
                     }
                 }
@@ -7235,7 +7235,7 @@ pub const Interpreter = struct {
                 if (so.proxy_handler != null or so.proxy_revoked) {
                     for (try self.objectOwnKeysList(so)) |k| {
                         if (value.isPrivateKey(k)) continue;
-                        const desc = try builtins.objectGetOwnPropertyDescriptor(self, Value.undef(), &.{ src, self.keyToValue(k) });
+                        const desc = try builtins.objectGetOwnPropertyDescriptor(self, Value.undef(), &.{ src, try self.keyToValue(k) });
                         if (!(desc.isObject() and (try self.getProperty(desc, "enumerable")).toBoolean())) continue;
                         try self.setMember(target, k, try self.getProperty(src, k));
                     }
@@ -7244,7 +7244,7 @@ pub const Interpreter = struct {
                 if (so.is_array) {
                     for (try self.objectOwnKeysList(so)) |k| {
                         if (value.isPrivateKey(k)) continue;
-                        const desc = try builtins.objectGetOwnPropertyDescriptor(self, Value.undef(), &.{ src, self.keyToValue(k) });
+                        const desc = try builtins.objectGetOwnPropertyDescriptor(self, Value.undef(), &.{ src, try self.keyToValue(k) });
                         if (!(desc.isObject() and (try self.getProperty(desc, "enumerable")).toBoolean())) continue;
                         try self.setMember(target, k, try self.getProperty(src, k));
                     }
@@ -7495,7 +7495,7 @@ pub const Interpreter = struct {
                 try arr.asObj().appendElement(self.arena, try Value.strAlloc(self.arena, try self.stringSliceFromSearchSpan(input, search_input, mstart, mend)));
                 for (0..m.captures.len) |i| try arr.asObj().appendElement(self.arena, try self.captureVal(m, i));
                 try self.setProp(arr.asObj(), "index", Value.num(@floatFromInt(utf16IndexForByteOffset(search_input, mstart))));
-                try self.setProp(arr.asObj(), "input", Value.str(input));
+                try self.setProp(arr.asObj(), "input", try Value.strAlloc(self.arena, input));
                 const groups = try self.regexGroups(re, m);
                 try self.setProp(arr.asObj(), "groups", if (groups) |g| Value.obj(g) else Value.undef());
                 // The `d` (hasIndices) flag adds a parallel match-indices array.
@@ -7548,11 +7548,11 @@ pub const Interpreter = struct {
         if (!rx.isObject()) return self.throwError("TypeError", "RegExpExec receiver must be an object");
         const exec = try self.getProperty(rx, "exec");
         if (exec.isCallable()) {
-            const result = try self.callValueWithThis(exec, &.{Value.str(s)}, rx);
+            const result = try self.callValueWithThis(exec, &.{try Value.strAlloc(self.arena, s)}, rx);
             if (result.isNull() or (result.isObject() and !result.asObj().is_symbol and !result.asObj().is_bigint)) return result;
             return self.throwError("TypeError", "RegExp exec result must be an object or null");
         }
-        if (rx.asObj().is_regex) return (try self.regexMethod(rx.asObj(), "exec", &.{Value.str(s)})).?;
+        if (rx.asObj().is_regex) return (try self.regexMethod(rx.asObj(), "exec", &.{try Value.strAlloc(self.arena, s)})).?;
         return self.throwError("TypeError", "RegExp exec property is not callable");
     }
 
@@ -7888,7 +7888,7 @@ pub const Interpreter = struct {
         const default_ctor = self.env.get("RegExp") orelse return self.throwError("TypeError", "RegExp is not defined");
         const c = try self.speciesConstructor(this, default_ctor);
         const flags = try self.toStringV(try self.getProperty(this, "flags"));
-        const matcher = try self.construct(c, &.{ this, Value.str(flags) });
+        const matcher = try self.construct(c, &.{ this, try Value.strAlloc(self.arena, flags) });
         const last_index = toLen(try self.toNumberV(try self.getProperty(this, "lastIndex")));
         try self.setRegExpLikeLastIndex(matcher, @floatFromInt(last_index));
         const global = std.mem.indexOfScalar(u8, flags, 'g') != null;
@@ -7995,10 +7995,10 @@ pub const Interpreter = struct {
             var replacement: []const u8 = "";
             if (functional_replace) {
                 var call_args: std.ArrayListUnmanaged(Value) = .empty;
-                try call_args.append(self.arena, Value.str(matched));
+                try call_args.append(self.arena, try Value.strAlloc(self.arena, matched));
                 try call_args.appendSlice(self.arena, captures.items);
                 try call_args.append(self.arena, Value.num(@floatFromInt(position)));
-                try call_args.append(self.arena, Value.str(s));
+                try call_args.append(self.arena, try Value.strAlloc(self.arena, s));
                 if (!named_captures.isUndefined()) try call_args.append(self.arena, named_captures);
                 replacement = try self.toStringV(try self.callValue(replace_value, call_args.items));
             } else {
@@ -8037,14 +8037,14 @@ pub const Interpreter = struct {
         const flags = try self.toStringV(try self.getProperty(rx, "flags"));
         const full_unicode = std.mem.indexOfScalar(u8, flags, 'u') != null or std.mem.indexOfScalar(u8, flags, 'v') != null;
         const splitter_flags = if (std.mem.indexOfScalar(u8, flags, 'y') != null) flags else try std.mem.concat(self.arena, u8, &.{ flags, "y" });
-        const splitter = try self.construct(ctor, &.{ rx, Value.str(splitter_flags) });
+        const splitter = try self.construct(ctor, &.{ rx, try Value.strAlloc(self.arena, splitter_flags) });
         const lim: usize = if (limit_value.isUndefined()) std.math.maxInt(u32) else value.Value.uint32FromF64(try self.toNumberV(limit_value));
         if (lim == 0) return result;
 
         const size = utf16LenOfString(s);
         if (size == 0) {
             const z = try self.regexpExecGeneric(splitter, s);
-            if (z.isNull()) try out.append(self.arena, Value.str(s));
+            if (z.isNull()) try out.append(self.arena, try Value.strAlloc(self.arena, s));
             return result;
         }
 
@@ -8233,7 +8233,7 @@ pub const Interpreter = struct {
             try self.setProp(dtf, "\x00intl", Value.str("DateTimeFormat"));
             const locs = try canonicalizeLocaleList(self, if (args.len > 0) args[0] else Value.undef());
             const loc = localeListFirstOr(locs, "en");
-            try self.setProp(dtf, "\x00locale", Value.str(loc));
+            try self.setProp(dtf, "\x00locale", try Value.strAlloc(self.arena, loc));
             const r = try dtfProcessOptionsKind(self, if (args.len > 1) args[1] else Value.undef(), required, defaults);
             try dtfStoreOptions(self, dtf, r);
             return try intlDateTimeFormatFn(@ptrCast(self), Value.obj(dtf), &.{Value.num(t)});
@@ -9038,7 +9038,7 @@ pub const Interpreter = struct {
 
     /// A property key as a JS value for passing to a trap. (String keys only for
     /// now; symbol-keyed trap arguments aren't reconstructed yet.)
-    pub fn keyToValue(self: *Interpreter, key: []const u8) Value {
+    pub fn keyToValue(self: *Interpreter, key: []const u8) EvalError!Value {
         // A symbol-encoded key recovers the original Symbol (registered in
         // `keyOf` when it was used as a property key); other keys are strings.
         if (value.isSymbolKey(key)) {
@@ -9058,7 +9058,7 @@ pub const Interpreter = struct {
                 }
             };
         }
-        return Value.str(key);
+        return try Value.strAlloc(self.arena, key);
     }
 
     /// Guard against unbounded proxy→target→proxy forwarding (which recurses
@@ -9182,7 +9182,7 @@ pub const Interpreter = struct {
         defer self.depth -= 1;
         const target = o.proxy_target orelse return self.throwError("TypeError", "Cannot perform 'get' on a proxy that has been revoked");
         if (try self.proxyTrap(o, "get")) |trap| {
-            const res = try self.callValueWithThis(trap, &.{ Value.obj(target), self.keyToValue(key), receiver }, Value.obj(o.proxy_handler.?));
+            const res = try self.callValueWithThis(trap, &.{ Value.obj(target), try self.keyToValue(key), receiver }, Value.obj(o.proxy_handler.?));
             // [[Get]] invariant (9.5.8): a non-configurable non-writable data
             // property must report its value; a non-configurable accessor with
             // no getter must report undefined.
@@ -9206,7 +9206,7 @@ pub const Interpreter = struct {
         defer self.depth -= 1;
         const target = o.proxy_target orelse return self.throwError("TypeError", "Cannot perform 'set' on a proxy that has been revoked");
         if (try self.proxyTrap(o, "set")) |trap| {
-            const ok = (try self.callValueWithThis(trap, &.{ Value.obj(target), self.keyToValue(key), v, receiver }, Value.obj(o.proxy_handler.?))).toBoolean();
+            const ok = (try self.callValueWithThis(trap, &.{ Value.obj(target), try self.keyToValue(key), v, receiver }, Value.obj(o.proxy_handler.?))).toBoolean();
             // [[Set]] invariant (9.5.9): a successful set can't disagree with a
             // non-configurable non-writable data property, nor target a
             // non-configurable accessor that has no setter.
@@ -9229,7 +9229,7 @@ pub const Interpreter = struct {
         defer self.depth -= 1;
         const target = o.proxy_target orelse return self.throwError("TypeError", "Cannot perform 'has' on a proxy that has been revoked");
         if (try self.proxyTrap(o, "has")) |trap| {
-            const b = (try self.callValueWithThis(trap, &.{ Value.obj(target), self.keyToValue(key) }, Value.obj(o.proxy_handler.?))).toBoolean();
+            const b = (try self.callValueWithThis(trap, &.{ Value.obj(target), try self.keyToValue(key) }, Value.obj(o.proxy_handler.?))).toBoolean();
             // [[HasProperty]] invariant (9.5.7): can't hide a non-configurable
             // own property, nor an own property of a non-extensible target.
             if (!b and target.proxy_handler == null and !target.proxy_revoked and objectHasOwn(target, key)) {
@@ -9247,7 +9247,7 @@ pub const Interpreter = struct {
         defer self.depth -= 1;
         const target = o.proxy_target orelse return self.throwError("TypeError", "Cannot perform 'deleteProperty' on a proxy that has been revoked");
         if (try self.proxyTrap(o, "deleteProperty")) |trap| {
-            const b = (try self.callValueWithThis(trap, &.{ Value.obj(target), self.keyToValue(key) }, Value.obj(o.proxy_handler.?))).toBoolean();
+            const b = (try self.callValueWithThis(trap, &.{ Value.obj(target), try self.keyToValue(key) }, Value.obj(o.proxy_handler.?))).toBoolean();
             // [[Delete]] invariant (9.5.10): can't report deleting a
             // non-configurable property, nor any property of a non-extensible target.
             if (b and target.proxy_handler == null and !target.proxy_revoked and objectHasOwn(target, key)) {
@@ -9920,7 +9920,7 @@ pub const Interpreter = struct {
                     for (consumed.items) |c| {
                         if (std.mem.eql(u8, c, k)) continue :outer;
                     }
-                    const desc = try builtins.objectGetOwnPropertyDescriptor(self, Value.undef(), &.{ val, self.keyToValue(k) });
+                    const desc = try builtins.objectGetOwnPropertyDescriptor(self, Value.undef(), &.{ val, try self.keyToValue(k) });
                     if (!(desc.isObject() and (try self.getProperty(desc, "enumerable")).toBoolean())) continue;
                     // Copy via [[Get]] so an accessor's getter runs (and a data
                     // property's value is read), landing as a plain data prop.
@@ -10404,7 +10404,7 @@ pub const Interpreter = struct {
                     return true;
                 }
                 if (rcv.proxy_handler != null or rcv.proxy_revoked) {
-                    const existing = try builtins.objectGetOwnPropertyDescriptor(@ptrCast(self), Value.undef(), &.{ Value.obj(rcv), self.keyToValue(key) });
+                    const existing = try builtins.objectGetOwnPropertyDescriptor(@ptrCast(self), Value.undef(), &.{ Value.obj(rcv), try self.keyToValue(key) });
                     const desc = (try self.newObject()).asObj();
                     try desc.setOwn(self.arena, self.root_shape, "value", v);
                     if (existing.isObject()) {
@@ -10549,7 +10549,7 @@ pub const Interpreter = struct {
         if (!builtins.isRealObject(receiver)) return false;
         const ro = receiver.asObj();
         if (ro.proxy_handler != null or ro.proxy_revoked) {
-            const existing = try builtins.objectGetOwnPropertyDescriptor(@ptrCast(self), Value.undef(), &.{ Value.obj(ro), self.keyToValue(key) });
+            const existing = try builtins.objectGetOwnPropertyDescriptor(@ptrCast(self), Value.undef(), &.{ Value.obj(ro), try self.keyToValue(key) });
             const desc = (try self.newObject()).asObj();
             try desc.setOwn(self.arena, self.root_shape, "value", v);
             if (existing.isObject()) {
@@ -11483,7 +11483,7 @@ pub const Interpreter = struct {
             return !(try moduleNsDesc(self, o, key)).isUndefined();
         }
         if (o.proxy_handler != null or o.proxy_revoked) {
-            const desc = try builtins.objectGetOwnPropertyDescriptor(@ptrCast(self), Value.undef(), &.{ Value.obj(o), self.keyToValue(key) });
+            const desc = try builtins.objectGetOwnPropertyDescriptor(@ptrCast(self), Value.undef(), &.{ Value.obj(o), try self.keyToValue(key) });
             return !desc.isUndefined();
         }
         return objectHasOwn(o, key);
@@ -11496,7 +11496,7 @@ pub const Interpreter = struct {
             return moduleNsEnumerable(o, key);
         }
         if (o.proxy_handler != null or o.proxy_revoked) {
-            const desc = try builtins.objectGetOwnPropertyDescriptor(@ptrCast(self), Value.undef(), &.{ Value.obj(o), self.keyToValue(key) });
+            const desc = try builtins.objectGetOwnPropertyDescriptor(@ptrCast(self), Value.undef(), &.{ Value.obj(o), try self.keyToValue(key) });
             if (!desc.isObject()) return false;
             if (desc.asObj().getOwn("enumerable")) |enumerable| return enumerable.toBoolean();
             return false;
@@ -11552,7 +11552,7 @@ pub const Interpreter = struct {
         }
         if (eq(name, "__lookupGetter__") or eq(name, "__lookupSetter__")) {
             const key = try self.keyOf(arg0(args));
-            const key_v = self.keyToValue(key);
+            const key_v = try self.keyToValue(key);
             const want_get = eq(name, "__lookupGetter__");
             var cur: Value = recv;
             while (cur.isObject()) {
@@ -11648,7 +11648,7 @@ pub const Interpreter = struct {
                         // property); else step [[GetPrototypeOf]]. Both steps are
                         // proxy-aware, so a throwing trap propagates (per the err tests).
                         const key = try self.keyOf(arg0(args)); // ToPropertyKey once
-                        const key_v = self.keyToValue(key);
+                        const key_v = try self.keyToValue(key);
                         const want_get = eq(name, "__lookupGetter__");
                         var cur: Value = recv;
                         while (cur.isObject()) {
@@ -12882,7 +12882,7 @@ pub const Interpreter = struct {
             try self.setProp(o, "\x00intl", Value.str("NumberFormat"));
             const locs = try canonicalizeLocaleList(self, if (args.len > 0) args[0] else Value.undef());
             const loc = localeListFirstOr(locs, "en");
-            try self.setProp(o, "\x00locale", Value.str(loc));
+            try self.setProp(o, "\x00locale", try Value.strAlloc(self.arena, loc));
             const ro = try nfProcessOptions(self, if (args.len > 1) args[1] else Value.undef());
             try self.setProp(o, "\x00opts", Value.obj(ro));
             return try intlNumberFormatFn(@ptrCast(self), Value.obj(o), &.{Value.num(n)});
@@ -12897,7 +12897,7 @@ pub const Interpreter = struct {
             }
             if (radix == 10) return try Value.strAlloc(self.arena, try value.numberToString(self.arena, n));
             if (std.math.isNan(n)) return Value.str("NaN");
-            if (std.math.isInf(n)) return Value.str(if (n < 0) "-Infinity" else "Infinity");
+            if (std.math.isInf(n)) return if (n < 0) Value.str("-Infinity") else Value.str("Infinity");
             return try Value.strAlloc(self.arena, try numberToRadix(self.arena, n, radix));
         }
         if (eq(name, "toFixed")) {
@@ -12918,7 +12918,7 @@ pub const Interpreter = struct {
             // non-finite receiver.
             const f = try self.toNumberV(arg0(args));
             if (std.math.isNan(n)) return Value.str("NaN");
-            if (std.math.isInf(n)) return Value.str(if (n < 0) "-Infinity" else "Infinity");
+            if (std.math.isInf(n)) return if (n < 0) Value.str("-Infinity") else Value.str("Infinity");
             var frac: ?usize = null;
             if (has_arg) {
                 const fi = if (std.math.isNan(f)) @as(f64, 0) else @trunc(f);
@@ -12934,7 +12934,7 @@ pub const Interpreter = struct {
             if (args.len == 0 or args[0].isUndefined()) return try Value.strAlloc(self.arena, try value.numberToString(self.arena, n));
             const p = try self.toNumberV(args[0]);
             if (std.math.isNan(n)) return Value.str("NaN");
-            if (std.math.isInf(n)) return Value.str(if (n < 0) "-Infinity" else "Infinity");
+            if (std.math.isInf(n)) return if (n < 0) Value.str("-Infinity") else Value.str("Infinity");
             const pf = if (std.math.isNan(p)) @as(f64, 0) else @trunc(p);
             if (pf < 1 or pf > 100) return self.throwError("RangeError", "toPrecision() argument must be between 1 and 100");
             return try Value.strAlloc(self.arena, try toPrecisionStr(self.arena, n, @intFromFloat(pf)));
@@ -12946,7 +12946,7 @@ pub const Interpreter = struct {
         _ = self;
         _ = args;
         if (eq(name, "valueOf")) return Value.boolVal(b);
-        if (eq(name, "toString")) return Value.str(if (b) "true" else "false");
+        if (eq(name, "toString")) return if (b) Value.str("true") else Value.str("false");
         return null;
     }
 
@@ -13017,15 +13017,15 @@ pub const Interpreter = struct {
     }
 
     fn stringMethod(self: *Interpreter, s: []const u8, name: []const u8, args: []const Value, check_protocol: bool) EvalError!?Value {
-        if (eq(name, "valueOf") or eq(name, "toString")) return Value.str(s);
+        if (eq(name, "valueOf") or eq(name, "toString")) return try Value.strAlloc(self.arena, s);
         if (check_protocol and eq(name, "replaceAll"))
-            if (try self.replaceAllProtocolDispatch(Value.str(s), args)) |r| return r;
+            if (try self.replaceAllProtocolDispatch(try Value.strAlloc(self.arena, s), args)) |r| return r;
         // Well-known Symbol method protocol: `split`/`match`/`matchAll`/`search`/
         // `replace`/`replaceAll` first check their first argument for the matching
         // `Symbol.*` method and, if it is callable, delegate to it (with `this` =
         // that argument and the string as the first parameter). RegExp instances
         // use the protocol for methods whose spec algorithms are implemented.
-        if (check_protocol) if (try self.stringProtocolDispatch(name, Value.str(s), args)) |r| return r;
+        if (check_protocol) if (try self.stringProtocolDispatch(name, try Value.strAlloc(self.arena, s), args)) |r| return r;
         if (eq(name, "charAt")) {
             const pos = try self.stringPosition(s, arg0(args)) orelse return Value.str("");
             const cu = stringCodeUnitAt(s, pos) orelse return Value.str("");
@@ -13099,7 +13099,7 @@ pub const Interpreter = struct {
             }
             return try Value.strAlloc(self.arena, try unicode_case.toLower(self.arena, s));
         }
-        if (eq(name, "trim")) return Value.str(jsTrim(s, true, true));
+        if (eq(name, "trim")) return try Value.strAlloc(self.arena, jsTrim(s, true, true));
         if (eq(name, "repeat")) {
             const rn = try self.toNumberV(arg0(args));
             if (rn < 0 or std.math.isInf(rn)) return self.throwError("RangeError", "Invalid count value");
@@ -13135,7 +13135,7 @@ pub const Interpreter = struct {
                 if (lim == 0) return result;
                 if (s.len == 0) {
                     // Empty input: [""] unless the pattern matches the empty string.
-                    if ((re.find(s) catch null) == null) try out.append(self.arena, Value.str(s));
+                    if ((re.find(s) catch null) == null) try out.append(self.arena, try Value.strAlloc(self.arena, s));
                     return result;
                 }
                 var p: usize = 0; // end of the previous piece
@@ -13188,8 +13188,8 @@ pub const Interpreter = struct {
             const cu = stringCodeUnitAt(s, @intCast(idx)) orelse return Value.undef();
             return try Value.strAlloc(self.arena, try self.stringFromCodeUnit(cu.unit));
         }
-        if (eq(name, "trimStart")) return Value.str(jsTrim(s, true, false));
-        if (eq(name, "trimEnd")) return Value.str(jsTrim(s, false, true));
+        if (eq(name, "trimStart")) return try Value.strAlloc(self.arena, jsTrim(s, true, false));
+        if (eq(name, "trimEnd")) return try Value.strAlloc(self.arena, jsTrim(s, false, true));
         if (eq(name, "isWellFormed")) {
             // Well-formed UTF-16 has no LONE surrogate. An astral code point is a
             // 4-byte UTF-8 sequence here; a high+low surrogate pair (e.g. from
@@ -13273,7 +13273,7 @@ pub const Interpreter = struct {
                         try call_args.append(a, try Value.strOwned(self.arena, try a.dupe(u8, m.slice)));
                         for (0..m.captures.len) |i| try call_args.append(a, try self.captureVal(m, i));
                         try call_args.append(a, Value.num(@floatFromInt(mstart)));
-                        try call_args.append(a, Value.str(s));
+                        try call_args.append(a, try Value.strAlloc(self.arena, s));
                         const r = try self.callValue(repl_val, call_args.items);
                         try buf.appendSlice(a, try self.toStringV(r));
                     } else {
@@ -13297,7 +13297,7 @@ pub const Interpreter = struct {
                 try buf.appendSlice(a, s[from..idx]);
                 const position = utf16IndexFromByteOffset(s, idx);
                 if (is_func) {
-                    const r = try self.callValue(repl_val, &.{ Value.str(pat), Value.num(@floatFromInt(position)), Value.str(s) });
+                    const r = try self.callValue(repl_val, &.{ try Value.strAlloc(self.arena, pat), Value.num(@floatFromInt(position)), try Value.strAlloc(self.arena, s) });
                     try buf.appendSlice(a, try self.toStringV(r));
                 } else {
                     try self.getSubstitutionValues(&buf, template, pat, s, position, &.{}, Value.undef());
@@ -13360,8 +13360,8 @@ pub const Interpreter = struct {
             } else remaining;
             return try Value.strAlloc(self.arena, try self.stringSliceUtf16(s, start, start + len));
         }
-        if (eq(name, "trimLeft")) return Value.str(jsTrim(s, true, false));
-        if (eq(name, "trimRight")) return Value.str(jsTrim(s, false, true));
+        if (eq(name, "trimLeft")) return try Value.strAlloc(self.arena, jsTrim(s, true, false));
+        if (eq(name, "trimRight")) return try Value.strAlloc(self.arena, jsTrim(s, false, true));
         // Annex B B.2.3 HTML wrapper methods (CreateHTML).
         {
             const HtmlSpec = struct { m: []const u8, tag: []const u8, attr: []const u8 };
@@ -13428,7 +13428,7 @@ pub const Interpreter = struct {
             const re_obj = try self.toRegexObject(arg0(args));
             if (self.wellKnownSymbolKey("search")) |key| {
                 const method = try self.getProperty(Value.obj(re_obj), key);
-                return try self.callValueWithThis(method, &.{Value.str(s)}, Value.obj(re_obj));
+                return try self.callValueWithThis(method, &.{try Value.strAlloc(self.arena, s)}, Value.obj(re_obj));
             }
             return try self.regexpSearch(Value.obj(re_obj), s);
         }
@@ -13436,7 +13436,7 @@ pub const Interpreter = struct {
             const re_obj = try self.toRegexObject(arg0(args));
             if (self.wellKnownSymbolKey("match")) |key| {
                 const method = try self.getProperty(Value.obj(re_obj), key);
-                return try self.callValueWithThis(method, &.{Value.str(s)}, Value.obj(re_obj));
+                return try self.callValueWithThis(method, &.{try Value.strAlloc(self.arena, s)}, Value.obj(re_obj));
             }
             return try self.regexpMatch(Value.obj(re_obj), s);
         }
@@ -13461,7 +13461,7 @@ pub const Interpreter = struct {
                     const m = try self.getProperty(regexp, k);
                     if (!m.isUndefined() and !m.isNull()) {
                         if (!m.isCallable()) return self.throwError("TypeError", "regexp[Symbol.matchAll] is not callable");
-                        return try self.callValueWithThis(m, &.{Value.str(s)}, regexp);
+                        return try self.callValueWithThis(m, &.{try Value.strAlloc(self.arena, s)}, regexp);
                     }
                 };
             }
@@ -13476,7 +13476,7 @@ pub const Interpreter = struct {
             const rx = try self.makeRegex(src, "g");
             if (skey) |k| {
                 const m = try self.getProperty(rx, k);
-                return try self.callValueWithThis(m, &.{Value.str(s)}, rx);
+                return try self.callValueWithThis(m, &.{try Value.strAlloc(self.arena, s)}, rx);
             }
             return try self.regexpMatchAll(rx, s);
         }
@@ -13828,7 +13828,7 @@ pub const Interpreter = struct {
             .neg => Value.num(-(try self.toNumberV(nv))),
             .pos => Value.num(try self.toNumberV(nv)),
             .not => Value.boolVal(!v.toBoolean()),
-            .typeof => Value.str(v.typeOf()),
+            .typeof => try Value.strAlloc(self.arena, v.typeOf()),
             .bit_not => Value.num(@floatFromInt(~Value.num(try self.toNumberV(nv)).toInt32())),
             .void_op => Value.undef(),
             .to_string => try Value.strAlloc(self.arena, try self.toStringV(v)), // template-substitution ToString
@@ -13904,7 +13904,7 @@ pub const Interpreter = struct {
                     .number => "number",
                     .default => "default",
                 };
-                const res = try self.callValueWithThis(exotic, &.{Value.str(hint_str)}, v);
+                const res = try self.callValueWithThis(exotic, &.{try Value.strAlloc(self.arena, hint_str)}, v);
                 if (!res.isObject() or res.asObj().is_symbol or res.asObj().is_bigint) return res;
                 return self.throwError("TypeError", "Cannot convert object to primitive value");
             }
@@ -15344,7 +15344,7 @@ fn setupKeyedCombinator(self: *Interpreter, this: Value, promises: Value, kind: 
     const combine = try self.arena.create(promise.Combine);
     combine.* = .{ .resolve = cap.resolve, .reject = cap.reject, .values = values, .remaining = 1, .kind = kind };
     for (all_keys) |key| {
-        const desc = builtins.objectGetOwnPropertyDescriptor(@ptrCast(self), Value.undef(), &.{ Value.obj(source), self.keyToValue(key) }) catch |err| return rejectAbrupt(self, cap, err);
+        const desc = builtins.objectGetOwnPropertyDescriptor(@ptrCast(self), Value.undef(), &.{ Value.obj(source), try self.keyToValue(key) }) catch |err| return rejectAbrupt(self, cap, err);
         if (desc.isUndefined()) continue;
         const enumerable = self.getProperty(desc, "enumerable") catch |err| return rejectAbrupt(self, cap, err);
         if (!enumerable.toBoolean()) continue;
@@ -15474,15 +15474,15 @@ fn vmUseThreadGILFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
 }
 
 fn vmIndexingModeFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
-    _ = ctx;
     _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const v = if (args.len > 0) args[0] else Value.undef();
     if (v.isObject() and v.asObj().is_array) {
         if (v.asObj().forced_array_storage) return Value.str("Array ArrayStorage");
         return Value.str("Array CopyOnWrite");
     }
     if (v.isObject()) {
-        if (v.asObj().typed_array) |ta| return Value.str(ta.kind.ctorName());
+        if (v.asObj().typed_array) |ta| return try Value.strAlloc(self.arena, ta.kind.ctorName());
     }
     return Value.str("Object");
 }
@@ -15713,8 +15713,8 @@ fn errorToStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.Host
     const name = if (name_v.isUndefined()) "Error" else try self.toStringV(name_v);
     const msg_v = try self.getProperty(this, "message");
     const msg = if (msg_v.isUndefined()) "" else try self.toStringV(msg_v);
-    if (name.len == 0) return Value.str(msg);
-    if (msg.len == 0) return Value.str(name);
+    if (name.len == 0) return try Value.strAlloc(self.arena, msg);
+    if (msg.len == 0) return try Value.strAlloc(self.arena, name);
     return try Value.strOwned(self.arena, try std.mem.concat(self.arena, u8, &.{ name, ": ", msg }));
 }
 
@@ -15757,7 +15757,7 @@ fn errorStackGet(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
             }
         }
     }
-    return Value.str(first_line);
+    return try Value.strAlloc(self.arena, first_line);
 }
 
 /// SetterThatIgnoresPrototypeProperties(this, home, p, v): reject a non-object
@@ -15779,7 +15779,7 @@ fn setterIgnoringProto(self: *Interpreter, this: Value, home: ?*value.Object, ke
     const o = this.asObj();
     // [[GetOwnProperty]](this, key): own data slot, own accessor, or proxy trap.
     const has_own = if (o.proxy_handler != null or o.proxy_revoked) blk: {
-        const d = try builtins.objectGetOwnPropertyDescriptor(@ptrCast(self), Value.undef(), &.{ Value.obj(o), self.keyToValue(key) });
+        const d = try builtins.objectGetOwnPropertyDescriptor(@ptrCast(self), Value.undef(), &.{ Value.obj(o), try self.keyToValue(key) });
         break :blk d.isObject();
     } else (o.getOwn(key) != null or o.getAccessor(key) != null);
     if (!has_own) {
@@ -15837,7 +15837,7 @@ fn booleanProtoFn(comptime to_string: bool) value.NativeFn {
                 .object => if (this.asObj().prim != null and this.asObj().prim.?.isBoolean()) this.asObj().prim.?.asBool() else return self.throwError("TypeError", "Boolean.prototype method requires that 'this' be a Boolean"),
                 else => return self.throwError("TypeError", "Boolean.prototype method requires that 'this' be a Boolean"),
             };
-            return if (to_string) Value.str(if (b) "true" else "false") else Value.boolVal(b);
+            return if (to_string) (if (b) Value.str("true") else Value.str("false")) else Value.boolVal(b);
         }
     }.call;
 }
@@ -15865,7 +15865,7 @@ fn symbolDescriptionGetFn(ctx: *anyopaque, this: Value, args: []const Value) val
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const sym = try thisSymbol(self, this, "Symbol.prototype.description");
-    return if (sym.sym_desc) |d| Value.str(d) else Value.undef();
+    return if (sym.sym_desc) |d| try Value.strAlloc(self.arena, d) else Value.undef();
 }
 
 /// `Symbol.prototype[@@toPrimitive]` → the symbol itself (any hint). Lets
@@ -15999,7 +15999,7 @@ fn reflectOwnKeysFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
     // objectOwnKeysList is proxy- and module-namespace-aware (sorted exotic keys).
     const keys = try self.objectOwnKeysList(target.asObj());
     const arr = try self.newArray();
-    for (keys) |k| try arr.asObj().appendElement(self.arena, self.keyToValue(k));
+    for (keys) |k| try arr.asObj().appendElement(self.arena, try self.keyToValue(k));
     return arr;
 }
 
@@ -16393,7 +16393,7 @@ fn srWrapValue(self: *Interpreter, wrap_env: *Environment, error_env: *Environme
         try w.setAttr(self.arena, "length", ro_attr);
         const name_v = self.getProperty(Value.obj(o), "name") catch
             return throwErrorInRealm(self, error_env, "TypeError", "ShadowRealm: wrapped function name is not accessible");
-        try w.setOwn(self.arena, self.root_shape, "name", Value.str(if (name_v.isString()) name_v.asStr() else ""));
+        try w.setOwn(self.arena, self.root_shape, "name", if (name_v.isString()) try Value.strAlloc(self.arena, name_v.asStr()) else Value.str(""));
         try w.setAttr(self.arena, "name", ro_attr);
         return Value.obj(w);
     }
@@ -16770,7 +16770,7 @@ fn bigIntToStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
         if (!(rf >= 2 and rf <= 36)) return self.throwError("RangeError", "toString() radix must be between 2 and 36");
         radix = @intFromFloat(rf);
     }
-    if (big.bigint_text != null and radix == 10) return Value.str(big.bigint_text.?);
+    if (big.bigint_text != null and radix == 10) return try Value.strAlloc(self.arena, big.bigint_text.?);
     if (big.bigint_text != null) return self.throwError("RangeError", "BigInt value is too large for non-decimal radix conversion");
     return try Value.strAlloc(self.arena, try formatBigIntRadix(self.arena, big.bigint, radix));
 }
@@ -17842,7 +17842,7 @@ fn asyncIterProtoDisposeFn(ctx: *anyopaque, this: Value, args: []const Value) va
 fn installSymbolMethod(a: std.mem.Allocator, rs: *Shape, obj: *value.Object, key: []const u8, display: []const u8, len: usize, f: value.NativeFn) EvalError!void {
     try setNative(a, rs, obj, key, len, f);
     if (obj.getOwn(key)) |mv| if (mv.isObject()) {
-        try mv.asObj().setOwn(a, rs, "name", Value.str(display));
+        try mv.asObj().setOwn(a, rs, "name", try Value.strAlloc(a, display));
         try mv.asObj().setAttr(a, "name", .{ .writable = false, .enumerable = false, .configurable = true });
     };
 }
@@ -18031,7 +18031,7 @@ fn iteratorZipKeyedFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
             self.closeListKeepingThrow(iters.elements.items);
             return error.Throw;
         };
-        try keys.appendInternalElement(self.arena, Value.str(key));
+        try keys.appendInternalElement(self.arena, try Value.strAlloc(self.arena, key));
         try iters.appendInternalElement(self.arena, sub);
     }
     // Per-key padding (longest mode): Get(padding, key) for each key, or all
@@ -18283,7 +18283,7 @@ fn installIterator(env: *Environment, rs: *Shape, object_proto: *value.Object) E
         kproto.* = .{ .proto = iter_proto };
         try setNative(a, rs, kproto, "next", 0, cursorIterNext);
         if (sym_tag) |k| {
-            try kproto.setOwn(a, rs, k, Value.str(kp[1]));
+            try kproto.setOwn(a, rs, k, try Value.strAlloc(a, kp[1]));
             try kproto.setAttr(a, k, .{ .writable = false, .enumerable = false, .configurable = true });
         }
         try env.put(kp[0], Value.obj(kproto));
@@ -18891,7 +18891,7 @@ fn installOneFunctionKind(
     try kproto.setOwn(a, rs, "constructor", Value.obj(ctor));
     try kproto.setAttr(a, "constructor", .{ .writable = false, .enumerable = false, .configurable = true });
     if (sym_tag) |k| {
-        try kproto.setOwn(a, rs, k, Value.str(name));
+        try kproto.setOwn(a, rs, k, try Value.strAlloc(a, name));
         try kproto.setAttr(a, k, .{ .writable = false, .enumerable = false, .configurable = true });
     }
     if (instance_proto) |gp| {
@@ -20206,7 +20206,7 @@ fn taProtoGetter(comptime which: enum { length, byte_length, byte_offset, buffer
                 .byte_length => Value.num(@floatFromInt((cur orelse 0) * ta.kind.byteSize())),
                 .byte_offset => Value.num(@floatFromInt(if (cur == null) 0 else ta.byte_offset)),
                 .buffer => Value.obj(ta.buffer),
-                .tag => Value.str(ta.kind.ctorName()),
+                .tag => try Value.strAlloc(self.arena, ta.kind.ctorName()),
             };
         }
     }.call;
@@ -20490,7 +20490,7 @@ fn uint8ToHexFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostErr
         try out.append(self.arena, hex[b >> 4]);
         try out.append(self.arena, hex[b & 0x0F]);
     }
-    return Value.str(out.items);
+    return try Value.strAlloc(self.arena, out.items);
 }
 
 fn uint8SetFromBase64Fn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -21387,7 +21387,7 @@ fn canonicalizeLocaleList(self: *Interpreter, v: Value) EvalError!*value.Object 
     if (v.isString() or (v.isObject() and v.asObj().getOwn("\x00locale") != null)) {
         const s = if (v.isString()) v.asStr() else v.asObj().getOwn("\x00locale").?.asStr();
         const c = canonicalizeLocaleTag(self.arena, s) orelse return self.throwError("RangeError", "Incorrect locale information provided");
-        try arr.appendElement(self.arena, Value.str(c));
+        try arr.appendElement(self.arena, try Value.strAlloc(self.arena, c));
         return arr;
     }
     // Anything else (incl. a primitive) is ToObject'd (null/undefined excluded
@@ -21399,7 +21399,7 @@ fn canonicalizeLocaleList(self: *Interpreter, v: Value) EvalError!*value.Object 
         // CanonicalizeLocaleList checks HasProperty (honoring a Proxy `has` trap)
         // before reading each index; a missing index is skipped.
         const key = try std.fmt.allocPrint(self.arena, "{d}", .{i});
-        if (!try self.inOperator(Value.str(key), ov)) continue;
+        if (!try self.inOperator(try Value.strAlloc(self.arena, key), ov)) continue;
         const ev = try self.getProperty(ov, key);
         if (!ev.isString() and !ev.isObject()) return self.throwError("TypeError", "Intl: locale must be a string or object");
         // An Intl.Locale element contributes its [[Locale]] slot directly (its
@@ -21409,7 +21409,7 @@ fn canonicalizeLocaleList(self: *Interpreter, v: Value) EvalError!*value.Object 
         else
             try self.toStringV(ev);
         const c = canonicalizeLocaleTag(self.arena, s) orelse return self.throwError("RangeError", "Incorrect locale information provided");
-        if (!localeListContains(arr, c)) try arr.appendElement(self.arena, Value.str(c));
+        if (!localeListContains(arr, c)) try arr.appendElement(self.arena, try Value.strAlloc(self.arena, c));
     }
     return arr;
 }
@@ -21481,7 +21481,7 @@ fn intlSupportedValuesOfFn(ctx: *anyopaque, this: Value, args: []const Value) va
     const tz = std.mem.eql(u8, key, "timeZone");
     for (items) |s| {
         if (tz and !std.mem.eql(u8, canonicalTimeZoneName(s), s)) continue;
-        try arr.appendElement(self.arena, Value.str(s));
+        try arr.appendElement(self.arena, try Value.strAlloc(self.arena, s));
     }
     return Value.obj(arr);
 }
@@ -21721,7 +21721,7 @@ fn intlLocaleConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) va
 
     const o = (try self.newObject()).asObj();
     if (self.new_target.isObject()) o.setProtoAtomic(try self.ctorRealmProto(self.new_target.asObj(), "Locale"));
-    try self.setProp(o, "\x00locale", Value.str(canon));
+    try self.setProp(o, "\x00locale", try Value.strAlloc(self.arena, canon));
     try o.setAttr(self.arena, "\x00locale", .{ .writable = false, .enumerable = false, .configurable = false });
     return Value.obj(o);
 }
@@ -21736,13 +21736,13 @@ fn intlLocaleGetter(comptime f: LocaleField) value.NativeFn {
             const tag = this.asObj().getOwn("\x00locale").?.asStr();
             // -u- extension keyword accessors.
             switch (f) {
-                .calendar => return if (localeUValue(tag, "ca")) |v| Value.str(v) else Value.undef(),
-                .case_first => return if (localeUValue(tag, "kf")) |v| Value.str(v) else Value.undef(),
-                .collation => return if (localeUValue(tag, "co")) |v| Value.str(v) else Value.undef(),
-                .hour_cycle => return if (localeUValue(tag, "hc")) |v| Value.str(v) else Value.undef(),
-                .numbering_system => return if (localeUValue(tag, "nu")) |v| Value.str(v) else Value.undef(),
+                .calendar => return if (localeUValue(tag, "ca")) |v| try Value.strAlloc(self.arena, v) else Value.undef(),
+                .case_first => return if (localeUValue(tag, "kf")) |v| try Value.strAlloc(self.arena, v) else Value.undef(),
+                .collation => return if (localeUValue(tag, "co")) |v| try Value.strAlloc(self.arena, v) else Value.undef(),
+                .hour_cycle => return if (localeUValue(tag, "hc")) |v| try Value.strAlloc(self.arena, v) else Value.undef(),
+                .numbering_system => return if (localeUValue(tag, "nu")) |v| try Value.strAlloc(self.arena, v) else Value.undef(),
                 .numeric => return Value.boolVal(if (localeUValue(tag, "kn")) |v| (v.len == 0 or std.mem.eql(u8, v, "true")) else false),
-                .first_day_of_week => return if (localeUValue(tag, "fw")) |v| Value.str(v) else Value.undef(),
+                .first_day_of_week => return if (localeUValue(tag, "fw")) |v| try Value.strAlloc(self.arena, v) else Value.undef(),
                 else => {},
             }
             // baseName (GetLocaleBaseName) is the language-id prefix: everything
@@ -21761,20 +21761,20 @@ fn intlLocaleGetter(comptime f: LocaleField) value.NativeFn {
                 }
             }
             const base = tag[0..base_end];
-            if (f == .base_name) return Value.str(base);
+            if (f == .base_name) return try Value.strAlloc(self.arena, base);
             var it = std.mem.splitScalar(u8, base, '-');
             const lang = it.next() orelse "";
-            if (f == .language) return Value.str(lang);
+            if (f == .language) return try Value.strAlloc(self.arena, lang);
             var have_script = false;
             var have_region = false;
             var variants: std.ArrayListUnmanaged(u8) = .empty;
             while (it.next()) |part| {
                 if (!have_script and !have_region and part.len == 4 and std.ascii.isAlphabetic(part[0])) {
                     have_script = true;
-                    if (f == .script) return Value.str(part);
+                    if (f == .script) return try Value.strAlloc(self.arena, part);
                 } else if (!have_region and ((part.len == 2 and std.ascii.isAlphabetic(part[0])) or (part.len == 3 and std.ascii.isDigit(part[0])))) {
                     have_region = true;
-                    if (f == .region) return Value.str(part);
+                    if (f == .region) return try Value.strAlloc(self.arena, part);
                 } else {
                     if (variants.items.len > 0) try variants.append(self.arena, '-');
                     try variants.appendSlice(self.arena, part);
@@ -21847,7 +21847,7 @@ fn intlLocaleTransformFn(comptime kind: enum { max, min }) value.NativeFn {
             const canon = canonicalizeLocaleTag(a, buf.items) orelse return self.throwError("RangeError", "Incorrect locale information provided");
             const o = (try self.newObject()).asObj();
             o.setProtoAtomic(this.asObj().proto);
-            try self.setProp(o, "\x00locale", Value.str(canon));
+            try self.setProp(o, "\x00locale", try Value.strAlloc(self.arena, canon));
             try o.setAttr(self.arena, "\x00locale", .{ .writable = false, .enumerable = false, .configurable = false });
             return Value.obj(o);
         }
@@ -21871,7 +21871,7 @@ fn intlLocaleListFn(comptime which: enum { calendars, collations, hour_cycles, n
                 .numbering_systems => localeUValue(tag, "nu") orelse "latn",
                 .time_zones => null, // requires region data
             };
-            if (def) |d| try arr.appendElement(self.arena, Value.str(d));
+            if (def) |d| try arr.appendElement(self.arena, try Value.strAlloc(self.arena, d));
             return Value.obj(arr);
         }
     }.call;
@@ -22327,10 +22327,10 @@ fn dtfStoreOptions(self: *Interpreter, o: *value.Object, r_in: DtfOptions) EvalE
         r.hour12 = null;
     }
     const ro = (try self.newObject()).asObj();
-    try self.setProp(ro, "\x00rloc", Value.str(ext.loc));
+    try self.setProp(ro, "\x00rloc", try Value.strAlloc(self.arena, ext.loc));
     const S = struct {
         fn put(s: *Interpreter, obj: *value.Object, k: []const u8, v: []const u8) EvalError!void {
-            if (v.len > 0) try s.setProp(obj, k, Value.str(v));
+            if (v.len > 0) try s.setProp(obj, k, try Value.strAlloc(s.arena, v));
         }
     };
     try S.put(self, ro, "weekday", r.weekday);
@@ -22432,7 +22432,7 @@ fn nfProcessOptions(self: *Interpreter, raw_in: Value) EvalError!*value.Object {
             if (v.isUndefined()) return null;
             const sval = try s.toStringV(v);
             for (allowed) |a| if (std.mem.eql(u8, sval, a)) {
-                try s.setProp(dst, name, Value.str(a));
+                try s.setProp(dst, name, try Value.strAlloc(s.arena, a));
                 return a;
             };
             return s.throwError("RangeError", try std.fmt.allocPrint(s.arena, "invalid value for option {s}", .{name}));
@@ -22459,7 +22459,7 @@ fn nfProcessOptions(self: *Interpreter, raw_in: Value) EvalError!*value.Object {
     if (!nsv.isUndefined()) {
         const ns = try std.ascii.allocLowerString(self.arena, try self.toStringV(nsv));
         if (!dtfWellFormedType(ns)) return self.throwError("RangeError", "invalid numberingSystem");
-        try self.setProp(ro, "numberingSystem", Value.str(ns));
+        try self.setProp(ro, "numberingSystem", try Value.strAlloc(self.arena, ns));
     }
     // SetNumberFormatUnitOptions: style, then currency*/unit* (all read).
     const style = (try H.str(self, raw, ro, "style", &.{ "decimal", "percent", "currency", "unit" })) orelse "decimal";
@@ -22486,7 +22486,7 @@ fn nfProcessOptions(self: *Interpreter, raw_in: Value) EvalError!*value.Object {
         if (csign == null) try self.setProp(ro, "currencySign", Value.str("standard"));
     } else if (std.mem.eql(u8, style, "unit")) {
         if (unit == null) return self.throwError("TypeError", "unit is required with style \"unit\"");
-        try self.setProp(ro, "unit", Value.str(unit.?));
+        try self.setProp(ro, "unit", try Value.strAlloc(self.arena, unit.?));
         if (udisp == null) try self.setProp(ro, "unitDisplay", Value.str("short"));
     }
     // notation, then SetNumberFormatDigitOptions, then compactDisplay/useGrouping/signDisplay.
@@ -22546,7 +22546,7 @@ fn nfProcessOptions(self: *Interpreter, raw_in: Value) EvalError!*value.Object {
             if (std.mem.eql(u8, s, "true") or std.mem.eql(u8, s, "false")) {
                 // The strings "true"/"false" fall back to the default ("auto").
             } else if (std.mem.eql(u8, s, "min2") or std.mem.eql(u8, s, "auto") or std.mem.eql(u8, s, "always")) {
-                try self.setProp(ro, "useGrouping", Value.str(s));
+                try self.setProp(ro, "useGrouping", try Value.strAlloc(self.arena, s));
             } else return self.throwError("RangeError", "invalid value for option useGrouping");
         }
     }
@@ -22568,7 +22568,7 @@ fn prProcessOptions(self: *Interpreter, raw: Value) EvalError!*value.Object {
             if (v.isUndefined()) return null;
             const sval = try s.toStringV(v);
             for (allowed) |a| if (std.mem.eql(u8, sval, a)) {
-                try s.setProp(dst, name, Value.str(a));
+                try s.setProp(dst, name, try Value.strAlloc(s.arena, a));
                 return a;
             };
             return s.throwError("RangeError", try std.fmt.allocPrint(s.arena, "invalid value for option {s}", .{name}));
@@ -22676,9 +22676,9 @@ fn intlServiceConstructorFn(comptime service: []const u8) value.NativeFn {
             // Resolve the locale (first supported requested, else "en").
             const locs = try canonicalizeLocaleList(self, if (args.len > 0) args[0] else Value.undef());
             const resolved = localeListFirstSupportedOr(locs, "en");
-            try self.setProp(o, "\x00intl", Value.str(service));
+            try self.setProp(o, "\x00intl", try Value.strAlloc(self.arena, service));
             try o.setAttr(self.arena, "\x00intl", .{ .writable = false, .enumerable = false, .configurable = false });
-            try self.setProp(o, "\x00locale", Value.str(resolved));
+            try self.setProp(o, "\x00locale", try Value.strAlloc(self.arena, resolved));
             try o.setAttr(self.arena, "\x00locale", .{ .writable = false, .enumerable = false, .configurable = false });
             // DateTimeFormat validates and normalizes its options eagerly (so
             // bad values throw at construction and resolvedOptions can reflect
@@ -22700,9 +22700,9 @@ fn intlServiceConstructorFn(comptime service: []const u8) value.NativeFn {
                 const ro = (try self.newObject()).asObj();
                 if (raw.isObject()) {
                     _ = try dtfGetStr(self, raw, "localeMatcher", &.{ "lookup", "best fit" }, "best fit");
-                    if (try dtfGetType(self, raw, "numberingSystem")) |ns| try self.setProp(ro, "numberingSystem", Value.str(ns));
-                    if (try dtfGetStr(self, raw, "style", &.{ "long", "short", "narrow" }, null)) |s| try self.setProp(ro, "style", Value.str(s));
-                    if (try dtfGetStr(self, raw, "numeric", &.{ "always", "auto" }, null)) |nu| try self.setProp(ro, "numeric", Value.str(nu));
+                    if (try dtfGetType(self, raw, "numberingSystem")) |ns| try self.setProp(ro, "numberingSystem", try Value.strAlloc(self.arena, ns));
+                    if (try dtfGetStr(self, raw, "style", &.{ "long", "short", "narrow" }, null)) |s| try self.setProp(ro, "style", try Value.strAlloc(self.arena, s));
+                    if (try dtfGetStr(self, raw, "numeric", &.{ "always", "auto" }, null)) |nu| try self.setProp(ro, "numeric", try Value.strAlloc(self.arena, nu));
                 }
                 try self.setProp(o, "\x00opts", Value.obj(ro));
                 try o.setAttr(self.arena, "\x00opts", .{ .writable = false, .enumerable = false, .configurable = false });
@@ -22715,8 +22715,8 @@ fn intlServiceConstructorFn(comptime service: []const u8) value.NativeFn {
                 const ro = (try self.newObject()).asObj();
                 if (raw.isObject()) {
                     _ = try dtfGetStr(self, raw, "localeMatcher", &.{ "lookup", "best fit" }, "best fit");
-                    if (try dtfGetStr(self, raw, "type", &.{ "conjunction", "disjunction", "unit" }, null)) |t| try self.setProp(ro, "type", Value.str(t));
-                    if (try dtfGetStr(self, raw, "style", &.{ "long", "short", "narrow" }, null)) |s| try self.setProp(ro, "style", Value.str(s));
+                    if (try dtfGetStr(self, raw, "type", &.{ "conjunction", "disjunction", "unit" }, null)) |t| try self.setProp(ro, "type", try Value.strAlloc(self.arena, t));
+                    if (try dtfGetStr(self, raw, "style", &.{ "long", "short", "narrow" }, null)) |s| try self.setProp(ro, "style", try Value.strAlloc(self.arena, s));
                 }
                 try self.setProp(o, "\x00opts", Value.obj(ro));
                 try o.setAttr(self.arena, "\x00opts", .{ .writable = false, .enumerable = false, .configurable = false });
@@ -22727,14 +22727,14 @@ fn intlServiceConstructorFn(comptime service: []const u8) value.NativeFn {
                 const ro = (try self.newObject()).asObj();
                 _ = try dtfGetStr(self, raw, "localeMatcher", &.{ "lookup", "best fit" }, "best fit");
                 const style = (try dtfGetStr(self, raw, "style", &.{ "narrow", "short", "long" }, "long")).?;
-                try self.setProp(ro, "style", Value.str(style));
+                try self.setProp(ro, "style", try Value.strAlloc(self.arena, style));
                 const typ = try dtfGetStr(self, raw, "type", &.{ "language", "region", "script", "currency", "calendar", "dateTimeField" }, null);
                 if (typ == null) return self.throwError("TypeError", "DisplayNames requires the type option");
-                try self.setProp(ro, "type", Value.str(typ.?));
+                try self.setProp(ro, "type", try Value.strAlloc(self.arena, typ.?));
                 const fallback = (try dtfGetStr(self, raw, "fallback", &.{ "code", "none" }, "code")).?;
-                try self.setProp(ro, "fallback", Value.str(fallback));
+                try self.setProp(ro, "fallback", try Value.strAlloc(self.arena, fallback));
                 const ld = (try dtfGetStr(self, raw, "languageDisplay", &.{ "dialect", "standard" }, "dialect")).?;
-                if (std.mem.eql(u8, typ.?, "language")) try self.setProp(ro, "languageDisplay", Value.str(ld));
+                if (std.mem.eql(u8, typ.?, "language")) try self.setProp(ro, "languageDisplay", try Value.strAlloc(self.arena, ld));
                 try self.setProp(o, "\x00opts", Value.obj(ro));
                 try o.setAttr(self.arena, "\x00opts", .{ .writable = false, .enumerable = false, .configurable = false });
             } else if (comptime std.mem.eql(u8, service, "Segmenter")) {
@@ -22745,7 +22745,7 @@ fn intlServiceConstructorFn(comptime service: []const u8) value.NativeFn {
                 const ro = (try self.newObject()).asObj();
                 if (raw.isObject()) {
                     _ = try dtfGetStr(self, raw, "localeMatcher", &.{ "lookup", "best fit" }, "best fit");
-                    if (try dtfGetStr(self, raw, "granularity", &.{ "grapheme", "word", "sentence" }, null)) |g| try self.setProp(ro, "granularity", Value.str(g));
+                    if (try dtfGetStr(self, raw, "granularity", &.{ "grapheme", "word", "sentence" }, null)) |g| try self.setProp(ro, "granularity", try Value.strAlloc(self.arena, g));
                 }
                 try self.setProp(o, "\x00opts", Value.obj(ro));
                 try o.setAttr(self.arena, "\x00opts", .{ .writable = false, .enumerable = false, .configurable = false });
@@ -22753,19 +22753,19 @@ fn intlServiceConstructorFn(comptime service: []const u8) value.NativeFn {
                 const raw = if (args.len > 1) args[1] else Value.undef();
                 const ro = (try self.newObject()).asObj();
                 if (raw.isObject()) {
-                    if (try dtfGetStr(self, raw, "usage", &.{ "sort", "search" }, null)) |u| try self.setProp(ro, "usage", Value.str(u));
+                    if (try dtfGetStr(self, raw, "usage", &.{ "sort", "search" }, null)) |u| try self.setProp(ro, "usage", try Value.strAlloc(self.arena, u));
                     _ = try dtfGetStr(self, raw, "localeMatcher", &.{ "lookup", "best fit" }, "best fit");
                     // collation: a well-formed Unicode collation type, else RangeError.
                     const cov = try self.getProperty(raw, "collation");
                     if (!cov.isUndefined()) {
                         const cstr = try std.ascii.allocLowerString(self.arena, try self.toStringV(cov));
                         if (!dtfWellFormedType(cstr)) return self.throwError("RangeError", "invalid collation");
-                        try self.setProp(ro, "collation", Value.str(cstr));
+                        try self.setProp(ro, "collation", try Value.strAlloc(self.arena, cstr));
                     }
                     const num = try self.getProperty(raw, "numeric");
                     if (!num.isUndefined()) try self.setProp(ro, "numeric", Value.boolVal(num.toBoolean()));
-                    if (try dtfGetStr(self, raw, "caseFirst", &.{ "upper", "lower", "false" }, null)) |cf| try self.setProp(ro, "caseFirst", Value.str(cf));
-                    if (try dtfGetStr(self, raw, "sensitivity", &.{ "base", "accent", "case", "variant" }, null)) |se| try self.setProp(ro, "sensitivity", Value.str(se));
+                    if (try dtfGetStr(self, raw, "caseFirst", &.{ "upper", "lower", "false" }, null)) |cf| try self.setProp(ro, "caseFirst", try Value.strAlloc(self.arena, cf));
+                    if (try dtfGetStr(self, raw, "sensitivity", &.{ "base", "accent", "case", "variant" }, null)) |se| try self.setProp(ro, "sensitivity", try Value.strAlloc(self.arena, se));
                     const ip = try self.getProperty(raw, "ignorePunctuation");
                     if (!ip.isUndefined()) try self.setProp(ro, "ignorePunctuation", Value.boolVal(ip.toBoolean()));
                 }
@@ -22780,9 +22780,9 @@ fn intlServiceConstructorFn(comptime service: []const u8) value.NativeFn {
                 var base: []const u8 = "short";
                 if (raw.isObject()) {
                     _ = try dtfGetStr(self, raw, "localeMatcher", &.{ "lookup", "best fit" }, "best fit");
-                    if (try dtfGetType(self, raw, "numberingSystem")) |ns| try self.setProp(ro, "numberingSystem", Value.str(ns));
+                    if (try dtfGetType(self, raw, "numberingSystem")) |ns| try self.setProp(ro, "numberingSystem", try Value.strAlloc(self.arena, ns));
                     base = (try dtfGetStr(self, raw, "style", &.{ "long", "short", "narrow", "digital" }, "short")).?;
-                    try self.setProp(ro, "style", Value.str(base));
+                    try self.setProp(ro, "style", try Value.strAlloc(self.arena, base));
                     // Per-unit style + display options (validated; defaults derived below).
                     const time_units = [_][]const u8{ "hours", "minutes", "seconds" };
                     inline for (duration_units) |u| {
@@ -22790,9 +22790,9 @@ fn intlServiceConstructorFn(comptime service: []const u8) value.NativeFn {
                             if (std.mem.eql(u8, u, t)) break true;
                         } else false;
                         const allowed: []const []const u8 = if (is_time) &.{ "long", "short", "narrow", "numeric", "2-digit" } else &.{ "long", "short", "narrow", "numeric" };
-                        if (try dtfGetStr(self, raw, u, allowed, null)) |v| try self.setProp(ro, u, Value.str(v));
+                        if (try dtfGetStr(self, raw, u, allowed, null)) |v| try self.setProp(ro, u, try Value.strAlloc(self.arena, v));
                         const dkey = u ++ "Display";
-                        if (try dtfGetStr(self, raw, dkey, &.{ "always", "auto" }, null)) |d| try self.setProp(ro, dkey, Value.str(d));
+                        if (try dtfGetStr(self, raw, dkey, &.{ "always", "auto" }, null)) |d| try self.setProp(ro, dkey, try Value.strAlloc(self.arena, d));
                     }
                     const fd = try self.getProperty(raw, "fractionalDigits");
                     if (!fd.isUndefined()) {
@@ -22801,7 +22801,7 @@ fn intlServiceConstructorFn(comptime service: []const u8) value.NativeFn {
                         try self.setProp(ro, "fractionalDigits", Value.num(n));
                     }
                 } else {
-                    try self.setProp(ro, "style", Value.str(base));
+                    try self.setProp(ro, "style", try Value.strAlloc(self.arena, base));
                 }
                 // An explicit non-numeric style after a numeric/2-digit unit is invalid.
                 var rstyles: [10][]const u8 = undefined;
@@ -23417,8 +23417,8 @@ fn intlDateTimeFormatToPartsFn(ctx: *anyopaque, this: Value, args: []const Value
     const arr = (try self.newArray()).asObj();
     for (parts.items) |p| {
         const o = (try self.newObject()).asObj();
-        try self.setProp(o, "type", Value.str(p.typ));
-        try self.setProp(o, "value", Value.str(p.value));
+        try self.setProp(o, "type", try Value.strAlloc(self.arena, p.typ));
+        try self.setProp(o, "value", try Value.strAlloc(self.arena, p.value));
         try arr.appendElement(self.arena, Value.obj(o));
     }
     return Value.obj(arr);
@@ -23562,9 +23562,9 @@ fn intlDateTimeFormatRangeToPartsFn(ctx: *anyopaque, this: Value, args: []const 
     const emit = struct {
         fn part(s: *Interpreter, a: *value.Object, p: DtfPart, src: []const u8) value.HostError!void {
             const o = (try s.newObject()).asObj();
-            try s.setProp(o, "type", Value.str(p.typ));
-            try s.setProp(o, "value", Value.str(p.value));
-            try s.setProp(o, "source", Value.str(src));
+            try s.setProp(o, "type", try Value.strAlloc(s.arena, p.typ));
+            try s.setProp(o, "value", try Value.strAlloc(s.arena, p.value));
+            try s.setProp(o, "source", try Value.strAlloc(s.arena, src));
             try a.appendElement(s.arena, Value.obj(o));
         }
         fn one(s: *Interpreter, a: *value.Object, prts: []const DtfPart, src: []const u8) value.HostError!void {
@@ -23581,7 +23581,7 @@ fn intlDateTimeFormatRangeToPartsFn(ctx: *anyopaque, this: Value, args: []const 
             try emit(self, arr, xp.items[2..3], "startRange");
             const lo = (try self.newObject()).asObj();
             try self.setProp(lo, "type", Value.str("literal"));
-            try self.setProp(lo, "value", Value.str(dtf_range_sep));
+            try self.setProp(lo, "value", try Value.strAlloc(self.arena, dtf_range_sep));
             try self.setProp(lo, "source", Value.str("shared"));
             try arr.appendElement(self.arena, Value.obj(lo));
             try emit(self, arr, yp.items[2..3], "endRange");
@@ -23590,7 +23590,7 @@ fn intlDateTimeFormatRangeToPartsFn(ctx: *anyopaque, this: Value, args: []const 
             try emit(self, arr, xp.items[0..3], "startRange");
             const lo = (try self.newObject()).asObj();
             try self.setProp(lo, "type", Value.str("literal"));
-            try self.setProp(lo, "value", Value.str(dtf_range_sep));
+            try self.setProp(lo, "value", try Value.strAlloc(self.arena, dtf_range_sep));
             try self.setProp(lo, "source", Value.str("shared"));
             try arr.appendElement(self.arena, Value.obj(lo));
             try emit(self, arr, yp.items[0..3], "endRange");
@@ -23602,7 +23602,7 @@ fn intlDateTimeFormatRangeToPartsFn(ctx: *anyopaque, this: Value, args: []const 
         try emit(self, arr, xp.items, "startRange");
         const lo = (try self.newObject()).asObj();
         try self.setProp(lo, "type", Value.str("literal"));
-        try self.setProp(lo, "value", Value.str(dtf_range_sep));
+        try self.setProp(lo, "value", try Value.strAlloc(self.arena, dtf_range_sep));
         try self.setProp(lo, "source", Value.str("shared"));
         try arr.appendElement(self.arena, Value.obj(lo));
         try emit(self, arr, yp.items, "endRange");
@@ -23614,7 +23614,7 @@ fn intlDateTimeFormatRangeToPartsFn(ctx: *anyopaque, this: Value, args: []const 
         try emit(self, arr, xp.items[shared_prefix..], "startRange");
         const lo = (try self.newObject()).asObj();
         try self.setProp(lo, "type", Value.str("literal"));
-        try self.setProp(lo, "value", Value.str(dtf_range_sep));
+        try self.setProp(lo, "value", try Value.strAlloc(self.arena, dtf_range_sep));
         try self.setProp(lo, "source", Value.str("shared"));
         try arr.appendElement(self.arena, Value.obj(lo));
         try emit(self, arr, yp.items[shared_prefix..], "endRange");
@@ -23623,7 +23623,7 @@ fn intlDateTimeFormatRangeToPartsFn(ctx: *anyopaque, this: Value, args: []const 
     try emit(self, arr, xp.items, "startRange");
     const lo = (try self.newObject()).asObj();
     try self.setProp(lo, "type", Value.str("literal"));
-    try self.setProp(lo, "value", Value.str(dtf_range_sep));
+    try self.setProp(lo, "value", try Value.strAlloc(self.arena, dtf_range_sep));
     try self.setProp(lo, "source", Value.str("shared"));
     try arr.appendElement(self.arena, Value.obj(lo));
     try emit(self, arr, yp.items, "endRange");
@@ -23868,8 +23868,8 @@ fn intlResolveNumbering(self: *Interpreter, out: *value.Object, tag: []const u8,
         try std.fmt.allocPrint(self.arena, "{s}-u-nu-{s}", .{ lang_base, ns })
     else
         lang_base;
-    try self.setProp(out, "locale", Value.str(rloc));
-    try self.setProp(out, "numberingSystem", Value.str(ns));
+    try self.setProp(out, "locale", try Value.strAlloc(self.arena, rloc));
+    try self.setProp(out, "numberingSystem", try Value.strAlloc(self.arena, ns));
 }
 
 /// ResolveLocale for Collator's relevant extension keys kn (numeric) and kf
@@ -24715,9 +24715,9 @@ fn intlNumberFormatRangeToPartsFn(ctx: *anyopaque, this: Value, args: []const Va
     const Emit = struct {
         fn part(s: *Interpreter, a: *value.Object, typ: []const u8, part_value: []const u8, src: []const u8) value.HostError!void {
             const po = (try s.newObject()).asObj();
-            try s.setProp(po, "type", Value.str(typ));
-            try s.setProp(po, "value", Value.str(part_value));
-            try s.setProp(po, "source", Value.str(src));
+            try s.setProp(po, "type", try Value.strAlloc(s.arena, typ));
+            try s.setProp(po, "value", try Value.strAlloc(s.arena, part_value));
+            try s.setProp(po, "source", try Value.strAlloc(s.arena, src));
             try a.appendElement(s.arena, Value.obj(po));
         }
         fn one(s: *Interpreter, a: *value.Object, prts: []const NfPart, src: []const u8) value.HostError!void {
@@ -24737,7 +24737,7 @@ fn intlNumberFormatRangeToPartsFn(ctx: *anyopaque, this: Value, args: []const Va
     try Emit.one(self, arr, xp.items, "startRange");
     const lo = (try self.newObject()).asObj();
     try self.setProp(lo, "type", Value.str("literal"));
-    try self.setProp(lo, "value", Value.str(nfRangeSeparator(xp.items, yp.items, shared_prefix)));
+    try self.setProp(lo, "value", try Value.strAlloc(self.arena, nfRangeSeparator(xp.items, yp.items, shared_prefix)));
     try self.setProp(lo, "source", Value.str("shared"));
     try arr.appendElement(self.arena, Value.obj(lo));
     try Emit.one(self, arr, yp.items[shared_prefix..], "endRange");
@@ -24751,8 +24751,8 @@ fn intlNumberFormatToPartsFn(ctx: *anyopaque, this: Value, args: []const Value) 
     const arr = (try self.newArray()).asObj();
     for (parts.items) |p| {
         const o = (try self.newObject()).asObj();
-        try self.setProp(o, "type", Value.str(p.typ));
-        try self.setProp(o, "value", Value.str(p.value));
+        try self.setProp(o, "type", try Value.strAlloc(self.arena, p.typ));
+        try self.setProp(o, "value", try Value.strAlloc(self.arena, p.value));
         try arr.appendElement(self.arena, Value.obj(o));
     }
     return Value.obj(arr);
@@ -24940,8 +24940,8 @@ fn durUnitNf(self: *Interpreter, locale: []const u8, style: []const u8, unit_sin
     const standalone = !std.mem.eql(u8, style, "numeric") and !std.mem.eql(u8, style, "2-digit");
     if (standalone) {
         try self.setProp(ro, "style", Value.str("unit"));
-        try self.setProp(ro, "unit", Value.str(unit_singular));
-        try self.setProp(ro, "unitDisplay", Value.str(style));
+        try self.setProp(ro, "unit", try Value.strAlloc(self.arena, unit_singular));
+        try self.setProp(ro, "unitDisplay", try Value.strAlloc(self.arena, style));
     } else {
         try self.setProp(ro, "useGrouping", Value.boolVal(false));
         if (std.mem.eql(u8, style, "2-digit")) try self.setProp(ro, "minimumIntegerDigits", Value.num(2));
@@ -24949,7 +24949,7 @@ fn durUnitNf(self: *Interpreter, locale: []const u8, style: []const u8, unit_sin
     if (sign_never) try self.setProp(ro, "signDisplay", Value.str("never"));
     const nf = (try self.newObject()).asObj();
     try self.setProp(nf, "\x00intl", Value.str("NumberFormat"));
-    try self.setProp(nf, "\x00locale", Value.str(locale));
+    try self.setProp(nf, "\x00locale", try Value.strAlloc(self.arena, locale));
     try self.setProp(nf, "\x00opts", Value.obj(ro));
     return Value.obj(nf);
 }
@@ -24966,17 +24966,17 @@ fn durFmtVal(self: *Interpreter, locale: []const u8, num: f64, style: []const u8
 fn durFmtCombineUnit(self: *Interpreter, locale: []const u8, dec: []const u8, style: []const u8, unit_singular: []const u8, sign_never: bool, fd: ?usize) value.HostError![]const u8 {
     const ro = (try self.newObject()).asObj();
     try self.setProp(ro, "style", Value.str("unit"));
-    try self.setProp(ro, "unit", Value.str(unit_singular));
-    try self.setProp(ro, "unitDisplay", Value.str(style));
+    try self.setProp(ro, "unit", try Value.strAlloc(self.arena, unit_singular));
+    try self.setProp(ro, "unitDisplay", try Value.strAlloc(self.arena, style));
     try self.setProp(ro, "minimumFractionDigits", Value.num(if (fd) |f| @floatFromInt(f) else 0));
     try self.setProp(ro, "maximumFractionDigits", Value.num(if (fd) |f| @floatFromInt(f) else 9));
     try self.setProp(ro, "roundingMode", Value.str("trunc"));
     if (sign_never) try self.setProp(ro, "signDisplay", Value.str("never"));
     const nf = (try self.newObject()).asObj();
     try self.setProp(nf, "\x00intl", Value.str("NumberFormat"));
-    try self.setProp(nf, "\x00locale", Value.str(locale));
+    try self.setProp(nf, "\x00locale", try Value.strAlloc(self.arena, locale));
     try self.setProp(nf, "\x00opts", Value.obj(ro));
-    return nfFormatOne(self, Value.obj(nf), Value.str(dec));
+    return nfFormatOne(self, Value.obj(nf), try Value.strAlloc(self.arena, dec));
 }
 
 fn durFmtCombineNumeric(self: *Interpreter, locale: []const u8, dec: []const u8, min_int: usize, sign_never: bool, fd: ?usize) value.HostError![]const u8 {
@@ -24988,9 +24988,9 @@ fn durFmtCombineNumeric(self: *Interpreter, locale: []const u8, dec: []const u8,
     if (sign_never) try self.setProp(ro, "signDisplay", Value.str("never"));
     const nf = (try self.newObject()).asObj();
     try self.setProp(nf, "\x00intl", Value.str("NumberFormat"));
-    try self.setProp(nf, "\x00locale", Value.str(locale));
+    try self.setProp(nf, "\x00locale", try Value.strAlloc(self.arena, locale));
     try self.setProp(nf, "\x00opts", Value.obj(ro));
-    return nfFormatOne(self, Value.obj(nf), Value.str(dec));
+    return nfFormatOne(self, Value.obj(nf), try Value.strAlloc(self.arena, dec));
 }
 
 fn durFracDigits(ov: ?Value) ?usize {
@@ -25217,14 +25217,14 @@ fn intlDurationFormatToPartsFn(ctx: *anyopaque, this: Value, args: []const Value
             const sep = if (gi == groups.items.len - 1) (if (groups.items.len == 2) uc.pair else uc.fin) else uc.mid;
             const lo = (try self.newObject()).asObj();
             try self.setProp(lo, "type", Value.str("literal"));
-            try self.setProp(lo, "value", Value.str(sep));
+            try self.setProp(lo, "value", try Value.strAlloc(self.arena, sep));
             try arr.appendElement(self.arena, Value.obj(lo));
         }
         for (grp.items) |p| {
             const o = (try self.newObject()).asObj();
-            try self.setProp(o, "type", Value.str(p.typ));
-            try self.setProp(o, "value", Value.str(p.value));
-            if (p.unit) |un| try self.setProp(o, "unit", Value.str(un));
+            try self.setProp(o, "type", try Value.strAlloc(self.arena, p.typ));
+            try self.setProp(o, "value", try Value.strAlloc(self.arena, p.value));
+            if (p.unit) |un| try self.setProp(o, "unit", try Value.strAlloc(self.arena, un));
             try arr.appendElement(self.arena, Value.obj(o));
         }
     }
@@ -25285,7 +25285,7 @@ fn intlCollatorCompareFn(ctx: *anyopaque, this: Value, args: []const Value) valu
     const y = try self.toStringV(if (args.len > 1) args[1] else Value.undef());
     const loc = if (this.asObj().getOwn("\x00locale")) |v| if (v.isString()) v.asStr() else "en" else "en";
     const ro = if (this.asObj().getOwn("\x00opts")) |v| v else Value.undef();
-    const opts = try collatorOptionsFrom(self, Value.str(loc), ro);
+    const opts = try collatorOptionsFrom(self, try Value.strAlloc(self.arena, loc), ro);
     return Value.num(try collatorCompareStrings(self, x, y, opts));
 }
 
@@ -25451,7 +25451,7 @@ fn intlPluralSelectFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
         else
             @as(i32, 0));
     }
-    return Value.str(pluralCategory(pluralRulesFor(this), ops));
+    return try Value.strAlloc(self.arena, pluralCategory(pluralRulesFor(this), ops));
 }
 
 /// One element of a ListFormat result: an "element" (a list item) or a
@@ -25670,7 +25670,7 @@ fn segDataObj(self: *Interpreter, str: []const u8, start: usize, end: usize, gra
     const o = (try self.newObject()).asObj();
     try self.setProp(o, "segment", try Value.strOwned(self.arena, try self.arena.dupe(u8, str[start..end])));
     try self.setProp(o, "index", Value.num(@floatFromInt(Interpreter.utf16IndexForByteOffset(str, start))));
-    try self.setProp(o, "input", Value.str(str));
+    try self.setProp(o, "input", try Value.strAlloc(self.arena, str));
     if (std.mem.eql(u8, gran, "word")) try self.setProp(o, "isWordLike", Value.boolVal(word_like));
     return Value.obj(o);
 }
@@ -25695,9 +25695,9 @@ fn intlSegmenterSegmentFn(ctx: *anyopaque, this: Value, args: []const Value) val
     if (self.env.get("\x00SegmentsProto")) |p| if (p.isObject()) {
         o.setProtoAtomic(p.asObj());
     };
-    try self.setProp(o, "\x00segstr", Value.str(str));
+    try self.setProp(o, "\x00segstr", try Value.strAlloc(self.arena, str));
     try o.setAttr(self.arena, "\x00segstr", .{ .writable = false, .enumerable = false, .configurable = false });
-    try self.setProp(o, "\x00gran", Value.str(gran));
+    try self.setProp(o, "\x00gran", try Value.strAlloc(self.arena, gran));
     try o.setAttr(self.arena, "\x00gran", .{ .writable = false, .enumerable = false, .configurable = false });
     return Value.obj(o);
 }
@@ -25738,7 +25738,7 @@ fn intlSegmentsIteratorFn(ctx: *anyopaque, this: Value, args: []const Value) val
     };
     try self.setProp(it, "\x00segstr", this.asObj().getOwn("\x00segstr").?);
     try it.setAttr(self.arena, "\x00segstr", .{ .writable = false, .enumerable = false, .configurable = false });
-    try self.setProp(it, "\x00gran", Value.str(segmenterGranularity(this.asObj())));
+    try self.setProp(it, "\x00gran", try Value.strAlloc(self.arena, segmenterGranularity(this.asObj())));
     try it.setAttr(self.arena, "\x00gran", .{ .writable = false, .enumerable = false, .configurable = false });
     try self.setProp(it, "\x00pos", Value.num(0));
     try it.setAttr(self.arena, "\x00pos", .{ .writable = true, .enumerable = false, .configurable = false });
@@ -25807,7 +25807,7 @@ fn intlDisplayNamesOfFn(ctx: *anyopaque, this: Value, args: []const Value) value
         canon = try std.ascii.allocUpperString(self.arena, code);
         // The currencies enumerated by supportedValuesOf have a (stand-in) name,
         // so they resolve even under fallback:"none".
-        for (supported_currencies) |c| if (std.mem.eql(u8, c, canon)) return Value.str(canon);
+        for (supported_currencies) |c| if (std.mem.eql(u8, c, canon)) return try Value.strAlloc(self.arena, canon);
     } else if (std.mem.eql(u8, typ, "language")) {
         // A unicode_language_id: structurally valid AND no extension (singleton)
         // subtag (DisplayNames language codes are not full locale tags).
@@ -25818,7 +25818,7 @@ fn intlDisplayNamesOfFn(ctx: *anyopaque, this: Value, args: []const Value) value
         if (!dtfWellFormedType(code)) return self.throwError("RangeError", "invalid calendar code");
         // Calendars enumerated by supportedValuesOf resolve under fallback:"none".
         const cc = dtfCanonCalendar(code);
-        if (dtfCalAvail(cc)) return Value.str(cc);
+        if (dtfCalAvail(cc)) return try Value.strAlloc(self.arena, cc);
     } else if (std.mem.eql(u8, typ, "dateTimeField")) {
         const fields = [_][]const u8{ "era", "year", "quarter", "month", "weekOfYear", "weekday", "day", "dayPeriod", "hour", "minute", "second", "timeZoneName" };
         var ok = false;
@@ -25828,7 +25828,7 @@ fn intlDisplayNamesOfFn(ctx: *anyopaque, this: Value, args: []const Value) value
         if (!ok) return self.throwError("RangeError", "invalid dateTimeField");
     }
     if (std.mem.eql(u8, fallback, "none")) return Value.undef();
-    return Value.str(canon);
+    return try Value.strAlloc(self.arena, canon);
 }
 
 fn intlListFormatFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -25847,8 +25847,8 @@ fn intlListFormatToPartsFn(ctx: *anyopaque, this: Value, args: []const Value) va
     const arr = (try self.newArray()).asObj();
     for (parts.items) |p| {
         const o = (try self.newObject()).asObj();
-        try self.setProp(o, "type", Value.str(p.typ));
-        try self.setProp(o, "value", Value.str(p.value));
+        try self.setProp(o, "type", try Value.strAlloc(self.arena, p.typ));
+        try self.setProp(o, "value", try Value.strAlloc(self.arena, p.value));
         try arr.appendElement(self.arena, Value.obj(o));
     }
     return Value.obj(arr);
@@ -26030,7 +26030,7 @@ fn intlRelativeTimeFormatFn(ctx: *anyopaque, this: Value, args: []const Value) v
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!intlBrandOk(this, "RelativeTimeFormat")) return self.throwError("TypeError", "Intl.RelativeTimeFormat.prototype.format on incompatible receiver");
     const r = try rtfCompute(self, this, args);
-    if (r.term) |t| return Value.str(t);
+    if (r.term) |t| return try Value.strAlloc(self.arena, t);
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     try buf.appendSlice(self.arena, r.prefix);
     try buf.appendSlice(self.arena, try rtfTranslateNumber(self, try rtfGroup(self, r.int_str, r.group, r.min_group_digits), r.numbering));
@@ -26067,8 +26067,8 @@ fn intlRelativeTimeFormatToPartsFn(ctx: *anyopaque, this: Value, args: []const V
     const addPart = struct {
         fn p(s: *Interpreter, a: *value.Object, typ: []const u8, v: []const u8, unit: ?[]const u8) EvalError!void {
             const o = (try s.newObject()).asObj();
-            try s.setProp(o, "type", Value.str(typ));
-            try s.setProp(o, "value", Value.str(v));
+            try s.setProp(o, "type", try Value.strAlloc(s.arena, typ));
+            try s.setProp(o, "value", try Value.strAlloc(s.arena, v));
             if (unit) |u| try s.setProp(o, "unit", try Value.strOwned(s.arena, try std.fmt.allocPrint(s.arena, "{s}", .{u})));
             try a.appendElement(s.arena, Value.obj(o));
         }
@@ -26178,7 +26178,7 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
                     if (ug.isBoolean()) {
                         grouping = Value.boolVal(ug.asBool());
                     } else if (ug.isString()) {
-                        grouping = Value.str(ug.asStr());
+                        grouping = try Value.strAlloc(self.arena, ug.asStr());
                     } else if (std.mem.eql(u8, notation, "compact")) {
                         grouping = Value.str("min2"); // compact default
                     }
@@ -26190,10 +26190,10 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
                 // reported values; formatting output stays option-only above).
                 const nf_ns: ?[]const u8 = if (this.asObj().getOwn("\x00opts")) |ov| (if (ov.isObject()) (if (ov.asObj().getOwn("numberingSystem")) |n| (if (n.isString()) n.asStr() else null) else null) else null) else null;
                 try intlResolveNumbering(self, o, loc.asStr(), nf_ns);
-                try self.setProp(o, "style", Value.str(style));
+                try self.setProp(o, "style", try Value.strAlloc(self.arena, style));
                 if (currency) |c| {
-                    try self.setProp(o, "currency", Value.str(c));
-                    try self.setProp(o, "currencyDisplay", Value.str(currency_display));
+                    try self.setProp(o, "currency", try Value.strAlloc(self.arena, c));
+                    try self.setProp(o, "currencyDisplay", try Value.strAlloc(self.arena, currency_display));
                     try self.setProp(o, "currencySign", Value.str("standard"));
                 }
                 if (std.mem.eql(u8, style, "unit")) {
@@ -26226,13 +26226,13 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
                     try self.setProp(o, "maximumSignificantDigits", Value.num(max_sig orelse 21));
                 }
                 try self.setProp(o, "useGrouping", grouping);
-                try self.setProp(o, "notation", Value.str(notation));
-                if (std.mem.eql(u8, notation, "compact")) try self.setProp(o, "compactDisplay", Value.str(compact_display));
-                try self.setProp(o, "signDisplay", Value.str(sign_display));
+                try self.setProp(o, "notation", try Value.strAlloc(self.arena, notation));
+                if (std.mem.eql(u8, notation, "compact")) try self.setProp(o, "compactDisplay", try Value.strAlloc(self.arena, compact_display));
+                try self.setProp(o, "signDisplay", try Value.strAlloc(self.arena, sign_display));
                 try self.setProp(o, "roundingIncrement", Value.num(rounding_increment));
-                try self.setProp(o, "roundingMode", Value.str(rounding_mode));
-                try self.setProp(o, "roundingPriority", Value.str(rounding_priority));
-                try self.setProp(o, "trailingZeroDisplay", Value.str(trailing_zero));
+                try self.setProp(o, "roundingMode", try Value.strAlloc(self.arena, rounding_mode));
+                try self.setProp(o, "roundingPriority", try Value.strAlloc(self.arena, rounding_priority));
+                try self.setProp(o, "trailingZeroDisplay", try Value.strAlloc(self.arena, trailing_zero));
             } else if (comptime std.mem.eql(u8, service, "Collator")) {
                 // Reflect the normalized options over the spec defaults, in the
                 // resolvedOptions field order.
@@ -26258,9 +26258,9 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
                     break :blk std.mem.eql(u8, lang, "th");
                 };
                 try self.setProp(o, "ignorePunctuation", cget(rv, "ignorePunctuation") orelse Value.boolVal(ip_default));
-                try self.setProp(o, "collation", Value.str(res.collation));
+                try self.setProp(o, "collation", try Value.strAlloc(self.arena, res.collation));
                 try self.setProp(o, "numeric", Value.boolVal(res.numeric));
-                try self.setProp(o, "caseFirst", Value.str(res.case_first));
+                try self.setProp(o, "caseFirst", try Value.strAlloc(self.arena, res.case_first));
             } else if (comptime std.mem.eql(u8, service, "PluralRules")) {
                 // Spec key order: locale (set above), type, notation,
                 // minimumIntegerDigits, then significant-OR-fraction digits,
@@ -26275,7 +26275,7 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
                 }.s;
                 try self.setProp(o, "type", pg(ro, "type") orelse Value.str("cardinal"));
                 const pr_notation: []const u8 = if (pg(ro, "notation")) |n| n.asStr() else "standard";
-                try self.setProp(o, "notation", Value.str(pr_notation));
+                try self.setProp(o, "notation", try Value.strAlloc(self.arena, pr_notation));
                 // compactDisplay is reported only when notation is "compact".
                 if (std.mem.eql(u8, pr_notation, "compact")) {
                     try self.setProp(o, "compactDisplay", pg(ro, "compactDisplay") orelse Value.str("short"));
@@ -26298,7 +26298,7 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
                 const prules = pluralRulesFor(this);
                 for (order) |cat| {
                     for (prules) |r| if (std.mem.eql(u8, r.cat, cat)) {
-                        try cats.appendElement(self.arena, Value.str(cat));
+                        try cats.appendElement(self.arena, try Value.strAlloc(self.arena, cat));
                         break;
                     };
                 }
@@ -26322,11 +26322,11 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
                 // computed at construction.
                 if (get(self, ro, "\x00rloc")) |rl| try self.setProp(o, "locale", rl);
                 const cal = get(self, ro, "calendar");
-                try self.setProp(o, "calendar", if (cal) |c| Value.str(c.asStr()) else Value.str("gregory"));
+                try self.setProp(o, "calendar", if (cal) |c| try Value.strAlloc(self.arena, c.asStr()) else Value.str("gregory"));
                 const ns = get(self, ro, "numberingSystem");
-                try self.setProp(o, "numberingSystem", if (ns) |c| Value.str(c.asStr()) else Value.str("latn"));
+                try self.setProp(o, "numberingSystem", if (ns) |c| try Value.strAlloc(self.arena, c.asStr()) else Value.str("latn"));
                 const tz = get(self, ro, "timeZone");
-                try self.setProp(o, "timeZone", if (tz) |c| Value.str(c.asStr()) else Value.str("UTC"));
+                try self.setProp(o, "timeZone", if (tz) |c| try Value.strAlloc(self.arena, c.asStr()) else Value.str("UTC"));
                 // Component / style fields are reflected only when set, in order.
                 const has_style = get(self, ro, "dateStyle") != null or get(self, ro, "timeStyle") != null;
                 const has_time = get(self, ro, "hour") != null or has_style;
@@ -26352,8 +26352,8 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
                         numeric = nv.asStr();
                     };
                 };
-                try self.setProp(o, "style", Value.str(style));
-                try self.setProp(o, "numeric", Value.str(numeric));
+                try self.setProp(o, "style", try Value.strAlloc(self.arena, style));
+                try self.setProp(o, "numeric", try Value.strAlloc(self.arena, numeric));
                 const rtf_ns: ?[]const u8 = if (this.asObj().getOwn("\x00opts")) |ov| (if (ov.isObject()) (if (ov.asObj().getOwn("numberingSystem")) |n| (if (n.isString()) n.asStr() else null) else null) else null) else null;
                 try intlResolveNumbering(self, o, loc.asStr(), rtf_ns);
             } else if (comptime std.mem.eql(u8, service, "ListFormat")) {
@@ -26367,8 +26367,8 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
                         style = sv.asStr();
                     };
                 };
-                try self.setProp(o, "type", Value.str(typ));
-                try self.setProp(o, "style", Value.str(style));
+                try self.setProp(o, "type", try Value.strAlloc(self.arena, typ));
+                try self.setProp(o, "style", try Value.strAlloc(self.arena, style));
             } else if (comptime std.mem.eql(u8, service, "DisplayNames")) {
                 // Reflect the normalized record (locale, then the Table-6 order).
                 const ro: ?Value = this.asObj().getOwn("\x00opts");
@@ -26382,7 +26382,7 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
                 if (this.asObj().getOwn("\x00opts")) |ov| if (ov.isObject()) {
                     if (ov.asObj().getOwn("granularity")) |g| granularity = g.asStr();
                 };
-                try self.setProp(o, "granularity", Value.str(granularity));
+                try self.setProp(o, "granularity", try Value.strAlloc(self.arena, granularity));
             } else if (comptime std.mem.eql(u8, service, "DurationFormat")) {
                 const ro: ?Value = this.asObj().getOwn("\x00opts");
                 const dget = struct {
@@ -26393,15 +26393,15 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
                 }.s;
                 const base = if (dget(ro, "style")) |st| st.asStr() else "short";
                 try intlResolveNumbering(self, o, loc.asStr(), if (dget(ro, "numberingSystem")) |n| n.asStr() else null);
-                try self.setProp(o, "style", Value.str(base));
+                try self.setProp(o, "style", try Value.strAlloc(self.arena, base));
                 // Resolved per-unit style/display via GetDurationUnitOptions
                 // (prevStyle cascade, digital defaults, 2-digit promotion).
                 var styles: [10][]const u8 = undefined;
                 var displays: [10][]const u8 = undefined;
                 _ = durResolveUnits(ro, base, &styles, &displays);
                 inline for (duration_units, 0..) |u, i| {
-                    try self.setProp(o, u, Value.str(styles[i]));
-                    try self.setProp(o, u ++ "Display", Value.str(displays[i]));
+                    try self.setProp(o, u, try Value.strAlloc(self.arena, styles[i]));
+                    try self.setProp(o, u ++ "Display", try Value.strAlloc(self.arena, displays[i]));
                 }
                 if (dget(ro, "fractionalDigits")) |fd| try self.setProp(o, "fractionalDigits", fd);
             }
@@ -26479,7 +26479,7 @@ fn installIntl(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalE
             try setConstructor(self_a, shp, proto, ctor);
             if (ttag) |k| {
                 const full = std.fmt.allocPrint(self_a, "Intl.{s}", .{name}) catch name;
-                try proto.setOwn(self_a, shp, k, Value.str(full));
+                try proto.setOwn(self_a, shp, k, try Value.strAlloc(self_a, full));
                 try proto.setAttr(self_a, k, .{ .writable = false, .enumerable = false, .configurable = true });
             }
             _ = e;
@@ -26875,7 +26875,7 @@ fn host262AgentGetReportFn(ctx: *anyopaque, this: Value, args: []const Value) va
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const r = agent.takeReport(self.arena) orelse return Value.nul(); // none available (harness polls)
-    return Value.str(r);
+    return try Value.strAlloc(self.arena, r);
 }
 
 fn host262AgentNoopFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -27121,11 +27121,11 @@ fn atomicsWaitFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
         agent.wait(storage, offset, i64, @bitCast(expected_raw), timeout_ns)
     else
         agent.wait(storage, offset, i32, @bitCast(@as(u32, @truncate(expected_raw))), timeout_ns);
-    return Value.str(switch (outcome) {
-        .ok => "ok",
-        .not_equal => "not-equal",
-        .timed_out => "timed-out",
-    });
+    return switch (outcome) {
+        .ok => Value.str("ok"),
+        .not_equal => Value.str("not-equal"),
+        .timed_out => Value.str("timed-out"),
+    };
 }
 /// `Atomics.pause(N)` — a microarchitectural pause hint. `N`, if present, must
 /// be an integral Number (the iteration count); anything else is a TypeError.
@@ -27301,7 +27301,7 @@ fn moduleNsIndex(ns: *ModuleNs, name: []const u8) ?usize {
 /// [[Get]] for a module namespace: live binding read; an uninitialized (TDZ)
 /// binding throws ReferenceError.
 fn moduleNsGet(self: *Interpreter, ns: *ModuleNs, key: []const u8) EvalError!Value {
-    if (std.mem.eql(u8, key, ns.tag_key)) return Value.str(if (ns.deferred) "Deferred Module" else "Module");
+    if (std.mem.eql(u8, key, ns.tag_key)) return if (ns.deferred) Value.str("Deferred Module") else Value.str("Module");
     // On a deferred namespace, "then" is symbol-like: it reads as absent
     // (OrdinaryGet), never the export binding — so it can't throw a TDZ error.
     if (ns.deferred and std.mem.eql(u8, key, "then")) return Value.undef();
@@ -27349,7 +27349,7 @@ pub fn moduleNsDesc(self: *Interpreter, o: *value.Object, key: []const u8) EvalE
     if (ns.deferred and std.mem.eql(u8, key, "then")) return Value.undef();
     if (std.mem.eql(u8, key, ns.tag_key)) {
         const d = (try self.newObject()).asObj();
-        try self.setProp(d, "value", Value.str(if (ns.deferred) "Deferred Module" else "Module"));
+        try self.setProp(d, "value", if (ns.deferred) Value.str("Deferred Module") else Value.str("Module"));
         try self.setProp(d, "writable", Value.boolVal(false));
         try self.setProp(d, "enumerable", Value.boolVal(false));
         try self.setProp(d, "configurable", Value.boolVal(false));
@@ -27683,7 +27683,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
             p.* = .{ .proto = error_proto };
             break :blk p;
         };
-        try proto.setOwn(a, root_shape, "name", Value.str(ename));
+        try proto.setOwn(a, root_shape, "name", try Value.strAlloc(a, ename));
         try proto.setAttr(a, "name", ro);
         try proto.setOwn(a, root_shape, "message", Value.str(""));
         try proto.setAttr(a, "message", ro);
@@ -27939,7 +27939,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
         const tk = stt.asObj().sym_key;
         inline for (.{ "Map", "Set", "WeakMap", "WeakSet", "Promise" }) |nm| {
             if (env.get(nm)) |cv| if (cv.isObject()) if (cv.asObj().getOwn("prototype")) |pv| if (pv.isObject()) {
-                try pv.asObj().setOwn(a, root_shape, tk, Value.str(nm));
+                try pv.asObj().setOwn(a, root_shape, tk, try Value.strAlloc(a, nm));
                 try pv.asObj().setAttr(a, tk, .{ .writable = false, .enumerable = false, .configurable = true });
             };
         }
@@ -28005,7 +28005,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
         // The JSON and Math namespaces carry the same non-enumerable tag.
         inline for (.{ .{ "JSON", "JSON" }, .{ "Math", "Math" } }) |nt| {
             if (env.get(nt[0])) |nv| if (nv.isObject()) {
-                try nv.asObj().setOwn(a, root_shape, rtt.asObj().sym_key, Value.str(nt[1]));
+                try nv.asObj().setOwn(a, root_shape, rtt.asObj().sym_key, try Value.strAlloc(a, nt[1]));
                 try nv.asObj().setAttr(a, rtt.asObj().sym_key, .{ .writable = false, .enumerable = false, .configurable = true });
             };
         }
@@ -28430,7 +28430,7 @@ pub fn installFunctionProps(
     const ro_attr: value.PropAttr = .{ .writable = false, .enumerable = false, .configurable = true };
     try obj.setOwn(arena, root_shape, "length", Value.num(@floatFromInt(len)));
     try obj.setAttr(arena, "length", ro_attr);
-    try obj.setOwn(arena, root_shape, "name", Value.str(name));
+    try obj.setOwn(arena, root_shape, "name", try Value.strAlloc(arena, name));
     try obj.setAttr(arena, "name", ro_attr);
 }
 
@@ -28444,7 +28444,7 @@ pub fn installNativeProps(a: std.mem.Allocator, rs: *Shape, obj: *value.Object, 
     const ro_attr: value.PropAttr = .{ .writable = false, .enumerable = false, .configurable = true };
     try obj.setOwn(a, rs, "length", Value.num(@floatFromInt(len)));
     try obj.setAttr(a, "length", ro_attr);
-    try obj.setOwn(a, rs, "name", Value.str(name));
+    try obj.setOwn(a, rs, "name", try Value.strAlloc(a, name));
     try obj.setAttr(a, "name", ro_attr);
 }
 
@@ -28592,7 +28592,7 @@ fn stringValueMethod(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
         .object => if (this.asObj().prim != null and this.asObj().prim.?.isString()) this.asObj().prim.?.asStr() else return throwStringValueTypeError(self),
         else => return throwStringValueTypeError(self),
     };
-    return Value.str(s);
+    return try Value.strAlloc(self.arena, s);
 }
 
 fn throwStringValueTypeError(self: *Interpreter) EvalError {
@@ -29107,7 +29107,7 @@ fn regexpLegacyGetter(comptime field: ReLegacyField) value.NativeFn {
                 .g8 => self.re_legacy.groups[7],
                 .g9 => self.re_legacy.groups[8],
             };
-            return Value.str(s);
+            return try Value.strAlloc(self.arena, s);
         }
     }.call;
 }
@@ -30688,7 +30688,7 @@ fn temporalCalendarIdGetter(ctx: *anyopaque, this: Value, args: []const Value) v
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!this.isObject() or this.asObj().temporal == null) return self.throwError("TypeError", "Temporal calendarId accessor on incompatible receiver");
-    return Value.str(this.asObj().temporal.?.calendar);
+    return try Value.strAlloc(self.arena, this.asObj().temporal.?.calendar);
 }
 
 /// Whether `id` is a Temporal-supported BCP-47 calendar identifier
@@ -31848,7 +31848,7 @@ fn temporalEraGetter(comptime want_year: bool) value.NativeFn {
             const ce = calEraOf(t.calendar, d.year, d.month, d.day);
             const era = ce.era orelse return Value.undef();
             if (want_year) return Value.num(@floatFromInt(ce.era_year));
-            return Value.str(era);
+            return try Value.strAlloc(self.arena, era);
         }
     }.call;
 }
@@ -35697,7 +35697,7 @@ fn makeDurationFormatForLocaleString(self: *Interpreter, locales: Value, options
     try o.setAttr(self.arena, "\x00intl", .{ .writable = false, .enumerable = false, .configurable = false });
     const locs = try canonicalizeLocaleList(self, locales);
     const resolved = localeListFirstSupportedOr(locs, "en");
-    try self.setProp(o, "\x00locale", Value.str(resolved));
+    try self.setProp(o, "\x00locale", try Value.strAlloc(self.arena, resolved));
     try o.setAttr(self.arena, "\x00locale", .{ .writable = false, .enumerable = false, .configurable = false });
 
     if (!options.isUndefined() and !(options.isObject() and !options.asObj().is_symbol and !options.asObj().is_bigint))
@@ -35706,17 +35706,17 @@ fn makeDurationFormatForLocaleString(self: *Interpreter, locales: Value, options
     var base: []const u8 = "short";
     if (options.isObject()) {
         _ = try dtfGetStr(self, options, "localeMatcher", &.{ "lookup", "best fit" }, "best fit");
-        if (try dtfGetType(self, options, "numberingSystem")) |ns| try self.setProp(ro, "numberingSystem", Value.str(ns));
+        if (try dtfGetType(self, options, "numberingSystem")) |ns| try self.setProp(ro, "numberingSystem", try Value.strAlloc(self.arena, ns));
         base = (try dtfGetStr(self, options, "style", &.{ "long", "short", "narrow", "digital" }, "short")).?;
-        try self.setProp(ro, "style", Value.str(base));
+        try self.setProp(ro, "style", try Value.strAlloc(self.arena, base));
         const time_units = [_][]const u8{ "hours", "minutes", "seconds" };
         inline for (duration_units) |u| {
             const is_time = for (time_units) |tu| {
                 if (std.mem.eql(u8, u, tu)) break true;
             } else false;
             const allowed: []const []const u8 = if (is_time) &.{ "long", "short", "narrow", "numeric", "2-digit" } else &.{ "long", "short", "narrow", "numeric" };
-            if (try dtfGetStr(self, options, u, allowed, null)) |v| try self.setProp(ro, u, Value.str(v));
-            if (try dtfGetStr(self, options, u ++ "Display", &.{ "always", "auto" }, null)) |d| try self.setProp(ro, u ++ "Display", Value.str(d));
+            if (try dtfGetStr(self, options, u, allowed, null)) |v| try self.setProp(ro, u, try Value.strAlloc(self.arena, v));
+            if (try dtfGetStr(self, options, u ++ "Display", &.{ "always", "auto" }, null)) |d| try self.setProp(ro, u ++ "Display", try Value.strAlloc(self.arena, d));
         }
         const fd = try self.getProperty(options, "fractionalDigits");
         if (!fd.isUndefined()) {
@@ -35725,7 +35725,7 @@ fn makeDurationFormatForLocaleString(self: *Interpreter, locales: Value, options
             try self.setProp(ro, "fractionalDigits", Value.num(n));
         }
     } else {
-        try self.setProp(ro, "style", Value.str(base));
+        try self.setProp(ro, "style", try Value.strAlloc(self.arena, base));
     }
     var styles: [10][]const u8 = undefined;
     var displays: [10][]const u8 = undefined;
@@ -35749,7 +35749,7 @@ fn temporalToLocaleStringFn(ctx: *anyopaque, this: Value, args: []const Value) v
             try self.setProp(dtf, "\x00allowTemporalZonedDateTime", Value.boolVal(true));
         const locs = try canonicalizeLocaleList(self, if (args.len > 0) args[0] else Value.undef());
         const loc = localeListFirstOr(locs, "en");
-        try self.setProp(dtf, "\x00locale", Value.str(loc));
+        try self.setProp(dtf, "\x00locale", try Value.strAlloc(self.arena, loc));
         if (t.kind == .zoned_date_time and args.len > 1 and !args[1].isUndefined()) {
             const raw = Value.obj(try self.toObject(args[1]));
             if (!(try self.getProperty(raw, "timeZone")).isUndefined())
@@ -37401,7 +37401,7 @@ fn temporalZdtTimeZoneIdGetter(ctx: *anyopaque, this: Value, args: []const Value
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsZdt(this)) return self.throwError("TypeError", "non-ZonedDateTime");
-    return Value.str(this.asObj().temporal.?.tz_name);
+    return try Value.strAlloc(self.arena, this.asObj().temporal.?.tz_name);
 }
 
 fn temporalZdtOffsetGetter(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -38035,7 +38035,7 @@ fn temporalType(self_a: std.mem.Allocator, rs: *Shape, env: *Environment, ns: *v
     try setConstructor(self_a, rs, proto, ctor);
     if (tag_key) |k| {
         const full = std.fmt.allocPrint(self_a, "Temporal.{s}", .{name}) catch name;
-        try proto.setOwn(self_a, rs, k, Value.str(full));
+        try proto.setOwn(self_a, rs, k, try Value.strAlloc(self_a, full));
         try proto.setAttr(self_a, k, .{ .writable = false, .enumerable = false, .configurable = true });
     }
     try env.put(proto_key, Value.obj(proto));
@@ -38885,7 +38885,7 @@ fn symbolForFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostErro
     if (reg.getOwn(key)) |existing| return existing;
     const sym = try makeSymbolObj(self.arena, self.root_shape, key, symbolProto(self));
     _ = self.registerSymbol(sym.asObj());
-    try sym.asObj().setOwn(self.arena, self.root_shape, "\x00forKey", Value.str(key));
+    try sym.asObj().setOwn(self.arena, self.root_shape, "\x00forKey", try Value.strAlloc(self.arena, key));
     try reg.setOwn(self.arena, self.root_shape, key, sym);
     return sym;
 }

@@ -52,7 +52,7 @@ pub const ValueNB = struct {
     /// no table is active, which never happens on a live realm path.
     pub fn str(s: []const u8) ValueNB {
         const cell = strcell.internActive(s) orelse strcell.staticCell("");
-        return .{ .nb = nanbox.NanBox.encodeString(@constCast(@ptrCast(cell))) };
+        return .{ .nb = nanbox.NanBox.encodeString(@ptrCast(@constCast(cell))) };
     }
 
     // ---- Discriminants ----------------------------------------------------
@@ -177,13 +177,16 @@ test "value_nb: strings round-trip via StringCell with no allocator and match se
     const a = std.testing.allocator;
     var table = strcell.InternTable.init(a);
     defer table.deinit();
+    var value_arena = std.heap.ArenaAllocator.init(a);
+    defer value_arena.deinit();
+    const va = value_arena.allocator();
     const prev = strcell.setActiveTable(&table);
     defer _ = strcell.setActiveTable(prev);
 
     const strs = [_][]const u8{ "", "hi", "a longer one", "0", "  42  ", "ünïcödé" };
     for (strs) |s| {
         const nb = ValueNB.str(s); // <-- no allocator argument
-        const v = Value.str(s);
+        const v = try Value.strAlloc(va, s);
         try std.testing.expectEqual(@as(ValueNB.Kind, .string), nb.kind());
         try std.testing.expectEqualStrings(s, nb.asStr());
         try std.testing.expectEqual(v.toBoolean(), nb.toBoolean()); // "" is falsy

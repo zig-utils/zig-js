@@ -586,7 +586,7 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 // ToPropertyKey: coerce to the property-key string once (runs the
                 // key's toString/valueOf), so a computed key's coercion happens
                 // before the property value is evaluated.
-                try stack.append(stack_alloc, Value.str(try propKey(vm, stack.pop().?)));
+                try stack.append(stack_alloc, try Value.strAlloc(vm.arena, try propKey(vm, stack.pop().?)));
             },
             .name_anon => {
                 // NamedEvaluation: name the bare anonymous function/class value on
@@ -612,7 +612,7 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
             },
             .typeof_op => {
                 const v = stack.pop().?;
-                try stack.append(stack_alloc, Value.str(v.typeOf()));
+                try stack.append(stack_alloc, try Value.strAlloc(vm.arena, v.typeOf()));
             },
             .bit_not => {
                 const v = try vm.toNumericPrimitive(stack.pop().?);
@@ -627,7 +627,7 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
             },
             .to_string => {
                 const v = stack.pop().?;
-                try stack.append(stack_alloc, Value.str(try vm.toStringV(v)));
+                try stack.append(stack_alloc, try Value.strAlloc(vm.arena, try vm.toStringV(v)));
             },
 
             .add, .sub, .mul, .div, .mod, .pow, .lt, .le, .gt, .ge, .eq, .neq, .eq_strict, .neq_strict, .in_op, .bit_and, .bit_or, .bit_xor, .shl, .shr, .ushr => {

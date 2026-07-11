@@ -41,8 +41,8 @@ pub fn encodeLiteral(comptime s: []const u8) NanBox {
     return NanBox.encodeString(@ptrCast(@constCast(strcell.staticCell(s))));
 }
 
-/// Recover a `Value` from its NaN-boxed word. A string decodes to a slice over
-/// the interned cell's bytes (stable for the table's lifetime).
+/// Recover a `Value` from its NaN-boxed word. A string decodes by reusing the
+/// interned cell pointer directly (stable for the table's lifetime).
 pub fn decode(nb: NanBox) Value {
     if (nb.isNumber()) return Value.num(nb.asNumber());
     return switch (nb.tag().?) {
@@ -52,7 +52,7 @@ pub fn decode(nb: NanBox) Value {
         .object => Value.obj(@ptrCast(@alignCast(nb.asPointer()))),
         .string => blk: {
             const cell: *strcell.StringCell = @ptrCast(@alignCast(nb.asPointer()));
-            break :blk Value.str(cell.bytes);
+            break :blk Value.strCell(cell);
         },
     };
 }
@@ -97,16 +97,19 @@ test "valuebox: strings round-trip and equal strings share one cell" {
     const a = std.testing.allocator;
     var intern = strcell.InternTable.init(a);
     defer intern.deinit();
+    var value_arena = std.heap.ArenaAllocator.init(a);
+    defer value_arena.deinit();
+    const va = value_arena.allocator();
 
     const strs = [_][]const u8{ "", "hi", "a longer string with spaces", "ünïcödé ☃", "undefined" };
-    for (strs) |s| try expectRoundTrip(&intern, Value.str(s));
+    for (strs) |s| try expectRoundTrip(&intern, try Value.strAlloc(va, s));
 
     // The shared-string property: two equal-byte string Values encode to the
     // same StringCell pointer (interning), so NaN-box string identity is byte
     // identity — what a Layer-C shared heap wants.
     var buf = [_]u8{ 'd', 'u', 'p' };
     const n1 = try encode(&intern, Value.str("dup"));
-    const n2 = try encode(&intern, Value.str(&buf));
+    const n2 = try encode(&intern, try Value.strAlloc(va, &buf));
     try std.testing.expectEqual(n1.asPointer(), n2.asPointer());
     try std.testing.expect(n1.isString());
 }

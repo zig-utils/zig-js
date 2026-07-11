@@ -2222,14 +2222,17 @@ pub const Value = struct {
     pub inline fn num(n: f64) Value {
         return .{ .bits = if (std.math.isNan(n)) canon_nan else @bitCast(n) };
     }
-    pub inline fn str(s: []const u8) Value {
-        return boxed(tag_string, @intFromPtr(strcell.makeCell(s)));
+    pub inline fn str(comptime s: []const u8) Value {
+        return staticStr(s);
     }
     pub inline fn strAlloc(allocator: std.mem.Allocator, s: []const u8) std.mem.Allocator.Error!Value {
         return boxed(tag_string, @intFromPtr(try strcell.createCell(allocator, s)));
     }
     pub inline fn strOwned(allocator: std.mem.Allocator, s: []u8) std.mem.Allocator.Error!Value {
         return boxed(tag_string, @intFromPtr(try strcell.createCellOwned(allocator, s)));
+    }
+    pub inline fn strCell(cell: *const StringCell) Value {
+        return boxed(tag_string, @intFromPtr(cell));
     }
     pub inline fn staticStr(comptime s: []const u8) Value {
         return boxed(tag_string, @intFromPtr(strcell.staticCell(s)));

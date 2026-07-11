@@ -3576,11 +3576,11 @@ pub const Context = struct {
             // JSON module, the raw source string for text, or an immutable
             // Uint8Array view for bytes.
             const def = if (std.mem.eql(u8, m.syn_type, "json"))
-                try builtins.jsonParse(machine, Value.undef(), &.{Value.str(src)})
+                try builtins.jsonParse(machine, Value.undef(), &.{try Value.strAlloc(machine.arena, src)})
             else if (std.mem.eql(u8, m.syn_type, "bytes"))
                 Value.obj(try machine.makeImmutableUint8ArrayFromBytes(src))
             else
-                Value.str(src);
+                try Value.strAlloc(machine.arena, src);
             try m.env.put("*default*", def);
             try self.finishModuleSuccess(machine, m);
             return;

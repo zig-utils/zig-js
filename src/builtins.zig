@@ -72,8 +72,8 @@ pub fn stringFn(ctx: *anyopaque, this: Value, args: []const Value) HostError!Val
             break :blk try std.fmt.allocPrint(ip.arena, "Symbol({s})", .{args[0].asObj().sym_desc orelse ""});
         break :blk try ip.toStringV(args[0]);
     };
-    if (!ip.new_target.isUndefined()) return ip.makeWrapper(Value.str(s));
-    return Value.str(s);
+    if (!ip.new_target.isUndefined()) return ip.makeWrapper(try Value.strAlloc(ip.arena, s));
+    return try Value.strAlloc(ip.arena, s);
 }
 
 pub fn numberFn(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
@@ -731,7 +731,7 @@ pub fn ownEnumerableKeys(self: *Interpreter, o: *value.Object) HostError![]const
     var list: std.ArrayListUnmanaged([]const u8) = .empty;
     for (try self.objectOwnKeysList(o)) |k| {
         if (value.isSymbolKey(k) or value.isPrivateKey(k)) continue;
-        const desc = try objectGetOwnPropertyDescriptor(self, Value.undef(), &.{ Value.obj(o), self.keyToValue(k) });
+        const desc = try objectGetOwnPropertyDescriptor(self, Value.undef(), &.{ Value.obj(o), try self.keyToValue(k) });
         if (desc.isObject() and (try self.getProperty(desc, "enumerable")).toBoolean())
             try list.append(self.arena, k);
     }
@@ -780,7 +780,7 @@ fn enumerableOwnProperties(self: *Interpreter, arg0: Value, kind: EnumKind) Host
             const desc = try interpreter.moduleNsDesc(self, o, k);
             break :blk desc.isObject() and descBool(desc.asObj(), "enumerable", false);
         } else if (is_proxy) blk: {
-            const desc = try objectGetOwnPropertyDescriptor(self, Value.undef(), &.{ ov, self.keyToValue(k) });
+            const desc = try objectGetOwnPropertyDescriptor(self, Value.undef(), &.{ ov, try self.keyToValue(k) });
             break :blk desc.isObject() and (try self.getProperty(desc, "enumerable")).toBoolean();
         } else if (o.prim != null and o.prim.?.isString())
             // A String wrapper exposes only its char indices as enumerable own keys.
@@ -795,7 +795,7 @@ fn enumerableOwnProperties(self: *Interpreter, arg0: Value, kind: EnumKind) Host
             } else false)) and o.getAttr(k).enumerable);
         if (!enumerable) continue;
         if (kind == .key) {
-            try result.asObj().appendElement(self.arena, Value.str(k));
+            try result.asObj().appendElement(self.arena, try Value.strAlloc(self.arena, k));
             continue;
         }
         const v = try self.getProperty(ov, k); // [[Get]] — runs an accessor getter
@@ -803,7 +803,7 @@ fn enumerableOwnProperties(self: *Interpreter, arg0: Value, kind: EnumKind) Host
             try result.asObj().appendElement(self.arena, v);
         } else {
             const pair = try self.newArray();
-            try pair.asObj().appendElement(self.arena, Value.str(k));
+            try pair.asObj().appendElement(self.arena, try Value.strAlloc(self.arena, k));
             try pair.asObj().appendElement(self.arena, v);
             try result.asObj().appendElement(self.arena, pair);
         }
@@ -856,7 +856,7 @@ pub fn objectAssign(ctx: *anyopaque, this: Value, args: []const Value) HostError
             // [[GetOwnProperty]] for the enumerable bit (proxy-aware, and a key
             // dropped since the snapshot is skipped).
             const enumerable = if (is_proxy) blk: {
-                const desc = try objectGetOwnPropertyDescriptor(self, Value.undef(), &.{ src_v, self.keyToValue(k) });
+                const desc = try objectGetOwnPropertyDescriptor(self, Value.undef(), &.{ src_v, try self.keyToValue(k) });
                 break :blk desc.isObject() and (try self.getProperty(desc, "enumerable")).toBoolean();
             } else if (from.prim != null and from.prim.?.isString())
                 // A String wrapper's only enumerable own keys are its char indices
@@ -1568,7 +1568,7 @@ pub fn defineOneResult(self: *Interpreter, target: *value.Object, key: []const u
         if (trap.isUndefined() or trap.isNull()) return defineOneResult(self, tgt, key, d);
         if (!trap.isCallable()) return self.throwError("TypeError", "proxy 'defineProperty' trap is not callable");
         const trap_desc = try descriptorObjectForProxyTrap(self, d);
-        const res = try self.callValueWithThis(trap, &.{ Value.obj(tgt), self.keyToValue(key), trap_desc }, Value.obj(handler));
+        const res = try self.callValueWithThis(trap, &.{ Value.obj(tgt), try self.keyToValue(key), trap_desc }, Value.obj(handler));
         if (!res.toBoolean()) return false;
         // [[DefineOwnProperty]] invariants (9.5.6) for an ordinary target.
         if (tgt.proxy_handler == null and !tgt.proxy_revoked) {
@@ -1621,7 +1621,7 @@ pub fn defineOneResult(self: *Interpreter, target: *value.Object, key: []const u
             if (arrayIndexOf(key)) |i| {
                 if (i < p.asStr().len) {
                     const attr: value.PropAttr = .{ .writable = false, .enumerable = true, .configurable = false };
-                    const ch: Value = Value.str(try self.arena.dupe(u8, p.asStr()[i .. i + 1]));
+                    const ch: Value = try Value.strOwned(self.arena, try self.arena.dupe(u8, p.asStr()[i .. i + 1]));
                     return compatibleRedefine(attr, ch, null, d);
                 }
             }
@@ -1908,7 +1908,7 @@ fn applyProperties(self: *Interpreter, target: *value.Object, props: Value) Host
     // [[Get]] (so an accessor-valued descriptor property runs its getter), per
     // ObjectDefineProperties — not the raw data slot.
     for (try self.objectOwnKeysList(props_obj)) |k| {
-        const prop_desc = try objectGetOwnPropertyDescriptor(self, Value.undef(), &.{ Value.obj(props_obj), self.keyToValue(k) });
+        const prop_desc = try objectGetOwnPropertyDescriptor(self, Value.undef(), &.{ Value.obj(props_obj), try self.keyToValue(k) });
         if (!prop_desc.isObject() or !completedDescAttr(prop_desc.asObj()).enumerable) continue;
         const d = try self.getProperty(Value.obj(props_obj), k);
         if (!isRealObject(d)) return self.throwError("TypeError", "Property description must be an object");
@@ -1997,7 +1997,7 @@ fn setIntegrityLevel(ctx: *anyopaque, self: *Interpreter, o: *value.Object, free
             o.setExtensible(false);
         }
         for (try self.objectOwnKeysList(o)) |k| {
-            const cur = try objectGetOwnPropertyDescriptor(ctx, Value.undef(), &.{ Value.obj(o), self.keyToValue(k) });
+            const cur = try objectGetOwnPropertyDescriptor(ctx, Value.undef(), &.{ Value.obj(o), try self.keyToValue(k) });
             if (!cur.isObject()) continue; // [[GetOwnProperty]] returned undefined
             const is_accessor = cur.asObj().getOwn("get") != null or cur.asObj().getOwn("set") != null;
             const d = (try self.newObject()).asObj();
@@ -2076,7 +2076,7 @@ fn isLocked(self: *Interpreter, ov: Value, frozen: bool) HostError!bool {
         } else if (o.isExtensible()) return false;
         const ov_obj: Value = Value.obj(o);
         for (try self.objectOwnKeysList(o)) |k| {
-            const desc = try objectGetOwnPropertyDescriptor(self, Value.undef(), &.{ ov_obj, self.keyToValue(k) });
+            const desc = try objectGetOwnPropertyDescriptor(self, Value.undef(), &.{ ov_obj, try self.keyToValue(k) });
             if (!desc.isObject()) continue;
             const configurable = try self.getProperty(desc, "configurable");
             if (configurable.toBoolean()) return false;
@@ -2177,7 +2177,7 @@ pub fn objectGetOwnPropertySymbols(ctx: *anyopaque, this: Value, args: []const V
     // here and may throw), then keep only the symbol keys.
     for (try self.objectOwnKeysList(o)) |k| {
         if (value.isRealSymbolKey(k))
-            try result.asObj().appendElement(self.arena, self.keyToValue(k));
+            try result.asObj().appendElement(self.arena, try self.keyToValue(k));
     }
     return result;
 }
@@ -2192,7 +2192,7 @@ pub fn objectGetOwnPropertyDescriptors(ctx: *anyopaque, this: Value, args: []con
     // [[OwnPropertyKeys]] order (array indices / String chars / "length" aware).
     for (try self.objectOwnKeysList(o)) |k| {
         if (value.isPrivateKey(k)) continue; // private slots aren't reflected
-        const d = try objectGetOwnPropertyDescriptor(ctx, Value.undef(), &.{ ov, self.keyToValue(k) });
+        const d = try objectGetOwnPropertyDescriptor(ctx, Value.undef(), &.{ ov, try self.keyToValue(k) });
         if (d.isUndefined()) continue; // CreateDataPropertyOrThrow only for present descs
         try self.setMember(result, k, d);
     }
@@ -2279,9 +2279,9 @@ pub fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, this: Value, args: []cons
         if (trap.isUndefined() or trap.isNull())
             return objectGetOwnPropertyDescriptor(ctx, Value.undef(), &.{ Value.obj(tgt), arg(args, 1) });
         if (!trap.isCallable()) return self.throwError("TypeError", "proxy 'getOwnPropertyDescriptor' trap is not callable");
-        const res = try self.callValueWithThis(trap, &.{ Value.obj(tgt), self.keyToValue(key) }, Value.obj(handler));
+        const res = try self.callValueWithThis(trap, &.{ Value.obj(tgt), try self.keyToValue(key) }, Value.obj(handler));
         if (!res.isUndefined() and !isRealObject(res)) return self.throwError("TypeError", "proxy 'getOwnPropertyDescriptor' trap must return an object or undefined");
-        const target_desc = try objectGetOwnPropertyDescriptor(ctx, Value.undef(), &.{ Value.obj(tgt), self.keyToValue(key) });
+        const target_desc = try objectGetOwnPropertyDescriptor(ctx, Value.undef(), &.{ Value.obj(tgt), try self.keyToValue(key) });
         const target_extensible = try proxyTargetExtensible(self, tgt);
         if (res.isUndefined()) {
             if (target_desc.isObject()) {
@@ -2332,7 +2332,7 @@ pub fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, this: Value, args: []cons
                 return dataDescriptor(self, Value.num(@floatFromInt(p.asStr().len)), .{ .writable = false, .enumerable = false, .configurable = false });
             if (arrayIndexOf(key)) |i| {
                 if (i < p.asStr().len)
-                    return dataDescriptor(self, Value.str(try self.arena.dupe(u8, p.asStr()[i .. i + 1])), .{ .writable = false, .enumerable = true, .configurable = false });
+                    return dataDescriptor(self, try Value.strOwned(self.arena, try self.arena.dupe(u8, p.asStr()[i .. i + 1])), .{ .writable = false, .enumerable = true, .configurable = false });
             }
         }
     }
@@ -2411,7 +2411,7 @@ pub fn objectGetOwnPropertyNames(ctx: *anyopaque, this: Value, args: []const Val
     // keys only (symbols go to getOwnPropertySymbols).
     for (try self.objectOwnKeysList(o)) |k| {
         if (value.isSymbolKey(k) or value.isPrivateKey(k)) continue;
-        try result.asObj().appendElement(self.arena, Value.str(k));
+        try result.asObj().appendElement(self.arena, try Value.strAlloc(self.arena, k));
     }
     return result;
 }
@@ -2459,7 +2459,7 @@ pub fn stringFromCharCode(ctx: *anyopaque, this: Value, args: []const Value) Hos
         const code: u16 = if (std.math.isNan(n) or std.math.isInf(n)) 0 else @intFromFloat(@mod(@trunc(n), 65536));
         try appendCodePointWtf8(self.arena, &buf, @intCast(code));
     }
-    return Value.str(try buf.toOwnedSlice(self.arena));
+    return try Value.strOwned(self.arena, try buf.toOwnedSlice(self.arena));
 }
 
 /// Append code point `cp` (already validated to be ≤ 0x10FFFF) to `buf`. A lone
@@ -2496,7 +2496,7 @@ pub fn stringFromCodePoint(ctx: *anyopaque, this: Value, args: []const Value) Ho
         // 3-byte form) rather than rejecting it the way std.unicode does.
         try appendCodePointWtf8(self.arena, &buf, cp);
     }
-    return Value.str(try buf.toOwnedSlice(self.arena));
+    return try Value.strOwned(self.arena, try buf.toOwnedSlice(self.arena));
 }
 
 /// `String.raw(template, ...subs)` — reassemble a template literal from its
@@ -2525,7 +2525,7 @@ pub fn stringRaw(ctx: *anyopaque, this: Value, args: []const Value) HostError!Va
         if (i + 1 == segs) break;
         if (i < subs.len) try buf.appendSlice(self.arena, try self.toStringV(subs[i]));
     }
-    return Value.str(try buf.toOwnedSlice(self.arena));
+    return try Value.strOwned(self.arena, try buf.toOwnedSlice(self.arena));
 }
 
 // ---- JSON --------------------------------------------------------------
@@ -2594,7 +2594,7 @@ pub fn jsonStringify(ctx: *anyopaque, this: Value, args: []const Value) HostErro
             },
             .string => {
                 const s = try self.toStringV(space);
-                space = Value.str(s);
+                space = try Value.strAlloc(self.arena, s);
             },
             else => space = p,
         }
@@ -2616,7 +2616,7 @@ pub fn jsonStringify(ctx: *anyopaque, this: Value, args: []const Value) HostErro
     try holder.setOwn(self.arena, self.root_shape, "", arg(args, 0));
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     if (!try st.serialize(&buf, Value.obj(holder), "")) return Value.undef();
-    return Value.str(try buf.toOwnedSlice(a));
+    return try Value.strOwned(a, try buf.toOwnedSlice(a));
 }
 
 /// Carries the `JSON.stringify` options (replacer / allowlist / indent gap)
@@ -2645,10 +2645,10 @@ const Stringifier = struct {
         if (v.isObject() and !v.asObj().is_symbol) {
             const tj = try self.getProperty(v, "toJSON");
             if (tj.isObject() and tj.asObj().isCallableObject())
-                v = try self.callValueWithThis(tj, &.{Value.str(key)}, v);
+                v = try self.callValueWithThis(tj, &.{try Value.strAlloc(self.arena, key)}, v);
         }
         if (st.replacer_fn) |rf|
-            v = try self.callValueWithThis(rf, &.{ Value.str(key), v }, holder);
+            v = try self.callValueWithThis(rf, &.{ try Value.strAlloc(self.arena, key), v }, holder);
         // A JSON.rawJSON object emits its validated text verbatim.
         if (v.isObject() and v.asObj().is_raw_json) {
             const raw = (v.asObj().getOwn("rawJSON") orelse Value.str("")).asStr();
@@ -2668,7 +2668,7 @@ const Stringifier = struct {
                 },
                 .string => {
                     const s = try self.toStringV(v);
-                    v = Value.str(s);
+                    v = try Value.strAlloc(self.arena, s);
                 },
                 else => v = p,
             }
@@ -2881,7 +2881,7 @@ pub fn jsonRawJSON(ctx: *anyopaque, this: Value, args: []const Value) HostError!
         return self.throwError("SyntaxError", "JSON.rawJSON text must be a primitive JSON value");
     const o = try gc_mod.allocObj(self.arena);
     o.* = .{ .proto = null, .is_raw_json = true };
-    try o.setOwn(self.arena, self.root_shape, "rawJSON", Value.str(s));
+    try o.setOwn(self.arena, self.root_shape, "rawJSON", try Value.strAlloc(self.arena, s));
     try o.setAttr(self.arena, "rawJSON", .{ .writable = false, .enumerable = true, .configurable = false });
     o.setExtensible(false); // SetIntegrityLevel(frozen)
     return Value.obj(o);
@@ -2951,7 +2951,7 @@ fn internalizeJson(self: *Interpreter, holder: Value, key: []const u8, reviver: 
         }
     }
     const context = try jsonReviverContext(self, holder, key, val, sources);
-    return self.callValueWithThis(reviver, &.{ Value.str(key), val, context }, holder);
+    return self.callValueWithThis(reviver, &.{ try Value.strAlloc(self.arena, key), val, context }, holder);
 }
 
 fn jsonReviverContext(self: *Interpreter, holder: Value, key: []const u8, val: Value, sources: []const JsonSourceEntry) HostError!Value {
@@ -2962,7 +2962,7 @@ fn jsonReviverContext(self: *Interpreter, holder: Value, key: []const u8, val: V
             i -= 1;
             const entry = sources[i];
             if (entry.holder == holder.asObj() and std.mem.eql(u8, entry.key, key) and value.strictEquals(entry.value, val)) {
-                try ctx.setOwn(self.arena, self.root_shape, "source", Value.str(entry.source));
+                try ctx.setOwn(self.arena, self.root_shape, "source", try Value.strAlloc(self.arena, entry.source));
                 break;
             }
         }
@@ -3029,7 +3029,7 @@ const JsonParser = struct {
             '"' => {
                 const start = p.i;
                 const s = try p.parseString();
-                return .{ .value = Value.str(s), .source = p.s[start..p.i] };
+                return .{ .value = try Value.strAlloc(p.interp.arena, s), .source = p.s[start..p.i] };
             },
             't' => return p.parseLiteral("true", Value.boolVal(true)),
             'f' => return p.parseLiteral("false", Value.boolVal(false)),
@@ -3275,7 +3275,7 @@ fn uriEncode(self: *Interpreter, v: Value, comptime component: bool) HostError!V
             i += 1;
         }
     }
-    return Value.str(try buf.toOwnedSlice(self.arena));
+    return try Value.strOwned(self.arena, try buf.toOwnedSlice(self.arena));
 }
 
 /// Decode (24.5.2.2): ToString, then un-escape `%XX` runs. A single byte whose
@@ -3330,7 +3330,7 @@ fn uriDecode(self: *Interpreter, v: Value, comptime full: bool) HostError!Value 
             i = j;
         }
     }
-    return Value.str(try buf.toOwnedSlice(self.arena));
+    return try Value.strOwned(self.arena, try buf.toOwnedSlice(self.arena));
 }
 
 pub fn encodeURIFn(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
@@ -3391,7 +3391,7 @@ pub fn escapeFn(ctx: *anyopaque, this: Value, args: []const Value) HostError!Val
             escapeCodeUnit(self.arena, &buf, keep, @intCast(cp)) catch return error.OutOfMemory;
         }
     }
-    return Value.str(try buf.toOwnedSlice(self.arena));
+    return try Value.strOwned(self.arena, try buf.toOwnedSlice(self.arena));
 }
 
 /// `unescape` (Annex B B.2.2): reverse of `escape` — `%uXXXX` and `%XX`.
@@ -3422,5 +3422,5 @@ pub fn unescapeFn(ctx: *anyopaque, this: Value, args: []const Value) HostError!V
             i += 1;
         }
     }
-    return Value.str(try buf.toOwnedSlice(self.arena));
+    return try Value.strOwned(self.arena, try buf.toOwnedSlice(self.arena));
 }

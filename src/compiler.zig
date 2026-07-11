@@ -1882,7 +1882,7 @@ pub const Compiler = struct {
                 _ = try self.chunk.emit(.load_bigint, try self.chunk.addName(text));
             },
             .string => |s| {
-                const ci = try self.chunk.addConst(Value.str(s));
+                const ci = try self.chunk.addConst(try Value.strAlloc(self.arena, s));
                 _ = try self.chunk.emit(.load_const, ci);
             },
             .boolean => |b| _ = try self.chunk.emit(if (b) .load_true else .load_false, 0),
@@ -2176,7 +2176,7 @@ pub const Compiler = struct {
                         if (p.key_expr) |ke| {
                             try self.compileExpr(ke);
                         } else {
-                            const ci = try self.chunk.addConst(Value.str(p.key));
+                            const ci = try self.chunk.addConst(try Value.strAlloc(self.arena, p.key));
                             _ = try self.chunk.emit(.load_const, ci);
                         }
                         const gi = try self.compileFunction(p.value.function, false);
