@@ -24656,7 +24656,7 @@ fn intlNumberFormatRangeToPartsFn(ctx: *anyopaque, this: Value, args: []const Va
             try s.setProp(po, "type", Value.str(typ));
             try s.setProp(po, "value", Value.str(part_value));
             try s.setProp(po, "source", Value.str(src));
-            try a.elements.append(a.elementsAllocator(s.arena), Value.obj(po));
+            try a.appendElement(s.arena, Value.obj(po));
         }
         fn one(s: *Interpreter, a: *value.Object, prts: []const NfPart, src: []const u8) value.HostError!void {
             for (prts) |p| try part(s, a, p.typ, p.value, src);
@@ -24677,7 +24677,7 @@ fn intlNumberFormatRangeToPartsFn(ctx: *anyopaque, this: Value, args: []const Va
     try self.setProp(lo, "type", Value.str("literal"));
     try self.setProp(lo, "value", Value.str(nfRangeSeparator(xp.items, yp.items, shared_prefix)));
     try self.setProp(lo, "source", Value.str("shared"));
-    try arr.elements.append(arr.elementsAllocator(self.arena), Value.obj(lo));
+    try arr.appendElement(self.arena, Value.obj(lo));
     try Emit.one(self, arr, yp.items[shared_prefix..], "endRange");
     return Value.obj(arr);
 }
@@ -24691,7 +24691,7 @@ fn intlNumberFormatToPartsFn(ctx: *anyopaque, this: Value, args: []const Value) 
         const o = (try self.newObject()).asObj();
         try self.setProp(o, "type", Value.str(p.typ));
         try self.setProp(o, "value", Value.str(p.value));
-        try arr.elements.append(arr.elementsAllocator(self.arena), Value.obj(o));
+        try arr.appendElement(self.arena, Value.obj(o));
     }
     return Value.obj(arr);
 }
@@ -25156,14 +25156,14 @@ fn intlDurationFormatToPartsFn(ctx: *anyopaque, this: Value, args: []const Value
             const lo = (try self.newObject()).asObj();
             try self.setProp(lo, "type", Value.str("literal"));
             try self.setProp(lo, "value", Value.str(sep));
-            try arr.elements.append(arr.elementsAllocator(self.arena), Value.obj(lo));
+            try arr.appendElement(self.arena, Value.obj(lo));
         }
         for (grp.items) |p| {
             const o = (try self.newObject()).asObj();
             try self.setProp(o, "type", Value.str(p.typ));
             try self.setProp(o, "value", Value.str(p.value));
             if (p.unit) |un| try self.setProp(o, "unit", Value.str(un));
-            try arr.elements.append(arr.elementsAllocator(self.arena), Value.obj(o));
+            try arr.appendElement(self.arena, Value.obj(o));
         }
     }
     return Value.obj(arr);
@@ -25787,7 +25787,7 @@ fn intlListFormatToPartsFn(ctx: *anyopaque, this: Value, args: []const Value) va
         const o = (try self.newObject()).asObj();
         try self.setProp(o, "type", Value.str(p.typ));
         try self.setProp(o, "value", Value.str(p.value));
-        try arr.elements.append(arr.elementsAllocator(self.arena), Value.obj(o));
+        try arr.appendElement(self.arena, Value.obj(o));
     }
     return Value.obj(arr);
 }
@@ -26008,7 +26008,7 @@ fn intlRelativeTimeFormatToPartsFn(ctx: *anyopaque, this: Value, args: []const V
             try s.setProp(o, "type", Value.str(typ));
             try s.setProp(o, "value", Value.str(v));
             if (unit) |u| try s.setProp(o, "unit", Value.str(try std.fmt.allocPrint(s.arena, "{s}", .{u})));
-            try a.elements.append(a.elementsAllocator(s.arena), Value.obj(o));
+            try a.appendElement(s.arena, Value.obj(o));
         }
     }.p;
     if (r.term) |t| {
@@ -26236,7 +26236,7 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
                 const prules = pluralRulesFor(this);
                 for (order) |cat| {
                     for (prules) |r| if (std.mem.eql(u8, r.cat, cat)) {
-                        try cats.elements.append(cats.elementsAllocator(self.arena), Value.str(cat));
+                        try cats.appendElement(self.arena, Value.str(cat));
                         break;
                     };
                 }
