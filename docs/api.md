@@ -125,7 +125,7 @@ Native callbacks use the standard `JSObjectCallAsFunctionCallback` calling conve
 
 `JSObjectMakeDeferredPromise` returns a pending native Promise and stores callable resolve/reject functions in the provided out pointers when they are non-null. Those functions settle the promise through the normal Promise job queue; embedder-observable callbacks run at the next microtask checkpoint, such as the one performed after `JSEvaluateScript`.
 
-`JSWorkerPostMessage` and `JSWorkerReceive` use structured clone to move values between isolated worker contexts. Values that structured clone rejects, such as functions and Symbols, report through the exception out pointer.
+`JSWorkerPostMessage` and `JSWorkerReceive` use structured clone to move values between isolated worker contexts. Null worker refs and values that structured clone rejects, such as functions and Symbols, report through the exception out pointer.
 
 `JSStringCreateWithUTF8CString(null)` returns null. `JSStringGetUTF8CString` returns 0 for null strings, null output buffers, or zero buffer size; otherwise it writes a null-terminated UTF-8 prefix and returns the number of bytes written including the terminator.
 

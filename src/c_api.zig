@@ -894,8 +894,11 @@ export fn JSWorkerCreate(source: JSStringRef) callconv(.c) JSWorkerRef {
 /// Returns false (and sets `exception`) if serialization fails (e.g. the value
 /// holds a function or symbol, which structured clone refuses).
 export fn JSWorkerPostMessage(worker: JSWorkerRef, ctx: JSContextRef, value_ref: JSValueRef, exception: ExceptionRef) callconv(.c) bool {
-    const w = workerFrom(worker) orelse return false;
     const c = ctxFrom(ctx) orelse return false;
+    const w = workerFrom(worker) orelse {
+        setException(c, exception, "TypeError: worker is not a worker");
+        return false;
+    };
     const gc_saved = gc_mod.setActiveHeap(c.gc);
     defer _ = gc_mod.setActiveHeap(gc_saved);
     const sa_saved = strcell.setActiveArena(c.arena());
@@ -919,8 +922,11 @@ export fn JSWorkerPostMessage(worker: JSWorkerRef, ctx: JSContextRef, value_ref:
 /// message, deserialized into `ctx`'s realm. Returns null when the worker has
 /// closed its side and drained, or the timeout elapsed.
 export fn JSWorkerReceive(worker: JSWorkerRef, ctx: JSContextRef, timeout_ms: u64, exception: ExceptionRef) callconv(.c) JSValueRef {
-    const w = workerFrom(worker) orelse return null;
     const c = ctxFrom(ctx) orelse return null;
+    const w = workerFrom(worker) orelse {
+        setException(c, exception, "TypeError: worker is not a worker");
+        return null;
+    };
     const gc_saved = gc_mod.setActiveHeap(c.gc);
     defer _ = gc_mod.setActiveHeap(gc_saved);
     const sa_saved = strcell.setActiveArena(c.arena());
@@ -1987,6 +1993,30 @@ test "C-API: worker post rejects uncloneable values through exception" {
     var buf: [128]u8 = undefined;
     const written = JSStringGetUTF8CString(msg, &buf, buf.len);
     try std.testing.expect(std.mem.indexOf(u8, buf[0 .. written - 1], "DataCloneError") != null);
+}
+
+test "C-API: worker APIs reject null workers through exception" {
+    const ctx = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
+    defer JSGlobalContextRelease(ctx);
+
+    const message_value = JSValueMakeNumber(ctx, 1) orelse return error.ValueInitFailed;
+    var exception: JSValueRef = null;
+
+    try std.testing.expect(!JSWorkerPostMessage(null, ctx, message_value, &exception));
+    try std.testing.expect(exception != null);
+    const post_msg = JSValueToStringCopy(ctx, exception, null) orelse return error.StringInitFailed;
+    defer JSStringRelease(post_msg);
+    var buf: [128]u8 = undefined;
+    var written = JSStringGetUTF8CString(post_msg, &buf, buf.len);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0 .. written - 1], "worker is not a worker") != null);
+
+    exception = null;
+    try std.testing.expect(JSWorkerReceive(null, ctx, 1, &exception) == null);
+    try std.testing.expect(exception != null);
+    const receive_msg = JSValueToStringCopy(ctx, exception, null) orelse return error.StringInitFailed;
+    defer JSStringRelease(receive_msg);
+    written = JSStringGetUTF8CString(receive_msg, &buf, buf.len);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0 .. written - 1], "worker is not a worker") != null);
 }
 
 test "C-API: JSGarbageCollect honors JSValueProtect/Unprotect (GC on)" {
