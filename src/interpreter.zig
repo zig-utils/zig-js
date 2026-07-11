@@ -7492,7 +7492,7 @@ pub const Interpreter = struct {
                 if (global or sticky) try self.setRegExpLastIndex(o, @floatFromInt(utf16IndexForByteOffset(search_input, mend)));
                 recordRegexpLegacy(self, search_input, mstart, mend, m.captures);
                 const arr = try self.newArray();
-                try arr.asObj().appendElement(self.arena, Value.str(try self.stringSliceFromSearchSpan(input, search_input, mstart, mend)));
+                try arr.asObj().appendElement(self.arena, try Value.strAlloc(self.arena, try self.stringSliceFromSearchSpan(input, search_input, mstart, mend)));
                 for (0..m.captures.len) |i| try arr.asObj().appendElement(self.arena, try self.captureVal(m, i));
                 try self.setProp(arr.asObj(), "index", Value.num(@floatFromInt(utf16IndexForByteOffset(search_input, mstart))));
                 try self.setProp(arr.asObj(), "input", Value.str(input));
@@ -7671,7 +7671,7 @@ pub const Interpreter = struct {
 
     fn stringIndexValue(self: *Interpreter, s: []const u8, index: usize) EvalError!?Value {
         const cu = stringCodeUnitAt(s, index) orelse return null;
-        return Value.str(try self.stringFromCodeUnit(cu.unit));
+        return try Value.strAlloc(self.arena, try self.stringFromCodeUnit(cu.unit));
     }
 
     fn ensureStringAppend(self: *Interpreter, buf: *const std.ArrayListUnmanaged(u8), add_len: usize) EvalError!void {
@@ -7987,7 +7987,7 @@ pub const Interpreter = struct {
                 if (capture.isUndefined()) {
                     try captures.append(self.arena, Value.undef());
                 } else {
-                    try captures.append(self.arena, Value.str(try self.toStringV(capture)));
+                    try captures.append(self.arena, try Value.strAlloc(self.arena, try self.toStringV(capture)));
                 }
             }
             const named_captures = try self.getProperty(result, "groups");
@@ -8319,13 +8319,13 @@ pub const Interpreter = struct {
         // ---- string conversions ----------------------------------------------
         if (eq(name, "toISOString")) {
             if (std.math.isNan(t)) return self.throwError("RangeError", "Invalid time value");
-            return Value.str(try self.dateISO(t));
+            return try Value.strAlloc(self.arena, try self.dateISO(t));
         }
         if (eq(name, "toJSON")) {
             // The Date-receiver fast path (the generic `dateToJSONFn` native
             // handles a borrowed/non-Date `this`): a non-finite time is null.
             if (!std.math.isFinite(t)) return Value.nul();
-            return Value.str(try self.dateISO(t));
+            return try Value.strAlloc(self.arena, try self.dateISO(t));
         }
         if (eq(name, "toUTCString") or eq(name, "toGMTString")) {
             if (std.math.isNan(t)) return Value.str("Invalid Date");
@@ -12895,10 +12895,10 @@ pub const Interpreter = struct {
                     return self.throwError("RangeError", "toString() radix must be an integer between 2 and 36");
                 radix = @intFromFloat(r);
             }
-            if (radix == 10) return Value.str(try value.numberToString(self.arena, n));
+            if (radix == 10) return try Value.strAlloc(self.arena, try value.numberToString(self.arena, n));
             if (std.math.isNan(n)) return Value.str("NaN");
             if (std.math.isInf(n)) return Value.str(if (n < 0) "-Infinity" else "Infinity");
-            return Value.str(try numberToRadix(self.arena, n, radix));
+            return try Value.strAlloc(self.arena, try numberToRadix(self.arena, n, radix));
         }
         if (eq(name, "toFixed")) {
             // ToIntegerOrInfinity(fractionDigits) runs first (can throw TypeError
@@ -12909,8 +12909,8 @@ pub const Interpreter = struct {
             if (fi < 0 or fi > 100)
                 return self.throwError("RangeError", "toFixed() digits must be between 0 and 100");
             if (std.math.isNan(n) or std.math.isInf(n))
-                return Value.str(try value.numberToString(self.arena, n));
-            return Value.str(try toFixed(self.arena, n, @intFromFloat(fi)));
+                return try Value.strAlloc(self.arena, try value.numberToString(self.arena, n));
+            return try Value.strAlloc(self.arena, try toFixed(self.arena, n, @intFromFloat(fi)));
         }
         if (eq(name, "toExponential")) {
             const has_arg = args.len > 0 and !args[0].isUndefined();
@@ -12925,19 +12925,19 @@ pub const Interpreter = struct {
                 if (fi < 0 or fi > 100) return self.throwError("RangeError", "toExponential() argument must be between 0 and 100");
                 frac = @intFromFloat(fi);
             }
-            return Value.str(try toExponentialStr(self.arena, n, frac));
+            return try Value.strAlloc(self.arena, try toExponentialStr(self.arena, n, frac));
         }
         if (eq(name, "toPrecision")) {
             // `precision === undefined` returns ToString(x) without coercion;
             // otherwise ToIntegerOrInfinity(precision) runs before the not-finite
             // return.
-            if (args.len == 0 or args[0].isUndefined()) return Value.str(try value.numberToString(self.arena, n));
+            if (args.len == 0 or args[0].isUndefined()) return try Value.strAlloc(self.arena, try value.numberToString(self.arena, n));
             const p = try self.toNumberV(args[0]);
             if (std.math.isNan(n)) return Value.str("NaN");
             if (std.math.isInf(n)) return Value.str(if (n < 0) "-Infinity" else "Infinity");
             const pf = if (std.math.isNan(p)) @as(f64, 0) else @trunc(p);
             if (pf < 1 or pf > 100) return self.throwError("RangeError", "toPrecision() argument must be between 1 and 100");
-            return Value.str(try toPrecisionStr(self.arena, n, @intFromFloat(pf)));
+            return try Value.strAlloc(self.arena, try toPrecisionStr(self.arena, n, @intFromFloat(pf)));
         }
         return null;
     }
@@ -13029,7 +13029,7 @@ pub const Interpreter = struct {
         if (eq(name, "charAt")) {
             const pos = try self.stringPosition(s, arg0(args)) orelse return Value.str("");
             const cu = stringCodeUnitAt(s, pos) orelse return Value.str("");
-            return Value.str(try self.stringFromCodeUnit(cu.unit));
+            return try Value.strAlloc(self.arena, try self.stringFromCodeUnit(cu.unit));
         }
         if (eq(name, "charCodeAt")) {
             const pos = try self.stringPosition(s, arg0(args)) orelse return Value.num(std.math.nan(f64));
@@ -13067,7 +13067,8 @@ pub const Interpreter = struct {
             const len = utf16LenOfString(s);
             const start = try relIndex(self, arg0(args), len, 0);
             const end = try relIndex(self, arg(args, 1), len, @floatFromInt(len));
-            return Value.str(if (start < end) try self.stringSliceUtf16(s, start, end) else "");
+            if (start < end) return try Value.strAlloc(self.arena, try self.stringSliceUtf16(s, start, end));
+            return Value.str("");
         }
         if (eq(name, "substring")) {
             const len = utf16LenOfString(s);
@@ -13078,25 +13079,25 @@ pub const Interpreter = struct {
                 a0 = b0;
                 b0 = t;
             }
-            return Value.str(try self.stringSliceUtf16(s, a0, b0));
+            return try Value.strAlloc(self.arena, try self.stringSliceUtf16(s, a0, b0));
         }
         if (eq(name, "toUpperCase") or eq(name, "toLocaleUpperCase")) {
             if (eq(name, "toLocaleUpperCase")) {
                 const locs = try canonicalizeLocaleList(self, if (args.len > 0) args[0] else Value.undef());
                 const loc = localeListFirstOr(locs, "");
-                if (localeIsLithuanian(loc)) return Value.str(try lithuanianUpper(self, s));
-                if (localeIsTurkic(loc)) return Value.str(try turkicUpper(self, s));
+                if (localeIsLithuanian(loc)) return try Value.strAlloc(self.arena, try lithuanianUpper(self, s));
+                if (localeIsTurkic(loc)) return try Value.strAlloc(self.arena, try turkicUpper(self, s));
             }
-            return Value.str(try unicode_case.toUpper(self.arena, s));
+            return try Value.strAlloc(self.arena, try unicode_case.toUpper(self.arena, s));
         }
         if (eq(name, "toLowerCase") or eq(name, "toLocaleLowerCase")) {
             if (eq(name, "toLocaleLowerCase")) {
                 const locs = try canonicalizeLocaleList(self, if (args.len > 0) args[0] else Value.undef());
                 const loc = localeListFirstOr(locs, "");
-                if (localeIsLithuanian(loc)) return Value.str(try lithuanianLower(self, s));
-                if (localeIsTurkic(loc)) return Value.str(try turkicLower(self, s));
+                if (localeIsLithuanian(loc)) return try Value.strAlloc(self.arena, try lithuanianLower(self, s));
+                if (localeIsTurkic(loc)) return try Value.strAlloc(self.arena, try turkicLower(self, s));
             }
-            return Value.str(try unicode_case.toLower(self.arena, s));
+            return try Value.strAlloc(self.arena, try unicode_case.toLower(self.arena, s));
         }
         if (eq(name, "trim")) return Value.str(jsTrim(s, true, true));
         if (eq(name, "repeat")) {
@@ -13185,7 +13186,7 @@ pub const Interpreter = struct {
             const idx: i64 = if (fl < 0) @as(i64, @intCast(slen)) + @as(i64, @intFromFloat(fl)) else @intFromFloat(fl);
             if (idx < 0 or idx >= slen) return Value.undef();
             const cu = stringCodeUnitAt(s, @intCast(idx)) orelse return Value.undef();
-            return Value.str(try self.stringFromCodeUnit(cu.unit));
+            return try Value.strAlloc(self.arena, try self.stringFromCodeUnit(cu.unit));
         }
         if (eq(name, "trimStart")) return Value.str(jsTrim(s, true, false));
         if (eq(name, "trimEnd")) return Value.str(jsTrim(s, false, true));
@@ -13357,7 +13358,7 @@ pub const Interpreter = struct {
                 const lu: usize = @intFromFloat(@trunc(l));
                 break :blk @min(lu, remaining);
             } else remaining;
-            return Value.str(try self.stringSliceUtf16(s, start, start + len));
+            return try Value.strAlloc(self.arena, try self.stringSliceUtf16(s, start, start + len));
         }
         if (eq(name, "trimLeft")) return Value.str(jsTrim(s, true, false));
         if (eq(name, "trimRight")) return Value.str(jsTrim(s, false, true));
@@ -13421,7 +13422,7 @@ pub const Interpreter = struct {
                 .nfkd
             else
                 return self.throwError("RangeError", "The normalization form should be one of NFC, NFD, NFKC, NFKD");
-            return Value.str(try unicode_normalize.normalize(self.arena, s, nf));
+            return try Value.strAlloc(self.arena, try unicode_normalize.normalize(self.arena, s, nf));
         }
         if (eq(name, "search")) {
             const re_obj = try self.toRegexObject(arg0(args));
@@ -13830,7 +13831,7 @@ pub const Interpreter = struct {
             .typeof => Value.str(v.typeOf()),
             .bit_not => Value.num(@floatFromInt(~Value.num(try self.toNumberV(nv)).toInt32())),
             .void_op => Value.undef(),
-            .to_string => Value.str(try self.toStringV(v)), // template-substitution ToString
+            .to_string => try Value.strAlloc(self.arena, try self.toStringV(v)), // template-substitution ToString
         };
     }
 
