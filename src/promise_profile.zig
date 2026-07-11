@@ -14,6 +14,9 @@ pub const PromiseStats = struct {
     resolving_function_pairs: u64 = 0,
     capability_executors: u64 = 0,
     promises_created: u64 = 0,
+    promise_state_cells: u64 = 0,
+    promise_wrapper_objects: u64 = 0,
+    resolving_function_objects: u64 = 0,
     reaction_list_grows: u64 = 0,
     microtask_queue_grows: u64 = 0,
     microtask_batch_grows: u64 = 0,
@@ -41,6 +44,9 @@ const PromiseCounters = struct {
     resolving_function_pairs: std.atomic.Value(u64) = .init(0),
     capability_executors: std.atomic.Value(u64) = .init(0),
     promises_created: std.atomic.Value(u64) = .init(0),
+    promise_state_cells: std.atomic.Value(u64) = .init(0),
+    promise_wrapper_objects: std.atomic.Value(u64) = .init(0),
+    resolving_function_objects: std.atomic.Value(u64) = .init(0),
     reaction_list_grows: std.atomic.Value(u64) = .init(0),
     microtask_queue_grows: std.atomic.Value(u64) = .init(0),
     microtask_batch_grows: std.atomic.Value(u64) = .init(0),
@@ -64,6 +70,9 @@ pub fn resetPromiseStats() void {
     counters.resolving_function_pairs.store(0, .release);
     counters.capability_executors.store(0, .release);
     counters.promises_created.store(0, .release);
+    counters.promise_state_cells.store(0, .release);
+    counters.promise_wrapper_objects.store(0, .release);
+    counters.resolving_function_objects.store(0, .release);
     counters.reaction_list_grows.store(0, .release);
     counters.microtask_queue_grows.store(0, .release);
     counters.microtask_batch_grows.store(0, .release);
@@ -89,6 +98,9 @@ pub fn promiseStats() PromiseStats {
         .resolving_function_pairs = counters.resolving_function_pairs.load(.acquire),
         .capability_executors = counters.capability_executors.load(.acquire),
         .promises_created = counters.promises_created.load(.acquire),
+        .promise_state_cells = counters.promise_state_cells.load(.acquire),
+        .promise_wrapper_objects = counters.promise_wrapper_objects.load(.acquire),
+        .resolving_function_objects = counters.resolving_function_objects.load(.acquire),
         .reaction_list_grows = counters.reaction_list_grows.load(.acquire),
         .microtask_queue_grows = counters.microtask_queue_grows.load(.acquire),
         .microtask_batch_grows = counters.microtask_batch_grows.load(.acquire),
@@ -146,6 +158,18 @@ pub inline fn recordPromiseCreated() void {
     bump("promises_created");
 }
 
+pub inline fn recordPromiseStateCell() void {
+    bump("promise_state_cells");
+}
+
+pub inline fn recordPromiseWrapperObject() void {
+    bump("promise_wrapper_objects");
+}
+
+pub inline fn recordResolvingFunctionObject() void {
+    bump("resolving_function_objects");
+}
+
 pub inline fn recordReactionListGrow() void {
     bump("reaction_list_grows");
 }
@@ -173,6 +197,9 @@ test "promise profile stats reset and snapshot" {
     recordResolvingFunctionPair();
     recordCapabilityExecutor();
     recordPromiseCreated();
+    recordPromiseStateCell();
+    recordPromiseWrapperObject();
+    recordResolvingFunctionObject();
     recordReactionListGrow();
     recordMicrotaskQueueGrow();
     recordMicrotaskBatchGrow();
@@ -193,6 +220,9 @@ test "promise profile stats reset and snapshot" {
     try std.testing.expectEqual(@as(u64, 1), stats.resolving_function_pairs);
     try std.testing.expectEqual(@as(u64, 1), stats.capability_executors);
     try std.testing.expectEqual(@as(u64, 1), stats.promises_created);
+    try std.testing.expectEqual(@as(u64, 1), stats.promise_state_cells);
+    try std.testing.expectEqual(@as(u64, 1), stats.promise_wrapper_objects);
+    try std.testing.expectEqual(@as(u64, 1), stats.resolving_function_objects);
     try std.testing.expectEqual(@as(u64, 1), stats.reaction_list_grows);
     try std.testing.expectEqual(@as(u64, 1), stats.microtask_queue_grows);
     try std.testing.expectEqual(@as(u64, 1), stats.microtask_batch_grows);

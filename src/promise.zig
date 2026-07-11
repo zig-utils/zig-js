@@ -364,15 +364,17 @@ pub fn traceNativePrivateData(o: *Object, v: anytype) void {
 
 /// Allocate a fresh pending Promise object (proto = `Promise.prototype`).
 pub fn newPromise(self: *Interpreter) EvalError!*Object {
-    promise_profile.recordPromiseCreated();
     const p = try gc_mod.allocPromise(self.arena);
+    promise_profile.recordPromiseStateCell();
     p.* = .{ .gc_owned = self.gc_backing != null };
     const obj = try gc_mod.allocObj(self.arena);
+    promise_profile.recordPromiseWrapperObject();
     obj.* = .{ .promise = @ptrCast(p) };
     const promise_ctor = self.env.get("\x00Promise") orelse self.env.get("Promise");
     if (promise_ctor) |ctor| {
         if (ctor.isObject()) obj.proto = try self.protoObject(ctor.asObj());
     }
+    promise_profile.recordPromiseCreated();
     return obj;
 }
 
@@ -554,9 +556,11 @@ pub fn reject(self: *Interpreter, p: *Promise, reason: Value) EvalError!void {
 pub fn nativeResolveReject(self: *Interpreter, p: *Promise) EvalError!struct { resolve: Value, reject: Value } {
     promise_profile.recordResolvingFunctionPair();
     const res = try gc_mod.allocObj(self.arena);
+    promise_profile.recordResolvingFunctionObject();
     res.* = .{ .native = resolveThunk, .private_data = @ptrCast(p) };
     try interp.installNativeProps(self.arena, self.root_shape, res, "", 1);
     const rej = try gc_mod.allocObj(self.arena);
+    promise_profile.recordResolvingFunctionObject();
     rej.* = .{ .native = rejectThunk, .private_data = @ptrCast(res) };
     try interp.installNativeProps(self.arena, self.root_shape, rej, "", 1);
     return .{ .resolve = Value.obj(res), .reject = Value.obj(rej) };

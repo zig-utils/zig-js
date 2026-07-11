@@ -667,10 +667,11 @@ runtime contention. The focused columns split microtask-queue lock traffic
 arena traffic (`aacq`/`acnt`/`aspn`, acquisitions / contended acquisitions /
 failed spin attempts), and transient Promise allocation sources (`rpair`
 resolving-function pairs, `cap` `NewPromiseCapability` executors, `pnew`
-Promise creations, `rgr` reaction-list growth, `qgr` microtask-queue growth,
-and `bgr` drain-batch growth). A third `gil+gc` timing column keeps the
-serialized path on GC-managed cells, which separates GC/cell-management overhead
-from queue-lock and parallel scheduling overhead.
+Promise creations, `pcell` Promise state cells, `pobj` Promise wrapper objects,
+`rfn` resolving-function objects, `rgr` reaction-list growth, `qgr`
+microtask-queue growth, and `bgr` drain-batch growth). A third `gil+gc` timing
+column keeps the serialized path on GC-managed cells, which separates
+GC/cell-management overhead from queue-lock and parallel scheduling overhead.
 That profile led to one contention reduction: no-GIL interpreters now lock the
 current `MicrotaskQueue` rather than a realm-wide lock, so independent
 spawned-thread Promise drains no longer serialize on the host queue.
