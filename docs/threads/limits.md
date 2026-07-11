@@ -663,9 +663,10 @@ Issue #1 remains the umbrella status page.
 - **Reference-only PR-249 files.** Promote only when the engine implements the
   behavior and the file is reliable under Zig `0.17-dev`, especially the
   WebAssembly-required files, JIT/shell-hook witnesses, JSC-specific mark-list
-  or heap-snapshot/preventCollection probes, ArrayBuffer detach/resize survivor
-  assumptions, typed-array race-shape probes, and allocation-site catchable OOM
-  semantics beyond the current `heap_limit_bytes` `Thread` completion contract.
+  or heap-snapshot/preventCollection probes, detached-buffer fresh-view
+  reference assumptions, typed-array race-shape probes, and allocation-site
+  catchable OOM semantics beyond the current `heap_limit_bytes` `Thread`
+  completion contract.
   Run
   `python3 tools/threads-reference-audit.py --run-probes --expect-current-blockers --probe-timeout 60`
   to keep the nearest-probe negative baseline honest: it passes only while

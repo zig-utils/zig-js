@@ -39,7 +39,8 @@ EXPLICIT_CASE_CATEGORIES = {
         "typed-array set length race semantics",
     ),
     "cve/mc-life-creator-thread-dies.js": (
-        "ArrayBuffer detach/resize survivor semantics",
+        "detached ArrayBuffer fresh-view construction race",
+        "portable creator-owned buffer survival already covered",
     ),
     "dw2-marklistset-storm.js": (
         "JSC shared-GC mark-list hooks",
