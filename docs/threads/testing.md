@@ -795,9 +795,12 @@ PR-249 files stay reference-only for concrete reasons:
   whose current zig-js failure is still the documented `RangeError` blocker.
 - `cve/mc-life-creator-thread-dies.js` still depends on reference-shell buffer
   variants and detach assumptions that are not promotable as-is. The stable
-  subset is covered by `threadfuzz creatorbuffers`, which checks child-created
-  `SharedArrayBuffer` / `ArrayBuffer` storage after creator exit, sibling reads,
-  GC pressure, and post-creator `ArrayBuffer.transfer()`.
+  subset is covered by the unit witness
+  `threads: creator-owned ArrayBuffer storage survives creator exit, GC, resize,
+  and transfer` plus `threadfuzz creatorbuffers`. Together they check
+  child-created `SharedArrayBuffer` / `ArrayBuffer` storage after creator exit,
+  sibling reads, GC pressure, post-creator resize, and post-creator
+  `ArrayBuffer.transfer()`.
 - `dw2-marklistset-storm.js` and `w16-c1-prevent-collection.js` remain out
   because they target JSC shared-GC mark-list and heap-snapshot
   `preventCollection` hooks rather than portable zig-js behavior.

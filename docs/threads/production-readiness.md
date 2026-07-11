@@ -774,7 +774,8 @@ as embedders exercise more threaded host patterns.
   stack-local microtask queue, with both `join()` and `asyncJoin()` observers,
   creator-owned `SharedArrayBuffer` and `ArrayBuffer` storage that survives the
   creating Thread's exit, sibling-thread reads, GC pressure, and post-creator
-  `ArrayBuffer.transfer()`, child-created SAB/ArrayBuffer storage crossing
+  resize/`ArrayBuffer.transfer()` (also covered by the focused unit witness),
+  child-created SAB/ArrayBuffer storage crossing
   isolated Worker structured-clone after creator Thread exit plus a sibling
   script Worker clone/finalization cleanup/transfer observer variant plus a
   module Worker clone/finalization cleanup/transfer observer variant, and

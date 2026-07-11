@@ -13374,6 +13374,54 @@ test "enable_gc: typed-array and DataView metadata release when collected" {
     try std.testing.expectEqual(baseline, ctx.gc_object_backing_stores_live);
 }
 
+test "threads: creator-owned ArrayBuffer storage survives creator exit, GC, resize, and transfer" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{ .enable_threads = true, .enable_gc = true });
+    defer ctx.destroy();
+
+    _ = try ctx.evaluate(
+        \\globalThis.creatorBuffers = new Thread(() => {
+        \\  const sab = new SharedArrayBuffer(16);
+        \\  const sv = new Uint8Array(sab);
+        \\  for (let i = 0; i < sv.length; i++) sv[i] = i + 10;
+        \\  const ab = new ArrayBuffer(16, { maxByteLength: 32 });
+        \\  const av = new Uint8Array(ab);
+        \\  for (let i = 0; i < av.length; i++) av[i] = i + 40;
+        \\  return { sab, ab };
+        \\}).join();
+        \\"ready";
+    );
+    ctx.collectGarbage();
+
+    const result = try ctx.evaluate(
+        \\(() => {
+        \\  const holder = globalThis.creatorBuffers;
+        \\  const sabBefore = new Thread((h) => new Uint8Array(h.sab)[7], holder).join();
+        \\  const abBefore = new Thread((h) => new Uint8Array(h.ab)[11], holder).join();
+        \\  holder.ab.resize(24);
+        \\  const resized = new Uint8Array(holder.ab);
+        \\  if (resized[11] !== 51) throw new Error("resize lost ArrayBuffer contents");
+        \\  resized[20] = 99;
+        \\  const moved = holder.ab.transfer(24);
+        \\  if (!holder.ab.detached || holder.ab.byteLength !== 0)
+        \\    throw new Error("transfer did not detach source");
+        \\  const mv = new Uint8Array(moved);
+        \\  const transferRead = new Thread((buf) => new Uint8Array(buf)[20], moved).join();
+        \\  return [
+        \\    new Uint8Array(holder.sab)[7],
+        \\    sabBefore,
+        \\    abBefore,
+        \\    mv[11],
+        \\    mv[20],
+        \\    transferRead,
+        \\    moved.byteLength,
+        \\  ].join(",");
+        \\})();
+    );
+    try std.testing.expect(result.isString());
+    try std.testing.expectEqualStrings("17,17,51,51,99,99,24", result.asStr());
+}
+
 test "Temporal June 2024 removed API surface is absent" {
     try std.testing.expect((try evalIn(
         \\const removed = [

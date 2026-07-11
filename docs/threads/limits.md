@@ -619,7 +619,8 @@ Issue #1 remains the umbrella status page.
   waiters stay parked through a finishing sweep,
   creator-owned `SharedArrayBuffer` and `ArrayBuffer` storage that survives the
   creating Thread's exit, sibling-thread reads, GC pressure, and post-creator
-  `ArrayBuffer.transfer()`, child-created SAB/ArrayBuffer storage crossing
+  resize/`ArrayBuffer.transfer()` (also covered by the focused unit witness),
+  child-created SAB/ArrayBuffer storage crossing
   isolated Worker structured-clone after creator exit plus sibling script and
   module Worker clone/finalization cleanup/transfer observer variants, and
   cleanup
