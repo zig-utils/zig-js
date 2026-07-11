@@ -753,8 +753,9 @@ export fn JSObjectIsConstructor(ctx: JSContextRef, object: JSObjectRef) callconv
 
 // ---- JSString lifecycle ------------------------------------------------
 
-export fn JSStringCreateWithUTF8CString(utf8: [*:0]const u8) callconv(.c) JSStringRef {
-    const js = JsString.create(gpa, std.mem.span(utf8)) catch return null;
+export fn JSStringCreateWithUTF8CString(utf8: [*c]const u8) callconv(.c) JSStringRef {
+    if (utf8 == null) return null;
+    const js = JsString.create(gpa, std.mem.sliceTo(utf8, 0)) catch return null;
     return @ptrCast(js);
 }
 
@@ -774,9 +775,10 @@ export fn JSStringGetLength(str: JSStringRef) callconv(.c) usize {
     return s.utf16Len();
 }
 
-export fn JSStringGetUTF8CString(str: JSStringRef, buffer: [*]u8, buffer_size: usize) callconv(.c) usize {
+export fn JSStringGetUTF8CString(str: JSStringRef, buffer: [*c]u8, buffer_size: usize) callconv(.c) usize {
     const s = strFrom(str) orelse return 0;
     if (buffer_size == 0) return 0;
+    if (buffer == null) return 0;
     const copy_len = @min(s.bytes.len, buffer_size - 1);
     @memcpy(buffer[0..copy_len], s.bytes[0..copy_len]);
     buffer[copy_len] = 0;
@@ -915,6 +917,19 @@ test "C-API: round-trip a UTF-8 string" {
     const written = JSStringGetUTF8CString(s, &buf, buf.len);
     try std.testing.expectEqual(@as(usize, 6), written); // "hello" + NUL
     try std.testing.expectEqualStrings("hello", buf[0 .. written - 1]);
+}
+
+test "C-API: JSString null C pointers are rejected safely" {
+    try std.testing.expect(JSStringCreateWithUTF8CString(null) == null);
+    try std.testing.expectEqual(@as(usize, 0), JSStringGetLength(null));
+    try std.testing.expectEqual(@as(usize, 0), JSStringGetUTF8CString(null, null, 8));
+
+    const s = JSStringCreateWithUTF8CString("hello") orelse return error.StringInitFailed;
+    defer JSStringRelease(s);
+    try std.testing.expectEqual(@as(usize, 0), JSStringGetUTF8CString(s, null, 8));
+    var one: [1]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 1), JSStringGetUTF8CString(s, &one, one.len));
+    try std.testing.expectEqual(@as(u8, 0), one[0]);
 }
 
 test "C-API: primitive object-tagged values report primitive types" {

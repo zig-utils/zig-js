@@ -121,6 +121,8 @@ Native callbacks use the standard `JSObjectCallAsFunctionCallback` calling conve
 
 `JSWorkerPostMessage` and `JSWorkerReceive` use structured clone to move values between isolated worker contexts. Values that structured clone rejects, such as functions and Symbols, report through the exception out pointer.
 
+`JSStringCreateWithUTF8CString(null)` returns null. `JSStringGetUTF8CString` returns 0 for null strings, null output buffers, or zero buffer size; otherwise it writes a null-terminated UTF-8 prefix and returns the number of bytes written including the terminator.
+
 ## Caveats
 
 > [!WARNING]
