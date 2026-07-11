@@ -953,6 +953,7 @@ pub const Interpreter = struct {
     /// no untraced module graph, and no-op when GC is disabled.
     gc_checkpoint_ctx: ?*anyopaque = null,
     gc_checkpoint_fn: ?*const fn (ctx: *anyopaque) void = null,
+    gc_recover_allocation_fn: ?*const fn (ctx: *anyopaque) bool = null,
     /// Optional Context callback invoked at the engine step checkpoints
     /// (`(steps & 1023) == 0`) to run a guarded mid-script collection. Set only
     /// when the GC is on; null = zero cost. The callback owns the safety policy
@@ -11022,7 +11023,16 @@ pub const Interpreter = struct {
     fn allocArrayBufferBytes(self: *Interpreter, len: usize) EvalError![]u8 {
         if (len == 0) return &.{};
         const data = if (self.gc_backing) |a| blk: {
-            const p = a.rawAlloc(len, .@"8", @returnAddress()) orelse return error.OutOfMemory;
+            const p = a.rawAlloc(len, .@"8", @returnAddress()) orelse retry: {
+                if (self.gc_checkpoint_ctx) |ctx| {
+                    if (self.gc_recover_allocation_fn) |recover| {
+                        if (recover(ctx)) {
+                            break :retry a.rawAlloc(len, .@"8", @returnAddress()) orelse return error.OutOfMemory;
+                        }
+                    }
+                }
+                return error.OutOfMemory;
+            };
             if (self.gc_array_buffer_bytes_live) |live| _ = @atomicRmw(usize, live, .Add, len, .monotonic);
             break :blk p[0..len];
         } else try self.arena.alignedAlloc(u8, .@"8", len);

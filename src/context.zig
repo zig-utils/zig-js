@@ -2035,6 +2035,7 @@ pub const Context = struct {
             .gc_requested = &self.gc_requested,
             .gc_checkpoint_ctx = self,
             .gc_checkpoint_fn = serviceRequestedGcCheckpoint,
+            .gc_recover_allocation_fn = recoverAllocationFailure,
             // Mid-script collection hook: wired only when the GC is on, so the
             // arena engine pays nothing (the VM/tree-walker skip on a null fn).
             .gc_safepoint_ctx = if (self.gc != null) self else null,
@@ -2187,6 +2188,11 @@ pub const Context = struct {
     fn serviceRequestedGcCheckpoint(ctx: *anyopaque) void {
         const self: *Context = @ptrCast(@alignCast(ctx));
         self.collectRequestedGarbage();
+    }
+
+    fn recoverAllocationFailure(ctx: *anyopaque) bool {
+        const self: *Context = @ptrCast(@alignCast(ctx));
+        return self.collectForAllocationFailure();
     }
 
     fn hasRunningJsThreads(self: *const Context) bool {
@@ -13203,6 +13209,37 @@ test "enable_gc: ArrayBuffer bytes release when wrapper is collected" {
     try std.testing.expectEqual(baseline, ctx.gc_array_buffer_bytes_live);
     const cleared = try ctx.evaluate("globalThis.ref.deref() === undefined");
     try std.testing.expectEqual(true, cleared.asBool());
+}
+
+test "enable_gc: heap_limit_bytes retries ArrayBuffer byte allocation after collection" {
+    const chunk = 20 * 1024 * 1024;
+    const ctx = try Context.createWith(std.testing.allocator, .{
+        .enable_gc = true,
+        .heap_limit_bytes = 32 * 1024 * 1024,
+    });
+    defer ctx.destroy();
+
+    const baseline = ctx.gc_array_buffer_bytes_live;
+    _ = try ctx.evaluate(
+        \\globalThis.unreachableArrayBuffer = new ArrayBuffer(20 * 1024 * 1024);
+        \\globalThis.unreachableArrayBuffer = undefined;
+        \\0;
+    );
+    try std.testing.expectEqual(baseline + chunk, ctx.gc_array_buffer_bytes_live);
+
+    const result = try ctx.evaluate(
+        \\(() => {
+        \\  let second = new ArrayBuffer(20 * 1024 * 1024);
+        \\  globalThis.keepRecoveredArrayBuffer = second;
+        \\  return second.byteLength;
+        \\})();
+    );
+    try std.testing.expectEqual(@as(f64, @floatFromInt(chunk)), result.asNum());
+    try std.testing.expectEqual(baseline + chunk, ctx.gc_array_buffer_bytes_live);
+
+    _ = try ctx.evaluate("globalThis.keepRecoveredArrayBuffer = undefined; 0");
+    ctx.collectGarbage();
+    try std.testing.expectEqual(baseline, ctx.gc_array_buffer_bytes_live);
 }
 
 test "enable_gc: collectGarbage trims empty GC backing tail chunks" {
