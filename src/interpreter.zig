@@ -18995,6 +18995,10 @@ fn dispDisposed(o: *value.Object) bool {
     return (o.getOwn("\x00ds_done") orelse Value.boolVal(false)).toBoolean();
 }
 
+fn dispThrowDisposed(self: *Interpreter) EvalError {
+    return self.throwError("ReferenceError", "DisposableStack is disposed");
+}
+
 fn disposableStackConstructorFn(comptime is_async: bool) value.NativeFn {
     return struct {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -19019,6 +19023,12 @@ fn dispPush(self: *Interpreter, o: *value.Object, v: Value, f: Value, kind: f64)
     try entry.appendInternalElement(self.arena, v);
     try entry.appendInternalElement(self.arena, f);
     try entry.appendInternalElement(self.arena, Value.num(kind));
+    // The stack object's elements_lock acts as the native state mutex for
+    // disposed-state publication, move/transfer, and resource-list mutation.
+    // It is never held while resolving disposal methods or invoking callbacks.
+    o.lockElements();
+    defer o.unlockElements();
+    if (dispDisposed(o)) return dispThrowDisposed(self);
     const res = o.getOwn("\x00ds_res").?.asObj();
     try res.appendInternalElement(self.arena, Value.obj(entry));
 }
@@ -19035,10 +19045,16 @@ fn dispUseFn(comptime is_async: bool) value.NativeFn {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
             if (!isDispStackOf(this, is_async)) return self.throwError("TypeError", "use called on an incompatible receiver");
-            if (dispDisposed(this.asObj())) return self.throwError("ReferenceError", "DisposableStack is disposed");
+            if (dispDisposed(this.asObj())) return dispThrowDisposed(self);
             const v = if (args.len > 0) args[0] else Value.undef();
             if (v.isUndefined() or v.isNull()) {
                 if (is_async) try dispPush(self, this.asObj(), v, Value.undef(), 3);
+                if (!is_async) {
+                    const stack = this.asObj();
+                    stack.lockElements();
+                    defer stack.unlockElements();
+                    if (dispDisposed(stack)) return dispThrowDisposed(self);
+                }
                 return v;
             }
             const key = self.wellKnownSymbolKey(if (is_async) "asyncDispose" else "dispose") orelse return self.throwError("TypeError", "Symbol.dispose unavailable");
@@ -19059,7 +19075,7 @@ fn dispUseFn(comptime is_async: bool) value.NativeFn {
 fn dispAdoptFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!isDispStack(this)) return self.throwError("TypeError", "adopt called on a non-DisposableStack");
-    if (dispDisposed(this.asObj())) return self.throwError("ReferenceError", "DisposableStack is disposed");
+    if (dispDisposed(this.asObj())) return dispThrowDisposed(self);
     const v = if (args.len > 0) args[0] else Value.undef();
     const f = if (args.len > 1) args[1] else Value.undef();
     if (!f.isCallable()) return self.throwError("TypeError", "onDispose is not callable");
@@ -19070,7 +19086,7 @@ fn dispAdoptFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostErro
 fn dispDeferFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!isDispStack(this)) return self.throwError("TypeError", "defer called on a non-DisposableStack");
-    if (dispDisposed(this.asObj())) return self.throwError("ReferenceError", "DisposableStack is disposed");
+    if (dispDisposed(this.asObj())) return dispThrowDisposed(self);
     const f = if (args.len > 0) args[0] else Value.undef();
     if (!f.isCallable()) return self.throwError("TypeError", "onDispose is not callable");
     try dispPush(self, this.asObj(), Value.undef(), f, 2);
@@ -19083,7 +19099,10 @@ fn dispMoveFn(comptime is_async: bool) value.NativeFn {
             _ = args;
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
             if (!isDispStackOf(this, is_async)) return self.throwError("TypeError", "move called on an incompatible receiver");
-            if (dispDisposed(this.asObj())) return self.throwError("ReferenceError", "DisposableStack is disposed");
+            const src = this.asObj();
+            src.lockElements();
+            defer src.unlockElements();
+            if (dispDisposed(src)) return dispThrowDisposed(self);
             // OrdinaryCreateFromConstructor(%DisposableStack%, …): the new stack
             // uses the INTRINSIC prototype, never the subclass's.
             const name = if (is_async) "AsyncDisposableStack" else "DisposableStack";
@@ -19091,12 +19110,12 @@ fn dispMoveFn(comptime is_async: bool) value.NativeFn {
             if (self.env.get(name)) |c| if (c.isObject()) {
                 o.setProtoAtomic(try self.protoObject(c.asObj()));
             };
-            try dsHidden(self, o, "\x00ds_res", this.asObj().getOwn("\x00ds_res").?);
+            try dsHidden(self, o, "\x00ds_res", src.getOwn("\x00ds_res").?);
             try dsHidden(self, o, "\x00ds_done", Value.boolVal(false));
             try dsHidden(self, o, "\x00ds_async", Value.boolVal(is_async));
             // The source keeps an empty list and is marked disposed.
-            try dsHidden(self, this.asObj(), "\x00ds_res", try self.newArray());
-            try dsHidden(self, this.asObj(), "\x00ds_done", Value.boolVal(true));
+            try dsHidden(self, src, "\x00ds_res", try self.newArray());
+            try dsHidden(self, src, "\x00ds_done", Value.boolVal(true));
             return Value.obj(o);
         }
     }.call;
@@ -19116,13 +19135,10 @@ fn dispOne(self: *Interpreter, entry: *value.Object, is_async: bool) EvalError!v
     if (is_async) _ = try self.awaitValue(r);
 }
 
-fn dispOnlyAsyncSentinels(o: *value.Object) bool {
-    const res = o.getOwn("\x00ds_res").?.asObj();
-    const n = res.elementsLen();
-    if (n == 0) return false;
-    var i: usize = 0;
-    while (i < n) : (i += 1) {
-        const entry_v = res.elementAt(i) orelse return false;
+fn dispOnlyAsyncSentinels(entries: []const Value) bool {
+    if (entries.len == 0) return false;
+    for (entries) |entry_v| {
+        if (!entry_v.isObject()) return false;
         const entry = entry_v.asObj();
         const kind = (entry.elementAt(2) orelse return false).asNum();
         if (@as(u8, @intFromFloat(kind)) != 3) return false;
@@ -19130,11 +19146,28 @@ fn dispOnlyAsyncSentinels(o: *value.Object) bool {
     return true;
 }
 
-/// Run a stack's disposal: dispose every resource in reverse, chaining throws
-/// into SuppressedError. Returns the pending error (to throw) or null.
-fn dispRunAll(self: *Interpreter, o: *value.Object, is_async: bool) EvalError!?Value {
+const DispStart = struct {
+    entries: []Value,
+    needs_tick: bool,
+};
+
+/// Atomically publish disposed state and detach a resource snapshot.
+/// The stack-state lock is released before any disposal callback or await.
+fn dispStartDispose(self: *Interpreter, o: *value.Object, is_async: bool) EvalError!?DispStart {
+    o.lockElements();
+    defer o.unlockElements();
+    if (dispDisposed(o)) return null;
     const res = o.getOwn("\x00ds_res").?.asObj();
     const entries = try res.internalElementsSnapshot(self.arena);
+    const needs_tick = is_async and dispOnlyAsyncSentinels(entries);
+    try dsHidden(self, o, "\x00ds_done", Value.boolVal(true));
+    res.clearElementsRetainingCapacity();
+    return .{ .entries = entries, .needs_tick = needs_tick };
+}
+
+/// Run a stack's disposal: dispose every resource in reverse, chaining throws
+/// into SuppressedError. Returns the pending error (to throw) or null.
+fn dispRunAll(self: *Interpreter, entries: []const Value, is_async: bool) EvalError!?Value {
     var has_err = false;
     var err: Value = Value.undef();
     var i = entries.len;
@@ -19153,7 +19186,6 @@ fn dispRunAll(self: *Interpreter, o: *value.Object, is_async: bool) EvalError!?V
             }
         }
     }
-    res.elements.clearRetainingCapacity();
     return if (has_err) err else null;
 }
 
@@ -19172,9 +19204,8 @@ fn dispDisposeFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!isDispStackOf(this, false)) return self.throwError("TypeError", "dispose called on an incompatible receiver");
-    if (dispDisposed(this.asObj())) return Value.undef();
-    try dsHidden(self, this.asObj(), "\x00ds_done", Value.boolVal(true));
-    if (try dispRunAll(self, this.asObj(), false)) |err| {
+    const start = (try dispStartDispose(self, this.asObj(), false)) orelse return Value.undef();
+    if (try dispRunAll(self, start.entries, false)) |err| {
         self.exception = err;
         return error.Throw;
     }
@@ -19185,16 +19216,18 @@ fn dispDisposeAsyncFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!isDispStackOf(this, true)) return promiseRejectValue(self, try self.makeError("TypeError", "disposeAsync called on an incompatible receiver"));
-    if (dispDisposed(this.asObj())) return promiseResolveValue(self, Value.undef());
-    const needs_tick = dispOnlyAsyncSentinels(this.asObj());
-    try dsHidden(self, this.asObj(), "\x00ds_done", Value.boolVal(true));
-    const r = dispRunAll(self, this.asObj(), true) catch {
+    const start = (dispStartDispose(self, this.asObj(), true) catch {
+        const exc = self.exception;
+        self.exception = Value.undef();
+        return promiseRejectValue(self, exc);
+    }) orelse return promiseResolveValue(self, Value.undef());
+    const r = dispRunAll(self, start.entries, true) catch {
         const exc = self.exception;
         self.exception = Value.undef();
         return promiseRejectValue(self, exc);
     };
     if (r) |err| return promiseRejectValue(self, err);
-    if (needs_tick) return promiseResolveAfterTick(self, Value.undef());
+    if (start.needs_tick) return promiseResolveAfterTick(self, Value.undef());
     return promiseResolveValue(self, Value.undef());
 }
 
@@ -19202,7 +19235,10 @@ fn dispDisposedGetter(ctx: *anyopaque, this: Value, args: []const Value) value.H
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!isDispStack(this)) return self.throwError("TypeError", "disposed getter on a non-DisposableStack");
-    return Value.boolVal(dispDisposed(this.asObj()));
+    const stack = this.asObj();
+    stack.lockElements();
+    defer stack.unlockElements();
+    return Value.boolVal(dispDisposed(stack));
 }
 
 fn installDisposableStacks(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalError!void {

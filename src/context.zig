@@ -7155,6 +7155,45 @@ test "parallel_js: AsyncIterator helper rejects concurrent entry while running" 
     try std.testing.expect(result.asBool());
 }
 
+test "parallel_js: DisposableStack rejects concurrent push during dispose callback" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_threads = true,
+        .enable_gc = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+    });
+    defer ctx.destroy();
+
+    const result = try ctx.evaluate(
+        \\const gate = new SharedArrayBuffer(8);
+        \\const flag = new Int32Array(gate);
+        \\let order = "";
+        \\const stack = new DisposableStack();
+        \\stack.defer(() => {
+        \\  order += "D";
+        \\  Atomics.store(flag, 0, 1);
+        \\  Atomics.notify(flag, 0);
+        \\  let spins = 0;
+        \\  while (Atomics.load(flag, 1) === 0 && spins < 10000000) spins++;
+        \\  if (Atomics.load(flag, 1) === 0) throw new Error("dispose callback gate timeout");
+        \\});
+        \\const worker = new Thread(() => {
+        \\  stack.dispose();
+        \\  return stack.disposed;
+        \\});
+        \\let spins = 0;
+        \\while (Atomics.load(flag, 0) === 0 && spins < 10000000) spins++;
+        \\if (Atomics.load(flag, 0) === 0) throw new Error("worker did not enter dispose callback");
+        \\let rejected = false;
+        \\try { stack.defer(() => { order += "bad"; }); } catch (e) { rejected = e instanceof ReferenceError; }
+        \\Atomics.store(flag, 1, 1);
+        \\Atomics.notify(flag, 1);
+        \\rejected && worker.join() === true && stack.disposed === true && order === "D"
+    );
+    try std.testing.expect(result.asBool());
+}
+
 test "isFinite / isNaN coerce via ToNumber (Symbol throws, strings convert)" {
     // `Let num be ? ToNumber(number)`: strings/booleans convert, a Symbol throws.
     try std.testing.expect((try evalIn("isFinite('0')")).asBool());
