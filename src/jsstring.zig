@@ -19,8 +19,19 @@ pub const JsString = struct {
     }
 
     pub fn retain(self: *JsString) *JsString {
-        _ = self.refcount.fetchAdd(1, .monotonic);
-        return self;
+        return self.tryRetain() orelse @panic("JSString refcount overflow");
+    }
+
+    pub fn tryRetain(self: *JsString) ?*JsString {
+        var current = self.refcount.load(.monotonic);
+        while (true) {
+            if (current == std.math.maxInt(usize)) return null;
+            if (self.refcount.cmpxchgWeak(current, current + 1, .monotonic, .monotonic)) |observed| {
+                current = observed;
+                continue;
+            }
+            return self;
+        }
     }
 
     pub fn release(self: *JsString) void {
@@ -71,4 +82,13 @@ test "JSString retain/release is atomic across threads" {
 
 test "JSString rejects invalid UTF-8 before unchecked length walks" {
     try std.testing.expectError(error.InvalidUtf8, JsString.create(std.testing.allocator, "bad\xc0utf8"));
+}
+
+test "JSString retain refuses refcount overflow" {
+    const s = try JsString.create(std.testing.allocator, "overflow");
+    defer s.release();
+    s.refcount.store(std.math.maxInt(usize), .release);
+    try std.testing.expect(s.tryRetain() == null);
+    try std.testing.expectEqual(std.math.maxInt(usize), s.refcount.load(.acquire));
+    s.refcount.store(1, .release);
 }

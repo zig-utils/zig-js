@@ -929,7 +929,7 @@ export fn JSStringCreateWithUTF8CString(utf8: [*c]const u8) callconv(.c) JSStrin
 
 export fn JSStringRetain(str: JSStringRef) callconv(.c) JSStringRef {
     const s = strFrom(str) orelse return null;
-    _ = s.retain();
+    _ = s.tryRetain() orelse return null;
     return str;
 }
 
@@ -1110,6 +1110,16 @@ test "C-API: JSString null C pointers are rejected safely" {
 test "C-API: JSString rejects invalid UTF-8 input" {
     const invalid = [_:0]u8{ 'b', 'a', 'd', 0xc0, 'u', 't', 'f', '8' };
     try std.testing.expect(JSStringCreateWithUTF8CString(&invalid) == null);
+}
+
+test "C-API: JSStringRetain rejects refcount overflow" {
+    const str = JSStringCreateWithUTF8CString("retain overflow") orelse return error.StringInitFailed;
+    const s = strFrom(str) orelse return error.StringInitFailed;
+    s.refcount.store(std.math.maxInt(usize), .release);
+    try std.testing.expect(JSStringRetain(str) == null);
+    try std.testing.expectEqual(std.math.maxInt(usize), s.refcount.load(.acquire));
+    s.refcount.store(1, .release);
+    JSStringRelease(str);
 }
 
 test "C-API: JSValueMakeString rejects null string refs" {
