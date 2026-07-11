@@ -523,28 +523,29 @@ export fn JSValueToObject(ctx: JSContextRef, v: JSValueRef, exception: Exception
     return box(c, Value.obj(obj));
 }
 
-export fn JSValueProtect(ctx: JSContextRef, v: JSValueRef) callconv(.c) void {
-    const c = ctxFrom(ctx) orelse return;
-    if (c.gc == null) return; // arena contexts keep values for the context lifetime.
-    const raw = v orelse return;
+export fn JSValueProtect(ctx: JSContextRef, v: JSValueRef) callconv(.c) bool {
+    const c = ctxFrom(ctx) orelse return false;
+    const raw = v orelse return false;
+    if (c.gc == null) return true; // arena contexts keep values for the context lifetime.
     // `c_api_handles` is read by the mid-script parallel collector; guard it
     // under `realm_lock` (a no-op outside parallel_js).
     c.realmLock();
     defer c.realmUnlock();
     for (c.c_api_handles.items) |*h| {
         if (h.ref == raw) {
-            h.count += 1;
-            return;
+            h.count = std.math.add(usize, h.count, 1) catch return false;
+            return true;
         }
     }
-    c.reserveCApiHandlesLocked(1) catch return;
+    c.reserveCApiHandlesLocked(1) catch return false;
     c.c_api_handles.appendAssumeCapacity(.{ .ref = raw, .count = 1 });
+    return true;
 }
 
-export fn JSValueUnprotect(ctx: JSContextRef, v: JSValueRef) callconv(.c) void {
-    const c = ctxFrom(ctx) orelse return;
-    if (c.gc == null) return;
-    const raw = v orelse return;
+export fn JSValueUnprotect(ctx: JSContextRef, v: JSValueRef) callconv(.c) bool {
+    const c = ctxFrom(ctx) orelse return false;
+    const raw = v orelse return false;
+    if (c.gc == null) return true;
     c.realmLock();
     defer c.realmUnlock();
     for (c.c_api_handles.items, 0..) |*h, i| {
@@ -554,8 +555,9 @@ export fn JSValueUnprotect(ctx: JSContextRef, v: JSValueRef) callconv(.c) void {
         } else {
             _ = c.c_api_handles.swapRemove(i);
         }
-        return;
+        return true;
     }
+    return false;
 }
 
 // ---- JSObject construction & properties --------------------------------
@@ -2379,8 +2381,8 @@ test "C-API: JSGarbageCollect honors JSValueProtect/Unprotect (GC on)" {
     const mk = JSStringCreateWithUTF8CString("({ tag: 123 })") orelse return error.StringInitFailed;
     defer JSStringRelease(mk);
     const held = JSEvaluateScript(ctx, mk, null, null, 0, null) orelse return error.EvalFailed;
-    JSValueProtect(ctx, held);
-    JSValueProtect(ctx, held);
+    try std.testing.expect(JSValueProtect(ctx, held));
+    try std.testing.expect(JSValueProtect(ctx, held));
 
     // Produce a pile of unreferenced garbage.
     const junk = JSStringCreateWithUTF8CString("for (let i = 0; i < 500; i++) { ({ a: i, b: [i] }); } 0") orelse return error.StringInitFailed;
@@ -2399,12 +2401,13 @@ test "C-API: JSGarbageCollect honors JSValueProtect/Unprotect (GC on)" {
     try std.testing.expectEqual(@as(f64, 123), JSValueToNumber(ctx, tag, null));
 
     const with_protection = ctx_obj.gc.?.live_cells;
-    JSValueUnprotect(ctx, held);
+    try std.testing.expect(JSValueUnprotect(ctx, held));
     JSGarbageCollect(ctx);
     try std.testing.expectEqual(with_protection, ctx_obj.gc.?.live_cells);
-    JSValueUnprotect(ctx, held);
+    try std.testing.expect(JSValueUnprotect(ctx, held));
     JSGarbageCollect(ctx);
     try std.testing.expect(ctx_obj.gc.?.live_cells < with_protection);
+    try std.testing.expect(!JSValueUnprotect(ctx, held));
 }
 
 test "C-API: JSValueProtect reserves handle capacity chunks" {
@@ -2413,27 +2416,35 @@ test "C-API: JSValueProtect reserves handle capacity chunks" {
     const ctx: JSContextRef = @ptrCast(ctx_obj);
 
     const first = JSValueToObject(ctx, JSValueMakeNumber(ctx, 1), null) orelse return error.ObjectCreateFailed;
-    JSValueProtect(ctx, first);
+    try std.testing.expect(JSValueProtect(ctx, first));
     try std.testing.expectEqual(@as(usize, 1), ctx_obj.c_api_handles.items.len);
     try std.testing.expect(ctx_obj.c_api_handles.capacity >= Context.c_api_handle_reserve_granularity);
     const first_capacity = ctx_obj.c_api_handles.capacity;
 
-    JSValueProtect(ctx, first);
+    try std.testing.expect(JSValueProtect(ctx, first));
     try std.testing.expectEqual(@as(usize, 1), ctx_obj.c_api_handles.items.len);
     try std.testing.expectEqual(@as(usize, 2), ctx_obj.c_api_handles.items[0].count);
     try std.testing.expectEqual(first_capacity, ctx_obj.c_api_handles.capacity);
 
+    ctx_obj.c_api_handles.items[0].count = std.math.maxInt(usize);
+    try std.testing.expect(!JSValueProtect(ctx, first));
+    try std.testing.expectEqual(std.math.maxInt(usize), ctx_obj.c_api_handles.items[0].count);
+    ctx_obj.c_api_handles.items[0].count = 2;
+
     while (ctx_obj.c_api_handles.items.len < first_capacity) {
         const v = JSValueToObject(ctx, JSValueMakeNumber(ctx, @floatFromInt(ctx_obj.c_api_handles.items.len)), null) orelse return error.ObjectCreateFailed;
-        JSValueProtect(ctx, v);
+        try std.testing.expect(JSValueProtect(ctx, v));
     }
     try std.testing.expectEqual(first_capacity, ctx_obj.c_api_handles.items.len);
     try std.testing.expectEqual(first_capacity, ctx_obj.c_api_handles.capacity);
 
     const overflow = JSValueToObject(ctx, JSValueMakeNumber(ctx, 99), null) orelse return error.ObjectCreateFailed;
-    JSValueProtect(ctx, overflow);
+    try std.testing.expect(JSValueProtect(ctx, overflow));
     try std.testing.expectEqual(first_capacity + 1, ctx_obj.c_api_handles.items.len);
     try std.testing.expect(ctx_obj.c_api_handles.capacity > first_capacity);
+
+    try std.testing.expect(!JSValueProtect(ctx, null));
+    try std.testing.expect(!JSValueUnprotect(ctx, null));
 }
 
 test "C-API: JSValueProtect roots survive mid-script parallel GC" {
@@ -2452,7 +2463,7 @@ test "C-API: JSValueProtect roots survive mid-script parallel GC" {
     const mk = JSStringCreateWithUTF8CString("({ tag: 456, nested: { marker: 789 } })") orelse return error.StringInitFailed;
     defer JSStringRelease(mk);
     const held = JSEvaluateScript(ctx, mk, null, null, 0, null) orelse return error.EvalFailed;
-    JSValueProtect(ctx, held);
+    try std.testing.expect(JSValueProtect(ctx, held));
 
     const src = JSStringCreateWithUTF8CString(
         \\(() => {
@@ -2519,7 +2530,7 @@ test "C-API: JSValueProtect roots survive mid-script parallel GC" {
 
     JSGarbageCollect(ctx);
     const with_protection = ctx_obj.gc.?.live_cells;
-    JSValueUnprotect(ctx, held);
+    try std.testing.expect(JSValueUnprotect(ctx, held));
     JSGarbageCollect(ctx);
     try std.testing.expect(ctx_obj.gc.?.live_cells < with_protection);
 }

@@ -66,8 +66,8 @@ bool        JSValueToBoolean(JSContextRef, JSValueRef);
 double      JSValueToNumber(JSContextRef, JSValueRef, JSValueRef* exception);
 JSStringRef JSValueToStringCopy(JSContextRef, JSValueRef, JSValueRef* exception);
 JSObjectRef JSValueToObject(JSContextRef, JSValueRef, JSValueRef* exception);
-void        JSValueProtect(JSContextRef, JSValueRef);
-void        JSValueUnprotect(JSContextRef, JSValueRef);
+bool        JSValueProtect(JSContextRef, JSValueRef);
+bool        JSValueUnprotect(JSContextRef, JSValueRef);
 ```
 
 ```c [Objects]
@@ -120,6 +120,8 @@ Native callbacks use the standard `JSObjectCallAsFunctionCallback` calling conve
 `JSValueIsEqual`, `JSValueToNumber`, `JSValueToStringCopy`, and `JSValueToObject` reject null value refs by reporting an exception through the out pointer.
 
 For no-exception value inspection APIs, a null value ref is an invalid handle, not JavaScript `undefined`: `JSValueGetType` returns the zig-js extension `invalid`, value predicates and `JSValueIsStrictEqual` return false, and `JSValueToBoolean` returns false.
+
+`JSValueProtect` and `JSValueUnprotect` return `true` when the handle table operation is accepted. They return `false` for invalid/null handles, missing protected entries on GC-enabled contexts, allocation failure, or protection-count overflow; overflow is rejected rather than wrapping the counted root.
 
 `JSObjectSetProperty` and `JSWorkerPostMessage` reject null value refs by reporting an exception through the out pointer instead of storing or posting JavaScript `undefined`.
 
