@@ -17626,7 +17626,7 @@ fn iterToArrayFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
     while (true) {
         const s = try self.iterStepM(this, next_method);
         if (s.done) break;
-        try arr.elements.append(arr.elementsAllocator(self.arena), s.value);
+        try arr.appendElement(self.arena, s.value);
     }
     return Value.obj(arr);
 }
@@ -18526,7 +18526,7 @@ fn asyncIterConsumeImpl(self: *Interpreter, this: Value, comptime which: AsyncCo
             while (true) {
                 const s = try asyncIterStep(self, this);
                 if (s.done) break;
-                try arr.elements.append(arr.elementsAllocator(self.arena), s.value);
+                try arr.appendElement(self.arena, s.value);
             }
             return Value.obj(arr);
         },
@@ -21419,7 +21419,7 @@ fn intlSupportedValuesOfFn(ctx: *anyopaque, this: Value, args: []const Value) va
     const tz = std.mem.eql(u8, key, "timeZone");
     for (items) |s| {
         if (tz and !std.mem.eql(u8, canonicalTimeZoneName(s), s)) continue;
-        try arr.elements.append(arr.elementsAllocator(self.arena), Value.str(s));
+        try arr.appendElement(self.arena, Value.str(s));
     }
     return Value.obj(arr);
 }
@@ -21809,7 +21809,7 @@ fn intlLocaleListFn(comptime which: enum { calendars, collations, hour_cycles, n
                 .numbering_systems => localeUValue(tag, "nu") orelse "latn",
                 .time_zones => null, // requires region data
             };
-            if (def) |d| try arr.elements.append(arr.elementsAllocator(self.arena), Value.str(d));
+            if (def) |d| try arr.appendElement(self.arena, Value.str(d));
             return Value.obj(arr);
         }
     }.call;
@@ -21841,8 +21841,8 @@ fn intlLocaleWeekInfoFn(ctx: *anyopaque, this: Value, args: []const Value) value
     }
     try self.setProp(o, "firstDay", Value.num(first_day));
     const we = (try self.newArray()).asObj();
-    try we.elements.append(we.elementsAllocator(self.arena), Value.num(6));
-    try we.elements.append(we.elementsAllocator(self.arena), Value.num(7));
+    try we.appendElement(self.arena, Value.num(6));
+    try we.appendElement(self.arena, Value.num(7));
     try self.setProp(o, "weekend", Value.obj(we));
     return Value.obj(o);
 }
@@ -21871,7 +21871,7 @@ fn intlLocaleTimeZonesFn(ctx: *anyopaque, this: Value, args: []const Value) valu
     if (!has_region) return Value.undef();
     // We lack per-region zone data; report UTC so the result is a non-empty array.
     const arr = (try self.newArray()).asObj();
-    try arr.elements.append(arr.elementsAllocator(self.arena), Value.str("UTC"));
+    try arr.appendElement(self.arena, Value.str("UTC"));
     return Value.obj(arr);
 }
 
@@ -23357,7 +23357,7 @@ fn intlDateTimeFormatToPartsFn(ctx: *anyopaque, this: Value, args: []const Value
         const o = (try self.newObject()).asObj();
         try self.setProp(o, "type", Value.str(p.typ));
         try self.setProp(o, "value", Value.str(p.value));
-        try arr.elements.append(arr.elementsAllocator(self.arena), Value.obj(o));
+        try arr.appendElement(self.arena, Value.obj(o));
     }
     return Value.obj(arr);
 }
@@ -23503,7 +23503,7 @@ fn intlDateTimeFormatRangeToPartsFn(ctx: *anyopaque, this: Value, args: []const 
             try s.setProp(o, "type", Value.str(p.typ));
             try s.setProp(o, "value", Value.str(p.value));
             try s.setProp(o, "source", Value.str(src));
-            try a.elements.append(a.elementsAllocator(s.arena), Value.obj(o));
+            try a.appendElement(s.arena, Value.obj(o));
         }
         fn one(s: *Interpreter, a: *value.Object, prts: []const DtfPart, src: []const u8) value.HostError!void {
             for (prts) |p| try part(s, a, p, src);
@@ -23521,7 +23521,7 @@ fn intlDateTimeFormatRangeToPartsFn(ctx: *anyopaque, this: Value, args: []const 
             try self.setProp(lo, "type", Value.str("literal"));
             try self.setProp(lo, "value", Value.str(dtf_range_sep));
             try self.setProp(lo, "source", Value.str("shared"));
-            try arr.elements.append(arr.elementsAllocator(self.arena), Value.obj(lo));
+            try arr.appendElement(self.arena, Value.obj(lo));
             try emit(self, arr, yp.items[2..3], "endRange");
             try emit(self, arr, xp.items[3..5], "shared");
         } else {
@@ -23530,7 +23530,7 @@ fn intlDateTimeFormatRangeToPartsFn(ctx: *anyopaque, this: Value, args: []const 
             try self.setProp(lo, "type", Value.str("literal"));
             try self.setProp(lo, "value", Value.str(dtf_range_sep));
             try self.setProp(lo, "source", Value.str("shared"));
-            try arr.elements.append(arr.elementsAllocator(self.arena), Value.obj(lo));
+            try arr.appendElement(self.arena, Value.obj(lo));
             try emit(self, arr, yp.items[0..3], "endRange");
             try emit(self, arr, xp.items[3..5], "shared");
         }
@@ -23542,7 +23542,7 @@ fn intlDateTimeFormatRangeToPartsFn(ctx: *anyopaque, this: Value, args: []const 
         try self.setProp(lo, "type", Value.str("literal"));
         try self.setProp(lo, "value", Value.str(dtf_range_sep));
         try self.setProp(lo, "source", Value.str("shared"));
-        try arr.elements.append(arr.elementsAllocator(self.arena), Value.obj(lo));
+        try arr.appendElement(self.arena, Value.obj(lo));
         try emit(self, arr, yp.items, "endRange");
         return Value.obj(arr);
     }
@@ -23554,7 +23554,7 @@ fn intlDateTimeFormatRangeToPartsFn(ctx: *anyopaque, this: Value, args: []const 
         try self.setProp(lo, "type", Value.str("literal"));
         try self.setProp(lo, "value", Value.str(dtf_range_sep));
         try self.setProp(lo, "source", Value.str("shared"));
-        try arr.elements.append(arr.elementsAllocator(self.arena), Value.obj(lo));
+        try arr.appendElement(self.arena, Value.obj(lo));
         try emit(self, arr, yp.items[shared_prefix..], "endRange");
         return Value.obj(arr);
     }
@@ -23563,7 +23563,7 @@ fn intlDateTimeFormatRangeToPartsFn(ctx: *anyopaque, this: Value, args: []const 
     try self.setProp(lo, "type", Value.str("literal"));
     try self.setProp(lo, "value", Value.str(dtf_range_sep));
     try self.setProp(lo, "source", Value.str("shared"));
-    try arr.elements.append(arr.elementsAllocator(self.arena), Value.obj(lo));
+    try arr.appendElement(self.arena, Value.obj(lo));
     try emit(self, arr, yp.items, "endRange");
     return Value.obj(arr);
 }
