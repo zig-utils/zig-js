@@ -26651,7 +26651,11 @@ fn structuredCloneFn(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
         if (!tv.isUndefined() and !tv.isNull()) {
             if (!tv.isObject() or !tv.asObj().is_array)
                 return self.throwError("TypeError", "structuredClone transfer must be an array");
-            for (tv.asObj().elements.items) |entry| {
+            // Snapshot the transfer list before validating entries. The list is
+            // ordinary JS input, so a shared-realm sibling thread may mutate its
+            // element storage while this builtin runs; validation itself must
+            // not borrow `elements.items` directly.
+            for (try tv.asObj().internalElementsSnapshot(self.arena)) |entry| {
                 if (!entry.isObject() or entry.asObj().array_buffer == null)
                     return self.throwError("TypeError", "DataCloneError: only ArrayBuffers are transferable");
                 const ab = entry.asObj().array_buffer.?;
