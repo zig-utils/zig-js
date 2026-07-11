@@ -264,9 +264,26 @@ export fn JSValueIsDate(ctx: JSContextRef, v: JSValueRef) callconv(.c) bool {
 }
 
 export fn JSValueIsEqual(ctx: JSContextRef, a: JSValueRef, b: JSValueRef, exception: ExceptionRef) callconv(.c) bool {
-    _ = ctx;
-    _ = exception;
-    return value.looseEquals(unbox(a), unbox(b));
+    const c = ctxFrom(ctx) orelse return false;
+    const gc_saved = gc_mod.setActiveHeap(c.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(c.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = c.interpreter();
+    c.pushActiveInterpreter(&machine) catch {
+        setException(c, exception, "OutOfMemory");
+        return false;
+    };
+    defer c.popActiveInterpreter(&machine);
+    const result = machine.applyBinary(.eq, unbox(a), unbox(b)) catch |err| {
+        if (err == error.Throw) {
+            if (exception != null) exception[0] = box(c, machine.exception);
+        } else {
+            setException(c, exception, @errorName(err));
+        }
+        return false;
+    };
+    return result.toBoolean();
 }
 
 export fn JSValueIsStrictEqual(ctx: JSContextRef, a: JSValueRef, b: JSValueRef) callconv(.c) bool {
@@ -842,6 +859,40 @@ test "C-API: JSEvaluateScript computes 1 + 1 === 2" {
     try std.testing.expect(exception == null);
     try std.testing.expect(JSValueIsNumber(ctx, result));
     try std.testing.expectEqual(@as(f64, 2), JSValueToNumber(ctx, result, null));
+}
+
+test "C-API: JSValueIsEqual uses JavaScript abstract equality semantics" {
+    const ctx = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
+    defer JSGlobalContextRelease(ctx);
+
+    var exception: JSValueRef = null;
+    const object_script = JSStringCreateWithUTF8CString(
+        \\var cApiEqCount = 0;
+        \\({
+        \\  valueOf() { cApiEqCount += 1; return 7; }
+        \\});
+    ) orelse return error.StringInitFailed;
+    defer JSStringRelease(object_script);
+    const object_value = JSEvaluateScript(ctx, object_script, null, null, 0, &exception) orelse return error.EvalFailed;
+    try std.testing.expect(exception == null);
+
+    try std.testing.expect(JSValueIsEqual(ctx, object_value, JSValueMakeNumber(ctx, 7), &exception));
+    try std.testing.expect(exception == null);
+
+    const count_script = JSStringCreateWithUTF8CString("cApiEqCount") orelse return error.StringInitFailed;
+    defer JSStringRelease(count_script);
+    const count = JSEvaluateScript(ctx, count_script, null, null, 0, &exception) orelse return error.EvalFailed;
+    try std.testing.expect(exception == null);
+    try std.testing.expectEqual(@as(f64, 1), JSValueToNumber(ctx, count, null));
+
+    const throwing_script = JSStringCreateWithUTF8CString("({ valueOf() { throw new TypeError('eq boom'); } })") orelse return error.StringInitFailed;
+    defer JSStringRelease(throwing_script);
+    const throwing_value = JSEvaluateScript(ctx, throwing_script, null, null, 0, &exception) orelse return error.EvalFailed;
+    try std.testing.expect(exception == null);
+
+    exception = null;
+    try std.testing.expect(!JSValueIsEqual(ctx, throwing_value, JSValueMakeNumber(ctx, 1), &exception));
+    try std.testing.expect(exception != null);
 }
 
 test "C-API: JSValueToNumber uses JavaScript ToNumber semantics" {
