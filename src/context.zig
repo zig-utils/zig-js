@@ -10365,6 +10365,30 @@ test "Context heap_limit_bytes allocation pressure is catchable inside JS try" {
     try std.testing.expect(stats.peak_bytes <= stats.limit_bytes);
 }
 
+test "Context heap_limit_bytes allocation pressure is catchable with catch binding" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .heap_limit_bytes = 4 * 1024 * 1024 });
+    defer ctx.destroy();
+
+    const result = try ctx.evaluate(
+        \\let ok = false;
+        \\try {
+        \\  const keep = [];
+        \\  for (let i = 0;; i++)
+        \\    keep.push(new ArrayBuffer(1 << 20));
+        \\} catch (e) {
+        \\  ok =
+        \\    e instanceof OutOfMemoryError &&
+        \\    e instanceof Error &&
+        \\    e.name === "OutOfMemoryError" &&
+        \\    e.message === "Context heap limit exceeded";
+        \\}
+        \\ok;
+    );
+    try std.testing.expect(result.asBool());
+    const stats = ctx.heapBudgetStats().?;
+    try std.testing.expect(stats.peak_bytes <= stats.limit_bytes);
+}
+
 test "Context heap_limit_bytes string allocation pressure does not panic" {
     const ctx = try Context.createWith(std.testing.allocator, .{ .heap_limit_bytes = 4 * 1024 * 1024 });
     defer ctx.destroy();

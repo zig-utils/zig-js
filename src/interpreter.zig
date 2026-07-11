@@ -13732,6 +13732,21 @@ pub const Interpreter = struct {
         // block that internally throws-and-catches clobbers it, so hold it
         // alongside `held_err` and restore it if the held throw resumes.
         var held_exc: Value = Value.undef();
+        // A heap-limit OOM can be converted into a JS throw using the reserved
+        // OutOfMemoryError object, but `catch (e)` still needs a declarative
+        // catch environment. Reserve the simple catch-binding environment before
+        // entering the allocation-pressure region so the OOM can actually land
+        // in the local catch frame instead of escaping as a whole-thread OOM.
+        var reserved_catch_env: ?*Environment = null;
+        if (!self.out_of_memory_exception.isUndefined()) if (t.catch_param) |p| {
+            const catch_env = try gc_mod.allocEnv(self.arena);
+            self.initEnvironment(catch_env, self.env, false);
+            if (p.* == .identifier) {
+                catch_env.is_catch_param = true;
+                try catch_env.put(p.identifier, Value.undef());
+            }
+            reserved_catch_env = catch_env;
+        };
         if (self.eval(t.block)) |v| {
             result = v;
         } else |err| {
@@ -13748,8 +13763,11 @@ pub const Interpreter = struct {
                 // overhead — the catch block establishes its own block scope for
                 // any lexical declarations. Skip the allocation in that case.
                 if (t.catch_param) |p| {
-                    const catch_env = try gc_mod.allocEnv(self.arena);
-                    self.initEnvironment(catch_env, self.env, false);
+                    const catch_env = reserved_catch_env orelse blk: {
+                        const env = try gc_mod.allocEnv(self.arena);
+                        self.initEnvironment(env, self.env, false);
+                        break :blk env;
+                    };
                     self.env = catch_env;
                     if (p.* == .identifier) catch_env.is_catch_param = true;
                     try self.bindPattern(p, exc, true);
