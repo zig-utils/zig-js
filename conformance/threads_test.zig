@@ -369,6 +369,8 @@ pub fn main(init: std.process.Init) !void {
     var sweep = false;
     var list_mode = false;
     var one: ?[]const u8 = null;
+    var shard_index: ?usize = null;
+    var shard_count: ?usize = null;
     var args = std.process.Args.Iterator.init(init.minimal.args);
     _ = args.next();
     while (args.next()) |a| {
@@ -379,6 +381,30 @@ pub fn main(init: std.process.Init) !void {
         if (std.mem.eql(u8, a, "sweep")) sweep = true;
         if (std.mem.eql(u8, a, "list")) list_mode = true;
         if (std.mem.eql(u8, a, "one")) one = args.next();
+        if (std.mem.eql(u8, a, "shard")) {
+            const raw_index = args.next() orelse {
+                std.debug.print("threads-test: shard requires <index> <count>\n", .{});
+                return error.InvalidShard;
+            };
+            const raw_count = args.next() orelse {
+                std.debug.print("threads-test: shard requires <index> <count>\n", .{});
+                return error.InvalidShard;
+            };
+            shard_index = std.fmt.parseInt(usize, raw_index, 10) catch {
+                std.debug.print("threads-test: invalid shard index '{s}'\n", .{raw_index});
+                return error.InvalidShard;
+            };
+            shard_count = std.fmt.parseInt(usize, raw_count, 10) catch {
+                std.debug.print("threads-test: invalid shard count '{s}'\n", .{raw_count});
+                return error.InvalidShard;
+            };
+        }
+    }
+    const shard_n = shard_count orelse 1;
+    const shard_i = shard_index orelse 0;
+    if (shard_n == 0 or shard_i >= shard_n) {
+        std.debug.print("threads-test: invalid shard {d}/{d}\n", .{ shard_i, shard_n });
+        return error.InvalidShard;
     }
 
     // `list`: print the green allowlist (one path per line) and exit, so a
@@ -441,9 +467,22 @@ pub fn main(init: std.process.Init) !void {
         if (parallel_js) try names.appendSlice(gpa, &parallel_only_allowlist);
     }
 
+    var selected_total: usize = 0;
+    for (names.items, 0..) |_, case_index| {
+        if (case_index % shard_n == shard_i) selected_total += 1;
+    }
+    if (shard_count != null) {
+        std.debug.print(
+            "threads-test: shard {d}/{d} selected {d}/{d} corpus files\n",
+            .{ shard_i, shard_n, selected_total, names.items.len },
+        );
+    }
+
     var failed: usize = 0;
     var skipped: usize = 0;
-    for (names.items) |name| {
+    for (names.items, 0..) |name, case_index| {
+        if (case_index % shard_n != shard_i) continue;
+        std.debug.print("  RUN   {s}\n", .{name});
         if (parallel_js and !explicit_one and parallelJsBudgetSkip(name)) {
             skipped += 1;
             std.debug.print("  SKIP  {s} (parallel_js budget frontier)\n", .{name});
@@ -650,7 +689,7 @@ pub fn main(init: std.process.Init) !void {
             }
         }
     }
-    std.debug.print("------------------------\n{d}/{d} corpus files passed", .{ names.items.len - failed - skipped, names.items.len });
+    std.debug.print("------------------------\n{d}/{d} corpus files passed", .{ selected_total - failed - skipped, selected_total });
     if (skipped != 0) std.debug.print(" ({d} skipped)", .{skipped});
     std.debug.print("\n", .{});
     if (failed != 0 and !sweep) return error.CorpusFailures;

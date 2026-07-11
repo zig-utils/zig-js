@@ -41,8 +41,14 @@ jobs:
         include:
           - name: unit
             cmd: zig build test
-          - name: threads-gil
-            cmd: zig build threads-test
+          - name: threads-gil (shard 0/4)
+            cmd: zig build threads-test -Dthreads-shard-index=0 -Dthreads-shard-count=4
+          - name: threads-gil (shard 1/4)
+            cmd: zig build threads-test -Dthreads-shard-index=1 -Dthreads-shard-count=4
+          - name: threads-gil (shard 2/4)
+            cmd: zig build threads-test -Dthreads-shard-index=2 -Dthreads-shard-count=4
+          - name: threads-gil (shard 3/4)
+            cmd: zig build threads-test -Dthreads-shard-index=3 -Dthreads-shard-count=4
           - name: threads-nogil-witness
             cmd: zig build threads-test -Dthreads-parallel-js=true -Dthreads-case=sync/condition-wait-notify.js
           # Reference-only corpus hygiene: fail if a non-promoted PR-249 file

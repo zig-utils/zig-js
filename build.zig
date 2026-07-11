@@ -109,6 +109,8 @@ pub fn build(b: *std.Build) void {
     const threads_case = b.option([]const u8, "threads-case", "Run one vendored thread test path") orelse null;
     const threads_sweep = b.option(bool, "threads-sweep", "Run every vendored default-gate thread test") orelse false;
     const threads_parallel_js = b.option(bool, "threads-parallel-js", "Run threaded PR-249 cases with the test-only parallel_js GIL-removal mode") orelse false;
+    const threads_shard_index = b.option(usize, "threads-shard-index", "Run only this zero-based threads-test shard index") orelse null;
+    const threads_shard_count = b.option(usize, "threads-shard-count", "Split threads-test cases across this many shards") orelse null;
     if (threads_parallel_js) {
         run_threads_test.addArg("parallel-js");
     }
@@ -116,6 +118,13 @@ pub fn build(b: *std.Build) void {
         run_threads_test.addArg("sweep");
     } else if (threads_case) |case| {
         run_threads_test.addArgs(&.{ "one", case });
+    }
+    if (threads_shard_count) |count| {
+        run_threads_test.addArgs(&.{
+            "shard",
+            b.fmt("{d}", .{threads_shard_index orelse 0}),
+            b.fmt("{d}", .{count}),
+        });
     }
     const threads_test_step = b.step("threads-test", "Run the vendored PR-249 threads corpus allowlist");
     threads_test_step.dependOn(&run_threads_test.step);

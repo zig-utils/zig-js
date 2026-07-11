@@ -10,6 +10,7 @@ Run the fast local gates before changing thread behavior or docs:
 ```sh
 zig build test
 zig build threads-test
+zig build threads-test -Dthreads-shard-index=0 -Dthreads-shard-count=4
 zig build threads-test -Dthreads-case=atomics/property-waitasync-timeout.js
 zig build threads-test -Dthreads-parallel-js=true -Dthreads-case=sync/condition-wait-notify.js
 zig build threads-reference-audit
@@ -117,9 +118,12 @@ joinable after one peer exhausts the context cap and prove GC-backed capped
 contexts can recover after unreachable pressure is collected.
 
 `zig build threads-test` runs the green WebKit PR-249 allowlist from
-`reference/webkit-249/threads-tests`. The current coverage contains 231
-promoted files out of 259 executable PR-249 files: 229 in the default
-`zig build threads-test` allowlist plus 2 `parallel_js`-only witnesses. It covers:
+`reference/webkit-249/threads-tests`. CI shards the serialized/GIL leg with
+`-Dthreads-shard-index=N -Dthreads-shard-count=4`; local full runs still use the
+plain command, while a stuck shard prints the active `RUN` case before executing
+it. The current coverage contains 231 promoted files out of 259 executable
+PR-249 files: 229 in the default `zig build threads-test` allowlist plus 2
+`parallel_js`-only witnesses. It covers:
 
 - `api/` and `lifecycle/`: constructor shape, lifecycle, ids, constructor
   errors, exceptions, restriction, return values, join semantics, blocking
