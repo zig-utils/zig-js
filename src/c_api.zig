@@ -130,6 +130,13 @@ fn setExceptionValue(ctx: *Context, exc: ExceptionRef, exception_value: Value) v
     if (exc != null) exc[0] = box(ctx, exception_value);
 }
 
+fn boxResult(ctx: *Context, exception: ExceptionRef, result: Value) JSValueRef {
+    return box(ctx, result) orelse {
+        setException(ctx, exception, "OutOfMemory");
+        return null;
+    };
+}
+
 fn isEvaluationParseError(err: anyerror) bool {
     return switch (err) {
         error.UnexpectedCharacter,
@@ -321,7 +328,7 @@ export fn JSEvaluateScript(
         }
         return null;
     };
-    return box(c, result);
+    return boxResult(c, exception, result);
 }
 
 // ---- JSValue inspection ------------------------------------------------
@@ -494,7 +501,10 @@ export fn JSValueToStringCopy(ctx: JSContextRef, v: JSValueRef, exception: Excep
         }
         return null;
     };
-    const js = JsString.create(gpa, s) catch return null;
+    const js = JsString.create(gpa, s) catch {
+        setException(c, exception, "OutOfMemory");
+        return null;
+    };
     return @ptrCast(js);
 }
 
@@ -520,7 +530,7 @@ export fn JSValueToObject(ctx: JSContextRef, v: JSValueRef, exception: Exception
         }
         return null;
     };
-    return box(c, Value.obj(obj));
+    return boxResult(c, exception, Value.obj(obj));
 }
 
 export fn JSValueProtect(ctx: JSContextRef, v: JSValueRef) callconv(.c) bool {
@@ -643,7 +653,7 @@ export fn JSObjectMakeArray(ctx: JSContextRef, argc: usize, argv: [*c]const JSVa
             return null;
         };
     }
-    return box(c, arr);
+    return boxResult(c, exception, arr);
 }
 
 export fn JSObjectMakeDeferredPromise(ctx: JSContextRef, resolve: [*c]JSObjectRef, reject: [*c]JSObjectRef, exception: ExceptionRef) callconv(.c) JSObjectRef {
@@ -728,7 +738,7 @@ export fn JSObjectGetProperty(ctx: JSContextRef, object: JSObjectRef, name: JSSt
         }
         return null;
     };
-    return box(c, result);
+    return boxResult(c, exception, result);
 }
 
 export fn JSObjectSetProperty(ctx: JSContextRef, object: JSObjectRef, name: JSStringRef, val: JSValueRef, attrs: c_uint, exception: ExceptionRef) callconv(.c) void {
@@ -788,7 +798,7 @@ export fn JSObjectGetPropertyAtIndex(ctx: JSContextRef, object: JSObjectRef, ind
         }
         return null;
     };
-    return box(c, result);
+    return boxResult(c, exception, result);
 }
 
 export fn JSObjectCallAsFunction(ctx: JSContextRef, function: JSObjectRef, this_object: JSObjectRef, argc: usize, argv: [*c]const JSValueRef, exception: ExceptionRef) callconv(.c) JSValueRef {
@@ -813,7 +823,13 @@ export fn JSObjectCallAsFunction(ctx: JSContextRef, function: JSObjectRef, this_
         };
     const args = collectArgs(c, argc, argv, exception) orelse return null;
     // C-ABI host callbacks run directly across the FFI boundary.
-    if (obj.callback) |cb| return cb(ctx, function, this_ref, argc, argv, exception);
+    if (obj.callback) |cb| {
+        const result = cb(ctx, function, this_ref, argc, argv, exception);
+        if (result != null) return result;
+        if (exception != null and exception[0] != null) return null;
+        setException(c, exception, "TypeError: host callback returned null without exception");
+        return null;
+    }
     // JS functions / native builtins / error constructors run on the interpreter.
     const gc_saved = gc_mod.setActiveHeap(c.gc);
     defer _ = gc_mod.setActiveHeap(gc_saved);
@@ -831,7 +847,7 @@ export fn JSObjectCallAsFunction(ctx: JSContextRef, function: JSObjectRef, this_
         } else setException(c, exception, @errorName(err));
         return null;
     };
-    return box(c, res);
+    return boxResult(c, exception, res);
 }
 
 fn hostCallbackNative(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -906,7 +922,7 @@ export fn JSObjectCallAsConstructor(ctx: JSContextRef, constructor: JSObjectRef,
         } else setException(c, exception, @errorName(err));
         return null;
     };
-    return box(c, res);
+    return boxResult(c, exception, res);
 }
 
 export fn JSObjectIsFunction(ctx: JSContextRef, object: JSObjectRef) callconv(.c) bool {
@@ -1035,7 +1051,7 @@ export fn JSWorkerReceive(worker: JSWorkerRef, ctx: JSContextRef, timeout_ms: u6
         } else setException(c, exception, @errorName(err));
         return null;
     };
-    return box(c, v orelse return null);
+    return boxResult(c, exception, v orelse return null);
 }
 
 /// Request cooperative termination: running JS throws at the next step
@@ -1886,6 +1902,15 @@ test "C-API: host callback null result throws without implicit undefined" {
     const fn_obj = JSObjectMakeFunctionWithCallback(ctx, fn_name, nullHostCallback) orelse return error.FunctionCreateFailed;
 
     var exception: JSValueRef = null;
+    try std.testing.expect(JSObjectCallAsFunction(ctx, fn_obj, null, 0, null, &exception) == null);
+    try std.testing.expect(exception != null);
+    const direct_msg = JSValueToStringCopy(ctx, exception, null) orelse return error.StringInitFailed;
+    defer JSStringRelease(direct_msg);
+    var direct_buf: [128]u8 = undefined;
+    const direct_written = JSStringGetUTF8CString(direct_msg, &direct_buf, direct_buf.len);
+    try std.testing.expect(std.mem.indexOf(u8, direct_buf[0 .. direct_written - 1], "host callback returned null") != null);
+
+    exception = null;
     const global = JSContextGetGlobalObject(ctx);
     JSObjectSetProperty(ctx, global, fn_name, fn_obj, 0, &exception);
     try std.testing.expect(exception == null);

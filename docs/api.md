@@ -115,6 +115,8 @@ Native callbacks use the standard `JSObjectCallAsFunctionCallback` calling conve
 
 `JSEvaluateScript` rejects a null source string by returning null and reporting an exception through the out pointer when one is provided. For parse/lex failures, the exception is a `SyntaxError` object whose message includes the source name and adjusted line/column; the object also carries non-enumerable `sourceURL`, `line`, `column`, and `byteOffset` properties for embedders that do not want to parse message text. For runtime throws of Error objects, `sourceURL` and `startingLineNumber` are attached as non-enumerable properties, and the default `stack` string includes that source frame when present.
 
+When an exception-capable API has produced a successful JavaScript result but cannot allocate the C `JSValueRef` / `JSStringRef` wrapper needed to return it, it reports `OutOfMemory` through the exception out pointer instead of returning an ambiguous silent null.
+
 `JSObjectGetProperty`, `JSObjectGetPropertyAtIndex`, and `JSObjectSetProperty` reject null object refs and null property-name strings by reporting an exception through the out pointer.
 
 `JSValueIsEqual`, `JSValueToNumber`, `JSValueToStringCopy`, and `JSValueToObject` reject null value refs by reporting an exception through the out pointer.
