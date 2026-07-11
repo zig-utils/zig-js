@@ -7257,7 +7257,7 @@ pub const Interpreter = struct {
                 }
             },
             .string => for (src.asStr(), 0..) |ch, i| {
-                try self.setMember(target, try std.fmt.allocPrint(self.arena, "{d}", .{i}), Value.str(try self.arena.dupe(u8, &.{ch})));
+                try self.setMember(target, try std.fmt.allocPrint(self.arena, "{d}", .{i}), try Value.strOwned(self.arena, try self.arena.dupe(u8, &.{ch})));
             },
             else => {}, // null/undefined/number/boolean spread → no own enumerable props
         }
@@ -7903,7 +7903,7 @@ pub const Interpreter = struct {
             if (p.isObject()) it.setProtoAtomic(p.asObj());
         }
         try self.setProp(it, "__re", matcher);
-        try self.setProp(it, "__str", Value.str(try self.arena.dupe(u8, s)));
+        try self.setProp(it, "__str", try Value.strOwned(self.arena, try self.arena.dupe(u8, s)));
         try self.setProp(it, "__g", Value.boolVal(global));
         try self.setProp(it, "__u", Value.boolVal(unicode));
         try self.setProp(it, "__done", Value.boolVal(false));
@@ -7925,7 +7925,7 @@ pub const Interpreter = struct {
 
             const match_v = try self.getProperty(result, "0");
             const match_s = try self.toStringV(match_v);
-            try arr.asObj().appendElement(self.arena, Value.str(try self.arena.dupe(u8, match_s)));
+            try arr.asObj().appendElement(self.arena, try Value.strOwned(self.arena, try self.arena.dupe(u8, match_s)));
 
             if (match_s.len == 0) {
                 const li = toLen(try self.toNumberV(try self.getProperty(rx, "lastIndex")));
@@ -10193,7 +10193,7 @@ pub const Interpreter = struct {
             .string => {
                 const s = val.asStr();
                 if (i >= s.len) return Value.undef();
-                return Value.str(try self.arena.dupe(u8, s[i .. i + 1]));
+                return try Value.strOwned(self.arena, try self.arena.dupe(u8, s[i .. i + 1]));
             },
             else => return self.throwError("TypeError", "value is not iterable"),
         }
@@ -12207,7 +12207,7 @@ pub const Interpreter = struct {
                     else => try buf.appendSlice(self.arena, try self.toStringV(el)),
                 }
             }
-            return Value.str(try buf.toOwnedSlice(self.arena));
+            return try Value.strOwned(self.arena, try buf.toOwnedSlice(self.arena));
         }
         if (eq(name, "toLocaleString")) {
             // Like join(","), but each present element is rendered via
@@ -12225,7 +12225,7 @@ pub const Interpreter = struct {
                 const r = try self.callMethod(el, "toLocaleString", &forwarded);
                 try buf.appendSlice(self.arena, try self.toStringV(r));
             }
-            return Value.str(try buf.toOwnedSlice(self.arena));
+            return try Value.strOwned(self.arena, try buf.toOwnedSlice(self.arena));
         }
         if (eq(name, "slice")) {
             const start = try relIndex(self, arg0(args), ilen, 0);
@@ -13106,13 +13106,13 @@ pub const Interpreter = struct {
             var buf: std.ArrayListUnmanaged(u8) = .empty;
             var i: usize = 0;
             while (i < n) : (i += 1) try buf.appendSlice(self.arena, s);
-            return Value.str(try buf.toOwnedSlice(self.arena));
+            return try Value.strOwned(self.arena, try buf.toOwnedSlice(self.arena));
         }
         if (eq(name, "concat")) {
             var buf: std.ArrayListUnmanaged(u8) = .empty;
             try buf.appendSlice(self.arena, s);
             for (args) |a| try buf.appendSlice(self.arena, try self.toStringV(a));
-            return Value.str(try buf.toOwnedSlice(self.arena));
+            return try Value.strOwned(self.arena, try buf.toOwnedSlice(self.arena));
         }
         if (eq(name, "split")) {
             const result = try self.newArray();
@@ -13121,7 +13121,7 @@ pub const Interpreter = struct {
             if (args.len == 0 or args[0].isUndefined()) {
                 const lim: usize = if (args.len > 1 and !args[1].isUndefined()) value.Value.uint32FromF64(try self.toNumberV(args[1])) else std.math.maxInt(u32);
                 if (lim == 0) return result;
-                try out.append(self.arena, Value.str(try self.arena.dupe(u8, s)));
+                try out.append(self.arena, try Value.strOwned(self.arena, try self.arena.dupe(u8, s)));
                 return result;
             }
             // `limit` (ToUint32; absent -> effectively unbounded) is converted
@@ -13147,7 +13147,7 @@ pub const Interpreter = struct {
                         q = m_start + 1;
                         continue;
                     }
-                    try out.append(self.arena, Value.str(try self.arena.dupe(u8, s[p..m_start])));
+                    try out.append(self.arena, try Value.strOwned(self.arena, try self.arena.dupe(u8, s[p..m_start])));
                     if (out.items.len >= lim) return result;
                     for (0..m.captures.len) |ci| {
                         try out.append(self.arena, try self.captureVal(m, ci));
@@ -13156,7 +13156,7 @@ pub const Interpreter = struct {
                     p = m_end;
                     q = if (m_end > m_start) m_end else m_end + 1;
                 }
-                try out.append(self.arena, Value.str(try self.arena.dupe(u8, s[p..])));
+                try out.append(self.arena, try Value.strOwned(self.arena, try self.arena.dupe(u8, s[p..])));
                 return result;
             }
             const sep = try self.toStringV(args[0]);
@@ -13164,14 +13164,14 @@ pub const Interpreter = struct {
             if (sep.len == 0) {
                 for (s) |c| {
                     if (out.items.len >= lim) return result;
-                    try out.append(self.arena, Value.str(try self.arena.dupe(u8, &.{c})));
+                    try out.append(self.arena, try Value.strOwned(self.arena, try self.arena.dupe(u8, &.{c})));
                 }
                 return result;
             }
             var it = std.mem.splitSequence(u8, s, sep);
             while (it.next()) |part| {
                 if (out.items.len >= lim) return result;
-                try out.append(self.arena, Value.str(try self.arena.dupe(u8, part)));
+                try out.append(self.arena, try Value.strOwned(self.arena, try self.arena.dupe(u8, part)));
             }
             return result;
         }
@@ -13229,22 +13229,22 @@ pub const Interpreter = struct {
                     i += n;
                 }
             }
-            return Value.str(try buf.toOwnedSlice(self.arena));
+            return try Value.strOwned(self.arena, try buf.toOwnedSlice(self.arena));
         }
         if (eq(name, "padStart") or eq(name, "padEnd")) {
             const target = toLen(try self.toNumberV(arg0(args)));
             const len = utf16LenOfString(s);
-            if (len >= target) return Value.str(try self.arena.dupe(u8, s));
+            if (len >= target) return try Value.strOwned(self.arena, try self.arena.dupe(u8, s));
             const pad = if (args.len > 1 and !args[1].isUndefined()) try self.toStringV(args[1]) else " ";
             const pad_units = utf16LenOfString(pad);
-            if (pad_units == 0) return Value.str(try self.arena.dupe(u8, s));
+            if (pad_units == 0) return try Value.strOwned(self.arena, try self.arena.dupe(u8, s));
             var buf: std.ArrayListUnmanaged(u8) = .empty;
             var fill_len = target - len;
             if (eq(name, "padEnd")) try buf.appendSlice(self.arena, s);
             while (fill_len >= pad_units) : (fill_len -= pad_units) try buf.appendSlice(self.arena, pad);
             if (fill_len > 0) try self.appendStringUtf16Prefix(&buf, pad, fill_len);
             if (eq(name, "padStart")) try buf.appendSlice(self.arena, s);
-            return Value.str(try buf.toOwnedSlice(self.arena));
+            return try Value.strOwned(self.arena, try buf.toOwnedSlice(self.arena));
         }
         if (eq(name, "replace") or eq(name, "replaceAll")) {
             const all = eq(name, "replaceAll");
@@ -13399,7 +13399,7 @@ pub const Interpreter = struct {
                 try buf.appendSlice(self.arena, "</");
                 try buf.appendSlice(self.arena, h.tag);
                 try buf.append(self.arena, '>');
-                return Value.str(try buf.toOwnedSlice(self.arena));
+                return try Value.strOwned(self.arena, try buf.toOwnedSlice(self.arena));
             }
         }
         if (eq(name, "localeCompare")) {
@@ -13494,7 +13494,7 @@ pub const Interpreter = struct {
     /// in the match (an unmatched optional), else its matched substring.
     fn captureVal(self: *Interpreter, m: regex.Match, i: usize) EvalError!Value {
         if (i < m.captures_present.len and !m.captures_present[i]) return Value.undef();
-        return Value.str(try self.arena.dupe(u8, m.captures[i]));
+        return try Value.strOwned(self.arena, try self.arena.dupe(u8, m.captures[i]));
     }
 
     /// The `groups` object for a match — `{ name: capture }` for each named
@@ -13506,7 +13506,7 @@ pub const Interpreter = struct {
         o.setProtoAtomic(null); // RegExpBuiltinExec: the groups object is ObjectCreate(null)
         for (re.named_capture_list) |entry| {
             const v: Value = if (re.getNamedCapture(&m, entry.name)) |capture|
-                Value.str(try self.arena.dupe(u8, capture))
+                try Value.strOwned(self.arena, try self.arena.dupe(u8, capture))
             else
                 Value.undef();
             try self.setProp(o, entry.name, v);
@@ -21779,7 +21779,7 @@ fn intlLocaleGetter(comptime f: LocaleField) value.NativeFn {
                     try variants.appendSlice(self.arena, part);
                 }
             }
-            if (f == .variants) return if (variants.items.len > 0) Value.str(try variants.toOwnedSlice(self.arena)) else Value.undef();
+            if (f == .variants) return if (variants.items.len > 0) try Value.strOwned(self.arena, try variants.toOwnedSlice(self.arena)) else Value.undef();
             return Value.undef();
         }
     }.call;
@@ -23406,7 +23406,7 @@ fn intlDateTimeFormatFn(ctx: *anyopaque, this: Value, args: []const Value) value
     const parts = try dtfBuildParts(self, this, args);
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     for (parts.items) |p| try buf.appendSlice(self.arena, p.value);
-    return Value.str(try buf.toOwnedSlice(self.arena));
+    return try Value.strOwned(self.arena, try buf.toOwnedSlice(self.arena));
 }
 
 fn intlDateTimeFormatToPartsFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -23917,7 +23917,7 @@ fn collatorResolveLocale(self: *Interpreter, out: *value.Object, tag: []const u8
         if (!numeric) try buf.appendSlice(self.arena, "-false");
         any_kw = true;
     }
-    try self.setProp(out, "locale", Value.str(try buf.toOwnedSlice(self.arena)));
+    try self.setProp(out, "locale", try Value.strOwned(self.arena, try buf.toOwnedSlice(self.arena)));
     return .{ .numeric = numeric, .case_first = case_first, .collation = collation };
 }
 
@@ -24606,7 +24606,7 @@ fn intlNumberFormatFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
     const parts = try nfBuildParts(self, this, args);
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     for (parts.items) |p| try buf.appendSlice(self.arena, p.value);
-    return Value.str(try buf.toOwnedSlice(self.arena));
+    return try Value.strOwned(self.arena, try buf.toOwnedSlice(self.arena));
 }
 
 /// Format one value to a string via the shared parts builder.
@@ -25132,7 +25132,7 @@ fn intlDurationFormatFn(ctx: *anyopaque, this: Value, args: []const Value) value
         }
         try buf.appendSlice(self.arena, it);
     }
-    return Value.str(try buf.toOwnedSlice(self.arena));
+    return try Value.strOwned(self.arena, try buf.toOwnedSlice(self.arena));
 }
 
 const DurPart = struct { typ: []const u8, value: []const u8, unit: ?[]const u8 };
@@ -25667,7 +25667,7 @@ fn segNext(str: []const u8, pos: usize, gran: []const u8) struct { end: usize, w
 /// properties in that order; isWordLike only for the "word" granularity).
 fn segDataObj(self: *Interpreter, str: []const u8, start: usize, end: usize, gran: []const u8, word_like: bool) EvalError!Value {
     const o = (try self.newObject()).asObj();
-    try self.setProp(o, "segment", Value.str(try self.arena.dupe(u8, str[start..end])));
+    try self.setProp(o, "segment", try Value.strOwned(self.arena, try self.arena.dupe(u8, str[start..end])));
     try self.setProp(o, "index", Value.num(@floatFromInt(Interpreter.utf16IndexForByteOffset(str, start))));
     try self.setProp(o, "input", Value.str(str));
     if (std.mem.eql(u8, gran, "word")) try self.setProp(o, "isWordLike", Value.boolVal(word_like));
@@ -25836,7 +25836,7 @@ fn intlListFormatFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
     const parts = try lfBuildParts(self, this, args);
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     for (parts.items) |p| try buf.appendSlice(self.arena, p.value);
-    return Value.str(try buf.toOwnedSlice(self.arena));
+    return try Value.strOwned(self.arena, try buf.toOwnedSlice(self.arena));
 }
 
 fn intlListFormatToPartsFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -26038,7 +26038,7 @@ fn intlRelativeTimeFormatFn(ctx: *anyopaque, this: Value, args: []const Value) v
         try buf.appendSlice(self.arena, try rtfTranslateNumber(self, r.frac_str, r.numbering));
     }
     try buf.appendSlice(self.arena, r.suffix);
-    return Value.str(try buf.toOwnedSlice(self.arena));
+    return try Value.strOwned(self.arena, try buf.toOwnedSlice(self.arena));
 }
 
 /// Group an integer digit string every three digits.
@@ -28394,7 +28394,7 @@ fn cursorIterNext(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
                 // normally one UTF-8 scalar, but can also be a WTF-8 surrogate pair
                 // when two UTF-16 code units were concatenated at runtime.
                 advance = stringIteratorSeqLen(s, i);
-                val = Value.str(try self.arena.dupe(u8, s[i .. i + advance]));
+                val = try Value.strOwned(self.arena, try self.arena.dupe(u8, s[i .. i + advance]));
                 done = false;
             }
         },
@@ -28909,7 +28909,7 @@ fn regexpEscapeFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
         }
         first = false;
     }
-    return Value.str(try out.toOwnedSlice(self.arena));
+    return try Value.strOwned(self.arena, try out.toOwnedSlice(self.arena));
 }
 
 /// A `RegExp.prototype` accessor remembers the realm/prototype it was installed
@@ -28991,7 +28991,7 @@ fn regexFlagsGetter(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
             n += 1;
         }
     }
-    return Value.str(try self.arena.dupe(u8, buf[0..n]));
+    return try Value.strOwned(self.arena, try self.arena.dupe(u8, buf[0..n]));
 }
 
 /// A `RegExp.prototype` method thunk (`exec`/`test`/`toString`) dispatching to
@@ -30460,7 +30460,7 @@ fn temporalDurationToStringFn(ctx: *anyopaque, this: Value, args: []const Value)
         }
     }
     if (buf.items.len == @as(usize, if (sign < 0) 2 else 1)) try buf.appendSlice(self.arena, "T0S");
-    return Value.str(try buf.toOwnedSlice(self.arena));
+    return try Value.strOwned(self.arena, try buf.toOwnedSlice(self.arena));
 }
 
 fn temporalDurationToJSONFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -31908,7 +31908,7 @@ fn temporalPlainDateToStringFn(ctx: *anyopaque, this: Value, args: []const Value
     try isoYearStr(self, &buf, iso.y);
     try tfmt(self, &buf, "-{d:0>2}-{d:0>2}", .{ iso.m, iso.d });
     try appendCalAnnotation(self, &buf, cal, t.calendar);
-    return Value.str(try buf.toOwnedSlice(self.arena));
+    return try Value.strOwned(self.arena, try buf.toOwnedSlice(self.arena));
 }
 
 fn temporalPlainDateToJSONFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -31921,7 +31921,7 @@ fn temporalPlainDateToJSONFn(ctx: *anyopaque, this: Value, args: []const Value) 
     try isoYearStr(self, &buf, iso.y);
     try tfmt(self, &buf, "-{d:0>2}-{d:0>2}", .{ iso.m, iso.d });
     try appendCalAnnotation(self, &buf, .auto, t.calendar);
-    return Value.str(try buf.toOwnedSlice(self.arena));
+    return try Value.strOwned(self.arena, try buf.toOwnedSlice(self.arena));
 }
 
 /// Validate a `calendar` property in a Temporal fields bag (ToTemporalCalendar
@@ -32871,7 +32871,7 @@ fn temporalPlainTimeToStringFn(ctx: *anyopaque, this: Value, args: []const Value
     const precision = try readTemporalStringPrecision(self, if (args.len > 0) args[0] else Value.undef(), .minute);
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     _ = try appendIsoTimeString(self, &buf, this.asObj().temporal.?, precision);
-    return Value.str(try buf.toOwnedSlice(self.arena));
+    return try Value.strOwned(self.arena, try buf.toOwnedSlice(self.arena));
 }
 
 fn temporalPlainTimeToJSONFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -32880,7 +32880,7 @@ fn temporalPlainTimeToJSONFn(ctx: *anyopaque, this: Value, args: []const Value) 
     if (!tIsTemporal(this, .plain_time)) return self.throwError("TypeError", "non-PlainTime");
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     _ = try appendIsoTimeString(self, &buf, this.asObj().temporal.?, .{});
-    return Value.str(try buf.toOwnedSlice(self.arena));
+    return try Value.strOwned(self.arena, try buf.toOwnedSlice(self.arena));
 }
 
 // ---- Temporal.PlainDateTime -----------------------------------------
@@ -32931,7 +32931,7 @@ fn temporalPlainDateTimeToStringFn(ctx: *anyopaque, this: Value, args: []const V
     try tfmt(self, &buf, "-{d:0>2}-{d:0>2}T", .{ c.m, c.d });
     try appendIsoTimeFromNs(self, &buf, rounded_time, precision);
     try appendCalAnnotation(self, &buf, cal, t.calendar);
-    return Value.str(try buf.toOwnedSlice(self.arena));
+    return try Value.strOwned(self.arena, try buf.toOwnedSlice(self.arena));
 }
 
 fn temporalPlainDateTimeToJSONFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -32945,7 +32945,7 @@ fn temporalPlainDateTimeToJSONFn(ctx: *anyopaque, this: Value, args: []const Val
     try tfmt(self, &buf, "-{d:0>2}-{d:0>2}T", .{ iso.m, iso.d });
     _ = try appendIsoTimeString(self, &buf, t, .{});
     try appendCalAnnotation(self, &buf, .auto, t.calendar);
-    return Value.str(try buf.toOwnedSlice(self.arena));
+    return try Value.strOwned(self.arena, try buf.toOwnedSlice(self.arena));
 }
 
 // ---- `with` (PlainDate / PlainTime / PlainDateTime) -----------------
@@ -33282,7 +33282,7 @@ fn temporalYearMonthToStringFn(ctx: *anyopaque, this: Value, args: []const Value
     // ISO string ("YYYY-MM-DD[u-ca=iso8601]").
     if (!std.mem.eql(u8, t.calendar, "iso8601") or calShowsAnnotation(cal, t.calendar)) try tfmt(self, &buf, "-{d:0>2}", .{iso.d});
     try appendCalAnnotation(self, &buf, cal, t.calendar);
-    return Value.str(try buf.toOwnedSlice(self.arena));
+    return try Value.strOwned(self.arena, try buf.toOwnedSlice(self.arena));
 }
 
 fn temporalYearMonthToJSONFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -33298,7 +33298,7 @@ fn temporalYearMonthToJSONFn(ctx: *anyopaque, this: Value, args: []const Value) 
         try tfmt(self, &buf, "-{d:0>2}", .{iso.d});
         try appendCalAnnotation(self, &buf, .auto, t.calendar);
     }
-    return Value.str(try buf.toOwnedSlice(self.arena));
+    return try Value.strOwned(self.arena, try buf.toOwnedSlice(self.arena));
 }
 
 fn checkIsoYearMonth(self: *Interpreter, y: i64, m: u8) EvalError!void {
@@ -36020,7 +36020,7 @@ fn temporalInstantToJSONFn(ctx: *anyopaque, this: Value, args: []const Value) va
     if (!tIsTemporal(this, .instant)) return self.throwError("TypeError", "non-Instant");
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     try appendInstantIsoUtcString(self, &buf, this.asObj().temporal.?.epoch_ns, .{});
-    return Value.str(try buf.toOwnedSlice(self.arena));
+    return try Value.strOwned(self.arena, try buf.toOwnedSlice(self.arena));
 }
 
 const InstantToStringOptions = struct { precision: TemporalStringPrecision, tz: TimeZone, z_suffix: bool };
@@ -36099,7 +36099,7 @@ fn temporalInstantToStringFn(ctx: *anyopaque, this: Value, args: []const Value) 
         try buf.appendSlice(self.arena, "-00:45")
     else
         try buf.appendSlice(self.arena, try offsetNsToString(self, render_offset));
-    return Value.str(try buf.toOwnedSlice(self.arena));
+    return try Value.strOwned(self.arena, try buf.toOwnedSlice(self.arena));
 }
 
 fn temporalInstantFromEpochFn(comptime unit_ns: i128) value.NativeFn {
@@ -37491,7 +37491,7 @@ fn temporalZdtToStringFn(ctx: *anyopaque, this: Value, args: []const Value) valu
         try buf.append(self.arena, ']');
     }
     try appendCalAnnotation(self, &buf, opts.cal, t.calendar);
-    return Value.str(try buf.toOwnedSlice(self.arena));
+    return try Value.strOwned(self.arena, try buf.toOwnedSlice(self.arena));
 }
 
 fn temporalZdtToJSONFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
