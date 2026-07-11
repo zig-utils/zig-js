@@ -498,13 +498,22 @@ export fn JSObjectMakeDeferredPromise(ctx: JSContextRef, resolve: [*c]JSObjectRe
     defer _ = strcell.setActiveArena(sa_saved);
 
     var machine = c.interpreter();
+    c.pushActiveInterpreter(&machine) catch {
+        setException(c, exception, "OutOfMemory");
+        return null;
+    };
+    defer c.popActiveInterpreter(&machine);
     const obj = promise.newPromise(&machine) catch |err| {
-        setException(c, exception, @errorName(err));
+        if (err == error.Throw) {
+            if (exception != null) exception[0] = box(c, machine.exception);
+        } else setException(c, exception, @errorName(err));
         return null;
     };
     const p: *promise.Promise = @ptrCast(@alignCast(obj.promise.?));
     const capability = promise.nativeResolveReject(&machine, p) catch |err| {
-        setException(c, exception, @errorName(err));
+        if (err == error.Throw) {
+            if (exception != null) exception[0] = box(c, machine.exception);
+        } else setException(c, exception, @errorName(err));
         return null;
     };
 
