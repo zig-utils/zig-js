@@ -13,11 +13,13 @@
 //!
 //! ## Threading rules
 //!
-//! Every handle is affine to the thread that created its context:
+//! Every handle is affine to the context and thread that created it:
 //! a `JSContextRef` — and every `JSValueRef`/`JSObjectRef` obtained through it —
 //! may only be used on the thread that called `JSGlobalContextCreate`.
-//! Cross-thread use is undefined behavior (the arena, object graph, and
-//! microtask queue are unsynchronized by design); debug builds panic on it.
+//! `JSValueRef`/`JSObjectRef` boxes carry their owning context, and context-taking
+//! C APIs reject handles from a different context. Cross-thread use is still
+//! undefined behavior (the arena, object graph, and microtask queue are
+//! unsynchronized by design); debug builds panic on it.
 //! The supported multithreading pattern is one context per thread, sharing
 //! only `SharedArrayBuffer` storage — see docs/threads/bindings.md and
 //! https://github.com/zig-utils/zig-js/issues/1 for the worker/agent roadmap.
@@ -46,7 +48,14 @@ const Object = value.Object;
 const gpa = std.heap.page_allocator;
 
 /// Boxed interpreter value handed across the C boundary as a `JSValueRef`.
-const Boxed = struct { value: Value };
+/// Handles are realm-affine: APIs that receive a `JSContextRef` reject boxes
+/// created by another context instead of silently mixing arenas/object graphs.
+const Boxed = struct {
+    /// Keep `value` first: the GC root scanner treats a protected `*Boxed` as
+    /// a `*Value` when tracing C-API handles.
+    value: Value,
+    owner: *Context,
+};
 
 /// JSC-shaped `JSType`. Values 0..6 match Apple's public enum; `bigint` and
 /// `invalid` are zig-js extensions so the C boundary does not misreport BigInt
@@ -99,12 +108,22 @@ fn ctxFrom(ref: JSContextRef) ?*Context {
 
 fn box(ctx: *Context, v: Value) JSValueRef {
     const b = ctx.arena().create(Boxed) catch return null;
-    b.* = .{ .value = v };
+    b.* = .{ .value = v, .owner = ctx };
     return @ptrCast(b);
 }
 
+fn boxedFrom(ref: JSValueRef) ?*Boxed {
+    return @ptrCast(@alignCast(ref orelse return null));
+}
+
 fn valueFrom(ref: JSValueRef) ?Value {
-    const b: *Boxed = @ptrCast(@alignCast(ref orelse return null));
+    const b = boxedFrom(ref) orelse return null;
+    return b.value;
+}
+
+fn valueFromContext(ctx: *Context, ref: JSValueRef) ?Value {
+    const b = boxedFrom(ref) orelse return null;
+    if (b.owner != ctx) return null;
     return b.value;
 }
 
@@ -113,7 +132,7 @@ fn unbox(ref: JSValueRef) Value {
 }
 
 fn valueArgFrom(ctx: *Context, ref: JSValueRef, exception: ExceptionRef) ?Value {
-    if (valueFrom(ref)) |v| return v;
+    if (valueFromContext(ctx, ref)) |v| return v;
     setException(ctx, exception, "TypeError: value is not a value");
     return null;
 }
@@ -310,10 +329,7 @@ export fn JSEvaluateScript(
         return null;
     };
     const this_value = if (this_object) |_|
-        Value.obj(objectFrom(this_object) orelse {
-            setException(c, exception, "TypeError: thisObject is not an object");
-            return null;
-        })
+        Value.obj(objectArgFrom(c, this_object, exception) orelse return null)
     else
         Value.obj(c.global_object);
     const result = c.evaluateWithThis(s.bytes, this_value) catch |err| {
@@ -334,8 +350,8 @@ export fn JSEvaluateScript(
 // ---- JSValue inspection ------------------------------------------------
 
 export fn JSValueGetType(ctx: JSContextRef, v: JSValueRef) callconv(.c) JSType {
-    _ = ctx;
-    const uv = valueFrom(v) orelse return .invalid;
+    const c = ctxRawFrom(ctx) orelse return .invalid;
+    const uv = valueFromContext(c, v) orelse return .invalid;
     return switch (uv.kind()) {
         .undefined => .undefined,
         .null => .null,
@@ -347,45 +363,45 @@ export fn JSValueGetType(ctx: JSContextRef, v: JSValueRef) callconv(.c) JSType {
 }
 
 export fn JSValueIsUndefined(ctx: JSContextRef, v: JSValueRef) callconv(.c) bool {
-    _ = ctx;
-    return if (valueFrom(v)) |uv| uv.isUndefined() else false;
+    const c = ctxRawFrom(ctx) orelse return false;
+    return if (valueFromContext(c, v)) |uv| uv.isUndefined() else false;
 }
 
 export fn JSValueIsNull(ctx: JSContextRef, v: JSValueRef) callconv(.c) bool {
-    _ = ctx;
-    return if (valueFrom(v)) |uv| uv.isNull() else false;
+    const c = ctxRawFrom(ctx) orelse return false;
+    return if (valueFromContext(c, v)) |uv| uv.isNull() else false;
 }
 
 export fn JSValueIsBoolean(ctx: JSContextRef, v: JSValueRef) callconv(.c) bool {
-    _ = ctx;
-    return if (valueFrom(v)) |uv| uv.isBoolean() else false;
+    const c = ctxRawFrom(ctx) orelse return false;
+    return if (valueFromContext(c, v)) |uv| uv.isBoolean() else false;
 }
 
 export fn JSValueIsNumber(ctx: JSContextRef, v: JSValueRef) callconv(.c) bool {
-    _ = ctx;
-    return if (valueFrom(v)) |uv| uv.isNumber() else false;
+    const c = ctxRawFrom(ctx) orelse return false;
+    return if (valueFromContext(c, v)) |uv| uv.isNumber() else false;
 }
 
 export fn JSValueIsString(ctx: JSContextRef, v: JSValueRef) callconv(.c) bool {
-    _ = ctx;
-    return if (valueFrom(v)) |uv| uv.isString() else false;
+    const c = ctxRawFrom(ctx) orelse return false;
+    return if (valueFromContext(c, v)) |uv| uv.isString() else false;
 }
 
 export fn JSValueIsObject(ctx: JSContextRef, v: JSValueRef) callconv(.c) bool {
-    _ = ctx;
-    const uv = valueFrom(v) orelse return false;
+    const c = ctxRawFrom(ctx) orelse return false;
+    const uv = valueFromContext(c, v) orelse return false;
     return uv.isObject() and !uv.asObj().is_symbol and !uv.asObj().is_bigint;
 }
 
 export fn JSValueIsArray(ctx: JSContextRef, v: JSValueRef) callconv(.c) bool {
-    _ = ctx;
-    const uv = valueFrom(v) orelse return false;
+    const c = ctxRawFrom(ctx) orelse return false;
+    const uv = valueFromContext(c, v) orelse return false;
     return uv.isObject() and uv.asObj().is_array;
 }
 
 export fn JSValueIsDate(ctx: JSContextRef, v: JSValueRef) callconv(.c) bool {
-    _ = ctx;
-    const uv = valueFrom(v) orelse return false;
+    const c = ctxRawFrom(ctx) orelse return false;
+    const uv = valueFromContext(c, v) orelse return false;
     return uv.isObject() and uv.asObj().is_date;
 }
 
@@ -415,9 +431,9 @@ export fn JSValueIsEqual(ctx: JSContextRef, a: JSValueRef, b: JSValueRef, except
 }
 
 export fn JSValueIsStrictEqual(ctx: JSContextRef, a: JSValueRef, b: JSValueRef) callconv(.c) bool {
-    _ = ctx;
-    const lhs = valueFrom(a) orelse return false;
-    const rhs = valueFrom(b) orelse return false;
+    const c = ctxRawFrom(ctx) orelse return false;
+    const lhs = valueFromContext(c, a) orelse return false;
+    const rhs = valueFromContext(c, b) orelse return false;
     return value.strictEquals(lhs, rhs);
 }
 
@@ -453,8 +469,8 @@ export fn JSValueMakeString(ctx: JSContextRef, str: JSStringRef) callconv(.c) JS
 // ---- JSValue coercion -------------------------------------------------
 
 export fn JSValueToBoolean(ctx: JSContextRef, v: JSValueRef) callconv(.c) bool {
-    _ = ctx;
-    return if (valueFrom(v)) |uv| uv.toBoolean() else false;
+    const c = ctxRawFrom(ctx) orelse return false;
+    return if (valueFromContext(c, v)) |uv| uv.toBoolean() else false;
 }
 
 export fn JSValueToNumber(ctx: JSContextRef, v: JSValueRef, exception: ExceptionRef) callconv(.c) f64 {
@@ -535,7 +551,9 @@ export fn JSValueToObject(ctx: JSContextRef, v: JSValueRef, exception: Exception
 
 export fn JSValueProtect(ctx: JSContextRef, v: JSValueRef) callconv(.c) bool {
     const c = ctxFrom(ctx) orelse return false;
-    const raw = v orelse return false;
+    const boxed = boxedFrom(v) orelse return false;
+    if (boxed.owner != c) return false;
+    const raw = v.?;
     if (c.gc == null) return true; // arena contexts keep values for the context lifetime.
     // `c_api_handles` is read by the mid-script parallel collector; guard it
     // under `realm_lock` (a no-op outside parallel_js).
@@ -554,7 +572,9 @@ export fn JSValueProtect(ctx: JSContextRef, v: JSValueRef) callconv(.c) bool {
 
 export fn JSValueUnprotect(ctx: JSContextRef, v: JSValueRef) callconv(.c) bool {
     const c = ctxFrom(ctx) orelse return false;
-    const raw = v orelse return false;
+    const boxed = boxedFrom(v) orelse return false;
+    if (boxed.owner != c) return false;
+    const raw = v.?;
     if (c.gc == null) return true;
     c.realmLock();
     defer c.realmUnlock();
@@ -707,7 +727,8 @@ fn objectFrom(ref: JSObjectRef) ?*Object {
 }
 
 fn objectArgFrom(ctx: *Context, object: JSObjectRef, exception: ExceptionRef) ?*Object {
-    return objectFrom(object) orelse {
+    const value_ref = valueArgFrom(ctx, object, exception) orelse return null;
+    return if (value_ref.isObject()) value_ref.asObj() else {
         setException(ctx, exception, "TypeError: object is not an object");
         return null;
     };
@@ -807,15 +828,12 @@ export fn JSObjectCallAsFunction(ctx: JSContextRef, function: JSObjectRef, this_
         setException(c, exception, "TypeError: argc > 0 requires non-null argv");
         return null;
     }
-    const obj = objectFrom(function) orelse {
+    const obj = objectArgFrom(c, function, exception) orelse {
         setException(c, exception, "TypeError: value is not a function");
         return null;
     };
     const this_ref = if (this_object) |_|
-        if (objectFrom(this_object) != null) this_object else {
-            setException(c, exception, "TypeError: thisObject is not an object");
-            return null;
-        }
+        if (objectArgFrom(c, this_object, exception) != null) this_object else return null
     else
         box(c, Value.obj(c.global_object)) orelse {
             setException(c, exception, "OutOfMemory");
@@ -825,8 +843,14 @@ export fn JSObjectCallAsFunction(ctx: JSContextRef, function: JSObjectRef, this_
     // C-ABI host callbacks run directly across the FFI boundary.
     if (obj.callback) |cb| {
         const result = cb(ctx, function, this_ref, argc, argv, exception);
-        if (result != null) return result;
-        if (exception != null and exception[0] != null) return null;
+        if (result) |ref| {
+            _ = valueArgFrom(c, ref, exception) orelse return null;
+            return result;
+        }
+        if (exception != null and exception[0] != null) {
+            _ = valueArgFrom(c, exception[0], exception) orelse return null;
+            return null;
+        }
         setException(c, exception, "TypeError: host callback returned null without exception");
         return null;
     }
@@ -868,9 +892,9 @@ fn hostCallbackNative(ctx: *anyopaque, this: Value, args: []const Value) value.H
     for (args, js_args) |arg, *slot| slot.* = box(c, arg);
     var exception: JSValueRef = null;
     const result = cb(@ptrCast(c), box(c, Value.obj(obj)), box(c, this), args.len, js_args.ptr, &exception);
-    if (result) |ref| return unbox(ref);
+    if (result) |ref| return valueFromContext(c, ref) orelse return machine.throwError("TypeError", "host callback returned invalid value");
     if (exception) |ref| {
-        machine.exception = unbox(ref);
+        machine.exception = valueFromContext(c, ref) orelse Value.str("TypeError: host callback set invalid exception");
         return error.Throw;
     }
     return machine.throwError("TypeError", "host callback returned null without exception");
@@ -901,7 +925,7 @@ export fn JSObjectCallAsConstructor(ctx: JSContextRef, constructor: JSObjectRef,
         setException(c, exception, "TypeError: argc > 0 requires non-null argv");
         return null;
     }
-    const obj = objectFrom(constructor) orelse {
+    const obj = objectArgFrom(c, constructor, exception) orelse {
         setException(c, exception, "TypeError: value is not a constructor");
         return null;
     };
@@ -926,15 +950,15 @@ export fn JSObjectCallAsConstructor(ctx: JSContextRef, constructor: JSObjectRef,
 }
 
 export fn JSObjectIsFunction(ctx: JSContextRef, object: JSObjectRef) callconv(.c) bool {
-    _ = ctx;
-    const obj = objectFrom(object) orelse return false;
-    return obj.isCallableObject();
+    const c = ctxRawFrom(ctx) orelse return false;
+    const val = valueFromContext(c, object) orelse return false;
+    return val.isObject() and val.asObj().isCallableObject();
 }
 
 export fn JSObjectIsConstructor(ctx: JSContextRef, object: JSObjectRef) callconv(.c) bool {
-    _ = ctx;
-    const obj = objectFrom(object) orelse return false;
-    return interp.isConstructorValue(Value.obj(obj));
+    const c = ctxRawFrom(ctx) orelse return false;
+    const val = valueFromContext(c, object) orelse return false;
+    return val.isObject() and interp.isConstructorValue(val);
 }
 
 // ---- JSString lifecycle ------------------------------------------------
@@ -1195,6 +1219,61 @@ test "C-API: value inspection APIs report null handles as invalid" {
     try std.testing.expect(!JSValueIsStrictEqual(ctx, null, null));
     try std.testing.expect(!JSValueIsStrictEqual(ctx, null, undefined_value));
     try std.testing.expect(!JSValueToBoolean(ctx, null));
+}
+
+test "C-API: context-owned handles reject cross-context use" {
+    const ctx_a = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
+    defer JSGlobalContextRelease(ctx_a);
+    const ctx_b = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
+    defer JSGlobalContextRelease(ctx_b);
+
+    var exception: JSValueRef = null;
+    const number_a = JSValueMakeNumber(ctx_a, 7) orelse return error.ValueInitFailed;
+    const object_a = JSObjectMake(ctx_a, null, null) orelse return error.ObjectCreateFailed;
+    const function_src = JSStringCreateWithUTF8CString("(function () { return 1; })") orelse return error.StringInitFailed;
+    defer JSStringRelease(function_src);
+    const function_a = JSEvaluateScript(ctx_a, function_src, null, null, 0, &exception) orelse return error.EvalFailed;
+    try std.testing.expect(exception == null);
+
+    try std.testing.expectEqual(JSType.invalid, JSValueGetType(ctx_b, number_a));
+    try std.testing.expect(!JSValueIsNumber(ctx_b, number_a));
+    try std.testing.expect(!JSValueToBoolean(ctx_b, number_a));
+    try std.testing.expect(!JSValueIsStrictEqual(ctx_b, number_a, number_a));
+    try std.testing.expect(!JSValueProtect(ctx_b, number_a));
+
+    exception = null;
+    try std.testing.expect(!JSValueIsEqual(ctx_b, number_a, JSValueMakeNumber(ctx_b, 7), &exception));
+    try std.testing.expect(exception != null);
+
+    exception = null;
+    const coerced = JSValueToNumber(ctx_b, number_a, &exception);
+    try std.testing.expect(std.math.isNan(coerced));
+    try std.testing.expect(exception != null);
+
+    const key = JSStringCreateWithUTF8CString("x") orelse return error.StringInitFailed;
+    defer JSStringRelease(key);
+
+    exception = null;
+    try std.testing.expect(JSObjectGetProperty(ctx_b, object_a, key, &exception) == null);
+    try std.testing.expect(exception != null);
+
+    exception = null;
+    JSObjectSetProperty(ctx_b, object_a, key, JSValueMakeNumber(ctx_b, 1), kJSPropertyAttributeNone, &exception);
+    try std.testing.expect(exception != null);
+
+    exception = null;
+    try std.testing.expect(JSObjectCallAsFunction(ctx_b, function_a, null, 0, null, &exception) == null);
+    try std.testing.expect(exception != null);
+
+    exception = null;
+    try std.testing.expect(JSObjectCallAsConstructor(ctx_b, function_a, 0, null, &exception) == null);
+    try std.testing.expect(exception != null);
+
+    const this_src = JSStringCreateWithUTF8CString("this") orelse return error.StringInitFailed;
+    defer JSStringRelease(this_src);
+    exception = null;
+    try std.testing.expect(JSEvaluateScript(ctx_b, this_src, object_a, null, 0, &exception) == null);
+    try std.testing.expect(exception != null);
 }
 
 test "C-API: JSEvaluateScript computes 1 + 1 === 2" {

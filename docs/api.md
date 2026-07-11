@@ -121,7 +121,9 @@ When an exception-capable API has produced a successful JavaScript result but ca
 
 `JSValueIsEqual`, `JSValueToNumber`, `JSValueToStringCopy`, and `JSValueToObject` reject null value refs by reporting an exception through the out pointer.
 
-For no-exception value inspection APIs, a null value ref is an invalid handle, not JavaScript `undefined`: `JSValueGetType` returns the zig-js extension `invalid`, value predicates and `JSValueIsStrictEqual` return false, and `JSValueToBoolean` returns false.
+`JSValueRef` / `JSObjectRef` handles are owned by the context that created them. APIs that receive a `JSContextRef` reject handles from a different context instead of mixing arenas or object graphs: exception-capable APIs report a `TypeError`, while no-exception inspection/protection APIs return their invalid-handle result.
+
+For no-exception value inspection APIs, a null or wrong-context value ref is an invalid handle, not JavaScript `undefined`: `JSValueGetType` returns the zig-js extension `invalid`, value predicates and `JSValueIsStrictEqual` return false, and `JSValueToBoolean` returns false.
 
 `JSValueProtect` and `JSValueUnprotect` return `true` when the handle table operation is accepted. They return `false` for invalid/null handles, missing protected entries on GC-enabled contexts, allocation failure, or protection-count overflow; overflow is rejected rather than wrapping the counted root.
 
