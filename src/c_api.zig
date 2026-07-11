@@ -530,7 +530,9 @@ fn collectArgs(c: *Context, argc: usize, argv: [*c]const JSValueRef, exception: 
         return null;
     };
     var i: usize = 0;
-    while (i < argc) : (i += 1) args[i] = unbox(argv[i]);
+    while (i < argc) : (i += 1) {
+        args[i] = valueArgFrom(c, argv[i], exception) orelse return null;
+    }
     return args;
 }
 
@@ -734,10 +736,10 @@ export fn JSObjectCallAsFunction(ctx: JSContextRef, function: JSObjectRef, this_
             setException(c, exception, "OutOfMemory");
             return null;
         };
+    const args = collectArgs(c, argc, argv, exception) orelse return null;
     // C-ABI host callbacks run directly across the FFI boundary.
     if (obj.callback) |cb| return cb(ctx, function, this_ref, argc, argv, exception);
     // JS functions / native builtins / error constructors run on the interpreter.
-    const args = collectArgs(c, argc, argv, exception) orelse return null;
     const gc_saved = gc_mod.setActiveHeap(c.gc);
     defer _ = gc_mod.setActiveHeap(gc_saved);
     const sa_saved = strcell.setActiveArena(c.arena());
@@ -1671,6 +1673,33 @@ test "C-API: argc rejects null argv" {
     const date_ctor = JSObjectGetProperty(ctx, global, date_name, &exception) orelse return error.PropFailed;
     try std.testing.expect(exception == null);
     try std.testing.expect(JSObjectCallAsConstructor(ctx, date_ctor, 1, null, &exception) == null);
+    try std.testing.expect(exception != null);
+}
+
+test "C-API: argv rejects null value refs" {
+    const ctx = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
+    defer JSGlobalContextRelease(ctx);
+
+    var args = [_]JSValueRef{null};
+    var exception: JSValueRef = null;
+
+    try std.testing.expect(JSObjectMakeArray(ctx, args.len, &args, &exception) == null);
+    try std.testing.expect(exception != null);
+
+    exception = null;
+    const fn_name = JSStringCreateWithUTF8CString("hostAnswer") orelse return error.StringInitFailed;
+    defer JSStringRelease(fn_name);
+    const fn_obj = JSObjectMakeFunctionWithCallback(ctx, fn_name, namedHostCallback) orelse return error.FunctionCreateFailed;
+    try std.testing.expect(JSObjectCallAsFunction(ctx, fn_obj, null, args.len, &args, &exception) == null);
+    try std.testing.expect(exception != null);
+
+    exception = null;
+    const global = JSContextGetGlobalObject(ctx);
+    const date_name = JSStringCreateWithUTF8CString("Date") orelse return error.StringInitFailed;
+    defer JSStringRelease(date_name);
+    const date_ctor = JSObjectGetProperty(ctx, global, date_name, &exception) orelse return error.PropFailed;
+    try std.testing.expect(exception == null);
+    try std.testing.expect(JSObjectCallAsConstructor(ctx, date_ctor, args.len, &args, &exception) == null);
     try std.testing.expect(exception != null);
 }
 
