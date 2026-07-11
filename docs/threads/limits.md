@@ -27,7 +27,9 @@ tests as the matching engine features land.
 - Optional per-context allocator pressure cap:
   `Context.createWith(.{ .heap_limit_bytes = n })` fails closed with
   `error.OutOfMemory` once Context-owned outstanding allocator bytes exceed the
-  configured budget.
+  configured budget. `ctx.heapBudgetStats()` reports `limit_bytes`,
+  `used_bytes`, lifetime `peak_bytes`, and `remaining_bytes` for capped
+  contexts.
 - Test-shell helpers such as `print`, `setTimeout`, `drainMicrotasks`, `gc`,
   and supported `$vm` compatibility hooks for conformance coverage.
 
@@ -195,11 +197,15 @@ Issue #1 remains the umbrella status page.
   a thread-safe outstanding-byte budget. It covers arena chunks, GC cell slabs
   and side stores, shared-buffer retain tables, thread records, and other
   Context-owned allocations routed through `Context.gpa`, then reports allocator
-  pressure as ordinary Zig `error.OutOfMemory`. This is intentionally an
-  embedder allocator boundary rather than a JavaScript heap-shape oracle. The
-  remaining #24 work is to define deterministic per-thread OOM survivor
-  semantics and promote the matching PR-249 witness once the observable contract
-  is nailed down.
+  pressure as ordinary Zig `error.OutOfMemory`. `Context.heapBudgetStats()`
+  returns current outstanding bytes, lifetime peak bytes, the configured limit,
+  and remaining headroom for capped contexts; uncapped contexts return `null`.
+  The peak is monotonic for the context lifetime, so embedders can tune limits
+  and alert on near-cap scripts without installing a custom allocator wrapper.
+  This is intentionally an embedder allocator boundary rather than a JavaScript
+  heap-shape oracle. The remaining #24 work is to define deterministic
+  per-thread OOM survivor semantics and promote the matching PR-249 witness once
+  the observable contract is nailed down.
 - **Parallel scaling optimization.** Benchmarks show real speedup, but scaling
   is sub-linear. `zig build threads-profile` now provides a repeatable baseline
   against the `.gil = true` fallback for independent compute, shared object

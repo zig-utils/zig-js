@@ -160,16 +160,29 @@ pub const BudgetAllocator = struct {
     inner: std.mem.Allocator,
     limit: usize,
     used: std.atomic.Value(usize) = .init(0),
+    peak: std.atomic.Value(usize) = .init(0),
 
-    fn reserve(self: *BudgetAllocator, amount: usize) bool {
-        var current = self.used.load(.monotonic);
-        while (true) {
-            if (amount > self.limit -| current) return false;
-            if (self.used.cmpxchgWeak(current, current + amount, .acq_rel, .monotonic)) |observed| {
+    fn recordPeak(self: *BudgetAllocator, used_now: usize) void {
+        var current = self.peak.load(.monotonic);
+        while (used_now > current) {
+            if (self.peak.cmpxchgWeak(current, used_now, .monotonic, .monotonic)) |observed| {
                 current = observed;
                 continue;
             }
-            return true;
+            return;
+        }
+    }
+
+    fn reserve(self: *BudgetAllocator, amount: usize) ?usize {
+        var current = self.used.load(.monotonic);
+        while (true) {
+            if (amount > self.limit -| current) return null;
+            const next = current + amount;
+            if (self.used.cmpxchgWeak(current, next, .acq_rel, .monotonic)) |observed| {
+                current = observed;
+                continue;
+            }
+            return next;
         }
     }
 
@@ -179,32 +192,35 @@ pub const BudgetAllocator = struct {
 
     fn allocFn(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
         const self: *BudgetAllocator = @ptrCast(@alignCast(ctx));
-        if (!self.reserve(len)) return null;
+        const next = self.reserve(len) orelse return null;
         const ptr = self.inner.vtable.alloc(self.inner.ptr, len, alignment, ret_addr) orelse {
             self.release(len);
             return null;
         };
+        self.recordPeak(next);
         return ptr;
     }
 
     fn resizeFn(ctx: *anyopaque, mem: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
         const self: *BudgetAllocator = @ptrCast(@alignCast(ctx));
-        if (new_len > mem.len and !self.reserve(new_len - mem.len)) return false;
+        const grow_next = if (new_len > mem.len) self.reserve(new_len - mem.len) orelse return false else null;
         if (!self.inner.vtable.resize(self.inner.ptr, mem, alignment, new_len, ret_addr)) {
             if (new_len > mem.len) self.release(new_len - mem.len);
             return false;
         }
+        if (grow_next) |next| self.recordPeak(next);
         if (new_len < mem.len) self.release(mem.len - new_len);
         return true;
     }
 
     fn remapFn(ctx: *anyopaque, mem: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
         const self: *BudgetAllocator = @ptrCast(@alignCast(ctx));
-        if (new_len > mem.len and !self.reserve(new_len - mem.len)) return null;
+        const grow_next = if (new_len > mem.len) self.reserve(new_len - mem.len) orelse return null else null;
         const ptr = self.inner.vtable.remap(self.inner.ptr, mem, alignment, new_len, ret_addr) orelse {
             if (new_len > mem.len) self.release(new_len - mem.len);
             return null;
         };
+        if (grow_next) |next| self.recordPeak(next);
         if (new_len < mem.len) self.release(mem.len - new_len);
         return ptr;
     }
@@ -225,6 +241,16 @@ pub const BudgetAllocator = struct {
     pub fn allocator(self: *BudgetAllocator) std.mem.Allocator {
         return .{ .ptr = self, .vtable = &vtable };
     }
+
+    pub fn stats(self: *const BudgetAllocator) Context.HeapBudgetStats {
+        const used = @constCast(self).used.load(.acquire);
+        return .{
+            .limit_bytes = self.limit,
+            .used_bytes = used,
+            .peak_bytes = @constCast(self).peak.load(.acquire),
+            .remaining_bytes = self.limit -| used,
+        };
+    }
 };
 
 test "BudgetAllocator enforces outstanding byte limit" {
@@ -233,16 +259,21 @@ test "BudgetAllocator enforces outstanding byte limit" {
 
     const first = try a.alloc(u8, 48);
     try std.testing.expectEqual(@as(usize, 48), budget.used.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 48), budget.peak.load(.acquire));
     try std.testing.expectError(error.OutOfMemory, a.alloc(u8, 17));
+    try std.testing.expectEqual(@as(usize, 48), budget.peak.load(.acquire));
 
     a.free(first);
     try std.testing.expectEqual(@as(usize, 0), budget.used.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 48), budget.peak.load(.acquire));
 
     const second = try a.alloc(u8, 64);
     try std.testing.expectEqual(@as(usize, 64), budget.used.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 64), budget.peak.load(.acquire));
     try std.testing.expectError(error.OutOfMemory, a.alloc(u8, 1));
     a.free(second);
     try std.testing.expectEqual(@as(usize, 0), budget.used.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 64), budget.peak.load(.acquire));
 }
 
 /// Reusable backing allocator for GC cells. `zig-gc` asks its backing allocator
@@ -1701,6 +1732,13 @@ pub const Context = struct {
         parallel_midscript_gc: bool = false,
     };
 
+    pub const HeapBudgetStats = struct {
+        limit_bytes: usize,
+        used_bytes: usize,
+        peak_bytes: usize,
+        remaining_bytes: usize,
+    };
+
     /// The engine's precise-GC heap type and its root-tracing binding (issue #1
     /// Phase 7). Held by pointer so addresses are stable; `null` costs nothing
     /// when the GC is off.
@@ -2091,6 +2129,11 @@ pub const Context = struct {
             }
             return next == 0;
         }
+    }
+
+    pub fn heapBudgetStats(self: *const Context) ?HeapBudgetStats {
+        const ba = self.budget_allocator orelse return null;
+        return ba.stats();
     }
 
     /// Whether the calling thread is the one that created this context.
@@ -10258,9 +10301,18 @@ test "Context public Options expose only stable thread controls" {
 test "Context heap_limit_bytes fails closed on allocation pressure" {
     const ctx = try Context.createWith(std.testing.allocator, .{ .heap_limit_bytes = 4 * 1024 * 1024 });
     defer ctx.destroy();
+    const created_stats = ctx.heapBudgetStats().?;
+    try std.testing.expectEqual(@as(usize, 4 * 1024 * 1024), created_stats.limit_bytes);
+    try std.testing.expect(created_stats.used_bytes > 0);
+    try std.testing.expect(created_stats.peak_bytes >= created_stats.used_bytes);
+    try std.testing.expectEqual(created_stats.limit_bytes - created_stats.used_bytes, created_stats.remaining_bytes);
 
     const ok = try ctx.evaluate("1 + 2");
     try std.testing.expectEqual(@as(f64, 3), ok.asNum());
+    const after_eval_stats = ctx.heapBudgetStats().?;
+    try std.testing.expect(after_eval_stats.used_bytes > 0);
+    try std.testing.expect(after_eval_stats.peak_bytes >= after_eval_stats.used_bytes);
+    try std.testing.expect(after_eval_stats.peak_bytes <= after_eval_stats.limit_bytes);
 
     try std.testing.expectError(error.OutOfMemory, ctx.evaluate(
         \\var keep = [];
@@ -10268,6 +10320,15 @@ test "Context heap_limit_bytes fails closed on allocation pressure" {
         \\  keep.push({ i: i, nested: { j: i + 1 } });
         \\keep.length;
     ));
+    const failed_stats = ctx.heapBudgetStats().?;
+    try std.testing.expect(failed_stats.peak_bytes <= failed_stats.limit_bytes);
+    try std.testing.expectEqual(failed_stats.limit_bytes - failed_stats.used_bytes, failed_stats.remaining_bytes);
+}
+
+test "Context heapBudgetStats is absent without heap_limit_bytes" {
+    const ctx = try Context.createWith(std.testing.allocator, .{});
+    defer ctx.destroy();
+    try std.testing.expect(ctx.heapBudgetStats() == null);
 }
 
 test "Context TestingOptions can hide SharedArrayBuffer while keeping Atomics" {
