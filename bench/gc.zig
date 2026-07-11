@@ -567,8 +567,39 @@ fn printTaskLifecycle(gpa: std.mem.Allocator, io: std.Io) !void {
     }
 }
 
-fn printNursery(gpa: std.mem.Allocator, io: std.Io) !void {
-    const source =
+const NurseryCase = struct {
+    name: []const u8,
+    source: []const u8,
+};
+
+const nursery_cases = [_]NurseryCase{
+    .{
+        .name = "ephemeral",
+        .source =
+        \\globalThis.nurseryProfileKeep = [];
+        \\(function () {
+        \\  for (let i = 0; i < 512; i++) {
+        \\    const value = { i: i, nested: { value: i + 1 } };
+        \\    if (value.i < 0) nurseryProfileKeep.push(value);
+        \\  }
+        \\})()
+        ,
+    },
+    .{
+        .name = "1/16 retained",
+        .source =
+        \\globalThis.nurseryProfileKeep = [];
+        \\(function () {
+        \\  for (let i = 0; i < 512; i++) {
+        \\    const value = { i: i, nested: { value: i + 1 } };
+        \\    if ((i & 15) === 0) nurseryProfileKeep.push(value);
+        \\  }
+        \\})()
+        ,
+    },
+    .{
+        .name = "1/4 retained",
+        .source =
         \\globalThis.nurseryProfileKeep = [];
         \\(function () {
         \\  for (let i = 0; i < 512; i++) {
@@ -576,11 +607,27 @@ fn printNursery(gpa: std.mem.Allocator, io: std.Io) !void {
         \\    if ((i & 3) === 0) nurseryProfileKeep.push(value);
         \\  }
         \\})()
-    ;
+        ,
+    },
+    .{
+        .name = "all retained",
+        .source =
+        \\globalThis.nurseryProfileKeep = [];
+        \\(function () {
+        \\  for (let i = 0; i < 512; i++) {
+        \\    const value = { i: i, nested: { value: i + 1 } };
+        \\    nurseryProfileKeep.push(value);
+        \\  }
+        \\})()
+        ,
+    },
+};
 
-    std.debug.print("\nQuiescent nursery cycle (512 object graphs; 1/4 retained)\n", .{});
-    std.debug.print("{s:<18} {s:>12} {s:>10} {s:>12} {s:>10} {s:>12} {s:>10} {s:>12} {s:>12} {s:>10} {s:>10}\n", .{
+fn printNursery(gpa: std.mem.Allocator, io: std.Io) !void {
+    std.debug.print("\nQuiescent nursery cycle shapes (512 object graphs)\n", .{});
+    std.debug.print("{s:<18} {s:<14} {s:>12} {s:>10} {s:>12} {s:>10} {s:>12} {s:>10} {s:>12} {s:>12} {s:>10} {s:>10}\n", .{
         "mode",
+        "shape",
         "pause ns",
         "young",
         "young bytes",
@@ -594,43 +641,46 @@ fn printNursery(gpa: std.mem.Allocator, io: std.Io) !void {
     });
     for (modes) |mode| {
         if (!modeUsesGc(mode)) continue;
-        const ctx = try makeContext(gpa, mode);
-        defer ctx.destroy();
-        ctx.collectGarbage();
-        const heap = ctx.gc.?;
-        // Isolate the nursery boundary in this row. Single-mutator mode can
-        // otherwise start a full incremental cycle mid-script when total bytes
-        // cross the old-space threshold before the quiescent minor checkpoint.
-        heap.threshold_bytes = std.math.maxInt(usize);
-        const minor_before = heap.minor_collections;
-        const full_before = heap.full_collections;
-        const promoted_before = heap.promoted_cells;
-        const promoted_bytes_before = heap.promoted_bytes;
-        _ = try ctx.evaluate(source);
-        const young_in = heap.young_cells;
-        const t0 = nowNs(io);
-        _ = try ctx.evaluate("0"); // collection runs at the quiescent entry boundary
-        const pause_ns: u64 = @intCast(nowNs(io) - t0);
-        const promoted = heap.promoted_cells - promoted_before;
-        const minor_delta = heap.minor_collections - minor_before;
-        const full_delta = heap.full_collections - full_before;
-        const reclaimed = if (minor_delta + full_delta > 0) young_in -| promoted else 0;
-        const young_bytes = if (minor_delta > 0) heap.last_minor_young_bytes else 0;
-        const reclaimed_bytes = if (minor_delta > 0) heap.last_minor_reclaimed_bytes else 0;
-        const promoted_bytes = if (minor_delta > 0) heap.last_minor_promoted_bytes else heap.promoted_bytes - promoted_bytes_before;
-        std.debug.print("{s:<18} {d:>12} {d:>10} {d:>12} {d:>10} {d:>12} {d:>10} {d:>12} {d:>12} {d:>10} {d:>10}\n", .{
-            mode.name,
-            pause_ns,
-            young_in,
-            young_bytes,
-            reclaimed,
-            reclaimed_bytes,
-            promoted,
-            promoted_bytes,
-            heap.nursery_threshold_bytes,
-            minor_delta,
-            full_delta,
-        });
+        for (nursery_cases) |case| {
+            const ctx = try makeContext(gpa, mode);
+            defer ctx.destroy();
+            ctx.collectGarbage();
+            const heap = ctx.gc.?;
+            // Isolate the nursery boundary in this row. Single-mutator mode can
+            // otherwise start a full incremental cycle mid-script when total bytes
+            // cross the old-space threshold before the quiescent minor checkpoint.
+            heap.threshold_bytes = std.math.maxInt(usize);
+            const minor_before = heap.minor_collections;
+            const full_before = heap.full_collections;
+            const promoted_before = heap.promoted_cells;
+            const promoted_bytes_before = heap.promoted_bytes;
+            _ = try ctx.evaluate(case.source);
+            const young_in = heap.young_cells;
+            const t0 = nowNs(io);
+            _ = try ctx.evaluate("0"); // collection runs at the quiescent entry boundary
+            const pause_ns: u64 = @intCast(nowNs(io) - t0);
+            const promoted = heap.promoted_cells - promoted_before;
+            const minor_delta = heap.minor_collections - minor_before;
+            const full_delta = heap.full_collections - full_before;
+            const reclaimed = if (minor_delta + full_delta > 0) young_in -| promoted else 0;
+            const young_bytes = if (minor_delta > 0) heap.last_minor_young_bytes else 0;
+            const reclaimed_bytes = if (minor_delta > 0) heap.last_minor_reclaimed_bytes else 0;
+            const promoted_bytes = if (minor_delta > 0) heap.last_minor_promoted_bytes else heap.promoted_bytes - promoted_bytes_before;
+            std.debug.print("{s:<18} {s:<14} {d:>12} {d:>10} {d:>12} {d:>10} {d:>12} {d:>10} {d:>12} {d:>12} {d:>10} {d:>10}\n", .{
+                mode.name,
+                case.name,
+                pause_ns,
+                young_in,
+                young_bytes,
+                reclaimed,
+                reclaimed_bytes,
+                promoted,
+                promoted_bytes,
+                heap.nursery_threshold_bytes,
+                minor_delta,
+                full_delta,
+            });
+        }
     }
 }
 
