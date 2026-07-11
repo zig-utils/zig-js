@@ -790,9 +790,10 @@ PR-249 files stay reference-only for concrete reasons:
 - JIT/CVE files that require JSC-specific code artifact hooks, ASAN controls,
   stop counters, disassembly controls, or retired-artifact machinery remain out
   until real engine behavior backs those hooks.
-- `semantics/oom-one-thread.js` remains out until the new
-  `Context.Options.heap_limit_bytes` allocator cap grows into a documented
-  per-thread OOM survivor contract that matches the reference witness.
+- `semantics/oom-one-thread.js` now runs under a zig-js
+  `Context.Options.heap_limit_bytes` cap in the reference probe, but remains
+  out because native allocation pressure still escapes as a `Thread` completion
+  OOM instead of being catchable by the allocating JS frame's local `try/catch`.
 - `cve/mc-df-arraycopy-relabel.js` remains out because it depends on JSC's
   butterfly verification shell option and a typed-array set length race shape
   whose current zig-js failure is still the documented `RangeError` blocker.

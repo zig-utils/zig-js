@@ -48,7 +48,7 @@ EXPLICIT_CASE_CATEGORIES = {
         "JSC heap snapshot/preventCollection hooks",
     ),
     "semantics/oom-one-thread.js": (
-        "heap cap / per-thread OOM",
+        "allocation-site catchable OOM",
     ),
 }
 
@@ -80,7 +80,7 @@ PROMOTION_PROBE_EXPECTATIONS = {
     "w16-c1-prevent-collection.js": ProbeExpectation("timeout"),
     "semantics/oom-one-thread.js": ProbeExpectation(
         "fail",
-        ("heap cap fired on at least one thread", "zero OOMs"),
+        ("OutOfMemoryError: Context heap limit exceeded",),
     ),
 }
 

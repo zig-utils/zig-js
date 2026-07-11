@@ -210,9 +210,11 @@ Issue #1 remains the umbrella status page.
   `Thread`s can still join. Existing `asyncJoin()` waiters reject with the same
   reserved object when their already-created promise reaction can be delivered.
   This is intentionally an embedder allocator boundary rather than a JavaScript
-  heap-shape oracle. The remaining #24 work is to stress the survivor contract
-  under more interleavings and promote or reclassify the matching PR-249 witness
-  once the audit agrees with this observable contract.
+  heap-shape oracle. The remaining #24/#27 work is allocation-site catchability:
+  a JS `try/catch` around the allocating expression should observe the OOM
+  before it escapes to the whole `Thread` completion path. The PR-249
+  `semantics/oom-one-thread.js` probe now exercises the real cap and fails on
+  that sharper blocker.
 - **Parallel scaling optimization.** Benchmarks show real speedup, but scaling
   is sub-linear. `zig build threads-profile` now provides a repeatable baseline
   against the `.gil = true` fallback for independent compute, shared object
@@ -662,8 +664,9 @@ Issue #1 remains the umbrella status page.
   behavior and the file is reliable under Zig `0.17-dev`, especially the
   WebAssembly-required files, JIT/shell-hook witnesses, JSC-specific mark-list
   or heap-snapshot/preventCollection probes, ArrayBuffer detach/resize survivor
-  assumptions, typed-array race-shape probes, and per-thread OOM survivor
-  semantics beyond the current `heap_limit_bytes` allocator cap. Run
+  assumptions, typed-array race-shape probes, and allocation-site catchable OOM
+  semantics beyond the current `heap_limit_bytes` `Thread` completion contract.
+  Run
   `python3 tools/threads-reference-audit.py --run-probes --expect-current-blockers --probe-timeout 60`
   to keep the nearest-probe negative baseline honest: it passes only while
   those files still fail or time out with their documented blocker evidence,

@@ -345,6 +345,17 @@ fn asyncDrainSleepMs(name: []const u8) i64 {
     return 10;
 }
 
+fn heapLimitBytesForCase(name: []const u8) ?usize {
+    // The PR-249 OOM witness's original JSC RAM-cap directive is inert in the
+    // vendored file. Map it to zig-js's real Context allocator cap so the
+    // reference probe exercises pressure instead of failing vacuously. Keep the
+    // cap below the test's ~256MiB live hoard but above runner/bootstrap
+    // overhead; the remaining blocker is allocation-site catchability, not
+    // whether the cap fires.
+    if (std.mem.eql(u8, name, "semantics/oom-one-thread.js")) return 192 * 1024 * 1024;
+    return null;
+}
+
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const io = init.io;
@@ -527,6 +538,7 @@ pub fn main(init: std.process.Init) !void {
                 .main_can_block = !std.mem.endsWith(u8, name, "blocking-gate.js"),
                 .max_js_threads = if (std.mem.endsWith(u8, name, "thread-id-bounds.js")) 4 else null,
                 .enable_shared_array_buffer = std.mem.indexOf(u8, directive, "--useSharedArrayBuffer=0") == null,
+                .heap_limit_bytes = heapLimitBytesForCase(name),
             };
             const expect_termination = std.mem.endsWith(u8, name, "-termination.js") or
                 std.mem.indexOf(u8, directive, "--watchdog-exception-ok") != null;
