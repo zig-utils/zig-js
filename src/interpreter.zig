@@ -14634,6 +14634,7 @@ fn promiseConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value
     const pobj = try promise.newPromise(self);
     if (self.new_target.isObject()) pobj.setProtoAtomic(try self.ctorRealmIntrinsicProto(self.new_target.asObj(), "Promise"));
     const pp = pobj.promise.?;
+    promise_profile.recordResolvingFunctionPair();
     const resolving = try self.arena.create(promise.Resolving);
     resolving.* = .{ .promise = @ptrCast(@alignCast(pp)) };
     const res_fn = try gc_mod.allocObj(self.arena);
@@ -15193,6 +15194,7 @@ fn promiseTryFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostErr
 
 fn newPromiseCapability(self: *Interpreter, c: Value) EvalError!Capability {
     if (!isConstructorValue(c)) return self.throwError("TypeError", "NewPromiseCapability called on a non-constructor");
+    promise_profile.recordCapabilityExecutor();
     const capture = try self.arena.create(CapCapture);
     capture.* = .{};
     const executor = try gc_mod.allocObj(self.arena);

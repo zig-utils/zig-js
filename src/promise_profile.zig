@@ -11,6 +11,8 @@ pub const PromiseStats = struct {
     thenable_jobs_enqueued: u64 = 0,
     reaction_jobs_run: u64 = 0,
     thenable_jobs_run: u64 = 0,
+    resolving_function_pairs: u64 = 0,
+    capability_executors: u64 = 0,
 
     pub fn jobsEnqueued(self: PromiseStats) u64 {
         return self.reaction_jobs_enqueued + self.thenable_jobs_enqueued;
@@ -32,6 +34,8 @@ const PromiseCounters = struct {
     thenable_jobs_enqueued: std.atomic.Value(u64) = .init(0),
     reaction_jobs_run: std.atomic.Value(u64) = .init(0),
     thenable_jobs_run: std.atomic.Value(u64) = .init(0),
+    resolving_function_pairs: std.atomic.Value(u64) = .init(0),
+    capability_executors: std.atomic.Value(u64) = .init(0),
 };
 
 var counters: PromiseCounters = .{};
@@ -49,6 +53,8 @@ pub fn resetPromiseStats() void {
     counters.thenable_jobs_enqueued.store(0, .release);
     counters.reaction_jobs_run.store(0, .release);
     counters.thenable_jobs_run.store(0, .release);
+    counters.resolving_function_pairs.store(0, .release);
+    counters.capability_executors.store(0, .release);
     enabled.store(true, .release);
 }
 
@@ -68,6 +74,8 @@ pub fn promiseStats() PromiseStats {
         .thenable_jobs_enqueued = counters.thenable_jobs_enqueued.load(.acquire),
         .reaction_jobs_run = counters.reaction_jobs_run.load(.acquire),
         .thenable_jobs_run = counters.thenable_jobs_run.load(.acquire),
+        .resolving_function_pairs = counters.resolving_function_pairs.load(.acquire),
+        .capability_executors = counters.capability_executors.load(.acquire),
     };
 }
 
@@ -110,6 +118,14 @@ pub inline fn recordMicrotaskRun(thenable: bool) void {
     if (thenable) bump("thenable_jobs_run") else bump("reaction_jobs_run");
 }
 
+pub inline fn recordResolvingFunctionPair() void {
+    bump("resolving_function_pairs");
+}
+
+pub inline fn recordCapabilityExecutor() void {
+    bump("capability_executors");
+}
+
 test "promise profile stats reset and snapshot" {
     resetPromiseStats();
     defer disablePromiseStats();
@@ -122,6 +138,8 @@ test "promise profile stats reset and snapshot" {
     recordPromiseLockYield();
     recordMicrotaskRun(false);
     recordMicrotaskRun(true);
+    recordResolvingFunctionPair();
+    recordCapabilityExecutor();
 
     const stats = promiseStats();
     try std.testing.expectEqual(@as(u64, 2), stats.microtask_enqueues);
@@ -136,4 +154,6 @@ test "promise profile stats reset and snapshot" {
     try std.testing.expectEqual(@as(u64, 1), stats.reaction_jobs_run);
     try std.testing.expectEqual(@as(u64, 1), stats.thenable_jobs_run);
     try std.testing.expectEqual(@as(u64, 2), stats.jobsRun());
+    try std.testing.expectEqual(@as(u64, 1), stats.resolving_function_pairs);
+    try std.testing.expectEqual(@as(u64, 1), stats.capability_executors);
 }

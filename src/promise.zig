@@ -499,6 +499,7 @@ pub fn reject(self: *Interpreter, p: *Promise, reason: Value) EvalError!void {
 /// Native resolve/reject closures over `p`'s state (a capability whose promise
 /// is the native `p`). Used wherever the result is an intrinsic promise.
 pub fn nativeResolveReject(self: *Interpreter, p: *Promise) EvalError!struct { resolve: Value, reject: Value } {
+    promise_profile.recordResolvingFunctionPair();
     const data = try self.arena.create(Resolving);
     data.* = .{ .promise = p };
     const res = try gc_mod.allocObj(self.arena);

@@ -662,11 +662,13 @@ under no-GIL versus `.gil = true`. Its timing columns come from an
 uninstrumented warmed pass; the counter columns come from a separate counted
 pass in the same warmed context, so profiler atomics do not masquerade as
 runtime contention. The focused columns split microtask-queue lock traffic
-(`qlock`/`qyld`), per-Promise state-lock traffic (`plock`/`pyld`), and
-thread-safe arena traffic (`aacq`/`acnt`/`aspn`, acquisitions / contended
-acquisitions / failed spin attempts). A third `gil+gc` timing column keeps the
-serialized path on GC-managed cells, which separates GC/cell-management overhead
-from queue-lock and parallel scheduling overhead.
+(`qlock`/`qyld`), per-Promise state-lock traffic (`plock`/`pyld`), thread-safe
+arena traffic (`aacq`/`acnt`/`aspn`, acquisitions / contended acquisitions /
+failed spin attempts), and transient Promise allocation sources (`rpair`
+resolving-function pairs, `cap` `NewPromiseCapability` executors). A third
+`gil+gc` timing column keeps the serialized path on GC-managed cells, which
+separates GC/cell-management overhead from queue-lock and parallel scheduling
+overhead.
 That profile led to one contention reduction: no-GIL interpreters now lock the
 current `MicrotaskQueue` rather than a realm-wide lock, so independent
 spawned-thread Promise drains no longer serialize on the host queue.
