@@ -1321,6 +1321,10 @@ pub const Context = struct {
     /// synchronization or the explicit `.gil = true` fallback. Debug builds
     /// enforce the applicable rule (see docs/threads/bindings.md).
     owner_thread: std.Thread.Id,
+    /// Reference count for contexts owned through the C API. Zig callers keep the
+    /// direct single-owner `destroy()` contract; `JSGlobalContextCreate*` sets
+    /// this to one and `JSGlobalContextRetain/Release` maintain it.
+    c_api_ref_count: std.atomic.Value(usize) = .init(0),
     env: interp.Environment,
     global_object: *value.Object,
     /// The empty root shape every object in this context transitions from.
@@ -1926,6 +1930,27 @@ pub const Context = struct {
         self.arena_state.deinit();
         self.gpa.destroy(self.arena_state);
         self.gpa.destroy(self);
+    }
+
+    pub fn initCApiRef(self: *Context) void {
+        self.c_api_ref_count.store(1, .release);
+    }
+
+    pub fn retainCApiRef(self: *Context) void {
+        _ = self.c_api_ref_count.fetchAdd(1, .monotonic);
+    }
+
+    pub fn releaseCApiRef(self: *Context) bool {
+        var current = self.c_api_ref_count.load(.acquire);
+        while (true) {
+            if (current == 0) return true;
+            const next = current - 1;
+            if (self.c_api_ref_count.cmpxchgWeak(current, next, .acq_rel, .acquire)) |observed| {
+                current = observed;
+                continue;
+            }
+            return next == 0;
+        }
     }
 
     /// Whether the calling thread is the one that created this context.

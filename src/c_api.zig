@@ -134,6 +134,7 @@ export fn JSGarbageCollect(ctx: JSContextRef) callconv(.c) void {
 export fn JSGlobalContextCreate(global_class: ?*anyopaque) callconv(.c) JSContextRef {
     _ = global_class;
     const ctx = Context.create(gpa) catch return null;
+    ctx.initCApiRef();
     return @ptrCast(ctx);
 }
 
@@ -144,6 +145,7 @@ export fn JSGlobalContextCreate(global_class: ?*anyopaque) callconv(.c) JSContex
 /// on failure. (`JSGlobalContextCreate` stays single-threaded for JSC parity.)
 export fn ZJSGlobalContextCreateThreaded(gil: bool) callconv(.c) JSContextRef {
     const ctx = Context.createWith(gpa, .{ .enable_threads = true, .gil = gil }) catch return null;
+    ctx.initCApiRef();
     return @ptrCast(ctx);
 }
 
@@ -151,11 +153,13 @@ export fn JSGlobalContextRelease(ctx: JSContextRef) callconv(.c) void {
     // A `.gil = true` threaded context is released from outside JS execution;
     // `Context.destroy()` performs the serialized teardown itself.
     const c = ctxRawFrom(ctx) orelse return;
-    c.destroy();
+    if (c.releaseCApiRef()) c.destroy();
 }
 
 export fn JSGlobalContextRetain(ctx: JSContextRef) callconv(.c) JSContextRef {
-    return ctx; // Single-owner for v1; refcounting lands with multi-realm support.
+    const c = ctxRawFrom(ctx) orelse return null;
+    c.retainCApiRef();
+    return ctx;
 }
 
 export fn JSContextGetGlobalObject(ctx: JSContextRef) callconv(.c) JSObjectRef {
@@ -668,6 +672,23 @@ test "C-API: create + release context, round-trip a number" {
     const num = JSValueMakeNumber(ctx, 42.5) orelse return error.JSValueMakeFailed;
     try std.testing.expect(JSValueIsNumber(ctx, num));
     try std.testing.expectEqual(@as(f64, 42.5), JSValueToNumber(ctx, num, null));
+}
+
+test "C-API: JSGlobalContextRetain keeps context alive until final release" {
+    const ctx = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
+    const retained = JSGlobalContextRetain(ctx) orelse return error.RetainFailed;
+    try std.testing.expectEqual(ctx, retained);
+
+    JSGlobalContextRelease(ctx);
+
+    const script = JSStringCreateWithUTF8CString("var retainedValue = 40; retainedValue + 2") orelse return error.StringInitFailed;
+    defer JSStringRelease(script);
+    var exception: JSValueRef = null;
+    const result = JSEvaluateScript(retained, script, null, null, 0, &exception) orelse return error.EvalFailed;
+    try std.testing.expect(exception == null);
+    try std.testing.expectEqual(@as(f64, 42), JSValueToNumber(retained, result, null));
+
+    JSGlobalContextRelease(retained);
 }
 
 test "C-API: round-trip a UTF-8 string" {
