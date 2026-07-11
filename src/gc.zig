@@ -381,6 +381,8 @@ pub fn tracePromise(p: *promise.Promise, v: anytype) void {
     p.lockState();
     defer p.unlockState();
     markValue(v, p.value);
+    if (p.on_fulfill_inline) |r| traceReaction(r, v);
+    if (p.on_reject_inline) |r| traceReaction(r, v);
     for (p.on_fulfill.items) |r| traceReaction(r, v);
     for (p.on_reject.items) |r| traceReaction(r, v);
 }
@@ -818,10 +820,13 @@ pub const Binding = struct {
             .promise => {
                 const p: *promise.Promise = @ptrCast(@alignCast(cell));
                 if (p.gc_owned) {
-                    const count = p.on_fulfill.items.len + p.on_reject.items.len;
+                    const count = p.on_fulfill.items.len + p.on_reject.items.len +
+                        @intFromBool(p.on_fulfill_inline != null) + @intFromBool(p.on_reject_inline != null);
                     if (self.context.gc_finalizer_stats_out) |stats| stats.promise_reactions += count;
                     p.on_fulfill.deinit(self.context.gpa);
                     p.on_reject.deinit(self.context.gpa);
+                    p.on_fulfill_inline = null;
+                    p.on_reject_inline = null;
                     p.on_fulfill = .empty;
                     p.on_reject = .empty;
                     if (count > 0) {

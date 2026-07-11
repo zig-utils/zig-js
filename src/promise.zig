@@ -50,6 +50,11 @@ pub const Promise = struct {
     /// Reaction list buffers are owned by the GC backing allocator when this
     /// promise cell is GC-owned; arena contexts keep the legacy arena path.
     gc_owned: bool = false,
+    /// The overwhelmingly common pending-promise shape has one fulfill and one
+    /// reject reaction. Keep that pair inline and allocate overflow lists only
+    /// when more reactions are registered.
+    on_fulfill_inline: ?Reaction = null,
+    on_reject_inline: ?Reaction = null,
     on_fulfill: std.ArrayListUnmanaged(Reaction) = .empty,
     on_reject: std.ArrayListUnmanaged(Reaction) = .empty,
 
@@ -205,7 +210,7 @@ test "microtask queue is FIFO with a head cursor" {
     try std.testing.expectEqual(@as(f64, 6), q.pop().?.argument.asNum());
 }
 
-test "Promise reaction lists reserve capacity chunks" {
+test "Promise reactions keep first entry inline then reserve overflow chunks" {
     const a = std.testing.allocator;
     var live: usize = 0;
     var machine = Interpreter{
@@ -223,26 +228,32 @@ test "Promise reaction lists reserve capacity chunks" {
         .resolve = Value.undef(),
         .reject = Value.undef(),
     };
-    try appendReactionUnlocked(&machine, &p, &p.on_fulfill, reaction);
-    try std.testing.expect(p.on_fulfill.capacity >= reaction_list_reserve_granularity);
+    try appendReactionUnlocked(&machine, &p, &p.on_fulfill_inline, &p.on_fulfill, reaction);
+    try std.testing.expect(p.on_fulfill_inline != null);
+    try std.testing.expectEqual(@as(usize, 0), p.on_fulfill.capacity);
     try std.testing.expectEqual(@as(usize, 1), live);
+
+    try appendReactionUnlocked(&machine, &p, &p.on_fulfill_inline, &p.on_fulfill, reaction);
+    try std.testing.expect(p.on_fulfill.capacity >= reaction_list_reserve_granularity);
+    try std.testing.expectEqual(@as(usize, 1), p.on_fulfill.items.len);
+    try std.testing.expectEqual(@as(usize, 2), live);
 
     const first_capacity = p.on_fulfill.capacity;
     while (p.on_fulfill.items.len < first_capacity) {
-        try appendReactionUnlocked(&machine, &p, &p.on_fulfill, reaction);
+        try appendReactionUnlocked(&machine, &p, &p.on_fulfill_inline, &p.on_fulfill, reaction);
     }
     try std.testing.expectEqual(first_capacity, p.on_fulfill.items.len);
     try std.testing.expectEqual(first_capacity, p.on_fulfill.capacity);
-    try std.testing.expectEqual(first_capacity, live);
-
-    try appendReactionUnlocked(&machine, &p, &p.on_fulfill, reaction);
-    try std.testing.expectEqual(first_capacity + 1, p.on_fulfill.items.len);
-    try std.testing.expect(p.on_fulfill.capacity > first_capacity);
     try std.testing.expectEqual(first_capacity + 1, live);
 
-    popReactionUnlocked(&machine, &p, &p.on_fulfill);
+    try appendReactionUnlocked(&machine, &p, &p.on_fulfill_inline, &p.on_fulfill, reaction);
+    try std.testing.expectEqual(first_capacity + 1, p.on_fulfill.items.len);
+    try std.testing.expect(p.on_fulfill.capacity > first_capacity);
+    try std.testing.expectEqual(first_capacity + 2, live);
+
+    popReactionUnlocked(&machine, &p, &p.on_fulfill_inline, &p.on_fulfill);
     try std.testing.expectEqual(first_capacity, p.on_fulfill.items.len);
-    try std.testing.expectEqual(first_capacity, live);
+    try std.testing.expectEqual(first_capacity + 1, live);
 }
 
 /// Shared aggregation state for the combinators (`Promise.all`/`allSettled`/
@@ -390,7 +401,13 @@ fn reserveReactionListUnlocked(self: *Interpreter, list: *std.ArrayListUnmanaged
     try list.ensureTotalCapacity(reactionAllocator(self), list.items.len + extra);
 }
 
-fn appendReactionUnlocked(self: *Interpreter, p: *Promise, list: *std.ArrayListUnmanaged(Reaction), r: Reaction) EvalError!void {
+fn appendReactionUnlocked(
+    self: *Interpreter,
+    p: *Promise,
+    inline_slot: *?Reaction,
+    list: *std.ArrayListUnmanaged(Reaction),
+    r: Reaction,
+) EvalError!void {
     // Incremental-GC barrier: the reaction's callbacks are stored into the live
     // promise cell (which may already be marked black). Shade them.
     if (r.handler) |h| gc_mod.barrierValueFrom(p, h);
@@ -400,13 +417,22 @@ fn appendReactionUnlocked(self: *Interpreter, p: *Promise, list: *std.ArrayListU
         gc_mod.barrierValueFrom(p, r.resolve);
         gc_mod.barrierValueFrom(p, r.reject);
     }
+    if (inline_slot.* == null) {
+        inline_slot.* = r;
+        noteReactionAdded(self, p);
+        return;
+    }
     try reserveReactionListUnlocked(self, list, 1);
     list.appendAssumeCapacity(r);
     noteReactionAdded(self, p);
 }
 
-fn popReactionUnlocked(self: *Interpreter, p: *Promise, list: *std.ArrayListUnmanaged(Reaction)) void {
-    _ = list.pop();
+fn popReactionUnlocked(self: *Interpreter, p: *Promise, inline_slot: *?Reaction, list: *std.ArrayListUnmanaged(Reaction)) void {
+    if (list.items.len > 0) {
+        _ = list.pop();
+    } else {
+        inline_slot.* = null;
+    }
     noteReactionsRemoved(self, p, 1);
 }
 
@@ -436,6 +462,8 @@ fn settle(self: *Interpreter, p: *Promise, state: State, v: Value) EvalError!voi
 
     var fulfill: std.ArrayListUnmanaged(Reaction) = .empty;
     var reject_list: std.ArrayListUnmanaged(Reaction) = .empty;
+    var fulfill_inline: ?Reaction = null;
+    var reject_inline: ?Reaction = null;
     var removed_count: usize = 0;
 
     p.lockState();
@@ -446,21 +474,30 @@ fn settle(self: *Interpreter, p: *Promise, state: State, v: Value) EvalError!voi
     p.state = state;
     gc_mod.barrierValueFrom(p, v); // settlement value stored into the live promise cell
     p.value = v;
+    fulfill_inline = p.on_fulfill_inline;
+    reject_inline = p.on_reject_inline;
     fulfill = p.on_fulfill;
     reject_list = p.on_reject;
-    removed_count = fulfill.items.len + reject_list.items.len;
+    removed_count = fulfill.items.len + reject_list.items.len +
+        @intFromBool(fulfill_inline != null) + @intFromBool(reject_inline != null);
     p.unlockState();
 
     errdefer {
         p.lockState();
+        p.on_fulfill_inline = null;
+        p.on_reject_inline = null;
         p.on_fulfill = .empty;
         p.on_reject = .empty;
         p.unlockState();
         disposeMovedReactions(self, p, &fulfill, &reject_list, removed_count);
     }
+    const selected_inline = if (state == .fulfilled) fulfill_inline else reject_inline;
     const selected = if (state == .fulfilled) fulfill.items else reject_list.items;
+    if (selected_inline) |r| try enqueue(self, .{ .reaction = r, .argument = v, .fulfilled = state == .fulfilled });
     for (selected) |r| try enqueue(self, .{ .reaction = r, .argument = v, .fulfilled = state == .fulfilled });
     p.lockState();
+    p.on_fulfill_inline = null;
+    p.on_reject_inline = null;
     p.on_fulfill = .empty;
     p.on_reject = .empty;
     p.unlockState();
@@ -561,9 +598,9 @@ fn performThenReactions(self: *Interpreter, p: *Promise, react_f: Reaction, reac
     const snap = .{ .state = p.state, .value = p.value };
     switch (snap.state) {
         .pending => {
-            try appendReactionUnlocked(self, p, &p.on_fulfill, react_f);
-            errdefer popReactionUnlocked(self, p, &p.on_fulfill);
-            try appendReactionUnlocked(self, p, &p.on_reject, react_r);
+            try appendReactionUnlocked(self, p, &p.on_fulfill_inline, &p.on_fulfill, react_f);
+            errdefer popReactionUnlocked(self, p, &p.on_fulfill_inline, &p.on_fulfill);
+            try appendReactionUnlocked(self, p, &p.on_reject_inline, &p.on_reject, react_r);
             p.unlockState();
             return;
         },
