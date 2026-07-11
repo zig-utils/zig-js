@@ -126,6 +126,10 @@ fn setException(ctx: *Context, exc: ExceptionRef, message: []const u8) void {
     if (exc != null) exc[0] = box(ctx, Value.str(message));
 }
 
+fn setExceptionValue(ctx: *Context, exc: ExceptionRef, exception_value: Value) void {
+    if (exc != null) exc[0] = box(ctx, exception_value);
+}
+
 fn isEvaluationParseError(err: anyerror) bool {
     return switch (err) {
         error.UnexpectedCharacter,
@@ -138,6 +142,38 @@ fn isEvaluationParseError(err: anyerror) bool {
         => true,
         else => false,
     };
+}
+
+fn setDiagnosticField(ctx: *Context, obj: *Object, name: []const u8, field_value: Value) !void {
+    try obj.setOwn(ctx.arena(), ctx.root_shape, name, field_value);
+    try obj.setAttr(ctx.arena(), name, .{ .writable = true, .enumerable = false, .configurable = true });
+}
+
+fn makeEvaluationSyntaxError(
+    ctx: *Context,
+    message: []const u8,
+    source_name: []const u8,
+    line: usize,
+    column: usize,
+    byte_offset: usize,
+) !Value {
+    const gc_saved = gc_mod.setActiveHeap(ctx.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(ctx.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+
+    var machine = ctx.interpreter();
+    try ctx.pushActiveInterpreter(&machine);
+    defer ctx.popActiveInterpreter(&machine);
+
+    const err = try machine.makeError("SyntaxError", message);
+    const obj = err.asObj();
+    const source_name_copy = try ctx.arena().dupe(u8, source_name);
+    try setDiagnosticField(ctx, obj, "sourceURL", Value.str(source_name_copy));
+    try setDiagnosticField(ctx, obj, "line", Value.num(@floatFromInt(line)));
+    try setDiagnosticField(ctx, obj, "column", Value.num(@floatFromInt(column)));
+    try setDiagnosticField(ctx, obj, "byteOffset", Value.num(@floatFromInt(byte_offset)));
+    return err;
 }
 
 fn setEvaluationException(ctx: *Context, exc: ExceptionRef, err: anyerror, source_url: JSStringRef, starting_line_number: c_int) void {
@@ -158,7 +194,11 @@ fn setEvaluationException(ctx: *Context, exc: ExceptionRef, err: anyerror, sourc
                 setException(ctx, exc, @errorName(err));
                 return;
             };
-            setException(ctx, exc, message);
+            const syntax_error = makeEvaluationSyntaxError(ctx, message, source_name, line, loc.column, loc.byte_offset) catch {
+                setException(ctx, exc, message);
+                return;
+            };
+            setExceptionValue(ctx, exc, syntax_error);
             return;
         }
     }
@@ -1590,6 +1630,36 @@ test "C-API: evaluation syntax exceptions include source URL and line" {
     var buf: [128]u8 = undefined;
     const written = JSStringGetUTF8CString(msg, &buf, buf.len);
     try std.testing.expect(std.mem.indexOf(u8, buf[0 .. written - 1], "app.js:41:12") != null);
+
+    var prop_exception: JSValueRef = null;
+    const source_key = JSStringCreateWithUTF8CString("sourceURL") orelse return error.StringInitFailed;
+    defer JSStringRelease(source_key);
+    const line_key = JSStringCreateWithUTF8CString("line") orelse return error.StringInitFailed;
+    defer JSStringRelease(line_key);
+    const column_key = JSStringCreateWithUTF8CString("column") orelse return error.StringInitFailed;
+    defer JSStringRelease(column_key);
+    const byte_offset_key = JSStringCreateWithUTF8CString("byteOffset") orelse return error.StringInitFailed;
+    defer JSStringRelease(byte_offset_key);
+
+    const source_value = JSObjectGetProperty(ctx, exception, source_key, &prop_exception) orelse return error.PropFailed;
+    try std.testing.expect(prop_exception == null);
+    const source_out = JSValueToStringCopy(ctx, source_value, null) orelse return error.StringInitFailed;
+    defer JSStringRelease(source_out);
+    var source_buf: [64]u8 = undefined;
+    const source_written = JSStringGetUTF8CString(source_out, &source_buf, source_buf.len);
+    try std.testing.expectEqualStrings("app.js", source_buf[0 .. source_written - 1]);
+
+    const line_value = JSObjectGetProperty(ctx, exception, line_key, &prop_exception) orelse return error.PropFailed;
+    try std.testing.expect(prop_exception == null);
+    try std.testing.expectEqual(@as(f64, 41), JSValueToNumber(ctx, line_value, null));
+
+    const column_value = JSObjectGetProperty(ctx, exception, column_key, &prop_exception) orelse return error.PropFailed;
+    try std.testing.expect(prop_exception == null);
+    try std.testing.expectEqual(@as(f64, 12), JSValueToNumber(ctx, column_value, null));
+
+    const byte_offset_value = JSObjectGetProperty(ctx, exception, byte_offset_key, &prop_exception) orelse return error.PropFailed;
+    try std.testing.expect(prop_exception == null);
+    try std.testing.expect(JSValueIsNumber(ctx, byte_offset_value));
 
     const lex_script = JSStringCreateWithUTF8CString("let ok = 1;\n'") orelse return error.StringInitFailed;
     defer JSStringRelease(lex_script);
