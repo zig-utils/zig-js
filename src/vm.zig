@@ -735,7 +735,7 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
             .array_append => {
                 const v = stack.pop().?;
                 const arr = stack.items[stack.items.len - 1];
-                try arr.asObj().elements.append(arr.asObj().elementsAllocator(vm.arena), v);
+                try arr.asObj().appendElement(vm.arena, v);
             },
             .array_append_hole => {
                 // An array-literal elision: a slot that reads as absent (skipped by

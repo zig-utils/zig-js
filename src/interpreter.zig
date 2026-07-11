@@ -3190,7 +3190,7 @@ pub const Interpreter = struct {
         if (!v.isUndefined() and !v.isNull()) {
             const o = try self.toObject(v);
             for (try self.forInKeyList(o)) |k| {
-                try arr.elements.append(arr.elementsAllocator(self.arena), Value.str(k));
+                try arr.appendElement(self.arena, Value.str(k));
             }
         }
         return Value.obj(arr);
@@ -5197,9 +5197,9 @@ pub const Interpreter = struct {
         if (self.template_cache.get(@ptrCast(site))) |cached| return cached.asObj();
         const t = site.tagged_template;
         const s = (try self.newArray()).asObj();
-        for (t.cooked) |c| try s.elements.append(s.elementsAllocator(self.arena), if (c) |cv| Value.str(cv) else Value.undef());
+        for (t.cooked) |c| try s.appendElement(self.arena, if (c) |cv| Value.str(cv) else Value.undef());
         const raw_arr = (try self.newArray()).asObj();
-        for (t.raw) |c| try raw_arr.elements.append(raw_arr.elementsAllocator(self.arena), Value.str(c));
+        for (t.raw) |c| try raw_arr.appendElement(self.arena, Value.str(c));
         try freezeTemplateArray(self, raw_arr);
         try s.setOwn(self.arena, self.root_shape, "raw", Value.obj(raw_arr));
         try s.setAttr(self.arena, "raw", .{ .writable = false, .enumerable = false, .configurable = false });
@@ -5253,7 +5253,7 @@ pub const Interpreter = struct {
             if (!obj.proxy_callable) return self.throwError("TypeError", "value is not a function");
             if (try self.proxyTrap(obj, "apply")) |trap| {
                 const arr = try self.newArray();
-                for (args) |a| try arr.asObj().elements.append(arr.asObj().elementsAllocator(self.arena), a);
+                for (args) |a| try arr.asObj().appendElement(self.arena, a);
                 return self.callValueWithThis(trap, &.{ Value.obj(target), this_val, arr }, Value.obj(obj.proxy_handler.?));
             }
             return self.callValueWithThis(Value.obj(target), args, this_val);
@@ -5426,7 +5426,7 @@ pub const Interpreter = struct {
         while (true) {
             const step = try self.iterStep(it);
             if (step.done) break;
-            try arr.asObj().elements.append(arr.asObj().elementsAllocator(self.arena), step.value);
+            try arr.asObj().appendElement(self.arena, step.value);
         }
         return arr;
     }
@@ -5869,7 +5869,7 @@ pub const Interpreter = struct {
         };
         try args_obj.asObj().setOwn(self.arena, self.root_shape, "length", Value.num(@floatFromInt(args.len)));
         try args_obj.asObj().setAttr(self.arena, "length", .{ .writable = true, .enumerable = false, .configurable = true });
-        for (args) |av| try args_obj.asObj().elements.append(args_obj.asObj().elementsAllocator(self.arena), av);
+        for (args) |av| try args_obj.asObj().appendElement(self.arena, av);
 
         // Strict mode's `arguments.callee` is a poison-pill accessor whose get
         // and set are both `%ThrowTypeError%`. Non-simple sloppy formals also
@@ -5922,7 +5922,7 @@ pub const Interpreter = struct {
             if (p.is_rest) {
                 const rest = try self.newArray();
                 var j = i;
-                while (j < args.len) : (j += 1) try rest.asObj().elements.append(rest.asObj().elementsAllocator(self.arena), args[j]);
+                while (j < args.len) : (j += 1) try rest.asObj().appendElement(self.arena, args[j]);
                 if (p.pattern) |pat| try self.bindPattern(pat, rest, true) else try self.env.put(p.name, rest);
                 break;
             }
@@ -6002,7 +6002,7 @@ pub const Interpreter = struct {
             if (!isConstructorValue(Value.obj(target))) return self.throwError("TypeError", "value is not a constructor");
             if (try self.proxyTrap(obj, "construct")) |trap| {
                 const arr = try self.newArray();
-                for (args) |a| try arr.asObj().elements.append(arr.asObj().elementsAllocator(self.arena), a);
+                for (args) |a| try arr.asObj().appendElement(self.arena, a);
                 const res = try self.callValueWithThis(trap, &.{ Value.obj(target), arr, new_target }, Value.obj(obj.proxy_handler.?));
                 // The [[Construct]] trap must return an Object (9.5.14 step 9).
                 if (!res.isObject() or res.asObj().is_symbol or res.asObj().is_bigint)
