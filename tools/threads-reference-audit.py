@@ -256,10 +256,15 @@ def audit_json_summary(
 
     helpers = sum(1 for case in remaining if case in HELPERS)
     executable_total = len(all_cases()) - helpers
+    executable_passed = len(load_allowlist())
     reference_executable = len(remaining) - helpers
     return {
+        "promoted_executable": executable_passed,
+        "executable_total": executable_total,
+        "reference_only_executable": reference_executable,
+        "helper_preload": helpers,
         "allowlist": {
-            "executable_passed": len(load_allowlist()),
+            "executable_passed": executable_passed,
             "executable_total": executable_total,
         },
         "reference_only": {

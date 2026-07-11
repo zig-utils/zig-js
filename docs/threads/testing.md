@@ -819,7 +819,11 @@ probes print focused runner evidence before the Zig build tail so the concrete
 JS error, corpus failure, or timeout is visible in one command.
 `--format json` emits the same allowlist counts, reference-only categories,
 closest probe commands, and expected current blocker evidence in a stable
-machine-readable form for CI reports, dashboards, or issue-tracker updates.
+machine-readable form for CI reports, dashboards, or issue-tracker updates. The
+top-level `promoted_executable`, `executable_total`,
+`reference_only_executable`, and `helper_preload` fields mirror the nested
+sections so simple status scripts can read coverage without understanding the
+full category schema.
 `--expect-current-blockers` flips that maintenance check into a negative gate:
 it succeeds only while the nearest probes still fail or time out with the
 documented blocker evidence. If it starts failing because a probe passes, or
