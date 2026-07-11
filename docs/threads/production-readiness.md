@@ -198,8 +198,9 @@ Known performance/maturity work:
   percentage. Quiescent nursery rows now compare multiple 512-object retention
   shapes (ephemeral, sparse, one-quarter retained, and all retained) and report
   boundary pause time, young input cells/bytes, reclaimed cells/bytes, promoted
-  cells/bytes, the next nursery threshold, and minor/full cycle deltas instead
-  of relying only on a one-shot object workload. The no-GIL bootstrap row should
+  cells/bytes, byte survival/reclamation percentages, the next nursery
+  threshold, and minor/full cycle deltas instead of relying only on a one-shot
+  object workload. The no-GIL bootstrap row should
   also be read against the explicit parallel-lock deferral above: returned
   contexts are fully parallel, but private global/API installation no longer
   measures the atomic allocator lock on every cell allocation. Once parallel,

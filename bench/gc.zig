@@ -625,7 +625,7 @@ const nursery_cases = [_]NurseryCase{
 
 fn printNursery(gpa: std.mem.Allocator, io: std.Io) !void {
     std.debug.print("\nQuiescent nursery cycle shapes (512 object graphs)\n", .{});
-    std.debug.print("{s:<18} {s:<14} {s:>12} {s:>10} {s:>12} {s:>10} {s:>12} {s:>10} {s:>12} {s:>12} {s:>10} {s:>10}\n", .{
+    std.debug.print("{s:<18} {s:<14} {s:>12} {s:>10} {s:>12} {s:>10} {s:>12} {s:>10} {s:>12} {s:>8} {s:>8} {s:>12} {s:>10} {s:>10}\n", .{
         "mode",
         "shape",
         "pause ns",
@@ -635,6 +635,8 @@ fn printNursery(gpa: std.mem.Allocator, io: std.Io) !void {
         "recl bytes",
         "promoted",
         "prom bytes",
+        "surv %",
+        "recl %",
         "next thresh",
         "minor",
         "full",
@@ -666,7 +668,9 @@ fn printNursery(gpa: std.mem.Allocator, io: std.Io) !void {
             const young_bytes = if (minor_delta > 0) heap.last_minor_young_bytes else 0;
             const reclaimed_bytes = if (minor_delta > 0) heap.last_minor_reclaimed_bytes else 0;
             const promoted_bytes = if (minor_delta > 0) heap.last_minor_promoted_bytes else heap.promoted_bytes - promoted_bytes_before;
-            std.debug.print("{s:<18} {s:<14} {d:>12} {d:>10} {d:>12} {d:>10} {d:>12} {d:>10} {d:>12} {d:>12} {d:>10} {d:>10}\n", .{
+            const survival_x100 = if (young_bytes == 0) @as(usize, 0) else (promoted_bytes * 10000) / young_bytes;
+            const reclaimed_x100 = if (young_bytes == 0) @as(usize, 0) else (reclaimed_bytes * 10000) / young_bytes;
+            std.debug.print("{s:<18} {s:<14} {d:>12} {d:>10} {d:>12} {d:>10} {d:>12} {d:>10} {d:>12} {d:>5}.{d:0>2}% {d:>5}.{d:0>2}% {d:>12} {d:>10} {d:>10}\n", .{
                 mode.name,
                 case.name,
                 pause_ns,
@@ -676,6 +680,10 @@ fn printNursery(gpa: std.mem.Allocator, io: std.Io) !void {
                 reclaimed_bytes,
                 promoted,
                 promoted_bytes,
+                survival_x100 / 100,
+                survival_x100 % 100,
+                reclaimed_x100 / 100,
+                reclaimed_x100 % 100,
                 heap.nursery_threshold_bytes,
                 minor_delta,
                 full_delta,

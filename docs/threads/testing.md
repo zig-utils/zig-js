@@ -651,9 +651,9 @@ prints a repeated allocate-plus-collect churn table that summarizes
 fresh cells, reused cells, freed cells, final chunk/live counts, and reuse
 percentage for GC modes. The quiescent nursery table reports the evaluation-entry
 pause used to collect a fixed young workload, young cells/bytes entering the
-cycle, reclaimed cells/bytes, promoted cells/bytes, the next nursery threshold,
-and minor/full cycle deltas. This keeps nursery tuning tied to reclamation
-quality, pause cost, and threshold drift.
+cycle, reclaimed cells/bytes, promoted cells/bytes, byte survival/reclamation
+percentages, the next nursery threshold, and minor/full cycle deltas. This keeps
+nursery tuning tied to reclamation quality, pause cost, and threshold drift.
 Direct `GcCellBacking` unit tests cover lazy fresh-slot bumping, free-list
 recycling, fresh-chunk cursor advancement, ownership span/hint classification,
 sorted address-index lookup with chunk/bump-offset/address metadata kept in
