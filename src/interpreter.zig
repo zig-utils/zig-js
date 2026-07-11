@@ -14806,6 +14806,7 @@ pub fn promiseResolveValue(self: *Interpreter, v: Value) EvalError!Value {
             if (ctor.isObject() and ctor.asObj() == pc.asObj()) return v;
         };
     }
+    if (!v.isObject()) return Value.obj(try promise.newSettledPromise(self, .fulfilled, v));
     const pobj = try promise.newPromise(self);
     try promise.resolve(self, @ptrCast(@alignCast(pobj.promise.?)), v);
     return Value.obj(pobj);
@@ -14823,9 +14824,7 @@ fn promiseResolveAfterTick(self: *Interpreter, v: Value) EvalError!Value {
 
 /// A fresh promise already rejected with `reason`.
 fn promiseRejectValue(self: *Interpreter, reason: Value) EvalError!Value {
-    const pobj = try promise.newPromise(self);
-    try promise.reject(self, @ptrCast(@alignCast(pobj.promise.?)), reason);
-    return Value.obj(pobj);
+    return Value.obj(try promise.newSettledPromise(self, .rejected, reason));
 }
 
 fn isIntrinsicPromiseConstructor(self: *Interpreter, c: Value) bool {

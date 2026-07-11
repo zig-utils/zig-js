@@ -686,6 +686,10 @@ reaction record instead of allocating native resolve/reject capability closures
 per dependent promise; custom species capabilities still use the function-based
 path. The focused Promise profile tracks this through lower `LockedArena`
 traffic and unchanged reaction/thenable job counts.
+Intrinsic `Promise.resolve` for primitive values and intrinsic `Promise.reject`
+now allocate already-settled native promises directly, preserving subclass and
+thenable paths while avoiding the general settlement machinery for cases with no
+user-observable resolver or thenable work.
 What now gates the GIL drop is the
 whole-corpus TSan campaign +
 serial-perf gate. The two *named* remaining rare no-GIL races are now both

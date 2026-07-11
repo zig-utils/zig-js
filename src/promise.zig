@@ -378,6 +378,19 @@ pub fn newPromise(self: *Interpreter) EvalError!*Object {
     return obj;
 }
 
+/// Allocate a fresh already-settled native Promise object. This is only valid
+/// for intrinsic Promise paths that do not need user-observable resolving
+/// functions or thenable assimilation.
+pub fn newSettledPromise(self: *Interpreter, state: State, v: Value) EvalError!*Object {
+    std.debug.assert(state != .pending);
+    const obj = try newPromise(self);
+    const p: *Promise = @ptrCast(@alignCast(obj.promise.?));
+    p.state = state;
+    gc_mod.barrierValueFrom(p, v);
+    p.value = v;
+    return obj;
+}
+
 inline fn reactionAllocator(self: *Interpreter) std.mem.Allocator {
     return self.gc_backing orelse self.arena;
 }
