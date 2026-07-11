@@ -619,7 +619,7 @@ fn timePromiseScenario(gpa: std.mem.Allocator, io: std.Io, workers: usize, mode:
 
 fn printPromiseProfile(gpa: std.mem.Allocator, io: std.Io, workers: []const usize, scenario: Scenario) !void {
     std.debug.print("\n{s} profile\n", .{scenario.name});
-    std.debug.print("gil+gc = serialized fallback with GC-managed cells; ns columns are uninstrumented warmed timings; enq/pop/run = counted microtask queue enqueues, pops, and job runs; qlock/qyld = counted queue-lock acquisitions / yield-backed contention; plock/pyld = counted Promise-state lock acquisitions / yield-backed contention; aacq/acnt/aspn = counted LockedArena acquisitions / contended acquisitions / failed spin attempts; rxn/thn split reaction from thenable jobs; rpair/cap = resolving-function pairs / NewPromiseCapability executors\n", .{});
+    std.debug.print("gil+gc = serialized fallback with GC-managed cells; ns columns are uninstrumented warmed timings; enq/pop/run = counted microtask queue enqueues, pops, and job runs; qlock/qyld = counted queue-lock acquisitions / yield-backed contention; plock/pyld = counted Promise-state lock acquisitions / yield-backed contention; aacq/acnt/aspn = counted LockedArena acquisitions / contended acquisitions / failed spin attempts; rxn/thn split reaction from thenable jobs; rpair/cap = resolving-function pairs / NewPromiseCapability executors; pnew/rgr/qgr/bgr = Promise creations / reaction-list growth / microtask-queue growth / drain-batch growth\n", .{});
     std.debug.print("{s:>8} {s:>14} {s:>14} {s:>14} {s:>12} {s:>12} {s:>12}", .{
         "threads",
         "no-gil ns",
@@ -629,7 +629,7 @@ fn printPromiseProfile(gpa: std.mem.Allocator, io: std.Io, workers: []const usiz
         "vs gil",
         "vs gil+gc",
     });
-    std.debug.print(" {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>10}", .{
+    std.debug.print(" {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>10}", .{
         "ng enq",
         "ng pop",
         "ng run",
@@ -644,9 +644,13 @@ fn printPromiseProfile(gpa: std.mem.Allocator, io: std.Io, workers: []const usiz
         "ng thn",
         "ng rpair",
         "ng cap",
+        "ng pnew",
+        "ng rgr",
+        "ng qgr",
+        "ng bgr",
         "ng events",
     });
-    std.debug.print(" {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>10}\n", .{
+    std.debug.print(" {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>10}\n", .{
         "gil enq",
         "gil pop",
         "gil run",
@@ -661,6 +665,10 @@ fn printPromiseProfile(gpa: std.mem.Allocator, io: std.Io, workers: []const usiz
         "gil thn",
         "gil rpair",
         "gil cap",
+        "gil pnew",
+        "gil rgr",
+        "gil qgr",
+        "gil bgr",
         "gil events",
     });
 
@@ -691,7 +699,7 @@ fn printPromiseProfile(gpa: std.mem.Allocator, io: std.Io, workers: []const usiz
             vs_gil,
             vs_gil_gc,
         });
-        std.debug.print(" {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>10}", .{
+        std.debug.print(" {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>10}", .{
             parallel.promise.microtask_enqueues,
             parallel.promise.microtask_pops,
             parallel.promise.jobsRun(),
@@ -706,9 +714,13 @@ fn printPromiseProfile(gpa: std.mem.Allocator, io: std.Io, workers: []const usiz
             parallel.promise.thenable_jobs_run,
             parallel.promise.resolving_function_pairs,
             parallel.promise.capability_executors,
+            parallel.promise.promises_created,
+            parallel.promise.reaction_list_grows,
+            parallel.promise.microtask_queue_grows,
+            parallel.promise.microtask_batch_grows,
             parallel.contention.events(),
         });
-        std.debug.print(" {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>10}\n", .{
+        std.debug.print(" {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>10}\n", .{
             gil.promise.microtask_enqueues,
             gil.promise.microtask_pops,
             gil.promise.jobsRun(),
@@ -723,6 +735,10 @@ fn printPromiseProfile(gpa: std.mem.Allocator, io: std.Io, workers: []const usiz
             gil.promise.thenable_jobs_run,
             gil.promise.resolving_function_pairs,
             gil.promise.capability_executors,
+            gil.promise.promises_created,
+            gil.promise.reaction_list_grows,
+            gil.promise.microtask_queue_grows,
+            gil.promise.microtask_batch_grows,
             gil.contention.events(),
         });
     }

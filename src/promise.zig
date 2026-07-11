@@ -128,6 +128,7 @@ pub const MicrotaskQueue = struct {
         const spare = self.items.capacity - self.items.items.len;
         if (spare >= additional) return;
         const extra = @max(additional, microtask_queue_reserve_granularity);
+        promise_profile.recordMicrotaskQueueGrow();
         try self.items.ensureTotalCapacity(a, self.items.items.len + extra);
     }
 
@@ -352,6 +353,7 @@ pub fn traceNativePrivateData(o: *Object, v: anytype) void {
 
 /// Allocate a fresh pending Promise object (proto = `Promise.prototype`).
 pub fn newPromise(self: *Interpreter) EvalError!*Object {
+    promise_profile.recordPromiseCreated();
     const p = try gc_mod.allocPromise(self.arena);
     p.* = .{ .gc_owned = self.gc_backing != null };
     const obj = try gc_mod.allocObj(self.arena);
@@ -384,6 +386,7 @@ fn reserveReactionListUnlocked(self: *Interpreter, list: *std.ArrayListUnmanaged
     const spare = list.capacity - list.items.len;
     if (spare >= additional) return;
     const extra = @max(additional, reaction_list_reserve_granularity);
+    promise_profile.recordReactionListGrow();
     try list.ensureTotalCapacity(reactionAllocator(self), list.items.len + extra);
 }
 

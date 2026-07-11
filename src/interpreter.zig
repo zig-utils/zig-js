@@ -6536,6 +6536,7 @@ pub const Interpreter = struct {
             q.clearRetainingCapacity();
             return false;
         }
+        if (batch.capacity - batch.items.len < pending.len) promise_profile.recordMicrotaskBatchGrow();
         try batch.appendSlice(self.arena, pending);
         promise_profile.recordMicrotaskPops(pending.len);
         q.clearRetainingCapacity();
