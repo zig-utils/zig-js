@@ -699,7 +699,16 @@ export fn JSObjectCallAsConstructor(ctx: JSContextRef, constructor: JSObjectRef,
         return null;
     };
     const args = collectArgs(c, argc, argv) orelse return null;
+    const gc_saved = gc_mod.setActiveHeap(c.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(c.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
     var interpreter = c.interpreter();
+    c.pushActiveInterpreter(&interpreter) catch {
+        setException(c, exception, "OutOfMemory");
+        return null;
+    };
+    defer c.popActiveInterpreter(&interpreter);
     const res = interpreter.construct(Value.obj(obj), args) catch |err| {
         if (err == error.Throw) {
             if (exception != null) exception[0] = box(c, interpreter.exception);
@@ -1416,6 +1425,41 @@ test "C-API: JSObjectIsConstructor recognizes native constructors" {
     const plain = JSObjectMake(ctx, null, null);
     try std.testing.expect(!JSObjectIsFunction(ctx, plain));
     try std.testing.expect(!JSObjectIsConstructor(ctx, plain));
+}
+
+test "C-API: JSObjectCallAsConstructor runs JavaScript constructors and reports throws" {
+    const ctx = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
+    defer JSGlobalContextRelease(ctx);
+
+    var exception: JSValueRef = null;
+    const script = JSStringCreateWithUTF8CString(
+        \\var cApiCtorCount = 0;
+        \\function CApiCtor(n) { cApiCtorCount += n; this.value = cApiCtorCount; }
+        \\CApiCtor;
+    ) orelse return error.StringInitFailed;
+    defer JSStringRelease(script);
+    const ctor = JSEvaluateScript(ctx, script, null, null, 0, &exception) orelse return error.EvalFailed;
+    try std.testing.expect(exception == null);
+
+    var args = [_]JSValueRef{JSValueMakeNumber(ctx, 5)};
+    const instance = JSObjectCallAsConstructor(ctx, ctor, args.len, &args, &exception) orelse return error.ConstructFailed;
+    try std.testing.expect(exception == null);
+
+    const value_key = JSStringCreateWithUTF8CString("value") orelse return error.StringInitFailed;
+    defer JSStringRelease(value_key);
+    const value_prop = JSObjectGetProperty(ctx, instance, value_key, &exception) orelse return error.PropFailed;
+    try std.testing.expect(exception == null);
+    try std.testing.expectEqual(@as(f64, 5), JSValueToNumber(ctx, value_prop, null));
+
+    const throwing_script = JSStringCreateWithUTF8CString("(function ThrowingCtor() { throw new TypeError('ctor boom'); })") orelse return error.StringInitFailed;
+    defer JSStringRelease(throwing_script);
+    const throwing_ctor = JSEvaluateScript(ctx, throwing_script, null, null, 0, &exception) orelse return error.EvalFailed;
+    try std.testing.expect(exception == null);
+
+    exception = null;
+    const failed = JSObjectCallAsConstructor(ctx, throwing_ctor, 0, null, &exception);
+    try std.testing.expect(failed == null);
+    try std.testing.expect(exception != null);
 }
 
 test "C-API: array construction and indexed get use JavaScript get semantics" {
