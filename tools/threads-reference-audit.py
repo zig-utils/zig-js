@@ -36,7 +36,7 @@ HELPERS = {
 EXPLICIT_CASE_CATEGORIES = {
     "cve/mc-df-arraycopy-relabel.js": (
         "JSC butterfly verification shell option",
-        "typed-array set length race semantics",
+        "typed-array set source-length snapshot covered by zig-js witnesses",
     ),
     "cve/mc-life-creator-thread-dies.js": (
         "detached ArrayBuffer fresh-view construction race",

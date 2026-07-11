@@ -793,6 +793,12 @@ PR-249 files stay reference-only for concrete reasons:
 - `cve/mc-df-arraycopy-relabel.js` remains out because it depends on JSC's
   butterfly verification shell option and a typed-array set length race shape
   whose current zig-js failure is still the documented `RangeError` blocker.
+  The portable zig-js contract is covered by
+  `TypedArray set snapshots array-like source length` and
+  `parallel_js: TypedArray set snapshots array-like source length under no-GIL grow`:
+  source length is snapshotted once, so growth before the snapshot can reject
+  when it no longer fits the destination, while growth after the snapshot does
+  not extend the copy.
 - `cve/mc-life-creator-thread-dies.js` still depends on a reference-shell
   detach race that constructs fresh `Int32Array` views after the source
   `ArrayBuffer` has been transferred. zig-js keeps the normal detached-buffer

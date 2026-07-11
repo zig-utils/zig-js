@@ -9539,6 +9539,92 @@ test "TypedArray set skips writes after source getters shrink target" {
     )).asBool());
 }
 
+test "TypedArray set snapshots array-like source length" {
+    try std.testing.expect((try evalIn(
+        \\var target = new Uint8Array([9, 9, 9]);
+        \\var touchedIndex = false;
+        \\var tooLong = new Proxy({ 0: 1, 1: 2, 2: 3, 3: 4 }, {
+        \\  get(obj, prop) {
+        \\    if (prop === "length") return 4;
+        \\    if (prop === "0") touchedIndex = true;
+        \\    return obj[prop];
+        \\  }
+        \\});
+        \\var threw = false;
+        \\try { target.set(tooLong); } catch (e) { threw = e instanceof RangeError; }
+        \\threw && !touchedIndex && String(target) === "9,9,9";
+    )).asBool());
+    try std.testing.expect((try evalIn(
+        \\var target = new Uint8Array([0, 0, 0]);
+        \\var source = { 0: 11, 1: 22, length: 2 };
+        \\var growing = new Proxy(source, {
+        \\  get(obj, prop) {
+        \\    if (prop === "1") {
+        \\      obj.length = 5;
+        \\      obj[2] = 33;
+        \\      obj[3] = 44;
+        \\      obj[4] = 55;
+        \\    }
+        \\    return obj[prop];
+        \\  }
+        \\});
+        \\target.set(growing);
+        \\source.length === 5 && String(target) === "11,22,0";
+    )).asBool());
+}
+
+test "parallel_js: TypedArray set snapshots array-like source length under no-GIL grow" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_threads = true,
+        .enable_gc = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+    });
+    defer ctx.destroy();
+
+    const result = try ctx.evaluate(
+        \\(() => {
+        \\  if ($vm.useThreadGIL() !== false)
+        \\    throw new Error("main still holds the thread GIL");
+        \\  const target = new Uint8Array(3);
+        \\  const source = [11, 22];
+        \\  const gate = { ready: 0, done: 0 };
+        \\  const grower = new Thread((source, gate) => {
+        \\    if ($vm.useThreadGIL() !== false)
+        \\      throw new Error("worker still holds the thread GIL");
+        \\    while (Atomics.load(gate, "ready") === 0)
+        \\      Atomics.wait(gate, "ready", 0, 100);
+        \\    source.push(33, 44, 55);
+        \\    Atomics.store(gate, "done", 1);
+        \\    Atomics.notify(gate, "done");
+        \\    return source.length;
+        \\  }, source, gate);
+        \\  const proxy = new Proxy(source, {
+        \\    get(obj, prop, receiver) {
+        \\      if (prop === "length")
+        \\        return 2;
+        \\      if (prop === "1") {
+        \\        Atomics.store(gate, "ready", 1);
+        \\        Atomics.notify(gate, "ready");
+        \\        while (Atomics.load(gate, "done") === 0)
+        \\          Atomics.wait(gate, "done", 0, 100);
+        \\      }
+        \\      return Reflect.get(obj, prop, receiver);
+        \\    },
+        \\  });
+        \\  target.set(proxy);
+        \\  const grownLength = grower.join();
+        \\  return grownLength === 5 &&
+        \\    source.length === 5 &&
+        \\    target[0] === 11 &&
+        \\    target[1] === 22 &&
+        \\    target[2] === 0;
+        \\})()
+    );
+    try std.testing.expect(result.asBool());
+}
+
 test "TypedArray set coerces offset before detached buffer checks" {
     try std.testing.expect((try evalIn(
         \\class ExpectedError extends Error {}
