@@ -107,6 +107,15 @@ fn unbox(ref: JSValueRef) Value {
     return b.value;
 }
 
+fn valueArgFrom(ctx: *Context, ref: JSValueRef, exception: ExceptionRef) ?Value {
+    if (ref) |boxed| {
+        const b: *Boxed = @ptrCast(@alignCast(boxed));
+        return b.value;
+    }
+    setException(ctx, exception, "TypeError: value is not a value");
+    return null;
+}
+
 fn strFrom(ref: JSStringRef) ?*JsString {
     return @ptrCast(@alignCast(ref orelse return null));
 }
@@ -305,6 +314,8 @@ export fn JSValueIsDate(ctx: JSContextRef, v: JSValueRef) callconv(.c) bool {
 
 export fn JSValueIsEqual(ctx: JSContextRef, a: JSValueRef, b: JSValueRef, exception: ExceptionRef) callconv(.c) bool {
     const c = ctxFrom(ctx) orelse return false;
+    const lhs = valueArgFrom(c, a, exception) orelse return false;
+    const rhs = valueArgFrom(c, b, exception) orelse return false;
     const gc_saved = gc_mod.setActiveHeap(c.gc);
     defer _ = gc_mod.setActiveHeap(gc_saved);
     const sa_saved = strcell.setActiveArena(c.arena());
@@ -315,7 +326,7 @@ export fn JSValueIsEqual(ctx: JSContextRef, a: JSValueRef, b: JSValueRef, except
         return false;
     };
     defer c.popActiveInterpreter(&machine);
-    const result = machine.applyBinary(.eq, unbox(a), unbox(b)) catch |err| {
+    const result = machine.applyBinary(.eq, lhs, rhs) catch |err| {
         if (err == error.Throw) {
             if (exception != null) exception[0] = box(c, machine.exception);
         } else {
@@ -369,6 +380,7 @@ export fn JSValueToBoolean(ctx: JSContextRef, v: JSValueRef) callconv(.c) bool {
 
 export fn JSValueToNumber(ctx: JSContextRef, v: JSValueRef, exception: ExceptionRef) callconv(.c) f64 {
     const c = ctxFrom(ctx) orelse return std.math.nan(f64);
+    const val = valueArgFrom(c, v, exception) orelse return std.math.nan(f64);
     const gc_saved = gc_mod.setActiveHeap(c.gc);
     defer _ = gc_mod.setActiveHeap(gc_saved);
     const sa_saved = strcell.setActiveArena(c.arena());
@@ -379,7 +391,7 @@ export fn JSValueToNumber(ctx: JSContextRef, v: JSValueRef, exception: Exception
         return std.math.nan(f64);
     };
     defer c.popActiveInterpreter(&machine);
-    return machine.toNumberV(unbox(v)) catch |err| {
+    return machine.toNumberV(val) catch |err| {
         if (err == error.Throw) {
             if (exception != null) exception[0] = box(c, machine.exception);
         } else {
@@ -391,6 +403,7 @@ export fn JSValueToNumber(ctx: JSContextRef, v: JSValueRef, exception: Exception
 
 export fn JSValueToStringCopy(ctx: JSContextRef, v: JSValueRef, exception: ExceptionRef) callconv(.c) JSStringRef {
     const c = ctxFrom(ctx) orelse return null;
+    const val = valueArgFrom(c, v, exception) orelse return null;
     const gc_saved = gc_mod.setActiveHeap(c.gc);
     defer _ = gc_mod.setActiveHeap(gc_saved);
     const sa_saved = strcell.setActiveArena(c.arena());
@@ -401,7 +414,7 @@ export fn JSValueToStringCopy(ctx: JSContextRef, v: JSValueRef, exception: Excep
         return null;
     };
     defer c.popActiveInterpreter(&machine);
-    const s = machine.toStringV(unbox(v)) catch |err| {
+    const s = machine.toStringV(val) catch |err| {
         if (err == error.Throw) {
             if (exception != null) exception[0] = box(c, machine.exception);
         } else {
@@ -415,7 +428,7 @@ export fn JSValueToStringCopy(ctx: JSContextRef, v: JSValueRef, exception: Excep
 
 export fn JSValueToObject(ctx: JSContextRef, v: JSValueRef, exception: ExceptionRef) callconv(.c) JSObjectRef {
     const c = ctxFrom(ctx) orelse return null;
-    const val = unbox(v);
+    const val = valueArgFrom(c, v, exception) orelse return null;
     if (val.isObject() and !val.asObj().is_symbol and !val.asObj().is_bigint) return v;
     const gc_saved = gc_mod.setActiveHeap(c.gc);
     defer _ = gc_mod.setActiveHeap(gc_saved);
@@ -1454,6 +1467,30 @@ test "C-API: JSValueToObject uses JavaScript ToObject semantics" {
     try std.testing.expect(exception != null);
     exception = null;
     try std.testing.expect(JSValueToObject(ctx, JSValueMakeUndefined(ctx), &exception) == null);
+    try std.testing.expect(exception != null);
+}
+
+test "C-API: value coercion APIs reject null value refs with exception" {
+    const ctx = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
+    defer JSGlobalContextRelease(ctx);
+
+    const undefined_value = JSValueMakeUndefined(ctx) orelse return error.ValueInitFailed;
+    var exception: JSValueRef = null;
+
+    try std.testing.expect(!JSValueIsEqual(ctx, null, undefined_value, &exception));
+    try std.testing.expect(exception != null);
+
+    exception = null;
+    const number = JSValueToNumber(ctx, null, &exception);
+    try std.testing.expect(std.math.isNan(number));
+    try std.testing.expect(exception != null);
+
+    exception = null;
+    try std.testing.expect(JSValueToStringCopy(ctx, null, &exception) == null);
+    try std.testing.expect(exception != null);
+
+    exception = null;
+    try std.testing.expect(JSValueToObject(ctx, null, &exception) == null);
     try std.testing.expect(exception != null);
 }
 

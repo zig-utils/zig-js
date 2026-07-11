@@ -115,6 +115,8 @@ Native callbacks use the standard `JSObjectCallAsFunctionCallback` calling conve
 
 `JSObjectGetProperty`, `JSObjectGetPropertyAtIndex`, and `JSObjectSetProperty` reject null object refs and null property-name strings by reporting an exception through the out pointer.
 
+`JSValueIsEqual`, `JSValueToNumber`, `JSValueToStringCopy`, and `JSValueToObject` reject null value refs by reporting an exception through the out pointer.
+
 `JSObjectCallAsFunction(..., thisObject, ...)` uses the provided object as the call receiver, or the context global object when `thisObject` is null.
 
 `JSObjectCallAsConstructor` performs the runtime `[[Construct]]` path and reports constructor throws through the exception out pointer.
