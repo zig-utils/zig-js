@@ -14357,11 +14357,11 @@ pub const Interpreter = struct {
     /// OrdinaryHasInstance(C=`rc`, O=`l`): is `rc.prototype` in `l`'s prototype
     /// chain? Assumes `rc` is already known callable (false otherwise).
     /// An object's effective [[Prototype]]: its `proto`, or — for a callable
-    /// (native/bound) function that was never given one — %Function.prototype%,
-    /// which every function inherits.
+    /// (native/C-ABI callback/bound) function that was never given one —
+    /// %Function.prototype%, which every function inherits.
     pub fn effectiveProto(self: *Interpreter, o: *value.Object) ?*value.Object {
         if (o.protoAtomic()) |p| return p;
-        if (!o.proto_explicit_null and (o.native != null or o.js_func != null or o.bound != null)) return self.functionProto();
+        if (!o.proto_explicit_null and (o.native != null or o.callback != null or o.js_func != null or o.bound != null)) return self.functionProto();
         return null;
     }
 

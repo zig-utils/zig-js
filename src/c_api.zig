@@ -457,11 +457,41 @@ export fn JSObjectCallAsFunction(ctx: JSContextRef, function: JSObjectRef, this_
     return box(c, res);
 }
 
+fn hostCallbackNative(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const machine: *interp.Interpreter = @ptrCast(@alignCast(ctx));
+    const obj = machine.active_native orelse {
+        machine.exception = Value.str("TypeError: host callback missing callee");
+        return error.Throw;
+    };
+    const cb = obj.callback orelse {
+        machine.exception = Value.str("TypeError: host callback missing callback");
+        return error.Throw;
+    };
+    const c: *Context = @ptrCast(@alignCast(obj.callback_context orelse {
+        machine.exception = Value.str("TypeError: host callback missing context");
+        return error.Throw;
+    }));
+    const js_args = try machine.arena.alloc(JSValueRef, args.len);
+    for (args, js_args) |arg, *slot| slot.* = box(c, arg);
+    var exception: JSValueRef = null;
+    const result = cb(@ptrCast(c), box(c, Value.obj(obj)), box(c, this), args.len, js_args.ptr, &exception);
+    if (result) |ref| return unbox(ref);
+    if (exception) |ref| {
+        machine.exception = unbox(ref);
+        return error.Throw;
+    }
+    return Value.undef();
+}
+
 export fn JSObjectMakeFunctionWithCallback(ctx: JSContextRef, name: JSStringRef, callback: JSObjectCallAsFunctionCallback) callconv(.c) JSObjectRef {
-    _ = name;
     const c = ctxFrom(ctx) orelse return null;
     const obj = gc_mod.allocObj(c.arena()) catch return null;
-    obj.* = .{ .callback = callback };
+    var machine = c.interpreter();
+    obj.* = .{ .callback = callback, .callback_context = c, .native = hostCallbackNative, .proto = machine.functionProto() };
+    const name_bytes = if (strFrom(name)) |s| s.bytes else "";
+    const name_copy = c.arena().dupe(u8, name_bytes) catch return null;
+    obj.setOwn(c.arena(), c.root_shape, "name", Value.str(name_copy)) catch return null;
+    obj.setAttr(c.arena(), "name", .{ .writable = false, .enumerable = false, .configurable = true }) catch return null;
     return box(c, Value.obj(obj));
 }
 
@@ -677,6 +707,47 @@ test "C-API: object property get/set" {
     JSObjectSetProperty(ctx, obj, key, JSValueMakeNumber(ctx, 42), 0, null);
     const got = JSObjectGetProperty(ctx, obj, key, null);
     try std.testing.expectEqual(@as(f64, 42), JSValueToNumber(ctx, got, null));
+}
+
+fn namedHostCallback(ctx: JSContextRef, function: JSObjectRef, this_object: JSObjectRef, argument_count: usize, arguments: [*c]const JSValueRef, exception: ExceptionRef) callconv(.c) JSValueRef {
+    _ = function;
+    _ = this_object;
+    _ = argument_count;
+    _ = arguments;
+    _ = exception;
+    return JSValueMakeNumber(ctx, 42);
+}
+
+test "C-API: callback functions honor name and Function prototype" {
+    const ctx = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
+    defer JSGlobalContextRelease(ctx);
+
+    const fn_name = JSStringCreateWithUTF8CString("hostAnswer") orelse return error.StringInitFailed;
+    defer JSStringRelease(fn_name);
+    const fn_obj = JSObjectMakeFunctionWithCallback(ctx, fn_name, namedHostCallback) orelse return error.FunctionCreateFailed;
+    try std.testing.expect(JSObjectIsFunction(ctx, fn_obj));
+
+    var exception: JSValueRef = null;
+    const global = JSContextGetGlobalObject(ctx);
+    JSObjectSetProperty(ctx, global, fn_name, fn_obj, 0, &exception);
+    try std.testing.expect(exception == null);
+
+    const script = JSStringCreateWithUTF8CString(
+        \\var d = Object.getOwnPropertyDescriptor(hostAnswer, "name");
+        \\typeof hostAnswer === "function" &&
+        \\hostAnswer() === 42 &&
+        \\hostAnswer.name === "hostAnswer" &&
+        \\d.writable === false &&
+        \\d.enumerable === false &&
+        \\d.configurable === true &&
+        \\Object.getPrototypeOf(hostAnswer) === Function.prototype &&
+        \\Function.prototype.toString.call(hostAnswer) === "function hostAnswer() { [native code] }"
+    ) orelse return error.StringInitFailed;
+    defer JSStringRelease(script);
+
+    const result = JSEvaluateScript(ctx, script, null, null, 0, &exception) orelse return error.EvalFailed;
+    try std.testing.expect(exception == null);
+    try std.testing.expect(JSValueToBoolean(ctx, result));
 }
 
 test "C-API: array construction and indexed get use element helpers" {

@@ -763,6 +763,9 @@ pub const Object = struct {
     /// observable length is `max(elements.items.len, array_len)`.
     array_len: usize = 0,
     callback: ?HostCallback = null,
+    /// Owning Context for C-API host callbacks. Kept separate from
+    /// `private_data`, which belongs to `JSObjectMake(..., data)` embedders.
+    callback_context: ?*anyopaque = null,
     native: ?NativeFn = null,
     /// For a `native` function, whether it implements [[Construct]] — i.e. is
     /// `new`-able. Most built-ins are *not* constructors (methods, `Math.*`,
