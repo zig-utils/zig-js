@@ -125,6 +125,8 @@ For no-exception value inspection APIs, a null value ref is an invalid handle, n
 
 `JSValueMakeString` rejects a null string ref by returning null instead of creating JavaScript `undefined`.
 
+Native callbacks installed with `JSObjectMakeFunctionWithCallback` must return a non-null value ref or set the exception out pointer; returning null without an exception throws a `TypeError` instead of implicitly producing JavaScript `undefined`.
+
 `JSObjectCallAsFunction(..., thisObject, ...)` uses the provided object as the call receiver, or the context global object when `thisObject` is null.
 
 `JSObjectCallAsConstructor` performs the runtime `[[Construct]]` path and reports constructor throws through the exception out pointer.

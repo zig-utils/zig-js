@@ -855,7 +855,7 @@ fn hostCallbackNative(ctx: *anyopaque, this: Value, args: []const Value) value.H
         machine.exception = unbox(ref);
         return error.Throw;
     }
-    return Value.undef();
+    return machine.throwError("TypeError", "host callback returned null without exception");
 }
 
 export fn JSObjectMakeFunctionWithCallback(ctx: JSContextRef, name: JSStringRef, callback: JSObjectCallAsFunctionCallback) callconv(.c) JSObjectRef {
@@ -1807,6 +1807,16 @@ fn namedHostCallback(ctx: JSContextRef, function: JSObjectRef, this_object: JSOb
     return JSValueMakeNumber(ctx, 42);
 }
 
+fn nullHostCallback(ctx: JSContextRef, function: JSObjectRef, this_object: JSObjectRef, argument_count: usize, arguments: [*c]const JSValueRef, exception: ExceptionRef) callconv(.c) JSValueRef {
+    _ = ctx;
+    _ = function;
+    _ = this_object;
+    _ = argument_count;
+    _ = arguments;
+    _ = exception;
+    return null;
+}
+
 test "C-API: callback functions honor name and Function prototype" {
     const ctx = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
     defer JSGlobalContextRelease(ctx);
@@ -1832,6 +1842,34 @@ test "C-API: callback functions honor name and Function prototype" {
         \\Object.getPrototypeOf(hostAnswer) === Function.prototype &&
         \\hostAnswer instanceof Function &&
         \\Function.prototype.toString.call(hostAnswer) === "function hostAnswer() { [native code] }"
+    ) orelse return error.StringInitFailed;
+    defer JSStringRelease(script);
+
+    const result = JSEvaluateScript(ctx, script, null, null, 0, &exception) orelse return error.EvalFailed;
+    try std.testing.expect(exception == null);
+    try std.testing.expect(JSValueToBoolean(ctx, result));
+}
+
+test "C-API: host callback null result throws without implicit undefined" {
+    const ctx = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
+    defer JSGlobalContextRelease(ctx);
+
+    const fn_name = JSStringCreateWithUTF8CString("badHostCallback") orelse return error.StringInitFailed;
+    defer JSStringRelease(fn_name);
+    const fn_obj = JSObjectMakeFunctionWithCallback(ctx, fn_name, nullHostCallback) orelse return error.FunctionCreateFailed;
+
+    var exception: JSValueRef = null;
+    const global = JSContextGetGlobalObject(ctx);
+    JSObjectSetProperty(ctx, global, fn_name, fn_obj, 0, &exception);
+    try std.testing.expect(exception == null);
+
+    const script = JSStringCreateWithUTF8CString(
+        \\try {
+        \\  badHostCallback();
+        \\  false;
+        \\} catch (e) {
+        \\  e instanceof TypeError && /host callback returned null/.test(String(e));
+        \\}
     ) orelse return error.StringInitFailed;
     defer JSStringRelease(script);
 
