@@ -12087,6 +12087,8 @@ fn runWorkerTerminateThreadLocalAsyncHoldCleanupInterleavingKind(
     id = 0;
     while (id < nrelease_threads) : (id += 1) expected_release_score += release_base + id;
     const expected_reject_count = ntls_threads + 2;
+    const expected_early_cleanup_limit = if (midgc) ntls_threads else 0;
+    const expected_early_cleanup_sum_limit = if (midgc) expected_cleanup_sum else 0;
 
     const ctx = (if (midgc)
         js.Context.createWithTestingOptions(gpa, .{
@@ -12117,6 +12119,7 @@ fn runWorkerTerminateThreadLocalAsyncHoldCleanupInterleavingKind(
         \\  globalThis.__workerTlsAsyncHoldReleaseJoinSum = 0;
         \\  globalThis.__workerTlsAsyncHoldReleaseJoinCount = 0;
         \\  globalThis.__workerTlsAsyncHoldEarlyCleanupCount = 0;
+        \\  globalThis.__workerTlsAsyncHoldEarlyCleanupSum = 0;
         \\  globalThis.__workerTlsAsyncHoldExpectedThrow = 0;
         \\  globalThis.__workerTlsAsyncHoldRegistry = new FinalizationRegistry((held) => {{
         \\    globalThis.__workerTlsAsyncHoldCleanupCount++;
@@ -12274,6 +12277,29 @@ fn runWorkerTerminateThreadLocalAsyncHoldCleanupInterleavingKind(
         "";
     defer if (midgc) gpa.free(midgc_pressure_src);
 
+    const early_cleanup_check_src = try std.fmt.allocPrint(
+        gpa,
+        \\  const earlyCleanupCount = globalThis.__workerTlsAsyncHoldCleanupCount;
+        \\  const earlyCleanupSum = globalThis.__workerTlsAsyncHoldCleanupSum;
+        \\  if (earlyCleanupCount > {d})
+        \\    throw new Error('worker terminate/ThreadLocal asyncHold cleanup count before top-level teardown ' + earlyCleanupCount + '/{d}');
+        \\  const earlyMin = earlyCleanupCount * {d} + ((earlyCleanupCount * (earlyCleanupCount - 1)) / 2);
+        \\  const earlyMax = earlyCleanupCount * ({d} + {d} - 1) - ((earlyCleanupCount * (earlyCleanupCount - 1)) / 2);
+        \\  if (earlyCleanupSum < earlyMin || earlyCleanupSum > earlyMax || earlyCleanupSum > {d})
+        \\    throw new Error('worker terminate/ThreadLocal asyncHold cleanup sum before top-level teardown ' + earlyCleanupSum + '/' + earlyMin + '..' + earlyMax);
+        \\
+    ,
+        .{
+            expected_early_cleanup_limit,
+            expected_early_cleanup_limit,
+            tls_base,
+            tls_base,
+            ntls_threads,
+            expected_early_cleanup_sum_limit,
+        },
+    );
+    defer gpa.free(early_cleanup_check_src);
+
     const fail_src = try std.fmt.allocPrint(
         gpa,
         \\(() => {{
@@ -12415,9 +12441,9 @@ fn runWorkerTerminateThreadLocalAsyncHoldCleanupInterleavingKind(
         \\    throw new Error('worker terminate/ThreadLocal asyncHold release lock left locked');
         \\{s}
         \\  registry.cleanupSome();
-        \\  if (globalThis.__workerTlsAsyncHoldCleanupCount !== 0)
-        \\    throw new Error('worker terminate/ThreadLocal asyncHold cleanup fired before top-level teardown');
+        \\{s}
         \\  globalThis.__workerTlsAsyncHoldEarlyCleanupCount = globalThis.__workerTlsAsyncHoldCleanupCount;
+        \\  globalThis.__workerTlsAsyncHoldEarlyCleanupSum = globalThis.__workerTlsAsyncHoldCleanupSum;
         \\  globalThis.__workerTlsAsyncHoldExpectedThrow = 1;
         \\  throw new Error('threadfuzz worker terminate ThreadLocal asyncHold cleanup {d}');
         \\}})();
@@ -12453,6 +12479,7 @@ fn runWorkerTerminateThreadLocalAsyncHoldCleanupInterleavingKind(
             nrelease_threads,
             expected_release_score,
             midgc_pressure_src,
+            early_cleanup_check_src,
             seed,
         },
     );
@@ -12531,8 +12558,13 @@ fn runWorkerTerminateThreadLocalAsyncHoldCleanupInterleavingKind(
         \\    $drainRunLoop();
         \\    drainMicrotasks();
         \\  }}
-        \\  if (globalThis.__workerTlsAsyncHoldEarlyCleanupCount !== 0)
-        \\    throw new Error('worker terminate/ThreadLocal asyncHold early cleanup count ' + globalThis.__workerTlsAsyncHoldEarlyCleanupCount);
+        \\  if (globalThis.__workerTlsAsyncHoldEarlyCleanupCount > {d})
+        \\    throw new Error('worker terminate/ThreadLocal asyncHold early cleanup count ' + globalThis.__workerTlsAsyncHoldEarlyCleanupCount + '/{d}');
+        \\  const earlyCount = globalThis.__workerTlsAsyncHoldEarlyCleanupCount;
+        \\  const earlyMin = earlyCount * {d} + ((earlyCount * (earlyCount - 1)) / 2);
+        \\  const earlyMax = earlyCount * ({d} + {d} - 1) - ((earlyCount * (earlyCount - 1)) / 2);
+        \\  if (globalThis.__workerTlsAsyncHoldEarlyCleanupSum < earlyMin || globalThis.__workerTlsAsyncHoldEarlyCleanupSum > earlyMax || globalThis.__workerTlsAsyncHoldEarlyCleanupSum > {d})
+        \\    throw new Error('worker terminate/ThreadLocal asyncHold early cleanup sum ' + globalThis.__workerTlsAsyncHoldEarlyCleanupSum + '/' + earlyMin + '..' + earlyMax);
         \\  if (globalThis.__workerTlsAsyncHoldReleaseJoinCount !== {d})
         \\    throw new Error('bad worker terminate/ThreadLocal asyncHold release join count ' + globalThis.__workerTlsAsyncHoldReleaseJoinCount);
         \\  if (globalThis.__workerTlsAsyncHoldReleaseScore !== {d})
@@ -12558,7 +12590,21 @@ fn runWorkerTerminateThreadLocalAsyncHoldCleanupInterleavingKind(
         \\}})();
         \\
     ,
-        .{ nrelease_threads, nrelease_threads, expected_release_score, expected_release_score, expected_reject_sum, expected_reject_count, expected_reject_count },
+        .{
+            nrelease_threads,
+            expected_early_cleanup_limit,
+            expected_early_cleanup_limit,
+            tls_base,
+            tls_base,
+            ntls_threads,
+            expected_early_cleanup_sum_limit,
+            nrelease_threads,
+            expected_release_score,
+            expected_release_score,
+            expected_reject_sum,
+            expected_reject_count,
+            expected_reject_count,
+        },
     );
     defer gpa.free(check_src);
     const checked = ctx.evaluate(check_src) catch |err| {
