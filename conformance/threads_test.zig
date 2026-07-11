@@ -349,10 +349,10 @@ fn asyncDrainSleepMs(name: []const u8) i64 {
 fn heapLimitBytesForCase(name: []const u8) ?usize {
     // The PR-249 OOM witness's original JSC RAM-cap directive is inert in the
     // vendored file. Map it to zig-js's real Context allocator cap so the
-    // reference probe exercises pressure instead of failing vacuously. Keep the
-    // cap below the test's ~256MiB live hoard but above runner/bootstrap
-    // overhead; the remaining blocker is allocation-site catchability, not
-    // whether the cap fires.
+    // promoted case exercises the same pressure contract in the normal corpus:
+    // at least one Thread hits the cap, catches the reserved OutOfMemoryError,
+    // and sibling Threads still complete. Keep the cap below the test's ~256MiB
+    // live hoard but above runner/bootstrap overhead.
     if (std.mem.eql(u8, name, "semantics/oom-one-thread.js")) return 192 * 1024 * 1024;
     return null;
 }
