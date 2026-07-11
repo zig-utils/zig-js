@@ -113,7 +113,7 @@ Native callbacks use the standard `JSObjectCallAsFunctionCallback` calling conve
 
 `JSEvaluateScript` rejects a null source string by returning null and reporting an exception through the out pointer when one is provided.
 
-`JSObjectGetProperty` and `JSObjectSetProperty` reject null property-name strings by reporting an exception through the out pointer.
+`JSObjectGetProperty`, `JSObjectGetPropertyAtIndex`, and `JSObjectSetProperty` reject null object refs and null property-name strings by reporting an exception through the out pointer.
 
 `JSObjectCallAsFunction(..., thisObject, ...)` uses the provided object as the call receiver, or the context global object when `thisObject` is null.
 
