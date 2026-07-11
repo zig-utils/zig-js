@@ -682,8 +682,8 @@ fn hostCallbackNative(ctx: *anyopaque, this: Value, args: []const Value) value.H
 
 export fn JSObjectMakeFunctionWithCallback(ctx: JSContextRef, name: JSStringRef, callback: JSObjectCallAsFunctionCallback) callconv(.c) JSObjectRef {
     const c = ctxFrom(ctx) orelse return null;
-    const obj = gc_mod.allocObj(c.arena()) catch return null;
     var machine = c.interpreter();
+    const obj = gc_mod.allocObject(c.gc, c.arena()) catch return null;
     obj.* = .{ .callback = callback, .callback_context = c, .native = hostCallbackNative, .proto = machine.functionProto() };
     const name_bytes = if (strFrom(name)) |s| s.bytes else "";
     const name_copy = c.arena().dupe(u8, name_bytes) catch return null;
@@ -1360,6 +1360,7 @@ test "C-API: callback functions honor name and Function prototype" {
         \\d.enumerable === false &&
         \\d.configurable === true &&
         \\Object.getPrototypeOf(hostAnswer) === Function.prototype &&
+        \\hostAnswer instanceof Function &&
         \\Function.prototype.toString.call(hostAnswer) === "function hostAnswer() { [native code] }"
     ) orelse return error.StringInitFailed;
     defer JSStringRelease(script);
