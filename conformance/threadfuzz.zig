@@ -12421,6 +12421,8 @@ fn runWorkerTerminateThreadLocalAsyncHoldCleanupInterleavingKind(
         \\    Atomics.wait(gate, 'condReady', 0, 1);
         \\
         \\  const releaseThreads = [];
+        \\  globalThis.__workerTlsAsyncHoldReleaseThreads = releaseThreads;
+        \\  globalThis.__workerTlsAsyncHoldReleaseJoinPromises = [];
         \\  releaseLock.hold(() => {{
         \\    for (let id = 0; id < {d}; id++) {{
         \\      releaseThreads.push(new Thread((lock, id, releaseBase, seedMarker) => {{
@@ -12444,6 +12446,7 @@ fn runWorkerTerminateThreadLocalAsyncHoldCleanupInterleavingKind(
         \\    const p = t.join();
         \\    if (!(p instanceof Promise))
         \\      throw new Error('worker terminate/ThreadLocal asyncHold release join did not return a promise');
+        \\    globalThis.__workerTlsAsyncHoldReleaseJoinPromises.push(p);
         \\    p.then((value) => {{
         \\      globalThis.__workerTlsAsyncHoldReleaseJoinSum += value;
         \\      globalThis.__workerTlsAsyncHoldReleaseJoinCount++;
@@ -12570,6 +12573,39 @@ fn runWorkerTerminateThreadLocalAsyncHoldCleanupInterleavingKind(
     };
     if (!settled.isNumber() or settled.asNum() != @as(f64, @floatFromInt(expected_reject_count))) {
         std.debug.print("seed {d}: worker terminate/ThreadLocal asyncHold settled got {d}, expected {d}\n", .{ seed, if (settled.isNumber()) settled.asNum() else -1, expected_reject_count });
+        return false;
+    }
+
+    const release_join_src =
+        \\(async () => {
+        \\  const values = await Promise.all(globalThis.__workerTlsAsyncHoldReleaseJoinPromises);
+        \\  let sum = 0;
+        \\  for (const value of values)
+        \\    sum += value;
+        \\  globalThis.__workerTlsAsyncHoldReleaseJoinSum = sum;
+        \\  globalThis.__workerTlsAsyncHoldReleaseJoinCount = values.length;
+        \\  return sum;
+        \\})()
+        \\
+    ;
+    const release_join_promise = ctx.evaluate(release_join_src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: worker terminate/ThreadLocal asyncHold release join setup threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    const release_joined = machine.awaitValue(release_join_promise) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: worker terminate/ThreadLocal asyncHold release join await failed {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!release_joined.isNumber() or release_joined.asNum() != @as(f64, @floatFromInt(expected_release_score))) {
+        std.debug.print("seed {d}: worker terminate/ThreadLocal asyncHold release join got {d}, expected {d}\n", .{ seed, if (release_joined.isNumber()) release_joined.asNum() else -1, expected_release_score });
         return false;
     }
 
