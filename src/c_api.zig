@@ -543,10 +543,31 @@ export fn JSObjectSetProperty(ctx: JSContextRef, object: JSObjectRef, name: JSSt
 }
 
 export fn JSObjectGetPropertyAtIndex(ctx: JSContextRef, object: JSObjectRef, index: c_uint, exception: ExceptionRef) callconv(.c) JSValueRef {
-    _ = exception;
     const c = ctxFrom(ctx) orelse return null;
     const obj = objectFrom(object) orelse return box(c, Value.undef());
-    return box(c, obj.elementAt(index) orelse Value.undef());
+    const gc_saved = gc_mod.setActiveHeap(c.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(c.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    const key = std.fmt.allocPrint(c.arena(), "{d}", .{index}) catch {
+        setException(c, exception, "OutOfMemory");
+        return null;
+    };
+    var machine = c.interpreter();
+    c.pushActiveInterpreter(&machine) catch {
+        setException(c, exception, "OutOfMemory");
+        return null;
+    };
+    defer c.popActiveInterpreter(&machine);
+    const result = machine.getProperty(Value.obj(obj), key) catch |err| {
+        if (err == error.Throw) {
+            if (exception != null) exception[0] = box(c, machine.exception);
+        } else {
+            setException(c, exception, @errorName(err));
+        }
+        return null;
+    };
+    return box(c, result);
 }
 
 fn collectArgs(c: *Context, argc: usize, argv: [*c]const JSValueRef) ?[]Value {
@@ -1252,10 +1273,11 @@ test "C-API: JSObjectIsConstructor recognizes native constructors" {
     try std.testing.expect(!JSObjectIsConstructor(ctx, plain));
 }
 
-test "C-API: array construction and indexed get use element helpers" {
+test "C-API: array construction and indexed get use JavaScript get semantics" {
     const ctx = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
     defer JSGlobalContextRelease(ctx);
 
+    var exception: JSValueRef = null;
     var values = [_]JSValueRef{
         JSValueMakeNumber(ctx, 10),
         JSValueMakeNumber(ctx, 20),
@@ -1268,6 +1290,36 @@ test "C-API: array construction and indexed get use element helpers" {
     try std.testing.expectEqual(@as(f64, 10), JSValueToNumber(ctx, first, null));
     try std.testing.expectEqual(@as(f64, 20), JSValueToNumber(ctx, second, null));
     try std.testing.expect(JSValueIsUndefined(ctx, missing));
+
+    const script = JSStringCreateWithUTF8CString(
+        \\var cApiIndexGetCount = 0;
+        \\var cApiIndexProto = {};
+        \\Object.defineProperty(cApiIndexProto, "2", {
+        \\  get() { cApiIndexGetCount += 1; return 30; }
+        \\});
+        \\Object.defineProperty(cApiIndexProto, "3", {
+        \\  get() { throw new RangeError("indexed boom"); }
+        \\});
+        \\Object.create(cApiIndexProto);
+    ) orelse return error.StringInitFailed;
+    defer JSStringRelease(script);
+    const obj = JSEvaluateScript(ctx, script, null, null, 0, &exception) orelse return error.EvalFailed;
+    try std.testing.expect(exception == null);
+
+    const inherited_index = JSObjectGetPropertyAtIndex(ctx, obj, 2, &exception) orelse return error.PropFailed;
+    try std.testing.expect(exception == null);
+    try std.testing.expectEqual(@as(f64, 30), JSValueToNumber(ctx, inherited_index, null));
+
+    const count_script = JSStringCreateWithUTF8CString("cApiIndexGetCount") orelse return error.StringInitFailed;
+    defer JSStringRelease(count_script);
+    const count = JSEvaluateScript(ctx, count_script, null, null, 0, &exception) orelse return error.EvalFailed;
+    try std.testing.expect(exception == null);
+    try std.testing.expectEqual(@as(f64, 1), JSValueToNumber(ctx, count, null));
+
+    exception = null;
+    const failed = JSObjectGetPropertyAtIndex(ctx, obj, 3, &exception);
+    try std.testing.expect(failed == null);
+    try std.testing.expect(exception != null);
 }
 
 test "C-API: JSObjectMakeDeferredPromise resolves and rejects through returned functions" {
