@@ -433,8 +433,15 @@ export fn JSValueUnprotect(ctx: JSContextRef, v: JSValueRef) callconv(.c) void {
 export fn JSObjectMake(ctx: JSContextRef, class: ?*anyopaque, data: ?*anyopaque) callconv(.c) JSObjectRef {
     _ = class;
     const c = ctxFrom(ctx) orelse return null;
-    const obj = gc_mod.allocObj(c.arena()) catch return null;
-    obj.* = .{ .private_data = data, .private_data_tag = .host };
+    const gc_saved = gc_mod.setActiveHeap(c.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(c.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = c.interpreter();
+    const value_obj = machine.newObject() catch return null;
+    const obj = value_obj.asObj();
+    obj.private_data = data;
+    obj.private_data_tag = .host;
     return box(c, Value.obj(obj));
 }
 
@@ -1116,6 +1123,30 @@ test "C-API: JSObject private data is host-owned and guarded" {
     try std.testing.expect(JSObjectGetPrivate(date_ctor) == null);
     try std.testing.expect(!JSObjectSetPrivate(date_ctor, engine_probe_ptr));
     try std.testing.expect(JSObjectGetPrivate(date_ctor) == null);
+}
+
+test "C-API: JSObjectMake creates ordinary realm objects" {
+    const ctx = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
+    defer JSGlobalContextRelease(ctx);
+
+    var exception: JSValueRef = null;
+    const obj = JSObjectMake(ctx, null, null);
+    const global = JSContextGetGlobalObject(ctx);
+    const name = JSStringCreateWithUTF8CString("cApiObject") orelse return error.StringInitFailed;
+    defer JSStringRelease(name);
+    JSObjectSetProperty(ctx, global, name, obj, 0, &exception);
+    try std.testing.expect(exception == null);
+
+    const script = JSStringCreateWithUTF8CString(
+        \\Object.getPrototypeOf(cApiObject) === Object.prototype &&
+        \\cApiObject.toString() === "[object Object]" &&
+        \\typeof cApiObject.hasOwnProperty === "function"
+    ) orelse return error.StringInitFailed;
+    defer JSStringRelease(script);
+
+    const result = JSEvaluateScript(ctx, script, null, null, 0, &exception) orelse return error.EvalFailed;
+    try std.testing.expect(exception == null);
+    try std.testing.expect(JSValueToBoolean(ctx, result));
 }
 
 test "C-API: JSValueToObject uses JavaScript ToObject semantics" {
