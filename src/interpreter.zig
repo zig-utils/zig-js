@@ -13270,7 +13270,7 @@ pub const Interpreter = struct {
                     try buf.appendSlice(a, s[last..mstart]);
                     if (is_func) {
                         var call_args: std.ArrayListUnmanaged(Value) = .empty;
-                        try call_args.append(a, Value.str(try a.dupe(u8, m.slice)));
+                        try call_args.append(a, try Value.strOwned(self.arena, try a.dupe(u8, m.slice)));
                         for (0..m.captures.len) |i| try call_args.append(a, try self.captureVal(m, i));
                         try call_args.append(a, Value.num(@floatFromInt(mstart)));
                         try call_args.append(a, Value.str(s));
@@ -13285,7 +13285,7 @@ pub const Interpreter = struct {
                     if (!g) break;
                 }
                 try buf.appendSlice(a, s[last..]);
-                return Value.str(try buf.toOwnedSlice(a));
+                return try Value.strOwned(self.arena, try buf.toOwnedSlice(a));
             }
 
             // String pattern: replace the first occurrence (or all for replaceAll).
@@ -13315,7 +13315,7 @@ pub const Interpreter = struct {
                 if (!all) break;
             }
             if (from <= s.len) try buf.appendSlice(a, s[from..]);
-            return Value.str(try buf.toOwnedSlice(a));
+            return try Value.strOwned(self.arena, try buf.toOwnedSlice(a));
         }
         if (eq(name, "codePointAt")) {
             // ToIntegerOrInfinity(pos): a position outside [0, len) yields undefined
@@ -14004,7 +14004,7 @@ pub const Interpreter = struct {
             if (builtin_wrapper_value_of) return p;
             if (builtin_to_string) {
                 if (builtin_to_string_method) |m| return try self.callValueWithThis(m, &.{}, v);
-                return Value.str(try p.toString(self.arena));
+                return try Value.strAlloc(self.arena, try p.toString(self.arena));
             }
             return self.throwError("TypeError", "Cannot convert object to primitive value");
         }
@@ -15848,7 +15848,7 @@ fn symbolToStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const sym = try thisSymbol(self, this, "Symbol.prototype.toString");
     const ds = sym.sym_desc orelse "";
-    return Value.str(try std.mem.concat(self.arena, u8, &.{ "Symbol(", ds, ")" }));
+    return try Value.strOwned(self.arena, try std.mem.concat(self.arena, u8, &.{ "Symbol(", ds, ")" }));
 }
 
 /// `Symbol.prototype.valueOf` → the Symbol itself. Requires a Symbol `this`.
@@ -16754,7 +16754,7 @@ fn bigIntToLocaleStringFn(ctx: *anyopaque, this: Value, args: []const Value) val
     const locs = try canonicalizeLocaleList(self, if (args.len > 0) args[0] else Value.undef());
     const loc = localeListFirstOr(locs, "en");
     const ro = try nfProcessOptions(self, if (args.len > 1) args[1] else Value.undef());
-    return Value.str(try bigIntFormatWithOptions(self, big, loc, ro));
+    return try Value.strAlloc(self.arena, try bigIntFormatWithOptions(self, big, loc, ro));
 }
 
 /// `BigInt.prototype.toString(radix)` — the BigInt rendered in `radix` (2..36).
@@ -16772,7 +16772,7 @@ fn bigIntToStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
     }
     if (big.bigint_text != null and radix == 10) return Value.str(big.bigint_text.?);
     if (big.bigint_text != null) return self.throwError("RangeError", "BigInt value is too large for non-decimal radix conversion");
-    return Value.str(try formatBigIntRadix(self.arena, big.bigint, radix));
+    return try Value.strAlloc(self.arena, try formatBigIntRadix(self.arena, big.bigint, radix));
 }
 
 fn bigIntValueOfFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -22481,7 +22481,7 @@ fn nfProcessOptions(self: *Interpreter, raw_in: Value) EvalError!*value.Object {
     if (std.mem.eql(u8, style, "currency") and cur_code == null) return self.throwError("TypeError", "currency code is required with style \"currency\"");
     if (unit) |u| if (!isWellFormedUnitIdentifier(u)) return self.throwError("RangeError", "invalid unit identifier");
     if (std.mem.eql(u8, style, "currency")) {
-        try self.setProp(ro, "currency", Value.str(try std.ascii.allocUpperString(self.arena, cur_code.?)));
+        try self.setProp(ro, "currency", try Value.strOwned(self.arena, try std.ascii.allocUpperString(self.arena, cur_code.?)));
         if (cdisp == null) try self.setProp(ro, "currencyDisplay", Value.str("symbol"));
         if (csign == null) try self.setProp(ro, "currencySign", Value.str("standard"));
     } else if (std.mem.eql(u8, style, "unit")) {
@@ -23546,7 +23546,7 @@ fn intlDateTimeFormatRangeFn(ctx: *anyopaque, this: Value, args: []const Value) 
     try dtfRangeCheckKinds(self, start, end);
     const xp = try dtfBuildParts(self, this, &.{start}); // dtfBuildParts TimeClips (RangeError on bad value)
     const yp = try dtfBuildParts(self, this, &.{end});
-    return Value.str(try dtfFormatRangePartsText(self, xp.items, yp.items));
+    return try Value.strAlloc(self.arena, try dtfFormatRangePartsText(self, xp.items, yp.items));
 }
 
 fn intlDateTimeFormatRangeToPartsFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -24697,9 +24697,9 @@ fn intlNumberFormatRangeFn(ctx: *anyopaque, this: Value, args: []const Value) va
     const yp = try nfBuildParts(self, this, &.{yv});
     const xs = try nfFormatOne(self, this, xv);
     const ys = try nfFormatOne(self, this, yv);
-    if (std.mem.eql(u8, xs, ys)) return Value.str(try std.fmt.allocPrint(self.arena, "~{s}", .{xs}));
+    if (std.mem.eql(u8, xs, ys)) return try Value.strOwned(self.arena, try std.fmt.allocPrint(self.arena, "~{s}", .{xs}));
     const locale = if (this.asObj().getOwn("\x00locale")) |lv| (if (lv.isString()) lv.asStr() else "en") else "en";
-    return Value.str(try nfFormatRangePartsText(self, locale, xp.items, yp.items));
+    return try Value.strAlloc(self.arena, try nfFormatRangePartsText(self, locale, xp.items, yp.items));
 }
 
 fn intlNumberFormatRangeToPartsFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -26069,7 +26069,7 @@ fn intlRelativeTimeFormatToPartsFn(ctx: *anyopaque, this: Value, args: []const V
             const o = (try s.newObject()).asObj();
             try s.setProp(o, "type", Value.str(typ));
             try s.setProp(o, "value", Value.str(v));
-            if (unit) |u| try s.setProp(o, "unit", Value.str(try std.fmt.allocPrint(s.arena, "{s}", .{u})));
+            if (unit) |u| try s.setProp(o, "unit", try Value.strOwned(s.arena, try std.fmt.allocPrint(s.arena, "{s}", .{u})));
             try a.appendElement(s.arena, Value.obj(o));
         }
     }.p;
@@ -28157,7 +28157,7 @@ fn stringIteratorFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (this.isUndefined() or this.isNull())
         return self.throwError("TypeError", "String.prototype[Symbol.iterator] called on null or undefined");
-    return self.makeCursorIterator(Value.str(try self.toStringV(this)));
+    return self.makeCursorIterator(try Value.strAlloc(self.arena, try self.toStringV(this)));
 }
 
 /// %RegExpStringIteratorPrototype%.next — lazily RegExpExec the matcher against
@@ -28964,7 +28964,7 @@ fn regexSourceGetter(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
         if (isHomeRegExpProto(self, o)) return Value.str("(?:)");
         return throwRegExpAccessorTypeError(self, "RegExp.prototype.source called on a non-RegExp");
     }
-    return Value.str(try escapeRegexSource(self.arena, o.regex_source));
+    return try Value.strAlloc(self.arena, try escapeRegexSource(self.arena, o.regex_source));
 }
 
 fn regexFlagsGetter(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -30682,7 +30682,7 @@ fn temporalMonthCodeGetter(ctx: *anyopaque, this: Value, args: []const Value) va
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!this.isObject() or this.asObj().temporal == null) return self.throwError("TypeError", "non-Temporal");
     const t = this.asObj().temporal.?;
-    return Value.str(try calMonthCode(self, t.calendar, t.year, t.month));
+    return try Value.strAlloc(self.arena, try calMonthCode(self, t.calendar, t.year, t.month));
 }
 fn temporalCalendarIdGetter(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
@@ -33734,7 +33734,7 @@ fn temporalMonthDayGetter(comptime f: MonthDayField) value.NativeFn {
             const t = this.asObj().temporal.?;
             const cd = calendarDateFromIso(t.calendar, t.year, t.month, t.day);
             return switch (f) {
-                .month_code => Value.str(try calMonthCode(self, t.calendar, cd.y, cd.m)),
+                .month_code => try Value.strAlloc(self.arena, try calMonthCode(self, t.calendar, cd.y, cd.m)),
                 .day => Value.num(@floatFromInt(cd.d)),
             };
         }
@@ -33746,7 +33746,7 @@ fn temporalMonthDayToStringFn(ctx: *anyopaque, this: Value, args: []const Value)
     if (!tIsTemporal(this, .plain_month_day)) return self.throwError("TypeError", "non-PlainMonthDay");
     const cal = try readCalendarName(self, if (args.len > 0) args[0] else Value.undef());
     const t = this.asObj().temporal.?;
-    return Value.str(try temporalMonthDayString(self, t, cal));
+    return try Value.strAlloc(self.arena, try temporalMonthDayString(self, t, cal));
 }
 
 fn temporalMonthDayToJSONFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -33754,7 +33754,7 @@ fn temporalMonthDayToJSONFn(ctx: *anyopaque, this: Value, args: []const Value) v
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_month_day)) return self.throwError("TypeError", "non-PlainMonthDay");
     const t = this.asObj().temporal.?;
-    return Value.str(try temporalMonthDayString(self, t, .auto));
+    return try Value.strAlloc(self.arena, try temporalMonthDayString(self, t, .auto));
 }
 
 fn temporalMonthDayString(self: *Interpreter, t: *const value.TemporalData, cal: CalName) EvalError![]const u8 {
@@ -33942,7 +33942,7 @@ fn constrainedChineseLikeLeapMonthDay(self: *Interpreter, cal: []const u8, mc: M
 fn monthDayFromIsoStringDate(self: *Interpreter, cal: []const u8, y: i64, m: u8, d: u8) EvalError!IsoMD {
     if (std.mem.eql(u8, cal, "iso8601")) return .{ .y = 1972, .m = m, .d = d, .cal = cal };
     const cd = calendarDateFromIso(cal, y, m, d);
-    const mc = try readMonthCodeInfo(self, Value.str(try calMonthCode(self, cal, cd.y, cd.m)));
+    const mc = try readMonthCodeInfo(self, try Value.strAlloc(self.arena, try calMonthCode(self, cal, cd.y, cd.m)));
     var out = (try monthDayReferenceIso(self, cal, mc, cd.m, cd.d)).iso;
     out.cal = cal;
     return out;
@@ -37381,7 +37381,7 @@ fn temporalZdtMonthCodeGetter(ctx: *anyopaque, this: Value, args: []const Value)
     if (!tIsZdt(this)) return self.throwError("TypeError", "non-ZonedDateTime");
     const t = this.asObj().temporal.?;
     const l = zdtLocal(this.asObj().temporal.?);
-    return Value.str(try calMonthCode(self, t.calendar, l.year, l.month));
+    return try Value.strAlloc(self.arena, try calMonthCode(self, t.calendar, l.year, l.month));
 }
 
 fn temporalZdtEpochGetter(comptime ms: bool) value.NativeFn {
@@ -37408,7 +37408,7 @@ fn temporalZdtOffsetGetter(ctx: *anyopaque, this: Value, args: []const Value) va
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsZdt(this)) return self.throwError("TypeError", "non-ZonedDateTime");
-    return Value.str(try offsetNsToString(self, zdtOffsetAt(this.asObj().temporal.?)));
+    return try Value.strAlloc(self.arena, try offsetNsToString(self, zdtOffsetAt(this.asObj().temporal.?)));
 }
 
 const ZdtToStringOptions = struct {
