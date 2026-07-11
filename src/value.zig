@@ -580,9 +580,11 @@ pub const IterHelper = struct {
         while (!self.lock.tryLock()) : (spins += 1) {
             if ((spins & 0xff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
         }
+        gc_runtime.enterTraceSensitiveLock();
     }
 
     pub fn unlockState(self: *IterHelper) void {
+        gc_runtime.leaveTraceSensitiveLock();
         self.lock.unlock();
     }
 };
@@ -1034,9 +1036,11 @@ pub const Object = struct {
                 std.atomic.spinLoopHint();
             }
         }
+        gc_runtime.enterTraceSensitiveLock();
     }
 
     pub fn unlockProperties(self: *const Object) void {
+        gc_runtime.leaveTraceSensitiveLock();
         @constCast(self).property_lock.unlock();
     }
 
@@ -1072,10 +1076,12 @@ pub const Object = struct {
                 std.atomic.spinLoopHint();
             }
         }
+        gc_runtime.enterTraceSensitiveLock();
     }
 
     pub fn unlockElements(self: *const Object) void {
         if (!element_locks_enabled.load(.acquire)) return;
+        gc_runtime.leaveTraceSensitiveLock();
         @constCast(self).elements_lock.unlock();
     }
 

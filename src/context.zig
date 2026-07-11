@@ -16,6 +16,7 @@ const shared_buffer = @import("shared_buffer.zig");
 const gil_mod = @import("gil.zig");
 const jsthread = @import("jsthread.zig");
 const stack_scan = @import("stack_scan.zig");
+const gc_runtime = @import("gc_runtime.zig");
 const agent = @import("agent.zig");
 const promise = @import("promise.zig");
 const parser_mod = @import("parser.zig");
@@ -2198,7 +2199,7 @@ pub const Context = struct {
 
     fn recoverAllocationFailure(ctx: *anyopaque) bool {
         const self: *Context = @ptrCast(@alignCast(ctx));
-        return self.collectForAllocationFailure();
+        return self.collectForAllocationFailure(gc_mod.currentInterpreter());
     }
 
     fn hasRunningJsThreads(self: *const Context) bool {
@@ -2322,17 +2323,18 @@ pub const Context = struct {
     }
 
     /// Emergency retry path for GC cell allocation under an external allocator
-    /// cap. Runs only where the current thread can safely scan its native stack
-    /// and any peer JS stacks are frozen by the serialized GIL parking protocol.
-    /// In the no-GIL default (`parallel_js`) a live peer may be parked in native
-    /// wait code whose stack/park record is still being published, so fail
-    /// closed instead of racing that publication. Abort-safe no-GIL recovery is
-    /// tracked separately in #30.
-    pub fn collectForAllocationFailure(self: *Context) bool {
+    /// cap. Serialized/GIL contexts run a conservative current-thread stack scan
+    /// only when peers are frozen by the parking protocol. In no-GIL
+    /// `parallel_js`, recovery is allowed only when allocation happened under an
+    /// active interpreter that can safely elect the abort/no-sweep parallel
+    /// collector; otherwise it fails closed to ordinary OOM.
+    pub fn collectForAllocationFailure(self: *Context, machine: ?*interp.Interpreter) bool {
         const h = self.gc orelse return false;
         if (!stack_scan.supported) return false;
         if (self.gc_par_collector.load(.acquire) != null) return false;
-        if (self.parallel_js and self.hasRunningJsThreads()) return false;
+        if (self.parallel_js and self.hasRunningJsThreads()) {
+            return self.collectForParallelAllocationFailure(h, machine);
+        }
         if (self.gil) |g| {
             if (!g.allOthersParked()) return false;
         } else if (self.hasRunningJsThreads()) {
@@ -2342,6 +2344,21 @@ pub const Context = struct {
         self.gc_scan_native_stack = true;
         defer self.gc_scan_native_stack = false;
         h.collect();
+        if (self.gc_cell_backing) |backing| _ = backing.trimEmptyTailChunks();
+        self.gc_requested.store(false, .monotonic);
+        return true;
+    }
+
+    fn collectForParallelAllocationFailure(self: *Context, h: *GcHeap, maybe_machine: ?*interp.Interpreter) bool {
+        const machine = maybe_machine orelse return false;
+        if (!h.parallel) return false;
+        if (gc_runtime.inTraceSensitiveLock()) return false;
+        if (self.shouldDeferParallelGcRetry()) return false;
+        if (self.gc_par_collector.cmpxchgStrong(null, machine, .acq_rel, .acquire) != null) return false;
+        _ = self.gc_par_attempts.fetchAdd(1, .monotonic);
+        defer self.gc_par_collector.store(null, .release);
+        const swept = self.driveParallelCollection(h, machine);
+        if (!swept) return false;
         if (self.gc_cell_backing) |backing| _ = backing.trimEmptyTailChunks();
         self.gc_requested.store(false, .monotonic);
         return true;
@@ -2411,7 +2428,7 @@ pub const Context = struct {
         // Parallel mid-script collection (opt-in: `parallel_midscript_gc`). Runs
         // even though `gil != null` because `parallel_js` drops the *execution*
         // GIL. Abort-safe; see `serviceParallelGc`.
-        if (self.gc_par_enabled and h.parallel) {
+        if (h.parallel and (self.gc_par_enabled or self.gc_par_collector.load(.acquire) != null)) {
             self.serviceParallelGc(h, machine);
             return;
         }
@@ -2500,7 +2517,7 @@ pub const Context = struct {
         }
         _ = self.gc_par_attempts.fetchAdd(1, .monotonic);
         defer self.gc_par_collector.store(null, .release);
-        self.driveParallelCollection(h, machine);
+        _ = self.driveParallelCollection(h, machine);
         // NOTE: `gc_par_request` is monotonic and is NOT reset here. Each cycle's
         // first generation (a fresh `fetchAdd`) is strictly greater than any
         // interpreter's `gc_published_gen`, so every peer republishes for the new
@@ -2596,7 +2613,7 @@ pub const Context = struct {
         return true;
     }
 
-    fn driveParallelCollection(self: *Context, h: *GcHeap, machine: *interp.Interpreter) void {
+    fn driveParallelCollection(self: *Context, h: *GcHeap, machine: *interp.Interpreter) bool {
         const started_ns = std.Io.Timestamp.now(agent.engineIo(), .awake).nanoseconds;
         defer self.recordParallelGcPause(started_ns);
         // BEGIN: whiten + arm the barrier under alloc_lock, then trace the
@@ -2646,7 +2663,7 @@ pub const Context = struct {
                     _ = self.gc_par_aborts.fetchAdd(1, .monotonic);
                     _ = self.gc_par_publication_timeout_aborts.fetchAdd(1, .monotonic);
                     self.deferParallelGcRetry();
-                    return;
+                    return false;
                 }
                 // Yield so peers get scheduled to reach their safepoints and
                 // publish, rather than starving them by busy-spinning.
@@ -2682,7 +2699,7 @@ pub const Context = struct {
                 if (swept) {
                     _ = self.gc_par_collections.fetchAdd(1, .monotonic);
                     self.gc_par_retry_after_ns.store(0, .release);
-                    return;
+                    return true;
                 }
                 _ = self.gc_par_finish_retries.fetchAdd(1, .monotonic);
                 attempt_finish_retries += 1;
@@ -2708,6 +2725,7 @@ pub const Context = struct {
         _ = self.gc_par_aborts.fetchAdd(1, .monotonic);
         _ = self.gc_par_round_limit_aborts.fetchAdd(1, .monotonic);
         self.deferParallelGcRetry();
+        return false;
     }
 
     pub fn queueFinalizationRegistryCleanup(self: *Context, registry: *value.Object) void {
@@ -2830,6 +2848,8 @@ pub const Context = struct {
         machine.this_value = this_value;
         try self.pushActiveInterpreter(&machine);
         defer self.popActiveInterpreter(&machine);
+        const ai_saved = gc_mod.setActiveInterpreter(&machine);
+        defer _ = gc_mod.setActiveInterpreter(ai_saved);
         // Top-level strictness from the program's directive prologue (the parser
         // leaves `strict` set if it saw a leading `"use strict"`).
         machine.strict = parser.strict;
@@ -3065,6 +3085,8 @@ pub const Context = struct {
         var machine = self.interpreter();
         try self.pushActiveInterpreter(&machine);
         defer self.popActiveInterpreter(&machine);
+        const ai_saved = gc_mod.setActiveInterpreter(&machine);
+        defer _ = gc_mod.setActiveInterpreter(ai_saved);
         machine.strict = true;
         // Expose the graph to runtime dynamic `import()`.
         self.mod_host = host;
@@ -12269,6 +12291,67 @@ test "parallel_js (M3): mid-script parallel collector reclaims garbage while thr
     // safepoint and drives collection, so the direct parked-peer path must be
     // represented rather than hidden inside a generic attempt count.
     try std.testing.expect(ctx.gc_par_parked_peer_observations.load(.monotonic) > 0);
+}
+
+test "parallel_js heap_limit_bytes recovers GC cells while sibling Thread is alive" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_threads = true,
+        .enable_gc = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+        .heap_limit_bytes = 8 * 1024 * 1024,
+    });
+    defer ctx.destroy();
+
+    var sibling: jsthread.ThreadRecord = .{ .id = 999, .gil = ctx.gil.?, .ctx = ctx };
+    {
+        ctx.gil.?.lockApi();
+        defer ctx.gil.?.unlockApi();
+        try ctx.reserveJsThreadsLocked(1);
+        ctx.js_threads.appendAssumeCapacity(&sibling);
+    }
+    defer {
+        ctx.gil.?.lockApi();
+        var i: usize = ctx.js_threads.items.len;
+        while (i > 0) {
+            i -= 1;
+            if (ctx.js_threads.items[i] == &sibling) {
+                _ = ctx.js_threads.swapRemove(i);
+                break;
+            }
+        }
+        ctx.gil.?.unlockApi();
+    }
+
+    const before_attempts = ctx.gc_par_attempts.load(.monotonic);
+    const before_collections = ctx.gc_par_collections.load(.monotonic);
+
+    const CellPressure = struct {
+        fn allocGarbageCells(context: *Context, count: usize) !void {
+            var i: usize = 0;
+            while (i < count) : (i += 1) {
+                _ = try gc_mod.allocObj(context.arena());
+            }
+        }
+    };
+
+    const gc_saved = gc_mod.setActiveHeap(ctx.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const ss_saved = stack_scan.enter(@frameAddress());
+    defer stack_scan.leave(ss_saved);
+    var machine = ctx.interpreter();
+    try ctx.pushActiveInterpreter(&machine);
+    defer ctx.popActiveInterpreter(&machine);
+    const ai_saved = gc_mod.setActiveInterpreter(&machine);
+    defer _ = gc_mod.setActiveInterpreter(ai_saved);
+
+    try CellPressure.allocGarbageCells(ctx, 20_000);
+    try CellPressure.allocGarbageCells(ctx, 20_000);
+    try std.testing.expect(ctx.gc_par_attempts.load(.monotonic) > before_attempts);
+    try std.testing.expect(ctx.gc_par_collections.load(.monotonic) > before_collections);
+    const stats = ctx.heapBudgetStats().?;
+    try std.testing.expect(stats.peak_bytes <= stats.limit_bytes);
 }
 
 test "parallel_js (M3): sync wait peers publish roots for mid-script parallel GC" {

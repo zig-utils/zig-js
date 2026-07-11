@@ -10,6 +10,7 @@ pub const State = struct {
 };
 
 threadlocal var active_object_backing: ?ObjectBackingState = null;
+threadlocal var trace_sensitive_lock_depth: usize = 0;
 
 pub fn setActive(state: State) State {
     const prev = State{ .object_backing = active_object_backing };
@@ -19,6 +20,24 @@ pub fn setActive(state: State) State {
 
 pub fn activeObjectBacking() ?ObjectBackingState {
     return active_object_backing;
+}
+
+/// Track locks that the concurrent/parallel tracer may also acquire while
+/// walking object/environment/promise side storage. Allocation-failure recovery
+/// must fail closed when the current mutator already holds one of these locks:
+/// tracing from that point could self-deadlock or invert the side-store lock
+/// order. Normal safepoint collection is unaffected.
+pub inline fn enterTraceSensitiveLock() void {
+    trace_sensitive_lock_depth += 1;
+}
+
+pub inline fn leaveTraceSensitiveLock() void {
+    std.debug.assert(trace_sensitive_lock_depth > 0);
+    trace_sensitive_lock_depth -= 1;
+}
+
+pub inline fn inTraceSensitiveLock() bool {
+    return trace_sensitive_lock_depth != 0;
 }
 
 // ---------------------------------------------------------------------------

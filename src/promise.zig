@@ -11,6 +11,7 @@
 //! generators use); the interpreter casts back when dispatching.
 
 const std = @import("std");
+const gc_runtime = @import("gc_runtime.zig");
 const gc_mod = @import("gc.zig");
 const value = @import("value.zig");
 const interp = @import("interpreter.zig");
@@ -69,9 +70,11 @@ pub const Promise = struct {
                 std.atomic.spinLoopHint();
             }
         }
+        gc_runtime.enterTraceSensitiveLock();
     }
 
     pub fn unlockState(self: *Promise) void {
+        gc_runtime.leaveTraceSensitiveLock();
         self.lock.unlock();
     }
 };
@@ -277,9 +280,11 @@ pub const Combine = struct {
         while (!self.lock.tryLock()) : (spins += 1) {
             if ((spins & 0xff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
         }
+        gc_runtime.enterTraceSensitiveLock();
     }
 
     pub fn unlockState(self: *Combine) void {
+        gc_runtime.leaveTraceSensitiveLock();
         self.lock.unlock();
     }
 };

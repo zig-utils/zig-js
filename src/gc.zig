@@ -611,7 +611,7 @@ pub const Binding = struct {
     pub const Kind = CellKind;
 
     pub fn recoverAllocationFailure(self: *Binding) bool {
-        return self.context.collectForAllocationFailure();
+        return self.context.collectForAllocationFailure(currentInterpreter());
     }
 
     /// Persistent roots reachable from the realm plus registered active
@@ -872,6 +872,7 @@ pub fn allocObject(heap_erased: ?*anyopaque, arena: std.mem.Allocator) std.mem.A
 /// scattered `*.create(value.Object)` site funnel through `allocObj(arena)`
 /// without threading the heap pointer through hundreds of signatures.
 threadlocal var active_heap: ?*anyopaque = null;
+threadlocal var active_interpreter: ?*interp.Interpreter = null;
 
 /// Install `h` as this thread's active heap, returning the previous value (so
 /// nested entry points can restore it). Pass null for the arena engine.
@@ -894,6 +895,19 @@ pub fn setActiveHeap(h: ?*anyopaque) ?*anyopaque {
         _ = gc_runtime.setBarrier(null, null, null);
     }
     return prev;
+}
+
+/// Install the interpreter currently executing JS on this thread. Allocation
+/// failure recovery uses this only as an internal safepoint-owned capability:
+/// if no interpreter is active, GC cell OOM recovery remains fail-closed.
+pub fn setActiveInterpreter(machine: ?*interp.Interpreter) ?*interp.Interpreter {
+    const prev = active_interpreter;
+    active_interpreter = machine;
+    return prev;
+}
+
+pub fn currentInterpreter() ?*interp.Interpreter {
+    return active_interpreter;
 }
 
 /// Type-erased entry the `gc_runtime` shim calls at reference-store sites. The

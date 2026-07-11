@@ -606,6 +606,8 @@ fn threadMain(rec: *ThreadRecord, fn_v: Value, args: []const Value) void {
         return;
     };
     defer rec.ctx.popActiveInterpreter(&machine);
+    const ai_saved = gc_mod.setActiveInterpreter(&machine);
+    defer _ = gc_mod.setActiveInterpreter(ai_saved);
     machine.microtasks = microtasks;
     machine.async_waiters = &async_waiters;
     var result: Value = Value.undef();

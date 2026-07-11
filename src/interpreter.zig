@@ -15,6 +15,7 @@ const agent = @import("agent.zig");
 const structured_clone = @import("structured_clone.zig");
 const gil_mod = @import("gil.zig");
 const stack_scan = @import("stack_scan.zig");
+const gc_runtime = @import("gc_runtime.zig");
 const gc_mod = @import("gc.zig");
 const jsthread = @import("jsthread.zig");
 const parser_mod = @import("parser.zig");
@@ -458,9 +459,11 @@ pub const Environment = struct {
         while (!self.binding_lock.tryLock()) : (spins += 1) {
             if ((spins & 0xff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
         }
+        gc_runtime.enterTraceSensitiveLock();
     }
     pub fn unlockBindings(self: *Environment) void {
         if (!binding_locks_enabled.load(.acquire)) return;
+        gc_runtime.leaveTraceSensitiveLock();
         self.binding_lock.unlock();
     }
 
