@@ -640,9 +640,12 @@ Do this once the engine's `context.zig`/`interpreter.zig` surface is settled
   evaluateModule exit, collectGarbage, destroy) so a marker never outlives its
   cycle. Default off → the M2 incremental driver and the arena engine are
   byte-identical. The pieces it composes: born-cell deferral
-  (`born_concurrent`); O(1) `isManaged`; per-object (`Object`) and
-  per-environment (`Environment.binding_lock`) concurrent-trace synchronization;
-  the insertion barrier; the thread-safe `aux` scratch allocator. Validated by
+  (`born_concurrent`); exact maybe-managed payload membership (`isManaged` and
+  broad barrier inputs tolerate stale/wild non-GC pointers instead of peeking at
+  their candidate headers, while `zig-gc`'s live-payload index keeps exact
+  lookup off the O(live-cells) path); per-object (`Object`) and per-environment
+  (`Environment.binding_lock`) concurrent-trace synchronization; the insertion
+  barrier; the thread-safe `aux` scratch allocator. Validated by
   `enable_gc concurrent (M3): the production driver marks on a thread while JS
   runs` — a 4,000-iteration loop allocates objects + per-iter `let` environments
   and reassigns a global while the marker traces (~dozens of begin→marker→finish

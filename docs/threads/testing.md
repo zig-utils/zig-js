@@ -693,8 +693,10 @@ The `enable_gc nursery` integration tests establish old containers before adding
 young edges, then cover Object/Environment/Promise retention, young-garbage
 reclamation and promotion counters, WeakRef clearing, WeakMap ephemerons, and
 FinalizationRegistry cleanup. The sibling `zig-gc` suite independently covers
-owner and child-only barriers, weak slots, binding-selected old-cell rescanning,
-ephemerons, full fallback accounting, and normal/TSan collector builds.
+owner and child-only barriers, stale/wild maybe-managed root/barrier rejection,
+live-payload index maintenance, weak slots, binding-selected old-cell
+rescanning, ephemerons, full fallback accounting, and normal/TSan collector
+builds.
 `enable_gc: heap binding and cell backing share one lifecycle allocation` covers
 the context-lifecycle reduction where the GC heap, root-tracing binding, and cell
 backing live in one stable state object instead of three separate GPA

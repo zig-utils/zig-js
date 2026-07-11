@@ -227,6 +227,10 @@ Known performance/maturity work:
   collection just before an abort cannot append into `barrier_buf` after the
   abort path has cleared it; the dependency has a deterministic regression test
   for that abort boundary and is covered by the local `parallel_js` TSan slice.
+  Broad "maybe managed" root/barrier inputs now use exact live-payload
+  membership in `zig-gc`, so stale or wild non-GC pointers fail closed instead
+  of being header-peeked; the dependency's live-payload index keeps that safety
+  compatible with barrier-heavy no-GIL fuzz/profile workloads.
   The current internal policy treats property `Atomics.wait`,
   `Condition.wait`, and contended `Lock` acquisition as running peers while
   they pump tasks and GC safepoints; only the short native condition-wait region
