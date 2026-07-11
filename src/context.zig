@@ -2013,6 +2013,7 @@ pub const Context = struct {
             .this_value = Value.obj(self.global_object),
             .root_shape = self.root_shape,
             .microtasks = &self.microtasks,
+            .out_of_memory_exception = self.reserved_thread_oom_error orelse Value.undef(),
             // Only engage per-queue microtask locking in no-GIL mode;
             // single-threaded and `.gil = true` execution stay lock-free.
             .lock_microtasks = self.parallel_js,
@@ -10342,6 +10343,26 @@ test "Context heap_limit_bytes fails closed on allocation pressure" {
     const failed_stats = ctx.heapBudgetStats().?;
     try std.testing.expect(failed_stats.peak_bytes <= failed_stats.limit_bytes);
     try std.testing.expectEqual(failed_stats.limit_bytes - failed_stats.used_bytes, failed_stats.remaining_bytes);
+}
+
+test "Context heap_limit_bytes allocation pressure is catchable inside JS try" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .heap_limit_bytes = 4 * 1024 * 1024 });
+    defer ctx.destroy();
+
+    const result = try ctx.evaluate(
+        \\let caught = false;
+        \\try {
+        \\  const keep = [];
+        \\  for (let i = 0;; i++)
+        \\    keep.push(new ArrayBuffer(1 << 20));
+        \\} catch {
+        \\  caught = true;
+        \\}
+        \\caught;
+    );
+    try std.testing.expect(result.asBool());
+    const stats = ctx.heapBudgetStats().?;
+    try std.testing.expect(stats.peak_bytes <= stats.limit_bytes);
 }
 
 test "Context heapBudgetStats is absent without heap_limit_bytes" {

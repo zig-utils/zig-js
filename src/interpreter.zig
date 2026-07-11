@@ -1100,6 +1100,11 @@ pub const Interpreter = struct {
     /// The in-flight thrown value while `error.Throw` propagates. Read by
     /// `catch` and by the Context/C-API boundary.
     exception: Value = Value.undef(),
+    /// Optional prebuilt JS exception for Context heap-limit failures. When set,
+    /// allocation failures that happen while a JS handler is active can be
+    /// reinterpreted as catchable `error.Throw` without allocating a fresh Error
+    /// object while the allocator is already at its cap.
+    out_of_memory_exception: Value = Value.undef(),
     /// Target label of a pending labeled `break`/`continue` (null = unlabeled).
     signal_label: ?[]const u8 = null,
     /// Label of the enclosing `labeled_stmt`, handed to the loop it wraps.
@@ -2124,6 +2129,14 @@ pub const Interpreter = struct {
     pub fn throwError(self: *Interpreter, name: []const u8, message: []const u8) EvalError {
         self.exception = try self.makeError(name, message);
         return error.Throw;
+    }
+
+    pub fn catchableOutOfMemory(self: *Interpreter, err: EvalError) EvalError {
+        if (err == error.OutOfMemory and !self.out_of_memory_exception.isUndefined()) {
+            self.exception = self.out_of_memory_exception;
+            return error.Throw;
+        }
+        return err;
     }
 
     /// Raise a SyntaxError for parser failures with a best-effort source
@@ -13721,7 +13734,8 @@ pub const Interpreter = struct {
         if (self.eval(t.block)) |v| {
             result = v;
         } else |err| {
-            if (err == error.Throw and t.catch_block != null) {
+            const abrupt = self.catchableOutOfMemory(err);
+            if (abrupt == error.Throw and t.catch_block != null) {
                 const exc = self.exception;
                 self.exception = Value.undef();
                 const saved = self.env;
@@ -13748,7 +13762,7 @@ pub const Interpreter = struct {
                     held_exc = self.exception;
                 }
             } else {
-                held_err = err;
+                held_err = abrupt;
                 held_exc = self.exception;
             }
         }

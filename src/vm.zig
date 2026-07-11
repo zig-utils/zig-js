@@ -412,7 +412,8 @@ fn execLoop(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
     // throw propagates to the caller (uncaught — the generator/function ends).
     while (true) {
         return runChunk(vm, exec, chunk, frame, gen) catch |e| {
-            if (e == error.Throw and exec.handlers.items.len > 0) {
+            const abrupt = if (exec.handlers.items.len > 0) vm.catchableOutOfMemory(e) else e;
+            if (abrupt == error.Throw and exec.handlers.items.len > 0) {
                 const stack_alloc = generatorStackAllocator(vm, gen);
                 const h = exec.handlers.pop().?;
                 exec.stack.shrinkRetainingCapacity(h.stack_depth);
@@ -428,7 +429,7 @@ fn execLoop(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 }
                 continue;
             }
-            return e;
+            return abrupt;
         };
     }
 }
@@ -2636,6 +2637,13 @@ fn unwindThrow(vm: *Interpreter, acts: *std.ArrayListUnmanaged(*Activation)) Eva
     return false;
 }
 
+fn activationStackHasHandler(acts: *const std.ArrayListUnmanaged(*Activation)) bool {
+    for (acts.items) |act| {
+        if (act.exec.handlers.items.len > 0) return true;
+    }
+    return false;
+}
+
 /// Drive an explicit stack of JS-chunk activations for `initial` and any nested
 /// plain JS→JS calls it makes, so deep recursion lives on the heap instead of
 /// the OS call stack. Native-fn boundaries still recurse natively (bounded) and
@@ -2658,7 +2666,8 @@ fn runDriver(vm: *Interpreter, initial: *Activation) EvalError!Value {
     while (acts.items.len > 0) {
         const cur = acts.items[acts.items.len - 1];
         const rv = runChunk(vm, &cur.exec, cur.chunk, cur.frame, null) catch |e| {
-            if (e != error.Throw) {
+            const abrupt = if (activationStackHasHandler(&acts)) vm.catchableOutOfMemory(e) else e;
+            if (abrupt != error.Throw) {
                 // OOM / OptShortCircuit: tear down all activations and propagate.
                 while (acts.items.len > 0) {
                     const a = acts.items[acts.items.len - 1];
@@ -2667,7 +2676,7 @@ fn runDriver(vm: *Interpreter, initial: *Activation) EvalError!Value {
                     _ = acts.pop();
                     if (acts.items.len > 0) vm.depth -= 1;
                 }
-                return e;
+                return abrupt;
             }
             if (try unwindThrow(vm, &acts)) continue; // resumed at a handler
             return error.Throw; // uncaught → propagate to the native caller
