@@ -159,7 +159,7 @@ linked into a library consumer. Ruled anyway for completeness.
 
 ---
 
-## Path dependency: `../zig-regex` (`/Users/chrisbreuer/Code/Libraries/zig-regex/src`)
+## Path dependency: `../zig-regex`
 
 RegExp is backed by the sibling zig-regex repo. Full scan of its `src/*.zig`:
 
