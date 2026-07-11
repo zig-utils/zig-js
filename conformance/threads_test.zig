@@ -357,6 +357,34 @@ fn heapLimitBytesForCase(name: []const u8) ?usize {
     return null;
 }
 
+const CaseTiming = struct {
+    name: []const u8 = "",
+    ms: u64 = 0,
+};
+
+fn nowNs(io: std.Io) i96 {
+    return std.Io.Clock.awake.now(io).nanoseconds;
+}
+
+fn elapsedMs(start_ns: i96, end_ns: i96) u64 {
+    if (end_ns <= start_ns) return 0;
+    return @intCast(@divFloor(end_ns - start_ns, std.time.ns_per_ms));
+}
+
+fn recordSlowCase(slowest: []CaseTiming, name: []const u8, ms: u64) void {
+    var insert_at: ?usize = null;
+    for (slowest, 0..) |entry, i| {
+        if (ms > entry.ms) {
+            insert_at = i;
+            break;
+        }
+    }
+    const at = insert_at orelse return;
+    var i = slowest.len - 1;
+    while (i > at) : (i -= 1) slowest[i] = slowest[i - 1];
+    slowest[at] = .{ .name = name, .ms = ms };
+}
+
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const io = init.io;
@@ -480,19 +508,31 @@ pub fn main(init: std.process.Init) !void {
 
     var failed: usize = 0;
     var skipped: usize = 0;
+    var completed: usize = 0;
+    var shard_started_ns: i96 = 0;
+    var slowest = [_]CaseTiming{ .{}, .{}, .{}, .{}, .{}, .{}, .{}, .{} };
+    if (shard_count != null) shard_started_ns = nowNs(io);
     for (names.items, 0..) |name, case_index| {
         if (case_index % shard_n != shard_i) continue;
-        std.debug.print("  RUN   {s}\n", .{name});
+        const case_started_ns = nowNs(io);
+        completed += 1;
+        std.debug.print("  RUN   {d}/{d} {s}\n", .{ completed, selected_total, name });
         if (parallel_js and !explicit_one and parallelJsBudgetSkip(name)) {
             skipped += 1;
-            std.debug.print("  SKIP  {s} (parallel_js budget frontier)\n", .{name});
+            const case_ms = elapsedMs(case_started_ns, nowNs(io));
+            recordSlowCase(&slowest, name, case_ms);
+            std.debug.print("  SKIP  {s} ({d} ms, parallel_js budget frontier)\n", .{ name, case_ms });
             continue;
         }
         if (!explicit_one and !sweep and requiresProcessIsolation(name)) {
-            if (try runIsolatedCase(gpa, io, parallel_js, name)) {
-                std.debug.print("  PASS  {s}\n", .{name});
+            const passed = try runIsolatedCase(gpa, io, parallel_js, name);
+            const case_ms = elapsedMs(case_started_ns, nowNs(io));
+            recordSlowCase(&slowest, name, case_ms);
+            if (passed) {
+                std.debug.print("  PASS  {s} ({d} ms)\n", .{ name, case_ms });
             } else {
                 failed += 1;
+                std.debug.print("  FAIL  {s} ({d} ms)\n", .{ name, case_ms });
             }
             continue;
         }
@@ -501,7 +541,9 @@ pub fn main(init: std.process.Init) !void {
         // waiter tables/buffers are released before the next file starts.
         {
             const test_src = dir.readFileAlloc(io, name, gpa, .limited(1 << 20)) catch {
-                std.debug.print("  MISS  {s}\n", .{name});
+                const case_ms = elapsedMs(case_started_ns, nowNs(io));
+                recordSlowCase(&slowest, name, case_ms);
+                std.debug.print("  MISS  {s} ({d} ms)\n", .{ name, case_ms });
                 failed += 1;
                 continue;
             };
@@ -584,7 +626,9 @@ pub fn main(init: std.process.Init) !void {
             const expect_termination = std.mem.endsWith(u8, name, "-termination.js") or
                 std.mem.indexOf(u8, directive, "--watchdog-exception-ok") != null;
             const ctx = js.Context.createWithTestingOptions(gpa, options) catch {
-                std.debug.print("  FAIL  {s} (context)\n", .{name});
+                const case_ms = elapsedMs(case_started_ns, nowNs(io));
+                recordSlowCase(&slowest, name, case_ms);
+                std.debug.print("  FAIL  {s} ({d} ms, context)\n", .{ name, case_ms });
                 failed += 1;
                 continue;
             };
@@ -607,8 +651,10 @@ pub fn main(init: std.process.Init) !void {
             defer if (watchdog) |w| w.join();
             if (ctx.evaluate(buf.items)) |_| {
                 if (expect_termination) {
+                    const case_ms = elapsedMs(case_started_ns, nowNs(io));
+                    recordSlowCase(&slowest, name, case_ms);
                     failed += 1;
-                    std.debug.print("  FAIL  {s}: returned normally under termination\n", .{name});
+                    std.debug.print("  FAIL  {s} ({d} ms): returned normally under termination\n", .{ name, case_ms });
                     continue;
                 }
                 var balanced = false;
@@ -621,13 +667,15 @@ pub fn main(init: std.process.Init) !void {
                     }
                     std.Io.sleep(js.agent.engineIo(), .fromMilliseconds(drain_sleep_ms), .awake) catch {};
                 }
+                const case_ms = elapsedMs(case_started_ns, nowNs(io));
+                recordSlowCase(&slowest, name, case_ms);
                 if (balanced) {
-                    std.debug.print("  PASS  {s}\n", .{name});
+                    std.debug.print("  PASS  {s} ({d} ms)\n", .{ name, case_ms });
                 } else {
                     const progress = ctx.evaluate("String(__asyncPassed) + '/' + String(__asyncExpected)") catch js.Value.undef();
                     const progress_s = if (progress.isString()) progress.asStr() else "?/?";
                     failed += 1;
-                    std.debug.print("  FAIL  {s}: async completions not reached ({s})\n", .{ name, progress_s });
+                    std.debug.print("  FAIL  {s} ({d} ms): async completions not reached ({s})\n", .{ name, case_ms, progress_s });
                     const labels = ctx.evaluate("__asyncPassedLabels.join(',')") catch js.Value.undef();
                     if (labels.isString() and labels.asStr().len != 0)
                         std.debug.print("  completed async arms: {s}\n", .{labels.asStr()});
@@ -659,20 +707,22 @@ pub fn main(init: std.process.Init) !void {
                     }
                 }
             } else |_| {
+                const case_ms = elapsedMs(case_started_ns, nowNs(io));
+                recordSlowCase(&slowest, name, case_ms);
                 if (expect_termination) {
                     // The watchdog-exception-ok contract: the termination throw IS
                     // the pass; the D9-violation paths print FAILURE first.
                     if (std.mem.indexOf(u8, ctx.print_buffer.items, "FAILURE") == null) {
-                        std.debug.print("  PASS  {s}\n", .{name});
+                        std.debug.print("  PASS  {s} ({d} ms)\n", .{ name, case_ms });
                     } else {
                         failed += 1;
-                        std.debug.print("  FAIL  {s}: D9 violated\n", .{name});
+                        std.debug.print("  FAIL  {s} ({d} ms): D9 violated\n", .{ name, case_ms });
                     }
                     continue;
                 }
                 if (ctx.exception) |e| {
                     if (e.isString() and std.mem.eql(u8, e.asStr(), "__zigjs_threads_quit__")) {
-                        std.debug.print("  PASS  {s}\n", .{name});
+                        std.debug.print("  PASS  {s} ({d} ms)\n", .{ name, case_ms });
                         continue;
                     }
                 }
@@ -684,9 +734,17 @@ pub fn main(init: std.process.Init) !void {
                     var machine = ctx.interpreter();
                     break :descr machine.toStringV(e) catch "?";
                 } else "?";
-                std.debug.print("  FAIL  {s}: {s}\n", .{ name, msg });
+                std.debug.print("  FAIL  {s} ({d} ms): {s}\n", .{ name, case_ms, msg });
                 if (ctx.gil) |g| g.release();
             }
+        }
+    }
+    if (shard_count != null) {
+        std.debug.print("threads-test: shard {d}/{d} elapsed {d} ms\n", .{ shard_i, shard_n, elapsedMs(shard_started_ns, nowNs(io)) });
+        std.debug.print("threads-test: shard {d}/{d} slowest cases:\n", .{ shard_i, shard_n });
+        for (slowest) |entry| {
+            if (entry.name.len == 0) break;
+            std.debug.print("  {d} ms  {s}\n", .{ entry.ms, entry.name });
         }
     }
     std.debug.print("------------------------\n{d}/{d} corpus files passed", .{ selected_total - failed - skipped, selected_total });
