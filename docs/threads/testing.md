@@ -468,7 +468,10 @@ Its opt-in counters let
 queued `asyncHold` grants. The `shape`/`newsh`/`syld` columns report hidden-class
 transition requests, newly-created child shapes, and transition-lock yields, so
 object/property rows can distinguish cached shape convergence from slot/element
-work. The `lcnt` and `aq` columns split direct contended
+work. The `aacq`/`acnt`/`aspn` columns report LockedArena acquisitions,
+contended acquisitions, and failed spin attempts, so allocation-heavy rows can
+separate allocator pressure from object-shape and waiter pressure. The `lcnt`
+and `aq` columns split direct contended
 `Lock.hold` attempts from queued `Lock.asyncHold` grants inside that total, and
 `parks` count timed wait/pump iterations including `Thread.join`. The `joins`
 columns split the `Thread.join` subset out of aggregate parks so lifecycle churn

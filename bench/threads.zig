@@ -759,7 +759,7 @@ fn printPromiseProfile(gpa: std.mem.Allocator, io: std.Io, workers: []const usiz
 fn printScenario(gpa: std.mem.Allocator, io: std.Io, scenario: Scenario, workers: []const usize) !void {
     std.debug.print("\n{s}\n", .{scenario.name});
     std.debug.print("{s:>8} {s:>14} {s:>14} {s:>12} {s:>12}" ++
-        " {s:>10} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>10} {s:>10} {s:>9} {s:>9} {s:>9} {s:>10} {s:>9} {s:>9} {s:>9} {s:>9} {s:>10} {s:>10} {s:>9} {s:>9} {s:>9} {s:>9} {s:>10} {s:>10} {s:>10} {s:>10}", .{
+        " {s:>10} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>10} {s:>10} {s:>9} {s:>9} {s:>9} {s:>10}", .{
         "threads",
         "no-gil ns",
         "gil ns",
@@ -769,6 +769,9 @@ fn printScenario(gpa: std.mem.Allocator, io: std.Io, scenario: Scenario, workers
         "ng shape",
         "ng newsh",
         "ng syld",
+        "ng aacq",
+        "ng acnt",
+        "ng aspn",
         "ng lcnt",
         "ng aq",
         "ng parks",
@@ -777,6 +780,8 @@ fn printScenario(gpa: std.mem.Allocator, io: std.Io, scenario: Scenario, workers
         "ng cond",
         "ng prop",
         "ng waitus",
+    });
+    std.debug.print(" {s:>9} {s:>9} {s:>9} {s:>9} {s:>10} {s:>10} {s:>9} {s:>9} {s:>9} {s:>9} {s:>10} {s:>10} {s:>10} {s:>10}", .{
         "ng jus",
         "ng lus",
         "ng cus",
@@ -792,11 +797,14 @@ fn printScenario(gpa: std.mem.Allocator, io: std.Io, scenario: Scenario, workers
         "ng hold",
         "ng cjob",
     });
-    std.debug.print(" {s:>10} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>10} {s:>10} {s:>9} {s:>9} {s:>9} {s:>10} {s:>9} {s:>9} {s:>9} {s:>9} {s:>10} {s:>10} {s:>9} {s:>9} {s:>9} {s:>9} {s:>10} {s:>10} {s:>10} {s:>10}\n", .{
+    std.debug.print(" {s:>10} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>10} {s:>10} {s:>9} {s:>9} {s:>9} {s:>10} {s:>9} {s:>9} {s:>9} {s:>9} {s:>10} {s:>10} {s:>9} {s:>9} {s:>9} {s:>9} {s:>10} {s:>10} {s:>10} {s:>10}\n", .{
         "gil events",
         "gil shape",
         "gil newsh",
         "gil syld",
+        "gil aacq",
+        "gil acnt",
+        "gil aspn",
         "gil lcnt",
         "gil aq",
         "gil parks",
@@ -836,7 +844,7 @@ fn printScenario(gpa: std.mem.Allocator, io: std.Io, scenario: Scenario, workers
             @as(f64, @floatFromInt(@max(parallel_ns, 1)));
 
         std.debug.print("{d:>8} {d:>14} {d:>14} {d:>11.2}x {d:>11.2}x" ++
-            " {d:>10} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>10} {d:>10} {d:>9} {d:>9} {d:>9} {d:>10} {d:>9} {d:>9} {d:>9} {d:>9} {d:>10} {d:>10} {d:>9} {d:>9} {d:>9} {d:>9} {d:>10} {d:>10} {d:>10} {d:>10}", .{
+            " {d:>10} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>10} {d:>10}", .{
             n,
             parallel_ns,
             gil_ns,
@@ -846,10 +854,15 @@ fn printScenario(gpa: std.mem.Allocator, io: std.Io, scenario: Scenario, workers
             parallel.shape.transition_requests,
             parallel.shape.transition_misses,
             parallel.shape.transition_lock_yields,
+            parallel.stats.arena_lock_acquires,
+            parallel.stats.arena_lock_contentions,
+            parallel.stats.arena_lock_spins,
             parallel.stats.lock_contentions,
             parallel.stats.async_hold_queued,
             parallel.stats.parks(),
             parallel.stats.thread_join_parks,
+        });
+        std.debug.print(" {d:>9} {d:>9} {d:>9} {d:>10} {d:>9} {d:>9} {d:>9} {d:>9} {d:>10} {d:>10} {d:>9} {d:>9} {d:>9} {d:>9} {d:>10} {d:>10} {d:>10} {d:>10}", .{
             parallel.stats.lock_wait_parks,
             parallel.stats.condition_wait_parks,
             parallel.stats.property_wait_parks,
@@ -869,15 +882,20 @@ fn printScenario(gpa: std.mem.Allocator, io: std.Io, scenario: Scenario, workers
             parallel.stats.task_pump_async_hold_jobs,
             parallel.stats.task_pump_condition_jobs,
         });
-        std.debug.print(" {d:>10} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>10} {d:>10} {d:>9} {d:>9} {d:>9} {d:>10} {d:>9} {d:>9} {d:>9} {d:>9} {d:>10} {d:>10} {d:>9} {d:>9} {d:>9} {d:>9} {d:>10} {d:>10} {d:>10} {d:>10}\n", .{
+        std.debug.print(" {d:>10} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>10} {d:>10}", .{
             gil.stats.events(),
             gil.shape.transition_requests,
             gil.shape.transition_misses,
             gil.shape.transition_lock_yields,
+            gil.stats.arena_lock_acquires,
+            gil.stats.arena_lock_contentions,
+            gil.stats.arena_lock_spins,
             gil.stats.lock_contentions,
             gil.stats.async_hold_queued,
             gil.stats.parks(),
             gil.stats.thread_join_parks,
+        });
+        std.debug.print(" {d:>9} {d:>9} {d:>9} {d:>10} {d:>9} {d:>9} {d:>9} {d:>9} {d:>10} {d:>10} {d:>9} {d:>9} {d:>9} {d:>9} {d:>10} {d:>10} {d:>10} {d:>10}\n", .{
             gil.stats.lock_wait_parks,
             gil.stats.condition_wait_parks,
             gil.stats.property_wait_parks,
