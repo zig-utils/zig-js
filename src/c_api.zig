@@ -106,6 +106,17 @@ fn ctxFrom(ref: JSContextRef) ?*Context {
     return c;
 }
 
+fn ctxForHandleInspection(ref: JSContextRef) ?*Context {
+    const c = ctxRawFrom(ref) orelse return null;
+    if (comptime builtin.mode == .Debug) {
+        if (!c.isOwnerThread()) std.debug.panic(
+            "Context is single-thread-affine: used from thread {d}, owned by thread {d} (docs/threads/bindings.md)",
+            .{ std.Thread.getCurrentId(), c.owner_thread },
+        );
+    }
+    return c;
+}
+
 fn box(ctx: *Context, v: Value) JSValueRef {
     const b = ctx.arena().create(Boxed) catch return null;
     b.* = .{ .value = v, .owner = ctx };
@@ -350,7 +361,7 @@ export fn JSEvaluateScript(
 // ---- JSValue inspection ------------------------------------------------
 
 export fn JSValueGetType(ctx: JSContextRef, v: JSValueRef) callconv(.c) JSType {
-    const c = ctxRawFrom(ctx) orelse return .invalid;
+    const c = ctxForHandleInspection(ctx) orelse return .invalid;
     const uv = valueFromContext(c, v) orelse return .invalid;
     return switch (uv.kind()) {
         .undefined => .undefined,
@@ -363,44 +374,44 @@ export fn JSValueGetType(ctx: JSContextRef, v: JSValueRef) callconv(.c) JSType {
 }
 
 export fn JSValueIsUndefined(ctx: JSContextRef, v: JSValueRef) callconv(.c) bool {
-    const c = ctxRawFrom(ctx) orelse return false;
+    const c = ctxForHandleInspection(ctx) orelse return false;
     return if (valueFromContext(c, v)) |uv| uv.isUndefined() else false;
 }
 
 export fn JSValueIsNull(ctx: JSContextRef, v: JSValueRef) callconv(.c) bool {
-    const c = ctxRawFrom(ctx) orelse return false;
+    const c = ctxForHandleInspection(ctx) orelse return false;
     return if (valueFromContext(c, v)) |uv| uv.isNull() else false;
 }
 
 export fn JSValueIsBoolean(ctx: JSContextRef, v: JSValueRef) callconv(.c) bool {
-    const c = ctxRawFrom(ctx) orelse return false;
+    const c = ctxForHandleInspection(ctx) orelse return false;
     return if (valueFromContext(c, v)) |uv| uv.isBoolean() else false;
 }
 
 export fn JSValueIsNumber(ctx: JSContextRef, v: JSValueRef) callconv(.c) bool {
-    const c = ctxRawFrom(ctx) orelse return false;
+    const c = ctxForHandleInspection(ctx) orelse return false;
     return if (valueFromContext(c, v)) |uv| uv.isNumber() else false;
 }
 
 export fn JSValueIsString(ctx: JSContextRef, v: JSValueRef) callconv(.c) bool {
-    const c = ctxRawFrom(ctx) orelse return false;
+    const c = ctxForHandleInspection(ctx) orelse return false;
     return if (valueFromContext(c, v)) |uv| uv.isString() else false;
 }
 
 export fn JSValueIsObject(ctx: JSContextRef, v: JSValueRef) callconv(.c) bool {
-    const c = ctxRawFrom(ctx) orelse return false;
+    const c = ctxForHandleInspection(ctx) orelse return false;
     const uv = valueFromContext(c, v) orelse return false;
     return uv.isObject() and !uv.asObj().is_symbol and !uv.asObj().is_bigint;
 }
 
 export fn JSValueIsArray(ctx: JSContextRef, v: JSValueRef) callconv(.c) bool {
-    const c = ctxRawFrom(ctx) orelse return false;
+    const c = ctxForHandleInspection(ctx) orelse return false;
     const uv = valueFromContext(c, v) orelse return false;
     return uv.isObject() and uv.asObj().is_array;
 }
 
 export fn JSValueIsDate(ctx: JSContextRef, v: JSValueRef) callconv(.c) bool {
-    const c = ctxRawFrom(ctx) orelse return false;
+    const c = ctxForHandleInspection(ctx) orelse return false;
     const uv = valueFromContext(c, v) orelse return false;
     return uv.isObject() and uv.asObj().is_date;
 }
@@ -431,7 +442,7 @@ export fn JSValueIsEqual(ctx: JSContextRef, a: JSValueRef, b: JSValueRef, except
 }
 
 export fn JSValueIsStrictEqual(ctx: JSContextRef, a: JSValueRef, b: JSValueRef) callconv(.c) bool {
-    const c = ctxRawFrom(ctx) orelse return false;
+    const c = ctxForHandleInspection(ctx) orelse return false;
     const lhs = valueFromContext(c, a) orelse return false;
     const rhs = valueFromContext(c, b) orelse return false;
     return value.strictEquals(lhs, rhs);
@@ -469,7 +480,7 @@ export fn JSValueMakeString(ctx: JSContextRef, str: JSStringRef) callconv(.c) JS
 // ---- JSValue coercion -------------------------------------------------
 
 export fn JSValueToBoolean(ctx: JSContextRef, v: JSValueRef) callconv(.c) bool {
-    const c = ctxRawFrom(ctx) orelse return false;
+    const c = ctxForHandleInspection(ctx) orelse return false;
     return if (valueFromContext(c, v)) |uv| uv.toBoolean() else false;
 }
 
@@ -950,13 +961,13 @@ export fn JSObjectCallAsConstructor(ctx: JSContextRef, constructor: JSObjectRef,
 }
 
 export fn JSObjectIsFunction(ctx: JSContextRef, object: JSObjectRef) callconv(.c) bool {
-    const c = ctxRawFrom(ctx) orelse return false;
+    const c = ctxForHandleInspection(ctx) orelse return false;
     const val = valueFromContext(c, object) orelse return false;
     return val.isObject() and val.asObj().isCallableObject();
 }
 
 export fn JSObjectIsConstructor(ctx: JSContextRef, object: JSObjectRef) callconv(.c) bool {
-    const c = ctxRawFrom(ctx) orelse return false;
+    const c = ctxForHandleInspection(ctx) orelse return false;
     const val = valueFromContext(c, object) orelse return false;
     return val.isObject() and interp.isConstructorValue(val);
 }
