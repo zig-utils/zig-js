@@ -677,8 +677,11 @@ export fn JSObjectGetPropertyAtIndex(ctx: JSContextRef, object: JSObjectRef, ind
     return box(c, result);
 }
 
-fn collectArgs(c: *Context, argc: usize, argv: [*c]const JSValueRef) ?[]Value {
-    const args = c.arena().alloc(Value, argc) catch return null;
+fn collectArgs(c: *Context, argc: usize, argv: [*c]const JSValueRef, exception: ExceptionRef) ?[]Value {
+    const args = c.arena().alloc(Value, argc) catch {
+        setException(c, exception, "OutOfMemory");
+        return null;
+    };
     var i: usize = 0;
     while (i < argc) : (i += 1) args[i] = unbox(argv[i]);
     return args;
@@ -707,7 +710,7 @@ export fn JSObjectCallAsFunction(ctx: JSContextRef, function: JSObjectRef, this_
     // C-ABI host callbacks run directly across the FFI boundary.
     if (obj.callback) |cb| return cb(ctx, function, this_ref, argc, argv, exception);
     // JS functions / native builtins / error constructors run on the interpreter.
-    const args = collectArgs(c, argc, argv) orelse return null;
+    const args = collectArgs(c, argc, argv, exception) orelse return null;
     const gc_saved = gc_mod.setActiveHeap(c.gc);
     defer _ = gc_mod.setActiveHeap(gc_saved);
     const sa_saved = strcell.setActiveArena(c.arena());
@@ -782,7 +785,7 @@ export fn JSObjectCallAsConstructor(ctx: JSContextRef, constructor: JSObjectRef,
         setException(c, exception, "TypeError: value is not a constructor");
         return null;
     };
-    const args = collectArgs(c, argc, argv) orelse return null;
+    const args = collectArgs(c, argc, argv, exception) orelse return null;
     const gc_saved = gc_mod.setActiveHeap(c.gc);
     defer _ = gc_mod.setActiveHeap(gc_saved);
     const sa_saved = strcell.setActiveArena(c.arena());
@@ -1577,6 +1580,31 @@ test "C-API: argc rejects null argv" {
     const date_ctor = JSObjectGetProperty(ctx, global, date_name, &exception) orelse return error.PropFailed;
     try std.testing.expect(exception == null);
     try std.testing.expect(JSObjectCallAsConstructor(ctx, date_ctor, 1, null, &exception) == null);
+    try std.testing.expect(exception != null);
+}
+
+test "C-API: argv collection failures report exception" {
+    const ctx = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
+    defer JSGlobalContextRelease(ctx);
+
+    var exception: JSValueRef = null;
+    const fn_script = JSStringCreateWithUTF8CString("(function(){ return 1; })") orelse return error.StringInitFailed;
+    defer JSStringRelease(fn_script);
+    const fn_obj = JSEvaluateScript(ctx, fn_script, null, null, 0, &exception) orelse return error.EvalFailed;
+    try std.testing.expect(exception == null);
+
+    var dummy = JSValueMakeUndefined(ctx);
+    try std.testing.expect(JSObjectCallAsFunction(ctx, fn_obj, null, std.math.maxInt(usize), &dummy, &exception) == null);
+    try std.testing.expect(exception != null);
+
+    exception = null;
+    const global = JSContextGetGlobalObject(ctx);
+    const date_name = JSStringCreateWithUTF8CString("Date") orelse return error.StringInitFailed;
+    defer JSStringRelease(date_name);
+    const date_ctor = JSObjectGetProperty(ctx, global, date_name, &exception) orelse return error.PropFailed;
+    try std.testing.expect(exception == null);
+
+    try std.testing.expect(JSObjectCallAsConstructor(ctx, date_ctor, std.math.maxInt(usize), &dummy, &exception) == null);
     try std.testing.expect(exception != null);
 }
 
