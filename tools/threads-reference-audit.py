@@ -411,6 +411,7 @@ def run_probe_candidates(
     *,
     timeout_s: float,
     expect_current_blockers: bool,
+    skip_timeout_probes: bool,
     emit: bool = True,
 ) -> tuple[int, list[dict[str, object]]]:
     if emit:
@@ -423,6 +424,24 @@ def run_probe_candidates(
         if cats is None:
             continue
         reason = ", ".join(cats) if cats else "uncategorized"
+        expected = PROMOTION_PROBE_EXPECTATIONS.get(case)
+        if skip_timeout_probes and expected is not None and expected.status == "timeout":
+            if emit:
+                print(f"  - {case}: {reason}")
+                print("    SKIP expected timeout blocker")
+            results.append({
+                "case": case,
+                "status": "skipped",
+                "skip_reason": "expected timeout blocker",
+                "exit_code": None,
+                "expected_current_blocker": expect_current_blockers,
+                "expectation_matched": None,
+                "output": {
+                    "evidence": [],
+                    "tail": [],
+                },
+            })
+            continue
         cmd = [
             "zig",
             "build",
@@ -524,6 +543,14 @@ def main(argv: list[str]) -> int:
             "or time out with the documented current blocker evidence."
         ),
     )
+    parser.add_argument(
+        "--skip-timeout-probes",
+        action="store_true",
+        help=(
+            "With --run-probes, skip probes whose documented blocker is an expected timeout. "
+            "This keeps quick evidence gates focused on probes with concrete failure text."
+        ),
+    )
     args = parser.parse_args(argv)
 
     remaining, classified, uncategorized, missing_allowlist = audit()
@@ -543,6 +570,7 @@ def main(argv: list[str]) -> int:
             uncategorized,
             timeout_s=args.probe_timeout,
             expect_current_blockers=args.expect_current_blockers,
+            skip_timeout_probes=args.skip_timeout_probes,
             emit=args.format != "json",
         )
     if args.format == "json":
