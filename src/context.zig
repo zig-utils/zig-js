@@ -2202,17 +2202,20 @@ pub const Context = struct {
     }
 
     fn hasRunningJsThreads(self: *const Context) bool {
-        const io = agent.engineIo();
         const g = self.gil;
         if (g) |threading| threading.lockApi();
         defer if (g) |threading| threading.unlockApi();
         for (self.js_threads.items) |rec| {
-            rec.join_mutex.lockUncancelable(io);
-            const exited = rec.exited;
-            rec.join_mutex.unlock(io);
-            if (!exited) return true;
+            if (!threadRecordExited(rec)) return true;
         }
         return false;
+    }
+
+    fn threadRecordExited(rec: *jsthread.ThreadRecord) bool {
+        const io = agent.engineIo();
+        rec.join_mutex.lockUncancelable(io);
+        defer rec.join_mutex.unlock(io);
+        return rec.exited;
     }
 
     pub fn lockActiveInterpreters(self: *Context) void {
@@ -2901,11 +2904,11 @@ pub const Context = struct {
                     }
                     rec.join_mutex.unlock(io);
                 } else {
-                    while (!rec.exited) {
+                    while (!threadRecordExited(rec)) {
                         // Parked keepalive still serves run-loop tasks: a waiting
                         // thread may need a grant delivery pumped to finish.
                         jsthread.pumpTasks(&machine);
-                        if (rec.exited) break;
+                        if (threadRecordExited(rec)) break;
                         g.waitTimeout(&rec.done_cond, .{ .duration = .{
                             .raw = .fromMilliseconds(5),
                             .clock = .awake,
