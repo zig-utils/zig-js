@@ -329,8 +329,22 @@ export fn JSValueToNumber(ctx: JSContextRef, v: JSValueRef, exception: Exception
 
 export fn JSValueToStringCopy(ctx: JSContextRef, v: JSValueRef, exception: ExceptionRef) callconv(.c) JSStringRef {
     const c = ctxFrom(ctx) orelse return null;
-    const s = unbox(v).toString(c.arena()) catch {
+    const gc_saved = gc_mod.setActiveHeap(c.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(c.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = c.interpreter();
+    c.pushActiveInterpreter(&machine) catch {
         setException(c, exception, "OutOfMemory");
+        return null;
+    };
+    defer c.popActiveInterpreter(&machine);
+    const s = machine.toStringV(unbox(v)) catch |err| {
+        if (err == error.Throw) {
+            if (exception != null) exception[0] = box(c, machine.exception);
+        } else {
+            setException(c, exception, @errorName(err));
+        }
         return null;
     };
     const js = JsString.create(gpa, s) catch return null;
@@ -797,6 +811,38 @@ test "C-API: JSValueToNumber uses JavaScript ToNumber semantics" {
     try std.testing.expect(exception == null);
     const symbol_number = JSValueToNumber(ctx, symbol_value, &exception);
     try std.testing.expect(std.math.isNan(symbol_number));
+    try std.testing.expect(exception != null);
+}
+
+test "C-API: JSValueToStringCopy uses JavaScript ToString semantics" {
+    const ctx = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
+    defer JSGlobalContextRelease(ctx);
+
+    var exception: JSValueRef = null;
+    const object_script = JSStringCreateWithUTF8CString("({ toString() { return 'zig'; } })") orelse return error.StringInitFailed;
+    defer JSStringRelease(object_script);
+    const object_value = JSEvaluateScript(ctx, object_script, null, null, 0, &exception) orelse return error.EvalFailed;
+    try std.testing.expect(exception == null);
+    const object_string = JSValueToStringCopy(ctx, object_value, &exception) orelse return error.ToStringFailed;
+    defer JSStringRelease(object_string);
+    try std.testing.expect(exception == null);
+    var object_buf: [8]u8 = undefined;
+    const object_written = JSStringGetUTF8CString(object_string, &object_buf, object_buf.len);
+    try std.testing.expectEqualStrings("zig", object_buf[0 .. object_written - 1]);
+
+    const throwing_script = JSStringCreateWithUTF8CString("({ toString() { throw new TypeError('nope'); } })") orelse return error.StringInitFailed;
+    defer JSStringRelease(throwing_script);
+    const throwing_value = JSEvaluateScript(ctx, throwing_script, null, null, 0, &exception) orelse return error.EvalFailed;
+    try std.testing.expect(exception == null);
+    try std.testing.expect(JSValueToStringCopy(ctx, throwing_value, &exception) == null);
+    try std.testing.expect(exception != null);
+
+    exception = null;
+    const symbol_script = JSStringCreateWithUTF8CString("Symbol('x')") orelse return error.StringInitFailed;
+    defer JSStringRelease(symbol_script);
+    const symbol_value = JSEvaluateScript(ctx, symbol_script, null, null, 0, &exception) orelse return error.EvalFailed;
+    try std.testing.expect(exception == null);
+    try std.testing.expect(JSValueToStringCopy(ctx, symbol_value, &exception) == null);
     try std.testing.expect(exception != null);
 }
 
