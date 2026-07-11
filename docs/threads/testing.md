@@ -30,6 +30,7 @@ For performance work, also run:
 ```sh
 zig build threads-profile
 zig build threads-profile -Dthreads-profile-case='condition asyncWait'
+zig build threads-profile -Dthreads-profile-case='condition asyncWait parked'
 zig build threads-profile -Dthreads-profile-debug=true -Dthreads-profile-case='condition asyncWait'
 zig build midgc-profile
 zig build gc-profile
@@ -609,10 +610,15 @@ Async-generator request queues use the same direct queue shape:
 FIFO pop, consumed-slot compaction before growth, fixed-size reserve growth, and
 GC pending-request tracing through `Generator.pendingRequests()`.
 The property `waitAsync` timeout row should keep `async` and `done` equal after
-finite tickets settle; the single-lock `Condition.asyncWait` row exposes
-same-lock regrant batching, while the multi-lock row exercises FIFO-bursted
-realm task enqueue across lock groups and the paired run-loop job delivery
-pressure separately through the `hold` versus `cjob` split.
+finite tickets settle; the single-lock `Condition.asyncWait` row intentionally
+keeps its notifier in a hot property-spin rendezvous to stress task delivery
+under scheduler pressure. The `condition asyncWait parked` row keeps the same
+single-lock async-condition shape but parks the notifier with property
+`Atomics.wait`, so it is the cleaner control row when deciding whether a change
+helped condition reacquire delivery or merely changed spin-loop interference.
+The multi-lock row exercises FIFO-bursted realm task enqueue across lock groups
+and the paired run-loop job delivery pressure separately through the `hold`
+versus `cjob` split.
 Worker channel unit tests cover both FIFO head-cursor draining and fixed-size
 capacity chunk reservation before inbox/outbox appends; the script/module Worker
 message rows in `threads-profile` are the local signal for whether those queue

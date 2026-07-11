@@ -350,11 +350,13 @@ Known performance/maturity work:
   release function while preserving the release-function object and existing
   lock/GC ordering.
 - The profile now has direct rows for property `Atomics.waitAsync` finite
-  timeout settlement plus single-lock and multi-lock `Condition.asyncWait`
-  reacquire delivery, so local performance work can separate async waiter
-  registration, property ticket settlement, async-condition reacquire completion,
-  FIFO-bursted task enqueue pressure, and run-loop grant delivery instead of
-  inferring them from elapsed time alone.
+  timeout settlement plus busy-spin single-lock, parked single-lock, and
+  multi-lock `Condition.asyncWait` reacquire delivery. Use the parked row as the
+  cleaner condition-delivery control, and the original single-lock row as the
+  scheduler-pressure stress case. Together they let local performance work
+  separate async waiter registration, property ticket settlement,
+  async-condition reacquire completion, FIFO-bursted task enqueue pressure, and
+  run-loop grant delivery instead of inferring them from elapsed time alone.
 - Condition notify/notifyAll use the same FIFO head-cursor pattern for the
   mixed sync/async waiter queue, avoiding one front-shift per notified waiter.
   The waiter queue reserves fixed-size capacity chunks before capacity-assumed

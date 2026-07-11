@@ -394,6 +394,49 @@ const scenarios = [_]Scenario{
         .flush_tasks_after = true,
     },
     .{
+        .name = "condition asyncWait parked",
+        .setup =
+        \\globalThis.asyncParkCondLock = new Lock();
+        \\globalThis.asyncParkCond = new Condition();
+        \\globalThis.asyncParkCondBox = { ready: 0, seen: 0 };
+        \\globalThis.worker = function(id) {
+        \\  var workers = globalThis.__profileWorkers | 0;
+        \\  if (workers <= 1) return id + 1;
+        \\  var rounds = 30;
+        \\  if (id === 0) {
+        \\    for (var i = 0; i < rounds; i = i + 1) {
+        \\      var need = (workers - 1) * (i + 1);
+        \\      while (Atomics.load(asyncParkCondBox, 'ready') < need) {
+        \\        var cur = Atomics.load(asyncParkCondBox, 'ready');
+        \\        Atomics.wait(asyncParkCondBox, 'ready', cur, 100);
+        \\      }
+        \\      asyncParkCond.notifyAll();
+        \\    }
+        \\    return rounds;
+        \\  }
+        \\  for (var j = 0; j < rounds; j = j + 1) {
+        \\    asyncParkCondLock.asyncHold(function() {
+        \\      var wait = asyncParkCond.asyncWait(asyncParkCondLock);
+        \\      Atomics.add(asyncParkCondBox, 'ready', 1);
+        \\      Atomics.notify(asyncParkCondBox, 'ready');
+        \\      return wait.then(function(release) {
+        \\        asyncParkCondBox.seen = (asyncParkCondBox.seen | 0) + 1;
+        \\        release();
+        \\      });
+        \\    });
+        \\  }
+        \\  return id + 1;
+        \\};
+        \\globalThis.__profileFlush = function() {
+        \\  var workers = globalThis.__profileWorkers | 0;
+        \\  for (var i = 0; i < workers * 30; i = i + 1)
+        \\    asyncParkCond.notifyAll();
+        \\};
+        ,
+        .rounds = 5,
+        .flush_tasks_after = true,
+    },
+    .{
         .name = "condition asyncWait multi-lock",
         .setup =
         \\globalThis.asyncMultiCond = new Condition();

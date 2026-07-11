@@ -657,7 +657,11 @@ whose joiner is a spawned thread are routed to the realm queue rather than the
 joiner's abandoned local queue (`PendingJoin` records the joiner; exiting threads
 flush their residual queue). With the budget-cleared corpus and these fixes, the
 promoted `parallel_js` allowlist now runs clean. (6)
-The contention profiler now also has focused `promise microtasks`,
+The contention profiler keeps both the original `condition asyncWait` stress row
+whose notifier busy-spins on the ready counter and a `condition asyncWait parked`
+control row whose notifier parks with property `Atomics.wait`; compare both
+before attributing an async-condition change to task delivery versus scheduler
+interference. The profiler also has focused `promise microtasks`,
 `promise reactions`, and `promise thenables` cases for issue #15: they keep the
 default table narrow, but record Promise microtask enqueue/pop/run totals and
 split reaction jobs from thenable-assimilation jobs under no-GIL versus
