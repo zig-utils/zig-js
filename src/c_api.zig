@@ -175,7 +175,6 @@ export fn JSEvaluateScript(
     starting_line_number: c_int,
     exception: ExceptionRef,
 ) callconv(.c) JSValueRef {
-    _ = this_object;
     _ = source_url;
     _ = starting_line_number;
     // `Context.evaluate()` acquires/releases the per-context GIL for serialized
@@ -183,7 +182,14 @@ export fn JSEvaluateScript(
     // is usable through the public C API in Debug builds too.
     const c = ctxRawFrom(ctx) orelse return null;
     const s = strFrom(script) orelse return null;
-    const result = c.evaluate(s.bytes) catch |err| {
+    const this_value = if (this_object) |_|
+        Value.obj(objectFrom(this_object) orelse {
+            setException(c, exception, "TypeError: thisObject is not an object");
+            return null;
+        })
+    else
+        Value.obj(c.global_object);
+    const result = c.evaluateWithThis(s.bytes, this_value) catch |err| {
         // A JS `throw` surfaces the actual thrown value; host failures (parse
         // errors, OOM) surface their error name as a string.
         if (err == error.Throw) {
@@ -756,6 +762,31 @@ test "C-API: object property get/set" {
     JSObjectSetProperty(ctx, obj, key, JSValueMakeNumber(ctx, 42), 0, null);
     const got = JSObjectGetProperty(ctx, obj, key, null);
     try std.testing.expectEqual(@as(f64, 42), JSValueToNumber(ctx, got, null));
+}
+
+test "C-API: JSEvaluateScript honors explicit thisObject" {
+    const ctx = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
+    defer JSGlobalContextRelease(ctx);
+
+    var exception: JSValueRef = null;
+    const global_probe = JSStringCreateWithUTF8CString("this === globalThis") orelse return error.StringInitFailed;
+    defer JSStringRelease(global_probe);
+    const global_result = JSEvaluateScript(ctx, global_probe, null, null, 0, &exception) orelse return error.EvalFailed;
+    try std.testing.expect(exception == null);
+    try std.testing.expect(JSValueToBoolean(ctx, global_result));
+
+    const obj = JSObjectMake(ctx, null, null);
+    const key = JSStringCreateWithUTF8CString("answer") orelse return error.StringInitFailed;
+    defer JSStringRelease(key);
+    JSObjectSetProperty(ctx, obj, key, JSValueMakeNumber(ctx, 42), kJSPropertyAttributeNone, &exception);
+    try std.testing.expect(exception == null);
+
+    const script = JSStringCreateWithUTF8CString("this.answer") orelse return error.StringInitFailed;
+    defer JSStringRelease(script);
+    const result = JSEvaluateScript(ctx, script, obj, null, 0, &exception) orelse return error.EvalFailed;
+    try std.testing.expect(exception == null);
+    try std.testing.expectEqual(@as(f64, 42), JSValueToNumber(ctx, result, &exception));
+    try std.testing.expect(exception == null);
 }
 
 test "C-API: JSObjectSetProperty honors property attributes" {

@@ -2530,6 +2530,14 @@ pub const Context = struct {
     /// constructs the compiler doesn't lower yet fall back to the tree-walker,
     /// so behavior is identical either way — the VM just handles the hot subset.
     pub fn evaluate(self: *Context, source: []const u8) RunError!value.Value {
+        return self.evaluateWithThis(source, Value.obj(self.global_object));
+    }
+
+    /// Like `evaluate`, but with an explicit top-level `this` binding. This is
+    /// used by the C API's `JSEvaluateScript(thisObject, ...)` entry point while
+    /// the plain embedder-facing Zig API keeps the normal Script default of the
+    /// global object.
+    pub fn evaluateWithThis(self: *Context, source: []const u8, this_value: Value) RunError!value.Value {
         if (self.gil) |g| if (!self.parallel_js) g.acquire();
         defer if (self.gil) |g| if (!self.parallel_js) g.release();
         self.assertOwnerThread();
@@ -2562,6 +2570,7 @@ pub const Context = struct {
         // scan descends into arrows but stops at nested functions/classes/methods.
         if (prog.* == .program) try parser.scanEvalContext(prog.program, true, true);
         var machine = self.interpreter();
+        machine.this_value = this_value;
         try self.pushActiveInterpreter(&machine);
         defer self.popActiveInterpreter(&machine);
         // Top-level strictness from the program's directive prologue (the parser
