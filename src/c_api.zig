@@ -254,8 +254,8 @@ export fn JSValueIsArray(ctx: JSContextRef, v: JSValueRef) callconv(.c) bool {
 
 export fn JSValueIsDate(ctx: JSContextRef, v: JSValueRef) callconv(.c) bool {
     _ = ctx;
-    _ = v;
-    return false; // Date type not yet implemented.
+    const uv = unbox(v);
+    return uv.isObject() and uv.asObj().is_date;
 }
 
 export fn JSValueIsEqual(ctx: JSContextRef, a: JSValueRef, b: JSValueRef, exception: ExceptionRef) callconv(.c) bool {
@@ -720,6 +720,33 @@ test "C-API: JSEvaluateScript computes 1 + 1 === 2" {
     try std.testing.expect(exception == null);
     try std.testing.expect(JSValueIsNumber(ctx, result));
     try std.testing.expectEqual(@as(f64, 2), JSValueToNumber(ctx, result, null));
+}
+
+test "C-API: JSValueIsDate reports Date internal slot" {
+    const ctx = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
+    defer JSGlobalContextRelease(ctx);
+
+    var exception: JSValueRef = null;
+    const date_script = JSStringCreateWithUTF8CString("new Date(0)") orelse return error.StringInitFailed;
+    defer JSStringRelease(date_script);
+    const date = JSEvaluateScript(ctx, date_script, null, null, 0, &exception) orelse return error.EvalFailed;
+    try std.testing.expect(exception == null);
+    try std.testing.expect(JSValueIsDate(ctx, date));
+
+    const invalid_date_script = JSStringCreateWithUTF8CString("new Date(NaN)") orelse return error.StringInitFailed;
+    defer JSStringRelease(invalid_date_script);
+    const invalid_date = JSEvaluateScript(ctx, invalid_date_script, null, null, 0, &exception) orelse return error.EvalFailed;
+    try std.testing.expect(exception == null);
+    try std.testing.expect(JSValueIsDate(ctx, invalid_date));
+
+    const callable_date_script = JSStringCreateWithUTF8CString("Date()") orelse return error.StringInitFailed;
+    defer JSStringRelease(callable_date_script);
+    const callable_date = JSEvaluateScript(ctx, callable_date_script, null, null, 0, &exception) orelse return error.EvalFailed;
+    try std.testing.expect(exception == null);
+    try std.testing.expect(!JSValueIsDate(ctx, callable_date));
+
+    const plain = JSObjectMake(ctx, null, null);
+    try std.testing.expect(!JSValueIsDate(ctx, plain));
 }
 
 test "C-API: ZJSGlobalContextCreateThreaded(parallel) evaluates JS + exposes Thread" {
