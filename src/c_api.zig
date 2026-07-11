@@ -588,7 +588,7 @@ export fn JSObjectIsFunction(ctx: JSContextRef, object: JSObjectRef) callconv(.c
 export fn JSObjectIsConstructor(ctx: JSContextRef, object: JSObjectRef) callconv(.c) bool {
     _ = ctx;
     const obj = objectFrom(object) orelse return false;
-    return obj.js_func != null or obj.error_ctor != null;
+    return interp.isConstructorValue(Value.obj(obj));
 }
 
 // ---- JSString lifecycle ------------------------------------------------
@@ -1011,6 +1011,34 @@ test "C-API: callback functions honor name and Function prototype" {
     const result = JSEvaluateScript(ctx, script, null, null, 0, &exception) orelse return error.EvalFailed;
     try std.testing.expect(exception == null);
     try std.testing.expect(JSValueToBoolean(ctx, result));
+}
+
+test "C-API: JSObjectIsConstructor recognizes native constructors" {
+    const ctx = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
+    defer JSGlobalContextRelease(ctx);
+
+    var exception: JSValueRef = null;
+    const global = JSContextGetGlobalObject(ctx);
+    const date_name = JSStringCreateWithUTF8CString("Date") orelse return error.StringInitFailed;
+    defer JSStringRelease(date_name);
+    const date_ctor = JSObjectGetProperty(ctx, global, date_name, &exception) orelse return error.PropFailed;
+    try std.testing.expect(exception == null);
+    try std.testing.expect(JSObjectIsFunction(ctx, date_ctor));
+    try std.testing.expect(JSObjectIsConstructor(ctx, date_ctor));
+
+    const date_obj = JSObjectCallAsConstructor(ctx, date_ctor, 0, null, &exception) orelse return error.ConstructFailed;
+    try std.testing.expect(exception == null);
+    try std.testing.expect(JSValueIsDate(ctx, date_obj));
+
+    const fn_name = JSStringCreateWithUTF8CString("hostAnswer") orelse return error.StringInitFailed;
+    defer JSStringRelease(fn_name);
+    const fn_obj = JSObjectMakeFunctionWithCallback(ctx, fn_name, namedHostCallback) orelse return error.FunctionCreateFailed;
+    try std.testing.expect(JSObjectIsFunction(ctx, fn_obj));
+    try std.testing.expect(!JSObjectIsConstructor(ctx, fn_obj));
+
+    const plain = JSObjectMake(ctx, null, null);
+    try std.testing.expect(!JSObjectIsFunction(ctx, plain));
+    try std.testing.expect(!JSObjectIsConstructor(ctx, plain));
 }
 
 test "C-API: array construction and indexed get use element helpers" {
