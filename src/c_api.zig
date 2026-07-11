@@ -382,6 +382,11 @@ export fn JSValueToObject(ctx: JSContextRef, v: JSValueRef, exception: Exception
     const sa_saved = strcell.setActiveArena(c.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = c.interpreter();
+    c.pushActiveInterpreter(&machine) catch {
+        setException(c, exception, "OutOfMemory");
+        return null;
+    };
+    defer c.popActiveInterpreter(&machine);
     const obj = machine.toObject(val) catch |err| {
         if (err == error.Throw) {
             if (exception != null) exception[0] = box(c, machine.exception);
@@ -438,6 +443,8 @@ export fn JSObjectMake(ctx: JSContextRef, class: ?*anyopaque, data: ?*anyopaque)
     const sa_saved = strcell.setActiveArena(c.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = c.interpreter();
+    c.pushActiveInterpreter(&machine) catch return null;
+    defer c.popActiveInterpreter(&machine);
     const value_obj = machine.newObject() catch return null;
     const obj = value_obj.asObj();
     obj.private_data = data;
@@ -475,6 +482,11 @@ export fn JSObjectMakeArray(ctx: JSContextRef, argc: usize, argv: [*c]const JSVa
     const sa_saved = strcell.setActiveArena(c.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = c.interpreter();
+    c.pushActiveInterpreter(&machine) catch {
+        setException(c, exception, "OutOfMemory");
+        return null;
+    };
+    defer c.popActiveInterpreter(&machine);
     const arr = machine.newArray() catch |err| {
         if (err == error.Throw) {
             if (exception != null) exception[0] = box(c, machine.exception);
@@ -700,7 +712,13 @@ fn hostCallbackNative(ctx: *anyopaque, this: Value, args: []const Value) value.H
 export fn JSObjectMakeFunctionWithCallback(ctx: JSContextRef, name: JSStringRef, callback: JSObjectCallAsFunctionCallback) callconv(.c) JSObjectRef {
     const c = ctxFrom(ctx) orelse return null;
     const cb = callback orelse return null;
+    const gc_saved = gc_mod.setActiveHeap(c.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(c.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
     var machine = c.interpreter();
+    c.pushActiveInterpreter(&machine) catch return null;
+    defer c.popActiveInterpreter(&machine);
     const obj = gc_mod.allocObject(c.gc, c.arena()) catch return null;
     obj.* = .{ .callback = cb, .callback_context = c, .native = hostCallbackNative, .proto = machine.functionProto() };
     const name_bytes = if (strFrom(name)) |s| s.bytes else "";
