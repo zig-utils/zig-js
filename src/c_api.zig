@@ -599,7 +599,10 @@ fn objectFrom(ref: JSObjectRef) ?*Object {
 export fn JSObjectGetProperty(ctx: JSContextRef, object: JSObjectRef, name: JSStringRef, exception: ExceptionRef) callconv(.c) JSValueRef {
     const c = ctxFrom(ctx) orelse return null;
     const obj = objectFrom(object) orelse return box(c, Value.undef());
-    const key = strFrom(name) orelse return box(c, Value.undef());
+    const key = strFrom(name) orelse {
+        setException(c, exception, "TypeError: property name is null");
+        return null;
+    };
     const gc_saved = gc_mod.setActiveHeap(c.gc);
     defer _ = gc_mod.setActiveHeap(gc_saved);
     const sa_saved = strcell.setActiveArena(c.arena());
@@ -624,7 +627,10 @@ export fn JSObjectGetProperty(ctx: JSContextRef, object: JSObjectRef, name: JSSt
 export fn JSObjectSetProperty(ctx: JSContextRef, object: JSObjectRef, name: JSStringRef, val: JSValueRef, attrs: c_uint, exception: ExceptionRef) callconv(.c) void {
     const c = ctxFrom(ctx) orelse return;
     const obj = objectFrom(object) orelse return;
-    const key = strFrom(name) orelse return;
+    const key = strFrom(name) orelse {
+        setException(c, exception, "TypeError: property name is null");
+        return;
+    };
     const gc_saved = gc_mod.setActiveHeap(c.gc);
     defer _ = gc_mod.setActiveHeap(gc_saved);
     const sa_saved = strcell.setActiveArena(c.arena());
@@ -1223,6 +1229,20 @@ test "C-API: object property get/set" {
     JSObjectSetProperty(ctx, obj, key, JSValueMakeNumber(ctx, 42), 0, null);
     const got = JSObjectGetProperty(ctx, obj, key, null);
     try std.testing.expectEqual(@as(f64, 42), JSValueToNumber(ctx, got, null));
+}
+
+test "C-API: property accessors reject null names with exception" {
+    const ctx = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
+    defer JSGlobalContextRelease(ctx);
+
+    const obj = JSObjectMake(ctx, null, null);
+    var exception: JSValueRef = null;
+    try std.testing.expect(JSObjectGetProperty(ctx, obj, null, &exception) == null);
+    try std.testing.expect(exception != null);
+
+    exception = null;
+    JSObjectSetProperty(ctx, obj, null, JSValueMakeNumber(ctx, 1), 0, &exception);
+    try std.testing.expect(exception != null);
 }
 
 test "C-API: JSObjectGetProperty uses JavaScript get semantics" {
