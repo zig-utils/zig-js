@@ -5366,7 +5366,7 @@ fn runMixedWaiterRaceLifecycleInterleaving(gpa: std.mem.Allocator, seed: u64) !b
         \\        () => {{ Atomics.add(gate, 'propAbandonSettled', 1); }});
         \\      ready();
         \\      for (;;)
-        \\        Atomics.wait(gate, 'ready', Atomics.load(gate, 'ready'), 1000);
+        \\        sleepMs(1000);
         \\    }}, gate, key));
         \\  }}
         \\  for (let i = 0; i < {d}; i++) {{
@@ -5412,7 +5412,7 @@ fn runMixedWaiterRaceLifecycleInterleaving(gpa: std.mem.Allocator, seed: u64) !b
         \\        () => {{ Atomics.add(gate, 'typedAbandonSettled', 1); }});
         \\      ready();
         \\      for (;;)
-        \\        Atomics.wait(gate, 'ready', Atomics.load(gate, 'ready'), 1000);
+        \\        sleepMs(1000);
         \\    }}, sab, slot, gate));
         \\  }}
         \\  while (Atomics.load(gate, 'ready') < {d})
