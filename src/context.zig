@@ -106,6 +106,7 @@ pub const GcCellBacking = struct {
     /// larger reserved-slot overhang of a 512 KiB chunk. The lazy bump cursor
     /// means unused slots are not prelinked.
     const large_chunk_bytes: usize = 384 * 1024;
+    const reusable_tail_chunks: usize = 8;
     const FreeNode = extern struct {
         next: ?*FreeNode,
         chunk_idx: usize,
@@ -590,6 +591,16 @@ pub const GcCellBacking = struct {
         while (first_trimmed > 0 and self.bucket_live_counts[idx].items[first_trimmed - 1] == 0) {
             first_trimmed -= 1;
         }
+        // Keep a small reusable empty tail behind any live prefix. Context reuse
+        // workloads commonly allocate a burst, collect, then allocate a similar
+        // burst again; trimming every empty tail slab forces the next task to
+        // reissue fresh chunks instead of reusing the just-freed slots. Retaining
+        // a bounded tail keeps reuse hot while still returning larger one-off
+        // spikes.
+        if (first_trimmed < old_len and first_trimmed > 0) {
+            const empty_tail = old_len - first_trimmed;
+            first_trimmed += @min(empty_tail, reusable_tail_chunks);
+        }
         if (first_trimmed == old_len) return 0;
 
         self.acquireInner();
@@ -867,14 +878,15 @@ test "GC cell backing reserves chunk metadata capacity chunks" {
     try std.testing.expect(backing.bucket_addr_index[idx].capacity >= backing.bucket_addr_index[idx].items.len);
 }
 
-test "GC cell backing trims empty tail chunks after collection" {
+test "GC cell backing trims excess empty tail chunks after collection" {
     var backing = GcCellBacking{ .inner = std.testing.allocator };
     defer backing.deinit();
     const a = backing.allocator();
 
     const idx = GcCellBacking.bucketIndex(200, .@"16").?;
     const slots = GcCellBacking.chunk_bytes / GcCellBacking.bucket_sizes[idx];
-    var cells = try std.testing.allocator.alloc([]align(16) u8, slots + 1);
+    const tail_chunks = GcCellBacking.reusable_tail_chunks + 2;
+    var cells = try std.testing.allocator.alloc([]align(16) u8, (tail_chunks * slots) + 1);
     defer std.testing.allocator.free(cells);
 
     var allocated: usize = 0;
@@ -885,24 +897,26 @@ test "GC cell backing trims empty tail chunks after collection" {
     }
     defer for (cells[0..slots]) |cell| a.free(cell);
 
-    try std.testing.expectEqual(@as(usize, 2), backing.bucket_chunks[idx].items.len);
-    try std.testing.expectEqual(@as(usize, 1), backing.bucket_live_counts[idx].items[1]);
-    a.free(cells[slots]);
-    try std.testing.expectEqual(@as(usize, 0), backing.bucket_live_counts[idx].items[1]);
-    try std.testing.expectEqual(@as(usize, 1), backing.bucket_free_counts[idx]);
+    try std.testing.expectEqual(tail_chunks + 1, backing.bucket_chunks[idx].items.len);
+    for (cells[slots .. tail_chunks * slots]) |cell| a.free(cell);
+    a.free(cells[tail_chunks * slots]);
+    for (1..tail_chunks + 1) |chunk_idx| {
+        try std.testing.expectEqual(@as(usize, 0), backing.bucket_live_counts[idx].items[chunk_idx]);
+    }
+    try std.testing.expectEqual(((tail_chunks - 1) * slots) + 1, backing.bucket_free_counts[idx]);
 
-    try std.testing.expectEqual(@as(usize, 1), backing.trimEmptyTailChunks());
-    try std.testing.expectEqual(@as(usize, 1), backing.bucket_chunks[idx].items.len);
-    try std.testing.expectEqual(@as(usize, 0), backing.bucket_free_counts[idx]);
-    try std.testing.expectEqual(slots, backing.bucket_issued_slots[idx]);
-    try std.testing.expectEqual(slots, backing.bucket_capacity_slots[idx]);
-    try std.testing.expectEqual(@as(usize, 1), backing.bucket_addr_index[idx].items.len);
-    try std.testing.expect(backing.bucket_bump_start[idx] >= backing.bucket_chunks[idx].items.len);
+    // Retain a bounded reusable empty tail and trim only the excess tail chunks.
+    try std.testing.expectEqual(@as(usize, 2), backing.trimEmptyTailChunks());
+    try std.testing.expectEqual(GcCellBacking.reusable_tail_chunks + 1, backing.bucket_chunks[idx].items.len);
+    try std.testing.expectEqual(GcCellBacking.reusable_tail_chunks * slots, backing.bucket_free_counts[idx]);
+    try std.testing.expectEqual((GcCellBacking.reusable_tail_chunks + 1) * slots, backing.bucket_issued_slots[idx]);
+    try std.testing.expectEqual((GcCellBacking.reusable_tail_chunks + 1) * slots, backing.bucket_capacity_slots[idx]);
+    try std.testing.expectEqual(GcCellBacking.reusable_tail_chunks + 1, backing.bucket_addr_index[idx].items.len);
 
     const next = try a.alignedAlloc(u8, .@"16", 200);
     a.free(next);
-    try std.testing.expectEqual(@as(usize, 2), backing.bucket_chunks[idx].items.len);
-    try std.testing.expectEqual(@as(usize, 1), backing.trimEmptyTailChunks());
+    try std.testing.expectEqual(GcCellBacking.reusable_tail_chunks + 1, backing.bucket_chunks[idx].items.len);
+    try std.testing.expectEqual(@as(usize, 0), backing.trimEmptyTailChunks());
 }
 
 test "GC cell backing keeps non-empty tail and empty inner chunks" {
@@ -933,9 +947,9 @@ test "GC cell backing keeps non-empty tail and empty inner chunks" {
     try std.testing.expectEqual(@as(usize, 1), backing.bucket_live_counts[idx].items[2]);
 
     a.free(cells[2 * slots]);
-    try std.testing.expectEqual(@as(usize, 2), backing.trimEmptyTailChunks());
-    try std.testing.expectEqual(@as(usize, 1), backing.bucket_chunks[idx].items.len);
-    try std.testing.expectEqual(slots, backing.bucket_capacity_slots[idx]);
+    try std.testing.expectEqual(@as(usize, 0), backing.trimEmptyTailChunks());
+    try std.testing.expectEqual(@as(usize, 3), backing.bucket_chunks[idx].items.len);
+    try std.testing.expectEqual(3 * slots, backing.bucket_capacity_slots[idx]);
 }
 
 test "GC cell backing compacts tail-trim metadata in one range" {
@@ -965,22 +979,24 @@ test "GC cell backing compacts tail-trim metadata in one range" {
     try std.testing.expectEqual(@as(usize, 0), backing.bucket_live_counts[idx].items[4]);
     try std.testing.expect(backing.bucket_free_counts[idx] > slots);
 
-    try std.testing.expectEqual(@as(usize, 2), backing.trimEmptyTailChunks());
-    try std.testing.expectEqual(@as(usize, 3), backing.bucket_chunks[idx].items.len);
-    try std.testing.expectEqual(@as(usize, 3), backing.bucket_addr_index[idx].items.len);
-    try std.testing.expectEqual(slots, backing.bucket_free_counts[idx]);
+    try std.testing.expectEqual(@as(usize, 0), backing.trimEmptyTailChunks());
+    try std.testing.expectEqual(@as(usize, 5), backing.bucket_chunks[idx].items.len);
+    try std.testing.expectEqual(@as(usize, 5), backing.bucket_addr_index[idx].items.len);
+    try std.testing.expectEqual((2 * slots) + 1, backing.bucket_free_counts[idx]);
     try std.testing.expectEqual(@as(usize, 0), backing.bucket_live_counts[idx].items[1]);
-    try std.testing.expectEqual(slots * 3, backing.bucket_capacity_slots[idx]);
-    try std.testing.expectEqual(slots * 3, backing.bucket_issued_slots[idx]);
+    try std.testing.expectEqual(@as(usize, 0), backing.bucket_live_counts[idx].items[3]);
+    try std.testing.expectEqual(@as(usize, 0), backing.bucket_live_counts[idx].items[4]);
+    try std.testing.expectEqual((slots * 4) + 1, backing.bucket_issued_slots[idx]);
+    try std.testing.expectEqual(slots * 5, backing.bucket_capacity_slots[idx]);
 
     var retained_nodes: usize = 0;
     var it = backing.free_lists[idx];
     while (it) |node| {
-        try std.testing.expectEqual(@as(usize, 1), node.chunk_idx);
+        try std.testing.expect(node.chunk_idx == 1 or node.chunk_idx == 3 or node.chunk_idx == 4);
         retained_nodes += 1;
         it = node.next;
     }
-    try std.testing.expectEqual(slots, retained_nodes);
+    try std.testing.expectEqual((2 * slots) + 1, retained_nodes);
 
     var prev_end: usize = 0;
     for (backing.bucket_addr_index[idx].items) |entry| {
