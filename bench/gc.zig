@@ -692,6 +692,58 @@ fn printNursery(gpa: std.mem.Allocator, io: std.Io) !void {
     }
 }
 
+fn printNurseryDrift(gpa: std.mem.Allocator) !void {
+    const cycles: usize = 4;
+    std.debug.print("\nQuiescent nursery threshold drift ({d} repeated 512-object batches)\n", .{cycles});
+    std.debug.print("{s:<18} {s:<14} {s:>6} {s:>12} {s:>12} {s:>8} {s:>12} {s:>10} {s:>10}\n", .{
+        "mode",
+        "shape",
+        "cycle",
+        "young bytes",
+        "prom bytes",
+        "surv %",
+        "next thresh",
+        "minor",
+        "full",
+    });
+    for (modes) |mode| {
+        if (!modeUsesGc(mode)) continue;
+        for (nursery_cases) |case| {
+            const ctx = try makeContext(gpa, mode);
+            defer ctx.destroy();
+            ctx.collectGarbage();
+            const heap = ctx.gc.?;
+            // Keep this table focused on nursery policy drift. Old-space pressure
+            // is covered by the explicit full-GC and allocation-churn rows below.
+            heap.threshold_bytes = std.math.maxInt(usize);
+            var cycle: usize = 0;
+            while (cycle < cycles) : (cycle += 1) {
+                const minor_before = heap.minor_collections;
+                const full_before = heap.full_collections;
+                _ = try ctx.evaluate(case.source);
+                _ = try ctx.evaluate("0"); // collection runs at the quiescent entry boundary
+                const minor_delta = heap.minor_collections - minor_before;
+                const full_delta = heap.full_collections - full_before;
+                const young_bytes = if (minor_delta > 0) heap.last_minor_young_bytes else 0;
+                const promoted_bytes = if (minor_delta > 0) heap.last_minor_promoted_bytes else 0;
+                const survival_x100 = if (young_bytes == 0) @as(usize, 0) else (promoted_bytes * 10000) / young_bytes;
+                std.debug.print("{s:<18} {s:<14} {d:>6} {d:>12} {d:>12} {d:>5}.{d:0>2}% {d:>12} {d:>10} {d:>10}\n", .{
+                    mode.name,
+                    case.name,
+                    cycle + 1,
+                    young_bytes,
+                    promoted_bytes,
+                    survival_x100 / 100,
+                    survival_x100 % 100,
+                    heap.nursery_threshold_bytes,
+                    minor_delta,
+                    full_delta,
+                });
+            }
+        }
+    }
+}
+
 pub fn main() !void {
     const gpa = std.heap.page_allocator;
     var threaded = std.Io.Threaded.init(gpa, .{ .environ = .empty });
@@ -702,6 +754,7 @@ pub fn main() !void {
     try printLifecycle(gpa, io);
     try printTaskLifecycle(gpa, io);
     try printNursery(gpa, io);
+    try printNurseryDrift(gpa);
     try printWorkloadDestroy(gpa, io);
     try printAllocation(gpa, io);
     try printExplicitGc(gpa, io);

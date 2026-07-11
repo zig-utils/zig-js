@@ -652,11 +652,13 @@ tail trimming should compact freelist and sorted-address-index metadata once for
 the whole released tail range, not once per released slab. The same profile now
 prints a repeated allocate-plus-collect churn table that summarizes
 fresh cells, reused cells, freed cells, final chunk/live counts, and reuse
-percentage for GC modes. The quiescent nursery table reports the evaluation-entry
+percentage for GC modes. The quiescent nursery tables report the evaluation-entry
 pause used to collect a fixed young workload, young cells/bytes entering the
 cycle, reclaimed cells/bytes, promoted cells/bytes, byte survival/reclamation
-percentages, the next nursery threshold, and minor/full cycle deltas. This keeps
-nursery tuning tied to reclamation quality, pause cost, and threshold drift.
+percentages, the next nursery threshold, minor/full cycle deltas, and a repeated
+batch threshold-drift row for each retention shape. This keeps nursery tuning tied
+to reclamation quality, pause cost, and threshold trajectory instead of a single
+post-cycle number.
 Direct `GcCellBacking` unit tests cover lazy fresh-slot bumping, free-list
 recycling, fresh-chunk cursor advancement, ownership span/hint classification,
 sorted address-index lookup with chunk/bump-offset/address metadata kept in
