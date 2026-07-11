@@ -35,8 +35,22 @@ const module_namespace_waiter_reserve_granularity = 16;
 /// no-GIL default may contend here, while `.gil = true` keeps it uncontended and
 /// the single-thread path pays nothing.
 pub const LockedArena = struct {
+    const local_chunk_bytes: usize = 64 * 1024;
+    const local_max_alloc: usize = 4096;
+    const local_chunk_alignment: std.mem.Alignment = .@"64";
+
+    const LocalChunk = struct {
+        start: usize,
+        end: usize,
+    };
+
     inner: std.mem.Allocator,
     lock: std.atomic.Value(u32) = .init(0),
+    local_chunks: std.ArrayListUnmanaged(LocalChunk) = .empty,
+
+    threadlocal var local_owner: ?*LockedArena = null;
+    threadlocal var local_cursor: usize = 0;
+    threadlocal var local_end: usize = 0;
 
     inline fn acquire(self: *LockedArena) void {
         var spins: usize = 0;
@@ -47,8 +61,56 @@ pub const LockedArena = struct {
         self.lock.store(0, .release);
     }
 
+    inline fn canUseLocal(len: usize, alignment: std.mem.Alignment) bool {
+        return len > 0 and
+            len <= local_max_alloc and
+            @intFromEnum(alignment) <= @intFromEnum(local_chunk_alignment);
+    }
+
+    inline fn resetLocalFor(self: *LockedArena) void {
+        if (local_owner == self) {
+            local_owner = null;
+            local_cursor = 0;
+            local_end = 0;
+        }
+    }
+
+    fn allocLocalExisting(self: *LockedArena, len: usize, alignment: std.mem.Alignment) ?[*]u8 {
+        if (!canUseLocal(len, alignment)) return null;
+        if (local_owner != self) return null;
+        const aligned = alignment.forward(local_cursor);
+        if (aligned > local_end or len > local_end - aligned) return null;
+        local_cursor = aligned + len;
+        return @ptrFromInt(aligned);
+    }
+
+    fn ownsLocalLocked(self: *LockedArena, ptr: [*]u8) bool {
+        const addr = @intFromPtr(ptr);
+        for (self.local_chunks.items) |chunk| {
+            if (addr >= chunk.start and addr < chunk.end) return true;
+        }
+        return false;
+    }
+
+    fn refillLocal(self: *LockedArena, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        if (!canUseLocal(len, alignment)) return null;
+        self.acquire();
+        defer self.unlock();
+
+        const raw = self.inner.vtable.alloc(self.inner.ptr, local_chunk_bytes, local_chunk_alignment, ret_addr) orelse return null;
+        const start = @intFromPtr(raw);
+        const end = start + local_chunk_bytes;
+        self.local_chunks.append(self.inner, .{ .start = start, .end = end }) catch return null;
+        local_owner = self;
+        local_cursor = start;
+        local_end = end;
+        return self.allocLocalExisting(len, alignment);
+    }
+
     fn allocFn(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
         const self: *LockedArena = @ptrCast(@alignCast(ctx));
+        if (self.allocLocalExisting(len, alignment)) |ptr| return ptr;
+        if (self.refillLocal(len, alignment, ret_addr)) |ptr| return ptr;
         self.acquire();
         defer self.unlock();
         return self.inner.vtable.alloc(self.inner.ptr, len, alignment, ret_addr);
@@ -57,18 +119,21 @@ pub const LockedArena = struct {
         const self: *LockedArena = @ptrCast(@alignCast(ctx));
         self.acquire();
         defer self.unlock();
+        if (self.ownsLocalLocked(mem.ptr)) return false;
         return self.inner.vtable.resize(self.inner.ptr, mem, alignment, new_len, ret_addr);
     }
     fn remapFn(ctx: *anyopaque, mem: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
         const self: *LockedArena = @ptrCast(@alignCast(ctx));
         self.acquire();
         defer self.unlock();
+        if (self.ownsLocalLocked(mem.ptr)) return null;
         return self.inner.vtable.remap(self.inner.ptr, mem, alignment, new_len, ret_addr);
     }
     fn freeFn(ctx: *anyopaque, mem: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
         const self: *LockedArena = @ptrCast(@alignCast(ctx));
         self.acquire();
         defer self.unlock();
+        if (self.ownsLocalLocked(mem.ptr)) return;
         self.inner.vtable.free(self.inner.ptr, mem, alignment, ret_addr);
     }
 
@@ -1610,6 +1675,10 @@ pub const Context = struct {
         // `Shape.transition` reuses the root shape's captured allocator — so a
         // wrapper installed later would leave shape transitions on the raw arena.
         var locked_arena: ?*LockedArena = null;
+        errdefer if (locked_arena) |la| {
+            la.resetLocalFor();
+            gpa.destroy(la);
+        };
         const a = if (options.enable_threads or options.parallel_gc) blk: {
             const la = try gpa.create(LockedArena);
             la.* = .{ .inner = arena_state.allocator() };
@@ -1848,6 +1917,7 @@ pub const Context = struct {
             self.gc_state = null;
         }
         if (self.locked_arena) |la| {
+            la.resetLocalFor();
             self.gpa.destroy(la);
             self.locked_arena = null;
         }
@@ -10614,7 +10684,10 @@ test "LockedArena: concurrent allocation from many threads is race-free (GIL-rem
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     var la = LockedArena{ .inner = arena_state.allocator() };
+    defer la.resetLocalFor();
     const a = la.allocator();
+    jsthread.resetContentionStats();
+    defer jsthread.disableContentionStats();
 
     const threads = 8;
     const per = 1000;
@@ -10640,6 +10713,7 @@ test "LockedArena: concurrent allocation from many threads is race-free (GIL-rem
 
     // Every one of the threads*per allocations succeeded and read back intact.
     try std.testing.expectEqual(@as(u32, threads * per), w.ok.load(.monotonic));
+    try std.testing.expect(jsthread.contentionStats().arena_lock_acquires < threads * 8);
 }
 
 test "parallel_gc (M3 GIL-removal bring-up): mutators create+shape+mutate disjoint objects in parallel" {

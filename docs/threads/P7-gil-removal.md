@@ -154,7 +154,9 @@ are done and validated:
   Arena (shapes, strings, AST, binding tables): `Context.LockedArena`,
   installed **before** the create-time arena is captured, so `root_shape`/`env`
   and `Shape.transition` (which reuses the root shape's captured allocator) are
-  thread-safe.
+  thread-safe. Small arena allocations refill per-thread bump chunks under the
+  lock, then allocate lock-free from the local chunk; large, highly aligned, and
+  resize/remap operations keep using the serialized fallback.
   Backing-store accounting counters are atomic.
 - **Per-structure locks** (the object model + collections): `Object.property_lock`
   / `elements_lock`, `Shape.transition_lock`, `Environment.binding_lock`,
@@ -665,7 +667,8 @@ pass in the same warmed context, so profiler atomics do not masquerade as
 runtime contention. The focused columns split microtask-queue lock traffic
 (`qlock`/`qyld`), per-Promise state-lock traffic (`plock`/`pyld`), thread-safe
 arena traffic (`aacq`/`acnt`/`aspn`, acquisitions / contended acquisitions /
-failed spin attempts), and transient Promise allocation sources (`rpair`
+failed spin attempts; after chunking, acquisitions are chunk refills or
+fallback operations rather than every tiny arena allocation), and transient Promise allocation sources (`rpair`
 resolving-function pairs, `cap` `NewPromiseCapability` executors, `pnew`
 Promise creations, `pcell` Promise state cells, `pobj` Promise wrapper objects,
 `rfn` resolving-function objects, `rgr` reaction-list growth, `qgr`
