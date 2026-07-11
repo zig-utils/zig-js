@@ -210,11 +210,11 @@ Issue #1 remains the umbrella status page.
   `Thread`s can still join. Existing `asyncJoin()` waiters reject with the same
   reserved object when their already-created promise reaction can be delivered.
   This is intentionally an embedder allocator boundary rather than a JavaScript
-  heap-shape oracle. The remaining #24/#27 work is allocation-site catchability:
-  a JS `try/catch` around the allocating expression should observe the OOM
-  before it escapes to the whole `Thread` completion path. The PR-249
-  `semantics/oom-one-thread.js` probe now exercises the real cap and fails on
-  that sharper blocker.
+  heap-shape oracle. GC-backed capped contexts can now reclaim at safe GC cell
+  allocation failures and retry, which promotes the PR-249
+  `semantics/oom-one-thread.js` recovery witness. Remaining #24/#27 work is to
+  keep broadening allocation-site catchability and emergency-headroom behavior
+  beyond the promoted witness.
 - **Parallel scaling optimization.** Benchmarks show real speedup, but scaling
   is sub-linear. `zig build threads-profile` now provides a repeatable baseline
   against the `.gil = true` fallback for independent compute, shared object

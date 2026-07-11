@@ -232,6 +232,7 @@ const allowlist = [_][]const u8{
     "semantics/private-fields-shared.js",
     "semantics/proto-cycle-race.js",
     "semantics/regexp-lastindex-shared.js",
+    "semantics/oom-one-thread.js",
     "semantics/stack-overflow-per-thread.js",
     "semantics/symbol-registry-cross-thread.js",
     "semantics/termination-storm.js",

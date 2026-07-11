@@ -610,6 +610,10 @@ pub const Binding = struct {
 
     pub const Kind = CellKind;
 
+    pub fn recoverAllocationFailure(self: *Binding) bool {
+        return self.context.collectForAllocationFailure();
+    }
+
     /// Persistent roots reachable from the realm plus registered active
     /// Interpreter execution roots at quiescent checkpoints.
     pub fn traceRoots(self: *Binding, v: anytype) void {

@@ -48,9 +48,6 @@ EXPLICIT_CASE_CATEGORIES = {
     "w16-c1-prevent-collection.js": (
         "JSC heap snapshot/preventCollection hooks",
     ),
-    "semantics/oom-one-thread.js": (
-        "allocation-site catchable OOM",
-    ),
 }
 
 PROMOTION_PROBES = (
@@ -58,7 +55,6 @@ PROMOTION_PROBES = (
     "cve/mc-life-creator-thread-dies.js",
     "dw2-marklistset-storm.js",
     "w16-c1-prevent-collection.js",
-    "semantics/oom-one-thread.js",
 )
 
 
@@ -79,10 +75,6 @@ PROMOTION_PROBE_EXPECTATIONS = {
     ),
     "dw2-marklistset-storm.js": ProbeExpectation("timeout"),
     "w16-c1-prevent-collection.js": ProbeExpectation("timeout"),
-    "semantics/oom-one-thread.js": ProbeExpectation(
-        "fail",
-        ("OutOfMemoryError: Context heap limit exceeded",),
-    ),
 }
 
 

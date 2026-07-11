@@ -116,8 +116,8 @@ shared-realm `Thread` OOM survivor witness that keeps a sibling joinable after
 one peer exhausts the context cap.
 
 `zig build threads-test` runs the green WebKit PR-249 allowlist from
-`reference/webkit-249/threads-tests`. The current coverage contains 230
-promoted files out of 259 executable PR-249 files: 228 in the default
+`reference/webkit-249/threads-tests`. The current coverage contains 231
+promoted files out of 259 executable PR-249 files: 229 in the default
 `zig build threads-test` allowlist plus 2 `parallel_js`-only witnesses. It covers:
 
 - `api/` and `lifecycle/`: constructor shape, lifecycle, ids, constructor
@@ -790,12 +790,6 @@ PR-249 files stay reference-only for concrete reasons:
 - JIT/CVE files that require JSC-specific code artifact hooks, ASAN controls,
   stop counters, disassembly controls, or retired-artifact machinery remain out
   until real engine behavior backs those hooks.
-- `semantics/oom-one-thread.js` now runs under a zig-js
-  `Context.Options.heap_limit_bytes` cap in the reference probe, but remains
-  out because native allocation pressure still escapes as a `Thread` completion
-  OOM instead of being catchable by the allocating JS frame's local `try/catch`.
-  Heap-limited corpus cases are GC-backed so the remaining blocker is the real
-  collect/retry recovery path rather than a permanently unreclaimable arena cap.
 - `cve/mc-df-arraycopy-relabel.js` remains out because it depends on JSC's
   butterfly verification shell option and a typed-array set length race shape
   whose current zig-js failure is still the documented `RangeError` blocker.

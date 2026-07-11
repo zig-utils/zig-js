@@ -2306,6 +2306,28 @@ pub const Context = struct {
         self.collectGarbage();
     }
 
+    /// Emergency retry path for GC cell allocation under an external allocator
+    /// cap. Runs only where the current thread can safely scan its native stack
+    /// and any peer JS stacks are frozen by the GIL parking protocol; no-GIL
+    /// parallel recovery still needs the abort-safe publication protocol in #29.
+    pub fn collectForAllocationFailure(self: *Context) bool {
+        const h = self.gc orelse return false;
+        if (!stack_scan.supported) return false;
+        if (self.gc_par_collector.load(.acquire) != null) return false;
+        if (self.gil) |g| {
+            if (!g.allOthersParked()) return false;
+        } else if (self.hasRunningJsThreads()) {
+            return false;
+        }
+        self.finishConcurrentGCIfActive();
+        self.gc_scan_native_stack = true;
+        defer self.gc_scan_native_stack = false;
+        h.collect();
+        if (self.gc_cell_backing) |backing| _ = backing.trimEmptyTailChunks();
+        self.gc_requested.store(false, .monotonic);
+        return true;
+    }
+
     /// Heap-growth-triggered collection at an engine step checkpoint, while the
     /// native stack holds live `Value`s. Sound because the GC binding adds two
     /// extra root sources: registered active VM `Exec` operand stacks (precise,
