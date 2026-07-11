@@ -48,7 +48,9 @@ const gpa = std.heap.page_allocator;
 /// Boxed interpreter value handed across the C boundary as a `JSValueRef`.
 const Boxed = struct { value: Value };
 
-/// JSC `JSType` — ABI-compatible with Apple's enum and Home's `types.JSType`.
+/// JSC-shaped `JSType`. Values 0..6 match Apple's public enum; `bigint` is a
+/// zig-js extension so the C boundary does not misreport BigInt primitives as
+/// generic objects.
 pub const JSType = enum(c_uint) {
     undefined = 0,
     null = 1,
@@ -57,6 +59,7 @@ pub const JSType = enum(c_uint) {
     string = 4,
     object = 5,
     symbol = 6,
+    bigint = 7,
 };
 
 pub const JSValueRef = ?*anyopaque;
@@ -206,13 +209,14 @@ export fn JSEvaluateScript(
 
 export fn JSValueGetType(ctx: JSContextRef, v: JSValueRef) callconv(.c) JSType {
     _ = ctx;
-    return switch (unbox(v).kind()) {
+    const uv = unbox(v);
+    return switch (uv.kind()) {
         .undefined => .undefined,
         .null => .null,
         .boolean => .boolean,
         .number => .number,
         .string => .string,
-        .object => .object,
+        .object => if (uv.asObj().is_symbol) .symbol else if (uv.asObj().is_bigint) .bigint else .object,
     };
 }
 
@@ -243,7 +247,8 @@ export fn JSValueIsString(ctx: JSContextRef, v: JSValueRef) callconv(.c) bool {
 
 export fn JSValueIsObject(ctx: JSContextRef, v: JSValueRef) callconv(.c) bool {
     _ = ctx;
-    return unbox(v).isObject();
+    const uv = unbox(v);
+    return uv.isObject() and !uv.asObj().is_symbol and !uv.asObj().is_bigint;
 }
 
 export fn JSValueIsArray(ctx: JSContextRef, v: JSValueRef) callconv(.c) bool {
@@ -354,7 +359,7 @@ export fn JSValueToStringCopy(ctx: JSContextRef, v: JSValueRef, exception: Excep
 export fn JSValueToObject(ctx: JSContextRef, v: JSValueRef, exception: ExceptionRef) callconv(.c) JSObjectRef {
     const c = ctxFrom(ctx) orelse return null;
     const val = unbox(v);
-    if (val.isObject()) return v;
+    if (val.isObject() and !val.asObj().is_symbol and !val.asObj().is_bigint) return v;
     const gc_saved = gc_mod.setActiveHeap(c.gc);
     defer _ = gc_mod.setActiveHeap(gc_saved);
     const sa_saved = strcell.setActiveArena(c.arena());
@@ -767,6 +772,26 @@ test "C-API: round-trip a UTF-8 string" {
     try std.testing.expectEqualStrings("hello", buf[0 .. written - 1]);
 }
 
+test "C-API: primitive object-tagged values report primitive types" {
+    const ctx = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
+    defer JSGlobalContextRelease(ctx);
+
+    var exception: JSValueRef = null;
+    const symbol_script = JSStringCreateWithUTF8CString("Symbol('x')") orelse return error.StringInitFailed;
+    defer JSStringRelease(symbol_script);
+    const symbol_value = JSEvaluateScript(ctx, symbol_script, null, null, 0, &exception) orelse return error.EvalFailed;
+    try std.testing.expect(exception == null);
+    try std.testing.expectEqual(JSType.symbol, JSValueGetType(ctx, symbol_value));
+    try std.testing.expect(!JSValueIsObject(ctx, symbol_value));
+
+    const bigint_script = JSStringCreateWithUTF8CString("1n") orelse return error.StringInitFailed;
+    defer JSStringRelease(bigint_script);
+    const bigint_value = JSEvaluateScript(ctx, bigint_script, null, null, 0, &exception) orelse return error.EvalFailed;
+    try std.testing.expect(exception == null);
+    try std.testing.expectEqual(JSType.bigint, JSValueGetType(ctx, bigint_value));
+    try std.testing.expect(!JSValueIsObject(ctx, bigint_value));
+}
+
 test "C-API: JSEvaluateScript computes 1 + 1 === 2" {
     const ctx = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
     defer JSGlobalContextRelease(ctx);
@@ -955,6 +980,20 @@ test "C-API: JSValueToObject uses JavaScript ToObject semantics" {
     defer JSStringRelease(str_ref);
     const str_obj = JSValueToObject(ctx, JSValueMakeString(ctx, str_ref), &exception) orelse return error.ObjectCreateFailed;
     try std.testing.expect(exception == null);
+    const symbol_script = JSStringCreateWithUTF8CString("Symbol('boxed')") orelse return error.StringInitFailed;
+    defer JSStringRelease(symbol_script);
+    const symbol_prim = JSEvaluateScript(ctx, symbol_script, null, null, 0, &exception) orelse return error.EvalFailed;
+    try std.testing.expect(exception == null);
+    const symbol_obj = JSValueToObject(ctx, symbol_prim, &exception) orelse return error.ObjectCreateFailed;
+    try std.testing.expect(exception == null);
+    try std.testing.expect(JSValueIsObject(ctx, symbol_obj));
+    const bigint_script = JSStringCreateWithUTF8CString("1n") orelse return error.StringInitFailed;
+    defer JSStringRelease(bigint_script);
+    const bigint_prim = JSEvaluateScript(ctx, bigint_script, null, null, 0, &exception) orelse return error.EvalFailed;
+    try std.testing.expect(exception == null);
+    const bigint_obj = JSValueToObject(ctx, bigint_prim, &exception) orelse return error.ObjectCreateFailed;
+    try std.testing.expect(exception == null);
+    try std.testing.expect(JSValueIsObject(ctx, bigint_obj));
 
     const global = JSContextGetGlobalObject(ctx);
     const num_name = JSStringCreateWithUTF8CString("boxedNumber") orelse return error.StringInitFailed;
@@ -963,11 +1002,19 @@ test "C-API: JSValueToObject uses JavaScript ToObject semantics" {
     defer JSStringRelease(bool_name);
     const str_name = JSStringCreateWithUTF8CString("boxedString") orelse return error.StringInitFailed;
     defer JSStringRelease(str_name);
+    const symbol_name = JSStringCreateWithUTF8CString("boxedSymbol") orelse return error.StringInitFailed;
+    defer JSStringRelease(symbol_name);
+    const bigint_name = JSStringCreateWithUTF8CString("boxedBigInt") orelse return error.StringInitFailed;
+    defer JSStringRelease(bigint_name);
     JSObjectSetProperty(ctx, global, num_name, num_obj, kJSPropertyAttributeNone, &exception);
     try std.testing.expect(exception == null);
     JSObjectSetProperty(ctx, global, bool_name, bool_obj, kJSPropertyAttributeNone, &exception);
     try std.testing.expect(exception == null);
     JSObjectSetProperty(ctx, global, str_name, str_obj, kJSPropertyAttributeNone, &exception);
+    try std.testing.expect(exception == null);
+    JSObjectSetProperty(ctx, global, symbol_name, symbol_obj, kJSPropertyAttributeNone, &exception);
+    try std.testing.expect(exception == null);
+    JSObjectSetProperty(ctx, global, bigint_name, bigint_obj, kJSPropertyAttributeNone, &exception);
     try std.testing.expect(exception == null);
 
     const script = JSStringCreateWithUTF8CString(
@@ -976,7 +1023,11 @@ test "C-API: JSValueToObject uses JavaScript ToObject semantics" {
         \\boxedBoolean.valueOf() === true &&
         \\Object.prototype.toString.call(boxedBoolean) === "[object Boolean]" &&
         \\boxedString.valueOf() === "zig" &&
-        \\Object.prototype.toString.call(boxedString) === "[object String]"
+        \\Object.prototype.toString.call(boxedString) === "[object String]" &&
+        \\typeof boxedSymbol.valueOf() === "symbol" &&
+        \\Object.prototype.toString.call(boxedSymbol) === "[object Symbol]" &&
+        \\boxedBigInt.valueOf() === 1n &&
+        \\Object.prototype.toString.call(boxedBigInt) === "[object BigInt]"
     ) orelse return error.StringInitFailed;
     defer JSStringRelease(script);
     const result = JSEvaluateScript(ctx, script, null, null, 0, &exception) orelse return error.EvalFailed;
