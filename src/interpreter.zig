@@ -4254,7 +4254,7 @@ pub const Interpreter = struct {
         // NativeFunction source form is anonymous (`function () { [native code] }`).
         const raw_name: []const u8 = if (o.bound != null) "" else if (o.getOwn("name")) |n| (if (n.isString()) n.asStr() else "") else "";
         const nm: []const u8 = if (raw_name.len > 0 and raw_name[0] == 0) "" else raw_name;
-        return Value.str(try std.mem.concat(self.arena, u8, &.{ "function ", nm, "() { [native code] }" }));
+        return try Value.strOwned(self.arena, try std.mem.concat(self.arena, u8, &.{ "function ", nm, "() { [native code] }" }));
     }
 
     /// True if `node` is an *anonymous* function/class definition — the
@@ -8018,13 +8018,13 @@ pub const Interpreter = struct {
             }
         }
         try appendUtf16Slice(&out, self.arena, s, accumulated, string_len);
-        return Value.str(try out.toOwnedSlice(self.arena));
+        return try Value.strOwned(self.arena, try out.toOwnedSlice(self.arena));
     }
 
     fn appendSplitSegment(self: *Interpreter, out: *std.ArrayListUnmanaged(Value), s: []const u8, start: usize, end: usize) EvalError!void {
         var buf: std.ArrayListUnmanaged(u8) = .empty;
         try appendUtf16Slice(&buf, self.arena, s, start, end);
-        try out.append(self.arena, Value.str(try buf.toOwnedSlice(self.arena)));
+        try out.append(self.arena, try Value.strOwned(self.arena, try buf.toOwnedSlice(self.arena)));
     }
 
     fn regexpSplit(self: *Interpreter, rx: Value, s: []const u8, limit_value: Value) EvalError!Value {
@@ -8087,7 +8087,7 @@ pub const Interpreter = struct {
         if (self.isRegExpProto(this.asObj())) return Value.str("/(?:)/");
         const src = try self.toStringV(try self.getProperty(this, "source"));
         const flags = try self.toStringV(try self.getProperty(this, "flags"));
-        return Value.str(try std.mem.concat(self.arena, u8, &.{ "/", src, "/", flags }));
+        return try Value.strOwned(self.arena, try std.mem.concat(self.arena, u8, &.{ "/", src, "/", flags }));
     }
 
     const ms_per_day: i64 = 86400000;
@@ -8330,7 +8330,7 @@ pub const Interpreter = struct {
         if (eq(name, "toUTCString") or eq(name, "toGMTString")) {
             if (std.math.isNan(t)) return Value.str("Invalid Date");
             const c = dateDecompose(t);
-            return Value.str(try std.fmt.allocPrint(self.arena, "{s}, {d:0>2} {s} {s} {d:0>2}:{d:0>2}:{d:0>2} GMT", .{
+            return try Value.strOwned(self.arena, try std.fmt.allocPrint(self.arena, "{s}, {d:0>2} {s} {s} {d:0>2}:{d:0>2}:{d:0>2} GMT", .{
                 day_names[@intCast(c.wday)], dnz(c.d), month_names[@intCast(c.mo)], try self.dateYearString(c.y), dnz(c.h), dnz(c.mi), dnz(c.s),
             }));
         }
@@ -8341,9 +8341,9 @@ pub const Interpreter = struct {
             const c = dateDecompose(t);
             const date_str = try std.fmt.allocPrint(self.arena, "{s} {s} {d:0>2} {s}", .{ day_names[@intCast(c.wday)], month_names[@intCast(c.mo)], dnz(c.d), try self.dateYearString(c.y) });
             const time_str = try std.fmt.allocPrint(self.arena, "{d:0>2}:{d:0>2}:{d:0>2} GMT+0000 (Coordinated Universal Time)", .{ dnz(c.h), dnz(c.mi), dnz(c.s) });
-            if (eq(name, "toDateString") or eq(name, "toLocaleDateString")) return Value.str(date_str);
-            if (eq(name, "toTimeString") or eq(name, "toLocaleTimeString")) return Value.str(time_str);
-            return Value.str(try std.mem.concat(self.arena, u8, &.{ date_str, " ", time_str }));
+            if (eq(name, "toDateString") or eq(name, "toLocaleDateString")) return try Value.strAlloc(self.arena, date_str);
+            if (eq(name, "toTimeString") or eq(name, "toLocaleTimeString")) return try Value.strAlloc(self.arena, time_str);
+            return try Value.strOwned(self.arena, try std.mem.concat(self.arena, u8, &.{ date_str, " ", time_str }));
         }
 
         // ---- getters ----------------------------------------------------------
@@ -15641,7 +15641,7 @@ fn objectProtoToStringFn(ctx: *anyopaque, this: Value, args: []const Value) valu
             if (tv.isString()) tag = tv.asStr();
         }
     }
-    return Value.str(try std.mem.concat(self.arena, u8, &.{ "[object ", tag, "]" }));
+    return try Value.strOwned(self.arena, try std.mem.concat(self.arena, u8, &.{ "[object ", tag, "]" }));
 }
 
 pub fn objectToStringIsArray(self: *Interpreter, o: *value.Object) EvalError!bool {
@@ -15714,7 +15714,7 @@ fn errorToStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.Host
     const msg = if (msg_v.isUndefined()) "" else try self.toStringV(msg_v);
     if (name.len == 0) return Value.str(msg);
     if (msg.len == 0) return Value.str(name);
-    return Value.str(try std.mem.concat(self.arena, u8, &.{ name, ": ", msg }));
+    return try Value.strOwned(self.arena, try std.mem.concat(self.arena, u8, &.{ name, ": ", msg }));
 }
 
 /// `Error.prototype.stack` getter (V8-style): a string for a receiver that has
@@ -15746,7 +15746,7 @@ fn errorStackGet(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
                 if (line_v.isNumber()) {
                     const line = line_v.asNum();
                     if (!std.math.isNan(line) and !std.math.isInf(line) and line >= 1) {
-                        return Value.str(try std.fmt.allocPrint(self.arena, "{s}\n    at <eval> ({s}:{d})", .{
+                        return try Value.strOwned(self.arena, try std.fmt.allocPrint(self.arena, "{s}\n    at <eval> ({s}:{d})", .{
                             first_line,
                             source_v.asStr(),
                             @as(usize, @intFromFloat(@trunc(line))),
@@ -19574,7 +19574,7 @@ fn typedArrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args
             const el = try self.taLoadIdx(ta, i);
             if (!el.isUndefined()) try buf.appendSlice(self.arena, try self.toStringV(el));
         }
-        return Value.str(try buf.toOwnedSlice(self.arena));
+        return try Value.strOwned(self.arena, try buf.toOwnedSlice(self.arena));
     }
     if (eq(name, "toLocaleString")) {
         // Per spec: R = ToString(? Invoke(element, "toLocaleString")), joined by ",".
@@ -19592,7 +19592,7 @@ fn typedArrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args
             const r = try self.callValueWithThis(method, &forwarded, el);
             try buf.appendSlice(self.arena, try self.toStringV(r));
         }
-        return Value.str(try buf.toOwnedSlice(self.arena));
+        return try Value.strOwned(self.arena, try buf.toOwnedSlice(self.arena));
     }
     if (eq(name, "forEach")) {
         const cb = if (args.len > 0) args[0] else Value.undef();
@@ -20475,7 +20475,7 @@ fn uint8ToBase64Fn(ctx: *anyopaque, this: Value, args: []const Value) value.Host
     const url = std.mem.eql(u8, try getStringOption(self, opts, "alphabet", &.{ "base64", "base64url" }, "base64"), "base64url");
     const omit = try getBoolOption(self, opts, "omitPadding");
     const bytes = (try uint8SnapshotBytes(self, o)) orelse return self.throwError("TypeError", "Uint8Array buffer is detached");
-    return Value.str(try encodeBase64(self, bytes, url, omit));
+    return try Value.strAlloc(self.arena, try encodeBase64(self, bytes, url, omit));
 }
 
 fn uint8ToHexFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
