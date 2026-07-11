@@ -585,6 +585,10 @@ export fn JSObjectSetProperty(ctx: JSContextRef, object: JSObjectRef, name: JSSt
     const c = ctxFrom(ctx) orelse return;
     const obj = objectFrom(object) orelse return;
     const key = strFrom(name) orelse return;
+    const gc_saved = gc_mod.setActiveHeap(c.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(c.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
     switch (obj.deleteAccessorOwn(c.arena(), key.bytes) catch {
         setException(c, exception, "OutOfMemory");
         return;
