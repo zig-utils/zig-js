@@ -216,6 +216,7 @@ pub const HostHooks = struct {
 
 pub const Worker = struct {
     thread: ?std.Thread = null,
+    owner_thread: std.Thread.Id,
     /// main → worker messages.
     inbox: Channel = .{},
     /// worker → main messages.
@@ -237,6 +238,13 @@ pub const Worker = struct {
         w.hooks.store(hooks, .release);
     }
 
+    /// Worker handles are owned by the thread that spawned them. The channels
+    /// are synchronized, but the thread handle, host hook installation, and
+    /// destroy lifecycle are single-owner.
+    pub fn isOwnerThread(w: *const Worker) bool {
+        return std.Thread.getCurrentId() == w.owner_thread;
+    }
+
     fn notifyHost(w: *Worker) void {
         if (w.hooks.load(.acquire)) |h| h.notify(h.ctx);
     }
@@ -247,7 +255,7 @@ pub const Worker = struct {
     pub fn spawn(src: []const u8) error{OutOfMemory}!*Worker {
         const w = try alloc.create(Worker);
         errdefer alloc.destroy(w);
-        w.* = .{ .src = try alloc.dupe(u8, src) };
+        w.* = .{ .owner_thread = std.Thread.getCurrentId(), .src = try alloc.dupe(u8, src) };
         errdefer alloc.free(w.src);
         w.thread = std.Thread.spawn(.{}, workerMain, .{w}) catch return error.OutOfMemory;
         return w;
@@ -270,6 +278,7 @@ pub const Worker = struct {
         const src_copy = try alloc.dupe(u8, entry_source);
         errdefer alloc.free(src_copy);
         w.* = .{
+            .owner_thread = std.Thread.getCurrentId(),
             .src = &.{},
             .module = .{ .entry_path = path_copy, .entry_source = src_copy, .host = host },
         };

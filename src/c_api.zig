@@ -1017,7 +1017,9 @@ export fn JSStringGetUTF8CString(str: JSStringRef, buffer: [*c]u8, buffer_size: 
 pub const JSWorkerRef = ?*anyopaque;
 
 fn workerFrom(ref: JSWorkerRef) ?*WorkerMod.Worker {
-    return @ptrCast(@alignCast(ref orelse return null));
+    const w: *WorkerMod.Worker = @ptrCast(@alignCast(ref orelse return null));
+    if (!w.isOwnerThread()) return null;
+    return w;
 }
 
 /// Spawn a worker running `source` (a script) in a fresh realm on its own
@@ -2480,6 +2482,27 @@ test "C-API: worker APIs reject null workers through exception" {
     defer JSStringRelease(receive_msg);
     written = JSStringGetUTF8CString(receive_msg, &buf, buf.len);
     try std.testing.expect(std.mem.indexOf(u8, buf[0 .. written - 1], "worker is not a worker") != null);
+}
+
+test "C-API: worker handles are owner-thread affine" {
+    const src = JSStringCreateWithUTF8CString(
+        "globalThis.onmessage = () => {};",
+    ) orelse return error.StringInitFailed;
+    defer JSStringRelease(src);
+
+    const w = JSWorkerCreate(src) orelse return error.WorkerSpawnFailed;
+    defer JSWorkerRelease(w);
+    try std.testing.expect(workerFrom(w) != null);
+
+    const Probe = struct {
+        fn run(worker: JSWorkerRef, rejected: *bool) void {
+            rejected.* = workerFrom(worker) == null;
+        }
+    };
+    var rejected = false;
+    const t = try std.Thread.spawn(.{}, Probe.run, .{ w, &rejected });
+    t.join();
+    try std.testing.expect(rejected);
 }
 
 test "C-API: JSGarbageCollect honors JSValueProtect/Unprotect (GC on)" {
