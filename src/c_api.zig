@@ -322,12 +322,22 @@ export fn JSValueToStringCopy(ctx: JSContextRef, v: JSValueRef, exception: Excep
 }
 
 export fn JSValueToObject(ctx: JSContextRef, v: JSValueRef, exception: ExceptionRef) callconv(.c) JSObjectRef {
-    _ = exception;
     const c = ctxFrom(ctx) orelse return null;
     const val = unbox(v);
     if (val.isObject()) return v;
-    const obj = gc_mod.allocObj(c.arena()) catch return null;
-    obj.* = .{};
+    const gc_saved = gc_mod.setActiveHeap(c.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(c.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = c.interpreter();
+    const obj = machine.toObject(val) catch |err| {
+        if (err == error.Throw) {
+            if (exception != null) exception[0] = box(c, machine.exception);
+        } else {
+            setException(c, exception, @errorName(err));
+        }
+        return null;
+    };
     return box(c, Value.obj(obj));
 }
 
@@ -789,6 +799,59 @@ test "C-API: object property get/set" {
     JSObjectSetProperty(ctx, obj, key, JSValueMakeNumber(ctx, 42), 0, null);
     const got = JSObjectGetProperty(ctx, obj, key, null);
     try std.testing.expectEqual(@as(f64, 42), JSValueToNumber(ctx, got, null));
+}
+
+test "C-API: JSValueToObject uses JavaScript ToObject semantics" {
+    const ctx = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
+    defer JSGlobalContextRelease(ctx);
+
+    var exception: JSValueRef = null;
+    const num_obj = JSValueToObject(ctx, JSValueMakeNumber(ctx, 7), &exception) orelse return error.ObjectCreateFailed;
+    try std.testing.expect(exception == null);
+    const bool_obj = JSValueToObject(ctx, JSValueMakeBoolean(ctx, true), &exception) orelse return error.ObjectCreateFailed;
+    try std.testing.expect(exception == null);
+    const str_ref = JSStringCreateWithUTF8CString("zig") orelse return error.StringInitFailed;
+    defer JSStringRelease(str_ref);
+    const str_obj = JSValueToObject(ctx, JSValueMakeString(ctx, str_ref), &exception) orelse return error.ObjectCreateFailed;
+    try std.testing.expect(exception == null);
+
+    const global = JSContextGetGlobalObject(ctx);
+    const num_name = JSStringCreateWithUTF8CString("boxedNumber") orelse return error.StringInitFailed;
+    defer JSStringRelease(num_name);
+    const bool_name = JSStringCreateWithUTF8CString("boxedBoolean") orelse return error.StringInitFailed;
+    defer JSStringRelease(bool_name);
+    const str_name = JSStringCreateWithUTF8CString("boxedString") orelse return error.StringInitFailed;
+    defer JSStringRelease(str_name);
+    JSObjectSetProperty(ctx, global, num_name, num_obj, kJSPropertyAttributeNone, &exception);
+    try std.testing.expect(exception == null);
+    JSObjectSetProperty(ctx, global, bool_name, bool_obj, kJSPropertyAttributeNone, &exception);
+    try std.testing.expect(exception == null);
+    JSObjectSetProperty(ctx, global, str_name, str_obj, kJSPropertyAttributeNone, &exception);
+    try std.testing.expect(exception == null);
+
+    const script = JSStringCreateWithUTF8CString(
+        \\boxedNumber.valueOf() === 7 &&
+        \\Object.prototype.toString.call(boxedNumber) === "[object Number]" &&
+        \\boxedBoolean.valueOf() === true &&
+        \\Object.prototype.toString.call(boxedBoolean) === "[object Boolean]" &&
+        \\boxedString.valueOf() === "zig" &&
+        \\Object.prototype.toString.call(boxedString) === "[object String]"
+    ) orelse return error.StringInitFailed;
+    defer JSStringRelease(script);
+    const result = JSEvaluateScript(ctx, script, null, null, 0, &exception) orelse return error.EvalFailed;
+    try std.testing.expect(exception == null);
+    try std.testing.expect(JSValueToBoolean(ctx, result));
+
+    const obj = JSObjectMake(ctx, null, null);
+    try std.testing.expect(JSValueIsStrictEqual(ctx, obj, JSValueToObject(ctx, obj, &exception)));
+    try std.testing.expect(exception == null);
+
+    exception = null;
+    try std.testing.expect(JSValueToObject(ctx, JSValueMakeNull(ctx), &exception) == null);
+    try std.testing.expect(exception != null);
+    exception = null;
+    try std.testing.expect(JSValueToObject(ctx, JSValueMakeUndefined(ctx), &exception) == null);
+    try std.testing.expect(exception != null);
 }
 
 test "C-API: JSEvaluateScript honors explicit thisObject" {
