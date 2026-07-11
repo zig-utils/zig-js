@@ -494,11 +494,28 @@ fn objectFrom(ref: JSObjectRef) ?*Object {
 }
 
 export fn JSObjectGetProperty(ctx: JSContextRef, object: JSObjectRef, name: JSStringRef, exception: ExceptionRef) callconv(.c) JSValueRef {
-    _ = exception;
     const c = ctxFrom(ctx) orelse return null;
     const obj = objectFrom(object) orelse return box(c, Value.undef());
     const key = strFrom(name) orelse return box(c, Value.undef());
-    return box(c, obj.getOwn(key.bytes) orelse Value.undef());
+    const gc_saved = gc_mod.setActiveHeap(c.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(c.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = c.interpreter();
+    c.pushActiveInterpreter(&machine) catch {
+        setException(c, exception, "OutOfMemory");
+        return null;
+    };
+    defer c.popActiveInterpreter(&machine);
+    const result = machine.getProperty(Value.obj(obj), key.bytes) catch |err| {
+        if (err == error.Throw) {
+            if (exception != null) exception[0] = box(c, machine.exception);
+        } else {
+            setException(c, exception, @errorName(err));
+        }
+        return null;
+    };
+    return box(c, result);
 }
 
 export fn JSObjectSetProperty(ctx: JSContextRef, object: JSObjectRef, name: JSStringRef, val: JSValueRef, attrs: c_uint, exception: ExceptionRef) callconv(.c) void {
@@ -938,6 +955,54 @@ test "C-API: object property get/set" {
     JSObjectSetProperty(ctx, obj, key, JSValueMakeNumber(ctx, 42), 0, null);
     const got = JSObjectGetProperty(ctx, obj, key, null);
     try std.testing.expectEqual(@as(f64, 42), JSValueToNumber(ctx, got, null));
+}
+
+test "C-API: JSObjectGetProperty uses JavaScript get semantics" {
+    const ctx = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
+    defer JSGlobalContextRelease(ctx);
+
+    var exception: JSValueRef = null;
+    const script = JSStringCreateWithUTF8CString(
+        \\var cApiGetCount = 0;
+        \\var cApiProto = { inherited: 42 };
+        \\var cApiObj = Object.create(cApiProto);
+        \\Object.defineProperty(cApiObj, "accessed", {
+        \\  get() { cApiGetCount += 1; return this.inherited + 1; }
+        \\});
+        \\Object.defineProperty(cApiObj, "boom", {
+        \\  get() { throw new TypeError("boom"); }
+        \\});
+        \\cApiObj;
+    ) orelse return error.StringInitFailed;
+    defer JSStringRelease(script);
+
+    const obj = JSEvaluateScript(ctx, script, null, null, 0, &exception) orelse return error.EvalFailed;
+    try std.testing.expect(exception == null);
+
+    const inherited_key = JSStringCreateWithUTF8CString("inherited") orelse return error.StringInitFailed;
+    defer JSStringRelease(inherited_key);
+    const inherited = JSObjectGetProperty(ctx, obj, inherited_key, &exception) orelse return error.PropFailed;
+    try std.testing.expect(exception == null);
+    try std.testing.expectEqual(@as(f64, 42), JSValueToNumber(ctx, inherited, null));
+
+    const accessed_key = JSStringCreateWithUTF8CString("accessed") orelse return error.StringInitFailed;
+    defer JSStringRelease(accessed_key);
+    const accessed = JSObjectGetProperty(ctx, obj, accessed_key, &exception) orelse return error.PropFailed;
+    try std.testing.expect(exception == null);
+    try std.testing.expectEqual(@as(f64, 43), JSValueToNumber(ctx, accessed, null));
+
+    const count_script = JSStringCreateWithUTF8CString("cApiGetCount") orelse return error.StringInitFailed;
+    defer JSStringRelease(count_script);
+    const count = JSEvaluateScript(ctx, count_script, null, null, 0, &exception) orelse return error.EvalFailed;
+    try std.testing.expect(exception == null);
+    try std.testing.expectEqual(@as(f64, 1), JSValueToNumber(ctx, count, null));
+
+    const boom_key = JSStringCreateWithUTF8CString("boom") orelse return error.StringInitFailed;
+    defer JSStringRelease(boom_key);
+    exception = null;
+    const failed = JSObjectGetProperty(ctx, obj, boom_key, &exception);
+    try std.testing.expect(failed == null);
+    try std.testing.expect(exception != null);
 }
 
 test "C-API: JSObject private data is host-owned and guarded" {
