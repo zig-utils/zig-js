@@ -1107,6 +1107,11 @@ test "C-API: JSString null C pointers are rejected safely" {
     try std.testing.expectEqual(@as(u8, 0), one[0]);
 }
 
+test "C-API: JSString rejects invalid UTF-8 input" {
+    const invalid = [_:0]u8{ 'b', 'a', 'd', 0xc0, 'u', 't', 'f', '8' };
+    try std.testing.expect(JSStringCreateWithUTF8CString(&invalid) == null);
+}
+
 test "C-API: JSValueMakeString rejects null string refs" {
     const ctx = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
     defer JSGlobalContextRelease(ctx);

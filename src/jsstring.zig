@@ -10,6 +10,7 @@ pub const JsString = struct {
     gpa: std.mem.Allocator,
 
     pub fn create(gpa: std.mem.Allocator, utf8: []const u8) !*JsString {
+        if (!std.unicode.utf8ValidateSlice(utf8)) return error.InvalidUtf8;
         const self = try gpa.create(JsString);
         errdefer gpa.destroy(self);
         const buf = try gpa.dupe(u8, utf8);
@@ -66,4 +67,8 @@ test "JSString retain/release is atomic across threads" {
 
     try std.testing.expectEqual(@as(usize, 1), s.refcount.load(.acquire));
     try std.testing.expectEqual(@as(usize, 18), s.utf16Len());
+}
+
+test "JSString rejects invalid UTF-8 before unchecked length walks" {
+    try std.testing.expectError(error.InvalidUtf8, JsString.create(std.testing.allocator, "bad\xc0utf8"));
 }

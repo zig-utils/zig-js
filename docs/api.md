@@ -125,6 +125,8 @@ For no-exception value inspection APIs, a null value ref is an invalid handle, n
 
 `JSValueMakeString` rejects a null string ref by returning null instead of creating JavaScript `undefined`.
 
+`JSStringCreateWithUTF8CString` accepts valid UTF-8 only. A null pointer or invalid UTF-8 byte sequence returns null, so later string APIs can use the validated UTF-8 backing safely.
+
 Native callbacks installed with `JSObjectMakeFunctionWithCallback` must return a non-null value ref or set the exception out pointer; returning null without an exception throws a `TypeError` instead of implicitly producing JavaScript `undefined`.
 
 `JSObjectCallAsFunction(..., thisObject, ...)` uses the provided object as the call receiver, or the context global object when `thisObject` is null.
