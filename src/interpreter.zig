@@ -15708,9 +15708,34 @@ fn errorStackGet(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
     // error, an implementation-defined trace string. Read the class name directly
     // off `[[ErrorData]]` rather than via [[Get]], so a hostile/recursive receiver
     // (proxy traps, getters) can't re-enter and blow the stack.
-    if (!this.asObj().is_error) return Value.undef();
-    const name = this.asObj().error_name;
-    return Value.str(if (name.len == 0) "Error" else name);
+    const obj = this.asObj();
+    if (!obj.is_error) return Value.undef();
+    const name = if (obj.error_name.len == 0) "Error" else obj.error_name;
+    const message = if (obj.getOwn("message")) |v|
+        (if (v.isString()) v.asStr() else "")
+    else
+        "";
+    const first_line = if (message.len == 0)
+        name
+    else
+        try std.mem.concat(self.arena, u8, &.{ name, ": ", message });
+    if (obj.getOwn("sourceURL")) |source_v| {
+        if (source_v.isString()) {
+            if (obj.getOwn("startingLineNumber")) |line_v| {
+                if (line_v.isNumber()) {
+                    const line = line_v.asNum();
+                    if (!std.math.isNan(line) and !std.math.isInf(line) and line >= 1) {
+                        return Value.str(try std.fmt.allocPrint(self.arena, "{s}\n    at <eval> ({s}:{d})", .{
+                            first_line,
+                            source_v.asStr(),
+                            @as(usize, @intFromFloat(@trunc(line))),
+                        }));
+                    }
+                }
+            }
+        }
+    }
+    return Value.str(first_line);
 }
 
 /// SetterThatIgnoresPrototypeProperties(this, home, p, v): reject a non-object

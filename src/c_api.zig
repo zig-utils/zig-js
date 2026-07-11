@@ -176,13 +176,39 @@ fn makeEvaluationSyntaxError(
     return err;
 }
 
+fn evaluationSourceName(source_url: JSStringRef) []const u8 {
+    return if (strFrom(source_url)) |s|
+        if (s.bytes.len == 0) "<eval>" else s.bytes
+    else
+        "<eval>";
+}
+
+fn attachEvaluationRuntimeSourceMetadata(
+    ctx: *Context,
+    thrown: Value,
+    source_url: JSStringRef,
+    starting_line_number: c_int,
+) !void {
+    if (!thrown.isObject()) return;
+    const obj = thrown.asObj();
+    if (!obj.is_error) return;
+    if (source_url == null and starting_line_number <= 0) return;
+
+    const gc_saved = gc_mod.setActiveHeap(ctx.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(ctx.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+
+    const source_name = evaluationSourceName(source_url);
+    const source_name_copy = try ctx.arena().dupe(u8, source_name);
+    try setDiagnosticField(ctx, obj, "sourceURL", Value.str(source_name_copy));
+    try setDiagnosticField(ctx, obj, "startingLineNumber", Value.num(@floatFromInt(if (starting_line_number > 0) starting_line_number else 1)));
+}
+
 fn setEvaluationException(ctx: *Context, exc: ExceptionRef, err: anyerror, source_url: JSStringRef, starting_line_number: c_int) void {
     if (isEvaluationParseError(err)) {
         if (ctx.last_evaluation_diagnostic) |loc| {
-            const source_name = if (strFrom(source_url)) |s|
-                if (s.bytes.len == 0) "<eval>" else s.bytes
-            else
-                "<eval>";
+            const source_name = evaluationSourceName(source_url);
             const base_line: usize = if (starting_line_number > 0) @intCast(starting_line_number) else 1;
             const line = loc.line + base_line - 1;
             const message = std.fmt.allocPrint(ctx.arena(), "{s}: {s}:{d}:{d}", .{
@@ -287,7 +313,9 @@ export fn JSEvaluateScript(
         // A JS `throw` surfaces the actual thrown value; host failures (parse
         // errors, OOM) surface their error name as a string.
         if (err == error.Throw) {
-            if (exception != null) exception[0] = box(c, c.exception orelse Value.str("uncaught exception"));
+            const thrown = c.exception orelse Value.str("uncaught exception");
+            attachEvaluationRuntimeSourceMetadata(c, thrown, source_url, starting_line_number) catch {};
+            if (exception != null) exception[0] = box(c, thrown);
         } else {
             setEvaluationException(c, exception, err, source_url, starting_line_number);
         }
@@ -1672,6 +1700,48 @@ test "C-API: evaluation syntax exceptions include source URL and line" {
     var lex_buf: [128]u8 = undefined;
     const lex_written = JSStringGetUTF8CString(lex_msg, &lex_buf, lex_buf.len);
     try std.testing.expect(std.mem.indexOf(u8, lex_buf[0 .. lex_written - 1], "app.js:41:2") != null);
+}
+
+test "C-API: evaluation runtime errors include source metadata" {
+    const ctx = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
+    defer JSGlobalContextRelease(ctx);
+
+    const script = JSStringCreateWithUTF8CString("throw new Error('boom')") orelse return error.StringInitFailed;
+    defer JSStringRelease(script);
+    const url = JSStringCreateWithUTF8CString("runtime.js") orelse return error.StringInitFailed;
+    defer JSStringRelease(url);
+
+    var exception: JSValueRef = null;
+    try std.testing.expect(JSEvaluateScript(ctx, script, null, url, 99, &exception) == null);
+    try std.testing.expect(exception != null);
+
+    var prop_exception: JSValueRef = null;
+    const source_key = JSStringCreateWithUTF8CString("sourceURL") orelse return error.StringInitFailed;
+    defer JSStringRelease(source_key);
+    const starting_line_key = JSStringCreateWithUTF8CString("startingLineNumber") orelse return error.StringInitFailed;
+    defer JSStringRelease(starting_line_key);
+    const stack_key = JSStringCreateWithUTF8CString("stack") orelse return error.StringInitFailed;
+    defer JSStringRelease(stack_key);
+
+    const source_value = JSObjectGetProperty(ctx, exception, source_key, &prop_exception) orelse return error.PropFailed;
+    try std.testing.expect(prop_exception == null);
+    const source_out = JSValueToStringCopy(ctx, source_value, null) orelse return error.StringInitFailed;
+    defer JSStringRelease(source_out);
+    var source_buf: [64]u8 = undefined;
+    const source_written = JSStringGetUTF8CString(source_out, &source_buf, source_buf.len);
+    try std.testing.expectEqualStrings("runtime.js", source_buf[0 .. source_written - 1]);
+
+    const starting_line_value = JSObjectGetProperty(ctx, exception, starting_line_key, &prop_exception) orelse return error.PropFailed;
+    try std.testing.expect(prop_exception == null);
+    try std.testing.expectEqual(@as(f64, 99), JSValueToNumber(ctx, starting_line_value, null));
+
+    const stack_value = JSObjectGetProperty(ctx, exception, stack_key, &prop_exception) orelse return error.PropFailed;
+    try std.testing.expect(prop_exception == null);
+    const stack_out = JSValueToStringCopy(ctx, stack_value, null) orelse return error.StringInitFailed;
+    defer JSStringRelease(stack_out);
+    var stack_buf: [160]u8 = undefined;
+    const stack_written = JSStringGetUTF8CString(stack_out, &stack_buf, stack_buf.len);
+    try std.testing.expect(std.mem.indexOf(u8, stack_buf[0 .. stack_written - 1], "runtime.js:99") != null);
 }
 
 test "C-API: JSObjectSetProperty honors property attributes" {
