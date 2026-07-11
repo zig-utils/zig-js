@@ -664,6 +664,7 @@ export fn JSObjectSetProperty(ctx: JSContextRef, object: JSObjectRef, name: JSSt
         setException(c, exception, "TypeError: property name is null");
         return;
     };
+    const property_value = valueArgFrom(c, val, exception) orelse return;
     const gc_saved = gc_mod.setActiveHeap(c.gc);
     defer _ = gc_mod.setActiveHeap(gc_saved);
     const sa_saved = strcell.setActiveArena(c.arena());
@@ -678,7 +679,7 @@ export fn JSObjectSetProperty(ctx: JSContextRef, object: JSObjectRef, name: JSSt
             return;
         },
     }
-    obj.setOwn(c.arena(), c.root_shape, key.bytes, unbox(val)) catch {
+    obj.setOwn(c.arena(), c.root_shape, key.bytes, property_value) catch {
         setException(c, exception, "OutOfMemory");
         return;
     };
@@ -914,6 +915,7 @@ export fn JSWorkerPostMessage(worker: JSWorkerRef, ctx: JSContextRef, value_ref:
         setException(c, exception, "TypeError: worker is not a worker");
         return false;
     };
+    const message_value = valueArgFrom(c, value_ref, exception) orelse return false;
     const gc_saved = gc_mod.setActiveHeap(c.gc);
     defer _ = gc_mod.setActiveHeap(gc_saved);
     const sa_saved = strcell.setActiveArena(c.arena());
@@ -924,7 +926,7 @@ export fn JSWorkerPostMessage(worker: JSWorkerRef, ctx: JSContextRef, value_ref:
         return false;
     };
     defer c.popActiveInterpreter(&machine);
-    w.postMessage(&machine, unbox(value_ref)) catch |err| {
+    w.postMessage(&machine, message_value) catch |err| {
         if (err == error.Throw) {
             if (exception != null) exception[0] = box(c, machine.exception);
         } else setException(c, exception, @errorName(err));
@@ -1291,6 +1293,31 @@ test "C-API: property accessors reject null objects with exception" {
 
     exception = null;
     try std.testing.expect(JSObjectGetPropertyAtIndex(ctx, null, 0, &exception) == null);
+    try std.testing.expect(exception != null);
+}
+
+test "C-API: value write APIs reject null value refs with exception" {
+    const ctx = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
+    defer JSGlobalContextRelease(ctx);
+
+    const obj = JSObjectMake(ctx, null, null) orelse return error.ObjectCreateFailed;
+    const key = JSStringCreateWithUTF8CString("missingValue") orelse return error.StringInitFailed;
+    defer JSStringRelease(key);
+    var exception: JSValueRef = null;
+
+    JSObjectSetProperty(ctx, obj, key, null, 0, &exception);
+    try std.testing.expect(exception != null);
+
+    const src = JSStringCreateWithUTF8CString(
+        "globalThis.onmessage = () => {};",
+    ) orelse return error.StringInitFailed;
+    defer JSStringRelease(src);
+
+    const w = JSWorkerCreate(src) orelse return error.WorkerSpawnFailed;
+    defer JSWorkerRelease(w);
+
+    exception = null;
+    try std.testing.expect(!JSWorkerPostMessage(w, ctx, null, &exception));
     try std.testing.expect(exception != null);
 }
 
