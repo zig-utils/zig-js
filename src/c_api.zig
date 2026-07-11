@@ -127,19 +127,21 @@ fn boxedFrom(ref: JSValueRef) ?*Boxed {
     return @ptrCast(@alignCast(ref orelse return null));
 }
 
-fn valueFrom(ref: JSValueRef) ?Value {
-    const b = boxedFrom(ref) orelse return null;
-    return b.value;
-}
-
 fn valueFromContext(ctx: *Context, ref: JSValueRef) ?Value {
     const b = boxedFrom(ref) orelse return null;
     if (b.owner != ctx) return null;
     return b.value;
 }
 
-fn unbox(ref: JSValueRef) Value {
-    return valueFrom(ref) orelse Value.undef();
+fn objectFromHandleInspection(ref: JSObjectRef) ?*Object {
+    const b = boxedFrom(ref) orelse return null;
+    if (comptime builtin.mode == .Debug) {
+        if (!b.owner.isOwnerThread()) std.debug.panic(
+            "Context is single-thread-affine: used from thread {d}, owned by thread {d} (docs/threads/bindings.md)",
+            .{ std.Thread.getCurrentId(), b.owner.owner_thread },
+        );
+    }
+    return if (b.value.isObject()) b.value.asObj() else null;
 }
 
 fn valueArgFrom(ctx: *Context, ref: JSValueRef, exception: ExceptionRef) ?Value {
@@ -621,12 +623,12 @@ export fn JSObjectMake(ctx: JSContextRef, class: ?*anyopaque, data: ?*anyopaque)
 }
 
 export fn JSObjectGetPrivate(object: JSObjectRef) callconv(.c) ?*anyopaque {
-    const obj = objectFrom(object) orelse return null;
+    const obj = objectFromHandleInspection(object) orelse return null;
     return if (obj.private_data_tag == .host) obj.private_data else null;
 }
 
 export fn JSObjectSetPrivate(object: JSObjectRef, data: ?*anyopaque) callconv(.c) bool {
-    const obj = objectFrom(object) orelse return false;
+    const obj = objectFromHandleInspection(object) orelse return false;
     if (obj.private_data_tag == .host) {
         obj.private_data = data;
         return true;
@@ -730,11 +732,6 @@ export fn JSObjectMakeDeferredPromise(ctx: JSContextRef, resolve: [*c]JSObjectRe
         setException(c, exception, "OutOfMemory");
         return null;
     };
-}
-
-fn objectFrom(ref: JSObjectRef) ?*Object {
-    const u = unbox(ref);
-    return if (u.isObject()) u.asObj() else null;
 }
 
 fn objectArgFrom(ctx: *Context, object: JSObjectRef, exception: ExceptionRef) ?*Object {
@@ -876,7 +873,8 @@ export fn JSObjectCallAsFunction(ctx: JSContextRef, function: JSObjectRef, this_
         return null;
     };
     defer c.popActiveInterpreter(&interpreter);
-    const res = interpreter.callValueWithThis(Value.obj(obj), args, unbox(this_ref)) catch |err| {
+    const this_value = valueArgFrom(c, this_ref, exception) orelse return null;
+    const res = interpreter.callValueWithThis(Value.obj(obj), args, this_value) catch |err| {
         if (err == error.Throw) {
             if (exception != null) exception[0] = box(c, interpreter.exception);
         } else setException(c, exception, @errorName(err));
