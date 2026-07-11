@@ -792,17 +792,17 @@ fn enumerableOwnProperties(self: *Interpreter, arg0: Value, kind: EnumKind) Host
             } else false)) and o.getAttr(k).enumerable);
         if (!enumerable) continue;
         if (kind == .key) {
-            try result.asObj().elements.append(result.asObj().elementsAllocator(self.arena), Value.str(k));
+            try result.asObj().appendElement(self.arena, Value.str(k));
             continue;
         }
         const v = try self.getProperty(ov, k); // [[Get]] — runs an accessor getter
         if (kind == .value) {
-            try result.asObj().elements.append(result.asObj().elementsAllocator(self.arena), v);
+            try result.asObj().appendElement(self.arena, v);
         } else {
             const pair = try self.newArray();
-            try pair.asObj().elements.append(pair.asObj().elementsAllocator(self.arena), Value.str(k));
-            try pair.asObj().elements.append(pair.asObj().elementsAllocator(self.arena), v);
-            try result.asObj().elements.append(result.asObj().elementsAllocator(self.arena), pair);
+            try pair.asObj().appendElement(self.arena, Value.str(k));
+            try pair.asObj().appendElement(self.arena, v);
+            try result.asObj().appendElement(self.arena, pair);
         }
     }
     return result;
@@ -976,7 +976,7 @@ pub fn arrayConstructor(ctx: *anyopaque, this: Value, args: []const Value) HostE
         // them). Only the logical length is set.
         arr.asObj().array_len = @intFromFloat(n);
     } else {
-        for (args) |v| try arr.asObj().elements.append(arr.asObj().elementsAllocator(self.arena), v);
+        for (args) |v| try arr.asObj().appendElement(self.arena, v);
     }
     return arr;
 }
@@ -2174,7 +2174,7 @@ pub fn objectGetOwnPropertySymbols(ctx: *anyopaque, this: Value, args: []const V
     // here and may throw), then keep only the symbol keys.
     for (try self.objectOwnKeysList(o)) |k| {
         if (value.isRealSymbolKey(k))
-            try result.asObj().elements.append(result.asObj().elementsAllocator(self.arena), self.keyToValue(k));
+            try result.asObj().appendElement(self.arena, self.keyToValue(k));
     }
     return result;
 }
@@ -2408,7 +2408,7 @@ pub fn objectGetOwnPropertyNames(ctx: *anyopaque, this: Value, args: []const Val
     // keys only (symbols go to getOwnPropertySymbols).
     for (try self.objectOwnKeysList(o)) |k| {
         if (value.isSymbolKey(k) or value.isPrivateKey(k)) continue;
-        try result.asObj().elements.append(result.asObj().elementsAllocator(self.arena), Value.str(k));
+        try result.asObj().appendElement(self.arena, Value.str(k));
     }
     return result;
 }
@@ -3144,7 +3144,7 @@ const JsonParser = struct {
         var index: usize = 0;
         while (true) {
             const child = try p.parseValue();
-            try result.asObj().elements.append(result.asObj().elementsAllocator(p.interp.arena), child.value);
+            try result.asObj().appendElement(p.interp.arena, child.value);
             if (child.source) |src| {
                 const key = try std.fmt.allocPrint(p.interp.arena, "{d}", .{index});
                 try p.sources.append(p.interp.arena, .{ .holder = result.asObj(), .key = key, .value = child.value, .source = src });
