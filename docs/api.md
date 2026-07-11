@@ -107,7 +107,7 @@ void        JSWorkerRelease(JSWorkerRef);
 ```
 :::
 
-Native callbacks use the standard `JSObjectCallAsFunctionCallback` calling convention, so functions you expose to JavaScript through this subset are registered exactly as they are with JavaScriptCore. `ZJSGlobalContextCreateThreaded` and `JSWorker*` are zig-js extensions rather than public JSC symbols.
+Native callbacks use the standard `JSObjectCallAsFunctionCallback` calling convention, so functions you expose to JavaScript through this subset are registered exactly as they are with JavaScriptCore. `JSObjectSetProperty` maps `ReadOnly`, `DontEnum`, and `DontDelete` attributes to JavaScript `writable`, `enumerable`, and `configurable` descriptor fields. `ZJSGlobalContextCreateThreaded` and `JSWorker*` are zig-js extensions rather than public JSC symbols.
 
 `JSObjectMakeDeferredPromise` returns a pending native Promise and stores callable resolve/reject functions in the provided out pointers when they are non-null. Those functions settle the promise through the normal Promise job queue; embedder-observable callbacks run at the next microtask checkpoint, such as the one performed after `JSEvaluateScript`.
 
@@ -116,6 +116,6 @@ Native callbacks use the standard `JSObjectCallAsFunctionCallback` calling conve
 > [!WARNING]
 > The implemented subset covers the common evaluation, value, object, string, and protected-handle surface plus the zig-js worker extension. Full JavaScriptCore class definitions, Objective-C `JSValue`/`JSContext`, inspector/debugger APIs, typed-array C constructors, and other WebKit internals are out of scope. The language/runtime scope is whatever the configured conformance runner currently proves — see [Conformance](/conformance).
 
-Some functions currently accept JavaScriptCore-shaped signatures but do not yet honor every argument: `JSGlobalContextRetain` does not reference-count (contexts are single-owner for now), `JSEvaluateScript` ignores `thisObject` / `sourceURL` / `startingLineNumber`, and `JSObjectSetProperty` ignores the `attributes` argument. Treat those as pre-stabilization gaps, not long-term ABI commitments: call sites compile today, but inert parameters should be implemented, renamed, or removed before the surface is declared stable. `JSObjectMakeFunctionWithCallback` does honor the provided function name.
+Some functions currently accept JavaScriptCore-shaped signatures but do not yet honor every argument: `JSGlobalContextRetain` does not reference-count (contexts are single-owner for now), and `JSEvaluateScript` ignores `thisObject` / `sourceURL` / `startingLineNumber`. Treat those as pre-stabilization gaps, not long-term ABI commitments: call sites compile today, but inert parameters should be implemented, renamed, or removed before the surface is declared stable. `JSObjectMakeFunctionWithCallback` does honor the provided function name, and `JSObjectSetProperty` honors property attributes.
 
 **Threading.** Handles are affine to the thread that owns their context: a context and its `JSValueRef` / `JSObjectRef` handles must be created and used on one thread (one context per thread — the C surface asserts this). For cross-context / cross-thread work use the `JSWorker*` extension (isolated worker contexts that exchange messages); see the [threading docs](/threads/) for what may cross a thread boundary.

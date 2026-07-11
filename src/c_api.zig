@@ -74,6 +74,11 @@ pub const JSObjectCallAsFunctionCallback = *const fn (
     exception: ExceptionRef,
 ) callconv(.c) JSValueRef;
 
+pub const kJSPropertyAttributeNone: c_uint = 0;
+pub const kJSPropertyAttributeReadOnly: c_uint = 1 << 1;
+pub const kJSPropertyAttributeDontEnum: c_uint = 1 << 2;
+pub const kJSPropertyAttributeDontDelete: c_uint = 1 << 3;
+
 // ---- internal helpers --------------------------------------------------
 
 fn ctxRawFrom(ref: JSContextRef) ?*Context {
@@ -105,6 +110,14 @@ fn strFrom(ref: JSStringRef) ?*JsString {
 
 fn setException(ctx: *Context, exc: ExceptionRef, message: []const u8) void {
     if (exc != null) exc[0] = box(ctx, Value.str(message));
+}
+
+fn propAttrFromC(attrs: c_uint) value.PropAttr {
+    return .{
+        .writable = (attrs & kJSPropertyAttributeReadOnly) == 0,
+        .enumerable = (attrs & kJSPropertyAttributeDontEnum) == 0,
+        .configurable = (attrs & kJSPropertyAttributeDontDelete) == 0,
+    };
 }
 
 // ---- VM lifecycle ------------------------------------------------------
@@ -415,12 +428,27 @@ export fn JSObjectGetProperty(ctx: JSContextRef, object: JSObjectRef, name: JSSt
 }
 
 export fn JSObjectSetProperty(ctx: JSContextRef, object: JSObjectRef, name: JSStringRef, val: JSValueRef, attrs: c_uint, exception: ExceptionRef) callconv(.c) void {
-    _ = attrs;
-    _ = exception;
     const c = ctxFrom(ctx) orelse return;
     const obj = objectFrom(object) orelse return;
     const key = strFrom(name) orelse return;
-    obj.setOwn(c.arena(), c.root_shape, key.bytes, unbox(val)) catch return;
+    switch (obj.deleteAccessorOwn(c.arena(), key.bytes) catch {
+        setException(c, exception, "OutOfMemory");
+        return;
+    }) {
+        .absent, .removed_continue, .deleted => {},
+        .blocked => {
+            setException(c, exception, "TypeError: cannot redefine non-configurable accessor");
+            return;
+        },
+    }
+    obj.setOwn(c.arena(), c.root_shape, key.bytes, unbox(val)) catch {
+        setException(c, exception, "OutOfMemory");
+        return;
+    };
+    obj.setAttr(c.arena(), key.bytes, propAttrFromC(attrs)) catch {
+        setException(c, exception, "OutOfMemory");
+        return;
+    };
 }
 
 export fn JSObjectGetPropertyAtIndex(ctx: JSContextRef, object: JSObjectRef, index: c_uint, exception: ExceptionRef) callconv(.c) JSValueRef {
@@ -707,6 +735,53 @@ test "C-API: object property get/set" {
     JSObjectSetProperty(ctx, obj, key, JSValueMakeNumber(ctx, 42), 0, null);
     const got = JSObjectGetProperty(ctx, obj, key, null);
     try std.testing.expectEqual(@as(f64, 42), JSValueToNumber(ctx, got, null));
+}
+
+test "C-API: JSObjectSetProperty honors property attributes" {
+    const ctx = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
+    defer JSGlobalContextRelease(ctx);
+
+    const obj = JSObjectMake(ctx, null, null);
+    const key = JSStringCreateWithUTF8CString("locked") orelse return error.StringInitFailed;
+    defer JSStringRelease(key);
+
+    var exception: JSValueRef = null;
+    JSObjectSetProperty(
+        ctx,
+        obj,
+        key,
+        JSValueMakeNumber(ctx, 7),
+        kJSPropertyAttributeReadOnly | kJSPropertyAttributeDontEnum | kJSPropertyAttributeDontDelete,
+        &exception,
+    );
+    try std.testing.expect(exception == null);
+
+    const global = JSContextGetGlobalObject(ctx);
+    const target_name = JSStringCreateWithUTF8CString("attrTarget") orelse return error.StringInitFailed;
+    defer JSStringRelease(target_name);
+    JSObjectSetProperty(ctx, global, target_name, obj, kJSPropertyAttributeNone, &exception);
+    try std.testing.expect(exception == null);
+
+    const script = JSStringCreateWithUTF8CString(
+        \\var d = Object.getOwnPropertyDescriptor(attrTarget, "locked");
+        \\var before = attrTarget.locked;
+        \\attrTarget.locked = 9;
+        \\var del = delete attrTarget.locked;
+        \\before === 7 &&
+        \\attrTarget.locked === 7 &&
+        \\del === false &&
+        \\Object.prototype.hasOwnProperty.call(attrTarget, "locked") &&
+        \\Object.keys(attrTarget).indexOf("locked") === -1 &&
+        \\d.value === 7 &&
+        \\d.writable === false &&
+        \\d.enumerable === false &&
+        \\d.configurable === false
+    ) orelse return error.StringInitFailed;
+    defer JSStringRelease(script);
+
+    const result = JSEvaluateScript(ctx, script, null, null, 0, &exception) orelse return error.EvalFailed;
+    try std.testing.expect(exception == null);
+    try std.testing.expect(JSValueToBoolean(ctx, result));
 }
 
 fn namedHostCallback(ctx: JSContextRef, function: JSObjectRef, this_object: JSObjectRef, argument_count: usize, arguments: [*c]const JSValueRef, exception: ExceptionRef) callconv(.c) JSValueRef {
