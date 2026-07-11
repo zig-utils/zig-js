@@ -458,15 +458,29 @@ export fn JSObjectSetPrivate(object: JSObjectRef, data: ?*anyopaque) callconv(.c
 }
 
 export fn JSObjectMakeArray(ctx: JSContextRef, argc: usize, argv: [*c]const JSValueRef, exception: ExceptionRef) callconv(.c) JSObjectRef {
-    _ = exception;
     const c = ctxFrom(ctx) orelse return null;
-    const obj = gc_mod.allocObj(c.arena()) catch return null;
-    obj.* = .{ .is_array = true };
+    const gc_saved = gc_mod.setActiveHeap(c.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(c.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = c.interpreter();
+    const arr = machine.newArray() catch |err| {
+        if (err == error.Throw) {
+            if (exception != null) exception[0] = box(c, machine.exception);
+        } else {
+            setException(c, exception, @errorName(err));
+        }
+        return null;
+    };
+    const obj = arr.asObj();
     var i: usize = 0;
     while (i < argc) : (i += 1) {
-        obj.appendElement(c.arena(), unbox(argv[i])) catch return null;
+        obj.appendElement(c.arena(), unbox(argv[i])) catch {
+            setException(c, exception, "OutOfMemory");
+            return null;
+        };
     }
-    return box(c, Value.obj(obj));
+    return box(c, arr);
 }
 
 export fn JSObjectMakeDeferredPromise(ctx: JSContextRef, resolve: [*c]JSObjectRef, reject: [*c]JSObjectRef, exception: ExceptionRef) callconv(.c) JSObjectRef {
@@ -1371,6 +1385,36 @@ test "C-API: array construction and indexed get use JavaScript get semantics" {
     const failed = JSObjectGetPropertyAtIndex(ctx, obj, 3, &exception);
     try std.testing.expect(failed == null);
     try std.testing.expect(exception != null);
+}
+
+test "C-API: JSObjectMakeArray inherits Array prototype" {
+    const ctx = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
+    defer JSGlobalContextRelease(ctx);
+
+    var exception: JSValueRef = null;
+    var values = [_]JSValueRef{
+        JSValueMakeNumber(ctx, 10),
+        JSValueMakeNumber(ctx, 20),
+    };
+    const arr = JSObjectMakeArray(ctx, values.len, &values, &exception) orelse return error.ArrayCreateFailed;
+    try std.testing.expect(exception == null);
+
+    const global = JSContextGetGlobalObject(ctx);
+    const name = JSStringCreateWithUTF8CString("cApiArray") orelse return error.StringInitFailed;
+    defer JSStringRelease(name);
+    JSObjectSetProperty(ctx, global, name, arr, 0, &exception);
+    try std.testing.expect(exception == null);
+
+    const script = JSStringCreateWithUTF8CString(
+        \\Array.isArray(cApiArray) &&
+        \\Object.getPrototypeOf(cApiArray) === Array.prototype &&
+        \\cApiArray.join("-") === "10-20" &&
+        \\cApiArray.map(function (x) { return x * 2; }).join(",") === "20,40"
+    ) orelse return error.StringInitFailed;
+    defer JSStringRelease(script);
+    const result = JSEvaluateScript(ctx, script, null, null, 0, &exception) orelse return error.EvalFailed;
+    try std.testing.expect(exception == null);
+    try std.testing.expect(JSValueToBoolean(ctx, result));
 }
 
 test "C-API: JSObjectMakeDeferredPromise resolves and rejects through returned functions" {
