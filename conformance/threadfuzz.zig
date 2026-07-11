@@ -5308,6 +5308,7 @@ fn runMixedWaiterRaceLifecycleInterleaving(gpa: std.mem.Allocator, seed: u64) !b
         \\  const view = new Int32Array(sab);
         \\  globalThis.__waitRaceGate = gate;
         \\  globalThis.__waitRaceView = view;
+        \\  globalThis.__waitRaceNormalThreads = [];
         \\  globalThis.__waitRaceAbandonedThreads = [];
         \\  globalThis.__waitRacePropAbandonKeys = [];
         \\  globalThis.__waitRaceTypedAbandonSlots = [];
@@ -5316,6 +5317,7 @@ fn runMixedWaiterRaceLifecycleInterleaving(gpa: std.mem.Allocator, seed: u64) !b
         \\    Atomics.notify(gate, 'ready');
         \\  }}
         \\  function observeNormal(t) {{
+        \\    globalThis.__waitRaceNormalThreads.push(t);
         \\    t.asyncJoin().then(
         \\      (v) => {{ globalThis.__waitRaceNormalScore += v; globalThis.__waitRaceNormalCount++; }},
         \\      () => {{ globalThis.__waitRaceNormalScore = -1000000; }});
@@ -5433,6 +5435,23 @@ fn runMixedWaiterRaceLifecycleInterleaving(gpa: std.mem.Allocator, seed: u64) !b
         \\    drainMicrotasks();
         \\    Atomics.wait(gate, 'ready', {d}, 1);
         \\  }}
+        \\  if (globalThis.__waitRaceNormalCount < {d}) {{
+        \\    for (const t of globalThis.__waitRaceNormalThreads) {{
+        \\      try {{
+        \\        t.join();
+        \\      }} catch (e) {{
+        \\        globalThis.__waitRaceNormalScore = -1000000;
+        \\        break;
+        \\      }}
+        \\      $drainRunLoop();
+        \\      drainMicrotasks();
+        \\    }}
+        \\    for (let spin = 0; globalThis.__waitRaceNormalCount < {d} && spin < 4000; spin++) {{
+        \\      $drainRunLoop();
+        \\      drainMicrotasks();
+        \\      Atomics.wait(gate, 'ready', {d}, 1);
+        \\    }}
+        \\  }}
         \\  if (globalThis.__waitRaceNormalScore !== {d})
         \\    throw new Error('bad mixed waiter normal score ' + globalThis.__waitRaceNormalScore + '/{d}');
         \\  if (globalThis.__waitRaceNormalCount !== {d})
@@ -5466,6 +5485,9 @@ fn runMixedWaiterRaceLifecycleInterleaving(gpa: std.mem.Allocator, seed: u64) !b
             total_ready,
             n_prop_notify,
             n_typed_notify,
+            expected_normal_count,
+            total_ready,
+            expected_normal_count,
             expected_normal_count,
             total_ready,
             expected_normal_score,
