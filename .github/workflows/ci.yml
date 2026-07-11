@@ -11,7 +11,7 @@ name: CI
 # — which is why this was Linux-only before.)
 #
 # Triggers: pull_request + push-to-main + manual dispatch + nightly schedule. The
-# no-GIL TSan corpus gate, suppression witness, and test262-parallel leg now run on
+# no-GIL TSan corpus gate and test262-parallel leg now run on
 # every PR and main push (production gating), not just nightly.
 on:
   pull_request:
@@ -183,11 +183,10 @@ jobs:
         working-directory: zig-js
         run: |
           set -uo pipefail
-          # Halt each case at its first race so the report is the case-log tail;
-          # suppress the JS-defined intentional races on shared-buffer *program
-          # bytes* (see tsan-suppressions.txt) so the gate reports only
-          # engine-state races.
-          export TSAN_OPTIONS="halt_on_error=1 suppressions=$PWD/tsan-suppressions.txt"
+          # Halt each case at its first race so the report is the case-log tail.
+          # The engine currently keeps even JS program-byte paths TSan-clean via
+          # locks/atomics, so the production corpus runs with no suppressions.
+          export TSAN_OPTIONS="halt_on_error=1"
           BIN=./zig-out/bin/threads-test
           # This shard's slice of the allowlist (NR % 4 == shard), each case run
           # in its own process. `timeout` caps a heavy stress case (the GC/CAS
@@ -211,37 +210,6 @@ jobs:
           # The gate is races==0; surface a race as a leg failure (non-race
           # functional fails/timeouts under TSan slowness do not fail the gate).
           [ "$races" -eq 0 ]
-
-  # Proves the program-byte suppressions are load-bearing AND narrow: the
-  # suppressed cases must (a) report races *without* the suppression file
-  # (so it isn't masking nothing), (b) have every such race touch a program-byte
-  # access function — never an engine-state frame, which the suppression would
-  # then be hiding — and (c) pass *with* the suppressions.
-  tsan-suppression-witness:
-    name: tsan-suppression-witness
-    # Gates every PR + main push (production no-GIL safety), plus nightly.
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          path: zig-js
-      - uses: actions/checkout@v6
-        with:
-          repository: zig-utils/zig-regex
-          path: zig-regex
-      - uses: actions/checkout@v6
-        with:
-          repository: zig-utils/zig-gc
-          path: zig-gc
-      - uses: pantry-pm/pantry/packages/action@main
-        with:
-          packages: zig@0.17.0-dev
-      - name: Build the TSan-instrumented threads-test binary
-        working-directory: zig-js
-        run: zig build threads-test-bin -Dtsan=true
-      - name: Witness suppressions are load-bearing and narrow
-        working-directory: zig-js
-        run: tools/tsan-suppression-witness.sh
 
   nightly-threadfuzz-tsan:
     name: nightly-threadfuzz-tsan (${{ matrix.name }})

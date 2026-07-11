@@ -97,12 +97,12 @@ profiles, so their hidden-root, parked-waiter, Worker, cleanup, termination,
 and async-join paths are covered by sanitizer instead of only by non-TSan
 breadth runs; the nightly/manual sweeps extend that same sanitizer coverage to
 more generated programs without making every PR pay the full cost. These gates
-fail on engine-state races. JS-defined program-byte races are covered by narrow
-suppressions plus a suppression witness that proves the suppressions are both
-load-bearing and not hiding engine-state frames. The witness is
-`tools/tsan-suppression-witness.sh`; run it after building
-`threads-test-bin -Dtsan=true` when changing `tsan-suppressions.txt`, raw
-TypedArray/shared-buffer access helpers, or the memory-model boundary.
+fail on every reported race. CI currently runs without a suppression file:
+plain typed-array paths take the buffer lock, and Atomics paths use hardware
+atomics, so even JS-defined program-byte access stays TSan-clean. If a future
+program-byte false positive genuinely needs a suppression, add a deterministic
+load-bearing witness in the same change; do not add broad suppressions or
+suppress engine-state frames.
 
 ## What Each Gate Covers
 

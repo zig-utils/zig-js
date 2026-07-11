@@ -5,8 +5,9 @@ This page defines the contract for threaded zig-js contexts:
 - Engine state must stay race-free, memory-safe, and ThreadSanitizer-clean.
 - JavaScript program state can still have program-level races when code shares
   mutable data without synchronization.
-- ThreadSanitizer suppressions are allowed only for intentional JavaScript
-  program-byte races, never for engine metadata or GC state.
+- ThreadSanitizer runs without suppressions. If a future JavaScript
+  program-byte false positive needs one, it must land with a dedicated
+  load-bearing witness and must never cover engine metadata or GC state.
 
 ## Contexts
 
@@ -171,14 +172,15 @@ successfully claims a supported plain object or array, an enforced foreign-threa
 access throws. The engine does not automatically restrict ordinary shared
 objects, and restriction does not turn other objects into synchronized data.
 
-## ThreadSanitizer Suppressions
+## ThreadSanitizer Suppression Policy
 
-`tsan-suppressions.txt` is intentionally narrow. It suppresses only raw
-JavaScript program-byte reads and writes on shared buffer storage where the JS
-memory model permits unsynchronized concurrent access. The suppressed frames
-must access only the buffer data bytes.
+CI currently runs the no-GIL ThreadSanitizer corpus without a suppression file.
+Plain typed-array paths take the buffer lock, and Atomics paths use hardware
+atomics, so even JavaScript program-byte access stays TSan-clean today.
 
-The suppression file must not cover:
+If a future JS-defined program-byte false positive genuinely requires a
+suppression, it must land with a deterministic, load-bearing witness that fails
+without the suppression and passes with it. A suppression file must not cover:
 
 - object metadata, shape trees, property slots, or key-order storage,
 - environments, closures, frames, stacks, promises, or microtasks,
@@ -186,13 +188,6 @@ The suppression file must not cover:
 - GC allocation, mark bits, barriers, roots, finalization, or shared-buffer
   lifetime metadata,
 - C-API handle ownership, protection counters, or string refcounts.
-
-CI runs `tools/tsan-suppression-witness.sh` to prove the suppressions are
-load-bearing and narrow. The selected cases must race without the suppression
-file, every reported race must name only approved program-byte frames, and the
-same cases must pass with suppressions enabled. The script owns the executable
-approved-frame regex; keep it in sync with `tsan-suppressions.txt` whenever a
-new program-byte access helper is added.
 
 ## C-API Rules
 
@@ -228,8 +223,6 @@ The public contract is checked by:
 - `zig build test -Dtsan=true`,
 - `zig build test -Dtsan=true -Dtest-filter=parallel_js`,
 - the sharded no-GIL PR-249 corpus TSan sweep,
-- the TSan suppression-narrowness witness
-  (`tools/tsan-suppression-witness.sh`),
 - `test262-parallel`,
 - `threadfuzz`, including TSan and deterministic-result verifier modes.
 

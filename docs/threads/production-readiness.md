@@ -816,13 +816,12 @@ Every pull request and push to `main` runs:
 - ReleaseSafe `threadfuzz`,
 - deterministic-result `threadfuzz-verify`,
 - sharded no-GIL PR-249 corpus TSan sweep,
-- TSan suppression-narrowness witness
-  (`tools/tsan-suppression-witness.sh`),
 - test262-parallel representative slice.
 
 The no-GIL corpus TSan gate and specialized mid-GC/lifecycle TSan fuzzer smokes
-hard-block on engine-state races. The suppression
-witness proves the program-byte suppressions are both load-bearing and narrow.
+hard-block on every reported race. The corpus runs without suppressions; any
+future program-byte suppression must include a deterministic load-bearing
+witness and must not cover engine state.
 Nightly/manual CI additionally runs higher-iteration TSan fuzzer sweeps for the
 default, mid-script-GC, and lifecycle profiles so sanitizer depth keeps growing
 without making every PR pay the full runtime.

@@ -40,9 +40,8 @@ tests as the matching engine features land.
   artifact controls are absent until backed by real engine behavior.
 - Treating JavaScript-level data races as engine-level synchronization. For
   example, racing accesses to shared buffer program bytes are JS program races;
-  ThreadSanitizer suppressions are deliberately limited to those program-byte
-  frames and are guarded by a suppression-narrowness witness. See
-  [Memory Model](./memory-model.md).
+  the engine currently keeps those paths TSan-clean with locks/atomics instead
+  of suppressions. See [Memory Model](./memory-model.md).
 - Treating deep recursive call behavior as a finished VM-stack architecture.
   VM and tree-walker calls both throw catchable `RangeError`s before native
   stack overflow, and the promoted PR-249 stack-overflow witness is green, but
@@ -355,7 +354,7 @@ Issue #1 remains the umbrella status page.
   has its own baseline instead of being inferred from shared-realm `Thread`
   rows.
 - **Memory model maintenance.** Keep [Memory Model](./memory-model.md) aligned
-  with the TSan suppression witness, new synchronization primitives, and any
+  with the no-suppression TSan policy, new synchronization primitives, and any
   promoted PR-249 coverage that exercises JS-defined races.
 - **Mid-script parallel GC maturity.** The abort-safe collector now has
   cooperative root publication at sync-wait pump points, covering property
