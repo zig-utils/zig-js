@@ -466,6 +466,10 @@ export fn JSObjectSetPrivate(object: JSObjectRef, data: ?*anyopaque) callconv(.c
 
 export fn JSObjectMakeArray(ctx: JSContextRef, argc: usize, argv: [*c]const JSValueRef, exception: ExceptionRef) callconv(.c) JSObjectRef {
     const c = ctxFrom(ctx) orelse return null;
+    if (argc > 0 and argv == null) {
+        setException(c, exception, "TypeError: argc > 0 requires non-null argv");
+        return null;
+    }
     const gc_saved = gc_mod.setActiveHeap(c.gc);
     defer _ = gc_mod.setActiveHeap(gc_saved);
     const sa_saved = strcell.setActiveArena(c.arena());
@@ -626,6 +630,10 @@ fn collectArgs(c: *Context, argc: usize, argv: [*c]const JSValueRef) ?[]Value {
 
 export fn JSObjectCallAsFunction(ctx: JSContextRef, function: JSObjectRef, this_object: JSObjectRef, argc: usize, argv: [*c]const JSValueRef, exception: ExceptionRef) callconv(.c) JSValueRef {
     const c = ctxFrom(ctx) orelse return null;
+    if (argc > 0 and argv == null) {
+        setException(c, exception, "TypeError: argc > 0 requires non-null argv");
+        return null;
+    }
     const obj = objectFrom(function) orelse {
         setException(c, exception, "TypeError: value is not a function");
         return null;
@@ -703,6 +711,10 @@ export fn JSObjectMakeFunctionWithCallback(ctx: JSContextRef, name: JSStringRef,
 
 export fn JSObjectCallAsConstructor(ctx: JSContextRef, constructor: JSObjectRef, argc: usize, argv: [*c]const JSValueRef, exception: ExceptionRef) callconv(.c) JSObjectRef {
     const c = ctxFrom(ctx) orelse return null;
+    if (argc > 0 and argv == null) {
+        setException(c, exception, "TypeError: argc > 0 requires non-null argv");
+        return null;
+    }
     const obj = objectFrom(constructor) orelse {
         setException(c, exception, "TypeError: value is not a constructor");
         return null;
@@ -1397,6 +1409,31 @@ test "C-API: callback functions honor name and Function prototype" {
     const result = JSEvaluateScript(ctx, script, null, null, 0, &exception) orelse return error.EvalFailed;
     try std.testing.expect(exception == null);
     try std.testing.expect(JSValueToBoolean(ctx, result));
+}
+
+test "C-API: argc rejects null argv" {
+    const ctx = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
+    defer JSGlobalContextRelease(ctx);
+
+    var exception: JSValueRef = null;
+    try std.testing.expect(JSObjectMakeArray(ctx, 1, null, &exception) == null);
+    try std.testing.expect(exception != null);
+
+    exception = null;
+    const fn_name = JSStringCreateWithUTF8CString("hostAnswer") orelse return error.StringInitFailed;
+    defer JSStringRelease(fn_name);
+    const fn_obj = JSObjectMakeFunctionWithCallback(ctx, fn_name, namedHostCallback) orelse return error.FunctionCreateFailed;
+    try std.testing.expect(JSObjectCallAsFunction(ctx, fn_obj, null, 1, null, &exception) == null);
+    try std.testing.expect(exception != null);
+
+    exception = null;
+    const global = JSContextGetGlobalObject(ctx);
+    const date_name = JSStringCreateWithUTF8CString("Date") orelse return error.StringInitFailed;
+    defer JSStringRelease(date_name);
+    const date_ctor = JSObjectGetProperty(ctx, global, date_name, &exception) orelse return error.PropFailed;
+    try std.testing.expect(exception == null);
+    try std.testing.expect(JSObjectCallAsConstructor(ctx, date_ctor, 1, null, &exception) == null);
+    try std.testing.expect(exception != null);
 }
 
 fn thisObjectProbeCallback(ctx: JSContextRef, function: JSObjectRef, this_object: JSObjectRef, argument_count: usize, arguments: [*c]const JSValueRef, exception: ExceptionRef) callconv(.c) JSValueRef {
