@@ -24,6 +24,10 @@ tests as the matching engine features land.
 - GC-managed parallel contexts with thread-safe allocation, write barriers,
   root tracing for active VM frames, conservative stack scanning where sound,
   and abort-safe mid-script collection experiments.
+- Optional per-context allocator pressure cap:
+  `Context.createWith(.{ .heap_limit_bytes = n })` fails closed with
+  `error.OutOfMemory` once Context-owned outstanding allocator bytes exceed the
+  configured budget.
 - Test-shell helpers such as `print`, `setTimeout`, `drainMicrotasks`, `gc`,
   and supported `$vm` compatibility hooks for conformance coverage.
 
@@ -73,7 +77,9 @@ Detailed acceptance criteria are tracked in
 [contention #15](https://github.com/zig-utils/zig-js/issues/15),
 [mid-script GC #14](https://github.com/zig-utils/zig-js/issues/14),
 [fuzzing #13](https://github.com/zig-utils/zig-js/issues/13),
-[memory model #12](https://github.com/zig-utils/zig-js/issues/12), and
+[memory model #12](https://github.com/zig-utils/zig-js/issues/12),
+[heap/OOM resource control #24](https://github.com/zig-utils/zig-js/issues/24),
+and
 [PR-249 promotions #11](https://github.com/zig-utils/zig-js/issues/11).
 Issue #1 remains the umbrella status page.
 
@@ -184,6 +190,16 @@ Issue #1 remains the umbrella status page.
 - **Context lifecycle cost.** Long-lived embedders amortize the GC setup and
   teardown costs, but create-per-unit-of-work embedders need either cheaper
   context lifecycle or clearer guidance.
+- **Heap cap and OOM contract.** The first production resource-control primitive
+  is public: `Context.Options.heap_limit_bytes` wraps the context allocator with
+  a thread-safe outstanding-byte budget. It covers arena chunks, GC cell slabs
+  and side stores, shared-buffer retain tables, thread records, and other
+  Context-owned allocations routed through `Context.gpa`, then reports allocator
+  pressure as ordinary Zig `error.OutOfMemory`. This is intentionally an
+  embedder allocator boundary rather than a JavaScript heap-shape oracle. The
+  remaining #24 work is to define deterministic per-thread OOM survivor
+  semantics and promote the matching PR-249 witness once the observable contract
+  is nailed down.
 - **Parallel scaling optimization.** Benchmarks show real speedup, but scaling
   is sub-linear. `zig build threads-profile` now provides a repeatable baseline
   against the `.gil = true` fallback for independent compute, shared object
@@ -632,8 +648,8 @@ Issue #1 remains the umbrella status page.
   behavior and the file is reliable under Zig `0.17-dev`, especially the
   WebAssembly-required files, JIT/shell-hook witnesses, JSC-specific mark-list
   or heap-snapshot/preventCollection probes, ArrayBuffer detach/resize survivor
-  assumptions, typed-array race-shape probes, and real heap cap / per-thread
-  OOM semantics. Run
+  assumptions, typed-array race-shape probes, and per-thread OOM survivor
+  semantics beyond the current `heap_limit_bytes` allocator cap. Run
   `python3 tools/threads-reference-audit.py --run-probes --expect-current-blockers --probe-timeout 60`
   to keep the nearest-probe negative baseline honest: it passes only while
   those files still fail or time out with their documented blocker evidence,

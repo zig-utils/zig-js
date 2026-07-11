@@ -109,7 +109,8 @@ suppress engine-state frames.
 
 `zig build test` runs unit and C-API tests, including agents, workers, shared
 buffers, property-mode Atomics, `Thread`, `Lock`, `Condition`, `ThreadLocal`,
-parallel-GC witnesses, C embedder threading, and the main can-block gate.
+parallel-GC witnesses, C embedder threading, the main can-block gate, and the
+public `Context.Options.heap_limit_bytes` allocator-cap smoke coverage.
 
 `zig build threads-test` runs the green WebKit PR-249 allowlist from
 `reference/webkit-249/threads-tests`. The current coverage contains 230
@@ -786,8 +787,9 @@ PR-249 files stay reference-only for concrete reasons:
 - JIT/CVE files that require JSC-specific code artifact hooks, ASAN controls,
   stop counters, disassembly controls, or retired-artifact machinery remain out
   until real engine behavior backs those hooks.
-- `semantics/oom-one-thread.js` remains out until there is a real heap cap and
-  per-thread OOM handling contract.
+- `semantics/oom-one-thread.js` remains out until the new
+  `Context.Options.heap_limit_bytes` allocator cap grows into a documented
+  per-thread OOM survivor contract that matches the reference witness.
 - `cve/mc-df-arraycopy-relabel.js` remains out because it depends on JSC's
   butterfly verification shell option and a typed-array set length race shape
   whose current zig-js failure is still the documented `RangeError` blocker.

@@ -150,6 +150,101 @@ pub const LockedArena = struct {
     }
 };
 
+/// A small owned wrapper that enforces a per-Context outstanding-byte budget
+/// over the embedder allocator. It is intentionally byte-count based rather than
+/// JavaScript-semantics based: arena chunks, GC cell slabs, side stores, thread
+/// records, and other Context-owned allocations all pass through this allocator,
+/// so embedders get one fail-closed resource-control knob without requiring a
+/// separate quota check at every allocation site.
+pub const BudgetAllocator = struct {
+    inner: std.mem.Allocator,
+    limit: usize,
+    used: std.atomic.Value(usize) = .init(0),
+
+    fn reserve(self: *BudgetAllocator, amount: usize) bool {
+        var current = self.used.load(.monotonic);
+        while (true) {
+            if (amount > self.limit -| current) return false;
+            if (self.used.cmpxchgWeak(current, current + amount, .acq_rel, .monotonic)) |observed| {
+                current = observed;
+                continue;
+            }
+            return true;
+        }
+    }
+
+    fn release(self: *BudgetAllocator, amount: usize) void {
+        _ = self.used.fetchSub(amount, .acq_rel);
+    }
+
+    fn allocFn(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        const self: *BudgetAllocator = @ptrCast(@alignCast(ctx));
+        if (!self.reserve(len)) return null;
+        const ptr = self.inner.vtable.alloc(self.inner.ptr, len, alignment, ret_addr) orelse {
+            self.release(len);
+            return null;
+        };
+        return ptr;
+    }
+
+    fn resizeFn(ctx: *anyopaque, mem: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
+        const self: *BudgetAllocator = @ptrCast(@alignCast(ctx));
+        if (new_len > mem.len and !self.reserve(new_len - mem.len)) return false;
+        if (!self.inner.vtable.resize(self.inner.ptr, mem, alignment, new_len, ret_addr)) {
+            if (new_len > mem.len) self.release(new_len - mem.len);
+            return false;
+        }
+        if (new_len < mem.len) self.release(mem.len - new_len);
+        return true;
+    }
+
+    fn remapFn(ctx: *anyopaque, mem: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+        const self: *BudgetAllocator = @ptrCast(@alignCast(ctx));
+        if (new_len > mem.len and !self.reserve(new_len - mem.len)) return null;
+        const ptr = self.inner.vtable.remap(self.inner.ptr, mem, alignment, new_len, ret_addr) orelse {
+            if (new_len > mem.len) self.release(new_len - mem.len);
+            return null;
+        };
+        if (new_len < mem.len) self.release(mem.len - new_len);
+        return ptr;
+    }
+
+    fn freeFn(ctx: *anyopaque, mem: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+        const self: *BudgetAllocator = @ptrCast(@alignCast(ctx));
+        self.inner.vtable.free(self.inner.ptr, mem, alignment, ret_addr);
+        self.release(mem.len);
+    }
+
+    const vtable: std.mem.Allocator.VTable = .{
+        .alloc = allocFn,
+        .resize = resizeFn,
+        .remap = remapFn,
+        .free = freeFn,
+    };
+
+    pub fn allocator(self: *BudgetAllocator) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &vtable };
+    }
+};
+
+test "BudgetAllocator enforces outstanding byte limit" {
+    var budget = BudgetAllocator{ .inner = std.testing.allocator, .limit = 64 };
+    const a = budget.allocator();
+
+    const first = try a.alloc(u8, 48);
+    try std.testing.expectEqual(@as(usize, 48), budget.used.load(.acquire));
+    try std.testing.expectError(error.OutOfMemory, a.alloc(u8, 17));
+
+    a.free(first);
+    try std.testing.expectEqual(@as(usize, 0), budget.used.load(.acquire));
+
+    const second = try a.alloc(u8, 64);
+    try std.testing.expectEqual(@as(usize, 64), budget.used.load(.acquire));
+    try std.testing.expectError(error.OutOfMemory, a.alloc(u8, 1));
+    a.free(second);
+    try std.testing.expectEqual(@as(usize, 0), budget.used.load(.acquire));
+}
+
 /// Reusable backing allocator for GC cells. `zig-gc` asks its backing allocator
 /// for one 16-byte-aligned slab per managed cell; routing every object through
 /// the page/general allocator made GC-mode object allocation and context teardown
@@ -1302,7 +1397,9 @@ pub const Context = struct {
     pub const js_thread_reserve_granularity = 16;
     pub const active_interpreter_reserve_granularity = 16;
 
+    host_gpa: std.mem.Allocator,
     gpa: std.mem.Allocator,
+    budget_allocator: ?*BudgetAllocator = null,
     arena_state: *std.heap.ArenaAllocator,
     /// Thread-safe wrapper over `arena_state` installed when `enable_threads`
     /// (null otherwise → raw arena). Makes parallel shape/string/AST/binding
@@ -1558,6 +1655,12 @@ pub const Context = struct {
         /// thread-using context on the arena allocator). A context with no
         /// `enable_threads` is single-threaded either way and pays nothing.
         gil: bool = false,
+        /// Optional fail-closed cap for this Context's outstanding allocator
+        /// bytes. The cap covers arena chunks, GC cell slabs and side storage,
+        /// thread records, and other Context-owned allocations routed through the
+        /// Context allocator. Null means unbounded aside from the embedder
+        /// allocator.
+        heap_limit_bytes: ?usize = null,
     };
 
     /// Test/conformance-only creation knobs. These model harness flags such as
@@ -1579,6 +1682,9 @@ pub const Context = struct {
         main_can_block: bool = true,
         /// Test cap for live shared-realm `Thread` objects.
         max_js_threads: ?u32 = null,
+        /// Same resource-control knob as public `Options.heap_limit_bytes`, kept
+        /// here so conformance/fuzzer drivers can exercise quota behavior.
+        heap_limit_bytes: ?usize = null,
         /// Test-shell flag model for PR-249 `--useSharedArrayBuffer=0`: leave
         /// property Atomics installed, but hide the global SAB constructor.
         enable_shared_array_buffer: bool = true,
@@ -1660,6 +1766,7 @@ pub const Context = struct {
             .concurrent_gc = options.concurrent_gc,
             .parallel_gc = want_parallel,
             .parallel_js = want_parallel,
+            .heap_limit_bytes = options.heap_limit_bytes,
         });
     }
 
@@ -1670,11 +1777,19 @@ pub const Context = struct {
             return error.InvalidThreadTestingOptions;
         if (options.parallel_midscript_gc and !options.parallel_js)
             return error.InvalidThreadTestingOptions;
-        const arena_state = try gpa.create(std.heap.ArenaAllocator);
-        arena_state.* = std.heap.ArenaAllocator.init(gpa);
+        var budget_allocator: ?*BudgetAllocator = null;
+        errdefer if (budget_allocator) |ba| gpa.destroy(ba);
+        const context_gpa = if (options.heap_limit_bytes) |limit| blk: {
+            const ba = try gpa.create(BudgetAllocator);
+            ba.* = .{ .inner = gpa, .limit = limit };
+            budget_allocator = ba;
+            break :blk ba.allocator();
+        } else gpa;
+        const arena_state = try context_gpa.create(std.heap.ArenaAllocator);
+        arena_state.* = std.heap.ArenaAllocator.init(context_gpa);
         errdefer {
             arena_state.deinit();
-            gpa.destroy(arena_state);
+            context_gpa.destroy(arena_state);
         }
         // When threads (or the parallel-GC bring-up) are enabled, every
         // arena-allocated structure — shapes, strings, AST, binding tables —
@@ -1687,22 +1802,25 @@ pub const Context = struct {
         var locked_arena: ?*LockedArena = null;
         errdefer if (locked_arena) |la| {
             la.resetLocalFor();
-            gpa.destroy(la);
+            context_gpa.destroy(la);
         };
         const a = if (options.enable_threads or options.parallel_gc) blk: {
-            const la = try gpa.create(LockedArena);
+            const la = try context_gpa.create(LockedArena);
             la.* = .{ .inner = arena_state.allocator() };
             locked_arena = la;
             break :blk la.allocator();
         } else arena_state.allocator();
 
-        const self = try gpa.create(Context);
+        const self = try context_gpa.create(Context);
+        errdefer context_gpa.destroy(self);
         self.* = .{
-            .gpa = gpa,
+            .host_gpa = gpa,
+            .gpa = context_gpa,
+            .budget_allocator = budget_allocator,
             .arena_state = arena_state,
             .locked_arena = locked_arena,
             .owner_thread = std.Thread.getCurrentId(),
-            .sab_retains = .{ .gpa = gpa },
+            .sab_retains = .{ .gpa = context_gpa },
             .env = .{ .arena = a, .fn_scope = true }, // global is a variable scope
             .global_object = undefined, // set below, once the heap exists
             .root_shape = try Shape.createRoot(a),
@@ -1716,7 +1834,7 @@ pub const Context = struct {
             // GC cells are gpa-backed (the collector frees them individually).
             // Keep the heap, binding, and cell backing in one stable allocation
             // to reduce GC-enabled context lifecycle churn.
-            const gc_state = try gpa.create(GcState);
+            const gc_state = try context_gpa.create(GcState);
             gc_state.binding = .{ .context = self };
             // GC cells are individually collectable, but their allocation shape
             // is regular: one 16-byte-aligned slab per cell. Use the reusable
@@ -1726,7 +1844,7 @@ pub const Context = struct {
             // delaying these locks keeps no-GIL context creation on the fast
             // allocation path. Parallel mode is enabled immediately before
             // returning below.
-            gc_state.backing = .{ .inner = gpa, .parallel = false };
+            gc_state.backing = .{ .inner = context_gpa, .parallel = false };
             const cell_backing = gc_state.backing.allocator();
             gc_state.heap = GcHeap.init(cell_backing, &gc_state.binding);
             const h = &gc_state.heap;
@@ -1801,9 +1919,9 @@ pub const Context = struct {
         if (options.enable_threads) {
             // `locked_arena` (the thread-safe arena, #1) was installed before any
             // create-time allocation above, so shapes/env/etc. already use it.
-            const g = try gpa.create(gil_mod.Gil);
+            const g = try context_gpa.create(gil_mod.Gil);
             g.* = .{};
-            g.park_alloc = gpa;
+            g.park_alloc = context_gpa;
             self.gil = g;
             g.acquire();
             defer g.release();
@@ -1863,6 +1981,9 @@ pub const Context = struct {
     }
 
     pub fn destroy(self: *Context) void {
+        const host_gpa = self.host_gpa;
+        const context_gpa = self.gpa;
+        const budget_allocator = self.budget_allocator;
         if (self.gil) |g| {
             self.teardown_stop.store(true, .release);
             // Spawned threads need the lock to finish: park until each is
@@ -1933,8 +2054,9 @@ pub const Context = struct {
         }
         self.sab_retains.deinit();
         self.arena_state.deinit();
-        self.gpa.destroy(self.arena_state);
-        self.gpa.destroy(self);
+        context_gpa.destroy(self.arena_state);
+        context_gpa.destroy(self);
+        if (budget_allocator) |ba| host_gpa.destroy(ba);
     }
 
     pub fn initCApiRef(self: *Context) void {
@@ -10118,12 +10240,29 @@ test "Context threads run parallel by default; gil option opts into serialized m
 test "Context public Options expose only stable thread controls" {
     try std.testing.expect(@hasField(Context.Options, "enable_threads"));
     try std.testing.expect(@hasField(Context.Options, "gil"));
+    try std.testing.expect(@hasField(Context.Options, "heap_limit_bytes"));
     try std.testing.expect(!@hasField(Context.Options, "parallel_js"));
     try std.testing.expect(!@hasField(Context.Options, "parallel_midscript_gc"));
     try std.testing.expect(!@hasField(Context.Options, "parallel_gc"));
     try std.testing.expect(@hasField(Context.TestingOptions, "parallel_js"));
     try std.testing.expect(@hasField(Context.TestingOptions, "parallel_midscript_gc"));
     try std.testing.expect(@hasField(Context.TestingOptions, "enable_shared_array_buffer"));
+    try std.testing.expect(@hasField(Context.TestingOptions, "heap_limit_bytes"));
+}
+
+test "Context heap_limit_bytes fails closed on allocation pressure" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .heap_limit_bytes = 4 * 1024 * 1024 });
+    defer ctx.destroy();
+
+    const ok = try ctx.evaluate("1 + 2");
+    try std.testing.expectEqual(@as(f64, 3), ok.asNum());
+
+    try std.testing.expectError(error.OutOfMemory, ctx.evaluate(
+        \\var keep = [];
+        \\for (var i = 0; i < 20000; i = i + 1)
+        \\  keep.push({ i: i, nested: { j: i + 1 } });
+        \\keep.length;
+    ));
 }
 
 test "Context TestingOptions can hide SharedArrayBuffer while keeping Atomics" {
