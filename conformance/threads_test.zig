@@ -530,15 +530,16 @@ pub fn main(init: std.process.Init) !void {
             // termination throw as its PASSING outcome.
             const directive = test_src[0 .. std.mem.indexOfScalar(u8, test_src, '\n') orelse test_src.len];
             const enable_threads = !runsWithoutThreadGlobal(name);
+            const heap_limit_bytes = heapLimitBytesForCase(name);
             const options = js.Context.TestingOptions{
                 .enable_threads = enable_threads,
-                .enable_gc = parallel_js or std.mem.indexOf(u8, test_src, "gc()") != null,
+                .enable_gc = heap_limit_bytes != null or parallel_js or std.mem.indexOf(u8, test_src, "gc()") != null,
                 .parallel_gc = parallel_js and enable_threads,
                 .parallel_js = parallel_js and enable_threads,
                 .main_can_block = !std.mem.endsWith(u8, name, "blocking-gate.js"),
                 .max_js_threads = if (std.mem.endsWith(u8, name, "thread-id-bounds.js")) 4 else null,
                 .enable_shared_array_buffer = std.mem.indexOf(u8, directive, "--useSharedArrayBuffer=0") == null,
-                .heap_limit_bytes = heapLimitBytesForCase(name),
+                .heap_limit_bytes = heap_limit_bytes,
             };
             const expect_termination = std.mem.endsWith(u8, name, "-termination.js") or
                 std.mem.indexOf(u8, directive, "--watchdog-exception-ok") != null;

@@ -794,6 +794,8 @@ PR-249 files stay reference-only for concrete reasons:
   `Context.Options.heap_limit_bytes` cap in the reference probe, but remains
   out because native allocation pressure still escapes as a `Thread` completion
   OOM instead of being catchable by the allocating JS frame's local `try/catch`.
+  Heap-limited corpus cases are GC-backed so the remaining blocker is the real
+  collect/retry recovery path rather than a permanently unreclaimable arena cap.
 - `cve/mc-df-arraycopy-relabel.js` remains out because it depends on JSC's
   butterfly verification shell option and a typed-array set length race shape
   whose current zig-js failure is still the documented `RangeError` blocker.
