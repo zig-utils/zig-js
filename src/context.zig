@@ -1499,6 +1499,12 @@ pub const Context = struct {
     /// leaves it false and stays precise (so exact-reclamation tests are
     /// unaffected). See `collectMidScript` and `stack_scan.zig`.
     gc_scan_native_stack: bool = false,
+    /// When paired with `gc_scan_native_stack`, also scan parked peer stack
+    /// records. Allocation-failure recovery leaves this off: a peer blocked in
+    /// native wait code can still mutate its wait-frame locals/park publication
+    /// slots, so scanning those stacks is not TSan-clean. GIL mid-script GC can
+    /// opt in when it has established the stronger park protocol it expects.
+    gc_scan_parked_stacks: bool = false,
     /// Realm-wide serial for class private-name storage keys. Private names are
     /// per-class brands, so two unrelated classes declaring `#x` must not alias
     /// even if both outlive separate evaluate calls.
@@ -2314,12 +2320,16 @@ pub const Context = struct {
 
     /// Emergency retry path for GC cell allocation under an external allocator
     /// cap. Runs only where the current thread can safely scan its native stack
-    /// and any peer JS stacks are frozen by the GIL parking protocol; no-GIL
-    /// parallel recovery still needs the abort-safe publication protocol in #29.
+    /// and any peer JS stacks are frozen by the serialized GIL parking protocol.
+    /// In the no-GIL default (`parallel_js`) a live peer may be parked in native
+    /// wait code whose stack/park record is still being published, so fail
+    /// closed instead of racing that publication. Abort-safe no-GIL recovery is
+    /// tracked separately in #30.
     pub fn collectForAllocationFailure(self: *Context) bool {
         const h = self.gc orelse return false;
         if (!stack_scan.supported) return false;
         if (self.gc_par_collector.load(.acquire) != null) return false;
+        if (self.parallel_js and self.hasRunningJsThreads()) return false;
         if (self.gil) |g| {
             if (!g.allOthersParked()) return false;
         } else if (self.hasRunningJsThreads()) {
@@ -2443,6 +2453,8 @@ pub const Context = struct {
         }
         self.gc_scan_native_stack = true;
         defer self.gc_scan_native_stack = false;
+        self.gc_scan_parked_stacks = true;
+        defer self.gc_scan_parked_stacks = false;
         if (h.marking.load(.acquire)) {
             // Drain a bounded slice of the grey set; when it empties, close the
             // cycle (re-scan roots under the GIL, then sweep).

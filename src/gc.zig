@@ -632,7 +632,7 @@ pub const Binding = struct {
             // *parallel* collection: there, a parked peer is traced precisely via
             // `gc_parked` (below), and its park record's `beginPark`/`endPark`
             // flip too fast to scan race-free without the GIL it doesn't hold.
-            if (par == null) if (ctx.gil) |g| {
+            if (par == null and ctx.gc_scan_parked_stacks) if (ctx.gil) |g| {
                 const me = stack_scan.parkRecord();
                 for (g.park_records.items) |rec| {
                     if (rec == me) continue;
