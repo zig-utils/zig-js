@@ -72,6 +72,8 @@ void        JSValueUnprotect(JSContextRef, JSValueRef);
 
 ```c [Objects]
 JSObjectRef JSObjectMake(JSContextRef, JSClassRef, void* data);
+void*       JSObjectGetPrivate(JSObjectRef);
+bool        JSObjectSetPrivate(JSObjectRef, void* data);
 JSObjectRef JSObjectMakeArray(JSContextRef, size_t argc, const JSValueRef args[], JSValueRef* exception);
 JSObjectRef JSObjectMakeDeferredPromise(JSContextRef, JSObjectRef* resolve,
                                         JSObjectRef* reject, JSValueRef* exception);
@@ -108,6 +110,8 @@ void        JSWorkerRelease(JSWorkerRef);
 :::
 
 Native callbacks use the standard `JSObjectCallAsFunctionCallback` calling convention, so functions you expose to JavaScript through this subset are registered exactly as they are with JavaScriptCore. `JSObjectSetProperty` maps `ReadOnly`, `DontEnum`, and `DontDelete` attributes to JavaScript `writable`, `enumerable`, and `configurable` descriptor fields. `JSValueToObject` performs JavaScript `ToObject` conversion, returning real primitive wrapper objects and reporting an exception for `null` / `undefined`. `JSValueIsDate` reports the runtime's Date internal slot, including invalid Date objects. `ZJSGlobalContextCreateThreaded` and `JSWorker*` are zig-js extensions rather than public JSC symbols.
+
+`JSObjectMake(..., data)` marks the opaque pointer as host-owned private data. `JSObjectGetPrivate` returns only host-owned private data; engine-owned native records are not exposed. `JSObjectSetPrivate` can update host-owned private data and can attach host data to plain objects that do not already carry engine private data.
 
 `JSObjectMakeDeferredPromise` returns a pending native Promise and stores callable resolve/reject functions in the provided out pointers when they are non-null. Those functions settle the promise through the normal Promise job queue; embedder-observable callbacks run at the next microtask checkpoint, such as the one performed after `JSEvaluateScript`.
 

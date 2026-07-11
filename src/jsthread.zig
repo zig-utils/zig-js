@@ -1201,7 +1201,7 @@ pub fn traceNativePrivateData(o: *value.Object, v: anytype) void {
             v.mark(st.lock.owner);
             traceLockRecordRoots(st.lock, v);
         },
-        .jsthread_thread, .jsthread_unlock_token, .none => {},
+        .jsthread_thread, .jsthread_unlock_token, .host, .none => {},
     }
 }
 

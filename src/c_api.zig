@@ -382,8 +382,27 @@ export fn JSObjectMake(ctx: JSContextRef, class: ?*anyopaque, data: ?*anyopaque)
     _ = class;
     const c = ctxFrom(ctx) orelse return null;
     const obj = gc_mod.allocObj(c.arena()) catch return null;
-    obj.* = .{ .private_data = data };
+    obj.* = .{ .private_data = data, .private_data_tag = .host };
     return box(c, Value.obj(obj));
+}
+
+export fn JSObjectGetPrivate(object: JSObjectRef) callconv(.c) ?*anyopaque {
+    const obj = objectFrom(object) orelse return null;
+    return if (obj.private_data_tag == .host) obj.private_data else null;
+}
+
+export fn JSObjectSetPrivate(object: JSObjectRef, data: ?*anyopaque) callconv(.c) bool {
+    const obj = objectFrom(object) orelse return false;
+    if (obj.private_data_tag == .host) {
+        obj.private_data = data;
+        return true;
+    }
+    if (obj.private_data_tag == .none and obj.private_data == null) {
+        obj.private_data = data;
+        obj.private_data_tag = .host;
+        return true;
+    }
+    return false;
 }
 
 export fn JSObjectMakeArray(ctx: JSContextRef, argc: usize, argv: [*c]const JSValueRef, exception: ExceptionRef) callconv(.c) JSObjectRef {
@@ -799,6 +818,33 @@ test "C-API: object property get/set" {
     JSObjectSetProperty(ctx, obj, key, JSValueMakeNumber(ctx, 42), 0, null);
     const got = JSObjectGetProperty(ctx, obj, key, null);
     try std.testing.expectEqual(@as(f64, 42), JSValueToNumber(ctx, got, null));
+}
+
+test "C-API: JSObject private data is host-owned and guarded" {
+    const ctx = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
+    defer JSGlobalContextRelease(ctx);
+
+    var first: u8 = 1;
+    var second: u8 = 2;
+    var engine_probe: u8 = 3;
+    const first_ptr: *anyopaque = @ptrCast(&first);
+    const second_ptr: *anyopaque = @ptrCast(&second);
+    const engine_probe_ptr: *anyopaque = @ptrCast(&engine_probe);
+
+    const obj = JSObjectMake(ctx, null, first_ptr);
+    try std.testing.expectEqual(@intFromPtr(first_ptr), @intFromPtr(JSObjectGetPrivate(obj).?));
+    try std.testing.expect(JSObjectSetPrivate(obj, second_ptr));
+    try std.testing.expectEqual(@intFromPtr(second_ptr), @intFromPtr(JSObjectGetPrivate(obj).?));
+    try std.testing.expect(JSObjectSetPrivate(obj, null));
+    try std.testing.expect(JSObjectGetPrivate(obj) == null);
+
+    const global = JSContextGetGlobalObject(ctx);
+    const date_name = JSStringCreateWithUTF8CString("Date") orelse return error.StringInitFailed;
+    defer JSStringRelease(date_name);
+    const date_ctor = JSObjectGetProperty(ctx, global, date_name, null) orelse return error.PropFailed;
+    try std.testing.expect(JSObjectGetPrivate(date_ctor) == null);
+    try std.testing.expect(!JSObjectSetPrivate(date_ctor, engine_probe_ptr));
+    try std.testing.expect(JSObjectGetPrivate(date_ctor) == null);
 }
 
 test "C-API: JSValueToObject uses JavaScript ToObject semantics" {

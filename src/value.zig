@@ -616,6 +616,7 @@ pub const ObjectBackingFlags = packed struct {
 
 pub const ObjectPrivateDataTag = enum(u8) {
     none,
+    host,
     jsthread_thread,
     jsthread_lock,
     jsthread_condition,

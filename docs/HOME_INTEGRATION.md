@@ -64,9 +64,10 @@ tests):
 3. **TypedArray / ArrayBuffer** — `JSObjectMakeTypedArray`,
    `JSObjectMakeArrayBufferWithBytesNoCopy`, byte-length/bytes accessors,
    `JSValueGetTypedArrayType`. Needed for `Buffer`, fetch/stream bodies, crypto.
-4. **Prototype & structure control** — `JSObjectGetPrototype`/`SetPrototype`,
-   private/internal slots (Home stashes native pointers + cached JS values on
-   wrappers), and `JSObjectGetPrivate`/`SetPrivate` equivalents.
+4. **Prototype & structure control** — `JSObjectGetPrototype`/`SetPrototype`
+   and richer private/internal slot modeling. `JSObjectGetPrivate` /
+   `JSObjectSetPrivate` now cover host-owned opaque pointers, but Home also
+   stashes cached JS values on wrappers.
 5. **GC reachability hooks** — an equivalent of JSC's "is this wrapper still
    reachable" output constraint so a native object with pending activity is not
    collected (Home uses Strong/Weak `JSRef` upgrade today; some classes need the
