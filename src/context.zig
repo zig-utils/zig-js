@@ -7392,6 +7392,21 @@ test "Iterator constructor uses NewTarget realm prototype fallback" {
     )).asBool());
 }
 
+test "Iterator concat and zip helpers produce expected records" {
+    try std.testing.expect((try evalIn(
+        \\const concat = Iterator.concat([1, 2], new Set([3])).toArray();
+        \\const zip = Iterator.zip([[1, 2], ["a", "b"]]).toArray();
+        \\const keyed = Iterator.zipKeyed({ left: [10, 20], right: ["x", "y"] }).toArray();
+        \\concat.join(",") === "1,2,3" &&
+        \\zip.length === 2 &&
+        \\zip[0][0] === 1 && zip[0][1] === "a" &&
+        \\zip[1][0] === 2 && zip[1][1] === "b" &&
+        \\keyed.length === 2 &&
+        \\keyed[0].left === 10 && keyed[0].right === "x" &&
+        \\keyed[1].left === 20 && keyed[1].right === "y"
+    )).asBool());
+}
+
 test "Date call remains string-returning through bind" {
     try std.testing.expect((try evalIn("typeof Date(0, 0, 0) === 'string'")).asBool());
     try std.testing.expect((try evalIn("typeof Date.bind(null)(0, 0, 0) === 'string'")).asBool());

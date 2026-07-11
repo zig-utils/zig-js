@@ -17835,8 +17835,8 @@ fn iteratorConcatFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
         const method = try self.getProperty(arg_v, ikey);
         if (method.isUndefined() or method.isNull() or !method.isCallable())
             return self.throwError("TypeError", "Iterator.concat: each argument must have a callable @@iterator");
-        try srcs.elements.append(srcs.elementsAllocator(self.arena), arg_v);
-        try methods.elements.append(methods.elementsAllocator(self.arena), method);
+        try srcs.appendInternalElement(self.arena, arg_v);
+        try methods.appendInternalElement(self.arena, method);
     }
     // The captured @@iterator methods ride in `func` for the .concat consumer.
     return makeIterHelper(self, Value.obj(srcs), .concat, Value.obj(methods), 0);
@@ -17922,7 +17922,7 @@ fn iteratorZipFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
             self.iteratorCloseKeepingThrow(input_iter);
             return error.Throw;
         };
-        try iters.elements.append(iters.elementsAllocator(self.arena), sub);
+        try iters.appendInternalElement(self.arena, sub);
     }
     // Per-source padding aligned to iterator order (longest mode only): pull
     // exactly `iterCount` values from the padding iterable, padding short. Any
@@ -17971,8 +17971,8 @@ fn iteratorZipKeyedFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
             self.closeListKeepingThrow(iters.elements.items);
             return error.Throw;
         };
-        try keys.elements.append(keys.elementsAllocator(self.arena), Value.str(key));
-        try iters.elements.append(iters.elementsAllocator(self.arena), sub);
+        try keys.appendInternalElement(self.arena, Value.str(key));
+        try iters.appendInternalElement(self.arena, sub);
     }
     // Per-key padding (longest mode): Get(padding, key) for each key, or all
     // undefined when padding is absent.
@@ -17985,8 +17985,8 @@ fn iteratorZipKeyedFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
                     self.closeListKeepingThrow(iters.elements.items);
                     return error.Throw;
                 };
-                try pads.elements.append(pads.elementsAllocator(self.arena), pv);
-            } else try pads.elements.append(pads.elementsAllocator(self.arena), Value.undef());
+                try pads.appendInternalElement(self.arena, pv);
+            } else try pads.appendInternalElement(self.arena, Value.undef());
         }
         pad_arr = Value.obj(pads);
     }
@@ -18002,7 +18002,7 @@ fn buildZipPadding(self: *Interpreter, mode: u8, padding: Value, n: usize) EvalE
     const pads = (try self.newArray()).asObj();
     if (padding.isUndefined()) {
         var i: usize = 0;
-        while (i < n) : (i += 1) try pads.elements.append(pads.elementsAllocator(self.arena), Value.undef());
+        while (i < n) : (i += 1) try pads.appendInternalElement(self.arena, Value.undef());
         return Value.obj(pads);
     }
     if (!padding.isObject() or padding.asObj().is_bigint or padding.asObj().is_symbol)
@@ -18020,14 +18020,14 @@ fn buildZipPadding(self: *Interpreter, mode: u8, padding: Value, n: usize) EvalE
     var i: usize = 0;
     while (i < n) : (i += 1) {
         if (exhausted) {
-            try pads.elements.append(pads.elementsAllocator(self.arena), Value.undef());
+            try pads.appendInternalElement(self.arena, Value.undef());
             continue;
         }
         const s = try self.iterStepM(pit, pnext);
         if (s.done) {
             exhausted = true;
-            try pads.elements.append(pads.elementsAllocator(self.arena), Value.undef());
-        } else try pads.elements.append(pads.elementsAllocator(self.arena), s.value);
+            try pads.appendInternalElement(self.arena, Value.undef());
+        } else try pads.appendInternalElement(self.arena, s.value);
     }
     // Close the padding iterator (normal completion) if it still has values.
     if (!exhausted) try self.iteratorClose(pit);
@@ -18037,7 +18037,7 @@ fn buildZipPadding(self: *Interpreter, mode: u8, padding: Value, n: usize) EvalE
 /// Build a zip/zipKeyed iterator-helper object with its per-source done flags.
 fn makeZipHelper(self: *Interpreter, kind: value.IterHelper.Kind, iters: *value.Object, keys: Value, mode: u8, padding: Value) EvalError!Value {
     const flags = (try self.newArray()).asObj();
-    for (iters.elements.items) |_| try flags.elements.append(flags.elementsAllocator(self.arena), Value.boolVal(false));
+    for (iters.elements.items) |_| try flags.appendInternalElement(self.arena, Value.boolVal(false));
     const o = (try self.newObject()).asObj();
     const h = try gc_mod.allocIterHelper(self.arena);
     h.* = .{ .src = Value.obj(iters), .kind = kind, .func = keys, .limit = @floatFromInt(mode), .inner = Value.obj(flags), .padding = padding };
