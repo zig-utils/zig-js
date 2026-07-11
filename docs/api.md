@@ -115,6 +115,8 @@ Native callbacks use the standard `JSObjectCallAsFunctionCallback` calling conve
 
 `JSObjectCallAsConstructor` performs the runtime `[[Construct]]` path and reports constructor throws through the exception out pointer.
 
+`JSObjectMakeFunctionWithCallback` returns null when the callback pointer is null.
+
 `JSObjectMake(..., data)` returns an ordinary object in the current realm, inheriting from that realm's `Object.prototype`, and marks the opaque pointer as host-owned private data. `JSObjectGetPrivate` returns only host-owned private data; engine-owned native records are not exposed. `JSObjectSetPrivate` can update host-owned private data and can attach host data to plain objects that do not already carry engine private data.
 
 `JSObjectMakeDeferredPromise` returns a pending native Promise and stores callable resolve/reject functions in the provided out pointers when they are non-null. Those functions settle the promise through the normal Promise job queue; embedder-observable callbacks run at the next microtask checkpoint, such as the one performed after `JSEvaluateScript`.

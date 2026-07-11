@@ -68,7 +68,7 @@ pub const JSContextRef = ?*anyopaque;
 pub const JSStringRef = ?*anyopaque;
 pub const ExceptionRef = [*c]JSValueRef;
 
-pub const JSObjectCallAsFunctionCallback = *const fn (
+pub const JSObjectCallAsFunctionCallback = ?*const fn (
     ctx: JSContextRef,
     function: JSObjectRef,
     this_object: JSObjectRef,
@@ -699,9 +699,10 @@ fn hostCallbackNative(ctx: *anyopaque, this: Value, args: []const Value) value.H
 
 export fn JSObjectMakeFunctionWithCallback(ctx: JSContextRef, name: JSStringRef, callback: JSObjectCallAsFunctionCallback) callconv(.c) JSObjectRef {
     const c = ctxFrom(ctx) orelse return null;
+    const cb = callback orelse return null;
     var machine = c.interpreter();
     const obj = gc_mod.allocObject(c.gc, c.arena()) catch return null;
-    obj.* = .{ .callback = callback, .callback_context = c, .native = hostCallbackNative, .proto = machine.functionProto() };
+    obj.* = .{ .callback = cb, .callback_context = c, .native = hostCallbackNative, .proto = machine.functionProto() };
     const name_bytes = if (strFrom(name)) |s| s.bytes else "";
     const name_copy = c.arena().dupe(u8, name_bytes) catch return null;
     obj.setOwn(c.arena(), c.root_shape, "name", Value.str(name_copy)) catch return null;
@@ -1424,6 +1425,15 @@ test "C-API: callback functions honor name and Function prototype" {
     const result = JSEvaluateScript(ctx, script, null, null, 0, &exception) orelse return error.EvalFailed;
     try std.testing.expect(exception == null);
     try std.testing.expect(JSValueToBoolean(ctx, result));
+}
+
+test "C-API: JSObjectMakeFunctionWithCallback rejects null callback" {
+    const ctx = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
+    defer JSGlobalContextRelease(ctx);
+
+    const fn_name = JSStringCreateWithUTF8CString("missingCallback") orelse return error.StringInitFailed;
+    defer JSStringRelease(fn_name);
+    try std.testing.expect(JSObjectMakeFunctionWithCallback(ctx, fn_name, null) == null);
 }
 
 test "C-API: argc rejects null argv" {
