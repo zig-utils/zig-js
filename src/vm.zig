@@ -741,8 +741,7 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 // An array-literal elision: a slot that reads as absent (skipped by
                 // iteration, `in`, etc.) but counts toward length.
                 const arr = stack.items[stack.items.len - 1].asObj();
-                try arr.markHole(vm.arena, arr.elements.items.len);
-                try arr.elements.append(arr.elementsAllocator(vm.arena), Value.undef());
+                try arr.appendArrayHole(vm.arena);
             },
             .get_prop => {
                 const obj = stack.pop().?;

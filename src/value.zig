@@ -1138,6 +1138,15 @@ pub const Object = struct {
         try self.elements.append(self.elementsAllocator(arena), v);
     }
 
+    /// Append an array-literal elision at the current dense end. The slot
+    /// contributes to array length but remains an absent indexed property.
+    pub fn appendArrayHole(self: *Object, arena: std.mem.Allocator) std.mem.Allocator.Error!void {
+        self.lockElements();
+        defer self.unlockElements();
+        try self.markHoleUnlocked(arena, self.elements.items.len);
+        try self.elements.append(self.elementsAllocator(arena), Value.undef());
+    }
+
     /// Atomic fast path for `Array.prototype.push` on a packed dense Array.
     /// Returns the new logical length, or null when holes/sparse tail require
     /// the full observable `[[Set]]` path.

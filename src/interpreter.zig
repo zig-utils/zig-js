@@ -8943,10 +8943,9 @@ pub const Interpreter = struct {
                 try self.spreadInto(&v.asObj().elements, try self.eval(en.spread));
             } else if (en.* == .elision) {
                 // A hole: a slot that reads as absent (skipped by iteration).
-                try v.asObj().markHole(self.arena, v.asObj().elements.items.len);
-                try v.asObj().elements.append(v.asObj().elementsAllocator(self.arena), Value.undef());
+                try v.asObj().appendArrayHole(self.arena);
             } else {
-                try v.asObj().elements.append(v.asObj().elementsAllocator(self.arena), try self.eval(en));
+                try v.asObj().appendElement(self.arena, try self.eval(en));
             }
         }
         return v;
@@ -9929,7 +9928,7 @@ pub const Interpreter = struct {
                 const rest_arr = try self.newArray();
                 const len = iterableLen(val);
                 while (idx < len) : (idx += 1) {
-                    try rest_arr.asObj().elements.append(rest_arr.asObj().elementsAllocator(self.arena), try self.elementAt(val, idx));
+                    try rest_arr.asObj().appendElement(self.arena, try self.elementAt(val, idx));
                 }
                 try self.bindPattern(rest_target, rest_arr, declare);
             }
@@ -10042,7 +10041,7 @@ pub const Interpreter = struct {
                     done = true;
                     break;
                 }
-                try rest_arr.asObj().elements.append(rest_arr.asObj().elementsAllocator(self.arena), try self.getProperty(res, "value"));
+                try rest_arr.asObj().appendElement(self.arena, try self.getProperty(res, "value"));
             }
             if (rest_key) |k|
                 try self.setMember(rest_recv, k, rest_arr)
@@ -14852,10 +14851,10 @@ fn objectGroupByFn(ctx: *anyopaque, this: Value, args: []const Value) value.Host
         const kv = try self.callValue(cb, &.{ el, Value.num(@floatFromInt(i)) });
         const key = try self.keyOf(kv);
         if (obj.getOwn(key)) |bucket| {
-            try bucket.asObj().elements.append(bucket.asObj().elementsAllocator(self.arena), el);
+            try bucket.asObj().appendElement(self.arena, el);
         } else {
             const arr = try self.newArray();
-            try arr.asObj().elements.append(arr.asObj().elementsAllocator(self.arena), el);
+            try arr.asObj().appendElement(self.arena, el);
             try self.setProp(obj, key, arr);
         }
     }
@@ -14875,10 +14874,10 @@ fn mapGroupByFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostErr
         const key = try self.callValue(cb, &.{ el, Value.num(@floatFromInt(i)) });
         if ((try self.mapMethod(map, "has", &.{key})).?.asBool()) {
             const bucket = (try self.mapMethod(map, "get", &.{key})).?;
-            try bucket.asObj().elements.append(bucket.asObj().elementsAllocator(self.arena), el);
+            try bucket.asObj().appendElement(self.arena, el);
         } else {
             const arr = try self.newArray();
-            try arr.asObj().elements.append(arr.asObj().elementsAllocator(self.arena), el);
+            try arr.asObj().appendElement(self.arena, el);
             _ = try self.mapMethod(map, "set", &.{ key, arr });
         }
     }
@@ -15946,7 +15945,7 @@ fn reflectOwnKeysFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
     // objectOwnKeysList is proxy- and module-namespace-aware (sorted exotic keys).
     const keys = try self.objectOwnKeysList(target.asObj());
     const arr = try self.newArray();
-    for (keys) |k| try arr.asObj().elements.append(arr.asObj().elementsAllocator(self.arena), self.keyToValue(k));
+    for (keys) |k| try arr.asObj().appendElement(self.arena, self.keyToValue(k));
     return arr;
 }
 
