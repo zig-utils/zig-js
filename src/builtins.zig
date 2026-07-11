@@ -142,15 +142,15 @@ pub fn functionConstructor(ctx: *anyopaque, this: Value, args: []const Value) Ho
     // trailing Annex B HTML-open-comment param (`Function("<!--", "")`) comments
     // out to end-of-line, so without the newline it would swallow the `)`.
     const param_source = try std.fmt.allocPrint(self.arena, "({s}\n)", .{params.items});
-    var param_parser = Parser.init(self.arena, param_source) catch
-        return self.throwError("SyntaxError", "Function: invalid parameters or body");
-    param_parser.parseDynamicFunctionParams(false, false) catch
-        return self.throwError("SyntaxError", "Function: invalid parameters or body");
+    var param_parser = Parser.init(self.arena, param_source) catch |err|
+        return self.throwParserSyntaxError("Function parameters", param_source, null, err);
+    param_parser.parseDynamicFunctionParams(false, false) catch |err|
+        return self.throwParserSyntaxError("Function parameters", param_source, &param_parser, err);
     const source = try std.fmt.allocPrint(self.arena, "(function({s}\n) {{\n{s}\n}})", .{ params.items, body });
-    var parser = Parser.init(self.arena, source) catch
-        return self.throwError("SyntaxError", "Function: invalid parameters or body");
-    const prog = parser.parseProgram() catch
-        return self.throwError("SyntaxError", "Function: invalid parameters or body");
+    var parser = Parser.init(self.arena, source) catch |err|
+        return self.throwParserSyntaxError("Function body", source, null, err);
+    const prog = parser.parseProgram() catch |err|
+        return self.throwParserSyntaxError("Function body", source, &parser, err);
     // Create the function in the Function constructor's own realm (so its
     // closure — and thus [[Realm]] — is that realm).
     const fn_v = try self.eval(prog);

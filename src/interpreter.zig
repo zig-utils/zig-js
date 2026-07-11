@@ -17,6 +17,7 @@ const gil_mod = @import("gil.zig");
 const stack_scan = @import("stack_scan.zig");
 const gc_mod = @import("gc.zig");
 const jsthread = @import("jsthread.zig");
+const parser_mod = @import("parser.zig");
 const iana_zones = @import("iana_zones.zig");
 const iana_offsets = @import("iana_offsets.zig");
 const Compiler = @import("compiler.zig").Compiler;
@@ -2123,6 +2124,27 @@ pub const Interpreter = struct {
     pub fn throwError(self: *Interpreter, name: []const u8, message: []const u8) EvalError {
         self.exception = try self.makeError(name, message);
         return error.Throw;
+    }
+
+    /// Raise a SyntaxError for parser failures with a best-effort source
+    /// location. `context` names the embedding operation ("eval", "Function",
+    /// etc.); source-bearing APIs can layer richer filenames on top separately.
+    pub fn throwParserSyntaxError(self: *Interpreter, context: []const u8, source: []const u8, parser: ?*const Parser, err: anyerror) EvalError {
+        const loc = if (parser) |p| p.errorLocation() else parser_mod.sourceLocationAt(source, 0);
+        const message = std.fmt.allocPrint(self.arena, "{s}: {s} at {d}:{d}", .{
+            context,
+            @errorName(err),
+            loc.line,
+            loc.column,
+        }) catch return error.OutOfMemory;
+        return self.throwError("SyntaxError", message);
+    }
+
+    pub fn throwParserSyntaxErrorInRealm(self: *Interpreter, realm: *Environment, context: []const u8, source: []const u8, parser: ?*const Parser, err: anyerror) EvalError {
+        const saved_env = self.env;
+        self.env = realm;
+        defer self.env = saved_env;
+        return self.throwParserSyntaxError(context, source, parser, err);
     }
 
     pub fn eval(self: *Interpreter, node: *const Node) EvalError!Value {
@@ -14410,7 +14432,7 @@ fn evalFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Val
     if (args.len == 0) return Value.undef();
     if (!args[0].isString()) return args[0]; // eval of a non-string is the identity
     const src = args[0].asStr();
-    var parser = Parser.init(self.arena, src) catch return self.throwError("SyntaxError", "eval: invalid source");
+    var parser = Parser.init(self.arena, src) catch |err| return self.throwParserSyntaxError("eval", src, null, err);
     // Direct eval inherits the caller's strictness for early errors; indirect
     // eval is global code in the eval function's realm and only becomes strict
     // from its own directive prologue.
@@ -14423,7 +14445,7 @@ fn evalFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Val
         parser.in_class = true;
         parser.eval_private_allowed = true;
     }
-    const prog = parser.parseProgram() catch return self.throwError("SyntaxError", "eval: parse error");
+    const prog = parser.parseProgram() catch |err| return self.throwParserSyntaxError("eval", src, &parser, err);
     if (self.direct_eval_call) if (self.current_private_map) |pm|
         try self.rewritePrivateNamesInNode(prog, @constCast(pm));
 
@@ -16109,8 +16131,9 @@ fn host262EvalScriptFn(ctx: *anyopaque, this: Value, args: []const Value) value.
     const fnobj = self.active_native orelse return Value.undef();
     const genv: *Environment = @ptrCast(@alignCast(fnobj.private_data orelse return Value.undef()));
     if (args.len == 0 or !args[0].isString()) return if (args.len > 0) args[0] else Value.undef();
-    var parser = Parser.init(self.arena, args[0].asStr()) catch return self.throwError("SyntaxError", "evalScript: invalid source");
-    const prog = parser.parseProgram() catch return self.throwError("SyntaxError", "evalScript: parse error");
+    const src = args[0].asStr();
+    var parser = Parser.init(self.arena, src) catch |err| return self.throwParserSyntaxError("evalScript", src, null, err);
+    const prog = parser.parseProgram() catch |err| return self.throwParserSyntaxError("evalScript", src, &parser, err);
     const prog_strict = parser.strict;
     const gobj: ?*value.Object = if (genv.get("globalThis")) |g| (if (g.isObject()) g.asObj() else null) else null;
     const s_env = self.env;
@@ -16412,8 +16435,9 @@ fn shadowRealmEvaluateFn(ctx: *anyopaque, this: Value, args: []const Value) valu
     const src = if (args.len > 0) args[0] else Value.undef();
     if (!src.isString()) return throwErrorInRealm(self, caller_env, "TypeError", "ShadowRealm.prototype.evaluate expects a string");
     const genv: *Environment = @ptrCast(@alignCast(this.asObj().private_data orelse return throwErrorInRealm(self, caller_env, "TypeError", "ShadowRealm has no realm")));
-    var parser = Parser.init(self.arena, src.asStr()) catch return throwErrorInRealm(self, caller_env, "SyntaxError", "evaluate: invalid source");
-    const prog = parser.parseProgram() catch return throwErrorInRealm(self, caller_env, "SyntaxError", "evaluate: parse error");
+    const source = src.asStr();
+    var parser = Parser.init(self.arena, source) catch |err| return self.throwParserSyntaxErrorInRealm(caller_env, "ShadowRealm.evaluate", source, null, err);
+    const prog = parser.parseProgram() catch |err| return self.throwParserSyntaxErrorInRealm(caller_env, "ShadowRealm.evaluate", source, &parser, err);
     const prog_strict = parser.strict;
     const gobj: ?*value.Object = if (genv.get("globalThis")) |g| (if (g.isObject()) g.asObj() else null) else null;
     const s_env = self.env;
@@ -18741,20 +18765,20 @@ fn dynamicFunctionFn(comptime kind: DynFnKind) value.NativeFn {
             // `)` on its own line (matching the assembled source below) so a
             // trailing Annex B HTML-open-comment param doesn't comment out the `)`.
             const param_source = try std.fmt.allocPrint(self.arena, "({s}\n)", .{params.items});
-            var param_parser = Parser.init(self.arena, param_source) catch
-                return self.throwError("SyntaxError", "Function: invalid parameters or body");
-            param_parser.parseDynamicFunctionParams(kind == .generator or kind == .async_generator, kind == .async_fn or kind == .async_generator) catch
-                return self.throwError("SyntaxError", "Function: invalid parameters or body");
+            var param_parser = Parser.init(self.arena, param_source) catch |err|
+                return self.throwParserSyntaxError("Function parameters", param_source, null, err);
+            param_parser.parseDynamicFunctionParams(kind == .generator or kind == .async_generator, kind == .async_fn or kind == .async_generator) catch |err|
+                return self.throwParserSyntaxError("Function parameters", param_source, &param_parser, err);
             const prefix = switch (kind) {
                 .generator => "function* anonymous",
                 .async_fn => "async function anonymous",
                 .async_generator => "async function* anonymous",
             };
             const source = try std.fmt.allocPrint(self.arena, "({s}({s}\n) {{\n{s}\n}})", .{ prefix, params.items, body });
-            var parser = Parser.init(self.arena, source) catch
-                return self.throwError("SyntaxError", "Function: invalid parameters or body");
-            const prog = parser.parseProgram() catch
-                return self.throwError("SyntaxError", "Function: invalid parameters or body");
+            var parser = Parser.init(self.arena, source) catch |err|
+                return self.throwParserSyntaxError("Function body", source, null, err);
+            const prog = parser.parseProgram() catch |err|
+                return self.throwParserSyntaxError("Function body", source, &parser, err);
             const fnval = try self.eval(prog);
             // GetPrototypeFromConstructor: a real new.target subclass overrides
             // the function object's [[Prototype]] (the default kind-prototype is
@@ -39226,7 +39250,7 @@ fn relationalNaN(a: Value, b: Value) bool {
 // Tests
 // ---------------------------------------------------------------------------
 
-const Parser = @import("parser.zig").Parser;
+const Parser = parser_mod.Parser;
 
 fn evalSource(arena: std.mem.Allocator, src: []const u8) !Value {
     var parser = try Parser.init(arena, src);

@@ -5432,6 +5432,13 @@ test "ShadowRealm evaluate wraps child abrupt completions" {
         \\  caught("'use strict'; eval('var public = 1;')")
         \\].join("|")
     );
+    try std.testing.expect((try evalIn(
+        \\var r = new ShadowRealm();
+        \\var ok = false;
+        \\try { r.evaluate('let ok = 1;\nlet bad = ;'); }
+        \\catch (e) { ok = e instanceof SyntaxError && e.message.includes('ShadowRealm.evaluate:') && e.message.includes(' at 2:'); }
+        \\ok
+    )).asBool());
 }
 
 test "ShadowRealm constructor metadata" {
@@ -6153,7 +6160,7 @@ test "Function constructor builds callable functions from source" {
     // A syntactically invalid body throws SyntaxError.
     try std.testing.expect((try evalIn(
         \\var t = false;
-        \\try { Function("return )("); } catch (e) { t = e.name === "SyntaxError"; }
+        \\try { Function("return )("); } catch (e) { t = e.name === "SyntaxError" && e.message.includes("Function body:") && e.message.includes(" at "); }
         \\t
     )).asBool());
     try std.testing.expect((try evalIn(
@@ -8808,7 +8815,7 @@ test "eval: direct eval runs in the caller's scope" {
     // A syntax error in the source throws a SyntaxError.
     try std.testing.expect((try evalIn(
         \\var t = false;
-        \\try { eval('var ='); } catch (e) { t = e instanceof SyntaxError; }
+        \\try { eval('var ='); } catch (e) { t = e instanceof SyntaxError && e.message.includes('eval:') && e.message.includes(' at 1:'); }
         \\t
     )).asBool());
     try std.testing.expect((try evalIn(
