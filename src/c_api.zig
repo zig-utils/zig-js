@@ -221,7 +221,10 @@ export fn JSEvaluateScript(
     // threaded contexts. Fetch raw here so `ZJSGlobalContextCreateThreaded(true)`
     // is usable through the public C API in Debug builds too.
     const c = ctxRawFrom(ctx) orelse return null;
-    const s = strFrom(script) orelse return null;
+    const s = strFrom(script) orelse {
+        setException(c, exception, "TypeError: script is null");
+        return null;
+    };
     const this_value = if (this_object) |_|
         Value.obj(objectFrom(this_object) orelse {
             setException(c, exception, "TypeError: thisObject is not an object");
@@ -1024,6 +1027,21 @@ test "C-API: JSEvaluateScript computes 1 + 1 === 2" {
     try std.testing.expect(exception == null);
     try std.testing.expect(JSValueIsNumber(ctx, result));
     try std.testing.expectEqual(@as(f64, 2), JSValueToNumber(ctx, result, null));
+}
+
+test "C-API: JSEvaluateScript rejects null script with exception" {
+    const ctx = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
+    defer JSGlobalContextRelease(ctx);
+
+    var exception: JSValueRef = null;
+    try std.testing.expect(JSEvaluateScript(ctx, null, null, null, 0, &exception) == null);
+    try std.testing.expect(exception != null);
+
+    const msg = JSValueToStringCopy(ctx, exception, null) orelse return error.StringInitFailed;
+    defer JSStringRelease(msg);
+    var buf: [128]u8 = undefined;
+    const written = JSStringGetUTF8CString(msg, &buf, buf.len);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0 .. written - 1], "script is null") != null);
 }
 
 test "C-API: unsupported JSClassRef inputs fail fast" {
