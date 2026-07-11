@@ -112,8 +112,9 @@ buffers, property-mode Atomics, `Thread`, `Lock`, `Condition`, `ThreadLocal`,
 parallel-GC witnesses, C embedder threading, the main can-block gate, and the
 public `Context.Options.heap_limit_bytes` allocator-cap and
 `Context.heapBudgetStats()` pressure-diagnostic smoke coverage, plus the
-shared-realm `Thread` OOM survivor witness that keeps a sibling joinable after
-one peer exhausts the context cap.
+shared-realm `Thread` OOM survivor/recovery witnesses that keep a sibling
+joinable after one peer exhausts the context cap and prove GC-backed capped
+contexts can recover after unreachable pressure is collected.
 
 `zig build threads-test` runs the green WebKit PR-249 allowlist from
 `reference/webkit-249/threads-tests`. The current coverage contains 231

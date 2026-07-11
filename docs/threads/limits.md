@@ -25,11 +25,12 @@ tests as the matching engine features land.
   root tracing for active VM frames, conservative stack scanning where sound,
   and abort-safe mid-script collection experiments.
 - Optional per-context allocator pressure cap:
-  `Context.createWith(.{ .heap_limit_bytes = n })` fails closed with
-  `error.OutOfMemory` once Context-owned outstanding allocator bytes exceed the
-  configured budget. `ctx.heapBudgetStats()` reports `limit_bytes`,
-  `used_bytes`, lifetime `peak_bytes`, and `remaining_bytes` for capped
-  contexts.
+  `Context.createWith(.{ .heap_limit_bytes = n })` applies a thread-safe budget
+  to Context-owned outstanding allocator bytes. Arena-backed contexts fail
+  closed with `error.OutOfMemory`; GC-backed contexts can collect and retry at
+  safe allocation-recovery points. `ctx.heapBudgetStats()` reports
+  `limit_bytes`, `used_bytes`, lifetime `peak_bytes`, and `remaining_bytes` for
+  capped contexts.
 - Test-shell helpers such as `print`, `setTimeout`, `drainMicrotasks`, `gc`,
   and supported `$vm` compatibility hooks for conformance coverage.
 
@@ -210,11 +211,12 @@ Issue #1 remains the umbrella status page.
   `Thread`s can still join. Existing `asyncJoin()` waiters reject with the same
   reserved object when their already-created promise reaction can be delivered.
   This is intentionally an embedder allocator boundary rather than a JavaScript
-  heap-shape oracle. GC-backed capped contexts can now reclaim at safe GC cell
-  allocation failures and retry, which promotes the PR-249
-  `semantics/oom-one-thread.js` recovery witness. Remaining #24/#27 work is to
-  keep broadening allocation-site catchability and emergency-headroom behavior
-  beyond the promoted witness.
+  heap-shape oracle. Arena-backed caps remain fail-closed and non-reclaimable.
+  GC-backed capped contexts can now reclaim at safe GC cell and ArrayBuffer byte
+  allocation failures, then retry; that recovery policy promotes the PR-249
+  `semantics/oom-one-thread.js` witness. Remaining emergency-recovery work is
+  tracked in #30: no-GIL root-publication recovery and lock-aware side-store
+  pressure without deadlocking GC tracing.
 - **Parallel scaling optimization.** Benchmarks show real speedup, but scaling
   is sub-linear. `zig build threads-profile` now provides a repeatable baseline
   against the `.gil = true` fallback for independent compute, shared object
