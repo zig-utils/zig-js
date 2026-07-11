@@ -13474,8 +13474,8 @@ pub const Interpreter = struct {
     /// A two-element `[start, end]` array, as used by the match-indices array.
     fn indexPair(self: *Interpreter, lo: usize, hi: usize) EvalError!Value {
         const p = (try self.newArray()).asObj();
-        try p.elements.append(p.elementsAllocator(self.arena), Value.num(@floatFromInt(lo)));
-        try p.elements.append(p.elementsAllocator(self.arena), Value.num(@floatFromInt(hi)));
+        try p.appendElement(self.arena, Value.num(@floatFromInt(lo)));
+        try p.appendElement(self.arena, Value.num(@floatFromInt(hi)));
         return Value.obj(p);
     }
 
@@ -13486,19 +13486,19 @@ pub const Interpreter = struct {
     /// `base` is the byte offset of the search window within the original input.
     fn makeIndicesArray(self: *Interpreter, re: *regex.Regex, m: regex.Match, input: []const u8, base: usize) EvalError!*value.Object {
         const idx = (try self.newArray()).asObj();
-        try idx.elements.append(idx.elementsAllocator(self.arena), try self.indexPair(
+        try idx.appendElement(self.arena, try self.indexPair(
             utf16IndexForByteOffset(input, base + m.start),
             utf16IndexForByteOffset(input, base + m.end),
         ));
         for (0..m.captures.len) |i| {
             const present = i < m.captures_present.len and m.captures_present[i];
             if (present and i < m.capture_spans.len) {
-                try idx.elements.append(idx.elementsAllocator(self.arena), try self.indexPair(
+                try idx.appendElement(self.arena, try self.indexPair(
                     utf16IndexForByteOffset(input, base + m.capture_spans[i][0]),
                     utf16IndexForByteOffset(input, base + m.capture_spans[i][1]),
                 ));
             } else {
-                try idx.elements.append(idx.elementsAllocator(self.arena), Value.undef());
+                try idx.appendElement(self.arena, Value.undef());
             }
         }
         if (re.named_capture_list.len > 0) {
@@ -28214,8 +28214,8 @@ fn arrayIteratorValue(self: *Interpreter, kind: usize, index: usize, elem: Value
         1 => Value.num(@floatFromInt(index)),
         2 => blk: {
             const pair = (try self.newArray()).asObj();
-            try pair.elements.append(pair.elementsAllocator(self.arena), Value.num(@floatFromInt(index)));
-            try pair.elements.append(pair.elementsAllocator(self.arena), elem);
+            try pair.appendElement(self.arena, Value.num(@floatFromInt(index)));
+            try pair.appendElement(self.arena, elem);
             break :blk Value.obj(pair);
         },
         else => elem,
@@ -28271,8 +28271,8 @@ fn cursorIterNext(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
                         1 => Value.num(@floatFromInt(i)), // keys
                         2 => blk: {
                             const pair = (try self.newArray()).asObj();
-                            try pair.elements.append(pair.elementsAllocator(self.arena), Value.num(@floatFromInt(i)));
-                            try pair.elements.append(pair.elementsAllocator(self.arena), try self.taLoad(ta, i));
+                            try pair.appendElement(self.arena, Value.num(@floatFromInt(i)));
+                            try pair.appendElement(self.arena, try self.taLoad(ta, i));
                             break :blk Value.obj(pair);
                         },
                         else => try self.taLoad(ta, i), // values
