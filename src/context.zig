@@ -5341,6 +5341,28 @@ test "Promise.resolve queues thenable jobs" {
     try std.testing.expectEqualStrings("1234", v.asStr());
 }
 
+test "Promise.resolve/reject intrinsic fast path preserves subclass capability" {
+    const ctx = try Context.create(std.testing.allocator);
+    defer ctx.destroy();
+    _ = try ctx.evaluate(
+        \\var log = [];
+        \\var p = Promise.resolve(41);
+        \\p.then(function (v) { log.push("p:" + v + ":" + (p instanceof Promise)); });
+        \\Promise.reject("bad").catch(function (v) { log.push("r:" + v); });
+        \\class SubPromise extends Promise {
+        \\  constructor(executor) {
+        \\    log.push("ctor");
+        \\    super(executor);
+        \\  }
+        \\}
+        \\var sp = SubPromise.resolve(7);
+        \\var sr = SubPromise.reject(9);
+        \\sp.then(function (v) { log.push("sp:" + v + ":" + (sp instanceof SubPromise)); });
+        \\sr.catch(function (v) { log.push("sr:" + v + ":" + (sr instanceof SubPromise)); });
+    );
+    try std.testing.expectEqualStrings("ctor|ctor|ctor|ctor|p:41:true|r:bad|sp:7:true|sr:9:true", (try ctx.evaluate("log.join('|')")).asStr());
+}
+
 test "Promise resolving function rejects self resolution" {
     const ctx = try Context.create(std.testing.allocator);
     defer ctx.destroy();

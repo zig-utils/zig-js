@@ -14775,6 +14775,7 @@ fn promiseFinallyFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
 }
 
 fn promiseResolveForConstructor(self: *Interpreter, c: Value, v: Value) EvalError!Value {
+    if (isIntrinsicPromiseConstructor(self, c)) return promiseResolveValue(self, v);
     if (promise.promiseOf(v) != null) {
         const ctor = try self.getProperty(v, "constructor");
         if (ctor.isObject() and c.isObject() and ctor.asObj() == c.asObj()) return v;
@@ -14816,6 +14817,12 @@ fn promiseRejectValue(self: *Interpreter, reason: Value) EvalError!Value {
     return Value.obj(pobj);
 }
 
+fn isIntrinsicPromiseConstructor(self: *Interpreter, c: Value) bool {
+    if (!c.isObject()) return false;
+    const intrinsic = self.env.get("\x00Promise") orelse self.env.get("Promise") orelse return false;
+    return intrinsic.isObject() and c.asObj() == intrinsic.asObj();
+}
+
 /// `Promise.resolve(v)` — uses `this` as the constructor `C`: returns `v`
 /// unchanged when it is a promise whose `constructor` is `C`, otherwise builds
 /// `C`'s capability and resolves it with `v` (so a subclass's `resolve` yields a
@@ -14831,6 +14838,8 @@ fn promiseResolveStaticFn(ctx: *anyopaque, this: Value, args: []const Value) val
 /// `Promise.reject(e)` — builds `this`'s capability and rejects it with `e`.
 fn promiseRejectStaticFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (isIntrinsicPromiseConstructor(self, this))
+        return promiseRejectValue(self, if (args.len > 0) args[0] else Value.undef());
     const cap = try newPromiseCapability(self, this);
     _ = try self.callValue(cap.reject, &.{if (args.len > 0) args[0] else Value.undef()});
     return cap.promise;
