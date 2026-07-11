@@ -11,7 +11,8 @@
 //! Phase 1).
 //!
 //! Thread-safety contract:
-//! - `retain`/`release` are atomic; any thread may call them.
+//! - `retain`/`release` are atomic; any thread may call them. Retain is checked
+//!   and refuses to wrap the storage refcount.
 //! - `len()` / `slice()` are lock-free (acquire load of the published length).
 //! - `grow` may race with other growers (CAS loop) and with readers (they see
 //!   either the old or the new length, never a torn one).
@@ -61,8 +62,19 @@ pub const SharedBufferStorage = struct {
     }
 
     pub fn retain(self: *SharedBufferStorage) *SharedBufferStorage {
-        _ = self.refcount.fetchAdd(1, .monotonic);
-        return self;
+        return self.tryRetain() orelse @panic("SharedBufferStorage refcount overflow");
+    }
+
+    pub fn tryRetain(self: *SharedBufferStorage) ?*SharedBufferStorage {
+        var current = self.refcount.load(.monotonic);
+        while (true) {
+            if (current == std.math.maxInt(usize)) return null;
+            if (self.refcount.cmpxchgWeak(current, current + 1, .monotonic, .monotonic)) |observed| {
+                current = observed;
+                continue;
+            }
+            return self;
+        }
     }
 
     pub fn release(self: *SharedBufferStorage) void {
@@ -243,4 +255,13 @@ test "cross-thread atomic increments land; refcount survives churn" {
     for (threads) |t| t.join();
     const counter: *u64 = @ptrCast(@alignCast(s.slab));
     try std.testing.expectEqual(@as(u64, 4 * iters), @atomicLoad(u64, counter, .seq_cst));
+}
+
+test "SharedBufferStorage retain refuses refcount overflow" {
+    const s = try SharedBufferStorage.create(8, null);
+    defer s.release();
+    s.refcount.store(std.math.maxInt(usize), .release);
+    try std.testing.expect(s.tryRetain() == null);
+    try std.testing.expectEqual(std.math.maxInt(usize), s.refcount.load(.acquire));
+    s.refcount.store(1, .release);
 }
