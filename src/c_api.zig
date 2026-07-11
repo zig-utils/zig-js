@@ -117,6 +117,23 @@ fn ctxForHandleInspection(ref: JSContextRef) ?*Context {
     return c;
 }
 
+fn ctxForEvaluation(ref: JSContextRef) ?*Context {
+    const c = ctxRawFrom(ref) orelse return null;
+    if (comptime builtin.mode == .Debug) {
+        // Serialized threaded contexts acquire the GIL inside
+        // `Context.evaluateWithThis`, then assert that ownership there. For
+        // non-threaded and true-parallel C contexts, preserve the documented
+        // C-handle affinity before touching the unsynchronized host boundary.
+        if (c.gil == null or c.parallel_js) {
+            if (!c.isOwnerThread()) std.debug.panic(
+                "Context is single-thread-affine: used from thread {d}, owned by thread {d} (docs/threads/bindings.md)",
+                .{ std.Thread.getCurrentId(), c.owner_thread },
+            );
+        }
+    }
+    return c;
+}
+
 fn box(ctx: *Context, v: Value) JSValueRef {
     const b = ctx.arena().create(Boxed) catch return null;
     b.* = .{ .value = v, .owner = ctx };
@@ -337,9 +354,10 @@ export fn JSEvaluateScript(
     exception: ExceptionRef,
 ) callconv(.c) JSValueRef {
     // `Context.evaluate()` acquires/releases the per-context GIL for serialized
-    // threaded contexts. Fetch raw here so `ZJSGlobalContextCreateThreaded(true)`
-    // is usable through the public C API in Debug builds too.
-    const c = ctxRawFrom(ctx) orelse return null;
+    // threaded contexts, so this uses the evaluation-specific C-boundary helper
+    // instead of `ctxFrom` while still preserving debug affinity checks for
+    // non-threaded and true-parallel C contexts.
+    const c = ctxForEvaluation(ctx) orelse return null;
     const s = strFrom(script) orelse {
         setException(c, exception, "TypeError: script is null");
         return null;
