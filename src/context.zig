@@ -5439,6 +5439,32 @@ test "Promise thenable job ignores throw after resolve" {
     try std.testing.expectEqualStrings("ok", v.asStr());
 }
 
+test "enable_gc: Promise thenable resolving functions keep shared state" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    defer ctx.destroy();
+    _ = try ctx.evaluate(
+        \\var savedResolve, savedReject;
+        \\var result = "pending";
+        \\(function () {
+        \\  var p = Promise.resolve({
+        \\    then: function (resolve, reject) {
+        \\      savedResolve = resolve;
+        \\      savedReject = reject;
+        \\    }
+        \\  });
+        \\  p.then(function (v) { result = v; }, function (e) { result = "rejected:" + e; });
+        \\})();
+    );
+    _ = try ctx.evaluate(
+        \\gc();
+        \\savedResolve("first");
+        \\savedReject("late reject");
+        \\savedResolve("late fulfill");
+    );
+    const v = try ctx.evaluate("result");
+    try std.testing.expectEqualStrings("first", v.asStr());
+}
+
 test "Promise keyed combinators preserve enumerable own keys" {
     const ctx = try Context.create(std.testing.allocator);
     defer ctx.destroy();

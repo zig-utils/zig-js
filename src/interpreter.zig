@@ -14634,49 +14634,15 @@ fn promiseConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value
     const pobj = try promise.newPromise(self);
     if (self.new_target.isObject()) pobj.setProtoAtomic(try self.ctorRealmIntrinsicProto(self.new_target.asObj(), "Promise"));
     const pp = pobj.promise.?;
-    promise_profile.recordResolvingFunctionPair();
-    const resolving = try self.arena.create(promise.Resolving);
-    resolving.* = .{ .promise = @ptrCast(@alignCast(pp)) };
-    const res_fn = try gc_mod.allocObj(self.arena);
-    res_fn.* = .{ .native = promiseResolveClosure, .private_data = @ptrCast(resolving) };
-    const rej_fn = try gc_mod.allocObj(self.arena);
-    rej_fn.* = .{ .native = promiseRejectClosure, .private_data = @ptrCast(resolving) };
-    // The resolve/reject functions are anonymous, length 1 (spec).
-    try installNativeProps(self.arena, self.root_shape, res_fn, "", 1);
-    try installNativeProps(self.arena, self.root_shape, rej_fn, "", 1);
-    if (self.callValueWithThis(executor, &.{ Value.obj(res_fn), Value.obj(rej_fn) }, Value.undef())) |_| {} else |err| {
+    const resolving = try promise.nativeResolveReject(self, @ptrCast(@alignCast(pp)));
+    if (self.callValueWithThis(executor, &.{ resolving.resolve, resolving.reject }, Value.undef())) |_| {} else |err| {
         if (err == error.Throw) {
             const reason = self.exception;
             self.exception = Value.undef();
-            if (!resolving.already) {
-                resolving.already = true;
-                try promise.reject(self, resolving.promise, reason);
-            }
+            _ = try self.callValue(resolving.reject, &.{reason});
         } else return err;
     }
     return Value.obj(pobj);
-}
-
-fn promiseResolveClosure(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
-    _ = this;
-    const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const fnobj = self.active_native orelse return Value.undef();
-    const resolving: *promise.Resolving = @ptrCast(@alignCast(fnobj.private_data.?));
-    if (resolving.already) return Value.undef();
-    resolving.already = true;
-    try promise.resolve(self, resolving.promise, if (args.len > 0) args[0] else Value.undef());
-    return Value.undef();
-}
-
-fn promiseRejectClosure(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
-    _ = this;
-    const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const fnobj = self.active_native orelse return Value.undef();
-    const resolving: *promise.Resolving = @ptrCast(@alignCast(fnobj.private_data.?));
-    if (resolving.already) return Value.undef();
-    resolving.already = true;
-    try promise.reject(self, resolving.promise, if (args.len > 0) args[0] else Value.undef());
-    return Value.undef();
 }
 
 /// `Promise.prototype.then` — the result promise is built from
@@ -15089,12 +15055,6 @@ inline fn tracePrivateValue(v: anytype, val: Value) void {
 pub fn traceNativePrivateData(o: *value.Object, v: anytype) void {
     const nf = o.native orelse return;
     const pd = o.private_data orelse return;
-
-    if (nf == promiseResolveClosure or nf == promiseRejectClosure) {
-        const data: *promise.Resolving = @ptrCast(@alignCast(pd));
-        v.mark(data.promise);
-        return;
-    }
 
     if (nf == finallyReactionFn or nf == finallyThunkFn) {
         const data: *FinallyData = @ptrCast(@alignCast(pd));

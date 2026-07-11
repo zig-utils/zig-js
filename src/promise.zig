@@ -71,15 +71,6 @@ pub const Promise = struct {
     }
 };
 
-/// Shared state for one promise resolving-function pair. ECMAScript's
-/// [[AlreadyResolved]] belongs to the resolve/reject functions, not to the
-/// promise itself: resolving with a pending thenable must ignore the paired
-/// reject function while still allowing the follow-up thenable job to settle.
-pub const Resolving = struct {
-    promise: *Promise,
-    already: bool = false,
-};
-
 /// A queued reaction job: run `reaction.handler(argument)` and settle
 /// `reaction.result` accordingly (a pass-through when `handler` is null).
 pub const Microtask = struct {
@@ -294,16 +285,32 @@ pub const Elem = struct {
     already: *bool,
 };
 
-/// Native resolve/reject closures (used for thenable assimilation): each reaches
-/// its target promise via the active-native callee's `private_data`.
+fn resolvingStateObject(fnobj: *Object) ?*Object {
+    if (fnobj.native == resolveThunk) return fnobj;
+    if (fnobj.native == rejectThunk) {
+        const raw = fnobj.private_data orelse return null;
+        return @ptrCast(@alignCast(raw));
+    }
+    return null;
+}
+
+fn resolvingTarget(state: *Object) ?*Promise {
+    const raw = state.private_data orelse return null;
+    return @ptrCast(@alignCast(raw));
+}
+
+/// Native resolve/reject closures (used for thenable assimilation): the resolve
+/// function object owns the shared resolving record, and the paired reject
+/// function's `private_data` points at that resolve object.
 fn resolveThunk(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const fnobj = self.active_native orelse return Value.undef();
-    const data: *Resolving = @ptrCast(@alignCast(fnobj.private_data.?));
-    if (data.already) return Value.undef();
-    data.already = true;
-    try resolve(self, data.promise, if (args.len > 0) args[0] else Value.undef());
+    const state = resolvingStateObject(fnobj) orelse return Value.undef();
+    const target = resolvingTarget(state) orelse return Value.undef();
+    if (state.promise_resolving_already) return Value.undef();
+    state.promise_resolving_already = true;
+    try resolve(self, target, if (args.len > 0) args[0] else Value.undef());
     return Value.undef();
 }
 
@@ -311,10 +318,11 @@ fn rejectThunk(ctx: *anyopaque, this: Value, args: []const Value) value.HostErro
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const fnobj = self.active_native orelse return Value.undef();
-    const data: *Resolving = @ptrCast(@alignCast(fnobj.private_data.?));
-    if (data.already) return Value.undef();
-    data.already = true;
-    try reject(self, data.promise, if (args.len > 0) args[0] else Value.undef());
+    const state = resolvingStateObject(fnobj) orelse return Value.undef();
+    const target = resolvingTarget(state) orelse return Value.undef();
+    if (state.promise_resolving_already) return Value.undef();
+    state.promise_resolving_already = true;
+    try reject(self, target, if (args.len > 0) args[0] else Value.undef());
     return Value.undef();
 }
 
@@ -330,10 +338,15 @@ pub fn promiseOf(v: Value) ?*Promise {
 /// allocated in this file.
 pub fn traceNativePrivateData(o: *Object, v: anytype) void {
     const nf = o.native orelse return;
-    const pd = o.private_data orelse return;
-    if (nf == resolveThunk or nf == rejectThunk) {
-        const data: *Resolving = @ptrCast(@alignCast(pd));
-        v.mark(data.promise);
+    if (nf == resolveThunk) {
+        if (resolvingTarget(o)) |p| v.mark(p);
+        return;
+    }
+    if (nf == rejectThunk) {
+        const pd = o.private_data orelse return;
+        const state: *Object = @ptrCast(@alignCast(pd));
+        v.mark(state);
+        if (resolvingTarget(state)) |p| v.mark(p);
     }
 }
 
@@ -500,13 +513,11 @@ pub fn reject(self: *Interpreter, p: *Promise, reason: Value) EvalError!void {
 /// is the native `p`). Used wherever the result is an intrinsic promise.
 pub fn nativeResolveReject(self: *Interpreter, p: *Promise) EvalError!struct { resolve: Value, reject: Value } {
     promise_profile.recordResolvingFunctionPair();
-    const data = try self.arena.create(Resolving);
-    data.* = .{ .promise = p };
     const res = try gc_mod.allocObj(self.arena);
-    res.* = .{ .native = resolveThunk, .private_data = @ptrCast(data) };
+    res.* = .{ .native = resolveThunk, .private_data = @ptrCast(p) };
     try interp.installNativeProps(self.arena, self.root_shape, res, "", 1);
     const rej = try gc_mod.allocObj(self.arena);
-    rej.* = .{ .native = rejectThunk, .private_data = @ptrCast(data) };
+    rej.* = .{ .native = rejectThunk, .private_data = @ptrCast(res) };
     try interp.installNativeProps(self.arena, self.root_shape, rej, "", 1);
     return .{ .resolve = Value.obj(res), .reject = Value.obj(rej) };
 }

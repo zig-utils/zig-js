@@ -787,6 +787,11 @@ pub const Object = struct {
     /// Internal owner tag for engine-managed `private_data` roots. Untagged
     /// host data stays opaque; tracers must not inspect it speculatively.
     private_data_tag: ObjectPrivateDataTag = .none,
+    /// Promise resolving functions carry one shared, spec-observable
+    /// [[AlreadyResolved]] record per resolve/reject pair. The resolve function
+    /// object owns that tiny record directly; the reject function points at the
+    /// resolve object through `private_data`.
+    promise_resolving_already: bool = false,
     /// `Thread.restrict(obj)`: the only OS thread allowed to touch this
     /// object through the enforced internal-method funnels (0 =
     /// unrestricted). Foreign access throws `ConcurrentAccessError`. Atomic: the
