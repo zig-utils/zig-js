@@ -60,6 +60,13 @@ witness: `JSValueProtect` keeps an otherwise-unrooted C-API object alive while
 shared-realm `Thread`s drive a finishing sweep, and `JSValueUnprotect` releases
 that root afterward.
 
+Shape transitions use an append-only publication rule. The transition hash map
+is still mutated only while holding the parent shape's transition lock, but each
+fully initialized child shape is also release-published onto an immutable child
+list. Cached transition hits may traverse that list with acquire ordering
+without taking the transition lock; misses still re-enter the locked hash map
+path so duplicate same-name insertions converge on one child shape.
+
 Program state is the mutable data that JavaScript code intentionally shares:
 
 - bytes in `SharedArrayBuffer` or transferred/shared `ArrayBuffer` storage,

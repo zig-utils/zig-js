@@ -73,6 +73,15 @@ pub const Shape = struct {
     /// Edges to child shapes that add one more property, keyed by that name.
     /// Shared and cached so identical construction sequences converge.
     transitions: std.StringHashMapUnmanaged(*Shape) = .{},
+    /// Append-only read cache of `transitions`.
+    ///
+    /// Shape transitions are never deleted and shapes live for the whole owning
+    /// Context. Once a child is fully initialized and inserted while holding
+    /// `transition_lock`, it is published here with release ordering so cached
+    /// transition hits can traverse immutable child links without taking the
+    /// transition lock.
+    transition_head: std.atomic.Value(?*Shape) = .init(null),
+    transition_next: ?*Shape = null,
     transition_lock: std.atomic.Mutex = .unlocked,
     arena: std.mem.Allocator,
 
@@ -102,6 +111,12 @@ pub const Shape = struct {
     /// share structure.
     pub fn transition(self: *Shape, name: []const u8) std.mem.Allocator.Error!*Shape {
         bumpShapeStat("transition_requests");
+
+        if (self.findTransitionCached(name)) |child| {
+            bumpShapeStat("transition_hits");
+            return child;
+        }
+
         self.lockTransitions();
         defer self.transition_lock.unlock();
 
@@ -120,7 +135,24 @@ pub const Shape = struct {
             .arena = self.arena,
         };
         try self.transitions.put(self.arena, owned, child);
+        self.publishTransition(child);
         return child;
+    }
+
+    fn findTransitionCached(self: *Shape, name: []const u8) ?*Shape {
+        var child = self.transition_head.load(.acquire);
+        while (child) |sh| {
+            if (sh.name) |n| {
+                if (std.mem.eql(u8, n, name)) return sh;
+            }
+            child = sh.transition_next;
+        }
+        return null;
+    }
+
+    fn publishTransition(self: *Shape, child: *Shape) void {
+        child.transition_next = self.transition_head.load(.acquire);
+        self.transition_head.store(child, .release);
     }
 
     fn lockTransitions(self: *Shape) void {
