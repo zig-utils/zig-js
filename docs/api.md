@@ -128,7 +128,7 @@ Native callbacks use the standard `JSObjectCallAsFunctionCallback` calling conve
 ## Caveats
 
 > [!WARNING]
-> The implemented subset covers the common evaluation, value, object, string, and protected-handle surface plus the zig-js worker extension. Full JavaScriptCore class definitions, Objective-C `JSValue`/`JSContext`, inspector/debugger APIs, typed-array C constructors, and other WebKit internals are out of scope. The language/runtime scope is whatever the configured conformance runner currently proves — see [Conformance](/conformance).
+> The implemented subset covers the common evaluation, value, object, string, and protected-handle surface plus the zig-js worker extension. Full JavaScriptCore class definitions, Objective-C `JSValue`/`JSContext`, inspector/debugger APIs, typed-array C constructors, and other WebKit internals are out of scope. Non-null `JSClassRef` inputs to `JSGlobalContextCreate` or `JSObjectMake` are rejected rather than silently ignored. The language/runtime scope is whatever the configured conformance runner currently proves — see [Conformance](/conformance).
 
 Some functions currently accept JavaScriptCore-shaped signatures but do not yet honor every argument: `JSEvaluateScript` honors `thisObject` but still ignores `sourceURL` / `startingLineNumber`. Treat those as pre-stabilization gaps, not long-term ABI commitments: call sites compile today, but inert parameters should be implemented, renamed, or removed before the surface is declared stable. `JSGlobalContextRetain` / `JSGlobalContextRelease` maintain a real C-API reference count, `JSObjectMakeFunctionWithCallback` honors the provided function name, and `JSObjectSetProperty` honors property attributes.
 

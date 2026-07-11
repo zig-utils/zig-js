@@ -135,7 +135,7 @@ export fn JSGarbageCollect(ctx: JSContextRef) callconv(.c) void {
 }
 
 export fn JSGlobalContextCreate(global_class: ?*anyopaque) callconv(.c) JSContextRef {
-    _ = global_class;
+    if (global_class != null) return null;
     const ctx = Context.create(gpa) catch return null;
     ctx.initCApiRef();
     return @ptrCast(ctx);
@@ -436,7 +436,7 @@ export fn JSValueUnprotect(ctx: JSContextRef, v: JSValueRef) callconv(.c) void {
 // ---- JSObject construction & properties --------------------------------
 
 export fn JSObjectMake(ctx: JSContextRef, class: ?*anyopaque, data: ?*anyopaque) callconv(.c) JSObjectRef {
-    _ = class;
+    if (class != null) return null;
     const c = ctxFrom(ctx) orelse return null;
     const gc_saved = gc_mod.setActiveHeap(c.gc);
     defer _ = gc_mod.setActiveHeap(gc_saved);
@@ -987,6 +987,16 @@ test "C-API: JSEvaluateScript computes 1 + 1 === 2" {
     try std.testing.expect(exception == null);
     try std.testing.expect(JSValueIsNumber(ctx, result));
     try std.testing.expectEqual(@as(f64, 2), JSValueToNumber(ctx, result, null));
+}
+
+test "C-API: unsupported JSClassRef inputs fail fast" {
+    var fake_class: u8 = 0;
+    const fake: *anyopaque = @ptrCast(&fake_class);
+    try std.testing.expect(JSGlobalContextCreate(fake) == null);
+
+    const ctx = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
+    defer JSGlobalContextRelease(ctx);
+    try std.testing.expect(JSObjectMake(ctx, fake, null) == null);
 }
 
 test "C-API: JSValueIsEqual uses JavaScript abstract equality semantics" {
