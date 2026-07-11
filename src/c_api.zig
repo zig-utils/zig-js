@@ -48,9 +48,9 @@ const gpa = std.heap.page_allocator;
 /// Boxed interpreter value handed across the C boundary as a `JSValueRef`.
 const Boxed = struct { value: Value };
 
-/// JSC-shaped `JSType`. Values 0..6 match Apple's public enum; `bigint` is a
-/// zig-js extension so the C boundary does not misreport BigInt primitives as
-/// generic objects.
+/// JSC-shaped `JSType`. Values 0..6 match Apple's public enum; `bigint` and
+/// `invalid` are zig-js extensions so the C boundary does not misreport BigInt
+/// primitives or null handles as generic/undefined values.
 pub const JSType = enum(c_uint) {
     undefined = 0,
     null = 1,
@@ -60,6 +60,7 @@ pub const JSType = enum(c_uint) {
     object = 5,
     symbol = 6,
     bigint = 7,
+    invalid = 8,
 };
 
 pub const JSValueRef = ?*anyopaque;
@@ -102,16 +103,17 @@ fn box(ctx: *Context, v: Value) JSValueRef {
     return @ptrCast(b);
 }
 
-fn unbox(ref: JSValueRef) Value {
-    const b: *Boxed = @ptrCast(@alignCast(ref orelse return Value.undef()));
+fn valueFrom(ref: JSValueRef) ?Value {
+    const b: *Boxed = @ptrCast(@alignCast(ref orelse return null));
     return b.value;
 }
 
+fn unbox(ref: JSValueRef) Value {
+    return valueFrom(ref) orelse Value.undef();
+}
+
 fn valueArgFrom(ctx: *Context, ref: JSValueRef, exception: ExceptionRef) ?Value {
-    if (ref) |boxed| {
-        const b: *Boxed = @ptrCast(@alignCast(boxed));
-        return b.value;
-    }
+    if (valueFrom(ref)) |v| return v;
     setException(ctx, exception, "TypeError: value is not a value");
     return null;
 }
@@ -258,7 +260,7 @@ export fn JSEvaluateScript(
 
 export fn JSValueGetType(ctx: JSContextRef, v: JSValueRef) callconv(.c) JSType {
     _ = ctx;
-    const uv = unbox(v);
+    const uv = valueFrom(v) orelse return .invalid;
     return switch (uv.kind()) {
         .undefined => .undefined,
         .null => .null,
@@ -271,44 +273,44 @@ export fn JSValueGetType(ctx: JSContextRef, v: JSValueRef) callconv(.c) JSType {
 
 export fn JSValueIsUndefined(ctx: JSContextRef, v: JSValueRef) callconv(.c) bool {
     _ = ctx;
-    return unbox(v).isUndefined();
+    return if (valueFrom(v)) |uv| uv.isUndefined() else false;
 }
 
 export fn JSValueIsNull(ctx: JSContextRef, v: JSValueRef) callconv(.c) bool {
     _ = ctx;
-    return unbox(v).isNull();
+    return if (valueFrom(v)) |uv| uv.isNull() else false;
 }
 
 export fn JSValueIsBoolean(ctx: JSContextRef, v: JSValueRef) callconv(.c) bool {
     _ = ctx;
-    return unbox(v).isBoolean();
+    return if (valueFrom(v)) |uv| uv.isBoolean() else false;
 }
 
 export fn JSValueIsNumber(ctx: JSContextRef, v: JSValueRef) callconv(.c) bool {
     _ = ctx;
-    return unbox(v).isNumber();
+    return if (valueFrom(v)) |uv| uv.isNumber() else false;
 }
 
 export fn JSValueIsString(ctx: JSContextRef, v: JSValueRef) callconv(.c) bool {
     _ = ctx;
-    return unbox(v).isString();
+    return if (valueFrom(v)) |uv| uv.isString() else false;
 }
 
 export fn JSValueIsObject(ctx: JSContextRef, v: JSValueRef) callconv(.c) bool {
     _ = ctx;
-    const uv = unbox(v);
+    const uv = valueFrom(v) orelse return false;
     return uv.isObject() and !uv.asObj().is_symbol and !uv.asObj().is_bigint;
 }
 
 export fn JSValueIsArray(ctx: JSContextRef, v: JSValueRef) callconv(.c) bool {
     _ = ctx;
-    const uv = unbox(v);
+    const uv = valueFrom(v) orelse return false;
     return uv.isObject() and uv.asObj().is_array;
 }
 
 export fn JSValueIsDate(ctx: JSContextRef, v: JSValueRef) callconv(.c) bool {
     _ = ctx;
-    const uv = unbox(v);
+    const uv = valueFrom(v) orelse return false;
     return uv.isObject() and uv.asObj().is_date;
 }
 
@@ -339,7 +341,9 @@ export fn JSValueIsEqual(ctx: JSContextRef, a: JSValueRef, b: JSValueRef, except
 
 export fn JSValueIsStrictEqual(ctx: JSContextRef, a: JSValueRef, b: JSValueRef) callconv(.c) bool {
     _ = ctx;
-    return value.strictEquals(unbox(a), unbox(b));
+    const lhs = valueFrom(a) orelse return false;
+    const rhs = valueFrom(b) orelse return false;
+    return value.strictEquals(lhs, rhs);
 }
 
 // ---- JSValue constructors ---------------------------------------------
@@ -375,7 +379,7 @@ export fn JSValueMakeString(ctx: JSContextRef, str: JSStringRef) callconv(.c) JS
 
 export fn JSValueToBoolean(ctx: JSContextRef, v: JSValueRef) callconv(.c) bool {
     _ = ctx;
-    return unbox(v).toBoolean();
+    return if (valueFrom(v)) |uv| uv.toBoolean() else false;
 }
 
 export fn JSValueToNumber(ctx: JSContextRef, v: JSValueRef, exception: ExceptionRef) callconv(.c) f64 {
@@ -1053,6 +1057,26 @@ test "C-API: primitive object-tagged values report primitive types" {
     try std.testing.expect(exception == null);
     try std.testing.expectEqual(JSType.bigint, JSValueGetType(ctx, bigint_value));
     try std.testing.expect(!JSValueIsObject(ctx, bigint_value));
+}
+
+test "C-API: value inspection APIs report null handles as invalid" {
+    const ctx = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
+    defer JSGlobalContextRelease(ctx);
+
+    const undefined_value = JSValueMakeUndefined(ctx) orelse return error.ValueInitFailed;
+
+    try std.testing.expectEqual(JSType.invalid, JSValueGetType(ctx, null));
+    try std.testing.expect(!JSValueIsUndefined(ctx, null));
+    try std.testing.expect(!JSValueIsNull(ctx, null));
+    try std.testing.expect(!JSValueIsBoolean(ctx, null));
+    try std.testing.expect(!JSValueIsNumber(ctx, null));
+    try std.testing.expect(!JSValueIsString(ctx, null));
+    try std.testing.expect(!JSValueIsObject(ctx, null));
+    try std.testing.expect(!JSValueIsArray(ctx, null));
+    try std.testing.expect(!JSValueIsDate(ctx, null));
+    try std.testing.expect(!JSValueIsStrictEqual(ctx, null, null));
+    try std.testing.expect(!JSValueIsStrictEqual(ctx, null, undefined_value));
+    try std.testing.expect(!JSValueToBoolean(ctx, null));
 }
 
 test "C-API: JSEvaluateScript computes 1 + 1 === 2" {
