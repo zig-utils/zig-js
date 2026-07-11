@@ -621,12 +621,31 @@ export fn JSObjectCallAsFunction(ctx: JSContextRef, function: JSObjectRef, this_
         setException(c, exception, "TypeError: value is not a function");
         return null;
     };
+    const this_ref = if (this_object) |_|
+        if (objectFrom(this_object) != null) this_object else {
+            setException(c, exception, "TypeError: thisObject is not an object");
+            return null;
+        }
+    else
+        box(c, Value.obj(c.global_object)) orelse {
+            setException(c, exception, "OutOfMemory");
+            return null;
+        };
     // C-ABI host callbacks run directly across the FFI boundary.
-    if (obj.callback) |cb| return cb(ctx, function, this_object, argc, argv, exception);
+    if (obj.callback) |cb| return cb(ctx, function, this_ref, argc, argv, exception);
     // JS functions / native builtins / error constructors run on the interpreter.
     const args = collectArgs(c, argc, argv) orelse return null;
+    const gc_saved = gc_mod.setActiveHeap(c.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(c.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
     var interpreter = c.interpreter();
-    const res = interpreter.callValueWithThis(Value.obj(obj), args, unbox(this_object)) catch |err| {
+    c.pushActiveInterpreter(&interpreter) catch {
+        setException(c, exception, "OutOfMemory");
+        return null;
+    };
+    defer c.popActiveInterpreter(&interpreter);
+    const res = interpreter.callValueWithThis(Value.obj(obj), args, unbox(this_ref)) catch |err| {
         if (err == error.Throw) {
             if (exception != null) exception[0] = box(c, interpreter.exception);
         } else setException(c, exception, @errorName(err));
@@ -1339,6 +1358,36 @@ test "C-API: callback functions honor name and Function prototype" {
     const result = JSEvaluateScript(ctx, script, null, null, 0, &exception) orelse return error.EvalFailed;
     try std.testing.expect(exception == null);
     try std.testing.expect(JSValueToBoolean(ctx, result));
+}
+
+fn thisObjectProbeCallback(ctx: JSContextRef, function: JSObjectRef, this_object: JSObjectRef, argument_count: usize, arguments: [*c]const JSValueRef, exception: ExceptionRef) callconv(.c) JSValueRef {
+    _ = function;
+    _ = argument_count;
+    _ = arguments;
+    _ = exception;
+    return JSValueMakeBoolean(ctx, JSValueIsStrictEqual(ctx, this_object, JSContextGetGlobalObject(ctx)));
+}
+
+test "C-API: JSObjectCallAsFunction defaults null thisObject to global object" {
+    const ctx = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
+    defer JSGlobalContextRelease(ctx);
+
+    var exception: JSValueRef = null;
+    const script = JSStringCreateWithUTF8CString("(function () { return this === globalThis; })") orelse return error.StringInitFailed;
+    defer JSStringRelease(script);
+    const func = JSEvaluateScript(ctx, script, null, null, 0, &exception) orelse return error.EvalFailed;
+    try std.testing.expect(exception == null);
+
+    const result = JSObjectCallAsFunction(ctx, func, null, 0, null, &exception) orelse return error.CallFailed;
+    try std.testing.expect(exception == null);
+    try std.testing.expect(JSValueToBoolean(ctx, result));
+
+    const cb_name = JSStringCreateWithUTF8CString("probeThisObject") orelse return error.StringInitFailed;
+    defer JSStringRelease(cb_name);
+    const cb = JSObjectMakeFunctionWithCallback(ctx, cb_name, thisObjectProbeCallback) orelse return error.FunctionCreateFailed;
+    const cb_result = JSObjectCallAsFunction(ctx, cb, null, 0, null, &exception) orelse return error.CallFailed;
+    try std.testing.expect(exception == null);
+    try std.testing.expect(JSValueToBoolean(ctx, cb_result));
 }
 
 test "C-API: JSObjectIsConstructor recognizes native constructors" {
