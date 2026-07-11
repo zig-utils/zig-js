@@ -2136,7 +2136,15 @@ pub const Interpreter = struct {
             loc.line,
             loc.column,
         }) catch return error.OutOfMemory;
-        return self.throwError("SyntaxError", message);
+        self.exception = try self.makeError("SyntaxError", message);
+        const obj = self.exception.asObj();
+        try obj.setOwn(self.arena, self.root_shape, "line", Value.num(@floatFromInt(loc.line)));
+        try obj.setAttr(self.arena, "line", .{ .writable = true, .enumerable = false, .configurable = true });
+        try obj.setOwn(self.arena, self.root_shape, "column", Value.num(@floatFromInt(loc.column)));
+        try obj.setAttr(self.arena, "column", .{ .writable = true, .enumerable = false, .configurable = true });
+        try obj.setOwn(self.arena, self.root_shape, "byteOffset", Value.num(@floatFromInt(loc.byte_offset)));
+        try obj.setAttr(self.arena, "byteOffset", .{ .writable = true, .enumerable = false, .configurable = true });
+        return error.Throw;
     }
 
     pub fn throwParserSyntaxError(self: *Interpreter, context: []const u8, source: []const u8, parser: ?*const Parser, err: anyerror) EvalError {

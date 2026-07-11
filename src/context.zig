@@ -8816,7 +8816,7 @@ test "eval: direct eval runs in the caller's scope" {
     // A syntax error in the source throws a SyntaxError.
     try std.testing.expect((try evalIn(
         \\var t = false;
-        \\try { eval('var ='); } catch (e) { t = e instanceof SyntaxError && e.message.includes('eval:') && e.message.includes(' at 1:'); }
+        \\try { eval('var ='); } catch (e) { t = e instanceof SyntaxError && e.message.includes('eval:') && e.message.includes(' at 1:') && e.line === 1 && e.column > 0 && e.byteOffset >= 0 && Object.keys(e).indexOf('line') === -1; }
         \\t
     )).asBool());
     try std.testing.expect((try evalIn(
