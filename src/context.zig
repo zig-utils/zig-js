@@ -10578,8 +10578,12 @@ test "Context heap_limit_bytes lets sibling Threads survive one Thread OOM" {
         \\try {
         \\  new Thread(() => {
         \\    const keep = [];
-        \\    for (let i = 0;; i++)
-        \\      keep.push({ i: i, payload: [i, i + 1, i + 2, i + 3, i + 4, i + 5, i + 6, i + 7] });
+        \\    let s = "0123456789abcdef";
+        \\    for (let i = 0; i < 32; i++) {
+        \\      s = s + s;
+        \\      keep.push(s);
+        \\    }
+        \\    throw new Error("heap limit did not trip before bounded pressure loop ended");
         \\  }).join();
         \\} catch (e) {
         \\  caught = e;
