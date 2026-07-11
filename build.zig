@@ -46,8 +46,14 @@ pub fn build(b: *std.Build) void {
     // the agent/worker/waiter machinery (issue #1).
     const tsan = b.option(bool, "tsan", "Build unit tests with ThreadSanitizer") orelse false;
     const test_filter = b.option([]const u8, "test-filter", "Only run unit tests whose name contains this substring");
+    const unit_shard_index = b.option(usize, "unit-shard-index", "Run only this zero-based unit-test shard index") orelse null;
+    const unit_shard_count = b.option(usize, "unit-shard-count", "Split unit tests across this many shards") orelse null;
     const tests = b.addTest(.{
         .filters = if (test_filter) |f| &.{f} else &.{},
+        .test_runner = .{
+            .path = b.path("tools/unit_test_runner.zig"),
+            .mode = .simple,
+        },
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/root.zig"),
             .target = target,
@@ -60,6 +66,10 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const run_tests = b.addRunArtifact(tests);
+    if (unit_shard_count) |count| {
+        run_tests.setEnvironmentVariable("UNIT_SHARD_INDEX", b.fmt("{d}", .{unit_shard_index orelse 0}));
+        run_tests.setEnvironmentVariable("UNIT_SHARD_COUNT", b.fmt("{d}", .{count}));
+    }
 
     const test_step = b.step("test", "Run zig-js unit tests");
     test_step.dependOn(&run_tests.step);
