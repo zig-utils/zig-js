@@ -111,8 +111,29 @@ fn canonicalizeSurrogates(allocator: std.mem.Allocator, bytes: []const u8) std.m
 /// byte copy.
 pub fn createCell(allocator: std.mem.Allocator, bytes: []const u8) std.mem.Allocator.Error!*StringCell {
     const owned = try canonicalizeSurrogates(allocator, bytes);
+    errdefer allocator.free(owned);
     const cell = try allocator.create(StringCell);
     cell.* = .{ .bytes = owned, .hash = hashBytes(owned) };
+    return cell;
+}
+
+/// Allocate a fresh (un-interned) cell that takes ownership of `owned` when no
+/// surrogate canonicalization is needed. If the bytes contain a runtime-formed
+/// surrogate pair, the returned cell owns a canonicalized copy and `owned` is
+/// released through the same allocator.
+pub fn createCellOwned(allocator: std.mem.Allocator, owned: []u8) std.mem.Allocator.Error!*StringCell {
+    var owns_original = true;
+    errdefer if (owns_original) allocator.free(owned);
+    const bytes = if (std.mem.indexOfScalar(u8, owned, 0xED) == null) owned else blk: {
+        const canonical = try canonicalizeSurrogates(allocator, owned);
+        allocator.free(owned);
+        owns_original = false;
+        break :blk canonical;
+    };
+    owns_original = false;
+    errdefer allocator.free(bytes);
+    const cell = try allocator.create(StringCell);
+    cell.* = .{ .bytes = bytes, .hash = hashBytes(bytes) };
     return cell;
 }
 

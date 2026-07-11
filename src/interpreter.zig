@@ -14118,7 +14118,7 @@ pub const Interpreter = struct {
                 if (l.isString() or r.isString()) {
                     const ls = try self.toStringV(l);
                     const rs = try self.toStringV(r);
-                    break :blk Value.str(try std.mem.concat(self.arena, u8, &.{ ls, rs }));
+                    break :blk try Value.strOwned(self.arena, try std.mem.concat(self.arena, u8, &.{ ls, rs }));
                 }
                 // Numeric `+`: both operands were already ToPrimitive'd (default
                 // hint) above; ToNumeric(lhs) then ToNumeric(rhs) follow in order,

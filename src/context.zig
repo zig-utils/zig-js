@@ -10365,6 +10365,25 @@ test "Context heap_limit_bytes allocation pressure is catchable inside JS try" {
     try std.testing.expect(stats.peak_bytes <= stats.limit_bytes);
 }
 
+test "Context heap_limit_bytes string allocation pressure does not panic" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .heap_limit_bytes = 4 * 1024 * 1024 });
+    defer ctx.destroy();
+
+    try std.testing.expectError(error.Throw, ctx.evaluate(
+        \\try {
+        \\  let s = "x";
+        \\  for (let i = 0;; i++)
+        \\    s = s + s;
+        \\} catch {
+        \\  throw 7;
+        \\}
+        \\0;
+    ));
+    try std.testing.expectEqual(@as(f64, 7), ctx.exception.?.asNum());
+    const stats = ctx.heapBudgetStats().?;
+    try std.testing.expect(stats.peak_bytes <= stats.limit_bytes);
+}
+
 test "Context heapBudgetStats is absent without heap_limit_bytes" {
     const ctx = try Context.createWith(std.testing.allocator, .{});
     defer ctx.destroy();
