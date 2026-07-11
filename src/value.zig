@@ -2225,6 +2225,9 @@ pub const Value = struct {
     pub inline fn str(s: []const u8) Value {
         return boxed(tag_string, @intFromPtr(strcell.makeCell(s)));
     }
+    pub inline fn staticStr(comptime s: []const u8) Value {
+        return boxed(tag_string, @intFromPtr(strcell.staticCell(s)));
+    }
     pub inline fn obj(o: *Object) Value {
         return boxed(tag_object, @intFromPtr(o));
     }

@@ -176,6 +176,10 @@ const ContentionCounters = struct {
 var contention_counters: ContentionCounters = .{};
 var contention_stats_enabled: std.atomic.Value(bool) = .init(false);
 
+fn outOfMemoryCompletionValue() Value {
+    return Value.staticStr("OutOfMemoryError");
+}
+
 pub fn resetContentionStats() void {
     contention_stats_enabled.store(false, .release);
     contention_counters.thread_join_parks.store(0, .release);
@@ -588,7 +592,7 @@ fn threadMain(rec: *ThreadRecord, fn_v: Value, args: []const Value) void {
     // conservatively scanned, and the queued tasks stay precisely rooted via
     // `machine.microtasks` in `traceInterpreterRoots` (which holds the lock).
     const microtasks = rec.ctx.arena().create(promise.MicrotaskQueue) catch {
-        var pj = publishThreadCompletion(rec, true, Value.undef());
+        var pj = publishThreadCompletion(rec, true, outOfMemoryCompletionValue());
         pj.deinit(rec.ctx.arena());
         return;
     };
@@ -597,7 +601,7 @@ fn threadMain(rec: *ThreadRecord, fn_v: Value, args: []const Value) void {
     rec.microtasks = microtasks;
     var machine = rec.ctx.interpreter();
     rec.ctx.pushActiveInterpreter(&machine) catch {
-        var pending_joins = publishThreadCompletion(rec, true, Value.undef());
+        var pending_joins = publishThreadCompletion(rec, true, outOfMemoryCompletionValue());
         pending_joins.deinit(rec.ctx.arena());
         return;
     };
@@ -626,7 +630,7 @@ fn threadMain(rec: *ThreadRecord, fn_v: Value, args: []const Value) void {
         pumpTasks(&machine);
         machine.settleAsyncWaiters();
         result = out;
-    } else |_| {
+    } else |err| {
         machine.drainMicrotasks() catch {};
         if (async_waiters.items.len > 0) {
             agent.abandonAsync(@ptrCast(&async_waiters));
@@ -634,7 +638,10 @@ fn threadMain(rec: *ThreadRecord, fn_v: Value, args: []const Value) void {
         }
         abandonPropAsyncQueue(g, microtasks);
         threw = true;
-        result = machine.exception;
+        result = switch (err) {
+            error.OutOfMemory => outOfMemoryCompletionValue(),
+            else => machine.exception,
+        };
     }
     // Settle asyncJoin promises on this (the settling) thread, then drain
     // the reactions it just queued. `publishThreadCompletion` snapshots the

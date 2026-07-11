@@ -10331,6 +10331,31 @@ test "Context heapBudgetStats is absent without heap_limit_bytes" {
     try std.testing.expect(ctx.heapBudgetStats() == null);
 }
 
+test "Context heap_limit_bytes lets sibling Threads survive one Thread OOM" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_threads = true, .heap_limit_bytes = 4 * 1024 * 1024 });
+    defer ctx.destroy();
+
+    const result = try ctx.evaluate(
+        \\const sibling = new Thread(() => 41);
+        \\let oomOk = false;
+        \\try {
+        \\  new Thread(() => {
+        \\    const keep = [];
+        \\    for (let i = 0;; i++)
+        \\      keep.push({ i: i, payload: [i, i + 1, i + 2, i + 3, i + 4, i + 5, i + 6, i + 7] });
+        \\  }).join();
+        \\} catch (e) {
+        \\  oomOk = e === "OutOfMemoryError";
+        \\}
+        \\oomOk && sibling.join() === 41 && Thread.current.id === 0;
+    );
+    try std.testing.expect(result.asBool());
+    const stats = ctx.heapBudgetStats().?;
+    try std.testing.expect(stats.peak_bytes <= stats.limit_bytes);
+}
+
 test "Context TestingOptions can hide SharedArrayBuffer while keeping Atomics" {
     const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{ .enable_shared_array_buffer = false });
     defer ctx.destroy();
