@@ -107,6 +107,7 @@ pub const Lexer = struct {
     prev_kind: TokenKind = .eof,
     prev_text: []const u8 = "",
     last_identifier_escaped: bool = false,
+    last_error_offset: ?usize = null,
     /// A stack of brace kinds (true = object literal `{`, false = block `{`), to
     /// resolve the `}`-then-`/` ambiguity: `{…} / x` divides an object literal,
     /// whereas a block `}` allows a regex.
@@ -129,6 +130,10 @@ pub const Lexer = struct {
 
     pub fn initOptions(arena: std.mem.Allocator, src: []const u8, html_comments: bool) Lexer {
         return .{ .src = src, .arena = arena, .html_comments = html_comments };
+    }
+
+    pub fn errorOffset(self: *const Lexer) usize {
+        return self.last_error_offset orelse @min(self.i, self.src.len);
     }
 
     fn peek(self: *Lexer) u8 {
@@ -397,7 +402,10 @@ pub const Lexer = struct {
     pub fn next(self: *Lexer) LexError!Token {
         const prev = self.prev_kind;
         const prev_text = self.prev_text;
-        var t = try self.nextRaw();
+        var t = self.nextRaw() catch |err| {
+            self.last_error_offset = @min(self.i, self.src.len);
+            return err;
+        };
         // A real token has been scanned: a subsequent `-->` is only an HTML close
         // comment once a fresh line terminator (set in skipTrivia) precedes it.
         self.at_line_start = false;
@@ -1221,14 +1229,52 @@ fn radixDigitsToDecimal(arena: std.mem.Allocator, digits: []const u8, radix: u8)
 /// division at a `}`.
 fn bracePosIsObject(prev_kind: TokenKind, prev_text: []const u8) bool {
     return switch (prev_kind) {
-        .lparen, .lbracket, .comma, .colon, .question,
-        .assign, .plus_eq, .minus_eq, .star_eq, .slash_eq, .percent_eq,
-        .star_star_eq, .shl_eq, .shr_eq, .ushr_eq, .amp_eq, .pipe_eq, .caret_eq,
-        .amp_amp_eq, .pipe_pipe_eq, .qq_eq,
-        .plus, .minus, .star, .star_star, .slash, .percent,
-        .eq, .eq_strict, .neq, .neq_strict, .lt, .le, .gt, .ge,
-        .bang, .tilde, .amp, .pipe, .caret, .amp_amp, .pipe_pipe, .qq,
-        .shl, .shr, .ushr,
+        .lparen,
+        .lbracket,
+        .comma,
+        .colon,
+        .question,
+        .assign,
+        .plus_eq,
+        .minus_eq,
+        .star_eq,
+        .slash_eq,
+        .percent_eq,
+        .star_star_eq,
+        .shl_eq,
+        .shr_eq,
+        .ushr_eq,
+        .amp_eq,
+        .pipe_eq,
+        .caret_eq,
+        .amp_amp_eq,
+        .pipe_pipe_eq,
+        .qq_eq,
+        .plus,
+        .minus,
+        .star,
+        .star_star,
+        .slash,
+        .percent,
+        .eq,
+        .eq_strict,
+        .neq,
+        .neq_strict,
+        .lt,
+        .le,
+        .gt,
+        .ge,
+        .bang,
+        .tilde,
+        .amp,
+        .pipe,
+        .caret,
+        .amp_amp,
+        .pipe_pipe,
+        .qq,
+        .shl,
+        .shr,
+        .ushr,
         => true,
         // Expression-introducing keywords (but NOT do/else/case/default, which
         // introduce a block/clause body).
@@ -1241,14 +1287,52 @@ fn bracePosIsObject(prev_kind: TokenKind, prev_text: []const u8) bool {
 
 fn functionExprAllowed(prev_kind: TokenKind, prev_text: []const u8) bool {
     return switch (prev_kind) {
-        .lparen, .lbracket, .comma, .colon, .question,
-        .assign, .plus_eq, .minus_eq, .star_eq, .slash_eq, .percent_eq,
-        .star_star_eq, .shl_eq, .shr_eq, .ushr_eq, .amp_eq, .pipe_eq, .caret_eq,
-        .amp_amp_eq, .pipe_pipe_eq, .qq_eq,
-        .plus, .minus, .star, .star_star, .slash, .percent,
-        .eq, .eq_strict, .neq, .neq_strict, .lt, .le, .gt, .ge,
-        .bang, .tilde, .amp, .pipe, .caret, .amp_amp, .pipe_pipe, .qq,
-        .shl, .shr, .ushr,
+        .lparen,
+        .lbracket,
+        .comma,
+        .colon,
+        .question,
+        .assign,
+        .plus_eq,
+        .minus_eq,
+        .star_eq,
+        .slash_eq,
+        .percent_eq,
+        .star_star_eq,
+        .shl_eq,
+        .shr_eq,
+        .ushr_eq,
+        .amp_eq,
+        .pipe_eq,
+        .caret_eq,
+        .amp_amp_eq,
+        .pipe_pipe_eq,
+        .qq_eq,
+        .plus,
+        .minus,
+        .star,
+        .star_star,
+        .slash,
+        .percent,
+        .eq,
+        .eq_strict,
+        .neq,
+        .neq_strict,
+        .lt,
+        .le,
+        .gt,
+        .ge,
+        .bang,
+        .tilde,
+        .amp,
+        .pipe,
+        .caret,
+        .amp_amp,
+        .pipe_pipe,
+        .qq,
+        .shl,
+        .shr,
+        .ushr,
         => true,
         .identifier => isOperandKeyword(prev_text),
         else => false,

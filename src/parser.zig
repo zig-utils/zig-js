@@ -167,10 +167,19 @@ pub const Parser = struct {
     last_error_offset: ?usize = null,
 
     pub fn init(arena: std.mem.Allocator, source: []const u8) ParseError!Parser {
+        var ignored: ?SourceLocation = null;
+        return initWithDiagnostic(arena, source, &ignored);
+    }
+
+    pub fn initWithDiagnostic(arena: std.mem.Allocator, source: []const u8, diagnostic: *?SourceLocation) ParseError!Parser {
+        diagnostic.* = null;
         var lx = lex.Lexer.init(arena, source);
         var list: std.ArrayListUnmanaged(Token) = .empty;
         while (true) {
-            const t = try lx.next();
+            const t = lx.next() catch |err| {
+                diagnostic.* = sourceLocationAt(source, lx.errorOffset());
+                return err;
+            };
             try list.append(arena, t);
             if (t.kind == .eof) break;
         }
@@ -958,7 +967,10 @@ pub const Parser = struct {
         var lx = lex.Lexer.initOptions(self.arena, self.source, false);
         var list: std.ArrayListUnmanaged(Token) = .empty;
         while (true) {
-            const t = try lx.next();
+            const t = lx.next() catch |err| {
+                self.last_error_offset = lx.errorOffset();
+                return err;
+            };
             try list.append(self.arena, t);
             if (t.kind == .eof) break;
         }
@@ -4271,6 +4283,16 @@ test "parser records current token source location for expected-token failures" 
     const loc = p.errorLocation();
     try std.testing.expectEqual(@as(usize, 2), loc.line);
     try std.testing.expectEqual(@as(usize, 12), loc.column);
+}
+
+test "parser init reports lexer failure source location" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var diagnostic: ?SourceLocation = null;
+    try std.testing.expectError(lex.LexError.UnterminatedString, Parser.initWithDiagnostic(arena.allocator(), "let ok = 1;\n'", &diagnostic));
+    const loc = diagnostic orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 2), loc.line);
+    try std.testing.expectEqual(@as(usize, 2), loc.column);
 }
 
 test "parser builds precedence-correct tree" {

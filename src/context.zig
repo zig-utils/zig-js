@@ -2567,8 +2567,9 @@ pub const Context = struct {
         const a = self.arena();
         const owned_source = try a.dupe(u8, source);
         self.last_evaluation_diagnostic = null;
-        var parser = Parser.init(a, owned_source) catch |err| {
-            self.last_evaluation_diagnostic = parser_mod.sourceLocationAt(owned_source, 0);
+        var lex_diagnostic: ?parser_mod.SourceLocation = null;
+        var parser = Parser.initWithDiagnostic(a, owned_source, &lex_diagnostic) catch |err| {
+            self.last_evaluation_diagnostic = lex_diagnostic orelse parser_mod.sourceLocationAt(owned_source, 0);
             return err;
         };
         const prog = parser.parseProgram() catch |err| {
@@ -8816,6 +8817,11 @@ test "eval: direct eval runs in the caller's scope" {
     try std.testing.expect((try evalIn(
         \\var t = false;
         \\try { eval('var ='); } catch (e) { t = e instanceof SyntaxError && e.message.includes('eval:') && e.message.includes(' at 1:'); }
+        \\t
+    )).asBool());
+    try std.testing.expect((try evalIn(
+        \\var t = false;
+        \\try { eval("let ok = 1;\n'"); } catch (e) { t = e instanceof SyntaxError && e.message.includes('eval: UnterminatedString') && e.message.includes(' at 2:'); }
         \\t
     )).asBool());
     try std.testing.expect((try evalIn(

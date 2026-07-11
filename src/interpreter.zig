@@ -2129,8 +2129,7 @@ pub const Interpreter = struct {
     /// Raise a SyntaxError for parser failures with a best-effort source
     /// location. `context` names the embedding operation ("eval", "Function",
     /// etc.); source-bearing APIs can layer richer filenames on top separately.
-    pub fn throwParserSyntaxError(self: *Interpreter, context: []const u8, source: []const u8, parser: ?*const Parser, err: anyerror) EvalError {
-        const loc = if (parser) |p| p.errorLocation() else parser_mod.sourceLocationAt(source, 0);
+    pub fn throwParserSyntaxErrorAt(self: *Interpreter, context: []const u8, loc: parser_mod.SourceLocation, err: anyerror) EvalError {
         const message = std.fmt.allocPrint(self.arena, "{s}: {s} at {d}:{d}", .{
             context,
             @errorName(err),
@@ -2140,11 +2139,23 @@ pub const Interpreter = struct {
         return self.throwError("SyntaxError", message);
     }
 
+    pub fn throwParserSyntaxError(self: *Interpreter, context: []const u8, source: []const u8, parser: ?*const Parser, err: anyerror) EvalError {
+        const loc = if (parser) |p| p.errorLocation() else parser_mod.sourceLocationAt(source, 0);
+        return self.throwParserSyntaxErrorAt(context, loc, err);
+    }
+
     pub fn throwParserSyntaxErrorInRealm(self: *Interpreter, realm: *Environment, context: []const u8, source: []const u8, parser: ?*const Parser, err: anyerror) EvalError {
         const saved_env = self.env;
         self.env = realm;
         defer self.env = saved_env;
         return self.throwParserSyntaxError(context, source, parser, err);
+    }
+
+    pub fn throwParserSyntaxErrorAtInRealm(self: *Interpreter, realm: *Environment, context: []const u8, loc: parser_mod.SourceLocation, err: anyerror) EvalError {
+        const saved_env = self.env;
+        self.env = realm;
+        defer self.env = saved_env;
+        return self.throwParserSyntaxErrorAt(context, loc, err);
     }
 
     pub fn eval(self: *Interpreter, node: *const Node) EvalError!Value {
@@ -14432,7 +14443,9 @@ fn evalFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Val
     if (args.len == 0) return Value.undef();
     if (!args[0].isString()) return args[0]; // eval of a non-string is the identity
     const src = args[0].asStr();
-    var parser = Parser.init(self.arena, src) catch |err| return self.throwParserSyntaxError("eval", src, null, err);
+    var lex_diagnostic: ?parser_mod.SourceLocation = null;
+    var parser = Parser.initWithDiagnostic(self.arena, src, &lex_diagnostic) catch |err|
+        return self.throwParserSyntaxErrorAt("eval", lex_diagnostic orelse parser_mod.sourceLocationAt(src, 0), err);
     // Direct eval inherits the caller's strictness for early errors; indirect
     // eval is global code in the eval function's realm and only becomes strict
     // from its own directive prologue.
@@ -16132,7 +16145,9 @@ fn host262EvalScriptFn(ctx: *anyopaque, this: Value, args: []const Value) value.
     const genv: *Environment = @ptrCast(@alignCast(fnobj.private_data orelse return Value.undef()));
     if (args.len == 0 or !args[0].isString()) return if (args.len > 0) args[0] else Value.undef();
     const src = args[0].asStr();
-    var parser = Parser.init(self.arena, src) catch |err| return self.throwParserSyntaxError("evalScript", src, null, err);
+    var lex_diagnostic: ?parser_mod.SourceLocation = null;
+    var parser = Parser.initWithDiagnostic(self.arena, src, &lex_diagnostic) catch |err|
+        return self.throwParserSyntaxErrorAt("evalScript", lex_diagnostic orelse parser_mod.sourceLocationAt(src, 0), err);
     const prog = parser.parseProgram() catch |err| return self.throwParserSyntaxError("evalScript", src, &parser, err);
     const prog_strict = parser.strict;
     const gobj: ?*value.Object = if (genv.get("globalThis")) |g| (if (g.isObject()) g.asObj() else null) else null;
@@ -16436,7 +16451,9 @@ fn shadowRealmEvaluateFn(ctx: *anyopaque, this: Value, args: []const Value) valu
     if (!src.isString()) return throwErrorInRealm(self, caller_env, "TypeError", "ShadowRealm.prototype.evaluate expects a string");
     const genv: *Environment = @ptrCast(@alignCast(this.asObj().private_data orelse return throwErrorInRealm(self, caller_env, "TypeError", "ShadowRealm has no realm")));
     const source = src.asStr();
-    var parser = Parser.init(self.arena, source) catch |err| return self.throwParserSyntaxErrorInRealm(caller_env, "ShadowRealm.evaluate", source, null, err);
+    var lex_diagnostic: ?parser_mod.SourceLocation = null;
+    var parser = Parser.initWithDiagnostic(self.arena, source, &lex_diagnostic) catch |err|
+        return self.throwParserSyntaxErrorAtInRealm(caller_env, "ShadowRealm.evaluate", lex_diagnostic orelse parser_mod.sourceLocationAt(source, 0), err);
     const prog = parser.parseProgram() catch |err| return self.throwParserSyntaxErrorInRealm(caller_env, "ShadowRealm.evaluate", source, &parser, err);
     const prog_strict = parser.strict;
     const gobj: ?*value.Object = if (genv.get("globalThis")) |g| (if (g.isObject()) g.asObj() else null) else null;
@@ -18765,8 +18782,9 @@ fn dynamicFunctionFn(comptime kind: DynFnKind) value.NativeFn {
             // `)` on its own line (matching the assembled source below) so a
             // trailing Annex B HTML-open-comment param doesn't comment out the `)`.
             const param_source = try std.fmt.allocPrint(self.arena, "({s}\n)", .{params.items});
-            var param_parser = Parser.init(self.arena, param_source) catch |err|
-                return self.throwParserSyntaxError("Function parameters", param_source, null, err);
+            var param_lex_diagnostic: ?parser_mod.SourceLocation = null;
+            var param_parser = Parser.initWithDiagnostic(self.arena, param_source, &param_lex_diagnostic) catch |err|
+                return self.throwParserSyntaxErrorAt("Function parameters", param_lex_diagnostic orelse parser_mod.sourceLocationAt(param_source, 0), err);
             param_parser.parseDynamicFunctionParams(kind == .generator or kind == .async_generator, kind == .async_fn or kind == .async_generator) catch |err|
                 return self.throwParserSyntaxError("Function parameters", param_source, &param_parser, err);
             const prefix = switch (kind) {
@@ -18775,8 +18793,9 @@ fn dynamicFunctionFn(comptime kind: DynFnKind) value.NativeFn {
                 .async_generator => "async function* anonymous",
             };
             const source = try std.fmt.allocPrint(self.arena, "({s}({s}\n) {{\n{s}\n}})", .{ prefix, params.items, body });
-            var parser = Parser.init(self.arena, source) catch |err|
-                return self.throwParserSyntaxError("Function body", source, null, err);
+            var lex_diagnostic: ?parser_mod.SourceLocation = null;
+            var parser = Parser.initWithDiagnostic(self.arena, source, &lex_diagnostic) catch |err|
+                return self.throwParserSyntaxErrorAt("Function body", lex_diagnostic orelse parser_mod.sourceLocationAt(source, 0), err);
             const prog = parser.parseProgram() catch |err|
                 return self.throwParserSyntaxError("Function body", source, &parser, err);
             const fnval = try self.eval(prog);

@@ -8,7 +8,8 @@ const gc_mod = @import("gc.zig");
 const value = @import("value.zig");
 const interpreter = @import("interpreter.zig");
 const Interpreter = interpreter.Interpreter;
-const Parser = @import("parser.zig").Parser;
+const parser_mod = @import("parser.zig");
+const Parser = parser_mod.Parser;
 const promise = @import("promise.zig");
 const agent = @import("agent.zig");
 
@@ -142,13 +143,15 @@ pub fn functionConstructor(ctx: *anyopaque, this: Value, args: []const Value) Ho
     // trailing Annex B HTML-open-comment param (`Function("<!--", "")`) comments
     // out to end-of-line, so without the newline it would swallow the `)`.
     const param_source = try std.fmt.allocPrint(self.arena, "({s}\n)", .{params.items});
-    var param_parser = Parser.init(self.arena, param_source) catch |err|
-        return self.throwParserSyntaxError("Function parameters", param_source, null, err);
+    var param_lex_diagnostic: ?parser_mod.SourceLocation = null;
+    var param_parser = Parser.initWithDiagnostic(self.arena, param_source, &param_lex_diagnostic) catch |err|
+        return self.throwParserSyntaxErrorAt("Function parameters", param_lex_diagnostic orelse parser_mod.sourceLocationAt(param_source, 0), err);
     param_parser.parseDynamicFunctionParams(false, false) catch |err|
         return self.throwParserSyntaxError("Function parameters", param_source, &param_parser, err);
     const source = try std.fmt.allocPrint(self.arena, "(function({s}\n) {{\n{s}\n}})", .{ params.items, body });
-    var parser = Parser.init(self.arena, source) catch |err|
-        return self.throwParserSyntaxError("Function body", source, null, err);
+    var lex_diagnostic: ?parser_mod.SourceLocation = null;
+    var parser = Parser.initWithDiagnostic(self.arena, source, &lex_diagnostic) catch |err|
+        return self.throwParserSyntaxErrorAt("Function body", lex_diagnostic orelse parser_mod.sourceLocationAt(source, 0), err);
     const prog = parser.parseProgram() catch |err|
         return self.throwParserSyntaxError("Function body", source, &parser, err);
     // Create the function in the Function constructor's own realm (so its

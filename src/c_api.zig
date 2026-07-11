@@ -1425,6 +1425,18 @@ test "C-API: evaluation syntax exceptions include source URL and line" {
     var buf: [128]u8 = undefined;
     const written = JSStringGetUTF8CString(msg, &buf, buf.len);
     try std.testing.expect(std.mem.indexOf(u8, buf[0 .. written - 1], "app.js:41:12") != null);
+
+    const lex_script = JSStringCreateWithUTF8CString("let ok = 1;\n'") orelse return error.StringInitFailed;
+    defer JSStringRelease(lex_script);
+    exception = null;
+    try std.testing.expect(JSEvaluateScript(ctx, lex_script, null, url, 40, &exception) == null);
+    try std.testing.expect(exception != null);
+
+    const lex_msg = JSValueToStringCopy(ctx, exception, null) orelse return error.StringInitFailed;
+    defer JSStringRelease(lex_msg);
+    var lex_buf: [128]u8 = undefined;
+    const lex_written = JSStringGetUTF8CString(lex_msg, &lex_buf, lex_buf.len);
+    try std.testing.expect(std.mem.indexOf(u8, lex_buf[0 .. lex_written - 1], "app.js:41:2") != null);
 }
 
 test "C-API: JSObjectSetProperty honors property attributes" {
