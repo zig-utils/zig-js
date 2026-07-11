@@ -12117,6 +12117,7 @@ fn runWorkerTerminateThreadLocalAsyncHoldCleanupInterleavingKind(
         \\  globalThis.__workerTlsAsyncHoldReleaseJoinSum = 0;
         \\  globalThis.__workerTlsAsyncHoldReleaseJoinCount = 0;
         \\  globalThis.__workerTlsAsyncHoldEarlyCleanupCount = 0;
+        \\  globalThis.__workerTlsAsyncHoldExpectedThrow = 0;
         \\  globalThis.__workerTlsAsyncHoldRegistry = new FinalizationRegistry((held) => {{
         \\    globalThis.__workerTlsAsyncHoldCleanupCount++;
         \\    globalThis.__workerTlsAsyncHoldCleanupSum += held;
@@ -12402,7 +12403,7 @@ fn runWorkerTerminateThreadLocalAsyncHoldCleanupInterleavingKind(
         \\      globalThis.__workerTlsAsyncHoldReleaseJoinSum = -1000000;
         \\    }});
         \\  }}
-        \\  for (let spins = 0; globalThis.__workerTlsAsyncHoldReleaseJoinCount < {d} && spins < 1000; spins++) {{
+        \\  for (let spins = 0; globalThis.__workerTlsAsyncHoldReleaseJoinCount < {d} && spins < 10000; spins++) {{
         \\    $drainRunLoop();
         \\    drainMicrotasks();
         \\  }}
@@ -12410,10 +12411,6 @@ fn runWorkerTerminateThreadLocalAsyncHoldCleanupInterleavingKind(
         \\    throw new Error('bad worker terminate/ThreadLocal asyncHold release count ' + globalThis.__workerTlsAsyncHoldReleaseCount);
         \\  if (globalThis.__workerTlsAsyncHoldReleaseScore !== {d})
         \\    throw new Error('bad worker terminate/ThreadLocal asyncHold release score ' + globalThis.__workerTlsAsyncHoldReleaseScore);
-        \\  if (globalThis.__workerTlsAsyncHoldReleaseJoinCount !== {d})
-        \\    throw new Error('bad worker terminate/ThreadLocal asyncHold release join count ' + globalThis.__workerTlsAsyncHoldReleaseJoinCount);
-        \\  if (globalThis.__workerTlsAsyncHoldReleaseJoinSum !== {d})
-        \\    throw new Error('bad worker terminate/ThreadLocal asyncHold release join sum ' + globalThis.__workerTlsAsyncHoldReleaseJoinSum);
         \\  if (releaseLock.locked)
         \\    throw new Error('worker terminate/ThreadLocal asyncHold release lock left locked');
         \\{s}
@@ -12421,6 +12418,7 @@ fn runWorkerTerminateThreadLocalAsyncHoldCleanupInterleavingKind(
         \\  if (globalThis.__workerTlsAsyncHoldCleanupCount !== 0)
         \\    throw new Error('worker terminate/ThreadLocal asyncHold cleanup fired before top-level teardown');
         \\  globalThis.__workerTlsAsyncHoldEarlyCleanupCount = globalThis.__workerTlsAsyncHoldCleanupCount;
+        \\  globalThis.__workerTlsAsyncHoldExpectedThrow = 1;
         \\  throw new Error('threadfuzz worker terminate ThreadLocal asyncHold cleanup {d}');
         \\}})();
         \\
@@ -12454,8 +12452,6 @@ fn runWorkerTerminateThreadLocalAsyncHoldCleanupInterleavingKind(
             nrelease_threads,
             nrelease_threads,
             expected_release_score,
-            nrelease_threads,
-            expected_release_score,
             midgc_pressure_src,
             seed,
         },
@@ -12469,6 +12465,15 @@ fn runWorkerTerminateThreadLocalAsyncHoldCleanupInterleavingKind(
     } else |err| {
         if (err != error.Throw) {
             std.debug.print("seed {d}: worker terminate/ThreadLocal asyncHold failed with {s}\n", .{ seed, @errorName(err) });
+            return false;
+        }
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        const expected_throw = ctx.evaluate("globalThis.__workerTlsAsyncHoldExpectedThrow") catch js.Value.undef();
+        if (!expected_throw.isNumber() or expected_throw.asNum() != 1) {
+            std.debug.print("seed {d}: worker terminate/ThreadLocal asyncHold threw before teardown point: {s}\n", .{ seed, msg_txt });
             return false;
         }
     }
@@ -12522,8 +12527,14 @@ fn runWorkerTerminateThreadLocalAsyncHoldCleanupInterleavingKind(
     const check_src = try std.fmt.allocPrint(
         gpa,
         \\(() => {{
+        \\  for (let spins = 0; globalThis.__workerTlsAsyncHoldReleaseJoinCount < {d} && spins < 10000; spins++) {{
+        \\    $drainRunLoop();
+        \\    drainMicrotasks();
+        \\  }}
         \\  if (globalThis.__workerTlsAsyncHoldEarlyCleanupCount !== 0)
         \\    throw new Error('worker terminate/ThreadLocal asyncHold early cleanup count ' + globalThis.__workerTlsAsyncHoldEarlyCleanupCount);
+        \\  if (globalThis.__workerTlsAsyncHoldReleaseJoinCount !== {d})
+        \\    throw new Error('bad worker terminate/ThreadLocal asyncHold release join count ' + globalThis.__workerTlsAsyncHoldReleaseJoinCount);
         \\  if (globalThis.__workerTlsAsyncHoldReleaseScore !== {d})
         \\    throw new Error('bad worker terminate/ThreadLocal asyncHold release score ' + globalThis.__workerTlsAsyncHoldReleaseScore);
         \\  if (globalThis.__workerTlsAsyncHoldReleaseJoinSum !== {d})
@@ -12547,7 +12558,7 @@ fn runWorkerTerminateThreadLocalAsyncHoldCleanupInterleavingKind(
         \\}})();
         \\
     ,
-        .{ expected_release_score, expected_release_score, expected_reject_sum, expected_reject_count, expected_reject_count },
+        .{ nrelease_threads, nrelease_threads, expected_release_score, expected_release_score, expected_reject_sum, expected_reject_count, expected_reject_count },
     );
     defer gpa.free(check_src);
     const checked = ctx.evaluate(check_src) catch |err| {
