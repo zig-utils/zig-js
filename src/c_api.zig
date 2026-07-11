@@ -793,7 +793,16 @@ export fn JSWorkerCreate(source: JSStringRef) callconv(.c) JSWorkerRef {
 export fn JSWorkerPostMessage(worker: JSWorkerRef, ctx: JSContextRef, value_ref: JSValueRef, exception: ExceptionRef) callconv(.c) bool {
     const w = workerFrom(worker) orelse return false;
     const c = ctxFrom(ctx) orelse return false;
+    const gc_saved = gc_mod.setActiveHeap(c.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(c.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
     var machine = c.interpreter();
+    c.pushActiveInterpreter(&machine) catch {
+        setException(c, exception, "OutOfMemory");
+        return false;
+    };
+    defer c.popActiveInterpreter(&machine);
     w.postMessage(&machine, unbox(value_ref)) catch |err| {
         if (err == error.Throw) {
             if (exception != null) exception[0] = box(c, c.exception orelse Value.str("DataCloneError"));
@@ -809,7 +818,16 @@ export fn JSWorkerPostMessage(worker: JSWorkerRef, ctx: JSContextRef, value_ref:
 export fn JSWorkerReceive(worker: JSWorkerRef, ctx: JSContextRef, timeout_ms: u64, exception: ExceptionRef) callconv(.c) JSValueRef {
     const w = workerFrom(worker) orelse return null;
     const c = ctxFrom(ctx) orelse return null;
+    const gc_saved = gc_mod.setActiveHeap(c.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(c.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
     var machine = c.interpreter();
+    c.pushActiveInterpreter(&machine) catch {
+        setException(c, exception, "OutOfMemory");
+        return null;
+    };
+    defer c.popActiveInterpreter(&machine);
     const tmo: ?u64 = if (timeout_ms == 0) null else timeout_ms;
     const v = w.receive(&machine, tmo) catch |err| {
         setException(c, exception, @errorName(err));

@@ -119,6 +119,8 @@ Native callbacks use the standard `JSObjectCallAsFunctionCallback` calling conve
 
 `JSObjectMakeDeferredPromise` returns a pending native Promise and stores callable resolve/reject functions in the provided out pointers when they are non-null. Those functions settle the promise through the normal Promise job queue; embedder-observable callbacks run at the next microtask checkpoint, such as the one performed after `JSEvaluateScript`.
 
+`JSWorkerPostMessage` and `JSWorkerReceive` use structured clone to move values between isolated worker contexts. Values that structured clone rejects, such as functions and Symbols, report through the exception out pointer.
+
 ## Caveats
 
 > [!WARNING]
