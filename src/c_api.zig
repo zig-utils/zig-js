@@ -134,6 +134,20 @@ fn ctxForEvaluation(ref: JSContextRef) ?*Context {
     return c;
 }
 
+fn ctxForLifecycle(ref: JSContextRef) ?*Context {
+    const c = ctxRawFrom(ref) orelse return null;
+    if (comptime builtin.mode == .Debug) {
+        // Retain/release are host lifecycle operations, not VM execution. They
+        // must preserve context thread-affinity without requiring the serialized
+        // GIL to already be held.
+        if (!c.isOwnerThread()) std.debug.panic(
+            "Context is single-thread-affine: used from thread {d}, owned by thread {d} (docs/threads/bindings.md)",
+            .{ std.Thread.getCurrentId(), c.owner_thread },
+        );
+    }
+    return c;
+}
+
 fn box(ctx: *Context, v: Value) JSValueRef {
     const b = ctx.arena().create(Boxed) catch return null;
     b.* = .{ .value = v, .owner = ctx };
@@ -330,12 +344,12 @@ export fn ZJSGlobalContextCreateThreaded(gil: bool) callconv(.c) JSContextRef {
 export fn JSGlobalContextRelease(ctx: JSContextRef) callconv(.c) void {
     // A `.gil = true` threaded context is released from outside JS execution;
     // `Context.destroy()` performs the serialized teardown itself.
-    const c = ctxRawFrom(ctx) orelse return;
+    const c = ctxForLifecycle(ctx) orelse return;
     if (c.releaseCApiRef()) c.destroy();
 }
 
 export fn JSGlobalContextRetain(ctx: JSContextRef) callconv(.c) JSContextRef {
-    const c = ctxRawFrom(ctx) orelse return null;
+    const c = ctxForLifecycle(ctx) orelse return null;
     if (!c.retainCApiRef()) return null;
     return ctx;
 }
