@@ -646,6 +646,10 @@ export fn JSObjectMakeArray(ctx: JSContextRef, argc: usize, argv: [*c]const JSVa
 
 export fn JSObjectMakeDeferredPromise(ctx: JSContextRef, resolve: [*c]JSObjectRef, reject: [*c]JSObjectRef, exception: ExceptionRef) callconv(.c) JSObjectRef {
     const c = ctxFrom(ctx) orelse return null;
+    if (resolve == null or reject == null) {
+        setException(c, exception, "TypeError: resolve and reject out pointers are required");
+        return null;
+    }
     const gc_saved = gc_mod.setActiveHeap(c.gc);
     defer _ = gc_mod.setActiveHeap(gc_saved);
     const sa_saved = strcell.setActiveArena(c.arena());
@@ -671,18 +675,14 @@ export fn JSObjectMakeDeferredPromise(ctx: JSContextRef, resolve: [*c]JSObjectRe
         return null;
     };
 
-    if (resolve != null) {
-        resolve[0] = box(c, capability.resolve) orelse {
-            setException(c, exception, "OutOfMemory");
-            return null;
-        };
-    }
-    if (reject != null) {
-        reject[0] = box(c, capability.reject) orelse {
-            setException(c, exception, "OutOfMemory");
-            return null;
-        };
-    }
+    resolve[0] = box(c, capability.resolve) orelse {
+        setException(c, exception, "OutOfMemory");
+        return null;
+    };
+    reject[0] = box(c, capability.reject) orelse {
+        setException(c, exception, "OutOfMemory");
+        return null;
+    };
     return box(c, Value.obj(obj)) orelse {
         setException(c, exception, "OutOfMemory");
         return null;
@@ -2191,6 +2191,27 @@ test "C-API: JSObjectMakeDeferredPromise resolves and rejects through returned f
     const still_seen = JSEvaluateScript(ctx, seen, null, null, 0, &exception) orelse return error.EvalFailed;
     try std.testing.expect(exception == null);
     try std.testing.expectEqual(@as(f64, 42), JSValueToNumber(ctx, still_seen, null));
+}
+
+test "C-API: JSObjectMakeDeferredPromise requires resolve and reject outputs" {
+    const ctx = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
+    defer JSGlobalContextRelease(ctx);
+
+    var resolve: JSObjectRef = null;
+    var reject: JSObjectRef = null;
+    var exception: JSValueRef = null;
+    try std.testing.expect(JSObjectMakeDeferredPromise(ctx, null, &reject, &exception) == null);
+    try std.testing.expect(exception != null);
+
+    const msg = JSValueToStringCopy(ctx, exception, null) orelse return error.StringInitFailed;
+    defer JSStringRelease(msg);
+    var buf: [128]u8 = undefined;
+    const written = JSStringGetUTF8CString(msg, &buf, buf.len);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0 .. written - 1], "out pointers are required") != null);
+
+    exception = null;
+    try std.testing.expect(JSObjectMakeDeferredPromise(ctx, &resolve, null, &exception) == null);
+    try std.testing.expect(exception != null);
 }
 
 test "C-API: JSObjectMakeDeferredPromise reject function settles the promise" {

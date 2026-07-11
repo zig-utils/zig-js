@@ -135,7 +135,7 @@ Native callbacks installed with `JSObjectMakeFunctionWithCallback` must return a
 
 `JSObjectMake(..., data)` returns an ordinary object in the current realm, inheriting from that realm's `Object.prototype`, and marks the opaque pointer as host-owned private data. `JSObjectGetPrivate` returns only host-owned private data; engine-owned native records are not exposed. `JSObjectSetPrivate` can update host-owned private data and can attach host data to plain objects that do not already carry engine private data.
 
-`JSObjectMakeDeferredPromise` returns a pending native Promise and stores callable resolve/reject functions in the provided out pointers when they are non-null. Those functions settle the promise through the normal Promise job queue; embedder-observable callbacks run at the next microtask checkpoint, such as the one performed after `JSEvaluateScript`.
+`JSObjectMakeDeferredPromise` returns a pending native Promise and stores callable resolve/reject functions in the required out pointers. Passing a null resolve or reject out pointer is a contract error reported through the exception out pointer. The returned functions settle the promise through the normal Promise job queue; embedder-observable callbacks run at the next microtask checkpoint, such as the one performed after `JSEvaluateScript`.
 
 `JSWorkerPostMessage` and `JSWorkerReceive` use structured clone to move values between isolated worker contexts. Null worker refs and values that structured clone rejects, such as functions and Symbols, report through the exception out pointer.
 
