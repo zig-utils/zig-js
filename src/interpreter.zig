@@ -7437,8 +7437,8 @@ pub const Interpreter = struct {
                 if (global or sticky) try self.setRegExpLastIndex(o, @floatFromInt(utf16IndexForByteOffset(search_input, mend)));
                 recordRegexpLegacy(self, search_input, mstart, mend, m.captures);
                 const arr = try self.newArray();
-                try arr.asObj().elements.append(arr.asObj().elementsAllocator(self.arena), Value.str(try self.stringSliceFromSearchSpan(input, search_input, mstart, mend)));
-                for (0..m.captures.len) |i| try arr.asObj().elements.append(arr.asObj().elementsAllocator(self.arena), try self.captureVal(m, i));
+                try arr.asObj().appendElement(self.arena, Value.str(try self.stringSliceFromSearchSpan(input, search_input, mstart, mend)));
+                for (0..m.captures.len) |i| try arr.asObj().appendElement(self.arena, try self.captureVal(m, i));
                 try self.setProp(arr.asObj(), "index", Value.num(@floatFromInt(utf16IndexForByteOffset(search_input, mstart))));
                 try self.setProp(arr.asObj(), "input", Value.str(input));
                 const groups = try self.regexGroups(re, m);
@@ -7866,11 +7866,11 @@ pub const Interpreter = struct {
         const arr = try self.newArray();
         while (true) {
             const result = try self.regexpExecGeneric(rx, s);
-            if (result.isNull()) return if (arr.asObj().elements.items.len == 0) Value.nul() else arr;
+            if (result.isNull()) return if (arr.asObj().elementsLen() == 0) Value.nul() else arr;
 
             const match_v = try self.getProperty(result, "0");
             const match_s = try self.toStringV(match_v);
-            try arr.asObj().elements.append(arr.asObj().elementsAllocator(self.arena), Value.str(try self.arena.dupe(u8, match_s)));
+            try arr.asObj().appendElement(self.arena, Value.str(try self.arena.dupe(u8, match_s)));
 
             if (match_s.len == 0) {
                 const li = toLen(try self.toNumberV(try self.getProperty(rx, "lastIndex")));
