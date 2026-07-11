@@ -19016,11 +19016,11 @@ fn disposableStackConstructorFn(comptime is_async: bool) value.NativeFn {
 /// Push a resource entry [value, onDispose, kind] (kind 0=use,1=adopt,2=defer).
 fn dispPush(self: *Interpreter, o: *value.Object, v: Value, f: Value, kind: f64) EvalError!void {
     const entry = (try self.newArray()).asObj();
-    try entry.elements.append(entry.elementsAllocator(self.arena), v);
-    try entry.elements.append(entry.elementsAllocator(self.arena), f);
-    try entry.elements.append(entry.elementsAllocator(self.arena), Value.num(kind));
+    try entry.appendInternalElement(self.arena, v);
+    try entry.appendInternalElement(self.arena, f);
+    try entry.appendInternalElement(self.arena, Value.num(kind));
     const res = o.getOwn("\x00ds_res").?.asObj();
-    try res.elements.append(res.elementsAllocator(self.arena), Value.obj(entry));
+    try res.appendInternalElement(self.arena, Value.obj(entry));
 }
 
 fn dispGetMethod(self: *Interpreter, v: Value, sym_key: []const u8) EvalError!Value {
@@ -19104,9 +19104,9 @@ fn dispMoveFn(comptime is_async: bool) value.NativeFn {
 
 /// Dispose one resource entry, returning normally or propagating its throw.
 fn dispOne(self: *Interpreter, entry: *value.Object, is_async: bool) EvalError!void {
-    const v = entry.elements.items[0];
-    const f = entry.elements.items[1];
-    const kind = entry.elements.items[2].asNum();
+    const v = entry.elementAt(0) orelse return self.throwError("TypeError", "malformed DisposableStack resource");
+    const f = entry.elementAt(1) orelse return self.throwError("TypeError", "malformed DisposableStack resource");
+    const kind = (entry.elementAt(2) orelse return self.throwError("TypeError", "malformed DisposableStack resource")).asNum();
     const r = switch (@as(u8, @intFromFloat(kind))) {
         1 => try self.callValueWithThis(f, &.{v}, Value.undef()), // adopt: onDispose(value)
         2 => try self.callValueWithThis(f, &.{}, Value.undef()), // defer: onDispose()
@@ -19118,10 +19118,14 @@ fn dispOne(self: *Interpreter, entry: *value.Object, is_async: bool) EvalError!v
 
 fn dispOnlyAsyncSentinels(o: *value.Object) bool {
     const res = o.getOwn("\x00ds_res").?.asObj();
-    if (res.elements.items.len == 0) return false;
-    for (res.elements.items) |entry_v| {
+    const n = res.elementsLen();
+    if (n == 0) return false;
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        const entry_v = res.elementAt(i) orelse return false;
         const entry = entry_v.asObj();
-        if (@as(u8, @intFromFloat(entry.elements.items[2].asNum())) != 3) return false;
+        const kind = (entry.elementAt(2) orelse return false).asNum();
+        if (@as(u8, @intFromFloat(kind)) != 3) return false;
     }
     return true;
 }
@@ -19130,12 +19134,13 @@ fn dispOnlyAsyncSentinels(o: *value.Object) bool {
 /// into SuppressedError. Returns the pending error (to throw) or null.
 fn dispRunAll(self: *Interpreter, o: *value.Object, is_async: bool) EvalError!?Value {
     const res = o.getOwn("\x00ds_res").?.asObj();
+    const entries = try res.internalElementsSnapshot(self.arena);
     var has_err = false;
     var err: Value = Value.undef();
-    var i = res.elements.items.len;
+    var i = entries.len;
     while (i > 0) {
         i -= 1;
-        const entry = res.elements.items[i].asObj();
+        const entry = entries[i].asObj();
         if (dispOne(self, entry, is_async)) |_| {} else |e| {
             if (e != error.Throw) return e;
             const thrown = self.exception;
