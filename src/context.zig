@@ -1941,8 +1941,16 @@ pub const Context = struct {
         self.c_api_ref_count.store(1, .release);
     }
 
-    pub fn retainCApiRef(self: *Context) void {
-        _ = self.c_api_ref_count.fetchAdd(1, .monotonic);
+    pub fn retainCApiRef(self: *Context) bool {
+        var current = self.c_api_ref_count.load(.monotonic);
+        while (true) {
+            if (current == std.math.maxInt(usize)) return false;
+            if (self.c_api_ref_count.cmpxchgWeak(current, current + 1, .monotonic, .monotonic)) |observed| {
+                current = observed;
+                continue;
+            }
+            return true;
+        }
     }
 
     pub fn releaseCApiRef(self: *Context) bool {

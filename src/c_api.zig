@@ -277,7 +277,7 @@ export fn JSGlobalContextRelease(ctx: JSContextRef) callconv(.c) void {
 
 export fn JSGlobalContextRetain(ctx: JSContextRef) callconv(.c) JSContextRef {
     const c = ctxRawFrom(ctx) orelse return null;
-    c.retainCApiRef();
+    if (!c.retainCApiRef()) return null;
     return ctx;
 }
 
@@ -1081,6 +1081,16 @@ test "C-API: JSGlobalContextRetain keeps context alive until final release" {
     try std.testing.expectEqual(@as(f64, 42), JSValueToNumber(retained, result, null));
 
     JSGlobalContextRelease(retained);
+}
+
+test "C-API: JSGlobalContextRetain rejects refcount overflow" {
+    const ctx = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
+    const c = ctxRawFrom(ctx) orelse return error.JSCInitFailed;
+    c.c_api_ref_count.store(std.math.maxInt(usize), .release);
+    try std.testing.expect(JSGlobalContextRetain(ctx) == null);
+    try std.testing.expectEqual(std.math.maxInt(usize), c.c_api_ref_count.load(.acquire));
+    c.c_api_ref_count.store(1, .release);
+    JSGlobalContextRelease(ctx);
 }
 
 test "C-API: round-trip a UTF-8 string" {
