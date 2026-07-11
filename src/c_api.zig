@@ -438,7 +438,7 @@ export fn JSValueMakeNumber(ctx: JSContextRef, n: f64) callconv(.c) JSValueRef {
 
 export fn JSValueMakeString(ctx: JSContextRef, str: JSStringRef) callconv(.c) JSValueRef {
     const c = ctxFrom(ctx) orelse return null;
-    const s = strFrom(str) orelse return box(c, Value.undef());
+    const s = strFrom(str) orelse return null;
     const copy = c.arena().dupe(u8, s.bytes) catch return null;
     return box(c, Value.str(copy));
 }
@@ -1105,6 +1105,13 @@ test "C-API: JSString null C pointers are rejected safely" {
     var one: [1]u8 = undefined;
     try std.testing.expectEqual(@as(usize, 1), JSStringGetUTF8CString(s, &one, one.len));
     try std.testing.expectEqual(@as(u8, 0), one[0]);
+}
+
+test "C-API: JSValueMakeString rejects null string refs" {
+    const ctx = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
+    defer JSGlobalContextRelease(ctx);
+
+    try std.testing.expect(JSValueMakeString(ctx, null) == null);
 }
 
 test "C-API: primitive object-tagged values report primitive types" {

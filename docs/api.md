@@ -123,6 +123,8 @@ For no-exception value inspection APIs, a null value ref is an invalid handle, n
 
 `JSObjectMakeArray`, `JSObjectCallAsFunction`, and `JSObjectCallAsConstructor` reject null `argv` arrays when `argc > 0` and null value refs inside non-null argument arrays by reporting an exception through the out pointer.
 
+`JSValueMakeString` rejects a null string ref by returning null instead of creating JavaScript `undefined`.
+
 `JSObjectCallAsFunction(..., thisObject, ...)` uses the provided object as the call receiver, or the context global object when `thisObject` is null.
 
 `JSObjectCallAsConstructor` performs the runtime `[[Construct]]` path and reports constructor throws through the exception out pointer.
