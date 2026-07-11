@@ -1463,6 +1463,11 @@ pub const Context = struct {
     /// The empty root shape every object in this context transitions from.
     root_shape: *Shape,
     exception: ?value.Value = null,
+    /// Prebuilt, immutable-ish OOM completion object for capped shared-realm
+    /// `Thread`s. It is allocated during bootstrap, while budget is still
+    /// available, so an exhausted thread can publish a real Error object without
+    /// allocating on the already-failed path.
+    reserved_thread_oom_error: ?value.Value = null,
     /// The realm microtask queue (Promise reactions for the host/main thread)
     /// and the `print` output buffer — persistent across `evaluate` calls.
     /// Spawned shared-realm `Thread`s install their own arena-owned
@@ -1959,6 +1964,9 @@ pub const Context = struct {
         if (self.env.get("$262")) |d| {
             if (d.isObject()) try d.asObj().setOwn(a, self.root_shape, "global", Value.obj(global_obj));
         }
+        if (options.heap_limit_bytes != null) {
+            self.reserved_thread_oom_error = try self.createReservedThreadOomError();
+        }
         if (options.enable_threads) {
             // `locked_arena` (the thread-safe arena, #1) was installed before any
             // create-time allocation above, so shapes/env/etc. already use it.
@@ -1981,6 +1989,17 @@ pub const Context = struct {
         }
         if (!options.enable_threads and (options.concurrent_gc or options.parallel_gc)) enableParallelSync();
         return self;
+    }
+
+    fn createReservedThreadOomError(self: *Context) !Value {
+        var machine = self.interpreter();
+        const err = try machine.makeError("OutOfMemoryError", "Context heap limit exceeded");
+        const obj = err.asObj();
+        try obj.setOwn(self.arena(), self.root_shape, "name", Value.str("OutOfMemoryError"));
+        try obj.setAttr(self.arena(), "name", .{ .writable = false, .enumerable = false, .configurable = false });
+        try obj.setAttr(self.arena(), "message", .{ .writable = false, .enumerable = false, .configurable = false });
+        obj.setExtensible(false);
+        return err;
     }
 
     /// An interpreter bound to this context's arena, globals, and shape tree.
@@ -10339,6 +10358,7 @@ test "Context heap_limit_bytes lets sibling Threads survive one Thread OOM" {
 
     const result = try ctx.evaluate(
         \\const sibling = new Thread(() => 41);
+        \\let caught = null;
         \\let oomOk = false;
         \\try {
         \\  new Thread(() => {
@@ -10347,9 +10367,20 @@ test "Context heap_limit_bytes lets sibling Threads survive one Thread OOM" {
         \\      keep.push({ i: i, payload: [i, i + 1, i + 2, i + 3, i + 4, i + 5, i + 6, i + 7] });
         \\  }).join();
         \\} catch (e) {
-        \\  oomOk = e === "OutOfMemoryError";
+        \\  caught = e;
+        \\  oomOk =
+        \\    e instanceof OutOfMemoryError &&
+        \\    e instanceof Error &&
+        \\    Error.isError(e) &&
+        \\    e.name === "OutOfMemoryError" &&
+        \\    e.message === "Context heap limit exceeded" &&
+        \\    Object.isFrozen(e);
         \\}
-        \\oomOk && sibling.join() === 41 && Thread.current.id === 0;
+        \\let mutationBlocked = false;
+        \\try { caught.name = "changed"; } catch (_) {}
+        \\try { caught.extra = 1; } catch (_) {}
+        \\mutationBlocked = caught.name === "OutOfMemoryError" && caught.extra === undefined;
+        \\oomOk && mutationBlocked && sibling.join() === 41 && Thread.current.id === 0;
     );
     try std.testing.expect(result.asBool());
     const stats = ctx.heapBudgetStats().?;

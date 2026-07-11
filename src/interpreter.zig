@@ -27363,9 +27363,9 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
 pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol: ?*value.Object) EvalError!void {
     const a = env.arena;
     const error_names = [_][]const u8{
-        "Error",           "TypeError", "RangeError", "ReferenceError",
-        "SyntaxError",     "EvalError", "URIError",   "AggregateError",
-        "SuppressedError",
+        "Error",           "TypeError",        "RangeError", "ReferenceError",
+        "SyntaxError",     "EvalError",        "URIError",   "AggregateError",
+        "SuppressedError", "OutOfMemoryError",
     };
     for (error_names) |name| {
         const o = try gc_mod.allocObj(a);

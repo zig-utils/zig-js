@@ -176,8 +176,8 @@ const ContentionCounters = struct {
 var contention_counters: ContentionCounters = .{};
 var contention_stats_enabled: std.atomic.Value(bool) = .init(false);
 
-fn outOfMemoryCompletionValue() Value {
-    return Value.staticStr("OutOfMemoryError");
+fn outOfMemoryCompletionValue(ctx: *Context) Value {
+    return ctx.reserved_thread_oom_error orelse Value.staticStr("OutOfMemoryError");
 }
 
 pub fn resetContentionStats() void {
@@ -592,7 +592,7 @@ fn threadMain(rec: *ThreadRecord, fn_v: Value, args: []const Value) void {
     // conservatively scanned, and the queued tasks stay precisely rooted via
     // `machine.microtasks` in `traceInterpreterRoots` (which holds the lock).
     const microtasks = rec.ctx.arena().create(promise.MicrotaskQueue) catch {
-        var pj = publishThreadCompletion(rec, true, outOfMemoryCompletionValue());
+        var pj = publishThreadCompletion(rec, true, outOfMemoryCompletionValue(rec.ctx));
         pj.deinit(rec.ctx.arena());
         return;
     };
@@ -601,7 +601,7 @@ fn threadMain(rec: *ThreadRecord, fn_v: Value, args: []const Value) void {
     rec.microtasks = microtasks;
     var machine = rec.ctx.interpreter();
     rec.ctx.pushActiveInterpreter(&machine) catch {
-        var pending_joins = publishThreadCompletion(rec, true, outOfMemoryCompletionValue());
+        var pending_joins = publishThreadCompletion(rec, true, outOfMemoryCompletionValue(rec.ctx));
         pending_joins.deinit(rec.ctx.arena());
         return;
     };
@@ -639,7 +639,7 @@ fn threadMain(rec: *ThreadRecord, fn_v: Value, args: []const Value) void {
         abandonPropAsyncQueue(g, microtasks);
         threw = true;
         result = switch (err) {
-            error.OutOfMemory => outOfMemoryCompletionValue(),
+            error.OutOfMemory => outOfMemoryCompletionValue(rec.ctx),
             else => machine.exception,
         };
     }

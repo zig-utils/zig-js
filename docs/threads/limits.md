@@ -203,12 +203,12 @@ Issue #1 remains the umbrella status page.
   The peak is monotonic for the context lifetime, so embedders can tune limits
   and alert on near-cap scripts without installing a custom allocator wrapper.
   Top-level host evaluation reports cap pressure as Zig `error.OutOfMemory`.
-  A spawned shared-realm `Thread` that hits the cap publishes an allocation-free
-  `"OutOfMemoryError"` completion sentinel, so `join()` rethrows a deterministic
-  JS-visible value even when there is no heap headroom left to allocate a fresh
-  `Error` object, and sibling `Thread`s can still join. Existing `asyncJoin()`
-  waiters reject with the same sentinel when their already-created promise
-  reaction can be delivered.
+  A capped context prebuilds an immutable `OutOfMemoryError` instance during
+  bootstrap; a spawned shared-realm `Thread` that hits the cap publishes that
+  reserved object, so `join()` rethrows a deterministic `Error` value even when
+  there is no heap headroom left to allocate a fresh object, and sibling
+  `Thread`s can still join. Existing `asyncJoin()` waiters reject with the same
+  reserved object when their already-created promise reaction can be delivered.
   This is intentionally an embedder allocator boundary rather than a JavaScript
   heap-shape oracle. The remaining #24 work is to stress the survivor contract
   under more interleavings and promote or reclassify the matching PR-249 witness
