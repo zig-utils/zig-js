@@ -511,12 +511,23 @@ export fn JSObjectSetPrivate(object: JSObjectRef, data: ?*anyopaque) callconv(.c
     return false;
 }
 
+fn collectArgs(c: *Context, argc: usize, argv: [*c]const JSValueRef, exception: ExceptionRef) ?[]Value {
+    const args = c.arena().alloc(Value, argc) catch {
+        setException(c, exception, "OutOfMemory");
+        return null;
+    };
+    var i: usize = 0;
+    while (i < argc) : (i += 1) args[i] = unbox(argv[i]);
+    return args;
+}
+
 export fn JSObjectMakeArray(ctx: JSContextRef, argc: usize, argv: [*c]const JSValueRef, exception: ExceptionRef) callconv(.c) JSObjectRef {
     const c = ctxFrom(ctx) orelse return null;
     if (argc > 0 and argv == null) {
         setException(c, exception, "TypeError: argc > 0 requires non-null argv");
         return null;
     }
+    const args = collectArgs(c, argc, argv, exception) orelse return null;
     const gc_saved = gc_mod.setActiveHeap(c.gc);
     defer _ = gc_mod.setActiveHeap(gc_saved);
     const sa_saved = strcell.setActiveArena(c.arena());
@@ -538,7 +549,7 @@ export fn JSObjectMakeArray(ctx: JSContextRef, argc: usize, argv: [*c]const JSVa
     const obj = arr.asObj();
     var i: usize = 0;
     while (i < argc) : (i += 1) {
-        obj.appendElement(c.arena(), unbox(argv[i])) catch {
+        obj.appendElement(c.arena(), args[i]) catch {
             setException(c, exception, "OutOfMemory");
             return null;
         };
@@ -681,16 +692,6 @@ export fn JSObjectGetPropertyAtIndex(ctx: JSContextRef, object: JSObjectRef, ind
         return null;
     };
     return box(c, result);
-}
-
-fn collectArgs(c: *Context, argc: usize, argv: [*c]const JSValueRef, exception: ExceptionRef) ?[]Value {
-    const args = c.arena().alloc(Value, argc) catch {
-        setException(c, exception, "OutOfMemory");
-        return null;
-    };
-    var i: usize = 0;
-    while (i < argc) : (i += 1) args[i] = unbox(argv[i]);
-    return args;
 }
 
 export fn JSObjectCallAsFunction(ctx: JSContextRef, function: JSObjectRef, this_object: JSObjectRef, argc: usize, argv: [*c]const JSValueRef, exception: ExceptionRef) callconv(.c) JSValueRef {
@@ -1614,6 +1615,10 @@ test "C-API: argv collection failures report exception" {
     try std.testing.expect(exception == null);
 
     var dummy = JSValueMakeUndefined(ctx);
+    try std.testing.expect(JSObjectMakeArray(ctx, std.math.maxInt(usize), &dummy, &exception) == null);
+    try std.testing.expect(exception != null);
+
+    exception = null;
     try std.testing.expect(JSObjectCallAsFunction(ctx, fn_obj, null, std.math.maxInt(usize), &dummy, &exception) == null);
     try std.testing.expect(exception != null);
 
