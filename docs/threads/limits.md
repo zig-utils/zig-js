@@ -28,7 +28,9 @@ tests as the matching engine features land.
   `Context.createWith(.{ .heap_limit_bytes = n })` applies a thread-safe budget
   to Context-owned outstanding allocator bytes. Arena-backed contexts fail
   closed with `error.OutOfMemory`; GC-backed contexts can collect and retry at
-  safe allocation-recovery points. `ctx.heapBudgetStats()` reports
+  safe allocation-recovery points, including no-GIL GC-cell slab failures where
+  an active interpreter can drive the abort-safe parallel collector.
+  `ctx.heapBudgetStats()` reports
   `limit_bytes`, `used_bytes`, lifetime `peak_bytes`, and `remaining_bytes` for
   capped contexts.
 - Test-shell helpers such as `print`, `setTimeout`, `drainMicrotasks`, `gc`,
@@ -213,10 +215,13 @@ Issue #1 remains the umbrella status page.
   This is intentionally an embedder allocator boundary rather than a JavaScript
   heap-shape oracle. Arena-backed caps remain fail-closed and non-reclaimable.
   GC-backed capped contexts can now reclaim at safe GC cell and ArrayBuffer byte
-  allocation failures, then retry; that recovery policy promotes the PR-249
-  `semantics/oom-one-thread.js` witness. Remaining emergency-recovery work is
-  tracked in #30: no-GIL root-publication recovery and lock-aware side-store
-  pressure without deadlocking GC tracing.
+  allocation failures, then retry. In no-GIL shared-realm contexts, GC-cell slab
+  recovery is safepoint-owned by the active interpreter and uses the abort-safe
+  parallel root-publication collector; allocation still fails closed when
+  recovery is attempted outside active JS execution or while holding side-store
+  locks that the tracer may need. Remaining emergency-recovery work is tracked
+  in #30: lock-aware side-store pressure coverage without deadlocking GC
+  tracing.
 - **Parallel scaling optimization.** Benchmarks show real speedup, but scaling
   is sub-linear. `zig build threads-profile` now provides a repeatable baseline
   against the `.gil = true` fallback for independent compute, shared object
