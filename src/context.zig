@@ -158,10 +158,16 @@ pub const LockedArena = struct {
 /// so embedders get one fail-closed resource-control knob without requiring a
 /// separate quota check at every allocation site.
 pub const BudgetAllocator = struct {
+    const RecoveryFn = *const fn (*anyopaque) bool;
+
     inner: std.mem.Allocator,
     limit: usize,
     used: std.atomic.Value(usize) = .init(0),
     peak: std.atomic.Value(usize) = .init(0),
+    recover_ctx: ?*anyopaque = null,
+    recover_fn: ?RecoveryFn = null,
+
+    threadlocal var recovery_depth: usize = 0;
 
     fn recordPeak(self: *BudgetAllocator, used_now: usize) void {
         var current = self.peak.load(.monotonic);
@@ -187,13 +193,28 @@ pub const BudgetAllocator = struct {
         }
     }
 
+    fn tryRecover(self: *BudgetAllocator) bool {
+        if (recovery_depth != 0) return false;
+        const f = self.recover_fn orelse return false;
+        const ctx = self.recover_ctx orelse return false;
+        recovery_depth += 1;
+        defer recovery_depth -= 1;
+        return f(ctx);
+    }
+
+    fn reserveWithRecovery(self: *BudgetAllocator, amount: usize) ?usize {
+        if (self.reserve(amount)) |next| return next;
+        if (!self.tryRecover()) return null;
+        return self.reserve(amount);
+    }
+
     fn release(self: *BudgetAllocator, amount: usize) void {
         _ = self.used.fetchSub(amount, .acq_rel);
     }
 
     fn allocFn(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
         const self: *BudgetAllocator = @ptrCast(@alignCast(ctx));
-        const next = self.reserve(len) orelse return null;
+        const next = self.reserveWithRecovery(len) orelse return null;
         const ptr = self.inner.vtable.alloc(self.inner.ptr, len, alignment, ret_addr) orelse {
             self.release(len);
             return null;
@@ -204,7 +225,7 @@ pub const BudgetAllocator = struct {
 
     fn resizeFn(ctx: *anyopaque, mem: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
         const self: *BudgetAllocator = @ptrCast(@alignCast(ctx));
-        const grow_next = if (new_len > mem.len) self.reserve(new_len - mem.len) orelse return false else null;
+        const grow_next = if (new_len > mem.len) self.reserveWithRecovery(new_len - mem.len) orelse return false else null;
         if (!self.inner.vtable.resize(self.inner.ptr, mem, alignment, new_len, ret_addr)) {
             if (new_len > mem.len) self.release(new_len - mem.len);
             return false;
@@ -216,7 +237,7 @@ pub const BudgetAllocator = struct {
 
     fn remapFn(ctx: *anyopaque, mem: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
         const self: *BudgetAllocator = @ptrCast(@alignCast(ctx));
-        const grow_next = if (new_len > mem.len) self.reserve(new_len - mem.len) orelse return null else null;
+        const grow_next = if (new_len > mem.len) self.reserveWithRecovery(new_len - mem.len) orelse return null else null;
         const ptr = self.inner.vtable.remap(self.inner.ptr, mem, alignment, new_len, ret_addr) orelse {
             if (new_len > mem.len) self.release(new_len - mem.len);
             return null;
@@ -241,6 +262,11 @@ pub const BudgetAllocator = struct {
 
     pub fn allocator(self: *BudgetAllocator) std.mem.Allocator {
         return .{ .ptr = self, .vtable = &vtable };
+    }
+
+    pub fn setRecovery(self: *BudgetAllocator, ctx: *anyopaque, f: RecoveryFn) void {
+        self.recover_ctx = ctx;
+        self.recover_fn = f;
     }
 
     pub fn stats(self: *const BudgetAllocator) Context.HeapBudgetStats {
@@ -275,6 +301,38 @@ test "BudgetAllocator enforces outstanding byte limit" {
     a.free(second);
     try std.testing.expectEqual(@as(usize, 0), budget.used.load(.acquire));
     try std.testing.expectEqual(@as(usize, 64), budget.peak.load(.acquire));
+}
+
+test "BudgetAllocator retries once after recovery frees budget" {
+    var budget = BudgetAllocator{ .inner = std.testing.allocator, .limit = 64 };
+    const a = budget.allocator();
+
+    const State = struct {
+        allocator: std.mem.Allocator,
+        held: ?[]u8 = null,
+        calls: usize = 0,
+
+        fn recover(raw: *anyopaque) bool {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.calls += 1;
+            const held = self.held orelse return false;
+            self.allocator.free(held);
+            self.held = null;
+            return true;
+        }
+    };
+
+    var state = State{ .allocator = a };
+    budget.setRecovery(&state, State.recover);
+
+    state.held = try a.alloc(u8, 48);
+    const second = try a.alloc(u8, 32);
+    try std.testing.expectEqual(@as(usize, 1), state.calls);
+    try std.testing.expect(state.held == null);
+    try std.testing.expectEqual(@as(usize, 32), budget.used.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 48), budget.peak.load(.acquire));
+    a.free(second);
+    try std.testing.expectEqual(@as(usize, 0), budget.used.load(.acquire));
 }
 
 /// Reusable backing allocator for GC cells. `zig-gc` asks its backing allocator
@@ -1995,6 +2053,7 @@ pub const Context = struct {
             if (self.gc_cell_backing) |backing| backing.parallel = true;
         }
         if (!options.enable_threads and (options.concurrent_gc or options.parallel_gc)) enableParallelSync();
+        if (self.budget_allocator) |ba| ba.setRecovery(self, recoverAllocationFailure);
         return self;
     }
 
@@ -10612,6 +10671,36 @@ test "Context heap_limit_bytes string allocation pressure does not panic" {
         \\0;
     ));
     try std.testing.expectEqual(@as(f64, 7), ctx.exception.?.asNum());
+    const stats = ctx.heapBudgetStats().?;
+    try std.testing.expect(stats.peak_bytes <= stats.limit_bytes);
+}
+
+test "Context heap_limit_bytes object side-store pressure recovers garbage" {
+    const ctx = try Context.createWith(std.testing.allocator, .{
+        .enable_gc = true,
+        .heap_limit_bytes = 4 * 1024 * 1024,
+    });
+    defer ctx.destroy();
+
+    const result = try ctx.evaluate(
+        \\(() => {
+        \\  const names = [];
+        \\  for (let i = 0; i < 96; i++)
+        \\    names.push("sideStoreRecovery" + i);
+        \\  for (let round = 0; round < 192; round++) {
+        \\    const o = {};
+        \\    for (const name of names)
+        \\      o[name] = round;
+        \\    Object.defineProperty(o, "locked", {
+        \\      value: round,
+        \\      writable: false,
+        \\      configurable: true
+        \\    });
+        \\  }
+        \\  return 17;
+        \\})();
+    );
+    try std.testing.expectEqual(@as(f64, 17), result.asNum());
     const stats = ctx.heapBudgetStats().?;
     try std.testing.expect(stats.peak_bytes <= stats.limit_bytes);
 }
