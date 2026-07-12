@@ -12888,6 +12888,86 @@ test "parallel_js heap_limit_bytes fails closed with deferred iterator helper tr
     try std.testing.expect(ctx.gc_par_deferred_rounds.load(.monotonic) > before_deferred_rounds);
 }
 
+test "parallel_js heap_limit_bytes fails closed with deferred async-generator requests" {
+    // #36 request-buffer witness: an async generator suspended on an unresolved
+    // await keeps later next/return requests in its GC-backed request side
+    // store. That cell is still a Generator cell and is deferred by the parallel
+    // tracer, so no-GIL allocation-failure recovery must fail closed rather than
+    // sweep while a peer is live.
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_threads = true,
+        .enable_gc = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+        .heap_limit_bytes = 8 * 1024 * 1024,
+    });
+    defer ctx.destroy();
+
+    const baseline = ctx.gc_generator_backing_stores_live;
+    const prepared = try ctx.evaluate(
+        \\(() => {
+        \\  async function* ag() {
+        \\    await new Promise(() => {});
+        \\    yield 1;
+        \\  }
+        \\  const it = ag();
+        \\  const p1 = it.next();
+        \\  const p2 = it.next();
+        \\  const p3 = it.return(7);
+        \\  globalThis.__deferredRecoveryAsyncGenerator = { it, p1, p2, p3 };
+        \\  return typeof p1.then === 'function' &&
+        \\         typeof p2.then === 'function' &&
+        \\         typeof p3.then === 'function';
+        \\})();
+    );
+    try std.testing.expect(prepared.asBool());
+    try std.testing.expect(ctx.gc_generator_backing_stores_live > baseline);
+
+    var sibling: jsthread.ThreadRecord = .{ .id = 999, .gil = ctx.gil.?, .ctx = ctx };
+    {
+        ctx.gil.?.lockApi();
+        defer ctx.gil.?.unlockApi();
+        try ctx.reserveJsThreadsLocked(1);
+        ctx.js_threads.appendAssumeCapacity(&sibling);
+    }
+    defer {
+        ctx.gil.?.lockApi();
+        var i: usize = ctx.js_threads.items.len;
+        while (i > 0) {
+            i -= 1;
+            if (ctx.js_threads.items[i] == &sibling) {
+                _ = ctx.js_threads.swapRemove(i);
+                break;
+            }
+        }
+        ctx.gil.?.unlockApi();
+    }
+
+    const before_attempts = ctx.gc_par_attempts.load(.monotonic);
+    const before_collections = ctx.gc_par_collections.load(.monotonic);
+    const before_aborts = ctx.gc_par_aborts.load(.monotonic);
+    const before_round_aborts = ctx.gc_par_round_limit_aborts.load(.monotonic);
+    const before_deferred_rounds = ctx.gc_par_deferred_rounds.load(.monotonic);
+
+    const gc_saved = gc_mod.setActiveHeap(ctx.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const ss_saved = stack_scan.enter(@frameAddress());
+    defer stack_scan.leave(ss_saved);
+    var machine = ctx.interpreter();
+    try ctx.pushActiveInterpreter(&machine);
+    defer ctx.popActiveInterpreter(&machine);
+    const ai_saved = gc_mod.setActiveInterpreter(&machine);
+    defer _ = gc_mod.setActiveInterpreter(ai_saved);
+
+    try std.testing.expect(!ctx.collectForAllocationFailure(&machine));
+    try std.testing.expect(ctx.gc_par_attempts.load(.monotonic) > before_attempts);
+    try std.testing.expectEqual(before_collections, ctx.gc_par_collections.load(.monotonic));
+    try std.testing.expect(ctx.gc_par_aborts.load(.monotonic) > before_aborts);
+    try std.testing.expect(ctx.gc_par_round_limit_aborts.load(.monotonic) > before_round_aborts);
+    try std.testing.expect(ctx.gc_par_deferred_rounds.load(.monotonic) > before_deferred_rounds);
+}
+
 test "parallel_js (M3): sync wait peers publish roots for mid-script parallel GC" {
     // Sync property waits, Condition waits, and contended Lock acquisition are
     // not frozen `gc_parked` peers: they periodically pump tasks between short
