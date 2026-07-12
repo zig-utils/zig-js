@@ -108,6 +108,12 @@ zig build threadfuzz -Dtsan=true -Dfuzz-midgc=true -Dfuzz-iters=5
 zig build threadfuzz -Dtsan=true -Dfuzz-lifecycle=true -Dfuzz-iters=5
 ```
 
+Manual `workflow_dispatch` runs can override those three nightly TSan iteration
+counts without changing the scheduled defaults. Use the
+`nightly_tsan_default_iters`, `nightly_tsan_midgc_iters`, and
+`nightly_tsan_lifecycle_iters` inputs to collect `wall-ms` and flake evidence
+for #13 before promoting a larger depth into the nightly schedule.
+
 The corpus TSan sweep is sharded in CI and runs each allowlisted case in its own
 process to avoid TSan shadow-memory growth across a single long run. CI also
 runs TSan smoke seeds for the specialized mid-script-GC and lifecycle fuzzer

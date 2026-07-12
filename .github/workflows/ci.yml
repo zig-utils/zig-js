@@ -18,6 +18,19 @@ on:
   push:
     branches: [main] # this project lands directly on main, so gate main pushes too
   workflow_dispatch:
+    inputs:
+      nightly_tsan_default_iters:
+        description: 'Manual nightly-threadfuzz-tsan default-profile iterations'
+        required: false
+        default: '120'
+      nightly_tsan_midgc_iters:
+        description: 'Manual nightly-threadfuzz-tsan mid-GC profile iterations'
+        required: false
+        default: '5'
+      nightly_tsan_lifecycle_iters:
+        description: 'Manual nightly-threadfuzz-tsan lifecycle profile iterations'
+        required: false
+        default: '5'
   schedule:
     - cron: '0 7 * * *' # nightly continuous validation (incl. the race-hunt probe)
 
@@ -241,12 +254,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: default-120
-            cmd: zig build threadfuzz -Dtsan=true -Dfuzz-iters=120
-          - name: midgc-5
-            cmd: THREADFUZZ_SEED_TIMEOUT_MS=300000 zig build threadfuzz -Dtsan=true -Dfuzz-midgc=true -Dfuzz-iters=5
-          - name: lifecycle-5
-            cmd: zig build threadfuzz -Dtsan=true -Dfuzz-lifecycle=true -Dfuzz-iters=5
+          - name: default
+            profile: default
+          - name: midgc
+            profile: midgc
+          - name: lifecycle
+            profile: lifecycle
     steps:
       - uses: actions/checkout@v6
         with:
@@ -264,7 +277,22 @@ jobs:
           packages: zig@0.17.0-dev
       - name: ${{ matrix.name }}
         working-directory: zig-js
-        run: ${{ matrix.cmd }}
+        env:
+          DEFAULT_ITERS: ${{ github.event.inputs.nightly_tsan_default_iters || '120' }}
+          MIDGC_ITERS: ${{ github.event.inputs.nightly_tsan_midgc_iters || '5' }}
+          LIFECYCLE_ITERS: ${{ github.event.inputs.nightly_tsan_lifecycle_iters || '5' }}
+        run: |
+          case "${{ matrix.profile }}" in
+            default)
+              zig build threadfuzz -Dtsan=true -Dfuzz-iters="${DEFAULT_ITERS}"
+              ;;
+            midgc)
+              THREADFUZZ_SEED_TIMEOUT_MS=300000 zig build threadfuzz -Dtsan=true -Dfuzz-midgc=true -Dfuzz-iters="${MIDGC_ITERS}"
+              ;;
+            lifecycle)
+              zig build threadfuzz -Dtsan=true -Dfuzz-lifecycle=true -Dfuzz-iters="${LIFECYCLE_ITERS}"
+              ;;
+          esac
 
   # Runs a curated test262 cross-section in GIL-free parallel contexts and asserts
   # it introduces no NEW failures vs the baseline (arena) engine — i.e. the
