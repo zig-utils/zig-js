@@ -52,8 +52,8 @@ GC-cell slab backing.
 
 `-Dthreads-profile-case='<exact scenario name>'` runs one shared-realm row
 across the host's 1/2/4/8-thread matrix and skips Worker tables.
-`-Dthreads-profile-max-workers=N` caps those rows for focused smoke checks or
-debugging, while full local baselines should omit the cap. Add
+`-Dthreads-profile-max-workers=N` caps worker-count rows for broad or focused
+smoke checks and debugging, while full local baselines should omit the cap. Add
 `-Dthreads-profile-debug=true` for a symbolized safety-check build when
 diagnosing a crash; timing from that mode is not a performance baseline.
 

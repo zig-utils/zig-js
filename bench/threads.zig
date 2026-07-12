@@ -1434,7 +1434,11 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
     var args = std.process.Args.Iterator.init(init.minimal.args);
     _ = args.next();
-    const scenario_filter = args.next();
+    const scenario_filter_arg = args.next();
+    const scenario_filter = if (scenario_filter_arg) |arg|
+        if (arg.len == 0) null else arg
+    else
+        null;
     const max_workers_arg = args.next();
     const max_workers = if (max_workers_arg) |arg| blk: {
         const parsed = try std.fmt.parseInt(usize, arg, 10);
