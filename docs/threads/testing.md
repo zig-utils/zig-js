@@ -71,13 +71,14 @@ diagnosing a crash; timing from that mode is not a performance baseline.
 `midgc-profile` isolates the internal `parallel_midscript_gc` testing policy so
 its collector behavior is not hidden inside the broader contention matrix. It
 reports elected attempts, finishing sweeps, publication-timeout versus
-round-limit aborts, opened root-publication generations, failed publication
-poll totals and worst-generation poll counts, allocation-race finish retries
-and worst-attempt retry counts, born-growth extension rounds, running-peer
-requests, parked-peer observations, actual peer publications, post-abort retry
-backoff skips, and collector-side total/maximum pause time. That pause is time
-the collector mutator spends in the driver; it is not a stop-the-world pause
-because peer mutators continue running.
+round-limit aborts, deferred-cell blocked aborts, opened root-publication
+generations, failed publication poll totals and worst-generation poll counts,
+allocation-race finish retries and worst-attempt retry counts, born-growth
+extension rounds, deferred-work rounds, running-peer requests, parked-peer
+observations, actual peer publications, post-abort retry backoff skips, and
+collector-side total/maximum pause time. That pause is time the collector
+mutator spends in the driver; it is not a stop-the-world pause because peer
+mutators continue running.
 The profile is an attribution tool, not a stable embedder API or correctness
 gate.
 

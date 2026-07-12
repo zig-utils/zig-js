@@ -259,13 +259,15 @@ Known performance/maturity work:
   measured implementation policy, not stable embedder API.
 - `zig build midgc-profile` now makes convergence measurable without exposing
   the internal `parallel_midscript_gc` knob as embedder API. It separates
-  publication-timeout aborts from round-limit aborts and reports publication
-  generations, total/worst-generation publication polls, total/worst-attempt
-  self-checking finish retries, running versus parked peer observations, actual
-  peer root publications, post-abort retry backoff skips, and collector-side
-  total/maximum pause time. Focused tests assert the attempt/outcome and
-  abort-reason accounting identities, the max-versus-total bounds, and prove
-  both running-peer publication and direct parked-peer observation paths execute.
+  publication-timeout aborts from round-limit aborts, splits out attempts whose
+  finish was blocked by deferred generator/iterator cells, and reports
+  publication generations, total/worst-generation publication polls,
+  total/worst-attempt self-checking finish retries, running versus parked peer
+  observations, actual peer root publications, post-abort retry backoff skips,
+  and collector-side total/maximum pause time. Focused tests assert the
+  attempt/outcome and abort-reason accounting identities, the max-versus-total
+  bounds, and prove both running-peer publication and direct parked-peer
+  observation paths execute.
 - Native synchronization side records participate in the nursery remembered
   set. Lock/Condition/ThreadLocal wrappers are the owner for queued async-hold
   jobs, async condition waiters and lock edges, and ThreadLocal map values. A

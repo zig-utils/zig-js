@@ -1762,9 +1762,11 @@ pub const Context = struct {
     /// races detected by the self-checking finish step; their paired max keeps
     /// the worst single elected attempt visible. Born-growth and deferred rounds
     /// explain why a generation skipped finish: peers were still allocating, or
-    /// the marker still had deferred work that cannot be swept yet. Peer request
-    /// counts snapshot running versus directly traceable parked peers once per
-    /// generation, while peer publications count roots actually handed off.
+    /// the marker still had deferred work that cannot be swept yet. Deferred
+    /// aborts count whole elected attempts that ended because such deferred
+    /// cells prevented a safe no-GIL finish. Peer request counts snapshot
+    /// running versus directly traceable parked peers once per generation, while
+    /// peer publications count roots actually handed off.
     /// Pause time is collector-mutator time spent inside the driver, not a
     /// stop-the-world pause: peer mutators continue throughout. Backoff skips
     /// count safepoints that avoided immediately re-electing another collector
@@ -1780,6 +1782,7 @@ pub const Context = struct {
     gc_par_born_growth_rounds: std.atomic.Value(u64) = .init(0),
     gc_par_round_extension_rounds: std.atomic.Value(u64) = .init(0),
     gc_par_deferred_rounds: std.atomic.Value(u64) = .init(0),
+    gc_par_deferred_aborts: std.atomic.Value(u64) = .init(0),
     gc_par_running_peer_requests: std.atomic.Value(u64) = .init(0),
     gc_par_parked_peer_observations: std.atomic.Value(u64) = .init(0),
     gc_par_peer_publications: std.atomic.Value(u64) = .init(0),
@@ -2876,11 +2879,13 @@ pub const Context = struct {
         }
         // Couldn't converge within the round budget (heavy continuous allocation
         // or a deferred generator) — abort and let quiescent collection reclaim.
+        const deferred_blocked_finish = h.deferredPendingLen() != 0;
         self.gc_scan_native_stack = true;
         h.abortConcurrentMarkParallel();
         self.gc_scan_native_stack = false;
         _ = self.gc_par_aborts.fetchAdd(1, .monotonic);
         _ = self.gc_par_round_limit_aborts.fetchAdd(1, .monotonic);
+        if (deferred_blocked_finish) _ = self.gc_par_deferred_aborts.fetchAdd(1, .monotonic);
         self.deferParallelGcRetry();
         return false;
     }
@@ -12476,6 +12481,7 @@ fn expectParallelGcTelemetryCoherent(ctx: *Context) !void {
     const born_growth_rounds = ctx.gc_par_born_growth_rounds.load(.monotonic);
     const round_extension_rounds = ctx.gc_par_round_extension_rounds.load(.monotonic);
     const deferred_rounds = ctx.gc_par_deferred_rounds.load(.monotonic);
+    const deferred_aborts = ctx.gc_par_deferred_aborts.load(.monotonic);
     const backoff_skips = ctx.gc_par_backoff_skips.load(.monotonic);
 
     try std.testing.expect(attempts > 0);
@@ -12489,6 +12495,7 @@ fn expectParallelGcTelemetryCoherent(ctx: *Context) !void {
     try std.testing.expect(born_growth_rounds <= generations);
     try std.testing.expect(round_extension_rounds <= generations);
     try std.testing.expect(deferred_rounds <= generations);
+    try std.testing.expect(deferred_aborts <= round_aborts);
     if (aborts == 0) try std.testing.expectEqual(@as(u64, 0), backoff_skips);
 }
 
@@ -12799,6 +12806,7 @@ test "parallel_js heap_limit_bytes fails closed with deferred generator tracing"
     const before_aborts = ctx.gc_par_aborts.load(.monotonic);
     const before_round_aborts = ctx.gc_par_round_limit_aborts.load(.monotonic);
     const before_deferred_rounds = ctx.gc_par_deferred_rounds.load(.monotonic);
+    const before_deferred_aborts = ctx.gc_par_deferred_aborts.load(.monotonic);
 
     const gc_saved = gc_mod.setActiveHeap(ctx.gc);
     defer _ = gc_mod.setActiveHeap(gc_saved);
@@ -12816,6 +12824,7 @@ test "parallel_js heap_limit_bytes fails closed with deferred generator tracing"
     try std.testing.expect(ctx.gc_par_aborts.load(.monotonic) > before_aborts);
     try std.testing.expect(ctx.gc_par_round_limit_aborts.load(.monotonic) > before_round_aborts);
     try std.testing.expect(ctx.gc_par_deferred_rounds.load(.monotonic) > before_deferred_rounds);
+    try std.testing.expect(ctx.gc_par_deferred_aborts.load(.monotonic) > before_deferred_aborts);
 }
 
 test "parallel_js heap_limit_bytes fails closed with deferred generator handlers" {
@@ -12877,6 +12886,7 @@ test "parallel_js heap_limit_bytes fails closed with deferred generator handlers
     const before_aborts = ctx.gc_par_aborts.load(.monotonic);
     const before_round_aborts = ctx.gc_par_round_limit_aborts.load(.monotonic);
     const before_deferred_rounds = ctx.gc_par_deferred_rounds.load(.monotonic);
+    const before_deferred_aborts = ctx.gc_par_deferred_aborts.load(.monotonic);
 
     const gc_saved = gc_mod.setActiveHeap(ctx.gc);
     defer _ = gc_mod.setActiveHeap(gc_saved);
@@ -12894,6 +12904,7 @@ test "parallel_js heap_limit_bytes fails closed with deferred generator handlers
     try std.testing.expect(ctx.gc_par_aborts.load(.monotonic) > before_aborts);
     try std.testing.expect(ctx.gc_par_round_limit_aborts.load(.monotonic) > before_round_aborts);
     try std.testing.expect(ctx.gc_par_deferred_rounds.load(.monotonic) > before_deferred_rounds);
+    try std.testing.expect(ctx.gc_par_deferred_aborts.load(.monotonic) > before_deferred_aborts);
 }
 
 test "parallel_js heap_limit_bytes fails closed with deferred iterator helper tracing" {
@@ -12947,6 +12958,7 @@ test "parallel_js heap_limit_bytes fails closed with deferred iterator helper tr
     const before_aborts = ctx.gc_par_aborts.load(.monotonic);
     const before_round_aborts = ctx.gc_par_round_limit_aborts.load(.monotonic);
     const before_deferred_rounds = ctx.gc_par_deferred_rounds.load(.monotonic);
+    const before_deferred_aborts = ctx.gc_par_deferred_aborts.load(.monotonic);
 
     const gc_saved = gc_mod.setActiveHeap(ctx.gc);
     defer _ = gc_mod.setActiveHeap(gc_saved);
@@ -12964,6 +12976,7 @@ test "parallel_js heap_limit_bytes fails closed with deferred iterator helper tr
     try std.testing.expect(ctx.gc_par_aborts.load(.monotonic) > before_aborts);
     try std.testing.expect(ctx.gc_par_round_limit_aborts.load(.monotonic) > before_round_aborts);
     try std.testing.expect(ctx.gc_par_deferred_rounds.load(.monotonic) > before_deferred_rounds);
+    try std.testing.expect(ctx.gc_par_deferred_aborts.load(.monotonic) > before_deferred_aborts);
 }
 
 test "parallel_js heap_limit_bytes fails closed with deferred async-generator requests" {
@@ -13027,6 +13040,7 @@ test "parallel_js heap_limit_bytes fails closed with deferred async-generator re
     const before_aborts = ctx.gc_par_aborts.load(.monotonic);
     const before_round_aborts = ctx.gc_par_round_limit_aborts.load(.monotonic);
     const before_deferred_rounds = ctx.gc_par_deferred_rounds.load(.monotonic);
+    const before_deferred_aborts = ctx.gc_par_deferred_aborts.load(.monotonic);
 
     const gc_saved = gc_mod.setActiveHeap(ctx.gc);
     defer _ = gc_mod.setActiveHeap(gc_saved);
@@ -13044,6 +13058,7 @@ test "parallel_js heap_limit_bytes fails closed with deferred async-generator re
     try std.testing.expect(ctx.gc_par_aborts.load(.monotonic) > before_aborts);
     try std.testing.expect(ctx.gc_par_round_limit_aborts.load(.monotonic) > before_round_aborts);
     try std.testing.expect(ctx.gc_par_deferred_rounds.load(.monotonic) > before_deferred_rounds);
+    try std.testing.expect(ctx.gc_par_deferred_aborts.load(.monotonic) > before_deferred_aborts);
 }
 
 test "parallel_js (M3): sync wait peers publish roots for mid-script parallel GC" {

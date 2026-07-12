@@ -339,10 +339,11 @@ roadmap item repeats it.
      collection otherwise, never trading correctness for pause-time.
    - **Convergence telemetry.** `zig build midgc-profile` exercises the internal
      policy and attributes attempts, sweeps, publication-timeout and round-limit
-     aborts, generations, total and worst-generation failed publication polls,
-     total and worst-attempt finish retries, born-cell-growth rounds,
-     born-growth extension rounds, deferred-work rounds, running and parked peer
-     observations, actual peer publications, post-abort retry backoff skips, and collector-side
+     aborts, deferred-cell blocked aborts, generations, total and
+     worst-generation failed publication polls, total and worst-attempt finish
+     retries, born-cell-growth rounds, born-growth extension rounds,
+     deferred-work rounds, running and parked peer observations, actual peer
+     publications, post-abort retry backoff skips, and collector-side
      total/maximum pause. The pause is local to the collector mutator; peers are
      not stopped.
      Focused tests enforce the counter accounting identities and
