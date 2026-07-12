@@ -267,8 +267,8 @@ Known performance/maturity work:
   independent compute loops in one GIL-free context.
 - `zig build threads-profile` is the dedicated contention harness. It compares
   the no-GIL default with `.gil = true` across independent compute, shared
-  object properties, mixed Object/Function/Promise GC-cell allocation, shared
-  array append, typed-array Atomics, contended
+  object properties, global lexical binding churn, mixed Object/Function/Promise
+  GC-cell allocation, shared array append, typed-array Atomics, contended
   property `Atomics.wait` / `notify`, `Condition.wait` / `notifyAll`,
   property `Atomics.waitAsync` timeout settlement, single-lock and multi-lock
   `Condition.asyncWait`, `Lock.hold`, `Lock.asyncHold` delivery, observed

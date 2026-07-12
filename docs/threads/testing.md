@@ -470,8 +470,9 @@ visible without inflating the green allowlist with no-op passes.
 `zig build threads-profile` is not a pass/fail correctness gate. It is the local
 scaling and contention profiler for issue #1. The wall-clock columns compare the
 no-GIL default with `.gil = true` across independent compute, shared object
-properties, shared array append, typed-array Atomics, property `Atomics.wait` /
-`notify`, property `Atomics.waitAsync` timeout settlement,
+properties, global lexical binding churn, shared array append, typed-array
+Atomics, property `Atomics.wait` / `notify`, property `Atomics.waitAsync`
+timeout settlement,
 `Condition.wait` / `notifyAll`, single-lock and multi-lock
 `Condition.asyncWait`, contended `Lock.hold`, `Lock.asyncHold` delivery,
 observed `Lock.asyncHold` callback settlement, no-fn `Lock.asyncHold`

@@ -234,6 +234,21 @@ const scenarios = [_]Scenario{
         .rounds = 8,
     },
     .{
+        .name = "global binding churn",
+        .setup =
+        \\let sharedBinding = 0;
+        \\globalThis.worker = function(id) {
+        \\  var acc = id;
+        \\  for (var i = 0; i < 384; i = i + 1) {
+        \\    sharedBinding = (sharedBinding | 0) + 1;
+        \\    acc = acc + (sharedBinding | 0);
+        \\  }
+        \\  return acc;
+        \\};
+        ,
+        .rounds = 1,
+    },
+    .{
         .name = "shared array append",
         .setup =
         \\globalThis.sharedArray = [];

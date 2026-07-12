@@ -225,8 +225,8 @@ Issue #1 remains the umbrella status page.
 - **Parallel scaling optimization.** Benchmarks show real speedup, but scaling
   is sub-linear. `zig build threads-profile` now provides a repeatable baseline
   against the `.gil = true` fallback for independent compute, shared object
-  properties, mixed Object/Function/Promise GC-cell allocation, shared array
-  append, typed-array Atomics, property
+  properties, global lexical binding churn, mixed Object/Function/Promise
+  GC-cell allocation, shared array append, typed-array Atomics, property
   `Atomics.wait` / `notify`, property `Atomics.waitAsync` timeout settlement,
   `Condition.wait` / `notifyAll`, single-lock and multi-lock `Condition.asyncWait`,
   `Lock.asyncHold` delivery, observed `Lock.asyncHold` callback settlement,
