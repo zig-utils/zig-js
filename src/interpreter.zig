@@ -13774,8 +13774,12 @@ pub const Interpreter = struct {
         // entering the allocation-pressure region so the OOM can actually land
         // in the local catch frame instead of escaping as a whole-thread OOM.
         var reserved_catch_env: ?*Environment = null;
+        const reserved_catch_env_root_mark = self.gc_env_roots.items.len;
+        defer self.gc_env_roots.shrinkRetainingCapacity(reserved_catch_env_root_mark);
         if (!self.out_of_memory_exception.isUndefined()) if (t.catch_param) |p| {
+            try self.gc_env_roots.ensureUnusedCapacity(self.arena, 1);
             const catch_env = try gc_mod.allocEnv(self.arena);
+            self.gc_env_roots.appendAssumeCapacity(catch_env);
             self.initEnvironment(catch_env, self.env, false);
             if (p.* == .identifier) {
                 catch_env.is_catch_param = true;
