@@ -736,8 +736,8 @@ reclamation and promotion counters, WeakRef clearing, WeakMap ephemerons, and
 FinalizationRegistry cleanup. The sibling `zig-gc` suite independently covers
 owner and child-only barriers, stale/wild maybe-managed root/barrier rejection,
 live-payload index maintenance, weak slots, binding-selected old-cell
-rescanning, ephemerons, full fallback accounting, and normal/TSan collector
-builds.
+rescanning, ephemerons, oversized post-spike collector-scratch trimming, full
+fallback accounting, and normal/TSan collector builds.
 `enable_gc: heap binding and cell backing share one lifecycle allocation` covers
 the context-lifecycle reduction where the GC heap, root-tracing binding, and cell
 backing live in one stable state object instead of three separate GPA

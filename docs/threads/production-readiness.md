@@ -241,6 +241,10 @@ Known performance/maturity work:
   membership in `zig-gc`, so stale or wild non-GC pointers fail closed instead
   of being header-peeked; the dependency's live-payload index keeps that safety
   compatible with barrier-heavy no-GIL fuzz/profile workloads.
+  `zig-gc` also frees oversized empty collector scratch buffers after a one-off
+  spike once current live-cell pressure no longer justifies retaining them, so
+  pooled contexts keep the normal scratch reuse path without carrying arbitrarily
+  large weak-slot/mark-stack buffers forever.
   The current internal policy treats property `Atomics.wait`,
   `Condition.wait`, and contended `Lock` acquisition as running peers while
   they pump tasks and GC safepoints; only the short native condition-wait region
