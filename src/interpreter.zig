@@ -9669,10 +9669,7 @@ pub const Interpreter = struct {
                     // over the dense element store, so the getter is invoked.
                     if (arrayElementIndex(key)) |i| {
                         // A mapped arguments index reads its parameter binding.
-                        if (argMapName(o, i)) |nm| {
-                            const aenv: *Environment = @ptrCast(@alignCast(o.arg_map_env.?));
-                            return aenv.get(nm) orelse Value.undef();
-                        }
+                        if (argMapGet(o, i)) |mapped| return mapped;
                         // A present (non-hole) dense element with no index accessor
                         // is returned directly; a hole falls through to the proto
                         // chain so an inherited index (e.g. `Array.prototype[0]`) is
@@ -9735,10 +9732,7 @@ pub const Interpreter = struct {
                     if (c.is_array) {
                         if (arrayElementIndex(key)) |i| {
                             // A mapped arguments index reads its parameter binding.
-                            if (argMapName(c, i)) |nm| {
-                                const aenv: *Environment = @ptrCast(@alignCast(c.arg_map_env.?));
-                                return aenv.get(nm) orelse Value.undef();
-                            }
+                            if (argMapGet(c, i)) |mapped| return mapped;
                             // Locked dense read (no-GIL grow-vs-read class): a peer
                             // append/realloc must not race this len/bounds/element read.
                             if (c.getAccessor(key) == null) if (c.denseElement(i)) |v| return v;
@@ -10479,9 +10473,8 @@ pub const Interpreter = struct {
             if (arrayElementIndex(key)) |i| {
                 // A mapped index writes through to its parameter binding (the
                 // element is kept in sync so the descriptor's value stays current).
-                if (argMapName(o, i)) |nm| {
-                    const aenv: *Environment = @ptrCast(@alignCast(o.arg_map_env.?));
-                    try aenv.assign(nm, v);
+                if (argMapName(o, i) != null) {
+                    argMapSet(o, i, v);
                     _ = o.setElementAt(i, v);
                     return true;
                 }

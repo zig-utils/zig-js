@@ -34,9 +34,6 @@ HELPERS = {
 }
 
 EXPLICIT_CASE_CATEGORIES = {
-    "cve/mc-init-direct-arguments-override.js": (
-        "DirectArguments no-GIL stress exceeds focused promotion budget",
-    ),
     "cve/mc-df-arraycopy-relabel.js": (
         "JSC butterfly verification shell option",
         "typed-array set source-length snapshot covered by zig-js witnesses",
@@ -93,10 +90,6 @@ EXPECTED_REFERENCE_ONLY_PASSES = {
     "cve/mc-aint-poll-resume-stale-elided.js": (
         "GIL-mode premise skip; the post-UNGIL JSC DFG poll-resume hook is not "
         "exposed by zig-js."
-    ),
-    "cve/mc-init-direct-arguments-override.js": (
-        "Serialized mode passes, but the no-GIL DirectArguments stress remains "
-        "outside the focused promotion budget."
     ),
 }
 

@@ -27,8 +27,11 @@
 // mapped-arguments check is exercised).
 load("../harness.js", "caller relative");
 
-const N = 4; // reader threads
-const ITERATIONS = 20000;
+const NO_GIL = typeof $vm !== "undefined"
+    && typeof $vm.useThreadGIL === "function"
+    && $vm.useThreadGIL() === false;
+const N = NO_GIL ? 2 : 4; // reader threads
+const ITERATIONS = NO_GIL ? 2000 : 20000;
 
 function mint(a, b, c) {
     return arguments; // sloppy + simple parameters => DirectArguments

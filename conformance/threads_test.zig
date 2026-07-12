@@ -83,6 +83,7 @@ const allowlist = [_][]const u8{
     "cve/mc-hand-restrict-claim.js",
     "cve/mc-init-butterfly-grow-slack.js",
     "cve/mc-init-cloned-arguments-specials.js",
+    "cve/mc-init-direct-arguments-override.js",
     "cve/mc-init-lazy-global-first-touch.js",
     "cve/mc-init-rope-resolve-race.js",
     "cve/mc-int-resizable-tail-quarantine.js",
