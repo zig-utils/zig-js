@@ -479,6 +479,23 @@ pub const Settled = struct { id: u64, outcome: WaitOutcome };
 
 var async_id_counter = std.atomic.Value(u64).init(1);
 
+fn asyncIdInUseLocked(id: u64) bool {
+    var it = waiters.valueIterator();
+    while (it.next()) |listp| {
+        for (listp.*.tickets.items) |t| {
+            if (t.is_async and t.async_id == id) return true;
+        }
+    }
+    return false;
+}
+
+fn nextAsyncWaiterIdLocked() u64 {
+    while (true) {
+        const id = async_id_counter.fetchAdd(1, .monotonic);
+        if (id != 0 and !asyncIdInUseLocked(id)) return id;
+    }
+}
+
 /// Register an async waiter. `owner` identifies the realm that will harvest
 /// it (a stable pointer for the realm's lifetime). Returns `not_equal` /
 /// `timed_out` for the spec's synchronous early-outs.
@@ -493,7 +510,7 @@ pub fn waitAsyncEnqueue(storage: *SharedBufferStorage, offset: usize, comptime T
     if (group.stopping) return .timed_out;
     const list = listFor(.{ .storage = storage, .offset = offset }) orelse return .timed_out;
     const t = alloc.create(Ticket) catch return .timed_out;
-    const id = async_id_counter.fetchAdd(1, .monotonic);
+    const id = nextAsyncWaiterIdLocked();
     const now = std.Io.Timestamp.now(io, .awake).nanoseconds;
     t.* = .{
         .linked = true,
@@ -719,6 +736,35 @@ test "agent broadcast generation never publishes idle zero and ack checks surviv
     try std.testing.expect(!agentNeedsBroadcastAck(&done, wrapped));
     active.acked_gen = wrapped;
     try std.testing.expect(!agentNeedsBroadcastAck(&active, wrapped));
+}
+
+test "waitAsync ids skip zero and live collisions after wrap" {
+    const s = try SharedBufferStorage.create(8, null);
+    defer s.release();
+    const key = WaitKey{ .storage = s, .offset = 0 };
+    var owner: u8 = 0;
+    var live_id_one = Ticket{ .linked = true, .is_async = true, .owner = &owner, .async_id = 1 };
+
+    async_id_counter.store(std.math.maxInt(u64), .monotonic);
+    defer async_id_counter.store(1, .monotonic);
+
+    const io = engineIo();
+    waiters_used.store(true, .monotonic);
+    waiters_mutex.lockUncancelable(io);
+    const list = listFor(key) orelse {
+        waiters_mutex.unlock(io);
+        return error.TestUnexpectedResult;
+    };
+    defer {
+        list.tickets.deinit(alloc);
+        _ = waiters.remove(key);
+        alloc.destroy(list);
+        waiters_mutex.unlock(io);
+    }
+    try std.testing.expect(appendTicketLocked(list, &live_id_one));
+
+    try std.testing.expectEqual(std.math.maxInt(u64), nextAsyncWaiterIdLocked());
+    try std.testing.expectEqual(@as(u64, 2), nextAsyncWaiterIdLocked());
 }
 
 test "waiter table notify unlinks sync tickets and preserves async FIFO tail" {

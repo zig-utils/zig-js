@@ -54,7 +54,7 @@ before acting on one.
 | `mono_base` | `src/agent.zig:247` | Atomic monotonic-clock zero point for `$262.agent.monotonicNow()`. | **locked** | Initialized with compare-exchange; reads are atomic. |
 | `waiters`, `waiters_mutex`, `waiters_cond`, `waiters_used` | `src/agent.zig:288-293` | Typed-array `Atomics.wait` / `notify` / `waitAsync` waiter table. | **locked** | The table is guarded by `waiters_mutex`; `waiters_cond` wakes async harvesters; `waiters_used` is an atomic fast-path guard. Sync and async ticket-list appends reserve fixed-size capacity chunks before capacity-assumed writes. Notify unlinks sync stack tickets before signaling, and async harvest/abandon stable-compact matching tickets in one pass while preserving FIFO order for remaining waiters. |
 | `live_agents` | `src/agent.zig:296` | Atomic count of currently running spawned agents. | **locked** | Lets async waiter harvesting avoid waiting forever when no notifier can still exist. |
-| `async_id_counter` | `src/agent.zig:399` | Atomic id source for typed-array `Atomics.waitAsync` tickets. | **locked** | Uses atomic `fetchAdd`, unique process-wide. |
+| `async_id_counter` | `src/agent.zig:399` | Atomic id source for typed-array `Atomics.waitAsync` tickets. | **locked** | IDs are minted while holding `waiters_mutex`; the normal path uses atomic `fetchAdd`, and wrap/collision handling skips `0` plus any currently-live async ticket id before publishing the ticket. |
 
 ## Engine: `src/gc.zig`
 
