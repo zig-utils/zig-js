@@ -10559,6 +10559,37 @@ test "Context heap_limit_bytes string allocation pressure does not panic" {
     try std.testing.expect(stats.peak_bytes <= stats.limit_bytes);
 }
 
+test "Context heap_limit_bytes object side-store pressure fails closed" {
+    const ctx = try Context.createWith(std.testing.allocator, .{
+        .enable_gc = true,
+        .heap_limit_bytes = 4 * 1024 * 1024,
+    });
+    defer ctx.destroy();
+
+    try std.testing.expectError(error.OutOfMemory, ctx.evaluate(
+        \\(() => {
+        \\  const names = [];
+        \\  for (let i = 0; i < 96; i++)
+        \\    names.push("sideStorePressure" + i);
+        \\  const keep = [];
+        \\  for (;;) {
+        \\    const o = {};
+        \\    for (const name of names)
+        \\      o[name] = keep.length;
+        \\    delete o.sideStorePressure3;
+        \\    Object.defineProperty(o, "locked", {
+        \\      value: keep.length,
+        \\      writable: false,
+        \\      configurable: true
+        \\    });
+        \\    keep.push(o);
+        \\  }
+        \\})();
+    ));
+    const stats = ctx.heapBudgetStats().?;
+    try std.testing.expect(stats.peak_bytes <= stats.limit_bytes);
+}
+
 test "Context heapBudgetStats is absent without heap_limit_bytes" {
     const ctx = try Context.createWith(std.testing.allocator, .{});
     defer ctx.destroy();
@@ -13428,6 +13459,75 @@ test "enable_gc: heap_limit_bytes retries ArrayBuffer byte allocation after coll
     _ = try ctx.evaluate("globalThis.keepRecoveredArrayBuffer = undefined; 0");
     ctx.collectGarbage();
     try std.testing.expectEqual(baseline, ctx.gc_array_buffer_bytes_live);
+}
+
+test "enable_gc: heap_limit_bytes object side stores reclaim after explicit collection" {
+    const ctx = try Context.createWith(std.testing.allocator, .{
+        .enable_gc = true,
+        .heap_limit_bytes = 16 * 1024 * 1024,
+    });
+    defer ctx.destroy();
+
+    ctx.collectGarbage(); // stabilize post-intrinsics backing-store baseline
+    const baseline = ctx.gc_object_backing_stores_live;
+    _ = try ctx.evaluate(
+        \\(() => {
+        \\  const names = [];
+        \\  for (let i = 0; i < 48; i++)
+        \\    names.push("sideStoreReclaim" + i);
+        \\  let first = [];
+        \\  for (let i = 0; i < 128; i++) {
+        \\    const o = {};
+        \\    for (const name of names)
+        \\      o[name] = i;
+        \\    Object.defineProperty(o, "fixed", {
+        \\      value: i,
+        \\      writable: false,
+        \\      configurable: true
+        \\    });
+        \\    first.push(o);
+        \\  }
+        \\  globalThis.sideStoreReclaimRef = new WeakRef(first[0]);
+        \\  first = undefined;
+        \\  return names.length;
+        \\})();
+    );
+    try std.testing.expect(ctx.gc_object_backing_stores_live > baseline);
+
+    ctx.collectGarbage();
+    ctx.collectGarbage();
+    try std.testing.expectEqual(baseline, ctx.gc_object_backing_stores_live);
+    const cleared = try ctx.evaluate("globalThis.sideStoreReclaimRef.deref() === undefined");
+    try std.testing.expectEqual(true, cleared.asBool());
+
+    const result = try ctx.evaluate(
+        \\(() => {
+        \\  const names = [];
+        \\  for (let i = 0; i < 48; i++)
+        \\    names.push("sideStoreReclaim" + i);
+        \\  const second = [];
+        \\  for (let i = 0; i < 128; i++) {
+        \\    const o = {};
+        \\    for (const name of names)
+        \\      o[name] = i + 1;
+        \\    Object.defineProperty(o, "fixed", {
+        \\      value: i,
+        \\      writable: false,
+        \\      configurable: true
+        \\    });
+        \\    second.push(o);
+        \\  }
+        \\  globalThis.keepSideStoreReclaim = second;
+        \\  return second.length;
+        \\})();
+    );
+    try std.testing.expectEqual(@as(f64, 128), result.asNum());
+    try std.testing.expect(ctx.gc_object_backing_stores_live > baseline);
+
+    _ = try ctx.evaluate("globalThis.keepSideStoreReclaim = undefined; globalThis.sideStoreReclaimRef = undefined; 0");
+    ctx.collectGarbage();
+    ctx.collectGarbage();
+    try std.testing.expectEqual(baseline, ctx.gc_object_backing_stores_live);
 }
 
 test "enable_gc: collectGarbage trims empty GC backing tail chunks" {
