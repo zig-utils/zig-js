@@ -336,6 +336,45 @@ test "BudgetAllocator retries once after recovery frees budget" {
     try std.testing.expectEqual(@as(usize, 0), budget.used.load(.acquire));
 }
 
+test "BudgetAllocator does not recover inside allocator-internal critical sections" {
+    var budget = BudgetAllocator{ .inner = std.testing.allocator, .limit = 64 };
+    const a = budget.allocator();
+
+    const State = struct {
+        allocator: std.mem.Allocator,
+        held: ?[]u8 = null,
+        calls: usize = 0,
+
+        fn recover(raw: *anyopaque) bool {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.calls += 1;
+            const held = self.held orelse return false;
+            self.allocator.free(held);
+            self.held = null;
+            return true;
+        }
+    };
+
+    var state = State{ .allocator = a };
+    budget.setRecovery(&state, State.recover);
+
+    state.held = try a.alloc(u8, 48);
+    {
+        gc_runtime.enterAllocationRecoveryBlocked();
+        defer gc_runtime.leaveAllocationRecoveryBlocked();
+        try std.testing.expectError(error.OutOfMemory, a.alloc(u8, 32));
+    }
+    try std.testing.expectEqual(@as(usize, 0), state.calls);
+    try std.testing.expect(state.held != null);
+
+    const second = try a.alloc(u8, 32);
+    try std.testing.expectEqual(@as(usize, 1), state.calls);
+    try std.testing.expect(state.held == null);
+    try std.testing.expectEqual(@as(usize, 32), budget.used.load(.acquire));
+    a.free(second);
+    try std.testing.expectEqual(@as(usize, 0), budget.used.load(.acquire));
+}
+
 /// Reusable backing allocator for GC cells. `zig-gc` asks its backing allocator
 /// for one 16-byte-aligned slab per managed cell; routing every object through
 /// the page/general allocator made GC-mode object allocation and context teardown
