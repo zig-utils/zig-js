@@ -34,6 +34,9 @@ HELPERS = {
 }
 
 EXPLICIT_CASE_CATEGORIES = {
+    "cve/mc-init-direct-arguments-override.js": (
+        "DirectArguments no-GIL stress exceeds focused promotion budget",
+    ),
     "cve/mc-df-arraycopy-relabel.js": (
         "JSC butterfly verification shell option",
         "typed-array set source-length snapshot covered by zig-js witnesses",
@@ -76,6 +79,35 @@ PROMOTION_PROBE_EXPECTATIONS = {
     "dw2-marklistset-storm.js": ProbeExpectation("timeout"),
     "w16-c1-prevent-collection.js": ProbeExpectation("timeout"),
 }
+
+
+EXPECTED_REFERENCE_ONLY_PASSES = {
+    "congc-t2-lockorder-lint.js": (
+        "$vm.sharedHeapTest-gated JSC lock-order harness; zig-js only reaches "
+        "the trailing arithmetic sanity check."
+    ),
+    "congc-t8-stop-interleaving.js": (
+        "$vm shared-GC / haveABadTime arms are JSC-shell hooks and are not "
+        "portable to zig-js."
+    ),
+    "cve/mc-aint-poll-resume-stale-elided.js": (
+        "GIL-mode premise skip; the post-UNGIL JSC DFG poll-resume hook is not "
+        "exposed by zig-js."
+    ),
+    "cve/mc-init-direct-arguments-override.js": (
+        "Serialized mode passes, but the no-GIL DirectArguments stress remains "
+        "outside the focused promotion budget."
+    ),
+}
+
+
+def probe_command(case: str) -> list[str]:
+    return [
+        "zig",
+        "build",
+        "threads-test",
+        f"-Dthreads-case={case}",
+    ]
 
 
 def load_allowlist() -> set[str]:
@@ -222,12 +254,7 @@ def probe_candidates(
         candidates.append({
             "case": case,
             "categories": cats,
-            "command": [
-                "zig",
-                "build",
-                "threads-test",
-                f"-Dthreads-case={case}",
-            ],
+            "command": probe_command(case),
             "expected_current_blocker": None if expected is None else {
                 "status": expected.status,
                 "evidence": list(expected.evidence),
@@ -270,6 +297,7 @@ def audit_json_summary(
         "uncategorized": sorted(uncategorized),
         "missing_allowlist_entries": missing_allowlist,
         "promotion_probe_candidates": probe_candidates(classified, uncategorized),
+        "expected_reference_only_passes": EXPECTED_REFERENCE_ONLY_PASSES,
     }
 
 
@@ -440,14 +468,7 @@ def run_probe_candidates(
                 },
             })
             continue
-        cmd = [
-            "zig",
-            "build",
-            "threads-test",
-            f"-Dthreads-case={case}",
-            "--summary",
-            "all",
-        ]
+        cmd = [*probe_command(case), "--summary", "all"]
         if emit:
             print(f"  - {case}: {reason}")
         run_status, returncode, output = run_probe_command(cmd, timeout_s)
@@ -513,6 +534,84 @@ def run_probe_candidates(
     return failures, results
 
 
+def run_reference_only_scan(
+    remaining: list[str],
+    classified: dict[str, list[str]],
+    uncategorized: dict[str, list[str]],
+    *,
+    timeout_s: float,
+    emit: bool = True,
+) -> tuple[int, list[dict[str, object]]]:
+    """Run all reference-only executables and fail on surprising passes."""
+
+    if emit:
+        print()
+        print(f"scanning reference-only executables (timeout {timeout_s:g}s each):")
+
+    unexpected_passes = 0
+    results: list[dict[str, object]] = []
+    for case in sorted(remaining):
+        if case in HELPERS:
+            continue
+
+        cats = classified.get(case) or uncategorized.get(case) or []
+        reason = ", ".join(cats) if cats else "uncategorized"
+        if emit:
+            print(f"  - {case}: {reason}")
+
+        run_status, returncode, output = run_probe_command(
+            [*probe_command(case), "--summary", "all"],
+            timeout_s,
+        )
+        output_summary = probe_output_summary(output)
+        if run_status == "timeout":
+            if emit:
+                print("    TIMEOUT")
+                if output:
+                    print_probe_output_tail(output)
+            results.append({
+                "case": case,
+                "status": "timeout",
+                "exit_code": None,
+                "categories": cats,
+                "output": output_summary,
+            })
+            continue
+
+        if returncode == 0:
+            expected_pass_reason = EXPECTED_REFERENCE_ONLY_PASSES.get(case)
+            if expected_pass_reason is None:
+                unexpected_passes += 1
+                status = "pass"
+                if emit:
+                    print("    UNEXPECTED PASS: promote or reclassify this file")
+            else:
+                status = "expected-reference-only-pass"
+                if emit:
+                    print(f"    expected reference-only pass: {expected_pass_reason}")
+            results.append({
+                "case": case,
+                "status": status,
+                "exit_code": returncode,
+                "categories": cats,
+                "expected_reference_only_pass": expected_pass_reason,
+                "output": output_summary,
+            })
+        else:
+            if emit:
+                print(f"    expected non-promotion evidence exit={returncode}")
+                print_probe_output_tail(output)
+            results.append({
+                "case": case,
+                "status": "fail",
+                "exit_code": returncode,
+                "categories": cats,
+                "output": output_summary,
+            })
+
+    return unexpected_passes, results
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--format", choices=("text", "markdown", "json"), default="text")
@@ -549,6 +648,14 @@ def main(argv: list[str]) -> int:
             "This keeps quick evidence gates focused on probes with concrete failure text."
         ),
     )
+    parser.add_argument(
+        "--scan-reference-only",
+        action="store_true",
+        help=(
+            "Run every reference-only executable file and return nonzero if any passes. "
+            "This slower opt-in sweep catches stale blockers that should be promoted."
+        ),
+    )
     args = parser.parse_args(argv)
 
     remaining, classified, uncategorized, missing_allowlist = audit()
@@ -571,11 +678,24 @@ def main(argv: list[str]) -> int:
             skip_timeout_probes=args.skip_timeout_probes,
             emit=args.format != "json",
         )
+    scan_failures = 0
+    scan_results: list[dict[str, object]] = []
+    if args.scan_reference_only:
+        scan_failures, scan_results = run_reference_only_scan(
+            remaining,
+            classified,
+            uncategorized,
+            timeout_s=args.probe_timeout,
+            emit=args.format != "json",
+        )
     if args.format == "json":
         summary = audit_json_summary(remaining, classified, uncategorized, missing_allowlist)
         if args.run_probes:
             summary["probe_results"] = probe_results
             summary["probe_failures"] = probe_failures
+        if args.scan_reference_only:
+            summary["reference_only_scan_results"] = scan_results
+            summary["reference_only_scan_unexpected_passes"] = scan_failures
         print(json.dumps(summary, indent=2, sort_keys=True))
 
     if missing_allowlist:
@@ -583,6 +703,8 @@ def main(argv: list[str]) -> int:
     if args.fail_on_uncategorized and uncategorized:
         return 1
     if args.run_probes and probe_failures:
+        return 1
+    if args.scan_reference_only and scan_failures:
         return 1
     return 0
 

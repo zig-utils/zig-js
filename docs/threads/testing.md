@@ -123,7 +123,7 @@ contexts can recover after unreachable pressure is collected.
 plain command, while a stuck shard prints the active `RUN` case before executing
 it. The required matrix gate is also bounded so a true hang becomes an archived,
 diagnosable failed job instead of an opaque spinner. The current coverage
-contains 231 promoted files out of 259 executable PR-249 files: 229 in the
+contains 235 promoted files out of 259 executable PR-249 files: 233 in the
 default `zig build threads-test` allowlist plus 2 `parallel_js`-only witnesses.
 It covers:
 
@@ -837,6 +837,7 @@ python3 tools/threads-reference-audit.py --format json
 python3 tools/threads-reference-audit.py --probe-candidates
 python3 tools/threads-reference-audit.py --run-probes --probe-timeout 60
 python3 tools/threads-reference-audit.py --run-probes --expect-current-blockers --probe-timeout 60
+python3 tools/threads-reference-audit.py --scan-reference-only --probe-timeout 20
 ```
 
 `--run-probes` executes the closest reference-only candidates with focused
@@ -858,6 +859,11 @@ documented blocker evidence. If it starts failing because a probe passes, or
 because the failure shape changed, re-run that single `-Dthreads-case=...`
 probe, promote the file only when the underlying behavior is implemented, and
 update the docs/issue tracker in the same change.
+`--scan-reference-only` is a slower opt-in broom for issue audits: it runs every
+remaining executable reference-only file and fails only if one unexpectedly
+passes. Expected reference-only passes are machine-listed separately for cases
+that are known to skip JSC-only premises or that pass only in serialized mode
+while their no-GIL promotion arm remains too expensive.
 
 ## Docs Checks
 

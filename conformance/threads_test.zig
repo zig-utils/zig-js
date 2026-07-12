@@ -81,10 +81,14 @@ const allowlist = [_][]const u8{
     "cve/mc-grow-wasm-relocating-grow.js",
     "cve/mc-hand-dead-registrant-settle.js",
     "cve/mc-hand-restrict-claim.js",
+    "cve/mc-init-butterfly-grow-slack.js",
     "cve/mc-init-cloned-arguments-specials.js",
     "cve/mc-init-lazy-global-first-touch.js",
     "cve/mc-init-rope-resolve-race.js",
     "cve/mc-int-resizable-tail-quarantine.js",
+    "cve/mc-jit-delete-reuse-stale-offset.js",
+    "cve/mc-jit-double-relabel-stale-shape.js",
+    "cve/mc-jit-ta-resize-hoisted-base.js",
     "cve/mc-life-detach-quarantine-storm.js",
     "cve/mc-life-sab-refchurn.js",
     "cve/mc-life-wasm-grow-relocate.js",
@@ -420,7 +424,11 @@ fn estimatedSerializedShardMs(name: []const u8) u64 {
     if (std.mem.eql(u8, name, "scaling/raytrace-like.js")) return 12_234;
     if (std.mem.eql(u8, name, "jit/ftl-direct-tailcall-dataic-arg-clobber.js")) return 7_182;
     if (std.mem.eql(u8, name, "cve/mc-df-delete-reuse.js")) return 3_928;
+    if (std.mem.eql(u8, name, "cve/mc-jit-delete-reuse-stale-offset.js")) return 3_908;
+    if (std.mem.eql(u8, name, "cve/mc-init-butterfly-grow-slack.js")) return 2_819;
     if (std.mem.eql(u8, name, "semantics/ic-delete_by_id-vs-transition.js")) return 2_385;
+    if (std.mem.eql(u8, name, "cve/mc-jit-double-relabel-stale-shape.js")) return 2_014;
+    if (std.mem.eql(u8, name, "cve/mc-jit-ta-resize-hoisted-base.js")) return 1_837;
     return 1_000;
 }
 
