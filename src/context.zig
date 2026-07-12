@@ -12572,6 +12572,47 @@ test "parallel_js heap_limit_bytes recovers GC cells while sibling Thread is ali
     try std.testing.expect(stats.peak_bytes <= stats.limit_bytes);
 }
 
+test "parallel_js heap_limit_bytes fails closed inside trace-sensitive locks" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_threads = true,
+        .enable_gc = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+        .heap_limit_bytes = 8 * 1024 * 1024,
+    });
+    defer ctx.destroy();
+
+    var sibling: jsthread.ThreadRecord = .{ .id = 999, .gil = ctx.gil.?, .ctx = ctx };
+    {
+        ctx.gil.?.lockApi();
+        defer ctx.gil.?.unlockApi();
+        try ctx.reserveJsThreadsLocked(1);
+        ctx.js_threads.appendAssumeCapacity(&sibling);
+    }
+    defer {
+        ctx.gil.?.lockApi();
+        var i: usize = ctx.js_threads.items.len;
+        while (i > 0) {
+            i -= 1;
+            if (ctx.js_threads.items[i] == &sibling) {
+                _ = ctx.js_threads.swapRemove(i);
+                break;
+            }
+        }
+        ctx.gil.?.unlockApi();
+    }
+
+    var machine = ctx.interpreter();
+    const before_attempts = ctx.gc_par_attempts.load(.monotonic);
+    {
+        gc_runtime.enterTraceSensitiveLock();
+        defer gc_runtime.leaveTraceSensitiveLock();
+        try std.testing.expect(!ctx.collectForAllocationFailure(&machine));
+    }
+    try std.testing.expectEqual(before_attempts, ctx.gc_par_attempts.load(.monotonic));
+}
+
 test "parallel_js (M3): sync wait peers publish roots for mid-script parallel GC" {
     // Sync property waits, Condition waits, and contended Lock acquisition are
     // not frozen `gc_parked` peers: they periodically pump tasks between short
