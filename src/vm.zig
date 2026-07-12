@@ -19,6 +19,7 @@ const value = @import("value.zig");
 const interp = @import("interpreter.zig");
 const promise = @import("promise.zig");
 const agent = @import("agent.zig");
+const gc_runtime = @import("gc_runtime.zig");
 
 const Value = value.Value;
 const Chunk = bc.Chunk;
@@ -213,6 +214,16 @@ pub const Generator = struct {
     requests_head: usize = 0,
     pumping: bool = false,
 
+    fn lockRequests(self: *Generator) void {
+        self.requests_mutex.lockUncancelable(agent.engineIo());
+        gc_runtime.enterTraceSensitiveLock();
+    }
+
+    fn unlockRequests(self: *Generator) void {
+        gc_runtime.leaveTraceSensitiveLock();
+        self.requests_mutex.unlock(agent.engineIo());
+    }
+
     fn backingFor(self: *Generator, fallback: std.mem.Allocator, comptime field: []const u8) std.mem.Allocator {
         const a = self.backing_allocator orelse return fallback;
         var spins: usize = 0;
@@ -358,6 +369,18 @@ test "async generator request queue uses a head cursor and compacting reserve" {
     try std.testing.expectEqual(@as(usize, 0), g.requests_head);
     try std.testing.expectEqual(@as(usize, 0), g.requests.items.len);
     try std.testing.expectEqual(first_capacity, g.requests.capacity);
+}
+
+test "async generator request lock is trace-sensitive" {
+    var g = Generator{
+        .chunk = undefined,
+        .env = undefined,
+    };
+
+    try std.testing.expect(!gc_runtime.inTraceSensitiveLock());
+    g.lockRequests();
+    defer g.unlockRequests();
+    try std.testing.expect(gc_runtime.inTraceSensitiveLock());
 }
 
 /// Property-key string for a computed index: a Symbol uses its unique internal
@@ -1999,9 +2022,9 @@ pub fn asyncGenRequest(vm: *Interpreter, gen_obj: *value.Object, kind: ResumeKin
     gc_mod.barrierCellFrom(g, @ptrCast(rp));
     var start_req: ?AsyncGenRequest = null;
     var start_done = false;
-    g.requests_mutex.lockUncancelable(agent.engineIo());
+    g.lockRequests();
     {
-        errdefer g.requests_mutex.unlock(agent.engineIo());
+        errdefer g.unlockRequests();
         try g.appendRequest(vm.arena, .{ .kind = kind, .value = val, .result = rp });
         if (!g.pumping) {
             g.pumping = true;
@@ -2011,7 +2034,7 @@ pub fn asyncGenRequest(vm: *Interpreter, gen_obj: *value.Object, kind: ResumeKin
                 start_req = g.frontRequest();
         }
     }
-    g.requests_mutex.unlock(agent.engineIo());
+    g.unlockRequests();
     // A completed generator never resumes: each new request settles immediately
     // (next/return → `{done:true}`, throw → reject) rather than re-running the
     // body from its final instruction pointer.
@@ -2129,8 +2152,8 @@ fn agResume(vm: *Interpreter, g: *Generator, kind: ResumeKind, val: Value) EvalE
 /// Drive the front request to its next stop, settling its promise (yield/
 /// return/throw) or wiring an await continuation.
 fn agFront(g: *Generator) ?AsyncGenRequest {
-    g.requests_mutex.lockUncancelable(agent.engineIo());
-    defer g.requests_mutex.unlock(agent.engineIo());
+    g.lockRequests();
+    defer g.unlockRequests();
     if (!g.hasPendingRequest()) {
         g.pumping = false;
         return null;
@@ -2141,7 +2164,7 @@ fn agFront(g: *Generator) ?AsyncGenRequest {
 fn agRemoveFrontAndContinue(vm: *Interpreter, g: *Generator) EvalError!void {
     var next_req: ?AsyncGenRequest = null;
     var drain_done = false;
-    g.requests_mutex.lockUncancelable(agent.engineIo());
+    g.lockRequests();
     _ = g.popRequest();
     if (g.done)
         drain_done = true
@@ -2149,7 +2172,7 @@ fn agRemoveFrontAndContinue(vm: *Interpreter, g: *Generator) EvalError!void {
         next_req = front
     else
         g.pumping = false;
-    g.requests_mutex.unlock(agent.engineIo());
+    g.unlockRequests();
     if (drain_done)
         try agDrainDone(vm, g)
     else if (next_req) |req|
@@ -2217,13 +2240,13 @@ fn agStep(vm: *Interpreter, g: *Generator, kind: ResumeKind, val: Value) EvalErr
 fn agPumpNext(vm: *Interpreter, g: *Generator) EvalError!void {
     var req: ?AsyncGenRequest = null;
     var drain_done = false;
-    g.requests_mutex.lockUncancelable(agent.engineIo());
+    g.lockRequests();
     if (g.pumping) {
-        g.requests_mutex.unlock(agent.engineIo());
+        g.unlockRequests();
         return;
     }
     if (!g.hasPendingRequest()) {
-        g.requests_mutex.unlock(agent.engineIo());
+        g.unlockRequests();
         return;
     }
     g.pumping = true;
@@ -2231,7 +2254,7 @@ fn agPumpNext(vm: *Interpreter, g: *Generator) EvalError!void {
         drain_done = true
     else
         req = g.frontRequest();
-    g.requests_mutex.unlock(agent.engineIo());
+    g.unlockRequests();
     if (drain_done)
         try agDrainDone(vm, g)
     else if (req) |r|
@@ -2273,13 +2296,13 @@ fn settleAsyncGeneratorDoneReturn(vm: *Interpreter, result: *value.Object, value
 /// yields `{ undefined, done:true }`, a `return` its value, a `throw` rejects.
 fn agDrainDone(vm: *Interpreter, g: *Generator) EvalError!void {
     while (true) {
-        g.requests_mutex.lockUncancelable(agent.engineIo());
+        g.lockRequests();
         const req = g.popRequest() orelse {
             g.pumping = false;
-            g.requests_mutex.unlock(agent.engineIo());
+            g.unlockRequests();
             break;
         };
-        g.requests_mutex.unlock(agent.engineIo());
+        g.unlockRequests();
         switch (req.kind) {
             .throw_ => try promise.reject(vm, @ptrCast(@alignCast(req.result.promise.?)), req.value),
             .return_ => try settleAsyncGeneratorDoneReturn(vm, req.result, req.value),
@@ -2297,9 +2320,9 @@ fn agReturnFulfill(ctx: *anyopaque, this: Value, args: []const Value) value.Host
     const front_req = agFront(g) orelse return Value.undef();
     const front = front_req.result;
     try promise.resolve(vm, @ptrCast(@alignCast(front.promise.?)), try makeIterResult(vm, if (args.len > 0) args[0] else Value.undef(), true));
-    g.requests_mutex.lockUncancelable(agent.engineIo());
+    g.lockRequests();
     _ = g.popRequest();
-    g.requests_mutex.unlock(agent.engineIo());
+    g.unlockRequests();
     try agDrainDone(vm, g);
     return Value.undef();
 }
@@ -2312,9 +2335,9 @@ fn agReturnReject(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
     const front_req = agFront(g) orelse return Value.undef();
     const front = front_req.result;
     try promise.reject(vm, @ptrCast(@alignCast(front.promise.?)), if (args.len > 0) args[0] else Value.undef());
-    g.requests_mutex.lockUncancelable(agent.engineIo());
+    g.lockRequests();
     _ = g.popRequest();
-    g.requests_mutex.unlock(agent.engineIo());
+    g.unlockRequests();
     try agDrainDone(vm, g);
     return Value.undef();
 }

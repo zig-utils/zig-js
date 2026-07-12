@@ -226,9 +226,10 @@ Issue #1 remains the umbrella status page.
   safepoint-owned by the active interpreter and use the abort-safe parallel
   root-publication collector; allocation still fails closed when recovery is
   attempted outside active JS execution or while holding side-store locks that
-  the tracer may need. Remaining emergency-recovery work is tracked in #30:
-  lock-aware side-store pressure coverage under live no-GIL peers without
-  deadlocking GC tracing.
+  the tracer may need. Object/property, promise-state, iterator-helper, and
+  async-generator request locks all participate in that guard. Remaining
+  emergency-recovery work is tracked in #30: lock-aware side-store pressure
+  coverage under live no-GIL peers without deadlocking GC tracing.
 - **Parallel scaling optimization.** Benchmarks show real speedup, but scaling
   is sub-linear. `zig build threads-profile` now provides a repeatable baseline
   against the `.gil = true` fallback for independent compute, shared object
