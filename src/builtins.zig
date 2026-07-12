@@ -1715,7 +1715,7 @@ pub fn defineOneResult(self: *Interpreter, target: *value.Object, key: []const u
                 try target.setAttr(self.arena, key, attr);
                 target.has_indexed_property.store(true, .monotonic);
                 // Redefining a mapped index as non-writable severs the parameter link.
-                if (am_mapped and !attr.writable) target.arg_map_names[i] = "";
+                if (am_mapped and !attr.writable) interpreter.argMapSever(target, i);
                 target.extendArrayLengthFloor(i + 1);
                 return true;
             }
@@ -1802,7 +1802,7 @@ pub fn defineOneResult(self: *Interpreter, target: *value.Object, key: []const u
             // `length`; 2^32 - 1 and above are ordinary properties.
             if (i < 4294967295 and i + 1 > target.arrayLength()) target.extendArrayLengthFloor(i + 1);
             // Defining a mapped arguments index as an accessor severs its link.
-            if (target.is_arguments and (get != null or set != null) and i < target.arg_map_names.len) target.arg_map_names[i] = "";
+            if (target.is_arguments and (get != null or set != null)) interpreter.argMapSever(target, i);
         }
     }
     return true;

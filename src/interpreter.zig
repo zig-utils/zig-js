@@ -5956,7 +5956,9 @@ pub const Interpreter = struct {
         if (!func.is_strict and !non_simple_params and func.params.len > 0) {
             const n = @min(args.len, func.params.len);
             const names = try args_obj.asObj().argMapNamesAllocator(self.arena).alloc([]const u8, n);
+            const severed = try args_obj.asObj().argMapSeveredAllocator(self.arena).alloc(std.atomic.Value(bool), n);
             for (names, 0..) |*nm, i| nm.* = func.params[i].name;
+            for (severed) |*flag| flag.* = .init(false);
             // A duplicated parameter name maps only its last index.
             for (names, 0..) |nm, i| {
                 var j = i + 1;
@@ -5967,6 +5969,7 @@ pub const Interpreter = struct {
             }
             args_obj.asObj().arg_map_env = @ptrCast(call_env);
             args_obj.asObj().arg_map_names = names;
+            args_obj.asObj().arg_map_severed = severed;
         }
         return args_obj;
     }
@@ -10704,7 +10707,7 @@ pub const Interpreter = struct {
             if (o.getOwn(key) == null and o.denseElementInBounds(i)) {
                 if (o.attrsMap() != null and !o.getAttr(key).configurable) return false;
                 // Deleting a mapped arguments index severs its parameter link.
-                if (o.is_arguments and i < o.arg_map_names.len) o.arg_map_names[i] = "";
+                if (o.is_arguments) argMapSever(o, i);
                 _ = try o.deleteDenseElement(self.arena, i);
                 return true;
             }
@@ -39028,8 +39031,15 @@ pub fn hasProperty(o: *value.Object, name: []const u8) bool {
 /// mapped arguments object or index `i` is unmapped (out of range / severed).
 pub fn argMapName(o: *value.Object, i: usize) ?[]const u8 {
     if (o.arg_map_env == null or i >= o.arg_map_names.len) return null;
+    if (i < o.arg_map_severed.len and o.arg_map_severed[i].load(.acquire)) return null;
     const nm = o.arg_map_names[i];
     return if (nm.len == 0) null else nm;
+}
+
+/// Atomically sever a mapped-arguments index from its parameter binding.
+pub fn argMapSever(o: *value.Object, i: usize) void {
+    if (i >= o.arg_map_severed.len) return;
+    o.arg_map_severed[i].store(true, .release);
 }
 
 /// Read a mapped index's parameter binding (null if unmapped).

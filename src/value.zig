@@ -614,6 +614,7 @@ pub const ObjectBackingFlags = packed struct {
     data_view: bool = false,
     temporal: bool = false,
     arg_map_names: bool = false,
+    arg_map_severed: bool = false,
 };
 
 pub const ObjectPrivateDataTag = enum(u8) {
@@ -815,10 +816,14 @@ pub const Object = struct {
     /// A mapped (sloppy-mode, simple-parameter) arguments object's
     /// `[[ParameterMap]]`: the call's environment record (type-erased
     /// `*Environment`) and the parameter name each index maps to (`""` = not
-    /// mapped). A mapped index reads/writes the parameter binding; defining it as
-    /// an accessor or non-writable, or deleting it, severs the mapping.
+    /// initially mapped). A mapped index reads/writes the parameter binding;
+    /// defining it as an accessor or non-writable, or deleting it, atomically
+    /// severs the mapping in `arg_map_severed`. The names slice is immutable once
+    /// the arguments object is published so no-GIL readers cannot tear a slice
+    /// pair while another thread severs an index.
     arg_map_env: ?*anyopaque = null,
     arg_map_names: [][]const u8 = &.{},
+    arg_map_severed: []std.atomic.Value(bool) = &.{},
     /// `Map`/`Set` instances. A Map keeps `[key,value]` pair-arrays in
     /// `elements`; a Set keeps values directly. `size` is a maintained property.
     is_map: bool = false,
@@ -1024,6 +1029,10 @@ pub const Object = struct {
 
     pub fn argMapNamesAllocator(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator {
         return self.backingFor(fallback, "arg_map_names");
+    }
+
+    pub fn argMapSeveredAllocator(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator {
+        return self.backingFor(fallback, "arg_map_severed");
     }
 
     pub fn lockProperties(self: *const Object) void {

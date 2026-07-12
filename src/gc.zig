@@ -355,6 +355,11 @@ fn finalizeObjectBacking(o: *Object, a: std.mem.Allocator) usize {
         o.arg_map_names = &.{};
         released += 1;
     }
+    if (flags.arg_map_severed) {
+        a.free(o.arg_map_severed);
+        o.arg_map_severed = &.{};
+        released += 1;
+    }
 
     o.backing_flags = .{};
     o.backing_allocator = null;

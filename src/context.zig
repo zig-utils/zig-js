@@ -9662,6 +9662,63 @@ test "parallel_js: TypedArray set snapshots array-like source length under no-GI
     try std.testing.expect(result.asBool());
 }
 
+test "parallel_js: mapped arguments severing is atomic under no-GIL readers" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_threads = true,
+        .enable_gc = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+    });
+    defer ctx.destroy();
+
+    const result = try ctx.evaluate(
+        \\(() => {
+        \\  if ($vm.useThreadGIL() !== false)
+        \\    throw new Error("main still holds the thread GIL");
+        \\  function mint(a, b, c) { return arguments; }
+        \\  const shared = { slot: null, stop: 0, started: 0, go: 0 };
+        \\  const sentinel = "value-one";
+        \\  const readers = [];
+        \\  for (let r = 0; r < 2; ++r) {
+        \\    readers.push(new Thread((shared, sentinel) => {
+        \\      if ($vm.useThreadGIL() !== false)
+        \\        throw new Error("worker still holds the thread GIL");
+        \\      Atomics.add(shared, "started", 1);
+        \\      while (Atomics.load(shared, "go") === 0)
+        \\        Atomics.wait(shared, "go", 0, 100);
+        \\      let failures = 0;
+        \\      while (Atomics.load(shared, "stop") === 0) {
+        \\        const args = shared.slot;
+        \\        if (args === null) continue;
+        \\        if (args[1] !== sentinel) ++failures;
+        \\        const v0 = args[0];
+        \\        if (!(v0 === 7 || v0 === undefined)) ++failures;
+        \\        const len = args.length;
+        \\        if (!(len === 3 || len === 99)) ++failures;
+        \\      }
+        \\      return failures;
+        \\    }, shared, sentinel));
+        \\  }
+        \\  while (Atomics.load(shared, "started") !== readers.length)
+        \\    Atomics.wait(shared, "started", Atomics.load(shared, "started"), 100);
+        \\  Atomics.store(shared, "go", 1);
+        \\  Atomics.notify(shared, "go", readers.length);
+        \\  for (let i = 0; i < 750; ++i) {
+        \\    const args = mint(7, sentinel, true);
+        \\    shared.slot = args;
+        \\    delete args[0];
+        \\    args.length = 99;
+        \\    if ((i & 31) === 0) Atomics.wait(shared, "go", 1, 1);
+        \\  }
+        \\  Atomics.store(shared, "stop", 1);
+        \\  Atomics.notify(shared, "stop", readers.length);
+        \\  return readers.every(t => t.join() === 0);
+        \\})()
+    );
+    try std.testing.expect(result.asBool());
+}
+
 test "TypedArray set coerces offset before detached buffer checks" {
     try std.testing.expect((try evalIn(
         \\class ExpectedError extends Error {}
