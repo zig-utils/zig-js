@@ -611,6 +611,19 @@ const nursery_cases = [_]NurseryCase{
         ,
     },
     .{
+        .name = "array/object 1/4",
+        .source =
+        \\globalThis.nurseryProfileKeep = [];
+        \\(function () {
+        \\  for (let i = 0; i < 512; i++) {
+        \\    const value = [i, i + 1, { nested: i + 2 }];
+        \\    value.push(i + 3);
+        \\    if ((i & 3) === 0) nurseryProfileKeep.push(value);
+        \\  }
+        \\})()
+        ,
+    },
+    .{
         .name = "all retained",
         .source =
         \\globalThis.nurseryProfileKeep = [];
@@ -625,7 +638,7 @@ const nursery_cases = [_]NurseryCase{
 };
 
 fn printNursery(gpa: std.mem.Allocator, io: std.Io) !void {
-    std.debug.print("\nQuiescent nursery cycle shapes (512 object graphs)\n", .{});
+    std.debug.print("\nQuiescent nursery cycle shapes (512 allocation graphs)\n", .{});
     std.debug.print("{s:<18} {s:<14} {s:>12} {s:>10} {s:>12} {s:>10} {s:>12} {s:>10} {s:>12} {s:>8} {s:>8} {s:>12} {s:>10} {s:>10}\n", .{
         "mode",
         "shape",
@@ -695,7 +708,7 @@ fn printNursery(gpa: std.mem.Allocator, io: std.Io) !void {
 
 fn printNurseryDrift(gpa: std.mem.Allocator) !void {
     const cycles: usize = 4;
-    std.debug.print("\nQuiescent nursery threshold drift ({d} repeated 512-object batches)\n", .{cycles});
+    std.debug.print("\nQuiescent nursery threshold drift ({d} repeated 512-allocation batches)\n", .{cycles});
     std.debug.print("{s:<18} {s:<14} {s:>6} {s:>12} {s:>12} {s:>8} {s:>12} {s:>10} {s:>10}\n", .{
         "mode",
         "shape",

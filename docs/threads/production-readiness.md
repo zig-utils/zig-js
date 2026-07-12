@@ -198,12 +198,13 @@ Known performance/maturity work:
   reduced object-cell chunk churn separately from remaining create/destroy
   wall-clock costs. A repeated allocate-plus-collect churn table now reports
   fresh versus reused cells, freed cells, final chunk/live counts, and reuse
-  percentage. Quiescent nursery rows now compare multiple 512-object retention
-  shapes (ephemeral, sparse, one-quarter retained, and all retained) and report
-  boundary pause time, young input cells/bytes, reclaimed cells/bytes, promoted
-  cells/bytes, byte survival/reclamation percentages, the next nursery
-  threshold, minor/full cycle deltas, and repeated-batch threshold drift instead
-  of relying only on a one-shot object workload. The nursery threshold policy now
+  percentage. Quiescent nursery rows now compare multiple 512-allocation
+  retention shapes (ephemeral, sparse, one-quarter retained, array/object
+  one-quarter retained, and all retained) and report boundary pause time, young
+  input cells/bytes, reclaimed cells/bytes, promoted cells/bytes, byte
+  survival/reclamation percentages, the next nursery threshold, minor/full cycle
+  deltas, and repeated-batch threshold drift instead of relying only on a
+  one-shot object workload. The nursery threshold policy now
   keeps low-survival decay gradual but caps upward growth at the observed young
   batch size, avoiding the earlier high-survival pattern where one fixed-size
   batch could raise the threshold enough to skip the next minor and carry dead
