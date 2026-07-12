@@ -12087,7 +12087,9 @@ fn runWorkerTerminateThreadLocalAsyncHoldCleanupInterleavingKind(
     const nworkers = 1 + r.uintLessThan(usize, 2);
     const ntls_threads = 2 + r.uintLessThan(usize, 3);
     const nrelease_threads = 2 + r.uintLessThan(usize, 3);
-    const wait_timeout_ms = 1200 + r.uintLessThan(usize, 800);
+    const wait_timeout_ms = if (builtin.sanitize_thread) 12_000 else 1200 + r.uintLessThan(usize, 800);
+    const waiter_reject_spin_limit: usize = if (builtin.sanitize_thread) 100_000 else 2_000;
+    const release_join_spin_limit: usize = if (builtin.sanitize_thread) 100_000 else 10_000;
     const gc_rounds = if (midgc) 14 + r.uintLessThan(usize, 5) else 0;
     const gc_per_round = if (midgc) 1200 + r.uintLessThan(usize, 500) else 0;
     const gc_spin_iters = if (midgc) 2600 + r.uintLessThan(usize, 3200) else 0;
@@ -12274,7 +12276,7 @@ fn runWorkerTerminateThreadLocalAsyncHoldCleanupInterleavingKind(
             \\      gate.condOpen = true;
             \\      cond.notifyAll();
             \\    }});
-            \\    for (let spins = 0; globalThis.__workerTlsAsyncHoldRejectCount < beforeWaiterReject + 2 && spins < 2000; spins++) {{
+            \\    for (let spins = 0; globalThis.__workerTlsAsyncHoldRejectCount < beforeWaiterReject + 2 && spins < {d}; spins++) {{
             \\      $drainRunLoop();
             \\      drainMicrotasks();
             \\    }}
@@ -12284,7 +12286,7 @@ fn runWorkerTerminateThreadLocalAsyncHoldCleanupInterleavingKind(
             \\    gate.tlsFail = true;
             \\    Atomics.store(gate, 'release', 1);
             \\    Atomics.notify(gate, 'release');
-            \\    for (let spins = 0; globalThis.__workerTlsAsyncHoldRejectCount < expectedAfterTlsRelease && spins < 2000; spins++) {{
+            \\    for (let spins = 0; globalThis.__workerTlsAsyncHoldRejectCount < expectedAfterTlsRelease && spins < {d}; spins++) {{
             \\      $drainRunLoop();
             \\      drainMicrotasks();
             \\    }}
@@ -12293,7 +12295,7 @@ fn runWorkerTerminateThreadLocalAsyncHoldCleanupInterleavingKind(
             \\  }}
             \\
         ,
-            .{ gc_rounds, seed_marker, gc_rounds, gc_per_round, gc_spin_iters, ntls_threads },
+            .{ gc_rounds, seed_marker, gc_rounds, gc_per_round, gc_spin_iters, waiter_reject_spin_limit, ntls_threads, waiter_reject_spin_limit },
         )
     else
         "";
@@ -12454,7 +12456,7 @@ fn runWorkerTerminateThreadLocalAsyncHoldCleanupInterleavingKind(
         \\      globalThis.__workerTlsAsyncHoldReleaseJoinSum = -1000000;
         \\    }});
         \\  }}
-        \\  for (let spins = 0; globalThis.__workerTlsAsyncHoldReleaseJoinCount < {d} && spins < 10000; spins++) {{
+        \\  for (let spins = 0; globalThis.__workerTlsAsyncHoldReleaseJoinCount < {d} && spins < {d}; spins++) {{
         \\    $drainRunLoop();
         \\    drainMicrotasks();
         \\  }}
@@ -12501,6 +12503,7 @@ fn runWorkerTerminateThreadLocalAsyncHoldCleanupInterleavingKind(
             release_base,
             seed_marker,
             nrelease_threads,
+            release_join_spin_limit,
             nrelease_threads,
             expected_release_score,
             midgc_pressure_src,
@@ -12552,7 +12555,7 @@ fn runWorkerTerminateThreadLocalAsyncHoldCleanupInterleavingKind(
     const settle_src = try std.fmt.allocPrint(
         gpa,
         \\(() => {{
-        \\  for (let spins = 0; globalThis.__workerTlsAsyncHoldRejectCount < {d} && spins < 2000; spins++) {{
+        \\  for (let spins = 0; globalThis.__workerTlsAsyncHoldRejectCount < {d} && spins < {d}; spins++) {{
         \\    $drainRunLoop();
         \\    drainMicrotasks();
         \\  }}
@@ -12560,7 +12563,7 @@ fn runWorkerTerminateThreadLocalAsyncHoldCleanupInterleavingKind(
         \\}})()
         \\
     ,
-        .{expected_reject_count},
+        .{ expected_reject_count, waiter_reject_spin_limit },
     );
     defer gpa.free(settle_src);
     const settled = ctx.evaluate(settle_src) catch |err| {
@@ -12612,7 +12615,7 @@ fn runWorkerTerminateThreadLocalAsyncHoldCleanupInterleavingKind(
     const check_src = try std.fmt.allocPrint(
         gpa,
         \\(() => {{
-        \\  for (let spins = 0; globalThis.__workerTlsAsyncHoldReleaseJoinCount < {d} && spins < 10000; spins++) {{
+        \\  for (let spins = 0; globalThis.__workerTlsAsyncHoldReleaseJoinCount < {d} && spins < {d}; spins++) {{
         \\    $drainRunLoop();
         \\    drainMicrotasks();
         \\  }}
@@ -12650,6 +12653,7 @@ fn runWorkerTerminateThreadLocalAsyncHoldCleanupInterleavingKind(
     ,
         .{
             nrelease_threads,
+            release_join_spin_limit,
             expected_early_cleanup_limit,
             expected_early_cleanup_limit,
             tls_base,
