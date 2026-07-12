@@ -36,6 +36,7 @@ zig build threads-profile -Dthreads-profile-case='condition asyncWait parked'
 zig build threads-profile -Dthreads-profile-debug=true -Dthreads-profile-case='condition asyncWait'
 zig build midgc-profile
 zig build gc-profile
+zig build gc-profile -Dgc-profile-case='nursery'
 ```
 
 These profiles are not correctness gates. `threads-profile` is the local
@@ -50,6 +51,12 @@ property waits alongside the existing contention event counters. `gc-profile`
 is the local allocation/lifecycle baseline for comparing arena, explicit-GC,
 no-GIL threaded GC, and `.gil = true` context modes, including the reusable
 GC-cell slab backing.
+
+`-Dgc-profile-case='<exact table name>'` runs one GC allocation/lifecycle table
+without spending the full profile matrix. Current exact cases are `lifecycle`,
+`task lifecycle`, `nursery`, `nursery drift`, `workload destroy`, `allocation`,
+`explicit gc`, `gc backing baseline`, `gc backing baseline buckets`,
+`gc backing`, `gc backing buckets`, `gc churn reuse`, and `gc finalizers`.
 
 `-Dthreads-profile-case='<exact scenario name>'` runs one shared-realm row
 across the host's 1/2/4/8-thread matrix and skips Worker tables.

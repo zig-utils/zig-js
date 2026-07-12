@@ -141,6 +141,8 @@ Issue #1 remains the umbrella status page.
   create/destroy-heavy context lifecycles are still slower under the GC path than
   under the old arena model. `zig build gc-profile` remains the repeatable
   baseline for nursery tuning, deeper generational policy, and lifecycle pooling.
+  `-Dgc-profile-case='<exact table name>'` runs one focused profile table when a
+  full local matrix would be too expensive for a small change.
   It splits context lifecycle time into create and destroy columns while also
   including a create-per-task versus long-lived-context reuse table with periodic
   collection to quantify the embedder lifecycle tradeoff, plus a workload destroy

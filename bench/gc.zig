@@ -1,6 +1,7 @@
 //! GC allocation and Context lifecycle profile.
 //!
 //! `zig build gc-profile`
+//! `zig build gc-profile -Dgc-profile-case='nursery'`
 //!
 //! This is the local baseline for issue #1's GC allocation/lifecycle work. It
 //! measures the embedder-visible costs that remain after no-GIL correctness:
@@ -744,13 +745,7 @@ fn printNurseryDrift(gpa: std.mem.Allocator) !void {
     }
 }
 
-pub fn main() !void {
-    const gpa = std.heap.page_allocator;
-    var threaded = std.Io.Threaded.init(gpa, .{ .environ = .empty });
-    defer threaded.deinit();
-    const io = threaded.io();
-
-    std.debug.print("zig-js GC allocation/context lifecycle profile\n", .{});
+fn printFullProfile(gpa: std.mem.Allocator, io: std.Io) !void {
     try printLifecycle(gpa, io);
     try printTaskLifecycle(gpa, io);
     try printNursery(gpa, io);
@@ -764,4 +759,43 @@ pub fn main() !void {
     try printGcBackingBuckets(gpa);
     try printGcChurnReuse(gpa, io);
     try printGcFinalizers(gpa);
+}
+
+fn printFilteredProfile(gpa: std.mem.Allocator, io: std.Io, filter: []const u8) !void {
+    if (std.mem.eql(u8, filter, "lifecycle")) return printLifecycle(gpa, io);
+    if (std.mem.eql(u8, filter, "task lifecycle")) return printTaskLifecycle(gpa, io);
+    if (std.mem.eql(u8, filter, "nursery")) return printNursery(gpa, io);
+    if (std.mem.eql(u8, filter, "nursery drift")) return printNurseryDrift(gpa);
+    if (std.mem.eql(u8, filter, "workload destroy")) return printWorkloadDestroy(gpa, io);
+    if (std.mem.eql(u8, filter, "allocation")) return printAllocation(gpa, io);
+    if (std.mem.eql(u8, filter, "explicit gc")) return printExplicitGc(gpa, io);
+    if (std.mem.eql(u8, filter, "gc backing baseline")) return printGcBackingBaseline(gpa);
+    if (std.mem.eql(u8, filter, "gc backing baseline buckets")) return printGcBackingBaselineBuckets(gpa);
+    if (std.mem.eql(u8, filter, "gc backing")) return printGcBacking(gpa);
+    if (std.mem.eql(u8, filter, "gc backing buckets")) return printGcBackingBuckets(gpa);
+    if (std.mem.eql(u8, filter, "gc churn reuse")) return printGcChurnReuse(gpa, io);
+    if (std.mem.eql(u8, filter, "gc finalizers")) return printGcFinalizers(gpa);
+
+    std.debug.print("unknown gc-profile case: {s}\n", .{filter});
+    return error.UnknownGcProfileCase;
+}
+
+pub fn main(init: std.process.Init) !void {
+    const gpa = std.heap.page_allocator;
+    const io = init.io;
+    var args = std.process.Args.Iterator.init(init.minimal.args);
+    _ = args.next();
+    const filter_arg = args.next();
+    const filter = if (filter_arg) |arg|
+        if (arg.len == 0) null else arg
+    else
+        null;
+
+    std.debug.print("zig-js GC allocation/context lifecycle profile\n", .{});
+    std.debug.print("focused filters: lifecycle, task lifecycle, nursery, nursery drift, workload destroy, allocation, explicit gc, gc backing baseline, gc backing baseline buckets, gc backing, gc backing buckets, gc churn reuse, gc finalizers\n", .{});
+    if (filter) |case| {
+        try printFilteredProfile(gpa, io, case);
+    } else {
+        try printFullProfile(gpa, io);
+    }
 }

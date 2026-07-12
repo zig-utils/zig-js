@@ -329,6 +329,8 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const run_gc_profile = b.addRunArtifact(gc_profile);
+    const gc_profile_case = b.option([]const u8, "gc-profile-case", "Run one exact gc-profile table name");
+    if (gc_profile_case) |case| run_gc_profile.addArg(case);
     const gc_profile_step = b.step("gc-profile", "Profile GC allocation and Context lifecycle costs");
     gc_profile_step.dependOn(&run_gc_profile.step);
 }

@@ -218,6 +218,7 @@ zig build threads-profile -Dthreads-profile-case='promise microtasks'
 zig build threads-profile -Dthreads-profile-case='promise thenables'
 zig build midgc-profile
 zig build gc-profile
+zig build gc-profile -Dgc-profile-case='nursery'
 ```
 
 The test262 corpus is vendored as the `test262/` git submodule. `zig build test262` uses it by default and skips cleanly if it is absent.

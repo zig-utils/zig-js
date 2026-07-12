@@ -173,7 +173,10 @@ Known performance/maturity work:
   create/destroy, create-per-task versus long-lived-context reuse with periodic
   collection, workload destroy attribution with and without a prior quiescent
   `collectGarbage()`, object-heavy allocation, block-scoped `let` allocation,
-  and explicit `collectGarbage()`. The lifecycle row now breaks create and
+  and explicit `collectGarbage()`. Use
+  `-Dgc-profile-case='<exact table name>'` for focused local rows such as
+  `nursery`, `nursery drift`, `allocation`, or `gc churn reuse` before paying
+  for the full profile matrix. The lifecycle row now breaks create and
   destroy apart, the workload destroy row separates finalizer/collection work
   from post-collection teardown, and the profile also prints GC cell-backing
   attribution for the intrinsic empty-context footprint and for an object-heavy
