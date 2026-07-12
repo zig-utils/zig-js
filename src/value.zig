@@ -2,6 +2,7 @@ const std = @import("std");
 const Shape = @import("shape.zig").Shape;
 const SharedBufferStorage = @import("shared_buffer.zig").SharedBufferStorage;
 const gc_runtime = @import("gc_runtime.zig");
+const object_profile = @import("object_profile.zig");
 const strcell = @import("strcell.zig");
 const StringCell = strcell.StringCell;
 
@@ -925,6 +926,7 @@ pub const Object = struct {
         while (!self.backing_lock.tryLock()) : (spins += 1) {
             if ((spins & 0xff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
         }
+        object_profile.recordBackingLockAcquire(spins);
         return true;
     }
     fn unlockBacking(self: *Object, held: bool) void {
@@ -1045,6 +1047,7 @@ pub const Object = struct {
                 std.atomic.spinLoopHint();
             }
         }
+        object_profile.recordPropertyLockAcquire(spins);
         gc_runtime.enterTraceSensitiveLock();
     }
 
@@ -1085,6 +1088,7 @@ pub const Object = struct {
                 std.atomic.spinLoopHint();
             }
         }
+        object_profile.recordElementLockAcquire(spins);
         gc_runtime.enterTraceSensitiveLock();
     }
 

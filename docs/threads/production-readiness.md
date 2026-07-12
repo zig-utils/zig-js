@@ -205,10 +205,11 @@ Known performance/maturity work:
   contexts are fully parallel, but private global/API installation no longer
   measures the atomic allocator lock on every cell allocation. Once parallel,
   `threads-profile` exposes LockedArena `aacq`/`acnt`/`aspn` and Environment
-  binding-lock `eacq`/`ecnt`/`espn` columns in the shared-realm rows so
+  binding-lock `eacq`/`ecnt`/`espn` columns, plus Object backing/property/element
+  lock triplets (`ob*`/`op*`/`oe*`), in the shared-realm rows so
   allocation-heavy and global/environment-binding-heavy profile cases can
-  separate arena lock traffic from binding-table, hidden-class, and
-  synchronization pressure.
+  separate arena lock traffic from binding-table, hidden-class, object-storage,
+  and synchronization pressure.
   cell allocation is locked per size class, so unrelated cell sizes can use
   their slab/free-list fast paths concurrently. Only chunk growth, chunk
   metadata, and delegated non-cell side storage take the separate
@@ -278,6 +279,8 @@ Known performance/maturity work:
   `events` count logical contention (`Lock`/`Condition`/property wait and
   queued `asyncHold` grants), `shape`/`newsh`/`syld` report hidden-class
   transition requests, newly-created child shapes, and transition-lock yields,
+  `aacq`/`acnt`/`aspn`, `eacq`/`ecnt`/`espn`, and `ob*`/`op*`/`oe*` report
+  arena, Environment binding, and Object backing/property/element lock traffic,
   `lcnt` and `aq` split direct contended
   `Lock.hold` attempts from queued `Lock.asyncHold` grants inside that total,
   `parks` count timed wait/pump iterations including `Thread.join`, `joins`

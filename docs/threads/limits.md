@@ -241,7 +241,10 @@ Issue #1 remains the umbrella status page.
   `events` total, while `shape`/`newsh`/`syld` split hidden-class transition
   requests, newly-created child shapes, and transition-lock yields so
   object/property rows can separate cached shape convergence from later
-  slot/element work. Its `joins` columns split `Thread.join` parks
+  slot/element work. The `aacq`/`acnt`/`aspn`, `eacq`/`ecnt`/`espn`, and
+  `ob*`/`op*`/`oe*` lock triplets split arena, Environment binding, and Object
+  backing/property/element lock traffic before optimizing those paths. Its
+  `joins` columns split `Thread.join` parks
   from aggregate park pressure, its `lock`/`cond`/`prop`
   columns split the remaining sync park pressure by contended `Lock.hold`,
   `Condition.wait`, and property `Atomics.wait`, its

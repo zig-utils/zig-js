@@ -817,7 +817,7 @@ fn printPromiseProfile(gpa: std.mem.Allocator, io: std.Io, workers: []const usiz
 fn printScenario(gpa: std.mem.Allocator, io: std.Io, scenario: Scenario, workers: []const usize) !void {
     std.debug.print("\n{s}\n", .{scenario.name});
     std.debug.print("{s:>8} {s:>14} {s:>14} {s:>12} {s:>12}" ++
-        " {s:>10} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>10} {s:>10} {s:>9} {s:>9} {s:>9} {s:>10}", .{
+        " {s:>10} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9}", .{
         "threads",
         "no-gil ns",
         "gil ns",
@@ -833,6 +833,17 @@ fn printScenario(gpa: std.mem.Allocator, io: std.Io, scenario: Scenario, workers
         "ng eacq",
         "ng ecnt",
         "ng espn",
+    });
+    std.debug.print(" {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>10} {s:>10} {s:>9} {s:>9} {s:>9} {s:>10}", .{
+        "ng obacq",
+        "ng obcnt",
+        "ng obspn",
+        "ng opacq",
+        "ng opcnt",
+        "ng opspn",
+        "ng oeacq",
+        "ng oecnt",
+        "ng oespn",
         "ng lcnt",
         "ng aq",
         "ng parks",
@@ -858,7 +869,7 @@ fn printScenario(gpa: std.mem.Allocator, io: std.Io, scenario: Scenario, workers
         "ng hold",
         "ng cjob",
     });
-    std.debug.print(" {s:>10} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>10} {s:>10} {s:>9} {s:>9} {s:>9} {s:>10} {s:>9} {s:>9} {s:>9} {s:>9} {s:>10} {s:>10} {s:>9} {s:>9} {s:>9} {s:>9} {s:>10} {s:>10} {s:>10} {s:>10}\n", .{
+    std.debug.print(" {s:>10} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9}", .{
         "gil events",
         "gil shape",
         "gil newsh",
@@ -869,6 +880,17 @@ fn printScenario(gpa: std.mem.Allocator, io: std.Io, scenario: Scenario, workers
         "gil eacq",
         "gil ecnt",
         "gil espn",
+    });
+    std.debug.print(" {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>10} {s:>10} {s:>9} {s:>9} {s:>9} {s:>10} {s:>9} {s:>9} {s:>9} {s:>9} {s:>10} {s:>10} {s:>9} {s:>9} {s:>9} {s:>9} {s:>10} {s:>10} {s:>10} {s:>10}\n", .{
+        "gil obacq",
+        "gil obcnt",
+        "gil obspn",
+        "gil opacq",
+        "gil opcnt",
+        "gil opspn",
+        "gil oeacq",
+        "gil oecnt",
+        "gil oespn",
         "gil lcnt",
         "gil aq",
         "gil parks",
@@ -908,7 +930,7 @@ fn printScenario(gpa: std.mem.Allocator, io: std.Io, scenario: Scenario, workers
             @as(f64, @floatFromInt(@max(parallel_ns, 1)));
 
         std.debug.print("{d:>8} {d:>14} {d:>14} {d:>11.2}x {d:>11.2}x" ++
-            " {d:>10} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>10} {d:>10}", .{
+            " {d:>10} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9}", .{
             n,
             parallel_ns,
             gil_ns,
@@ -924,6 +946,17 @@ fn printScenario(gpa: std.mem.Allocator, io: std.Io, scenario: Scenario, workers
             parallel.stats.env_lock_acquires,
             parallel.stats.env_lock_contentions,
             parallel.stats.env_lock_spins,
+        });
+        std.debug.print(" {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>10} {d:>10}", .{
+            parallel.stats.object_backing_lock_acquires,
+            parallel.stats.object_backing_lock_contentions,
+            parallel.stats.object_backing_lock_spins,
+            parallel.stats.object_property_lock_acquires,
+            parallel.stats.object_property_lock_contentions,
+            parallel.stats.object_property_lock_spins,
+            parallel.stats.object_element_lock_acquires,
+            parallel.stats.object_element_lock_contentions,
+            parallel.stats.object_element_lock_spins,
             parallel.stats.lock_contentions,
             parallel.stats.async_hold_queued,
             parallel.stats.parks(),
@@ -949,7 +982,7 @@ fn printScenario(gpa: std.mem.Allocator, io: std.Io, scenario: Scenario, workers
             parallel.stats.task_pump_async_hold_jobs,
             parallel.stats.task_pump_condition_jobs,
         });
-        std.debug.print(" {d:>10} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>10} {d:>10}", .{
+        std.debug.print(" {d:>10} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9}", .{
             gil.stats.events(),
             gil.shape.transition_requests,
             gil.shape.transition_misses,
@@ -960,6 +993,17 @@ fn printScenario(gpa: std.mem.Allocator, io: std.Io, scenario: Scenario, workers
             gil.stats.env_lock_acquires,
             gil.stats.env_lock_contentions,
             gil.stats.env_lock_spins,
+        });
+        std.debug.print(" {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>10} {d:>10}", .{
+            gil.stats.object_backing_lock_acquires,
+            gil.stats.object_backing_lock_contentions,
+            gil.stats.object_backing_lock_spins,
+            gil.stats.object_property_lock_acquires,
+            gil.stats.object_property_lock_contentions,
+            gil.stats.object_property_lock_spins,
+            gil.stats.object_element_lock_acquires,
+            gil.stats.object_element_lock_contentions,
+            gil.stats.object_element_lock_spins,
             gil.stats.lock_contentions,
             gil.stats.async_hold_queued,
             gil.stats.parks(),
@@ -1469,6 +1513,7 @@ pub fn main(init: std.process.Init) !void {
     if (max_workers) |max| std.debug.print("worker row cap: <= {d}\n", .{max});
     std.debug.print("events = logical contention (Lock/Condition/property wait/asyncHold); parks = timed wait/pump iterations including Thread.join\n", .{});
     std.debug.print("shape/newsh/syld = hidden-class transition requests / newly-created child shapes / transition-lock yields\n", .{});
+    std.debug.print("ob*/op*/oe* = Object backing/property/element lock acquisitions, contended acquisitions, and failed spin attempts\n", .{});
     std.debug.print("lcnt/aq = direct contended Lock.hold attempts / queued Lock.asyncHold grants, split out from events\n", .{});
     std.debug.print("joins = Thread.join timed wait/pump iterations, separated from other park sources for lifecycle attribution\n", .{});
     std.debug.print("lock/cond/prop = park iterations attributed to contended Lock.hold, Condition.wait, and property Atomics.wait\n", .{});

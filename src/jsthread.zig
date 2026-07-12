@@ -21,6 +21,7 @@ const interp = @import("interpreter.zig");
 const ContextMod = @import("context.zig");
 const gil_mod = @import("gil.zig");
 const agent = @import("agent.zig");
+const object_profile = @import("object_profile.zig");
 
 const promise = @import("promise.zig");
 
@@ -116,6 +117,15 @@ pub const ContentionStats = struct {
     env_lock_acquires: u64 = 0,
     env_lock_contentions: u64 = 0,
     env_lock_spins: u64 = 0,
+    object_backing_lock_acquires: u64 = 0,
+    object_backing_lock_contentions: u64 = 0,
+    object_backing_lock_spins: u64 = 0,
+    object_property_lock_acquires: u64 = 0,
+    object_property_lock_contentions: u64 = 0,
+    object_property_lock_spins: u64 = 0,
+    object_element_lock_acquires: u64 = 0,
+    object_element_lock_contentions: u64 = 0,
+    object_element_lock_spins: u64 = 0,
     thread_join_wait_ns: u64 = 0,
     lock_wait_ns: u64 = 0,
     condition_wait_ns: u64 = 0,
@@ -214,6 +224,7 @@ pub fn resetContentionStats() void {
     contention_counters.env_lock_acquires.store(0, .release);
     contention_counters.env_lock_contentions.store(0, .release);
     contention_counters.env_lock_spins.store(0, .release);
+    object_profile.reset();
     contention_counters.thread_join_wait_ns.store(0, .release);
     contention_counters.lock_wait_ns.store(0, .release);
     contention_counters.condition_wait_ns.store(0, .release);
@@ -223,9 +234,11 @@ pub fn resetContentionStats() void {
 
 pub fn disableContentionStats() void {
     contention_stats_enabled.store(false, .release);
+    object_profile.disable();
 }
 
 pub fn contentionStats() ContentionStats {
+    const object = object_profile.snapshot();
     return .{
         .thread_join_parks = contention_counters.thread_join_parks.load(.acquire),
         .lock_contentions = contention_counters.lock_contentions.load(.acquire),
@@ -253,6 +266,15 @@ pub fn contentionStats() ContentionStats {
         .env_lock_acquires = contention_counters.env_lock_acquires.load(.acquire),
         .env_lock_contentions = contention_counters.env_lock_contentions.load(.acquire),
         .env_lock_spins = contention_counters.env_lock_spins.load(.acquire),
+        .object_backing_lock_acquires = object.object_backing_lock_acquires,
+        .object_backing_lock_contentions = object.object_backing_lock_contentions,
+        .object_backing_lock_spins = object.object_backing_lock_spins,
+        .object_property_lock_acquires = object.object_property_lock_acquires,
+        .object_property_lock_contentions = object.object_property_lock_contentions,
+        .object_property_lock_spins = object.object_property_lock_spins,
+        .object_element_lock_acquires = object.object_element_lock_acquires,
+        .object_element_lock_contentions = object.object_element_lock_contentions,
+        .object_element_lock_spins = object.object_element_lock_spins,
         .thread_join_wait_ns = contention_counters.thread_join_wait_ns.load(.acquire),
         .lock_wait_ns = contention_counters.lock_wait_ns.load(.acquire),
         .condition_wait_ns = contention_counters.condition_wait_ns.load(.acquire),
@@ -351,6 +373,9 @@ test "jsthread contention stats reset and snapshot" {
     recordWorkerChannelClose();
     recordArenaLockAcquire(3);
     recordEnvLockAcquire(5);
+    object_profile.recordBackingLockAcquire(7);
+    object_profile.recordPropertyLockAcquire(11);
+    object_profile.recordElementLockAcquire(13);
     finishContentionWaitTimer("thread_join_wait_ns", 0);
     finishContentionWaitTimer("lock_wait_ns", 0);
     finishContentionWaitTimer("condition_wait_ns", 0);
@@ -375,6 +400,15 @@ test "jsthread contention stats reset and snapshot" {
     try std.testing.expectEqual(@as(u64, 1), stats.env_lock_acquires);
     try std.testing.expectEqual(@as(u64, 1), stats.env_lock_contentions);
     try std.testing.expectEqual(@as(u64, 5), stats.env_lock_spins);
+    try std.testing.expectEqual(@as(u64, 1), stats.object_backing_lock_acquires);
+    try std.testing.expectEqual(@as(u64, 1), stats.object_backing_lock_contentions);
+    try std.testing.expectEqual(@as(u64, 7), stats.object_backing_lock_spins);
+    try std.testing.expectEqual(@as(u64, 1), stats.object_property_lock_acquires);
+    try std.testing.expectEqual(@as(u64, 1), stats.object_property_lock_contentions);
+    try std.testing.expectEqual(@as(u64, 11), stats.object_property_lock_spins);
+    try std.testing.expectEqual(@as(u64, 1), stats.object_element_lock_acquires);
+    try std.testing.expectEqual(@as(u64, 1), stats.object_element_lock_contentions);
+    try std.testing.expectEqual(@as(u64, 13), stats.object_element_lock_spins);
     try std.testing.expect(stats.thread_join_wait_ns > 0);
     try std.testing.expect(stats.lock_wait_ns > 0);
     try std.testing.expect(stats.condition_wait_ns > 0);
@@ -400,6 +434,15 @@ test "jsthread contention stats reset and snapshot" {
     try std.testing.expectEqual(@as(u64, 0), contentionStats().env_lock_acquires);
     try std.testing.expectEqual(@as(u64, 0), contentionStats().env_lock_contentions);
     try std.testing.expectEqual(@as(u64, 0), contentionStats().env_lock_spins);
+    try std.testing.expectEqual(@as(u64, 0), contentionStats().object_backing_lock_acquires);
+    try std.testing.expectEqual(@as(u64, 0), contentionStats().object_backing_lock_contentions);
+    try std.testing.expectEqual(@as(u64, 0), contentionStats().object_backing_lock_spins);
+    try std.testing.expectEqual(@as(u64, 0), contentionStats().object_property_lock_acquires);
+    try std.testing.expectEqual(@as(u64, 0), contentionStats().object_property_lock_contentions);
+    try std.testing.expectEqual(@as(u64, 0), contentionStats().object_property_lock_spins);
+    try std.testing.expectEqual(@as(u64, 0), contentionStats().object_element_lock_acquires);
+    try std.testing.expectEqual(@as(u64, 0), contentionStats().object_element_lock_contentions);
+    try std.testing.expectEqual(@as(u64, 0), contentionStats().object_element_lock_spins);
     try std.testing.expectEqual(@as(u64, 0), contentionStats().waitNs());
     disableContentionStats();
 }

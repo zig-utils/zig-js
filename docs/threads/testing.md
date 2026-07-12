@@ -43,7 +43,8 @@ contention baseline for comparing the no-GIL default against `.gil = true`
 across the hot shared structures named in the production roadmap. Its mixed
 Object/Function/Promise allocation row enables GC in both modes to isolate the
 cell-backing lock path; shared-realm rows also split LockedArena and
-Environment binding-lock acquisitions/contention/spins. The profile prints
+Environment binding-lock acquisitions/contention/spins, plus Object backing,
+property, and element lock acquisitions/contention/spins. The profile prints
 internal native-wait microsecond attribution for join, lock, condition, and
 property waits alongside the existing contention event counters. `gc-profile`
 is the local allocation/lifecycle baseline for comparing arena, explicit-GC,
@@ -487,9 +488,12 @@ transition requests, newly-created child shapes, and transition-lock yields, so
 object/property rows can distinguish cached shape convergence from slot/element
 work. The `aacq`/`acnt`/`aspn` columns report LockedArena acquisitions,
 contended acquisitions, and failed spin attempts; the `eacq`/`ecnt`/`espn`
-columns report the same for Environment binding-table locks, so allocation-heavy
-and binding-heavy rows can separate allocator pressure, global/environment
-pressure, object-shape pressure, and waiter pressure. The `lcnt`
+columns report the same for Environment binding-table locks; `obacq`/`obcnt`/
+`obspn`, `opacq`/`opcnt`/`opspn`, and `oeacq`/`oecnt`/`oespn` report the same
+for Object backing, property, and element locks. This lets allocation-heavy,
+binding-heavy, shared-property, and shared-array rows separate allocator
+pressure, global/environment pressure, object-shape pressure, object-storage
+lock pressure, and waiter pressure. The `lcnt`
 and `aq` columns split direct contended
 `Lock.hold` attempts from queued `Lock.asyncHold` grants inside that total, and
 `parks` count timed wait/pump iterations including `Thread.join`. The `joins`
