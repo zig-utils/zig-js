@@ -56,6 +56,13 @@ that must remain correct regardless of JavaScript interleavings. This includes:
 Races in that state are engine bugs. They must be fixed with locks, atomics,
 publication protocols, or ownership changes. They must not be hidden by
 ThreadSanitizer suppressions.
+Resizable `ArrayBuffer` storage is in this engine-state category even when the
+JavaScript program intentionally races view operations with resize. Typed-array
+and `DataView` helpers borrow the live byte slice through the buffer lock when a
+peer resize/free is possible, and bulk-copy helpers such as `slice` and
+`sliceToImmutable` re-resolve the range and copy from one locked source
+snapshot. Those guards are memory-safety guarantees, not a promise that
+unsynchronized JavaScript resize races produce deterministic values.
 The protected-handle table is covered by a focused mid-script parallel-GC unit
 witness: `JSValueProtect` keeps an otherwise-unrooted C-API object alive while
 shared-realm `Thread`s drive a finishing sweep, and `JSValueUnprotect` releases
@@ -192,10 +199,15 @@ without the suppression and passes with it. A suppression file must not cover:
 ## C-API Rules
 
 `JSStringRef` values are immutable and use atomic retain/release.
+Retain-count overflow is rejected instead of wrapping.
 
 GC-enabled `JSValueRef` wrappers are made durable across collection with
-`JSValueProtect` and `JSValueUnprotect`. Do not infer additional cross-thread
-handle semantics beyond the documented threaded context APIs.
+`JSValueProtect` and `JSValueUnprotect`. The counted protected-handle table
+deduplicates roots and rejects protection-count overflow instead of wrapping.
+`JSValueRef` and `JSObjectRef` boxes carry the context that created them, so
+context-taking APIs reject wrong-realm handles instead of mixing arenas or object
+graphs. Do not infer additional cross-thread handle semantics beyond the
+documented threaded context APIs.
 
 For non-threaded contexts, use handles only on the owning thread. For threaded
 contexts, create the context with `ZJSGlobalContextCreateThreaded(gil)` and use
