@@ -39,6 +39,19 @@ const builtin = @import("builtin");
 /// request" / "never published".
 var next_cycle: std.atomic.Value(u64) = .init(1);
 
+fn allocateCycleId() u64 {
+    var current = next_cycle.load(.monotonic);
+    while (true) {
+        const cycle = if (current == 0) 1 else current;
+        const next = if (cycle == std.math.maxInt(u64)) 1 else cycle + 1;
+        if (next_cycle.cmpxchgWeak(current, next, .monotonic, .monotonic)) |observed| {
+            current = observed;
+            continue;
+        }
+        return cycle;
+    }
+}
+
 pub const RootHandshake = struct {
     /// Cycle id the collector currently wants roots for; 0 when idle.
     request: std.atomic.Value(u64) = .init(0),
@@ -55,7 +68,7 @@ pub const RootHandshake = struct {
     /// to publish. Returns the unique cycle id. The `request` store is `release`
     /// so a mutator that acquire-loads it also observes the reset acks/expected.
     pub fn open(self: *RootHandshake, expected_mutators: u32) u64 {
-        const cycle = next_cycle.fetchAdd(1, .monotonic);
+        const cycle = allocateCycleId();
         self.acks.store(0, .monotonic);
         self.expected.store(expected_mutators, .monotonic);
         self.request.store(cycle, .release);
@@ -194,5 +207,21 @@ test "RootHandshake: idle safepoints are no-ops and reopened cycles re-collect" 
     _ = hs.open(1);
     hs.serviceSafepoint(&calls, Cb.publish);
     try std.testing.expectEqual(@as(usize, 2), calls);
+    hs.close();
+}
+
+test "RootHandshake: cycle allocation never publishes idle zero" {
+    next_cycle.store(std.math.maxInt(u64), .release);
+
+    var hs = RootHandshake{};
+    const last = hs.open(0);
+    try std.testing.expectEqual(std.math.maxInt(u64), last);
+    try std.testing.expectEqual(std.math.maxInt(u64), hs.request.load(.acquire));
+    hs.close();
+
+    const wrapped = hs.open(0);
+    try std.testing.expectEqual(@as(u64, 1), wrapped);
+    try std.testing.expectEqual(@as(u64, 1), hs.request.load(.acquire));
+    try std.testing.expect(wrapped != 0);
     hs.close();
 }
