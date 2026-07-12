@@ -304,6 +304,62 @@ test "BudgetAllocator enforces outstanding byte limit" {
     try std.testing.expectEqual(@as(usize, 64), budget.peak.load(.acquire));
 }
 
+test "BudgetAllocator accounts resize growth and shrink" {
+    var buf: [256]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&buf);
+    var budget = BudgetAllocator{ .inner = fba.allocator(), .limit = 96 };
+    const a = budget.allocator();
+
+    var mem = try a.alloc(u8, 32);
+    try std.testing.expectEqual(@as(usize, 32), budget.used.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 32), budget.peak.load(.acquire));
+
+    try std.testing.expect(a.resize(mem, 48));
+    mem = mem.ptr[0..48];
+    try std.testing.expectEqual(@as(usize, 48), budget.used.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 48), budget.peak.load(.acquire));
+
+    try std.testing.expect(!a.resize(mem, 128));
+    try std.testing.expectEqual(@as(usize, 48), budget.used.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 48), budget.peak.load(.acquire));
+
+    try std.testing.expect(a.resize(mem, 16));
+    mem = mem.ptr[0..16];
+    try std.testing.expectEqual(@as(usize, 16), budget.used.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 48), budget.peak.load(.acquire));
+
+    a.free(mem);
+    try std.testing.expectEqual(@as(usize, 0), budget.used.load(.acquire));
+}
+
+test "BudgetAllocator accounts remap growth and shrink" {
+    var buf: [256]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&buf);
+    var budget = BudgetAllocator{ .inner = fba.allocator(), .limit = 96 };
+    const a = budget.allocator();
+
+    var mem = try a.alloc(u8, 24);
+    try std.testing.expectEqual(@as(usize, 24), budget.used.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 24), budget.peak.load(.acquire));
+
+    mem = a.remap(mem, 64) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 64), mem.len);
+    try std.testing.expectEqual(@as(usize, 64), budget.used.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 64), budget.peak.load(.acquire));
+
+    try std.testing.expect(a.remap(mem, 128) == null);
+    try std.testing.expectEqual(@as(usize, 64), budget.used.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 64), budget.peak.load(.acquire));
+
+    mem = a.remap(mem, 8) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 8), mem.len);
+    try std.testing.expectEqual(@as(usize, 8), budget.used.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 64), budget.peak.load(.acquire));
+
+    a.free(mem);
+    try std.testing.expectEqual(@as(usize, 0), budget.used.load(.acquire));
+}
+
 test "BudgetAllocator retries once after recovery frees budget" {
     var budget = BudgetAllocator{ .inner = std.testing.allocator, .limit = 64 };
     const a = budget.allocator();
