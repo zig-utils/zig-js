@@ -14766,11 +14766,18 @@ fn runMidScriptAtomicsMutexLockIfAvailableGc(gpa: std.mem.Allocator, seed: u64) 
         \\(() => {{
         \\  globalThis.__midgcMutexLiaCleanupCount = 0;
         \\  globalThis.__midgcMutexLiaCleanupSum = 0;
+        \\  globalThis.__midgcMutexLiaAcquireCleanupCount = 0;
+        \\  globalThis.__midgcMutexLiaTimeoutCleanupCount = 0;
         \\  globalThis.__midgcMutexLiaAsyncScore = 0;
         \\  globalThis.__midgcMutexLiaAsyncCount = 0;
+        \\  const cleanupAcquireCutoff = {d};
         \\  globalThis.__midgcMutexLiaRegistry = new FinalizationRegistry((held) => {{
         \\    globalThis.__midgcMutexLiaCleanupCount++;
         \\    globalThis.__midgcMutexLiaCleanupSum += held;
+        \\    if (held < cleanupAcquireCutoff)
+        \\      globalThis.__midgcMutexLiaAcquireCleanupCount++;
+        \\    else
+        \\      globalThis.__midgcMutexLiaTimeoutCleanupCount++;
         \\  }});
         \\  const registry = globalThis.__midgcMutexLiaRegistry;
         \\  const mutex = new Atomics.Mutex();
@@ -14870,8 +14877,10 @@ fn runMidScriptAtomicsMutexLockIfAvailableGc(gpa: std.mem.Allocator, seed: u64) 
         \\  }}
         \\  if (typeof gc === 'function') gc();
         \\  globalThis.__midgcMutexLiaRegistry.cleanupSome();
-        \\  if (globalThis.__midgcMutexLiaCleanupCount !== 0)
-        \\    throw new Error('midgc lockIfAvailable cleanup fired while peers were parked');
+        \\  if (globalThis.__midgcMutexLiaAcquireCleanupCount !== 0)
+        \\    throw new Error('midgc lockIfAvailable acquire cleanup fired while peers were parked');
+        \\  if (globalThis.__midgcMutexLiaTimeoutCleanupCount > {d})
+        \\    throw new Error('midgc lockIfAvailable timeout cleanup over-counted while peers were parked');
         \\  while (Atomics.load(gate, 'timeoutDone') < {d})
         \\    Atomics.wait(gate, 'timeoutDone', Atomics.load(gate, 'timeoutDone'), 1);
         \\  Atomics.store(gate, 'release', 1);
@@ -14898,6 +14907,7 @@ fn runMidScriptAtomicsMutexLockIfAvailableGc(gpa: std.mem.Allocator, seed: u64) 
         \\
     ,
         .{
+            cleanup_base + n_acquire,
             seed_marker,
             n_acquire,
             acquire_base,
@@ -14912,6 +14922,7 @@ fn runMidScriptAtomicsMutexLockIfAvailableGc(gpa: std.mem.Allocator, seed: u64) 
             rounds,
             per_round,
             spin_iters,
+            n_timeout,
             n_timeout,
             expected_join_sum,
             expected_join_sum,

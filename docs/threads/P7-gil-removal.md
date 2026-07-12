@@ -293,9 +293,10 @@ roadmap item repeats it.
      and same-`Lock` waiters stay parked through a finishing sweep before burst
      release and exact finalization cleanup are verified, a
      sibling `Atomics.Mutex.lockIfAvailable` case where acquire-after-release
-     and timeout token waiters stay parked behind a holder through a finishing
-     sweep before reused-token acquire/timeout results and exact finalization
-     cleanup are verified, a sibling static `Atomics.Condition.wait` case where
+     waiters stay parked behind a holder through a finishing sweep, timeout
+     waiters may expire independently while those acquire peers remain rooted,
+     and reused-token acquire/timeout results plus exact finalization cleanup
+     are verified, a sibling static `Atomics.Condition.wait` case where
      notify/reacquire token waiters stay parked through a finishing sweep before
      exact notify counts, token reacquisition, `asyncJoin` observers, and
      finalization cleanup are verified, and a

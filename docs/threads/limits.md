@@ -461,10 +461,11 @@ Issue #1 remains the umbrella status page.
   `Atomics.Condition.waitFor` peers stay parked through a finishing sweep,
   reject early cleanup while their stack roots are live, then time out with
   exact `UnlockToken` reacquisition/unlock and finalization cleanup, plus a sibling
-  `Atomics.Mutex.lockIfAvailable` subprogram where acquire-after-release and
-  timeout token waiters stay parked behind a holder through a finishing sweep,
-  reject early cleanup while their roots are live, then verify reused-token
-  acquire/timeout results and exact finalization cleanup, plus a sibling
+  `Atomics.Mutex.lockIfAvailable` subprogram where acquire-after-release
+  waiters stay parked behind a holder through a finishing sweep, timeout
+  waiters may expire independently while those acquire peers remain rooted, and
+  reused-token acquire/timeout results plus exact finalization cleanup are
+  verified, plus a sibling
   static `Atomics.Condition.wait` subprogram where notify/reacquire token
   waiters stay parked through a finishing sweep, reject early cleanup while
   their roots are live, then verify exact notify counts, token reacquisition,

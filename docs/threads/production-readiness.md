@@ -635,10 +635,11 @@ as embedders exercise more threaded host patterns.
   cleanup is not delivered while their stack roots are live, then requires
   timeout results, `Atomics.Mutex.UnlockToken` reacquisition/unlock, and exact
   cleanup after quiescence.
-  The `Atomics.Mutex.lockIfAvailable` subprogram parks acquire-after-release
-  and timeout token waiters behind a holder through a finishing sweep, verifies
-  cleanup is not delivered while their stack roots are live, then requires
-  reused-token acquire and timeout results plus exact cleanup after quiescence.
+  The `Atomics.Mutex.lockIfAvailable` subprogram keeps acquire-after-release
+  waiters parked behind a holder through a finishing sweep, allows timeout
+  waiters to expire independently while those acquire peers remain rooted, then
+  requires reused-token acquire and timeout results plus exact cleanup after
+  quiescence.
   The static `Atomics.Condition.wait` subprogram parks notify/reacquire token
   waiters through a finishing sweep, verifies cleanup is not delivered while
   their stack roots are live, then requires exact notify counts, token

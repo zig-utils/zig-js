@@ -247,11 +247,11 @@ adds a sync-wait burst subprogram that parks multiple waiters on the same
 property, the same `Condition`, and the same contended `Lock` through a
 finishing sweep, rejects early cleanup while those stack roots are still live,
 then releases all three wait sets and verifies exact cleanup after quiescence,
-adds an `Atomics.Mutex.lockIfAvailable` subprogram that parks
-acquire-after-release and timeout token waiters behind a holder through a
-finishing sweep, rejects early cleanup while those roots are live, then requires
-reused-token acquire and timeout results plus exact `FinalizationRegistry`
-cleanup after quiescence,
+adds an `Atomics.Mutex.lockIfAvailable` subprogram that keeps
+acquire-after-release waiters parked behind a holder through a finishing sweep,
+allows timeout waiters to expire independently while those acquire peers remain
+rooted, then requires reused-token acquire and timeout results plus exact
+`FinalizationRegistry` cleanup after quiescence,
 adds a static `Atomics.Condition.wait` subprogram that parks notify/reacquire
 token waiters through a finishing sweep, rejects early cleanup while their stack
 roots are live, then requires exact notify counts, token reacquisition,
