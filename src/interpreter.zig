@@ -677,6 +677,30 @@ pub const Environment = struct {
         return null;
     }
 
+    /// Look up a binding known to live in this exact declarative environment.
+    /// Mapped-arguments parameter aliases use this: a parameter map never targets
+    /// an outer scope or module alias, so the full parent-chain/alias walk only
+    /// adds lock/hash churn on hot no-GIL readers.
+    pub fn getLocal(self: *Environment, name: []const u8) ?Value {
+        self.lockBindings();
+        defer self.unlockBindings();
+        return self.vars.get(name);
+    }
+
+    /// Assign a binding known to live in this exact declarative environment.
+    /// Returns false if the binding is absent; callers that need sloppy global
+    /// creation should use `assign` instead.
+    pub fn assignLocal(self: *Environment, name: []const u8, v: Value) bool {
+        self.lockBindings();
+        defer self.unlockBindings();
+        if (self.vars.getPtr(name)) |ptr| {
+            gc_mod.barrierValueFrom(self, v);
+            ptr.* = v;
+            return true;
+        }
+        return false;
+    }
+
     pub fn bindingAllocator(self: *const Environment) std.mem.Allocator {
         return self.bindings_allocator orelse self.arena;
     }
@@ -39046,14 +39070,14 @@ pub fn argMapSever(o: *value.Object, i: usize) void {
 pub fn argMapGet(o: *value.Object, i: usize) ?Value {
     const nm = argMapName(o, i) orelse return null;
     const env: *Environment = @ptrCast(@alignCast(o.arg_map_env.?));
-    return env.get(nm);
+    return env.getLocal(nm);
 }
 
 /// Write a mapped index's parameter binding.
 pub fn argMapSet(o: *value.Object, i: usize, v: Value) void {
     const nm = argMapName(o, i) orelse return;
     const env: *Environment = @ptrCast(@alignCast(o.arg_map_env.?));
-    env.assign(nm, v) catch {};
+    _ = env.assignLocal(nm, v);
 }
 
 /// CanonicalNumericIndexString(key): the Number a key denotes when it is the
