@@ -12572,6 +12572,82 @@ test "parallel_js heap_limit_bytes recovers GC cells while sibling Thread is ali
     try std.testing.expect(stats.peak_bytes <= stats.limit_bytes);
 }
 
+test "parallel_js heap_limit_bytes recovers ArrayBuffer bytes while peer runs" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const chunk = 20 * 1024 * 1024;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_threads = true,
+        .enable_gc = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+        .heap_limit_bytes = 32 * 1024 * 1024,
+    });
+    defer ctx.destroy();
+    defer _ = ctx.evaluate(
+        \\if (globalThis.__abRecoveryGate) {
+        \\  Atomics.store(globalThis.__abRecoveryGate, 'stop', 1);
+        \\  Atomics.notify(globalThis.__abRecoveryGate, 'stop');
+        \\}
+        \\if (globalThis.__abRecoveryWorker) {
+        \\  try { globalThis.__abRecoveryWorker.join(); } catch (_) {}
+        \\}
+        \\0;
+    ) catch {};
+
+    const baseline = ctx.gc_array_buffer_bytes_live;
+    const before_attempts = ctx.gc_par_attempts.load(.monotonic);
+    const before_collections = ctx.gc_par_collections.load(.monotonic);
+    const before_running_peer_requests = ctx.gc_par_running_peer_requests.load(.monotonic);
+    const before_peer_publications = ctx.gc_par_peer_publications.load(.monotonic);
+
+    const result = try ctx.evaluate(
+        \\(() => {
+        \\  globalThis.__abRecoveryGate = { ready: 0, stop: 0 };
+        \\  globalThis.__abRecoveryWorker = new Thread((gate) => {
+        \\    Atomics.store(gate, 'ready', 1);
+        \\    Atomics.notify(gate, 'ready');
+        \\    let spin = 0;
+        \\    while (Atomics.load(gate, 'stop') === 0) {
+        \\      spin = (spin + 1) & 0x3fffffff;
+        \\      if (spin === -1) throw new Error('unreachable');
+        \\    }
+        \\    return 7;
+        \\  }, globalThis.__abRecoveryGate);
+        \\  try {
+        \\    while (Atomics.load(globalThis.__abRecoveryGate, 'ready') === 0)
+        \\      Atomics.wait(globalThis.__abRecoveryGate, 'ready', 0, 1);
+        \\    function makeDroppedBuffer() {
+        \\      let dropped = new ArrayBuffer(20 * 1024 * 1024);
+        \\      return dropped.byteLength;
+        \\    }
+        \\    if (makeDroppedBuffer() !== 20 * 1024 * 1024)
+        \\      throw new Error('bad dropped buffer length');
+        \\    const second = new ArrayBuffer(20 * 1024 * 1024);
+        \\    globalThis.__abRecoveryKeep = second;
+        \\    Atomics.store(globalThis.__abRecoveryGate, 'stop', 1);
+        \\    Atomics.notify(globalThis.__abRecoveryGate, 'stop');
+        \\    if (globalThis.__abRecoveryWorker.join() !== 7)
+        \\      throw new Error('bad worker result');
+        \\    return second.byteLength;
+        \\  } finally {
+        \\    Atomics.store(globalThis.__abRecoveryGate, 'stop', 1);
+        \\    Atomics.notify(globalThis.__abRecoveryGate, 'stop');
+        \\    try { globalThis.__abRecoveryWorker.join(); } catch (_) {}
+        \\  }
+        \\})();
+    );
+    try std.testing.expectEqual(@as(f64, @floatFromInt(chunk)), result.asNum());
+    try std.testing.expectEqual(baseline + chunk, ctx.gc_array_buffer_bytes_live);
+    try std.testing.expect(ctx.gc_par_attempts.load(.monotonic) > before_attempts);
+    try std.testing.expect(ctx.gc_par_collections.load(.monotonic) > before_collections);
+    try std.testing.expect(ctx.gc_par_running_peer_requests.load(.monotonic) > before_running_peer_requests);
+    try std.testing.expect(ctx.gc_par_peer_publications.load(.monotonic) > before_peer_publications);
+
+    _ = try ctx.evaluate("globalThis.__abRecoveryKeep = undefined; 0");
+    ctx.collectGarbage();
+    try std.testing.expectEqual(baseline, ctx.gc_array_buffer_bytes_live);
+}
+
 test "parallel_js heap_limit_bytes fails closed inside trace-sensitive locks" {
     if (builtin.single_threaded) return error.SkipZigTest;
     const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{

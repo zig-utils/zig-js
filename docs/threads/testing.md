@@ -130,7 +130,10 @@ public `Context.Options.heap_limit_bytes` allocator-cap and
 `Context.heapBudgetStats()` pressure-diagnostic smoke coverage, plus the
 shared-realm `Thread` OOM survivor/recovery witnesses that keep a sibling
 joinable after one peer exhausts the context cap and prove GC-backed capped
-contexts can recover after unreachable pressure is collected.
+contexts can recover after unreachable pressure is collected. The focused
+heap-cap witnesses also cover no-GIL `ArrayBuffer` byte-slab recovery while a
+real peer thread is running and publishing roots to the abort-safe parallel
+collector.
 
 `zig build threads-test` runs the green WebKit PR-249 allowlist from
 `reference/webkit-249/threads-tests`. CI shards the serialized/GIL leg with

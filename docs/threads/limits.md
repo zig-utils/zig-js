@@ -30,9 +30,10 @@ tests as the matching engine features land.
   closed with `error.OutOfMemory`; GC-backed contexts can collect and retry at
   safe allocation-recovery points. Single-threaded and GIL-capable GC-backed
   contexts also retry reclaimed `ArrayBuffer` byte-slab pressure. Live no-GIL
-  peer recovery is currently proven only for GC-cell slab failures where an
-  active interpreter can drive the abort-safe parallel collector; broader
-  ArrayBuffer byte and side-store no-GIL recovery remains tracked under #30.
+  peer recovery is proven for GC-cell slab failures and safepoint-owned
+  `ArrayBuffer` byte-slab pressure where an active interpreter can drive the
+  abort-safe parallel collector; broader side-store no-GIL recovery remains
+  tracked under #30.
   `ctx.heapBudgetStats()` reports
   `limit_bytes`, `used_bytes`, lifetime `peak_bytes`, and `remaining_bytes` for
   capped contexts.
@@ -220,14 +221,14 @@ Issue #1 remains the umbrella status page.
   This is intentionally an embedder allocator boundary rather than a JavaScript
   heap-shape oracle. Arena-backed caps remain fail-closed and non-reclaimable.
   GC-backed capped contexts can now reclaim at safe GC cell allocation failures
-  and, in single-threaded/GIL-capable contexts, reclaimed `ArrayBuffer` byte
-  pressure, then retry. In no-GIL shared-realm contexts, GC-cell slab recovery is
-  safepoint-owned by the active interpreter and uses the abort-safe parallel
+  and reclaimed `ArrayBuffer` byte pressure, then retry. In no-GIL shared-realm
+  contexts, GC-cell slab and `ArrayBuffer` byte-slab recovery are
+  safepoint-owned by the active interpreter and use the abort-safe parallel
   root-publication collector; allocation still fails closed when recovery is
   attempted outside active JS execution or while holding side-store locks that
   the tracer may need. Remaining emergency-recovery work is tracked in #30:
-  lock-aware side-store and ArrayBuffer-byte pressure coverage under live no-GIL
-  peers without deadlocking GC tracing.
+  lock-aware side-store pressure coverage under live no-GIL peers without
+  deadlocking GC tracing.
 - **Parallel scaling optimization.** Benchmarks show real speedup, but scaling
   is sub-linear. `zig build threads-profile` now provides a repeatable baseline
   against the `.gil = true` fallback for independent compute, shared object
