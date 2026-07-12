@@ -389,7 +389,7 @@ fn estimatedSerializedShardMs(name: []const u8) u64 {
     // CI-observed serialized/GIL corpus costs from the per-case shard summaries.
     // Unknown cases keep a small non-zero default so greedy assignment still
     // spreads the rest of the allowlist evenly by count.
-    if (std.mem.eql(u8, name, "dw1-sort-comparator-callsite-shapes.js")) return 2_543_010;
+    if (std.mem.eql(u8, name, "dw1-sort-comparator-callsite-shapes.js")) return 2_500;
     if (std.mem.eql(u8, name, "jit/tid-tag-3-threads.js")) return 252_632;
     if (std.mem.eql(u8, name, "cve/mc-val-llint-cache-storm.js")) return 190_214;
     if (std.mem.eql(u8, name, "cve/mc-tear-typedarray-detach-grow-shrink.js")) return 169_210;

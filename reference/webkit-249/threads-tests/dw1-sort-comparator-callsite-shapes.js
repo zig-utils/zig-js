@@ -58,11 +58,18 @@ function makeArr(seed, flipped) {
     return a;
 }
 
+// JSC needs enough warmup to tier each callsite shape into DFG. zig-js exposes
+// the shell `noInline` hook as identity and has no JIT tier-up, so matching the
+// sibling DW-1 OSR test's 2000-round warmup keeps the shape coverage without
+// spending tens of CI minutes in interpreter-only prelude.
+const WARMUP_ROUNDS = 2000;
+const EXIT_ROUNDS = 100;
+
 function exercise(sortFn, tag) {
-    for (var i = 0; i < 100000; ++i)
+    for (var i = 0; i < WARMUP_ROUNDS; ++i)
         sortFn(makeArr(i, false));
 
-    for (var i = 0; i < 100; ++i) {
+    for (var i = 0; i < EXIT_ROUNDS; ++i) {
         var arr = makeArr(i, true);
         var ref = arr.slice().sort(function (a, b) { return a.k - b.k; });
         sortFn(arr);
