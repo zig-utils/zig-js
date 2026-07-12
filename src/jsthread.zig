@@ -1079,7 +1079,29 @@ const CondRecord = struct {
     /// rather than a durable queue field.
     sync_handoff_pending: usize = 0,
 
+    fn maybeCompactBeforeAppend(self: *CondRecord) void {
+        if (self.queue_head == 0) return;
+        if (self.queue.items.len < self.queue.capacity) return;
+        const live_len = self.queue.items.len - self.queue_head;
+        if (live_len == 0) {
+            self.queue.clearRetainingCapacity();
+            self.queue_head = 0;
+            return;
+        }
+        // Keep the notify hot path cursor-based, but do not let steady
+        // notify/re-wait churn grow the backing array forever. Compact only
+        // when an append would otherwise allocate and the consumed prefix is
+        // large enough to make the copy amortized.
+        if (self.queue_head < condition_queue_reserve_granularity) return;
+        if (self.queue_head < live_len) return;
+        const live = self.queue.items[self.queue_head..];
+        std.mem.copyForwards(CondEntry, self.queue.items[0..live.len], live);
+        self.queue.shrinkRetainingCapacity(live.len);
+        self.queue_head = 0;
+    }
+
     fn appendWaiter(self: *CondRecord, arena: std.mem.Allocator, entry: CondEntry) !void {
+        self.maybeCompactBeforeAppend();
         const spare = self.queue.capacity - self.queue.items.len;
         if (spare == 0) {
             try self.queue.ensureTotalCapacity(arena, self.queue.items.len + condition_queue_reserve_granularity);
@@ -1156,6 +1178,36 @@ test "condition queue reserves capacity chunks" {
     while (rec.popWaiter()) |_| {}
     try std.testing.expectEqual(@as(usize, 0), rec.queue_head);
     try std.testing.expectEqual(@as(usize, 0), rec.queue.items.len);
+}
+
+test "condition queue compacts consumed head before growing" {
+    var rec = CondRecord{ .gil = undefined };
+    const a = std.testing.allocator;
+    defer rec.queue.deinit(a);
+
+    var tickets = try a.alloc(SyncCondTicket, condition_queue_reserve_granularity * 2 + 1);
+    defer a.free(tickets);
+    @memset(tickets, .{});
+
+    var i: usize = 0;
+    while (i < condition_queue_reserve_granularity * 2) : (i += 1) {
+        try rec.appendWaiter(a, .{ .sync = &tickets[i] });
+    }
+    const full_capacity = rec.queue.capacity;
+    try std.testing.expectEqual(full_capacity, rec.queue.items.len);
+
+    i = 0;
+    while (i < condition_queue_reserve_granularity) : (i += 1) {
+        _ = rec.popWaiter() orelse return error.TestExpectedEqual;
+    }
+    try std.testing.expectEqual(condition_queue_reserve_granularity, rec.queue_head);
+
+    try rec.appendWaiter(a, .{ .sync = &tickets[condition_queue_reserve_granularity * 2] });
+    try std.testing.expectEqual(full_capacity, rec.queue.capacity);
+    try std.testing.expectEqual(@as(usize, 0), rec.queue_head);
+    try std.testing.expectEqual(condition_queue_reserve_granularity + 1, rec.queue.items.len);
+    try std.testing.expectEqual(@intFromPtr(&tickets[condition_queue_reserve_granularity]), @intFromPtr(rec.queue.items[0].sync));
+    try std.testing.expectEqual(@intFromPtr(&tickets[condition_queue_reserve_granularity * 2]), @intFromPtr(rec.queue.items[condition_queue_reserve_granularity].sync));
 }
 
 test "condition sync handoff countdown tracks acknowledged tickets" {
