@@ -293,6 +293,10 @@ pub fn build(b: *std.Build) void {
     const run_threads_profile = b.addRunArtifact(threads_profile);
     const threads_profile_case = b.option([]const u8, "threads-profile-case", "Run one exact threads-profile scenario name");
     if (threads_profile_case) |case| run_threads_profile.addArg(case);
+    const threads_profile_max_workers = b.option(usize, "threads-profile-max-workers", "Cap worker-count rows for a focused threads-profile case");
+    if (threads_profile_case != null) {
+        if (threads_profile_max_workers) |max_workers| run_threads_profile.addArg(b.fmt("{d}", .{max_workers}));
+    }
     const threads_profile_step = b.step("threads-profile", "Profile no-GIL Thread contention, async waits, and .gil fallback cost");
     threads_profile_step.dependOn(&run_threads_profile.step);
 

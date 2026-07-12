@@ -239,7 +239,7 @@ const scenarios = [_]Scenario{
         \\let sharedBinding = 0;
         \\globalThis.worker = function(id) {
         \\  var acc = id;
-        \\  for (var i = 0; i < 384; i = i + 1) {
+        \\  for (var i = 0; i < 64; i = i + 1) {
         \\    sharedBinding = (sharedBinding | 0) + 1;
         \\    acc = acc + (sharedBinding | 0);
         \\  }
@@ -1435,17 +1435,34 @@ pub fn main(init: std.process.Init) !void {
     var args = std.process.Args.Iterator.init(init.minimal.args);
     _ = args.next();
     const scenario_filter = args.next();
+    const max_workers_arg = args.next();
+    const max_workers = if (max_workers_arg) |arg| blk: {
+        const parsed = try std.fmt.parseInt(usize, arg, 10);
+        if (parsed == 0) return error.InvalidWorkerCap;
+        break :blk parsed;
+    } else null;
 
     const cores = std.Thread.getCpuCount() catch 4;
-    const worker_counts = if (cores >= 8)
+    const default_worker_counts = if (cores >= 8)
         &[_]usize{ 1, 2, 4, 8 }
     else if (cores >= 4)
         &[_]usize{ 1, 2, 4 }
     else
         &[_]usize{ 1, 2 };
+    var worker_count_buf: [4]usize = undefined;
+    var worker_count_len: usize = 0;
+    for (default_worker_counts) |count| {
+        if (max_workers == null or count <= max_workers.?) {
+            worker_count_buf[worker_count_len] = count;
+            worker_count_len += 1;
+        }
+    }
+    if (worker_count_len == 0) return error.InvalidWorkerCap;
+    const worker_counts = worker_count_buf[0..worker_count_len];
 
     std.debug.print("zig-js shared-realm Thread contention profile\n", .{});
     std.debug.print("cores: {d}; no-GIL is Context.createWith(.{{ .enable_threads = true }}), serialized is .gil = true\n", .{cores});
+    if (max_workers) |max| std.debug.print("worker row cap: <= {d}\n", .{max});
     std.debug.print("events = logical contention (Lock/Condition/property wait/asyncHold); parks = timed wait/pump iterations including Thread.join\n", .{});
     std.debug.print("shape/newsh/syld = hidden-class transition requests / newly-created child shapes / transition-lock yields\n", .{});
     std.debug.print("lcnt/aq = direct contended Lock.hold attempts / queued Lock.asyncHold grants, split out from events\n", .{});
@@ -1454,7 +1471,7 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("waitus/jus/lus/cus/pus = total native wait microseconds, then join/lock/condition/property wait microseconds\n", .{});
     std.debug.print("async/done = aggregate async waiter registrations/settlements; caw/cad and paw/pad split Condition.asyncWait versus property waitAsync\n", .{});
     std.debug.print("empty/jobs = run-loop task-pump empty fast-path hits / delivered grant jobs; hold/cjob split asyncHold vs Condition.asyncWait reacquire jobs\n", .{});
-    std.debug.print("focused filters: worker messages, worker teardown, promise microtasks, promise reactions, promise thenables\n", .{});
+    std.debug.print("focused filters: global binding churn, worker messages, worker teardown, promise microtasks, promise reactions, promise thenables\n", .{});
 
     if (scenario_filter) |filter| {
         if (std.mem.eql(u8, filter, "worker messages")) {

@@ -30,6 +30,7 @@ For performance work, also run:
 
 ```sh
 zig build threads-profile
+zig build threads-profile -Dthreads-profile-case='global binding churn' -Dthreads-profile-max-workers=1
 zig build threads-profile -Dthreads-profile-case='condition asyncWait'
 zig build threads-profile -Dthreads-profile-case='condition asyncWait parked'
 zig build threads-profile -Dthreads-profile-debug=true -Dthreads-profile-case='condition asyncWait'
@@ -50,7 +51,9 @@ no-GIL threaded GC, and `.gil = true` context modes, including the reusable
 GC-cell slab backing.
 
 `-Dthreads-profile-case='<exact scenario name>'` runs one shared-realm row
-across the host's 1/2/4/8-thread matrix and skips Worker tables. Add
+across the host's 1/2/4/8-thread matrix and skips Worker tables.
+`-Dthreads-profile-max-workers=N` caps those rows for focused smoke checks or
+debugging, while full local baselines should omit the cap. Add
 `-Dthreads-profile-debug=true` for a symbolized safety-check build when
 diagnosing a crash; timing from that mode is not a performance baseline.
 
