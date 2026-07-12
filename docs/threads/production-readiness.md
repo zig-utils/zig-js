@@ -722,10 +722,12 @@ as embedders exercise more threaded host patterns.
   and releases the completion mutex on termination/error unwinds, and joiners
   only publish `gc_parked` for the actual native condition wait rather than
   while pumping tasks, so failed or active `Thread.join()` calls do not leave
-  stale or moving frozen-peer state behind. Requested shell/host GC leaves an
-  elected mid-script parallel collector untouched while threads are live, and a
-  later quiescent collection aborts stale parallel mark state before starting a
-  fresh precise mark.
+  stale or moving frozen-peer state behind. Native-callback entry is covered by
+  a mid-script witness where no-GIL workers repeatedly enter VM closures through
+  `Array.prototype.map` while the collector publishes roots. Requested
+  shell/host GC leaves an elected mid-script parallel collector untouched while
+  threads are live, and a later quiescent collection aborts stale parallel mark
+  state before starting a fresh precise mark.
 - The lifecycle fuzzer profile adds deterministic resizable `ArrayBuffer` /
   `DataView` constructor races under no-GIL resize pressure, termination storms
   where main JS throws with parked/unjoined `Thread`s, exact-counter oracles for script

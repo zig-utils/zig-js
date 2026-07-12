@@ -550,7 +550,10 @@ least one publication generation, and maximum collector-side pause does not
 exceed total pause. The same coherence check keeps worst-generation publication
 polls and worst-attempt finish retries bounded by their aggregate totals.
 End-to-end witnesses require both directly observed parked peers and roots
-actually published by running sync-wait peers.
+actually published by running sync-wait peers. A focused native-callback
+witness also runs VM-lowered closures through `Array.prototype.map` inside
+no-GIL workers while mid-script collection runs, so tree-walker callback entry,
+captured upvalues, root publication, and the mid-GC barrier are checked together.
 
 The focused `condition asyncWait` profile is also a nursery lifetime gate. A
 Debug run exposed a GC-poisoned Promise stored only in the native condition

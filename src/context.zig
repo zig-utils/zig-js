@@ -12914,6 +12914,72 @@ test "parallel_js (M3): thrown Thread completion roots survive mid-script parall
     try std.testing.expect(ctx.gc_par_collections.load(.monotonic) > before_collections);
 }
 
+test "parallel_js (M3): native callback VM closures survive mid-script parallel GC" {
+    // #14 coverage: each worker enters a VM-lowered closure through a native
+    // Array.prototype.map callback while other no-GIL workers allocate enough
+    // to elect the abort-safe mid-script collector. The callback reads captured
+    // upvalues and a nested object; if tree-walker/native-callback entry, root
+    // publication, or the mid-GC barrier mishandles that frame, the exact sum or
+    // telemetry oracle fails.
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_threads = true,
+        .enable_gc = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+        .parallel_midscript_gc = true,
+    });
+    defer ctx.destroy();
+
+    const src =
+        \\(() => {
+        \\  const carrier = (() => {
+        \\    const base = { value: 17, nested: { bonus: 5 } };
+        \\    return {
+        \\      cb(x) {
+        \\        const local = { x, base };
+        \\        return local.x + base.value + base.nested.bonus;
+        \\      }
+        \\    };
+        \\  })();
+        \\  const N = 3;
+        \\  const rounds = 8;
+        \\  const threads = [];
+        \\  for (let t = 0; t < N; t++) {
+        \\    threads.push(new Thread((fn, tid) => {
+        \\      const keep = [];
+        \\      let sum = 0;
+        \\      for (let round = 0; round < rounds; round++) {
+        \\        const mapped = [1, 2, 3, 4, 5].map(fn);
+        \\        for (const v of mapped) sum += v;
+        \\        for (let i = 0; i < 700; i++) {
+        \\          const garbage = { tid, round, i, nested: { fn, value: i + round } };
+        \\          if ((i & 127) === 0) keep.push(garbage);
+        \\        }
+        \\        let spin = 0;
+        \\        for (let i = 0; i < 6000; i++) spin = (spin + i + round + tid) & 0x3fffffff;
+        \\        if (spin < 0) keep.push({ never: true });
+        \\      }
+        \\      return sum + keep.length;
+        \\    }, carrier.cb, t));
+        \\  }
+        \\  let total = 0;
+        \\  for (const t of threads) total += t.join();
+        \\  return total;
+        \\})();
+    ;
+
+    const before_attempts = ctx.gc_par_attempts.load(.monotonic);
+    const before_collections = ctx.gc_par_collections.load(.monotonic);
+    const result = try ctx.evaluate(src);
+    try std.testing.expectEqual(@as(f64, 3 * ((8 * 125) + (8 * 6))), result.asNum());
+    try std.testing.expect(ctx.gc_par_attempts.load(.monotonic) > before_attempts);
+    try std.testing.expect(ctx.gc_par_collections.load(.monotonic) > before_collections);
+    try expectParallelGcTelemetryCoherent(ctx);
+    try std.testing.expect(ctx.gc_par_running_peer_requests.load(.monotonic) > 0);
+    try std.testing.expect(ctx.gc_par_peer_publications.load(.monotonic) > 0);
+}
+
 test "parallel_gc soak: sustained parallel allocation reclaims across rounds, no leak/UAF" {
     // GC-maturity (#2): a *sustained-load soak*. Each outer round spawns 4 GIL-free
     // workers that build and discard heavy object graphs in parallel, then join.
