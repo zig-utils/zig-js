@@ -32,8 +32,11 @@ tests as the matching engine features land.
   contexts also retry reclaimed `ArrayBuffer` byte-slab pressure. Live no-GIL
   peer recovery is proven for GC-cell slab failures and safepoint-owned
   `ArrayBuffer` byte-slab pressure where an active interpreter can drive the
-  abort-safe parallel collector; broader side-store no-GIL recovery remains
-  tracked under #30.
+  abort-safe parallel collector. Mutable generator / iterator-helper side
+  stores are a distinct fail-closed class today: the parallel tracer defers them
+  to a world-stopped finish, so allocation-failure recovery aborts rather than
+  claiming a sweep while deferred generator/iterator edges remain. Broader
+  side-store no-GIL recovery remains tracked under #30 / #36.
   `ctx.heapBudgetStats()` reports
   `limit_bytes`, `used_bytes`, lifetime `peak_bytes`, and `remaining_bytes` for
   capped contexts.

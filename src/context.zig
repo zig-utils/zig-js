@@ -12745,6 +12745,79 @@ test "parallel_js heap_limit_bytes fails closed inside trace-sensitive locks" {
     try std.testing.expectEqual(before_attempts, ctx.gc_par_attempts.load(.monotonic));
 }
 
+test "parallel_js heap_limit_bytes fails closed with deferred generator tracing" {
+    // #36 policy witness: a rooted suspended generator makes the parallel marker
+    // defer tracing its mutable execution buffers to a world-stopped finish.
+    // Allocation-failure recovery must not treat that as a successful no-GIL
+    // sweep while a peer is live; it aborts instead, preserving the invariant
+    // that generator/iterator side stores are not generically recoverable yet.
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_threads = true,
+        .enable_gc = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+        .heap_limit_bytes = 8 * 1024 * 1024,
+    });
+    defer ctx.destroy();
+
+    const prepared = try ctx.evaluate(
+        \\(() => {
+        \\  function* gen() {
+        \\    const retained = { marker: 41, nested: { value: 1 } };
+        \\    yield retained;
+        \\    return retained.marker + retained.nested.value;
+        \\  }
+        \\  globalThis.__deferredRecoveryGenerator = gen();
+        \\  return globalThis.__deferredRecoveryGenerator.next().value.marker;
+        \\})();
+    );
+    try std.testing.expectEqual(@as(f64, 41), prepared.asNum());
+
+    var sibling: jsthread.ThreadRecord = .{ .id = 999, .gil = ctx.gil.?, .ctx = ctx };
+    {
+        ctx.gil.?.lockApi();
+        defer ctx.gil.?.unlockApi();
+        try ctx.reserveJsThreadsLocked(1);
+        ctx.js_threads.appendAssumeCapacity(&sibling);
+    }
+    defer {
+        ctx.gil.?.lockApi();
+        var i: usize = ctx.js_threads.items.len;
+        while (i > 0) {
+            i -= 1;
+            if (ctx.js_threads.items[i] == &sibling) {
+                _ = ctx.js_threads.swapRemove(i);
+                break;
+            }
+        }
+        ctx.gil.?.unlockApi();
+    }
+
+    const before_attempts = ctx.gc_par_attempts.load(.monotonic);
+    const before_collections = ctx.gc_par_collections.load(.monotonic);
+    const before_aborts = ctx.gc_par_aborts.load(.monotonic);
+    const before_round_aborts = ctx.gc_par_round_limit_aborts.load(.monotonic);
+    const before_deferred_rounds = ctx.gc_par_deferred_rounds.load(.monotonic);
+
+    const gc_saved = gc_mod.setActiveHeap(ctx.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const ss_saved = stack_scan.enter(@frameAddress());
+    defer stack_scan.leave(ss_saved);
+    var machine = ctx.interpreter();
+    try ctx.pushActiveInterpreter(&machine);
+    defer ctx.popActiveInterpreter(&machine);
+    const ai_saved = gc_mod.setActiveInterpreter(&machine);
+    defer _ = gc_mod.setActiveInterpreter(ai_saved);
+
+    try std.testing.expect(!ctx.collectForAllocationFailure(&machine));
+    try std.testing.expect(ctx.gc_par_attempts.load(.monotonic) > before_attempts);
+    try std.testing.expectEqual(before_collections, ctx.gc_par_collections.load(.monotonic));
+    try std.testing.expect(ctx.gc_par_aborts.load(.monotonic) > before_aborts);
+    try std.testing.expect(ctx.gc_par_round_limit_aborts.load(.monotonic) > before_round_aborts);
+    try std.testing.expect(ctx.gc_par_deferred_rounds.load(.monotonic) > before_deferred_rounds);
+}
+
 test "parallel_js (M3): sync wait peers publish roots for mid-script parallel GC" {
     // Sync property waits, Condition waits, and contended Lock acquisition are
     // not frozen `gc_parked` peers: they periodically pump tasks between short

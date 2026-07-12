@@ -135,7 +135,10 @@ heap-cap witnesses also cover no-GIL `ArrayBuffer` byte-slab recovery while a
 real peer thread is running and publishing roots to the abort-safe parallel
 collector, plus the trace-sensitive async-generator request lock guard that
 keeps allocation-failure recovery out of mutable generator side-store critical
-sections.
+sections. A separate deferred-generator witness roots a suspended generator and
+checks that no-GIL allocation-failure recovery aborts instead of sweeping while
+parallel tracing has deferred the generator's mutable execution buffers to a
+world-stopped finish.
 
 `zig build threads-test` runs the green WebKit PR-249 allowlist from
 `reference/webkit-249/threads-tests`. CI shards the serialized/GIL leg with
