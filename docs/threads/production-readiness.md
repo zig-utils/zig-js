@@ -203,8 +203,12 @@ Known performance/maturity work:
   boundary pause time, young input cells/bytes, reclaimed cells/bytes, promoted
   cells/bytes, byte survival/reclamation percentages, the next nursery
   threshold, minor/full cycle deltas, and repeated-batch threshold drift instead
-  of relying only on a one-shot object workload. The no-GIL bootstrap row should
-  also be read against the explicit parallel-lock deferral above: returned
+  of relying only on a one-shot object workload. The nursery threshold policy now
+  keeps low-survival decay gradual but caps upward growth at the observed young
+  batch size, avoiding the earlier high-survival pattern where one fixed-size
+  batch could raise the threshold enough to skip the next minor and carry dead
+  young cells to a later boundary. The no-GIL bootstrap row should also be read
+  against the explicit parallel-lock deferral above: returned
   contexts are fully parallel, but private global/API installation no longer
   measures the atomic allocator lock on every cell allocation. Once parallel,
   `threads-profile` exposes LockedArena `aacq`/`acnt`/`aspn` and Environment

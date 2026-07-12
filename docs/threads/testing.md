@@ -693,7 +693,10 @@ cycle, reclaimed cells/bytes, promoted cells/bytes, byte survival/reclamation
 percentages, the next nursery threshold, minor/full cycle deltas, and a repeated
 batch threshold-drift row for each retention shape. This keeps nursery tuning tied
 to reclamation quality, pause cost, and threshold trajectory instead of a single
-post-cycle number.
+post-cycle number. Nursery threshold decay remains gradual after low-survival
+cycles, while upward growth is capped at the just-observed young batch size so
+high-survival bursts do not skip the next quiescent minor and carry an otherwise
+dead young batch to a later boundary.
 Direct `GcCellBacking` unit tests cover lazy fresh-slot bumping, free-list
 recycling, fresh-chunk cursor advancement, ownership span/hint classification,
 sorted address-index lookup with chunk/bump-offset/address metadata kept in
