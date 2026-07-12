@@ -802,7 +802,7 @@ fn printPromiseProfile(gpa: std.mem.Allocator, io: std.Io, workers: []const usiz
 fn printScenario(gpa: std.mem.Allocator, io: std.Io, scenario: Scenario, workers: []const usize) !void {
     std.debug.print("\n{s}\n", .{scenario.name});
     std.debug.print("{s:>8} {s:>14} {s:>14} {s:>12} {s:>12}" ++
-        " {s:>10} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>10} {s:>10} {s:>9} {s:>9} {s:>9} {s:>10}", .{
+        " {s:>10} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>10} {s:>10} {s:>9} {s:>9} {s:>9} {s:>10}", .{
         "threads",
         "no-gil ns",
         "gil ns",
@@ -815,6 +815,9 @@ fn printScenario(gpa: std.mem.Allocator, io: std.Io, scenario: Scenario, workers
         "ng aacq",
         "ng acnt",
         "ng aspn",
+        "ng eacq",
+        "ng ecnt",
+        "ng espn",
         "ng lcnt",
         "ng aq",
         "ng parks",
@@ -840,7 +843,7 @@ fn printScenario(gpa: std.mem.Allocator, io: std.Io, scenario: Scenario, workers
         "ng hold",
         "ng cjob",
     });
-    std.debug.print(" {s:>10} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>10} {s:>10} {s:>9} {s:>9} {s:>9} {s:>10} {s:>9} {s:>9} {s:>9} {s:>9} {s:>10} {s:>10} {s:>9} {s:>9} {s:>9} {s:>9} {s:>10} {s:>10} {s:>10} {s:>10}\n", .{
+    std.debug.print(" {s:>10} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>10} {s:>10} {s:>9} {s:>9} {s:>9} {s:>10} {s:>9} {s:>9} {s:>9} {s:>9} {s:>10} {s:>10} {s:>9} {s:>9} {s:>9} {s:>9} {s:>10} {s:>10} {s:>10} {s:>10}\n", .{
         "gil events",
         "gil shape",
         "gil newsh",
@@ -848,6 +851,9 @@ fn printScenario(gpa: std.mem.Allocator, io: std.Io, scenario: Scenario, workers
         "gil aacq",
         "gil acnt",
         "gil aspn",
+        "gil eacq",
+        "gil ecnt",
+        "gil espn",
         "gil lcnt",
         "gil aq",
         "gil parks",
@@ -887,7 +893,7 @@ fn printScenario(gpa: std.mem.Allocator, io: std.Io, scenario: Scenario, workers
             @as(f64, @floatFromInt(@max(parallel_ns, 1)));
 
         std.debug.print("{d:>8} {d:>14} {d:>14} {d:>11.2}x {d:>11.2}x" ++
-            " {d:>10} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>10} {d:>10}", .{
+            " {d:>10} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>10} {d:>10}", .{
             n,
             parallel_ns,
             gil_ns,
@@ -900,6 +906,9 @@ fn printScenario(gpa: std.mem.Allocator, io: std.Io, scenario: Scenario, workers
             parallel.stats.arena_lock_acquires,
             parallel.stats.arena_lock_contentions,
             parallel.stats.arena_lock_spins,
+            parallel.stats.env_lock_acquires,
+            parallel.stats.env_lock_contentions,
+            parallel.stats.env_lock_spins,
             parallel.stats.lock_contentions,
             parallel.stats.async_hold_queued,
             parallel.stats.parks(),
@@ -925,7 +934,7 @@ fn printScenario(gpa: std.mem.Allocator, io: std.Io, scenario: Scenario, workers
             parallel.stats.task_pump_async_hold_jobs,
             parallel.stats.task_pump_condition_jobs,
         });
-        std.debug.print(" {d:>10} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>10} {d:>10}", .{
+        std.debug.print(" {d:>10} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>9} {d:>10} {d:>10}", .{
             gil.stats.events(),
             gil.shape.transition_requests,
             gil.shape.transition_misses,
@@ -933,6 +942,9 @@ fn printScenario(gpa: std.mem.Allocator, io: std.Io, scenario: Scenario, workers
             gil.stats.arena_lock_acquires,
             gil.stats.arena_lock_contentions,
             gil.stats.arena_lock_spins,
+            gil.stats.env_lock_acquires,
+            gil.stats.env_lock_contentions,
+            gil.stats.env_lock_spins,
             gil.stats.lock_contentions,
             gil.stats.async_hold_queued,
             gil.stats.parks(),

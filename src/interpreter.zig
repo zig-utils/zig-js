@@ -459,6 +459,7 @@ pub const Environment = struct {
         while (!self.binding_lock.tryLock()) : (spins += 1) {
             if ((spins & 0xff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
         }
+        jsthread.recordEnvLockAcquire(spins);
         gc_runtime.enterTraceSensitiveLock();
     }
     pub fn unlockBindings(self: *Environment) void {

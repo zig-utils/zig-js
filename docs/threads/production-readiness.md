@@ -204,9 +204,11 @@ Known performance/maturity work:
   also be read against the explicit parallel-lock deferral above: returned
   contexts are fully parallel, but private global/API installation no longer
   measures the atomic allocator lock on every cell allocation. Once parallel,
-  `threads-profile` exposes LockedArena `aacq`/`acnt`/`aspn` columns in the
-  shared-realm rows so allocation-heavy profile cases can separate arena lock
-  traffic from hidden-class and synchronization pressure.
+  `threads-profile` exposes LockedArena `aacq`/`acnt`/`aspn` and Environment
+  binding-lock `eacq`/`ecnt`/`espn` columns in the shared-realm rows so
+  allocation-heavy and global/environment-binding-heavy profile cases can
+  separate arena lock traffic from binding-table, hidden-class, and
+  synchronization pressure.
   cell allocation is locked per size class, so unrelated cell sizes can use
   their slab/free-list fast paths concurrently. Only chunk growth, chunk
   metadata, and delegated non-cell side storage take the separate

@@ -113,6 +113,9 @@ pub const ContentionStats = struct {
     arena_lock_acquires: u64 = 0,
     arena_lock_contentions: u64 = 0,
     arena_lock_spins: u64 = 0,
+    env_lock_acquires: u64 = 0,
+    env_lock_contentions: u64 = 0,
+    env_lock_spins: u64 = 0,
     thread_join_wait_ns: u64 = 0,
     lock_wait_ns: u64 = 0,
     condition_wait_ns: u64 = 0,
@@ -167,6 +170,9 @@ const ContentionCounters = struct {
     arena_lock_acquires: std.atomic.Value(u64) = .init(0),
     arena_lock_contentions: std.atomic.Value(u64) = .init(0),
     arena_lock_spins: std.atomic.Value(u64) = .init(0),
+    env_lock_acquires: std.atomic.Value(u64) = .init(0),
+    env_lock_contentions: std.atomic.Value(u64) = .init(0),
+    env_lock_spins: std.atomic.Value(u64) = .init(0),
     thread_join_wait_ns: std.atomic.Value(u64) = .init(0),
     lock_wait_ns: std.atomic.Value(u64) = .init(0),
     condition_wait_ns: std.atomic.Value(u64) = .init(0),
@@ -205,6 +211,9 @@ pub fn resetContentionStats() void {
     contention_counters.arena_lock_acquires.store(0, .release);
     contention_counters.arena_lock_contentions.store(0, .release);
     contention_counters.arena_lock_spins.store(0, .release);
+    contention_counters.env_lock_acquires.store(0, .release);
+    contention_counters.env_lock_contentions.store(0, .release);
+    contention_counters.env_lock_spins.store(0, .release);
     contention_counters.thread_join_wait_ns.store(0, .release);
     contention_counters.lock_wait_ns.store(0, .release);
     contention_counters.condition_wait_ns.store(0, .release);
@@ -241,6 +250,9 @@ pub fn contentionStats() ContentionStats {
         .arena_lock_acquires = contention_counters.arena_lock_acquires.load(.acquire),
         .arena_lock_contentions = contention_counters.arena_lock_contentions.load(.acquire),
         .arena_lock_spins = contention_counters.arena_lock_spins.load(.acquire),
+        .env_lock_acquires = contention_counters.env_lock_acquires.load(.acquire),
+        .env_lock_contentions = contention_counters.env_lock_contentions.load(.acquire),
+        .env_lock_spins = contention_counters.env_lock_spins.load(.acquire),
         .thread_join_wait_ns = contention_counters.thread_join_wait_ns.load(.acquire),
         .lock_wait_ns = contention_counters.lock_wait_ns.load(.acquire),
         .condition_wait_ns = contention_counters.condition_wait_ns.load(.acquire),
@@ -263,6 +275,14 @@ pub inline fn recordArenaLockAcquire(spins: usize) void {
     if (spins > 0) {
         bumpContention("arena_lock_contentions");
         addContention("arena_lock_spins", @intCast(spins));
+    }
+}
+
+pub inline fn recordEnvLockAcquire(spins: usize) void {
+    bumpContention("env_lock_acquires");
+    if (spins > 0) {
+        bumpContention("env_lock_contentions");
+        addContention("env_lock_spins", @intCast(spins));
     }
 }
 
@@ -330,6 +350,7 @@ test "jsthread contention stats reset and snapshot" {
     recordWorkerChannelEmptyPop();
     recordWorkerChannelClose();
     recordArenaLockAcquire(3);
+    recordEnvLockAcquire(5);
     finishContentionWaitTimer("thread_join_wait_ns", 0);
     finishContentionWaitTimer("lock_wait_ns", 0);
     finishContentionWaitTimer("condition_wait_ns", 0);
@@ -351,6 +372,9 @@ test "jsthread contention stats reset and snapshot" {
     try std.testing.expectEqual(@as(u64, 1), stats.arena_lock_acquires);
     try std.testing.expectEqual(@as(u64, 1), stats.arena_lock_contentions);
     try std.testing.expectEqual(@as(u64, 3), stats.arena_lock_spins);
+    try std.testing.expectEqual(@as(u64, 1), stats.env_lock_acquires);
+    try std.testing.expectEqual(@as(u64, 1), stats.env_lock_contentions);
+    try std.testing.expectEqual(@as(u64, 5), stats.env_lock_spins);
     try std.testing.expect(stats.thread_join_wait_ns > 0);
     try std.testing.expect(stats.lock_wait_ns > 0);
     try std.testing.expect(stats.condition_wait_ns > 0);
@@ -370,6 +394,12 @@ test "jsthread contention stats reset and snapshot" {
     try std.testing.expectEqual(@as(u64, 0), contentionStats().worker_channel_pops);
     try std.testing.expectEqual(@as(u64, 0), contentionStats().worker_channel_empty_pops);
     try std.testing.expectEqual(@as(u64, 0), contentionStats().worker_channel_closes);
+    try std.testing.expectEqual(@as(u64, 0), contentionStats().arena_lock_acquires);
+    try std.testing.expectEqual(@as(u64, 0), contentionStats().arena_lock_contentions);
+    try std.testing.expectEqual(@as(u64, 0), contentionStats().arena_lock_spins);
+    try std.testing.expectEqual(@as(u64, 0), contentionStats().env_lock_acquires);
+    try std.testing.expectEqual(@as(u64, 0), contentionStats().env_lock_contentions);
+    try std.testing.expectEqual(@as(u64, 0), contentionStats().env_lock_spins);
     try std.testing.expectEqual(@as(u64, 0), contentionStats().waitNs());
     disableContentionStats();
 }
