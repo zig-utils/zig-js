@@ -107,6 +107,8 @@ pub const ContentionStats = struct {
     task_pump_jobs: u64 = 0,
     task_pump_async_hold_jobs: u64 = 0,
     task_pump_condition_jobs: u64 = 0,
+    condition_queue_grows: u64 = 0,
+    condition_queue_compactions: u64 = 0,
     worker_channel_pushes: u64 = 0,
     worker_channel_pops: u64 = 0,
     worker_channel_empty_pops: u64 = 0,
@@ -173,6 +175,8 @@ const ContentionCounters = struct {
     task_pump_jobs: std.atomic.Value(u64) = .init(0),
     task_pump_async_hold_jobs: std.atomic.Value(u64) = .init(0),
     task_pump_condition_jobs: std.atomic.Value(u64) = .init(0),
+    condition_queue_grows: std.atomic.Value(u64) = .init(0),
+    condition_queue_compactions: std.atomic.Value(u64) = .init(0),
     worker_channel_pushes: std.atomic.Value(u64) = .init(0),
     worker_channel_pops: std.atomic.Value(u64) = .init(0),
     worker_channel_empty_pops: std.atomic.Value(u64) = .init(0),
@@ -214,6 +218,8 @@ pub fn resetContentionStats() void {
     contention_counters.task_pump_jobs.store(0, .release);
     contention_counters.task_pump_async_hold_jobs.store(0, .release);
     contention_counters.task_pump_condition_jobs.store(0, .release);
+    contention_counters.condition_queue_grows.store(0, .release);
+    contention_counters.condition_queue_compactions.store(0, .release);
     contention_counters.worker_channel_pushes.store(0, .release);
     contention_counters.worker_channel_pops.store(0, .release);
     contention_counters.worker_channel_empty_pops.store(0, .release);
@@ -256,6 +262,8 @@ pub fn contentionStats() ContentionStats {
         .task_pump_jobs = contention_counters.task_pump_jobs.load(.acquire),
         .task_pump_async_hold_jobs = contention_counters.task_pump_async_hold_jobs.load(.acquire),
         .task_pump_condition_jobs = contention_counters.task_pump_condition_jobs.load(.acquire),
+        .condition_queue_grows = contention_counters.condition_queue_grows.load(.acquire),
+        .condition_queue_compactions = contention_counters.condition_queue_compactions.load(.acquire),
         .worker_channel_pushes = contention_counters.worker_channel_pushes.load(.acquire),
         .worker_channel_pops = contention_counters.worker_channel_pops.load(.acquire),
         .worker_channel_empty_pops = contention_counters.worker_channel_empty_pops.load(.acquire),
@@ -367,6 +375,8 @@ test "jsthread contention stats reset and snapshot" {
     bumpContention("task_pump_jobs");
     bumpContention("task_pump_async_hold_jobs");
     bumpContention("task_pump_condition_jobs");
+    bumpContention("condition_queue_grows");
+    bumpContention("condition_queue_compactions");
     recordWorkerChannelPush();
     recordWorkerChannelPop();
     recordWorkerChannelEmptyPop();
@@ -390,6 +400,8 @@ test "jsthread contention stats reset and snapshot" {
     try std.testing.expectEqual(@as(u64, 1), stats.task_pump_jobs);
     try std.testing.expectEqual(@as(u64, 1), stats.task_pump_async_hold_jobs);
     try std.testing.expectEqual(@as(u64, 1), stats.task_pump_condition_jobs);
+    try std.testing.expectEqual(@as(u64, 1), stats.condition_queue_grows);
+    try std.testing.expectEqual(@as(u64, 1), stats.condition_queue_compactions);
     try std.testing.expectEqual(@as(u64, 1), stats.worker_channel_pushes);
     try std.testing.expectEqual(@as(u64, 1), stats.worker_channel_pops);
     try std.testing.expectEqual(@as(u64, 1), stats.worker_channel_empty_pops);
@@ -424,6 +436,8 @@ test "jsthread contention stats reset and snapshot" {
     try std.testing.expectEqual(@as(u64, 0), contentionStats().task_pump_jobs);
     try std.testing.expectEqual(@as(u64, 0), contentionStats().task_pump_async_hold_jobs);
     try std.testing.expectEqual(@as(u64, 0), contentionStats().task_pump_condition_jobs);
+    try std.testing.expectEqual(@as(u64, 0), contentionStats().condition_queue_grows);
+    try std.testing.expectEqual(@as(u64, 0), contentionStats().condition_queue_compactions);
     try std.testing.expectEqual(@as(u64, 0), contentionStats().worker_channel_pushes);
     try std.testing.expectEqual(@as(u64, 0), contentionStats().worker_channel_pops);
     try std.testing.expectEqual(@as(u64, 0), contentionStats().worker_channel_empty_pops);
@@ -1098,6 +1112,7 @@ const CondRecord = struct {
         std.mem.copyForwards(CondEntry, self.queue.items[0..live.len], live);
         self.queue.shrinkRetainingCapacity(live.len);
         self.queue_head = 0;
+        bumpContention("condition_queue_compactions");
     }
 
     fn appendWaiter(self: *CondRecord, arena: std.mem.Allocator, entry: CondEntry) !void {
@@ -1105,6 +1120,7 @@ const CondRecord = struct {
         const spare = self.queue.capacity - self.queue.items.len;
         if (spare == 0) {
             try self.queue.ensureTotalCapacity(arena, self.queue.items.len + condition_queue_reserve_granularity);
+            bumpContention("condition_queue_grows");
         }
         self.queue.appendAssumeCapacity(entry);
     }
@@ -1181,6 +1197,9 @@ test "condition queue reserves capacity chunks" {
 }
 
 test "condition queue compacts consumed head before growing" {
+    resetContentionStats();
+    defer disableContentionStats();
+
     var rec = CondRecord{ .gil = undefined };
     const a = std.testing.allocator;
     defer rec.queue.deinit(a);
@@ -1195,6 +1214,10 @@ test "condition queue compacts consumed head before growing" {
     }
     const full_capacity = rec.queue.capacity;
     try std.testing.expectEqual(full_capacity, rec.queue.items.len);
+    var stats = contentionStats();
+    try std.testing.expect(stats.condition_queue_grows > 0);
+    try std.testing.expectEqual(@as(u64, 0), stats.condition_queue_compactions);
+    const grows_before_compaction = stats.condition_queue_grows;
 
     i = 0;
     while (i < condition_queue_reserve_granularity) : (i += 1) {
@@ -1208,6 +1231,9 @@ test "condition queue compacts consumed head before growing" {
     try std.testing.expectEqual(condition_queue_reserve_granularity + 1, rec.queue.items.len);
     try std.testing.expectEqual(@intFromPtr(&tickets[condition_queue_reserve_granularity]), @intFromPtr(rec.queue.items[0].sync));
     try std.testing.expectEqual(@intFromPtr(&tickets[condition_queue_reserve_granularity * 2]), @intFromPtr(rec.queue.items[condition_queue_reserve_granularity].sync));
+    stats = contentionStats();
+    try std.testing.expectEqual(grows_before_compaction, stats.condition_queue_grows);
+    try std.testing.expectEqual(@as(u64, 1), stats.condition_queue_compactions);
 }
 
 test "condition sync handoff countdown tracks acknowledged tickets" {

@@ -532,9 +532,12 @@ pressure stay visible without hiding behind a combined total.
 The `empty`/`jobs` columns split the run-loop task pump into empty atomic
 fast-path hits and real grant-job delivery, and the paired `hold`/`cjob`
 columns split those delivered jobs into ordinary `Lock.asyncHold` grants versus
-`Condition.asyncWait` reacquire grants. Run it before and after synchronization
-or lifecycle changes so performance work has an attributed baseline instead of
-only elapsed time. The profile also prints isolated `Worker` tables for
+`Condition.asyncWait` reacquire grants. The `cqgrow`/`cqcomp` columns count
+condition waiter-queue backing growth and consumed-head compaction, so
+`condition asyncWait` and notify-heavy rows can distinguish allocation pressure
+from amortized FIFO churn. Run it before and after synchronization or lifecycle
+changes so performance work has an attributed baseline instead of only elapsed
+time. The profile also prints isolated `Worker` tables for
 structured-clone inbox/outbox round-trips, empty receive polling, and teardown
 churn. The message table now prints `push`/`pop` channel operations for the
 timed round trips and `null` empty receives for the polling row, so a timing
@@ -615,7 +618,11 @@ shape and zero-timeout polling behavior under a direct unit guard, while
 timeout/termination queue shape directly, and `condition sync handoff countdown
 tracks acknowledged tickets` covers the no-rescan sync notify handoff counter.
 `condition queue reserves capacity chunks` guards the fixed-chunk waiter-queue
-growth invariant under `CondRecord.mutex`.
+growth invariant under `CondRecord.mutex`, and `condition queue compacts
+consumed head before growing` guards steady notify/re-wait churn by compacting a
+large consumed head before a capacity growth would be needed. Contention-profile
+stats expose those paths as `cqgrow`/`cqcomp`, keeping the allocator/churn side
+of async-condition rows visible next to elapsed timing and task-pump counts.
 `jsthread lock pending async jobs are cursor FIFO` covers FIFO pop,
 consumed-slot retry, and front-stash retry without front shifts, while
 `jsthread lock pending queues reserve capacity chunks` and

@@ -309,7 +309,10 @@ Known performance/maturity work:
   condition-async wait/done and property-waitAsync wait/done pairs, and
   `empty`/`jobs` split the run-loop task pump into empty fast-path hits and
   delivered grant jobs while `hold`/`cjob` split those delivered jobs into
-  ordinary `Lock.asyncHold` grants and `Condition.asyncWait` reacquire grants.
+  ordinary `Lock.asyncHold` grants and `Condition.asyncWait` reacquire grants;
+  `cqgrow`/`cqcomp` count condition waiter-queue backing growth versus
+  consumed-head compaction so notify-heavy rows can separate allocation pressure
+  from amortized FIFO churn.
 - The mixed GC-cell allocation row explicitly enables GC in both modes, so its
   no-GIL versus `.gil = true` result measures parallel allocator behavior rather
   than comparing the no-GIL slab allocator with the serialized arena engine.
