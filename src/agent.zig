@@ -87,6 +87,14 @@ pub fn canBlock(main_can_block: bool) bool {
     return t_agent != null or main_can_block;
 }
 
+fn nextBroadcastGeneration(current: u64) u64 {
+    return if (current == std.math.maxInt(u64)) 1 else current + 1;
+}
+
+fn agentNeedsBroadcastAck(a: *const Agent, generation: u64) bool {
+    return !a.done and a.acked_gen != generation;
+}
+
 /// `$262.agent.start(src)`: spawn the agent thread NOW (it runs `src` in a
 /// fresh realm via `run` and typically parks in `receiveBroadcast`). This is
 /// the ordering the blocking-wait corpus requires — agents make progress
@@ -161,13 +169,13 @@ pub fn broadcast(storage: *SharedBufferStorage) void {
     group_used.store(true, .monotonic);
     if (group.bcast) |old| old.release();
     group.bcast = storage.retain();
-    group.bcast_gen += 1;
+    group.bcast_gen = nextBroadcastGeneration(group.bcast_gen);
     group.cond.broadcast(io);
     var rounds: usize = 0;
     while (!group.stopping) {
         var pending: usize = 0;
         for (group.agents.items) |a| {
-            if (!a.done and a.acked_gen < group.bcast_gen) pending += 1;
+            if (agentNeedsBroadcastAck(a, group.bcast_gen)) pending += 1;
         }
         if (pending == 0) break;
         io_compat.conditionWaitTimeout(&group.cond, io, &group.mutex, .{ .duration = .{
@@ -697,6 +705,20 @@ test "agent reports reserve fixed-size capacity chunks" {
     const extra = try std.fmt.bufPrint(&buf, "report-{d}", .{first_capacity});
     report(extra);
     try std.testing.expect(group.reports.capacity > first_capacity);
+}
+
+test "agent broadcast generation never publishes idle zero and ack checks survive wrap" {
+    try std.testing.expectEqual(@as(u64, 1), nextBroadcastGeneration(0));
+    try std.testing.expectEqual(@as(u64, 1), nextBroadcastGeneration(std.math.maxInt(u64)));
+
+    var active = Agent{ .src = "", .acked_gen = std.math.maxInt(u64) };
+    var done = Agent{ .src = "", .done = true, .acked_gen = std.math.maxInt(u64) };
+    const wrapped = nextBroadcastGeneration(std.math.maxInt(u64));
+
+    try std.testing.expect(agentNeedsBroadcastAck(&active, wrapped));
+    try std.testing.expect(!agentNeedsBroadcastAck(&done, wrapped));
+    active.acked_gen = wrapped;
+    try std.testing.expect(!agentNeedsBroadcastAck(&active, wrapped));
 }
 
 test "waiter table notify unlinks sync tickets and preserves async FIFO tail" {
