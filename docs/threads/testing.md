@@ -135,7 +135,7 @@ contexts can recover after unreachable pressure is collected.
 plain command, while a stuck shard prints the active `RUN` case before executing
 it. The required matrix gate is also bounded so a true hang becomes an archived,
 diagnosable failed job instead of an opaque spinner. The current coverage
-contains 235 promoted files out of 259 executable PR-249 files: 233 in the
+contains 236 promoted files out of 259 executable PR-249 files: 234 in the
 default `zig build threads-test` allowlist plus 2 `parallel_js`-only witnesses.
 It covers:
 
