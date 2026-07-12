@@ -372,7 +372,10 @@ Known performance/maturity work:
   scheduler-pressure stress case. Together they let local performance work
   separate async waiter registration, property ticket settlement,
   async-condition reacquire completion, FIFO-bursted task enqueue pressure, and
-  run-loop grant delivery instead of inferring them from elapsed time alone.
+  run-loop grant delivery instead of inferring them from elapsed time alone. The
+  profiler prints every exact shared-realm scenario filter from the benchmark
+  table at startup, so control rows such as `condition asyncWait multi-lock`
+  remain discoverable as the table evolves.
 - Condition notify/notifyAll use the same FIFO head-cursor pattern for the
   mixed sync/async waiter queue, avoiding one front-shift per notified waiter.
   The waiter queue reserves fixed-size capacity chunks before capacity-assumed

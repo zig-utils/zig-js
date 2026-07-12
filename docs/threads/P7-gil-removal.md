@@ -662,7 +662,10 @@ The contention profiler keeps both the original `condition asyncWait` stress row
 whose notifier busy-spins on the ready counter and a `condition asyncWait parked`
 control row whose notifier parks with property `Atomics.wait`; compare both
 before attributing an async-condition change to task delivery versus scheduler
-interference. The profiler also has focused `promise microtasks`,
+interference. The `condition asyncWait multi-lock` row splits the same condition
+delivery through several lock groups, and the profiler now prints exact
+shared-realm scenario filters from the scenario table so this control row stays
+discoverable. The profiler also has focused `promise microtasks`,
 `promise reactions`, and `promise thenables` cases for issue #15: they keep the
 default table narrow, but record Promise microtask enqueue/pop/run totals and
 split reaction jobs from thenable-assimilation jobs under no-GIL versus

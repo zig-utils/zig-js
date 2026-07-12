@@ -575,6 +575,13 @@ const scenarios = [_]Scenario{
     },
 };
 
+fn printSharedRealmScenarioFilters() void {
+    std.debug.print("focused shared-realm filters:", .{});
+    for (scenarios) |scenario| std.debug.print(" \"{s}\"", .{scenario.name});
+    std.debug.print("\n", .{});
+    std.debug.print("focused aggregate filters: worker messages, worker teardown, promise microtasks, promise reactions, promise thenables\n", .{});
+}
+
 fn nowNs(io: std.Io) i96 {
     return std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
 }
@@ -1520,7 +1527,7 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("waitus/jus/lus/cus/pus = total native wait microseconds, then join/lock/condition/property wait microseconds\n", .{});
     std.debug.print("async/done = aggregate async waiter registrations/settlements; caw/cad and paw/pad split Condition.asyncWait versus property waitAsync\n", .{});
     std.debug.print("empty/jobs = run-loop task-pump empty fast-path hits / delivered grant jobs; hold/cjob split asyncHold vs Condition.asyncWait reacquire jobs\n", .{});
-    std.debug.print("focused filters: global binding churn, worker messages, worker teardown, promise microtasks, promise reactions, promise thenables\n", .{});
+    printSharedRealmScenarioFilters();
 
     if (scenario_filter) |filter| {
         if (std.mem.eql(u8, filter, "worker messages")) {

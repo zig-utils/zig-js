@@ -33,6 +33,7 @@ zig build threads-profile
 zig build threads-profile -Dthreads-profile-case='global binding churn' -Dthreads-profile-max-workers=1
 zig build threads-profile -Dthreads-profile-case='condition asyncWait'
 zig build threads-profile -Dthreads-profile-case='condition asyncWait parked'
+zig build threads-profile -Dthreads-profile-case='condition asyncWait multi-lock'
 zig build threads-profile -Dthreads-profile-debug=true -Dthreads-profile-case='condition asyncWait'
 zig build midgc-profile
 zig build gc-profile
@@ -59,7 +60,9 @@ without spending the full profile matrix. Current exact cases are `lifecycle`,
 `gc backing`, `gc backing buckets`, `gc churn reuse`, and `gc finalizers`.
 
 `-Dthreads-profile-case='<exact scenario name>'` runs one shared-realm row
-across the host's 1/2/4/8-thread matrix and skips Worker tables.
+across the host's 1/2/4/8-thread matrix and skips Worker tables. The profiler
+prints the exact shared-realm scenario names from its scenario table at startup,
+so newly added focused rows cannot silently drift out of the command help.
 `-Dthreads-profile-max-workers=N` caps worker-count rows for broad or focused
 smoke checks and debugging, while full local baselines should omit the cap. Add
 `-Dthreads-profile-debug=true` for a symbolized safety-check build when
@@ -647,7 +650,8 @@ single-lock async-condition shape but parks the notifier with property
 helped condition reacquire delivery or merely changed spin-loop interference.
 The multi-lock row exercises FIFO-bursted realm task enqueue across lock groups
 and the paired run-loop job delivery pressure separately through the `hold`
-versus `cjob` split.
+versus `cjob` split; it is also listed in the startup filter output so it can be
+run directly without rediscovering its exact scenario name from source.
 Worker channel unit tests cover both FIFO head-cursor draining and fixed-size
 capacity chunk reservation before inbox/outbox appends; the script/module Worker
 message rows in `threads-profile` are the local signal for whether those queue
