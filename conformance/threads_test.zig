@@ -385,6 +385,94 @@ fn recordSlowCase(slowest: []CaseTiming, name: []const u8, ms: u64) void {
     slowest[at] = .{ .name = name, .ms = ms };
 }
 
+fn estimatedSerializedShardMs(name: []const u8) u64 {
+    // CI-observed serialized/GIL corpus costs from the per-case shard summaries.
+    // Unknown cases keep a small non-zero default so greedy assignment still
+    // spreads the rest of the allowlist evenly by count.
+    if (std.mem.eql(u8, name, "dw1-sort-comparator-callsite-shapes.js")) return 2_543_010;
+    if (std.mem.eql(u8, name, "jit/tid-tag-3-threads.js")) return 252_632;
+    if (std.mem.eql(u8, name, "cve/mc-val-llint-cache-storm.js")) return 190_214;
+    if (std.mem.eql(u8, name, "cve/mc-tear-typedarray-detach-grow-shrink.js")) return 169_210;
+    if (std.mem.eql(u8, name, "jit/spawned-thread-butterfly-stress.js")) return 137_946;
+    if (std.mem.eql(u8, name, "jit/ftl-osr-entry-catch-loop-amplifier.js")) return 113_570;
+    if (std.mem.eql(u8, name, "dw1-sort-comparator-osr.js")) return 104_698;
+    if (std.mem.eql(u8, name, "cve/mc-df-ta-sort-inplace.js")) return 86_825;
+    if (std.mem.eql(u8, name, "cve/mc-safe-gcwait-rope-repro.js")) return 78_219;
+    if (std.mem.eql(u8, name, "cve/mc-df-segmented-length.js")) return 71_910;
+    if (std.mem.eql(u8, name, "cve/mc-val-multislot-clone.js")) return 60_102;
+    if (std.mem.eql(u8, name, "races/counter-lock.js")) return 40_418;
+    if (std.mem.eql(u8, name, "scaling/richards-like.js")) return 39_083;
+    if (std.mem.eql(u8, name, "dw1-sort-comparator-iterator-host.js")) return 36_761;
+    if (std.mem.eql(u8, name, "bench/array-element-write.js")) return 32_636;
+    if (std.mem.eql(u8, name, "scaling/string-heavy.js")) return 30_637;
+    if (std.mem.eql(u8, name, "bench/flat-butterfly-write.js")) return 29_804;
+    if (std.mem.eql(u8, name, "bench/inline-property-write.js")) return 28_670;
+    if (std.mem.eql(u8, name, "jit/golden-disasm-corpus.js")) return 27_561;
+    if (std.mem.eql(u8, name, "jit/tag-discipline.js")) return 26_216;
+    if (std.mem.eql(u8, name, "bench/array-element-read.js")) return 24_550;
+    if (std.mem.eql(u8, name, "bench/flat-butterfly-read.js")) return 22_313;
+    if (std.mem.eql(u8, name, "gc-stress/havebadtime-vs-indexed-fastpath.js")) return 21_516;
+    if (std.mem.eql(u8, name, "races/counter-atomics.js")) return 19_292;
+    if (std.mem.eql(u8, name, "bench/megamorphic-access.js")) return 17_740;
+    if (std.mem.eql(u8, name, "bench/inline-property-read.js")) return 15_890;
+    if (std.mem.eql(u8, name, "semantics/oom-one-thread.js")) return 14_110;
+    if (std.mem.eql(u8, name, "races/transition-vs-write.js")) return 12_754;
+    if (std.mem.eql(u8, name, "scaling/raytrace-like.js")) return 12_234;
+    if (std.mem.eql(u8, name, "jit/ftl-direct-tailcall-dataic-arg-clobber.js")) return 7_182;
+    if (std.mem.eql(u8, name, "cve/mc-df-delete-reuse.js")) return 3_928;
+    if (std.mem.eql(u8, name, "semantics/ic-delete_by_id-vs-transition.js")) return 2_385;
+    return 1_000;
+}
+
+const WeightedShardOrder = struct {
+    names: []const []const u8,
+
+    fn lessThan(ctx: WeightedShardOrder, a: usize, b: usize) bool {
+        const a_ms = estimatedSerializedShardMs(ctx.names[a]);
+        const b_ms = estimatedSerializedShardMs(ctx.names[b]);
+        if (a_ms != b_ms) return a_ms > b_ms;
+        return std.mem.lessThan(u8, ctx.names[a], ctx.names[b]);
+    }
+};
+
+fn leastLoadedShard(loads_ms: []const u64) usize {
+    var best: usize = 0;
+    for (loads_ms[1..], 1..) |load, shard| {
+        if (load < loads_ms[best]) best = shard;
+    }
+    return best;
+}
+
+fn assignThreadTestShards(
+    gpa: std.mem.Allocator,
+    names: []const []const u8,
+    assignments: []usize,
+    shard_n: usize,
+    weighted: bool,
+) !void {
+    if (!weighted) {
+        for (assignments, 0..) |*assignment, case_index| {
+            assignment.* = case_index % shard_n;
+        }
+        return;
+    }
+
+    var loads_ms = try gpa.alloc(u64, shard_n);
+    defer gpa.free(loads_ms);
+    @memset(loads_ms, 0);
+
+    const order = try gpa.alloc(usize, names.len);
+    defer gpa.free(order);
+    for (order, 0..) |*slot, case_index| slot.* = case_index;
+
+    std.mem.sort(usize, order, WeightedShardOrder{ .names = names }, WeightedShardOrder.lessThan);
+    for (order) |case_index| {
+        const shard = leastLoadedShard(loads_ms);
+        assignments[case_index] = shard;
+        loads_ms[shard] += estimatedSerializedShardMs(names[case_index]);
+    }
+}
+
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const io = init.io;
@@ -495,15 +583,31 @@ pub fn main(init: std.process.Init) !void {
         if (parallel_js) try names.appendSlice(gpa, &parallel_only_allowlist);
     }
 
+    const weighted_shards = shard_count != null and shard_n > 1 and !parallel_js and !sweep and !explicit_one;
+    const shard_assignments = try gpa.alloc(usize, names.items.len);
+    defer gpa.free(shard_assignments);
+    try assignThreadTestShards(gpa, names.items, shard_assignments, shard_n, weighted_shards);
+
     var selected_total: usize = 0;
-    for (names.items, 0..) |_, case_index| {
-        if (case_index % shard_n == shard_i) selected_total += 1;
+    var selected_estimated_ms: u64 = 0;
+    for (names.items, 0..) |name, case_index| {
+        if (shard_assignments[case_index] == shard_i) {
+            selected_total += 1;
+            selected_estimated_ms += estimatedSerializedShardMs(name);
+        }
     }
     if (shard_count != null) {
-        std.debug.print(
-            "threads-test: shard {d}/{d} selected {d}/{d} corpus files\n",
-            .{ shard_i, shard_n, selected_total, names.items.len },
-        );
+        if (weighted_shards) {
+            std.debug.print(
+                "threads-test: shard {d}/{d} selected {d}/{d} corpus files (weighted estimate {d} ms)\n",
+                .{ shard_i, shard_n, selected_total, names.items.len, selected_estimated_ms },
+            );
+        } else {
+            std.debug.print(
+                "threads-test: shard {d}/{d} selected {d}/{d} corpus files\n",
+                .{ shard_i, shard_n, selected_total, names.items.len },
+            );
+        }
     }
 
     var failed: usize = 0;
@@ -513,7 +617,7 @@ pub fn main(init: std.process.Init) !void {
     var slowest = [_]CaseTiming{ .{}, .{}, .{}, .{}, .{}, .{}, .{}, .{} };
     if (shard_count != null) shard_started_ns = nowNs(io);
     for (names.items, 0..) |name, case_index| {
-        if (case_index % shard_n != shard_i) continue;
+        if (shard_assignments[case_index] != shard_i) continue;
         const case_started_ns = nowNs(io);
         completed += 1;
         std.debug.print("  RUN   {d}/{d} {s}\n", .{ completed, selected_total, name });
