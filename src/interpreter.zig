@@ -6718,12 +6718,14 @@ pub const Interpreter = struct {
     }
 
     pub fn pushTempRoot(self: *Interpreter, v: Value) EvalError!usize {
+        if (self.gc == null) return 0;
         const mark = self.gc_temp_roots.items.len;
         try self.gc_temp_roots.append(self.arena, v);
         return mark;
     }
 
     pub fn restoreTempRoots(self: *Interpreter, mark: usize) void {
+        if (self.gc == null) return;
         self.gc_temp_roots.shrinkRetainingCapacity(mark);
     }
 

@@ -11,6 +11,7 @@ pub const State = struct {
 
 threadlocal var active_object_backing: ?ObjectBackingState = null;
 threadlocal var trace_sensitive_lock_depth: usize = 0;
+threadlocal var allocation_recovery_blocked_depth: usize = 0;
 
 pub fn setActive(state: State) State {
     const prev = State{ .object_backing = active_object_backing };
@@ -38,6 +39,23 @@ pub inline fn leaveTraceSensitiveLock() void {
 
 pub inline fn inTraceSensitiveLock() bool {
     return trace_sensitive_lock_depth != 0;
+}
+
+/// Track allocator-internal critical sections that allocation-failure recovery
+/// could re-enter. The outer allocation path may still catch OOM and recover
+/// after these locks are released; this only prevents self-deadlock from a
+/// generic allocator callback.
+pub inline fn enterAllocationRecoveryBlocked() void {
+    allocation_recovery_blocked_depth += 1;
+}
+
+pub inline fn leaveAllocationRecoveryBlocked() void {
+    std.debug.assert(allocation_recovery_blocked_depth > 0);
+    allocation_recovery_blocked_depth -= 1;
+}
+
+pub inline fn allocationRecoveryBlocked() bool {
+    return allocation_recovery_blocked_depth != 0;
 }
 
 // ---------------------------------------------------------------------------
