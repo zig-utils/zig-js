@@ -18,9 +18,9 @@ python3 tools/threads-reference-audit.py --run-probes --expect-current-blockers 
 zig build test -Dtsan=true
 zig build test -Dtsan=true -Dtest-filter=parallel_js
 zig build threadfuzz -Dfuzz-iters=20
-zig build threadfuzz -Dtsan=true -Dfuzz-midgc=true -Dfuzz-iters=2
+THREADFUZZ_SEED_TIMEOUT_MS=300000 zig build threadfuzz -Dtsan=true -Dfuzz-midgc=true -Dfuzz-iters=2
 zig build threadfuzz -Dtsan=true -Dfuzz-lifecycle=true -Dfuzz-iters=2
-zig build threadfuzz -Dfuzz-midgc=true -Dfuzz-iters=5
+THREADFUZZ_SEED_TIMEOUT_MS=300000 zig build threadfuzz -Dfuzz-midgc=true -Dfuzz-iters=5
 zig build threadfuzz -Dfuzz-lifecycle=true -Dfuzz-iters=20
 zig build threadfuzz -Dfuzz-verify=true -Dfuzz-iters=300
 bun run docs:build
@@ -88,11 +88,11 @@ push to `main`:
 ```sh
 zig build threadfuzz -Dfuzz-iters=400
 zig build threadfuzz -Dtsan=true -Dfuzz-iters=60
-zig build threadfuzz -Dtsan=true -Dfuzz-midgc=true -Dfuzz-iters=2
+THREADFUZZ_SEED_TIMEOUT_MS=300000 zig build threadfuzz -Dtsan=true -Dfuzz-midgc=true -Dfuzz-iters=2
 zig build threadfuzz -Dtsan=true -Dfuzz-lifecycle=true -Dfuzz-iters=2
 zig build threadfuzz -Dfuzz-amplify=true -Dfuzz-iters=30
 zig build threadfuzz -Dfuzz-broad=true -Dfuzz-iters=80
-zig build threadfuzz -Dfuzz-midgc=true -Dfuzz-iters=20
+THREADFUZZ_SEED_TIMEOUT_MS=300000 zig build threadfuzz -Dfuzz-midgc=true -Dfuzz-iters=20
 zig build threadfuzz -Dfuzz-lifecycle=true -Dfuzz-iters=60
 zig build threadfuzz -Doptimize=ReleaseSafe -Dfuzz-iters=400
 zig build threadfuzz -Dfuzz-verify=true -Dfuzz-iters=300

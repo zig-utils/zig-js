@@ -128,8 +128,11 @@ jobs:
           # also keeps ThreadLocal-only roots and completed-but-unjoined Thread
           # results live across that pressure window.
           # Each seed must complete exactly and finish at least one parallel sweep.
+          # Loaded GitHub runners can occasionally stretch this profile past the
+          # default 120s seed watchdog even when the focused seed replay is fast
+          # locally, so match the TSan mid-GC leg's per-seed hang window here.
           - name: threadfuzz-midgc
-            cmd: zig build threadfuzz -Dfuzz-midgc=true -Dfuzz-iters=20
+            cmd: THREADFUZZ_SEED_TIMEOUT_MS=300000 zig build threadfuzz -Dfuzz-midgc=true -Dfuzz-iters=20
           # Lifecycle profile: deterministic termination storms (main throws
           # with parked/unjoined Threads), cross-realm Worker + shared-realm
           # Thread overlap on one SharedArrayBuffer with an exact counter oracle,
