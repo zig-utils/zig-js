@@ -112,9 +112,11 @@ pub const MicrotaskQueue = struct {
                 std.Thread.yield() catch {};
             } else std.atomic.spinLoopHint();
         }
+        gc_runtime.enterTraceSensitiveLock();
     }
 
     pub fn release(self: *MicrotaskQueue) void {
+        gc_runtime.leaveTraceSensitiveLock();
         self.lock.unlock();
     }
 
@@ -211,6 +213,15 @@ test "microtask queue is FIFO with a head cursor" {
     try std.testing.expectEqual(@as(u64, 5), q.enqueueGeneration());
     try std.testing.expectEqual(@as(usize, 1), q.pendingLen());
     try std.testing.expectEqual(@as(f64, 6), q.pop().?.argument.asNum());
+}
+
+test "MicrotaskQueue lock is trace-sensitive" {
+    var q = MicrotaskQueue{};
+
+    try std.testing.expect(!gc_runtime.inTraceSensitiveLock());
+    q.acquire();
+    defer q.release();
+    try std.testing.expect(gc_runtime.inTraceSensitiveLock());
 }
 
 test "Promise reactions keep first entry inline then reserve overflow chunks" {

@@ -361,8 +361,8 @@ Known performance/maturity work:
   delivered job while preserving checkpoint order. Microtask enqueues and
   abandoned-thread queue transfers reserve fixed-size capacity chunks before
   capacity-assumed appends, reducing allocator-growth trips under
-  each target `MicrotaskQueue`'s queue-local lock during promise/thread
-  lifecycle bursts. Per-promise
+  each target `MicrotaskQueue`'s trace-sensitive queue-local lock during
+  promise/thread lifecycle bursts. Per-promise
   fulfill/reject reaction lists also reserve fixed-size capacity chunks before
   capacity-assumed appends under `Promise.lock`, while preserving GC-owned
   reaction-entry accounting and settlement/finalization cleanup.
