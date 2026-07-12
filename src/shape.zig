@@ -85,6 +85,11 @@ pub const Shape = struct {
     transition_lock: std.atomic.Mutex = .unlocked,
     arena: std.mem.Allocator,
 
+    const TransitionLockResult = union(enum) {
+        locked,
+        cached: *Shape,
+    };
+
     /// Create the empty root shape for a Context.
     pub fn createRoot(arena: std.mem.Allocator) std.mem.Allocator.Error!*Shape {
         const root = try arena.create(Shape);
@@ -117,7 +122,13 @@ pub const Shape = struct {
             return child;
         }
 
-        self.lockTransitions();
+        switch (self.lockTransitionsOrCached(name)) {
+            .locked => {},
+            .cached => |child| {
+                bumpShapeStat("transition_hits");
+                return child;
+            },
+        }
         defer self.transition_lock.unlock();
 
         if (self.transitions.get(name)) |child| {
@@ -155,9 +166,10 @@ pub const Shape = struct {
         self.transition_head.store(child, .release);
     }
 
-    fn lockTransitions(self: *Shape) void {
+    fn lockTransitionsOrCached(self: *Shape, name: []const u8) TransitionLockResult {
         var spins: usize = 0;
         while (!self.transition_lock.tryLock()) : (spins += 1) {
+            if (self.findTransitionCached(name)) |child| return .{ .cached = child };
             if ((spins & 0xff) == 0) {
                 bumpShapeStat("transition_lock_yields");
                 std.Thread.yield() catch {};
@@ -165,6 +177,7 @@ pub const Shape = struct {
                 std.atomic.spinLoopHint();
             }
         }
+        return .locked;
     }
 };
 
@@ -212,6 +225,32 @@ test "shape transition stats reset and snapshot" {
     try std.testing.expectEqual(@as(u64, 0), shapeStats().transition_misses);
     try std.testing.expectEqual(@as(u64, 0), shapeStats().transition_lock_yields);
     disableShapeStats();
+}
+
+test "shape transition lock wait observes published cache" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try Shape.createRoot(a);
+
+    const owned = try a.dupe(u8, "shared");
+    const child = try a.create(Shape);
+    child.* = .{
+        .parent = root,
+        .name = owned,
+        .slot = 0,
+        .count = 1,
+        .arena = a,
+    };
+    root.publishTransition(child);
+
+    try std.testing.expect(root.transition_lock.tryLock());
+    defer root.transition_lock.unlock();
+
+    switch (root.lockTransitionsOrCached("shared")) {
+        .cached => |got| try std.testing.expectEqual(child, got),
+        .locked => return error.ExpectedCachedTransition,
+    }
 }
 
 test "shape transitions converge under concurrent same-name insertion" {
