@@ -2289,6 +2289,17 @@ pub const Value = struct {
         return boxed(tag_null, 0);
     }
 
+    /// Exact NaN-box word used by the baseline native-code ABI. Engine code
+    /// must preserve this word unchanged unless it is constructing a Number,
+    /// in which case `num` remains responsible for canonicalizing NaN.
+    pub inline fn rawBits(self: Value) u64 {
+        return self.bits;
+    }
+
+    pub inline fn fromRawBits(bits: u64) Value {
+        return .{ .bits = bits };
+    }
+
     // Accessors (caller has checked `kind()` first).
     pub inline fn asNum(self: Value) f64 {
         return @bitCast(self.bits);

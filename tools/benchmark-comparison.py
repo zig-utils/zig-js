@@ -365,7 +365,7 @@ def render(rows: list[Row], lanes: list[int], raw_path: pathlib.Path | None, inf
         "",
         f"Across these four deliberately small kernels, JSC's single-context throughput is {geometric_mean(single_ratios):.2f}x",
         "the zig-js throughput by geometric mean. This is expected: the system JSC is a mature optimizing JIT, while",
-        "zig-js currently has interpreters and no JIT. The number is a compact description of this matrix, not a claim",
+        "zig-js has an early baseline JIT; rows outside its documented native subset continue in bytecode. The number is a compact description of this matrix, not a claim",
         "about applications or unsupported workloads.",
         "",
         f"At {max_lanes} independent warmed contexts, JSC throughput is {geometric_mean(steady_max_ratios):.2f}x zig-js by",

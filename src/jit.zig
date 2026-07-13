@@ -76,6 +76,9 @@ pub const NativeEntry = *const fn (*NativeFrame) callconv(.c) u32;
 pub const CompiledCode = struct {
     memory: CodeMemory,
     entry: NativeEntry,
+    /// Number of bytecode dispatches represented by a successful native entry.
+    /// Used to preserve the interpreter's step-budget/checkpoint accounting.
+    bytecode_steps: u32 = 0,
 
     pub fn deinit(self: *CompiledCode) void {
         self.memory.deinit();

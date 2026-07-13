@@ -20,6 +20,8 @@ const interp = @import("interpreter.zig");
 const promise = @import("promise.zig");
 const agent = @import("agent.zig");
 const gc_runtime = @import("gc_runtime.zig");
+const jit = @import("jit.zig");
+const jit_compiler = @import("jit/compiler.zig");
 
 const Value = value.Value;
 const Chunk = bc.Chunk;
@@ -29,6 +31,7 @@ const Function = interp.Function;
 const EvalError = interp.EvalError;
 
 const async_gen_request_reserve_granularity: usize = 16;
+const native_tier_entry_threshold: u32 = 3;
 
 fn bindThisForCall(vm: *Interpreter, func: *Function, this_val: Value) EvalError!Value {
     if (func.is_arrow) return func.arrow_this;
@@ -515,6 +518,46 @@ pub fn run(vm: *Interpreter, chunk: *Chunk, frame: ?*Frame) EvalError!Value {
     return execLoop(vm, &exec, chunk, frame, null);
 }
 
+fn tryRunNative(vm: *Interpreter, exec: *Exec, chunk: *Chunk, gen: ?*Generator) ?Value {
+    if (gen != null or exec.ip != 0 or exec.stack.items.len != 0 or exec.handlers.items.len != 0) return null;
+    const owner = vm.jit_owner orelse return null;
+
+    var code = chunk.tier.loadCode();
+    if (code == null and chunk.tier.observeEntry(native_tier_entry_threshold)) {
+        var compiled = jit_compiler.compile(chunk) catch {
+            chunk.tier.publishRejected();
+            return null;
+        };
+        const owned = owner.adopt(compiled) catch {
+            compiled.deinit();
+            chunk.tier.publishRejected();
+            return null;
+        };
+        chunk.tier.publishReady(owned);
+        code = owned;
+    }
+    const native = code orelse return null;
+
+    // Preserve runChunk's exact step/checkpoint contract. A native entry may
+    // cover an interval only when it neither exceeds the budget nor crosses a
+    // 1024-step termination/GIL/GC checkpoint; those rare boundaries stay in
+    // bytecode and are retried on the next clean entry.
+    const instruction_count: u64 = native.bytecode_steps;
+    const end_steps = std.math.add(u64, vm.steps, instruction_count) catch return null;
+    if (end_steps > interp.max_steps or (vm.steps >> 10) != (end_steps >> 10)) return null;
+    const saved_steps = vm.steps;
+    vm.steps = end_steps;
+
+    var native_frame = jit.NativeFrame{};
+    return switch (native.run(&native_frame)) {
+        .complete => Value.fromRawBits(native_frame.result_bits),
+        else => {
+            vm.steps = saved_steps;
+            return null;
+        },
+    };
+}
+
 /// The instruction loop. `exec` holds the (resumable) stack/acc/ip; `gen` is
 /// non-null only when running a generator body, enabling the `gen_yield` opcode
 /// to snapshot `exec` and suspend. For a normal call `gen` is null and
@@ -535,6 +578,7 @@ fn execLoop(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
     exec.frame = frame; // so a mid-script collection roots this activation's slots
     vm.pushExecRoot(exec);
     defer vm.popExecRoot(exec);
+    if (tryRunNative(vm, exec, chunk, gen)) |result| return result;
     // Run the instruction stream; if a throw escapes and an active handler can
     // catch it, unwind to that handler's catch block and resume. Otherwise the
     // throw propagates to the caller (uncaught — the generator/function ends).
@@ -2862,7 +2906,11 @@ fn runDriver(vm: *Interpreter, initial: *Activation) EvalError!Value {
 
     while (acts.items.len > 0) {
         const cur = acts.items[acts.items.len - 1];
-        const rv = runChunk(vm, &cur.exec, cur.chunk, cur.frame, null) catch |e| {
+        const outcome: EvalError!Value = if (tryRunNative(vm, &cur.exec, cur.chunk, null)) |native_result|
+            native_result
+        else
+            runChunk(vm, &cur.exec, cur.chunk, cur.frame, null);
+        const rv = outcome catch |e| {
             const abrupt = if (activationStackHasHandler(&acts)) vm.catchableOutOfMemory(e) else e;
             if (abrupt != error.Throw) {
                 // OOM / OptShortCircuit: tear down all activations and propagate.
@@ -2992,6 +3040,43 @@ test "vm: functions, recursion, closures" {
         \\function mk(x) { return function (y) { return x + y; }; }
         \\mk(10)(5)
     )).asNum());
+}
+
+test "vm: hot primitive constant function tiers through native entry" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var parser = try Parser.init(allocator, "function answer() { return 42; } answer()");
+    const program = try parser.parseProgram();
+    const chunk = try Compiler.compileProgram(allocator, program);
+
+    var owner = jit.Owner.init(std.testing.allocator);
+    defer owner.deinit();
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
+    try interp.installGlobals(&env, root_shape);
+    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+
+    var previous_steps: u64 = 0;
+    var expected_delta: u64 = 0;
+    for (0..3) |iteration| {
+        try std.testing.expectEqual(@as(f64, 42), (try run(&machine, chunk, null)).asNum());
+        const delta = machine.steps - previous_steps;
+        if (iteration == 0) expected_delta = delta else try std.testing.expectEqual(expected_delta, delta);
+        previous_steps = machine.steps;
+    }
+
+    const function_chunk = chunk.fns.items[0].chunk.?;
+    try std.testing.expectEqual(jit.TierState.ready, function_chunk.tier.loadState());
+    try std.testing.expectEqual(@as(u32, 2), function_chunk.tier.loadCode().?.bytecode_steps);
+    try std.testing.expectEqual(jit.TierState.rejected, chunk.tier.loadState());
+
+    // Crossing an interpreter checkpoint stays in bytecode even after native
+    // publication, preserving the exact step at which termination/GIL/GC work
+    // would be observed.
+    machine.steps = 1022;
+    try std.testing.expectEqual(@as(f64, 42), (try run(&machine, function_chunk, null)).asNum());
+    try std.testing.expectEqual(@as(u64, 1024), machine.steps);
 }
 
 test "vm: completed non-escaping recursive activations reuse bounded storage" {
