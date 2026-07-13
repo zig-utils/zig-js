@@ -3062,7 +3062,7 @@ pub const Context = struct {
                     // host publication/drive point before observing the join
                     // state, otherwise fast exits can skip the safepoint that the
                     // slower parked path below provides.
-                    machine.serviceGcSafepoint();
+                    if (self.hasRunningJsThreads()) machine.serviceGcSafepoint();
                     rec.join_mutex.lockUncancelable(io);
                     while (!rec.exited) {
                         // Parked keepalive still serves run-loop tasks: a waiting
@@ -3096,7 +3096,7 @@ pub const Context = struct {
                     // pump/safepoint but before the host parks, leaving no next
                     // loop iteration to publish roots for a collector elected by
                     // another still-running peer.
-                    machine.serviceGcSafepoint();
+                    if (self.hasRunningJsThreads()) machine.serviceGcSafepoint();
                 } else {
                     while (!threadRecordExited(rec)) {
                         // Parked keepalive still serves run-loop tasks: a waiting
@@ -3109,13 +3109,6 @@ pub const Context = struct {
                         } }) catch {};
                     }
                 }
-            }
-            if (self.parallel_js) {
-                // One final host safepoint while `teardown_stop` is still set:
-                // asyncJoin rejection cleanup below can run JS, but by then all
-                // spawned records have exited, so this is the last teardown-only
-                // window to help a pending parallel collection converge.
-                machine.serviceGcSafepoint();
             }
             // `teardown_stop` exists to make spawned threads leave their
             // blocking loops after a top-level failure. Once every spawned
