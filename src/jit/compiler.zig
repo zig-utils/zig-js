@@ -258,6 +258,129 @@ fn comparisonCondition(op: bc.Op) aarch64.Condition {
     };
 }
 
+fn emitOperation(assembler: *aarch64.Assembler, chunk: *const Chunk, state: State, inst: bc.Inst) !?ControlFixup {
+    switch (inst.op) {
+        .load_const => {
+            try assembler.movImmediate64(9, chunk.consts.items[inst.a].rawBits());
+            if (classify(chunk.consts.items[inst.a]).? == .number)
+                try assembler.moveFloatFromRegister64(try numericRegister(state.depth), 9)
+            else
+                try assembler.store64(9, 20, try slotOffset(state.depth));
+        },
+        .load_undefined => {
+            try assembler.movImmediate64(9, Value.undef().rawBits());
+            try assembler.store64(9, 20, try slotOffset(state.depth));
+        },
+        .load_null => {
+            try assembler.movImmediate64(9, Value.nul().rawBits());
+            try assembler.store64(9, 20, try slotOffset(state.depth));
+        },
+        .load_true, .load_false => {
+            try assembler.movImmediate64(9, Value.boolVal(inst.op == .load_true).rawBits());
+            try assembler.store64(9, 20, try slotOffset(state.depth));
+        },
+        .pop => {},
+        .load_local => {
+            if (state.locals[inst.a] == .number)
+                try assembler.moveFloat64(try numericRegister(state.depth), try numericLocalRegister(inst.a))
+            else {
+                try assembler.load64(9, 22, try slotOffset(inst.a));
+                try assembler.store64(9, 20, try slotOffset(state.depth));
+            }
+        },
+        .store_local => {
+            if (state.stack[state.depth - 1] == .number)
+                try assembler.moveFloat64(try numericLocalRegister(inst.a), try numericRegister(state.depth - 1))
+            else {
+                try assembler.load64(9, 20, try slotOffset(state.depth - 1));
+                try assembler.store64(9, 22, try slotOffset(inst.a));
+            }
+        },
+        .add, .sub, .mul, .div, .mod => {
+            const result_slot = state.depth - 2;
+            const result_register = try numericRegister(result_slot);
+            const rhs_register = try numericRegister(result_slot + 1);
+            if (inst.op == .mod) {
+                // Match `numberRemainder`'s hot positive-u32 guard. Exact
+                // integral conversions stay entirely in generated code;
+                // negative, zero, fractional, infinite, and NaN operands
+                // take the full IEEE helper without changing VM semantics.
+                try assembler.convertFloat64ToUnsigned32(9, result_register);
+                try assembler.convertUnsigned32ToFloat64(2, 9);
+                try assembler.compareFloat64(result_register, 2);
+                const lhs_slow = try assembler.branchConditionPlaceholder(.ne);
+                const lhs_zero = try assembler.branchZero32Placeholder(9);
+                try assembler.convertFloat64ToUnsigned32(10, rhs_register);
+                try assembler.convertUnsigned32ToFloat64(2, 10);
+                try assembler.compareFloat64(rhs_register, 2);
+                const rhs_slow = try assembler.branchConditionPlaceholder(.ne);
+                const rhs_zero = try assembler.branchZero32Placeholder(10);
+                try assembler.divideUnsigned32(11, 9, 10);
+                try assembler.multiplySubtract32(9, 11, 10, 9);
+                try assembler.convertUnsigned32ToFloat64(result_register, 9);
+                const fast_done = try assembler.branchPlaceholder();
+                const slow = assembler.position();
+                try assembler.patchConditionBranch(lhs_slow, slow);
+                try assembler.patchCompareBranch(lhs_zero, slow);
+                try assembler.patchConditionBranch(rhs_slow, slow);
+                try assembler.patchCompareBranch(rhs_zero, slow);
+                // The semantic helper follows the C ABI and may clobber
+                // caller-saved d16-d23. Preserve any outer numeric operands
+                // that remain live below this binary expression.
+                for (0..result_slot) |slot| if (state.stack[slot] == .number) {
+                    try assembler.moveRegisterFromFloat64(9, try numericRegister(slot));
+                    try assembler.store64(9, 20, try slotOffset(slot));
+                };
+                try assembler.moveFloat64(0, result_register);
+                try assembler.moveFloat64(1, rhs_register);
+                try assembler.load64(16, 21, frameOffset("remainder"));
+                try assembler.branchLinkRegister(16);
+                try assembler.moveFloat64(result_register, 0);
+                for (0..result_slot) |slot| if (state.stack[slot] == .number) {
+                    try assembler.load64(9, 20, try slotOffset(slot));
+                    try assembler.moveFloatFromRegister64(try numericRegister(slot), 9);
+                };
+                try assembler.patchBranch(fast_done, assembler.position());
+            } else {
+                const op: aarch64.FloatOp = switch (inst.op) {
+                    .add => .add,
+                    .sub => .sub,
+                    .mul => .mul,
+                    .div => .div,
+                    else => unreachable,
+                };
+                try assembler.floatBinary64(op, result_register, result_register, rhs_register);
+            }
+        },
+        .lt, .le, .gt, .ge, .eq, .neq, .eq_strict, .neq_strict => {
+            const result_slot = state.depth - 2;
+            try assembler.compareFloat64(try numericRegister(result_slot), try numericRegister(result_slot + 1));
+            try assembler.conditionalSet32(9, comparisonCondition(inst.op));
+            try assembler.movImmediate64(10, Value.boolVal(false).rawBits());
+            try assembler.addRegister64(9, 10, 9);
+            try assembler.store64(9, 20, try slotOffset(result_slot));
+        },
+        .jump => return .{ .branch = .{ .at = try assembler.branchPlaceholder(), .target = inst.a } },
+        .jump_if_false => {
+            try assembler.load64(9, 20, try slotOffset(state.depth - 1));
+            return .{ .test_zero = .{ .at = try assembler.testBitZeroPlaceholder(9, 0), .target = inst.a } };
+        },
+        .ret => {
+            if (state.stack[state.depth - 1] == .number)
+                try emitCanonicalNumber(assembler, 9, try numericRegister(state.depth - 1))
+            else
+                try assembler.load64(9, 20, try slotOffset(state.depth - 1));
+            try emitCompletedExit(assembler, 9);
+        },
+        .ret_undef => {
+            try assembler.movImmediate64(9, Value.undef().rawBits());
+            try emitCompletedExit(assembler, 9);
+        },
+        else => unreachable,
+    }
+    return null;
+}
+
 fn compileNumeric(chunk: *const Chunk) !jit.CompiledCode {
     if (!jit.supported or builtin.cpu.arch != .aarch64) return error.UnsupportedTarget;
 
@@ -327,125 +450,7 @@ fn compileNumeric(chunk: *const Chunk) !jit.CompiledCode {
         checkpoint_fixups[ip] = try assembler.branchConditionPlaceholder(.eq);
         operation_offsets[ip] = assembler.position();
 
-        switch (inst.op) {
-            .load_const => {
-                try assembler.movImmediate64(9, chunk.consts.items[inst.a].rawBits());
-                if (classify(chunk.consts.items[inst.a]).? == .number)
-                    try assembler.moveFloatFromRegister64(try numericRegister(state.depth), 9)
-                else
-                    try assembler.store64(9, 20, try slotOffset(state.depth));
-            },
-            .load_undefined => {
-                try assembler.movImmediate64(9, Value.undef().rawBits());
-                try assembler.store64(9, 20, try slotOffset(state.depth));
-            },
-            .load_null => {
-                try assembler.movImmediate64(9, Value.nul().rawBits());
-                try assembler.store64(9, 20, try slotOffset(state.depth));
-            },
-            .load_true, .load_false => {
-                try assembler.movImmediate64(9, Value.boolVal(inst.op == .load_true).rawBits());
-                try assembler.store64(9, 20, try slotOffset(state.depth));
-            },
-            .pop => {},
-            .load_local => {
-                if (state.locals[inst.a] == .number)
-                    try assembler.moveFloat64(try numericRegister(state.depth), try numericLocalRegister(inst.a))
-                else {
-                    try assembler.load64(9, 22, try slotOffset(inst.a));
-                    try assembler.store64(9, 20, try slotOffset(state.depth));
-                }
-            },
-            .store_local => {
-                if (state.stack[state.depth - 1] == .number)
-                    try assembler.moveFloat64(try numericLocalRegister(inst.a), try numericRegister(state.depth - 1))
-                else {
-                    try assembler.load64(9, 20, try slotOffset(state.depth - 1));
-                    try assembler.store64(9, 22, try slotOffset(inst.a));
-                }
-            },
-            .add, .sub, .mul, .div, .mod => {
-                const result_slot = state.depth - 2;
-                const result_register = try numericRegister(result_slot);
-                const rhs_register = try numericRegister(result_slot + 1);
-                if (inst.op == .mod) {
-                    // Match `numberRemainder`'s hot positive-u32 guard. Exact
-                    // integral conversions stay entirely in generated code;
-                    // negative, zero, fractional, infinite, and NaN operands
-                    // take the full IEEE helper without changing VM semantics.
-                    try assembler.convertFloat64ToUnsigned32(9, result_register);
-                    try assembler.convertUnsigned32ToFloat64(2, 9);
-                    try assembler.compareFloat64(result_register, 2);
-                    const lhs_slow = try assembler.branchConditionPlaceholder(.ne);
-                    const lhs_zero = try assembler.branchZero32Placeholder(9);
-                    try assembler.convertFloat64ToUnsigned32(10, rhs_register);
-                    try assembler.convertUnsigned32ToFloat64(2, 10);
-                    try assembler.compareFloat64(rhs_register, 2);
-                    const rhs_slow = try assembler.branchConditionPlaceholder(.ne);
-                    const rhs_zero = try assembler.branchZero32Placeholder(10);
-                    try assembler.divideUnsigned32(11, 9, 10);
-                    try assembler.multiplySubtract32(9, 11, 10, 9);
-                    try assembler.convertUnsigned32ToFloat64(result_register, 9);
-                    const fast_done = try assembler.branchPlaceholder();
-                    const slow = assembler.position();
-                    try assembler.patchConditionBranch(lhs_slow, slow);
-                    try assembler.patchCompareBranch(lhs_zero, slow);
-                    try assembler.patchConditionBranch(rhs_slow, slow);
-                    try assembler.patchCompareBranch(rhs_zero, slow);
-                    // The semantic helper follows the C ABI and may clobber
-                    // caller-saved d16-d23. Preserve any outer numeric operands
-                    // that remain live below this binary expression.
-                    for (0..result_slot) |slot| if (state.stack[slot] == .number) {
-                        try assembler.moveRegisterFromFloat64(9, try numericRegister(slot));
-                        try assembler.store64(9, 20, try slotOffset(slot));
-                    };
-                    try assembler.moveFloat64(0, result_register);
-                    try assembler.moveFloat64(1, rhs_register);
-                    try assembler.load64(16, 21, frameOffset("remainder"));
-                    try assembler.branchLinkRegister(16);
-                    try assembler.moveFloat64(result_register, 0);
-                    for (0..result_slot) |slot| if (state.stack[slot] == .number) {
-                        try assembler.load64(9, 20, try slotOffset(slot));
-                        try assembler.moveFloatFromRegister64(try numericRegister(slot), 9);
-                    };
-                    try assembler.patchBranch(fast_done, assembler.position());
-                } else {
-                    const op: aarch64.FloatOp = switch (inst.op) {
-                        .add => .add,
-                        .sub => .sub,
-                        .mul => .mul,
-                        .div => .div,
-                        else => unreachable,
-                    };
-                    try assembler.floatBinary64(op, result_register, result_register, rhs_register);
-                }
-            },
-            .lt, .le, .gt, .ge, .eq, .neq, .eq_strict, .neq_strict => {
-                const result_slot = state.depth - 2;
-                try assembler.compareFloat64(try numericRegister(result_slot), try numericRegister(result_slot + 1));
-                try assembler.conditionalSet32(9, comparisonCondition(inst.op));
-                try assembler.movImmediate64(10, Value.boolVal(false).rawBits());
-                try assembler.addRegister64(9, 10, 9);
-                try assembler.store64(9, 20, try slotOffset(result_slot));
-            },
-            .jump => control_fixups[ip] = .{ .branch = .{ .at = try assembler.branchPlaceholder(), .target = inst.a } },
-            .jump_if_false => {
-                try assembler.load64(9, 20, try slotOffset(state.depth - 1));
-                control_fixups[ip] = .{ .test_zero = .{ .at = try assembler.testBitZeroPlaceholder(9, 0), .target = inst.a } };
-            },
-            .ret => {
-                if (state.stack[state.depth - 1] == .number)
-                    try emitCanonicalNumber(&assembler, 9, try numericRegister(state.depth - 1))
-                else
-                    try assembler.load64(9, 20, try slotOffset(state.depth - 1));
-                try emitCompletedExit(&assembler, 9);
-            },
-            .ret_undef => {
-                try assembler.movImmediate64(9, Value.undef().rawBits());
-                try emitCompletedExit(&assembler, 9);
-            },
-            else => unreachable,
-        }
+        control_fixups[ip] = try emitOperation(&assembler, chunk, state, inst);
     }
 
     for (control_fixups) |fixup_opt| if (fixup_opt) |fixup| switch (fixup) {
