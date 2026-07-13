@@ -17642,6 +17642,7 @@ fn runMidScriptWorkerCloseTerminateProfile(gpa: std.mem.Allocator, seed: u64, co
         \\    throw new Error('midgc worker-close spinner was not active before sweep');
         \\  const gate = {{ ready: 0, release: 0 }};
         \\  const threads = [];
+        \\  const asyncJoins = [];
         \\  let asyncSum = 0;
         \\  for (let id = 0; id < {d}; id++) {{
         \\    const t = new Thread((id, per, seedMarker) => {{
@@ -17663,14 +17664,14 @@ fn runMidScriptWorkerCloseTerminateProfile(gpa: std.mem.Allocator, seed: u64, co
         \\        throw new Error('bad midgc worker-close thread root seed');
         \\      return root;
         \\    }}, id, {d}, {d});
-        \\    t.asyncJoin().then(
+        \\    asyncJoins.push(t.asyncJoin().then(
         \\      (root) => {{
         \\        if (root && root.nested && root.nested.seed === {d})
         \\          asyncSum += root.marker;
         \\        else
         \\          asyncSum = -1000000;
         \\      }},
-        \\      () => {{ asyncSum = -1000000; }});
+        \\      () => {{ asyncSum = -1000000; }}));
         \\    threads.push(t);
         \\  }}
         \\  while (Atomics.load(gate, 'ready') < {d})
@@ -17704,7 +17705,8 @@ fn runMidScriptWorkerCloseTerminateProfile(gpa: std.mem.Allocator, seed: u64, co
         \\  }}
         \\  if (joinSum !== {d})
         \\    throw new Error('bad midgc worker-close join sum ' + joinSum);
-        \\  Promise.resolve().then(() => {{
+        \\  // A synchronous join may return just before its asyncJoin reaction runs.
+        \\  Promise.all(asyncJoins).then(() => {{
         \\    if (asyncSum !== {d})
         \\      throw new Error('bad midgc worker-close async sum ' + asyncSum);
         \\    globalThis.{s}Oracle = 1;
