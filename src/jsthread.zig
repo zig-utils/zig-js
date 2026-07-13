@@ -1026,6 +1026,8 @@ const LockRecord = struct {
         const spare = list.capacity - list.items.len;
         if (spare >= additional) return;
         const extra = @max(additional, lock_pending_reserve_granularity);
+        gc_runtime.enterTraceSensitiveLock();
+        defer gc_runtime.leaveTraceSensitiveLock();
         try list.ensureTotalCapacity(arena, list.items.len + extra);
     }
 
@@ -1120,6 +1122,8 @@ const CondRecord = struct {
         self.maybeCompactBeforeAppend();
         const spare = self.queue.capacity - self.queue.items.len;
         if (spare == 0) {
+            gc_runtime.enterTraceSensitiveLock();
+            defer gc_runtime.leaveTraceSensitiveLock();
             try self.queue.ensureTotalCapacity(arena, self.queue.items.len + condition_queue_reserve_granularity);
             bumpContention("condition_queue_grows");
         }
@@ -1145,6 +1149,55 @@ const CondRecord = struct {
         self.queue_head = 0;
         return null;
     }
+};
+
+fn createSyncCondTicketTraceSensitive(arena: std.mem.Allocator) std.mem.Allocator.Error!*SyncCondTicket {
+    gc_runtime.enterTraceSensitiveLock();
+    defer gc_runtime.leaveTraceSensitiveLock();
+    return arena.create(SyncCondTicket);
+}
+
+const TraceSensitiveAllocProbe = struct {
+    inner: std.mem.Allocator,
+    saw_trace_sensitive_alloc: bool = false,
+
+    fn allocator(self: *@This()) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &vtable };
+    }
+
+    fn note(self: *@This()) void {
+        self.saw_trace_sensitive_alloc = self.saw_trace_sensitive_alloc or gc_runtime.inTraceSensitiveLock();
+    }
+
+    fn allocFn(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        self.note();
+        return self.inner.vtable.alloc(self.inner.ptr, len, alignment, ret_addr);
+    }
+
+    fn resizeFn(ctx: *anyopaque, mem: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        self.note();
+        return self.inner.vtable.resize(self.inner.ptr, mem, alignment, new_len, ret_addr);
+    }
+
+    fn remapFn(ctx: *anyopaque, mem: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        self.note();
+        return self.inner.vtable.remap(self.inner.ptr, mem, alignment, new_len, ret_addr);
+    }
+
+    fn freeFn(ctx: *anyopaque, mem: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        self.inner.vtable.free(self.inner.ptr, mem, alignment, ret_addr);
+    }
+
+    const vtable: std.mem.Allocator.VTable = .{
+        .alloc = allocFn,
+        .resize = resizeFn,
+        .remap = remapFn,
+        .free = freeFn,
+    };
 };
 
 test "condition queue head cursor skips canceled sync waiters" {
@@ -1195,6 +1248,30 @@ test "condition queue reserves capacity chunks" {
     while (rec.popWaiter()) |_| {}
     try std.testing.expectEqual(@as(usize, 0), rec.queue_head);
     try std.testing.expectEqual(@as(usize, 0), rec.queue.items.len);
+}
+
+test "condition queue growth is trace-sensitive" {
+    var probe = TraceSensitiveAllocProbe{ .inner = std.testing.allocator };
+    const a = probe.allocator();
+    var rec = CondRecord{ .gil = undefined };
+    defer rec.queue.deinit(a);
+
+    var ticket = SyncCondTicket{};
+    try std.testing.expect(!gc_runtime.inTraceSensitiveLock());
+    try rec.appendWaiter(a, .{ .sync = &ticket });
+    try std.testing.expect(probe.saw_trace_sensitive_alloc);
+    try std.testing.expect(!gc_runtime.inTraceSensitiveLock());
+}
+
+test "sync condition ticket allocation is trace-sensitive" {
+    var probe = TraceSensitiveAllocProbe{ .inner = std.testing.allocator };
+    const a = probe.allocator();
+
+    try std.testing.expect(!gc_runtime.inTraceSensitiveLock());
+    const ticket = try createSyncCondTicketTraceSensitive(a);
+    defer a.destroy(ticket);
+    try std.testing.expect(probe.saw_trace_sensitive_alloc);
+    try std.testing.expect(!gc_runtime.inTraceSensitiveLock());
 }
 
 test "condition queue compacts consumed head before growing" {
@@ -1861,7 +1938,7 @@ fn condWaitCore(self: *Interpreter, rec: *CondRecord, lock: *LockRecord, timeout
     // Arena-allocated, NOT stack: the notifier's consume-loop reads the
     // ticket after this frame may have returned (a stack ticket dangles —
     // it read clobbered memory and spun forever).
-    const ticket = self.arena.create(SyncCondTicket) catch |err| {
+    const ticket = createSyncCondTicketTraceSensitive(self.arena) catch |err| {
         lock.mutex.unlock(io);
         rec.mutex.unlock(io);
         return err;
@@ -3222,6 +3299,26 @@ test "jsthread lock retry-front queue reserves capacity chunks" {
     while (rec.popPending()) |_| {}
     try std.testing.expectEqual(@as(usize, 0), rec.pending_front.items.len);
     try std.testing.expectEqual(@as(usize, 0), rec.pending_head);
+}
+
+test "jsthread lock pending queue growth is trace-sensitive" {
+    var rec = LockRecord{ .gil = undefined };
+    var probe = TraceSensitiveAllocProbe{ .inner = std.testing.allocator };
+    const a = probe.allocator();
+    defer rec.pending_front.deinit(a);
+    defer rec.pending.deinit(a);
+
+    var pending_job = HoldJob{ .lock = &rec, .outer = undefined, .cb = null, .release_state = .{ .lock = &rec } };
+    try std.testing.expect(!gc_runtime.inTraceSensitiveLock());
+    try rec.appendPending(a, &pending_job);
+    try std.testing.expect(probe.saw_trace_sensitive_alloc);
+    try std.testing.expect(!gc_runtime.inTraceSensitiveLock());
+
+    probe.saw_trace_sensitive_alloc = false;
+    var front_job = HoldJob{ .lock = &rec, .outer = undefined, .cb = null, .release_state = .{ .lock = &rec } };
+    try rec.pushFrontPending(a, &front_job);
+    try std.testing.expect(probe.saw_trace_sensitive_alloc);
+    try std.testing.expect(!gc_runtime.inTraceSensitiveLock());
 }
 
 test "jsthread traces queued async hold task roots" {
