@@ -146,6 +146,55 @@ fn buildBlocks(chunk: *const Chunk, analysis: *const Analysis, allocator: std.me
     return blocks.toOwnedSlice(allocator);
 }
 
+fn buildCoveredSuccessors(
+    chunk: *const Chunk,
+    analysis: *const Analysis,
+    blocks: []const Block,
+    allocator: std.mem.Allocator,
+) ![]bool {
+    const block_at = try allocator.alloc(usize, chunk.code.items.len);
+    defer allocator.free(block_at);
+    @memset(block_at, unreachable_offset);
+    for (blocks, 0..) |block, index| block_at[block.start] = index;
+
+    const predecessors = try allocator.alloc(u32, blocks.len);
+    defer allocator.free(predecessors);
+    @memset(predecessors, 0);
+    for (blocks) |block| {
+        const last = chunk.code.items[block.end - 1];
+        switch (last.op) {
+            .jump => {
+                if (last.a >= block_at.len or block_at[last.a] == unreachable_offset) return error.UnsupportedChunk;
+                predecessors[block_at[last.a]] += 1;
+            },
+            .jump_if_false => {
+                if (last.a >= block_at.len or block_at[last.a] == unreachable_offset) return error.UnsupportedChunk;
+                predecessors[block_at[last.a]] += 1;
+                if (block.end < block_at.len and analysis.states[block.end] != null) {
+                    if (block_at[block.end] == unreachable_offset) return error.UnsupportedChunk;
+                    predecessors[block_at[block.end]] += 1;
+                }
+            },
+            .ret, .ret_undef => {},
+            else => if (block.end < block_at.len and analysis.states[block.end] != null) {
+                if (block_at[block.end] == unreachable_offset) return error.UnsupportedChunk;
+                predecessors[block_at[block.end]] += 1;
+            },
+        }
+    }
+
+    const covered = try allocator.alloc(bool, blocks.len);
+    @memset(covered, false);
+    for (blocks[0 .. blocks.len - 1], 0..) |block, index| {
+        if (covered[index] or chunk.code.items[block.end - 1].op != .jump_if_false) continue;
+        const successor = blocks[index + 1];
+        const combined = @as(u32, block.instructionCount()) + successor.instructionCount();
+        if (block.end == successor.start and predecessors[index + 1] == 1 and combined <= std.math.maxInt(u12))
+            covered[index + 1] = true;
+    }
+    return covered;
+}
+
 fn classify(v: Value) ?Kind {
     return switch (v.kind()) {
         .undefined => .undefined,
@@ -500,6 +549,14 @@ fn patchControlFixups(
     };
 }
 
+fn patchControlToOffset(assembler: *aarch64.Assembler, fixup: ControlFixup, target: usize) !void {
+    switch (fixup) {
+        .branch => |branch| try assembler.patchBranch(branch.at, target),
+        .condition => |branch| try assembler.patchConditionBranch(branch.at, target),
+        .test_zero => |branch| try assembler.patchTestBranch(branch.at, target),
+    }
+}
+
 fn compileNumeric(chunk: *const Chunk) !jit.CompiledCode {
     if (!jit.supported or builtin.cpu.arch != .aarch64) return error.UnsupportedTarget;
 
@@ -511,6 +568,8 @@ fn compileNumeric(chunk: *const Chunk) !jit.CompiledCode {
     const code_len = chunk.code.items.len;
     const blocks = try buildBlocks(chunk, &analysis, allocator);
     defer allocator.free(blocks);
+    const covered_successors = try buildCoveredSuccessors(chunk, &analysis, blocks, allocator);
+    defer allocator.free(covered_successors);
 
     const estimated = std.math.mul(usize, code_len, 768) catch return error.UnsupportedChunk;
     var memory = try jit.CodeMemory.init(estimated + 4096);
@@ -519,12 +578,16 @@ fn compileNumeric(chunk: *const Chunk) !jit.CompiledCode {
 
     const fast_offsets = try allocator.alloc(usize, code_len);
     defer allocator.free(fast_offsets);
+    const hot_offsets = try allocator.alloc(usize, blocks.len);
+    defer allocator.free(hot_offsets);
     const fast_budget_fixups = try allocator.alloc(usize, blocks.len);
     defer allocator.free(fast_budget_fixups);
     const fast_checkpoint_fixups = try allocator.alloc(usize, blocks.len);
     defer allocator.free(fast_checkpoint_fixups);
     const fast_control_fixups = try allocator.alloc(?ControlFixup, code_len);
     defer allocator.free(fast_control_fixups);
+    const refund_fixups = try allocator.alloc(?ControlFixup, blocks.len);
+    defer allocator.free(refund_fixups);
     const slow_offsets = try allocator.alloc(usize, blocks.len);
     defer allocator.free(slow_offsets);
     const slow_fallthrough_fixups = try allocator.alloc(usize, blocks.len);
@@ -540,9 +603,11 @@ fn compileNumeric(chunk: *const Chunk) !jit.CompiledCode {
     const status_fixups = try allocator.alloc(usize, code_len);
     defer allocator.free(status_fixups);
     @memset(fast_offsets, unreachable_offset);
+    @memset(hot_offsets, unreachable_offset);
     @memset(fast_budget_fixups, unreachable_offset);
     @memset(fast_checkpoint_fixups, unreachable_offset);
     @memset(fast_control_fixups, null);
+    @memset(refund_fixups, null);
     @memset(slow_offsets, unreachable_offset);
     @memset(slow_fallthrough_fixups, unreachable_offset);
     @memset(operation_offsets, unreachable_offset);
@@ -580,15 +645,21 @@ fn compileNumeric(chunk: *const Chunk) !jit.CompiledCode {
     // next 1024-step safepoint falls within it, so observable boundaries keep
     // the interpreter's instruction-level semantics.
     for (blocks, 0..) |block, block_index| {
-        fast_offsets[block.start] = assembler.position();
-        const instruction_count = block.instructionCount();
-        try assembler.compareImmediate64(25, instruction_count);
-        fast_budget_fixups[block_index] = try assembler.branchConditionPlaceholder(.lo);
-        try assembler.compareImmediate64(24, instruction_count);
-        fast_checkpoint_fixups[block_index] = try assembler.branchConditionPlaceholder(.ls);
-        try assembler.subtractImmediate64(25, 25, instruction_count);
-        try assembler.subtractImmediate64(24, 24, instruction_count);
-        try assembler.addImmediate64(19, 19, instruction_count);
+        if (!covered_successors[block_index]) {
+            fast_offsets[block.start] = assembler.position();
+            const instruction_count: u12 = if (block_index + 1 < blocks.len and covered_successors[block_index + 1])
+                @intCast(@as(u32, block.instructionCount()) + blocks[block_index + 1].instructionCount())
+            else
+                block.instructionCount();
+            try assembler.compareImmediate64(25, instruction_count);
+            fast_budget_fixups[block_index] = try assembler.branchConditionPlaceholder(.lo);
+            try assembler.compareImmediate64(24, instruction_count);
+            fast_checkpoint_fixups[block_index] = try assembler.branchConditionPlaceholder(.ls);
+            try assembler.subtractImmediate64(25, 25, instruction_count);
+            try assembler.subtractImmediate64(24, 24, instruction_count);
+            try assembler.addImmediate64(19, 19, instruction_count);
+        }
+        hot_offsets[block_index] = assembler.position();
 
         var ip: usize = block.start;
         while (ip < block.end) {
@@ -607,7 +678,45 @@ fn compileNumeric(chunk: *const Chunk) !jit.CompiledCode {
             fast_control_fixups[ip] = try emitOperation(&assembler, chunk, state, inst);
             ip += 1;
         }
+        if (block_index + 1 < blocks.len and covered_successors[block_index + 1]) {
+            const last_ip = block.end - 1;
+            refund_fixups[block_index] = fast_control_fixups[last_ip] orelse return error.UnsupportedChunk;
+            fast_control_fixups[last_ip] = null;
+        }
     }
+
+    // A covered successor is physically entered without another accounting
+    // prefix only from its pre-accounting predecessor. Slow replay and explicit
+    // transfers use this guarded entry, which then jumps back to the same body.
+    for (blocks, 0..) |block, block_index| if (covered_successors[block_index]) {
+        fast_offsets[block.start] = assembler.position();
+        const instruction_count = block.instructionCount();
+        try assembler.compareImmediate64(25, instruction_count);
+        fast_budget_fixups[block_index] = try assembler.branchConditionPlaceholder(.lo);
+        try assembler.compareImmediate64(24, instruction_count);
+        fast_checkpoint_fixups[block_index] = try assembler.branchConditionPlaceholder(.ls);
+        try assembler.subtractImmediate64(25, 25, instruction_count);
+        try assembler.subtractImmediate64(24, 24, instruction_count);
+        try assembler.addImmediate64(19, 19, instruction_count);
+        const body = try assembler.branchPlaceholder();
+        try assembler.patchBranch(body, hot_offsets[block_index]);
+    };
+
+    // A false conditional executes only the predecessor bytecodes. Refund the
+    // covered successor that was conservatively pre-accounted, then enter the
+    // false target through its ordinary guarded offset.
+    for (blocks, 0..) |block, block_index| if (refund_fixups[block_index]) |fixup| {
+        const stub = assembler.position();
+        try patchControlToOffset(&assembler, fixup, stub);
+        const successor_count = blocks[block_index + 1].instructionCount();
+        try assembler.addImmediate64(25, 25, successor_count);
+        try assembler.addImmediate64(24, 24, successor_count);
+        try assembler.subtractImmediate64(19, 19, successor_count);
+        const target = chunk.code.items[block.end - 1].a;
+        if (target >= code_len or fast_offsets[target] == unreachable_offset) return error.UnsupportedChunk;
+        const leave = try assembler.branchPlaceholder();
+        try assembler.patchBranch(leave, fast_offsets[target]);
+    };
     try patchControlFixups(&assembler, fast_control_fixups, fast_offsets);
 
     // Boundary blocks replay the original instruction accounting until their
@@ -771,28 +880,33 @@ test "compiler executes a numeric local loop across a checkpoint" {
     var compiled = try compile(function_chunk);
     defer compiled.deinit();
 
-    var slots = [_]u64{
-        Value.num(10).rawBits(),
-        Value.undef().rawBits(),
-        Value.undef().rawBits(),
-    };
+    var slots: [3]u64 = undefined;
     var scratch: [jit.numeric_scratch_capacity]u64 = undefined;
-    var steps: u64 = 0;
-    var checkpoint_calls: u32 = 0;
-    var frame = jit.NativeFrame{
-        .slots = &slots,
-        .scratch = &scratch,
-        .steps = &steps,
-        .runtime_context = &checkpoint_calls,
-        .checkpoint = Runtime.checkpoint,
-        .remainder = Runtime.remainder,
-        .steps_until_checkpoint = 1,
-        .steps_until_budget = 1_000_000,
-    };
-    try std.testing.expectEqual(jit.ExitStatus.complete, compiled.run(&frame));
-    try std.testing.expectEqual(@as(f64, 45), Value.fromRawBits(frame.result_bits).asNum());
-    try std.testing.expectEqual(@as(u32, 1), checkpoint_calls);
-    try std.testing.expect(steps > 100);
+    var expected_steps: ?u64 = null;
+    for (1..48) |checkpoint_distance| {
+        slots = .{
+            Value.num(10).rawBits(),
+            Value.undef().rawBits(),
+            Value.undef().rawBits(),
+        };
+        var steps: u64 = 0;
+        var checkpoint_calls: u32 = 0;
+        var frame = jit.NativeFrame{
+            .slots = &slots,
+            .scratch = &scratch,
+            .steps = &steps,
+            .runtime_context = &checkpoint_calls,
+            .checkpoint = Runtime.checkpoint,
+            .remainder = Runtime.remainder,
+            .steps_until_checkpoint = checkpoint_distance,
+            .steps_until_budget = 1_000_000,
+        };
+        try std.testing.expectEqual(jit.ExitStatus.complete, compiled.run(&frame));
+        try std.testing.expectEqual(@as(f64, 45), Value.fromRawBits(frame.result_bits).asNum());
+        try std.testing.expectEqual(@as(u32, 1), checkpoint_calls);
+        if (expected_steps) |expected| try std.testing.expectEqual(expected, steps) else expected_steps = steps;
+    }
+    try std.testing.expect(expected_steps.? > 100);
     try std.testing.expect(compiled.manages_steps);
     try std.testing.expectEqual(@as(u32, 3), compiled.frame_slots);
     try std.testing.expectEqual(@as(u64, 1), compiled.required_numeric_slots);
