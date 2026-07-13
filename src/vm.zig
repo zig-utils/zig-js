@@ -3212,6 +3212,13 @@ test "vm: numeric baseline tier preserves steps and non-number fallback" {
     try std.testing.expectEqual(@as(f64, 1.5), (try run(&machine, remainder_chunk, &remainder_frame)).asNum());
     remainder_slots = .{ Value.num(std.math.nan(f64)), Value.num(2) };
     try std.testing.expect(std.math.isNan((try run(&machine, remainder_chunk, &remainder_frame)).asNum()));
+
+    // The native budget countdown must throw before the exact first instruction
+    // beyond the limit, even when that step is not a 1024-step checkpoint.
+    sum_slots = .{ Value.num(10), Value.undef(), Value.undef() };
+    machine.steps = interp.max_steps - 1;
+    try std.testing.expectError(error.Throw, run(&machine, sum_chunk, &sum_frame));
+    try std.testing.expectEqual(interp.max_steps + 1, machine.steps);
 }
 
 test "vm: completed non-escaping recursive activations reuse bounded storage" {
