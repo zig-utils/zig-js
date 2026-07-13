@@ -142,7 +142,8 @@ heap-cap witnesses also cover no-GIL `ArrayBuffer` byte-slab recovery while a
 real peer thread is running and publishing roots to the abort-safe parallel
 collector, plus the trace-sensitive `MicrotaskQueue` and async-generator
 request lock guards that keep allocation-failure recovery out of mutable
-promise/thread queue and generator side-store critical sections. Separate
+promise/thread queue, ThreadLocal map, and generator side-store critical
+sections. Separate
 deferred-generator, deferred-generator-handler,
 deferred-async-generator-request, and deferred-iterator-helper witnesses root
 suspended stack, resumable handler, pending-request, and mid-helper state, then

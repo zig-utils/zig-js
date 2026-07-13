@@ -17,6 +17,7 @@ const gc_mod = @import("gc.zig");
 const stack_scan = @import("stack_scan.zig");
 const value = @import("value.zig");
 const strcell = @import("strcell.zig");
+const gc_runtime = @import("gc_runtime.zig");
 const interp = @import("interpreter.zig");
 const ContextMod = @import("context.zig");
 const gil_mod = @import("gil.zig");
@@ -1269,11 +1270,23 @@ const TLRecord = struct {
         while (!self.map_lock.tryLock()) : (spins += 1) {
             if ((spins & 0xff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
         }
+        gc_runtime.enterTraceSensitiveLock();
     }
     fn unlockMap(self: *TLRecord) void {
+        gc_runtime.leaveTraceSensitiveLock();
         self.map_lock.unlock();
     }
 };
+
+test "ThreadLocal map lock is trace-sensitive" {
+    var rec = TLRecord{ .gil = undefined, .arena = std.testing.allocator };
+
+    try std.testing.expect(!gc_runtime.inTraceSensitiveLock());
+    rec.lockMap();
+    try std.testing.expect(gc_runtime.inTraceSensitiveLock());
+    rec.unlockMap();
+    try std.testing.expect(!gc_runtime.inTraceSensitiveLock());
+}
 
 fn rememberThreadLocalForCurrentThread(rec: *TLRecord) !void {
     const thread_rec = t_current orelse return;
