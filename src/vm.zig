@@ -190,7 +190,11 @@ pub const Generator = struct {
     done: bool = false,
     suspended: bool = false,
     resume_mutex: std.Io.Mutex = .init,
-    running: bool = false,
+    /// Resume ownership. Ordinary generators also hold `resume_mutex` to
+    /// preserve the re-entrant TypeError; async functions use this atomic as a
+    /// release/acquire handoff between promise jobs drained by different
+    /// shared-realm threads.
+    running: std.atomic.Value(bool) = .init(false),
     /// An async function activation (vs a `function*`). It is driven by promise
     /// settlement rather than `.next()`: each `await` suspends like a `yield`,
     /// and `result` is the promise the call returned, settled on completion.
@@ -222,6 +226,17 @@ pub const Generator = struct {
     fn unlockRequests(self: *Generator) void {
         gc_runtime.leaveTraceSensitiveLock();
         self.requests_mutex.unlock(agent.engineIo());
+    }
+
+    fn claimAsyncResume(self: *Generator) void {
+        var spins: usize = 0;
+        while (self.running.cmpxchgWeak(false, true, .acquire, .monotonic) != null) : (spins += 1) {
+            if ((spins & 0xff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
+        }
+    }
+
+    fn releaseAsyncResume(self: *Generator) void {
+        self.running.store(false, .release);
     }
 
     fn backingFor(self: *Generator, fallback: std.mem.Allocator, comptime field: []const u8) std.mem.Allocator {
@@ -381,6 +396,27 @@ test "async generator request lock is trace-sensitive" {
     g.lockRequests();
     defer g.unlockRequests();
     try std.testing.expect(gc_runtime.inTraceSensitiveLock());
+}
+
+test "async function resume ownership is a release acquire handoff" {
+    if (@import("builtin").single_threaded) return error.SkipZigTest;
+    var g: Generator = undefined;
+    g.running = .init(false);
+    var completed: usize = 0;
+    const Runner = struct {
+        fn run(gen: *Generator, count: *usize) void {
+            var i: usize = 0;
+            while (i < 1000) : (i += 1) {
+                gen.claimAsyncResume();
+                count.* += 1;
+                gen.releaseAsyncResume();
+            }
+        }
+    };
+    var threads: [4]std.Thread = undefined;
+    for (&threads) |*thread| thread.* = try std.Thread.spawn(.{}, Runner.run, .{ &g, &completed });
+    for (&threads) |*thread| thread.join();
+    try std.testing.expectEqual(@as(usize, 4000), completed);
 }
 
 /// Property-key string for a computed index: a Symbol uses its unique internal
@@ -1461,7 +1497,7 @@ fn genResume(vm: *Interpreter, gen_obj: *value.Object, kind: ResumeKind, val: Va
     const g: *Generator = @ptrCast(@alignCast(gen_obj.gen.?));
     if (!g.resume_mutex.tryLock()) return vm.throwError("TypeError", "generator is already running");
     defer g.resume_mutex.unlock(agent.engineIo());
-    if (g.running) return vm.throwError("TypeError", "generator is already running");
+    if (g.running.load(.monotonic)) return vm.throwError("TypeError", "generator is already running");
 
     // A completed (or not-yet-started) generator handles each kind without
     // re-entering the body.
@@ -1532,8 +1568,8 @@ fn genResume(vm: *Interpreter, gen_obj: *value.Object, kind: ResumeKind, val: Va
         }
     }
 
-    g.running = true;
-    defer g.running = false;
+    g.running.store(true, .monotonic);
+    defer g.running.store(false, .monotonic);
     g.started = true;
     g.suspended = false;
 
@@ -1825,7 +1861,14 @@ fn completeAsyncWithDisposal(vm: *Interpreter, g: *Generator, result_value: Valu
 /// Run the async activation until its next `await` or completion, then settle
 /// its result promise (on return/throw) or wire resume reactions (on await).
 fn asyncDrive(vm: *Interpreter, g: *Generator, kind: ResumeKind, val: Value) EvalError!void {
-    if (g.done or g.running) return;
+    // Consecutive awaits may be drained by different shared-realm threads. An
+    // already-settled next await can run while the prior drive is in its return
+    // tail, so claim the activation with an acquire CAS and publish all state
+    // with a release store. The wait is only for that tail handoff: promise
+    // reactions are jobs, never inline callbacks into a still-executing await.
+    g.claimAsyncResume();
+    defer g.releaseAsyncResume();
+    if (g.done) return;
     if (g.started) {
         switch (kind) {
             .send => try g.exec.stack.append(g.stackAllocator(vm.arena), val), // the awaited value
@@ -1841,8 +1884,6 @@ fn asyncDrive(vm: *Interpreter, g: *Generator, kind: ResumeKind, val: Value) Eva
         }
     }
     g.started = true;
-    g.running = true;
-    defer g.running = false;
     g.suspended = false;
 
     const s_env = vm.env;
