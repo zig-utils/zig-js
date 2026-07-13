@@ -90,13 +90,68 @@ pub const Frame = struct {
     }
 };
 
+/// The VM operand stack has a much hotter append path than a general-purpose
+/// ArrayList: almost every bytecode instruction pushes at least one Value. The
+/// standard unmanaged append calls ensureTotalCapacity even when capacity is
+/// already available; profiles attributed roughly a third of arithmetic VM
+/// samples to that call/check boundary. Keep ArrayList growth semantics on the
+/// rare full-capacity path, but make the common append one inlined comparison
+/// and one store.
+const OperandStack = struct {
+    items: []Value = &.{},
+    capacity: usize = 0,
+
+    pub const empty: OperandStack = .{};
+
+    pub inline fn append(self: *OperandStack, allocator: std.mem.Allocator, item: Value) std.mem.Allocator.Error!void {
+        if (self.items.len == self.capacity) try self.grow(allocator);
+        self.items.len += 1;
+        self.items[self.items.len - 1] = item;
+    }
+
+    noinline fn grow(self: *OperandStack, allocator: std.mem.Allocator) std.mem.Allocator.Error!void {
+        var list: std.ArrayListUnmanaged(Value) = .{
+            .items = self.items,
+            .capacity = self.capacity,
+        };
+        try list.ensureTotalCapacity(allocator, self.items.len + 1);
+        self.items = list.items;
+        self.capacity = list.capacity;
+    }
+
+    pub inline fn pop(self: *OperandStack) ?Value {
+        if (self.items.len == 0) return null;
+        const item = self.items[self.items.len - 1];
+        self.items.len -= 1;
+        return item;
+    }
+
+    pub inline fn shrinkRetainingCapacity(self: *OperandStack, new_len: usize) void {
+        std.debug.assert(new_len <= self.items.len);
+        self.items.len = new_len;
+    }
+
+    pub inline fn clearRetainingCapacity(self: *OperandStack) void {
+        self.items.len = 0;
+    }
+
+    pub fn deinit(self: *OperandStack, allocator: std.mem.Allocator) void {
+        var list: std.ArrayListUnmanaged(Value) = .{
+            .items = self.items,
+            .capacity = self.capacity,
+        };
+        list.deinit(allocator);
+        self.* = .empty;
+    }
+};
+
 /// A resumable execution state: the operand stack, completion accumulator, and
 /// instruction pointer. For a normal call this lives on the host stack and is
 /// thrown away when `run` returns; for a generator it lives in the `Generator`
 /// and persists across `yield`/resume, which is what makes suspension faithful
 /// (the whole operand stack is saved, so a `yield` can sit mid-expression).
 pub const Exec = struct {
-    stack: std.ArrayListUnmanaged(Value) = .empty,
+    stack: OperandStack = .empty,
     acc: Value = Value.undef(),
     ip: usize = 0,
     /// The activation frame this Exec is running (null for env-mode bodies:
@@ -135,7 +190,7 @@ fn looksLikeCompletionKind(v: Value) bool {
     return n >= 0 and n <= @as(f64, @floatFromInt(@intFromEnum(Completion.continue_)));
 }
 
-fn completionKindBelowTop(stack: *const std.ArrayListUnmanaged(Value)) ?Completion {
+fn completionKindBelowTop(stack: *const OperandStack) ?Completion {
     if (stack.items.len == 0) return null;
     const v = stack.items[stack.items.len - 1];
     if (!looksLikeCompletionKind(v)) return null;
