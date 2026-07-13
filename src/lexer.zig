@@ -1000,6 +1000,16 @@ fn hexVal(c: u8) ?u8 {
 /// Append a UTF-8-encoded code point to `buf`. Lone surrogates are emitted as
 /// WTF-8 so JS strings can preserve UTF-16 code units that are not scalar values.
 fn appendCodePoint(arena: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), cp: u21) std.mem.Allocator.Error!void {
+    // A codepoint past the Unicode maximum only reaches here from a `\u{…}` escape
+    // whose value overflows 0x10FFFF. That is always an invalid escape — a
+    // SyntaxError in a string (rejected before this runs) and a discarded
+    // (cooked=undefined) quasi in a tagged template — so emit U+FFFD rather than
+    // feed the out-of-range scalar to utf8Encode, which panics. (Fixes a crash on
+    // ``\u{110000}`` in a tagged template.)
+    if (cp > 0x10FFFF) {
+        try buf.appendSlice(arena, "\u{FFFD}");
+        return;
+    }
     var tmp: [4]u8 = undefined;
     const n = std.unicode.utf8Encode(cp, &tmp) catch {
         try buf.append(arena, @intCast(0xE0 | (cp >> 12)));
