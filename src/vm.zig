@@ -7,10 +7,10 @@
 //! (turning names into slot indexes is the next perf tier); what we remove here
 //! is AST recursion and per-node dispatch.
 //!
-//! Calls recurse on the host stack: a VM-compiled callee runs in a nested `run`,
-//! a tree-walk-only or native callee is delegated to `Interpreter`. Programs run
-//! entirely in one mode (VM or tree-walk), so a VM frame only ever creates and
-//! calls VM closures plus host natives.
+//! Plain VM-to-VM calls use an explicit heap activation stack so logical JS
+//! recursion does not consume the host stack. Tree-walk-only and native callees
+//! are delegated to `Interpreter`; generator/async bodies retain their own
+//! resumable execution state.
 
 const std = @import("std");
 const gc_mod = @import("gc.zig");
@@ -2573,6 +2573,11 @@ const Activation = struct {
     exec: Exec = .{},
     chunk: *Chunk,
     frame: *Frame,
+    /// Full backing store retained when `frame.slots` is narrowed for a call.
+    /// Keeping capacity here lets a later activation with no more locals reuse
+    /// the same allocation.
+    slot_storage: []Value,
+    next_free: ?*Activation = null,
     // The operand-stack index in the *caller* where this call's result lands
     // (callee + args were popped off before the call ran). Unused for the
     // driver's initial activation.
@@ -2589,25 +2594,78 @@ const Activation = struct {
     saved_pm: ?*const std.StringHashMapUnmanaged([]const u8),
 };
 
+/// Return an inactive activation whose frame was never captured. The pool is
+/// interpreter-local, so independent contexts and shared-realm threads never
+/// contend on it. Arena allocations cannot be individually freed; recycling
+/// here avoids retaining one frame/slot/Exec allocation for every completed JS
+/// call until Context teardown.
+fn releaseActivation(vm: *Interpreter, act: *Activation) void {
+    if (act.frame.escaped.load(.monotonic)) return;
+    act.exec.stack.clearRetainingCapacity();
+    act.exec.handlers.clearRetainingCapacity();
+    act.exec.acc = Value.undef();
+    act.exec.ip = 0;
+    act.exec.frame = null;
+    act.next_free = if (vm.vm_activation_free) |raw| @ptrCast(@alignCast(raw)) else null;
+    vm.vm_activation_free = act;
+}
+
+fn acquireActivation(vm: *Interpreter, local_count: usize) EvalError!*Activation {
+    if (vm.vm_activation_free) |raw| {
+        const act: *Activation = @ptrCast(@alignCast(raw));
+        if (act.slot_storage.len >= local_count) {
+            vm.vm_activation_free = act.next_free;
+            act.next_free = null;
+            act.frame.slots = act.slot_storage[0..local_count];
+            act.frame.parent = null;
+            act.frame.escaped.store(false, .monotonic);
+            @memset(act.frame.slots, Value.undef());
+            return act;
+        }
+    }
+
+    const slots = try vm.arena.alloc(Value, local_count);
+    @memset(slots, Value.undef());
+    const frame = try vm.arena.create(Frame);
+    frame.* = .{ .slots = slots, .parent = null };
+    const act = try vm.arena.create(Activation);
+    act.* = .{
+        .chunk = undefined,
+        .frame = frame,
+        .slot_storage = slots,
+        .saved_this = undefined,
+        .saved_strict = undefined,
+        .saved_env = undefined,
+        .saved_nt = undefined,
+        .saved_ims = undefined,
+        .saved_imo = undefined,
+        .saved_cur_module = undefined,
+        .saved_eval_nt = undefined,
+        .saved_pm = undefined,
+    };
+    vm.vm_activation_allocations += 1;
+    return act;
+}
+
 /// Allocate a callee activation (frame + slots from `args`), capture the caller
 /// VM state into it, and install the callee's VM state. Does not run anything.
 /// On a throw from `bindThisForCall` the caller state is restored before
 /// propagating, so the caller is never left with the callee's state.
 fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []const Value, this_val: Value, new_target: Value) EvalError!*Activation {
-    const slots = try vm.arena.alloc(Value, func.local_count);
-    @memset(slots, Value.undef());
+    const act = try acquireActivation(vm, func.local_count);
+    const exec = act.exec;
+    const frame = act.frame;
+    const slot_storage = act.slot_storage;
+    const slots = frame.slots;
     for (func.params, 0..) |_, i| {
         if (i < args.len) slots[i] = args[i];
     }
-    const frame = try vm.arena.create(Frame);
-    frame.* = .{
-        .slots = slots,
-        .parent = if (func.frame) |fp| @ptrCast(@alignCast(fp)) else null,
-    };
-    const act = try vm.arena.create(Activation);
     act.* = .{
+        .exec = exec,
         .chunk = fchunk,
         .frame = frame,
+        .slot_storage = slot_storage,
+        .next_free = null,
         .saved_this = vm.this_value,
         .saved_strict = vm.strict,
         .saved_env = vm.env,
@@ -2617,6 +2675,10 @@ fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
         .saved_cur_module = vm.cur_module,
         .saved_eval_nt = vm.direct_eval_new_target_allowed,
         .saved_pm = vm.current_private_map,
+    };
+    frame.* = .{
+        .slots = slots,
+        .parent = if (func.frame) |fp| @ptrCast(@alignCast(fp)) else null,
     };
     if (!func.is_arrow) vm.current_private_map = func.private_map; // a direct eval here resolves the class's private names
     vm.strict = func.is_strict;
@@ -2630,6 +2692,7 @@ fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
     vm.cur_module = func.module_referrer;
     vm.this_value = bindThisForCall(vm, func, this_val) catch |e| {
         popActivation(vm, act);
+        releaseActivation(vm, act);
         return e;
     };
     return act;
@@ -2695,6 +2758,7 @@ fn unwindThrow(vm: *Interpreter, acts: *std.ArrayListUnmanaged(*Activation)) Eva
         vm.popExecRoot(&cur.exec);
         popActivation(vm, cur);
         _ = acts.pop();
+        releaseActivation(vm, cur);
         if (acts.items.len == 0) return false; // uncaught; initial depth owned by runFunction
         vm.depth -= 1; // a nested activation was discarded
     }
@@ -2738,6 +2802,7 @@ fn runDriver(vm: *Interpreter, initial: *Activation) EvalError!Value {
                     vm.popExecRoot(&a.exec);
                     popActivation(vm, a);
                     _ = acts.pop();
+                    releaseActivation(vm, a);
                     if (acts.items.len > 0) vm.depth -= 1;
                 }
                 return abrupt;
@@ -2756,8 +2821,10 @@ fn runDriver(vm: *Interpreter, initial: *Activation) EvalError!Value {
                 inheritCallerState(callee, current);
                 vm.popExecRoot(&current.exec);
                 _ = acts.pop();
+                releaseActivation(vm, current);
             } else {
                 if (vm.depth >= interp.max_call_depth) {
+                    releaseActivation(vm, callee);
                     _ = vm.throwError("RangeError", "Maximum call stack size exceeded") catch {};
                     if (try unwindThrow(vm, &acts)) continue;
                     return error.Throw;
@@ -2773,6 +2840,7 @@ fn runDriver(vm: *Interpreter, initial: *Activation) EvalError!Value {
         vm.popExecRoot(&cur.exec);
         popActivation(vm, cur);
         _ = acts.pop();
+        releaseActivation(vm, cur);
         if (acts.items.len == 0) return rv; // initial returned; runFunction owns its depth
         vm.depth -= 1; // a nested activation completed
         const caller = acts.items[acts.items.len - 1];
@@ -2850,6 +2918,29 @@ test "vm: functions, recursion, closures" {
         \\function mk(x) { return function (y) { return x + y; }; }
         \\mk(10)(5)
     )).asNum());
+}
+
+test "vm: completed non-escaping recursive activations reuse bounded storage" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var parser = try Parser.init(a,
+        \\function fib(n) { return n < 2 ? n : fib(n - 1) + fib(n - 2); }
+        \\var total = 0;
+        \\for (var i = 0; i < 50; i = i + 1) total = total + fib(10);
+        \\total
+    );
+    const prog = try parser.parseProgram();
+    const chunk = try Compiler.compileProgram(a, prog);
+    var env = Environment{ .arena = a, .fn_scope = true };
+    const root_shape = try @import("shape.zig").Shape.createRoot(a);
+    try interp.installGlobals(&env, root_shape);
+    var machine = Interpreter{ .arena = a, .env = &env, .root_shape = root_shape };
+
+    try std.testing.expectEqual(@as(f64, 2750), (try run(&machine, chunk, null)).asNum());
+    // fib(10) needs only its live recursion depth. Repeating it 50 times must
+    // not retain one arena allocation per completed call.
+    try std.testing.expect(machine.vm_activation_allocations <= 12);
 }
 
 test "vm: recursive calls throw a catchable RangeError before native stack overflow" {

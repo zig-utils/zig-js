@@ -1239,6 +1239,14 @@ pub const Interpreter = struct {
     driver_active: bool = false,
     pending_activation: ?*anyopaque = null,
     pending_tail_call: bool = false,
+    /// Reusable, non-escaped VM call activations. The concrete node type lives
+    /// in vm.zig; this stays opaque to avoid an interpreter↔VM module cycle.
+    /// Activations whose frames were captured by a closure are never pooled.
+    vm_activation_free: ?*anyopaque = null,
+    /// Diagnostic counter used by focused VM tests and performance profiles.
+    /// It counts backing activation allocations, not calls; a bounded value for
+    /// repeated shallow recursion proves that the free list is doing real work.
+    vm_activation_allocations: usize = 0,
 
     /// Guard a function call against native-stack exhaustion: throw a catchable
     /// `RangeError` when either the logical call-depth limit or the real OS
