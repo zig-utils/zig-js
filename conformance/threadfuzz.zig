@@ -12312,6 +12312,11 @@ fn runWorkerTerminateThreadLocalAsyncHoldCleanupInterleavingKind(
             \\      gate.condOpen = true;
             \\      cond.notifyAll();
             \\    }});
+            \\    // Completion can lag far behind this mutator under TSan. Join
+            \\    // before pumping the asyncJoin reactions so the oracle checks
+            \\    // settlement, rather than a machine-speed-dependent spin race.
+            \\    try {{ propWaiter.join(); }} catch (_) {{}}
+            \\    try {{ condWaiter.join(); }} catch (_) {{}}
             \\    for (let spins = 0; globalThis.__workerTlsAsyncHoldRejectCount < beforeWaiterReject + 2 && spins < {d}; spins++) {{
             \\      $drainRunLoop();
             \\      drainMicrotasks();
@@ -12322,6 +12327,9 @@ fn runWorkerTerminateThreadLocalAsyncHoldCleanupInterleavingKind(
             \\    gate.tlsFail = true;
             \\    Atomics.store(gate, 'release', 1);
             \\    Atomics.notify(gate, 'release');
+            \\    for (const t of tlsThreads) {{
+            \\      try {{ t.join(); }} catch (_) {{}}
+            \\    }}
             \\    for (let spins = 0; globalThis.__workerTlsAsyncHoldRejectCount < expectedAfterTlsRelease && spins < {d}; spins++) {{
             \\      $drainRunLoop();
             \\      drainMicrotasks();
