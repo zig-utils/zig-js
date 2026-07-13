@@ -26806,9 +26806,13 @@ pub fn makeSharedArrayBufferWrapper(self: *Interpreter, storage: *shared_buffer.
         tracked = true;
     }
     errdefer {
-        if (tracked) if (self.sab_retains) |rl| {
-            _ = rl.releaseTracked(storage);
-        };
+        if (tracked) {
+            if (self.sab_retains) |rl| _ = rl.releaseTracked(storage);
+        } else if (self.sab_retains == null) {
+            // Standalone interpreters have no realm retain list, but this
+            // constructor still owns the transferred reference on every path.
+            storage.release();
+        }
     }
     const o = (try self.newObject()).asObj();
     const ab = try self.allocArrayBufferData();

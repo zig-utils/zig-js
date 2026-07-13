@@ -21,6 +21,7 @@ const agent = @import("agent.zig");
 const promise = @import("promise.zig");
 const parser_mod = @import("parser.zig");
 const object_profile = @import("object_profile.zig");
+const structured_clone = @import("structured_clone.zig");
 
 pub const RunError = interp.EvalError || @import("parser.zig").ParseError;
 
@@ -10159,6 +10160,41 @@ test "structuredClone: identity, cycles, types, SAB sharing, transfer" {
         \\try { structuredClone(function () {}); } catch (e) { threw = e instanceof TypeError; }
         \\if (!threw) throw new Error("function clone did not throw");
     );
+}
+
+test "structured clone rejects forged replayed and trailing SAB tokens" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    defer ctx.destroy();
+    var machine = ctx.interpreter();
+
+    const sab = try ctx.evaluate("new SharedArrayBuffer(8)");
+    const valid = try structured_clone.serialize(&machine, std.testing.allocator, sab);
+    defer structured_clone.releaseSerialized(valid);
+    defer std.testing.allocator.free(valid);
+    try std.testing.expect(valid.len > 1);
+
+    const forged = try std.testing.allocator.dupe(u8, valid);
+    defer std.testing.allocator.free(forged);
+    forged[forged.len - 1] ^= 0xff;
+    try std.testing.expectError(error.Throw, structured_clone.deserialize(&machine, forged));
+
+    const cloned = try structured_clone.deserialize(&machine, valid);
+    try std.testing.expect(cloned.isObject());
+    try std.testing.expect(cloned.asObj().array_buffer != null);
+    try std.testing.expect(cloned.asObj().array_buffer.?.is_shared);
+    try std.testing.expectError(error.Throw, structured_clone.deserialize(&machine, valid));
+
+    const trailing_sab = try structured_clone.serialize(&machine, std.testing.allocator, sab);
+    defer structured_clone.releaseSerialized(trailing_sab);
+    defer std.testing.allocator.free(trailing_sab);
+    const undef = try structured_clone.serialize(&machine, std.testing.allocator, Value.undef());
+    defer std.testing.allocator.free(undef);
+    const with_trailing = try std.testing.allocator.alloc(u8, undef.len + trailing_sab.len);
+    defer std.testing.allocator.free(with_trailing);
+    @memcpy(with_trailing[0..undef.len], undef);
+    @memcpy(with_trailing[undef.len..], trailing_sab);
+    try std.testing.expectError(error.Throw, structured_clone.deserialize(&machine, with_trailing));
+    try std.testing.expectError(error.Throw, structured_clone.deserialize(&machine, trailing_sab));
 }
 
 test "Thread API (enable_threads): shared realm, identity, exceptions, ids" {

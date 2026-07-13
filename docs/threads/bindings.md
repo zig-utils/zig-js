@@ -44,6 +44,12 @@ before acting on one.
 | `promise.Combine` / per-element `already` | `src/promise.zig`, `src/interpreter.zig` | Shared aggregation record for `Promise.all` / `allSettled` / `any` / keyed variants, plus each element's paired resolve/reject AlreadyCalled flag. | **locked** | `Combine.lock` guards `remaining`, `settled`, and per-element `already`, so racing reactions cannot double-count an element or run final/early settlement twice. Result-array slots are written through locked element helpers, and the resolve/reject/final-settle calls run after releasing the combine lock. |
 | `Generator.requests` / `requests_head` / `requests_mutex` | `src/vm.zig:211-213` | Per-async-generator request queue for `.next()` / `.return()` / `.throw()` promises. | **locked; traced through pending requests** | Request enqueue, front lookup, pop, and done-drain paths hold `requests_mutex`. `requests_head` drains FIFO without front-shifting remaining requests; enqueue reserves fixed-size capacity chunks before capacity-assumed appends and compacts consumed head slots before growing. GC traces only `pendingRequests()`, so consumed slots are not kept alive. |
 
+## Engine: `src/structured_clone.zig`
+
+| Symbol | Location | What it is | Ruling | Notes / phase |
+|---|---|---|---|---|
+| `shared_ref_head` / `shared_ref_lock` | `src/structured_clone.zig` | Process-wide registry mapping opaque 128-bit structured-clone tokens to one retained `SharedBufferStorage` reference. | **locked, single-use** | Serialization generates a random token and registers one checked retained reference. Deserialization and dropped-message cleanup remove the entry atomically before transferring or releasing it. Unknown and replayed tokens fail closed, serialized bytes contain no storage pointer, and successful deserialization rejects trailing bytes after releasing a valid trailing token. Registry entries use the process page allocator because Worker messages can outlive either endpoint arena. |
+
 ## Engine: `src/agent.zig`
 
 | Symbol | Location | What it is | Ruling | Notes / phase |

@@ -4,10 +4,9 @@
 //! graph into a context-independent byte stream, deserialize that stream into
 //! a (possibly different) realm's arena. The byte form is deliberately the
 //! contract: it is the `postMessage` wire format for Phase 5 workers, so it
-//! must never contain pointers into a source arena. The single exception is
-//! a SharedArrayBuffer payload, which carries a *retained* pointer to its
-//! process-wide storage (that is the point of a SAB; the reference is
-//! consumed by deserialize).
+//! must never contain pointers. SharedArrayBuffer payloads carry an opaque,
+//! unguessable, single-use token for one retained process-wide storage
+//! reference; deserialize or release atomically consumes that token.
 //!
 //! Supported: primitives, BigInt, plain objects (own enumerable props, read
 //! through [[Get]] so getters run), Arrays (dense elements + holes + named
@@ -24,10 +23,94 @@ const value = @import("value.zig");
 const interpreter = @import("interpreter.zig");
 const builtins = @import("builtins.zig");
 const shared_buffer = @import("shared_buffer.zig");
+const agent = @import("agent.zig");
 
 const Value = value.Value;
 const Interpreter = interpreter.Interpreter;
 const HostError = value.HostError;
+
+const SharedRefToken = [16]u8;
+const SharedRefEntry = struct {
+    token: SharedRefToken,
+    storage: *shared_buffer.SharedBufferStorage,
+    next: ?*SharedRefEntry = null,
+};
+
+var shared_ref_lock: std.atomic.Mutex = .unlocked;
+var shared_ref_head: ?*SharedRefEntry = null;
+
+fn lockSharedRefs() void {
+    var spins: usize = 0;
+    while (!shared_ref_lock.tryLock()) : (spins += 1) {
+        if ((spins & 0xff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
+    }
+}
+
+fn tokenExistsLocked(token: SharedRefToken) bool {
+    var current = shared_ref_head;
+    while (current) |entry| : (current = entry.next) {
+        if (std.mem.eql(u8, &entry.token, &token)) return true;
+    }
+    return false;
+}
+
+fn registerSharedRefToken(storage: *shared_buffer.SharedBufferStorage) error{OutOfMemory}!SharedRefToken {
+    const entry = try std.heap.page_allocator.create(SharedRefEntry);
+    errdefer std.heap.page_allocator.destroy(entry);
+    entry.storage = storage.tryRetain() orelse return error.OutOfMemory;
+    errdefer entry.storage.release();
+
+    while (true) {
+        agent.engineIo().randomSecure(&entry.token) catch return error.OutOfMemory;
+        lockSharedRefs();
+        if (tokenExistsLocked(entry.token)) {
+            shared_ref_lock.unlock();
+            continue;
+        }
+        entry.next = shared_ref_head;
+        shared_ref_head = entry;
+        shared_ref_lock.unlock();
+        return entry.token;
+    }
+}
+
+fn consumeSharedRefToken(token: SharedRefToken) ?*shared_buffer.SharedBufferStorage {
+    lockSharedRefs();
+    var link = &shared_ref_head;
+    while (link.*) |entry| {
+        if (std.mem.eql(u8, &entry.token, &token)) {
+            link.* = entry.next;
+            shared_ref_lock.unlock();
+            const storage = entry.storage;
+            std.heap.page_allocator.destroy(entry);
+            return storage;
+        }
+        link = &entry.next;
+    }
+    shared_ref_lock.unlock();
+    return null;
+}
+
+fn releaseSharedRefToken(token: SharedRefToken) bool {
+    const storage = consumeSharedRefToken(token) orelse return false;
+    storage.release();
+    return true;
+}
+
+fn sharedRefTokenExists(token: SharedRefToken) bool {
+    lockSharedRefs();
+    defer shared_ref_lock.unlock();
+    return tokenExistsLocked(token);
+}
+
+fn sharedRefTokenCount() usize {
+    lockSharedRefs();
+    defer shared_ref_lock.unlock();
+    var count: usize = 0;
+    var current = shared_ref_head;
+    while (current) |entry| : (current = entry.next) count += 1;
+    return count;
+}
 
 const Tag = enum(u8) {
     undef,
@@ -76,6 +159,9 @@ const Writer = struct {
         try w.int(u32, @intCast(s.len));
         try w.out.appendSlice(w.gpa, s);
     }
+    fn sharedToken(w: *Writer, token: SharedRefToken) error{OutOfMemory}!void {
+        try w.out.appendSlice(w.gpa, &token);
+    }
 };
 
 // ---- reader -----------------------------------------------------------------
@@ -98,7 +184,7 @@ const Reader = struct {
     }
     fn int(r: *Reader, comptime T: type) Error!T {
         const n = @sizeOf(T);
-        if (r.pos + n > r.bytes.len) return error.Malformed;
+        if (n > r.bytes.len - r.pos) return error.Malformed;
         defer r.pos += n;
         return std.mem.readInt(T, r.bytes[r.pos..][0..n], .little);
     }
@@ -106,10 +192,15 @@ const Reader = struct {
         return @bitCast(try r.int(u64));
     }
     fn str(r: *Reader) Error![]const u8 {
-        const n = try r.int(u32);
-        if (r.pos + n > r.bytes.len) return error.Malformed;
+        const n: usize = try r.int(u32);
+        if (n > r.bytes.len - r.pos) return error.Malformed;
         defer r.pos += n;
         return r.bytes[r.pos..][0..n];
+    }
+    fn sharedToken(r: *Reader) Error!SharedRefToken {
+        if (@sizeOf(SharedRefToken) > r.bytes.len - r.pos) return error.Malformed;
+        defer r.pos += @sizeOf(SharedRefToken);
+        return r.bytes[r.pos..][0..@sizeOf(SharedRefToken)].*;
     }
 };
 
@@ -245,10 +336,14 @@ const Serializer = struct {
         if (o.array_buffer) |ab| {
             if (ab.is_shared) {
                 const storage = ab.shared orelse return s.throwClone("DataCloneError: malformed SharedArrayBuffer");
+                const token = try registerSharedRefToken(storage);
+                var token_written = false;
+                errdefer {
+                    if (!token_written) _ = releaseSharedRefToken(token);
+                }
                 try s.w.tag(.shared_array_buffer);
-                // The one non-self-contained payload: a retained reference to
-                // the process-wide storage, consumed by deserialize.
-                try s.w.int(u64, @intFromPtr(storage.retain()));
+                try s.w.sharedToken(token);
+                token_written = true;
                 return;
             }
             if (ab.isDetached()) return s.throwClone("DataCloneError: detached ArrayBuffer cannot be cloned");
@@ -389,10 +484,12 @@ pub fn serialize(self: *Interpreter, gpa: std.mem.Allocator, v: Value) HostError
 /// stream is dropped without being deserialized).
 pub fn releaseSerialized(bytes: []const u8) void {
     var r = Reader{ .bytes = bytes };
-    skipReleasing(&r) catch {};
+    while (r.pos < r.bytes.len) skipSerialized(&r, .release) catch return;
 }
 
-fn skipReleasing(r: *Reader) Reader.Error!void {
+const SkipMode = enum { validate, release };
+
+fn skipSerialized(r: *Reader, mode: SkipMode) Reader.Error!void {
     switch (try r.tag()) {
         .undef, .null_v => {},
         .bool_v => _ = try r.byte(),
@@ -401,8 +498,14 @@ fn skipReleasing(r: *Reader) Reader.Error!void {
         .bigint => _ = try r.int(i128),
         .ref => _ = try r.int(u32),
         .shared_array_buffer => {
-            const p: *shared_buffer.SharedBufferStorage = @ptrFromInt(try r.int(u64));
-            p.release();
+            const token = try r.sharedToken();
+            switch (mode) {
+                .validate => if (!sharedRefTokenExists(token)) return error.Malformed,
+                // Cleanup is intentionally idempotent: an earlier partial
+                // deserialize may already have consumed this token. Keep
+                // parsing so later still-live tokens are not stranded.
+                .release => _ = releaseSharedRefToken(token),
+            }
         },
         .array_buffer => {
             _ = try r.int(u64);
@@ -410,13 +513,13 @@ fn skipReleasing(r: *Reader) Reader.Error!void {
         },
         .typed_array => {
             _ = try r.byte();
-            try skipReleasing(r);
+            try skipSerialized(r, mode);
             _ = try r.int(u64);
             _ = try r.int(u64);
             _ = try r.byte();
         },
         .data_view => {
-            try skipReleasing(r);
+            try skipSerialized(r, mode);
             _ = try r.int(u64);
             _ = try r.int(u64);
             _ = try r.byte();
@@ -429,39 +532,39 @@ fn skipReleasing(r: *Reader) Reader.Error!void {
             const n = try r.int(u32);
             var i: u32 = 0;
             while (i < n) : (i += 1) {
-                try skipReleasing(r);
-                try skipReleasing(r);
+                try skipSerialized(r, mode);
+                try skipSerialized(r, mode);
             }
         },
         .set => {
             const n = try r.int(u32);
             var i: u32 = 0;
-            while (i < n) : (i += 1) try skipReleasing(r);
+            while (i < n) : (i += 1) try skipSerialized(r, mode);
         },
         .error_obj => {
             _ = try r.str();
             if (try r.byte() == 1) _ = try r.str();
         },
-        .wrapper => try skipReleasing(r),
+        .wrapper => try skipSerialized(r, mode),
         .array => {
             _ = try r.int(u64);
             const n = try r.int(u32);
             var i: u32 = 0;
             while (i < n) : (i += 1) {
-                if (try r.byte() == 0) try skipReleasing(r);
+                if (try r.byte() == 0) try skipSerialized(r, mode);
             }
-            try skipNamed(r);
+            try skipNamed(r, mode);
         },
-        .object => try skipNamed(r),
+        .object => try skipNamed(r, mode),
     }
 }
 
-fn skipNamed(r: *Reader) Reader.Error!void {
+fn skipNamed(r: *Reader, mode: SkipMode) Reader.Error!void {
     const n = try r.int(u32);
     var i: u32 = 0;
     while (i < n) : (i += 1) {
         _ = try r.str();
-        try skipReleasing(r);
+        try skipSerialized(r, mode);
     }
 }
 
@@ -610,8 +713,10 @@ const Deserializer = struct {
                 return Value.obj(o);
             },
             .shared_array_buffer => {
-                const storage: *shared_buffer.SharedBufferStorage = @ptrFromInt(d.r.int(u64) catch return d.fail());
-                // The stream's reference transfers to the wrapper.
+                const token = d.r.sharedToken() catch return d.fail();
+                const storage = consumeSharedRefToken(token) orelse return d.fail();
+                // The consumed reference transfers to the wrapper. The wrapper
+                // constructor owns failure cleanup as part of that contract.
                 const o = try interpreter.makeSharedArrayBufferWrapper(d.self, storage);
                 try d.objs.append(a, o);
                 return Value.obj(o);
@@ -668,11 +773,117 @@ const Deserializer = struct {
 };
 
 /// Deserialize a stream produced by `serialize` into `self`'s realm. The
-/// stream's SAB references transfer to the wrappers it creates. On a midway
-/// failure, references in the unconsumed tail are NOT released (the storage
-/// leaks until process exit) — callers treat a failed stream as poisoned and
-/// must not retry it.
+/// stream's single-use SAB tokens transfer their retained references to the
+/// wrappers they create. A successful root must consume the entire stream;
+/// valid trailing token payloads are released before malformed input fails.
 pub fn deserialize(self: *Interpreter, bytes: []const u8) HostError!Value {
+    var verify = Reader{ .bytes = bytes };
+    skipSerialized(&verify, .validate) catch return self.throwError("TypeError", "structured clone: malformed payload");
+    if (verify.pos != bytes.len) {
+        releaseSerialized(bytes);
+        return self.throwError("TypeError", "structured clone: malformed payload");
+    }
     var d = Deserializer{ .self = self, .r = .{ .bytes = bytes } };
     return d.deser();
+}
+
+test "structured clone SAB tokens are single-use and reject forgery" {
+    const baseline = sharedRefTokenCount();
+    const storage = try shared_buffer.SharedBufferStorage.create(8, null);
+    defer storage.release();
+
+    const token = try registerSharedRefToken(storage);
+    try std.testing.expectEqual(baseline + 1, sharedRefTokenCount());
+    const consumed = consumeSharedRefToken(token) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(storage, consumed);
+    try std.testing.expect(consumeSharedRefToken(token) == null);
+    consumed.release();
+    try std.testing.expectEqual(baseline, sharedRefTokenCount());
+
+    var forged = token;
+    forged[0] ^= 0xff;
+    try std.testing.expect(consumeSharedRefToken(forged) == null);
+
+    const released = try registerSharedRefToken(storage);
+    try std.testing.expect(releaseSharedRefToken(released));
+    try std.testing.expect(!releaseSharedRefToken(released));
+    try std.testing.expectEqual(baseline, sharedRefTokenCount());
+}
+
+test "structured clone SAB token consumption is atomic" {
+    if (@import("builtin").single_threaded) return error.SkipZigTest;
+    const baseline = sharedRefTokenCount();
+    const storage = try shared_buffer.SharedBufferStorage.create(8, null);
+    defer storage.release();
+    const token = try registerSharedRefToken(storage);
+
+    var wins = std.atomic.Value(usize).init(0);
+    const Consumer = struct {
+        fn run(t: SharedRefToken, won: *std.atomic.Value(usize)) void {
+            if (consumeSharedRefToken(t)) |held| {
+                _ = won.fetchAdd(1, .monotonic);
+                held.release();
+            }
+        }
+    };
+    var threads: [8]std.Thread = undefined;
+    for (&threads) |*thread| thread.* = try std.Thread.spawn(.{}, Consumer.run, .{ token, &wins });
+    for (&threads) |*thread| thread.join();
+
+    try std.testing.expectEqual(@as(usize, 1), wins.load(.monotonic));
+    try std.testing.expectEqual(baseline, sharedRefTokenCount());
+}
+
+test "structured clone consumed SAB token releases on wrapper allocation failure" {
+    const baseline = sharedRefTokenCount();
+    const storage = try shared_buffer.SharedBufferStorage.create(8, null);
+    defer storage.release();
+    try std.testing.expectEqual(@as(usize, 1), storage.retainCount());
+
+    const token = try registerSharedRefToken(storage);
+    try std.testing.expectEqual(@as(usize, 2), storage.retainCount());
+    const held = consumeSharedRefToken(token) orelse return error.TestUnexpectedResult;
+
+    var no_memory: [0]u8 = .{};
+    var failing = std.heap.FixedBufferAllocator.init(&no_memory);
+    var machine: Interpreter = undefined;
+    machine.arena = failing.allocator();
+    machine.gc = null;
+    machine.sab_retains = null;
+    try std.testing.expectError(error.OutOfMemory, interpreter.makeSharedArrayBufferWrapper(&machine, held));
+    try std.testing.expectEqual(@as(usize, 1), storage.retainCount());
+    try std.testing.expectEqual(baseline, sharedRefTokenCount());
+}
+
+test "structured clone SAB release rejects replay and cleans valid trailing token" {
+    const baseline = sharedRefTokenCount();
+    const storage = try shared_buffer.SharedBufferStorage.create(8, null);
+    defer storage.release();
+    const token = try registerSharedRefToken(storage);
+
+    var bytes: [1 + 1 + @sizeOf(SharedRefToken)]u8 = undefined;
+    bytes[0] = @intFromEnum(Tag.undef);
+    bytes[1] = @intFromEnum(Tag.shared_array_buffer);
+    @memcpy(bytes[2..], &token);
+
+    var root = Reader{ .bytes = &bytes };
+    try skipSerialized(&root, .validate);
+    try std.testing.expectEqual(@as(usize, 1), root.pos);
+    releaseSerialized(bytes[root.pos..]);
+    try std.testing.expectEqual(baseline, sharedRefTokenCount());
+    releaseSerialized(bytes[root.pos..]);
+    try std.testing.expectEqual(baseline, sharedRefTokenCount());
+
+    const already_consumed = try registerSharedRefToken(storage);
+    const still_live = try registerSharedRefToken(storage);
+    const held = consumeSharedRefToken(already_consumed) orelse return error.TestUnexpectedResult;
+    held.release();
+    var pair: [2 * (1 + @sizeOf(SharedRefToken))]u8 = undefined;
+    pair[0] = @intFromEnum(Tag.shared_array_buffer);
+    @memcpy(pair[1 .. 1 + @sizeOf(SharedRefToken)], &already_consumed);
+    const second_tag = 1 + @sizeOf(SharedRefToken);
+    pair[second_tag] = @intFromEnum(Tag.shared_array_buffer);
+    @memcpy(pair[second_tag + 1 ..], &still_live);
+    releaseSerialized(&pair);
+    try std.testing.expectEqual(baseline, sharedRefTokenCount());
 }

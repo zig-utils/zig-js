@@ -77,6 +77,11 @@ pub const SharedBufferStorage = struct {
         }
     }
 
+    /// Internal lifetime diagnostic used by focused ownership/security tests.
+    pub fn retainCount(self: *const SharedBufferStorage) usize {
+        return @constCast(self).refcount.load(.acquire);
+    }
+
     pub fn release(self: *SharedBufferStorage) void {
         if (self.refcount.fetchSub(1, .release) == 1) {
             _ = self.refcount.load(.acquire);
