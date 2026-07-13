@@ -14,6 +14,7 @@
 const std = @import("std");
 const ast = @import("ast.zig");
 const value = @import("value.zig");
+const jit = @import("jit.zig");
 const Shape = @import("shape.zig").Shape;
 
 const Value = value.Value;
@@ -322,6 +323,10 @@ pub const Chunk = struct {
     /// One inline cache per instruction, allocated by `finalize` once the code
     /// stream is complete. Warm across runs of the same chunk.
     ics: []InlineCache = &.{},
+    /// Hotness and race-safe native-tier publication state. It remains cold
+    /// until VM entry observation is wired to a backend; keeping it on the
+    /// chunk makes the eventual shared-realm path single-writer by construction.
+    tier: jit.Tier = .{},
 
     pub fn init(arena: std.mem.Allocator) Chunk {
         return .{ .arena = arena };

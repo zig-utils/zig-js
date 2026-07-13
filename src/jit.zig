@@ -18,6 +18,40 @@ pub const supported = is_darwin and switch (builtin.cpu.arch) {
     else => false,
 };
 
+pub const TierState = enum(u8) { cold, compiling, ready, rejected };
+
+/// Per-chunk hotness and single-writer compilation claim.
+///
+/// Entrants that lose the claim never wait: they continue in bytecode while
+/// the winning thread compiles. Publishing `ready` or `rejected` releases all
+/// compiler writes to later acquire readers.
+pub const Tier = struct {
+    state: std.atomic.Value(TierState) = .init(.cold),
+    entries: std.atomic.Value(u32) = .init(0),
+
+    pub fn observeEntry(self: *Tier, threshold: u32) bool {
+        std.debug.assert(threshold > 0);
+        if (self.state.load(.monotonic) != .cold) return false;
+        const previous = self.entries.fetchAdd(1, .monotonic);
+        if (previous < threshold - 1) return false;
+        return self.state.cmpxchgStrong(.cold, .compiling, .acq_rel, .monotonic) == null;
+    }
+
+    pub fn loadState(self: *const Tier) TierState {
+        return self.state.load(.acquire);
+    }
+
+    pub fn publishReady(self: *Tier) void {
+        std.debug.assert(self.state.load(.monotonic) == .compiling);
+        self.state.store(.ready, .release);
+    }
+
+    pub fn publishRejected(self: *Tier) void {
+        std.debug.assert(self.state.load(.monotonic) == .compiling);
+        self.state.store(.rejected, .release);
+    }
+};
+
 const State = enum { writable, executable };
 
 /// One immutable-after-publication native-code mapping.
@@ -82,6 +116,50 @@ extern "c" fn sys_icache_invalidate(start: *anyopaque, len: usize) void;
 test "CodeMemory rejects empty mappings" {
     if (!supported) return error.SkipZigTest;
     try std.testing.expectError(error.InvalidCapacity, CodeMemory.init(0));
+}
+
+test "Tier claims compilation exactly at its hot threshold" {
+    var tier = Tier{};
+    try std.testing.expect(!tier.observeEntry(3));
+    try std.testing.expect(!tier.observeEntry(3));
+    try std.testing.expect(tier.observeEntry(3));
+    try std.testing.expectEqual(TierState.compiling, tier.loadState());
+    try std.testing.expect(!tier.observeEntry(3));
+    tier.publishReady();
+    try std.testing.expectEqual(TierState.ready, tier.loadState());
+}
+
+test "Tier caches an unsupported compilation" {
+    var tier = Tier{};
+    try std.testing.expect(tier.observeEntry(1));
+    tier.publishRejected();
+    try std.testing.expectEqual(TierState.rejected, tier.loadState());
+    try std.testing.expect(!tier.observeEntry(1));
+}
+
+test "Tier permits one concurrent compiler" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+
+    const Shared = struct {
+        tier: Tier = .{},
+        claims: std.atomic.Value(u32) = .init(0),
+
+        fn enter(shared: *@This()) void {
+            var i: u32 = 0;
+            while (i < 1000) : (i += 1) {
+                if (shared.tier.observeEntry(32)) _ = shared.claims.fetchAdd(1, .monotonic);
+            }
+        }
+    };
+
+    var shared = Shared{};
+    var threads: [8]std.Thread = undefined;
+    for (&threads) |*thread| thread.* = try std.Thread.spawn(.{}, Shared.enter, .{&shared});
+    for (&threads) |*thread| thread.join();
+
+    try std.testing.expectEqual(@as(u32, 1), shared.claims.load(.monotonic));
+    try std.testing.expectEqual(TierState.compiling, shared.tier.loadState());
+    shared.tier.publishRejected();
 }
 
 test "CodeMemory publishes and executes native code" {
