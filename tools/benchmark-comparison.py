@@ -17,11 +17,16 @@ from collections import defaultdict
 
 
 WORKLOADS = {
-    "arithmetic": 40,
-    "properties": 40,
-    "arrays": 30,
-    "fibonacci": 8,
+    # Equal work is used for both engines. These counts keep the fastest row
+    # above the full-run 50 ms timing floor on the reference M3 Pro while
+    # keeping the shared-realm stress matrix practical.
+    "arithmetic": 80,
+    "properties": 80,
+    "arrays": 180,
+    "fibonacci": 24,
 }
+
+MIN_FULL_MEDIAN_NS = 50_000_000
 
 
 @dataclasses.dataclass(frozen=True)
@@ -86,17 +91,35 @@ def collect(
     quick: bool,
 ) -> list[Row]:
     rows: list[Row] = []
+    pair_index = 0
+
+    def run_pair(zig_arguments: list[str], jsc_arguments: list[str]) -> None:
+        nonlocal pair_index
+        pair = ((zig_js, zig_arguments), (jsc, jsc_arguments))
+        # Deterministically alternate process order by matrix row. Samples stay
+        # consecutive inside each already-warmed runner, but neither engine is
+        # systematically favored by always running first on a cooler machine.
+        if pair_index % 2:
+            pair = tuple(reversed(pair))
+        pair_index += 1
+        for binary, arguments in pair:
+            rows.extend(run_case(binary, arguments))
+
     for workload, default_jobs in WORKLOADS.items():
         jobs = max(1, default_jobs // 20) if quick else default_jobs
-        rows.extend(run_case(zig_js, ["single", workload, str(jobs), str(samples)]))
-        rows.extend(run_case(jsc, ["single", workload, str(jobs), str(samples)]))
+        run_pair(
+            ["single", workload, str(jobs), str(samples)],
+            ["single", workload, str(jobs), str(samples)],
+        )
         for lane_count in lanes:
-            rows.extend(run_case(zig_js, ["shared", workload, str(jobs), str(samples), str(lane_count)]))
-            rows.extend(run_case(jsc, ["contexts", workload, str(jobs), str(samples), str(lane_count)]))
+            run_pair(
+                ["shared", workload, str(jobs), str(samples), str(lane_count)],
+                ["contexts", workload, str(jobs), str(samples), str(lane_count)],
+            )
     return rows
 
 
-def validate(rows: list[Row], samples: int, lanes: list[int]) -> None:
+def validate(rows: list[Row], samples: int, lanes: list[int], quick: bool) -> None:
     grouped: dict[tuple[str, str, str, int, int], list[Row]] = defaultdict(list)
     for row in rows:
         grouped[row.key].append(row)
@@ -112,6 +135,10 @@ def validate(rows: list[Row], samples: int, lanes: list[int]) -> None:
         checksums = {row.checksum for row in group}
         if len(checksums) != 1:
             raise RuntimeError(f"{key} produced unstable checksums: {sorted(checksums)}")
+        if not quick and statistics.median(row.elapsed_ns for row in group) < MIN_FULL_MEDIAN_NS:
+            raise RuntimeError(
+                f"{key} median is shorter than the {MIN_FULL_MEDIAN_NS / 1e6:.0f} ms full-run timing floor"
+            )
 
     by_work: dict[tuple[str, int, int], set[int]] = defaultdict(set)
     for row in rows:
@@ -123,6 +150,12 @@ def validate(rows: list[Row], samples: int, lanes: list[int]) -> None:
 
 def median_ns(groups: dict[tuple[str, str, str, int, int], list[Row]], key: tuple[str, str, str, int, int]) -> float:
     return statistics.median(row.elapsed_ns for row in groups[key])
+
+
+def spread(groups: dict[tuple[str, str, str, int, int], list[Row]], key: tuple[str, str, str, int, int]) -> tuple[float, float, float]:
+    values = [row.elapsed_ns for row in groups[key]]
+    relative_stddev = statistics.stdev(values) / statistics.mean(values) * 100 if len(values) > 1 else 0.0
+    return min(values), max(values), relative_stddev
 
 
 def geometric_mean(values: list[float]) -> float:
@@ -176,51 +209,76 @@ def render(rows: list[Row], lanes: list[int], raw_path: pathlib.Path | None) -> 
         "## Single-thread result",
         "",
         "Each row runs the same number of jobs in one GC-enabled zig-js context and one warmed JSC global context.",
-        "Lower time is better; `JSC / zig-js` is JSC throughput divided by zig-js throughput.",
+        "Both runners time the exact invocation `__benchmarkSelected(__benchmarkJobs, __benchmarkLane)`.",
+        "Lower time is better; `JSC / zig-js` is JSC throughput divided by zig-js throughput. RSD is relative standard deviation.",
         "",
-        "| workload | jobs | zig-js median (ms) | JSC median (ms) | JSC / zig-js |",
-        "| --- | ---: | ---: | ---: | ---: |",
+        "| workload | jobs | zig-js median (ms) | zig-js min–max (ms) | zig-js RSD | JSC median (ms) | JSC min–max (ms) | JSC RSD | JSC / zig-js |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ])
     single_ratios: list[float] = []
     for workload in WORKLOADS:
         jobs = next(row.jobs for row in rows if row.workload == workload)
         zig = median_ns(groups, ("zig-js", "single", workload, 1, jobs))
         jsc = median_ns(groups, ("JavaScriptCore", "single", workload, 1, jobs))
+        zig_min, zig_max, zig_rsd = spread(groups, ("zig-js", "single", workload, 1, jobs))
+        jsc_min, jsc_max, jsc_rsd = spread(groups, ("JavaScriptCore", "single", workload, 1, jobs))
         ratio = zig / jsc
         single_ratios.append(ratio)
-        lines.append(f"| `{workload}` | {jobs} | {zig / 1e6:.3f} | {jsc / 1e6:.3f} | {ratio:.2f}x |")
+        lines.append(
+            f"| `{workload}` | {jobs} | {zig / 1e6:.3f} | {zig_min / 1e6:.3f}–{zig_max / 1e6:.3f} | {zig_rsd:.2f}% | "
+            f"{jsc / 1e6:.3f} | {jsc_min / 1e6:.3f}–{jsc_max / 1e6:.3f} | {jsc_rsd:.2f}% | {ratio:.2f}x |"
+        )
 
     lines.extend([
         "",
-        "## Parallel throughput and scaling",
+        "## zig-js shared-realm scaling",
         "",
-        "Every lane performs the full per-row job count. `scaling` compares total throughput with that engine's",
-        "single-lane row. zig-js lanes are shared-realm no-GIL JavaScript `Thread`s; JSC lanes are independent",
-        "warmed `JSGlobalContext`s on OS threads. Those are intentionally reported together for throughput, but",
-        "they are not the same programming model.",
+        "Every lane performs the full per-row job count. The timed region creates and joins shared-realm no-GIL",
+        "JavaScript `Thread`s. `scaling` compares aggregate throughput with the zig-js single-context row.",
         "",
-        "| workload | lanes | zig-js median (ms) | zig-js scaling | JSC median (ms) | JSC scaling | JSC / zig-js |",
+        "| workload | lanes | jobs/lane | median (ms) | min–max (ms) | RSD | scaling |",
         "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
     ])
     zig_max_scaling: list[float] = []
-    jsc_max_scaling: list[float] = []
     max_lanes = lanes[-1]
     for workload in WORKLOADS:
         jobs = next(row.jobs for row in rows if row.workload == workload)
         zig_one = median_ns(groups, ("zig-js", "single", workload, 1, jobs))
-        jsc_one = median_ns(groups, ("JavaScriptCore", "single", workload, 1, jobs))
         for lane_count in lanes:
             zig = median_ns(groups, ("zig-js", "shared", workload, lane_count, jobs))
-            jsc = median_ns(groups, ("JavaScriptCore", "contexts", workload, lane_count, jobs))
+            zig_min, zig_max, zig_rsd = spread(groups, ("zig-js", "shared", workload, lane_count, jobs))
             zig_scaling = lane_count * zig_one / zig
-            jsc_scaling = lane_count * jsc_one / jsc
-            ratio = zig / jsc
             if lane_count == max_lanes:
                 zig_max_scaling.append(zig_scaling)
+            lines.append(
+                f"| `{workload}` | {lane_count} | {jobs} | {zig / 1e6:.3f} | "
+                f"{zig_min / 1e6:.3f}–{zig_max / 1e6:.3f} | {zig_rsd:.2f}% | {zig_scaling:.2f}x |"
+            )
+
+    lines.extend([
+        "",
+        "## JSC independent-context scaling reference",
+        "",
+        "Each lane owns a separately prepared and warmed `JSGlobalContext`. The timed region creates the OS threads,",
+        "evaluates one invocation per context, and joins them. This is an isolated-context scaling reference, not a",
+        "direct throughput competitor for zig-js's shared object graph.",
+        "",
+        "| workload | lanes | jobs/lane | median (ms) | min–max (ms) | RSD | scaling |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ])
+    jsc_max_scaling: list[float] = []
+    for workload in WORKLOADS:
+        jobs = next(row.jobs for row in rows if row.workload == workload)
+        jsc_one = median_ns(groups, ("JavaScriptCore", "single", workload, 1, jobs))
+        for lane_count in lanes:
+            jsc = median_ns(groups, ("JavaScriptCore", "contexts", workload, lane_count, jobs))
+            jsc_min, jsc_max, jsc_rsd = spread(groups, ("JavaScriptCore", "contexts", workload, lane_count, jobs))
+            jsc_scaling = lane_count * jsc_one / jsc
+            if lane_count == max_lanes:
                 jsc_max_scaling.append(jsc_scaling)
             lines.append(
-                f"| `{workload}` | {lane_count} | {zig / 1e6:.3f} | {zig_scaling:.2f}x | "
-                f"{jsc / 1e6:.3f} | {jsc_scaling:.2f}x | {ratio:.2f}x |"
+                f"| `{workload}` | {lane_count} | {jobs} | {jsc / 1e6:.3f} | "
+                f"{jsc_min / 1e6:.3f}–{jsc_max / 1e6:.3f} | {jsc_rsd:.2f}% | {jsc_scaling:.2f}x |"
             )
 
     lines.extend([
@@ -233,18 +291,21 @@ def render(rows: list[Row], lanes: list[int], raw_path: pathlib.Path | None) -> 
         "about applications or unsupported workloads.",
         "",
         f"At {max_lanes} lanes, geometric-mean throughput scaling is {geometric_mean(zig_max_scaling):.2f}x for zig-js's",
-        f"shared realm and {geometric_mean(jsc_max_scaling):.2f}x for independent JSC contexts. Per-workload rows matter more",
-        "than the aggregate: recursion, allocation, property access, and integer loops stress different engine paths.",
+        f"shared realm and {geometric_mean(jsc_max_scaling):.2f}x for the separate JSC isolated-context reference.",
+        "These are deliberately not divided into a cross-engine parallel ratio because the programming models differ.",
+        "Per-workload rows matter more than either aggregate.",
         "",
         "## Method and timed boundaries",
         "",
-        "- Both engines evaluate the exact bytes in `bench/comparison.js`; the driver rejects unstable or cross-engine checksum mismatches.",
+        "- Both engines evaluate the exact bytes in `bench/comparison.js`; the single-context rows time the exact same invocation bytes, and the driver rejects unstable or cross-engine checksum mismatches.",
         "- zig-js is built `ReleaseFast`. Its single row explicitly enables precise GC; shared mode enables the shipping no-GIL thread configuration, which implies GC.",
         "- Each context evaluates the workload source and performs three reduced-size warm-up calls before measurement.",
         "- A single sample times one host evaluation call. Context/source setup and warm-up are outside the timer.",
         "- Parallel JS state and JSC contexts are prepared and warmed before measurement. The timed region creates the zig-js `Thread`s / JSC OS threads, performs the work, and ends after every thread joins. JSC context teardown is outside the timer.",
+        "- Runner process order alternates deterministically for each matrix row instead of always favoring one engine with the cooler first run.",
+        f"- Full runs reject any row whose median is shorter than {MIN_FULL_MEDIAN_NS / 1e6:.0f} ms; quick harness validation skips that timing floor.",
         "- Samples run sequentially on an otherwise ordinary host. No CPU pinning, frequency locking, or background-process suppression is attempted.",
-        "- Median is the headline; every raw sample is retained. Compare runs on the same hardware and power state before treating small deltas as meaningful.",
+        "- Median is the headline; min/max and relative standard deviation expose dispersion, and every raw sample is retained.",
         "",
         "## Reproduce",
         "",
@@ -290,7 +351,7 @@ def main() -> int:
             parser.error(f"runner does not exist: {binary}")
 
     rows = collect(args.zig_js_runner, args.jsc_runner, samples, lanes, args.quick)
-    validate(rows, samples, lanes)
+    validate(rows, samples, lanes, args.quick)
     if args.raw_out:
         write_raw(args.raw_out, rows)
     report = render(rows, lanes, args.raw_out)

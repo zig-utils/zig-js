@@ -29,6 +29,7 @@ extern fn JSEvaluateScript(
 extern fn JSValueToNumber(ctx: JSContextRef, value: JSValueRef, exception: [*c]JSValueRef) callconv(.c) f64;
 
 const workload_source: [:0]const u8 = @embedFile("comparison.js");
+const invocation: [:0]const u8 = "__benchmarkSelected(__benchmarkJobs, __benchmarkLane)";
 
 const Mode = enum { single, contexts };
 
@@ -71,7 +72,7 @@ fn configure(
     lane: usize,
 ) !void {
     _ = try evaluate(ctx, workload_source);
-    const source = try std.fmt.allocPrintSentinel(allocator, "globalThis.__benchmarkName = \"{s}\"; globalThis.__benchmarkJobs = {d}; globalThis.__benchmarkLane = {d};", .{
+    const source = try std.fmt.allocPrintSentinel(allocator, "globalThis.__benchmarkSelected = benchmarkFunction(\"{s}\"); globalThis.__benchmarkJobs = {d}; globalThis.__benchmarkLane = {d};", .{
         workload, jobs, lane,
     }, 0);
     defer allocator.free(source);
@@ -82,11 +83,16 @@ fn warm(
     allocator: std.mem.Allocator,
     ctx: JSGlobalContextRef,
     warm_jobs: usize,
+    jobs: usize,
     lane: usize,
 ) !void {
-    const source = try std.fmt.allocPrintSentinel(allocator, "runBenchmark(__benchmarkName, {d}, {d})", .{ warm_jobs, lane }, 0);
-    defer allocator.free(source);
-    for (0..3) |_| _ = try evaluate(ctx, source);
+    const warm_config = try std.fmt.allocPrintSentinel(allocator, "globalThis.__benchmarkJobs = {d}; globalThis.__benchmarkLane = {d};", .{ warm_jobs, lane }, 0);
+    defer allocator.free(warm_config);
+    _ = try evaluate(ctx, warm_config);
+    for (0..3) |_| _ = try evaluate(ctx, invocation);
+    const restore = try std.fmt.allocPrintSentinel(allocator, "globalThis.__benchmarkJobs = {d}; globalThis.__benchmarkLane = {d};", .{ jobs, lane }, 0);
+    defer allocator.free(restore);
+    _ = try evaluate(ctx, restore);
 }
 
 fn printRow(
@@ -115,9 +121,8 @@ fn runSingle(
     const ctx = JSGlobalContextCreate(null) orelse return error.JavaScriptCoreFailure;
     defer JSGlobalContextRelease(ctx);
     try configure(allocator, ctx, workload, jobs, 0);
-    try warm(allocator, ctx, @max(@as(usize, 1), jobs / 10), 0);
+    try warm(allocator, ctx, @max(@as(usize, 1), jobs / 10), jobs, 0);
 
-    const invocation: [:0]const u8 = "runBenchmark(__benchmarkName, __benchmarkJobs, 0)";
     for (0..samples) |sample| {
         const started = nowNs(io);
         const checksum = try evaluate(ctx, invocation);
@@ -131,7 +136,7 @@ fn laneMain(lane: *Lane) void {
         lane.failed.store(true, .release);
         return;
     };
-    lane.checksum = evaluate(ctx, "runBenchmark(__benchmarkName, __benchmarkJobs, __benchmarkLane)") catch {
+    lane.checksum = evaluate(ctx, invocation) catch {
         lane.failed.store(true, .release);
         return;
     };
@@ -162,7 +167,7 @@ fn runContexts(
             lane.context = ctx;
             errdefer JSGlobalContextRelease(ctx);
             try configure(allocator, ctx, workload, jobs, lane_index);
-            try warm(allocator, ctx, @max(@as(usize, 1), jobs / 10), lane_index);
+            try warm(allocator, ctx, @max(@as(usize, 1), jobs / 10), jobs, lane_index);
         }
 
         const started = nowNs(io);

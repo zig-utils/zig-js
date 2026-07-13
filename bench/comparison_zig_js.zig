@@ -12,6 +12,7 @@ const std = @import("std");
 const js = @import("js");
 
 const workload_source = @embedFile("comparison.js");
+const invocation = "__benchmarkSelected(__benchmarkJobs, __benchmarkLane)";
 
 const shared_harness =
     \\globalThis.__benchmarkRunShared = function(jobs, lanes) {
@@ -65,15 +66,17 @@ fn runSingle(
     defer ctx.destroy();
     _ = try ctx.evaluate(workload_source);
 
-    const configure = try std.fmt.allocPrint(ctx.arena(), "globalThis.__benchmarkSelected = benchmarkFunction(\"{s}\"); globalThis.__benchmarkJobs = {d};", .{ workload, jobs });
+    const configure = try std.fmt.allocPrint(ctx.arena(), "globalThis.__benchmarkSelected = benchmarkFunction(\"{s}\"); globalThis.__benchmarkJobs = {d}; globalThis.__benchmarkLane = 0;", .{ workload, jobs });
     _ = try ctx.evaluate(configure);
     const warm_jobs = @max(@as(usize, 1), jobs / 10);
-    const warm = try std.fmt.allocPrint(ctx.arena(), "__benchmarkSelected({d}, 0)", .{warm_jobs});
-    for (0..3) |_| _ = try ctx.evaluate(warm);
+    const warm = try std.fmt.allocPrint(ctx.arena(), "globalThis.__benchmarkJobs = {d};", .{warm_jobs});
+    _ = try ctx.evaluate(warm);
+    for (0..3) |_| _ = try ctx.evaluate(invocation);
+    _ = try ctx.evaluate(configure);
 
     for (0..samples) |sample| {
         const started = nowNs(io);
-        const result = try ctx.evaluate("__benchmarkSelected(__benchmarkJobs, 0)");
+        const result = try ctx.evaluate(invocation);
         const elapsed: u64 = @intCast(nowNs(io) - started);
         try printRow(writer, .single, workload, 1, jobs, sample, elapsed, result.toNumber());
     }
@@ -93,19 +96,21 @@ fn runShared(
     _ = try ctx.evaluate(workload_source);
     _ = try ctx.evaluate(shared_harness);
 
-    const configure = try std.fmt.allocPrint(ctx.arena(), "globalThis.__benchmarkSelected = benchmarkFunction(\"{s}\");", .{workload});
+    const configure = try std.fmt.allocPrint(ctx.arena(), "globalThis.__benchmarkSelected = benchmarkFunction(\"{s}\"); globalThis.__benchmarkJobs = {d}; globalThis.__benchmarkLane = 0;", .{ workload, jobs });
     _ = try ctx.evaluate(configure);
 
     const warm_jobs = @max(@as(usize, 1), jobs / 10);
-    const warm = try std.fmt.allocPrint(ctx.arena(), "__benchmarkSelected({d}, 0)", .{warm_jobs});
-    for (0..3) |_| _ = try ctx.evaluate(warm);
+    const warm = try std.fmt.allocPrint(ctx.arena(), "globalThis.__benchmarkJobs = {d};", .{warm_jobs});
+    _ = try ctx.evaluate(warm);
+    for (0..3) |_| _ = try ctx.evaluate(invocation);
+    _ = try ctx.evaluate(configure);
 
-    const invocation = try std.fmt.allocPrint(ctx.arena(), "__benchmarkRunShared({d}, {d})", .{
+    const shared_invocation = try std.fmt.allocPrint(ctx.arena(), "__benchmarkRunShared({d}, {d})", .{
         jobs, lanes,
     });
     for (0..samples) |sample| {
         const started = nowNs(io);
-        const result = try ctx.evaluate(invocation);
+        const result = try ctx.evaluate(shared_invocation);
         const elapsed: u64 = @intCast(nowNs(io) - started);
         try printRow(writer, .shared, workload, lanes, jobs, sample, elapsed, result.toNumber());
     }
