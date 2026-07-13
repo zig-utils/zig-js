@@ -2071,6 +2071,10 @@ pub const Object = struct {
     pub fn deleteAccessorOwn(self: *Object, arena: std.mem.Allocator, key: []const u8) std.mem.Allocator.Error!AccessorDeleteResult {
         self.lockProperties();
         defer self.unlockProperties();
+        return self.deleteAccessorOwnUnlocked(arena, key);
+    }
+
+    fn deleteAccessorOwnUnlocked(self: *Object, arena: std.mem.Allocator, key: []const u8) std.mem.Allocator.Error!AccessorDeleteResult {
         const m = self.accessors.load(.monotonic) orelse return .absent;
         if (m.getPtr(key) == null) return .absent;
         if (!self.getAttrUnlocked(key).configurable) return .blocked;
@@ -2085,6 +2089,22 @@ pub const Object = struct {
             }
         }
         return if (self.getOwnUnlocked(key) == null) .deleted else .removed_continue;
+    }
+
+    /// Object-literal data initialization is CreateDataProperty: replace any
+    /// existing own accessor with a data property, or overwrite/create the data
+    /// property directly. Do the accessor probe/delete and data slot write under
+    /// one property lock; the older two-call path took the same lock twice per
+    /// ordinary literal property, which shows up directly in no-GIL allocation
+    /// profiles even though there is no semantic need to drop the lock between
+    /// the two operations.
+    pub fn defineLiteralDataOwn(self: *Object, arena: std.mem.Allocator, root: *Shape, key: []const u8, v: Value) std.mem.Allocator.Error!AccessorDeleteResult {
+        self.lockProperties();
+        defer self.unlockProperties();
+        const deleted = try self.deleteAccessorOwnUnlocked(arena, key);
+        if (deleted == .blocked) return .blocked;
+        try self.setOwnUnlocked(arena, root, key, v);
+        return deleted;
     }
 
     pub fn deleteNamedDataOwn(self: *Object, arena: std.mem.Allocator, root: *Shape, key: []const u8) std.mem.Allocator.Error!bool {

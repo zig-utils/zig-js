@@ -20,6 +20,7 @@ const gc_runtime = @import("gc_runtime.zig");
 const agent = @import("agent.zig");
 const promise = @import("promise.zig");
 const parser_mod = @import("parser.zig");
+const object_profile = @import("object_profile.zig");
 
 pub const RunError = interp.EvalError || @import("parser.zig").ParseError;
 
@@ -5834,6 +5835,24 @@ test "object literal __proto__ sets ordinary object prototype" {
         \\Object.getPrototypeOf(o) === p &&
         \\Object.getPrototypeOf(n) === null
     )).asBool());
+}
+
+test "object literal data properties take one property lock each" {
+    const ctx = try Context.create(std.testing.allocator);
+    defer ctx.destroy();
+
+    object_profile.reset();
+    _ = try ctx.evaluate("({});");
+    const baseline = object_profile.snapshot().object_property_lock_acquires;
+
+    object_profile.reset();
+    defer object_profile.disable();
+    const result = try ctx.evaluate("({ a: 1, b: 2, c: 3 });");
+    try std.testing.expect(result.isObject());
+
+    const stats = object_profile.snapshot();
+    try std.testing.expectEqual(@as(u64, 3), stats.object_property_lock_acquires - baseline);
+    try std.testing.expectEqual(@as(u64, 0), stats.object_property_lock_contentions);
 }
 
 test "RegExp duplicate named captures use participating group" {

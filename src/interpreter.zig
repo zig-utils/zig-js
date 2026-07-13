@@ -1278,11 +1278,10 @@ pub const Interpreter = struct {
     /// own data property even when an earlier duplicate literal entry made the
     /// same key an accessor.
     pub fn defineLiteralDataProp(self: *Interpreter, obj: *value.Object, key: []const u8, v: Value) EvalError!void {
-        switch (try obj.deleteAccessorOwn(self.arena, key)) {
+        switch (try obj.defineLiteralDataOwn(self.arena, self.root_shape, key, v)) {
             .absent, .removed_continue, .deleted => {},
             .blocked => return self.throwError("TypeError", "Cannot redefine non-configurable accessor"),
         }
-        try obj.setOwn(self.arena, self.root_shape, key, v);
     }
 
     fn defineOwnDataProp(self: *Interpreter, obj: *value.Object, key: []const u8, v: Value, attr: value.PropAttr) EvalError!void {
