@@ -34,8 +34,9 @@ tests as the matching engine features land.
   `ArrayBuffer` byte-slab pressure where an active interpreter can drive the
   abort-safe parallel collector. Realm task queues, property `Atomics.wait`
   waiter tables, `Lock.asyncHold` queues, condition waiter queues/tickets,
-  ThreadLocal maps, and other trace-sensitive side-store locks fail closed
-  while held, because the tracer may need the same lock to find hidden JS roots.
+  ThreadLocal maps, thread API bookkeeping, active-interpreter and realm root
+  registries, and other trace-sensitive side-store locks fail closed while
+  held, because the tracer may need the same lock to find hidden JS roots.
   Mutable generator / iterator-helper side stores
   are a distinct fail-closed class today: the parallel tracer defers them to a
   world-stopped finish, so allocation-failure recovery aborts rather than
@@ -232,9 +233,10 @@ Issue #1 remains the umbrella status page.
   contexts, GC-cell slab and `ArrayBuffer` byte-slab recovery are
   safepoint-owned by the active interpreter and use the abort-safe parallel
   root-publication collector; allocation still fails closed when recovery is
-  attempted outside active JS execution or while holding side-store locks that
-  the tracer may need. Object/property, promise-state, iterator-helper, and
-  async-generator request locks all participate in that guard. Remaining
+  attempted outside active JS execution or while holding side-store/root-list
+  locks that the tracer may need. Object/property, promise-state,
+  iterator-helper, async-generator request, realm-root, active-interpreter,
+  thread API, and pending-join locks all participate in that guard. Remaining
   emergency-recovery work is tracked in #30: lock-aware side-store pressure
   coverage under live no-GIL peers without deadlocking GC tracing.
 - **Parallel scaling optimization.** Benchmarks show real speedup, but scaling

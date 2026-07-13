@@ -115,8 +115,13 @@ pub const Gil = struct {
     /// Lock/unlock the threading-API bookkeeping critical section. Non-recursive.
     pub fn lockApi(g: *Gil) void {
         spinLock(&g.api_lock);
+        // A parallel collector takes this lock to trace `tasks` and
+        // `Context.js_threads`. Allocations anywhere in an API transaction must
+        // fail closed instead of electing a collector that would reacquire it.
+        gc_runtime.enterTraceSensitiveLock();
     }
     pub fn unlockApi(g: *Gil) void {
+        gc_runtime.leaveTraceSensitiveLock();
         g.api_lock.unlock();
     }
 
@@ -532,5 +537,14 @@ test "gil: task queue growth is trace-sensitive" {
     try std.testing.expect(!gc_runtime.inTraceSensitiveLock());
     try g.enqueueTask(a, @ptrCast(&task));
     try std.testing.expect(probe.saw_trace_sensitive_alloc);
+    try std.testing.expect(!gc_runtime.inTraceSensitiveLock());
+}
+
+test "gil: API bookkeeping lock is trace-sensitive" {
+    var g = Gil{};
+    try std.testing.expect(!gc_runtime.inTraceSensitiveLock());
+    g.lockApi();
+    try std.testing.expect(gc_runtime.inTraceSensitiveLock());
+    g.unlockApi();
     try std.testing.expect(!gc_runtime.inTraceSensitiveLock());
 }

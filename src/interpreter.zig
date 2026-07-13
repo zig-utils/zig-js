@@ -6648,10 +6648,16 @@ pub const Interpreter = struct {
         while (!m.tryLock()) : (spins += 1) {
             if ((spins & 0xff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
         }
+        // The parallel tracer takes this same realm lock for async waiters and
+        // other persistent roots. Do not recover allocation while holding it.
+        gc_runtime.enterTraceSensitiveLock();
     }
 
     pub fn unlockRealm(self: *Interpreter) void {
-        if (self.realm_lock) |m| m.unlock();
+        if (self.realm_lock) |m| {
+            gc_runtime.leaveTraceSensitiveLock();
+            m.unlock();
+        }
     }
 
     fn asyncWaiterCount(self: *Interpreter, listp: *std.ArrayListUnmanaged(AsyncWaiterEntry)) usize {

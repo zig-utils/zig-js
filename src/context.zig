@@ -2395,8 +2395,12 @@ pub const Context = struct {
 
     pub fn lockActiveInterpreters(self: *Context) void {
         while (self.active_interp_lock.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) std.atomic.spinLoopHint();
+        // The parallel tracer takes this lock before walking the interpreter
+        // root registry. Registry growth must not collect back into the lock.
+        gc_runtime.enterTraceSensitiveLock();
     }
     pub fn unlockActiveInterpreters(self: *Context) void {
+        gc_runtime.leaveTraceSensitiveLock();
         self.active_interp_lock.store(0, .release);
     }
 
@@ -2411,10 +2415,16 @@ pub const Context = struct {
         }
     }
     pub fn realmLock(self: *Context) void {
-        if (self.parallel_js) spinLockMutex(&self.realm_lock);
+        if (self.parallel_js) {
+            spinLockMutex(&self.realm_lock);
+            gc_runtime.enterTraceSensitiveLock();
+        }
     }
     pub fn realmUnlock(self: *Context) void {
-        if (self.parallel_js) self.realm_lock.unlock();
+        if (self.parallel_js) {
+            gc_runtime.leaveTraceSensitiveLock();
+            self.realm_lock.unlock();
+        }
     }
 
     /// Lock the realm microtask queue (`microtasks`). The collector takes this
@@ -9315,6 +9325,32 @@ test "async: `async` remains usable as an ordinary identifier" {
     try std.testing.expectEqual(@as(f64, 5), (try evalIn("var o = { async() { return 5; } }; o.async()")).asNum());
     // `async` called as a function.
     try std.testing.expectEqual(@as(f64, 9), (try evalIn("function async(x) { return x; } async(9)")).asNum());
+}
+
+test "Context root registry locks are trace-sensitive" {
+    var ctx: Context = undefined;
+    ctx.parallel_js = true;
+    ctx.realm_lock = .unlocked;
+    ctx.active_interp_lock = .init(0);
+
+    try std.testing.expect(!gc_runtime.inTraceSensitiveLock());
+    ctx.realmLock();
+    try std.testing.expect(gc_runtime.inTraceSensitiveLock());
+    ctx.realmUnlock();
+    try std.testing.expect(!gc_runtime.inTraceSensitiveLock());
+
+    ctx.lockActiveInterpreters();
+    try std.testing.expect(gc_runtime.inTraceSensitiveLock());
+    ctx.unlockActiveInterpreters();
+    try std.testing.expect(!gc_runtime.inTraceSensitiveLock());
+
+    var realm_mutex: std.atomic.Mutex = .unlocked;
+    var machine: interp.Interpreter = undefined;
+    machine.realm_lock = &realm_mutex;
+    machine.lockRealm();
+    try std.testing.expect(gc_runtime.inTraceSensitiveLock());
+    machine.unlockRealm();
+    try std.testing.expect(!gc_runtime.inTraceSensitiveLock());
 }
 
 test "Context is thread-affine: owner recognized, foreign thread rejected" {

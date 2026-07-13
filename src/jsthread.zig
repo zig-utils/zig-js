@@ -863,13 +863,19 @@ fn publishThreadCompletion(rec: *ThreadRecord, threw: bool, result: Value) std.A
 fn appendPendingJoinLocked(rec: *ThreadRecord, arena: std.mem.Allocator, pending: PendingJoin) !void {
     const spare = rec.pending_joins.capacity - rec.pending_joins.items.len;
     if (spare == 0) {
+        // The parallel tracer takes `join_mutex` to find pending promise roots.
+        // Capacity growth runs with that mutex held, so recovery must not
+        // collect back into it.
+        gc_runtime.enterTraceSensitiveLock();
+        defer gc_runtime.leaveTraceSensitiveLock();
         try rec.pending_joins.ensureTotalCapacity(arena, rec.pending_joins.items.len + pending_join_reserve_granularity);
     }
     rec.pending_joins.appendAssumeCapacity(pending);
 }
 
-test "Thread asyncJoin pending list reserves capacity chunks" {
-    const a = std.testing.allocator;
+test "Thread asyncJoin pending list growth is trace-sensitive and chunked" {
+    var probe = TraceSensitiveAllocProbe{ .inner = std.testing.allocator };
+    const a = probe.allocator();
     var rec = ThreadRecord{
         .id = 1,
         .gil = undefined,
@@ -880,6 +886,7 @@ test "Thread asyncJoin pending list reserves capacity chunks" {
     var microtasks = promise.MicrotaskQueue{};
     var first_promise = value.Object{};
     try appendPendingJoinLocked(&rec, a, .{ .promise = &first_promise, .microtasks = &microtasks });
+    try std.testing.expect(probe.saw_trace_sensitive_alloc);
     try std.testing.expect(rec.pending_joins.capacity >= pending_join_reserve_granularity);
 
     const first_capacity = rec.pending_joins.capacity;
