@@ -8,6 +8,7 @@
 const std = @import("std");
 const io_compat = @import("io_compat.zig");
 const agent = @import("agent.zig");
+const gc_runtime = @import("gc_runtime.zig");
 const stack_scan = @import("stack_scan.zig");
 
 pub const Gil = struct {
@@ -134,6 +135,8 @@ pub const Gil = struct {
         const needed = g.tasks.items.len + additional;
         if (needed <= g.tasks.capacity) return;
         const extra = @max(additional, task_queue_reserve_granularity);
+        gc_runtime.enterTraceSensitiveLock();
+        defer gc_runtime.leaveTraceSensitiveLock();
         try g.tasks.ensureTotalCapacity(a, g.tasks.items.len + extra);
     }
 
@@ -423,6 +426,49 @@ test "gil: mutual exclusion and contended yield handover" {
     t5.join();
 }
 
+const TraceSensitiveAllocProbe = struct {
+    inner: std.mem.Allocator,
+    saw_trace_sensitive_alloc: bool = false,
+
+    fn allocator(self: *@This()) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &vtable };
+    }
+
+    fn note(self: *@This()) void {
+        self.saw_trace_sensitive_alloc = self.saw_trace_sensitive_alloc or gc_runtime.inTraceSensitiveLock();
+    }
+
+    fn allocFn(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        self.note();
+        return self.inner.vtable.alloc(self.inner.ptr, len, alignment, ret_addr);
+    }
+
+    fn resizeFn(ctx: *anyopaque, mem: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        self.note();
+        return self.inner.vtable.resize(self.inner.ptr, mem, alignment, new_len, ret_addr);
+    }
+
+    fn remapFn(ctx: *anyopaque, mem: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        self.note();
+        return self.inner.vtable.remap(self.inner.ptr, mem, alignment, new_len, ret_addr);
+    }
+
+    fn freeFn(ctx: *anyopaque, mem: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        self.inner.vtable.free(self.inner.ptr, mem, alignment, ret_addr);
+    }
+
+    const vtable: std.mem.Allocator.VTable = .{
+        .alloc = allocFn,
+        .resize = resizeFn,
+        .remap = remapFn,
+        .free = freeFn,
+    };
+};
+
 test "gil: task queue is FIFO without front shifts" {
     var g = Gil{};
     const a = std.testing.allocator;
@@ -468,4 +514,17 @@ test "gil: task queue is FIFO without front shifts" {
     try std.testing.expectEqual(@as(usize, 0), g.tasks_head);
     try std.testing.expectEqual(@as(usize, 0), g.tasks.items.len);
     try std.testing.expectEqual(@as(usize, 0), g.dequeueTaskBurst(&burst));
+}
+
+test "gil: task queue growth is trace-sensitive" {
+    var g = Gil{};
+    var probe = TraceSensitiveAllocProbe{ .inner = std.testing.allocator };
+    const a = probe.allocator();
+    defer g.tasks.deinit(a);
+
+    var task: u8 = 1;
+    try std.testing.expect(!gc_runtime.inTraceSensitiveLock());
+    try g.enqueueTask(a, @ptrCast(&task));
+    try std.testing.expect(probe.saw_trace_sensitive_alloc);
+    try std.testing.expect(!gc_runtime.inTraceSensitiveLock());
 }
