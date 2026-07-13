@@ -63,8 +63,11 @@ serial exhaustion fails closed instead of wrapping into a previously-issued
 Symbol key or private brand.
 Structured-clone messages never treat wire bytes as storage pointers. A
 `SharedArrayBuffer` crosses an isolated Worker boundary through an opaque random
-single-use token for one retained storage reference; unknown, replayed, and
-trailing payloads fail closed.
+single-use token for one retained storage reference. Tokens live in a framed
+ownership manifest and payloads reference them by canonical index, so rejected
+payload cleanup does not depend on recursive payload parsing. Unknown,
+out-of-order, duplicate, and replayed references, as well as trailing payloads,
+fail closed.
 Resizable `ArrayBuffer` storage is in this engine-state category even when the
 JavaScript program intentionally races view operations with resize. Typed-array
 and `DataView` helpers borrow the live byte slice through the buffer lock when a

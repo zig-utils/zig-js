@@ -10171,11 +10171,14 @@ test "structured clone rejects forged replayed and trailing SAB tokens" {
     const valid = try structured_clone.serialize(&machine, std.testing.allocator, sab);
     defer structured_clone.releaseSerialized(valid);
     defer std.testing.allocator.free(valid);
-    try std.testing.expect(valid.len > 1);
+    // Four-byte magic, one-byte version, u32 token count, and u64 payload
+    // length precede the token manifest.
+    const manifest_offset = 4 + 1 + @sizeOf(u32) + @sizeOf(u64);
+    try std.testing.expect(valid.len > manifest_offset);
 
     const forged = try std.testing.allocator.dupe(u8, valid);
     defer std.testing.allocator.free(forged);
-    forged[forged.len - 1] ^= 0xff;
+    forged[manifest_offset] ^= 0xff;
     try std.testing.expectError(error.Throw, structured_clone.deserialize(&machine, forged));
 
     const cloned = try structured_clone.deserialize(&machine, valid);

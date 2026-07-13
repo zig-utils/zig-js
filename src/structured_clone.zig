@@ -4,9 +4,11 @@
 //! graph into a context-independent byte stream, deserialize that stream into
 //! a (possibly different) realm's arena. The byte form is deliberately the
 //! contract: it is the `postMessage` wire format for Phase 5 workers, so it
-//! must never contain pointers. SharedArrayBuffer payloads carry an opaque,
-//! unguessable, single-use token for one retained process-wide storage
-//! reference; deserialize or release atomically consumes that token.
+//! must never contain pointers. Each frame owns a manifest of opaque,
+//! unguessable, single-use SharedArrayBuffer tokens; payloads refer to the
+//! manifest by canonical index. Deserialization or frame release atomically
+//! consumes every retained process-wide storage reference. The manifest keeps
+//! cleanup independent of payload parsing, including for rejected payloads.
 //!
 //! Supported: primitives, BigInt, plain objects (own enumerable props, read
 //! through [[Get]] so getters run), Arrays (dense elements + holes + named
@@ -30,6 +32,10 @@ const Interpreter = interpreter.Interpreter;
 const HostError = value.HostError;
 
 const SharedRefToken = [16]u8;
+const wire_magic = "ZJSC".*;
+const wire_version: u8 = 1;
+const wire_header_len = wire_magic.len + @sizeOf(u8) + @sizeOf(u32) + @sizeOf(u64);
+
 const SharedRefEntry = struct {
     token: SharedRefToken,
     storage: *shared_buffer.SharedBufferStorage,
@@ -159,9 +165,6 @@ const Writer = struct {
         try w.int(u32, @intCast(s.len));
         try w.out.appendSlice(w.gpa, s);
     }
-    fn sharedToken(w: *Writer, token: SharedRefToken) error{OutOfMemory}!void {
-        try w.out.appendSlice(w.gpa, &token);
-    }
 };
 
 // ---- reader -----------------------------------------------------------------
@@ -197,11 +200,6 @@ const Reader = struct {
         defer r.pos += n;
         return r.bytes[r.pos..][0..n];
     }
-    fn sharedToken(r: *Reader) Error!SharedRefToken {
-        if (@sizeOf(SharedRefToken) > r.bytes.len - r.pos) return error.Malformed;
-        defer r.pos += @sizeOf(SharedRefToken);
-        return r.bytes[r.pos..][0..@sizeOf(SharedRefToken)].*;
-    }
 };
 
 // ---- serialize ----------------------------------------------------------------
@@ -213,6 +211,7 @@ const Serializer = struct {
     /// numbering by creating object shells in read order).
     memo: std.AutoHashMapUnmanaged(*value.Object, u32) = .empty,
     next_id: u32 = 0,
+    shared_tokens: std.ArrayListUnmanaged(SharedRefToken) = .empty,
 
     fn throwClone(s: *Serializer, what: []const u8) HostError {
         return s.self.throwError("TypeError", what);
@@ -337,13 +336,16 @@ const Serializer = struct {
             if (ab.is_shared) {
                 const storage = ab.shared orelse return s.throwClone("DataCloneError: malformed SharedArrayBuffer");
                 const token = try registerSharedRefToken(storage);
-                var token_written = false;
-                errdefer {
-                    if (!token_written) _ = releaseSharedRefToken(token);
-                }
+                const token_index = std.math.cast(u32, s.shared_tokens.items.len) orelse {
+                    _ = releaseSharedRefToken(token);
+                    return s.throwClone("DataCloneError: too many SharedArrayBuffers");
+                };
+                s.shared_tokens.append(s.w.gpa, token) catch {
+                    _ = releaseSharedRefToken(token);
+                    return error.OutOfMemory;
+                };
                 try s.w.tag(.shared_array_buffer);
-                try s.w.sharedToken(token);
-                token_written = true;
+                try s.w.int(u32, token_index);
                 return;
             }
             if (ab.isDetached()) return s.throwClone("DataCloneError: detached ArrayBuffer cannot be cloned");
@@ -472,24 +474,133 @@ fn isIndexKey(k: []const u8) bool {
 pub fn serialize(self: *Interpreter, gpa: std.mem.Allocator, v: Value) HostError![]u8 {
     var s = Serializer{ .self = self, .w = .{ .gpa = gpa } };
     defer s.memo.deinit(gpa);
+    defer s.shared_tokens.deinit(gpa);
+    defer s.w.out.deinit(gpa);
     errdefer {
-        releaseSerialized(s.w.out.items);
-        s.w.out.deinit(gpa);
+        for (s.shared_tokens.items) |token| _ = releaseSharedRefToken(token);
     }
     try s.ser(v);
-    return s.w.out.toOwnedSlice(gpa) catch return error.OutOfMemory;
+    return encodeFrame(gpa, s.shared_tokens.items, s.w.out.items) catch |err| switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.Overflow => s.throwClone("DataCloneError: structured clone payload is too large"),
+    };
 }
 
 /// Release the SAB storage references a serialized stream holds (use when a
-/// stream is dropped without being deserialized).
+/// stream is dropped without being deserialized). Manifests are independent
+/// of payload validation, so cleanup remains complete for rejected payloads.
 pub fn releaseSerialized(bytes: []const u8) void {
-    var r = Reader{ .bytes = bytes };
-    while (r.pos < r.bytes.len) skipSerialized(&r, .release) catch return;
+    var remaining = bytes;
+    while (remaining.len > 0) {
+        const frame_len = releaseFrame(remaining) orelse return;
+        remaining = remaining[frame_len..];
+    }
 }
 
-const SkipMode = enum { validate, release };
+const Frame = struct {
+    tokens: []const u8,
+    payload: []const u8,
+    frame_len: usize,
 
-fn skipSerialized(r: *Reader, mode: SkipMode) Reader.Error!void {
+    fn tokenCount(frame: Frame) usize {
+        return frame.tokens.len / @sizeOf(SharedRefToken);
+    }
+
+    fn token(frame: Frame, index: usize) SharedRefToken {
+        const start = index * @sizeOf(SharedRefToken);
+        return frame.tokens[start .. start + @sizeOf(SharedRefToken)][0..@sizeOf(SharedRefToken)].*;
+    }
+};
+
+fn encodeFrame(
+    gpa: std.mem.Allocator,
+    tokens: []const SharedRefToken,
+    payload: []const u8,
+) error{ OutOfMemory, Overflow }![]u8 {
+    const token_count = std.math.cast(u32, tokens.len) orelse return error.Overflow;
+    const payload_len = std.math.cast(u64, payload.len) orelse return error.Overflow;
+    const manifest_len = std.math.mul(usize, tokens.len, @sizeOf(SharedRefToken)) catch return error.Overflow;
+    const prefix_len = std.math.add(usize, wire_header_len, manifest_len) catch return error.Overflow;
+    const total_len = std.math.add(usize, prefix_len, payload.len) catch return error.Overflow;
+    const framed = try gpa.alloc(u8, total_len);
+    var pos: usize = 0;
+    @memcpy(framed[pos .. pos + wire_magic.len], &wire_magic);
+    pos += wire_magic.len;
+    framed[pos] = wire_version;
+    pos += @sizeOf(u8);
+    std.mem.writeInt(u32, framed[pos..][0..@sizeOf(u32)], token_count, .little);
+    pos += @sizeOf(u32);
+    std.mem.writeInt(u64, framed[pos..][0..@sizeOf(u64)], payload_len, .little);
+    pos += @sizeOf(u64);
+    for (tokens) |token| {
+        @memcpy(framed[pos .. pos + @sizeOf(SharedRefToken)], &token);
+        pos += @sizeOf(SharedRefToken);
+    }
+    @memcpy(framed[pos..], payload);
+    return framed;
+}
+
+fn readFrame(bytes: []const u8) Reader.Error!Frame {
+    if (bytes.len < wire_header_len) return error.Malformed;
+    if (!std.mem.eql(u8, bytes[0..wire_magic.len], &wire_magic)) return error.Malformed;
+    if (bytes[wire_magic.len] != wire_version) return error.Malformed;
+    var pos: usize = wire_magic.len + @sizeOf(u8);
+    const token_count: usize = std.mem.readInt(u32, bytes[pos..][0..@sizeOf(u32)], .little);
+    pos += @sizeOf(u32);
+    const payload_len_raw = std.mem.readInt(u64, bytes[pos..][0..@sizeOf(u64)], .little);
+    pos += @sizeOf(u64);
+    const payload_len = std.math.cast(usize, payload_len_raw) orelse return error.Malformed;
+    const manifest_len = std.math.mul(usize, token_count, @sizeOf(SharedRefToken)) catch return error.Malformed;
+    if (manifest_len > bytes.len - pos) return error.Malformed;
+    const payload_start = pos + manifest_len;
+    if (payload_len > bytes.len - payload_start) return error.Malformed;
+    const frame_len = std.math.add(usize, payload_start, payload_len) catch return error.Malformed;
+    return .{
+        .tokens = bytes[pos..payload_start],
+        .payload = bytes[payload_start..frame_len],
+        .frame_len = frame_len,
+    };
+}
+
+/// Release a frame's manifest before inspecting its payload length. This is
+/// deliberately separate from `readFrame`: a truncated or otherwise rejected
+/// payload still owns every complete token named by its frame header.
+fn releaseFrame(bytes: []const u8) ?usize {
+    if (bytes.len < wire_header_len) return null;
+    if (!std.mem.eql(u8, bytes[0..wire_magic.len], &wire_magic)) return null;
+    if (bytes[wire_magic.len] != wire_version) return null;
+    var pos: usize = wire_magic.len + @sizeOf(u8);
+    const token_count: usize = std.mem.readInt(u32, bytes[pos..][0..@sizeOf(u32)], .little);
+    pos += @sizeOf(u32);
+    const payload_len_raw = std.mem.readInt(u64, bytes[pos..][0..@sizeOf(u64)], .little);
+    pos += @sizeOf(u64);
+    const manifest_len = std.math.mul(usize, token_count, @sizeOf(SharedRefToken)) catch return null;
+    if (manifest_len > bytes.len - pos) return null;
+    const tokens = bytes[pos .. pos + manifest_len];
+    for (0..token_count) |i| {
+        const start = i * @sizeOf(SharedRefToken);
+        _ = releaseSharedRefToken(tokens[start .. start + @sizeOf(SharedRefToken)][0..@sizeOf(SharedRefToken)].*);
+    }
+    const payload_len = std.math.cast(usize, payload_len_raw) orelse return null;
+    const payload_start = pos + manifest_len;
+    if (payload_len > bytes.len - payload_start) return null;
+    return std.math.add(usize, payload_start, payload_len) catch null;
+}
+
+const SkipState = struct {
+    frame: Frame,
+    next_shared: u32 = 0,
+
+    fn validateToken(state: *SkipState, index: u32) Reader.Error!void {
+        if (index != state.next_shared) return error.Malformed;
+        const token_index = std.math.cast(usize, index) orelse return error.Malformed;
+        if (token_index >= state.frame.tokenCount()) return error.Malformed;
+        if (!sharedRefTokenExists(state.frame.token(token_index))) return error.Malformed;
+        state.next_shared = std.math.add(u32, state.next_shared, 1) catch return error.Malformed;
+    }
+};
+
+fn skipSerialized(r: *Reader, state: *SkipState) Reader.Error!void {
     switch (try r.tag()) {
         .undef, .null_v => {},
         .bool_v => _ = try r.byte(),
@@ -498,14 +609,7 @@ fn skipSerialized(r: *Reader, mode: SkipMode) Reader.Error!void {
         .bigint => _ = try r.int(i128),
         .ref => _ = try r.int(u32),
         .shared_array_buffer => {
-            const token = try r.sharedToken();
-            switch (mode) {
-                .validate => if (!sharedRefTokenExists(token)) return error.Malformed,
-                // Cleanup is intentionally idempotent: an earlier partial
-                // deserialize may already have consumed this token. Keep
-                // parsing so later still-live tokens are not stranded.
-                .release => _ = releaseSharedRefToken(token),
-            }
+            try state.validateToken(try r.int(u32));
         },
         .array_buffer => {
             _ = try r.int(u64);
@@ -513,13 +617,13 @@ fn skipSerialized(r: *Reader, mode: SkipMode) Reader.Error!void {
         },
         .typed_array => {
             _ = try r.byte();
-            try skipSerialized(r, mode);
+            try skipSerialized(r, state);
             _ = try r.int(u64);
             _ = try r.int(u64);
             _ = try r.byte();
         },
         .data_view => {
-            try skipSerialized(r, mode);
+            try skipSerialized(r, state);
             _ = try r.int(u64);
             _ = try r.int(u64);
             _ = try r.byte();
@@ -532,39 +636,39 @@ fn skipSerialized(r: *Reader, mode: SkipMode) Reader.Error!void {
             const n = try r.int(u32);
             var i: u32 = 0;
             while (i < n) : (i += 1) {
-                try skipSerialized(r, mode);
-                try skipSerialized(r, mode);
+                try skipSerialized(r, state);
+                try skipSerialized(r, state);
             }
         },
         .set => {
             const n = try r.int(u32);
             var i: u32 = 0;
-            while (i < n) : (i += 1) try skipSerialized(r, mode);
+            while (i < n) : (i += 1) try skipSerialized(r, state);
         },
         .error_obj => {
             _ = try r.str();
             if (try r.byte() == 1) _ = try r.str();
         },
-        .wrapper => try skipSerialized(r, mode),
+        .wrapper => try skipSerialized(r, state),
         .array => {
             _ = try r.int(u64);
             const n = try r.int(u32);
             var i: u32 = 0;
             while (i < n) : (i += 1) {
-                if (try r.byte() == 0) try skipSerialized(r, mode);
+                if (try r.byte() == 0) try skipSerialized(r, state);
             }
-            try skipNamed(r, mode);
+            try skipNamed(r, state);
         },
-        .object => try skipNamed(r, mode),
+        .object => try skipNamed(r, state),
     }
 }
 
-fn skipNamed(r: *Reader, mode: SkipMode) Reader.Error!void {
+fn skipNamed(r: *Reader, state: *SkipState) Reader.Error!void {
     const n = try r.int(u32);
     var i: u32 = 0;
     while (i < n) : (i += 1) {
         _ = try r.str();
-        try skipSerialized(r, mode);
+        try skipSerialized(r, state);
     }
 }
 
@@ -575,6 +679,8 @@ const Deserializer = struct {
     r: Reader,
     /// Objects in creation order — mirrors the serializer's id numbering.
     objs: std.ArrayListUnmanaged(*value.Object) = .empty,
+    frame: Frame,
+    next_shared: u32 = 0,
 
     fn fail(d: *Deserializer) HostError {
         return d.self.throwError("TypeError", "structured clone: malformed payload");
@@ -713,7 +819,11 @@ const Deserializer = struct {
                 return Value.obj(o);
             },
             .shared_array_buffer => {
-                const token = d.r.sharedToken() catch return d.fail();
+                const index = d.r.int(u32) catch return d.fail();
+                const token_index = std.math.cast(usize, index) orelse return d.fail();
+                if (index != d.next_shared or token_index >= d.frame.tokenCount()) return d.fail();
+                d.next_shared = std.math.add(u32, d.next_shared, 1) catch return d.fail();
+                const token = d.frame.token(token_index);
                 const storage = consumeSharedRefToken(token) orelse return d.fail();
                 // The consumed reference transfers to the wrapper. The wrapper
                 // constructor owns failure cleanup as part of that contract.
@@ -777,14 +887,32 @@ const Deserializer = struct {
 /// wrappers they create. A successful root must consume the entire stream;
 /// valid trailing token payloads are released before malformed input fails.
 pub fn deserialize(self: *Interpreter, bytes: []const u8) HostError!Value {
-    var verify = Reader{ .bytes = bytes };
-    skipSerialized(&verify, .validate) catch return self.throwError("TypeError", "structured clone: malformed payload");
-    if (verify.pos != bytes.len) {
+    const frame = readFrame(bytes) catch return self.throwError("TypeError", "structured clone: malformed payload");
+    if (frame.frame_len != bytes.len) {
         releaseSerialized(bytes);
         return self.throwError("TypeError", "structured clone: malformed payload");
     }
-    var d = Deserializer{ .self = self, .r = .{ .bytes = bytes } };
-    return d.deser();
+    var verify = Reader{ .bytes = frame.payload };
+    var skip = SkipState{ .frame = frame };
+    skipSerialized(&verify, &skip) catch {
+        releaseSerialized(bytes);
+        return self.throwError("TypeError", "structured clone: malformed payload");
+    };
+    const frame_token_count = std.math.cast(u32, frame.tokenCount()) orelse {
+        releaseSerialized(bytes);
+        return self.throwError("TypeError", "structured clone: malformed payload");
+    };
+    if (verify.pos != frame.payload.len or skip.next_shared != frame_token_count) {
+        releaseSerialized(bytes);
+        return self.throwError("TypeError", "structured clone: malformed payload");
+    }
+    var d = Deserializer{ .self = self, .r = .{ .bytes = frame.payload }, .frame = frame };
+    return d.deser() catch |err| {
+        // Tokens already consumed by wrappers are absent from the registry;
+        // manifest cleanup is idempotent and releases every later token.
+        releaseSerialized(bytes);
+        return err;
+    };
 }
 
 test "structured clone SAB tokens are single-use and reject forgery" {
@@ -861,29 +989,41 @@ test "structured clone SAB release rejects replay and cleans valid trailing toke
     defer storage.release();
     const token = try registerSharedRefToken(storage);
 
-    var bytes: [1 + 1 + @sizeOf(SharedRefToken)]u8 = undefined;
-    bytes[0] = @intFromEnum(Tag.undef);
-    bytes[1] = @intFromEnum(Tag.shared_array_buffer);
-    @memcpy(bytes[2..], &token);
+    const undef_frame = try encodeFrame(std.testing.allocator, &.{}, &.{@intFromEnum(Tag.undef)});
+    defer std.testing.allocator.free(undef_frame);
+    var sab_payload: [1 + @sizeOf(u32)]u8 = undefined;
+    sab_payload[0] = @intFromEnum(Tag.shared_array_buffer);
+    std.mem.writeInt(u32, sab_payload[1..][0..@sizeOf(u32)], 0, .little);
+    const sab_frame = try encodeFrame(std.testing.allocator, &.{token}, &sab_payload);
+    defer std.testing.allocator.free(sab_frame);
 
-    var root = Reader{ .bytes = &bytes };
-    try skipSerialized(&root, .validate);
-    try std.testing.expectEqual(@as(usize, 1), root.pos);
-    releaseSerialized(bytes[root.pos..]);
+    const root = try readFrame(undef_frame);
+    try std.testing.expectEqual(@as(usize, 1), root.payload.len);
+    releaseSerialized(sab_frame);
     try std.testing.expectEqual(baseline, sharedRefTokenCount());
-    releaseSerialized(bytes[root.pos..]);
+    releaseSerialized(sab_frame);
     try std.testing.expectEqual(baseline, sharedRefTokenCount());
 
     const already_consumed = try registerSharedRefToken(storage);
     const still_live = try registerSharedRefToken(storage);
     const held = consumeSharedRefToken(already_consumed) orelse return error.TestUnexpectedResult;
     held.release();
-    var pair: [2 * (1 + @sizeOf(SharedRefToken))]u8 = undefined;
-    pair[0] = @intFromEnum(Tag.shared_array_buffer);
-    @memcpy(pair[1 .. 1 + @sizeOf(SharedRefToken)], &already_consumed);
-    const second_tag = 1 + @sizeOf(SharedRefToken);
-    pair[second_tag] = @intFromEnum(Tag.shared_array_buffer);
-    @memcpy(pair[second_tag + 1 ..], &still_live);
-    releaseSerialized(&pair);
+    var pair_payload: [2 * (1 + @sizeOf(u32))]u8 = undefined;
+    pair_payload[0] = @intFromEnum(Tag.shared_array_buffer);
+    std.mem.writeInt(u32, pair_payload[1..][0..@sizeOf(u32)], 0, .little);
+    const second_tag = 1 + @sizeOf(u32);
+    pair_payload[second_tag] = @intFromEnum(Tag.shared_array_buffer);
+    std.mem.writeInt(u32, pair_payload[second_tag + 1 ..][0..@sizeOf(u32)], 1, .little);
+    const pair = try encodeFrame(std.testing.allocator, &.{ already_consumed, still_live }, &pair_payload);
+    defer std.testing.allocator.free(pair);
+    releaseSerialized(pair);
+    try std.testing.expectEqual(baseline, sharedRefTokenCount());
+
+    const truncated_token = try registerSharedRefToken(storage);
+    const truncated = try encodeFrame(std.testing.allocator, &.{truncated_token}, &.{
+        @intFromEnum(Tag.shared_array_buffer), 0, 0, 0, 0,
+    });
+    defer std.testing.allocator.free(truncated);
+    releaseSerialized(truncated[0 .. truncated.len - 1]);
     try std.testing.expectEqual(baseline, sharedRefTokenCount());
 }

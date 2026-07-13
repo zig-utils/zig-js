@@ -13,10 +13,12 @@ A `Worker` owns one OS thread and one `Context` (own arena, realm, shapes,
 microtask queue — the Phase-0 affinity model holds per worker). The only
 things that cross a worker boundary are **serialized bytes** (process-
 allocator-owned, produced by `structured_clone.serialize`) and **retained SAB
-storage** (the refcounted `SharedBufferStorage` from Phase 1). SAB references
-inside the byte stream are opaque random single-use tokens, not process
-pointers. A locked registry atomically consumes each token on deserialize or
-queue cleanup; forged and replayed tokens fail closed. Nothing that
+storage** (the refcounted `SharedBufferStorage` from Phase 1). Each framed
+message owns a manifest of opaque random single-use SAB tokens, never process
+pointers; the clone payload names them by canonical index. A locked registry
+atomically consumes each token on deserialize or queue cleanup, and manifest
+cleanup does not depend on recursively parsing a valid payload. Forged,
+out-of-order, duplicate, and replayed token references fail closed. Nothing that
 lives in a worker arena ever escapes it — same lifetime rule as agents.
 
 Messages flow over two `Channel`s (mutex + condition FIFOs of `[]u8`): `inbox`
