@@ -84,10 +84,11 @@ const Channel = struct {
     }
 
     fn ensureQueueCapacityLocked(ch: *Channel, additional: usize) !void {
-        const needed = ch.queue.items.len + additional;
+        const needed = std.math.add(usize, ch.queue.items.len, additional) catch return error.OutOfMemory;
         if (needed <= ch.queue.capacity) return;
         ch.compactQueueLocked();
-        if (ch.queue.items.len + additional <= ch.queue.capacity) return;
+        const compacted_needed = std.math.add(usize, ch.queue.items.len, additional) catch return error.OutOfMemory;
+        if (compacted_needed <= ch.queue.capacity) return;
         const extra = @max(additional, channel_queue_reserve_granularity);
         const target = std.math.add(usize, ch.queue.items.len, extra) catch return error.OutOfMemory;
         try ch.queue.ensureTotalCapacity(ch.queue_allocator, target);
