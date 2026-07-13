@@ -4271,6 +4271,29 @@ pub const Interpreter = struct {
         return !f.is_arrow and (f.is_generator or (!f.is_method and !f.is_async));
     }
 
+    /// Force a function's lazily-created `.prototype` into being a real own
+    /// property (with its correct non-enumerable attributes and, for an ordinary
+    /// function, its `constructor` back-link). Mirrors the lazy install in
+    /// `getProperty`, so reflection over the function — `Reflect.ownKeys`,
+    /// `Object.getOwnPropertyNames` — sees the property that a bare access would
+    /// materialize. No-op for arrows/methods/plain-async (no prototype slot) and
+    /// for a function whose prototype already exists.
+    pub fn materializeFunctionPrototype(self: *Interpreter, o: *value.Object) EvalError!void {
+        if (o.js_func == null or !jsFunctionHasOwnPrototypeSlot(o)) return;
+        if (o.getOwn("prototype") != null or o.getAccessor("prototype") != null) return;
+        const f = funcOf(Value.obj(o)) orelse return;
+        if (f.is_generator) {
+            _ = try self.genProtoObject(o, f.is_async);
+            return;
+        }
+        if (!f.is_arrow) {
+            const proto = try self.protoObject(o);
+            try o.setAttr(self.arena, "prototype", .{ .writable = true, .enumerable = false, .configurable = false });
+            try self.setProp(proto, "constructor", Value.obj(o));
+            try proto.setAttr(self.arena, "constructor", .{ .writable = true, .enumerable = false, .configurable = true });
+        }
+    }
+
     /// `Function.prototype.toString`. A user function returns its exact captured
     /// source; a native, bound, or not-yet-captured function returns the spec's
     /// NativeFunction syntax `function NAME() { [native code] }`.
@@ -9414,6 +9437,13 @@ pub const Interpreter = struct {
             try list.appendSlice(self.arena, symbols.items);
             return list.items;
         }
+        // A function's `.prototype` own property is materialized lazily; force it
+        // into being so it appears as a real own key here (its non-enumerable
+        // attrs keep it out of Object.keys/JSON). It is repositioned after `name`
+        // below — the spec creates it at that position, but the lazy install
+        // appends it at the tail.
+        const fn_has_proto = t.js_func != null and Interpreter.jsFunctionHasOwnPrototypeSlot(t);
+        if (fn_has_proto) try self.materializeFunctionPrototype(t);
         var indices: std.ArrayListUnmanaged([]const u8) = .empty;
         var seen: std.AutoHashMapUnmanaged(usize, void) = .empty;
         for (try t.denseElementIndices(self.arena)) |dense_i| {
@@ -9440,6 +9470,22 @@ pub const Interpreter = struct {
                 return value.canonicalIndex(x).? < value.canonicalIndex(y).?;
             }
         }.lt);
+        // Move a function's `prototype` to directly follow `name` (spec creation
+        // order), rather than wherever the lazy install appended it.
+        if (fn_has_proto) {
+            var reordered: std.ArrayListUnmanaged([]const u8) = .empty;
+            var placed = false;
+            for (strings.items) |s| {
+                if (std.mem.eql(u8, s, "prototype")) continue;
+                try reordered.append(self.arena, s);
+                if (std.mem.eql(u8, s, "name")) {
+                    try reordered.append(self.arena, "prototype");
+                    placed = true;
+                }
+            }
+            if (!placed) try reordered.append(self.arena, "prototype");
+            strings = reordered;
+        }
         var list: std.ArrayListUnmanaged([]const u8) = .empty;
         try list.appendSlice(self.arena, indices.items);
         try list.appendSlice(self.arena, strings.items);
