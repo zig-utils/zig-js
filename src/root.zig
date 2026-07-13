@@ -44,6 +44,7 @@ pub const jsthread = @import("jsthread.zig");
 pub const bytecode = @import("bytecode.zig");
 pub const Compiler = @import("compiler.zig").Compiler;
 pub const vm = @import("vm.zig");
+pub const jit = @import("jit.zig");
 
 // JavaScriptCore-shaped C API subset (re-exported for documentation / direct use).
 pub const c_api = @import("c_api.zig");
@@ -84,6 +85,7 @@ test {
     _ = @import("bytecode.zig");
     _ = @import("compiler.zig");
     _ = @import("vm.zig");
+    _ = @import("jit.zig");
     _ = @import("context.zig");
     _ = @import("c_api.zig");
     _ = @import("gc.zig");
