@@ -28,6 +28,7 @@ const WatchdogProfile = enum(usize) {
     vexc,
     vlock,
     vwait,
+    vgrowatomic,
 };
 
 const watchdog_profile_names = [_][]const u8{
@@ -40,6 +41,7 @@ const watchdog_profile_names = [_][]const u8{
     "vexc",
     "vlock",
     "vwait",
+    "vgrowatomic",
 };
 
 var watchdog_enabled = std.atomic.Value(bool).init(false);
@@ -1097,6 +1099,47 @@ fn genWaitNotify(seed: u64, buf: *std.ArrayListUnmanaged(u8), gpa: std.mem.Alloc
     defer gpa.free(src);
     try buf.appendSlice(gpa, src);
     return @floatFromInt(n);
+}
+
+/// A *deterministic* concurrent grown-buffer Atomics witness (issue #13: Atomics
+/// lifecycle semantics on resizable/growable SharedArrayBuffers). A length-tracking
+/// Int32Array over a growable SharedArrayBuffer must expose indices that only
+/// become valid AFTER the buffer grows: every Atomics op re-witnesses the live
+/// buffer length (ValidateAtomicAccess/TypedArrayLength) rather than bounds-checking
+/// against the stale pre-grow length. `n` Threads each do `per` `Atomics.add(a, IDX, 1)`
+/// on an index IDX that lies in the grown region (out of bounds before the grow);
+/// the final `Atomics.load(a, IDX)` must be exactly `n*per`. A stale-length
+/// regression makes every add throw RangeError, so the join rethrows (unexpected
+/// throw) or the accumulated sum is short. Arena/GIL path (no GC): a growable
+/// SharedArrayBuffer grows in place (storage stays put, only the length rises), the
+/// grow runs on the main thread before the workers spawn, and the SAB storage is
+/// shared, so each worker sees the grown length.
+fn genGrowAtomic(seed: u64, buf: *std.ArrayListUnmanaged(u8), gpa: std.mem.Allocator) !f64 {
+    var prng = std.Random.DefaultPrng.init(seed);
+    const r = prng.random();
+    const n = 3 + r.uintLessThan(usize, 6); // 3..8 threads
+    const per = 100 + r.uintLessThan(usize, 400); // 100..499 adds each
+    // Initial view length 4 (16 bytes); grow to 8 (32 bytes). IDX is in the grown
+    // region [4, 8) — out of bounds before the grow, valid after it.
+    const idx = 4 + r.uintLessThan(usize, 4); // 4..7
+    const src = try std.fmt.allocPrint(
+        gpa,
+        \\var sab = new SharedArrayBuffer(16, {{ maxByteLength: 64 }});
+        \\var a = new Int32Array(sab);
+        \\sab.grow(32);
+        \\var ts = [];
+        \\for (var i = 0; i < {d}; i++) ts.push(new Thread(function() {{
+        \\  for (var j = 0; j < {d}; j++) Atomics.add(a, {d}, 1);
+        \\}}));
+        \\for (var k = 0; k < ts.length; k++) ts[k].join();
+        \\Atomics.load(a, {d})
+        \\
+    ,
+        .{ n, per, idx, idx },
+    );
+    defer gpa.free(src);
+    try buf.appendSlice(gpa, src);
+    return @floatFromInt(n * per);
 }
 
 /// Teardown stress: every spawned Thread publishes that it reached a blocking or
@@ -20223,6 +20266,48 @@ pub fn main(init: std.process.Init) !void {
         }
         printProfileSummary("vwait", iters, base_seed, wfail, run_started_ms);
         if (wfail != 0) std.process.exit(1);
+        return;
+    };
+
+    // `threadfuzz vgrowatomic <iters> <seed>`: deterministic concurrent Atomics on
+    // a grown growable SharedArrayBuffer — every Atomics op must re-witness the
+    // live (grown) length, so n threads accumulating on a grown-region index sum
+    // to exactly n*per (#13).
+    if (first) |a| if (std.mem.eql(u8, a, "vgrowatomic")) {
+        if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch 200;
+        if (args.next()) |b| base_seed = std.fmt.parseInt(u64, b, 10) catch 1;
+        var gfail: usize = 0;
+        var gi: usize = 0;
+        while (gi < iters) : (gi += 1) {
+            const seed = base_seed +% gi;
+            noteSeed(.vgrowatomic, seed);
+            defer finishSeed();
+            var gbuf: std.ArrayListUnmanaged(u8) = .empty;
+            defer gbuf.deinit(gpa);
+            const expected = try genGrowAtomic(seed, &gbuf, gpa);
+            const ctx = js.Context.createWith(gpa, .{ .enable_threads = true }) catch {
+                std.debug.print("seed {d}: context creation failed\n", .{seed});
+                gfail += 1;
+                continue;
+            };
+            defer ctx.destroy();
+            if (ctx.evaluate(gbuf.items)) |v| {
+                const got = if (v.isNumber()) v.asNum() else -1;
+                if (got != expected) {
+                    std.debug.print("seed {d}: WRONG RESULT got {d} expected {d} (grown-buffer Atomics stale-length bug)\n", .{ seed, got, expected });
+                    gfail += 1;
+                }
+            } else |e| {
+                const msg_txt = if (ctx.exception) |ex| blk: {
+                    var render = ctx.interpreter();
+                    break :blk render.toStringV(ex) catch "<unstringifiable>";
+                } else "<none>";
+                std.debug.print("seed {d}: unexpected throw {s}: {s}\n", .{ seed, @errorName(e), msg_txt });
+                gfail += 1;
+            }
+        }
+        printProfileSummary("vgrowatomic", iters, base_seed, gfail, run_started_ms);
+        if (gfail != 0) std.process.exit(1);
         return;
     };
     // `threadfuzz lifecycle <iters> <seed>`: deterministic concurrent

@@ -27003,9 +27003,17 @@ fn atomicsValidate(self: *Interpreter, ta_v: Value, idx_v: Value, write: bool, o
     // ValidateTypedArray(write): reject an immutable buffer before the index is
     // coerced (the value isn't coerced yet either).
     if (write and ta.buffer.array_buffer.?.immutable) return self.throwError("TypeError", "Atomics cannot write to an immutable ArrayBuffer");
-    if (ta.buffer.array_buffer.?.isDetached()) return self.throwError("TypeError", "ArrayBuffer is detached");
+    // ValidateTypedArray: a detached or out-of-bounds view (a resizable buffer
+    // shrank below a fixed view's extent) is a TypeError, thrown before the index
+    // is coerced. currentLength() folds in both, and also re-witnesses a
+    // length-tracking view against the live buffer size — the length that
+    // MakeTypedArrayWithBufferWitnessRecord/TypedArrayLength would compute.
+    const cur_len = ta.currentLength() orelse return self.throwError("TypeError", "TypedArray is out of bounds for atomic access");
+    // ValidateAtomicAccess bounds-checks against that *current* length, not the
+    // cached one: a grown buffer exposes the new indices, and a length-tracking
+    // view that shrank rejects a now-past-the-end index with a RangeError.
     const i = try toIndexArg(self, idx_v);
-    if (i >= ta.length) return self.throwError("RangeError", "Access index out of bounds for atomic access.");
+    if (i >= cur_len) return self.throwError("RangeError", "Access index out of bounds for atomic access.");
     return .{ .ta = ta, .i = @intCast(i) };
 }
 
@@ -38409,6 +38417,12 @@ fn installSharedArrayBufferAndAtomics(env: *Environment, rs: *Shape, object_prot
         };
         break :blk null;
     };
+    const sym_species: ?[]const u8 = blk: {
+        if (env.get("Symbol")) |sym| if (sym.isObject()) {
+            if (sym.asObj().getOwn("species")) |t| if (t.isObject() and t.asObj().is_symbol) break :blk t.asObj().sym_key;
+        };
+        break :blk null;
+    };
     // SharedArrayBuffer.
     {
         const proto = try gc_mod.allocObj(a);
@@ -38428,6 +38442,18 @@ fn installSharedArrayBufferAndAtomics(env: *Environment, rs: *Shape, object_prot
         try ctor.setOwn(a, rs, "prototype", Value.obj(proto));
         try ctor.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
         try setConstructor(a, rs, proto, ctor);
+        // `SharedArrayBuffer[Symbol.species]` — a getter returning the receiver,
+        // so `slice`'s SpeciesConstructor is the subclass itself. Installed here
+        // (the shared install runs after the generic species-getter pass, which
+        // only sees constructors already in `env`). {enumerable:false,
+        // configurable:true}, and get-only so a sloppy species assignment no-ops.
+        if (sym_species) |skey| {
+            const getter = try gc_mod.allocObj(a);
+            getter.* = .{ .native = returnThisFn };
+            try installNativeProps(a, rs, getter, "get [Symbol.species]", 0);
+            try ctor.setAccessor(a, skey, Value.obj(getter), null);
+            try ctor.setAttr(a, skey, .{ .enumerable = false, .configurable = true });
+        }
         try env.put("SharedArrayBuffer", Value.obj(ctor));
     }
     // Atomics namespace.
