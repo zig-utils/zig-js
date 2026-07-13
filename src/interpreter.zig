@@ -17,6 +17,7 @@ const gil_mod = @import("gil.zig");
 const stack_scan = @import("stack_scan.zig");
 const gc_runtime = @import("gc_runtime.zig");
 const gc_mod = @import("gc.zig");
+const jit = @import("jit.zig");
 const jsthread = @import("jsthread.zig");
 const parser_mod = @import("parser.zig");
 const iana_zones = @import("iana_zones.zig");
@@ -903,6 +904,9 @@ const RegExpLegacy = struct {
 pub const Interpreter = struct {
     arena: std.mem.Allocator,
     env: *Environment,
+    /// Context-owned registry for immutable native code. Null in standalone
+    /// interpreter helpers and agent realms, which remain bytecode-only.
+    jit_owner: ?*jit.Owner = null,
     /// The Context-owned microtask queue (Promise reactions). Drained after the
     /// main script in `Context.evaluate` and inline by `await`.
     microtasks: ?*promise.MicrotaskQueue = null,

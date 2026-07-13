@@ -30,6 +30,7 @@ pub const TierState = enum(u8) { cold, compiling, ready, rejected };
 pub const Tier = struct {
     state: std.atomic.Value(TierState) = .init(.cold),
     entries: std.atomic.Value(u32) = .init(0),
+    code: ?*CompiledCode = null,
 
     pub fn observeEntry(self: *Tier, threshold: u32) bool {
         std.debug.assert(threshold > 0);
@@ -43,9 +44,15 @@ pub const Tier = struct {
         return self.state.load(.acquire);
     }
 
-    pub fn publishReady(self: *Tier) void {
+    pub fn publishReady(self: *Tier, code: *CompiledCode) void {
         std.debug.assert(self.state.load(.monotonic) == .compiling);
+        self.code = code;
         self.state.store(.ready, .release);
+    }
+
+    pub fn loadCode(self: *const Tier) ?*const CompiledCode {
+        if (self.state.load(.acquire) != .ready) return null;
+        return self.code.?;
     }
 
     pub fn publishRejected(self: *Tier) void {
@@ -77,6 +84,41 @@ pub const CompiledCode = struct {
 
     pub fn run(self: *const CompiledCode, frame: *NativeFrame) ExitStatus {
         return @enumFromInt(self.entry(frame));
+    }
+};
+
+/// Context-owned lifetime registry for immutable compiled mappings. Adoption is
+/// serialized because different shared-realm chunks can tier concurrently;
+/// teardown runs only after all JavaScript threads have joined.
+pub const Owner = struct {
+    allocator: ?std.mem.Allocator = null,
+    lock: std.atomic.Mutex = .unlocked,
+    codes: std.ArrayListUnmanaged(*CompiledCode) = .empty,
+
+    pub fn init(allocator: std.mem.Allocator) Owner {
+        return .{ .allocator = allocator };
+    }
+
+    pub fn adopt(self: *Owner, compiled: CompiledCode) std.mem.Allocator.Error!*CompiledCode {
+        const allocator = self.allocator orelse return error.OutOfMemory;
+        const owned = try allocator.create(CompiledCode);
+        errdefer allocator.destroy(owned);
+
+        while (!self.lock.tryLock()) std.atomic.spinLoopHint();
+        defer self.lock.unlock();
+        try self.codes.append(allocator, owned);
+        owned.* = compiled;
+        return owned;
+    }
+
+    pub fn deinit(self: *Owner) void {
+        const allocator = self.allocator orelse return;
+        for (self.codes.items) |code| {
+            code.deinit();
+            allocator.destroy(code);
+        }
+        self.codes.deinit(allocator);
+        self.* = .{};
     }
 };
 
@@ -172,8 +214,10 @@ test "Tier claims compilation exactly at its hot threshold" {
     try std.testing.expect(tier.observeEntry(3));
     try std.testing.expectEqual(TierState.compiling, tier.loadState());
     try std.testing.expect(!tier.observeEntry(3));
-    tier.publishReady();
+    var code: CompiledCode = undefined;
+    tier.publishReady(&code);
     try std.testing.expectEqual(TierState.ready, tier.loadState());
+    try std.testing.expectEqual(&code, tier.loadCode().?);
 }
 
 test "Tier caches an unsupported compilation" {
@@ -219,6 +263,17 @@ test "native entry publishes an exact result word through the stable ABI" {
     try std.testing.expectEqual(ExitStatus.complete, compiled.run(&frame));
     try std.testing.expectEqual(expected, frame.result_bits);
     try std.testing.expectEqual(@as(usize, 0), frame.exit_ip);
+}
+
+test "Owner releases adopted executable mappings" {
+    if (!supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+
+    var owner = Owner.init(std.testing.allocator);
+    defer owner.deinit();
+    const code = try owner.adopt(try compileConstantEntry(0x1234));
+    var frame = NativeFrame{};
+    try std.testing.expectEqual(ExitStatus.complete, code.run(&frame));
+    try std.testing.expectEqual(@as(u64, 0x1234), frame.result_bits);
 }
 
 test "CodeMemory publishes and executes native code" {

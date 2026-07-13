@@ -22,6 +22,7 @@ const promise = @import("promise.zig");
 const parser_mod = @import("parser.zig");
 const object_profile = @import("object_profile.zig");
 const structured_clone = @import("structured_clone.zig");
+const jit = @import("jit.zig");
 
 pub const RunError = interp.EvalError || @import("parser.zig").ParseError;
 
@@ -1607,6 +1608,9 @@ pub const Context = struct {
     /// (null otherwise → raw arena). Makes parallel shape/string/AST/binding
     /// allocation safe in the no-GIL default (#1). See `LockedArena`.
     locked_arena: ?*LockedArena = null,
+    /// Executable mappings outlive individual Interpreter values and are freed
+    /// after every shared-realm JavaScript thread has joined.
+    jit_owner: jit.Owner = .{},
     /// Reusable allocator used as the GC heap's cell backing. It recycles
     /// per-cell slabs for allocation/lifecycle performance and becomes
     /// internally locked under `parallel_gc`, so multiple mutators can allocate
@@ -2042,6 +2046,7 @@ pub const Context = struct {
             .budget_allocator = budget_allocator,
             .arena_state = arena_state,
             .locked_arena = locked_arena,
+            .jit_owner = jit.Owner.init(context_gpa),
             .owner_thread = std.Thread.getCurrentId(),
             .sab_retains = .{ .gpa = context_gpa },
             .env = .{ .arena = a, .fn_scope = true }, // global is a variable scope
@@ -2191,6 +2196,7 @@ pub const Context = struct {
         return .{
             .arena = self.arena(),
             .env = &self.env,
+            .jit_owner = &self.jit_owner,
             .global_object = self.global_object,
             .this_value = Value.obj(self.global_object),
             .root_shape = self.root_shape,
@@ -2299,6 +2305,7 @@ pub const Context = struct {
             self.locked_arena = null;
         }
         self.sab_retains.deinit();
+        self.jit_owner.deinit();
         self.arena_state.deinit();
         context_gpa.destroy(self.arena_state);
         context_gpa.destroy(self);
