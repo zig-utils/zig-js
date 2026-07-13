@@ -485,6 +485,14 @@ const Serializer = struct {
             } else {
                 try s.w.byte(0);
             }
+            // HTML structured clone copies an Error's own `cause` when present
+            // (an own `cause` of `undefined` still counts as present).
+            if (o.getOwn("cause")) |cause| {
+                try s.w.byte(1);
+                try s.ser(cause, try s.childDepth(depth));
+            } else {
+                try s.w.byte(0);
+            }
             return;
         }
         if (o.prim) |p| {
@@ -806,6 +814,8 @@ fn skipSerialized(r: *Reader, state: *SkipState, depth: u16) Reader.Error!void {
         .error_obj => {
             _ = try r.str();
             if (try r.flag()) _ = try r.str();
+            // A present `cause` is a full serialized value (matches serialize/deser).
+            if (try r.flag()) try skipSerialized(r, state, try wireChildDepth(depth));
         },
         .wrapper => try skipSerialized(r, state, try wireChildDepth(depth)),
         .array => {
@@ -975,6 +985,11 @@ const Deserializer = struct {
                     const msg = try a.dupe(u8, d.r.str() catch return d.fail());
                     try o.setOwn(a, d.self.root_shape, "message", try Value.strOwned(a, msg));
                     try o.setAttr(a, "message", .{ .writable = true, .enumerable = false, .configurable = true });
+                }
+                if (try d.readFlag()) {
+                    const cause = try d.deser(try d.childDepth(depth));
+                    try o.setOwn(a, d.self.root_shape, "cause", cause);
+                    try o.setAttr(a, "cause", .{ .writable = true, .enumerable = false, .configurable = true });
                 }
                 return Value.obj(o);
             },
