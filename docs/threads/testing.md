@@ -140,11 +140,11 @@ joinable after one peer exhausts the context cap and prove GC-backed capped
 contexts can recover after unreachable pressure is collected. The focused
 heap-cap witnesses also cover no-GIL `ArrayBuffer` byte-slab recovery while a
 real peer thread is running and publishing roots to the abort-safe parallel
-collector, plus the trace-sensitive realm task queue, `MicrotaskQueue`,
-`Lock`/`Condition`, and async-generator
-request lock guards that keep allocation-failure recovery out of mutable
-promise/thread queue, lock/condition waiter, ThreadLocal map, and generator
-side-store critical sections. Separate
+collector, plus the trace-sensitive realm task queue, property waiter tables,
+`MicrotaskQueue`, `Lock`/`Condition`, and async-generator request lock guards
+that keep allocation-failure recovery out of mutable promise/thread queue,
+property/lock/condition waiter, ThreadLocal map, and generator side-store
+critical sections. Separate
 deferred-generator, deferred-generator-handler,
 deferred-async-generator-request, and deferred-iterator-helper witnesses root
 suspended stack, resumable handler, pending-request, and mid-helper state, then

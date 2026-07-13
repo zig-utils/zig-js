@@ -2461,8 +2461,10 @@ fn jsInt32(n: f64) i32 {
 
 // One FIFO of property waiters per threaded realm, stored on `Gil`.
 // `Gil.prop_mutex` serializes the lists independently from the context GIL;
-// sync tickets are page-allocator owned and unlinked before wait returns,
-// while async tickets are page-allocator owned until settlement.
+// sync tickets are unlinked before wait returns, while async tickets are owned
+// until settlement. Metadata allocation uses `Gil.prop_alloc`, which is the
+// Context allocator in real threaded contexts so heap caps cover waiter
+// pressure.
 const PropTicket = struct {
     obj: *value.Object,
     key: []const u8,
@@ -2473,7 +2475,6 @@ const PropTicket = struct {
     /// termination paths unlink their own ticket before returning.
     queued: bool = false,
 };
-const prop_alloc = std.heap.page_allocator;
 const prop_waiter_reserve_granularity = 16;
 const prop_async_reserve_granularity = 16;
 
@@ -2492,7 +2493,13 @@ pub const PropAsyncTicket = struct {
     owner: *const anyopaque,
 };
 
+fn propAsyncAllocator(t: *const PropAsyncTicket) std.mem.Allocator {
+    const g: *const gil_mod.Gil = @ptrCast(@alignCast(t.owner));
+    return g.prop_alloc;
+}
+
 fn reservePropQueueLocked(
+    g: *gil_mod.Gil,
     queue: *std.ArrayListUnmanaged(*anyopaque),
     additional: usize,
     granularity: usize,
@@ -2500,17 +2507,19 @@ fn reservePropQueueLocked(
     const spare = queue.capacity - queue.items.len;
     if (spare >= additional) return;
     const extra = @max(additional, granularity);
-    try queue.ensureTotalCapacity(prop_alloc, queue.items.len + extra);
+    gc_runtime.enterTraceSensitiveLock();
+    defer gc_runtime.leaveTraceSensitiveLock();
+    try queue.ensureTotalCapacity(g.prop_alloc, queue.items.len + extra);
 }
 
 fn appendPropTicketLocked(g: *gil_mod.Gil, ticket: *PropTicket) !void {
-    try reservePropQueueLocked(&g.prop_waiters, 1, prop_waiter_reserve_granularity);
+    try reservePropQueueLocked(g, &g.prop_waiters, 1, prop_waiter_reserve_granularity);
     g.prop_waiters.appendAssumeCapacity(@ptrCast(ticket));
     ticket.queued = true;
 }
 
 fn appendPropAsyncLocked(g: *gil_mod.Gil, ticket: *PropAsyncTicket) !void {
-    try reservePropQueueLocked(&g.prop_async, 1, prop_async_reserve_granularity);
+    try reservePropQueueLocked(g, &g.prop_async, 1, prop_async_reserve_granularity);
     g.prop_async.appendAssumeCapacity(@ptrCast(ticket));
 }
 
@@ -2519,23 +2528,25 @@ fn appendPropAsyncLocked(g: *gil_mod.Gil, ticket: *PropAsyncTicket) !void {
 /// resolves "timed-out" from the awaiters' poll points.
 pub fn propWaitAsync(self: *Interpreter, args: []const Value, timeout_ns: ?u64) value.HostError!Value {
     const o = args[0].asObj();
+    const g = self.gil.?;
+    const prop_alloc = g.prop_alloc;
     const key_tmp = try self.keyOf(argAt(args, 1));
     const expected = argAt(args, 2);
     const cur = try ownDataOrThrow(self, o, key_tmp, "Atomics.waitAsync: object has no own data property");
-    const res = (try self.newObject()).asObj();
     if (!sameValueZero(cur, expected)) {
+        const res = (try self.newObject()).asObj();
         try self.setProp(res, "async", Value.boolVal(false));
         try self.setProp(res, "value", Value.str("not-equal"));
         return Value.obj(res);
     }
     if (timeout_ns != null and timeout_ns.? == 0) {
+        const res = (try self.newObject()).asObj();
         try self.setProp(res, "async", Value.boolVal(false));
         try self.setProp(res, "value", Value.str("timed-out"));
         return Value.obj(res);
     }
     const microtasks = self.microtasks orelse
         return self.throwError("Error", "Atomics.waitAsync requires a microtask queue");
-    const p_obj = try promise.newPromise(self);
     const key = prop_alloc.dupe(u8, key_tmp) catch return error.OutOfMemory;
     const t = prop_alloc.create(PropAsyncTicket) catch {
         prop_alloc.free(key);
@@ -2546,6 +2557,8 @@ pub fn propWaitAsync(self: *Interpreter, args: []const Value, timeout_ns: ?u64) 
         prop_alloc.free(key);
         prop_alloc.destroy(t);
     };
+    const p_obj = try promise.newPromise(self);
+    const res = (try self.newObject()).asObj();
     const now = std.Io.Timestamp.now(agent.engineIo(), .awake).nanoseconds;
     t.* = .{
         .obj = o,
@@ -2554,9 +2567,8 @@ pub fn propWaitAsync(self: *Interpreter, args: []const Value, timeout_ns: ?u64) 
         .promise = p_obj,
         .microtasks = microtasks,
         .thread = t_current,
-        .owner = @ptrCast(self.gil.?),
+        .owner = @ptrCast(g),
     };
-    const g = self.gil.?;
     g.lockPropWaiters();
     var locked = true;
     defer if (locked) g.unlockPropWaiters();
@@ -2581,6 +2593,7 @@ pub fn propWaitAsync(self: *Interpreter, args: []const Value, timeout_ns: ?u64) 
 }
 
 fn settlePropAsync(self: *Interpreter, t: *PropAsyncTicket, outcome: []const u8) void {
+    const prop_alloc = propAsyncAllocator(t);
     bumpContention("property_wait_async_settled");
     const outcome_value = if (std.mem.eql(u8, outcome, "ok")) Value.str("ok") else Value.str("timed-out");
     if (promise.promiseOf(Value.obj(t.promise))) |pp| {
@@ -2613,6 +2626,7 @@ fn transferPropAsyncQueue(g: *gil_mod.Gil, from: *promise.MicrotaskQueue, to: *p
 }
 
 fn abandonPropAsyncQueue(g: *gil_mod.Gil, queue: *promise.MicrotaskQueue) void {
+    const prop_alloc = g.prop_alloc;
     g.lockPropWaiters();
     defer g.unlockPropWaiters();
     var write: usize = 0;
@@ -2649,6 +2663,7 @@ fn transferPendingJoinQueue(ctx: *Context, from: *promise.MicrotaskQueue, to: *p
 /// poll points (awaitValue's GIL-handover loop, the drain tail).
 pub fn pollPropAsync(self: *Interpreter) void {
     const g = self.gil orelse return;
+    const prop_alloc = g.prop_alloc;
     const now = std.Io.Timestamp.now(agent.engineIo(), .awake).nanoseconds;
     var expired: std.ArrayListUnmanaged(*PropAsyncTicket) = .empty;
     defer expired.deinit(prop_alloc);
@@ -2674,6 +2689,7 @@ pub fn nextPropAsyncDeadline(self: *Interpreter) ?i96 {
 
 /// Drop tickets of a dying realm (their promises die with the arena).
 pub fn abandonPropAsync(g: *gil_mod.Gil) void {
+    const prop_alloc = g.prop_alloc;
     const owner: *const anyopaque = @ptrCast(g);
     g.lockPropWaiters();
     for (g.prop_async.items) |raw| {
@@ -2790,11 +2806,14 @@ fn collectPropAsyncExpiredLocked(g: *gil_mod.Gil, now: i96, settle: *std.ArrayLi
         const raw = g.prop_async.items[read];
         const t: *PropAsyncTicket = @ptrCast(@alignCast(raw));
         if (t.deadline_ns != null and t.deadline_ns.? <= now) {
-            settle.append(prop_alloc, t) catch {
+            gc_runtime.enterTraceSensitiveLock();
+            settle.append(g.prop_alloc, t) catch {
+                gc_runtime.leaveTraceSensitiveLock();
                 if (write != read) g.prop_async.items[write] = raw;
                 write += 1;
                 continue;
             };
+            gc_runtime.leaveTraceSensitiveLock();
             continue;
         }
         if (write != read) g.prop_async.items[write] = raw;
@@ -2871,6 +2890,7 @@ test "property waiter removal stable-compacts timed-out sync ticket" {
 
 test "property waitAsync expiry stable-compacts expired tickets" {
     var g = gil_mod.Gil{};
+    const prop_alloc = g.prop_alloc;
     defer g.prop_async.deinit(prop_alloc);
     var expired: std.ArrayListUnmanaged(*PropAsyncTicket) = .empty;
     defer expired.deinit(prop_alloc);
@@ -2906,6 +2926,7 @@ test "property waitAsync expiry stable-compacts expired tickets" {
 
 test "property waitAsync abandon removes one owner queue" {
     var g = gil_mod.Gil{};
+    const prop_alloc = g.prop_alloc;
     defer g.prop_async.deinit(prop_alloc);
     var obj: value.Object = undefined;
     var promise_obj: value.Object = undefined;
@@ -2913,15 +2934,15 @@ test "property waitAsync abandon removes one owner queue" {
     var q1 = promise.MicrotaskQueue{};
 
     const t0 = try prop_alloc.create(PropAsyncTicket);
-    t0.* = .{ .obj = &obj, .key = try prop_alloc.dupe(u8, "a"), .deadline_ns = null, .promise = &promise_obj, .microtasks = &q0, .thread = null, .owner = undefined };
+    t0.* = .{ .obj = &obj, .key = try prop_alloc.dupe(u8, "a"), .deadline_ns = null, .promise = &promise_obj, .microtasks = &q0, .thread = null, .owner = @ptrCast(&g) };
     const t1 = try prop_alloc.create(PropAsyncTicket);
     errdefer {
         prop_alloc.free(t1.key);
         prop_alloc.destroy(t1);
     }
-    t1.* = .{ .obj = &obj, .key = try prop_alloc.dupe(u8, "b"), .deadline_ns = null, .promise = &promise_obj, .microtasks = &q1, .thread = null, .owner = undefined };
+    t1.* = .{ .obj = &obj, .key = try prop_alloc.dupe(u8, "b"), .deadline_ns = null, .promise = &promise_obj, .microtasks = &q1, .thread = null, .owner = @ptrCast(&g) };
     const t2 = try prop_alloc.create(PropAsyncTicket);
-    t2.* = .{ .obj = &obj, .key = try prop_alloc.dupe(u8, "c"), .deadline_ns = null, .promise = &promise_obj, .microtasks = &q0, .thread = null, .owner = undefined };
+    t2.* = .{ .obj = &obj, .key = try prop_alloc.dupe(u8, "c"), .deadline_ns = null, .promise = &promise_obj, .microtasks = &q0, .thread = null, .owner = @ptrCast(&g) };
 
     try g.prop_async.append(prop_alloc, @ptrCast(t0));
     try g.prop_async.append(prop_alloc, @ptrCast(t1));
@@ -2938,6 +2959,7 @@ test "property waitAsync abandon removes one owner queue" {
 
 test "property waiter queues reserve capacity chunks" {
     var g = gil_mod.Gil{};
+    const prop_alloc = g.prop_alloc;
     defer g.prop_waiters.deinit(prop_alloc);
     defer g.prop_async.deinit(prop_alloc);
     var obj: value.Object = undefined;
@@ -2981,6 +3003,27 @@ test "property waiter queues reserve capacity chunks" {
     try std.testing.expect(g.prop_async.capacity > async_capacity);
 }
 
+test "property waiter queue growth uses Gil allocator and is trace-sensitive" {
+    var g = gil_mod.Gil{};
+    var probe = TraceSensitiveAllocProbe{ .inner = std.testing.allocator };
+    g.prop_alloc = probe.allocator();
+    defer g.prop_waiters.deinit(g.prop_alloc);
+    defer g.prop_async.deinit(g.prop_alloc);
+
+    var obj: value.Object = undefined;
+    var waiter = PropTicket{ .obj = &obj, .key = "x" };
+    try std.testing.expect(!gc_runtime.inTraceSensitiveLock());
+    try appendPropTicketLocked(&g, &waiter);
+    try std.testing.expect(probe.saw_trace_sensitive_alloc);
+    try std.testing.expect(!gc_runtime.inTraceSensitiveLock());
+
+    probe.saw_trace_sensitive_alloc = false;
+    var async = PropAsyncTicket{ .obj = &obj, .key = "x", .deadline_ns = null, .promise = undefined, .microtasks = undefined, .thread = null, .owner = @ptrCast(&g) };
+    try appendPropAsyncLocked(&g, &async);
+    try std.testing.expect(probe.saw_trace_sensitive_alloc);
+    try std.testing.expect(!gc_runtime.inTraceSensitiveLock());
+}
+
 fn waitPropTicketTimeout(self: *Interpreter, g: *gil_mod.Gil, ticket: *PropTicket, timeout: std.Io.Timeout) error{Timeout}!void {
     const io = agent.engineIo();
     if (self.use_thread_gil) {
@@ -3011,6 +3054,8 @@ fn waitPropTicketTimeout(self: *Interpreter, g: *gil_mod.Gil, ticket: *PropTicke
 
 pub fn propWait(self: *Interpreter, args: []const Value, timeout_ns: ?u64) value.HostError!Value {
     const o = args[0].asObj();
+    const g = self.gil.?;
+    const prop_alloc = g.prop_alloc;
     const key_tmp = try self.keyOf(argAt(args, 1));
     const expected = argAt(args, 2);
     const cur = try ownDataOrThrow(self, o, key_tmp, "Atomics.wait: object has no own data property");
@@ -3028,7 +3073,6 @@ pub fn propWait(self: *Interpreter, args: []const Value, timeout_ns: ?u64) value
         prop_alloc.destroy(ticket);
         prop_alloc.free(key);
     }
-    const g = self.gil.?;
     g.lockPropWaiters();
     var linked = false;
     defer {
@@ -3083,6 +3127,7 @@ pub fn propNotify(self: *Interpreter, args: []const Value) value.HostError!Value
     const io = agent.engineIo();
     var n: usize = 0;
     const g = self.gil.?;
+    const prop_alloc = g.prop_alloc;
     var settle: std.ArrayListUnmanaged(*PropAsyncTicket) = .empty;
     defer settle.deinit(prop_alloc);
     g.lockPropWaiters();
@@ -3092,6 +3137,8 @@ pub fn propNotify(self: *Interpreter, args: []const Value) value.HostError!Value
     if (n < count) {
         const limit = count - n;
         const async_matches = countPropAsyncMatchesLocked(g, o, key, limit);
+        gc_runtime.enterTraceSensitiveLock();
+        defer gc_runtime.leaveTraceSensitiveLock();
         try settle.ensureTotalCapacity(prop_alloc, async_matches);
         collectPropAsyncNotifyLocked(g, o, key, limit, &settle);
         n += async_matches;

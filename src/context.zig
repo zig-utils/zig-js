@@ -2152,6 +2152,7 @@ pub const Context = struct {
             const g = try context_gpa.create(gil_mod.Gil);
             g.* = .{};
             g.park_alloc = context_gpa;
+            g.prop_alloc = context_gpa;
             self.gil = g;
             g.acquire();
             defer g.release();
@@ -10890,6 +10891,15 @@ test "Context heapBudgetStats is absent without heap_limit_bytes" {
     const ctx = try Context.createWith(std.testing.allocator, .{});
     defer ctx.destroy();
     try std.testing.expect(ctx.heapBudgetStats() == null);
+}
+
+test "threaded context property waiter allocator uses context allocator" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_threads = true });
+    defer ctx.destroy();
+
+    const prop_alloc = ctx.gil.?.prop_alloc;
+    try std.testing.expectEqual(ctx.gpa.ptr, prop_alloc.ptr);
+    try std.testing.expectEqual(ctx.gpa.vtable, prop_alloc.vtable);
 }
 
 test "Context heap_limit_bytes lets sibling Threads survive one Thread OOM" {

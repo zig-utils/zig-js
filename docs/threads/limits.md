@@ -32,10 +32,11 @@ tests as the matching engine features land.
   contexts also retry reclaimed `ArrayBuffer` byte-slab pressure. Live no-GIL
   peer recovery is proven for GC-cell slab failures and safepoint-owned
   `ArrayBuffer` byte-slab pressure where an active interpreter can drive the
-  abort-safe parallel collector. Realm task queues, `Lock.asyncHold` queues,
-  condition waiter queues/tickets, ThreadLocal maps, and other trace-sensitive
-  side-store locks fail closed while held, because the tracer may need the same
-  lock to find hidden JS roots. Mutable generator / iterator-helper side stores
+  abort-safe parallel collector. Realm task queues, property `Atomics.wait`
+  waiter tables, `Lock.asyncHold` queues, condition waiter queues/tickets,
+  ThreadLocal maps, and other trace-sensitive side-store locks fail closed
+  while held, because the tracer may need the same lock to find hidden JS roots.
+  Mutable generator / iterator-helper side stores
   are a distinct fail-closed class today: the parallel tracer defers them to a
   world-stopped finish, so allocation-failure recovery aborts rather than
   claiming a sweep while deferred generator/iterator edges remain. Broader

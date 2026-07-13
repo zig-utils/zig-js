@@ -41,8 +41,14 @@ pub const Gil = struct {
     /// duration of the blocking wait.
     prop_waiters: std.ArrayListUnmanaged(*anyopaque) = .empty,
     /// Property-mode `Atomics.waitAsync` tickets for this realm. Entries are
-    /// type-erased `*jsthread.PropAsyncTicket` and are page-allocator owned.
+    /// type-erased `*jsthread.PropAsyncTicket` and allocated with `prop_alloc`.
     prop_async: std.ArrayListUnmanaged(*anyopaque) = .empty,
+    /// Allocator for property-mode waiter metadata (`prop_waiters`,
+    /// `prop_async`, ticket key copies, and settlement scratch). Threaded
+    /// contexts overwrite this with their Context allocator so
+    /// `heap_limit_bytes` covers property Atomics waiter pressure; the
+    /// page-allocator default keeps standalone unit tests ergonomic.
+    prop_alloc: std.mem.Allocator = std.heap.page_allocator,
     /// Serializes the property-mode `Atomics.wait` / `notify` / `waitAsync`
     /// waiter tables independently from the context GIL. Sync waits use this as
     /// the condition-variable mutex, so notify cannot race enqueue/unlink once
