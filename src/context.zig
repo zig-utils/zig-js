@@ -11297,7 +11297,7 @@ test "enable_gc nursery: weak refs, ephemerons, and finalization stay weak" {
     try std.testing.expect((try ctx.evaluate("keyRef.deref() === undefined")).asBool());
     try std.testing.expect((try ctx.evaluate("valueRef.deref() === undefined")).asBool());
     try std.testing.expect((try ctx.evaluate("directRef.deref() === undefined")).asBool());
-    _ = try ctx.evaluate("fr.cleanupSome()");
+    _ = try ctx.evaluate("$drainFinalizationCleanup()");
     try std.testing.expect((try ctx.evaluate("cleaned.length === 1 && cleaned[0] === 17")).asBool());
 }
 
@@ -15219,7 +15219,7 @@ test "enable_gc: bulk destroy skips one backing free per finalized cell" {
     try std.testing.expectEqual(stats.cells, stats.bulk_cell_frees_skipped);
 }
 
-test "enable_gc: FinalizationRegistry cleanupSome delivers collected holdings" {
+test "enable_gc: FinalizationRegistry automatic cleanup delivers collected holdings" {
     const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
     defer ctx.destroy();
 
@@ -15230,10 +15230,10 @@ test "enable_gc: FinalizationRegistry cleanupSome delivers collected holdings" {
         \\registry.register(targetRef.deref(), { tag: 21 });
         \\0
     );
+    try std.testing.expect((try ctx.evaluate("typeof FinalizationRegistry.prototype.cleanupSome === 'undefined'")).asBool());
     ctx.collectGarbage();
+    _ = try ctx.evaluate("$drainFinalizationCleanup()");
     const delivered = try ctx.evaluate(
-        \\if (globalThis.cleanup.length !== 0) throw new Error("cleanup ran too early");
-        \\registry.cleanupSome();
         \\globalThis.cleanup.join(",");
     );
     try std.testing.expectEqualStrings("21", delivered.asStr());
@@ -15279,7 +15279,7 @@ test "enable_gc: FinalizationRegistry unregister prevents cleanup delivery" {
     );
     ctx.collectGarbage();
     const r = try ctx.evaluate(
-        \\registry.cleanupSome();
+        \\$drainFinalizationCleanup();
         \\globalThis.cleanup.length;
     );
     try std.testing.expectEqual(@as(f64, 0), r.asNum());

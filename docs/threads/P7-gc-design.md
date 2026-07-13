@@ -14,7 +14,7 @@ This is the concrete plan and implementation record for the tracing GC that
 enabled no-GIL shared-realm work. GC contexts reclaim unreachable cells, clear
 `WeakRef` targets, run `WeakMap` / `WeakSet` weak-key cleanup through the
 ephemeron/weak-slot pass, and make `FinalizationRegistry` records available to
-`cleanupSome()` and automatic cleanup jobs after quiescent collection.
+automatic cleanup jobs after quiescent collection.
 
 ## Decisions (and why)
 
@@ -182,7 +182,7 @@ treats those as non-cells. This keeps the trace surface to runtime values only.
   fixed-point marks WeakMap values whose keys are live. Then every registered
   weak edge whose target is still white is cleared, WeakMap/WeakSet drop
   white-keyed entries, and FinalizationRegistry records whose targets died are
-  marked ready for `cleanupSome()` or automatic host cleanup jobs.
+  marked ready for automatic host cleanup jobs.
 - **Sweep:** walk blocks; white cells → `finalize` then return to the free
   list; flip black→white for next cycle. Lazy/incremental sweep is an M2 option.
 - **Trigger:** `maybeCollect` at the existing `(steps & 1023)` safepoints
@@ -456,9 +456,8 @@ Do this once the engine's `context.zig`/`interpreter.zig` surface is settled
   ephemeron test and in zig-js with GC-enabled WeakMap/WeakSet tests.
   *FinalizationRegistry cleanup landed:* registries now store typed records
   with weak target/token pointers and strong held values. Collection marks
-  records ready when their target dies, and
-  `FinalizationRegistry.prototype.cleanupSome()` delivers those holdings after
-  the quiescent collection point. The same ready records are queued as
+  records ready when their target dies, and the registered cleanup callback
+  receives those holdings after the quiescent collection point. Ready records are queued as
   per-context host cleanup jobs and drained by the interpreter checkpoint,
   including promise microtasks queued by cleanup callbacks.
   The GC binding also skips the embedded global environment when tracing

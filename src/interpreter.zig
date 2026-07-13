@@ -6781,9 +6781,9 @@ pub const Interpreter = struct {
         self.gc_root_lock.unlock();
     }
 
-    /// Host cleanup jobs for FinalizationRegistry. Explicit `cleanupSome()` and
-    /// automatic cleanup share the same ready-record queue; if user code already
-    /// consumed a record, the automatic job simply finds nothing to deliver.
+    /// Host cleanup jobs for FinalizationRegistry. Collection appends registries
+    /// with ready records; host checkpoints deliver them through each registry's
+    /// constructor callback.
     pub fn drainFinalizationCleanupJobs(self: *Interpreter) EvalError!void {
         const q = self.finalization_cleanup_jobs orelse return;
         var i: usize = 0;
@@ -15667,6 +15667,18 @@ fn drainMicrotasksFn(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
     return Value.undef();
 }
 
+/// Deterministic test-shell checkpoint for already-queued FinalizationRegistry
+/// host cleanup jobs. The standardized prototype intentionally has no
+/// `cleanupSome`; tests and fuzzers use this `$`-prefixed host hook after an
+/// explicit collector checkpoint instead of inventing a JavaScript API.
+fn drainFinalizationCleanupFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    try self.drainFinalizationCleanupJobs();
+    return Value.undef();
+}
+
 /// Internal shell run-loop tick used by `conformance/threads_test.zig` while it
 /// waits for `asyncTestPassed()` counters. Kept separate from drainMicrotasks()
 /// because corpus tests assert that async lock grants do not settle merely by
@@ -19150,22 +19162,9 @@ fn finRegUnregisterFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
     return Value.boolVal(this.asObj().finRecordUnregister(weakKeyPtr(token)));
 }
 
-fn finRegCleanupSomeFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
-    const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject() or !this.asObj().is_finalization_registry) return self.throwError("TypeError", "FinalizationRegistry.prototype.cleanupSome called on an incompatible receiver");
-    const cb = if (args.len > 0 and !args[0].isUndefined()) args[0] else this.asObj().finalization_callback;
-    if (!cb.isCallable()) return self.throwError("TypeError", "FinalizationRegistry.prototype.cleanupSome callback is not callable");
-    // Pop each ready record under the lock, then run the callback with no lock
-    // held (it may re-enter the registry) — race-free vs a concurrent marker.
-    while (this.asObj().finRecordTakeReady()) |record| {
-        _ = try self.callValue(cb, &.{record.held});
-    }
-    return Value.undef();
-}
-
 /// Install `WeakRef` and `FinalizationRegistry`. With the opt-in GC enabled,
 /// WeakRef targets clear when collected and FinalizationRegistry records become
-/// observable through cleanupSome at quiescent collection points.
+/// queued for automatic host cleanup at quiescent collection points.
 // ===== DisposableStack / AsyncDisposableStack ========================
 // The explicit-resource-management container objects. The `using`/`await using`
 // *syntax* isn't wired, but the class API (use/adopt/defer/move/dispose) is.
@@ -27563,6 +27562,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     try defineGlobalFn(env, root_shape, "setTimeout", 2, setTimeoutFn);
     try defineGlobalFn(env, root_shape, "drainMicrotasks", 0, drainMicrotasksFn);
     try defineGlobalFn(env, root_shape, "$drainRunLoop", 0, drainRunLoopFn);
+    try defineGlobalFn(env, root_shape, "$drainFinalizationCleanup", 0, drainFinalizationCleanupFn);
     try defineGlobalFn(env, root_shape, "noInline", 1, noInlineFn);
     try defineGlobalFn(env, root_shape, "gc", 0, gcFn);
     try defineGlobalFn(env, root_shape, "quit", 0, quitFn);

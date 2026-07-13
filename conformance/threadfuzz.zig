@@ -916,7 +916,7 @@ fn appendBroadSidecars(buf: *std.ArrayListUnmanaged(u8), gpa: std.mem.Allocator)
         \\    for (var k = 0; k < 24; k++) registry.register({ k: k, p: 'cleanup' + k }, 1);
         \\  })();
         \\  gc();
-        \\  registry.cleanupSome(function(held){ cleanupSeen += held; });
+        \\  $drainFinalizationCleanup();
         \\}
         \\
     );
@@ -2583,7 +2583,7 @@ fn runWorkerExceptionFinalizationCleanupInterleaving(gpa: std.mem.Allocator, see
     const cleanup_src = try std.fmt.allocPrint(
         gpa,
         \\(() => {{
-        \\  globalThis.__workerExcFinRegistry.cleanupSome();
+        \\  $drainFinalizationCleanup();
         \\  if (globalThis.__workerExcFinCleanupCount !== {d})
         \\    throw new Error('bad worker exception/finalization cleanup count: ' + globalThis.__workerExcFinCleanupCount);
         \\  if (globalThis.__workerExcFinCleanupSum !== {d})
@@ -2830,7 +2830,7 @@ fn runModuleWorkerExceptionFinalizationCleanupInterleaving(gpa: std.mem.Allocato
     const cleanup_src = try std.fmt.allocPrint(
         gpa,
         \\(() => {{
-        \\  globalThis.__moduleWorkerExcFinRegistry.cleanupSome();
+        \\  $drainFinalizationCleanup();
         \\  if (globalThis.__moduleWorkerExcFinCleanupCount !== {d})
         \\    throw new Error('bad module worker exception/finalization cleanup count: ' + globalThis.__moduleWorkerExcFinCleanupCount);
         \\  if (globalThis.__moduleWorkerExcFinCleanupSum !== {d})
@@ -3154,7 +3154,7 @@ fn runWorkerThreadFinalizationInterleavingKind(
     const cleanup_src = try std.fmt.allocPrint(
         gpa,
         \\(() => {{
-        \\  globalThis.__workerThreadFinRegistry.cleanupSome();
+        \\  $drainFinalizationCleanup();
         \\  if (globalThis.__workerThreadFinCleanupCount !== {d})
         \\    throw new Error('bad worker/thread finalization cleanup count: ' + globalThis.__workerThreadFinCleanupCount);
         \\  if (globalThis.__workerThreadFinCleanupSum !== {d})
@@ -3479,7 +3479,7 @@ fn runWorkerTerminateFinalizationInterleavingKind(
     const cleanup_src = try std.fmt.allocPrint(
         gpa,
         \\(() => {{
-        \\  globalThis.__workerTermFinRegistry.cleanupSome();
+        \\  $drainFinalizationCleanup();
         \\  if (globalThis.__workerTermFinCleanupCount !== {d})
         \\    throw new Error('bad worker terminate/finalization cleanup count: ' + globalThis.__workerTermFinCleanupCount);
         \\  if (globalThis.__workerTermFinCleanupSum !== {d})
@@ -3796,7 +3796,7 @@ fn runWorkerTerminateThreadTeardownInterleavingKind(
         \\    throw new Error('bad worker terminate/thread teardown reject score ' + globalThis.__workerTermThreadRejectScore);
         \\  if (globalThis.__workerTermThreadRejectCount !== {d})
         \\    throw new Error('bad worker terminate/thread teardown reject count ' + globalThis.__workerTermThreadRejectCount);
-        \\  globalThis.__workerTermThreadRegistry.cleanupSome();
+        \\  $drainFinalizationCleanup();
         \\  if (globalThis.__workerTermThreadCleanupCount !== {d})
         \\    throw new Error('bad worker terminate/thread teardown cleanup count ' + globalThis.__workerTermThreadCleanupCount);
         \\  if (globalThis.__workerTermThreadCleanupSum !== {d})
@@ -4174,7 +4174,7 @@ fn runWorkerTerminateConditionAsyncCleanupInterleavingKind(
         \\  }}
         \\  if (joinThrew !== 1)
         \\    throw new Error('worker terminate/condition spinner was not terminated');
-        \\  globalThis.__workerTermCondRegistry.cleanupSome();
+        \\  $drainFinalizationCleanup();
         \\  if (globalThis.__workerTermCondCleanupCount !== {d})
         \\    throw new Error('bad worker terminate/condition cleanup count ' + globalThis.__workerTermCondCleanupCount);
         \\  if (globalThis.__workerTermCondCleanupSum !== {d})
@@ -4551,7 +4551,7 @@ fn runWorkerTerminateWaitAsyncCleanupInterleavingKind(
         \\    notified += Atomics.notify(globalThis.__workerTermWaitView, id);
         \\  if (notified !== 0)
         \\    throw new Error('worker terminate/waitAsync leaked ' + notified + ' child waitAsync tickets');
-        \\  globalThis.__workerTermWaitRegistry.cleanupSome();
+        \\  $drainFinalizationCleanup();
         \\  if (globalThis.__workerTermWaitCleanupCount !== {d})
         \\    throw new Error('bad worker terminate/waitAsync cleanup count ' + globalThis.__workerTermWaitCleanupCount);
         \\  if (globalThis.__workerTermWaitCleanupSum !== {d})
@@ -4882,7 +4882,7 @@ fn runModuleWorkerTerminateThreadTeardownInterleavingKind(
         \\    throw new Error('bad module worker terminate/thread teardown reject score ' + globalThis.__moduleTermThreadRejectScore);
         \\  if (globalThis.__moduleTermThreadRejectCount !== {d})
         \\    throw new Error('bad module worker terminate/thread teardown reject count ' + globalThis.__moduleTermThreadRejectCount);
-        \\  globalThis.__moduleTermThreadRegistry.cleanupSome();
+        \\  $drainFinalizationCleanup();
         \\  if (globalThis.__moduleTermThreadCleanupCount !== {d})
         \\    throw new Error('bad module worker terminate/thread teardown cleanup count ' + globalThis.__moduleTermThreadCleanupCount);
         \\  if (globalThis.__moduleTermThreadCleanupSum !== {d})
@@ -6057,7 +6057,7 @@ fn runFinalizationCleanupInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
     const cleanup_src = try std.fmt.allocPrint(
         gpa,
         \\(() => {{
-        \\  globalThis.__finRegistry.cleanupSome();
+        \\  $drainFinalizationCleanup();
         \\  if (globalThis.__finCleanupCount !== {d})
         \\    throw new Error('bad cleanup count: ' + globalThis.__finCleanupCount);
         \\  if (globalThis.__finCleanupSum !== {d})
@@ -6290,7 +6290,7 @@ fn runWeakCleanupOrderingInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
     const cleanup_src = try std.fmt.allocPrint(
         gpa,
         \\(() => {{
-        \\  globalThis.__weakOrderRegistry.cleanupSome();
+        \\  $drainFinalizationCleanup();
         \\  if (globalThis.__weakOrderCount !== {d})
         \\    throw new Error('weak-order cleanup count ' + globalThis.__weakOrderCount + '/{d}');
         \\  if (globalThis.__weakOrderSum !== {d})
@@ -6646,7 +6646,7 @@ fn runFinalizationAsyncJoinCleanupInterleavingKind(gpa: std.mem.Allocator, seed:
         \\(() => {{
         \\  // Keep the registry reachable through cleanup delivery, but prove that
         \\  // unregister-token records never become cleanup jobs.
-        \\  globalThis.__finAsyncCleanupRegistry.cleanupSome();
+        \\  $drainFinalizationCleanup();
         \\  if (globalThis.__finAsyncCleanupCount !== {d})
         \\    throw new Error('bad finalization async cleanup count: ' + globalThis.__finAsyncCleanupCount);
         \\  if (globalThis.__finAsyncCleanupSum !== {d})
@@ -6855,7 +6855,7 @@ fn runFinalizationWaiterCleanupInterleaving(gpa: std.mem.Allocator, seed: u64) !
     const check_src = try std.fmt.allocPrint(
         gpa,
         \\(() => {{
-        \\  globalThis.__finWaiterRegistry.cleanupSome();
+        \\  $drainFinalizationCleanup();
         \\  if (globalThis.__finWaiterCleanupCount !== {d})
         \\    throw new Error('bad finalization waiter cleanup count: ' + globalThis.__finWaiterCleanupCount);
         \\  if (globalThis.__finWaiterCleanupSum !== {d})
@@ -7122,7 +7122,7 @@ fn runWaitAsyncFinalizationCleanupInterleavingKind(gpa: std.mem.Allocator, seed:
     const cleanup_src = try std.fmt.allocPrint(
         gpa,
         \\(() => {{
-        \\  globalThis.__waitAsyncFinRegistry.cleanupSome();
+        \\  $drainFinalizationCleanup();
         \\  if (globalThis.__waitAsyncFinCleanupCount !== {d})
         \\    throw new Error('bad waitAsync/finalization cleanup count ' + globalThis.__waitAsyncFinCleanupCount);
         \\  if (globalThis.__waitAsyncFinCleanupSum !== {d})
@@ -7378,7 +7378,7 @@ fn runConditionAsyncFinalizationCleanupInterleavingKind(gpa: std.mem.Allocator, 
     const cleanup_src = try std.fmt.allocPrint(
         gpa,
         \\(() => {{
-        \\  globalThis.__condAsyncFinRegistry.cleanupSome();
+        \\  $drainFinalizationCleanup();
         \\  if (globalThis.__condAsyncFinCleanupCount !== {d})
         \\    throw new Error('bad condition async/finalization cleanup count ' + globalThis.__condAsyncFinCleanupCount);
         \\  if (globalThis.__condAsyncFinCleanupSum !== {d})
@@ -7623,7 +7623,7 @@ fn runAtomicsConditionFinalizationInterleaving(gpa: std.mem.Allocator, seed: u64
     const cleanup_src = try std.fmt.allocPrint(
         gpa,
         \\(() => {{
-        \\  globalThis.__atomicsCondRegistry.cleanupSome();
+        \\  $drainFinalizationCleanup();
         \\  if (globalThis.__atomicsCondCleanupCount !== {d})
         \\    throw new Error('bad Atomics.Condition cleanup count ' + globalThis.__atomicsCondCleanupCount + '/' + {d});
         \\  if (globalThis.__atomicsCondCleanupSum !== {d})
@@ -7872,7 +7872,7 @@ fn runAtomicsMutexLockIfAvailableFinalizationInterleaving(gpa: std.mem.Allocator
     const cleanup_src = try std.fmt.allocPrint(
         gpa,
         \\(() => {{
-        \\  globalThis.__atomicsMutexLiaRegistry.cleanupSome();
+        \\  $drainFinalizationCleanup();
         \\  if (globalThis.__atomicsMutexLiaCleanupCount !== {d})
         \\    throw new Error('bad Atomics.Mutex.lockIfAvailable cleanup count ' + globalThis.__atomicsMutexLiaCleanupCount + '/' + {d});
         \\  if (globalThis.__atomicsMutexLiaCleanupSum !== {d})
@@ -8083,7 +8083,7 @@ fn runMicrotaskChurnLifecycleInterleaving(gpa: std.mem.Allocator, seed: u64) !bo
     const cleanup_src = try std.fmt.allocPrint(
         gpa,
         \\(() => {{
-        \\  globalThis.__microtaskChurnRegistry.cleanupSome();
+        \\  $drainFinalizationCleanup();
         \\  if (globalThis.__microtaskChurnCleanupCount !== {d})
         \\    throw new Error('bad microtask churn cleanup count ' + globalThis.__microtaskChurnCleanupCount + '/' + {d});
         \\  if (globalThis.__microtaskChurnCleanupSum !== {d})
@@ -8288,7 +8288,7 @@ fn runLateAsyncJoinCleanupInterleaving(gpa: std.mem.Allocator, seed: u64) !bool 
     const cleanup_src = try std.fmt.allocPrint(
         gpa,
         \\(() => {{
-        \\  globalThis.__lateAsyncJoinRegistry.cleanupSome();
+        \\  $drainFinalizationCleanup();
         \\  if (globalThis.__lateAsyncJoinCleanupCount !== {d})
         \\    throw new Error('bad late asyncJoin cleanup count ' + globalThis.__lateAsyncJoinCleanupCount + '/' + {d});
         \\  if (globalThis.__lateAsyncJoinCleanupSum !== {d})
@@ -8509,7 +8509,7 @@ fn runLateAsyncJoinRejectCleanupInterleaving(gpa: std.mem.Allocator, seed: u64) 
     const cleanup_src = try std.fmt.allocPrint(
         gpa,
         \\(() => {{
-        \\  globalThis.__lateAsyncJoinRejectRegistry.cleanupSome();
+        \\  $drainFinalizationCleanup();
         \\  if (globalThis.__lateAsyncJoinRejectCleanupCount !== {d})
         \\    throw new Error('bad late asyncJoin reject cleanup count ' + globalThis.__lateAsyncJoinRejectCleanupCount + '/' + {d});
         \\  if (globalThis.__lateAsyncJoinRejectCleanupSum !== {d})
@@ -8637,7 +8637,7 @@ fn runMidScriptLateAsyncJoinCleanupGc(gpa: std.mem.Allocator, seed: u64) !bool {
         \\  }}
         \\  if (joinScore !== {d})
         \\    throw new Error('bad midgc late asyncJoin blocking join score ' + joinScore);
-        \\  globalThis.__midgcLateAsyncJoinRegistry.cleanupSome();
+        \\  $drainFinalizationCleanup();
         \\  if (globalThis.__midgcLateAsyncJoinCleanupCount !== 0)
         \\    throw new Error('midgc late asyncJoin cleanup ran before collection window');
         \\
@@ -8649,7 +8649,7 @@ fn runMidScriptLateAsyncJoinCleanupGc(gpa: std.mem.Allocator, seed: u64) !bool {
         \\    for (let j = 0; j < {d}; j++) spin = (spin + j + round) & 0x3fffffff;
         \\    if (spin < 0) keep.push({{ impossible: true }});
         \\  }}
-        \\  globalThis.__midgcLateAsyncJoinRegistry.cleanupSome();
+        \\  $drainFinalizationCleanup();
         \\  if (globalThis.__midgcLateAsyncJoinCleanupCount !== 0)
         \\    throw new Error('midgc late asyncJoin cleanup ran while late promise records were live');
         \\
@@ -8765,7 +8765,7 @@ fn runMidScriptLateAsyncJoinCleanupGc(gpa: std.mem.Allocator, seed: u64) !bool {
     const cleanup_src = try std.fmt.allocPrint(
         gpa,
         \\(() => {{
-        \\  globalThis.__midgcLateAsyncJoinRegistry.cleanupSome();
+        \\  $drainFinalizationCleanup();
         \\  if (globalThis.__midgcLateAsyncJoinCleanupCount !== {d})
         \\    throw new Error('bad midgc late asyncJoin cleanup count ' + globalThis.__midgcLateAsyncJoinCleanupCount + '/' + {d});
         \\  if (globalThis.__midgcLateAsyncJoinCleanupSum !== {d})
@@ -8895,7 +8895,7 @@ fn runMidScriptLateAsyncJoinRejectCleanupGc(gpa: std.mem.Allocator, seed: u64) !
         \\  }}
         \\  if (blockingScore !== {d})
         \\    throw new Error('bad midgc late asyncJoin reject blocking score ' + blockingScore);
-        \\  globalThis.__midgcLateAsyncJoinRejectRegistry.cleanupSome();
+        \\  $drainFinalizationCleanup();
         \\  if (globalThis.__midgcLateAsyncJoinRejectCleanupCount !== 0)
         \\    throw new Error('midgc late asyncJoin reject cleanup ran before collection window');
         \\
@@ -8907,7 +8907,7 @@ fn runMidScriptLateAsyncJoinRejectCleanupGc(gpa: std.mem.Allocator, seed: u64) !
         \\    for (let j = 0; j < {d}; j++) spin = (spin + j + round) & 0x3fffffff;
         \\    if (spin < 0) keep.push({{ impossible: true }});
         \\  }}
-        \\  globalThis.__midgcLateAsyncJoinRejectRegistry.cleanupSome();
+        \\  $drainFinalizationCleanup();
         \\  if (globalThis.__midgcLateAsyncJoinRejectCleanupCount !== 0)
         \\    throw new Error('midgc late asyncJoin reject cleanup ran while late promise records were live');
         \\
@@ -9023,7 +9023,7 @@ fn runMidScriptLateAsyncJoinRejectCleanupGc(gpa: std.mem.Allocator, seed: u64) !
     const cleanup_src = try std.fmt.allocPrint(
         gpa,
         \\(() => {{
-        \\  globalThis.__midgcLateAsyncJoinRejectRegistry.cleanupSome();
+        \\  $drainFinalizationCleanup();
         \\  if (globalThis.__midgcLateAsyncJoinRejectCleanupCount !== {d})
         \\    throw new Error('bad midgc late asyncJoin reject cleanup count ' + globalThis.__midgcLateAsyncJoinRejectCleanupCount + '/' + {d});
         \\  if (globalThis.__midgcLateAsyncJoinRejectCleanupSum !== {d})
@@ -9588,7 +9588,7 @@ fn runWorkerCreatorOwnedBufferCleanupProfile(
         \\    return {{ cmd: 'check', id: b.id, sab: b.sab, ab: b.ab, movable: b.movable, sum: b.sum, base: b.base, per: {d} }};
         \\  }};
         \\  globalThis.__workerCreatorCleanupFinish = function(expectedCount, expectedSum) {{
-        \\    globalThis.__workerCreatorCleanupRegistry.cleanupSome();
+        \\    $drainFinalizationCleanup();
         \\    if (globalThis.__workerCreatorCleanupCount !== expectedCount)
         \\      throw new Error('worker creator-owned cleanup count ' + globalThis.__workerCreatorCleanupCount + '/' + expectedCount);
         \\    if (globalThis.__workerCreatorCleanupSum !== expectedSum)
@@ -10268,7 +10268,7 @@ fn runTerminationWaiterCleanupInterleaving(gpa: std.mem.Allocator, seed: u64) !b
         \\  }}
         \\  if (joinThrew !== 1)
         \\    throw new Error('termination waiter cleanup spinner was not terminated');
-        \\  globalThis.__termWaitCleanupRegistry.cleanupSome();
+        \\  $drainFinalizationCleanup();
         \\  if (globalThis.__termWaitCleanupCount !== {d})
         \\    throw new Error('bad termination waiter cleanup finalization count ' + globalThis.__termWaitCleanupCount + '/' + {d});
         \\  if (globalThis.__termWaitCleanupSum !== {d})
@@ -10650,7 +10650,7 @@ fn runThreadRestrictFinalizationCleanupInterleaving(gpa: std.mem.Allocator, seed
     const cleanup_src = try std.fmt.allocPrint(
         gpa,
         \\(() => {{
-        \\  globalThis.__restrictFinRegistry.cleanupSome();
+        \\  $drainFinalizationCleanup();
         \\  if (globalThis.__restrictFinCleanupCount !== {d})
         \\    throw new Error('bad Thread.restrict finalization cleanup count ' + globalThis.__restrictFinCleanupCount);
         \\  if (globalThis.__restrictFinCleanupSum !== {d})
@@ -10936,7 +10936,7 @@ fn runThreadLocalFinalizationCleanupInterleaving(gpa: std.mem.Allocator, seed: u
         \\    if (++spins > 10000000)
         \\      throw new Error('ThreadLocal finalization workers not ready: ' + Atomics.load(gate, 'ready'));
         \\  }}
-        \\  globalThis.__tlsFinRegistry.cleanupSome();
+        \\  $drainFinalizationCleanup();
         \\  if (globalThis.__tlsFinCleanupCount !== 0)
         \\    throw new Error('ThreadLocal finalization cleanup was queued before resume: ' + globalThis.__tlsFinCleanupCount);
         \\  Atomics.store(gate, 'go', 1);
@@ -10972,7 +10972,7 @@ fn runThreadLocalFinalizationCleanupInterleaving(gpa: std.mem.Allocator, seed: u
     const cleanup_src = try std.fmt.allocPrint(
         gpa,
         \\(() => {{
-        \\  globalThis.__tlsFinRegistry.cleanupSome();
+        \\  $drainFinalizationCleanup();
         \\  if (globalThis.__tlsFinCleanupCount !== {d})
         \\    throw new Error('bad ThreadLocal finalization cleanup count ' + globalThis.__tlsFinCleanupCount);
         \\  if (globalThis.__tlsFinCleanupSum !== {d})
@@ -11070,7 +11070,7 @@ fn runThreadLocalTerminationCleanupInterleaving(gpa: std.mem.Allocator, seed: u6
         \\  }}
         \\  while (Atomics.load(gate, 'ready') < {d})
         \\    Atomics.wait(gate, 'ready', Atomics.load(gate, 'ready'), 1);
-        \\  globalThis.__tlsTermRegistry.cleanupSome();
+        \\  $drainFinalizationCleanup();
         \\  if (globalThis.__tlsTermCleanupCount !== 0)
         \\    throw new Error('ThreadLocal termination cleanup ran before teardown: ' + globalThis.__tlsTermCleanupCount);
         \\  throw new Error('threadfuzz ThreadLocal termination cleanup {d}');
@@ -11152,7 +11152,7 @@ fn runThreadLocalTerminationCleanupInterleaving(gpa: std.mem.Allocator, seed: u6
     const cleanup_src = try std.fmt.allocPrint(
         gpa,
         \\(() => {{
-        \\  globalThis.__tlsTermRegistry.cleanupSome();
+        \\  $drainFinalizationCleanup();
         \\  if (globalThis.__tlsTermCleanupCount !== {d})
         \\    throw new Error('bad ThreadLocal termination cleanup count ' + globalThis.__tlsTermCleanupCount);
         \\  if (globalThis.__tlsTermCleanupSum !== {d})
@@ -11267,7 +11267,7 @@ fn runNestedThreadAsyncJoinCleanupInterleaving(gpa: std.mem.Allocator, seed: u64
         \\    Atomics.wait(gate, 'parentReady', Atomics.load(gate, 'parentReady'), 1);
         \\  while (Atomics.load(gate, 'childReady') < {d})
         \\    Atomics.wait(gate, 'childReady', Atomics.load(gate, 'childReady'), 1);
-        \\  globalThis.__nestedThreadRegistry.cleanupSome();
+        \\  $drainFinalizationCleanup();
         \\  if (globalThis.__nestedThreadCleanupCount > {d})
         \\    throw new Error('nested thread cleanup overcount before child release');
         \\  Atomics.store(gate, 'releaseParents', 1);
@@ -11350,7 +11350,7 @@ fn runNestedThreadAsyncJoinCleanupInterleaving(gpa: std.mem.Allocator, seed: u64
     const cleanup_src = try std.fmt.allocPrint(
         gpa,
         \\(() => {{
-        \\  globalThis.__nestedThreadRegistry.cleanupSome();
+        \\  $drainFinalizationCleanup();
         \\  if (globalThis.__nestedThreadCleanupCount !== {d})
         \\    throw new Error('bad nested thread cleanup count ' + globalThis.__nestedThreadCleanupCount + '/' + {d});
         \\  if (globalThis.__nestedThreadCleanupSum !== {d})
@@ -11477,7 +11477,7 @@ fn runMidScriptNestedThreadAsyncJoinCleanupGc(gpa: std.mem.Allocator, seed: u64)
         \\    Atomics.wait(gate, 'parentReady', Atomics.load(gate, 'parentReady'), 1);
         \\  while (Atomics.load(gate, 'childReady') < {d})
         \\    Atomics.wait(gate, 'childReady', Atomics.load(gate, 'childReady'), 1);
-        \\  globalThis.__midgcNestedThreadRegistry.cleanupSome();
+        \\  $drainFinalizationCleanup();
         \\  if (globalThis.__midgcNestedThreadCleanupCount > {d})
         \\    throw new Error('midgc nested thread cleanup overcount before child release');
         \\  const keep = [];
@@ -11595,7 +11595,7 @@ fn runMidScriptNestedThreadAsyncJoinCleanupGc(gpa: std.mem.Allocator, seed: u64)
     const cleanup_src = try std.fmt.allocPrint(
         gpa,
         \\(() => {{
-        \\  globalThis.__midgcNestedThreadRegistry.cleanupSome();
+        \\  $drainFinalizationCleanup();
         \\  if (globalThis.__midgcNestedThreadCleanupCount !== {d})
         \\    throw new Error('bad midgc nested thread cleanup count ' + globalThis.__midgcNestedThreadCleanupCount + '/' + {d});
         \\  if (globalThis.__midgcNestedThreadCleanupSum !== {d})
@@ -11870,7 +11870,7 @@ fn runAsyncHoldReleaseWaiterCleanupInterleaving(gpa: std.mem.Allocator, seed: u6
     const cleanup_src = try std.fmt.allocPrint(
         gpa,
         \\(() => {{
-        \\  globalThis.__asyncHoldReleaseRegistry.cleanupSome();
+        \\  $drainFinalizationCleanup();
         \\  if (globalThis.__asyncHoldReleaseCleanupCount !== {d})
         \\    throw new Error('bad asyncHold release cleanup count ' + globalThis.__asyncHoldReleaseCleanupCount + '/' + {d});
         \\  if (globalThis.__asyncHoldReleaseCleanupSum !== {d})
@@ -11969,7 +11969,7 @@ fn runThreadLocalAsyncHoldReleaseCleanupInterleaving(gpa: std.mem.Allocator, see
         \\  while (Atomics.load(gate, 'tlsReady') < {d})
         \\    Atomics.wait(gate, 'tlsReady', Atomics.load(gate, 'tlsReady'), 1);
         \\  if (typeof gc === 'function') gc();
-        \\  globalThis.__tlsAsyncHoldRegistry.cleanupSome();
+        \\  $drainFinalizationCleanup();
         \\  if (globalThis.__tlsAsyncHoldCleanupCount !== 0)
         \\    throw new Error('ThreadLocal asyncHold cleanup fired while owner threads were parked');
         \\
@@ -12031,7 +12031,7 @@ fn runThreadLocalAsyncHoldReleaseCleanupInterleaving(gpa: std.mem.Allocator, see
         \\    throw new Error('bad ThreadLocal asyncHold release score ' + globalThis.__tlsAsyncHoldReleaseScore);
         \\  if (releaseLock.locked)
         \\    throw new Error('ThreadLocal asyncHold release lock left locked');
-        \\  globalThis.__tlsAsyncHoldRegistry.cleanupSome();
+        \\  $drainFinalizationCleanup();
         \\  if (globalThis.__tlsAsyncHoldCleanupCount !== 0)
         \\    throw new Error('ThreadLocal asyncHold cleanup fired before TLS release');
         \\
@@ -12111,7 +12111,7 @@ fn runThreadLocalAsyncHoldReleaseCleanupInterleaving(gpa: std.mem.Allocator, see
     const cleanup_src = try std.fmt.allocPrint(
         gpa,
         \\(() => {{
-        \\  globalThis.__tlsAsyncHoldRegistry.cleanupSome();
+        \\  $drainFinalizationCleanup();
         \\  if (globalThis.__tlsAsyncHoldCleanupCount !== {d})
         \\    throw new Error('bad ThreadLocal asyncHold cleanup count ' + globalThis.__tlsAsyncHoldCleanupCount + '/' + {d});
         \\  if (globalThis.__tlsAsyncHoldCleanupSum !== {d})
@@ -12455,7 +12455,7 @@ fn runWorkerTerminateThreadLocalAsyncHoldCleanupInterleavingKind(
         \\  }}
         \\  while (Atomics.load(gate, 'tlsReady') < {d})
         \\    Atomics.wait(gate, 'tlsReady', Atomics.load(gate, 'tlsReady'), 1);
-        \\  registry.cleanupSome();
+        \\  $drainFinalizationCleanup();
         \\  if (globalThis.__workerTlsAsyncHoldCleanupCount !== 0)
         \\    throw new Error('worker terminate/ThreadLocal asyncHold cleanup fired before teardown');
         \\
@@ -12554,7 +12554,7 @@ fn runWorkerTerminateThreadLocalAsyncHoldCleanupInterleavingKind(
         \\  if (releaseLock.locked)
         \\    throw new Error('worker terminate/ThreadLocal asyncHold release lock left locked');
         \\{s}
-        \\  registry.cleanupSome();
+        \\  $drainFinalizationCleanup();
         \\{s}
         \\  globalThis.__workerTlsAsyncHoldEarlyCleanupCount = globalThis.__workerTlsAsyncHoldCleanupCount;
         \\  globalThis.__workerTlsAsyncHoldEarlyCleanupSum = globalThis.__workerTlsAsyncHoldCleanupSum;
@@ -12773,7 +12773,7 @@ fn runWorkerTerminateThreadLocalAsyncHoldCleanupInterleavingKind(
     while (cleanup_attempt < 4) : (cleanup_attempt += 1) {
         ctx.collectGarbage();
         const observed = ctx.evaluate(
-            "globalThis.__workerTlsAsyncHoldRegistry.cleanupSome(); globalThis.__workerTlsAsyncHoldCleanupCount",
+            "$drainFinalizationCleanup(); globalThis.__workerTlsAsyncHoldCleanupCount",
         ) catch |err| {
             const msg_txt = if (ctx.exception) |ex| blk: {
                 var render = ctx.interpreter();
@@ -12795,7 +12795,7 @@ fn runWorkerTerminateThreadLocalAsyncHoldCleanupInterleavingKind(
     const cleanup_src = try std.fmt.allocPrint(
         gpa,
         \\(() => {{
-        \\  globalThis.__workerTlsAsyncHoldRegistry.cleanupSome();
+        \\  $drainFinalizationCleanup();
         \\  if (globalThis.__workerTlsAsyncHoldCleanupCount !== {d})
         \\    throw new Error('bad worker terminate/ThreadLocal asyncHold cleanup count ' + globalThis.__workerTlsAsyncHoldCleanupCount + '/' + {d});
         \\  if (globalThis.__workerTlsAsyncHoldCleanupSum !== {d})
@@ -13058,7 +13058,7 @@ fn runMidScriptAsyncHoldReleaseWaiterCleanupGc(gpa: std.mem.Allocator, seed: u64
     const cleanup_src = try std.fmt.allocPrint(
         gpa,
         \\(() => {{
-        \\  globalThis.__midgcAsyncHoldReleaseRegistry.cleanupSome();
+        \\  $drainFinalizationCleanup();
         \\  if (globalThis.__midgcAsyncHoldReleaseCleanupCount !== {d})
         \\    throw new Error('bad midgc asyncHold release cleanup count ' + globalThis.__midgcAsyncHoldReleaseCleanupCount + '/' + {d});
         \\  if (globalThis.__midgcAsyncHoldReleaseCleanupSum !== {d})
@@ -13327,7 +13327,7 @@ fn runAsyncHoldThrowFinalizationInterleavingKind(gpa: std.mem.Allocator, seed: u
     const cleanup_src = try std.fmt.allocPrint(
         gpa,
         \\(() => {{
-        \\  globalThis.__asyncHoldThrowRegistry.cleanupSome();
+        \\  $drainFinalizationCleanup();
         \\  if (globalThis.__asyncHoldThrowCleanupCount !== {d})
         \\    throw new Error('bad asyncHold throw/finalization cleanup count ' + globalThis.__asyncHoldThrowCleanupCount + '/' + {d});
         \\  if (globalThis.__asyncHoldThrowCleanupSum !== {d})
@@ -13848,11 +13848,7 @@ fn runMidScriptWaitPumpGc(gpa: std.mem.Allocator, seed: u64) !bool {
     const cleanup_src = try std.fmt.allocPrint(
         gpa,
         \\(() => {{
-        \\  if (globalThis.__midgcRegistry)
-        \\    globalThis.__midgcRegistry.cleanupSome(function(held) {{
-        \\      globalThis.__midgcCleanupCount = globalThis.__midgcCleanupCount + 1;
-        \\      globalThis.__midgcCleanupSum = globalThis.__midgcCleanupSum + held;
-        \\    }});
+        \\  $drainFinalizationCleanup();
         \\  if (globalThis.__midgcCleanupCount !== {d})
         \\    throw new Error('midgc cleanup count ' + globalThis.__midgcCleanupCount);
         \\  if (globalThis.__midgcCleanupSum !== {d})
@@ -14310,7 +14306,7 @@ fn runMidScriptSyncWaitCleanupGc(gpa: std.mem.Allocator, seed: u64) !bool {
     const cleanup_src = try std.fmt.allocPrint(
         gpa,
         \\(() => {{
-        \\  globalThis.__midgcSyncRegistry.cleanupSome();
+        \\  $drainFinalizationCleanup();
         \\  if (globalThis.__midgcSyncCleanupCount !== {d})
         \\    throw new Error('midgc sync-wait cleanup count ' + globalThis.__midgcSyncCleanupCount + '/' + {d});
         \\  if (globalThis.__midgcSyncCleanupSum !== {d})
@@ -14469,7 +14465,7 @@ fn runMidScriptSyncWaitBurstCleanupGc(gpa: std.mem.Allocator, seed: u64) !bool {
         \\    Atomics.wait(gate, 'condReady', Atomics.load(gate, 'condReady'), 1);
         \\  while (Atomics.load(gate, 'lockReady') < {d})
         \\    Atomics.wait(gate, 'lockReady', Atomics.load(gate, 'lockReady'), 1);
-        \\  globalThis.__midgcSyncBurstRegistry.cleanupSome();
+        \\  $drainFinalizationCleanup();
         \\  if (globalThis.__midgcSyncBurstCleanupCount !== 0)
         \\    throw new Error('midgc sync-burst cleanup fired before parked sweep');
         \\  const keep = [];
@@ -14482,7 +14478,7 @@ fn runMidScriptSyncWaitBurstCleanupGc(gpa: std.mem.Allocator, seed: u64) !bool {
         \\    if (spin < 0) keep.push({{ impossible: true }});
         \\  }}
         \\  if (typeof gc === 'function') gc();
-        \\  globalThis.__midgcSyncBurstRegistry.cleanupSome();
+        \\  $drainFinalizationCleanup();
         \\  if (globalThis.__midgcSyncBurstCleanupCount !== 0)
         \\    throw new Error('midgc sync-burst cleanup fired while peers were parked');
         \\  Atomics.store(gate, 'prop', 1);
@@ -14571,7 +14567,7 @@ fn runMidScriptSyncWaitBurstCleanupGc(gpa: std.mem.Allocator, seed: u64) !bool {
     const cleanup_src = try std.fmt.allocPrint(
         gpa,
         \\(() => {{
-        \\  globalThis.__midgcSyncBurstRegistry.cleanupSome();
+        \\  $drainFinalizationCleanup();
         \\  if (globalThis.__midgcSyncBurstCleanupCount !== {d})
         \\    throw new Error('bad midgc sync-burst cleanup count ' + globalThis.__midgcSyncBurstCleanupCount + '/' + {d});
         \\  if (globalThis.__midgcSyncBurstCleanupSum !== {d})
@@ -14703,7 +14699,7 @@ fn runMidScriptSyncTimeoutGc(gpa: std.mem.Allocator, seed: u64) !bool {
         \\  while (Atomics.load(gate, 'ready') < {d})
         \\    Atomics.wait(gate, 'ready', Atomics.load(gate, 'ready'), 1);
         \\  Atomics.wait(gate, 'ready', {d}, 8);
-        \\  globalThis.__midgcSyncTimeoutRegistry.cleanupSome();
+        \\  $drainFinalizationCleanup();
         \\  if (globalThis.__midgcSyncTimeoutCleanupCount !== 0)
         \\    throw new Error('midgc sync-timeout cleanup fired before parked sweep');
         \\  const keep = [];
@@ -14716,7 +14712,7 @@ fn runMidScriptSyncTimeoutGc(gpa: std.mem.Allocator, seed: u64) !bool {
         \\    if (spin < 0) keep.push({{ impossible: true }});
         \\  }}
         \\  if (typeof gc === 'function') gc();
-        \\  globalThis.__midgcSyncTimeoutRegistry.cleanupSome();
+        \\  $drainFinalizationCleanup();
         \\  if (globalThis.__midgcSyncTimeoutCleanupCount !== 0)
         \\    throw new Error('midgc sync-timeout cleanup fired while timeout peers were parked');
         \\  let joinSum = 0;
@@ -14780,7 +14776,7 @@ fn runMidScriptSyncTimeoutGc(gpa: std.mem.Allocator, seed: u64) !bool {
     const cleanup_src = try std.fmt.allocPrint(
         gpa,
         \\(() => {{
-        \\  globalThis.__midgcSyncTimeoutRegistry.cleanupSome();
+        \\  $drainFinalizationCleanup();
         \\  if (globalThis.__midgcSyncTimeoutCleanupCount !== {d})
         \\    throw new Error('bad midgc sync-timeout cleanup count ' + globalThis.__midgcSyncTimeoutCleanupCount + '/' + {d});
         \\  if (globalThis.__midgcSyncTimeoutCleanupSum !== {d})
@@ -14950,7 +14946,7 @@ fn runMidScriptAtomicsMutexLockIfAvailableGc(gpa: std.mem.Allocator, seed: u64) 
         \\  }}
         \\  while (Atomics.load(gate, 'ready') < {d})
         \\    Atomics.wait(gate, 'ready', Atomics.load(gate, 'ready'), 1);
-        \\  globalThis.__midgcMutexLiaRegistry.cleanupSome();
+        \\  $drainFinalizationCleanup();
         \\  if (globalThis.__midgcMutexLiaCleanupCount !== 0)
         \\    throw new Error('midgc lockIfAvailable cleanup fired before parked sweep');
         \\  const keep = [];
@@ -14963,7 +14959,7 @@ fn runMidScriptAtomicsMutexLockIfAvailableGc(gpa: std.mem.Allocator, seed: u64) 
         \\    if (spin < 0) keep.push({{ impossible: true }});
         \\  }}
         \\  if (typeof gc === 'function') gc();
-        \\  globalThis.__midgcMutexLiaRegistry.cleanupSome();
+        \\  $drainFinalizationCleanup();
         \\  if (globalThis.__midgcMutexLiaAcquireCleanupCount !== 0)
         \\    throw new Error('midgc lockIfAvailable acquire cleanup fired while peers were parked');
         \\  if (globalThis.__midgcMutexLiaTimeoutCleanupCount > {d})
@@ -15051,7 +15047,7 @@ fn runMidScriptAtomicsMutexLockIfAvailableGc(gpa: std.mem.Allocator, seed: u64) 
     const cleanup_src = try std.fmt.allocPrint(
         gpa,
         \\(() => {{
-        \\  globalThis.__midgcMutexLiaRegistry.cleanupSome();
+        \\  $drainFinalizationCleanup();
         \\  if (globalThis.__midgcMutexLiaCleanupCount !== {d})
         \\    throw new Error('bad midgc lockIfAvailable cleanup count ' + globalThis.__midgcMutexLiaCleanupCount + '/' + {d});
         \\  if (globalThis.__midgcMutexLiaCleanupSum !== {d})
@@ -15171,7 +15167,7 @@ fn runMidScriptAtomicsConditionWaitGc(gpa: std.mem.Allocator, seed: u64) !bool {
         \\  while (Atomics.load(gate, 'ready') < {d})
         \\    Atomics.wait(gate, 'ready', Atomics.load(gate, 'ready'), 1);
         \\  Atomics.wait(gate, 'ready', {d}, 8);
-        \\  globalThis.__midgcCondWaitRegistry.cleanupSome();
+        \\  $drainFinalizationCleanup();
         \\  if (globalThis.__midgcCondWaitCleanupCount !== 0)
         \\    throw new Error('midgc Condition.wait cleanup fired before parked sweep');
         \\  const keep = [];
@@ -15184,7 +15180,7 @@ fn runMidScriptAtomicsConditionWaitGc(gpa: std.mem.Allocator, seed: u64) !bool {
         \\    if (spin < 0) keep.push({{ impossible: true }});
         \\  }}
         \\  if (typeof gc === 'function') gc();
-        \\  globalThis.__midgcCondWaitRegistry.cleanupSome();
+        \\  $drainFinalizationCleanup();
         \\  if (globalThis.__midgcCondWaitCleanupCount !== 0)
         \\    throw new Error('midgc Condition.wait cleanup fired while peers were parked');
         \\  const woke = Atomics.Condition.notify(cond, {d});
@@ -15262,7 +15258,7 @@ fn runMidScriptAtomicsConditionWaitGc(gpa: std.mem.Allocator, seed: u64) !bool {
     const cleanup_src = try std.fmt.allocPrint(
         gpa,
         \\(() => {{
-        \\  globalThis.__midgcCondWaitRegistry.cleanupSome();
+        \\  $drainFinalizationCleanup();
         \\  if (globalThis.__midgcCondWaitCleanupCount !== {d})
         \\    throw new Error('bad midgc Condition.wait cleanup count ' + globalThis.__midgcCondWaitCleanupCount + '/' + {d});
         \\  if (globalThis.__midgcCondWaitCleanupSum !== {d})
@@ -15357,7 +15353,7 @@ fn runMidScriptThreadLocalFinalizationGc(gpa: std.mem.Allocator, seed: u64) !boo
         \\    if (++spins > 10000000)
         \\      throw new Error('midgc ThreadLocal finalization workers not ready: ' + Atomics.load(gate, 'ready'));
         \\  }}
-        \\  globalThis.__midgcTlsFinRegistry.cleanupSome();
+        \\  $drainFinalizationCleanup();
         \\  if (globalThis.__midgcTlsFinCleanupCount !== 0)
         \\    throw new Error('midgc ThreadLocal cleanup fired before parked roots released');
         \\  const keep = [];
@@ -15369,7 +15365,7 @@ fn runMidScriptThreadLocalFinalizationGc(gpa: std.mem.Allocator, seed: u64) !boo
         \\    if (spin < 0) keep.push({{ impossible: true }});
         \\  }}
         \\  if (typeof gc === 'function') gc();
-        \\  globalThis.__midgcTlsFinRegistry.cleanupSome();
+        \\  $drainFinalizationCleanup();
         \\  if (globalThis.__midgcTlsFinCleanupCount !== 0)
         \\    throw new Error('midgc ThreadLocal cleanup fired during parked sweep');
         \\  Atomics.store(gate, 'release', 1);
@@ -15427,7 +15423,7 @@ fn runMidScriptThreadLocalFinalizationGc(gpa: std.mem.Allocator, seed: u64) !boo
     const cleanup_src = try std.fmt.allocPrint(
         gpa,
         \\(() => {{
-        \\  globalThis.__midgcTlsFinRegistry.cleanupSome();
+        \\  $drainFinalizationCleanup();
         \\  if (globalThis.__midgcTlsFinCleanupCount !== {d})
         \\    throw new Error('bad midgc ThreadLocal finalization cleanup count ' + globalThis.__midgcTlsFinCleanupCount + '/' + {d});
         \\  if (globalThis.__midgcTlsFinCleanupSum !== {d})
@@ -15521,7 +15517,7 @@ fn runMidScriptThreadLocalTerminationCleanupGc(gpa: std.mem.Allocator, seed: u64
         \\    if (++spins > 10000000)
         \\      throw new Error('midgc ThreadLocal termination workers not ready: ' + Atomics.load(gate, 'ready'));
         \\  }}
-        \\  globalThis.__midgcTlsTermRegistry.cleanupSome();
+        \\  $drainFinalizationCleanup();
         \\  if (Atomics.load(globalThis.__midgcTlsTermCleanup, 'count') !== 0)
         \\    throw new Error('midgc ThreadLocal termination cleanup fired before sweep');
         \\  const keep = [];
@@ -15535,7 +15531,7 @@ fn runMidScriptThreadLocalTerminationCleanupGc(gpa: std.mem.Allocator, seed: u64
         \\  if (keep.length !== {d})
         \\    throw new Error('bad midgc ThreadLocal termination keep length ' + keep.length);
         \\  if (typeof gc === 'function') gc();
-        \\  globalThis.__midgcTlsTermRegistry.cleanupSome();
+        \\  $drainFinalizationCleanup();
         \\  if (Atomics.load(globalThis.__midgcTlsTermCleanup, 'count') !== 0)
         \\    throw new Error('midgc ThreadLocal termination cleanup fired while owners were parked');
         \\  throw new Error('threadfuzz midgc ThreadLocal termination cleanup {d}');
@@ -15615,7 +15611,7 @@ fn runMidScriptThreadLocalTerminationCleanupGc(gpa: std.mem.Allocator, seed: u64
     const cleanup_src = try std.fmt.allocPrint(
         gpa,
         \\(() => {{
-        \\  globalThis.__midgcTlsTermRegistry.cleanupSome();
+        \\  $drainFinalizationCleanup();
         \\  const cleanupCount = Atomics.load(globalThis.__midgcTlsTermCleanup, 'count');
         \\  const cleanupSum = Atomics.load(globalThis.__midgcTlsTermCleanup, 'sum');
         \\  if (cleanupCount !== {d})
@@ -15742,7 +15738,7 @@ fn runMidScriptThreadRestrictFinalizationGc(gpa: std.mem.Allocator, seed: u64) !
         \\  }}
         \\  while (Atomics.load(gate, 'ready') < {d})
         \\    Atomics.wait(gate, 'ready', Atomics.load(gate, 'ready'), 1);
-        \\  globalThis.__midgcRestrictFinRegistry.cleanupSome();
+        \\  $drainFinalizationCleanup();
         \\  if (globalThis.__midgcRestrictFinCleanupCount !== 0)
         \\    throw new Error('midgc restrict cleanup fired before owner threads released');
         \\  const keep = [];
@@ -15754,7 +15750,7 @@ fn runMidScriptThreadRestrictFinalizationGc(gpa: std.mem.Allocator, seed: u64) !
         \\    if (spin < 0) keep.push({{ impossible: true }});
         \\  }}
         \\  if (typeof gc === 'function') gc();
-        \\  globalThis.__midgcRestrictFinRegistry.cleanupSome();
+        \\  $drainFinalizationCleanup();
         \\  if (globalThis.__midgcRestrictFinCleanupCount !== 0)
         \\    throw new Error('midgc restrict cleanup fired while owner threads were parked');
         \\  Atomics.store(gate, 'release', 1);
@@ -15849,7 +15845,7 @@ fn runMidScriptThreadRestrictFinalizationGc(gpa: std.mem.Allocator, seed: u64) !
     const cleanup_src = try std.fmt.allocPrint(
         gpa,
         \\(() => {{
-        \\  globalThis.__midgcRestrictFinRegistry.cleanupSome();
+        \\  $drainFinalizationCleanup();
         \\  if (globalThis.__midgcRestrictFinCleanupCount !== {d})
         \\    throw new Error('bad midgc Thread.restrict finalization cleanup count ' + globalThis.__midgcRestrictFinCleanupCount + '/' + {d});
         \\  if (globalThis.__midgcRestrictFinCleanupSum !== {d})
@@ -16145,7 +16141,7 @@ fn runMidScriptWeakCollectionGc(gpa: std.mem.Allocator, seed: u64) !bool {
     const cleanup_src = try std.fmt.allocPrint(
         gpa,
         \\(() => {{
-        \\  globalThis.__midgcWeakRegistry.cleanupSome();
+        \\  $drainFinalizationCleanup();
         \\  let liveSum = 0;
         \\  for (let k = 0; k < globalThis.__midgcWeakKeys.length; k++) {{
         \\    const key = globalThis.__midgcWeakKeys[k];
@@ -17274,7 +17270,7 @@ fn runMidScriptMicrotaskChurnGc(gpa: std.mem.Allocator, seed: u64) !bool {
     const cleanup_src = try std.fmt.allocPrint(
         gpa,
         \\(() => {{
-        \\  globalThis.__midgcMicrotaskRegistry.cleanupSome();
+        \\  $drainFinalizationCleanup();
         \\  if (globalThis.__midgcMicrotaskCleanupCount !== {d})
         \\    throw new Error('bad midgc microtask cleanup count ' + globalThis.__midgcMicrotaskCleanupCount + '/' + {d});
         \\  if (globalThis.__midgcMicrotaskCleanupSum !== {d})
@@ -17968,7 +17964,7 @@ fn runMidScriptWorkerCloseTerminateProfile(gpa: std.mem.Allocator, seed: u64, co
     const cleanup_src = try std.fmt.allocPrint(
         gpa,
         \\(() => {{
-        \\  globalThis.{s}Registry.cleanupSome();
+        \\  $drainFinalizationCleanup();
         \\  if (globalThis.{s}CleanupCount !== {d})
         \\    throw new Error('bad midgc worker-close cleanup count: ' + globalThis.{s}CleanupCount);
         \\  if (globalThis.{s}CleanupSum !== {d})
@@ -17978,7 +17974,6 @@ fn runMidScriptWorkerCloseTerminateProfile(gpa: std.mem.Allocator, seed: u64, co
         \\
     ,
         .{
-            msg_prefix,
             msg_prefix,
             expected_cleanup_count,
             msg_prefix,
@@ -18363,7 +18358,7 @@ fn runMidScriptWorkerCleanupProfile(gpa: std.mem.Allocator, seed: u64, comptime 
     const cleanup_src = try std.fmt.allocPrint(
         gpa,
         \\(() => {{
-        \\  globalThis.__midgcWorkerCleanupRegistry.cleanupSome();
+        \\  $drainFinalizationCleanup();
         \\  if (globalThis.__midgcWorkerCleanupCount !== {d})
         \\    throw new Error('bad midgc worker-cleanup cleanup count: ' + globalThis.__midgcWorkerCleanupCount);
         \\  if (globalThis.__midgcWorkerCleanupSum !== {d})

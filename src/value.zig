@@ -906,7 +906,7 @@ pub const Object = struct {
     is_weak_ref: bool = false,
     weak_ref_target: ?*Object = null,
     /// Marks a `FinalizationRegistry`. Dead targets make records ready for
-    /// explicit `cleanupSome()` delivery at quiescent collection points.
+    /// automatic host cleanup delivery at quiescent collection points.
     is_finalization_registry: bool = false,
     finalization_callback: Value = Value.undef(),
     finalization_records: std.ArrayListUnmanaged(FinalizationRecord) = .empty,
