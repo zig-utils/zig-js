@@ -10221,6 +10221,23 @@ test "structured clone nesting limit is catchable" {
     try std.testing.expect((try ctx.evaluate(source)).asBool());
 }
 
+test "structured clone frame limit releases retained SAB tokens" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    defer ctx.destroy();
+    var machine = ctx.interpreter();
+    const sab = try ctx.evaluate("globalThis.__limitedCloneSab = new SharedArrayBuffer(8)");
+    const storage = sab.asObj().array_buffer.?.shared.?;
+    const retain_count = storage.retainCount();
+    const graph = try ctx.evaluate(
+        "[__limitedCloneSab, 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx']",
+    );
+    try std.testing.expectError(
+        error.MessageTooLarge,
+        structured_clone.serializeWithLimit(&machine, std.testing.allocator, graph, 60),
+    );
+    try std.testing.expectEqual(retain_count, storage.retainCount());
+}
+
 test "Thread API (enable_threads): shared realm, identity, exceptions, ids" {
     const ctx = try Context.createWith(std.testing.allocator, .{ .enable_threads = true });
     defer ctx.destroy();

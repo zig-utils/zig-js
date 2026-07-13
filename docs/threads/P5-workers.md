@@ -40,7 +40,10 @@ inbox/outbox `ChannelLimits`; defaults are 64 MiB per frame, 256 MiB of live
 queued bytes, and 1024 live messages. Push is nonblocking and fallible: closed,
 limit, and metadata-allocation rejection is reported synchronously, after the
 channel lock is released, and releases the rejected frame/SAB manifest exactly
-once. Live byte/message accounting is decremented on pop; dead FIFO prefixes
+once. Worker serialization enforces the complete per-frame cap from its first
+write, including the frame header and SAB manifest, so rejection does not first
+materialize an oversized process allocation. Live byte/message accounting is
+decremented on pop; dead FIFO prefixes
 compact before avoidable metadata growth. `deinit` releases any frames never
 consumed.
 

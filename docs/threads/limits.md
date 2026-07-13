@@ -14,7 +14,9 @@ tests as the matching engine features land.
 - Worker inboxes/outboxes reject nonblockingly at configurable per-frame,
   live-byte, and live-message caps. Defaults are 64 MiB, 256 MiB, and 1024;
   successful `postMessage` means exactly one queued frame, while rejection is
-  synchronous and releases frame/SAB ownership exactly once.
+  synchronous and releases frame/SAB ownership exactly once. The per-frame cap
+  includes framing and SAB manifests and is enforced during serialization, not
+  only after allocation.
 - Structured clone has a shared 256-level nesting ceiling across serialization,
   wire preflight, and deserialization. Excessive graphs fail with a catchable
   clone error, and framed SAB manifests keep rejection cleanup non-recursive.

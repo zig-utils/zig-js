@@ -30,6 +30,7 @@ const agent = @import("agent.zig");
 const Value = value.Value;
 const Interpreter = interpreter.Interpreter;
 const HostError = value.HostError;
+pub const SerializeLimitError = HostError || error{MessageTooLarge};
 
 const SharedRefToken = [16]u8;
 const wire_magic = "ZJSC".*;
@@ -150,14 +151,26 @@ const Tag = enum(u8) {
 const Writer = struct {
     out: std.ArrayListUnmanaged(u8) = .empty,
     gpa: std.mem.Allocator,
+    limit: usize = std.math.maxInt(usize),
+    limit_exceeded: bool = false,
+
+    fn reserve(w: *Writer, additional: usize) error{OutOfMemory}!void {
+        if (additional > w.limit -| w.out.items.len) {
+            w.limit_exceeded = true;
+            return error.OutOfMemory;
+        }
+    }
 
     fn tag(w: *Writer, t: Tag) error{OutOfMemory}!void {
+        try w.reserve(@sizeOf(u8));
         try w.out.append(w.gpa, @intFromEnum(t));
     }
     fn byte(w: *Writer, b: u8) error{OutOfMemory}!void {
+        try w.reserve(@sizeOf(u8));
         try w.out.append(w.gpa, b);
     }
     fn int(w: *Writer, comptime T: type, v: T) error{OutOfMemory}!void {
+        try w.reserve(@sizeOf(T));
         var buf: [@sizeOf(T)]u8 = undefined;
         std.mem.writeInt(T, &buf, v, .little);
         try w.out.appendSlice(w.gpa, &buf);
@@ -167,7 +180,13 @@ const Writer = struct {
     }
     fn str(w: *Writer, s: []const u8) error{ OutOfMemory, Overflow }!void {
         const len = std.math.cast(u32, s.len) orelse return error.Overflow;
-        try w.int(u32, len);
+        const field_len = std.math.add(usize, @sizeOf(u32), s.len) catch return error.Overflow;
+        try w.reserve(field_len);
+        // Reserve the whole field atomically, then append without repeating
+        // the budget check in `int`.
+        var len_buf: [@sizeOf(u32)]u8 = undefined;
+        std.mem.writeInt(u32, &len_buf, len, .little);
+        try w.out.appendSlice(w.gpa, &len_buf);
         try w.out.appendSlice(w.gpa, s);
     }
 };
@@ -374,6 +393,11 @@ const Serializer = struct {
         if (o.array_buffer) |ab| {
             if (ab.is_shared) {
                 const storage = ab.shared orelse return s.throwClone("DataCloneError: malformed SharedArrayBuffer");
+                if (@sizeOf(SharedRefToken) > s.w.limit -| s.w.out.items.len) {
+                    s.w.limit_exceeded = true;
+                    return error.OutOfMemory;
+                }
+                s.w.limit -= @sizeOf(SharedRefToken);
                 const token = try registerSharedRefToken(storage);
                 const token_index = std.math.cast(u32, s.shared_tokens.items.len) orelse {
                     _ = releaseSharedRefToken(token);
@@ -521,14 +545,46 @@ fn isIndexKey(k: []const u8) bool {
 /// On error nothing is retained (SAB references taken for an earlier part of
 /// a graph that later fails are released).
 pub fn serialize(self: *Interpreter, gpa: std.mem.Allocator, v: Value) HostError![]u8 {
-    var s = Serializer{ .self = self, .w = .{ .gpa = gpa } };
+    return serializeWithLimit(self, gpa, v, std.math.maxInt(usize)) catch |err| switch (err) {
+        error.MessageTooLarge => unreachable,
+        error.OutOfMemory => error.OutOfMemory,
+        error.Throw => error.Throw,
+        error.OptShortCircuit => error.OptShortCircuit,
+    };
+}
+
+/// Serialize while bounding the complete frame (header + SAB manifest +
+/// payload). Limit rejection is a catchable clone error, and tokens retained
+/// before a later rejection are released by the normal serializer unwind.
+pub fn serializeWithLimit(
+    self: *Interpreter,
+    gpa: std.mem.Allocator,
+    v: Value,
+    max_frame_bytes: usize,
+) SerializeLimitError![]u8 {
+    const payload_limit = if (max_frame_bytes >= wire_header_len)
+        max_frame_bytes - wire_header_len
+    else
+        0;
+    var s = Serializer{ .self = self, .w = .{ .gpa = gpa, .limit = payload_limit } };
     defer s.memo.deinit(gpa);
     defer s.shared_tokens.deinit(gpa);
     defer s.w.out.deinit(gpa);
     errdefer {
         for (s.shared_tokens.items) |token| _ = releaseSharedRefToken(token);
     }
-    try s.ser(v, 0);
+    s.ser(v, 0) catch |err| {
+        if (err == error.OutOfMemory and s.w.limit_exceeded)
+            return error.MessageTooLarge;
+        return err;
+    };
+    const manifest_len = std.math.mul(usize, s.shared_tokens.items.len, @sizeOf(SharedRefToken)) catch
+        return error.MessageTooLarge;
+    const framed_len = std.math.add(usize, wire_header_len, manifest_len) catch
+        return error.MessageTooLarge;
+    const total_len = std.math.add(usize, framed_len, s.w.out.items.len) catch
+        return error.MessageTooLarge;
+    if (total_len > max_frame_bytes) return error.MessageTooLarge;
     return encodeFrame(gpa, s.shared_tokens.items, s.w.out.items) catch |err| switch (err) {
         error.OutOfMemory => error.OutOfMemory,
         error.Overflow => s.throwClone("DataCloneError: structured clone payload is too large"),

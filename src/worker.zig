@@ -475,7 +475,7 @@ pub const Worker = struct {
 
     /// Main-side send: serialize `v` from `from`'s realm into the inbox.
     pub fn postMessage(w: *Worker, from: *interp.Interpreter, v: Value) value.HostError!void {
-        const bytes = try structured_clone.serialize(from, alloc, v);
+        const bytes = try serializeForChannel(&w.inbox, from, v);
         try enqueueOwned(&w.inbox, from, bytes);
     }
 
@@ -523,6 +523,15 @@ pub const Worker = struct {
         alloc.destroy(w);
     }
 };
+
+fn serializeForChannel(ch: *Channel, self: *interp.Interpreter, v: Value) value.HostError![]u8 {
+    return structured_clone.serializeWithLimit(self, alloc, v, ch.limits.max_message_bytes) catch |err| switch (err) {
+        error.MessageTooLarge => self.throwError("RangeError", "Worker message exceeds the channel message limit"),
+        error.OutOfMemory => error.OutOfMemory,
+        error.Throw => error.Throw,
+        error.OptShortCircuit => error.OptShortCircuit,
+    };
+}
 
 fn enqueueOwned(ch: *Channel, self: *interp.Interpreter, bytes: []u8) value.HostError!void {
     ch.pushOwned(bytes) catch |err| return switch (err) {
@@ -595,7 +604,7 @@ fn workerPostMessageFn(ctx: *anyopaque, this: Value, args: []const Value) value.
     const self: *interp.Interpreter = @ptrCast(@alignCast(ctx));
     const w = workerOf(self) orelse return Value.undef();
     const v = if (args.len > 0) args[0] else Value.undef();
-    const bytes = try structured_clone.serialize(self, alloc, v);
+    const bytes = try serializeForChannel(&w.outbox, self, v);
     try enqueueOwned(&w.outbox, self, bytes);
     w.notifyHost(); // wake the embedder's loop to drain via `receive`
     return Value.undef();
