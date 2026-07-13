@@ -11363,6 +11363,7 @@ pub const Interpreter = struct {
     fn arrayResultPush(self: *Interpreter, result: Value, idx: usize, v: Value) EvalError!void {
         if (result.isObject() and result.asObj().is_array and result.asObj().accessors.load(.monotonic) == null and
             result.asObj().attrsMap() == null and !result.asObj().proxy_revoked and result.asObj().proxy_handler == null and
+            result.asObj().isExtensible() and
             try result.asObj().appendElementIfLen(self.arena, idx, v))
         {
             return;
