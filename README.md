@@ -108,25 +108,25 @@ Those numbers show current VM/tree-walk parity on these microbenchmarks, not a b
 
 ### zig-js vs JavaScriptCore
 
-`zig build benchmark-comparison` runs the exact same pure-JavaScript kernels through GC-enabled zig-js and the macOS system JavaScriptCore, checks deterministic results across engines, and reports seven-sample medians. The latest [full report](docs/.data/benchmark-comparison-2026-07-13.md) was recorded on an 11-core Apple M3 Pro:
+`zig build benchmark-comparison` runs the exact same pure-JavaScript kernels and single-context invocation bytes through GC-enabled zig-js and the macOS system JavaScriptCore, checks deterministic results across engines, and reports seven-sample medians with dispersion. The latest [full report](docs/.data/benchmark-comparison-2026-07-13.md) was recorded on an 11-core Apple M3 Pro; every full-run row exceeds a 50 ms median timing floor:
 
 | workload | zig-js single ms | JSC single ms | JSC / zig-js |
 | --- | ---: | ---: | ---: |
-| arithmetic | 248.075 | 60.305 | 4.11x |
-| properties | 163.112 | 40.633 | 4.01x |
-| arrays | 93.505 | 9.338 | 10.01x |
-| Fibonacci | 262.657 | 20.668 | 12.71x |
+| arithmetic | 472.650 | 120.707 | 3.92x |
+| properties | 346.126 | 80.259 | 4.31x |
+| arrays | 575.475 | 51.924 | 11.08x |
+| Fibonacci | 496.859 | 60.960 | 8.15x |
 
 At eight lanes, the throughput picture is deliberately workload-specific:
 
-| workload | zig-js shared-realm scaling | JSC independent-context scaling | JSC / zig-js at 8 lanes |
-| --- | ---: | ---: | ---: |
-| arithmetic | 5.97x | 4.91x | 3.39x |
-| properties | 4.42x | 4.67x | 4.25x |
-| arrays | 1.32x | 2.88x | 21.83x |
-| Fibonacci | 0.87x | 4.41x | 64.66x |
+| workload | zig-js shared-realm scaling | JSC independent-context scaling reference |
+| --- | ---: | ---: |
+| arithmetic | 5.35x | 5.11x |
+| properties | 4.98x | 4.81x |
+| arrays | 1.57x | 4.90x |
+| Fibonacci | 0.84x | 5.18x |
 
-The parallel models are not semantically equivalent: zig-js uses one shared object graph with no-GIL JavaScript `Thread`s, while public JSC uses isolated `JSGlobalContext`s on OS threads. The result honestly shows both the strong independent-compute/property scaling and the current array-allocation/recursive-call contention. See [Performance Benchmarks](docs/benchmarks.md) for workloads, timed boundaries, caveats, reproduction, and raw evidence.
+The parallel models are not semantically equivalent: zig-js uses one shared object graph with no-GIL JavaScript `Thread`s, while public JSC uses isolated `JSGlobalContext`s on OS threads. They are deliberately reported as separate scaling panels without a cross-engine parallel ratio. The result shows both the strong independent-compute/property scaling and the current array-allocation/recursive-call contention. See [Performance Benchmarks](docs/benchmarks.md) for workloads, timed boundaries, process-order alternation, dispersion, caveats, reproduction, and raw evidence.
 
 Implemented performance machinery includes the bytecode VM, frame slots/upvalues, object shapes, inline caches, the engine-wide 8-byte NaN-boxed `Value`, GC slab backing, and an opt-in-GC one-cycle nursery that reclaims young garbage at quiescent boundaries and immediately tenures survivors. Future work includes tighter VM/codegen coverage, nursery sizing and pause optimization, deeper generational policies, and possible baseline/JIT exploration. There is no optimizing JIT today.
 

@@ -34,9 +34,13 @@ inventing implementation status.
   exclusion is removed.
 - Do not describe the C API as the whole JavaScriptCore framework. It is an
   implemented public C-API subset.
-- Do not compare shared-realm zig-js `Thread`s with JSC independent contexts
-  without naming the semantic difference. State the hardware, engine versions,
-  sample count, statistic, workload scope, and saved raw evidence.
+- Do not publish a direct throughput ratio between shared-realm zig-js `Thread`s
+  and independent JSC contexts. Report them as separate scaling references until
+  a symmetric independent-context zig-js mode exists. State the hardware, engine
+  versions, sample count, statistic, workload scope, and saved raw evidence.
+- Do not publish a benchmark report from a dirty tracked worktree. The report's
+  commit must identify the exact runner/workload source that produced the raw
+  samples; generated output files are written only after metadata is captured.
 - Historical design notes may keep old numbers only when they are clearly
   framed as history. Public status pages should use current data.
 
