@@ -1871,10 +1871,19 @@ fn runWorkerCloseTerminateRace(gpa: std.mem.Allocator, seed: u64) !bool {
         std.debug.print("seed {d}: cannot make dropped message: {s}\n", .{ seed, @errorName(err) });
         return false;
     };
+    var dropped_rejected = false;
     graceful.postMessage(&machine, dropped_msg) catch |err| {
-        std.debug.print("seed {d}: graceful post after close failed: {s}\n", .{ seed, @errorName(err) });
-        return false;
+        if (err != error.Throw) {
+            std.debug.print("seed {d}: graceful post after close returned wrong error: {s}\n", .{ seed, @errorName(err) });
+            return false;
+        }
+        machine.exception = js.Value.undef();
+        dropped_rejected = true;
     };
+    if (!dropped_rejected) {
+        std.debug.print("seed {d}: graceful post after close was silently accepted\n", .{seed});
+        return false;
+    }
 
     var replies: usize = 0;
     var ack_sum: f64 = 0;
@@ -1938,10 +1947,19 @@ fn runWorkerCloseTerminateRace(gpa: std.mem.Allocator, seed: u64) !bool {
         std.debug.print("seed {d}: cannot make after-terminate message: {s}\n", .{ seed, @errorName(err) });
         return false;
     };
+    var terminated_rejected = false;
     terminator.postMessage(&machine, after_term) catch |err| {
-        std.debug.print("seed {d}: terminator post after terminate failed: {s}\n", .{ seed, @errorName(err) });
-        return false;
+        if (err != error.Throw) {
+            std.debug.print("seed {d}: terminator post after terminate returned wrong error: {s}\n", .{ seed, @errorName(err) });
+            return false;
+        }
+        machine.exception = js.Value.undef();
+        terminated_rejected = true;
     };
+    if (!terminated_rejected) {
+        std.debug.print("seed {d}: terminator post after terminate was silently accepted\n", .{seed});
+        return false;
+    }
     terminator.join();
     const after_term_reply = terminator.receive(&machine, 0) catch |err| {
         std.debug.print("seed {d}: terminator receive after join failed: {s}\n", .{ seed, @errorName(err) });
@@ -2038,10 +2056,19 @@ fn runModuleWorkerCloseTerminateRace(gpa: std.mem.Allocator, seed: u64) !bool {
         std.debug.print("seed {d}: cannot make module dropped message: {s}\n", .{ seed, @errorName(err) });
         return false;
     };
+    var dropped_rejected = false;
     graceful.postMessage(&machine, dropped_msg) catch |err| {
-        std.debug.print("seed {d}: graceful module post after close failed: {s}\n", .{ seed, @errorName(err) });
-        return false;
+        if (err != error.Throw) {
+            std.debug.print("seed {d}: graceful module post after close returned wrong error: {s}\n", .{ seed, @errorName(err) });
+            return false;
+        }
+        machine.exception = js.Value.undef();
+        dropped_rejected = true;
     };
+    if (!dropped_rejected) {
+        std.debug.print("seed {d}: graceful module post after close was silently accepted\n", .{seed});
+        return false;
+    }
 
     var replies: usize = 0;
     var ack_sum: f64 = 0;
@@ -2109,10 +2136,19 @@ fn runModuleWorkerCloseTerminateRace(gpa: std.mem.Allocator, seed: u64) !bool {
         std.debug.print("seed {d}: cannot make module after-terminate message: {s}\n", .{ seed, @errorName(err) });
         return false;
     };
+    var terminated_rejected = false;
     terminator.postMessage(&machine, after_term) catch |err| {
-        std.debug.print("seed {d}: terminator module post after terminate failed: {s}\n", .{ seed, @errorName(err) });
-        return false;
+        if (err != error.Throw) {
+            std.debug.print("seed {d}: terminator module post after terminate returned wrong error: {s}\n", .{ seed, @errorName(err) });
+            return false;
+        }
+        machine.exception = js.Value.undef();
+        terminated_rejected = true;
     };
+    if (!terminated_rejected) {
+        std.debug.print("seed {d}: terminator module post after terminate was silently accepted\n", .{seed});
+        return false;
+    }
     terminator.join();
     const after_term_reply = terminator.receive(&machine, 0) catch |err| {
         std.debug.print("seed {d}: terminator module receive after join failed: {s}\n", .{ seed, @errorName(err) });
@@ -17590,10 +17626,19 @@ fn runMidScriptWorkerCloseTerminateProfile(gpa: std.mem.Allocator, seed: u64, co
         std.debug.print("seed {d}: cannot make midgc worker-close dropped message: {s}\n", .{ seed, @errorName(err) });
         return false;
     };
+    var dropped_rejected = false;
     graceful.postMessage(&machine, dropped_msg) catch |err| {
-        std.debug.print("seed {d}: midgc graceful worker-close post after close failed: {s}\n", .{ seed, @errorName(err) });
-        return false;
+        if (err != error.Throw) {
+            std.debug.print("seed {d}: midgc graceful worker-close post after close returned wrong error: {s}\n", .{ seed, @errorName(err) });
+            return false;
+        }
+        machine.exception = js.Value.undef();
+        dropped_rejected = true;
     };
+    if (!dropped_rejected) {
+        std.debug.print("seed {d}: midgc graceful worker-close post after close was silently accepted\n", .{seed});
+        return false;
+    }
 
     const spin_src = try std.fmt.allocPrint(gpa, "globalThis.{s}Msg('spin', 3000)", .{msg_prefix});
     defer gpa.free(spin_src);
@@ -17829,10 +17874,19 @@ fn runMidScriptWorkerCloseTerminateProfile(gpa: std.mem.Allocator, seed: u64, co
         std.debug.print("seed {d}: cannot make midgc worker-close after-terminate message: {s}\n", .{ seed, @errorName(err) });
         return false;
     };
+    var terminated_rejected = false;
     terminator.postMessage(&machine, after_term) catch |err| {
-        std.debug.print("seed {d}: midgc terminator worker-close post after terminate failed: {s}\n", .{ seed, @errorName(err) });
-        return false;
+        if (err != error.Throw) {
+            std.debug.print("seed {d}: midgc terminator worker-close post after terminate returned wrong error: {s}\n", .{ seed, @errorName(err) });
+            return false;
+        }
+        machine.exception = js.Value.undef();
+        terminated_rejected = true;
     };
+    if (!terminated_rejected) {
+        std.debug.print("seed {d}: midgc terminator worker-close post after terminate was silently accepted\n", .{seed});
+        return false;
+    }
     terminator.join();
     const after_term_reply = terminator.receive(&machine, 0) catch |err| {
         std.debug.print("seed {d}: midgc terminator worker-close receive after join failed: {s}\n", .{ seed, @errorName(err) });
