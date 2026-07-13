@@ -5,7 +5,7 @@ description: The execution model and source map of zig-js.
 
 # Architecture
 
-zig-js runs JavaScript through a tree-walking interpreter and a suspendable bytecode VM that share the same object model. The **tree-walker is the primary engine** — the semantic baseline and the default execution path. The bytecode VM is a **targeted second path chosen for capability, not throughput**: on the saved microbenchmarks the two run at parity, so the VM exists for what the tree-walker structurally cannot do — suspend-and-resume, and a heap activation stack for deep recursion and proper tail calls — rather than to run supported code faster.
+zig-js runs JavaScript through a tree-walking interpreter and a suspendable bytecode VM that share the same object model. The **tree-walker is the semantic baseline**. Supported functions and programs compile to bytecode for suspend-and-resume, a heap activation stack for deep recursion and proper tail calls, and the optimization substrate. Hot bytecode will tier into native code under the [baseline JIT contract](baseline-jit.md); unsupported code always retains an exact interpreter fallback.
 
 ## Execution paths
 
