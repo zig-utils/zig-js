@@ -39,6 +39,11 @@ const ChannelPushError = error{
     OutOfMemory,
 };
 
+fn boundedWaitDuration(milliseconds: u64) std.Io.Duration {
+    const signed = std.math.cast(i64, milliseconds) orelse std.math.maxInt(i64);
+    return .fromMilliseconds(signed);
+}
+
 /// A FIFO of serialized messages with blocking pop. Closing wakes every
 /// waiter; remaining messages are still poppable (drain-then-stop), and
 /// `deinit` releases whatever was never consumed (including any SAB storage
@@ -152,7 +157,7 @@ const Channel = struct {
             };
             ch.clearQueue();
             const tmo: std.Io.Timeout = if (timeout_ms) |ms| .{ .duration = .{
-                .raw = .fromMilliseconds(@intCast(ms)),
+                .raw = boundedWaitDuration(ms),
                 .clock = .awake,
             } } else .none;
             io_compat.conditionWaitTimeout(&ch.cond, io, &ch.mutex, tmo) catch |err| switch (err) {
@@ -304,6 +309,13 @@ test "worker channel reports queue metadata allocation failure" {
     try std.testing.expectError(error.OutOfMemory, ch.pushOwned(try alloc.dupe(u8, &.{1})));
     try std.testing.expectEqual(@as(usize, 0), ch.liveMessages());
     try std.testing.expectEqual(@as(usize, 0), ch.queued_bytes);
+}
+
+test "worker wait timeout clamps unrepresentable milliseconds" {
+    try std.testing.expectEqual(
+        std.math.maxInt(i64),
+        boundedWaitDuration(std.math.maxInt(u64)).toMilliseconds(),
+    );
 }
 
 test "worker postMessage surfaces channel rejection" {
