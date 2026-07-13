@@ -37,7 +37,7 @@ Current public status is evidence-scoped:
 - test262 totals come from [docs/.data/test262.json](docs/.data/test262.json), regenerated from [docs/.data/test262-run-2026-07-05.txt](docs/.data/test262-run-2026-07-05.txt).
 - The skipped-test inventory is [docs/.data/test262-skips.tsv](docs/.data/test262-skips.tsv), currently zero.
 - The exact excluded-file inventory is [docs/.data/test262-excluded.tsv](docs/.data/test262-excluded.tsv), currently zero.
-- VM/tree-walker numbers below come from [docs/.data/bench-2026-07-04.txt](docs/.data/bench-2026-07-04.txt); the JSC comparison comes from the [July 13, 2026 report](docs/.data/benchmark-comparison-2026-07-13.md) and its [224 raw samples](docs/.data/benchmark-comparison-2026-07-13.tsv).
+- VM/tree-walker numbers below come from [docs/.data/bench-2026-07-04.txt](docs/.data/bench-2026-07-04.txt); the JSC comparison comes from the [July 13, 2026 report](docs/.data/benchmark-comparison-2026-07-13.md) and its [616 raw samples](docs/.data/benchmark-comparison-2026-07-13.tsv).
 - C API scope comes from the exported symbols in [src/c_api.zig](src/c_api.zig).
 - Threading and GC status are documented under [docs/threads](docs/threads) and [docs/architecture.md](docs/architecture.md).
 
@@ -108,25 +108,25 @@ Those numbers show current VM/tree-walk parity on these microbenchmarks, not a b
 
 ### zig-js vs JavaScriptCore
 
-`zig build benchmark-comparison` runs the exact same pure-JavaScript kernels and single-context invocation bytes through GC-enabled zig-js and the macOS system JavaScriptCore, checks deterministic results across engines, and reports seven-sample medians with dispersion. The latest [full report](docs/.data/benchmark-comparison-2026-07-13.md) was recorded on an 11-core Apple M3 Pro; every full-run row exceeds a 50 ms median timing floor:
+`zig build benchmark-comparison` runs the same pure-JavaScript kernels through GC-enabled zig-js and the macOS system JavaScriptCore, checks deterministic results across engines, and reports seven-sample medians with dispersion. It directly compares warmed single contexts, warmed independent contexts on persistent OS workers, and cold thread/context lifecycles; zig-js shared-realm threads remain a separate capability panel. The latest [full report](docs/.data/benchmark-comparison-2026-07-13.md) measured commit `c9f68e32` on an 11-core Apple M3 Pro (battery power, 66%, discharging); every full-run row exceeds a 50 ms median timing floor:
 
 | workload | zig-js single ms | JSC single ms | JSC / zig-js |
 | --- | ---: | ---: | ---: |
-| arithmetic | 472.650 | 120.707 | 3.92x |
-| properties | 346.126 | 80.259 | 4.31x |
-| arrays | 575.475 | 51.924 | 11.08x |
-| Fibonacci | 496.859 | 60.960 | 8.15x |
+| arithmetic | 433.536 | 119.881 | 3.62x |
+| properties | 329.675 | 86.305 | 3.82x |
+| arrays | 544.743 | 52.876 | 10.30x |
+| Fibonacci | 474.637 | 62.094 | 7.64x |
 
-At eight lanes, the throughput picture is deliberately workload-specific:
+At eight warmed independent contexts, the programming model and timed boundary are symmetric:
 
-| workload | zig-js shared-realm scaling | JSC independent-context scaling reference |
-| --- | ---: | ---: |
-| arithmetic | 5.35x | 5.11x |
-| properties | 4.98x | 4.81x |
-| arrays | 1.57x | 4.90x |
-| Fibonacci | 0.84x | 5.18x |
+| workload | zig-js ms | JSC ms | JSC / zig-js | zig-js scaling | JSC scaling |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| arithmetic | 662.490 | 209.608 | 3.16x | 5.10x | 4.60x |
+| properties | 522.445 | 142.411 | 3.67x | 4.74x | 4.55x |
+| arrays | 805.877 | 92.791 | 8.68x | 5.48x | 4.59x |
+| Fibonacci | 728.851 | 105.038 | 6.94x | 5.33x | 4.75x |
 
-The parallel models are not semantically equivalent: zig-js uses one shared object graph with no-GIL JavaScript `Thread`s, while public JSC uses isolated `JSGlobalContext`s on OS threads. They are deliberately reported as separate scaling panels without a cross-engine parallel ratio. The result shows both the strong independent-compute/property scaling and the current array-allocation/recursive-call contention. See [Performance Benchmarks](docs/benchmarks.md) for workloads, timed boundaries, process-order alternation, dispersion, caveats, reproduction, and raw evidence.
+By geometric mean, JSC leads direct single-context throughput by 5.74x and eight-context steady throughput by 5.14x. Eight-lane scaling from each engine's own steady one-lane baseline is 5.16x for zig-js and 4.62x for JSC. zig-js's separate shared-realm path scales 4.91x for arithmetic, 4.78x for properties, 1.71x for arrays, and 0.79x for Fibonacci. See [Performance Benchmarks](docs/benchmarks.md) for cold-lifecycle results, exact timed boundaries, process-order alternation, dispersion, caveats, reproduction, and raw evidence.
 
 Implemented performance machinery includes the bytecode VM, frame slots/upvalues, object shapes, inline caches, the engine-wide 8-byte NaN-boxed `Value`, GC slab backing, and an opt-in-GC one-cycle nursery that reclaims young garbage at quiescent boundaries and immediately tenures survivors. Future work includes tighter VM/codegen coverage, nursery sizing and pause optimization, deeper generational policies, and possible baseline/JIT exploration. There is no optimizing JIT today.
 
@@ -223,8 +223,9 @@ bun run docs:data
 bun run docs:build
 
 zig build bench                   # VM/tree-walk and thread-scaling benchmark
-zig build benchmark-comparison    # zig-js single/shared vs system JSC (macOS)
+zig build benchmark-comparison    # zig-js direct/independent/shared vs system JSC (macOS)
 zig build benchmark-comparison -Dbenchmark-comparison-quick=true
+zig build benchmark-comparison-test
 zig build threads-test            # WebKit PR-249 thread allowlist
 zig build threads-reference-audit # classify non-promoted PR-249 files
 python3 tools/threads-reference-audit.py --probe-candidates
