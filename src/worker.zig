@@ -354,6 +354,25 @@ test "worker-global postMessage throws on channel rejection" {
     try std.testing.expectEqual(@as(f64, 1), observed.asNum());
 }
 
+test "worker queue rejection releases SAB frame ownership" {
+    const ctx = try Context.create(std.testing.allocator);
+    defer ctx.destroy();
+    var machine = ctx.interpreter();
+    const sab = try ctx.evaluate("new SharedArrayBuffer(8)");
+    const storage = sab.asObj().array_buffer.?.shared.?;
+    const retain_count = storage.retainCount();
+    const w = try Worker.spawnWith("", .{
+        .inbox_limits = .{ .max_queued_bytes = 0 },
+    });
+    defer {
+        w.close();
+        w.join();
+        w.destroy();
+    }
+    try std.testing.expectError(error.Throw, w.postMessage(&machine, sab));
+    try std.testing.expectEqual(retain_count, storage.retainCount());
+}
+
 /// A module-graph entry point for a module worker. The host's `load`
 /// callback runs on the worker thread, so it must be thread-safe (an
 /// embedder-owned static module map is the canonical pattern); the source
