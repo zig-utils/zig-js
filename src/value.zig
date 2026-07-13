@@ -2667,6 +2667,21 @@ pub fn sameValueZero(a: Value, b: Value) bool {
     return strictEquals(a, b);
 }
 
+/// SameValue(x, y) (ECMA-262 7.2.11): like SameValueZero, but distinguishes
+/// +0 from -0 — SameValue(+0, -0) is false, while SameValue(NaN, NaN) is true.
+/// Used by the Proxy [[Get]]/[[Set]] invariants and Object.is.
+pub fn sameValue(a: Value, b: Value) bool {
+    if (a.isNumber() and b.isNumber()) {
+        const x = a.asNum();
+        const y = b.asNum();
+        if (std.math.isNan(x) and std.math.isNan(y)) return true;
+        // Zeros compare equal only when their sign bits agree (+0 vs -0 differ).
+        if (x == 0 and y == 0) return std.math.signbit(x) == std.math.signbit(y);
+        return x == y;
+    }
+    return strictEquals(a, b);
+}
+
 /// Abstract Equality Comparison (==), simplified for the v1 value set.
 pub fn looseEquals(a: Value, b: Value) bool {
     if (a.kind() == b.kind()) {

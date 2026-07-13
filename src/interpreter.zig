@@ -5127,8 +5127,14 @@ pub const Interpreter = struct {
             }
         }
         const iter_obj = try self.iteratorOf(v); // throws TypeError if not iterable
+        // GetIterator reads the `next` method exactly ONCE and reuses it for every
+        // step; re-reading it per step (a `get next()` accessor, or a mutated slot)
+        // is observable and non-conformant.
+        const next_method = try self.getProperty(iter_obj, "next");
+        const next_root = try self.pushTempRoot(next_method);
+        defer self.restoreTempRoots(next_root);
         while (true) {
-            const res = try self.callMethod(iter_obj, "next", &.{});
+            const res = try self.callValueWithThis(next_method, &.{}, iter_obj);
             if (!builtins.isRealObject(res)) return self.throwError("TypeError", "iterator result is not an object");
             if ((try self.getProperty(res, "done")).toBoolean()) break;
             try list.append(self.arena, try self.getProperty(res, "value"));
@@ -7284,7 +7290,10 @@ pub const Interpreter = struct {
                     }
                     return;
                 }
-                for (try so.ownKeys(self.arena)) |k| {
+                // [[OwnPropertyKeys]] (not just `ownKeys`): integer-indexed dense
+                // elements live outside the shape's key order, so a `{ ...src }`
+                // where `src.0` was set via `src[0]=…` would otherwise drop it.
+                for (try self.objectOwnKeysList(so)) |k| {
                     if (value.isPrivateKey(k)) continue;
                     if (!so.getAttr(k).enumerable) continue;
                     try self.setMember(target, k, try self.getProperty(src, k));
@@ -9225,7 +9234,7 @@ pub const Interpreter = struct {
                     if ((acc.get == null or acc.get.?.isUndefined()) and !res.isUndefined())
                         return self.throwError("TypeError", "proxy 'get' must report undefined for a non-configurable accessor with no getter");
                 } else if (!target.getAttr(key).writable) {
-                    if (target.getOwn(key)) |tv| if (!value.strictEquals(res, tv))
+                    if (target.getOwn(key)) |tv| if (!value.sameValue(res, tv))
                         return self.throwError("TypeError", "proxy 'get' must report the target value for a non-configurable non-writable property");
                 }
             }
@@ -9248,7 +9257,7 @@ pub const Interpreter = struct {
                 if (target.getAccessor(key)) |acc| {
                     if (acc.set == null or acc.set.?.isUndefined()) return self.throwError("TypeError", "proxy 'set' cannot succeed for a non-configurable accessor with no setter");
                 } else if (!target.getAttr(key).writable) {
-                    if (target.getOwn(key)) |tv| if (!value.strictEquals(v, tv))
+                    if (target.getOwn(key)) |tv| if (!value.sameValue(v, tv))
                         return self.throwError("TypeError", "proxy 'set' cannot change a non-configurable non-writable property");
                 }
             }
@@ -16829,7 +16838,16 @@ fn bigIntToStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
         radix = @intFromFloat(rf);
     }
     if (big.bigint_text != null and radix == 10) return try Value.strAlloc(self.arena, big.bigint_text.?);
-    if (big.bigint_text != null) return self.throwError("RangeError", "BigInt value is too large for non-decimal radix conversion");
+    if (big.bigint_text != null) {
+        // Value beyond i128 (radix 10 already returned above via the cached decimal
+        // text): reconstruct the bignum and let it format in the requested radix.
+        var m = try managedBigIntFromObject(self.arena, big);
+        const s = m.toString(self.arena, radix, .lower) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => unreachable,
+        };
+        return try Value.strAlloc(self.arena, s);
+    }
     return try Value.strAlloc(self.arena, try formatBigIntRadix(self.arena, big.bigint, radix));
 }
 
