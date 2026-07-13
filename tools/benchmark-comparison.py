@@ -185,11 +185,10 @@ def metadata() -> dict[str, str]:
     }
 
 
-def render(rows: list[Row], lanes: list[int], raw_path: pathlib.Path | None) -> str:
+def render(rows: list[Row], lanes: list[int], raw_path: pathlib.Path | None, info: dict[str, str]) -> str:
     groups: dict[tuple[str, str, str, int, int], list[Row]] = defaultdict(list)
     for row in rows:
         groups[row.key].append(row)
-    info = metadata()
     lines = [
         f"# zig-js / JavaScriptCore benchmark — {info['Date']}",
         "",
@@ -350,11 +349,16 @@ def main() -> int:
         if not binary.is_file():
             parser.error(f"runner does not exist: {binary}")
 
+    info = metadata()
+    publishing = args.raw_out is not None or args.markdown_out is not None
+    if publishing and info["zig-js"].endswith(" (tracked worktree dirty)"):
+        parser.error("refusing to publish benchmark evidence from a dirty tracked worktree")
+
     rows = collect(args.zig_js_runner, args.jsc_runner, samples, lanes, args.quick)
     validate(rows, samples, lanes, args.quick)
+    report = render(rows, lanes, args.raw_out, info)
     if args.raw_out:
         write_raw(args.raw_out, rows)
-    report = render(rows, lanes, args.raw_out)
     if args.markdown_out:
         args.markdown_out.parent.mkdir(parents=True, exist_ok=True)
         args.markdown_out.write_text(report)
