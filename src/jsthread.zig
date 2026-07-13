@@ -3024,6 +3024,34 @@ test "property waiter queue growth uses Gil allocator and is trace-sensitive" {
     try std.testing.expect(!gc_runtime.inTraceSensitiveLock());
 }
 
+test "property waiter metadata counts against heap budget" {
+    const ctx = try Context.createWith(std.testing.allocator, .{
+        .enable_threads = true,
+        .heap_limit_bytes = 8 * 1024 * 1024,
+    });
+    defer ctx.destroy();
+
+    const g = ctx.gil.?;
+    const before = ctx.heapBudgetStats().?.used_bytes;
+    const key = try g.prop_alloc.dupe(u8, "budgeted-property-waiter");
+    errdefer g.prop_alloc.free(key);
+    const ticket = try g.prop_alloc.create(PropAsyncTicket);
+    errdefer g.prop_alloc.destroy(ticket);
+    ticket.* = .{
+        .obj = ctx.global_object,
+        .key = key,
+        .deadline_ns = null,
+        .promise = ctx.global_object,
+        .microtasks = &ctx.microtasks,
+        .thread = null,
+        .owner = @ptrCast(g),
+    };
+    try appendPropAsyncLocked(g, ticket);
+
+    const after = ctx.heapBudgetStats().?.used_bytes;
+    try std.testing.expect(after > before);
+}
+
 fn waitPropTicketTimeout(self: *Interpreter, g: *gil_mod.Gil, ticket: *PropTicket, timeout: std.Io.Timeout) error{Timeout}!void {
     const io = agent.engineIo();
     if (self.use_thread_gil) {
