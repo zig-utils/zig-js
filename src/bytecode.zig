@@ -306,6 +306,13 @@ pub const FnTemplate = struct {
 /// and function-template pools. All slices live in the owning arena.
 pub const Chunk = struct {
     arena: std.mem.Allocator,
+    /// Frame layout owned by this chunk. Program and environment-mode chunks
+    /// leave both at zero; plain function chunks record parameters first,
+    /// followed by every function-scoped local. Native tiers use this metadata
+    /// to validate slot operands and entry guards without depending on a
+    /// `Function` object's private layout.
+    param_count: u32 = 0,
+    local_count: u32 = 0,
     code: std.ArrayListUnmanaged(Inst) = .empty,
     consts: std.ArrayListUnmanaged(Value) = .empty,
     names: std.ArrayListUnmanaged([]const u8) = .empty,

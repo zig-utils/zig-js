@@ -50,10 +50,29 @@ test "compiler lowers a constant-return bytecode function" {
     const program = try parser.parseProgram();
     const root = try Compiler.compileProgram(allocator, program);
     const function_chunk = root.fns.items[0].chunk.?;
+    try std.testing.expectEqual(@as(u32, 0), function_chunk.param_count);
+    try std.testing.expectEqual(@as(u32, 0), function_chunk.local_count);
 
     var compiled = try compile(function_chunk);
     defer compiled.deinit();
     var frame = jit.NativeFrame{};
     try std.testing.expectEqual(jit.ExitStatus.complete, compiled.run(&frame));
     try std.testing.expectEqual(@as(f64, 42), @import("../value.zig").Value.fromRawBits(frame.result_bits).asNum());
+}
+
+test "plain function chunks record native frame arity" {
+    const std = @import("std");
+    const Parser = @import("../parser.zig").Parser;
+    const Compiler = @import("../compiler.zig").Compiler;
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var parser = try Parser.init(allocator, "function sum(a, b) { var c = 0; return a + b + c; }");
+    const program = try parser.parseProgram();
+    const root = try Compiler.compileProgram(allocator, program);
+    const function_chunk = root.fns.items[0].chunk.?;
+
+    try std.testing.expectEqual(@as(u32, 2), function_chunk.param_count);
+    try std.testing.expectEqual(@as(u32, 3), function_chunk.local_count);
 }

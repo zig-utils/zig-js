@@ -3067,6 +3067,8 @@ test "vm: hot primitive constant function tiers through native entry" {
     }
 
     const function_chunk = chunk.fns.items[0].chunk.?;
+    try std.testing.expectEqual(@as(u32, 0), function_chunk.param_count);
+    try std.testing.expectEqual(@as(u32, 0), function_chunk.local_count);
     try std.testing.expectEqual(jit.TierState.ready, function_chunk.tier.loadState());
     try std.testing.expectEqual(@as(u32, 2), function_chunk.tier.loadCode().?.bytecode_steps);
     try std.testing.expectEqual(jit.TierState.rejected, chunk.tier.loadState());

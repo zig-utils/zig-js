@@ -813,6 +813,8 @@ pub const Compiler = struct {
 
         const chunk = try arena.create(Chunk);
         chunk.* = Chunk.init(arena);
+        chunk.param_count = @intCast(fnode.params.len);
+        chunk.local_count = scope.count;
         var c = Compiler{ .arena = arena, .chunk = chunk, .mode = .function, .scope = scope, .is_strict = fnode.is_strict };
         if (fnode.is_expr_body) {
             try c.compileTailExpr(fnode.body);
@@ -2561,6 +2563,9 @@ pub const Compiler = struct {
                 _ = try scope.addLocal(self.arena, p.name);
             }
             if (!fnode.is_expr_body) try collectLocals(self.arena, scope, fnode.body);
+
+            compiled.param_count = @intCast(fnode.params.len);
+            compiled.local_count = scope.count;
 
             var sub_c = Compiler{ .arena = self.arena, .chunk = compiled, .mode = .function, .scope = scope, .is_strict = fnode.is_strict };
             if (fnode.is_expr_body) {

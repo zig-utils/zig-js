@@ -69,6 +69,26 @@ pub const ExitStatus = enum(u32) { complete, side_exit, throw, stop };
 pub const NativeFrame = extern struct {
     result_bits: u64 = 0,
     exit_ip: usize = 0,
+    /// Raw NaN-boxed function slots. The VM keeps the owning activation rooted
+    /// for the entire native call; generated code may only access indexes that
+    /// the chunk's immutable frame metadata proves in bounds.
+    slots: ?[*]u64 = null,
+    /// Caller-owned spill storage for the native operand stack. The first
+    /// numeric tier permits no GC pointer here, so precise tracing needs no
+    /// backend-specific stack map.
+    scratch: ?[*]u64 = null,
+    /// Exact interpreter step counter, updated before every native safepoint
+    /// and on every exit.
+    steps: ?*u64 = null,
+    runtime_context: ?*anyopaque = null,
+    /// Returns zero to continue or a non-zero `ExitStatus` value to leave
+    /// native code after servicing budget, termination, GIL, and GC work.
+    checkpoint: ?*const fn (*NativeFrame) callconv(.c) u32 = null,
+    /// Full Number remainder semantics for operands outside the generated
+    /// positive-small-integer fast path.
+    remainder: ?*const fn (f64, f64) callconv(.c) f64 = null,
+    steps_until_checkpoint: u64 = 0,
+    steps_until_budget: u64 = 0,
 };
 
 pub const NativeEntry = *const fn (*NativeFrame) callconv(.c) u32;
