@@ -502,6 +502,29 @@ inline fn numberRemainder(a: f64, b: f64) f64 {
     return @rem(a, b);
 }
 
+fn nativeRemainder(a: f64, b: f64) callconv(.c) f64 {
+    return numberRemainder(a, b);
+}
+
+fn nativeCheckpoint(frame: *jit.NativeFrame) callconv(.c) u32 {
+    const vm: *Interpreter = @ptrCast(@alignCast(frame.runtime_context orelse return @intFromEnum(jit.ExitStatus.stop)));
+    const steps = (frame.steps orelse return @intFromEnum(jit.ExitStatus.stop)).*;
+    if (steps > interp.max_steps) {
+        const abrupt = vm.catchableOutOfMemory(vm.throwError("RangeError", "evaluation step budget exceeded"));
+        return @intFromEnum(if (abrupt == error.Throw) jit.ExitStatus.throw else jit.ExitStatus.stop);
+    }
+    // A budget island can share this callback with an ordinary 1024-step
+    // checkpoint. When neither condition applies there is no runtime work.
+    if ((steps & 1023) != 0) return 0;
+    if (vm.stop_flag) |sf| if (sf.load(.monotonic)) {
+        const abrupt = vm.catchableOutOfMemory(vm.throwError("Error", "worker terminated"));
+        return @intFromEnum(if (abrupt == error.Throw) jit.ExitStatus.throw else jit.ExitStatus.stop);
+    };
+    if (vm.use_thread_gil) if (vm.gil) |g| g.yieldIfContended();
+    if (vm.gc_safepoint_fn != null) vm.serviceGcSafepoint();
+    return 0;
+}
+
 fn generatorStackAllocator(vm: *Interpreter, gen: ?*Generator) std.mem.Allocator {
     return if (gen) |g| g.stackAllocator(vm.arena) else vm.arena;
 }
@@ -518,7 +541,7 @@ pub fn run(vm: *Interpreter, chunk: *Chunk, frame: ?*Frame) EvalError!Value {
     return execLoop(vm, &exec, chunk, frame, null);
 }
 
-fn tryRunNative(vm: *Interpreter, exec: *Exec, chunk: *Chunk, gen: ?*Generator) ?Value {
+fn tryRunNative(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?*Generator) EvalError!?Value {
     if (gen != null or exec.ip != 0 or exec.stack.items.len != 0 or exec.handlers.items.len != 0) return null;
     const owner = vm.jit_owner orelse return null;
 
@@ -537,6 +560,42 @@ fn tryRunNative(vm: *Interpreter, exec: *Exec, chunk: *Chunk, gen: ?*Generator) 
         code = owned;
     }
     const native = code orelse return null;
+
+    if (native.manages_steps) {
+        if (native.max_stack_depth > jit.numeric_scratch_capacity) return null;
+        const current_frame = frame;
+        if (native.frame_slots > 0) {
+            const cf = current_frame orelse return null;
+            if (cf.slots.len < native.frame_slots or cf.escaped.load(.monotonic)) return null;
+        }
+        if (native.required_numeric_slots != 0) {
+            const cf = current_frame orelse return null;
+            var required = native.required_numeric_slots;
+            while (required != 0) {
+                const slot: u6 = @intCast(@ctz(required));
+                if (!cf.slots[slot].isNumber()) return null;
+                required &= required - 1;
+            }
+        }
+
+        var scratch: [jit.numeric_scratch_capacity]u64 = undefined;
+        var native_frame = jit.NativeFrame{
+            .slots = if (current_frame) |cf| @ptrCast(cf.slots.ptr) else null,
+            .scratch = scratch[0..].ptr,
+            .steps = &vm.steps,
+            .runtime_context = vm,
+            .checkpoint = nativeCheckpoint,
+            .remainder = nativeRemainder,
+            .steps_until_checkpoint = 1024 - (vm.steps & 1023),
+            .steps_until_budget = if (vm.steps <= interp.max_steps) interp.max_steps - vm.steps else 0,
+        };
+        return switch (native.run(&native_frame)) {
+            .complete => Value.fromRawBits(native_frame.result_bits),
+            .throw => error.Throw,
+            .stop => error.OutOfMemory,
+            .side_exit => null,
+        };
+    }
 
     // Preserve runChunk's exact step/checkpoint contract. A native entry may
     // cover an interval only when it neither exceeds the budget nor crosses a
@@ -578,7 +637,7 @@ fn execLoop(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
     exec.frame = frame; // so a mid-script collection roots this activation's slots
     vm.pushExecRoot(exec);
     defer vm.popExecRoot(exec);
-    if (tryRunNative(vm, exec, chunk, gen)) |result| return result;
+    if (try tryRunNative(vm, exec, chunk, frame, gen)) |result| return result;
     // Run the instruction stream; if a throw escapes and an active handler can
     // catch it, unwind to that handler's catch block and resume. Otherwise the
     // throw propagates to the caller (uncaught — the generator/function ends).
@@ -2906,7 +2965,7 @@ fn runDriver(vm: *Interpreter, initial: *Activation) EvalError!Value {
 
     while (acts.items.len > 0) {
         const cur = acts.items[acts.items.len - 1];
-        const outcome: EvalError!Value = if (tryRunNative(vm, &cur.exec, cur.chunk, null)) |native_result|
+        const outcome: EvalError!Value = if (try tryRunNative(vm, &cur.exec, cur.chunk, cur.frame, null)) |native_result|
             native_result
         else
             runChunk(vm, &cur.exec, cur.chunk, cur.frame, null);
@@ -3079,6 +3138,80 @@ test "vm: hot primitive constant function tiers through native entry" {
     machine.steps = 1022;
     try std.testing.expectEqual(@as(f64, 42), (try run(&machine, function_chunk, null)).asNum());
     try std.testing.expectEqual(@as(u64, 1024), machine.steps);
+}
+
+test "vm: numeric baseline tier preserves steps and non-number fallback" {
+    if (!jit.supported or @import("builtin").cpu.arch != .aarch64) return error.SkipZigTest;
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var parser = try Parser.init(allocator,
+        \\function sum(n) {
+        \\  var total = 0;
+        \\  for (var i = 0; i < n; i = i + 1) total = total + i;
+        \\  return total;
+        \\}
+        \\function addOne(x) { return x + 1; }
+        \\function remainder(a, b) { return a % b; }
+    );
+    const program = try parser.parseProgram();
+    const root = try Compiler.compileProgram(allocator, program);
+
+    var owner = jit.Owner.init(std.testing.allocator);
+    defer owner.deinit();
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
+    try interp.installGlobals(&env, root_shape);
+    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+
+    const sum_chunk = root.fns.items[0].chunk.?;
+    var sum_slots = [_]Value{ Value.num(10), Value.undef(), Value.undef() };
+    var sum_frame = Frame{ .slots = &sum_slots, .parent = null };
+    var expected_steps: u64 = 0;
+    for (0..3) |iteration| {
+        sum_slots = .{ Value.num(10), Value.undef(), Value.undef() };
+        if (iteration == 2) machine.steps = 1023; // native entry must service the first-op checkpoint
+        const start_steps = machine.steps;
+        try std.testing.expectEqual(@as(f64, 45), (try run(&machine, sum_chunk, &sum_frame)).asNum());
+        const delta = machine.steps - start_steps;
+        if (iteration == 0) expected_steps = delta else try std.testing.expectEqual(expected_steps, delta);
+    }
+    try std.testing.expectEqual(jit.TierState.ready, sum_chunk.tier.loadState());
+    try std.testing.expect(sum_chunk.tier.loadCode().?.manages_steps);
+
+    const add_chunk = root.fns.items[1].chunk.?;
+    var add_slots = [_]Value{Value.num(0)};
+    var add_frame = Frame{ .slots = &add_slots, .parent = null };
+    for (1..4) |n| {
+        add_slots[0] = Value.num(@floatFromInt(n));
+        try std.testing.expectEqual(@as(f64, @floatFromInt(n + 1)), (try run(&machine, add_chunk, &add_frame)).asNum());
+    }
+    try std.testing.expectEqual(jit.TierState.ready, add_chunk.tier.loadState());
+    add_slots[0] = Value.str("x");
+    const fallback = try run(&machine, add_chunk, &add_frame);
+    try std.testing.expect(fallback.isString());
+    try std.testing.expectEqualStrings("x1", fallback.asStr());
+
+    const remainder_chunk = root.fns.items[2].chunk.?;
+    var remainder_slots = [_]Value{ Value.num(0), Value.num(1) };
+    var remainder_frame = Frame{ .slots = &remainder_slots, .parent = null };
+    const warmup = [_][3]f64{
+        .{ 5, 2, 1 },
+        .{ 8, 3, 2 },
+        .{ 9, 4, 1 },
+    };
+    for (warmup) |case| {
+        remainder_slots = .{ Value.num(case[0]), Value.num(case[1]) };
+        try std.testing.expectEqual(case[2], (try run(&machine, remainder_chunk, &remainder_frame)).asNum());
+    }
+    try std.testing.expectEqual(jit.TierState.ready, remainder_chunk.tier.loadState());
+    remainder_slots = .{ Value.num(-5), Value.num(2) };
+    try std.testing.expectEqual(@as(f64, -1), (try run(&machine, remainder_chunk, &remainder_frame)).asNum());
+    remainder_slots = .{ Value.num(5.5), Value.num(2) };
+    try std.testing.expectEqual(@as(f64, 1.5), (try run(&machine, remainder_chunk, &remainder_frame)).asNum());
+    remainder_slots = .{ Value.num(std.math.nan(f64)), Value.num(2) };
+    try std.testing.expect(std.math.isNan((try run(&machine, remainder_chunk, &remainder_frame)).asNum()));
 }
 
 test "vm: completed non-escaping recursive activations reuse bounded storage" {

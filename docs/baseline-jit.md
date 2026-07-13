@@ -30,6 +30,11 @@ JavaScript `Thread`s, so publication and rejection are race-safe; only the
 winner of the `cold` to `compiling` transition allocates code. Context teardown
 owns all generated mappings and waits until no engine thread can execute them.
 
+Embedders can set `Context.Options.enable_jit = false` to keep every chunk on
+the bytecode VM. The switch is fixed for the context lifetime, so differential
+tests and profiles can compare identical source without a timing-sensitive tier
+toggle or partially published code.
+
 ## Entry ABI
 
 The native entry point receives one pointer to a stable `NativeFrame` defined

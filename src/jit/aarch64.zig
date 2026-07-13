@@ -127,6 +127,22 @@ pub const Assembler = struct {
         try self.emit32(0x1e60_2000 | (@as(u32, fm) << 16) | (@as(u32, fn_) << 5));
     }
 
+    pub fn convertFloat64ToUnsigned32(self: *Assembler, rd: u5, fn_: u5) error{NoSpace}!void {
+        try self.emit32(0x1e79_0000 | (@as(u32, fn_) << 5) | rd);
+    }
+
+    pub fn convertUnsigned32ToFloat64(self: *Assembler, fd: u5, rn: u5) error{NoSpace}!void {
+        try self.emit32(0x1e63_0000 | (@as(u32, rn) << 5) | fd);
+    }
+
+    pub fn divideUnsigned32(self: *Assembler, rd: u5, rn: u5, rm: u5) error{NoSpace}!void {
+        try self.emit32(0x1ac0_0800 | (@as(u32, rm) << 16) | (@as(u32, rn) << 5) | rd);
+    }
+
+    pub fn multiplySubtract32(self: *Assembler, rd: u5, rn: u5, rm: u5, ra: u5) error{NoSpace}!void {
+        try self.emit32(0x1b00_8000 | (@as(u32, rm) << 16) | (@as(u32, ra) << 10) | (@as(u32, rn) << 5) | rd);
+    }
+
     pub fn conditionalSet32(self: *Assembler, rd: u5, condition: Condition) error{NoSpace}!void {
         try self.emit32(0x1a9f_07e0 | (@as(u32, @intFromEnum(condition.inverted())) << 12) | rd);
     }
@@ -150,6 +166,12 @@ pub const Assembler = struct {
     pub fn branchNotZero32Placeholder(self: *Assembler, rt: u5) error{NoSpace}!usize {
         const at = self.offset;
         try self.emit32(0x3500_0000 | @as(u32, rt));
+        return at;
+    }
+
+    pub fn branchZero32Placeholder(self: *Assembler, rt: u5) error{NoSpace}!usize {
+        const at = self.offset;
+        try self.emit32(0x3400_0000 | @as(u32, rt));
         return at;
     }
 
@@ -179,7 +201,8 @@ pub const Assembler = struct {
     pub fn patchCompareBranch(self: *Assembler, at: usize, target: usize) error{ InvalidBranch, BranchOutOfRange }!void {
         const displacement = try branchDisplacement(at, target, 19);
         const current = readInstruction(self.buffer, at) catch return error.InvalidBranch;
-        if ((current & 0x7f00_0000) != 0x3500_0000) return error.InvalidBranch;
+        const opcode = current & 0x7e00_0000;
+        if (opcode != 0x3400_0000) return error.InvalidBranch;
         const encoded = @as(u32, @bitCast(@as(i32, @intCast(displacement)))) & 0x7ffff;
         writeInstruction(self.buffer, at, (current & 0xff00_001f) | (encoded << 5)) catch return error.InvalidBranch;
     }
@@ -279,6 +302,40 @@ test "AArch64 numeric tier instruction encodings" {
         0x3600_0049, 0x1400_0001, 0xd65f_03c0,
     };
     try std.testing.expectEqual(expected.len * 4, assembler.bytes().len);
+    for (expected, 0..) |instruction, index| {
+        try std.testing.expectEqual(instruction, std.mem.readInt(u32, assembler.bytes()[index * 4 ..][0..4], .little));
+    }
+}
+
+test "AArch64 guarded unsigned remainder encodings" {
+    var storage: [56]u8 = undefined;
+    var assembler = Assembler.init(&storage);
+    try assembler.convertFloat64ToUnsigned32(9, 0);
+    try assembler.convertUnsigned32ToFloat64(2, 9);
+    try assembler.compareFloat64(0, 2);
+    const lhs_fractional = try assembler.branchConditionPlaceholder(.ne);
+    const lhs_zero = try assembler.branchZero32Placeholder(9);
+    try assembler.convertFloat64ToUnsigned32(10, 1);
+    try assembler.convertUnsigned32ToFloat64(2, 10);
+    try assembler.compareFloat64(1, 2);
+    const rhs_fractional = try assembler.branchConditionPlaceholder(.ne);
+    const rhs_zero = try assembler.branchZero32Placeholder(10);
+    try assembler.divideUnsigned32(11, 9, 10);
+    try assembler.multiplySubtract32(9, 11, 10, 9);
+    try assembler.convertUnsigned32ToFloat64(0, 9);
+    const slow = assembler.position();
+    try assembler.ret();
+    try assembler.patchConditionBranch(lhs_fractional, slow);
+    try assembler.patchCompareBranch(lhs_zero, slow);
+    try assembler.patchConditionBranch(rhs_fractional, slow);
+    try assembler.patchCompareBranch(rhs_zero, slow);
+
+    const expected = [_]u32{
+        0x1e79_0009, 0x1e63_0122, 0x1e62_2000, 0x5400_0141,
+        0x3400_0129, 0x1e79_002a, 0x1e63_0142, 0x1e62_2020,
+        0x5400_00a1, 0x3400_008a, 0x1aca_092b, 0x1b0a_a569,
+        0x1e63_0120, 0xd65f_03c0,
+    };
     for (expected, 0..) |instruction, index| {
         try std.testing.expectEqual(instruction, std.mem.readInt(u32, assembler.bytes()[index * 4 ..][0..4], .little));
     }

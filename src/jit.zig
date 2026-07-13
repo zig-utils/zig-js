@@ -62,6 +62,7 @@ pub const Tier = struct {
 };
 
 pub const ExitStatus = enum(u32) { complete, side_exit, throw, stop };
+pub const numeric_scratch_capacity = 64;
 
 /// Stable C-compatible boundary between generated code and the Zig runtime.
 /// More fields are appended as lowering grows; generated code only addresses
@@ -99,6 +100,12 @@ pub const CompiledCode = struct {
     /// Number of bytecode dispatches represented by a successful native entry.
     /// Used to preserve the interpreter's step-budget/checkpoint accounting.
     bytecode_steps: u32 = 0,
+    /// Numeric/control entries update the interpreter counter themselves and
+    /// call the runtime exactly at bytecode checkpoint boundaries.
+    manages_steps: bool = false,
+    frame_slots: u32 = 0,
+    required_numeric_slots: u64 = 0,
+    max_stack_depth: u8 = 0,
 
     pub fn deinit(self: *CompiledCode) void {
         self.memory.deinit();

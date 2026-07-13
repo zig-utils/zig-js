@@ -1760,6 +1760,7 @@ pub const Context = struct {
     /// Executable mappings outlive individual Interpreter values and are freed
     /// after every shared-realm JavaScript thread has joined.
     jit_owner: jit.Owner = .{},
+    enable_jit: bool = true,
     /// Reusable allocator used as the GC heap's cell backing. It recycles
     /// per-cell slabs for allocation/lifecycle performance and becomes
     /// internally locked under `parallel_gc`, so multiple mutators can allocate
@@ -2002,6 +2003,10 @@ pub const Context = struct {
     script_referrer: []const u8 = "",
 
     pub const Options = struct {
+        /// Enable hot bytecode functions' baseline native tier when the host
+        /// architecture supports it. Disable deterministically for differential
+        /// validation and profiling; unsupported targets always interpret.
+        enable_jit: bool = true,
         /// Install the shared-realm `Thread` API. Spawned threads run in
         /// parallel by default; set `.gil = true` for the serialized fallback.
         enable_threads: bool = false,
@@ -2036,6 +2041,7 @@ pub const Context = struct {
     /// `[[CanBlock]]` and the PR-249 max thread count without making them part
     /// of the stable embedder options surface.
     pub const TestingOptions = struct {
+        enable_jit: bool = true,
         enable_threads: bool = false,
         enable_gc: bool = false,
         concurrent_gc: bool = false,
@@ -2137,6 +2143,7 @@ pub const Context = struct {
         // of the parallel sync cost.
         const want_parallel = options.enable_threads and !options.gil;
         return createWithTestingOptions(gpa, .{
+            .enable_jit = options.enable_jit,
             .enable_threads = options.enable_threads,
             .enable_gc = options.enable_gc or want_parallel,
             .concurrent_gc = options.concurrent_gc,
@@ -2206,6 +2213,7 @@ pub const Context = struct {
             .arena_state = arena_state,
             .locked_arena = locked_arena,
             .jit_owner = jit.Owner.init(context_gpa),
+            .enable_jit = options.enable_jit,
             .owner_thread = std.Thread.getCurrentId(),
             .sab_retains = .{ .gpa = context_gpa },
             .env = .{ .arena = a, .fn_scope = true }, // global is a variable scope
@@ -2355,7 +2363,7 @@ pub const Context = struct {
         return .{
             .arena = self.arena(),
             .env = &self.env,
-            .jit_owner = &self.jit_owner,
+            .jit_owner = if (self.enable_jit) &self.jit_owner else null,
             .global_object = self.global_object,
             .this_value = Value.obj(self.global_object),
             .root_shape = self.root_shape,
@@ -11060,7 +11068,18 @@ test "Context threads run parallel by default; gil option opts into serialized m
     }
 }
 
+test "Context enable_jit false keeps the bytecode VM deterministic" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_jit = false });
+    defer ctx.destroy();
+    try std.testing.expect(!ctx.enable_jit);
+    const machine = ctx.interpreter();
+    try std.testing.expect(machine.jit_owner == null);
+    const result = try ctx.evaluate("function addOne(x) { return x + 1; } addOne(1); addOne(2); addOne(3); addOne(4)");
+    try std.testing.expectEqual(@as(f64, 5), result.asNum());
+}
+
 test "Context public Options expose only stable thread controls" {
+    try std.testing.expect(@hasField(Context.Options, "enable_jit"));
     try std.testing.expect(@hasField(Context.Options, "enable_threads"));
     try std.testing.expect(@hasField(Context.Options, "gil"));
     try std.testing.expect(@hasField(Context.Options, "heap_limit_bytes"));
