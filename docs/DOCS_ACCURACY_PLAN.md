@@ -18,6 +18,9 @@ inventing implementation status.
 - **Threading status** comes from `docs/threads/*`, `conformance/threads_test.zig`,
   and the current `zig build threads-test` result.
 - **Build commands** come from `build.zig` and `package.json`.
+- **Performance claims** come from a dated report under `docs/.data/`, its raw
+  sample file, and the exact workload/runner sources documented in
+  `docs/benchmarks.md`. Do not copy quick-mode smoke timings into public tables.
 
 ## Rules
 
@@ -31,6 +34,9 @@ inventing implementation status.
   exclusion is removed.
 - Do not describe the C API as the whole JavaScriptCore framework. It is an
   implemented public C-API subset.
+- Do not compare shared-realm zig-js `Thread`s with JSC independent contexts
+  without naming the semantic difference. State the hardware, engine versions,
+  sample count, statistic, workload scope, and saved raw evidence.
 - Historical design notes may keep old numbers only when they are clearly
   framed as history. Public status pages should use current data.
 

@@ -187,6 +187,7 @@ export default {
   nav: [
     { text: 'Guide', link: '/guide/' },
     { text: 'Architecture', link: '/architecture' },
+    { text: 'Benchmarks', link: '/benchmarks' },
     { text: 'Conformance', link: '/conformance' },
     { text: 'C-API', link: '/api' },
     { text: 'GitHub', link: 'https://github.com/stacksjs/zig-js' },
@@ -211,6 +212,7 @@ export default {
           text: 'Internals',
           items: [
             { text: 'Architecture', link: '/architecture' },
+            { text: 'Performance Benchmarks', link: '/benchmarks' },
             { text: 'Threading', link: '/threads/' },
             { text: 'Thread API Reference', link: '/threads/api' },
             { text: 'Thread Memory Model', link: '/threads/memory-model' },
