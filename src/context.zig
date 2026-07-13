@@ -30,6 +30,152 @@ const finalization_cleanup_queue_reserve_granularity = 16;
 const module_queue_reserve_granularity = 16;
 const module_namespace_waiter_reserve_granularity = 16;
 
+/// Serializes calls into an embedder allocator that may not itself be safe for
+/// concurrent use. Under no-GIL execution, otherwise-independent engine locks
+/// (arena refills, GC slab refills, JIT ownership, side lists) can all bottom
+/// out in that same allocator at once. This wrapper is installed only for true
+/// parallel contexts and sits below every Context allocator consumer.
+const SerializedAllocator = struct {
+    inner: std.mem.Allocator,
+    lock: std.atomic.Value(u32) = .init(0),
+
+    inline fn acquire(self: *SerializedAllocator) void {
+        var spins: usize = 0;
+        while (self.lock.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) : (spins += 1) {
+            if ((spins & 0xff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
+        }
+    }
+
+    inline fn release(self: *SerializedAllocator) void {
+        self.lock.store(0, .release);
+    }
+
+    fn allocFn(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        const self: *SerializedAllocator = @ptrCast(@alignCast(ctx));
+        self.acquire();
+        defer self.release();
+        return self.inner.vtable.alloc(self.inner.ptr, len, alignment, ret_addr);
+    }
+
+    fn resizeFn(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
+        const self: *SerializedAllocator = @ptrCast(@alignCast(ctx));
+        self.acquire();
+        defer self.release();
+        return self.inner.vtable.resize(self.inner.ptr, memory, alignment, new_len, ret_addr);
+    }
+
+    fn remapFn(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+        const self: *SerializedAllocator = @ptrCast(@alignCast(ctx));
+        self.acquire();
+        defer self.release();
+        return self.inner.vtable.remap(self.inner.ptr, memory, alignment, new_len, ret_addr);
+    }
+
+    fn freeFn(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+        const self: *SerializedAllocator = @ptrCast(@alignCast(ctx));
+        self.acquire();
+        defer self.release();
+        self.inner.vtable.free(self.inner.ptr, memory, alignment, ret_addr);
+    }
+
+    const vtable: std.mem.Allocator.VTable = .{
+        .alloc = allocFn,
+        .resize = resizeFn,
+        .remap = remapFn,
+        .free = freeFn,
+    };
+
+    fn allocator(self: *SerializedAllocator) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &vtable };
+    }
+};
+
+test "SerializedAllocator prevents overlapping embedder allocator calls" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+
+    const ProbeAllocator = struct {
+        inner: std.mem.Allocator,
+        active: std.atomic.Value(u32) = .init(0),
+        overlapped: std.atomic.Value(bool) = .init(false),
+
+        fn enter(self: *@This()) void {
+            if (self.active.fetchAdd(1, .acq_rel) != 0) self.overlapped.store(true, .release);
+            var i: usize = 0;
+            while (i < 2000) : (i += 1) std.atomic.spinLoopHint();
+        }
+
+        fn leave(self: *@This()) void {
+            _ = self.active.fetchSub(1, .release);
+        }
+
+        fn allocFn(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.enter();
+            defer self.leave();
+            return self.inner.vtable.alloc(self.inner.ptr, len, alignment, ret_addr);
+        }
+
+        fn resizeFn(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.enter();
+            defer self.leave();
+            return self.inner.vtable.resize(self.inner.ptr, memory, alignment, new_len, ret_addr);
+        }
+
+        fn remapFn(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.enter();
+            defer self.leave();
+            return self.inner.vtable.remap(self.inner.ptr, memory, alignment, new_len, ret_addr);
+        }
+
+        fn freeFn(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.enter();
+            defer self.leave();
+            self.inner.vtable.free(self.inner.ptr, memory, alignment, ret_addr);
+        }
+
+        const vtable: std.mem.Allocator.VTable = .{
+            .alloc = allocFn,
+            .resize = resizeFn,
+            .remap = remapFn,
+            .free = freeFn,
+        };
+
+        fn allocator(self: *@This()) std.mem.Allocator {
+            return .{ .ptr = self, .vtable = &vtable };
+        }
+    };
+
+    const Runner = struct {
+        fn run(allocator: std.mem.Allocator) void {
+            var i: usize = 0;
+            while (i < 50) : (i += 1) {
+                const memory = allocator.alloc(u8, 64) catch return;
+                allocator.free(memory);
+            }
+        }
+    };
+
+    var probe = ProbeAllocator{ .inner = std.heap.page_allocator };
+    var serialized = SerializedAllocator{ .inner = probe.allocator() };
+    const allocator = serialized.allocator();
+    var threads: [8]std.Thread = undefined;
+    for (&threads) |*thread| thread.* = try std.Thread.spawn(.{}, Runner.run, .{allocator});
+    for (&threads) |*thread| thread.join();
+
+    try std.testing.expect(!probe.overlapped.load(.acquire));
+    try std.testing.expectEqual(@as(u32, 0), probe.active.load(.acquire));
+
+    const parallel = try Context.createWith(std.testing.allocator, .{ .enable_threads = true });
+    try std.testing.expect(parallel.host_allocator_lock != null);
+    parallel.destroy();
+    const serialized_context = try Context.createWith(std.testing.allocator, .{ .enable_threads = true, .gil = true });
+    try std.testing.expect(serialized_context.host_allocator_lock == null);
+    serialized_context.destroy();
+}
+
 /// A mutex-guarded wrapper over the per-context arena allocator. Shapes,
 /// interned strings, AST nodes, and Environment binding tables are all
 /// arena-allocated, and `std.heap.ArenaAllocator` is not thread-safe — so once
@@ -1602,6 +1748,9 @@ pub const Context = struct {
 
     host_gpa: std.mem.Allocator,
     gpa: std.mem.Allocator,
+    /// Bottom-level allocator lock installed only for no-GIL contexts. It must
+    /// outlive the arena, GC backing, budget wrapper, JIT owner, and Context.
+    host_allocator_lock: ?*SerializedAllocator = null,
     budget_allocator: ?*BudgetAllocator = null,
     arena_state: *std.heap.ArenaAllocator,
     /// Thread-safe wrapper over `arena_state` installed when `enable_threads`
@@ -2004,14 +2153,23 @@ pub const Context = struct {
             return error.InvalidThreadTestingOptions;
         if (options.parallel_midscript_gc and !options.parallel_js)
             return error.InvalidThreadTestingOptions;
+        var host_allocator_lock: ?*SerializedAllocator = null;
+        errdefer if (host_allocator_lock) |lock| gpa.destroy(lock);
+        const serialized_gpa = if (options.parallel_gc) blk: {
+            const lock = try gpa.create(SerializedAllocator);
+            lock.* = .{ .inner = gpa };
+            host_allocator_lock = lock;
+            break :blk lock.allocator();
+        } else gpa;
+
         var budget_allocator: ?*BudgetAllocator = null;
         errdefer if (budget_allocator) |ba| gpa.destroy(ba);
         const context_gpa = if (options.heap_limit_bytes) |limit| blk: {
             const ba = try gpa.create(BudgetAllocator);
-            ba.* = .{ .inner = gpa, .limit = limit };
+            ba.* = .{ .inner = serialized_gpa, .limit = limit };
             budget_allocator = ba;
             break :blk ba.allocator();
-        } else gpa;
+        } else serialized_gpa;
         const arena_state = try context_gpa.create(std.heap.ArenaAllocator);
         arena_state.* = std.heap.ArenaAllocator.init(context_gpa);
         errdefer {
@@ -2043,6 +2201,7 @@ pub const Context = struct {
         self.* = .{
             .host_gpa = gpa,
             .gpa = context_gpa,
+            .host_allocator_lock = host_allocator_lock,
             .budget_allocator = budget_allocator,
             .arena_state = arena_state,
             .locked_arena = locked_arena,
@@ -2236,6 +2395,7 @@ pub const Context = struct {
         const host_gpa = self.host_gpa;
         const context_gpa = self.gpa;
         const budget_allocator = self.budget_allocator;
+        const host_allocator_lock = self.host_allocator_lock;
         if (self.gil) |g| {
             self.teardown_stop.store(true, .release);
             // Spawned threads need the lock to finish: park until each is
@@ -2310,6 +2470,7 @@ pub const Context = struct {
         context_gpa.destroy(self.arena_state);
         context_gpa.destroy(self);
         if (budget_allocator) |ba| host_gpa.destroy(ba);
+        if (host_allocator_lock) |lock| host_gpa.destroy(lock);
     }
 
     pub fn initCApiRef(self: *Context) void {
@@ -10879,6 +11040,7 @@ test "Context threads run parallel by default; gil option opts into serialized m
         try std.testing.expect(ctx.parallel_js); // parallel is the default
         try std.testing.expect(ctx.gc.?.parallel);
         try std.testing.expect(ctx.gc_cell_backing.?.parallel);
+        try std.testing.expect(ctx.host_allocator_lock != null);
     }
     // Opt-out: gil => the serialized (GIL) path.
     {
@@ -10887,12 +11049,14 @@ test "Context threads run parallel by default; gil option opts into serialized m
         const v = try ctx.evaluate("1 + 2");
         try std.testing.expectEqual(@as(f64, 3), v.asNum());
         try std.testing.expect(!ctx.parallel_js); // GIL serializes instead
+        try std.testing.expect(ctx.host_allocator_lock == null);
     }
     // No threads => single-threaded, neither path engaged.
     {
         const ctx = try Context.createWith(std.testing.allocator, .{});
         defer ctx.destroy();
         try std.testing.expect(!ctx.parallel_js);
+        try std.testing.expect(ctx.host_allocator_lock == null);
     }
 }
 
