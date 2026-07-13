@@ -48,7 +48,8 @@ fn constantResult(chunk: *const Chunk) ?ConstantSelection {
 
 const max_slots = 64;
 const max_code_len = 4096;
-const numeric_register_capacity = 8;
+const numeric_stack_register_capacity = 8;
+const numeric_local_register_capacity = 8;
 const unreachable_offset = std.math.maxInt(usize);
 
 const Kind = enum(u8) { undefined, null, boolean, number };
@@ -207,8 +208,13 @@ fn frameOffset(comptime field: []const u8) u15 {
 }
 
 fn numericRegister(stack_slot: usize) error{UnsupportedChunk}!u5 {
-    if (stack_slot >= numeric_register_capacity) return error.UnsupportedChunk;
-    return @intCast(8 + stack_slot);
+    if (stack_slot >= numeric_stack_register_capacity) return error.UnsupportedChunk;
+    return @intCast(16 + stack_slot);
+}
+
+fn numericLocalRegister(local_slot: usize) error{UnsupportedChunk}!u5 {
+    if (local_slot >= numeric_local_register_capacity) return error.UnsupportedChunk;
+    return @intCast(8 + local_slot);
 }
 
 fn emitRestoreAndReturn(assembler: *aarch64.Assembler) !void {
@@ -257,11 +263,12 @@ fn compileNumeric(chunk: *const Chunk) !jit.CompiledCode {
 
     var analysis = try analyzeNumeric(chunk);
     defer analysis.deinit();
-    if (analysis.max_stack_depth > numeric_register_capacity) return error.UnsupportedChunk;
+    if (analysis.max_stack_depth > numeric_stack_register_capacity or chunk.local_count > numeric_local_register_capacity)
+        return error.UnsupportedChunk;
     const allocator = std.heap.page_allocator;
     const code_len = chunk.code.items.len;
 
-    const estimated = std.math.mul(usize, code_len, 192) catch return error.UnsupportedChunk;
+    const estimated = std.math.mul(usize, code_len, 384) catch return error.UnsupportedChunk;
     var memory = try jit.CodeMemory.init(estimated + 4096);
     errdefer memory.deinit();
     var assembler = aarch64.Assembler.init(memory.writableBytes());
@@ -304,6 +311,10 @@ fn compileNumeric(chunk: *const Chunk) !jit.CompiledCode {
     try assembler.load64(19, 9, 0);
     try assembler.load64(24, 21, frameOffset("steps_until_checkpoint"));
     try assembler.load64(25, 21, frameOffset("steps_until_budget"));
+    for (0..chunk.param_count) |slot| {
+        try assembler.load64(9, 22, try slotOffset(slot));
+        try assembler.moveFloatFromRegister64(try numericLocalRegister(slot), 9);
+    }
 
     for (chunk.code.items, 0..) |inst, ip| {
         const state = analysis.states[ip] orelse continue;
@@ -338,18 +349,20 @@ fn compileNumeric(chunk: *const Chunk) !jit.CompiledCode {
             },
             .pop => {},
             .load_local => {
-                try assembler.load64(9, 22, try slotOffset(inst.a));
                 if (state.locals[inst.a] == .number)
-                    try assembler.moveFloatFromRegister64(try numericRegister(state.depth), 9)
-                else
+                    try assembler.moveFloat64(try numericRegister(state.depth), try numericLocalRegister(inst.a))
+                else {
+                    try assembler.load64(9, 22, try slotOffset(inst.a));
                     try assembler.store64(9, 20, try slotOffset(state.depth));
+                }
             },
             .store_local => {
                 if (state.stack[state.depth - 1] == .number)
-                    try emitCanonicalNumber(&assembler, 9, try numericRegister(state.depth - 1))
-                else
+                    try assembler.moveFloat64(try numericLocalRegister(inst.a), try numericRegister(state.depth - 1))
+                else {
                     try assembler.load64(9, 20, try slotOffset(state.depth - 1));
-                try assembler.store64(9, 22, try slotOffset(inst.a));
+                    try assembler.store64(9, 22, try slotOffset(inst.a));
+                }
             },
             .add, .sub, .mul, .div, .mod => {
                 const result_slot = state.depth - 2;
@@ -379,11 +392,22 @@ fn compileNumeric(chunk: *const Chunk) !jit.CompiledCode {
                     try assembler.patchCompareBranch(lhs_zero, slow);
                     try assembler.patchConditionBranch(rhs_slow, slow);
                     try assembler.patchCompareBranch(rhs_zero, slow);
+                    // The semantic helper follows the C ABI and may clobber
+                    // caller-saved d16-d23. Preserve any outer numeric operands
+                    // that remain live below this binary expression.
+                    for (0..result_slot) |slot| if (state.stack[slot] == .number) {
+                        try assembler.moveRegisterFromFloat64(9, try numericRegister(slot));
+                        try assembler.store64(9, 20, try slotOffset(slot));
+                    };
                     try assembler.moveFloat64(0, result_register);
                     try assembler.moveFloat64(1, rhs_register);
                     try assembler.load64(16, 21, frameOffset("remainder"));
                     try assembler.branchLinkRegister(16);
                     try assembler.moveFloat64(result_register, 0);
+                    for (0..result_slot) |slot| if (state.stack[slot] == .number) {
+                        try assembler.load64(9, 20, try slotOffset(slot));
+                        try assembler.moveFloatFromRegister64(try numericRegister(slot), 9);
+                    };
                     try assembler.patchBranch(fast_done, assembler.position());
                 } else {
                     const op: aarch64.FloatOp = switch (inst.op) {
@@ -440,10 +464,24 @@ fn compileNumeric(chunk: *const Chunk) !jit.CompiledCode {
     // runtime work happens exactly before the instruction whose step reaches a
     // 1024 boundary (or exceeds the evaluation budget).
     for (chunk.code.items, 0..) |_, ip| {
-        if (analysis.states[ip] == null) continue;
+        const state = analysis.states[ip] orelse continue;
         const stub = assembler.position();
         try assembler.patchConditionBranch(budget_fixups[ip], stub);
         try assembler.patchConditionBranch(checkpoint_fixups[ip], stub);
+        // Numeric locals live in callee-saved d8-d15 on the hot path. Publish
+        // canonical frame words only at a safepoint, where precise GC and error
+        // creation can inspect the activation. The frame is proven unescaped
+        // before entry, so no peer can observe the write-back delay.
+        for (0..chunk.local_count) |slot| if (state.locals[slot] == .number) {
+            try emitCanonicalNumber(&assembler, 9, try numericLocalRegister(slot));
+            try assembler.store64(9, 22, try slotOffset(slot));
+        };
+        // d16-d23 are caller-saved. Spill live numeric operand values around
+        // the runtime callback; non-numeric values already live in scratch.
+        for (0..state.depth) |slot| if (state.stack[slot] == .number) {
+            try assembler.moveRegisterFromFloat64(9, try numericRegister(slot));
+            try assembler.store64(9, 20, try slotOffset(slot));
+        };
         try assembler.load64(9, 21, frameOffset("steps"));
         try assembler.store64(19, 9, 0);
         try assembler.movImmediate64(9, ip);
@@ -452,6 +490,10 @@ fn compileNumeric(chunk: *const Chunk) !jit.CompiledCode {
         try assembler.load64(16, 21, frameOffset("checkpoint"));
         try assembler.branchLinkRegister(16);
         status_fixups[ip] = try assembler.branchNotZero32Placeholder(0);
+        for (0..state.depth) |slot| if (state.stack[slot] == .number) {
+            try assembler.load64(9, 20, try slotOffset(slot));
+            try assembler.moveFloatFromRegister64(try numericRegister(slot), 9);
+        };
         try assembler.movImmediate32(24, 1024);
         const resume_branch = try assembler.branchPlaceholder();
         try assembler.patchBranch(resume_branch, operation_offsets[ip]);
