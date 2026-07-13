@@ -11,6 +11,9 @@ tests as the matching engine features land.
 
 - Agent and worker isolation: one `Context` per OS thread, values crossing by
   structured clone or retained `SharedArrayBuffer` storage.
+- Structured clone has a shared 256-level nesting ceiling across serialization,
+  wire preflight, and deserialization. Excessive graphs fail with a catchable
+  clone error, and framed SAB manifests keep rejection cleanup non-recursive.
 - Shared-realm `Thread`: one `Context`, one heap, one global object, real OS
   threads, same-realm identity, and no-GIL parallel execution by default.
 - Serialized shared-realm fallback:

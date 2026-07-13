@@ -20,6 +20,9 @@ atomically consumes each token on deserialize or queue cleanup, and manifest
 cleanup does not depend on recursively parsing a valid payload. Forged,
 out-of-order, duplicate, and replayed token references fail closed. Nothing that
 lives in a worker arena ever escapes it — same lifetime rule as agents.
+Serialization, structural preflight, and deserialization share a 256-level
+wire-nesting ceiling; an over-depth graph or payload produces a catchable clone
+error while its frame manifest still releases retained SAB references.
 
 Messages flow over two `Channel`s (mutex + condition FIFOs of `[]u8`): `inbox`
 (main→worker) and `outbox` (worker→main). Each channel drains with a FIFO head

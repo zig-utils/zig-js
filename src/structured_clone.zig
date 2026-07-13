@@ -35,6 +35,10 @@ const SharedRefToken = [16]u8;
 const wire_magic = "ZJSC".*;
 const wire_version: u8 = 1;
 const wire_header_len = wire_magic.len + @sizeOf(u8) + @sizeOf(u32) + @sizeOf(u64);
+/// Root is depth zero. A payload may nest this many child values while keeping
+/// serializer, preflight, and deserializer recursion safely off the host stack
+/// limit. This is a wire-format complexity contract, not a JS call-stack cap.
+pub const max_nesting_depth: u16 = 256;
 
 const SharedRefEntry = struct {
     token: SharedRefToken,
@@ -277,7 +281,13 @@ const Serializer = struct {
         return .{ .logical_len = @max(n, o.array_len), .elements = elements, .holes = holes };
     }
 
-    fn ser(s: *Serializer, v: Value) HostError!void {
+    fn childDepth(s: *Serializer, depth: u16) HostError!u16 {
+        if (depth >= max_nesting_depth)
+            return s.throwClone("DataCloneError: structured clone nesting limit exceeded");
+        return depth + 1;
+    }
+
+    fn ser(s: *Serializer, v: Value, depth: u16) HostError!void {
         switch (v.kind()) {
             .undefined => try s.w.tag(.undef),
             .null => try s.w.tag(.null_v),
@@ -293,11 +303,11 @@ const Serializer = struct {
                 try s.w.tag(.string);
                 try s.w.str(v.asStr());
             },
-            .object => try s.serObject(v.asObj()),
+            .object => try s.serObject(v.asObj(), depth),
         }
     }
 
-    fn serObject(s: *Serializer, o: *value.Object) HostError!void {
+    fn serObject(s: *Serializer, o: *value.Object, depth: u16) HostError!void {
         // BigInts are JS *values*: no identity to preserve, no memo entry.
         if (o.is_bigint) {
             if (o.bigint_text) |t| {
@@ -357,7 +367,7 @@ const Serializer = struct {
         if (o.typed_array) |ta| {
             try s.w.tag(.typed_array);
             try s.w.byte(@intFromEnum(ta.kind));
-            try s.serObject(ta.buffer);
+            try s.serObject(ta.buffer, try s.childDepth(depth));
             try s.w.int(u64, @intCast(ta.byte_offset));
             try s.w.int(u64, @intCast(ta.length));
             try s.w.byte(@intFromBool(ta.track_length));
@@ -365,7 +375,7 @@ const Serializer = struct {
         }
         if (o.data_view) |dv| {
             try s.w.tag(.data_view);
-            try s.serObject(dv.buffer);
+            try s.serObject(dv.buffer, try s.childDepth(depth));
             try s.w.int(u64, @intCast(dv.byte_offset));
             try s.w.int(u64, @intCast(dv.byte_length));
             try s.w.byte(@intFromBool(dv.track_length));
@@ -389,9 +399,11 @@ const Serializer = struct {
             const entries = try s.snapshotMapEntries(o);
             defer s.w.gpa.free(entries);
             try s.w.int(u32, @intCast(entries.len));
+            if (entries.len == 0) return;
+            const child_depth = try s.childDepth(depth);
             for (entries) |entry| {
-                try s.ser(entry.key);
-                try s.ser(entry.val);
+                try s.ser(entry.key, child_depth);
+                try s.ser(entry.val, child_depth);
             }
             return;
         }
@@ -402,7 +414,9 @@ const Serializer = struct {
             const entries = try s.snapshotSetEntries(o);
             defer s.w.gpa.free(entries);
             try s.w.int(u32, @intCast(entries.len));
-            for (entries) |entry| try s.ser(entry);
+            if (entries.len == 0) return;
+            const child_depth = try s.childDepth(depth);
+            for (entries) |entry| try s.ser(entry, child_depth);
             return;
         }
         if (o.is_error) {
@@ -420,7 +434,7 @@ const Serializer = struct {
         if (o.prim) |p| {
             // Boolean/Number/String wrapper: the boxed primitive only.
             try s.w.tag(.wrapper);
-            try s.ser(p);
+            try s.ser(p, try s.childDepth(depth));
             return;
         }
         if (o.is_array) {
@@ -434,19 +448,19 @@ const Serializer = struct {
             try s.w.int(u32, @intCast(snap.elements.len));
             for (snap.elements, snap.holes) |el, hole| {
                 try s.w.byte(@intFromBool(hole));
-                if (!hole) try s.ser(el);
+                if (!hole) try s.ser(el, try s.childDepth(depth));
             }
-            try s.serNamedProps(o, true);
+            try s.serNamedProps(o, true, depth);
             return;
         }
         try s.w.tag(.object);
-        try s.serNamedProps(o, false);
+        try s.serNamedProps(o, false, depth);
     }
 
     /// Own enumerable named properties, read through [[Get]] (getters run),
     /// in creation order. For arrays, index-shaped keys are skipped (the
     /// elements were serialized densely already).
-    fn serNamedProps(s: *Serializer, o: *value.Object, skip_indices: bool) HostError!void {
+    fn serNamedProps(s: *Serializer, o: *value.Object, skip_indices: bool, depth: u16) HostError!void {
         const keys = try builtins.ownEnumerableKeys(s.self, o);
         var count: u32 = 0;
         for (keys) |k| {
@@ -454,10 +468,12 @@ const Serializer = struct {
             count += 1;
         }
         try s.w.int(u32, count);
+        if (count == 0) return;
+        const child_depth = try s.childDepth(depth);
         for (keys) |k| {
             if (skip_indices and isIndexKey(k)) continue;
             try s.w.str(k);
-            try s.ser(try s.self.getProperty(Value.obj(o), k));
+            try s.ser(try s.self.getProperty(Value.obj(o), k), child_depth);
         }
     }
 };
@@ -479,7 +495,7 @@ pub fn serialize(self: *Interpreter, gpa: std.mem.Allocator, v: Value) HostError
     errdefer {
         for (s.shared_tokens.items) |token| _ = releaseSharedRefToken(token);
     }
-    try s.ser(v);
+    try s.ser(v, 0);
     return encodeFrame(gpa, s.shared_tokens.items, s.w.out.items) catch |err| switch (err) {
         error.OutOfMemory => error.OutOfMemory,
         error.Overflow => s.throwClone("DataCloneError: structured clone payload is too large"),
@@ -600,7 +616,12 @@ const SkipState = struct {
     }
 };
 
-fn skipSerialized(r: *Reader, state: *SkipState) Reader.Error!void {
+fn wireChildDepth(depth: u16) Reader.Error!u16 {
+    if (depth >= max_nesting_depth) return error.Malformed;
+    return depth + 1;
+}
+
+fn skipSerialized(r: *Reader, state: *SkipState, depth: u16) Reader.Error!void {
     switch (try r.tag()) {
         .undef, .null_v => {},
         .bool_v => _ = try r.byte(),
@@ -617,13 +638,13 @@ fn skipSerialized(r: *Reader, state: *SkipState) Reader.Error!void {
         },
         .typed_array => {
             _ = try r.byte();
-            try skipSerialized(r, state);
+            try skipSerialized(r, state, try wireChildDepth(depth));
             _ = try r.int(u64);
             _ = try r.int(u64);
             _ = try r.byte();
         },
         .data_view => {
-            try skipSerialized(r, state);
+            try skipSerialized(r, state, try wireChildDepth(depth));
             _ = try r.int(u64);
             _ = try r.int(u64);
             _ = try r.byte();
@@ -634,41 +655,48 @@ fn skipSerialized(r: *Reader, state: *SkipState) Reader.Error!void {
         },
         .map => {
             const n = try r.int(u32);
+            if (n == 0) return;
+            const child_depth = try wireChildDepth(depth);
             var i: u32 = 0;
             while (i < n) : (i += 1) {
-                try skipSerialized(r, state);
-                try skipSerialized(r, state);
+                try skipSerialized(r, state, child_depth);
+                try skipSerialized(r, state, child_depth);
             }
         },
         .set => {
             const n = try r.int(u32);
+            if (n == 0) return;
+            const child_depth = try wireChildDepth(depth);
             var i: u32 = 0;
-            while (i < n) : (i += 1) try skipSerialized(r, state);
+            while (i < n) : (i += 1) try skipSerialized(r, state, child_depth);
         },
         .error_obj => {
             _ = try r.str();
             if (try r.byte() == 1) _ = try r.str();
         },
-        .wrapper => try skipSerialized(r, state),
+        .wrapper => try skipSerialized(r, state, try wireChildDepth(depth)),
         .array => {
             _ = try r.int(u64);
             const n = try r.int(u32);
             var i: u32 = 0;
             while (i < n) : (i += 1) {
-                if (try r.byte() == 0) try skipSerialized(r, state);
+                if (try r.byte() == 0)
+                    try skipSerialized(r, state, try wireChildDepth(depth));
             }
-            try skipNamed(r, state);
+            try skipNamed(r, state, depth);
         },
-        .object => try skipNamed(r, state),
+        .object => try skipNamed(r, state, depth),
     }
 }
 
-fn skipNamed(r: *Reader, state: *SkipState) Reader.Error!void {
+fn skipNamed(r: *Reader, state: *SkipState, depth: u16) Reader.Error!void {
     const n = try r.int(u32);
+    if (n == 0) return;
+    const child_depth = try wireChildDepth(depth);
     var i: u32 = 0;
     while (i < n) : (i += 1) {
         _ = try r.str();
-        try skipSerialized(r, state);
+        try skipSerialized(r, state, child_depth);
     }
 }
 
@@ -686,13 +714,18 @@ const Deserializer = struct {
         return d.self.throwError("TypeError", "structured clone: malformed payload");
     }
 
+    fn childDepth(d: *Deserializer, depth: u16) HostError!u16 {
+        if (depth >= max_nesting_depth) return d.fail();
+        return depth + 1;
+    }
+
     fn protoFor(d: *Deserializer, name: []const u8) ?*value.Object {
         const c = d.self.env.get(name) orelse return null;
         if (!c.isObject()) return null;
         return d.self.protoObject(c.asObj()) catch null;
     }
 
-    fn deser(d: *Deserializer) HostError!Value {
+    fn deser(d: *Deserializer, depth: u16) HostError!Value {
         const a = d.self.arena;
         const t = d.r.tag() catch return d.fail();
         switch (t) {
@@ -711,7 +744,7 @@ const Deserializer = struct {
             .object => {
                 const o = (try d.self.newObject()).asObj();
                 try d.objs.append(a, o);
-                try d.deserNamedProps(o);
+                try d.deserNamedProps(o, depth);
                 return Value.obj(o);
             },
             .array => {
@@ -726,11 +759,11 @@ const Deserializer = struct {
                         try arr.appendElement(a, Value.undef());
                         try arr.markHole(a, i);
                     } else {
-                        try arr.appendElement(a, try d.deser());
+                        try arr.appendElement(a, try d.deser(try d.childDepth(depth)));
                     }
                 }
                 arr.array_len = len;
-                try d.deserNamedProps(arr);
+                try d.deserNamedProps(arr, depth);
                 return Value.obj(arr);
             },
             .date => {
@@ -759,10 +792,11 @@ const Deserializer = struct {
                 o.is_map = true;
                 if (d.protoFor("Map")) |p| o.proto = p;
                 const n = d.r.int(u32) catch return d.fail();
+                const child_depth = if (n == 0) 0 else try d.childDepth(depth);
                 var i: u32 = 0;
                 while (i < n) : (i += 1) {
-                    const k = try d.deser();
-                    const v = try d.deser();
+                    const k = try d.deser(child_depth);
+                    const v = try d.deser(child_depth);
                     const pair = (try d.self.newArray()).asObj();
                     try pair.appendElement(a, k);
                     try pair.appendElement(a, v);
@@ -777,8 +811,9 @@ const Deserializer = struct {
                 o.is_set = true;
                 if (d.protoFor("Set")) |p| o.proto = p;
                 const n = d.r.int(u32) catch return d.fail();
+                const child_depth = if (n == 0) 0 else try d.childDepth(depth);
                 var i: u32 = 0;
-                while (i < n) : (i += 1) try o.appendInternalElement(a, try d.deser());
+                while (i < n) : (i += 1) try o.appendInternalElement(a, try d.deser(child_depth));
                 return Value.obj(o);
             },
             .error_obj => {
@@ -796,7 +831,7 @@ const Deserializer = struct {
                 return Value.obj(o);
             },
             .wrapper => {
-                const p = try d.deser();
+                const p = try d.deser(try d.childDepth(depth));
                 const o = (try d.self.newObject()).asObj();
                 try d.objs.append(a, o);
                 o.prim = p;
@@ -837,7 +872,7 @@ const Deserializer = struct {
                 const kind: value.TAKind = @enumFromInt(kind_b);
                 const o = (try d.self.newObject()).asObj();
                 try d.objs.append(a, o);
-                const buf = try d.deser();
+                const buf = try d.deser(try d.childDepth(depth));
                 if (!buf.isObject() or buf.asObj().array_buffer == null) return d.fail();
                 const ta = try o.typedArrayAllocator(a).create(value.TypedArrayData);
                 ta.* = .{
@@ -854,7 +889,7 @@ const Deserializer = struct {
             .data_view => {
                 const o = (try d.self.newObject()).asObj();
                 try d.objs.append(a, o);
-                const buf = try d.deser();
+                const buf = try d.deser(try d.childDepth(depth));
                 if (!buf.isObject() or buf.asObj().array_buffer == null) return d.fail();
                 const dv = try o.dataViewAllocator(a).create(value.DataViewData);
                 dv.* = .{
@@ -870,13 +905,15 @@ const Deserializer = struct {
         }
     }
 
-    fn deserNamedProps(d: *Deserializer, o: *value.Object) HostError!void {
+    fn deserNamedProps(d: *Deserializer, o: *value.Object, depth: u16) HostError!void {
         const a = d.self.arena;
         const n = d.r.int(u32) catch return d.fail();
+        if (n == 0) return;
+        const child_depth = try d.childDepth(depth);
         var i: u32 = 0;
         while (i < n) : (i += 1) {
             const k = try a.dupe(u8, d.r.str() catch return d.fail());
-            const v = try d.deser();
+            const v = try d.deser(child_depth);
             try d.self.setProp(o, k, v);
         }
     }
@@ -894,7 +931,7 @@ pub fn deserialize(self: *Interpreter, bytes: []const u8) HostError!Value {
     }
     var verify = Reader{ .bytes = frame.payload };
     var skip = SkipState{ .frame = frame };
-    skipSerialized(&verify, &skip) catch {
+    skipSerialized(&verify, &skip, 0) catch {
         releaseSerialized(bytes);
         return self.throwError("TypeError", "structured clone: malformed payload");
     };
@@ -907,7 +944,7 @@ pub fn deserialize(self: *Interpreter, bytes: []const u8) HostError!Value {
         return self.throwError("TypeError", "structured clone: malformed payload");
     }
     var d = Deserializer{ .self = self, .r = .{ .bytes = frame.payload }, .frame = frame };
-    return d.deser() catch |err| {
+    return d.deser(0) catch |err| {
         // Tokens already consumed by wrappers are absent from the registry;
         // manifest cleanup is idempotent and releases every later token.
         releaseSerialized(bytes);
@@ -1025,5 +1062,39 @@ test "structured clone SAB release rejects replay and cleans valid trailing toke
     });
     defer std.testing.allocator.free(truncated);
     releaseSerialized(truncated[0 .. truncated.len - 1]);
+    try std.testing.expectEqual(baseline, sharedRefTokenCount());
+}
+
+test "structured clone wire depth is bounded and rejected manifests clean up" {
+    const allowed_wrappers: usize = max_nesting_depth;
+    const allowed_payload = try std.testing.allocator.alloc(u8, allowed_wrappers + 1);
+    defer std.testing.allocator.free(allowed_payload);
+    @memset(allowed_payload[0..allowed_wrappers], @intFromEnum(Tag.wrapper));
+    allowed_payload[allowed_wrappers] = @intFromEnum(Tag.undef);
+    const allowed_frame_bytes = try encodeFrame(std.testing.allocator, &.{}, allowed_payload);
+    defer std.testing.allocator.free(allowed_frame_bytes);
+    const allowed_frame = try readFrame(allowed_frame_bytes);
+    var allowed_reader = Reader{ .bytes = allowed_frame.payload };
+    var allowed_state = SkipState{ .frame = allowed_frame };
+    try skipSerialized(&allowed_reader, &allowed_state, 0);
+    try std.testing.expectEqual(allowed_frame.payload.len, allowed_reader.pos);
+
+    const baseline = sharedRefTokenCount();
+    const storage = try shared_buffer.SharedBufferStorage.create(8, null);
+    defer storage.release();
+    const token = try registerSharedRefToken(storage);
+    const rejected_wrappers = allowed_wrappers + 1;
+    const rejected_payload = try std.testing.allocator.alloc(u8, rejected_wrappers + 1 + @sizeOf(u32));
+    defer std.testing.allocator.free(rejected_payload);
+    @memset(rejected_payload[0..rejected_wrappers], @intFromEnum(Tag.wrapper));
+    rejected_payload[rejected_wrappers] = @intFromEnum(Tag.shared_array_buffer);
+    std.mem.writeInt(u32, rejected_payload[rejected_wrappers + 1 ..][0..@sizeOf(u32)], 0, .little);
+    const rejected_frame_bytes = try encodeFrame(std.testing.allocator, &.{token}, rejected_payload);
+    defer std.testing.allocator.free(rejected_frame_bytes);
+    const rejected_frame = try readFrame(rejected_frame_bytes);
+    var rejected_reader = Reader{ .bytes = rejected_frame.payload };
+    var rejected_state = SkipState{ .frame = rejected_frame };
+    try std.testing.expectError(error.Malformed, skipSerialized(&rejected_reader, &rejected_state, 0));
+    releaseSerialized(rejected_frame_bytes);
     try std.testing.expectEqual(baseline, sharedRefTokenCount());
 }

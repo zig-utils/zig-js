@@ -10200,6 +10200,22 @@ test "structured clone rejects forged replayed and trailing SAB tokens" {
     try std.testing.expectError(error.Throw, structured_clone.deserialize(&machine, trailing_sab));
 }
 
+test "structured clone nesting limit is catchable" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    defer ctx.destroy();
+    const source = try std.fmt.allocPrint(std.testing.allocator,
+        \\let value = 0;
+        \\for (let i = 0; i < {0d}; i++) value = [value];
+        \\structuredClone(value);
+        \\value = [value];
+        \\let caught = false;
+        \\try {{ structuredClone(value); }} catch (e) {{ caught = e instanceof TypeError; }}
+        \\caught;
+    , .{structured_clone.max_nesting_depth});
+    defer std.testing.allocator.free(source);
+    try std.testing.expect((try ctx.evaluate(source)).asBool());
+}
+
 test "Thread API (enable_threads): shared realm, identity, exceptions, ids" {
     const ctx = try Context.createWith(std.testing.allocator, .{ .enable_threads = true });
     defer ctx.destroy();
