@@ -35,8 +35,14 @@ messages on every `pop`. Zero-timeout internal polls return while holding the
 channel lock when the queue is empty instead of entering a timed condition wait,
 which keeps `Worker.receive(..., 0)` suitable for host-side drain probes. A
 channel `close()` wakes every waiter; already-queued messages stay poppable
-(drain-then-stop). `deinit` releases any bytes (and the SAB refs inside them)
-never consumed.
+(drain-then-stop). `Worker.spawnWith` / `spawnModuleWith` accept independent
+inbox/outbox `ChannelLimits`; defaults are 64 MiB per frame, 256 MiB of live
+queued bytes, and 1024 live messages. Push is nonblocking and fallible: closed,
+limit, and metadata-allocation rejection is reported synchronously, after the
+channel lock is released, and releases the rejected frame/SAB manifest exactly
+once. Live byte/message accounting is decremented on pop; dead FIFO prefixes
+compact before avoidable metadata growth. `deinit` releases any frames never
+consumed.
 
 ## Worker lifecycle (`src/worker.zig`)
 
@@ -51,7 +57,9 @@ never consumed.
 - `postMessage(from, v)` / `receive(into, timeout_ms)` — serialize from the
   caller's interpreter, deserialize into the caller's interpreter. `receive`
   returns null when the worker closed its outbox and drained, or the timeout
-  elapsed (null = wait forever).
+  elapsed (null = wait forever). A post that returns successfully owns exactly
+  one queued frame; closed/full/oversized delivery throws instead of silently
+  dropping it.
 - `terminate()` — set the stop word the engines' step checkpoints poll
   (interpreter eval loop and `vm.zig` dispatch, every 1024 steps), making
   in-flight JS throw, and close the inbox so the delivery loop ends.
@@ -83,6 +91,9 @@ A minimal `JSWorker*` surface, since JSC has no worker ABI to mirror (this is a
 zig-js extension):
 
 - `JSWorkerCreate(source)` → `JSWorkerRef` (script worker; null on failure).
+- `JSWorkerCreateWithLimits(source, maxMessageBytes, maxQueuedBytes,
+  maxQueuedMessages)` → `JSWorkerRef` with the same explicit cap applied to
+  both directions (zero is a real zero limit).
 - `JSWorkerPostMessage(worker, ctx, value, exception)` → bool — serialize
   `value` from `ctx`'s realm into the inbox; false + `exception` on a refused
   clone (function/symbol/etc.).

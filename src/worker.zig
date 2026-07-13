@@ -26,6 +26,19 @@ const Value = value.Value;
 const alloc = std.heap.page_allocator;
 const channel_queue_reserve_granularity = 64;
 
+pub const ChannelLimits = struct {
+    max_message_bytes: usize = 64 * 1024 * 1024,
+    max_queued_bytes: usize = 256 * 1024 * 1024,
+    max_queued_messages: usize = 1024,
+};
+
+const ChannelPushError = error{
+    Closed,
+    MessageTooLarge,
+    QueueFull,
+    OutOfMemory,
+};
+
 /// A FIFO of serialized messages with blocking pop. Closing wakes every
 /// waiter; remaining messages are still poppable (drain-then-stop), and
 /// `deinit` releases whatever was never consumed (including any SAB storage
@@ -38,41 +51,87 @@ const Channel = struct {
     /// front-removal shifts in Worker-heavy host loops.
     queue: std.ArrayListUnmanaged([]u8) = .empty,
     queue_head: usize = 0,
+    queued_bytes: usize = 0,
     closed: bool = false,
+    limits: ChannelLimits = .{},
+    queue_allocator: std.mem.Allocator = alloc,
+
+    fn init(limits: ChannelLimits) Channel {
+        return .{ .limits = limits };
+    }
+
+    fn liveMessages(ch: *const Channel) usize {
+        return ch.queue.items.len - ch.queue_head;
+    }
 
     fn hasQueued(ch: *const Channel) bool {
         return ch.queue_head < ch.queue.items.len;
     }
 
     fn clearQueue(ch: *Channel) void {
+        std.debug.assert(!ch.hasQueued());
+        std.debug.assert(ch.queued_bytes == 0);
         ch.queue.clearRetainingCapacity();
+        ch.queue_head = 0;
+    }
+
+    fn compactQueueLocked(ch: *Channel) void {
+        if (ch.queue_head == 0) return;
+        const live = ch.liveMessages();
+        std.mem.copyForwards([]u8, ch.queue.items[0..live], ch.queue.items[ch.queue_head..]);
+        ch.queue.shrinkRetainingCapacity(live);
         ch.queue_head = 0;
     }
 
     fn ensureQueueCapacityLocked(ch: *Channel, additional: usize) !void {
         const needed = ch.queue.items.len + additional;
         if (needed <= ch.queue.capacity) return;
+        ch.compactQueueLocked();
+        if (ch.queue.items.len + additional <= ch.queue.capacity) return;
         const extra = @max(additional, channel_queue_reserve_granularity);
-        try ch.queue.ensureTotalCapacity(alloc, ch.queue.items.len + extra);
+        const target = std.math.add(usize, ch.queue.items.len, extra) catch return error.OutOfMemory;
+        try ch.queue.ensureTotalCapacity(ch.queue_allocator, target);
     }
 
-    fn push(ch: *Channel, bytes: []u8) void {
+    fn rejectOwned(bytes: []u8, err: ChannelPushError) ChannelPushError {
+        structured_clone.releaseSerialized(bytes);
+        alloc.free(bytes);
+        return err;
+    }
+
+    /// Takes ownership of `bytes` on both success and failure. A successful
+    /// return means exactly one live FIFO entry owns the frame; every error
+    /// releases the frame and its SAB manifest before returning.
+    fn pushOwned(ch: *Channel, bytes: []u8) ChannelPushError!void {
+        if (bytes.len > ch.limits.max_message_bytes)
+            return rejectOwned(bytes, error.MessageTooLarge);
         const io = agent.engineIo();
         ch.mutex.lockUncancelable(io);
-        defer ch.mutex.unlock(io);
         if (ch.closed) {
-            structured_clone.releaseSerialized(bytes);
-            alloc.free(bytes);
-            return;
+            ch.mutex.unlock(io);
+            return rejectOwned(bytes, error.Closed);
+        }
+        if (ch.liveMessages() >= ch.limits.max_queued_messages) {
+            ch.mutex.unlock(io);
+            return rejectOwned(bytes, error.QueueFull);
+        }
+        const next_bytes = std.math.add(usize, ch.queued_bytes, bytes.len) catch {
+            ch.mutex.unlock(io);
+            return rejectOwned(bytes, error.QueueFull);
+        };
+        if (next_bytes > ch.limits.max_queued_bytes) {
+            ch.mutex.unlock(io);
+            return rejectOwned(bytes, error.QueueFull);
         }
         ch.ensureQueueCapacityLocked(1) catch {
-            structured_clone.releaseSerialized(bytes);
-            alloc.free(bytes);
-            return;
+            ch.mutex.unlock(io);
+            return rejectOwned(bytes, error.OutOfMemory);
         };
         ch.queue.appendAssumeCapacity(bytes);
+        ch.queued_bytes = next_bytes;
         jsthread.recordWorkerChannelPush();
         ch.cond.signal(io);
+        ch.mutex.unlock(io);
     }
 
     /// Next message (caller frees), or null when the channel is closed and
@@ -106,6 +165,8 @@ const Channel = struct {
         const bytes = ch.queue.items[ch.queue_head];
         ch.queue.items[ch.queue_head] = undefined;
         ch.queue_head += 1;
+        std.debug.assert(bytes.len <= ch.queued_bytes);
+        ch.queued_bytes -= bytes.len;
         if (ch.queue_head == ch.queue.items.len) ch.clearQueue();
         jsthread.recordWorkerChannelPop();
         return bytes;
@@ -125,7 +186,9 @@ const Channel = struct {
             structured_clone.releaseSerialized(bytes);
             alloc.free(bytes);
         }
-        ch.queue.deinit(alloc);
+        ch.queued_bytes = 0;
+        ch.queue.deinit(ch.queue_allocator);
+        ch.queue_head = 0;
     }
 };
 
@@ -136,9 +199,9 @@ test "worker channel pops FIFO without front shifts" {
     const first = try alloc.dupe(u8, &.{1});
     const second = try alloc.dupe(u8, &.{2});
     const third = try alloc.dupe(u8, &.{3});
-    ch.push(first);
-    ch.push(second);
-    ch.push(third);
+    try ch.pushOwned(first);
+    try ch.pushOwned(second);
+    try ch.pushOwned(third);
 
     const got_first = ch.pop(0) orelse return error.TestUnexpectedResult;
     defer alloc.free(got_first);
@@ -157,7 +220,7 @@ test "worker channel pops FIFO without front shifts" {
 
     try std.testing.expect(ch.pop(0) == null);
     const late = try alloc.dupe(u8, &.{4});
-    ch.push(late);
+    try ch.pushOwned(late);
     const got_late = ch.pop(0) orelse return error.TestUnexpectedResult;
     defer alloc.free(got_late);
     try std.testing.expectEqual(@as(u8, 4), got_late[0]);
@@ -166,13 +229,13 @@ test "worker channel pops FIFO without front shifts" {
     try std.testing.expect(ch.pop(0) == null);
 }
 
-test "worker channel reserves fixed-size capacity chunks" {
+test "worker channel reserves capacity chunks and compacts dead prefixes" {
     var ch = Channel{};
     defer ch.deinit();
 
     try std.testing.expectEqual(@as(usize, 0), ch.queue.capacity);
     const first = try alloc.dupe(u8, &.{1});
-    ch.push(first);
+    try ch.pushOwned(first);
     try std.testing.expect(ch.queue.capacity >= channel_queue_reserve_granularity);
     try std.testing.expectEqual(@as(usize, 1), ch.queue.items.len);
 
@@ -180,16 +243,115 @@ test "worker channel reserves fixed-size capacity chunks" {
     var i: usize = 1;
     while (i < first_capacity) : (i += 1) {
         const msg = try alloc.dupe(u8, &.{@intCast(i & 0xff)});
-        ch.push(msg);
+        try ch.pushOwned(msg);
     }
     try std.testing.expectEqual(first_capacity, ch.queue.capacity);
     try std.testing.expectEqual(first_capacity, ch.queue.items.len);
 
+    const popped = ch.pop(0) orelse return error.TestUnexpectedResult;
+    alloc.free(popped);
     const extra = try alloc.dupe(u8, &.{0xff});
-    ch.push(extra);
+    try ch.pushOwned(extra);
+    try std.testing.expectEqual(first_capacity, ch.queue.capacity);
+    try std.testing.expectEqual(@as(usize, 0), ch.queue_head);
+
+    const growth = try alloc.dupe(u8, &.{0xfe});
+    try ch.pushOwned(growth);
     try std.testing.expect(ch.queue.capacity > first_capacity);
 
     while (ch.pop(0)) |bytes| alloc.free(bytes);
+}
+
+test "worker channel enforces exact message and byte limits" {
+    var ch = Channel.init(.{
+        .max_message_bytes = 2,
+        .max_queued_bytes = 3,
+        .max_queued_messages = 2,
+    });
+    defer ch.deinit();
+
+    try std.testing.expectError(error.MessageTooLarge, ch.pushOwned(try alloc.dupe(u8, &.{ 1, 2, 3 })));
+    try std.testing.expectEqual(@as(usize, 0), ch.liveMessages());
+    try std.testing.expectEqual(@as(usize, 0), ch.queued_bytes);
+
+    try ch.pushOwned(try alloc.dupe(u8, &.{ 1, 2 }));
+    try ch.pushOwned(try alloc.dupe(u8, &.{3}));
+    try std.testing.expectEqual(@as(usize, 2), ch.liveMessages());
+    try std.testing.expectEqual(@as(usize, 3), ch.queued_bytes);
+    try std.testing.expectError(error.QueueFull, ch.pushOwned(try alloc.dupe(u8, &.{4})));
+
+    const first = ch.pop(0) orelse return error.TestUnexpectedResult;
+    defer alloc.free(first);
+    try std.testing.expectEqual(@as(usize, 1), ch.liveMessages());
+    try std.testing.expectEqual(@as(usize, 1), ch.queued_bytes);
+    try ch.pushOwned(try alloc.dupe(u8, &.{ 4, 5 }));
+    try std.testing.expectEqual(@as(usize, 3), ch.queued_bytes);
+
+    ch.close();
+    try std.testing.expectError(error.Closed, ch.pushOwned(try alloc.dupe(u8, &.{6})));
+    while (ch.pop(0)) |bytes| alloc.free(bytes);
+    try std.testing.expectEqual(@as(usize, 0), ch.liveMessages());
+    try std.testing.expectEqual(@as(usize, 0), ch.queued_bytes);
+}
+
+test "worker channel reports queue metadata allocation failure" {
+    var no_memory: [0]u8 = .{};
+    var failing = std.heap.FixedBufferAllocator.init(&no_memory);
+    var ch = Channel{ .queue_allocator = failing.allocator() };
+    defer ch.deinit();
+
+    try std.testing.expectError(error.OutOfMemory, ch.pushOwned(try alloc.dupe(u8, &.{1})));
+    try std.testing.expectEqual(@as(usize, 0), ch.liveMessages());
+    try std.testing.expectEqual(@as(usize, 0), ch.queued_bytes);
+}
+
+test "worker postMessage surfaces channel rejection" {
+    const ctx = try Context.create(std.testing.allocator);
+    defer ctx.destroy();
+    var machine = ctx.interpreter();
+
+    const limited = try Worker.spawnWith("", .{
+        .inbox_limits = .{ .max_message_bytes = 1 },
+    });
+    defer {
+        limited.close();
+        limited.join();
+        limited.destroy();
+    }
+    try std.testing.expectError(error.Throw, limited.postMessage(&machine, Value.undef()));
+
+    const closed = try Worker.spawn("");
+    defer {
+        closed.close();
+        closed.join();
+        closed.destroy();
+    }
+    closed.close();
+    try std.testing.expectError(error.Throw, closed.postMessage(&machine, Value.undef()));
+}
+
+test "worker-global postMessage throws on channel rejection" {
+    const ctx = try Context.create(std.testing.allocator);
+    defer ctx.destroy();
+    var machine = ctx.interpreter();
+    const signal = try ctx.evaluate("globalThis.__workerLimitSignal = new SharedArrayBuffer(4)");
+    const w = try Worker.spawnWith(
+        \\globalThis.onmessage = (e) => {
+        \\  let result = 2;
+        \\  try { postMessage(1); } catch (err) { if (err instanceof RangeError) result = 1; }
+        \\  Atomics.store(new Int32Array(e.data), 0, result);
+        \\  close();
+        \\};
+    , .{ .outbox_limits = .{ .max_message_bytes = 1 } });
+    defer {
+        w.close();
+        w.join();
+        w.destroy();
+    }
+    try w.postMessage(&machine, signal);
+    w.join();
+    const observed = try ctx.evaluate("Atomics.load(new Int32Array(__workerLimitSignal), 0)");
+    try std.testing.expectEqual(@as(f64, 1), observed.asNum());
 }
 
 /// A module-graph entry point for a module worker. The host's `load`
@@ -215,6 +377,11 @@ pub const HostHooks = struct {
 };
 
 pub const Worker = struct {
+    pub const Options = struct {
+        inbox_limits: ChannelLimits = .{},
+        outbox_limits: ChannelLimits = .{},
+    };
+
     thread: ?std.Thread = null,
     owner_thread: std.Thread.Id,
     /// main → worker messages.
@@ -253,9 +420,18 @@ pub const Worker = struct {
     /// returned worker must be `terminate`d or have its inbox closed, then
     /// `join`ed and `destroy`ed by the caller.
     pub fn spawn(src: []const u8) error{OutOfMemory}!*Worker {
+        return spawnWith(src, .{});
+    }
+
+    pub fn spawnWith(src: []const u8, options: Options) error{OutOfMemory}!*Worker {
         const w = try alloc.create(Worker);
         errdefer alloc.destroy(w);
-        w.* = .{ .owner_thread = std.Thread.getCurrentId(), .src = try alloc.dupe(u8, src) };
+        w.* = .{
+            .owner_thread = std.Thread.getCurrentId(),
+            .inbox = Channel.init(options.inbox_limits),
+            .outbox = Channel.init(options.outbox_limits),
+            .src = try alloc.dupe(u8, src),
+        };
         errdefer alloc.free(w.src);
         w.thread = std.Thread.spawn(.{}, workerMain, .{w}) catch return error.OutOfMemory;
         return w;
@@ -271,6 +447,15 @@ pub const Worker = struct {
         entry_source: []const u8,
         host: ContextMod.Context.ModuleHost,
     ) error{OutOfMemory}!*Worker {
+        return spawnModuleWith(entry_path, entry_source, host, .{});
+    }
+
+    pub fn spawnModuleWith(
+        entry_path: []const u8,
+        entry_source: []const u8,
+        host: ContextMod.Context.ModuleHost,
+        options: Options,
+    ) error{OutOfMemory}!*Worker {
         const w = try alloc.create(Worker);
         errdefer alloc.destroy(w);
         const path_copy = try alloc.dupe(u8, entry_path);
@@ -279,6 +464,8 @@ pub const Worker = struct {
         errdefer alloc.free(src_copy);
         w.* = .{
             .owner_thread = std.Thread.getCurrentId(),
+            .inbox = Channel.init(options.inbox_limits),
+            .outbox = Channel.init(options.outbox_limits),
             .src = &.{},
             .module = .{ .entry_path = path_copy, .entry_source = src_copy, .host = host },
         };
@@ -289,7 +476,7 @@ pub const Worker = struct {
     /// Main-side send: serialize `v` from `from`'s realm into the inbox.
     pub fn postMessage(w: *Worker, from: *interp.Interpreter, v: Value) value.HostError!void {
         const bytes = try structured_clone.serialize(from, alloc, v);
-        w.inbox.push(bytes);
+        try enqueueOwned(&w.inbox, from, bytes);
     }
 
     /// Main-side receive: the next worker→main message, deserialized into
@@ -336,6 +523,15 @@ pub const Worker = struct {
         alloc.destroy(w);
     }
 };
+
+fn enqueueOwned(ch: *Channel, self: *interp.Interpreter, bytes: []u8) value.HostError!void {
+    ch.pushOwned(bytes) catch |err| return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.Closed => self.throwError("TypeError", "Worker message channel is closed"),
+        error.MessageTooLarge => self.throwError("RangeError", "Worker message exceeds the channel message limit"),
+        error.QueueFull => self.throwError("RangeError", "Worker message channel capacity exceeded"),
+    };
+}
 
 fn workerMain(w: *Worker) void {
     const ctx = Context.create(alloc) catch {
@@ -400,7 +596,7 @@ fn workerPostMessageFn(ctx: *anyopaque, this: Value, args: []const Value) value.
     const w = workerOf(self) orelse return Value.undef();
     const v = if (args.len > 0) args[0] else Value.undef();
     const bytes = try structured_clone.serialize(self, alloc, v);
-    w.outbox.push(bytes);
+    try enqueueOwned(&w.outbox, self, bytes);
     w.notifyHost(); // wake the embedder's loop to drain via `receive`
     return Value.undef();
 }

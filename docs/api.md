@@ -102,6 +102,10 @@ size_t      JSStringGetUTF8CString(JSStringRef, char* buffer, size_t bufferSize)
 
 ```c [Workers]
 JSWorkerRef JSWorkerCreate(JSStringRef source);
+JSWorkerRef JSWorkerCreateWithLimits(JSStringRef source,
+                                     size_t maxMessageBytes,
+                                     size_t maxQueuedBytes,
+                                     size_t maxQueuedMessages);
 bool        JSWorkerPostMessage(JSWorkerRef, JSContextRef, JSValueRef, JSValueRef* exception);
 JSValueRef  JSWorkerReceive(JSWorkerRef, JSContextRef, uint64_t timeoutMs, JSValueRef* exception);
 void        JSWorkerTerminate(JSWorkerRef);
@@ -149,7 +153,7 @@ Native callbacks installed with `JSObjectMakeFunctionWithCallback` must return a
 
 `JSObjectMakeDeferredPromise` returns a pending native Promise and stores callable resolve/reject functions in the required out pointers. Passing a null resolve or reject out pointer is a contract error reported through the exception out pointer. The returned functions settle the promise through the normal Promise job queue; embedder-observable callbacks run at the next microtask checkpoint, such as the one performed after `JSEvaluateScript`.
 
-`JSWorkerPostMessage` and `JSWorkerReceive` use structured clone to move values between isolated worker contexts. `JSWorkerRef` handles are owner-thread-affine: post, receive, terminate, and release must be called on the thread that created the worker. Null or foreign-thread worker refs are rejected; exception-capable worker APIs report through the exception out pointer. Values that structured clone rejects, such as functions and Symbols, also report through the exception out pointer.
+`JSWorkerPostMessage` and `JSWorkerReceive` use structured clone to move values between isolated worker contexts. `JSWorkerCreate` uses the default 64 MiB per-message, 256 MiB queued-byte, and 1024 queued-message caps in both directions; `JSWorkerCreateWithLimits` sets all three explicitly (zero is a real zero limit). Rejected closed/full/oversized delivery returns `false` and reports an exception instead of silently dropping a frame. `JSWorkerRef` handles are owner-thread-affine: post, receive, terminate, and release must be called on the thread that created the worker. Null or foreign-thread worker refs are rejected; exception-capable worker APIs report through the exception out pointer. Values that structured clone rejects, such as functions and Symbols, also report through the exception out pointer.
 
 `JSStringCreateWithUTF8CString(null)` returns null. `JSStringGetUTF8CString` returns 0 for null strings, null output buffers, or zero buffer size; otherwise it writes a null-terminated UTF-8 prefix and returns the number of bytes written including the terminator.
 

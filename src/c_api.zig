@@ -1066,6 +1066,27 @@ export fn JSWorkerCreate(source: JSStringRef) callconv(.c) JSWorkerRef {
     return @ptrCast(w);
 }
 
+/// Spawn a worker whose inbox and outbox share explicit nonblocking delivery
+/// limits. Zero is a real zero limit, not a request for a default.
+export fn JSWorkerCreateWithLimits(
+    source: JSStringRef,
+    max_message_bytes: usize,
+    max_queued_bytes: usize,
+    max_queued_messages: usize,
+) callconv(.c) JSWorkerRef {
+    const s = strFrom(source) orelse return null;
+    const limits: WorkerMod.ChannelLimits = .{
+        .max_message_bytes = max_message_bytes,
+        .max_queued_bytes = max_queued_bytes,
+        .max_queued_messages = max_queued_messages,
+    };
+    const w = WorkerMod.Worker.spawnWith(s.bytes, .{
+        .inbox_limits = limits,
+        .outbox_limits = limits,
+    }) catch return null;
+    return @ptrCast(w);
+}
+
 /// Serialize `value` from `ctx`'s realm and deliver it to the worker's inbox.
 /// Returns false (and sets `exception`) if serialization fails (e.g. the value
 /// holds a function or symbol, which structured clone refuses).
@@ -2493,6 +2514,25 @@ test "C-API: worker post rejects uncloneable values through exception" {
     var buf: [128]u8 = undefined;
     const written = JSStringGetUTF8CString(msg, &buf, buf.len);
     try std.testing.expect(std.mem.indexOf(u8, buf[0 .. written - 1], "DataCloneError") != null);
+}
+
+test "C-API: worker post reports configured channel limits" {
+    const ctx = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
+    defer JSGlobalContextRelease(ctx);
+    const src = JSStringCreateWithUTF8CString("globalThis.onmessage = () => {};") orelse
+        return error.StringInitFailed;
+    defer JSStringRelease(src);
+    const w = JSWorkerCreateWithLimits(src, 1, 1, 1) orelse return error.WorkerSpawnFailed;
+    defer JSWorkerRelease(w);
+
+    var exception: JSValueRef = null;
+    try std.testing.expect(!JSWorkerPostMessage(w, ctx, JSValueMakeNumber(ctx, 1), &exception));
+    try std.testing.expect(exception != null);
+    const msg = JSValueToStringCopy(ctx, exception, null) orelse return error.StringInitFailed;
+    defer JSStringRelease(msg);
+    var buf: [128]u8 = undefined;
+    const written = JSStringGetUTF8CString(msg, &buf, buf.len);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0 .. written - 1], "message limit") != null);
 }
 
 test "C-API: worker APIs reject null workers through exception" {

@@ -11,6 +11,10 @@ tests as the matching engine features land.
 
 - Agent and worker isolation: one `Context` per OS thread, values crossing by
   structured clone or retained `SharedArrayBuffer` storage.
+- Worker inboxes/outboxes reject nonblockingly at configurable per-frame,
+  live-byte, and live-message caps. Defaults are 64 MiB, 256 MiB, and 1024;
+  successful `postMessage` means exactly one queued frame, while rejection is
+  synchronous and releases frame/SAB ownership exactly once.
 - Structured clone has a shared 256-level nesting ceiling across serialization,
   wire preflight, and deserialization. Excessive graphs fail with a catchable
   clone error, and framed SAB manifests keep rejection cleanup non-recursive.
