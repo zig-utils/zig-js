@@ -563,8 +563,11 @@ the internal mid-script parallel collector. Its accounting invariants are also
 asserted by focused unit tests: every elected attempt ends in exactly one sweep
 or classified abort, abort reasons sum to total aborts, each attempt opens at
 least one publication generation, and maximum collector-side pause does not
-exceed total pause. The same coherence check keeps worst-generation publication
-polls and worst-attempt finish retries bounded by their aggregate totals.
+exceed total pause. Publication generations use `0` only as the idle sentinel
+and have a focused wraparound witness, so a stale high generation cannot satisfy
+a fresh request after counter wrap. The same coherence check keeps
+worst-generation publication polls and worst-attempt finish retries bounded by
+their aggregate totals.
 End-to-end witnesses require both directly observed parked peers and roots
 actually published by running sync-wait peers. A focused native-callback
 witness also runs VM-lowered closures through `Array.prototype.map` inside
