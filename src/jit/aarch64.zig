@@ -89,6 +89,14 @@ pub const Assembler = struct {
         try self.emit32(0xa8c1_0000 | (@as(u32, second) << 10) | (31 << 5) | first);
     }
 
+    pub fn pushFloatPair64(self: *Assembler, first: u5, second: u5) error{NoSpace}!void {
+        try self.emit32(0x6dbf_0000 | (@as(u32, second) << 10) | (31 << 5) | first);
+    }
+
+    pub fn popFloatPair64(self: *Assembler, first: u5, second: u5) error{NoSpace}!void {
+        try self.emit32(0x6cc1_0000 | (@as(u32, second) << 10) | (31 << 5) | first);
+    }
+
     /// `ldr xt, [xn, #byte_offset]`, using AArch64's unsigned scaled form.
     pub fn load64(self: *Assembler, xt: u5, xn: u5, byte_offset: u15) error{ NoSpace, InvalidOffset }!void {
         if ((byte_offset & 7) != 0) return error.InvalidOffset;
@@ -107,6 +115,10 @@ pub const Assembler = struct {
 
     pub fn moveFloatFromRegister64(self: *Assembler, fd: u5, rn: u5) error{NoSpace}!void {
         try self.emit32(0x9e67_0000 | (@as(u32, rn) << 5) | fd);
+    }
+
+    pub fn moveFloat64(self: *Assembler, fd: u5, fn_: u5) error{NoSpace}!void {
+        try self.emit32(0x1e60_4000 | (@as(u32, fn_) << 5) | fd);
     }
 
     pub fn moveRegisterFromFloat64(self: *Assembler, rd: u5, fn_: u5) error{NoSpace}!void {
@@ -336,6 +348,19 @@ test "AArch64 guarded unsigned remainder encodings" {
         0x5400_00a1, 0x3400_008a, 0x1aca_092b, 0x1b0a_a569,
         0x1e63_0120, 0xd65f_03c0,
     };
+    for (expected, 0..) |instruction, index| {
+        try std.testing.expectEqual(instruction, std.mem.readInt(u32, assembler.bytes()[index * 4 ..][0..4], .little));
+    }
+}
+
+test "AArch64 preserves register-resident numeric stack" {
+    var storage: [16]u8 = undefined;
+    var assembler = Assembler.init(&storage);
+    try assembler.pushFloatPair64(8, 9);
+    try assembler.popFloatPair64(8, 9);
+    try assembler.moveFloat64(0, 8);
+    try assembler.ret();
+    const expected = [_]u32{ 0x6dbf_27e8, 0x6cc1_27e8, 0x1e60_4100, 0xd65f_03c0 };
     for (expected, 0..) |instruction, index| {
         try std.testing.expectEqual(instruction, std.mem.readInt(u32, assembler.bytes()[index * 4 ..][0..4], .little));
     }
