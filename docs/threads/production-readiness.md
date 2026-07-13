@@ -251,13 +251,15 @@ Known performance/maturity work:
   they pump tasks and GC safepoints; only the short native condition-wait region
   sets `gc_parked`, and the collector may directly trace that frozen peer only
   while pinning `gc_root_lock`. Each root-publication generation gives running
-  peers up to 50,000 mark/poll iterations and at least 25 ms to publish, with a
-  32-generation base convergence cap. Attempts that are still making born-cell
-  progress and have no deferred work may use bounded extension rounds before a
-  round-limit abort. Publication-timeout or round-limit failures abort without
-  sweeping, briefly suppress immediate re-election churn at later safepoints,
-  and leave reclamation to the next quiescent full collection. These budgets are
-  measured implementation policy, not stable embedder API.
+  peers up to 50,000 mark/poll iterations, with a 25 ms floor for opportunistic
+  mid-script collection and a 100 ms floor for allocation-failure recovery that
+  cannot otherwise proceed. Both use a 32-generation base convergence cap.
+  Attempts that are still making born-cell progress and have no deferred work
+  may use bounded extension rounds before a round-limit abort. Publication-timeout
+  or round-limit failures abort without sweeping, briefly suppress immediate
+  re-election churn at later safepoints, and leave reclamation to the next
+  quiescent full collection. These budgets are measured implementation policy,
+  not stable embedder API.
 - `zig build midgc-profile` now makes convergence measurable without exposing
   the internal `parallel_midscript_gc` knob as embedder API. It separates
   publication-timeout aborts from round-limit aborts, splits out attempts whose

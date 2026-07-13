@@ -2542,7 +2542,11 @@ pub const Context = struct {
         if (self.gc_par_collector.cmpxchgStrong(null, machine, .acq_rel, .acquire) != null) return false;
         _ = self.gc_par_attempts.fetchAdd(1, .monotonic);
         defer self.gc_par_collector.store(null, .release);
-        const swept = self.driveParallelCollection(h, machine);
+        // Allocation cannot make progress without a sweep. Give running peers a
+        // larger scheduling window than routine opportunistic mid-script GC;
+        // this stays bounded and still aborts without sweeping if publication
+        // cannot be proven.
+        const swept = self.driveParallelCollection(h, machine, 100 * std.time.ns_per_ms);
         if (!swept) return false;
         if (self.gc_cell_backing) |backing| _ = backing.trimEmptyTailChunks();
         self.gc_requested.store(false, .monotonic);
@@ -2703,7 +2707,7 @@ pub const Context = struct {
         _ = self.gc_par_attempts.fetchAdd(1, .monotonic);
         defer self.gc_par_collector.store(null, .release);
         defer self.gc_par_request.store(0, .release);
-        _ = self.driveParallelCollection(h, machine);
+        _ = self.driveParallelCollection(h, machine, 25 * std.time.ns_per_ms);
     }
 
     /// Peer/loser path: if the collector has an open request this interpreter
@@ -2806,7 +2810,12 @@ pub const Context = struct {
         }
     }
 
-    fn driveParallelCollection(self: *Context, h: *GcHeap, machine: *interp.Interpreter) bool {
+    fn driveParallelCollection(
+        self: *Context,
+        h: *GcHeap,
+        machine: *interp.Interpreter,
+        publication_wait_floor_ns: i96,
+    ) bool {
         const started_ns = std.Io.Timestamp.now(agent.engineIo(), .awake).nanoseconds;
         defer self.recordParallelGcPause(started_ns);
         // BEGIN: whiten + arm the barrier under alloc_lock, then trace the
@@ -2828,7 +2837,6 @@ pub const Context = struct {
         // those waiters at least one wake/publish opportunity under local load,
         // TSan slowdown, or core oversubscription.
         const wait_budget: u64 = 50_000;
-        const wait_floor_ns: i96 = 25 * std.time.ns_per_ms;
         var prev_born: usize = h.bornPendingLen();
         var attempt_finish_retries: u64 = 0;
         var round: u32 = 0;
@@ -2839,7 +2847,7 @@ pub const Context = struct {
             const gen = self.openParallelPublicationGeneration();
             _ = self.gc_par_generations.fetchAdd(1, .monotonic);
             self.countParallelPeers(machine);
-            const deadline_ns = std.Io.Timestamp.now(agent.engineIo(), .awake).nanoseconds + wait_floor_ns;
+            const deadline_ns = std.Io.Timestamp.now(agent.engineIo(), .awake).nanoseconds + publication_wait_floor_ns;
             var waited: u64 = 0;
             while (!self.allParallelPublished(gen, machine)) {
                 self.gc_scan_native_stack = true;
