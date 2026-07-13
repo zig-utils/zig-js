@@ -92,6 +92,7 @@ def collect(
 ) -> list[Row]:
     rows: list[Row] = []
     pair_index = 0
+    all_lanes = [1, *lanes]
 
     def run_pair(zig_arguments: list[str], jsc_arguments: list[str]) -> None:
         nonlocal pair_index
@@ -111,10 +112,15 @@ def collect(
             ["single", workload, str(jobs), str(samples)],
             ["single", workload, str(jobs), str(samples)],
         )
-        for lane_count in lanes:
-            run_pair(
-                ["shared", workload, str(jobs), str(samples), str(lane_count)],
-                ["contexts", workload, str(jobs), str(samples), str(lane_count)],
+        for lane_count in all_lanes:
+            for mode in ("independent_steady", "independent_cold"):
+                arguments = [mode, workload, str(jobs), str(samples), str(lane_count)]
+                run_pair(arguments, arguments)
+            rows.extend(
+                run_case(
+                    zig_js,
+                    ["shared", workload, str(jobs), str(samples), str(lane_count)],
+                )
             )
     return rows
 
@@ -124,9 +130,24 @@ def validate(rows: list[Row], samples: int, lanes: list[int], quick: bool) -> No
     for row in rows:
         grouped[row.key].append(row)
 
-    expected_groups = len(WORKLOADS) * 2 * (1 + len(lanes))
-    if len(grouped) != expected_groups:
-        raise RuntimeError(f"expected {expected_groups} result groups, got {len(grouped)}")
+    all_lanes = [1, *lanes]
+    expected: set[tuple[str, str, str, int, int]] = set()
+    for workload, default_jobs in WORKLOADS.items():
+        jobs = max(1, default_jobs // 20) if quick else default_jobs
+        expected.update({
+            ("zig-js", "single", workload, 1, jobs),
+            ("JavaScriptCore", "single", workload, 1, jobs),
+        })
+        for lane_count in all_lanes:
+            expected.add(("zig-js", "shared", workload, lane_count, jobs))
+            for engine in ("zig-js", "JavaScriptCore"):
+                expected.add((engine, "independent_steady", workload, lane_count, jobs))
+                expected.add((engine, "independent_cold", workload, lane_count, jobs))
+    actual = set(grouped)
+    if actual != expected:
+        missing = sorted(expected - actual)
+        unexpected = sorted(actual - expected)
+        raise RuntimeError(f"result matrix mismatch; missing={missing}, unexpected={unexpected}")
     for key, group in grouped.items():
         if len(group) != samples:
             raise RuntimeError(f"{key} has {len(group)} samples, expected {samples}")
@@ -175,6 +196,7 @@ def metadata() -> dict[str, str]:
     memory_gib = f"{int(memory) / (1024 ** 3):.1f} GiB" if memory.isdigit() else memory
     commit = command_output(["git", "rev-parse", "HEAD"])
     dirty = command_output(["git", "status", "--porcelain", "--untracked-files=no"], "")
+    power = " ".join(command_output(["pmset", "-g", "batt"], "unavailable").split())
     return {
         "Date": dt.date.today().isoformat(),
         "Host": f"{cpu}; {physical} physical / {logical} logical CPUs; {memory_gib}",
@@ -182,13 +204,21 @@ def metadata() -> dict[str, str]:
         "Zig": command_output(["zig", "version"]),
         "zig-js": commit + (" (tracked worktree dirty)" if dirty else ""),
         "JavaScriptCore": f"system framework {jsc_version}",
+        "Power": power,
     }
+
+
+def ensure_publishable(info: dict[str, str], publishing: bool) -> None:
+    if publishing and info["zig-js"].endswith(" (tracked worktree dirty)"):
+        raise ValueError("refusing to publish benchmark evidence from a dirty tracked worktree")
 
 
 def render(rows: list[Row], lanes: list[int], raw_path: pathlib.Path | None, info: dict[str, str]) -> str:
     groups: dict[tuple[str, str, str, int, int], list[Row]] = defaultdict(list)
     for row in rows:
         groups[row.key].append(row)
+    all_lanes = [1, *lanes]
+    max_lanes = all_lanes[-1]
     lines = [
         f"# zig-js / JavaScriptCore benchmark — {info['Date']}",
         "",
@@ -230,54 +260,103 @@ def render(rows: list[Row], lanes: list[int], raw_path: pathlib.Path | None, inf
 
     lines.extend([
         "",
-        "## zig-js shared-realm scaling",
+        "## Independent-context steady state",
         "",
-        "Every lane performs the full per-row job count. The timed region creates and joins shared-realm no-GIL",
-        "JavaScript `Thread`s. `scaling` compares aggregate throughput with the zig-js single-context row.",
+        "Both engines keep one warmed context on one persistent OS worker per lane. The timed region contains the",
+        "same semaphore dispatch, exact invocation, and completion wait. Every lane performs the full job count.",
+        "`scaling` uses the same engine and mode at one lane; cross-engine throughput is directly comparable.",
         "",
-        "| workload | lanes | jobs/lane | median (ms) | min–max (ms) | RSD | scaling |",
-        "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| workload | lanes | jobs/lane | zig-js median (ms) | zig-js min–max (ms) | zig-js RSD | JSC median (ms) | JSC min–max (ms) | JSC RSD | JSC / zig-js | zig-js scaling | JSC scaling |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ])
-    zig_max_scaling: list[float] = []
-    max_lanes = lanes[-1]
+    steady_max_ratios: list[float] = []
+    zig_steady_max_scaling: list[float] = []
+    jsc_steady_max_scaling: list[float] = []
     for workload in WORKLOADS:
         jobs = next(row.jobs for row in rows if row.workload == workload)
-        zig_one = median_ns(groups, ("zig-js", "single", workload, 1, jobs))
-        for lane_count in lanes:
-            zig = median_ns(groups, ("zig-js", "shared", workload, lane_count, jobs))
-            zig_min, zig_max, zig_rsd = spread(groups, ("zig-js", "shared", workload, lane_count, jobs))
+        zig_one = median_ns(groups, ("zig-js", "independent_steady", workload, 1, jobs))
+        jsc_one = median_ns(groups, ("JavaScriptCore", "independent_steady", workload, 1, jobs))
+        for lane_count in all_lanes:
+            zig_key = ("zig-js", "independent_steady", workload, lane_count, jobs)
+            jsc_key = ("JavaScriptCore", "independent_steady", workload, lane_count, jobs)
+            zig = median_ns(groups, zig_key)
+            jsc = median_ns(groups, jsc_key)
+            zig_min, zig_max, zig_rsd = spread(groups, zig_key)
+            jsc_min, jsc_max, jsc_rsd = spread(groups, jsc_key)
             zig_scaling = lane_count * zig_one / zig
+            jsc_scaling = lane_count * jsc_one / jsc
+            ratio = zig / jsc
             if lane_count == max_lanes:
-                zig_max_scaling.append(zig_scaling)
+                steady_max_ratios.append(ratio)
+                zig_steady_max_scaling.append(zig_scaling)
+                jsc_steady_max_scaling.append(jsc_scaling)
             lines.append(
-                f"| `{workload}` | {lane_count} | {jobs} | {zig / 1e6:.3f} | "
-                f"{zig_min / 1e6:.3f}–{zig_max / 1e6:.3f} | {zig_rsd:.2f}% | {zig_scaling:.2f}x |"
+                f"| `{workload}` | {lane_count} | {jobs} | {zig / 1e6:.3f} | {zig_min / 1e6:.3f}–{zig_max / 1e6:.3f} | {zig_rsd:.2f}% | "
+                f"{jsc / 1e6:.3f} | {jsc_min / 1e6:.3f}–{jsc_max / 1e6:.3f} | {jsc_rsd:.2f}% | {ratio:.2f}x | {zig_scaling:.2f}x | {jsc_scaling:.2f}x |"
             )
 
     lines.extend([
         "",
-        "## JSC independent-context scaling reference",
+        "## Independent-context cold lifecycle",
         "",
-        "Each lane owns a separately prepared and warmed `JSGlobalContext`. The timed region creates the OS threads,",
-        "evaluates one invocation per context, and joins them. This is an isolated-context scaling reference, not a",
-        "direct throughput competitor for zig-js's shared object graph.",
+        "Neither engine warms these contexts. The timer covers OS-thread creation, context creation, workload-source",
+        "evaluation and configuration, the exact invocation, context destruction, and OS-thread join on both sides.",
+        "`scaling` uses the same engine and cold lifecycle at one lane.",
+        "",
+        "| workload | lanes | jobs/lane | zig-js median (ms) | zig-js min–max (ms) | zig-js RSD | JSC median (ms) | JSC min–max (ms) | JSC RSD | JSC / zig-js | zig-js scaling | JSC scaling |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ])
+    cold_max_ratios: list[float] = []
+    zig_cold_max_scaling: list[float] = []
+    jsc_cold_max_scaling: list[float] = []
+    for workload in WORKLOADS:
+        jobs = next(row.jobs for row in rows if row.workload == workload)
+        zig_one = median_ns(groups, ("zig-js", "independent_cold", workload, 1, jobs))
+        jsc_one = median_ns(groups, ("JavaScriptCore", "independent_cold", workload, 1, jobs))
+        for lane_count in all_lanes:
+            zig_key = ("zig-js", "independent_cold", workload, lane_count, jobs)
+            jsc_key = ("JavaScriptCore", "independent_cold", workload, lane_count, jobs)
+            zig = median_ns(groups, zig_key)
+            jsc = median_ns(groups, jsc_key)
+            zig_min, zig_max, zig_rsd = spread(groups, zig_key)
+            jsc_min, jsc_max, jsc_rsd = spread(groups, jsc_key)
+            zig_scaling = lane_count * zig_one / zig
+            jsc_scaling = lane_count * jsc_one / jsc
+            ratio = zig / jsc
+            if lane_count == max_lanes:
+                cold_max_ratios.append(ratio)
+                zig_cold_max_scaling.append(zig_scaling)
+                jsc_cold_max_scaling.append(jsc_scaling)
+            lines.append(
+                f"| `{workload}` | {lane_count} | {jobs} | {zig / 1e6:.3f} | {zig_min / 1e6:.3f}–{zig_max / 1e6:.3f} | {zig_rsd:.2f}% | "
+                f"{jsc / 1e6:.3f} | {jsc_min / 1e6:.3f}–{jsc_max / 1e6:.3f} | {jsc_rsd:.2f}% | {ratio:.2f}x | {zig_scaling:.2f}x | {jsc_scaling:.2f}x |"
+            )
+
+    lines.extend([
+        "",
+        "## zig-js shared-realm scaling",
+        "",
+        "This is zig-js's distinct no-GIL shared-object-graph model, which JSC's public C API does not provide.",
+        "The timed region creates JavaScript `Thread`s, performs the work, and joins them. Scaling uses the same",
+        "shared-realm path at one lane, so thread lifecycle overhead is present in every row.",
         "",
         "| workload | lanes | jobs/lane | median (ms) | min–max (ms) | RSD | scaling |",
         "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
     ])
-    jsc_max_scaling: list[float] = []
+    zig_shared_max_scaling: list[float] = []
     for workload in WORKLOADS:
         jobs = next(row.jobs for row in rows if row.workload == workload)
-        jsc_one = median_ns(groups, ("JavaScriptCore", "single", workload, 1, jobs))
-        for lane_count in lanes:
-            jsc = median_ns(groups, ("JavaScriptCore", "contexts", workload, lane_count, jobs))
-            jsc_min, jsc_max, jsc_rsd = spread(groups, ("JavaScriptCore", "contexts", workload, lane_count, jobs))
-            jsc_scaling = lane_count * jsc_one / jsc
+        zig_one = median_ns(groups, ("zig-js", "shared", workload, 1, jobs))
+        for lane_count in all_lanes:
+            key = ("zig-js", "shared", workload, lane_count, jobs)
+            zig = median_ns(groups, key)
+            zig_min, zig_max, zig_rsd = spread(groups, key)
+            zig_scaling = lane_count * zig_one / zig
             if lane_count == max_lanes:
-                jsc_max_scaling.append(jsc_scaling)
+                zig_shared_max_scaling.append(zig_scaling)
             lines.append(
-                f"| `{workload}` | {lane_count} | {jobs} | {jsc / 1e6:.3f} | "
-                f"{jsc_min / 1e6:.3f}–{jsc_max / 1e6:.3f} | {jsc_rsd:.2f}% | {jsc_scaling:.2f}x |"
+                f"| `{workload}` | {lane_count} | {jobs} | {zig / 1e6:.3f} | "
+                f"{zig_min / 1e6:.3f}–{zig_max / 1e6:.3f} | {zig_rsd:.2f}% | {zig_scaling:.2f}x |"
             )
 
     lines.extend([
@@ -289,18 +368,25 @@ def render(rows: list[Row], lanes: list[int], raw_path: pathlib.Path | None, inf
         "zig-js currently has interpreters and no JIT. The number is a compact description of this matrix, not a claim",
         "about applications or unsupported workloads.",
         "",
-        f"At {max_lanes} lanes, geometric-mean throughput scaling is {geometric_mean(zig_max_scaling):.2f}x for zig-js's",
-        f"shared realm and {geometric_mean(jsc_max_scaling):.2f}x for the separate JSC isolated-context reference.",
-        "These are deliberately not divided into a cross-engine parallel ratio because the programming models differ.",
-        "Per-workload rows matter more than either aggregate.",
+        f"At {max_lanes} independent warmed contexts, JSC throughput is {geometric_mean(steady_max_ratios):.2f}x zig-js by",
+        f"geometric mean; scaling from the mode's own one-lane baseline is {geometric_mean(zig_steady_max_scaling):.2f}x",
+        f"for zig-js and {geometric_mean(jsc_steady_max_scaling):.2f}x for JSC. In the symmetric cold lifecycle, JSC",
+        f"throughput is {geometric_mean(cold_max_ratios):.2f}x zig-js, with {geometric_mean(zig_cold_max_scaling):.2f}x",
+        f"and {geometric_mean(jsc_cold_max_scaling):.2f}x scaling respectively.",
+        "",
+        f"zig-js's shared-realm path scales {geometric_mean(zig_shared_max_scaling):.2f}x at {max_lanes} lanes from its",
+        "own one-lane shared baseline. It has no direct JSC ratio because the public JSC embedding API exposes",
+        "isolated global contexts, not concurrent JavaScript workers sharing one object graph. Per-workload rows",
+        "matter more than any aggregate.",
         "",
         "## Method and timed boundaries",
         "",
-        "- Both engines evaluate the exact bytes in `bench/comparison.js`; the single-context rows time the exact same invocation bytes, and the driver rejects unstable or cross-engine checksum mismatches.",
-        "- zig-js is built `ReleaseFast`. Its single row explicitly enables precise GC; shared mode enables the shipping no-GIL thread configuration, which implies GC.",
-        "- Each context evaluates the workload source and performs three reduced-size warm-up calls before measurement.",
-        "- A single sample times one host evaluation call. Context/source setup and warm-up are outside the timer.",
-        "- Parallel JS state and JSC contexts are prepared and warmed before measurement. The timed region creates the zig-js `Thread`s / JSC OS threads, performs the work, and ends after every thread joins. JSC context teardown is outside the timer.",
+        "- Both engines evaluate the exact bytes in `bench/comparison.js`. Directly compared single and independent rows use the exact invocation bytes `__benchmarkSelected(__benchmarkJobs, __benchmarkLane)`; shared mode calls the same selected function with the same jobs/lane arguments. The driver rejects unstable or cross-engine checksum mismatches.",
+        "- zig-js is built `ReleaseFast`. Direct and independent contexts explicitly enable precise GC; shared mode enables the shipping no-GIL thread configuration, which implies GC.",
+        "- Single mode evaluates the workload source, configures the context, and performs three reduced-size warm-up calls before timing one host evaluation call per sample.",
+        "- Independent steady mode uses the same persistent-worker protocol in both runners. Every worker creates, configures, and warms its own thread-affine context before measurement. Each timer includes semaphore dispatch, one invocation per lane, and completion waits; worker/context teardown follows all samples.",
+        "- Independent cold mode performs no warm-up. Every timer includes OS-thread spawn, worker-owned context creation, workload-source evaluation and configuration, one invocation, context destruction, and OS-thread join.",
+        "- Shared mode prepares and warms one zig-js shared realm outside the timer. Every timed sample creates and joins the requested JavaScript `Thread`s. Its one-lane row is the scaling baseline.",
         "- Runner process order alternates deterministically for each matrix row instead of always favoring one engine with the cooler first run.",
         f"- Full runs reject any row whose median is shorter than {MIN_FULL_MEDIAN_NS / 1e6:.0f} ms; quick harness validation skips that timing floor.",
         "- Samples run sequentially on an otherwise ordinary host. No CPU pinning, frequency locking, or background-process suppression is attempted.",
@@ -351,8 +437,10 @@ def main() -> int:
 
     info = metadata()
     publishing = args.raw_out is not None or args.markdown_out is not None
-    if publishing and info["zig-js"].endswith(" (tracked worktree dirty)"):
-        parser.error("refusing to publish benchmark evidence from a dirty tracked worktree")
+    try:
+        ensure_publishable(info, publishing)
+    except ValueError as error:
+        parser.error(str(error))
 
     rows = collect(args.zig_js_runner, args.jsc_runner, samples, lanes, args.quick)
     validate(rows, samples, lanes, args.quick)

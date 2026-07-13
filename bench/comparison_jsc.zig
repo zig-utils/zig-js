@@ -1,8 +1,10 @@
-//! Machine-readable system-JavaScriptCore side of the comparison benchmark.
+//! Machine-readable system-JavaScriptCore comparison benchmark runner.
 //!
-//! Single mode reuses one warmed JSGlobalContext. Contexts mode prepares one
-//! independent warmed JSGlobalContext per lane, then includes OS-thread spawn,
-//! evaluation, and join in the timed region. Context teardown happens later.
+//! Single mode reuses one warmed JSGlobalContext. Independent steady mode
+//! keeps one warmed creator-thread-owned context and one OS worker per lane;
+//! only symmetric dispatch/evaluation/completion is timed. Independent cold
+//! mode times OS-thread and context creation, source setup, one invocation,
+//! context destruction, and join.
 
 const std = @import("std");
 
@@ -31,15 +33,27 @@ extern fn JSValueToNumber(ctx: JSContextRef, value: JSValueRef, exception: [*c]J
 const workload_source: [:0]const u8 = @embedFile("comparison.js");
 const invocation: [:0]const u8 = "__benchmarkSelected(__benchmarkJobs, __benchmarkLane)";
 
-const Mode = enum { single, contexts };
+const Mode = enum { single, independent_steady, independent_cold };
 
-const Lane = struct {
+const SteadyLane = struct {
+    io: std.Io,
     workload: []const u8,
     jobs: usize,
     lane: usize,
-    context: JSGlobalContextRef = null,
-    checksum: f64 = 0,
+    ready: *std.Io.Semaphore,
+    done: *std.Io.Semaphore,
+    start: std.Io.Semaphore = .{},
+    stop: std.atomic.Value(bool) = .init(false),
     failed: std.atomic.Value(bool) = .init(false),
+    checksum: f64 = 0,
+};
+
+const ColdLane = struct {
+    workload: []const u8,
+    jobs: usize,
+    lane: usize,
+    failed: std.atomic.Value(bool) = .init(false),
+    checksum: f64 = 0,
 };
 
 fn nowNs(io: std.Io) i96 {
@@ -47,8 +61,8 @@ fn nowNs(io: std.Io) i96 {
 }
 
 fn parseMode(text: []const u8) !Mode {
-    if (std.mem.eql(u8, text, "single")) return .single;
-    if (std.mem.eql(u8, text, "contexts")) return .contexts;
+    inline for (std.meta.tags(Mode)) |mode|
+        if (std.mem.eql(u8, text, @tagName(mode))) return mode;
     return error.InvalidMode;
 }
 
@@ -131,8 +145,100 @@ fn runSingle(
     }
 }
 
-fn laneMain(lane: *Lane) void {
-    const ctx = lane.context orelse {
+fn steadyLaneMain(lane: *SteadyLane) void {
+    const allocator = std.heap.page_allocator;
+    const ctx = JSGlobalContextCreate(null) orelse {
+        lane.failed.store(true, .release);
+        lane.ready.post(lane.io);
+        return;
+    };
+    defer JSGlobalContextRelease(ctx);
+    configure(allocator, ctx, lane.workload, lane.jobs, lane.lane) catch {
+        lane.failed.store(true, .release);
+        lane.ready.post(lane.io);
+        return;
+    };
+    warm(allocator, ctx, @max(@as(usize, 1), lane.jobs / 10), lane.jobs, lane.lane) catch {
+        lane.failed.store(true, .release);
+        lane.ready.post(lane.io);
+        return;
+    };
+    lane.ready.post(lane.io);
+
+    while (true) {
+        lane.start.waitUncancelable(lane.io);
+        if (lane.stop.load(.acquire)) return;
+        lane.checksum = evaluate(ctx, invocation) catch {
+            lane.failed.store(true, .release);
+            lane.done.post(lane.io);
+            return;
+        };
+        lane.done.post(lane.io);
+    }
+}
+
+fn runIndependentSteady(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    writer: *std.Io.Writer,
+    workload: []const u8,
+    jobs: usize,
+    samples: usize,
+    lane_count: usize,
+) !void {
+    const lanes = try allocator.alloc(SteadyLane, lane_count);
+    defer allocator.free(lanes);
+    const threads = try allocator.alloc(std.Thread, lane_count);
+    defer allocator.free(threads);
+    var ready: std.Io.Semaphore = .{};
+    var done: std.Io.Semaphore = .{};
+    var spawned: usize = 0;
+    defer {
+        for (lanes[0..spawned]) |*lane| {
+            lane.stop.store(true, .release);
+            lane.start.post(io);
+        }
+        for (threads[0..spawned]) |thread| thread.join();
+    }
+
+    for (lanes, 0..) |*lane, lane_index| {
+        lane.* = .{
+            .io = io,
+            .workload = workload,
+            .jobs = jobs,
+            .lane = lane_index,
+            .ready = &ready,
+            .done = &done,
+        };
+        threads[lane_index] = try std.Thread.spawn(.{}, steadyLaneMain, .{lane});
+        spawned += 1;
+    }
+    for (0..lane_count) |_| ready.waitUncancelable(io);
+    for (lanes) |*lane| if (lane.failed.load(.acquire)) return error.BenchmarkWorkerFailure;
+
+    for (0..samples) |sample| {
+        const started = nowNs(io);
+        for (lanes) |*lane| lane.start.post(io);
+        for (0..lane_count) |_| done.waitUncancelable(io);
+        const elapsed: u64 = @intCast(nowNs(io) - started);
+
+        var checksum: f64 = 0;
+        for (lanes) |*lane| {
+            if (lane.failed.load(.acquire)) return error.BenchmarkWorkerFailure;
+            checksum += lane.checksum;
+        }
+        try printRow(writer, .independent_steady, workload, lane_count, jobs, sample, elapsed, checksum);
+    }
+}
+
+fn coldLaneMain(lane: *ColdLane) void {
+    const allocator = std.heap.page_allocator;
+    const ctx = JSGlobalContextCreate(null) orelse {
+        lane.failed.store(true, .release);
+        return;
+    };
+    defer JSGlobalContextRelease(ctx);
+    configure(allocator, ctx, lane.workload, lane.jobs, lane.lane) catch {
         lane.failed.store(true, .release);
         return;
     };
@@ -142,7 +248,7 @@ fn laneMain(lane: *Lane) void {
     };
 }
 
-fn runContexts(
+fn runIndependentCold(
     allocator: std.mem.Allocator,
     io: std.Io,
     writer: *std.Io.Writer,
@@ -151,38 +257,36 @@ fn runContexts(
     samples: usize,
     lane_count: usize,
 ) !void {
-    const lanes = try allocator.alloc(Lane, lane_count);
+    const lanes = try allocator.alloc(ColdLane, lane_count);
     defer allocator.free(lanes);
     const threads = try allocator.alloc(std.Thread, lane_count);
     defer allocator.free(threads);
 
     for (0..samples) |sample| {
-        for (lanes, 0..) |*lane, lane_index| {
-            lane.* = .{
-                .workload = workload,
-                .jobs = jobs,
-                .lane = lane_index,
-            };
-            const ctx = JSGlobalContextCreate(null) orelse return error.JavaScriptCoreFailure;
-            lane.context = ctx;
-            errdefer JSGlobalContextRelease(ctx);
-            try configure(allocator, ctx, workload, jobs, lane_index);
-            try warm(allocator, ctx, @max(@as(usize, 1), jobs / 10), jobs, lane_index);
-        }
+        for (lanes, 0..) |*lane, lane_index| lane.* = .{
+            .workload = workload,
+            .jobs = jobs,
+            .lane = lane_index,
+        };
 
         const started = nowNs(io);
-        for (lanes, 0..) |*lane, lane_index|
-            threads[lane_index] = try std.Thread.spawn(.{}, laneMain, .{lane});
+        var spawned: usize = 0;
+        for (lanes) |*lane| {
+            threads[spawned] = std.Thread.spawn(.{}, coldLaneMain, .{lane}) catch |err| {
+                for (threads[0..spawned]) |thread| thread.join();
+                return err;
+            };
+            spawned += 1;
+        }
         for (threads) |thread| thread.join();
         const elapsed: u64 = @intCast(nowNs(io) - started);
 
         var checksum: f64 = 0;
         for (lanes) |*lane| {
-            defer if (lane.context) |ctx| JSGlobalContextRelease(ctx);
-            if (lane.failed.load(.acquire)) return error.JavaScriptCoreFailure;
+            if (lane.failed.load(.acquire)) return error.BenchmarkWorkerFailure;
             checksum += lane.checksum;
         }
-        try printRow(writer, .contexts, workload, lane_count, jobs, sample, elapsed, checksum);
+        try printRow(writer, .independent_cold, workload, lane_count, jobs, sample, elapsed, checksum);
     }
 }
 
@@ -194,10 +298,12 @@ pub fn main(init: std.process.Init) !void {
     const workload = args[2];
     const jobs = try std.fmt.parseUnsigned(usize, args[3], 10);
     const samples = try std.fmt.parseUnsigned(usize, args[4], 10);
-    const lanes = if (mode == .contexts)
-        if (args.len == 6) try std.fmt.parseUnsigned(usize, args[5], 10) else return error.InvalidArguments
+    const lanes = if (mode == .single)
+        1
+    else if (args.len == 6)
+        try std.fmt.parseUnsigned(usize, args[5], 10)
     else
-        1;
+        return error.InvalidArguments;
     if (jobs == 0 or samples == 0 or lanes == 0) return error.InvalidArguments;
 
     var stdout_buffer: [4096]u8 = undefined;
@@ -205,7 +311,8 @@ pub fn main(init: std.process.Init) !void {
     const stdout = &stdout_writer.interface;
     switch (mode) {
         .single => try runSingle(init.gpa, init.io, stdout, workload, jobs, samples),
-        .contexts => try runContexts(init.gpa, init.io, stdout, workload, jobs, samples, lanes),
+        .independent_steady => try runIndependentSteady(init.gpa, init.io, stdout, workload, jobs, samples, lanes),
+        .independent_cold => try runIndependentCold(init.gpa, init.io, stdout, workload, jobs, samples, lanes),
     }
     try stdout.flush();
 }

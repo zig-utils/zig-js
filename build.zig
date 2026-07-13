@@ -281,7 +281,11 @@ pub fn build(b: *std.Build) void {
     // runners are deliberately separate executables so zig-js's JSC-shaped C
     // exports cannot interpose on the real framework symbols. The Python driver
     // only orchestrates runs, validates checksums, and renders raw/report data.
-    const comparison_step = b.step("benchmark-comparison", "Compare zig-js single/no-GIL throughput with system JavaScriptCore (macOS)");
+    const comparison_harness_test = b.addSystemCommand(&.{ "python3", "tools/test_benchmark_comparison.py" });
+    const comparison_harness_test_step = b.step("benchmark-comparison-test", "Test comparison matrix validation without running benchmarks");
+    comparison_harness_test_step.dependOn(&comparison_harness_test.step);
+
+    const comparison_step = b.step("benchmark-comparison", "Compare zig-js direct/independent/shared throughput with system JavaScriptCore (macOS)");
     const comparison_bin_step = b.step("benchmark-comparison-bin", "Build the zig-js and system-JSC comparison runners (macOS)");
     if (target.result.os.tag == .macos) {
         const comparison_zig_js = b.addExecutable(.{
