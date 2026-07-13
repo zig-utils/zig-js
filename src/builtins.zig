@@ -190,8 +190,9 @@ fn skipStrWhiteSpace(s: []const u8) usize {
 pub fn parseFloatFn(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
     _ = this;
     const self = interp(ctx);
-    const prim = try self.toPrimitive(arg(args, 0), .string);
-    const s = try prim.toString(self.arena);
+    // ToString(string) — throws a TypeError for a Symbol argument (per spec),
+    // rather than silently stringifying it to NaN.
+    const s = try self.toStringV(arg(args, 0));
     const nan = std.math.nan(f64);
     // ParseFloat: trim leading StrWhiteSpace, then take the longest prefix that is
     // a StrDecimalLiteral. We scan that grammar by hand rather than leaning on
@@ -228,8 +229,8 @@ pub fn parseFloatFn(ctx: *anyopaque, this: Value, args: []const Value) HostError
 pub fn parseIntFn(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
     _ = this;
     const self = interp(ctx);
-    const s_prim = try self.toPrimitive(arg(args, 0), .string);
-    const s = try s_prim.toString(self.arena);
+    // ToString(string) — throws a TypeError for a Symbol argument (per spec).
+    const s = try self.toStringV(arg(args, 0));
     var radix: i32 = 10;
     var strip_prefix = true;
     if (args.len >= 2 and !args[1].isUndefined()) {
@@ -2741,12 +2742,24 @@ const Stringifier = struct {
         const self = st.self;
         const a = self.arena;
         const keys = if (st.allow) |al| al else try st.jsonObjectKeys(v.asObj(), shape);
+        // A Proxy's enumerability comes from [[GetOwnProperty]] (the
+        // getOwnPropertyDescriptor trap), which EnumerableOwnPropertyNames runs
+        // per key — the raw shape can't answer it, and a throwing or
+        // absent-descriptor trap must be observed (not silently serialized).
+        const is_proxy = v.asObj().proxy_handler != null or v.asObj().proxy_revoked;
         const outer = st.indent.items.len;
         try st.indent.appendSlice(a, st.gap);
         var tmp: std.ArrayListUnmanaged(u8) = .empty;
         var count: usize = 0;
         for (keys) |k| {
-            if (jsonHiddenKey(k) or (st.allow == null and !shape.getAttr(k).enumerable)) continue;
+            if (jsonHiddenKey(k)) continue;
+            if (st.allow == null) {
+                const enumerable = if (is_proxy) blk: {
+                    const desc = try objectGetOwnPropertyDescriptor(self, Value.undef(), &.{ v, try self.keyToValue(k) });
+                    break :blk desc.isObject() and (try self.getProperty(desc, "enumerable")).toBoolean();
+                } else shape.getAttr(k).enumerable;
+                if (!enumerable) continue;
+            }
             var member: std.ArrayListUnmanaged(u8) = .empty;
             if (!try st.serialize(&member, v, k)) continue; // omitted property
             if (count != 0) try tmp.append(a, ',');
