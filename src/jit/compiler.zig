@@ -257,6 +257,7 @@ fn analyzeNumeric(chunk: *const Chunk) !Analysis {
 
 const ControlFixup = union(enum) {
     branch: struct { at: usize, target: u32 },
+    condition: struct { at: usize, target: u32 },
     test_zero: struct { at: usize, target: u32 },
 };
 
@@ -317,6 +318,39 @@ fn comparisonCondition(op: bc.Op) aarch64.Condition {
         .neq, .neq_strict => .ne,
         else => unreachable,
     };
+}
+
+fn isNumericComparison(op: bc.Op) bool {
+    return switch (op) {
+        .lt, .le, .gt, .ge, .eq, .neq, .eq_strict, .neq_strict => true,
+        else => false,
+    };
+}
+
+fn comparisonFalseCondition(op: bc.Op) aarch64.Condition {
+    return switch (op) {
+        .lt => .pl,
+        .le => .hi,
+        .gt => .le,
+        .ge => .lt,
+        .eq, .eq_strict => .ne,
+        .neq, .neq_strict => .eq,
+        else => unreachable,
+    };
+}
+
+fn emitFusedComparisonBranch(
+    assembler: *aarch64.Assembler,
+    state: State,
+    comparison: bc.Op,
+    target: u32,
+) !ControlFixup {
+    const lhs_slot = state.depth - 2;
+    try assembler.compareFloat64(try numericRegister(lhs_slot), try numericRegister(lhs_slot + 1));
+    return .{ .condition = .{
+        .at = try assembler.branchConditionPlaceholder(comparisonFalseCondition(comparison)),
+        .target = target,
+    } };
 }
 
 fn emitOperation(assembler: *aarch64.Assembler, chunk: *const Chunk, state: State, inst: bc.Inst) !?ControlFixup {
@@ -453,6 +487,11 @@ fn patchControlFixups(
                 return error.UnsupportedChunk;
             try assembler.patchBranch(branch.at, bytecode_offsets[branch.target]);
         },
+        .condition => |branch| {
+            if (branch.target >= bytecode_offsets.len or bytecode_offsets[branch.target] == unreachable_offset)
+                return error.UnsupportedChunk;
+            try assembler.patchConditionBranch(branch.at, bytecode_offsets[branch.target]);
+        },
         .test_zero => |branch| {
             if (branch.target >= bytecode_offsets.len or bytecode_offsets[branch.target] == unreachable_offset)
                 return error.UnsupportedChunk;
@@ -551,9 +590,22 @@ fn compileNumeric(chunk: *const Chunk) !jit.CompiledCode {
         try assembler.subtractImmediate64(24, 24, instruction_count);
         try assembler.addImmediate64(19, 19, instruction_count);
 
-        for (block.start..block.end) |ip| {
+        var ip: usize = block.start;
+        while (ip < block.end) {
             const state = analysis.states[ip].?;
-            fast_control_fixups[ip] = try emitOperation(&assembler, chunk, state, chunk.code.items[ip]);
+            const inst = chunk.code.items[ip];
+            if (isNumericComparison(inst.op) and ip + 1 < block.end and chunk.code.items[ip + 1].op == .jump_if_false) {
+                fast_control_fixups[ip + 1] = try emitFusedComparisonBranch(
+                    &assembler,
+                    state,
+                    inst.op,
+                    chunk.code.items[ip + 1].a,
+                );
+                ip += 2;
+                continue;
+            }
+            fast_control_fixups[ip] = try emitOperation(&assembler, chunk, state, inst);
+            ip += 1;
         }
     }
     try patchControlFixups(&assembler, fast_control_fixups, fast_offsets);

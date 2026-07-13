@@ -3154,6 +3154,7 @@ test "vm: numeric baseline tier preserves steps and non-number fallback" {
         \\}
         \\function addOne(x) { return x + 1; }
         \\function remainder(a, b) { return a % b; }
+        \\function below(a, b) { if (a < b) return 1; return 0; }
     );
     const program = try parser.parseProgram();
     const root = try Compiler.compileProgram(allocator, program);
@@ -3212,6 +3213,25 @@ test "vm: numeric baseline tier preserves steps and non-number fallback" {
     try std.testing.expectEqual(@as(f64, 1.5), (try run(&machine, remainder_chunk, &remainder_frame)).asNum());
     remainder_slots = .{ Value.num(std.math.nan(f64)), Value.num(2) };
     try std.testing.expect(std.math.isNan((try run(&machine, remainder_chunk, &remainder_frame)).asNum()));
+
+    const below_chunk = root.fns.items[3].chunk.?;
+    var below_slots = [_]Value{ Value.num(1), Value.num(2) };
+    var below_frame = Frame{ .slots = &below_slots, .parent = null };
+    try std.testing.expectEqual(@as(f64, 1), (try run(&machine, below_chunk, &below_frame)).asNum());
+    below_slots = .{ Value.num(2), Value.num(1) };
+    try std.testing.expectEqual(@as(f64, 0), (try run(&machine, below_chunk, &below_frame)).asNum());
+    below_slots = .{ Value.num(2), Value.num(2) };
+    try std.testing.expectEqual(@as(f64, 0), (try run(&machine, below_chunk, &below_frame)).asNum());
+    try std.testing.expectEqual(jit.TierState.ready, below_chunk.tier.loadState());
+    below_slots = .{ Value.num(std.math.nan(f64)), Value.num(2) };
+    try std.testing.expectEqual(@as(f64, 0), (try run(&machine, below_chunk, &below_frame)).asNum());
+    // Force every early instruction distance through the exact replay path;
+    // comparison flags must never survive a runtime checkpoint callback.
+    for (1..10) |distance| {
+        machine.steps = 1024 - distance;
+        below_slots = .{ Value.num(1), Value.num(2) };
+        try std.testing.expectEqual(@as(f64, 1), (try run(&machine, below_chunk, &below_frame)).asNum());
+    }
 
     // The native budget countdown must throw before the exact first instruction
     // beyond the limit, even when that step is not a 1024-step checkpoint.
