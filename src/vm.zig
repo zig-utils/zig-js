@@ -485,6 +485,20 @@ fn propKey(vm: *Interpreter, key: Value) EvalError![]const u8 {
     return vm.keyOf(key);
 }
 
+/// Number remainder keeps the full IEEE/ECMAScript path for zero (including
+/// negative zero), negative/fractional values, infinities, and large integers.
+/// Hot loop counters and positive small moduli can use integer remainder,
+/// avoiding the out-of-line fmod call while producing the same exact Number.
+inline fn numberRemainder(a: f64, b: f64) f64 {
+    const max_u32: f64 = @floatFromInt(std.math.maxInt(u32));
+    if (a > 0 and a <= max_u32 and b > 0 and b <= max_u32 and @trunc(a) == a and @trunc(b) == b) {
+        const lhs: u32 = @intFromFloat(a);
+        const rhs: u32 = @intFromFloat(b);
+        return @floatFromInt(lhs % rhs);
+    }
+    return @rem(a, b);
+}
+
 fn generatorStackAllocator(vm: *Interpreter, gen: ?*Generator) std.mem.Allocator {
     return if (gen) |g| g.stackAllocator(vm.arena) else vm.arena;
 }
@@ -762,7 +776,7 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                             .sub => Value.num(a - b),
                             .mul => Value.num(a * b),
                             .div => Value.num(a / b),
-                            .mod => Value.num(@rem(a, b)),
+                            .mod => Value.num(numberRemainder(a, b)),
                             .pow => if (std.math.isInf(b) and @abs(a) == 1)
                                 Value.num(std.math.nan(f64))
                             else
@@ -2940,6 +2954,11 @@ test "vm: arithmetic, precedence, comparison, logical" {
     const a = arena.allocator();
     try std.testing.expectEqual(@as(f64, 7), (try vmRun(a, "1 + 2 * 3")).asNum());
     try std.testing.expectEqual(@as(f64, 1024), (try vmRun(a, "2 ** 10")).asNum());
+    try std.testing.expectEqual(@as(f64, 1), (try vmRun(a, "4294967295 % 2")).asNum());
+    try std.testing.expectEqual(@as(f64, 1.5), (try vmRun(a, "5.5 % 2")).asNum());
+    try std.testing.expectEqual(@as(f64, -1), (try vmRun(a, "-5 % 2")).asNum());
+    const negative_zero = (try vmRun(a, "-0 % 3")).asNum();
+    try std.testing.expect(negative_zero == 0 and std.math.signbit(negative_zero));
     try std.testing.expect((try vmRun(a, "3 > 2 && 2 >= 2")).asBool());
     try std.testing.expect((try vmRun(a, "false || 1 === 1")).asBool());
     try std.testing.expectEqualStrings("ab1", (try vmRun(a, "'a' + 'b' + 1")).asStr());
