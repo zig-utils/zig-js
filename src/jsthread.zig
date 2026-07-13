@@ -2553,7 +2553,7 @@ pub fn propWaitAsync(self: *Interpreter, args: []const Value, timeout_ns: ?u64) 
         return error.OutOfMemory;
     };
     var queued = false;
-    errdefer if (!queued) {
+    defer if (!queued) {
         prop_alloc.free(key);
         prop_alloc.destroy(t);
     };
