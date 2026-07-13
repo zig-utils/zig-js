@@ -13133,8 +13133,13 @@ pub const Interpreter = struct {
             // the argument's valueOf/toString (so an abrupt completion in either
             // propagates in spec order).
             const sub = try self.toStringV(arg0(args));
-            const start = try self.clampPos(arg(args, 1), s.len);
-            return Value.num(if (std.mem.indexOfPos(u8, s, start, sub)) |idx| @floatFromInt(idx) else -1);
+            // `position` and the returned index are UTF-16 code-unit offsets, not
+            // byte offsets: clamp the position in code units, convert to a byte
+            // offset for the (self-synchronizing WTF-8) byte search, then map the
+            // match byte offset back to a code-unit index.
+            const start_cu = try self.stringClampPosition(s, arg(args, 1), 0);
+            const start_byte = byteOffsetForUtf16Index(s, start_cu);
+            return Value.num(if (std.mem.indexOfPos(u8, s, start_byte, sub)) |idx| @floatFromInt(utf16IndexForByteOffset(s, idx)) else -1);
         }
         if (eq(name, "includes")) {
             if (try self.isRegExp(arg0(args))) return self.throwError("TypeError", "First argument to String.prototype.includes must not be a regular expression");
@@ -13255,9 +13260,13 @@ pub const Interpreter = struct {
             const sep = try self.toStringV(args[0]);
             if (lim == 0) return result;
             if (sep.len == 0) {
-                for (s) |c| {
+                // Empty separator splits into individual UTF-16 code units (an
+                // astral character becomes its two surrogate halves), not bytes.
+                const cu_len = utf16LenOfString(s);
+                var i: usize = 0;
+                while (i < cu_len) : (i += 1) {
                     if (out.items.len >= lim) return result;
-                    try out.append(self.arena, try Value.strOwned(self.arena, try self.arena.dupe(u8, &.{c})));
+                    try out.append(self.arena, try Value.strAlloc(self.arena, try self.stringSliceUtf16(s, i, i + 1)));
                 }
                 return result;
             }
@@ -13428,15 +13437,18 @@ pub const Interpreter = struct {
             // (incl. the default `undefined`) searches the whole string; otherwise
             // the match must start at or before the clamped position.
             const sub = try self.toStringV(arg0(args));
+            // `position` and the returned index are UTF-16 code-unit offsets.
+            const cu_len = utf16LenOfString(s);
             const np = try self.toNumberV(arg(args, 1));
-            const limit: usize = if (std.math.isNan(np)) s.len else if (np <= 0)
+            const limit_cu: usize = if (std.math.isNan(np)) cu_len else if (np <= 0)
                 0
-            else if (np >= @as(f64, @floatFromInt(s.len))) s.len else @intFromFloat(@trunc(np));
-            if (sub.len == 0) return Value.num(@floatFromInt(@min(limit, s.len)));
-            // A match starting at k (k ≤ limit) occupies s[k .. k+sub.len); the
-            // largest such k is the last occurrence within s[0 .. limit+sub.len].
-            const hi = @min(limit + sub.len, s.len);
-            return Value.num(if (std.mem.lastIndexOf(u8, s[0..hi], sub)) |idx| @floatFromInt(idx) else -1);
+            else if (np >= @as(f64, @floatFromInt(cu_len))) cu_len else @intFromFloat(@trunc(np));
+            if (sub.len == 0) return Value.num(@floatFromInt(limit_cu));
+            // A match starting at code-unit ≤ limit occupies s[kb .. kb+sub.len) in
+            // bytes; the largest such start lies within s[0 .. limit_byte+sub.len].
+            const limit_byte = byteOffsetForUtf16Index(s, limit_cu);
+            const hi = @min(limit_byte + sub.len, s.len);
+            return Value.num(if (std.mem.lastIndexOf(u8, s[0..hi], sub)) |idx| @floatFromInt(utf16IndexForByteOffset(s, idx)) else -1);
         }
         if (eq(name, "substr")) {
             // `substr(start, length)`: start may count from the end.
@@ -19526,7 +19538,8 @@ fn installWeakRefAndFinReg(env: *Environment, rs: *Shape, object_proto: *value.O
         proto.* = .{ .proto = object_proto };
         try setNative(a, rs, proto, "register", 2, finRegRegisterFn);
         try setNative(a, rs, proto, "unregister", 1, finRegUnregisterFn);
-        try setNative(a, rs, proto, "cleanupSome", 0, finRegCleanupSomeFn);
+        // `cleanupSome` was dropped from the FinalizationRegistry proposal before
+        // standardization — it is not a spec property, so it is not installed.
         if (tt) |k| {
             try proto.setOwn(a, rs, k, Value.str("FinalizationRegistry"));
             try proto.setAttr(a, k, .{ .writable = false, .enumerable = false, .configurable = true });
@@ -39456,10 +39469,58 @@ fn toExponentialStr(arena: std.mem.Allocator, n: f64, frac: ?usize) ![]const u8 
         try out.appendSlice(arena, "e+0");
         return out.items;
     }
-    var buf: [512]u8 = undefined;
-    if (frac) |f| if (f >= 16 or @abs(n) < std.math.floatMin(f64)) return renderScientificFixed(arena, n, f);
-    const s = std.fmt.float.render(&buf, n, .{ .mode = .scientific, .precision = frac }) catch return error.OutOfMemory;
-    return jsExpFix(arena, s);
+    const f = frac orelse {
+        // Shortest scientific form — no rounding choice, so the renderer is fine.
+        var buf: [512]u8 = undefined;
+        const s = std.fmt.float.render(&buf, n, .{ .mode = .scientific, .precision = null }) catch return error.OutOfMemory;
+        return jsExpFix(arena, s);
+    };
+    const neg = n < 0;
+    // Exact significant digits + decimal exponent: printf %e at 767 digits emits
+    // the TRUE digits of the double (no rounding). Keep f+1 significant digits and
+    // round HALF-UP on the next exact digit ("pick the larger n", 21.1.3.2) — not
+    // printf's half-to-EVEN — so (2.5).toExponential(0) is "3e+0" while the exact
+    // double 1.00499… of 1.005 gives (1.005).toExponential(2) === "1.00e+0".
+    const high_prec: usize = 767;
+    const cap = high_prec + 32;
+    const raw = try arena.alloc(u8, cap);
+    const rlen = snprintf(raw.ptr, cap, "%.*e", @as(c_int, @intCast(high_prec)), @abs(n));
+    if (rlen < 0 or @as(usize, @intCast(rlen)) >= cap) return error.OutOfMemory;
+    const es = raw[0..@intCast(rlen)]; // "d.ffff…e±XX"
+    const eidx = std.mem.indexOfScalar(u8, es, 'e').?;
+    var allsig: std.ArrayListUnmanaged(u8) = .empty;
+    for (es[0..eidx]) |c| if (c != '.') try allsig.append(arena, c);
+    var exp = std.fmt.parseInt(i32, es[eidx + 1 ..], 10) catch 0;
+
+    const p = f + 1; // total significant digits
+    var digits: std.ArrayListUnmanaged(u8) = .empty;
+    try digits.appendSlice(arena, allsig.items[0..@min(p, allsig.items.len)]);
+    while (digits.items.len < p) try digits.append(arena, '0');
+    if (p < allsig.items.len and allsig.items[p] >= '5') {
+        var i: usize = digits.items.len;
+        var carry = true;
+        while (i > 0 and carry) {
+            i -= 1;
+            if (digits.items[i] == '9') digits.items[i] = '0' else {
+                digits.items[i] += 1;
+                carry = false;
+            }
+        }
+        if (carry) {
+            digits.items[0] = '1'; // "999…" -> "100…", exponent bumped
+            exp += 1;
+        }
+    }
+
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    if (neg) try out.append(arena, '-');
+    try out.append(arena, digits.items[0]);
+    if (f > 0) {
+        try out.append(arena, '.');
+        try out.appendSlice(arena, digits.items[1..]);
+    }
+    try out.appendSlice(arena, try jsExpFix(arena, try std.fmt.allocPrint(arena, "e{d}", .{exp})));
+    return out.items;
 }
 
 /// `Number.prototype.toPrecision` — `p` significant digits, choosing fixed or
