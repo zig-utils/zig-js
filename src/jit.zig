@@ -8,6 +8,8 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
+const aarch64 = @import("jit/aarch64.zig");
+
 const is_darwin = switch (builtin.os.tag) {
     .driverkit, .ios, .maccatalyst, .macos, .tvos, .visionos, .watchos => true,
     else => false,
@@ -49,6 +51,32 @@ pub const Tier = struct {
     pub fn publishRejected(self: *Tier) void {
         std.debug.assert(self.state.load(.monotonic) == .compiling);
         self.state.store(.rejected, .release);
+    }
+};
+
+pub const ExitStatus = enum(u32) { complete, side_exit, throw, stop };
+
+/// Stable C-compatible boundary between generated code and the Zig runtime.
+/// More fields are appended as lowering grows; generated code only addresses
+/// fields through backend constants derived with `@offsetOf`.
+pub const NativeFrame = extern struct {
+    result_bits: u64 = 0,
+    exit_ip: usize = 0,
+};
+
+pub const NativeEntry = *const fn (*NativeFrame) callconv(.c) u32;
+
+pub const CompiledCode = struct {
+    memory: CodeMemory,
+    entry: NativeEntry,
+
+    pub fn deinit(self: *CompiledCode) void {
+        self.memory.deinit();
+        self.* = undefined;
+    }
+
+    pub fn run(self: *const CompiledCode, frame: *NativeFrame) ExitStatus {
+        return @enumFromInt(self.entry(frame));
     }
 };
 
@@ -110,6 +138,25 @@ pub const CodeMemory = struct {
     }
 };
 
+/// Compile the smallest real native entry: publish one exact NaN-boxed word as
+/// a completed result. This is the backend/ABI bring-up primitive used before
+/// bytecode lowering; it deliberately knows nothing about source text.
+pub fn compileConstantEntry(result_bits: u64) !CompiledCode {
+    if (!supported or builtin.cpu.arch != .aarch64) return error.UnsupportedTarget;
+
+    var memory = try CodeMemory.init(32);
+    errdefer memory.deinit();
+    var assembler = aarch64.Assembler.init(memory.writableBytes());
+    try assembler.movImmediate64(1, result_bits);
+    try assembler.store64(1, 0, @offsetOf(NativeFrame, "result_bits"));
+    try assembler.movImmediate32(0, @intFromEnum(ExitStatus.complete));
+    try assembler.ret();
+    try memory.publish(assembler.bytes().len);
+
+    const entry: NativeEntry = @ptrCast(@alignCast(memory.executableBytes().ptr));
+    return .{ .memory = memory, .entry = entry };
+}
+
 extern "c" fn pthread_jit_write_protect_np(enabled: c_int) void;
 extern "c" fn sys_icache_invalidate(start: *anyopaque, len: usize) void;
 
@@ -160,6 +207,18 @@ test "Tier permits one concurrent compiler" {
     try std.testing.expectEqual(@as(u32, 1), shared.claims.load(.monotonic));
     try std.testing.expectEqual(TierState.compiling, shared.tier.loadState());
     shared.tier.publishRejected();
+}
+
+test "native entry publishes an exact result word through the stable ABI" {
+    if (!supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+
+    const expected: u64 = 0x7ff8_1234_5678_9abc;
+    var compiled = try compileConstantEntry(expected);
+    defer compiled.deinit();
+    var frame = NativeFrame{};
+    try std.testing.expectEqual(ExitStatus.complete, compiled.run(&frame));
+    try std.testing.expectEqual(expected, frame.result_bits);
+    try std.testing.expectEqual(@as(usize, 0), frame.exit_ip);
 }
 
 test "CodeMemory publishes and executes native code" {
