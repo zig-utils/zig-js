@@ -2769,9 +2769,14 @@ const Stringifier = struct {
     }
 
     fn jsonObjectKeys(st: *Stringifier, object: *value.Object, shape: *value.Object) HostError![]const []const u8 {
-        if (object.proxy_handler != null or object.proxy_revoked or shape.module_ns != null or shape.prim != null or shape.typed_array != null or shape.is_array)
-            return st.self.objectOwnKeysList(object);
-        return shape.ownKeys(st.self.arena);
+        _ = shape;
+        // Full [[OwnPropertyKeys]] order, which includes integer-indexed dense
+        // elements. Those live in `elements`, outside the shape, so `shape.ownKeys`
+        // would drop a key set via `o[0]=…` on an ordinary object — making
+        // `JSON.stringify({...; o[0]="a"})` wrongly emit `{}`. SerializeJSONObject
+        // enumerates every own *string* key; symbols/private are filtered by
+        // `jsonHiddenKey` in the caller, non-enumerables by the live attr check.
+        return st.self.objectOwnKeysList(object);
     }
 
     /// Emit a newline + the current indent when pretty-printing (no-op for the
