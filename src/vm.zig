@@ -559,10 +559,10 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
     var ip: usize = exec.ip;
     const code = chunk.code.items;
     // Parallel-mode flag hoisted out of the hot loop: in the default engine this
-    // is false, so the per-opcode frame-slot lock check is a single predicted
-    // register branch (no atomic load, no call) — load_local/store_local stay at
-    // full speed.
-    const frame_locking = bc.ic_seqlock_enabled.load(.monotonic);
+    // is false, so frame slots and monomorphic property IC hits avoid locks and
+    // repeated atomic mode loads. Shared/concurrent-GC contexts enable the flag
+    // before executing any chunk and retain the synchronized paths below.
+    const parallel_sync = bc.ic_seqlock_enabled.load(.monotonic);
 
     while (ip < code.len) {
         vm.steps += 1;
@@ -649,7 +649,7 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
 
             .load_local => {
                 const cf = frame.?;
-                const held = cf.lockSlots(frame_locking);
+                const held = cf.lockSlots(parallel_sync);
                 const v = cf.slots[inst.a];
                 cf.unlockSlots(held);
                 try stack.append(stack_alloc, v);
@@ -657,7 +657,7 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
             .store_local => {
                 const cf = frame.?;
                 const v = stack.items[stack.items.len - 1]; // leaves value on the stack
-                const held = cf.lockSlots(frame_locking);
+                const held = cf.lockSlots(parallel_sync);
                 cf.slots[inst.a] = v;
                 cf.unlockSlots(held);
             },
@@ -665,7 +665,7 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 var f = frame.?;
                 var d = inst.a;
                 while (d > 0) : (d -= 1) f = f.parent.?;
-                const held = f.lockSlots(frame_locking);
+                const held = f.lockSlots(parallel_sync);
                 const v = f.slots[inst.b];
                 f.unlockSlots(held);
                 try stack.append(stack_alloc, v);
@@ -675,7 +675,7 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 var d = inst.a;
                 while (d > 0) : (d -= 1) f = f.parent.?;
                 const v = stack.items[stack.items.len - 1]; // leaves value on the stack
-                const held = f.lockSlots(frame_locking);
+                const held = f.lockSlots(parallel_sync);
                 f.slots[inst.b] = v;
                 f.unlockSlots(held);
             },
@@ -868,17 +868,17 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                     // [[Get]] path: getters + the prototype walk).
                     if (obj.isObject()) {
                         const o = obj.asObj();
-                        o.lockProperties();
-                        defer o.unlockProperties();
+                        if (parallel_sync) o.lockProperties();
+                        defer if (parallel_sync) o.unlockProperties();
                         if (!o.is_array and o.accessors.load(.monotonic) == null and o.attrsMap() == null) {
                             const ic = &chunk.ics[ip - 1];
-                            if (ic.lookupSlot(o.shape)) |sl| {
+                            if (ic.lookupSlotMode(o.shape, parallel_sync)) |sl| {
                                 result = o.slots.items[sl];
                                 break :fast;
                             }
                             if (o.shape) |sh| {
                                 if (sh.lookup(name)) |slot| {
-                                    ic.record(sh, slot);
+                                    ic.recordMode(sh, slot, parallel_sync);
                                     result = o.slots.items[slot];
                                     break :fast;
                                 }
@@ -980,18 +980,18 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                     // slow path ([[Set]] honors setters + non-writable).
                     if (obj.isObject()) {
                         const o = obj.asObj();
-                        o.lockProperties();
-                        defer o.unlockProperties();
+                        if (parallel_sync) o.lockProperties();
+                        defer if (parallel_sync) o.unlockProperties();
                         if (!o.is_array and o.accessors.load(.monotonic) == null and o.attrsMap() == null) {
                             const ic = &chunk.ics[ip - 1];
-                            if (ic.lookupSlot(o.shape)) |sl| {
+                            if (ic.lookupSlotMode(o.shape, parallel_sync)) |sl| {
                                 gc_mod.barrierValueFrom(o, v); // IC fast-path slot store
                                 o.slots.items[sl] = v;
                                 break :fast;
                             }
                             if (o.shape) |sh| {
                                 if (sh.lookup(name)) |slot| {
-                                    ic.record(sh, slot);
+                                    ic.recordMode(sh, slot, parallel_sync);
                                     gc_mod.barrierValueFrom(o, v); // IC fast-path slot store
                                     o.slots.items[slot] = v;
                                     break :fast;

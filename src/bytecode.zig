@@ -42,7 +42,14 @@ pub const InlineCache = struct {
     /// `ic_seqlock_enabled` it is a seqlock read (`loadHit`) that rejects a
     /// torn or in-progress cache. Null = miss → caller does the real lookup.
     pub fn lookupSlot(ic: *InlineCache, obj_shape: ?*Shape) ?u32 {
-        if (ic_seqlock_enabled.load(.monotonic)) return ic.loadHit(obj_shape);
+        return ic.lookupSlotMode(obj_shape, ic_seqlock_enabled.load(.monotonic));
+    }
+
+    /// Same lookup with the process-wide mode already hoisted by the VM. A
+    /// chunk cannot switch from isolated to shared execution while it runs, so
+    /// paying an atomic flag load at every property opcode is unnecessary.
+    pub inline fn lookupSlotMode(ic: *InlineCache, obj_shape: ?*Shape, parallel: bool) ?u32 {
+        if (parallel) return ic.loadHit(obj_shape);
         if (obj_shape != null and obj_shape == ic.shape) return ic.slot;
         return null;
     }
@@ -52,7 +59,12 @@ pub const InlineCache = struct {
     /// skips on writer contention, so a missed update only costs a future
     /// lookup, never correctness).
     pub fn record(ic: *InlineCache, sh: *Shape, slot: u32) void {
-        if (ic_seqlock_enabled.load(.monotonic)) {
+        ic.recordMode(sh, slot, ic_seqlock_enabled.load(.monotonic));
+    }
+
+    /// Same update with the process-wide mode already hoisted by the VM.
+    pub inline fn recordMode(ic: *InlineCache, sh: *Shape, slot: u32, parallel: bool) void {
+        if (parallel) {
             ic.tryStore(sh, slot);
             return;
         }
