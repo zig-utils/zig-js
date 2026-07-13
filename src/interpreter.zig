@@ -39215,42 +39215,107 @@ fn arg0(args: []const Value) Value {
     return if (args.len > 0) args[0] else Value.undef();
 }
 
-/// Integer `n` formatted in `radix` (2–36), e.g. `(255).toString(16)` → "ff".
-/// `n.toString(radix)` for radix ≠ 10 — converts both the integer and (up to a
-/// bounded number of digits) the fractional part of a finite number. Works in
-/// f64 throughout so it isn't limited to u64-range integers.
+/// The next representable f64 above `x` (`x >= 0`); for `x == 0` the smallest
+/// positive denormal. Used for the half-ULP delta in `numberToRadix`.
+fn nextUpNonNeg(x: f64) f64 {
+    if (std.math.isInf(x)) return x;
+    const bits: u64 = @bitCast(x);
+    return @bitCast(bits +% 1);
+}
+
+/// V8 `Double::Exponent()`: the binary exponent `e` for which the value equals
+/// (53-bit integer significand) × 2^e. `> 0` means the value is ≥ 2^53, so its
+/// low base-r digits are not representable and must be emitted as zeros.
+fn v8Exponent(x: f64) i32 {
+    const bits: u64 = @bitCast(x);
+    const biased: i32 = @intCast((bits >> 52) & 0x7ff);
+    if (biased == 0) return -1074; // subnormal
+    return biased - 1075; // 0x3ff + 52
+}
+
+/// `n.toString(radix)` for radix ≠ 10 on a finite non-zero number. A faithful
+/// port of V8's DoubleToRadixCString: emit the fractional part first, stopping
+/// as soon as the emitted digits round-trip (half-ULP `delta` termination, ties
+/// to even) so the result is the shortest string denoting exactly `n`; a
+/// fractional round-up can carry into the integer part. The integer part then
+/// zero-fills digit positions below the value's representable precision (≥ 2^53)
+/// rather than trusting lossy f64 division. Matches V8 byte-for-byte.
 fn numberToRadix(arena: std.mem.Allocator, n: f64, radix: usize) ![]const u8 {
     if (n == 0) return "0";
-    const digits = "0123456789abcdefghijklmnopqrstuvwxyz";
+    const chars = "0123456789abcdefghijklmnopqrstuvwxyz";
     const rf: f64 = @floatFromInt(radix);
     const neg = n < 0;
-    var int_part = @floor(@abs(n));
-    var frac = @abs(n) - int_part;
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    if (neg) try buf.append(arena, '-');
-    // Integer part (built least-significant-digit first, then reversed).
-    var int_digits: std.ArrayListUnmanaged(u8) = .empty;
-    if (int_part == 0) {
-        try int_digits.append(arena, '0');
-    } else while (int_part >= 1) {
-        const d = @mod(int_part, rf);
-        try int_digits.append(arena, digits[@intFromFloat(d)]);
-        int_part = @floor(int_part / rf);
-    }
-    std.mem.reverse(u8, int_digits.items);
-    try buf.appendSlice(arena, int_digits.items);
-    // Fractional part, bounded so an inexact binary fraction terminates.
-    if (frac > 0) {
-        try buf.append(arena, '.');
-        var count: usize = 0;
-        while (frac > 0 and count < 52) : (count += 1) {
-            frac *= rf;
-            const d = @floor(frac);
-            try buf.append(arena, digits[@intFromFloat(d)]);
-            frac -= d;
+    const mag = @abs(n);
+
+    // Integer digits grow downward from the middle; fraction digits upward.
+    const kBufferSize = 2200;
+    const mid = kBufferSize / 2;
+    var buffer: [kBufferSize]u8 = undefined;
+    var integer_cursor: usize = mid;
+    var fraction_cursor: usize = mid;
+
+    var integer = @floor(mag);
+    var fraction = mag - integer;
+
+    // delta = half the gap to the next double (at least the smallest denormal).
+    var delta = 0.5 * (nextUpNonNeg(mag) - mag);
+    const min_delta = nextUpNonNeg(0.0);
+    if (delta < min_delta) delta = min_delta;
+
+    if (fraction >= delta) {
+        buffer[fraction_cursor] = '.';
+        fraction_cursor += 1;
+        while (true) {
+            fraction *= rf;
+            delta *= rf;
+            const digit: usize = @intFromFloat(fraction);
+            buffer[fraction_cursor] = chars[digit];
+            fraction_cursor += 1;
+            fraction -= @as(f64, @floatFromInt(digit));
+            // Round to even when past the halfway point.
+            if (fraction > 0.5 or (fraction == 0.5 and (digit & 1) == 1)) {
+                if (fraction + delta > 1) {
+                    // Round up: walk back over trailing max-digits, bumping the
+                    // first that can grow; a carry off the front adds 1 to integer.
+                    while (true) {
+                        fraction_cursor -= 1;
+                        if (fraction_cursor == mid) {
+                            integer += 1;
+                            break;
+                        }
+                        const c = buffer[fraction_cursor];
+                        const d: usize = if (c > '9') (c - 'a' + 10) else (c - '0');
+                        if (d + 1 < radix) {
+                            buffer[fraction_cursor] = chars[d + 1];
+                            fraction_cursor += 1;
+                            break;
+                        }
+                    }
+                    break;
+                }
+            }
+            if (fraction < delta) break;
         }
     }
-    return buf.items;
+
+    // Integer part: zero-fill positions the f64 can't represent, then divmod.
+    while (v8Exponent(integer / rf) > 0) {
+        integer /= rf;
+        integer_cursor -= 1;
+        buffer[integer_cursor] = '0';
+    }
+    while (true) {
+        const remainder = @mod(integer, rf);
+        integer_cursor -= 1;
+        buffer[integer_cursor] = chars[@intFromFloat(remainder)];
+        integer = (integer - remainder) / rf;
+        if (integer <= 0) break;
+    }
+
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    if (neg) try out.append(arena, '-');
+    try out.appendSlice(arena, buffer[integer_cursor..fraction_cursor]);
+    return out.items;
 }
 
 /// `n.toFixed(d)` — fixed-point with `d` decimals (d ≤ 100; no exponent forms).
