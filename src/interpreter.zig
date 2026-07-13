@@ -1031,7 +1031,7 @@ pub const Interpreter = struct {
     gc_env_roots: std.ArrayListUnmanaged(*Environment) = .empty,
     /// Context-owned serial used to mint per-class private-name storage keys.
     /// Null only in isolated interpreter unit helpers.
-    private_name_serial: ?*u64 = null,
+    private_name_serial: ?*std.atomic.Value(u64) = null,
     private_name_serial_local: u64 = 0,
     /// Host-defined `[[CanBlock]]` policy for this VM. Spawned `$262.agent`
     /// threads override it through their threadlocal agent record.
@@ -4351,15 +4351,10 @@ pub const Interpreter = struct {
     }
 
     fn nextPrivateStorageKey(self: *Interpreter, name: []const u8) ![]const u8 {
-        const id = if (self.private_name_serial) |serial| blk: {
-            const n = serial.*;
-            serial.* += 1;
-            break :blk n;
-        } else blk: {
-            const n = self.private_name_serial_local;
-            self.private_name_serial_local += 1;
-            break :blk n;
-        };
+        const id = if (self.private_name_serial) |serial|
+            try mintUniqueAtomicSerial(u64, serial)
+        else
+            try mintUniqueLocalSerial(u64, &self.private_name_serial_local);
         return std.fmt.allocPrint(self.arena, "{s}\x00{d}", .{ name, id });
     }
 
@@ -38514,11 +38509,28 @@ fn aliasIteratorToMethod(a: std.mem.Allocator, rs: *Shape, env: *Environment, pr
     try proto.setAttr(a, itv.asObj().sym_key, .{ .writable = true, .enumerable = false, .configurable = true });
 }
 
-/// Monotonic id for unique Symbol property-key encodings (single-threaded;
-/// test262 workers are separate processes).
-// Atomic: concurrent agents minting symbols must never collide on a key
-// (bindings.md ruling — racing `+=` could yield duplicate sym_keys, i.e.
-// two distinct Symbols comparing equal as property keys).
+fn mintUniqueAtomicSerial(comptime T: type, counter: *std.atomic.Value(T)) error{OutOfMemory}!T {
+    var current = counter.load(.monotonic);
+    while (true) {
+        if (current == std.math.maxInt(T)) return error.OutOfMemory;
+        const next = current + 1;
+        if (counter.cmpxchgWeak(current, next, .monotonic, .monotonic)) |observed| {
+            current = observed;
+            continue;
+        }
+        return next;
+    }
+}
+
+fn mintUniqueLocalSerial(comptime T: type, counter: *T) error{OutOfMemory}!T {
+    const next = std.math.add(T, counter.*, 1) catch return error.OutOfMemory;
+    counter.* = next;
+    return next;
+}
+
+/// Monotonic id for unique Symbol property-key encodings. Concurrent agents
+/// and shared-realm Threads must never collide, and exhaustion must not wrap
+/// into a previously issued key.
 var symbol_counter = std.atomic.Value(usize).init(0);
 
 /// Create a Symbol object: a tagged object with a unique `sym_key` (a NUL-led
@@ -38527,7 +38539,7 @@ fn makeSymbolObj(a: std.mem.Allocator, rs: *Shape, desc: ?[]const u8, proto: ?*v
     _ = rs;
     const o = try gc_mod.allocObj(a);
     o.* = .{ .is_symbol = true, .proto = proto, .sym_desc = desc };
-    const n = symbol_counter.fetchAdd(1, .monotonic) + 1;
+    const n = try mintUniqueAtomicSerial(usize, &symbol_counter);
     o.sym_key = try std.fmt.allocPrint(a, "\x00s{d}", .{n});
     return Value.obj(o);
 }
@@ -40647,6 +40659,40 @@ test "interpreter logical assignment operators" {
     try std.testing.expectEqual(@as(f64, 0), (try evalSource(a, "let x = 0; x &&= 9; x")).asNum());
     try std.testing.expectEqual(@as(f64, 7), (try evalSource(a, "let x = null; x ??= 7; x")).asNum());
     try std.testing.expectEqual(@as(f64, 3), (try evalSource(a, "let x = 3; x ??= 7; x")).asNum());
+}
+
+test "identity serial minting refuses wrap" {
+    var atomic_serial = std.atomic.Value(u64).init(std.math.maxInt(u64) - 1);
+    try std.testing.expectEqual(std.math.maxInt(u64), try mintUniqueAtomicSerial(u64, &atomic_serial));
+    try std.testing.expectError(error.OutOfMemory, mintUniqueAtomicSerial(u64, &atomic_serial));
+
+    var local_serial: u64 = std.math.maxInt(u64) - 1;
+    try std.testing.expectEqual(std.math.maxInt(u64), try mintUniqueLocalSerial(u64, &local_serial));
+    try std.testing.expectError(error.OutOfMemory, mintUniqueLocalSerial(u64, &local_serial));
+}
+
+test "identity serial minting stays unique across threads" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const worker_count = 4;
+    const ids_per_worker = 256;
+    var serial = std.atomic.Value(u64).init(0);
+    var ids: [worker_count * ids_per_worker]u64 = undefined;
+
+    const Worker = struct {
+        fn run(counter: *std.atomic.Value(u64), out: []u64) void {
+            for (out) |*id| id.* = mintUniqueAtomicSerial(u64, counter) catch 0;
+        }
+    };
+
+    var threads: [worker_count]std.Thread = undefined;
+    for (&threads, 0..) |*thread, i| {
+        const start = i * ids_per_worker;
+        thread.* = try std.Thread.spawn(.{}, Worker.run, .{ &serial, ids[start..][0..ids_per_worker] });
+    }
+    for (&threads) |*thread| thread.join();
+
+    std.sort.heap(u64, &ids, {}, std.sort.asc(u64));
+    for (ids, 1..) |id, expected| try std.testing.expectEqual(@as(u64, @intCast(expected)), id);
 }
 
 test "interpreter class private fields/methods and static blocks" {

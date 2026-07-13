@@ -1675,10 +1675,10 @@ pub const Context = struct {
     /// slots, so scanning those stacks is not TSan-clean. GIL mid-script GC can
     /// opt in when it has established the stronger park protocol it expects.
     gc_scan_parked_stacks: bool = false,
-    /// Realm-wide serial for class private-name storage keys. Private names are
-    /// per-class brands, so two unrelated classes declaring `#x` must not alias
-    /// even if both outlive separate evaluate calls.
-    private_name_serial: u64 = 0,
+    /// Realm-wide source for unique class private-name storage keys. Parallel
+    /// class evaluation can mint names concurrently, so checked atomic minting
+    /// refuses both raced duplicates and wrap into a previously-issued brand.
+    private_name_serial: std.atomic.Value(u64) = .init(0),
     /// Cooperative termination for worker contexts: the owning Worker's stop
     /// word, polled at the engines' step checkpoints (src/worker.zig).
     stop_flag: ?*const std.atomic.Value(bool) = null,
@@ -10482,6 +10482,47 @@ test "Thread API preserves per-class private brands across shared realm threads"
         \\  new Thread(() => { try { A.read(b); return "no-throw"; } catch (e) { return e.name; } }).join(),
         \\];
         \\if (reports.join(",") !== "a,b,TypeError") throw new Error("cross-thread private brand: " + reports.join(","));
+    );
+}
+
+test "Thread API mints distinct private brands during parallel class evaluation" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_threads = true });
+    defer ctx.destroy();
+    _ = try ctx.evaluate(
+        \\const gate = { ready: 0, go: 0 };
+        \\const threads = [];
+        \\for (let id = 0; id < 8; id++) {
+        \\  threads.push(new Thread((id) => {
+        \\    Atomics.add(gate, "ready", 1);
+        \\    Atomics.notify(gate, "ready");
+        \\    while (Atomics.load(gate, "go") === 0)
+        \\      Atomics.wait(gate, "go", 0, 1000);
+        \\    class C {
+        \\      #x = id;
+        \\      static read(o) { return o.#x; }
+        \\      static has(o) { return #x in o; }
+        \\    }
+        \\    return { C, instance: new C(), id };
+        \\  }, id));
+        \\}
+        \\while (Atomics.load(gate, "ready") < threads.length)
+        \\  Atomics.wait(gate, "ready", Atomics.load(gate, "ready"), 1);
+        \\Atomics.store(gate, "go", 1);
+        \\Atomics.notify(gate, "go", threads.length);
+        \\const results = threads.map((thread) => thread.join());
+        \\for (let i = 0; i < results.length; i++) {
+        \\  const own = results[i];
+        \\  if (!own.C.has(own.instance) || own.C.read(own.instance) !== own.id)
+        \\    throw new Error("private brand lost for " + i);
+        \\  for (let j = 0; j < results.length; j++) {
+        \\    if (i === j) continue;
+        \\    const foreign = results[j].instance;
+        \\    if (own.C.has(foreign)) throw new Error("private brand collision " + i + "/" + j);
+        \\    let threw = false;
+        \\    try { own.C.read(foreign); } catch (e) { threw = e instanceof TypeError; }
+        \\    if (!threw) throw new Error("foreign private read did not throw " + i + "/" + j);
+        \\  }
+        \\}
     );
 }
 

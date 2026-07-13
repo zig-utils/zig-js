@@ -51,11 +51,16 @@ that must remain correct regardless of JavaScript interleavings. This includes:
 - inline caches, thread records, join records, waiter queues, condition
   variables, mutexes, and lock bookkeeping,
 - GC allocation, barriers, mark state, roots, finalization state, shared-buffer
-  ownership, and C-API protected handles.
+  ownership, and C-API protected handles,
+- engine-minted identity keys for Symbols and class private names.
 
 Races in that state are engine bugs. They must be fixed with locks, atomics,
 publication protocols, or ownership changes. They must not be hidden by
 ThreadSanitizer suppressions.
+Symbol property-key serials and per-context class private-name serials use
+checked atomic minting. Parallel creation must produce distinct identities, and
+serial exhaustion fails closed instead of wrapping into a previously-issued
+Symbol key or private brand.
 Resizable `ArrayBuffer` storage is in this engine-state category even when the
 JavaScript program intentionally races view operations with resize. Typed-array
 and `DataView` helpers borrow the live byte slice through the buffer lock when a
