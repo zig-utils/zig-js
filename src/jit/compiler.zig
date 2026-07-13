@@ -85,6 +85,67 @@ const Analysis = struct {
     }
 };
 
+const Block = struct {
+    start: u32,
+    end: u32,
+
+    fn instructionCount(self: Block) u12 {
+        return @intCast(self.end - self.start);
+    }
+};
+
+fn isBlockTerminator(op: bc.Op) bool {
+    return switch (op) {
+        .jump, .jump_if_false, .ret, .ret_undef => true,
+        else => false,
+    };
+}
+
+fn buildBlocks(chunk: *const Chunk, analysis: *const Analysis, allocator: std.mem.Allocator) ![]Block {
+    const code = chunk.code.items;
+    const starts = try allocator.alloc(bool, code.len);
+    defer allocator.free(starts);
+    @memset(starts, false);
+    starts[0] = true;
+
+    for (code, 0..) |inst, ip| {
+        if (analysis.states[ip] == null) continue;
+        switch (inst.op) {
+            .jump => {
+                if (inst.a >= code.len) return error.UnsupportedChunk;
+                starts[inst.a] = true;
+            },
+            .jump_if_false => {
+                if (inst.a >= code.len) return error.UnsupportedChunk;
+                starts[inst.a] = true;
+                if (ip + 1 < code.len) starts[ip + 1] = true;
+            },
+            else => {},
+        }
+    }
+
+    var blocks: std.ArrayListUnmanaged(Block) = .empty;
+    errdefer blocks.deinit(allocator);
+    var ip: usize = 0;
+    while (ip < code.len) {
+        if (analysis.states[ip] == null) {
+            ip += 1;
+            continue;
+        }
+        if (!starts[ip]) return error.UnsupportedChunk;
+        const start = ip;
+        while (true) {
+            const terminates = isBlockTerminator(code[ip].op);
+            ip += 1;
+            const reached_encoding_limit = ip - start == std.math.maxInt(u12);
+            if (reached_encoding_limit and ip < code.len and analysis.states[ip] != null) starts[ip] = true;
+            if (terminates or ip == code.len or analysis.states[ip] == null or starts[ip] or reached_encoding_limit) break;
+        }
+        try blocks.append(allocator, .{ .start = @intCast(start), .end = @intCast(ip) });
+    }
+    return blocks.toOwnedSlice(allocator);
+}
+
 fn classify(v: Value) ?Kind {
     return switch (v.kind()) {
         .undefined => .undefined,
@@ -381,6 +442,25 @@ fn emitOperation(assembler: *aarch64.Assembler, chunk: *const Chunk, state: Stat
     return null;
 }
 
+fn patchControlFixups(
+    assembler: *aarch64.Assembler,
+    fixups: []const ?ControlFixup,
+    bytecode_offsets: []const usize,
+) !void {
+    for (fixups) |fixup_opt| if (fixup_opt) |fixup| switch (fixup) {
+        .branch => |branch| {
+            if (branch.target >= bytecode_offsets.len or bytecode_offsets[branch.target] == unreachable_offset)
+                return error.UnsupportedChunk;
+            try assembler.patchBranch(branch.at, bytecode_offsets[branch.target]);
+        },
+        .test_zero => |branch| {
+            if (branch.target >= bytecode_offsets.len or bytecode_offsets[branch.target] == unreachable_offset)
+                return error.UnsupportedChunk;
+            try assembler.patchTestBranch(branch.at, bytecode_offsets[branch.target]);
+        },
+    };
+}
+
 fn compileNumeric(chunk: *const Chunk) !jit.CompiledCode {
     if (!jit.supported or builtin.cpu.arch != .aarch64) return error.UnsupportedTarget;
 
@@ -390,29 +470,46 @@ fn compileNumeric(chunk: *const Chunk) !jit.CompiledCode {
         return error.UnsupportedChunk;
     const allocator = std.heap.page_allocator;
     const code_len = chunk.code.items.len;
+    const blocks = try buildBlocks(chunk, &analysis, allocator);
+    defer allocator.free(blocks);
 
-    const estimated = std.math.mul(usize, code_len, 384) catch return error.UnsupportedChunk;
+    const estimated = std.math.mul(usize, code_len, 768) catch return error.UnsupportedChunk;
     var memory = try jit.CodeMemory.init(estimated + 4096);
     errdefer memory.deinit();
     var assembler = aarch64.Assembler.init(memory.writableBytes());
 
-    const bytecode_offsets = try allocator.alloc(usize, code_len);
-    defer allocator.free(bytecode_offsets);
+    const fast_offsets = try allocator.alloc(usize, code_len);
+    defer allocator.free(fast_offsets);
+    const fast_budget_fixups = try allocator.alloc(usize, blocks.len);
+    defer allocator.free(fast_budget_fixups);
+    const fast_checkpoint_fixups = try allocator.alloc(usize, blocks.len);
+    defer allocator.free(fast_checkpoint_fixups);
+    const fast_control_fixups = try allocator.alloc(?ControlFixup, code_len);
+    defer allocator.free(fast_control_fixups);
+    const slow_offsets = try allocator.alloc(usize, blocks.len);
+    defer allocator.free(slow_offsets);
+    const slow_fallthrough_fixups = try allocator.alloc(usize, blocks.len);
+    defer allocator.free(slow_fallthrough_fixups);
     const operation_offsets = try allocator.alloc(usize, code_len);
     defer allocator.free(operation_offsets);
     const budget_fixups = try allocator.alloc(usize, code_len);
     defer allocator.free(budget_fixups);
     const checkpoint_fixups = try allocator.alloc(usize, code_len);
     defer allocator.free(checkpoint_fixups);
-    const control_fixups = try allocator.alloc(?ControlFixup, code_len);
-    defer allocator.free(control_fixups);
+    const slow_control_fixups = try allocator.alloc(?ControlFixup, code_len);
+    defer allocator.free(slow_control_fixups);
     const status_fixups = try allocator.alloc(usize, code_len);
     defer allocator.free(status_fixups);
-    @memset(bytecode_offsets, unreachable_offset);
+    @memset(fast_offsets, unreachable_offset);
+    @memset(fast_budget_fixups, unreachable_offset);
+    @memset(fast_checkpoint_fixups, unreachable_offset);
+    @memset(fast_control_fixups, null);
+    @memset(slow_offsets, unreachable_offset);
+    @memset(slow_fallthrough_fixups, unreachable_offset);
     @memset(operation_offsets, unreachable_offset);
     @memset(budget_fixups, unreachable_offset);
     @memset(checkpoint_fixups, unreachable_offset);
-    @memset(control_fixups, null);
+    @memset(slow_control_fixups, null);
     @memset(status_fixups, unreachable_offset);
 
     // Preserve every callee-saved register used by the generated entry. x21 is
@@ -439,35 +536,61 @@ fn compileNumeric(chunk: *const Chunk) !jit.CompiledCode {
         try assembler.moveFloatFromRegister64(try numericLocalRegister(slot), 9);
     }
 
-    for (chunk.code.items, 0..) |inst, ip| {
-        const state = analysis.states[ip] orelse continue;
-        bytecode_offsets[ip] = assembler.position();
+    // Normal execution accounts for an entire basic block at once. A block
+    // enters the exact replay path when either the evaluation budget or the
+    // next 1024-step safepoint falls within it, so observable boundaries keep
+    // the interpreter's instruction-level semantics.
+    for (blocks, 0..) |block, block_index| {
+        fast_offsets[block.start] = assembler.position();
+        const instruction_count = block.instructionCount();
+        try assembler.compareImmediate64(25, instruction_count);
+        fast_budget_fixups[block_index] = try assembler.branchConditionPlaceholder(.lo);
+        try assembler.compareImmediate64(24, instruction_count);
+        fast_checkpoint_fixups[block_index] = try assembler.branchConditionPlaceholder(.ls);
+        try assembler.subtractImmediate64(25, 25, instruction_count);
+        try assembler.subtractImmediate64(24, 24, instruction_count);
+        try assembler.addImmediate64(19, 19, instruction_count);
 
-        try assembler.addImmediate64(19, 19, 1);
-        try assembler.subtractImmediateSetFlags64(25, 25, 1);
-        budget_fixups[ip] = try assembler.branchConditionPlaceholder(.lo);
-        try assembler.subtractImmediateSetFlags64(24, 24, 1);
-        checkpoint_fixups[ip] = try assembler.branchConditionPlaceholder(.eq);
-        operation_offsets[ip] = assembler.position();
-
-        control_fixups[ip] = try emitOperation(&assembler, chunk, state, inst);
+        for (block.start..block.end) |ip| {
+            const state = analysis.states[ip].?;
+            fast_control_fixups[ip] = try emitOperation(&assembler, chunk, state, chunk.code.items[ip]);
+        }
     }
+    try patchControlFixups(&assembler, fast_control_fixups, fast_offsets);
 
-    for (control_fixups) |fixup_opt| if (fixup_opt) |fixup| switch (fixup) {
-        .branch => |branch| {
-            if (branch.target >= code_len or bytecode_offsets[branch.target] == unreachable_offset) return error.UnsupportedChunk;
-            try assembler.patchBranch(branch.at, bytecode_offsets[branch.target]);
-        },
-        .test_zero => |branch| {
-            if (branch.target >= code_len or bytecode_offsets[branch.target] == unreachable_offset) return error.UnsupportedChunk;
-            try assembler.patchTestBranch(branch.at, bytecode_offsets[branch.target]);
-        },
-    };
+    // Boundary blocks replay the original instruction accounting until their
+    // end, then rejoin a fast block. Checkpoint islands resume immediately at
+    // the operation whose accounting triggered the callback.
+    for (blocks, 0..) |block, block_index| {
+        slow_offsets[block_index] = assembler.position();
+        try assembler.patchConditionBranch(fast_budget_fixups[block_index], slow_offsets[block_index]);
+        try assembler.patchConditionBranch(fast_checkpoint_fixups[block_index], slow_offsets[block_index]);
+
+        for (block.start..block.end) |ip| {
+            const state = analysis.states[ip].?;
+            try assembler.addImmediate64(19, 19, 1);
+            try assembler.subtractImmediateSetFlags64(25, 25, 1);
+            budget_fixups[ip] = try assembler.branchConditionPlaceholder(.lo);
+            try assembler.subtractImmediateSetFlags64(24, 24, 1);
+            checkpoint_fixups[ip] = try assembler.branchConditionPlaceholder(.eq);
+            operation_offsets[ip] = assembler.position();
+            slow_control_fixups[ip] = try emitOperation(&assembler, chunk, state, chunk.code.items[ip]);
+        }
+
+        const last_op = chunk.code.items[block.end - 1].op;
+        if (!isBlockTerminator(last_op) or last_op == .jump_if_false) {
+            if (block.end >= code_len or fast_offsets[block.end] == unreachable_offset) return error.UnsupportedChunk;
+            slow_fallthrough_fixups[block_index] = try assembler.branchPlaceholder();
+        }
+    }
+    try patchControlFixups(&assembler, slow_control_fixups, fast_offsets);
+    for (blocks, slow_fallthrough_fixups) |block, at| if (at != unreachable_offset)
+        try assembler.patchBranch(at, fast_offsets[block.end]);
 
     // Each bytecode instruction has one cold checkpoint island. The hot path
-    // pays only two countdown decrements and predicted-not-taken branches;
-    // runtime work happens exactly before the instruction whose step reaches a
-    // 1024 boundary (or exceeds the evaluation budget).
+    // reaches these only through a boundary block's exact replay. Runtime work
+    // happens before the instruction whose step reaches a 1024 boundary (or
+    // exceeds the evaluation budget).
     for (chunk.code.items, 0..) |_, ip| {
         const state = analysis.states[ip] orelse continue;
         const stub = assembler.position();

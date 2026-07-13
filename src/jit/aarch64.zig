@@ -73,12 +73,20 @@ pub const Assembler = struct {
         try self.emit32(0x8b00_0000 | (@as(u32, rm) << 16) | (@as(u32, rn) << 5) | rd);
     }
 
+    pub fn subtractImmediate64(self: *Assembler, rd: u5, rn: u5, value: u12) error{NoSpace}!void {
+        try self.emit32(0xd100_0000 | (@as(u32, value) << 10) | (@as(u32, rn) << 5) | rd);
+    }
+
     pub fn subtractImmediateSetFlags64(self: *Assembler, rd: u5, rn: u5, value: u12) error{NoSpace}!void {
         try self.emit32(0xf100_0000 | (@as(u32, value) << 10) | (@as(u32, rn) << 5) | rd);
     }
 
     pub fn compareRegister64(self: *Assembler, rn: u5, rm: u5) error{NoSpace}!void {
         try self.emit32(0xeb00_001f | (@as(u32, rm) << 16) | (@as(u32, rn) << 5));
+    }
+
+    pub fn compareImmediate64(self: *Assembler, rn: u5, value: u12) error{NoSpace}!void {
+        try self.subtractImmediateSetFlags64(31, rn, value);
     }
 
     pub fn pushPair(self: *Assembler, first: u5, second: u5) error{NoSpace}!void {
@@ -354,13 +362,15 @@ test "AArch64 guarded unsigned remainder encodings" {
 }
 
 test "AArch64 preserves register-resident numeric stack" {
-    var storage: [16]u8 = undefined;
+    var storage: [24]u8 = undefined;
     var assembler = Assembler.init(&storage);
     try assembler.pushFloatPair64(8, 9);
     try assembler.popFloatPair64(8, 9);
     try assembler.moveFloat64(0, 8);
+    try assembler.compareImmediate64(25, 9);
+    try assembler.subtractImmediate64(25, 25, 9);
     try assembler.ret();
-    const expected = [_]u32{ 0x6dbf_27e8, 0x6cc1_27e8, 0x1e60_4100, 0xd65f_03c0 };
+    const expected = [_]u32{ 0x6dbf_27e8, 0x6cc1_27e8, 0x1e60_4100, 0xf100_273f, 0xd100_2739, 0xd65f_03c0 };
     for (expected, 0..) |instruction, index| {
         try std.testing.expectEqual(instruction, std.mem.readInt(u32, assembler.bytes()[index * 4 ..][0..4], .little));
     }
