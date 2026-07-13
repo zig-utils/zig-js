@@ -23,6 +23,10 @@ lives in a worker arena ever escapes it — same lifetime rule as agents.
 Serialization, structural preflight, and deserialization share a 256-level
 wire-nesting ceiling; an over-depth graph or payload produces a catchable clone
 error while its frame manifest still releases retained SAB references.
+Fixed-width graph IDs, lengths, and collection/property counts are checked on
+write. Preflight rejects noncanonical flags/references and any count that cannot
+fit the remaining payload before deserialization allocates or enters its loop;
+`u64` sizes also fail closed when the host `usize` cannot represent them.
 
 Messages flow over two `Channel`s (mutex + condition FIFOs of `[]u8`): `inbox`
 (main→worker) and `outbox` (worker→main). Each channel drains with a FIFO head

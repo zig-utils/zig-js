@@ -14,6 +14,9 @@ tests as the matching engine features land.
 - Structured clone has a shared 256-level nesting ceiling across serialization,
   wire preflight, and deserialization. Excessive graphs fail with a catchable
   clone error, and framed SAB manifests keep rejection cleanup non-recursive.
+  Graph IDs, strings, counts, and host-size conversions are checked; impossible
+  wire counts and noncanonical references/flags fail before large loops or
+  allocations.
 - Shared-realm `Thread`: one `Context`, one heap, one global object, real OS
   threads, same-realm identity, and no-GIL parallel execution by default.
 - Serialized shared-realm fallback:

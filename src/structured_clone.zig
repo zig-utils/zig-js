@@ -165,8 +165,9 @@ const Writer = struct {
     fn num(w: *Writer, v: f64) error{OutOfMemory}!void {
         try w.int(u64, @bitCast(v));
     }
-    fn str(w: *Writer, s: []const u8) error{OutOfMemory}!void {
-        try w.int(u32, @intCast(s.len));
+    fn str(w: *Writer, s: []const u8) error{ OutOfMemory, Overflow }!void {
+        const len = std.math.cast(u32, s.len) orelse return error.Overflow;
+        try w.int(u32, len);
         try w.out.appendSlice(w.gpa, s);
     }
 };
@@ -189,6 +190,11 @@ const Reader = struct {
         defer r.pos += 1;
         return r.bytes[r.pos];
     }
+    fn flag(r: *Reader) Error!bool {
+        const b = try r.byte();
+        if (b > 1) return error.Malformed;
+        return b == 1;
+    }
     fn int(r: *Reader, comptime T: type) Error!T {
         const n = @sizeOf(T);
         if (n > r.bytes.len - r.pos) return error.Malformed;
@@ -199,10 +205,15 @@ const Reader = struct {
         return @bitCast(try r.int(u64));
     }
     fn str(r: *Reader) Error![]const u8 {
-        const n: usize = try r.int(u32);
+        const n = std.math.cast(usize, try r.int(u32)) orelse return error.Malformed;
         if (n > r.bytes.len - r.pos) return error.Malformed;
         defer r.pos += n;
         return r.bytes[r.pos..][0..n];
+    }
+
+    fn ensureCountFits(r: *Reader, count: u32, minimum_bytes_each: usize) Error!void {
+        const n = std.math.cast(usize, count) orelse return error.Malformed;
+        if (n > (r.bytes.len - r.pos) / minimum_bytes_each) return error.Malformed;
     }
 };
 
@@ -219,6 +230,21 @@ const Serializer = struct {
 
     fn throwClone(s: *Serializer, what: []const u8) HostError {
         return s.self.throwError("TypeError", what);
+    }
+
+    fn writeStr(s: *Serializer, text: []const u8) HostError!void {
+        return s.w.str(text) catch |err| switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            error.Overflow => s.throwClone("DataCloneError: structured clone string is too large"),
+        };
+    }
+
+    fn wireU32(s: *Serializer, n: usize, what: []const u8) HostError!u32 {
+        return std.math.cast(u32, n) orelse return s.throwClone(what);
+    }
+
+    fn wireU64(s: *Serializer, n: usize, what: []const u8) HostError!u64 {
+        return std.math.cast(u64, n) orelse return s.throwClone(what);
     }
 
     const MapEntrySnapshot = struct { key: Value, val: Value };
@@ -301,7 +327,7 @@ const Serializer = struct {
             },
             .string => {
                 try s.w.tag(.string);
-                try s.w.str(v.asStr());
+                try s.writeStr(v.asStr());
             },
             .object => try s.serObject(v.asObj(), depth),
         }
@@ -312,7 +338,7 @@ const Serializer = struct {
         if (o.is_bigint) {
             if (o.bigint_text) |t| {
                 try s.w.tag(.bigint_text);
-                try s.w.str(t);
+                try s.writeStr(t);
             } else {
                 try s.w.tag(.bigint);
                 try s.w.int(i128, o.bigint);
@@ -339,8 +365,11 @@ const Serializer = struct {
         if (o.is_arguments) return s.throwClone("DataCloneError: arguments objects cannot be cloned");
         if (o.is_htmldda) return s.throwClone("DataCloneError: this object cannot be cloned");
 
-        try s.memo.put(s.w.gpa, o, s.next_id);
-        s.next_id += 1;
+        const object_id = s.next_id;
+        const next_id = std.math.add(u32, object_id, 1) catch
+            return s.throwClone("DataCloneError: too many structured clone objects");
+        try s.memo.put(s.w.gpa, o, object_id);
+        s.next_id = next_id;
 
         if (o.array_buffer) |ab| {
             if (ab.is_shared) {
@@ -360,24 +389,27 @@ const Serializer = struct {
             }
             if (ab.isDetached()) return s.throwClone("DataCloneError: detached ArrayBuffer cannot be cloned");
             try s.w.tag(.array_buffer);
-            try s.w.int(u64, if (ab.max_byte_length) |m| @intCast(m) else std.math.maxInt(u64));
-            try s.w.str(ab.bytes());
+            try s.w.int(u64, if (ab.max_byte_length) |m|
+                try s.wireU64(m, "DataCloneError: ArrayBuffer maximum is too large")
+            else
+                std.math.maxInt(u64));
+            try s.writeStr(ab.bytes());
             return;
         }
         if (o.typed_array) |ta| {
             try s.w.tag(.typed_array);
             try s.w.byte(@intFromEnum(ta.kind));
             try s.serObject(ta.buffer, try s.childDepth(depth));
-            try s.w.int(u64, @intCast(ta.byte_offset));
-            try s.w.int(u64, @intCast(ta.length));
+            try s.w.int(u64, try s.wireU64(ta.byte_offset, "DataCloneError: TypedArray offset is too large"));
+            try s.w.int(u64, if (ta.track_length) 0 else try s.wireU64(ta.length, "DataCloneError: TypedArray length is too large"));
             try s.w.byte(@intFromBool(ta.track_length));
             return;
         }
         if (o.data_view) |dv| {
             try s.w.tag(.data_view);
             try s.serObject(dv.buffer, try s.childDepth(depth));
-            try s.w.int(u64, @intCast(dv.byte_offset));
-            try s.w.int(u64, @intCast(dv.byte_length));
+            try s.w.int(u64, try s.wireU64(dv.byte_offset, "DataCloneError: DataView offset is too large"));
+            try s.w.int(u64, if (dv.track_length) 0 else try s.wireU64(dv.byte_length, "DataCloneError: DataView length is too large"));
             try s.w.byte(@intFromBool(dv.track_length));
             return;
         }
@@ -388,8 +420,8 @@ const Serializer = struct {
         }
         if (o.is_regex) {
             try s.w.tag(.regexp);
-            try s.w.str(o.regex_source);
-            try s.w.str(o.regex_flags);
+            try s.writeStr(o.regex_source);
+            try s.writeStr(o.regex_flags);
             return;
         }
         if (o.is_map) {
@@ -398,7 +430,7 @@ const Serializer = struct {
             defer s.self.restoreTempRoots(root_mark);
             const entries = try s.snapshotMapEntries(o);
             defer s.w.gpa.free(entries);
-            try s.w.int(u32, @intCast(entries.len));
+            try s.w.int(u32, try s.wireU32(entries.len, "DataCloneError: too many Map entries"));
             if (entries.len == 0) return;
             const child_depth = try s.childDepth(depth);
             for (entries) |entry| {
@@ -413,7 +445,7 @@ const Serializer = struct {
             defer s.self.restoreTempRoots(root_mark);
             const entries = try s.snapshotSetEntries(o);
             defer s.w.gpa.free(entries);
-            try s.w.int(u32, @intCast(entries.len));
+            try s.w.int(u32, try s.wireU32(entries.len, "DataCloneError: too many Set entries"));
             if (entries.len == 0) return;
             const child_depth = try s.childDepth(depth);
             for (entries) |entry| try s.ser(entry, child_depth);
@@ -421,11 +453,11 @@ const Serializer = struct {
         }
         if (o.is_error) {
             try s.w.tag(.error_obj);
-            try s.w.str(o.error_name);
+            try s.writeStr(o.error_name);
             const msg = try s.self.getProperty(Value.obj(o), "message");
             if (msg.isString()) {
                 try s.w.byte(1);
-                try s.w.str(msg.asStr());
+                try s.writeStr(msg.asStr());
             } else {
                 try s.w.byte(0);
             }
@@ -444,8 +476,8 @@ const Serializer = struct {
             const snap = try s.snapshotArrayElements(o);
             defer s.w.gpa.free(snap.elements);
             defer s.w.gpa.free(snap.holes);
-            try s.w.int(u64, @intCast(snap.logical_len));
-            try s.w.int(u32, @intCast(snap.elements.len));
+            try s.w.int(u64, try s.wireU64(snap.logical_len, "DataCloneError: Array length is too large"));
+            try s.w.int(u32, try s.wireU32(snap.elements.len, "DataCloneError: too many Array elements"));
             for (snap.elements, snap.holes) |el, hole| {
                 try s.w.byte(@intFromBool(hole));
                 if (!hole) try s.ser(el, try s.childDepth(depth));
@@ -465,14 +497,15 @@ const Serializer = struct {
         var count: u32 = 0;
         for (keys) |k| {
             if (skip_indices and isIndexKey(k)) continue;
-            count += 1;
+            count = std.math.add(u32, count, 1) catch
+                return s.throwClone("DataCloneError: too many object properties");
         }
         try s.w.int(u32, count);
         if (count == 0) return;
         const child_depth = try s.childDepth(depth);
         for (keys) |k| {
             if (skip_indices and isIndexKey(k)) continue;
-            try s.w.str(k);
+            try s.writeStr(k);
             try s.ser(try s.self.getProperty(Value.obj(o), k), child_depth);
         }
     }
@@ -561,7 +594,8 @@ fn readFrame(bytes: []const u8) Reader.Error!Frame {
     if (!std.mem.eql(u8, bytes[0..wire_magic.len], &wire_magic)) return error.Malformed;
     if (bytes[wire_magic.len] != wire_version) return error.Malformed;
     var pos: usize = wire_magic.len + @sizeOf(u8);
-    const token_count: usize = std.mem.readInt(u32, bytes[pos..][0..@sizeOf(u32)], .little);
+    const token_count = std.math.cast(usize, std.mem.readInt(u32, bytes[pos..][0..@sizeOf(u32)], .little)) orelse
+        return error.Malformed;
     pos += @sizeOf(u32);
     const payload_len_raw = std.mem.readInt(u64, bytes[pos..][0..@sizeOf(u64)], .little);
     pos += @sizeOf(u64);
@@ -586,7 +620,8 @@ fn releaseFrame(bytes: []const u8) ?usize {
     if (!std.mem.eql(u8, bytes[0..wire_magic.len], &wire_magic)) return null;
     if (bytes[wire_magic.len] != wire_version) return null;
     var pos: usize = wire_magic.len + @sizeOf(u8);
-    const token_count: usize = std.mem.readInt(u32, bytes[pos..][0..@sizeOf(u32)], .little);
+    const token_count = std.math.cast(usize, std.mem.readInt(u32, bytes[pos..][0..@sizeOf(u32)], .little)) orelse
+        return null;
     pos += @sizeOf(u32);
     const payload_len_raw = std.mem.readInt(u64, bytes[pos..][0..@sizeOf(u64)], .little);
     pos += @sizeOf(u64);
@@ -606,6 +641,7 @@ fn releaseFrame(bytes: []const u8) ?usize {
 const SkipState = struct {
     frame: Frame,
     next_shared: u32 = 0,
+    next_object: u32 = 0,
 
     fn validateToken(state: *SkipState, index: u32) Reader.Error!void {
         if (index != state.next_shared) return error.Malformed;
@@ -614,6 +650,10 @@ const SkipState = struct {
         if (!sharedRefTokenExists(state.frame.token(token_index))) return error.Malformed;
         state.next_shared = std.math.add(u32, state.next_shared, 1) catch return error.Malformed;
     }
+
+    fn addObject(state: *SkipState) Reader.Error!void {
+        state.next_object = std.math.add(u32, state.next_object, 1) catch return error.Malformed;
+    }
 };
 
 fn wireChildDepth(depth: u16) Reader.Error!u16 {
@@ -621,33 +661,68 @@ fn wireChildDepth(depth: u16) Reader.Error!u16 {
     return depth + 1;
 }
 
+fn wireUsize(raw: u64) Reader.Error!usize {
+    return std.math.cast(usize, raw) orelse return error.Malformed;
+}
+
+fn tagCreatesObject(tag: Tag) bool {
+    return switch (tag) {
+        .object,
+        .array,
+        .date,
+        .regexp,
+        .map,
+        .set,
+        .error_obj,
+        .wrapper,
+        .array_buffer,
+        .shared_array_buffer,
+        .typed_array,
+        .data_view,
+        => true,
+        else => false,
+    };
+}
+
 fn skipSerialized(r: *Reader, state: *SkipState, depth: u16) Reader.Error!void {
-    switch (try r.tag()) {
+    const tag = try r.tag();
+    if (tagCreatesObject(tag)) try state.addObject();
+    switch (tag) {
         .undef, .null_v => {},
-        .bool_v => _ = try r.byte(),
+        .bool_v => _ = try r.flag(),
         .number, .date => _ = try r.num(),
         .string, .bigint_text => _ = try r.str(),
         .bigint => _ = try r.int(i128),
-        .ref => _ = try r.int(u32),
+        .ref => {
+            const id = try r.int(u32);
+            if (id >= state.next_object) return error.Malformed;
+        },
         .shared_array_buffer => {
             try state.validateToken(try r.int(u32));
         },
         .array_buffer => {
-            _ = try r.int(u64);
-            _ = try r.str();
+            const max_raw = try r.int(u64);
+            const bytes = try r.str();
+            if (max_raw != std.math.maxInt(u64)) {
+                const max = try wireUsize(max_raw);
+                if (max < bytes.len) return error.Malformed;
+            }
         },
         .typed_array => {
-            _ = try r.byte();
+            const kind = try r.byte();
+            if (kind > @intFromEnum(value.TAKind.u64)) return error.Malformed;
             try skipSerialized(r, state, try wireChildDepth(depth));
-            _ = try r.int(u64);
-            _ = try r.int(u64);
-            _ = try r.byte();
+            _ = try wireUsize(try r.int(u64));
+            const len = try wireUsize(try r.int(u64));
+            const track = try r.flag();
+            if (track and len != 0) return error.Malformed;
         },
         .data_view => {
             try skipSerialized(r, state, try wireChildDepth(depth));
-            _ = try r.int(u64);
-            _ = try r.int(u64);
-            _ = try r.byte();
+            _ = try wireUsize(try r.int(u64));
+            const len = try wireUsize(try r.int(u64));
+            const track = try r.flag();
+            if (track and len != 0) return error.Malformed;
         },
         .regexp => {
             _ = try r.str();
@@ -655,6 +730,7 @@ fn skipSerialized(r: *Reader, state: *SkipState, depth: u16) Reader.Error!void {
         },
         .map => {
             const n = try r.int(u32);
+            try r.ensureCountFits(n, 2);
             if (n == 0) return;
             const child_depth = try wireChildDepth(depth);
             var i: u32 = 0;
@@ -665,6 +741,7 @@ fn skipSerialized(r: *Reader, state: *SkipState, depth: u16) Reader.Error!void {
         },
         .set => {
             const n = try r.int(u32);
+            try r.ensureCountFits(n, 1);
             if (n == 0) return;
             const child_depth = try wireChildDepth(depth);
             var i: u32 = 0;
@@ -672,15 +749,19 @@ fn skipSerialized(r: *Reader, state: *SkipState, depth: u16) Reader.Error!void {
         },
         .error_obj => {
             _ = try r.str();
-            if (try r.byte() == 1) _ = try r.str();
+            if (try r.flag()) _ = try r.str();
         },
         .wrapper => try skipSerialized(r, state, try wireChildDepth(depth)),
         .array => {
-            _ = try r.int(u64);
+            const logical_len = try wireUsize(try r.int(u64));
             const n = try r.int(u32);
+            const element_count = std.math.cast(usize, n) orelse return error.Malformed;
+            if (r.bytes.len - r.pos < @sizeOf(u32)) return error.Malformed;
+            if (element_count > r.bytes.len - r.pos - @sizeOf(u32)) return error.Malformed;
+            if (element_count > logical_len) return error.Malformed;
             var i: u32 = 0;
             while (i < n) : (i += 1) {
-                if (try r.byte() == 0)
+                if (!try r.flag())
                     try skipSerialized(r, state, try wireChildDepth(depth));
             }
             try skipNamed(r, state, depth);
@@ -691,6 +772,7 @@ fn skipSerialized(r: *Reader, state: *SkipState, depth: u16) Reader.Error!void {
 
 fn skipNamed(r: *Reader, state: *SkipState, depth: u16) Reader.Error!void {
     const n = try r.int(u32);
+    try r.ensureCountFits(n, @sizeOf(u32) + @sizeOf(u8));
     if (n == 0) return;
     const child_depth = try wireChildDepth(depth);
     var i: u32 = 0;
@@ -719,6 +801,15 @@ const Deserializer = struct {
         return depth + 1;
     }
 
+    fn readUsize(d: *Deserializer) HostError!usize {
+        const raw = d.r.int(u64) catch return d.fail();
+        return std.math.cast(usize, raw) orelse return d.fail();
+    }
+
+    fn readFlag(d: *Deserializer) HostError!bool {
+        return d.r.flag() catch return d.fail();
+    }
+
     fn protoFor(d: *Deserializer, name: []const u8) ?*value.Object {
         const c = d.self.env.get(name) orelse return null;
         if (!c.isObject()) return null;
@@ -731,15 +822,16 @@ const Deserializer = struct {
         switch (t) {
             .undef => return Value.undef(),
             .null_v => return Value.nul(),
-            .bool_v => return Value.boolVal((d.r.byte() catch return d.fail()) != 0),
+            .bool_v => return Value.boolVal(try d.readFlag()),
             .number => return Value.num(d.r.num() catch return d.fail()),
             .string => return try Value.strOwned(a, try a.dupe(u8, d.r.str() catch return d.fail())),
             .bigint => return d.self.makeBigInt(d.r.int(i128) catch return d.fail()),
             .bigint_text => return d.self.makeBigIntText(try a.dupe(u8, d.r.str() catch return d.fail())),
             .ref => {
                 const id = d.r.int(u32) catch return d.fail();
-                if (id >= d.objs.items.len) return d.fail();
-                return Value.obj(d.objs.items[id]);
+                const object_index = std.math.cast(usize, id) orelse return d.fail();
+                if (object_index >= d.objs.items.len) return d.fail();
+                return Value.obj(d.objs.items[object_index]);
             },
             .object => {
                 const o = (try d.self.newObject()).asObj();
@@ -750,11 +842,11 @@ const Deserializer = struct {
             .array => {
                 const arr = (try d.self.newArray()).asObj();
                 try d.objs.append(a, arr);
-                const len: usize = @intCast(d.r.int(u64) catch return d.fail());
-                const n = d.r.int(u32) catch return d.fail();
-                var i: u32 = 0;
+                const len = try d.readUsize();
+                const n = std.math.cast(usize, d.r.int(u32) catch return d.fail()) orelse return d.fail();
+                var i: usize = 0;
                 while (i < n) : (i += 1) {
-                    const hole = (d.r.byte() catch return d.fail()) != 0;
+                    const hole = try d.readFlag();
                     if (hole) {
                         try arr.appendElement(a, Value.undef());
                         try arr.markHole(a, i);
@@ -823,7 +915,7 @@ const Deserializer = struct {
                 o.is_error = true;
                 o.error_name = name;
                 o.proto = d.protoFor(name) orelse d.protoFor("Error");
-                if ((d.r.byte() catch return d.fail()) == 1) {
+                if (try d.readFlag()) {
                     const msg = try a.dupe(u8, d.r.str() catch return d.fail());
                     try o.setOwn(a, d.self.root_shape, "message", try Value.strOwned(a, msg));
                     try o.setAttr(a, "message", .{ .writable = true, .enumerable = false, .configurable = true });
@@ -850,7 +942,8 @@ const Deserializer = struct {
                 const o = try d.self.makeArrayBuffer(bytes.len);
                 try d.objs.append(a, o);
                 @memcpy(o.array_buffer.?.bytes()[0..bytes.len], bytes);
-                if (max_raw != std.math.maxInt(u64)) o.array_buffer.?.max_byte_length = @intCast(max_raw);
+                if (max_raw != std.math.maxInt(u64))
+                    o.array_buffer.?.max_byte_length = std.math.cast(usize, max_raw) orelse return d.fail();
                 return Value.obj(o);
             },
             .shared_array_buffer => {
@@ -874,13 +967,29 @@ const Deserializer = struct {
                 try d.objs.append(a, o);
                 const buf = try d.deser(try d.childDepth(depth));
                 if (!buf.isObject() or buf.asObj().array_buffer == null) return d.fail();
+                const byte_offset = try d.readUsize();
+                const length = try d.readUsize();
+                const track_length = try d.readFlag();
+                const element_size = kind.byteSize();
+                const ab = buf.asObj().array_buffer.?;
+                ab.lockBuffer();
+                const buffer_len = ab.bytes().len;
+                const resizable = ab.max_byte_length != null;
+                ab.unlockBuffer();
+                if (byte_offset % element_size != 0 or byte_offset > buffer_len) return d.fail();
+                if (track_length) {
+                    if (!resizable or length != 0) return d.fail();
+                } else {
+                    const byte_length = std.math.mul(usize, length, element_size) catch return d.fail();
+                    if (byte_length > buffer_len - byte_offset) return d.fail();
+                }
                 const ta = try o.typedArrayAllocator(a).create(value.TypedArrayData);
                 ta.* = .{
                     .buffer = buf.asObj(),
-                    .byte_offset = @intCast(d.r.int(u64) catch return d.fail()),
-                    .length = @intCast(d.r.int(u64) catch return d.fail()),
+                    .byte_offset = byte_offset,
+                    .length = length,
                     .kind = kind,
-                    .track_length = (d.r.byte() catch return d.fail()) != 0,
+                    .track_length = track_length,
                 };
                 o.typed_array = ta;
                 if (d.protoFor(kind.ctorName())) |p| o.proto = p;
@@ -891,12 +1000,24 @@ const Deserializer = struct {
                 try d.objs.append(a, o);
                 const buf = try d.deser(try d.childDepth(depth));
                 if (!buf.isObject() or buf.asObj().array_buffer == null) return d.fail();
+                const byte_offset = try d.readUsize();
+                const byte_length = try d.readUsize();
+                const track_length = try d.readFlag();
+                const ab = buf.asObj().array_buffer.?;
+                ab.lockBuffer();
+                const buffer_len = ab.bytes().len;
+                const resizable = ab.max_byte_length != null;
+                ab.unlockBuffer();
+                if (byte_offset > buffer_len) return d.fail();
+                if (track_length) {
+                    if (!resizable or byte_length != 0) return d.fail();
+                } else if (byte_length > buffer_len - byte_offset) return d.fail();
                 const dv = try o.dataViewAllocator(a).create(value.DataViewData);
                 dv.* = .{
                     .buffer = buf.asObj(),
-                    .byte_offset = @intCast(d.r.int(u64) catch return d.fail()),
-                    .byte_length = @intCast(d.r.int(u64) catch return d.fail()),
-                    .track_length = (d.r.byte() catch return d.fail()) != 0,
+                    .byte_offset = byte_offset,
+                    .byte_length = byte_length,
+                    .track_length = track_length,
                 };
                 o.data_view = dv;
                 if (d.protoFor("DataView")) |p| o.proto = p;
@@ -1097,4 +1218,47 @@ test "structured clone wire depth is bounded and rejected manifests clean up" {
     try std.testing.expectError(error.Malformed, skipSerialized(&rejected_reader, &rejected_state, 0));
     releaseSerialized(rejected_frame_bytes);
     try std.testing.expectEqual(baseline, sharedRefTokenCount());
+}
+
+test "structured clone wire rejects impossible counts and noncanonical fields" {
+    const Check = struct {
+        fn malformed(payload: []const u8) !void {
+            const frame_bytes = try encodeFrame(std.testing.allocator, &.{}, payload);
+            defer std.testing.allocator.free(frame_bytes);
+            const frame = try readFrame(frame_bytes);
+            var reader = Reader{ .bytes = frame.payload };
+            var state = SkipState{ .frame = frame };
+            try std.testing.expectError(error.Malformed, skipSerialized(&reader, &state, 0));
+        }
+    };
+
+    var collection: [1 + @sizeOf(u32)]u8 = undefined;
+    inline for (.{ Tag.map, Tag.set, Tag.object }) |tag| {
+        collection[0] = @intFromEnum(tag);
+        std.mem.writeInt(u32, collection[1..][0..@sizeOf(u32)], std.math.maxInt(u32), .little);
+        try Check.malformed(&collection);
+    }
+
+    var string: [1 + @sizeOf(u32)]u8 = undefined;
+    string[0] = @intFromEnum(Tag.string);
+    std.mem.writeInt(u32, string[1..][0..@sizeOf(u32)], std.math.maxInt(u32), .little);
+    try Check.malformed(&string);
+
+    var array: [1 + @sizeOf(u64) + @sizeOf(u32)]u8 = undefined;
+    array[0] = @intFromEnum(Tag.array);
+    std.mem.writeInt(u64, array[1..][0..@sizeOf(u64)], std.math.maxInt(u64), .little);
+    std.mem.writeInt(u32, array[1 + @sizeOf(u64) ..][0..@sizeOf(u32)], std.math.maxInt(u32), .little);
+    try Check.malformed(&array);
+
+    var short_array: [1 + @sizeOf(u64) + @sizeOf(u32) + 1]u8 = undefined;
+    short_array[0] = @intFromEnum(Tag.array);
+    std.mem.writeInt(u64, short_array[1..][0..@sizeOf(u64)], 0, .little);
+    std.mem.writeInt(u32, short_array[1 + @sizeOf(u64) ..][0..@sizeOf(u32)], 1, .little);
+    short_array[short_array.len - 1] = 1;
+    try Check.malformed(&short_array);
+
+    try Check.malformed(&.{ @intFromEnum(Tag.bool_v), 2 });
+    try Check.malformed(&.{ @intFromEnum(Tag.error_obj), 0, 0, 0, 0, 2 });
+    try Check.malformed(&.{ @intFromEnum(Tag.typed_array), std.math.maxInt(u8) });
+    try Check.malformed(&.{ @intFromEnum(Tag.ref), 0, 0, 0, 0 });
 }

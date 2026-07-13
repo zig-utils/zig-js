@@ -10145,6 +10145,11 @@ test "structuredClone: identity, cycles, types, SAB sharing, transfer" {
         \\const ct = structuredClone(ta);
         \\ct[0] = 9;
         \\if (ta[0] !== 1 || ct[1] !== 2) throw new Error("TA not copied");
+        \\const rab = new ArrayBuffer(8, { maxByteLength: 16 });
+        \\const tracked = structuredClone({ ta: new Uint8Array(rab), dv: new DataView(rab) });
+        \\if (tracked.ta.buffer !== tracked.dv.buffer) throw new Error("view buffer identity");
+        \\tracked.ta.buffer.resize(12);
+        \\if (tracked.ta.length !== 12 || tracked.dv.byteLength !== 12) throw new Error("tracking views");
         \\// SAB shares storage
         \\const sab = new SharedArrayBuffer(8);
         \\const cs = structuredClone(sab);
