@@ -277,6 +277,56 @@ pub fn build(b: *std.Build) void {
     const bench_step = b.step("bench", "Benchmark the bytecode VM against the tree-walker");
     bench_step.dependOn(&run_bench.step);
 
+    // Reproducible engine comparison against the system JavaScriptCore. The
+    // runners are deliberately separate executables so zig-js's JSC-shaped C
+    // exports cannot interpose on the real framework symbols. The Python driver
+    // only orchestrates runs, validates checksums, and renders raw/report data.
+    const comparison_step = b.step("benchmark-comparison", "Compare zig-js single/no-GIL throughput with system JavaScriptCore (macOS)");
+    const comparison_bin_step = b.step("benchmark-comparison-bin", "Build the zig-js and system-JSC comparison runners (macOS)");
+    if (target.result.os.tag == .macos) {
+        const comparison_zig_js = b.addExecutable(.{
+            .name = "bench-comparison-zig-js",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("bench/comparison_zig_js.zig"),
+                .target = target,
+                .optimize = .ReleaseFast,
+                .imports = &.{.{ .name = "js", .module = bench_js_mod }},
+            }),
+        });
+        const comparison_jsc = b.addExecutable(.{
+            .name = "bench-comparison-jsc",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("bench/comparison_jsc.zig"),
+                .target = target,
+                .optimize = .ReleaseFast,
+                .link_libc = true,
+            }),
+        });
+        comparison_jsc.root_module.linkFramework("JavaScriptCore", .{});
+
+        const run_comparison = b.addSystemCommand(&.{ "python3", "tools/benchmark-comparison.py" });
+        run_comparison.addArtifactArg(comparison_zig_js);
+        run_comparison.addArtifactArg(comparison_jsc);
+        if (b.option(bool, "benchmark-comparison-quick", "Run one reduced-size comparison sample for harness validation") orelse false)
+            run_comparison.addArg("--quick");
+        if (b.option([]const u8, "benchmark-comparison-raw-out", "Write raw comparison samples to this TSV path")) |path| {
+            run_comparison.addArgs(&.{ "--raw-out", path });
+        }
+        if (b.option([]const u8, "benchmark-comparison-markdown-out", "Write the rendered comparison report to this Markdown path")) |path| {
+            run_comparison.addArgs(&.{ "--markdown-out", path });
+        }
+        comparison_step.dependOn(&run_comparison.step);
+
+        const install_comparison_zig_js = b.addInstallArtifact(comparison_zig_js, .{});
+        const install_comparison_jsc = b.addInstallArtifact(comparison_jsc, .{});
+        comparison_bin_step.dependOn(&install_comparison_zig_js.step);
+        comparison_bin_step.dependOn(&install_comparison_jsc.step);
+    } else {
+        const unsupported = b.addFail("benchmark-comparison requires the macOS system JavaScriptCore framework");
+        comparison_step.dependOn(&unsupported.step);
+        comparison_bin_step.dependOn(&unsupported.step);
+    }
+
     // Thread contention profile: compare the no-GIL shared-realm default against
     // the `.gil = true` fallback across hot shared structures. This is a local
     // performance tool, not a correctness gate.
