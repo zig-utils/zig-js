@@ -105,6 +105,10 @@ pub const CompiledCode = struct {
     manages_steps: bool = false,
     frame_slots: u32 = 0,
     required_numeric_slots: u64 = 0,
+    /// Parameter slots that must contain canonical non-negative u32 Numbers.
+    /// The VM checks this before native step accounting or slot mutation, so a
+    /// failed speculative integer entry restarts safely at bytecode IP zero.
+    required_u32_slots: u64 = 0,
     max_stack_depth: u8 = 0,
 
     pub fn deinit(self: *CompiledCode) void {

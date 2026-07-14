@@ -506,6 +506,24 @@ fn nativeRemainder(a: f64, b: f64) callconv(.c) f64 {
     return numberRemainder(a, b);
 }
 
+fn isExactUnsigned32(value_: Value) bool {
+    if (!value_.isNumber()) return false;
+    const number = value_.asNum();
+    if (!std.math.isFinite(number) or number < 0 or number > @as(f64, @floatFromInt(std.math.maxInt(u32)))) return false;
+    if (number == 0 and std.math.signbit(number)) return false;
+    return @trunc(number) == number;
+}
+
+fn unsigned32GuardsPass(slots: []const Value, required_mask: u64) bool {
+    var required = required_mask;
+    while (required != 0) {
+        const slot: u6 = @intCast(@ctz(required));
+        if (slot >= slots.len or !isExactUnsigned32(slots[slot])) return false;
+        required &= required - 1;
+    }
+    return true;
+}
+
 fn nativeCheckpoint(frame: *jit.NativeFrame) callconv(.c) u32 {
     const vm: *Interpreter = @ptrCast(@alignCast(frame.runtime_context orelse return @intFromEnum(jit.ExitStatus.stop)));
     const steps = (frame.steps orelse return @intFromEnum(jit.ExitStatus.stop)).*;
@@ -576,6 +594,10 @@ fn tryRunNative(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, ge
                 if (!cf.slots[slot].isNumber()) return null;
                 required &= required - 1;
             }
+        }
+        if (native.required_u32_slots != 0) {
+            const cf = current_frame orelse return null;
+            if (!unsigned32GuardsPass(cf.slots, native.required_u32_slots)) return null;
         }
 
         var scratch: [jit.numeric_scratch_capacity]u64 = undefined;
@@ -3139,6 +3161,32 @@ test "vm: hot primitive constant function tiers through native entry" {
     machine.steps = 1022;
     try std.testing.expectEqual(@as(f64, 42), (try run(&machine, function_chunk, null)).asNum());
     try std.testing.expectEqual(@as(u64, 1024), machine.steps);
+}
+
+test "vm: speculative unsigned parameter guards are exact" {
+    var slots = [_]Value{
+        Value.num(0),
+        Value.num(42),
+        Value.num(@floatFromInt(std.math.maxInt(u32))),
+    };
+    try std.testing.expect(unsigned32GuardsPass(&slots, 0b111));
+    try std.testing.expect(unsigned32GuardsPass(&slots, 0));
+
+    const rejected = [_]f64{
+        -0.0,
+        -1,
+        1.5,
+        std.math.nan(f64),
+        std.math.inf(f64),
+        @as(f64, @floatFromInt(@as(u64, std.math.maxInt(u32)) + 1)),
+    };
+    for (rejected) |number| {
+        slots[1] = Value.num(number);
+        try std.testing.expect(!unsigned32GuardsPass(&slots, 0b010));
+    }
+    slots[1] = Value.str("not a number");
+    try std.testing.expect(!unsigned32GuardsPass(&slots, 0b010));
+    try std.testing.expect(!unsigned32GuardsPass(&slots, @as(u64, 1) << 7));
 }
 
 test "vm: numeric baseline tier preserves steps and non-number fallback" {
