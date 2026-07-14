@@ -335,6 +335,11 @@ pub const Chunk = struct {
     /// Isolated execution publishes a plan only after fully decoding it and may
     /// cache its monomorphic slots; parallel mode does not consume this table.
     quick_property_plans: []?*anyopaque = &.{},
+    /// Lazily decoded packed-array loop plans, indexed by loop-head bytecode.
+    /// As with property plans, only isolated execution consumes this table;
+    /// unsupported structural shapes are cached too so cold decoding is paid
+    /// once rather than once per loop iteration.
+    quick_array_plans: []?*anyopaque = &.{},
     /// Hotness and race-safe native-tier publication state. It remains cold
     /// until VM entry observation is wired to a backend; keeping it on the
     /// chunk makes the eventual shared-realm path single-writer by construction.
