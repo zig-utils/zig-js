@@ -3703,7 +3703,7 @@ pub const Interpreter = struct {
                 // Object env record SetMutableBinding: in strict mode, a binding the
                 // getter deleted no longer exists → ReferenceError on write-back.
                 if (ov.isObject() and ov.asObj().is_bigint) {
-                    const b = ov.asObj().bigint;
+                    const b = ov.asObj().bigIntValue();
                     const up = try self.makeBigInt(if (inc) b +% 1 else b -% 1);
                     if (self.strict and !(try self.hasPropertyResult(wo, name)))
                         return self.throwError("ReferenceError", "binding is no longer defined");
@@ -3735,7 +3735,7 @@ pub const Interpreter = struct {
             if (ov.isObject() and !ov.asObj().is_bigint and !ov.asObj().is_symbol)
                 ov = try self.toPrimitive(ov, .number);
             if (ov.isObject() and ov.asObj().is_bigint) {
-                const b = ov.asObj().bigint;
+                const b = ov.asObj().bigIntValue();
                 const up = try self.makeBigInt(if (inc) b +% 1 else b -% 1);
                 try self.setMember(recv, key, up);
                 return if (prefix) up else ov;
@@ -3756,7 +3756,7 @@ pub const Interpreter = struct {
             if (ov.isObject() and !ov.asObj().is_bigint and !ov.asObj().is_symbol)
                 ov = try self.toPrimitive(ov, .number);
             if (ov.isObject() and ov.asObj().is_bigint) {
-                const b = ov.asObj().bigint;
+                const b = ov.asObj().bigIntValue();
                 const up = try self.makeBigInt(if (inc) b +% 1 else b -% 1);
                 if (!try self.setMemberResult(Value.obj(parent), key, up, self.this_value)) {
                     if (self.strict) return self.throwError("TypeError", "Cannot set property");
@@ -3781,7 +3781,7 @@ pub const Interpreter = struct {
         if (old_val.isObject() and !old_val.asObj().is_bigint and !old_val.asObj().is_symbol)
             old_val = try self.toPrimitive(old_val, .number);
         if (old_val.isObject() and old_val.asObj().is_bigint) {
-            const b = old_val.asObj().bigint;
+            const b = old_val.asObj().bigIntValue();
             const updated = try self.makeBigInt(if (inc) b +% 1 else b -% 1);
             try self.assignTo(target, updated);
             return if (prefix) updated else old_val;
@@ -4426,7 +4426,7 @@ pub const Interpreter = struct {
     /// else ToString. Used to name concise methods/accessors from their key.
     fn keyDisplayName(self: *Interpreter, kv: Value) EvalError![]const u8 {
         if (kv.isObject() and kv.asObj().is_symbol)
-            return if (kv.asObj().sym_desc) |d| try std.fmt.allocPrint(self.arena, "[{s}]", .{d}) else "";
+            return if (kv.asObj().symbolDescription()) |d| try std.fmt.allocPrint(self.arena, "[{s}]", .{d}) else "";
         if (kv.isString()) return kv.asStr();
         return self.toStringV(kv);
     }
@@ -6089,6 +6089,7 @@ pub const Interpreter = struct {
         // parameters, each in-range index aliases its parameter binding.
         if (!func.is_strict and !non_simple_params and func.params.len > 0) {
             const n = @min(args.len, func.params.len);
+            const cold = try args_obj.asObj().ensureCold(self.arena);
             const names = try args_obj.asObj().argMapNamesAllocator(self.arena).alloc([]const u8, n);
             const severed = try args_obj.asObj().argMapSeveredAllocator(self.arena).alloc(std.atomic.Value(bool), n);
             for (names, 0..) |*nm, i| nm.* = func.params[i].name;
@@ -6101,9 +6102,9 @@ pub const Interpreter = struct {
                     break;
                 };
             }
-            args_obj.asObj().arg_map_env = @ptrCast(call_env);
-            args_obj.asObj().arg_map_names = names;
-            args_obj.asObj().arg_map_severed = severed;
+            cold.arg_map_env = @ptrCast(call_env);
+            cold.arg_map_names = names;
+            cold.arg_map_severed = severed;
         }
         return args_obj;
     }
@@ -6444,8 +6445,8 @@ pub const Interpreter = struct {
     /// Index a Symbol by its encoded `sym_key` so it can later be recovered (by
     /// getOwnPropertySymbols / proxy traps), then return that key.
     fn registerSymbol(self: *Interpreter, sym: *value.Object) []const u8 {
-        self.symbols.put(self.arena, sym.sym_key, sym) catch {};
-        return sym.sym_key;
+        self.symbols.put(self.arena, sym.symbolKey(), sym) catch {};
+        return sym.symbolKey();
     }
 
     /// Allocate a fresh plain object. The single creation point so later tiers
@@ -6931,7 +6932,7 @@ pub const Interpreter = struct {
             i += 1;
             self.unlockRealm();
             if (!registry.is_finalization_registry) continue;
-            const cb = registry.finalization_callback;
+            const cb = registry.finalizationCallback();
             if (!cb.isCallable()) continue;
             // Pop each ready record (registry-internal lock); run its callback unlocked.
             while (registry.finRecordTakeReady()) |record| {
@@ -7216,7 +7217,7 @@ pub const Interpreter = struct {
     /// A BigInt primitive value with the given `i128` magnitude.
     pub fn makeBigInt(self: *Interpreter, v: i128) EvalError!Value {
         const o = try gc_mod.allocObj(self.arena);
-        o.* = .{ .is_bigint = true, .bigint = v };
+        o.* = .{ .is_bigint = true, .primitive = .{ .bigint = .{ .value = v } } };
         try self.finishBigInt(o);
         return Value.obj(o);
     }
@@ -7224,7 +7225,7 @@ pub const Interpreter = struct {
     pub fn makeBigIntText(self: *Interpreter, s: []const u8) EvalError!Value {
         if (std.fmt.parseInt(i128, s, 10)) |v| return self.makeBigInt(v) else |_| {}
         const o = try gc_mod.allocObj(self.arena);
-        o.* = .{ .is_bigint = true, .bigint_text = s };
+        o.* = .{ .is_bigint = true, .primitive = .{ .bigint = .{ .text = .init(s) } } };
         try self.finishBigInt(o);
         return Value.obj(o);
     }
@@ -7557,8 +7558,9 @@ pub const Interpreter = struct {
         // source / flags live in internal slots; `lastIndex` is the one real own
         // data property (writable). source/flags/global/… resolve via the
         // RegExp.prototype accessor getters.
-        o.regex_source = try self.arena.dupe(u8, source);
-        o.regex_flags = try self.arena.dupe(u8, flags);
+        const cold = try o.ensureCold(self.arena);
+        cold.regex_source = try self.arena.dupe(u8, source);
+        cold.regex_flags = try self.arena.dupe(u8, flags);
         try self.setProp(o, "lastIndex", Value.num(0));
         try o.setAttr(self.arena, "lastIndex", .{ .writable = true, .enumerable = false, .configurable = false });
         if (self.new_target.isObject()) {
@@ -7598,9 +7600,9 @@ pub const Interpreter = struct {
     }
 
     fn compileRegex(self: *Interpreter, o: *value.Object) EvalError!*regex.Regex {
-        if (o.regex_compiled) |cached| return @ptrCast(@alignCast(cached));
-        const raw_src = o.regex_source;
-        const flags = o.regex_flags;
+        if (o.regexCompiled()) |cached| return @ptrCast(@alignCast(cached));
+        const raw_src = o.regexSource();
+        const flags = o.regexFlags();
         const unicode = std.mem.indexOfScalar(u8, flags, 'u') != null or std.mem.indexOfScalar(u8, flags, 'v') != null;
         const compat_src = if (unicode) raw_src else try regexp_compat.normalizeAnnexBClassRanges(self.arena, raw_src);
         const src = if (unicode) compat_src else try self.regexpSearchInput(compat_src, false);
@@ -7618,7 +7620,7 @@ pub const Interpreter = struct {
         const compiled = try self.arena.create(regex.Regex);
         compiled.* = regex.Regex.compileWithFlags(self.arena, src, cf) catch
             return self.throwError("SyntaxError", "invalid regular expression");
-        o.regex_compiled = @ptrCast(compiled);
+        o.cold.?.regex_compiled = @ptrCast(compiled);
         return compiled;
     }
 
@@ -7647,24 +7649,25 @@ pub const Interpreter = struct {
             const flags_v = if (args.len > 1) args[1] else Value.undef();
             if (pattern_v.isObject() and pattern_v.asObj().is_regex) {
                 if (!flags_v.isUndefined()) return self.throwError("TypeError", "flags supplied with a RegExp pattern");
-                pattern = pattern_v.asObj().regex_source;
-                flags = pattern_v.asObj().regex_flags;
+                pattern = pattern_v.asObj().regexSource();
+                flags = pattern_v.asObj().regexFlags();
             } else {
                 if (!pattern_v.isUndefined()) pattern = try self.toStringV(pattern_v);
                 if (!flags_v.isUndefined()) flags = try self.toStringV(flags_v);
             }
             try self.validateRegExpFlags(flags);
             const source = if (pattern.len == 0) "(?:)" else pattern;
-            const old_source = o.regex_source;
-            const old_flags = o.regex_flags;
-            const old_compiled = o.regex_compiled;
-            o.regex_source = try self.arena.dupe(u8, source);
-            o.regex_flags = try self.arena.dupe(u8, flags);
-            o.regex_compiled = null;
+            const old_source = o.regexSource();
+            const old_flags = o.regexFlags();
+            const old_compiled = o.regexCompiled();
+            const cold = o.cold.?;
+            cold.regex_source = try self.arena.dupe(u8, source);
+            cold.regex_flags = try self.arena.dupe(u8, flags);
+            cold.regex_compiled = null;
             _ = self.compileRegex(o) catch |err| {
-                o.regex_source = old_source;
-                o.regex_flags = old_flags;
-                o.regex_compiled = old_compiled;
+                cold.regex_source = old_source;
+                cold.regex_flags = old_flags;
+                cold.regex_compiled = old_compiled;
                 return err;
             };
             try self.setRegExpLastIndex(o, 0);
@@ -7675,7 +7678,7 @@ pub const Interpreter = struct {
             // RegExpBuiltinExec always reads/coerces `lastIndex`; it only uses it
             // as the search start for global/sticky regexps.
             const li = toLen(try self.toNumberV(try self.getProperty(Value.obj(o), "lastIndex")));
-            const flags = o.regex_flags;
+            const flags = o.regexFlags();
             const global = std.mem.indexOfScalar(u8, flags, 'g') != null;
             const sticky = std.mem.indexOfScalar(u8, flags, 'y') != null;
             const unicode = std.mem.indexOfScalar(u8, flags, 'u') != null or std.mem.indexOfScalar(u8, flags, 'v') != null;
@@ -7722,7 +7725,7 @@ pub const Interpreter = struct {
     fn regexpTestBuiltin(self: *Interpreter, o: *value.Object, input_arg: Value) EvalError!bool {
         const input = try self.toStringV(input_arg);
         const li = toLen(try self.toNumberV(try self.getProperty(Value.obj(o), "lastIndex")));
-        const flags = o.regex_flags;
+        const flags = o.regexFlags();
         const global = std.mem.indexOfScalar(u8, flags, 'g') != null;
         const sticky = std.mem.indexOfScalar(u8, flags, 'y') != null;
         const unicode = std.mem.indexOfScalar(u8, flags, 'u') != null or std.mem.indexOfScalar(u8, flags, 'v') != null;
@@ -9258,7 +9261,7 @@ pub const Interpreter = struct {
                 const ks = symv.asObj().ownKeys(self.arena) catch &.{};
                 for (ks) |k| {
                     const v = symv.asObj().getOwn(k) orelse continue;
-                    if (v.isObject() and v.asObj().is_symbol and std.mem.eql(u8, v.asObj().sym_key, key)) {
+                    if (v.isObject() and v.asObj().is_symbol and std.mem.eql(u8, v.asObj().symbolKey(), key)) {
                         self.symbols.put(self.arena, key, v.asObj()) catch {};
                         return Value.obj(v.asObj());
                     }
@@ -10603,7 +10606,7 @@ pub const Interpreter = struct {
                     // valid; the store happens only if the index is valid after.
                     if (ta.kind.isBigInt()) {
                         const bv = try self.toBigIntValueImpl(v, false);
-                        if (isValidIntegerIndex(ta, n)) value.taWriteBig(ta, @intFromFloat(n), bv.asObj().bigint);
+                        if (isValidIntegerIndex(ta, n)) value.taWriteBig(ta, @intFromFloat(n), bv.asObj().bigIntValue());
                     } else {
                         const num = try self.toNumberV(v);
                         if (isValidIntegerIndex(ta, n)) value.taWrite(ta, @intFromFloat(n), num);
@@ -10622,7 +10625,7 @@ pub const Interpreter = struct {
                     if (!isValidIntegerIndex(rta, n)) return false;
                     if (rta.kind.isBigInt()) {
                         const bv = try self.toBigIntValueImpl(v, false);
-                        value.taWriteBig(rta, @intFromFloat(n), bv.asObj().bigint);
+                        value.taWriteBig(rta, @intFromFloat(n), bv.asObj().bigIntValue());
                     } else {
                         value.taWrite(rta, @intFromFloat(n), try self.toNumberV(v));
                     }
@@ -11091,14 +11094,14 @@ pub const Interpreter = struct {
     pub fn wellKnownSymbolKey(self: *Interpreter, name: []const u8) ?[]const u8 {
         if (wellKnownSymbolHiddenName(name)) |hidden| {
             if (self.env.get(hidden)) |intrinsic| {
-                if (intrinsic.isObject() and intrinsic.asObj().is_symbol) return intrinsic.asObj().sym_key;
+                if (intrinsic.isObject() and intrinsic.asObj().is_symbol) return intrinsic.asObj().symbolKey();
             }
         }
         const sym = self.env.get("Symbol") orelse return null;
         if (!sym.isObject()) return null;
         const it = sym.asObj().getOwn(name) orelse return null;
         if (!it.isObject() or !it.asObj().is_symbol) return null;
-        return it.asObj().sym_key;
+        return it.asObj().symbolKey();
     }
 
     /// SpeciesConstructor(O, defaultConstructor): `O.constructor[Symbol.species]`,
@@ -11424,7 +11427,7 @@ pub const Interpreter = struct {
             // invalid/out-of-bounds index or immutable buffer (a silent no-op,
             // not a throw).
             if (i >= (ta.currentLength() orelse 0) or (ta.buffer.array_buffer.?.immutable and !allow_immutable)) return;
-            value.taWriteBig(ta, i, bv.asObj().bigint);
+            value.taWriteBig(ta, i, bv.asObj().bigIntValue());
         } else {
             const num = try self.toNumberV(v);
             if (i >= (ta.currentLength() orelse 0) or (ta.buffer.array_buffer.?.immutable and !allow_immutable)) return;
@@ -13511,7 +13514,7 @@ pub const Interpreter = struct {
             // expanding `$` substitutions or invoking a function replacer.
             if (!all and arg0(args).isObject() and arg0(args).asObj().is_regex) {
                 const ro = arg0(args).asObj();
-                const g = all or std.mem.indexOfScalar(u8, ro.regex_flags, 'g') != null;
+                const g = all or std.mem.indexOfScalar(u8, ro.regexFlags(), 'g') != null;
                 const re = try self.compileRegex(ro);
                 const template: []const u8 = if (is_func) "" else try self.toStringV(repl_val);
                 var last: usize = 0; // end of the last copied region
@@ -13724,7 +13727,7 @@ pub const Interpreter = struct {
             // RegExpCreate(regexp, "g"), then Invoke(rx, @@matchAll, « S ») so a
             // replaced/deleted RegExp.prototype[@@matchAll] is honoured.
             const src = if (regexp.isObject() and regexp.asObj().is_regex)
-                regexp.asObj().regex_source
+                regexp.asObj().regexSource()
             else if (regexp.isUndefined())
                 ""
             else
@@ -14460,14 +14463,14 @@ pub const Interpreter = struct {
         // arbitrary-precision path. Bitwise ops never overflow and i128's
         // two's-complement matches BigInt's, so they stay on the fast path
         // unless an operand is text-backed.
-        if (lo.bigint_text != null or ro.bigint_text != null)
+        if (lo.bigIntText() != null or ro.bigIntText() != null)
             return self.bigIntBinaryBig(op, lo, ro);
         switch (op) {
             .pow, .shl, .shr => return self.bigIntBinaryBig(op, lo, ro),
             else => {},
         }
-        const a = lo.bigint;
-        const b = ro.bigint;
+        const a = lo.bigIntValue();
+        const b = ro.bigIntValue();
         switch (op) {
             // Arithmetic can overflow i128 even when both operands fit; fall back
             // to the bignum path on overflow so the result is exact.
@@ -15949,7 +15952,7 @@ fn symbolToStringTagKey(self: *Interpreter) ?[]const u8 {
     if (!sym.isObject()) return null;
     const tt = sym.asObj().getOwn("toStringTag") orelse return null;
     if (!tt.isObject() or !tt.asObj().is_symbol) return null;
-    return tt.asObj().sym_key;
+    return tt.asObj().symbolKey();
 }
 
 /// `Error.isError(v)` — true iff `v` is an object with [[ErrorData]], looking
@@ -16137,7 +16140,7 @@ fn symbolToStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const sym = try thisSymbol(self, this, "Symbol.prototype.toString");
-    const ds = sym.sym_desc orelse "";
+    const ds = sym.symbolDescription() orelse "";
     return try Value.strOwned(self.arena, try std.mem.concat(self.arena, u8, &.{ "Symbol(", ds, ")" }));
 }
 
@@ -16155,7 +16158,7 @@ fn symbolDescriptionGetFn(ctx: *anyopaque, this: Value, args: []const Value) val
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const sym = try thisSymbol(self, this, "Symbol.prototype.description");
-    return if (sym.sym_desc) |d| try Value.strAlloc(self.arena, d) else Value.undef();
+    return if (sym.symbolDescription()) |d| try Value.strAlloc(self.arena, d) else Value.undef();
 }
 
 /// `Symbol.prototype[@@toPrimitive]` → the symbol itself (any hint). Lets
@@ -16564,8 +16567,8 @@ fn install262AbstractModuleSource(env: *Environment, rs: *Shape, host: *value.Ob
             const getter = try gc_mod.allocObj(a);
             getter.* = .{ .native = host262AbstractModuleSourceTagGetter };
             try installNativeProps(a, rs, getter, "get [Symbol.toStringTag]", 0);
-            try proto.setAccessor(a, tag.asObj().sym_key, Value.obj(getter), null);
-            try proto.setAttr(a, tag.asObj().sym_key, .{ .enumerable = false, .configurable = true });
+            try proto.setAccessor(a, tag.asObj().symbolKey(), Value.obj(getter), null);
+            try proto.setAttr(a, tag.asObj().symbolKey(), .{ .enumerable = false, .configurable = true });
         };
     };
 
@@ -17060,8 +17063,8 @@ fn bigIntToStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
         if (!(rf >= 2 and rf <= 36)) return self.throwError("RangeError", "toString() radix must be between 2 and 36");
         radix = @intFromFloat(rf);
     }
-    if (big.bigint_text != null and radix == 10) return try Value.strAlloc(self.arena, big.bigint_text.?);
-    if (big.bigint_text != null) {
+    if (big.bigIntText() != null and radix == 10) return try Value.strAlloc(self.arena, big.bigIntText().?);
+    if (big.bigIntText() != null) {
         // Value beyond i128 (radix 10 already returned above via the cached decimal
         // text): reconstruct the bignum and let it format in the requested radix.
         var m = try managedBigIntFromObject(self.arena, big);
@@ -17071,7 +17074,7 @@ fn bigIntToStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
         };
         return try Value.strAlloc(self.arena, s);
     }
-    return try Value.strAlloc(self.arena, try formatBigIntRadix(self.arena, big.bigint, radix));
+    return try Value.strAlloc(self.arena, try formatBigIntRadix(self.arena, big.bigIntValue(), radix));
 }
 
 fn bigIntValueOfFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -17143,13 +17146,13 @@ fn bigVsFiniteF64(arena: std.mem.Allocator, big: *std.math.big.int.Managed, y: f
 
 fn managedBigIntFromObject(arena: std.mem.Allocator, big: *value.Object) error{OutOfMemory}!std.math.big.int.Managed {
     var out = try std.math.big.int.Managed.init(arena);
-    if (big.bigint_text) |s| {
+    if (big.bigIntText()) |s| {
         out.setString(10, s) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => unreachable,
         };
     } else {
-        try out.set(big.bigint);
+        try out.set(big.bigIntValue());
     }
     return out;
 }
@@ -17166,14 +17169,14 @@ fn makeBigIntFromManaged(self: *Interpreter, managed: *const std.math.big.int.Ma
 }
 
 pub fn negateBigIntObject(self: *Interpreter, big: *value.Object) EvalError!Value {
-    if (big.bigint_text == null) return self.makeBigInt(-%big.bigint);
+    if (big.bigIntText() == null) return self.makeBigInt(-%big.bigIntValue());
     var input = try managedBigIntFromObject(self.arena, big);
     input.negate();
     return makeBigIntFromManaged(self, &input);
 }
 
 pub fn bitNotBigIntObject(self: *Interpreter, big: *value.Object) EvalError!Value {
-    if (big.bigint_text == null) return self.makeBigInt(~big.bigint);
+    if (big.bigIntText() == null) return self.makeBigInt(~big.bigIntValue());
     var input = try managedBigIntFromObject(self.arena, big);
     input.negate();
     var out = try std.math.big.int.Managed.init(self.arena);
@@ -17377,7 +17380,7 @@ fn dataViewSetFn(comptime t: DVType) value.NativeFn {
             var big: i128 = 0;
             if (t.big) {
                 const bv = try self.toBigIntValueImpl(val, false);
-                big = bv.asObj().bigint;
+                big = bv.asObj().bigIntValue();
             } else {
                 num = try self.toNumberV(val);
             }
@@ -18518,20 +18521,20 @@ fn installIterator(env: *Environment, rs: *Shape, object_proto: *value.Object) E
     const a = env.arena;
     const sym_iter: ?[]const u8 = blk: {
         if (env.get("Symbol")) |sym| if (sym.isObject()) {
-            if (sym.asObj().getOwn("iterator")) |t| if (t.isObject() and t.asObj().is_symbol) break :blk t.asObj().sym_key;
+            if (sym.asObj().getOwn("iterator")) |t| if (t.isObject() and t.asObj().is_symbol) break :blk t.asObj().symbolKey();
         };
         break :blk null;
     };
     const sym_tag: ?[]const u8 = blk: {
         if (env.get("Symbol")) |sym| if (sym.isObject()) {
-            if (sym.asObj().getOwn("toStringTag")) |t| if (t.isObject() and t.asObj().is_symbol) break :blk t.asObj().sym_key;
+            if (sym.asObj().getOwn("toStringTag")) |t| if (t.isObject() and t.asObj().is_symbol) break :blk t.asObj().symbolKey();
         };
         break :blk null;
     };
 
     const sym_dispose: ?[]const u8 = blk: {
         if (env.get("Symbol")) |sym| if (sym.isObject()) {
-            if (sym.asObj().getOwn("dispose")) |t| if (t.isObject() and t.asObj().is_symbol) break :blk t.asObj().sym_key;
+            if (sym.asObj().getOwn("dispose")) |t| if (t.isObject() and t.asObj().is_symbol) break :blk t.asObj().symbolKey();
         };
         break :blk null;
     };
@@ -18991,19 +18994,19 @@ fn installAsyncIterator(env: *Environment, rs: *Shape, object_proto: *value.Obje
     const a = env.arena;
     const sym_async_iter: ?[]const u8 = blk: {
         if (env.get("Symbol")) |sym| if (sym.isObject()) {
-            if (sym.asObj().getOwn("asyncIterator")) |t| if (t.isObject() and t.asObj().is_symbol) break :blk t.asObj().sym_key;
+            if (sym.asObj().getOwn("asyncIterator")) |t| if (t.isObject() and t.asObj().is_symbol) break :blk t.asObj().symbolKey();
         };
         break :blk null;
     };
     const sym_tag: ?[]const u8 = blk: {
         if (env.get("Symbol")) |sym| if (sym.isObject()) {
-            if (sym.asObj().getOwn("toStringTag")) |t| if (t.isObject() and t.asObj().is_symbol) break :blk t.asObj().sym_key;
+            if (sym.asObj().getOwn("toStringTag")) |t| if (t.isObject() and t.asObj().is_symbol) break :blk t.asObj().symbolKey();
         };
         break :blk null;
     };
     const sym_async_dispose: ?[]const u8 = blk: {
         if (env.get("Symbol")) |sym| if (sym.isObject()) {
-            if (sym.asObj().getOwn("asyncDispose")) |t| if (t.isObject() and t.asObj().is_symbol) break :blk t.asObj().sym_key;
+            if (sym.asObj().getOwn("asyncDispose")) |t| if (t.isObject() and t.asObj().is_symbol) break :blk t.asObj().symbolKey();
         };
         break :blk null;
     };
@@ -19208,7 +19211,7 @@ fn installFunctionKinds(env: *Environment, rs: *Shape) EvalError!void {
     const a = env.arena;
     const sym_tag: ?[]const u8 = blk: {
         if (env.get("Symbol")) |sym| if (sym.isObject()) {
-            if (sym.asObj().getOwn("toStringTag")) |t| if (t.isObject() and t.asObj().is_symbol) break :blk t.asObj().sym_key;
+            if (sym.asObj().getOwn("toStringTag")) |t| if (t.isObject() and t.asObj().is_symbol) break :blk t.asObj().symbolKey();
         };
         break :blk null;
     };
@@ -19279,7 +19282,7 @@ fn finalizationRegistryConstructorFn(ctx: *anyopaque, this: Value, args: []const
     if (!cb.isCallable()) return self.throwError("TypeError", "FinalizationRegistry: cleanup callback must be callable");
     const o = (try self.newObject()).asObj();
     o.is_finalization_registry = true;
-    o.finalization_callback = cb;
+    (try o.ensureCold(self.arena)).finalization_callback = cb;
     if (try self.protoFromCtor("FinalizationRegistry")) |pr| o.setProtoAtomic(pr);
     return Value.obj(o);
 }
@@ -19594,7 +19597,7 @@ fn installDisposableStacks(env: *Environment, rs: *Shape, object_proto: *value.O
     const symKey = struct {
         fn get(s: ?Value, name: []const u8) ?[]const u8 {
             if (s) |sv| if (sv.isObject()) {
-                if (sv.asObj().getOwn(name)) |t| if (t.isObject() and t.asObj().is_symbol) return t.asObj().sym_key;
+                if (sv.asObj().getOwn(name)) |t| if (t.isObject() and t.asObj().is_symbol) return t.asObj().symbolKey();
             };
             return null;
         }
@@ -19662,7 +19665,7 @@ fn installWeakRefAndFinReg(env: *Environment, rs: *Shape, object_proto: *value.O
     const a = env.arena;
     const tt: ?[]const u8 = blk: {
         if (env.get("Symbol")) |sym| if (sym.isObject()) {
-            if (sym.asObj().getOwn("toStringTag")) |t| if (t.isObject() and t.asObj().is_symbol) break :blk t.asObj().sym_key;
+            if (sym.asObj().getOwn("toStringTag")) |t| if (t.isObject() and t.asObj().is_symbol) break :blk t.asObj().symbolKey();
         };
         break :blk null;
     };
@@ -19719,8 +19722,8 @@ fn installDataView(env: *Environment, rs: *Shape, object_proto: *value.Object) E
     // DataView.prototype[Symbol.toStringTag] = "DataView" {configurable}.
     if (env.get("Symbol")) |sym| if (sym.isObject()) {
         if (sym.asObj().getOwn("toStringTag")) |tt| if (tt.isObject() and tt.asObj().is_symbol) {
-            try proto.setOwn(a, rs, tt.asObj().sym_key, Value.str("DataView"));
-            try proto.setAttr(a, tt.asObj().sym_key, .{ .writable = false, .enumerable = false, .configurable = true });
+            try proto.setOwn(a, rs, tt.asObj().symbolKey(), Value.str("DataView"));
+            try proto.setAttr(a, tt.asObj().symbolKey(), .{ .writable = false, .enumerable = false, .configurable = true });
         };
     };
     const ctor = try gc_mod.allocObj(a);
@@ -20368,8 +20371,8 @@ fn taSortCompare(self: *Interpreter, a: Value, b: Value, cmp: Value) EvalError!f
         return if (std.math.isNan(n)) 0 else n;
     }
     if (a.isObject() and a.asObj().is_bigint) {
-        const av = a.asObj().bigint;
-        const bv = b.asObj().bigint;
+        const av = a.asObj().bigIntValue();
+        const bv = b.asObj().bigIntValue();
         return if (av < bv) -1 else if (av > bv) 1 else 0;
     }
     const an = a.asNum();
@@ -23164,12 +23167,12 @@ fn intlServiceConstructorFn(comptime service: []const u8) value.NativeFn {
                 // DefinePropertyOrThrow(this, [[FallbackSymbol]], { value: o,
                 // writable/enumerable/configurable: false }); return this.
                 if (self.env.get("\x00IntlFallbackSym")) |fs| if (fs.isObject()) {
-                    if (ct.getOwn(fs.asObj().sym_key) != null) return self.throwError("TypeError", "Intl." ++ service ++ " already constructed on this object");
+                    if (ct.getOwn(fs.asObj().symbolKey()) != null) return self.throwError("TypeError", "Intl." ++ service ++ " already constructed on this object");
                     // Register the symbol so keyToValue recovers it (with its
                     // description) for getOwnPropertySymbols.
-                    try self.symbols.put(self.arena, fs.asObj().sym_key, fs.asObj());
-                    try ct.setOwn(self.arena, self.root_shape, fs.asObj().sym_key, Value.obj(o));
-                    try ct.setAttr(self.arena, fs.asObj().sym_key, .{ .writable = false, .enumerable = false, .configurable = false });
+                    try self.symbols.put(self.arena, fs.asObj().symbolKey(), fs.asObj());
+                    try ct.setOwn(self.arena, self.root_shape, fs.asObj().symbolKey(), Value.obj(o));
+                    try ct.setAttr(self.arena, fs.asObj().symbolKey(), .{ .writable = false, .enumerable = false, .configurable = false });
                 };
                 return Value.obj(ct);
             }
@@ -23189,7 +23192,7 @@ fn unwrapIntlThis(self: *Interpreter, recv: Value, comptime service: []const u8)
     if (intlBrandOk(recv, service)) return recv;
     if (recv.isObject()) {
         if (self.env.get("\x00IntlFallbackSym")) |fs| if (fs.isObject()) {
-            const inner = try self.getProperty(recv, fs.asObj().sym_key);
+            const inner = try self.getProperty(recv, fs.asObj().symbolKey());
             if (intlBrandOk(inner, service)) return inner;
         };
     }
@@ -25075,7 +25078,7 @@ fn nfFormatRangePartsText(self: *Interpreter, locale: []const u8, xp: []const Nf
 /// Coerce a formatRange argument: a BigInt becomes its numeric value; other
 /// values pass through (nfFormatOne handles numbers and numeric strings).
 fn nfNumericArg(v: Value) Value {
-    if (v.isObject() and v.asObj().is_bigint) return Value.num(@floatFromInt(v.asObj().bigint));
+    if (v.isObject() and v.asObj().is_bigint) return Value.num(@floatFromInt(v.asObj().bigIntValue()));
     return v;
 }
 
@@ -26841,7 +26844,7 @@ fn installIntl(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalE
     const a = env.arena;
     const tag: ?[]const u8 = blk: {
         if (env.get("Symbol")) |sym| if (sym.isObject()) {
-            if (sym.asObj().getOwn("toStringTag")) |t| if (t.isObject() and t.asObj().is_symbol) break :blk t.asObj().sym_key;
+            if (sym.asObj().getOwn("toStringTag")) |t| if (t.isObject() and t.asObj().is_symbol) break :blk t.asObj().symbolKey();
         };
         break :blk null;
     };
@@ -26940,7 +26943,7 @@ fn installIntl(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalE
         seg_proto.* = .{ .proto = object_proto };
         try setNative(a, rs, seg_proto, "containing", 1, intlSegmentsContainingFn);
         const iter_key: ?[]const u8 = blk: {
-            if (env.get("Symbol")) |sym| if (sym.isObject()) if (sym.asObj().getOwn("iterator")) |it| if (it.isObject() and it.asObj().is_symbol) break :blk it.asObj().sym_key;
+            if (env.get("Symbol")) |sym| if (sym.isObject()) if (sym.asObj().getOwn("iterator")) |it| if (it.isObject() and it.asObj().is_symbol) break :blk it.asObj().symbolKey();
             break :blk null;
         };
         if (iter_key) |sk| {
@@ -27370,7 +27373,7 @@ fn atomicsValidate(self: *Interpreter, ta_v: Value, idx_v: Value, write: bool, o
 fn atomicsCoerce(self: *Interpreter, ta: *value.TypedArrayData, v: Value) value.HostError!f64 {
     if (ta.kind.isBigInt()) {
         const bv = try self.toBigIntValueImpl(v, false);
-        return @floatFromInt(@as(i64, @truncate(bv.asObj().bigint)));
+        return @floatFromInt(@as(i64, @truncate(bv.asObj().bigIntValue())));
     }
     // ToIntegerOrInfinity: NaN coerces to +0 and -0 normalizes to +0 (so the
     // value `Atomics.store` returns matches ToInteger, e.g. store(view,i,-0)===+0).
@@ -27394,7 +27397,7 @@ fn atomicsWriteN(ta: *value.TypedArrayData, i: usize, n: f64) void {
 fn atomicsCoerceRaw(self: *Interpreter, ta: *value.TypedArrayData, v: Value) value.HostError!u64 {
     if (ta.kind.isBigInt()) {
         const bv = try self.toBigIntValueImpl(v, false);
-        return @bitCast(@as(i64, @truncate(bv.asObj().bigint)));
+        return @bitCast(@as(i64, @truncate(bv.asObj().bigIntValue())));
     }
     return value.taNumToRaw(ta.kind, try atomicsCoerce(self, ta, v));
 }
@@ -27469,7 +27472,7 @@ fn atomicsStoreFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
     const arg_v = if (args.len > 2) args[2] else Value.undef();
     if (vd.ta.kind.isBigInt()) {
         const bv = try self.toBigIntValueImpl(arg_v, false);
-        const as64: i64 = @truncate(bv.asObj().bigint);
+        const as64: i64 = @truncate(bv.asObj().bigIntValue());
         try atomicsRevalidate(self, vd.ta, vd.i); // the value coercion may have detached the buffer
         value.taAtomicStoreRaw(vd.ta, vd.i, @bitCast(as64));
         return self.makeBigInt(as64);
@@ -28325,12 +28328,12 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
         const fnobj = try gc_mod.allocObj(a);
         fnobj.* = .{ .native = symbolToPrimitiveFn };
         try installNativeProps(a, root_shape, fnobj, "[Symbol.toPrimitive]", 1);
-        try symbol_proto.setOwn(a, root_shape, tp.asObj().sym_key, Value.obj(fnobj));
-        try symbol_proto.setAttr(a, tp.asObj().sym_key, .{ .writable = false, .enumerable = false, .configurable = true });
+        try symbol_proto.setOwn(a, root_shape, tp.asObj().symbolKey(), Value.obj(fnobj));
+        try symbol_proto.setAttr(a, tp.asObj().symbolKey(), .{ .writable = false, .enumerable = false, .configurable = true });
     };
     if (symbol_ns.getOwn("toStringTag")) |tst| if (tst.isObject()) {
-        try symbol_proto.setOwn(a, root_shape, tst.asObj().sym_key, Value.str("Symbol"));
-        try symbol_proto.setAttr(a, tst.asObj().sym_key, .{ .writable = false, .enumerable = false, .configurable = true });
+        try symbol_proto.setOwn(a, root_shape, tst.asObj().symbolKey(), Value.str("Symbol"));
+        try symbol_proto.setAttr(a, tst.asObj().symbolKey(), .{ .writable = false, .enumerable = false, .configurable = true });
     };
     // Array.prototype[@@unscopables]: a null-prototype object whose own data
     // properties (all `true`) hide the post-ES2015 method names from `with` scope.
@@ -28340,8 +28343,8 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
         inline for (.{ "at", "copyWithin", "entries", "fill", "find", "findIndex", "findLast", "findLastIndex", "flat", "flatMap", "includes", "keys", "toReversed", "toSorted", "toSpliced", "values" }) |n| {
             try unsc.setOwn(a, root_shape, n, Value.boolVal(true));
         }
-        try array_proto.setOwn(a, root_shape, usk.asObj().sym_key, Value.obj(unsc));
-        try array_proto.setAttr(a, usk.asObj().sym_key, .{ .writable = false, .enumerable = false, .configurable = true });
+        try array_proto.setOwn(a, root_shape, usk.asObj().symbolKey(), Value.obj(unsc));
+        try array_proto.setAttr(a, usk.asObj().symbolKey(), .{ .writable = false, .enumerable = false, .configurable = true });
     };
     try env.put("Symbol", Value.obj(symbol_ns));
 
@@ -28350,15 +28353,15 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     math_obj.setProtoAtomic(object_proto);
     json_ns.setProtoAtomic(object_proto);
     if (symbol_ns.getOwn("toStringTag")) |mtt| if (mtt.isObject() and mtt.asObj().is_symbol) {
-        try math_obj.setOwn(a, root_shape, mtt.asObj().sym_key, Value.str("Math"));
-        try math_obj.setAttr(a, mtt.asObj().sym_key, .{ .writable = false, .enumerable = false, .configurable = true });
+        try math_obj.setOwn(a, root_shape, mtt.asObj().symbolKey(), Value.str("Math"));
+        try math_obj.setAttr(a, mtt.asObj().symbolKey(), .{ .writable = false, .enumerable = false, .configurable = true });
     };
 
     // `Symbol.toStringTag` on the collection prototypes ({!w,!e,c}), so
     // `Map.prototype[Symbol.toStringTag] === "Map"` etc. and a subclass's
     // `Object.prototype.toString` reports the right tag.
     if (symbol_ns.getOwn("toStringTag")) |stt| if (stt.isObject() and stt.asObj().is_symbol) {
-        const tk = stt.asObj().sym_key;
+        const tk = stt.asObj().symbolKey();
         inline for (.{ "Map", "Set", "WeakMap", "WeakSet", "Promise" }) |nm| {
             if (env.get(nm)) |cv| if (cv.isObject()) if (cv.asObj().getOwn("prototype")) |pv| if (pv.isObject()) {
                 try pv.asObj().setOwn(a, root_shape, tk, try Value.strAlloc(a, nm));
@@ -28370,12 +28373,12 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     // Function.prototype[Symbol.hasInstance] — a {!w,!e,!c} method backing the
     // ordinary `instanceof` (installed now that the well-known symbol exists).
     if (symbol_ns.getOwn("hasInstance")) |hi| if (hi.isObject()) {
-        if (func_proto.getOwn(hi.asObj().sym_key) == null) {
+        if (func_proto.getOwn(hi.asObj().symbolKey()) == null) {
             const m = try gc_mod.allocObj(a);
             m.* = .{ .native = functionHasInstanceFn };
             try installNativeProps(a, root_shape, m, "[Symbol.hasInstance]", 1);
-            try func_proto.setOwn(a, root_shape, hi.asObj().sym_key, Value.obj(m));
-            try func_proto.setAttr(a, hi.asObj().sym_key, .{ .writable = false, .enumerable = false, .configurable = false });
+            try func_proto.setOwn(a, root_shape, hi.asObj().symbolKey(), Value.obj(m));
+            try func_proto.setAttr(a, hi.asObj().symbolKey(), .{ .writable = false, .enumerable = false, .configurable = false });
         }
     };
 
@@ -28384,7 +28387,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     // constructor the spec gives a species slot, now that the well-known symbol
     // and the constructors all exist. {enumerable:false, configurable:true}.
     if (symbol_ns.getOwn("species")) |sp| if (sp.isObject()) {
-        const skey = sp.asObj().sym_key;
+        const skey = sp.asObj().symbolKey();
         inline for (.{ "Promise", "Array", "Map", "Set", "RegExp", "ArrayBuffer" }) |ctor_name| {
             if (env.get(ctor_name)) |cv| if (cv.isObject()) {
                 const getter = try gc_mod.allocObj(a);
@@ -28403,7 +28406,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
             inline for (.{ "match", "search", "matchAll", "replace", "split" }) |op| {
                 if (symbol_ns.getOwn(op)) |sv| if (sv.isObject() and sv.asObj().is_symbol) {
                     const len: usize = if (comptime (std.mem.eql(u8, op, "replace") or std.mem.eql(u8, op, "split"))) 2 else 1;
-                    try installSymbolMethod(a, root_shape, rp.asObj(), sv.asObj().sym_key, "[Symbol." ++ op ++ "]", len, regexpSymbolMethod(op));
+                    try installSymbolMethod(a, root_shape, rp.asObj(), sv.asObj().symbolKey(), "[Symbol." ++ op ++ "]", len, regexpSymbolMethod(op));
                 };
             }
         };
@@ -28422,13 +28425,13 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     // `Symbol.toStringTag` of "Reflect".
     reflect_ns.* = .{ .proto = object_proto };
     if (symbol_ns.getOwn("toStringTag")) |rtt| if (rtt.isObject() and rtt.asObj().is_symbol) {
-        try reflect_ns.setOwn(a, root_shape, rtt.asObj().sym_key, Value.str("Reflect"));
-        try reflect_ns.setAttr(a, rtt.asObj().sym_key, .{ .writable = false, .enumerable = false, .configurable = true });
+        try reflect_ns.setOwn(a, root_shape, rtt.asObj().symbolKey(), Value.str("Reflect"));
+        try reflect_ns.setAttr(a, rtt.asObj().symbolKey(), .{ .writable = false, .enumerable = false, .configurable = true });
         // The JSON and Math namespaces carry the same non-enumerable tag.
         inline for (.{ .{ "JSON", "JSON" }, .{ "Math", "Math" } }) |nt| {
             if (env.get(nt[0])) |nv| if (nv.isObject()) {
-                try nv.asObj().setOwn(a, root_shape, rtt.asObj().sym_key, try Value.strAlloc(a, nt[1]));
-                try nv.asObj().setAttr(a, rtt.asObj().sym_key, .{ .writable = false, .enumerable = false, .configurable = true });
+                try nv.asObj().setOwn(a, root_shape, rtt.asObj().symbolKey(), try Value.strAlloc(a, nt[1]));
+                try nv.asObj().setAttr(a, rtt.asObj().symbolKey(), .{ .writable = false, .enumerable = false, .configurable = true });
             };
         }
     };
@@ -28454,16 +28457,16 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     if (symbol_ns.getOwn("iterator")) |it_sym| {
         if (it_sym.isObject() and it_sym.asObj().is_symbol) {
             const it_fn = array_proto.getOwn("values") orelse Value.undef();
-            try array_proto.setOwn(a, root_shape, it_sym.asObj().sym_key, it_fn);
-            try array_proto.setAttr(a, it_sym.asObj().sym_key, .{ .writable = true, .enumerable = false, .configurable = true });
+            try array_proto.setOwn(a, root_shape, it_sym.asObj().symbolKey(), it_fn);
+            try array_proto.setAttr(a, it_sym.asObj().symbolKey(), .{ .writable = true, .enumerable = false, .configurable = true });
             // `String.prototype[Symbol.iterator]` — a String Iterator over the
             // ToString of `this` (so `""[Symbol.iterator]()`, for-of, and spread
             // over a string all obtain a real %StringIteratorPrototype% iterator).
             const str_it = try gc_mod.allocObj(a);
             str_it.* = .{ .native = stringIteratorFn };
             try installFunctionProps(a, root_shape, str_it, &.{}, "[Symbol.iterator]");
-            try string_proto.setOwn(a, root_shape, it_sym.asObj().sym_key, Value.obj(str_it));
-            try string_proto.setAttr(a, it_sym.asObj().sym_key, .{ .writable = true, .enumerable = false, .configurable = true });
+            try string_proto.setOwn(a, root_shape, it_sym.asObj().symbolKey(), Value.obj(str_it));
+            try string_proto.setAttr(a, it_sym.asObj().symbolKey(), .{ .writable = true, .enumerable = false, .configurable = true });
         }
     }
     // `Map.prototype[Symbol.iterator]` aliases `entries`, and `Set.prototype[
@@ -28515,8 +28518,8 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
             const m = try gc_mod.allocObj(a);
             m.* = .{ .native = dateSymbolToPrimitiveFn };
             try installNativeProps(a, root_shape, m, "[Symbol.toPrimitive]", 1);
-            try date_proto.setOwn(a, root_shape, tp.asObj().sym_key, Value.obj(m));
-            try date_proto.setAttr(a, tp.asObj().sym_key, .{ .writable = false, .enumerable = false, .configurable = true });
+            try date_proto.setOwn(a, root_shape, tp.asObj().symbolKey(), Value.obj(m));
+            try date_proto.setAttr(a, tp.asObj().symbolKey(), .{ .writable = false, .enumerable = false, .configurable = true });
         };
     };
     try date_ns.setOwn(a, root_shape, "prototype", Value.obj(date_proto));
@@ -28539,8 +28542,8 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
         // `Object.prototype.toString.call(1n)` → "[object BigInt]").
         if (env.get("Symbol")) |sym| if (sym.isObject()) {
             if (sym.asObj().getOwn("toStringTag")) |tt| if (tt.isObject() and tt.asObj().is_symbol) {
-                try bi_proto.setOwn(a, root_shape, tt.asObj().sym_key, Value.str("BigInt"));
-                try bi_proto.setAttr(a, tt.asObj().sym_key, .{ .writable = false, .enumerable = false, .configurable = true });
+                try bi_proto.setOwn(a, root_shape, tt.asObj().symbolKey(), Value.str("BigInt"));
+                try bi_proto.setAttr(a, tt.asObj().symbolKey(), .{ .writable = false, .enumerable = false, .configurable = true });
             };
         };
         const bi_ns = try gc_mod.allocObj(a);
@@ -29372,7 +29375,7 @@ fn regexFlagGetter(comptime flag: u8) value.NativeFn {
                 if (isHomeRegExpProto(self, o)) return Value.undef();
                 return throwRegExpAccessorTypeError(self, "RegExp.prototype accessor called on a non-RegExp");
             }
-            return Value.boolVal(std.mem.indexOfScalar(u8, o.regex_flags, flag) != null);
+            return Value.boolVal(std.mem.indexOfScalar(u8, o.regexFlags(), flag) != null);
         }
     }.call;
 }
@@ -29386,7 +29389,7 @@ fn regexSourceGetter(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
         if (isHomeRegExpProto(self, o)) return Value.str("(?:)");
         return throwRegExpAccessorTypeError(self, "RegExp.prototype.source called on a non-RegExp");
     }
-    return try Value.strAlloc(self.arena, try escapeRegexSource(self.arena, o.regex_source));
+    return try Value.strAlloc(self.arena, try escapeRegexSource(self.arena, o.regexSource()));
 }
 
 fn regexFlagsGetter(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -29633,8 +29636,8 @@ fn installTypedArrays(env: *Environment, rs: *Shape) EvalError!void {
     try setNativeGetter(a, rs, ab_proto, "immutable", arrayBufferGetter(.immutable));
     if (env.get("Symbol")) |sym| if (sym.isObject()) {
         if (sym.asObj().getOwn("toStringTag")) |tt| if (tt.isObject() and tt.asObj().is_symbol) {
-            try ab_proto.setOwn(a, rs, tt.asObj().sym_key, Value.str("ArrayBuffer"));
-            try ab_proto.setAttr(a, tt.asObj().sym_key, .{ .writable = false, .enumerable = false, .configurable = true });
+            try ab_proto.setOwn(a, rs, tt.asObj().symbolKey(), Value.str("ArrayBuffer"));
+            try ab_proto.setAttr(a, tt.asObj().symbolKey(), .{ .writable = false, .enumerable = false, .configurable = true });
         };
     };
     const ab_ctor = try gc_mod.allocObj(a);
@@ -29651,8 +29654,8 @@ fn installTypedArrays(env: *Environment, rs: *Shape) EvalError!void {
             const g = try gc_mod.allocObj(a);
             g.* = .{ .native = returnThisFn };
             try installNativeProps(a, rs, g, "get [Symbol.species]", 0);
-            try ab_ctor.setAccessor(a, sp.asObj().sym_key, Value.obj(g), null);
-            try ab_ctor.setAttr(a, sp.asObj().sym_key, .{ .enumerable = false, .configurable = true });
+            try ab_ctor.setAccessor(a, sp.asObj().symbolKey(), Value.obj(g), null);
+            try ab_ctor.setAttr(a, sp.asObj().symbolKey(), .{ .enumerable = false, .configurable = true });
         };
     };
     try env.put("ArrayBuffer", Value.obj(ab_ctor));
@@ -29694,13 +29697,13 @@ fn installTypedArrays(env: *Environment, rs: *Shape) EvalError!void {
             const g = try gc_mod.allocObj(a);
             g.* = .{ .native = taProtoGetter(.tag) };
             try installNativeProps(a, rs, g, "get [Symbol.toStringTag]", 0);
-            try ta_proto.setAccessor(a, tt.asObj().sym_key, Value.obj(g), null);
-            try ta_proto.setAttr(a, tt.asObj().sym_key, .{ .enumerable = false, .configurable = true });
+            try ta_proto.setAccessor(a, tt.asObj().symbolKey(), Value.obj(g), null);
+            try ta_proto.setAttr(a, tt.asObj().symbolKey(), .{ .enumerable = false, .configurable = true });
         };
         if (sym.asObj().getOwn("iterator")) |it| if (it.isObject() and it.asObj().is_symbol) {
             const values_fn = ta_proto.getOwn("values") orelse Value.undef();
-            try ta_proto.setOwn(a, rs, it.asObj().sym_key, values_fn);
-            try ta_proto.setAttr(a, it.asObj().sym_key, .{ .writable = true, .enumerable = false, .configurable = true });
+            try ta_proto.setOwn(a, rs, it.asObj().symbolKey(), values_fn);
+            try ta_proto.setAttr(a, it.asObj().symbolKey(), .{ .writable = true, .enumerable = false, .configurable = true });
         };
     };
 
@@ -29721,8 +29724,8 @@ fn installTypedArrays(env: *Environment, rs: *Shape) EvalError!void {
             const g = try gc_mod.allocObj(a);
             g.* = .{ .native = returnThisFn };
             try installNativeProps(a, rs, g, "get [Symbol.species]", 0);
-            try ta_ctor.setAccessor(a, sp.asObj().sym_key, Value.obj(g), null);
-            try ta_ctor.setAttr(a, sp.asObj().sym_key, .{ .enumerable = false, .configurable = true });
+            try ta_ctor.setAccessor(a, sp.asObj().symbolKey(), Value.obj(g), null);
+            try ta_ctor.setAttr(a, sp.asObj().symbolKey(), .{ .enumerable = false, .configurable = true });
         };
     };
 
@@ -29786,8 +29789,8 @@ fn installTypedArrays(env: *Environment, rs: *Shape) EvalError!void {
         try setNativeWithData(a, rs, proto, "importValue", 2, shadowRealmImportValueFn, @ptrCast(env));
         if (env.get("Symbol")) |sym| if (sym.isObject()) {
             if (sym.asObj().getOwn("toStringTag")) |tt| if (tt.isObject() and tt.asObj().is_symbol) {
-                try proto.setOwn(a, rs, tt.asObj().sym_key, Value.str("ShadowRealm"));
-                try proto.setAttr(a, tt.asObj().sym_key, .{ .writable = false, .enumerable = false, .configurable = true });
+                try proto.setOwn(a, rs, tt.asObj().symbolKey(), Value.str("ShadowRealm"));
+                try proto.setAttr(a, tt.asObj().symbolKey(), .{ .writable = false, .enumerable = false, .configurable = true });
             };
         };
         const ctor = try gc_mod.allocObj(a);
@@ -35355,10 +35358,10 @@ fn checkPlainDateTimeNs(self: *Interpreter, ns: i128) EvalError!void {
 fn checkedEpochNsFromBigInt(self: *Interpreter, v: Value) EvalError!i128 {
     const bv = try self.toBigIntValueImpl(v, false);
     const big = bv.asObj();
-    if (big.bigint_text != null)
+    if (big.bigIntText() != null)
         return self.throwError("RangeError", "epoch nanoseconds out of range");
-    try checkInstantEpochNs(self, big.bigint);
-    return big.bigint;
+    try checkInstantEpochNs(self, big.bigIntValue());
+    return big.bigIntValue();
 }
 
 fn makeInstantFromEpochNs(self: *Interpreter, ns: i128) EvalError!*value.Object {
@@ -38482,7 +38485,7 @@ fn installTemporal(env: *Environment, rs: *Shape, object_proto: *value.Object) E
     const a = env.arena;
     const tag: ?[]const u8 = blk: {
         if (env.get("Symbol")) |sym| if (sym.isObject()) {
-            if (sym.asObj().getOwn("toStringTag")) |t| if (t.isObject() and t.asObj().is_symbol) break :blk t.asObj().sym_key;
+            if (sym.asObj().getOwn("toStringTag")) |t| if (t.isObject() and t.asObj().is_symbol) break :blk t.asObj().symbolKey();
         };
         break :blk null;
     };
@@ -38859,7 +38862,7 @@ fn installDOMException(env: *Environment, rs: *Shape, object_proto: *value.Objec
     };
     const sym_tag: ?[]const u8 = blk: {
         if (env.get("Symbol")) |sym| if (sym.isObject()) {
-            if (sym.asObj().getOwn("toStringTag")) |t| if (t.isObject() and t.asObj().is_symbol) break :blk t.asObj().sym_key;
+            if (sym.asObj().getOwn("toStringTag")) |t| if (t.isObject() and t.asObj().is_symbol) break :blk t.asObj().symbolKey();
         };
         break :blk null;
     };
@@ -39011,7 +39014,7 @@ fn installTextEncoder(env: *Environment, rs: *Shape, object_proto: *value.Object
     const a = env.arena;
     const sym_tag: ?[]const u8 = blk: {
         if (env.get("Symbol")) |sym| if (sym.isObject()) {
-            if (sym.asObj().getOwn("toStringTag")) |t| if (t.isObject() and t.asObj().is_symbol) break :blk t.asObj().sym_key;
+            if (sym.asObj().getOwn("toStringTag")) |t| if (t.isObject() and t.asObj().is_symbol) break :blk t.asObj().symbolKey();
         };
         break :blk null;
     };
@@ -39194,7 +39197,7 @@ fn installTextDecoder(env: *Environment, rs: *Shape, object_proto: *value.Object
     const a = env.arena;
     const sym_tag: ?[]const u8 = blk: {
         if (env.get("Symbol")) |sym| if (sym.isObject()) {
-            if (sym.asObj().getOwn("toStringTag")) |t| if (t.isObject() and t.asObj().is_symbol) break :blk t.asObj().sym_key;
+            if (sym.asObj().getOwn("toStringTag")) |t| if (t.isObject() and t.asObj().is_symbol) break :blk t.asObj().symbolKey();
         };
         break :blk null;
     };
@@ -40116,7 +40119,7 @@ fn installEventTarget(env: *Environment, rs: *Shape, object_proto: *value.Object
     const symKey = struct {
         fn f(e: *Environment, name: []const u8) ?[]const u8 {
             if (e.get("Symbol")) |s| if (s.isObject()) {
-                if (s.asObj().getOwn(name)) |t| if (t.isObject() and t.asObj().is_symbol) return t.asObj().sym_key;
+                if (s.asObj().getOwn(name)) |t| if (t.isObject() and t.asObj().is_symbol) return t.asObj().symbolKey();
             };
             return null;
         }
@@ -40368,7 +40371,7 @@ fn installAbort(env: *Environment, rs: *Shape, object_proto: *value.Object) Eval
     const symKey = struct {
         fn f(e: *Environment, name: []const u8) ?[]const u8 {
             if (e.get("Symbol")) |s| if (s.isObject()) {
-                if (s.asObj().getOwn(name)) |t| if (t.isObject() and t.asObj().is_symbol) return t.asObj().sym_key;
+                if (s.asObj().getOwn(name)) |t| if (t.isObject() and t.asObj().is_symbol) return t.asObj().symbolKey();
             };
             return null;
         }
@@ -40436,7 +40439,7 @@ fn installURL(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalEr
     const symKey = struct {
         fn f(e: *Environment, name: []const u8) ?[]const u8 {
             if (e.get("Symbol")) |s| if (s.isObject()) {
-                if (s.asObj().getOwn(name)) |t| if (t.isObject() and t.asObj().is_symbol) return t.asObj().sym_key;
+                if (s.asObj().getOwn(name)) |t| if (t.isObject() and t.asObj().is_symbol) return t.asObj().symbolKey();
             };
             return null;
         }
@@ -40758,7 +40761,7 @@ fn installURLSearchParams(env: *Environment, rs: *Shape, object_proto: *value.Ob
     const sym = struct {
         fn key(e: *Environment, name: []const u8) ?[]const u8 {
             if (e.get("Symbol")) |s| if (s.isObject()) {
-                if (s.asObj().getOwn(name)) |t| if (t.isObject() and t.asObj().is_symbol) return t.asObj().sym_key;
+                if (s.asObj().getOwn(name)) |t| if (t.isObject() and t.asObj().is_symbol) return t.asObj().symbolKey();
             };
             return null;
         }
@@ -41026,7 +41029,7 @@ fn installHeaders(env: *Environment, rs: *Shape, object_proto: *value.Object) Ev
     const symKey = struct {
         fn f(e: *Environment, name: []const u8) ?[]const u8 {
             if (e.get("Symbol")) |s| if (s.isObject()) {
-                if (s.asObj().getOwn(name)) |t| if (t.isObject() and t.asObj().is_symbol) return t.asObj().sym_key;
+                if (s.asObj().getOwn(name)) |t| if (t.isObject() and t.asObj().is_symbol) return t.asObj().symbolKey();
             };
             return null;
         }
@@ -41189,7 +41192,7 @@ fn installFormData(env: *Environment, rs: *Shape, object_proto: *value.Object) E
     const symKey = struct {
         fn f(e: *Environment, name: []const u8) ?[]const u8 {
             if (e.get("Symbol")) |s| if (s.isObject()) {
-                if (s.asObj().getOwn(name)) |t| if (t.isObject() and t.asObj().is_symbol) return t.asObj().sym_key;
+                if (s.asObj().getOwn(name)) |t| if (t.isObject() and t.asObj().is_symbol) return t.asObj().symbolKey();
             };
             return null;
         }
@@ -41375,7 +41378,7 @@ fn installBlob(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalE
     const symKey = struct {
         fn f(e: *Environment, name: []const u8) ?[]const u8 {
             if (e.get("Symbol")) |s| if (s.isObject()) {
-                if (s.asObj().getOwn(name)) |t| if (t.isObject() and t.asObj().is_symbol) return t.asObj().sym_key;
+                if (s.asObj().getOwn(name)) |t| if (t.isObject() and t.asObj().is_symbol) return t.asObj().symbolKey();
             };
             return null;
         }
@@ -41760,7 +41763,7 @@ fn installFetchTypes(env: *Environment, rs: *Shape, object_proto: *value.Object)
     const symKey = struct {
         fn f(e: *Environment, name: []const u8) ?[]const u8 {
             if (e.get("Symbol")) |s| if (s.isObject()) {
-                if (s.asObj().getOwn(name)) |t| if (t.isObject() and t.asObj().is_symbol) return t.asObj().sym_key;
+                if (s.asObj().getOwn(name)) |t| if (t.isObject() and t.asObj().is_symbol) return t.asObj().symbolKey();
             };
             return null;
         }
@@ -41884,8 +41887,8 @@ fn installCrypto(env: *Environment, rs: *Shape, object_proto: *value.Object) Eva
     try setNative(a, rs, crypto, "randomUUID", 0, cryptoRandomUUIDFn);
     if (env.get("Symbol")) |sym| if (sym.isObject()) {
         if (sym.asObj().getOwn("toStringTag")) |t| if (t.isObject() and t.asObj().is_symbol) {
-            try crypto.setOwn(a, rs, t.asObj().sym_key, Value.str("Crypto"));
-            try crypto.setAttr(a, t.asObj().sym_key, .{ .writable = false, .enumerable = false, .configurable = true });
+            try crypto.setOwn(a, rs, t.asObj().symbolKey(), Value.str("Crypto"));
+            try crypto.setAttr(a, t.asObj().symbolKey(), .{ .writable = false, .enumerable = false, .configurable = true });
         };
     };
     try env.put("crypto", Value.obj(crypto));
@@ -41895,13 +41898,13 @@ fn installSharedArrayBufferAndAtomics(env: *Environment, rs: *Shape, object_prot
     const a = env.arena;
     const sym_tag: ?[]const u8 = blk: {
         if (env.get("Symbol")) |sym| if (sym.isObject()) {
-            if (sym.asObj().getOwn("toStringTag")) |t| if (t.isObject() and t.asObj().is_symbol) break :blk t.asObj().sym_key;
+            if (sym.asObj().getOwn("toStringTag")) |t| if (t.isObject() and t.asObj().is_symbol) break :blk t.asObj().symbolKey();
         };
         break :blk null;
     };
     const sym_species: ?[]const u8 = blk: {
         if (env.get("Symbol")) |sym| if (sym.isObject()) {
-            if (sym.asObj().getOwn("species")) |t| if (t.isObject() and t.asObj().is_symbol) break :blk t.asObj().sym_key;
+            if (sym.asObj().getOwn("species")) |t| if (t.isObject() and t.asObj().is_symbol) break :blk t.asObj().symbolKey();
         };
         break :blk null;
     };
@@ -42017,8 +42020,8 @@ fn aliasIteratorToMethod(a: std.mem.Allocator, rs: *Shape, env: *Environment, pr
     const itv = symv.asObj().getOwn("iterator") orelse return;
     if (!itv.isObject() or !itv.asObj().is_symbol) return;
     const fn_v = proto.getOwn(method) orelse return;
-    try proto.setOwn(a, rs, itv.asObj().sym_key, fn_v);
-    try proto.setAttr(a, itv.asObj().sym_key, .{ .writable = true, .enumerable = false, .configurable = true });
+    try proto.setOwn(a, rs, itv.asObj().symbolKey(), fn_v);
+    try proto.setAttr(a, itv.asObj().symbolKey(), .{ .writable = true, .enumerable = false, .configurable = true });
 }
 
 fn mintUniqueAtomicSerial(comptime T: type, counter: *std.atomic.Value(T)) error{OutOfMemory}!T {
@@ -42050,9 +42053,13 @@ var symbol_counter = std.atomic.Value(usize).init(0);
 fn makeSymbolObj(a: std.mem.Allocator, rs: *Shape, desc: ?[]const u8, proto: ?*value.Object) EvalError!Value {
     _ = rs;
     const o = try gc_mod.allocObj(a);
-    o.* = .{ .is_symbol = true, .proto = proto, .sym_desc = desc };
+    o.* = .{
+        .is_symbol = true,
+        .proto = proto,
+        .primitive = .{ .symbol = .{ .description = .init(desc) } },
+    };
     const n = try mintUniqueAtomicSerial(usize, &symbol_counter);
-    o.sym_key = try std.fmt.allocPrint(a, "\x00s{d}", .{n});
+    o.primitive.symbol.key = .init(try std.fmt.allocPrint(a, "\x00s{d}", .{n}));
     return Value.obj(o);
 }
 
@@ -42583,29 +42590,31 @@ pub fn hasProperty(o: *value.Object, name: []const u8) bool {
 /// The parameter name a mapped-arguments index aliases, or null if `o` is not a
 /// mapped arguments object or index `i` is unmapped (out of range / severed).
 pub fn argMapName(o: *value.Object, i: usize) ?[]const u8 {
-    if (o.arg_map_env == null or i >= o.arg_map_names.len) return null;
-    if (i < o.arg_map_severed.len and o.arg_map_severed[i].load(.acquire)) return null;
-    const nm = o.arg_map_names[i];
+    const cold = o.cold orelse return null;
+    if (cold.arg_map_env == null or i >= cold.arg_map_names.len) return null;
+    if (i < cold.arg_map_severed.len and cold.arg_map_severed[i].load(.acquire)) return null;
+    const nm = cold.arg_map_names[i];
     return if (nm.len == 0) null else nm;
 }
 
 /// Atomically sever a mapped-arguments index from its parameter binding.
 pub fn argMapSever(o: *value.Object, i: usize) void {
-    if (i >= o.arg_map_severed.len) return;
-    o.arg_map_severed[i].store(true, .release);
+    const cold = o.cold orelse return;
+    if (i >= cold.arg_map_severed.len) return;
+    cold.arg_map_severed[i].store(true, .release);
 }
 
 /// Read a mapped index's parameter binding (null if unmapped).
 pub fn argMapGet(o: *value.Object, i: usize) ?Value {
     const nm = argMapName(o, i) orelse return null;
-    const env: *Environment = @ptrCast(@alignCast(o.arg_map_env.?));
+    const env: *Environment = @ptrCast(@alignCast(o.cold.?.arg_map_env.?));
     return env.getLocal(nm);
 }
 
 /// Write a mapped index's parameter binding.
 pub fn argMapSet(o: *value.Object, i: usize, v: Value) void {
     const nm = argMapName(o, i) orelse return;
-    const env: *Environment = @ptrCast(@alignCast(o.arg_map_env.?));
+    const env: *Environment = @ptrCast(@alignCast(o.cold.?.arg_map_env.?));
     _ = env.assignLocal(nm, v);
 }
 

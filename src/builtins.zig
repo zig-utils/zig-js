@@ -69,7 +69,7 @@ pub fn stringFn(ctx: *anyopaque, this: Value, args: []const Value) HostError!Val
         // any other case ToString (toStringV, running @@toPrimitive/toString/
         // valueOf and throwing for a Symbol under `new String(sym)`).
         if (ip.new_target.isUndefined() and args[0].isObject() and args[0].asObj().is_symbol)
-            break :blk try std.fmt.allocPrint(ip.arena, "Symbol({s})", .{args[0].asObj().sym_desc orelse ""});
+            break :blk try std.fmt.allocPrint(ip.arena, "Symbol({s})", .{args[0].asObj().symbolDescription() orelse ""});
         break :blk try ip.toStringV(args[0]);
     };
     if (!ip.new_target.isUndefined()) return ip.makeWrapper(try Value.strAlloc(ip.arena, s));
@@ -1431,8 +1431,8 @@ pub fn regExpFn(ctx: *anyopaque, this: Value, args: []const Value) HostError!Val
     var internal_pattern: ?[]const u8 = null;
     var internal_flags: ?[]const u8 = null;
     if (a0.isObject() and a0.asObj().is_regex) {
-        internal_pattern = a0.asObj().regex_source;
-        internal_flags = a0.asObj().regex_flags;
+        internal_pattern = a0.asObj().regexSource();
+        internal_flags = a0.asObj().regexFlags();
     }
 
     if (!self.new_target.isUndefined()) _ = try self.regexpPrototypeFromNewTarget();

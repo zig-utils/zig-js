@@ -362,12 +362,12 @@ const Serializer = struct {
     fn serObject(s: *Serializer, o: *value.Object, depth: u16) HostError!void {
         // BigInts are JS *values*: no identity to preserve, no memo entry.
         if (o.is_bigint) {
-            if (o.bigint_text) |t| {
+            if (o.bigIntText()) |t| {
                 try s.w.tag(.bigint_text);
                 try s.writeStr(t);
             } else {
                 try s.w.tag(.bigint);
-                try s.w.int(i128, o.bigint);
+                try s.w.int(i128, o.bigIntValue());
             }
             return;
         }
@@ -451,8 +451,8 @@ const Serializer = struct {
         }
         if (o.is_regex) {
             try s.w.tag(.regexp);
-            try s.writeStr(o.regex_source);
-            try s.writeStr(o.regex_flags);
+            try s.writeStr(o.regexSource());
+            try s.writeStr(o.regexFlags());
             return;
         }
         if (o.is_map) {

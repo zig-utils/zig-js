@@ -602,7 +602,54 @@ pub const FinalizationRecord = struct {
     ready: bool = false,
 };
 
+/// Rare internal slots kept out of every ordinary object. These states belong
+/// to disjoint exotic object kinds, but a single sidecar keeps access simple
+/// while removing enough default-initialized payload to place Object cells in
+/// zig-js's existing 512-byte GC slab. The sidecar is allocated lazily through
+/// the same budgeted allocator and ownership accounting as other Object backing
+/// stores.
+pub const ObjectColdState = struct {
+    arg_map_env: ?*anyopaque = null,
+    arg_map_names: [][]const u8 = &.{},
+    arg_map_severed: []std.atomic.Value(bool) = &.{},
+    weak_entries: std.ArrayListUnmanaged(WeakCollectionEntry) = .empty,
+    weak_index: std.AutoHashMapUnmanaged(usize, usize) = .empty,
+    regex_source: []const u8 = "",
+    regex_flags: []const u8 = "",
+    regex_compiled: ?*anyopaque = null,
+    finalization_callback: Value = Value.undef(),
+    finalization_records: std.ArrayListUnmanaged(FinalizationRecord) = .empty,
+};
+
+/// Symbol and BigInt are mutually exclusive primitive-tagged Object variants.
+/// Their equal-size payloads overlap without a redundant runtime tag because
+/// `is_symbol` / `is_bigint` already select the active interpretation.
+pub const ObjectOptionalBytes = extern struct {
+    ptr: ?[*]const u8 = null,
+    len: usize = 0,
+
+    pub inline fn init(bytes: ?[]const u8) ObjectOptionalBytes {
+        return if (bytes) |s| .{ .ptr = s.ptr, .len = s.len } else .{};
+    }
+
+    pub inline fn get(self: ObjectOptionalBytes) ?[]const u8 {
+        return if (self.ptr) |ptr| ptr[0..self.len] else null;
+    }
+};
+
+pub const ObjectPrimitiveState = extern union {
+    symbol: extern struct {
+        key: ObjectOptionalBytes = .{},
+        description: ObjectOptionalBytes = .{},
+    },
+    bigint: extern struct {
+        value: i128 = 0,
+        text: ObjectOptionalBytes = .{},
+    },
+};
+
 pub const ObjectBackingFlags = packed struct {
+    cold: bool = false,
     slots: bool = false,
     elements: bool = false,
     accessors: bool = false,
@@ -650,6 +697,7 @@ pub const Object = struct {
     /// finalized accurately while migration is incremental.
     backing_allocator: ?std.mem.Allocator = null,
     backing_flags: ObjectBackingFlags = .{},
+    cold: ?*ObjectColdState = null,
     /// `backingFor`/`(de)activateBacking` touch `backing_flags`/`backing_allocator`
     /// while the caller holds *whichever* structure lock matches the field
     /// (elements_lock for elements, property_lock for slots/attrs/accessors), so
@@ -726,29 +774,22 @@ pub const Object = struct {
     /// outcome is racy-by-spec regardless of who wins).
     extensible_flag: std.atomic.Value(bool) = .init(true),
     /// A Symbol (a tagged object so identity `===` and storage reuse the object
-    /// machinery; `typeof` reports "symbol"). `sym_key` is its unique property-key
-    /// encoding (used when a symbol is an object property key).
+    /// machinery; `typeof` reports "symbol"). The primitive union's symbol key
+    /// is its unique property-key encoding.
     is_symbol: bool = false,
-    sym_key: []const u8 = "",
+    // Symbol key and description overlap the mutually exclusive BigInt payload.
     /// A BigInt primitive (`typeof` reports "bigint"; treated as a primitive in
     /// equality/arithmetic). Small values use the `i128` fast path; oversized
     /// literals/decimal strings keep a canonical decimal identity in
-    /// `bigint_text` until full arbitrary-precision arithmetic lands.
+    /// canonical decimal text until full arbitrary-precision arithmetic lands.
     is_bigint: bool = false,
-    bigint: i128 = 0,
-    bigint_text: ?[]const u8 = null,
+    primitive: ObjectPrimitiveState = .{ .symbol = .{} },
     /// An `[[IsHTMLDDA]]` exotic object (e.g. `document.all`): `typeof` reports
     /// "undefined", ToBoolean is false, and it is loosely-equal to null/undefined.
     is_htmldda: bool = false,
     /// A `JSON.rawJSON(...)` result (carries `[[IsRawJSON]]`): a frozen null-proto
     /// object with an own "rawJSON" string property emitted verbatim by stringify.
     is_raw_json: bool = false,
-    /// A Symbol's `[[Description]]`: `null` = no description (reads as
-    /// `undefined`), else the string. Held in this dedicated slot rather than an
-    /// own `description` property so it stays invisible to reflection
-    /// (`Object.getOwnPropertyDescriptor(sym, "description")` is undefined) —
-    /// `Symbol.prototype.description` is a prototype accessor instead.
-    sym_desc: ?[]const u8 = null,
     /// A `Date` instance — its [[DateValue]] (ms since the Unix epoch, or NaN
     /// for an invalid date) is the internal-slot field `date_ms`, invisible to
     /// reflection/enumeration; methods are dispatched in `dateMethod`.
@@ -822,20 +863,11 @@ pub const Object = struct {
     /// True for `RegExp` instances (carries `source`/`flags` properties; matching
     /// is backed by zig-regex).
     is_regex: bool = false,
+    // RegExp source, flags, and compiled cache live in `cold`.
     /// True for function `arguments` objects; they are array-like internally but
     /// carry the Arguments brand for Object.prototype.toString.
     is_arguments: bool = false,
-    /// A mapped (sloppy-mode, simple-parameter) arguments object's
-    /// `[[ParameterMap]]`: the call's environment record (type-erased
-    /// `*Environment`) and the parameter name each index maps to (`""` = not
-    /// initially mapped). A mapped index reads/writes the parameter binding;
-    /// defining it as an accessor or non-writable, or deleting it, atomically
-    /// severs the mapping in `arg_map_severed`. The names slice is immutable once
-    /// the arguments object is published so no-GIL readers cannot tear a slice
-    /// pair while another thread severs an index.
-    arg_map_env: ?*anyopaque = null,
-    arg_map_names: [][]const u8 = &.{},
-    arg_map_severed: []std.atomic.Value(bool) = &.{},
+    // Mapped-arguments environment, names, and severed bits live in `cold`.
     /// `Map`/`Set` instances. A Map keeps `[key,value]` pair-arrays in
     /// `elements`; a Set keeps values directly. `size` is a maintained property.
     is_map: bool = false,
@@ -846,13 +878,7 @@ pub const Object = struct {
     /// A WeakMap/WeakSet reuses the `is_map`/`is_set` storage but carries this
     /// flag so the brand checks can tell a Map from a WeakMap (and Set/WeakSet).
     is_weak: bool = false,
-    /// WeakMap/WeakSet entries. Keys are weak GC edges; for WeakMap, `value`
-    /// becomes live iff `key` is live during the ephemeron fixed-point pass.
-    weak_entries: std.ArrayListUnmanaged(WeakCollectionEntry) = .empty,
-    /// Pointer identity -> `weak_entries` index. This keeps WeakMap/WeakSet
-    /// operations O(1) while the entry list remains the GC-visible ephemeron
-    /// storage. Stale/missing entries are tolerated and repaired by mutators.
-    weak_index: std.AutoHashMapUnmanaged(usize, usize) = .empty,
+    // Weak entries and their lookup index live in `cold`.
     /// For error instances, the error class name (e.g. "TypeError"); for a
     /// builtin error *constructor* object, see `error_ctor`.
     error_name: []const u8 = "",
@@ -904,14 +930,6 @@ pub const Object = struct {
     /// `DataView` view (non-null marks a DataView): a typed read/write window
     /// over `buffer`'s bytes with per-access endianness.
     data_view: ?*DataViewData = null,
-    /// A RegExp's [[OriginalSource]] / [[OriginalFlags]] internal slots. Held off
-    /// the property map so `source`/`flags`/`global`/… resolve through the
-    /// RegExp.prototype accessor getters (not instance own data properties).
-    regex_source: []const u8 = "",
-    regex_flags: []const u8 = "",
-    /// Cached `*regex.Regex`, type-erased to keep value.zig independent from the
-    /// regex package. Invalidated when `RegExp.prototype.compile` changes slots.
-    regex_compiled: ?*anyopaque = null,
     /// Marks a `WeakRef` instance. The target is a weak GC edge, so collection
     /// may clear it while the WeakRef object itself remains branded.
     is_weak_ref: bool = false,
@@ -919,8 +937,7 @@ pub const Object = struct {
     /// Marks a `FinalizationRegistry`. Dead targets make records ready for
     /// automatic host cleanup delivery at quiescent collection points.
     is_finalization_registry: bool = false,
-    finalization_callback: Value = Value.undef(),
-    finalization_records: std.ArrayListUnmanaged(FinalizationRecord) = .empty,
+    // Cleanup callback and records live in `cold`.
     /// Lazy Iterator-Helper state (`map`/`filter`/`take`/`drop`/`flatMap`/wrap),
     /// non-null on a helper iterator returned by those methods.
     iter_helper: ?*IterHelper = null,
@@ -996,6 +1013,52 @@ pub const Object = struct {
         defer self.unlockBacking(backing_locked);
         if (!@field(self.backing_flags, field)) return null;
         return self.backing_allocator;
+    }
+
+    /// Allocate the cold internal-slot sidecar on first use. Exotic objects
+    /// pay this cost; ordinary objects retain only the nullable pointer.
+    pub fn ensureCold(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator.Error!*ObjectColdState {
+        if (self.cold) |cold| return cold;
+        const backing = self.backingForTracked(fallback, "cold");
+        const cold = backing.allocator.create(ObjectColdState) catch |err| {
+            if (backing.activated) self.deactivateBacking("cold");
+            return err;
+        };
+        cold.* = .{};
+        self.cold = cold;
+        return cold;
+    }
+
+    pub inline fn symbolKey(self: *const Object) []const u8 {
+        return self.primitive.symbol.key.get() orelse "";
+    }
+
+    pub inline fn symbolDescription(self: *const Object) ?[]const u8 {
+        return self.primitive.symbol.description.get();
+    }
+
+    pub inline fn bigIntValue(self: *const Object) i128 {
+        return self.primitive.bigint.value;
+    }
+
+    pub inline fn bigIntText(self: *const Object) ?[]const u8 {
+        return self.primitive.bigint.text.get();
+    }
+
+    pub inline fn regexSource(self: *const Object) []const u8 {
+        return if (self.cold) |cold| cold.regex_source else "";
+    }
+
+    pub inline fn regexFlags(self: *const Object) []const u8 {
+        return if (self.cold) |cold| cold.regex_flags else "";
+    }
+
+    pub inline fn regexCompiled(self: *const Object) ?*anyopaque {
+        return if (self.cold) |cold| cold.regex_compiled else null;
+    }
+
+    pub inline fn finalizationCallback(self: *const Object) Value {
+        return if (self.cold) |cold| cold.finalization_callback else Value.undef();
     }
 
     /// Whether new own properties may be added (see `extensible_flag`).
@@ -1425,7 +1488,7 @@ pub const Object = struct {
         self.lockElements();
         defer self.unlockElements();
         const i = self.weakEntryIndexUnlocked(key) orelse return null;
-        return self.weak_entries.items[i].value;
+        return self.cold.?.weak_entries.items[i].value;
     }
 
     /// WeakMap/WeakSet `[[Has]]`.
@@ -1441,14 +1504,15 @@ pub const Object = struct {
         gcBarrier(self, v);
         self.lockElements();
         defer self.unlockElements();
+        const cold = try self.ensureCold(fallback);
         const alloc = self.weakEntriesAllocator(fallback);
         if (self.weakEntryIndexUnlocked(key)) |i| {
-            self.weak_entries.items[i].value = v;
+            cold.weak_entries.items[i].value = v;
             self.weakIndexPut(alloc, key, i);
             return;
         }
-        const i = self.weak_entries.items.len;
-        try self.weak_entries.append(alloc, .{ .key = key, .value = v });
+        const i = cold.weak_entries.items.len;
+        try cold.weak_entries.append(alloc, .{ .key = key, .value = v });
         self.weakIndexPut(alloc, key, i);
     }
 
@@ -1457,13 +1521,14 @@ pub const Object = struct {
         gc_runtime.barrierWeak(@ptrCast(self));
         self.lockElements();
         defer self.unlockElements();
+        const cold = try self.ensureCold(fallback);
         const alloc = self.weakEntriesAllocator(fallback);
         if (self.weakEntryIndexUnlocked(key)) |i| {
             self.weakIndexPut(alloc, key, i);
             return;
         }
-        const i = self.weak_entries.items.len;
-        try self.weak_entries.append(alloc, .{ .key = key });
+        const i = cold.weak_entries.items.len;
+        try cold.weak_entries.append(alloc, .{ .key = key });
         self.weakIndexPut(alloc, key, i);
     }
 
@@ -1482,28 +1547,30 @@ pub const Object = struct {
     }
 
     fn weakEntryIndexUnlocked(self: *Object, key: ?*anyopaque) ?usize {
+        const cold = self.cold orelse return null;
         const k = weakIndexKey(key);
-        if (self.weak_index.get(k)) |i| {
-            if (i < self.weak_entries.items.len and self.weak_entries.items[i].key == key) return i;
+        if (cold.weak_index.get(k)) |i| {
+            if (i < cold.weak_entries.items.len and cold.weak_entries.items[i].key == key) return i;
         }
-        for (self.weak_entries.items, 0..) |entry, i| {
+        for (cold.weak_entries.items, 0..) |entry, i| {
             if (entry.key == key) return i;
         }
         return null;
     }
 
     fn weakIndexPut(self: *Object, alloc: std.mem.Allocator, key: ?*anyopaque, i: usize) void {
-        self.weak_index.put(alloc, weakIndexKey(key), i) catch {};
+        self.cold.?.weak_index.put(alloc, weakIndexKey(key), i) catch {};
     }
 
     pub fn weakEntrySwapRemoveAtUnlocked(self: *Object, i: usize) void {
-        const removed_key = self.weak_entries.items[i].key;
-        const last_i = self.weak_entries.items.len - 1;
-        const moved_key = self.weak_entries.items[last_i].key;
-        _ = self.weak_entries.swapRemove(i);
-        _ = self.weak_index.remove(weakIndexKey(removed_key));
+        const cold = self.cold.?;
+        const removed_key = cold.weak_entries.items[i].key;
+        const last_i = cold.weak_entries.items.len - 1;
+        const moved_key = cold.weak_entries.items[last_i].key;
+        _ = cold.weak_entries.swapRemove(i);
+        _ = cold.weak_index.remove(weakIndexKey(removed_key));
         if (i != last_i) {
-            if (self.weak_index.getPtr(weakIndexKey(moved_key))) |slot| slot.* = i;
+            if (cold.weak_index.getPtr(weakIndexKey(moved_key))) |slot| slot.* = i;
         }
     }
 
@@ -1512,7 +1579,8 @@ pub const Object = struct {
     pub fn finRecordAppend(self: *Object, fallback: std.mem.Allocator, record: FinalizationRecord) std.mem.Allocator.Error!void {
         self.lockElements();
         defer self.unlockElements();
-        try self.finalization_records.append(self.finalizationRecordsAllocator(fallback), record);
+        const cold = try self.ensureCold(fallback);
+        try cold.finalization_records.append(self.finalizationRecordsAllocator(fallback), record);
     }
 
     /// FinalizationRegistry `unregister`: remove every record whose token matches
@@ -1520,17 +1588,18 @@ pub const Object = struct {
     pub fn finRecordUnregister(self: *Object, token: ?*anyopaque) bool {
         self.lockElements();
         defer self.unlockElements();
+        const cold = self.cold orelse return false;
         var removed = false;
         var write: usize = 0;
-        for (self.finalization_records.items, 0..) |record, read| {
+        for (cold.finalization_records.items, 0..) |record, read| {
             if (record.token == token) {
                 removed = true;
                 continue;
             }
-            if (write != read) self.finalization_records.items[write] = record;
+            if (write != read) cold.finalization_records.items[write] = record;
             write += 1;
         }
-        if (removed) self.finalization_records.shrinkRetainingCapacity(write);
+        if (removed) cold.finalization_records.shrinkRetainingCapacity(write);
         return removed;
     }
 
@@ -1540,10 +1609,11 @@ pub const Object = struct {
     pub fn finRecordTakeReady(self: *Object) ?FinalizationRecord {
         self.lockElements();
         defer self.unlockElements();
+        const cold = self.cold orelse return null;
         var i: usize = 0;
-        while (i < self.finalization_records.items.len) : (i += 1) {
-            if (self.finalization_records.items[i].ready)
-                return self.finalization_records.orderedRemove(i);
+        while (i < cold.finalization_records.items.len) : (i += 1) {
+            if (cold.finalization_records.items[i].ready)
+                return cold.finalization_records.orderedRemove(i);
         }
         return null;
     }
@@ -2631,31 +2701,31 @@ test "Value is an engine-wide 8-byte NaN-boxed word" {
 }
 
 pub fn bigIntIsZero(o: *Object) bool {
-    if (o.bigint_text) |s| return std.mem.eql(u8, s, "0");
-    return o.bigint == 0;
+    if (o.bigIntText()) |s| return std.mem.eql(u8, s, "0");
+    return o.bigIntValue() == 0;
 }
 
 pub fn bigIntToNumber(o: *Object) f64 {
-    if (o.bigint_text) |s| return std.fmt.parseFloat(f64, s) catch if (s.len > 0 and s[0] == '-') -std.math.inf(f64) else std.math.inf(f64);
-    return @floatFromInt(o.bigint);
+    if (o.bigIntText()) |s| return std.fmt.parseFloat(f64, s) catch if (s.len > 0 and s[0] == '-') -std.math.inf(f64) else std.math.inf(f64);
+    return @floatFromInt(o.bigIntValue());
 }
 
 pub fn bigIntToString(o: *Object, arena: std.mem.Allocator) error{OutOfMemory}![]const u8 {
-    if (o.bigint_text) |s| return s;
-    return std.fmt.allocPrint(arena, "{d}", .{o.bigint});
+    if (o.bigIntText()) |s| return s;
+    return std.fmt.allocPrint(arena, "{d}", .{o.bigIntValue()});
 }
 
 fn bigIntEquals(a: *Object, b: *Object) bool {
-    if (a.bigint_text) |as| {
-        if (b.bigint_text) |bs| return std.mem.eql(u8, as, bs);
+    if (a.bigIntText()) |as| {
+        if (b.bigIntText()) |bs| return std.mem.eql(u8, as, bs);
         const parsed = std.fmt.parseInt(i128, as, 10) catch return false;
-        return parsed == b.bigint;
+        return parsed == b.bigIntValue();
     }
-    if (b.bigint_text) |bs| {
+    if (b.bigIntText()) |bs| {
         const parsed = std.fmt.parseInt(i128, bs, 10) catch return false;
-        return a.bigint == parsed;
+        return a.bigIntValue() == parsed;
     }
-    return a.bigint == b.bigint;
+    return a.bigIntValue() == b.bigIntValue();
 }
 
 /// ECMAScript-ish ToString for objects: errors render `Name: message`, arrays
@@ -2888,13 +2958,13 @@ pub fn looseEquals(a: Value, b: Value) bool {
     if (a_big != b_big) {
         const big_obj = if (a_big) a.asObj() else b.asObj();
         const other = if (a_big) b else a;
-        if (big_obj.bigint_text != null) {
+        if (big_obj.bigIntText() != null) {
             return switch (other.kind()) {
-                .string => std.mem.eql(u8, std.mem.trim(u8, other.asStr(), " \t\r\n"), big_obj.bigint_text.?),
+                .string => std.mem.eql(u8, std.mem.trim(u8, other.asStr(), " \t\r\n"), big_obj.bigIntText().?),
                 else => false,
             };
         }
-        const big: i128 = big_obj.bigint;
+        const big: i128 = big_obj.bigIntValue();
         return switch (other.kind()) {
             .number => @as(f64, @floatFromInt(big)) == other.asNum(),
             .boolean => big == @as(i128, if (other.asBool()) 1 else 0),
@@ -3164,8 +3234,10 @@ test "Object.restricted_to CAS lets exactly one concurrent claimer win" {
 test "WeakMap and WeakSet entry delete is unordered tail removal" {
     const a = std.testing.allocator;
     var o = Object{ .is_weak = true, .is_map = true };
-    defer o.weak_entries.deinit(a);
-    defer o.weak_index.deinit(a);
+    const cold = try o.ensureCold(a);
+    defer a.destroy(cold);
+    defer cold.weak_entries.deinit(a);
+    defer cold.weak_index.deinit(a);
 
     var key1: u8 = 1;
     var key2: u8 = 2;
@@ -3175,17 +3247,19 @@ test "WeakMap and WeakSet entry delete is unordered tail removal" {
     try o.weakEntrySet(a, @ptrCast(&key3), Value.num(3));
 
     try std.testing.expect(o.weakEntryDelete(@ptrCast(&key1)));
-    try std.testing.expectEqual(@as(usize, 2), o.weak_entries.items.len);
+    try std.testing.expectEqual(@as(usize, 2), cold.weak_entries.items.len);
     try std.testing.expect(!o.weakEntryHas(@ptrCast(&key1)));
     try std.testing.expect(o.weakEntryHas(@ptrCast(&key2)));
     try std.testing.expect(o.weakEntryHas(@ptrCast(&key3)));
-    try std.testing.expectEqual(@intFromPtr(&key3), @intFromPtr(o.weak_entries.items[0].key.?));
+    try std.testing.expectEqual(@intFromPtr(&key3), @intFromPtr(cold.weak_entries.items[0].key.?));
 }
 
 test "FinalizationRegistry unregister stable-compacts matching records" {
     const a = std.testing.allocator;
     var o = Object{ .is_finalization_registry = true };
-    defer o.finalization_records.deinit(a);
+    const cold = try o.ensureCold(a);
+    defer a.destroy(cold);
+    defer cold.finalization_records.deinit(a);
 
     var token_a: u8 = 1;
     var token_b: u8 = 2;
@@ -3202,15 +3276,15 @@ test "FinalizationRegistry unregister stable-compacts matching records" {
     try o.finRecordAppend(a, .{ .target = @ptrCast(&target5), .held = Value.num(5), .token = @ptrCast(&token_a) });
 
     try std.testing.expect(o.finRecordUnregister(@ptrCast(&token_a)));
-    try std.testing.expectEqual(@as(usize, 2), o.finalization_records.items.len);
-    try std.testing.expectEqual(@as(f64, 2), o.finalization_records.items[0].held.asNum());
-    try std.testing.expectEqual(@as(f64, 4), o.finalization_records.items[1].held.asNum());
-    try std.testing.expectEqual(@intFromPtr(&token_b), @intFromPtr(o.finalization_records.items[0].token.?));
-    try std.testing.expectEqual(@intFromPtr(&token_c), @intFromPtr(o.finalization_records.items[1].token.?));
+    try std.testing.expectEqual(@as(usize, 2), cold.finalization_records.items.len);
+    try std.testing.expectEqual(@as(f64, 2), cold.finalization_records.items[0].held.asNum());
+    try std.testing.expectEqual(@as(f64, 4), cold.finalization_records.items[1].held.asNum());
+    try std.testing.expectEqual(@intFromPtr(&token_b), @intFromPtr(cold.finalization_records.items[0].token.?));
+    try std.testing.expectEqual(@intFromPtr(&token_c), @intFromPtr(cold.finalization_records.items[1].token.?));
 
     var missing: u8 = 4;
     try std.testing.expect(!o.finRecordUnregister(@ptrCast(&missing)));
     try std.testing.expect(o.finRecordUnregister(@ptrCast(&token_b)));
-    try std.testing.expectEqual(@as(usize, 1), o.finalization_records.items.len);
-    try std.testing.expectEqual(@as(f64, 4), o.finalization_records.items[0].held.asNum());
+    try std.testing.expectEqual(@as(usize, 1), cold.finalization_records.items.len);
+    try std.testing.expectEqual(@as(f64, 4), cold.finalization_records.items[0].held.asNum());
 }

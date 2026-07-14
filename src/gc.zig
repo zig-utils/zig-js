@@ -73,7 +73,8 @@ inline fn markManaged(v: anytype, cell: anytype) void {
 }
 
 inline fn hasObjectBacking(flags: value.ObjectBackingFlags) bool {
-    return flags.slots or
+    return flags.cold or
+        flags.slots or
         flags.elements or
         flags.accessors or
         flags.key_order or
@@ -84,7 +85,8 @@ inline fn hasObjectBacking(flags: value.ObjectBackingFlags) bool {
         flags.typed_array or
         flags.data_view or
         flags.temporal or
-        flags.arg_map_names;
+        flags.arg_map_names or
+        flags.arg_map_severed;
 }
 
 // ---- Per-kind tracers (public so a test binding can reuse them) -----------
@@ -138,13 +140,15 @@ pub fn traceObject(o: *Object, v: anytype) void {
     markValueOpt(v, o.prim);
     markWeakObject(v, &o.weak_ref_target); // a stable field address — safe to register
     if (o.is_finalization_registry) {
-        markValue(v, o.finalization_callback);
-        // Only `held` is a strong edge (mark it by value under the entry-storage
-        // lock so a concurrent append can't tear the read). target/token are
-        // weak — their liveness is decided by `isLive` at finish, not registered.
-        if (concurrent) o.lockElements();
-        for (o.finalization_records.items) |*record| markValue(v, record.held);
-        if (concurrent) o.unlockElements();
+        if (o.cold) |cold| {
+            markValue(v, cold.finalization_callback);
+            // Only `held` is a strong edge (mark it by value under the entry-storage
+            // lock so a concurrent append can't tear the read). target/token are
+            // weak — their liveness is decided by `isLive` at finish, not registered.
+            if (concurrent) o.lockElements();
+            for (cold.finalization_records.items) |*record| markValue(v, record.held);
+            if (concurrent) o.unlockElements();
+        }
     }
 
     // Type-erased side-cells.
@@ -154,7 +158,7 @@ pub fn traceObject(o: *Object, v: anytype) void {
     if (o.gen) |p| v.mark(p); // *vm.Generator (kind .generator)
     if (o.iter_helper) |p| v.mark(p); // (kind .iter_helper)
     if (o.module_ns) |p| v.mark(p); // *ModuleNs (kind .module_ns)
-    if (o.arg_map_env) |p| v.mark(p); // *Environment (kind .environment)
+    if (o.cold) |cold| if (cold.arg_map_env) |p| v.mark(p); // *Environment (kind .environment)
     promise.traceNativePrivateData(o, v);
     interp.traceNativePrivateData(o, v);
     jsthread.traceNativePrivateData(o, v);
@@ -166,7 +170,8 @@ pub fn traceObject(o: *Object, v: anytype) void {
 
 pub fn traceObjectEphemeron(o: *Object, v: anytype) void {
     if (!(o.is_weak and o.is_map)) return;
-    for (o.weak_entries.items) |entry| {
+    const cold = o.cold orelse return;
+    for (cold.weak_entries.items) |entry| {
         if (v.isMarked(entry.key)) markValue(v, entry.value);
     }
 }
@@ -185,9 +190,10 @@ pub fn pruneDeadWeakEntries(o: *Object, heap: anytype) bool {
 
     var cleanup_ready = false;
     if (o.is_weak and (o.is_map or o.is_set)) {
+        const cold = o.cold orelse return false;
         var i: usize = 0;
-        while (i < o.weak_entries.items.len) {
-            if (!heap.isLive(o.weak_entries.items[i].key)) {
+        while (i < cold.weak_entries.items.len) {
+            if (!heap.isLive(cold.weak_entries.items[i].key)) {
                 o.weakEntrySwapRemoveAtUnlocked(i);
             } else {
                 i += 1;
@@ -195,7 +201,8 @@ pub fn pruneDeadWeakEntries(o: *Object, heap: anytype) bool {
         }
     }
     if (o.is_finalization_registry) {
-        for (o.finalization_records.items) |*record| {
+        const cold = o.cold orelse return cleanup_ready;
+        for (cold.finalization_records.items) |*record| {
             // Once a record is ready, its target may have been swept in an
             // earlier cycle; never ask the heap about that stale pointer again.
             if (!record.ready and !heap.isLive(record.target)) {
@@ -328,15 +335,16 @@ fn finalizeObjectBacking(o: *Object, a: std.mem.Allocator) usize {
         released += 1;
     }
     if (flags.weak_entries) {
-        o.weak_entries.deinit(a);
-        o.weak_entries = .empty;
-        o.weak_index.deinit(a);
-        o.weak_index = .empty;
+        const cold = o.cold.?;
+        cold.weak_entries.deinit(a);
+        cold.weak_entries = .empty;
+        cold.weak_index.deinit(a);
+        cold.weak_index = .empty;
         released += 1;
     }
     if (flags.finalization_records) {
-        o.finalization_records.deinit(a);
-        o.finalization_records = .empty;
+        o.cold.?.finalization_records.deinit(a);
+        o.cold.?.finalization_records = .empty;
         released += 1;
     }
     if (flags.typed_array) {
@@ -361,13 +369,18 @@ fn finalizeObjectBacking(o: *Object, a: std.mem.Allocator) usize {
         released += 1;
     }
     if (flags.arg_map_names) {
-        a.free(o.arg_map_names);
-        o.arg_map_names = &.{};
+        a.free(o.cold.?.arg_map_names);
+        o.cold.?.arg_map_names = &.{};
         released += 1;
     }
     if (flags.arg_map_severed) {
-        a.free(o.arg_map_severed);
-        o.arg_map_severed = &.{};
+        a.free(o.cold.?.arg_map_severed);
+        o.cold.?.arg_map_severed = &.{};
+        released += 1;
+    }
+    if (flags.cold) {
+        a.destroy(o.cold.?);
+        o.cold = null;
         released += 1;
     }
 
@@ -910,6 +923,8 @@ fn managedCellType(comptime kind: CellKind) type {
 }
 
 comptime {
+    if (Heap.cellAllocationBytes(Object) > 512)
+        @compileError("Object payload no longer fits the 512-byte GC slab");
     for (@typeInfo(CellKind).@"enum".field_values) |raw_kind| {
         const Cell = managedCellType(@enumFromInt(raw_kind));
         if (!ContextMod.GcCellBacking.usesCellSlab(Heap.cellAllocationBytes(Cell)))
@@ -1190,11 +1205,12 @@ test "gc pruneDeadWeakEntries removes dead weak keys with unordered tail removal
     var dead_key_a: u8 = 2;
     var dead_key_b: u8 = 3;
 
-    var o = Object{ .is_weak = true, .is_map = true };
-    defer o.weak_entries.deinit(a);
-    try o.weak_entries.append(a, .{ .key = @ptrCast(&dead_key_a), .value = Value.num(10) });
-    try o.weak_entries.append(a, .{ .key = @ptrCast(&dead_key_b), .value = Value.num(20) });
-    try o.weak_entries.append(a, .{ .key = @ptrCast(&live_key), .value = Value.num(30) });
+    var cold = value.ObjectColdState{};
+    var o = Object{ .is_weak = true, .is_map = true, .cold = &cold };
+    defer cold.weak_entries.deinit(a);
+    try cold.weak_entries.append(a, .{ .key = @ptrCast(&dead_key_a), .value = Value.num(10) });
+    try cold.weak_entries.append(a, .{ .key = @ptrCast(&dead_key_b), .value = Value.num(20) });
+    try cold.weak_entries.append(a, .{ .key = @ptrCast(&live_key), .value = Value.num(30) });
 
     const FakeHeap = struct {
         live: ?*anyopaque,
@@ -1205,8 +1221,8 @@ test "gc pruneDeadWeakEntries removes dead weak keys with unordered tail removal
     const heap = FakeHeap{ .live = @ptrCast(&live_key) };
 
     try std.testing.expect(!pruneDeadWeakEntries(&o, &heap));
-    try std.testing.expectEqual(@as(usize, 1), o.weak_entries.items.len);
-    try std.testing.expectEqual(@intFromPtr(&live_key), @intFromPtr(o.weak_entries.items[0].key.?));
+    try std.testing.expectEqual(@as(usize, 1), cold.weak_entries.items.len);
+    try std.testing.expectEqual(@intFromPtr(&live_key), @intFromPtr(cold.weak_entries.items[0].key.?));
 }
 
 test "gc traces only the active microtask variant" {
