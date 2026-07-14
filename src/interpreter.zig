@@ -29764,6 +29764,7 @@ fn installTypedArrays(env: *Environment, rs: *Shape) EvalError!void {
     try installAbort(env, rs, object_proto);
     try installHeaders(env, rs, object_proto);
     try installFormData(env, rs, object_proto);
+    try installBlob(env, rs, object_proto);
     try installTemporal(env, rs, object_proto);
     try installIntl(env, rs, object_proto);
     // ShadowRealm: a child realm with `evaluate` (and a minimal `importValue`).
@@ -41206,6 +41207,208 @@ fn installFormData(env: *Environment, rs: *Shape, object_proto: *value.Object) E
     try ctor.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
     try setConstructor(a, rs, proto, ctor);
     try env.put("FormData", Value.obj(ctor));
+}
+
+// ===== Blob / File ===================================================
+// A Blob keeps its bytes in a hidden ArrayBuffer (\x00blobbuf) and its MIME type
+// in \x00blobtype. File adds \x00filename and \x00filemod (lastModified).
+fn blobIsBlob(v: Value) bool {
+    return v.isObject() and v.asObj().getOwn("\x00blobbuf") != null;
+}
+fn blobBytesOf(o: *value.Object) []const u8 {
+    if (o.getOwn("\x00blobbuf")) |bv| if (bv.isObject()) if (bv.asObj().array_buffer) |ab| return ab.bytes();
+    return &.{};
+}
+/// Valid Blob/File type: all chars in U+0020..U+007E; lowercased, else "".
+fn blobNormalizeType(self: *Interpreter, t: []const u8) EvalError![]const u8 {
+    for (t) |c| if (c < 0x20 or c > 0x7E) return "";
+    const buf = try self.arena.alloc(u8, t.len);
+    for (t, 0..) |c, i| buf[i] = std.ascii.toLower(c);
+    return buf;
+}
+fn blobConcatParts(self: *Interpreter, parts_v: Value) EvalError![]u8 {
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    if (parts_v.isUndefined()) return out.items;
+    // WebIDL sequence conversion requires an object; a primitive (e.g. a bare
+    // string, which is iterable but not an object) is a TypeError.
+    if (!parts_v.isObject()) return self.throwError("TypeError", "The provided value cannot be converted to a sequence");
+    for (try collectIterable(self, parts_v)) |part| {
+        if (blobIsBlob(part)) {
+            try out.appendSlice(self.arena, blobBytesOf(part.asObj()));
+        } else if (bufferSourceBytes(part)) |b| {
+            try out.appendSlice(self.arena, b);
+        } else {
+            try out.appendSlice(self.arena, try wtf8ToUtf8Bytes(self, try self.toStringV(part)));
+        }
+    }
+    return out.items;
+}
+fn blobMake(self: *Interpreter, proto_name: []const u8, bytes: []const u8, blob_type: []const u8) EvalError!*value.Object {
+    const buf = try self.makeArrayBuffer(bytes.len);
+    if (bytes.len > 0) @memcpy(buf.array_buffer.?.bytes()[0..bytes.len], bytes);
+    const obj = try gc_mod.allocObj(self.arena);
+    obj.* = .{};
+    if (self.env.get(proto_name)) |c| if (c.isObject()) {
+        if (c.asObj().getOwn("prototype")) |pp| if (pp.isObject()) obj.setProtoAtomic(pp.asObj());
+    };
+    try obj.setOwn(self.arena, self.root_shape, "\x00blobbuf", Value.obj(buf));
+    try obj.setOwn(self.arena, self.root_shape, "\x00blobtype", try Value.strAlloc(self.arena, blob_type));
+    return obj;
+}
+fn blobConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (self.new_target.isUndefined()) return self.throwError("TypeError", "Failed to construct 'Blob': Please use the 'new' operator");
+    const bytes = try blobConcatParts(self, if (args.len > 0) args[0] else Value.undef());
+    var ty: []const u8 = "";
+    if (args.len > 1 and args[1].isObject()) {
+        const tv = try self.getProperty(args[1], "type");
+        if (!tv.isUndefined()) ty = try blobNormalizeType(self, try self.toStringV(tv));
+    }
+    return Value.obj(try blobMake(self, "Blob", bytes, ty));
+}
+fn blobSizeGet(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!blobIsBlob(this)) return self.throwError("TypeError", "Illegal invocation");
+    return Value.num(@floatFromInt(blobBytesOf(this.asObj()).len));
+}
+fn blobTypeGet(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!blobIsBlob(this)) return self.throwError("TypeError", "Illegal invocation");
+    return this.asObj().getOwn("\x00blobtype") orelse Value.str("");
+}
+fn blobClampIndex(x: f64, len: usize) usize {
+    const l: f64 = @floatFromInt(len);
+    var r = x;
+    if (std.math.isNan(r)) return 0;
+    if (r < 0) {
+        r = l + r;
+        if (r < 0) r = 0;
+    } else if (r > l) r = l;
+    return @intFromFloat(r);
+}
+fn blobSliceFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!blobIsBlob(this)) return self.throwError("TypeError", "Illegal invocation");
+    const bytes = blobBytesOf(this.asObj());
+    const len = bytes.len;
+    const start: usize = if (args.len > 0 and !args[0].isUndefined()) blobClampIndex(try self.toNumberV(args[0]), len) else 0;
+    const end: usize = if (args.len > 1 and !args[1].isUndefined()) blobClampIndex(try self.toNumberV(args[1]), len) else len;
+    const span: []const u8 = if (end > start) bytes[start..end] else &.{};
+    var ty: []const u8 = "";
+    if (args.len > 2 and !args[2].isUndefined()) ty = try blobNormalizeType(self, try self.toStringV(args[2]));
+    return Value.obj(try blobMake(self, "Blob", span, ty));
+}
+fn blobTextFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!blobIsBlob(this)) return self.throwError("TypeError", "Illegal invocation");
+    // The stored bytes are UTF-8; expose them as a JS string.
+    const s = try Value.strAlloc(self.arena, blobBytesOf(this.asObj()));
+    return try promiseResolveValue(self, s);
+}
+fn blobArrayBufferFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!blobIsBlob(this)) return self.throwError("TypeError", "Illegal invocation");
+    const bytes = blobBytesOf(this.asObj());
+    const buf = try self.makeArrayBuffer(bytes.len);
+    if (bytes.len > 0) @memcpy(buf.array_buffer.?.bytes()[0..bytes.len], bytes);
+    return try promiseResolveValue(self, Value.obj(buf));
+}
+fn blobBytesFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!blobIsBlob(this)) return self.throwError("TypeError", "Illegal invocation");
+    const ta = try newTypedArray(self, .u8, blobBytesOf(this.asObj()).len);
+    const bytes = blobBytesOf(this.asObj());
+    if (bytes.len > 0) @memcpy(ta.typed_array.?.buffer.array_buffer.?.bytes()[0..bytes.len], bytes);
+    return try promiseResolveValue(self, Value.obj(ta));
+}
+fn fileConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (self.new_target.isUndefined()) return self.throwError("TypeError", "Failed to construct 'File': Please use the 'new' operator");
+    if (args.len < 2) return self.throwError("TypeError", "Failed to construct 'File': 2 arguments required");
+    const bytes = try blobConcatParts(self, args[0]);
+    const name = try self.toStringV(args[1]);
+    var ty: []const u8 = "";
+    var last_mod: f64 = 0;
+    if (args.len > 2 and args[2].isObject()) {
+        const tv = try self.getProperty(args[2], "type");
+        if (!tv.isUndefined()) ty = try blobNormalizeType(self, try self.toStringV(tv));
+        const lm = try self.getProperty(args[2], "lastModified");
+        if (!lm.isUndefined()) last_mod = try self.toNumberV(lm);
+    }
+    const obj = try blobMake(self, "File", bytes, ty);
+    try obj.setOwn(self.arena, self.root_shape, "\x00filename", try Value.strAlloc(self.arena, name));
+    try obj.setOwn(self.arena, self.root_shape, "\x00filemod", Value.num(last_mod));
+    return Value.obj(obj);
+}
+fn fileNameGet(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!this.isObject()) return self.throwError("TypeError", "Illegal invocation");
+    return this.asObj().getOwn("\x00filename") orelse Value.str("");
+}
+fn fileLastModifiedGet(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!this.isObject()) return self.throwError("TypeError", "Illegal invocation");
+    return this.asObj().getOwn("\x00filemod") orelse Value.num(0);
+}
+fn installBlob(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalError!void {
+    const a = env.arena;
+    const symKey = struct {
+        fn f(e: *Environment, name: []const u8) ?[]const u8 {
+            if (e.get("Symbol")) |s| if (s.isObject()) {
+                if (s.asObj().getOwn(name)) |t| if (t.isObject() and t.asObj().is_symbol) return t.asObj().sym_key;
+            };
+            return null;
+        }
+    }.f;
+    const proto = try gc_mod.allocObj(a);
+    proto.* = .{ .proto = object_proto };
+    try setNativeGetter(a, rs, proto, "size", blobSizeGet);
+    try proto.setAttr(a, "size", .{ .enumerable = true, .configurable = true });
+    try setNativeGetter(a, rs, proto, "type", blobTypeGet);
+    try proto.setAttr(a, "type", .{ .enumerable = true, .configurable = true });
+    try setNative(a, rs, proto, "slice", 2, blobSliceFn);
+    try setNative(a, rs, proto, "text", 0, blobTextFn);
+    try setNative(a, rs, proto, "arrayBuffer", 0, blobArrayBufferFn);
+    try setNative(a, rs, proto, "bytes", 0, blobBytesFn);
+    if (symKey(env, "toStringTag")) |k| {
+        try proto.setOwn(a, rs, k, Value.str("Blob"));
+        try proto.setAttr(a, k, .{ .writable = false, .enumerable = false, .configurable = true });
+    }
+    const ctor = try gc_mod.allocObj(a);
+    ctor.* = .{ .native = blobConstructorFn, .native_ctor = true };
+    try installNativeProps(a, rs, ctor, "Blob", 0);
+    try ctor.setOwn(a, rs, "prototype", Value.obj(proto));
+    try ctor.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
+    try setConstructor(a, rs, proto, ctor);
+    try env.put("Blob", Value.obj(ctor));
+
+    // File extends Blob.
+    const file_proto = try gc_mod.allocObj(a);
+    file_proto.* = .{ .proto = proto };
+    try setNativeGetter(a, rs, file_proto, "name", fileNameGet);
+    try file_proto.setAttr(a, "name", .{ .enumerable = true, .configurable = true });
+    try setNativeGetter(a, rs, file_proto, "lastModified", fileLastModifiedGet);
+    try file_proto.setAttr(a, "lastModified", .{ .enumerable = true, .configurable = true });
+    if (symKey(env, "toStringTag")) |k| {
+        try file_proto.setOwn(a, rs, k, Value.str("File"));
+        try file_proto.setAttr(a, k, .{ .writable = false, .enumerable = false, .configurable = true });
+    }
+    const file_ctor = try gc_mod.allocObj(a);
+    file_ctor.* = .{ .native = fileConstructorFn, .native_ctor = true };
+    try installNativeProps(a, rs, file_ctor, "File", 0);
+    try file_ctor.setOwn(a, rs, "prototype", Value.obj(file_proto));
+    try file_ctor.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
+    try setConstructor(a, rs, file_proto, file_ctor);
+    try env.put("File", Value.obj(file_ctor));
 }
 
 // ===== crypto (getRandomValues / randomUUID) =========================
