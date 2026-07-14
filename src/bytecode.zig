@@ -344,6 +344,9 @@ pub const Chunk = struct {
     /// type-erased to avoid importing interpreter/value types here and are
     /// guarded by their exact closure environment, global object, and shape.
     quick_global_bindings: []?*anyopaque = &.{},
+    /// Lazily decoded pure numeric self-recurrence plan for this function
+    /// chunk. The VM owns the type and caches an explicit unsupported plan too.
+    quick_recurrence_plan: ?*anyopaque = null,
     /// Hotness and race-safe native-tier publication state. It remains cold
     /// until VM entry observation is wired to a backend; keeping it on the
     /// chunk makes the eventual shared-realm path single-writer by construction.

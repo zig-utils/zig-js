@@ -644,6 +644,18 @@ const QuickGlobalBinding = struct {
     slot: u32,
 };
 
+const QuickAddRecurrence = struct {
+    threshold: u16,
+    first_delta: u16,
+    second_delta: u16,
+    binding_instruction: u32,
+};
+
+const QuickRecurrencePlan = union(enum) {
+    unsupported,
+    add: QuickAddRecurrence,
+};
+
 // Test-only observations enforce that the optimized path remains reachable.
 // The fetchAdd call is compile-time removed from production builds.
 var quick_property_update_hits: std.atomic.Value(u64) = .init(0);
@@ -657,6 +669,7 @@ var quick_packed_array_sum_loop_hits: std.atomic.Value(u64) = .init(0);
 var quick_packed_array_push_loop_hits: std.atomic.Value(u64) = .init(0);
 var quick_packed_array_specialized_expression_hits: std.atomic.Value(u64) = .init(0);
 var quick_global_binding_hits: std.atomic.Value(u64) = .init(0);
+var quick_numeric_recurrence_hits: std.atomic.Value(u64) = .init(0);
 
 inline fn quickPlainObject(value_: Value) ?*value.Object {
     if (!value_.isObject()) return null;
@@ -965,6 +978,112 @@ fn recordQuickGlobalBinding(chunk: *Chunk, instruction: usize, vm: *Interpreter,
         break :cache created;
     };
     cache.* = .{ .env = env, .object = object, .shape = shape, .slot = slot };
+}
+
+fn exactU16(value_: Value, allow_zero: bool) ?u16 {
+    if (!value_.isNumber()) return null;
+    const number = value_.asNum();
+    if (!std.math.isFinite(number) or @trunc(number) != number or number < @as(f64, if (allow_zero) 0 else 1) or number > std.math.maxInt(u16))
+        return null;
+    return @intFromFloat(number);
+}
+
+fn compileQuickRecurrencePlan(chunk: *Chunk) QuickRecurrencePlan {
+    const code = chunk.code.items;
+    if (chunk.param_count != 1 or chunk.local_count != 1 or code.len != 19) return .unsupported;
+    const expected = [_]bc.Op{
+        .load_local, .load_const, .lt,  .jump_if_false, .load_local, .jump,       .load_var,
+        .load_local, .load_const, .sub, .call,          .load_var,   .load_local, .load_const,
+        .sub,        .call,       .add, .ret,           .ret_undef,
+    };
+    for (expected, 0..) |op, instruction| if (code[instruction].op != op) return .unsupported;
+    if (code[0].a != 0 or code[3].a != 6 or code[4].a != 0 or code[5].a != 17 or
+        code[7].a != 0 or code[10].a != 1 or code[12].a != 0 or code[15].a != 1 or
+        code[1].a >= chunk.consts.items.len or code[8].a >= chunk.consts.items.len or code[13].a >= chunk.consts.items.len or
+        code[6].a >= chunk.names.items.len or code[11].a >= chunk.names.items.len or
+        !std.mem.eql(u8, chunk.names.items[code[6].a], chunk.names.items[code[11].a]))
+        return .unsupported;
+    const threshold = exactU16(chunk.consts.items[code[1].a], false) orelse return .unsupported;
+    const first_delta = exactU16(chunk.consts.items[code[8].a], false) orelse return .unsupported;
+    const second_delta = exactU16(chunk.consts.items[code[13].a], false) orelse return .unsupported;
+    if (first_delta > threshold or second_delta > threshold) return .unsupported;
+    return .{ .add = .{
+        .threshold = threshold,
+        .first_delta = first_delta,
+        .second_delta = second_delta,
+        .binding_instruction = 6,
+    } };
+}
+
+fn quickRecurrencePlan(chunk: *Chunk) ?*QuickRecurrencePlan {
+    if (chunk.quick_recurrence_plan) |raw| return @ptrCast(@alignCast(raw));
+    const plan = chunk.arena.create(QuickRecurrencePlan) catch return null;
+    plan.* = compileQuickRecurrencePlan(chunk);
+    chunk.quick_recurrence_plan = plan;
+    return plan;
+}
+
+fn addRecurrenceSteps(first: u64, second: u64) u64 {
+    const cap = interp.max_steps + 1;
+    const children = std.math.add(u64, first, second) catch return cap;
+    return @min(std.math.add(u64, children, 16) catch cap, cap);
+}
+
+fn advanceQuickSteps(vm: *Interpreter, requested: u64) EvalError!void {
+    var remaining = requested;
+    while (remaining != 0) {
+        const until_checkpoint = 1024 - (vm.steps & 1023);
+        const advance = @min(remaining, until_checkpoint);
+        vm.steps += advance;
+        remaining -= advance;
+        if (vm.steps > interp.max_steps)
+            return vm.throwError("RangeError", "evaluation step budget exceeded");
+        if ((vm.steps & 1023) == 0) {
+            if (vm.stop_flag) |flag| if (flag.load(.monotonic))
+                return vm.throwError("Error", "worker terminated");
+            if (vm.use_thread_gil) if (vm.gil) |gil| gil.yieldIfContended();
+            if (vm.gc_safepoint_fn != null) vm.serviceGcSafepoint();
+        }
+    }
+}
+
+fn tryQuickNumericRecurrence(vm: *Interpreter, func: *Function, args: []const Value) EvalError!?Value {
+    const chunk = func.chunk orelse return null;
+    const plan = quickRecurrencePlan(chunk) orelse return null;
+    const recurrence = switch (plan.*) {
+        .unsupported => return null,
+        .add => |add| add,
+    };
+    if (args.len == 0) return null;
+    const input = exactU16(args[0], true) orelse return null;
+    if (input > 255) return null;
+    const live_callee = quickGlobalBindingValue(chunk, recurrence.binding_instruction, vm) orelse return null;
+    const function_object = func.obj orelse return null;
+    if (!live_callee.isObject() or live_callee.asObj() != function_object) return null;
+    const minimum_delta = @min(recurrence.first_delta, recurrence.second_delta);
+    const needed_depth: u32 = if (input < recurrence.threshold)
+        1
+    else
+        @as(u32, (input - recurrence.threshold) / minimum_delta) + 2;
+    if (vm.depth + needed_depth > interp.max_call_depth) return null;
+
+    var results: [256]f64 = undefined;
+    var steps: [256]u64 = undefined;
+    var n: usize = 0;
+    while (n <= input) : (n += 1) {
+        if (n < recurrence.threshold) {
+            results[n] = @floatFromInt(n);
+            steps[n] = 7;
+        } else {
+            const first = n - recurrence.first_delta;
+            const second = n - recurrence.second_delta;
+            results[n] = results[first] + results[second];
+            steps[n] = addRecurrenceSteps(steps[first], steps[second]);
+        }
+    }
+    try advanceQuickSteps(vm, steps[input]);
+    if (builtin.is_test) _ = quick_numeric_recurrence_hits.fetchAdd(1, .monotonic);
+    return Value.num(results[input]);
 }
 
 fn tryQuickArrayLoop(
@@ -2208,6 +2327,15 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 const argc = inst.a;
                 const base = stack.items.len - argc;
                 const callee = stack.items[base - 1];
+                if (!parallel_sync) {
+                    if (jsChunkFn(callee)) |func| {
+                        if (try tryQuickNumericRecurrence(vm, func, stack.items[base..])) |result| {
+                            stack.shrinkRetainingCapacity(base - 1);
+                            try stack.append(stack_alloc, result);
+                            continue;
+                        }
+                    }
+                }
                 // Trampoline plain JS→JS calls under the driver: build the callee
                 // activation, clear callee+args off this stack (the result lands
                 // where the callee was), flush acc/ip, and yield to `runDriver`
@@ -4552,6 +4680,53 @@ test "vm: caches live global function bindings" {
             try std.testing.expectEqual(isolated_hits, quick_global_binding_hits.load(.monotonic));
         }
     }
+}
+
+test "vm: quickens guarded pure numeric recurrence" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const source =
+        \\function fib(n) { return n < 2 ? n : fib(n - 1) + fib(n - 2); }
+        \\var saved = fib;
+        \\var first = fib(8);
+        \\fib = function () { return 100; };
+        \\first + saved(3)
+    ;
+    const old_parallel = bc.ic_seqlock_enabled.load(.monotonic);
+    defer bc.ic_seqlock_enabled.store(old_parallel, .monotonic);
+    const hits_before = quick_numeric_recurrence_hits.load(.monotonic);
+    var isolated_hits: u64 = undefined;
+    var run_steps: [2]u64 = undefined;
+    for ([_]bool{ false, true }, 0..) |parallel, run_index| {
+        bc.ic_seqlock_enabled.store(parallel, .monotonic);
+        var parser = try Parser.init(allocator, source);
+        const program = try parser.parseProgram();
+        const chunk = try Compiler.compileProgram(allocator, program);
+        var env = Environment{ .arena = allocator, .fn_scope = true };
+        const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
+        try interp.installGlobals(&env, root_shape);
+        const global = try gc_mod.allocObj(allocator);
+        global.* = .{};
+        try env.put("globalThis", Value.obj(global));
+        try interp.mirrorGlobalsOnto(&env, global, root_shape);
+        var machine = Interpreter{
+            .arena = allocator,
+            .env = &env,
+            .root_shape = root_shape,
+            .global_object = global,
+            .this_value = Value.obj(global),
+        };
+        try std.testing.expectEqual(@as(f64, 221), (try run(&machine, chunk, null)).asNum());
+        run_steps[run_index] = machine.steps;
+        if (!parallel) {
+            try std.testing.expect(quick_numeric_recurrence_hits.load(.monotonic) > hits_before);
+            isolated_hits = quick_numeric_recurrence_hits.load(.monotonic);
+        } else {
+            try std.testing.expectEqual(isolated_hits, quick_numeric_recurrence_hits.load(.monotonic));
+        }
+    }
+    try std.testing.expectEqual(run_steps[1], run_steps[0]);
 }
 
 test "vm: quickens packed dense numeric array reads" {
