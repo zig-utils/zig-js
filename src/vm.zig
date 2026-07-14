@@ -508,6 +508,23 @@ inline fn numberRemainder(a: f64, b: f64) f64 {
     return @rem(a, b);
 }
 
+inline fn exactNonNegativeU32(number: f64, allow_zero: bool) ?u32 {
+    if (!std.math.isFinite(number) or @trunc(number) != number or
+        number < @as(f64, if (allow_zero) 0 else 1) or
+        number > @as(f64, @floatFromInt(std.math.maxInt(u32))))
+        return null;
+    return @intFromFloat(number);
+}
+
+/// ToInt32 over an already-numeric quick-path value. Small exact unsigned
+/// values are the overwhelmingly common case and need neither Value boxing nor
+/// the generic modulo calculation; every other Number retains the full
+/// ECMAScript conversion.
+inline fn quickNumberToInt32(number: f64) i32 {
+    if (exactNonNegativeU32(number, true)) |integer| return @bitCast(integer);
+    return @bitCast(Value.uint32FromF64(number));
+}
+
 const max_quick_property_instructions: usize = 20;
 const max_quick_property_stack: usize = 8;
 const max_quick_property_ops: usize = 8;
@@ -686,7 +703,7 @@ const QuickObjectAllocationLoop = struct {
     stamp_mask: i32,
     checksum_mask: i32,
     modulus: f64,
-    increment: f64,
+    increment: u32,
     displaced_property_instruction: u32,
     literal_instructions: [3]u32,
     exit_ip: u32,
@@ -1219,7 +1236,7 @@ fn compileQuickObjectAllocationLoop(chunk: *Chunk, start: usize) ?QuickObjectAll
         .modulus = constants[1],
         .stamp_mask = Value.num(constants[2]).toInt32(),
         .checksum_mask = Value.num(constants[3]).toInt32(),
-        .increment = constants[4],
+        .increment = exactNonNegativeU32(constants[4], false) orelse return null,
         .displaced_property_instruction = @intCast(start + 15),
         .literal_instructions = .{ @intCast(start + 26), @intCast(start + 30), @intCast(start + 33) },
         .exit_ip = @intCast(start + expected.len),
@@ -2529,7 +2546,8 @@ fn tryQuickObjectAllocationLoop(
     if (!frame.slots[counter_slot].isNumber() or !frame.slots[total_slot].isNumber() or
         !frame.slots[extra_slot].isNumber()) return null;
     const bound_value = quickArrayBoundValue(allocation.bound, frame) orelse return null;
-    var counter = frame.slots[counter_slot].asNum();
+    var counter_integer = exactNonNegativeU32(frame.slots[counter_slot].asNum(), true) orelse return null;
+    var counter: f64 = @floatFromInt(counter_integer);
     var total = frame.slots[total_slot].asNum();
     const extra = frame.slots[extra_slot].asNum();
     const bound = bound_value.asNum();
@@ -2557,7 +2575,8 @@ fn tryQuickObjectAllocationLoop(
     var iterations: u64 = 0;
     var completed = false;
     while (iterations < max_iterations and counter < bound) {
-        const selected = Value.num(counter).toInt32() & allocation.selector_mask;
+        const counter_int32: i32 = @bitCast(counter_integer);
+        const selected = counter_int32 & allocation.selector_mask;
         if (selected < 0) break;
         const element_index: usize = @intCast(selected);
         if (element_index >= array.elements.items.len) break;
@@ -2567,8 +2586,9 @@ fn tryQuickObjectAllocationLoop(
         const displaced_property_slot = quickOwnDataSlot(chunk, allocation.displaced_property_instruction, displaced) orelse break;
         const previous = quickSlotNumber(displaced, displaced_property_slot) orelse break;
         const next = numberRemainder((previous + counter) + extra, allocation.modulus);
-        const stamp: f64 = @floatFromInt(Value.num(counter).toInt32() & allocation.stamp_mask);
-        const next_counter = counter + allocation.increment;
+        const stamp: f64 = @floatFromInt(counter_int32 & allocation.stamp_mask);
+        const next_counter_integer = std.math.add(u32, counter_integer, allocation.increment) catch break;
+        const next_counter: f64 = @floatFromInt(next_counter_integer);
         const completes_loop = !(next_counter < bound);
         const completed_extra_steps = (iterations + 1) * steps_per_iteration - 1 +
             (if (completes_loop) @as(u64, 4) else 0);
@@ -2604,8 +2624,9 @@ fn tryQuickObjectAllocationLoop(
             array.replaceDenseElementExclusivePresentAfterBarrier(element_index, fresh_value);
         } else if (!array.replaceDenseElement(element_index, fresh_value)) unreachable;
 
-        const checksum_value = Value.num((next + stamp) + previous).toInt32() & allocation.checksum_mask;
+        const checksum_value = quickNumberToInt32((next + stamp) + previous) & allocation.checksum_mask;
         total += @floatFromInt(checksum_value);
+        counter_integer = next_counter_integer;
         counter = next_counter;
         frame.slots[total_slot] = Value.num(total);
         frame.slots[counter_slot] = Value.num(counter);
@@ -7344,6 +7365,35 @@ test "vm: quickens fixed-shape object allocation loops with exact steps and guar
 
     bc.ic_seqlock_enabled.store(false, .monotonic);
     const fallback_hits = quick_object_allocation_loop_hits.load(.monotonic);
+    const guarded_counter_kernel =
+        \\function allocateFrom(items, limit, extra, cursor) {
+        \\  let total = 0;
+        \\  while (cursor < limit) {
+        \\    let selected = cursor & 0;
+        \\    let old = items[selected];
+        \\    let next = (old.seed + cursor + extra) % 1009;
+        \\    let replacement = { seed: next, mark: cursor & 0, prior: old.seed };
+        \\    items[selected] = replacement;
+        \\    total = total + ((replacement.seed + replacement.mark + replacement.prior) & 31);
+        \\    cursor = cursor + 1;
+        \\  }
+        \\  return total;
+        \\}
+    ;
+    const guarded_counter_cases = [_]struct { limit: []const u8, start: []const u8 }{
+        .{ .limit = "1.5", .start = "0.5" },
+        .{ .limit = "0", .start = "-1" },
+        .{ .limit = "4294967297", .start = "4294967296" },
+    };
+    for (guarded_counter_cases) |case| {
+        const guarded_result = try vmRun(allocator, try std.fmt.allocPrint(
+            allocator,
+            "{s}\nallocateFrom([{{ seed: 1, mark: 0, prior: 0 }}], {s}, 2, {s})",
+            .{ guarded_counter_kernel, case.limit, case.start },
+        ));
+        try std.testing.expect(guarded_result.isNumber());
+        try std.testing.expectEqual(fallback_hits, quick_object_allocation_loop_hits.load(.monotonic));
+    }
     try std.testing.expectEqual(@as(f64, 2), (try vmRun(allocator, try std.fmt.allocPrint(allocator,
         \\{s}
         \\let calls = 0;
