@@ -503,12 +503,18 @@ inline fn numberRemainder(a: f64, b: f64) f64 {
     return @rem(a, b);
 }
 
-const max_quick_property_instructions: usize = 16;
+const max_quick_property_instructions: usize = 20;
 const max_quick_property_stack: usize = 8;
+
+const QuickPropertyUpdate = struct {
+    extra_steps: u8,
+    next_ip: usize,
+};
 
 // Test-only observations enforce that the optimized path remains reachable.
 // The fetchAdd call is compile-time removed from production builds.
 var quick_property_update_hits: std.atomic.Value(u64) = .init(0);
+var quick_property_loop_tail_hits: std.atomic.Value(u64) = .init(0);
 
 inline fn quickPlainObject(value_: Value) ?*value.Object {
     if (!value_.isObject()) return null;
@@ -528,7 +534,7 @@ inline fn quickPropertySlot(chunk: *Chunk, instruction: usize, object: *value.Ob
 /// Every read is guarded before the sole mutation, so any miss can safely fall
 /// back to the ordinary bytecode at `start`. This isolated-mode tier accepts no
 /// accessors, attributes, prototypes, arrays, coercions, or observable calls.
-fn tryNumericPropertyUpdate(chunk: *Chunk, frame: *Frame, start: usize, max_extra_steps: u64) ?u8 {
+fn tryNumericPropertyUpdate(chunk: *Chunk, frame: *Frame, start: usize, max_extra_steps: u64) ?QuickPropertyUpdate {
     const code = chunk.code.items;
     if (start >= code.len or code[start].op != .load_local) return null;
     const base_index: usize = @intCast(code[start].a);
@@ -586,14 +592,79 @@ fn tryNumericPropertyUpdate(chunk: *Chunk, frame: *Frame, start: usize, max_extr
             },
             .set_prop => {
                 if (depth != 1 or cursor + 1 >= code.len or code[cursor + 1].op != .pop) return null;
-                const consumed = cursor + 2 - start;
-                if (consumed > max_quick_property_instructions or consumed - 1 > max_extra_steps) return null;
                 const slot = quickPropertySlot(chunk, cursor, target) orelse return null;
                 const result = Value.num(numbers[0]);
+
+                var executed = cursor + 2 - start;
+                var next_ip = cursor + 2;
+                var update_local: ?usize = null;
+                var update_value: f64 = undefined;
+                tail: {
+                    // Fuse the canonical counted-loop tail:
+                    //   counter = counter <op> constant; jump condition
+                    //   condition: counter <cmp> bound; jump_if_false exit
+                    // A miss merely keeps the ordinary assignment-only trace.
+                    const tail_start = cursor + 2;
+                    if (tail_start + 5 >= code.len) break :tail;
+                    const load_counter = code[tail_start];
+                    const load_delta = code[tail_start + 1];
+                    const arithmetic = code[tail_start + 2];
+                    const store_counter = code[tail_start + 3];
+                    if (load_counter.op != .load_local or load_delta.op != .load_const or
+                        store_counter.op != .store_local or store_counter.a != load_counter.a or
+                        code[tail_start + 4].op != .pop or code[tail_start + 5].op != .jump)
+                        break :tail;
+                    const counter_index: usize = @intCast(load_counter.a);
+                    const delta_index: usize = @intCast(load_delta.a);
+                    if (counter_index >= frame.slots.len or delta_index >= chunk.consts.items.len) break :tail;
+                    const counter = frame.slots[counter_index];
+                    const delta = chunk.consts.items[delta_index];
+                    if (!counter.isNumber() or !delta.isNumber()) break :tail;
+                    const updated = switch (arithmetic.op) {
+                        .add => counter.asNum() + delta.asNum(),
+                        .sub => counter.asNum() - delta.asNum(),
+                        .mul => counter.asNum() * delta.asNum(),
+                        .div => counter.asNum() / delta.asNum(),
+                        .mod => numberRemainder(counter.asNum(), delta.asNum()),
+                        else => break :tail,
+                    };
+
+                    const condition: usize = @intCast(code[tail_start + 5].a);
+                    if (condition + 3 >= code.len or condition >= start or condition + 4 > start) break :tail;
+                    const condition_counter = code[condition];
+                    const load_bound = code[condition + 1];
+                    const comparison = code[condition + 2];
+                    const branch = code[condition + 3];
+                    if (condition_counter.op != .load_local or condition_counter.a != load_counter.a or
+                        load_bound.op != .load_const or branch.op != .jump_if_false)
+                        break :tail;
+                    const bound_index: usize = @intCast(load_bound.a);
+                    if (bound_index >= chunk.consts.items.len) break :tail;
+                    const bound = chunk.consts.items[bound_index];
+                    if (!bound.isNumber()) break :tail;
+                    const keep_looping = switch (comparison.op) {
+                        .lt => updated < bound.asNum(),
+                        .le => updated <= bound.asNum(),
+                        .gt => updated > bound.asNum(),
+                        .ge => updated >= bound.asNum(),
+                        else => break :tail,
+                    };
+
+                    executed += 10; // local update + backedge + four-instruction condition
+                    next_ip = if (keep_looping) condition + 4 else @intCast(branch.a);
+                    update_local = counter_index;
+                    update_value = updated;
+                }
+
+                if (executed > max_quick_property_instructions or executed - 1 > max_extra_steps) return null;
                 gc_mod.barrierValueFrom(target, result);
                 target.slots.items[slot] = result;
+                if (update_local) |index| {
+                    frame.slots[index] = Value.num(update_value);
+                    if (builtin.is_test) _ = quick_property_loop_tail_hits.fetchAdd(1, .monotonic);
+                }
                 if (builtin.is_test) _ = quick_property_update_hits.fetchAdd(1, .monotonic);
-                return @intCast(consumed);
+                return .{ .extra_steps = @intCast(executed - 1), .next_ip = next_ip };
             },
             else => return null,
         }
@@ -898,10 +969,9 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                     const steps_until_checkpoint = 1024 - (vm.steps & 1023);
                     const steps_until_budget = interp.max_steps - vm.steps;
                     const max_extra_steps = @min(steps_until_checkpoint - 1, steps_until_budget);
-                    if (tryNumericPropertyUpdate(chunk, cf, ip - 1, max_extra_steps)) |consumed| {
-                        const extra: u64 = consumed - 1;
-                        vm.steps += extra;
-                        ip += @intCast(extra);
+                    if (tryNumericPropertyUpdate(chunk, cf, ip - 1, max_extra_steps)) |quick| {
+                        vm.steps += quick.extra_steps;
+                        ip = quick.next_ip;
                         continue;
                     }
                 }
@@ -3605,6 +3675,7 @@ test "vm: quickens warmed numeric property update traces" {
     const function = Interpreter.funcOf(function_value).?;
     const function_chunk = function.chunk.?;
     const before = quick_property_update_hits.load(.monotonic);
+    const loop_tails_before = quick_property_loop_tail_hits.load(.monotonic);
     var expected_steps: u64 = 0;
     for (0..3) |iteration| {
         if (iteration == 2) machine.steps = 1018;
@@ -3624,6 +3695,7 @@ test "vm: quickens warmed numeric property update traces" {
             try std.testing.expectEqual(expected_steps, elapsed_steps);
     }
     try std.testing.expect(quick_property_update_hits.load(.monotonic) > before);
+    try std.testing.expect(quick_property_loop_tail_hits.load(.monotonic) > loop_tails_before);
 }
 
 test "vm: for loop with ++ and compound assignment" {
