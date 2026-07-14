@@ -144,6 +144,8 @@ const Tag = enum(u8) {
     shared_array_buffer,
     typed_array,
     data_view,
+    blob,
+    file,
 };
 
 // ---- writer -----------------------------------------------------------------
@@ -201,7 +203,7 @@ const Reader = struct {
 
     fn tag(r: *Reader) Error!Tag {
         const b = try r.byte();
-        if (b > @intFromEnum(Tag.data_view)) return error.Malformed;
+        if (b > @intFromEnum(Tag.file)) return error.Malformed;
         return @enumFromInt(b);
     }
     fn byte(r: *Reader) Error!u8 {
@@ -500,6 +502,22 @@ const Serializer = struct {
             }
             return;
         }
+        if (o.getOwn("\x00blobbuf")) |bufv| {
+            // Blob/File: copy the byte payload, MIME type, and (File) name/mtime.
+            const is_file = o.getOwn("\x00filename") != null;
+            try s.w.tag(if (is_file) .file else .blob);
+            const bytes: []const u8 = if (bufv.isObject()) (if (bufv.asObj().array_buffer) |ab| ab.bytes() else &.{}) else &.{};
+            try s.writeStr(bytes);
+            const tv = o.getOwn("\x00blobtype");
+            try s.writeStr(if (tv != null and tv.?.isString()) tv.?.asStr() else "");
+            if (is_file) {
+                const nv = o.getOwn("\x00filename");
+                try s.writeStr(if (nv != null and nv.?.isString()) nv.?.asStr() else "");
+                const mv = o.getOwn("\x00filemod");
+                try s.w.num(if (mv != null and mv.?.isNumber()) mv.?.asNum() else 0);
+            }
+            return;
+        }
         if (o.prim) |p| {
             // Boolean/Number/String wrapper: the boxed primitive only.
             try s.w.tag(.wrapper);
@@ -748,6 +766,8 @@ fn tagCreatesObject(tag: Tag) bool {
         .shared_array_buffer,
         .typed_array,
         .data_view,
+        .blob,
+        .file,
         => true,
         else => false,
     };
@@ -796,6 +816,14 @@ fn skipSerialized(r: *Reader, state: *SkipState, depth: u16) Reader.Error!void {
         .regexp => {
             _ = try r.str();
             _ = try r.str();
+        },
+        .blob, .file => {
+            _ = try r.str(); // bytes
+            _ = try r.str(); // type
+            if (tag == .file) {
+                _ = try r.str(); // name
+                _ = try r.num(); // lastModified
+            }
         },
         .map => {
             const n = try r.int(u32);
@@ -948,6 +976,20 @@ const Deserializer = struct {
                 if (!re.isObject()) return d.fail();
                 try d.objs.append(a, re.asObj());
                 return re;
+            },
+            .blob, .file => {
+                const bytes = try a.dupe(u8, d.r.str() catch return d.fail());
+                const blob_type = try a.dupe(u8, d.r.str() catch return d.fail());
+                var name: []const u8 = "";
+                var last_mod: f64 = 0;
+                if (t == .file) {
+                    name = try a.dupe(u8, d.r.str() catch return d.fail());
+                    last_mod = d.r.num() catch return d.fail();
+                }
+                const blob = try d.self.makeClonedBlob(t == .file, bytes, blob_type, name, last_mod);
+                if (!blob.isObject()) return d.fail();
+                try d.objs.append(a, blob.asObj());
+                return blob;
             },
             .map => {
                 const o = (try d.self.newObject()).asObj();

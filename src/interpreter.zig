@@ -11235,6 +11235,16 @@ pub const Interpreter = struct {
         return o;
     }
 
+    /// Rebuild a Blob/File from structured-clone data (called by structured_clone).
+    pub fn makeClonedBlob(self: *Interpreter, is_file: bool, bytes: []const u8, blob_type: []const u8, name: []const u8, last_mod: f64) EvalError!Value {
+        const obj = try blobMake(self, if (is_file) "File" else "Blob", bytes, blob_type);
+        if (is_file) {
+            try obj.setOwn(self.arena, self.root_shape, "\x00filename", try Value.strAlloc(self.arena, name));
+            try obj.setOwn(self.arena, self.root_shape, "\x00filemod", Value.num(last_mod));
+        }
+        return Value.obj(obj);
+    }
+
     pub fn makeImmutableUint8ArrayFromBytes(self: *Interpreter, bytes: []const u8) EvalError!*value.Object {
         const o = try newTypedArray(self, .u8, bytes.len);
         const ab = o.typed_array.?.buffer.array_buffer.?;
