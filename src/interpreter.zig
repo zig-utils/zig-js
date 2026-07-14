@@ -22298,7 +22298,12 @@ fn dtfCanonNamedTimeZone(self: *Interpreter, s: []const u8) EvalError!?[]const u
             word_start = (c == '/' or c == '_' or c == '-');
         }
     }
-    return try out.toOwnedSlice(self.arena);
+    const candidate = try out.toOwnedSlice(self.arena);
+    // A well-formed `Region/City` string is only a valid time zone if it names a
+    // real IANA zone (after alias resolution). Without this, "Bogus/Nowhere" was
+    // silently accepted; the Intl constructors must throw a RangeError instead.
+    if (!iana_zones.isCanonical(canonicalTimeZoneName(candidate))) return null;
+    return candidate;
 }
 
 fn dtfCanonTimeZone(self: *Interpreter, s: []const u8) EvalError![]const u8 {
