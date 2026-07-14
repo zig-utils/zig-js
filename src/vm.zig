@@ -2579,7 +2579,10 @@ fn tryQuickObjectAllocationLoop(
         frame.slots[displaced_slot] = displaced_value;
         frame.slots[value_slot] = Value.num(next);
         frame.slots[fresh_slot] = fresh_value;
-        vm.checkRestricted(array) catch |err| {
+        // Avoid the non-inlined error/TLS path for the overwhelmingly common
+        // unrestricted receiver. Restricted arrays retain the full ownership
+        // check and the exact error-step accounting below.
+        if (array.restricted_to.load(.acquire) != 0) vm.checkRestricted(array) catch |err| {
             vm.steps += iterations * steps_per_iteration + 39;
             return err;
         };

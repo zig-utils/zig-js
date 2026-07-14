@@ -11601,6 +11601,56 @@ test "enable_gc nursery: quick object replacement keeps exact-managed children" 
     try std.testing.expectEqual(@as(f64, @floatFromInt(seeds[0] + seeds[7])), retained.asNum());
 }
 
+test "quick object replacement checks a restricted receiver before fused mutation" {
+    const old_parallel = bc.ic_seqlock_enabled.load(.monotonic);
+    defer bc.ic_seqlock_enabled.store(old_parallel, .monotonic);
+    bc.ic_seqlock_enabled.store(false, .monotonic);
+
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true, .enable_jit = false });
+    defer ctx.destroy();
+
+    _ = try ctx.evaluate(
+        \\function allocate(items, limit) {
+        \\  var total = 0;
+        \\  var cursor = 0;
+        \\  while (cursor < limit) {
+        \\    var selected = cursor & 7;
+        \\    var old = items[selected];
+        \\    var next = (old.seed + cursor + 2) % 1009;
+        \\    var replacement = { seed: next, mark: cursor & 3, prior: old.seed };
+        \\    items[selected] = replacement;
+        \\    total = total + ((replacement.seed + replacement.mark + replacement.prior) & 31);
+        \\    cursor = cursor + 1;
+        \\  }
+        \\  return total;
+        \\}
+        \\var items = [
+        \\  { seed: 1, mark: 0, prior: 0 }, { seed: 2, mark: 0, prior: 0 },
+        \\  { seed: 3, mark: 0, prior: 0 }, { seed: 4, mark: 0, prior: 0 },
+        \\  { seed: 5, mark: 0, prior: 0 }, { seed: 6, mark: 0, prior: 0 },
+        \\  { seed: 7, mark: 0, prior: 0 }, { seed: 8, mark: 0, prior: 0 }
+        \\];
+        \\allocate(items, 96);
+    );
+    const items = ctx.global_object.getOwn("items").?.asObj();
+    const first_before = items.elementAt(0).?.asObj();
+    const current: u64 = @intCast(std.Thread.getCurrentId());
+    items.restricted_to.store(if (current == std.math.maxInt(u64)) current - 1 else current + 1, .release);
+    defer items.restricted_to.store(0, .release);
+
+    // A zero-iteration loop never performs an internal method on the receiver.
+    try std.testing.expectEqual(@as(f64, 0), (try ctx.evaluate("allocate(items, 0)")).asNum());
+    const hits_before = vm.quickObjectAllocationLoopHitsForTesting();
+    try std.testing.expect((try ctx.evaluate(
+        \\var restrictedCaught = false;
+        \\try { allocate(items, 1); }
+        \\catch (error) { restrictedCaught = true; }
+        \\restrictedCaught;
+    )).asBool());
+    try std.testing.expectEqual(first_before, items.elementAt(0).?.asObj());
+    try std.testing.expectEqual(hits_before, vm.quickObjectAllocationLoopHitsForTesting());
+}
+
 test "enable_gc: collectGarbage reclaims unreachable objects, keeps reachable" {
     const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
     defer ctx.destroy();
