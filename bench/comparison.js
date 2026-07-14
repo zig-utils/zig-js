@@ -48,11 +48,14 @@ function benchmarkDirectCallStep(value, delta) {
 }
 
 function benchmarkDirectCalls(jobs, lane) {
+  // Copy the callee once per lane so shared-realm rows measure ordinary call
+  // throughput rather than contending on the benchmark's own global binding.
+  var step = benchmarkDirectCallStep;
   var total = 0;
   for (var job = 0; job < jobs; job = job + 1) {
     var value = lane + job + 1;
     for (var i = 0; i < 10000; i = i + 1)
-      value = benchmarkDirectCallStep(value, i);
+      value = step(value, i);
     total = total + value;
   }
   return total;

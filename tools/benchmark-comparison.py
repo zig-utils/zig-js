@@ -23,7 +23,7 @@ WORKLOADS = {
     "arithmetic": 160,
     "properties": 200,
     "arrays": 450,
-    "direct_calls": 400,
+    "direct_calls": 500,
     "fibonacci": 100,
 }
 
