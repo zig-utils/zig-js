@@ -811,6 +811,7 @@ fn compileNumeric(chunk: *const Chunk) !jit.CompiledCode {
 }
 
 test "compiler lowers a constant-return bytecode function" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
     const Parser = @import("../parser.zig").Parser;
     const Compiler = @import("../compiler.zig").Compiler;
 

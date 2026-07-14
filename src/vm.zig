@@ -3102,6 +3102,7 @@ test "vm: functions, recursion, closures" {
 }
 
 test "vm: hot primitive constant function tiers through native entry" {
+    if (!jit.supported or @import("builtin").cpu.arch != .aarch64) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
