@@ -98,6 +98,24 @@ function benchmarkClosureCalls(jobs, lane) {
   return total;
 }
 
+function benchmarkArgumentsStep(value, delta) {
+  // Read through the real per-call arguments object rather than the named
+  // parameters. This exercises arguments materialization and indexed access.
+  return (arguments[0] + arguments[1]) % 1000003;
+}
+
+function benchmarkArgumentsCalls(jobs, lane) {
+  var step = benchmarkArgumentsStep;
+  var total = 0;
+  for (var job = 0; job < jobs; job = job + 1) {
+    var value = lane + job + 1;
+    for (var i = 0; i < 10000; i = i + 1)
+      value = step(value, i);
+    total = total + value;
+  }
+  return total;
+}
+
 var benchmarkFibValue = function benchmarkFibValue(n, state) {
   // Keep each call observable so this row continues measuring recursive call
   // throughput even when an engine can recognize and memoize the pure
@@ -122,6 +140,7 @@ function benchmarkFunction(name) {
   if (name === "direct_calls") return benchmarkDirectCalls;
   if (name === "method_calls") return benchmarkMethodCalls;
   if (name === "closure_calls") return benchmarkClosureCalls;
+  if (name === "arguments_calls") return benchmarkArgumentsCalls;
   if (name === "fibonacci") return benchmarkFibonacci;
   throw new Error("unknown benchmark workload: " + name);
 }

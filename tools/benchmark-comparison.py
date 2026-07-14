@@ -26,6 +26,7 @@ WORKLOADS = {
     "direct_calls": 500,
     "method_calls": 500,
     "closure_calls": 200,
+    "arguments_calls": 200,
     "fibonacci": 100,
 }
 
