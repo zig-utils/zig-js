@@ -2081,6 +2081,9 @@ pub const Context = struct {
     /// both the writers and the collector **only under `parallel_js`** (a null
     /// `realm_lock_p` in GIL mode keeps those paths byte-identical). A brief mutex.
     realm_lock: std.atomic.Mutex = .unlocked,
+    /// Realm-wide prototype graph mutation lock. OrdinarySetPrototypeOf must
+    /// make its multi-object cycle check and final edge install one operation.
+    prototype_lock: std.atomic.Mutex = .unlocked,
     /// C-API `Boxed` handles (`JSValueRef`s) protected by the embedder.
     /// `JSValueProtect` registers a wrapper here when the GC is on (`*Boxed`
     /// aliases `*Value`, its first field); `gc.zig`'s `traceRoots` marks them
@@ -2490,6 +2493,7 @@ pub const Context = struct {
             // single-threaded and `.gil = true` execution stay lock-free.
             .lock_microtasks = self.parallel_js,
             .realm_lock = if (self.parallel_js) &self.realm_lock else null,
+            .prototype_lock = if (self.parallel_js) &self.prototype_lock else null,
             .print_buffer = &self.print_buffer,
             .tdz_marker = self.tdz_marker,
             .sab_retains = &self.sab_retains,

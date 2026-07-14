@@ -970,15 +970,32 @@ pub const Object = struct {
     }
 
     fn backingFor(self: *Object, fallback: std.mem.Allocator, comptime field: []const u8) std.mem.Allocator {
+        return self.backingForTracked(fallback, field).allocator;
+    }
+
+    const BackingSelection = struct {
+        allocator: std.mem.Allocator,
+        activated: bool,
+    };
+
+    fn backingForTracked(self: *Object, fallback: std.mem.Allocator, comptime field: []const u8) BackingSelection {
         const backing_locked = self.lockBacking();
         defer self.unlockBacking(backing_locked);
         if (self.backing_allocator) |a| {
             if (!@field(self.backing_flags, field)) {
-                if (self.activateBacking(field)) |active| return active;
+                if (self.activateBacking(field)) |active| return .{ .allocator = active, .activated = true };
             }
-            return a;
+            return .{ .allocator = a, .activated = false };
         }
-        return self.activateBacking(field) orelse fallback;
+        if (self.activateBacking(field)) |active| return .{ .allocator = active, .activated = true };
+        return .{ .allocator = fallback, .activated = false };
+    }
+
+    fn activeBackingAllocator(self: *Object, comptime field: []const u8) ?std.mem.Allocator {
+        const backing_locked = self.lockBacking();
+        defer self.unlockBacking(backing_locked);
+        if (!@field(self.backing_flags, field)) return null;
+        return self.backing_allocator;
     }
 
     /// Whether new own properties may be added (see `extensible_flag`).
@@ -1071,10 +1088,9 @@ pub const Object = struct {
         }
 
         const old_len = self.slots.items.len;
-        const was_backed = self.backing_flags.slots;
-        const allocator = self.slotsAllocator(fallback);
-        const storage = allocator.alloc(Value, self.inline_slots.len * 2) catch |err| {
-            if (!was_backed and self.backing_flags.slots) self.deactivateBacking("slots");
+        const backing = self.backingForTracked(fallback, "slots");
+        const storage = backing.allocator.alloc(Value, self.inline_slots.len * 2) catch |err| {
+            if (backing.activated) self.deactivateBacking("slots");
             return err;
         };
         @memcpy(storage[0..old_len], self.slots.items);
@@ -1157,16 +1173,35 @@ pub const Object = struct {
 
     /// [[Prototype]], read/written atomically: `setPrototypeOf` (and internal
     /// reparenting) writes `proto` on a shared object while peers walk its
-    /// prototype chain (no-GIL). A nullable pointer is one word, so `.monotonic`
-    /// is a plain load/store — zero perf cost, it just marks the access
-    /// synchronized for ThreadSanitizer. Object-creation struct-inits write the
-    /// raw field directly (the object isn't published yet → no race).
+    /// prototype chain (no-GIL). Acquire/release also publishes the accompanying
+    /// explicit-null discriminator without requiring readers to lock the graph.
+    /// Object-creation struct-inits write the raw field directly (the object
+    /// isn't published yet → no race).
     pub inline fn protoAtomic(self: *const Object) ?*Object {
-        return @atomicLoad(?*Object, &@constCast(self).proto, .monotonic);
+        return @atomicLoad(?*Object, &@constCast(self).proto, .acquire);
     }
     pub inline fn setProtoAtomic(self: *Object, p: ?*Object) void {
         gc_runtime.barrierFrom(@ptrCast(self), if (p) |proto| @ptrCast(proto) else null);
-        @atomicStore(?*Object, &self.proto, p, .monotonic);
+        @atomicStore(?*Object, &self.proto, p, .release);
+    }
+
+    pub inline fn protoExplicitNull(self: *const Object) bool {
+        return @atomicLoad(bool, &@constCast(self).proto_explicit_null, .monotonic);
+    }
+
+    pub inline fn setProtoExplicitNull(self: *Object, value_: bool) void {
+        @atomicStore(bool, &self.proto_explicit_null, value_, .monotonic);
+    }
+
+    pub inline fn setPrototypeStateAtomic(self: *Object, p: ?*Object) void {
+        // Publish the explicit-null discriminator before the release-store of a
+        // null link. A reader that acquires that null therefore cannot revive
+        // the implicit Function.prototype fallback. For a non-null link the
+        // pointer itself determines the result, so clear the discriminator only
+        // after publishing the link.
+        if (p == null) self.setProtoExplicitNull(true);
+        self.setProtoAtomic(p);
+        if (p != null) self.setProtoExplicitNull(false);
     }
 
     /// Gate for the per-object `elements_lock`, enabled by the
@@ -1749,8 +1784,8 @@ pub const Object = struct {
     }
 
     fn resetSlotsForRebuildUnlocked(self: *Object) void {
-        if (self.backing_flags.slots) {
-            self.slots.deinit(self.backing_allocator.?);
+        if (self.activeBackingAllocator("slots")) |allocator| {
+            self.slots.deinit(allocator);
             self.deactivateBacking("slots");
         }
         self.initInlineSlots();
@@ -1764,8 +1799,7 @@ pub const Object = struct {
 
     fn deinitKeyOrderUnlocked(self: *Object) void {
         if (self.key_order.load(.monotonic)) |ord| {
-            if (self.backing_flags.key_order) {
-                const a = self.backing_allocator.?;
+            if (self.activeBackingAllocator("key_order")) |a| {
                 for (ord.items) |key| a.free(key);
                 ord.deinit(a);
                 a.destroy(ord);
@@ -1791,16 +1825,17 @@ pub const Object = struct {
         // flag, but the replacement list uses that same backing store and still
         // needs to be visible to the GC finalizer.
         const old_key_order = self.key_order.load(.monotonic);
-        const old_uses_backing = self.backing_flags.key_order;
-        const old_backing_allocator = self.backing_allocator;
-        const alloc = self.keyOrderAllocator(arena);
+        const old_backing_allocator = self.activeBackingAllocator("key_order");
+        const old_uses_backing = old_backing_allocator != null;
+        const backing = self.backingForTracked(arena, "key_order");
+        const alloc = backing.allocator;
         const ko = try alloc.create(std.ArrayListUnmanaged([]const u8));
         ko.* = .empty;
         errdefer {
             for (ko.items) |key| alloc.free(key);
             ko.deinit(alloc);
             alloc.destroy(ko);
-            if (!old_uses_backing and self.backing_flags.key_order) self.deactivateBacking("key_order");
+            if (backing.activated) self.deactivateBacking("key_order");
         }
         for (names) |name| try ko.append(alloc, try alloc.dupe(u8, name));
         if (old_key_order) |ord| {
@@ -1985,7 +2020,7 @@ pub const Object = struct {
     fn deleteAttrUnlocked(self: *Object, name: []const u8) void {
         const m = self.attrsMap() orelse return;
         if (m.fetchRemove(name)) |removed| {
-            if (self.backing_flags.attrs) self.backing_allocator.?.free(removed.key);
+            if (self.activeBackingAllocator("attrs")) |allocator| allocator.free(removed.key);
         }
     }
 
@@ -2199,7 +2234,7 @@ pub const Object = struct {
         if (m.getPtr(key) == null) return .absent;
         if (!self.getAttrUnlocked(key).configurable) return .blocked;
         if (m.fetchRemove(key)) |removed| {
-            if (self.backing_flags.accessors) self.backing_allocator.?.free(removed.key);
+            if (self.activeBackingAllocator("accessors")) |allocator| allocator.free(removed.key);
         }
         if (self.is_array) {
             if (canonicalIndex(key)) |i| {
@@ -3013,7 +3048,7 @@ test "object named property delete rebuild serializes with writers" {
 // keep the corpus TSan-clean. Run under `-Dtsan=true` to also catch data races;
 // without TSan they still catch torn reads / crashes / corruption. ----
 
-test "Object.proto atomic read survives concurrent setPrototypeOf" {
+test "Object prototype state atomics survive concurrent setPrototypeOf" {
     var a = Object{};
     var b = Object{};
     var o = Object{ .proto = &a };
@@ -3023,11 +3058,15 @@ test "Object.proto atomic read survives concurrent setPrototypeOf" {
                 const p = target.protoAtomic();
                 // Must always be one of the two valid protos (never a torn ptr).
                 if (p != pa and p != pb) @panic("proto torn read");
+                _ = target.protoExplicitNull();
             }
         }
         fn writer(target: *Object, pa: *Object, pb: *Object, stop: *std.atomic.Value(bool)) void {
             var i: usize = 0;
-            while (i < 200_000) : (i += 1) target.setProtoAtomic(if ((i & 1) == 0) pa else pb);
+            while (i < 200_000) : (i += 1) {
+                target.setProtoAtomic(if ((i & 1) == 0) pa else pb);
+                target.setProtoExplicitNull((i & 1) == 0);
+            }
             stop.store(true, .release);
         }
     };

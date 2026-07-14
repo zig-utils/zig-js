@@ -958,6 +958,10 @@ pub const Interpreter = struct {
     /// mid-script parallel collector reads under the same lock. Null on the
     /// GIL-serialized path.
     realm_lock: ?*std.atomic.Mutex = null,
+    /// Serializes OrdinarySetPrototypeOf's cycle check with its graph update in
+    /// no-GIL realms. The prototype relation spans multiple objects, so no
+    /// single object's lock can make opposite-direction updates atomic.
+    prototype_lock: ?*std.atomic.Mutex = null,
     /// Microtask currently popped from the queue and executing. It is no longer
     /// present in `microtasks`, so GC must trace it separately.
     current_microtask: ?promise.Microtask = null,
@@ -5510,7 +5514,7 @@ pub const Interpreter = struct {
             break :blk if (p.isObject()) p.asObj() else null;
         } else self.effectiveProto(target);
         obj.* = .{ .bound = @ptrCast(bf), .proto = target_proto };
-        obj.proto_explicit_null = target_proto == null;
+        obj.setProtoExplicitNull(target_proto == null);
         // Per spec: a bound function's `length` is max(0, target.length - args)
         // and its `name` is "bound " + target.name. Both are
         // { writable: false, enumerable: false, configurable: true }.
@@ -6785,6 +6789,22 @@ pub const Interpreter = struct {
 
     pub fn unlockRealm(self: *Interpreter) void {
         if (self.realm_lock) |m| {
+            gc_runtime.leaveTraceSensitiveLock();
+            m.unlock();
+        }
+    }
+
+    fn lockPrototypeGraph(self: *Interpreter) void {
+        const m = self.prototype_lock orelse return;
+        var spins: usize = 0;
+        while (!m.tryLock()) : (spins += 1) {
+            if ((spins & 0xff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
+        }
+        gc_runtime.enterTraceSensitiveLock();
+    }
+
+    fn unlockPrototypeGraph(self: *Interpreter) void {
+        if (self.prototype_lock) |m| {
             gc_runtime.leaveTraceSensitiveLock();
             m.unlock();
         }
@@ -9266,6 +9286,8 @@ pub const Interpreter = struct {
     }
 
     fn ordinarySetPrototypeOf(self: *Interpreter, o: *value.Object, new_proto: ?*value.Object) EvalError!bool {
+        self.lockPrototypeGraph();
+        defer self.unlockPrototypeGraph();
         const current = try self.ordinaryProtoValue(o);
         if (sameProtoValue(new_proto, current)) return true;
         if (self.objectProto()) |op| {
@@ -9283,8 +9305,7 @@ pub const Interpreter = struct {
             cur = self.effectiveProto(c);
         }
         if (new_proto) |np| _ = self.preparePrototypeUse(np);
-        o.setProtoAtomic(new_proto);
-        o.proto_explicit_null = new_proto == null;
+        o.setPrototypeStateAtomic(new_proto);
         return true;
     }
 
@@ -14664,7 +14685,7 @@ pub const Interpreter = struct {
     /// %Function.prototype%, which every function inherits.
     pub fn effectiveProto(self: *Interpreter, o: *value.Object) ?*value.Object {
         if (o.protoAtomic()) |p| return p;
-        if (!o.proto_explicit_null and (o.native != null or o.callback != null or o.js_func != null or o.bound != null)) return self.functionProto();
+        if (!o.protoExplicitNull() and (o.native != null or o.callback != null or o.js_func != null or o.bound != null)) return self.functionProto();
         return null;
     }
 
