@@ -644,6 +644,15 @@ pub const Binding = struct {
         return ContextMod.GcCellBacking.usesCellSlab(total);
     }
 
+    pub fn classifyConservativeInterior(self: *Binding, address: usize) gc.InteriorOwnership {
+        const backing = self.context.gc_cell_backing orelse return .outside;
+        return backing.classifyConservativeInterior(address);
+    }
+
+    pub fn allCellsUseOwnedStorage(_: *Binding) bool {
+        return true;
+    }
+
     /// Persistent roots reachable from the realm plus registered active
     /// Interpreter execution roots at quiescent checkpoints.
     pub fn traceRoots(self: *Binding, v: anytype) void {
@@ -879,6 +888,27 @@ pub const Binding = struct {
 
 /// The engine's GC heap type. `Context` holds one behind `enable_gc`.
 pub const Heap = gc.Heap(Binding);
+
+fn managedCellType(comptime kind: CellKind) type {
+    return switch (kind) {
+        .object => Object,
+        .environment => Environment,
+        .function => interp.Function,
+        .bound_fn => interp.Interpreter.BoundFn,
+        .promise => promise.Promise,
+        .generator => vm.Generator,
+        .iter_helper => value.IterHelper,
+        .module_ns => interp.ModuleNs,
+    };
+}
+
+comptime {
+    for (@typeInfo(CellKind).@"enum".field_values) |raw_kind| {
+        const Cell = managedCellType(@enumFromInt(raw_kind));
+        if (!ContextMod.GcCellBacking.usesCellSlab(Heap.cellAllocationBytes(Cell)))
+            @compileError("GC cell exceeds owned slab storage: " ++ @typeName(Cell));
+    }
+}
 
 /// Allocate an `Object` cell through the GC heap when present (tagged
 /// `.object`), else from the arena — today's engine. `heap_erased` is

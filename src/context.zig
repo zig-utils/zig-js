@@ -925,6 +925,42 @@ pub const GcCellBacking = struct {
         return false;
     }
 
+    fn classifyInteriorInBucketLocked(self: *GcCellBacking, idx: usize, address: usize) ?@import("gc").InteriorOwnership {
+        if (address < self.bucket_addr_min[idx] or address >= self.bucket_addr_max[idx]) return null;
+        const entry = self.findChunkAddrLocked(idx, address) orelse return null;
+        self.bucket_owns_hint[idx] = entry.chunk_idx;
+        const chunk = self.bucket_chunks[idx].items[entry.chunk_idx];
+        const offset = address - @intFromPtr(chunk.ptr);
+        if (offset >= self.bucket_next_offsets[idx].items[entry.chunk_idx]) return .owned_empty;
+        const slot_size = bucket_sizes[idx];
+        const slot_offset = offset - offset % slot_size;
+        return .{ .allocation = @ptrCast(chunk.ptr + slot_offset) };
+    }
+
+    /// Classify a conservative machine word through the persistent slab chunk
+    /// indexes. The collector still validates header magic and the exact payload
+    /// extent; this method only maps owned issued storage back to its slot base.
+    pub fn classifyConservativeInterior(self: *GcCellBacking, address: usize) @import("gc").InteriorOwnership {
+        const hint: usize = @intCast(self.owned_bucket_hint.load(.monotonic));
+        if (hint < bucket_count) {
+            self.acquireBucket(hint);
+            const result = self.classifyInteriorInBucketLocked(hint, address);
+            self.unlockBucket(hint);
+            if (result) |owned| return owned;
+        }
+        for (0..bucket_count) |idx| {
+            if (idx == hint) continue;
+            self.acquireBucket(idx);
+            const result = self.classifyInteriorInBucketLocked(idx, address);
+            self.unlockBucket(idx);
+            if (result) |owned| {
+                self.owned_bucket_hint.store(@intCast(idx), .monotonic);
+                return owned;
+            }
+        }
+        return .outside;
+    }
+
     fn recordReusedSlotLocked(self: *GcCellBacking, idx: usize, chunk_idx: usize) void {
         self.bucket_reused_allocs[idx] += 1;
         self.bucket_live_counts[idx].items[chunk_idx] += 1;
@@ -1333,6 +1369,13 @@ test "GC cell backing recognizes exact issued allocation starts" {
     try std.testing.expectEqual(@as(u8, @intCast(bucket_idx)), backing.owned_bucket_hint.load(.monotonic));
     try std.testing.expect(!backing.ownsCellAllocation(@ptrCast(cell.ptr + 16)));
     try std.testing.expect(!backing.ownsCellAllocation(@ptrCast(foreign.ptr)));
+    switch (backing.classifyConservativeInterior(@intFromPtr(cell.ptr + 16))) {
+        .allocation => |base| try std.testing.expectEqual(@intFromPtr(cell.ptr), @intFromPtr(base)),
+        else => return error.TestUnexpectedResult,
+    }
+    const unissued = backing.bucket_chunks[bucket_idx].items[0].ptr + backing.bucket_next_offsets[bucket_idx].items[0];
+    try std.testing.expect(std.meta.activeTag(backing.classifyConservativeInterior(@intFromPtr(unissued))) == .owned_empty);
+    try std.testing.expect(std.meta.activeTag(backing.classifyConservativeInterior(@intFromPtr(foreign.ptr))) == .outside);
     allocator.free(cell);
     // Ownership/issuance deliberately outlives liveness; zig-gc's cleared
     // header magic and the backing's explicit free tag reject this stale slot
@@ -1340,6 +1383,10 @@ test "GC cell backing recognizes exact issued allocation starts" {
     try std.testing.expect(backing.ownsCellAllocation(@ptrCast(cell.ptr)));
     const freed: *GcCellBacking.FreeNode = @ptrCast(@alignCast(cell.ptr));
     try std.testing.expectEqual(GcCellBacking.free_slot_magic, freed.magic);
+    switch (backing.classifyConservativeInterior(@intFromPtr(cell.ptr + 16))) {
+        .allocation => |base| try std.testing.expectEqual(@intFromPtr(cell.ptr), @intFromPtr(base)),
+        else => return error.TestUnexpectedResult,
+    }
 }
 
 test "GC cell backing ownership hint avoids repeated bucket chunk scans" {
