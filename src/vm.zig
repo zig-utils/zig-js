@@ -591,6 +591,7 @@ var quick_property_specialized_hits: std.atomic.Value(u64) = .init(0);
 var quick_dense_array_index_hits: std.atomic.Value(u64) = .init(0);
 var quick_array_length_hits: std.atomic.Value(u64) = .init(0);
 var quick_array_prototype_data_hits: std.atomic.Value(u64) = .init(0);
+var quick_array_push_hits: std.atomic.Value(u64) = .init(0);
 
 inline fn quickPlainObject(value_: Value) ?*value.Object {
     if (!value_.isObject()) return null;
@@ -1927,7 +1928,12 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 const args = stack.items[base..];
                 const this_val = stack.items[base - 1];
                 const callee = stack.items[base - 2];
-                const res = try callValue(vm, callee, args, this_val);
+                const fast_array_push = try vm.tryFastArrayPush(callee, this_val, args);
+                const res = fast_array_push orelse blk: {
+                    break :blk try callValue(vm, callee, args, this_val);
+                };
+                if (builtin.is_test and fast_array_push != null)
+                    _ = quick_array_push_hits.fetchAdd(1, .monotonic);
                 stack.shrinkRetainingCapacity(base - 2);
                 try stack.append(stack_alloc, res);
             },
@@ -4031,6 +4037,7 @@ test "vm: quickens packed dense numeric array reads" {
     const before = quick_dense_array_index_hits.load(.monotonic);
     const lengths_before = quick_array_length_hits.load(.monotonic);
     const prototype_data_before = quick_array_prototype_data_hits.load(.monotonic);
+    const pushes_before = quick_array_push_hits.load(.monotonic);
     try std.testing.expectEqual(@as(f64, 6), (try vmRun(allocator,
         \\function sum(values) {
         \\  let total = 0;
@@ -4046,6 +4053,8 @@ test "vm: quickens packed dense numeric array reads" {
         \\let values = []; values.push(1); values.push(2); values.length
     )).asNum());
     try std.testing.expect(quick_array_prototype_data_hits.load(.monotonic) > prototype_data_before);
+    try std.testing.expect(quick_array_push_hits.load(.monotonic) > pushes_before);
+    const pushes_after = quick_array_push_hits.load(.monotonic);
 
     // Holes and indexed accessors remain observable and must take [[Get]].
     try std.testing.expectEqual(@as(f64, 9), (try vmRun(allocator,
@@ -4065,6 +4074,17 @@ test "vm: quickens packed dense numeric array reads" {
         \\});
         \\let values = []; values.push(1)
     )).asNum());
+    try std.testing.expectEqual(pushes_after, quick_array_push_hits.load(.monotonic));
+
+    // An indexed prototype setter must observe push's ordinary [[Set]].
+    try std.testing.expectEqual(@as(f64, 71), (try vmRun(allocator,
+        \\let seen = 0;
+        \\Object.defineProperty(Array.prototype, "0", {
+        \\  set: function (value) { seen = value; }, configurable: true
+        \\});
+        \\let values = []; values.push(7); seen * 10 + values.length
+    )).asNum());
+    try std.testing.expectEqual(pushes_after, quick_array_push_hits.load(.monotonic));
 }
 
 test "vm: quickens warmed numeric property update traces" {

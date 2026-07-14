@@ -6207,6 +6207,27 @@ pub const Interpreter = struct {
         return true;
     }
 
+    /// VM call-site fast path for the intrinsic `Array.prototype.push`. The
+    /// callee identity check means an own/prototype override has already won
+    /// during ordinary property lookup. Only packed, extensible real arrays
+    /// whose indexed writes cannot observe a descriptor or prototype hook are
+    /// mutated here; every generic/observable case returns null for normal
+    /// native dispatch.
+    pub fn tryFastArrayPush(self: *Interpreter, callee: Value, this: Value, args: []const Value) EvalError!?Value {
+        if (!callee.isObject()) return null;
+        const native = callee.asObj().native orelse return null;
+        if (native != arrayProtoMethod("push")) return null;
+        if (!this.isObject()) return null;
+        const o = this.asObj();
+        try self.checkRestricted(o);
+        if (!o.is_array or o.is_arguments or o.proxy_handler != null or o.proxy_revoked or
+            o.accessors.load(.monotonic) != null or o.attrsMap() != null or
+            o.has_indexed_property.load(.monotonic) or !o.isExtensible() or
+            !self.arrayProtoChainCleanForDenseAppend(o)) return null;
+        const new_len = try o.appendPackedDenseElements(self.arena, args) orelse return null;
+        return Value.num(@floatFromInt(new_len));
+    }
+
     fn arrayProtoMayAffectIndexedHas(self: *Interpreter, o: *value.Object) bool {
         var cur = self.effectiveProto(o);
         while (cur) |c| {
