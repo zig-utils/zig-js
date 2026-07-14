@@ -10550,7 +10550,10 @@ test "structured clone nesting limit is catchable" {
         \\structuredClone(value);
         \\value = [value];
         \\let caught = false;
-        \\try {{ structuredClone(value); }} catch (e) {{ caught = e instanceof TypeError; }}
+        \\try {{ structuredClone(value); }} catch (e) {{
+        \\  caught = e instanceof DOMException &&
+        \\    e.name === "DataCloneError" && e.code === DOMException.DATA_CLONE_ERR;
+        \\}}
         \\caught;
     , .{structured_clone.max_nesting_depth});
     defer std.testing.allocator.free(source);
