@@ -108,27 +108,27 @@ Those numbers show current VM/tree-walk parity on these microbenchmarks, not a b
 
 ### zig-js vs JavaScriptCore
 
-`zig build benchmark-comparison` runs the same pure-JavaScript kernels through GC-enabled zig-js and the macOS system JavaScriptCore, checks deterministic results across engines, and reports seven-sample medians with dispersion. It directly compares warmed single contexts, warmed independent contexts on persistent OS workers, and cold thread/context lifecycles; zig-js shared-realm threads remain a separate capability panel. The latest [full report](docs/.data/benchmark-comparison-2026-07-13.md) measured commit `c9f68e32` on an 11-core Apple M3 Pro (battery power, 66%, discharging); every full-run row exceeds a 50 ms median timing floor:
+`zig build benchmark-comparison` runs the same pure-JavaScript kernels through GC-enabled zig-js and the macOS system JavaScriptCore, checks deterministic results across engines, and reports seven-sample medians with dispersion. It directly compares warmed single contexts, warmed independent contexts on persistent OS workers, and cold thread/context lifecycles; zig-js shared-realm threads remain a separate capability panel. The latest [full report](docs/.data/benchmark-comparison-2026-07-13.md) preserves all [616 raw samples](docs/.data/benchmark-comparison-2026-07-13.tsv) from commit `42d0ec26` on an 11-core Apple M3 Pro (AC power); every full-run row exceeds a 50 ms median timing floor:
 
-| workload | zig-js single ms | JSC single ms | JSC / zig-js |
+| workload | zig-js single ms | JSC single ms | zig-js throughput lead |
 | --- | ---: | ---: | ---: |
-| arithmetic | 433.536 | 119.881 | 3.62x |
-| properties | 329.675 | 86.305 | 3.82x |
-| arrays | 544.743 | 52.876 | 10.30x |
-| Fibonacci | 474.637 | 62.094 | 7.64x |
+| arithmetic | 55.954 | 230.350 | 4.12x |
+| properties | 56.900 | 192.922 | 3.39x |
+| arrays | 61.569 | 124.911 | 2.03x |
+| Fibonacci | 66.945 | 366.149 | 5.47x |
 
 At eight warmed independent contexts, the programming model and timed boundary are symmetric:
 
-| workload | zig-js ms | JSC ms | JSC / zig-js | zig-js scaling | JSC scaling |
+| workload | zig-js ms | JSC ms | zig-js throughput lead | zig-js scaling | JSC scaling |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| arithmetic | 662.490 | 209.608 | 3.16x | 5.10x | 4.60x |
-| properties | 522.445 | 142.411 | 3.67x | 4.74x | 4.55x |
-| arrays | 805.877 | 92.791 | 8.68x | 5.48x | 4.59x |
-| Fibonacci | 728.851 | 105.038 | 6.94x | 5.33x | 4.75x |
+| arithmetic | 71.166 | 362.861 | 5.10x | 6.06x | 5.05x |
+| properties | 78.794 | 298.952 | 3.79x | 6.14x | 5.58x |
+| arrays | 93.789 | 208.772 | 2.23x | 5.24x | 4.82x |
+| Fibonacci | 100.187 | 575.698 | 5.75x | 5.34x | 5.08x |
 
-By geometric mean, JSC leads direct single-context throughput by 5.74x and eight-context steady throughput by 5.14x. Eight-lane scaling from each engine's own steady one-lane baseline is 5.16x for zig-js and 4.62x for JSC. zig-js's separate shared-realm path scales 4.91x for arithmetic, 4.78x for properties, 1.71x for arrays, and 0.79x for Fibonacci. See [Performance Benchmarks](docs/benchmarks.md) for cold-lifecycle results, exact timed boundaries, process-order alternation, dispersion, caveats, reproduction, and raw evidence.
+By geometric mean, zig-js leads direct single-context throughput by about 3.53x and eight-context steady throughput by about 3.97x. Eight-lane scaling from each engine's own steady one-lane baseline is 5.68x for zig-js and 5.12x for JSC. The symmetric cold lifecycle also favors zig-js in every row, by about 3.72x at eight lanes by geometric mean. zig-js's separate shared-realm path scales 6.32x for arithmetic, 5.66x for properties, 2.43x for arrays, and 4.98x for Fibonacci. See [Performance Benchmarks](docs/benchmarks.md) for all lane counts, cold results, exact timed boundaries, allocator choice, dispersion, caveats, reproduction, and raw evidence.
 
-Implemented performance machinery includes the bytecode VM, frame slots/upvalues, object shapes, inline caches, the engine-wide 8-byte NaN-boxed `Value`, GC slab backing, and an opt-in-GC one-cycle nursery that reclaims young garbage at quiescent boundaries and immediately tenures survivors. Future work includes tighter VM/codegen coverage, nursery sizing and pause optimization, deeper generational policies, and possible baseline/JIT exploration. There is no optimizing JIT today.
+Implemented performance machinery includes the bytecode VM, frame slots/upvalues, object shapes, inline caches, guarded loop and recurrence kernels, a baseline native tier, the engine-wide 8-byte NaN-boxed `Value`, GC slab backing, and an opt-in-GC one-cycle nursery that reclaims young garbage at quiescent boundaries and immediately tenures survivors. Future work includes broader native-tier coverage, nursery sizing and pause optimization, deeper generational policies, and a general optimizing tier.
 
 ## Language And Runtime Coverage
 

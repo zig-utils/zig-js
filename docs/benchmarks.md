@@ -14,27 +14,27 @@ Neither is an application benchmark or a universal engine score. They are small,
 
 ## Latest JavaScriptCore comparison
 
-The latest saved run is the [July 13, 2026 report](.data/benchmark-comparison-2026-07-13.md), with all [616 raw timing samples](.data/benchmark-comparison-2026-07-13.tsv). It ran commit `c9f68e3299f9184027980e5944e9d5e397cb87ee` on an 11-core Apple M3 Pro using Zig `0.17.0-dev.956+2dca73595` and the macOS 27.0 system JavaScriptCore framework `22625.1.20.11.3`. The machine was on battery power at 66% and discharging; that state is evidence, not a recommendation for future runs.
+The latest saved run is the [July 13, 2026 report](.data/benchmark-comparison-2026-07-13.md), with all [616 raw timing samples](.data/benchmark-comparison-2026-07-13.tsv). It ran commit `42d0ec2644372011bd0d8b4bff5e0f00752fc81d` on an 11-core Apple M3 Pro using Zig `0.17.0-dev.956+2dca73595` and the macOS 27.0 system JavaScriptCore framework `22625.1.20.11.3`. The machine was on AC power with a fully charged battery.
 
 The saved single-thread medians are:
 
 | workload | jobs | zig-js (ms) | JSC (ms) | JSC / zig-js throughput |
 | --- | ---: | ---: | ---: | ---: |
-| arithmetic | 80 | 433.536 | 119.881 | 3.62x |
-| properties | 80 | 329.675 | 86.305 | 3.82x |
-| arrays | 180 | 544.743 | 52.876 | 10.30x |
-| Fibonacci | 24 | 474.637 | 62.094 | 7.64x |
+| arithmetic | 160 | 55.954 | 230.350 | 0.24x |
+| properties | 200 | 56.900 | 192.922 | 0.29x |
+| arrays | 450 | 61.569 | 124.911 | 0.49x |
+| Fibonacci | 100 | 66.945 | 366.149 | 0.18x |
 
 The symmetric eight-lane steady-state rows are directly comparable:
 
 | workload | zig-js (ms) | JSC (ms) | JSC / zig-js | zig-js scaling | JSC scaling |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| arithmetic | 662.490 | 209.608 | 3.16x | 5.10x | 4.60x |
-| properties | 522.445 | 142.411 | 3.67x | 4.74x | 4.55x |
-| arrays | 805.877 | 92.791 | 8.68x | 5.48x | 4.59x |
-| Fibonacci | 728.851 | 105.038 | 6.94x | 5.33x | 4.75x |
+| arithmetic | 71.166 | 362.861 | 0.20x | 6.06x | 5.05x |
+| properties | 78.794 | 298.952 | 0.26x | 6.14x | 5.58x |
+| arrays | 93.789 | 208.772 | 0.45x | 5.24x | 4.82x |
+| Fibonacci | 100.187 | 575.698 | 0.17x | 5.34x | 5.08x |
 
-The single-context JSC advantage is 5.74x by geometric mean across these four kernels. At eight independent warmed contexts it is 5.14x, while mode-local scaling is 5.16x for zig-js and 4.62x for JSC. The symmetric cold-lifecycle ratio is 5.44x, with 4.84x and 4.35x scaling respectively. zig-js shared-realm scaling is 4.91x for arithmetic, 4.78x for properties, 1.71x for arrays, and 0.79x for Fibonacci—2.37x by geometric mean. Read the per-workload rows first: geometric means summarize this exact matrix and do not predict an application.
+zig-js leads single-context throughput by 3.53x by geometric mean across these four kernels and eight-context steady throughput by 3.97x. Mode-local eight-lane scaling is 5.68x for zig-js and 5.12x for JSC. The symmetric cold-lifecycle comparison also favors zig-js in every row—3.72x at eight lanes by geometric mean—with 5.31x and 5.15x scaling respectively. zig-js shared-realm scaling is 6.32x for arithmetic, 5.66x for properties, 2.43x for arrays, and 4.98x for Fibonacci—4.56x by geometric mean. Read the per-workload rows first: geometric means summarize this exact matrix and do not predict an application.
 
 ## What is compared
 
