@@ -286,10 +286,26 @@ fn joinIntegerFact(left: IntegerFact, right: IntegerFact) IntegerFact {
     return .nonnegative;
 }
 
-fn joinIntegerRange(left: IntegerRange, right: IntegerRange, widen: bool) IntegerRange {
+fn joinIntegerRange(left: IntegerRange, right: IntegerRange, widen: bool, thresholds: []const i64) IntegerRange {
     if (!left.isKnown() or !right.isKnown()) return .unknown;
-    const joined: IntegerRange = .{ .min = @min(left.min, right.min), .max = @max(left.max, right.max) };
-    if (widen and !std.meta.eql(left, joined)) return .unknown;
+    var joined: IntegerRange = .{ .min = @min(left.min, right.min), .max = @max(left.max, right.max) };
+    if (widen and joined.min < left.min) {
+        var widened: ?i64 = null;
+        for (thresholds) |threshold| {
+            if (threshold > joined.min) break;
+            widened = threshold;
+        }
+        joined.min = widened orelse return .unknown;
+    }
+    if (widen and joined.max > left.max) {
+        var widened: ?i64 = null;
+        for (thresholds) |threshold| {
+            if (threshold < joined.max) continue;
+            widened = threshold;
+            break;
+        }
+        joined.max = widened orelse return .unknown;
+    }
     return joined;
 }
 
@@ -298,7 +314,7 @@ fn joinKind(left: Kind, right: Kind) Kind {
     return .unknown;
 }
 
-fn joinCondition(left: ?Condition, right: ?Condition, widen_ranges: bool) ?Condition {
+fn joinCondition(left: ?Condition, right: ?Condition, widen_ranges: bool, thresholds: []const i64) ?Condition {
     const lhs = left orelse return null;
     const rhs = right orelse return null;
     if (lhs.op != rhs.op or
@@ -309,18 +325,18 @@ fn joinCondition(left: ?Condition, right: ?Condition, widen_ranges: bool) ?Condi
         .op = lhs.op,
         .lhs = .{
             .integer = joinIntegerFact(lhs.lhs.integer, rhs.lhs.integer),
-            .range = joinIntegerRange(lhs.lhs.range, rhs.lhs.range, widen_ranges),
+            .range = joinIntegerRange(lhs.lhs.range, rhs.lhs.range, widen_ranges, thresholds),
             .local = lhs.lhs.local,
         },
         .rhs = .{
             .integer = joinIntegerFact(lhs.rhs.integer, rhs.rhs.integer),
-            .range = joinIntegerRange(lhs.rhs.range, rhs.rhs.range, widen_ranges),
+            .range = joinIntegerRange(lhs.rhs.range, rhs.rhs.range, widen_ranges, thresholds),
             .local = lhs.rhs.local,
         },
     };
 }
 
-fn mergeState(existing: *State, incoming: State, widen_ranges: bool) error{UnsupportedChunk}!bool {
+fn mergeState(existing: *State, incoming: State, widen_ranges: bool, thresholds: []const i64) error{UnsupportedChunk}!bool {
     if (existing.depth != incoming.depth) return error.UnsupportedChunk;
     for (existing.stack[0..existing.depth], incoming.stack[0..incoming.depth]) |current, next|
         if (current != next) return error.UnsupportedChunk;
@@ -341,7 +357,7 @@ fn mergeState(existing: *State, incoming: State, widen_ranges: bool) error{Unsup
         }
     }
     for (&existing.local_ranges, incoming.local_ranges) |*current, next| {
-        const merged = joinIntegerRange(current.*, next, widen_ranges);
+        const merged = joinIntegerRange(current.*, next, widen_ranges, thresholds);
         if (!std.meta.eql(merged, current.*)) {
             current.* = merged;
             changed = true;
@@ -355,7 +371,7 @@ fn mergeState(existing: *State, incoming: State, widen_ranges: bool) error{Unsup
         }
     }
     for (existing.stack_ranges[0..existing.depth], incoming.stack_ranges[0..incoming.depth]) |*current, next| {
-        const merged = joinIntegerRange(current.*, next, widen_ranges);
+        const merged = joinIntegerRange(current.*, next, widen_ranges, thresholds);
         if (!std.meta.eql(merged, current.*)) {
             current.* = merged;
             changed = true;
@@ -368,7 +384,7 @@ fn mergeState(existing: *State, incoming: State, widen_ranges: bool) error{Unsup
         }
     }
     for (existing.stack_conditions[0..existing.depth], incoming.stack_conditions[0..incoming.depth]) |*current, next| {
-        const merged = joinCondition(current.*, next, widen_ranges);
+        const merged = joinCondition(current.*, next, widen_ranges, thresholds);
         if (!std.meta.eql(current.*, merged)) {
             current.* = merged;
             changed = true;
@@ -485,6 +501,26 @@ fn refineComparison(state: *State, condition: Condition, truth: bool) void {
     }
 }
 
+fn collectRangeThresholds(chunk: *const Chunk, allocator: std.mem.Allocator) ![]i64 {
+    var thresholds: std.ArrayListUnmanaged(i64) = .empty;
+    errdefer thresholds.deinit(allocator);
+    try thresholds.append(allocator, 0);
+    try thresholds.append(allocator, std.math.maxInt(u32));
+    for (chunk.consts.items) |constant| {
+        const range = classifyIntegerRange(constant);
+        if (range.isKnown()) try thresholds.append(allocator, range.min);
+    }
+    std.mem.sort(i64, thresholds.items, {}, std.sort.asc(i64));
+    var unique: usize = 0;
+    for (thresholds.items) |threshold| {
+        if (unique != 0 and thresholds.items[unique - 1] == threshold) continue;
+        thresholds.items[unique] = threshold;
+        unique += 1;
+    }
+    thresholds.items.len = unique;
+    return thresholds.toOwnedSlice(allocator);
+}
+
 fn enqueueState(
     states: []?State,
     worklist: *std.ArrayListUnmanaged(u32),
@@ -492,11 +528,12 @@ fn enqueueState(
     target: u32,
     state: State,
     widen_ranges: bool,
+    thresholds: []const i64,
 ) !void {
     if (target >= states.len) return error.UnsupportedChunk;
     if (states[target]) |existing_state| {
         var existing = existing_state;
-        if (try mergeState(&existing, state, widen_ranges)) {
+        if (try mergeState(&existing, state, widen_ranges, thresholds)) {
             states[target] = existing;
             try worklist.append(allocator, target);
         }
@@ -511,6 +548,8 @@ fn analyzeNumeric(chunk: *const Chunk, integer_parameters: bool) !Analysis {
     if (chunk.local_count > max_slots or chunk.param_count > chunk.local_count) return error.UnsupportedChunk;
 
     const allocator = std.heap.page_allocator;
+    const thresholds = try collectRangeThresholds(chunk, allocator);
+    defer allocator.free(thresholds);
     const states = try allocator.alloc(?State, chunk.code.items.len);
     errdefer allocator.free(states);
     @memset(states, null);
@@ -596,7 +635,7 @@ fn analyzeNumeric(chunk: *const Chunk, integer_parameters: bool) !Analysis {
                 });
             },
             .jump => {
-                try enqueueState(states, &worklist, allocator, inst.a, state, inst.a <= ip);
+                try enqueueState(states, &worklist, allocator, inst.a, state, inst.a <= ip, thresholds);
                 fallthrough = false;
             },
             .jump_if_false => {
@@ -607,7 +646,7 @@ fn analyzeNumeric(chunk: *const Chunk, integer_parameters: bool) !Analysis {
                     refineComparison(&false_state, condition, false);
                     refineComparison(&state, condition, true);
                 }
-                try enqueueState(states, &worklist, allocator, inst.a, false_state, inst.a <= ip);
+                try enqueueState(states, &worklist, allocator, inst.a, false_state, inst.a <= ip, thresholds);
             },
             .ret => {
                 _ = try state.pop();
@@ -626,7 +665,7 @@ fn analyzeNumeric(chunk: *const Chunk, integer_parameters: bool) !Analysis {
         max_stack_depth = @max(max_stack_depth, state.depth);
         if (fallthrough) {
             const next = std.math.cast(u32, ip + 1) orelse return error.UnsupportedChunk;
-            try enqueueState(states, &worklist, allocator, next, state, false);
+            try enqueueState(states, &worklist, allocator, next, state, false, thresholds);
         }
     }
 
@@ -1214,6 +1253,7 @@ test "integer provenance converges through benchmark-shaped loops" {
             {
                 const induction_slot = state.stack_locals[state.depth - 2].?;
                 try std.testing.expectEqual(bc.Op.jump_if_false, chunk.code.items[ip + 1].op);
+                try std.testing.expectEqual(IntegerRange{ .min = 0, .max = 100_000 }, state.local_ranges[induction_slot]);
                 const body_state = analysis.states[ip + 2].?;
                 try std.testing.expectEqual(IntegerRange{ .min = 0, .max = 99_999 }, body_state.local_ranges[induction_slot]);
                 saw_inner_bound = true;
@@ -1224,6 +1264,9 @@ test "integer provenance converges through benchmark-shaped loops" {
             try std.testing.expect(state.depth >= 2);
             try std.testing.expectEqual(IntegerFact.nonnegative, state.stack_integers[state.depth - 2]);
             try std.testing.expectEqual(IntegerFact.positive, state.stack_integers[state.depth - 1]);
+            const dividend_range = state.stack_ranges[state.depth - 2];
+            try std.testing.expect(dividend_range.isKnown());
+            try std.testing.expect(dividend_range.min >= 0 and dividend_range.max <= max_safe_integer);
             try std.testing.expectEqual(IntegerRange{ .min = 1_000_003, .max = 1_000_003 }, state.stack_ranges[state.depth - 1]);
             const result_state = analysis.states[ip + 1].?;
             try std.testing.expectEqual(IntegerRange{ .min = 0, .max = 1_000_002 }, result_state.stack_ranges[result_state.depth - 1]);
