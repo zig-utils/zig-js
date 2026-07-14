@@ -590,6 +590,7 @@ var quick_property_loop_tail_hits: std.atomic.Value(u64) = .init(0);
 var quick_property_specialized_hits: std.atomic.Value(u64) = .init(0);
 var quick_dense_array_index_hits: std.atomic.Value(u64) = .init(0);
 var quick_array_length_hits: std.atomic.Value(u64) = .init(0);
+var quick_array_prototype_data_hits: std.atomic.Value(u64) = .init(0);
 
 inline fn quickPlainObject(value_: Value) ?*value.Object {
     if (!value_.isObject()) return null;
@@ -1514,6 +1515,41 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                             result = Value.num(@floatFromInt(@max(o.elements.items.len, o.array_len)));
                             if (builtin.is_test) _ = quick_array_length_hits.fetchAdd(1, .monotonic);
                             break :fast;
+                        }
+                        // Ordinary arrays normally have no named own properties;
+                        // their methods are direct data properties on
+                        // Array.prototype. Cache that prototype shape/slot while
+                        // retaining the observable own-property and accessor
+                        // checks. A replaced method value is read from the live
+                        // slot, and any shape transition invalidates the cache.
+                        if (!parallel_sync and o.is_array and !o.is_arguments and o.proxy_handler == null and !o.proxy_revoked and
+                            o.accessors.load(.monotonic) == null and o.attrsMap() == null)
+                        {
+                            const own_data = if (o.shape) |shape| shape.lookup(name) else null;
+                            if (own_data == null) {
+                                if (o.protoAtomic()) |prototype| {
+                                    if (prototype.proxy_handler == null and !prototype.proxy_revoked and
+                                        prototype.accessors.load(.monotonic) == null)
+                                    {
+                                        const ic = &chunk.ics[ip - 1];
+                                        if (ic.lookupSlotMode(prototype.shape, false)) |slot| {
+                                            if (slot < prototype.slots.items.len) {
+                                                result = prototype.slots.items[slot];
+                                                if (builtin.is_test) _ = quick_array_prototype_data_hits.fetchAdd(1, .monotonic);
+                                                break :fast;
+                                            }
+                                        }
+                                        if (prototype.shape) |shape| {
+                                            if (shape.lookup(name)) |slot| {
+                                                ic.recordMode(shape, slot, false);
+                                                result = prototype.slots.items[slot];
+                                                if (builtin.is_test) _ = quick_array_prototype_data_hits.fetchAdd(1, .monotonic);
+                                                break :fast;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
                         if (parallel_sync) o.lockProperties();
                         defer if (parallel_sync) o.unlockProperties();
@@ -3994,6 +4030,7 @@ test "vm: quickens packed dense numeric array reads" {
     const allocator = arena.allocator();
     const before = quick_dense_array_index_hits.load(.monotonic);
     const lengths_before = quick_array_length_hits.load(.monotonic);
+    const prototype_data_before = quick_array_prototype_data_hits.load(.monotonic);
     try std.testing.expectEqual(@as(f64, 6), (try vmRun(allocator,
         \\function sum(values) {
         \\  let total = 0;
@@ -4005,12 +4042,28 @@ test "vm: quickens packed dense numeric array reads" {
     try std.testing.expect(quick_dense_array_index_hits.load(.monotonic) > before);
     try std.testing.expect(quick_array_length_hits.load(.monotonic) > lengths_before);
 
+    try std.testing.expectEqual(@as(f64, 2), (try vmRun(allocator,
+        \\let values = []; values.push(1); values.push(2); values.length
+    )).asNum());
+    try std.testing.expect(quick_array_prototype_data_hits.load(.monotonic) > prototype_data_before);
+
     // Holes and indexed accessors remain observable and must take [[Get]].
     try std.testing.expectEqual(@as(f64, 9), (try vmRun(allocator,
         \\let values = [1, , 3]; Array.prototype[1] = 9; values[1]
     )).asNum());
     try std.testing.expectEqual(@as(f64, 7), (try vmRun(allocator,
         \\let values = [1]; Object.defineProperty(values, "0", { get: function () { return 7; } }); values[0]
+    )).asNum());
+
+    // Own overrides and prototype accessors remain observable.
+    try std.testing.expectEqual(@as(f64, 99), (try vmRun(allocator,
+        \\let values = []; values.push = function () { return 99; }; values.push(1)
+    )).asNum());
+    try std.testing.expectEqual(@as(f64, 77), (try vmRun(allocator,
+        \\Object.defineProperty(Array.prototype, "push", {
+        \\  get: function () { return function () { return 77; }; }, configurable: true
+        \\});
+        \\let values = []; values.push(1)
     )).asNum());
 }
 
