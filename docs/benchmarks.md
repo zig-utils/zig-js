@@ -14,35 +14,56 @@ Neither is an application benchmark or a universal engine score. They are small,
 
 ## Latest JavaScriptCore comparison
 
-The latest saved run is the [July 13, 2026 report](.data/benchmark-comparison-2026-07-13.md), with all [1,232 raw timing samples](.data/benchmark-comparison-2026-07-13.tsv). It ran clean commit `27ebbfb1660af39aa8b21cfc1801fceb202c0fe1` on an 11-core Apple M3 Pro using Zig `0.17.0-dev.956+2dca73595` and the macOS 27.0 system JavaScriptCore framework `22625.1.20.11.3`. The machine was on battery power at 74% when the environment was captured.
+The latest saved run is the [July 14, 2026 report](.data/benchmark-comparison-2026-07-14.md), with all [1,540 raw timing samples](.data/benchmark-comparison-2026-07-14.tsv). It ran clean commit `db131e0a6c70e8f9b3f22c580b54373cd13abdfc` on an 11-core Apple M3 Pro using Zig `0.17.0-dev.956+2dca73595` and the macOS 27.0 system JavaScriptCore framework `22625.1.20.11.3`. The machine was on AC power, charging at 44%, when the environment was captured.
 
 The saved single-thread medians are:
 
-| workload | jobs | zig-js (ms) | JSC (ms) | JSC / zig-js throughput |
+| workload | jobs | zig-js (ms) | JSC (ms) | zig-js / JSC throughput |
 | --- | ---: | ---: | ---: | ---: |
-| arithmetic | 160 | 56.360 | 242.893 | 0.23x |
-| properties | 200 | 59.821 | 208.153 | 0.29x |
-| arrays | 450 | 64.517 | 130.636 | 0.49x |
-| direct calls | 500 | 68.548 | 105.109 | 0.65x |
-| method calls | 500 | 80.100 | 144.332 | 0.55x |
-| closure calls | 500 | 73.039 | 165.998 | 0.44x |
-| arguments calls | 400 | 64.888 | 205.600 | 0.32x |
-| Fibonacci | 100 | 69.739 | 387.101 | 0.18x |
+| arithmetic | 160 | 57.169 | 237.804 | 4.16x |
+| properties | 200 | 58.924 | 201.435 | 3.42x |
+| polymorphic properties | 350 | 71.133 | 180.003 | 2.53x |
+| object churn | 100 | 204.392 | 120.512 | 0.59x |
+| arrays | 450 | 65.839 | 128.433 | 1.95x |
+| direct calls | 500 | 64.457 | 100.548 | 1.56x |
+| method calls | 500 | 78.233 | 140.714 | 1.80x |
+| closure calls | 500 | 67.883 | 159.003 | 2.34x |
+| arguments calls | 400 | 60.091 | 213.843 | 3.56x |
+| Fibonacci | 100 | 68.897 | 373.520 | 5.42x |
+
+A ratio above 1.00x favors zig-js; below 1.00x favors JSC.
 
 The symmetric eight-lane steady-state rows are directly comparable:
 
-| workload | zig-js (ms) | JSC (ms) | JSC / zig-js | zig-js scaling | JSC scaling |
+| workload | zig-js (ms) | JSC (ms) | zig-js / JSC throughput | zig-js scaling | JSC scaling |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| arithmetic | 75.017 | 377.715 | 0.20x | 6.09x | 5.11x |
-| properties | 88.670 | 326.927 | 0.27x | 5.35x | 4.97x |
-| arrays | 102.011 | 218.555 | 0.47x | 5.07x | 4.82x |
-| direct calls | 88.550 | 170.483 | 0.52x | 5.95x | 4.71x |
-| method calls | 112.945 | 239.010 | 0.47x | 5.84x | 5.09x |
-| closure calls | 96.799 | 280.139 | 0.35x | 5.93x | 4.79x |
-| arguments calls | 92.878 | 373.951 | 0.25x | 5.29x | 4.37x |
-| Fibonacci | 106.903 | 601.253 | 0.18x | 5.20x | 5.00x |
+| arithmetic | 72.838 | 370.596 | 5.09x | 6.28x | 5.10x |
+| properties | 86.367 | 320.280 | 3.71x | 5.43x | 5.00x |
+| polymorphic properties | 118.358 | 300.590 | 2.54x | 4.76x | 4.88x |
+| object churn | 786.543 | 196.866 | 0.25x | 2.12x | 4.88x |
+| arrays | 105.306 | 203.256 | 1.93x | 4.98x | 5.10x |
+| direct calls | 87.218 | 168.485 | 1.93x | 5.94x | 4.75x |
+| method calls | 104.680 | 225.601 | 2.16x | 5.97x | 5.00x |
+| closure calls | 100.858 | 278.503 | 2.76x | 5.41x | 4.55x |
+| arguments calls | 83.543 | 357.399 | 4.28x | 5.71x | 4.56x |
+| Fibonacci | 109.876 | 803.650 | 7.31x | 5.13x | 3.72x |
 
-zig-js leads single-context throughput by about 2.78x by geometric mean across these eight kernels and eight-context steady throughput by about 3.23x. Mode-local eight-lane scaling is 5.58x for zig-js and 4.85x for JSC. The symmetric cold-lifecycle comparison also favors zig-js in every row—about 3.13x at eight lanes by geometric mean—with 5.41x and 4.66x scaling respectively. zig-js shared-realm scaling is above 1x for all eight workloads and 4.96x by geometric mean. Read the per-workload rows first: geometric means summarize this exact matrix and do not predict an application.
+The separate no-GIL shared-realm path has no direct public-JSC equivalent. Its one-to-eight-lane result is:
+
+| workload | one lane (ms) | eight lanes (ms) | throughput scaling |
+| --- | ---: | ---: | ---: |
+| arithmetic | 57.403 | 74.216 | 6.19x |
+| properties | 87.853 | 132.873 | 5.29x |
+| polymorphic properties | 463.550 | 666.142 | 5.57x |
+| object churn | 986.746 | 28,321.516 | 0.28x |
+| arrays | 67.885 | 225.873 | 2.40x |
+| direct calls | 66.645 | 86.532 | 6.16x |
+| method calls | 121.762 | 186.462 | 5.22x |
+| closure calls | 69.264 | 127.141 | 4.36x |
+| arguments calls | 59.335 | 83.469 | 5.69x |
+| Fibonacci | 214.050 | 378.608 | 4.52x |
+
+zig-js wins 9 of 10 single-context rows. Its geometric-mean throughput lead is 2.36x in direct single-context mode and 2.47x at eight warmed independent contexts. Mode-local eight-lane scaling is 4.99x for zig-js and 4.73x for JSC. The symmetric cold lifecycle scales 5.01x and 4.75x respectively. Shared-realm scaling is 3.67x by geometric mean, but object churn is the explicit exception: JSC leads the direct comparison and shared allocation/GC contention drives scaling to 0.28x. Read the per-workload rows first; geometric means summarize this exact matrix and do not predict an application.
 
 ## What is compared
 
@@ -52,8 +73,8 @@ Both runners evaluate the exact source in [`bench/comparison.js`](../bench/compa
 | --- | --- |
 | `arithmetic` | 100,000 integer additions and modulo operations |
 | `properties` | 25,000 rounds mutating four properties on one object |
-| `polymorphic_properties` | 10,000 named-property read/modify/write rounds across four live receiver shapes; present on `main` but not yet included in the saved eight-workload report |
-| `object_churn` | initialize a 256-object lane-local ring, replace entries with 20,000 fresh three-property objects, read each displaced object, then checksum the bounded live tail; tracked by #62 and not yet included in the saved report |
+| `polymorphic_properties` | 10,000 named-property read/modify/write rounds across four live receiver shapes |
+| `object_churn` | initialize a 256-object lane-local ring, replace entries with 20,000 fresh three-property objects, read each displaced object, then checksum the bounded live tail |
 | `arrays` | push 10,000 integers, then read and sum the array |
 | `direct_calls` | 10,000 calls through a lane-local function binding |
 | `method_calls` | 10,000 receiver-bound calls whose method reads `this.bias` |
@@ -82,7 +103,7 @@ reuses freed slabs across short-lived contexts instead of forcing each arena and
 GC backing allocation through page-level `mmap`/`munmap`. The allocator process
 exists for the whole runner, just as JSC's internal cached allocator does. Cold
 mode still times every context-owned allocation and release; only reusable
-allocator infrastructure is process-scoped. The saved July 13 report uses this
+allocator infrastructure is process-scoped. The saved July 14 report uses this
 same allocator policy in every zig-js mode.
 
 For every result group:
