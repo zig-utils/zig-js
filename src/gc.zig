@@ -216,6 +216,7 @@ pub fn traceEnv(e: *Environment, v: anytype) void {
     if (e.dispose_pending) |pending| markValue(v, pending);
     var ait = e.aliases.valueIterator();
     while (ait.next()) |a| markManaged(v, a.env);
+    if (e.object_proto_intrinsic) |o| v.mark(o);
     if (concurrent) e.unlockBindings();
     if (e.parent) |p| markManaged(v, p);
     if (e.with_object) |o| v.mark(o);
@@ -878,10 +879,12 @@ pub fn allocObject(heap_erased: ?*anyopaque, arena: std.mem.Allocator) std.mem.A
         const heap: *Heap = @ptrCast(@alignCast(h));
         const o = try heap.create(Object, .object);
         o.* = .{};
+        o.initInlineSlots();
         return o;
     }
     const o = try arena.create(Object);
     o.* = .{};
+    o.initInlineSlots();
     return o;
 }
 
@@ -975,10 +978,12 @@ pub fn allocObj(arena: std.mem.Allocator) std.mem.Allocator.Error!*Object {
         const heap: *Heap = @ptrCast(@alignCast(h));
         const o = try heap.create(Object, .object);
         o.* = .{};
+        o.initInlineSlots();
         return o;
     }
     const o = try arena.create(Object);
     o.* = .{};
+    o.initInlineSlots();
     return o;
 }
 

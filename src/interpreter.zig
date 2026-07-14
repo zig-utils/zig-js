@@ -408,6 +408,11 @@ pub const Environment = struct {
     /// Internal accounting for GC-owned duplicated binding-name bytes.
     gc_name_bytes_live: ?*usize = null,
     parent: ?*Environment = null,
+    /// Stable `%Object.prototype%` for this realm. Only the root environment
+    /// owns a value; object allocation walks to that root and caches the
+    /// intrinsic there so lexical shadowing, global replacement, and temporary
+    /// cross-realm entry cannot change ordinary-object prototype identity.
+    object_proto_intrinsic: ?*value.Object = null,
     /// Set when a closure captures this environment (or a descendant, via
     /// `markCaptured` walking the parent chain at closure creation). A `for
     /// (let …)` loop uses it to decide whether each iteration needs a fresh
@@ -6419,7 +6424,10 @@ pub const Interpreter = struct {
         // An ordinary object's [[Prototype]] is %Object.prototype%. Callers that
         // need a null-proto object (`Object.create(null)`, dictionary holders)
         // overwrite `obj.protoAtomic()` right after this returns.
-        obj.* = .{ .proto = self.objectProto() };
+        // `allocObject` has already default-initialized every field; assign only
+        // the prototype instead of zeroing the large Object payload a second
+        // time on the dominant allocation path.
+        obj.proto = self.objectProto();
         return Value.obj(obj);
     }
 
@@ -7319,17 +7327,32 @@ pub const Interpreter = struct {
         return if (p.isObject()) p.asObj() else null;
     }
 
-    /// `%Object.prototype%`, the [[Prototype]] of an ordinary plain object —
-    /// resolved through the live `Object` binding so it's the *current realm's*
-    /// prototype (mirrors `arrayProto`/`functionProto`). Null during the early
-    /// bootstrap window before `Object` is installed (then a plain object is
-    /// created proto-less, which is fine — the intrinsics wire their protos
-    /// explicitly and don't go through `newObject`).
+    /// `%Object.prototype%`, the [[Prototype]] of an ordinary plain object.
+    /// Resolve it once from the realm during bootstrap/first use, then retain
+    /// the intrinsic identity even if user code shadows or replaces the global
+    /// `Object` binding. Null only during the early bootstrap window before
+    /// `Object` is installed; those intrinsics wire their prototypes explicitly.
     fn objectProto(self: *Interpreter) ?*value.Object {
-        const ov = self.env.get("Object") orelse return null;
+        var realm = self.env;
+        while (realm.parent) |parent| realm = parent;
+        realm.lockBindings();
+        if (realm.object_proto_intrinsic) |cached| {
+            realm.unlockBindings();
+            return cached;
+        }
+        realm.unlockBindings();
+
+        const ov = realm.get("Object") orelse return null;
         if (!ov.isObject()) return null;
         const p = ov.asObj().getOwn("prototype") orelse return null;
-        return if (p.isObject()) p.asObj() else null;
+        if (!p.isObject()) return null;
+        const intrinsic = p.asObj();
+        gc_mod.barrierCellFrom(realm, @ptrCast(intrinsic));
+        realm.lockBindings();
+        if (realm.object_proto_intrinsic == null) realm.object_proto_intrinsic = intrinsic;
+        const cached = realm.object_proto_intrinsic;
+        realm.unlockBindings();
+        return cached;
     }
 
     /// The shared `%ThrowTypeError%` intrinsic, stashed as the get/set of

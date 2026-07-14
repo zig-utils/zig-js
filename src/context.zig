@@ -6147,17 +6147,16 @@ test "object literal data properties take one property lock each" {
     const ctx = try Context.create(std.testing.allocator);
     defer ctx.destroy();
 
-    object_profile.reset();
+    // Warm the realm-intrinsic cache so its one-time Object.prototype lookup is
+    // outside the property-lock measurement for the literal itself.
     _ = try ctx.evaluate("({});");
-    const baseline = object_profile.snapshot().object_property_lock_acquires;
-
     object_profile.reset();
     defer object_profile.disable();
     const result = try ctx.evaluate("({ a: 1, b: 2, c: 3 });");
     try std.testing.expect(result.isObject());
 
     const stats = object_profile.snapshot();
-    try std.testing.expectEqual(@as(u64, 3), stats.object_property_lock_acquires - baseline);
+    try std.testing.expectEqual(@as(u64, 3), stats.object_property_lock_acquires);
     try std.testing.expectEqual(@as(u64, 0), stats.object_property_lock_contentions);
 }
 
@@ -7786,6 +7785,19 @@ test "plain objects inherit from Object.prototype" {
     // The [[Prototype]] of a plain object / object literal is Object.prototype.
     try std.testing.expect((try evalIn("Object.getPrototypeOf({}) === Object.prototype")).asBool());
     try std.testing.expect((try evalIn("({}).__proto__ === Object.prototype")).asBool());
+    // Literal allocation uses the realm intrinsic, not a later replacement or
+    // lexical shadow of the global constructor binding.
+    try std.testing.expect((try evalIn(
+        \\var intrinsic = Object.prototype;
+        \\var getPrototypeOf = Object.getPrototypeOf;
+        \\Object = { prototype: null };
+        \\getPrototypeOf({}) === intrinsic;
+    )).asBool());
+    try std.testing.expect((try evalIn(
+        \\var intrinsic = Object.prototype;
+        \\var getPrototypeOf = Object.getPrototypeOf;
+        \\(function (Object) { return getPrototypeOf({}) === intrinsic; })({ prototype: null });
+    )).asBool());
     // Inherited Object.prototype methods resolve through the chain (as values and calls).
     try std.testing.expect((try evalIn("typeof ({}).hasOwnProperty === 'function'")).asBool());
     try std.testing.expect((try evalIn("({ a: 1 }).hasOwnProperty('a')")).asBool());
@@ -11549,6 +11561,54 @@ test "enable_gc nursery: owner barriers preserve old object, environment, and pr
     try std.testing.expectEqual(@as(f64, 7), promise_value.asNum());
 }
 
+test "enable_gc nursery: promoted functions retain immutable closure and home-object edges" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    defer ctx.destroy();
+    ctx.collectGarbage();
+
+    _ = try ctx.evaluate(
+        \\globalThis.functionBundle = (() => {
+        \\  const captured = { value: 40 };
+        \\  const proto = { answer() { return 2; } };
+        \\  const receiver = {
+        \\    __proto__: proto,
+        \\    answer() { return captured.value + super.answer(); }
+        \\  };
+        \\  return { closure: () => captured.value, receiver };
+        \\})();
+    );
+    ctx.gc.?.collectYoung(); // promote each function with its immutable edges
+
+    for (0..3) |_| {
+        _ = try ctx.evaluate(
+            \\for (let i = 0; i < 256; i++) ({ garbage: i, nested: { value: i } });
+        );
+        ctx.gc.?.collectYoung();
+    }
+
+    const result = try ctx.evaluate(
+        \\functionBundle.closure() + functionBundle.receiver.answer();
+    );
+    try std.testing.expectEqual(@as(f64, 82), result.asNum());
+}
+
+test "enable_gc: cached Object prototype remains a traced realm intrinsic" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    defer ctx.destroy();
+
+    _ = try ctx.evaluate(
+        \\globalThis.intrinsicRef = new WeakRef(Object.prototype);
+        \\globalThis.intrinsicGetPrototypeOf = Object.getPrototypeOf;
+        \\Object = { prototype: null };
+    );
+    ctx.collectGarbage();
+
+    try std.testing.expect((try ctx.evaluate(
+        \\intrinsicRef.deref() !== undefined &&
+        \\intrinsicGetPrototypeOf({}) === intrinsicRef.deref();
+    )).asBool());
+}
+
 test "enable_gc nursery: weak refs, ephemerons, and finalization stay weak" {
     const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
     defer ctx.destroy();
@@ -15015,7 +15075,7 @@ test "enable_gc: Object backing allocator avoids cell classifier outside paralle
     const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
     defer ctx.destroy();
 
-    const v = try ctx.evaluate("globalThis.keep = {}; globalThis.keep.x = 1; globalThis.keep");
+    const v = try ctx.evaluate("globalThis.keep = { a: 1, b: 2, c: 3, d: 4, e: 5 }; globalThis.keep");
     const o = v.asObj();
     try std.testing.expect(o.backing_allocator != null);
     const backing = o.backing_allocator.?;
@@ -15038,7 +15098,7 @@ test "enable_threads: Object backing allocator stays synchronized under parallel
     const ctx = try Context.createWith(std.testing.allocator, .{ .enable_threads = true });
     defer ctx.destroy();
 
-    const v = try ctx.evaluate("globalThis.keep = {}; globalThis.keep.x = 1; globalThis.keep");
+    const v = try ctx.evaluate("globalThis.keep = { a: 1, b: 2, c: 3, d: 4, e: 5 }; globalThis.keep");
     const o = v.asObj();
     try std.testing.expect(o.backing_allocator != null);
     const backing = o.backing_allocator.?;

@@ -665,6 +665,10 @@ pub const Object = struct {
     /// plus a flat per-object `slots` array indexed by the shape. See shape.zig.
     shape: ?*Shape = null,
     slots: std.ArrayListUnmanaged(Value) = .empty,
+    /// Most ordinary objects never grow beyond a handful of named properties.
+    /// Keep those values in the GC cell itself so object literals avoid a
+    /// second allocator round trip; `slots.items` points here until growth.
+    inline_slots: [4]Value = undefined,
     /// Prototype link ([[Prototype]]): property lookup walks this chain. An
     /// instance's proto is its constructor's `.prototype`; a class's `.prototype`
     /// protos to its superclass's `.prototype`.
@@ -981,6 +985,36 @@ pub const Object = struct {
 
     pub fn slotsAllocator(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator {
         return self.backingFor(fallback, "slots");
+    }
+
+    pub fn initInlineSlots(self: *Object) void {
+        self.slots = .{ .items = self.inline_slots[0..0], .capacity = self.inline_slots.len };
+    }
+
+    fn slotsAreInline(self: *const Object) bool {
+        return self.slots.capacity == self.inline_slots.len and self.slots.items.ptr == &self.inline_slots;
+    }
+
+    fn appendSlot(self: *Object, fallback: std.mem.Allocator, value_: Value) std.mem.Allocator.Error!void {
+        if (self.slots.items.len < self.slots.capacity) {
+            self.slots.appendAssumeCapacity(value_);
+            return;
+        }
+        if (!self.slotsAreInline()) {
+            try self.slots.append(self.slotsAllocator(fallback), value_);
+            return;
+        }
+
+        const old_len = self.slots.items.len;
+        const was_backed = self.backing_flags.slots;
+        const allocator = self.slotsAllocator(fallback);
+        const storage = allocator.alloc(Value, self.inline_slots.len * 2) catch |err| {
+            if (!was_backed and self.backing_flags.slots) self.deactivateBacking("slots");
+            return err;
+        };
+        @memcpy(storage[0..old_len], self.slots.items);
+        self.slots = .{ .items = storage[0..old_len], .capacity = storage.len };
+        self.slots.appendAssumeCapacity(value_);
     }
 
     pub fn elementsAllocator(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator {
@@ -1645,7 +1679,7 @@ pub const Object = struct {
             self.slots.deinit(self.backing_allocator.?);
             self.deactivateBacking("slots");
         }
-        self.slots = .empty;
+        self.initInlineSlots();
     }
 
     pub fn deinitKeyOrder(self: *Object) void {
@@ -2061,7 +2095,7 @@ pub const Object = struct {
         }
         const base = self.shape orelse root;
         const child = try base.transition(name);
-        try self.slots.append(self.slotsAllocator(arena), v); // new slot index == base.count == child.slot
+        try self.appendSlot(arena, v); // new slot index == base.count == child.slot
         self.shape = child;
         if (canonicalIndex(name) != null) {
             self.has_indexed_property.store(true, .monotonic);
@@ -2766,6 +2800,24 @@ test "object named properties serialize concurrent same-name writes" {
     try std.testing.expectEqual(@as(usize, 1), object.slots.items.len);
     try std.testing.expectEqual(@as(?u32, 0), object.shape.?.lookup("shared"));
     try std.testing.expect(value.isNumber());
+}
+
+test "ordinary object keeps four named property values inline before migrating" {
+    const root = try Shape.createRoot(std.heap.page_allocator);
+    var object = Object{};
+    object.initInlineSlots();
+
+    const names = [_][]const u8{ "a", "b", "c", "d", "e" };
+    for (names[0..4], 0..) |name, i| {
+        try object.setOwn(std.testing.allocator, root, name, Value.num(@floatFromInt(i)));
+    }
+    try std.testing.expect(object.slotsAreInline());
+    try std.testing.expectEqual(@as(usize, 4), object.slots.items.len);
+
+    try object.setOwn(std.testing.allocator, root, names[4], Value.num(4));
+    try std.testing.expect(!object.slotsAreInline());
+    try std.testing.expectEqual(@as(usize, 5), object.slots.items.len);
+    object.slots.deinit(std.testing.allocator);
 }
 
 test "object named property delete rebuild serializes with writers" {
