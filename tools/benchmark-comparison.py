@@ -24,6 +24,7 @@ WORKLOADS = {
     "properties": 200,
     "arrays": 450,
     "direct_calls": 500,
+    "method_calls": 500,
     "fibonacci": 100,
 }
 

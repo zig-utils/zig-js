@@ -61,6 +61,25 @@ function benchmarkDirectCalls(jobs, lane) {
   return total;
 }
 
+function benchmarkMethodStep(value, delta) {
+  return (this.bias + value + delta) % 1000003;
+}
+
+function benchmarkMethodCalls(jobs, lane) {
+  // Each lane owns its receiver. The method reads `this.bias`, so this remains
+  // a real property lookup and receiver-binding call rather than a direct call
+  // with decorative object syntax.
+  var receiver = { bias: lane + 1, step: benchmarkMethodStep };
+  var total = 0;
+  for (var job = 0; job < jobs; job = job + 1) {
+    var value = job + 1;
+    for (var i = 0; i < 10000; i = i + 1)
+      value = receiver.step(value, i);
+    total = total + value;
+  }
+  return total;
+}
+
 var benchmarkFibValue = function benchmarkFibValue(n, state) {
   // Keep each call observable so this row continues measuring recursive call
   // throughput even when an engine can recognize and memoize the pure
@@ -83,6 +102,7 @@ function benchmarkFunction(name) {
   if (name === "properties") return benchmarkProperties;
   if (name === "arrays") return benchmarkArrays;
   if (name === "direct_calls") return benchmarkDirectCalls;
+  if (name === "method_calls") return benchmarkMethodCalls;
   if (name === "fibonacci") return benchmarkFibonacci;
   throw new Error("unknown benchmark workload: " + name);
 }
