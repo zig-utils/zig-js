@@ -21,7 +21,7 @@ WORKLOADS = {
     # above the full-run 50 ms timing floor on the reference M3 Pro while
     # keeping the shared-realm stress matrix practical.
     "arithmetic": 160,
-    "properties": 80,
+    "properties": 200,
     "arrays": 450,
     "fibonacci": 100,
 }
