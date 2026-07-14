@@ -43,6 +43,21 @@ function benchmarkArrays(jobs, lane) {
   return total;
 }
 
+function benchmarkDirectCallStep(value, delta) {
+  return (value + delta) % 1000003;
+}
+
+function benchmarkDirectCalls(jobs, lane) {
+  var total = 0;
+  for (var job = 0; job < jobs; job = job + 1) {
+    var value = lane + job + 1;
+    for (var i = 0; i < 10000; i = i + 1)
+      value = benchmarkDirectCallStep(value, i);
+    total = total + value;
+  }
+  return total;
+}
+
 var benchmarkFibValue = function benchmarkFibValue(n, state) {
   // Keep each call observable so this row continues measuring recursive call
   // throughput even when an engine can recognize and memoize the pure
@@ -64,6 +79,7 @@ function benchmarkFunction(name) {
   if (name === "arithmetic") return benchmarkArithmetic;
   if (name === "properties") return benchmarkProperties;
   if (name === "arrays") return benchmarkArrays;
+  if (name === "direct_calls") return benchmarkDirectCalls;
   if (name === "fibonacci") return benchmarkFibonacci;
   throw new Error("unknown benchmark workload: " + name);
 }

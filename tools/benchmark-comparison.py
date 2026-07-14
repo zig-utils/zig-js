@@ -23,6 +23,7 @@ WORKLOADS = {
     "arithmetic": 160,
     "properties": 200,
     "arrays": 450,
+    "direct_calls": 400,
     "fibonacci": 100,
 }
 
@@ -363,7 +364,7 @@ def render(rows: list[Row], lanes: list[int], raw_path: pathlib.Path | None, inf
         "",
         "## Reading the result",
         "",
-        f"Across these four deliberately small kernels, JSC's single-context throughput is {geometric_mean(single_ratios):.2f}x",
+        f"Across these {len(WORKLOADS)} deliberately small kernels, JSC's single-context throughput is {geometric_mean(single_ratios):.2f}x",
         "the zig-js throughput by geometric mean. These kernels deliberately exercise guarded native/VM tiers that",
         "zig-js currently implements; rows outside those documented subsets continue through general bytecode paths.",
         "The number is a compact description of this matrix, not a claim about applications or unsupported workloads.",
