@@ -860,6 +860,7 @@ var quick_packed_array_push_loop_hits: std.atomic.Value(u64) = .init(0);
 var quick_packed_array_specialized_expression_hits: std.atomic.Value(u64) = .init(0);
 var quick_polymorphic_property_loop_hits: std.atomic.Value(u64) = .init(0);
 var quick_object_allocation_loop_hits: std.atomic.Value(u64) = .init(0);
+var quick_object_allocation_checkpoint_crossings: std.atomic.Value(u64) = .init(0);
 var quick_object_literal_shape_preparations: std.atomic.Value(u64) = .init(0);
 
 pub fn quickObjectAllocationLoopHitsForTesting() u64 {
@@ -3841,10 +3842,28 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                     if (quickArrayPlan(chunk, start, parallel_sync)) |plan| {
                         const steps_until_checkpoint = 1024 - (vm.steps & 1023);
                         const steps_until_budget = interp.max_steps - vm.steps;
-                        const max_extra_steps = @min(steps_until_checkpoint - 1, steps_until_budget);
+                        // The fixed-shape allocation plan has no observable
+                        // calls inside one guarded iteration. Let it finish at
+                        // most one iteration across the internal checkpoint,
+                        // then service that checkpoint from materialized state
+                        // below instead of falling through one generic loop.
+                        const checkpoint_slack: u64 = switch (plan.*) {
+                            .object_allocation => if (parallel_sync) 0 else 60,
+                            else => 0,
+                        };
+                        const max_extra_steps = @min(steps_until_checkpoint - 1 + checkpoint_slack, steps_until_budget);
                         if (try tryQuickArrayLoop(vm, chunk, plan, cf, start, max_extra_steps, parallel_sync)) |quick| {
-                            vm.steps += quick.extra_steps;
                             ip = quick.next_ip;
+                            if (checkpoint_slack == 0) {
+                                vm.steps += quick.extra_steps;
+                            } else {
+                                const checkpoint_epoch = vm.steps >> 10;
+                                exec.acc = acc;
+                                exec.ip = ip;
+                                try advanceQuickObservableSteps(vm, quick.extra_steps);
+                                if (builtin.is_test and vm.steps >> 10 != checkpoint_epoch)
+                                    _ = quick_object_allocation_checkpoint_crossings.fetchAdd(1, .monotonic);
+                            }
                             if (builtin.is_test) switch (plan.*) {
                                 .packed_sum => _ = quick_packed_array_sum_loop_hits.fetchAdd(1, .monotonic),
                                 .packed_push => |push| {
@@ -7419,10 +7438,20 @@ test "vm: quickens fixed-shape object allocation loops with exact steps and guar
     const old_parallel = bc.ic_seqlock_enabled.load(.monotonic);
     defer bc.ic_seqlock_enabled.store(old_parallel, .monotonic);
     const hits_before = quick_object_allocation_loop_hits.load(.monotonic);
+    const crossings_before = quick_object_allocation_checkpoint_crossings.load(.monotonic);
     const preparations_before = quick_object_literal_shape_preparations.load(.monotonic);
     var hits = hits_before;
+    var crossings = crossings_before;
     var results: [2]Value = undefined;
     var steps: [2]u64 = undefined;
+    const SafepointCounter = struct {
+        fn service(raw_count: *anyopaque, raw_machine: *anyopaque) void {
+            const count: *u64 = @ptrCast(@alignCast(raw_count));
+            const machine: *Interpreter = @ptrCast(@alignCast(raw_machine));
+            std.debug.assert(machine.steps & 1023 == 0);
+            count.* += 1;
+        }
+    };
     for ([_]bool{ false, true }, 0..) |parallel, run_index| {
         bc.ic_seqlock_enabled.store(parallel, .monotonic);
         var parser = try Parser.init(allocator, source);
@@ -7432,11 +7461,25 @@ test "vm: quickens fixed-shape object allocation loops with exact steps and guar
         const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
         try interp.installGlobals(&env, root_shape);
         var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape };
+        var serviced_checkpoints: u64 = 0;
+        machine.gc_safepoint_ctx = &serviced_checkpoints;
+        machine.gc_safepoint_fn = SafepointCounter.service;
         results[run_index] = try run(&machine, chunk, null);
         steps[run_index] = machine.steps;
+        try std.testing.expectEqual(machine.steps >> 10, serviced_checkpoints);
         const next_hits = quick_object_allocation_loop_hits.load(.monotonic);
         try std.testing.expect(next_hits > hits);
-        try std.testing.expect(next_hits - hits > 16);
+        if (parallel)
+            try std.testing.expect(next_hits - hits > 16)
+        else
+            // The first iteration installs the literal/index caches; every
+            // subsequent iteration stays specialized across checkpoints.
+            try std.testing.expectEqual(@as(u64, 95), next_hits - hits);
+        const next_crossings = quick_object_allocation_checkpoint_crossings.load(.monotonic);
+        if (parallel)
+            try std.testing.expectEqual(crossings, next_crossings)
+        else
+            try std.testing.expect(next_crossings > crossings);
         if (!parallel) {
             try std.testing.expectEqual(
                 preparations_before + 1,
@@ -7444,6 +7487,7 @@ test "vm: quickens fixed-shape object allocation loops with exact steps and guar
             );
         }
         hits = next_hits;
+        crossings = next_crossings;
     }
     try std.testing.expectEqual(
         preparations_before + 1,
