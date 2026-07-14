@@ -655,10 +655,28 @@ const QuickPackedArrayPushLoop = struct {
     executed: u8,
 };
 
+const QuickPolymorphicPropertyLoop = struct {
+    index_local: u32,
+    array_local: u32,
+    object_local: u32,
+    value_local: u32,
+    checksum_local: u32,
+    extra_local: u32,
+    bound: QuickArrayBound,
+    selector_mask: i32,
+    modulus: f64,
+    checksum_mask: i32,
+    increment: f64,
+    get_prop_instruction: u32,
+    set_prop_instruction: u32,
+    exit_ip: u32,
+};
+
 const QuickArrayPlan = union(enum) {
     unsupported,
     packed_sum: QuickPackedArraySumLoop,
     packed_push: QuickPackedArrayPushLoop,
+    polymorphic_property: QuickPolymorphicPropertyLoop,
 };
 
 const max_quick_leaf_ops = 16;
@@ -796,6 +814,7 @@ var quick_array_push_hits: std.atomic.Value(u64) = .init(0);
 var quick_packed_array_sum_loop_hits: std.atomic.Value(u64) = .init(0);
 var quick_packed_array_push_loop_hits: std.atomic.Value(u64) = .init(0);
 var quick_packed_array_specialized_expression_hits: std.atomic.Value(u64) = .init(0);
+var quick_polymorphic_property_loop_hits: std.atomic.Value(u64) = .init(0);
 var quick_global_binding_hits: std.atomic.Value(u64) = .init(0);
 var quick_native_direct_call_hits: std.atomic.Value(u64) = .init(0);
 var quick_numeric_call_loop_hits: std.atomic.Value(u64) = .init(0);
@@ -974,7 +993,90 @@ fn compileQuickPackedArrayPushLoop(chunk: *Chunk, start: usize) ?QuickPackedArra
     };
 }
 
+fn compileQuickPolymorphicPropertyLoop(chunk: *Chunk, start: usize) ?QuickPolymorphicPropertyLoop {
+    const code = chunk.code.items;
+    if (start + 38 > code.len) return null;
+    const expected = [_]bc.Op{
+        .load_local, .load_const,  .lt,          .jump_if_false,
+        .load_local, .load_local,  .load_const,  .bit_and,
+        .get_index,  .store_local, .pop,         .load_local,
+        .get_prop,   .load_local,  .add,         .load_local,
+        .add,        .load_const,  .mod,         .store_local,
+        .pop,        .load_local,  .load_local,  .set_prop,
+        .pop,        .load_local,  .load_local,  .load_const,
+        .bit_and,    .add,         .store_local, .pop,
+        .load_local, .load_const,  .add,         .store_local,
+        .pop,        .jump,
+    };
+    for (expected, 0..) |op, offset|
+        if (offset != 1 and code[start + offset].op != op) return null;
+
+    const index_local = code[start].a;
+    const object_local = code[start + 9].a;
+    const value_local = code[start + 19].a;
+    const checksum_local = code[start + 25].a;
+    const locals = [_]u32{
+        index_local,    code[start + 4].a,  object_local, value_local,
+        checksum_local, code[start + 15].a,
+    };
+    for (locals, 0..) |local, left|
+        for (locals[left + 1 ..]) |other| if (local == other) return null;
+    if (code[start + 3].a != start + expected.len or
+        code[start + 5].a != index_local or
+        code[start + 11].a != object_local or code[start + 21].a != object_local or
+        code[start + 13].a != index_local or
+        code[start + 22].a != value_local or code[start + 26].a != value_local or
+        code[start + 30].a != checksum_local or
+        code[start + 32].a != index_local or code[start + 35].a != index_local or
+        code[start + 37].a != start or
+        code[start + 12].a >= chunk.names.items.len or code[start + 23].a >= chunk.names.items.len or
+        !std.mem.eql(u8, chunk.names.items[code[start + 12].a], chunk.names.items[code[start + 23].a]))
+        return null;
+
+    const bound: QuickArrayBound = switch (code[start + 1].op) {
+        .load_local => .{ .local = code[start + 1].a },
+        .load_const => constant: {
+            if (code[start + 1].a >= chunk.consts.items.len) return null;
+            const value_ = chunk.consts.items[code[start + 1].a];
+            if (!value_.isNumber()) return null;
+            break :constant .{ .constant = value_.asNum() };
+        },
+        else => return null,
+    };
+    switch (bound) {
+        .local => |local| for (locals[0..5]) |modified| {
+            if (local == modified) return null;
+        },
+        .constant => {},
+    }
+    const constant_instructions = [_]usize{ start + 6, start + 17, start + 27, start + 33 };
+    var constants: [4]f64 = undefined;
+    for (constant_instructions, 0..) |instruction, index| {
+        const constant_index = code[instruction].a;
+        if (constant_index >= chunk.consts.items.len or !chunk.consts.items[constant_index].isNumber()) return null;
+        constants[index] = chunk.consts.items[constant_index].asNum();
+    }
+    return .{
+        .index_local = index_local,
+        .array_local = code[start + 4].a,
+        .object_local = object_local,
+        .value_local = value_local,
+        .checksum_local = checksum_local,
+        .extra_local = code[start + 15].a,
+        .bound = bound,
+        .selector_mask = Value.num(constants[0]).toInt32(),
+        .modulus = constants[1],
+        .checksum_mask = Value.num(constants[2]).toInt32(),
+        .increment = constants[3],
+        .get_prop_instruction = @intCast(start + 12),
+        .set_prop_instruction = @intCast(start + 23),
+        .exit_ip = @intCast(start + expected.len),
+    };
+}
+
 fn compileQuickArrayPlan(chunk: *Chunk, start: usize) QuickArrayPlan {
+    if (compileQuickPolymorphicPropertyLoop(chunk, start)) |property|
+        return .{ .polymorphic_property = property };
     if (compileQuickPackedArrayPushLoop(chunk, start)) |push| return .{ .packed_push = push };
     const code = chunk.code.items;
     if (start + 18 > code.len) return .unsupported;
@@ -1043,7 +1145,16 @@ inline fn mayStartQuickArrayLoop(code: []const bc.Inst, start: usize) bool {
         code[start + 5].op == .dup and
         code[start + 6].op == .get_prop and
         code[start + 7].op == .swap;
-    return packed_sum or packed_push;
+    const polymorphic_property = start + 8 < code.len and
+        (code[start + 1].op == .load_const or code[start + 1].op == .load_local) and
+        code[start + 2].op == .lt and
+        code[start + 3].op == .jump_if_false and
+        code[start + 4].op == .load_local and
+        code[start + 5].op == .load_local and
+        code[start + 6].op == .load_const and
+        code[start + 7].op == .bit_and and
+        code[start + 8].op == .get_index;
+    return packed_sum or packed_push or polymorphic_property;
 }
 
 const QuickArrayLoopUpdate = struct {
@@ -1259,10 +1370,10 @@ fn compileQuickMethodCallLoopPlan(chunk: *Chunk, start: usize) QuickCallLoopPlan
     const code = chunk.code.items;
     if (start + 19 > code.len) return .unsupported;
     const expected = [_]bc.Op{
-        .load_local, .load_const, .lt,         .jump_if_false, .load_local,
-        .dup,        .get_prop,   .swap,       .load_local,    .load_local,
-        .call_with_this,          .store_local, .pop,          .load_local,
-        .load_const, .add,        .store_local, .pop,          .jump,
+        .load_local,     .load_const,  .lt,   .jump_if_false, .load_local,
+        .dup,            .get_prop,    .swap, .load_local,    .load_local,
+        .call_with_this, .store_local, .pop,  .load_local,    .load_const,
+        .add,            .store_local, .pop,  .jump,
     };
     for (expected, 0..) |op, offset| {
         if (offset == 1) {
@@ -1986,11 +2097,10 @@ fn compileQuickObservableRecurrencePlan(chunk: *Chunk) ?QuickObservableAddRecurr
     const code = chunk.code.items;
     if (chunk.param_count != 2 or chunk.local_count != 2 or code.len != 28) return null;
     const expected = [_]bc.Op{
-        .load_local, .load_local, .get_prop,  .load_const, .add,        .set_prop,  .pop,
-        .load_local, .load_const, .lt,        .jump_if_false, .load_local, .jump,
-        .load_var,   .load_local, .load_const, .sub,       .load_local, .call,
-        .load_var,   .load_local, .load_const, .sub,       .load_local, .call,
-        .add,        .ret,        .ret_undef,
+        .load_local, .load_local, .get_prop,   .load_const,    .add,        .set_prop, .pop,
+        .load_local, .load_const, .lt,         .jump_if_false, .load_local, .jump,     .load_var,
+        .load_local, .load_const, .sub,        .load_local,    .call,       .load_var, .load_local,
+        .load_const, .sub,        .load_local, .call,          .add,        .ret,      .ret_undef,
     };
     for (expected, 0..) |op, instruction| if (code[instruction].op != op) return null;
     if (code[0].a != 1 or code[1].a != 1 or
@@ -2303,6 +2413,83 @@ fn tryQuickArrayLoop(
 ) EvalError!?QuickArrayLoopUpdate {
     return switch (plan.*) {
         .unsupported => null,
+        .polymorphic_property => |property| quick: {
+            // Shared frames/objects retain ordinary per-op locking and
+            // interleaving. This tier is for isolated contexts where the exact
+            // trace contains no calls or other observable re-entry points.
+            if (parallel_sync or frame.escaped.load(.monotonic)) break :quick null;
+            const index_slot: usize = @intCast(property.index_local);
+            const array_slot: usize = @intCast(property.array_local);
+            const object_slot: usize = @intCast(property.object_local);
+            const value_slot: usize = @intCast(property.value_local);
+            const checksum_slot: usize = @intCast(property.checksum_local);
+            const extra_slot: usize = @intCast(property.extra_local);
+            for ([_]usize{ index_slot, array_slot, object_slot, value_slot, checksum_slot, extra_slot }) |slot|
+                if (slot >= frame.slots.len) break :quick null;
+
+            const array_value = frame.slots[array_slot];
+            if (!array_value.isObject()) break :quick null;
+            const array = array_value.asObj();
+            if (!array.is_array or array.is_arguments or array.proxy_handler != null or array.proxy_revoked or
+                array.accessors.load(.monotonic) != null or array.holes != null or
+                array.array_len > array.elements.items.len)
+                break :quick null;
+            if (!frame.slots[index_slot].isNumber() or !frame.slots[checksum_slot].isNumber() or
+                !frame.slots[extra_slot].isNumber())
+                break :quick null;
+            const bound = quickArrayBoundValue(property.bound, frame) orelse break :quick null;
+            var index = frame.slots[index_slot].asNum();
+            var checksum = frame.slots[checksum_slot].asNum();
+            const extra = frame.slots[extra_slot].asNum();
+            if (!(index < bound.asNum())) break :quick null;
+
+            const steps_per_iteration: u64 = 38;
+            const max_iterations = (max_extra_steps + 1) / steps_per_iteration;
+            if (max_iterations == 0) break :quick null;
+            var iterations: u64 = 0;
+            var completed = false;
+            var last_object: Value = undefined;
+            var last_value: f64 = undefined;
+            while (iterations < max_iterations and index < bound.asNum()) {
+                const next_index = index + property.increment;
+                const completes_loop = !(next_index < bound.asNum());
+                const completed_extra_steps = (iterations + 1) * steps_per_iteration - 1 +
+                    (if (completes_loop) @as(u64, 4) else 0);
+                if (completed_extra_steps > max_extra_steps) break;
+
+                const selected = Value.num(index).toInt32() & property.selector_mask;
+                if (selected < 0) break;
+                const element_index: usize = @intCast(selected);
+                if (element_index >= array.elements.items.len) break;
+                const object_value = array.elements.items[element_index];
+                const object = quickPlainObject(object_value) orelse break;
+                if (object.proxy_handler != null or object.proxy_revoked or object.shape == null) break;
+                const read_slot = quickOwnDataSlot(chunk, property.get_prop_instruction, object) orelse break;
+                const write_slot = quickOwnDataSlot(chunk, property.set_prop_instruction, object) orelse break;
+                if (read_slot != write_slot) break;
+                const current = quickSlotNumber(object, read_slot) orelse break;
+                const next = numberRemainder((current + index) + extra, property.modulus);
+                const updated = Value.num(next);
+                gc_mod.barrierValueFrom(object, updated);
+                object.slots.items[write_slot] = updated;
+                checksum += @floatFromInt(Value.num(next).toInt32() & property.checksum_mask);
+                index = next_index;
+                last_object = object_value;
+                last_value = next;
+                iterations += 1;
+                completed = completes_loop;
+                if (completed) break;
+            }
+            if (iterations == 0) break :quick null;
+            frame.slots[index_slot] = Value.num(index);
+            frame.slots[object_slot] = last_object;
+            frame.slots[value_slot] = Value.num(last_value);
+            frame.slots[checksum_slot] = Value.num(checksum);
+            break :quick .{
+                .extra_steps = iterations * steps_per_iteration - 1 + (if (completed) @as(u64, 4) else 0),
+                .next_ip = if (completed) property.exit_ip else start,
+            };
+        },
         .packed_sum => |sum| quick: {
             const max_iterations = (max_extra_steps + 1) / 18;
             if (max_iterations == 0) break :quick null;
@@ -2376,6 +2563,22 @@ fn tryQuickArrayLoop(
             break :quick .{ .extra_steps = @as(u64, @intCast(iterations)) * executed - 1, .next_ip = start };
         },
     };
+}
+
+inline fn quickOwnDataSlot(chunk: *Chunk, raw_instruction: u32, object: *value.Object) ?usize {
+    const instruction: usize = @intCast(raw_instruction);
+    if (instruction >= chunk.code.items.len or instruction >= chunk.ics.len) return null;
+    const name_index = chunk.code.items[instruction].a;
+    if (name_index >= chunk.names.items.len) return null;
+    const ic = &chunk.ics[instruction];
+    const slot = ic.lookupSlotMode(object.shape, false) orelse slot: {
+        const shape = object.shape orelse return null;
+        const resolved = shape.lookup(chunk.names.items[name_index]) orelse return null;
+        ic.recordMode(shape, resolved, false);
+        break :slot resolved;
+    };
+    if (slot >= object.slots.items.len) return null;
+    return slot;
 }
 
 inline fn quickPropertySlot(chunk: *Chunk, instruction: usize, object: *value.Object) ?usize {
@@ -2463,11 +2666,11 @@ fn compileQuickPropertyKernelPlan(chunk: *Chunk, start: usize) QuickPropertyKern
     const code = chunk.code.items;
     if (start < 4 or start + 38 > code.len) return .unsupported;
     const expected = [_]bc.Op{
-        .load_local, .load_local, .get_prop, .load_local, .add, .load_const, .mod, .set_prop, .pop,
-        .load_local, .load_local, .get_prop, .load_const, .add, .set_prop, .pop,
-        .load_local, .load_local, .get_prop, .load_local, .get_prop, .add, .set_prop, .pop,
-        .load_local, .load_local, .get_prop, .load_local, .get_prop, .sub, .set_prop, .pop,
-        .load_local, .load_const, .add, .store_local, .pop, .jump,
+        .load_local, .load_local, .get_prop, .load_local, .add,      .load_const, .mod,        .set_prop,   .pop,
+        .load_local, .load_local, .get_prop, .load_const, .add,      .set_prop,   .pop,        .load_local, .load_local,
+        .get_prop,   .load_local, .get_prop, .add,        .set_prop, .pop,        .load_local, .load_local, .get_prop,
+        .load_local, .get_prop,   .sub,      .set_prop,   .pop,      .load_local, .load_const, .add,        .store_local,
+        .pop,        .jump,
     };
     for (expected, 0..) |op, offset| if (code[start + offset].op != op) return .unsupported;
 
@@ -2502,7 +2705,7 @@ fn compileQuickPropertyKernelPlan(chunk: *Chunk, start: usize) QuickPropertyKern
         .counter_increment = constants[2],
         .bound = constants[3],
         .read_instructions = .{
-            @intCast(start + 2), @intCast(start + 11), @intCast(start + 18),
+            @intCast(start + 2),  @intCast(start + 11), @intCast(start + 18),
             @intCast(start + 20), @intCast(start + 26), @intCast(start + 28),
         },
         .write_instructions = .{
@@ -3274,6 +3477,7 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                                         .generic => {},
                                     }
                                 },
+                                .polymorphic_property => _ = quick_polymorphic_property_loop_hits.fetchAdd(1, .monotonic),
                                 .unsupported => {},
                             };
                             continue;
@@ -6394,7 +6598,6 @@ test "vm: quickens guarded pure numeric recurrence" {
         }
     }
     try std.testing.expectEqual(run_steps[1], run_steps[0]);
-
 }
 
 test "vm: compiles observable numeric recurrence without eliding calls" {
@@ -6593,6 +6796,73 @@ test "vm: quickens packed dense numeric array reads" {
         \\let values = []; values.push(7); seen * 10 + values.length
     )).asNum());
     try std.testing.expectEqual(pushes_after, quick_array_push_hits.load(.monotonic));
+}
+
+test "vm: quickens isolated polymorphic own-data property loops with exact steps" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const old_parallel = bc.ic_seqlock_enabled.load(.monotonic);
+    defer bc.ic_seqlock_enabled.store(old_parallel, .monotonic);
+    const sources = [_][]const u8{
+        \\function kernel(objects, lane) {
+        \\  let checksum = 0;
+        \\  for (let i = 0; i < 32; i = i + 1) {
+        \\    let object = objects[i & 3];
+        \\    let next = (object.value + i + lane) % 1000003;
+        \\    object.value = next;
+        \\    checksum = checksum + (next & 1023);
+        \\  }
+        \\  return checksum + objects[0].value + objects[1].value + objects[2].value + objects[3].value;
+        \\}
+        \\kernel([{ value: 1, a: 0 }, { b: 0, value: 2 }, { c: 0, d: 0, value: 3 }, { e: 0, f: 0, g: 0, value: 4 }], 2)
+        ,
+        \\let calls = 0; let backing = 2;
+        \\let objects = [{ value: 1, a: 0 }, { b: 0, value: 2 }, { c: 0, d: 0, value: 3 }, { e: 0, f: 0, g: 0, value: 4 }];
+        \\Object.defineProperty(objects[1], "value", {
+        \\  get: function () { calls = calls + 1; return backing; },
+        \\  set: function (value) { calls = calls + 1; backing = value; }
+        \\});
+        \\function kernel(objects, lane) {
+        \\  let checksum = 0;
+        \\  for (let i = 0; i < 32; i = i + 1) {
+        \\    let object = objects[i & 3];
+        \\    let next = (object.value + i + lane) % 1000003;
+        \\    object.value = next;
+        \\    checksum = checksum + (next & 1023);
+        \\  }
+        \\  return checksum + calls * 100000 + objects[0].value + backing + objects[2].value + objects[3].value;
+        \\}
+        \\kernel(objects, 2)
+        ,
+    };
+    const hits_before = quick_polymorphic_property_loop_hits.load(.monotonic);
+    var hits = hits_before;
+    for (sources) |source| {
+        var results: [2]Value = undefined;
+        var steps: [2]u64 = undefined;
+        for ([_]bool{ false, true }, 0..) |parallel, run_index| {
+            bc.ic_seqlock_enabled.store(parallel, .monotonic);
+            var parser = try Parser.init(allocator, source);
+            const program = try parser.parseProgram();
+            const chunk = try Compiler.compileProgram(allocator, program);
+            var env = Environment{ .arena = allocator, .fn_scope = true };
+            const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
+            try interp.installGlobals(&env, root_shape);
+            var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape };
+            results[run_index] = try run(&machine, chunk, null);
+            steps[run_index] = machine.steps;
+            const next_hits = quick_polymorphic_property_loop_hits.load(.monotonic);
+            if (parallel)
+                try std.testing.expectEqual(hits, next_hits)
+            else
+                try std.testing.expect(next_hits > hits);
+            hits = next_hits;
+        }
+        try std.testing.expectEqual(results[1].rawBits(), results[0].rawBits());
+        try std.testing.expectEqual(steps[1], steps[0]);
+    }
+    try std.testing.expect(hits > hits_before);
 }
 
 test "vm: shared array fast paths retain observable overrides" {

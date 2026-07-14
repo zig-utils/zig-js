@@ -22,7 +22,7 @@ WORKLOADS = {
     # keeping the shared-realm stress matrix practical.
     "arithmetic": 160,
     "properties": 200,
-    "polymorphic_properties": 200,
+    "polymorphic_properties": 350,
     "arrays": 450,
     "direct_calls": 500,
     "method_calls": 500,
