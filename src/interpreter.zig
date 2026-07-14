@@ -24168,6 +24168,9 @@ const CollatorOptions = struct {
     collation: []const u8 = "default",
     sensitivity: []const u8 = "variant",
     ignore_punctuation: bool = false,
+    /// `numeric` collation (the `kn` extension / `numeric` option): digit runs
+    /// compare by numeric value, so "a2" < "a10".
+    numeric: bool = false,
 };
 
 fn collatorOptionsFrom(self: *Interpreter, locales: Value, options: Value) EvalError!CollatorOptions {
@@ -24180,6 +24183,9 @@ fn collatorOptionsFrom(self: *Interpreter, locales: Value, options: Value) EvalE
     if (localeUValue(locale, "co")) |co| {
         if (collatorCollationSupported(locale, co)) opts.collation = co;
     }
+    // The `-u-kn` locale extension turns on numeric collation ("kn" or "kn-true";
+    // "kn-false" turns it off). The `numeric` option below overrides it.
+    if (localeUValue(locale, "kn")) |kn| opts.numeric = !std.mem.eql(u8, kn, "false");
     if (!options.isUndefined()) {
         const raw = Value.obj(try self.toObject(options));
         if (try dtfGetStr(self, raw, "usage", &.{ "sort", "search" }, null)) |u| opts.usage = u;
@@ -24194,7 +24200,8 @@ fn collatorOptionsFrom(self: *Interpreter, locales: Value, options: Value) EvalE
             if (!dtfWellFormedType(cstr)) return self.throwError("RangeError", "invalid collation");
             if (collatorCollationSupported(locale, cstr)) opts.collation = cstr;
         }
-        _ = try self.getProperty(raw, "numeric");
+        const num = try self.getProperty(raw, "numeric");
+        if (!num.isUndefined()) opts.numeric = num.toBoolean();
     }
     return opts;
 }
@@ -24301,7 +24308,58 @@ fn cmpBytes(a: []const u8, b: []const u8) i32 {
     };
 }
 
+/// Compare two ASCII digit runs by numeric value: fewer significant digits is
+/// smaller; equal width compares lexicographically. Leading zeros are ignored
+/// (so "007" and "7" are equal in value).
+fn collatorDigitRunCmp(a: []const u8, b: []const u8) i32 {
+    const strip = struct {
+        fn f(s: []const u8) []const u8 {
+            var i: usize = 0;
+            while (i < s.len and s[i] == '0') i += 1;
+            return s[i..];
+        }
+    }.f;
+    const as = strip(a);
+    const bs = strip(b);
+    if (as.len != bs.len) return if (as.len < bs.len) -1 else 1;
+    return switch (std.mem.order(u8, as, bs)) {
+        .lt => -1,
+        .gt => 1,
+        .eq => 0,
+    };
+}
+
+/// Numeric collation: walk both strings, comparing maximal ASCII-digit runs by
+/// value and the intervening non-digit segments with the ordinary collator.
+fn collatorNumericCompare(self: *Interpreter, x: []const u8, y: []const u8, opts: CollatorOptions) EvalError!i32 {
+    var plain = opts;
+    plain.numeric = false;
+    var i: usize = 0;
+    var j: usize = 0;
+    while (i < x.len and j < y.len) {
+        if (std.ascii.isDigit(x[i]) and std.ascii.isDigit(y[j])) {
+            const xs = i;
+            while (i < x.len and std.ascii.isDigit(x[i])) i += 1;
+            const ys = j;
+            while (j < y.len and std.ascii.isDigit(y[j])) j += 1;
+            const c = collatorDigitRunCmp(x[xs..i], y[ys..j]);
+            if (c != 0) return c;
+        } else {
+            const xs = i;
+            while (i < x.len and !std.ascii.isDigit(x[i])) i += 1;
+            const ys = j;
+            while (j < y.len and !std.ascii.isDigit(y[j])) j += 1;
+            const c = try collatorCompareStrings(self, x[xs..i], y[ys..j], plain);
+            if (c != 0) return c;
+        }
+    }
+    if (i < x.len) return 1;
+    if (j < y.len) return -1;
+    return 0;
+}
+
 fn collatorCompareStrings(self: *Interpreter, x: []const u8, y: []const u8, opts: CollatorOptions) EvalError!i32 {
+    if (opts.numeric) return collatorNumericCompare(self, x, y, opts);
     if ((std.mem.eql(u8, x, "\xf0\x9d\x85\x9e") and std.mem.eql(u8, y, "\xf0\x9d\x85\x97\xf0\x9d\x85\xa5")) or
         (std.mem.eql(u8, y, "\xf0\x9d\x85\x9e") and std.mem.eql(u8, x, "\xf0\x9d\x85\x97\xf0\x9d\x85\xa5")))
         return 0;
