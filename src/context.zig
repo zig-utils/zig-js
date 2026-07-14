@@ -14918,7 +14918,9 @@ test "enable_gc: heap_limit_bytes retries ArrayBuffer byte allocation after coll
     const chunk = 20 * 1024 * 1024;
     const ctx = try Context.createWith(std.testing.allocator, .{
         .enable_gc = true,
-        .heap_limit_bytes = 32 * 1024 * 1024,
+        // Bootstrap generously, then derive the recovery threshold from actual
+        // live usage below. Context overhead varies with target and cell layout.
+        .heap_limit_bytes = 128 * 1024 * 1024,
     });
     defer ctx.destroy();
 
@@ -14929,6 +14931,13 @@ test "enable_gc: heap_limit_bytes retries ArrayBuffer byte allocation after coll
         \\0;
     );
     try std.testing.expectEqual(baseline + chunk, ctx.gc_array_buffer_bytes_live);
+
+    // Leave just under one additional slab available. The second allocation
+    // must therefore collect, while reclaiming the first slab leaves ample
+    // target-independent headroom for the retry and collector scratch.
+    const after_first = ctx.heapBudgetStats().?;
+    ctx.budget_allocator.?.limit = after_first.used_bytes + chunk - 1;
+    try std.testing.expect(ctx.heapBudgetStats().?.remaining_bytes < chunk);
 
     const result = try ctx.evaluate(
         \\(() => {
