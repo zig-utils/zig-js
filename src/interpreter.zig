@@ -20636,6 +20636,53 @@ fn encodeBase64(self: *Interpreter, bytes: []const u8, url: bool, omit_padding: 
     return out.items;
 }
 
+/// `btoa(data)` — ToString, then base64-encode the bytes, requiring each UTF-16
+/// code unit to be Latin-1 (≤ 0xFF); a code point outside that range is an
+/// InvalidCharacterError DOMException.
+fn btoaFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const s = try self.toStringV(if (args.len > 0) args[0] else Value.undef());
+    var bytes: std.ArrayListUnmanaged(u8) = .empty;
+    var i: usize = 0;
+    while (i < s.len) {
+        const b0 = s[i];
+        var cp: u21 = undefined;
+        if (b0 < 0x80) {
+            cp = b0;
+            i += 1;
+        } else if ((b0 & 0xE0) == 0xC0 and i + 1 < s.len) {
+            cp = (@as(u21, b0 & 0x1F) << 6) | (s[i + 1] & 0x3F);
+            i += 2;
+        } else {
+            // Any 3+ byte WTF-8 sequence (incl. lone surrogates) is a code point
+            // > 0xFF; force the range error without decoding it exactly.
+            cp = 0x100;
+            i += 1;
+        }
+        if (cp > 0xFF) return self.throwDOMException("InvalidCharacterError", "The string to be encoded contains characters outside of the Latin1 range.");
+        try bytes.append(self.arena, @intCast(cp));
+    }
+    return try Value.strAlloc(self.arena, try encodeBase64(self, bytes.items, false, false));
+}
+
+/// `atob(data)` — ToString, then the HTML forgiving-base64 decode; each decoded
+/// byte becomes a code unit (0–255). Invalid input is an InvalidCharacterError.
+fn atobFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const s = try self.toStringV(if (args.len > 0) args[0] else Value.undef());
+    const res = try decodeBase64(self, s, false, .loose, std.math.maxInt(usize));
+    if (res.err) return self.throwDOMException("InvalidCharacterError", "The string to be decoded is not correctly encoded.");
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: [4]u8 = undefined;
+    for (res.bytes) |b| {
+        const n = std.unicode.utf8Encode(@as(u21, b), &buf) catch unreachable;
+        try out.appendSlice(self.arena, buf[0..n]);
+    }
+    return try Value.strAlloc(self.arena, out.items);
+}
+
 /// GetOptionsObject: undefined → no options; an ordinary object → itself;
 /// anything else (including null, symbols, bigints) → TypeError.
 fn getOptionsObject(self: *Interpreter, v: Value) EvalError!?*value.Object {
@@ -27735,6 +27782,8 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     try defineGlobalFn(env, root_shape, "parseInt", 2, builtins.parseIntFn);
     try defineGlobalFn(env, root_shape, "parseFloat", 1, builtins.parseFloatFn);
     try defineGlobalFn(env, root_shape, "structuredClone", 1, structuredCloneFn);
+    try defineGlobalFn(env, root_shape, "btoa", 1, btoaFn);
+    try defineGlobalFn(env, root_shape, "atob", 1, atobFn);
     try defineGlobalFn(env, root_shape, "isNaN", 1, builtins.isNaNFn);
     try defineGlobalFn(env, root_shape, "isFinite", 1, builtins.isFiniteFn);
     try defineGlobalFn(env, root_shape, "encodeURI", 1, builtins.encodeURIFn);
