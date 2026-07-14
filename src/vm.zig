@@ -715,6 +715,40 @@ inline fn quickPlainObject(value_: Value) ?*value.Object {
     return object;
 }
 
+/// Resolve a direct data property on an Array prototype without walking the
+/// full generic [[Get]] machinery. In shared mode both the receiver's own-data
+/// exclusion and the prototype slot read are short property-lock snapshots;
+/// the IC itself uses its seqlock publication mode.
+fn quickArrayPrototypeData(
+    chunk: *Chunk,
+    instruction: usize,
+    array: *value.Object,
+    name: []const u8,
+    parallel_sync: bool,
+) ?Value {
+    if (parallel_sync) array.lockProperties();
+    const plain_receiver = array.accessors.load(.monotonic) == null and array.attrsMap() == null;
+    const own_data = if (plain_receiver) if (array.shape) |shape| shape.lookup(name) else null else null;
+    if (parallel_sync) array.unlockProperties();
+    if (!plain_receiver or own_data != null) return null;
+
+    const prototype = array.protoAtomic() orelse return null;
+    if (prototype.proxy_handler != null or prototype.proxy_revoked) return null;
+    if (parallel_sync) prototype.lockProperties();
+    defer if (parallel_sync) prototype.unlockProperties();
+    if (prototype.accessors.load(.monotonic) != null) return null;
+    if (instruction >= chunk.ics.len) return null;
+    const ic = &chunk.ics[instruction];
+    const slot = ic.lookupSlotMode(prototype.shape, parallel_sync) orelse slot: {
+        const shape = prototype.shape orelse return null;
+        const resolved = shape.lookup(name) orelse return null;
+        ic.recordMode(shape, resolved, parallel_sync);
+        break :slot resolved;
+    };
+    if (slot >= prototype.slots.items.len) return null;
+    return prototype.slots.items[slot];
+}
+
 inline fn quickArrayIndex(key: Value) ?usize {
     if (!key.isNumber()) return null;
     const number = key.asNum();
@@ -2489,10 +2523,11 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                     // [[Get]] path: getters + the prototype walk).
                     if (obj.isObject()) {
                         const o = obj.asObj();
-                        if (!parallel_sync and o.is_array and !o.is_arguments and o.proxy_handler == null and !o.proxy_revoked and
+                        if (o.is_array and !o.is_arguments and o.proxy_handler == null and !o.proxy_revoked and
                             std.mem.eql(u8, name, "length"))
                         {
-                            result = Value.num(@floatFromInt(@max(o.elements.items.len, o.array_len)));
+                            const length = if (parallel_sync) o.arrayLength() else @max(o.elements.items.len, o.array_len);
+                            result = Value.num(@floatFromInt(length));
                             if (builtin.is_test) _ = quick_array_length_hits.fetchAdd(1, .monotonic);
                             break :fast;
                         }
@@ -2502,33 +2537,11 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                         // retaining the observable own-property and accessor
                         // checks. A replaced method value is read from the live
                         // slot, and any shape transition invalidates the cache.
-                        if (!parallel_sync and o.is_array and !o.is_arguments and o.proxy_handler == null and !o.proxy_revoked and
-                            o.accessors.load(.monotonic) == null and o.attrsMap() == null)
-                        {
-                            const own_data = if (o.shape) |shape| shape.lookup(name) else null;
-                            if (own_data == null) {
-                                if (o.protoAtomic()) |prototype| {
-                                    if (prototype.proxy_handler == null and !prototype.proxy_revoked and
-                                        prototype.accessors.load(.monotonic) == null)
-                                    {
-                                        const ic = &chunk.ics[ip - 1];
-                                        if (ic.lookupSlotMode(prototype.shape, false)) |slot| {
-                                            if (slot < prototype.slots.items.len) {
-                                                result = prototype.slots.items[slot];
-                                                if (builtin.is_test) _ = quick_array_prototype_data_hits.fetchAdd(1, .monotonic);
-                                                break :fast;
-                                            }
-                                        }
-                                        if (prototype.shape) |shape| {
-                                            if (shape.lookup(name)) |slot| {
-                                                ic.recordMode(shape, slot, false);
-                                                result = prototype.slots.items[slot];
-                                                if (builtin.is_test) _ = quick_array_prototype_data_hits.fetchAdd(1, .monotonic);
-                                                break :fast;
-                                            }
-                                        }
-                                    }
-                                }
+                        if (o.is_array and !o.is_arguments and o.proxy_handler == null and !o.proxy_revoked) {
+                            if (quickArrayPrototypeData(chunk, ip - 1, o, name, parallel_sync)) |data| {
+                                result = data;
+                                if (builtin.is_test) _ = quick_array_prototype_data_hits.fetchAdd(1, .monotonic);
+                                break :fast;
                             }
                         }
                         if (parallel_sync) o.lockProperties();
@@ -2562,18 +2575,22 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 if (obj.isNull() or obj.isUndefined())
                     return vm.throwError("TypeError", "cannot read property of null or undefined");
                 fast: {
-                    // A present packed element has no observable coercion,
-                    // accessor, hole, or prototype work. Shared arrays retain
-                    // the locked generic path; isolated arrays can read their
-                    // stable element allocation directly.
-                    if (!parallel_sync and obj.isObject()) {
+                    // A present dense element has no observable coercion,
+                    // accessor, hole, or prototype work. Shared arrays take a
+                    // short element-lock snapshot; isolated arrays read their
+                    // stable allocation directly.
+                    if (obj.isObject()) {
                         const o = obj.asObj();
-                        if (o.is_array and !o.is_arguments and o.proxy_handler == null and !o.proxy_revoked and
-                            o.accessors.load(.monotonic) == null and o.holes == null)
-                        {
+                        if (o.is_array and !o.is_arguments and o.proxy_handler == null and !o.proxy_revoked) {
                             if (quickArrayIndex(key)) |index| {
-                                if (index < o.elements.items.len) {
-                                    try stack.append(stack_alloc, o.elements.items[index]);
+                                const element = if (parallel_sync)
+                                    o.denseElement(index)
+                                else if (o.accessors.load(.monotonic) == null and o.holes == null and index < o.elements.items.len)
+                                    o.elements.items[index]
+                                else
+                                    null;
+                                if (element) |present| {
+                                    try stack.append(stack_alloc, present);
                                     if (builtin.is_test) _ = quick_dense_array_index_hits.fetchAdd(1, .monotonic);
                                     break :fast;
                                 }
@@ -2923,10 +2940,7 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 const args = stack.items[base..];
                 const this_val = stack.items[base - 1];
                 const callee = stack.items[base - 2];
-                const fast_array_push = if (!parallel_sync)
-                    try vm.tryFastArrayPush(callee, this_val, args)
-                else
-                    null;
+                const fast_array_push = try vm.tryFastArrayPush(callee, this_val, args);
                 const res = fast_array_push orelse blk: {
                     break :blk try callValue(vm, callee, args, this_val);
                 };
@@ -5384,6 +5398,38 @@ test "vm: quickens packed dense numeric array reads" {
         \\let values = []; values.push(7); seen * 10 + values.length
     )).asNum());
     try std.testing.expectEqual(pushes_after, quick_array_push_hits.load(.monotonic));
+}
+
+test "vm: shared array fast paths retain observable overrides" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const old_parallel = bc.ic_seqlock_enabled.load(.monotonic);
+    defer bc.ic_seqlock_enabled.store(old_parallel, .monotonic);
+    bc.ic_seqlock_enabled.store(true, .monotonic);
+
+    const reads_before = quick_dense_array_index_hits.load(.monotonic);
+    const lengths_before = quick_array_length_hits.load(.monotonic);
+    const prototype_before = quick_array_prototype_data_hits.load(.monotonic);
+    const pushes_before = quick_array_push_hits.load(.monotonic);
+    try std.testing.expectEqual(@as(f64, 5), (try vmRun(allocator,
+        \\let values = []; values.push(1); values.push(2);
+        \\values.length + values[0] + values[1]
+    )).asNum());
+    try std.testing.expect(quick_dense_array_index_hits.load(.monotonic) > reads_before);
+    try std.testing.expect(quick_array_length_hits.load(.monotonic) > lengths_before);
+    try std.testing.expect(quick_array_prototype_data_hits.load(.monotonic) > prototype_before);
+    try std.testing.expect(quick_array_push_hits.load(.monotonic) > pushes_before);
+
+    try std.testing.expectEqual(@as(f64, 99), (try vmRun(allocator,
+        \\let values = []; values.push = function () { return 99; }; values.push(1)
+    )).asNum());
+    try std.testing.expectEqual(@as(f64, 77), (try vmRun(allocator,
+        \\Object.defineProperty(Array.prototype, "push", {
+        \\  get: function () { return function () { return 77; }; }, configurable: true
+        \\});
+        \\let values = []; values.push(1)
+    )).asNum());
 }
 
 test "vm: packed array sum quickening preserves bytecode steps" {
