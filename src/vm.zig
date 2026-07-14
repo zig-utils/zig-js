@@ -34,6 +34,7 @@ const EvalError = interp.EvalError;
 
 const async_gen_request_reserve_granularity: usize = 16;
 const native_tier_entry_threshold: u32 = 3;
+const inline_call_depth_limit: u8 = 32;
 
 fn bindThisForCall(vm: *Interpreter, func: *Function, this_val: Value) EvalError!Value {
     if (func.is_arrow) return func.arrow_this;
@@ -2335,6 +2336,15 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                             try stack.append(stack_alloc, result);
                             continue;
                         }
+                        if (func.vm_inline_calls_safe and !vm.vm_inline_calls_disabled) {
+                            const result = if (vm.vm_inline_call_depth < inline_call_depth_limit)
+                                try runInlineFunction(vm, func, func.chunk.?, stack.items[base..], Value.undef(), Value.undef())
+                            else
+                                try callValueWithInlineCallsDisabled(vm, callee, stack.items[base..], Value.undef());
+                            stack.shrinkRetainingCapacity(base - 1);
+                            try stack.append(stack_alloc, result);
+                            continue;
+                        }
                     }
                 }
                 // Trampoline plain JS→JS calls under the driver: build the callee
@@ -3847,6 +3857,7 @@ fn makeClosure(vm: *Interpreter, tmpl: *bc.FnTemplate, frame: ?*Frame) EvalError
         .import_meta_slot = vm.import_meta_slot,
         .module_referrer = vm.cur_module,
         .chunk = if (tmpl.is_generator or tmpl.is_async) null else tmpl.chunk,
+        .vm_inline_calls_safe = if (tmpl.chunk) |compiled| interp.vmChunkAllowsInlineCalls(compiled) else false,
         .gen_chunk = if (tmpl.is_generator) tmpl.chunk else null,
         .frame = frame,
         .local_count = tmpl.local_count,
@@ -4099,6 +4110,32 @@ fn inheritCallerState(dst: *Activation, src: *const Activation) void {
     dst.saved_cur_module = src.saved_cur_module;
     dst.saved_eval_nt = src.saved_eval_nt;
     dst.saved_pm = src.saved_pm;
+}
+
+/// Execute a shallow ordinary VM call directly, retaining the same activation,
+/// root registration, handler unwinding, step accounting, and state restoration
+/// as a driver-owned activation. The depth bound keeps native stack use fixed;
+/// the boundary call disables this path while a nested heap driver handles the
+/// remainder of a deep chain.
+fn runInlineFunction(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []const Value, this_val: Value, new_target: Value) EvalError!Value {
+    try vm.stackGuard();
+    vm.depth += 1;
+    defer vm.depth -= 1;
+    const act = try buildActivation(vm, func, fchunk, args, this_val, new_target);
+    defer {
+        popActivation(vm, act);
+        releaseActivation(vm, act);
+    }
+    vm.vm_inline_call_depth += 1;
+    defer vm.vm_inline_call_depth -= 1;
+    return execLoop(vm, &act.exec, fchunk, act.frame, null);
+}
+
+fn callValueWithInlineCallsDisabled(vm: *Interpreter, callee: Value, args: []const Value, this_val: Value) EvalError!Value {
+    const saved = vm.vm_inline_calls_disabled;
+    vm.vm_inline_calls_disabled = true;
+    defer vm.vm_inline_calls_disabled = saved;
+    return callValue(vm, callee, args, this_val);
 }
 
 /// If `callee` is a plain JS-chunk function (not generator/async/native/bound/
@@ -4502,7 +4539,7 @@ test "vm: recursive calls throw a catchable RangeError before native stack overf
     defer arena.deinit();
     const a = arena.allocator();
     var parser = try Parser.init(a,
-        \\function recurse(n) { return recurse(n + 1); }
+        \\function recurse(n) { return 1 + recurse(n + 1); }
         \\recurse(0)
     );
     const prog = try parser.parseProgram();

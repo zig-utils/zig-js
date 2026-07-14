@@ -749,6 +749,14 @@ pub fn functionRealmGlobal(env: *Environment, fallback: ?*value.Object) ?*value.
     return fallback;
 }
 
+pub fn vmChunkAllowsInlineCalls(chunk: *const bc.Chunk) bool {
+    for (chunk.code.items) |inst| switch (inst.op) {
+        .tail_call, .tail_call_eval, .tail_call_method, .tail_call_with_this => return false,
+        else => {},
+    };
+    return true;
+}
+
 const TreeTailCall = struct {
     callee: Value,
     args: []const Value,
@@ -783,6 +791,11 @@ pub const Function = struct {
     /// compiler does not lower yet, in which case the function is invoked via the
     /// tree-walker (`callFunction`). Generators/async use `gen_chunk`/`async_chunk`.
     chunk: ?*bc.Chunk = null,
+    /// True when a plain VM chunk can execute through the bounded native-stack
+    /// call fast path. Chunks containing a tail-call opcode must stay entirely
+    /// under the heap activation driver because those opcodes yield a pending
+    /// activation directly to that driver.
+    vm_inline_calls_safe: bool = false,
     /// VM closure capture: the defining function's frame (type-erased `*vm.Frame`),
     /// for resolving upvalues. Null at the top level. The slot count to allocate
     /// for this function's own frame.
@@ -1265,6 +1278,12 @@ pub const Interpreter = struct {
     /// It counts backing activation allocations, not calls; a bounded value for
     /// repeated shallow recursion proves that the free list is doing real work.
     vm_activation_allocations: usize = 0,
+    /// Bounded native-stack VM call depth. Ordinary shallow calls avoid a
+    /// driver round-trip; once the bound is reached, a nested heap activation
+    /// driver handles the remainder of the chain. Both fields are interpreter-
+    /// local, including in shared-realm worker lanes.
+    vm_inline_call_depth: u8 = 0,
+    vm_inline_calls_disabled: bool = false,
 
     /// Guard a function call against native-stack exhaustion: throw a catchable
     /// `RangeError` when either the logical call-depth limit or the real OS
@@ -4192,6 +4211,7 @@ pub const Interpreter = struct {
             if (compiled) |code| {
                 func.chunk = code.chunk;
                 func.local_count = code.local_count;
+                func.vm_inline_calls_safe = vmChunkAllowsInlineCalls(code.chunk);
             }
         }
         // A function object's [[Prototype]] is the kind-specific function
