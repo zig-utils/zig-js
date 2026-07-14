@@ -141,6 +141,41 @@ const Analysis = struct {
     }
 };
 
+const integer_local_register_capacity = 4;
+
+const RepresentationState = struct {
+    locals: u64 = 0,
+    stack: u8 = 0,
+    depth: u8 = 0,
+
+    fn push(self: *RepresentationState, integer: bool) error{UnsupportedChunk}!void {
+        if (self.depth == jit.numeric_scratch_capacity) return error.UnsupportedChunk;
+        const bit = @as(u8, 1) << @intCast(self.depth);
+        if (integer) self.stack |= bit else self.stack &= ~bit;
+        self.depth += 1;
+    }
+
+    fn pop(self: *RepresentationState) error{UnsupportedChunk}!bool {
+        if (self.depth == 0) return error.UnsupportedChunk;
+        self.depth -= 1;
+        const bit = @as(u8, 1) << @intCast(self.depth);
+        const integer = self.stack & bit != 0;
+        self.stack &= ~bit;
+        return integer;
+    }
+};
+
+const IntegerSelection = struct {
+    locals: u64,
+    states: []?RepresentationState,
+    allocator: std.mem.Allocator,
+
+    fn deinit(self: *IntegerSelection) void {
+        self.allocator.free(self.states);
+        self.* = undefined;
+    }
+};
+
 const Block = struct {
     start: u32,
     end: u32,
@@ -671,6 +706,176 @@ fn analyzeNumeric(chunk: *const Chunk, integer_parameters: bool) !Analysis {
 
     if (!saw_return) return error.UnsupportedChunk;
     return .{ .states = states, .max_stack_depth = max_stack_depth, .allocator = allocator };
+}
+
+fn lowBits(count: u32) u64 {
+    if (count == 64) return std.math.maxInt(u64);
+    if (count == 0) return 0;
+    return (@as(u64, 1) << @intCast(count)) - 1;
+}
+
+fn isUnsignedSafeRange(range: IntegerRange) bool {
+    return range.isKnown() and range.min >= 0 and range.max <= max_safe_integer;
+}
+
+fn candidateIntegerLocals(chunk: *const Chunk, analysis: *const Analysis) u64 {
+    var candidates = lowBits(chunk.local_count);
+    var uses: [max_slots]u32 = @splat(0);
+    for (chunk.code.items, 0..) |inst, ip| {
+        const state = analysis.states[ip] orelse continue;
+        switch (inst.op) {
+            .load_local => {
+                const bit = @as(u64, 1) << @intCast(inst.a);
+                uses[inst.a] += 1;
+                if (state.locals[inst.a] != .number or !isUnsignedSafeRange(state.local_ranges[inst.a])) candidates &= ~bit;
+            },
+            .store_local => {
+                const bit = @as(u64, 1) << @intCast(inst.a);
+                if (state.depth == 0 or
+                    state.stack[state.depth - 1] != .number or
+                    !isUnsignedSafeRange(state.stack_ranges[state.depth - 1]))
+                    candidates &= ~bit;
+            },
+            else => {},
+        }
+    }
+
+    var selected: u64 = 0;
+    while (@popCount(selected) < integer_local_register_capacity) {
+        var best_slot: ?u6 = null;
+        var best_uses: u32 = 0;
+        for (0..chunk.local_count) |slot| {
+            const bit = @as(u64, 1) << @intCast(slot);
+            if (candidates & bit == 0 or selected & bit != 0 or uses[slot] <= best_uses) continue;
+            best_slot = @intCast(slot);
+            best_uses = uses[slot];
+        }
+        const slot = best_slot orelse break;
+        selected |= @as(u64, 1) << slot;
+    }
+    return selected;
+}
+
+fn enqueueRepresentation(
+    states: []?RepresentationState,
+    worklist: *std.ArrayListUnmanaged(u32),
+    allocator: std.mem.Allocator,
+    target: u32,
+    incoming: RepresentationState,
+) !void {
+    if (target >= states.len) return error.UnsupportedChunk;
+    if (states[target]) |existing_state| {
+        if (existing_state.depth != incoming.depth or existing_state.stack != incoming.stack) return error.UnsupportedChunk;
+        var existing = existing_state;
+        const merged_locals = existing.locals & incoming.locals;
+        if (merged_locals != existing.locals) {
+            existing.locals = merged_locals;
+            states[target] = existing;
+            try worklist.append(allocator, target);
+        }
+        return;
+    }
+    states[target] = incoming;
+    try worklist.append(allocator, target);
+}
+
+fn analyzeRepresentations(
+    chunk: *const Chunk,
+    analysis: *const Analysis,
+    selected_locals: u64,
+    allocator: std.mem.Allocator,
+) ![]?RepresentationState {
+    const states = try allocator.alloc(?RepresentationState, chunk.code.items.len);
+    errdefer allocator.free(states);
+    @memset(states, null);
+    states[0] = .{ .locals = selected_locals & lowBits(chunk.param_count) };
+
+    var worklist: std.ArrayListUnmanaged(u32) = .empty;
+    defer worklist.deinit(allocator);
+    try worklist.append(allocator, 0);
+    while (worklist.pop()) |ip_u32| {
+        const ip: usize = ip_u32;
+        const inst = chunk.code.items[ip];
+        const numeric_state = analysis.states[ip].?;
+        var state = states[ip].?;
+        var fallthrough = true;
+        switch (inst.op) {
+            .load_const => try state.push(isUnsignedSafeRange(classifyIntegerRange(chunk.consts.items[inst.a]))),
+            .load_undefined, .load_null, .load_true, .load_false => try state.push(false),
+            .pop => _ = try state.pop(),
+            .load_local => {
+                const bit = @as(u64, 1) << @intCast(inst.a);
+                try state.push(selected_locals & bit != 0 and state.locals & bit != 0);
+            },
+            .store_local => {
+                if (state.depth == 0) return error.UnsupportedChunk;
+                const bit = @as(u64, 1) << @intCast(inst.a);
+                if (selected_locals & bit != 0) {
+                    const stack_bit = @as(u8, 1) << @intCast(state.depth - 1);
+                    if (state.stack & stack_bit != 0) state.locals |= bit else state.locals &= ~bit;
+                }
+            },
+            .add, .sub, .mul, .div, .mod => {
+                const rhs_integer = try state.pop();
+                const lhs_integer = try state.pop();
+                const rhs_slot = numeric_state.depth - 1;
+                const lhs_slot = rhs_slot - 1;
+                const lhs: StackValue = .{
+                    .kind = numeric_state.stack[lhs_slot],
+                    .integer = numeric_state.stack_integers[lhs_slot],
+                    .range = numeric_state.stack_ranges[lhs_slot],
+                };
+                const rhs: StackValue = .{
+                    .kind = numeric_state.stack[rhs_slot],
+                    .integer = numeric_state.stack_integers[rhs_slot],
+                    .range = numeric_state.stack_ranges[rhs_slot],
+                };
+                const supported = inst.op != .div and (inst.op != .mod or (rhs.range.isKnown() and rhs.range.min > 0));
+                try state.push(lhs_integer and rhs_integer and supported and isUnsignedSafeRange(arithmeticIntegerRange(inst.op, lhs, rhs)));
+            },
+            .lt, .le, .gt, .ge, .eq, .neq, .eq_strict, .neq_strict => {
+                _ = try state.pop();
+                _ = try state.pop();
+                try state.push(false);
+            },
+            .jump => {
+                try enqueueRepresentation(states, &worklist, allocator, inst.a, state);
+                fallthrough = false;
+            },
+            .jump_if_false => {
+                _ = try state.pop();
+                try enqueueRepresentation(states, &worklist, allocator, inst.a, state);
+            },
+            .ret => {
+                _ = try state.pop();
+                fallthrough = false;
+            },
+            .ret_undef => fallthrough = false,
+            else => return error.UnsupportedChunk,
+        }
+        if (fallthrough) {
+            const next = std.math.cast(u32, ip + 1) orelse return error.UnsupportedChunk;
+            try enqueueRepresentation(states, &worklist, allocator, next, state);
+        }
+    }
+    return states;
+}
+
+fn selectIntegerLocals(chunk: *const Chunk, analysis: *const Analysis) !IntegerSelection {
+    const allocator = std.heap.page_allocator;
+    var selected = candidateIntegerLocals(chunk, analysis);
+    while (true) {
+        const states = try analyzeRepresentations(chunk, analysis, selected, allocator);
+        var valid = selected;
+        for (chunk.code.items, 0..) |inst, ip| {
+            if (inst.op != .load_local or states[ip] == null) continue;
+            const bit = @as(u64, 1) << @intCast(inst.a);
+            if (selected & bit != 0 and states[ip].?.locals & bit == 0) valid &= ~bit;
+        }
+        if (valid == selected) return .{ .locals = selected, .states = states, .allocator = allocator };
+        allocator.free(states);
+        selected = valid;
+    }
 }
 
 const ControlFixup = union(enum) {
@@ -1241,6 +1446,9 @@ test "integer provenance converges through benchmark-shaped loops" {
     const chunk = root.fns.items[0].chunk.?;
     var analysis = try analyzeNumeric(chunk, true);
     defer analysis.deinit();
+    var selection = try selectIntegerLocals(chunk, &analysis);
+    defer selection.deinit();
+    try std.testing.expectEqual(@as(usize, integer_local_register_capacity), @popCount(selection.locals));
 
     var saw_inner_bound = false;
     var saw_remainder = false;
@@ -1261,7 +1469,10 @@ test "integer provenance converges through benchmark-shaped loops" {
         },
         .mod => {
             const state = analysis.states[ip].?;
+            const representation = selection.states[ip].?;
             try std.testing.expect(state.depth >= 2);
+            const operand_mask = (@as(u8, 1) << @intCast(state.depth - 2)) | (@as(u8, 1) << @intCast(state.depth - 1));
+            try std.testing.expectEqual(operand_mask, representation.stack & operand_mask);
             try std.testing.expectEqual(IntegerFact.nonnegative, state.stack_integers[state.depth - 2]);
             try std.testing.expectEqual(IntegerFact.positive, state.stack_integers[state.depth - 1]);
             const dividend_range = state.stack_ranges[state.depth - 2];
