@@ -52,6 +52,7 @@ Both runners evaluate the exact source in [`bench/comparison.js`](../bench/compa
 | --- | --- |
 | `arithmetic` | 100,000 integer additions and modulo operations |
 | `properties` | 25,000 rounds mutating four properties on one object |
+| `polymorphic_properties` | 10,000 named-property read/modify/write rounds across four live receiver shapes; present on `main` but not yet included in the saved eight-workload report |
 | `arrays` | push 10,000 integers, then read and sum the array |
 | `direct_calls` | 10,000 calls through a lane-local function binding |
 | `method_calls` | 10,000 receiver-bound calls whose method reads `this.bias` |

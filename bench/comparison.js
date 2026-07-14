@@ -31,6 +31,31 @@ function benchmarkProperties(jobs, lane) {
   return total;
 }
 
+function benchmarkPolymorphicProperties(jobs, lane) {
+  var total = 0;
+  for (var job = 0; job < jobs; job = job + 1) {
+    var base = lane + job + 1;
+    // Keep `value` at four different slots. The hot access below therefore
+    // crosses four live receiver shapes instead of one monomorphic object.
+    var objects = [
+      { value: base, a: 1 },
+      { b: 2, value: base + 1 },
+      { c: 3, d: 4, value: base + 2 },
+      { e: 5, f: 6, g: 7, value: base + 3 }
+    ];
+    var checksum = 0;
+    for (var i = 0; i < 10000; i = i + 1) {
+      var object = objects[i & 3];
+      var next = (object.value + i + lane) % 1000003;
+      object.value = next;
+      checksum = checksum + (next & 1023);
+    }
+    total = total + checksum + objects[0].value + objects[1].value +
+      objects[2].value + objects[3].value;
+  }
+  return total;
+}
+
 function benchmarkArrays(jobs, lane) {
   var total = 0;
   for (var job = 0; job < jobs; job = job + 1) {
@@ -136,6 +161,7 @@ function benchmarkFibonacci(jobs, lane) {
 function benchmarkFunction(name) {
   if (name === "arithmetic") return benchmarkArithmetic;
   if (name === "properties") return benchmarkProperties;
+  if (name === "polymorphic_properties") return benchmarkPolymorphicProperties;
   if (name === "arrays") return benchmarkArrays;
   if (name === "direct_calls") return benchmarkDirectCalls;
   if (name === "method_calls") return benchmarkMethodCalls;
