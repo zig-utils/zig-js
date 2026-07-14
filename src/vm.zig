@@ -690,6 +690,10 @@ const QuickObjectAllocationLoop = struct {
     displaced_property_instruction: u32,
     literal_instructions: [3]u32,
     exit_ip: u32,
+    /// Isolated-mode cache of the immutable validated literal descriptor. A
+    /// Chunk can cross realm entry, so the root shape is the exact cache key.
+    prepared_root_shape: ?*Shape = null,
+    prepared_literal_shape: ?value.PreparedInlineLiteralShape = null,
 };
 
 const QuickArrayPlan = union(enum) {
@@ -839,6 +843,7 @@ var quick_packed_array_push_loop_hits: std.atomic.Value(u64) = .init(0);
 var quick_packed_array_specialized_expression_hits: std.atomic.Value(u64) = .init(0);
 var quick_polymorphic_property_loop_hits: std.atomic.Value(u64) = .init(0);
 var quick_object_allocation_loop_hits: std.atomic.Value(u64) = .init(0);
+var quick_object_literal_shape_preparations: std.atomic.Value(u64) = .init(0);
 
 pub fn quickObjectAllocationLoopHitsForTesting() u64 {
     std.debug.assert(builtin.is_test);
@@ -2496,7 +2501,7 @@ fn tryQuickNumericRecurrence(vm: *Interpreter, func: *Function, args: []const Va
 fn tryQuickObjectAllocationLoop(
     vm: *Interpreter,
     chunk: *Chunk,
-    allocation: *const QuickObjectAllocationLoop,
+    allocation: *QuickObjectAllocationLoop,
     frame: *Frame,
     start: usize,
     max_extra_steps: u64,
@@ -2532,10 +2537,19 @@ fn tryQuickObjectAllocationLoop(
 
     for (allocation.literal_instructions) |instruction|
         if (instruction >= chunk.ics.len) return null;
-    const first_transition = chunk.ics[allocation.literal_instructions[0]].lookupLiteralTransitionMode(vm.root_shape, false) orelse return null;
-    const second_transition = chunk.ics[allocation.literal_instructions[1]].lookupLiteralTransitionMode(first_transition.shape, false) orelse return null;
-    const third_transition = chunk.ics[allocation.literal_instructions[2]].lookupLiteralTransitionMode(second_transition.shape, false) orelse return null;
-    const literal_shape = value.Object.prepareInlineLiteralShape(vm.root_shape, third_transition.shape, 3) orelse return null;
+    const literal_shape = prepared: {
+        if (allocation.prepared_root_shape == vm.root_shape) {
+            if (allocation.prepared_literal_shape) |cached| break :prepared cached;
+        }
+        const first_transition = chunk.ics[allocation.literal_instructions[0]].lookupLiteralTransitionMode(vm.root_shape, false) orelse return null;
+        const second_transition = chunk.ics[allocation.literal_instructions[1]].lookupLiteralTransitionMode(first_transition.shape, false) orelse return null;
+        const third_transition = chunk.ics[allocation.literal_instructions[2]].lookupLiteralTransitionMode(second_transition.shape, false) orelse return null;
+        const resolved = value.Object.prepareInlineLiteralShape(vm.root_shape, third_transition.shape, 3) orelse return null;
+        allocation.prepared_literal_shape = resolved;
+        allocation.prepared_root_shape = vm.root_shape;
+        if (builtin.is_test) _ = quick_object_literal_shape_preparations.fetchAdd(1, .monotonic);
+        break :prepared resolved;
+    };
 
     const steps_per_iteration: u64 = 61;
     const max_iterations = (max_extra_steps + 1) / steps_per_iteration;
@@ -2610,7 +2624,7 @@ fn tryQuickObjectAllocationLoop(
 fn tryQuickArrayLoop(
     vm: *Interpreter,
     chunk: *Chunk,
-    plan: *const QuickArrayPlan,
+    plan: *QuickArrayPlan,
     frame: *Frame,
     start: usize,
     max_extra_steps: u64,
@@ -7293,6 +7307,7 @@ test "vm: quickens fixed-shape object allocation loops with exact steps and guar
     const old_parallel = bc.ic_seqlock_enabled.load(.monotonic);
     defer bc.ic_seqlock_enabled.store(old_parallel, .monotonic);
     const hits_before = quick_object_allocation_loop_hits.load(.monotonic);
+    const preparations_before = quick_object_literal_shape_preparations.load(.monotonic);
     var hits = hits_before;
     var results: [2]Value = undefined;
     var steps: [2]u64 = undefined;
@@ -7308,12 +7323,22 @@ test "vm: quickens fixed-shape object allocation loops with exact steps and guar
         results[run_index] = try run(&machine, chunk, null);
         steps[run_index] = machine.steps;
         const next_hits = quick_object_allocation_loop_hits.load(.monotonic);
-        if (parallel)
-            try std.testing.expectEqual(hits, next_hits)
-        else
+        if (parallel) {
+            try std.testing.expectEqual(hits, next_hits);
+        } else {
             try std.testing.expect(next_hits > hits);
+            try std.testing.expect(next_hits - hits > 16);
+            try std.testing.expectEqual(
+                preparations_before + 1,
+                quick_object_literal_shape_preparations.load(.monotonic),
+            );
+        }
         hits = next_hits;
     }
+    try std.testing.expectEqual(
+        preparations_before + 1,
+        quick_object_literal_shape_preparations.load(.monotonic),
+    );
     try std.testing.expectEqual(results[1].rawBits(), results[0].rawBits());
     try std.testing.expectEqual(steps[1], steps[0]);
 
