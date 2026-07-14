@@ -619,6 +619,21 @@ pub const Binding = struct {
         return self.context.collectForAllocationFailure(currentInterpreter());
     }
 
+    /// Optional zig-gc fast membership hook. The reusable cell backing can
+    /// validate an allocation-start address without touching candidate memory;
+    /// zig-gc still checks live header magic and retains its hash/list fallback
+    /// for delegated allocations and bindings without this hook.
+    pub fn ownsCellAllocation(self: *Binding, allocation: *anyopaque) bool {
+        const backing = self.context.gc_cell_backing orelse return false;
+        return backing.ownsCellAllocation(allocation);
+    }
+
+    /// A successful eligible-size allocation necessarily came from the cell
+    /// slab: this backing fails rather than delegating when slab growth OOMs.
+    pub fn usesOwnedCellStorage(_: *Binding, total: usize) bool {
+        return ContextMod.GcCellBacking.usesCellSlab(total);
+    }
+
     /// Persistent roots reachable from the realm plus registered active
     /// Interpreter execution roots at quiescent checkpoints.
     pub fn traceRoots(self: *Binding, v: anytype) void {

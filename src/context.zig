@@ -615,7 +615,9 @@ pub const GcCellBacking = struct {
     /// means unused slots are not prelinked.
     const large_chunk_bytes: usize = 384 * 1024;
     const reusable_tail_chunks: usize = 8;
+    const free_slot_magic: u64 = 0x6672_6565_5f67_6363;
     const FreeNode = extern struct {
+        magic: u64,
         next: ?*FreeNode,
         chunk_idx: usize,
     };
@@ -881,6 +883,31 @@ pub const GcCellBacking = struct {
         return self.ownedChunkIndexLocked(idx, ptr) != null;
     }
 
+    fn ownsIssuedSlotStartLocked(self: *GcCellBacking, idx: usize, ptr: [*]u8) bool {
+        const chunk_idx = self.ownedChunkIndexLocked(idx, ptr) orelse return false;
+        const chunk = self.bucket_chunks[idx].items[chunk_idx];
+        const offset = @intFromPtr(ptr) - @intFromPtr(chunk.ptr);
+        return offset % bucket_sizes[idx] == 0 and offset < self.bucket_next_offsets[idx].items[chunk_idx];
+    }
+
+    pub fn usesCellSlab(total: usize) bool {
+        return bucketIndex(total, .@"16") != null;
+    }
+
+    /// Validate an allocation-start address before zig-gc dereferences its
+    /// candidate header. Freed slots remain issued/owned—the collector clears
+    /// header magic before returning them, supplying the liveness half.
+    pub fn ownsCellAllocation(self: *GcCellBacking, allocation: *anyopaque) bool {
+        const ptr: [*]u8 = @ptrCast(allocation);
+        inline for (0..bucket_count) |idx| {
+            self.acquireBucket(idx);
+            const owned = self.ownsIssuedSlotStartLocked(idx, ptr);
+            self.unlockBucket(idx);
+            if (owned) return true;
+        }
+        return false;
+    }
+
     fn recordReusedSlotLocked(self: *GcCellBacking, idx: usize, chunk_idx: usize) void {
         self.bucket_reused_allocs[idx] += 1;
         self.bucket_live_counts[idx].items[chunk_idx] += 1;
@@ -951,6 +978,7 @@ pub const GcCellBacking = struct {
                 std.debug.assert(self.bucket_live_counts[idx].items[chunk_idx] > 0);
                 self.bucket_live_counts[idx].items[chunk_idx] -= 1;
                 const node: *FreeNode = @ptrCast(@alignCast(mem.ptr));
+                node.magic = free_slot_magic;
                 node.next = self.free_lists[idx];
                 node.chunk_idx = chunk_idx;
                 self.free_lists[idx] = node;
@@ -1271,6 +1299,27 @@ test "GC cell backing rejects pointers outside bucket address spans before scann
     try std.testing.expect(!backing.ownsPtrLocked(idx, foreign.ptr));
     try std.testing.expect(@intFromPtr(cell.ptr) >= backing.bucket_addr_min[idx]);
     try std.testing.expect(@intFromPtr(cell.ptr) < backing.bucket_addr_max[idx]);
+}
+
+test "GC cell backing recognizes exact issued allocation starts" {
+    var backing = GcCellBacking{ .inner = std.testing.allocator };
+    defer backing.deinit();
+    const allocator = backing.allocator();
+    const cell = try allocator.alignedAlloc(u8, .@"16", 200);
+    const foreign = try std.testing.allocator.alignedAlloc(u8, .@"16", 200);
+    defer std.testing.allocator.free(foreign);
+
+    try std.testing.expect(GcCellBacking.usesCellSlab(200));
+    try std.testing.expect(backing.ownsCellAllocation(@ptrCast(cell.ptr)));
+    try std.testing.expect(!backing.ownsCellAllocation(@ptrCast(cell.ptr + 16)));
+    try std.testing.expect(!backing.ownsCellAllocation(@ptrCast(foreign.ptr)));
+    allocator.free(cell);
+    // Ownership/issuance deliberately outlives liveness; zig-gc's cleared
+    // header magic and the backing's explicit free tag reject this stale slot
+    // before treating it as a cell.
+    try std.testing.expect(backing.ownsCellAllocation(@ptrCast(cell.ptr)));
+    const freed: *GcCellBacking.FreeNode = @ptrCast(@alignCast(cell.ptr));
+    try std.testing.expectEqual(GcCellBacking.free_slot_magic, freed.magic);
 }
 
 test "GC cell backing ownership hint avoids repeated bucket chunk scans" {
