@@ -29775,6 +29775,7 @@ fn installTypedArrays(env: *Environment, rs: *Shape) EvalError!void {
     try installHeaders(env, rs, object_proto);
     try installFormData(env, rs, object_proto);
     try installBlob(env, rs, object_proto);
+    try installFetchTypes(env, rs, object_proto);
     try installTemporal(env, rs, object_proto);
     try installIntl(env, rs, object_proto);
     // ShadowRealm: a child realm with `evaluate` (and a minimal `importValue`).
@@ -41419,6 +41420,419 @@ fn installBlob(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalE
     try file_ctor.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
     try setConstructor(a, rs, file_proto, file_ctor);
     try env.put("File", Value.obj(file_ctor));
+}
+
+// ===== Request / Response (Fetch bodies) =============================
+// Response state: \x00Rstatus/RstatusText/Rheaders/Rtype/Rurl/Rredirected/
+// Rbody(ArrayBuffer|null)/RbodyUsed. Request state: \x00Qurl/Qmethod/Qheaders/
+// Qbody/QbodyUsed + the request-init string slots (cache/credentials/…).
+const BodyExtract = struct { bytes: ?[]const u8, ctype: ?[]const u8 };
+fn fetchExtractBody(self: *Interpreter, body_v: Value) EvalError!BodyExtract {
+    if (body_v.isUndefined() or body_v.isNull()) return .{ .bytes = null, .ctype = null };
+    if (blobIsBlob(body_v)) {
+        const tv = body_v.asObj().getOwn("\x00blobtype");
+        const ct: ?[]const u8 = if (tv != null and tv.?.isString() and tv.?.asStr().len > 0) tv.?.asStr() else null;
+        return .{ .bytes = blobBytesOf(body_v.asObj()), .ctype = ct };
+    }
+    if (body_v.isObject() and body_v.asObj().getOwn("\x00usp") != null) {
+        return .{ .bytes = try uspToString(self, body_v), .ctype = "application/x-www-form-urlencoded;charset=UTF-8" };
+    }
+    if (bufferSourceBytes(body_v)) |b| return .{ .bytes = b, .ctype = null };
+    return .{ .bytes = try wtf8ToUtf8Bytes(self, try self.toStringV(body_v)), .ctype = "text/plain;charset=UTF-8" };
+}
+fn fetchMakeHeaders(self: *Interpreter, init_v: Value) EvalError!*value.Object {
+    const obj = try gc_mod.allocObj(self.arena);
+    obj.* = .{};
+    if (self.env.get("Headers")) |c| if (c.isObject()) if (c.asObj().getOwn("prototype")) |pp| if (pp.isObject()) obj.setProtoAtomic(pp.asObj());
+    _ = try headersList(self, Value.obj(obj));
+    if (!init_v.isUndefined() and !init_v.isNull()) try headersFill(self, Value.obj(obj), init_v);
+    return obj;
+}
+fn fetchHeadersHasName(self: *Interpreter, headers: *value.Object, lower: []const u8) EvalError!bool {
+    for (try (try headersList(self, Value.obj(headers))).internalElementsSnapshot(self.arena)) |pair| {
+        if (std.mem.eql(u8, uspPairKV(pair).k, lower)) return true;
+    }
+    return false;
+}
+fn fetchStoreBody(self: *Interpreter, obj: *value.Object, slot: []const u8, bytes: ?[]const u8) EvalError!void {
+    if (bytes) |b| {
+        const buf = try self.makeArrayBuffer(b.len);
+        if (b.len > 0) @memcpy(buf.array_buffer.?.bytes()[0..b.len], b);
+        try obj.setOwn(self.arena, self.root_shape, slot, Value.obj(buf));
+    } else {
+        try obj.setOwn(self.arena, self.root_shape, slot, Value.nul());
+    }
+}
+fn fetchBodyBytes(this: Value) []const u8 {
+    if (!this.isObject()) return &.{};
+    const o = this.asObj();
+    const bv = o.getOwn("\x00Rbody") orelse o.getOwn("\x00Qbody") orelse return &.{};
+    if (bv.isObject()) if (bv.asObj().array_buffer) |ab| return ab.bytes();
+    return &.{};
+}
+fn fetchMarkUsed(self: *Interpreter, this: Value) EvalError!void {
+    if (!this.isObject()) return;
+    const o = this.asObj();
+    const slot: []const u8 = if (o.getOwn("\x00Rbody") != null) "\x00RbodyUsed" else "\x00QbodyUsed";
+    try o.setOwn(self.arena, self.root_shape, slot, Value.boolVal(true));
+}
+fn bodyTextFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    try fetchMarkUsed(self, this);
+    return try promiseResolveValue(self, try Value.strAlloc(self.arena, fetchBodyBytes(this)));
+}
+fn bodyJsonFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    try fetchMarkUsed(self, this);
+    const s = try Value.strAlloc(self.arena, fetchBodyBytes(this));
+    const json = self.env.get("JSON") orelse return self.throwError("Error", "JSON unavailable");
+    const parse = try self.getProperty(json, "parse");
+    if (self.callValue(parse, &.{s})) |res| {
+        return try promiseResolveValue(self, res);
+    } else |err| {
+        if (err == error.Throw) {
+            const reason = self.exception;
+            self.exception = Value.undef();
+            return Value.obj(try promise.newSettledPromise(self, .rejected, reason));
+        }
+        return err;
+    }
+}
+fn bodyArrayBufferFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    try fetchMarkUsed(self, this);
+    const bytes = fetchBodyBytes(this);
+    const buf = try self.makeArrayBuffer(bytes.len);
+    if (bytes.len > 0) @memcpy(buf.array_buffer.?.bytes()[0..bytes.len], bytes);
+    return try promiseResolveValue(self, Value.obj(buf));
+}
+fn bodyBytesFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    try fetchMarkUsed(self, this);
+    const bytes = fetchBodyBytes(this);
+    const ta = try newTypedArray(self, .u8, bytes.len);
+    if (bytes.len > 0) @memcpy(ta.typed_array.?.buffer.array_buffer.?.bytes()[0..bytes.len], bytes);
+    return try promiseResolveValue(self, Value.obj(ta));
+}
+fn bodyBlobFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    try fetchMarkUsed(self, this);
+    // Content-type comes from the body's own headers when present.
+    var ct: []const u8 = "";
+    if (this.isObject()) {
+        const hv = this.asObj().getOwn("\x00Rheaders") orelse this.asObj().getOwn("\x00Qheaders");
+        if (hv != null and hv.?.isObject()) {
+            for (try (try headersList(self, hv.?)).internalElementsSnapshot(self.arena)) |pair| {
+                const kv = uspPairKV(pair);
+                if (std.mem.eql(u8, kv.k, "content-type")) ct = kv.v;
+            }
+        }
+    }
+    return try promiseResolveValue(self, Value.obj(try blobMake(self, "Blob", fetchBodyBytes(this), ct)));
+}
+fn fetchSlotStrGetter(comptime slot: []const u8, comptime dflt: []const u8) value.NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+            _ = args;
+            const self: *Interpreter = @ptrCast(@alignCast(ctx));
+            if (!this.isObject()) return self.throwError("TypeError", "Illegal invocation");
+            if (this.asObj().getOwn(slot)) |v| return v;
+            return Value.str(dflt);
+        }
+    }.call;
+}
+fn fetchBoolSlotGetter(comptime slot: []const u8) value.NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+            _ = args;
+            const self: *Interpreter = @ptrCast(@alignCast(ctx));
+            if (!this.isObject()) return self.throwError("TypeError", "Illegal invocation");
+            return Value.boolVal(if (this.asObj().getOwn(slot)) |v| v.toBoolean() else false);
+        }
+    }.call;
+}
+// ---- Response -------------------------------------------------------
+fn responseMake(self: *Interpreter, status: u32, status_text: []const u8, headers: *value.Object, body: ?[]const u8, rtype: []const u8, url: []const u8, redirected: bool) EvalError!*value.Object {
+    const obj = try gc_mod.allocObj(self.arena);
+    obj.* = .{};
+    if (self.env.get("Response")) |c| if (c.isObject()) if (c.asObj().getOwn("prototype")) |pp| if (pp.isObject()) obj.setProtoAtomic(pp.asObj());
+    const rs = self.root_shape;
+    try obj.setOwn(self.arena, rs, "\x00Rstatus", Value.num(@floatFromInt(status)));
+    try obj.setOwn(self.arena, rs, "\x00RstatusText", try Value.strAlloc(self.arena, status_text));
+    try obj.setOwn(self.arena, rs, "\x00Rheaders", Value.obj(headers));
+    try obj.setOwn(self.arena, rs, "\x00Rtype", try Value.strAlloc(self.arena, rtype));
+    try obj.setOwn(self.arena, rs, "\x00Rurl", try Value.strAlloc(self.arena, url));
+    try obj.setOwn(self.arena, rs, "\x00Rredirected", Value.boolVal(redirected));
+    try obj.setOwn(self.arena, rs, "\x00RbodyUsed", Value.boolVal(false));
+    try fetchStoreBody(self, obj, "\x00Rbody", body);
+    return obj;
+}
+fn responseApplyBodyCT(self: *Interpreter, headers: *value.Object, be: BodyExtract) EvalError!void {
+    if (be.ctype) |ct| {
+        if (!try fetchHeadersHasName(self, headers, "content-type"))
+            try headersAppendRaw(self, Value.obj(headers), Value.str("content-type"), try Value.strAlloc(self.arena, ct));
+    }
+}
+fn responseConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (self.new_target.isUndefined()) return self.throwError("TypeError", "Failed to construct 'Response': Please use the 'new' operator");
+    const body_v = if (args.len > 0) args[0] else Value.undef();
+    var status: f64 = 200;
+    var status_text: []const u8 = "";
+    var headers_init: Value = Value.undef();
+    if (args.len > 1 and args[1].isObject()) {
+        const sv = try self.getProperty(args[1], "status");
+        if (!sv.isUndefined()) status = try self.toNumberV(sv);
+        const stv = try self.getProperty(args[1], "statusText");
+        if (!stv.isUndefined()) status_text = try self.toStringV(stv);
+        headers_init = try self.getProperty(args[1], "headers");
+    }
+    if (status < 200 or status > 599) return self.throwError("RangeError", "Failed to construct 'Response': The status provided is outside the range [200, 599].");
+    const st: u32 = @intFromFloat(status);
+    const headers = try fetchMakeHeaders(self, headers_init);
+    const be = try fetchExtractBody(self, body_v);
+    if (be.bytes != null and (st == 204 or st == 205 or st == 304))
+        return self.throwError("TypeError", "Response with null body status cannot have body");
+    try responseApplyBodyCT(self, headers, be);
+    return Value.obj(try responseMake(self, st, status_text, headers, be.bytes, "default", "", false));
+}
+fn responseStatusGet(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!this.isObject()) return self.throwError("TypeError", "Illegal invocation");
+    return this.asObj().getOwn("\x00Rstatus") orelse Value.num(200);
+}
+fn responseOkGet(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!this.isObject()) return self.throwError("TypeError", "Illegal invocation");
+    const s = if (this.asObj().getOwn("\x00Rstatus")) |v| v.asNum() else 200;
+    return Value.boolVal(s >= 200 and s <= 299);
+}
+fn responseHeadersGet(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!this.isObject()) return self.throwError("TypeError", "Illegal invocation");
+    return this.asObj().getOwn("\x00Rheaders") orelse Value.undef();
+}
+fn responseErrorStaticFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    return Value.obj(try responseMake(self, 0, "", try fetchMakeHeaders(self, Value.undef()), null, "error", "", false));
+}
+fn responseJsonStaticFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const json = self.env.get("JSON") orelse return self.throwError("Error", "JSON unavailable");
+    const stringify = try self.getProperty(json, "stringify");
+    const jstr = try self.callValue(stringify, &.{if (args.len > 0) args[0] else Value.undef()});
+    if (jstr.isUndefined()) return self.throwError("TypeError", "The data is not JSON serializable");
+    const bytes = try wtf8ToUtf8Bytes(self, try self.toStringV(jstr));
+    var status: u32 = 200;
+    var status_text: []const u8 = "";
+    var headers_init: Value = Value.undef();
+    if (args.len > 1 and args[1].isObject()) {
+        const sv = try self.getProperty(args[1], "status");
+        if (!sv.isUndefined()) status = @intFromFloat(try self.toNumberV(sv));
+        const stv = try self.getProperty(args[1], "statusText");
+        if (!stv.isUndefined()) status_text = try self.toStringV(stv);
+        headers_init = try self.getProperty(args[1], "headers");
+    }
+    const headers = try fetchMakeHeaders(self, headers_init);
+    if (!try fetchHeadersHasName(self, headers, "content-type"))
+        try headersAppendRaw(self, Value.obj(headers), Value.str("content-type"), Value.str("application/json"));
+    return Value.obj(try responseMake(self, status, status_text, headers, bytes, "default", "", false));
+}
+fn responseRedirectStaticFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const url_raw = try self.toStringV(if (args.len > 0) args[0] else Value.undef());
+    const parsed = (try urlParse(self, url_raw, null)) orelse return self.throwError("TypeError", "Failed to execute 'redirect' on 'Response': Invalid URL");
+    const url = try urlSerialize(self, parsed, false);
+    var status: u32 = 302;
+    if (args.len > 1 and !args[1].isUndefined()) status = @intFromFloat(try self.toNumberV(args[1]));
+    if (status != 301 and status != 302 and status != 303 and status != 307 and status != 308)
+        return self.throwError("RangeError", "Failed to execute 'redirect' on 'Response': Invalid status code");
+    const headers = try fetchMakeHeaders(self, Value.undef());
+    try headersAppendRaw(self, Value.obj(headers), Value.str("location"), try Value.strAlloc(self.arena, url));
+    return Value.obj(try responseMake(self, status, "", headers, null, "default", "", false));
+}
+// ---- Request --------------------------------------------------------
+fn requestNormalizeMethod(m: []const u8) []const u8 {
+    const known = [_][]const u8{ "DELETE", "GET", "HEAD", "OPTIONS", "POST", "PUT" };
+    for (known) |k| if (std.ascii.eqlIgnoreCase(m, k)) return k;
+    return m;
+}
+fn requestConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (self.new_target.isUndefined()) return self.throwError("TypeError", "Failed to construct 'Request': Please use the 'new' operator");
+    if (args.len == 0 or args[0].isUndefined()) return self.throwError("TypeError", "Failed to construct 'Request': 1 argument required");
+    const input = args[0];
+    var url: []const u8 = "";
+    var method: []const u8 = "GET";
+    var headers_init: Value = Value.undef();
+    var body_v: Value = Value.undef();
+    if (input.isObject() and input.asObj().getOwn("\x00Qurl") != null) {
+        // Copy from an existing Request.
+        const src = input.asObj();
+        url = (src.getOwn("\x00Qurl") orelse Value.str("")).asStr();
+        method = (src.getOwn("\x00Qmethod") orelse Value.str("GET")).asStr();
+        if (src.getOwn("\x00Qheaders")) |h| headers_init = h;
+    } else {
+        const parsed = (try urlParse(self, try self.toStringV(input), null)) orelse return self.throwError("TypeError", "Failed to construct 'Request': Invalid URL");
+        url = try urlSerialize(self, parsed, false);
+    }
+    var cache: []const u8 = "default";
+    var credentials: []const u8 = "same-origin";
+    var mode: []const u8 = "cors";
+    var redirect: []const u8 = "follow";
+    var integrity: []const u8 = "";
+    var keepalive = false;
+    if (args.len > 1 and args[1].isObject()) {
+        const mv = try self.getProperty(args[1], "method");
+        if (!mv.isUndefined()) method = requestNormalizeMethod(try self.toStringV(mv));
+        const hv = try self.getProperty(args[1], "headers");
+        if (!hv.isUndefined()) headers_init = hv;
+        body_v = try self.getProperty(args[1], "body");
+        const cv = try self.getProperty(args[1], "cache");
+        if (!cv.isUndefined()) cache = try self.toStringV(cv);
+        const crv = try self.getProperty(args[1], "credentials");
+        if (!crv.isUndefined()) credentials = try self.toStringV(crv);
+        const mdv = try self.getProperty(args[1], "mode");
+        if (!mdv.isUndefined()) mode = try self.toStringV(mdv);
+        const rdv = try self.getProperty(args[1], "redirect");
+        if (!rdv.isUndefined()) redirect = try self.toStringV(rdv);
+        const iv = try self.getProperty(args[1], "integrity");
+        if (!iv.isUndefined()) integrity = try self.toStringV(iv);
+        const kv = try self.getProperty(args[1], "keepalive");
+        if (!kv.isUndefined()) keepalive = kv.toBoolean();
+    }
+    const headers = try fetchMakeHeaders(self, headers_init);
+    const be = try fetchExtractBody(self, body_v);
+    if (be.ctype) |ct| {
+        if (!try fetchHeadersHasName(self, headers, "content-type"))
+            try headersAppendRaw(self, Value.obj(headers), Value.str("content-type"), try Value.strAlloc(self.arena, ct));
+    }
+    const obj = try gc_mod.allocObj(self.arena);
+    obj.* = .{};
+    if (self.env.get("Request")) |c| if (c.isObject()) if (c.asObj().getOwn("prototype")) |pp| if (pp.isObject()) obj.setProtoAtomic(pp.asObj());
+    const rs = self.root_shape;
+    try obj.setOwn(self.arena, rs, "\x00Qurl", try Value.strAlloc(self.arena, url));
+    try obj.setOwn(self.arena, rs, "\x00Qmethod", try Value.strAlloc(self.arena, method));
+    try obj.setOwn(self.arena, rs, "\x00Qheaders", Value.obj(headers));
+    try obj.setOwn(self.arena, rs, "\x00QbodyUsed", Value.boolVal(false));
+    try fetchStoreBody(self, obj, "\x00Qbody", be.bytes);
+    try obj.setOwn(self.arena, rs, "\x00Qcache", try Value.strAlloc(self.arena, cache));
+    try obj.setOwn(self.arena, rs, "\x00Qcredentials", try Value.strAlloc(self.arena, credentials));
+    try obj.setOwn(self.arena, rs, "\x00Qmode", try Value.strAlloc(self.arena, mode));
+    try obj.setOwn(self.arena, rs, "\x00Qredirect", try Value.strAlloc(self.arena, redirect));
+    try obj.setOwn(self.arena, rs, "\x00Qintegrity", try Value.strAlloc(self.arena, integrity));
+    try obj.setOwn(self.arena, rs, "\x00Qkeepalive", Value.boolVal(keepalive));
+    return Value.obj(obj);
+}
+fn requestSlotGetter(comptime slot: []const u8) value.NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+            _ = args;
+            const self: *Interpreter = @ptrCast(@alignCast(ctx));
+            if (!this.isObject()) return self.throwError("TypeError", "Illegal invocation");
+            return this.asObj().getOwn(slot) orelse Value.undef();
+        }
+    }.call;
+}
+fn requestCloneFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!this.isObject() or this.asObj().getOwn("\x00Qurl") == null) return self.throwError("TypeError", "Illegal invocation");
+    if (self.env.get("Request")) |c| return try self.construct(c, &.{this});
+    return self.throwError("Error", "Request unavailable");
+}
+fn installFetchTypes(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalError!void {
+    const a = env.arena;
+    const symKey = struct {
+        fn f(e: *Environment, name: []const u8) ?[]const u8 {
+            if (e.get("Symbol")) |s| if (s.isObject()) {
+                if (s.asObj().getOwn(name)) |t| if (t.isObject() and t.asObj().is_symbol) return t.asObj().sym_key;
+            };
+            return null;
+        }
+    }.f;
+    // ---- Response ----
+    const rp = try gc_mod.allocObj(a);
+    rp.* = .{ .proto = object_proto };
+    try setNativeGetter(a, rs, rp, "status", responseStatusGet);
+    try setNativeGetter(a, rs, rp, "ok", responseOkGet);
+    try setNativeGetter(a, rs, rp, "statusText", fetchSlotStrGetter("\x00RstatusText", ""));
+    try setNativeGetter(a, rs, rp, "headers", responseHeadersGet);
+    try setNativeGetter(a, rs, rp, "type", fetchSlotStrGetter("\x00Rtype", "default"));
+    try setNativeGetter(a, rs, rp, "url", fetchSlotStrGetter("\x00Rurl", ""));
+    try setNativeGetter(a, rs, rp, "redirected", fetchBoolSlotGetter("\x00Rredirected"));
+    try setNativeGetter(a, rs, rp, "bodyUsed", fetchBoolSlotGetter("\x00RbodyUsed"));
+    inline for (.{ "status", "ok", "statusText", "headers", "type", "url", "redirected", "bodyUsed" }) |g| {
+        try rp.setAttr(a, g, .{ .enumerable = true, .configurable = true });
+    }
+    try setNative(a, rs, rp, "text", 0, bodyTextFn);
+    try setNative(a, rs, rp, "json", 0, bodyJsonFn);
+    try setNative(a, rs, rp, "arrayBuffer", 0, bodyArrayBufferFn);
+    try setNative(a, rs, rp, "bytes", 0, bodyBytesFn);
+    try setNative(a, rs, rp, "blob", 0, bodyBlobFn);
+    if (symKey(env, "toStringTag")) |k| {
+        try rp.setOwn(a, rs, k, Value.str("Response"));
+        try rp.setAttr(a, k, .{ .writable = false, .enumerable = false, .configurable = true });
+    }
+    const rctor = try gc_mod.allocObj(a);
+    rctor.* = .{ .native = responseConstructorFn, .native_ctor = true };
+    try installNativeProps(a, rs, rctor, "Response", 0);
+    try rctor.setOwn(a, rs, "prototype", Value.obj(rp));
+    try rctor.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
+    try setConstructor(a, rs, rp, rctor);
+    try setNative(a, rs, rctor, "error", 0, responseErrorStaticFn);
+    try setNative(a, rs, rctor, "json", 1, responseJsonStaticFn);
+    try setNative(a, rs, rctor, "redirect", 1, responseRedirectStaticFn);
+    try env.put("Response", Value.obj(rctor));
+    // ---- Request ----
+    const qp = try gc_mod.allocObj(a);
+    qp.* = .{ .proto = object_proto };
+    try setNativeGetter(a, rs, qp, "url", requestSlotGetter("\x00Qurl"));
+    try setNativeGetter(a, rs, qp, "method", requestSlotGetter("\x00Qmethod"));
+    try setNativeGetter(a, rs, qp, "headers", requestSlotGetter("\x00Qheaders"));
+    try setNativeGetter(a, rs, qp, "bodyUsed", fetchBoolSlotGetter("\x00QbodyUsed"));
+    try setNativeGetter(a, rs, qp, "cache", fetchSlotStrGetter("\x00Qcache", "default"));
+    try setNativeGetter(a, rs, qp, "credentials", fetchSlotStrGetter("\x00Qcredentials", "same-origin"));
+    try setNativeGetter(a, rs, qp, "mode", fetchSlotStrGetter("\x00Qmode", "cors"));
+    try setNativeGetter(a, rs, qp, "redirect", fetchSlotStrGetter("\x00Qredirect", "follow"));
+    try setNativeGetter(a, rs, qp, "integrity", fetchSlotStrGetter("\x00Qintegrity", ""));
+    try setNativeGetter(a, rs, qp, "keepalive", fetchBoolSlotGetter("\x00Qkeepalive"));
+    try setNativeGetter(a, rs, qp, "destination", fetchSlotStrGetter("\x00__none", ""));
+    try setNativeGetter(a, rs, qp, "referrer", fetchSlotStrGetter("\x00__none2", "about:client"));
+    inline for (.{ "url", "method", "headers", "bodyUsed", "cache", "credentials", "mode", "redirect", "integrity", "keepalive", "destination", "referrer" }) |g| {
+        try qp.setAttr(a, g, .{ .enumerable = true, .configurable = true });
+    }
+    try setNative(a, rs, qp, "clone", 0, requestCloneFn);
+    try setNative(a, rs, qp, "text", 0, bodyTextFn);
+    try setNative(a, rs, qp, "json", 0, bodyJsonFn);
+    try setNative(a, rs, qp, "arrayBuffer", 0, bodyArrayBufferFn);
+    try setNative(a, rs, qp, "bytes", 0, bodyBytesFn);
+    try setNative(a, rs, qp, "blob", 0, bodyBlobFn);
+    if (symKey(env, "toStringTag")) |k| {
+        try qp.setOwn(a, rs, k, Value.str("Request"));
+        try qp.setAttr(a, k, .{ .writable = false, .enumerable = false, .configurable = true });
+    }
+    const qctor = try gc_mod.allocObj(a);
+    qctor.* = .{ .native = requestConstructorFn, .native_ctor = true };
+    try installNativeProps(a, rs, qctor, "Request", 1);
+    try qctor.setOwn(a, rs, "prototype", Value.obj(qp));
+    try qctor.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
+    try setConstructor(a, rs, qp, qctor);
+    try env.put("Request", Value.obj(qctor));
 }
 
 // ===== crypto (getRandomValues / randomUUID) =========================
