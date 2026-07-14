@@ -861,6 +861,7 @@ var quick_packed_array_specialized_expression_hits: std.atomic.Value(u64) = .ini
 var quick_polymorphic_property_loop_hits: std.atomic.Value(u64) = .init(0);
 var quick_object_allocation_loop_hits: std.atomic.Value(u64) = .init(0);
 var quick_object_allocation_checkpoint_crossings: std.atomic.Value(u64) = .init(0);
+var quick_object_allocation_first_entry_steps: std.atomic.Value(u64) = .init(std.math.maxInt(u64));
 var quick_object_literal_shape_preparations: std.atomic.Value(u64) = .init(0);
 
 pub fn quickObjectAllocationLoopHitsForTesting() u64 {
@@ -2584,7 +2585,10 @@ fn tryQuickObjectAllocationLoopMode(
     // checkpoint-bounded allocation batch instead of taking the root binding
     // lock again for every fresh literal below.
     const object_proto = vm.objectProto();
-    const max_allocation_batch = 16;
+    // Seventeen 61-step iterations can straddle one 1,024-step checkpoint.
+    // Keep that crossing iteration in the same bulk allocation instead of
+    // opening a contended one-object batch at every shared-realm safepoint.
+    const max_allocation_batch = 17;
     var fresh_batch: [if (parallel_sync) max_allocation_batch else 0]*value.Object = undefined;
     var fresh_batch_index: usize = 0;
     var fresh_batch_len: usize = 0;
@@ -2637,7 +2641,7 @@ fn tryQuickObjectAllocationLoopMode(
                     frame.slots[value_slot] = Value.num(next);
                     frame.slots[total_slot] = Value.num(total);
                     frame.slots[counter_slot] = Value.num(counter);
-                    vm.steps += iterations * steps_per_iteration + 24;
+                    try advanceQuickObservableSteps(vm, iterations * steps_per_iteration + 24);
                     return err;
                 };
                 std.debug.assert(fresh_batch_len != 0);
@@ -2652,7 +2656,7 @@ fn tryQuickObjectAllocationLoopMode(
             frame.slots[value_slot] = Value.num(next);
             frame.slots[total_slot] = Value.num(total);
             frame.slots[counter_slot] = Value.num(counter);
-            vm.steps += iterations * steps_per_iteration + 24;
+            try advanceQuickObservableSteps(vm, iterations * steps_per_iteration + 24);
             return err;
         };
         fresh.proto = object_proto;
@@ -2674,7 +2678,7 @@ fn tryQuickObjectAllocationLoopMode(
         if (array.restricted_to.load(.acquire) != 0) vm.checkRestricted(array) catch |err| {
             frame.slots[total_slot] = Value.num(total);
             frame.slots[counter_slot] = Value.num(counter);
-            vm.steps += iterations * steps_per_iteration + 39;
+            try advanceQuickObservableSteps(vm, iterations * steps_per_iteration + 39);
             return err;
         };
         const stored = if (gc_mod.barrierExactManagedCellFrom(@ptrCast(array), @ptrCast(fresh)))
@@ -2690,13 +2694,13 @@ fn tryQuickObjectAllocationLoopMode(
             const key = propKey(vm, Value.num(@floatFromInt(selected))) catch |err| {
                 frame.slots[total_slot] = Value.num(total);
                 frame.slots[counter_slot] = Value.num(counter);
-                vm.steps += iterations * steps_per_iteration + 39;
+                try advanceQuickObservableSteps(vm, iterations * steps_per_iteration + 39);
                 return err;
             };
             vm.setMember(array_value, key, fresh_value) catch |err| {
                 frame.slots[total_slot] = Value.num(total);
                 frame.slots[counter_slot] = Value.num(counter);
-                vm.steps += iterations * steps_per_iteration + 39;
+                try advanceQuickObservableSteps(vm, iterations * steps_per_iteration + 39);
                 return err;
             };
         }
@@ -3848,11 +3852,25 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                         // then service that checkpoint from materialized state
                         // below instead of falling through one generic loop.
                         const checkpoint_slack: u64 = switch (plan.*) {
-                            .object_allocation => if (parallel_sync) 0 else 60,
+                            .object_allocation => 60,
                             else => 0,
                         };
                         const max_extra_steps = @min(steps_until_checkpoint - 1 + checkpoint_slack, steps_until_budget);
+                        const quick_entry_steps = vm.steps;
+                        if (checkpoint_slack != 0) {
+                            exec.acc = acc;
+                            exec.ip = start;
+                        }
                         if (try tryQuickArrayLoop(vm, chunk, plan, cf, start, max_extra_steps, parallel_sync)) |quick| {
+                            if (builtin.is_test) switch (plan.*) {
+                                .object_allocation => _ = quick_object_allocation_first_entry_steps.cmpxchgStrong(
+                                    std.math.maxInt(u64),
+                                    quick_entry_steps,
+                                    .monotonic,
+                                    .monotonic,
+                                ),
+                                else => {},
+                            };
                             ip = quick.next_ip;
                             if (checkpoint_slack == 0) {
                                 vm.steps += quick.extra_steps;
@@ -7444,6 +7462,7 @@ test "vm: quickens fixed-shape object allocation loops with exact steps and guar
     var crossings = crossings_before;
     var results: [2]Value = undefined;
     var steps: [2]u64 = undefined;
+    var first_entries: [2]u64 = undefined;
     const SafepointCounter = struct {
         fn service(raw_count: *anyopaque, raw_machine: *anyopaque) void {
             const count: *u64 = @ptrCast(@alignCast(raw_count));
@@ -7454,6 +7473,7 @@ test "vm: quickens fixed-shape object allocation loops with exact steps and guar
     };
     for ([_]bool{ false, true }, 0..) |parallel, run_index| {
         bc.ic_seqlock_enabled.store(parallel, .monotonic);
+        quick_object_allocation_first_entry_steps.store(std.math.maxInt(u64), .monotonic);
         var parser = try Parser.init(allocator, source);
         const program = try parser.parseProgram();
         const chunk = try Compiler.compileProgram(allocator, program);
@@ -7466,6 +7486,8 @@ test "vm: quickens fixed-shape object allocation loops with exact steps and guar
         machine.gc_safepoint_fn = SafepointCounter.service;
         results[run_index] = try run(&machine, chunk, null);
         steps[run_index] = machine.steps;
+        first_entries[run_index] = quick_object_allocation_first_entry_steps.load(.monotonic);
+        try std.testing.expect(first_entries[run_index] != std.math.maxInt(u64));
         try std.testing.expectEqual(machine.steps >> 10, serviced_checkpoints);
         const next_hits = quick_object_allocation_loop_hits.load(.monotonic);
         try std.testing.expect(next_hits > hits);
@@ -7476,10 +7498,7 @@ test "vm: quickens fixed-shape object allocation loops with exact steps and guar
             // subsequent iteration stays specialized across checkpoints.
             try std.testing.expectEqual(@as(u64, 95), next_hits - hits);
         const next_crossings = quick_object_allocation_checkpoint_crossings.load(.monotonic);
-        if (parallel)
-            try std.testing.expectEqual(crossings, next_crossings)
-        else
-            try std.testing.expect(next_crossings > crossings);
+        try std.testing.expect(next_crossings > crossings);
         if (!parallel) {
             try std.testing.expectEqual(
                 preparations_before + 1,
@@ -7495,6 +7514,67 @@ test "vm: quickens fixed-shape object allocation loops with exact steps and guar
     );
     try std.testing.expectEqual(results[1].rawBits(), results[0].rawBits());
     try std.testing.expectEqual(steps[1], steps[0]);
+    try std.testing.expectEqual(first_entries[1], first_entries[0]);
+
+    // Place the first successful specialized iteration so its final logical
+    // step lands immediately before, exactly at, and immediately after a
+    // 1,024-step checkpoint. Shared mode must retain the exact result/step
+    // count and service every crossed checkpoint from the materialized state.
+    bc.ic_seqlock_enabled.store(true, .monotonic);
+    const first_entry = first_entries[1];
+    const checkpoint = std.mem.alignForward(u64, first_entry + 61, 1024);
+    for ([_]u64{ checkpoint - 61, checkpoint - 60, checkpoint - 59 }) |target_entry| {
+        const initial_steps = target_entry - first_entry;
+        quick_object_allocation_first_entry_steps.store(std.math.maxInt(u64), .monotonic);
+        var parser = try Parser.init(allocator, source);
+        const program = try parser.parseProgram();
+        const chunk = try Compiler.compileProgram(allocator, program);
+        var env = Environment{ .arena = allocator, .fn_scope = true };
+        const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
+        try interp.installGlobals(&env, root_shape);
+        var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .steps = initial_steps };
+        var serviced_checkpoints: u64 = 0;
+        machine.gc_safepoint_ctx = &serviced_checkpoints;
+        machine.gc_safepoint_fn = SafepointCounter.service;
+        const result = try run(&machine, chunk, null);
+        try std.testing.expectEqual(results[1].rawBits(), result.rawBits());
+        try std.testing.expectEqual(steps[1], machine.steps - initial_steps);
+        try std.testing.expectEqual(target_entry, quick_object_allocation_first_entry_steps.load(.monotonic));
+        try std.testing.expectEqual((machine.steps >> 10) - (initial_steps >> 10), serviced_checkpoints);
+    }
+
+    // A specialized iteration may end exactly on the evaluation budget, but
+    // the next logical bytecode step must still throw at max_steps + 1.
+    const budget_initial_steps = interp.max_steps - 60 - first_entry;
+    quick_object_allocation_first_entry_steps.store(std.math.maxInt(u64), .monotonic);
+    var budget_parser = try Parser.init(allocator, source);
+    const budget_program = try budget_parser.parseProgram();
+    const budget_chunk = try Compiler.compileProgram(allocator, budget_program);
+    var budget_env = Environment{ .arena = allocator, .fn_scope = true };
+    const budget_root_shape = try @import("shape.zig").Shape.createRoot(allocator);
+    try interp.installGlobals(&budget_env, budget_root_shape);
+    var budget_machine = Interpreter{
+        .arena = allocator,
+        .env = &budget_env,
+        .root_shape = budget_root_shape,
+        .steps = budget_initial_steps,
+    };
+    try std.testing.expectError(error.Throw, run(&budget_machine, budget_chunk, null));
+    try std.testing.expectEqual(interp.max_steps - 60, quick_object_allocation_first_entry_steps.load(.monotonic));
+    try std.testing.expectEqual(interp.max_steps + 1, budget_machine.steps);
+
+    // The observable-step helper used after a crossing must still stop on the
+    // exact checkpoint before it advances any later logical steps.
+    var stop_requested: std.atomic.Value(bool) = .init(true);
+    var stop_machine = Interpreter{
+        .arena = allocator,
+        .env = &budget_env,
+        .root_shape = budget_root_shape,
+        .steps = 1023,
+        .stop_flag = &stop_requested,
+    };
+    try std.testing.expectError(error.Throw, advanceQuickObservableSteps(&stop_machine, 2));
+    try std.testing.expectEqual(@as(u64, 1024), stop_machine.steps);
 
     bc.ic_seqlock_enabled.store(false, .monotonic);
     const prototype_hits_before = quick_object_allocation_loop_hits.load(.monotonic);
