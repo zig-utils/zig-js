@@ -1726,6 +1726,18 @@ pub const Object = struct {
         return true;
     }
 
+    /// Replace one existing, present dense element after the caller has fired
+    /// an exact managed-cell barrier. Unlike the exclusive variant below, this
+    /// retains the element lock and presence check required by shared-realm
+    /// quick paths racing delete/truncate operations.
+    pub fn replaceDenseElementPresentAfterBarrier(self: *Object, i: usize, v: Value) bool {
+        self.lockElements();
+        defer self.unlockElements();
+        if (i >= self.elements.items.len or self.isHoleUnlocked(i)) return false;
+        self.elements.items[i] = v;
+        return true;
+    }
+
     /// Replace a prevalidated present dense element after the caller has fired
     /// the appropriate GC barrier. Only isolated quick paths that already proved
     /// exclusive access, bounds, and a hole-free dense store may use this.

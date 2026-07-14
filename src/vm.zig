@@ -2524,7 +2524,7 @@ fn tryQuickObjectAllocationLoop(
     max_extra_steps: u64,
     parallel_sync: bool,
 ) EvalError!?QuickArrayLoopUpdate {
-    if (parallel_sync or frame.escaped.load(.monotonic)) return null;
+    if (frame.escaped.load(.monotonic)) return null;
     const counter_slot: usize = @intCast(allocation.counter_local);
     const array_slot: usize = @intCast(allocation.array_local);
     const index_slot: usize = @intCast(allocation.index_local);
@@ -2540,9 +2540,13 @@ fn tryQuickObjectAllocationLoop(
     if (!array_value.isObject()) return null;
     const array = array_value.asObj();
     if (!array.is_array or array.is_arguments or array.proxy_handler != null or array.proxy_revoked or
-        array.accessors.load(.monotonic) != null or array.attrsMap() != null or array.holes != null or
-        array.has_indexed_property.load(.monotonic) or array.array_len > array.elements.items.len)
+        array.accessors.load(.monotonic) != null or array.attrsMap() != null or
+        array.has_indexed_property.load(.monotonic))
         return null;
+    if (parallel_sync) array.lockElements();
+    const dense_array = array.holes == null and array.array_len <= array.elements.items.len;
+    if (parallel_sync) array.unlockElements();
+    if (!dense_array) return null;
     if (!frame.slots[counter_slot].isNumber() or !frame.slots[total_slot].isNumber() or
         !frame.slots[extra_slot].isNumber()) return null;
     const bound_value = quickArrayBoundValue(allocation.bound, frame) orelse return null;
@@ -2556,16 +2560,18 @@ fn tryQuickObjectAllocationLoop(
     for (allocation.literal_instructions) |instruction|
         if (instruction >= chunk.ics.len) return null;
     const literal_shape = prepared: {
-        if (allocation.prepared_root_shape == vm.root_shape) {
+        if (!parallel_sync and allocation.prepared_root_shape == vm.root_shape) {
             if (allocation.prepared_literal_shape) |cached| break :prepared cached;
         }
-        const first_transition = chunk.ics[allocation.literal_instructions[0]].lookupLiteralTransitionMode(vm.root_shape, false) orelse return null;
-        const second_transition = chunk.ics[allocation.literal_instructions[1]].lookupLiteralTransitionMode(first_transition.shape, false) orelse return null;
-        const third_transition = chunk.ics[allocation.literal_instructions[2]].lookupLiteralTransitionMode(second_transition.shape, false) orelse return null;
+        const first_transition = chunk.ics[allocation.literal_instructions[0]].lookupLiteralTransitionMode(vm.root_shape, parallel_sync) orelse return null;
+        const second_transition = chunk.ics[allocation.literal_instructions[1]].lookupLiteralTransitionMode(first_transition.shape, parallel_sync) orelse return null;
+        const third_transition = chunk.ics[allocation.literal_instructions[2]].lookupLiteralTransitionMode(second_transition.shape, parallel_sync) orelse return null;
         const resolved = value.Object.prepareInlineLiteralShape(vm.root_shape, third_transition.shape, 3) orelse return null;
-        allocation.prepared_literal_shape = resolved;
-        allocation.prepared_root_shape = vm.root_shape;
-        if (builtin.is_test) _ = quick_object_literal_shape_preparations.fetchAdd(1, .monotonic);
+        if (!parallel_sync) {
+            allocation.prepared_literal_shape = resolved;
+            allocation.prepared_root_shape = vm.root_shape;
+            if (builtin.is_test) _ = quick_object_literal_shape_preparations.fetchAdd(1, .monotonic);
+        }
         break :prepared resolved;
     };
 
@@ -2584,12 +2590,27 @@ fn tryQuickObjectAllocationLoop(
         const selected = counter_int32 & allocation.selector_mask;
         if (selected < 0) break;
         const element_index: usize = @intCast(selected);
-        if (element_index >= array.elements.items.len) break;
-        const displaced_value = array.elements.items[element_index];
-        const displaced = quickPlainObject(displaced_value) orelse break;
-        if (displaced.proxy_handler != null or displaced.proxy_revoked or displaced.shape == null) break;
-        const displaced_property_slot = quickOwnDataSlot(chunk, allocation.displaced_property_instruction, displaced) orelse break;
-        const previous = quickSlotNumber(displaced, displaced_property_slot) orelse break;
+        const displaced_value = if (parallel_sync)
+            array.denseElement(element_index) orelse break
+        else if (element_index < array.elements.items.len)
+            array.elements.items[element_index]
+        else
+            break;
+        const previous = if (parallel_sync) previous: {
+            const property = quickOwnDataPropertyValue(
+                chunk,
+                allocation.displaced_property_instruction,
+                displaced_value,
+                true,
+            ) orelse break;
+            if (!property.isNumber()) break;
+            break :previous property.asNum();
+        } else previous: {
+            const displaced = quickPlainObject(displaced_value) orelse break;
+            if (displaced.proxy_handler != null or displaced.proxy_revoked or displaced.shape == null) break;
+            const displaced_property_slot = quickOwnDataSlot(chunk, allocation.displaced_property_instruction, displaced) orelse break;
+            break :previous quickSlotNumber(displaced, displaced_property_slot) orelse break;
+        };
         const next = numberRemainder((previous + counter) + extra, allocation.modulus);
         const stamp: f64 = @floatFromInt(counter_int32 & allocation.stamp_mask);
         const next_counter_integer = std.math.add(u32, counter_integer, allocation.increment) catch break;
@@ -2630,9 +2651,29 @@ fn tryQuickObjectAllocationLoop(
             vm.steps += iterations * steps_per_iteration + 39;
             return err;
         };
-        if (gc_mod.barrierExactManagedCellFrom(@ptrCast(array), @ptrCast(fresh))) {
-            array.replaceDenseElementExclusivePresentAfterBarrier(element_index, fresh_value);
-        } else if (!array.replaceDenseElement(element_index, fresh_value)) unreachable;
+        const stored = if (gc_mod.barrierExactManagedCellFrom(@ptrCast(array), @ptrCast(fresh)))
+            if (parallel_sync)
+                array.replaceDenseElementPresentAfterBarrier(element_index, fresh_value)
+            else stored: {
+                array.replaceDenseElementExclusivePresentAfterBarrier(element_index, fresh_value);
+                break :stored true;
+            }
+        else
+            array.replaceDenseElement(element_index, fresh_value);
+        if (!stored) {
+            const key = propKey(vm, Value.num(@floatFromInt(selected))) catch |err| {
+                frame.slots[total_slot] = Value.num(total);
+                frame.slots[counter_slot] = Value.num(counter);
+                vm.steps += iterations * steps_per_iteration + 39;
+                return err;
+            };
+            vm.setMember(array_value, key, fresh_value) catch |err| {
+                frame.slots[total_slot] = Value.num(total);
+                frame.slots[counter_slot] = Value.num(counter);
+                vm.steps += iterations * steps_per_iteration + 39;
+                return err;
+            };
+        }
 
         const checksum_value = quickNumberToInt32((next + stamp) + previous) & allocation.checksum_mask;
         total += @floatFromInt(checksum_value);
@@ -7354,11 +7395,9 @@ test "vm: quickens fixed-shape object allocation loops with exact steps and guar
         results[run_index] = try run(&machine, chunk, null);
         steps[run_index] = machine.steps;
         const next_hits = quick_object_allocation_loop_hits.load(.monotonic);
-        if (parallel) {
-            try std.testing.expectEqual(hits, next_hits);
-        } else {
-            try std.testing.expect(next_hits > hits);
-            try std.testing.expect(next_hits - hits > 16);
+        try std.testing.expect(next_hits > hits);
+        try std.testing.expect(next_hits - hits > 16);
+        if (!parallel) {
             try std.testing.expectEqual(
                 preparations_before + 1,
                 quick_object_literal_shape_preparations.load(.monotonic),

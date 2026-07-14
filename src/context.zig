@@ -11670,17 +11670,20 @@ test "quick object replacement checks a restricted receiver before fused mutatio
     items.restricted_to.store(if (current == std.math.maxInt(u64)) current - 1 else current + 1, .release);
     defer items.restricted_to.store(0, .release);
 
-    // A zero-iteration loop never performs an internal method on the receiver.
-    try std.testing.expectEqual(@as(f64, 0), (try ctx.evaluate("allocate(items, 0)")).asNum());
-    const hits_before = vm.quickObjectAllocationLoopHitsForTesting();
-    try std.testing.expect((try ctx.evaluate(
-        \\var restrictedCaught = false;
-        \\try { allocate(items, 1); }
-        \\catch (error) { restrictedCaught = true; }
-        \\restrictedCaught;
-    )).asBool());
-    try std.testing.expectEqual(first_before, items.elementAt(0).?.asObj());
-    try std.testing.expectEqual(hits_before, vm.quickObjectAllocationLoopHitsForTesting());
+    for ([_]bool{ false, true }) |parallel| {
+        bc.ic_seqlock_enabled.store(parallel, .monotonic);
+        // A zero-iteration loop never performs an internal method on the receiver.
+        try std.testing.expectEqual(@as(f64, 0), (try ctx.evaluate("allocate(items, 0)")).asNum());
+        const hits_before = vm.quickObjectAllocationLoopHitsForTesting();
+        try std.testing.expect((try ctx.evaluate(
+            \\var restrictedCaught = false;
+            \\try { allocate(items, 1); }
+            \\catch (error) { restrictedCaught = true; }
+            \\restrictedCaught;
+        )).asBool());
+        try std.testing.expectEqual(first_before, items.elementAt(0).?.asObj());
+        try std.testing.expectEqual(hits_before, vm.quickObjectAllocationLoopHitsForTesting());
+    }
 }
 
 test "enable_gc: collectGarbage reclaims unreachable objects, keeps reachable" {
@@ -13270,6 +13273,54 @@ test "parallel_js (M3 GIL-removal slice): real Thread contends Atomics.Mutex wit
         \\shared.n;
     );
     try std.testing.expectEqual(@as(f64, 2000), result.asNum());
+}
+
+test "parallel_js: fixed-shape object allocation quickens across shared Thread workers" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_threads = true,
+        .enable_gc = true,
+        .enable_jit = false,
+        .parallel_gc = true,
+        .parallel_js = true,
+    });
+    defer ctx.destroy();
+
+    const hits_before = vm.quickObjectAllocationLoopHitsForTesting();
+    const result = try ctx.evaluate(
+        \\function runAllocationLane(lane) {
+        \\  var items = [
+        \\    { seed: 1, mark: 0, prior: 0 }, { seed: 2, mark: 0, prior: 0 },
+        \\    { seed: 3, mark: 0, prior: 0 }, { seed: 4, mark: 0, prior: 0 },
+        \\    { seed: 5, mark: 0, prior: 0 }, { seed: 6, mark: 0, prior: 0 },
+        \\    { seed: 7, mark: 0, prior: 0 }, { seed: 8, mark: 0, prior: 0 }
+        \\  ];
+        \\  var total = 0;
+        \\  var cursor = 0;
+        \\  while (cursor < 512) {
+        \\    var selected = cursor & 7;
+        \\    var old = items[selected];
+        \\    var next = (old.seed + cursor + lane) % 1009;
+        \\    var replacement = { seed: next, mark: cursor & 3, prior: old.seed };
+        \\    items[selected] = replacement;
+        \\    total = total + ((replacement.seed + replacement.mark + replacement.prior) & 31);
+        \\    cursor = cursor + 1;
+        \\  }
+        \\  return total;
+        \\}
+        \\var expected = [];
+        \\var workers = [];
+        \\for (var lane = 0; lane < 4; lane++) expected.push(runAllocationLane(lane));
+        \\for (var lane = 0; lane < 4; lane++) workers.push(new Thread(runAllocationLane, lane));
+        \\var exact = true;
+        \\for (var lane = 0; lane < 4; lane++) {
+        \\  if (workers[lane].join() !== expected[lane]) exact = false;
+        \\}
+        \\exact;
+    );
+    try std.testing.expect(result.asBool());
+    const quick_hits = vm.quickObjectAllocationLoopHitsForTesting() - hits_before;
+    try std.testing.expect(quick_hits > 3000);
 }
 
 fn expectParallelGcTelemetryCoherent(ctx: *Context) !void {
