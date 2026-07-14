@@ -56,6 +56,38 @@ function benchmarkPolymorphicProperties(jobs, lane) {
   return total;
 }
 
+function benchmarkObjectChurn(jobs, lane) {
+  var total = 0;
+  for (var job = 0; job < jobs; job = job + 1) {
+    // Keep a fixed live ring. Each replacement makes the displaced object
+    // unreachable, so the timed loop sustains allocation/reclamation pressure
+    // without retaining an ever-growing graph.
+    var ring = [];
+    for (var slot = 0; slot < 256; slot = slot + 1) {
+      ring.push({
+        value: lane + job + slot + 1,
+        stamp: slot & 7,
+        previous: 0
+      });
+    }
+    for (var i = 0; i < 20000; i = i + 1) {
+      var index = i & 255;
+      var displaced = ring[index];
+      var value = (displaced.value + i + lane) % 1000003;
+      var fresh = {
+        value: value,
+        stamp: i & 7,
+        previous: displaced.value
+      };
+      ring[index] = fresh;
+      total = total + ((fresh.value + fresh.stamp + fresh.previous) & 1023);
+    }
+    for (var tail = 0; tail < ring.length; tail = tail + 1)
+      total = total + (ring[tail].value & 1023);
+  }
+  return total;
+}
+
 function benchmarkArrays(jobs, lane) {
   var total = 0;
   for (var job = 0; job < jobs; job = job + 1) {
@@ -162,6 +194,7 @@ function benchmarkFunction(name) {
   if (name === "arithmetic") return benchmarkArithmetic;
   if (name === "properties") return benchmarkProperties;
   if (name === "polymorphic_properties") return benchmarkPolymorphicProperties;
+  if (name === "object_churn") return benchmarkObjectChurn;
   if (name === "arrays") return benchmarkArrays;
   if (name === "direct_calls") return benchmarkDirectCalls;
   if (name === "method_calls") return benchmarkMethodCalls;

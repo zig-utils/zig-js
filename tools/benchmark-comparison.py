@@ -23,6 +23,7 @@ WORKLOADS = {
     "arithmetic": 160,
     "properties": 200,
     "polymorphic_properties": 350,
+    "object_churn": 100,
     "arrays": 450,
     "direct_calls": 500,
     "method_calls": 500,
