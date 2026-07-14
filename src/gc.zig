@@ -773,11 +773,14 @@ pub const Binding = struct {
     }
 
     /// Object and Environment mutations are funneled through owner-aware
-    /// barriers. Type-erased side cells have a wider set of lifecycle writes, so
-    /// quiescent minor GC conservatively rescans those old kinds. This is still a
-    /// much smaller edge surface than retracing every old object graph.
+    /// barriers. Mutable type-erased side cells have a wider set of lifecycle
+    /// writes, so quiescent minor GC conservatively rescans those old kinds.
+    /// Function reference fields are the exception: closure/home/super/object
+    /// links are fully initialized before the function is published and never
+    /// rewritten afterward, so promoting the function and its edges together is
+    /// sufficient and avoids retracing every old builtin closure each cycle.
     pub fn traceOldOnMinor(kind: Kind) bool {
-        return kind != .object and kind != .environment;
+        return kind != .object and kind != .environment and kind != .function;
     }
 
     pub fn traceEphemeron(self: *Binding, cell: *anyopaque, kind: Kind, v: anytype) void {
