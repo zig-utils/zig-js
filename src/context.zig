@@ -618,11 +618,38 @@ pub const GcCellBacking = struct {
     /// chunk growth; single-mutator contexts retain the smaller 64 KiB chunks.
     const large_chunk_bytes: usize = 384 * 1024;
     const reusable_tail_chunks: usize = 8;
-    const free_slot_magic: u64 = 0x6672_6565_5f67_6363;
-    const FreeNode = extern struct {
-        magic: u64,
-        next: ?*FreeNode,
-        chunk_idx: usize,
+    const free_bitmap_words: usize = (chunk_bytes / bucket_sizes[0]) / 64;
+    const FreeBitmap = struct {
+        words: [free_bitmap_words]u64 = @splat(0),
+
+        fn insert(self: *FreeBitmap, slot: usize) bool {
+            const word = slot / 64;
+            const mask = @as(u64, 1) << @intCast(slot % 64);
+            const was_free = self.words[word] & mask != 0;
+            self.words[word] |= mask;
+            return !was_free;
+        }
+
+        fn takeFirst(self: *FreeBitmap) ?usize {
+            for (&self.words, 0..) |*word, word_idx| {
+                if (word.* == 0) continue;
+                const bit: usize = @intCast(@ctz(word.*));
+                word.* &= word.* - 1;
+                return word_idx * 64 + bit;
+            }
+            return null;
+        }
+
+        fn count(self: *const FreeBitmap) usize {
+            var total: usize = 0;
+            for (self.words) |word| total += @popCount(word);
+            return total;
+        }
+
+        fn any(self: *const FreeBitmap) bool {
+            for (self.words) |word| if (word != 0) return true;
+            return false;
+        }
     };
     const ChunkAddr = struct {
         start: usize,
@@ -664,8 +691,8 @@ pub const GcCellBacking = struct {
     bucket_chunks: [bucket_count]std.ArrayListUnmanaged([]align(16) u8) = .{ .empty, .empty, .empty, .empty, .empty, .empty },
     bucket_next_offsets: [bucket_count]std.ArrayListUnmanaged(usize) = .{ .empty, .empty, .empty, .empty, .empty, .empty },
     bucket_live_counts: [bucket_count]std.ArrayListUnmanaged(usize) = .{ .empty, .empty, .empty, .empty, .empty, .empty },
+    bucket_free_bitmaps: [bucket_count]std.ArrayListUnmanaged(FreeBitmap) = .{ .empty, .empty, .empty, .empty, .empty, .empty },
     bucket_addr_index: [bucket_count]std.ArrayListUnmanaged(ChunkAddr) = .{ .empty, .empty, .empty, .empty, .empty, .empty },
-    free_lists: [bucket_count]?*FreeNode = .{ null, null, null, null, null, null },
     bucket_free_counts: [bucket_count]usize = .{ 0, 0, 0, 0, 0, 0 },
     bucket_chunk_counts: [bucket_count]usize = .{ 0, 0, 0, 0, 0, 0 },
     bucket_capacity_bytes: [bucket_count]usize = .{ 0, 0, 0, 0, 0, 0 },
@@ -678,8 +705,10 @@ pub const GcCellBacking = struct {
     /// keeps this hot so object-heavy scripts do not rescan filled chunks.
     bucket_bump_hint: [bucket_count]?usize = .{ null, null, null, null, null, null },
     /// Lowest chunk index that can still have never-issued slots. Freed slots
-    /// are tracked by `free_lists`, so filled chunks never become fresh again.
+    /// are tracked by per-chunk bitmaps, so filled chunks never become fresh.
     bucket_bump_start: [bucket_count]usize = .{ 0, 0, 0, 0, 0, 0 },
+    /// A chunk known to contain reusable issued slots for each size class.
+    bucket_free_hint: [bucket_count]?usize = .{ null, null, null, null, null, null },
     /// Last chunk that classified an owned pointer for each bucket. GC frees
     /// and teardown usually arrive in chunk-local runs, so this avoids restarting
     /// the chunk walk for every cell while preserving exact ownership checks.
@@ -778,6 +807,9 @@ pub const GcCellBacking = struct {
         if (self.bucket_live_counts[idx].capacity < needed) {
             self.bucket_live_counts[idx].ensureTotalCapacity(self.inner, target) catch return false;
         }
+        if (self.bucket_free_bitmaps[idx].capacity < needed) {
+            self.bucket_free_bitmaps[idx].ensureTotalCapacity(self.inner, target) catch return false;
+        }
         if (self.bucket_addr_index[idx].capacity < needed) {
             self.bucket_addr_index[idx].ensureTotalCapacity(self.inner, target) catch return false;
         }
@@ -796,6 +828,7 @@ pub const GcCellBacking = struct {
         self.bucket_chunks[idx].appendAssumeCapacity(chunk);
         self.bucket_next_offsets[idx].appendAssumeCapacity(0);
         self.bucket_live_counts[idx].appendAssumeCapacity(0);
+        self.bucket_free_bitmaps[idx].appendAssumeCapacity(.{});
         const start = @intFromPtr(chunk.ptr);
         const end = start + chunk.len;
         const addr_entry = ChunkAddr{ .start = start, .end = end, .chunk_idx = chunk_idx };
@@ -976,18 +1009,34 @@ pub const GcCellBacking = struct {
         self.bucket_owns_hint[idx] = chunk_idx;
     }
 
+    fn takeFreedSlotFromChunkLocked(self: *GcCellBacking, idx: usize, chunk_idx: usize) ?[*]u8 {
+        const slot = self.bucket_free_bitmaps[idx].items[chunk_idx].takeFirst() orelse return null;
+        self.bucket_free_counts[idx] -= 1;
+        self.recordReusedSlotLocked(idx, chunk_idx);
+        self.bucket_free_hint[idx] = if (self.bucket_free_bitmaps[idx].items[chunk_idx].any()) chunk_idx else null;
+        return self.bucket_chunks[idx].items[chunk_idx].ptr + slot * bucket_sizes[idx];
+    }
+
+    fn takeFreedSlotLocked(self: *GcCellBacking, idx: usize) ?[*]u8 {
+        if (self.bucket_free_counts[idx] == 0) return null;
+        if (self.bucket_free_hint[idx]) |hint| {
+            if (hint < self.bucket_free_bitmaps[idx].items.len) {
+                if (self.takeFreedSlotFromChunkLocked(idx, hint)) |ptr| return ptr;
+            }
+        }
+        for (0..self.bucket_free_bitmaps[idx].items.len) |chunk_idx| {
+            if (self.takeFreedSlotFromChunkLocked(idx, chunk_idx)) |ptr| return ptr;
+        }
+        unreachable;
+    }
+
     fn allocFn(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
         const self: *GcCellBacking = @ptrCast(@alignCast(ctx));
         if (bucketIndex(len, alignment)) |idx| {
             self.acquireBucket(idx);
             defer self.unlockBucket(idx);
             if (self.bulk_teardown) return null;
-            if (self.free_lists[idx]) |node| {
-                self.free_lists[idx] = node.next;
-                self.bucket_free_counts[idx] -= 1;
-                self.recordReusedSlotLocked(idx, node.chunk_idx);
-                return @ptrCast(node);
-            }
+            if (self.takeFreedSlotLocked(idx)) |ptr| return ptr;
             return self.bumpFreshSlotLocked(idx);
         }
         self.acquireInner();
@@ -1030,8 +1079,8 @@ pub const GcCellBacking = struct {
             self.acquireBucket(idx);
             if (self.ownedChunkIndexLocked(idx, mem.ptr)) |chunk_idx| {
                 // Context teardown frees owned bucket chunks wholesale
-                // immediately after `zig-gc` walks live cells. Avoid rebuilding
-                // freelists in that one-way phase, but still delegate any
+                // immediately after `zig-gc` walks live cells. Avoid updating
+                // reuse bitmaps in that one-way phase, but still delegate any
                 // bucket-shaped allocation that never belonged to a cell slab.
                 if (self.bulk_teardown) {
                     self.unlockBucket(idx);
@@ -1039,13 +1088,15 @@ pub const GcCellBacking = struct {
                 }
                 std.debug.assert(self.bucket_live_counts[idx].items[chunk_idx] > 0);
                 self.bucket_live_counts[idx].items[chunk_idx] -= 1;
-                const node: *FreeNode = @ptrCast(@alignCast(mem.ptr));
-                node.magic = free_slot_magic;
-                node.next = self.free_lists[idx];
-                node.chunk_idx = chunk_idx;
-                self.free_lists[idx] = node;
-                self.bucket_free_counts[idx] += 1;
+                const chunk = self.bucket_chunks[idx].items[chunk_idx];
+                const offset = @intFromPtr(mem.ptr) - @intFromPtr(chunk.ptr);
+                std.debug.assert(offset % bucket_sizes[idx] == 0);
+                std.debug.assert(offset < self.bucket_next_offsets[idx].items[chunk_idx]);
                 self.bucket_freed_slots[idx] += 1;
+                const inserted = self.bucket_free_bitmaps[idx].items[chunk_idx].insert(offset / bucket_sizes[idx]);
+                std.debug.assert(inserted);
+                self.bucket_free_counts[idx] += 1;
+                self.bucket_free_hint[idx] = chunk_idx;
                 self.unlockBucket(idx);
                 return;
             }
@@ -1107,7 +1158,7 @@ pub const GcCellBacking = struct {
     }
 
     /// During `Context.destroy`, `zig-gc` frees every live cell and then this
-    /// backing immediately frees whole chunks. Rebuilding freelists in that
+    /// backing immediately frees whole chunks. Updating reuse bitmaps in that
     /// phase is pure teardown churn, so owned cell frees become no-ops. Context
     /// destroy is single-owner after threads have been joined/terminated, so the
     /// backing also leaves parallel mode and skips a spinlock on every teardown
@@ -1119,36 +1170,11 @@ pub const GcCellBacking = struct {
             self.acquireInner();
         }
         self.bulk_teardown = true;
-        self.free_lists = .{ null, null, null, null, null, null };
-        self.bucket_free_counts = .{ 0, 0, 0, 0, 0, 0 };
         if (was_parallel) {
             self.unlockInner();
             self.unlockAllBuckets();
             self.parallel = false;
         }
-    }
-
-    fn rebuildRetainedFreeListLocked(self: *GcCellBacking, idx: usize, retained_chunks: usize) usize {
-        const old_free_count = self.bucket_free_counts[idx];
-        var retained: ?*FreeNode = null;
-        var retained_count: usize = 0;
-        const slot_size = bucket_sizes[idx];
-        for (self.bucket_chunks[idx].items[0..retained_chunks], 0..) |chunk, chunk_idx| {
-            const issued_bytes = self.bucket_next_offsets[idx].items[chunk_idx];
-            var offset: usize = 0;
-            while (offset < issued_bytes) : (offset += slot_size) {
-                const node: *FreeNode = @ptrCast(@alignCast(chunk.ptr + offset));
-                if (node.magic != free_slot_magic) continue;
-                node.chunk_idx = chunk_idx;
-                node.next = retained;
-                retained = node;
-                retained_count += 1;
-            }
-        }
-        self.free_lists[idx] = retained;
-        self.bucket_free_counts[idx] = retained_count;
-        std.debug.assert(retained_count <= old_free_count);
-        return old_free_count - retained_count;
     }
 
     fn removeTailAddrIndexLocked(self: *GcCellBacking, idx: usize, first_trimmed_chunk: usize) usize {
@@ -1171,11 +1197,18 @@ pub const GcCellBacking = struct {
         const chunks = self.bucket_chunks[idx].items;
         self.bucket_owns_hint[idx] = null;
         self.bucket_bump_hint[idx] = null;
+        self.bucket_free_hint[idx] = null;
         self.bucket_bump_start[idx] = chunks.len;
         for (chunks, 0..) |chunk, chunk_idx| {
             if (self.bucket_next_offsets[idx].items[chunk_idx] < chunk.len) {
                 self.bucket_bump_start[idx] = chunk_idx;
                 self.bucket_bump_hint[idx] = chunk_idx;
+                break;
+            }
+        }
+        for (self.bucket_free_bitmaps[idx].items, 0..) |bitmap, chunk_idx| {
+            if (bitmap.any()) {
+                self.bucket_free_hint[idx] = chunk_idx;
                 break;
             }
         }
@@ -1213,9 +1246,9 @@ pub const GcCellBacking = struct {
         const trimmed = old_len - first_trimmed;
         const removed_addr_entries = self.removeTailAddrIndexLocked(idx, first_trimmed);
         std.debug.assert(removed_addr_entries == trimmed);
-        // Rebuild from the bounded retained prefix instead of chasing every
-        // node in the discarded burst. With no retained chunks this is O(1).
-        const removed_free = self.rebuildRetainedFreeListLocked(idx, first_trimmed);
+        var removed_free: usize = 0;
+        for (self.bucket_free_bitmaps[idx].items[first_trimmed..old_len]) |bitmap| removed_free += bitmap.count();
+        self.bucket_free_counts[idx] -= removed_free;
         var expected_free: usize = 0;
 
         for (self.bucket_chunks[idx].items[first_trimmed..old_len], first_trimmed..) |chunk, chunk_idx| {
@@ -1234,6 +1267,7 @@ pub const GcCellBacking = struct {
         std.debug.assert(removed_free == expected_free);
 
         self.bucket_live_counts[idx].shrinkRetainingCapacity(first_trimmed);
+        self.bucket_free_bitmaps[idx].shrinkRetainingCapacity(first_trimmed);
         self.bucket_next_offsets[idx].shrinkRetainingCapacity(first_trimmed);
         self.bucket_chunks[idx].shrinkRetainingCapacity(first_trimmed);
         self.refreshBucketHintsAfterTrimLocked(idx);
@@ -1241,7 +1275,7 @@ pub const GcCellBacking = struct {
     }
 
     /// Release fully unused tail chunks after a quiescent full collection. This
-    /// keeps the reusable freelist behavior for non-empty chunks, but gives
+    /// keeps reusable issued slots in non-empty chunks, but gives
     /// one-off allocation spikes a way to return backing slabs before
     /// `Context.destroy`.
     pub fn trimEmptyTailChunks(self: *GcCellBacking) usize {
@@ -1261,15 +1295,16 @@ pub const GcCellBacking = struct {
             chunks.deinit(self.inner);
             self.bucket_next_offsets[idx].deinit(self.inner);
             self.bucket_live_counts[idx].deinit(self.inner);
+            self.bucket_free_bitmaps[idx].deinit(self.inner);
             self.bucket_addr_index[idx].deinit(self.inner);
             self.bucket_next_offsets[idx] = .empty;
             self.bucket_live_counts[idx] = .empty;
+            self.bucket_free_bitmaps[idx] = .empty;
             self.bucket_addr_index[idx] = .empty;
             chunks.* = .empty;
             self.bucket_addr_min[idx] = std.math.maxInt(usize);
             self.bucket_addr_max[idx] = 0;
         }
-        self.free_lists = .{ null, null, null, null, null, null };
         self.bucket_free_counts = .{ 0, 0, 0, 0, 0, 0 };
         self.bucket_chunk_counts = .{ 0, 0, 0, 0, 0, 0 };
         self.bucket_capacity_bytes = .{ 0, 0, 0, 0, 0, 0 };
@@ -1281,6 +1316,7 @@ pub const GcCellBacking = struct {
         self.bucket_owns_hint = .{ null, null, null, null, null, null };
         self.bucket_bump_hint = .{ null, null, null, null, null, null };
         self.bucket_bump_start = .{ 0, 0, 0, 0, 0, 0 };
+        self.bucket_free_hint = .{ null, null, null, null, null, null };
         self.bulk_teardown = false;
     }
 };
@@ -1316,7 +1352,7 @@ test "GC cell backing recycles aligned cell slabs and delegates side storage" {
     a.free(side);
 }
 
-test "GC cell backing lazily bumps fresh chunk slots before using the free list" {
+test "GC cell backing lazily bumps fresh chunk slots before using reuse bitmaps" {
     var backing = GcCellBacking{ .inner = std.testing.allocator };
     defer backing.deinit();
     const a = backing.allocator();
@@ -1328,25 +1364,65 @@ test "GC cell backing lazily bumps fresh chunk slots before using the free list"
     try std.testing.expectEqual(@as(usize, 1), backing.bucket_chunks[idx].items.len);
     try std.testing.expectEqual(@as(usize, 2 * GcCellBacking.bucket_sizes[idx]), backing.bucket_next_offsets[idx].items[0]);
     try std.testing.expectEqual(@as(usize, 2), backing.bucket_live_counts[idx].items[0]);
-    try std.testing.expectEqual(@as(?*GcCellBacking.FreeNode, null), backing.free_lists[idx]);
+    try std.testing.expect(!backing.bucket_free_bitmaps[idx].items[0].any());
+    try std.testing.expectEqual(@as(?usize, null), backing.bucket_free_hint[idx]);
     try std.testing.expectEqual(@as(?usize, 0), backing.bucket_bump_hint[idx]);
     try std.testing.expectEqual(@as(usize, 2), backing.bucket_fresh_allocs[idx]);
     try std.testing.expectEqual(@as(usize, 0), backing.bucket_reused_allocs[idx]);
 
     a.free(one);
-    try std.testing.expect(backing.free_lists[idx] != null);
+    try std.testing.expectEqual(@as(usize, 1), backing.bucket_free_bitmaps[idx].items[0].count());
+    try std.testing.expectEqual(@as(?usize, 0), backing.bucket_free_hint[idx]);
     try std.testing.expectEqual(@as(usize, 1), backing.bucket_free_counts[idx]);
     try std.testing.expectEqual(@as(usize, 1), backing.bucket_freed_slots[idx]);
     try std.testing.expectEqual(@as(usize, 1), backing.bucket_live_counts[idx].items[0]);
     const recycled = try a.alignedAlloc(u8, .@"16", 200);
     try std.testing.expectEqual(one.ptr, recycled.ptr);
-    try std.testing.expectEqual(@as(?*GcCellBacking.FreeNode, null), backing.free_lists[idx]);
+    try std.testing.expect(!backing.bucket_free_bitmaps[idx].items[0].any());
+    try std.testing.expectEqual(@as(?usize, null), backing.bucket_free_hint[idx]);
     try std.testing.expectEqual(@as(usize, 0), backing.bucket_free_counts[idx]);
     try std.testing.expectEqual(@as(usize, 1), backing.bucket_reused_allocs[idx]);
     try std.testing.expectEqual(@as(usize, 2), backing.bucket_live_counts[idx].items[0]);
 
     a.free(two);
     a.free(recycled);
+}
+
+test "GC cell backing reuses fragmented slots without writing allocator metadata into cells" {
+    var backing = GcCellBacking{ .inner = std.testing.allocator };
+    defer backing.deinit();
+    const a = backing.allocator();
+
+    const idx = GcCellBacking.bucketIndex(200, .@"16").?;
+    var cells: [4][]align(16) u8 = undefined;
+    for (&cells) |*cell| cell.* = try a.alignedAlloc(u8, .@"16", 200);
+
+    @memset(cells[1], 0xa5);
+    @memset(cells[3], 0x5a);
+    // Call the backing directly so std.mem.Allocator's debug poison does not
+    // obscure whether this allocator writes its own metadata into the slot.
+    GcCellBacking.freeFn(&backing, cells[3], .@"16", @returnAddress());
+    GcCellBacking.freeFn(&backing, cells[1], .@"16", @returnAddress());
+
+    try std.testing.expectEqual(@as(usize, 2), backing.bucket_free_bitmaps[idx].items[0].count());
+    try std.testing.expectEqual(@as(usize, 2), backing.bucket_free_counts[idx]);
+    try std.testing.expectEqual(@as(?usize, 0), backing.bucket_free_hint[idx]);
+    // The reusable state is external: freeing a slot does not overwrite the
+    // payload bytes that zig-gc may still inspect while finishing a sweep.
+    try std.testing.expectEqual(@as(u8, 0xa5), cells[1][0]);
+    try std.testing.expectEqual(@as(u8, 0x5a), cells[3][0]);
+
+    const first = try a.alignedAlloc(u8, .@"16", 200);
+    const second = try a.alignedAlloc(u8, .@"16", 200);
+    try std.testing.expectEqual(cells[1].ptr, first.ptr);
+    try std.testing.expectEqual(cells[3].ptr, second.ptr);
+    try std.testing.expectEqual(@as(usize, 0), backing.bucket_free_counts[idx]);
+    try std.testing.expectEqual(@as(?usize, null), backing.bucket_free_hint[idx]);
+
+    a.free(cells[0]);
+    a.free(first);
+    a.free(cells[2]);
+    a.free(second);
 }
 
 test "GC cell backing rejects pointers outside bucket address spans before scanning chunks" {
@@ -1393,11 +1469,10 @@ test "GC cell backing recognizes exact issued allocation starts" {
     try std.testing.expect(std.meta.activeTag(backing.classifyConservativeInterior(@intFromPtr(foreign.ptr))) == .outside);
     allocator.free(cell);
     // Ownership/issuance deliberately outlives liveness; zig-gc's cleared
-    // header magic and the backing's explicit free tag reject this stale slot
-    // before treating it as a cell.
+    // header magic rejects this stale slot before treating it as a cell, while
+    // the allocator tracks reusability outside the dead cell's storage.
     try std.testing.expect(backing.ownsCellAllocation(@ptrCast(cell.ptr)));
-    const freed: *GcCellBacking.FreeNode = @ptrCast(@alignCast(cell.ptr));
-    try std.testing.expectEqual(GcCellBacking.free_slot_magic, freed.magic);
+    try std.testing.expectEqual(@as(usize, 1), backing.bucket_free_bitmaps[bucket_idx].items[0].count());
     switch (backing.classifyConservativeInterior(@intFromPtr(cell.ptr + 16))) {
         .allocation => |base| try std.testing.expectEqual(@intFromPtr(cell.ptr), @intFromPtr(base)),
         else => return error.TestUnexpectedResult,
@@ -1461,6 +1536,7 @@ test "GC cell backing ownership fallback uses sorted chunk address index" {
     try std.testing.expectEqual(backing.bucket_chunks[idx].items.len, backing.bucket_addr_index[idx].items.len);
     try std.testing.expect(backing.bucket_chunks[idx].capacity >= backing.bucket_chunks[idx].items.len);
     try std.testing.expect(backing.bucket_next_offsets[idx].capacity >= backing.bucket_next_offsets[idx].items.len);
+    try std.testing.expect(backing.bucket_free_bitmaps[idx].capacity >= backing.bucket_free_bitmaps[idx].items.len);
     try std.testing.expect(backing.bucket_addr_index[idx].capacity >= backing.bucket_addr_index[idx].items.len);
     var prev_end: usize = 0;
     for (backing.bucket_addr_index[idx].items) |entry| {
@@ -1488,23 +1564,28 @@ test "GC cell backing reserves chunk metadata capacity chunks" {
     try std.testing.expect(backing.addChunk(idx));
     try std.testing.expectEqual(@as(usize, 1), backing.bucket_chunks[idx].items.len);
     try std.testing.expectEqual(backing.bucket_chunks[idx].items.len, backing.bucket_next_offsets[idx].items.len);
+    try std.testing.expectEqual(backing.bucket_chunks[idx].items.len, backing.bucket_live_counts[idx].items.len);
+    try std.testing.expectEqual(backing.bucket_chunks[idx].items.len, backing.bucket_free_bitmaps[idx].items.len);
     try std.testing.expectEqual(backing.bucket_chunks[idx].items.len, backing.bucket_addr_index[idx].items.len);
     try std.testing.expect(backing.bucket_chunks[idx].capacity >= GcCellBacking.chunk_metadata_reserve_granularity);
     try std.testing.expect(backing.bucket_next_offsets[idx].capacity >= GcCellBacking.chunk_metadata_reserve_granularity);
     try std.testing.expect(backing.bucket_live_counts[idx].capacity >= GcCellBacking.chunk_metadata_reserve_granularity);
+    try std.testing.expect(backing.bucket_free_bitmaps[idx].capacity >= GcCellBacking.chunk_metadata_reserve_granularity);
     try std.testing.expect(backing.bucket_addr_index[idx].capacity >= GcCellBacking.chunk_metadata_reserve_granularity);
 
     const first_chunks_capacity = backing.bucket_chunks[idx].capacity;
     const first_offsets_capacity = backing.bucket_next_offsets[idx].capacity;
     const first_live_capacity = backing.bucket_live_counts[idx].capacity;
+    const first_bitmap_capacity = backing.bucket_free_bitmaps[idx].capacity;
     const first_addr_capacity = backing.bucket_addr_index[idx].capacity;
-    const first_min_capacity = @min(first_chunks_capacity, @min(first_offsets_capacity, @min(first_live_capacity, first_addr_capacity)));
+    const first_min_capacity = @min(first_chunks_capacity, @min(first_offsets_capacity, @min(first_live_capacity, @min(first_bitmap_capacity, first_addr_capacity))));
 
     while (backing.bucket_chunks[idx].items.len < first_min_capacity) {
         try std.testing.expect(backing.addChunk(idx));
         try std.testing.expectEqual(first_chunks_capacity, backing.bucket_chunks[idx].capacity);
         try std.testing.expectEqual(first_offsets_capacity, backing.bucket_next_offsets[idx].capacity);
         try std.testing.expectEqual(first_live_capacity, backing.bucket_live_counts[idx].capacity);
+        try std.testing.expectEqual(first_bitmap_capacity, backing.bucket_free_bitmaps[idx].capacity);
         try std.testing.expectEqual(first_addr_capacity, backing.bucket_addr_index[idx].capacity);
     }
 
@@ -1512,10 +1593,12 @@ test "GC cell backing reserves chunk metadata capacity chunks" {
     try std.testing.expect(backing.bucket_chunks[idx].capacity > first_chunks_capacity or
         backing.bucket_next_offsets[idx].capacity > first_offsets_capacity or
         backing.bucket_live_counts[idx].capacity > first_live_capacity or
+        backing.bucket_free_bitmaps[idx].capacity > first_bitmap_capacity or
         backing.bucket_addr_index[idx].capacity > first_addr_capacity);
     try std.testing.expect(backing.bucket_chunks[idx].capacity >= backing.bucket_chunks[idx].items.len);
     try std.testing.expect(backing.bucket_next_offsets[idx].capacity >= backing.bucket_next_offsets[idx].items.len);
     try std.testing.expect(backing.bucket_live_counts[idx].capacity >= backing.bucket_live_counts[idx].items.len);
+    try std.testing.expect(backing.bucket_free_bitmaps[idx].capacity >= backing.bucket_free_bitmaps[idx].items.len);
     try std.testing.expect(backing.bucket_addr_index[idx].capacity >= backing.bucket_addr_index[idx].items.len);
 }
 
@@ -1560,7 +1643,7 @@ test "GC cell backing trims excess empty tail chunks after collection" {
     try std.testing.expectEqual(@as(usize, 0), backing.trimEmptyTailChunks());
 }
 
-test "GC cell backing drops an all-free list when trimming its whole bucket" {
+test "GC cell backing drops all reuse bitmaps when trimming its whole bucket" {
     var backing = GcCellBacking{ .inner = std.testing.allocator };
     defer backing.deinit();
     const a = backing.allocator();
@@ -1575,7 +1658,8 @@ test "GC cell backing drops an all-free list when trimming its whole bucket" {
     try std.testing.expectEqual(slots + 1, backing.bucket_free_counts[idx]);
 
     try std.testing.expectEqual(@as(usize, 2), backing.trimEmptyTailChunks());
-    try std.testing.expectEqual(@as(?*GcCellBacking.FreeNode, null), backing.free_lists[idx]);
+    try std.testing.expectEqual(@as(usize, 0), backing.bucket_free_bitmaps[idx].items.len);
+    try std.testing.expectEqual(@as(?usize, null), backing.bucket_free_hint[idx]);
     try std.testing.expectEqual(@as(usize, 0), backing.bucket_free_counts[idx]);
     try std.testing.expectEqual(@as(usize, 0), backing.bucket_chunks[idx].items.len);
     try std.testing.expectEqual(@as(usize, 0), backing.bucket_issued_slots[idx]);
@@ -1651,14 +1735,19 @@ test "GC cell backing compacts tail-trim metadata in one range" {
     try std.testing.expectEqual((slots * 4) + 1, backing.bucket_issued_slots[idx]);
     try std.testing.expectEqual(slots * 5, backing.bucket_capacity_slots[idx]);
 
-    var retained_nodes: usize = 0;
-    var it = backing.free_lists[idx];
-    while (it) |node| {
-        try std.testing.expect(node.chunk_idx == 1 or node.chunk_idx == 3 or node.chunk_idx == 4);
-        retained_nodes += 1;
-        it = node.next;
+    var retained_slots: usize = 0;
+    for (backing.bucket_free_bitmaps[idx].items, 0..) |bitmap, chunk_idx| {
+        const free_in_chunk = bitmap.count();
+        if (chunk_idx == 1 or chunk_idx == 3) {
+            try std.testing.expectEqual(slots, free_in_chunk);
+        } else if (chunk_idx == 4) {
+            try std.testing.expectEqual(@as(usize, 1), free_in_chunk);
+        } else {
+            try std.testing.expectEqual(@as(usize, 0), free_in_chunk);
+        }
+        retained_slots += free_in_chunk;
     }
-    try std.testing.expectEqual((2 * slots) + 1, retained_nodes);
+    try std.testing.expectEqual((2 * slots) + 1, retained_slots);
 
     var prev_end: usize = 0;
     for (backing.bucket_addr_index[idx].items) |entry| {
@@ -1829,7 +1918,7 @@ test "GC cell backing selects 512-byte chunk geometry independently of locks" {
     try std.testing.expect(!large.parallel);
 }
 
-test "GC cell backing bulk teardown skips freelist rebuilds and still delegates side storage" {
+test "GC cell backing bulk teardown skips reuse bitmap updates and still delegates side storage" {
     var backing = GcCellBacking{ .inner = std.testing.allocator };
     defer backing.deinit();
     const a = backing.allocator();
@@ -1845,7 +1934,8 @@ test "GC cell backing bulk teardown skips freelist rebuilds and still delegates 
     a.free(bucket_shaped_side);
 
     try std.testing.expect(backing.bulk_teardown);
-    try std.testing.expectEqual(@as(?*GcCellBacking.FreeNode, null), backing.free_lists[idx]);
+    try std.testing.expect(!backing.bucket_free_bitmaps[idx].items[0].any());
+    try std.testing.expectEqual(@as(usize, 0), backing.bucket_free_counts[idx]);
     try std.testing.expectError(error.OutOfMemory, a.alignedAlloc(u8, .@"16", 200));
 }
 
@@ -1871,7 +1961,8 @@ test "GC cell backing bulk teardown leaves parallel mode for single-owner destro
     }
 
     a.free(cell);
-    try std.testing.expectEqual(@as(?*GcCellBacking.FreeNode, null), backing.free_lists[idx]);
+    try std.testing.expect(!backing.bucket_free_bitmaps[idx].items[0].any());
+    try std.testing.expectEqual(@as(usize, 0), backing.bucket_free_counts[idx]);
 }
 
 test "GC cell backing shards parallel allocation locks by size class" {
