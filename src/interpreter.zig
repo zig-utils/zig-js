@@ -29763,6 +29763,7 @@ fn installTypedArrays(env: *Environment, rs: *Shape) EvalError!void {
     try installEventTarget(env, rs, object_proto);
     try installAbort(env, rs, object_proto);
     try installHeaders(env, rs, object_proto);
+    try installFormData(env, rs, object_proto);
     try installTemporal(env, rs, object_proto);
     try installIntl(env, rs, object_proto);
     // ShadowRealm: a child realm with `evaluate` (and a minimal `importValue`).
@@ -41042,6 +41043,169 @@ fn installHeaders(env: *Environment, rs: *Shape, object_proto: *value.Object) Ev
     try ctor.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
     try setConstructor(a, rs, proto, ctor);
     try env.put("Headers", Value.obj(ctor));
+}
+
+// ===== FormData ======================================================
+// Entries live in \x00fd as [name, value] pairs in insertion order; names are
+// case-sensitive and values are coerced to strings (no Blob support yet).
+fn fdList(self: *Interpreter, this: Value) EvalError!*value.Object {
+    if (this.isObject()) if (this.asObj().getOwn("\x00fd")) |v| if (v.isObject()) return v.asObj();
+    const arr = (try self.newArray()).asObj();
+    if (this.isObject()) try this.asObj().setOwn(self.arena, self.root_shape, "\x00fd", Value.obj(arr));
+    return arr;
+}
+fn fdPush(self: *Interpreter, list: *value.Object, name: []const u8, val: []const u8) EvalError!void {
+    const pair = (try self.newArray()).asObj();
+    try pair.appendElement(self.arena, try Value.strAlloc(self.arena, name));
+    try pair.appendElement(self.arena, try Value.strAlloc(self.arena, val));
+    try list.appendElement(self.arena, Value.obj(pair));
+}
+fn fdAppendFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const name = try self.toStringV(if (args.len > 0) args[0] else Value.undef());
+    const val = try self.toStringV(if (args.len > 1) args[1] else Value.undef());
+    try fdPush(self, try fdList(self, this), name, val);
+    return Value.undef();
+}
+fn fdSetFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const name = try self.toStringV(if (args.len > 0) args[0] else Value.undef());
+    const val = try self.toStringV(if (args.len > 1) args[1] else Value.undef());
+    // Replace the first occurrence in place, drop the rest; append if absent.
+    const list = try fdList(self, this);
+    const fresh = (try self.newArray()).asObj();
+    var placed = false;
+    for (try list.internalElementsSnapshot(self.arena)) |pair| {
+        if (std.mem.eql(u8, uspPairKV(pair).k, name)) {
+            if (!placed) {
+                try fdPush(self, fresh, name, val);
+                placed = true;
+            }
+            continue;
+        }
+        try fresh.appendElement(self.arena, pair);
+    }
+    if (!placed) try fdPush(self, fresh, name, val);
+    try this.asObj().setOwn(self.arena, self.root_shape, "\x00fd", Value.obj(fresh));
+    return Value.undef();
+}
+fn fdGetFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const name = try self.toStringV(if (args.len > 0) args[0] else Value.undef());
+    for (try (try fdList(self, this)).internalElementsSnapshot(self.arena)) |pair| {
+        const kv = uspPairKV(pair);
+        if (std.mem.eql(u8, kv.k, name)) return try Value.strAlloc(self.arena, kv.v);
+    }
+    return Value.nul();
+}
+fn fdGetAllFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const name = try self.toStringV(if (args.len > 0) args[0] else Value.undef());
+    const arr = (try self.newArray()).asObj();
+    for (try (try fdList(self, this)).internalElementsSnapshot(self.arena)) |pair| {
+        const kv = uspPairKV(pair);
+        if (std.mem.eql(u8, kv.k, name)) try arr.appendElement(self.arena, try Value.strAlloc(self.arena, kv.v));
+    }
+    return Value.obj(arr);
+}
+fn fdHasFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const name = try self.toStringV(if (args.len > 0) args[0] else Value.undef());
+    for (try (try fdList(self, this)).internalElementsSnapshot(self.arena)) |pair| {
+        if (std.mem.eql(u8, uspPairKV(pair).k, name)) return Value.boolVal(true);
+    }
+    return Value.boolVal(false);
+}
+fn fdDeleteFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const name = try self.toStringV(if (args.len > 0) args[0] else Value.undef());
+    const list = try fdList(self, this);
+    const fresh = (try self.newArray()).asObj();
+    for (try list.internalElementsSnapshot(self.arena)) |pair| {
+        if (std.mem.eql(u8, uspPairKV(pair).k, name)) continue;
+        try fresh.appendElement(self.arena, pair);
+    }
+    try this.asObj().setOwn(self.arena, self.root_shape, "\x00fd", Value.obj(fresh));
+    return Value.undef();
+}
+fn fdForEachFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const cb = if (args.len > 0) args[0] else Value.undef();
+    if (!cb.isObject() or !cb.asObj().isCallableObject()) return self.throwError("TypeError", "FormData.forEach callback is not a function");
+    const this_arg = if (args.len > 1) args[1] else Value.undef();
+    for (try (try fdList(self, this)).internalElementsSnapshot(self.arena)) |pair| {
+        const kv = uspPairKV(pair);
+        _ = try self.callValueWithThis(cb, &.{ try Value.strAlloc(self.arena, kv.v), try Value.strAlloc(self.arena, kv.k), this }, this_arg);
+    }
+    return Value.undef();
+}
+fn fdIterFn(comptime which: enum { entries, keys, values }) value.NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+            _ = args;
+            const self: *Interpreter = @ptrCast(@alignCast(ctx));
+            const snap = (try self.newArray()).asObj();
+            for (try (try fdList(self, this)).internalElementsSnapshot(self.arena)) |pair| {
+                const kv = uspPairKV(pair);
+                switch (which) {
+                    .keys => try snap.appendElement(self.arena, try Value.strAlloc(self.arena, kv.k)),
+                    .values => try snap.appendElement(self.arena, try Value.strAlloc(self.arena, kv.v)),
+                    .entries => try snap.appendElement(self.arena, pair),
+                }
+            }
+            return try self.iteratorOf(Value.obj(snap));
+        }
+    }.call;
+}
+fn fdConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (self.new_target.isUndefined()) return self.throwError("TypeError", "Failed to construct 'FormData': Please use the 'new' operator");
+    // A form argument (HTMLFormElement) is the only accepted init; there is no
+    // DOM here, so a supplied non-undefined argument is a conversion failure.
+    if (args.len > 0 and !args[0].isUndefined()) return self.throwError("TypeError", "Failed to construct 'FormData': parameter 1 is not of type 'HTMLFormElement'.");
+    const obj = try gc_mod.allocObj(self.arena);
+    obj.* = .{};
+    if (self.env.get("FormData")) |c| if (c.isObject()) {
+        if (c.asObj().getOwn("prototype")) |pp| if (pp.isObject()) obj.setProtoAtomic(pp.asObj());
+    };
+    _ = try fdList(self, Value.obj(obj));
+    return Value.obj(obj);
+}
+fn installFormData(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalError!void {
+    const a = env.arena;
+    const symKey = struct {
+        fn f(e: *Environment, name: []const u8) ?[]const u8 {
+            if (e.get("Symbol")) |s| if (s.isObject()) {
+                if (s.asObj().getOwn(name)) |t| if (t.isObject() and t.asObj().is_symbol) return t.asObj().sym_key;
+            };
+            return null;
+        }
+    }.f;
+    const proto = try gc_mod.allocObj(a);
+    proto.* = .{ .proto = object_proto };
+    try setNative(a, rs, proto, "append", 2, fdAppendFn);
+    try setNative(a, rs, proto, "set", 2, fdSetFn);
+    try setNative(a, rs, proto, "get", 1, fdGetFn);
+    try setNative(a, rs, proto, "getAll", 1, fdGetAllFn);
+    try setNative(a, rs, proto, "has", 1, fdHasFn);
+    try setNative(a, rs, proto, "delete", 1, fdDeleteFn);
+    try setNative(a, rs, proto, "forEach", 1, fdForEachFn);
+    try setNative(a, rs, proto, "entries", 0, fdIterFn(.entries));
+    try setNative(a, rs, proto, "keys", 0, fdIterFn(.keys));
+    try setNative(a, rs, proto, "values", 0, fdIterFn(.values));
+    if (symKey(env, "iterator")) |k| try setNative(a, rs, proto, k, 0, fdIterFn(.entries));
+    if (symKey(env, "toStringTag")) |k| {
+        try proto.setOwn(a, rs, k, Value.str("FormData"));
+        try proto.setAttr(a, k, .{ .writable = false, .enumerable = false, .configurable = true });
+    }
+    const ctor = try gc_mod.allocObj(a);
+    ctor.* = .{ .native = fdConstructorFn, .native_ctor = true };
+    try installNativeProps(a, rs, ctor, "FormData", 1);
+    try ctor.setOwn(a, rs, "prototype", Value.obj(proto));
+    try ctor.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
+    try setConstructor(a, rs, proto, ctor);
+    try env.put("FormData", Value.obj(ctor));
 }
 
 // ===== crypto (getRandomValues / randomUUID) =========================
