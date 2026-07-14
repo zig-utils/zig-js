@@ -29724,6 +29724,7 @@ fn installTypedArrays(env: *Environment, rs: *Shape) EvalError!void {
     try installDisposableStacks(env, rs, object_proto);
     try installSharedArrayBufferAndAtomics(env, rs, object_proto);
     try installDOMException(env, rs, object_proto);
+    try installTextEncoder(env, rs, object_proto);
     try installTemporal(env, rs, object_proto);
     try installIntl(env, rs, object_proto);
     // ShadowRealm: a child realm with `evaluate` (and a minimal `importValue`).
@@ -38841,6 +38842,145 @@ fn installDOMException(env: *Environment, rs: *Shape, object_proto: *value.Objec
         try proto.setAttr(a, ec.constant, attr);
     }
     try env.put("DOMException", Value.obj(ctor));
+}
+
+// ===== TextEncoder (Encoding standard) ================================
+/// Convert a WTF-8 JS string to valid UTF-8 bytes: combine a surrogate pair into
+/// its scalar, and replace every LONE surrogate with U+FFFD.
+fn wtf8ToUtf8Bytes(self: *Interpreter, s: []const u8) EvalError![]const u8 {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var i: usize = 0;
+    while (i < s.len) {
+        if (wtf8SurrogateAt(s, i)) |first| {
+            if (isHighSurrogate(first)) {
+                if (wtf8SurrogateAt(s, i + 3)) |second| if (isLowSurrogate(second)) {
+                    const cp: u21 = 0x10000 + ((@as(u21, first - 0xD800) << 10) | (second - 0xDC00));
+                    var b: [4]u8 = undefined;
+                    const n = std.unicode.utf8Encode(cp, &b) catch unreachable;
+                    try buf.appendSlice(self.arena, b[0..n]);
+                    i += 6;
+                    continue;
+                };
+            }
+            try buf.appendSlice(self.arena, "\u{FFFD}");
+            i += 3;
+        } else {
+            const n = utf8SeqLen(s, i);
+            try buf.appendSlice(self.arena, s[i .. i + n]);
+            i += n;
+        }
+    }
+    return buf.items;
+}
+
+fn textEncoderConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (self.new_target.isUndefined()) return self.throwError("TypeError", "Failed to construct 'TextEncoder': Please use the 'new' operator");
+    const obj = try gc_mod.allocObj(self.arena);
+    obj.* = .{};
+    if (self.env.get("TextEncoder")) |c| if (c.isObject()) {
+        if (c.asObj().getOwn("prototype")) |p| if (p.isObject()) obj.setProtoAtomic(p.asObj());
+    };
+    return Value.obj(obj);
+}
+fn textEncoderEncodingGet(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = ctx;
+    _ = this;
+    _ = args;
+    return Value.str("utf-8");
+}
+fn textEncoderEncodeFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const s = if (args.len > 0 and !args[0].isUndefined()) try self.toStringV(args[0]) else "";
+    const bytes = try wtf8ToUtf8Bytes(self, s);
+    const o = try newTypedArray(self, .u8, bytes.len);
+    if (bytes.len > 0) @memcpy(o.typed_array.?.buffer.array_buffer.?.bytes()[0..bytes.len], bytes);
+    return Value.obj(o);
+}
+/// `encodeInto(source, destination)` — encode as much of `source` as fits in the
+/// Uint8Array `destination`, never splitting a character, and report
+/// `{ read, written }` (read = source UTF-16 code units consumed).
+fn textEncoderEncodeIntoFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const s = if (args.len > 0 and !args[0].isUndefined()) try self.toStringV(args[0]) else "";
+    const dv = if (args.len > 1) args[1] else Value.undef();
+    if (!dv.isObject() or dv.asObj().typed_array == null or dv.asObj().typed_array.?.kind != .u8)
+        return self.throwError("TypeError", "TextEncoder.encodeInto destination must be a Uint8Array");
+    const ta = dv.asObj().typed_array.?;
+    const dest = ta.buffer.array_buffer.?.bytes()[ta.byte_offset .. ta.byte_offset + (ta.currentLength() orelse 0)];
+    var read: usize = 0;
+    var written: usize = 0;
+    var i: usize = 0;
+    var b: [4]u8 = undefined;
+    while (i < s.len) {
+        var cp: u21 = undefined;
+        var byte_adv: usize = undefined;
+        var cu: usize = undefined;
+        if (wtf8SurrogateAt(s, i)) |first| {
+            var handled_pair = false;
+            if (isHighSurrogate(first)) {
+                if (wtf8SurrogateAt(s, i + 3)) |second| {
+                    if (isLowSurrogate(second)) {
+                        cp = 0x10000 + ((@as(u21, first - 0xD800) << 10) | (second - 0xDC00));
+                        byte_adv = 6;
+                        cu = 2;
+                        handled_pair = true;
+                    }
+                }
+            }
+            if (!handled_pair) {
+                cp = 0xFFFD;
+                byte_adv = 3;
+                cu = 1;
+            }
+        } else {
+            const n = utf8SeqLen(s, i);
+            cp = std.unicode.utf8Decode(s[i .. i + n]) catch 0xFFFD;
+            byte_adv = n;
+            cu = if (cp >= 0x10000) 2 else 1;
+        }
+        const enc_n = std.unicode.utf8Encode(cp, &b) catch unreachable;
+        if (written + enc_n > dest.len) break;
+        @memcpy(dest[written .. written + enc_n], b[0..enc_n]);
+        written += enc_n;
+        read += cu;
+        i += byte_adv;
+    }
+    const res = (try self.newObject()).asObj();
+    try self.setProp(res, "read", Value.num(@floatFromInt(read)));
+    try self.setProp(res, "written", Value.num(@floatFromInt(written)));
+    return Value.obj(res);
+}
+
+fn installTextEncoder(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalError!void {
+    const a = env.arena;
+    const sym_tag: ?[]const u8 = blk: {
+        if (env.get("Symbol")) |sym| if (sym.isObject()) {
+            if (sym.asObj().getOwn("toStringTag")) |t| if (t.isObject() and t.asObj().is_symbol) break :blk t.asObj().sym_key;
+        };
+        break :blk null;
+    };
+    const proto = try gc_mod.allocObj(a);
+    proto.* = .{ .proto = object_proto };
+    try setNativeGetter(a, rs, proto, "encoding", textEncoderEncodingGet);
+    try proto.setAttr(a, "encoding", .{ .enumerable = true, .configurable = true });
+    try setNative(a, rs, proto, "encode", 0, textEncoderEncodeFn);
+    try setNative(a, rs, proto, "encodeInto", 2, textEncoderEncodeIntoFn);
+    if (sym_tag) |k| {
+        try proto.setOwn(a, rs, k, Value.str("TextEncoder"));
+        try proto.setAttr(a, k, .{ .writable = false, .enumerable = false, .configurable = true });
+    }
+    const ctor = try gc_mod.allocObj(a);
+    ctor.* = .{ .native = textEncoderConstructorFn, .native_ctor = true };
+    try installNativeProps(a, rs, ctor, "TextEncoder", 0);
+    try ctor.setOwn(a, rs, "prototype", Value.obj(proto));
+    try ctor.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
+    try setConstructor(a, rs, proto, ctor);
+    try env.put("TextEncoder", Value.obj(ctor));
 }
 
 fn installSharedArrayBufferAndAtomics(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalError!void {
