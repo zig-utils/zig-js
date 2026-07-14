@@ -39821,6 +39821,46 @@ fn eventConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
     try obj.setOwn(self.arena, rs, "\x00Ets", Value.num(0));
     return Value.obj(obj);
 }
+fn customEventConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (self.new_target.isUndefined()) return self.throwError("TypeError", "Failed to construct 'CustomEvent': Please use the 'new' operator");
+    if (args.len == 0) return self.throwError("TypeError", "Failed to construct 'CustomEvent': 1 argument required, but only 0 present.");
+    const ty = try self.toStringV(args[0]);
+    var bubbles = false;
+    var cancelable = false;
+    var composed = false;
+    var detail = Value.nul();
+    if (args.len > 1 and args[1].isObject()) {
+        bubbles = (try self.getProperty(args[1], "bubbles")).toBoolean();
+        cancelable = (try self.getProperty(args[1], "cancelable")).toBoolean();
+        composed = (try self.getProperty(args[1], "composed")).toBoolean();
+        const d = try self.getProperty(args[1], "detail");
+        if (!d.isUndefined()) detail = d;
+    }
+    const obj = try gc_mod.allocObj(self.arena);
+    obj.* = .{};
+    if (self.env.get("CustomEvent")) |c| if (c.isObject()) {
+        if (c.asObj().getOwn("prototype")) |pp| if (pp.isObject()) obj.setProtoAtomic(pp.asObj());
+    };
+    const rs = self.root_shape;
+    try obj.setOwn(self.arena, rs, "\x00Et", try Value.strAlloc(self.arena, ty));
+    try obj.setOwn(self.arena, rs, "\x00Eb", Value.boolVal(bubbles));
+    try obj.setOwn(self.arena, rs, "\x00Ec", Value.boolVal(cancelable));
+    try obj.setOwn(self.arena, rs, "\x00Eo", Value.boolVal(composed));
+    try obj.setOwn(self.arena, rs, "\x00Ed", Value.boolVal(false));
+    try obj.setOwn(self.arena, rs, "\x00Etg", Value.nul());
+    try obj.setOwn(self.arena, rs, "\x00Ect", Value.nul());
+    try obj.setOwn(self.arena, rs, "\x00Ets", Value.num(0));
+    try obj.setOwn(self.arena, rs, "\x00Edetail", detail);
+    return Value.obj(obj);
+}
+fn customEventDetailGet(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!evIsEvent(this)) return self.throwError("TypeError", "Illegal invocation");
+    return this.asObj().getOwn("\x00Edetail") orelse Value.nul();
+}
 fn eventGetter(comptime which: []const u8) value.NativeFn {
     return struct {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -40095,6 +40135,22 @@ fn installEventTarget(env: *Environment, rs: *Shape, object_proto: *value.Object
         try ev_proto.setAttr(a, pair[0], .{ .writable = false, .enumerable = true, .configurable = false });
     }
     try env.put("Event", Value.obj(ev_ctor));
+    // ---- CustomEvent (Event subclass with a detail payload) ----
+    const ce_proto = try gc_mod.allocObj(a);
+    ce_proto.* = .{ .proto = ev_proto };
+    try setNativeGetter(a, rs, ce_proto, "detail", customEventDetailGet);
+    try ce_proto.setAttr(a, "detail", .{ .enumerable = true, .configurable = true });
+    if (symKey(env, "toStringTag")) |k| {
+        try ce_proto.setOwn(a, rs, k, Value.str("CustomEvent"));
+        try ce_proto.setAttr(a, k, .{ .writable = false, .enumerable = false, .configurable = true });
+    }
+    const ce_ctor = try gc_mod.allocObj(a);
+    ce_ctor.* = .{ .native = customEventConstructorFn, .native_ctor = true };
+    try installNativeProps(a, rs, ce_ctor, "CustomEvent", 1);
+    try ce_ctor.setOwn(a, rs, "prototype", Value.obj(ce_proto));
+    try ce_ctor.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
+    try setConstructor(a, rs, ce_proto, ce_ctor);
+    try env.put("CustomEvent", Value.obj(ce_ctor));
     // ---- EventTarget ----
     const et_proto = try gc_mod.allocObj(a);
     et_proto.* = .{ .proto = object_proto };
