@@ -52,25 +52,37 @@ const numeric_stack_register_capacity = 8;
 const numeric_local_register_capacity = 8;
 const unreachable_offset = std.math.maxInt(usize);
 
-const Kind = enum(u8) { undefined, null, boolean, number };
+const Kind = enum(u8) { unknown, undefined, null, boolean, number };
+
+/// Integer-valued expression provenance. This deliberately does not encode a
+/// finite bound: lowering must also obtain a range proof before relying on a
+/// fact, because repeated Number arithmetic can overflow to infinity.
+const IntegerFact = enum(u8) { unknown, signed, nonnegative, positive };
+
+const StackValue = struct { kind: Kind, integer: IntegerFact };
 
 const State = struct {
     locals: [max_slots]Kind = @splat(.undefined),
+    local_integers: [max_slots]IntegerFact = @splat(.unknown),
     stack: [jit.numeric_scratch_capacity]Kind = @splat(.undefined),
+    stack_integers: [jit.numeric_scratch_capacity]IntegerFact = @splat(.unknown),
     depth: u8 = 0,
 
-    fn push(self: *State, kind: Kind) error{UnsupportedChunk}!void {
+    fn push(self: *State, kind: Kind, integer: IntegerFact) error{UnsupportedChunk}!void {
         if (self.depth == jit.numeric_scratch_capacity) return error.UnsupportedChunk;
         self.stack[self.depth] = kind;
+        self.stack_integers[self.depth] = integer;
         self.depth += 1;
     }
 
-    fn pop(self: *State) error{UnsupportedChunk}!Kind {
+    fn pop(self: *State) error{UnsupportedChunk}!StackValue {
         if (self.depth == 0) return error.UnsupportedChunk;
         self.depth -= 1;
         const kind = self.stack[self.depth];
+        const integer = self.stack_integers[self.depth];
         self.stack[self.depth] = .undefined;
-        return kind;
+        self.stack_integers[self.depth] = .unknown;
+        return .{ .kind = kind, .integer = integer };
     }
 };
 
@@ -205,6 +217,68 @@ fn classify(v: Value) ?Kind {
     };
 }
 
+fn classifyInteger(v: Value) IntegerFact {
+    if (!v.isNumber()) return .unknown;
+    const number = v.asNum();
+    if (!std.math.isFinite(number) or @trunc(number) != number or (number == 0 and std.math.signbit(number))) return .unknown;
+    if (number > 0) return .positive;
+    if (number == 0) return .nonnegative;
+    return .signed;
+}
+
+fn joinIntegerFact(left: IntegerFact, right: IntegerFact) IntegerFact {
+    if (left == right) return left;
+    if (left == .unknown or right == .unknown) return .unknown;
+    if (left == .signed or right == .signed) return .signed;
+    return .nonnegative;
+}
+
+fn joinKind(left: Kind, right: Kind) Kind {
+    if (left == right) return left;
+    return .unknown;
+}
+
+fn mergeState(existing: *State, incoming: State) error{UnsupportedChunk}!bool {
+    if (existing.depth != incoming.depth) return error.UnsupportedChunk;
+    for (existing.stack[0..existing.depth], incoming.stack[0..incoming.depth]) |current, next|
+        if (current != next) return error.UnsupportedChunk;
+
+    var changed = false;
+    for (&existing.locals, incoming.locals) |*current, next| {
+        const merged = joinKind(current.*, next);
+        if (merged != current.*) {
+            current.* = merged;
+            changed = true;
+        }
+    }
+    for (&existing.local_integers, incoming.local_integers) |*current, next| {
+        const merged = joinIntegerFact(current.*, next);
+        if (merged != current.*) {
+            current.* = merged;
+            changed = true;
+        }
+    }
+    for (existing.stack_integers[0..existing.depth], incoming.stack_integers[0..incoming.depth]) |*current, next| {
+        const merged = joinIntegerFact(current.*, next);
+        if (merged != current.*) {
+            current.* = merged;
+            changed = true;
+        }
+    }
+    return changed;
+}
+
+fn arithmeticIntegerFact(op: bc.Op, lhs: IntegerFact, rhs: IntegerFact) IntegerFact {
+    if (lhs == .unknown or rhs == .unknown) return .unknown;
+    return switch (op) {
+        .add, .mul => if (lhs == .signed or rhs == .signed) .signed else .nonnegative,
+        .sub => .signed,
+        .mod => if (rhs != .positive) .unknown else if (lhs == .signed) .signed else .nonnegative,
+        .div => .unknown,
+        else => unreachable,
+    };
+}
+
 fn enqueueState(
     states: []?State,
     worklist: *std.ArrayListUnmanaged(u32),
@@ -213,15 +287,19 @@ fn enqueueState(
     state: State,
 ) !void {
     if (target >= states.len) return error.UnsupportedChunk;
-    if (states[target]) |existing| {
-        if (!std.meta.eql(existing, state)) return error.UnsupportedChunk;
+    if (states[target]) |existing_state| {
+        var existing = existing_state;
+        if (try mergeState(&existing, state)) {
+            states[target] = existing;
+            try worklist.append(allocator, target);
+        }
         return;
     }
     states[target] = state;
     try worklist.append(allocator, target);
 }
 
-fn analyzeNumeric(chunk: *const Chunk) !Analysis {
+fn analyzeNumeric(chunk: *const Chunk, integer_parameters: bool) !Analysis {
     if (chunk.code.items.len == 0 or chunk.code.items.len > max_code_len) return error.UnsupportedChunk;
     if (chunk.local_count > max_slots or chunk.param_count > chunk.local_count) return error.UnsupportedChunk;
 
@@ -231,7 +309,10 @@ fn analyzeNumeric(chunk: *const Chunk) !Analysis {
     @memset(states, null);
 
     var initial = State{};
-    for (0..chunk.param_count) |slot| initial.locals[slot] = .number;
+    for (0..chunk.param_count) |slot| {
+        initial.locals[slot] = .number;
+        if (integer_parameters) initial.local_integers[slot] = .nonnegative;
+    }
     states[0] = initial;
 
     var worklist: std.ArrayListUnmanaged(u32) = .empty;
@@ -249,34 +330,42 @@ fn analyzeNumeric(chunk: *const Chunk) !Analysis {
         switch (inst.op) {
             .load_const => {
                 if (inst.a >= chunk.consts.items.len) return error.UnsupportedChunk;
-                try state.push(classify(chunk.consts.items[inst.a]) orelse return error.UnsupportedChunk);
+                const constant = chunk.consts.items[inst.a];
+                try state.push(classify(constant) orelse return error.UnsupportedChunk, classifyInteger(constant));
             },
-            .load_undefined => try state.push(.undefined),
-            .load_null => try state.push(.null),
-            .load_true, .load_false => try state.push(.boolean),
+            .load_undefined => try state.push(.undefined, .unknown),
+            .load_null => try state.push(.null, .unknown),
+            .load_true, .load_false => try state.push(.boolean, .unknown),
             .pop => _ = try state.pop(),
             .load_local => {
                 if (inst.a >= chunk.local_count) return error.UnsupportedChunk;
-                try state.push(state.locals[inst.a]);
+                // A local whose representation differs across predecessors is
+                // safe only after an unconditional overwrite. Reconciliation
+                // at a live mixed-kind merge is outside this numeric tier.
+                if (state.locals[inst.a] == .unknown) return error.UnsupportedChunk;
+                try state.push(state.locals[inst.a], state.local_integers[inst.a]);
             },
             .store_local => {
                 if (inst.a >= chunk.local_count or state.depth == 0) return error.UnsupportedChunk;
                 state.locals[inst.a] = state.stack[state.depth - 1];
+                state.local_integers[inst.a] = state.stack_integers[state.depth - 1];
             },
             .add, .sub, .mul, .div, .mod => {
-                if (try state.pop() != .number or try state.pop() != .number) return error.UnsupportedChunk;
-                try state.push(.number);
+                const rhs = try state.pop();
+                const lhs = try state.pop();
+                if (rhs.kind != .number or lhs.kind != .number) return error.UnsupportedChunk;
+                try state.push(.number, arithmeticIntegerFact(inst.op, lhs.integer, rhs.integer));
             },
             .lt, .le, .gt, .ge, .eq, .neq, .eq_strict, .neq_strict => {
-                if (try state.pop() != .number or try state.pop() != .number) return error.UnsupportedChunk;
-                try state.push(.boolean);
+                if ((try state.pop()).kind != .number or (try state.pop()).kind != .number) return error.UnsupportedChunk;
+                try state.push(.boolean, .unknown);
             },
             .jump => {
                 try enqueueState(states, &worklist, allocator, inst.a, state);
                 fallthrough = false;
             },
             .jump_if_false => {
-                if (try state.pop() != .boolean) return error.UnsupportedChunk;
+                if ((try state.pop()).kind != .boolean) return error.UnsupportedChunk;
                 try enqueueState(states, &worklist, allocator, inst.a, state);
             },
             .ret => {
@@ -560,7 +649,7 @@ fn patchControlToOffset(assembler: *aarch64.Assembler, fixup: ControlFixup, targ
 fn compileNumeric(chunk: *const Chunk) !jit.CompiledCode {
     if (!jit.supported or builtin.cpu.arch != .aarch64) return error.UnsupportedTarget;
 
-    var analysis = try analyzeNumeric(chunk);
+    var analysis = try analyzeNumeric(chunk, false);
     defer analysis.deinit();
     if (analysis.max_stack_depth > numeric_stack_register_capacity or chunk.local_count > numeric_local_register_capacity)
         return error.UnsupportedChunk;
@@ -846,6 +935,73 @@ test "plain function chunks record native frame arity" {
 
     try std.testing.expectEqual(@as(u32, 2), function_chunk.param_count);
     try std.testing.expectEqual(@as(u32, 3), function_chunk.local_count);
+}
+
+test "integer provenance converges through benchmark-shaped loops" {
+    const Parser = @import("../parser.zig").Parser;
+    const Compiler = @import("../compiler.zig").Compiler;
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var parser = try Parser.init(allocator,
+        \\function kernel(jobs, lane) {
+        \\  var total = 0;
+        \\  for (var job = 0; job < jobs; job = job + 1) {
+        \\    var value = lane + job + 1;
+        \\    for (var i = 0; i < 100000; i = i + 1)
+        \\      value = (value + i + lane) % 1000003;
+        \\    total = total + value;
+        \\  }
+        \\  return total;
+        \\}
+    );
+    const program = try parser.parseProgram();
+    const root = try Compiler.compileProgram(allocator, program);
+    const chunk = root.fns.items[0].chunk.?;
+    var analysis = try analyzeNumeric(chunk, true);
+    defer analysis.deinit();
+
+    var saw_remainder = false;
+    var saw_return = false;
+    for (chunk.code.items, 0..) |inst, ip| switch (inst.op) {
+        .mod => {
+            const state = analysis.states[ip].?;
+            try std.testing.expect(state.depth >= 2);
+            try std.testing.expectEqual(IntegerFact.nonnegative, state.stack_integers[state.depth - 2]);
+            try std.testing.expectEqual(IntegerFact.positive, state.stack_integers[state.depth - 1]);
+            saw_remainder = true;
+        },
+        .ret => {
+            const state = analysis.states[ip].?;
+            try std.testing.expect(state.depth >= 1);
+            try std.testing.expectEqual(IntegerFact.nonnegative, state.stack_integers[state.depth - 1]);
+            saw_return = true;
+        },
+        else => {},
+    };
+    try std.testing.expect(saw_remainder);
+    try std.testing.expect(saw_return);
+}
+
+test "integer provenance rejects live mixed-kind locals" {
+    const Parser = @import("../parser.zig").Parser;
+    const Compiler = @import("../compiler.zig").Compiler;
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var parser = try Parser.init(allocator,
+        \\function mixed(n) {
+        \\  var value;
+        \\  if (n > 0) value = 1;
+        \\  return value;
+        \\}
+    );
+    const program = try parser.parseProgram();
+    const root = try Compiler.compileProgram(allocator, program);
+    const chunk = root.fns.items[0].chunk.?;
+    try std.testing.expectError(error.UnsupportedChunk, analyzeNumeric(chunk, true));
 }
 
 test "compiler executes a numeric local loop across a checkpoint" {
