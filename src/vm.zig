@@ -39,6 +39,7 @@ fn bindThisForCall(vm: *Interpreter, func: *Function, this_val: Value) EvalError
     if (func.is_arrow) return func.arrow_this;
     if (func.is_strict) return this_val;
     if (this_val.isNull() or this_val.isUndefined()) {
+        if (func.realm_global) |global| return Value.obj(global);
         if (vm.env.get("globalThis")) |gt| if (gt.isObject()) return gt;
         return if (vm.global_object) |g| Value.obj(g) else this_val;
     }
@@ -3837,6 +3838,7 @@ fn makeClosure(vm: *Interpreter, tmpl: *bc.FnTemplate, frame: ?*Frame) EvalError
         .body = tmpl.body,
         .is_expr_body = tmpl.is_expr_body,
         .closure = closure_env,
+        .realm_global = interp.functionRealmGlobal(closure_env, vm.global_object),
         .name = tmpl.name,
         .source = tmpl.source,
         .is_generator = tmpl.is_generator,
@@ -3956,6 +3958,7 @@ const Activation = struct {
     saved_this: Value,
     saved_strict: bool,
     saved_env: *Environment,
+    saved_global: ?*value.Object,
     saved_nt: Value,
     saved_ims: ?*interp.ImportMetaSlot,
     saved_imo: ?*value.Object,
@@ -4006,6 +4009,7 @@ fn acquireActivation(vm: *Interpreter, local_count: usize) EvalError!*Activation
         .saved_this = undefined,
         .saved_strict = undefined,
         .saved_env = undefined,
+        .saved_global = undefined,
         .saved_nt = undefined,
         .saved_ims = undefined,
         .saved_imo = undefined,
@@ -4039,6 +4043,7 @@ fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
         .saved_this = vm.this_value,
         .saved_strict = vm.strict,
         .saved_env = vm.env,
+        .saved_global = vm.global_object,
         .saved_nt = vm.new_target,
         .saved_ims = vm.import_meta_slot,
         .saved_imo = vm.import_meta_obj,
@@ -4055,6 +4060,7 @@ fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
     // Free variables (globals, and a named function expression's self name)
     // resolve through `vm.env`; install the closure's defining environment.
     vm.env = func.closure;
+    if (func.realm_global) |global| vm.global_object = global;
     vm.new_target = if (func.is_arrow) func.arrow_new_target else new_target;
     vm.direct_eval_new_target_allowed = if (func.is_arrow) func.arrow_direct_eval_new_target_allowed else true;
     vm.import_meta_slot = func.import_meta_slot;
@@ -4073,6 +4079,7 @@ fn popActivation(vm: *Interpreter, act: *Activation) void {
     vm.this_value = act.saved_this;
     vm.strict = act.saved_strict;
     vm.env = act.saved_env;
+    vm.global_object = act.saved_global;
     vm.new_target = act.saved_nt;
     vm.import_meta_slot = act.saved_ims;
     vm.import_meta_obj = act.saved_imo;
@@ -4085,6 +4092,7 @@ fn inheritCallerState(dst: *Activation, src: *const Activation) void {
     dst.saved_this = src.saved_this;
     dst.saved_strict = src.saved_strict;
     dst.saved_env = src.saved_env;
+    dst.saved_global = src.saved_global;
     dst.saved_nt = src.saved_nt;
     dst.saved_ims = src.saved_ims;
     dst.saved_imo = src.saved_imo;
@@ -4634,6 +4642,38 @@ test "vm: objects, arrays, members, this, new, instanceof on the VM" {
     try std.testing.expectEqual(@as(f64, 7), (try vmRun(a, "function P(x, y) { this.x = x; this.y = y; } let p = new P(3, 4); p.x + p.y")).asNum());
     try std.testing.expect((try vmRun(a, "function P(x) { this.x = x; } (new P(1)) instanceof P")).asBool());
     try std.testing.expectEqual(@as(f64, 10), (try vmRun(a, "let o = { n: 10, get: function () { return this.n; } }; o.get()")).asNum());
+}
+
+test "vm: sloppy recursive calls retain their function realm global" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var parser = try Parser.init(allocator,
+        \\var original = globalThis;
+        \\function recur(n) { return n > 0 ? recur(n - 1) : this; }
+        \\globalThis = { replacement: true };
+        \\var retained = recur(3) === original;
+        \\globalThis = original;
+        \\retained
+    );
+    const program = try parser.parseProgram();
+    const chunk = try Compiler.compileProgram(allocator, program);
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
+    try interp.installGlobals(&env, root_shape);
+    const global = try gc_mod.allocObj(allocator);
+    global.* = .{};
+    try env.put("globalThis", Value.obj(global));
+    var machine = Interpreter{
+        .arena = allocator,
+        .env = &env,
+        .root_shape = root_shape,
+        .global_object = global,
+        .this_value = Value.obj(global),
+    };
+
+    try std.testing.expect((try run(&machine, chunk, null)).asBool());
+    try std.testing.expectEqual(global, machine.global_object.?);
 }
 
 test "vm: caches live global function bindings" {

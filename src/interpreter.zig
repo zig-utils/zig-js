@@ -740,6 +740,15 @@ pub const ImportMetaSlot = struct {
     obj: ?*value.Object = null,
 };
 
+/// Resolve a function's realm global once, when its closure is created. The
+/// ambient interpreter may currently be entered from another realm (notably
+/// through that realm's `Function` constructor), so the closure environment is
+/// authoritative and the ambient global is only a fallback for minimal hosts.
+pub fn functionRealmGlobal(env: *Environment, fallback: ?*value.Object) ?*value.Object {
+    if (env.get("globalThis")) |global| if (global.isObject()) return global.asObj();
+    return fallback;
+}
+
 const TreeTailCall = struct {
     callee: Value,
     args: []const Value,
@@ -757,6 +766,11 @@ pub const Function = struct {
     /// without a source-derived flag (e.g. VM templates) stays correct.
     uses_arguments: bool = true,
     closure: *Environment,
+    /// The function's [[Realm]] global object, captured when the function is
+    /// created. Sloppy `this` substitution and realm-sensitive operations must
+    /// use this stable identity rather than repeatedly resolving the writable
+    /// `globalThis` property through the closure environment.
+    realm_global: ?*value.Object = null,
     name: []const u8 = "",
     /// Exact source text of the function definition, for `Function.prototype.
     /// toString`. Empty when the parser didn't capture it (then toString falls
@@ -4129,6 +4143,7 @@ pub const Interpreter = struct {
             .is_arrow = fnode.is_arrow,
             .uses_arguments = fnode.uses_arguments,
             .closure = closure,
+            .realm_global = functionRealmGlobal(closure, self.global_object),
             .name = fnode.name,
             .source = fnode.source,
             .is_generator = fnode.is_generator,
@@ -5711,7 +5726,9 @@ pub const Interpreter = struct {
         self.import_meta_slot = func.import_meta_slot;
         self.import_meta_obj = if (func.import_meta_slot) |slot| slot.obj else null;
         self.cur_module = func.module_referrer;
-        if (self.env.get("globalThis")) |gt| {
+        if (func.realm_global) |global| {
+            self.global_object = global;
+        } else if (self.env.get("globalThis")) |gt| {
             if (gt.isObject()) self.global_object = gt.asObj();
         }
         // Sloppy-mode this-substitution: null/undefined become the callee
@@ -5723,6 +5740,7 @@ pub const Interpreter = struct {
             func.arrow_this
         else if (!func.is_strict) blk: {
             if (this_val.isNull() or this_val.isUndefined()) {
+                if (func.realm_global) |global| break :blk Value.obj(global);
                 if (self.env.get("globalThis")) |gt| if (gt.isObject()) break :blk gt;
                 break :blk if (self.global_object) |g| Value.obj(g) else this_val;
             }
