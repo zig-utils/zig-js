@@ -678,6 +678,11 @@ pub const GcCellBacking = struct {
     /// and teardown usually arrive in chunk-local runs, so this avoids restarting
     /// the chunk walk for every cell while preserving exact ownership checks.
     bucket_owns_hint: [bucket_count]?usize = .{ null, null, null, null, null, null },
+    /// Most recently successful ownership size class. Object graphs usually
+    /// contain long runs of one dominant cell size, so try that bucket before
+    /// scanning the other exact ranges. Atomic because parallel marking can
+    /// classify cells concurrently with mutators allocating private cells.
+    owned_bucket_hint: std.atomic.Value(u8) = .init(bucket_count),
     bucket_addr_min: [bucket_count]usize = .{
         std.math.maxInt(usize),
         std.math.maxInt(usize),
@@ -899,11 +904,23 @@ pub const GcCellBacking = struct {
     /// header magic before returning them, supplying the liveness half.
     pub fn ownsCellAllocation(self: *GcCellBacking, allocation: *anyopaque) bool {
         const ptr: [*]u8 = @ptrCast(allocation);
-        inline for (0..bucket_count) |idx| {
+        const hint = self.owned_bucket_hint.load(.monotonic);
+        const hint_idx: usize = @intCast(hint);
+        if (hint_idx < bucket_count) {
+            self.acquireBucket(hint_idx);
+            const owned = self.ownsIssuedSlotStartLocked(hint_idx, ptr);
+            self.unlockBucket(hint_idx);
+            if (owned) return true;
+        }
+        for (0..bucket_count) |idx| {
+            if (idx == hint_idx) continue;
             self.acquireBucket(idx);
             const owned = self.ownsIssuedSlotStartLocked(idx, ptr);
             self.unlockBucket(idx);
-            if (owned) return true;
+            if (owned) {
+                self.owned_bucket_hint.store(@intCast(idx), .monotonic);
+                return true;
+            }
         }
         return false;
     }
@@ -1308,9 +1325,12 @@ test "GC cell backing recognizes exact issued allocation starts" {
     const cell = try allocator.alignedAlloc(u8, .@"16", 200);
     const foreign = try std.testing.allocator.alignedAlloc(u8, .@"16", 200);
     defer std.testing.allocator.free(foreign);
+    const bucket_idx = GcCellBacking.bucketIndex(200, .@"16").?;
 
     try std.testing.expect(GcCellBacking.usesCellSlab(200));
+    try std.testing.expectEqual(@as(u8, GcCellBacking.bucket_count), backing.owned_bucket_hint.load(.monotonic));
     try std.testing.expect(backing.ownsCellAllocation(@ptrCast(cell.ptr)));
+    try std.testing.expectEqual(@as(u8, @intCast(bucket_idx)), backing.owned_bucket_hint.load(.monotonic));
     try std.testing.expect(!backing.ownsCellAllocation(@ptrCast(cell.ptr + 16)));
     try std.testing.expect(!backing.ownsCellAllocation(@ptrCast(foreign.ptr)));
     allocator.free(cell);
@@ -2834,6 +2854,22 @@ pub const Context = struct {
         }
     }
 
+    /// Reclaim a nursery batch at a safe single-mutator VM checkpoint. This is
+    /// deliberately synchronous: the current interpreter is parked in the
+    /// safepoint call, active interpreter roots are registered, and the guarded
+    /// native-stack scan covers temporary host/register roots. A full or
+    /// concurrent cycle already in progress keeps ownership of the checkpoint.
+    fn collectYoungMidScriptIfNeeded(self: *Context, h: *GcHeap) bool {
+        if (h.marking.load(.acquire) or h.concurrent.load(.acquire)) return false;
+        if (!h.shouldCollectYoung()) return false;
+        self.gc_scan_native_stack = true;
+        defer self.gc_scan_native_stack = false;
+        self.gc_scan_parked_stacks = true;
+        defer self.gc_scan_parked_stacks = false;
+        h.collectYoung();
+        return true;
+    }
+
     fn collectMidScript(raw_ctx: *anyopaque, raw_machine: *anyopaque) void {
         const self: *Context = @ptrCast(@alignCast(raw_ctx));
         const machine: *interp.Interpreter = @ptrCast(@alignCast(raw_machine));
@@ -2854,6 +2890,11 @@ pub const Context = struct {
         // mode is explicit/quiescent only (`collectGarbage`); skip the safepoint
         // collector so parallel execution never races a marker.
         if (h.parallel) return;
+        // The default cell nursery is useful only if allocation-heavy scripts
+        // can reclaim it before returning to a host boundary. A single mutator
+        // is stopped here, so collect young garbage directly instead of
+        // repeatedly starting full-heap cycles from total live bytes.
+        if (self.collectYoungMidScriptIfNeeded(h)) return;
         // M3 concurrent driver (single-mutator, opt-in): begin a concurrent mark
         // at one safepoint and close it at the next, a dedicated marker thread
         // tracing during the window while the mutator runs. Stores feed the marker
@@ -2863,7 +2904,7 @@ pub const Context = struct {
         if (self.gc_concurrent) {
             if (h.concurrent.load(.acquire)) {
                 self.finishConcurrentGCIfActive();
-            } else if (h.bytes_live >= h.threshold_bytes) {
+            } else if (h.shouldCollectOld()) {
                 self.gc_scan_native_stack = true;
                 h.beginConcurrentMark();
                 self.gc_scan_native_stack = false;
@@ -2893,7 +2934,7 @@ pub const Context = struct {
             // Drain a bounded slice of the grey set; when it empties, close the
             // cycle (re-scan roots under the GIL, then sweep).
             if (h.markStep(mark_budget)) h.finishMarking();
-        } else if (h.bytes_live >= h.threshold_bytes) {
+        } else if (h.shouldCollectOld()) {
             // Begin an incremental cycle: snapshot roots, then let the mutator
             // run between safepoints with the barrier shading its stores.
             h.startMarking();
@@ -11839,6 +11880,33 @@ test "enable_gc: mid-script collection reclaims garbage during a running loop (b
     // The heap stayed bounded: nothing like the ~150k object graphs a leak would
     // accumulate over 50k iterations survived.
     try std.testing.expect(ctx.gc.?.live_cells < 20000);
+}
+
+test "enable_gc: mid-script safepoints collect nursery before old heap" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    defer ctx.destroy();
+    ctx.collectGarbage();
+    const heap = ctx.gc.?;
+    heap.threshold_bytes = std.math.maxInt(usize);
+    heap.nursery_threshold_bytes = Context.GcHeap.min_nursery_threshold_bytes;
+    const minor_before = heap.minor_collections;
+    const full_before = heap.full_collections;
+
+    const result = try ctx.evaluate(
+        \\let acc = 0;
+        \\for (let i = 0; i < 10000; i++) {
+        \\  const value = { a: i, nested: { b: i + 1 }, values: [i, i + 2] };
+        \\  acc += value.a + value.nested.b + value.values[1];
+        \\}
+        \\acc;
+    );
+    // sum(3*i + 3), i=0..9999.
+    try std.testing.expectEqual(@as(f64, 150015000), result.asNum());
+    // More than the one possible exit-boundary cycle proves the running loop
+    // entered the nursery collector at VM safepoints.
+    try std.testing.expect(heap.minor_collections - minor_before > 2);
+    try std.testing.expectEqual(full_before, heap.full_collections);
+    try std.testing.expect(heap.live_cells < 20000);
 }
 
 test "enable_gc concurrent (M3): the production driver marks on a thread while JS runs" {
