@@ -10498,7 +10498,10 @@ test "structuredClone: identity, cycles, types, SAB sharing, transfer" {
         \\if (ab.byteLength !== 0 || !ab.detached) throw new Error("source not detached");
         \\// DataCloneError
         \\let threw = false;
-        \\try { structuredClone(function () {}); } catch (e) { threw = e instanceof TypeError; }
+        \\try { structuredClone(function () {}); } catch (e) {
+        \\  threw = e instanceof DOMException &&
+        \\    e.name === "DataCloneError" && e.code === DOMException.DATA_CLONE_ERR;
+        \\}
         \\if (!threw) throw new Error("function clone did not throw");
     );
 }
