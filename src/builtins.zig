@@ -253,6 +253,7 @@ pub fn parseIntFn(ctx: *anyopaque, this: Value, args: []const Value) HostError!V
         radix = 16;
         i += 2;
     }
+    const digit_start = i;
     var acc: f64 = 0;
     var any = false;
     while (i < s.len) : (i += 1) {
@@ -262,6 +263,15 @@ pub fn parseIntFn(ctx: *anyopaque, this: Value, args: []const Value) HostError!V
         any = true;
     }
     if (!any) return Value.num(std.math.nan(f64));
+    // The digit-by-digit accumulation above drifts by up to a few ULP once the
+    // value exceeds 2^53. For decimal (the common case) re-parse the digit run
+    // with a correctly-rounded string→f64 conversion so large inputs round like
+    // the spec (and other engines) require.
+    if (radix == 10 and i - digit_start > 15) {
+        if (std.fmt.parseFloat(f64, s[digit_start..i])) |exact| {
+            return Value.num(if (neg) -exact else exact);
+        } else |_| {}
+    }
     return Value.num(if (neg) -acc else acc);
 }
 
