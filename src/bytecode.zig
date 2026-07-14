@@ -27,15 +27,20 @@ const Value = value.Value;
 /// different objects. See `InlineCache.lookupSlot`/`record`.
 pub var ic_seqlock_enabled: std.atomic.Value(bool) = .init(false);
 
-/// A monomorphic inline cache for a `get_prop`/`set_prop` site: remembers the
-/// last object shape seen there and the slot the property lived at, so a repeat
-/// access on the same shape skips the lookup entirely. One per instruction.
+/// A small polymorphic inline cache for a `get_prop`/`set_prop` site. The first
+/// observed shape stays in the primary entry (preserving the one-compare
+/// monomorphic hot path); three secondary entries cover common polymorphic
+/// sites without allocating a side table. One cache lives beside every
+/// instruction, and a fifth distinct shape replaces secondary entries in
+/// round-robin order.
 pub const InlineCache = struct {
     shape: ?*Shape = null,
     slot: u32 = 0,
+    secondary_shapes: [3]?*Shape = .{ null, null, null },
+    secondary_slots: [3]u32 = .{ 0, 0, 0 },
+    next_secondary: u32 = 0,
     /// Seqlock version for the parallel protocol: even = stable, odd = a writer
-    /// is mid-update. Untouched on the default (GIL-serialized) path. Fits in
-    /// the struct's existing padding, so the cache stays 16 bytes.
+    /// is mid-update. Untouched on the default (GIL-serialized) path.
     version: std.atomic.Value(u32) = .init(0),
 
     /// Return the cached slot iff the cache currently maps `obj_shape`. On the
@@ -52,6 +57,8 @@ pub const InlineCache = struct {
     pub inline fn lookupSlotMode(ic: *InlineCache, obj_shape: ?*Shape, parallel: bool) ?u32 {
         if (parallel) return ic.loadHit(obj_shape);
         if (obj_shape != null and obj_shape == ic.shape) return ic.slot;
+        inline for (0..ic.secondary_shapes.len) |index|
+            if (obj_shape != null and obj_shape == ic.secondary_shapes[index]) return ic.secondary_slots[index];
         return null;
     }
 
@@ -69,8 +76,7 @@ pub const InlineCache = struct {
             ic.tryStore(sh, slot);
             return;
         }
-        ic.shape = sh;
-        ic.slot = slot;
+        ic.store(sh, slot);
     }
 
     /// Seqlock read: re-read the version around the field loads and reject if a
@@ -89,9 +95,39 @@ pub const InlineCache = struct {
         if (v1 & 1 != 0) return null; // a writer holds the cache
         const sh = @atomicLoad(?*Shape, &ic.shape, .seq_cst);
         const sl = @atomicLoad(u32, &ic.slot, .seq_cst);
+        var hit = if (sh != null and sh == obj_shape) sl else null;
+        inline for (0..ic.secondary_shapes.len) |index| {
+            const secondary_shape = @atomicLoad(?*Shape, &ic.secondary_shapes[index], .seq_cst);
+            const secondary_slot = @atomicLoad(u32, &ic.secondary_slots[index], .seq_cst);
+            if (hit == null and secondary_shape != null and secondary_shape == obj_shape) hit = secondary_slot;
+        }
         if (ic.version.load(.seq_cst) != v1) return null; // torn against a write
-        if (sh != null and sh == obj_shape) return sl;
-        return null;
+        return hit;
+    }
+
+    fn store(ic: *InlineCache, sh: *Shape, slot: u32) void {
+        if (ic.shape == null or ic.shape == sh) {
+            ic.slot = slot;
+            ic.shape = sh;
+            return;
+        }
+        for (&ic.secondary_shapes, &ic.secondary_slots) |*cached_shape, *cached_slot| {
+            if (cached_shape.* == sh) {
+                cached_slot.* = slot;
+                return;
+            }
+        }
+        for (&ic.secondary_shapes, &ic.secondary_slots) |*cached_shape, *cached_slot| {
+            if (cached_shape.* == null) {
+                cached_slot.* = slot;
+                cached_shape.* = sh;
+                return;
+            }
+        }
+        const index = ic.next_secondary % ic.secondary_shapes.len;
+        ic.next_secondary +%= 1;
+        ic.secondary_slots[index] = slot;
+        ic.secondary_shapes[index] = sh;
     }
 
     /// Seqlock write: claim the cache by CAS-ing the version even→odd, publish
@@ -102,8 +138,33 @@ pub const InlineCache = struct {
         const v = ic.version.load(.seq_cst);
         if (v & 1 != 0) return; // a writer is already in progress
         if (ic.version.cmpxchgStrong(v, v +% 1, .seq_cst, .seq_cst) != null) return; // lost the claim
-        @atomicStore(u32, &ic.slot, slot, .seq_cst);
-        @atomicStore(?*Shape, &ic.shape, sh, .seq_cst);
+        const primary_shape = @atomicLoad(?*Shape, &ic.shape, .seq_cst);
+        if (primary_shape == null or primary_shape == sh) {
+            @atomicStore(u32, &ic.slot, slot, .seq_cst);
+            @atomicStore(?*Shape, &ic.shape, sh, .seq_cst);
+            ic.version.store(v +% 2, .seq_cst);
+            return;
+        }
+        inline for (0..ic.secondary_shapes.len) |index| {
+            if (@atomicLoad(?*Shape, &ic.secondary_shapes[index], .seq_cst) == sh) {
+                @atomicStore(u32, &ic.secondary_slots[index], slot, .seq_cst);
+                ic.version.store(v +% 2, .seq_cst);
+                return;
+            }
+        }
+        inline for (0..ic.secondary_shapes.len) |index| {
+            if (@atomicLoad(?*Shape, &ic.secondary_shapes[index], .seq_cst) == null) {
+                @atomicStore(u32, &ic.secondary_slots[index], slot, .seq_cst);
+                @atomicStore(?*Shape, &ic.secondary_shapes[index], sh, .seq_cst);
+                ic.version.store(v +% 2, .seq_cst);
+                return;
+            }
+        }
+        const next = @atomicLoad(u32, &ic.next_secondary, .seq_cst);
+        const index = next % ic.secondary_shapes.len;
+        @atomicStore(u32, &ic.next_secondary, next +% 1, .seq_cst);
+        @atomicStore(u32, &ic.secondary_slots[index], slot, .seq_cst);
+        @atomicStore(?*Shape, &ic.secondary_shapes[index], sh, .seq_cst);
         ic.version.store(v +% 2, .seq_cst); // republish: stable (even)
     }
 };
@@ -447,7 +508,26 @@ pub const Chunk = struct {
     }
 };
 
-test "InlineCache seqlock: concurrent writers never tear the (shape, slot) pair" {
+test "InlineCache retains four polymorphic shape-slot pairs" {
+    var shapes: [5]Shape = undefined;
+    var ic = InlineCache{};
+    for (shapes[0..4], 0..) |*shape, index| ic.recordMode(shape, @intCast(index), false);
+    for (shapes[0..4], 0..) |*shape, index|
+        try std.testing.expectEqual(@as(?u32, @intCast(index)), ic.lookupSlotMode(shape, false));
+
+    // A fifth shape retains the primary monomorphic entry and evicts exactly
+    // one secondary entry. The replacement itself must immediately hit.
+    ic.recordMode(&shapes[4], 4, false);
+    try std.testing.expectEqual(@as(?u32, 0), ic.lookupSlotMode(&shapes[0], false));
+    try std.testing.expectEqual(@as(?u32, 4), ic.lookupSlotMode(&shapes[4], false));
+    var retained_secondary: usize = 0;
+    for (shapes[1..4]) |*shape| if (ic.lookupSlotMode(shape, false) != null) {
+        retained_secondary += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 2), retained_secondary);
+}
+
+test "InlineCache seqlock: concurrent writers never tear shape-slot pairs" {
     // The hazard the seqlock fixes: two threads racing the *same* instruction's
     // cache over *different* shapes (each holds a different object's
     // `property_lock`, so the per-object locks don't serialize them). With plain
