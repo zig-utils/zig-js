@@ -839,6 +839,12 @@ var quick_packed_array_push_loop_hits: std.atomic.Value(u64) = .init(0);
 var quick_packed_array_specialized_expression_hits: std.atomic.Value(u64) = .init(0);
 var quick_polymorphic_property_loop_hits: std.atomic.Value(u64) = .init(0);
 var quick_object_allocation_loop_hits: std.atomic.Value(u64) = .init(0);
+
+pub fn quickObjectAllocationLoopHitsForTesting() u64 {
+    std.debug.assert(builtin.is_test);
+    return quick_object_allocation_loop_hits.load(.monotonic);
+}
+
 var quick_global_binding_hits: std.atomic.Value(u64) = .init(0);
 var quick_literal_transition_hits: std.atomic.Value(u64) = .init(0);
 var quick_native_direct_call_hits: std.atomic.Value(u64) = .init(0);
@@ -2577,7 +2583,9 @@ fn tryQuickObjectAllocationLoop(
             vm.steps += iterations * steps_per_iteration + 39;
             return err;
         };
-        if (!array.replaceDenseElement(element_index, fresh_value)) unreachable;
+        if (gc_mod.barrierExactManagedCellFrom(@ptrCast(array), @ptrCast(fresh))) {
+            array.replaceDenseElementExclusivePresentAfterBarrier(element_index, fresh_value);
+        } else if (!array.replaceDenseElement(element_index, fresh_value)) unreachable;
 
         const checksum_value = Value.num((next + stamp) + previous).toInt32() & allocation.checksum_mask;
         total += @floatFromInt(checksum_value);

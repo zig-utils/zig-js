@@ -1014,6 +1014,17 @@ pub inline fn barrierCellFrom(owner: ?*anyopaque, cell: ?*anyopaque) void {
     gc_runtime.barrierFrom(owner, cell);
 }
 
+/// Barrier an edge whose owner and child are known exact live payloads from the
+/// active heap. Returns false in arena mode so callers can retain their generic
+/// store path. The strict zig-gc entry avoids classifying either pointer through
+/// the tolerant live-payload index.
+pub inline fn barrierExactManagedCellFrom(owner: *anyopaque, cell: *anyopaque) bool {
+    const raw = active_heap orelse return false;
+    const heap: *Heap = @ptrCast(@alignCast(raw));
+    heap.writeBarrierFromManaged(owner, cell);
+    return true;
+}
+
 pub inline fn barrierWeak(owner: ?*anyopaque) void {
     gc_runtime.barrierWeak(owner);
 }

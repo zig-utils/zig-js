@@ -8,6 +8,7 @@ const value = @import("value.zig");
 const strcell = @import("strcell.zig");
 const Value = value.Value;
 const compiler = @import("compiler.zig");
+const bc = @import("bytecode.zig");
 const vm = @import("vm.zig");
 const builtins = @import("builtins.zig");
 const Shape = @import("shape.zig").Shape;
@@ -11534,6 +11535,64 @@ test "enable_gc: object-heavy program runs and tears down clean (no leaks)" {
     );
     // sum_{i=0..199}(i + 2i + (i+2)) = sum(4i+2) = 80000, plus obj.x+obj.y = 3.
     try std.testing.expectEqual(@as(f64, 80003), result.asNum());
+}
+
+test "enable_gc nursery: quick object replacement keeps exact-managed children" {
+    const old_parallel = bc.ic_seqlock_enabled.load(.monotonic);
+    defer bc.ic_seqlock_enabled.store(old_parallel, .monotonic);
+    bc.ic_seqlock_enabled.store(false, .monotonic);
+
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true, .enable_jit = false });
+    defer ctx.destroy();
+
+    _ = try ctx.evaluate(
+        \\var items = [
+        \\  { seed: 1, mark: 0, prior: 0 }, { seed: 2, mark: 0, prior: 0 },
+        \\  { seed: 3, mark: 0, prior: 0 }, { seed: 4, mark: 0, prior: 0 },
+        \\  { seed: 5, mark: 0, prior: 0 }, { seed: 6, mark: 0, prior: 0 },
+        \\  { seed: 7, mark: 0, prior: 0 }, { seed: 8, mark: 0, prior: 0 }
+        \\];
+    );
+    ctx.collectGarbage();
+    const heap = ctx.gc.?;
+    heap.nursery_threshold_bytes = 1;
+    const minor_before = heap.minor_collections;
+    const hits_before = vm.quickObjectAllocationLoopHitsForTesting();
+
+    const result = try ctx.evaluate(
+        \\function allocate(items, limit, extra) {
+        \\  var total = 0;
+        \\  var cursor = 0;
+        \\  while (cursor < limit) {
+        \\    var selected = cursor & 7;
+        \\    var old = items[selected];
+        \\    var next = (old.seed + cursor + extra) % 1009;
+        \\    var replacement = { seed: next, mark: cursor & 3, prior: old.seed };
+        \\    items[selected] = replacement;
+        \\    total = total + ((replacement.seed + replacement.mark + replacement.prior) & 31);
+        \\    cursor = cursor + 1;
+        \\  }
+        \\  return total;
+        \\}
+        \\allocate(items, 4096, 2)
+    );
+
+    var seeds = [_]i32{ 1, 2, 3, 4, 5, 6, 7, 8 };
+    var expected: i32 = 0;
+    for (0..4096) |cursor| {
+        const selected = cursor & 7;
+        const old = seeds[selected];
+        const next = @mod(old + @as(i32, @intCast(cursor)) + 2, 1009);
+        expected += (next + @as(i32, @intCast(cursor & 3)) + old) & 31;
+        seeds[selected] = next;
+    }
+    try std.testing.expectEqual(@as(f64, @floatFromInt(expected)), result.asNum());
+    try std.testing.expect(vm.quickObjectAllocationLoopHitsForTesting() > hits_before);
+    try std.testing.expect(heap.minor_collections > minor_before);
+
+    heap.collectYoung();
+    const retained = try ctx.evaluate("items[0].seed + items[7].seed");
+    try std.testing.expectEqual(@as(f64, @floatFromInt(seeds[0] + seeds[7])), retained.asNum());
 }
 
 test "enable_gc: collectGarbage reclaims unreachable objects, keeps reachable" {

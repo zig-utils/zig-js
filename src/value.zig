@@ -1621,6 +1621,15 @@ pub const Object = struct {
         return true;
     }
 
+    /// Replace a prevalidated present dense element after the caller has fired
+    /// the appropriate GC barrier. Only isolated quick paths that already proved
+    /// exclusive access, bounds, and a hole-free dense store may use this.
+    pub inline fn replaceDenseElementExclusivePresentAfterBarrier(self: *Object, i: usize, v: Value) void {
+        std.debug.assert(i < self.elements.items.len);
+        std.debug.assert(self.holes == null);
+        self.elements.items[i] = v;
+    }
+
     pub fn growDenseElement(self: *Object, arena: std.mem.Allocator, i: usize, v: Value) std.mem.Allocator.Error!usize {
         self.lockElements();
         defer self.unlockElements();
