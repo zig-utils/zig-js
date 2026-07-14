@@ -16,12 +16,12 @@ const js = @import("js");
 
 const workload_source = @embedFile("comparison.js");
 const invocation = "__benchmarkSelected(__benchmarkJobs, __benchmarkLane)";
-// Independent workers need a process-wide thread-safe allocator. libc malloc
-// keeps reusable slabs between short-lived contexts instead of translating
-// every arena/GC backing allocation into page-level mmap/munmap churn; this is
-// the representative embedder configuration and matches JSC's use of a cached
-// production allocator inside the same long-lived runner process.
-const independent_context_allocator = std.heap.c_allocator;
+// Every measured context uses the same process-wide production allocator.
+// libc malloc keeps reusable slabs between contexts instead of translating
+// arena/GC backing allocations into page-level mmap/munmap churn, is safe for
+// independent workers, and matches JSC's cached process allocator more closely
+// than mixing the runner allocator into the direct and shared rows.
+const benchmark_context_allocator = std.heap.c_allocator;
 
 const shared_harness =
     \\globalThis.__benchmarkRunShared = function(jobs, lanes) {
@@ -122,7 +122,7 @@ fn runSingle(
 }
 
 fn steadyLaneMain(lane: *SteadyLane) void {
-    const ctx = js.Context.createWith(independent_context_allocator, .{ .enable_gc = true }) catch {
+    const ctx = js.Context.createWith(benchmark_context_allocator, .{ .enable_gc = true }) catch {
         lane.failed.store(true, .release);
         lane.ready.post(lane.io);
         return;
@@ -208,7 +208,7 @@ fn runIndependentSteady(
 }
 
 fn coldLaneMain(lane: *ColdLane) void {
-    const ctx = js.Context.createWith(independent_context_allocator, .{ .enable_gc = true }) catch {
+    const ctx = js.Context.createWith(benchmark_context_allocator, .{ .enable_gc = true }) catch {
         lane.failed.store(true, .release);
         return;
     };
@@ -312,10 +312,10 @@ pub fn main(init: std.process.Init) !void {
     var stdout_writer = std.Io.File.stdout().writer(init.io, &stdout_buffer);
     const stdout = &stdout_writer.interface;
     switch (mode) {
-        .single => try runSingle(init.gpa, init.io, stdout, workload, jobs, samples),
+        .single => try runSingle(benchmark_context_allocator, init.io, stdout, workload, jobs, samples),
         .independent_steady => try runIndependentSteady(init.gpa, init.io, stdout, workload, jobs, samples, lanes),
         .independent_cold => try runIndependentCold(init.gpa, init.io, stdout, workload, jobs, samples, lanes),
-        .shared => try runShared(init.gpa, init.io, stdout, workload, jobs, samples, lanes),
+        .shared => try runShared(benchmark_context_allocator, init.io, stdout, workload, jobs, samples, lanes),
     }
     try stdout.flush();
 }
