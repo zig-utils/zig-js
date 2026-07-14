@@ -24,6 +24,28 @@ pub fn compile(chunk: *const Chunk) !jit.CompiledCode {
     return compileNumeric(chunk);
 }
 
+/// Allocation-free entry filter for eager tiering. A false result guarantees
+/// that numeric analysis would reject on opcode/size grounds; a true result is
+/// only a candidate and still receives the full type/range analysis in
+/// `compile`. This keeps cold first calls fast without paying compiler setup
+/// for object, property, call, or closure-heavy functions.
+pub fn isCandidate(chunk: *const Chunk) bool {
+    if (constantResult(chunk) != null) return true;
+    if (chunk.code.items.len == 0 or chunk.code.items.len > max_code_len or
+        chunk.local_count > max_slots or chunk.param_count > chunk.local_count)
+        return false;
+    for (chunk.code.items) |inst| switch (inst.op) {
+        .load_const, .load_undefined, .load_null, .load_true, .load_false,
+        .pop, .load_local, .store_local,
+        .add, .sub, .mul, .div, .mod,
+        .lt, .le, .gt, .ge, .eq, .neq, .eq_strict, .neq_strict,
+        .jump, .jump_if_false, .ret, .ret_undef,
+        => {},
+        else => return false,
+    };
+    return true;
+}
+
 const ConstantSelection = struct { bits: u64, steps: u32 };
 
 fn constantResult(chunk: *const Chunk) ?ConstantSelection {

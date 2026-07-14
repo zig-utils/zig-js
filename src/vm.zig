@@ -34,6 +34,7 @@ const EvalError = interp.EvalError;
 
 const async_gen_request_reserve_granularity: usize = 16;
 const native_tier_entry_threshold: u32 = 3;
+const eager_native_tier_entry_threshold: u32 = 1;
 const inline_call_depth_limit: u8 = 32;
 
 fn bindThisForCall(vm: *Interpreter, func: *Function, this_val: Value) EvalError!Value {
@@ -2030,7 +2031,15 @@ fn tryRunNative(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, ge
     const owner = vm.jit_owner orelse return null;
 
     var code = chunk.tier.loadCode();
-    if (code == null and chunk.tier.observeEntry(native_tier_entry_threshold)) {
+    // Candidate numeric chunks compile on their first call: a substantial loop
+    // repays the baseline compiler cost immediately, and cold contexts have no
+    // second call. Object/call-heavy chunks retain the ordinary hot threshold
+    // so their first invocation does not pay analysis for a known opcode miss.
+    const tier_threshold = if (jit_compiler.isCandidate(chunk))
+        eager_native_tier_entry_threshold
+    else
+        native_tier_entry_threshold;
+    if (code == null and chunk.tier.observeEntry(tier_threshold)) {
         var compiled = jit_compiler.compile(chunk) catch {
             chunk.tier.publishRejected();
             return null;
