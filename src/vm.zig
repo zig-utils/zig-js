@@ -2529,6 +2529,7 @@ fn tryQuickObjectAllocationLoop(
     const first_transition = chunk.ics[allocation.literal_instructions[0]].lookupLiteralTransitionMode(vm.root_shape, false) orelse return null;
     const second_transition = chunk.ics[allocation.literal_instructions[1]].lookupLiteralTransitionMode(first_transition.shape, false) orelse return null;
     const third_transition = chunk.ics[allocation.literal_instructions[2]].lookupLiteralTransitionMode(second_transition.shape, false) orelse return null;
+    const literal_shape = value.Object.prepareInlineLiteralShape(vm.root_shape, third_transition.shape, 3) orelse return null;
 
     const steps_per_iteration: u64 = 61;
     const max_iterations = (max_extra_steps + 1) / steps_per_iteration;
@@ -2561,7 +2562,7 @@ fn tryQuickObjectAllocationLoop(
             return err;
         };
         const fresh = fresh_value.asObj();
-        if (!fresh.initializeInlineLiteralShape(vm.root_shape, third_transition.shape, &.{
+        if (!fresh.initializePreparedInlineLiteralShape(literal_shape, &.{
             Value.num(next),
             Value.num(stamp),
             Value.num(previous),

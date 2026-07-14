@@ -629,6 +629,11 @@ pub const ObjectPrivateDataTag = enum(u8) {
     jsthread_release_state,
 };
 
+pub const PreparedInlineLiteralShape = struct {
+    final_shape: *Shape,
+    slot_count: u8,
+};
+
 /// A JavaScript object. v1 keeps this deliberately small: a string-keyed
 /// property map, an optional dense array part, and three flavors of callable:
 /// a JS-defined function (`js_func`, type-erased `*Function` to avoid an
@@ -637,6 +642,8 @@ pub const ObjectPrivateDataTag = enum(u8) {
 /// the owning Context's arena; in GC mode, migrated backing stores record their
 /// allocator so object finalization can reclaim them before Context teardown.
 pub const Object = struct {
+    pub const inline_slot_capacity: usize = 4;
+
     /// Non-null when this object's lazily-allocated backing stores have moved
     /// out of the arena for GC-mode reclamation. Individual flags below record
     /// which stores actually use this allocator, so mixed legacy/GC state is
@@ -668,7 +675,7 @@ pub const Object = struct {
     /// Most ordinary objects never grow beyond a handful of named properties.
     /// Keep those values in the GC cell itself so object literals avoid a
     /// second allocator round trip; `slots.items` points here until growth.
-    inline_slots: [4]Value = undefined,
+    inline_slots: [inline_slot_capacity]Value = undefined,
     /// Prototype link ([[Prototype]]): property lookup walks this chain. An
     /// instance's proto is its constructor's `.prototype`; a class's `.prototype`
     /// protos to its superclass's `.prototype`.
@@ -991,50 +998,61 @@ pub const Object = struct {
         self.slots = .{ .items = self.inline_slots[0..0], .capacity = self.inline_slots.len };
     }
 
-    /// Initialize an exclusively-owned fresh object at an already-warmed
-    /// fixed shape without replaying each generic property transition. The
-    /// complete root-to-final chain is validated before any field is changed;
-    /// callers can therefore fall back safely when a cached shape is stale or
-    /// does not describe a compact ordinary literal. Values stay in the cell's
-    /// inline storage and retain the normal owner-aware insertion barriers.
-    pub inline fn initializeInlineLiteralShape(
-        self: *Object,
+    /// Validate an immutable root-to-final shape chain once before a hot
+    /// allocation site publishes it repeatedly. The prepared descriptor is
+    /// valid for the lifetime of the owning Context because Shapes never
+    /// mutate their parent/name/slot metadata after publication.
+    pub fn prepareInlineLiteralShape(
         root: *Shape,
         final_shape: *Shape,
-        values: []const Value,
-    ) bool {
-        if (values.len == 0 or values.len > self.inline_slots.len or
-            self.shape != null or self.slots.items.len != 0 or !self.slotsAreInline() or
-            self.backing_flags.slots or self.accessors.load(.monotonic) != null or
-            self.key_order.load(.monotonic) != null or self.attrs != null or !self.isExtensible())
-            return false;
+        slot_count: usize,
+    ) ?PreparedInlineLiteralShape {
+        if (slot_count == 0 or slot_count > inline_slot_capacity)
+            return null;
 
-        var chain: [4]*Shape = undefined;
+        var chain: [inline_slot_capacity]*Shape = undefined;
         var cursor: ?*Shape = final_shape;
-        var remaining = values.len;
+        var remaining = slot_count;
         while (remaining > 0) {
-            const child = cursor orelse return false;
-            const name = child.name orelse return false;
+            const child = cursor orelse return null;
+            const name = child.name orelse return null;
             const index = remaining - 1;
             if (child.slot != index or child.count != remaining or canonicalIndex(name) != null)
-                return false;
+                return null;
             chain[index] = child;
             cursor = child.parent;
             remaining = index;
         }
-        if (cursor != root) return false;
-        for (chain[0..values.len], 0..) |child, left| {
+        if (cursor != root) return null;
+        for (chain[0..slot_count], 0..) |child, left| {
             const name = child.name.?;
-            for (chain[left + 1 .. values.len]) |other|
-                if (std.mem.eql(u8, name, other.name.?)) return false;
+            for (chain[left + 1 .. slot_count]) |other|
+                if (std.mem.eql(u8, name, other.name.?)) return null;
         }
+        return .{ .final_shape = final_shape, .slot_count = @intCast(slot_count) };
+    }
+
+    /// Initialize an exclusively-owned fresh object using a descriptor prepared
+    /// by `prepareInlineLiteralShape`, without replaying generic property
+    /// transitions or re-walking immutable shape metadata. Values stay in the
+    /// cell's inline storage and retain owner-aware insertion barriers.
+    pub inline fn initializePreparedInlineLiteralShape(
+        self: *Object,
+        prepared: PreparedInlineLiteralShape,
+        values: []const Value,
+    ) bool {
+        if (values.len != prepared.slot_count or
+            self.shape != null or self.slots.items.len != 0 or !self.slotsAreInline() or
+            self.backing_flags.slots or self.accessors.load(.monotonic) != null or
+            self.key_order.load(.monotonic) != null or self.attrs != null or !self.isExtensible())
+            return false;
 
         for (values, 0..) |value_, index| {
             gcBarrier(self, value_);
             self.inline_slots[index] = value_;
         }
         self.slots.items = self.inline_slots[0..values.len];
-        self.shape = final_shape;
+        self.shape = prepared.final_shape;
         return true;
     }
 
@@ -2904,22 +2922,51 @@ test "fixed-shape object allocation publishes validated literal shape into inlin
     var object = Object{};
     object.initInlineSlots();
     const values = [_]Value{ Value.num(11), Value.obj(&referenced), Value.num(33) };
-    try std.testing.expect(object.initializeInlineLiteralShape(root, final_shape, &values));
+    const prepared = Object.prepareInlineLiteralShape(root, final_shape, values.len) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(object.initializePreparedInlineLiteralShape(prepared, &values));
     try std.testing.expectEqual(final_shape, object.shape.?);
     try std.testing.expect(object.slotsAreInline());
     try std.testing.expectEqualSlices(Value, &values, object.slots.items);
 
+    try std.testing.expect(Object.prepareInlineLiteralShape(root, final_shape, 2) == null);
+    const other_root = try Shape.createRoot(arena.allocator());
+    try std.testing.expect(Object.prepareInlineLiteralShape(other_root, final_shape, values.len) == null);
+    const duplicate = try first.transition("alpha");
+    try std.testing.expect(Object.prepareInlineLiteralShape(root, duplicate, 2) == null);
+    var wrong_count = Object{};
+    wrong_count.initInlineSlots();
+    try std.testing.expect(!wrong_count.initializePreparedInlineLiteralShape(prepared, values[0..2]));
+
     var occupied = Object{};
     occupied.initInlineSlots();
     try occupied.setOwn(arena.allocator(), root, "existing", Value.num(1));
-    try std.testing.expect(!occupied.initializeInlineLiteralShape(root, final_shape, &values));
+    try std.testing.expect(!occupied.initializePreparedInlineLiteralShape(prepared, &values));
     try std.testing.expectEqual(@as(usize, 1), occupied.slots.items.len);
 
     const indexed_shape = try root.transition("0");
-    var indexed = Object{};
-    indexed.initInlineSlots();
-    try std.testing.expect(!indexed.initializeInlineLiteralShape(root, indexed_shape, &.{Value.num(1)}));
-    try std.testing.expectEqual(@as(usize, 0), indexed.slots.items.len);
+    try std.testing.expect(Object.prepareInlineLiteralShape(root, indexed_shape, 1) == null);
+
+    var accessor_map: std.StringHashMapUnmanaged(Accessor) = .empty;
+    var accessored = Object{};
+    accessored.initInlineSlots();
+    accessored.accessors.store(&accessor_map, .monotonic);
+    try std.testing.expect(!accessored.initializePreparedInlineLiteralShape(prepared, &values));
+
+    var attrs_map: std.StringHashMapUnmanaged(PropAttr) = .empty;
+    var attributed = Object{ .attrs = &attrs_map };
+    attributed.initInlineSlots();
+    try std.testing.expect(!attributed.initializePreparedInlineLiteralShape(prepared, &values));
+
+    var key_order: std.ArrayListUnmanaged([]const u8) = .empty;
+    var ordered = Object{};
+    ordered.initInlineSlots();
+    ordered.key_order.store(&key_order, .monotonic);
+    try std.testing.expect(!ordered.initializePreparedInlineLiteralShape(prepared, &values));
+
+    var sealed = Object{};
+    sealed.initInlineSlots();
+    sealed.setExtensible(false);
+    try std.testing.expect(!sealed.initializePreparedInlineLiteralShape(prepared, &values));
 }
 
 test "object named property delete rebuild serializes with writers" {
