@@ -80,6 +80,24 @@ function benchmarkMethodCalls(jobs, lane) {
   return total;
 }
 
+function benchmarkClosureCalls(jobs, lane) {
+  var total = 0;
+  for (var job = 0; job < jobs; job = job + 1) {
+    var seed = lane + job + 1;
+    for (var i = 0; i < 10000; i = i + 1) {
+      // Fresh identity and a live by-reference capture on every iteration.
+      // Calling immediately keeps the kernel focused without retaining an
+      // unbounded closure graph after the job completes.
+      var closure = function (delta) {
+        return (seed + delta) % 1000003;
+      };
+      seed = closure(i);
+    }
+    total = total + seed;
+  }
+  return total;
+}
+
 var benchmarkFibValue = function benchmarkFibValue(n, state) {
   // Keep each call observable so this row continues measuring recursive call
   // throughput even when an engine can recognize and memoize the pure
@@ -103,6 +121,7 @@ function benchmarkFunction(name) {
   if (name === "arrays") return benchmarkArrays;
   if (name === "direct_calls") return benchmarkDirectCalls;
   if (name === "method_calls") return benchmarkMethodCalls;
+  if (name === "closure_calls") return benchmarkClosureCalls;
   if (name === "fibonacci") return benchmarkFibonacci;
   throw new Error("unknown benchmark workload: " + name);
 }
