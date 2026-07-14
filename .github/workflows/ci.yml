@@ -358,5 +358,5 @@ jobs:
       - name: docs:build
         working-directory: zig-js
         run: |
-          bun install
+          bun install --frozen-lockfile
           bun run docs:build
