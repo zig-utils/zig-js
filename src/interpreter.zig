@@ -29761,6 +29761,7 @@ fn installTypedArrays(env: *Environment, rs: *Shape) EvalError!void {
     try installURLSearchParams(env, rs, object_proto);
     try installURL(env, rs, object_proto);
     try installEventTarget(env, rs, object_proto);
+    try installAbort(env, rs, object_proto);
     try installTemporal(env, rs, object_proto);
     try installIntl(env, rs, object_proto);
     // ShadowRealm: a child realm with `evaluate` (and a minimal `importValue`).
@@ -39943,31 +39944,23 @@ fn etAddListenerFn(ctx: *anyopaque, this: Value, args: []const Value) value.Host
     try rec.setOwn(self.arena, self.root_shape, "\x00Lcap", Value.boolVal(capture));
     try rec.setOwn(self.arena, self.root_shape, "\x00Lonce", Value.boolVal(once));
     try list.appendElement(self.arena, Value.obj(rec));
-    // When a live signal is supplied, aborting it removes this listener.
-    if (signal.isObject()) {
-        const remover = try gc_mod.allocObj(self.arena);
-        remover.* = .{ .native = etSignalRemoveFn };
-        try remover.setOwn(self.arena, self.root_shape, "\x00SRtgt", this);
-        try remover.setOwn(self.arena, self.root_shape, "\x00SRrec", Value.obj(rec));
-        try installNativeProps(self.arena, self.root_shape, remover, "", 1);
-        _ = self.callValueWithThis(try self.getProperty(signal, "addEventListener"), &.{ Value.str("abort"), Value.obj(remover), makeOnceOpts(self) catch Value.undef() }, signal) catch {};
+    // When a live AbortSignal is supplied, aborting it removes this listener.
+    // Recorded on the signal's removal list and processed by signalAbort (a
+    // JS-listener would receive the signal as `this`, losing the target/record).
+    if (abortIsSignal(signal)) {
+        const so = signal.asObj();
+        const removals: *value.Object = blk: {
+            if (so.getOwn("\x00ASremovals")) |d| if (d.isObject()) break :blk d.asObj();
+            const arr = (try self.newArray()).asObj();
+            try so.setOwn(self.arena, self.root_shape, "\x00ASremovals", Value.obj(arr));
+            break :blk arr;
+        };
+        const entry = try gc_mod.allocObj(self.arena);
+        entry.* = .{};
+        try entry.setOwn(self.arena, self.root_shape, "\x00SRtgt", this);
+        try entry.setOwn(self.arena, self.root_shape, "\x00SRrec", Value.obj(rec));
+        try removals.appendElement(self.arena, Value.obj(entry));
     }
-    return Value.undef();
-}
-fn makeOnceOpts(self: *Interpreter) EvalError!Value {
-    const o = try gc_mod.allocObj(self.arena);
-    o.* = .{};
-    try o.setOwn(self.arena, self.root_shape, "once", Value.boolVal(true));
-    return Value.obj(o);
-}
-fn etSignalRemoveFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
-    _ = args;
-    const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject()) return Value.undef();
-    const tgt = this.asObj().getOwn("\x00SRtgt") orelse return Value.undef();
-    const rec = this.asObj().getOwn("\x00SRrec") orelse return Value.undef();
-    if (!tgt.isObject() or !rec.isObject()) return Value.undef();
-    try etRemoveRecord(self, tgt.asObj(), rec.asObj());
     return Value.undef();
 }
 fn etRemoveRecord(self: *Interpreter, target: *value.Object, rec: *value.Object) EvalError!void {
@@ -40119,6 +40112,253 @@ fn installEventTarget(env: *Environment, rs: *Shape, object_proto: *value.Object
     try et_ctor.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
     try setConstructor(a, rs, et_proto, et_ctor);
     try env.put("EventTarget", Value.obj(et_ctor));
+}
+
+// ===== AbortController / AbortSignal =================================
+// An AbortSignal is an EventTarget subclass with hidden slots \x00ASsig (brand),
+// \x00ASaborted, \x00ASreason, \x00onabort (event-handler IDL attribute). An
+// AbortController holds its signal in \x00ACsig.
+fn abortIsSignal(v: Value) bool {
+    return v.isObject() and v.asObj().getOwn("\x00ASsig") != null;
+}
+fn makeAbortSignal(self: *Interpreter) EvalError!*value.Object {
+    const sig = try gc_mod.allocObj(self.arena);
+    sig.* = .{};
+    if (self.env.get("AbortSignal")) |c| if (c.isObject()) {
+        if (c.asObj().getOwn("prototype")) |pp| if (pp.isObject()) sig.setProtoAtomic(pp.asObj());
+    };
+    const rs = self.root_shape;
+    try sig.setOwn(self.arena, rs, "\x00ASsig", Value.boolVal(true));
+    try sig.setOwn(self.arena, rs, "\x00ASaborted", Value.boolVal(false));
+    try sig.setOwn(self.arena, rs, "\x00ASreason", Value.undef());
+    return sig;
+}
+fn dispatchNamedEvent(self: *Interpreter, target: *value.Object, name: []const u8) EvalError!void {
+    const ev = try gc_mod.allocObj(self.arena);
+    ev.* = .{};
+    if (self.env.get("Event")) |c| if (c.isObject()) {
+        if (c.asObj().getOwn("prototype")) |pp| if (pp.isObject()) ev.setProtoAtomic(pp.asObj());
+    };
+    const rs = self.root_shape;
+    try ev.setOwn(self.arena, rs, "\x00Et", try Value.strAlloc(self.arena, name));
+    try ev.setOwn(self.arena, rs, "\x00Eb", Value.boolVal(false));
+    try ev.setOwn(self.arena, rs, "\x00Ec", Value.boolVal(false));
+    try ev.setOwn(self.arena, rs, "\x00Eo", Value.boolVal(false));
+    try ev.setOwn(self.arena, rs, "\x00Ed", Value.boolVal(false));
+    try ev.setOwn(self.arena, rs, "\x00Etg", Value.nul());
+    try ev.setOwn(self.arena, rs, "\x00Ect", Value.nul());
+    try ev.setOwn(self.arena, rs, "\x00Ets", Value.num(0));
+    _ = try etDispatchFn(self, Value.obj(target), &.{Value.obj(ev)});
+}
+fn signalAbort(self: *Interpreter, sig: *value.Object, reason: Value) EvalError!void {
+    if (evBool(sig, "\x00ASaborted")) return;
+    const r = if (reason.isUndefined()) try self.makeDOMException("AbortError", "This operation was aborted") else reason;
+    try sig.setOwn(self.arena, self.root_shape, "\x00ASreason", r);
+    try sig.setOwn(self.arena, self.root_shape, "\x00ASaborted", Value.boolVal(true));
+    // Remove listeners that were added with this signal (addEventListener signal
+    // option) before firing, so they do not run for the abort event.
+    if (sig.getOwn("\x00ASremovals")) |rv| if (rv.isObject()) {
+        for (try rv.asObj().internalElementsSnapshot(self.arena)) |e| {
+            if (!e.isObject()) continue;
+            const tgt = e.asObj().getOwn("\x00SRtgt") orelse continue;
+            const rec = e.asObj().getOwn("\x00SRrec") orelse continue;
+            if (tgt.isObject() and rec.isObject()) try etRemoveRecord(self, tgt.asObj(), rec.asObj());
+        }
+    };
+    try dispatchNamedEvent(self, sig, "abort");
+    // Propagate to signals that depend on this one (AbortSignal.any sources),
+    // each aborting with this signal's reason.
+    if (sig.getOwn("\x00ASdeps")) |dv| if (dv.isObject()) {
+        for (try dv.asObj().internalElementsSnapshot(self.arena)) |dep| {
+            if (dep.isObject()) try signalAbort(self, dep.asObj(), r);
+        }
+    };
+}
+fn abortSignalGetter(comptime which: []const u8) value.NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+            _ = args;
+            const self: *Interpreter = @ptrCast(@alignCast(ctx));
+            if (!abortIsSignal(this)) return self.throwError("TypeError", "Illegal invocation");
+            const o = this.asObj();
+            if (comptime std.mem.eql(u8, which, "aborted")) return Value.boolVal(evBool(o, "\x00ASaborted"));
+            if (comptime std.mem.eql(u8, which, "reason")) return o.getOwn("\x00ASreason") orelse Value.undef();
+            if (comptime std.mem.eql(u8, which, "onabort")) return o.getOwn("\x00onabort") orelse Value.nul();
+            return Value.undef();
+        }
+    }.call;
+}
+fn abortThrowIfAbortedFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!abortIsSignal(this)) return self.throwError("TypeError", "Illegal invocation");
+    if (evBool(this.asObj(), "\x00ASaborted")) {
+        self.exception = this.asObj().getOwn("\x00ASreason") orelse Value.undef();
+        return error.Throw;
+    }
+    return Value.undef();
+}
+fn abortOnabortDispatchFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    // Internal "abort" listener that forwards to the current onabort handler.
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!this.isObject()) return Value.undef();
+    const h = this.asObj().getOwn("\x00onabort") orelse return Value.undef();
+    if (!h.isObject() or !h.asObj().isCallableObject()) return Value.undef();
+    _ = try self.callValueWithThis(h, &.{if (args.len > 0) args[0] else Value.undef()}, this);
+    return Value.undef();
+}
+fn abortOnabortSetFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!abortIsSignal(this)) return self.throwError("TypeError", "Illegal invocation");
+    const o = this.asObj();
+    const v = if (args.len > 0) args[0] else Value.undef();
+    try o.setOwn(self.arena, self.root_shape, "\x00onabort", v);
+    // Register the internal forwarding listener once, at first assignment, so it
+    // occupies the correct position relative to addEventListener listeners.
+    if (!evBool(o, "\x00ASob")) {
+        try o.setOwn(self.arena, self.root_shape, "\x00ASob", Value.boolVal(true));
+        const lst = try gc_mod.allocObj(self.arena);
+        lst.* = .{ .native = abortOnabortDispatchFn };
+        // The forwarding listener reads the handler off the signal via `this`.
+        _ = try etAddListenerFn(self, this, &.{ Value.str("abort"), Value.obj(lst) });
+        // Rewire the record's callback `this` binding: the internal listener must
+        // run with the signal as `this`; etDispatch already passes the target as
+        // `this` for function listeners, so no extra wiring is needed.
+    }
+    return Value.undef();
+}
+fn abortSignalConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    return self.throwError("TypeError", "Illegal constructor.");
+}
+fn abortSignalStaticAbortFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const sig = try makeAbortSignal(self);
+    try signalAbort(self, sig, if (args.len > 0) args[0] else Value.undef());
+    return Value.obj(sig);
+}
+fn abortSignalStaticAnyFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const res = try makeAbortSignal(self);
+    const sources = try collectIterable(self, if (args.len > 0) args[0] else Value.undef());
+    for (sources) |src| {
+        if (!abortIsSignal(src)) return self.throwError("TypeError", "AbortSignal.any expects AbortSignal instances");
+        if (evBool(src.asObj(), "\x00ASaborted")) {
+            try signalAbort(self, res, src.asObj().getOwn("\x00ASreason") orelse Value.undef());
+            return Value.obj(res);
+        }
+    }
+    // Register `res` as a dependent of each source: aborting any source aborts
+    // `res` with that source's reason (see signalAbort propagation).
+    for (sources) |src| {
+        const so = src.asObj();
+        const deps: *value.Object = blk: {
+            if (so.getOwn("\x00ASdeps")) |d| if (d.isObject()) break :blk d.asObj();
+            const arr = (try self.newArray()).asObj();
+            try so.setOwn(self.arena, self.root_shape, "\x00ASdeps", Value.obj(arr));
+            break :blk arr;
+        };
+        try deps.appendElement(self.arena, Value.obj(res));
+    }
+    return Value.obj(res);
+}
+fn abortControllerConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (self.new_target.isUndefined()) return self.throwError("TypeError", "Failed to construct 'AbortController': Please use the 'new' operator");
+    const obj = try gc_mod.allocObj(self.arena);
+    obj.* = .{};
+    if (self.env.get("AbortController")) |c| if (c.isObject()) {
+        if (c.asObj().getOwn("prototype")) |pp| if (pp.isObject()) obj.setProtoAtomic(pp.asObj());
+    };
+    const sig = try makeAbortSignal(self);
+    try obj.setOwn(self.arena, self.root_shape, "\x00ACsig", Value.obj(sig));
+    return Value.obj(obj);
+}
+fn abortControllerSignalGet(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!this.isObject()) return self.throwError("TypeError", "Illegal invocation");
+    return this.asObj().getOwn("\x00ACsig") orelse Value.undef();
+}
+fn abortControllerAbortFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!this.isObject()) return self.throwError("TypeError", "Illegal invocation");
+    const sigv = this.asObj().getOwn("\x00ACsig") orelse return Value.undef();
+    if (sigv.isObject()) try signalAbort(self, sigv.asObj(), if (args.len > 0) args[0] else Value.undef());
+    return Value.undef();
+}
+fn installAbort(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalError!void {
+    const a = env.arena;
+    const symKey = struct {
+        fn f(e: *Environment, name: []const u8) ?[]const u8 {
+            if (e.get("Symbol")) |s| if (s.isObject()) {
+                if (s.asObj().getOwn(name)) |t| if (t.isObject() and t.asObj().is_symbol) return t.asObj().sym_key;
+            };
+            return null;
+        }
+    }.f;
+    // AbortSignal.prototype chains to EventTarget.prototype.
+    const et_proto: *value.Object = blk: {
+        if (env.get("EventTarget")) |c| if (c.isObject()) {
+            if (c.asObj().getOwn("prototype")) |pp| if (pp.isObject()) break :blk pp.asObj();
+        };
+        break :blk object_proto;
+    };
+    const sig_proto = try gc_mod.allocObj(a);
+    sig_proto.* = .{ .proto = et_proto };
+    inline for (.{ "aborted", "reason" }) |g| {
+        try setNativeGetter(a, rs, sig_proto, g, abortSignalGetter(g));
+        try sig_proto.setAttr(a, g, .{ .enumerable = true, .configurable = true });
+    }
+    // onabort is a read/write event-handler attribute.
+    {
+        const getter = try gc_mod.allocObj(a);
+        getter.* = .{ .native = abortSignalGetter("onabort") };
+        try installNativeProps(a, rs, getter, "get onabort", 0);
+        const setter = try gc_mod.allocObj(a);
+        setter.* = .{ .native = abortOnabortSetFn };
+        try installNativeProps(a, rs, setter, "set onabort", 1);
+        try sig_proto.setAccessor(a, "onabort", Value.obj(getter), Value.obj(setter));
+        try sig_proto.setAttr(a, "onabort", .{ .enumerable = true, .configurable = true });
+    }
+    try setNative(a, rs, sig_proto, "throwIfAborted", 0, abortThrowIfAbortedFn);
+    if (symKey(env, "toStringTag")) |k| {
+        try sig_proto.setOwn(a, rs, k, Value.str("AbortSignal"));
+        try sig_proto.setAttr(a, k, .{ .writable = false, .enumerable = false, .configurable = true });
+    }
+    const sig_ctor = try gc_mod.allocObj(a);
+    sig_ctor.* = .{ .native = abortSignalConstructorFn, .native_ctor = true };
+    try installNativeProps(a, rs, sig_ctor, "AbortSignal", 0);
+    try sig_ctor.setOwn(a, rs, "prototype", Value.obj(sig_proto));
+    try sig_ctor.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
+    try setConstructor(a, rs, sig_proto, sig_ctor);
+    try setNative(a, rs, sig_ctor, "abort", 1, abortSignalStaticAbortFn);
+    try setNative(a, rs, sig_ctor, "any", 1, abortSignalStaticAnyFn);
+    try env.put("AbortSignal", Value.obj(sig_ctor));
+
+    // AbortController.
+    const ac_proto = try gc_mod.allocObj(a);
+    ac_proto.* = .{ .proto = object_proto };
+    try setNativeGetter(a, rs, ac_proto, "signal", abortControllerSignalGet);
+    try ac_proto.setAttr(a, "signal", .{ .enumerable = true, .configurable = true });
+    try setNative(a, rs, ac_proto, "abort", 0, abortControllerAbortFn);
+    if (symKey(env, "toStringTag")) |k| {
+        try ac_proto.setOwn(a, rs, k, Value.str("AbortController"));
+        try ac_proto.setAttr(a, k, .{ .writable = false, .enumerable = false, .configurable = true });
+    }
+    const ac_ctor = try gc_mod.allocObj(a);
+    ac_ctor.* = .{ .native = abortControllerConstructorFn, .native_ctor = true };
+    try installNativeProps(a, rs, ac_ctor, "AbortController", 0);
+    try ac_ctor.setOwn(a, rs, "prototype", Value.obj(ac_proto));
+    try ac_ctor.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
+    try setConstructor(a, rs, ac_proto, ac_ctor);
+    try env.put("AbortController", Value.obj(ac_ctor));
 }
 
 fn installURL(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalError!void {
