@@ -16,6 +16,12 @@ const js = @import("js");
 
 const workload_source = @embedFile("comparison.js");
 const invocation = "__benchmarkSelected(__benchmarkJobs, __benchmarkLane)";
+// Independent workers need a process-wide thread-safe allocator. libc malloc
+// keeps reusable slabs between short-lived contexts instead of translating
+// every arena/GC backing allocation into page-level mmap/munmap churn; this is
+// the representative embedder configuration and matches JSC's use of a cached
+// production allocator inside the same long-lived runner process.
+const independent_context_allocator = std.heap.c_allocator;
 
 const shared_harness =
     \\globalThis.__benchmarkRunShared = function(jobs, lanes) {
@@ -116,7 +122,7 @@ fn runSingle(
 }
 
 fn steadyLaneMain(lane: *SteadyLane) void {
-    const ctx = js.Context.createWith(std.heap.page_allocator, .{ .enable_gc = true }) catch {
+    const ctx = js.Context.createWith(independent_context_allocator, .{ .enable_gc = true }) catch {
         lane.failed.store(true, .release);
         lane.ready.post(lane.io);
         return;
@@ -202,7 +208,7 @@ fn runIndependentSteady(
 }
 
 fn coldLaneMain(lane: *ColdLane) void {
-    const ctx = js.Context.createWith(std.heap.page_allocator, .{ .enable_gc = true }) catch {
+    const ctx = js.Context.createWith(independent_context_allocator, .{ .enable_gc = true }) catch {
         lane.failed.store(true, .release);
         return;
     };

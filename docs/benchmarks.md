@@ -62,6 +62,15 @@ The first three modes are cross-engine comparisons. JSC's public API does not ex
 
 The runners are separate executables. That prevents zig-js's JavaScriptCore-shaped C exports from interposing on the real framework symbols.
 
+The zig-js runner gives every independent worker context the process-wide,
+thread-safe libc allocator. This is the representative embedding setup: libc
+reuses freed slabs across short-lived contexts instead of forcing each arena and
+GC backing allocation through page-level `mmap`/`munmap`. The allocator process
+exists for the whole runner, just as JSC's internal cached allocator does. Cold
+mode still times every context-owned allocation and release; only reusable
+allocator infrastructure is process-scoped. Direct-single and shared modes use
+the runner allocator because they create one context on the main thread.
+
 For every result group:
 
 1. Build the runners in `ReleaseFast`.

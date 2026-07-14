@@ -294,6 +294,7 @@ pub fn build(b: *std.Build) void {
                 .root_source_file = b.path("bench/comparison_zig_js.zig"),
                 .target = target,
                 .optimize = .ReleaseFast,
+                .link_libc = true,
                 .imports = &.{.{ .name = "js", .module = bench_js_mod }},
             }),
         });
