@@ -29748,6 +29748,7 @@ fn installTypedArrays(env: *Environment, rs: *Shape) EvalError!void {
     try installTextEncoder(env, rs, object_proto);
     try installTextDecoder(env, rs, object_proto);
     try installCrypto(env, rs, object_proto);
+    try installURLSearchParams(env, rs, object_proto);
     try installTemporal(env, rs, object_proto);
     try installIntl(env, rs, object_proto);
     // ShadowRealm: a child realm with `evaluate` (and a minimal `importValue`).
@@ -39188,6 +39189,304 @@ fn installTextDecoder(env: *Environment, rs: *Shape, object_proto: *value.Object
     try ctor.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
     try setConstructor(a, rs, proto, ctor);
     try env.put("TextDecoder", Value.obj(ctor));
+}
+
+// ===== URLSearchParams (form-urlencoded) =============================
+/// application/x-www-form-urlencoded byte: unreserved bytes pass through, space
+/// becomes '+', everything else is percent-encoded (uppercase hex).
+fn formUrlEncode(self: *Interpreter, s: []const u8) EvalError![]const u8 {
+    const utf8 = try wtf8ToUtf8Bytes(self, s);
+    const hex = "0123456789ABCDEF";
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    for (utf8) |b| {
+        if (b == ' ') {
+            try out.append(self.arena, '+');
+        } else if ((b >= 'A' and b <= 'Z') or (b >= 'a' and b <= 'z') or (b >= '0' and b <= '9') or b == '*' or b == '-' or b == '.' or b == '_') {
+            try out.append(self.arena, b);
+        } else {
+            try out.append(self.arena, '%');
+            try out.append(self.arena, hex[b >> 4]);
+            try out.append(self.arena, hex[b & 0x0F]);
+        }
+    }
+    return out.items;
+}
+/// application/x-www-form-urlencoded decode: '+' → space, %XX → byte, rest as-is.
+fn formUrlDecode(self: *Interpreter, s: []const u8) EvalError![]const u8 {
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    var i: usize = 0;
+    while (i < s.len) {
+        const c = s[i];
+        if (c == '+') {
+            try out.append(self.arena, ' ');
+            i += 1;
+        } else if (c == '%' and i + 2 < s.len) {
+            if (hexDigit(s[i + 1])) |hi| {
+                if (hexDigit(s[i + 2])) |lo| {
+                    try out.append(self.arena, hi * 16 + lo);
+                    i += 3;
+                    continue;
+                }
+            }
+            try out.append(self.arena, c);
+            i += 1;
+        } else {
+            try out.append(self.arena, c);
+            i += 1;
+        }
+    }
+    return out.items;
+}
+/// The mutable `[[k,v],…]` pairs array backing a URLSearchParams instance.
+fn uspPairs(self: *Interpreter, this: Value) EvalError!*value.Object {
+    if (this.isObject()) if (this.asObj().getOwn("\x00usp")) |v| if (v.isObject()) return v.asObj();
+    return (try self.newArray()).asObj();
+}
+fn uspPush(self: *Interpreter, pairs: *value.Object, k: []const u8, v: []const u8) EvalError!void {
+    const pair = (try self.newArray()).asObj();
+    try pair.appendElement(self.arena, try Value.strAlloc(self.arena, k));
+    try pair.appendElement(self.arena, try Value.strAlloc(self.arena, v));
+    try pairs.appendElement(self.arena, Value.obj(pair));
+}
+/// Parse `a=1&b=2` (leading `?` stripped) into the pairs array.
+fn uspParseString(self: *Interpreter, pairs: *value.Object, input: []const u8) EvalError!void {
+    var s = input;
+    if (s.len > 0 and s[0] == '?') s = s[1..];
+    if (s.len == 0) return;
+    var it = std.mem.splitScalar(u8, s, '&');
+    while (it.next()) |seg| {
+        if (seg.len == 0) continue;
+        const eqi = std.mem.indexOfScalar(u8, seg, '=');
+        const k = if (eqi) |e| seg[0..e] else seg;
+        const v = if (eqi) |e| seg[e + 1 ..] else "";
+        try uspPush(self, pairs, try formUrlDecode(self, k), try formUrlDecode(self, v));
+    }
+}
+fn uspPairKV(pair: Value) struct { k: []const u8, v: []const u8 } {
+    if (!pair.isObject()) return .{ .k = "", .v = "" };
+    const kv = pair.asObj();
+    const k = if (kv.elementAt(0)) |x| (if (x.isString()) x.asStr() else "") else "";
+    const v = if (kv.elementAt(1)) |x| (if (x.isString()) x.asStr() else "") else "";
+    return .{ .k = k, .v = v };
+}
+fn urlSearchParamsConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const obj = try gc_mod.allocObj(self.arena);
+    obj.* = .{};
+    if (self.env.get("URLSearchParams")) |c| if (c.isObject()) {
+        if (c.asObj().getOwn("prototype")) |p| if (p.isObject()) obj.setProtoAtomic(p.asObj());
+    };
+    const pairs = (try self.newArray()).asObj();
+    try obj.setOwn(self.arena, self.root_shape, "\x00usp", Value.obj(pairs));
+    const init = if (args.len > 0) args[0] else Value.undef();
+    if (init.isObject() and init.asObj().is_array) {
+        for (try init.asObj().internalElementsSnapshot(self.arena)) |entry| {
+            if (!entry.isObject()) return self.throwError("TypeError", "URLSearchParams init sequence entry must be a pair");
+            const k = try self.toStringV(if (entry.asObj().elementAt(0)) |x| x else Value.undef());
+            const v = try self.toStringV(if (entry.asObj().elementAt(1)) |x| x else Value.undef());
+            try uspPush(self, pairs, k, v);
+        }
+    } else if (init.isObject() and !init.asObj().is_symbol) {
+        for (try self.objectOwnKeysList(init.asObj())) |k| {
+            if (value.isSymbolKey(k) or value.isPrivateKey(k)) continue;
+            if (!objectHasOwn(init.asObj(), k) or !init.asObj().getAttr(k).enumerable) continue;
+            const v = try self.toStringV(try self.getProperty(init, k));
+            try uspPush(self, pairs, k, v);
+        }
+    } else if (!init.isUndefined()) {
+        try uspParseString(self, pairs, try self.toStringV(init));
+    }
+    return Value.obj(obj);
+}
+fn uspToString(self: *Interpreter, this: Value) EvalError![]const u8 {
+    const pairs = try uspPairs(self, this);
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    for (try pairs.internalElementsSnapshot(self.arena), 0..) |pair, idx| {
+        const kv = uspPairKV(pair);
+        if (idx != 0) try out.append(self.arena, '&');
+        try out.appendSlice(self.arena, try formUrlEncode(self, kv.k));
+        try out.append(self.arena, '=');
+        try out.appendSlice(self.arena, try formUrlEncode(self, kv.v));
+    }
+    return out.items;
+}
+fn uspGetFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const name = try self.toStringV(if (args.len > 0) args[0] else Value.undef());
+    for (try (try uspPairs(self, this)).internalElementsSnapshot(self.arena)) |pair| {
+        const kv = uspPairKV(pair);
+        if (std.mem.eql(u8, kv.k, name)) return try Value.strAlloc(self.arena, kv.v);
+    }
+    return Value.nul();
+}
+fn uspGetAllFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const name = try self.toStringV(if (args.len > 0) args[0] else Value.undef());
+    const res = (try self.newArray()).asObj();
+    for (try (try uspPairs(self, this)).internalElementsSnapshot(self.arena)) |pair| {
+        const kv = uspPairKV(pair);
+        if (std.mem.eql(u8, kv.k, name)) try res.appendElement(self.arena, try Value.strAlloc(self.arena, kv.v));
+    }
+    return Value.obj(res);
+}
+fn uspHasFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const name = try self.toStringV(if (args.len > 0) args[0] else Value.undef());
+    const check_val = args.len > 1 and !args[1].isUndefined();
+    const val = if (check_val) try self.toStringV(args[1]) else "";
+    for (try (try uspPairs(self, this)).internalElementsSnapshot(self.arena)) |pair| {
+        const kv = uspPairKV(pair);
+        if (std.mem.eql(u8, kv.k, name) and (!check_val or std.mem.eql(u8, kv.v, val))) return Value.boolVal(true);
+    }
+    return Value.boolVal(false);
+}
+fn uspAppendFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const name = try self.toStringV(if (args.len > 0) args[0] else Value.undef());
+    const val = try self.toStringV(if (args.len > 1) args[1] else Value.undef());
+    try uspPush(self, try uspPairs(self, this), name, val);
+    return Value.undef();
+}
+/// Rebuild the pairs array applying set/delete semantics.
+fn uspRebuild(self: *Interpreter, this: Value, name: []const u8, set_value: ?[]const u8, del_value: ?[]const u8) EvalError!void {
+    const old = try uspPairs(self, this);
+    const fresh = (try self.newArray()).asObj();
+    var placed = false;
+    for (try old.internalElementsSnapshot(self.arena)) |pair| {
+        const kv = uspPairKV(pair);
+        if (std.mem.eql(u8, kv.k, name)) {
+            if (set_value) |sv| {
+                if (!placed) {
+                    try uspPush(self, fresh, name, sv);
+                    placed = true;
+                }
+                continue; // drop other matches
+            }
+            if (del_value) |dv| {
+                if (std.mem.eql(u8, kv.v, dv)) continue; // drop this match
+            } else continue; // delete all matches
+        }
+        try fresh.appendElement(self.arena, pair);
+    }
+    if (set_value != null and !placed) try uspPush(self, fresh, name, set_value.?);
+    try this.asObj().setOwn(self.arena, self.root_shape, "\x00usp", Value.obj(fresh));
+}
+fn uspSetFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const name = try self.toStringV(if (args.len > 0) args[0] else Value.undef());
+    const val = try self.toStringV(if (args.len > 1) args[1] else Value.undef());
+    try uspRebuild(self, this, name, val, null);
+    return Value.undef();
+}
+fn uspDeleteFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const name = try self.toStringV(if (args.len > 0) args[0] else Value.undef());
+    const dv: ?[]const u8 = if (args.len > 1 and !args[1].isUndefined()) try self.toStringV(args[1]) else null;
+    try uspRebuild(self, this, name, null, dv);
+    return Value.undef();
+}
+fn uspSortFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const pairs = try uspPairs(self, this);
+    const items = try pairs.internalElementsSnapshot(self.arena);
+    // Stable sort by key (code-unit order — the keys are already UTF-8/code-point
+    // ordered for the common ASCII case).
+    std.mem.sort(Value, items, {}, struct {
+        fn lt(_: void, x: Value, y: Value) bool {
+            return std.mem.order(u8, uspPairKV(x).k, uspPairKV(y).k) == .lt;
+        }
+    }.lt);
+    const fresh = (try self.newArray()).asObj();
+    for (items) |p| try fresh.appendElement(self.arena, p);
+    try this.asObj().setOwn(self.arena, self.root_shape, "\x00usp", Value.obj(fresh));
+    return Value.undef();
+}
+fn uspToStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    return try Value.strAlloc(self.arena, try uspToString(self, this));
+}
+fn uspSizeGet(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    return Value.num(@floatFromInt((try uspPairs(self, this)).elementsLen()));
+}
+fn uspForEachFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const cb = if (args.len > 0) args[0] else Value.undef();
+    if (!cb.isObject() or !cb.asObj().isCallableObject()) return self.throwError("TypeError", "URLSearchParams.forEach callback is not a function");
+    const this_arg = if (args.len > 1) args[1] else Value.undef();
+    for (try (try uspPairs(self, this)).internalElementsSnapshot(self.arena)) |pair| {
+        const kv = uspPairKV(pair);
+        _ = try self.callValueWithThis(cb, &.{ try Value.strAlloc(self.arena, kv.v), try Value.strAlloc(self.arena, kv.k), this }, this_arg);
+    }
+    return Value.undef();
+}
+/// entries/keys/values/@@iterator all return a fresh Array's iterator over a
+/// snapshot of the current pairs.
+fn uspIterFn(comptime which: enum { entries, keys, values }) value.NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+            _ = args;
+            const self: *Interpreter = @ptrCast(@alignCast(ctx));
+            const snap = (try self.newArray()).asObj();
+            for (try (try uspPairs(self, this)).internalElementsSnapshot(self.arena)) |pair| {
+                const kv = uspPairKV(pair);
+                switch (which) {
+                    .keys => try snap.appendElement(self.arena, try Value.strAlloc(self.arena, kv.k)),
+                    .values => try snap.appendElement(self.arena, try Value.strAlloc(self.arena, kv.v)),
+                    .entries => {
+                        const e = (try self.newArray()).asObj();
+                        try e.appendElement(self.arena, try Value.strAlloc(self.arena, kv.k));
+                        try e.appendElement(self.arena, try Value.strAlloc(self.arena, kv.v));
+                        try snap.appendElement(self.arena, Value.obj(e));
+                    },
+                }
+            }
+            return try self.iteratorOf(Value.obj(snap));
+        }
+    }.call;
+}
+fn installURLSearchParams(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalError!void {
+    const a = env.arena;
+    const sym = struct {
+        fn key(e: *Environment, name: []const u8) ?[]const u8 {
+            if (e.get("Symbol")) |s| if (s.isObject()) {
+                if (s.asObj().getOwn(name)) |t| if (t.isObject() and t.asObj().is_symbol) return t.asObj().sym_key;
+            };
+            return null;
+        }
+    };
+    const proto = try gc_mod.allocObj(a);
+    proto.* = .{ .proto = object_proto };
+    try setNative(a, rs, proto, "get", 1, uspGetFn);
+    try setNative(a, rs, proto, "getAll", 1, uspGetAllFn);
+    try setNative(a, rs, proto, "has", 1, uspHasFn);
+    try setNative(a, rs, proto, "set", 2, uspSetFn);
+    try setNative(a, rs, proto, "append", 2, uspAppendFn);
+    try setNative(a, rs, proto, "delete", 1, uspDeleteFn);
+    try setNative(a, rs, proto, "sort", 0, uspSortFn);
+    try setNative(a, rs, proto, "forEach", 1, uspForEachFn);
+    try setNative(a, rs, proto, "toString", 0, uspToStringFn);
+    try setNative(a, rs, proto, "entries", 0, uspIterFn(.entries));
+    try setNative(a, rs, proto, "keys", 0, uspIterFn(.keys));
+    try setNative(a, rs, proto, "values", 0, uspIterFn(.values));
+    try setNativeGetter(a, rs, proto, "size", uspSizeGet);
+    try proto.setAttr(a, "size", .{ .enumerable = true, .configurable = true });
+    if (sym.key(env, "iterator")) |k| try setNative(a, rs, proto, k, 0, uspIterFn(.entries));
+    if (sym.key(env, "toStringTag")) |k| {
+        try proto.setOwn(a, rs, k, Value.str("URLSearchParams"));
+        try proto.setAttr(a, k, .{ .writable = false, .enumerable = false, .configurable = true });
+    }
+    const ctor = try gc_mod.allocObj(a);
+    ctor.* = .{ .native = urlSearchParamsConstructorFn, .native_ctor = true };
+    try installNativeProps(a, rs, ctor, "URLSearchParams", 0);
+    try ctor.setOwn(a, rs, "prototype", Value.obj(proto));
+    try ctor.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
+    try setConstructor(a, rs, proto, ctor);
+    try env.put("URLSearchParams", Value.obj(ctor));
 }
 
 // ===== crypto (getRandomValues / randomUUID) =========================
