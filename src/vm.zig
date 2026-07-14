@@ -807,6 +807,7 @@ var quick_property_update_hits: std.atomic.Value(u64) = .init(0);
 var quick_property_loop_tail_hits: std.atomic.Value(u64) = .init(0);
 var quick_property_specialized_hits: std.atomic.Value(u64) = .init(0);
 var quick_property_kernel_hits: std.atomic.Value(u64) = .init(0);
+var quick_property_plan_decode_attempts: std.atomic.Value(u64) = .init(0);
 var quick_dense_array_index_hits: std.atomic.Value(u64) = .init(0);
 var quick_dense_array_store_hits: std.atomic.Value(u64) = .init(0);
 var quick_array_length_hits: std.atomic.Value(u64) = .init(0);
@@ -1142,34 +1143,6 @@ fn quickArrayPlan(chunk: *Chunk, start: usize, parallel_sync: bool) ?*QuickArray
         slot.* = plan;
     }
     return plan;
-}
-
-inline fn mayStartQuickArrayLoop(code: []const bc.Inst, start: usize) bool {
-    // Packed indexed accumulation starts with `index < array.length`.
-    const packed_sum = start + 3 < code.len and
-        code[start + 1].op == .load_local and
-        code[start + 2].op == .get_prop and
-        code[start + 3].op == .lt;
-    // Packed production starts with a numeric bound and immediately resolves a
-    // named method on the target array.
-    const packed_push = start + 7 < code.len and
-        (code[start + 1].op == .load_const or code[start + 1].op == .load_local) and
-        code[start + 2].op == .lt and
-        code[start + 3].op == .jump_if_false and
-        code[start + 4].op == .load_local and
-        code[start + 5].op == .dup and
-        code[start + 6].op == .get_prop and
-        code[start + 7].op == .swap;
-    const polymorphic_property = start + 8 < code.len and
-        (code[start + 1].op == .load_const or code[start + 1].op == .load_local) and
-        code[start + 2].op == .lt and
-        code[start + 3].op == .jump_if_false and
-        code[start + 4].op == .load_local and
-        code[start + 5].op == .load_local and
-        code[start + 6].op == .load_const and
-        code[start + 7].op == .bit_and and
-        code[start + 8].op == .get_index;
-    return packed_sum or packed_push or polymorphic_property;
 }
 
 const QuickArrayLoopUpdate = struct {
@@ -1509,36 +1482,6 @@ fn quickCallLoopPlan(chunk: *Chunk, start: usize, parallel_sync: bool) ?*QuickCa
         slot.* = plan;
     }
     return plan;
-}
-
-inline fn mayStartQuickCallLoop(code: []const bc.Inst, start: usize) bool {
-    if (start + 7 >= code.len or
-        (code[start + 1].op != .load_const and code[start + 1].op != .load_local) or
-        code[start + 2].op != .lt or
-        code[start + 3].op != .jump_if_false)
-        return false;
-    const direct =
-        (code[start + 1].op == .load_const or code[start + 1].op == .load_local) and
-        (code[start + 4].op == .load_var or code[start + 4].op == .load_local) and
-        code[start + 5].op == .load_local and
-        code[start + 6].op == .load_local and
-        code[start + 7].op == .call;
-    const method = start + 10 < code.len and
-        code[start + 4].op == .load_local and
-        code[start + 5].op == .dup and
-        code[start + 6].op == .get_prop and
-        code[start + 7].op == .swap and
-        code[start + 8].op == .load_local and
-        code[start + 9].op == .load_local and
-        code[start + 10].op == .call_with_this;
-    const closure = start + 9 < code.len and
-        code[start + 4].op == .make_closure and
-        code[start + 5].op == .store_local and
-        code[start + 6].op == .pop and
-        code[start + 7].op == .load_local and
-        code[start + 8].op == .load_local and
-        code[start + 9].op == .call;
-    return direct or method or closure;
 }
 
 fn specializeQuickLeaf(ops: []const QuickLeafOp) QuickLeafSpecialization {
@@ -2810,6 +2753,7 @@ fn tryQuickPropertyKernel(
 }
 
 fn compileQuickPropertyPlan(chunk: *Chunk, start: usize) ?*QuickPropertyPlan {
+    if (builtin.is_test) _ = quick_property_plan_decode_attempts.fetchAdd(1, .monotonic);
     const code = chunk.code.items;
     if (start >= code.len or code[start].op != .load_local) return null;
     var plan: QuickPropertyPlan = undefined;
@@ -2934,6 +2878,12 @@ fn compileQuickPropertyPlan(chunk: *Chunk, start: usize) ?*QuickPropertyPlan {
     return null;
 }
 
+var unsupported_quick_property_plan_sentinel: u8 = 0;
+
+inline fn unsupportedQuickPropertyPlanRaw() *anyopaque {
+    return @ptrCast(&unsupported_quick_property_plan_sentinel);
+}
+
 inline fn quickPropertyPlan(chunk: *Chunk, start: usize) ?*QuickPropertyPlan {
     if (chunk.quick_property_plans.len == 0) {
         const plans = chunk.arena.alloc(?*anyopaque, chunk.code.items.len) catch return null;
@@ -2941,11 +2891,38 @@ inline fn quickPropertyPlan(chunk: *Chunk, start: usize) ?*QuickPropertyPlan {
         chunk.quick_property_plans = plans;
     }
     if (start >= chunk.quick_property_plans.len) return null;
-    if (chunk.quick_property_plans[start]) |raw|
+    if (chunk.quick_property_plans[start]) |raw| {
+        if (raw == unsupportedQuickPropertyPlanRaw()) return null;
         return @ptrCast(@alignCast(raw));
-    const plan = compileQuickPropertyPlan(chunk, start) orelse return null;
+    }
+    const plan = compileQuickPropertyPlan(chunk, start) orelse {
+        chunk.quick_property_plans[start] = unsupportedQuickPropertyPlanRaw();
+        return null;
+    };
     chunk.quick_property_plans[start] = plan;
     return plan;
+}
+
+inline fn quickPropertySiteMayApply(chunk: *Chunk, start: usize, parallel_sync: bool) bool {
+    if (start >= chunk.quick_property_kernel_plans.len) return false;
+    const kernel_slot = &chunk.quick_property_kernel_plans[start];
+    const kernel_raw = if (parallel_sync)
+        @atomicLoad(?*anyopaque, kernel_slot, .acquire)
+    else
+        kernel_slot.*;
+    if (kernel_raw) |raw| {
+        const plan: *QuickPropertyKernelPlan = @ptrCast(@alignCast(raw));
+        switch (plan.*) {
+            .unsupported => {},
+            .four_property_loop => return true,
+        }
+    } else return true;
+
+    if (parallel_sync) return false;
+    if (chunk.quick_property_plans.len == 0) return true;
+    if (start >= chunk.quick_property_plans.len) return false;
+    const ordinary_raw = chunk.quick_property_plans[start] orelse return true;
+    return ordinary_raw != unsupportedQuickPropertyPlanRaw();
 }
 
 inline fn quickPropertyNumber(
@@ -3461,8 +3438,12 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
 
             .load_local => {
                 const cf = frame.?;
-                if (stack.items.len == 0 and mayStartQuickCallLoop(code, ip - 1)) {
-                    const start = ip - 1;
+                const start = ip - 1;
+                const quick_loop_candidates = if (start < chunk.quick_loop_candidates.len)
+                    chunk.quick_loop_candidates[start]
+                else
+                    0;
+                if (stack.items.len == 0 and (quick_loop_candidates & bc.quick_call_loop_candidate) != 0) {
                     if (quickCallLoopPlan(chunk, start, parallel_sync)) |plan| {
                         const steps_until_checkpoint = 1024 - (vm.steps & 1023);
                         const steps_until_budget = interp.max_steps - vm.steps;
@@ -3474,8 +3455,7 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                         }
                     }
                 }
-                if (stack.items.len == 0 and mayStartQuickArrayLoop(code, ip - 1)) {
-                    const start = ip - 1;
+                if (stack.items.len == 0 and (quick_loop_candidates & bc.quick_array_loop_candidate) != 0) {
                     if (quickArrayPlan(chunk, start, parallel_sync)) |plan| {
                         const steps_until_checkpoint = 1024 - (vm.steps & 1023);
                         const steps_until_budget = interp.max_steps - vm.steps;
@@ -3503,10 +3483,11 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 // base and then a numeric RHS load. Keep the recognizer call off
                 // ordinary numeric locals (including the arithmetic JIT side
                 // exits), and off the inner `load_local; get_prop` read pair.
-                const may_start_quick_property = ip < code.len and switch (code[ip].op) {
-                    .load_const, .load_local => true,
-                    else => false,
-                };
+                const may_start_quick_property = ip < code.len and quickPropertySiteMayApply(chunk, start, parallel_sync) and
+                    switch (code[ip].op) {
+                        .load_const, .load_local => true,
+                        else => false,
+                    };
                 if (may_start_quick_property) property: {
                     const held = cf.lockSlots(parallel_sync);
                     const quick_property_base = cf.slots[inst.a].isObject();
@@ -3515,13 +3496,13 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                     const steps_until_checkpoint = 1024 - (vm.steps & 1023);
                     const steps_until_budget = interp.max_steps - vm.steps;
                     const max_extra_steps = @min(steps_until_checkpoint - 1, steps_until_budget);
-                    if (tryQuickPropertyKernel(chunk, cf, ip - 1, max_extra_steps, parallel_sync)) |quick| {
+                    if (tryQuickPropertyKernel(chunk, cf, start, max_extra_steps, parallel_sync)) |quick| {
                         vm.steps += quick.extra_steps;
                         ip = quick.next_ip;
                         continue;
                     }
                     if (!parallel_sync) {
-                        if (tryNumericPropertyUpdate(chunk, cf, ip - 1, max_extra_steps)) |quick| {
+                        if (tryNumericPropertyUpdate(chunk, cf, start, max_extra_steps)) |quick| {
                             vm.steps += quick.extra_steps;
                             ip = quick.next_ip;
                             continue;
@@ -6303,7 +6284,8 @@ test "vm: numeric call-loop quickening preserves guards and exact steps" {
             }
         }
         for (function_chunk.code.items, 0..) |_, instruction| {
-            if (!mayStartQuickCallLoop(function_chunk.code.items, instruction)) continue;
+            if (instruction >= function_chunk.quick_loop_candidates.len or
+                (function_chunk.quick_loop_candidates[instruction] & bc.quick_call_loop_candidate) == 0) continue;
             switch (compileQuickCallLoopPlan(function_chunk, instruction)) {
                 .numeric_leaf => |loop| {
                     call_loop_supported = true;
@@ -7153,6 +7135,39 @@ test "vm: quickens warmed numeric property update traces" {
     var cached_plan = false;
     for (function_chunk.quick_property_plans) |plan| cached_plan = cached_plan or plan != null;
     try std.testing.expect(cached_plan);
+}
+
+test "vm: caches unsupported isolated property quickening plans" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var parser = try Parser.init(allocator,
+        \\function lookup(array, index) { return array[index]; }
+    );
+    const program = try parser.parseProgram();
+    const root = try Compiler.compileProgram(allocator, program);
+    const function_chunk = root.fns.items[0].chunk.?;
+
+    var candidate: ?usize = null;
+    for (function_chunk.code.items, 0..) |instruction, index| {
+        if (instruction.op == .load_local and index + 2 < function_chunk.code.items.len and
+            function_chunk.code.items[index + 1].op == .load_local and
+            function_chunk.code.items[index + 2].op == .get_index)
+        {
+            candidate = index;
+            break;
+        }
+    }
+    const start = candidate orelse return error.TestUnexpectedResult;
+    try std.testing.expect(quickPropertyKernelPlan(function_chunk, start, true) != null);
+    try std.testing.expect(!quickPropertySiteMayApply(function_chunk, start, true));
+    try std.testing.expect(quickPropertySiteMayApply(function_chunk, start, false));
+    const attempts_before = quick_property_plan_decode_attempts.load(.monotonic);
+    try std.testing.expect(quickPropertyPlan(function_chunk, start) == null);
+    try std.testing.expectEqual(attempts_before + 1, quick_property_plan_decode_attempts.load(.monotonic));
+    try std.testing.expect(function_chunk.quick_property_plans[start].? == unsupportedQuickPropertyPlanRaw());
+    try std.testing.expect(quickPropertyPlan(function_chunk, start) == null);
+    try std.testing.expectEqual(attempts_before + 1, quick_property_plan_decode_attempts.load(.monotonic));
 }
 
 test "vm: fuses warmed four-property loops with exact bytecode steps" {
