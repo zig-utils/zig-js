@@ -2153,6 +2153,30 @@ pub const Object = struct {
         return deleted;
     }
 
+    /// Apply an already-proven fixed-name object-literal shape transition. The
+    /// bytecode caller owns the fresh, not-yet-published literal exclusively.
+    /// Isolated execution can avoid `property_lock`; concurrent tracing/shared
+    /// execution still takes it before revalidating every piece of object-local
+    /// state that would make CreateDataProperty observable.
+    pub fn applyLiteralTransition(self: *Object, arena: std.mem.Allocator, root: *Shape, child: *Shape, slot: u32, v: Value, synchronized: bool) std.mem.Allocator.Error!bool {
+        if (synchronized) self.lockProperties();
+        defer if (synchronized) self.unlockProperties();
+        const parent = child.parent orelse return false;
+        if ((self.shape orelse root) != parent or child.slot != slot) return false;
+        if (self.slots.items.len != @as(usize, slot) or child.count != slot + 1) return false;
+        if (child.name == null or self.accessors.load(.monotonic) != null or
+            self.key_order.load(.monotonic) != null or self.attrs != null or !self.isExtensible()) return false;
+
+        gcBarrier(self, v);
+        try self.appendSlot(arena, v);
+        self.shape = child;
+        if (canonicalIndex(child.name.?) != null) {
+            self.has_indexed_property.store(true, .monotonic);
+            self.indexed_own_seen.store(true, .release);
+        }
+        return true;
+    }
+
     pub fn deleteNamedDataOwn(self: *Object, arena: std.mem.Allocator, root: *Shape, key: []const u8) std.mem.Allocator.Error!bool {
         return self.deleteNamedDataOwnInternal(arena, root, key, false);
     }

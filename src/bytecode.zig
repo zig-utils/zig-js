@@ -34,6 +34,11 @@ pub var ic_seqlock_enabled: std.atomic.Value(bool) = .init(false);
 /// instruction, and a fifth distinct shape replaces secondary entries in
 /// round-robin order.
 pub const InlineCache = struct {
+    pub const LiteralTransition = struct {
+        shape: *Shape,
+        slot: u32,
+    };
+
     shape: ?*Shape = null,
     slot: u32 = 0,
     secondary_shapes: [3]?*Shape = .{ null, null, null },
@@ -59,6 +64,23 @@ pub const InlineCache = struct {
         if (obj_shape != null and obj_shape == ic.shape) return ic.slot;
         inline for (0..ic.secondary_shapes.len) |index|
             if (obj_shape != null and obj_shape == ic.secondary_shapes[index]) return ic.secondary_slots[index];
+        return null;
+    }
+
+    /// `init_prop` stores the immutable child shape instead of the predecessor:
+    /// the child's parent is therefore the exact guard for a warm literal-site
+    /// transition, while the paired slot is the append destination. The same
+    /// four-entry storage remains available for chunks reused across realms.
+    pub inline fn lookupLiteralTransitionMode(ic: *InlineCache, parent: *Shape, parallel: bool) ?LiteralTransition {
+        if (parallel) return ic.loadLiteralTransition(parent);
+        if (ic.shape) |child| {
+            if (child.parent == parent) return .{ .shape = child, .slot = ic.slot };
+        }
+        inline for (0..ic.secondary_shapes.len) |index| {
+            if (ic.secondary_shapes[index]) |child| {
+                if (child.parent == parent) return .{ .shape = child, .slot = ic.secondary_slots[index] };
+            }
+        }
         return null;
     }
 
@@ -102,6 +124,25 @@ pub const InlineCache = struct {
             if (hit == null and secondary_shape != null and secondary_shape == obj_shape) hit = secondary_slot;
         }
         if (ic.version.load(.seq_cst) != v1) return null; // torn against a write
+        return hit;
+    }
+
+    fn loadLiteralTransition(ic: *InlineCache, parent: *Shape) ?LiteralTransition {
+        const v1 = ic.version.load(.seq_cst);
+        if (v1 & 1 != 0) return null;
+        const primary_shape = @atomicLoad(?*Shape, &ic.shape, .seq_cst);
+        const primary_slot = @atomicLoad(u32, &ic.slot, .seq_cst);
+        var hit: ?LiteralTransition = if (primary_shape != null and primary_shape.?.parent == parent)
+            .{ .shape = primary_shape.?, .slot = primary_slot }
+        else
+            null;
+        inline for (0..ic.secondary_shapes.len) |index| {
+            const child = @atomicLoad(?*Shape, &ic.secondary_shapes[index], .seq_cst);
+            const slot = @atomicLoad(u32, &ic.secondary_slots[index], .seq_cst);
+            if (hit == null and child != null and child.?.parent == parent)
+                hit = .{ .shape = child.?, .slot = slot };
+        }
+        if (ic.version.load(.seq_cst) != v1) return null;
         return hit;
     }
 

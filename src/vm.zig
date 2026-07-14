@@ -817,6 +817,7 @@ var quick_packed_array_push_loop_hits: std.atomic.Value(u64) = .init(0);
 var quick_packed_array_specialized_expression_hits: std.atomic.Value(u64) = .init(0);
 var quick_polymorphic_property_loop_hits: std.atomic.Value(u64) = .init(0);
 var quick_global_binding_hits: std.atomic.Value(u64) = .init(0);
+var quick_literal_transition_hits: std.atomic.Value(u64) = .init(0);
 var quick_native_direct_call_hits: std.atomic.Value(u64) = .init(0);
 var quick_numeric_call_loop_hits: std.atomic.Value(u64) = .init(0);
 var quick_numeric_arguments_call_loop_hits: std.atomic.Value(u64) = .init(0);
@@ -3691,7 +3692,21 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 if (Interpreter.funcOf(v)) |f| {
                     if (f.is_method) f.home_object = obj.asObj();
                 }
-                try vm.defineLiteralDataProp(obj.asObj(), chunk.names.items[inst.a], v);
+                const object = obj.asObj();
+                const key = chunk.names.items[inst.a];
+                const base_shape = object.shape orelse vm.root_shape;
+                const cache = &chunk.ics[ip - 1];
+                if (cache.lookupLiteralTransitionMode(base_shape, parallel_sync)) |transition| {
+                    if (try object.applyLiteralTransition(vm.arena, vm.root_shape, transition.shape, transition.slot, v, parallel_sync)) {
+                        if (builtin.is_test) _ = quick_literal_transition_hits.fetchAdd(1, .monotonic);
+                        continue;
+                    }
+                }
+                try vm.defineLiteralDataProp(object, key, v);
+                if (object.shape) |child| {
+                    if (child.parent == base_shape and child.name != null and std.mem.eql(u8, child.name.?, key))
+                        cache.recordMode(child, child.slot, parallel_sync);
+                }
             },
             .init_proto => {
                 const v = stack.pop().?;
@@ -6478,6 +6493,50 @@ test "vm: if/else and short-circuit value" {
     try std.testing.expectEqual(@as(f64, 1), (try vmRun(a, "let v = 0; if (3 > 2) { v = 1; } else { v = 2; } v")).asNum());
     try std.testing.expectEqual(@as(f64, 5), (try vmRun(a, "0 || 5")).asNum());
     try std.testing.expectEqual(@as(f64, 0), (try vmRun(a, "0 && 5")).asNum());
+}
+
+test "vm: fixed-name object literals cache shape transitions across realms" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var parser = try Parser.init(allocator,
+        \\function build(limit) {
+        \\  let total = 0;
+        \\  for (let i = 0; i < limit; i = i + 1) {
+        \\    let object = { "0": i, a: i + 1, a: i + 2, __proto__: null, ["b"]: i + 3,
+        \\      c: i + 4, d: i + 5, e: i + 6, f: i + 7 };
+        \\    total = total + object[0] + object.a + object.b + object.c + object.d + object.e + object.f;
+        \\    if (object.__proto__ !== undefined) total = total + 1000000;
+        \\  }
+        \\  return total;
+        \\}
+        \\function *accessorReplacement() {
+        \\  let calls = 0;
+        \\  let object = { get x() { calls = calls + 1; return 1; }, x: 7 };
+        \\  yield object.x * 10 + calls;
+        \\}
+        \\build(20) + accessorReplacement().next().value
+    );
+    const program = try parser.parseProgram();
+    const chunk = try Compiler.compileProgram(allocator, program);
+
+    const old_parallel = bc.ic_seqlock_enabled.load(.monotonic);
+    defer bc.ic_seqlock_enabled.store(old_parallel, .monotonic);
+    var hits = quick_literal_transition_hits.load(.monotonic);
+    var steps: [2]u64 = undefined;
+    for ([_]bool{ false, true }, 0..) |parallel, run_index| {
+        bc.ic_seqlock_enabled.store(parallel, .monotonic);
+        var env = Environment{ .arena = allocator, .fn_scope = true };
+        const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
+        try interp.installGlobals(&env, root_shape);
+        var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape };
+        try std.testing.expectEqual(@as(f64, 1940), (try run(&machine, chunk, null)).asNum());
+        steps[run_index] = machine.steps;
+        const next_hits = quick_literal_transition_hits.load(.monotonic);
+        try std.testing.expect(next_hits > hits);
+        hits = next_hits;
+    }
+    try std.testing.expectEqual(steps[0], steps[1]);
 }
 
 test "vm: objects, arrays, members, this, new, instanceof on the VM" {
