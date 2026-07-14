@@ -11,9 +11,9 @@
 | Host | Apple M3 Pro; 11 physical / 11 logical CPUs; 18.0 GiB |
 | OS | macOS 27.0 (26A5368g) |
 | Zig | 0.17.0-dev.956+2dca73595 |
-| zig-js | c9f68e3299f9184027980e5944e9d5e397cb87ee |
+| zig-js | 42d0ec2644372011bd0d8b4bff5e0f00752fc81d |
 | JavaScriptCore | system framework 22625.1.20.11.3 |
-| Power | Now drawing from 'Battery Power' -InternalBattery-0 (id=22806627) 66%; discharging; (no estimate) present: true |
+| Power | Now drawing from 'AC Power' -InternalBattery-0 (id=22806627) 100%; charged; 0:00 remaining present: true |
 
 ## Single-thread result
 
@@ -23,10 +23,10 @@ Lower time is better; `JSC / zig-js` is JSC throughput divided by zig-js through
 
 | workload | jobs | zig-js median (ms) | zig-js min–max (ms) | zig-js RSD | JSC median (ms) | JSC min–max (ms) | JSC RSD | JSC / zig-js |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| `arithmetic` | 80 | 433.536 | 415.841–448.622 | 2.71% | 119.881 | 118.348–124.370 | 1.90% | 3.62x |
-| `properties` | 80 | 329.675 | 328.671–331.043 | 0.23% | 86.305 | 82.875–137.086 | 21.59% | 3.82x |
-| `arrays` | 180 | 544.743 | 541.676–590.392 | 3.60% | 52.876 | 52.692–53.950 | 0.91% | 10.30x |
-| `fibonacci` | 24 | 474.637 | 473.548–479.441 | 0.43% | 62.094 | 60.797–62.628 | 1.26% | 7.64x |
+| `arithmetic` | 160 | 55.954 | 54.285–56.554 | 1.46% | 230.350 | 228.974–233.707 | 0.79% | 0.24x |
+| `properties` | 200 | 56.900 | 55.232–73.208 | 12.36% | 192.922 | 191.535–194.178 | 0.50% | 0.29x |
+| `arrays` | 450 | 61.569 | 60.634–62.594 | 1.21% | 124.911 | 122.696–159.423 | 10.10% | 0.49x |
+| `fibonacci` | 100 | 66.945 | 66.810–67.328 | 0.27% | 366.149 | 363.943–367.800 | 0.33% | 0.18x |
 
 ## Independent-context steady state
 
@@ -36,22 +36,22 @@ same semaphore dispatch, exact invocation, and completion wait. Every lane perfo
 
 | workload | lanes | jobs/lane | zig-js median (ms) | zig-js min–max (ms) | zig-js RSD | JSC median (ms) | JSC min–max (ms) | JSC RSD | JSC / zig-js | zig-js scaling | JSC scaling |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| `arithmetic` | 1 | 80 | 422.368 | 415.288–436.884 | 1.99% | 120.566 | 119.023–133.625 | 4.54% | 3.50x | 1.00x | 1.00x |
-| `arithmetic` | 2 | 80 | 434.523 | 422.577–437.361 | 1.15% | 135.270 | 122.304–171.198 | 13.02% | 3.21x | 1.94x | 1.78x |
-| `arithmetic` | 4 | 80 | 474.739 | 464.725–480.738 | 1.21% | 146.377 | 136.980–152.460 | 4.26% | 3.24x | 3.56x | 3.29x |
-| `arithmetic` | 8 | 80 | 662.490 | 646.963–668.470 | 1.36% | 209.608 | 201.443–237.055 | 6.65% | 3.16x | 5.10x | 4.60x |
-| `properties` | 1 | 80 | 309.636 | 309.195–312.569 | 0.38% | 80.972 | 80.787–104.236 | 12.48% | 3.82x | 1.00x | 1.00x |
-| `properties` | 2 | 80 | 313.935 | 312.076–390.171 | 8.90% | 81.674 | 81.294–82.825 | 0.65% | 3.84x | 1.97x | 1.98x |
-| `properties` | 4 | 80 | 401.788 | 375.370–445.713 | 5.83% | 106.238 | 95.338–113.562 | 6.59% | 3.78x | 3.08x | 3.05x |
-| `properties` | 8 | 80 | 522.445 | 513.787–525.638 | 0.94% | 142.411 | 134.289–180.459 | 12.01% | 3.67x | 4.74x | 4.55x |
-| `arrays` | 1 | 180 | 552.312 | 548.025–567.047 | 1.29% | 53.238 | 51.587–54.730 | 2.22% | 10.37x | 1.00x | 1.00x |
-| `arrays` | 2 | 180 | 549.890 | 543.770–568.357 | 1.57% | 52.986 | 51.626–53.308 | 1.09% | 10.38x | 2.01x | 2.01x |
-| `arrays` | 4 | 180 | 580.195 | 575.861–587.301 | 0.70% | 59.031 | 57.944–60.829 | 1.81% | 9.83x | 3.81x | 3.61x |
-| `arrays` | 8 | 180 | 805.877 | 797.851–820.371 | 0.99% | 92.791 | 89.660–101.150 | 4.10% | 8.68x | 5.48x | 4.59x |
-| `fibonacci` | 1 | 24 | 485.886 | 478.069–492.549 | 0.97% | 62.403 | 60.656–63.666 | 1.67% | 7.79x | 1.00x | 1.00x |
-| `fibonacci` | 2 | 24 | 483.751 | 477.170–488.172 | 0.78% | 62.154 | 61.416–63.131 | 0.96% | 7.78x | 2.01x | 2.01x |
-| `fibonacci` | 4 | 24 | 525.775 | 511.503–569.749 | 3.67% | 88.944 | 85.326–96.001 | 4.09% | 5.91x | 3.70x | 2.81x |
-| `fibonacci` | 8 | 24 | 728.851 | 715.020–755.814 | 1.95% | 105.038 | 99.724–110.189 | 2.96% | 6.94x | 5.33x | 4.75x |
+| `arithmetic` | 1 | 160 | 53.917 | 53.785–54.242 | 0.39% | 229.070 | 228.710–233.087 | 0.84% | 0.24x | 1.00x | 1.00x |
+| `arithmetic` | 2 | 160 | 57.763 | 56.661–70.814 | 8.54% | 246.607 | 242.794–286.540 | 6.24% | 0.23x | 1.87x | 1.86x |
+| `arithmetic` | 4 | 160 | 57.770 | 57.652–62.640 | 3.16% | 267.568 | 259.561–541.945 | 34.88% | 0.22x | 3.73x | 3.42x |
+| `arithmetic` | 8 | 160 | 71.166 | 68.715–74.321 | 2.46% | 362.861 | 352.458–368.399 | 1.83% | 0.20x | 6.06x | 5.05x |
+| `properties` | 1 | 200 | 60.432 | 59.229–66.171 | 4.66% | 208.496 | 206.511–211.269 | 0.87% | 0.29x | 1.00x | 1.00x |
+| `properties` | 2 | 200 | 57.548 | 57.419–58.198 | 0.45% | 200.100 | 199.118–200.768 | 0.24% | 0.29x | 2.10x | 2.08x |
+| `properties` | 4 | 200 | 58.754 | 58.672–59.612 | 0.60% | 204.024 | 203.686–205.356 | 0.31% | 0.29x | 4.11x | 4.09x |
+| `properties` | 8 | 200 | 78.794 | 75.739–81.852 | 2.64% | 298.952 | 290.094–305.905 | 2.05% | 0.26x | 6.14x | 5.58x |
+| `arrays` | 1 | 450 | 61.379 | 61.095–62.246 | 0.75% | 125.758 | 123.963–128.246 | 1.07% | 0.49x | 1.00x | 1.00x |
+| `arrays` | 2 | 450 | 63.685 | 62.629–64.443 | 0.93% | 127.125 | 126.416–127.892 | 0.41% | 0.50x | 1.93x | 1.98x |
+| `arrays` | 4 | 450 | 65.822 | 64.412–66.986 | 1.55% | 135.494 | 129.856–139.075 | 2.23% | 0.49x | 3.73x | 3.71x |
+| `arrays` | 8 | 450 | 93.789 | 89.558–103.628 | 4.88% | 208.772 | 205.445–222.755 | 2.83% | 0.45x | 5.24x | 4.82x |
+| `fibonacci` | 1 | 100 | 66.893 | 66.744–67.059 | 0.15% | 365.270 | 364.945–367.685 | 0.31% | 0.18x | 1.00x | 1.00x |
+| `fibonacci` | 2 | 100 | 68.575 | 68.351–68.821 | 0.22% | 374.296 | 373.527–375.732 | 0.19% | 0.18x | 1.95x | 1.95x |
+| `fibonacci` | 4 | 100 | 71.540 | 70.565–72.819 | 1.08% | 396.386 | 390.225–405.936 | 1.32% | 0.18x | 3.74x | 3.69x |
+| `fibonacci` | 8 | 100 | 100.187 | 98.754–103.069 | 1.45% | 575.698 | 569.927–589.123 | 1.28% | 0.17x | 5.34x | 5.08x |
 
 ## Independent-context cold lifecycle
 
@@ -61,22 +61,22 @@ evaluation and configuration, the exact invocation, context destruction, and OS-
 
 | workload | lanes | jobs/lane | zig-js median (ms) | zig-js min–max (ms) | zig-js RSD | JSC median (ms) | JSC min–max (ms) | JSC RSD | JSC / zig-js | zig-js scaling | JSC scaling |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| `arithmetic` | 1 | 80 | 470.580 | 445.695–512.413 | 5.20% | 125.781 | 120.407–141.581 | 5.96% | 3.74x | 1.00x | 1.00x |
-| `arithmetic` | 2 | 80 | 459.229 | 453.321–525.751 | 5.54% | 123.197 | 122.547–150.368 | 9.76% | 3.73x | 2.05x | 2.04x |
-| `arithmetic` | 4 | 80 | 521.474 | 510.019–572.544 | 3.97% | 152.114 | 149.099–161.644 | 2.67% | 3.43x | 3.61x | 3.31x |
-| `arithmetic` | 8 | 80 | 760.859 | 738.454–797.597 | 2.41% | 240.960 | 215.961–260.243 | 7.65% | 3.16x | 4.95x | 4.18x |
-| `properties` | 1 | 80 | 331.333 | 328.645–331.955 | 0.34% | 82.092 | 81.879–84.333 | 1.05% | 4.04x | 1.00x | 1.00x |
-| `properties` | 2 | 80 | 342.082 | 340.628–363.670 | 2.59% | 84.578 | 83.557–89.712 | 2.54% | 4.04x | 1.94x | 1.94x |
-| `properties` | 4 | 80 | 406.993 | 398.260–417.529 | 1.62% | 98.672 | 96.976–101.614 | 1.71% | 4.12x | 3.26x | 3.33x |
-| `properties` | 8 | 80 | 633.520 | 595.417–670.186 | 4.14% | 146.999 | 141.899–224.777 | 18.83% | 4.31x | 4.18x | 4.47x |
-| `arrays` | 1 | 180 | 572.934 | 564.260–586.184 | 1.38% | 53.940 | 52.430–62.553 | 6.08% | 10.62x | 1.00x | 1.00x |
-| `arrays` | 2 | 180 | 580.427 | 574.448–590.735 | 0.92% | 54.011 | 51.792–54.865 | 1.92% | 10.75x | 1.97x | 2.00x |
-| `arrays` | 4 | 180 | 617.718 | 611.309–630.251 | 1.04% | 62.672 | 59.252–82.648 | 12.42% | 9.86x | 3.71x | 3.44x |
-| `arrays` | 8 | 180 | 875.253 | 870.752–918.019 | 2.14% | 95.676 | 94.156–108.559 | 5.13% | 9.15x | 5.24x | 4.51x |
-| `fibonacci` | 1 | 24 | 521.059 | 507.627–536.008 | 1.89% | 62.459 | 60.698–65.504 | 3.15% | 8.34x | 1.00x | 1.00x |
-| `fibonacci` | 2 | 24 | 500.820 | 499.257–511.266 | 0.95% | 63.051 | 62.185–70.043 | 4.32% | 7.94x | 2.08x | 1.98x |
-| `fibonacci` | 4 | 24 | 579.331 | 567.450–640.443 | 4.70% | 78.104 | 69.173–83.092 | 5.80% | 7.42x | 3.60x | 3.20x |
-| `fibonacci` | 8 | 24 | 820.780 | 805.772–837.600 | 1.29% | 117.016 | 103.514–123.353 | 6.88% | 7.01x | 5.08x | 4.27x |
+| `arithmetic` | 1 | 160 | 54.987 | 54.476–55.712 | 0.79% | 233.633 | 231.496–241.093 | 1.62% | 0.24x | 1.00x | 1.00x |
+| `arithmetic` | 2 | 160 | 58.415 | 58.274–59.481 | 0.72% | 252.005 | 243.655–288.304 | 5.96% | 0.23x | 1.88x | 1.85x |
+| `arithmetic` | 4 | 160 | 60.055 | 59.799–63.559 | 2.41% | 263.875 | 257.900–280.757 | 3.10% | 0.23x | 3.66x | 3.54x |
+| `arithmetic` | 8 | 160 | 81.126 | 74.691–96.609 | 9.33% | 353.384 | 339.705–382.249 | 5.07% | 0.23x | 5.42x | 5.29x |
+| `properties` | 1 | 200 | 57.576 | 57.213–59.784 | 1.58% | 213.103 | 196.193–230.514 | 6.30% | 0.27x | 1.00x | 1.00x |
+| `properties` | 2 | 200 | 59.229 | 58.933–59.612 | 0.39% | 201.723 | 200.995–203.379 | 0.41% | 0.29x | 1.94x | 2.11x |
+| `properties` | 4 | 200 | 60.376 | 60.267–61.802 | 0.89% | 205.388 | 204.874–208.202 | 0.55% | 0.29x | 3.81x | 4.15x |
+| `properties` | 8 | 200 | 81.192 | 80.012–85.109 | 2.30% | 306.101 | 299.850–316.233 | 1.80% | 0.27x | 5.67x | 5.57x |
+| `arrays` | 1 | 450 | 60.979 | 60.818–63.807 | 1.74% | 126.370 | 125.512–127.720 | 0.65% | 0.48x | 1.00x | 1.00x |
+| `arrays` | 2 | 450 | 63.739 | 63.222–65.781 | 1.41% | 128.586 | 128.093–129.367 | 0.40% | 0.50x | 1.91x | 1.97x |
+| `arrays` | 4 | 450 | 65.689 | 65.320–68.307 | 1.61% | 137.901 | 131.791–140.500 | 1.98% | 0.48x | 3.71x | 3.67x |
+| `arrays` | 8 | 450 | 99.306 | 93.767–102.001 | 2.80% | 211.454 | 205.133–222.486 | 2.92% | 0.47x | 4.91x | 4.78x |
+| `fibonacci` | 1 | 100 | 70.030 | 68.670–77.815 | 4.99% | 365.727 | 364.797–367.188 | 0.24% | 0.19x | 1.00x | 1.00x |
+| `fibonacci` | 2 | 100 | 70.253 | 69.710–70.885 | 0.67% | 375.207 | 375.022–376.204 | 0.13% | 0.19x | 1.99x | 1.95x |
+| `fibonacci` | 4 | 100 | 73.161 | 71.470–74.211 | 1.22% | 398.881 | 392.757–404.859 | 1.17% | 0.18x | 3.83x | 3.67x |
+| `fibonacci` | 8 | 100 | 106.815 | 102.860–108.626 | 1.79% | 585.694 | 577.179–599.577 | 1.48% | 0.18x | 5.24x | 5.00x |
 
 ## zig-js shared-realm scaling
 
@@ -86,37 +86,37 @@ shared-realm path at one lane, so thread lifecycle overhead is present in every 
 
 | workload | lanes | jobs/lane | median (ms) | min–max (ms) | RSD | scaling |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| `arithmetic` | 1 | 80 | 435.488 | 420.536–474.872 | 4.26% | 1.00x |
-| `arithmetic` | 2 | 80 | 421.715 | 416.250–591.324 | 14.41% | 2.07x |
-| `arithmetic` | 4 | 80 | 492.469 | 487.181–501.627 | 1.00% | 3.54x |
-| `arithmetic` | 8 | 80 | 710.189 | 692.246–788.037 | 4.57% | 4.91x |
-| `properties` | 1 | 80 | 320.425 | 319.444–320.908 | 0.19% | 1.00x |
-| `properties` | 2 | 80 | 327.182 | 323.312–334.767 | 1.49% | 1.96x |
-| `properties` | 4 | 80 | 385.745 | 378.584–416.932 | 3.86% | 3.32x |
-| `properties` | 8 | 80 | 536.103 | 524.681–590.351 | 4.01% | 4.78x |
-| `arrays` | 1 | 180 | 622.644 | 608.402–654.461 | 2.92% | 1.00x |
-| `arrays` | 2 | 180 | 719.164 | 676.592–741.642 | 3.52% | 1.73x |
-| `arrays` | 4 | 180 | 1387.326 | 1377.005–1404.931 | 0.74% | 1.80x |
-| `arrays` | 8 | 180 | 2920.470 | 2666.452–3358.129 | 7.81% | 1.71x |
-| `fibonacci` | 1 | 24 | 484.348 | 476.927–499.502 | 1.57% | 1.00x |
-| `fibonacci` | 2 | 24 | 969.305 | 966.175–980.783 | 0.63% | 1.00x |
-| `fibonacci` | 4 | 24 | 2787.451 | 2617.520–3108.218 | 6.61% | 0.70x |
-| `fibonacci` | 8 | 24 | 4887.213 | 4732.521–4924.973 | 1.53% | 0.79x |
+| `arithmetic` | 1 | 160 | 54.346 | 54.067–55.796 | 1.33% | 1.00x |
+| `arithmetic` | 2 | 160 | 56.784 | 56.687–57.934 | 0.77% | 1.91x |
+| `arithmetic` | 4 | 160 | 58.259 | 57.547–60.701 | 2.06% | 3.73x |
+| `arithmetic` | 8 | 160 | 68.762 | 68.008–73.696 | 2.78% | 6.32x |
+| `properties` | 1 | 200 | 76.414 | 76.286–76.619 | 0.17% | 1.00x |
+| `properties` | 2 | 200 | 78.367 | 78.160–79.531 | 0.75% | 1.95x |
+| `properties` | 4 | 200 | 79.805 | 79.647–79.904 | 0.13% | 3.83x |
+| `properties` | 8 | 200 | 107.915 | 101.637–110.247 | 3.05% | 5.66x |
+| `arrays` | 1 | 450 | 63.442 | 62.118–64.027 | 1.18% | 1.00x |
+| `arrays` | 2 | 450 | 65.285 | 64.738–67.114 | 1.54% | 1.94x |
+| `arrays` | 4 | 450 | 73.257 | 71.926–95.258 | 10.87% | 3.46x |
+| `arrays` | 8 | 450 | 208.605 | 203.942–211.613 | 1.13% | 2.43x |
+| `fibonacci` | 1 | 100 | 199.146 | 198.882–200.084 | 0.20% | 1.00x |
+| `fibonacci` | 2 | 100 | 203.606 | 203.487–203.936 | 0.07% | 1.96x |
+| `fibonacci` | 4 | 100 | 226.709 | 217.945–229.633 | 1.72% | 3.51x |
+| `fibonacci` | 8 | 100 | 320.123 | 309.602–327.475 | 1.86% | 4.98x |
 
 ## Reading the result
 
-Across these four deliberately small kernels, JSC's single-context throughput is 5.74x
-the zig-js throughput by geometric mean. This is expected: the system JSC is a mature optimizing JIT, while
-zig-js currently has interpreters and no JIT. The number is a compact description of this matrix, not a claim
-about applications or unsupported workloads.
+Across these four deliberately small kernels, JSC's single-context throughput is 0.28x
+the zig-js throughput by geometric mean. These kernels deliberately exercise guarded native/VM tiers that
+zig-js currently implements; rows outside those documented subsets continue through general bytecode paths.
+The number is a compact description of this matrix, not a claim about applications or unsupported workloads.
 
-At 8 independent warmed contexts, JSC throughput is 5.14x zig-js by
-geometric mean; scaling from the mode's own one-lane baseline is 5.16x
-for zig-js and 4.62x for JSC. In the symmetric cold lifecycle, JSC
-throughput is 5.44x zig-js, with 4.84x
-and 4.35x scaling respectively.
+At 8 independent warmed contexts, JSC throughput is 0.25x zig-js by
+geometric mean; scaling from the mode's own one-lane baseline is 5.68x
+for zig-js and 5.12x for JSC. In the symmetric cold lifecycle, JSC
+throughput is 0.27x zig-js, with 5.31x
+and 5.15x scaling respectively.
 
-zig-js's shared-realm path scales 2.37x at 8 lanes from its
+zig-js's shared-realm path scales 4.56x at 8 lanes from its
 own one-lane shared baseline. It has no direct JSC ratio because the public JSC embedding API exposes
 isolated global contexts, not concurrent JavaScript workers sharing one object graph. Per-workload rows
 matter more than any aggregate.
@@ -125,6 +125,7 @@ matter more than any aggregate.
 
 - Both engines evaluate the exact bytes in `bench/comparison.js`. Directly compared single and independent rows use the exact invocation bytes `__benchmarkSelected(__benchmarkJobs, __benchmarkLane)`; shared mode calls the same selected function with the same jobs/lane arguments. The driver rejects unstable or cross-engine checksum mismatches.
 - zig-js is built `ReleaseFast`. Direct and independent contexts explicitly enable precise GC; shared mode enables the shipping no-GIL thread configuration, which implies GC.
+- zig-js independent workers give each context the process-wide thread-safe libc allocator, whose reusable infrastructure outlives timed cold contexts; cold mode still times every context-owned allocation and release. JSC uses its internal process allocator.
 - Single mode evaluates the workload source, configures the context, and performs three reduced-size warm-up calls before timing one host evaluation call per sample.
 - Independent steady mode uses the same persistent-worker protocol in both runners. Every worker creates, configures, and warms its own thread-affine context before measurement. Each timer includes semaphore dispatch, one invocation per lane, and completion waits; worker/context teardown follows all samples.
 - Independent cold mode performs no warm-up. Every timer includes OS-thread spawn, worker-owned context creation, workload-source evaluation and configuration, one invocation, context destruction, and OS-thread join.
