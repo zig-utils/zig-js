@@ -2082,8 +2082,16 @@ pub const Object = struct {
             // (fast-path guards) synchronize with it; content stays under the lock.
             @atomicStore(?*std.StringHashMapUnmanaged(PropAttr), &self.attrs, m, .release);
         }
-        const gop = try self.attrsMap().?.getOrPut(alloc, name);
-        if (!gop.found_existing) gop.key_ptr.* = try alloc.dupe(u8, name);
+        const attrs = self.attrsMap().?;
+        if (attrs.getPtr(name)) |value_ptr| {
+            value_ptr.* = a;
+            return;
+        }
+        const owned_name = try alloc.dupe(u8, name);
+        errdefer alloc.free(owned_name);
+        const gop = try attrs.getOrPut(alloc, owned_name);
+        std.debug.assert(!gop.found_existing); // property_lock excludes a competing insert
+        gop.key_ptr.* = owned_name;
         gop.value_ptr.* = a;
     }
 
@@ -2176,10 +2184,19 @@ pub const Object = struct {
             nm.* = .{};
             self.accessors.store(nm, .monotonic); // publish under lockProperties
         }
-        const gop = try self.accessors.load(.monotonic).?.getOrPut(alloc, name);
-        if (!gop.found_existing) {
-            gop.key_ptr.* = try alloc.dupe(u8, name);
+        const accessors = self.accessors.load(.monotonic).?;
+        var inserted = false;
+        const value_ptr = accessors.getPtr(name) orelse entry: {
+            const owned_name = try alloc.dupe(u8, name);
+            errdefer alloc.free(owned_name);
+            const gop = try accessors.getOrPut(alloc, owned_name);
+            std.debug.assert(!gop.found_existing); // property_lock excludes a competing insert
+            gop.key_ptr.* = owned_name;
             gop.value_ptr.* = .{};
+            inserted = true;
+            break :entry gop.value_ptr;
+        };
+        if (inserted) {
             if (canonicalIndex(name) != null) {
                 self.has_indexed_property.store(true, .monotonic);
                 self.indexed_own_seen.store(true, .release);
@@ -2188,15 +2205,15 @@ pub const Object = struct {
             // existing data keys (shape-chain insertion order), so the new
             // accessor interleaves correctly with them.
             try self.ensureKeyOrderUnlocked(arena);
-            try self.recordKeyOrderUnlocked(arena, gop.key_ptr.*);
+            try self.recordKeyOrderUnlocked(arena, name);
         }
         if (get) |g| {
             gcBarrier(self, g);
-            gop.value_ptr.get = g;
+            value_ptr.get = g;
         }
         if (set) |s| {
             gcBarrier(self, s);
-            gop.value_ptr.set = s;
+            value_ptr.set = s;
         }
     }
 

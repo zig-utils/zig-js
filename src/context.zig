@@ -11406,11 +11406,16 @@ test "Context heap_limit_bytes object side-store pressure fails closed" {
         \\  for (let i = 0; i < 96; i++)
         \\    names.push("sideStorePressure" + i);
         \\  const keep = [];
+        \\  const getter = () => 1;
         \\  for (;;) {
         \\    const o = {};
         \\    for (const name of names)
         \\      o[name] = keep.length;
         \\    delete o.sideStorePressure3;
+        \\    Object.defineProperty(o, "read", {
+        \\      get: getter,
+        \\      configurable: true
+        \\    });
         \\    Object.defineProperty(o, "locked", {
         \\      value: keep.length,
         \\      writable: false,
