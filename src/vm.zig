@@ -637,6 +637,13 @@ const QuickArrayPlan = union(enum) {
     packed_push: QuickPackedArrayPushLoop,
 };
 
+const QuickGlobalBinding = struct {
+    env: *Environment,
+    object: *value.Object,
+    shape: *Shape,
+    slot: u32,
+};
+
 // Test-only observations enforce that the optimized path remains reachable.
 // The fetchAdd call is compile-time removed from production builds.
 var quick_property_update_hits: std.atomic.Value(u64) = .init(0);
@@ -649,6 +656,7 @@ var quick_array_push_hits: std.atomic.Value(u64) = .init(0);
 var quick_packed_array_sum_loop_hits: std.atomic.Value(u64) = .init(0);
 var quick_packed_array_push_loop_hits: std.atomic.Value(u64) = .init(0);
 var quick_packed_array_specialized_expression_hits: std.atomic.Value(u64) = .init(0);
+var quick_global_binding_hits: std.atomic.Value(u64) = .init(0);
 
 inline fn quickPlainObject(value_: Value) ?*value.Object {
     if (!value_.isObject()) return null;
@@ -914,6 +922,49 @@ fn quickArrayBoundValue(bound: QuickArrayBound, frame: *Frame) ?Value {
             break :value_ frame.slots[local];
         },
     };
+}
+
+inline fn quickGlobalBindingValue(chunk: *Chunk, instruction: usize, vm: *Interpreter) ?Value {
+    if (instruction >= chunk.quick_global_bindings.len) return null;
+    const raw = chunk.quick_global_bindings[instruction] orelse return null;
+    const cache: *QuickGlobalBinding = @ptrCast(@alignCast(raw));
+    if (vm.env != cache.env or vm.global_object != cache.object or cache.object.shape != cache.shape)
+        return null;
+    const slot: usize = @intCast(cache.slot);
+    if (slot >= cache.object.slots.items.len) return null;
+    return cache.object.slots.items[slot];
+}
+
+fn recordQuickGlobalBinding(chunk: *Chunk, instruction: usize, vm: *Interpreter, name: []const u8) void {
+    const env = vm.env;
+    if (env.parent != null or env.with_object != null) return;
+    env.lockBindings();
+    const is_live_global_data = env.aliases.get(name) == null and
+        env.vars.contains(name) and
+        !env.consts.contains(name) and
+        !env.lexicals.contains(name) and
+        !env.deletable.contains(name);
+    env.unlockBindings();
+    if (!is_live_global_data) return;
+    const object = vm.global_object orelse return;
+    if (object.proxy_handler != null or object.proxy_revoked or object.getAccessor(name) != null) return;
+    const shape = object.shape orelse return;
+    const slot = shape.lookup(name) orelse return;
+    if (slot >= object.slots.items.len) return;
+    if (chunk.quick_global_bindings.len == 0) {
+        const caches = chunk.arena.alloc(?*anyopaque, chunk.code.items.len) catch return;
+        @memset(caches, null);
+        chunk.quick_global_bindings = caches;
+    }
+    if (instruction >= chunk.quick_global_bindings.len) return;
+    const cache: *QuickGlobalBinding = if (chunk.quick_global_bindings[instruction]) |raw|
+        @ptrCast(@alignCast(raw))
+    else cache: {
+        const created = chunk.arena.create(QuickGlobalBinding) catch return;
+        chunk.quick_global_bindings[instruction] = created;
+        break :cache created;
+    };
+    cache.* = .{ .env = env, .object = object, .shape = shape, .slot = slot };
 }
 
 fn tryQuickArrayLoop(
@@ -1622,7 +1673,15 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 // `Symbol.unscopables`); identical to `env.get` when no `with` is on
                 // the chain, so this is a no-op for ordinary generator/async bodies.
                 const name = chunk.names.items[inst.a];
+                if (!parallel_sync) {
+                    if (quickGlobalBindingValue(chunk, ip - 1, vm)) |cached| {
+                        try stack.append(stack_alloc, cached);
+                        if (builtin.is_test) _ = quick_global_binding_hits.fetchAdd(1, .monotonic);
+                        continue;
+                    }
+                }
                 const v = (try vm.lookupIdent(name)) orelse (try vm.globalProp(name)) orelse return vm.throwError("ReferenceError", name);
+                if (!parallel_sync) recordQuickGlobalBinding(chunk, ip - 1, vm, name);
                 try stack.append(stack_alloc, v);
             },
             .load_var_or_undef => {
@@ -4447,6 +4506,52 @@ test "vm: objects, arrays, members, this, new, instanceof on the VM" {
     try std.testing.expectEqual(@as(f64, 7), (try vmRun(a, "function P(x, y) { this.x = x; this.y = y; } let p = new P(3, 4); p.x + p.y")).asNum());
     try std.testing.expect((try vmRun(a, "function P(x) { this.x = x; } (new P(1)) instanceof P")).asBool());
     try std.testing.expectEqual(@as(f64, 10), (try vmRun(a, "let o = { n: 10, get: function () { return this.n; } }; o.get()")).asNum());
+}
+
+test "vm: caches live global function bindings" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const source =
+        \\var switchAt = 2;
+        \\function recur(n) {
+        \\  if (n === switchAt) recur = function () { return 10; };
+        \\  return n < 1 ? 0 : recur(n - 1) + 1;
+        \\}
+        \\var original = recur;
+        \\original(3)
+    ;
+    const old_parallel = bc.ic_seqlock_enabled.load(.monotonic);
+    defer bc.ic_seqlock_enabled.store(old_parallel, .monotonic);
+    const hits_before = quick_global_binding_hits.load(.monotonic);
+    var isolated_hits: u64 = undefined;
+    for ([_]bool{ false, true }) |parallel| {
+        bc.ic_seqlock_enabled.store(parallel, .monotonic);
+        var parser = try Parser.init(allocator, source);
+        const program = try parser.parseProgram();
+        const chunk = try Compiler.compileProgram(allocator, program);
+        var env = Environment{ .arena = allocator, .fn_scope = true };
+        const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
+        try interp.installGlobals(&env, root_shape);
+        const global = try gc_mod.allocObj(allocator);
+        global.* = .{};
+        try env.put("globalThis", Value.obj(global));
+        try interp.mirrorGlobalsOnto(&env, global, root_shape);
+        var machine = Interpreter{
+            .arena = allocator,
+            .env = &env,
+            .root_shape = root_shape,
+            .global_object = global,
+            .this_value = Value.obj(global),
+        };
+        try std.testing.expectEqual(@as(f64, 12), (try run(&machine, chunk, null)).asNum());
+        if (!parallel) {
+            try std.testing.expect(quick_global_binding_hits.load(.monotonic) > hits_before);
+            isolated_hits = quick_global_binding_hits.load(.monotonic);
+        } else {
+            try std.testing.expectEqual(isolated_hits, quick_global_binding_hits.load(.monotonic));
+        }
+    }
 }
 
 test "vm: quickens packed dense numeric array reads" {

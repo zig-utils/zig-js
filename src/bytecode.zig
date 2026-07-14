@@ -340,6 +340,10 @@ pub const Chunk = struct {
     /// unsupported structural shapes are cached too so cold decoding is paid
     /// once rather than once per loop iteration.
     quick_array_plans: []?*anyopaque = &.{},
+    /// Isolated-mode live-slot caches for global `load_var` sites. Entries are
+    /// type-erased to avoid importing interpreter/value types here and are
+    /// guarded by their exact closure environment, global object, and shape.
+    quick_global_bindings: []?*anyopaque = &.{},
     /// Hotness and race-safe native-tier publication state. It remains cold
     /// until VM entry observation is wired to a backend; keeping it on the
     /// chunk makes the eventual shared-realm path single-writer by construction.
