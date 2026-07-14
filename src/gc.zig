@@ -413,11 +413,17 @@ inline fn traceReaction(r: promise.Reaction, v: anytype) void {
 }
 
 inline fn traceMicrotask(mt: promise.Microtask, v: anytype) void {
-    traceReaction(mt.reaction, v);
-    markValue(v, mt.argument);
-    markValue(v, mt.thenable);
-    markValue(v, mt.then_fn);
-    if (mt.promise) |p| markManaged(v, p);
+    switch (mt.kind) {
+        .reaction => {
+            traceReaction(mt.reaction, v);
+            markValue(v, mt.argument);
+        },
+        .thenable => {
+            markValue(v, mt.thenable);
+            markValue(v, mt.then_fn);
+            if (mt.promise) |p| markManaged(v, p);
+        },
+    }
 }
 
 pub fn traceGenerator(g: *vm.Generator, v: anytype) void {
@@ -1200,4 +1206,67 @@ test "gc pruneDeadWeakEntries removes dead weak keys with unordered tail removal
     try std.testing.expect(!pruneDeadWeakEntries(&o, &heap));
     try std.testing.expectEqual(@as(usize, 1), o.weak_entries.items.len);
     try std.testing.expectEqual(@intFromPtr(&live_key), @intFromPtr(o.weak_entries.items[0].key.?));
+}
+
+test "gc traces only the active microtask variant" {
+    const Recorder = struct {
+        marked: [8]?*anyopaque = .{ null, null, null, null, null, null, null, null },
+        len: usize = 0,
+
+        pub fn mark(self: *@This(), cell: ?*anyopaque) void {
+            const p = cell orelse return;
+            self.marked[self.len] = p;
+            self.len += 1;
+        }
+
+        fn contains(self: *const @This(), cell: *anyopaque) bool {
+            for (self.marked[0..self.len]) |marked| {
+                if (marked == cell) return true;
+            }
+            return false;
+        }
+    };
+
+    var reaction_handler = Object{};
+    var reaction_argument = Object{};
+    var thenable = Object{};
+    var then_fn = Object{};
+    var inactive_argument = Object{};
+    var reaction_result = promise.Promise{ .gc_owned = true };
+    var thenable_result = promise.Promise{ .gc_owned = true };
+    var inactive_result = promise.Promise{ .gc_owned = true };
+
+    var reaction_marks = Recorder{};
+    traceMicrotask(.{
+        .kind = .reaction,
+        .reaction = .{ .handler = Value.obj(&reaction_handler), .result = &reaction_result },
+        .argument = Value.obj(&reaction_argument),
+        .fulfilled = true,
+        .thenable = Value.obj(&thenable),
+        .then_fn = Value.obj(&then_fn),
+        .promise = &inactive_result,
+    }, &reaction_marks);
+    try std.testing.expect(reaction_marks.contains(&reaction_handler));
+    try std.testing.expect(reaction_marks.contains(&reaction_argument));
+    try std.testing.expect(reaction_marks.contains(&reaction_result));
+    try std.testing.expect(!reaction_marks.contains(&thenable));
+    try std.testing.expect(!reaction_marks.contains(&then_fn));
+    try std.testing.expect(!reaction_marks.contains(&inactive_result));
+
+    var thenable_marks = Recorder{};
+    traceMicrotask(.{
+        .kind = .thenable,
+        .reaction = .{ .handler = Value.obj(&reaction_handler), .result = &inactive_result },
+        .argument = Value.obj(&inactive_argument),
+        .fulfilled = true,
+        .thenable = Value.obj(&thenable),
+        .then_fn = Value.obj(&then_fn),
+        .promise = &thenable_result,
+    }, &thenable_marks);
+    try std.testing.expect(thenable_marks.contains(&thenable));
+    try std.testing.expect(thenable_marks.contains(&then_fn));
+    try std.testing.expect(thenable_marks.contains(&thenable_result));
+    try std.testing.expect(!thenable_marks.contains(&reaction_handler));
+    try std.testing.expect(!thenable_marks.contains(&inactive_argument));
+    try std.testing.expect(!thenable_marks.contains(&inactive_result));
 }
