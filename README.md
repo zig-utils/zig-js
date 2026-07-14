@@ -108,56 +108,56 @@ Those numbers show current VM/tree-walk parity on these microbenchmarks, not a b
 
 ### zig-js vs JavaScriptCore
 
-`zig build benchmark-comparison` runs the same pure-JavaScript kernels through GC-enabled zig-js and the macOS system JavaScriptCore, checks deterministic results across engines, and reports seven-sample medians with dispersion. It directly compares warmed single contexts, warmed independent contexts on persistent OS workers, and cold thread/context lifecycles; zig-js shared-realm threads remain a separate capability panel. The latest [full report](docs/.data/benchmark-comparison-2026-07-14.md) preserves all [1,540 raw samples](docs/.data/benchmark-comparison-2026-07-14.tsv) from clean commit `c98a36c4` on an 11-core Apple M3 Pro (AC power, fully charged when captured). Every full-run row exceeds a 50 ms median timing floor; equal work counts were conservatively recalibrated for both engines to keep the fastest rows above that floor.
+`zig build benchmark-comparison` runs the same pure-JavaScript kernels through GC-enabled zig-js and the macOS system JavaScriptCore, checks deterministic results across engines, and reports seven-sample medians with dispersion. It directly compares warmed single contexts, warmed independent contexts on persistent OS workers, and cold thread/context lifecycles; zig-js shared-realm threads remain a separate capability panel. The latest [full report](docs/.data/benchmark-comparison-2026-07-14.md) preserves all [1,540 raw samples](docs/.data/benchmark-comparison-2026-07-14.tsv) from clean commit `4e3de6f5` on an 11-core Apple M3 Pro (battery power at 93% and discharging when captured). Every full-run row exceeds a 50 ms median timing floor; equal work counts are identical for both engines.
 
 Lower time is better. A throughput ratio above 1.00x favors zig-js; below 1.00x favors JSC.
 
 | workload | zig-js single (ms) | JSC single (ms) | zig-js / JSC throughput |
 | --- | ---: | ---: | ---: |
-| arithmetic | 88.764 | 348.910 | 3.93x |
-| properties | 87.972 | 289.043 | 3.29x |
-| polymorphic properties | 81.124 | 202.880 | 2.50x |
-| object churn | 197.469 | 119.400 | 0.60x |
-| arrays | 78.073 | 147.870 | 1.89x |
-| direct calls | 56.532 | 118.268 | 2.09x |
-| method calls | 60.881 | 137.290 | 2.25x |
-| closure calls | 61.843 | 186.502 | 3.02x |
-| arguments calls | 66.822 | 293.922 | 4.40x |
-| Fibonacci | 83.070 | 453.216 | 5.46x |
+| arithmetic | 83.971 | 344.822 | 4.11x |
+| properties | 88.214 | 295.844 | 3.35x |
+| polymorphic properties | 81.608 | 198.403 | 2.43x |
+| object churn | 176.398 | 116.168 | 0.66x |
+| arrays | 81.078 | 158.210 | 1.95x |
+| direct calls | 56.462 | 117.743 | 2.09x |
+| method calls | 72.504 | 136.747 | 1.89x |
+| closure calls | 64.665 | 210.548 | 3.26x |
+| arguments calls | 70.965 | 295.125 | 4.16x |
+| Fibonacci | 83.211 | 447.072 | 5.37x |
 
 At eight warmed independent contexts, both engines use the same persistent-worker protocol and every lane performs the full job count:
 
 | workload | zig-js (ms) | JSC (ms) | zig-js / JSC throughput | zig-js scaling | JSC scaling |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| arithmetic | 102.917 | 512.033 | 4.98x | 6.40x | 5.45x |
-| properties | 113.895 | 434.044 | 3.81x | 6.40x | 5.48x |
-| polymorphic properties | 121.178 | 338.869 | 2.80x | 5.34x | 4.82x |
-| object churn | 714.208 | 169.960 | 0.24x | 2.17x | 5.54x |
-| arrays | 117.506 | 235.293 | 2.00x | 5.54x | 5.31x |
-| direct calls | 77.983 | 190.953 | 2.45x | 5.71x | 4.82x |
-| method calls | 85.761 | 213.969 | 2.49x | 5.70x | 5.13x |
-| closure calls | 83.235 | 307.948 | 3.70x | 5.91x | 4.91x |
-| arguments calls | 97.371 | 494.148 | 5.07x | 5.48x | 4.80x |
-| Fibonacci | 135.307 | 749.786 | 5.54x | 4.88x | 4.84x |
+| arithmetic | 101.773 | 482.515 | 4.74x | 5.99x | 5.71x |
+| properties | 116.082 | 396.810 | 3.42x | 6.11x | 5.74x |
+| polymorphic properties | 123.384 | 288.752 | 2.34x | 5.30x | 5.51x |
+| object churn | 543.223 | 172.520 | 0.32x | 2.63x | 5.29x |
+| arrays | 117.231 | 230.295 | 1.96x | 5.27x | 5.27x |
+| direct calls | 74.279 | 175.791 | 2.37x | 6.07x | 5.34x |
+| method calls | 94.982 | 207.752 | 2.19x | 5.18x | 5.26x |
+| closure calls | 97.397 | 321.771 | 3.30x | 5.13x | 4.74x |
+| arguments calls | 96.319 | 473.689 | 4.92x | 5.56x | 5.02x |
+| Fibonacci | 117.196 | 659.069 | 5.62x | 5.72x | 5.44x |
 
 zig-js's no-GIL shared-realm mode has no direct public-JSC equivalent because its threads share one object graph. Its latest eight-lane scaling is:
 
 | workload | one lane (ms) | eight lanes (ms) | throughput scaling |
 | --- | ---: | ---: | ---: |
-| arithmetic | 83.473 | 102.441 | 6.52x |
-| properties | 125.505 | 166.612 | 6.03x |
-| polymorphic properties | 519.222 | 717.062 | 5.79x |
-| object churn | 399.682 | 11,089.300 | 0.29x |
-| arrays | 80.226 | 232.296 | 2.76x |
-| direct calls | 55.595 | 78.896 | 5.64x |
-| method calls | 114.588 | 176.190 | 5.20x |
-| closure calls | 63.255 | 85.257 | 5.94x |
-| arguments calls | 69.610 | 103.016 | 5.41x |
-| Fibonacci | 236.729 | 409.887 | 4.62x |
+| arithmetic | 78.691 | 104.988 | 6.00x |
+| properties | 123.939 | 160.016 | 6.20x |
+| polymorphic properties | 520.453 | 692.200 | 6.02x |
+| object churn | 374.794 | 9,203.183 | 0.33x |
+| arrays | 92.151 | 232.684 | 3.17x |
+| direct calls | 56.468 | 78.439 | 5.76x |
+| method calls | 115.302 | 175.250 | 5.26x |
+| closure calls | 67.827 | 85.510 | 6.35x |
+| arguments calls | 66.970 | 95.524 | 5.61x |
+| Fibonacci | 243.440 | 366.814 | 5.31x |
 
-zig-js wins 9 of 10 direct single-context rows. Across the complete 10-workload matrix, its geometric-mean throughput lead is 2.56x in direct single-context mode and 2.63x at eight warmed independent contexts. Mode-local eight-lane scaling is 5.16x for zig-js and 5.10x for JSC; the symmetric cold lifecycle has a 2.63x zig-js throughput lead and scales 5.13x and 5.01x respectively. Shared-realm scaling is 3.89x by geometric mean. Object churn remains the clear exception: JSC leads that direct row and shared scaling is still below 1x. The bounded tail-freelist rebuild reduced the exact-parent eight-lane shared median by 12.2%; in the complete publication, object churn improved from 12,368.464 ms to 11,089.300 ms (10.3%), while its faster one-lane baseline leaves reported scaling at 0.29x. See [Performance Benchmarks](docs/benchmarks.md) for all lane counts, cold results, exact timed boundaries, allocator choice, dispersion, caveats, reproduction, and raw evidence.
+zig-js wins 9 of 10 direct single-context rows. Across the complete 10-workload matrix, its geometric-mean throughput lead is 2.56x in direct single-context mode and 2.54x at eight warmed independent contexts. Mode-local eight-lane scaling is 5.18x for zig-js and 5.32x for JSC; the symmetric cold lifecycle has a 2.58x zig-js throughput lead and scales 5.29x and 5.25x respectively. Shared-realm scaling is 4.09x by geometric mean. Object churn remains the clear exception: JSC leads that direct row and shared scaling is still below 1x. Per-chunk free-state tracking improved the exact-parent direct median by 7.37% and the decision-load shared median by 2.96%; compared with the previous full publication, the new direct and shared-eight medians are 10.7% and 17.0% lower. See [Performance Benchmarks](docs/benchmarks.md) for all lane counts, cold results, exact timed boundaries, allocator choice, dispersion, caveats, reproduction, and raw evidence.
 
-Implemented performance machinery includes the bytecode VM, frame slots/upvalues, object shapes, inline caches, guarded loop and recurrence kernels, a baseline native tier, the engine-wide 8-byte NaN-boxed `Value`, GC slab backing, and an opt-in-GC one-cycle nursery that reclaims young garbage at quiescent boundaries and immediately tenures survivors. Future work includes broader native-tier coverage, nursery sizing and pause optimization, deeper generational policies, and a general optimizing tier.
+Implemented performance machinery includes the bytecode VM, frame slots/upvalues, object shapes, inline caches, guarded loop and recurrence kernels, a baseline native tier, the engine-wide 8-byte NaN-boxed `Value`, GC slab backing with per-chunk reusable-slot bitmaps, and an opt-in-GC one-cycle nursery that reclaims young garbage at quiescent boundaries and immediately tenures survivors. Future work includes broader native-tier coverage, nursery sizing and pause optimization, deeper generational policies, and a general optimizing tier.
 
 ## Language And Runtime Coverage
 
