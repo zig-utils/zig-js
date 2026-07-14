@@ -29749,6 +29749,7 @@ fn installTypedArrays(env: *Environment, rs: *Shape) EvalError!void {
     try installTextDecoder(env, rs, object_proto);
     try installCrypto(env, rs, object_proto);
     try installURLSearchParams(env, rs, object_proto);
+    try installURL(env, rs, object_proto);
     try installTemporal(env, rs, object_proto);
     try installIntl(env, rs, object_proto);
     // ShadowRealm: a child realm with `evaluate` (and a minimal `importValue`).
@@ -39191,6 +39192,628 @@ fn installTextDecoder(env: *Environment, rs: *Shape, object_proto: *value.Object
     try env.put("TextDecoder", Value.obj(ctor));
 }
 
+// ===== URL (WHATWG, common schemes) ==================================
+const UrlParts = struct {
+    scheme: []const u8 = "",
+    username: []const u8 = "",
+    password: []const u8 = "",
+    host: ?[]const u8 = null, // null = no host (opaque-path URLs)
+    port: []const u8 = "", // "" = default/none
+    path: []const u8 = "", // serialized path (incl. leading '/' for special), or opaque path
+    query: ?[]const u8 = null,
+    fragment: ?[]const u8 = null,
+    opaque_path: bool = false,
+};
+fn urlIsSpecialScheme(s: []const u8) bool {
+    const special = [_][]const u8{ "http", "https", "ws", "wss", "ftp", "file" };
+    for (special) |sp| if (std.mem.eql(u8, s, sp)) return true;
+    return false;
+}
+fn urlDefaultPort(s: []const u8) ?[]const u8 {
+    if (std.mem.eql(u8, s, "http") or std.mem.eql(u8, s, "ws")) return "80";
+    if (std.mem.eql(u8, s, "https") or std.mem.eql(u8, s, "wss")) return "443";
+    if (std.mem.eql(u8, s, "ftp")) return "21";
+    return null;
+}
+const UrlEncSet = enum { c0, fragment, query, special_query, path, userinfo };
+fn urlShouldEncode(set: UrlEncSet, b: u8) bool {
+    if (b <= 0x1F or b > 0x7E) return true;
+    const in = struct {
+        fn f(c: u8, chars: []const u8) bool {
+            return std.mem.indexOfScalar(u8, chars, c) != null;
+        }
+    }.f;
+    return switch (set) {
+        .c0 => false,
+        .fragment => b == ' ' or in(b, "\"<>`"),
+        .query => b == ' ' or in(b, "\"#<>"),
+        .special_query => b == ' ' or in(b, "\"#<>'"),
+        .path => b == ' ' or in(b, "\"#<>?`{}"),
+        .userinfo => b == ' ' or in(b, "\"#<>?`{}/:;=@[\\]^|"),
+    };
+}
+fn urlPercentEncode(self: *Interpreter, out: *std.ArrayListUnmanaged(u8), s: []const u8, set: UrlEncSet) EvalError!void {
+    const utf8 = try wtf8ToUtf8Bytes(self, s);
+    const hex = "0123456789ABCDEF";
+    for (utf8) |b| {
+        if (urlShouldEncode(set, b)) {
+            try out.append(self.arena, '%');
+            try out.append(self.arena, hex[b >> 4]);
+            try out.append(self.arena, hex[b & 0x0F]);
+        } else try out.append(self.arena, b);
+    }
+}
+fn urlStripTabsNewlines(a: std.mem.Allocator, s: []const u8) ![]const u8 {
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    for (s) |c| if (c != '\t' and c != '\n' and c != '\r') try out.append(a, c);
+    return out.items;
+}
+fn isC0OrSpace(c: u8) bool {
+    return c <= 0x20;
+}
+/// Parse a URL string (optionally against a base). Handles special schemes with
+/// an authority, opaque-path non-special schemes, and basic relative resolution.
+fn urlParse(self: *Interpreter, input_raw: []const u8, base: ?UrlParts) EvalError!?UrlParts {
+    // Trim leading/trailing C0-control-or-space, then remove all tab/newline.
+    var t = input_raw;
+    while (t.len > 0 and isC0OrSpace(t[0])) t = t[1..];
+    while (t.len > 0 and isC0OrSpace(t[t.len - 1])) t = t[0 .. t.len - 1];
+    const input = try urlStripTabsNewlines(self.arena, t);
+
+    var p = UrlParts{};
+    var rest = input;
+    // Scheme: ALPHA *( ALPHA / DIGIT / "+" / "-" / "." ) ":"
+    var scheme_end: ?usize = null;
+    if (input.len > 0 and std.ascii.isAlphabetic(input[0])) {
+        var i: usize = 1;
+        while (i < input.len) : (i += 1) {
+            const c = input[i];
+            if (c == ':') {
+                scheme_end = i;
+                break;
+            }
+            if (!(std.ascii.isAlphanumeric(c) or c == '+' or c == '-' or c == '.')) break;
+        }
+    }
+    if (scheme_end) |se| {
+        var sb: std.ArrayListUnmanaged(u8) = .empty;
+        for (input[0..se]) |c| try sb.append(self.arena, std.ascii.toLower(c));
+        p.scheme = sb.items;
+        rest = input[se + 1 ..];
+    } else {
+        // No scheme → relative reference; requires a base.
+        const b = base orelse return null;
+        p = b;
+        p.query = b.query;
+        p.fragment = null;
+        return try urlParseRelative(self, &p, input);
+    }
+
+    const special = urlIsSpecialScheme(p.scheme);
+    const has_authority = std.mem.startsWith(u8, rest, "//") or (special and std.mem.startsWith(u8, rest, "/"));
+    if (special or std.mem.startsWith(u8, rest, "//")) {
+        // Skip "//" (special schemes tolerate any number of leading slashes).
+        var body = rest;
+        if (std.mem.startsWith(u8, body, "//")) body = body[2..] else if (special) {
+            while (body.len > 0 and (body[0] == '/' or body[0] == '\\')) body = body[1..];
+        }
+        // Authority ends at the first / \ ? #
+        var auth_end: usize = body.len;
+        for (body, 0..) |c, i| {
+            if (c == '/' or c == '?' or c == '#' or (special and c == '\\')) {
+                auth_end = i;
+                break;
+            }
+        }
+        const authority = body[0..auth_end];
+        const after = body[auth_end..];
+        // userinfo (last '@' in authority)
+        var hostport = authority;
+        if (std.mem.lastIndexOfScalar(u8, authority, '@')) |at| {
+            const userinfo = authority[0..at];
+            hostport = authority[at + 1 ..];
+            if (std.mem.indexOfScalar(u8, userinfo, ':')) |colon| {
+                var ub: std.ArrayListUnmanaged(u8) = .empty;
+                try urlPercentEncode(self, &ub, userinfo[0..colon], .userinfo);
+                p.username = ub.items;
+                var pb: std.ArrayListUnmanaged(u8) = .empty;
+                try urlPercentEncode(self, &pb, userinfo[colon + 1 ..], .userinfo);
+                p.password = pb.items;
+            } else {
+                var ub: std.ArrayListUnmanaged(u8) = .empty;
+                try urlPercentEncode(self, &ub, userinfo, .userinfo);
+                p.username = ub.items;
+            }
+        }
+        // host[:port] — IPv6 literal in brackets keeps its colons.
+        var host_str = hostport;
+        if (hostport.len > 0 and hostport[0] == '[') {
+            const close = std.mem.indexOfScalar(u8, hostport, ']') orelse return null;
+            host_str = hostport[0 .. close + 1];
+            const tail = hostport[close + 1 ..];
+            if (tail.len > 0 and tail[0] == ':') p.port = try urlNormalizePort(self, p.scheme, tail[1..]) orelse return null;
+        } else if (std.mem.lastIndexOfScalar(u8, hostport, ':')) |colon| {
+            host_str = hostport[0..colon];
+            p.port = try urlNormalizePort(self, p.scheme, hostport[colon + 1 ..]) orelse return null;
+        }
+        // Host: lowercase a domain (ASCII); reject empty for special (except file).
+        if (host_str.len == 0) {
+            if (special and !std.mem.eql(u8, p.scheme, "file")) return null;
+            p.host = "";
+        } else {
+            var hb: std.ArrayListUnmanaged(u8) = .empty;
+            for (host_str) |c| try hb.append(self.arena, std.ascii.toLower(c));
+            p.host = hb.items;
+        }
+        try urlParsePathQueryFrag(self, &p, after, special, true);
+    } else {
+        // No authority: opaque path (non-special) — the rest up to ?/# is the path.
+        _ = has_authority;
+        try urlParsePathQueryFrag(self, &p, rest, false, false);
+        p.opaque_path = !std.mem.startsWith(u8, rest, "/");
+    }
+    return p;
+}
+fn urlNormalizePort(self: *Interpreter, scheme: []const u8, s: []const u8) EvalError!?[]const u8 {
+    _ = self;
+    if (s.len == 0) return "";
+    var n: u32 = 0;
+    for (s) |c| {
+        if (!std.ascii.isDigit(c)) return null;
+        n = n * 10 + (c - '0');
+        if (n > 65535) return null;
+    }
+    if (urlDefaultPort(scheme)) |dp| {
+        var buf: [8]u8 = undefined;
+        const ns = std.fmt.bufPrint(&buf, "{d}", .{n}) catch return null;
+        if (std.mem.eql(u8, ns, dp)) return ""; // default port omitted
+    }
+    return s;
+}
+fn urlParsePathQueryFrag(self: *Interpreter, p: *UrlParts, s_in: []const u8, special: bool, has_host: bool) EvalError!void {
+    var s = s_in;
+    // Fragment
+    if (std.mem.indexOfScalar(u8, s, '#')) |h| {
+        var fb: std.ArrayListUnmanaged(u8) = .empty;
+        try urlPercentEncode(self, &fb, s[h + 1 ..], .fragment);
+        p.fragment = fb.items;
+        s = s[0..h];
+    }
+    // Query
+    if (std.mem.indexOfScalar(u8, s, '?')) |q| {
+        var qb: std.ArrayListUnmanaged(u8) = .empty;
+        try urlPercentEncode(self, &qb, s[q + 1 ..], if (special) .special_query else .query);
+        p.query = qb.items;
+        s = s[0..q];
+    }
+    // Path
+    var pb: std.ArrayListUnmanaged(u8) = .empty;
+    if (has_host or special or std.mem.startsWith(u8, s, "/")) {
+        // Path-absolute: normalize segments (resolve '.' and '..').
+        try urlEncodeNormalizePath(self, &pb, s, special);
+    } else {
+        // Opaque path: percent-encode with the C0 set, no normalization.
+        try urlPercentEncode(self, &pb, s, .c0);
+    }
+    p.path = pb.items;
+}
+fn urlEncodeNormalizePath(self: *Interpreter, out: *std.ArrayListUnmanaged(u8), s: []const u8, special: bool) EvalError!void {
+    var segs: std.ArrayListUnmanaged([]const u8) = .empty;
+    var body = s;
+    // A special scheme treats '\' as '/'.
+    var norm: std.ArrayListUnmanaged(u8) = .empty;
+    if (special) {
+        for (body) |c| try norm.append(self.arena, if (c == '\\') '/' else c);
+        body = norm.items;
+    }
+    if (body.len == 0 or body[0] != '/') {
+        // ensure leading slash context handled by caller; here split on '/'
+    }
+    var it = std.mem.splitScalar(u8, body, '/');
+    // The first split piece before a leading '/' is empty — skip it.
+    var first = true;
+    while (it.next()) |seg| {
+        const is_last = it.peek() == null;
+        if (first) {
+            first = false;
+            if (seg.len == 0) continue; // leading slash
+        }
+        if (std.mem.eql(u8, seg, ".") or std.ascii.eqlIgnoreCase(seg, "%2e")) {
+            // A terminal "." leaves a trailing slash (empty final segment).
+            if (is_last) try segs.append(self.arena, "");
+            continue;
+        }
+        if (std.mem.eql(u8, seg, "..") or std.ascii.eqlIgnoreCase(seg, "%2e%2e") or std.ascii.eqlIgnoreCase(seg, ".%2e") or std.ascii.eqlIgnoreCase(seg, "%2e.")) {
+            if (segs.items.len > 0) _ = segs.pop();
+            if (is_last) try segs.append(self.arena, "");
+            continue;
+        }
+        var eb: std.ArrayListUnmanaged(u8) = .empty;
+        try urlPercentEncode(self, &eb, seg, .path);
+        try segs.append(self.arena, eb.items);
+    }
+    for (segs.items) |seg| {
+        try out.append(self.arena, '/');
+        try out.appendSlice(self.arena, seg);
+    }
+    if (out.items.len == 0) try out.append(self.arena, '/');
+}
+fn urlParseRelative(self: *Interpreter, p: *UrlParts, input: []const u8) EvalError!?UrlParts {
+    const special = urlIsSpecialScheme(p.scheme);
+    // Empty reference: keep the base path and query verbatim (fragment dropped).
+    if (input.len == 0) return p.*;
+    // Scheme-relative ("//authority…"): reuse the base scheme, parse fresh.
+    if (std.mem.startsWith(u8, input, "//")) {
+        const full = try std.mem.concat(self.arena, u8, &.{ p.scheme, ":", input });
+        return try urlParse(self, full, null);
+    }
+    // Fragment-only: keep the base path and query.
+    if (input.len > 0 and input[0] == '#') {
+        var fb: std.ArrayListUnmanaged(u8) = .empty;
+        try urlPercentEncode(self, &fb, input[1..], .fragment);
+        p.fragment = fb.items;
+        return p.*;
+    }
+    // Query-only (with optional fragment): keep the base path.
+    if (input.len > 0 and input[0] == '?') {
+        var s = input[1..];
+        p.fragment = null;
+        if (std.mem.indexOfScalar(u8, s, '#')) |h| {
+            var fb: std.ArrayListUnmanaged(u8) = .empty;
+            try urlPercentEncode(self, &fb, s[h + 1 ..], .fragment);
+            p.fragment = fb.items;
+            s = s[0..h];
+        }
+        var qb: std.ArrayListUnmanaged(u8) = .empty;
+        try urlPercentEncode(self, &qb, s, if (special) .special_query else .query);
+        p.query = qb.items;
+        return p.*;
+    }
+    // Merge path: absolute path replaces; relative merges onto the base dir.
+    var merged: []const u8 = undefined;
+    if (input.len > 0 and input[0] == '/') {
+        merged = input;
+    } else {
+        // base dir = up to last '/'
+        const base_path = p.path;
+        const slash = std.mem.lastIndexOfScalar(u8, base_path, '/') orelse 0;
+        merged = try std.mem.concat(self.arena, u8, &.{ base_path[0 .. slash + 1], input });
+    }
+    p.query = null;
+    p.fragment = null;
+    try urlParsePathQueryFrag(self, p, merged, special, p.host != null);
+    return p.*;
+}
+fn urlSerialize(self: *Interpreter, p: UrlParts, exclude_fragment: bool) EvalError![]const u8 {
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    try out.appendSlice(self.arena, p.scheme);
+    try out.append(self.arena, ':');
+    if (p.host) |h| {
+        try out.appendSlice(self.arena, "//");
+        if (p.username.len > 0 or p.password.len > 0) {
+            try out.appendSlice(self.arena, p.username);
+            if (p.password.len > 0) {
+                try out.append(self.arena, ':');
+                try out.appendSlice(self.arena, p.password);
+            }
+            try out.append(self.arena, '@');
+        }
+        try out.appendSlice(self.arena, h);
+        if (p.port.len > 0) {
+            try out.append(self.arena, ':');
+            try out.appendSlice(self.arena, p.port);
+        }
+    } else if (!p.opaque_path and std.mem.startsWith(u8, p.path, "//")) {
+        try out.appendSlice(self.arena, "/.");
+    }
+    try out.appendSlice(self.arena, p.path);
+    if (p.query) |q| {
+        try out.append(self.arena, '?');
+        try out.appendSlice(self.arena, q);
+    }
+    if (!exclude_fragment) if (p.fragment) |f| {
+        try out.append(self.arena, '#');
+        try out.appendSlice(self.arena, f);
+    };
+    return out.items;
+}
+fn urlOrigin(self: *Interpreter, p: UrlParts) EvalError![]const u8 {
+    // Tuple origin for special (non-file) schemes; "null" otherwise.
+    if (std.mem.eql(u8, p.scheme, "file") or p.host == null or !urlIsSpecialScheme(p.scheme)) return "null";
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    try out.appendSlice(self.arena, p.scheme);
+    try out.appendSlice(self.arena, "://");
+    try out.appendSlice(self.arena, p.host.?);
+    if (p.port.len > 0) {
+        try out.append(self.arena, ':');
+        try out.appendSlice(self.arena, p.port);
+    }
+    return out.items;
+}
+
+fn urlSlot(o: *value.Object, key: []const u8) ?[]const u8 {
+    if (o.getOwn(key)) |v| if (v.isString()) return v.asStr();
+    return null;
+}
+fn urlStore(self: *Interpreter, o: *value.Object, p: UrlParts) EvalError!void {
+    const S = struct {
+        fn put(s: *Interpreter, obj: *value.Object, k: []const u8, v: []const u8) EvalError!void {
+            try obj.setOwn(s.arena, s.root_shape, k, try Value.strAlloc(s.arena, v));
+        }
+    };
+    try S.put(self, o, "\x00Us", p.scheme);
+    try S.put(self, o, "\x00Uu", p.username);
+    try S.put(self, o, "\x00Uw", p.password);
+    try S.put(self, o, "\x00Uh", p.host orelse "");
+    try S.put(self, o, "\x00Up", p.path);
+    try S.put(self, o, "\x00Un", p.port);
+    try o.setOwn(self.arena, self.root_shape, "\x00Uhh", Value.boolVal(p.host != null));
+    try o.setOwn(self.arena, self.root_shape, "\x00Uop", Value.boolVal(p.opaque_path));
+    if (p.query) |q| try S.put(self, o, "\x00Uq", q) else try o.setOwn(self.arena, self.root_shape, "\x00Uq", Value.nul());
+    if (p.fragment) |f| try S.put(self, o, "\x00Uf", f) else try o.setOwn(self.arena, self.root_shape, "\x00Uf", Value.nul());
+}
+fn urlLoad(o: *value.Object) UrlParts {
+    const has_host = if (o.getOwn("\x00Uhh")) |v| v.toBoolean() else false;
+    const qv = o.getOwn("\x00Uq");
+    const fv = o.getOwn("\x00Uf");
+    return .{
+        .scheme = urlSlot(o, "\x00Us") orelse "",
+        .username = urlSlot(o, "\x00Uu") orelse "",
+        .password = urlSlot(o, "\x00Uw") orelse "",
+        .host = if (has_host) (urlSlot(o, "\x00Uh") orelse "") else null,
+        .path = urlSlot(o, "\x00Up") orelse "",
+        .port = urlSlot(o, "\x00Un") orelse "",
+        .opaque_path = if (o.getOwn("\x00Uop")) |v| v.toBoolean() else false,
+        .query = if (qv) |v| (if (v.isString()) v.asStr() else null) else null,
+        .fragment = if (fv) |v| (if (v.isString()) v.asStr() else null) else null,
+    };
+}
+fn urlConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (self.new_target.isUndefined()) return self.throwError("TypeError", "Failed to construct 'URL': Please use the 'new' operator");
+    const input = try self.toStringV(if (args.len > 0) args[0] else Value.undef());
+    var base: ?UrlParts = null;
+    if (args.len > 1 and !args[1].isUndefined()) {
+        const bs = try self.toStringV(args[1]);
+        base = (try urlParse(self, bs, null)) orelse return self.throwError("TypeError", "Invalid base URL");
+    }
+    const parts = (try urlParse(self, input, base)) orelse return self.throwError("TypeError", "Invalid URL");
+    const obj = try gc_mod.allocObj(self.arena);
+    obj.* = .{};
+    if (self.env.get("URL")) |c| if (c.isObject()) {
+        if (c.asObj().getOwn("prototype")) |pp| if (pp.isObject()) obj.setProtoAtomic(pp.asObj());
+    };
+    try urlStore(self, obj, parts);
+    // Build a (snapshot) URLSearchParams over the query.
+    if (self.env.get("URLSearchParams")) |uspc| if (uspc.isObject()) {
+        const sp = try self.construct(uspc, &.{if (parts.query) |q| try Value.strAlloc(self.arena, q) else Value.str("")});
+        try obj.setOwn(self.arena, self.root_shape, "\x00Usp", sp);
+        // Live link: the params write back into this URL's query on mutation.
+        if (sp.isObject()) try sp.asObj().setOwn(self.arena, self.root_shape, "\x00Uspurl", Value.obj(obj));
+    };
+    return Value.obj(obj);
+}
+fn urlGetter(comptime which: []const u8) value.NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+            _ = args;
+            const self: *Interpreter = @ptrCast(@alignCast(ctx));
+            if (!this.isObject()) return self.throwError("TypeError", "URL getter on non-object");
+            const o = this.asObj();
+            const p = urlLoad(o);
+            if (std.mem.eql(u8, which, "searchParams")) return o.getOwn("\x00Usp") orelse Value.undef();
+            const s: []const u8 = blk: {
+                if (std.mem.eql(u8, which, "href")) break :blk try urlSerialize(self, p, false);
+                if (std.mem.eql(u8, which, "protocol")) break :blk try std.mem.concat(self.arena, u8, &.{ p.scheme, ":" });
+                if (std.mem.eql(u8, which, "username")) break :blk p.username;
+                if (std.mem.eql(u8, which, "password")) break :blk p.password;
+                if (std.mem.eql(u8, which, "hostname")) break :blk (p.host orelse "");
+                if (std.mem.eql(u8, which, "port")) break :blk p.port;
+                if (std.mem.eql(u8, which, "pathname")) break :blk p.path;
+                if (std.mem.eql(u8, which, "host")) {
+                    if (p.host) |h| {
+                        if (p.port.len > 0) break :blk try std.mem.concat(self.arena, u8, &.{ h, ":", p.port });
+                        break :blk h;
+                    }
+                    break :blk "";
+                }
+                if (std.mem.eql(u8, which, "search")) break :blk if (p.query) |q| (if (q.len == 0) "" else try std.mem.concat(self.arena, u8, &.{ "?", q })) else "";
+                if (std.mem.eql(u8, which, "hash")) break :blk if (p.fragment) |f| (if (f.len == 0) "" else try std.mem.concat(self.arena, u8, &.{ "#", f })) else "";
+                if (std.mem.eql(u8, which, "origin")) break :blk try urlOrigin(self, p);
+                break :blk "";
+            };
+            return try Value.strAlloc(self.arena, s);
+        }
+    }.call;
+}
+fn urlHashSetFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!this.isObject()) return Value.undef();
+    var p = urlLoad(this.asObj());
+    var v = try self.toStringV(if (args.len > 0) args[0] else Value.undef());
+    if (v.len > 0 and v[0] == '#') v = v[1..];
+    if (v.len == 0) {
+        p.fragment = null;
+    } else {
+        var fb: std.ArrayListUnmanaged(u8) = .empty;
+        try urlPercentEncode(self, &fb, v, .fragment);
+        p.fragment = fb.items;
+    }
+    try urlStore(self, this.asObj(), p);
+    return Value.undef();
+}
+fn urlToStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!this.isObject()) return self.throwError("TypeError", "URL.toString on non-object");
+    return try Value.strAlloc(self.arena, try urlSerialize(self, urlLoad(this.asObj()), false));
+}
+/// Re-seed the URL's live `.searchParams` pairs from a new query string (identity
+/// of the URLSearchParams object is preserved).
+fn urlRefreshSearchParams(self: *Interpreter, o: *value.Object, query: ?[]const u8) EvalError!void {
+    const spv = o.getOwn("\x00Usp") orelse return;
+    if (!spv.isObject()) return;
+    const pairs = (try self.newArray()).asObj();
+    if (query) |q| try uspParseString(self, pairs, q);
+    try spv.asObj().setOwn(self.arena, self.root_shape, "\x00usp", Value.obj(pairs));
+}
+/// The `href`/`protocol`/`username`/`password`/`host`/`hostname`/`port`/
+/// `pathname`/`search` setters (basic-URL-parse with a state override, per WHATWG).
+fn urlSetter(comptime which: []const u8) value.NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+            const self: *Interpreter = @ptrCast(@alignCast(ctx));
+            if (!this.isObject()) return Value.undef();
+            const o = this.asObj();
+            var p = urlLoad(o);
+            const val = try self.toStringV(if (args.len > 0) args[0] else Value.undef());
+            const special = urlIsSpecialScheme(p.scheme);
+            const enc = struct {
+                fn f(s: *Interpreter, in: []const u8, set: UrlEncSet) EvalError![]const u8 {
+                    var b: std.ArrayListUnmanaged(u8) = .empty;
+                    try urlPercentEncode(s, &b, in, set);
+                    return b.items;
+                }
+            }.f;
+            if (comptime std.mem.eql(u8, which, "href")) {
+                const np = (try urlParse(self, val, null)) orelse return self.throwError("TypeError", "Invalid URL");
+                try urlStore(self, o, np);
+                try urlRefreshSearchParams(self, o, np.query);
+                return Value.undef();
+            }
+            if (comptime std.mem.eql(u8, which, "protocol")) {
+                var s = val;
+                if (s.len > 0 and s[s.len - 1] == ':') s = s[0 .. s.len - 1];
+                if (s.len == 0 or !std.ascii.isAlphabetic(s[0])) return Value.undef();
+                var sb: std.ArrayListUnmanaged(u8) = .empty;
+                for (s) |c| {
+                    if (!(std.ascii.isAlphanumeric(c) or c == '+' or c == '-' or c == '.')) return Value.undef();
+                    try sb.append(self.arena, std.ascii.toLower(c));
+                }
+                // WHATWG forbids toggling the special/non-special class of a scheme.
+                if (urlIsSpecialScheme(sb.items) != special) return Value.undef();
+                p.scheme = sb.items;
+                try urlStore(self, o, p);
+                return Value.undef();
+            }
+            // The authority-bearing setters are inert on a host-less/opaque URL.
+            const authority_setter = comptime (std.mem.eql(u8, which, "username") or std.mem.eql(u8, which, "password") or
+                std.mem.eql(u8, which, "host") or std.mem.eql(u8, which, "hostname") or std.mem.eql(u8, which, "port"));
+            if (authority_setter and (p.host == null or p.opaque_path)) return Value.undef();
+            if (comptime std.mem.eql(u8, which, "username")) {
+                p.username = try enc(self, val, .userinfo);
+            } else if (comptime std.mem.eql(u8, which, "password")) {
+                p.password = try enc(self, val, .userinfo);
+            } else if (comptime std.mem.eql(u8, which, "port")) {
+                if (val.len == 0) {
+                    p.port = "";
+                } else {
+                    var end: usize = 0;
+                    while (end < val.len and std.ascii.isDigit(val[end])) end += 1;
+                    if (end == 0) return Value.undef();
+                    p.port = (try urlNormalizePort(self, p.scheme, val[0..end])) orelse return Value.undef();
+                }
+            } else if (comptime std.mem.eql(u8, which, "hostname")) {
+                if (val.len == 0 and special) return Value.undef();
+                var hb: std.ArrayListUnmanaged(u8) = .empty;
+                for (val) |c| try hb.append(self.arena, std.ascii.toLower(c));
+                p.host = hb.items;
+            } else if (comptime std.mem.eql(u8, which, "host")) {
+                var hs = val;
+                var new_port: ?[]const u8 = null;
+                if (hs.len > 0 and hs[0] == '[') {
+                    const close = std.mem.indexOfScalar(u8, hs, ']') orelse return Value.undef();
+                    const tail = hs[close + 1 ..];
+                    if (tail.len > 0 and tail[0] == ':') new_port = (try urlNormalizePort(self, p.scheme, tail[1..])) orelse return Value.undef();
+                    hs = hs[0 .. close + 1];
+                } else if (std.mem.lastIndexOfScalar(u8, hs, ':')) |colon| {
+                    new_port = (try urlNormalizePort(self, p.scheme, hs[colon + 1 ..])) orelse return Value.undef();
+                    hs = hs[0..colon];
+                }
+                if (hs.len == 0 and special) return Value.undef();
+                var hb: std.ArrayListUnmanaged(u8) = .empty;
+                for (hs) |c| try hb.append(self.arena, std.ascii.toLower(c));
+                p.host = hb.items;
+                if (new_port) |np| p.port = np;
+            } else if (comptime std.mem.eql(u8, which, "pathname")) {
+                if (p.opaque_path) return Value.undef();
+                var pb: std.ArrayListUnmanaged(u8) = .empty;
+                try urlEncodeNormalizePath(self, &pb, val, special);
+                p.path = pb.items;
+            } else if (comptime std.mem.eql(u8, which, "search")) {
+                var s = val;
+                if (s.len > 0 and s[0] == '?') s = s[1..];
+                p.query = if (s.len == 0) null else try enc(self, s, if (special) .special_query else .query);
+                try urlStore(self, o, p);
+                try urlRefreshSearchParams(self, o, p.query);
+                return Value.undef();
+            }
+            try urlStore(self, o, p);
+            return Value.undef();
+        }
+    }.call;
+}
+fn urlCanParseFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const input = try self.toStringV(if (args.len > 0) args[0] else Value.undef());
+    var base: ?UrlParts = null;
+    if (args.len > 1 and !args[1].isUndefined()) {
+        base = (try urlParse(self, try self.toStringV(args[1]), null)) orelse return Value.boolVal(false);
+    }
+    return Value.boolVal((try urlParse(self, input, base)) != null);
+}
+fn installURL(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalError!void {
+    const a = env.arena;
+    const symKey = struct {
+        fn f(e: *Environment, name: []const u8) ?[]const u8 {
+            if (e.get("Symbol")) |s| if (s.isObject()) {
+                if (s.asObj().getOwn(name)) |t| if (t.isObject() and t.asObj().is_symbol) return t.asObj().sym_key;
+            };
+            return null;
+        }
+    }.f;
+    const proto = try gc_mod.allocObj(a);
+    proto.* = .{ .proto = object_proto };
+    // Read-only accessors.
+    inline for (.{ "origin", "searchParams" }) |g| {
+        try setNativeGetter(a, rs, proto, g, urlGetter(g));
+        try proto.setAttr(a, g, .{ .enumerable = true, .configurable = true });
+    }
+    // Read/write accessors (getter + component setter).
+    const accessor = struct {
+        fn f(al: std.mem.Allocator, sh: *Shape, pr: *value.Object, comptime name: []const u8, set: value.NativeFn) EvalError!void {
+            const getter = try gc_mod.allocObj(al);
+            getter.* = .{ .native = urlGetter(name) };
+            try installNativeProps(al, sh, getter, "get " ++ name, 0);
+            const setter = try gc_mod.allocObj(al);
+            setter.* = .{ .native = set };
+            try installNativeProps(al, sh, setter, "set " ++ name, 1);
+            try pr.setAccessor(al, name, Value.obj(getter), Value.obj(setter));
+            try pr.setAttr(al, name, .{ .enumerable = true, .configurable = true });
+        }
+    }.f;
+    inline for (.{ "href", "protocol", "username", "password", "host", "hostname", "port", "pathname", "search" }) |g| {
+        try accessor(a, rs, proto, g, urlSetter(g));
+    }
+    try accessor(a, rs, proto, "hash", urlHashSetFn);
+    try setNative(a, rs, proto, "toString", 0, urlToStringFn);
+    try setNative(a, rs, proto, "toJSON", 0, urlToStringFn);
+    if (symKey(env, "toStringTag")) |k| {
+        try proto.setOwn(a, rs, k, Value.str("URL"));
+        try proto.setAttr(a, k, .{ .writable = false, .enumerable = false, .configurable = true });
+    }
+    const ctor = try gc_mod.allocObj(a);
+    ctor.* = .{ .native = urlConstructorFn, .native_ctor = true };
+    try installNativeProps(a, rs, ctor, "URL", 1);
+    try ctor.setOwn(a, rs, "prototype", Value.obj(proto));
+    try ctor.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
+    try setConstructor(a, rs, proto, ctor);
+    try setNative(a, rs, ctor, "canParse", 1, urlCanParseFn);
+    try env.put("URL", Value.obj(ctor));
+}
+
 // ===== URLSearchParams (form-urlencoded) =============================
 /// application/x-www-form-urlencoded byte: unreserved bytes pass through, space
 /// becomes '+', everything else is percent-encoded (uppercase hex).
@@ -39346,7 +39969,19 @@ fn uspAppendFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostErro
     const name = try self.toStringV(if (args.len > 0) args[0] else Value.undef());
     const val = try self.toStringV(if (args.len > 1) args[1] else Value.undef());
     try uspPush(self, try uspPairs(self, this), name, val);
+    try uspSyncToUrl(self, this);
     return Value.undef();
+}
+/// When this URLSearchParams is the live `.searchParams` of a URL object (back-
+/// ref in `\x00Uspurl`), push its serialized form into the parent's query.
+fn uspSyncToUrl(self: *Interpreter, this: Value) EvalError!void {
+    if (!this.isObject()) return;
+    const urlv = this.asObj().getOwn("\x00Uspurl") orelse return;
+    if (!urlv.isObject()) return;
+    var p = urlLoad(urlv.asObj());
+    const s = try uspToString(self, this);
+    p.query = if (s.len == 0) null else s;
+    try urlStore(self, urlv.asObj(), p);
 }
 /// Rebuild the pairs array applying set/delete semantics.
 fn uspRebuild(self: *Interpreter, this: Value, name: []const u8, set_value: ?[]const u8, del_value: ?[]const u8) EvalError!void {
@@ -39371,6 +40006,7 @@ fn uspRebuild(self: *Interpreter, this: Value, name: []const u8, set_value: ?[]c
     }
     if (set_value != null and !placed) try uspPush(self, fresh, name, set_value.?);
     try this.asObj().setOwn(self.arena, self.root_shape, "\x00usp", Value.obj(fresh));
+    try uspSyncToUrl(self, this);
 }
 fn uspSetFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
@@ -39401,6 +40037,7 @@ fn uspSortFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!
     const fresh = (try self.newArray()).asObj();
     for (items) |p| try fresh.appendElement(self.arena, p);
     try this.asObj().setOwn(self.arena, self.root_shape, "\x00usp", Value.obj(fresh));
+    try uspSyncToUrl(self, this);
     return Value.undef();
 }
 fn uspToStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
