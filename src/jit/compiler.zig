@@ -868,9 +868,19 @@ fn selectIntegerLocals(chunk: *const Chunk, analysis: *const Analysis) !IntegerS
         const states = try analyzeRepresentations(chunk, analysis, selected, allocator);
         var valid = selected;
         for (chunk.code.items, 0..) |inst, ip| {
-            if (inst.op != .load_local or states[ip] == null) continue;
-            const bit = @as(u64, 1) << @intCast(inst.a);
-            if (selected & bit != 0 and states[ip].?.locals & bit == 0) valid &= ~bit;
+            const representation = states[ip] orelse continue;
+            const numeric = analysis.states[ip].?;
+            var required = selected;
+            while (required != 0) {
+                const slot: u6 = @intCast(@ctz(required));
+                const bit = @as(u64, 1) << slot;
+                if (numeric.locals[slot] == .number and representation.locals & bit == 0) valid &= ~bit;
+                required &= required - 1;
+            }
+            if (inst.op == .load_local) {
+                const bit = @as(u64, 1) << @intCast(inst.a);
+                if (selected & bit != 0 and representation.locals & bit == 0) valid &= ~bit;
+            }
         }
         if (valid == selected) return .{ .locals = selected, .states = states, .allocator = allocator };
         allocator.free(states);
@@ -902,11 +912,45 @@ fn numericLocalRegister(local_slot: usize) error{UnsupportedChunk}!u5 {
     return @intCast(8 + local_slot);
 }
 
-fn emitRestoreAndReturn(assembler: *aarch64.Assembler) !void {
+fn integerStackRegister(stack_slot: usize) error{UnsupportedChunk}!u5 {
+    if (stack_slot >= jit.numeric_scratch_capacity) return error.UnsupportedChunk;
+    return @intCast(stack_slot);
+}
+
+fn integerLocalRegister(selected: u64, local_slot: usize) error{UnsupportedChunk}!u5 {
+    const bit = @as(u64, 1) << @intCast(local_slot);
+    if (selected & bit == 0) return error.UnsupportedChunk;
+    const lower = selected & (bit - 1);
+    const index = @popCount(lower);
+    return switch (index) {
+        0 => 23,
+        1 => 26,
+        2 => 27,
+        3 => 28,
+        else => error.UnsupportedChunk,
+    };
+}
+
+fn stackIsInteger(representation: RepresentationState, stack_slot: usize) bool {
+    return representation.stack & (@as(u8, 1) << @intCast(stack_slot)) != 0;
+}
+
+fn emitIntegerAsNumber(assembler: *aarch64.Assembler, raw_register: u5, integer_register: u5) !void {
+    try assembler.convertUnsigned64ToFloat64(0, integer_register);
+    try assembler.moveRegisterFromFloat64(raw_register, 0);
+}
+
+fn ensureFloatStackValue(assembler: *aarch64.Assembler, representation: RepresentationState, stack_slot: usize) !void {
+    if (stackIsInteger(representation, stack_slot))
+        try assembler.convertUnsigned64ToFloat64(try numericRegister(stack_slot), try integerStackRegister(stack_slot));
+}
+
+fn emitRestoreAndReturn(assembler: *aarch64.Assembler, selected_integers: u64) !void {
     try assembler.popFloatPair64(14, 15);
     try assembler.popFloatPair64(12, 13);
     try assembler.popFloatPair64(10, 11);
     try assembler.popFloatPair64(8, 9);
+    if (@popCount(selected_integers) > 2) try assembler.popPair(27, 28);
     try assembler.popPair(25, 26);
     try assembler.popPair(23, 24);
     try assembler.popPair(21, 22);
@@ -915,12 +959,12 @@ fn emitRestoreAndReturn(assembler: *aarch64.Assembler) !void {
     try assembler.ret();
 }
 
-fn emitCompletedExit(assembler: *aarch64.Assembler, result_register: u5) !void {
+fn emitCompletedExit(assembler: *aarch64.Assembler, result_register: u5, selected_integers: u64) !void {
     try assembler.load64(10, 21, frameOffset("steps"));
     try assembler.store64(19, 10, 0);
     try assembler.store64(result_register, 21, frameOffset("result_bits"));
     try assembler.movImmediate32(0, @intFromEnum(jit.ExitStatus.complete));
-    try emitRestoreAndReturn(assembler);
+    try emitRestoreAndReturn(assembler, selected_integers);
 }
 
 fn emitCanonicalNumber(assembler: *aarch64.Assembler, register: u5, float_register: u5) !void {
@@ -962,28 +1006,95 @@ fn comparisonFalseCondition(op: bc.Op) aarch64.Condition {
     };
 }
 
+fn integerComparisonCondition(op: bc.Op) aarch64.Condition {
+    return switch (op) {
+        .lt => .lo,
+        .le => .ls,
+        .gt => .hi,
+        .ge => .hs,
+        .eq, .eq_strict => .eq,
+        .neq, .neq_strict => .ne,
+        else => unreachable,
+    };
+}
+
+fn integerComparisonFalseCondition(op: bc.Op) aarch64.Condition {
+    return switch (op) {
+        .lt => .hs,
+        .le => .hi,
+        .gt => .ls,
+        .ge => .lo,
+        .eq, .eq_strict => .ne,
+        .neq, .neq_strict => .eq,
+        else => unreachable,
+    };
+}
+
 fn emitFusedComparisonBranch(
     assembler: *aarch64.Assembler,
     state: State,
+    representation: RepresentationState,
     comparison: bc.Op,
     target: u32,
 ) !ControlFixup {
     const lhs_slot = state.depth - 2;
-    try assembler.compareFloat64(try numericRegister(lhs_slot), try numericRegister(lhs_slot + 1));
+    const both_integer = stackIsInteger(representation, lhs_slot) and stackIsInteger(representation, lhs_slot + 1);
+    if (both_integer) {
+        try assembler.compareRegister64(try integerStackRegister(lhs_slot), try integerStackRegister(lhs_slot + 1));
+    } else {
+        try ensureFloatStackValue(assembler, representation, lhs_slot);
+        try ensureFloatStackValue(assembler, representation, lhs_slot + 1);
+        try assembler.compareFloat64(try numericRegister(lhs_slot), try numericRegister(lhs_slot + 1));
+    }
     return .{ .condition = .{
-        .at = try assembler.branchConditionPlaceholder(comparisonFalseCondition(comparison)),
+        .at = try assembler.branchConditionPlaceholder(if (both_integer)
+            integerComparisonFalseCondition(comparison)
+        else
+            comparisonFalseCondition(comparison)),
         .target = target,
     } };
 }
 
-fn emitOperation(assembler: *aarch64.Assembler, chunk: *const Chunk, state: State, inst: bc.Inst) !?ControlFixup {
+fn integerArithmeticResult(state: State, representation: RepresentationState, op: bc.Op) bool {
+    if (state.depth < 2) return false;
+    const rhs_slot = state.depth - 1;
+    const lhs_slot = rhs_slot - 1;
+    if (!stackIsInteger(representation, lhs_slot) or !stackIsInteger(representation, rhs_slot) or op == .div) return false;
+    const lhs: StackValue = .{
+        .kind = state.stack[lhs_slot],
+        .integer = state.stack_integers[lhs_slot],
+        .range = state.stack_ranges[lhs_slot],
+    };
+    const rhs: StackValue = .{
+        .kind = state.stack[rhs_slot],
+        .integer = state.stack_integers[rhs_slot],
+        .range = state.stack_ranges[rhs_slot],
+    };
+    if (op == .mod and (!rhs.range.isKnown() or rhs.range.min <= 0)) return false;
+    return isUnsignedSafeRange(arithmeticIntegerRange(op, lhs, rhs));
+}
+
+fn emitOperation(
+    assembler: *aarch64.Assembler,
+    chunk: *const Chunk,
+    state: State,
+    representation: RepresentationState,
+    selected_integers: u64,
+    inst: bc.Inst,
+) !?ControlFixup {
     switch (inst.op) {
         .load_const => {
-            try assembler.movImmediate64(9, chunk.consts.items[inst.a].rawBits());
-            if (classify(chunk.consts.items[inst.a]).? == .number)
-                try assembler.moveFloatFromRegister64(try numericRegister(state.depth), 9)
-            else
-                try assembler.store64(9, 20, try slotOffset(state.depth));
+            const constant = chunk.consts.items[inst.a];
+            const integer_range = classifyIntegerRange(constant);
+            if (isUnsignedSafeRange(integer_range)) {
+                try assembler.movImmediate64(try integerStackRegister(state.depth), @intCast(integer_range.min));
+            } else {
+                try assembler.movImmediate64(9, constant.rawBits());
+                if (classify(constant).? == .number)
+                    try assembler.moveFloatFromRegister64(try numericRegister(state.depth), 9)
+                else
+                    try assembler.store64(9, 20, try slotOffset(state.depth));
+            }
         },
         .load_undefined => {
             try assembler.movImmediate64(9, Value.undef().rawBits());
@@ -999,7 +1110,10 @@ fn emitOperation(assembler: *aarch64.Assembler, chunk: *const Chunk, state: Stat
         },
         .pop => {},
         .load_local => {
-            if (state.locals[inst.a] == .number)
+            const bit = @as(u64, 1) << @intCast(inst.a);
+            if (selected_integers & bit != 0 and representation.locals & bit != 0)
+                try assembler.moveRegister64(try integerStackRegister(state.depth), try integerLocalRegister(selected_integers, inst.a))
+            else if (state.locals[inst.a] == .number)
                 try assembler.moveFloat64(try numericRegister(state.depth), try numericLocalRegister(inst.a))
             else {
                 try assembler.load64(9, 22, try slotOffset(inst.a));
@@ -1007,10 +1121,15 @@ fn emitOperation(assembler: *aarch64.Assembler, chunk: *const Chunk, state: Stat
             }
         },
         .store_local => {
-            if (state.stack[state.depth - 1] == .number)
-                try assembler.moveFloat64(try numericLocalRegister(inst.a), try numericRegister(state.depth - 1))
-            else {
-                try assembler.load64(9, 20, try slotOffset(state.depth - 1));
+            const stack_slot = state.depth - 1;
+            const bit = @as(u64, 1) << @intCast(inst.a);
+            if (selected_integers & bit != 0 and stackIsInteger(representation, stack_slot))
+                try assembler.moveRegister64(try integerLocalRegister(selected_integers, inst.a), try integerStackRegister(stack_slot))
+            else if (state.stack[stack_slot] == .number) {
+                try ensureFloatStackValue(assembler, representation, stack_slot);
+                try assembler.moveFloat64(try numericLocalRegister(inst.a), try numericRegister(stack_slot));
+            } else {
+                try assembler.load64(9, 20, try slotOffset(stack_slot));
                 try assembler.store64(9, 22, try slotOffset(inst.a));
             }
         },
@@ -1018,62 +1137,92 @@ fn emitOperation(assembler: *aarch64.Assembler, chunk: *const Chunk, state: Stat
             const result_slot = state.depth - 2;
             const result_register = try numericRegister(result_slot);
             const rhs_register = try numericRegister(result_slot + 1);
-            if (inst.op == .mod) {
-                // Match `numberRemainder`'s hot positive-u32 guard. Exact
-                // integral conversions stay entirely in generated code;
-                // negative, zero, fractional, infinite, and NaN operands
-                // take the full IEEE helper without changing VM semantics.
-                try assembler.convertFloat64ToUnsigned32(9, result_register);
-                try assembler.convertUnsigned32ToFloat64(2, 9);
-                try assembler.compareFloat64(result_register, 2);
-                const lhs_slow = try assembler.branchConditionPlaceholder(.ne);
-                const lhs_zero = try assembler.branchZero32Placeholder(9);
-                try assembler.convertFloat64ToUnsigned32(10, rhs_register);
-                try assembler.convertUnsigned32ToFloat64(2, 10);
-                try assembler.compareFloat64(rhs_register, 2);
-                const rhs_slow = try assembler.branchConditionPlaceholder(.ne);
-                const rhs_zero = try assembler.branchZero32Placeholder(10);
-                try assembler.divideUnsigned32(11, 9, 10);
-                try assembler.multiplySubtract32(9, 11, 10, 9);
-                try assembler.convertUnsigned32ToFloat64(result_register, 9);
-                const fast_done = try assembler.branchPlaceholder();
-                const slow = assembler.position();
-                try assembler.patchConditionBranch(lhs_slow, slow);
-                try assembler.patchCompareBranch(lhs_zero, slow);
-                try assembler.patchConditionBranch(rhs_slow, slow);
-                try assembler.patchCompareBranch(rhs_zero, slow);
-                // The semantic helper follows the C ABI and may clobber
-                // caller-saved d16-d23. Preserve any outer numeric operands
-                // that remain live below this binary expression.
-                for (0..result_slot) |slot| if (state.stack[slot] == .number) {
-                    try assembler.moveRegisterFromFloat64(9, try numericRegister(slot));
-                    try assembler.store64(9, 20, try slotOffset(slot));
-                };
-                try assembler.moveFloat64(0, result_register);
-                try assembler.moveFloat64(1, rhs_register);
-                try assembler.load64(16, 21, frameOffset("remainder"));
-                try assembler.branchLinkRegister(16);
-                try assembler.moveFloat64(result_register, 0);
-                for (0..result_slot) |slot| if (state.stack[slot] == .number) {
-                    try assembler.load64(9, 20, try slotOffset(slot));
-                    try assembler.moveFloatFromRegister64(try numericRegister(slot), 9);
-                };
-                try assembler.patchBranch(fast_done, assembler.position());
-            } else {
-                const op: aarch64.FloatOp = switch (inst.op) {
-                    .add => .add,
-                    .sub => .sub,
-                    .mul => .mul,
-                    .div => .div,
+            if (integerArithmeticResult(state, representation, inst.op)) {
+                const integer_result = try integerStackRegister(result_slot);
+                const integer_rhs = try integerStackRegister(result_slot + 1);
+                switch (inst.op) {
+                    .add => try assembler.addRegister64(integer_result, integer_result, integer_rhs),
+                    .sub => try assembler.subtractRegister64(integer_result, integer_result, integer_rhs),
+                    .mul => try assembler.multiply64(integer_result, integer_result, integer_rhs),
+                    .mod => {
+                        try assembler.divideUnsigned64(9, integer_result, integer_rhs);
+                        try assembler.multiplySubtract64(integer_result, 9, integer_rhs, integer_result);
+                    },
                     else => unreachable,
-                };
-                try assembler.floatBinary64(op, result_register, result_register, rhs_register);
+                }
+            } else {
+                try ensureFloatStackValue(assembler, representation, result_slot);
+                try ensureFloatStackValue(assembler, representation, result_slot + 1);
+                if (inst.op == .mod) {
+                    // Match `numberRemainder`'s hot positive-u32 guard. Exact
+                    // integral conversions stay entirely in generated code;
+                    // negative, zero, fractional, infinite, and NaN operands
+                    // take the full IEEE helper without changing VM semantics.
+                    try assembler.convertFloat64ToUnsigned32(9, result_register);
+                    try assembler.convertUnsigned32ToFloat64(2, 9);
+                    try assembler.compareFloat64(result_register, 2);
+                    const lhs_slow = try assembler.branchConditionPlaceholder(.ne);
+                    const lhs_zero = try assembler.branchZero32Placeholder(9);
+                    try assembler.convertFloat64ToUnsigned32(10, rhs_register);
+                    try assembler.convertUnsigned32ToFloat64(2, 10);
+                    try assembler.compareFloat64(rhs_register, 2);
+                    const rhs_slow = try assembler.branchConditionPlaceholder(.ne);
+                    const rhs_zero = try assembler.branchZero32Placeholder(10);
+                    try assembler.divideUnsigned32(11, 9, 10);
+                    try assembler.multiplySubtract32(9, 11, 10, 9);
+                    try assembler.convertUnsigned32ToFloat64(result_register, 9);
+                    const fast_done = try assembler.branchPlaceholder();
+                    const slow = assembler.position();
+                    try assembler.patchConditionBranch(lhs_slow, slow);
+                    try assembler.patchCompareBranch(lhs_zero, slow);
+                    try assembler.patchConditionBranch(rhs_slow, slow);
+                    try assembler.patchCompareBranch(rhs_zero, slow);
+                    // The semantic helper follows the C ABI and may clobber
+                    // caller-saved d16-d23. Preserve any outer numeric operands
+                    // that remain live below this binary expression.
+                    for (0..result_slot) |slot| if (state.stack[slot] == .number) {
+                        if (stackIsInteger(representation, slot))
+                            try emitIntegerAsNumber(assembler, 9, try integerStackRegister(slot))
+                        else
+                            try assembler.moveRegisterFromFloat64(9, try numericRegister(slot));
+                        try assembler.store64(9, 20, try slotOffset(slot));
+                    };
+                    try assembler.moveFloat64(0, result_register);
+                    try assembler.moveFloat64(1, rhs_register);
+                    try assembler.load64(16, 21, frameOffset("remainder"));
+                    try assembler.branchLinkRegister(16);
+                    try assembler.moveFloat64(result_register, 0);
+                    for (0..result_slot) |slot| if (state.stack[slot] == .number) {
+                        try assembler.load64(9, 20, try slotOffset(slot));
+                        if (stackIsInteger(representation, slot)) {
+                            try assembler.moveFloatFromRegister64(0, 9);
+                            try assembler.convertFloat64ToUnsigned64(try integerStackRegister(slot), 0);
+                        } else try assembler.moveFloatFromRegister64(try numericRegister(slot), 9);
+                    };
+                    try assembler.patchBranch(fast_done, assembler.position());
+                } else {
+                    const op: aarch64.FloatOp = switch (inst.op) {
+                        .add => .add,
+                        .sub => .sub,
+                        .mul => .mul,
+                        .div => .div,
+                        else => unreachable,
+                    };
+                    try assembler.floatBinary64(op, result_register, result_register, rhs_register);
+                }
             }
         },
         .lt, .le, .gt, .ge, .eq, .neq, .eq_strict, .neq_strict => {
             const result_slot = state.depth - 2;
-            try assembler.compareFloat64(try numericRegister(result_slot), try numericRegister(result_slot + 1));
-            try assembler.conditionalSet32(9, comparisonCondition(inst.op));
+            const both_integer = stackIsInteger(representation, result_slot) and stackIsInteger(representation, result_slot + 1);
+            if (both_integer) {
+                try assembler.compareRegister64(try integerStackRegister(result_slot), try integerStackRegister(result_slot + 1));
+            } else {
+                try ensureFloatStackValue(assembler, representation, result_slot);
+                try ensureFloatStackValue(assembler, representation, result_slot + 1);
+                try assembler.compareFloat64(try numericRegister(result_slot), try numericRegister(result_slot + 1));
+            }
+            try assembler.conditionalSet32(9, if (both_integer) integerComparisonCondition(inst.op) else comparisonCondition(inst.op));
             try assembler.movImmediate64(10, Value.boolVal(false).rawBits());
             try assembler.addRegister64(9, 10, 9);
             try assembler.store64(9, 20, try slotOffset(result_slot));
@@ -1084,15 +1233,18 @@ fn emitOperation(assembler: *aarch64.Assembler, chunk: *const Chunk, state: Stat
             return .{ .test_zero = .{ .at = try assembler.testBitZeroPlaceholder(9, 0), .target = inst.a } };
         },
         .ret => {
-            if (state.stack[state.depth - 1] == .number)
-                try emitCanonicalNumber(assembler, 9, try numericRegister(state.depth - 1))
+            const result_slot = state.depth - 1;
+            if (stackIsInteger(representation, result_slot)) {
+                try emitIntegerAsNumber(assembler, 9, try integerStackRegister(result_slot));
+            } else if (state.stack[result_slot] == .number)
+                try emitCanonicalNumber(assembler, 9, try numericRegister(result_slot))
             else
-                try assembler.load64(9, 20, try slotOffset(state.depth - 1));
-            try emitCompletedExit(assembler, 9);
+                try assembler.load64(9, 20, try slotOffset(result_slot));
+            try emitCompletedExit(assembler, 9, selected_integers);
         },
         .ret_undef => {
             try assembler.movImmediate64(9, Value.undef().rawBits());
-            try emitCompletedExit(assembler, 9);
+            try emitCompletedExit(assembler, 9, selected_integers);
         },
         else => unreachable,
     }
@@ -1134,8 +1286,20 @@ fn patchControlToOffset(assembler: *aarch64.Assembler, fixup: ControlFixup, targ
 fn compileNumeric(chunk: *const Chunk) !jit.CompiledCode {
     if (!jit.supported or builtin.cpu.arch != .aarch64) return error.UnsupportedTarget;
 
-    var analysis = try analyzeNumeric(chunk, false);
+    var analysis = try analyzeNumeric(chunk, true);
     defer analysis.deinit();
+    var selection = selectIntegerLocals(chunk, &analysis) catch blk: {
+        const states = try analyzeRepresentations(chunk, &analysis, 0, std.heap.page_allocator);
+        break :blk IntegerSelection{ .locals = 0, .states = states, .allocator = std.heap.page_allocator };
+    };
+    defer selection.deinit();
+    if (selection.locals == 0) {
+        selection.deinit();
+        analysis.deinit();
+        analysis = try analyzeNumeric(chunk, false);
+        const states = try analyzeRepresentations(chunk, &analysis, 0, std.heap.page_allocator);
+        selection = .{ .locals = 0, .states = states, .allocator = std.heap.page_allocator };
+    }
     if (analysis.max_stack_depth > numeric_stack_register_capacity or chunk.local_count > numeric_local_register_capacity)
         return error.UnsupportedChunk;
     const allocator = std.heap.page_allocator;
@@ -1198,6 +1362,7 @@ fn compileNumeric(chunk: *const Chunk) !jit.CompiledCode {
     try assembler.pushPair(21, 22);
     try assembler.pushPair(23, 24);
     try assembler.pushPair(25, 26);
+    if (@popCount(selection.locals) > 2) try assembler.pushPair(27, 28);
     try assembler.pushFloatPair64(8, 9);
     try assembler.pushFloatPair64(10, 11);
     try assembler.pushFloatPair64(12, 13);
@@ -1212,6 +1377,9 @@ fn compileNumeric(chunk: *const Chunk) !jit.CompiledCode {
     for (0..chunk.param_count) |slot| {
         try assembler.load64(9, 22, try slotOffset(slot));
         try assembler.moveFloatFromRegister64(try numericLocalRegister(slot), 9);
+        const bit = @as(u64, 1) << @intCast(slot);
+        if (selection.locals & bit != 0)
+            try assembler.convertFloat64ToUnsigned64(try integerLocalRegister(selection.locals, slot), try numericLocalRegister(slot));
     }
 
     // Normal execution accounts for an entire basic block at once. A block
@@ -1238,18 +1406,20 @@ fn compileNumeric(chunk: *const Chunk) !jit.CompiledCode {
         var ip: usize = block.start;
         while (ip < block.end) {
             const state = analysis.states[ip].?;
+            const representation = selection.states[ip].?;
             const inst = chunk.code.items[ip];
             if (isNumericComparison(inst.op) and ip + 1 < block.end and chunk.code.items[ip + 1].op == .jump_if_false) {
                 fast_control_fixups[ip + 1] = try emitFusedComparisonBranch(
                     &assembler,
                     state,
+                    representation,
                     inst.op,
                     chunk.code.items[ip + 1].a,
                 );
                 ip += 2;
                 continue;
             }
-            fast_control_fixups[ip] = try emitOperation(&assembler, chunk, state, inst);
+            fast_control_fixups[ip] = try emitOperation(&assembler, chunk, state, representation, selection.locals, inst);
             ip += 1;
         }
         if (block_index + 1 < blocks.len and covered_successors[block_index + 1]) {
@@ -1303,13 +1473,21 @@ fn compileNumeric(chunk: *const Chunk) !jit.CompiledCode {
 
         for (block.start..block.end) |ip| {
             const state = analysis.states[ip].?;
+            const representation = selection.states[ip].?;
             try assembler.addImmediate64(19, 19, 1);
             try assembler.subtractImmediateSetFlags64(25, 25, 1);
             budget_fixups[ip] = try assembler.branchConditionPlaceholder(.lo);
             try assembler.subtractImmediateSetFlags64(24, 24, 1);
             checkpoint_fixups[ip] = try assembler.branchConditionPlaceholder(.eq);
             operation_offsets[ip] = assembler.position();
-            slow_control_fixups[ip] = try emitOperation(&assembler, chunk, state, chunk.code.items[ip]);
+            slow_control_fixups[ip] = try emitOperation(
+                &assembler,
+                chunk,
+                state,
+                representation,
+                selection.locals,
+                chunk.code.items[ip],
+            );
         }
 
         const last_op = chunk.code.items[block.end - 1].op;
@@ -1328,21 +1506,31 @@ fn compileNumeric(chunk: *const Chunk) !jit.CompiledCode {
     // exceeds the evaluation budget).
     for (chunk.code.items, 0..) |_, ip| {
         const state = analysis.states[ip] orelse continue;
+        const representation = selection.states[ip].?;
         const stub = assembler.position();
         try assembler.patchConditionBranch(budget_fixups[ip], stub);
         try assembler.patchConditionBranch(checkpoint_fixups[ip], stub);
-        // Numeric locals live in callee-saved d8-d15 on the hot path. Publish
-        // canonical frame words only at a safepoint, where precise GC and error
-        // creation can inspect the activation. The frame is proven unescaped
-        // before entry, so no peer can observe the write-back delay.
+        // Numeric locals live in callee-saved d8-d15 or, for selected safe
+        // integers, x23/x26-x28. Publish canonical frame words only at a
+        // safepoint, where precise GC and error creation can inspect the
+        // activation. The frame is proven unescaped before entry, so no peer
+        // can observe the write-back delay.
         for (0..chunk.local_count) |slot| if (state.locals[slot] == .number) {
-            try emitCanonicalNumber(&assembler, 9, try numericLocalRegister(slot));
+            const bit = @as(u64, 1) << @intCast(slot);
+            if (selection.locals & bit != 0 and representation.locals & bit != 0)
+                try emitIntegerAsNumber(&assembler, 9, try integerLocalRegister(selection.locals, slot))
+            else
+                try emitCanonicalNumber(&assembler, 9, try numericLocalRegister(slot));
             try assembler.store64(9, 22, try slotOffset(slot));
         };
-        // d16-d23 are caller-saved. Spill live numeric operand values around
-        // the runtime callback; non-numeric values already live in scratch.
+        // d16-d23 and x0-x7 are caller-saved. Spill live numeric operand values
+        // around the runtime callback; non-numeric values already live in
+        // scratch.
         for (0..state.depth) |slot| if (state.stack[slot] == .number) {
-            try assembler.moveRegisterFromFloat64(9, try numericRegister(slot));
+            if (stackIsInteger(representation, slot))
+                try emitIntegerAsNumber(&assembler, 9, try integerStackRegister(slot))
+            else
+                try assembler.moveRegisterFromFloat64(9, try numericRegister(slot));
             try assembler.store64(9, 20, try slotOffset(slot));
         };
         try assembler.load64(9, 21, frameOffset("steps"));
@@ -1355,7 +1543,10 @@ fn compileNumeric(chunk: *const Chunk) !jit.CompiledCode {
         status_fixups[ip] = try assembler.branchNotZero32Placeholder(0);
         for (0..state.depth) |slot| if (state.stack[slot] == .number) {
             try assembler.load64(9, 20, try slotOffset(slot));
-            try assembler.moveFloatFromRegister64(try numericRegister(slot), 9);
+            if (stackIsInteger(representation, slot)) {
+                try assembler.moveFloatFromRegister64(0, 9);
+                try assembler.convertFloat64ToUnsigned64(try integerStackRegister(slot), 0);
+            } else try assembler.moveFloatFromRegister64(try numericRegister(slot), 9);
         };
         try assembler.movImmediate32(24, 1024);
         const resume_branch = try assembler.branchPlaceholder();
@@ -1363,7 +1554,7 @@ fn compileNumeric(chunk: *const Chunk) !jit.CompiledCode {
     }
 
     const status_exit = assembler.position();
-    try emitRestoreAndReturn(&assembler);
+    try emitRestoreAndReturn(&assembler, selection.locals);
     for (status_fixups) |at| if (at != unreachable_offset) try assembler.patchCompareBranch(at, status_exit);
 
     try memory.publish(assembler.bytes().len);
@@ -1380,6 +1571,7 @@ fn compileNumeric(chunk: *const Chunk) !jit.CompiledCode {
         .manages_steps = true,
         .frame_slots = chunk.local_count,
         .required_numeric_slots = required_numeric_slots,
+        .required_u32_slots = if (selection.locals != 0) lowBits(chunk.param_count) else 0,
         .max_stack_depth = analysis.max_stack_depth,
     };
 }
@@ -1536,6 +1728,82 @@ test "integer provenance rejects live mixed-kind locals" {
     const root = try Compiler.compileProgram(allocator, program);
     const chunk = root.fns.items[0].chunk.?;
     try std.testing.expectError(error.UnsupportedChunk, analyzeNumeric(chunk, true));
+}
+
+test "compiler executes guarded integer remainder loop" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    const Parser = @import("../parser.zig").Parser;
+    const Compiler = @import("../compiler.zig").Compiler;
+
+    const Runtime = struct {
+        fn checkpoint(frame: *jit.NativeFrame) callconv(.c) u32 {
+            const calls: *u32 = @ptrCast(@alignCast(frame.runtime_context.?));
+            calls.* += 1;
+            return 0;
+        }
+
+        fn remainder(a: f64, b: f64) callconv(.c) f64 {
+            return @rem(a, b);
+        }
+    };
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var parser = try Parser.init(allocator,
+        \\function kernel(jobs, lane) {
+        \\  var total = 0;
+        \\  for (var job = 0; job < jobs; job = job + 1) {
+        \\    var value = lane + job + 1;
+        \\    for (var i = 0; i < 2000; i = i + 1)
+        \\      value = (value + i + lane) % 1000003;
+        \\    total = total + value;
+        \\  }
+        \\  return total;
+        \\}
+    );
+    const program = try parser.parseProgram();
+    const root = try Compiler.compileProgram(allocator, program);
+    const chunk = root.fns.items[0].chunk.?;
+    var compiled = try compile(chunk);
+    defer compiled.deinit();
+
+    const jobs: usize = 3;
+    const lane: u64 = 2;
+    var expected: u64 = 0;
+    for (0..jobs) |job| {
+        var result = lane + @as(u64, @intCast(job)) + 1;
+        for (0..2000) |i| result = (result + @as(u64, @intCast(i)) + lane) % 1_000_003;
+        expected += result;
+    }
+
+    var slots = [_]u64{
+        Value.num(@floatFromInt(jobs)).rawBits(),
+        Value.num(@floatFromInt(lane)).rawBits(),
+        Value.undef().rawBits(),
+        Value.undef().rawBits(),
+        Value.undef().rawBits(),
+        Value.undef().rawBits(),
+    };
+    var scratch: [jit.numeric_scratch_capacity]u64 = undefined;
+    for ([_]u64{ 1, 17, 1024 }) |checkpoint_distance| {
+        var steps: u64 = 0;
+        var checkpoint_calls: u32 = 0;
+        var frame = jit.NativeFrame{
+            .slots = &slots,
+            .scratch = &scratch,
+            .steps = &steps,
+            .runtime_context = &checkpoint_calls,
+            .checkpoint = Runtime.checkpoint,
+            .remainder = Runtime.remainder,
+            .steps_until_checkpoint = checkpoint_distance,
+            .steps_until_budget = 1_000_000,
+        };
+        try std.testing.expectEqual(jit.ExitStatus.complete, compiled.run(&frame));
+        try std.testing.expectEqual(@as(f64, @floatFromInt(expected)), Value.fromRawBits(frame.result_bits).asNum());
+        try std.testing.expect(checkpoint_calls > 0);
+    }
+    try std.testing.expectEqual(@as(u64, 0b11), compiled.required_u32_slots);
 }
 
 test "compiler executes a numeric local loop across a checkpoint" {
