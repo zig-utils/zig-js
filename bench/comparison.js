@@ -43,14 +43,14 @@ function benchmarkArrays(jobs, lane) {
   return total;
 }
 
-function benchmarkFibValue(n, state) {
+var benchmarkFibValue = function benchmarkFibValue(n, state) {
   // Keep each call observable so this row continues measuring recursive call
   // throughput even when an engine can recognize and memoize the pure
   // recurrence. The state is invocation-local, so shared-realm lanes never
   // race one counter or produce schedule-dependent checksums.
   state.calls = state.calls + 1;
   return n < 2 ? n : benchmarkFibValue(n - 1, state) + benchmarkFibValue(n - 2, state);
-}
+};
 
 function benchmarkFibonacci(jobs, lane) {
   var total = lane;
