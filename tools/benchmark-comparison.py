@@ -25,8 +25,8 @@ WORKLOADS = {
     "arrays": 450,
     "direct_calls": 500,
     "method_calls": 500,
-    "closure_calls": 200,
-    "arguments_calls": 200,
+    "closure_calls": 500,
+    "arguments_calls": 400,
     "fibonacci": 100,
 }
 
