@@ -29760,6 +29760,7 @@ fn installTypedArrays(env: *Environment, rs: *Shape) EvalError!void {
     try installCrypto(env, rs, object_proto);
     try installURLSearchParams(env, rs, object_proto);
     try installURL(env, rs, object_proto);
+    try installEventTarget(env, rs, object_proto);
     try installTemporal(env, rs, object_proto);
     try installIntl(env, rs, object_proto);
     // ShadowRealm: a child realm with `evaluate` (and a minimal `importValue`).
@@ -39774,6 +39775,352 @@ fn urlCanParseFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
     }
     return Value.boolVal((try urlParse(self, input, base)) != null);
 }
+
+// ===== Event / EventTarget (DOM Events, tree-less flat model) =========
+// An Event carries its state in hidden slots: \x00Et type, \x00Eb/Ec/Eo bubbles/
+// cancelable/composed, \x00Ed defaultPrevented, \x00Esp/Esi stop(-immediate)
+// flags, \x00Edf dispatch-in-progress, \x00Etg/Ect target/currentTarget,
+// \x00Ets timeStamp, \x00Eit isTrusted. An EventTarget keeps its listener
+// records in the \x00etl array; each record is an object with \x00Lt type,
+// \x00Lc callback, \x00Lcap capture, \x00Lonce once.
+fn evBool(o: *value.Object, k: []const u8) bool {
+    if (o.getOwn(k)) |v| return v.toBoolean();
+    return false;
+}
+fn evIsEvent(v: Value) bool {
+    return v.isObject() and v.asObj().getOwn("\x00Et") != null;
+}
+fn eventConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (self.new_target.isUndefined()) return self.throwError("TypeError", "Failed to construct 'Event': Please use the 'new' operator");
+    if (args.len == 0) return self.throwError("TypeError", "Failed to construct 'Event': 1 argument required, but only 0 present.");
+    const ty = try self.toStringV(args[0]);
+    var bubbles = false;
+    var cancelable = false;
+    var composed = false;
+    if (args.len > 1 and args[1].isObject()) {
+        bubbles = (try self.getProperty(args[1], "bubbles")).toBoolean();
+        cancelable = (try self.getProperty(args[1], "cancelable")).toBoolean();
+        composed = (try self.getProperty(args[1], "composed")).toBoolean();
+    }
+    const obj = try gc_mod.allocObj(self.arena);
+    obj.* = .{};
+    if (self.env.get("Event")) |c| if (c.isObject()) {
+        if (c.asObj().getOwn("prototype")) |pp| if (pp.isObject()) obj.setProtoAtomic(pp.asObj());
+    };
+    const rs = self.root_shape;
+    try obj.setOwn(self.arena, rs, "\x00Et", try Value.strAlloc(self.arena, ty));
+    try obj.setOwn(self.arena, rs, "\x00Eb", Value.boolVal(bubbles));
+    try obj.setOwn(self.arena, rs, "\x00Ec", Value.boolVal(cancelable));
+    try obj.setOwn(self.arena, rs, "\x00Eo", Value.boolVal(composed));
+    try obj.setOwn(self.arena, rs, "\x00Ed", Value.boolVal(false));
+    try obj.setOwn(self.arena, rs, "\x00Etg", Value.nul());
+    try obj.setOwn(self.arena, rs, "\x00Ect", Value.nul());
+    try obj.setOwn(self.arena, rs, "\x00Ets", Value.num(0));
+    return Value.obj(obj);
+}
+fn eventGetter(comptime which: []const u8) value.NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+            _ = args;
+            const self: *Interpreter = @ptrCast(@alignCast(ctx));
+            if (!evIsEvent(this)) return self.throwError("TypeError", "Illegal invocation");
+            const o = this.asObj();
+            if (comptime std.mem.eql(u8, which, "type")) return o.getOwn("\x00Et") orelse Value.str("");
+            if (comptime std.mem.eql(u8, which, "bubbles")) return Value.boolVal(evBool(o, "\x00Eb"));
+            if (comptime std.mem.eql(u8, which, "cancelable")) return Value.boolVal(evBool(o, "\x00Ec"));
+            if (comptime std.mem.eql(u8, which, "composed")) return Value.boolVal(evBool(o, "\x00Eo"));
+            if (comptime std.mem.eql(u8, which, "defaultPrevented")) return Value.boolVal(evBool(o, "\x00Ed"));
+            if (comptime std.mem.eql(u8, which, "returnValue")) return Value.boolVal(!evBool(o, "\x00Ed"));
+            if (comptime std.mem.eql(u8, which, "isTrusted")) return Value.boolVal(evBool(o, "\x00Eit"));
+            if (comptime std.mem.eql(u8, which, "timeStamp")) return o.getOwn("\x00Ets") orelse Value.num(0);
+            if (comptime std.mem.eql(u8, which, "target") or std.mem.eql(u8, which, "srcElement")) return o.getOwn("\x00Etg") orelse Value.nul();
+            if (comptime std.mem.eql(u8, which, "currentTarget")) return o.getOwn("\x00Ect") orelse Value.nul();
+            if (comptime std.mem.eql(u8, which, "eventPhase")) return Value.num(if (evBool(o, "\x00Edf")) 2 else 0);
+            return Value.undef();
+        }
+    }.call;
+}
+fn eventPreventDefaultFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!evIsEvent(this)) return self.throwError("TypeError", "Illegal invocation");
+    const o = this.asObj();
+    if (evBool(o, "\x00Ec")) try o.setOwn(self.arena, self.root_shape, "\x00Ed", Value.boolVal(true));
+    return Value.undef();
+}
+fn eventStopPropFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!evIsEvent(this)) return self.throwError("TypeError", "Illegal invocation");
+    try this.asObj().setOwn(self.arena, self.root_shape, "\x00Esp", Value.boolVal(true));
+    return Value.undef();
+}
+fn eventStopImmediateFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!evIsEvent(this)) return self.throwError("TypeError", "Illegal invocation");
+    const o = this.asObj();
+    try o.setOwn(self.arena, self.root_shape, "\x00Esp", Value.boolVal(true));
+    try o.setOwn(self.arena, self.root_shape, "\x00Esi", Value.boolVal(true));
+    return Value.undef();
+}
+fn eventComposedPathFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!evIsEvent(this)) return self.throwError("TypeError", "Illegal invocation");
+    const arr = (try self.newArray()).asObj();
+    const o = this.asObj();
+    if (evBool(o, "\x00Edf")) if (o.getOwn("\x00Ect")) |ct| if (!ct.isNull()) try arr.appendElement(self.arena, ct);
+    return Value.obj(arr);
+}
+fn etListeners(self: *Interpreter, target: *value.Object) EvalError!*value.Object {
+    if (target.getOwn("\x00etl")) |v| if (v.isObject()) return v.asObj();
+    const arr = (try self.newArray()).asObj();
+    try target.setOwn(self.arena, self.root_shape, "\x00etl", Value.obj(arr));
+    return arr;
+}
+fn etCallbackOf(rec: Value) Value {
+    if (rec.isObject()) if (rec.asObj().getOwn("\x00Lc")) |c| return c;
+    return Value.undef();
+}
+fn eventTargetConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (self.new_target.isUndefined()) return self.throwError("TypeError", "Failed to construct 'EventTarget': Please use the 'new' operator");
+    const obj = try gc_mod.allocObj(self.arena);
+    obj.* = .{};
+    // Honour a subclass new.target's prototype (AbortSignal etc.).
+    var proto_set = false;
+    if (self.new_target.isObject()) if (self.new_target.asObj().getOwn("prototype")) |pp| if (pp.isObject()) {
+        obj.setProtoAtomic(pp.asObj());
+        proto_set = true;
+    };
+    if (!proto_set) if (self.env.get("EventTarget")) |c| if (c.isObject()) {
+        if (c.asObj().getOwn("prototype")) |pp| if (pp.isObject()) obj.setProtoAtomic(pp.asObj());
+    };
+    return Value.obj(obj);
+}
+fn etAddListenerFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!this.isObject()) return self.throwError("TypeError", "Illegal invocation");
+    const ty = try self.toStringV(if (args.len > 0) args[0] else Value.undef());
+    const cb = if (args.len > 1) args[1] else Value.undef();
+    if (cb.isNull() or cb.isUndefined()) return Value.undef(); // no-op
+    if (!cb.isObject()) return self.throwError("TypeError", "The \"listener\" argument must be an object or function");
+    var capture = false;
+    var once = false;
+    var signal: Value = Value.undef();
+    if (args.len > 2) {
+        const opt = args[2];
+        if (opt.isObject()) {
+            capture = (try self.getProperty(opt, "capture")).toBoolean();
+            once = (try self.getProperty(opt, "once")).toBoolean();
+            signal = try self.getProperty(opt, "signal");
+        } else capture = opt.toBoolean();
+    }
+    // A listener with an already-aborted signal is never added.
+    if (signal.isObject()) {
+        if ((try self.getProperty(signal, "aborted")).toBoolean()) return Value.undef();
+    }
+    const list = try etListeners(self, this.asObj());
+    // Dedup: same type + same callback identity + same capture.
+    for (try list.internalElementsSnapshot(self.arena)) |rec| {
+        if (!rec.isObject()) continue;
+        const ro = rec.asObj();
+        const rt = ro.getOwn("\x00Lt") orelse continue;
+        if (!rt.isString() or !std.mem.eql(u8, rt.asStr(), ty)) continue;
+        if (evBool(ro, "\x00Lcap") != capture) continue;
+        const rc = ro.getOwn("\x00Lc") orelse continue;
+        if (rc.isObject() and cb.isObject() and rc.asObj() == cb.asObj()) return Value.undef();
+    }
+    const rec = try gc_mod.allocObj(self.arena);
+    rec.* = .{};
+    try rec.setOwn(self.arena, self.root_shape, "\x00Lt", try Value.strAlloc(self.arena, ty));
+    try rec.setOwn(self.arena, self.root_shape, "\x00Lc", cb);
+    try rec.setOwn(self.arena, self.root_shape, "\x00Lcap", Value.boolVal(capture));
+    try rec.setOwn(self.arena, self.root_shape, "\x00Lonce", Value.boolVal(once));
+    try list.appendElement(self.arena, Value.obj(rec));
+    // When a live signal is supplied, aborting it removes this listener.
+    if (signal.isObject()) {
+        const remover = try gc_mod.allocObj(self.arena);
+        remover.* = .{ .native = etSignalRemoveFn };
+        try remover.setOwn(self.arena, self.root_shape, "\x00SRtgt", this);
+        try remover.setOwn(self.arena, self.root_shape, "\x00SRrec", Value.obj(rec));
+        try installNativeProps(self.arena, self.root_shape, remover, "", 1);
+        _ = self.callValueWithThis(try self.getProperty(signal, "addEventListener"), &.{ Value.str("abort"), Value.obj(remover), makeOnceOpts(self) catch Value.undef() }, signal) catch {};
+    }
+    return Value.undef();
+}
+fn makeOnceOpts(self: *Interpreter) EvalError!Value {
+    const o = try gc_mod.allocObj(self.arena);
+    o.* = .{};
+    try o.setOwn(self.arena, self.root_shape, "once", Value.boolVal(true));
+    return Value.obj(o);
+}
+fn etSignalRemoveFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!this.isObject()) return Value.undef();
+    const tgt = this.asObj().getOwn("\x00SRtgt") orelse return Value.undef();
+    const rec = this.asObj().getOwn("\x00SRrec") orelse return Value.undef();
+    if (!tgt.isObject() or !rec.isObject()) return Value.undef();
+    try etRemoveRecord(self, tgt.asObj(), rec.asObj());
+    return Value.undef();
+}
+fn etRemoveRecord(self: *Interpreter, target: *value.Object, rec: *value.Object) EvalError!void {
+    const list = try etListeners(self, target);
+    const fresh = (try self.newArray()).asObj();
+    for (try list.internalElementsSnapshot(self.arena)) |r| {
+        if (r.isObject() and r.asObj() == rec) continue;
+        try fresh.appendElement(self.arena, r);
+    }
+    try target.setOwn(self.arena, self.root_shape, "\x00etl", Value.obj(fresh));
+}
+fn etRemoveListenerFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!this.isObject()) return self.throwError("TypeError", "Illegal invocation");
+    const ty = try self.toStringV(if (args.len > 0) args[0] else Value.undef());
+    const cb = if (args.len > 1) args[1] else Value.undef();
+    if (!cb.isObject()) return Value.undef();
+    var capture = false;
+    if (args.len > 2) {
+        const opt = args[2];
+        if (opt.isObject()) capture = (try self.getProperty(opt, "capture")).toBoolean() else capture = opt.toBoolean();
+    }
+    const list = try etListeners(self, this.asObj());
+    const fresh = (try self.newArray()).asObj();
+    for (try list.internalElementsSnapshot(self.arena)) |rec| {
+        var drop = false;
+        if (rec.isObject()) {
+            const ro = rec.asObj();
+            const rt = ro.getOwn("\x00Lt");
+            const rc = ro.getOwn("\x00Lc");
+            if (rt != null and rt.?.isString() and std.mem.eql(u8, rt.?.asStr(), ty) and
+                evBool(ro, "\x00Lcap") == capture and rc != null and rc.?.isObject() and cb.isObject() and rc.?.asObj() == cb.asObj())
+            {
+                drop = true;
+            }
+        }
+        if (!drop) try fresh.appendElement(self.arena, rec);
+    }
+    try this.asObj().setOwn(self.arena, self.root_shape, "\x00etl", Value.obj(fresh));
+    return Value.undef();
+}
+fn etDispatchFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!this.isObject()) return self.throwError("TypeError", "Illegal invocation");
+    const evv = if (args.len > 0) args[0] else Value.undef();
+    if (!evIsEvent(evv)) return self.throwError("TypeError", "parameter 1 is not of type 'Event'.");
+    const ev = evv.asObj();
+    const rs = self.root_shape;
+    if (evBool(ev, "\x00Edf")) return self.throwDOMException("InvalidStateError", "The event is already being dispatched.");
+    // Initialise dispatch: set flags/target, reset propagation stops.
+    try ev.setOwn(self.arena, rs, "\x00Edf", Value.boolVal(true));
+    try ev.setOwn(self.arena, rs, "\x00Esp", Value.boolVal(false));
+    try ev.setOwn(self.arena, rs, "\x00Esi", Value.boolVal(false));
+    try ev.setOwn(self.arena, rs, "\x00Etg", this);
+    try ev.setOwn(self.arena, rs, "\x00Ect", this);
+    const ty = (ev.getOwn("\x00Et") orelse Value.str("")).asStr();
+    const list = try etListeners(self, this.asObj());
+    const snapshot = try list.internalElementsSnapshot(self.arena);
+    for (snapshot) |rec| {
+        if (!rec.isObject()) continue;
+        const ro = rec.asObj();
+        const rt = ro.getOwn("\x00Lt") orelse continue;
+        if (!rt.isString() or !std.mem.eql(u8, rt.asStr(), ty)) continue;
+        // Skip listeners removed since the snapshot was taken. removeEventListener
+        // swaps in a fresh \x00etl array, so re-read the live list, not `list`.
+        var still_present = false;
+        for (try (try etListeners(self, this.asObj())).internalElementsSnapshot(self.arena)) |cur| {
+            if (cur.isObject() and cur.asObj() == ro) {
+                still_present = true;
+                break;
+            }
+        }
+        if (!still_present) continue;
+        if (evBool(ro, "\x00Lonce")) try etRemoveRecord(self, this.asObj(), ro);
+        const cb = ro.getOwn("\x00Lc") orelse continue;
+        if (!cb.isObject()) continue;
+        // An object listener dispatches through its handleEvent method.
+        var callee = cb;
+        var this_arg = this;
+        if (!cb.asObj().isCallableObject()) {
+            const he = try self.getProperty(cb, "handleEvent");
+            if (!he.isObject() or !he.asObj().isCallableObject()) continue;
+            callee = he;
+            this_arg = cb;
+        }
+        _ = self.callValueWithThis(callee, &.{evv}, this_arg) catch |err| {
+            if (err == error.Throw) {
+                self.exception = Value.undef(); // report + continue per spec
+            } else return err;
+        };
+        if (evBool(ev, "\x00Esi")) break;
+    }
+    try ev.setOwn(self.arena, rs, "\x00Edf", Value.boolVal(false));
+    try ev.setOwn(self.arena, rs, "\x00Ect", Value.nul());
+    return Value.boolVal(!evBool(ev, "\x00Ed"));
+}
+fn installEventTarget(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalError!void {
+    const a = env.arena;
+    const symKey = struct {
+        fn f(e: *Environment, name: []const u8) ?[]const u8 {
+            if (e.get("Symbol")) |s| if (s.isObject()) {
+                if (s.asObj().getOwn(name)) |t| if (t.isObject() and t.asObj().is_symbol) return t.asObj().sym_key;
+            };
+            return null;
+        }
+    }.f;
+    // ---- Event ----
+    const ev_proto = try gc_mod.allocObj(a);
+    ev_proto.* = .{ .proto = object_proto };
+    inline for (.{ "type", "bubbles", "cancelable", "composed", "defaultPrevented", "returnValue", "isTrusted", "timeStamp", "target", "srcElement", "currentTarget", "eventPhase" }) |g| {
+        try setNativeGetter(a, rs, ev_proto, g, eventGetter(g));
+        try ev_proto.setAttr(a, g, .{ .enumerable = true, .configurable = true });
+    }
+    try setNative(a, rs, ev_proto, "preventDefault", 0, eventPreventDefaultFn);
+    try setNative(a, rs, ev_proto, "stopPropagation", 0, eventStopPropFn);
+    try setNative(a, rs, ev_proto, "stopImmediatePropagation", 0, eventStopImmediateFn);
+    try setNative(a, rs, ev_proto, "composedPath", 0, eventComposedPathFn);
+    if (symKey(env, "toStringTag")) |k| {
+        try ev_proto.setOwn(a, rs, k, Value.str("Event"));
+        try ev_proto.setAttr(a, k, .{ .writable = false, .enumerable = false, .configurable = true });
+    }
+    const ev_ctor = try gc_mod.allocObj(a);
+    ev_ctor.* = .{ .native = eventConstructorFn, .native_ctor = true };
+    try installNativeProps(a, rs, ev_ctor, "Event", 1);
+    try ev_ctor.setOwn(a, rs, "prototype", Value.obj(ev_proto));
+    try ev_ctor.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
+    try setConstructor(a, rs, ev_proto, ev_ctor);
+    inline for (.{ .{ "NONE", 0 }, .{ "CAPTURING_PHASE", 1 }, .{ "AT_TARGET", 2 }, .{ "BUBBLING_PHASE", 3 } }) |pair| {
+        try ev_ctor.setOwn(a, rs, pair[0], Value.num(pair[1]));
+        try ev_ctor.setAttr(a, pair[0], .{ .writable = false, .enumerable = true, .configurable = false });
+        try ev_proto.setOwn(a, rs, pair[0], Value.num(pair[1]));
+        try ev_proto.setAttr(a, pair[0], .{ .writable = false, .enumerable = true, .configurable = false });
+    }
+    try env.put("Event", Value.obj(ev_ctor));
+    // ---- EventTarget ----
+    const et_proto = try gc_mod.allocObj(a);
+    et_proto.* = .{ .proto = object_proto };
+    try setNative(a, rs, et_proto, "addEventListener", 2, etAddListenerFn);
+    try setNative(a, rs, et_proto, "removeEventListener", 2, etRemoveListenerFn);
+    try setNative(a, rs, et_proto, "dispatchEvent", 1, etDispatchFn);
+    if (symKey(env, "toStringTag")) |k| {
+        try et_proto.setOwn(a, rs, k, Value.str("EventTarget"));
+        try et_proto.setAttr(a, k, .{ .writable = false, .enumerable = false, .configurable = true });
+    }
+    const et_ctor = try gc_mod.allocObj(a);
+    et_ctor.* = .{ .native = eventTargetConstructorFn, .native_ctor = true };
+    try installNativeProps(a, rs, et_ctor, "EventTarget", 0);
+    try et_ctor.setOwn(a, rs, "prototype", Value.obj(et_proto));
+    try et_ctor.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
+    try setConstructor(a, rs, et_proto, et_ctor);
+    try env.put("EventTarget", Value.obj(et_ctor));
+}
+
 fn installURL(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalError!void {
     const a = env.arena;
     const symKey = struct {
