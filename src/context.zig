@@ -14925,11 +14925,16 @@ test "enable_gc: heap_limit_bytes retries ArrayBuffer byte allocation after coll
     defer ctx.destroy();
 
     const baseline = ctx.gc_array_buffer_bytes_live;
-    _ = try ctx.evaluate(
-        \\globalThis.unreachableArrayBuffer = new ArrayBuffer(20 * 1024 * 1024);
-        \\globalThis.unreachableArrayBuffer = undefined;
-        \\0;
+    const first = try ctx.evaluate(
+        \\(() => {
+        \\  function makeDroppedBuffer() {
+        \\    let dropped = new ArrayBuffer(20 * 1024 * 1024);
+        \\    return dropped.byteLength;
+        \\  }
+        \\  return makeDroppedBuffer();
+        \\})();
     );
+    try std.testing.expectEqual(@as(f64, @floatFromInt(chunk)), first.asNum());
     try std.testing.expectEqual(baseline + chunk, ctx.gc_array_buffer_bytes_live);
 
     // Leave just under one additional slab available. The second allocation
