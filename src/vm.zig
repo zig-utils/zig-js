@@ -653,9 +653,21 @@ const QuickAddRecurrence = struct {
     binding_instruction: u32,
 };
 
+const QuickObservableAddRecurrence = struct {
+    threshold: u16,
+    first_delta: u16,
+    second_delta: u16,
+    first_binding_instruction: u32,
+    second_binding_instruction: u32,
+    counter_read_instruction: u32,
+    counter_write_instruction: u32,
+    counter_increment: f64,
+};
+
 const QuickRecurrencePlan = union(enum) {
     unsupported,
     add: QuickAddRecurrence,
+    observable_add: QuickObservableAddRecurrence,
 };
 
 // Test-only observations enforce that the optimized path remains reachable.
@@ -672,6 +684,7 @@ var quick_packed_array_push_loop_hits: std.atomic.Value(u64) = .init(0);
 var quick_packed_array_specialized_expression_hits: std.atomic.Value(u64) = .init(0);
 var quick_global_binding_hits: std.atomic.Value(u64) = .init(0);
 var quick_numeric_recurrence_hits: std.atomic.Value(u64) = .init(0);
+var quick_observable_recurrence_hits: std.atomic.Value(u64) = .init(0);
 
 inline fn quickPlainObject(value_: Value) ?*value.Object {
     if (!value_.isObject()) return null;
@@ -990,7 +1003,49 @@ fn exactU16(value_: Value, allow_zero: bool) ?u16 {
     return @intFromFloat(number);
 }
 
+fn compileQuickObservableRecurrencePlan(chunk: *Chunk) ?QuickObservableAddRecurrence {
+    const code = chunk.code.items;
+    if (chunk.param_count != 2 or chunk.local_count != 2 or code.len != 28) return null;
+    const expected = [_]bc.Op{
+        .load_local, .load_local, .get_prop,  .load_const, .add,        .set_prop,  .pop,
+        .load_local, .load_const, .lt,        .jump_if_false, .load_local, .jump,
+        .load_var,   .load_local, .load_const, .sub,       .load_local, .call,
+        .load_var,   .load_local, .load_const, .sub,       .load_local, .call,
+        .add,        .ret,        .ret_undef,
+    };
+    for (expected, 0..) |op, instruction| if (code[instruction].op != op) return null;
+    if (code[0].a != 1 or code[1].a != 1 or
+        code[7].a != 0 or code[10].a != 13 or code[11].a != 0 or code[12].a != 26 or
+        code[14].a != 0 or code[17].a != 1 or code[18].a != 2 or
+        code[20].a != 0 or code[23].a != 1 or code[24].a != 2 or
+        code[2].a >= chunk.names.items.len or code[5].a >= chunk.names.items.len or
+        code[13].a >= chunk.names.items.len or code[19].a >= chunk.names.items.len or
+        code[3].a >= chunk.consts.items.len or code[8].a >= chunk.consts.items.len or
+        code[15].a >= chunk.consts.items.len or code[21].a >= chunk.consts.items.len or
+        !std.mem.eql(u8, chunk.names.items[code[2].a], chunk.names.items[code[5].a]) or
+        !std.mem.eql(u8, chunk.names.items[code[13].a], chunk.names.items[code[19].a]))
+        return null;
+    const counter_increment = chunk.consts.items[code[3].a];
+    if (!counter_increment.isNumber()) return null;
+    const threshold = exactU16(chunk.consts.items[code[8].a], false) orelse return null;
+    const first_delta = exactU16(chunk.consts.items[code[15].a], false) orelse return null;
+    const second_delta = exactU16(chunk.consts.items[code[21].a], false) orelse return null;
+    if (first_delta > threshold or second_delta > threshold) return null;
+    return .{
+        .threshold = threshold,
+        .first_delta = first_delta,
+        .second_delta = second_delta,
+        .first_binding_instruction = 13,
+        .second_binding_instruction = 19,
+        .counter_read_instruction = 2,
+        .counter_write_instruction = 5,
+        .counter_increment = counter_increment.asNum(),
+    };
+}
+
 fn compileQuickRecurrencePlan(chunk: *Chunk) QuickRecurrencePlan {
+    if (compileQuickObservableRecurrencePlan(chunk)) |observable|
+        return .{ .observable_add = observable };
     const code = chunk.code.items;
     if (chunk.param_count != 1 or chunk.local_count != 1 or code.len != 19) return .unsupported;
     const expected = [_]bc.Op{
@@ -1049,43 +1104,110 @@ fn advanceQuickSteps(vm: *Interpreter, requested: u64) EvalError!void {
     }
 }
 
+inline fn advanceQuickObservableSteps(vm: *Interpreter, requested: u64) EvalError!void {
+    const end = std.math.add(u64, vm.steps, requested) catch return advanceQuickSteps(vm, requested);
+    if (end <= interp.max_steps and (vm.steps >> 10) == (end >> 10)) {
+        vm.steps = end;
+        return;
+    }
+    return advanceQuickSteps(vm, requested);
+}
+
+fn runQuickObservableRecurrence(
+    vm: *Interpreter,
+    recurrence: QuickObservableAddRecurrence,
+    state: *value.Object,
+    counter_slot: usize,
+    input: u16,
+) EvalError!f64 {
+    // Execute every logical invocation and counter mutation. Only the bytecode
+    // dispatch and activation materialization are compiled away; checkpoint and
+    // step positions stay identical to the 28-instruction function body.
+    try advanceQuickObservableSteps(vm, 6); // property update through set_prop
+    const updated_counter = Value.num(state.slots.items[counter_slot].asNum() + recurrence.counter_increment);
+    gc_mod.barrierValueFrom(state, updated_counter);
+    state.slots.items[counter_slot] = updated_counter;
+    try advanceQuickObservableSteps(vm, 5); // pop + condition + branch
+    if (input < recurrence.threshold) {
+        try advanceQuickObservableSteps(vm, 3); // value arm + jump + return
+        return @floatFromInt(input);
+    }
+
+    try advanceQuickObservableSteps(vm, 6); // first callee/arguments/call
+    const first = try runQuickObservableRecurrence(vm, recurrence, state, counter_slot, input - recurrence.first_delta);
+    try advanceQuickObservableSteps(vm, 6); // second callee/arguments/call
+    const second = try runQuickObservableRecurrence(vm, recurrence, state, counter_slot, input - recurrence.second_delta);
+    try advanceQuickObservableSteps(vm, 2); // add + return
+    return first + second;
+}
+
+inline fn quickRecurrenceCalleeMatches(vm: *Interpreter, chunk: *Chunk, instruction: u32, func: *Function) bool {
+    const live = quickGlobalBindingValue(chunk, instruction, vm) orelse return false;
+    const function_object = func.obj orelse return false;
+    return live.isObject() and live.asObj() == function_object;
+}
+
+fn quickRecurrenceNeededDepth(input: u16, threshold: u16, first_delta: u16, second_delta: u16) u32 {
+    const minimum_delta = @min(first_delta, second_delta);
+    return if (input < threshold)
+        1
+    else
+        @as(u32, (input - threshold) / minimum_delta) + 2;
+}
+
 fn tryQuickNumericRecurrence(vm: *Interpreter, func: *Function, args: []const Value) EvalError!?Value {
     const chunk = func.chunk orelse return null;
     const plan = quickRecurrencePlan(chunk) orelse return null;
-    const recurrence = switch (plan.*) {
-        .unsupported => return null,
-        .add => |add| add,
-    };
-    if (args.len == 0) return null;
-    const input = exactU16(args[0], true) orelse return null;
-    if (input > 255) return null;
-    const live_callee = quickGlobalBindingValue(chunk, recurrence.binding_instruction, vm) orelse return null;
-    const function_object = func.obj orelse return null;
-    if (!live_callee.isObject() or live_callee.asObj() != function_object) return null;
-    const minimum_delta = @min(recurrence.first_delta, recurrence.second_delta);
-    const needed_depth: u32 = if (input < recurrence.threshold)
-        1
-    else
-        @as(u32, (input - recurrence.threshold) / minimum_delta) + 2;
-    if (vm.depth + needed_depth > interp.max_call_depth) return null;
+    return switch (plan.*) {
+        .unsupported => null,
+        .add => |recurrence| pure: {
+            if (args.len == 0) break :pure null;
+            const input = exactU16(args[0], true) orelse break :pure null;
+            if (input > 255 or !quickRecurrenceCalleeMatches(vm, chunk, recurrence.binding_instruction, func))
+                break :pure null;
+            const needed_depth = quickRecurrenceNeededDepth(input, recurrence.threshold, recurrence.first_delta, recurrence.second_delta);
+            if (vm.depth + needed_depth > interp.max_call_depth) break :pure null;
 
-    var results: [256]f64 = undefined;
-    var steps: [256]u64 = undefined;
-    var n: usize = 0;
-    while (n <= input) : (n += 1) {
-        if (n < recurrence.threshold) {
-            results[n] = @floatFromInt(n);
-            steps[n] = 7;
-        } else {
-            const first = n - recurrence.first_delta;
-            const second = n - recurrence.second_delta;
-            results[n] = results[first] + results[second];
-            steps[n] = addRecurrenceSteps(steps[first], steps[second]);
-        }
-    }
-    try advanceQuickSteps(vm, steps[input]);
-    if (builtin.is_test) _ = quick_numeric_recurrence_hits.fetchAdd(1, .monotonic);
-    return Value.num(results[input]);
+            var results: [256]f64 = undefined;
+            var steps: [256]u64 = undefined;
+            var n: usize = 0;
+            while (n <= input) : (n += 1) {
+                if (n < recurrence.threshold) {
+                    results[n] = @floatFromInt(n);
+                    steps[n] = 7;
+                } else {
+                    const first = n - recurrence.first_delta;
+                    const second = n - recurrence.second_delta;
+                    results[n] = results[first] + results[second];
+                    steps[n] = addRecurrenceSteps(steps[first], steps[second]);
+                }
+            }
+            try advanceQuickSteps(vm, steps[input]);
+            if (builtin.is_test) _ = quick_numeric_recurrence_hits.fetchAdd(1, .monotonic);
+            break :pure Value.num(results[input]);
+        },
+        .observable_add => |recurrence| observable: {
+            if (args.len < 2) break :observable null;
+            const input = exactU16(args[0], true) orelse break :observable null;
+            if (input > 255 or
+                !quickRecurrenceCalleeMatches(vm, chunk, recurrence.first_binding_instruction, func) or
+                !quickRecurrenceCalleeMatches(vm, chunk, recurrence.second_binding_instruction, func))
+                break :observable null;
+            const state = quickPlainObject(args[1]) orelse break :observable null;
+            if (state.proxy_handler != null or state.proxy_revoked or state.is_symbol or state.is_bigint)
+                break :observable null;
+            const read_slot = quickPropertySlot(chunk, recurrence.counter_read_instruction, state) orelse break :observable null;
+            const write_slot = quickPropertySlot(chunk, recurrence.counter_write_instruction, state) orelse break :observable null;
+            if (read_slot != write_slot or quickSlotNumber(state, read_slot) == null) break :observable null;
+            const needed_depth = quickRecurrenceNeededDepth(input, recurrence.threshold, recurrence.first_delta, recurrence.second_delta);
+            if (needed_depth > inline_call_depth_limit or vm.depth + needed_depth > interp.max_call_depth)
+                break :observable null;
+
+            const result = try runQuickObservableRecurrence(vm, recurrence, state, read_slot, input);
+            if (builtin.is_test) _ = quick_observable_recurrence_hits.fetchAdd(1, .monotonic);
+            break :observable Value.num(result);
+        },
+    };
 }
 
 fn tryQuickArrayLoop(
@@ -4801,6 +4923,67 @@ test "vm: quickens guarded pure numeric recurrence" {
             isolated_hits = quick_numeric_recurrence_hits.load(.monotonic);
         } else {
             try std.testing.expectEqual(isolated_hits, quick_numeric_recurrence_hits.load(.monotonic));
+        }
+    }
+    try std.testing.expectEqual(run_steps[1], run_steps[0]);
+}
+
+test "vm: compiles observable numeric recurrence without eliding calls" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const source =
+        \\function recur(n, state) {
+        \\  state.calls = state.calls + 1;
+        \\  return n < 2 ? n : recur(n - 1, state) + recur(n - 2, state);
+        \\}
+        \\var state = { calls: 0 };
+        \\var saved = recur;
+        \\var first = recur(8, state);
+        \\var accessorState = { raw: 0 };
+        \\Object.defineProperty(accessorState, "calls", {
+        \\  get: function () { return this.raw; },
+        \\  set: function (value) { this.raw = value; }
+        \\});
+        \\var accessorResult = recur(3, accessorState);
+        \\recur = function (n, state) { state.calls = state.calls + 1000; return 100; };
+        \\var second = saved(3, state);
+        \\first + accessorResult + accessorState.raw + second + state.calls
+    ;
+    const old_parallel = bc.ic_seqlock_enabled.load(.monotonic);
+    defer bc.ic_seqlock_enabled.store(old_parallel, .monotonic);
+    const hits_before = quick_observable_recurrence_hits.load(.monotonic);
+    var isolated_hits: u64 = undefined;
+    var run_steps: [2]u64 = undefined;
+    for ([_]bool{ false, true }, 0..) |parallel, run_index| {
+        bc.ic_seqlock_enabled.store(parallel, .monotonic);
+        var parser = try Parser.init(allocator, source);
+        const program = try parser.parseProgram();
+        const chunk = try Compiler.compileProgram(allocator, program);
+        var env = Environment{ .arena = allocator, .fn_scope = true };
+        const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
+        try interp.installGlobals(&env, root_shape);
+        const global = try gc_mod.allocObj(allocator);
+        global.* = .{};
+        try env.put("globalThis", Value.obj(global));
+        try interp.mirrorGlobalsOnto(&env, global, root_shape);
+        var machine = Interpreter{
+            .arena = allocator,
+            .env = &env,
+            .root_shape = root_shape,
+            .global_object = global,
+            .this_value = Value.obj(global),
+        };
+        // fib(8) performs all 67 observable calls. The accessor-backed state
+        // takes the generic path and observes all five fib(3) mutations. After
+        // replacement, saved(3) executes once and its two live calls add 1000.
+        try std.testing.expectEqual(@as(f64, 2296), (try run(&machine, chunk, null)).asNum());
+        run_steps[run_index] = machine.steps;
+        if (!parallel) {
+            try std.testing.expect(quick_observable_recurrence_hits.load(.monotonic) > hits_before);
+            isolated_hits = quick_observable_recurrence_hits.load(.monotonic);
+        } else {
+            try std.testing.expectEqual(isolated_hits, quick_observable_recurrence_hits.load(.monotonic));
         }
     }
     try std.testing.expectEqual(run_steps[1], run_steps[0]);
