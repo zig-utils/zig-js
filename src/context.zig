@@ -13287,6 +13287,7 @@ test "parallel_js: fixed-shape object allocation quickens across shared Thread w
     defer ctx.destroy();
 
     const hits_before = vm.quickObjectAllocationLoopHitsForTesting();
+    const batch_cells_before = gc_mod.objectBatchCellsForTesting();
     const result = try ctx.evaluate(
         \\function runAllocationLane(lane) {
         \\  var items = [
@@ -13321,6 +13322,8 @@ test "parallel_js: fixed-shape object allocation quickens across shared Thread w
     try std.testing.expect(result.asBool());
     const quick_hits = vm.quickObjectAllocationLoopHitsForTesting() - hits_before;
     try std.testing.expect(quick_hits > 3000);
+    const batch_cells = gc_mod.objectBatchCellsForTesting() - batch_cells_before;
+    try std.testing.expect(batch_cells >= 2048);
 }
 
 fn expectParallelGcTelemetryCoherent(ctx: *Context) !void {

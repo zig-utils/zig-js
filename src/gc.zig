@@ -15,6 +15,7 @@
 //! back to their concrete types and traced by the helpers below.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const gc = @import("gc");
 const value = @import("value.zig");
 const interp = @import("interpreter.zig");
@@ -29,6 +30,12 @@ const agent = @import("agent.zig");
 const Value = value.Value;
 const Object = value.Object;
 const Environment = interp.Environment;
+
+var object_batch_cells_for_testing: std.atomic.Value(u64) = .init(0);
+
+pub fn objectBatchCellsForTesting() u64 {
+    return object_batch_cells_for_testing.load(.monotonic);
+}
 
 /// The engine's GC cell taxonomy. Each `Heap.create(T, kind)` tags its cell so
 /// `trace`/`finalize` dispatch without RTTI. AST nodes, bytecode chunks, and
@@ -950,6 +957,38 @@ pub fn allocObject(heap_erased: ?*anyopaque, arena: std.mem.Allocator) std.mem.A
     o.* = .{};
     o.initInlineSlots();
     return o;
+}
+
+/// Allocate and default-initialize a same-kind prefix for callers that can
+/// consume several objects before their next safepoint. GC-backed heaps
+/// publish the prefix under one metadata lock; arena mode preserves the same
+/// short-prefix/OOM ordering by returning prior successful allocations before
+/// retrying the failed position on the next call.
+pub fn allocObjectBatch(heap_erased: ?*anyopaque, arena: std.mem.Allocator, out: []*Object) std.mem.Allocator.Error!usize {
+    if (out.len == 0) return 0;
+    if (heap_erased) |h| {
+        const heap: *Heap = @ptrCast(@alignCast(h));
+        const count = try heap.createBatch(Object, .object, out);
+        for (out[0..count]) |o| {
+            o.* = .{};
+            o.initInlineSlots();
+        }
+        if (builtin.is_test) _ = object_batch_cells_for_testing.fetchAdd(count, .monotonic);
+        return count;
+    }
+
+    var count: usize = 0;
+    while (count < out.len) {
+        const o = arena.create(Object) catch |err| {
+            if (count == 0) return err;
+            break;
+        };
+        o.* = .{};
+        o.initInlineSlots();
+        out[count] = o;
+        count += 1;
+    }
+    return count;
 }
 
 /// The GC heap whose cells the *current thread* allocates into, or null for the

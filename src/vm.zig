@@ -2515,14 +2515,14 @@ fn tryQuickNumericRecurrence(vm: *Interpreter, func: *Function, args: []const Va
     };
 }
 
-fn tryQuickObjectAllocationLoop(
+fn tryQuickObjectAllocationLoopMode(
     vm: *Interpreter,
     chunk: *Chunk,
     allocation: *QuickObjectAllocationLoop,
     frame: *Frame,
     start: usize,
     max_extra_steps: u64,
-    parallel_sync: bool,
+    comptime parallel_sync: bool,
 ) EvalError!?QuickArrayLoopUpdate {
     if (frame.escaped.load(.monotonic)) return null;
     const counter_slot: usize = @intCast(allocation.counter_local);
@@ -2583,6 +2583,10 @@ fn tryQuickObjectAllocationLoop(
     // checkpoint-bounded allocation batch instead of taking the root binding
     // lock again for every fresh literal below.
     const object_proto = vm.objectProto();
+    const max_allocation_batch = 16;
+    var fresh_batch: [if (parallel_sync) max_allocation_batch else 0]*value.Object = undefined;
+    var fresh_batch_index: usize = 0;
+    var fresh_batch_len: usize = 0;
     var iterations: u64 = 0;
     var completed = false;
     while (iterations < max_iterations and counter < bound) {
@@ -2620,7 +2624,28 @@ fn tryQuickObjectAllocationLoop(
             (if (completes_loop) @as(u64, 4) else 0);
         if (completed_extra_steps > max_extra_steps) break;
 
-        const fresh = gc_mod.allocObject(vm.gc, vm.arena) catch |err| {
+        const fresh = if (parallel_sync) batched: {
+            if (fresh_batch_index == fresh_batch_len) {
+                const remaining: usize = @intCast(@min(
+                    max_iterations - iterations,
+                    @as(u64, max_allocation_batch),
+                ));
+                fresh_batch_len = gc_mod.allocObjectBatch(vm.gc, vm.arena, fresh_batch[0..remaining]) catch |err| {
+                    frame.slots[index_slot] = Value.num(@floatFromInt(selected));
+                    frame.slots[displaced_slot] = displaced_value;
+                    frame.slots[value_slot] = Value.num(next);
+                    frame.slots[total_slot] = Value.num(total);
+                    frame.slots[counter_slot] = Value.num(counter);
+                    vm.steps += iterations * steps_per_iteration + 24;
+                    return err;
+                };
+                std.debug.assert(fresh_batch_len != 0);
+                fresh_batch_index = 0;
+            }
+            const fresh = fresh_batch[fresh_batch_index];
+            fresh_batch_index += 1;
+            break :batched fresh;
+        } else gc_mod.allocObject(vm.gc, vm.arena) catch |err| {
             frame.slots[index_slot] = Value.num(@floatFromInt(selected));
             frame.slots[displaced_slot] = displaced_value;
             frame.slots[value_slot] = Value.num(next);
@@ -2691,6 +2716,21 @@ fn tryQuickObjectAllocationLoop(
         .extra_steps = iterations * steps_per_iteration - 1 + (if (completed) @as(u64, 4) else 0),
         .next_ip = if (completed) allocation.exit_ip else start,
     };
+}
+
+inline fn tryQuickObjectAllocationLoop(
+    vm: *Interpreter,
+    chunk: *Chunk,
+    allocation: *QuickObjectAllocationLoop,
+    frame: *Frame,
+    start: usize,
+    max_extra_steps: u64,
+    parallel_sync: bool,
+) EvalError!?QuickArrayLoopUpdate {
+    return if (parallel_sync)
+        try tryQuickObjectAllocationLoopMode(vm, chunk, allocation, frame, start, max_extra_steps, true)
+    else
+        try tryQuickObjectAllocationLoopMode(vm, chunk, allocation, frame, start, max_extra_steps, false);
 }
 
 fn tryQuickArrayLoop(
