@@ -609,6 +609,16 @@ const QuickArrayBound = union(enum) {
     local: u32,
 };
 
+const QuickArrayAdd3BitAnd = struct {
+    locals: [3]u32,
+    mask: i32,
+};
+
+const QuickArrayExpressionSpecialization = union(enum) {
+    generic,
+    add3_bit_and: QuickArrayAdd3BitAnd,
+};
+
 const QuickPackedArrayPushLoop = struct {
     index_local: u32,
     array_local: u32,
@@ -617,6 +627,7 @@ const QuickPackedArrayPushLoop = struct {
     get_prop_instruction: u32,
     ops: [max_quick_array_expression_ops]QuickArrayNumericOp,
     op_count: u8,
+    specialization: QuickArrayExpressionSpecialization,
     executed: u8,
 };
 
@@ -637,6 +648,7 @@ var quick_array_prototype_data_hits: std.atomic.Value(u64) = .init(0);
 var quick_array_push_hits: std.atomic.Value(u64) = .init(0);
 var quick_packed_array_sum_loop_hits: std.atomic.Value(u64) = .init(0);
 var quick_packed_array_push_loop_hits: std.atomic.Value(u64) = .init(0);
+var quick_packed_array_specialized_expression_hits: std.atomic.Value(u64) = .init(0);
 
 inline fn quickPlainObject(value_: Value) ?*value.Object {
     if (!value_.isObject()) return null;
@@ -650,6 +662,35 @@ inline fn quickArrayIndex(key: Value) ?usize {
     const number = key.asNum();
     if (!std.math.isFinite(number) or number < 0 or number >= 4294967295 or @trunc(number) != number) return null;
     return @intFromFloat(number);
+}
+
+fn specializeQuickArrayExpression(ops: []const QuickArrayNumericOp) QuickArrayExpressionSpecialization {
+    if (ops.len == 7) {
+        const first = switch (ops[0]) {
+            .local => |local| local,
+            else => return .generic,
+        };
+        const second = switch (ops[1]) {
+            .local => |local| local,
+            else => return .generic,
+        };
+        if (ops[2] != .add) return .generic;
+        const third = switch (ops[3]) {
+            .local => |local| local,
+            else => return .generic,
+        };
+        if (ops[4] != .add) return .generic;
+        const mask = switch (ops[5]) {
+            .constant => |number| number,
+            else => return .generic,
+        };
+        if (ops[6] != .bit_and) return .generic;
+        return .{ .add3_bit_and = .{
+            .locals = .{ first, second, third },
+            .mask = Value.num(mask).toInt32(),
+        } };
+    }
+    return .generic;
 }
 
 fn compileQuickPackedArrayPushLoop(chunk: *Chunk, start: usize) ?QuickPackedArrayPushLoop {
@@ -736,6 +777,7 @@ fn compileQuickPackedArrayPushLoop(chunk: *Chunk, start: usize) ?QuickPackedArra
         .get_prop_instruction = @intCast(start + 6),
         .ops = ops,
         .op_count = @intCast(op_count),
+        .specialization = specializeQuickArrayExpression(ops[0..op_count]),
         .executed = @intCast(exit - start),
     };
 }
@@ -816,7 +858,24 @@ const QuickArrayLoopUpdate = struct {
     next_ip: usize,
 };
 
-fn quickArrayNumericExpression(push: *const QuickPackedArrayPushLoop, frame: *Frame, index_value: Value) ?Value {
+inline fn quickArrayNumericLocal(push: *const QuickPackedArrayPushLoop, frame: *Frame, index_value: Value, raw_local: u32) ?f64 {
+    const local: usize = @intCast(raw_local);
+    if (local >= frame.slots.len) return null;
+    const operand = if (raw_local == push.index_local) index_value else frame.slots[local];
+    return if (operand.isNumber()) operand.asNum() else null;
+}
+
+inline fn quickArrayNumericExpression(push: *const QuickPackedArrayPushLoop, frame: *Frame, index_value: Value) ?Value {
+    switch (push.specialization) {
+        .add3_bit_and => |specialized| {
+            const first = quickArrayNumericLocal(push, frame, index_value, specialized.locals[0]) orelse return null;
+            const second = quickArrayNumericLocal(push, frame, index_value, specialized.locals[1]) orelse return null;
+            const third = quickArrayNumericLocal(push, frame, index_value, specialized.locals[2]) orelse return null;
+            const sum = Value.num((first + second) + third).toInt32();
+            return Value.num(@floatFromInt(sum & specialized.mask));
+        },
+        .generic => {},
+    }
     var numbers: [max_quick_array_expression_stack]f64 = undefined;
     var depth: usize = 0;
     for (push.ops[0..push.op_count]) |op| switch (op) {
@@ -825,11 +884,7 @@ fn quickArrayNumericExpression(push: *const QuickPackedArrayPushLoop, frame: *Fr
             depth += 1;
         },
         .local => |raw_local| {
-            const local: usize = @intCast(raw_local);
-            if (local >= frame.slots.len) return null;
-            const operand = if (raw_local == push.index_local) index_value else frame.slots[local];
-            if (!operand.isNumber()) return null;
-            numbers[depth] = operand.asNum();
+            numbers[depth] = quickArrayNumericLocal(push, frame, index_value, raw_local) orelse return null;
             depth += 1;
         },
         .add, .sub, .mul, .div, .mod, .bit_and => {
@@ -1622,7 +1677,13 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                             ip = quick.next_ip;
                             if (builtin.is_test) switch (plan.*) {
                                 .packed_sum => _ = quick_packed_array_sum_loop_hits.fetchAdd(1, .monotonic),
-                                .packed_push => _ = quick_packed_array_push_loop_hits.fetchAdd(1, .monotonic),
+                                .packed_push => |push| {
+                                    _ = quick_packed_array_push_loop_hits.fetchAdd(1, .monotonic);
+                                    switch (push.specialization) {
+                                        .add3_bit_and => _ = quick_packed_array_specialized_expression_hits.fetchAdd(1, .monotonic),
+                                        .generic => {},
+                                    }
+                                },
                                 .unsupported => {},
                             };
                             continue;
@@ -4398,6 +4459,7 @@ test "vm: quickens packed dense numeric array reads" {
     const pushes_before = quick_array_push_hits.load(.monotonic);
     const sum_loops_before = quick_packed_array_sum_loop_hits.load(.monotonic);
     const push_loops_before = quick_packed_array_push_loop_hits.load(.monotonic);
+    const specialized_expressions_before = quick_packed_array_specialized_expression_hits.load(.monotonic);
     try std.testing.expectEqual(@as(f64, 6), (try vmRun(allocator,
         \\function sum(values) {
         \\  let total = 0;
@@ -4420,14 +4482,15 @@ test "vm: quickens packed dense numeric array reads" {
     try std.testing.expect(quick_array_prototype_data_hits.load(.monotonic) > prototype_data_before);
     try std.testing.expect(quick_array_push_hits.load(.monotonic) > pushes_before);
     try std.testing.expectEqual(@as(f64, 806), (try vmRun(allocator,
-        \\function fill(limit) {
+        \\function fill(limit, job, lane) {
         \\  let values = [];
-        \\  for (let i = 0; i < limit; i = i + 1) values.push((i + 3) & 7);
+        \\  for (let i = 0; i < limit; i = i + 1) values.push((i + job + lane) & 7);
         \\  return values.length * 100 + values[3];
         \\}
-        \\fill(8)
+        \\fill(8, 2, 1)
     )).asNum());
     try std.testing.expect(quick_packed_array_push_loop_hits.load(.monotonic) > push_loops_before);
+    try std.testing.expect(quick_packed_array_specialized_expression_hits.load(.monotonic) > specialized_expressions_before);
     const push_loops_after = quick_packed_array_push_loop_hits.load(.monotonic);
     const pushes_after = quick_array_push_hits.load(.monotonic);
 
