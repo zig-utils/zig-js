@@ -23,7 +23,7 @@ WORKLOADS = {
     "arithmetic": 160,
     "properties": 80,
     "arrays": 450,
-    "fibonacci": 24,
+    "fibonacci": 100,
 }
 
 MIN_FULL_MEDIAN_NS = 50_000_000
