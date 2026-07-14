@@ -911,18 +911,19 @@ fn compileQuickArrayPlan(chunk: *Chunk, start: usize) QuickArrayPlan {
     } };
 }
 
-fn quickArrayPlan(chunk: *Chunk, start: usize) ?*QuickArrayPlan {
-    if (chunk.quick_array_plans.len == 0) {
-        const plans = chunk.arena.alloc(?*anyopaque, chunk.code.items.len) catch return null;
-        @memset(plans, null);
-        chunk.quick_array_plans = plans;
-    }
+fn quickArrayPlan(chunk: *Chunk, start: usize, parallel_sync: bool) ?*QuickArrayPlan {
     if (start >= chunk.quick_array_plans.len) return null;
-    if (chunk.quick_array_plans[start]) |raw|
+    const slot = &chunk.quick_array_plans[start];
+    if (if (parallel_sync) @atomicLoad(?*anyopaque, slot, .acquire) else slot.*) |raw|
         return @ptrCast(@alignCast(raw));
     const plan = chunk.arena.create(QuickArrayPlan) catch return null;
     plan.* = compileQuickArrayPlan(chunk, start);
-    chunk.quick_array_plans[start] = plan;
+    if (parallel_sync) {
+        if (@cmpxchgStrong(?*anyopaque, slot, null, plan, .acq_rel, .acquire)) |published|
+            return @ptrCast(@alignCast(published));
+    } else {
+        slot.* = plan;
+    }
     return plan;
 }
 
@@ -1376,6 +1377,7 @@ fn tryQuickArrayLoop(
     frame: *Frame,
     start: usize,
     max_extra_steps: u64,
+    parallel_sync: bool,
 ) EvalError!?QuickArrayLoopUpdate {
     return switch (plan.*) {
         .unsupported => null,
@@ -1390,8 +1392,11 @@ fn tryQuickArrayLoop(
             const array_value = frame.slots[array_slot];
             if (!array_value.isObject()) break :quick null;
             const array = array_value.asObj();
-            if (!array.is_array or array.is_arguments or array.proxy_handler != null or array.proxy_revoked or
-                array.accessors.load(.monotonic) != null or array.holes != null or array.array_len > array.elements.items.len)
+            if (!array.is_array or array.is_arguments or array.proxy_handler != null or array.proxy_revoked)
+                break :quick null;
+            if (parallel_sync) array.lockElements();
+            defer if (parallel_sync) array.unlockElements();
+            if (array.accessors.load(.monotonic) != null or array.holes != null or array.array_len > array.elements.items.len)
                 break :quick null;
             var index_value = frame.slots[index_slot];
             var total_value = frame.slots[total_slot];
@@ -1420,19 +1425,18 @@ fn tryQuickArrayLoop(
             const array_value = frame.slots[array_slot];
             if (!array_value.isObject()) break :quick null;
             const array = array_value.asObj();
+            if (!array.is_array or array.is_arguments or array.proxy_handler != null or array.proxy_revoked) break :quick null;
             const get_prop_instruction: usize = @intCast(push.get_prop_instruction);
-            if (get_prop_instruction >= chunk.ics.len or get_prop_instruction >= chunk.code.items.len)
-                break :quick null;
+            if (get_prop_instruction >= chunk.code.items.len) break :quick null;
             const name_index = chunk.code.items[get_prop_instruction].a;
             if (name_index >= chunk.names.items.len) break :quick null;
-            const method_name = chunk.names.items[name_index];
-            if (array.shape) |shape| if (shape.lookup(method_name) != null) break :quick null;
-            const prototype = array.protoAtomic() orelse break :quick null;
-            if (prototype.proxy_handler != null or prototype.proxy_revoked or prototype.accessors.load(.monotonic) != null)
-                break :quick null;
-            const method_slot = chunk.ics[get_prop_instruction].lookupSlotMode(prototype.shape, false) orelse break :quick null;
-            if (method_slot >= prototype.slots.items.len) break :quick null;
-            const callee = prototype.slots.items[method_slot];
+            const callee = quickArrayPrototypeData(
+                chunk,
+                get_prop_instruction,
+                array,
+                chunk.names.items[name_index],
+                parallel_sync,
+            ) orelse break :quick null;
 
             var values: [64]Value = undefined;
             var index_value = frame.slots[index_slot];
@@ -2258,13 +2262,13 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
 
             .load_local => {
                 const cf = frame.?;
-                if (!parallel_sync and stack.items.len == 0 and mayStartQuickArrayLoop(code, ip - 1)) {
+                if (stack.items.len == 0 and mayStartQuickArrayLoop(code, ip - 1)) {
                     const start = ip - 1;
-                    if (quickArrayPlan(chunk, start)) |plan| {
+                    if (quickArrayPlan(chunk, start, parallel_sync)) |plan| {
                         const steps_until_checkpoint = 1024 - (vm.steps & 1023);
                         const steps_until_budget = interp.max_steps - vm.steps;
                         const max_extra_steps = @min(steps_until_checkpoint - 1, steps_until_budget);
-                        if (try tryQuickArrayLoop(vm, chunk, plan, cf, start, max_extra_steps)) |quick| {
+                        if (try tryQuickArrayLoop(vm, chunk, plan, cf, start, max_extra_steps, parallel_sync)) |quick| {
                             vm.steps += quick.extra_steps;
                             ip = quick.next_ip;
                             if (builtin.is_test) switch (plan.*) {
@@ -5452,6 +5456,8 @@ test "vm: packed array sum quickening preserves bytecode steps" {
     const old_parallel = bc.ic_seqlock_enabled.load(.monotonic);
     defer bc.ic_seqlock_enabled.store(old_parallel, .monotonic);
     var steps: [2]u64 = undefined;
+    var sum_hits = quick_packed_array_sum_loop_hits.load(.monotonic);
+    var push_hits = quick_packed_array_push_loop_hits.load(.monotonic);
     for ([_]bool{ false, true }, 0..) |parallel, run_index| {
         bc.ic_seqlock_enabled.store(parallel, .monotonic);
         var parser = try Parser.init(allocator, source);
@@ -5463,6 +5469,12 @@ test "vm: packed array sum quickening preserves bytecode steps" {
         var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape };
         try std.testing.expectEqual(@as(f64, 36), (try run(&machine, chunk, null)).asNum());
         steps[run_index] = machine.steps;
+        const next_sum_hits = quick_packed_array_sum_loop_hits.load(.monotonic);
+        const next_push_hits = quick_packed_array_push_loop_hits.load(.monotonic);
+        try std.testing.expect(next_sum_hits > sum_hits);
+        try std.testing.expect(next_push_hits > push_hits);
+        sum_hits = next_sum_hits;
+        push_hits = next_push_hits;
     }
     try std.testing.expectEqual(steps[1], steps[0]);
 }

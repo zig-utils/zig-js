@@ -340,9 +340,9 @@ pub const Chunk = struct {
     /// to consult the ordinary plan at the same first instruction.
     quick_property_kernel_plans: []?*anyopaque = &.{},
     /// Lazily decoded packed-array loop plans, indexed by loop-head bytecode.
-    /// As with property plans, only isolated execution consumes this table;
-    /// unsupported structural shapes are cached too so cold decoding is paid
-    /// once rather than once per loop iteration.
+    /// The slot table is allocated with the bytecode so shared execution can
+    /// atomically publish a fully decoded plan without racing lazy table setup.
+    /// Unsupported structural shapes are cached too.
     quick_array_plans: []?*anyopaque = &.{},
     /// Isolated-mode live-slot caches for global `load_var` sites. Entries are
     /// type-erased to avoid importing interpreter/value types here and are
@@ -364,6 +364,8 @@ pub const Chunk = struct {
     pub fn finalize(self: *Chunk) std.mem.Allocator.Error!void {
         self.ics = try self.arena.alloc(InlineCache, self.code.items.len);
         @memset(self.ics, .{});
+        self.quick_array_plans = try self.arena.alloc(?*anyopaque, self.code.items.len);
+        @memset(self.quick_array_plans, null);
     }
 
     /// Emit an instruction, returning its index (for later jump back-patching).
