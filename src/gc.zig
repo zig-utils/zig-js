@@ -60,7 +60,16 @@ inline fn markWeakObject(v: anytype, slot: *?*Object) void {
 }
 
 inline fn markManaged(v: anytype, cell: anytype) void {
-    if (v.isManaged(cell)) v.mark(cell);
+    const Cell = @TypeOf(cell.*);
+    if (Cell == interp.Environment) {
+        if (cell.gc_managed) v.mark(cell);
+        return;
+    }
+    if (Cell == promise.Promise) {
+        if (cell.gc_owned) v.mark(cell);
+        return;
+    }
+    @compileError("markManaged requires explicit ownership metadata for " ++ @typeName(Cell));
 }
 
 inline fn hasObjectBacking(flags: value.ObjectBackingFlags) bool {
@@ -921,6 +930,13 @@ pub fn setActiveHeap(h: ?*anyopaque) ?*anyopaque {
         _ = gc_runtime.setBarrier(null, null, null);
     }
     return prev;
+}
+
+/// Whether the current thread's cell-allocation funnels target the GC heap.
+/// Callers use this immediately after allocation to persist exact ownership on
+/// cell types that can also be embedded in a Context or allocated by an arena.
+pub inline fn allocationsAreManaged() bool {
+    return active_heap != null;
 }
 
 /// Install the interpreter currently executing JS on this thread. Allocation

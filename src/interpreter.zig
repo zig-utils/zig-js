@@ -408,6 +408,11 @@ pub const Environment = struct {
     /// Internal accounting for GC-owned duplicated binding-name bytes.
     gc_name_bytes_live: ?*usize = null,
     parent: ?*Environment = null,
+    /// True only when this Environment itself was allocated as a GC cell. The
+    /// root realm Environment is embedded in Context and remains false. This is
+    /// immutable after initialization, allowing precise Environment edges to
+    /// skip broad heap-membership scans during tracing.
+    gc_managed: bool = false,
     /// Stable `%Object.prototype%` for this realm. Only the root environment
     /// owns a value; object allocation walks to that root and caches the
     /// intrinsic there so lexical shadowing, global replacement, and temporary
@@ -2076,6 +2081,7 @@ pub const Interpreter = struct {
             .bindings_allocator = self.gc_backing,
             .gc_name_bytes_live = self.gc_environment_name_bytes_live,
             .parent = parent,
+            .gc_managed = gc_mod.allocationsAreManaged(),
             .fn_scope = fn_scope,
         };
     }

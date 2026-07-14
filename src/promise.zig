@@ -382,7 +382,7 @@ pub fn traceNativePrivateData(o: *Object, v: anytype) void {
 pub fn newPromise(self: *Interpreter) EvalError!*Object {
     const p = try gc_mod.allocPromise(self.arena);
     promise_profile.recordPromiseStateCell();
-    p.* = .{ .gc_owned = self.gc_backing != null };
+    p.* = .{ .gc_owned = gc_mod.allocationsAreManaged() };
     const obj = try gc_mod.allocObj(self.arena);
     promise_profile.recordPromiseWrapperObject();
     obj.* = .{ .promise = @ptrCast(p) };

@@ -3620,6 +3620,7 @@ pub const Context = struct {
             .bindings_allocator = if (self.gc != null) self.gpa else null,
             .gc_name_bytes_live = if (self.gc != null) &self.gc_environment_name_bytes_live else null,
             .parent = &self.env,
+            .gc_managed = gc_mod.allocationsAreManaged(),
             .fn_scope = true,
         };
 
@@ -3754,6 +3755,7 @@ pub const Context = struct {
             .bindings_allocator = if (self.gc != null) self.gpa else null,
             .gc_name_bytes_live = if (self.gc != null) &self.gc_environment_name_bytes_live else null,
             .parent = &self.env,
+            .gc_managed = gc_mod.allocationsAreManaged(),
             .fn_scope = true,
         };
         const m = try a.create(Module);
@@ -14484,7 +14486,9 @@ test "enable_gc: active module cache roots module environments during collection
     defer _ = gc_mod.setActiveHeap(gc_saved);
 
     const env = try gc_mod.allocEnv(a);
-    env.* = .{ .arena = a, .parent = &ctx.env, .fn_scope = true };
+    env.* = .{ .arena = a, .parent = &ctx.env, .gc_managed = gc_mod.allocationsAreManaged(), .fn_scope = true };
+    try std.testing.expect(env.gc_managed);
+    try std.testing.expect(!ctx.env.gc_managed);
 
     const kept = try gc_mod.allocObj(a);
     kept.* = .{};
