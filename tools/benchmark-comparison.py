@@ -20,16 +20,16 @@ WORKLOADS = {
     # Equal work is used for both engines. These counts keep the fastest row
     # above the full-run 50 ms timing floor on the reference M3 Pro while
     # keeping the shared-realm stress matrix practical.
-    "arithmetic": 160,
-    "properties": 200,
-    "polymorphic_properties": 350,
+    "arithmetic": 240,
+    "properties": 300,
+    "polymorphic_properties": 400,
     "object_churn": 100,
-    "arrays": 450,
+    "arrays": 550,
     "direct_calls": 600,
     "method_calls": 500,
-    "closure_calls": 500,
-    "arguments_calls": 400,
-    "fibonacci": 100,
+    "closure_calls": 600,
+    "arguments_calls": 600,
+    "fibonacci": 125,
 }
 
 MIN_FULL_MEDIAN_NS = 50_000_000
