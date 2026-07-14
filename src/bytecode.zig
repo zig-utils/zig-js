@@ -395,7 +395,19 @@ fn mayStartQuickArrayLoop(code: []const Inst, start: usize) bool {
         code[start + 6].op == .load_const and
         code[start + 7].op == .bit_and and
         code[start + 8].op == .get_index;
-    return packed_sum or packed_push or polymorphic_property;
+    const object_allocation = start + 11 < code.len and
+        (code[start + 1].op == .load_const or code[start + 1].op == .load_local) and
+        code[start + 2].op == .lt and
+        code[start + 3].op == .jump_if_false and
+        code[start + 4].op == .load_local and
+        code[start + 5].op == .load_const and
+        code[start + 6].op == .bit_and and
+        code[start + 7].op == .store_local and
+        code[start + 8].op == .pop and
+        code[start + 9].op == .load_local and
+        code[start + 10].op == .load_local and
+        code[start + 11].op == .get_index;
+    return packed_sum or packed_push or polymorphic_property or object_allocation;
 }
 
 fn mayStartQuickCallLoop(code: []const Inst, start: usize) bool {

@@ -672,11 +672,32 @@ const QuickPolymorphicPropertyLoop = struct {
     exit_ip: u32,
 };
 
+const QuickObjectAllocationLoop = struct {
+    counter_local: u32,
+    array_local: u32,
+    index_local: u32,
+    displaced_local: u32,
+    value_local: u32,
+    fresh_local: u32,
+    total_local: u32,
+    extra_local: u32,
+    bound: QuickArrayBound,
+    selector_mask: i32,
+    stamp_mask: i32,
+    checksum_mask: i32,
+    modulus: f64,
+    increment: f64,
+    displaced_property_instruction: u32,
+    literal_instructions: [3]u32,
+    exit_ip: u32,
+};
+
 const QuickArrayPlan = union(enum) {
     unsupported,
     packed_sum: QuickPackedArraySumLoop,
     packed_push: QuickPackedArrayPushLoop,
     polymorphic_property: QuickPolymorphicPropertyLoop,
+    object_allocation: QuickObjectAllocationLoop,
 };
 
 const max_quick_leaf_ops = 16;
@@ -817,6 +838,7 @@ var quick_packed_array_sum_loop_hits: std.atomic.Value(u64) = .init(0);
 var quick_packed_array_push_loop_hits: std.atomic.Value(u64) = .init(0);
 var quick_packed_array_specialized_expression_hits: std.atomic.Value(u64) = .init(0);
 var quick_polymorphic_property_loop_hits: std.atomic.Value(u64) = .init(0);
+var quick_object_allocation_loop_hits: std.atomic.Value(u64) = .init(0);
 var quick_global_binding_hits: std.atomic.Value(u64) = .init(0);
 var quick_literal_transition_hits: std.atomic.Value(u64) = .init(0);
 var quick_native_direct_call_hits: std.atomic.Value(u64) = .init(0);
@@ -1090,7 +1112,112 @@ fn compileQuickPolymorphicPropertyLoop(chunk: *Chunk, start: usize) ?QuickPolymo
     };
 }
 
+fn compileQuickObjectAllocationLoop(chunk: *Chunk, start: usize) ?QuickObjectAllocationLoop {
+    const code = chunk.code.items;
+    const expected = [_]bc.Op{
+        .load_local, .load_const, .lt,          .jump_if_false, .load_local,  .load_const,  .bit_and,     .store_local,
+        .pop,        .load_local, .load_local,  .get_index,     .store_local, .pop,         .load_local,  .get_prop,
+        .load_local, .add,        .load_local,  .add,           .load_const,  .mod,         .store_local, .pop,
+        .new_object, .load_local, .init_prop,   .load_local,    .load_const,  .bit_and,     .init_prop,   .load_local,
+        .get_prop,   .init_prop,  .store_local, .pop,           .load_local,  .load_local,  .load_local,  .set_index,
+        .pop,        .load_local, .load_local,  .get_prop,      .load_local,  .get_prop,    .add,         .load_local,
+        .get_prop,   .add,        .load_const,  .bit_and,       .add,         .store_local, .pop,         .load_local,
+        .load_const, .add,        .store_local, .pop,           .jump,
+    };
+    if (start + expected.len > code.len) return null;
+    for (expected, 0..) |op, offset|
+        if (offset != 1 and code[start + offset].op != op) return null;
+
+    const counter_local = code[start].a;
+    const index_local = code[start + 7].a;
+    const array_local = code[start + 9].a;
+    const displaced_local = code[start + 12].a;
+    const extra_local = code[start + 18].a;
+    const value_local = code[start + 22].a;
+    const fresh_local = code[start + 34].a;
+    const total_local = code[start + 41].a;
+    const locals = [_]u32{
+        counter_local, index_local, array_local, displaced_local,
+        extra_local,   value_local, fresh_local, total_local,
+    };
+    for (locals, 0..) |local, left|
+        for (locals[left + 1 ..]) |other| if (local == other) return null;
+
+    if (code[start + 3].a != start + expected.len or
+        code[start + 4].a != counter_local or code[start + 10].a != index_local or
+        code[start + 14].a != displaced_local or code[start + 16].a != counter_local or
+        code[start + 25].a != value_local or code[start + 27].a != counter_local or
+        code[start + 31].a != displaced_local or code[start + 36].a != array_local or
+        code[start + 37].a != index_local or code[start + 38].a != fresh_local or
+        code[start + 42].a != fresh_local or code[start + 44].a != fresh_local or
+        code[start + 47].a != fresh_local or code[start + 53].a != total_local or
+        code[start + 55].a != counter_local or code[start + 58].a != counter_local or
+        code[start + 60].a != start)
+        return null;
+    if (!propertyNamesMatch(chunk, &.{ start + 15, start + 32 }) or
+        !propertyNamesMatch(chunk, &.{ start + 26, start + 43 }) or
+        !propertyNamesMatch(chunk, &.{ start + 30, start + 45 }) or
+        !propertyNamesMatch(chunk, &.{ start + 33, start + 48 }))
+        return null;
+
+    const literal_name_instructions = [_]usize{ start + 26, start + 30, start + 33 };
+    for (literal_name_instructions, 0..) |instruction, left| {
+        if (code[instruction].a >= chunk.names.items.len) return null;
+        const name = chunk.names.items[code[instruction].a];
+        for (literal_name_instructions[left + 1 ..]) |other_instruction| {
+            if (code[other_instruction].a >= chunk.names.items.len or
+                std.mem.eql(u8, name, chunk.names.items[code[other_instruction].a])) return null;
+        }
+    }
+
+    const bound: QuickArrayBound = switch (code[start + 1].op) {
+        .load_local => .{ .local = code[start + 1].a },
+        .load_const => constant: {
+            if (code[start + 1].a >= chunk.consts.items.len) return null;
+            const value_ = chunk.consts.items[code[start + 1].a];
+            if (!value_.isNumber()) return null;
+            break :constant .{ .constant = value_.asNum() };
+        },
+        else => return null,
+    };
+    switch (bound) {
+        .local => |local| for (locals) |modified| {
+            if (local == modified and local != extra_local) return null;
+        },
+        .constant => {},
+    }
+
+    const constant_instructions = [_]usize{ start + 5, start + 20, start + 28, start + 50, start + 56 };
+    var constants: [constant_instructions.len]f64 = undefined;
+    for (constant_instructions, 0..) |instruction, index| {
+        const constant_index = code[instruction].a;
+        if (constant_index >= chunk.consts.items.len or !chunk.consts.items[constant_index].isNumber()) return null;
+        constants[index] = chunk.consts.items[constant_index].asNum();
+    }
+    return .{
+        .counter_local = counter_local,
+        .array_local = array_local,
+        .index_local = index_local,
+        .displaced_local = displaced_local,
+        .value_local = value_local,
+        .fresh_local = fresh_local,
+        .total_local = total_local,
+        .extra_local = extra_local,
+        .bound = bound,
+        .selector_mask = Value.num(constants[0]).toInt32(),
+        .modulus = constants[1],
+        .stamp_mask = Value.num(constants[2]).toInt32(),
+        .checksum_mask = Value.num(constants[3]).toInt32(),
+        .increment = constants[4],
+        .displaced_property_instruction = @intCast(start + 15),
+        .literal_instructions = .{ @intCast(start + 26), @intCast(start + 30), @intCast(start + 33) },
+        .exit_ip = @intCast(start + expected.len),
+    };
+}
+
 fn compileQuickArrayPlan(chunk: *Chunk, start: usize) QuickArrayPlan {
+    if (compileQuickObjectAllocationLoop(chunk, start)) |allocation|
+        return .{ .object_allocation = allocation };
     if (compileQuickPolymorphicPropertyLoop(chunk, start)) |property|
         return .{ .polymorphic_property = property };
     if (compileQuickPackedArrayPushLoop(chunk, start)) |push| return .{ .packed_push = push };
@@ -2360,6 +2487,114 @@ fn tryQuickNumericRecurrence(vm: *Interpreter, func: *Function, args: []const Va
     };
 }
 
+fn tryQuickObjectAllocationLoop(
+    vm: *Interpreter,
+    chunk: *Chunk,
+    allocation: *const QuickObjectAllocationLoop,
+    frame: *Frame,
+    start: usize,
+    max_extra_steps: u64,
+    parallel_sync: bool,
+) EvalError!?QuickArrayLoopUpdate {
+    if (parallel_sync or frame.escaped.load(.monotonic)) return null;
+    const counter_slot: usize = @intCast(allocation.counter_local);
+    const array_slot: usize = @intCast(allocation.array_local);
+    const index_slot: usize = @intCast(allocation.index_local);
+    const displaced_slot: usize = @intCast(allocation.displaced_local);
+    const value_slot: usize = @intCast(allocation.value_local);
+    const fresh_slot: usize = @intCast(allocation.fresh_local);
+    const total_slot: usize = @intCast(allocation.total_local);
+    const extra_slot: usize = @intCast(allocation.extra_local);
+    for ([_]usize{ counter_slot, array_slot, index_slot, displaced_slot, value_slot, fresh_slot, total_slot, extra_slot }) |slot|
+        if (slot >= frame.slots.len) return null;
+
+    const array_value = frame.slots[array_slot];
+    if (!array_value.isObject()) return null;
+    const array = array_value.asObj();
+    if (!array.is_array or array.is_arguments or array.proxy_handler != null or array.proxy_revoked or
+        array.accessors.load(.monotonic) != null or array.attrsMap() != null or array.holes != null or
+        array.has_indexed_property.load(.monotonic) or array.array_len > array.elements.items.len)
+        return null;
+    if (!frame.slots[counter_slot].isNumber() or !frame.slots[total_slot].isNumber() or
+        !frame.slots[extra_slot].isNumber()) return null;
+    const bound_value = quickArrayBoundValue(allocation.bound, frame) orelse return null;
+    var counter = frame.slots[counter_slot].asNum();
+    var total = frame.slots[total_slot].asNum();
+    const extra = frame.slots[extra_slot].asNum();
+    const bound = bound_value.asNum();
+    if (!(counter < bound)) return null;
+
+    for (allocation.literal_instructions) |instruction|
+        if (instruction >= chunk.ics.len) return null;
+    const first_transition = chunk.ics[allocation.literal_instructions[0]].lookupLiteralTransitionMode(vm.root_shape, false) orelse return null;
+    const second_transition = chunk.ics[allocation.literal_instructions[1]].lookupLiteralTransitionMode(first_transition.shape, false) orelse return null;
+    const third_transition = chunk.ics[allocation.literal_instructions[2]].lookupLiteralTransitionMode(second_transition.shape, false) orelse return null;
+
+    const steps_per_iteration: u64 = 61;
+    const max_iterations = (max_extra_steps + 1) / steps_per_iteration;
+    if (max_iterations == 0) return null;
+    var iterations: u64 = 0;
+    var completed = false;
+    while (iterations < max_iterations and counter < bound) {
+        const selected = Value.num(counter).toInt32() & allocation.selector_mask;
+        if (selected < 0) break;
+        const element_index: usize = @intCast(selected);
+        if (element_index >= array.elements.items.len) break;
+        const displaced_value = array.elements.items[element_index];
+        const displaced = quickPlainObject(displaced_value) orelse break;
+        if (displaced.proxy_handler != null or displaced.proxy_revoked or displaced.shape == null) break;
+        const displaced_property_slot = quickOwnDataSlot(chunk, allocation.displaced_property_instruction, displaced) orelse break;
+        const previous = quickSlotNumber(displaced, displaced_property_slot) orelse break;
+        const next = numberRemainder((previous + counter) + extra, allocation.modulus);
+        const stamp: f64 = @floatFromInt(Value.num(counter).toInt32() & allocation.stamp_mask);
+        const next_counter = counter + allocation.increment;
+        const completes_loop = !(next_counter < bound);
+        const completed_extra_steps = (iterations + 1) * steps_per_iteration - 1 +
+            (if (completes_loop) @as(u64, 4) else 0);
+        if (completed_extra_steps > max_extra_steps) break;
+
+        const fresh_value = vm.newObject() catch |err| {
+            frame.slots[index_slot] = Value.num(@floatFromInt(selected));
+            frame.slots[displaced_slot] = displaced_value;
+            frame.slots[value_slot] = Value.num(next);
+            vm.steps += iterations * steps_per_iteration + 24;
+            return err;
+        };
+        const fresh = fresh_value.asObj();
+        if (!try fresh.applyLiteralTransition(vm.arena, vm.root_shape, first_transition.shape, first_transition.slot, Value.num(next), false))
+            unreachable;
+        if (!try fresh.applyLiteralTransition(vm.arena, vm.root_shape, second_transition.shape, second_transition.slot, Value.num(stamp), false))
+            unreachable;
+        if (!try fresh.applyLiteralTransition(vm.arena, vm.root_shape, third_transition.shape, third_transition.slot, Value.num(previous), false))
+            unreachable;
+
+        frame.slots[index_slot] = Value.num(@floatFromInt(selected));
+        frame.slots[displaced_slot] = displaced_value;
+        frame.slots[value_slot] = Value.num(next);
+        frame.slots[fresh_slot] = fresh_value;
+        vm.checkRestricted(array) catch |err| {
+            vm.steps += iterations * steps_per_iteration + 39;
+            return err;
+        };
+        if (!array.replaceDenseElement(element_index, fresh_value)) unreachable;
+
+        const checksum_value = Value.num((next + stamp) + previous).toInt32() & allocation.checksum_mask;
+        total += @floatFromInt(checksum_value);
+        counter = next_counter;
+        frame.slots[total_slot] = Value.num(total);
+        frame.slots[counter_slot] = Value.num(counter);
+        iterations += 1;
+        completed = completes_loop;
+        if (completed) break;
+    }
+    if (iterations == 0) return null;
+    if (builtin.is_test) _ = quick_object_allocation_loop_hits.fetchAdd(iterations, .monotonic);
+    return .{
+        .extra_steps = iterations * steps_per_iteration - 1 + (if (completed) @as(u64, 4) else 0),
+        .next_ip = if (completed) allocation.exit_ip else start,
+    };
+}
+
 fn tryQuickArrayLoop(
     vm: *Interpreter,
     chunk: *Chunk,
@@ -2371,6 +2606,15 @@ fn tryQuickArrayLoop(
 ) EvalError!?QuickArrayLoopUpdate {
     return switch (plan.*) {
         .unsupported => null,
+        .object_allocation => |*allocation| try tryQuickObjectAllocationLoop(
+            vm,
+            chunk,
+            allocation,
+            frame,
+            start,
+            max_extra_steps,
+            parallel_sync,
+        ),
         .polymorphic_property => |property| quick: {
             // Shared frames/objects retain ordinary per-op locking and
             // interleaving. This tier is for isolated contexts where the exact
@@ -3473,6 +3717,7 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                                     }
                                 },
                                 .polymorphic_property => _ = quick_polymorphic_property_loop_hits.fetchAdd(1, .monotonic),
+                                .object_allocation => {},
                                 .unsupported => {},
                             };
                             continue;
@@ -7001,6 +7246,89 @@ test "vm: quickens isolated polymorphic own-data property loops with exact steps
         try std.testing.expectEqual(steps[1], steps[0]);
     }
     try std.testing.expect(hits > hits_before);
+}
+
+test "vm: quickens fixed-shape object allocation loops with exact steps and guarded fallback" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const kernel =
+        \\function allocate(items, limit, extra) {
+        \\  let total = 0;
+        \\  let cursor = 0;
+        \\  while (cursor < limit) {
+        \\    let selected = cursor & 7;
+        \\    let old = items[selected];
+        \\    let next = (old.seed + cursor + extra) % 1009;
+        \\    let replacement = { seed: next, mark: cursor & 3, prior: old.seed };
+        \\    items[selected] = replacement;
+        \\    total = total + ((replacement.seed + replacement.mark + replacement.prior) & 31);
+        \\    cursor = cursor + 1;
+        \\  }
+        \\  return total;
+        \\}
+    ;
+    const source = try std.fmt.allocPrint(allocator,
+        \\{s}
+        \\let items = [
+        \\  {{ seed: 1, mark: 0, prior: 0 }}, {{ seed: 2, mark: 0, prior: 0 }},
+        \\  {{ seed: 3, mark: 0, prior: 0 }}, {{ seed: 4, mark: 0, prior: 0 }},
+        \\  {{ seed: 5, mark: 0, prior: 0 }}, {{ seed: 6, mark: 0, prior: 0 }},
+        \\  {{ seed: 7, mark: 0, prior: 0 }}, {{ seed: 8, mark: 0, prior: 0 }}
+        \\];
+        \\allocate(items, 96, 2)
+    , .{kernel});
+    const old_parallel = bc.ic_seqlock_enabled.load(.monotonic);
+    defer bc.ic_seqlock_enabled.store(old_parallel, .monotonic);
+    const hits_before = quick_object_allocation_loop_hits.load(.monotonic);
+    var hits = hits_before;
+    var results: [2]Value = undefined;
+    var steps: [2]u64 = undefined;
+    for ([_]bool{ false, true }, 0..) |parallel, run_index| {
+        bc.ic_seqlock_enabled.store(parallel, .monotonic);
+        var parser = try Parser.init(allocator, source);
+        const program = try parser.parseProgram();
+        const chunk = try Compiler.compileProgram(allocator, program);
+        var env = Environment{ .arena = allocator, .fn_scope = true };
+        const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
+        try interp.installGlobals(&env, root_shape);
+        var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape };
+        results[run_index] = try run(&machine, chunk, null);
+        steps[run_index] = machine.steps;
+        const next_hits = quick_object_allocation_loop_hits.load(.monotonic);
+        if (parallel)
+            try std.testing.expectEqual(hits, next_hits)
+        else
+            try std.testing.expect(next_hits > hits);
+        hits = next_hits;
+    }
+    try std.testing.expectEqual(results[1].rawBits(), results[0].rawBits());
+    try std.testing.expectEqual(steps[1], steps[0]);
+
+    bc.ic_seqlock_enabled.store(false, .monotonic);
+    const fallback_hits = quick_object_allocation_loop_hits.load(.monotonic);
+    try std.testing.expectEqual(@as(f64, 2), (try vmRun(allocator, try std.fmt.allocPrint(allocator,
+        \\{s}
+        \\let calls = 0;
+        \\let items = [{{ seed: 1, mark: 0, prior: 0 }}];
+        \\allocate(items, 1, 0);
+        \\let observed = {{}};
+        \\Object.defineProperty(observed, "seed", {{ get: function () {{ calls = calls + 1; return 3; }} }});
+        \\items[0] = observed;
+        \\allocate(items, 1, 0);
+        \\calls
+    , .{kernel}))).asNum());
+    try std.testing.expectEqual(fallback_hits, quick_object_allocation_loop_hits.load(.monotonic));
+    try std.testing.expectEqual(@as(f64, 1), (try vmRun(allocator, try std.fmt.allocPrint(allocator,
+        \\{s}
+        \\let stores = 0;
+        \\let target = [{{ seed: 1, mark: 0, prior: 0 }}];
+        \\allocate(target, 1, 0);
+        \\let items = new Proxy(target, {{ set: function (object, key, value) {{ stores = stores + 1; object[key] = value; return true; }} }});
+        \\allocate(items, 1, 0);
+        \\stores
+    , .{kernel}))).asNum());
+    try std.testing.expectEqual(fallback_hits, quick_object_allocation_loop_hits.load(.monotonic));
 }
 
 test "vm: shared array fast paths retain observable overrides" {
