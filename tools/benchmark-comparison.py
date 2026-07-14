@@ -20,9 +20,9 @@ WORKLOADS = {
     # Equal work is used for both engines. These counts keep the fastest row
     # above the full-run 50 ms timing floor on the reference M3 Pro while
     # keeping the shared-realm stress matrix practical.
-    "arithmetic": 80,
+    "arithmetic": 160,
     "properties": 80,
-    "arrays": 180,
+    "arrays": 450,
     "fibonacci": 24,
 }
 

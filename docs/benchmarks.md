@@ -45,7 +45,7 @@ Both runners evaluate the exact source in [`bench/comparison.js`](../bench/compa
 | `arithmetic` | 100,000 integer additions and modulo operations |
 | `properties` | 25,000 rounds mutating four properties on one object |
 | `arrays` | push 10,000 integers, then read and sum the array |
-| `fibonacci` | recursively evaluate `fib(24)` |
+| `fibonacci` | recursively evaluate `fib(24)` while incrementing an invocation-local observable call counter |
 
 The compared modes are intentionally explicit:
 
