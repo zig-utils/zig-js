@@ -26,6 +26,7 @@ const jit_compiler = @import("jit/compiler.zig");
 
 const Value = value.Value;
 const Chunk = bc.Chunk;
+const Shape = @import("shape.zig").Shape;
 const Interpreter = interp.Interpreter;
 const Environment = interp.Environment;
 const Function = interp.Function;
@@ -562,6 +563,12 @@ const QuickPropertySpecialization = union(enum) {
     property_pair_sub: QuickPropertyPair,
 };
 
+const QuickResolvedSlots = struct {
+    first: usize,
+    second: usize,
+    target: usize,
+};
+
 const QuickPropertyPlan = struct {
     target_local: u32,
     target_instruction: u32,
@@ -571,6 +578,9 @@ const QuickPropertyPlan = struct {
     next_ip: u32,
     tail: ?QuickLoopTail,
     specialization: QuickPropertySpecialization,
+    resolved_shape: ?*Shape,
+    resolved_read_slots: [2]u32,
+    resolved_target_slot: u32,
 };
 
 // Test-only observations enforce that the optimized path remains reachable.
@@ -614,9 +624,10 @@ inline fn quickConstantOf(op: QuickNumericOp) ?f64 {
     };
 }
 
-fn specializeQuickPropertyOps(ops: []const QuickNumericOp) QuickPropertySpecialization {
+fn specializeQuickPropertyOps(target_local: u32, ops: []const QuickNumericOp) QuickPropertySpecialization {
     if (ops.len == 5) {
         const property = quickPropertyOperandOf(ops[0]) orelse return .generic;
+        if (property.local != target_local) return .generic;
         const local = quickLocalOf(ops[1]) orelse return .generic;
         const modulus = quickConstantOf(ops[3]) orelse return .generic;
         if (switch (ops[2]) {
@@ -630,6 +641,7 @@ fn specializeQuickPropertyOps(ops: []const QuickNumericOp) QuickPropertySpeciali
             return .{ .property_local_add_mod = .{ .property = property, .local = local, .modulus = modulus } };
     } else if (ops.len == 3) {
         const left = quickPropertyOperandOf(ops[0]) orelse return .generic;
+        if (left.local != target_local) return .generic;
         if (quickConstantOf(ops[1])) |constant| {
             if (switch (ops[2]) {
                 .add => true,
@@ -637,6 +649,7 @@ fn specializeQuickPropertyOps(ops: []const QuickNumericOp) QuickPropertySpeciali
             })
                 return .{ .property_add_constant = .{ .property = left, .constant = constant } };
         } else if (quickPropertyOperandOf(ops[1])) |right| {
+            if (right.local != target_local) return .generic;
             return switch (ops[2]) {
                 .add => .{ .property_pair_add = .{ .left = left, .right = right } },
                 .sub => .{ .property_pair_sub = .{ .left = left, .right = right } },
@@ -760,7 +773,8 @@ fn compileQuickPropertyPlan(chunk: *Chunk, start: usize) ?*QuickPropertyPlan {
 
                 if (executed > max_quick_property_instructions) return null;
                 plan.executed = @intCast(executed);
-                plan.specialization = specializeQuickPropertyOps(plan.ops[0..plan.op_count]);
+                plan.specialization = specializeQuickPropertyOps(plan.target_local, plan.ops[0..plan.op_count]);
+                plan.resolved_shape = null;
                 const cached = chunk.arena.create(QuickPropertyPlan) catch return null;
                 cached.* = plan;
                 return cached;
@@ -805,6 +819,45 @@ inline fn quickPropertyNumber(
     return property.asNum();
 }
 
+inline fn quickSlotNumber(object: *value.Object, slot: usize) ?f64 {
+    if (slot >= object.slots.items.len) return null;
+    const property = object.slots.items[slot];
+    if (!property.isNumber()) return null;
+    return property.asNum();
+}
+
+fn quickResolvedSlots(plan: *QuickPropertyPlan, chunk: *Chunk, target: *value.Object) ?QuickResolvedSlots {
+    const shape = target.shape orelse return null;
+    if (plan.resolved_shape == shape) return .{
+        .first = plan.resolved_read_slots[0],
+        .second = plan.resolved_read_slots[1],
+        .target = plan.resolved_target_slot,
+    };
+
+    var first_instruction: u32 = undefined;
+    var second_instruction: ?u32 = null;
+    switch (plan.specialization) {
+        .property_local_add_mod => |specialized| first_instruction = specialized.property.instruction,
+        .property_add_constant => |specialized| first_instruction = specialized.property.instruction,
+        .property_pair_add, .property_pair_sub => |specialized| {
+            first_instruction = specialized.left.instruction;
+            second_instruction = specialized.right.instruction;
+        },
+        .generic => return null,
+    }
+
+    const first = quickPropertySlot(chunk, first_instruction, target) orelse return null;
+    const second = if (second_instruction) |instruction|
+        quickPropertySlot(chunk, instruction, target) orelse return null
+    else
+        first;
+    const target_slot = quickPropertySlot(chunk, plan.target_instruction, target) orelse return null;
+    plan.resolved_read_slots = .{ @intCast(first), @intCast(second) };
+    plan.resolved_target_slot = @intCast(target_slot);
+    plan.resolved_shape = shape;
+    return .{ .first = first, .second = second, .target = target_slot };
+}
+
 /// Execute a predecoded, warmed `base.property = numeric expression` trace.
 /// Every runtime shape/type guard succeeds before the sole mutation; a miss
 /// safely resumes the ordinary bytecode at `start`.
@@ -815,25 +868,34 @@ fn tryNumericPropertyUpdate(chunk: *Chunk, frame: *Frame, start: usize, max_extr
     const target = quickPlainObject(frame.slots[target_index]) orelse return null;
 
     var specialized = true;
+    var specialized_target_slot: ?usize = null;
     const result_number: f64 = switch (plan.specialization) {
         .property_local_add_mod => |shape| result: {
-            const property = quickPropertyNumber(chunk, frame, target, plan.target_local, shape.property) orelse return null;
+            const slots = quickResolvedSlots(plan, chunk, target) orelse return null;
+            specialized_target_slot = slots.target;
+            const property = quickSlotNumber(target, slots.first) orelse return null;
             const index: usize = @intCast(shape.local);
             if (index >= frame.slots.len or !frame.slots[index].isNumber()) return null;
             break :result numberRemainder(property + frame.slots[index].asNum(), shape.modulus);
         },
         .property_add_constant => |shape| result: {
-            const property = quickPropertyNumber(chunk, frame, target, plan.target_local, shape.property) orelse return null;
+            const slots = quickResolvedSlots(plan, chunk, target) orelse return null;
+            specialized_target_slot = slots.target;
+            const property = quickSlotNumber(target, slots.first) orelse return null;
             break :result property + shape.constant;
         },
-        .property_pair_add => |shape| result: {
-            const left = quickPropertyNumber(chunk, frame, target, plan.target_local, shape.left) orelse return null;
-            const right = quickPropertyNumber(chunk, frame, target, plan.target_local, shape.right) orelse return null;
+        .property_pair_add => result: {
+            const slots = quickResolvedSlots(plan, chunk, target) orelse return null;
+            specialized_target_slot = slots.target;
+            const left = quickSlotNumber(target, slots.first) orelse return null;
+            const right = quickSlotNumber(target, slots.second) orelse return null;
             break :result left + right;
         },
-        .property_pair_sub => |shape| result: {
-            const left = quickPropertyNumber(chunk, frame, target, plan.target_local, shape.left) orelse return null;
-            const right = quickPropertyNumber(chunk, frame, target, plan.target_local, shape.right) orelse return null;
+        .property_pair_sub => result: {
+            const slots = quickResolvedSlots(plan, chunk, target) orelse return null;
+            specialized_target_slot = slots.target;
+            const left = quickSlotNumber(target, slots.first) orelse return null;
+            const right = quickSlotNumber(target, slots.second) orelse return null;
             break :result left - right;
         },
         .generic => result: {
@@ -873,7 +935,7 @@ fn tryNumericPropertyUpdate(chunk: *Chunk, frame: *Frame, start: usize, max_extr
         },
     };
 
-    const target_slot = quickPropertySlot(chunk, plan.target_instruction, target) orelse return null;
+    const target_slot = specialized_target_slot orelse quickPropertySlot(chunk, plan.target_instruction, target) orelse return null;
     var next_ip: usize = plan.next_ip;
     var update_local: ?usize = null;
     var update_value: f64 = undefined;
