@@ -161,3 +161,6 @@ Performance evidence uses the symmetric JSC protocol in
 the 1,232-sample publication matrix is rerun only after a meaningful batch of
 optimizations. A speedup is not accepted if checksums, supported rows, or
 execution accounting differ.
+
+Repeated focused test builds grow the reproducible `.zig-cache` quickly; see
+[`dev-cache.md`](dev-cache.md) for inspecting and safely reclaiming it.
