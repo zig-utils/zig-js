@@ -825,6 +825,7 @@ var quick_numeric_arguments_direct_call_hits: std.atomic.Value(u64) = .init(0);
 var quick_numeric_closure_call_loop_hits: std.atomic.Value(u64) = .init(0);
 var quick_reusable_immediate_closure_hits: std.atomic.Value(u64) = .init(0);
 var quick_numeric_method_call_loop_hits: std.atomic.Value(u64) = .init(0);
+var fast_number_bitwise_hits: std.atomic.Value(u64) = .init(0);
 var quick_numeric_call_loop_test_enabled: std.atomic.Value(bool) = .init(true);
 var quick_numeric_recurrence_hits: std.atomic.Value(u64) = .init(0);
 var quick_observable_recurrence_hits: std.atomic.Value(u64) = .init(0);
@@ -3627,14 +3628,18 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 const l = stack.pop().?;
                 // Number-number fast path: when both operands are numbers the
                 // result is computed inline, bit-for-bit identical to
-                // Interpreter.applyBinary (interpreter.zig:13944-13967), skipping
-                // its ToPrimitive / BigInt / string-concat dispatch. Bitwise,
-                // shift, and `in` need ToInt32/object semantics, so they fall
-                // through to the general path.
+                // Interpreter.applyBinary, skipping its ToPrimitive / BigInt /
+                // string-concat dispatch. Bitwise and shift operators still run
+                // the exact ToInt32/ToUint32 conversions below; only `in` needs
+                // the general object path.
                 const result: Value = fast: {
                     if (l.isNumber() and r.isNumber()) {
                         const a = l.asNum();
                         const b = r.asNum();
+                        if (builtin.is_test) switch (inst.op) {
+                            .bit_and, .bit_or, .bit_xor, .shl, .shr, .ushr => _ = fast_number_bitwise_hits.fetchAdd(1, .monotonic),
+                            else => {},
+                        };
                         break :fast switch (inst.op) {
                             .add => Value.num(a + b),
                             .sub => Value.num(a - b),
@@ -3651,7 +3656,22 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                             .ge => Value.boolVal(a >= b),
                             .eq, .eq_strict => Value.boolVal(a == b),
                             .neq, .neq_strict => Value.boolVal(a != b),
-                            // in_op / bit_and / bit_or / bit_xor / shl / shr / ushr
+                            .bit_and => Value.num(@floatFromInt(l.toInt32() & r.toInt32())),
+                            .bit_or => Value.num(@floatFromInt(l.toInt32() | r.toInt32())),
+                            .bit_xor => Value.num(@floatFromInt(l.toInt32() ^ r.toInt32())),
+                            .shl => shift: {
+                                const amount: u5 = @intCast(r.toUint32() & 31);
+                                break :shift Value.num(@floatFromInt(@as(i32, @bitCast(l.toUint32() << amount))));
+                            },
+                            .shr => shift: {
+                                const amount: u5 = @intCast(r.toUint32() & 31);
+                                break :shift Value.num(@floatFromInt(l.toInt32() >> amount));
+                            },
+                            .ushr => shift: {
+                                const amount: u5 = @intCast(r.toUint32() & 31);
+                                break :shift Value.num(@floatFromInt(l.toUint32() >> amount));
+                            },
+                            // `in` requires an object RHS even for numeric inputs.
                             else => try vm.applyBinary(binOp(inst.op), l, r),
                         };
                     }
@@ -5974,6 +5994,35 @@ test "vm: arithmetic, precedence, comparison, logical" {
     try std.testing.expect((try vmRun(a, "3 > 2 && 2 >= 2")).asBool());
     try std.testing.expect((try vmRun(a, "false || 1 === 1")).asBool());
     try std.testing.expectEqualStrings("ab1", (try vmRun(a, "'a' + 'b' + 1")).asStr());
+}
+
+test "vm: number bitwise dispatch preserves conversions and coercion fallbacks" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const hits_before = fast_number_bitwise_hits.load(.monotonic);
+    try std.testing.expectEqual(@as(f64, 255), (try vmRun(a, "4294967295 & 255")).asNum());
+    try std.testing.expectEqual(@as(f64, 2147483647), (try vmRun(a, "-1 >>> 1")).asNum());
+    try std.testing.expectEqual(@as(f64, -1), (try vmRun(a, "2147483648 >> 31")).asNum());
+    try std.testing.expectEqual(@as(f64, 2), (try vmRun(a, "1 << 33")).asNum());
+    try std.testing.expectEqual(@as(f64, 5), (try vmRun(a, "NaN | 5")).asNum());
+    try std.testing.expectEqual(@as(f64, 3), (try vmRun(a, "Infinity ^ 3")).asNum());
+    try std.testing.expectEqual(@as(f64, 0), (try vmRun(a, "-0 | 0")).asNum());
+    try std.testing.expect(fast_number_bitwise_hits.load(.monotonic) >= hits_before + 7);
+
+    const fast_hits = fast_number_bitwise_hits.load(.monotonic);
+    try std.testing.expectEqual(@as(f64, 21), (try vmRun(a,
+        \\let log = '';
+        \\let lhs = { valueOf: function () { log = log + 'l'; return 6; } };
+        \\let rhs = { valueOf: function () { log = log + 'r'; return 3; } };
+        \\let result = lhs & rhs;
+        \\result * 10 + (log === 'lr' ? 1 : 0)
+    )).asNum());
+    try std.testing.expect((try vmRun(a, "(6n & 3n) === 2n")).asBool());
+    try std.testing.expect((try vmRun(a, "let threw = false; try { 1n & 1; } catch (e) { threw = true; } threw")).asBool());
+    try std.testing.expect((try vmRun(a, "let threw = false; try { Symbol() & 1; } catch (e) { threw = true; } threw")).asBool());
+    try std.testing.expectEqual(fast_hits, fast_number_bitwise_hits.load(.monotonic));
 }
 
 test "vm: vars, while loop, ternary" {
