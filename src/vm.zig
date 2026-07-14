@@ -2561,11 +2561,11 @@ fn tryQuickObjectAllocationLoop(
             return err;
         };
         const fresh = fresh_value.asObj();
-        if (!try fresh.applyLiteralTransition(vm.arena, vm.root_shape, first_transition.shape, first_transition.slot, Value.num(next), false))
-            unreachable;
-        if (!try fresh.applyLiteralTransition(vm.arena, vm.root_shape, second_transition.shape, second_transition.slot, Value.num(stamp), false))
-            unreachable;
-        if (!try fresh.applyLiteralTransition(vm.arena, vm.root_shape, third_transition.shape, third_transition.slot, Value.num(previous), false))
+        if (!fresh.initializeInlineLiteralShape(vm.root_shape, third_transition.shape, &.{
+            Value.num(next),
+            Value.num(stamp),
+            Value.num(previous),
+        }))
             unreachable;
 
         frame.slots[index_slot] = Value.num(@floatFromInt(selected));

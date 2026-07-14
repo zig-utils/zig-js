@@ -991,6 +991,53 @@ pub const Object = struct {
         self.slots = .{ .items = self.inline_slots[0..0], .capacity = self.inline_slots.len };
     }
 
+    /// Initialize an exclusively-owned fresh object at an already-warmed
+    /// fixed shape without replaying each generic property transition. The
+    /// complete root-to-final chain is validated before any field is changed;
+    /// callers can therefore fall back safely when a cached shape is stale or
+    /// does not describe a compact ordinary literal. Values stay in the cell's
+    /// inline storage and retain the normal owner-aware insertion barriers.
+    pub inline fn initializeInlineLiteralShape(
+        self: *Object,
+        root: *Shape,
+        final_shape: *Shape,
+        values: []const Value,
+    ) bool {
+        if (values.len == 0 or values.len > self.inline_slots.len or
+            self.shape != null or self.slots.items.len != 0 or !self.slotsAreInline() or
+            self.backing_flags.slots or self.accessors.load(.monotonic) != null or
+            self.key_order.load(.monotonic) != null or self.attrs != null or !self.isExtensible())
+            return false;
+
+        var chain: [4]*Shape = undefined;
+        var cursor: ?*Shape = final_shape;
+        var remaining = values.len;
+        while (remaining > 0) {
+            const child = cursor orelse return false;
+            const name = child.name orelse return false;
+            const index = remaining - 1;
+            if (child.slot != index or child.count != remaining or canonicalIndex(name) != null)
+                return false;
+            chain[index] = child;
+            cursor = child.parent;
+            remaining = index;
+        }
+        if (cursor != root) return false;
+        for (chain[0..values.len], 0..) |child, left| {
+            const name = child.name.?;
+            for (chain[left + 1 .. values.len]) |other|
+                if (std.mem.eql(u8, name, other.name.?)) return false;
+        }
+
+        for (values, 0..) |value_, index| {
+            gcBarrier(self, value_);
+            self.inline_slots[index] = value_;
+        }
+        self.slots.items = self.inline_slots[0..values.len];
+        self.shape = final_shape;
+        return true;
+    }
+
     fn slotsAreInline(self: *const Object) bool {
         return self.slots.capacity == self.inline_slots.len and self.slots.items.ptr == &self.inline_slots;
     }
@@ -2842,6 +2889,37 @@ test "ordinary object keeps four named property values inline before migrating" 
     try std.testing.expect(!object.slotsAreInline());
     try std.testing.expectEqual(@as(usize, 5), object.slots.items.len);
     object.slots.deinit(std.testing.allocator);
+}
+
+test "fixed-shape object allocation publishes validated literal shape into inline slots" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const root = try Shape.createRoot(arena.allocator());
+    const first = try root.transition("alpha");
+    const second = try first.transition("beta");
+    const final_shape = try second.transition("gamma");
+    var referenced = Object{};
+    referenced.initInlineSlots();
+
+    var object = Object{};
+    object.initInlineSlots();
+    const values = [_]Value{ Value.num(11), Value.obj(&referenced), Value.num(33) };
+    try std.testing.expect(object.initializeInlineLiteralShape(root, final_shape, &values));
+    try std.testing.expectEqual(final_shape, object.shape.?);
+    try std.testing.expect(object.slotsAreInline());
+    try std.testing.expectEqualSlices(Value, &values, object.slots.items);
+
+    var occupied = Object{};
+    occupied.initInlineSlots();
+    try occupied.setOwn(arena.allocator(), root, "existing", Value.num(1));
+    try std.testing.expect(!occupied.initializeInlineLiteralShape(root, final_shape, &values));
+    try std.testing.expectEqual(@as(usize, 1), occupied.slots.items.len);
+
+    const indexed_shape = try root.transition("0");
+    var indexed = Object{};
+    indexed.initInlineSlots();
+    try std.testing.expect(!indexed.initializeInlineLiteralShape(root, indexed_shape, &.{Value.num(1)}));
+    try std.testing.expectEqual(@as(usize, 0), indexed.slots.items.len);
 }
 
 test "object named property delete rebuild serializes with writers" {
