@@ -613,7 +613,9 @@ pub const GcCellBacking = struct {
     /// backing chunks and maintain smaller address indexes for the hot object
     /// bucket. 384 KiB keeps empty-context object chunks at three without the
     /// larger reserved-slot overhang of a 512 KiB chunk. The lazy bump cursor
-    /// means unused slots are not prelinked.
+    /// means unused slots are not prelinked. Once Object enters the 512-byte
+    /// class, threaded contexts use the same geometry to avoid synchronized
+    /// chunk growth; single-mutator contexts retain the smaller 64 KiB chunks.
     const large_chunk_bytes: usize = 384 * 1024;
     const reusable_tail_chunks: usize = 8;
     const free_slot_magic: u64 = 0x6672_6565_5f67_6363;
@@ -648,6 +650,9 @@ pub const GcCellBacking = struct {
 
     inner: std.mem.Allocator,
     parallel: bool = false,
+    /// Allocation geometry is selected before private realm bootstrap, while
+    /// `parallel` remains false so that bootstrap does not pay lock overhead.
+    large_512_chunks: bool = false,
     bulk_teardown: bool = false,
     /// Fast-path cell allocation is independent by size class. Chunk growth and
     /// delegated side-storage operations still serialize through `inner_lock`
@@ -738,8 +743,11 @@ pub const GcCellBacking = struct {
         return null;
     }
 
-    inline fn bucketChunkBytes(idx: usize) usize {
-        return if (bucket_sizes[idx] >= 1024) large_chunk_bytes else chunk_bytes;
+    inline fn bucketChunkBytes(self: *const GcCellBacking, idx: usize) usize {
+        return if (bucket_sizes[idx] >= 1024 or (self.large_512_chunks and bucket_sizes[idx] == 512))
+            large_chunk_bytes
+        else
+            chunk_bytes;
     }
 
     fn chunkAddrInsertIndexLocked(self: *GcCellBacking, idx: usize, start: usize) usize {
@@ -780,7 +788,7 @@ pub const GcCellBacking = struct {
         self.acquireInner();
         defer self.unlockInner();
         const slot_size = bucket_sizes[idx];
-        const slots = @max(@as(usize, 1), bucketChunkBytes(idx) / slot_size);
+        const slots = @max(@as(usize, 1), self.bucketChunkBytes(idx) / slot_size);
         const chunk_len = slots * slot_size;
         if (!self.reserveChunkMetadataLocked(idx, 1)) return false;
         const chunk = self.inner.alignedAlloc(u8, .@"16", chunk_len) catch return false;
@@ -1769,7 +1777,7 @@ test "GC cell backing uses larger chunks for object-sized buckets" {
 
     const object_idx = GcCellBacking.bucketIndex(900, .@"16").?;
     try std.testing.expectEqual(@as(usize, 1024), GcCellBacking.bucket_sizes[object_idx]);
-    try std.testing.expectEqual(GcCellBacking.large_chunk_bytes, GcCellBacking.bucketChunkBytes(object_idx));
+    try std.testing.expectEqual(GcCellBacking.large_chunk_bytes, backing.bucketChunkBytes(object_idx));
 
     const object = try a.alignedAlloc(u8, .@"16", 900);
     defer a.free(object);
@@ -1781,6 +1789,17 @@ test "GC cell backing uses larger chunks for object-sized buckets" {
     try std.testing.expectEqual(@as(usize, 1), stats.issued_slots);
     try std.testing.expectEqual(slots - 1, stats.free_slots);
     try std.testing.expectEqual(@as(usize, 1), stats.live_slots);
+}
+
+test "GC cell backing selects 512-byte chunk geometry independently of locks" {
+    const idx = GcCellBacking.bucketIndex(500, .@"16").?;
+    try std.testing.expectEqual(@as(usize, 512), GcCellBacking.bucket_sizes[idx]);
+
+    var serial = GcCellBacking{ .inner = std.testing.allocator };
+    var large = GcCellBacking{ .inner = std.testing.allocator, .large_512_chunks = true };
+    try std.testing.expectEqual(GcCellBacking.chunk_bytes, serial.bucketChunkBytes(idx));
+    try std.testing.expectEqual(GcCellBacking.large_chunk_bytes, large.bucketChunkBytes(idx));
+    try std.testing.expect(!large.parallel);
 }
 
 test "GC cell backing bulk teardown skips freelist rebuilds and still delegates side storage" {
@@ -2359,7 +2378,11 @@ pub const Context = struct {
             // delaying these locks keeps no-GIL context creation on the fast
             // allocation path. Parallel mode is enabled immediately before
             // returning below.
-            gc_state.backing = .{ .inner = context_gpa, .parallel = false };
+            gc_state.backing = .{
+                .inner = context_gpa,
+                .parallel = false,
+                .large_512_chunks = options.parallel_gc,
+            };
             const cell_backing = gc_state.backing.allocator();
             gc_state.heap = GcHeap.init(cell_backing, &gc_state.binding);
             const h = &gc_state.heap;
