@@ -13,6 +13,7 @@
 //! resumable execution state.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const gc_mod = @import("gc.zig");
 const bc = @import("bytecode.zig");
 const value = @import("value.zig");
@@ -502,6 +503,104 @@ inline fn numberRemainder(a: f64, b: f64) f64 {
     return @rem(a, b);
 }
 
+const max_quick_property_instructions: usize = 16;
+const max_quick_property_stack: usize = 8;
+
+// Test-only observations enforce that the optimized path remains reachable.
+// The fetchAdd call is compile-time removed from production builds.
+var quick_property_update_hits: std.atomic.Value(u64) = .init(0);
+
+inline fn quickPlainObject(value_: Value) ?*value.Object {
+    if (!value_.isObject()) return null;
+    const object = value_.asObj();
+    if (object.is_array or object.accessors.load(.monotonic) != null or object.attrsMap() != null) return null;
+    return object;
+}
+
+inline fn quickPropertySlot(chunk: *Chunk, instruction: usize, object: *value.Object) ?usize {
+    if (instruction >= chunk.ics.len) return null;
+    const slot: usize = @intCast(chunk.ics[instruction].lookupSlotMode(object.shape, false) orelse return null);
+    if (slot >= object.slots.items.len) return null;
+    return slot;
+}
+
+/// Collapse a warmed, monomorphic `base.property = numeric expression` trace.
+/// Every read is guarded before the sole mutation, so any miss can safely fall
+/// back to the ordinary bytecode at `start`. This isolated-mode tier accepts no
+/// accessors, attributes, prototypes, arrays, coercions, or observable calls.
+fn tryNumericPropertyUpdate(chunk: *Chunk, frame: *Frame, start: usize, max_extra_steps: u64) ?u8 {
+    const code = chunk.code.items;
+    if (start >= code.len or code[start].op != .load_local) return null;
+    const base_index: usize = @intCast(code[start].a);
+    if (base_index >= frame.slots.len) return null;
+    const target = quickPlainObject(frame.slots[base_index]) orelse return null;
+
+    var numbers: [max_quick_property_stack]f64 = undefined;
+    var depth: usize = 0;
+    var cursor = start + 1;
+    while (cursor < code.len and cursor - start < max_quick_property_instructions) {
+        const inst = code[cursor];
+        switch (inst.op) {
+            .load_const => {
+                const index: usize = @intCast(inst.a);
+                if (index >= chunk.consts.items.len or depth == numbers.len) return null;
+                const constant = chunk.consts.items[index];
+                if (!constant.isNumber()) return null;
+                numbers[depth] = constant.asNum();
+                depth += 1;
+                cursor += 1;
+            },
+            .load_local => {
+                const index: usize = @intCast(inst.a);
+                if (index >= frame.slots.len or depth == numbers.len) return null;
+                const local = frame.slots[index];
+                if (cursor + 1 < code.len and code[cursor + 1].op == .get_prop) {
+                    if (cursor + 1 - start >= max_quick_property_instructions) return null;
+                    const object = quickPlainObject(local) orelse return null;
+                    const slot = quickPropertySlot(chunk, cursor + 1, object) orelse return null;
+                    const property = object.slots.items[slot];
+                    if (!property.isNumber()) return null;
+                    numbers[depth] = property.asNum();
+                    cursor += 2;
+                } else {
+                    if (!local.isNumber()) return null;
+                    numbers[depth] = local.asNum();
+                    cursor += 1;
+                }
+                depth += 1;
+            },
+            .add, .sub, .mul, .div, .mod => {
+                if (depth < 2) return null;
+                const rhs = numbers[depth - 1];
+                const lhs = numbers[depth - 2];
+                depth -= 1;
+                numbers[depth - 1] = switch (inst.op) {
+                    .add => lhs + rhs,
+                    .sub => lhs - rhs,
+                    .mul => lhs * rhs,
+                    .div => lhs / rhs,
+                    .mod => numberRemainder(lhs, rhs),
+                    else => unreachable,
+                };
+                cursor += 1;
+            },
+            .set_prop => {
+                if (depth != 1 or cursor + 1 >= code.len or code[cursor + 1].op != .pop) return null;
+                const consumed = cursor + 2 - start;
+                if (consumed > max_quick_property_instructions or consumed - 1 > max_extra_steps) return null;
+                const slot = quickPropertySlot(chunk, cursor, target) orelse return null;
+                const result = Value.num(numbers[0]);
+                gc_mod.barrierValueFrom(target, result);
+                target.slots.items[slot] = result;
+                if (builtin.is_test) _ = quick_property_update_hits.fetchAdd(1, .monotonic);
+                return @intCast(consumed);
+            },
+            else => return null,
+        }
+    }
+    return null;
+}
+
 fn nativeRemainder(a: f64, b: f64) callconv(.c) f64 {
     return numberRemainder(a, b);
 }
@@ -788,6 +887,24 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
 
             .load_local => {
                 const cf = frame.?;
+                // A quick property assignment must start with an object-valued
+                // base and then a numeric RHS load. Keep the recognizer call off
+                // ordinary numeric locals (including the arithmetic JIT side
+                // exits), and off the inner `load_local; get_prop` read pair.
+                if (!parallel_sync and cf.slots[inst.a].isObject() and ip < code.len and switch (code[ip].op) {
+                    .load_const, .load_local => true,
+                    else => false,
+                }) {
+                    const steps_until_checkpoint = 1024 - (vm.steps & 1023);
+                    const steps_until_budget = interp.max_steps - vm.steps;
+                    const max_extra_steps = @min(steps_until_checkpoint - 1, steps_until_budget);
+                    if (tryNumericPropertyUpdate(chunk, cf, ip - 1, max_extra_steps)) |consumed| {
+                        const extra: u64 = consumed - 1;
+                        vm.steps += extra;
+                        ip += @intCast(extra);
+                        continue;
+                    }
+                }
                 const held = cf.lockSlots(parallel_sync);
                 const v = cf.slots[inst.a];
                 cf.unlockSlots(held);
@@ -3458,6 +3575,55 @@ test "vm: objects, arrays, members, this, new, instanceof on the VM" {
     try std.testing.expectEqual(@as(f64, 7), (try vmRun(a, "function P(x, y) { this.x = x; this.y = y; } let p = new P(3, 4); p.x + p.y")).asNum());
     try std.testing.expect((try vmRun(a, "function P(x) { this.x = x; } (new P(1)) instanceof P")).asBool());
     try std.testing.expectEqual(@as(f64, 10), (try vmRun(a, "let o = { n: 10, get: function () { return this.n; } }; o.get()")).asNum());
+}
+
+test "vm: quickens warmed numeric property update traces" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var parser = try Parser.init(allocator,
+        \\function update() {
+        \\  const object = { a: 1, b: 2 };
+        \\  let i = 0;
+        \\  while (i < 4) {
+        \\    object.a = object.a + i;
+        \\    object.b = object.a + object.b;
+        \\    i = i + 1;
+        \\  }
+        \\  return object.a * 100 + object.b;
+        \\}
+    );
+    const program = try parser.parseProgram();
+    const root = try Compiler.compileProgram(allocator, program);
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
+    try interp.installGlobals(&env, root_shape);
+    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape };
+    _ = try run(&machine, root, null);
+
+    const function_value = env.get("update").?;
+    const function = Interpreter.funcOf(function_value).?;
+    const function_chunk = function.chunk.?;
+    const before = quick_property_update_hits.load(.monotonic);
+    var expected_steps: u64 = 0;
+    for (0..3) |iteration| {
+        if (iteration == 2) machine.steps = 1018;
+        const start_steps = machine.steps;
+        try std.testing.expectEqual(@as(f64, 716), (try runFunction(
+            &machine,
+            function,
+            function_chunk,
+            &.{},
+            Value.undef(),
+            Value.undef(),
+        )).asNum());
+        const elapsed_steps = machine.steps - start_steps;
+        if (iteration == 0)
+            expected_steps = elapsed_steps
+        else
+            try std.testing.expectEqual(expected_steps, elapsed_steps);
+    }
+    try std.testing.expect(quick_property_update_hits.load(.monotonic) > before);
 }
 
 test "vm: for loop with ++ and compound assignment" {
