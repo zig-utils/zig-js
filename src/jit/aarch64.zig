@@ -73,6 +73,14 @@ pub const Assembler = struct {
         try self.emit32(0x8b00_0000 | (@as(u32, rm) << 16) | (@as(u32, rn) << 5) | rd);
     }
 
+    pub fn subtractRegister64(self: *Assembler, rd: u5, rn: u5, rm: u5) error{NoSpace}!void {
+        try self.emit32(0xcb00_0000 | (@as(u32, rm) << 16) | (@as(u32, rn) << 5) | rd);
+    }
+
+    pub fn multiply64(self: *Assembler, rd: u5, rn: u5, rm: u5) error{NoSpace}!void {
+        try self.emit32(0x9b00_7c00 | (@as(u32, rm) << 16) | (@as(u32, rn) << 5) | rd);
+    }
+
     pub fn subtractImmediate64(self: *Assembler, rd: u5, rn: u5, value: u12) error{NoSpace}!void {
         try self.emit32(0xd100_0000 | (@as(u32, value) << 10) | (@as(u32, rn) << 5) | rd);
     }
@@ -155,12 +163,28 @@ pub const Assembler = struct {
         try self.emit32(0x1e63_0000 | (@as(u32, rn) << 5) | fd);
     }
 
+    pub fn convertFloat64ToUnsigned64(self: *Assembler, rd: u5, fn_: u5) error{NoSpace}!void {
+        try self.emit32(0x9e79_0000 | (@as(u32, fn_) << 5) | rd);
+    }
+
+    pub fn convertUnsigned64ToFloat64(self: *Assembler, fd: u5, rn: u5) error{NoSpace}!void {
+        try self.emit32(0x9e63_0000 | (@as(u32, rn) << 5) | fd);
+    }
+
     pub fn divideUnsigned32(self: *Assembler, rd: u5, rn: u5, rm: u5) error{NoSpace}!void {
         try self.emit32(0x1ac0_0800 | (@as(u32, rm) << 16) | (@as(u32, rn) << 5) | rd);
     }
 
+    pub fn divideUnsigned64(self: *Assembler, rd: u5, rn: u5, rm: u5) error{NoSpace}!void {
+        try self.emit32(0x9ac0_0800 | (@as(u32, rm) << 16) | (@as(u32, rn) << 5) | rd);
+    }
+
     pub fn multiplySubtract32(self: *Assembler, rd: u5, rn: u5, rm: u5, ra: u5) error{NoSpace}!void {
         try self.emit32(0x1b00_8000 | (@as(u32, rm) << 16) | (@as(u32, ra) << 10) | (@as(u32, rn) << 5) | rd);
+    }
+
+    pub fn multiplySubtract64(self: *Assembler, rd: u5, rn: u5, rm: u5, ra: u5) error{NoSpace}!void {
+        try self.emit32(0x9b00_8000 | (@as(u32, rm) << 16) | (@as(u32, ra) << 10) | (@as(u32, rn) << 5) | rd);
     }
 
     pub fn conditionalSet32(self: *Assembler, rd: u5, condition: Condition) error{NoSpace}!void {
@@ -355,6 +379,31 @@ test "AArch64 guarded unsigned remainder encodings" {
         0x3400_0129, 0x1e79_002a, 0x1e63_0142, 0x1e62_2020,
         0x5400_00a1, 0x3400_008a, 0x1aca_092b, 0x1b0a_a569,
         0x1e63_0120, 0xd65f_03c0,
+    };
+    for (expected, 0..) |instruction, index| {
+        try std.testing.expectEqual(instruction, std.mem.readInt(u32, assembler.bytes()[index * 4 ..][0..4], .little));
+    }
+}
+
+test "AArch64 guarded unsigned 64-bit arithmetic encodings" {
+    var storage: [28]u8 = undefined;
+    var assembler = Assembler.init(&storage);
+    try assembler.subtractRegister64(9, 10, 11);
+    try assembler.multiply64(12, 13, 14);
+    try assembler.divideUnsigned64(15, 16, 17);
+    try assembler.multiplySubtract64(18, 19, 20, 21);
+    try assembler.convertUnsigned64ToFloat64(2, 22);
+    try assembler.convertFloat64ToUnsigned64(23, 3);
+    try assembler.ret();
+
+    const expected = [_]u32{
+        0xcb0b_0149,
+        0x9b0e_7dac,
+        0x9ad1_0a0f,
+        0x9b14_d672,
+        0x9e63_02c2,
+        0x9e79_0077,
+        0xd65f_03c0,
     };
     for (expected, 0..) |instruction, index| {
         try std.testing.expectEqual(instruction, std.mem.readInt(u32, assembler.bytes()[index * 4 ..][0..4], .little));
