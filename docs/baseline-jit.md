@@ -39,13 +39,18 @@ toggle or partially published code.
 
 The native entry point receives one pointer to a stable `NativeFrame` defined
 by the JIT module, rather than depending on Zig's private calling convention or
-the in-memory layout of `Interpreter` and `Exec`. The frame contains:
+the in-memory layout of `Interpreter` and `Exec`. The current frame contains:
 
-- pointers to the interpreter, chunk, current lexical frame, and operand
-  storage;
-- the current stack length, accumulator, instruction pointer, and step budget;
-- a pointer to an immutable table of C-callable runtime stubs;
-- a status and exit instruction pointer written by native code.
+- raw frame slots and numeric operand-spill storage;
+- the exact interpreter step counter plus checkpoint and budget countdowns;
+- an opaque runtime context and C-callable checkpoint/remainder helpers;
+- result bits and an exit instruction pointer written by native code.
+
+It intentionally does not expose the private `Interpreter`, `Chunk`, or `Exec`
+layouts. A future resumable side exit must append the state it needs to this
+ABI and reconstruct the full interpreter activation explicitly; returning
+`side_exit` from a partially executed entry and simply restarting the function
+would duplicate steps and side effects.
 
 `Value` is an eight-byte NaN-boxed word. Native arithmetic may stay unboxed in
 registers inside a proven numeric region, but every safepoint and side exit
@@ -83,6 +88,36 @@ the existing shape/slot inline-cache contract, including the parallel seqlock
 mode and GC write barrier. Arrays and calls use runtime stubs until dedicated
 representations are proven correct.
 
+## Guarded integer specialization
+
+Issue [#56](https://github.com/zig-utils/zig-js/issues/56) tracks the next
+numeric tier. Development measurements show that removing FP register moves or
+constant setup is no longer material: integer-valued loop state still travels
+through doubles, and remainder repeatedly validates and converts it. The next
+speed tier therefore specializes proven integer regions rather than adding
+benchmark-specific peepholes.
+
+Entry guards run before native step accounting and before any frame-slot
+mutation. If a parameter violates the compiled integer/range assumptions, the
+entry may return to bytecode at instruction zero with no state to reconstruct.
+Once observable native work begins, a failed assumption may use only one of
+these exact paths:
+
+- a cold semantic helper that completes the current bytecode operation;
+- a range proof that made failure impossible; or
+- a resumable side exit that publishes the precise instruction, operand stack,
+  locals, and already-consumed step count.
+
+The dataflow lattice distinguishes signed/non-negative integers and conservative
+ranges at control-flow merges. Integer locals and operands may stay in GPRs,
+but safepoints and returns materialize canonical Number words. Overflow cannot
+wrap: it must be proved absent, handled by a full-precision cold path, or leave
+through the precise side-exit contract. Fractional values, NaN, infinities,
+and negative zero continue in the generic Number tier or interpreter.
+
+The specialization is selected from bytecode plus runtime guards. It must not
+inspect source strings, function names, benchmark names, or call-site identity.
+
 ## Safepoints and accounting
 
 Back edges and calls are safepoints. Before either one, native code spills live
@@ -101,18 +136,18 @@ a machine register across a safepoint.
 
 ## Executable memory
 
-Code memory follows write-xor-execute policy:
+Code memory follows write-xor-execute policy. The currently emitted backend is
+AArch64 on Darwin:
 
 - macOS allocates `MAP_JIT` mappings and uses
   `pthread_jit_write_protect_np` around writes, followed by
   `sys_icache_invalidate`;
-- other POSIX targets allocate read/write pages, then change them to
-  read/execute before publication;
 - unsupported targets leave the tier disabled and continue in bytecode.
 
 The memory layer is independently tested with tiny architecture-specific code,
-but the compiler itself remains architecture-neutral and emits through a
-backend interface. AArch64 and x86-64 are the initial backends.
+but bytecode analysis remains separate from the AArch64 assembler. Other POSIX
+memory transitions and an x86-64 emitter remain future backend work; tests that
+execute generated entries skip when that backend is unavailable.
 
 ## Correctness and performance gates
 
