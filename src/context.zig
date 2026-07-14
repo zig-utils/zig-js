@@ -1128,23 +1128,27 @@ pub const GcCellBacking = struct {
         }
     }
 
-    fn removeTailFreeNodesLocked(self: *GcCellBacking, idx: usize, first_trimmed_chunk: usize) usize {
-        var removed: usize = 0;
+    fn rebuildRetainedFreeListLocked(self: *GcCellBacking, idx: usize, retained_chunks: usize) usize {
+        const old_free_count = self.bucket_free_counts[idx];
         var retained: ?*FreeNode = null;
-        var it = self.free_lists[idx];
-        while (it) |node| {
-            const next = node.next;
-            if (node.chunk_idx >= first_trimmed_chunk) {
-                removed += 1;
-            } else {
+        var retained_count: usize = 0;
+        const slot_size = bucket_sizes[idx];
+        for (self.bucket_chunks[idx].items[0..retained_chunks], 0..) |chunk, chunk_idx| {
+            const issued_bytes = self.bucket_next_offsets[idx].items[chunk_idx];
+            var offset: usize = 0;
+            while (offset < issued_bytes) : (offset += slot_size) {
+                const node: *FreeNode = @ptrCast(@alignCast(chunk.ptr + offset));
+                if (node.magic != free_slot_magic) continue;
+                node.chunk_idx = chunk_idx;
                 node.next = retained;
                 retained = node;
+                retained_count += 1;
             }
-            it = next;
         }
         self.free_lists[idx] = retained;
-        self.bucket_free_counts[idx] -= removed;
-        return removed;
+        self.bucket_free_counts[idx] = retained_count;
+        std.debug.assert(retained_count <= old_free_count);
+        return old_free_count - retained_count;
     }
 
     fn removeTailAddrIndexLocked(self: *GcCellBacking, idx: usize, first_trimmed_chunk: usize) usize {
@@ -1209,7 +1213,9 @@ pub const GcCellBacking = struct {
         const trimmed = old_len - first_trimmed;
         const removed_addr_entries = self.removeTailAddrIndexLocked(idx, first_trimmed);
         std.debug.assert(removed_addr_entries == trimmed);
-        const removed_free = self.removeTailFreeNodesLocked(idx, first_trimmed);
+        // Rebuild from the bounded retained prefix instead of chasing every
+        // node in the discarded burst. With no retained chunks this is O(1).
+        const removed_free = self.rebuildRetainedFreeListLocked(idx, first_trimmed);
         var expected_free: usize = 0;
 
         for (self.bucket_chunks[idx].items[first_trimmed..old_len], first_trimmed..) |chunk, chunk_idx| {
@@ -1552,6 +1558,27 @@ test "GC cell backing trims excess empty tail chunks after collection" {
     a.free(next);
     try std.testing.expectEqual(GcCellBacking.reusable_tail_chunks + 1, backing.bucket_chunks[idx].items.len);
     try std.testing.expectEqual(@as(usize, 0), backing.trimEmptyTailChunks());
+}
+
+test "GC cell backing drops an all-free list when trimming its whole bucket" {
+    var backing = GcCellBacking{ .inner = std.testing.allocator };
+    defer backing.deinit();
+    const a = backing.allocator();
+
+    const idx = GcCellBacking.bucketIndex(200, .@"16").?;
+    const slots = GcCellBacking.chunk_bytes / GcCellBacking.bucket_sizes[idx];
+    const cells = try std.testing.allocator.alloc([]align(16) u8, slots + 1);
+    defer std.testing.allocator.free(cells);
+
+    for (cells) |*cell| cell.* = try a.alignedAlloc(u8, .@"16", 200);
+    for (cells) |cell| a.free(cell);
+    try std.testing.expectEqual(slots + 1, backing.bucket_free_counts[idx]);
+
+    try std.testing.expectEqual(@as(usize, 2), backing.trimEmptyTailChunks());
+    try std.testing.expectEqual(@as(?*GcCellBacking.FreeNode, null), backing.free_lists[idx]);
+    try std.testing.expectEqual(@as(usize, 0), backing.bucket_free_counts[idx]);
+    try std.testing.expectEqual(@as(usize, 0), backing.bucket_chunks[idx].items.len);
+    try std.testing.expectEqual(@as(usize, 0), backing.bucket_issued_slots[idx]);
 }
 
 test "GC cell backing keeps non-empty tail and empty inner chunks" {
