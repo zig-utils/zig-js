@@ -82,13 +82,16 @@ pub const Promise = struct {
 /// A queued reaction job: run `reaction.handler(argument)` and settle
 /// `reaction.result` accordingly (a pass-through when `handler` is null).
 pub const Microtask = struct {
-    kind: enum { reaction, thenable } = .reaction,
+    kind: enum { reaction, thenable, callback } = .reaction,
     reaction: Reaction,
     argument: Value,
     fulfilled: bool, // whether the source settled fulfilled (vs rejected)
     thenable: Value = Value.undef(),
     then_fn: Value = Value.undef(),
     promise: ?*Promise = null,
+    /// `.callback` jobs (HTML queueMicrotask): the function to invoke with no
+    /// arguments. Settles no promise; a throw propagates as a reported exception.
+    callback: Value = Value.undef(),
 };
 
 pub const MicrotaskQueue = struct {
@@ -648,6 +651,12 @@ fn performThenReactions(self: *Interpreter, p: *Promise, react_f: Reaction, reac
     }
 }
 
+/// Queue a bare callback microtask (HTML `queueMicrotask`). Runs on the same
+/// checkpoint as Promise reactions, in FIFO order relative to them.
+pub fn enqueueCallback(self: *Interpreter, callback: Value) EvalError!void {
+    try enqueue(self, .{ .kind = .callback, .reaction = undefined, .argument = Value.undef(), .fulfilled = true, .callback = callback });
+}
+
 fn enqueue(self: *Interpreter, task: Microtask) EvalError!void {
     const q = self.microtasks orelse return; // no queue wired → drop (shouldn't happen)
     // Under `parallel_js` a peer thread may drain this queue concurrently; the
@@ -670,6 +679,11 @@ fn settleReaction(self: *Interpreter, r: Reaction, fulfilled: bool, arg: Value) 
 }
 
 pub fn runJob(self: *Interpreter, task: Microtask) EvalError!void {
+    if (task.kind == .callback) {
+        promise_profile.recordMicrotaskRun(false);
+        _ = try self.callValueWithThis(task.callback, &.{}, Value.undef());
+        return;
+    }
     if (task.kind == .thenable) {
         promise_profile.recordMicrotaskRun(true);
         const p = task.promise orelse return;

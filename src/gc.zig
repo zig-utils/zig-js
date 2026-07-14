@@ -423,6 +423,7 @@ inline fn traceMicrotask(mt: promise.Microtask, v: anytype) void {
             markValue(v, mt.then_fn);
             if (mt.promise) |p| markManaged(v, p);
         },
+        .callback => markValue(v, mt.callback),
     }
 }
 

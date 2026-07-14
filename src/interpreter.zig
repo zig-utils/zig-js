@@ -27088,6 +27088,15 @@ fn sharedArrayBufferSliceFn(ctx: *anyopaque, this: Value, args: []const Value) v
 /// deserialize round trip, so the IR doubles as the future worker
 /// `postMessage` wire format. Transferred ArrayBuffers are moved (the clone
 /// keeps the bytes, the source detaches).
+fn queueMicrotaskFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const cb = arg0(args);
+    if (!cb.isObject() or !cb.asObj().isCallableObject())
+        return self.throwError("TypeError", "queueMicrotask requires a callback function");
+    try promise.enqueueCallback(self, cb);
+    return Value.undef();
+}
 fn structuredCloneFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
@@ -27802,6 +27811,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     }
     try defineGlobalFn(env, root_shape, "parseInt", 2, builtins.parseIntFn);
     try defineGlobalFn(env, root_shape, "parseFloat", 1, builtins.parseFloatFn);
+    try defineGlobalFn(env, root_shape, "queueMicrotask", 1, queueMicrotaskFn);
     try defineGlobalFn(env, root_shape, "structuredClone", 1, structuredCloneFn);
     try defineGlobalFn(env, root_shape, "btoa", 1, btoaFn);
     try defineGlobalFn(env, root_shape, "atob", 1, atobFn);
