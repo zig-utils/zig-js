@@ -2208,6 +2208,27 @@ pub const Interpreter = struct {
         return self.makeErrorWithProto(name, message, null);
     }
 
+    /// Build a DOMException whose `name` is `name` (e.g. "DataCloneError"),
+    /// `code` derives from it, and `message` is the (possibly empty) detail. It
+    /// is error-like (`is_error`) and chains through %DOMException.prototype% to
+    /// %Error.prototype%; `name`/`message`/`code` are read by the prototype
+    /// accessors from `error_name` and the hidden `\x00dommsg` slot.
+    pub fn makeDOMException(self: *Interpreter, name: []const u8, message: []const u8) EvalError!Value {
+        const obj = try gc_mod.allocObj(self.arena);
+        obj.* = .{ .is_error = true, .error_name = try self.arena.dupe(u8, name) };
+        if (self.env.get("DOMException")) |ctor_v| if (ctor_v.isObject()) {
+            if (ctor_v.asObj().getOwn("prototype")) |p| if (p.isObject()) obj.setProtoAtomic(p.asObj());
+        };
+        if (message.len > 0)
+            try obj.setOwn(self.arena, self.root_shape, "\x00dommsg", try Value.strAlloc(self.arena, message));
+        return Value.obj(obj);
+    }
+
+    pub fn throwDOMException(self: *Interpreter, name: []const u8, message: []const u8) EvalError {
+        self.exception = try self.makeDOMException(name, message);
+        return error.Throw;
+    }
+
     /// Raise a JS exception of the given error class. Always returns
     /// `error.Throw` (or `error.OutOfMemory` if the error object can't be built).
     pub fn throwError(self: *Interpreter, name: []const u8, message: []const u8) EvalError {
@@ -27017,13 +27038,13 @@ fn structuredCloneFn(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
             // not borrow `elements.items` directly.
             for (try tv.asObj().internalElementsSnapshot(self.arena)) |entry| {
                 if (!entry.isObject() or entry.asObj().array_buffer == null)
-                    return self.throwError("TypeError", "DataCloneError: only ArrayBuffers are transferable");
+                    return self.throwDOMException("DataCloneError", "only ArrayBuffers are transferable");
                 const ab = entry.asObj().array_buffer.?;
-                if (ab.is_shared) return self.throwError("TypeError", "DataCloneError: a SharedArrayBuffer is not transferable");
-                if (ab.isDetached()) return self.throwError("TypeError", "DataCloneError: cannot transfer a detached ArrayBuffer");
-                if (ab.immutable) return self.throwError("TypeError", "DataCloneError: cannot transfer an immutable ArrayBuffer");
+                if (ab.is_shared) return self.throwDOMException("DataCloneError", "a SharedArrayBuffer is not transferable");
+                if (ab.isDetached()) return self.throwDOMException("DataCloneError", "cannot transfer a detached ArrayBuffer");
+                if (ab.immutable) return self.throwDOMException("DataCloneError", "cannot transfer an immutable ArrayBuffer");
                 for (transfer.items) |seen| if (seen == entry.asObj())
-                    return self.throwError("TypeError", "DataCloneError: duplicate transferable");
+                    return self.throwDOMException("DataCloneError", "duplicate transferable");
                 try transfer.append(self.arena, entry.asObj());
             }
         }
@@ -29653,6 +29674,7 @@ fn installTypedArrays(env: *Environment, rs: *Shape) EvalError!void {
     try installFunctionKinds(env, rs);
     try installDisposableStacks(env, rs, object_proto);
     try installSharedArrayBufferAndAtomics(env, rs, object_proto);
+    try installDOMException(env, rs, object_proto);
     try installTemporal(env, rs, object_proto);
     try installIntl(env, rs, object_proto);
     // ShadowRealm: a child realm with `evaluate` (and a minimal `importValue`).
@@ -38648,6 +38670,128 @@ fn installTemporal(env: *Environment, rs: *Shape, object_proto: *value.Object) E
     }
 
     try env.put("Temporal", Value.obj(ns));
+}
+
+// ===== DOMException (WebIDL) ==========================================
+// The legacy error-code table: each entry maps a `*_ERR` constant (installed on
+// the constructor and its prototype) to a numeric code, and — where a modern
+// name exists — to the DOMException `name` that yields that code.
+const DomExceptionCode = struct { constant: []const u8, code: u16, err_name: []const u8 };
+const dom_exception_codes = [_]DomExceptionCode{
+    .{ .constant = "INDEX_SIZE_ERR", .code = 1, .err_name = "IndexSizeError" },
+    .{ .constant = "DOMSTRING_SIZE_ERR", .code = 2, .err_name = "" },
+    .{ .constant = "HIERARCHY_REQUEST_ERR", .code = 3, .err_name = "HierarchyRequestError" },
+    .{ .constant = "WRONG_DOCUMENT_ERR", .code = 4, .err_name = "WrongDocumentError" },
+    .{ .constant = "INVALID_CHARACTER_ERR", .code = 5, .err_name = "InvalidCharacterError" },
+    .{ .constant = "NO_DATA_ALLOWED_ERR", .code = 6, .err_name = "" },
+    .{ .constant = "NO_MODIFICATION_ALLOWED_ERR", .code = 7, .err_name = "NoModificationAllowedError" },
+    .{ .constant = "NOT_FOUND_ERR", .code = 8, .err_name = "NotFoundError" },
+    .{ .constant = "NOT_SUPPORTED_ERR", .code = 9, .err_name = "NotSupportedError" },
+    .{ .constant = "INUSE_ATTRIBUTE_ERR", .code = 10, .err_name = "InUseAttributeError" },
+    .{ .constant = "INVALID_STATE_ERR", .code = 11, .err_name = "InvalidStateError" },
+    .{ .constant = "SYNTAX_ERR", .code = 12, .err_name = "SyntaxError" },
+    .{ .constant = "INVALID_MODIFICATION_ERR", .code = 13, .err_name = "InvalidModificationError" },
+    .{ .constant = "NAMESPACE_ERR", .code = 14, .err_name = "NamespaceError" },
+    .{ .constant = "INVALID_ACCESS_ERR", .code = 15, .err_name = "InvalidAccessError" },
+    .{ .constant = "VALIDATION_ERR", .code = 16, .err_name = "" },
+    .{ .constant = "TYPE_MISMATCH_ERR", .code = 17, .err_name = "TypeMismatchError" },
+    .{ .constant = "SECURITY_ERR", .code = 18, .err_name = "SecurityError" },
+    .{ .constant = "NETWORK_ERR", .code = 19, .err_name = "NetworkError" },
+    .{ .constant = "ABORT_ERR", .code = 20, .err_name = "AbortError" },
+    .{ .constant = "URL_MISMATCH_ERR", .code = 21, .err_name = "URLMismatchError" },
+    .{ .constant = "QUOTA_EXCEEDED_ERR", .code = 22, .err_name = "QuotaExceededError" },
+    .{ .constant = "TIMEOUT_ERR", .code = 23, .err_name = "TimeoutError" },
+    .{ .constant = "INVALID_NODE_TYPE_ERR", .code = 24, .err_name = "InvalidNodeTypeError" },
+    .{ .constant = "DATA_CLONE_ERR", .code = 25, .err_name = "DataCloneError" },
+};
+
+/// The legacy `code` a DOMException `name` maps to (0 for a name with no code).
+fn domExceptionCode(name: []const u8) u16 {
+    for (dom_exception_codes) |ec| {
+        if (ec.err_name.len > 0 and std.mem.eql(u8, name, ec.err_name)) return ec.code;
+    }
+    return 0;
+}
+
+// `name`/`message`/`code` are WebIDL attributes (prototype accessors), reading
+// per-instance state: `name` from the stored `error_name`, `message` from a
+// hidden slot, `code` derived from `name`.
+fn domExceptionNameGet(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!this.isObject()) return self.throwError("TypeError", "DOMException name getter called on non-object");
+    const en = this.asObj().error_name;
+    return try Value.strAlloc(self.arena, if (en.len == 0) "Error" else en);
+}
+fn domExceptionMessageGet(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!this.isObject()) return self.throwError("TypeError", "DOMException message getter called on non-object");
+    if (this.asObj().getOwn("\x00dommsg")) |m| return m;
+    return Value.str("");
+}
+fn domExceptionCodeGet(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!this.isObject()) return self.throwError("TypeError", "DOMException code getter called on non-object");
+    return Value.num(@floatFromInt(domExceptionCode(this.asObj().error_name)));
+}
+
+fn domExceptionConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (self.new_target.isUndefined()) return self.throwError("TypeError", "Failed to construct 'DOMException': Please use the 'new' operator");
+    const message = if (args.len > 0 and !args[0].isUndefined()) try self.toStringV(args[0]) else "";
+    const name = if (args.len > 1 and !args[1].isUndefined()) try self.toStringV(args[1]) else "Error";
+    return self.makeDOMException(name, message);
+}
+
+fn installDOMException(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalError!void {
+    const a = env.arena;
+    // DOMException.prototype's [[Prototype]] is %Error.prototype% (so a
+    // DOMException is `instanceof Error`), falling back to Object.prototype.
+    const error_proto: *value.Object = blk: {
+        if (env.get("Error")) |e| if (e.isObject()) {
+            if (e.asObj().getOwn("prototype")) |p| if (p.isObject()) break :blk p.asObj();
+        };
+        break :blk object_proto;
+    };
+    const sym_tag: ?[]const u8 = blk: {
+        if (env.get("Symbol")) |sym| if (sym.isObject()) {
+            if (sym.asObj().getOwn("toStringTag")) |t| if (t.isObject() and t.asObj().is_symbol) break :blk t.asObj().sym_key;
+        };
+        break :blk null;
+    };
+    const proto = try gc_mod.allocObj(a);
+    proto.* = .{ .proto = error_proto };
+    // WebIDL attributes are enumerable, configurable accessors.
+    inline for (.{ .{ "name", domExceptionNameGet }, .{ "message", domExceptionMessageGet }, .{ "code", domExceptionCodeGet } }) |g| {
+        try setNativeGetter(a, rs, proto, g[0], g[1]);
+        try proto.setAttr(a, g[0], .{ .enumerable = true, .configurable = true });
+    }
+    if (sym_tag) |k| {
+        try proto.setOwn(a, rs, k, Value.str("DOMException"));
+        try proto.setAttr(a, k, .{ .writable = false, .enumerable = false, .configurable = true });
+    }
+    const ctor = try gc_mod.allocObj(a);
+    ctor.* = .{ .native = domExceptionConstructorFn, .native_ctor = true };
+    // WebIDL constructor `length` counts REQUIRED args; both message and name are
+    // optional, so DOMException.length is 0.
+    try installNativeProps(a, rs, ctor, "DOMException", 0);
+    try ctor.setOwn(a, rs, "prototype", Value.obj(proto));
+    try ctor.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
+    try setConstructor(a, rs, proto, ctor);
+    // The legacy code constants live on both the constructor and its prototype,
+    // { !writable, enumerable, !configurable }.
+    inline for (dom_exception_codes) |ec| {
+        const cv = Value.num(@floatFromInt(ec.code));
+        const attr = value.PropAttr{ .writable = false, .enumerable = true, .configurable = false };
+        try ctor.setOwn(a, rs, ec.constant, cv);
+        try ctor.setAttr(a, ec.constant, attr);
+        try proto.setOwn(a, rs, ec.constant, cv);
+        try proto.setAttr(a, ec.constant, attr);
+    }
+    try env.put("DOMException", Value.obj(ctor));
 }
 
 fn installSharedArrayBufferAndAtomics(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalError!void {

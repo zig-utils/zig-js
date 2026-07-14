@@ -16,7 +16,7 @@
 //! wrappers, ArrayBuffer (byte copy; resizability preserved), growable and
 //! fixed SharedArrayBuffer (storage shared), every TypedArray kind, DataView.
 //! Cycles and identity (`a.x === a.y`) are preserved via a memo table.
-//! Rejected with a DataCloneError-style TypeError: functions, symbols,
+//! Rejected with a DataCloneError DOMException: functions, symbols,
 //! proxies, promises, generators, WeakMap/WeakSet/WeakRef, module namespaces,
 //! arguments objects, detached ArrayBuffers.
 
@@ -248,7 +248,12 @@ const Serializer = struct {
     shared_tokens: std.ArrayListUnmanaged(SharedRefToken) = .empty,
 
     fn throwClone(s: *Serializer, what: []const u8) HostError {
-        return s.self.throwError("TypeError", what);
+        // A structured-clone failure is a DataCloneError DOMException (not a plain
+        // TypeError). The call sites label their detail "DataCloneError: X"; the
+        // name carries that now, so strip the redundant prefix for the message.
+        const prefix = "DataCloneError: ";
+        const detail = if (std.mem.startsWith(u8, what, prefix)) what[prefix.len..] else what;
+        return s.self.throwDOMException("DataCloneError", detail);
     }
 
     fn writeStr(s: *Serializer, text: []const u8) HostError!void {
