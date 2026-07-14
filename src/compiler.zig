@@ -2554,10 +2554,11 @@ pub const Compiler = struct {
                 // Default values and rest params need a runtime prologue the VM
                 // doesn't emit yet. Generator-body env-mode closures can fall
                 // back to the tree-walker because their names live in Environment
-                // records; top-level programs must still fall back wholesale so
-                // unsupported statement forms stay on the tree-walker.
+                // records. A top-level function can also keep a null chunk and
+                // fall back independently because its captures resolve through
+                // the global Environment rather than an enclosing VM frame.
                 if (p.default != null or p.is_rest or p.pattern != null) {
-                    if (self.in_generator and self.scope == null) break :blk null;
+                    if (self.scope == null) break :blk null;
                     return error.Unsupported;
                 }
                 _ = try scope.addLocal(self.arena, p.name);
@@ -2571,7 +2572,7 @@ pub const Compiler = struct {
             if (fnode.is_expr_body) {
                 sub_c.compileExpr(fnode.body) catch |e| switch (e) {
                     error.Unsupported => {
-                        if (self.in_generator and self.scope == null) break :blk null;
+                        if (self.scope == null) break :blk null;
                         return error.Unsupported;
                     },
                     error.OutOfMemory => return error.OutOfMemory,
@@ -2580,7 +2581,7 @@ pub const Compiler = struct {
             } else {
                 sub_c.compileStmt(fnode.body) catch |e| switch (e) {
                     error.Unsupported => {
-                        if (self.in_generator and self.scope == null) break :blk null;
+                        if (self.scope == null) break :blk null;
                         return error.Unsupported;
                     },
                     error.OutOfMemory => return error.OutOfMemory,

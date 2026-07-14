@@ -15,6 +15,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const gc_mod = @import("gc.zig");
+const ast = @import("ast.zig");
 const bc = @import("bytecode.zig");
 const value = @import("value.zig");
 const interp = @import("interpreter.zig");
@@ -798,6 +799,8 @@ var quick_packed_array_specialized_expression_hits: std.atomic.Value(u64) = .ini
 var quick_global_binding_hits: std.atomic.Value(u64) = .init(0);
 var quick_native_direct_call_hits: std.atomic.Value(u64) = .init(0);
 var quick_numeric_call_loop_hits: std.atomic.Value(u64) = .init(0);
+var quick_numeric_arguments_call_loop_hits: std.atomic.Value(u64) = .init(0);
+var quick_numeric_arguments_direct_call_hits: std.atomic.Value(u64) = .init(0);
 var quick_numeric_closure_call_loop_hits: std.atomic.Value(u64) = .init(0);
 var quick_reusable_immediate_closure_hits: std.atomic.Value(u64) = .init(0);
 var quick_numeric_method_call_loop_hits: std.atomic.Value(u64) = .init(0);
@@ -1534,6 +1537,103 @@ fn compileQuickLeafPlan(chunk: *Chunk) QuickLeafPlan {
     return .unsupported;
 }
 
+fn appendQuickArgumentsExpression(
+    node: *const ast.Node,
+    argument_count: usize,
+    ops: *[max_quick_leaf_ops]QuickLeafOp,
+    op_count: *usize,
+    executed: *usize,
+) bool {
+    executed.* += 1;
+    const op: QuickLeafOp = switch (node.*) {
+        .number => |number| .{ .constant = number },
+        .member => |member| argument: {
+            if (member.optional or member.object.* != .identifier or
+                !std.mem.eql(u8, member.object.identifier, "arguments"))
+                return false;
+            const computed = member.computed orelse return false;
+            if (computed.* != .number) return false;
+            const number = computed.number;
+            if (!std.math.isFinite(number) or @trunc(number) != number or number < 0 or
+                number >= @as(f64, @floatFromInt(argument_count)))
+                return false;
+            // The ordinary tree walker evaluates the member, `arguments`
+            // identifier, and numeric key as three AST steps.
+            executed.* += 2;
+            break :argument .{ .argument = @intFromFloat(number) };
+        },
+        .binary => |binary| binary: {
+            if (!appendQuickArgumentsExpression(binary.left, argument_count, ops, op_count, executed) or
+                !appendQuickArgumentsExpression(binary.right, argument_count, ops, op_count, executed))
+                return false;
+            break :binary switch (binary.op) {
+                .add => .add,
+                .sub => .sub,
+                .mul => .mul,
+                .div => .div,
+                .mod => .mod,
+                else => return false,
+            };
+        },
+        else => return false,
+    };
+    if (op_count.* == max_quick_leaf_ops) return false;
+    ops[op_count.*] = op;
+    op_count.* += 1;
+    return true;
+}
+
+/// Compile a non-arrow leaf that observes only static numeric reads from its
+/// own `arguments` object. With no writes, calls, dynamic keys, or escaping
+/// references in the accepted AST, those reads are exactly the incoming values
+/// and the per-call exotic object can remain scalar-replaced.
+fn compileQuickArgumentsLeaf(function: *const Function, argument_count: usize) ?QuickNumericLeaf {
+    if (!function.uses_arguments or function.is_arrow or function.params.len != argument_count) return null;
+    for (function.params) |parameter|
+        if (parameter.default != null or parameter.is_rest or parameter.pattern != null) return null;
+
+    var executed: usize = 0;
+    const expression = if (function.is_expr_body) function.body else expression: {
+        if (function.body.* != .block or function.body.block.len != 1) return null;
+        const statement = function.body.block[0];
+        if (statement.* != .return_stmt) return null;
+        const returned = statement.return_stmt orelse return null;
+        executed = 2; // block + return statement
+        break :expression returned;
+    };
+    var ops: [max_quick_leaf_ops]QuickLeafOp = undefined;
+    var op_count: usize = 0;
+    if (!appendQuickArgumentsExpression(expression, argument_count, &ops, &op_count, &executed) or
+        op_count == 0 or executed > std.math.maxInt(u8))
+        return null;
+
+    return .{
+        .ops = ops,
+        .op_count = @intCast(op_count),
+        .executed = @intCast(executed),
+        .captured_local = null,
+        .receiver_property_instruction = null,
+        .specialization = specializeQuickLeaf(ops[0..op_count]),
+    };
+}
+
+fn tryQuickArgumentsCall(vm: *Interpreter, function: *const Function, values: []const Value) EvalError!?Value {
+    if (values.len > max_quick_leaf_stack) return null;
+    const leaf = compileQuickArgumentsLeaf(function, values.len) orelse return null;
+    var arguments: [max_quick_leaf_stack]f64 = undefined;
+    for (values, 0..) |value_, index| {
+        if (!value_.isNumber()) return null;
+        arguments[index] = value_.asNum();
+    }
+    const result = evaluateQuickLeaf(&leaf, arguments[0..values.len], null, null) orelse return null;
+    // The call bytecode itself was already counted by the dispatch loop. Retain
+    // every AST step the side-effect-free tree-walker leaf would have executed,
+    // including any stop/GIL/GC checkpoint crossed within the call.
+    try advanceQuickObservableSteps(vm, leaf.executed);
+    if (builtin.is_test) _ = quick_numeric_arguments_direct_call_hits.fetchAdd(1, .monotonic);
+    return Value.num(result);
+}
+
 fn quickLeafPlan(chunk: *Chunk, parallel_sync: bool) ?*QuickLeafPlan {
     if (if (parallel_sync) @atomicLoad(?*anyopaque, &chunk.quick_leaf_plan, .acquire) else chunk.quick_leaf_plan) |raw|
         return @ptrCast(@alignCast(raw));
@@ -1689,7 +1789,7 @@ fn tryQuickNumericCallLoop(
     var method_receiver: ?Value = null;
     var method_get_instruction: ?usize = null;
     var callee: ?Value = null;
-    var callee_chunk: *Chunk = undefined;
+    var callee_chunk: ?*Chunk = null;
     var argument_count: usize = 2;
     var captured_frame: ?*Frame = null;
     switch (loop.callee) {
@@ -1729,16 +1829,32 @@ fn tryQuickNumericCallLoop(
             captured_frame = frame;
         },
     }
-    if (captured_frame == null) {
-        const func = jsChunkFn(callee.?) orelse return null;
-        if (func.is_class_constructor or func.uses_arguments or func.params.len != argument_count) return null;
-        callee_chunk = func.chunk orelse return null;
-    }
-    if (callee_chunk.param_count != argument_count) return null;
-    const leaf_plan = quickLeafPlan(callee_chunk, parallel_sync) orelse return null;
-    const leaf = switch (leaf_plan.*) {
-        .unsupported => return null,
-        .numeric => |*leaf| leaf,
+    var arguments_leaf: QuickNumericLeaf = undefined;
+    var arguments_leaf_active = false;
+    const leaf: *const QuickNumericLeaf = if (captured_frame != null) leaf: {
+        const compiled = callee_chunk.?;
+        if (compiled.param_count != argument_count) return null;
+        const leaf_plan = quickLeafPlan(compiled, parallel_sync) orelse return null;
+        break :leaf switch (leaf_plan.*) {
+            .unsupported => return null,
+            .numeric => |*numeric| numeric,
+        };
+    } else leaf: {
+        const function = jsPlainFunction(callee.?) orelse return null;
+        if (function.is_class_constructor or function.params.len != argument_count) return null;
+        if (function.uses_arguments) {
+            arguments_leaf = compileQuickArgumentsLeaf(function, argument_count) orelse return null;
+            arguments_leaf_active = true;
+            break :leaf &arguments_leaf;
+        }
+        const compiled = function.chunk orelse return null;
+        if (compiled.param_count != argument_count) return null;
+        callee_chunk = compiled;
+        const leaf_plan = quickLeafPlan(compiled, parallel_sync) orelse return null;
+        break :leaf switch (leaf_plan.*) {
+            .unsupported => return null,
+            .numeric => |*numeric| numeric,
+        };
     };
     if (captured_frame != null) {
         if (leaf.captured_local == null or leaf.receiver_property_instruction != null) return null;
@@ -1748,7 +1864,7 @@ fn tryQuickNumericCallLoop(
     var stable_receiver_property: ?f64 = null;
     if (!parallel_sync) if (leaf.receiver_property_instruction) |raw_instruction| {
         stable_receiver_property = quickReceiverPropertyNumber(
-            callee_chunk,
+            callee_chunk.?,
             raw_instruction,
             method_receiver.?,
             false,
@@ -1773,7 +1889,7 @@ fn tryQuickNumericCallLoop(
         var receiver_property = stable_receiver_property;
         if (parallel_sync) if (leaf.receiver_property_instruction) |raw_instruction| {
             receiver_property = quickReceiverPropertyNumber(
-                callee_chunk,
+                callee_chunk.?,
                 raw_instruction,
                 method_receiver.?,
                 true,
@@ -1802,6 +1918,7 @@ fn tryQuickNumericCallLoop(
     frame.slots[index_slot] = Value.num(index);
     if (builtin.is_test) {
         _ = quick_numeric_call_loop_hits.fetchAdd(1, .monotonic);
+        if (arguments_leaf_active) _ = quick_numeric_arguments_call_loop_hits.fetchAdd(1, .monotonic);
         switch (loop.callee) {
             .closure_template => _ = quick_numeric_closure_call_loop_hits.fetchAdd(1, .monotonic),
             .method => _ = quick_numeric_method_call_loop_hits.fetchAdd(1, .monotonic),
@@ -3624,6 +3741,13 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 const argc = inst.a;
                 const base = stack.items.len - argc;
                 const callee = stack.items[base - 1];
+                if (jsPlainFunction(callee)) |function| {
+                    if (try tryQuickArgumentsCall(vm, function, stack.items[base..])) |result| {
+                        stack.shrinkRetainingCapacity(base - 1);
+                        try stack.append(stack_alloc, result);
+                        continue;
+                    }
+                }
                 if (jsChunkFn(callee)) |func| {
                     if (try tryQuickNumericRecurrence(vm, func, stack.items[base..], parallel_sync)) |result| {
                         stack.shrinkRetainingCapacity(base - 1);
@@ -5437,11 +5561,16 @@ fn callValueWithInlineCallsDisabled(vm: *Interpreter, callee: Value, args: []con
 /// If `callee` is a plain JS-chunk function (not generator/async/native/bound/
 /// proxy), return it — those are the calls the trampoline pushes onto its
 /// activation stack. Everything else takes the native call path.
-inline fn jsChunkFn(callee: Value) ?*Function {
+inline fn jsPlainFunction(callee: Value) ?*Function {
     if (!callee.isObject()) return null;
     const erased = callee.asObj().js_func orelse return null;
     const func: *Function = @ptrCast(@alignCast(erased));
     if (func.is_generator or func.is_async) return null;
+    return func;
+}
+
+inline fn jsChunkFn(callee: Value) ?*Function {
+    const func = jsPlainFunction(callee) orelse return null;
     if (func.chunk == null) return null;
     return func;
 }
@@ -5846,7 +5975,16 @@ test "vm: numeric call-loop quickening preserves guards and exact steps" {
         \\}
         \\var closureFirst = exerciseClosure(300);
         \\var closureSecond = exerciseClosure(10);
-        \\first + exercise(10) + before * 1000 + after * 10000 + methodFirst * 100000 + methodSecond + closureFirst * 10000000 + closureSecond
+        \\function argumentsStep(a, b) { return (arguments[0] + arguments[1]) % 101; }
+        \\function exerciseArguments(limit) {
+        \\  var localStep = argumentsStep;
+        \\  var value = 17;
+        \\  for (var i = 0; i < limit; i = i + 1) value = localStep(value, i);
+        \\  return value;
+        \\}
+        \\var argumentsFirst = exerciseArguments(300);
+        \\var argumentsSecond = exerciseArguments(10);
+        \\first + exercise(10) + before * 1000 + after * 10000 + methodFirst * 100000 + methodSecond + closureFirst * 10000000 + closureSecond + argumentsFirst * 1000000000 + argumentsSecond
     ;
     var parser = try Parser.init(allocator, source);
     const program = try parser.parseProgram();
@@ -5926,12 +6064,16 @@ test "vm: numeric call-loop quickening preserves guards and exact steps" {
     };
     const hits_before = quick_native_direct_call_hits.load(.monotonic);
     const loop_hits_before = quick_numeric_call_loop_hits.load(.monotonic);
+    const arguments_loop_hits_before = quick_numeric_arguments_call_loop_hits.load(.monotonic);
+    const arguments_direct_hits_before = quick_numeric_arguments_direct_call_hits.load(.monotonic);
     const closure_loop_hits_before = quick_numeric_closure_call_loop_hits.load(.monotonic);
     const reusable_closure_hits_before = quick_reusable_immediate_closure_hits.load(.monotonic);
     const method_loop_hits_before = quick_numeric_method_call_loop_hits.load(.monotonic);
     const fast_result = try run(&fast, chunk, null);
     try std.testing.expect(quick_native_direct_call_hits.load(.monotonic) > hits_before);
     try std.testing.expect(quick_numeric_call_loop_hits.load(.monotonic) > loop_hits_before);
+    try std.testing.expect(quick_numeric_arguments_call_loop_hits.load(.monotonic) > arguments_loop_hits_before);
+    try std.testing.expect(quick_numeric_arguments_direct_call_hits.load(.monotonic) > arguments_direct_hits_before);
     try std.testing.expect(quick_numeric_closure_call_loop_hits.load(.monotonic) > closure_loop_hits_before);
     try std.testing.expect(quick_reusable_immediate_closure_hits.load(.monotonic) > reusable_closure_hits_before);
     try std.testing.expect(quick_numeric_method_call_loop_hits.load(.monotonic) > method_loop_hits_before);
