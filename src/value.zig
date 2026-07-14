@@ -1510,6 +1510,18 @@ pub const Object = struct {
         return true;
     }
 
+    /// Replace one existing, present dense element without changing Array
+    /// length or filling a hole. The presence check and write share one element
+    /// lock so a parallel delete/truncate cannot race between them.
+    pub fn replaceDenseElement(self: *Object, i: usize, v: Value) bool {
+        self.lockElements();
+        defer self.unlockElements();
+        if (i >= self.elements.items.len or self.isHoleUnlocked(i)) return false;
+        gcBarrier(self, v);
+        self.elements.items[i] = v;
+        return true;
+    }
+
     pub fn growDenseElement(self: *Object, arena: std.mem.Allocator, i: usize, v: Value) std.mem.Allocator.Error!usize {
         self.lockElements();
         defer self.unlockElements();

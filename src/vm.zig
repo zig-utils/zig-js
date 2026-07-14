@@ -808,6 +808,7 @@ var quick_property_loop_tail_hits: std.atomic.Value(u64) = .init(0);
 var quick_property_specialized_hits: std.atomic.Value(u64) = .init(0);
 var quick_property_kernel_hits: std.atomic.Value(u64) = .init(0);
 var quick_dense_array_index_hits: std.atomic.Value(u64) = .init(0);
+var quick_dense_array_store_hits: std.atomic.Value(u64) = .init(0);
 var quick_array_length_hits: std.atomic.Value(u64) = .init(0);
 var quick_array_prototype_data_hits: std.atomic.Value(u64) = .init(0);
 var quick_array_push_hits: std.atomic.Value(u64) = .init(0);
@@ -873,6 +874,18 @@ inline fn quickArrayIndex(key: Value) ?usize {
     const number = key.asNum();
     if (!std.math.isFinite(number) or number < 0 or number >= 4294967295 or @trunc(number) != number) return null;
     return @intFromFloat(number);
+}
+
+inline fn quickDenseArrayStore(vm: *Interpreter, receiver: Value, key: Value, stored: Value) EvalError!bool {
+    if (!receiver.isObject()) return false;
+    const index = quickArrayIndex(key) orelse return false;
+    const object = receiver.asObj();
+    if (!object.is_array or object.is_arguments or object.proxy_handler != null or object.proxy_revoked or
+        object.accessors.load(.monotonic) != null or object.attrsMap() != null or
+        object.has_indexed_property.load(.monotonic))
+        return false;
+    try vm.checkRestricted(object);
+    return object.replaceDenseElement(index, stored);
 }
 
 fn specializeQuickArrayExpression(ops: []const QuickArrayNumericOp) QuickArrayExpressionSpecialization {
@@ -3920,6 +3933,11 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 // evaluated); `null[k] = v` throws before the key's `toString` runs.
                 if (obj.isNull() or obj.isUndefined())
                     return vm.throwError("TypeError", "Cannot set property of null or undefined");
+                if (try quickDenseArrayStore(vm, obj, key, v)) {
+                    if (builtin.is_test) _ = quick_dense_array_store_hits.fetchAdd(1, .monotonic);
+                    try stack.append(stack_alloc, v);
+                    continue;
+                }
                 try vm.setMember(obj, try propKey(vm, key), v);
                 try stack.append(stack_alloc, v);
             },
@@ -6699,6 +6717,7 @@ test "vm: quickens packed dense numeric array reads" {
     defer arena.deinit();
     const allocator = arena.allocator();
     const before = quick_dense_array_index_hits.load(.monotonic);
+    const stores_before = quick_dense_array_store_hits.load(.monotonic);
     const lengths_before = quick_array_length_hits.load(.monotonic);
     const prototype_data_before = quick_array_prototype_data_hits.load(.monotonic);
     const pushes_before = quick_array_push_hits.load(.monotonic);
@@ -6717,6 +6736,11 @@ test "vm: quickens packed dense numeric array reads" {
         \\let values = [1, 2, 3]; values.length + values[0]
     )).asNum());
     try std.testing.expect(quick_dense_array_index_hits.load(.monotonic) > before);
+    try std.testing.expectEqual(@as(f64, 9), (try vmRun(allocator,
+        \\let values = [1, 2]; values[1] = 8; values[0] + values[1]
+    )).asNum());
+    try std.testing.expect(quick_dense_array_store_hits.load(.monotonic) > stores_before);
+    const stores_after = quick_dense_array_store_hits.load(.monotonic);
     try std.testing.expect(quick_array_length_hits.load(.monotonic) > lengths_before);
     try std.testing.expect(quick_packed_array_sum_loop_hits.load(.monotonic) > sum_loops_before);
     const sum_loops_after = quick_packed_array_sum_loop_hits.load(.monotonic);
@@ -6763,6 +6787,30 @@ test "vm: quickens packed dense numeric array reads" {
         \\let values = [1]; Object.defineProperty(values, "0", { get: function () { return 7; } }); sum(values)
     )).asNum());
     try std.testing.expectEqual(sum_loops_after, quick_packed_array_sum_loop_hits.load(.monotonic));
+
+    // Accessors, descriptors, holes, and Proxies retain ordinary [[Set]].
+    try std.testing.expectEqual(@as(f64, 71), (try vmRun(allocator,
+        \\let seen = 0; let values = [1];
+        \\Object.defineProperty(values, "0", { set: function (value) { seen = value; } });
+        \\values[0] = 7; seen * 10 + values.length
+    )).asNum());
+    try std.testing.expectEqual(@as(f64, 1), (try vmRun(allocator,
+        \\let values = [1]; Object.defineProperty(values, "0", { writable: false });
+        \\values[0] = 7; values[0]
+    )).asNum());
+    try std.testing.expectEqual(@as(f64, 71), (try vmRun(allocator,
+        \\let seen = 0; Object.defineProperty(Array.prototype, "0", {
+        \\  set: function (value) { seen = value; }, configurable: true
+        \\});
+        \\let values = [,]; values[0] = 7; seen * 10 + values.length
+    )).asNum());
+    try std.testing.expectEqual(@as(f64, 7), (try vmRun(allocator,
+        \\let seen = 0; let values = new Proxy([1], {
+        \\  set: function (target, key, value) { seen = value; return true; }
+        \\});
+        \\values[0] = 7; seen
+    )).asNum());
+    try std.testing.expectEqual(stores_after, quick_dense_array_store_hits.load(.monotonic));
 
     // Own overrides and prototype accessors remain observable.
     try std.testing.expectEqual(@as(f64, 99), (try vmRun(allocator,
