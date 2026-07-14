@@ -585,6 +585,26 @@ const QuickPropertyPlan = struct {
     resolved_target_slot: u32,
 };
 
+const QuickPropertyKernelPlan = union(enum) {
+    unsupported,
+    four_property_loop: struct {
+        object_local: u32,
+        counter_local: u32,
+        bound: f64,
+        modulus: f64,
+        property_increment: f64,
+        counter_increment: f64,
+        read_instructions: [6]u32,
+        write_instructions: [4]u32,
+        exit_ip: u32,
+    },
+};
+
+const QuickPropertyKernelUpdate = struct {
+    extra_steps: u64,
+    next_ip: usize,
+};
+
 const QuickPackedArraySumLoop = struct {
     index_local: u32,
     array_local: u32,
@@ -676,6 +696,7 @@ const QuickRecurrencePlan = union(enum) {
 var quick_property_update_hits: std.atomic.Value(u64) = .init(0);
 var quick_property_loop_tail_hits: std.atomic.Value(u64) = .init(0);
 var quick_property_specialized_hits: std.atomic.Value(u64) = .init(0);
+var quick_property_kernel_hits: std.atomic.Value(u64) = .init(0);
 var quick_dense_array_index_hits: std.atomic.Value(u64) = .init(0);
 var quick_array_length_hits: std.atomic.Value(u64) = .init(0);
 var quick_array_prototype_data_hits: std.atomic.Value(u64) = .init(0);
@@ -1461,6 +1482,137 @@ fn specializeQuickPropertyOps(target_local: u32, ops: []const QuickNumericOp) Qu
     return .generic;
 }
 
+fn propertyNamesMatch(chunk: *Chunk, instructions: []const usize) bool {
+    if (instructions.len == 0) return false;
+    const first = instructions[0];
+    if (first >= chunk.code.items.len or chunk.code.items[first].a >= chunk.names.items.len) return false;
+    const name = chunk.names.items[chunk.code.items[first].a];
+    for (instructions[1..]) |instruction| {
+        if (instruction >= chunk.code.items.len or chunk.code.items[instruction].a >= chunk.names.items.len or
+            !std.mem.eql(u8, name, chunk.names.items[chunk.code.items[instruction].a]))
+            return false;
+    }
+    return true;
+}
+
+fn compileQuickPropertyKernelPlan(chunk: *Chunk, start: usize) QuickPropertyKernelPlan {
+    const code = chunk.code.items;
+    if (start < 4 or start + 38 > code.len) return .unsupported;
+    const expected = [_]bc.Op{
+        .load_local, .load_local, .get_prop, .load_local, .add, .load_const, .mod, .set_prop, .pop,
+        .load_local, .load_local, .get_prop, .load_const, .add, .set_prop, .pop,
+        .load_local, .load_local, .get_prop, .load_local, .get_prop, .add, .set_prop, .pop,
+        .load_local, .load_local, .get_prop, .load_local, .get_prop, .sub, .set_prop, .pop,
+        .load_local, .load_const, .add, .store_local, .pop, .jump,
+    };
+    for (expected, 0..) |op, offset| if (code[start + offset].op != op) return .unsupported;
+
+    const object_local = code[start].a;
+    const counter_local = code[start + 3].a;
+    for ([_]usize{ 1, 9, 10, 16, 17, 19, 24, 25, 27 }) |offset|
+        if (code[start + offset].a != object_local) return .unsupported;
+    if (code[start + 32].a != counter_local or code[start + 35].a != counter_local or
+        code[start - 4].op != .load_local or code[start - 4].a != counter_local or
+        code[start - 3].op != .load_const or code[start - 2].op != .lt or
+        code[start - 1].op != .jump_if_false or code[start - 1].a != @as(u32, @intCast(start + 38)) or
+        code[start + 37].a != @as(u32, @intCast(start - 4)))
+        return .unsupported;
+    if (!propertyNamesMatch(chunk, &.{ start + 2, start + 7, start + 18 }) or
+        !propertyNamesMatch(chunk, &.{ start + 11, start + 14, start + 20, start + 28 }) or
+        !propertyNamesMatch(chunk, &.{ start + 22, start + 26 }) or
+        !propertyNamesMatch(chunk, &.{start + 30}))
+        return .unsupported;
+
+    const constant_instructions = [_]usize{ start + 5, start + 12, start + 33, start - 3 };
+    var constants: [4]f64 = undefined;
+    for (constant_instructions, 0..) |instruction, index| {
+        const constant_index = code[instruction].a;
+        if (constant_index >= chunk.consts.items.len or !chunk.consts.items[constant_index].isNumber()) return .unsupported;
+        constants[index] = chunk.consts.items[constant_index].asNum();
+    }
+    return .{ .four_property_loop = .{
+        .object_local = object_local,
+        .counter_local = counter_local,
+        .modulus = constants[0],
+        .property_increment = constants[1],
+        .counter_increment = constants[2],
+        .bound = constants[3],
+        .read_instructions = .{
+            @intCast(start + 2), @intCast(start + 11), @intCast(start + 18),
+            @intCast(start + 20), @intCast(start + 26), @intCast(start + 28),
+        },
+        .write_instructions = .{
+            @intCast(start + 7), @intCast(start + 14), @intCast(start + 22), @intCast(start + 30),
+        },
+        .exit_ip = @intCast(start + 38),
+    } };
+}
+
+fn quickPropertyKernelPlan(chunk: *Chunk, start: usize) ?*QuickPropertyKernelPlan {
+    if (chunk.quick_property_kernel_plans.len == 0) {
+        const plans = chunk.arena.alloc(?*anyopaque, chunk.code.items.len) catch return null;
+        @memset(plans, null);
+        chunk.quick_property_kernel_plans = plans;
+    }
+    if (start >= chunk.quick_property_kernel_plans.len) return null;
+    if (chunk.quick_property_kernel_plans[start]) |raw| return @ptrCast(@alignCast(raw));
+    const plan = chunk.arena.create(QuickPropertyKernelPlan) catch return null;
+    plan.* = compileQuickPropertyKernelPlan(chunk, start);
+    chunk.quick_property_kernel_plans[start] = plan;
+    return plan;
+}
+
+fn tryQuickPropertyKernel(chunk: *Chunk, frame: *Frame, start: usize, max_extra_steps: u64) ?QuickPropertyKernelUpdate {
+    const plan = quickPropertyKernelPlan(chunk, start) orelse return null;
+    const kernel = switch (plan.*) {
+        .unsupported => return null,
+        .four_property_loop => |kernel| kernel,
+    };
+    const max_iterations = (max_extra_steps + 1) / 42;
+    if (max_iterations == 0) return null;
+    const object_local: usize = @intCast(kernel.object_local);
+    const counter_local: usize = @intCast(kernel.counter_local);
+    if (object_local >= frame.slots.len or counter_local >= frame.slots.len) return null;
+    const object = quickPlainObject(frame.slots[object_local]) orelse return null;
+    if (object.proxy_handler != null or object.proxy_revoked) return null;
+
+    var reads: [6]usize = undefined;
+    var writes: [4]usize = undefined;
+    for (kernel.read_instructions, 0..) |instruction, index|
+        reads[index] = quickPropertySlot(chunk, instruction, object) orelse return null;
+    for (kernel.write_instructions, 0..) |instruction, index|
+        writes[index] = quickPropertySlot(chunk, instruction, object) orelse return null;
+    if (reads[0] != writes[0] or reads[2] != writes[0] or
+        reads[1] != writes[1] or reads[3] != writes[1] or reads[5] != writes[1] or
+        reads[4] != writes[2])
+        return null;
+    var a = quickSlotNumber(object, writes[0]) orelse return null;
+    var b = quickSlotNumber(object, writes[1]) orelse return null;
+    var c = quickSlotNumber(object, writes[2]) orelse return null;
+    var d = quickSlotNumber(object, writes[3]) orelse return null;
+    if (!frame.slots[counter_local].isNumber()) return null;
+    var counter = frame.slots[counter_local].asNum();
+    var iterations: u64 = 0;
+    while (iterations < max_iterations and counter < kernel.bound) : (iterations += 1) {
+        a = numberRemainder(a + counter, kernel.modulus);
+        b += kernel.property_increment;
+        c = a + b;
+        d = c - b;
+        counter += kernel.counter_increment;
+    }
+    if (iterations == 0) return null;
+    object.slots.items[writes[0]] = Value.num(a);
+    object.slots.items[writes[1]] = Value.num(b);
+    object.slots.items[writes[2]] = Value.num(c);
+    object.slots.items[writes[3]] = Value.num(d);
+    frame.slots[counter_local] = Value.num(counter);
+    if (builtin.is_test) _ = quick_property_kernel_hits.fetchAdd(1, .monotonic);
+    return .{
+        .extra_steps = iterations * 42 - 1,
+        .next_ip = if (counter < kernel.bound) start else kernel.exit_ip,
+    };
+}
+
 fn compileQuickPropertyPlan(chunk: *Chunk, start: usize) ?*QuickPropertyPlan {
     const code = chunk.code.items;
     if (start >= code.len or code[start].op != .load_local) return null;
@@ -2107,6 +2259,11 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                     const steps_until_checkpoint = 1024 - (vm.steps & 1023);
                     const steps_until_budget = interp.max_steps - vm.steps;
                     const max_extra_steps = @min(steps_until_checkpoint - 1, steps_until_budget);
+                    if (tryQuickPropertyKernel(chunk, cf, ip - 1, max_extra_steps)) |quick| {
+                        vm.steps += quick.extra_steps;
+                        ip = quick.next_ip;
+                        continue;
+                    }
                     if (tryNumericPropertyUpdate(chunk, cf, ip - 1, max_extra_steps)) |quick| {
                         vm.steps += quick.extra_steps;
                         ip = quick.next_ip;
@@ -5318,6 +5475,50 @@ test "vm: quickens warmed numeric property update traces" {
     var cached_plan = false;
     for (function_chunk.quick_property_plans) |plan| cached_plan = cached_plan or plan != null;
     try std.testing.expect(cached_plan);
+}
+
+test "vm: fuses warmed four-property loops with exact bytecode steps" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const source =
+        \\function kernel() {
+        \\  const object = { a: 0, b: 1, c: 2, d: 3 };
+        \\  let i = 0;
+        \\  while (i < 8) {
+        \\    object.a = (object.a + i) % 1000003;
+        \\    object.b = object.b + 1;
+        \\    object.c = object.a + object.b;
+        \\    object.d = object.c - object.b;
+        \\    i = i + 1;
+        \\  }
+        \\  return object.a * 1000000 + object.b * 10000 + object.c * 100 + object.d;
+        \\}
+        \\kernel()
+    ;
+    const old_parallel = bc.ic_seqlock_enabled.load(.monotonic);
+    defer bc.ic_seqlock_enabled.store(old_parallel, .monotonic);
+    const hits_before = quick_property_kernel_hits.load(.monotonic);
+    var results: [2]f64 = undefined;
+    var steps: [2]u64 = undefined;
+    var isolated_hits: u64 = undefined;
+    for ([_]bool{ false, true }, 0..) |parallel, run_index| {
+        bc.ic_seqlock_enabled.store(parallel, .monotonic);
+        var parser = try Parser.init(allocator, source);
+        const program = try parser.parseProgram();
+        const chunk = try Compiler.compileProgram(allocator, program);
+        var env = Environment{ .arena = allocator, .fn_scope = true };
+        const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
+        try interp.installGlobals(&env, root_shape);
+        var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape };
+        results[run_index] = (try run(&machine, chunk, null)).asNum();
+        steps[run_index] = machine.steps;
+        if (!parallel) isolated_hits = quick_property_kernel_hits.load(.monotonic);
+    }
+    try std.testing.expectEqual(results[1], results[0]);
+    try std.testing.expectEqual(steps[1], steps[0]);
+    try std.testing.expect(isolated_hits > hits_before);
+    try std.testing.expectEqual(isolated_hits, quick_property_kernel_hits.load(.monotonic));
 }
 
 test "vm: for loop with ++ and compound assignment" {

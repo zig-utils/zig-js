@@ -335,6 +335,10 @@ pub const Chunk = struct {
     /// Isolated execution publishes a plan only after fully decoding it and may
     /// cache its monomorphic slots; parallel mode does not consume this table.
     quick_property_plans: []?*anyopaque = &.{},
+    /// Lazily decoded multi-property counted-loop kernels. Kept separate from
+    /// single-assignment plans because a guarded kernel miss must still be able
+    /// to consult the ordinary plan at the same first instruction.
+    quick_property_kernel_plans: []?*anyopaque = &.{},
     /// Lazily decoded packed-array loop plans, indexed by loop-head bytecode.
     /// As with property plans, only isolated execution consumes this table;
     /// unsupported structural shapes are cached too so cold decoding is paid
