@@ -29762,6 +29762,7 @@ fn installTypedArrays(env: *Environment, rs: *Shape) EvalError!void {
     try installURL(env, rs, object_proto);
     try installEventTarget(env, rs, object_proto);
     try installAbort(env, rs, object_proto);
+    try installHeaders(env, rs, object_proto);
     try installTemporal(env, rs, object_proto);
     try installIntl(env, rs, object_proto);
     // ShadowRealm: a child realm with `evaluate` (and a minimal `importValue`).
@@ -40777,6 +40778,270 @@ fn installURLSearchParams(env: *Environment, rs: *Shape, object_proto: *value.Ob
     try ctor.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
     try setConstructor(a, rs, proto, ctor);
     try env.put("URLSearchParams", Value.obj(ctor));
+}
+
+// ===== Headers (Fetch) ===============================================
+// The header list is stored in \x00hdrs as an array of [lowercased-name, value]
+// pairs in insertion order; iteration presents a sorted, combined view.
+fn hdrIsTokenChar(c: u8) bool {
+    return switch (c) {
+        'a'...'z', 'A'...'Z', '0'...'9' => true,
+        '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~' => true,
+        else => false,
+    };
+}
+fn hdrValidName(n: []const u8) bool {
+    if (n.len == 0) return false;
+    for (n) |c| if (!hdrIsTokenChar(c)) return false;
+    return true;
+}
+fn hdrNormalizeValue(v: []const u8) []const u8 {
+    var s = v;
+    while (s.len > 0 and (s[0] == 0x09 or s[0] == 0x0A or s[0] == 0x0D or s[0] == 0x20)) s = s[1..];
+    while (s.len > 0 and (s[s.len - 1] == 0x09 or s[s.len - 1] == 0x0A or s[s.len - 1] == 0x0D or s[s.len - 1] == 0x20)) s = s[0 .. s.len - 1];
+    return s;
+}
+fn hdrValidValue(v: []const u8) bool {
+    for (v) |c| if (c == 0 or c == 0x0A or c == 0x0D) return false;
+    return true;
+}
+fn hdrLower(self: *Interpreter, n: []const u8) EvalError![]const u8 {
+    const buf = try self.arena.alloc(u8, n.len);
+    for (n, 0..) |c, i| buf[i] = std.ascii.toLower(c);
+    return buf;
+}
+fn headersList(self: *Interpreter, this: Value) EvalError!*value.Object {
+    if (this.isObject()) if (this.asObj().getOwn("\x00hdrs")) |v| if (v.isObject()) return v.asObj();
+    const arr = (try self.newArray()).asObj();
+    if (this.isObject()) try this.asObj().setOwn(self.arena, self.root_shape, "\x00hdrs", Value.obj(arr));
+    return arr;
+}
+/// Append a validated (name,value): coerce, normalize, validate, push.
+fn headersAppendRaw(self: *Interpreter, this: Value, name_v: Value, value_v: Value) EvalError!void {
+    const n = try self.toStringV(name_v);
+    const raw = try self.toStringV(value_v);
+    const v = hdrNormalizeValue(raw);
+    if (!hdrValidName(n)) return self.throwError("TypeError", "Invalid header name");
+    if (!hdrValidValue(v)) return self.throwError("TypeError", "Invalid header value");
+    const list = try headersList(self, this);
+    const pair = (try self.newArray()).asObj();
+    try pair.appendElement(self.arena, try Value.strAlloc(self.arena, try hdrLower(self, n)));
+    try pair.appendElement(self.arena, try Value.strAlloc(self.arena, v));
+    try list.appendElement(self.arena, Value.obj(pair));
+}
+fn headersAppendFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    try headersAppendRaw(self, this, if (args.len > 0) args[0] else Value.undef(), if (args.len > 1) args[1] else Value.undef());
+    return Value.undef();
+}
+fn headersDeleteRaw(self: *Interpreter, this: Value, lower: []const u8) EvalError!void {
+    const list = try headersList(self, this);
+    const fresh = (try self.newArray()).asObj();
+    for (try list.internalElementsSnapshot(self.arena)) |pair| {
+        if (std.mem.eql(u8, uspPairKV(pair).k, lower)) continue;
+        try fresh.appendElement(self.arena, pair);
+    }
+    try this.asObj().setOwn(self.arena, self.root_shape, "\x00hdrs", Value.obj(fresh));
+}
+fn headersSetFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const n = try self.toStringV(if (args.len > 0) args[0] else Value.undef());
+    const v = hdrNormalizeValue(try self.toStringV(if (args.len > 1) args[1] else Value.undef()));
+    if (!hdrValidName(n)) return self.throwError("TypeError", "Invalid header name");
+    if (!hdrValidValue(v)) return self.throwError("TypeError", "Invalid header value");
+    const lower = try hdrLower(self, n);
+    try headersDeleteRaw(self, this, lower);
+    const list = try headersList(self, this);
+    const pair = (try self.newArray()).asObj();
+    try pair.appendElement(self.arena, try Value.strAlloc(self.arena, lower));
+    try pair.appendElement(self.arena, try Value.strAlloc(self.arena, v));
+    try list.appendElement(self.arena, Value.obj(pair));
+    return Value.undef();
+}
+fn headersGetFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const n = try self.toStringV(if (args.len > 0) args[0] else Value.undef());
+    if (!hdrValidName(n)) return self.throwError("TypeError", "Invalid header name");
+    const lower = try hdrLower(self, n);
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    var found = false;
+    for (try (try headersList(self, this)).internalElementsSnapshot(self.arena)) |pair| {
+        const kv = uspPairKV(pair);
+        if (!std.mem.eql(u8, kv.k, lower)) continue;
+        if (found) try out.appendSlice(self.arena, ", ");
+        try out.appendSlice(self.arena, kv.v);
+        found = true;
+    }
+    if (!found) return Value.nul();
+    return try Value.strAlloc(self.arena, out.items);
+}
+fn headersHasFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const n = try self.toStringV(if (args.len > 0) args[0] else Value.undef());
+    if (!hdrValidName(n)) return self.throwError("TypeError", "Invalid header name");
+    const lower = try hdrLower(self, n);
+    for (try (try headersList(self, this)).internalElementsSnapshot(self.arena)) |pair| {
+        if (std.mem.eql(u8, uspPairKV(pair).k, lower)) return Value.boolVal(true);
+    }
+    return Value.boolVal(false);
+}
+fn headersDeleteFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const n = try self.toStringV(if (args.len > 0) args[0] else Value.undef());
+    if (!hdrValidName(n)) return self.throwError("TypeError", "Invalid header name");
+    try headersDeleteRaw(self, this, try hdrLower(self, n));
+    return Value.undef();
+}
+fn headersGetSetCookieFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const arr = (try self.newArray()).asObj();
+    for (try (try headersList(self, this)).internalElementsSnapshot(self.arena)) |pair| {
+        const kv = uspPairKV(pair);
+        if (std.mem.eql(u8, kv.k, "set-cookie")) try arr.appendElement(self.arena, try Value.strAlloc(self.arena, kv.v));
+    }
+    return Value.obj(arr);
+}
+/// The sorted, combined header entries used by forEach and the iterators: one
+/// entry per name (values joined with ", "), except set-cookie which stays split.
+fn headersSortedEntries(self: *Interpreter, this: Value) EvalError!*value.Object {
+    const Entry = struct { name: []const u8, value: []const u8 };
+    var combined: std.ArrayListUnmanaged(Entry) = .empty;
+    var cookies: std.ArrayListUnmanaged(Entry) = .empty;
+    for (try (try headersList(self, this)).internalElementsSnapshot(self.arena)) |pair| {
+        const kv = uspPairKV(pair);
+        if (std.mem.eql(u8, kv.k, "set-cookie")) {
+            try cookies.append(self.arena, .{ .name = kv.k, .value = kv.v });
+            continue;
+        }
+        var hit = false;
+        for (combined.items) |*e| {
+            if (std.mem.eql(u8, e.name, kv.k)) {
+                e.value = try std.mem.concat(self.arena, u8, &.{ e.value, ", ", kv.v });
+                hit = true;
+                break;
+            }
+        }
+        if (!hit) try combined.append(self.arena, .{ .name = kv.k, .value = kv.v });
+    }
+    try combined.appendSlice(self.arena, cookies.items);
+    // Stable sort by name (set-cookie entries keep insertion order among equals).
+    std.mem.sort(Entry, combined.items, {}, struct {
+        fn lt(_: void, x: Entry, y: Entry) bool {
+            return std.mem.order(u8, x.name, y.name) == .lt;
+        }
+    }.lt);
+    const out = (try self.newArray()).asObj();
+    for (combined.items) |e| {
+        const pair = (try self.newArray()).asObj();
+        try pair.appendElement(self.arena, try Value.strAlloc(self.arena, e.name));
+        try pair.appendElement(self.arena, try Value.strAlloc(self.arena, e.value));
+        try out.appendElement(self.arena, Value.obj(pair));
+    }
+    return out;
+}
+fn headersForEachFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const cb = if (args.len > 0) args[0] else Value.undef();
+    if (!cb.isObject() or !cb.asObj().isCallableObject()) return self.throwError("TypeError", "Headers.forEach callback is not a function");
+    const this_arg = if (args.len > 1) args[1] else Value.undef();
+    for (try (try headersSortedEntries(self, this)).internalElementsSnapshot(self.arena)) |pair| {
+        const kv = uspPairKV(pair);
+        _ = try self.callValueWithThis(cb, &.{ try Value.strAlloc(self.arena, kv.v), try Value.strAlloc(self.arena, kv.k), this }, this_arg);
+    }
+    return Value.undef();
+}
+fn headersIterFn(comptime which: enum { entries, keys, values }) value.NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+            _ = args;
+            const self: *Interpreter = @ptrCast(@alignCast(ctx));
+            const snap = (try self.newArray()).asObj();
+            for (try (try headersSortedEntries(self, this)).internalElementsSnapshot(self.arena)) |pair| {
+                const kv = uspPairKV(pair);
+                switch (which) {
+                    .keys => try snap.appendElement(self.arena, try Value.strAlloc(self.arena, kv.k)),
+                    .values => try snap.appendElement(self.arena, try Value.strAlloc(self.arena, kv.v)),
+                    .entries => try snap.appendElement(self.arena, pair),
+                }
+            }
+            return try self.iteratorOf(Value.obj(snap));
+        }
+    }.call;
+}
+fn headersFill(self: *Interpreter, this: Value, init: Value) EvalError!void {
+    if (init.isObject() and init.asObj().getOwn("\x00hdrs") != null) {
+        // Another Headers: copy its (already validated) entries.
+        for (try (try headersList(self, init)).internalElementsSnapshot(self.arena)) |pair| {
+            const kv = uspPairKV(pair);
+            try headersAppendRaw(self, this, try Value.strAlloc(self.arena, kv.k), try Value.strAlloc(self.arena, kv.v));
+        }
+        return;
+    }
+    if (init.isObject() and init.asObj().is_array) {
+        // Sequence of [name, value] sequences.
+        for (try collectIterable(self, init)) |entry| {
+            const pair = try collectIterable(self, entry);
+            if (pair.len != 2) return self.throwError("TypeError", "Invalid header init: expected name/value pair");
+            try headersAppendRaw(self, this, pair[0], pair[1]);
+        }
+        return;
+    }
+    if (init.isObject()) {
+        // Record<string, string>: own enumerable string keys in order.
+        for (try self.objectOwnKeysList(init.asObj())) |k| {
+            try headersAppendRaw(self, this, try Value.strAlloc(self.arena, k), try self.getProperty(init, k));
+        }
+        return;
+    }
+}
+fn headersConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (self.new_target.isUndefined()) return self.throwError("TypeError", "Failed to construct 'Headers': Please use the 'new' operator");
+    const obj = try gc_mod.allocObj(self.arena);
+    obj.* = .{};
+    if (self.env.get("Headers")) |c| if (c.isObject()) {
+        if (c.asObj().getOwn("prototype")) |pp| if (pp.isObject()) obj.setProtoAtomic(pp.asObj());
+    };
+    _ = try headersList(self, Value.obj(obj)); // seed empty \x00hdrs
+    if (args.len > 0 and !args[0].isUndefined() and !args[0].isNull()) try headersFill(self, Value.obj(obj), args[0]);
+    return Value.obj(obj);
+}
+fn installHeaders(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalError!void {
+    const a = env.arena;
+    const symKey = struct {
+        fn f(e: *Environment, name: []const u8) ?[]const u8 {
+            if (e.get("Symbol")) |s| if (s.isObject()) {
+                if (s.asObj().getOwn(name)) |t| if (t.isObject() and t.asObj().is_symbol) return t.asObj().sym_key;
+            };
+            return null;
+        }
+    }.f;
+    const proto = try gc_mod.allocObj(a);
+    proto.* = .{ .proto = object_proto };
+    try setNative(a, rs, proto, "append", 2, headersAppendFn);
+    try setNative(a, rs, proto, "set", 2, headersSetFn);
+    try setNative(a, rs, proto, "get", 1, headersGetFn);
+    try setNative(a, rs, proto, "has", 1, headersHasFn);
+    try setNative(a, rs, proto, "delete", 1, headersDeleteFn);
+    try setNative(a, rs, proto, "getSetCookie", 0, headersGetSetCookieFn);
+    try setNative(a, rs, proto, "forEach", 1, headersForEachFn);
+    try setNative(a, rs, proto, "entries", 0, headersIterFn(.entries));
+    try setNative(a, rs, proto, "keys", 0, headersIterFn(.keys));
+    try setNative(a, rs, proto, "values", 0, headersIterFn(.values));
+    if (symKey(env, "iterator")) |k| try setNative(a, rs, proto, k, 0, headersIterFn(.entries));
+    if (symKey(env, "toStringTag")) |k| {
+        try proto.setOwn(a, rs, k, Value.str("Headers"));
+        try proto.setAttr(a, k, .{ .writable = false, .enumerable = false, .configurable = true });
+    }
+    const ctor = try gc_mod.allocObj(a);
+    ctor.* = .{ .native = headersConstructorFn, .native_ctor = true };
+    try installNativeProps(a, rs, ctor, "Headers", 0);
+    try ctor.setOwn(a, rs, "prototype", Value.obj(proto));
+    try ctor.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
+    try setConstructor(a, rs, proto, ctor);
+    try env.put("Headers", Value.obj(ctor));
 }
 
 // ===== crypto (getRandomValues / randomUUID) =========================
