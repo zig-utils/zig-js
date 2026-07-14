@@ -20436,64 +20436,67 @@ pub fn main(init: std.process.Init) !void {
         var li: usize = 0;
         while (li < iters) : (li += 1) {
             const seed = base_seed +% li;
-            noteSeed(.lifecycle, seed);
-            defer finishSeed();
-            if (!(try runMultiContextCreateDestroyInterleaving(gpa, seed))) lfail += 1;
-            if (!(try runResizableDataViewResizeInterleaving(gpa, seed))) lfail += 1;
-            if (!(try runTerminationStorm(gpa, seed))) lfail += 1;
-            if (!(try runWorkerThreadOverlap(gpa, seed))) lfail += 1;
-            if (!(try runModuleWorkerThreadOverlap(gpa, seed))) lfail += 1;
-            if (!(try runModuleWorkerGraphOverlap(gpa, seed))) lfail += 1;
-            if (!(try runModuleWorkerFanoutOverlap(gpa, seed))) lfail += 1;
-            if (!(try runWorkerCloseTerminateRace(gpa, seed))) lfail += 1;
-            if (!(try runModuleWorkerCloseTerminateRace(gpa, seed))) lfail += 1;
-            if (!(try runWorkerExceptionRecovery(gpa, seed))) lfail += 1;
-            if (!(try runWorkerThreadFinalizationInterleaving(gpa, seed))) lfail += 1;
-            if (!(try runModuleWorkerThreadFinalizationInterleaving(gpa, seed))) lfail += 1;
-            if (!(try runWorkerTerminateFinalizationInterleaving(gpa, seed))) lfail += 1;
-            if (!(try runModuleWorkerTerminateFinalizationInterleaving(gpa, seed))) lfail += 1;
-            if (!(try runWorkerTerminateThreadTeardownInterleaving(gpa, seed))) lfail += 1;
-            if (!(try runModuleWorkerTerminateThreadTeardownInterleaving(gpa, seed))) lfail += 1;
-            if (!(try runWorkerExceptionFinalizationCleanupInterleaving(gpa, seed))) lfail += 1;
-            if (!(try runModuleWorkerExceptionFinalizationCleanupInterleaving(gpa, seed))) lfail += 1;
-            if (!(try runThreadExceptionWaiterInterleaving(gpa, seed))) lfail += 1;
-            if (!(try runReturnedWaitAsyncLifecycleInterleaving(gpa, seed))) lfail += 1;
-            if (!(try runPropertyWaitAsyncLateSettlementLifecycleInterleaving(gpa, seed))) lfail += 1;
-            if (!(try runMixedWaiterRaceLifecycleInterleaving(gpa, seed))) lfail += 1;
-            if (!(try runPromisePublicationLifecycleInterleaving(gpa, seed))) lfail += 1;
-            if (!(try runFinalizationCleanupInterleaving(gpa, seed))) lfail += 1;
-            if (!(try runWeakCleanupOrderingInterleaving(gpa, seed))) lfail += 1;
-            if (!(try runFinalizationAsyncJoinCleanupInterleaving(gpa, seed))) lfail += 1;
-            if (!(try runFinalizationWaiterCleanupInterleaving(gpa, seed))) lfail += 1;
-            if (!(try runWaitAsyncFinalizationCleanupInterleaving(gpa, seed))) lfail += 1;
-            if (!(try runConditionAsyncFinalizationCleanupInterleaving(gpa, seed))) lfail += 1;
-            if (!(try runAtomicsConditionFinalizationInterleaving(gpa, seed))) lfail += 1;
-            if (!(try runAtomicsMutexLockIfAvailableFinalizationInterleaving(gpa, seed))) lfail += 1;
-            if (!(try runMicrotaskChurnLifecycleInterleaving(gpa, seed))) lfail += 1;
-            if (!(try runLateAsyncJoinCleanupInterleaving(gpa, seed))) lfail += 1;
-            if (!(try runLateAsyncJoinRejectCleanupInterleaving(gpa, seed))) lfail += 1;
-            if (!(try runAsyncHoldThrowFinalizationInterleaving(gpa, seed))) lfail += 1;
-            if (!(try runCreatorOwnedBufferLifecycleInterleaving(gpa, seed))) lfail += 1;
-            if (!(try runWorkerCreatorOwnedBufferLifecycleInterleaving(gpa, seed))) lfail += 1;
-            if (!(try runWorkerCreatorOwnedBufferCleanupInterleaving(gpa, seed))) lfail += 1;
-            if (!(try runModuleWorkerCreatorOwnedBufferCleanupInterleaving(gpa, seed))) lfail += 1;
-            if (!(try runTerminationPendingReactionInterleaving(gpa, seed))) lfail += 1;
-            if (!(try runTerminationWaiterCleanupInterleaving(gpa, seed))) lfail += 1;
-            if (!(try runWorkerTerminateConditionAsyncCleanupInterleaving(gpa, seed))) lfail += 1;
-            if (!(try runModuleWorkerTerminateConditionAsyncCleanupInterleaving(gpa, seed))) lfail += 1;
-            if (!(try runWorkerTerminateWaitAsyncCleanupInterleaving(gpa, seed))) lfail += 1;
-            if (!(try runModuleWorkerTerminateWaitAsyncCleanupInterleaving(gpa, seed))) lfail += 1;
-            if (!(try runWorkerTerminateThreadLocalAsyncHoldCleanupInterleaving(gpa, seed))) lfail += 1;
-            if (!(try runModuleWorkerTerminateThreadLocalAsyncHoldCleanupInterleaving(gpa, seed))) lfail += 1;
-            if (!(try runAsyncHoldBargingLifecycleInterleaving(gpa, seed))) lfail += 1;
-            if (!(try runAsyncHoldReleaseWaiterCleanupInterleaving(gpa, seed))) lfail += 1;
-            if (!(try runThreadLocalAsyncHoldReleaseCleanupInterleaving(gpa, seed))) lfail += 1;
-            if (!(try runThreadRestrictLifecycleInterleaving(gpa, seed))) lfail += 1;
-            if (!(try runThreadRestrictFinalizationCleanupInterleaving(gpa, seed))) lfail += 1;
-            if (!(try runThreadLocalLifecycleInterleaving(gpa, seed))) lfail += 1;
-            if (!(try runThreadLocalFinalizationCleanupInterleaving(gpa, seed))) lfail += 1;
-            if (!(try runThreadLocalTerminationCleanupInterleaving(gpa, seed))) lfail += 1;
-            if (!(try runNestedThreadAsyncJoinCleanupInterleaving(gpa, seed))) lfail += 1;
+            inline for (.{
+                runMultiContextCreateDestroyInterleaving,
+                runResizableDataViewResizeInterleaving,
+                runTerminationStorm,
+                runWorkerThreadOverlap,
+                runModuleWorkerThreadOverlap,
+                runModuleWorkerGraphOverlap,
+                runModuleWorkerFanoutOverlap,
+                runWorkerCloseTerminateRace,
+                runModuleWorkerCloseTerminateRace,
+                runWorkerExceptionRecovery,
+                runWorkerThreadFinalizationInterleaving,
+                runModuleWorkerThreadFinalizationInterleaving,
+                runWorkerTerminateFinalizationInterleaving,
+                runModuleWorkerTerminateFinalizationInterleaving,
+                runWorkerTerminateThreadTeardownInterleaving,
+                runModuleWorkerTerminateThreadTeardownInterleaving,
+                runWorkerExceptionFinalizationCleanupInterleaving,
+                runModuleWorkerExceptionFinalizationCleanupInterleaving,
+                runThreadExceptionWaiterInterleaving,
+                runReturnedWaitAsyncLifecycleInterleaving,
+                runPropertyWaitAsyncLateSettlementLifecycleInterleaving,
+                runMixedWaiterRaceLifecycleInterleaving,
+                runPromisePublicationLifecycleInterleaving,
+                runFinalizationCleanupInterleaving,
+                runWeakCleanupOrderingInterleaving,
+                runFinalizationAsyncJoinCleanupInterleaving,
+                runFinalizationWaiterCleanupInterleaving,
+                runWaitAsyncFinalizationCleanupInterleaving,
+                runConditionAsyncFinalizationCleanupInterleaving,
+                runAtomicsConditionFinalizationInterleaving,
+                runAtomicsMutexLockIfAvailableFinalizationInterleaving,
+                runMicrotaskChurnLifecycleInterleaving,
+                runLateAsyncJoinCleanupInterleaving,
+                runLateAsyncJoinRejectCleanupInterleaving,
+                runAsyncHoldThrowFinalizationInterleaving,
+                runCreatorOwnedBufferLifecycleInterleaving,
+                runWorkerCreatorOwnedBufferLifecycleInterleaving,
+                runWorkerCreatorOwnedBufferCleanupInterleaving,
+                runModuleWorkerCreatorOwnedBufferCleanupInterleaving,
+                runTerminationPendingReactionInterleaving,
+                runTerminationWaiterCleanupInterleaving,
+                runWorkerTerminateConditionAsyncCleanupInterleaving,
+                runModuleWorkerTerminateConditionAsyncCleanupInterleaving,
+                runWorkerTerminateWaitAsyncCleanupInterleaving,
+                runModuleWorkerTerminateWaitAsyncCleanupInterleaving,
+                runWorkerTerminateThreadLocalAsyncHoldCleanupInterleaving,
+                runModuleWorkerTerminateThreadLocalAsyncHoldCleanupInterleaving,
+                runAsyncHoldBargingLifecycleInterleaving,
+                runAsyncHoldReleaseWaiterCleanupInterleaving,
+                runThreadLocalAsyncHoldReleaseCleanupInterleaving,
+                runThreadRestrictLifecycleInterleaving,
+                runThreadRestrictFinalizationCleanupInterleaving,
+                runThreadLocalLifecycleInterleaving,
+                runThreadLocalFinalizationCleanupInterleaving,
+                runThreadLocalTerminationCleanupInterleaving,
+                runNestedThreadAsyncJoinCleanupInterleaving,
+            }) |case_fn| {
+                try runWatchedSeedCase(.lifecycle, case_fn, gpa, seed, &lfail);
+            }
+            finishSeed();
         }
         printProfileSummary("lifecycle", iters * 56, base_seed, lfail, run_started_ms);
         if (lfail != 0) std.process.exit(1);
