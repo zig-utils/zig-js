@@ -37,7 +37,7 @@ Current public status is evidence-scoped:
 - test262 totals come from [docs/.data/test262.json](docs/.data/test262.json), regenerated from [docs/.data/test262-run-2026-07-05.txt](docs/.data/test262-run-2026-07-05.txt).
 - The skipped-test inventory is [docs/.data/test262-skips.tsv](docs/.data/test262-skips.tsv), currently zero.
 - The exact excluded-file inventory is [docs/.data/test262-excluded.tsv](docs/.data/test262-excluded.tsv), currently zero.
-- VM/tree-walker numbers below come from [docs/.data/bench-2026-07-04.txt](docs/.data/bench-2026-07-04.txt); the JSC comparison comes from the [July 13, 2026 report](docs/.data/benchmark-comparison-2026-07-13.md) and its [616 raw samples](docs/.data/benchmark-comparison-2026-07-13.tsv).
+- VM/tree-walker numbers below come from [docs/.data/bench-2026-07-04.txt](docs/.data/bench-2026-07-04.txt); the JSC comparison comes from the [July 13, 2026 report](docs/.data/benchmark-comparison-2026-07-13.md) and its [1,232 raw samples](docs/.data/benchmark-comparison-2026-07-13.tsv).
 - C API scope comes from the exported symbols in [src/c_api.zig](src/c_api.zig).
 - Threading and GC status are documented under [docs/threads](docs/threads) and [docs/architecture.md](docs/architecture.md).
 
@@ -108,25 +108,33 @@ Those numbers show current VM/tree-walk parity on these microbenchmarks, not a b
 
 ### zig-js vs JavaScriptCore
 
-`zig build benchmark-comparison` runs the same pure-JavaScript kernels through GC-enabled zig-js and the macOS system JavaScriptCore, checks deterministic results across engines, and reports seven-sample medians with dispersion. It directly compares warmed single contexts, warmed independent contexts on persistent OS workers, and cold thread/context lifecycles; zig-js shared-realm threads remain a separate capability panel. The latest [full report](docs/.data/benchmark-comparison-2026-07-13.md) preserves all [616 raw samples](docs/.data/benchmark-comparison-2026-07-13.tsv) from commit `42d0ec26` on an 11-core Apple M3 Pro (AC power); every full-run row exceeds a 50 ms median timing floor:
+`zig build benchmark-comparison` runs the same pure-JavaScript kernels through GC-enabled zig-js and the macOS system JavaScriptCore, checks deterministic results across engines, and reports seven-sample medians with dispersion. It directly compares warmed single contexts, warmed independent contexts on persistent OS workers, and cold thread/context lifecycles; zig-js shared-realm threads remain a separate capability panel. The latest [full report](docs/.data/benchmark-comparison-2026-07-13.md) preserves all [1,232 raw samples](docs/.data/benchmark-comparison-2026-07-13.tsv) from commit `27ebbfb1` on an 11-core Apple M3 Pro (battery power, 74% at capture); every full-run row exceeds a 50 ms median timing floor:
 
 | workload | zig-js single ms | JSC single ms | zig-js throughput lead |
 | --- | ---: | ---: | ---: |
-| arithmetic | 55.954 | 230.350 | 4.12x |
-| properties | 56.900 | 192.922 | 3.39x |
-| arrays | 61.569 | 124.911 | 2.03x |
-| Fibonacci | 66.945 | 366.149 | 5.47x |
+| arithmetic | 56.360 | 242.893 | 4.31x |
+| properties | 59.821 | 208.153 | 3.48x |
+| arrays | 64.517 | 130.636 | 2.02x |
+| direct calls | 68.548 | 105.109 | 1.53x |
+| method calls | 80.100 | 144.332 | 1.80x |
+| closure calls | 73.039 | 165.998 | 2.27x |
+| arguments calls | 64.888 | 205.600 | 3.17x |
+| Fibonacci | 69.739 | 387.101 | 5.55x |
 
 At eight warmed independent contexts, the programming model and timed boundary are symmetric:
 
 | workload | zig-js ms | JSC ms | zig-js throughput lead | zig-js scaling | JSC scaling |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| arithmetic | 71.166 | 362.861 | 5.10x | 6.06x | 5.05x |
-| properties | 78.794 | 298.952 | 3.79x | 6.14x | 5.58x |
-| arrays | 93.789 | 208.772 | 2.23x | 5.24x | 4.82x |
-| Fibonacci | 100.187 | 575.698 | 5.75x | 5.34x | 5.08x |
+| arithmetic | 75.017 | 377.715 | 5.03x | 6.09x | 5.11x |
+| properties | 88.670 | 326.927 | 3.69x | 5.35x | 4.97x |
+| arrays | 102.011 | 218.555 | 2.14x | 5.07x | 4.82x |
+| direct calls | 88.550 | 170.483 | 1.93x | 5.95x | 4.71x |
+| method calls | 112.945 | 239.010 | 2.12x | 5.84x | 5.09x |
+| closure calls | 96.799 | 280.139 | 2.89x | 5.93x | 4.79x |
+| arguments calls | 92.878 | 373.951 | 4.03x | 5.29x | 4.37x |
+| Fibonacci | 106.903 | 601.253 | 5.62x | 5.20x | 5.00x |
 
-By geometric mean, zig-js leads direct single-context throughput by about 3.53x and eight-context steady throughput by about 3.97x. Eight-lane scaling from each engine's own steady one-lane baseline is 5.68x for zig-js and 5.12x for JSC. The symmetric cold lifecycle also favors zig-js in every row, by about 3.72x at eight lanes by geometric mean. zig-js's separate shared-realm path scales 6.32x for arithmetic, 5.66x for properties, 2.43x for arrays, and 4.98x for Fibonacci. See [Performance Benchmarks](docs/benchmarks.md) for all lane counts, cold results, exact timed boundaries, allocator choice, dispersion, caveats, reproduction, and raw evidence.
+By geometric mean, zig-js leads direct single-context throughput by about 2.78x and eight-context steady throughput by about 3.23x. Eight-lane scaling from each engine's own steady one-lane baseline is 5.58x for zig-js and 4.85x for JSC. The symmetric cold lifecycle favors zig-js in every row too—about 3.13x at eight lanes by geometric mean—with 5.41x and 4.66x scaling respectively. zig-js's separate shared-realm path scales above 1x for every workload and 4.96x by geometric mean at eight lanes. See [Performance Benchmarks](docs/benchmarks.md) for all lane counts, cold results, exact timed boundaries, allocator choice, dispersion, caveats, reproduction, and raw evidence.
 
 Implemented performance machinery includes the bytecode VM, frame slots/upvalues, object shapes, inline caches, guarded loop and recurrence kernels, a baseline native tier, the engine-wide 8-byte NaN-boxed `Value`, GC slab backing, and an opt-in-GC one-cycle nursery that reclaims young garbage at quiescent boundaries and immediately tenures survivors. Future work includes broader native-tier coverage, nursery sizing and pause optimization, deeper generational policies, and a general optimizing tier.
 

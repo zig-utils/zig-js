@@ -158,6 +158,6 @@ and shared-realm tests are required before those paths can enter native code.
 
 Performance evidence uses the symmetric JSC protocol in
 [`benchmarks.md`](benchmarks.md). Quick paired measurements guide development;
-the 616-sample publication matrix is rerun only after a meaningful batch of
+the 1,232-sample publication matrix is rerun only after a meaningful batch of
 optimizations. A speedup is not accepted if checksums, supported rows, or
 execution accounting differ.

@@ -26,7 +26,7 @@ zig build benchmark-comparison # zig-js single/shared vs system JSC (macOS only)
 zig build threads-test    # the multithreading (issue #1) suite — this is what CI gates
 ```
 
-The engine comparison runs seven median-scored samples of four shared workloads and validates their checksums across zig-js and the system JavaScriptCore. Use `-Dbenchmark-comparison-quick=true` for a reduced harness check, and see [Performance Benchmarks](/benchmarks) for the method and latest saved result.
+The engine comparison runs seven median-scored samples of eight shared workloads and validates their checksums across zig-js and the system JavaScriptCore. Use `-Dbenchmark-comparison-quick=true` for a reduced harness check, and see [Performance Benchmarks](/benchmarks) for the method and latest saved result.
 
 ## Run the real test262 suite
 
