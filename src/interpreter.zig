@@ -29725,6 +29725,7 @@ fn installTypedArrays(env: *Environment, rs: *Shape) EvalError!void {
     try installSharedArrayBufferAndAtomics(env, rs, object_proto);
     try installDOMException(env, rs, object_proto);
     try installTextEncoder(env, rs, object_proto);
+    try installTextDecoder(env, rs, object_proto);
     try installTemporal(env, rs, object_proto);
     try installIntl(env, rs, object_proto);
     // ShadowRealm: a child realm with `evaluate` (and a minimal `importValue`).
@@ -38981,6 +38982,190 @@ fn installTextEncoder(env: *Environment, rs: *Shape, object_proto: *value.Object
     try ctor.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
     try setConstructor(a, rs, proto, ctor);
     try env.put("TextEncoder", Value.obj(ctor));
+}
+
+// ===== TextDecoder (Encoding standard, common encodings) ==============
+/// Map an encoding label (trimmed, case-insensitive) to its canonical name, or
+/// null for an unsupported/unknown label (→ RangeError).
+fn textDecoderEncoding(label: []const u8) ?[]const u8 {
+    const t = std.mem.trim(u8, label, " \t\n\r\x0c");
+    const Alias = struct { name: []const u8, aliases: []const []const u8 };
+    const table = [_]Alias{
+        .{ .name = "utf-8", .aliases = &.{ "utf-8", "utf8", "unicode-1-1-utf-8", "unicode11utf8", "unicode20utf8", "x-unicode20utf8" } },
+        .{ .name = "utf-16le", .aliases = &.{ "utf-16le", "utf-16", "ucs-2", "unicode", "unicodefeff", "csunicode" } },
+        .{ .name = "utf-16be", .aliases = &.{ "utf-16be", "unicodefffe" } },
+        .{ .name = "windows-1252", .aliases = &.{ "windows-1252", "latin1", "iso-8859-1", "iso8859-1", "iso88591", "ascii", "us-ascii", "cp1252", "cp819", "ibm819", "l1", "x-cp1252" } },
+    };
+    for (table) |e| for (e.aliases) |al| if (std.ascii.eqlIgnoreCase(t, al)) return e.name;
+    return null;
+}
+
+/// The bytes a BufferSource (ArrayBuffer/SharedArrayBuffer/TypedArray/DataView)
+/// currently views, or null if `v` is not a buffer source.
+fn bufferSourceBytes(v: Value) ?[]const u8 {
+    if (!v.isObject()) return null;
+    const o = v.asObj();
+    if (o.typed_array) |ta| {
+        const ab = ta.buffer.array_buffer orelse return null;
+        if (ab.isDetached()) return &.{};
+        const len = (ta.currentLength() orelse 0) * ta.kind.byteSize();
+        return ab.bytes()[ta.byte_offset .. ta.byte_offset + len];
+    }
+    if (o.data_view) |dv| {
+        const ab = dv.buffer.array_buffer orelse return null;
+        if (ab.isDetached()) return &.{};
+        return ab.bytes()[dv.byte_offset .. dv.byte_offset + (dv.currentByteLength() orelse 0)];
+    }
+    if (o.array_buffer) |ab| {
+        if (ab.isDetached()) return &.{};
+        return ab.bytes();
+    }
+    return null;
+}
+
+fn tdEmit(self: *Interpreter, out: *std.ArrayListUnmanaged(u8), cp: u21) EvalError!void {
+    var b: [4]u8 = undefined;
+    const n = std.unicode.utf8Encode(cp, &b) catch {
+        try out.appendSlice(self.arena, "\u{FFFD}");
+        return;
+    };
+    try out.appendSlice(self.arena, b[0..n]);
+}
+
+fn textDecoderConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (self.new_target.isUndefined()) return self.throwError("TypeError", "Failed to construct 'TextDecoder': Please use the 'new' operator");
+    const label = if (args.len > 0 and !args[0].isUndefined()) try self.toStringV(args[0]) else "utf-8";
+    const enc = textDecoderEncoding(label) orelse return self.throwError("RangeError", "The encoding label provided is invalid.");
+    var fatal = false;
+    var ignore_bom = false;
+    if (args.len > 1 and args[1].isObject()) {
+        fatal = (try self.getProperty(args[1], "fatal")).toBoolean();
+        ignore_bom = (try self.getProperty(args[1], "ignoreBOM")).toBoolean();
+    }
+    const obj = try gc_mod.allocObj(self.arena);
+    obj.* = .{};
+    if (self.env.get("TextDecoder")) |c| if (c.isObject()) {
+        if (c.asObj().getOwn("prototype")) |p| if (p.isObject()) obj.setProtoAtomic(p.asObj());
+    };
+    try obj.setOwn(self.arena, self.root_shape, "\x00tdenc", try Value.strAlloc(self.arena, enc));
+    try obj.setOwn(self.arena, self.root_shape, "\x00tdfatal", Value.boolVal(fatal));
+    try obj.setOwn(self.arena, self.root_shape, "\x00tdbom", Value.boolVal(ignore_bom));
+    return Value.obj(obj);
+}
+fn tdSlotStr(this: Value, key: []const u8, dflt: []const u8) []const u8 {
+    if (this.isObject()) if (this.asObj().getOwn(key)) |v| if (v.isString()) return v.asStr();
+    return dflt;
+}
+fn tdSlotBool(this: Value, key: []const u8) bool {
+    if (this.isObject()) if (this.asObj().getOwn(key)) |v| return v.toBoolean();
+    return false;
+}
+fn textDecoderEncodingGet(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = ctx;
+    _ = args;
+    if (this.isObject()) if (this.asObj().getOwn("\x00tdenc")) |v| return v;
+    return Value.str("utf-8");
+}
+fn textDecoderFatalGet(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = ctx;
+    _ = args;
+    return Value.boolVal(tdSlotBool(this, "\x00tdfatal"));
+}
+fn textDecoderIgnoreBomGet(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = ctx;
+    _ = args;
+    return Value.boolVal(tdSlotBool(this, "\x00tdbom"));
+}
+fn textDecoderDecodeFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!this.isObject()) return self.throwError("TypeError", "TextDecoder.decode called on non-object");
+    const enc = tdSlotStr(this, "\x00tdenc", "utf-8");
+    const fatal = tdSlotBool(this, "\x00tdfatal");
+    const ignore_bom = tdSlotBool(this, "\x00tdbom");
+    var bytes: []const u8 = "";
+    if (args.len > 0 and !args[0].isUndefined()) {
+        bytes = bufferSourceBytes(args[0]) orelse return self.throwError("TypeError", "TextDecoder.decode input must be a BufferSource");
+    }
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    if (std.mem.eql(u8, enc, "utf-8")) {
+        var i: usize = 0;
+        if (!ignore_bom and bytes.len >= 3 and bytes[0] == 0xEF and bytes[1] == 0xBB and bytes[2] == 0xBF) i = 3;
+        while (i < bytes.len) {
+            const n = std.unicode.utf8ByteSequenceLength(bytes[i]) catch {
+                if (fatal) return self.throwError("TypeError", "The encoded data was not valid.");
+                try out.appendSlice(self.arena, "\u{FFFD}");
+                i += 1;
+                continue;
+            };
+            if (i + n > bytes.len or (std.unicode.utf8Decode(bytes[i .. i + n]) catch null) == null) {
+                if (fatal) return self.throwError("TypeError", "The encoded data was not valid.");
+                try out.appendSlice(self.arena, "\u{FFFD}");
+                i += 1;
+                continue;
+            }
+            try out.appendSlice(self.arena, bytes[i .. i + n]);
+            i += n;
+        }
+    } else if (std.mem.eql(u8, enc, "windows-1252")) {
+        for (bytes) |b| try tdEmit(self, &out, b);
+    } else { // utf-16le / utf-16be
+        const le = std.mem.eql(u8, enc, "utf-16le");
+        var i: usize = 0;
+        if (!ignore_bom and bytes.len >= 2) {
+            if (le and bytes[0] == 0xFF and bytes[1] == 0xFE) i = 2 else if (!le and bytes[0] == 0xFE and bytes[1] == 0xFF) i = 2;
+        }
+        while (i + 1 < bytes.len) : (i += 2) {
+            const unit: u16 = if (le) @as(u16, bytes[i]) | (@as(u16, bytes[i + 1]) << 8) else (@as(u16, bytes[i]) << 8) | bytes[i + 1];
+            if (unit >= 0xD800 and unit <= 0xDBFF and i + 3 < bytes.len) {
+                const lo: u16 = if (le) @as(u16, bytes[i + 2]) | (@as(u16, bytes[i + 3]) << 8) else (@as(u16, bytes[i + 2]) << 8) | bytes[i + 3];
+                if (lo >= 0xDC00 and lo <= 0xDFFF) {
+                    const cp: u21 = 0x10000 + ((@as(u21, unit - 0xD800) << 10) | (lo - 0xDC00));
+                    try tdEmit(self, &out, cp);
+                    i += 2;
+                    continue;
+                }
+            }
+            if (unit >= 0xD800 and unit <= 0xDFFF) {
+                if (fatal) return self.throwError("TypeError", "The encoded data was not valid.");
+                try out.appendSlice(self.arena, "\u{FFFD}");
+            } else try tdEmit(self, &out, unit);
+        }
+        if (i < bytes.len) { // dangling odd byte
+            if (fatal) return self.throwError("TypeError", "The encoded data was not valid.");
+            try out.appendSlice(self.arena, "\u{FFFD}");
+        }
+    }
+    return try Value.strAlloc(self.arena, out.items);
+}
+
+fn installTextDecoder(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalError!void {
+    const a = env.arena;
+    const sym_tag: ?[]const u8 = blk: {
+        if (env.get("Symbol")) |sym| if (sym.isObject()) {
+            if (sym.asObj().getOwn("toStringTag")) |t| if (t.isObject() and t.asObj().is_symbol) break :blk t.asObj().sym_key;
+        };
+        break :blk null;
+    };
+    const proto = try gc_mod.allocObj(a);
+    proto.* = .{ .proto = object_proto };
+    inline for (.{ .{ "encoding", textDecoderEncodingGet }, .{ "fatal", textDecoderFatalGet }, .{ "ignoreBOM", textDecoderIgnoreBomGet } }) |g| {
+        try setNativeGetter(a, rs, proto, g[0], g[1]);
+        try proto.setAttr(a, g[0], .{ .enumerable = true, .configurable = true });
+    }
+    try setNative(a, rs, proto, "decode", 0, textDecoderDecodeFn);
+    if (sym_tag) |k| {
+        try proto.setOwn(a, rs, k, Value.str("TextDecoder"));
+        try proto.setAttr(a, k, .{ .writable = false, .enumerable = false, .configurable = true });
+    }
+    const ctor = try gc_mod.allocObj(a);
+    ctor.* = .{ .native = textDecoderConstructorFn, .native_ctor = true };
+    try installNativeProps(a, rs, ctor, "TextDecoder", 0);
+    try ctor.setOwn(a, rs, "prototype", Value.obj(proto));
+    try ctor.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
+    try setConstructor(a, rs, proto, ctor);
+    try env.put("TextDecoder", Value.obj(ctor));
 }
 
 fn installSharedArrayBufferAndAtomics(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalError!void {
