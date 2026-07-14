@@ -2605,6 +2605,7 @@ pub const Compiler = struct {
             .is_expr_body = fnode.is_expr_body,
             .body = fnode.body,
             .source = fnode.source,
+            .uses_arguments = fnode.uses_arguments,
             .is_generator = fnode.is_generator,
             .is_async = fnode.is_async,
             .is_arrow = fnode.is_arrow,

@@ -660,11 +660,78 @@ const QuickArrayPlan = union(enum) {
     packed_push: QuickPackedArrayPushLoop,
 };
 
-const QuickGlobalBinding = struct {
-    env: *Environment,
-    object: *value.Object,
-    shape: *Shape,
-    slot: u32,
+const max_quick_leaf_ops = 16;
+const max_quick_leaf_stack = 8;
+
+const QuickLeafOp = union(enum) {
+    argument: u8,
+    constant: f64,
+    add,
+    sub,
+    mul,
+    div,
+    mod,
+};
+
+const QuickLeafAddMod = struct {
+    left: u8,
+    right: u8,
+    modulus: f64,
+};
+
+const QuickLeafSpecialization = union(enum) {
+    generic,
+    add_mod: QuickLeafAddMod,
+};
+
+const QuickNumericLeaf = struct {
+    ops: [max_quick_leaf_ops]QuickLeafOp,
+    op_count: u8,
+    executed: u8,
+    specialization: QuickLeafSpecialization,
+};
+
+const QuickLeafPlan = union(enum) {
+    unsupported,
+    numeric: QuickNumericLeaf,
+};
+
+const QuickCallCallee = union(enum) {
+    global_instruction: u32,
+    local: u32,
+};
+
+const QuickNumericCallLoop = struct {
+    index_local: u32,
+    value_local: u32,
+    bound: QuickArrayBound,
+    increment: f64,
+    callee: QuickCallCallee,
+    exit_ip: u32,
+};
+
+const QuickCallLoopPlan = union(enum) {
+    unsupported,
+    numeric_leaf: QuickNumericCallLoop,
+};
+
+const QuickCallLoopUpdate = struct {
+    extra_steps: u64,
+    next_ip: usize,
+};
+
+const QuickGlobalBinding = union(enum) {
+    object: struct {
+        env: *Environment,
+        object: *value.Object,
+        shape: *Shape,
+        slot: u32,
+    },
+    environment: struct {
+        start: *Environment,
+        binding: *Environment,
+        name: []const u8,
+    },
 };
 
 const QuickAddRecurrence = struct {
@@ -706,6 +773,9 @@ var quick_packed_array_sum_loop_hits: std.atomic.Value(u64) = .init(0);
 var quick_packed_array_push_loop_hits: std.atomic.Value(u64) = .init(0);
 var quick_packed_array_specialized_expression_hits: std.atomic.Value(u64) = .init(0);
 var quick_global_binding_hits: std.atomic.Value(u64) = .init(0);
+var quick_native_direct_call_hits: std.atomic.Value(u64) = .init(0);
+var quick_numeric_call_loop_hits: std.atomic.Value(u64) = .init(0);
+var quick_numeric_call_loop_test_enabled: std.atomic.Value(bool) = .init(true);
 var quick_numeric_recurrence_hits: std.atomic.Value(u64) = .init(0);
 var quick_observable_recurrence_hits: std.atomic.Value(u64) = .init(0);
 
@@ -1014,29 +1084,23 @@ inline fn quickGlobalBindingValue(chunk: *Chunk, instruction: usize, vm: *Interp
     if (instruction >= chunk.quick_global_bindings.len) return null;
     const raw = chunk.quick_global_bindings[instruction] orelse return null;
     const cache: *QuickGlobalBinding = @ptrCast(@alignCast(raw));
-    if (vm.env != cache.env or vm.global_object != cache.object or cache.object.shape != cache.shape)
-        return null;
-    const slot: usize = @intCast(cache.slot);
-    if (slot >= cache.object.slots.items.len) return null;
-    return cache.object.slots.items[slot];
+    return switch (cache.*) {
+        .object => |object_cache| value_: {
+            if (vm.env != object_cache.env or vm.global_object != object_cache.object or
+                object_cache.object.shape != object_cache.shape)
+                break :value_ null;
+            const slot: usize = @intCast(object_cache.slot);
+            if (slot >= object_cache.object.slots.items.len) break :value_ null;
+            break :value_ object_cache.object.slots.items[slot];
+        },
+        .environment => |environment_cache| if (vm.env == environment_cache.start)
+            environment_cache.binding.getLocal(environment_cache.name)
+        else
+            null,
+    };
 }
 
 fn recordQuickGlobalBinding(chunk: *Chunk, instruction: usize, vm: *Interpreter, name: []const u8) void {
-    const env = vm.env;
-    if (env.parent != null or env.with_object != null) return;
-    env.lockBindings();
-    const is_live_global_data = env.aliases.get(name) == null and
-        env.vars.contains(name) and
-        !env.consts.contains(name) and
-        !env.lexicals.contains(name) and
-        !env.deletable.contains(name);
-    env.unlockBindings();
-    if (!is_live_global_data) return;
-    const object = vm.global_object orelse return;
-    if (object.proxy_handler != null or object.proxy_revoked or object.getAccessor(name) != null) return;
-    const shape = object.shape orelse return;
-    const slot = shape.lookup(name) orelse return;
-    if (slot >= object.slots.items.len) return;
     if (chunk.quick_global_bindings.len == 0) {
         const caches = chunk.arena.alloc(?*anyopaque, chunk.code.items.len) catch return;
         @memset(caches, null);
@@ -1050,7 +1114,349 @@ fn recordQuickGlobalBinding(chunk: *Chunk, instruction: usize, vm: *Interpreter,
         chunk.quick_global_bindings[instruction] = created;
         break :cache created;
     };
-    cache.* = .{ .env = env, .object = object, .shape = shape, .slot = slot };
+
+    const start = vm.env;
+    if (start.parent == null and start.with_object == null) object: {
+        start.lockBindings();
+        const is_live_global_data = start.aliases.get(name) == null and
+            start.vars.contains(name) and
+            !start.consts.contains(name) and
+            !start.lexicals.contains(name) and
+            !start.deletable.contains(name);
+        start.unlockBindings();
+        if (!is_live_global_data) break :object;
+        const object = vm.global_object orelse break :object;
+        if (object.proxy_handler != null or object.proxy_revoked or object.getAccessor(name) != null) break :object;
+        const shape = object.shape orelse break :object;
+        const slot = shape.lookup(name) orelse break :object;
+        if (slot >= object.slots.items.len) break :object;
+        cache.* = .{ .object = .{ .env = start, .object = object, .shape = shape, .slot = slot } };
+        return;
+    }
+
+    // Evaluated scripts may put a transparent declarative environment between
+    // a function closure and the realm root. Cache the exact environment record
+    // rather than assuming root-object storage. `getLocal` keeps the value live
+    // under the binding lock; deletion makes the cache miss. `with` and module
+    // aliases retain full identifier resolution because they can run user code
+    // or redirect to another environment.
+    var cursor: ?*Environment = start;
+    while (cursor) |env| : (cursor = env.parent) {
+        if (env.with_object != null) return;
+        env.lockBindings();
+        const alias = env.aliases.contains(name);
+        const found = env.vars.contains(name);
+        env.unlockBindings();
+        if (alias) return;
+        if (found) {
+            cache.* = .{ .environment = .{ .start = start, .binding = env, .name = name } };
+            return;
+        }
+    }
+    // Leave the allocated cache unreachable if this binding cannot be guarded.
+    chunk.quick_global_bindings[instruction] = null;
+}
+
+fn compileQuickCallLoopPlan(chunk: *Chunk, start: usize) QuickCallLoopPlan {
+    const code = chunk.code.items;
+    if (start + 16 > code.len) return .unsupported;
+    const expected = [_]bc.Op{
+        .load_local,  .load_const,  .lt,         .jump_if_false,
+        .load_var,    .load_local,  .load_local, .call,
+        .store_local, .pop,         .load_local, .load_const,
+        .add,         .store_local, .pop,        .jump,
+    };
+    // A local loop bound is equally safe; only the second instruction differs.
+    for (expected, 0..) |op, offset| {
+        if (offset == 1) {
+            if (code[start + offset].op != .load_const and code[start + offset].op != .load_local) return .unsupported;
+        } else if (offset == 4) {
+            if (code[start + offset].op != .load_var and code[start + offset].op != .load_local) return .unsupported;
+        } else if (code[start + offset].op != op) return .unsupported;
+    }
+
+    const index_local = code[start].a;
+    const value_local = code[start + 5].a;
+    if (code[start + 3].a != start + 16 or
+        code[start + 6].a != index_local or
+        code[start + 7].a != 2 or
+        code[start + 8].a != value_local or
+        code[start + 10].a != index_local or
+        code[start + 11].a >= chunk.consts.items.len or
+        code[start + 13].a != index_local or
+        code[start + 15].a != start)
+        return .unsupported;
+    const increment = chunk.consts.items[code[start + 11].a];
+    if (!increment.isNumber()) return .unsupported;
+    const bound: QuickArrayBound = switch (code[start + 1].op) {
+        .load_local => .{ .local = code[start + 1].a },
+        .load_const => constant: {
+            if (code[start + 1].a >= chunk.consts.items.len) return .unsupported;
+            const value_ = chunk.consts.items[code[start + 1].a];
+            if (!value_.isNumber()) return .unsupported;
+            break :constant .{ .constant = value_.asNum() };
+        },
+        else => unreachable,
+    };
+    const callee: QuickCallCallee = switch (code[start + 4].op) {
+        .load_var => global: {
+            if (code[start + 4].a >= chunk.names.items.len) return .unsupported;
+            break :global .{ .global_instruction = @intCast(start + 4) };
+        },
+        .load_local => local: {
+            if (code[start + 4].a >= chunk.local_count) return .unsupported;
+            break :local .{ .local = code[start + 4].a };
+        },
+        else => unreachable,
+    };
+    return .{ .numeric_leaf = .{
+        .index_local = index_local,
+        .value_local = value_local,
+        .bound = bound,
+        .increment = increment.asNum(),
+        .callee = callee,
+        .exit_ip = @intCast(start + 16),
+    } };
+}
+
+fn quickCallLoopPlan(chunk: *Chunk, start: usize, parallel_sync: bool) ?*QuickCallLoopPlan {
+    if (start >= chunk.quick_call_plans.len) return null;
+    const slot = &chunk.quick_call_plans[start];
+    if (if (parallel_sync) @atomicLoad(?*anyopaque, slot, .acquire) else slot.*) |raw|
+        return @ptrCast(@alignCast(raw));
+    const plan = chunk.arena.create(QuickCallLoopPlan) catch return null;
+    plan.* = compileQuickCallLoopPlan(chunk, start);
+    if (parallel_sync) {
+        if (@cmpxchgStrong(?*anyopaque, slot, null, plan, .acq_rel, .acquire)) |published|
+            return @ptrCast(@alignCast(published));
+    } else {
+        slot.* = plan;
+    }
+    return plan;
+}
+
+inline fn mayStartQuickCallLoop(code: []const bc.Inst, start: usize) bool {
+    return start + 7 < code.len and
+        (code[start + 1].op == .load_const or code[start + 1].op == .load_local) and
+        code[start + 2].op == .lt and
+        code[start + 3].op == .jump_if_false and
+        (code[start + 4].op == .load_var or code[start + 4].op == .load_local) and
+        code[start + 5].op == .load_local and
+        code[start + 6].op == .load_local and
+        code[start + 7].op == .call;
+}
+
+fn specializeQuickLeaf(ops: []const QuickLeafOp) QuickLeafSpecialization {
+    if (ops.len != 5) return .generic;
+    const left = switch (ops[0]) {
+        .argument => |argument| argument,
+        else => return .generic,
+    };
+    const right = switch (ops[1]) {
+        .argument => |argument| argument,
+        else => return .generic,
+    };
+    if (ops[2] != .add) return .generic;
+    const modulus = switch (ops[3]) {
+        .constant => |constant| constant,
+        else => return .generic,
+    };
+    if (ops[4] != .mod) return .generic;
+    return .{ .add_mod = .{ .left = left, .right = right, .modulus = modulus } };
+}
+
+fn compileQuickLeafPlan(chunk: *Chunk) QuickLeafPlan {
+    if (chunk.param_count == 0 or chunk.param_count > max_quick_leaf_stack or chunk.local_count != chunk.param_count)
+        return .unsupported;
+    var ops: [max_quick_leaf_ops]QuickLeafOp = undefined;
+    var op_count: usize = 0;
+    var depth: usize = 0;
+    for (chunk.code.items, 0..) |inst, instruction| {
+        if (inst.op == .ret) {
+            if (depth != 1 or instruction + 1 > std.math.maxInt(u8)) return .unsupported;
+            if (instruction + 1 < chunk.code.items.len and
+                (instruction + 2 != chunk.code.items.len or chunk.code.items[instruction + 1].op != .ret_undef))
+                return .unsupported;
+            return .{ .numeric = .{
+                .ops = ops,
+                .op_count = @intCast(op_count),
+                .executed = @intCast(instruction + 1),
+                .specialization = specializeQuickLeaf(ops[0..op_count]),
+            } };
+        }
+        if (op_count == ops.len) return .unsupported;
+        const op: QuickLeafOp = switch (inst.op) {
+            .load_local => argument: {
+                if (inst.a >= chunk.param_count or depth == max_quick_leaf_stack) return .unsupported;
+                depth += 1;
+                break :argument .{ .argument = @intCast(inst.a) };
+            },
+            .load_const => constant: {
+                if (inst.a >= chunk.consts.items.len or !chunk.consts.items[inst.a].isNumber() or depth == max_quick_leaf_stack)
+                    return .unsupported;
+                depth += 1;
+                break :constant .{ .constant = chunk.consts.items[inst.a].asNum() };
+            },
+            .add, .sub, .mul, .div, .mod => binary: {
+                if (depth < 2) return .unsupported;
+                depth -= 1;
+                break :binary switch (inst.op) {
+                    .add => .add,
+                    .sub => .sub,
+                    .mul => .mul,
+                    .div => .div,
+                    .mod => .mod,
+                    else => unreachable,
+                };
+            },
+            else => return .unsupported,
+        };
+        ops[op_count] = op;
+        op_count += 1;
+    }
+    return .unsupported;
+}
+
+fn quickLeafPlan(chunk: *Chunk, parallel_sync: bool) ?*QuickLeafPlan {
+    if (if (parallel_sync) @atomicLoad(?*anyopaque, &chunk.quick_leaf_plan, .acquire) else chunk.quick_leaf_plan) |raw|
+        return @ptrCast(@alignCast(raw));
+    const plan = chunk.arena.create(QuickLeafPlan) catch return null;
+    plan.* = compileQuickLeafPlan(chunk);
+    if (parallel_sync) {
+        if (@cmpxchgStrong(?*anyopaque, &chunk.quick_leaf_plan, null, plan, .acq_rel, .acquire)) |published|
+            return @ptrCast(@alignCast(published));
+    } else {
+        chunk.quick_leaf_plan = plan;
+    }
+    return plan;
+}
+
+fn quickImmutableLocalBinding(vm: *Interpreter, name: []const u8) ?Value {
+    var cursor: ?*Environment = vm.env;
+    while (cursor) |env| : (cursor = env.parent) {
+        if (env.with_object != null) return null;
+        env.lockBindings();
+        const alias = env.aliases.contains(name);
+        const binding = env.vars.get(name);
+        const immutable = binding != null and env.consts.contains(name);
+        env.unlockBindings();
+        if (alias) return null;
+        if (binding) |callee| return if (immutable) callee else null;
+    }
+    return null;
+}
+
+fn evaluateQuickLeaf(leaf: *const QuickNumericLeaf, arguments: []const f64) ?f64 {
+    switch (leaf.specialization) {
+        .add_mod => |specialized| {
+            if (specialized.left >= arguments.len or specialized.right >= arguments.len) return null;
+            return numberRemainder(arguments[specialized.left] + arguments[specialized.right], specialized.modulus);
+        },
+        .generic => {},
+    }
+    var stack: [max_quick_leaf_stack]f64 = undefined;
+    var depth: usize = 0;
+    for (leaf.ops[0..leaf.op_count]) |op| switch (op) {
+        .argument => |argument| {
+            if (argument >= arguments.len) return null;
+            stack[depth] = arguments[argument];
+            depth += 1;
+        },
+        .constant => |constant| {
+            stack[depth] = constant;
+            depth += 1;
+        },
+        .add, .sub, .mul, .div, .mod => {
+            const rhs = stack[depth - 1];
+            const lhs = stack[depth - 2];
+            depth -= 1;
+            stack[depth - 1] = switch (op) {
+                .add => lhs + rhs,
+                .sub => lhs - rhs,
+                .mul => lhs * rhs,
+                .div => lhs / rhs,
+                .mod => numberRemainder(lhs, rhs),
+                else => unreachable,
+            };
+        },
+    };
+    return if (depth == 1) stack[0] else null;
+}
+
+fn tryQuickNumericCallLoop(
+    vm: *Interpreter,
+    chunk: *Chunk,
+    plan: *const QuickCallLoopPlan,
+    frame: *Frame,
+    start: usize,
+    max_extra_steps: u64,
+    parallel_sync: bool,
+) EvalError!?QuickCallLoopUpdate {
+    if (builtin.is_test and !quick_numeric_call_loop_test_enabled.load(.monotonic)) return null;
+    if (frame.escaped.load(.monotonic)) return null;
+    const loop = switch (plan.*) {
+        .unsupported => return null,
+        .numeric_leaf => |loop| loop,
+    };
+    const index_slot: usize = @intCast(loop.index_local);
+    const value_slot: usize = @intCast(loop.value_local);
+    if (index_slot >= frame.slots.len or value_slot >= frame.slots.len) return null;
+    if (!frame.slots[index_slot].isNumber() or !frame.slots[value_slot].isNumber()) return null;
+    const bound = quickArrayBoundValue(loop.bound, frame) orelse return null;
+    var index = frame.slots[index_slot].asNum();
+    var current = frame.slots[value_slot].asNum();
+    if (!(index < bound.asNum())) return null;
+
+    const callee = switch (loop.callee) {
+        .local => |raw_slot| local: {
+            const slot: usize = @intCast(raw_slot);
+            if (slot >= frame.slots.len) return null;
+            break :local frame.slots[slot];
+        },
+        .global_instruction => |raw_instruction| global: {
+            const instruction: usize = @intCast(raw_instruction);
+            if (instruction >= chunk.code.items.len) return null;
+            const binding_name_index = chunk.code.items[instruction].a;
+            if (binding_name_index >= chunk.names.items.len) return null;
+            break :global if (parallel_sync)
+                quickImmutableLocalBinding(vm, chunk.names.items[binding_name_index]) orelse return null
+            else
+                quickGlobalBindingValue(chunk, instruction, vm) orelse return null;
+        },
+    };
+    const func = jsChunkFn(callee) orelse return null;
+    if (func.is_class_constructor or func.uses_arguments or func.params.len != 2) return null;
+    const callee_chunk = func.chunk orelse return null;
+    if (callee_chunk.param_count != 2) return null;
+    const leaf_plan = quickLeafPlan(callee_chunk, parallel_sync) orelse return null;
+    const leaf = switch (leaf_plan.*) {
+        .unsupported => return null,
+        .numeric => |*leaf| leaf,
+    };
+    const steps_per_iteration = 16 + @as(u64, leaf.executed);
+    const max_iterations = (max_extra_steps + 1) / steps_per_iteration;
+    if (max_iterations == 0) return null;
+    try vm.stackGuard();
+
+    var iterations: u64 = 0;
+    while (iterations < max_iterations and index < bound.asNum()) : (iterations += 1) {
+        const next_index = index + loop.increment;
+        const completes_loop = !(next_index < bound.asNum());
+        const completed_extra_steps = (iterations + 1) * steps_per_iteration - 1 +
+            (if (completes_loop) @as(u64, 4) else 0);
+        if (completed_extra_steps > max_extra_steps) break;
+        current = evaluateQuickLeaf(leaf, &.{ current, index }) orelse return null;
+        index = next_index;
+    }
+    if (iterations == 0) return null;
+    const completes_loop = !(index < bound.asNum());
+    frame.slots[value_slot] = Value.num(current);
+    frame.slots[index_slot] = Value.num(index);
+    if (builtin.is_test) _ = quick_numeric_call_loop_hits.fetchAdd(1, .monotonic);
+    return .{
+        .extra_steps = iterations * steps_per_iteration - 1 + (if (completes_loop) @as(u64, 4) else 0),
+        .next_ip = if (completes_loop) loop.exit_ip else start,
+    };
 }
 
 fn exactU16(value_: Value, allow_zero: bool) ?u16 {
@@ -2036,6 +2442,43 @@ fn generatorHandlersAllocator(vm: *Interpreter, gen: ?*Generator) std.mem.Alloca
     return if (gen) |g| g.handlersAllocator(vm.arena) else vm.arena;
 }
 
+/// Enter an already-compiled numeric chunk over caller-owned primitive slots.
+/// The compiler's complete-opcode selection proves that these slots and its
+/// scratch stack contain only Numbers/primitive immediates at safepoints.
+fn tryRunManagedNative(vm: *Interpreter, native: *const jit.CompiledCode, slots: []Value) EvalError!?Value {
+    if (!native.manages_steps or native.max_stack_depth > jit.numeric_scratch_capacity) return null;
+    const frame_slots: usize = @intCast(native.frame_slots);
+    if (slots.len < frame_slots) return null;
+    const live_slots = slots[0..frame_slots];
+    if (native.required_numeric_slots != 0) {
+        var required = native.required_numeric_slots;
+        while (required != 0) {
+            const slot: u6 = @intCast(@ctz(required));
+            if (slot >= live_slots.len or !live_slots[slot].isNumber()) return null;
+            required &= required - 1;
+        }
+    }
+    if (native.required_u32_slots != 0 and !unsigned32GuardsPass(live_slots, native.required_u32_slots)) return null;
+
+    var scratch: [jit.numeric_scratch_capacity]u64 = undefined;
+    var native_frame = jit.NativeFrame{
+        .slots = if (frame_slots == 0) null else @ptrCast(live_slots.ptr),
+        .scratch = scratch[0..].ptr,
+        .steps = &vm.steps,
+        .runtime_context = vm,
+        .checkpoint = nativeCheckpoint,
+        .remainder = nativeRemainder,
+        .steps_until_checkpoint = 1024 - (vm.steps & 1023),
+        .steps_until_budget = if (vm.steps <= interp.max_steps) interp.max_steps - vm.steps else 0,
+    };
+    return switch (native.run(&native_frame)) {
+        .complete => Value.fromRawBits(native_frame.result_bits),
+        .throw => error.Throw,
+        .stop => error.OutOfMemory,
+        .side_exit => null,
+    };
+}
+
 /// Run `chunk` to completion, returning the program's accumulator (for a
 /// top-level chunk, `frame == null`) or the function's return value. `frame`
 /// is the current activation for `load_local`/`load_upval`.
@@ -2073,43 +2516,12 @@ fn tryRunNative(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, ge
     const native = code orelse return null;
 
     if (native.manages_steps) {
-        if (native.max_stack_depth > jit.numeric_scratch_capacity) return null;
         const current_frame = frame;
         if (native.frame_slots > 0) {
             const cf = current_frame orelse return null;
             if (cf.slots.len < native.frame_slots or cf.escaped.load(.monotonic)) return null;
         }
-        if (native.required_numeric_slots != 0) {
-            const cf = current_frame orelse return null;
-            var required = native.required_numeric_slots;
-            while (required != 0) {
-                const slot: u6 = @intCast(@ctz(required));
-                if (!cf.slots[slot].isNumber()) return null;
-                required &= required - 1;
-            }
-        }
-        if (native.required_u32_slots != 0) {
-            const cf = current_frame orelse return null;
-            if (!unsigned32GuardsPass(cf.slots, native.required_u32_slots)) return null;
-        }
-
-        var scratch: [jit.numeric_scratch_capacity]u64 = undefined;
-        var native_frame = jit.NativeFrame{
-            .slots = if (current_frame) |cf| @ptrCast(cf.slots.ptr) else null,
-            .scratch = scratch[0..].ptr,
-            .steps = &vm.steps,
-            .runtime_context = vm,
-            .checkpoint = nativeCheckpoint,
-            .remainder = nativeRemainder,
-            .steps_until_checkpoint = 1024 - (vm.steps & 1023),
-            .steps_until_budget = if (vm.steps <= interp.max_steps) interp.max_steps - vm.steps else 0,
-        };
-        return switch (native.run(&native_frame)) {
-            .complete => Value.fromRawBits(native_frame.result_bits),
-            .throw => error.Throw,
-            .stop => error.OutOfMemory,
-            .side_exit => null,
-        };
+        return try tryRunManagedNative(vm, native, if (current_frame) |cf| cf.slots else &.{});
     }
 
     // Preserve runChunk's exact step/checkpoint contract. A native entry may
@@ -2130,6 +2542,33 @@ fn tryRunNative(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, ge
             return null;
         },
     };
+}
+
+/// A ready numeric leaf has no object/upvalue/`this`/eval opcode and its native
+/// metadata guards every parameter representation before doing observable
+/// work. Run it over bounded stack slots so a hot ordinary call avoids building
+/// and recycling a heap activation. Extra arguments stay rooted on the caller's
+/// operand stack; only formal parameters are copied, matching buildActivation.
+fn tryRunNativeDirectCall(vm: *Interpreter, func: *Function, args: []const Value) EvalError!?Value {
+    if (vm.jit_owner == null) return null;
+    if (func.is_class_constructor or func.uses_arguments) return null;
+    const chunk = func.chunk orelse return null;
+    const native = chunk.tier.loadCode() orelse return null;
+    if (!native.manages_steps) return null;
+    const slot_count: usize = @intCast(native.frame_slots);
+    if (slot_count != func.local_count or slot_count > 64 or native.frame_slots != chunk.local_count) return null;
+
+    var slots: [64]Value = @splat(Value.undef());
+    const parameter_count = @min(func.params.len, slot_count);
+    const copy_count = @min(args.len, parameter_count);
+    @memcpy(slots[0..copy_count], args[0..copy_count]);
+
+    try vm.stackGuard();
+    vm.depth += 1;
+    defer vm.depth -= 1;
+    const result = try tryRunManagedNative(vm, native, slots[0..slot_count]);
+    if (builtin.is_test and result != null) _ = quick_native_direct_call_hits.fetchAdd(1, .monotonic);
+    return result;
 }
 
 /// The instruction loop. `exec` holds the (resumable) stack/acc/ip; `gen` is
@@ -2289,6 +2728,19 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
 
             .load_local => {
                 const cf = frame.?;
+                if (stack.items.len == 0 and mayStartQuickCallLoop(code, ip - 1)) {
+                    const start = ip - 1;
+                    if (quickCallLoopPlan(chunk, start, parallel_sync)) |plan| {
+                        const steps_until_checkpoint = 1024 - (vm.steps & 1023);
+                        const steps_until_budget = interp.max_steps - vm.steps;
+                        const max_extra_steps = @min(steps_until_checkpoint - 1, steps_until_budget);
+                        if (try tryQuickNumericCallLoop(vm, chunk, plan, cf, start, max_extra_steps, parallel_sync)) |quick| {
+                            vm.steps += quick.extra_steps;
+                            ip = quick.next_ip;
+                            continue;
+                        }
+                    }
+                }
                 if (stack.items.len == 0 and mayStartQuickArrayLoop(code, ip - 1)) {
                     const start = ip - 1;
                     if (quickArrayPlan(chunk, start, parallel_sync)) |plan| {
@@ -2769,6 +3221,11 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 const callee = stack.items[base - 1];
                 if (jsChunkFn(callee)) |func| {
                     if (try tryQuickNumericRecurrence(vm, func, stack.items[base..], parallel_sync)) |result| {
+                        stack.shrinkRetainingCapacity(base - 1);
+                        try stack.append(stack_alloc, result);
+                        continue;
+                    }
+                    if (try tryRunNativeDirectCall(vm, func, stack.items[base..])) |result| {
                         stack.shrinkRetainingCapacity(base - 1);
                         try stack.append(stack_alloc, result);
                         continue;
@@ -4284,6 +4741,7 @@ fn makeClosure(vm: *Interpreter, tmpl: *bc.FnTemplate, frame: ?*Frame) EvalError
         .realm_global = interp.functionRealmGlobal(closure_env, vm.global_object),
         .name = tmpl.name,
         .source = tmpl.source,
+        .uses_arguments = tmpl.uses_arguments,
         .is_generator = tmpl.is_generator,
         .is_async = tmpl.is_async,
         .is_strict = tmpl.is_strict,
@@ -4942,6 +5400,102 @@ test "vm: numeric baseline tier preserves steps and non-number fallback" {
     machine.steps = interp.max_steps - 1;
     try std.testing.expectError(error.Throw, run(&machine, sum_chunk, &sum_frame));
     try std.testing.expectEqual(interp.max_steps + 1, machine.steps);
+}
+
+test "vm: native numeric direct calls preserve guards and exact steps" {
+    if (!jit.supported or @import("builtin").cpu.arch != .aarch64) return error.SkipZigTest;
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const source =
+        \\function step(a, b) { return (a + b) % 101; }
+        \\function exercise(limit) {
+        \\  var local_step = step;
+        \\  var value = 7;
+        \\  for (var i = 0; i < limit; i = i + 1) value = local_step(value, i);
+        \\  return value;
+        \\}
+        \\var first = exercise(300);
+        \\var mutable = function (a, b) { return a + b; };
+        \\var before = mutable(5, 2) + mutable(6, 3);
+        \\mutable = function (a, b) { return a - b; };
+        \\var after = mutable(-5, 2) + mutable(1.5, 2);
+        \\first + exercise(10) + before * 1000 + after * 10000
+    ;
+    var parser = try Parser.init(allocator, source);
+    const program = try parser.parseProgram();
+    const chunk = try Compiler.compileProgram(allocator, program);
+    var call_loop_supported = false;
+    var leaf_supported = false;
+    for (chunk.fns.items) |template| {
+        const function_chunk = template.chunk orelse continue;
+        switch (compileQuickLeafPlan(function_chunk)) {
+            .numeric => leaf_supported = true,
+            .unsupported => {},
+        }
+        for (function_chunk.code.items, 0..) |_, instruction| {
+            if (!mayStartQuickCallLoop(function_chunk.code.items, instruction)) continue;
+            switch (compileQuickCallLoopPlan(function_chunk, instruction)) {
+                .numeric_leaf => call_loop_supported = true,
+                .unsupported => {},
+            }
+        }
+    }
+    try std.testing.expect(call_loop_supported);
+    try std.testing.expect(leaf_supported);
+
+    const old_parallel = bc.ic_seqlock_enabled.load(.monotonic);
+    defer bc.ic_seqlock_enabled.store(old_parallel, .monotonic);
+    bc.ic_seqlock_enabled.store(true, .monotonic);
+    const old_call_loop_enabled = quick_numeric_call_loop_test_enabled.load(.monotonic);
+    defer quick_numeric_call_loop_test_enabled.store(old_call_loop_enabled, .monotonic);
+    quick_numeric_call_loop_test_enabled.store(true, .monotonic);
+
+    var owner = jit.Owner.init(std.testing.allocator);
+    defer owner.deinit();
+    var fast_env = Environment{ .arena = allocator, .fn_scope = true };
+    const fast_root_shape = try @import("shape.zig").Shape.createRoot(allocator);
+    try interp.installGlobals(&fast_env, fast_root_shape);
+    const fast_global = try gc_mod.allocObj(allocator);
+    fast_global.* = .{};
+    try fast_env.put("globalThis", Value.obj(fast_global));
+    try interp.mirrorGlobalsOnto(&fast_env, fast_global, fast_root_shape);
+    var fast = Interpreter{
+        .arena = allocator,
+        .env = &fast_env,
+        .root_shape = fast_root_shape,
+        .global_object = fast_global,
+        .this_value = Value.obj(fast_global),
+        .jit_owner = &owner,
+    };
+    const hits_before = quick_native_direct_call_hits.load(.monotonic);
+    const loop_hits_before = quick_numeric_call_loop_hits.load(.monotonic);
+    const fast_result = try run(&fast, chunk, null);
+    try std.testing.expect(quick_native_direct_call_hits.load(.monotonic) > hits_before);
+    try std.testing.expect(quick_numeric_call_loop_hits.load(.monotonic) > loop_hits_before);
+
+    // Reuse the exact compiled source with the native tier disabled. The ready
+    // code belongs to `owner`, but the VM-level disable switch must still force
+    // ordinary activations and produce the same value and logical step count.
+    var slow_env = Environment{ .arena = allocator, .fn_scope = true };
+    const slow_root_shape = try @import("shape.zig").Shape.createRoot(allocator);
+    try interp.installGlobals(&slow_env, slow_root_shape);
+    const slow_global = try gc_mod.allocObj(allocator);
+    slow_global.* = .{};
+    try slow_env.put("globalThis", Value.obj(slow_global));
+    try interp.mirrorGlobalsOnto(&slow_env, slow_global, slow_root_shape);
+    var slow = Interpreter{
+        .arena = allocator,
+        .env = &slow_env,
+        .root_shape = slow_root_shape,
+        .global_object = slow_global,
+        .this_value = Value.obj(slow_global),
+    };
+    quick_numeric_call_loop_test_enabled.store(false, .monotonic);
+    const slow_result = try run(&slow, chunk, null);
+    try std.testing.expectEqual(fast_result.rawBits(), slow_result.rawBits());
+    try std.testing.expectEqual(fast.steps, slow.steps);
 }
 
 test "vm: completed non-escaping recursive activations reuse bounded storage" {

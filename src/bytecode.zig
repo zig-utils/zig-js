@@ -285,6 +285,9 @@ pub const FnTemplate = struct {
     /// Exact source text of the function definition, for `Function.prototype.
     /// toString` (empty when the parser didn't capture it).
     source: []const u8 = "",
+    /// Whether the source can observe its `arguments` object. Numeric leaf-call
+    /// inlining requires false; arguments-using functions retain full call setup.
+    uses_arguments: bool = true,
     is_generator: bool = false,
     is_async: bool = false,
     /// An arrow function: it captures `this`/`new.target`/`super`/the
@@ -345,6 +348,9 @@ pub const Chunk = struct {
     /// atomically publish a fully decoded plan without racing lazy table setup.
     /// Unsupported structural shapes are cached too.
     quick_array_plans: []?*anyopaque = &.{},
+    /// Lazily decoded counted loops whose body is one monomorphic numeric leaf
+    /// call. The VM owns the plan type; slots are indexed by loop-head bytecode.
+    quick_call_plans: []?*anyopaque = &.{},
     /// Isolated-mode live-slot caches for global `load_var` sites. Entries are
     /// type-erased to avoid importing interpreter/value types here and are
     /// guarded by their exact closure environment, global object, and shape.
@@ -352,6 +358,10 @@ pub const Chunk = struct {
     /// Lazily decoded pure numeric self-recurrence plan for this function
     /// chunk. The VM owns the type and caches an explicit unsupported plan too.
     quick_recurrence_plan: ?*anyopaque = null,
+    /// Lazily decoded straight-line numeric leaf expression for guarded call
+    /// inlining. Kept per callee chunk so rebinding a call site naturally
+    /// selects or rejects the replacement function's own plan.
+    quick_leaf_plan: ?*anyopaque = null,
     /// Hotness and race-safe native-tier publication state. It remains cold
     /// until VM entry observation is wired to a backend; keeping it on the
     /// chunk makes the eventual shared-realm path single-writer by construction.
@@ -369,6 +379,8 @@ pub const Chunk = struct {
         @memset(self.quick_property_kernel_plans, null);
         self.quick_array_plans = try self.arena.alloc(?*anyopaque, self.code.items.len);
         @memset(self.quick_array_plans, null);
+        self.quick_call_plans = try self.arena.alloc(?*anyopaque, self.code.items.len);
+        @memset(self.quick_call_plans, null);
     }
 
     /// Emit an instruction, returning its index (for later jump back-patching).
