@@ -29726,6 +29726,7 @@ fn installTypedArrays(env: *Environment, rs: *Shape) EvalError!void {
     try installDOMException(env, rs, object_proto);
     try installTextEncoder(env, rs, object_proto);
     try installTextDecoder(env, rs, object_proto);
+    try installCrypto(env, rs, object_proto);
     try installTemporal(env, rs, object_proto);
     try installIntl(env, rs, object_proto);
     // ShadowRealm: a child realm with `evaluate` (and a minimal `importValue`).
@@ -39166,6 +39167,62 @@ fn installTextDecoder(env: *Environment, rs: *Shape, object_proto: *value.Object
     try ctor.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
     try setConstructor(a, rs, proto, ctor);
     try env.put("TextDecoder", Value.obj(ctor));
+}
+
+// ===== crypto (getRandomValues / randomUUID) =========================
+fn cryptoGetRandomValuesFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const av = if (args.len > 0) args[0] else Value.undef();
+    if (!av.isObject() or av.asObj().typed_array == null)
+        return self.throwDOMException("TypeMismatchError", "The provided value is not an integer-typed ArrayBufferView");
+    const ta = av.asObj().typed_array.?;
+    if (ta.kind == .f16 or ta.kind == .f32 or ta.kind == .f64)
+        return self.throwDOMException("TypeMismatchError", "The provided ArrayBufferView is of a floating-point type");
+    const len = (ta.currentLength() orelse 0) * ta.kind.byteSize();
+    // getRandomValues quota: the byte length may not exceed 65536.
+    if (len > 65536) return self.throwDOMException("QuotaExceededError", "The ArrayBufferView's byte length exceeds the 65536 quota");
+    if (len > 0) {
+        const dest = ta.buffer.array_buffer.?.bytes()[ta.byte_offset .. ta.byte_offset + len];
+        agent.engineIo().randomSecure(dest) catch return self.throwError("Error", "crypto.getRandomValues: secure randomness unavailable");
+    }
+    return av;
+}
+fn cryptoRandomUUIDFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    var b: [16]u8 = undefined;
+    agent.engineIo().randomSecure(&b) catch return self.throwError("Error", "crypto.randomUUID: secure randomness unavailable");
+    b[6] = 0x40 | (b[6] & 0x0F); // version 4
+    b[8] = 0x80 | (b[8] & 0x3F); // variant 10
+    const hex = "0123456789abcdef";
+    var out: [36]u8 = undefined;
+    var oi: usize = 0;
+    for (b, 0..) |byte, idx| {
+        if (idx == 4 or idx == 6 or idx == 8 or idx == 10) {
+            out[oi] = '-';
+            oi += 1;
+        }
+        out[oi] = hex[byte >> 4];
+        out[oi + 1] = hex[byte & 0x0F];
+        oi += 2;
+    }
+    return try Value.strAlloc(self.arena, &out);
+}
+fn installCrypto(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalError!void {
+    const a = env.arena;
+    const crypto = try gc_mod.allocObj(a);
+    crypto.* = .{ .proto = object_proto };
+    try setNative(a, rs, crypto, "getRandomValues", 1, cryptoGetRandomValuesFn);
+    try setNative(a, rs, crypto, "randomUUID", 0, cryptoRandomUUIDFn);
+    if (env.get("Symbol")) |sym| if (sym.isObject()) {
+        if (sym.asObj().getOwn("toStringTag")) |t| if (t.isObject() and t.asObj().is_symbol) {
+            try crypto.setOwn(a, rs, t.asObj().sym_key, Value.str("Crypto"));
+            try crypto.setAttr(a, t.asObj().sym_key, .{ .writable = false, .enumerable = false, .configurable = true });
+        };
+    };
+    try env.put("crypto", Value.obj(crypto));
 }
 
 fn installSharedArrayBufferAndAtomics(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalError!void {
