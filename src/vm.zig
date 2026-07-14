@@ -5517,6 +5517,9 @@ test "vm: quickens warmed numeric property update traces" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
+    const old_parallel = bc.ic_seqlock_enabled.load(.monotonic);
+    defer bc.ic_seqlock_enabled.store(old_parallel, .monotonic);
+    bc.ic_seqlock_enabled.store(false, .monotonic);
     var parser = try Parser.init(allocator,
         \\function update() {
         \\  const object = { a: 1, b: 2 };
