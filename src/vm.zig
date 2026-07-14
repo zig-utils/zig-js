@@ -2572,6 +2572,11 @@ fn tryQuickObjectAllocationLoop(
     const steps_per_iteration: u64 = 61;
     const max_iterations = (max_extra_steps + 1) / steps_per_iteration;
     if (max_iterations == 0) return null;
+    // `%Object.prototype%` is a realm intrinsic, not a live lookup through the
+    // user-replaceable global binding. Resolve the realm cache once for this
+    // checkpoint-bounded allocation batch instead of taking the root binding
+    // lock again for every fresh literal below.
+    const object_proto = vm.objectProto();
     var iterations: u64 = 0;
     var completed = false;
     while (iterations < max_iterations and counter < bound) {
@@ -2594,7 +2599,7 @@ fn tryQuickObjectAllocationLoop(
             (if (completes_loop) @as(u64, 4) else 0);
         if (completed_extra_steps > max_extra_steps) break;
 
-        const fresh_value = vm.newObject() catch |err| {
+        const fresh = gc_mod.allocObject(vm.gc, vm.arena) catch |err| {
             frame.slots[index_slot] = Value.num(@floatFromInt(selected));
             frame.slots[displaced_slot] = displaced_value;
             frame.slots[value_slot] = Value.num(next);
@@ -2603,7 +2608,8 @@ fn tryQuickObjectAllocationLoop(
             vm.steps += iterations * steps_per_iteration + 24;
             return err;
         };
-        const fresh = fresh_value.asObj();
+        fresh.proto = object_proto;
+        const fresh_value = Value.obj(fresh);
         if (!fresh.initializePreparedInlineLiteralShape(literal_shape, &.{
             Value.num(next),
             Value.num(stamp),
@@ -7368,6 +7374,25 @@ test "vm: quickens fixed-shape object allocation loops with exact steps and guar
     try std.testing.expectEqual(steps[1], steps[0]);
 
     bc.ic_seqlock_enabled.store(false, .monotonic);
+    const prototype_hits_before = quick_object_allocation_loop_hits.load(.monotonic);
+    try std.testing.expect((try vmRun(allocator, try std.fmt.allocPrint(allocator,
+        \\{s}
+        \\let items = [
+        \\  {{ seed: 1, mark: 0, prior: 0 }}, {{ seed: 2, mark: 0, prior: 0 }},
+        \\  {{ seed: 3, mark: 0, prior: 0 }}, {{ seed: 4, mark: 0, prior: 0 }},
+        \\  {{ seed: 5, mark: 0, prior: 0 }}, {{ seed: 6, mark: 0, prior: 0 }},
+        \\  {{ seed: 7, mark: 0, prior: 0 }}, {{ seed: 8, mark: 0, prior: 0 }}
+        \\];
+        \\let intrinsic = Object.prototype;
+        \\let getPrototypeOf = Object.getPrototypeOf;
+        \\allocate(items, 96, 2);
+        \\Object = {{ prototype: null }};
+        \\allocate(items, 96, 2);
+        \\getPrototypeOf(items[0]) === intrinsic
+    , .{kernel}))).asBool());
+    try std.testing.expect(
+        quick_object_allocation_loop_hits.load(.monotonic) > prototype_hits_before,
+    );
     const fallback_hits = quick_object_allocation_loop_hits.load(.monotonic);
     const guarded_counter_kernel =
         \\function allocateFrom(items, limit, extra, cursor) {

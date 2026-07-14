@@ -7380,7 +7380,7 @@ pub const Interpreter = struct {
     /// the intrinsic identity even if user code shadows or replaces the global
     /// `Object` binding. Null only during the early bootstrap window before
     /// `Object` is installed; those intrinsics wire their prototypes explicitly.
-    fn objectProto(self: *Interpreter) ?*value.Object {
+    pub fn objectProto(self: *Interpreter) ?*value.Object {
         var realm = self.env;
         while (realm.parent) |parent| realm = parent;
         realm.lockBindings();
