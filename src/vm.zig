@@ -589,6 +589,7 @@ var quick_property_update_hits: std.atomic.Value(u64) = .init(0);
 var quick_property_loop_tail_hits: std.atomic.Value(u64) = .init(0);
 var quick_property_specialized_hits: std.atomic.Value(u64) = .init(0);
 var quick_dense_array_index_hits: std.atomic.Value(u64) = .init(0);
+var quick_array_length_hits: std.atomic.Value(u64) = .init(0);
 
 inline fn quickPlainObject(value_: Value) ?*value.Object {
     if (!value_.isObject()) return null;
@@ -1507,6 +1508,13 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                     // [[Get]] path: getters + the prototype walk).
                     if (obj.isObject()) {
                         const o = obj.asObj();
+                        if (!parallel_sync and o.is_array and !o.is_arguments and o.proxy_handler == null and !o.proxy_revoked and
+                            std.mem.eql(u8, name, "length"))
+                        {
+                            result = Value.num(@floatFromInt(@max(o.elements.items.len, o.array_len)));
+                            if (builtin.is_test) _ = quick_array_length_hits.fetchAdd(1, .monotonic);
+                            break :fast;
+                        }
                         if (parallel_sync) o.lockProperties();
                         defer if (parallel_sync) o.unlockProperties();
                         if (!o.is_array and o.accessors.load(.monotonic) == null and o.attrsMap() == null) {
@@ -3985,6 +3993,7 @@ test "vm: quickens packed dense numeric array reads" {
     defer arena.deinit();
     const allocator = arena.allocator();
     const before = quick_dense_array_index_hits.load(.monotonic);
+    const lengths_before = quick_array_length_hits.load(.monotonic);
     try std.testing.expectEqual(@as(f64, 6), (try vmRun(allocator,
         \\function sum(values) {
         \\  let total = 0;
@@ -3994,6 +4003,7 @@ test "vm: quickens packed dense numeric array reads" {
         \\sum([1, 2, 3])
     )).asNum());
     try std.testing.expect(quick_dense_array_index_hits.load(.monotonic) > before);
+    try std.testing.expect(quick_array_length_hits.load(.monotonic) > lengths_before);
 
     // Holes and indexed accessors remain observable and must take [[Get]].
     try std.testing.expectEqual(@as(f64, 9), (try vmRun(allocator,
