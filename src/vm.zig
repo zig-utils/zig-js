@@ -590,9 +590,40 @@ const QuickPackedArraySumLoop = struct {
     increment: f64,
 };
 
+const max_quick_array_expression_ops = 16;
+const max_quick_array_expression_stack = 8;
+
+const QuickArrayNumericOp = union(enum) {
+    constant: f64,
+    local: u32,
+    add,
+    sub,
+    mul,
+    div,
+    mod,
+    bit_and,
+};
+
+const QuickArrayBound = union(enum) {
+    constant: f64,
+    local: u32,
+};
+
+const QuickPackedArrayPushLoop = struct {
+    index_local: u32,
+    array_local: u32,
+    bound: QuickArrayBound,
+    increment: f64,
+    get_prop_instruction: u32,
+    ops: [max_quick_array_expression_ops]QuickArrayNumericOp,
+    op_count: u8,
+    executed: u8,
+};
+
 const QuickArrayPlan = union(enum) {
     unsupported,
     packed_sum: QuickPackedArraySumLoop,
+    packed_push: QuickPackedArrayPushLoop,
 };
 
 // Test-only observations enforce that the optimized path remains reachable.
@@ -605,6 +636,7 @@ var quick_array_length_hits: std.atomic.Value(u64) = .init(0);
 var quick_array_prototype_data_hits: std.atomic.Value(u64) = .init(0);
 var quick_array_push_hits: std.atomic.Value(u64) = .init(0);
 var quick_packed_array_sum_loop_hits: std.atomic.Value(u64) = .init(0);
+var quick_packed_array_push_loop_hits: std.atomic.Value(u64) = .init(0);
 
 inline fn quickPlainObject(value_: Value) ?*value.Object {
     if (!value_.isObject()) return null;
@@ -620,7 +652,96 @@ inline fn quickArrayIndex(key: Value) ?usize {
     return @intFromFloat(number);
 }
 
+fn compileQuickPackedArrayPushLoop(chunk: *Chunk, start: usize) ?QuickPackedArrayPushLoop {
+    const code = chunk.code.items;
+    if (start + 16 > code.len or
+        code[start].op != .load_local or
+        (code[start + 1].op != .load_const and code[start + 1].op != .load_local) or
+        code[start + 2].op != .lt or
+        code[start + 3].op != .jump_if_false or
+        code[start + 4].op != .load_local or
+        code[start + 5].op != .dup or
+        code[start + 6].op != .get_prop or code[start + 6].a >= chunk.names.items.len or
+        !std.mem.eql(u8, chunk.names.items[code[start + 6].a], "push") or
+        code[start + 7].op != .swap)
+        return null;
+
+    const bound: QuickArrayBound = switch (code[start + 1].op) {
+        .load_local => .{ .local = code[start + 1].a },
+        .load_const => constant: {
+            if (code[start + 1].a >= chunk.consts.items.len) return null;
+            const value_ = chunk.consts.items[code[start + 1].a];
+            if (!value_.isNumber()) return null;
+            break :constant .{ .constant = value_.asNum() };
+        },
+        else => unreachable,
+    };
+
+    var ops: [max_quick_array_expression_ops]QuickArrayNumericOp = undefined;
+    var op_count: usize = 0;
+    var depth: usize = 0;
+    var cursor = start + 8;
+    while (cursor < code.len and code[cursor].op != .call_with_this) : (cursor += 1) {
+        if (op_count == ops.len) return null;
+        const op: QuickArrayNumericOp = switch (code[cursor].op) {
+            .load_local => local: {
+                depth += 1;
+                break :local .{ .local = code[cursor].a };
+            },
+            .load_const => constant: {
+                if (code[cursor].a >= chunk.consts.items.len) return null;
+                const value_ = chunk.consts.items[code[cursor].a];
+                if (!value_.isNumber()) return null;
+                depth += 1;
+                break :constant .{ .constant = value_.asNum() };
+            },
+            .add, .sub, .mul, .div, .mod, .bit_and => binary: {
+                if (depth < 2) return null;
+                depth -= 1;
+                break :binary switch (code[cursor].op) {
+                    .add => .add,
+                    .sub => .sub,
+                    .mul => .mul,
+                    .div => .div,
+                    .mod => .mod,
+                    .bit_and => .bit_and,
+                    else => unreachable,
+                };
+            },
+            else => return null,
+        };
+        if (depth > max_quick_array_expression_stack) return null;
+        ops[op_count] = op;
+        op_count += 1;
+    }
+    if (cursor >= code.len or code[cursor].a != 1 or depth != 1 or cursor + 8 > code.len) return null;
+    const exit = cursor + 8;
+    const index_local = code[start].a;
+    if (code[start + 3].a != exit or
+        code[cursor + 1].op != .pop or
+        code[cursor + 2].op != .load_local or code[cursor + 2].a != index_local or
+        code[cursor + 3].op != .load_const or code[cursor + 3].a >= chunk.consts.items.len or
+        code[cursor + 4].op != .add or
+        code[cursor + 5].op != .store_local or code[cursor + 5].a != index_local or
+        code[cursor + 6].op != .pop or
+        code[cursor + 7].op != .jump or code[cursor + 7].a != start)
+        return null;
+    const increment = chunk.consts.items[code[cursor + 3].a];
+    if (!increment.isNumber() or exit - start > std.math.maxInt(u8)) return null;
+    return .{
+        .index_local = index_local,
+        .array_local = code[start + 4].a,
+        .bound = bound,
+        .increment = increment.asNum(),
+        .get_prop_instruction = @intCast(start + 6),
+        .ops = ops,
+        .op_count = @intCast(op_count),
+        .executed = @intCast(exit - start),
+    };
+}
+
 fn compileQuickArrayPlan(chunk: *Chunk, start: usize) QuickArrayPlan {
+    if (compileQuickPackedArrayPushLoop(chunk, start)) |push| return .{ .packed_push = push };
     const code = chunk.code.items;
     if (start + 18 > code.len) return .unsupported;
     const index_local = code[start].a;
@@ -673,10 +794,21 @@ fn quickArrayPlan(chunk: *Chunk, start: usize) ?*QuickArrayPlan {
 
 inline fn mayStartQuickArrayLoop(code: []const bc.Inst, start: usize) bool {
     // Packed indexed accumulation starts with `index < array.length`.
-    return start + 3 < code.len and
+    const packed_sum = start + 3 < code.len and
         code[start + 1].op == .load_local and
         code[start + 2].op == .get_prop and
         code[start + 3].op == .lt;
+    // Packed production starts with a numeric bound and immediately resolves a
+    // named method on the target array.
+    const packed_push = start + 7 < code.len and
+        (code[start + 1].op == .load_const or code[start + 1].op == .load_local) and
+        code[start + 2].op == .lt and
+        code[start + 3].op == .jump_if_false and
+        code[start + 4].op == .load_local and
+        code[start + 5].op == .dup and
+        code[start + 6].op == .get_prop and
+        code[start + 7].op == .swap;
+    return packed_sum or packed_push;
 }
 
 const QuickArrayLoopUpdate = struct {
@@ -684,7 +816,59 @@ const QuickArrayLoopUpdate = struct {
     next_ip: usize,
 };
 
-fn tryQuickArrayLoop(plan: *const QuickArrayPlan, frame: *Frame, start: usize, max_extra_steps: u64) ?QuickArrayLoopUpdate {
+fn quickArrayNumericExpression(push: *const QuickPackedArrayPushLoop, frame: *Frame, index_value: Value) ?Value {
+    var numbers: [max_quick_array_expression_stack]f64 = undefined;
+    var depth: usize = 0;
+    for (push.ops[0..push.op_count]) |op| switch (op) {
+        .constant => |number| {
+            numbers[depth] = number;
+            depth += 1;
+        },
+        .local => |raw_local| {
+            const local: usize = @intCast(raw_local);
+            if (local >= frame.slots.len) return null;
+            const operand = if (raw_local == push.index_local) index_value else frame.slots[local];
+            if (!operand.isNumber()) return null;
+            numbers[depth] = operand.asNum();
+            depth += 1;
+        },
+        .add, .sub, .mul, .div, .mod, .bit_and => {
+            const rhs = numbers[depth - 1];
+            const lhs = numbers[depth - 2];
+            depth -= 1;
+            numbers[depth - 1] = switch (op) {
+                .add => lhs + rhs,
+                .sub => lhs - rhs,
+                .mul => lhs * rhs,
+                .div => lhs / rhs,
+                .mod => numberRemainder(lhs, rhs),
+                .bit_and => @floatFromInt(Value.num(lhs).toInt32() & Value.num(rhs).toInt32()),
+                else => unreachable,
+            };
+        },
+    };
+    return if (depth == 1) Value.num(numbers[0]) else null;
+}
+
+fn quickArrayBoundValue(bound: QuickArrayBound, frame: *Frame) ?Value {
+    return switch (bound) {
+        .constant => |number| Value.num(number),
+        .local => |raw_local| value_: {
+            const local: usize = @intCast(raw_local);
+            if (local >= frame.slots.len or !frame.slots[local].isNumber()) break :value_ null;
+            break :value_ frame.slots[local];
+        },
+    };
+}
+
+fn tryQuickArrayLoop(
+    vm: *Interpreter,
+    chunk: *Chunk,
+    plan: *const QuickArrayPlan,
+    frame: *Frame,
+    start: usize,
+    max_extra_steps: u64,
+) EvalError!?QuickArrayLoopUpdate {
     return switch (plan.*) {
         .unsupported => null,
         .packed_sum => |sum| quick: {
@@ -717,6 +901,45 @@ fn tryQuickArrayLoop(plan: *const QuickArrayPlan, frame: *Frame, start: usize, m
             frame.slots[total_slot] = total_value;
             frame.slots[index_slot] = index_value;
             break :quick .{ .extra_steps = iterations * 18 - 1, .next_ip = start };
+        },
+        .packed_push => |*push| quick: {
+            const executed: u64 = push.executed;
+            const max_iterations: usize = @intCast((max_extra_steps + 1) / executed);
+            if (max_iterations == 0 or max_iterations > 64) break :quick null;
+            const index_slot: usize = @intCast(push.index_local);
+            const array_slot: usize = @intCast(push.array_local);
+            if (index_slot >= frame.slots.len or array_slot >= frame.slots.len) break :quick null;
+            const array_value = frame.slots[array_slot];
+            if (!array_value.isObject()) break :quick null;
+            const array = array_value.asObj();
+            const get_prop_instruction: usize = @intCast(push.get_prop_instruction);
+            if (get_prop_instruction >= chunk.ics.len or get_prop_instruction >= chunk.code.items.len)
+                break :quick null;
+            const name_index = chunk.code.items[get_prop_instruction].a;
+            if (name_index >= chunk.names.items.len) break :quick null;
+            const method_name = chunk.names.items[name_index];
+            if (array.shape) |shape| if (shape.lookup(method_name) != null) break :quick null;
+            const prototype = array.protoAtomic() orelse break :quick null;
+            if (prototype.proxy_handler != null or prototype.proxy_revoked or prototype.accessors.load(.monotonic) != null)
+                break :quick null;
+            const method_slot = chunk.ics[get_prop_instruction].lookupSlotMode(prototype.shape, false) orelse break :quick null;
+            if (method_slot >= prototype.slots.items.len) break :quick null;
+            const callee = prototype.slots.items[method_slot];
+
+            var values: [64]Value = undefined;
+            var index_value = frame.slots[index_slot];
+            var iterations: usize = 0;
+            while (iterations < max_iterations) : (iterations += 1) {
+                if (!index_value.isNumber()) break;
+                const bound = quickArrayBoundValue(push.bound, frame) orelse break;
+                if (!(index_value.asNum() < bound.asNum())) break;
+                values[iterations] = quickArrayNumericExpression(push, frame, index_value) orelse break;
+                index_value = Value.num(index_value.asNum() + push.increment);
+            }
+            if (iterations == 0) break :quick null;
+            _ = (try vm.tryFastArrayPush(callee, array_value, values[0..iterations])) orelse break :quick null;
+            frame.slots[index_slot] = index_value;
+            break :quick .{ .extra_steps = @as(u64, @intCast(iterations)) * executed - 1, .next_ip = start };
         },
     };
 }
@@ -1394,10 +1617,14 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                         const steps_until_checkpoint = 1024 - (vm.steps & 1023);
                         const steps_until_budget = interp.max_steps - vm.steps;
                         const max_extra_steps = @min(steps_until_checkpoint - 1, steps_until_budget);
-                        if (tryQuickArrayLoop(plan, cf, start, max_extra_steps)) |quick| {
+                        if (try tryQuickArrayLoop(vm, chunk, plan, cf, start, max_extra_steps)) |quick| {
                             vm.steps += quick.extra_steps;
                             ip = quick.next_ip;
-                            if (builtin.is_test) _ = quick_packed_array_sum_loop_hits.fetchAdd(1, .monotonic);
+                            if (builtin.is_test) switch (plan.*) {
+                                .packed_sum => _ = quick_packed_array_sum_loop_hits.fetchAdd(1, .monotonic),
+                                .packed_push => _ = quick_packed_array_push_loop_hits.fetchAdd(1, .monotonic),
+                                .unsupported => {},
+                            };
                             continue;
                         }
                     }
@@ -4170,6 +4397,7 @@ test "vm: quickens packed dense numeric array reads" {
     const prototype_data_before = quick_array_prototype_data_hits.load(.monotonic);
     const pushes_before = quick_array_push_hits.load(.monotonic);
     const sum_loops_before = quick_packed_array_sum_loop_hits.load(.monotonic);
+    const push_loops_before = quick_packed_array_push_loop_hits.load(.monotonic);
     try std.testing.expectEqual(@as(f64, 6), (try vmRun(allocator,
         \\function sum(values) {
         \\  let total = 0;
@@ -4191,6 +4419,16 @@ test "vm: quickens packed dense numeric array reads" {
     )).asNum());
     try std.testing.expect(quick_array_prototype_data_hits.load(.monotonic) > prototype_data_before);
     try std.testing.expect(quick_array_push_hits.load(.monotonic) > pushes_before);
+    try std.testing.expectEqual(@as(f64, 806), (try vmRun(allocator,
+        \\function fill(limit) {
+        \\  let values = [];
+        \\  for (let i = 0; i < limit; i = i + 1) values.push((i + 3) & 7);
+        \\  return values.length * 100 + values[3];
+        \\}
+        \\fill(8)
+    )).asNum());
+    try std.testing.expect(quick_packed_array_push_loop_hits.load(.monotonic) > push_loops_before);
+    const push_loops_after = quick_packed_array_push_loop_hits.load(.monotonic);
     const pushes_after = quick_array_push_hits.load(.monotonic);
 
     // Holes and indexed accessors remain observable and must take [[Get]].
@@ -4229,6 +4467,17 @@ test "vm: quickens packed dense numeric array reads" {
         \\let values = []; values.push(1)
     )).asNum());
     try std.testing.expectEqual(pushes_after, quick_array_push_hits.load(.monotonic));
+    try std.testing.expectEqual(@as(f64, 60), (try vmRun(allocator,
+        \\function fill() {
+        \\  let calls = 0;
+        \\  let values = [];
+        \\  values.push = function (value) { calls = calls + value; };
+        \\  for (let i = 0; i < 3; i = i + 1) values.push(i + 1);
+        \\  return calls * 10 + values.length;
+        \\}
+        \\fill()
+    )).asNum());
+    try std.testing.expectEqual(push_loops_after, quick_packed_array_push_loop_hits.load(.monotonic));
 
     // An indexed prototype setter must observe push's ordinary [[Set]].
     try std.testing.expectEqual(@as(f64, 71), (try vmRun(allocator,
@@ -4251,7 +4500,12 @@ test "vm: packed array sum quickening preserves bytecode steps" {
         \\  for (let i = 0; i < values.length; i = i + 1) total = total + values[i];
         \\  return total;
         \\}
-        \\sum([1, 2, 3, 4, 5, 6, 7, 8])
+        \\function fill() {
+        \\  let values = [];
+        \\  for (let i = 1; i < 9; i = i + 1) values.push(i);
+        \\  return values;
+        \\}
+        \\sum(fill())
     ;
     const old_parallel = bc.ic_seqlock_enabled.load(.monotonic);
     defer bc.ic_seqlock_enabled.store(old_parallel, .monotonic);
