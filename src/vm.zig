@@ -1458,8 +1458,12 @@ fn tryQuickArrayLoop(
 }
 
 inline fn quickPropertySlot(chunk: *Chunk, instruction: usize, object: *value.Object) ?usize {
+    return quickPropertySlotMode(chunk, instruction, object, false);
+}
+
+inline fn quickPropertySlotMode(chunk: *Chunk, instruction: usize, object: *value.Object, parallel_sync: bool) ?usize {
     if (instruction >= chunk.ics.len) return null;
-    const slot: usize = @intCast(chunk.ics[instruction].lookupSlotMode(object.shape, false) orelse return null);
+    const slot: usize = @intCast(chunk.ics[instruction].lookupSlotMode(object.shape, parallel_sync) orelse return null);
     if (slot >= object.slots.items.len) return null;
     return slot;
 }
@@ -1587,22 +1591,30 @@ fn compileQuickPropertyKernelPlan(chunk: *Chunk, start: usize) QuickPropertyKern
     } };
 }
 
-fn quickPropertyKernelPlan(chunk: *Chunk, start: usize) ?*QuickPropertyKernelPlan {
-    if (chunk.quick_property_kernel_plans.len == 0) {
-        const plans = chunk.arena.alloc(?*anyopaque, chunk.code.items.len) catch return null;
-        @memset(plans, null);
-        chunk.quick_property_kernel_plans = plans;
-    }
+fn quickPropertyKernelPlan(chunk: *Chunk, start: usize, parallel_sync: bool) ?*QuickPropertyKernelPlan {
     if (start >= chunk.quick_property_kernel_plans.len) return null;
-    if (chunk.quick_property_kernel_plans[start]) |raw| return @ptrCast(@alignCast(raw));
+    const slot = &chunk.quick_property_kernel_plans[start];
+    if (if (parallel_sync) @atomicLoad(?*anyopaque, slot, .acquire) else slot.*) |raw|
+        return @ptrCast(@alignCast(raw));
     const plan = chunk.arena.create(QuickPropertyKernelPlan) catch return null;
     plan.* = compileQuickPropertyKernelPlan(chunk, start);
-    chunk.quick_property_kernel_plans[start] = plan;
+    if (parallel_sync) {
+        if (@cmpxchgStrong(?*anyopaque, slot, null, plan, .acq_rel, .acquire)) |published|
+            return @ptrCast(@alignCast(published));
+    } else {
+        slot.* = plan;
+    }
     return plan;
 }
 
-fn tryQuickPropertyKernel(chunk: *Chunk, frame: *Frame, start: usize, max_extra_steps: u64) ?QuickPropertyKernelUpdate {
-    const plan = quickPropertyKernelPlan(chunk, start) orelse return null;
+fn tryQuickPropertyKernel(
+    chunk: *Chunk,
+    frame: *Frame,
+    start: usize,
+    max_extra_steps: u64,
+    parallel_sync: bool,
+) ?QuickPropertyKernelUpdate {
+    const plan = quickPropertyKernelPlan(chunk, start, parallel_sync) orelse return null;
     const kernel = switch (plan.*) {
         .unsupported => return null,
         .four_property_loop => |kernel| kernel,
@@ -1612,15 +1624,21 @@ fn tryQuickPropertyKernel(chunk: *Chunk, frame: *Frame, start: usize, max_extra_
     const object_local: usize = @intCast(kernel.object_local);
     const counter_local: usize = @intCast(kernel.counter_local);
     if (object_local >= frame.slots.len or counter_local >= frame.slots.len) return null;
-    const object = quickPlainObject(frame.slots[object_local]) orelse return null;
-    if (object.proxy_handler != null or object.proxy_revoked) return null;
+    const frame_held = frame.lockSlots(parallel_sync);
+    defer frame.unlockSlots(frame_held);
+    if (!frame.slots[object_local].isObject()) return null;
+    const object = frame.slots[object_local].asObj();
+    if (object.is_array or object.proxy_handler != null or object.proxy_revoked) return null;
+    if (parallel_sync) object.lockProperties();
+    defer if (parallel_sync) object.unlockProperties();
+    if (object.accessors.load(.monotonic) != null or object.attrsMap() != null) return null;
 
     var reads: [6]usize = undefined;
     var writes: [4]usize = undefined;
     for (kernel.read_instructions, 0..) |instruction, index|
-        reads[index] = quickPropertySlot(chunk, instruction, object) orelse return null;
+        reads[index] = quickPropertySlotMode(chunk, instruction, object, parallel_sync) orelse return null;
     for (kernel.write_instructions, 0..) |instruction, index|
-        writes[index] = quickPropertySlot(chunk, instruction, object) orelse return null;
+        writes[index] = quickPropertySlotMode(chunk, instruction, object, parallel_sync) orelse return null;
     if (reads[0] != writes[0] or reads[2] != writes[0] or
         reads[1] != writes[1] or reads[3] != writes[1] or reads[5] != writes[1] or
         reads[4] != writes[2])
@@ -2299,22 +2317,29 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 // base and then a numeric RHS load. Keep the recognizer call off
                 // ordinary numeric locals (including the arithmetic JIT side
                 // exits), and off the inner `load_local; get_prop` read pair.
-                if (!parallel_sync and cf.slots[inst.a].isObject() and ip < code.len and switch (code[ip].op) {
+                const may_start_quick_property = ip < code.len and switch (code[ip].op) {
                     .load_const, .load_local => true,
                     else => false,
-                }) {
+                };
+                if (may_start_quick_property) property: {
+                    const held = cf.lockSlots(parallel_sync);
+                    const quick_property_base = cf.slots[inst.a].isObject();
+                    cf.unlockSlots(held);
+                    if (!quick_property_base) break :property;
                     const steps_until_checkpoint = 1024 - (vm.steps & 1023);
                     const steps_until_budget = interp.max_steps - vm.steps;
                     const max_extra_steps = @min(steps_until_checkpoint - 1, steps_until_budget);
-                    if (tryQuickPropertyKernel(chunk, cf, ip - 1, max_extra_steps)) |quick| {
+                    if (tryQuickPropertyKernel(chunk, cf, ip - 1, max_extra_steps, parallel_sync)) |quick| {
                         vm.steps += quick.extra_steps;
                         ip = quick.next_ip;
                         continue;
                     }
-                    if (tryNumericPropertyUpdate(chunk, cf, ip - 1, max_extra_steps)) |quick| {
-                        vm.steps += quick.extra_steps;
-                        ip = quick.next_ip;
-                        continue;
+                    if (!parallel_sync) {
+                        if (tryNumericPropertyUpdate(chunk, cf, ip - 1, max_extra_steps)) |quick| {
+                            vm.steps += quick.extra_steps;
+                            ip = quick.next_ip;
+                            continue;
+                        }
                     }
                 }
                 const held = cf.lockSlots(parallel_sync);
@@ -5568,7 +5593,7 @@ test "vm: fuses warmed four-property loops with exact bytecode steps" {
     const hits_before = quick_property_kernel_hits.load(.monotonic);
     var results: [2]f64 = undefined;
     var steps: [2]u64 = undefined;
-    var isolated_hits: u64 = undefined;
+    var kernel_hits = hits_before;
     for ([_]bool{ false, true }, 0..) |parallel, run_index| {
         bc.ic_seqlock_enabled.store(parallel, .monotonic);
         var parser = try Parser.init(allocator, source);
@@ -5580,12 +5605,36 @@ test "vm: fuses warmed four-property loops with exact bytecode steps" {
         var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape };
         results[run_index] = (try run(&machine, chunk, null)).asNum();
         steps[run_index] = machine.steps;
-        if (!parallel) isolated_hits = quick_property_kernel_hits.load(.monotonic);
+        const next_hits = quick_property_kernel_hits.load(.monotonic);
+        try std.testing.expect(next_hits > kernel_hits);
+        kernel_hits = next_hits;
     }
     try std.testing.expectEqual(results[1], results[0]);
     try std.testing.expectEqual(steps[1], steps[0]);
-    try std.testing.expect(isolated_hits > hits_before);
-    try std.testing.expectEqual(isolated_hits, quick_property_kernel_hits.load(.monotonic));
+
+    // A structurally identical loop with an observable accessor must retain
+    // ordinary per-operation [[Get]]/[[Set]] behavior in synchronized mode.
+    try std.testing.expectEqual(@as(f64, 9), (try vmRun(allocator,
+        \\function accessorKernel() {
+        \\  let calls = 0; let backing = 0;
+        \\  const object = { a: 0, b: 1, c: 2, d: 3 };
+        \\  Object.defineProperty(object, "a", {
+        \\    get: function () { calls = calls + 1; return backing; },
+        \\    set: function (value) { calls = calls + 1; backing = value; }
+        \\  });
+        \\  let i = 0;
+        \\  while (i < 3) {
+        \\    object.a = (object.a + i) % 1000003;
+        \\    object.b = object.b + 1;
+        \\    object.c = object.a + object.b;
+        \\    object.d = object.c - object.b;
+        \\    i = i + 1;
+        \\  }
+        \\  return calls;
+        \\}
+        \\accessorKernel()
+    )).asNum());
+    try std.testing.expectEqual(kernel_hits, quick_property_kernel_hits.load(.monotonic));
 }
 
 test "vm: for loop with ++ and compound assignment" {
