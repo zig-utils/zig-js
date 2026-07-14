@@ -330,6 +330,11 @@ pub const Chunk = struct {
     /// One inline cache per instruction, allocated by `finalize` once the code
     /// stream is complete. Warm across runs of the same chunk.
     ics: []InlineCache = &.{},
+    /// Lazily allocated VM-owned immutable quick-trace plans, indexed by their
+    /// first bytecode. Kept type-erased here to avoid a bytecode → VM import
+    /// cycle. Isolated execution publishes a plan only after fully decoding it;
+    /// parallel mode does not consume or mutate this table.
+    quick_property_plans: []?*anyopaque = &.{},
     /// Hotness and race-safe native-tier publication state. It remains cold
     /// until VM entry observation is wired to a backend; keeping it on the
     /// chunk makes the eventual shared-realm path single-writer by construction.

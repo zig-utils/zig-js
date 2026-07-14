@@ -505,10 +505,47 @@ inline fn numberRemainder(a: f64, b: f64) f64 {
 
 const max_quick_property_instructions: usize = 20;
 const max_quick_property_stack: usize = 8;
+const max_quick_property_ops: usize = 8;
 
 const QuickPropertyUpdate = struct {
     extra_steps: u8,
     next_ip: usize,
+};
+
+const QuickPropertyOperand = struct {
+    local: u32,
+    instruction: u32,
+};
+
+const QuickNumericOp = union(enum) {
+    constant: f64,
+    local: u32,
+    property: QuickPropertyOperand,
+    add,
+    sub,
+    mul,
+    div,
+    mod,
+};
+
+const QuickLoopTail = struct {
+    counter_local: u32,
+    delta: f64,
+    arithmetic: bc.Op,
+    bound: f64,
+    comparison: bc.Op,
+    body_ip: u32,
+    exit_ip: u32,
+};
+
+const QuickPropertyPlan = struct {
+    target_local: u32,
+    target_instruction: u32,
+    ops: [max_quick_property_ops]QuickNumericOp,
+    op_count: u8,
+    executed: u8,
+    next_ip: u32,
+    tail: ?QuickLoopTail,
 };
 
 // Test-only observations enforce that the optimized path remains reachable.
@@ -530,18 +567,13 @@ inline fn quickPropertySlot(chunk: *Chunk, instruction: usize, object: *value.Ob
     return slot;
 }
 
-/// Collapse a warmed, monomorphic `base.property = numeric expression` trace.
-/// Every read is guarded before the sole mutation, so any miss can safely fall
-/// back to the ordinary bytecode at `start`. This isolated-mode tier accepts no
-/// accessors, attributes, prototypes, arrays, coercions, or observable calls.
-fn tryNumericPropertyUpdate(chunk: *Chunk, frame: *Frame, start: usize, max_extra_steps: u64) ?QuickPropertyUpdate {
+fn compileQuickPropertyPlan(chunk: *Chunk, start: usize) ?*QuickPropertyPlan {
     const code = chunk.code.items;
     if (start >= code.len or code[start].op != .load_local) return null;
-    const base_index: usize = @intCast(code[start].a);
-    if (base_index >= frame.slots.len) return null;
-    const target = quickPlainObject(frame.slots[base_index]) orelse return null;
-
-    var numbers: [max_quick_property_stack]f64 = undefined;
+    var plan: QuickPropertyPlan = undefined;
+    plan.target_local = code[start].a;
+    plan.op_count = 0;
+    plan.tail = null;
     var depth: usize = 0;
     var cursor = start + 1;
     while (cursor < code.len and cursor - start < max_quick_property_instructions) {
@@ -549,56 +581,49 @@ fn tryNumericPropertyUpdate(chunk: *Chunk, frame: *Frame, start: usize, max_extr
         switch (inst.op) {
             .load_const => {
                 const index: usize = @intCast(inst.a);
-                if (index >= chunk.consts.items.len or depth == numbers.len) return null;
+                if (index >= chunk.consts.items.len or plan.op_count == plan.ops.len or depth == max_quick_property_stack) return null;
                 const constant = chunk.consts.items[index];
                 if (!constant.isNumber()) return null;
-                numbers[depth] = constant.asNum();
+                plan.ops[plan.op_count] = .{ .constant = constant.asNum() };
+                plan.op_count += 1;
                 depth += 1;
                 cursor += 1;
             },
             .load_local => {
-                const index: usize = @intCast(inst.a);
-                if (index >= frame.slots.len or depth == numbers.len) return null;
-                const local = frame.slots[index];
+                if (plan.op_count == plan.ops.len or depth == max_quick_property_stack) return null;
                 if (cursor + 1 < code.len and code[cursor + 1].op == .get_prop) {
                     if (cursor + 1 - start >= max_quick_property_instructions) return null;
-                    const object = quickPlainObject(local) orelse return null;
-                    const slot = quickPropertySlot(chunk, cursor + 1, object) orelse return null;
-                    const property = object.slots.items[slot];
-                    if (!property.isNumber()) return null;
-                    numbers[depth] = property.asNum();
+                    plan.ops[plan.op_count] = .{ .property = .{
+                        .local = inst.a,
+                        .instruction = @intCast(cursor + 1),
+                    } };
                     cursor += 2;
                 } else {
-                    if (!local.isNumber()) return null;
-                    numbers[depth] = local.asNum();
+                    plan.ops[plan.op_count] = .{ .local = inst.a };
                     cursor += 1;
                 }
+                plan.op_count += 1;
                 depth += 1;
             },
             .add, .sub, .mul, .div, .mod => {
-                if (depth < 2) return null;
-                const rhs = numbers[depth - 1];
-                const lhs = numbers[depth - 2];
+                if (depth < 2 or plan.op_count == plan.ops.len) return null;
                 depth -= 1;
-                numbers[depth - 1] = switch (inst.op) {
-                    .add => lhs + rhs,
-                    .sub => lhs - rhs,
-                    .mul => lhs * rhs,
-                    .div => lhs / rhs,
-                    .mod => numberRemainder(lhs, rhs),
+                plan.ops[plan.op_count] = switch (inst.op) {
+                    .add => .add,
+                    .sub => .sub,
+                    .mul => .mul,
+                    .div => .div,
+                    .mod => .mod,
                     else => unreachable,
                 };
+                plan.op_count += 1;
                 cursor += 1;
             },
             .set_prop => {
                 if (depth != 1 or cursor + 1 >= code.len or code[cursor + 1].op != .pop) return null;
-                const slot = quickPropertySlot(chunk, cursor, target) orelse return null;
-                const result = Value.num(numbers[0]);
-
                 var executed = cursor + 2 - start;
-                var next_ip = cursor + 2;
-                var update_local: ?usize = null;
-                var update_value: f64 = undefined;
+                plan.target_instruction = @intCast(cursor);
+                plan.next_ip = @intCast(cursor + 2);
                 tail: {
                     // Fuse the canonical counted-loop tail:
                     //   counter = counter <op> constant; jump condition
@@ -614,20 +639,14 @@ fn tryNumericPropertyUpdate(chunk: *Chunk, frame: *Frame, start: usize, max_extr
                         store_counter.op != .store_local or store_counter.a != load_counter.a or
                         code[tail_start + 4].op != .pop or code[tail_start + 5].op != .jump)
                         break :tail;
-                    const counter_index: usize = @intCast(load_counter.a);
                     const delta_index: usize = @intCast(load_delta.a);
-                    if (counter_index >= frame.slots.len or delta_index >= chunk.consts.items.len) break :tail;
-                    const counter = frame.slots[counter_index];
+                    if (delta_index >= chunk.consts.items.len) break :tail;
                     const delta = chunk.consts.items[delta_index];
-                    if (!counter.isNumber() or !delta.isNumber()) break :tail;
-                    const updated = switch (arithmetic.op) {
-                        .add => counter.asNum() + delta.asNum(),
-                        .sub => counter.asNum() - delta.asNum(),
-                        .mul => counter.asNum() * delta.asNum(),
-                        .div => counter.asNum() / delta.asNum(),
-                        .mod => numberRemainder(counter.asNum(), delta.asNum()),
+                    if (!delta.isNumber()) break :tail;
+                    switch (arithmetic.op) {
+                        .add, .sub, .mul, .div, .mod => {},
                         else => break :tail,
-                    };
+                    }
 
                     const condition: usize = @intCast(code[tail_start + 5].a);
                     if (condition + 3 >= code.len or condition >= start or condition + 4 > start) break :tail;
@@ -642,34 +661,135 @@ fn tryNumericPropertyUpdate(chunk: *Chunk, frame: *Frame, start: usize, max_extr
                     if (bound_index >= chunk.consts.items.len) break :tail;
                     const bound = chunk.consts.items[bound_index];
                     if (!bound.isNumber()) break :tail;
-                    const keep_looping = switch (comparison.op) {
-                        .lt => updated < bound.asNum(),
-                        .le => updated <= bound.asNum(),
-                        .gt => updated > bound.asNum(),
-                        .ge => updated >= bound.asNum(),
+                    switch (comparison.op) {
+                        .lt, .le, .gt, .ge => {},
                         else => break :tail,
-                    };
+                    }
 
                     executed += 10; // local update + backedge + four-instruction condition
-                    next_ip = if (keep_looping) condition + 4 else @intCast(branch.a);
-                    update_local = counter_index;
-                    update_value = updated;
+                    plan.tail = .{
+                        .counter_local = load_counter.a,
+                        .delta = delta.asNum(),
+                        .arithmetic = arithmetic.op,
+                        .bound = bound.asNum(),
+                        .comparison = comparison.op,
+                        .body_ip = @intCast(condition + 4),
+                        .exit_ip = branch.a,
+                    };
                 }
 
-                if (executed > max_quick_property_instructions or executed - 1 > max_extra_steps) return null;
-                gc_mod.barrierValueFrom(target, result);
-                target.slots.items[slot] = result;
-                if (update_local) |index| {
-                    frame.slots[index] = Value.num(update_value);
-                    if (builtin.is_test) _ = quick_property_loop_tail_hits.fetchAdd(1, .monotonic);
-                }
-                if (builtin.is_test) _ = quick_property_update_hits.fetchAdd(1, .monotonic);
-                return .{ .extra_steps = @intCast(executed - 1), .next_ip = next_ip };
+                if (executed > max_quick_property_instructions) return null;
+                plan.executed = @intCast(executed);
+                const cached = chunk.arena.create(QuickPropertyPlan) catch return null;
+                cached.* = plan;
+                return cached;
             },
             else => return null,
         }
     }
     return null;
+}
+
+inline fn quickPropertyPlan(chunk: *Chunk, start: usize) ?*QuickPropertyPlan {
+    if (chunk.quick_property_plans.len == 0) {
+        const plans = chunk.arena.alloc(?*anyopaque, chunk.code.items.len) catch return null;
+        @memset(plans, null);
+        chunk.quick_property_plans = plans;
+    }
+    if (start >= chunk.quick_property_plans.len) return null;
+    if (chunk.quick_property_plans[start]) |raw|
+        return @ptrCast(@alignCast(raw));
+    const plan = compileQuickPropertyPlan(chunk, start) orelse return null;
+    chunk.quick_property_plans[start] = plan;
+    return plan;
+}
+
+/// Execute a predecoded, warmed `base.property = numeric expression` trace.
+/// Every runtime shape/type guard succeeds before the sole mutation; a miss
+/// safely resumes the ordinary bytecode at `start`.
+fn tryNumericPropertyUpdate(chunk: *Chunk, frame: *Frame, start: usize, max_extra_steps: u64) ?QuickPropertyUpdate {
+    const plan = quickPropertyPlan(chunk, start) orelse return null;
+    const target_index: usize = @intCast(plan.target_local);
+    if (target_index >= frame.slots.len) return null;
+    const target = quickPlainObject(frame.slots[target_index]) orelse return null;
+
+    var numbers: [max_quick_property_stack]f64 = undefined;
+    var depth: usize = 0;
+    for (plan.ops[0..plan.op_count]) |op| switch (op) {
+        .constant => |number| {
+            numbers[depth] = number;
+            depth += 1;
+        },
+        .local => |raw_index| {
+            const index: usize = @intCast(raw_index);
+            if (index >= frame.slots.len or !frame.slots[index].isNumber()) return null;
+            numbers[depth] = frame.slots[index].asNum();
+            depth += 1;
+        },
+        .property => |operand| {
+            const index: usize = @intCast(operand.local);
+            if (index >= frame.slots.len) return null;
+            const object = quickPlainObject(frame.slots[index]) orelse return null;
+            const slot = quickPropertySlot(chunk, operand.instruction, object) orelse return null;
+            const property = object.slots.items[slot];
+            if (!property.isNumber()) return null;
+            numbers[depth] = property.asNum();
+            depth += 1;
+        },
+        .add, .sub, .mul, .div, .mod => {
+            const rhs = numbers[depth - 1];
+            const lhs = numbers[depth - 2];
+            depth -= 1;
+            numbers[depth - 1] = switch (op) {
+                .add => lhs + rhs,
+                .sub => lhs - rhs,
+                .mul => lhs * rhs,
+                .div => lhs / rhs,
+                .mod => numberRemainder(lhs, rhs),
+                else => unreachable,
+            };
+        },
+    };
+
+    const target_slot = quickPropertySlot(chunk, plan.target_instruction, target) orelse return null;
+    var next_ip: usize = plan.next_ip;
+    var update_local: ?usize = null;
+    var update_value: f64 = undefined;
+    if (plan.tail) |tail| {
+        const counter_index: usize = @intCast(tail.counter_local);
+        if (counter_index >= frame.slots.len or !frame.slots[counter_index].isNumber()) return null;
+        const counter = frame.slots[counter_index].asNum();
+        const updated = switch (tail.arithmetic) {
+            .add => counter + tail.delta,
+            .sub => counter - tail.delta,
+            .mul => counter * tail.delta,
+            .div => counter / tail.delta,
+            .mod => numberRemainder(counter, tail.delta),
+            else => unreachable,
+        };
+        const keep_looping = switch (tail.comparison) {
+            .lt => updated < tail.bound,
+            .le => updated <= tail.bound,
+            .gt => updated > tail.bound,
+            .ge => updated >= tail.bound,
+            else => unreachable,
+        };
+        next_ip = if (keep_looping) tail.body_ip else tail.exit_ip;
+        update_local = counter_index;
+        update_value = updated;
+    }
+
+    const extra_steps: u64 = plan.executed - 1;
+    if (extra_steps > max_extra_steps) return null;
+    const result = Value.num(numbers[0]);
+    gc_mod.barrierValueFrom(target, result);
+    target.slots.items[target_slot] = result;
+    if (update_local) |index| {
+        frame.slots[index] = Value.num(update_value);
+        if (builtin.is_test) _ = quick_property_loop_tail_hits.fetchAdd(1, .monotonic);
+    }
+    if (builtin.is_test) _ = quick_property_update_hits.fetchAdd(1, .monotonic);
+    return .{ .extra_steps = @intCast(extra_steps), .next_ip = next_ip };
 }
 
 fn nativeRemainder(a: f64, b: f64) callconv(.c) f64 {
@@ -3696,6 +3816,9 @@ test "vm: quickens warmed numeric property update traces" {
     }
     try std.testing.expect(quick_property_update_hits.load(.monotonic) > before);
     try std.testing.expect(quick_property_loop_tail_hits.load(.monotonic) > loop_tails_before);
+    var cached_plan = false;
+    for (function_chunk.quick_property_plans) |plan| cached_plan = cached_plan or plan != null;
+    try std.testing.expect(cached_plan);
 }
 
 test "vm: for loop with ++ and compound assignment" {
