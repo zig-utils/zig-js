@@ -588,12 +588,20 @@ const QuickPropertyPlan = struct {
 var quick_property_update_hits: std.atomic.Value(u64) = .init(0);
 var quick_property_loop_tail_hits: std.atomic.Value(u64) = .init(0);
 var quick_property_specialized_hits: std.atomic.Value(u64) = .init(0);
+var quick_dense_array_index_hits: std.atomic.Value(u64) = .init(0);
 
 inline fn quickPlainObject(value_: Value) ?*value.Object {
     if (!value_.isObject()) return null;
     const object = value_.asObj();
     if (object.is_array or object.accessors.load(.monotonic) != null or object.attrsMap() != null) return null;
     return object;
+}
+
+inline fn quickArrayIndex(key: Value) ?usize {
+    if (!key.isNumber()) return null;
+    const number = key.asNum();
+    if (!std.math.isFinite(number) or number < 0 or number >= 4294967295 or @trunc(number) != number) return null;
+    return @intFromFloat(number);
 }
 
 inline fn quickPropertySlot(chunk: *Chunk, instruction: usize, object: *value.Object) ?usize {
@@ -1529,7 +1537,27 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 // TypeError before the key's `toString` runs (matches the tree-walker).
                 if (obj.isNull() or obj.isUndefined())
                     return vm.throwError("TypeError", "cannot read property of null or undefined");
-                try stack.append(stack_alloc, try vm.getProperty(obj, try propKey(vm, key)));
+                fast: {
+                    // A present packed element has no observable coercion,
+                    // accessor, hole, or prototype work. Shared arrays retain
+                    // the locked generic path; isolated arrays can read their
+                    // stable element allocation directly.
+                    if (!parallel_sync and obj.isObject()) {
+                        const o = obj.asObj();
+                        if (o.is_array and !o.is_arguments and o.proxy_handler == null and !o.proxy_revoked and
+                            o.accessors.load(.monotonic) == null and o.holes == null)
+                        {
+                            if (quickArrayIndex(key)) |index| {
+                                if (index < o.elements.items.len) {
+                                    try stack.append(stack_alloc, o.elements.items[index]);
+                                    if (builtin.is_test) _ = quick_dense_array_index_hits.fetchAdd(1, .monotonic);
+                                    break :fast;
+                                }
+                            }
+                        }
+                    }
+                    try stack.append(stack_alloc, try vm.getProperty(obj, try propKey(vm, key)));
+                }
             },
             .super_get => {
                 // `super.name`: GetSuperBase = home_object.[[Prototype]]; read with
@@ -3950,6 +3978,30 @@ test "vm: objects, arrays, members, this, new, instanceof on the VM" {
     try std.testing.expectEqual(@as(f64, 7), (try vmRun(a, "function P(x, y) { this.x = x; this.y = y; } let p = new P(3, 4); p.x + p.y")).asNum());
     try std.testing.expect((try vmRun(a, "function P(x) { this.x = x; } (new P(1)) instanceof P")).asBool());
     try std.testing.expectEqual(@as(f64, 10), (try vmRun(a, "let o = { n: 10, get: function () { return this.n; } }; o.get()")).asNum());
+}
+
+test "vm: quickens packed dense numeric array reads" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const before = quick_dense_array_index_hits.load(.monotonic);
+    try std.testing.expectEqual(@as(f64, 6), (try vmRun(allocator,
+        \\function sum(values) {
+        \\  let total = 0;
+        \\  for (let i = 0; i < values.length; i = i + 1) total = total + values[i];
+        \\  return total;
+        \\}
+        \\sum([1, 2, 3])
+    )).asNum());
+    try std.testing.expect(quick_dense_array_index_hits.load(.monotonic) > before);
+
+    // Holes and indexed accessors remain observable and must take [[Get]].
+    try std.testing.expectEqual(@as(f64, 9), (try vmRun(allocator,
+        \\let values = [1, , 3]; Array.prototype[1] = 9; values[1]
+    )).asNum());
+    try std.testing.expectEqual(@as(f64, 7), (try vmRun(allocator,
+        \\let values = [1]; Object.defineProperty(values, "0", { get: function () { return 7; } }); values[0]
+    )).asNum());
 }
 
 test "vm: quickens warmed numeric property update traces" {
