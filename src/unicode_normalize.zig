@@ -1,91 +1,90 @@
-//! Small Unicode normalization core for String.prototype.normalize.
+//! Unicode normalization core for String.prototype.normalize (NFC/NFD/NFKC/NFKD).
 //!
-//! This is intentionally table-shaped: the algorithm follows UAX #15
-//! decomposition, canonical ordering, and recomposition, while the data table is
-//! currently limited to the code points exercised by the conformance corpus.
+//! Follows UAX #15: canonical/compatibility decomposition, canonical ordering,
+//! then (for the composing forms) canonical composition. Hangul syllables are
+//! (de)composed algorithmically; every other mapping, the combining classes, and
+//! the primary-composite set come from the generated `unicode_normalize_data.zig`
+//! table (built from the UCD by tools/gen_norm.py).
 
 const std = @import("std");
+const data = @import("unicode_normalize_data.zig");
 
 const Codepoint = u21;
 
 pub const Form = enum { nfc, nfd, nfkc, nfkd };
 
-const Decomp = struct {
-    cp: Codepoint,
-    canonical: []const Codepoint,
-    compatibility: []const Codepoint = &.{},
-};
-
-const decomp_table = [_]Decomp{
-    .{ .cp = 0x00C5, .canonical = &.{ 'A', 0x030A } },
-    .{ .cp = 0x00C7, .canonical = &.{ 'C', 0x0327 } },
-    .{ .cp = 0x00E1, .canonical = &.{ 'a', 0x0301 } },
-    .{ .cp = 0x00E4, .canonical = &.{ 'a', 0x0308 } },
-    .{ .cp = 0x00F4, .canonical = &.{ 'o', 0x0302 } },
-    .{ .cp = 0x00F6, .canonical = &.{ 'o', 0x0308 } },
-    .{ .cp = 0x0100, .canonical = &.{ 'A', 0x0304 } },
-    .{ .cp = 0x0103, .canonical = &.{ 'a', 0x0306 } },
-    .{ .cp = 0x01B0, .canonical = &.{ 'u', 0x031B } },
-    .{ .cp = 0x0344, .canonical = &.{ 0x0308, 0x0301 } },
-    .{ .cp = 0x0958, .canonical = &.{ 0x0915, 0x093C } },
-    .{ .cp = 0x1E0B, .canonical = &.{ 'd', 0x0307 } },
-    .{ .cp = 0x1E0D, .canonical = &.{ 'd', 0x0323 } },
-    .{ .cp = 0x1E61, .canonical = &.{ 's', 0x0307 } },
-    .{ .cp = 0x1E63, .canonical = &.{ 's', 0x0323 } },
-    .{ .cp = 0x1E9B, .canonical = &.{ 0x017F, 0x0307 } },
-    .{ .cp = 0x1E69, .canonical = &.{ 's', 0x0323, 0x0307 } },
-    .{ .cp = 0x1EA1, .canonical = &.{ 'a', 0x0323 } },
-    .{ .cp = 0x1EE5, .canonical = &.{ 'u', 0x0323 } },
-    .{ .cp = 0x1EF1, .canonical = &.{ 'u', 0x031B, 0x0323 } },
-    .{ .cp = 0x2126, .canonical = &.{0x03A9} },
-    .{ .cp = 0x212B, .canonical = &.{ 'A', 0x030A } },
-    .{ .cp = 0x2ADC, .canonical = &.{ 0x2ADD, 0x0338 } },
-    .{ .cp = 0xAC00, .canonical = &.{ 0x1100, 0x1161 } },
-    .{ .cp = 0xD4DB, .canonical = &.{ 0x1111, 0x1171, 0x11B6 } },
-    .{ .cp = 0x017F, .canonical = &.{}, .compatibility = &.{'s'} },
-};
-
-const Compose = struct { a: Codepoint, b: Codepoint, to: Codepoint };
-
-const compose_table = [_]Compose{
-    .{ .a = 'A', .b = 0x030A, .to = 0x00C5 },
-    .{ .a = 'a', .b = 0x0301, .to = 0x00E1 },
-    .{ .a = 's', .b = 0x0323, .to = 0x1E63 },
-    .{ .a = 0x017F, .b = 0x0307, .to = 0x1E9B },
-    .{ .a = 0x1E61, .b = 0x0323, .to = 0x1E69 },
-    .{ .a = 0x1E63, .b = 0x0307, .to = 0x1E69 },
-};
+// Hangul jamo/syllable constants (Unicode 3.12): algorithmic (de)composition.
+const s_base: Codepoint = 0xAC00;
+const l_base: Codepoint = 0x1100;
+const v_base: Codepoint = 0x1161;
+const t_base: Codepoint = 0x11A7;
+const l_count: Codepoint = 19;
+const v_count: Codepoint = 21;
+const t_count: Codepoint = 28;
+const n_count: Codepoint = v_count * t_count; // 588
+const s_count: Codepoint = l_count * n_count; // 11172
 
 fn canonicalCombiningClass(cp: Codepoint) u8 {
-    return switch (cp) {
-        0x0338 => 1,
-        0x093C => 7,
-        0x0327 => 202,
-        0x031B => 216,
-        0x0323 => 220,
-        0x0301, 0x0302, 0x0304, 0x0306, 0x0307, 0x0308, 0x030A => 230,
-        else => 0,
-    };
+    var lo: usize = 0;
+    var hi: usize = data.ccc_table.len;
+    while (lo < hi) {
+        const mid = lo + (hi - lo) / 2;
+        const e = data.ccc_table[mid];
+        if (e.cp == cp) return e.cc;
+        if (e.cp < cp) lo = mid + 1 else hi = mid;
+    }
+    return 0;
 }
 
-fn lookupDecomp(cp: Codepoint, compat: bool) ?[]const Codepoint {
-    for (decomp_table) |entry| {
-        if (entry.cp != cp) continue;
-        if (compat and entry.compatibility.len != 0) return entry.compatibility;
-        if (entry.canonical.len != 0) return entry.canonical;
-        return null;
+fn lookupDecompIn(table: []const data.Decomp, cp: Codepoint) ?[]const Codepoint {
+    var lo: usize = 0;
+    var hi: usize = table.len;
+    while (lo < hi) {
+        const mid = lo + (hi - lo) / 2;
+        const e = table[mid];
+        if (e.cp == cp) return e.d;
+        if (e.cp < cp) lo = mid + 1 else hi = mid;
     }
     return null;
 }
 
+fn lookupDecomp(cp: Codepoint, compat: bool) ?[]const Codepoint {
+    if (lookupDecompIn(&data.canon_decomp, cp)) |d| return d;
+    if (compat) return lookupDecompIn(&data.compat_decomp, cp);
+    return null;
+}
+
 fn composePair(a: Codepoint, b: Codepoint) ?Codepoint {
-    for (compose_table) |entry| {
-        if (entry.a == a and entry.b == b) return entry.to;
+    // Hangul L + V → LV syllable.
+    if (a >= l_base and a < l_base + l_count and b >= v_base and b < v_base + v_count) {
+        return s_base + ((a - l_base) * v_count + (b - v_base)) * t_count;
+    }
+    // Hangul LV + T → LVT syllable.
+    if (a >= s_base and a < s_base + s_count and (a - s_base) % t_count == 0 and b > t_base and b < t_base + t_count) {
+        return a + (b - t_base);
+    }
+    // Table of primary composites, sorted by (a, b).
+    var lo: usize = 0;
+    var hi: usize = data.compose_table.len;
+    while (lo < hi) {
+        const mid = lo + (hi - lo) / 2;
+        const e = data.compose_table[mid];
+        if (e.a == a and e.b == b) return e.to;
+        if (e.a < a or (e.a == a and e.b < b)) lo = mid + 1 else hi = mid;
     }
     return null;
 }
 
 fn appendDecomposed(out: *std.ArrayListUnmanaged(Codepoint), alloc: std.mem.Allocator, cp: Codepoint, compat: bool) !void {
+    // Hangul syllables decompose algorithmically into L, V (, T) jamo.
+    if (cp >= s_base and cp < s_base + s_count) {
+        const si = cp - s_base;
+        try out.append(alloc, l_base + si / n_count);
+        try out.append(alloc, v_base + (si % n_count) / t_count);
+        const t = si % t_count;
+        if (t != 0) try out.append(alloc, t_base + t);
+        return;
+    }
     if (lookupDecomp(cp, compat)) |mapping| {
         for (mapping) |mapped| try appendDecomposed(out, alloc, mapped, compat);
     } else {
@@ -111,22 +110,29 @@ fn reorderCanonical(cps: []Codepoint) void {
 
 fn compose(out: *std.ArrayListUnmanaged(Codepoint), alloc: std.mem.Allocator, cps: []const Codepoint) !void {
     var starter_index: ?usize = null;
-    var last_ccc: u8 = 0;
+    // Combining class of the last character appended after the active starter
+    // (0 = nothing yet). Because `cps` is already canonically ordered, this is the
+    // max ccc among the in-between characters, so a candidate is "not blocked"
+    // exactly when prev_ccc is 0 or strictly less than the candidate's ccc.
+    var prev_ccc: u8 = 0;
 
     for (cps) |cp| {
         const ccc = canonicalCombiningClass(cp);
         if (starter_index) |si| {
-            if (ccc != 0 and last_ccc < ccc) {
+            if (prev_ccc == 0 or prev_ccc < ccc) {
                 if (composePair(out.items[si], cp)) |composed| {
                     out.items[si] = composed;
-                    continue;
+                    continue; // starter absorbed the character; prev_ccc unchanged
                 }
             }
         }
-
-        if (ccc == 0) starter_index = out.items.len;
         try out.append(alloc, cp);
-        last_ccc = ccc;
+        if (ccc == 0) {
+            starter_index = out.items.len - 1;
+            prev_ccc = 0;
+        } else {
+            prev_ccc = ccc;
+        }
     }
 }
 
