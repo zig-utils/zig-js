@@ -2598,6 +2598,8 @@ fn tryQuickObjectAllocationLoop(
             frame.slots[index_slot] = Value.num(@floatFromInt(selected));
             frame.slots[displaced_slot] = displaced_value;
             frame.slots[value_slot] = Value.num(next);
+            frame.slots[total_slot] = Value.num(total);
+            frame.slots[counter_slot] = Value.num(counter);
             vm.steps += iterations * steps_per_iteration + 24;
             return err;
         };
@@ -2617,6 +2619,8 @@ fn tryQuickObjectAllocationLoop(
         // unrestricted receiver. Restricted arrays retain the full ownership
         // check and the exact error-step accounting below.
         if (array.restricted_to.load(.acquire) != 0) vm.checkRestricted(array) catch |err| {
+            frame.slots[total_slot] = Value.num(total);
+            frame.slots[counter_slot] = Value.num(counter);
             vm.steps += iterations * steps_per_iteration + 39;
             return err;
         };
@@ -2628,13 +2632,13 @@ fn tryQuickObjectAllocationLoop(
         total += @floatFromInt(checksum_value);
         counter_integer = next_counter_integer;
         counter = next_counter;
-        frame.slots[total_slot] = Value.num(total);
-        frame.slots[counter_slot] = Value.num(counter);
         iterations += 1;
         completed = completes_loop;
         if (completed) break;
     }
     if (iterations == 0) return null;
+    frame.slots[total_slot] = Value.num(total);
+    frame.slots[counter_slot] = Value.num(counter);
     if (builtin.is_test) _ = quick_object_allocation_loop_hits.fetchAdd(iterations, .monotonic);
     return .{
         .extra_steps = iterations * steps_per_iteration - 1 + (if (completed) @as(u64, 4) else 0),
