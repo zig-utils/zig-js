@@ -666,6 +666,7 @@ const max_quick_leaf_stack = 8;
 const QuickLeafOp = union(enum) {
     argument: u8,
     constant: f64,
+    captured_local,
     receiver_property,
     add,
     sub,
@@ -686,9 +687,15 @@ const QuickLeafReceiverAddMod = struct {
     modulus: f64,
 };
 
+const QuickLeafCapturedAddMod = struct {
+    argument: u8,
+    modulus: f64,
+};
+
 const QuickLeafSpecialization = union(enum) {
     generic,
     add_mod: QuickLeafAddMod,
+    captured_add_mod: QuickLeafCapturedAddMod,
     receiver_add_mod: QuickLeafReceiverAddMod,
 };
 
@@ -696,6 +703,7 @@ const QuickNumericLeaf = struct {
     ops: [max_quick_leaf_ops]QuickLeafOp,
     op_count: u8,
     executed: u8,
+    captured_local: ?u32,
     receiver_property_instruction: ?u32,
     specialization: QuickLeafSpecialization,
 };
@@ -712,6 +720,7 @@ const QuickCallCallee = union(enum) {
         receiver_local: u32,
         get_prop_instruction: u32,
     },
+    closure_template: u32,
 };
 
 const QuickNumericCallLoop = struct {
@@ -789,6 +798,8 @@ var quick_packed_array_specialized_expression_hits: std.atomic.Value(u64) = .ini
 var quick_global_binding_hits: std.atomic.Value(u64) = .init(0);
 var quick_native_direct_call_hits: std.atomic.Value(u64) = .init(0);
 var quick_numeric_call_loop_hits: std.atomic.Value(u64) = .init(0);
+var quick_numeric_closure_call_loop_hits: std.atomic.Value(u64) = .init(0);
+var quick_reusable_immediate_closure_hits: std.atomic.Value(u64) = .init(0);
 var quick_numeric_method_call_loop_hits: std.atomic.Value(u64) = .init(0);
 var quick_numeric_call_loop_test_enabled: std.atomic.Value(bool) = .init(true);
 var quick_numeric_recurrence_hits: std.atomic.Value(u64) = .init(0);
@@ -1287,13 +1298,72 @@ fn compileQuickMethodCallLoopPlan(chunk: *Chunk, start: usize) QuickCallLoopPlan
     } };
 }
 
+fn compileQuickClosureCallLoopPlan(chunk: *Chunk, start: usize) QuickCallLoopPlan {
+    const code = chunk.code.items;
+    if (start + 18 > code.len) return .unsupported;
+    var closure_creations: usize = 0;
+    for (code) |instruction| closure_creations += @intFromBool(instruction.op == .make_closure);
+    // An escaped caller frame is safe only when this immediate-call loop is its
+    // sole source of closures. A checkpoint-spanning ordinary iteration may
+    // then mark the frame escaped, but the exact trace below proves that closure
+    // is stored in a local, called once, and never exposed to another thread.
+    if (closure_creations != 1) return .unsupported;
+    const expected = [_]bc.Op{
+        .load_local, .load_const, .lt,         .jump_if_false, .make_closure, .store_local,
+        .pop,        .load_local, .load_local, .call,          .store_local,  .pop,
+        .load_local, .load_const, .add,        .store_local,   .pop,          .jump,
+    };
+    for (expected, 0..) |op, offset| {
+        if (offset == 1) {
+            if (code[start + offset].op != .load_const and code[start + offset].op != .load_local) return .unsupported;
+        } else if (code[start + offset].op != op) return .unsupported;
+    }
+
+    const index_local = code[start].a;
+    const template_index = code[start + 4].a;
+    const closure_local = code[start + 5].a;
+    const value_local = code[start + 10].a;
+    if (code[start + 3].a != start + 18 or
+        template_index >= chunk.fns.items.len or
+        closure_local >= chunk.local_count or
+        code[start + 7].a != closure_local or
+        code[start + 8].a != index_local or
+        code[start + 9].a != 1 or
+        code[start + 12].a != index_local or
+        code[start + 13].a >= chunk.consts.items.len or
+        code[start + 15].a != index_local or
+        code[start + 17].a != start)
+        return .unsupported;
+    const template = chunk.fns.items[template_index];
+    if (template.self_name.len != 0 or template.uses_arguments or template.is_generator or template.is_async or
+        template.is_arrow or template.is_method or template.params.len != 1 or template.chunk == null)
+        return .unsupported;
+    const increment = chunk.consts.items[code[start + 13].a];
+    if (!increment.isNumber()) return .unsupported;
+    const bound = quickCallLoopBound(chunk, start + 1) orelse return .unsupported;
+    return .{ .numeric_leaf = .{
+        .index_local = index_local,
+        .value_local = value_local,
+        .bound = bound,
+        .increment = increment.asNum(),
+        .callee = .{ .closure_template = template_index },
+        .caller_steps = 18,
+        .exit_ip = @intCast(start + 18),
+    } };
+}
+
 fn compileQuickCallLoopPlan(chunk: *Chunk, start: usize) QuickCallLoopPlan {
     const direct = compileQuickDirectCallLoopPlan(chunk, start);
     switch (direct) {
         .unsupported => {},
         else => return direct,
     }
-    return compileQuickMethodCallLoopPlan(chunk, start);
+    const method = compileQuickMethodCallLoopPlan(chunk, start);
+    switch (method) {
+        .unsupported => {},
+        else => return method,
+    }
+    return compileQuickClosureCallLoopPlan(chunk, start);
 }
 
 fn quickCallLoopPlan(chunk: *Chunk, start: usize, parallel_sync: bool) ?*QuickCallLoopPlan {
@@ -1332,10 +1402,28 @@ inline fn mayStartQuickCallLoop(code: []const bc.Inst, start: usize) bool {
         code[start + 8].op == .load_local and
         code[start + 9].op == .load_local and
         code[start + 10].op == .call_with_this;
-    return direct or method;
+    const closure = start + 9 < code.len and
+        code[start + 4].op == .make_closure and
+        code[start + 5].op == .store_local and
+        code[start + 6].op == .pop and
+        code[start + 7].op == .load_local and
+        code[start + 8].op == .load_local and
+        code[start + 9].op == .call;
+    return direct or method or closure;
 }
 
 fn specializeQuickLeaf(ops: []const QuickLeafOp) QuickLeafSpecialization {
+    if (ops.len == 5 and ops[0] == .captured_local and ops[2] == .add and ops[4] == .mod) {
+        const argument = switch (ops[1]) {
+            .argument => |argument| argument,
+            else => return .generic,
+        };
+        const modulus = switch (ops[3]) {
+            .constant => |constant| constant,
+            else => return .generic,
+        };
+        return .{ .captured_add_mod = .{ .argument = argument, .modulus = modulus } };
+    }
     if (ops.len == 7 and ops[0] == .receiver_property and ops[2] == .add and ops[4] == .add and ops[6] == .mod) {
         const first = switch (ops[1]) {
             .argument => |argument| argument,
@@ -1375,6 +1463,7 @@ fn compileQuickLeafPlan(chunk: *Chunk) QuickLeafPlan {
     var ops: [max_quick_leaf_ops]QuickLeafOp = undefined;
     var op_count: usize = 0;
     var depth: usize = 0;
+    var captured_local: ?u32 = null;
     var receiver_property_instruction: ?u32 = null;
     var instruction: usize = 0;
     while (instruction < chunk.code.items.len) {
@@ -1388,6 +1477,7 @@ fn compileQuickLeafPlan(chunk: *Chunk) QuickLeafPlan {
                 .ops = ops,
                 .op_count = @intCast(op_count),
                 .executed = @intCast(instruction + 1),
+                .captured_local = captured_local,
                 .receiver_property_instruction = receiver_property_instruction,
                 .specialization = specializeQuickLeaf(ops[0..op_count]),
             } };
@@ -1416,6 +1506,12 @@ fn compileQuickLeafPlan(chunk: *Chunk) QuickLeafPlan {
                 receiver_property_instruction = @intCast(instruction);
                 depth += 1;
                 break :receiver .receiver_property;
+            },
+            .load_upval => captured: {
+                if (inst.a != 1 or depth == max_quick_leaf_stack or captured_local != null) return .unsupported;
+                captured_local = inst.b;
+                depth += 1;
+                break :captured .captured_local;
             },
             .add, .sub, .mul, .div, .mod => binary: {
                 if (depth < 2) return .unsupported;
@@ -1467,11 +1563,23 @@ fn quickImmutableLocalBinding(vm: *Interpreter, name: []const u8) ?Value {
     return null;
 }
 
-fn evaluateQuickLeaf(leaf: *const QuickNumericLeaf, arguments: []const f64, receiver_property: ?f64) ?f64 {
+fn evaluateQuickLeaf(
+    leaf: *const QuickNumericLeaf,
+    arguments: []const f64,
+    captured_value: ?f64,
+    receiver_property: ?f64,
+) ?f64 {
     switch (leaf.specialization) {
         .add_mod => |specialized| {
             if (specialized.left >= arguments.len or specialized.right >= arguments.len) return null;
             return numberRemainder(arguments[specialized.left] + arguments[specialized.right], specialized.modulus);
+        },
+        .captured_add_mod => |specialized| {
+            if (specialized.argument >= arguments.len) return null;
+            return numberRemainder(
+                (captured_value orelse return null) + arguments[specialized.argument],
+                specialized.modulus,
+            );
         },
         .receiver_add_mod => |specialized| {
             if (specialized.first >= arguments.len or specialized.second >= arguments.len) return null;
@@ -1493,6 +1601,10 @@ fn evaluateQuickLeaf(leaf: *const QuickNumericLeaf, arguments: []const f64, rece
         },
         .constant => |constant| {
             stack[depth] = constant;
+            depth += 1;
+        },
+        .captured_local => {
+            stack[depth] = captured_value orelse return null;
             depth += 1;
         },
         .receiver_property => {
@@ -1556,11 +1668,15 @@ fn tryQuickNumericCallLoop(
     parallel_sync: bool,
 ) EvalError!?QuickCallLoopUpdate {
     if (builtin.is_test and !quick_numeric_call_loop_test_enabled.load(.monotonic)) return null;
-    if (frame.escaped.load(.monotonic)) return null;
     const loop = switch (plan.*) {
         .unsupported => return null,
         .numeric_leaf => |loop| loop,
     };
+    const closure_loop = switch (loop.callee) {
+        .closure_template => true,
+        else => false,
+    };
+    if (frame.escaped.load(.monotonic) and !closure_loop) return null;
     const index_slot: usize = @intCast(loop.index_local);
     const value_slot: usize = @intCast(loop.value_local);
     if (index_slot >= frame.slots.len or value_slot >= frame.slots.len) return null;
@@ -1572,43 +1688,63 @@ fn tryQuickNumericCallLoop(
 
     var method_receiver: ?Value = null;
     var method_get_instruction: ?usize = null;
-    const callee = switch (loop.callee) {
-        .local => |raw_slot| local: {
+    var callee: ?Value = null;
+    var callee_chunk: *Chunk = undefined;
+    var argument_count: usize = 2;
+    var captured_frame: ?*Frame = null;
+    switch (loop.callee) {
+        .local => |raw_slot| {
             const slot: usize = @intCast(raw_slot);
             if (slot >= frame.slots.len) return null;
-            break :local frame.slots[slot];
+            callee = frame.slots[slot];
         },
-        .global_instruction => |raw_instruction| global: {
+        .global_instruction => |raw_instruction| {
             const instruction: usize = @intCast(raw_instruction);
             if (instruction >= chunk.code.items.len) return null;
             const binding_name_index = chunk.code.items[instruction].a;
             if (binding_name_index >= chunk.names.items.len) return null;
-            break :global if (parallel_sync)
+            callee = if (parallel_sync)
                 quickImmutableLocalBinding(vm, chunk.names.items[binding_name_index]) orelse return null
             else
                 quickGlobalBindingValue(chunk, instruction, vm) orelse return null;
         },
-        .method => |method| method: {
+        .method => |method| {
             const receiver_slot: usize = @intCast(method.receiver_local);
             if (receiver_slot >= frame.slots.len) return null;
             const receiver = frame.slots[receiver_slot];
             const instruction: usize = @intCast(method.get_prop_instruction);
-            const selected = quickOwnDataPropertyValue(chunk, instruction, receiver, parallel_sync) orelse return null;
+            callee = quickOwnDataPropertyValue(chunk, instruction, receiver, parallel_sync) orelse return null;
             method_receiver = receiver;
             method_get_instruction = instruction;
-            break :method selected;
         },
-    };
-    const func = jsChunkFn(callee) orelse return null;
-    if (func.is_class_constructor or func.uses_arguments or func.params.len != 2) return null;
-    const callee_chunk = func.chunk orelse return null;
-    if (callee_chunk.param_count != 2) return null;
+        .closure_template => |raw_template_index| {
+            const template_index: usize = @intCast(raw_template_index);
+            if (template_index >= chunk.fns.items.len) return null;
+            const template = chunk.fns.items[template_index];
+            if (template.self_name.len != 0 or template.uses_arguments or template.is_generator or template.is_async or
+                template.is_arrow or template.is_method or template.params.len != 1)
+                return null;
+            callee_chunk = template.chunk orelse return null;
+            argument_count = 1;
+            captured_frame = frame;
+        },
+    }
+    if (captured_frame == null) {
+        const func = jsChunkFn(callee.?) orelse return null;
+        if (func.is_class_constructor or func.uses_arguments or func.params.len != argument_count) return null;
+        callee_chunk = func.chunk orelse return null;
+    }
+    if (callee_chunk.param_count != argument_count) return null;
     const leaf_plan = quickLeafPlan(callee_chunk, parallel_sync) orelse return null;
     const leaf = switch (leaf_plan.*) {
         .unsupported => return null,
         .numeric => |*leaf| leaf,
     };
-    if (leaf.receiver_property_instruction != null and method_receiver == null) return null;
+    if (captured_frame != null) {
+        if (leaf.captured_local == null or leaf.receiver_property_instruction != null) return null;
+    } else if (leaf.captured_local != null or (leaf.receiver_property_instruction != null and method_receiver == null)) {
+        return null;
+    }
     var stable_receiver_property: ?f64 = null;
     if (!parallel_sync) if (leaf.receiver_property_instruction) |raw_instruction| {
         stable_receiver_property = quickReceiverPropertyNumber(
@@ -1632,7 +1768,7 @@ fn tryQuickNumericCallLoop(
         if (completed_extra_steps > max_extra_steps) break;
         if (parallel_sync) if (method_get_instruction) |instruction| {
             const live_method = quickOwnDataPropertyValue(chunk, instruction, method_receiver.?, true) orelse return null;
-            if (live_method.rawBits() != callee.rawBits()) return null;
+            if (live_method.rawBits() != callee.?.rawBits()) return null;
         };
         var receiver_property = stable_receiver_property;
         if (parallel_sync) if (leaf.receiver_property_instruction) |raw_instruction| {
@@ -1643,7 +1779,21 @@ fn tryQuickNumericCallLoop(
                 true,
             ) orelse return null;
         };
-        current = evaluateQuickLeaf(leaf, &.{ current, index }, receiver_property) orelse return null;
+        var captured_value: ?f64 = null;
+        if (leaf.captured_local) |raw_slot| {
+            const slot: usize = @intCast(raw_slot);
+            if (slot >= captured_frame.?.slots.len) return null;
+            if (slot == value_slot) {
+                captured_value = current;
+            } else {
+                const value_ = captured_frame.?.slots[slot];
+                if (!value_.isNumber()) return null;
+                captured_value = value_.asNum();
+            }
+        }
+        const arguments = [2]f64{ current, index };
+        const argument_slice = if (argument_count == 1) arguments[1..2] else arguments[0..2];
+        current = evaluateQuickLeaf(leaf, argument_slice, captured_value, receiver_property) orelse return null;
         index = next_index;
     }
     if (iterations == 0) return null;
@@ -1653,6 +1803,7 @@ fn tryQuickNumericCallLoop(
     if (builtin.is_test) {
         _ = quick_numeric_call_loop_hits.fetchAdd(1, .monotonic);
         switch (loop.callee) {
+            .closure_template => _ = quick_numeric_closure_call_loop_hits.fetchAdd(1, .monotonic),
             .method => _ = quick_numeric_method_call_loop_hits.fetchAdd(1, .monotonic),
             else => {},
         }
@@ -1661,6 +1812,49 @@ fn tryQuickNumericCallLoop(
         .extra_steps = iterations * steps_per_iteration - 1 + (if (completes_loop) @as(u64, 4) else 0),
         .next_ip = if (completes_loop) loop.exit_ip else start,
     };
+}
+
+/// Reuse the one materialized closure on checkpoint-spanning fallback
+/// iterations of a proved immediate-call loop. The structural plan requires a
+/// single closure site in the caller, and the numeric leaf accepts only the
+/// captured scalar expression, so neither identity nor the function object can
+/// be observed between the local store and call. All other closure creation
+/// retains the ordinary fresh-object path.
+fn quickReusableImmediateClosure(
+    chunk: *Chunk,
+    instruction: usize,
+    frame: *Frame,
+    parallel_sync: bool,
+) ?Value {
+    if (instruction < 4) return null;
+    const start = instruction - 4;
+    const plan = quickCallLoopPlan(chunk, start, parallel_sync) orelse return null;
+    const loop = switch (plan.*) {
+        .unsupported => return null,
+        .numeric_leaf => |loop| loop,
+    };
+    const template_index = switch (loop.callee) {
+        .closure_template => |template_index| template_index,
+        else => return null,
+    };
+    if (template_index >= chunk.fns.items.len or chunk.code.items[instruction].a != template_index) return null;
+    const callee_chunk = chunk.fns.items[template_index].chunk orelse return null;
+    const leaf_plan = quickLeafPlan(callee_chunk, parallel_sync) orelse return null;
+    const leaf = switch (leaf_plan.*) {
+        .unsupported => return null,
+        .numeric => |*leaf| leaf,
+    };
+    if (leaf.captured_local == null or leaf.receiver_property_instruction != null) return null;
+
+    const closure_slot: usize = @intCast(chunk.code.items[start + 5].a);
+    if (closure_slot >= frame.slots.len) return null;
+    const held = frame.lockSlots(parallel_sync);
+    defer frame.unlockSlots(held);
+    const candidate = frame.slots[closure_slot];
+    const function = jsChunkFn(candidate) orelse return null;
+    if (function.frame != @as(?*anyopaque, @ptrCast(frame)) or function.chunk != callee_chunk) return null;
+    if (builtin.is_test) _ = quick_reusable_immediate_closure_hits.fetchAdd(1, .monotonic);
+    return candidate;
 }
 
 fn exactU16(value_: Value, allow_zero: bool) ?u16 {
@@ -3418,7 +3612,14 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 try stack.append(stack_alloc, Value.boolVal(try vm.privateIn(chunk.names.items[inst.a], r)));
             },
 
-            .make_closure => try stack.append(stack_alloc, try makeClosure(vm, chunk.fns.items[inst.a], frame)),
+            .make_closure => {
+                const closure = if (frame) |cf|
+                    quickReusableImmediateClosure(chunk, ip - 1, cf, parallel_sync) orelse
+                        try makeClosure(vm, chunk.fns.items[inst.a], frame)
+                else
+                    try makeClosure(vm, chunk.fns.items[inst.a], frame);
+                try stack.append(stack_alloc, closure);
+            },
             .call => {
                 const argc = inst.a;
                 const base = stack.items.len - argc;
@@ -5635,13 +5836,25 @@ test "vm: numeric call-loop quickening preserves guards and exact steps" {
         \\var methodFirst = exerciseMethod(receiver, 300);
         \\receiver.step = function (a, b) { return this.bias + a - b; };
         \\var methodSecond = exerciseMethod(receiver, 10);
-        \\first + exercise(10) + before * 1000 + after * 10000 + methodFirst * 100000 + methodSecond
+        \\function exerciseClosure(limit) {
+        \\  var seed = 13;
+        \\  for (var i = 0; i < limit; i = i + 1) {
+        \\    var closure = function (delta) { return (seed + delta) % 101; };
+        \\    seed = closure(i);
+        \\  }
+        \\  return seed;
+        \\}
+        \\var closureFirst = exerciseClosure(300);
+        \\var closureSecond = exerciseClosure(10);
+        \\first + exercise(10) + before * 1000 + after * 10000 + methodFirst * 100000 + methodSecond + closureFirst * 10000000 + closureSecond
     ;
     var parser = try Parser.init(allocator, source);
     const program = try parser.parseProgram();
     const chunk = try Compiler.compileProgram(allocator, program);
     var call_loop_supported = false;
     var leaf_supported = false;
+    var closure_loop_supported = false;
+    var captured_leaf_supported = false;
     var method_loop_supported = false;
     var receiver_leaf_supported = false;
     for (chunk.fns.items) |template| {
@@ -5649,9 +5862,21 @@ test "vm: numeric call-loop quickening preserves guards and exact steps" {
         switch (compileQuickLeafPlan(function_chunk)) {
             .numeric => |leaf| {
                 leaf_supported = true;
+                captured_leaf_supported = captured_leaf_supported or leaf.captured_local != null;
                 receiver_leaf_supported = receiver_leaf_supported or leaf.receiver_property_instruction != null;
             },
             .unsupported => {},
+        }
+        for (function_chunk.fns.items) |nested_template| {
+            const nested_chunk = nested_template.chunk orelse continue;
+            switch (compileQuickLeafPlan(nested_chunk)) {
+                .numeric => |leaf| {
+                    leaf_supported = true;
+                    captured_leaf_supported = captured_leaf_supported or leaf.captured_local != null;
+                    receiver_leaf_supported = receiver_leaf_supported or leaf.receiver_property_instruction != null;
+                },
+                .unsupported => {},
+            }
         }
         for (function_chunk.code.items, 0..) |_, instruction| {
             if (!mayStartQuickCallLoop(function_chunk.code.items, instruction)) continue;
@@ -5659,6 +5884,7 @@ test "vm: numeric call-loop quickening preserves guards and exact steps" {
                 .numeric_leaf => |loop| {
                     call_loop_supported = true;
                     switch (loop.callee) {
+                        .closure_template => closure_loop_supported = true,
                         .method => method_loop_supported = true,
                         else => {},
                     }
@@ -5669,6 +5895,8 @@ test "vm: numeric call-loop quickening preserves guards and exact steps" {
     }
     try std.testing.expect(call_loop_supported);
     try std.testing.expect(leaf_supported);
+    try std.testing.expect(closure_loop_supported);
+    try std.testing.expect(captured_leaf_supported);
     try std.testing.expect(method_loop_supported);
     try std.testing.expect(receiver_leaf_supported);
 
@@ -5698,10 +5926,14 @@ test "vm: numeric call-loop quickening preserves guards and exact steps" {
     };
     const hits_before = quick_native_direct_call_hits.load(.monotonic);
     const loop_hits_before = quick_numeric_call_loop_hits.load(.monotonic);
+    const closure_loop_hits_before = quick_numeric_closure_call_loop_hits.load(.monotonic);
+    const reusable_closure_hits_before = quick_reusable_immediate_closure_hits.load(.monotonic);
     const method_loop_hits_before = quick_numeric_method_call_loop_hits.load(.monotonic);
     const fast_result = try run(&fast, chunk, null);
     try std.testing.expect(quick_native_direct_call_hits.load(.monotonic) > hits_before);
     try std.testing.expect(quick_numeric_call_loop_hits.load(.monotonic) > loop_hits_before);
+    try std.testing.expect(quick_numeric_closure_call_loop_hits.load(.monotonic) > closure_loop_hits_before);
+    try std.testing.expect(quick_reusable_immediate_closure_hits.load(.monotonic) > reusable_closure_hits_before);
     try std.testing.expect(quick_numeric_method_call_loop_hits.load(.monotonic) > method_loop_hits_before);
 
     // Reuse the exact compiled source with the native tier disabled. The ready
