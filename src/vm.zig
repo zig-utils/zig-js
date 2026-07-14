@@ -661,6 +661,7 @@ const QuickObservableAddRecurrence = struct {
     second_binding_instruction: u32,
     counter_read_instruction: u32,
     counter_write_instruction: u32,
+    counter_name: u32,
     counter_increment: f64,
 };
 
@@ -1039,6 +1040,7 @@ fn compileQuickObservableRecurrencePlan(chunk: *Chunk) ?QuickObservableAddRecurr
         .second_binding_instruction = 19,
         .counter_read_instruction = 2,
         .counter_write_instruction = 5,
+        .counter_name = code[2].a,
         .counter_increment = counter_increment.asNum(),
     };
 }
@@ -1072,11 +1074,21 @@ fn compileQuickRecurrencePlan(chunk: *Chunk) QuickRecurrencePlan {
     } };
 }
 
-fn quickRecurrencePlan(chunk: *Chunk) ?*QuickRecurrencePlan {
-    if (chunk.quick_recurrence_plan) |raw| return @ptrCast(@alignCast(raw));
+fn quickRecurrencePlan(chunk: *Chunk, parallel_sync: bool) ?*QuickRecurrencePlan {
+    if (parallel_sync) {
+        if (@atomicLoad(?*anyopaque, &chunk.quick_recurrence_plan, .acquire)) |raw|
+            return @ptrCast(@alignCast(raw));
+    } else if (chunk.quick_recurrence_plan) |raw| {
+        return @ptrCast(@alignCast(raw));
+    }
     const plan = chunk.arena.create(QuickRecurrencePlan) catch return null;
     plan.* = compileQuickRecurrencePlan(chunk);
-    chunk.quick_recurrence_plan = plan;
+    if (parallel_sync) {
+        if (@cmpxchgStrong(?*anyopaque, &chunk.quick_recurrence_plan, null, plan, .acq_rel, .acquire)) |published|
+            return @ptrCast(@alignCast(published));
+    } else {
+        chunk.quick_recurrence_plan = plan;
+    }
     return plan;
 }
 
@@ -1141,7 +1153,81 @@ fn runQuickObservableRecurrence(
     return first + second;
 }
 
-inline fn quickRecurrenceCalleeMatches(vm: *Interpreter, chunk: *Chunk, instruction: u32, func: *Function) bool {
+fn quickParallelCounterRead(vm: *Interpreter, state: *value.Object, name: []const u8) EvalError!Value {
+    state.lockProperties();
+    if (!state.is_array and state.proxy_handler == null and !state.proxy_revoked and
+        state.accessors.load(.monotonic) == null and state.attrsMap() == null)
+    {
+        if (state.shape) |shape| if (shape.lookup(name)) |slot| if (slot < state.slots.items.len) {
+            const result = state.slots.items[slot];
+            state.unlockProperties();
+            return result;
+        };
+    }
+    state.unlockProperties();
+    return vm.getProperty(Value.obj(state), name);
+}
+
+fn quickParallelCounterWrite(vm: *Interpreter, state: *value.Object, name: []const u8, updated: Value) EvalError!void {
+    state.lockProperties();
+    if (!state.is_array and state.proxy_handler == null and !state.proxy_revoked and
+        state.accessors.load(.monotonic) == null and state.attrsMap() == null)
+    {
+        if (state.shape) |shape| if (shape.lookup(name)) |slot| if (slot < state.slots.items.len) {
+            gc_mod.barrierValueFrom(state, updated);
+            state.slots.items[slot] = updated;
+            state.unlockProperties();
+            return;
+        };
+    }
+    state.unlockProperties();
+    try vm.setMember(Value.obj(state), name, updated);
+}
+
+fn runQuickObservableRecurrenceParallel(
+    vm: *Interpreter,
+    recurrence: QuickObservableAddRecurrence,
+    state: *value.Object,
+    counter_name: []const u8,
+    input: u16,
+) EvalError!f64 {
+    try advanceQuickObservableSteps(vm, 3); // through get_prop
+    const current = try quickParallelCounterRead(vm, state, counter_name);
+    try advanceQuickObservableSteps(vm, 2); // constant + add
+    const increment = Value.num(recurrence.counter_increment);
+    const updated = if (current.isNumber())
+        Value.num(current.asNum() + recurrence.counter_increment)
+    else
+        try vm.applyBinary(.add, current, increment);
+    try advanceQuickObservableSteps(vm, 1); // set_prop
+    try quickParallelCounterWrite(vm, state, counter_name, updated);
+    try advanceQuickObservableSteps(vm, 5); // pop + condition + branch
+    if (input < recurrence.threshold) {
+        try advanceQuickObservableSteps(vm, 3);
+        return @floatFromInt(input);
+    }
+
+    try advanceQuickObservableSteps(vm, 6);
+    const first = try runQuickObservableRecurrenceParallel(vm, recurrence, state, counter_name, input - recurrence.first_delta);
+    try advanceQuickObservableSteps(vm, 6);
+    const second = try runQuickObservableRecurrenceParallel(vm, recurrence, state, counter_name, input - recurrence.second_delta);
+    try advanceQuickObservableSteps(vm, 2);
+    return first + second;
+}
+
+inline fn quickRecurrenceCalleeMatches(vm: *Interpreter, chunk: *Chunk, instruction: u32, func: *Function, parallel_sync: bool) bool {
+    if (instruction < chunk.code.items.len) {
+        const name_index = chunk.code.items[instruction].a;
+        if (name_index < chunk.names.items.len) {
+            const name = chunk.names.items[name_index];
+            if (func.closure.isFnName(name)) {
+                const live = func.closure.getLocal(name) orelse return false;
+                const function_object = func.obj orelse return false;
+                return live.isObject() and live.asObj() == function_object;
+            }
+        }
+    }
+    if (parallel_sync) return false;
     const live = quickGlobalBindingValue(chunk, instruction, vm) orelse return false;
     const function_object = func.obj orelse return false;
     return live.isObject() and live.asObj() == function_object;
@@ -1155,15 +1241,15 @@ fn quickRecurrenceNeededDepth(input: u16, threshold: u16, first_delta: u16, seco
         @as(u32, (input - threshold) / minimum_delta) + 2;
 }
 
-fn tryQuickNumericRecurrence(vm: *Interpreter, func: *Function, args: []const Value) EvalError!?Value {
+fn tryQuickNumericRecurrence(vm: *Interpreter, func: *Function, args: []const Value, parallel_sync: bool) EvalError!?Value {
     const chunk = func.chunk orelse return null;
-    const plan = quickRecurrencePlan(chunk) orelse return null;
+    const plan = quickRecurrencePlan(chunk, parallel_sync) orelse return null;
     return switch (plan.*) {
         .unsupported => null,
         .add => |recurrence| pure: {
             if (args.len == 0) break :pure null;
             const input = exactU16(args[0], true) orelse break :pure null;
-            if (input > 255 or !quickRecurrenceCalleeMatches(vm, chunk, recurrence.binding_instruction, func))
+            if (input > 255 or !quickRecurrenceCalleeMatches(vm, chunk, recurrence.binding_instruction, func, parallel_sync))
                 break :pure null;
             const needed_depth = quickRecurrenceNeededDepth(input, recurrence.threshold, recurrence.first_delta, recurrence.second_delta);
             if (vm.depth + needed_depth > interp.max_call_depth) break :pure null;
@@ -1190,20 +1276,38 @@ fn tryQuickNumericRecurrence(vm: *Interpreter, func: *Function, args: []const Va
             if (args.len < 2) break :observable null;
             const input = exactU16(args[0], true) orelse break :observable null;
             if (input > 255 or
-                !quickRecurrenceCalleeMatches(vm, chunk, recurrence.first_binding_instruction, func) or
-                !quickRecurrenceCalleeMatches(vm, chunk, recurrence.second_binding_instruction, func))
+                !quickRecurrenceCalleeMatches(vm, chunk, recurrence.first_binding_instruction, func, parallel_sync) or
+                !quickRecurrenceCalleeMatches(vm, chunk, recurrence.second_binding_instruction, func, parallel_sync))
                 break :observable null;
-            const state = quickPlainObject(args[1]) orelse break :observable null;
-            if (state.proxy_handler != null or state.proxy_revoked or state.is_symbol or state.is_bigint)
-                break :observable null;
-            const read_slot = quickPropertySlot(chunk, recurrence.counter_read_instruction, state) orelse break :observable null;
-            const write_slot = quickPropertySlot(chunk, recurrence.counter_write_instruction, state) orelse break :observable null;
-            if (read_slot != write_slot or quickSlotNumber(state, read_slot) == null) break :observable null;
+            if (!args[1].isObject()) break :observable null;
+            const state = args[1].asObj();
+            if (state.is_symbol or state.is_bigint) break :observable null;
             const needed_depth = quickRecurrenceNeededDepth(input, recurrence.threshold, recurrence.first_delta, recurrence.second_delta);
             if (needed_depth > inline_call_depth_limit or vm.depth + needed_depth > interp.max_call_depth)
                 break :observable null;
 
-            const result = try runQuickObservableRecurrence(vm, recurrence, state, read_slot, input);
+            const result = if (parallel_sync) parallel: {
+                if (recurrence.first_binding_instruction >= chunk.code.items.len) break :observable null;
+                const self_name = chunk.code.items[recurrence.first_binding_instruction].a;
+                if (self_name >= chunk.names.items.len or !func.closure.isFnName(chunk.names.items[self_name]))
+                    break :observable null;
+                if (recurrence.counter_name >= chunk.names.items.len) break :observable null;
+                break :parallel try runQuickObservableRecurrenceParallel(
+                    vm,
+                    recurrence,
+                    state,
+                    chunk.names.items[recurrence.counter_name],
+                    input,
+                );
+            } else isolated: {
+                const plain_state = quickPlainObject(args[1]) orelse break :observable null;
+                if (plain_state.proxy_handler != null or plain_state.proxy_revoked or plain_state.is_symbol or plain_state.is_bigint)
+                    break :observable null;
+                const read_slot = quickPropertySlot(chunk, recurrence.counter_read_instruction, plain_state) orelse break :observable null;
+                const write_slot = quickPropertySlot(chunk, recurrence.counter_write_instruction, plain_state) orelse break :observable null;
+                if (read_slot != write_slot or quickSlotNumber(plain_state, read_slot) == null) break :observable null;
+                break :isolated try runQuickObservableRecurrence(vm, recurrence, plain_state, read_slot, input);
+            };
             if (builtin.is_test) _ = quick_observable_recurrence_hits.fetchAdd(1, .monotonic);
             break :observable Value.num(result);
         },
@@ -2451,22 +2555,20 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 const argc = inst.a;
                 const base = stack.items.len - argc;
                 const callee = stack.items[base - 1];
-                if (!parallel_sync) {
-                    if (jsChunkFn(callee)) |func| {
-                        if (try tryQuickNumericRecurrence(vm, func, stack.items[base..])) |result| {
-                            stack.shrinkRetainingCapacity(base - 1);
-                            try stack.append(stack_alloc, result);
-                            continue;
-                        }
-                        if (func.vm_inline_calls_safe and !vm.vm_inline_calls_disabled) {
-                            const result = if (vm.vm_inline_call_depth < inline_call_depth_limit)
-                                try runInlineFunction(vm, func, func.chunk.?, stack.items[base..], Value.undef(), Value.undef())
-                            else
-                                try callValueWithInlineCallsDisabled(vm, callee, stack.items[base..], Value.undef());
-                            stack.shrinkRetainingCapacity(base - 1);
-                            try stack.append(stack_alloc, result);
-                            continue;
-                        }
+                if (jsChunkFn(callee)) |func| {
+                    if (try tryQuickNumericRecurrence(vm, func, stack.items[base..], parallel_sync)) |result| {
+                        stack.shrinkRetainingCapacity(base - 1);
+                        try stack.append(stack_alloc, result);
+                        continue;
+                    }
+                    if (!parallel_sync and func.vm_inline_calls_safe and !vm.vm_inline_calls_disabled) {
+                        const result = if (vm.vm_inline_call_depth < inline_call_depth_limit)
+                            try runInlineFunction(vm, func, func.chunk.?, stack.items[base..], Value.undef(), Value.undef())
+                        else
+                            try callValueWithInlineCallsDisabled(vm, callee, stack.items[base..], Value.undef());
+                        stack.shrinkRetainingCapacity(base - 1);
+                        try stack.append(stack_alloc, result);
+                        continue;
                     }
                 }
                 // Trampoline plain JS→JS calls under the driver: build the callee
@@ -4926,6 +5028,7 @@ test "vm: quickens guarded pure numeric recurrence" {
         }
     }
     try std.testing.expectEqual(run_steps[1], run_steps[0]);
+
 }
 
 test "vm: compiles observable numeric recurrence without eliding calls" {
@@ -4987,6 +5090,39 @@ test "vm: compiles observable numeric recurrence without eliding calls" {
         }
     }
     try std.testing.expectEqual(run_steps[1], run_steps[0]);
+
+    // An immutable named-function-expression self binding is safe to compile
+    // in shared mode: no worker can replace the recursive callee out from under
+    // another. The counter path still performs every synchronized property
+    // read and write.
+    const named_source =
+        \\var recur = function recur(n, state) {
+        \\  state.calls = state.calls + 1;
+        \\  return n < 2 ? n : recur(n - 1, state) + recur(n - 2, state);
+        \\};
+        \\var state = { calls: 0 };
+        \\recur(8, state) + state.calls
+    ;
+    const shared_hits_before = quick_observable_recurrence_hits.load(.monotonic);
+    var named_parser = try Parser.init(allocator, named_source);
+    const named_program = try named_parser.parseProgram();
+    const named_chunk = try Compiler.compileProgram(allocator, named_program);
+    var named_env = Environment{ .arena = allocator, .fn_scope = true };
+    const named_root_shape = try @import("shape.zig").Shape.createRoot(allocator);
+    try interp.installGlobals(&named_env, named_root_shape);
+    const named_global = try gc_mod.allocObj(allocator);
+    named_global.* = .{};
+    try named_env.put("globalThis", Value.obj(named_global));
+    try interp.mirrorGlobalsOnto(&named_env, named_global, named_root_shape);
+    var named_machine = Interpreter{
+        .arena = allocator,
+        .env = &named_env,
+        .root_shape = named_root_shape,
+        .global_object = named_global,
+        .this_value = Value.obj(named_global),
+    };
+    try std.testing.expectEqual(@as(f64, 88), (try run(&named_machine, named_chunk, null)).asNum());
+    try std.testing.expect(quick_observable_recurrence_hits.load(.monotonic) > shared_hits_before);
 }
 
 test "vm: quickens packed dense numeric array reads" {
