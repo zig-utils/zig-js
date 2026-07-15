@@ -359,7 +359,7 @@ fn rejectThunk(ctx: *anyopaque, this: Value, args: []const Value) value.HostErro
 
 pub fn promiseOf(v: Value) ?*Promise {
     if (v.isObject()) {
-        if (v.asObj().promise) |p| return @ptrCast(@alignCast(p));
+        if (v.asObj().promiseData()) |p| return @ptrCast(@alignCast(p));
     }
     return null;
 }
@@ -388,7 +388,8 @@ pub fn newPromise(self: *Interpreter) EvalError!*Object {
     p.* = .{ .gc_owned = gc_mod.allocationsAreManaged() };
     const obj = try gc_mod.allocObj(self.arena);
     promise_profile.recordPromiseWrapperObject();
-    obj.* = .{ .promise = @ptrCast(p) };
+    obj.* = .{};
+    try obj.setPromiseData(self.arena, @ptrCast(p));
     const promise_ctor = self.env.get("\x00Promise") orelse self.env.get("Promise");
     if (promise_ctor) |ctor| {
         if (ctor.isObject()) obj.proto = try self.protoObject(ctor.asObj());
@@ -403,7 +404,7 @@ pub fn newPromise(self: *Interpreter) EvalError!*Object {
 pub fn newSettledPromise(self: *Interpreter, state: State, v: Value) EvalError!*Object {
     std.debug.assert(state != .pending);
     const obj = try newPromise(self);
-    const p: *Promise = @ptrCast(@alignCast(obj.promise.?));
+    const p: *Promise = @ptrCast(@alignCast(obj.promiseData().?));
     p.state = state;
     gc_mod.barrierValueFrom(p, v);
     p.value = v;
@@ -623,7 +624,7 @@ pub fn performThenResult(self: *Interpreter, p: *Promise, on_f: Value, on_r: Val
 
 pub fn then(self: *Interpreter, p: *Promise, on_f: Value, on_r: Value) EvalError!Value {
     const result = try newPromise(self);
-    const rp: *Promise = @ptrCast(@alignCast(result.promise.?));
+    const rp: *Promise = @ptrCast(@alignCast(result.promiseData().?));
     try performThenResult(self, p, on_f, on_r, rp);
     return Value.obj(result);
 }

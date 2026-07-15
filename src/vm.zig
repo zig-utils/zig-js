@@ -5164,7 +5164,7 @@ pub fn runAsync(vm: *Interpreter, func: *Function, args: []const Value, this_val
     const bound_this = bindThisForCall(vm, func, this_val) catch |err| {
         if (err != error.Throw) return err;
         const result = try promise.newPromise(vm);
-        const rp: *promise.Promise = @ptrCast(@alignCast(result.promise.?));
+        const rp: *promise.Promise = @ptrCast(@alignCast(result.promiseData().?));
         const reason = vm.exception;
         vm.exception = Value.undef();
         try promise.reject(vm, rp, reason);
@@ -5197,7 +5197,7 @@ pub fn runAsync(vm: *Interpreter, func: *Function, args: []const Value, this_val
     // binding `this`) of an async function must settle the result promise as a
     // rejection, not propagate out of the call.
     const result = try promise.newPromise(vm);
-    const rp: *promise.Promise = @ptrCast(@alignCast(result.promise.?));
+    const rp: *promise.Promise = @ptrCast(@alignCast(result.promiseData().?));
     if (!func.is_arrow) try genv.put("arguments", try vm.createArgumentsObject(func, args, genv));
     vm.bindParams2(func.params, args, func.is_arrow) catch |err| {
         if (err != error.Throw) return err;
@@ -5228,7 +5228,7 @@ pub fn runAsync(vm: *Interpreter, func: *Function, args: []const Value, this_val
 }
 
 fn resultPromise(g: *Generator) *promise.Promise {
-    return @ptrCast(@alignCast(g.result.?.promise.?));
+    return @ptrCast(@alignCast(g.result.?.promiseData().?));
 }
 
 const AsyncDisposeCompletion = struct {
@@ -5284,7 +5284,7 @@ fn scheduleAsyncDisposeContinuation(vm: *Interpreter, state: *AsyncDisposeComple
     onf.* = .{ .native = asyncDisposeResumeFulfilled, .private_data = @ptrCast(state) };
     const onr = try gc_mod.allocObj(vm.arena);
     onr.* = .{ .native = asyncDisposeResumeRejected, .private_data = @ptrCast(state) };
-    _ = try promise.then(vm, @ptrCast(@alignCast(wrapped.asObj().promise.?)), Value.obj(onf), Value.obj(onr));
+    _ = try promise.then(vm, @ptrCast(@alignCast(wrapped.asObj().promiseData().?)), Value.obj(onf), Value.obj(onr));
 }
 
 fn continueAsyncDisposal(vm: *Interpreter, state: *AsyncDisposeCompletion, rejected: ?Value) EvalError!void {
@@ -5415,7 +5415,7 @@ fn asyncDrive(vm: *Interpreter, g: *Generator, kind: ResumeKind, val: Value) Eva
         onf.* = .{ .native = asyncOnFulfill, .private_data = @ptrCast(g) };
         const onr = try gc_mod.allocObj(vm.arena);
         onr.* = .{ .native = asyncOnReject, .private_data = @ptrCast(g) };
-        _ = try promise.then(vm, @ptrCast(@alignCast(awaited.asObj().promise.?)), Value.obj(onf), Value.obj(onr));
+        _ = try promise.then(vm, @ptrCast(@alignCast(awaited.asObj().promiseData().?)), Value.obj(onf), Value.obj(onr));
         return;
     }
     g.done = true;
@@ -5710,15 +5710,15 @@ fn agStep(vm: *Interpreter, g: *Generator, kind: ResumeKind, val: Value) EvalErr
             onf.* = .{ .native = agOnFulfill, .private_data = @ptrCast(g) };
             const onr = try gc_mod.allocObj(vm.arena);
             onr.* = .{ .native = agOnReject, .private_data = @ptrCast(g) };
-            _ = try promise.then(vm, @ptrCast(@alignCast(wrapped.asObj().promise.?)), Value.obj(onf), Value.obj(onr));
+            _ = try promise.then(vm, @ptrCast(@alignCast(wrapped.asObj().promiseData().?)), Value.obj(onf), Value.obj(onr));
         },
         .yielded => |v| {
-            try promise.resolve(vm, @ptrCast(@alignCast(front.promise.?)), try makeIterResult(vm, v, false));
+            try promise.resolve(vm, @ptrCast(@alignCast(front.promiseData().?)), try makeIterResult(vm, v, false));
             try agRemoveFrontAndContinue(vm, g);
         },
         .returned => |v| {
             g.done = true;
-            try promise.resolve(vm, @ptrCast(@alignCast(front.promise.?)), try makeIterResult(vm, v, true));
+            try promise.resolve(vm, @ptrCast(@alignCast(front.promiseData().?)), try makeIterResult(vm, v, true));
             try agRemoveFrontAndContinue(vm, g);
         },
         .returned_await => |v| {
@@ -5732,7 +5732,7 @@ fn agStep(vm: *Interpreter, g: *Generator, kind: ResumeKind, val: Value) EvalErr
                 vm.exception = Value.undef();
                 if (can_resume_abrupt) return agStep(vm, g, .throw_, reason);
                 g.done = true;
-                try promise.reject(vm, @ptrCast(@alignCast(front.promise.?)), reason);
+                try promise.reject(vm, @ptrCast(@alignCast(front.promiseData().?)), reason);
                 try agRemoveFrontAndContinue(vm, g);
                 return;
             };
@@ -5741,11 +5741,11 @@ fn agStep(vm: *Interpreter, g: *Generator, kind: ResumeKind, val: Value) EvalErr
             onf.* = .{ .native = agReturnFulfill, .private_data = @ptrCast(g) };
             const onr = try gc_mod.allocObj(vm.arena);
             onr.* = .{ .native = agReturnReject, .private_data = @ptrCast(g) };
-            _ = try promise.then(vm, @ptrCast(@alignCast(wrapped.asObj().promise.?)), Value.obj(onf), Value.obj(onr));
+            _ = try promise.then(vm, @ptrCast(@alignCast(wrapped.asObj().promiseData().?)), Value.obj(onf), Value.obj(onr));
         },
         .threw => |e| {
             g.done = true;
-            try promise.reject(vm, @ptrCast(@alignCast(front.promise.?)), e);
+            try promise.reject(vm, @ptrCast(@alignCast(front.promiseData().?)), e);
             try agRemoveFrontAndContinue(vm, g);
         },
     }
@@ -5779,7 +5779,7 @@ fn agDoneReturnFulfill(ctx: *anyopaque, this: Value, args: []const Value) value.
     _ = this;
     const vm: *Interpreter = @ptrCast(@alignCast(ctx));
     const result: *value.Object = @ptrCast(@alignCast(vm.active_native.?.private_data.?));
-    try promise.resolve(vm, @ptrCast(@alignCast(result.promise.?)), try makeIterResult(vm, if (args.len > 0) args[0] else Value.undef(), true));
+    try promise.resolve(vm, @ptrCast(@alignCast(result.promiseData().?)), try makeIterResult(vm, if (args.len > 0) args[0] else Value.undef(), true));
     return Value.undef();
 }
 
@@ -5787,7 +5787,7 @@ fn agDoneReturnReject(ctx: *anyopaque, this: Value, args: []const Value) value.H
     _ = this;
     const vm: *Interpreter = @ptrCast(@alignCast(ctx));
     const result: *value.Object = @ptrCast(@alignCast(vm.active_native.?.private_data.?));
-    try promise.reject(vm, @ptrCast(@alignCast(result.promise.?)), if (args.len > 0) args[0] else Value.undef());
+    try promise.reject(vm, @ptrCast(@alignCast(result.promiseData().?)), if (args.len > 0) args[0] else Value.undef());
     return Value.undef();
 }
 
@@ -5796,14 +5796,14 @@ fn settleAsyncGeneratorDoneReturn(vm: *Interpreter, result: *value.Object, value
         if (err != error.Throw) return err;
         const reason = vm.exception;
         vm.exception = Value.undef();
-        try promise.reject(vm, @ptrCast(@alignCast(result.promise.?)), reason);
+        try promise.reject(vm, @ptrCast(@alignCast(result.promiseData().?)), reason);
         return;
     };
     const onf = try gc_mod.allocObj(vm.arena);
     onf.* = .{ .native = agDoneReturnFulfill, .private_data = @ptrCast(result) };
     const onr = try gc_mod.allocObj(vm.arena);
     onr.* = .{ .native = agDoneReturnReject, .private_data = @ptrCast(result) };
-    _ = try promise.then(vm, @ptrCast(@alignCast(wrapped.asObj().promise.?)), Value.obj(onf), Value.obj(onr));
+    _ = try promise.then(vm, @ptrCast(@alignCast(wrapped.asObj().promiseData().?)), Value.obj(onf), Value.obj(onr));
 }
 
 /// Once the generator is done, settle every still-queued request: a `next`
@@ -5818,9 +5818,9 @@ fn agDrainDone(vm: *Interpreter, g: *Generator) EvalError!void {
         };
         g.unlockRequests();
         switch (req.kind) {
-            .throw_ => try promise.reject(vm, @ptrCast(@alignCast(req.result.promise.?)), req.value),
+            .throw_ => try promise.reject(vm, @ptrCast(@alignCast(req.result.promiseData().?)), req.value),
             .return_ => try settleAsyncGeneratorDoneReturn(vm, req.result, req.value),
-            .send => try promise.resolve(vm, @ptrCast(@alignCast(req.result.promise.?)), try makeIterResult(vm, Value.undef(), true)),
+            .send => try promise.resolve(vm, @ptrCast(@alignCast(req.result.promiseData().?)), try makeIterResult(vm, Value.undef(), true)),
         }
     }
 }
@@ -5833,7 +5833,7 @@ fn agReturnFulfill(ctx: *anyopaque, this: Value, args: []const Value) value.Host
     const g: *Generator = @ptrCast(@alignCast(vm.active_native.?.private_data.?));
     const front_req = agFront(g) orelse return Value.undef();
     const front = front_req.result;
-    try promise.resolve(vm, @ptrCast(@alignCast(front.promise.?)), try makeIterResult(vm, if (args.len > 0) args[0] else Value.undef(), true));
+    try promise.resolve(vm, @ptrCast(@alignCast(front.promiseData().?)), try makeIterResult(vm, if (args.len > 0) args[0] else Value.undef(), true));
     g.lockRequests();
     _ = g.popRequest();
     g.unlockRequests();
@@ -5848,7 +5848,7 @@ fn agReturnReject(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
     const g: *Generator = @ptrCast(@alignCast(vm.active_native.?.private_data.?));
     const front_req = agFront(g) orelse return Value.undef();
     const front = front_req.result;
-    try promise.reject(vm, @ptrCast(@alignCast(front.promise.?)), if (args.len > 0) args[0] else Value.undef());
+    try promise.reject(vm, @ptrCast(@alignCast(front.promiseData().?)), if (args.len > 0) args[0] else Value.undef());
     g.lockRequests();
     _ = g.popRequest();
     g.unlockRequests();

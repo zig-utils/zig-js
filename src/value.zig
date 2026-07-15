@@ -623,6 +623,7 @@ pub const ObjectRareTag = enum {
     proxy,
     buffer_view,
     temporal,
+    promise,
 };
 
 pub const ObjectRareState = union(ObjectRareTag) {
@@ -653,6 +654,7 @@ pub const ObjectRareState = union(ObjectRareTag) {
         data_view: ?*DataViewData = null,
     },
     temporal: struct { ptr: ?*TemporalData = null },
+    promise: struct { ptr: ?*anyopaque = null },
 };
 
 pub const ObjectColdState = struct {
@@ -926,10 +928,7 @@ pub const Object = struct {
     /// For objects created by `new F()`, the constructor function's object —
     /// used by `instanceof` to walk the (flat, v1) construction link.
     ctor_ref: ?*Object = null,
-    /// `*Interpreter.Promise`, type-erased (cycle break like `js_func`/`gen`).
-    /// Non-null marks a Promise object — its `then`/`catch`/`finally` are
-    /// dispatched specially and it carries pending reactions + settled state.
-    promise: ?*anyopaque = null,
+    // The type-erased Promise state-cell pointer lives in rare state.
     // Primitive-wrapper [[NumberData]]/[[StringData]]/[[BooleanData]] lives cold.
     /// `Proxy` target and handler live in the disjoint rare-state sidecar.
     /// A revoked proxy retains only these hot behavior flags.
@@ -1347,6 +1346,19 @@ pub const Object = struct {
             .temporal => |*state| state.ptr = null,
             else => {},
         };
+    }
+
+    pub inline fn promiseData(self: *const Object) ?*anyopaque {
+        const cold = self.cold orelse return null;
+        return switch (cold.rare) {
+            .promise => |state| state.ptr,
+            else => null,
+        };
+    }
+
+    pub fn setPromiseData(self: *Object, fallback: std.mem.Allocator, data: *anyopaque) std.mem.Allocator.Error!void {
+        const state = try self.ensureRare(fallback, .promise, .{});
+        state.ptr = data;
     }
 
     pub fn setErrorName(self: *Object, fallback: std.mem.Allocator, name: []const u8) std.mem.Allocator.Error!void {

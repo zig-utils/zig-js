@@ -5673,7 +5673,7 @@ pub const Interpreter = struct {
             // back to the synchronous-settling tree-walk model below.
             if (func.async_chunk) |_| return vm.runAsync(self, func, args, this_val);
             const result = try promise.newPromise(self);
-            const rp: *promise.Promise = @ptrCast(@alignCast(result.promise.?));
+            const rp: *promise.Promise = @ptrCast(@alignCast(result.promiseData().?));
             if (self.callPlain(func, args, this_val, new_target)) |rv| {
                 try promise.resolve(self, rp, rv);
             } else |err| {
@@ -14904,7 +14904,7 @@ fn asyncFromSyncContinuation(self: *Interpreter, sync_iter: Value, result: Value
     const done = (self.getProperty(result, "done") catch |err| return promiseRejectAbrupt(self, err)).toBoolean();
     const value_v = self.getProperty(result, "value") catch |err| return promiseRejectAbrupt(self, err);
     const out = try promise.newPromise(self);
-    const out_p: *promise.Promise = @ptrCast(@alignCast(out.promise.?));
+    const out_p: *promise.Promise = @ptrCast(@alignCast(out.promiseData().?));
     const wrapped = promiseResolveValue(self, value_v) catch |err| {
         if (err != error.Throw) return err;
         const reason = self.exception;
@@ -14998,7 +14998,7 @@ fn promiseConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value
     if (!executor.isCallable()) return self.throwError("TypeError", "Promise resolver is not a function");
     const pobj = try promise.newPromise(self);
     if (self.new_target.isObject()) pobj.setProtoAtomic(try self.ctorRealmIntrinsicProto(self.new_target.asObj(), "Promise"));
-    const pp = pobj.promise.?;
+    const pp = pobj.promiseData().?;
     const resolving = try promise.nativeResolveReject(self, @ptrCast(@alignCast(pp)));
     if (self.callValueWithThis(executor, &.{ resolving.resolve, resolving.reject }, Value.undef())) |_| {} else |err| {
         if (err == error.Throw) {
@@ -15129,15 +15129,15 @@ pub fn promiseResolveValue(self: *Interpreter, v: Value) EvalError!Value {
     }
     if (!v.isObject()) return Value.obj(try promise.newSettledPromise(self, .fulfilled, v));
     const pobj = try promise.newPromise(self);
-    try promise.resolve(self, @ptrCast(@alignCast(pobj.promise.?)), v);
+    try promise.resolve(self, @ptrCast(@alignCast(pobj.promiseData().?)), v);
     return Value.obj(pobj);
 }
 
 fn promiseResolveAfterTick(self: *Interpreter, v: Value) EvalError!Value {
     const result = try promise.newPromise(self);
-    const rp: *promise.Promise = @ptrCast(@alignCast(result.promise.?));
+    const rp: *promise.Promise = @ptrCast(@alignCast(result.promiseData().?));
     const tick = try promise.newPromise(self);
-    const tp: *promise.Promise = @ptrCast(@alignCast(tick.promise.?));
+    const tp: *promise.Promise = @ptrCast(@alignCast(tick.promiseData().?));
     try promise.performThenResult(self, tp, Value.undef(), Value.undef(), rp);
     try promise.resolve(self, tp, v);
     return Value.obj(result);
@@ -15830,7 +15830,7 @@ fn setTimeoutFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostErr
         if (self.asyncWaiterCount(waiters) > 0) self.settleAsyncWaiters();
     }
     const tick = try promise.newPromise(self);
-    const pp: *promise.Promise = @ptrCast(@alignCast(tick.promise.?));
+    const pp: *promise.Promise = @ptrCast(@alignCast(tick.promiseData().?));
     try promise.resolve(self, pp, Value.undef());
     _ = try promise.then(self, pp, cb, Value.undef());
     return Value.num(0);

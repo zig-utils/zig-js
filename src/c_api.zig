@@ -747,7 +747,7 @@ export fn JSObjectMakeDeferredPromise(ctx: JSContextRef, resolve: [*c]JSObjectRe
         } else setException(c, exception, @errorName(err));
         return null;
     };
-    const p: *promise.Promise = @ptrCast(@alignCast(obj.promise.?));
+    const p: *promise.Promise = @ptrCast(@alignCast(obj.promiseData().?));
     const capability = promise.nativeResolveReject(&machine, p) catch |err| {
         if (err == error.Throw) {
             if (exception != null) exception[0] = box(c, machine.exception);
