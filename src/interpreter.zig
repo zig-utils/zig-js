@@ -22,6 +22,7 @@ const jsthread = @import("jsthread.zig");
 const parser_mod = @import("parser.zig");
 const iana_zones = @import("iana_zones.zig");
 const iana_offsets = @import("iana_offsets.zig");
+const dn_data = @import("intl_displaynames_data.zig");
 const Compiler = @import("compiler.zig").Compiler;
 const Shape = @import("shape.zig").Shape;
 const unicode_case = @import("unicode_case.zig");
@@ -26183,53 +26184,150 @@ fn intlPluralSelectRangeFn(ctx: *anyopaque, this: Value, args: []const Value) va
     return Value.str("other");
 }
 
+/// Binary search a sorted DisplayNames name table for `code` (exact match).
+fn dnLookup(table: []const dn_data.Entry, code: []const u8) ?[]const u8 {
+    var lo: usize = 0;
+    var hi: usize = table.len;
+    while (lo < hi) {
+        const mid = lo + (hi - lo) / 2;
+        const ord = std.mem.order(u8, table[mid].code, code);
+        if (ord == .eq) return table[mid].name;
+        if (ord == .lt) lo = mid + 1 else hi = mid;
+    }
+    return null;
+}
+fn dnIsAllAlpha(s: []const u8) bool {
+    for (s) |c| if (!std.ascii.isAlphabetic(c)) return false;
+    return s.len > 0;
+}
+/// Canonicalize one language-tag subtag by position: language lowercase, script
+/// (4 alpha) titlecase, region (2 alpha) uppercase; digits/others unchanged.
+fn dnCanonSubtag(self: *Interpreter, sub: []const u8, first: bool) EvalError![]const u8 {
+    if (first) return try std.ascii.allocLowerString(self.arena, sub);
+    if (sub.len == 4 and dnIsAllAlpha(sub)) {
+        const out = try self.arena.alloc(u8, 4);
+        out[0] = std.ascii.toUpper(sub[0]);
+        for (sub[1..], 1..) |c, i| out[i] = std.ascii.toLower(c);
+        return out;
+    }
+    if (sub.len == 2 and dnIsAllAlpha(sub)) return try std.ascii.allocUpperString(self.arena, sub);
+    return try self.arena.dupe(u8, sub);
+}
+/// Render a language tag's English name: try the whole dialect tag, else compose
+/// "Language (Script, Region, …)" from the base language + qualifier names.
+fn dnLanguageName(self: *Interpreter, canon_tag: []const u8, dialect: bool, want_short: bool) EvalError!?[]const u8 {
+    if (dialect) {
+        if (want_short) if (dnLookup(&dn_data.languages_short, canon_tag)) |n| return n;
+        if (dnLookup(&dn_data.languages, canon_tag)) |n| return n;
+    }
+    var it = std.mem.splitScalar(u8, canon_tag, '-');
+    const base = it.next() orelse return null;
+    const base_name = dnLookup(&dn_data.languages, base) orelse return null;
+    var quals: std.ArrayListUnmanaged([]const u8) = .empty;
+    while (it.next()) |sub| {
+        if (sub.len == 4 and dnIsAllAlpha(sub)) {
+            try quals.append(self.arena, dnLookup(&dn_data.scripts, sub) orelse sub);
+        } else if ((sub.len == 2 and dnIsAllAlpha(sub)) or sub.len == 3) {
+            try quals.append(self.arena, dnLookup(&dn_data.regions, sub) orelse sub);
+        } else {
+            try quals.append(self.arena, sub);
+        }
+    }
+    if (quals.items.len == 0) return base_name;
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    try out.appendSlice(self.arena, base_name);
+    try out.appendSlice(self.arena, " (");
+    for (quals.items, 0..) |q, i| {
+        if (i != 0) try out.appendSlice(self.arena, ", ");
+        try out.appendSlice(self.arena, q);
+    }
+    try out.append(self.arena, ')');
+    return out.items;
+}
 /// `Intl.DisplayNames.prototype.of(code)` — validates the code's structure for
-/// the configured type (RangeError otherwise). With no CLDR name data the name
-/// is always "not found": fallback "none" returns undefined, "code" returns the
-/// canonicalized code.
+/// the configured type (RangeError otherwise), then renders its English display
+/// name from the CLDR tables (for an `en` locale). When no name is found,
+/// fallback "none" returns undefined and "code" returns the canonicalized code.
 fn intlDisplayNamesOfFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!intlBrandOk(this, "DisplayNames")) return self.throwError("TypeError", "Intl.DisplayNames.prototype.of on incompatible receiver");
     const code = try self.toStringV(if (args.len > 0) args[0] else Value.undef());
     var typ: []const u8 = "language";
     var fallback: []const u8 = "code";
+    var language_display: []const u8 = "dialect";
+    var style: []const u8 = "long";
     if (this.asObj().getOwn("\x00opts")) |ov| if (ov.isObject()) {
         if (ov.asObj().getOwn("type")) |t| typ = t.asStr();
         if (ov.asObj().getOwn("fallback")) |f| fallback = f.asStr();
+        if (ov.asObj().getOwn("languageDisplay")) |l| language_display = l.asStr();
+        if (ov.asObj().getOwn("style")) |s| style = s.asStr();
     };
-    const allAlpha = struct {
-        fn f(s: []const u8) bool {
-            for (s) |c| if (!std.ascii.isAlphabetic(c)) return false;
-            return s.len > 0;
-        }
-    }.f;
+    const want_short = std.mem.eql(u8, style, "short");
+    // English CLDR names apply when the resolved locale is English.
+    const is_en = blk: {
+        if (this.asObj().getOwn("\x00locale")) |lv| if (lv.isString()) {
+            const loc = lv.asStr();
+            break :blk std.mem.eql(u8, loc, "en") or std.mem.startsWith(u8, loc, "en-");
+        };
+        break :blk false;
+    };
+    const allAlpha = dnIsAllAlpha;
     var canon: []const u8 = code;
+    var name: ?[]const u8 = null;
     if (std.mem.eql(u8, typ, "region")) {
         const digits = blk: {
             for (code) |c| if (!std.ascii.isDigit(c)) break :blk false;
             break :blk code.len == 3;
         };
         if (!((code.len == 2 and allAlpha(code)) or digits)) return self.throwError("RangeError", "invalid region code");
-        canon = try std.ascii.allocUpperString(self.arena, code);
+        // ICU looks up region codes case-sensitively (uppercase CLDR keys).
+        if (is_en) {
+            if (want_short) name = dnLookup(&dn_data.regions_short, code);
+            if (name == null) name = dnLookup(&dn_data.regions, code);
+        }
     } else if (std.mem.eql(u8, typ, "script")) {
         if (code.len != 4 or !allAlpha(code)) return self.throwError("RangeError", "invalid script code");
+        if (is_en) {
+            if (want_short) name = dnLookup(&dn_data.scripts_short, code);
+            if (name == null) name = dnLookup(&dn_data.scripts, code);
+        }
     } else if (std.mem.eql(u8, typ, "currency")) {
         if (code.len != 3 or !allAlpha(code)) return self.throwError("RangeError", "invalid currency code");
         canon = try std.ascii.allocUpperString(self.arena, code);
-        // The currencies enumerated by supportedValuesOf have a (stand-in) name,
-        // so they resolve even under fallback:"none".
-        for (supported_currencies) |c| if (std.mem.eql(u8, c, canon)) return try Value.strAlloc(self.arena, canon);
+        if (is_en) name = dnLookup(&dn_data.currencies, canon);
+        if (name == null) {
+            // The currencies enumerated by supportedValuesOf have a stand-in name.
+            for (supported_currencies) |c| if (std.mem.eql(u8, c, canon)) return try Value.strAlloc(self.arena, canon);
+        }
     } else if (std.mem.eql(u8, typ, "language")) {
         // A unicode_language_id: structurally valid AND no extension (singleton)
         // subtag (DisplayNames language codes are not full locale tags).
         if (!isStructurallyValidLanguageTag(code)) return self.throwError("RangeError", "invalid language code");
         var lit = std.mem.splitScalar(u8, code, '-');
         while (lit.next()) |s| if (s.len == 1) return self.throwError("RangeError", "language code may not contain an extension");
+        // Canonicalize each subtag by position, applying the CLDR language alias
+        // to the primary subtag (e.g. tl→fil, sh→sr-Latn) as node/ICU does.
+        var parts: std.ArrayListUnmanaged(u8) = .empty;
+        var sit = std.mem.splitScalar(u8, code, '-');
+        var first = true;
+        while (sit.next()) |sub| {
+            if (first) {
+                const low = try std.ascii.allocLowerString(self.arena, sub);
+                try parts.appendSlice(self.arena, dnLookup(&dn_data.language_aliases, low) orelse low);
+            } else {
+                try parts.append(self.arena, '-');
+                try parts.appendSlice(self.arena, try dnCanonSubtag(self, sub, false));
+            }
+            first = false;
+        }
+        canon = parts.items;
+        if (is_en) name = try dnLanguageName(self, canon, std.mem.eql(u8, language_display, "dialect"), want_short);
     } else if (std.mem.eql(u8, typ, "calendar")) {
         if (!dtfWellFormedType(code)) return self.throwError("RangeError", "invalid calendar code");
         // Calendars enumerated by supportedValuesOf resolve under fallback:"none".
         const cc = dtfCanonCalendar(code);
         if (dtfCalAvail(cc)) return try Value.strAlloc(self.arena, cc);
+        canon = cc;
     } else if (std.mem.eql(u8, typ, "dateTimeField")) {
         const fields = [_][]const u8{ "era", "year", "quarter", "month", "weekOfYear", "weekday", "day", "dayPeriod", "hour", "minute", "second", "timeZoneName" };
         var ok = false;
@@ -26238,6 +26336,7 @@ fn intlDisplayNamesOfFn(ctx: *anyopaque, this: Value, args: []const Value) value
         };
         if (!ok) return self.throwError("RangeError", "invalid dateTimeField");
     }
+    if (name) |n| return try Value.strAlloc(self.arena, n);
     if (std.mem.eql(u8, fallback, "none")) return Value.undef();
     return try Value.strAlloc(self.arena, canon);
 }
