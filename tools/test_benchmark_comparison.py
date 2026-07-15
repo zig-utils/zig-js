@@ -80,7 +80,11 @@ class ValidationTests(unittest.TestCase):
 
 class PublicationTests(unittest.TestCase):
     def test_dirty_evidence_publication_fails(self) -> None:
-        info = {"zig-js": "deadbeef (tracked worktree dirty)"}
+        info = {
+            "zig-js": "deadbeef",
+            "zig-gc": "cafebabe (tracked worktree dirty)",
+            "zig-regex": "feedface",
+        }
         with self.assertRaisesRegex(ValueError, "dirty tracked worktree"):
             benchmark.ensure_publishable(info, True)
 

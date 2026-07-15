@@ -189,7 +189,17 @@ def geometric_mean(values: list[float]) -> float:
     return math.exp(sum(math.log(value) for value in values) / len(values))
 
 
+def repository_revision(path: pathlib.Path) -> str:
+    commit = command_output(["git", "-C", str(path), "rev-parse", "HEAD"])
+    dirty = command_output(
+        ["git", "-C", str(path), "status", "--porcelain", "--untracked-files=no"],
+        "",
+    )
+    return commit + (" (tracked worktree dirty)" if dirty else "")
+
+
 def metadata() -> dict[str, str]:
+    repository = pathlib.Path(__file__).resolve().parent.parent
     jsc_framework = pathlib.Path("/System/Library/Frameworks/JavaScriptCore.framework").resolve()
     info = jsc_framework / "Resources" / "Info.plist"
     jsc_version = command_output(["plutil", "-extract", "CFBundleVersion", "raw", str(info)])
@@ -200,23 +210,28 @@ def metadata() -> dict[str, str]:
     logical = command_output(["sysctl", "-n", "hw.logicalcpu"])
     memory = command_output(["sysctl", "-n", "hw.memsize"])
     memory_gib = f"{int(memory) / (1024 ** 3):.1f} GiB" if memory.isdigit() else memory
-    commit = command_output(["git", "rev-parse", "HEAD"])
-    dirty = command_output(["git", "status", "--porcelain", "--untracked-files=no"], "")
     power = " ".join(command_output(["pmset", "-g", "batt"], "unavailable").split())
     return {
         "Date": dt.date.today().isoformat(),
         "Host": f"{cpu}; {physical} physical / {logical} logical CPUs; {memory_gib}",
         "OS": f"macOS {macos} ({macos_build})",
         "Zig": command_output(["zig", "version"]),
-        "zig-js": commit + (" (tracked worktree dirty)" if dirty else ""),
+        "zig-js": repository_revision(repository),
+        "zig-gc": repository_revision(repository.parent / "zig-gc"),
+        "zig-regex": repository_revision(repository.parent / "zig-regex"),
         "JavaScriptCore": f"system framework {jsc_version}",
         "Power": power,
     }
 
 
 def ensure_publishable(info: dict[str, str], publishing: bool) -> None:
-    if publishing and info["zig-js"].endswith(" (tracked worktree dirty)"):
-        raise ValueError("refusing to publish benchmark evidence from a dirty tracked worktree")
+    if not publishing:
+        return
+    dirty = [name for name, revision in info.items() if revision.endswith(" (tracked worktree dirty)")]
+    if dirty:
+        raise ValueError(
+            "refusing to publish benchmark evidence from dirty tracked worktree(s): " + ", ".join(dirty)
+        )
 
 
 def render(rows: list[Row], lanes: list[int], raw_path: pathlib.Path | None, info: dict[str, str]) -> str:
