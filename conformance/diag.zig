@@ -339,7 +339,7 @@ fn reportErr(ctx: *js.Context, err: anyerror, m: anytype) void {
     if (ctx.exception) |ex| {
         if (ex.isObject()) {
             const o = ex.asObj();
-            if (o.error_name.len > 0) name = o.error_name;
+            if (o.errorName().len > 0) name = o.errorName();
             if (o.getOwn("name")) |nv| if (nv.isString()) {
                 name = nv.asStr();
             };
@@ -414,7 +414,7 @@ fn runOne(gpa: std.mem.Allocator, io: std.Io, root: []const u8, out: std.Io.File
         if (ctx.exception) |ex| {
             if (ex.isObject()) {
                 const o = ex.asObj();
-                if (o.error_name.len > 0) name = o.error_name;
+                if (o.errorName().len > 0) name = o.errorName();
                 if (o.getOwn("name")) |nv| {
                     if (nv.isString()) name = nv.asStr();
                 }

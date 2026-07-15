@@ -487,7 +487,7 @@ fn captureDetail(gpa: std.mem.Allocator, ctx: *js.Context, err: anyerror, d: *st
             // non-native-error object.
             if (ex.isObject()) {
                 const o = ex.asObj();
-                const name = if (o.getOwn("name")) |v| (if (v.isString()) v.asStr() else o.error_name) else o.error_name;
+                const name = if (o.getOwn("name")) |v| (if (v.isString()) v.asStr() else o.errorName()) else o.errorName();
                 const msg = if (o.getOwn("message")) |v| (if (v.isString()) v.asStr() else "") else "";
                 if (name.len != 0 or msg.len != 0) {
                     d.appendSlice(gpa, name) catch {};
