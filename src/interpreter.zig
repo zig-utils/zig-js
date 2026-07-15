@@ -23250,6 +23250,26 @@ fn dtfTimeZoneOffsetMs(this: Value, epoch_ms: f64) i64 {
     return @intCast(@divTrunc(timeZoneOffsetAtEpoch(s, epoch_ns, fallback * 1_000_000), 1_000_000));
 }
 
+/// The English era name for a calendar's raw era, per era width (long/short/
+/// narrow). Gregorian ce/bce and the modern Japanese eras have distinct widths;
+/// the Buddhist era is "BE" throughout.
+fn dtfEraName(cal: []const u8, raw: []const u8, width: []const u8) []const u8 {
+    const long = std.mem.eql(u8, width, "long");
+    const narrow = std.mem.eql(u8, width, "narrow");
+    if (asciiEqlIgnoreCase(cal, "buddhist")) return "BE";
+    if (asciiEqlIgnoreCase(raw, "ce")) return if (long) "Anno Domini" else if (narrow) "A" else "AD";
+    if (asciiEqlIgnoreCase(raw, "bce")) return if (long) "Before Christ" else if (narrow) "B" else "BC";
+    const Jp = struct { k: []const u8, name: []const u8, n: []const u8 };
+    const jp = [_]Jp{
+        .{ .k = "reiwa", .name = "Reiwa", .n = "R" },
+        .{ .k = "heisei", .name = "Heisei", .n = "H" },
+        .{ .k = "showa", .name = "Sh\u{014d}wa", .n = "S" },
+        .{ .k = "taisho", .name = "Taish\u{014d}", .n = "T" },
+        .{ .k = "meiji", .name = "Meiji", .n = "M" },
+    };
+    for (jp) |j| if (asciiEqlIgnoreCase(raw, j.k)) return if (narrow) j.n else j.name;
+    return raw;
+}
 fn dtfMonthName(cal: []const u8, month: u8, width: []const u8) ?[]const u8 {
     if (month < 1 or month > 12) return null;
     const idx = month - 1;
@@ -23671,7 +23691,7 @@ fn dtfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Hos
         }
         if (o_era.len > 0) if (era_info.era) |raw_era| {
             try P.lit(self, &parts, " ");
-            try parts.append(self.arena, .{ .typ = "era", .value = if (asciiEqlIgnoreCase(raw_era, "ce")) "AD" else if (asciiEqlIgnoreCase(raw_era, "bce")) "BC" else raw_era });
+            try parts.append(self.arena, .{ .typ = "era", .value = dtfEraName(part_calendar, raw_era, o_era) });
         };
     }
     // Time part: "h:mm:ss AM/PM" (or 24-hour).
