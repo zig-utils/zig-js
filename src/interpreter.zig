@@ -23778,10 +23778,10 @@ fn intlDateTimeFormatToPartsFn(ctx: *anyopaque, this: Value, args: []const Value
     return Value.obj(arr);
 }
 
-/// Range separator shared by DateTimeFormat formatRange/formatRangeToParts (the
-/// en-US tests derive the separator from formatRangeToParts' shared literal, so
-/// the only requirement is that both use the same value).
-const dtf_range_sep = " \u{2013} ";
+/// Range separator shared by DateTimeFormat formatRange/formatRangeToParts.
+/// CLDR uses a thin space (U+2009) on both sides of the en dash (U+2013) across
+/// locales (en/de/fr/… all agree), matching ICU/Node.
+const dtf_range_sep = "\u{2009}\u{2013}\u{2009}";
 
 /// The "kind" of a formatRange argument: a Temporal kind, or null for a legacy
 /// time value (number/Date). The two arguments of formatRange must agree.
