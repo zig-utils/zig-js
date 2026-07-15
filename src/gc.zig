@@ -369,9 +369,9 @@ fn finalizeObjectBacking(o: *Object, a: std.mem.Allocator) usize {
         released += 1;
     }
     if (flags.temporal) {
-        if (o.temporal) |t| {
+        if (o.temporalData()) |t| {
             a.destroy(t);
-            o.temporal = null;
+            o.clearTemporalData();
         }
         released += 1;
     }

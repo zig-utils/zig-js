@@ -14261,7 +14261,7 @@ pub const Interpreter = struct {
                     break;
                 }
                 if (c.getOwn(m)) |fv| {
-                    if (fv.isObject() and (fv.asObj().js_func != null or (c == o and fv.asObj().native != null) or (o.temporal != null and std.mem.eql(u8, m, "valueOf") and fv.asObj().native != null))) method = fv
+                    if (fv.isObject() and (fv.asObj().js_func != null or (c == o and fv.asObj().native != null) or (o.temporalData() != null and std.mem.eql(u8, m, "valueOf") and fv.asObj().native != null))) method = fv
                         // Primitive wrappers' native valueOf is a spec builtin that
                         // produces the boxed primitive at this position in the
                         // OrdinaryToPrimitive order, so do not continue to a later
@@ -23424,7 +23424,7 @@ fn dtfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Hos
     var second: u8 = 0;
     var frac_ms: u32 = 0;
     {
-        const t_obj: ?*value.TemporalData = if (args.len > 0 and args[0].isObject()) args[0].asObj().temporal else null;
+        const t_obj: ?*value.TemporalData = if (args.len > 0 and args[0].isObject()) args[0].asObj().temporalData() else null;
         const direct = t_obj != null and switch (t_obj.?.kind) {
             .plain_date, .plain_time, .plain_date_time, .plain_year_month, .plain_month_day, .zoned_date_time => true,
             else => false,
@@ -23875,7 +23875,7 @@ const dtf_range_sep = "\u{2009}\u{2013}\u{2009}";
 /// The "kind" of a formatRange argument: a Temporal kind, or null for a legacy
 /// time value (number/Date). The two arguments of formatRange must agree.
 fn dtfArgKind(v: Value) ?value.TemporalData.Kind {
-    if (v.isObject() and v.asObj().temporal != null) return v.asObj().temporal.?.kind;
+    if (v.isObject() and v.asObj().temporalData() != null) return v.asObj().temporalData().?.kind;
     return null;
 }
 
@@ -23887,8 +23887,8 @@ fn dtfRangeCheckKinds(self: *Interpreter, a: Value, b: Value) value.HostError!vo
     const same = (ka == null and kb == null) or (ka != null and kb != null and ka.? == kb.?);
     if (!same) return self.throwError("TypeError", "Intl.DateTimeFormat range: start and end must be the same type");
     if (ka != null and a.isObject() and b.isObject()) {
-        const ta = a.asObj().temporal orelse return;
-        const tb = b.asObj().temporal orelse return;
+        const ta = a.asObj().temporalData() orelse return;
+        const tb = b.asObj().temporalData() orelse return;
         if (temporalCarriesCalendar(ta) and !std.mem.eql(u8, ta.calendar, tb.calendar))
             return self.throwError("RangeError", "Intl.DateTimeFormat range: start and end calendars must match");
     }
@@ -25384,7 +25384,7 @@ fn durationToRecord(self: *Interpreter, d: Value) value.HostError![10]f64 {
     if (tIsTemporal(d, .duration)) {
         // A Temporal.Duration: read its internal slots, not the (tauntable)
         // prototype getters.
-        vals = d.asObj().temporal.?.dur;
+        vals = d.asObj().temporalData().?.dur;
         for (&vals) |*p| if (p.* == 0) {
             p.* = 0;
         };
@@ -29434,7 +29434,7 @@ fn dateToTemporalInstantFn(ctx: *anyopaque, this: Value, args: []const Value) va
     const ms = this.asObj().dateMs();
     if (!std.math.isFinite(ms)) return self.throwError("RangeError", "invalid Date");
     const o = try makeTemporal(self, .instant, "\x00T.Instant");
-    o.temporal.?.epoch_ns = @as(i128, @intFromFloat(ms)) * 1_000_000;
+    o.temporalData().?.epoch_ns = @as(i128, @intFromFloat(ms)) * 1_000_000;
     return Value.obj(o);
 }
 
@@ -30291,8 +30291,8 @@ fn resolveRelativeTo(self: *Interpreter, opts: Value) EvalError!?RelTo {
     const rv = try self.getProperty(opts, "relativeTo");
     if (rv.isUndefined()) return null;
     if (rv.isNull()) return self.throwError("TypeError", "invalid relativeTo");
-    if (rv.isObject() and rv.asObj().temporal != null) {
-        const t = rv.asObj().temporal.?;
+    if (rv.isObject() and rv.asObj().temporalData() != null) {
+        const t = rv.asObj().temporalData().?;
         switch (t.kind) {
             .plain_date => return .{ .y = t.year, .m = t.month, .d = t.day, .time_ns = 0 },
             .plain_date_time => return .{ .y = t.year, .m = t.month, .d = t.day, .time_ns = timeToNs(t) },
@@ -30435,8 +30435,8 @@ fn relativeTimeZoneOffset(self: *Interpreter, tz: TimeZone, local_ns: i128, offs
 }
 
 fn validateRelativeCalendar(self: *Interpreter, v: Value) EvalError!void {
-    if (v.isObject() and !v.asObj().is_symbol and !v.asObj().is_bigint and v.asObj().temporal != null) {
-        _ = v.asObj().temporal.?.calendar;
+    if (v.isObject() and !v.asObj().is_symbol and !v.asObj().is_bigint and v.asObj().temporalData() != null) {
+        _ = v.asObj().temporalData().?.calendar;
         return;
     }
     if (!v.isString()) return self.throwError("TypeError", "calendar is not a valid calendar");
@@ -30839,8 +30839,11 @@ fn isoWeekOfYear(y: i64, m: u8, d: u8) struct { week: u8, year: i64 } {
 fn makeTemporal(self: *Interpreter, kind: value.TemporalData.Kind, proto_key: []const u8) EvalError!*value.Object {
     const o = (try self.newObject()).asObj();
     const t = try o.temporalAllocator(self.arena).create(value.TemporalData);
+    var installed = false;
+    errdefer if (!installed) o.destroyUninstalledTemporal(self.arena, t);
     t.* = .{ .kind = kind };
-    o.temporal = t;
+    try o.setTemporalData(self.arena, t);
+    installed = true;
     if (self.env.get(proto_key)) |p| if (p.isObject()) {
         o.setProtoAtomic(p.asObj());
     };
@@ -30932,9 +30935,9 @@ fn temporalDurationGetter(comptime idx: usize) value.NativeFn {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             _ = args;
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
-            if (!this.isObject() or this.asObj().temporal == null or this.asObj().temporal.?.kind != .duration)
+            if (!this.isObject() or this.asObj().temporalData() == null or this.asObj().temporalData().?.kind != .duration)
                 return self.throwError("TypeError", "Temporal.Duration accessor called on a non-Duration");
-            return Value.num(this.asObj().temporal.?.dur[idx]);
+            return Value.num(this.asObj().temporalData().?.dur[idx]);
         }
     }.call;
 }
@@ -30942,30 +30945,30 @@ fn temporalDurationGetter(comptime idx: usize) value.NativeFn {
 fn temporalDurationSignGetter(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject() or this.asObj().temporal == null or this.asObj().temporal.?.kind != .duration) return self.throwError("TypeError", "non-Duration");
-    return Value.num(durationSign(this.asObj().temporal.?));
+    if (!this.isObject() or this.asObj().temporalData() == null or this.asObj().temporalData().?.kind != .duration) return self.throwError("TypeError", "non-Duration");
+    return Value.num(durationSign(this.asObj().temporalData().?));
 }
 fn temporalDurationBlankGetter(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject() or this.asObj().temporal == null or this.asObj().temporal.?.kind != .duration) return self.throwError("TypeError", "non-Duration");
-    return Value.boolVal(durationSign(this.asObj().temporal.?) == 0);
+    if (!this.isObject() or this.asObj().temporalData() == null or this.asObj().temporalData().?.kind != .duration) return self.throwError("TypeError", "non-Duration");
+    return Value.boolVal(durationSign(this.asObj().temporalData().?) == 0);
 }
 
 fn temporalDurationNegatedFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject() or this.asObj().temporal == null or this.asObj().temporal.?.kind != .duration) return self.throwError("TypeError", "non-Duration");
+    if (!this.isObject() or this.asObj().temporalData() == null or this.asObj().temporalData().?.kind != .duration) return self.throwError("TypeError", "non-Duration");
     var dur: [10]f64 = undefined;
-    for (0..10) |i| dur[i] = -this.asObj().temporal.?.dur[i];
+    for (0..10) |i| dur[i] = -this.asObj().temporalData().?.dur[i];
     return makeDuration(self, dur);
 }
 fn temporalDurationAbsFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject() or this.asObj().temporal == null or this.asObj().temporal.?.kind != .duration) return self.throwError("TypeError", "non-Duration");
+    if (!this.isObject() or this.asObj().temporalData() == null or this.asObj().temporalData().?.kind != .duration) return self.throwError("TypeError", "non-Duration");
     var dur: [10]f64 = undefined;
-    for (0..10) |i| dur[i] = @abs(this.asObj().temporal.?.dur[i]);
+    for (0..10) |i| dur[i] = @abs(this.asObj().temporalData().?.dur[i]);
     return makeDuration(self, dur);
 }
 
@@ -31050,10 +31053,10 @@ fn durInRange(dur: [10]f64) bool {
 
 fn temporalDurationWithFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject() or this.asObj().temporal == null or this.asObj().temporal.?.kind != .duration) return self.throwError("TypeError", "non-Duration");
+    if (!this.isObject() or this.asObj().temporalData() == null or this.asObj().temporalData().?.kind != .duration) return self.throwError("TypeError", "non-Duration");
     const bag = if (args.len > 0) args[0] else Value.undef();
     if (!bag.isObject()) return self.throwError("TypeError", "Temporal.Duration.prototype.with: argument must be an object");
-    var out = this.asObj().temporal.?.dur;
+    var out = this.asObj().temporalData().?.dur;
     var any = false;
     for (dur_read_fields) |field| {
         const pv = try self.getProperty(bag, field.name);
@@ -31070,8 +31073,8 @@ fn temporalDurationAddImpl(comptime sign: f64) value.NativeFn {
     return struct {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
-            if (!this.isObject() or this.asObj().temporal == null or this.asObj().temporal.?.kind != .duration) return self.throwError("TypeError", "non-Duration");
-            const a = this.asObj().temporal.?.dur;
+            if (!this.isObject() or this.asObj().temporalData() == null or this.asObj().temporalData().?.kind != .duration) return self.throwError("TypeError", "non-Duration");
+            const a = this.asObj().temporalData().?.dur;
             const b = try durationFromArg(self, if (args.len > 0) args[0] else Value.undef());
             if (durHasCalendar(a) or durHasCalendar(b))
                 return self.throwError("RangeError", "Temporal.Duration add/subtract with calendar units requires relativeTo");
@@ -31106,8 +31109,8 @@ fn readUnitOption(self: *Interpreter, v: Value, key: []const u8) EvalError!?TUni
 
 fn temporalDurationTotalFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject() or this.asObj().temporal == null or this.asObj().temporal.?.kind != .duration) return self.throwError("TypeError", "non-Duration");
-    const dur = this.asObj().temporal.?.dur;
+    if (!this.isObject() or this.asObj().temporalData() == null or this.asObj().temporalData().?.kind != .duration) return self.throwError("TypeError", "non-Duration");
+    const dur = this.asObj().temporalData().?.dur;
     const a0 = if (args.len > 0) args[0] else Value.undef();
     if (!a0.isString() and !(a0.isObject() and !a0.asObj().is_symbol and !a0.asObj().is_bigint))
         return self.throwError("TypeError", "Temporal.Duration.prototype.total requires a string or options object");
@@ -31136,8 +31139,8 @@ fn durPresentLargest(dur: [10]f64) TUnit {
 
 fn temporalDurationRoundFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject() or this.asObj().temporal == null or this.asObj().temporal.?.kind != .duration) return self.throwError("TypeError", "non-Duration");
-    const dur = this.asObj().temporal.?.dur;
+    if (!this.isObject() or this.asObj().temporalData() == null or this.asObj().temporalData().?.kind != .duration) return self.throwError("TypeError", "non-Duration");
+    const dur = this.asObj().temporalData().?.dur;
     if (args.len == 0 or args[0].isUndefined()) return self.throwError("TypeError", "Temporal.Duration.prototype.round requires options");
     const read = try readDurationRoundOptions(self, args[0], dur);
     var opts = read.opts;
@@ -31192,10 +31195,10 @@ fn temporalDurationCompareFn(ctx: *anyopaque, this: Value, args: []const Value) 
 /// `Temporal.Duration.prototype.toString` — ISO-8601 duration (P…T…).
 fn temporalDurationToStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject() or this.asObj().temporal == null or this.asObj().temporal.?.kind != .duration) return self.throwError("TypeError", "non-Duration");
+    if (!this.isObject() or this.asObj().temporalData() == null or this.asObj().temporalData().?.kind != .duration) return self.throwError("TypeError", "non-Duration");
     const precision = try readTemporalStringPrecision(self, if (args.len > 0) args[0] else Value.undef(), .second);
-    const d = try durationApplyStringPrecision(self, this.asObj().temporal.?.dur, precision);
-    const sign = durationSign(this.asObj().temporal.?);
+    const d = try durationApplyStringPrecision(self, this.asObj().temporalData().?.dur, precision);
+    const sign = durationSign(this.asObj().temporalData().?);
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     if (sign < 0) try buf.append(self.arena, '-');
     try buf.append(self.arena, 'P');
@@ -31248,9 +31251,9 @@ fn temporalDurationFromFn(ctx: *anyopaque, this: Value, args: []const Value) val
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const a0 = if (args.len > 0) args[0] else Value.undef();
     // From an existing Duration: copy. From a property bag: read each component.
-    if (a0.isObject() and !a0.asObj().is_symbol and !a0.asObj().is_bigint and a0.asObj().temporal != null and a0.asObj().temporal.?.kind == .duration) {
+    if (a0.isObject() and !a0.asObj().is_symbol and !a0.asObj().is_bigint and a0.asObj().temporalData() != null and a0.asObj().temporalData().?.kind == .duration) {
         const o = try makeTemporal(self, .duration, "\x00T.Duration");
-        o.temporal.?.dur = a0.asObj().temporal.?.dur;
+        o.temporalData().?.dur = a0.asObj().temporalData().?.dur;
         return Value.obj(o);
     }
     if (a0.isObject() and !a0.asObj().is_symbol and !a0.asObj().is_bigint) {
@@ -31275,7 +31278,7 @@ fn temporalDurationFromFn(ctx: *anyopaque, this: Value, args: []const Value) val
     if (!a0.isString()) return self.throwError("TypeError", "Temporal.Duration.from requires a string or object");
     const s = try self.toStringV(a0);
     const o = try makeTemporal(self, .duration, "\x00T.Duration");
-    o.temporal.?.dur = try parseDurationString(self, s);
+    o.temporalData().?.dur = try parseDurationString(self, s);
     return Value.obj(o);
 }
 
@@ -31391,7 +31394,7 @@ fn regulateCalendarDate(self: *Interpreter, cal: []const u8, yf: f64, mf: f64, d
 }
 
 fn tIsTemporal(this: Value, kind: value.TemporalData.Kind) bool {
-    return this.isObject() and this.asObj().temporal != null and this.asObj().temporal.?.kind == kind;
+    return this.isObject() and this.asObj().temporalData() != null and this.asObj().temporalData().?.kind == kind;
 }
 
 fn temporalCarriesCalendar(t: *const value.TemporalData) bool {
@@ -31415,10 +31418,10 @@ fn temporalPlainDateConstructorFn(ctx: *anyopaque, this: Value, args: []const Va
     const cal = if (args.len > 3 and !args[3].isUndefined()) try toCalendarId(self, args[3], false) else "iso8601";
     const cd = calendarDateFromIso(cal, @intFromFloat(y), @intFromFloat(m), @intFromFloat(d));
     const o = try makeTemporal(self, .plain_date, "\x00T.PlainDate");
-    o.temporal.?.year = @intCast(cd.y);
-    o.temporal.?.month = cd.m;
-    o.temporal.?.day = cd.d;
-    o.temporal.?.calendar = cal;
+    o.temporalData().?.year = @intCast(cd.y);
+    o.temporalData().?.month = cd.m;
+    o.temporalData().?.day = cd.d;
+    o.temporalData().?.calendar = cal;
     try applyTemporalNewTargetProto(self, o);
     return Value.obj(o);
 }
@@ -31431,7 +31434,7 @@ fn temporalPlainDateGetter(comptime f: PlainDateField) value.NativeFn {
             _ = args;
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
             if (!tIsTemporal(this, .plain_date) and !tIsTemporal(this, .plain_date_time)) return self.throwError("TypeError", "Temporal.PlainDate accessor on incompatible receiver");
-            const t = this.asObj().temporal.?;
+            const t = this.asObj().temporalData().?;
             const iso = calendarDateToIso(t.calendar, t.year, t.month, t.day);
             return switch (f) {
                 .year => Value.num(@floatFromInt(t.year)),
@@ -31453,15 +31456,15 @@ fn temporalPlainDateGetter(comptime f: PlainDateField) value.NativeFn {
 fn temporalMonthCodeGetter(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject() or this.asObj().temporal == null) return self.throwError("TypeError", "non-Temporal");
-    const t = this.asObj().temporal.?;
+    if (!this.isObject() or this.asObj().temporalData() == null) return self.throwError("TypeError", "non-Temporal");
+    const t = this.asObj().temporalData().?;
     return try Value.strAlloc(self.arena, try calMonthCode(self, t.calendar, t.year, t.month));
 }
 fn temporalCalendarIdGetter(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject() or this.asObj().temporal == null) return self.throwError("TypeError", "Temporal calendarId accessor on incompatible receiver");
-    return try Value.strAlloc(self.arena, this.asObj().temporal.?.calendar);
+    if (!this.isObject() or this.asObj().temporalData() == null) return self.throwError("TypeError", "Temporal calendarId accessor on incompatible receiver");
+    return try Value.strAlloc(self.arena, this.asObj().temporalData().?.calendar);
 }
 
 /// Whether `id` is a Temporal-supported BCP-47 calendar identifier
@@ -32586,8 +32589,8 @@ fn calIsoFromEra(cal: []const u8, era: []const u8, era_year: i64) ?i64 {
 /// bare calendar id or Temporal ISO string, and other values are TypeError.
 /// Malformed or unknown ids are RangeError.
 fn toCalendarId(self: *Interpreter, v: Value, allow_iso_string: bool) value.HostError![]const u8 {
-    if (v.isObject() and v.asObj().temporal != null) {
-        const t = v.asObj().temporal.?;
+    if (v.isObject() and v.asObj().temporalData() != null) {
+        const t = v.asObj().temporalData().?;
         if (temporalCarriesCalendar(t)) return t.calendar;
         return self.throwError("TypeError", "calendar must be a string or a date-bearing Temporal object");
     }
@@ -32612,8 +32615,8 @@ fn temporalEraGetter(comptime want_year: bool) value.NativeFn {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             _ = args;
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
-            if (!this.isObject() or this.asObj().temporal == null) return self.throwError("TypeError", "Temporal era accessor on incompatible receiver");
-            const t = this.asObj().temporal.?;
+            if (!this.isObject() or this.asObj().temporalData() == null) return self.throwError("TypeError", "Temporal era accessor on incompatible receiver");
+            const t = this.asObj().temporalData().?;
             // ISO 8601 (and other calendars whose era model isn't implemented) have
             // no eras: both accessors read undefined. The solar-Gregorian family
             // (gregory ce/bce, buddhist be, roc roc/broc) reports its era here.
@@ -32630,8 +32633,8 @@ fn temporalEraGetter(comptime want_year: bool) value.NativeFn {
 fn temporalYearOfWeekGetter(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject() or this.asObj().temporal == null) return self.throwError("TypeError", "Temporal yearOfWeek accessor on incompatible receiver");
-    const t = this.asObj().temporal.?;
+    if (!this.isObject() or this.asObj().temporalData() == null) return self.throwError("TypeError", "Temporal yearOfWeek accessor on incompatible receiver");
+    const t = this.asObj().temporalData().?;
     if (!std.mem.eql(u8, t.calendar, "iso8601")) return Value.undef();
     return Value.num(@floatFromInt(isoWeekOfYear(t.year, t.month, t.day).year));
 }
@@ -32676,7 +32679,7 @@ fn temporalPlainDateToStringFn(ctx: *anyopaque, this: Value, args: []const Value
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_date)) return self.throwError("TypeError", "non-PlainDate");
     const cal = try readCalendarName(self, if (args.len > 0) args[0] else Value.undef());
-    const t = this.asObj().temporal.?;
+    const t = this.asObj().temporalData().?;
     const iso = calendarDateToIso(t.calendar, t.year, t.month, t.day);
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     try isoYearStr(self, &buf, iso.y);
@@ -32689,7 +32692,7 @@ fn temporalPlainDateToJSONFn(ctx: *anyopaque, this: Value, args: []const Value) 
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_date)) return self.throwError("TypeError", "non-PlainDate");
-    const t = this.asObj().temporal.?;
+    const t = this.asObj().temporalData().?;
     const iso = calendarDateToIso(t.calendar, t.year, t.month, t.day);
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     try isoYearStr(self, &buf, iso.y);
@@ -32722,7 +32725,7 @@ fn readCalendarField(self: *Interpreter, bag: Value) EvalError![]const u8 {
     const c = try self.getProperty(bag, "calendar");
     if (c.isUndefined()) return "iso8601";
     if (c.isObject() and !c.asObj().is_symbol and !c.asObj().is_bigint) {
-        if (c.asObj().temporal) |t| if (temporalCarriesCalendar(t)) return t.calendar; // a date-bearing Temporal value → its calendar
+        if (c.asObj().temporalData()) |t| if (temporalCarriesCalendar(t)) return t.calendar; // a date-bearing Temporal value → its calendar
         return self.throwError("TypeError", "calendar is not a valid calendar");
     } else if (!c.isString()) {
         // A symbol or bigint (or any non-string primitive) is not a valid
@@ -32991,11 +32994,11 @@ fn finishZonedDateTimeBagFields(self: *Interpreter, f: ZonedDateTimeBagFields, c
 
 fn toPlainDateFields(self: *Interpreter, v: Value, constrain: bool) EvalError!IsoYMD {
     if (tIsTemporal(v, .plain_date) or tIsTemporal(v, .plain_date_time)) {
-        const t = v.asObj().temporal.?;
+        const t = v.asObj().temporalData().?;
         return .{ .y = t.year, .m = t.month, .d = t.day, .cal = t.calendar };
     }
     if (tIsZdt(v)) {
-        const t = zdtLocal(v.asObj().temporal.?);
+        const t = zdtLocal(v.asObj().temporalData().?);
         return .{ .y = t.year, .m = t.month, .d = t.day, .cal = t.calendar };
     }
     if (v.isObject()) {
@@ -33399,10 +33402,10 @@ fn temporalPlainDateFromFn(ctx: *anyopaque, this: Value, args: []const Value) va
         break :blk parsed;
     };
     const o = try makeTemporal(self, .plain_date, "\x00T.PlainDate");
-    o.temporal.?.year = @intCast(f.y);
-    o.temporal.?.month = f.m;
-    o.temporal.?.day = f.d;
-    o.temporal.?.calendar = f.cal;
+    o.temporalData().?.year = @intCast(f.y);
+    o.temporalData().?.month = f.m;
+    o.temporalData().?.day = f.d;
+    o.temporalData().?.calendar = f.cal;
     return Value.obj(o);
 }
 
@@ -33419,7 +33422,7 @@ fn temporalPlainDateCompareFn(ctx: *anyopaque, this: Value, args: []const Value)
 fn temporalPlainDateEqualsFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_date)) return self.throwError("TypeError", "non-PlainDate");
-    const t = this.asObj().temporal.?;
+    const t = this.asObj().temporalData().?;
     const b = try toPlainDateFields(self, if (args.len > 0) args[0] else Value.undef(), true);
     return Value.boolVal(t.year == b.y and t.month == b.m and t.day == b.d and temporalCalendarIdsEqual(t.calendar, b.cal));
 }
@@ -33437,17 +33440,17 @@ fn temporalPlainDateAddFn(comptime sign: f64) value.NativeFn {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
             if (!tIsTemporal(this, .plain_date)) return self.throwError("TypeError", "non-PlainDate");
-            const t = this.asObj().temporal.?;
+            const t = this.asObj().temporalData().?;
             const dur = try durationFromArg(self, if (args.len > 0) args[0] else Value.undef());
             const reject = try readOverflowReject(self, if (args.len > 1) args[1] else Value.undef());
             const c = addCalendarDate(t.calendar, t.year, t.month, t.day, dur[0], dur[1], dur[2], dur[3] + durationWholeTimeDays(dur), sign, reject) orelse return self.throwError("RangeError", "date overflow");
             const iso = calendarDateToIso(t.calendar, c.y, c.m, c.d);
             try checkIsoDate(self, @floatFromInt(iso.y), @floatFromInt(iso.m), @floatFromInt(iso.d));
             const o = try makeTemporal(self, .plain_date, "\x00T.PlainDate");
-            o.temporal.?.year = @intCast(c.y);
-            o.temporal.?.month = c.m;
-            o.temporal.?.day = c.d;
-            o.temporal.?.calendar = t.calendar; // add/subtract preserve the calendar
+            o.temporalData().?.year = @intCast(c.y);
+            o.temporalData().?.month = c.m;
+            o.temporalData().?.day = c.d;
+            o.temporalData().?.calendar = t.calendar; // add/subtract preserve the calendar
             return Value.obj(o);
         }
     }.call;
@@ -33560,7 +33563,7 @@ fn parseDurationString(self: *Interpreter, s: []const u8) EvalError![10]f64 {
 /// Extract the 10 duration components from a Duration object, a fields bag, or
 /// an ISO 8601 duration string.
 fn durationFromArg(self: *Interpreter, v: Value) EvalError![10]f64 {
-    if (tIsTemporal(v, .duration)) return v.asObj().temporal.?.dur;
+    if (tIsTemporal(v, .duration)) return v.asObj().temporalData().?.dur;
     if (v.isObject()) {
         var out: [10]f64 = .{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
         var any = false;
@@ -33595,7 +33598,7 @@ fn temporalPlainTimeConstructorFn(ctx: *anyopaque, this: Value, args: []const Va
         vals[i] = n;
     }
     const o = try makeTemporal(self, .plain_time, "\x00T.PlainTime");
-    setTimeFields(o.temporal.?, vals);
+    setTimeFields(o.temporalData().?, vals);
     try applyTemporalNewTargetProto(self, o);
     return Value.obj(o);
 }
@@ -33626,7 +33629,7 @@ fn temporalPlainTimeGetter(comptime f: PlainTimeField) value.NativeFn {
             _ = args;
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
             if (!tIsTemporal(this, .plain_time) and !tIsTemporal(this, .plain_date_time)) return self.throwError("TypeError", "Temporal.PlainTime accessor on incompatible receiver");
-            const t = this.asObj().temporal.?;
+            const t = this.asObj().temporalData().?;
             return Value.num(@floatFromInt(switch (f) {
                 .hour => t.hour,
                 .minute => t.minute,
@@ -33644,7 +33647,7 @@ fn temporalPlainTimeToStringFn(ctx: *anyopaque, this: Value, args: []const Value
     if (!tIsTemporal(this, .plain_time)) return self.throwError("TypeError", "non-PlainTime");
     const precision = try readTemporalStringPrecision(self, if (args.len > 0) args[0] else Value.undef(), .minute);
     var buf: std.ArrayListUnmanaged(u8) = .empty;
-    _ = try appendIsoTimeString(self, &buf, this.asObj().temporal.?, precision);
+    _ = try appendIsoTimeString(self, &buf, this.asObj().temporalData().?, precision);
     return try Value.strOwned(self.arena, try buf.toOwnedSlice(self.arena));
 }
 
@@ -33653,7 +33656,7 @@ fn temporalPlainTimeToJSONFn(ctx: *anyopaque, this: Value, args: []const Value) 
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_time)) return self.throwError("TypeError", "non-PlainTime");
     var buf: std.ArrayListUnmanaged(u8) = .empty;
-    _ = try appendIsoTimeString(self, &buf, this.asObj().temporal.?, .{});
+    _ = try appendIsoTimeString(self, &buf, this.asObj().temporalData().?, .{});
     return try Value.strOwned(self.arena, try buf.toOwnedSlice(self.arena));
 }
 
@@ -33678,12 +33681,12 @@ fn temporalPlainDateTimeConstructorFn(ctx: *anyopaque, this: Value, args: []cons
     const cal = if (args.len > 9 and !args[9].isUndefined()) try toCalendarId(self, args[9], false) else "iso8601";
     const cd = calendarDateFromIso(cal, @intFromFloat(y), @intFromFloat(m), @intFromFloat(d));
     const o = try makeTemporal(self, .plain_date_time, "\x00T.PlainDateTime");
-    o.temporal.?.year = @intCast(cd.y);
-    o.temporal.?.month = cd.m;
-    o.temporal.?.day = cd.d;
-    o.temporal.?.calendar = cal;
-    setTimeFields(o.temporal.?, vals);
-    try checkPlainDateTimeNs(self, dateTimeToNs(o.temporal.?));
+    o.temporalData().?.year = @intCast(cd.y);
+    o.temporalData().?.month = cd.m;
+    o.temporalData().?.day = cd.d;
+    o.temporalData().?.calendar = cal;
+    setTimeFields(o.temporalData().?, vals);
+    try checkPlainDateTimeNs(self, dateTimeToNs(o.temporalData().?));
     try applyTemporalNewTargetProto(self, o);
     return Value.obj(o);
 }
@@ -33694,7 +33697,7 @@ fn temporalPlainDateTimeToStringFn(ctx: *anyopaque, this: Value, args: []const V
     const options = if (args.len > 0) args[0] else Value.undef();
     const cal = try readCalendarName(self, options);
     const precision = try readTemporalStringPrecision(self, options, .minute);
-    const t = this.asObj().temporal.?;
+    const t = this.asObj().temporalData().?;
     const rounded_time = roundNsForString(timeToNs(t), precision);
     try checkPlainDateTimeNs(self, @as(i128, calendarEpochDay(t.calendar, t.year, t.month, t.day)) * 86_400_000_000_000 + rounded_time);
     const day_delta = @divFloor(rounded_time, 86_400_000_000_000);
@@ -33712,7 +33715,7 @@ fn temporalPlainDateTimeToJSONFn(ctx: *anyopaque, this: Value, args: []const Val
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_date_time)) return self.throwError("TypeError", "non-PlainDateTime");
-    const t = this.asObj().temporal.?;
+    const t = this.asObj().temporalData().?;
     const iso = calendarDateToIso(t.calendar, t.year, t.month, t.day);
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     try isoYearStr(self, &buf, iso.y);
@@ -33741,7 +33744,7 @@ fn isObjectLike(v: Value) bool {
 }
 
 fn isAnyTemporal(v: Value) bool {
-    return v.isObject() and v.asObj().temporal != null;
+    return v.isObject() and v.asObj().temporalData() != null;
 }
 
 fn rejectUnsupportedEraFieldsForWith(self: *Interpreter, bag: Value, cal: []const u8) EvalError!void {
@@ -33919,7 +33922,7 @@ fn resolvePlainDateWithMonth(self: *Interpreter, cal: []const u8, fields: PlainD
 fn temporalPlainDateWithFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_date)) return self.throwError("TypeError", "non-PlainDate");
-    const t = this.asObj().temporal.?;
+    const t = this.asObj().temporalData().?;
     const bag = if (args.len > 0) args[0] else Value.undef();
     if (!isObjectLike(bag)) return self.throwError("TypeError", "Temporal.PlainDate.prototype.with: argument must be a PlainDate-like object");
     try rejectObjectWithCalendarOrTimeZone(self, bag);
@@ -33937,17 +33940,17 @@ fn temporalPlainDateWithFn(ctx: *anyopaque, this: Value, args: []const Value) va
         break :blk try regulateCalendarDate(self, t.calendar, @floatFromInt(y), @floatFromInt(@as(i64, reject_m)), @floatFromInt(d), false);
     } else constrained;
     const o = try makeTemporal(self, .plain_date, "\x00T.PlainDate");
-    o.temporal.?.year = @intCast(r.y);
-    o.temporal.?.month = r.m;
-    o.temporal.?.day = r.d;
-    o.temporal.?.calendar = t.calendar; // with() preserves the calendar
+    o.temporalData().?.year = @intCast(r.y);
+    o.temporalData().?.month = r.m;
+    o.temporalData().?.day = r.d;
+    o.temporalData().?.calendar = t.calendar; // with() preserves the calendar
     return Value.obj(o);
 }
 
 fn temporalPlainTimeWithFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_time)) return self.throwError("TypeError", "non-PlainTime");
-    const t = this.asObj().temporal.?;
+    const t = this.asObj().temporalData().?;
     const bag = if (args.len > 0) args[0] else Value.undef();
     if (!isObjectLike(bag) or isAnyTemporal(bag)) return self.throwError("TypeError", "Temporal.PlainTime.prototype.with: argument must be a PlainTime-like object");
     try rejectPlainTimeLikeInvalidFields(self, bag);
@@ -33955,15 +33958,15 @@ fn temporalPlainTimeWithFn(ctx: *anyopaque, this: Value, args: []const Value) va
     const raw = try readPlainTimeRawFields(self, bag, cur, true);
     const reject = try readOverflowReject(self, if (args.len > 1) args[1] else Value.undef());
     const o = try makeTemporal(self, .plain_time, "\x00T.PlainTime");
-    o.temporal.?.* = try regulatePlainTimeRawFields(self, raw, reject);
-    o.temporal.?.kind = .plain_time;
+    o.temporalData().?.* = try regulatePlainTimeRawFields(self, raw, reject);
+    o.temporalData().?.kind = .plain_time;
     return Value.obj(o);
 }
 
 fn temporalPlainDateTimeWithFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_date_time)) return self.throwError("TypeError", "non-PlainDateTime");
-    const t = this.asObj().temporal.?;
+    const t = this.asObj().temporalData().?;
     const bag = if (args.len > 0) args[0] else Value.undef();
     if (!isObjectLike(bag)) return self.throwError("TypeError", "Temporal.PlainDateTime.prototype.with: argument must be a PlainDateTime-like object");
     try rejectObjectWithCalendarOrTimeZone(self, bag);
@@ -33983,17 +33986,17 @@ fn temporalPlainDateTimeWithFn(ctx: *anyopaque, this: Value, args: []const Value
     } else constrained;
     const tm = try regulatePlainTimeRawFields(self, fields.time, reject);
     const o = try makeTemporal(self, .plain_date_time, "\x00T.PlainDateTime");
-    o.temporal.?.year = @intCast(r.y);
-    o.temporal.?.month = r.m;
-    o.temporal.?.day = r.d;
-    o.temporal.?.calendar = t.calendar; // with() preserves the calendar
-    o.temporal.?.hour = tm.hour;
-    o.temporal.?.minute = tm.minute;
-    o.temporal.?.second = tm.second;
-    o.temporal.?.millisecond = tm.millisecond;
-    o.temporal.?.microsecond = tm.microsecond;
-    o.temporal.?.nanosecond = tm.nanosecond;
-    try checkPlainDateTimeNs(self, dateTimeToNs(o.temporal.?));
+    o.temporalData().?.year = @intCast(r.y);
+    o.temporalData().?.month = r.m;
+    o.temporalData().?.day = r.d;
+    o.temporalData().?.calendar = t.calendar; // with() preserves the calendar
+    o.temporalData().?.hour = tm.hour;
+    o.temporalData().?.minute = tm.minute;
+    o.temporalData().?.second = tm.second;
+    o.temporalData().?.millisecond = tm.millisecond;
+    o.temporalData().?.microsecond = tm.microsecond;
+    o.temporalData().?.nanosecond = tm.nanosecond;
+    try checkPlainDateTimeNs(self, dateTimeToNs(o.temporalData().?));
     return Value.obj(o);
 }
 
@@ -34015,10 +34018,10 @@ fn temporalPlainYearMonthConstructorFn(ctx: *anyopaque, this: Value, args: []con
     if (refd < 1 or refd > @as(f64, @floatFromInt(dim))) return self.throwError("RangeError", "day out of range");
     const cd = calendarDateFromIso(cal, @intFromFloat(y), month, @intFromFloat(refd));
     const o = try makeTemporal(self, .plain_year_month, "\x00T.PlainYearMonth");
-    o.temporal.?.year = @intCast(cd.y);
-    o.temporal.?.month = cd.m;
-    o.temporal.?.day = cd.d;
-    o.temporal.?.calendar = cal;
+    o.temporalData().?.year = @intCast(cd.y);
+    o.temporalData().?.month = cd.m;
+    o.temporalData().?.day = cd.d;
+    o.temporalData().?.calendar = cal;
     try applyTemporalNewTargetProto(self, o);
     return Value.obj(o);
 }
@@ -34030,7 +34033,7 @@ fn temporalYearMonthGetter(comptime f: YearMonthField) value.NativeFn {
             _ = args;
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
             if (!tIsTemporal(this, .plain_year_month)) return self.throwError("TypeError", "Temporal.PlainYearMonth accessor on incompatible receiver");
-            const t = this.asObj().temporal.?;
+            const t = this.asObj().temporalData().?;
             return switch (f) {
                 .year => Value.num(@floatFromInt(t.year)),
                 .month => Value.num(@floatFromInt(t.month)),
@@ -34047,7 +34050,7 @@ fn temporalYearMonthToStringFn(ctx: *anyopaque, this: Value, args: []const Value
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_year_month)) return self.throwError("TypeError", "non-PlainYearMonth");
     const cal = try readCalendarName(self, if (args.len > 0) args[0] else Value.undef());
-    const t = this.asObj().temporal.?;
+    const t = this.asObj().temporalData().?;
     const iso = calendarDateToIso(t.calendar, t.year, t.month, t.day);
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     try isoYearStr(self, &buf, iso.y);
@@ -34063,7 +34066,7 @@ fn temporalYearMonthToJSONFn(ctx: *anyopaque, this: Value, args: []const Value) 
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_year_month)) return self.throwError("TypeError", "non-PlainYearMonth");
-    const t = this.asObj().temporal.?;
+    const t = this.asObj().temporalData().?;
     const iso = calendarDateToIso(t.calendar, t.year, t.month, t.day);
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     try isoYearStr(self, &buf, iso.y);
@@ -34138,7 +34141,7 @@ fn validateYearMonthRaw(self: *Interpreter, raw: RawYM, constrain: bool) EvalErr
 
 fn toYearMonthFields(self: *Interpreter, v: Value, constrain: bool) EvalError!IsoYM {
     if (tIsTemporal(v, .plain_year_month)) {
-        const t = v.asObj().temporal.?;
+        const t = v.asObj().temporalData().?;
         return .{ .y = t.year, .m = t.month, .d = t.day, .cal = t.calendar };
     }
     if (v.isObject()) {
@@ -34200,10 +34203,10 @@ fn toYearMonthFields(self: *Interpreter, v: Value, constrain: bool) EvalError!Is
 
 fn makeYearMonth(self: *Interpreter, y: i64, m: u8, cal: []const u8, d: u8) EvalError!Value {
     const o = try makeTemporal(self, .plain_year_month, "\x00T.PlainYearMonth");
-    o.temporal.?.year = @intCast(y);
-    o.temporal.?.month = m;
-    o.temporal.?.day = d;
-    o.temporal.?.calendar = cal;
+    o.temporalData().?.year = @intCast(y);
+    o.temporalData().?.month = m;
+    o.temporalData().?.day = d;
+    o.temporalData().?.calendar = cal;
     return Value.obj(o);
 }
 
@@ -34214,7 +34217,7 @@ fn temporalYearMonthFromFn(ctx: *anyopaque, this: Value, args: []const Value) va
     const options = if (args.len > 1) args[1] else Value.undef();
     if (tIsTemporal(input, .plain_year_month)) {
         _ = try readOverflowReject(self, options);
-        const t = input.asObj().temporal.?;
+        const t = input.asObj().temporalData().?;
         return makeYearMonth(self, t.year, t.month, t.calendar, t.day);
     }
     if (input.isString()) {
@@ -34232,10 +34235,10 @@ fn temporalYearMonthFromFn(ctx: *anyopaque, this: Value, args: []const Value) va
 fn temporalYearMonthWithFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_year_month)) return self.throwError("TypeError", "non-PlainYearMonth");
-    const t = this.asObj().temporal.?;
+    const t = this.asObj().temporalData().?;
     const bag = if (args.len > 0) args[0] else Value.undef();
     if (!bag.isObject()) return self.throwError("TypeError", "Temporal.PlainYearMonth.prototype.with: argument must be an object");
-    if (bag.asObj().temporal != null) return self.throwError("TypeError", "Temporal.PlainYearMonth.prototype.with: argument must be a partial object");
+    if (bag.asObj().temporalData() != null) return self.throwError("TypeError", "Temporal.PlainYearMonth.prototype.with: argument must be a partial object");
 
     if (!(try self.getProperty(bag, "calendar")).isUndefined())
         return self.throwError("TypeError", "calendar is not allowed in PlainYearMonth.with");
@@ -34309,7 +34312,7 @@ fn temporalYearMonthWithFn(ctx: *anyopaque, this: Value, args: []const Value) va
 fn temporalYearMonthEqualsFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_year_month)) return self.throwError("TypeError", "non-PlainYearMonth");
-    const t = this.asObj().temporal.?;
+    const t = this.asObj().temporalData().?;
     const b = try toYearMonthFields(self, if (args.len > 0) args[0] else Value.undef(), true);
     return Value.boolVal(t.year == b.y and t.month == b.m and t.day == b.d and temporalCalendarIdsEqual(t.calendar, b.cal));
 }
@@ -34347,7 +34350,7 @@ fn temporalYearMonthAddFn(comptime sign: f64) value.NativeFn {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
             if (!tIsTemporal(this, .plain_year_month)) return self.throwError("TypeError", "non-PlainYearMonth");
-            const t = this.asObj().temporal.?;
+            const t = this.asObj().temporalData().?;
             const dur = try durationFromArg(self, if (args.len > 0) args[0] else Value.undef());
             const reject = try readOverflowReject(self, if (args.len > 1) args[1] else Value.undef());
             if (!durInRange(dur)) return self.throwError("RangeError", "duration out of range");
@@ -34385,7 +34388,7 @@ fn temporalYearMonthUntilFn(comptime sign: f64) value.NativeFn {
             if (@intFromEnum(opts.largest) > @intFromEnum(TUnit.month)) return self.throwError("RangeError", "PlainYearMonth difference largestUnit must be year or month");
             if (@intFromEnum(opts.smallest) > @intFromEnum(TUnit.month)) return self.throwError("RangeError", "PlainYearMonth difference smallestUnit must be year or month");
             if (@intFromEnum(opts.largest) > @intFromEnum(opts.smallest)) return self.throwError("RangeError", "largestUnit cannot be smaller than smallestUnit");
-            const a = this.asObj().temporal.?;
+            const a = this.asObj().temporalData().?;
             if (!temporalCalendarIdsEqual(a.calendar, other.cal))
                 return self.throwError("RangeError", "calendar mismatch");
             if (a.year == other.y and a.month == other.m and temporalCalendarIdsEqual(a.calendar, other.cal)) {
@@ -34453,7 +34456,7 @@ fn temporalYearMonthUntilFn(comptime sign: f64) value.NativeFn {
 fn temporalYearMonthToPlainDateFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_year_month)) return self.throwError("TypeError", "non-PlainYearMonth");
-    const t = this.asObj().temporal.?;
+    const t = this.asObj().temporalData().?;
     const bag = if (args.len > 0) args[0] else Value.undef();
     if (!bag.isObject()) return self.throwError("TypeError", "Temporal.PlainYearMonth.prototype.toPlainDate: argument must be an object");
     const dv = try self.getProperty(bag, "day");
@@ -34466,10 +34469,10 @@ fn temporalYearMonthToPlainDateFn(ctx: *anyopaque, this: Value, args: []const Va
     const iso = calendarDateToIso(t.calendar, t.year, t.month, di);
     try checkIsoDate(self, @floatFromInt(iso.y), @floatFromInt(iso.m), @floatFromInt(iso.d));
     const o = try makeTemporal(self, .plain_date, "\x00T.PlainDate");
-    o.temporal.?.year = t.year;
-    o.temporal.?.month = t.month;
-    o.temporal.?.day = di;
-    o.temporal.?.calendar = t.calendar;
+    o.temporalData().?.year = t.year;
+    o.temporalData().?.month = t.month;
+    o.temporalData().?.day = di;
+    o.temporalData().?.calendar = t.calendar;
     return Value.obj(o);
 }
 
@@ -34489,10 +34492,10 @@ fn temporalPlainMonthDayConstructorFn(ctx: *anyopaque, this: Value, args: []cons
     if (d < 1 or d > @as(f64, @floatFromInt(dim))) return self.throwError("RangeError", "day out of range");
     try checkIsoDate(self, refy, m, d);
     const o = try makeTemporal(self, .plain_month_day, "\x00T.PlainMonthDay");
-    o.temporal.?.year = @intFromFloat(refy);
-    o.temporal.?.month = @intFromFloat(m);
-    o.temporal.?.day = @intFromFloat(d);
-    o.temporal.?.calendar = cal;
+    o.temporalData().?.year = @intFromFloat(refy);
+    o.temporalData().?.month = @intFromFloat(m);
+    o.temporalData().?.day = @intFromFloat(d);
+    o.temporalData().?.calendar = cal;
     try applyTemporalNewTargetProto(self, o);
     return Value.obj(o);
 }
@@ -34504,7 +34507,7 @@ fn temporalMonthDayGetter(comptime f: MonthDayField) value.NativeFn {
             _ = args;
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
             if (!tIsTemporal(this, .plain_month_day)) return self.throwError("TypeError", "Temporal.PlainMonthDay accessor on incompatible receiver");
-            const t = this.asObj().temporal.?;
+            const t = this.asObj().temporalData().?;
             const cd = calendarDateFromIso(t.calendar, t.year, t.month, t.day);
             return switch (f) {
                 .month_code => try Value.strAlloc(self.arena, try calMonthCode(self, t.calendar, cd.y, cd.m)),
@@ -34518,7 +34521,7 @@ fn temporalMonthDayToStringFn(ctx: *anyopaque, this: Value, args: []const Value)
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_month_day)) return self.throwError("TypeError", "non-PlainMonthDay");
     const cal = try readCalendarName(self, if (args.len > 0) args[0] else Value.undef());
-    const t = this.asObj().temporal.?;
+    const t = this.asObj().temporalData().?;
     return try Value.strAlloc(self.arena, try temporalMonthDayString(self, t, cal));
 }
 
@@ -34526,7 +34529,7 @@ fn temporalMonthDayToJSONFn(ctx: *anyopaque, this: Value, args: []const Value) v
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_month_day)) return self.throwError("TypeError", "non-PlainMonthDay");
-    const t = this.asObj().temporal.?;
+    const t = this.asObj().temporalData().?;
     return try Value.strAlloc(self.arena, try temporalMonthDayString(self, t, .auto));
 }
 
@@ -34795,7 +34798,7 @@ fn readMonthDayBagRaw(self: *Interpreter, v: Value) EvalError!RawMD {
 
 fn toMonthDayFields(self: *Interpreter, v: Value, constrain: bool) EvalError!IsoMD {
     if (tIsTemporal(v, .plain_month_day)) {
-        const t = v.asObj().temporal.?;
+        const t = v.asObj().temporalData().?;
         return .{ .y = t.year, .m = t.month, .d = t.day, .cal = t.calendar };
     }
     if (v.isObject()) {
@@ -34853,10 +34856,10 @@ fn toMonthDayFields(self: *Interpreter, v: Value, constrain: bool) EvalError!Iso
 
 fn makeMonthDay(self: *Interpreter, y: i64, m: u8, d: u8, cal: []const u8) EvalError!Value {
     const o = try makeTemporal(self, .plain_month_day, "\x00T.PlainMonthDay");
-    o.temporal.?.year = @intCast(y);
-    o.temporal.?.month = m;
-    o.temporal.?.day = d;
-    o.temporal.?.calendar = cal;
+    o.temporalData().?.year = @intCast(y);
+    o.temporalData().?.month = m;
+    o.temporalData().?.day = d;
+    o.temporalData().?.calendar = cal;
     return Value.obj(o);
 }
 
@@ -34871,7 +34874,7 @@ fn temporalMonthDayFromFn(ctx: *anyopaque, this: Value, args: []const Value) val
     const options = if (args.len > 1) args[1] else Value.undef();
     if (tIsTemporal(input, .plain_month_day)) {
         _ = try readOverflowReject(self, options);
-        const t = input.asObj().temporal.?;
+        const t = input.asObj().temporalData().?;
         return makeMonthDay(self, t.year, t.month, t.day, t.calendar);
     }
     if (input.isString()) {
@@ -34928,10 +34931,10 @@ fn prevalidateMonthDayRaw(self: *Interpreter, raw: RawMD) EvalError!void {
 fn temporalMonthDayWithFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_month_day)) return self.throwError("TypeError", "non-PlainMonthDay");
-    const t = this.asObj().temporal.?;
+    const t = this.asObj().temporalData().?;
     const bag = if (args.len > 0) args[0] else Value.undef();
     if (!bag.isObject()) return self.throwError("TypeError", "Temporal.PlainMonthDay.prototype.with: argument must be an object");
-    if (bag.asObj().temporal != null) return self.throwError("TypeError", "Temporal.PlainMonthDay.prototype.with requires a partial object");
+    if (bag.asObj().temporalData() != null) return self.throwError("TypeError", "Temporal.PlainMonthDay.prototype.with requires a partial object");
     if (!(try self.getProperty(bag, "calendar")).isUndefined()) return self.throwError("TypeError", "Temporal.PlainMonthDay.prototype.with does not accept calendar");
     if (!(try self.getProperty(bag, "timeZone")).isUndefined()) return self.throwError("TypeError", "Temporal.PlainMonthDay.prototype.with does not accept timeZone");
     const raw = try readMonthDayPartialRaw(self, bag, t);
@@ -34947,7 +34950,7 @@ fn temporalMonthDayWithFn(ctx: *anyopaque, this: Value, args: []const Value) val
 fn temporalMonthDayEqualsFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_month_day)) return self.throwError("TypeError", "non-PlainMonthDay");
-    const t = this.asObj().temporal.?;
+    const t = this.asObj().temporalData().?;
     const b = try toMonthDayFields(self, if (args.len > 0) args[0] else Value.undef(), true);
     return Value.boolVal(t.year == b.y and t.month == b.m and t.day == b.d and temporalCalendarIdsEqual(t.calendar, b.cal));
 }
@@ -34955,7 +34958,7 @@ fn temporalMonthDayEqualsFn(ctx: *anyopaque, this: Value, args: []const Value) v
 fn temporalMonthDayToPlainDateFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_month_day)) return self.throwError("TypeError", "non-PlainMonthDay");
-    const t = this.asObj().temporal.?;
+    const t = this.asObj().temporalData().?;
     const bag = if (args.len > 0) args[0] else Value.undef();
     if (!bag.isObject()) return self.throwError("TypeError", "Temporal.PlainMonthDay.prototype.toPlainDate: argument must be an object");
     const y = (try bagCalendarYear(self, bag, t.calendar)) orelse return self.throwError("TypeError", "toPlainDate requires a year");
@@ -34964,10 +34967,10 @@ fn temporalMonthDayToPlainDateFn(ctx: *anyopaque, this: Value, args: []const Val
     const iso = calendarDateToIso(t.calendar, y, t.month, day);
     try checkIsoDate(self, @floatFromInt(iso.y), @floatFromInt(iso.m), @floatFromInt(iso.d));
     const o = try makeTemporal(self, .plain_date, "\x00T.PlainDate");
-    o.temporal.?.year = @intCast(y);
-    o.temporal.?.month = t.month;
-    o.temporal.?.day = day;
-    o.temporal.?.calendar = t.calendar;
+    o.temporalData().?.year = @intCast(y);
+    o.temporalData().?.month = t.month;
+    o.temporalData().?.day = day;
+    o.temporalData().?.calendar = t.calendar;
     return Value.obj(o);
 }
 
@@ -35544,7 +35547,7 @@ fn makeDuration(self: *Interpreter, dur: [10]f64) EvalError!Value {
     }
     if (!durInRange(normalized)) return self.throwError("RangeError", "duration out of range");
     const o = try makeTemporal(self, .duration, "\x00T.Duration");
-    o.temporal.?.dur = normalized;
+    o.temporalData().?.dur = normalized;
     return Value.obj(o);
 }
 
@@ -35590,7 +35593,7 @@ fn temporalInstantAddFn(comptime sign: f64) value.NativeFn {
             const dur = try durationFromArg(self, if (args.len > 0) args[0] else Value.undef());
             try ensureNoCalendarUnits(self, dur);
             if (dur[3] != 0 or dur[2] != 0) return self.throwError("RangeError", "Instant arithmetic does not allow day/week units");
-            const target_ns = this.asObj().temporal.?.epoch_ns + @as(i128, @intFromFloat(sign)) * durationTimeNs(dur);
+            const target_ns = this.asObj().temporalData().?.epoch_ns + @as(i128, @intFromFloat(sign)) * durationTimeNs(dur);
             const o = try makeInstantFromEpochNs(self, target_ns);
             return Value.obj(o);
         }
@@ -35610,7 +35613,7 @@ fn temporalInstantUntilFn(comptime sign: f64) value.NativeFn {
             if (!opts.largest_set and opts.smallest_set and @intFromEnum(opts.smallest) < @intFromEnum(TUnit.second))
                 opts.largest = opts.smallest;
             try validateDurationRoundingIncrement(self, opts.smallest, opts.increment);
-            var diff = @as(i128, @intFromFloat(sign)) * (other - this.asObj().temporal.?.epoch_ns);
+            var diff = @as(i128, @intFromFloat(sign)) * (other - this.asObj().temporalData().?.epoch_ns);
             diff = roundNs(diff, opts.smallest, opts.increment, opts.mode);
             return makeDuration(self, balanceTimeNs(diff, opts.largest));
         }
@@ -35626,7 +35629,7 @@ fn temporalInstantRoundFn(ctx: *anyopaque, this: Value, args: []const Value) val
     if (!opts.smallest_set) return self.throwError("RangeError", "smallestUnit is required");
     if (@intFromEnum(opts.smallest) < @intFromEnum(TUnit.hour)) return self.throwError("RangeError", "Instant.round smallestUnit must be hour or smaller");
     try validateInstantRoundingIncrement(self, opts.smallest, opts.increment);
-    const o = try makeInstantFromEpochNs(self, roundInstantNs(this.asObj().temporal.?.epoch_ns, opts.smallest, opts.increment, opts.mode));
+    const o = try makeInstantFromEpochNs(self, roundInstantNs(this.asObj().temporalData().?.epoch_ns, opts.smallest, opts.increment, opts.mode));
     return Value.obj(o);
 }
 
@@ -35634,7 +35637,7 @@ fn temporalInstantEqualsFn(ctx: *anyopaque, this: Value, args: []const Value) va
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .instant)) return self.throwError("TypeError", "non-Instant");
     const other = try toInstantArg(self, if (args.len > 0) args[0] else Value.undef());
-    return Value.boolVal(this.asObj().temporal.?.epoch_ns == other);
+    return Value.boolVal(this.asObj().temporalData().?.epoch_ns == other);
 }
 
 fn temporalInstantCompareFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -35651,7 +35654,7 @@ fn temporalInstantExtraEpochGetter(comptime div: i128) value.NativeFn {
             _ = args;
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
             if (!tIsTemporal(this, .instant)) return self.throwError("TypeError", "non-Instant");
-            const ns = this.asObj().temporal.?.epoch_ns;
+            const ns = this.asObj().temporalData().?.epoch_ns;
             if (div == 1) return self.makeBigInt(ns);
             if (div >= 1_000_000) return Value.num(@floatFromInt(@divFloor(ns, div)));
             return self.makeBigInt(@divFloor(ns, div));
@@ -35663,9 +35666,9 @@ fn temporalInstantExtraEpochGetter(comptime div: i128) value.NativeFn {
 /// instant string with a `Z`/offset).
 fn toInstantArg(self: *Interpreter, v: Value) EvalError!i128 {
     const ns = if (tIsTemporal(v, .instant))
-        v.asObj().temporal.?.epoch_ns
+        v.asObj().temporalData().?.epoch_ns
     else if (tIsTemporal(v, .zoned_date_time))
-        v.asObj().temporal.?.epoch_ns
+        v.asObj().temporalData().?.epoch_ns
     else if (v.isString())
         try parseInstantString(self, v.asStr())
     else if (v.isObject() and !v.asObj().is_symbol and !v.asObj().is_bigint)
@@ -35703,7 +35706,7 @@ fn checkedEpochNsFromBigInt(self: *Interpreter, v: Value) EvalError!i128 {
 fn makeInstantFromEpochNs(self: *Interpreter, ns: i128) EvalError!*value.Object {
     try checkInstantEpochNs(self, ns);
     const o = try makeTemporal(self, .instant, "\x00T.Instant");
-    o.temporal.?.epoch_ns = ns;
+    o.temporalData().?.epoch_ns = ns;
     return o;
 }
 
@@ -35737,9 +35740,9 @@ fn temporalPlainTimeAddFn(comptime sign: f64) value.NativeFn {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
             if (!tIsTemporal(this, .plain_time)) return self.throwError("TypeError", "non-PlainTime");
             const dur = try durationFromArg(self, if (args.len > 0) args[0] else Value.undef());
-            const total = timeToNs(this.asObj().temporal.?) + @as(i128, @intFromFloat(sign)) * durationTimeNs(dur);
+            const total = timeToNs(this.asObj().temporalData().?) + @as(i128, @intFromFloat(sign)) * durationTimeNs(dur);
             const o = try makeTemporal(self, .plain_time, "\x00T.PlainTime");
-            nsToTime(o.temporal.?, total);
+            nsToTime(o.temporalData().?, total);
             return Value.obj(o);
         }
     }.call;
@@ -35755,7 +35758,7 @@ fn temporalPlainTimeUntilFn(comptime sign: f64) value.NativeFn {
             if (@intFromEnum(opts.largest) < @intFromEnum(TUnit.hour)) return self.throwError("RangeError", "PlainTime difference largestUnit must be hour or smaller");
             if (@intFromEnum(opts.smallest) < @intFromEnum(TUnit.hour)) return self.throwError("RangeError", "PlainTime difference smallestUnit must be hour or smaller");
             try validateDurationRoundingIncrement(self, opts.smallest, opts.increment);
-            var diff = @as(i128, @intFromFloat(sign)) * (timeToNs(&other) - timeToNs(this.asObj().temporal.?));
+            var diff = @as(i128, @intFromFloat(sign)) * (timeToNs(&other) - timeToNs(this.asObj().temporalData().?));
             diff = roundNs(diff, opts.smallest, opts.increment, opts.mode);
             return makeDuration(self, balanceTimeNs(diff, opts.largest));
         }
@@ -35770,9 +35773,9 @@ fn temporalPlainTimeRoundFn(ctx: *anyopaque, this: Value, args: []const Value) v
     if (!opts.smallest_set) return self.throwError("RangeError", "smallestUnit is required");
     if (@intFromEnum(opts.smallest) < @intFromEnum(TUnit.hour)) return self.throwError("RangeError", "PlainTime.round smallestUnit must be hour or smaller");
     try validateDurationRoundingIncrement(self, opts.smallest, opts.increment);
-    const rounded = roundNs(timeToNs(this.asObj().temporal.?), opts.smallest, opts.increment, opts.mode);
+    const rounded = roundNs(timeToNs(this.asObj().temporalData().?), opts.smallest, opts.increment, opts.mode);
     const o = try makeTemporal(self, .plain_time, "\x00T.PlainTime");
-    nsToTime(o.temporal.?, rounded);
+    nsToTime(o.temporalData().?, rounded);
     return Value.obj(o);
 }
 
@@ -35820,7 +35823,7 @@ fn regulatePlainTimeRawFields(self: *Interpreter, raw: [6]i64, reject: bool) Eva
 /// time portion is optional and defaults to midnight).
 fn toPlainTimeDataOpt(self: *Interpreter, v: Value, require_any: bool, reject: bool) EvalError!value.TemporalData {
     if (tIsTemporal(v, .plain_time) or tIsTemporal(v, .plain_date_time)) {
-        return v.asObj().temporal.?.*;
+        return v.asObj().temporalData().?.*;
     }
     var t: value.TemporalData = .{ .kind = .plain_time };
     if (v.isObject()) {
@@ -35879,8 +35882,8 @@ fn temporalPlainTimeFromFn(ctx: *anyopaque, this: Value, args: []const Value) va
         break :blk parsed;
     };
     const o = try makeTemporal(self, .plain_time, "\x00T.PlainTime");
-    o.temporal.?.* = t;
-    o.temporal.?.kind = .plain_time;
+    o.temporalData().?.* = t;
+    o.temporalData().?.kind = .plain_time;
     return Value.obj(o);
 }
 
@@ -35888,7 +35891,7 @@ fn temporalPlainTimeEqualsFn(ctx: *anyopaque, this: Value, args: []const Value) 
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_time)) return self.throwError("TypeError", "non-PlainTime");
     const other = try toPlainTimeData(self, if (args.len > 0) args[0] else Value.undef());
-    return Value.boolVal(timeToNs(this.asObj().temporal.?) == timeToNs(&other));
+    return Value.boolVal(timeToNs(this.asObj().temporalData().?) == timeToNs(&other));
 }
 
 fn temporalPlainTimeCompareFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -36011,7 +36014,7 @@ fn temporalPlainDateTimeAddFn(comptime sign: f64) value.NativeFn {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
             if (!tIsTemporal(this, .plain_date_time)) return self.throwError("TypeError", "non-PlainDateTime");
-            const t = this.asObj().temporal.?;
+            const t = this.asObj().temporalData().?;
             const dur = try durationFromArg(self, if (args.len > 0) args[0] else Value.undef());
             const reject = try readOverflowReject(self, if (args.len > 1) args[1] else Value.undef());
             // Date part with constrain, then time part carrying whole days.
@@ -36028,12 +36031,12 @@ fn temporalPlainDateTimeAddFn(comptime sign: f64) value.NativeFn {
             };
             try checkIsoDate(self, @floatFromInt(cc_iso.y), @floatFromInt(cc_iso.m), @floatFromInt(cc_iso.d));
             const o = try makeTemporal(self, .plain_date_time, "\x00T.PlainDateTime");
-            o.temporal.?.year = @intCast(cc.y);
-            o.temporal.?.month = cc.m;
-            o.temporal.?.day = cc.d;
-            o.temporal.?.calendar = t.calendar; // add/subtract preserve the calendar
-            nsToTime(o.temporal.?, time_ns);
-            try checkPlainDateTimeNs(self, dateTimeToNs(o.temporal.?));
+            o.temporalData().?.year = @intCast(cc.y);
+            o.temporalData().?.month = cc.m;
+            o.temporalData().?.day = cc.d;
+            o.temporalData().?.calendar = t.calendar; // add/subtract preserve the calendar
+            nsToTime(o.temporalData().?, time_ns);
+            try checkPlainDateTimeNs(self, dateTimeToNs(o.temporalData().?));
             return Value.obj(o);
         }
     }.call;
@@ -36054,7 +36057,7 @@ fn temporalPlainDateTimeUntilFn(comptime sign: f64) value.NativeFn {
             const opts = try readRoundOpts(self, if (args.len > 1) args[1] else Value.undef(), .{ .largest = .day, .smallest = .nanosecond, .mode = .trunc, .increment = 1 }, false);
             try validateDurationRoundingIncrement(self, opts.smallest, opts.increment);
             const largest = if (!opts.largest_set and @intFromEnum(opts.smallest) < @intFromEnum(TUnit.day)) opts.smallest else opts.largest;
-            const a = this.asObj().temporal.?;
+            const a = this.asObj().temporalData().?;
             const b = &other;
             if (!temporalCalendarIdsEqual(a.calendar, b.calendar)) return self.throwError("RangeError", "calendar mismatch");
             if (@intFromEnum(largest) >= @intFromEnum(TUnit.day)) {
@@ -36219,25 +36222,25 @@ fn temporalPlainDateTimeRoundFn(ctx: *anyopaque, this: Value, args: []const Valu
     if (!opts.smallest_set) return self.throwError("RangeError", "smallestUnit is required");
     if (@intFromEnum(opts.smallest) < @intFromEnum(TUnit.day)) return self.throwError("RangeError", "PlainDateTime.round smallestUnit must be day or smaller");
     try validatePlainDateTimeRoundingIncrement(self, opts.smallest, opts.increment);
-    const t = this.asObj().temporal.?;
+    const t = this.asObj().temporalData().?;
     const total = dateTimeToNs(t);
     const rounded = roundInstantNs(total, opts.smallest, opts.increment, opts.mode);
     try checkPlainDateTimeNs(self, rounded);
     const days = @divFloor(rounded, 86_400_000_000_000);
     const c = tCivilFromDays(@intCast(days));
     const o = try makeTemporal(self, .plain_date_time, "\x00T.PlainDateTime");
-    o.temporal.?.year = @intCast(c.y);
-    o.temporal.?.month = c.m;
-    o.temporal.?.day = c.d;
-    nsToTime(o.temporal.?, rounded);
+    o.temporalData().?.year = @intCast(c.y);
+    o.temporalData().?.month = c.m;
+    o.temporalData().?.day = c.d;
+    nsToTime(o.temporalData().?, rounded);
     return Value.obj(o);
 }
 
 /// Coerce to PlainDateTime fields (instance, fields bag, or ISO string).
 fn toPlainDateTimeData(self: *Interpreter, v: Value, constrain: bool) EvalError!value.TemporalData {
-    if (tIsTemporal(v, .plain_date_time)) return v.asObj().temporal.?.*;
+    if (tIsTemporal(v, .plain_date_time)) return v.asObj().temporalData().?.*;
     if (tIsTemporal(v, .plain_date)) {
-        var t = v.asObj().temporal.?.*;
+        var t = v.asObj().temporalData().?.*;
         t.kind = .plain_date_time;
         try checkPlainDateTimeNs(self, dateTimeToNs(&t));
         return t;
@@ -36268,7 +36271,7 @@ fn toPlainDateTimeData(self: *Interpreter, v: Value, constrain: bool) EvalError!
 fn temporalPlainDateTimeEqualsFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_date_time)) return self.throwError("TypeError", "non-PlainDateTime");
-    const t = this.asObj().temporal.?;
+    const t = this.asObj().temporalData().?;
     const other = try toPlainDateTimeData(self, if (args.len > 0) args[0] else Value.undef(), true);
     return Value.boolVal(dateTimeToNs(t) == dateTimeToNs(&other) and temporalCalendarIdsEqual(t.calendar, other.calendar));
 }
@@ -36287,12 +36290,12 @@ fn temporalDateTimeToPlainDateFn(ctx: *anyopaque, this: Value, args: []const Val
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_date_time)) return self.throwError("TypeError", "non-PlainDateTime");
-    const t = this.asObj().temporal.?;
+    const t = this.asObj().temporalData().?;
     const o = try makeTemporal(self, .plain_date, "\x00T.PlainDate");
-    o.temporal.?.year = t.year;
-    o.temporal.?.month = t.month;
-    o.temporal.?.day = t.day;
-    o.temporal.?.calendar = t.calendar;
+    o.temporalData().?.year = t.year;
+    o.temporalData().?.month = t.month;
+    o.temporalData().?.day = t.day;
+    o.temporalData().?.calendar = t.calendar;
     return Value.obj(o);
 }
 
@@ -36300,14 +36303,14 @@ fn temporalDateTimeToPlainTimeFn(ctx: *anyopaque, this: Value, args: []const Val
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_date_time)) return self.throwError("TypeError", "non-PlainDateTime");
-    const t = this.asObj().temporal.?;
+    const t = this.asObj().temporalData().?;
     const o = try makeTemporal(self, .plain_time, "\x00T.PlainTime");
-    o.temporal.?.hour = t.hour;
-    o.temporal.?.minute = t.minute;
-    o.temporal.?.second = t.second;
-    o.temporal.?.millisecond = t.millisecond;
-    o.temporal.?.microsecond = t.microsecond;
-    o.temporal.?.nanosecond = t.nanosecond;
+    o.temporalData().?.hour = t.hour;
+    o.temporalData().?.minute = t.minute;
+    o.temporalData().?.second = t.second;
+    o.temporalData().?.millisecond = t.millisecond;
+    o.temporalData().?.microsecond = t.microsecond;
+    o.temporalData().?.nanosecond = t.nanosecond;
     return Value.obj(o);
 }
 
@@ -36315,7 +36318,7 @@ fn temporalDateTimeToPlainYearMonthFn(ctx: *anyopaque, this: Value, args: []cons
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_date_time)) return self.throwError("TypeError", "non-PlainDateTime");
-    const t = this.asObj().temporal.?;
+    const t = this.asObj().temporalData().?;
     return makeYearMonth(self, t.year, t.month, t.calendar, 1);
 }
 
@@ -36323,46 +36326,46 @@ fn temporalDateTimeToPlainMonthDayFn(ctx: *anyopaque, this: Value, args: []const
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_date_time)) return self.throwError("TypeError", "non-PlainDateTime");
-    const t = this.asObj().temporal.?;
+    const t = this.asObj().temporalData().?;
     return makeMonthDay(self, monthDayReferenceYearForConversion(t), t.month, t.day, t.calendar);
 }
 
 fn temporalDateTimeWithPlainTimeFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_date_time)) return self.throwError("TypeError", "non-PlainDateTime");
-    const t = this.asObj().temporal.?;
+    const t = this.asObj().temporalData().?;
     const tm = if (args.len == 0 or args[0].isUndefined()) value.TemporalData{ .kind = .plain_time } else try toPlainTimeData(self, args[0]);
     const o = try makeTemporal(self, .plain_date_time, "\x00T.PlainDateTime");
-    o.temporal.?.year = t.year;
-    o.temporal.?.month = t.month;
-    o.temporal.?.day = t.day;
-    o.temporal.?.hour = tm.hour;
-    o.temporal.?.minute = tm.minute;
-    o.temporal.?.second = tm.second;
-    o.temporal.?.millisecond = tm.millisecond;
-    o.temporal.?.microsecond = tm.microsecond;
-    o.temporal.?.nanosecond = tm.nanosecond;
-    o.temporal.?.calendar = t.calendar;
-    try checkPlainDateTimeNs(self, dateTimeToNs(o.temporal.?));
+    o.temporalData().?.year = t.year;
+    o.temporalData().?.month = t.month;
+    o.temporalData().?.day = t.day;
+    o.temporalData().?.hour = tm.hour;
+    o.temporalData().?.minute = tm.minute;
+    o.temporalData().?.second = tm.second;
+    o.temporalData().?.millisecond = tm.millisecond;
+    o.temporalData().?.microsecond = tm.microsecond;
+    o.temporalData().?.nanosecond = tm.nanosecond;
+    o.temporalData().?.calendar = t.calendar;
+    try checkPlainDateTimeNs(self, dateTimeToNs(o.temporalData().?));
     return Value.obj(o);
 }
 
 fn temporalDateTimeWithPlainDateFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_date_time)) return self.throwError("TypeError", "non-PlainDateTime");
-    const t = this.asObj().temporal.?;
+    const t = this.asObj().temporalData().?;
     const f = try toPlainDateFields(self, if (args.len > 0) args[0] else Value.undef(), true);
     const o = try makeTemporal(self, .plain_date_time, "\x00T.PlainDateTime");
-    o.temporal.?.year = @intCast(f.y);
-    o.temporal.?.month = f.m;
-    o.temporal.?.day = f.d;
-    o.temporal.?.hour = t.hour;
-    o.temporal.?.minute = t.minute;
-    o.temporal.?.second = t.second;
-    o.temporal.?.millisecond = t.millisecond;
-    o.temporal.?.microsecond = t.microsecond;
-    o.temporal.?.nanosecond = t.nanosecond;
-    o.temporal.?.calendar = f.cal;
+    o.temporalData().?.year = @intCast(f.y);
+    o.temporalData().?.month = f.m;
+    o.temporalData().?.day = f.d;
+    o.temporalData().?.hour = t.hour;
+    o.temporalData().?.minute = t.minute;
+    o.temporalData().?.second = t.second;
+    o.temporalData().?.millisecond = t.millisecond;
+    o.temporalData().?.microsecond = t.microsecond;
+    o.temporalData().?.nanosecond = t.nanosecond;
+    o.temporalData().?.calendar = f.cal;
     return Value.obj(o);
 }
 
@@ -36381,8 +36384,8 @@ fn temporalDateTimeFromFn(ctx: *anyopaque, this: Value, args: []const Value) val
         break :blk parsed;
     };
     const o = try makeTemporal(self, .plain_date_time, "\x00T.PlainDateTime");
-    o.temporal.?.* = t;
-    o.temporal.?.kind = .plain_date_time;
+    o.temporalData().?.* = t;
+    o.temporalData().?.kind = .plain_date_time;
     return Value.obj(o);
 }
 
@@ -36393,7 +36396,7 @@ fn temporalPlainDateUntilFn(comptime sign: f64) value.NativeFn {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
             if (!tIsTemporal(this, .plain_date)) return self.throwError("TypeError", "non-PlainDate");
-            const t = this.asObj().temporal.?;
+            const t = this.asObj().temporalData().?;
             const b = try toPlainDateFields(self, if (args.len > 0) args[0] else Value.undef(), true);
             if (!temporalCalendarIdsEqual(t.calendar, b.cal)) return self.throwError("RangeError", "calendar mismatch");
             const opts = try readRoundOpts(self, if (args.len > 1) args[1] else Value.undef(), .{ .largest = .day, .smallest = .day, .mode = .trunc, .increment = 1 }, false);
@@ -36429,20 +36432,20 @@ fn temporalPlainDateUntilFn(comptime sign: f64) value.NativeFn {
 fn temporalDateToPlainDateTimeFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_date)) return self.throwError("TypeError", "non-PlainDate");
-    const t = this.asObj().temporal.?;
+    const t = this.asObj().temporalData().?;
     const tm = if (args.len == 0 or args[0].isUndefined()) value.TemporalData{ .kind = .plain_time } else try toPlainTimeData(self, args[0]);
     const o = try makeTemporal(self, .plain_date_time, "\x00T.PlainDateTime");
-    o.temporal.?.year = t.year;
-    o.temporal.?.month = t.month;
-    o.temporal.?.day = t.day;
-    o.temporal.?.hour = tm.hour;
-    o.temporal.?.minute = tm.minute;
-    o.temporal.?.second = tm.second;
-    o.temporal.?.millisecond = tm.millisecond;
-    o.temporal.?.microsecond = tm.microsecond;
-    o.temporal.?.nanosecond = tm.nanosecond;
-    o.temporal.?.calendar = t.calendar;
-    try checkPlainDateTimeNs(self, dateTimeToNs(o.temporal.?));
+    o.temporalData().?.year = t.year;
+    o.temporalData().?.month = t.month;
+    o.temporalData().?.day = t.day;
+    o.temporalData().?.hour = tm.hour;
+    o.temporalData().?.minute = tm.minute;
+    o.temporalData().?.second = tm.second;
+    o.temporalData().?.millisecond = tm.millisecond;
+    o.temporalData().?.microsecond = tm.microsecond;
+    o.temporalData().?.nanosecond = tm.nanosecond;
+    o.temporalData().?.calendar = t.calendar;
+    try checkPlainDateTimeNs(self, dateTimeToNs(o.temporalData().?));
     return Value.obj(o);
 }
 
@@ -36450,7 +36453,7 @@ fn temporalDateToYearMonthFn(ctx: *anyopaque, this: Value, args: []const Value) 
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_date)) return self.throwError("TypeError", "non-PlainDate");
-    const t = this.asObj().temporal.?;
+    const t = this.asObj().temporalData().?;
     return makeYearMonth(self, t.year, t.month, t.calendar, 1);
 }
 
@@ -36513,8 +36516,8 @@ fn makeDurationFormatForLocaleString(self: *Interpreter, locales: Value, options
 /// Intl.DateTimeFormat implementation for Temporal date/time-like values.
 fn temporalToLocaleStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject() or this.asObj().temporal == null) return self.throwError("TypeError", "toLocaleString called on a non-Temporal value");
-    const t = this.asObj().temporal.?;
+    if (!this.isObject() or this.asObj().temporalData() == null) return self.throwError("TypeError", "toLocaleString called on a non-Temporal value");
+    const t = this.asObj().temporalData().?;
     if (t.kind != .duration) {
         const dtf = (try self.newObject()).asObj();
         try self.setProp(dtf, "\x00intl", Value.str("DateTimeFormat"));
@@ -36591,7 +36594,7 @@ fn temporalToLocaleStringFn(ctx: *anyopaque, this: Value, args: []const Value) v
 /// (iso8601): a Temporal instance contributes its own calendar; any other value
 /// is `ToString`'d and must name `iso8601`, else a RangeError.
 fn requireIsoCalendarArg(self: *Interpreter, v: Value) value.HostError!void {
-    if (v.isObject() and v.asObj().temporal != null) return; // a Temporal instance is iso8601 here
+    if (v.isObject() and v.asObj().temporalData() != null) return; // a Temporal instance is iso8601 here
     // ToTemporalCalendarIdentifier: a non-object non-String is a TypeError.
     if (!v.isString()) return self.throwError("TypeError", "calendar must be a string or a Temporal object");
     const s = v.asStr();
@@ -36605,14 +36608,14 @@ fn temporalPlainDateWithCalendarFn(ctx: *anyopaque, this: Value, args: []const V
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_date)) return self.throwError("TypeError", "non-PlainDate");
     const cal = try toCalendarId(self, if (args.len > 0) args[0] else Value.undef(), true);
-    const t = this.asObj().temporal.?;
+    const t = this.asObj().temporalData().?;
     const iso = calendarDateToIso(t.calendar, t.year, t.month, t.day);
     const cd = calendarDateFromIso(cal, iso.y, iso.m, iso.d);
     const o = try makeTemporal(self, .plain_date, "\x00T.PlainDate");
-    o.temporal.?.year = @intCast(cd.y);
-    o.temporal.?.month = cd.m;
-    o.temporal.?.day = cd.d;
-    o.temporal.?.calendar = cal;
+    o.temporalData().?.year = @intCast(cd.y);
+    o.temporalData().?.month = cd.m;
+    o.temporalData().?.day = cd.d;
+    o.temporalData().?.calendar = cal;
     return Value.obj(o);
 }
 
@@ -36620,15 +36623,15 @@ fn temporalDateTimeWithCalendarFn(ctx: *anyopaque, this: Value, args: []const Va
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_date_time)) return self.throwError("TypeError", "non-PlainDateTime");
     const cal = try toCalendarId(self, if (args.len > 0) args[0] else Value.undef(), true);
-    const t = this.asObj().temporal.?;
+    const t = this.asObj().temporalData().?;
     const iso = calendarDateToIso(t.calendar, t.year, t.month, t.day);
     const cd = calendarDateFromIso(cal, iso.y, iso.m, iso.d);
     const o = try makeTemporal(self, .plain_date_time, "\x00T.PlainDateTime");
-    o.temporal.?.* = t.*;
-    o.temporal.?.year = @intCast(cd.y);
-    o.temporal.?.month = cd.m;
-    o.temporal.?.day = cd.d;
-    o.temporal.?.calendar = cal;
+    o.temporalData().?.* = t.*;
+    o.temporalData().?.year = @intCast(cd.y);
+    o.temporalData().?.month = cd.m;
+    o.temporalData().?.day = cd.d;
+    o.temporalData().?.calendar = cal;
     return Value.obj(o);
 }
 
@@ -36647,7 +36650,7 @@ fn dtLocalNs(t: *const value.TemporalData) i128 {
 /// ToTemporalTimeZoneSlotValue restricted to fixed-offset / named zones: a
 /// ZonedDateTime contributes its own zone; otherwise `ToString` then `parseTimeZone`.
 fn resolveTimeZoneArg(self: *Interpreter, v: Value) value.HostError!TimeZone {
-    if (v.isObject()) if (v.asObj().temporal) |t| if (t.kind == .zoned_date_time)
+    if (v.isObject()) if (v.asObj().temporalData()) |t| if (t.kind == .zoned_date_time)
         return TimeZone{ .name = t.tz_name, .offset_ns = t.tz_offset_ns };
     if (!v.isString()) return self.throwError("TypeError", "invalid timeZone");
     return parseTimeZone(self, v.asStr());
@@ -36666,16 +36669,16 @@ fn temporalDateTimeToZonedDateTimeFn(ctx: *anyopaque, this: Value, args: []const
         if (!isObjectLike(args[1])) return self.throwError("TypeError", "options must be an object");
         disambiguation = try readZdtDisambiguation(self, args[1]);
     }
-    const t = this.asObj().temporal.?;
+    const t = this.asObj().temporalData().?;
     const iso = calendarDateToIso(t.calendar, t.year, t.month, t.day);
     const local = @as(i128, tDaysFromCivil(iso.y, iso.m, iso.d)) * DAY_NS + timeToNs(t);
     const offset = if (isFixedTimeZone(tz)) tz.offset_ns else try zdtOffsetForLocalDisambiguation(self, tz, local, disambiguation);
     const o = try zdtMake(self, local - @as(i128, offset), tz.name, tz.offset_ns);
-    o.asObj().temporal.?.* = t.*;
-    o.asObj().temporal.?.kind = .zoned_date_time;
-    o.asObj().temporal.?.epoch_ns = local - @as(i128, offset);
-    o.asObj().temporal.?.tz_name = tz.name;
-    o.asObj().temporal.?.tz_offset_ns = tz.offset_ns;
+    o.asObj().temporalData().?.* = t.*;
+    o.asObj().temporalData().?.kind = .zoned_date_time;
+    o.asObj().temporalData().?.epoch_ns = local - @as(i128, offset);
+    o.asObj().temporalData().?.tz_name = tz.name;
+    o.asObj().temporalData().?.tz_offset_ns = tz.offset_ns;
     return o;
 }
 
@@ -36688,7 +36691,7 @@ fn temporalDateToZonedDateTimeFn(ctx: *anyopaque, this: Value, args: []const Val
     var tz: TimeZone = undefined;
     var time = value.TemporalData{ .kind = .plain_time }; // midnight
     var has_explicit_time = false;
-    if (item.isObject() and (item.asObj().temporal == null or item.asObj().temporal.?.kind != .zoned_date_time)) {
+    if (item.isObject() and (item.asObj().temporalData() == null or item.asObj().temporalData().?.kind != .zoned_date_time)) {
         // A bag: { timeZone (required), plainTime (optional) }.
         const tzv = try self.getProperty(item, "timeZone");
         if (tzv.isUndefined()) return self.throwError("TypeError", "toZonedDateTime: missing timeZone");
@@ -36702,7 +36705,7 @@ fn temporalDateToZonedDateTimeFn(ctx: *anyopaque, this: Value, args: []const Val
         if (item.isUndefined()) return self.throwError("TypeError", "toZonedDateTime requires a time zone");
         tz = try resolveTimeZoneArg(self, item);
     }
-    const d = this.asObj().temporal.?;
+    const d = this.asObj().temporalData().?;
     const iso_date = calendarDateToIso(d.calendar, d.year, d.month, d.day);
     if (!has_explicit_time) {
         if (skippedMidnightStartEpoch(tz.name, iso_date.y, iso_date.m, iso_date.d)) |epoch|
@@ -36720,7 +36723,7 @@ fn temporalDateToZonedDateTimeFn(ctx: *anyopaque, this: Value, args: []const Val
     combined.nanosecond = time.nanosecond;
     const local = @as(i128, tDaysFromCivil(iso_date.y, iso_date.m, iso_date.d)) * DAY_NS + timeToNs(&combined);
     const o = try zdtMake(self, local - @as(i128, tz.offset_ns), tz.name, tz.offset_ns);
-    const out = o.asObj().temporal.?;
+    const out = o.asObj().temporalData().?;
     out.year = d.year;
     out.month = d.month;
     out.day = d.day;
@@ -36740,14 +36743,14 @@ fn temporalInstantToZonedDateTimeISOFn(ctx: *anyopaque, this: Value, args: []con
     if (!tIsTemporal(this, .instant)) return self.throwError("TypeError", "non-Instant");
     if (args.len == 0 or args[0].isUndefined()) return self.throwError("TypeError", "toZonedDateTimeISO requires a time zone");
     const tz = try resolveTimeZoneArg(self, args[0]);
-    return zdtMake(self, this.asObj().temporal.?.epoch_ns, tz.name, tz.offset_ns);
+    return zdtMake(self, this.asObj().temporalData().?.epoch_ns, tz.name, tz.offset_ns);
 }
 
 fn temporalDateToMonthDayFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_date)) return self.throwError("TypeError", "non-PlainDate");
-    const t = this.asObj().temporal.?;
+    const t = this.asObj().temporalData().?;
     return makeMonthDay(self, monthDayReferenceYearForConversion(t), t.month, t.day, t.calendar);
 }
 
@@ -36767,7 +36770,7 @@ fn temporalInstantEpochGetter(comptime ms: bool) value.NativeFn {
             _ = args;
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
             if (!tIsTemporal(this, .instant)) return self.throwError("TypeError", "non-Instant");
-            const ns = this.asObj().temporal.?.epoch_ns;
+            const ns = this.asObj().temporalData().?.epoch_ns;
             if (ms) return Value.num(@floatFromInt(@divFloor(ns, 1_000_000)));
             return self.makeBigInt(ns);
         }
@@ -36793,7 +36796,7 @@ fn temporalInstantToJSONFn(ctx: *anyopaque, this: Value, args: []const Value) va
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .instant)) return self.throwError("TypeError", "non-Instant");
     var buf: std.ArrayListUnmanaged(u8) = .empty;
-    try appendInstantIsoUtcString(self, &buf, this.asObj().temporal.?.epoch_ns, .{});
+    try appendInstantIsoUtcString(self, &buf, this.asObj().temporalData().?.epoch_ns, .{});
     return try Value.strOwned(self.arena, try buf.toOwnedSlice(self.arena));
 }
 
@@ -36854,7 +36857,7 @@ fn temporalInstantToStringFn(ctx: *anyopaque, this: Value, args: []const Value) 
     if (!tIsTemporal(this, .instant)) return self.throwError("TypeError", "non-Instant");
     const options = if (args.len > 0) args[0] else Value.undef();
     const opts = try readInstantToStringOptions(self, options);
-    const rounded_epoch = roundInstantNsForString(this.asObj().temporal.?.epoch_ns, opts.precision);
+    const rounded_epoch = roundInstantNsForString(this.asObj().temporalData().?.epoch_ns, opts.precision);
     const render_offset = timeZoneOffsetAtEpoch(opts.tz.name, rounded_epoch, opts.tz.offset_ns);
     const ns = rounded_epoch + @as(i128, render_offset);
     const days = @divFloor(ns, 86_400_000_000_000);
@@ -36910,7 +36913,7 @@ fn temporalNowInstantFn(ctx: *anyopaque, this: Value, args: []const Value) value
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const o = try makeTemporal(self, .instant, "\x00T.Instant");
-    o.temporal.?.epoch_ns = nowEpochNs(self);
+    o.temporalData().?.epoch_ns = nowEpochNs(self);
     return Value.obj(o);
 }
 fn temporalNowPlainDateTimeFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -36923,38 +36926,38 @@ fn temporalNowPlainDateTimeFn(ctx: *anyopaque, this: Value, args: []const Value)
     const c = tCivilFromDays(@intCast(days));
     var rem = @mod(local_ns, 86_400_000_000_000);
     const o = try makeTemporal(self, .plain_date_time, "\x00T.PlainDateTime");
-    o.temporal.?.year = @intCast(c.y);
-    o.temporal.?.month = c.m;
-    o.temporal.?.day = c.d;
-    o.temporal.?.hour = @intCast(@divFloor(rem, nsPerUnit(.hour)));
+    o.temporalData().?.year = @intCast(c.y);
+    o.temporalData().?.month = c.m;
+    o.temporalData().?.day = c.d;
+    o.temporalData().?.hour = @intCast(@divFloor(rem, nsPerUnit(.hour)));
     rem = @mod(rem, nsPerUnit(.hour));
-    o.temporal.?.minute = @intCast(@divFloor(rem, nsPerUnit(.minute)));
+    o.temporalData().?.minute = @intCast(@divFloor(rem, nsPerUnit(.minute)));
     rem = @mod(rem, nsPerUnit(.minute));
-    o.temporal.?.second = @intCast(@divFloor(rem, nsPerUnit(.second)));
+    o.temporalData().?.second = @intCast(@divFloor(rem, nsPerUnit(.second)));
     rem = @mod(rem, nsPerUnit(.second));
-    o.temporal.?.millisecond = @intCast(@divFloor(rem, nsPerUnit(.millisecond)));
+    o.temporalData().?.millisecond = @intCast(@divFloor(rem, nsPerUnit(.millisecond)));
     rem = @mod(rem, nsPerUnit(.millisecond));
-    o.temporal.?.microsecond = @intCast(@divFloor(rem, nsPerUnit(.microsecond)));
-    o.temporal.?.nanosecond = @intCast(@mod(rem, nsPerUnit(.microsecond)));
+    o.temporalData().?.microsecond = @intCast(@divFloor(rem, nsPerUnit(.microsecond)));
+    o.temporalData().?.nanosecond = @intCast(@mod(rem, nsPerUnit(.microsecond)));
     return Value.obj(o);
 }
 fn temporalNowPlainDateFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const dt = try temporalNowPlainDateTimeFn(ctx, this, args);
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const o = try makeTemporal(self, .plain_date, "\x00T.PlainDate");
-    o.temporal.?.year = dt.asObj().temporal.?.year;
-    o.temporal.?.month = dt.asObj().temporal.?.month;
-    o.temporal.?.day = dt.asObj().temporal.?.day;
+    o.temporalData().?.year = dt.asObj().temporalData().?.year;
+    o.temporalData().?.month = dt.asObj().temporalData().?.month;
+    o.temporalData().?.day = dt.asObj().temporalData().?.day;
     return Value.obj(o);
 }
 fn temporalNowPlainTimeFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const dt = try temporalNowPlainDateTimeFn(ctx, this, args);
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const o = try makeTemporal(self, .plain_time, "\x00T.PlainTime");
-    o.temporal.?.hour = dt.asObj().temporal.?.hour;
-    o.temporal.?.minute = dt.asObj().temporal.?.minute;
-    o.temporal.?.second = dt.asObj().temporal.?.second;
-    o.temporal.?.millisecond = dt.asObj().temporal.?.millisecond;
+    o.temporalData().?.hour = dt.asObj().temporalData().?.hour;
+    o.temporalData().?.minute = dt.asObj().temporalData().?.minute;
+    o.temporalData().?.second = dt.asObj().temporalData().?.second;
+    o.temporalData().?.millisecond = dt.asObj().temporalData().?.millisecond;
     return Value.obj(o);
 }
 fn temporalNowTimeZoneIdFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -36969,9 +36972,9 @@ fn temporalNowZonedDateTimeFn(ctx: *anyopaque, this: Value, args: []const Value)
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const tz = if (args.len > 0 and !args[0].isUndefined()) try resolveTimeZoneArg(self, args[0]) else TimeZone{ .name = "UTC", .offset_ns = 0 };
     const o = try makeTemporal(self, .zoned_date_time, "\x00T.ZonedDateTime");
-    o.temporal.?.epoch_ns = nowEpochNs(self);
-    o.temporal.?.tz_name = tz.name;
-    o.temporal.?.tz_offset_ns = tz.offset_ns;
+    o.temporalData().?.epoch_ns = nowEpochNs(self);
+    o.temporalData().?.tz_name = tz.name;
+    o.temporalData().?.tz_offset_ns = tz.offset_ns;
     return Value.obj(o);
 }
 
@@ -37721,7 +37724,7 @@ fn temporalZdtGetTimeZoneTransitionFn(ctx: *anyopaque, this: Value, args: []cons
         return self.throwError("TypeError", "invalid direction");
     };
     if (!std.mem.eql(u8, dir, "next") and !std.mem.eql(u8, dir, "previous")) return self.throwError("RangeError", "invalid direction");
-    const t = this.asObj().temporal.?;
+    const t = this.asObj().temporalData().?;
     if (isFixedTimeZone(.{ .name = t.tz_name, .offset_ns = t.tz_offset_ns })) return Value.nul();
     const transition = timeZoneTransitionEpoch(t.tz_name, t.epoch_ns, std.mem.eql(u8, dir, "next")) orelse return Value.nul();
     return zdtMakeWithCalendar(self, transition, t.tz_name, t.tz_offset_ns, t.calendar);
@@ -38077,10 +38080,10 @@ fn temporalZonedDateTimeConstructorFn(ctx: *anyopaque, this: Value, args: []cons
     const tz = try parseTimeZoneBare(self, args[1].asStr());
     const cal = if (args.len > 2 and !args[2].isUndefined()) try toCalendarId(self, args[2], false) else "iso8601";
     const o = try makeTemporal(self, .zoned_date_time, "\x00T.ZonedDateTime");
-    o.temporal.?.epoch_ns = epoch_ns;
-    o.temporal.?.tz_name = tz.name;
-    o.temporal.?.tz_offset_ns = tz.offset_ns;
-    o.temporal.?.calendar = cal;
+    o.temporalData().?.epoch_ns = epoch_ns;
+    o.temporalData().?.tz_name = tz.name;
+    o.temporalData().?.tz_offset_ns = tz.offset_ns;
+    o.temporalData().?.calendar = cal;
     try applyTemporalNewTargetProto(self, o);
     return Value.obj(o);
 }
@@ -38113,7 +38116,7 @@ fn temporalZdtGetter(comptime f: ZdtField) value.NativeFn {
             _ = args;
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
             if (!tIsZdt(this)) return self.throwError("TypeError", "Temporal.ZonedDateTime accessor on incompatible receiver");
-            const t = this.asObj().temporal.?;
+            const t = this.asObj().temporalData().?;
             const l = zdtLocal(t);
             const iso = calendarDateToIso(t.calendar, l.year, l.month, l.day);
             return switch (f) {
@@ -38152,8 +38155,8 @@ fn temporalZdtMonthCodeGetter(ctx: *anyopaque, this: Value, args: []const Value)
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsZdt(this)) return self.throwError("TypeError", "non-ZonedDateTime");
-    const t = this.asObj().temporal.?;
-    const l = zdtLocal(this.asObj().temporal.?);
+    const t = this.asObj().temporalData().?;
+    const l = zdtLocal(this.asObj().temporalData().?);
     return try Value.strAlloc(self.arena, try calMonthCode(self, t.calendar, l.year, l.month));
 }
 
@@ -38163,7 +38166,7 @@ fn temporalZdtEpochGetter(comptime ms: bool) value.NativeFn {
             _ = args;
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
             if (!tIsZdt(this)) return self.throwError("TypeError", "non-ZonedDateTime");
-            const ns = this.asObj().temporal.?.epoch_ns;
+            const ns = this.asObj().temporalData().?.epoch_ns;
             if (ms) return Value.num(@floatFromInt(@divFloor(ns, 1_000_000)));
             return self.makeBigInt(ns);
         }
@@ -38174,14 +38177,14 @@ fn temporalZdtTimeZoneIdGetter(ctx: *anyopaque, this: Value, args: []const Value
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsZdt(this)) return self.throwError("TypeError", "non-ZonedDateTime");
-    return try Value.strAlloc(self.arena, this.asObj().temporal.?.tz_name);
+    return try Value.strAlloc(self.arena, this.asObj().temporalData().?.tz_name);
 }
 
 fn temporalZdtOffsetGetter(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsZdt(this)) return self.throwError("TypeError", "non-ZonedDateTime");
-    return try Value.strAlloc(self.arena, try offsetNsToString(self, zdtOffsetAt(this.asObj().temporal.?)));
+    return try Value.strAlloc(self.arena, try offsetNsToString(self, zdtOffsetAt(this.asObj().temporalData().?)));
 }
 
 const ZdtToStringOptions = struct {
@@ -38243,7 +38246,7 @@ fn temporalZdtToStringFn(ctx: *anyopaque, this: Value, args: []const Value) valu
     if (!tIsZdt(this)) return self.throwError("TypeError", "non-ZonedDateTime");
     const options = if (args.len > 0) args[0] else Value.undef();
     const opts = try readZdtToStringOptions(self, options);
-    const t = this.asObj().temporal.?;
+    const t = this.asObj().temporalData().?;
     const rounded_epoch = roundInstantNsForString(t.epoch_ns, opts.precision);
     const render_offset = timeZoneOffsetAtEpoch(t.tz_name, rounded_epoch, t.tz_offset_ns);
     const local_ns = rounded_epoch + @as(i128, render_offset);
@@ -38276,9 +38279,9 @@ fn temporalZdtToJSONFn(ctx: *anyopaque, this: Value, args: []const Value) value.
 fn zdtMake(self: *Interpreter, epoch_ns: i128, tz_name: []const u8, tz_offset: i64) EvalError!Value {
     try checkInstantEpochNs(self, epoch_ns);
     const o = try makeTemporal(self, .zoned_date_time, "\x00T.ZonedDateTime");
-    o.temporal.?.epoch_ns = epoch_ns;
-    o.temporal.?.tz_name = tz_name;
-    o.temporal.?.tz_offset_ns = tz_offset;
+    o.temporalData().?.epoch_ns = epoch_ns;
+    o.temporalData().?.tz_name = tz_name;
+    o.temporalData().?.tz_offset_ns = tz_offset;
     return Value.obj(o);
 }
 
@@ -38286,7 +38289,7 @@ fn zdtMakeWithCalendar(self: *Interpreter, epoch_ns: i128, tz_name: []const u8, 
     try checkInstantEpochNs(self, epoch_ns);
     const actual_offset = timeZoneOffsetAtEpoch(tz_name, epoch_ns, tz_offset);
     const v = try zdtMake(self, epoch_ns, tz_name, actual_offset);
-    const t = v.asObj().temporal.?;
+    const t = v.asObj().temporalData().?;
     const local = epoch_ns + actual_offset;
     const days = @divFloor(local, 86_400_000_000_000);
     const iso = tCivilFromDays(@intCast(days));
@@ -38342,23 +38345,23 @@ fn temporalZdtToInstantFn(ctx: *anyopaque, this: Value, args: []const Value) val
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsZdt(this)) return self.throwError("TypeError", "non-ZonedDateTime");
     const o = try makeTemporal(self, .instant, "\x00T.Instant");
-    o.temporal.?.epoch_ns = this.asObj().temporal.?.epoch_ns;
+    o.temporalData().?.epoch_ns = this.asObj().temporalData().?.epoch_ns;
     return Value.obj(o);
 }
 
 fn zdtLocalToTemporal(self: *Interpreter, this: Value, kind: value.TemporalData.Kind, proto_key: []const u8) EvalError!Value {
-    const l = zdtLocal(this.asObj().temporal.?);
+    const l = zdtLocal(this.asObj().temporalData().?);
     const o = try makeTemporal(self, kind, proto_key);
-    o.temporal.?.year = l.year;
-    o.temporal.?.month = l.month;
-    o.temporal.?.day = l.day;
-    o.temporal.?.hour = l.hour;
-    o.temporal.?.minute = l.minute;
-    o.temporal.?.second = l.second;
-    o.temporal.?.millisecond = l.millisecond;
-    o.temporal.?.microsecond = l.microsecond;
-    o.temporal.?.nanosecond = l.nanosecond;
-    o.temporal.?.calendar = l.calendar;
+    o.temporalData().?.year = l.year;
+    o.temporalData().?.month = l.month;
+    o.temporalData().?.day = l.day;
+    o.temporalData().?.hour = l.hour;
+    o.temporalData().?.minute = l.minute;
+    o.temporalData().?.second = l.second;
+    o.temporalData().?.millisecond = l.millisecond;
+    o.temporalData().?.microsecond = l.microsecond;
+    o.temporalData().?.nanosecond = l.nanosecond;
+    o.temporalData().?.calendar = l.calendar;
     return Value.obj(o);
 }
 
@@ -38384,7 +38387,7 @@ fn temporalZdtToYearMonthFn(ctx: *anyopaque, this: Value, args: []const Value) v
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsZdt(this)) return self.throwError("TypeError", "non-ZonedDateTime");
-    const t = this.asObj().temporal.?;
+    const t = this.asObj().temporalData().?;
     const l = zdtLocal(t);
     return makeYearMonth(self, l.year, l.month, t.calendar, 1);
 }
@@ -38392,7 +38395,7 @@ fn temporalZdtToMonthDayFn(ctx: *anyopaque, this: Value, args: []const Value) va
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsZdt(this)) return self.throwError("TypeError", "non-ZonedDateTime");
-    const t = this.asObj().temporal.?;
+    const t = this.asObj().temporalData().?;
     const l = zdtLocal(t);
     return makeMonthDay(self, monthDayReferenceYearForConversion(t), l.month, l.day, t.calendar);
 }
@@ -38404,7 +38407,7 @@ fn temporalZdtAddFn(comptime sign: f64) value.NativeFn {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
             if (!tIsZdt(this)) return self.throwError("TypeError", "non-ZonedDateTime");
-            const t = this.asObj().temporal.?;
+            const t = this.asObj().temporalData().?;
             const dur = try durationFromArg(self, if (args.len > 0) args[0] else Value.undef());
             const reject = try readOverflowReject(self, if (args.len > 1) args[1] else Value.undef());
             var epoch = t.epoch_ns;
@@ -38424,7 +38427,7 @@ fn temporalZdtAddFn(comptime sign: f64) value.NativeFn {
                 epoch += @as(i128, @intFromFloat(sign)) * time_only;
                 if (time_only == 0 and !std.mem.eql(u8, t.calendar, "iso8601")) {
                     const v = try zdtMakeWithCalendar(self, epoch, t.tz_name, t.tz_offset_ns, t.calendar);
-                    const out = v.asObj().temporal.?;
+                    const out = v.asObj().temporalData().?;
                     out.year = @intCast(c.y);
                     out.month = c.m;
                     out.day = c.d;
@@ -38454,7 +38457,7 @@ fn temporalZdtUntilFn(comptime sign: f64) value.NativeFn {
             const opts = try readRoundOpts(self, if (args.len > 1) args[1] else Value.undef(), .{ .largest = .hour, .smallest = .nanosecond, .mode = .trunc, .increment = 1 }, false);
             try validateDurationRoundingIncrement(self, opts.smallest, opts.increment);
             const largest = if (!opts.largest_set and @intFromEnum(opts.smallest) <= @intFromEnum(TUnit.day)) opts.smallest else opts.largest;
-            const t = this.asObj().temporal.?;
+            const t = this.asObj().temporalData().?;
             if (!temporalCalendarIdsEqual(t.calendar, other.calendar)) return self.throwError("RangeError", "calendar mismatch");
             if (!other_arg.isString() and !temporalTimeZoneIdsEqual(t.tz_name, other.tz_name)) return self.throwError("RangeError", "time zone mismatch");
             if (@intFromEnum(largest) >= @intFromEnum(TUnit.day)) {
@@ -38577,7 +38580,7 @@ fn temporalZdtRoundFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
     if (!opts.smallest_set) return self.throwError("RangeError", "smallestUnit is required");
     if (@intFromEnum(opts.smallest) < @intFromEnum(TUnit.day)) return self.throwError("RangeError", "ZonedDateTime.round smallestUnit must be day or smaller");
     try validateZonedDateTimeRoundingIncrement(self, opts.smallest, opts.increment);
-    const t = this.asObj().temporal.?;
+    const t = this.asObj().temporalData().?;
     if (opts.smallest == .day) {
         const l = zdtRoundingLocalDate(t, zdtLocal(t));
         const start_ns = try zdtStartOfDayEpochNs(self, t, l.year, l.month, l.day);
@@ -38601,7 +38604,7 @@ fn temporalZdtEqualsFn(ctx: *anyopaque, this: Value, args: []const Value) value.
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsZdt(this)) return self.throwError("TypeError", "non-ZonedDateTime");
     const other = try toZdtArg(self, if (args.len > 0) args[0] else Value.undef(), true, .reject, .compatible);
-    const t = this.asObj().temporal.?;
+    const t = this.asObj().temporalData().?;
     return Value.boolVal(t.epoch_ns == other.epoch_ns and temporalTimeZoneIdsEqual(t.tz_name, other.tz_name) and temporalCalendarIdsEqual(t.calendar, other.calendar));
 }
 
@@ -38616,7 +38619,7 @@ fn temporalZdtCompareFn(ctx: *anyopaque, this: Value, args: []const Value) value
 fn temporalZdtWithFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsZdt(this)) return self.throwError("TypeError", "non-ZonedDateTime");
-    const t = this.asObj().temporal.?;
+    const t = this.asObj().temporalData().?;
     const bag = if (args.len > 0) args[0] else Value.undef();
     if (!bag.isObject()) return self.throwError("TypeError", "Temporal.ZonedDateTime.prototype.with: argument must be an object");
     var l = zdtLocal(t);
@@ -38671,7 +38674,7 @@ fn temporalZdtWithFn(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
 fn temporalZdtWithPlainTimeFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsZdt(this)) return self.throwError("TypeError", "non-ZonedDateTime");
-    const t = this.asObj().temporal.?;
+    const t = this.asObj().temporalData().?;
     const l = zdtLocal(t);
     const omitted_time = args.len == 0 or args[0].isUndefined();
     if (omitted_time) {
@@ -38695,7 +38698,7 @@ fn temporalZdtWithPlainTimeFn(ctx: *anyopaque, this: Value, args: []const Value)
 fn temporalZdtWithTimeZoneFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsZdt(this)) return self.throwError("TypeError", "non-ZonedDateTime");
-    const t = this.asObj().temporal.?;
+    const t = this.asObj().temporalData().?;
     if (args.len == 0 or !args[0].isString()) return self.throwError("TypeError", "withTimeZone requires a time-zone string");
     const tz = try parseTimeZone(self, args[0].asStr());
     return zdtMakeWithCalendar(self, t.epoch_ns, tz.name, tz.offset_ns, t.calendar);
@@ -38705,9 +38708,9 @@ fn temporalZdtWithCalendarFn(ctx: *anyopaque, this: Value, args: []const Value) 
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsZdt(this)) return self.throwError("TypeError", "non-ZonedDateTime");
     const cal = try toCalendarId(self, if (args.len > 0) args[0] else Value.undef(), true);
-    const t = this.asObj().temporal.?;
+    const t = this.asObj().temporalData().?;
     const r = try zdtMake(self, t.epoch_ns, t.tz_name, t.tz_offset_ns);
-    r.asObj().temporal.?.calendar = cal;
+    r.asObj().temporalData().?.calendar = cal;
     return r;
 }
 
@@ -38715,7 +38718,7 @@ fn temporalZdtStartOfDayFn(ctx: *anyopaque, this: Value, args: []const Value) va
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsZdt(this)) return self.throwError("TypeError", "non-ZonedDateTime");
-    const t = this.asObj().temporal.?;
+    const t = this.asObj().temporalData().?;
     const l = zdtLocal(t);
     const iso = calendarDateToIso(t.calendar, l.year, l.month, l.day);
     if (skippedMidnightStartEpoch(t.tz_name, iso.y, iso.m, iso.d)) |epoch|
@@ -38726,7 +38729,7 @@ fn temporalZdtStartOfDayFn(ctx: *anyopaque, this: Value, args: []const Value) va
 
 /// Coerce to ZonedDateTime data (an instance or a "…[TimeZone]" string).
 fn toZdtArg(self: *Interpreter, v: Value, constrain: bool, offset_behavior: ZdtOffsetBehavior, disambiguation: ZdtDisambiguation) EvalError!value.TemporalData {
-    if (tIsZdt(v)) return v.asObj().temporal.?.*;
+    if (tIsZdt(v)) return v.asObj().temporalData().?.*;
     if (v.isString()) return parseZdtString(self, v.asStr(), offset_behavior, disambiguation);
     if (v.isObject()) {
         return finishZonedDateTimeBagFields(self, try readZonedDateTimeBagFields(self, v), constrain, offset_behavior, disambiguation);
@@ -38779,7 +38782,7 @@ fn temporalZdtFromFn(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
         break :blk try toZdtArg(self, item, !zdt_opts.reject, zdt_opts.offset_behavior, zdt_opts.disambiguation);
     };
     const o = try zdtMake(self, d.epoch_ns, d.tz_name, d.tz_offset_ns);
-    const t = o.asObj().temporal.?;
+    const t = o.asObj().temporalData().?;
     t.year = d.year;
     t.month = d.month;
     t.day = d.day;

@@ -622,6 +622,7 @@ pub const ObjectRareTag = enum {
     bound_function,
     proxy,
     buffer_view,
+    temporal,
 };
 
 pub const ObjectRareState = union(ObjectRareTag) {
@@ -651,6 +652,7 @@ pub const ObjectRareState = union(ObjectRareTag) {
         typed_array: ?*TypedArrayData = null,
         data_view: ?*DataViewData = null,
     },
+    temporal: struct { ptr: ?*TemporalData = null },
 };
 
 pub const ObjectColdState = struct {
@@ -960,9 +962,7 @@ pub const Object = struct {
     /// Marks a `ShadowRealm` instance (its child realm's Environment is in
     /// `private_data`).
     is_shadow_realm: bool = false,
-    /// `Temporal.*` internal slots (PlainDate/Time/DateTime/Duration/Instant/…),
-    /// non-null on a Temporal object.
-    temporal: ?*TemporalData = null,
+    // Temporal internal slots live in the disjoint rare-state sidecar.
 
     fn lockBacking(self: *Object) bool {
         if (!element_locks_enabled.load(.acquire)) return false;
@@ -1329,6 +1329,26 @@ pub const Object = struct {
         };
     }
 
+    pub inline fn temporalData(self: *const Object) ?*TemporalData {
+        const cold = self.cold orelse return null;
+        return switch (cold.rare) {
+            .temporal => |state| state.ptr,
+            else => null,
+        };
+    }
+
+    pub fn setTemporalData(self: *Object, fallback: std.mem.Allocator, data: *TemporalData) std.mem.Allocator.Error!void {
+        const state = try self.ensureRare(fallback, .temporal, .{});
+        state.ptr = data;
+    }
+
+    pub fn clearTemporalData(self: *Object) void {
+        if (self.cold) |cold| switch (cold.rare) {
+            .temporal => |*state| state.ptr = null,
+            else => {},
+        };
+    }
+
     pub fn setErrorName(self: *Object, fallback: std.mem.Allocator, name: []const u8) std.mem.Allocator.Error!void {
         const state = try self.ensureRare(fallback, .error_state, .{});
         state.name = name;
@@ -1499,6 +1519,12 @@ pub const Object = struct {
 
     pub fn temporalAllocator(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator {
         return self.backingFor(fallback, "temporal");
+    }
+
+    pub fn destroyUninstalledTemporal(self: *Object, fallback: std.mem.Allocator, data: *TemporalData) void {
+        const a = self.backing_allocator orelse fallback;
+        a.destroy(data);
+        self.deactivateBacking("temporal");
     }
 
     pub fn argMapNamesAllocator(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator {
