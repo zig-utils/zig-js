@@ -3878,7 +3878,20 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                                 const checkpoint_epoch = vm.steps >> 10;
                                 exec.acc = acc;
                                 exec.ip = ip;
-                                try advanceQuickObservableSteps(vm, quick.extra_steps);
+                                if (vm.gil != null) {
+                                    try advanceQuickObservableSteps(vm, quick.extra_steps);
+                                } else {
+                                    // The object-allocation quick helper has
+                                    // returned and every live managed value is
+                                    // now in registered Exec/frame storage.
+                                    // Scope the precise marker to this one
+                                    // checkpoint service; generic/error/threaded
+                                    // paths retain conservative stack tracing.
+                                    const saved_precise = vm.gc_precise_safepoint;
+                                    vm.gc_precise_safepoint = true;
+                                    defer vm.gc_precise_safepoint = saved_precise;
+                                    try advanceQuickObservableSteps(vm, quick.extra_steps);
+                                }
                                 if (builtin.is_test and vm.steps >> 10 != checkpoint_epoch)
                                     _ = quick_object_allocation_checkpoint_crossings.fetchAdd(1, .monotonic);
                             }

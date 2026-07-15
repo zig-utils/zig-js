@@ -1041,6 +1041,11 @@ pub const Interpreter = struct {
     /// See `stack_scan.zig` and docs/threads/P7-gc-design.md.
     gc_safepoint_ctx: ?*anyopaque = null,
     gc_safepoint_fn: ?*const fn (ctx: *anyopaque, machine: *anyopaque) void = null,
+    /// True only while a specialized VM path services a checkpoint after
+    /// materializing every live managed value into registered Exec/frame roots.
+    /// The Context may then skip conservative native-stack scanning for that
+    /// one private-mutator checkpoint; generic and parallel paths leave it false.
+    gc_precise_safepoint: bool = false,
     /// Root-publication generation this interpreter last published for, under the
     /// parallel mid-script collector (issue #1 M3). Written by this interpreter's
     /// own thread (at a safepoint or when parking), read by the collector to know

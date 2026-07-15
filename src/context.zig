@@ -2314,6 +2314,9 @@ pub const Context = struct {
     gc_par_pause_ns_max: std.atomic.Value(u64) = .init(0),
     gc_par_backoff_skips: std.atomic.Value(u64) = .init(0),
     gc_par_retry_after_ns: std.atomic.Value(u64) = .init(0),
+    /// Internal proof that private specialized VM checkpoints reached the
+    /// precise-root path. Tests compare deltas; embedders do not observe it.
+    gc_precise_safepoints: std.atomic.Value(u64) = .init(0),
     /// Guards the low-frequency realm-root lists that have no other lock —
     /// `async_waiters`, `c_api_handles`, `finalization_cleanup_jobs` — so the
     /// mid-script parallel collector can read them while peers mutate. Taken by
@@ -3152,15 +3155,16 @@ pub const Context = struct {
 
     /// Reclaim a nursery batch at a safe single-mutator VM checkpoint. This is
     /// deliberately synchronous: the current interpreter is parked in the
-    /// safepoint call, active interpreter roots are registered, and the guarded
-    /// native-stack scan covers temporary host/register roots. A full or
-    /// concurrent cycle already in progress keeps ownership of the checkpoint.
-    fn collectYoungMidScriptIfNeeded(self: *Context, h: *GcHeap) bool {
+    /// safepoint call and active interpreter roots are registered. Generic
+    /// paths conservatively scan temporary host/register roots; a specialized
+    /// path may prove those roots fully materialized and request precise tracing.
+    /// A full or concurrent cycle already in progress keeps ownership of the checkpoint.
+    fn collectYoungMidScriptIfNeeded(self: *Context, h: *GcHeap, precise_roots: bool) bool {
         if (h.marking.load(.acquire) or h.concurrent.load(.acquire)) return false;
         if (!h.shouldCollectYoung()) return false;
-        self.gc_scan_native_stack = true;
+        self.gc_scan_native_stack = !precise_roots;
         defer self.gc_scan_native_stack = false;
-        self.gc_scan_parked_stacks = true;
+        self.gc_scan_parked_stacks = !precise_roots;
         defer self.gc_scan_parked_stacks = false;
         h.collectYoung();
         return true;
@@ -3186,11 +3190,13 @@ pub const Context = struct {
         // mode is explicit/quiescent only (`collectGarbage`); skip the safepoint
         // collector so parallel execution never races a marker.
         if (h.parallel) return;
+        const precise_roots = machine.gc_precise_safepoint;
+        if (builtin.is_test and precise_roots) _ = self.gc_precise_safepoints.fetchAdd(1, .monotonic);
         // The default cell nursery is useful only if allocation-heavy scripts
         // can reclaim it before returning to a host boundary. A single mutator
         // is stopped here, so collect young garbage directly instead of
         // repeatedly starting full-heap cycles from total live bytes.
-        if (self.collectYoungMidScriptIfNeeded(h)) return;
+        if (self.collectYoungMidScriptIfNeeded(h, precise_roots)) return;
         // M3 concurrent driver (single-mutator, opt-in): begin a concurrent mark
         // at one safepoint and close it at the next, a dedicated marker thread
         // tracing during the window while the mutator runs. Stores feed the marker
@@ -3222,9 +3228,9 @@ pub const Context = struct {
         if (self.gil) |g| {
             if (!g.allOthersParked()) return;
         }
-        self.gc_scan_native_stack = true;
+        self.gc_scan_native_stack = !precise_roots;
         defer self.gc_scan_native_stack = false;
-        self.gc_scan_parked_stacks = true;
+        self.gc_scan_parked_stacks = !precise_roots;
         defer self.gc_scan_parked_stacks = false;
         if (h.marking.load(.acquire)) {
             // Drain a bounded slice of the grey set; when it empties, close the
@@ -13513,6 +13519,7 @@ test "parallel_js: fixed-shape object allocation quickens across shared Thread w
 
     const hits_before = vm.quickObjectAllocationLoopHitsForTesting();
     const batch_cells_before = gc_mod.objectBatchCellsForTesting();
+    const precise_before = ctx.gc_precise_safepoints.load(.monotonic);
     const result = try ctx.evaluate(
         \\function runAllocationLane(lane) {
         \\  var items = [
@@ -13549,6 +13556,59 @@ test "parallel_js: fixed-shape object allocation quickens across shared Thread w
     try std.testing.expect(quick_hits > 3000);
     const batch_cells = gc_mod.objectBatchCellsForTesting() - batch_cells_before;
     try std.testing.expect(batch_cells >= 2048);
+    try std.testing.expectEqual(precise_before, ctx.gc_precise_safepoints.load(.monotonic));
+}
+
+test "GC precise fixed-shape checkpoints preserve materialized roots" {
+    const source =
+        \\function runAllocationLane(lane) {
+        \\  var items = [
+        \\    { seed: 1, mark: 0, prior: 0 }, { seed: 2, mark: 0, prior: 0 },
+        \\    { seed: 3, mark: 0, prior: 0 }, { seed: 4, mark: 0, prior: 0 },
+        \\    { seed: 5, mark: 0, prior: 0 }, { seed: 6, mark: 0, prior: 0 },
+        \\    { seed: 7, mark: 0, prior: 0 }, { seed: 8, mark: 0, prior: 0 }
+        \\  ];
+        \\  var total = 0;
+        \\  var cursor = 0;
+        \\  while (cursor < 4096) {
+        \\    var selected = cursor & 7;
+        \\    var old = items[selected];
+        \\    var next = (old.seed + cursor + lane) % 1009;
+        \\    var replacement = { seed: next, mark: cursor & 3, prior: old.seed };
+        \\    items[selected] = replacement;
+        \\    total = total + ((replacement.seed + replacement.mark + replacement.prior) & 31);
+        \\    cursor = cursor + 1;
+        \\  }
+        \\  for (var i = 0; i < items.length; i = i + 1)
+        \\    total = total + items[i].seed * 3 + items[i].mark * 5 + items[i].prior * 7;
+        \\  return total;
+        \\}
+        \\runAllocationLane(2);
+    ;
+
+    const arena_ctx = try Context.createWith(std.testing.allocator, .{ .enable_jit = false });
+    defer arena_ctx.destroy();
+    const expected = try arena_ctx.evaluate(source);
+
+    const gc_ctx = try Context.createWith(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+    });
+    defer gc_ctx.destroy();
+    const heap = gc_ctx.gc.?;
+    heap.threshold_bytes = std.math.maxInt(usize);
+    heap.nursery_threshold_bytes = 1;
+    const minor_before = heap.minor_collections;
+    const precise_before = gc_ctx.gc_precise_safepoints.load(.monotonic);
+    const actual = try gc_ctx.evaluate(source);
+    try std.testing.expectEqual(expected.rawBits(), actual.rawBits());
+    try std.testing.expect(heap.minor_collections > minor_before);
+    try std.testing.expect(gc_ctx.gc_precise_safepoints.load(.monotonic) > precise_before);
+
+    const precise_after = gc_ctx.gc_precise_safepoints.load(.monotonic);
+    const generic = try gc_ctx.evaluate("var genericTotal = 0; for (var i = 0; i < 5000; i = i + 1) genericTotal = genericTotal + i; genericTotal;");
+    try std.testing.expectEqual(@as(f64, 12_497_500), generic.asNum());
+    try std.testing.expectEqual(precise_after, gc_ctx.gc_precise_safepoints.load(.monotonic));
 }
 
 fn expectParallelGcTelemetryCoherent(ctx: *Context) !void {
