@@ -777,7 +777,7 @@ const TreeTailCall = struct {
 };
 
 /// A JS-defined function value: parameter names, body AST, and the environment
-/// captured at definition (the closure). Stored type-erased on `Object.js_func`.
+/// captured at definition (the closure). Stored type-erased on `Object.jsFunction()`.
 pub const Function = struct {
     params: []const ast.Param,
     body: *ast.Node,
@@ -2773,7 +2773,7 @@ pub const Interpreter = struct {
                 // `active_function` when available (spec GetActiveFunction), else the
                 // per-call `super_ctor` (set from the ctor's live proto on entry).
                 const sup_opt: ?*value.Object = blk2: {
-                    if (self.active_function) |fn_obj| if (fn_obj.js_func) |erased| {
+                    if (self.active_function) |fn_obj| if (fn_obj.jsFunction()) |erased| {
                         const active: *Function = @ptrCast(@alignCast(erased));
                         if (active.is_derived_constructor) break :blk2 self.effectiveProto(fn_obj);
                     };
@@ -4284,7 +4284,8 @@ pub const Interpreter = struct {
             break :blk self.functionProto();
         };
         const obj = try gc_mod.allocObj(self.arena);
-        obj.* = .{ .js_func = @ptrCast(func), .proto = fproto };
+        obj.* = .{ .proto = fproto };
+        try obj.setJsFunction(self.arena, @ptrCast(func));
         func.obj = obj;
         try installFunctionProps(self.arena, self.root_shape, obj, fnode.params, func.name);
         return Value.obj(obj);
@@ -4333,7 +4334,7 @@ pub const Interpreter = struct {
 
     pub fn funcOf(v: Value) ?*Function {
         if (v.isObject()) {
-            if (v.asObj().js_func) |e| return @ptrCast(@alignCast(e));
+            if (v.asObj().jsFunction()) |e| return @ptrCast(@alignCast(e));
         }
         return null;
     }
@@ -4360,7 +4361,7 @@ pub const Interpreter = struct {
     }
 
     pub fn jsFunctionHasOwnPrototypeSlot(o: *value.Object) bool {
-        const erased = o.js_func orelse return false;
+        const erased = o.jsFunction() orelse return false;
         const f: *Function = @ptrCast(@alignCast(erased));
         // Ordinary functions expose a constructor `.prototype`. Generator and
         // async-generator functions, including concise methods, expose one for
@@ -4377,7 +4378,7 @@ pub const Interpreter = struct {
     /// materialize. No-op for arrows/methods/plain-async (no prototype slot) and
     /// for a function whose prototype already exists.
     pub fn materializeFunctionPrototype(self: *Interpreter, o: *value.Object) EvalError!void {
-        if (o.js_func == null or !jsFunctionHasOwnPrototypeSlot(o)) return;
+        if (o.jsFunction() == null or !jsFunctionHasOwnPrototypeSlot(o)) return;
         if (o.getOwn("prototype") != null or o.getAccessor("prototype") != null) return;
         const f = funcOf(Value.obj(o)) orelse return;
         if (f.is_generator) {
@@ -5488,7 +5489,7 @@ pub const Interpreter = struct {
             defer self.new_target = saved_nt;
             return nf(@ptrCast(self), this_val, args);
         }
-        if (obj.js_func) |erased| {
+        if (obj.jsFunction()) |erased| {
             const func: *Function = @ptrCast(@alignCast(erased));
             return self.callFunction(func, args, this_val);
         }
@@ -5649,7 +5650,7 @@ pub const Interpreter = struct {
         // GC cell reused by a peer's `makeFunction`, a use-after-free that surfaces
         // as a torn read of `func.is_class_constructor` back in `callPlain`. Publish
         // the callee's wrapping object (which marks the `Function` through
-        // `Object.js_func`) as a precise root for the call's duration.
+        // `Object.jsFunction()`) as a precise root for the call's duration.
         // `lock_microtasks` is true iff `parallel_js` (which the parallel marker requires), so the
         // single-threaded hot path pays nothing.
         const callee_rooted = self.lock_microtasks and func.obj != null;
@@ -5712,7 +5713,7 @@ pub const Interpreter = struct {
             self.tree_tail_call = null;
             if (!tail.callee.isObject()) return self.callValue(tail.callee, tail.args);
             const obj = tail.callee.asObj();
-            const erased = obj.js_func orelse return self.callValue(tail.callee, tail.args);
+            const erased = obj.jsFunction() orelse return self.callValue(tail.callee, tail.args);
             const next_func: *Function = @ptrCast(@alignCast(erased));
             if (next_func.is_generator or next_func.is_async or next_func.is_class_constructor)
                 return self.callValue(tail.callee, tail.args);
@@ -6245,7 +6246,7 @@ pub const Interpreter = struct {
             defer self.active_native = saved_native;
             return nf(@ptrCast(self), Value.undef(), args); // native ctor (Array, Map, RegExp, ...)
         }
-        if (obj.js_func) |erased| {
+        if (obj.jsFunction()) |erased| {
             const func: *Function = @ptrCast(@alignCast(erased));
             // Arrow / async / generator functions and concise methods / accessors
             // are not constructors (a class constructor is not flagged is_method).
@@ -6562,7 +6563,7 @@ pub const Interpreter = struct {
             const env: *Environment = @ptrCast(@alignCast(ctor.private_data.?));
             if (envIntrinsicProto(env, intrinsic)) |proto| return proto;
         }
-        if (ctor.js_func) |jf| {
+        if (ctor.jsFunction()) |jf| {
             const fnp: *Function = @ptrCast(@alignCast(jf));
             var env: ?*Environment = fnp.closure;
             while (env) |e| {
@@ -6587,7 +6588,7 @@ pub const Interpreter = struct {
             const env: *Environment = @ptrCast(@alignCast(ctor.private_data.?));
             if (envIntlServiceProto(env, service)) |proto| return proto;
         }
-        if (ctor.js_func) |jf| {
+        if (ctor.jsFunction()) |jf| {
             const fnp: *Function = @ptrCast(@alignCast(jf));
             var env: ?*Environment = fnp.closure;
             while (env) |e| {
@@ -6612,7 +6613,7 @@ pub const Interpreter = struct {
             const env: *Environment = @ptrCast(@alignCast(ctor.private_data.?));
             if (envIntrinsicObject(env, intrinsic)) |obj| return obj;
         }
-        if (ctor.js_func) |jf| {
+        if (ctor.jsFunction()) |jf| {
             const fnp: *Function = @ptrCast(@alignCast(jf));
             var env: ?*Environment = fnp.closure;
             while (env) |e| {
@@ -9614,7 +9615,7 @@ pub const Interpreter = struct {
         // attrs keep it out of Object.keys/JSON). It is repositioned after `name`
         // below — the spec creates it at that position, but the lazy install
         // appends it at the tail.
-        const fn_has_proto = t.js_func != null and Interpreter.jsFunctionHasOwnPrototypeSlot(t);
+        const fn_has_proto = t.jsFunction() != null and Interpreter.jsFunctionHasOwnPrototypeSlot(t);
         if (fn_has_proto) try self.materializeFunctionPrototype(t);
         var indices: std.ArrayListUnmanaged([]const u8) = .empty;
         var seen: std.AutoHashMapUnmanaged(usize, void) = .empty;
@@ -9841,7 +9842,7 @@ pub const Interpreter = struct {
                 // function has one, with a `constructor` back-reference. Without
                 // this a plain `Test262Error.prototype.toString = …` (and any
                 // `f.prototype.x = …`) read undefined and threw.
-                if (std.mem.eql(u8, key, "prototype") and o.js_func != null and Interpreter.jsFunctionHasOwnPrototypeSlot(o) and o.getOwn("prototype") == null and o.getAccessor("prototype") == null) {
+                if (std.mem.eql(u8, key, "prototype") and o.jsFunction() != null and Interpreter.jsFunctionHasOwnPrototypeSlot(o) and o.getOwn("prototype") == null and o.getAccessor("prototype") == null) {
                     if (funcOf(recv)) |f| {
                         // A generator function's `.prototype` is a fresh object whose
                         // [[Prototype]] is %GeneratorPrototype% and which has NO
@@ -10959,7 +10960,7 @@ pub const Interpreter = struct {
                 return true;
             }
         }
-        if (std.mem.eql(u8, key, "prototype") and o.js_func != null and o.getOwn("prototype") == null and o.getAccessor("prototype") == null)
+        if (std.mem.eql(u8, key, "prototype") and o.jsFunction() != null and o.getOwn("prototype") == null and o.getAccessor("prototype") == null)
             _ = try self.getProperty(Value.obj(o), key);
         return try o.deleteNamedDataOwn(self.arena, self.root_shape, key);
     }
@@ -14263,7 +14264,7 @@ pub const Interpreter = struct {
                     break;
                 }
                 if (c.getOwn(m)) |fv| {
-                    if (fv.isObject() and (fv.asObj().js_func != null or (c == o and fv.asObj().native != null) or (o.temporalData() != null and std.mem.eql(u8, m, "valueOf") and fv.asObj().native != null))) method = fv
+                    if (fv.isObject() and (fv.asObj().jsFunction() != null or (c == o and fv.asObj().native != null) or (o.temporalData() != null and std.mem.eql(u8, m, "valueOf") and fv.asObj().native != null))) method = fv
                         // Primitive wrappers' native valueOf is a spec builtin that
                         // produces the boxed primitive at this position in the
                         // OrdinaryToPrimitive order, so do not continue to a later
@@ -14350,7 +14351,7 @@ pub const Interpreter = struct {
         var cur: ?*value.Object = o;
         while (cur) |c| : (cur = c.protoAtomic()) {
             if (c.getOwn(name)) |fv| {
-                return if (fv.isObject() and fv.asObj().js_func != null) fv else null;
+                return if (fv.isObject() and fv.asObj().jsFunction() != null) fv else null;
             }
         }
         return null;
@@ -14725,7 +14726,7 @@ pub const Interpreter = struct {
     /// %Function.prototype%, which every function inherits.
     pub fn effectiveProto(self: *Interpreter, o: *value.Object) ?*value.Object {
         if (o.protoAtomic()) |p| return p;
-        if (!o.protoExplicitNull() and (o.native != null or o.hostCallback() != null or o.js_func != null or o.boundFunction() != null)) return self.functionProto();
+        if (!o.protoExplicitNull() and (o.native != null or o.hostCallback() != null or o.jsFunction() != null or o.boundFunction() != null)) return self.functionProto();
         return null;
     }
 
@@ -16441,7 +16442,7 @@ pub fn isConstructorValue(v: Value) bool {
     }
     if (o.errorCtor() != null) return true;
     if (o.native != null) return o.native_ctor;
-    if (o.js_func) |erased| {
+    if (o.jsFunction()) |erased| {
         const f: *Function = @ptrCast(@alignCast(erased));
         return !f.is_arrow and !f.is_async and !f.is_generator and !f.is_method;
     }
@@ -16645,7 +16646,7 @@ fn throwErrorInRealm(self: *Interpreter, realm: *Environment, name: []const u8, 
 }
 
 fn objectFunctionRealm(o: *value.Object) ?*Environment {
-    if (o.js_func) |erased| {
+    if (o.jsFunction()) |erased| {
         const func: *Function = @ptrCast(@alignCast(erased));
         return func.closure;
     }
@@ -43019,7 +43020,7 @@ pub fn objectHasOwn(o: *value.Object, name: []const u8) bool {
 
 fn isLazyFunctionPrototypeSlot(o: *value.Object, name: []const u8) bool {
     return std.mem.eql(u8, name, "prototype") and
-        o.js_func != null and
+        o.jsFunction() != null and
         Interpreter.jsFunctionHasOwnPrototypeSlot(o) and
         o.getOwn("prototype") == null and
         o.getAccessor("prototype") == null;

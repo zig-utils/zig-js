@@ -379,7 +379,7 @@ const Serializer = struct {
         }
         // The DataCloneError set: values with behavior or identity that cannot
         // cross a serialization boundary.
-        if (o.js_func != null or o.native != null or o.hostCallback() != null or o.boundFunction() != null)
+        if (o.jsFunction() != null or o.native != null or o.hostCallback() != null or o.boundFunction() != null)
             return s.throwClone("DataCloneError: function objects cannot be cloned");
         if (o.is_symbol) return s.throwClone("DataCloneError: Symbol values cannot be cloned");
         if (o.proxyTarget() != null or o.proxy_revoked)

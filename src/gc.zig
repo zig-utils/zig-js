@@ -159,7 +159,7 @@ pub fn traceObject(o: *Object, v: anytype) void {
     }
 
     // Type-erased side-cells.
-    if (o.js_func) |p| v.mark(p); // *Function (kind .function)
+    if (o.jsFunction()) |p| v.mark(p); // *Function (kind .function)
     if (o.boundFunction()) |p| v.mark(p); // *Interpreter.BoundFn (kind .bound_fn)
     if (o.promiseData()) |p| v.mark(p); // *promise.Promise (kind .promise)
     if (o.generator()) |p| v.mark(p); // *vm.Generator (kind .generator)
@@ -308,11 +308,10 @@ fn finalizeObjectBacking(o: *Object, a: std.mem.Allocator) usize {
     // collected branded object leaks its table + struct. Its keys are borrowed
     // private-name slices (put without copying), so unlike attrs/accessors we do
     // not free the keys.
-    if (o.private_brands) |pb| {
+    if (o.privateBrands()) |pb| {
         pb.deinit(a);
         a.destroy(pb);
-        o.private_brands = null;
-        released += 1;
+        o.clearPrivateBrands();
     }
     if (flags.key_order) {
         if (o.key_order.load(.monotonic)) |ord| {
@@ -900,7 +899,7 @@ pub const Binding = struct {
                         o.clearArrayBuffer();
                     }
                 }
-                if (hasObjectBacking(o.backing_flags) or o.private_brands != null) {
+                if (hasObjectBacking(o.backing_flags) or o.privateBrands() != null) {
                     const released = finalizeObjectBacking(o, if (o.backing_flags.allocator_active) o.backing_allocator else self.context.gpa);
                     if (released > 0) {
                         if (self.context.gc_finalizer_stats_out) |stats| stats.object_backing_releases += released;

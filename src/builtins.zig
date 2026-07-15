@@ -157,7 +157,7 @@ pub fn functionConstructor(ctx: *anyopaque, this: Value, args: []const Value) Ho
     // Create the function in the Function constructor's own realm (so its
     // closure — and thus [[Realm]] — is that realm).
     const fn_v = try self.eval(prog);
-    if (fn_v.isObject() and fn_v.asObj().js_func != null) {
+    if (fn_v.isObject() and fn_v.asObj().jsFunction() != null) {
         try fn_v.asObj().setOwn(self.arena, self.root_shape, "name", Value.str("anonymous"));
         try fn_v.asObj().setAttr(self.arena, "name", .{ .writable = false, .enumerable = false, .configurable = true });
         if (Interpreter.funcOf(fn_v)) |f| {
@@ -2335,7 +2335,7 @@ pub fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, this: Value, args: []cons
             return dataDescriptor(self, el, .{ .writable = true, .enumerable = true, .configurable = true });
         }
     }
-    if (std.mem.eql(u8, key, "prototype") and o.js_func != null and o.getOwn("prototype") == null and o.getAccessor("prototype") == null)
+    if (std.mem.eql(u8, key, "prototype") and o.jsFunction() != null and o.getOwn("prototype") == null and o.getAccessor("prototype") == null)
         _ = try self.getProperty(ov, key);
     if (o.boxedPrimitive()) |p| {
         if (p.isString()) {

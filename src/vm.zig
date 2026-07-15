@@ -5983,7 +5983,8 @@ fn makeClosure(vm: *Interpreter, tmpl: *bc.FnTemplate, frame: ?*Frame) EvalError
         if (tag) |t| if (vm.env.get(t)) |v| if (v.isObject()) break :blk v.asObj();
         break :blk vm.functionProto();
     };
-    obj.* = .{ .js_func = @ptrCast(func), .proto = fproto };
+    obj.* = .{ .proto = fproto };
+    try obj.setJsFunction(vm.arena, @ptrCast(func));
     func.obj = obj;
     try interp.installFunctionProps(vm.arena, vm.root_shape, obj, tmpl.params, tmpl.name);
     if (tmpl.self_name.len > 0) try closure_env.putFnName(tmpl.self_name, Value.obj(obj));
@@ -5995,7 +5996,7 @@ fn makeClosure(vm: *Interpreter, tmpl: *bc.FnTemplate, frame: ?*Frame) EvalError
 /// tree-walk closures) is handed to the interpreter.
 fn callValue(vm: *Interpreter, callee: Value, args: []const Value, this_val: Value) EvalError!Value {
     if (callee.isObject()) {
-        if (callee.asObj().js_func) |erased| {
+        if (callee.asObj().jsFunction()) |erased| {
             const func: *Function = @ptrCast(@alignCast(erased));
             if (!func.is_generator and !func.is_async) {
                 if (func.chunk) |fchunk| return runFunction(vm, func, fchunk, args, this_val, Value.undef());
@@ -6022,7 +6023,7 @@ fn invokeMethod(vm: *Interpreter, recv: Value, name: []const u8, args: []const V
 /// are delegated to the interpreter.
 fn construct(vm: *Interpreter, callee: Value, args: []const Value) EvalError!Value {
     if (callee.isObject()) {
-        if (callee.asObj().js_func) |erased| {
+        if (callee.asObj().jsFunction()) |erased| {
             const func: *Function = @ptrCast(@alignCast(erased));
             // Arrows, concise methods, generators, and async functions have no
             // [[Construct]] — `new` on them is a TypeError even though they carry a
@@ -6236,7 +6237,7 @@ fn callValueWithInlineCallsDisabled(vm: *Interpreter, callee: Value, args: []con
 /// activation stack. Everything else takes the native call path.
 inline fn jsPlainFunction(callee: Value) ?*Function {
     if (!callee.isObject()) return null;
-    const erased = callee.asObj().js_func orelse return null;
+    const erased = callee.asObj().jsFunction() orelse return null;
     const func: *Function = @ptrCast(@alignCast(erased));
     if (func.is_generator or func.is_async) return null;
     return func;

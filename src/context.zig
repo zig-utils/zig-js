@@ -15973,6 +15973,35 @@ test "enable_gc: Object named-property backing stores release when collected" {
     try std.testing.expectEqual(baseline, ctx.gc_object_backing_stores_live);
 }
 
+test "enable_gc: private brand backing releases when collected" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    defer ctx.destroy();
+
+    ctx.collectGarbage();
+    const baseline = ctx.gc_object_backing_stores_live;
+    _ = try ctx.evaluate(
+        \\(() => {
+        \\  class Branded { #value = 42; read() { return this.#value; } }
+        \\  globalThis.keep = new Branded();
+        \\  globalThis.ref = new WeakRef(globalThis.keep);
+        \\})();
+        \\0
+    );
+    try std.testing.expect(ctx.gc_object_backing_stores_live > baseline);
+    const alive = try ctx.evaluate("globalThis.keep.read()");
+    try std.testing.expectEqual(@as(f64, 42), alive.asNum());
+
+    _ = try ctx.evaluate("globalThis.keep = undefined; 0");
+    ctx.collectGarbage();
+    const cleared = try ctx.evaluate("globalThis.ref.deref() === undefined");
+    try std.testing.expectEqual(true, cleared.asBool());
+
+    _ = try ctx.evaluate("globalThis.ref = undefined; 0");
+    ctx.collectGarbage();
+    ctx.collectGarbage();
+    try std.testing.expectEqual(baseline, ctx.gc_object_backing_stores_live);
+}
+
 test "enable_gc: Object backing allocator avoids cell classifier outside parallel_js" {
     const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
     defer ctx.destroy();

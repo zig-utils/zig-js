@@ -3252,7 +3252,7 @@ fn threadRestrictFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value
     const v = if (args.len > 0) args[0] else Value.undef();
     if (!v.isObject()) return self.throwError("TypeError", "cannot restrict this object");
     const o = v.asObj();
-    const plain = o.js_func == null and o.native == null and o.hostCallback() == null and o.boundFunction() == null and
+    const plain = o.jsFunction() == null and o.native == null and o.hostCallback() == null and o.boundFunction() == null and
         o.generator() == null and o.proxyTarget() == null and !o.proxy_revoked and
         o != (self.global_object orelse o) and
         o.typedArray() == null and o.dataView() == null and o.arrayBuffer() == null and

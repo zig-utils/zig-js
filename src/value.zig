@@ -626,6 +626,7 @@ pub const ObjectRareTag = enum {
     promise,
     constructor,
     sparse_array,
+    js_function,
 };
 
 pub const ObjectRareState = union(ObjectRareTag) {
@@ -659,10 +660,12 @@ pub const ObjectRareState = union(ObjectRareTag) {
     promise: struct { ptr: ?*anyopaque = null },
     constructor: struct { ptr: ?*Object = null },
     sparse_array: struct { holes: ?*std.AutoHashMapUnmanaged(usize, void) = null },
+    js_function: struct { ptr: ?*anyopaque = null },
 };
 
 pub const ObjectColdState = struct {
     rare: ObjectRareState = .{ .none = {} },
+    private_brands: ?*std.StringHashMapUnmanaged(void) = null,
     arg_map_env: ?*anyopaque = null,
     arg_map_names: [][]const u8 = &.{},
     arg_map_severed: []std.atomic.Value(bool) = &.{},
@@ -802,7 +805,7 @@ pub const Object = struct {
     /// missing the brand (a non-instance, a derived `this` before `super()`
     /// returns, an instance of a different evaluation of the class) is rejected.
     /// Lazily allocated. Keyed by the (evaluation-unique) private storage name.
-    private_brands: ?*std.StringHashMapUnmanaged(void) = null,
+    // Private brand metadata lives in the cold sidecar.
     /// All own named keys (data AND accessor) in creation order — allocated
     /// lazily only when an accessor is first added, since data slots otherwise
     /// keep insertion order via the shape chain. `ownKeys` uses this to interleave
@@ -880,9 +883,7 @@ pub const Object = struct {
     /// constructors (`Array`, `Object`, `Map`, `RegExp`, …) set this, so
     /// `new Object.keys()` / `new Symbol()` throw a TypeError as required.
     native_ctor: bool = false,
-    /// `*Interpreter.Function`, type-erased to break the value↔interpreter
-    /// import cycle. The interpreter casts it back when calling.
-    js_func: ?*anyopaque = null,
+    // The type-erased `*Interpreter.Function` pointer lives in rare state.
     /// `*vm.Generator`, type-erased (same cycle break as `js_func`). Non-null
     /// marks a generator *object* — the iterator returned by calling a
     /// `function*`; its `.next()`/`.return()`/`.throw()` drive the suspendable VM.
@@ -1395,6 +1396,28 @@ pub const Object = struct {
             .sparse_array => |*state| state.holes = null,
             else => {},
         };
+    }
+
+    pub inline fn jsFunction(self: *const Object) ?*anyopaque {
+        const cold = self.cold orelse return null;
+        return switch (cold.rare) {
+            .js_function => |state| state.ptr,
+            else => null,
+        };
+    }
+
+    pub fn setJsFunction(self: *Object, fallback: std.mem.Allocator, function: *anyopaque) std.mem.Allocator.Error!void {
+        const state = try self.ensureRare(fallback, .js_function, .{});
+        state.ptr = function;
+    }
+
+    pub inline fn privateBrands(self: *const Object) ?*std.StringHashMapUnmanaged(void) {
+        const cold = self.cold orelse return null;
+        return cold.private_brands;
+    }
+
+    pub fn clearPrivateBrands(self: *Object) void {
+        if (self.cold) |cold| cold.private_brands = null;
     }
 
     pub fn setErrorName(self: *Object, fallback: std.mem.Allocator, name: []const u8) std.mem.Allocator.Error!void {
@@ -2341,7 +2364,7 @@ pub const Object = struct {
         }
         if (o.proxy_revoked) return o.proxy_callable;
         return o.hostCallback() != null or o.native != null or
-            o.js_func != null or o.errorCtor() != null or o.boundFunction() != null;
+            o.jsFunction() != null or o.errorCtor() != null or o.boundFunction() != null;
     }
 
     /// Own named property keys in insertion order (for `for-in` / enumeration).
@@ -2512,7 +2535,7 @@ pub const Object = struct {
     pub fn hasPrivateBrand(self: *const Object, name: []const u8) bool {
         self.lockProperties();
         defer self.unlockProperties();
-        const m = self.private_brands orelse return false;
+        const m = self.privateBrands() orelse return false;
         return m.contains(name);
     }
 
@@ -2523,12 +2546,13 @@ pub const Object = struct {
     pub fn addPrivateBrand(self: *Object, arena: std.mem.Allocator, name: []const u8) std.mem.Allocator.Error!void {
         self.lockProperties();
         defer self.unlockProperties();
+        const cold = try self.ensureCold(arena);
         const alloc = self.accessorsAllocator(arena);
-        if (self.private_brands == null) {
-            self.private_brands = try alloc.create(std.StringHashMapUnmanaged(void));
-            self.private_brands.?.* = .{};
+        if (cold.private_brands == null) {
+            cold.private_brands = try alloc.create(std.StringHashMapUnmanaged(void));
+            cold.private_brands.?.* = .{};
         }
-        try self.private_brands.?.put(alloc, name, {});
+        try cold.private_brands.?.put(alloc, name, {});
     }
 
     /// An own accessor (get/set) property, if present.
