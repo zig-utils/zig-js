@@ -24,6 +24,7 @@ const iana_zones = @import("iana_zones.zig");
 const iana_offsets = @import("iana_offsets.zig");
 const dn_data = @import("intl_displaynames_data.zig");
 const units_data = @import("intl_units_data.zig");
+const weekdata = @import("intl_weekdata.zig");
 const Compiler = @import("compiler.zig").Compiler;
 const Shape = @import("shape.zig").Shape;
 const unicode_case = @import("unicode_case.zig");
@@ -22232,7 +22233,17 @@ fn intlLocaleTextInfoFn(ctx: *anyopaque, this: Value, args: []const Value) value
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!this.isObject() or this.asObj().getOwn("\x00locale") == null) return self.throwError("TypeError", "Intl.Locale.prototype.getTextInfo on incompatible receiver");
     const o = (try self.newObject()).asObj();
-    try self.setProp(o, "direction", Value.str("ltr"));
+    const tag = this.asObj().getOwn("\x00locale").?.asStr();
+    var tri = parseTriple(tag);
+    if (tri.s.len == 0) if (cldrMaximize(self.arena, tri)) |m| {
+        tri = m;
+    };
+    const rtl_scripts = [_][]const u8{ "Arab", "Hebr", "Syrc", "Thaa", "Nkoo", "Rohg", "Mand", "Mend", "Adlm", "Yezi", "Ougr", "Phlp", "Samr", "Armi", "Sarb" };
+    var dir: []const u8 = "ltr";
+    for (rtl_scripts) |s| if (std.ascii.eqlIgnoreCase(tri.s, s)) {
+        dir = "rtl";
+    };
+    try self.setProp(o, "direction", try Value.strAlloc(self.arena, dir));
     return Value.obj(o);
 }
 
@@ -22242,9 +22253,16 @@ fn intlLocaleWeekInfoFn(ctx: *anyopaque, this: Value, args: []const Value) value
     if (!this.isObject() or this.asObj().getOwn("\x00locale") == null) return self.throwError("TypeError", "Intl.Locale.prototype.getWeekInfo on incompatible receiver");
     const tag = this.asObj().getOwn("\x00locale").?.asStr();
     const o = (try self.newObject()).asObj();
-    // firstDay: from the -u-fw- keyword (mon..sun -> 1..7) when present, else the
-    // default (1 = Monday; we lack per-region week data).
-    var first_day: f64 = 1;
+    // Region drives the CLDR week data; maximize when the tag has no region.
+    var tri = parseTriple(tag);
+    if (tri.r.len == 0) if (cldrMaximize(self.arena, tri)) |m| {
+        tri = m;
+    };
+    // firstDay: the -u-fw- keyword overrides; else the region default.
+    var first_day: f64 = @floatFromInt(weekdata.default_first_day);
+    for (weekdata.first_day) |f| if (std.ascii.eqlIgnoreCase(f.region, tri.r)) {
+        first_day = @floatFromInt(f.day);
+    };
     if (localeUValue(tag, "fw")) |fw| {
         const names = [_][]const u8{ "mon", "tue", "wed", "thu", "fri", "sat", "sun" };
         for (names, 1..) |n, i| if (std.mem.eql(u8, fw, n)) {
@@ -22252,9 +22270,12 @@ fn intlLocaleWeekInfoFn(ctx: *anyopaque, this: Value, args: []const Value) value
         };
     }
     try self.setProp(o, "firstDay", Value.num(first_day));
+    var weekend_days: []const u8 = weekdata.default_weekend[0..];
+    for (weekdata.weekends) |w| if (std.ascii.eqlIgnoreCase(w.region, tri.r)) {
+        weekend_days = w.days;
+    };
     const we = (try self.newArray()).asObj();
-    try we.appendElement(self.arena, Value.num(6));
-    try we.appendElement(self.arena, Value.num(7));
+    for (weekend_days) |dnum| try we.appendElement(self.arena, Value.num(@floatFromInt(dnum)));
     try self.setProp(o, "weekend", Value.obj(we));
     return Value.obj(o);
 }
