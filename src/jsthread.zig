@@ -519,7 +519,8 @@ fn installConcurrentAccessError(ctx: *Context) !void {
     if (!base_proto_v.isObject()) return;
 
     const ctor = try gc_mod.allocObj(a);
-    ctor.* = .{ .error_ctor = name, .private_data = @ptrCast(&ctx.env), .proto = base_v.asObj() };
+    ctor.* = .{ .private_data = @ptrCast(&ctx.env), .proto = base_v.asObj() };
+    try ctor.setErrorCtor(a, name);
     try interp.installNativeProps(a, rs, ctor, name, 1);
     const proto = try gc_mod.allocObj(a);
     proto.* = .{ .proto = base_proto_v.asObj() };
@@ -3258,7 +3259,7 @@ fn threadRestrictFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value
         !o.is_date and !o.is_regex and !o.is_map and !o.is_set and !o.is_weak and
         o.promise == null and !o.is_symbol and !o.is_bigint and o.module_ns == null and
         o.weak_ref_target == null and !o.is_arguments and !o.is_error and
-        o.prim == null and o.error_ctor == null and o.getOwn("constructor") == null;
+        o.prim == null and o.errorCtor() == null and o.getOwn("constructor") == null;
     if (!plain) return self.throwError("TypeError", "cannot restrict this object");
     const tid: u64 = @intCast(std.Thread.getCurrentId());
     // Claim via CAS 0→tid so two concurrent restricts can't both win.

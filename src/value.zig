@@ -610,6 +610,8 @@ pub const FinalizationRecord = struct {
 /// stores.
 pub const ObjectColdState = struct {
     primitive: ObjectPrimitiveState = .{ .symbol = .{} },
+    error_name: []const u8 = "",
+    error_ctor: ?[]const u8 = null,
     arg_map_env: ?*anyopaque = null,
     arg_map_names: [][]const u8 = &.{},
     arg_map_severed: []std.atomic.Value(bool) = &.{},
@@ -879,13 +881,7 @@ pub const Object = struct {
     /// flag so the brand checks can tell a Map from a WeakMap (and Set/WeakSet).
     is_weak: bool = false,
     // Weak entries and their lookup index live in `cold`.
-    /// For error instances, the error class name (e.g. "TypeError"); for a
-    /// builtin error *constructor* object, see `error_ctor`.
-    error_name: []const u8 = "",
-    /// Non-null marks this object as a builtin error constructor; the value is
-    /// the class name it produces ("Error", "TypeError", ...). Callable both
-    /// plainly (`TypeError("x")`) and via `new`.
-    error_ctor: ?[]const u8 = null,
+    // Error instance/constructor class names live in the cold sidecar.
     /// For objects created by `new F()`, the constructor function's object —
     /// used by `instanceof` to walk the (flat, v1) construction link.
     ctor_ref: ?*Object = null,
@@ -1043,6 +1039,24 @@ pub const Object = struct {
 
     pub inline fn bigIntText(self: *const Object) ?[]const u8 {
         return if (self.cold) |cold| cold.primitive.bigint.text.get() else null;
+    }
+
+    pub inline fn errorName(self: *const Object) []const u8 {
+        return if (self.cold) |cold| cold.error_name else "";
+    }
+
+    pub inline fn errorCtor(self: *const Object) ?[]const u8 {
+        return if (self.cold) |cold| cold.error_ctor else null;
+    }
+
+    pub fn setErrorName(self: *Object, fallback: std.mem.Allocator, name: []const u8) std.mem.Allocator.Error!void {
+        const cold = try self.ensureCold(fallback);
+        cold.error_name = name;
+    }
+
+    pub fn setErrorCtor(self: *Object, fallback: std.mem.Allocator, name: []const u8) std.mem.Allocator.Error!void {
+        const cold = try self.ensureCold(fallback);
+        cold.error_ctor = name;
     }
 
     pub inline fn regexSource(self: *const Object) []const u8 {
@@ -1964,7 +1978,7 @@ pub const Object = struct {
         }
         if (o.proxy_revoked) return o.proxy_callable;
         return o.callback != null or o.native != null or
-            o.js_func != null or o.error_ctor != null or o.bound != null;
+            o.js_func != null or o.errorCtor() != null or o.bound != null;
     }
 
     /// Own named property keys in insertion order (for `for-in` / enumeration).
@@ -2765,9 +2779,9 @@ fn objectToString(o: *Object, arena: std.mem.Allocator) error{OutOfMemory}![]con
     if (o.prim) |p| return p.toString(arena);
     if (o.is_error) {
         const name = if (o.getOwn("name")) |v|
-            (if (v.isString()) v.asStr() else o.error_name)
+            (if (v.isString()) v.asStr() else o.errorName())
         else
-            o.error_name;
+            o.errorName();
         const msg = if (o.getOwn("message")) |v|
             (if (v.isString()) v.asStr() else "")
         else

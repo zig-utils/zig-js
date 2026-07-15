@@ -6844,7 +6844,7 @@ test "vm: recursive calls throw a catchable RangeError before native stack overf
     const exception = machine.exception;
     try std.testing.expect(!exception.isUndefined());
     try std.testing.expect(exception.isObject());
-    try std.testing.expectEqualStrings("RangeError", exception.asObj().error_name);
+    try std.testing.expectEqualStrings("RangeError", exception.asObj().errorName());
 }
 
 test "vm: generator calls from bytecode are lazy" {

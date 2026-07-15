@@ -5560,7 +5560,7 @@ test "static source-phase imports fail as host availability errors" {
         try std.testing.expectEqual(error.Throw, err);
         const ex = ctx.exception.?;
         try std.testing.expect(ex.isObject());
-        try std.testing.expectEqualStrings("TypeError", ex.asObj().error_name);
+        try std.testing.expectEqualStrings("TypeError", ex.asObj().errorName());
         return;
     };
     return error.TestExpectedError;
@@ -7551,7 +7551,7 @@ test "defineProperty rejects incompatible redefinition of non-configurable props
         const ctx = try Context.create(std.testing.allocator);
         defer ctx.destroy();
         try std.testing.expectError(error.Throw, ctx.evaluate(src));
-        try std.testing.expectEqualStrings("TypeError", ctx.exception.?.asObj().error_name);
+        try std.testing.expectEqualStrings("TypeError", ctx.exception.?.asObj().errorName());
     }
     // Compatible redefinitions are still allowed.
     try std.testing.expectEqual(@as(f64, 2), (try evalIn(
@@ -7606,7 +7606,7 @@ test "new on a non-constructor built-in throws TypeError" {
         defer ctx.destroy();
         try std.testing.expectError(error.Throw, ctx.evaluate(src));
         try std.testing.expect(ctx.exception.?.asObj().is_error);
-        try std.testing.expectEqualStrings("TypeError", ctx.exception.?.asObj().error_name);
+        try std.testing.expectEqualStrings("TypeError", ctx.exception.?.asObj().errorName());
     }
     // The real constructors still build instances.
     try std.testing.expectEqual(@as(f64, 3), (try evalIn("new Array(3).length")).asNum());
@@ -11981,7 +11981,7 @@ test "Thread blocking APIs respect the main can-block gate" {
             };
             try std.testing.expect(thrown.isObject());
             const obj = thrown.asObj();
-            try std.testing.expectEqualStrings("TypeError", obj.error_name);
+            try std.testing.expectEqualStrings("TypeError", obj.errorName());
             const message = obj.getOwn("message") orelse {
                 try std.testing.expect(false);
                 return;

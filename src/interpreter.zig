@@ -2199,7 +2199,8 @@ pub const Interpreter = struct {
 
     fn makeErrorWithProto(self: *Interpreter, name: []const u8, message: []const u8, proto: ?*value.Object) EvalError!Value {
         const obj = try gc_mod.allocObj(self.arena);
-        obj.* = .{ .is_error = true, .error_name = name };
+        obj.* = .{ .is_error = true };
+        try obj.setErrorName(self.arena, name);
         // Link to `<name>.prototype` so `name` (and `toString`) are inherited and
         // `instanceof` / `Object.getPrototypeOf` see a real chain.
         if (proto) |p| {
@@ -2231,7 +2232,8 @@ pub const Interpreter = struct {
     /// accessors from `error_name` and the hidden `\x00dommsg` slot.
     pub fn makeDOMException(self: *Interpreter, name: []const u8, message: []const u8) EvalError!Value {
         const obj = try gc_mod.allocObj(self.arena);
-        obj.* = .{ .is_error = true, .error_name = try self.arena.dupe(u8, name) };
+        obj.* = .{ .is_error = true };
+        try obj.setErrorName(self.arena, try self.arena.dupe(u8, name));
         if (self.env.get("DOMException")) |ctor_v| if (ctor_v.isObject()) {
             if (ctor_v.asObj().getOwn("prototype")) |p| if (p.isObject()) obj.setProtoAtomic(p.asObj());
         };
@@ -5463,7 +5465,7 @@ pub const Interpreter = struct {
             const bf: *BoundFn = @ptrCast(@alignCast(erased));
             return self.callValueWithThis(bf.target, try self.concatArgs(bf.args, args), bf.this);
         }
-        if (obj.error_ctor) |name| return self.makeErrorWithArgs(name, args);
+        if (obj.errorCtor()) |name| return self.makeErrorWithArgs(name, args);
         if (obj.native) |nf| {
             try self.stackGuard();
             self.depth += 1;
@@ -6226,7 +6228,7 @@ pub const Interpreter = struct {
             const nt = if (std.meta.eql(new_target, callee)) bf.target else new_target;
             return self.constructNT(bf.target, try self.concatArgs(bf.args, args), nt);
         }
-        if (obj.error_ctor) |name| return self.makeErrorWithArgsNT(name, args, new_target);
+        if (obj.errorCtor()) |name| return self.makeErrorWithArgsNT(name, args, new_target);
         if (obj.native) |nf| {
             // Most built-ins aren't constructors; only flagged ones are `new`-able.
             if (!obj.native_ctor) return self.throwError("TypeError", "value is not a constructor");
@@ -6553,7 +6555,7 @@ pub const Interpreter = struct {
             const target = ctor.proxy_target orelse return self.throwError("TypeError", "Cannot get function realm from a revoked proxy");
             return try self.functionRealmIntrinsicProto(target, intrinsic);
         }
-        if ((ctor.native_ctor or ctor.error_ctor != null) and ctor.private_data != null) {
+        if ((ctor.native_ctor or ctor.errorCtor() != null) and ctor.private_data != null) {
             const env: *Environment = @ptrCast(@alignCast(ctor.private_data.?));
             if (envIntrinsicProto(env, intrinsic)) |proto| return proto;
         }
@@ -6578,7 +6580,7 @@ pub const Interpreter = struct {
             const target = ctor.proxy_target orelse return self.throwError("TypeError", "Cannot get function realm from a revoked proxy");
             return try self.functionRealmIntlProto(target, service);
         }
-        if ((ctor.native_ctor or ctor.error_ctor != null) and ctor.private_data != null) {
+        if ((ctor.native_ctor or ctor.errorCtor() != null) and ctor.private_data != null) {
             const env: *Environment = @ptrCast(@alignCast(ctor.private_data.?));
             if (envIntlServiceProto(env, service)) |proto| return proto;
         }
@@ -6603,7 +6605,7 @@ pub const Interpreter = struct {
             const target = ctor.proxy_target orelse return self.throwError("TypeError", "Cannot get function realm from a revoked proxy");
             return try self.functionRealmIntrinsicObject(target, intrinsic);
         }
-        if ((ctor.native_ctor or ctor.error_ctor != null) and ctor.private_data != null) {
+        if ((ctor.native_ctor or ctor.errorCtor() != null) and ctor.private_data != null) {
             const env: *Environment = @ptrCast(@alignCast(ctor.private_data.?));
             if (envIntrinsicObject(env, intrinsic)) |obj| return obj;
         }
@@ -10037,7 +10039,7 @@ pub const Interpreter = struct {
             .boolean => "Boolean",
             .object => blk: {
                 const o = recv.asObj();
-                break :blk if (o.is_array) "Array" else if (o.is_regex) "RegExp" else if (o.is_symbol) "Symbol" else if (o.is_error) (if (o.error_name.len > 0) o.error_name else "Error") else if (o.is_map) "Map" else if (o.is_set) "Set" else if (o.is_date) "Date" else if (o.prim) |p| (switch (p.kind()) {
+                break :blk if (o.is_array) "Array" else if (o.is_regex) "RegExp" else if (o.is_symbol) "Symbol" else if (o.is_error) (if (o.errorName().len > 0) o.errorName() else "Error") else if (o.is_map) "Map" else if (o.is_set) "Set" else if (o.is_date) "Date" else if (o.prim) |p| (switch (p.kind()) {
                     .number => "Number",
                     .string => "String",
                     .boolean => "Boolean",
@@ -14744,8 +14746,8 @@ pub const Interpreter = struct {
             if (cur.asObj() == p.asObj()) return true;
             cur = try self.objectGetPrototypeValue(cur.asObj());
         }
-        if (rc.error_ctor) |name| {
-            if (lo.is_error and (std.mem.eql(u8, lo.error_name, name) or std.mem.eql(u8, name, "Error")))
+        if (rc.errorCtor()) |name| {
+            if (lo.is_error and (std.mem.eql(u8, lo.errorName(), name) or std.mem.eql(u8, name, "Error")))
                 return true;
         }
         return false;
@@ -16047,7 +16049,7 @@ fn errorStackGet(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
     // (proxy traps, getters) can't re-enter and blow the stack.
     const obj = this.asObj();
     if (!obj.is_error) return Value.undef();
-    const name = if (obj.error_name.len == 0) "Error" else obj.error_name;
+    const name = if (obj.errorName().len == 0) "Error" else obj.errorName();
     const message = if (obj.getOwn("message")) |v|
         (if (v.isString()) v.asStr() else "")
     else
@@ -16433,7 +16435,7 @@ pub fn isConstructorValue(v: Value) bool {
         const bf: *Interpreter.BoundFn = @ptrCast(@alignCast(erased));
         return isConstructorValue(bf.target);
     }
-    if (o.error_ctor != null) return true;
+    if (o.errorCtor() != null) return true;
     if (o.native != null) return o.native_ctor;
     if (o.js_func) |erased| {
         const f: *Function = @ptrCast(@alignCast(erased));
@@ -28133,7 +28135,8 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     };
     for (error_names) |name| {
         const o = try gc_mod.allocObj(a);
-        o.* = .{ .error_ctor = name, .private_data = @ptrCast(env) };
+        o.* = .{ .private_data = @ptrCast(env) };
+        try o.setErrorCtor(a, name);
         // AggregateError(errors, message) has arity 2; SuppressedError(error,
         // suppressed, message) arity 3; the others (message) 1.
         const arity: usize = if (std.mem.eql(u8, name, "SuppressedError")) 3 else if (std.mem.eql(u8, name, "AggregateError")) 2 else 1;
@@ -39152,7 +39155,7 @@ fn domExceptionNameGet(ctx: *anyopaque, this: Value, args: []const Value) value.
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!this.isObject()) return self.throwError("TypeError", "DOMException name getter called on non-object");
-    const en = this.asObj().error_name;
+    const en = this.asObj().errorName();
     return try Value.strAlloc(self.arena, if (en.len == 0) "Error" else en);
 }
 fn domExceptionMessageGet(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -39166,7 +39169,7 @@ fn domExceptionCodeGet(ctx: *anyopaque, this: Value, args: []const Value) value.
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!this.isObject()) return self.throwError("TypeError", "DOMException code getter called on non-object");
-    return Value.num(@floatFromInt(domExceptionCode(this.asObj().error_name)));
+    return Value.num(@floatFromInt(domExceptionCode(this.asObj().errorName())));
 }
 
 fn domExceptionConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {

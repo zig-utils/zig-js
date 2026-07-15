@@ -484,7 +484,7 @@ const Serializer = struct {
         }
         if (o.is_error) {
             try s.w.tag(.error_obj);
-            try s.writeStr(o.error_name);
+            try s.writeStr(o.errorName());
             const msg = try s.self.getProperty(Value.obj(o), "message");
             if (msg.isString()) {
                 try s.w.byte(1);
@@ -1026,7 +1026,7 @@ const Deserializer = struct {
                 const o = (try d.self.newObject()).asObj();
                 try d.objs.append(a, o);
                 o.is_error = true;
-                o.error_name = name;
+                try o.setErrorName(a, name);
                 o.proto = d.protoFor(name) orelse d.protoFor("Error");
                 if (try d.readFlag()) {
                     const msg = try a.dupe(u8, d.r.str() catch return d.fail());
