@@ -609,6 +609,7 @@ pub const FinalizationRecord = struct {
 /// the same budgeted allocator and ownership accounting as other Object backing
 /// stores.
 pub const ObjectColdState = struct {
+    primitive: ObjectPrimitiveState = .{ .symbol = .{} },
     arg_map_env: ?*anyopaque = null,
     arg_map_names: [][]const u8 = &.{},
     arg_map_severed: []std.atomic.Value(bool) = &.{},
@@ -777,13 +778,12 @@ pub const Object = struct {
     /// machinery; `typeof` reports "symbol"). The primitive union's symbol key
     /// is its unique property-key encoding.
     is_symbol: bool = false,
-    // Symbol key and description overlap the mutually exclusive BigInt payload.
     /// A BigInt primitive (`typeof` reports "bigint"; treated as a primitive in
     /// equality/arithmetic). Small values use the `i128` fast path; oversized
     /// literals/decimal strings keep a canonical decimal identity in
     /// canonical decimal text until full arbitrary-precision arithmetic lands.
     is_bigint: bool = false,
-    primitive: ObjectPrimitiveState = .{ .symbol = .{} },
+    // Symbol key/description and BigInt value/text overlap in the cold sidecar.
     /// An `[[IsHTMLDDA]]` exotic object (e.g. `document.all`): `typeof` reports
     /// "undefined", ToBoolean is false, and it is loosely-equal to null/undefined.
     is_htmldda: bool = false,
@@ -1030,19 +1030,19 @@ pub const Object = struct {
     }
 
     pub inline fn symbolKey(self: *const Object) []const u8 {
-        return self.primitive.symbol.key.get() orelse "";
+        return if (self.cold) |cold| cold.primitive.symbol.key.get() orelse "" else "";
     }
 
     pub inline fn symbolDescription(self: *const Object) ?[]const u8 {
-        return self.primitive.symbol.description.get();
+        return if (self.cold) |cold| cold.primitive.symbol.description.get() else null;
     }
 
     pub inline fn bigIntValue(self: *const Object) i128 {
-        return self.primitive.bigint.value;
+        return if (self.cold) |cold| cold.primitive.bigint.value else 0;
     }
 
     pub inline fn bigIntText(self: *const Object) ?[]const u8 {
-        return self.primitive.bigint.text.get();
+        return if (self.cold) |cold| cold.primitive.bigint.text.get() else null;
     }
 
     pub inline fn regexSource(self: *const Object) []const u8 {

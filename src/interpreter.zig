@@ -7229,7 +7229,9 @@ pub const Interpreter = struct {
     /// A BigInt primitive value with the given `i128` magnitude.
     pub fn makeBigInt(self: *Interpreter, v: i128) EvalError!Value {
         const o = try gc_mod.allocObj(self.arena);
-        o.* = .{ .is_bigint = true, .primitive = .{ .bigint = .{ .value = v } } };
+        o.* = .{ .is_bigint = true };
+        const cold = try o.ensureCold(self.arena);
+        cold.primitive = .{ .bigint = .{ .value = v } };
         try self.finishBigInt(o);
         return Value.obj(o);
     }
@@ -7237,7 +7239,9 @@ pub const Interpreter = struct {
     pub fn makeBigIntText(self: *Interpreter, s: []const u8) EvalError!Value {
         if (std.fmt.parseInt(i128, s, 10)) |v| return self.makeBigInt(v) else |_| {}
         const o = try gc_mod.allocObj(self.arena);
-        o.* = .{ .is_bigint = true, .primitive = .{ .bigint = .{ .text = .init(s) } } };
+        o.* = .{ .is_bigint = true };
+        const cold = try o.ensureCold(self.arena);
+        cold.primitive = .{ .bigint = .{ .text = .init(s) } };
         try self.finishBigInt(o);
         return Value.obj(o);
     }
@@ -26625,9 +26629,9 @@ fn rtfShortName(unit: []const u8, plural: bool) ?[]const u8 {
 fn rtfNarrowName(unit: []const u8) ?[]const u8 {
     const T = struct { k: []const u8, n: []const u8 };
     const table = [_]T{
-        .{ .k = "second", .n = "s" }, .{ .k = "minute", .n = "m" },
-        .{ .k = "hour", .n = "h" },   .{ .k = "day", .n = "d" },
-        .{ .k = "week", .n = "w" },   .{ .k = "month", .n = "mo" },
+        .{ .k = "second", .n = "s" },  .{ .k = "minute", .n = "m" },
+        .{ .k = "hour", .n = "h" },    .{ .k = "day", .n = "d" },
+        .{ .k = "week", .n = "w" },    .{ .k = "month", .n = "mo" },
         .{ .k = "quarter", .n = "q" }, .{ .k = "year", .n = "y" },
     };
     for (table) |t| if (std.mem.eql(u8, unit, t.k)) return t.n;
@@ -42380,10 +42384,11 @@ fn makeSymbolObj(a: std.mem.Allocator, rs: *Shape, desc: ?[]const u8, proto: ?*v
     o.* = .{
         .is_symbol = true,
         .proto = proto,
-        .primitive = .{ .symbol = .{ .description = .init(desc) } },
     };
+    const cold = try o.ensureCold(a);
+    cold.primitive = .{ .symbol = .{ .description = .init(desc) } };
     const n = try mintUniqueAtomicSerial(usize, &symbol_counter);
-    o.primitive.symbol.key = .init(try std.fmt.allocPrint(a, "\x00s{d}", .{n}));
+    cold.primitive.symbol.key = .init(try std.fmt.allocPrint(a, "\x00s{d}", .{n}));
     return Value.obj(o);
 }
 
