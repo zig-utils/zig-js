@@ -26238,6 +26238,16 @@ fn segNext(str: []const u8, pos: usize, gran: []const u8) struct { end: usize, w
                 end += 1;
                 continue;
             }
+            // WB6/WB7: an apostrophe (' or U+2019) between two letters stays in the
+            // word ("don't" is one segment), as does a MidLetter dot ("a.b").
+            const cp = segCodePoint(str, end);
+            if ((c == '\'' or cp == 0x2019 or c == '.' or c == ':') and end > pos and segWordCat(str, end - 1)) {
+                const after = end + segScalarLen(str, end);
+                if (after < len and segWordCat(str, after)) {
+                    end = after;
+                    continue;
+                }
+            }
             break;
         }
     } else {
