@@ -26251,7 +26251,18 @@ fn segNext(str: []const u8, pos: usize, gran: []const u8) struct { end: usize, w
             break;
         }
     } else {
-        while (end < len and !segWordCat(str, end)) end += segScalarLen(str, end);
+        // A run of whitespace is one segment; every other non-word character is
+        // its own segment (UAX#29: "wow!!!" → "wow","!","!","!").
+        const isSpace = struct {
+            fn f(b: u8) bool {
+                return b == ' ' or b == '\t' or b == '\n' or b == '\r' or b == 0x0B or b == 0x0C;
+            }
+        }.f;
+        if (isSpace(str[pos])) {
+            while (end < len and isSpace(str[end])) end += 1;
+        } else {
+            end += segScalarLen(str, pos);
+        }
     }
     return .{ .end = end, .word_like = cat };
 }
