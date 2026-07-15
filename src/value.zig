@@ -699,6 +699,7 @@ pub const ObjectPrimitiveState = extern union {
 };
 
 pub const ObjectBackingFlags = packed struct {
+    allocator_active: bool = false,
     cold: bool = false,
     slots: bool = false,
     elements: bool = false,
@@ -745,7 +746,7 @@ pub const Object = struct {
     /// out of the arena for GC-mode reclamation. Individual flags below record
     /// which stores actually use this allocator, so mixed legacy/GC state is
     /// finalized accurately while migration is incremental.
-    backing_allocator: ?std.mem.Allocator = null,
+    backing_allocator: std.mem.Allocator = undefined,
     backing_flags: ObjectBackingFlags = .{},
     cold: ?*ObjectColdState = null,
     /// `backingFor`/`(de)activateBacking` touch `backing_flags`/`backing_allocator`
@@ -979,14 +980,17 @@ pub const Object = struct {
     // Assumes `backing_lock` held (called only from `backingFor`).
     fn activateBacking(self: *Object, comptime field: []const u8) ?std.mem.Allocator {
         const state = gc_runtime.activeObjectBacking() orelse return null;
-        if (self.backing_allocator == null) self.backing_allocator = state.allocator;
+        if (!self.backing_flags.allocator_active) {
+            self.backing_allocator = state.allocator;
+            self.backing_flags.allocator_active = true;
+        }
         if (!@field(self.backing_flags, field)) {
             @field(self.backing_flags, field) = true;
             // Atomic: parallel mutators (post-GIL) bump this shared accounting
             // counter concurrently. Identical result single-threaded.
             if (state.stores_live) |live| _ = @atomicRmw(usize, live, .Add, 1, .monotonic);
         }
-        return self.backing_allocator.?;
+        return self.backing_allocator;
     }
 
     fn deactivateBacking(self: *Object, comptime field: []const u8) void {
@@ -1013,7 +1017,8 @@ pub const Object = struct {
     fn backingForTracked(self: *Object, fallback: std.mem.Allocator, comptime field: []const u8) BackingSelection {
         const backing_locked = self.lockBacking();
         defer self.unlockBacking(backing_locked);
-        if (self.backing_allocator) |a| {
+        if (self.backing_flags.allocator_active) {
+            const a = self.backing_allocator;
             if (!@field(self.backing_flags, field)) {
                 if (self.activateBacking(field)) |active| return .{ .allocator = active, .activated = true };
             }
@@ -1027,6 +1032,7 @@ pub const Object = struct {
         const backing_locked = self.lockBacking();
         defer self.unlockBacking(backing_locked);
         if (!@field(self.backing_flags, field)) return null;
+        if (!self.backing_flags.allocator_active) return null;
         return self.backing_allocator;
     }
 
@@ -1520,7 +1526,7 @@ pub const Object = struct {
     }
 
     pub fn destroyUninstalledTypedArray(self: *Object, fallback: std.mem.Allocator, ta: *TypedArrayData) void {
-        const a = self.backing_allocator orelse fallback;
+        const a = if (self.backing_flags.allocator_active) self.backing_allocator else fallback;
         a.destroy(ta);
         self.deactivateBacking("typed_array");
     }
@@ -1534,7 +1540,7 @@ pub const Object = struct {
     }
 
     pub fn destroyUninstalledTemporal(self: *Object, fallback: std.mem.Allocator, data: *TemporalData) void {
-        const a = self.backing_allocator orelse fallback;
+        const a = if (self.backing_flags.allocator_active) self.backing_allocator else fallback;
         a.destroy(data);
         self.deactivateBacking("temporal");
     }

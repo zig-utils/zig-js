@@ -392,7 +392,7 @@ fn finalizeObjectBacking(o: *Object, a: std.mem.Allocator) usize {
     }
 
     o.backing_flags = .{};
-    o.backing_allocator = null;
+    o.backing_flags.allocator_active = false;
     return released;
 }
 
@@ -901,7 +901,7 @@ pub const Binding = struct {
                     }
                 }
                 if (hasObjectBacking(o.backing_flags) or o.private_brands != null) {
-                    const released = finalizeObjectBacking(o, o.backing_allocator orelse self.context.gpa);
+                    const released = finalizeObjectBacking(o, if (o.backing_flags.allocator_active) o.backing_allocator else self.context.gpa);
                     if (released > 0) {
                         if (self.context.gc_finalizer_stats_out) |stats| stats.object_backing_releases += released;
                         _ = @atomicRmw(usize, &self.context.gc_object_backing_stores_live, .Sub, released, .monotonic);

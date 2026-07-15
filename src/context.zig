@@ -15979,8 +15979,8 @@ test "enable_gc: Object backing allocator avoids cell classifier outside paralle
 
     const v = try ctx.evaluate("globalThis.keep = { a: 1, b: 2, c: 3, d: 4, e: 5 }; globalThis.keep");
     const o = v.asObj();
-    try std.testing.expect(o.backing_allocator != null);
-    const backing = o.backing_allocator.?;
+    try std.testing.expect(o.backing_flags.allocator_active);
+    const backing = o.backing_allocator;
     try std.testing.expectEqual(ctx.gpa.ptr, backing.ptr);
     try std.testing.expectEqual(ctx.gpa.vtable, backing.vtable);
 }
@@ -16002,8 +16002,8 @@ test "enable_threads: Object backing allocator stays synchronized under parallel
 
     const v = try ctx.evaluate("globalThis.keep = { a: 1, b: 2, c: 3, d: 4, e: 5 }; globalThis.keep");
     const o = v.asObj();
-    try std.testing.expect(o.backing_allocator != null);
-    const backing = o.backing_allocator.?;
+    try std.testing.expect(o.backing_flags.allocator_active);
+    const backing = o.backing_allocator;
     try std.testing.expectEqual(@intFromPtr(ctx.gc_cell_backing.?), @intFromPtr(backing.ptr));
 }
 
