@@ -615,6 +615,8 @@ pub const ObjectColdState = struct {
     date_ms: f64 = 0,
     module_ns: ?*anyopaque = null,
     weak_ref_target: ?*Object = null,
+    callback: ?HostCallback = null,
+    callback_context: ?*anyopaque = null,
     arg_map_env: ?*anyopaque = null,
     arg_map_names: [][]const u8 = &.{},
     arg_map_severed: []std.atomic.Value(bool) = &.{},
@@ -823,10 +825,7 @@ pub const Object = struct {
     /// length without materializing (and OOM-ing on) that many holes. The array's
     /// observable length is `max(elements.items.len, array_len)`.
     array_len: usize = 0,
-    callback: ?HostCallback = null,
-    /// Owning Context for C-API host callbacks. Kept separate from
-    /// `private_data`, which belongs to `JSObjectMake(..., data)` embedders.
-    callback_context: ?*anyopaque = null,
+    // C-API callback and owning Context live in the cold sidecar.
     native: ?NativeFn = null,
     /// For a `native` function, whether it implements [[Construct]] — i.e. is
     /// `new`-able. Most built-ins are *not* constructors (methods, `Math.*`,
@@ -1069,6 +1068,25 @@ pub const Object = struct {
 
     pub inline fn weakRefTargetSlot(self: *Object) *?*Object {
         return &self.cold.?.weak_ref_target;
+    }
+
+    pub inline fn hostCallback(self: *const Object) ?HostCallback {
+        return if (self.cold) |cold| cold.callback else null;
+    }
+
+    pub inline fn hostCallbackContext(self: *const Object) ?*anyopaque {
+        return if (self.cold) |cold| cold.callback_context else null;
+    }
+
+    pub fn setHostCallback(
+        self: *Object,
+        fallback: std.mem.Allocator,
+        callback: HostCallback,
+        context: *anyopaque,
+    ) std.mem.Allocator.Error!void {
+        const cold = try self.ensureCold(fallback);
+        cold.callback = callback;
+        cold.callback_context = context;
     }
 
     pub fn setErrorName(self: *Object, fallback: std.mem.Allocator, name: []const u8) std.mem.Allocator.Error!void {
@@ -2004,7 +2022,7 @@ pub const Object = struct {
             o = t;
         }
         if (o.proxy_revoked) return o.proxy_callable;
-        return o.callback != null or o.native != null or
+        return o.hostCallback() != null or o.native != null or
             o.js_func != null or o.errorCtor() != null or o.bound != null;
     }
 

@@ -14722,7 +14722,7 @@ pub const Interpreter = struct {
     /// %Function.prototype%, which every function inherits.
     pub fn effectiveProto(self: *Interpreter, o: *value.Object) ?*value.Object {
         if (o.protoAtomic()) |p| return p;
-        if (!o.protoExplicitNull() and (o.native != null or o.callback != null or o.js_func != null or o.bound != null)) return self.functionProto();
+        if (!o.protoExplicitNull() and (o.native != null or o.hostCallback() != null or o.js_func != null or o.bound != null)) return self.functionProto();
         return null;
     }
 

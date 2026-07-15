@@ -884,7 +884,7 @@ export fn JSObjectCallAsFunction(ctx: JSContextRef, function: JSObjectRef, this_
         };
     const args = collectArgs(c, argc, argv, exception) orelse return null;
     // C-ABI host callbacks run directly across the FFI boundary.
-    if (obj.callback) |cb| {
+    if (obj.hostCallback()) |cb| {
         const result = cb(ctx, function, this_ref, argc, argv, exception);
         if (result) |ref| {
             _ = valueArgFrom(c, ref, exception) orelse return null;
@@ -924,11 +924,11 @@ fn hostCallbackNative(ctx: *anyopaque, this: Value, args: []const Value) value.H
         machine.exception = Value.str("TypeError: host callback missing callee");
         return error.Throw;
     };
-    const cb = obj.callback orelse {
+    const cb = obj.hostCallback() orelse {
         machine.exception = Value.str("TypeError: host callback missing callback");
         return error.Throw;
     };
-    const c: *Context = @ptrCast(@alignCast(obj.callback_context orelse {
+    const c: *Context = @ptrCast(@alignCast(obj.hostCallbackContext() orelse {
         machine.exception = Value.str("TypeError: host callback missing context");
         return error.Throw;
     }));
@@ -955,7 +955,8 @@ export fn JSObjectMakeFunctionWithCallback(ctx: JSContextRef, name: JSStringRef,
     c.pushActiveInterpreter(&machine) catch return null;
     defer c.popActiveInterpreter(&machine);
     const obj = gc_mod.allocObject(c.gc, c.arena()) catch return null;
-    obj.* = .{ .callback = cb, .callback_context = c, .native = hostCallbackNative, .proto = machine.functionProto() };
+    obj.* = .{ .native = hostCallbackNative, .proto = machine.functionProto() };
+    obj.setHostCallback(c.arena(), cb, c) catch return null;
     const name_bytes = if (strFrom(name)) |s| s.bytes else "";
     const name_copy = c.arena().dupe(u8, name_bytes) catch return null;
     obj.setOwn(c.arena(), c.root_shape, "name", Value.strOwned(c.arena(), name_copy) catch return null) catch return null;
