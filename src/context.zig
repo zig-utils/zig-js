@@ -2345,6 +2345,7 @@ pub const Context = struct {
     gc_cooperative_attempts: std.atomic.Value(u64) = .init(0),
     gc_cooperative_collections: std.atomic.Value(u64) = .init(0),
     gc_cooperative_timeouts: std.atomic.Value(u64) = .init(0),
+    gc_cooperative_exit_cleanups: std.atomic.Value(u64) = .init(0),
     gc_cooperative_pause_ns_total: std.atomic.Value(u64) = .init(0),
     gc_cooperative_pause_ns_max: std.atomic.Value(u64) = .init(0),
     gc_cooperative_tranche_bytes: usize = 1024 * 1024 * 1024,
@@ -2621,7 +2622,7 @@ pub const Context = struct {
             .parallel_js = options.parallel_js,
         };
         self.gc_par_enabled = options.parallel_midscript_gc;
-        self.gc_cooperative_enabled = options.parallel_js and !options.parallel_midscript_gc;
+        self.gc_cooperative_enabled = options.enable_gc and options.parallel_js and !options.parallel_midscript_gc;
         if (options.enable_gc) {
             // GC cells are gpa-backed (the collector frees them individually).
             // Keep the heap, binding, and cell backing in one stable allocation
@@ -3021,6 +3022,13 @@ pub const Context = struct {
     }
 
     pub fn pushActiveInterpreter(self: *Context, machine: *interp.Interpreter) !void {
+        if (!self.gc_cooperative_enabled) {
+            self.lockActiveInterpreters();
+            defer self.unlockActiveInterpreters();
+            try self.reserveActiveInterpretersLocked(1);
+            self.active_interpreters.appendAssumeCapacity(machine);
+            return;
+        }
         while (true) {
             self.waitForCooperativeGcGate();
             self.lockActiveInterpreters();
@@ -3039,6 +3047,30 @@ pub const Context = struct {
     }
 
     pub fn popActiveInterpreter(self: *Context, machine: *interp.Interpreter) void {
+        if (!self.gc_cooperative_enabled) {
+            self.lockActiveInterpreters();
+            defer self.unlockActiveInterpreters();
+            var i: usize = self.active_interpreters.items.len;
+            while (i > 0) {
+                i -= 1;
+                if (self.active_interpreters.items[i] == machine) {
+                    _ = self.active_interpreters.swapRemove(i);
+                    return;
+                }
+            }
+            return;
+        }
+        // An abrupt worker exit can bypass the normal collector-return path
+        // after publishing ownership (notably a quota OOM during recovery).
+        // Only the owning interpreter may close that stale generation; peers
+        // must still join a live collector before unregistering.
+        if (self.gc_par_request.load(.acquire) != 0 and
+            self.gc_par_collector.load(.acquire) == machine)
+        {
+            self.gc_par_request.store(0, .release);
+            self.gc_par_collector.store(null, .release);
+            _ = self.gc_cooperative_exit_cleanups.fetchAdd(1, .monotonic);
+        }
         while (true) {
             if (self.gc_cooperative_enabled and self.gc_par_request.load(.acquire) != 0 and
                 self.gc_par_collector.load(.acquire) != machine)
@@ -3252,12 +3284,29 @@ pub const Context = struct {
         machine.gc_published_gen.store(request, .release);
         var spins: usize = 0;
         while (self.gc_par_request.load(.acquire) == request) : (spins += 1) {
+            if ((spins & 0xff) == 0 and !self.cooperativeCollectorIsActive()) {
+                if (self.gc_par_request.cmpxchgStrong(request, 0, .acq_rel, .acquire) == null) {
+                    self.gc_par_collector.store(null, .release);
+                    _ = self.gc_cooperative_exit_cleanups.fetchAdd(1, .monotonic);
+                }
+                break;
+            }
             if ((spins & 0xff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
         }
         machine.lockGcRoots();
         machine.gc_parked.store(false, .release);
         machine.unlockGcRoots();
         stack_scan.endPark();
+    }
+
+    fn cooperativeCollectorIsActive(self: *Context) bool {
+        const collector = self.gc_par_collector.load(.acquire) orelse return false;
+        self.lockActiveInterpreters();
+        defer self.unlockActiveInterpreters();
+        for (self.active_interpreters.items) |machine| {
+            if (machine == collector) return true;
+        }
+        return false;
     }
 
     fn allCooperativePeersStopped(self: *Context, request: u64, me: *interp.Interpreter) bool {
@@ -13753,6 +13802,26 @@ test "parallel_js: cooperative shared nursery rendezvous bounds object churn" {
     try std.testing.expectEqual(@as(u64, 0), ctx.gc_cooperative_timeouts.load(.monotonic));
     try std.testing.expectEqual(@as(u64, 0), ctx.gc_par_request.load(.acquire));
     try std.testing.expectEqual(@as(?*interp.Interpreter, null), ctx.gc_par_collector.load(.acquire));
+}
+
+test "parallel_js: cooperative rendezvous releases peers after collector exit" {
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_threads = true,
+        .enable_gc = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+    });
+    defer ctx.destroy();
+
+    var peer = ctx.interpreter();
+    var vanished = ctx.interpreter();
+    ctx.gc_par_collector.store(&vanished, .release);
+    ctx.gc_par_request.store(73, .release);
+    ctx.joinCooperativeGcRequest(&peer);
+    try std.testing.expectEqual(@as(u64, 0), ctx.gc_par_request.load(.acquire));
+    try std.testing.expectEqual(@as(?*interp.Interpreter, null), ctx.gc_par_collector.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 1), ctx.gc_cooperative_exit_cleanups.load(.monotonic));
+    try std.testing.expect(!peer.gc_parked.load(.acquire));
 }
 
 test "parallel_js: fixed-shape object allocation quickens across shared Thread workers" {
