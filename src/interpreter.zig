@@ -25003,7 +25003,16 @@ fn nfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Host
     }
     if (unit_suffix.len > 0) {
         if (unit_space) try push(self, &parts, "literal", " ");
-        try push(self, &parts, "unit", unit_suffix);
+        // The CLDR pattern bakes any number/unit gap into the suffix; expose it as
+        // a separate "literal" part (as ICU/Node do) so formatToParts matches.
+        var us = unit_suffix;
+        if (!unit_space and us[0] == ' ') {
+            var i: usize = 0;
+            while (i < us.len and us[i] == ' ') i += 1;
+            try push(self, &parts, "literal", us[0..i]);
+            us = us[i..];
+        }
+        try push(self, &parts, "unit", us);
     }
     if (acct and show_neg) try push(self, &parts, "literal", ")");
     // Translate the numeric parts to the resolved numbering system (latn = ASCII,
