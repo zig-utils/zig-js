@@ -145,7 +145,7 @@ pub fn traceObject(o: *Object, v: anytype) void {
         if (concurrent) o.unlockElements();
     }
     markValueOpt(v, o.prim);
-    markWeakObject(v, &o.weak_ref_target); // a stable field address — safe to register
+    if (o.is_weak_ref) markWeakObject(v, o.weakRefTargetSlot()); // stable cold-slot address
     if (o.is_finalization_registry) {
         if (o.cold) |cold| {
             markValue(v, cold.finalization_callback);
@@ -164,7 +164,7 @@ pub fn traceObject(o: *Object, v: anytype) void {
     if (o.promise) |p| v.mark(p); // *promise.Promise (kind .promise)
     if (o.gen) |p| v.mark(p); // *vm.Generator (kind .generator)
     if (o.iter_helper) |p| v.mark(p); // (kind .iter_helper)
-    if (o.module_ns) |p| v.mark(p); // *ModuleNs (kind .module_ns)
+    if (o.moduleNs()) |p| v.mark(p); // *ModuleNs (kind .module_ns)
     if (o.cold) |cold| if (cold.arg_map_env) |p| v.mark(p); // *Environment (kind .environment)
     promise.traceNativePrivateData(o, v);
     interp.traceNativePrivateData(o, v);

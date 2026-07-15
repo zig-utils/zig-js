@@ -3335,7 +3335,7 @@ pub const Interpreter = struct {
                     try out.append(self.arena, key);
                 }
             }
-            const own_keys = if (o.proxy_handler != null or o.proxy_revoked or o.module_ns != null)
+            const own_keys = if (o.proxy_handler != null or o.proxy_revoked or o.moduleNs() != null)
                 try self.objectOwnKeysList(o)
             else
                 try o.ownKeys(self.arena);
@@ -8339,7 +8339,7 @@ pub const Interpreter = struct {
         }
         // TimeClip(t): a non-finite or out-of-±8.64e15 time is NaN, otherwise the
         // integer part (toward zero), with -0 normalized to +0.
-        o.setDateMs(if (std.math.isNan(t) or @abs(t) > 8.64e15) std.math.nan(f64) else blk: {
+        try o.initDateMs(self.arena, if (std.math.isNan(t) or @abs(t) > 8.64e15) std.math.nan(f64) else blk: {
             const tr = @trunc(t);
             break :blk if (tr == 0) 0 else tr;
         });
@@ -9363,7 +9363,7 @@ pub const Interpreter = struct {
     /// [[IsExtensible]] honoring a Proxy target.
     fn ordinaryIsExtensible(self: *Interpreter, o: *value.Object) EvalError!bool {
         if (o.proxy_handler != null or o.proxy_revoked) return self.proxyIsExtensible(o);
-        if (o.module_ns != null) return false; // a module namespace is never extensible
+        if (o.moduleNs() != null) return false; // a module namespace is never extensible
         return o.isExtensible();
     }
 
@@ -10616,7 +10616,7 @@ pub const Interpreter = struct {
         if (o.proxy_handler != null or o.proxy_revoked) return self.proxySet(o, key, v, receiver);
         // A module namespace's [[Set]] always fails: strict throws, sloppy is a
         // silent no-op.
-        if (o.module_ns != null) return false;
+        if (o.moduleNs() != null) return false;
         if (o.typed_array) |ta| {
             // Integer-Indexed Exotic [[Set]] for a canonical numeric key.
             const numkey: ?f64 = if (arrayIndex(key)) |i| @as(f64, @floatFromInt(i)) else canonicalNumericIndexString(key);
@@ -19285,7 +19285,7 @@ fn weakRefConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value
     self.noteWeakWork();
     const o = (try self.newObject()).asObj();
     o.is_weak_ref = true;
-    o.weak_ref_target = target.asObj();
+    try o.setWeakRefTarget(self.arena, target.asObj());
     gc_mod.barrierWeak(o);
     if (try self.protoFromCtor("WeakRef")) |pr| o.setProtoAtomic(pr);
     return Value.obj(o);
@@ -19295,7 +19295,7 @@ fn weakRefDerefFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!this.isObject() or !this.asObj().is_weak_ref) return self.throwError("TypeError", "WeakRef.prototype.deref called on a non-WeakRef");
-    const target = this.asObj().weak_ref_target orelse return Value.undef();
+    const target = this.asObj().weakRefTarget() orelse return Value.undef();
     return Value.obj(target);
 }
 
@@ -28040,7 +28040,7 @@ pub fn triggerDeferForOwnKeys(self: *Interpreter, o: *value.Object) EvalError!vo
 }
 
 fn moduleNsOf(o: *value.Object) ?*ModuleNs {
-    if (o.module_ns) |p| return @ptrCast(@alignCast(p));
+    if (o.moduleNs()) |p| return @ptrCast(@alignCast(p));
     return null;
 }
 
@@ -28073,7 +28073,7 @@ fn moduleNsHas(ns: *ModuleNs, key: []const u8) bool {
 }
 
 pub fn isModuleNs(o: *value.Object) bool {
-    return o.module_ns != null;
+    return o.moduleNs() != null;
 }
 
 /// The string export names of a module namespace, sorted by code unit (for

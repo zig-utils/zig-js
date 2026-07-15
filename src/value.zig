@@ -612,6 +612,9 @@ pub const ObjectColdState = struct {
     primitive: ObjectPrimitiveState = .{ .symbol = .{} },
     error_name: []const u8 = "",
     error_ctor: ?[]const u8 = null,
+    date_ms: f64 = 0,
+    module_ns: ?*anyopaque = null,
+    weak_ref_target: ?*Object = null,
     arg_map_env: ?*anyopaque = null,
     arg_map_names: [][]const u8 = &.{},
     arg_map_severed: []std.atomic.Value(bool) = &.{},
@@ -796,7 +799,6 @@ pub const Object = struct {
     /// for an invalid date) is the internal-slot field `date_ms`, invisible to
     /// reflection/enumeration; methods are dispatched in `dateMethod`.
     is_date: bool = false,
-    date_ms: f64 = 0,
     is_array: bool = false,
     // (atomic accessors for `date_ms` are defined as methods below)
     /// Test-shell `$vm.ensureArrayStorage(array)` marker. zig-js uses one
@@ -910,7 +912,6 @@ pub const Object = struct {
     /// `[[Module]]` namespace and the engine intercepts its essential internal
     /// methods (live [[Get]], [[HasProperty]], sorted [[OwnPropertyKeys]],
     /// frozen/non-extensible, throwing [[Set]]/[[Delete]]/[[DefineOwnProperty]]).
-    module_ns: ?*anyopaque = null,
     /// For arrays: the set of dense-index *holes* (gaps that read as absent — a
     /// deleted element, an elision in `[1,,3]`, or a gap created by a sparse
     /// assignment). The `elements` slot for a hole still exists (holds undefined),
@@ -929,7 +930,6 @@ pub const Object = struct {
     /// Marks a `WeakRef` instance. The target is a weak GC edge, so collection
     /// may clear it while the WeakRef object itself remains branded.
     is_weak_ref: bool = false,
-    weak_ref_target: ?*Object = null,
     /// Marks a `FinalizationRegistry`. Dead targets make records ready for
     /// automatic host cleanup delivery at quiescent collection points.
     is_finalization_registry: bool = false,
@@ -1047,6 +1047,28 @@ pub const Object = struct {
 
     pub inline fn errorCtor(self: *const Object) ?[]const u8 {
         return if (self.cold) |cold| cold.error_ctor else null;
+    }
+
+    pub inline fn moduleNs(self: *const Object) ?*anyopaque {
+        return if (self.cold) |cold| cold.module_ns else null;
+    }
+
+    pub fn setModuleNs(self: *Object, fallback: std.mem.Allocator, module_ns: *anyopaque) std.mem.Allocator.Error!void {
+        const cold = try self.ensureCold(fallback);
+        cold.module_ns = module_ns;
+    }
+
+    pub inline fn weakRefTarget(self: *const Object) ?*Object {
+        return if (self.cold) |cold| cold.weak_ref_target else null;
+    }
+
+    pub fn setWeakRefTarget(self: *Object, fallback: std.mem.Allocator, target: *Object) std.mem.Allocator.Error!void {
+        const cold = try self.ensureCold(fallback);
+        cold.weak_ref_target = target;
+    }
+
+    pub inline fn weakRefTargetSlot(self: *Object) *?*Object {
+        return &self.cold.?.weak_ref_target;
     }
 
     pub fn setErrorName(self: *Object, fallback: std.mem.Allocator, name: []const u8) std.mem.Allocator.Error!void {
@@ -1314,10 +1336,15 @@ pub const Object = struct {
     /// one word, so `.monotonic` is a plain load/store (no perf cost) and just
     /// tells ThreadSanitizer the access is synchronized.
     pub fn dateMs(self: *const Object) f64 {
-        return @atomicLoad(f64, &@constCast(self).date_ms, .monotonic);
+        const cold = @constCast(self).cold orelse return 0;
+        return @atomicLoad(f64, &cold.date_ms, .monotonic);
+    }
+    pub fn initDateMs(self: *Object, fallback: std.mem.Allocator, v: f64) std.mem.Allocator.Error!void {
+        const cold = try self.ensureCold(fallback);
+        @atomicStore(f64, &cold.date_ms, v, .monotonic);
     }
     pub fn setDateMs(self: *Object, v: f64) void {
-        @atomicStore(f64, &self.date_ms, v, .monotonic);
+        @atomicStore(f64, &self.cold.?.date_ms, v, .monotonic);
     }
 
     pub fn elementsLen(self: *const Object) usize {

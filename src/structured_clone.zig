@@ -385,9 +385,9 @@ const Serializer = struct {
             return s.throwClone("DataCloneError: Proxy objects cannot be cloned");
         if (o.promise != null) return s.throwClone("DataCloneError: Promise objects cannot be cloned");
         if (o.gen != null) return s.throwClone("DataCloneError: generator objects cannot be cloned");
-        if (o.is_weak or o.weak_ref_target != null)
+        if (o.is_weak or o.weakRefTarget() != null)
             return s.throwClone("DataCloneError: weak collections cannot be cloned");
-        if (o.module_ns != null) return s.throwClone("DataCloneError: module namespaces cannot be cloned");
+        if (o.moduleNs() != null) return s.throwClone("DataCloneError: module namespaces cannot be cloned");
         if (o.is_arguments) return s.throwClone("DataCloneError: arguments objects cannot be cloned");
         if (o.is_htmldda) return s.throwClone("DataCloneError: this object cannot be cloned");
 
@@ -446,7 +446,7 @@ const Serializer = struct {
         }
         if (o.is_date) {
             try s.w.tag(.date);
-            try s.w.num(o.date_ms);
+            try s.w.num(o.dateMs());
             return;
         }
         if (o.is_regex) {
@@ -961,7 +961,7 @@ const Deserializer = struct {
                 const o = (try d.self.newObject()).asObj();
                 try d.objs.append(a, o);
                 o.is_date = true;
-                o.date_ms = d.r.num() catch return d.fail();
+                try o.initDateMs(a, d.r.num() catch return d.fail());
                 if (d.protoFor("Date")) |p| o.proto = p;
                 return Value.obj(o);
             },

@@ -4926,7 +4926,7 @@ pub const Context = struct {
         module.deferred_ns = ns;
         var machine = self.interpreter();
         try self.fillNamespace(&machine, module, ns);
-        const modns: *interp.ModuleNs = @ptrCast(@alignCast(ns.module_ns.?));
+        const modns: *interp.ModuleNs = @ptrCast(@alignCast(ns.moduleNs().?));
         modns.deferred = true;
         modns.defer_module = module;
         return ns;
@@ -5339,7 +5339,7 @@ pub const Context = struct {
             .locals = sorted_locals,
             .tag_key = machine.wellKnownSymbolKey("toStringTag") orelse "@@toStringTag",
         };
-        ns.module_ns = @ptrCast(modns);
+        try ns.setModuleNs(a, @ptrCast(modns));
         ns.proto = null; // a module namespace has a null [[Prototype]]
         ns.setExtensible(false);
     }
