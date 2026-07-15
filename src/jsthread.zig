@@ -607,6 +607,7 @@ fn threadCtorFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.Hos
     rec.js_obj = makeWrapper(ctx, rec) catch return error.OutOfMemory;
     const call_args = try a.dupe(Value, if (args.len > 1) args[1..] else &.{});
     ctx.js_threads.appendAssumeCapacity(rec);
+    if (ctx.js_threads.items.len >= 3) ctx.enableCooperativeGcTracking();
 
     rec.thread = std.Thread.spawn(.{ .stack_size = 64 << 20 }, threadMain, .{ rec, fn_v, call_args }) catch {
         rec.done = true;
