@@ -23719,7 +23719,15 @@ fn dtfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Hos
     const have_clock = o_hour.len > 0 or o_minute.len > 0 or o_second.len > 0;
     const have_time = have_clock or o_day_period.len > 0 or o_tzname.len > 0;
     if (have_time) {
-        if (parts.items.len > 0) try P.lit(self, &parts, ", ");
+        // CLDR dateTime connector: a long month uses " at "; a weekday-only date
+        // uses a plain space; otherwise ", ".
+        const dtsep: []const u8 = if (std.mem.eql(u8, o_month, "long"))
+            " at "
+        else if (o_weekday.len > 0 and o_year.len == 0 and o_month.len == 0 and o_day.len == 0)
+            " "
+        else
+            ", ";
+        if (parts.items.len > 0) try P.lit(self, &parts, dtsep);
         var h = hour24;
         var ap: []const u8 = "";
         if (o_day_period.len > 0) {
