@@ -24677,8 +24677,11 @@ fn nfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Host
     var rounding_increment: u64 = 1;
     var notation: []const u8 = "standard";
     var compact_display: []const u8 = "short";
+    var strip_if_integer = false;
     if (this.asObj().getOwn("\x00opts")) |ov| if (ov.isObject()) {
         const o = ov;
+        const tzv = try self.getProperty(o, "trailingZeroDisplay");
+        if (tzv.isString() and std.mem.eql(u8, tzv.asStr(), "stripIfInteger")) strip_if_integer = true;
         const nv = try self.getProperty(o, "notation");
         if (nv.isString()) notation = nv.asStr();
         const cdv = try self.getProperty(o, "compactDisplay");
@@ -24946,6 +24949,16 @@ fn nfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Host
         try push(self, &parts, "integer", try run.toOwnedSlice(self.arena));
     }
     // Fraction digits (already rounded/trimmed by nfRound).
+    // trailingZeroDisplay:"stripIfInteger" drops an all-zero fraction so an
+    // integer magnitude renders with no decimal part.
+    if (strip_if_integer and finite and frac_str.len > 0) {
+        var all_zero = true;
+        for (frac_str) |c| if (c != '0') {
+            all_zero = false;
+            break;
+        };
+        if (all_zero) frac_str = "";
+    }
     if (finite and frac_str.len > 0) {
         try push(self, &parts, "decimal", syms.decimal);
         try push(self, &parts, "fraction", frac_str);
