@@ -23745,11 +23745,12 @@ fn dtfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Hos
     return parts;
 }
 
-/// en flexible day period for an hour (minute 0): noon at 12, morning 6–11,
-/// afternoon 13–17, evening 18–20, else night ("n" is narrow noon).
+/// en flexible day period for an hour. Per CLDR's *format* dayPeriodRules:
+/// noon at 12 (any minute), morning 00–11, afternoon 13–17, evening 18–20, else
+/// night (21–23). ("n" is narrow noon; the other periods have no narrow form.)
 fn enDayPeriod(h: u8, width: []const u8) []const u8 {
     if (h == 12) return if (std.mem.eql(u8, width, "narrow")) "n" else "noon";
-    if (h >= 6 and h < 12) return "in the morning";
+    if (h < 12) return "in the morning";
     if (h >= 13 and h < 18) return "in the afternoon";
     if (h >= 18 and h < 21) return "in the evening";
     return "at night";
