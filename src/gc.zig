@@ -160,7 +160,7 @@ pub fn traceObject(o: *Object, v: anytype) void {
 
     // Type-erased side-cells.
     if (o.js_func) |p| v.mark(p); // *Function (kind .function)
-    if (o.bound) |p| v.mark(p); // *Interpreter.BoundFn (kind .bound_fn)
+    if (o.boundFunction()) |p| v.mark(p); // *Interpreter.BoundFn (kind .bound_fn)
     if (o.promise) |p| v.mark(p); // *promise.Promise (kind .promise)
     if (o.generator()) |p| v.mark(p); // *vm.Generator (kind .generator)
     if (o.iteratorHelper()) |p| v.mark(p); // (kind .iter_helper)

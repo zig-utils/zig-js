@@ -4401,7 +4401,7 @@ pub const Interpreter = struct {
         }
         // Bound function exotics have a public `.name` like "bound f", but their
         // NativeFunction source form is anonymous (`function () { [native code] }`).
-        const raw_name: []const u8 = if (o.bound != null) "" else if (o.getOwn("name")) |n| (if (n.isString()) n.asStr() else "") else "";
+        const raw_name: []const u8 = if (o.boundFunction() != null) "" else if (o.getOwn("name")) |n| (if (n.isString()) n.asStr() else "") else "";
         const nm: []const u8 = if (raw_name.len > 0 and raw_name[0] == 0) "" else raw_name;
         return try Value.strOwned(self.arena, try std.mem.concat(self.arena, u8, &.{ "function ", nm, "() { [native code] }" }));
     }
@@ -5462,7 +5462,7 @@ pub const Interpreter = struct {
             }
             return self.callValueWithThis(Value.obj(target), args, this_val);
         }
-        if (obj.bound) |erased| {
+        if (obj.boundFunction()) |erased| {
             const bf: *BoundFn = @ptrCast(@alignCast(erased));
             return self.callValueWithThis(bf.target, try self.concatArgs(bf.args, args), bf.this);
         }
@@ -5528,7 +5528,8 @@ pub const Interpreter = struct {
             const p = try self.proxyGetProto(target);
             break :blk if (p.isObject()) p.asObj() else null;
         } else self.effectiveProto(target);
-        obj.* = .{ .bound = @ptrCast(bf), .proto = target_proto };
+        obj.* = .{ .proto = target_proto };
+        try obj.setBoundFunction(self.arena, @ptrCast(bf));
         obj.setProtoExplicitNull(target_proto == null);
         // Per spec: a bound function's `length` is max(0, target.length - args)
         // and its `name` is "bound " + target.name. Both are
@@ -6222,7 +6223,7 @@ pub const Interpreter = struct {
             }
             return self.constructNT(Value.obj(target), args, new_target);
         }
-        if (obj.bound) |erased| {
+        if (obj.boundFunction()) |erased| {
             // `new (fn.bind(...))(...)`: construct the target with bound args
             // prepended (the bound `this` is ignored by `new`, per spec).
             const bf: *BoundFn = @ptrCast(@alignCast(erased));
@@ -6569,7 +6570,7 @@ pub const Interpreter = struct {
                 env = e.parent;
             }
         }
-        if (ctor.bound) |erased| {
+        if (ctor.boundFunction()) |erased| {
             const bf: *BoundFn = @ptrCast(@alignCast(erased));
             if (bf.target.isObject()) return try self.functionRealmIntrinsicProto(bf.target.asObj(), intrinsic);
         }
@@ -6594,7 +6595,7 @@ pub const Interpreter = struct {
                 env = e.parent;
             }
         }
-        if (ctor.bound) |erased| {
+        if (ctor.boundFunction()) |erased| {
             const bf: *BoundFn = @ptrCast(@alignCast(erased));
             if (bf.target.isObject()) return try self.functionRealmIntlProto(bf.target.asObj(), service);
         }
@@ -6619,7 +6620,7 @@ pub const Interpreter = struct {
                 env = e.parent;
             }
         }
-        if (ctor.bound) |erased| {
+        if (ctor.boundFunction()) |erased| {
             const bf: *BoundFn = @ptrCast(@alignCast(erased));
             if (bf.target.isObject()) return try self.functionRealmIntrinsicObject(bf.target.asObj(), intrinsic);
         }
@@ -9818,7 +9819,7 @@ pub const Interpreter = struct {
                 // expose their active caller/arguments state. Newer function kinds
                 // (methods, arrows, classes, async/generator functions, bound
                 // functions, built-ins) fall through to %ThrowTypeError%.
-                if ((std.mem.eql(u8, key, "caller") or std.mem.eql(u8, key, "arguments")) and o.bound == null and o.getOwn(key) == null) {
+                if ((std.mem.eql(u8, key, "caller") or std.mem.eql(u8, key, "arguments")) and o.boundFunction() == null and o.getOwn(key) == null) {
                     if (funcOf(recv)) |f| {
                         if (legacyCallerArgumentsAllowed(f)) {
                             const frame = self.legacyCallFrameFor(o) orelse return Value.nul();
@@ -14724,7 +14725,7 @@ pub const Interpreter = struct {
     /// %Function.prototype%, which every function inherits.
     pub fn effectiveProto(self: *Interpreter, o: *value.Object) ?*value.Object {
         if (o.protoAtomic()) |p| return p;
-        if (!o.protoExplicitNull() and (o.native != null or o.hostCallback() != null or o.js_func != null or o.bound != null)) return self.functionProto();
+        if (!o.protoExplicitNull() and (o.native != null or o.hostCallback() != null or o.js_func != null or o.boundFunction() != null)) return self.functionProto();
         return null;
     }
 
@@ -14735,7 +14736,7 @@ pub const Interpreter = struct {
 
     pub fn ordinaryHasInstance(self: *Interpreter, rc: *value.Object, l: Value) EvalError!bool {
         if (!rc.isCallableObject()) return false;
-        if (rc.bound) |erased| {
+        if (rc.boundFunction()) |erased| {
             const bf: *BoundFn = @ptrCast(@alignCast(erased));
             return self.instanceOf(l, bf.target);
         }
@@ -16433,7 +16434,7 @@ pub fn isConstructorValue(v: Value) bool {
     if (!v.isObject()) return false;
     const o = v.asObj();
     if (o.proxy_handler != null) return if (o.proxy_target) |t| isConstructorValue(Value.obj(t)) else false;
-    if (o.bound) |erased| {
+    if (o.boundFunction()) |erased| {
         const bf: *Interpreter.BoundFn = @ptrCast(@alignCast(erased));
         return isConstructorValue(bf.target);
     }

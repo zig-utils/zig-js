@@ -620,6 +620,7 @@ pub const ObjectColdState = struct {
     boxed_primitive: ?Value = null,
     generator: ?*anyopaque = null,
     iter_helper: ?*IterHelper = null,
+    bound_function: ?*anyopaque = null,
     arg_map_env: ?*anyopaque = null,
     arg_map_names: [][]const u8 = &.{},
     arg_map_severed: []std.atomic.Value(bool) = &.{},
@@ -846,7 +847,7 @@ pub const Object = struct {
     /// `*Interpreter.BoundFn`, type-erased. Non-null marks a bound function
     /// (`fn.bind(this, ...args)`): calling it invokes the target with the bound
     /// `this` and the bound args prepended.
-    bound: ?*anyopaque = null,
+    // Bound-function side cells live in the cold sidecar.
     /// Opaque `data` pointer carried for `JSObjectMake(ctx, class, data)` and
     /// surfaced to host callbacks via private-data accessors later.
     private_data: ?*anyopaque = null,
@@ -1111,6 +1112,15 @@ pub const Object = struct {
     pub fn setIteratorHelper(self: *Object, fallback: std.mem.Allocator, helper: *IterHelper) std.mem.Allocator.Error!void {
         const cold = try self.ensureCold(fallback);
         cold.iter_helper = helper;
+    }
+
+    pub inline fn boundFunction(self: *const Object) ?*anyopaque {
+        return if (self.cold) |cold| cold.bound_function else null;
+    }
+
+    pub fn setBoundFunction(self: *Object, fallback: std.mem.Allocator, bound_function: *anyopaque) std.mem.Allocator.Error!void {
+        const cold = try self.ensureCold(fallback);
+        cold.bound_function = bound_function;
     }
 
     pub fn setErrorName(self: *Object, fallback: std.mem.Allocator, name: []const u8) std.mem.Allocator.Error!void {
@@ -2047,7 +2057,7 @@ pub const Object = struct {
         }
         if (o.proxy_revoked) return o.proxy_callable;
         return o.hostCallback() != null or o.native != null or
-            o.js_func != null or o.errorCtor() != null or o.bound != null;
+            o.js_func != null or o.errorCtor() != null or o.boundFunction() != null;
     }
 
     /// Own named property keys in insertion order (for `for-in` / enumeration).
