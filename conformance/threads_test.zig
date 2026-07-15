@@ -819,7 +819,7 @@ pub fn main(init: std.process.Init) !void {
                         if (ctx.print_buffer.items[ctx.print_buffer.items.len - 1] != '\n') std.debug.print("\n", .{});
                     }
                 }
-            } else |_| {
+            } else |eval_err| {
                 const case_ms = elapsedMs(case_started_ns, nowNs(io));
                 recordSlowCase(&slowest, name, case_ms);
                 if (expect_termination) {
@@ -843,12 +843,30 @@ pub fn main(init: std.process.Init) !void {
                 // Stringifying the exception can run JS (Error.prototype.toString):
                 // hold the GIL like any other entry into the realm.
                 if (ctx.gil) |g| g.acquire();
-                const msg = if (ctx.exception) |e| descr: {
+                defer if (ctx.gil) |g| g.release();
+                if (ctx.exception) |e| {
                     var machine = ctx.interpreter();
-                    break :descr machine.toStringV(e) catch "?";
-                } else "?";
-                std.debug.print("  FAIL  {s} ({d} ms): {s}\n", .{ name, case_ms, msg });
-                if (ctx.gil) |g| g.release();
+                    if (machine.toStringV(e)) |msg| {
+                        std.debug.print("  FAIL  {s} ({d} ms, {s}): {s}\n", .{
+                            name, case_ms, @errorName(eval_err), msg,
+                        });
+                    } else |stringify_err| {
+                        const exception_kind = if (e.isObject() and e.asObj().is_error and e.asObj().error_name.len != 0)
+                            e.asObj().error_name
+                        else
+                            e.typeOf();
+                        // This fallback is allocation-free and does not invoke
+                        // user JavaScript, so it remains useful under the exact
+                        // heap pressure that made ToString fail.
+                        std.debug.print("  FAIL  {s} ({d} ms, {s}): exception={s}, stringify={s}\n", .{
+                            name, case_ms, @errorName(eval_err), exception_kind, @errorName(stringify_err),
+                        });
+                    }
+                } else {
+                    std.debug.print("  FAIL  {s} ({d} ms, {s}): exception=<missing>\n", .{
+                        name, case_ms, @errorName(eval_err),
+                    });
+                }
             }
         }
     }
