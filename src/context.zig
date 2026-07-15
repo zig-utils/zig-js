@@ -2609,14 +2609,18 @@ pub const Context = struct {
             const cell_backing = gc_state.backing.allocator();
             gc_state.heap = GcHeap.init(cell_backing, &gc_state.binding);
             const h = &gc_state.heap;
-            // GC scratch (`mark_stack`/`barrier_buf`) is touched by both a
-            // concurrent marker thread and the mutator under M3, so it must use
-            // a thread-safe allocator distinct from the (mutator-only) cell
-            // backing. The page allocator is process-global and thread-safe; for
-            // M1/M2 this only changes where the pointer stacks live, not
-            // behavior. Set before any allocation so deinit frees with the same
+            // A concurrent marker or peer mutator can touch GC scratch alongside
+            // the owning thread, so those modes retain the process-global,
+            // thread-safe page allocator. A private heap has no such requirement:
+            // keep its pointer stacks on the host allocator supplied for the
+            // context, avoiding process-global VM allocation for independent
+            // heaps. Use the unbudgeted host allocator so collector scratch stays
+            // outside the public heap limit, as it did before this specialization.
+            // Set this before any allocation so deinit frees with the same
             // allocator. See zig-gc `Heap.setAuxAllocator`.
-            h.setAuxAllocator(std.heap.page_allocator);
+            const private_gc_scratch = !options.enable_threads and
+                !options.concurrent_gc and !options.parallel_gc;
+            h.setAuxAllocator(if (private_gc_scratch) gpa else std.heap.page_allocator);
             h.setNurseryEnabled(true);
             self.gc = h;
             self.gc_binding = &gc_state.binding;
@@ -11804,6 +11808,38 @@ test "enable_gc: object-heavy program runs and tears down clean (no leaks)" {
     );
     // sum_{i=0..199}(i + 2i + (i+2)) = sum(4i+2) = 80000, plus obj.x+obj.y = 3.
     try std.testing.expectEqual(@as(f64, 80003), result.asNum());
+}
+
+test "enable_gc: collector scratch allocator follows the context concurrency policy" {
+    const Identity = struct {
+        fn expect(actual: std.mem.Allocator, expected: std.mem.Allocator) !void {
+            try std.testing.expectEqual(expected.ptr, actual.ptr);
+            try std.testing.expectEqual(expected.vtable, actual.vtable);
+        }
+    };
+
+    {
+        const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+        defer ctx.destroy();
+        try Identity.expect(ctx.gc.?.aux, std.testing.allocator);
+    }
+    {
+        const ctx = try Context.createWith(std.testing.allocator, .{
+            .enable_gc = true,
+            .concurrent_gc = true,
+        });
+        defer ctx.destroy();
+        try Identity.expect(ctx.gc.?.aux, std.heap.page_allocator);
+    }
+    {
+        const ctx = try Context.createWith(std.testing.allocator, .{
+            .enable_threads = true,
+            .enable_gc = true,
+            .gil = true,
+        });
+        defer ctx.destroy();
+        try Identity.expect(ctx.gc.?.aux, std.heap.page_allocator);
+    }
 }
 
 test "enable_gc nursery: quick object replacement keeps exact-managed children" {
