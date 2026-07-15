@@ -975,10 +975,17 @@ pub const Object = struct {
             if ((spins & 0xff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
         }
         object_profile.recordBackingLockAcquire(spins);
+        // Concurrent tracing snapshots the cold pointer and its rare GC edges
+        // under this lock. Treat it like the property/element locks so allocator
+        // recovery cannot recursively enter the tracer while it is held.
+        gc_runtime.enterTraceSensitiveLock();
         return true;
     }
     fn unlockBacking(self: *Object, held: bool) void {
-        if (held) self.backing_lock.unlock();
+        if (held) {
+            gc_runtime.leaveTraceSensitiveLock();
+            self.backing_lock.unlock();
+        }
     }
 
     // Assumes `backing_lock` held (called only from `backingFor`).
@@ -997,9 +1004,8 @@ pub const Object = struct {
         return self.backing_allocator;
     }
 
-    fn deactivateBacking(self: *Object, comptime field: []const u8) void {
-        const backing_locked = self.lockBacking();
-        defer self.unlockBacking(backing_locked);
+    // Assumes `backing_lock` held when object-side locks are enabled.
+    fn deactivateBackingLocked(self: *Object, comptime field: []const u8) void {
         if (!@field(self.backing_flags, field)) return;
         @field(self.backing_flags, field) = false;
         if (gc_runtime.activeObjectBacking()) |state| {
@@ -1007,6 +1013,12 @@ pub const Object = struct {
                 _ = @atomicRmw(usize, live, .Sub, 1, .monotonic);
             }
         }
+    }
+
+    fn deactivateBacking(self: *Object, comptime field: []const u8) void {
+        const backing_locked = self.lockBacking();
+        defer self.unlockBacking(backing_locked);
+        self.deactivateBackingLocked(field);
     }
 
     fn backingFor(self: *Object, fallback: std.mem.Allocator, comptime field: []const u8) std.mem.Allocator {
@@ -1021,6 +1033,11 @@ pub const Object = struct {
     fn backingForTracked(self: *Object, fallback: std.mem.Allocator, comptime field: []const u8) BackingSelection {
         const backing_locked = self.lockBacking();
         defer self.unlockBacking(backing_locked);
+        return self.backingForTrackedLocked(fallback, field);
+    }
+
+    // Assumes `backing_lock` held when object-side locks are enabled.
+    fn backingForTrackedLocked(self: *Object, fallback: std.mem.Allocator, comptime field: []const u8) BackingSelection {
         if (self.backing_flags.allocator_active) {
             const a = self.backing_allocator;
             if (!@field(self.backing_flags, field)) {
@@ -1043,10 +1060,15 @@ pub const Object = struct {
     /// Allocate the cold internal-slot sidecar on first use. Exotic objects
     /// pay this cost; ordinary objects retain only the nullable pointer.
     pub fn ensureCold(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator.Error!*ObjectColdState {
+        // The sidecar may be installed on an already-published object (for
+        // example, the first WeakMap.set). Serialize both the null check and
+        // publication with the concurrent tracer's cold-edge snapshot.
+        const backing_locked = self.lockBacking();
+        defer self.unlockBacking(backing_locked);
         if (self.cold) |cold| return cold;
-        const backing = self.backingForTracked(fallback, "cold");
+        const backing = self.backingForTrackedLocked(fallback, "cold");
         const cold = backing.allocator.create(ObjectColdState) catch |err| {
-            if (backing.activated) self.deactivateBacking("cold");
+            if (backing.activated) self.deactivateBackingLocked("cold");
             return err;
         };
         cold.* = .{};
@@ -1061,6 +1083,8 @@ pub const Object = struct {
         initial: @FieldType(ObjectRareState, @tagName(tag)),
     ) std.mem.Allocator.Error!*@FieldType(ObjectRareState, @tagName(tag)) {
         const cold = try self.ensureCold(fallback);
+        const backing_locked = self.lockBacking();
+        defer self.unlockBacking(backing_locked);
         const active = std.meta.activeTag(cold.rare);
         if (active == .none) {
             cold.rare = @unionInit(ObjectRareState, @tagName(tag), initial);
@@ -1068,6 +1092,50 @@ pub const Object = struct {
             std.debug.assert(active == tag);
         }
         return &@field(cold.rare, @tagName(tag));
+    }
+
+    /// Stable snapshot of every GC-visible cold/rare edge. The concurrent
+    /// marker uses one backing-lock section and releases it before acquiring
+    /// property or element locks, preserving the mutator's lock order.
+    pub const TraceColdSnapshot = struct {
+        cold: ?*ObjectColdState,
+        ctor_ref: ?*Object,
+        proxy_target: ?*Object,
+        proxy_handler: ?*Object,
+        boxed_primitive: ?Value,
+        weak_ref_target_slot: ?*?*Object,
+        js_function: ?*anyopaque,
+        bound_function: ?*anyopaque,
+        promise_data: ?*anyopaque,
+        generator: ?*anyopaque,
+        iterator_helper: ?*IterHelper,
+        module_ns: ?*anyopaque,
+        arg_map_env: ?*anyopaque,
+        typed_array: ?*TypedArrayData,
+        data_view: ?*DataViewData,
+    };
+
+    pub fn traceColdSnapshot(self: *Object, concurrent: bool) TraceColdSnapshot {
+        const backing_locked = if (concurrent) self.lockBacking() else false;
+        defer self.unlockBacking(backing_locked);
+        const cold = self.cold;
+        return .{
+            .cold = cold,
+            .ctor_ref = self.ctorRef(),
+            .proxy_target = self.proxyTarget(),
+            .proxy_handler = self.proxyHandler(),
+            .boxed_primitive = self.boxedPrimitive(),
+            .weak_ref_target_slot = if (self.is_weak_ref) self.weakRefTargetSlot() else null,
+            .js_function = self.jsFunction(),
+            .bound_function = self.boundFunction(),
+            .promise_data = self.promiseData(),
+            .generator = self.generator(),
+            .iterator_helper = self.iteratorHelper(),
+            .module_ns = self.moduleNs(),
+            .arg_map_env = if (cold) |state| state.arg_map_env else null,
+            .typed_array = self.typedArray(),
+            .data_view = self.dataView(),
+        };
     }
 
     pub inline fn symbolKey(self: *const Object) []const u8 {
@@ -3637,12 +3705,15 @@ test "Object backing lock pairs unlock with actual acquisition" {
 
     const prev = Object.element_locks_enabled.swap(false, .release);
     const not_locked = o.lockBacking();
+    try std.testing.expect(!gc_runtime.inTraceSensitiveLock());
     Object.element_locks_enabled.store(true, .release);
     o.unlockBacking(not_locked);
 
     const locked = o.lockBacking();
+    try std.testing.expect(gc_runtime.inTraceSensitiveLock());
     Object.element_locks_enabled.store(false, .release);
     o.unlockBacking(locked);
+    try std.testing.expect(!gc_runtime.inTraceSensitiveLock());
     defer Object.element_locks_enabled.store(prev, .release);
 
     try std.testing.expect(o.backing_lock.tryLock());

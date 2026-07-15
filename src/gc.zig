@@ -109,12 +109,15 @@ pub fn traceObject(o: *Object, v: anytype) void {
     // model (a plain mov on x86_64/arm64). The reparent sites pair this with an
     // atomic store. The construction link and proxy sidecar edges are written only at
     // creation, before the cell is published to the marker (the born-grey
-    // hand-off establishes happens-before), so a plain read is safe.
+    // hand-off establishes happens-before), so their payload reads are safe.
+    // The cold pointer itself can also be installed lazily on an already-live
+    // object, so snapshot it and all rare GC edges under `backing_lock`.
     const concurrent = v.concurrent();
     v.mark(if (concurrent) @atomicLoad(?*Object, &o.proto, .monotonic) else o.proto);
-    v.mark(o.ctorRef());
-    v.mark(o.proxyTarget());
-    v.mark(o.proxyHandler());
+    const cold = o.traceColdSnapshot(concurrent);
+    v.mark(cold.ctor_ref);
+    v.mark(cold.proxy_target);
+    v.mark(cold.proxy_handler);
 
     // Growable storage (slots/accessors behind `property_lock`, elements behind
     // `elements_lock`): under a *concurrent* mark (M3) the marker must read it
@@ -144,35 +147,35 @@ pub fn traceObject(o: *Object, v: anytype) void {
         for (o.elements.items) |el| markValue(v, el);
         if (concurrent) o.unlockElements();
     }
-    markValueOpt(v, o.boxedPrimitive());
-    if (o.is_weak_ref) markWeakObject(v, o.weakRefTargetSlot()); // stable cold-slot address
+    markValueOpt(v, cold.boxed_primitive);
+    if (cold.weak_ref_target_slot) |slot| markWeakObject(v, slot); // stable cold-slot address
     if (o.is_finalization_registry) {
-        if (o.cold) |cold| {
-            markValue(v, cold.finalization_callback);
+        if (cold.cold) |state| {
+            markValue(v, state.finalization_callback);
             // Only `held` is a strong edge (mark it by value under the entry-storage
             // lock so a concurrent append can't tear the read). target/token are
             // weak — their liveness is decided by `isLive` at finish, not registered.
             if (concurrent) o.lockElements();
-            for (cold.finalization_records.items) |*record| markValue(v, record.held);
+            for (state.finalization_records.items) |*record| markValue(v, record.held);
             if (concurrent) o.unlockElements();
         }
     }
 
     // Type-erased side-cells.
-    if (o.jsFunction()) |p| v.mark(p); // *Function (kind .function)
-    if (o.boundFunction()) |p| v.mark(p); // *Interpreter.BoundFn (kind .bound_fn)
-    if (o.promiseData()) |p| v.mark(p); // *promise.Promise (kind .promise)
-    if (o.generator()) |p| v.mark(p); // *vm.Generator (kind .generator)
-    if (o.iteratorHelper()) |p| v.mark(p); // (kind .iter_helper)
-    if (o.moduleNs()) |p| v.mark(p); // *ModuleNs (kind .module_ns)
-    if (o.cold) |cold| if (cold.arg_map_env) |p| v.mark(p); // *Environment (kind .environment)
+    if (cold.js_function) |p| v.mark(p); // *Function (kind .function)
+    if (cold.bound_function) |p| v.mark(p); // *Interpreter.BoundFn (kind .bound_fn)
+    if (cold.promise_data) |p| v.mark(p); // *promise.Promise (kind .promise)
+    if (cold.generator) |p| v.mark(p); // *vm.Generator (kind .generator)
+    if (cold.iterator_helper) |p| v.mark(p); // (kind .iter_helper)
+    if (cold.module_ns) |p| v.mark(p); // *ModuleNs (kind .module_ns)
+    if (cold.arg_map_env) |p| v.mark(p); // *Environment (kind .environment)
     promise.traceNativePrivateData(o, v);
     interp.traceNativePrivateData(o, v);
     jsthread.traceNativePrivateData(o, v);
     vm.traceNativePrivateData(o, v);
     // The viewed ArrayBuffer object keeps a TypedArray/DataView's storage alive.
-    if (o.typedArray()) |ta| v.mark(ta.buffer);
-    if (o.dataView()) |dv| v.mark(dv.buffer);
+    if (cold.typed_array) |ta| v.mark(ta.buffer);
+    if (cold.data_view) |dv| v.mark(dv.buffer);
 }
 
 pub fn traceObjectEphemeron(o: *Object, v: anytype) void {
