@@ -12166,7 +12166,15 @@ fn runWorkerTerminateThreadLocalAsyncHoldCleanupInterleavingKind(
     const nworkers = 1 + r.uintLessThan(usize, 2);
     const ntls_threads = 2 + r.uintLessThan(usize, 3);
     const nrelease_threads = 2 + r.uintLessThan(usize, 3);
-    const wait_timeout_ms = if (builtin.sanitize_thread) 12_000 else 1200 + r.uintLessThan(usize, 800);
+    const finite_wait_timeout_ms = if (builtin.sanitize_thread) 12_000 else 1200 + r.uintLessThan(usize, 800);
+    var wait_timeout_buf: [32]u8 = undefined;
+    // Mid-GC cases already run inside the bounded per-case watchdog. Keep the
+    // parked waiters pending until the deliberate release instead of letting a
+    // loaded TSan runner turn this semantic oracle into a wall-clock race.
+    const wait_timeout_js = if (midgc)
+        "Infinity"
+    else
+        std.fmt.bufPrint(&wait_timeout_buf, "{d}", .{finite_wait_timeout_ms}) catch unreachable;
     const waiter_reject_spin_limit: usize = if (builtin.sanitize_thread) 100_000 else 2_000;
     const release_join_spin_limit: usize = if (builtin.sanitize_thread) 100_000 else 10_000;
     const gc_rounds = if (midgc) 14 + r.uintLessThan(usize, 5) else 0;
@@ -12347,6 +12355,8 @@ fn runWorkerTerminateThreadLocalAsyncHoldCleanupInterleavingKind(
             \\    }}
             \\    if (typeof gc === 'function') gc();
             \\    const beforeWaiterReject = globalThis.__workerTlsAsyncHoldRejectCount;
+            \\    if (beforeWaiterReject !== 0)
+            \\      throw new Error('worker terminate/ThreadLocal asyncHold waiters settled before midgc release: ' + beforeWaiterReject);
             \\    gate.propFail = true;
             \\    Atomics.store(gate, 'prop', 1);
             \\    Atomics.notify(gate, 'prop');
@@ -12440,7 +12450,7 @@ fn runWorkerTerminateThreadLocalAsyncHoldCleanupInterleavingKind(
         \\      if (gate.tlsFail)
         \\        throw new Error('worker terminate/ThreadLocal asyncHold TLS midgc release');
         \\      return -1;
-        \\    }}, id, {d}, {d}, {d});
+        \\    }}, id, {d}, {d}, {s});
         \\    t.asyncJoin().then(
         \\      () => {{ globalThis.__workerTlsAsyncHoldRejectScore = -1000000; }},
         \\      (e) => {{
@@ -12470,7 +12480,7 @@ fn runWorkerTerminateThreadLocalAsyncHoldCleanupInterleavingKind(
         \\    if (gate.propFail)
         \\      throw new Error('worker terminate/ThreadLocal asyncHold property midgc release');
         \\    return root.marker;
-        \\  }}, gate, {d});
+        \\  }}, gate, {s});
         \\  propWaiter.asyncJoin().then(
         \\    () => {{ globalThis.__workerTlsAsyncHoldRejectScore = -1000000; }},
         \\    (e) => {{
@@ -12569,7 +12579,7 @@ fn runWorkerTerminateThreadLocalAsyncHoldCleanupInterleavingKind(
             seed,
             seed_marker,
             tls_base,
-            wait_timeout_ms,
+            wait_timeout_js,
             tls_reject_base,
             seed,
             ntls_threads,
@@ -12577,7 +12587,7 @@ fn runWorkerTerminateThreadLocalAsyncHoldCleanupInterleavingKind(
             seed,
             prop_reject_marker,
             seed,
-            wait_timeout_ms,
+            wait_timeout_js,
             prop_reject_marker,
             seed,
             cond_reject_marker,

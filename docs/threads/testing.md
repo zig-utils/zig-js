@@ -488,7 +488,10 @@ abandons child-owned typed-array `waitAsync` tickets, rejects pending
 termination overlapping `ThreadLocal` hidden roots, no-fn `Lock.asyncHold()`
 release-function delivery, parked property/condition waiters, top-level
 teardown, rejected `asyncJoin` observers, and exact cleanup. Each seed
-currently runs 56
+The mid-script variants keep those deliberately released waiters on indefinite
+waits, bounded by the host-side per-case watchdog, and assert that no rejection
+settles before the release point. This keeps the semantic oracle independent of
+TSan runner speed. Each seed currently runs 56
 deterministic lifecycle
 subprograms.
 
