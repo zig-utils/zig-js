@@ -24287,6 +24287,9 @@ const CollatorOptions = struct {
     /// `numeric` collation (the `kn` extension / `numeric` option): digit runs
     /// compare by numeric value, so "a2" < "a10".
     numeric: bool = false,
+    /// `caseFirst` ("upper"/"lower"/"false"): "upper" sorts uppercase before
+    /// lowercase at the tertiary (case) level.
+    case_first: []const u8 = "false",
 };
 
 fn collatorOptionsFrom(self: *Interpreter, locales: Value, options: Value) EvalError!CollatorOptions {
@@ -24302,11 +24305,12 @@ fn collatorOptionsFrom(self: *Interpreter, locales: Value, options: Value) EvalE
     // The `-u-kn` locale extension turns on numeric collation ("kn" or "kn-true";
     // "kn-false" turns it off). The `numeric` option below overrides it.
     if (localeUValue(locale, "kn")) |kn| opts.numeric = !std.mem.eql(u8, kn, "false");
+    if (localeUValue(locale, "kf")) |kf| opts.case_first = kf;
     if (!options.isUndefined()) {
         const raw = Value.obj(try self.toObject(options));
         if (try dtfGetStr(self, raw, "usage", &.{ "sort", "search" }, null)) |u| opts.usage = u;
         _ = try dtfGetStr(self, raw, "localeMatcher", &.{ "lookup", "best fit" }, "best fit");
-        _ = try dtfGetStr(self, raw, "caseFirst", &.{ "upper", "lower", "false" }, null);
+        if (try dtfGetStr(self, raw, "caseFirst", &.{ "upper", "lower", "false" }, null)) |cf| opts.case_first = cf;
         if (try dtfGetStr(self, raw, "sensitivity", &.{ "base", "accent", "case", "variant" }, null)) |s| opts.sensitivity = s;
         const ip = try self.getProperty(raw, "ignorePunctuation");
         if (!ip.isUndefined()) opts.ignore_punctuation = ip.toBoolean();
@@ -24495,7 +24499,8 @@ fn collatorCompareStrings(self: *Interpreter, x: []const u8, y: []const u8, opts
 
     const case_x = try collatorKey(self, x, opts, false, true);
     const case_y = try collatorKey(self, y, opts, false, true);
-    const case_cmp = collatorCaseOrder(case_x, case_y);
+    // caseFirst:"upper" reverses the default (lowercase-first) tertiary order.
+    const case_cmp = collatorCaseOrder(case_x, case_y) * @as(i32, if (std.mem.eql(u8, opts.case_first, "upper")) -1 else 1);
     if (std.mem.eql(u8, opts.sensitivity, "case")) return case_cmp;
     if (opts.ignore_punctuation) return 0;
     if (accent != 0) return accent;
