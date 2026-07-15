@@ -3326,7 +3326,7 @@ pub const Interpreter = struct {
             // A TypedArray's integer-indexed elements are own enumerable keys
             // (outside the shape); enumerate the current length (which a resizable
             // backing buffer may have shrunk or grown).
-            if (o.typed_array) |ta| {
+            if (o.typedArray()) |ta| {
                 var i: usize = 0;
                 const len = ta.currentLength() orelse 0;
                 while (i < len) : (i += 1) {
@@ -6279,7 +6279,7 @@ pub const Interpreter = struct {
     fn arrayProtoChainCleanForIndexedSet(self: *Interpreter, o: *value.Object) bool {
         var cur = self.effectiveProto(o);
         while (cur) |c| {
-            if (c.proxyHandler() != null or c.proxy_revoked or c.typed_array != null or c.has_indexed_property.load(.monotonic))
+            if (c.proxyHandler() != null or c.proxy_revoked or c.typedArray() != null or c.has_indexed_property.load(.monotonic))
                 return false;
             if (c.indexed_own_seen.load(.acquire)) return false;
             cur = self.effectiveProto(c);
@@ -6290,7 +6290,7 @@ pub const Interpreter = struct {
     fn arrayProtoChainCleanForDenseAppend(self: *Interpreter, o: *value.Object) bool {
         var cur = self.effectiveProto(o);
         while (cur) |c| {
-            if (c.proxyHandler() != null or c.proxy_revoked or c.typed_array != null or c.has_indexed_property.load(.monotonic))
+            if (c.proxyHandler() != null or c.proxy_revoked or c.typedArray() != null or c.has_indexed_property.load(.monotonic))
                 return false;
             if (c.indexed_own_seen.load(.acquire)) return false;
             cur = self.effectiveProto(c);
@@ -6322,7 +6322,7 @@ pub const Interpreter = struct {
     fn arrayProtoMayAffectIndexedHas(self: *Interpreter, o: *value.Object) bool {
         var cur = self.effectiveProto(o);
         while (cur) |c| {
-            if (c.proxyHandler() != null or c.proxy_revoked or c.typed_array != null or c.has_indexed_property.load(.monotonic))
+            if (c.proxyHandler() != null or c.proxy_revoked or c.typedArray() != null or c.has_indexed_property.load(.monotonic))
                 return true;
             if (c.indexed_own_seen.load(.acquire)) return true;
             cur = self.effectiveProto(c);
@@ -9559,7 +9559,7 @@ pub const Interpreter = struct {
                 return list.items;
             }
         }
-        if (t.typed_array) |ta| {
+        if (t.typedArray()) |ta| {
             // Integer-Indexed Exotic [[OwnPropertyKeys]]: the in-bounds element
             // indices (ascending) first, then any ordinary own string/symbol keys.
             var list: std.ArrayListUnmanaged([]const u8) = .empty;
@@ -9859,11 +9859,11 @@ pub const Interpreter = struct {
                         }
                     }
                 }
-                if (o.array_buffer) |ab| {
+                if (o.arrayBuffer()) |ab| {
                     if (std.mem.eql(u8, key, "byteLength") and o.getOwn(key) == null and o.getAccessor(key) == null)
                         return Value.num(@floatFromInt(if (ab.isDetached()) 0 else ab.bytes().len));
                 }
-                if (o.typed_array) |ta| {
+                if (o.typedArray()) |ta| {
                     const cur = ta.currentLength(); // null when detached / out of bounds
                     if (std.mem.eql(u8, key, "length") and o.getOwn(key) == null and o.getAccessor(key) == null) return Value.num(@floatFromInt(cur orelse 0));
                     if (std.mem.eql(u8, key, "byteLength") and o.getOwn(key) == null and o.getAccessor(key) == null) return Value.num(@floatFromInt((cur orelse 0) * ta.kind.byteSize()));
@@ -10618,7 +10618,7 @@ pub const Interpreter = struct {
         // A module namespace's [[Set]] always fails: strict throws, sloppy is a
         // silent no-op.
         if (o.moduleNs() != null) return false;
-        if (o.typed_array) |ta| {
+        if (o.typedArray()) |ta| {
             // Integer-Indexed Exotic [[Set]] for a canonical numeric key.
             const numkey: ?f64 = if (arrayIndex(key)) |i| @as(f64, @floatFromInt(i)) else canonicalNumericIndexString(key);
             if (numkey) |n| {
@@ -10646,7 +10646,7 @@ pub const Interpreter = struct {
                 if (!isValidIntegerIndex(ta, n)) return true;
                 if (!receiver.isObject()) return true;
                 const rcv = receiver.asObj();
-                if (rcv.typed_array) |rta| {
+                if (rcv.typedArray()) |rta| {
                     if (!isValidIntegerIndex(rta, n)) return false;
                     if (rta.kind.isBigInt()) {
                         const bv = try self.toBigIntValueImpl(v, false);
@@ -10772,7 +10772,7 @@ pub const Interpreter = struct {
             // Exotic ancestor handles a canonical numeric key itself (writing to a
             // valid index of the Receiver, else a no-op), so a same-keyed accessor
             // further up the chain is never reached.
-            if (c.typed_array != null and canonicalNumericIndexString(key) != null)
+            if (c.typedArray() != null and canonicalNumericIndexString(key) != null)
                 return self.setMemberResult(Value.obj(c), key, v, receiver);
             if (c.getAccessor(key)) |acc| {
                 if (acc.set) |s| {
@@ -10923,7 +10923,7 @@ pub const Interpreter = struct {
         // Integer-Indexed Exotic [[Delete]]: a canonical numeric key cannot be
         // deleted when it is a valid index (returns false); any other numeric key
         // (out of bounds, "-0", fractional) "deletes" as a no-op (returns true).
-        if (o.typed_array) |ta| {
+        if (o.typedArray()) |ta| {
             if (canonicalNumericIndexString(key)) |n| return !isValidIntegerIndex(ta, n);
         }
         if (o.boxedPrimitive()) |p| {
@@ -11192,16 +11192,16 @@ pub const Interpreter = struct {
     /// length; the result must be a non-detached typed array of at least `len`
     /// elements and the same content type (BigInt vs Number) as the exemplar.
     fn typedArraySpeciesCreate(self: *Interpreter, exemplar: *value.Object, len: usize, immutable_same_buffer_ok: ?*value.Object) EvalError!*value.Object {
-        const kind = exemplar.typed_array.?.kind;
+        const kind = exemplar.typedArray().?.kind;
         const default_ctor = self.env.get(kind.ctorName()) orelse return newTypedArray(self, kind, len);
         const ctor = try self.speciesConstructor(Value.obj(exemplar), default_ctor);
         // Fast path: the intrinsic constructor for this view kind.
         if (ctor.isObject() and default_ctor.isObject() and ctor.asObj() == default_ctor.asObj())
             return newTypedArray(self, kind, len);
         const res = try self.construct(ctor, &.{Value.num(@floatFromInt(len))});
-        if (!res.isObject() or res.asObj().typed_array == null)
+        if (!res.isObject() or res.asObj().typedArray() == null)
             return self.throwError("TypeError", "TypedArray species did not return a TypedArray");
-        const rta = res.asObj().typed_array.?;
+        const rta = res.asObj().typedArray().?;
         if (rta.kind.isBigInt() != kind.isBigInt())
             return self.throwError("TypeError", "TypedArray species content type does not match");
         // The callers write into the result, so ValidateTypedArray is normally
@@ -11209,7 +11209,7 @@ pub const Interpreter = struct {
         // has one spec-visible overlap case where the species result aliases the
         // source buffer; its byte-copy loop is allowed to perform those internal
         // writes even when the shared buffer is immutable.
-        if (rta.buffer.array_buffer.?.immutable and (immutable_same_buffer_ok == null or rta.buffer != immutable_same_buffer_ok.?))
+        if (rta.buffer.arrayBuffer().?.immutable and (immutable_same_buffer_ok == null or rta.buffer != immutable_same_buffer_ok.?))
             return self.throwError("TypeError", "TypedArray species result is backed by an immutable buffer");
         // ValidateTypedArray + the single-Number length guard use the LIVE length:
         // a result whose (resizable) buffer is detached/out-of-bounds, or now
@@ -11225,7 +11225,7 @@ pub const Interpreter = struct {
     /// over a detached buffer throws TypeError (ValidateTypedArray); a wrong
     /// content type or non-TypedArray result also throws.
     fn typedArraySubarrayCreate(self: *Interpreter, exemplar: *value.Object, buffer: *value.Object, byte_offset: usize, len: ?usize) EvalError!Value {
-        const kind = exemplar.typed_array.?.kind;
+        const kind = exemplar.typedArray().?.kind;
         const default_ctor = self.env.get(kind.ctorName()) orelse return self.throwError("TypeError", "missing TypedArray constructor");
         const ctor = try self.speciesConstructor(Value.obj(exemplar), default_ctor);
         const res = if (len) |length| try self.construct(ctor, &.{
@@ -11236,11 +11236,11 @@ pub const Interpreter = struct {
             Value.obj(buffer),
             Value.num(@floatFromInt(byte_offset)),
         });
-        if (!res.isObject() or res.asObj().typed_array == null)
+        if (!res.isObject() or res.asObj().typedArray() == null)
             return self.throwError("TypeError", "TypedArray species did not return a TypedArray");
-        if (res.asObj().typed_array.?.buffer.array_buffer.?.isDetached())
+        if (res.asObj().typedArray().?.buffer.arrayBuffer().?.isDetached())
             return self.throwError("TypeError", "TypedArray species returned a detached TypedArray");
-        if (res.asObj().typed_array.?.kind.isBigInt() != kind.isBigInt())
+        if (res.asObj().typedArray().?.kind.isBigInt() != kind.isBigInt())
             return self.throwError("TypeError", "TypedArray species content type does not match");
         return res;
     }
@@ -11255,8 +11255,8 @@ pub const Interpreter = struct {
         const ab = try self.allocArrayBufferData();
         errdefer self.destroyArrayBufferData(ab);
         ab.* = .{ .local_data = data, .gc_owned = self.gc_backing != null };
-        o.array_buffer = ab;
-        errdefer o.array_buffer = null;
+        try o.setArrayBuffer(self.arena, ab);
+        errdefer o.clearArrayBuffer();
         if (self.env.get("ArrayBuffer")) |c| {
             if (c.isObject()) o.setProtoAtomic(try self.protoObject(c.asObj()));
         }
@@ -11275,7 +11275,7 @@ pub const Interpreter = struct {
 
     pub fn makeImmutableUint8ArrayFromBytes(self: *Interpreter, bytes: []const u8) EvalError!*value.Object {
         const o = try newTypedArray(self, .u8, bytes.len);
-        const ab = o.typed_array.?.buffer.array_buffer.?;
+        const ab = o.typedArray().?.buffer.arrayBuffer().?;
         if (bytes.len > 0) @memcpy(ab.bytes()[0..bytes.len], bytes);
         ab.immutable = true;
         return o;
@@ -11349,7 +11349,7 @@ pub const Interpreter = struct {
         var ta_installed = false;
         errdefer if (!ta_installed) o.destroyUninstalledTypedArray(self.arena, ta);
 
-        if (a0.isObject() and a0.asObj().array_buffer != null) {
+        if (a0.isObject() and a0.asObj().arrayBuffer() != null) {
             // AllocateTypedArray runs before byteOffset/length coercion, so a
             // throwing newTarget.prototype getter wins over poisoned arguments.
             try self.initTypedArrayProto(o, kind);
@@ -11366,7 +11366,7 @@ pub const Interpreter = struct {
             // ArrayBuffer.resize swaps `local_data` concurrently (no-GIL), which
             // this read of `bytes()` would otherwise race. The earlier
             // byteOffset/length coercions run user code, so they stay outside.
-            const abuf = buffer.array_buffer.?;
+            const abuf = buffer.arrayBuffer().?;
             abuf.lockBuffer();
             const ab_detached = abuf.isDetached();
             const buflen = if (ab_detached) 0 else abuf.bytes().len;
@@ -11376,7 +11376,7 @@ pub const Interpreter = struct {
             var length: usize = undefined;
             // Omitting the length on a resizable buffer makes the view
             // length-tracking; on a fixed buffer it spans the remaining bytes.
-            const track = !has_len and buffer.array_buffer.?.max_byte_length != null;
+            const track = !has_len and buffer.arrayBuffer().?.max_byte_length != null;
             if (has_len) {
                 length = req_len;
             } else {
@@ -11388,19 +11388,19 @@ pub const Interpreter = struct {
             }
             if (byte_offset + length * size > buflen) return self.throwError("RangeError", "invalid typed array length");
             ta.* = .{ .buffer = buffer, .byte_offset = byte_offset, .length = length, .kind = kind, .track_length = track };
-            o.typed_array = ta;
+            try o.setTypedArray(self.arena, ta);
             ta_installed = true;
             return Value.obj(o);
         }
-        if (a0.isObject() and a0.asObj().typed_array != null) {
+        if (a0.isObject() and a0.asObj().typedArray() != null) {
             // new TA(typedArray): copy elements (converting numeric types). A
             // BigInt and a non-BigInt element type can't be mixed.
-            const src = a0.asObj().typed_array.?;
+            const src = a0.asObj().typedArray().?;
             if (src.kind.isBigInt() != kind.isBigInt()) return self.throwError("TypeError", "Cannot mix BigInt and other types when constructing a TypedArray");
             const length = src.currentLength() orelse return self.throwError("TypeError", "Cannot construct from an out-of-bounds TypedArray");
             try self.initTypedArrayProto(o, kind);
             ta.* = .{ .buffer = try self.makeArrayBuffer(length * size), .byte_offset = 0, .length = length, .kind = kind };
-            o.typed_array = ta;
+            try o.setTypedArray(self.arena, ta);
             ta_installed = true;
             var i: usize = 0;
             while (i < length) : (i += 1) {
@@ -11425,7 +11425,7 @@ pub const Interpreter = struct {
             if (list.len > typedArrayLengthLimit(size)) return self.throwError("RangeError", "invalid typed array length");
             try self.initTypedArrayProto(o, kind);
             ta.* = .{ .buffer = try self.makeArrayBuffer(list.len * size), .byte_offset = 0, .length = list.len, .kind = kind };
-            o.typed_array = ta;
+            try o.setTypedArray(self.arena, ta);
             ta_installed = true;
             var i: usize = 0;
             while (i < list.len) : (i += 1) try self.taStore(ta, i, list[i]);
@@ -11438,7 +11438,7 @@ pub const Interpreter = struct {
         const length: usize = @intCast(len_idx);
         try self.initTypedArrayProto(o, kind);
         ta.* = .{ .buffer = try self.makeArrayBuffer(length * size), .byte_offset = 0, .length = length, .kind = kind };
-        o.typed_array = ta;
+        try o.setTypedArray(self.arena, ta);
         ta_installed = true;
         return Value.obj(o);
     }
@@ -11451,11 +11451,11 @@ pub const Interpreter = struct {
             // TypedArraySetElement coerces first, then skips the store for an
             // invalid/out-of-bounds index or immutable buffer (a silent no-op,
             // not a throw).
-            if (i >= (ta.currentLength() orelse 0) or (ta.buffer.array_buffer.?.immutable and !allow_immutable)) return;
+            if (i >= (ta.currentLength() orelse 0) or (ta.buffer.arrayBuffer().?.immutable and !allow_immutable)) return;
             value.taWriteBig(ta, i, bv.asObj().bigIntValue());
         } else {
             const num = try self.toNumberV(v);
-            if (i >= (ta.currentLength() orelse 0) or (ta.buffer.array_buffer.?.immutable and !allow_immutable)) return;
+            if (i >= (ta.currentLength() orelse 0) or (ta.buffer.arrayBuffer().?.immutable and !allow_immutable)) return;
             value.taWrite(ta, i, num);
         }
     }
@@ -11485,8 +11485,8 @@ pub const Interpreter = struct {
         _ = self;
         if (count == 0) return;
         const esz = src.kind.byteSize();
-        const src_ab = src.buffer.array_buffer.?;
-        const dst_ab = dst.buffer.array_buffer.?;
+        const src_ab = src.buffer.arrayBuffer().?;
+        const dst_ab = dst.buffer.arrayBuffer().?;
         const lock_src = src_ab.needsElementLock();
         const lock_dst = dst_ab.needsElementLock() and dst_ab != src_ab;
         if (lock_src and lock_dst) {
@@ -11950,7 +11950,7 @@ pub const Interpreter = struct {
                 if (o.is_set) return try self.setMethod(o, name, args);
                 // A typed array's own methods take precedence over the Array-like
                 // coercion path (slice/indexOf/map/… are shared names).
-                if (o.typed_array != null and o.getOwn(name) == null) {
+                if (o.typedArray() != null and o.getOwn(name) == null) {
                     if (try typedArrayMethod(self, o, name, args)) |r| return r;
                 }
                 // A String wrapper object (`new String("…")`): its String.prototype
@@ -12072,7 +12072,7 @@ pub const Interpreter = struct {
         // chain can still make it present (HasProperty walks the chain).
         if (o.is_array and o.accessors.load(.monotonic) == null and o.denseElementPresent(i))
             return true;
-        if (o.typed_array) |ta| {
+        if (o.typedArray()) |ta| {
             if (i < (ta.currentLength() orelse 0)) return true;
         }
         const ks = try std.fmt.allocPrint(self.arena, "{d}", .{i});
@@ -12200,7 +12200,7 @@ pub const Interpreter = struct {
         var cur: ?*value.Object = self.effectiveProto(o);
         while (cur) |c| {
             if (c.proxyHandler() != null or c.proxy_revoked) return true;
-            if (c.typed_array != null and canonicalNumericIndexString(key) != null) return true;
+            if (c.typedArray() != null and canonicalNumericIndexString(key) != null) return true;
             if (c.getAccessor(key) != null) return true;
             if (objectHasOwn(c, key)) return true;
             cur = self.effectiveProto(c);
@@ -14668,7 +14668,7 @@ pub const Interpreter = struct {
     pub fn hasPropertyResult(self: *Interpreter, o: *value.Object, key: []const u8) EvalError!bool {
         // Integer-Indexed Exotic [[HasProperty]]: a canonical numeric key resolves
         // purely to index validity — it never consults the prototype chain.
-        if (o.typed_array) |ta| {
+        if (o.typedArray()) |ta| {
             if (canonicalNumericIndexString(key)) |n| return isValidIntegerIndex(ta, n);
         }
         var cur: ?*value.Object = o;
@@ -15788,7 +15788,7 @@ fn vmIndexingModeFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
         return Value.str("Array CopyOnWrite");
     }
     if (v.isObject()) {
-        if (v.asObj().typed_array) |ta| return try Value.strAlloc(self.arena, ta.kind.ctorName());
+        if (v.asObj().typedArray()) |ta| return try Value.strAlloc(self.arena, ta.kind.ctorName());
     }
     return Value.str("Object");
 }
@@ -16496,7 +16496,7 @@ fn host262DetachFn(ctx: *anyopaque, this: Value, args: []const Value) value.Host
     _ = this;
     _ = ctx;
     const v = if (args.len > 0) args[0] else Value.undef();
-    if (v.isObject()) if (v.asObj().array_buffer) |ab| {
+    if (v.isObject()) if (v.asObj().arrayBuffer()) |ab| {
         ab.setDetached(true);
     };
     return Value.undef();
@@ -17291,8 +17291,8 @@ fn dataViewConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) valu
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (self.new_target.isUndefined()) return self.throwError("TypeError", "Constructor DataView requires 'new'");
     const buf_v = if (args.len > 0) args[0] else Value.undef();
-    if (!buf_v.isObject() or buf_v.asObj().array_buffer == null) return self.throwError("TypeError", "First argument to DataView must be an ArrayBuffer");
-    const ab = buf_v.asObj().array_buffer.?;
+    if (!buf_v.isObject() or buf_v.asObj().arrayBuffer() == null) return self.throwError("TypeError", "First argument to DataView must be an ArrayBuffer");
+    const ab = buf_v.asObj().arrayBuffer().?;
     const offset = try toIndexArg(self, if (args.len > 1) args[1] else Value.undef());
     ab.lockBuffer();
     const initial_detached = ab.isDetached();
@@ -17329,7 +17329,7 @@ fn dataViewConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) valu
         return self.throwError("RangeError", "Invalid DataView length");
     const dv = try o.dataViewAllocator(self.arena).create(value.DataViewData);
     dv.* = .{ .buffer = buf_v.asObj(), .byte_offset = @intCast(offset), .byte_length = view_len, .track_length = track };
-    o.data_view = dv;
+    try o.setDataView(self.arena, dv);
     return Value.obj(o);
 }
 
@@ -17338,11 +17338,11 @@ fn dataViewGetFn(comptime t: DVType) value.NativeFn {
     return struct {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
-            if (!this.isObject() or this.asObj().data_view == null) return throwDataViewTypeError(self, "DataView.prototype.get" ++ t.name ++ " requires a DataView receiver");
-            const dv = this.asObj().data_view.?;
+            if (!this.isObject() or this.asObj().dataView() == null) return throwDataViewTypeError(self, "DataView.prototype.get" ++ t.name ++ " requires a DataView receiver");
+            const dv = this.asObj().dataView().?;
             const get_index = try toIndexArg(self, if (args.len > 0) args[0] else Value.undef());
             const little = if (args.len > 1) args[1].toBoolean() else false;
-            const ab = dv.buffer.array_buffer.?;
+            const ab = dv.buffer.arrayBuffer().?;
             const locked = ab.needsElementLock();
             if (locked) ab.lockBuffer();
             defer if (locked) ab.unlockBuffer();
@@ -17394,10 +17394,10 @@ fn dataViewSetFn(comptime t: DVType) value.NativeFn {
     return struct {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
-            if (!this.isObject() or this.asObj().data_view == null) return throwDataViewTypeError(self, "DataView.prototype.set" ++ t.name ++ " requires a DataView receiver");
-            const dv = this.asObj().data_view.?;
+            if (!this.isObject() or this.asObj().dataView() == null) return throwDataViewTypeError(self, "DataView.prototype.set" ++ t.name ++ " requires a DataView receiver");
+            const dv = this.asObj().dataView().?;
             // SetViewValue checks IsImmutableBuffer before coercing the index/value.
-            if (dv.buffer.array_buffer.?.immutable) return throwDataViewTypeError(self, "Cannot modify a DataView backed by an immutable ArrayBuffer");
+            if (dv.buffer.arrayBuffer().?.immutable) return throwDataViewTypeError(self, "Cannot modify a DataView backed by an immutable ArrayBuffer");
             const get_index = try toIndexArg(self, if (args.len > 0) args[0] else Value.undef());
             const val = if (args.len > 1) args[1] else Value.undef();
             // Coerce the value (ToBigInt for the Big types, else ToNumber) before
@@ -17411,7 +17411,7 @@ fn dataViewSetFn(comptime t: DVType) value.NativeFn {
                 num = try self.toNumberV(val);
             }
             const little = if (args.len > 2) args[2].toBoolean() else false;
-            const ab = dv.buffer.array_buffer.?;
+            const ab = dv.buffer.arrayBuffer().?;
             const locked = ab.needsElementLock();
             if (locked) ab.lockBuffer();
             defer if (locked) ab.unlockBuffer();
@@ -17468,15 +17468,15 @@ fn numToRaw(comptime UInt: type, num: f64) UInt {
 fn dataViewBufferGetter(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject() or this.asObj().data_view == null) return throwDataViewTypeError(self, "DataView.prototype.buffer requires a DataView receiver");
-    return Value.obj(this.asObj().data_view.?.buffer);
+    if (!this.isObject() or this.asObj().dataView() == null) return throwDataViewTypeError(self, "DataView.prototype.buffer requires a DataView receiver");
+    return Value.obj(this.asObj().dataView().?.buffer);
 }
 
 fn dataViewByteLengthGetter(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject() or this.asObj().data_view == null) return throwDataViewTypeError(self, "DataView.prototype.byteLength requires a DataView receiver");
-    const dv = this.asObj().data_view.?;
+    if (!this.isObject() or this.asObj().dataView() == null) return throwDataViewTypeError(self, "DataView.prototype.byteLength requires a DataView receiver");
+    const dv = this.asObj().dataView().?;
     // get byteLength throws when the view is detached or out of bounds.
     const cur = dv.currentByteLength() orelse return throwDataViewTypeError(self, "DataView is detached or out of bounds");
     return Value.num(@floatFromInt(cur));
@@ -17485,8 +17485,8 @@ fn dataViewByteLengthGetter(ctx: *anyopaque, this: Value, args: []const Value) v
 fn dataViewByteOffsetGetter(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject() or this.asObj().data_view == null) return throwDataViewTypeError(self, "DataView.prototype.byteOffset requires a DataView receiver");
-    const dv = this.asObj().data_view.?;
+    if (!this.isObject() or this.asObj().dataView() == null) return throwDataViewTypeError(self, "DataView.prototype.byteOffset requires a DataView receiver");
+    const dv = this.asObj().dataView().?;
     // get byteOffset throws when the view is detached or out of bounds.
     if (dv.currentByteLength() == null) return throwDataViewTypeError(self, "DataView is detached or out of bounds");
     return Value.num(@floatFromInt(dv.byte_offset));
@@ -19788,9 +19788,9 @@ fn arrayBufferSliceFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
 /// validate the result (right kind, not detached/same/too-small) before copying.
 fn arrayBufferSliceImpl(self: *Interpreter, this: Value, args: []const Value, comptime want_shared: bool) value.HostError!Value {
     const kind_name = if (want_shared) "SharedArrayBuffer" else "ArrayBuffer";
-    if (!this.isObject() or this.asObj().array_buffer == null or this.asObj().array_buffer.?.is_shared != want_shared)
+    if (!this.isObject() or this.asObj().arrayBuffer() == null or this.asObj().arrayBuffer().?.is_shared != want_shared)
         return self.throwError("TypeError", kind_name ++ ".prototype.slice called on an incompatible receiver");
-    const ab = this.asObj().array_buffer.?;
+    const ab = this.asObj().arrayBuffer().?;
     if (!want_shared and ab.isDetached()) return self.throwError("TypeError", "ArrayBuffer is detached");
     const blen = ab.bytes().len;
     const start = try relIndex(self, if (args.len > 0) args[0] else Value.undef(), blen, 0);
@@ -19802,9 +19802,9 @@ fn arrayBufferSliceImpl(self: *Interpreter, this: Value, args: []const Value, co
     const default_ctor = self.env.get(kind_name) orelse Value.undef();
     const ctor = try self.speciesConstructor(this, default_ctor);
     const new_v = try self.construct(ctor, &.{Value.num(@floatFromInt(safe_count))});
-    if (!new_v.isObject() or new_v.asObj().array_buffer == null)
+    if (!new_v.isObject() or new_v.asObj().arrayBuffer() == null)
         return self.throwError("TypeError", "ArrayBuffer species constructor did not return an ArrayBuffer");
-    const nb = new_v.asObj().array_buffer.?;
+    const nb = new_v.asObj().arrayBuffer().?;
     if (nb.is_shared != want_shared)
         return self.throwError("TypeError", "ArrayBuffer species constructor returned a buffer of the wrong shared-ness");
     if (!want_shared and nb.isDetached()) return self.throwError("TypeError", "species constructor returned a detached ArrayBuffer");
@@ -19838,7 +19838,7 @@ fn newTypedArray(self: *Interpreter, kind: value.TAKind, len: usize) EvalError!*
     errdefer if (!ta_installed) o.destroyUninstalledTypedArray(self.arena, ta);
 
     ta.* = .{ .buffer = try self.makeArrayBuffer(len * kind.byteSize()), .byte_offset = 0, .length = len, .kind = kind };
-    o.typed_array = ta;
+    try o.setTypedArray(self.arena, ta);
     ta_installed = true;
     if (self.env.get(kind.ctorName())) |c| {
         if (c.isObject()) o.setProtoAtomic(try self.protoObject(c.asObj()));
@@ -19855,10 +19855,10 @@ fn collectionIterKind(name: []const u8) u8 {
 /// %TypedArray%.prototype methods. The receiver is a typed array; element reads
 /// go through the buffer (`taRead`), writes coerce via ToNumber + `taWrite`.
 fn typedArrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args: []const Value) EvalError!?Value {
-    const ta = o.typed_array.?;
+    const ta = o.typedArray().?;
     // ValidateTypedArray(O, write): the in-place mutators reject an immutable
     // buffer up front, before coercing any argument.
-    if (ta.buffer.array_buffer.?.immutable and
+    if (ta.buffer.arrayBuffer().?.immutable and
         (eq(name, "fill") or eq(name, "set") or eq(name, "sort") or eq(name, "copyWithin") or eq(name, "reverse")))
         return self.throwError("TypeError", "Cannot modify a TypedArray backed by an immutable ArrayBuffer");
     // ValidateTypedArray throws when the buffer is detached or the view is out
@@ -19925,7 +19925,7 @@ fn typedArrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args
         var i: usize = 0;
         while (i < len) : (i += 1) {
             const r = try self.callValueWithThis(cb, &.{ try self.taLoadIdx(ta, i), Value.num(@floatFromInt(i)), recv }, cb_this);
-            try self.taStore(result.typed_array.?, i, r);
+            try self.taStore(result.typedArray().?, i, r);
         }
         return Value.obj(result);
     }
@@ -19939,7 +19939,7 @@ fn typedArrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args
                 try kept.append(self.arena, el);
         }
         const result = try self.typedArraySpeciesCreate(o, kept.items.len, null);
-        for (kept.items, 0..) |x, k| try self.taStore(result.typed_array.?, k, x);
+        for (kept.items, 0..) |x, k| try self.taStore(result.typedArray().?, k, x);
         return Value.obj(result);
     }
     if (eq(name, "some") or eq(name, "every")) {
@@ -20083,7 +20083,7 @@ fn typedArrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args
         // copy so a concurrent resize/swap/free cannot occur mid-copy; the range
         // is clamped to the length observed under the lock. Shared buffers (never
         // freed on grow) and the single-threaded engine need no lock.
-        const abuf = ta.buffer.array_buffer.?;
+        const abuf = ta.buffer.arrayBuffer().?;
         const locked = abuf.needsElementLock();
         if (locked) abuf.lockBuffer();
         defer if (locked) abuf.unlockBuffer();
@@ -20127,13 +20127,13 @@ fn typedArrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args
         // copy when count > 0.
         if (count > 0 and ta.currentLength() == null)
             return self.throwError("TypeError", "Cannot slice a TypedArray whose buffer is detached or out of bounds");
-        const aliases_immutable = result.typed_array.?.buffer == ta.buffer and ta.buffer.array_buffer.?.immutable;
-        if (result.typed_array.?.kind == ta.kind and result.typed_array.?.buffer != ta.buffer) {
-            try self.taSliceRawCopy(ta, result.typed_array.?, start, count);
+        const aliases_immutable = result.typedArray().?.buffer == ta.buffer and ta.buffer.arrayBuffer().?.immutable;
+        if (result.typedArray().?.kind == ta.kind and result.typedArray().?.buffer != ta.buffer) {
+            try self.taSliceRawCopy(ta, result.typedArray().?, start, count);
             return Value.obj(result);
         }
         var i: usize = 0;
-        while (i < count) : (i += 1) try self.taStoreInternal(result.typed_array.?, i, try self.taLoad(ta, start + i), aliases_immutable);
+        while (i < count) : (i += 1) try self.taStoreInternal(result.typedArray().?, i, try self.taLoad(ta, start + i), aliases_immutable);
         return Value.obj(result);
     }
     if (eq(name, "with")) {
@@ -20152,13 +20152,13 @@ fn typedArrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args
         // The result has the entry length; indices now out of bounds copy undefined.
         const result = try newTypedArray(self, ta.kind, len);
         var i: usize = 0;
-        while (i < len) : (i += 1) try self.taStore(result.typed_array.?, i, if (i == idx) cv else try self.taLoadIdx(ta, i));
+        while (i < len) : (i += 1) try self.taStore(result.typedArray().?, i, if (i == idx) cv else try self.taLoadIdx(ta, i));
         return Value.obj(result);
     }
     if (eq(name, "toReversed")) {
         const result = try newTypedArray(self, ta.kind, len);
         var i: usize = 0;
-        while (i < len) : (i += 1) try self.taStore(result.typed_array.?, i, try self.taLoad(ta, len - 1 - i));
+        while (i < len) : (i += 1) try self.taStore(result.typedArray().?, i, try self.taLoad(ta, len - 1 - i));
         return Value.obj(result);
     }
     if (eq(name, "sort") or eq(name, "toSorted")) {
@@ -20167,7 +20167,7 @@ fn typedArrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args
         if (cmp.isUndefined()) {
             if (eq(name, "toSorted")) {
                 const result = try newTypedArray(self, ta.kind, len);
-                try taSortDefault(self, ta, result.typed_array.?, len);
+                try taSortDefault(self, ta, result.typedArray().?, len);
                 return Value.obj(result);
             }
             try taSortDefault(self, ta, ta, len);
@@ -20179,7 +20179,7 @@ fn typedArrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args
         try taSort(self, buf, cmp);
         if (eq(name, "toSorted")) {
             const result = try newTypedArray(self, ta.kind, len);
-            for (buf, 0..) |v, k| try self.taStore(result.typed_array.?, k, v);
+            for (buf, 0..) |v, k| try self.taStore(result.typedArray().?, k, v);
             return Value.obj(result);
         }
         const live_len = ta.currentLength() orelse return recv;
@@ -20194,8 +20194,8 @@ fn typedArrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args
         // The offset's ToInteger can run user code (a valueOf) that detaches or
         // shrinks the target's buffer; re-read the live length afterwards.
         const tlen = ta.currentLength() orelse return self.throwError("TypeError", "Cannot set on a TypedArray whose buffer is detached or out of bounds");
-        if (src.isObject() and src.asObj().typed_array != null) {
-            const s = src.asObj().typed_array.?;
+        if (src.isObject() and src.asObj().typedArray() != null) {
+            const s = src.asObj().typedArray().?;
             if (s.kind.isBigInt() != ta.kind.isBigInt()) return self.throwError("TypeError", "Cannot mix BigInt and other types when setting a TypedArray");
             const slen = s.currentLength() orelse return self.throwError("TypeError", "source TypedArray buffer is detached or out of bounds");
             if (offset > tlen or slen > tlen - offset) return self.throwError("RangeError", "offset is out of bounds");
@@ -20313,7 +20313,7 @@ fn taSortDefaultTwoByte(self: *Interpreter, src: *const value.TypedArrayData, ds
 }
 
 fn taReadRawU16(ta: *const value.TypedArrayData, i: usize) u16 {
-    const buf = ta.buffer.array_buffer.?;
+    const buf = ta.buffer.arrayBuffer().?;
     buf.lockBuffer();
     defer buf.unlockBuffer();
     const bytes = buf.bytes();
@@ -20323,7 +20323,7 @@ fn taReadRawU16(ta: *const value.TypedArrayData, i: usize) u16 {
 }
 
 fn taWriteRawU16(ta: *value.TypedArrayData, i: usize, raw: u16) void {
-    const buf = ta.buffer.array_buffer.?;
+    const buf = ta.buffer.arrayBuffer().?;
     buf.lockBuffer();
     defer buf.unlockBuffer();
     const bytes = buf.bytes();
@@ -20438,11 +20438,11 @@ fn typedArrayAbstractFn(ctx: *anyopaque, this: Value, args: []const Value) value
 /// requested one, else a TypeError.
 fn typedArrayCreateLen(self: *Interpreter, constructor: Value, length: usize) EvalError!Value {
     const result = try self.construct(constructor, &.{Value.num(@floatFromInt(length))});
-    if (!result.isObject() or result.asObj().typed_array == null)
+    if (!result.isObject() or result.asObj().typedArray() == null)
         return self.throwError("TypeError", "TypedArrayCreate did not return a TypedArray");
-    const cur = result.asObj().typed_array.?.currentLength();
+    const cur = result.asObj().typedArray().?.currentLength();
     if (cur == null) return self.throwError("TypeError", "TypedArrayCreate returned a detached TypedArray");
-    if (result.asObj().typed_array.?.buffer.array_buffer.?.immutable)
+    if (result.asObj().typedArray().?.buffer.arrayBuffer().?.immutable)
         return self.throwError("TypeError", "TypedArrayCreate returned a TypedArray backed by an immutable buffer");
     if (cur.? < length) return self.throwError("TypeError", "TypedArrayCreate returned a TypedArray smaller than requested");
     return result;
@@ -20452,7 +20452,7 @@ fn typedArrayOfFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!isConstructorValue(this)) return self.throwError("TypeError", "%TypedArray%.of requires a constructor `this`");
     const result = try typedArrayCreateLen(self, this, args.len);
-    const ta = result.asObj().typed_array.?;
+    const ta = result.asObj().typedArray().?;
     for (args, 0..) |av, i| try self.taStore(ta, i, av);
     return result;
 }
@@ -20483,7 +20483,7 @@ fn typedArrayFromFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
             try list.append(self.arena, try self.getProperty(r, "value"));
         }
         const result = try typedArrayCreateLen(self, this, list.items.len);
-        const ta = result.asObj().typed_array.?;
+        const ta = result.asObj().typedArray().?;
         for (list.items, 0..) |v, i| {
             const mapped = if (mapfn.isCallable()) try self.callValueWithThis(mapfn, &.{ v, Value.num(@floatFromInt(i)) }, this_arg) else v;
             try self.taStore(ta, i, mapped);
@@ -20493,7 +20493,7 @@ fn typedArrayFromFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
 
     const len = toLen(try self.toNumberV(try self.getProperty(source, "length")));
     const result = try typedArrayCreateLen(self, this, len);
-    const ta = result.asObj().typed_array.?;
+    const ta = result.asObj().typedArray().?;
     var i: usize = 0;
     while (i < len) : (i += 1) {
         var kb: [24]u8 = undefined;
@@ -20513,11 +20513,11 @@ fn taProtoGetter(comptime which: enum { length, byte_length, byte_offset, buffer
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             _ = args;
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
-            if (!this.isObject() or this.asObj().typed_array == null) {
+            if (!this.isObject() or this.asObj().typedArray() == null) {
                 if (which == .tag) return Value.undef();
                 return self.throwError("TypeError", "%TypedArray%.prototype accessor called on a non-TypedArray");
             }
-            const ta = this.asObj().typed_array.?;
+            const ta = this.asObj().typedArray().?;
             const cur = ta.currentLength(); // null when detached / out of bounds
             return switch (which) {
                 .length => Value.num(@floatFromInt(cur orelse 0)),
@@ -20770,9 +20770,9 @@ fn getBoolOption(self: *Interpreter, opts: ?*value.Object, key: []const u8) Eval
 }
 
 fn uint8ArrayBytes(o: *value.Object) ?[]u8 {
-    const ta = o.typed_array orelse return null;
+    const ta = o.typedArray() orelse return null;
     if (ta.kind != .u8) return null;
-    const buf = ta.buffer.array_buffer orelse return null;
+    const buf = ta.buffer.arrayBuffer() orelse return null;
     if (buf.isDetached()) return null;
     const avail = if (ta.byte_offset <= buf.bytes().len) buf.bytes().len - ta.byte_offset else 0;
     const n = @min(ta.length, avail);
@@ -20792,7 +20792,7 @@ fn uint8ArrayBytes(o: *value.Object) ?[]u8 {
 fn uint8SnapshotBytes(self: *Interpreter, o: *value.Object) EvalError!?[]u8 {
     const hint = uint8ArrayBytes(o) orelse return null;
     const copy = try self.arena.alloc(u8, hint.len);
-    const buf = o.typed_array.?.buffer.array_buffer.?;
+    const buf = o.typedArray().?.buffer.arrayBuffer().?;
     const locked = buf.needsElementLock();
     if (locked) buf.lockBuffer();
     defer if (locked) buf.unlockBuffer();
@@ -20803,7 +20803,7 @@ fn uint8SnapshotBytes(self: *Interpreter, o: *value.Object) EvalError!?[]u8 {
 }
 
 fn requireUint8Array(self: *Interpreter, this: Value) EvalError!*value.Object {
-    if (this.isObject()) if (this.asObj().typed_array) |ta| if (ta.kind == .u8) return this.asObj();
+    if (this.isObject()) if (this.asObj().typedArray()) |ta| if (ta.kind == .u8) return this.asObj();
     return self.throwError("TypeError", "method requires a Uint8Array receiver");
 }
 
@@ -20818,7 +20818,7 @@ fn uint8FromBase64Fn(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
     const r = try decodeBase64(self, sv.asStr(), url, lch, std.math.maxInt(usize));
     if (r.err) return self.throwError("SyntaxError", "invalid base64-encoded string");
     const o = try newTypedArray(self, .u8, r.bytes.len);
-    @memcpy(o.typed_array.?.buffer.array_buffer.?.bytes()[0..r.bytes.len], r.bytes);
+    @memcpy(o.typedArray().?.buffer.arrayBuffer().?.bytes()[0..r.bytes.len], r.bytes);
     return Value.obj(o);
 }
 
@@ -20830,7 +20830,7 @@ fn uint8FromHexFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
     const r = try decodeHex(self, sv.asStr(), std.math.maxInt(usize));
     if (r.err) return self.throwError("SyntaxError", "invalid hex-encoded string");
     const o = try newTypedArray(self, .u8, r.bytes.len);
-    @memcpy(o.typed_array.?.buffer.array_buffer.?.bytes()[0..r.bytes.len], r.bytes);
+    @memcpy(o.typedArray().?.buffer.arrayBuffer().?.bytes()[0..r.bytes.len], r.bytes);
     return Value.obj(o);
 }
 
@@ -20861,7 +20861,7 @@ fn uint8ToHexFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostErr
 fn uint8SetFromBase64Fn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const o = try requireUint8Array(self, this);
-    if (o.typed_array.?.buffer.array_buffer.?.immutable) return self.throwError("TypeError", "Cannot write to a Uint8Array backed by an immutable ArrayBuffer");
+    if (o.typedArray().?.buffer.arrayBuffer().?.immutable) return self.throwError("TypeError", "Cannot write to a Uint8Array backed by an immutable ArrayBuffer");
     const sv = arg(args, 0);
     if (!sv.isString()) return self.throwError("TypeError", "setFromBase64 requires a string argument");
     const opts = try getOptionsObject(self, arg(args, 1));
@@ -20874,7 +20874,7 @@ fn uint8SetFromBase64Fn(ctx: *anyopaque, this: Value, args: []const Value) value
     // Write into the live buffer under the lock so a peer resize()+free can't
     // dangle the target mid-copy (UAF); re-resolve + clamp to the live length.
     {
-        const buf = o.typed_array.?.buffer.array_buffer.?;
+        const buf = o.typedArray().?.buffer.arrayBuffer().?;
         const locked = buf.needsElementLock();
         if (locked) buf.lockBuffer();
         defer if (locked) buf.unlockBuffer();
@@ -20890,7 +20890,7 @@ fn uint8SetFromBase64Fn(ctx: *anyopaque, this: Value, args: []const Value) value
 fn uint8SetFromHexFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const o = try requireUint8Array(self, this);
-    if (o.typed_array.?.buffer.array_buffer.?.immutable) return self.throwError("TypeError", "Cannot write to a Uint8Array backed by an immutable ArrayBuffer");
+    if (o.typedArray().?.buffer.arrayBuffer().?.immutable) return self.throwError("TypeError", "Cannot write to a Uint8Array backed by an immutable ArrayBuffer");
     const sv = arg(args, 0);
     if (!sv.isString()) return self.throwError("TypeError", "setFromHex requires a string argument");
     // Bound the decode by the current writable length (racy read, re-clamped
@@ -20900,7 +20900,7 @@ fn uint8SetFromHexFn(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
     // Write into the live buffer under the lock so a peer resize()+free can't
     // dangle the target mid-copy (UAF); re-resolve + clamp to the live length.
     {
-        const buf = o.typed_array.?.buffer.array_buffer.?;
+        const buf = o.typedArray().?.buffer.arrayBuffer().?;
         const locked = buf.needsElementLock();
         if (locked) buf.lockBuffer();
         defer if (locked) buf.unlockBuffer();
@@ -20923,7 +20923,7 @@ fn taProtoMethod(comptime name: []const u8) value.NativeFn {
     return struct {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
-            if (!this.isObject() or this.asObj().typed_array == null)
+            if (!this.isObject() or this.asObj().typedArray() == null)
                 return self.throwError("TypeError", "TypedArray.prototype method called on a non-TypedArray");
             return (try typedArrayMethod(self, this.asObj(), name, args)) orelse Value.undef();
         }
@@ -20952,7 +20952,7 @@ fn arrayBufferConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) v
     const proto = try self.protoFromCtor("ArrayBuffer");
     if (len > 0x7fffffff) return self.throwError("RangeError", "Invalid ArrayBuffer length");
     const o = try self.makeArrayBuffer(@intCast(len));
-    o.array_buffer.?.max_byte_length = max;
+    o.arrayBuffer().?.max_byte_length = max;
     if (proto) |pr| o.setProtoAtomic(pr);
     return Value.obj(o);
 }
@@ -20962,8 +20962,8 @@ fn arrayBufferGetter(comptime which: enum { byte_length, max_byte_length, resiza
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             _ = args;
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
-            if (!this.isObject() or this.asObj().array_buffer == null) return self.throwError("TypeError", "ArrayBuffer.prototype accessor called on a non-ArrayBuffer");
-            const ab = this.asObj().array_buffer.?;
+            if (!this.isObject() or this.asObj().arrayBuffer() == null) return self.throwError("TypeError", "ArrayBuffer.prototype accessor called on a non-ArrayBuffer");
+            const ab = this.asObj().arrayBuffer().?;
             // These are %ArrayBuffer.prototype% accessors — a SharedArrayBuffer
             // receiver throws (it has its own byteLength/maxByteLength/growable).
             if (ab.is_shared) return self.throwError("TypeError", "ArrayBuffer.prototype accessor called on a SharedArrayBuffer");
@@ -20983,8 +20983,8 @@ fn arrayBufferGetter(comptime which: enum { byte_length, max_byte_length, resiza
 /// fixed-length immutable buffer and detach the source.
 fn arrayBufferTransferToImmutableFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject() or this.asObj().array_buffer == null) return self.throwError("TypeError", "ArrayBuffer.prototype.transferToImmutable called on a non-ArrayBuffer");
-    const ab = this.asObj().array_buffer.?;
+    if (!this.isObject() or this.asObj().arrayBuffer() == null) return self.throwError("TypeError", "ArrayBuffer.prototype.transferToImmutable called on a non-ArrayBuffer");
+    const ab = this.asObj().arrayBuffer().?;
     if (ab.is_shared) return self.throwError("TypeError", "transferToImmutable cannot be called on a SharedArrayBuffer");
     const new_len: usize = if (args.len > 0 and !args[0].isUndefined()) @intCast(try toIndexArg(self, args[0])) else ab.bytes().len;
     if (ab.isDetached()) return self.throwError("TypeError", "ArrayBuffer is detached");
@@ -20995,8 +20995,8 @@ fn arrayBufferTransferToImmutableFn(ctx: *anyopaque, this: Value, args: []const 
     const was_detached = ab.isDetached();
     if (!was_detached) {
         const n = @min(new_len, ab.bytes().len);
-        @memcpy(out.array_buffer.?.bytes()[0..n], ab.bytes()[0..n]);
-        out.array_buffer.?.immutable = true;
+        @memcpy(out.arrayBuffer().?.bytes()[0..n], ab.bytes()[0..n]);
+        out.arrayBuffer().?.immutable = true;
         ab.setDetached(true);
     }
     ab.unlockBuffer();
@@ -21008,8 +21008,8 @@ fn arrayBufferTransferToImmutableFn(ctx: *anyopaque, this: Value, args: []const 
 /// the resulting buffer is immutable and the source is left intact.
 fn arrayBufferSliceToImmutableFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject() or this.asObj().array_buffer == null) return self.throwError("TypeError", "ArrayBuffer.prototype.sliceToImmutable called on a non-ArrayBuffer");
-    const ab = this.asObj().array_buffer.?;
+    if (!this.isObject() or this.asObj().arrayBuffer() == null) return self.throwError("TypeError", "ArrayBuffer.prototype.sliceToImmutable called on a non-ArrayBuffer");
+    const ab = this.asObj().arrayBuffer().?;
     if (ab.is_shared) return self.throwError("TypeError", "sliceToImmutable cannot be called on a SharedArrayBuffer");
     if (ab.isDetached()) return self.throwError("TypeError", "ArrayBuffer is detached");
     const blen = ab.bytes().len;
@@ -21029,17 +21029,17 @@ fn arrayBufferSliceToImmutableFn(ctx: *anyopaque, this: Value, args: []const Val
         if (ab.isDetached()) return self.throwError("TypeError", "ArrayBuffer is detached");
         const src = ab.bytes();
         if (src.len < end) return self.throwError("RangeError", "ArrayBuffer shrank below resolved slice end");
-        @memcpy(out.array_buffer.?.bytes()[0..count], src[start .. start + count]);
+        @memcpy(out.arrayBuffer().?.bytes()[0..count], src[start .. start + count]);
     }
-    out.array_buffer.?.immutable = true;
+    out.arrayBuffer().?.immutable = true;
     return Value.obj(out);
 }
 
 /// `ArrayBuffer.prototype.resize(newByteLength)` — grow/shrink a resizable buffer.
 fn arrayBufferResizeFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject() or this.asObj().array_buffer == null) return self.throwError("TypeError", "ArrayBuffer.prototype.resize called on a non-ArrayBuffer");
-    const ab = this.asObj().array_buffer.?;
+    if (!this.isObject() or this.asObj().arrayBuffer() == null) return self.throwError("TypeError", "ArrayBuffer.prototype.resize called on a non-ArrayBuffer");
+    const ab = this.asObj().arrayBuffer().?;
     if (ab.is_shared) return self.throwError("TypeError", "ArrayBuffer.prototype.resize called on a SharedArrayBuffer");
     if (ab.max_byte_length == null) return self.throwError("TypeError", "ArrayBuffer is not resizable");
     const new_len = try toIndexArg(self, if (args.len > 0) args[0] else Value.undef());
@@ -21068,8 +21068,8 @@ fn arrayBufferTransferFn(comptime fixed: bool) value.NativeFn {
     return struct {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
-            if (!this.isObject() or this.asObj().array_buffer == null) return self.throwError("TypeError", "ArrayBuffer.prototype.transfer called on a non-ArrayBuffer");
-            const ab = this.asObj().array_buffer.?;
+            if (!this.isObject() or this.asObj().arrayBuffer() == null) return self.throwError("TypeError", "ArrayBuffer.prototype.transfer called on a non-ArrayBuffer");
+            const ab = this.asObj().arrayBuffer().?;
             if (ab.is_shared) return self.throwError("TypeError", "ArrayBuffer.prototype.transfer called on a SharedArrayBuffer");
             const new_len: usize = if (args.len > 0 and !args[0].isUndefined()) @intCast(try toIndexArg(self, args[0])) else ab.bytes().len;
             if (ab.isDetached()) return self.throwError("TypeError", "ArrayBuffer is detached");
@@ -21084,8 +21084,8 @@ fn arrayBufferTransferFn(comptime fixed: bool) value.NativeFn {
             const was_detached = ab.isDetached();
             if (!was_detached) {
                 const n = @min(new_len, ab.bytes().len);
-                @memcpy(out.array_buffer.?.bytes()[0..n], ab.bytes()[0..n]);
-                if (!fixed) out.array_buffer.?.max_byte_length = ab.max_byte_length;
+                @memcpy(out.arrayBuffer().?.bytes()[0..n], ab.bytes()[0..n]);
+                if (!fixed) out.arrayBuffer().?.max_byte_length = ab.max_byte_length;
                 ab.setDetached(true);
             }
             ab.unlockBuffer();
@@ -21100,7 +21100,7 @@ fn arrayBufferIsViewFn(ctx: *anyopaque, this: Value, args: []const Value) value.
     _ = ctx;
     _ = this;
     const v = if (args.len > 0) args[0] else Value.undef();
-    return Value.boolVal(v.isObject() and (v.asObj().typed_array != null or v.asObj().data_view != null));
+    return Value.boolVal(v.isObject() and (v.asObj().typedArray() != null or v.asObj().dataView() != null));
 }
 
 // ===== Intl (ECMA-402) ===============================================
@@ -27381,9 +27381,9 @@ fn sabGetter(comptime which: enum { byte_length, max_byte_length, growable }) va
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             _ = args;
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
-            if (!this.isObject() or this.asObj().array_buffer == null or !this.asObj().array_buffer.?.is_shared)
+            if (!this.isObject() or this.asObj().arrayBuffer() == null or !this.asObj().arrayBuffer().?.is_shared)
                 return self.throwError("TypeError", "SharedArrayBuffer.prototype accessor called on a non-SharedArrayBuffer");
-            const ab = this.asObj().array_buffer.?;
+            const ab = this.asObj().arrayBuffer().?;
             return switch (which) {
                 .byte_length => Value.num(@floatFromInt(ab.bytes().len)),
                 .max_byte_length => Value.num(@floatFromInt(ab.max_byte_length orelse ab.bytes().len)),
@@ -27399,9 +27399,9 @@ fn sabGetter(comptime which: enum { byte_length, max_byte_length, growable }) va
 /// new length immediately.
 fn sabGrowFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject() or this.asObj().array_buffer == null or !this.asObj().array_buffer.?.is_shared)
+    if (!this.isObject() or this.asObj().arrayBuffer() == null or !this.asObj().arrayBuffer().?.is_shared)
         return self.throwError("TypeError", "SharedArrayBuffer.prototype.grow called on a non-SharedArrayBuffer");
-    const ab = this.asObj().array_buffer.?;
+    const ab = this.asObj().arrayBuffer().?;
     if (ab.max_byte_length == null) return self.throwError("TypeError", "SharedArrayBuffer is not growable");
     const new_len = try toIndexArg(self, if (args.len > 0) args[0] else Value.undef());
     const storage = ab.shared orelse return self.throwError("TypeError", "SharedArrayBuffer is not growable");
@@ -27459,9 +27459,9 @@ fn structuredCloneFn(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
             // element storage while this builtin runs; validation itself must
             // not borrow `elements.items` directly.
             for (try tv.asObj().internalElementsSnapshot(self.arena)) |entry| {
-                if (!entry.isObject() or entry.asObj().array_buffer == null)
+                if (!entry.isObject() or entry.asObj().arrayBuffer() == null)
                     return self.throwDOMException("DataCloneError", "only ArrayBuffers are transferable");
-                const ab = entry.asObj().array_buffer.?;
+                const ab = entry.asObj().arrayBuffer().?;
                 if (ab.is_shared) return self.throwDOMException("DataCloneError", "a SharedArrayBuffer is not transferable");
                 if (ab.isDetached()) return self.throwDOMException("DataCloneError", "cannot transfer a detached ArrayBuffer");
                 if (ab.immutable) return self.throwDOMException("DataCloneError", "cannot transfer an immutable ArrayBuffer");
@@ -27475,7 +27475,7 @@ fn structuredCloneFn(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
     // The move: the clone owns a copy of the bytes; the sources detach now
     // (after a fully successful serialize, so a DataCloneError mid-graph
     // leaves the inputs untouched).
-    for (transfer.items) |o| o.array_buffer.?.setDetached(true);
+    for (transfer.items) |o| o.arrayBuffer().?.setDetached(true);
     return structured_clone.deserialize(self, bytes);
 }
 
@@ -27507,8 +27507,8 @@ pub fn makeSharedArrayBufferWrapper(self: *Interpreter, storage: *shared_buffer.
         .is_shared = true,
         .max_byte_length = if (storage.growable) storage.capacity else null,
     };
-    o.array_buffer = ab;
-    errdefer o.array_buffer = null;
+    try o.setArrayBuffer(self.arena, ab);
+    errdefer o.clearArrayBuffer();
     if (self.env.get("SharedArrayBuffer")) |c| if (c.isObject()) {
         o.setProtoAtomic(try self.protoObject(c.asObj()));
     };
@@ -27578,9 +27578,9 @@ fn host262AgentStartFn(ctx: *anyopaque, this: Value, args: []const Value) value.
 fn sabStorageOf(v: Value) ?*shared_buffer.SharedBufferStorage {
     if (!v.isObject()) return null;
     const o = v.asObj();
-    if (o.array_buffer) |ab| return ab.shared;
-    if (o.typed_array) |ta| {
-        const ab = ta.buffer.array_buffer orelse return null;
+    if (o.arrayBuffer()) |ab| return ab.shared;
+    if (o.typedArray()) |ta| {
+        const ab = ta.buffer.arrayBuffer() orelse return null;
         return ab.shared;
     }
     return null;
@@ -27667,8 +27667,8 @@ fn installAgent(a: std.mem.Allocator, rs: *Shape, d: *value.Object) EvalError!vo
 /// a Float or Uint8Clamped view) over an attached buffer; returns the in-bounds
 /// element index from ToIndex(request).
 fn atomicsValidate(self: *Interpreter, ta_v: Value, idx_v: Value, write: bool, only_int32: bool, require_shared: bool) value.HostError!struct { ta: *value.TypedArrayData, i: usize } {
-    if (!ta_v.isObject() or ta_v.asObj().typed_array == null) return self.throwError("TypeError", "Atomics operand must be an integer TypedArray");
-    const ta = ta_v.asObj().typed_array.?;
+    if (!ta_v.isObject() or ta_v.asObj().typedArray() == null) return self.throwError("TypeError", "Atomics operand must be an integer TypedArray");
+    const ta = ta_v.asObj().typedArray().?;
     // ValidateIntegerTypedArray(typedArray, waitable): a waitable op
     // (wait/notify/waitAsync) only accepts Int32Array or BigInt64Array; the
     // kind check runs BEFORE the index is coerced to ToIndex.
@@ -27681,11 +27681,11 @@ fn atomicsValidate(self: *Interpreter, ta_v: Value, idx_v: Value, write: bool, o
     }
     // ValidateSharedIntegerTypedArray(true): `Atomics.wait` additionally
     // requires a SharedArrayBuffer, also checked before the index is coerced.
-    if (require_shared and !ta.buffer.array_buffer.?.is_shared)
+    if (require_shared and !ta.buffer.arrayBuffer().?.is_shared)
         return self.throwError("TypeError", "Typed array for wait/waitAsync/notify must wrap a SharedArrayBuffer.");
     // ValidateTypedArray(write): reject an immutable buffer before the index is
     // coerced (the value isn't coerced yet either).
-    if (write and ta.buffer.array_buffer.?.immutable) return self.throwError("TypeError", "Atomics cannot write to an immutable ArrayBuffer");
+    if (write and ta.buffer.arrayBuffer().?.immutable) return self.throwError("TypeError", "Atomics cannot write to an immutable ArrayBuffer");
     // ValidateTypedArray: a detached or out-of-bounds view (a resizable buffer
     // shrank below a fixed view's extent) is a TypeError, thrown before the index
     // is coerced. currentLength() folds in both, and also re-witnesses a
@@ -27747,7 +27747,7 @@ fn atomicsRawToValue(self: *Interpreter, kind: value.TAKind, raw: u64) value.Hos
 /// Re-check just before the actual read/write — a detached (or now out-of-bounds)
 /// buffer is a TypeError.
 fn atomicsRevalidate(self: *Interpreter, ta: *value.TypedArrayData, i: usize) value.HostError!void {
-    const ab = ta.buffer.array_buffer orelse return self.throwError("TypeError", "ArrayBuffer is detached");
+    const ab = ta.buffer.arrayBuffer() orelse return self.throwError("TypeError", "ArrayBuffer is detached");
     if (ab.isDetached()) return self.throwError("TypeError", "ArrayBuffer is detached");
     const len = ta.currentLength() orelse return self.throwError("TypeError", "TypedArray is out of bounds for atomic access");
     if (i >= len) return self.throwError("TypeError", "TypedArray is out of bounds for atomic access");
@@ -27842,7 +27842,7 @@ fn atomicsWaitFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
         const t_ns: ?u64 = if (std.math.isNan(t_ms) or t_ms == std.math.inf(f64)) null else if (t_ms <= 0) 0 else if (t_ms >= 1e12) null else @intFromFloat(t_ms * std.time.ns_per_ms);
         return jsthread.propWait(self, args, t_ns);
     }
-    if (args.len > 0 and args[0].isObject() and args[0].asObj().typed_array != null and self.gil != null and jsthread.currentThreadId() != 0)
+    if (args.len > 0 and args[0].isObject() and args[0].asObj().typedArray() != null and self.gil != null and jsthread.currentThreadId() != 0)
         return self.throwError("TypeError", "Atomics.wait cannot be called from the current thread.");
     const vd = try atomicsValidate(self, if (args.len > 0) args[0] else Value.undef(), if (args.len > 1) args[1] else Value.undef(), false, true, true);
     const expected_raw = try atomicsCoerceRaw(self, vd.ta, if (args.len > 2) args[2] else Value.undef());
@@ -27858,7 +27858,7 @@ fn atomicsWaitFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
         @intFromFloat(timeout_ms * std.time.ns_per_ms);
     // AgentCanSuspend check runs after every coercion.
     if (!agent.canBlock(self.main_can_block)) return self.throwError("TypeError", "Atomics.wait cannot block this agent");
-    const ab = vd.ta.buffer.array_buffer.?;
+    const ab = vd.ta.buffer.arrayBuffer().?;
     const storage = ab.shared orelse return self.throwError("TypeError", "Atomics.wait requires a shared buffer");
     const offset = vd.ta.byte_offset + vd.i * vd.ta.kind.byteSize();
     // A GIL'd thread must not park holding the VM lock — its notifier needs
@@ -27911,7 +27911,7 @@ fn atomicsNotifyFn(ctx: *anyopaque, this: Value, args: []const Value) value.Host
     }
     // Waiters only ever exist on shared buffers; notify on a non-shared
     // integer view validly wakes nobody.
-    const storage = vd.ta.buffer.array_buffer.?.shared orelse return Value.num(0);
+    const storage = vd.ta.buffer.arrayBuffer().?.shared orelse return Value.num(0);
     const offset = vd.ta.byte_offset + vd.i * vd.ta.kind.byteSize();
     return Value.num(@floatFromInt(agent.notify(storage, offset, count)));
 }
@@ -27940,7 +27940,7 @@ fn atomicsWaitAsyncFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
         null
     else
         @intFromFloat(timeout_ms * std.time.ns_per_ms);
-    const ab = vd.ta.buffer.array_buffer.?;
+    const ab = vd.ta.buffer.arrayBuffer().?;
     const storage = ab.shared orelse return self.throwError("TypeError", "Atomics.waitAsync requires a shared buffer");
     const offset = vd.ta.byte_offset + vd.i * vd.ta.kind.byteSize();
     const res = (try self.newObject()).asObj();
@@ -29090,7 +29090,7 @@ fn cursorIterNext(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
                     val = try arrayIteratorValue(self, kind, i, try self.getProperty(src, try std.fmt.allocPrint(self.arena, "{d}", .{i})));
                     done = false;
                 }
-            } else if (so.typed_array) |ta| {
+            } else if (so.typedArray()) |ta| {
                 const len = ta.currentLength() orelse
                     return self.throwError("TypeError", "Cannot operate on a TypedArray whose buffer is detached or out of bounds");
                 if (i < len) {
@@ -39287,7 +39287,7 @@ fn textEncoderEncodeFn(ctx: *anyopaque, this: Value, args: []const Value) value.
     const s = if (args.len > 0 and !args[0].isUndefined()) try self.toStringV(args[0]) else "";
     const bytes = try wtf8ToUtf8Bytes(self, s);
     const o = try newTypedArray(self, .u8, bytes.len);
-    if (bytes.len > 0) @memcpy(o.typed_array.?.buffer.array_buffer.?.bytes()[0..bytes.len], bytes);
+    if (bytes.len > 0) @memcpy(o.typedArray().?.buffer.arrayBuffer().?.bytes()[0..bytes.len], bytes);
     return Value.obj(o);
 }
 /// `encodeInto(source, destination)` — encode as much of `source` as fits in the
@@ -39298,10 +39298,10 @@ fn textEncoderEncodeIntoFn(ctx: *anyopaque, this: Value, args: []const Value) va
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const s = if (args.len > 0 and !args[0].isUndefined()) try self.toStringV(args[0]) else "";
     const dv = if (args.len > 1) args[1] else Value.undef();
-    if (!dv.isObject() or dv.asObj().typed_array == null or dv.asObj().typed_array.?.kind != .u8)
+    if (!dv.isObject() or dv.asObj().typedArray() == null or dv.asObj().typedArray().?.kind != .u8)
         return self.throwError("TypeError", "TextEncoder.encodeInto destination must be a Uint8Array");
-    const ta = dv.asObj().typed_array.?;
-    const dest = ta.buffer.array_buffer.?.bytes()[ta.byte_offset .. ta.byte_offset + (ta.currentLength() orelse 0)];
+    const ta = dv.asObj().typedArray().?;
+    const dest = ta.buffer.arrayBuffer().?.bytes()[ta.byte_offset .. ta.byte_offset + (ta.currentLength() orelse 0)];
     var read: usize = 0;
     var written: usize = 0;
     var i: usize = 0;
@@ -39394,18 +39394,18 @@ fn textDecoderEncoding(label: []const u8) ?[]const u8 {
 fn bufferSourceBytes(v: Value) ?[]const u8 {
     if (!v.isObject()) return null;
     const o = v.asObj();
-    if (o.typed_array) |ta| {
-        const ab = ta.buffer.array_buffer orelse return null;
+    if (o.typedArray()) |ta| {
+        const ab = ta.buffer.arrayBuffer() orelse return null;
         if (ab.isDetached()) return &.{};
         const len = (ta.currentLength() orelse 0) * ta.kind.byteSize();
         return ab.bytes()[ta.byte_offset .. ta.byte_offset + len];
     }
-    if (o.data_view) |dv| {
-        const ab = dv.buffer.array_buffer orelse return null;
+    if (o.dataView()) |dv| {
+        const ab = dv.buffer.arrayBuffer() orelse return null;
         if (ab.isDetached()) return &.{};
         return ab.bytes()[dv.byte_offset .. dv.byte_offset + (dv.currentByteLength() orelse 0)];
     }
-    if (o.array_buffer) |ab| {
+    if (o.arrayBuffer()) |ab| {
         if (ab.isDetached()) return &.{};
         return ab.bytes();
     }
@@ -41566,7 +41566,7 @@ fn blobIsBlob(v: Value) bool {
     return v.isObject() and v.asObj().getOwn("\x00blobbuf") != null;
 }
 fn blobBytesOf(o: *value.Object) []const u8 {
-    if (o.getOwn("\x00blobbuf")) |bv| if (bv.isObject()) if (bv.asObj().array_buffer) |ab| return ab.bytes();
+    if (o.getOwn("\x00blobbuf")) |bv| if (bv.isObject()) if (bv.asObj().arrayBuffer()) |ab| return ab.bytes();
     return &.{};
 }
 /// Valid Blob/File type: all chars in U+0020..U+007E; lowercased, else "".
@@ -41595,7 +41595,7 @@ fn blobConcatParts(self: *Interpreter, parts_v: Value) EvalError![]u8 {
 }
 fn blobMake(self: *Interpreter, proto_name: []const u8, bytes: []const u8, blob_type: []const u8) EvalError!*value.Object {
     const buf = try self.makeArrayBuffer(bytes.len);
-    if (bytes.len > 0) @memcpy(buf.array_buffer.?.bytes()[0..bytes.len], bytes);
+    if (bytes.len > 0) @memcpy(buf.arrayBuffer().?.bytes()[0..bytes.len], bytes);
     const obj = try gc_mod.allocObj(self.arena);
     obj.* = .{};
     if (self.env.get(proto_name)) |c| if (c.isObject()) {
@@ -41665,7 +41665,7 @@ fn blobArrayBufferFn(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
     if (!blobIsBlob(this)) return self.throwError("TypeError", "Illegal invocation");
     const bytes = blobBytesOf(this.asObj());
     const buf = try self.makeArrayBuffer(bytes.len);
-    if (bytes.len > 0) @memcpy(buf.array_buffer.?.bytes()[0..bytes.len], bytes);
+    if (bytes.len > 0) @memcpy(buf.arrayBuffer().?.bytes()[0..bytes.len], bytes);
     return try promiseResolveValue(self, Value.obj(buf));
 }
 fn blobBytesFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -41674,7 +41674,7 @@ fn blobBytesFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostErro
     if (!blobIsBlob(this)) return self.throwError("TypeError", "Illegal invocation");
     const ta = try newTypedArray(self, .u8, blobBytesOf(this.asObj()).len);
     const bytes = blobBytesOf(this.asObj());
-    if (bytes.len > 0) @memcpy(ta.typed_array.?.buffer.array_buffer.?.bytes()[0..bytes.len], bytes);
+    if (bytes.len > 0) @memcpy(ta.typedArray().?.buffer.arrayBuffer().?.bytes()[0..bytes.len], bytes);
     return try promiseResolveValue(self, Value.obj(ta));
 }
 fn fileConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -41796,7 +41796,7 @@ fn fetchHeadersHasName(self: *Interpreter, headers: *value.Object, lower: []cons
 fn fetchStoreBody(self: *Interpreter, obj: *value.Object, slot: []const u8, bytes: ?[]const u8) EvalError!void {
     if (bytes) |b| {
         const buf = try self.makeArrayBuffer(b.len);
-        if (b.len > 0) @memcpy(buf.array_buffer.?.bytes()[0..b.len], b);
+        if (b.len > 0) @memcpy(buf.arrayBuffer().?.bytes()[0..b.len], b);
         try obj.setOwn(self.arena, self.root_shape, slot, Value.obj(buf));
     } else {
         try obj.setOwn(self.arena, self.root_shape, slot, Value.nul());
@@ -41806,7 +41806,7 @@ fn fetchBodyBytes(this: Value) []const u8 {
     if (!this.isObject()) return &.{};
     const o = this.asObj();
     const bv = o.getOwn("\x00Rbody") orelse o.getOwn("\x00Qbody") orelse return &.{};
-    if (bv.isObject()) if (bv.asObj().array_buffer) |ab| return ab.bytes();
+    if (bv.isObject()) if (bv.asObj().arrayBuffer()) |ab| return ab.bytes();
     return &.{};
 }
 fn fetchMarkUsed(self: *Interpreter, this: Value) EvalError!void {
@@ -41845,7 +41845,7 @@ fn bodyArrayBufferFn(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
     try fetchMarkUsed(self, this);
     const bytes = fetchBodyBytes(this);
     const buf = try self.makeArrayBuffer(bytes.len);
-    if (bytes.len > 0) @memcpy(buf.array_buffer.?.bytes()[0..bytes.len], bytes);
+    if (bytes.len > 0) @memcpy(buf.arrayBuffer().?.bytes()[0..bytes.len], bytes);
     return try promiseResolveValue(self, Value.obj(buf));
 }
 fn bodyBytesFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -41854,7 +41854,7 @@ fn bodyBytesFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostErro
     try fetchMarkUsed(self, this);
     const bytes = fetchBodyBytes(this);
     const ta = try newTypedArray(self, .u8, bytes.len);
-    if (bytes.len > 0) @memcpy(ta.typed_array.?.buffer.array_buffer.?.bytes()[0..bytes.len], bytes);
+    if (bytes.len > 0) @memcpy(ta.typedArray().?.buffer.arrayBuffer().?.bytes()[0..bytes.len], bytes);
     return try promiseResolveValue(self, Value.obj(ta));
 }
 fn bodyBlobFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -42179,16 +42179,16 @@ fn cryptoGetRandomValuesFn(ctx: *anyopaque, this: Value, args: []const Value) va
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const av = if (args.len > 0) args[0] else Value.undef();
-    if (!av.isObject() or av.asObj().typed_array == null)
+    if (!av.isObject() or av.asObj().typedArray() == null)
         return self.throwDOMException("TypeMismatchError", "The provided value is not an integer-typed ArrayBufferView");
-    const ta = av.asObj().typed_array.?;
+    const ta = av.asObj().typedArray().?;
     if (ta.kind == .f16 or ta.kind == .f32 or ta.kind == .f64)
         return self.throwDOMException("TypeMismatchError", "The provided ArrayBufferView is of a floating-point type");
     const len = (ta.currentLength() orelse 0) * ta.kind.byteSize();
     // getRandomValues quota: the byte length may not exceed 65536.
     if (len > 65536) return self.throwDOMException("QuotaExceededError", "The ArrayBufferView's byte length exceeds the 65536 quota");
     if (len > 0) {
-        const dest = ta.buffer.array_buffer.?.bytes()[ta.byte_offset .. ta.byte_offset + len];
+        const dest = ta.buffer.arrayBuffer().?.bytes()[ta.byte_offset .. ta.byte_offset + len];
         agent.engineIo().randomSecure(dest) catch return self.throwError("Error", "crypto.getRandomValues: secure randomness unavailable");
     }
     return av;
@@ -42915,7 +42915,7 @@ pub fn hasProperty(o: *value.Object, name: []const u8) bool {
         // (an inherited array element makes the index present on the receiver).
         if (value.canonicalIndex(name)) |idx| {
             if (c.is_array and c.denseElementPresent(idx)) return true;
-            if (c.typed_array) |ta| if (idx < (ta.currentLength() orelse 0)) return true;
+            if (c.typedArray()) |ta| if (idx < (ta.currentLength() orelse 0)) return true;
             if (c.boxedPrimitive()) |p| if (p.isString() and idx < Interpreter.utf16LenOfString(p.asStr())) return true;
         }
         cur = c.protoAtomic();
@@ -42990,7 +42990,7 @@ pub fn objectHasOwn(o: *value.Object, name: []const u8) bool {
     if (moduleNsOf(o)) |ns| return moduleNsHas(ns, name);
     // A TypedArray's integer-indexed elements: a canonical numeric key is an own
     // property iff it is a valid index (so "-0"/out-of-bounds/fractional are not).
-    if (o.typed_array) |ta| {
+    if (o.typedArray()) |ta| {
         if (canonicalNumericIndexString(name)) |n| return isValidIntegerIndex(ta, n);
     }
     if (o.getOwn(name) != null or o.getAccessor(name) != null) return true;

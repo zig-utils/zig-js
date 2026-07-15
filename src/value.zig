@@ -218,7 +218,7 @@ pub const ArrayBufferData = struct {
 
 /// Read typed-array element `i` (within bounds, buffer attached) as a Number.
 pub fn taRead(ta: *const TypedArrayData, i: usize) Value {
-    const buf = ta.buffer.array_buffer.?;
+    const buf = ta.buffer.arrayBuffer().?;
     buf.lockBuffer();
     defer buf.unlockBuffer();
     const bytes = buf.bytes();
@@ -247,7 +247,7 @@ pub fn taRead(ta: *const TypedArrayData, i: usize) Value {
 /// Read a BigInt typed-array element `i` as an `i128` (the raw 64-bit value,
 /// sign-extended for BigInt64Array).
 pub fn taReadBig(ta: *const TypedArrayData, i: usize) i128 {
-    const buf = ta.buffer.array_buffer.?;
+    const buf = ta.buffer.arrayBuffer().?;
     buf.lockBuffer();
     defer buf.unlockBuffer();
     const bytes = buf.bytes();
@@ -262,7 +262,7 @@ pub fn taReadBig(ta: *const TypedArrayData, i: usize) i128 {
 
 /// Write a BigInt typed-array element `i` from an `i128` (the low 64 bits).
 pub fn taWriteBig(ta: *const TypedArrayData, i: usize, val: i128) void {
-    const buf = ta.buffer.array_buffer.?;
+    const buf = ta.buffer.arrayBuffer().?;
     buf.lockBuffer();
     defer buf.unlockBuffer();
     const bytes = buf.bytes();
@@ -287,7 +287,7 @@ fn taToInt(comptime T: type, num: f64) T {
 /// Write Number `num` into typed-array element `i`, coercing to the element type
 /// (integer wrap, Uint8Clamped rounding/clamping, float narrowing).
 pub fn taWrite(ta: *const TypedArrayData, i: usize, num: f64) void {
-    const buf = ta.buffer.array_buffer.?;
+    const buf = ta.buffer.arrayBuffer().?;
     buf.lockBuffer();
     defer buf.unlockBuffer();
     const bytes = buf.bytes();
@@ -340,7 +340,7 @@ pub fn taWrite(ta: *const TypedArrayData, i: usize, num: f64) void {
 
 /// The element's byte address, or null when the view is out of bounds.
 fn taElemPtr(ta: *const TypedArrayData, i: usize) ?[*]u8 {
-    const b = ta.buffer.array_buffer.?.bytes();
+    const b = ta.buffer.arrayBuffer().?.bytes();
     const off = ta.byte_offset + i * ta.kind.byteSize();
     if (off + ta.kind.byteSize() > b.len) return null;
     return b.ptr + off;
@@ -402,7 +402,7 @@ pub fn taNumToRaw(kind: TAKind, num: f64) u64 {
 }
 
 pub fn taAtomicLoadRaw(ta: *const TypedArrayData, i: usize) u64 {
-    const buf = ta.buffer.array_buffer.?;
+    const buf = ta.buffer.arrayBuffer().?;
     const locked = atomicNeedsLock(buf);
     if (locked) buf.lockBuffer();
     defer {
@@ -418,7 +418,7 @@ pub fn taAtomicLoadRaw(ta: *const TypedArrayData, i: usize) u64 {
 }
 
 pub fn taAtomicStoreRaw(ta: *const TypedArrayData, i: usize, raw: u64) void {
-    const buf = ta.buffer.array_buffer.?;
+    const buf = ta.buffer.arrayBuffer().?;
     const locked = atomicNeedsLock(buf);
     if (locked) buf.lockBuffer();
     defer {
@@ -436,7 +436,7 @@ pub fn taAtomicStoreRaw(ta: *const TypedArrayData, i: usize, raw: u64) void {
 /// One atomic read-modify-write; returns the previous raw bits. Integer ops
 /// wrap modulo the element width, matching the spec's modular arithmetic.
 pub fn taAtomicRmwRaw(comptime op: std.builtin.AtomicRmwOp, ta: *const TypedArrayData, i: usize, raw: u64) u64 {
-    const buf = ta.buffer.array_buffer.?;
+    const buf = ta.buffer.arrayBuffer().?;
     const locked = atomicNeedsLock(buf);
     if (locked) buf.lockBuffer();
     defer {
@@ -454,7 +454,7 @@ pub fn taAtomicRmwRaw(comptime op: std.builtin.AtomicRmwOp, ta: *const TypedArra
 /// One atomic compare-exchange; returns the previous raw bits (== `expected`
 /// when the swap happened, per `Atomics.compareExchange` semantics).
 pub fn taAtomicCasRaw(ta: *const TypedArrayData, i: usize, expected: u64, replacement: u64) u64 {
-    const buf = ta.buffer.array_buffer.?;
+    const buf = ta.buffer.arrayBuffer().?;
     const locked = atomicNeedsLock(buf);
     if (locked) buf.lockBuffer();
     defer {
@@ -495,7 +495,7 @@ pub const TypedArrayData = struct {
     /// view recomputes from the live buffer size; a fixed view keeps `length`
     /// unless its range no longer fits.
     pub fn currentLength(self: *const TypedArrayData) ?usize {
-        const buf = self.buffer.array_buffer orelse return null;
+        const buf = self.buffer.arrayBuffer() orelse return null;
         if (buf.isDetached()) return null;
         const esz = self.kind.byteSize();
         if (self.byte_offset > buf.bytes().len) return null;
@@ -517,7 +517,7 @@ pub const DataViewData = struct {
     /// The view's current byte length, or null if it is out of bounds (the
     /// resizable buffer shrank below it) or detached.
     pub fn currentByteLength(self: *const DataViewData) ?usize {
-        const buf = self.buffer.array_buffer orelse return null;
+        const buf = self.buffer.arrayBuffer() orelse return null;
         if (buf.isDetached()) return null;
         if (self.byte_offset > buf.bytes().len) return null;
         if (self.track_length) return buf.bytes().len - self.byte_offset;
@@ -621,6 +621,7 @@ pub const ObjectRareTag = enum {
     iter_helper,
     bound_function,
     proxy,
+    buffer_view,
 };
 
 pub const ObjectRareState = union(ObjectRareTag) {
@@ -644,6 +645,11 @@ pub const ObjectRareState = union(ObjectRareTag) {
     proxy: struct {
         target: ?*Object = null,
         handler: ?*Object = null,
+    },
+    buffer_view: struct {
+        array_buffer: ?*ArrayBufferData = null,
+        typed_array: ?*TypedArrayData = null,
+        data_view: ?*DataViewData = null,
     },
 };
 
@@ -940,15 +946,8 @@ pub const Object = struct {
     /// but `HasProperty`/iteration treat the index as not present. Lazily allocated.
     holes: ?*std.AutoHashMapUnmanaged(usize, void) = null,
 
-    /// `ArrayBuffer` backing store (non-null marks an ArrayBuffer object).
-    array_buffer: ?*ArrayBufferData = null,
-    /// Typed-array view (non-null marks a `Int8Array`/…/`Float64Array`): an
-    /// integer-indexed view over `buffer`'s bytes. Index get/set read/write the
-    /// underlying bytes coerced to/from the element type.
-    typed_array: ?*TypedArrayData = null,
-    /// `DataView` view (non-null marks a DataView): a typed read/write window
-    /// over `buffer`'s bytes with per-access endianness.
-    data_view: ?*DataViewData = null,
+    // ArrayBuffer, TypedArray, and DataView are mutually exclusive exotic
+    // object kinds; their backing pointer lives in the rare-state sidecar.
     /// Marks a `WeakRef` instance. The target is a weak GC edge, so collection
     /// may clear it while the WeakRef object itself remains branded.
     is_weak_ref: bool = false,
@@ -1264,6 +1263,70 @@ pub const Object = struct {
             },
             else => {},
         }
+    }
+
+    pub inline fn arrayBuffer(self: *const Object) ?*ArrayBufferData {
+        const cold = self.cold orelse return null;
+        return switch (cold.rare) {
+            .buffer_view => |state| state.array_buffer,
+            else => null,
+        };
+    }
+
+    pub inline fn typedArray(self: *const Object) ?*TypedArrayData {
+        const cold = self.cold orelse return null;
+        return switch (cold.rare) {
+            .buffer_view => |state| state.typed_array,
+            else => null,
+        };
+    }
+
+    pub inline fn dataView(self: *const Object) ?*DataViewData {
+        const cold = self.cold orelse return null;
+        return switch (cold.rare) {
+            .buffer_view => |state| state.data_view,
+            else => null,
+        };
+    }
+
+    fn bufferViewState(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator.Error!*@FieldType(ObjectRareState, "buffer_view") {
+        return self.ensureRare(fallback, .buffer_view, .{});
+    }
+
+    pub fn setArrayBuffer(self: *Object, fallback: std.mem.Allocator, data: *ArrayBufferData) std.mem.Allocator.Error!void {
+        const state = try self.bufferViewState(fallback);
+        state.array_buffer = data;
+    }
+
+    pub fn setTypedArray(self: *Object, fallback: std.mem.Allocator, data: *TypedArrayData) std.mem.Allocator.Error!void {
+        const state = try self.bufferViewState(fallback);
+        state.typed_array = data;
+    }
+
+    pub fn setDataView(self: *Object, fallback: std.mem.Allocator, data: *DataViewData) std.mem.Allocator.Error!void {
+        const state = try self.bufferViewState(fallback);
+        state.data_view = data;
+    }
+
+    pub fn clearArrayBuffer(self: *Object) void {
+        if (self.cold) |cold| switch (cold.rare) {
+            .buffer_view => |*state| state.array_buffer = null,
+            else => {},
+        };
+    }
+
+    pub fn clearTypedArray(self: *Object) void {
+        if (self.cold) |cold| switch (cold.rare) {
+            .buffer_view => |*state| state.typed_array = null,
+            else => {},
+        };
+    }
+
+    pub fn clearDataView(self: *Object) void {
+        if (self.cold) |cold| switch (cold.rare) {
+            .buffer_view => |*state| state.data_view = null,
+            else => {},
+        };
     }
 
     pub fn setErrorName(self: *Object, fallback: std.mem.Allocator, name: []const u8) std.mem.Allocator.Error!void {

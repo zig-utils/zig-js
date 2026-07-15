@@ -2272,8 +2272,8 @@ pub fn isPropertyMode(self: *Interpreter, v: Value) bool {
         !v.asObj().is_symbol and
         !v.asObj().is_bigint and
         v.asObj().proxyTarget() == null and
-        v.asObj().typed_array == null and
-        v.asObj().data_view == null;
+        v.asObj().typedArray() == null and
+        v.asObj().dataView() == null;
 }
 
 fn sameValueZero(a: Value, b: Value) bool {
@@ -3255,7 +3255,7 @@ fn threadRestrictFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value
     const plain = o.js_func == null and o.native == null and o.hostCallback() == null and o.boundFunction() == null and
         o.generator() == null and o.proxyTarget() == null and !o.proxy_revoked and
         o != (self.global_object orelse o) and
-        o.typed_array == null and o.data_view == null and o.array_buffer == null and
+        o.typedArray() == null and o.dataView() == null and o.arrayBuffer() == null and
         !o.is_date and !o.is_regex and !o.is_map and !o.is_set and !o.is_weak and
         o.promise == null and !o.is_symbol and !o.is_bigint and o.moduleNs() == null and
         o.weakRefTarget() == null and !o.is_arguments and !o.is_error and

@@ -372,7 +372,7 @@ test "worker queue rejection releases SAB frame ownership" {
     defer ctx.destroy();
     var machine = ctx.interpreter();
     const sab = try ctx.evaluate("new SharedArrayBuffer(8)");
-    const storage = sab.asObj().array_buffer.?.shared.?;
+    const storage = sab.asObj().arrayBuffer().?.shared.?;
     const retain_count = storage.retainCount();
     const w = try Worker.spawnWith("", .{
         .inbox_limits = .{ .max_queued_bytes = 0 },

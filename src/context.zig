@@ -11022,8 +11022,8 @@ test "structured clone rejects forged replayed and trailing SAB tokens" {
 
     const cloned = try structured_clone.deserialize(&machine, valid);
     try std.testing.expect(cloned.isObject());
-    try std.testing.expect(cloned.asObj().array_buffer != null);
-    try std.testing.expect(cloned.asObj().array_buffer.?.is_shared);
+    try std.testing.expect(cloned.asObj().arrayBuffer() != null);
+    try std.testing.expect(cloned.asObj().arrayBuffer().?.is_shared);
     try std.testing.expectError(error.Throw, structured_clone.deserialize(&machine, valid));
 
     const trailing_sab = try structured_clone.serialize(&machine, std.testing.allocator, sab);
@@ -11063,7 +11063,7 @@ test "structured clone frame limit releases retained SAB tokens" {
     defer ctx.destroy();
     var machine = ctx.interpreter();
     const sab = try ctx.evaluate("globalThis.__limitedCloneSab = new SharedArrayBuffer(8)");
-    const storage = sab.asObj().array_buffer.?.shared.?;
+    const storage = sab.asObj().arrayBuffer().?.shared.?;
     const retain_count = storage.retainCount();
     const graph = try ctx.evaluate(
         "[__limitedCloneSab, 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx']",

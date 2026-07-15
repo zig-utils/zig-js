@@ -397,7 +397,7 @@ const Serializer = struct {
         try s.memo.put(s.w.gpa, o, object_id);
         s.next_id = next_id;
 
-        if (o.array_buffer) |ab| {
+        if (o.arrayBuffer()) |ab| {
             if (ab.is_shared) {
                 const storage = ab.shared orelse return s.throwClone("DataCloneError: malformed SharedArrayBuffer");
                 if (@sizeOf(SharedRefToken) > s.w.limit -| s.w.out.items.len) {
@@ -427,7 +427,7 @@ const Serializer = struct {
             try s.writeStr(ab.bytes());
             return;
         }
-        if (o.typed_array) |ta| {
+        if (o.typedArray()) |ta| {
             try s.w.tag(.typed_array);
             try s.w.byte(@intFromEnum(ta.kind));
             try s.serObject(ta.buffer, try s.childDepth(depth));
@@ -436,7 +436,7 @@ const Serializer = struct {
             try s.w.byte(@intFromBool(ta.track_length));
             return;
         }
-        if (o.data_view) |dv| {
+        if (o.dataView()) |dv| {
             try s.w.tag(.data_view);
             try s.serObject(dv.buffer, try s.childDepth(depth));
             try s.w.int(u64, try s.wireU64(dv.byte_offset, "DataCloneError: DataView offset is too large"));
@@ -506,7 +506,7 @@ const Serializer = struct {
             // Blob/File: copy the byte payload, MIME type, and (File) name/mtime.
             const is_file = o.getOwn("\x00filename") != null;
             try s.w.tag(if (is_file) .file else .blob);
-            const bytes: []const u8 = if (bufv.isObject()) (if (bufv.asObj().array_buffer) |ab| ab.bytes() else &.{}) else &.{};
+            const bytes: []const u8 = if (bufv.isObject()) (if (bufv.asObj().arrayBuffer()) |ab| ab.bytes() else &.{}) else &.{};
             try s.writeStr(bytes);
             const tv = o.getOwn("\x00blobtype");
             try s.writeStr(if (tv != null and tv.?.isString()) tv.?.asStr() else "");
@@ -1059,9 +1059,9 @@ const Deserializer = struct {
                 const bytes = d.r.str() catch return d.fail();
                 const o = try d.self.makeArrayBuffer(bytes.len);
                 try d.objs.append(a, o);
-                @memcpy(o.array_buffer.?.bytes()[0..bytes.len], bytes);
+                @memcpy(o.arrayBuffer().?.bytes()[0..bytes.len], bytes);
                 if (max_raw != std.math.maxInt(u64))
-                    o.array_buffer.?.max_byte_length = std.math.cast(usize, max_raw) orelse return d.fail();
+                    o.arrayBuffer().?.max_byte_length = std.math.cast(usize, max_raw) orelse return d.fail();
                 return Value.obj(o);
             },
             .shared_array_buffer => {
@@ -1084,12 +1084,12 @@ const Deserializer = struct {
                 const o = (try d.self.newObject()).asObj();
                 try d.objs.append(a, o);
                 const buf = try d.deser(try d.childDepth(depth));
-                if (!buf.isObject() or buf.asObj().array_buffer == null) return d.fail();
+                if (!buf.isObject() or buf.asObj().arrayBuffer() == null) return d.fail();
                 const byte_offset = try d.readUsize();
                 const length = try d.readUsize();
                 const track_length = try d.readFlag();
                 const element_size = kind.byteSize();
-                const ab = buf.asObj().array_buffer.?;
+                const ab = buf.asObj().arrayBuffer().?;
                 ab.lockBuffer();
                 const buffer_len = ab.bytes().len;
                 const resizable = ab.max_byte_length != null;
@@ -1109,7 +1109,7 @@ const Deserializer = struct {
                     .kind = kind,
                     .track_length = track_length,
                 };
-                o.typed_array = ta;
+                try o.setTypedArray(a, ta);
                 if (d.protoFor(kind.ctorName())) |p| o.proto = p;
                 return Value.obj(o);
             },
@@ -1117,11 +1117,11 @@ const Deserializer = struct {
                 const o = (try d.self.newObject()).asObj();
                 try d.objs.append(a, o);
                 const buf = try d.deser(try d.childDepth(depth));
-                if (!buf.isObject() or buf.asObj().array_buffer == null) return d.fail();
+                if (!buf.isObject() or buf.asObj().arrayBuffer() == null) return d.fail();
                 const byte_offset = try d.readUsize();
                 const byte_length = try d.readUsize();
                 const track_length = try d.readFlag();
-                const ab = buf.asObj().array_buffer.?;
+                const ab = buf.asObj().arrayBuffer().?;
                 ab.lockBuffer();
                 const buffer_len = ab.bytes().len;
                 const resizable = ab.max_byte_length != null;
@@ -1137,7 +1137,7 @@ const Deserializer = struct {
                     .byte_length = byte_length,
                     .track_length = track_length,
                 };
-                o.data_view = dv;
+                try o.setDataView(a, dv);
                 if (d.protoFor("DataView")) |p| o.proto = p;
                 return Value.obj(o);
             },

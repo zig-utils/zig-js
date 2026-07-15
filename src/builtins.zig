@@ -796,7 +796,7 @@ fn enumerableOwnProperties(self: *Interpreter, arg0: Value, kind: EnumKind) Host
         } else if (o.boxedPrimitive() != null and o.boxedPrimitive().?.isString())
             // A String wrapper exposes only its char indices as enumerable own keys.
             (arrayIndexOf(k) != null and arrayIndexOf(k).? < o.boxedPrimitive().?.asStr().len)
-        else if ((o.is_array or o.typed_array != null) and std.mem.eql(u8, k, "length"))
+        else if ((o.is_array or o.typedArray() != null) and std.mem.eql(u8, k, "length"))
             // An Array's / TypedArray's "length" is a non-enumerable own property.
             false
         else
@@ -873,7 +873,7 @@ pub fn objectAssign(ctx: *anyopaque, this: Value, args: []const Value) HostError
                 // A String wrapper's only enumerable own keys are its char indices
                 // ("length" and inherited methods are non-enumerable).
                 (arrayIndexOf(k) != null and arrayIndexOf(k).? < from.boxedPrimitive().?.asStr().len)
-            else if ((from.is_array or from.typed_array != null) and std.mem.eql(u8, k, "length"))
+            else if ((from.is_array or from.typedArray() != null) and std.mem.eql(u8, k, "length"))
                 false
             else
                 ((interpreter.objectHasOwn(from, k) or (if (from.is_array) blk: {
@@ -1611,7 +1611,7 @@ pub fn defineOneResult(self: *Interpreter, target: *value.Object, key: []const u
     // only be (re)defined as a configurable, enumerable, writable data property
     // at a valid index; anything else returns false (and Object.defineProperty
     // then throws). The value, if present, is written through [[Set]].
-    if (target.typed_array) |ta| {
+    if (target.typedArray()) |ta| {
         if (interpreter.canonicalNumericIndexString(key)) |n| {
             if (!interpreter.isValidIntegerIndex(ta, n)) return false;
             if (get != null or set != null) return false;
@@ -1933,9 +1933,9 @@ fn applyProperties(self: *Interpreter, target: *value.Object, props: Value) Host
 /// A TypedArray's [[PreventExtensions]] returns false (→ Object.preventExtensions/
 /// seal/freeze throw, Reflect.preventExtensions returns false) when this is false.
 pub fn isTypedArrayFixedLength(o: *value.Object) bool {
-    const ta = o.typed_array orelse return true;
+    const ta = o.typedArray() orelse return true;
     if (ta.track_length) return false;
-    const ab = ta.buffer.array_buffer orelse return true;
+    const ab = ta.buffer.arrayBuffer() orelse return true;
     if (ab.max_byte_length != null and !ab.is_shared) return false;
     return true;
 }
@@ -1992,7 +1992,7 @@ fn setIntegrityLevel(ctx: *anyopaque, self: *Interpreter, o: *value.Object, free
     // tracking, or over a non-shared resizable buffer; a growable SHARED buffer's
     // view stays fixed-length), and a non-empty view can't have its integer-indexed
     // elements redefined non-configurable, so the per-property step throws.
-    if (o.typed_array) |ta| {
+    if (o.typedArray()) |ta| {
         if (!isTypedArrayFixedLength(o))
             return self.throwError("TypeError", "Cannot seal or freeze a TypedArray with elements");
         if ((ta.currentLength() orelse 0) > 0) {
@@ -2099,7 +2099,7 @@ fn isLocked(self: *Interpreter, ov: Value, frozen: bool) HostError!bool {
         return true;
     }
     if (o.isExtensible()) return false;
-    if (o.typed_array) |ta| {
+    if (o.typedArray()) |ta| {
         if ((ta.currentLength() orelse 0) > 0) return false;
     }
     // Dense element indices must each be non-configurable (and, for frozen,
@@ -2328,7 +2328,7 @@ pub fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, this: Value, args: []cons
 
     // Integer-Indexed Exotic [[GetOwnProperty]]: a valid index is a configurable,
     // enumerable, writable data property; any other canonical numeric key is absent.
-    if (o.typed_array) |ta| {
+    if (o.typedArray()) |ta| {
         if (interpreter.canonicalNumericIndexString(key)) |n| {
             if (!interpreter.isValidIntegerIndex(ta, n)) return Value.undef();
             const el = try self.getProperty(ov, key);

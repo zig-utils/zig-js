@@ -171,8 +171,8 @@ pub fn traceObject(o: *Object, v: anytype) void {
     jsthread.traceNativePrivateData(o, v);
     vm.traceNativePrivateData(o, v);
     // The viewed ArrayBuffer object keeps a TypedArray/DataView's storage alive.
-    if (o.typed_array) |ta| v.mark(ta.buffer);
-    if (o.data_view) |dv| v.mark(dv.buffer);
+    if (o.typedArray()) |ta| v.mark(ta.buffer);
+    if (o.dataView()) |dv| v.mark(dv.buffer);
 }
 
 pub fn traceObjectEphemeron(o: *Object, v: anytype) void {
@@ -355,16 +355,16 @@ fn finalizeObjectBacking(o: *Object, a: std.mem.Allocator) usize {
         released += 1;
     }
     if (flags.typed_array) {
-        if (o.typed_array) |ta| {
+        if (o.typedArray()) |ta| {
             a.destroy(ta);
-            o.typed_array = null;
+            o.clearTypedArray();
         }
         released += 1;
     }
     if (flags.data_view) {
-        if (o.data_view) |dv| {
+        if (o.dataView()) |dv| {
             a.destroy(dv);
-            o.data_view = null;
+            o.clearDataView();
         }
         released += 1;
     }
@@ -879,14 +879,9 @@ pub const Binding = struct {
         switch (kind) {
             .object => {
                 const o: *Object = @ptrCast(@alignCast(cell));
-                if (hasObjectBacking(o.backing_flags) or o.private_brands != null) {
-                    const released = finalizeObjectBacking(o, o.backing_allocator orelse self.context.gpa);
-                    if (released > 0) {
-                        if (self.context.gc_finalizer_stats_out) |stats| stats.object_backing_releases += released;
-                        _ = @atomicRmw(usize, &self.context.gc_object_backing_stores_live, .Sub, released, .monotonic);
-                    }
-                }
-                if (o.array_buffer) |ab| {
+                // Buffer metadata now lives in the cold sidecar. Release it
+                // before finalizeObjectBacking destroys that sidecar.
+                if (o.arrayBuffer()) |ab| {
                     if (self.context.gc_finalizer_stats_out) |stats| {
                         stats.array_buffers += 1;
                         if (ab.shared != null) stats.shared_array_buffers += 1;
@@ -902,7 +897,14 @@ pub const Binding = struct {
                     }
                     if (ab.gc_owned) {
                         self.context.gpa.destroy(ab);
-                        o.array_buffer = null;
+                        o.clearArrayBuffer();
+                    }
+                }
+                if (hasObjectBacking(o.backing_flags) or o.private_brands != null) {
+                    const released = finalizeObjectBacking(o, o.backing_allocator orelse self.context.gpa);
+                    if (released > 0) {
+                        if (self.context.gc_finalizer_stats_out) |stats| stats.object_backing_releases += released;
+                        _ = @atomicRmw(usize, &self.context.gc_object_backing_stores_live, .Sub, released, .monotonic);
                     }
                 }
             },
