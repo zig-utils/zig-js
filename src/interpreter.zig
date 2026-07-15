@@ -7580,9 +7580,9 @@ pub const Interpreter = struct {
         // source / flags live in internal slots; `lastIndex` is the one real own
         // data property (writable). source/flags/global/… resolve via the
         // RegExp.prototype accessor getters.
-        const cold = try o.ensureCold(self.arena);
-        cold.regex_source = try self.arena.dupe(u8, source);
-        cold.regex_flags = try self.arena.dupe(u8, flags);
+        const regex_state = try o.ensureRegexState(self.arena);
+        regex_state.source = try self.arena.dupe(u8, source);
+        regex_state.flags = try self.arena.dupe(u8, flags);
         try self.setProp(o, "lastIndex", Value.num(0));
         try o.setAttr(self.arena, "lastIndex", .{ .writable = true, .enumerable = false, .configurable = false });
         if (self.new_target.isObject()) {
@@ -7642,7 +7642,8 @@ pub const Interpreter = struct {
         const compiled = try self.arena.create(regex.Regex);
         compiled.* = regex.Regex.compileWithFlags(self.arena, src, cf) catch
             return self.throwError("SyntaxError", "invalid regular expression");
-        o.cold.?.regex_compiled = @ptrCast(compiled);
+        const regex_state = try o.ensureRegexState(self.arena);
+        regex_state.compiled = @ptrCast(compiled);
         return compiled;
     }
 
@@ -7682,14 +7683,14 @@ pub const Interpreter = struct {
             const old_source = o.regexSource();
             const old_flags = o.regexFlags();
             const old_compiled = o.regexCompiled();
-            const cold = o.cold.?;
-            cold.regex_source = try self.arena.dupe(u8, source);
-            cold.regex_flags = try self.arena.dupe(u8, flags);
-            cold.regex_compiled = null;
+            const regex_state = try o.ensureRegexState(self.arena);
+            regex_state.source = try self.arena.dupe(u8, source);
+            regex_state.flags = try self.arena.dupe(u8, flags);
+            regex_state.compiled = null;
             _ = self.compileRegex(o) catch |err| {
-                cold.regex_source = old_source;
-                cold.regex_flags = old_flags;
-                cold.regex_compiled = old_compiled;
+                regex_state.source = old_source;
+                regex_state.flags = old_flags;
+                regex_state.compiled = old_compiled;
                 return err;
             };
             try self.setRegExpLastIndex(o, 0);

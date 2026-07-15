@@ -627,6 +627,7 @@ pub const ObjectRareTag = enum {
     constructor,
     sparse_array,
     js_function,
+    regex,
 };
 
 pub const ObjectRareState = union(ObjectRareTag) {
@@ -661,6 +662,7 @@ pub const ObjectRareState = union(ObjectRareTag) {
     constructor: struct { ptr: ?*Object = null },
     sparse_array: struct { holes: ?*std.AutoHashMapUnmanaged(usize, void) = null },
     js_function: struct { ptr: ?*anyopaque = null },
+    regex: ObjectRegexState,
 };
 
 pub const ObjectColdState = struct {
@@ -671,9 +673,6 @@ pub const ObjectColdState = struct {
     arg_map_severed: []std.atomic.Value(bool) = &.{},
     weak_entries: std.ArrayListUnmanaged(WeakCollectionEntry) = .empty,
     weak_index: std.AutoHashMapUnmanaged(usize, usize) = .empty,
-    regex_source: []const u8 = "",
-    regex_flags: []const u8 = "",
-    regex_compiled: ?*anyopaque = null,
     finalization_callback: Value = Value.undef(),
     finalization_records: std.ArrayListUnmanaged(FinalizationRecord) = .empty,
 };
@@ -703,6 +702,12 @@ pub const ObjectPrimitiveState = extern union {
         value: i128 = 0,
         text: ObjectOptionalBytes = .{},
     },
+};
+
+pub const ObjectRegexState = struct {
+    source: []const u8 = "",
+    flags: []const u8 = "",
+    compiled: ?*anyopaque = null,
 };
 
 pub const ObjectBackingFlags = packed struct {
@@ -1431,15 +1436,31 @@ pub const Object = struct {
     }
 
     pub inline fn regexSource(self: *const Object) []const u8 {
-        return if (self.cold) |cold| cold.regex_source else "";
+        const cold = self.cold orelse return "";
+        return switch (cold.rare) {
+            .regex => |state| state.source,
+            else => "",
+        };
     }
 
     pub inline fn regexFlags(self: *const Object) []const u8 {
-        return if (self.cold) |cold| cold.regex_flags else "";
+        const cold = self.cold orelse return "";
+        return switch (cold.rare) {
+            .regex => |state| state.flags,
+            else => "",
+        };
     }
 
     pub inline fn regexCompiled(self: *const Object) ?*anyopaque {
-        return if (self.cold) |cold| cold.regex_compiled else null;
+        const cold = self.cold orelse return null;
+        return switch (cold.rare) {
+            .regex => |state| state.compiled,
+            else => null,
+        };
+    }
+
+    pub fn ensureRegexState(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator.Error!*ObjectRegexState {
+        return self.ensureRare(fallback, .regex, .{});
     }
 
     pub inline fn finalizationCallback(self: *const Object) Value {
