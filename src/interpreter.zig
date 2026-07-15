@@ -2230,7 +2230,7 @@ pub const Interpreter = struct {
     /// `code` derives from it, and `message` is the (possibly empty) detail. It
     /// is error-like (`is_error`) and chains through %DOMException.prototype% to
     /// %Error.prototype%; `name`/`message`/`code` are read by the prototype
-    /// accessors from `error_name` and the hidden `\x00dommsg` slot.
+    /// accessors from cold error metadata and the hidden `\x00dommsg` slot.
     pub fn makeDOMException(self: *Interpreter, name: []const u8, message: []const u8) EvalError!Value {
         const obj = try gc_mod.allocObj(self.arena);
         obj.* = .{ .is_error = true };
@@ -6171,8 +6171,9 @@ pub const Interpreter = struct {
     }
 
     /// `new Callee(args)`: builtin error constructors mint an error instance;
-    /// JS functions get a fresh `this` object (tagged with `ctor_ref` for
-    /// `instanceof`) and may override it by explicitly returning an object.
+    /// JS functions get a fresh `this` object (tagged with a constructor
+    /// reference for `instanceof`) and may override it by explicitly returning
+    /// an object.
     fn evalNew(self: *Interpreter, callee_node: *Node, arg_nodes: []*Node) EvalError!Value {
         const callee = try self.eval(callee_node);
         const args = try self.evalArgs(arg_nodes);
@@ -29224,7 +29225,7 @@ fn defineGlobalFnC(env: *Environment, rs: *Shape, name: []const u8, len: usize, 
     // A constructor's `.prototype` is an own, non-writable/-enumerable/
     // -configurable data property (so `getOwnPropertyDescriptor(C, "prototype")`
     // and reflection see it). Methods still dispatch via `builtinMethod`, and
-    // `instanceof` keeps working through its `ctor_ref`/`error_ctor` fallbacks.
+    // `instanceof` keeps working through its `ctorRef()`/`errorCtor()` fallbacks.
     if (is_ctor) {
         const proto = try gc_mod.allocObj(env.arena);
         proto.* = .{};
@@ -39161,7 +39162,7 @@ fn domExceptionCode(name: []const u8) u16 {
 }
 
 // `name`/`message`/`code` are WebIDL attributes (prototype accessors), reading
-// per-instance state: `name` from the stored `error_name`, `message` from a
+// per-instance state: `name` from cold error metadata, `message` from a
 // hidden slot, `code` derived from `name`.
 fn domExceptionNameGet(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
