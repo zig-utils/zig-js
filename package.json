@@ -11,5 +11,8 @@
   },
   "devDependencies": {
     "@stacksjs/bunpress": "^0.1.9"
+  },
+  "overrides": {
+    "ts-syntax-highlighter": "0.2.0"
   }
 }
