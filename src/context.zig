@@ -613,9 +613,13 @@ pub const GcCellBacking = struct {
     /// backing chunks and maintain smaller address indexes for the hot object
     /// bucket. 384 KiB keeps empty-context object chunks at three without the
     /// larger reserved-slot overhang of a 512 KiB chunk. The lazy bump cursor
-    /// means unused slots are not prelinked. Once Object enters the 512-byte
-    /// class, threaded contexts use the same geometry to avoid synchronized
-    /// chunk growth; single-mutator contexts retain the smaller 64 KiB chunks.
+    /// means unused slots are not prelinked. Every GC heap selects the larger
+    /// geometry for the current 256-byte Object bucket (and the adjacent
+    /// 512-byte class), reducing libc chunk growth for independent heaps and
+    /// synchronized growth for shared heaps. The 256-byte class uses a 256 KiB
+    /// chunk, keeping its 1,024 slots within `FreeBitmap` capacity; 512-byte and
+    /// larger classes use 384 KiB.
+    const object_chunk_bytes: usize = 256 * 1024;
     const large_chunk_bytes: usize = 384 * 1024;
     const reusable_tail_chunks: usize = 8;
     const free_bitmap_words: usize = (chunk_bytes / bucket_sizes[0]) / 64;
@@ -679,7 +683,7 @@ pub const GcCellBacking = struct {
     parallel: bool = false,
     /// Allocation geometry is selected before private realm bootstrap, while
     /// `parallel` remains false so that bootstrap does not pay lock overhead.
-    large_512_chunks: bool = false,
+    large_object_chunks: bool = false,
     bulk_teardown: bool = false,
     /// Fast-path cell allocation is independent by size class. Chunk growth and
     /// delegated side-storage operations still serialize through `inner_lock`
@@ -783,7 +787,10 @@ pub const GcCellBacking = struct {
     }
 
     inline fn bucketChunkBytes(self: *const GcCellBacking, idx: usize) usize {
-        return if (bucket_sizes[idx] >= 1024 or (self.large_512_chunks and bucket_sizes[idx] == 512))
+        return if (self.large_object_chunks and bucket_sizes[idx] == 256)
+            object_chunk_bytes
+        else if (bucket_sizes[idx] >= 1024 or
+            (self.large_object_chunks and bucket_sizes[idx] == 512))
             large_chunk_bytes
         else
             chunk_bytes;
@@ -2028,14 +2035,21 @@ test "GC cell backing uses larger chunks for object-sized buckets" {
     try std.testing.expectEqual(@as(usize, 1), stats.live_slots);
 }
 
-test "GC cell backing selects 512-byte chunk geometry independently of locks" {
-    const idx = GcCellBacking.bucketIndex(500, .@"16").?;
-    try std.testing.expectEqual(@as(usize, 512), GcCellBacking.bucket_sizes[idx]);
+test "GC cell backing selects current object chunk geometry independently of locks" {
+    const current_idx = GcCellBacking.bucketIndex(240, .@"16").?;
+    const adjacent_idx = GcCellBacking.bucketIndex(500, .@"16").?;
+    try std.testing.expectEqual(@as(usize, 256), GcCellBacking.bucket_sizes[current_idx]);
+    try std.testing.expectEqual(@as(usize, 512), GcCellBacking.bucket_sizes[adjacent_idx]);
 
     var serial = GcCellBacking{ .inner = std.testing.allocator };
-    var large = GcCellBacking{ .inner = std.testing.allocator, .large_512_chunks = true };
-    try std.testing.expectEqual(GcCellBacking.chunk_bytes, serial.bucketChunkBytes(idx));
-    try std.testing.expectEqual(GcCellBacking.large_chunk_bytes, large.bucketChunkBytes(idx));
+    var large = GcCellBacking{ .inner = std.testing.allocator, .large_object_chunks = true };
+    try std.testing.expectEqual(GcCellBacking.chunk_bytes, serial.bucketChunkBytes(current_idx));
+    try std.testing.expectEqual(GcCellBacking.chunk_bytes, serial.bucketChunkBytes(adjacent_idx));
+    try std.testing.expectEqual(GcCellBacking.object_chunk_bytes, large.bucketChunkBytes(current_idx));
+    try std.testing.expectEqual(GcCellBacking.large_chunk_bytes, large.bucketChunkBytes(adjacent_idx));
+    const bitmap_slots = GcCellBacking.free_bitmap_words * 64;
+    try std.testing.expect(large.bucketChunkBytes(current_idx) / GcCellBacking.bucket_sizes[current_idx] <= bitmap_slots);
+    try std.testing.expect(large.bucketChunkBytes(adjacent_idx) / GcCellBacking.bucket_sizes[adjacent_idx] <= bitmap_slots);
     try std.testing.expect(!large.parallel);
 }
 
@@ -2643,7 +2657,7 @@ pub const Context = struct {
             gc_state.backing = .{
                 .inner = context_gpa,
                 .parallel = false,
-                .large_512_chunks = options.parallel_gc,
+                .large_object_chunks = true,
             };
             const cell_backing = gc_state.backing.allocator();
             gc_state.heap = GcHeap.init(cell_backing, &gc_state.binding);
