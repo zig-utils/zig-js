@@ -618,6 +618,8 @@ pub const ObjectColdState = struct {
     callback: ?HostCallback = null,
     callback_context: ?*anyopaque = null,
     boxed_primitive: ?Value = null,
+    generator: ?*anyopaque = null,
+    iter_helper: ?*IterHelper = null,
     arg_map_env: ?*anyopaque = null,
     arg_map_names: [][]const u8 = &.{},
     arg_map_severed: []std.atomic.Value(bool) = &.{},
@@ -840,7 +842,7 @@ pub const Object = struct {
     /// `*vm.Generator`, type-erased (same cycle break as `js_func`). Non-null
     /// marks a generator *object* — the iterator returned by calling a
     /// `function*`; its `.next()`/`.return()`/`.throw()` drive the suspendable VM.
-    gen: ?*anyopaque = null,
+    // Generator-object and iterator-helper side cells live in the cold sidecar.
     /// `*Interpreter.BoundFn`, type-erased. Non-null marks a bound function
     /// (`fn.bind(this, ...args)`): calling it invokes the target with the bound
     /// `this` and the bound args prepended.
@@ -931,7 +933,6 @@ pub const Object = struct {
     // Cleanup callback and records live in `cold`.
     /// Lazy Iterator-Helper state (`map`/`filter`/`take`/`drop`/`flatMap`/wrap),
     /// non-null on a helper iterator returned by those methods.
-    iter_helper: ?*IterHelper = null,
     /// Marks a `ShadowRealm` instance (its child realm's Environment is in
     /// `private_data`).
     is_shadow_realm: bool = false,
@@ -1092,6 +1093,24 @@ pub const Object = struct {
     pub fn setBoxedPrimitive(self: *Object, fallback: std.mem.Allocator, primitive: Value) std.mem.Allocator.Error!void {
         const cold = try self.ensureCold(fallback);
         cold.boxed_primitive = primitive;
+    }
+
+    pub inline fn generator(self: *const Object) ?*anyopaque {
+        return if (self.cold) |cold| cold.generator else null;
+    }
+
+    pub fn setGenerator(self: *Object, fallback: std.mem.Allocator, raw_generator: *anyopaque) std.mem.Allocator.Error!void {
+        const cold = try self.ensureCold(fallback);
+        cold.generator = raw_generator;
+    }
+
+    pub inline fn iteratorHelper(self: *const Object) ?*IterHelper {
+        return if (self.cold) |cold| cold.iter_helper else null;
+    }
+
+    pub fn setIteratorHelper(self: *Object, fallback: std.mem.Allocator, helper: *IterHelper) std.mem.Allocator.Error!void {
+        const cold = try self.ensureCold(fallback);
+        cold.iter_helper = helper;
     }
 
     pub fn setErrorName(self: *Object, fallback: std.mem.Allocator, name: []const u8) std.mem.Allocator.Error!void {

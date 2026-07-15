@@ -384,7 +384,7 @@ const Serializer = struct {
         if (o.proxy_target != null or o.proxy_revoked)
             return s.throwClone("DataCloneError: Proxy objects cannot be cloned");
         if (o.promise != null) return s.throwClone("DataCloneError: Promise objects cannot be cloned");
-        if (o.gen != null) return s.throwClone("DataCloneError: generator objects cannot be cloned");
+        if (o.generator() != null) return s.throwClone("DataCloneError: generator objects cannot be cloned");
         if (o.is_weak or o.weakRefTarget() != null)
             return s.throwClone("DataCloneError: weak collections cannot be cloned");
         if (o.moduleNs() != null) return s.throwClone("DataCloneError: module namespaces cannot be cloned");

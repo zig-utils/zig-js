@@ -10373,7 +10373,7 @@ pub const Interpreter = struct {
     /// closed through their dispatched `return`). The result is discarded; a
     /// throw propagates (normal-completion close).
     pub fn iteratorClose(self: *Interpreter, iter: Value) EvalError!void {
-        if (iter.isObject() and iter.asObj().gen != null) {
+        if (iter.isObject() and iter.asObj().generator() != null) {
             const r = try self.callMethod(iter, "return", &.{});
             if (!r.isObject()) return self.throwError("TypeError", "iterator 'return' did not return an object");
             return;
@@ -11032,7 +11032,7 @@ pub const Interpreter = struct {
         switch (v.kind()) {
             .object => {
                 const o = v.asObj();
-                if (o.gen != null) return v;
+                if (o.generator() != null) return v;
                 // A user-defined `[Symbol.iterator]()` method takes precedence.
                 if (self.symbolIteratorKey()) |ik| {
                     const itfn = try self.getProperty(v, ik);
@@ -11090,7 +11090,7 @@ pub const Interpreter = struct {
             .string => return true,
             .object => {
                 const o = v.asObj();
-                if (o.is_array or o.is_set or o.is_map or o.gen != null) return true;
+                if (o.is_array or o.is_set or o.is_map or o.generator() != null) return true;
                 if (hasProperty(o, "next")) return true; // a manual iterator object
                 if (self.symbolIteratorKey()) |ik| return hasProperty(o, ik);
                 return false;
@@ -11850,7 +11850,7 @@ pub const Interpreter = struct {
         switch (recv.kind()) {
             .object => {
                 const o = recv.asObj();
-                if (o.gen != null) {
+                if (o.generator() != null) {
                     const sent: Value = if (args.len > 0) args[0] else Value.undef();
                     if (eq(name, "next")) return try vm.genNext(self, o, sent);
                     if (eq(name, "return")) return try vm.genReturn(self, o, sent);
@@ -17509,7 +17509,7 @@ fn makeIterHelper(self: *Interpreter, src: Value, kind: value.IterHelper.Kind, f
             h.next_method = try self.getProperty(src, "next");
         },
     }
-    o.iter_helper = h;
+    try o.setIteratorHelper(self.arena, h);
     if (self.env.get("\x00IterHelperProto")) |p| if (p.isObject()) {
         o.setProtoAtomic(p.asObj());
     };
@@ -17520,7 +17520,7 @@ fn makeIterWrapHelper(self: *Interpreter, src: Value, next_method: Value) EvalEr
     const o = (try self.newObject()).asObj();
     const h = try gc_mod.allocIterHelper(self.arena);
     h.* = .{ .src = src, .kind = .wrap, .next_method = next_method };
-    o.iter_helper = h;
+    try o.setIteratorHelper(self.arena, h);
     if (self.env.get("\x00IterHelperProto")) |p| if (p.isObject()) {
         o.setProtoAtomic(p.asObj());
     };
@@ -17554,8 +17554,8 @@ fn iteratorInheritsPrototype(self: *Interpreter, iterator: Value, proto: Value) 
 fn iterHelperNextFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject() or this.asObj().iter_helper == null) return self.throwError("TypeError", "Iterator Helper next called on an incompatible receiver");
-    const h = this.asObj().iter_helper.?;
+    if (!this.isObject() or this.asObj().iteratorHelper() == null) return self.throwError("TypeError", "Iterator Helper next called on an incompatible receiver");
+    const h = this.asObj().iteratorHelper().?;
     // GeneratorValidate: re-entering an already-executing helper (e.g. its
     // mapper calls back into next()) is a TypeError, not a stack RangeError.
     h.lockState();
@@ -17850,9 +17850,9 @@ fn zipCloseAll(self: *Interpreter, iters: []Value, flags: *value.Object, pending
 fn iterHelperReturnFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject() or this.asObj().iter_helper == null)
+    if (!this.isObject() or this.asObj().iteratorHelper() == null)
         return self.throwError("TypeError", "Iterator Helper return called on an incompatible receiver");
-    const h = this.asObj().iter_helper.?;
+    const h = this.asObj().iteratorHelper().?;
     // GeneratorValidate: a re-entrant return() while the helper is mid-close
     // (state "executing") is a TypeError.
     h.lockState();
@@ -17910,14 +17910,14 @@ fn iterHelperReturnFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
             // concat closes the iterator it is currently draining; the running
             // guard makes a re-entrant return() from that close a TypeError.
             .concat => {
-                if (h.inner) |inner| if (inner.isObject() and inner.asObj().iter_helper == null) {
+                if (h.inner) |inner| if (inner.isObject() and inner.asObj().iteratorHelper() == null) {
                     try self.iteratorClose(inner);
                 };
                 return self.iterResultObj(Value.undef(), true);
             },
             else => if (h.src.isObject()) try self.iteratorClose(h.src),
         }
-        if (h.inner) |inner| if (inner.isObject() and inner.asObj().iter_helper == null) try self.iteratorClose(inner);
+        if (h.inner) |inner| if (inner.isObject() and inner.asObj().iteratorHelper() == null) try self.iteratorClose(inner);
     }
     return self.iterResultObj(Value.undef(), true);
 }
@@ -18429,7 +18429,7 @@ fn makeZipHelper(self: *Interpreter, kind: value.IterHelper.Kind, iters: *value.
     const o = (try self.newObject()).asObj();
     const h = try gc_mod.allocIterHelper(self.arena);
     h.* = .{ .src = Value.obj(iters), .kind = kind, .func = keys, .limit = @floatFromInt(mode), .inner = Value.obj(flags), .padding = padding };
-    o.iter_helper = h;
+    try o.setIteratorHelper(self.arena, h);
     if (self.env.get("\x00IterHelperProto")) |p| if (p.isObject()) {
         o.setProtoAtomic(p.asObj());
     };
@@ -18461,7 +18461,7 @@ fn genProtoMethod(comptime which: enum { next, ret, throw }) value.NativeFn {
     return struct {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
-            if (!this.isObject() or this.asObj().gen == null)
+            if (!this.isObject() or this.asObj().generator() == null)
                 return self.throwError("TypeError", "method called on an incompatible receiver");
             const v: Value = if (args.len > 0) args[0] else Value.undef();
             return switch (which) {
@@ -18480,7 +18480,7 @@ fn asyncGenProtoMethod(comptime which: enum { next, ret, throw }) value.NativeFn
     return struct {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
-            if (!this.isObject() or this.asObj().gen == null or !vm.asyncGenObj(this.asObj())) {
+            if (!this.isObject() or this.asObj().generator() == null or !vm.asyncGenObj(this.asObj())) {
                 const pobj = try promise.newPromise(self);
                 const p = promise.promiseOf(Value.obj(pobj)).?;
                 const err = try self.makeError("TypeError", "AsyncGenerator method called on an incompatible receiver");
@@ -18773,8 +18773,8 @@ fn asyncHelperProduce(self: *Interpreter, h: *value.IterHelper) EvalError!struct
 fn asyncIterHelperNextFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject() or this.asObj().iter_helper == null) return promiseRejectValue(self, try self.makeError("TypeError", "Async iterator helper next called on an incompatible receiver"));
-    const h = this.asObj().iter_helper.?;
+    if (!this.isObject() or this.asObj().iteratorHelper() == null) return promiseRejectValue(self, try self.makeError("TypeError", "Async iterator helper next called on an incompatible receiver"));
+    const h = this.asObj().iteratorHelper().?;
     h.lockState();
     if (h.running) {
         h.unlockState();
@@ -18802,8 +18802,8 @@ fn asyncIterHelperNextFn(ctx: *anyopaque, this: Value, args: []const Value) valu
 fn asyncIterHelperReturnFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject() or this.asObj().iter_helper == null) return promiseRejectValue(self, try self.makeError("TypeError", "Async iterator helper return called on an incompatible receiver"));
-    const h = this.asObj().iter_helper.?;
+    if (!this.isObject() or this.asObj().iteratorHelper() == null) return promiseRejectValue(self, try self.makeError("TypeError", "Async iterator helper return called on an incompatible receiver"));
+    const h = this.asObj().iteratorHelper().?;
     h.lockState();
     if (h.running) {
         h.unlockState();
@@ -18843,7 +18843,7 @@ fn makeAsyncIterHelper(self: *Interpreter, src: Value, kind: value.IterHelper.Ki
     const o = (try self.newObject()).asObj();
     const h = try gc_mod.allocIterHelper(self.arena);
     h.* = .{ .src = src, .kind = kind, .func = func, .limit = limit, .is_async = true };
-    o.iter_helper = h;
+    try o.setIteratorHelper(self.arena, h);
     if (self.env.get("\x00AsyncIterHelperProto")) |p| if (p.isObject()) {
         o.setProtoAtomic(p.asObj());
     };

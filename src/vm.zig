@@ -4923,7 +4923,8 @@ pub fn makeGenerator(vm: *Interpreter, func: *Function, args: []const Value, thi
     };
     gc_mod.initGeneratorBacking(g);
     const obj = try gc_mod.allocObj(vm.arena);
-    obj.* = .{ .gen = @ptrCast(g) };
+    obj.* = .{};
+    try obj.setGenerator(vm.arena, @ptrCast(g));
     // The instance's [[Prototype]] is the generator function's own `.prototype`
     // object (whose own [[Prototype]] is %GeneratorPrototype%), per
     // OrdinaryCreateFromConstructor. Falls back to %GeneratorPrototype% directly
@@ -4965,7 +4966,7 @@ fn resumeKindNum(kind: ResumeKind) Value {
 /// context, applies the resume action at the suspend point, runs the VM to the
 /// next `yield` (or completion), then restores the caller's context.
 fn genResume(vm: *Interpreter, gen_obj: *value.Object, kind: ResumeKind, val: Value) EvalError!Value {
-    const g: *Generator = @ptrCast(@alignCast(gen_obj.gen.?));
+    const g: *Generator = @ptrCast(@alignCast(gen_obj.generator().?));
     if (!g.resume_mutex.tryLock()) return vm.throwError("TypeError", "generator is already running");
     defer g.resume_mutex.unlock(agent.engineIo());
     if (g.running.load(.monotonic)) return vm.throwError("TypeError", "generator is already running");
@@ -5103,7 +5104,7 @@ fn genResume(vm: *Interpreter, gen_obj: *value.Object, kind: ResumeKind, val: Va
 }
 
 pub fn asyncGenObj(gen_obj: *value.Object) bool {
-    const g: *Generator = @ptrCast(@alignCast(gen_obj.gen.?));
+    const g: *Generator = @ptrCast(@alignCast(gen_obj.generator().?));
     return g.is_async_gen;
 }
 
@@ -5499,7 +5500,8 @@ pub fn makeAsyncGenerator(vm: *Interpreter, func: *Function, args: []const Value
     };
     gc_mod.initGeneratorBacking(g);
     const obj = try gc_mod.allocObj(vm.arena);
-    obj.* = .{ .gen = @ptrCast(g) };
+    obj.* = .{};
+    try obj.setGenerator(vm.arena, @ptrCast(g));
     // The instance's [[Prototype]] is the async-generator function's own
     // `.prototype` object, whose own [[Prototype]] is %AsyncGeneratorPrototype%
     // (itself chaining to %AsyncIteratorPrototype% for the helper methods), per
@@ -5526,7 +5528,7 @@ pub fn makeAsyncGenerator(vm: *Interpreter, func: *Function, args: []const Value
 /// `asyncGen.next/return/throw(v)` — enqueue a request and return a promise for
 /// its `{ value, done }`. Pumping starts if no request is already in flight.
 pub fn asyncGenRequest(vm: *Interpreter, gen_obj: *value.Object, kind: ResumeKind, val: Value) EvalError!Value {
-    const g: *Generator = @ptrCast(@alignCast(gen_obj.gen.?));
+    const g: *Generator = @ptrCast(@alignCast(gen_obj.generator().?));
     const rp = try promise.newPromise(vm);
     // Incremental-GC barrier: the request's value + result promise are stored
     // into the live generator cell (which may already be marked).

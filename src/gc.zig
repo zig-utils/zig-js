@@ -162,8 +162,8 @@ pub fn traceObject(o: *Object, v: anytype) void {
     if (o.js_func) |p| v.mark(p); // *Function (kind .function)
     if (o.bound) |p| v.mark(p); // *Interpreter.BoundFn (kind .bound_fn)
     if (o.promise) |p| v.mark(p); // *promise.Promise (kind .promise)
-    if (o.gen) |p| v.mark(p); // *vm.Generator (kind .generator)
-    if (o.iter_helper) |p| v.mark(p); // (kind .iter_helper)
+    if (o.generator()) |p| v.mark(p); // *vm.Generator (kind .generator)
+    if (o.iteratorHelper()) |p| v.mark(p); // (kind .iter_helper)
     if (o.moduleNs()) |p| v.mark(p); // *ModuleNs (kind .module_ns)
     if (o.cold) |cold| if (cold.arg_map_env) |p| v.mark(p); // *Environment (kind .environment)
     promise.traceNativePrivateData(o, v);
