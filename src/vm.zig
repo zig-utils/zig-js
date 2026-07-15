@@ -2546,7 +2546,7 @@ fn tryQuickObjectAllocationLoopMode(
         array.has_indexed_property.load(.monotonic))
         return null;
     if (parallel_sync) array.lockElements();
-    const dense_array = array.holes == null and array.array_len <= array.elements.items.len;
+    const dense_array = array.holesMap() == null and array.array_len <= array.elements.items.len;
     if (parallel_sync) array.unlockElements();
     if (!dense_array) return null;
     if (!frame.slots[counter_slot].isNumber() or !frame.slots[total_slot].isNumber() or
@@ -2776,7 +2776,7 @@ fn tryQuickArrayLoop(
             if (!array_value.isObject()) break :quick null;
             const array = array_value.asObj();
             if (!array.is_array or array.is_arguments or array.proxyHandler() != null or array.proxy_revoked or
-                array.accessors.load(.monotonic) != null or array.holes != null or
+                array.accessors.load(.monotonic) != null or array.holesMap() != null or
                 array.array_len > array.elements.items.len)
                 break :quick null;
             if (!frame.slots[index_slot].isNumber() or !frame.slots[checksum_slot].isNumber() or
@@ -2850,7 +2850,7 @@ fn tryQuickArrayLoop(
                 break :quick null;
             if (parallel_sync) array.lockElements();
             defer if (parallel_sync) array.unlockElements();
-            if (array.accessors.load(.monotonic) != null or array.holes != null or array.array_len > array.elements.items.len)
+            if (array.accessors.load(.monotonic) != null or array.holesMap() != null or array.array_len > array.elements.items.len)
                 break :quick null;
             var index_value = frame.slots[index_slot];
             var total_value = frame.slots[total_slot];
@@ -4256,7 +4256,7 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                             if (quickArrayIndex(key)) |index| {
                                 const element = if (parallel_sync)
                                     o.denseElement(index)
-                                else if (o.accessors.load(.monotonic) == null and o.holes == null and index < o.elements.items.len)
+                                else if (o.accessors.load(.monotonic) == null and o.holesMap() == null and index < o.elements.items.len)
                                     o.elements.items[index]
                                 else
                                     null;

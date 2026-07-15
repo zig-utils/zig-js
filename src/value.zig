@@ -624,6 +624,8 @@ pub const ObjectRareTag = enum {
     buffer_view,
     temporal,
     promise,
+    constructor,
+    sparse_array,
 };
 
 pub const ObjectRareState = union(ObjectRareTag) {
@@ -655,6 +657,8 @@ pub const ObjectRareState = union(ObjectRareTag) {
     },
     temporal: struct { ptr: ?*TemporalData = null },
     promise: struct { ptr: ?*anyopaque = null },
+    constructor: struct { ptr: ?*Object = null },
+    sparse_array: struct { holes: ?*std.AutoHashMapUnmanaged(usize, void) = null },
 };
 
 pub const ObjectColdState = struct {
@@ -926,9 +930,7 @@ pub const Object = struct {
     is_weak: bool = false,
     // Weak entries and their lookup index live in `cold`.
     // Error instance/constructor class names live in the cold sidecar.
-    /// For objects created by `new F()`, the constructor function's object —
-    /// used by `instanceof` to walk the (flat, v1) construction link.
-    ctor_ref: ?*Object = null,
+    // `new F()` construction links live in the disjoint rare-state sidecar.
     // The type-erased Promise state-cell pointer lives in rare state.
     // Primitive-wrapper [[NumberData]]/[[StringData]]/[[BooleanData]] lives cold.
     /// `Proxy` target and handler live in the disjoint rare-state sidecar.
@@ -942,11 +944,7 @@ pub const Object = struct {
     /// `[[Module]]` namespace and the engine intercepts its essential internal
     /// methods (live [[Get]], [[HasProperty]], sorted [[OwnPropertyKeys]],
     /// frozen/non-extensible, throwing [[Set]]/[[Delete]]/[[DefineOwnProperty]]).
-    /// For arrays: the set of dense-index *holes* (gaps that read as absent — a
-    /// deleted element, an elision in `[1,,3]`, or a gap created by a sparse
-    /// assignment). The `elements` slot for a hole still exists (holds undefined),
-    /// but `HasProperty`/iteration treat the index as not present. Lazily allocated.
-    holes: ?*std.AutoHashMapUnmanaged(usize, void) = null,
+    // Sparse-array holes live in the disjoint rare-state sidecar.
 
     // ArrayBuffer, TypedArray, and DataView are mutually exclusive exotic
     // object kinds; their backing pointer lives in the rare-state sidecar.
@@ -1367,6 +1365,38 @@ pub const Object = struct {
         state.ptr = data;
     }
 
+    pub inline fn ctorRef(self: *const Object) ?*Object {
+        const cold = self.cold orelse return null;
+        return switch (cold.rare) {
+            .constructor => |state| state.ptr,
+            else => null,
+        };
+    }
+
+    pub fn setCtorRef(self: *Object, fallback: std.mem.Allocator, ctor: *Object) std.mem.Allocator.Error!void {
+        const state = try self.ensureRare(fallback, .constructor, .{});
+        state.ptr = ctor;
+    }
+
+    pub inline fn holesMap(self: *const Object) ?*std.AutoHashMapUnmanaged(usize, void) {
+        const cold = self.cold orelse return null;
+        return switch (cold.rare) {
+            .sparse_array => |state| state.holes,
+            else => null,
+        };
+    }
+
+    fn sparseArrayState(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator.Error!*@FieldType(ObjectRareState, "sparse_array") {
+        return self.ensureRare(fallback, .sparse_array, .{});
+    }
+
+    pub fn clearHolesMap(self: *Object) void {
+        if (self.cold) |cold| switch (cold.rare) {
+            .sparse_array => |*state| state.holes = null,
+            else => {},
+        };
+    }
+
     pub fn setErrorName(self: *Object, fallback: std.mem.Allocator, name: []const u8) std.mem.Allocator.Error!void {
         const state = try self.ensureRare(fallback, .error_state, .{});
         state.name = name;
@@ -1724,7 +1754,7 @@ pub const Object = struct {
     pub fn appendPackedDenseElements(self: *Object, arena: std.mem.Allocator, values: []const Value) std.mem.Allocator.Error!?usize {
         self.lockElements();
         defer self.unlockElements();
-        if (self.holes != null or self.array_len > self.elements.items.len) return null;
+        if (self.holesMap() != null or self.array_len > self.elements.items.len) return null;
         const new_len = self.elements.items.len + values.len;
         if (new_len > 4294967295) return null;
         for (values) |v| gcBarrier(self, v);
@@ -1741,7 +1771,7 @@ pub const Object = struct {
     pub fn appendDataIndexIfDense(self: *Object, arena: std.mem.Allocator, i: usize, v: Value) std.mem.Allocator.Error!bool {
         self.lockElements();
         defer self.unlockElements();
-        if (self.holes != null or i != self.elements.items.len or i != self.array_len) return false;
+        if (self.holesMap() != null or i != self.elements.items.len or i != self.array_len) return false;
         if (i >= 4294967295) return false;
         gcBarrier(self, v);
         self.indexed_own_seen.store(true, .release);
@@ -1967,7 +1997,7 @@ pub const Object = struct {
     pub fn packedDenseElementsCoverLength(self: *const Object) bool {
         self.lockElements();
         defer self.unlockElements();
-        return self.holes == null and self.array_len <= self.elements.items.len;
+        return self.holesMap() == null and self.array_len <= self.elements.items.len;
     }
 
     /// Snapshot a plain packed dense Array's iteration values under
@@ -1976,7 +2006,7 @@ pub const Object = struct {
     pub fn packedDenseElementsSnapshot(self: *const Object, arena: std.mem.Allocator) std.mem.Allocator.Error!?[]Value {
         self.lockElements();
         defer self.unlockElements();
-        if (self.holes != null or self.array_len > self.elements.items.len or self.accessors.load(.monotonic) != null) return null;
+        if (self.holesMap() != null or self.array_len > self.elements.items.len or self.accessors.load(.monotonic) != null) return null;
         const out = try arena.alloc(Value, self.elements.items.len);
         @memcpy(out, self.elements.items);
         return out;
@@ -2001,21 +2031,22 @@ pub const Object = struct {
     }
 
     fn isHoleUnlocked(self: *const Object, i: usize) bool {
-        const h = self.holes orelse return false;
+        const h = self.holesMap() orelse return false;
         return h.contains(i);
     }
 
     fn markHoleUnlocked(self: *Object, arena: std.mem.Allocator, i: usize) std.mem.Allocator.Error!void {
+        const state = try self.sparseArrayState(arena);
         const a = self.holesAllocator(arena);
-        if (self.holes == null) {
-            self.holes = try a.create(std.AutoHashMapUnmanaged(usize, void));
-            self.holes.?.* = .{};
+        if (state.holes == null) {
+            state.holes = try a.create(std.AutoHashMapUnmanaged(usize, void));
+            state.holes.?.* = .{};
         }
-        try self.holes.?.put(a, i, {});
+        try state.holes.?.put(a, i, {});
     }
 
     fn clearHoleUnlocked(self: *Object, i: usize) void {
-        if (self.holes) |h| _ = h.remove(i);
+        if (self.holesMap()) |h| _ = h.remove(i);
     }
 
     pub fn denseElementInBounds(self: *const Object, i: usize) bool {
@@ -2089,7 +2120,7 @@ pub const Object = struct {
     /// exclusive access, bounds, and a hole-free dense store may use this.
     pub inline fn replaceDenseElementExclusivePresentAfterBarrier(self: *Object, i: usize, v: Value) void {
         std.debug.assert(i < self.elements.items.len);
-        std.debug.assert(self.holes == null);
+        std.debug.assert(self.holesMap() == null);
         self.elements.items[i] = v;
     }
 
@@ -2158,7 +2189,7 @@ pub const Object = struct {
     pub fn reversePackedDenseElements(self: *Object) bool {
         self.lockElements();
         defer self.unlockElements();
-        if (self.holes != null or self.array_len > self.elements.items.len) return false;
+        if (self.holesMap() != null or self.array_len > self.elements.items.len) return false;
         std.mem.reverse(Value, self.elements.items);
         return true;
     }
@@ -2175,7 +2206,7 @@ pub const Object = struct {
         for (values) |v| gcBarrier(self, v);
         self.elements.clearRetainingCapacity();
         try self.elements.appendSlice(self.elementsAllocator(arena), values);
-        if (self.holes) |h| h.clearRetainingCapacity();
+        if (self.holesMap()) |h| h.clearRetainingCapacity();
         self.array_len = new_len;
     }
 
@@ -2188,7 +2219,7 @@ pub const Object = struct {
     ) std.mem.Allocator.Error!bool {
         self.lockElements();
         defer self.unlockElements();
-        if (self.holes != null or self.array_len > self.elements.items.len) return false;
+        if (self.holesMap() != null or self.array_len > self.elements.items.len) return false;
         for (inserts) |v| gcBarrier(self, v);
         if (inserts.len != 0) self.indexed_own_seen.store(true, .release);
         var i: usize = 0;

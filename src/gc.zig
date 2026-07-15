@@ -107,12 +107,12 @@ pub fn traceObject(o: *Object, v: anytype) void {
     // fires the insertion barrier to shade the new target); under a concurrent
     // mark we read it with a relaxed atomic load to be race-free per the memory
     // model (a plain mov on x86_64/arm64). The reparent sites pair this with an
-    // atomic store. `ctor_ref` and the proxy sidecar edges are written only at
+    // atomic store. The construction link and proxy sidecar edges are written only at
     // creation, before the cell is published to the marker (the born-grey
     // hand-off establishes happens-before), so a plain read is safe.
     const concurrent = v.concurrent();
     v.mark(if (concurrent) @atomicLoad(?*Object, &o.proto, .monotonic) else o.proto);
-    v.mark(o.ctor_ref);
+    v.mark(o.ctorRef());
     v.mark(o.proxyTarget());
     v.mark(o.proxyHandler());
 
@@ -334,10 +334,10 @@ fn finalizeObjectBacking(o: *Object, a: std.mem.Allocator) usize {
         released += 1;
     }
     if (flags.holes) {
-        if (o.holes) |holes| {
+        if (o.holesMap()) |holes| {
             holes.deinit(a);
             a.destroy(holes);
-            o.holes = null;
+            o.clearHolesMap();
         }
         released += 1;
     }

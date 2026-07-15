@@ -325,8 +325,9 @@ const Serializer = struct {
         const holes = try s.w.gpa.alloc(bool, n);
         errdefer s.w.gpa.free(holes);
         @memcpy(elements, o.elements.items);
+        const hole_map = o.holesMap();
         for (elements, 0..) |el, i| {
-            const hole = o.holes != null and o.holes.?.contains(i);
+            const hole = hole_map != null and hole_map.?.contains(i);
             holes[i] = hole;
             if (!hole) try s.rootSnapshotValue(el);
         }

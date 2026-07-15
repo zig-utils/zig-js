@@ -6253,7 +6253,8 @@ pub const Interpreter = struct {
                 return self.throwError("TypeError", "value is not a constructor");
             // OrdinaryCreateFromConstructor: the instance proto comes from NewTarget.
             const inst = try gc_mod.allocObj(self.arena);
-            inst.* = .{ .ctor_ref = obj, .proto = if (new_target.isObject()) try self.ctorRealmIntrinsicProto(new_target.asObj(), "Object") else try self.protoObject(obj) };
+            inst.* = .{ .proto = if (new_target.isObject()) try self.ctorRealmIntrinsicProto(new_target.asObj(), "Object") else try self.protoObject(obj) };
+            try inst.setCtorRef(self.arena, obj);
             const this_val = Value.obj(inst);
             const ret = try self.callFunctionNT(func, args, this_val, new_target);
             return if (ret.isObject()) ret else this_val;
@@ -7342,7 +7343,8 @@ pub const Interpreter = struct {
     /// the constructor's `.prototype`.
     pub fn newInstance(self: *Interpreter, ctor: *value.Object) EvalError!Value {
         const obj = try gc_mod.allocObj(self.arena);
-        obj.* = .{ .ctor_ref = ctor, .proto = try self.protoObject(ctor) };
+        obj.* = .{ .proto = try self.protoObject(ctor) };
+        try obj.setCtorRef(self.arena, ctor);
         return Value.obj(obj);
     }
 
