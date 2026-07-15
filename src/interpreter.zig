@@ -25,6 +25,7 @@ const iana_offsets = @import("iana_offsets.zig");
 const dn_data = @import("intl_displaynames_data.zig");
 const units_data = @import("intl_units_data.zig");
 const weekdata = @import("intl_weekdata.zig");
+const localeinfo = @import("intl_localeinfo.zig");
 const Compiler = @import("compiler.zig").Compiler;
 const Shape = @import("shape.zig").Shape;
 const unicode_case = @import("unicode_case.zig");
@@ -22215,14 +22216,38 @@ fn intlLocaleListFn(comptime which: enum { calendars, collations, hour_cycles, n
             if (!this.isObject() or this.asObj().getOwn("\x00locale") == null) return self.throwError("TypeError", "Intl.Locale.prototype method on incompatible receiver");
             const tag = this.asObj().getOwn("\x00locale").?.asStr();
             const arr = (try self.newArray()).asObj();
-            const def: ?[]const u8 = switch (which) {
-                .calendars => localeUValue(tag, "ca") orelse "iso8601",
-                .collations => localeUValue(tag, "co") orelse "default",
-                .hour_cycles => localeUValue(tag, "hc") orelse "h23",
-                .numbering_systems => localeUValue(tag, "nu") orelse "latn",
-                .time_zones => null, // requires region data
-            };
-            if (def) |d| try arr.appendElement(self.arena, try Value.strAlloc(self.arena, d));
+            // The region drives calendar/hour-cycle preferences (maximize when the
+            // tag has no region).
+            var tri = parseTriple(tag);
+            if ((which == .calendars or which == .hour_cycles) and tri.r.len == 0)
+                if (cldrMaximize(self.arena, tri)) |m| {
+                    tri = m;
+                };
+            switch (which) {
+                .calendars => {
+                    if (localeUValue(tag, "ca")) |ca| {
+                        try arr.appendElement(self.arena, try Value.strAlloc(self.arena, ca));
+                    } else {
+                        var list: []const []const u8 = &localeinfo.default_calendars;
+                        for (localeinfo.calendars) |c| if (std.ascii.eqlIgnoreCase(c.region, tri.r)) {
+                            list = c.cals;
+                        };
+                        for (list) |c| try arr.appendElement(self.arena, try Value.strAlloc(self.arena, c));
+                    }
+                },
+                .hour_cycles => {
+                    var hc: []const u8 = localeinfo.default_hour_cycle;
+                    if (localeUValue(tag, "hc")) |k| {
+                        hc = k;
+                    } else for (localeinfo.hour_cycles) |h| if (std.ascii.eqlIgnoreCase(h.region, tri.r)) {
+                        hc = h.hc;
+                    };
+                    try arr.appendElement(self.arena, try Value.strAlloc(self.arena, hc));
+                },
+                .collations => try arr.appendElement(self.arena, try Value.strAlloc(self.arena, localeUValue(tag, "co") orelse "default")),
+                .numbering_systems => try arr.appendElement(self.arena, try Value.strAlloc(self.arena, localeUValue(tag, "nu") orelse "latn")),
+                .time_zones => {}, // requires region-to-zone data
+            }
             return Value.obj(arr);
         }
     }.call;
