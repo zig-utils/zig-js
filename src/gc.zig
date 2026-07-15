@@ -938,6 +938,12 @@ pub const Binding = struct {
 /// The engine's GC heap type. `Context` holds one behind `enable_gc`.
 pub const Heap = gc.Heap(Binding);
 
+test "Object and cold sidecar fit the 256-byte GC slab" {
+    try std.testing.expectEqual(@as(usize, 208), @sizeOf(Object));
+    try std.testing.expect(Heap.cellAllocationBytes(Object) <= 256);
+    try std.testing.expect(Heap.cellAllocationBytes(value.ObjectColdState) <= 256);
+}
+
 fn managedCellType(comptime kind: CellKind) type {
     return switch (kind) {
         .object => Object,
