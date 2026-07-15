@@ -16304,6 +16304,15 @@ fn runMidScriptTerminationReactionGc(gpa: std.mem.Allocator, seed: u64) !bool {
         \\      }});
         \\    }}
         \\  }}
+        \\  // The abort-safe collector intentionally requires a born-cell lull
+        \\  // before sweeping. Keep the termination roots live through a
+        \\  // non-allocating window so this witness tests a finishing sweep,
+        \\  // rather than making scheduler timing decide whether finite churn
+        \\  // ends immediately after the last safe abort.
+        \\  let convergence = 0;
+        \\  for (let i = 0; i < 60000; i++)
+        \\    convergence = (convergence + i) & 0x3fffffff;
+        \\  if (convergence < 0) throw new Error('unreachable convergence guard');
         \\  if (typeof gc === 'function') gc();
         \\  throw new Error('threadfuzz midgc termination reactions {d} ' + keep.length);
         \\}})();
@@ -16315,6 +16324,16 @@ fn runMidScriptTerminationReactionGc(gpa: std.mem.Allocator, seed: u64) !bool {
 
     const before_attempts = ctx.gc_par_attempts.load(.monotonic);
     const before_collections = ctx.gc_par_collections.load(.monotonic);
+    const before_aborts = ctx.gc_par_aborts.load(.monotonic);
+    const before_publication_timeouts = ctx.gc_par_publication_timeout_aborts.load(.monotonic);
+    const before_round_limit_aborts = ctx.gc_par_round_limit_aborts.load(.monotonic);
+    const before_deferred_aborts = ctx.gc_par_deferred_aborts.load(.monotonic);
+    const before_finish_retries = ctx.gc_par_finish_retries.load(.monotonic);
+    const before_born_growth_rounds = ctx.gc_par_born_growth_rounds.load(.monotonic);
+    const before_deferred_rounds = ctx.gc_par_deferred_rounds.load(.monotonic);
+    const before_running_peer_requests = ctx.gc_par_running_peer_requests.load(.monotonic);
+    const before_parked_peer_observations = ctx.gc_par_parked_peer_observations.load(.monotonic);
+    const before_peer_publications = ctx.gc_par_peer_publications.load(.monotonic);
     if (ctx.evaluate(src)) |_| {
         std.debug.print("seed {d}: midgc termination-reaction script returned normally\n", .{seed});
         return false;
@@ -16329,7 +16348,27 @@ fn runMidScriptTerminationReactionGc(gpa: std.mem.Allocator, seed: u64) !bool {
         return false;
     }
     if (ctx.gc_par_collections.load(.monotonic) <= before_collections) {
-        std.debug.print("seed {d}: midgc termination-reaction did not finish a parallel collection\n", .{seed});
+        std.debug.print(
+            "seed {d}: midgc termination-reaction did not finish a parallel collection " ++
+                "(attempts +{d}, aborts +{d}, publication timeouts +{d}, round-limit aborts +{d}, " ++
+                "deferred aborts +{d}, finish retries +{d}, born-growth rounds +{d}, " ++
+                "deferred rounds +{d}, running-peer requests +{d}, parked-peer observations +{d}, " ++
+                "peer publications +{d})\n",
+            .{
+                seed,
+                ctx.gc_par_attempts.load(.monotonic) - before_attempts,
+                ctx.gc_par_aborts.load(.monotonic) - before_aborts,
+                ctx.gc_par_publication_timeout_aborts.load(.monotonic) - before_publication_timeouts,
+                ctx.gc_par_round_limit_aborts.load(.monotonic) - before_round_limit_aborts,
+                ctx.gc_par_deferred_aborts.load(.monotonic) - before_deferred_aborts,
+                ctx.gc_par_finish_retries.load(.monotonic) - before_finish_retries,
+                ctx.gc_par_born_growth_rounds.load(.monotonic) - before_born_growth_rounds,
+                ctx.gc_par_deferred_rounds.load(.monotonic) - before_deferred_rounds,
+                ctx.gc_par_running_peer_requests.load(.monotonic) - before_running_peer_requests,
+                ctx.gc_par_parked_peer_observations.load(.monotonic) - before_parked_peer_observations,
+                ctx.gc_par_peer_publications.load(.monotonic) - before_peer_publications,
+            },
+        );
         return false;
     }
 
