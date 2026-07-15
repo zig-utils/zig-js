@@ -23,6 +23,7 @@ const parser_mod = @import("parser.zig");
 const iana_zones = @import("iana_zones.zig");
 const iana_offsets = @import("iana_offsets.zig");
 const dn_data = @import("intl_displaynames_data.zig");
+const units_data = @import("intl_units_data.zig");
 const Compiler = @import("compiler.zig").Compiler;
 const Shape = @import("shape.zig").Shape;
 const unicode_case = @import("unicode_case.zig");
@@ -24748,16 +24749,24 @@ fn nfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Host
                 if (std.ascii.eqlIgnoreCase(unit_lang, "ko")) unit_prefix = "\u{c2dc}\u{c18d}";
                 if (std.ascii.eqlIgnoreCase(unit_lang, "zh")) unit_prefix = "\u{6bcf}\u{5c0f}\u{6642}";
             }
-            unit_space = !std.mem.eql(u8, unit, "percent") and
-                if (std.ascii.eqlIgnoreCase(unit_lang, "ko"))
-                    false
-                else if (std.ascii.eqlIgnoreCase(unit_lang, "de"))
-                    true
-                else
-                    !std.mem.eql(u8, ud, "narrow");
             // en cardinal plural: singular only for an exact magnitude of 1.
             const plural = !(@abs(n) == 1.0);
-            unit_suffix = try numberFormatUnitName(self, unit_locale, unit, ud, plural);
+            if (std.ascii.eqlIgnoreCase(unit_lang, "en") and unit_prefix.len == 0) {
+                if (try numberFormatUnitNameEn(self, unit, ud, plural)) |suf| {
+                    unit_suffix = suf; // spacing is baked into the CLDR pattern
+                    unit_space = false;
+                }
+            }
+            if (unit_suffix.len == 0) {
+                unit_space = !std.mem.eql(u8, unit, "percent") and
+                    if (std.ascii.eqlIgnoreCase(unit_lang, "ko"))
+                        false
+                    else if (std.ascii.eqlIgnoreCase(unit_lang, "de"))
+                        true
+                    else
+                        !std.mem.eql(u8, ud, "narrow");
+                unit_suffix = try numberFormatUnitName(self, unit_locale, unit, ud, plural);
+            }
         }
         const mi = try self.getProperty(o, "minimumIntegerDigits");
         if (!mi.isUndefined()) min_int = @intFromFloat(@max(1, @min(21, @trunc(try self.toNumberV(mi)))));
@@ -25015,6 +25024,40 @@ fn nfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Host
 /// en unit display name for NumberFormat style:unit. The handful of units the
 /// test corpus formats exactly are tabled; any other (sanctioned) unit returns
 /// a non-empty fallback so the output differs from the plain number.
+fn unitDataFind(id: []const u8) ?units_data.Unit {
+    for (units_data.units) |u| if (std.mem.eql(u8, u.id, id)) return u;
+    return null;
+}
+/// The suffix (spacing baked in) that follows the number for a single unit at a
+/// width (long/short/narrow) and plural category.
+fn unitSuffix(u: units_data.Unit, display: []const u8, plural: bool) []const u8 {
+    if (std.mem.eql(u8, display, "long")) return if (plural) u.lo else u.l1;
+    if (std.mem.eql(u8, display, "narrow")) return if (plural) u.no else u.n1;
+    return if (plural) u.so else u.s1;
+}
+fn unitPerSuffix(u: units_data.Unit, display: []const u8) []const u8 {
+    if (std.mem.eql(u8, display, "long")) return u.pl;
+    if (std.mem.eql(u8, display, "narrow")) return u.pn;
+    return u.ps;
+}
+/// English CLDR unit suffix for Intl.NumberFormat style:"unit" (spacing baked in;
+/// caller sets unit_space=false). Handles compound "A-per-B". Null if unknown.
+fn numberFormatUnitNameEn(self: *Interpreter, unit: []const u8, display: []const u8, plural: bool) value.HostError!?[]const u8 {
+    if (std.mem.indexOf(u8, unit, "-per-")) |p| {
+        const a = unitDataFind(unit[0..p]) orelse return null;
+        const b = unitDataFind(unit[p + 5 ..]) orelse return null;
+        const a_suf = unitSuffix(a, display, plural);
+        const per = unitPerSuffix(b, display);
+        if (per.len > 0) return try std.mem.concat(self.arena, u8, &.{ a_suf, per });
+        // No denominator per-pattern: join names with the compound pattern.
+        var b_name = unitSuffix(b, display, false);
+        while (b_name.len > 0 and b_name[0] == ' ') b_name = b_name[1..];
+        const sep: []const u8 = if (std.mem.eql(u8, display, "long")) " per " else "/";
+        return try std.mem.concat(self.arena, u8, &.{ a_suf, sep, b_name });
+    }
+    const u = unitDataFind(unit) orelse return null;
+    return unitSuffix(u, display, plural);
+}
 fn numberFormatUnitName(self: *Interpreter, locale: []const u8, unit: []const u8, display: []const u8, plural: bool) value.HostError![]const u8 {
     const long = std.mem.eql(u8, display, "long");
     if (std.mem.eql(u8, unit, "percent")) return "%";
@@ -26451,6 +26494,20 @@ fn rtfShortName(unit: []const u8, plural: bool) ?[]const u8 {
     return null;
 }
 
+/// en narrow relative-time unit abbreviation (no plural distinction, no space
+/// between the number and the unit: "3h ago").
+fn rtfNarrowName(unit: []const u8) ?[]const u8 {
+    const T = struct { k: []const u8, n: []const u8 };
+    const table = [_]T{
+        .{ .k = "second", .n = "s" }, .{ .k = "minute", .n = "m" },
+        .{ .k = "hour", .n = "h" },   .{ .k = "day", .n = "d" },
+        .{ .k = "week", .n = "w" },   .{ .k = "month", .n = "mo" },
+        .{ .k = "quarter", .n = "q" }, .{ .k = "year", .n = "y" },
+    };
+    for (table) |t| if (std.mem.eql(u8, unit, t.k)) return t.n;
+    return null;
+}
+
 fn rtfPolishCategory(mag: f64) []const u8 {
     if (mag != @trunc(mag)) return "other";
     const n: u64 = @intFromFloat(@abs(mag));
@@ -26535,10 +26592,12 @@ fn rtfCompute(self: *Interpreter, this: Value, args: []const Value) value.HostEr
     const locale = if (this.asObj().getOwn("\x00locale")) |lv| if (lv.isString()) lv.asStr() else "en" else "en";
     const syms = localeNumberSymbols(locale);
     const lang = localeLanguage(locale);
+    const is_narrow = std.mem.eql(u8, style, "narrow");
     const unit_name = if (std.mem.eql(u8, lang, "pl"))
         rtfPolishUnitName(info.singular, style, rtfPolishCategory(mag)) orelse info.singular
     else blk: {
-        const short = std.mem.eql(u8, style, "short") or std.mem.eql(u8, style, "narrow");
+        if (is_narrow) if (rtfNarrowName(info.singular)) |nn| break :blk nn;
+        const short = std.mem.eql(u8, style, "short") or is_narrow;
         break :blk if (short and rtfShortName(info.singular, plural) != null)
             rtfShortName(info.singular, plural).?
         else if (plural)
@@ -26546,6 +26605,8 @@ fn rtfCompute(self: *Interpreter, this: Value, args: []const Value) value.HostEr
         else
             info.singular;
     };
+    // Narrow en drops the space between the number and the unit ("3h ago").
+    const sep: []const u8 = if (is_narrow and !std.mem.eql(u8, lang, "pl")) "" else " ";
     // en long patterns: future "in {0} <unit>", past "{0} <unit> ago".
     return .{
         .int_str = r.int_str,
@@ -26555,7 +26616,7 @@ fn rtfCompute(self: *Interpreter, this: Value, args: []const Value) value.HostEr
         .suffix = if (std.mem.eql(u8, lang, "pl"))
             (if (neg) try std.fmt.allocPrint(self.arena, " {s} temu", .{unit_name}) else try std.fmt.allocPrint(self.arena, " {s}", .{unit_name}))
         else
-            (if (neg) try std.fmt.allocPrint(self.arena, " {s} ago", .{unit_name}) else try std.fmt.allocPrint(self.arena, " {s}", .{unit_name})),
+            (if (neg) try std.fmt.allocPrint(self.arena, "{s}{s} ago", .{ sep, unit_name }) else try std.fmt.allocPrint(self.arena, "{s}{s}", .{ sep, unit_name })),
         .group = syms.group,
         .decimal = syms.decimal,
         .numbering = resolveNumberingSystem(this),
