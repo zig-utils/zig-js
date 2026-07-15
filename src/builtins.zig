@@ -782,7 +782,7 @@ fn enumerableOwnProperties(self: *Interpreter, arg0: Value, kind: EnumKind) Host
     const o = try self.toObject(arg0); // RequireObjectCoercible + ToObject
     const ov: Value = Value.obj(o);
     const result = try self.newArray();
-    const is_proxy = o.proxy_handler != null or o.proxy_revoked;
+    const is_proxy = o.proxyHandler() != null or o.proxy_revoked;
     const is_module_ns = interpreter.isModuleNs(o);
     for (try ownStringKeysOrdered(self, o)) |k| {
         // [[GetOwnProperty]] enumerable check, read live so an earlier getter's
@@ -858,7 +858,7 @@ pub fn objectAssign(ctx: *anyopaque, this: Value, args: []const Value) HostError
         if (args[i].isNull() or args[i].isUndefined()) continue;
         const from = try self.toObject(args[i]);
         const src_v: Value = Value.obj(from);
-        const is_proxy = from.proxy_handler != null or from.proxy_revoked;
+        const is_proxy = from.proxyHandler() != null or from.proxy_revoked;
         // Every enumerable own key — string AND symbol (private excluded) — is
         // copied, in [[OwnPropertyKeys]] order (array indices / String chars /
         // "length" / symbols all included).
@@ -1375,8 +1375,8 @@ fn isArrayValue(self: *Interpreter, v: Value) HostError!bool {
     var o = v.asObj();
     while (true) {
         if (o.proxy_revoked) return self.throwError("TypeError", "Cannot perform 'IsArray' on a revoked proxy");
-        if (o.proxy_handler != null) {
-            o = o.proxy_target orelse return self.throwError("TypeError", "Cannot perform 'IsArray' on a revoked proxy");
+        if (o.proxyHandler() != null) {
+            o = o.proxyTarget() orelse return self.throwError("TypeError", "Cannot perform 'IsArray' on a revoked proxy");
             continue;
         }
         // The arguments exotic object is array-like but not an Array.
@@ -1464,7 +1464,7 @@ pub fn objectGetPrototypeOf(ctx: *anyopaque, this: Value, args: []const Value) H
     const v = arg(args, 0);
     if (v.isObject()) {
         const o = v.asObj();
-        if (o.proxy_handler != null or o.proxy_revoked) return self.proxyGetProto(o);
+        if (o.proxyHandler() != null or o.proxy_revoked) return self.proxyGetProto(o);
         // [[GetPrototypeOf]]: a callable with no explicit prototype reports
         // %Function.prototype% (every function inherits it).
         if (self.effectiveProto(o)) |p| return Value.obj(p);
@@ -1571,10 +1571,10 @@ pub fn defineOneResult(self: *Interpreter, target: *value.Object, key: []const u
     // [[DefineOwnProperty]] on a Proxy: invoke the `defineProperty` trap with a
     // FromPropertyDescriptor object; a falsy result is a TypeError. An absent
     // trap forwards to the target.
-    if (target.proxy_handler != null or target.proxy_revoked) {
+    if (target.proxyHandler() != null or target.proxy_revoked) {
         if (target.proxy_revoked) return self.throwError("TypeError", "Cannot perform 'defineProperty' on a revoked proxy");
-        const handler = target.proxy_handler.?;
-        const tgt = target.proxy_target orelse return self.throwError("TypeError", "Cannot perform 'defineProperty' on a revoked proxy");
+        const handler = target.proxyHandler().?;
+        const tgt = target.proxyTarget() orelse return self.throwError("TypeError", "Cannot perform 'defineProperty' on a revoked proxy");
         const trap = try self.getProperty(Value.obj(handler), "defineProperty");
         if (trap.isUndefined() or trap.isNull()) return defineOneResult(self, tgt, key, d);
         if (!trap.isCallable()) return self.throwError("TypeError", "proxy 'defineProperty' trap is not callable");
@@ -1582,7 +1582,7 @@ pub fn defineOneResult(self: *Interpreter, target: *value.Object, key: []const u
         const res = try self.callValueWithThis(trap, &.{ Value.obj(tgt), try self.keyToValue(key), trap_desc }, Value.obj(handler));
         if (!res.toBoolean()) return false;
         // [[DefineOwnProperty]] invariants (9.5.6) for an ordinary target.
-        if (tgt.proxy_handler == null and !tgt.proxy_revoked) {
+        if (tgt.proxyHandler() == null and !tgt.proxy_revoked) {
             const setting_nonconfig = if (d.getOwn("configurable")) |c| !c.toBoolean() else false;
             const has_own = tgt.getOwn(key) != null or tgt.getAccessor(key) != null;
             if (!has_own) {
@@ -1946,7 +1946,7 @@ pub fn objectPreventExtensions(ctx: *anyopaque, this: Value, args: []const Value
     if (args.len > 0 and isRealObject(args[0])) try self.checkRestricted(args[0].asObj());
     const o = arg(args, 0);
     if (isRealObject(o)) {
-        if (o.asObj().proxy_handler != null or o.asObj().proxy_revoked) {
+        if (o.asObj().proxyHandler() != null or o.asObj().proxy_revoked) {
             if (!try self.proxyPreventExt(o.asObj()))
                 return self.throwError("TypeError", "Cannot prevent extensions on proxy target");
         } else if (!isTypedArrayFixedLength(o.asObj())) {
@@ -1962,7 +1962,7 @@ pub fn objectIsExtensible(ctx: *anyopaque, this: Value, args: []const Value) Hos
     if (args.len > 0 and isRealObject(args[0])) try self.checkRestricted(args[0].asObj());
     const o = arg(args, 0);
     if (!isRealObject(o)) return Value.boolVal(false);
-    if (o.asObj().proxy_handler != null or o.asObj().proxy_revoked) return Value.boolVal(try self.proxyIsExtensible(o.asObj()));
+    if (o.asObj().proxyHandler() != null or o.asObj().proxy_revoked) return Value.boolVal(try self.proxyIsExtensible(o.asObj()));
     return Value.boolVal(o.asObj().isExtensible());
 }
 
@@ -2000,8 +2000,8 @@ fn setIntegrityLevel(ctx: *anyopaque, self: *Interpreter, o: *value.Object, free
             return self.throwError("TypeError", "Cannot seal or freeze a TypedArray with elements");
         }
     }
-    if (o.proxy_handler != null or o.proxy_revoked or interpreter.isModuleNs(o)) {
-        if (o.proxy_handler != null or o.proxy_revoked) {
+    if (o.proxyHandler() != null or o.proxy_revoked or interpreter.isModuleNs(o)) {
+        if (o.proxyHandler() != null or o.proxy_revoked) {
             if (!try self.proxyPreventExt(o))
                 return self.throwError("TypeError", "Object.seal/freeze: [[PreventExtensions]] returned false");
         } else {
@@ -2081,8 +2081,8 @@ pub fn objectIsFrozen(ctx: *anyopaque, this: Value, args: []const Value) HostErr
 fn isLocked(self: *Interpreter, ov: Value, frozen: bool) HostError!bool {
     if (!isRealObject(ov)) return true;
     const o = ov.asObj();
-    if (o.proxy_handler != null or o.proxy_revoked or interpreter.isModuleNs(o)) {
-        if (o.proxy_handler != null or o.proxy_revoked) {
+    if (o.proxyHandler() != null or o.proxy_revoked or interpreter.isModuleNs(o)) {
+        if (o.proxyHandler() != null or o.proxy_revoked) {
             if (try self.proxyIsExtensible(o)) return false;
         } else if (o.isExtensible()) return false;
         const ov_obj: Value = Value.obj(o);
@@ -2259,7 +2259,7 @@ fn completedDescAccessor(d: *value.Object) ?value.Accessor {
 }
 
 fn proxyTargetExtensible(self: *Interpreter, target: *value.Object) HostError!bool {
-    if (target.proxy_handler != null or target.proxy_revoked) return self.proxyIsExtensible(target);
+    if (target.proxyHandler() != null or target.proxy_revoked) return self.proxyIsExtensible(target);
     if (interpreter.isModuleNs(target)) return false;
     return target.isExtensible();
 }
@@ -2282,10 +2282,10 @@ pub fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, this: Value, args: []cons
     // [[GetOwnProperty]] on a Proxy: the trap returns a descriptor object or
     // undefined; the result is normalized (CompletePropertyDescriptor). An
     // absent trap forwards to the target.
-    if (o.proxy_handler != null or o.proxy_revoked) {
+    if (o.proxyHandler() != null or o.proxy_revoked) {
         if (o.proxy_revoked) return self.throwError("TypeError", "Cannot perform 'getOwnPropertyDescriptor' on a revoked proxy");
-        const handler = o.proxy_handler.?;
-        const tgt = o.proxy_target orelse return self.throwError("TypeError", "Cannot perform 'getOwnPropertyDescriptor' on a revoked proxy");
+        const handler = o.proxyHandler().?;
+        const tgt = o.proxyTarget() orelse return self.throwError("TypeError", "Cannot perform 'getOwnPropertyDescriptor' on a revoked proxy");
         const trap = try self.getProperty(Value.obj(handler), "getOwnPropertyDescriptor");
         if (trap.isUndefined() or trap.isNull())
             return objectGetOwnPropertyDescriptor(ctx, Value.undef(), &.{ Value.obj(tgt), arg(args, 1) });
@@ -2713,10 +2713,10 @@ const Stringifier = struct {
     fn jsonShape(st: *Stringifier, o: *value.Object) HostError!*value.Object {
         var shape = o;
         var guard: u32 = 0;
-        while (shape.proxy_handler != null or shape.proxy_revoked) {
+        while (shape.proxyHandler() != null or shape.proxy_revoked) {
             guard += 1;
             if (guard > 10000) return st.self.throwError("RangeError", "Maximum call stack size exceeded");
-            shape = shape.proxy_target orelse return st.self.throwError("TypeError", "Cannot stringify a revoked proxy");
+            shape = shape.proxyTarget() orelse return st.self.throwError("TypeError", "Cannot stringify a revoked proxy");
         }
         return shape;
     }
@@ -2725,7 +2725,7 @@ const Stringifier = struct {
         const a = st.self.arena;
         // SerializeJSONArray reads the length via LengthOfArrayLike (Get) — for a
         // Proxy that runs the "length" trap (and propagates an abrupt completion).
-        const len: usize = if (holder.isObject() and (holder.asObj().proxy_handler != null or holder.asObj().proxy_revoked))
+        const len: usize = if (holder.isObject() and (holder.asObj().proxyHandler() != null or holder.asObj().proxy_revoked))
             interpreter.toLen(try st.self.toNumberV(try st.self.getProperty(holder, "length")))
         else
             shape.arrayLength();
@@ -2756,7 +2756,7 @@ const Stringifier = struct {
         // getOwnPropertyDescriptor trap), which EnumerableOwnPropertyNames runs
         // per key — the raw shape can't answer it, and a throwing or
         // absent-descriptor trap must be observed (not silently serialized).
-        const is_proxy = v.asObj().proxy_handler != null or v.asObj().proxy_revoked;
+        const is_proxy = v.asObj().proxyHandler() != null or v.asObj().proxy_revoked;
         const outer = st.indent.items.len;
         try st.indent.appendSlice(a, st.gap);
         var tmp: std.ArrayListUnmanaged(u8) = .empty;

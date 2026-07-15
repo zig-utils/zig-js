@@ -908,7 +908,7 @@ fn quickArrayPrototypeData(
     if (!plain_receiver or own_data != null) return null;
 
     const prototype = array.protoAtomic() orelse return null;
-    if (prototype.proxy_handler != null or prototype.proxy_revoked) return null;
+    if (prototype.proxyHandler() != null or prototype.proxy_revoked) return null;
     if (parallel_sync) prototype.lockProperties();
     defer if (parallel_sync) prototype.unlockProperties();
     if (prototype.accessors.load(.monotonic) != null) return null;
@@ -935,7 +935,7 @@ inline fn quickDenseArrayStore(vm: *Interpreter, receiver: Value, key: Value, st
     if (!receiver.isObject()) return false;
     const index = quickArrayIndex(key) orelse return false;
     const object = receiver.asObj();
-    if (!object.is_array or object.is_arguments or object.proxy_handler != null or object.proxy_revoked or
+    if (!object.is_array or object.is_arguments or object.proxyHandler() != null or object.proxy_revoked or
         object.accessors.load(.monotonic) != null or object.attrsMap() != null or
         object.has_indexed_property.load(.monotonic))
         return false;
@@ -1411,7 +1411,7 @@ fn recordQuickGlobalBinding(chunk: *Chunk, instruction: usize, vm: *Interpreter,
         start.unlockBindings();
         if (!is_live_global_data) break :object;
         const object = vm.global_object orelse break :object;
-        if (object.proxy_handler != null or object.proxy_revoked or object.getAccessor(name) != null) break :object;
+        if (object.proxyHandler() != null or object.proxy_revoked or object.getAccessor(name) != null) break :object;
         const shape = object.shape orelse break :object;
         const slot = shape.lookup(name) orelse break :object;
         if (slot >= object.slots.items.len) break :object;
@@ -1967,7 +1967,7 @@ fn quickOwnDataPropertyValue(
     const object = receiver.asObj();
     if (parallel_sync) object.lockProperties();
     defer if (parallel_sync) object.unlockProperties();
-    if (object.is_array or object.proxy_handler != null or object.proxy_revoked or
+    if (object.is_array or object.proxyHandler() != null or object.proxy_revoked or
         object.accessors.load(.monotonic) != null or object.attrsMap() != null)
         return null;
     const slot = quickPropertySlotMode(chunk, instruction, object, parallel_sync) orelse return null;
@@ -2358,7 +2358,7 @@ fn runQuickObservableRecurrence(
 
 fn quickParallelCounterRead(vm: *Interpreter, state: *value.Object, name: []const u8) EvalError!Value {
     state.lockProperties();
-    if (!state.is_array and state.proxy_handler == null and !state.proxy_revoked and
+    if (!state.is_array and state.proxyHandler() == null and !state.proxy_revoked and
         state.accessors.load(.monotonic) == null and state.attrsMap() == null)
     {
         if (state.shape) |shape| if (shape.lookup(name)) |slot| if (slot < state.slots.items.len) {
@@ -2373,7 +2373,7 @@ fn quickParallelCounterRead(vm: *Interpreter, state: *value.Object, name: []cons
 
 fn quickParallelCounterWrite(vm: *Interpreter, state: *value.Object, name: []const u8, updated: Value) EvalError!void {
     state.lockProperties();
-    if (!state.is_array and state.proxy_handler == null and !state.proxy_revoked and
+    if (!state.is_array and state.proxyHandler() == null and !state.proxy_revoked and
         state.accessors.load(.monotonic) == null and state.attrsMap() == null)
     {
         if (state.shape) |shape| if (shape.lookup(name)) |slot| if (slot < state.slots.items.len) {
@@ -2504,7 +2504,7 @@ fn tryQuickNumericRecurrence(vm: *Interpreter, func: *Function, args: []const Va
                 );
             } else isolated: {
                 const plain_state = quickPlainObject(args[1]) orelse break :observable null;
-                if (plain_state.proxy_handler != null or plain_state.proxy_revoked or plain_state.is_symbol or plain_state.is_bigint)
+                if (plain_state.proxyHandler() != null or plain_state.proxy_revoked or plain_state.is_symbol or plain_state.is_bigint)
                     break :observable null;
                 const read_slot = quickPropertySlot(chunk, recurrence.counter_read_instruction, plain_state) orelse break :observable null;
                 const write_slot = quickPropertySlot(chunk, recurrence.counter_write_instruction, plain_state) orelse break :observable null;
@@ -2541,7 +2541,7 @@ fn tryQuickObjectAllocationLoopMode(
     const array_value = frame.slots[array_slot];
     if (!array_value.isObject()) return null;
     const array = array_value.asObj();
-    if (!array.is_array or array.is_arguments or array.proxy_handler != null or array.proxy_revoked or
+    if (!array.is_array or array.is_arguments or array.proxyHandler() != null or array.proxy_revoked or
         array.accessors.load(.monotonic) != null or array.attrsMap() != null or
         array.has_indexed_property.load(.monotonic))
         return null;
@@ -2616,7 +2616,7 @@ fn tryQuickObjectAllocationLoopMode(
             break :previous property.asNum();
         } else previous: {
             const displaced = quickPlainObject(displaced_value) orelse break;
-            if (displaced.proxy_handler != null or displaced.proxy_revoked or displaced.shape == null) break;
+            if (displaced.proxyHandler() != null or displaced.proxy_revoked or displaced.shape == null) break;
             const displaced_property_slot = quickOwnDataSlot(chunk, allocation.displaced_property_instruction, displaced) orelse break;
             break :previous quickSlotNumber(displaced, displaced_property_slot) orelse break;
         };
@@ -2775,7 +2775,7 @@ fn tryQuickArrayLoop(
             const array_value = frame.slots[array_slot];
             if (!array_value.isObject()) break :quick null;
             const array = array_value.asObj();
-            if (!array.is_array or array.is_arguments or array.proxy_handler != null or array.proxy_revoked or
+            if (!array.is_array or array.is_arguments or array.proxyHandler() != null or array.proxy_revoked or
                 array.accessors.load(.monotonic) != null or array.holes != null or
                 array.array_len > array.elements.items.len)
                 break :quick null;
@@ -2808,7 +2808,7 @@ fn tryQuickArrayLoop(
                 if (element_index >= array.elements.items.len) break;
                 const object_value = array.elements.items[element_index];
                 const object = quickPlainObject(object_value) orelse break;
-                if (object.proxy_handler != null or object.proxy_revoked or object.shape == null) break;
+                if (object.proxyHandler() != null or object.proxy_revoked or object.shape == null) break;
                 const read_slot = quickOwnDataSlot(chunk, property.get_prop_instruction, object) orelse break;
                 const write_slot = quickOwnDataSlot(chunk, property.set_prop_instruction, object) orelse break;
                 if (read_slot != write_slot) break;
@@ -2846,7 +2846,7 @@ fn tryQuickArrayLoop(
             const array_value = frame.slots[array_slot];
             if (!array_value.isObject()) break :quick null;
             const array = array_value.asObj();
-            if (!array.is_array or array.is_arguments or array.proxy_handler != null or array.proxy_revoked)
+            if (!array.is_array or array.is_arguments or array.proxyHandler() != null or array.proxy_revoked)
                 break :quick null;
             if (parallel_sync) array.lockElements();
             defer if (parallel_sync) array.unlockElements();
@@ -2879,7 +2879,7 @@ fn tryQuickArrayLoop(
             const array_value = frame.slots[array_slot];
             if (!array_value.isObject()) break :quick null;
             const array = array_value.asObj();
-            if (!array.is_array or array.is_arguments or array.proxy_handler != null or array.proxy_revoked) break :quick null;
+            if (!array.is_array or array.is_arguments or array.proxyHandler() != null or array.proxy_revoked) break :quick null;
             const get_prop_instruction: usize = @intCast(push.get_prop_instruction);
             if (get_prop_instruction >= chunk.code.items.len) break :quick null;
             const name_index = chunk.code.items[get_prop_instruction].a;
@@ -3097,7 +3097,7 @@ fn tryQuickPropertyKernel(
     defer frame.unlockSlots(frame_held);
     if (!frame.slots[object_local].isObject()) return null;
     const object = frame.slots[object_local].asObj();
-    if (object.is_array or object.proxy_handler != null or object.proxy_revoked) return null;
+    if (object.is_array or object.proxyHandler() != null or object.proxy_revoked) return null;
     if (parallel_sync) object.lockProperties();
     defer if (parallel_sync) object.unlockProperties();
     if (object.accessors.load(.monotonic) != null or object.attrsMap() != null) return null;
@@ -4194,7 +4194,7 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                     // [[Get]] path: getters + the prototype walk).
                     if (obj.isObject()) {
                         const o = obj.asObj();
-                        if (o.is_array and !o.is_arguments and o.proxy_handler == null and !o.proxy_revoked and
+                        if (o.is_array and !o.is_arguments and o.proxyHandler() == null and !o.proxy_revoked and
                             std.mem.eql(u8, name, "length"))
                         {
                             const length = if (parallel_sync) o.arrayLength() else @max(o.elements.items.len, o.array_len);
@@ -4208,7 +4208,7 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                         // retaining the observable own-property and accessor
                         // checks. A replaced method value is read from the live
                         // slot, and any shape transition invalidates the cache.
-                        if (o.is_array and !o.is_arguments and o.proxy_handler == null and !o.proxy_revoked) {
+                        if (o.is_array and !o.is_arguments and o.proxyHandler() == null and !o.proxy_revoked) {
                             if (quickArrayPrototypeData(chunk, ip - 1, o, name, parallel_sync)) |data| {
                                 result = data;
                                 if (builtin.is_test) _ = quick_array_prototype_data_hits.fetchAdd(1, .monotonic);
@@ -4252,7 +4252,7 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                     // stable allocation directly.
                     if (obj.isObject()) {
                         const o = obj.asObj();
-                        if (o.is_array and !o.is_arguments and o.proxy_handler == null and !o.proxy_revoked) {
+                        if (o.is_array and !o.is_arguments and o.proxyHandler() == null and !o.proxy_revoked) {
                             if (quickArrayIndex(key)) |index| {
                                 const element = if (parallel_sync)
                                     o.denseElement(index)

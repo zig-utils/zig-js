@@ -2271,7 +2271,7 @@ pub fn isPropertyMode(self: *Interpreter, v: Value) bool {
         v.isObject() and
         !v.asObj().is_symbol and
         !v.asObj().is_bigint and
-        v.asObj().proxy_target == null and
+        v.asObj().proxyTarget() == null and
         v.asObj().typed_array == null and
         v.asObj().data_view == null;
 }
@@ -3253,7 +3253,7 @@ fn threadRestrictFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value
     if (!v.isObject()) return self.throwError("TypeError", "cannot restrict this object");
     const o = v.asObj();
     const plain = o.js_func == null and o.native == null and o.hostCallback() == null and o.boundFunction() == null and
-        o.generator() == null and o.proxy_target == null and !o.proxy_revoked and
+        o.generator() == null and o.proxyTarget() == null and !o.proxy_revoked and
         o != (self.global_object orelse o) and
         o.typed_array == null and o.data_view == null and o.array_buffer == null and
         !o.is_date and !o.is_regex and !o.is_map and !o.is_set and !o.is_weak and

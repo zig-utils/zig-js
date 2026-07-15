@@ -381,7 +381,7 @@ const Serializer = struct {
         if (o.js_func != null or o.native != null or o.hostCallback() != null or o.boundFunction() != null)
             return s.throwClone("DataCloneError: function objects cannot be cloned");
         if (o.is_symbol) return s.throwClone("DataCloneError: Symbol values cannot be cloned");
-        if (o.proxy_target != null or o.proxy_revoked)
+        if (o.proxyTarget() != null or o.proxy_revoked)
             return s.throwClone("DataCloneError: Proxy objects cannot be cloned");
         if (o.promise != null) return s.throwClone("DataCloneError: Promise objects cannot be cloned");
         if (o.generator() != null) return s.throwClone("DataCloneError: generator objects cannot be cloned");

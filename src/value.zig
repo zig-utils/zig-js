@@ -620,6 +620,7 @@ pub const ObjectRareTag = enum {
     generator,
     iter_helper,
     bound_function,
+    proxy,
 };
 
 pub const ObjectRareState = union(ObjectRareTag) {
@@ -640,6 +641,10 @@ pub const ObjectRareState = union(ObjectRareTag) {
     generator: struct { ptr: ?*anyopaque = null },
     iter_helper: struct { ptr: ?*IterHelper = null },
     bound_function: struct { ptr: ?*anyopaque = null },
+    proxy: struct {
+        target: ?*Object = null,
+        handler: ?*Object = null,
+    },
 };
 
 pub const ObjectColdState = struct {
@@ -918,12 +923,8 @@ pub const Object = struct {
     /// dispatched specially and it carries pending reactions + settled state.
     promise: ?*anyopaque = null,
     // Primitive-wrapper [[NumberData]]/[[StringData]]/[[BooleanData]] lives cold.
-    /// `Proxy` exotic object: the wrapped target and the handler object. Both
-    /// non-null marks a proxy — property operations route through the handler's
-    /// traps (falling back to the target). A revoked proxy has both set to a
-    /// sentinel `revoked` flag.
-    proxy_target: ?*Object = null,
-    proxy_handler: ?*Object = null,
+    /// `Proxy` target and handler live in the disjoint rare-state sidecar.
+    /// A revoked proxy retains only these hot behavior flags.
     proxy_revoked: bool = false,
     /// Proxies keep their [[Call]] exotic behavior even after revocation. Once
     /// revoked, the target slot is gone, so cache the callable bit at creation.
@@ -1225,6 +1226,44 @@ pub const Object = struct {
     pub fn setBoundFunction(self: *Object, fallback: std.mem.Allocator, bound_function: *anyopaque) std.mem.Allocator.Error!void {
         const state = try self.ensureRare(fallback, .bound_function, .{});
         state.ptr = bound_function;
+    }
+
+    pub inline fn proxyTarget(self: *const Object) ?*Object {
+        const cold = self.cold orelse return null;
+        return switch (cold.rare) {
+            .proxy => |state| state.target,
+            else => null,
+        };
+    }
+
+    pub inline fn proxyHandler(self: *const Object) ?*Object {
+        const cold = self.cold orelse return null;
+        return switch (cold.rare) {
+            .proxy => |state| state.handler,
+            else => null,
+        };
+    }
+
+    pub fn setProxyState(
+        self: *Object,
+        fallback: std.mem.Allocator,
+        target: *Object,
+        handler: *Object,
+    ) std.mem.Allocator.Error!void {
+        const state = try self.ensureRare(fallback, .proxy, .{});
+        state.target = target;
+        state.handler = handler;
+    }
+
+    pub fn clearProxyState(self: *Object) void {
+        const cold = self.cold orelse return;
+        switch (cold.rare) {
+            .proxy => |*state| {
+                state.target = null;
+                state.handler = null;
+            },
+            else => {},
+        }
     }
 
     pub fn setErrorName(self: *Object, fallback: std.mem.Allocator, name: []const u8) std.mem.Allocator.Error!void {
@@ -2157,7 +2196,7 @@ pub const Object = struct {
         // pathological proxy→target cycle can't blow the stack.
         var o = self;
         var guard: u32 = 0;
-        while (o.proxy_target) |t| {
+        while (o.proxyTarget()) |t| {
             guard += 1;
             if (guard > 10000) return false;
             o = t;
