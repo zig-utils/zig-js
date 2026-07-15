@@ -14,29 +14,29 @@ Neither is an application benchmark or a universal engine score. They are small,
 
 ## Latest JavaScriptCore comparison
 
-The latest saved run is the [July 15, 2026 report](.data/benchmark-comparison-2026-07-15.md), with all [1,540 raw timing samples](.data/benchmark-comparison-2026-07-15.tsv). It ran clean zig-js commit `fff12f905819fab376372fabddb46d6a95f02f97`, zig-gc commit `9d4af0d49be5eba5b9283d5ed135fdf02626e2ac`, and zig-regex commit `5937fa7d4db0b69575c821066afd1a7da92aa019` on an 11-core Apple M3 Pro using Zig `0.17.0-dev.956+2dca73595` and the macOS 27.0 system JavaScriptCore framework `22625.1.20.11.3`. The harness recorded battery power at 83% and discharging. Work counts are identical for both engines, every full-run median exceeds the 50 ms timing floor, and runner order alternates. Read the saved min/max and RSD before interpreting small differences or comparing sessions.
+The latest saved run is the [July 15, 2026 report](.data/benchmark-comparison-2026-07-15.md), with all [1,540 raw timing samples](.data/benchmark-comparison-2026-07-15.tsv). It ran clean zig-js commit `0a74f7d1a35a9504d82d7ca846ff7a05c53f6740`, zig-gc commit `9d4af0d49be5eba5b9283d5ed135fdf02626e2ac`, and zig-regex commit `50764b0352e73a434278de38825dbb55464f1cf6` on an 11-core Apple M3 Pro using Zig `0.17.0-dev.956+2dca73595` and the macOS 27.0 system JavaScriptCore framework `22625.1.20.11.3`. The harness recorded AC power at 100% charge. Work counts are identical for both engines, every full-run median exceeds the 50 ms timing floor, and runner order alternates. Read the saved min/max and RSD before interpreting small differences or comparing sessions.
 
 | mode | lanes | wins vs JSC | zig-js / JSC throughput | zig-js scaling | JSC scaling |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| direct warmed context | 1 | 10 / 10 | **2.76x** | — | — |
-| independent steady contexts | 8 | 9 / 10 | **2.88x** | **5.30x** | 5.04x |
-| independent cold lifecycles | 8 | 9 / 10 | **2.98x** | **5.41x** | 4.88x |
-| shared realm, no GIL | 8 | no public-JSC equivalent | — | **4.23x** | — |
+| direct warmed context | 1 | 10 / 10 | **2.75x** | — | — |
+| independent steady contexts | 8 | 10 / 10 | **2.95x** | **5.38x** | 5.14x |
+| independent cold lifecycles | 8 | 10 / 10 | **2.90x** | **5.27x** | 5.08x |
+| shared realm, no GIL | 8 | no public-JSC equivalent | — | **4.17x** | — |
 
 The saved single-thread medians are:
 
 | workload | jobs | zig-js (ms) | JSC (ms) | zig-js / JSC throughput |
 | --- | ---: | ---: | ---: | ---: |
-| arithmetic | 240 | 83.460 | 356.409 | 4.27x |
-| properties | 300 | 90.049 | 298.925 | 3.32x |
-| polymorphic properties | 400 | 84.488 | 227.078 | 2.69x |
-| object churn | 100 | 109.144 | 117.864 | 1.08x |
-| arrays | 550 | 80.170 | 152.181 | 1.90x |
-| direct calls | 600 | 57.853 | 119.884 | 2.07x |
-| method calls | 500 | 63.367 | 141.896 | 2.24x |
-| closure calls | 600 | 64.975 | 196.604 | 3.03x |
-| arguments calls | 600 | 70.252 | 300.100 | 4.27x |
-| Fibonacci | 125 | 82.233 | 455.227 | 5.54x |
+| arithmetic | 240 | 82.936 | 353.899 | 4.27x |
+| properties | 300 | 87.534 | 293.427 | 3.35x |
+| polymorphic properties | 400 | 82.027 | 204.107 | 2.49x |
+| object churn | 100 | 80.380 | 117.343 | 1.46x |
+| arrays | 550 | 79.124 | 150.564 | 1.90x |
+| direct calls | 600 | 56.185 | 116.732 | 2.08x |
+| method calls | 500 | 63.899 | 137.733 | 2.16x |
+| closure calls | 600 | 77.444 | 187.510 | 2.42x |
+| arguments calls | 600 | 67.331 | 296.124 | 4.40x |
+| Fibonacci | 125 | 85.294 | 448.825 | 5.26x |
 
 A ratio above 1.00x favors zig-js; below 1.00x favors JSC.
 
@@ -44,35 +44,35 @@ The symmetric eight-lane steady-state rows are directly comparable:
 
 | workload | zig-js (ms) | JSC (ms) | zig-js / JSC throughput | zig-js scaling | JSC scaling |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| arithmetic | 107.624 | 537.507 | 4.99x | 6.20x | 5.29x |
-| properties | 127.531 | 470.714 | 3.69x | 5.70x | 5.00x |
-| polymorphic properties | 124.906 | 321.927 | 2.58x | 5.88x | 6.10x |
-| object churn | 266.624 | 183.781 | 0.69x | 3.28x | 5.07x |
-| arrays | 128.020 | 265.918 | 2.08x | 5.03x | 4.57x |
-| direct calls | 86.650 | 209.146 | 2.41x | 5.66x | 4.69x |
-| method calls | 94.638 | 225.753 | 2.39x | 5.45x | 5.00x |
-| closure calls | 94.428 | 338.457 | 3.58x | 5.44x | 4.56x |
-| arguments calls | 100.188 | 507.589 | 5.07x | 5.56x | 4.79x |
-| Fibonacci | 120.613 | 660.264 | 5.47x | 5.53x | 5.48x |
+| arithmetic | 106.720 | 550.496 | 5.16x | 6.22x | 5.09x |
+| properties | 119.083 | 462.222 | 3.88x | 5.88x | 5.06x |
+| polymorphic properties | 129.555 | 336.130 | 2.59x | 5.07x | 4.86x |
+| object churn | 170.179 | 187.303 | 1.10x | 3.77x | 5.05x |
+| arrays | 128.029 | 233.891 | 1.83x | 5.05x | 5.16x |
+| direct calls | 77.858 | 184.310 | 2.37x | 5.77x | 5.05x |
+| method calls | 88.482 | 205.107 | 2.32x | 5.69x | 5.35x |
+| closure calls | 85.020 | 295.237 | 3.47x | 5.84x | 5.04x |
+| arguments calls | 102.239 | 459.981 | 4.50x | 5.29x | 5.15x |
+| Fibonacci | 116.174 | 640.952 | 5.52x | 5.69x | 5.60x |
 
 The separate no-GIL shared-realm path has no direct public-JSC equivalent. Its one-to-eight-lane result is:
 
 | workload | one lane (ms) | eight lanes (ms) | throughput scaling |
 | --- | ---: | ---: | ---: |
-| arithmetic | 83.622 | 109.544 | 6.11x |
-| properties | 129.786 | 185.549 | 5.60x |
-| polymorphic properties | 597.711 | 757.858 | 6.31x |
-| object churn | 193.853 | 2,374.329 | 0.65x |
-| arrays | 83.483 | 242.194 | 2.76x |
-| direct calls | 59.257 | 85.414 | 5.55x |
-| method calls | 124.318 | 199.988 | 4.97x |
-| closure calls | 67.528 | 96.832 | 5.58x |
-| arguments calls | 70.621 | 102.137 | 5.53x |
-| Fibonacci | 257.612 | 374.975 | 5.50x |
+| arithmetic | 83.101 | 106.705 | 6.23x |
+| properties | 126.288 | 175.031 | 5.77x |
+| polymorphic properties | 503.704 | 738.795 | 5.45x |
+| object churn | 123.180 | 1,922.828 | 0.51x |
+| arrays | 82.337 | 214.583 | 3.07x |
+| direct calls | 56.310 | 80.143 | 5.62x |
+| method calls | 116.787 | 176.318 | 5.30x |
+| closure calls | 62.684 | 91.244 | 5.50x |
+| arguments calls | 67.804 | 97.508 | 5.56x |
+| Fibonacci | 258.003 | 366.792 | 5.63x |
 
-zig-js wins all 10 direct rows and 9 of 10 eight-lane rows in both directly comparable multi-context modes; object churn is the remaining loss. Its geometric-mean throughput lead is 2.76x direct, 2.88x at eight warmed independent contexts, and 2.98x in the symmetric eight-lane cold lifecycle. Mode-local eight-lane scaling is 5.30x for zig-js versus 5.04x for JSC when warmed and 5.41x versus 4.88x when cold. Shared-realm scaling is 4.23x by geometric mean.
+zig-js wins all 10 direct rows and all 10 eight-lane rows in both directly comparable multi-context modes. Its geometric-mean throughput lead is 2.75x direct, 2.95x at eight warmed independent contexts, and 2.90x in the symmetric eight-lane cold lifecycle. Mode-local eight-lane scaling is 5.38x for zig-js versus 5.14x for JSC when warmed and 5.27x versus 5.08x when cold. Shared-realm scaling is 4.17x by geometric mean.
 
-The shipping no-GIL heap now enables allocation accounting only after a second worker is registered, then performs a bounded cooperative young collection after a 1 GiB aggregate GC-cell tranche. Peers freeze at existing safepoints, publish their native stacks, and are released after collection; a 100 ms rendezvous timeout fails closed without sweeping. An order-balanced same-session object-churn A/B held the one-lane median effectively flat (195.479 versus 196.399 ms, -0.5%) and cut the eight-lane median from 5,554.628 to 2,214.625 ms (-60.1%), with exact checksums. The full matrix records shared object churn at 2,374.329 ms, 0.65x scaling, and 6.32% RSD. It remains below the shared-scaling completion target, while directly compared eight-context object churn is 266.624 versus 183.781 ms warmed and 275.548 versus 188.630 ms cold. Read the per-workload rows first; geometric means summarize this exact matrix and do not predict an application.
+Object instances now occupy a 256-byte GC slab (`208` bytes of payload and `240` raw bytes including allocator metadata), while cold error, regexp, constructor, and related state is allocated only when used. Current object buckets use 256 KiB chunks, avoiding repeated allocator and synchronized address-index growth without exceeding the fixed reuse bitmap. The object-churn medians are 80.380 versus 117.343 ms direct, 170.179 versus 187.303 ms at eight warmed contexts, and 177.256 versus 189.788 ms across cold eight-context lifecycles, so zig-js leads JSC in every directly compared object-churn row. Shared object churn is 1,922.828 ms at eight lanes with 0.51x scaling and 4.33% RSD; it remains the clearest shared-GC bottleneck. Read the per-workload rows first; geometric means summarize this exact matrix and do not predict an application.
 
 ## What is compared
 
