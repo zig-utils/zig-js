@@ -679,6 +679,13 @@ pub const Binding = struct {
         return backing.allocateCellBatch(total, out);
     }
 
+    /// Optional zig-gc sweep hook. Dead cells are already finalized and
+    /// unlinked; return a bounded same-size run under one backing lock.
+    pub fn freeCellStorageBatch(self: *Binding, total: usize, allocations: []*anyopaque) void {
+        const backing = self.context.gc_cell_backing orelse unreachable;
+        backing.freeCellStorageBatch(total, allocations);
+    }
+
     /// Optional zig-gc weak-pass gate. Runtime constructors publish the
     /// Context's monotonic bit before weak semantic state becomes observable.
     pub fn hasWeakWork(self: *Binding) bool {

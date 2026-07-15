@@ -1067,6 +1067,40 @@ pub const GcCellBacking = struct {
         return self.inner.vtable.alloc(self.inner.ptr, len, alignment, ret_addr);
     }
 
+    fn freeOwnedSlotLocked(self: *GcCellBacking, idx: usize, ptr: [*]u8) bool {
+        const chunk_idx = self.ownedChunkIndexLocked(idx, ptr) orelse return false;
+        // Context teardown frees owned bucket chunks wholesale immediately
+        // after `zig-gc` walks live cells. Avoid updating reuse bitmaps in that
+        // one-way phase.
+        if (self.bulk_teardown) return true;
+        std.debug.assert(self.bucket_live_counts[idx].items[chunk_idx] > 0);
+        self.bucket_live_counts[idx].items[chunk_idx] -= 1;
+        const chunk = self.bucket_chunks[idx].items[chunk_idx];
+        const offset = @intFromPtr(ptr) - @intFromPtr(chunk.ptr);
+        std.debug.assert(offset % bucket_sizes[idx] == 0);
+        std.debug.assert(offset < self.bucket_next_offsets[idx].items[chunk_idx]);
+        self.bucket_freed_slots[idx] += 1;
+        const inserted = self.bucket_free_bitmaps[idx].items[chunk_idx].insert(offset / bucket_sizes[idx]);
+        std.debug.assert(inserted);
+        self.bucket_free_counts[idx] += 1;
+        self.bucket_free_hint[idx] = chunk_idx;
+        return true;
+    }
+
+    /// Return a same-size sweep run while holding its size-class lock once.
+    /// zig-gc has already finalized/unlinked every allocation in the slice and
+    /// guarantees that all managed cell storage uses this backing.
+    pub fn freeCellStorageBatch(self: *GcCellBacking, len: usize, allocations: []*anyopaque) void {
+        if (allocations.len == 0) return;
+        const idx = bucketIndex(len, .@"16") orelse unreachable;
+        self.acquireBucket(idx);
+        defer self.unlockBucket(idx);
+        for (allocations) |allocation| {
+            const ptr: [*]u8 = @ptrCast(allocation);
+            std.debug.assert(self.freeOwnedSlotLocked(idx, ptr));
+        }
+    }
+
     fn resizeFn(ctx: *anyopaque, mem: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
         const self: *GcCellBacking = @ptrCast(@alignCast(ctx));
         if (bucketIndex(mem.len, alignment)) |idx| {
@@ -1100,26 +1134,7 @@ pub const GcCellBacking = struct {
         const self: *GcCellBacking = @ptrCast(@alignCast(ctx));
         if (bucketIndex(mem.len, alignment)) |idx| {
             self.acquireBucket(idx);
-            if (self.ownedChunkIndexLocked(idx, mem.ptr)) |chunk_idx| {
-                // Context teardown frees owned bucket chunks wholesale
-                // immediately after `zig-gc` walks live cells. Avoid updating
-                // reuse bitmaps in that one-way phase, but still delegate any
-                // bucket-shaped allocation that never belonged to a cell slab.
-                if (self.bulk_teardown) {
-                    self.unlockBucket(idx);
-                    return;
-                }
-                std.debug.assert(self.bucket_live_counts[idx].items[chunk_idx] > 0);
-                self.bucket_live_counts[idx].items[chunk_idx] -= 1;
-                const chunk = self.bucket_chunks[idx].items[chunk_idx];
-                const offset = @intFromPtr(mem.ptr) - @intFromPtr(chunk.ptr);
-                std.debug.assert(offset % bucket_sizes[idx] == 0);
-                std.debug.assert(offset < self.bucket_next_offsets[idx].items[chunk_idx]);
-                self.bucket_freed_slots[idx] += 1;
-                const inserted = self.bucket_free_bitmaps[idx].items[chunk_idx].insert(offset / bucket_sizes[idx]);
-                std.debug.assert(inserted);
-                self.bucket_free_counts[idx] += 1;
-                self.bucket_free_hint[idx] = chunk_idx;
+            if (self.freeOwnedSlotLocked(idx, mem.ptr)) {
                 self.unlockBucket(idx);
                 return;
             }
@@ -1442,6 +1457,31 @@ test "GC cell backing batches reused and fresh slabs under one bucket lock" {
         const ptr: [*]align(16) u8 = @ptrCast(@alignCast(slab));
         const cell: []align(16) u8 = ptr[0..len];
         a.free(cell);
+    }
+}
+
+test "GC cell backing batches same-size sweep releases under one bucket lock" {
+    var backing = GcCellBacking{ .inner = std.testing.allocator, .parallel = true };
+    defer backing.deinit();
+    const a = backing.allocator();
+    const len = 200;
+    const idx = GcCellBacking.bucketIndex(len, .@"16").?;
+
+    var cells: [4][]align(16) u8 = undefined;
+    var allocations: [cells.len]*anyopaque = undefined;
+    for (&cells, 0..) |*cell, i| {
+        cell.* = try a.alignedAlloc(u8, .@"16", len);
+        allocations[i] = cell.ptr;
+    }
+    const locks_before = backing.bucket_lock_acquisitions_for_testing[idx];
+    backing.freeCellStorageBatch(len, &allocations);
+    try std.testing.expectEqual(locks_before + 1, backing.bucket_lock_acquisitions_for_testing[idx]);
+    try std.testing.expectEqual(cells.len, backing.bucket_free_counts[idx]);
+    try std.testing.expectEqual(@as(usize, 0), backing.bucket_live_counts[idx].items[0]);
+
+    for (0..cells.len) |_| {
+        const reused = try a.alignedAlloc(u8, .@"16", len);
+        a.free(reused);
     }
 }
 
