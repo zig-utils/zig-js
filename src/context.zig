@@ -2124,6 +2124,11 @@ pub const Context = struct {
     /// The collector only enqueues registries; callbacks run later from the
     /// normal interpreter checkpoint, outside the collector.
     finalization_cleanup_jobs: std.ArrayListUnmanaged(*value.Object) = .empty,
+    /// Monotonic proof bit for zig-gc's optional weak-processing gate. Runtime
+    /// constructors publish true before any WeakMap/WeakSet/WeakRef/
+    /// FinalizationRegistry state can become observable. It never returns to
+    /// false, so a collector can safely skip all weak passes while it is false.
+    gc_weak_work: std.atomic.Value(bool) = .init(false),
     /// A JS-visible shell `gc()` call requests collection, but the precise M1
     /// collector is only sound at quiescent points. The request is serviced at
     /// the next evaluate/evaluateModule entry rather than inside live Zig
@@ -2706,6 +2711,7 @@ pub const Context = struct {
             .gc_array_buffer_bytes_live = if (self.gc != null) &self.gc_array_buffer_bytes_live else null,
             .gc_promise_reactions_live = if (self.gc != null) &self.gc_promise_reactions_live else null,
             .gc_environment_name_bytes_live = if (self.gc != null) &self.gc_environment_name_bytes_live else null,
+            .gc_weak_work = if (self.gc != null) &self.gc_weak_work else null,
             .gc_requested = &self.gc_requested,
             .gc_checkpoint_ctx = self,
             .gc_checkpoint_fn = serviceRequestedGcCheckpoint,
@@ -3457,6 +3463,10 @@ pub const Context = struct {
         }
         self.reserveFinalizationCleanupJobsLocked(1) catch return;
         self.finalization_cleanup_jobs.appendAssumeCapacity(registry);
+    }
+
+    pub fn noteWeakWork(self: *Context) void {
+        self.gc_weak_work.store(true, .release);
     }
 
     fn reserveFinalizationCleanupJobsLocked(self: *Context, additional: usize) error{OutOfMemory}!void {
@@ -14811,6 +14821,7 @@ test "enable_gc concurrent (M3): a WeakMap survives a marker racing a mutator th
     const a = ctx.arena();
 
     const wm = try gc_mod.allocObj(a);
+    ctx.noteWeakWork();
     wm.* = .{ .is_weak = true, .is_map = true };
     try ctx.global_object.setOwn(ctx.gpa, ctx.root_shape, "wm", Value.obj(wm));
     const keep = try gc_mod.allocObj(a); // strongly holds the (otherwise weak) keys
@@ -15032,6 +15043,24 @@ test "enable_gc: evaluate roots completion value across requested GC" {
     var machine = ctx.interpreter();
     const result = try machine.awaitValue(promise_value);
     try std.testing.expectEqual(@as(f64, 41), result.asNum());
+}
+
+test "enable_gc: weak processing stays gated until weak state is constructed" {
+    const sources = [_][]const u8{
+        "new WeakMap()",
+        "new WeakSet()",
+        "new WeakRef({})",
+        "new FinalizationRegistry(() => {})",
+    };
+    for (sources) |source| {
+        const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+        try std.testing.expect(!ctx.gc_weak_work.load(.acquire));
+        _ = try ctx.evaluate("({ plain: true })");
+        try std.testing.expect(!ctx.gc_weak_work.load(.acquire));
+        _ = try ctx.evaluate(source);
+        try std.testing.expect(ctx.gc_weak_work.load(.acquire));
+        ctx.destroy();
+    }
 }
 
 test "enable_gc: WeakRef target clears when only weakly reachable" {

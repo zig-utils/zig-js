@@ -1016,6 +1016,9 @@ pub const Interpreter = struct {
     gc_promise_reactions_live: ?*usize = null,
     /// Internal byte accounting for GC-owned Environment binding-name strings.
     gc_environment_name_bytes_live: ?*usize = null,
+    /// Context-owned monotonic weak-state bit. Weak constructors set it before
+    /// publishing state that requires ephemeron, weak-slot, or after-weak work.
+    gc_weak_work: ?*std.atomic.Value(bool) = null,
     /// Context-owned pending collection request set by the JS shell `gc()`
     /// helper. M1 collection is precise and quiescent-only, so the request is
     /// serviced by `Context` at the next safe entry point.
@@ -8637,6 +8640,10 @@ pub const Interpreter = struct {
         return self.makeMapWithIntrinsic(init_v, "Map");
     }
 
+    fn noteWeakWork(self: *Interpreter) void {
+        if (self.gc_weak_work) |flag| flag.store(true, .release);
+    }
+
     pub fn makeWeakMap(self: *Interpreter, init_v: Value) EvalError!Value {
         return self.makeMapWithIntrinsic(init_v, "WeakMap");
     }
@@ -8654,6 +8661,7 @@ pub const Interpreter = struct {
             }
         }
         o.is_weak = self.protoReachesCtorProto("WeakMap", o.protoAtomic());
+        if (o.is_weak) self.noteWeakWork();
         try self.addEntriesFromIterable(o, init_v, false);
         return Value.obj(o);
     }
@@ -8682,6 +8690,7 @@ pub const Interpreter = struct {
             }
         }
         o.is_weak = self.protoReachesCtorProto("WeakSet", o.protoAtomic());
+        if (o.is_weak) self.noteWeakWork();
         try self.addEntriesFromIterable(o, init_v, true);
         return Value.obj(o);
     }
@@ -19258,6 +19267,7 @@ fn weakRefConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value
     if (self.new_target.isUndefined()) return self.throwError("TypeError", "Constructor WeakRef requires 'new'");
     const target = if (args.len > 0) args[0] else Value.undef();
     if (!canBeHeldWeakly(target)) return self.throwError("TypeError", "WeakRef: target must be an object or a symbol");
+    self.noteWeakWork();
     const o = (try self.newObject()).asObj();
     o.is_weak_ref = true;
     o.weak_ref_target = target.asObj();
@@ -19280,6 +19290,7 @@ fn finalizationRegistryConstructorFn(ctx: *anyopaque, this: Value, args: []const
     if (self.new_target.isUndefined()) return self.throwError("TypeError", "Constructor FinalizationRegistry requires 'new'");
     const cb = if (args.len > 0) args[0] else Value.undef();
     if (!cb.isCallable()) return self.throwError("TypeError", "FinalizationRegistry: cleanup callback must be callable");
+    self.noteWeakWork();
     const o = (try self.newObject()).asObj();
     o.is_finalization_registry = true;
     (try o.ensureCold(self.arena)).finalization_callback = cb;

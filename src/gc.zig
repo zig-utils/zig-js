@@ -679,6 +679,12 @@ pub const Binding = struct {
         return backing.allocateCellBatch(total, out);
     }
 
+    /// Optional zig-gc weak-pass gate. Runtime constructors publish the
+    /// Context's monotonic bit before weak semantic state becomes observable.
+    pub fn hasWeakWork(self: *Binding) bool {
+        return self.context.gc_weak_work.load(.acquire);
+    }
+
     pub fn classifyConservativeInterior(self: *Binding, address: usize) gc.InteriorOwnership {
         const backing = self.context.gc_cell_backing orelse return .outside;
         return backing.classifyConservativeInterior(address);
