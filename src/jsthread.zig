@@ -73,6 +73,11 @@ pub const ThreadRecord = struct {
     /// `join_mutex`, but a parallel collector can start before the finisher has
     /// copied those promises into its interpreter temp roots.
     settling_joins: std.ArrayListUnmanaged(PendingJoin) = .empty,
+    /// `done` publishes the synchronous result before the finishing thread
+    /// settles the pre-existing asyncJoin snapshot. A synchronous join must
+    /// wait for both transitions or it can drain the joiner queue in between
+    /// them and miss the settlement reactions.
+    joins_settled: bool = true,
     /// The live microtask queue for this JS thread. Worker queues are stack
     /// locals in `threadMain`; outstanding async tickets are transferred away
     /// before that stack frame exits.
@@ -681,6 +686,7 @@ fn threadMain(rec: *ThreadRecord, fn_v: Value, args: []const Value) void {
     // `machine.microtasks` in `traceInterpreterRoots` (which holds the lock).
     const microtasks = rec.ctx.arena().create(promise.MicrotaskQueue) catch {
         var pj = publishThreadCompletion(rec, true, outOfMemoryCompletionValue(rec.ctx));
+        finishThreadJoinSettlement(rec);
         pj.deinit(rec.ctx.arena());
         return;
     };
@@ -690,6 +696,7 @@ fn threadMain(rec: *ThreadRecord, fn_v: Value, args: []const Value) void {
     var machine = rec.ctx.interpreter();
     rec.ctx.pushActiveInterpreter(&machine) catch {
         var pending_joins = publishThreadCompletion(rec, true, outOfMemoryCompletionValue(rec.ctx));
+        finishThreadJoinSettlement(rec);
         pending_joins.deinit(rec.ctx.arena());
         return;
     };
@@ -740,10 +747,7 @@ fn threadMain(rec: *ThreadRecord, fn_v: Value, args: []const Value) void {
     defer if (rec.ctx.parallel_js) g.release();
     var pending_joins = publishThreadCompletion(rec, threw, result);
     defer {
-        const io = agent.engineIo();
-        rec.join_mutex.lockUncancelable(io);
-        rec.settling_joins = .empty;
-        rec.join_mutex.unlock(io);
+        finishThreadJoinSettlement(rec);
         pending_joins.deinit(rec.ctx.arena());
     }
     // publishThreadCompletion emptied `rec.pending_joins` (a GC root) into this
@@ -855,9 +859,23 @@ fn publishThreadCompletion(rec: *ThreadRecord, threw: bool, result: Value) std.A
     const pending = rec.pending_joins;
     rec.pending_joins = .empty;
     rec.settling_joins = pending;
+    rec.joins_settled = pending.items.len == 0;
     rec.done = true;
     rec.done_cond.broadcast(io);
     return pending;
+}
+
+fn finishThreadJoinSettlement(rec: *ThreadRecord) void {
+    const io = agent.engineIo();
+    rec.join_mutex.lockUncancelable(io);
+    rec.settling_joins = .empty;
+    rec.joins_settled = true;
+    rec.done_cond.broadcast(io);
+    rec.join_mutex.unlock(io);
+}
+
+fn threadJoinReadyLocked(rec: *const ThreadRecord) bool {
+    return rec.done and rec.joins_settled;
 }
 
 fn appendPendingJoinLocked(rec: *ThreadRecord, arena: std.mem.Allocator, pending: PendingJoin) !void {
@@ -873,7 +891,7 @@ fn appendPendingJoinLocked(rec: *ThreadRecord, arena: std.mem.Allocator, pending
     rec.pending_joins.appendAssumeCapacity(pending);
 }
 
-test "Thread asyncJoin pending list growth is trace-sensitive and chunked" {
+test "Thread asyncJoin pending growth and synchronous join settlement gate" {
     var probe = TraceSensitiveAllocProbe{ .inner = std.testing.allocator };
     const a = probe.allocator();
     var rec = ThreadRecord{
@@ -908,8 +926,14 @@ test "Thread asyncJoin pending list growth is trace-sensitive and chunked" {
     var pending = publishThreadCompletion(&rec, false, Value.undef());
     defer pending.deinit(a);
     try std.testing.expect(rec.done);
+    try std.testing.expect(!rec.joins_settled);
+    try std.testing.expect(!threadJoinReadyLocked(&rec));
     try std.testing.expectEqual(first_capacity + 1, pending.items.len);
     try std.testing.expectEqual(@as(usize, 0), rec.pending_joins.items.len);
+    finishThreadJoinSettlement(&rec);
+    try std.testing.expect(rec.joins_settled);
+    try std.testing.expect(threadJoinReadyLocked(&rec));
+    try std.testing.expectEqual(@as(usize, 0), rec.settling_joins.items.len);
 }
 
 fn markThreadExited(rec: *ThreadRecord) void {
@@ -932,13 +956,13 @@ fn threadJoinFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.Hos
     // always allowed.
     const io = agent.engineIo();
     rec.join_mutex.lockUncancelable(io);
-    if (!rec.done and !self.main_can_block) {
+    if (!threadJoinReadyLocked(rec) and !self.main_can_block) {
         rec.join_mutex.unlock(io);
         return self.throwError("TypeError", "Thread.prototype.join cannot block the current thread");
     }
     var join_mutex_locked = true;
     errdefer if (join_mutex_locked) rec.join_mutex.unlock(io);
-    while (!rec.done) try parkPumpThreadJoin(self, rec);
+    while (!threadJoinReadyLocked(rec)) try parkPumpThreadJoin(self, rec);
     const threw = rec.threw;
     const result = rec.result;
     rec.join_mutex.unlock(io);
@@ -3576,7 +3600,7 @@ fn parkPumpThreadJoin(self: *Interpreter, rec: *ThreadRecord) value.HostError!vo
     rec.join_mutex.lockUncancelable(io);
     if (stopped)
         return self.throwError("Error", "worker terminated");
-    if (rec.done) return;
+    if (threadJoinReadyLocked(rec)) return;
 
     stack_scan.beginPark();
     self.gc_parked.store(true, .release);
