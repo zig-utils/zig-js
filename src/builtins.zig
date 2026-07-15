@@ -793,9 +793,9 @@ fn enumerableOwnProperties(self: *Interpreter, arg0: Value, kind: EnumKind) Host
         } else if (is_proxy) blk: {
             const desc = try objectGetOwnPropertyDescriptor(self, Value.undef(), &.{ ov, try self.keyToValue(k) });
             break :blk desc.isObject() and (try self.getProperty(desc, "enumerable")).toBoolean();
-        } else if (o.prim != null and o.prim.?.isString())
+        } else if (o.boxedPrimitive() != null and o.boxedPrimitive().?.isString())
             // A String wrapper exposes only its char indices as enumerable own keys.
-            (arrayIndexOf(k) != null and arrayIndexOf(k).? < o.prim.?.asStr().len)
+            (arrayIndexOf(k) != null and arrayIndexOf(k).? < o.boxedPrimitive().?.asStr().len)
         else if ((o.is_array or o.typed_array != null) and std.mem.eql(u8, k, "length"))
             // An Array's / TypedArray's "length" is a non-enumerable own property.
             false
@@ -869,10 +869,10 @@ pub fn objectAssign(ctx: *anyopaque, this: Value, args: []const Value) HostError
             const enumerable = if (is_proxy) blk: {
                 const desc = try objectGetOwnPropertyDescriptor(self, Value.undef(), &.{ src_v, try self.keyToValue(k) });
                 break :blk desc.isObject() and (try self.getProperty(desc, "enumerable")).toBoolean();
-            } else if (from.prim != null and from.prim.?.isString())
+            } else if (from.boxedPrimitive() != null and from.boxedPrimitive().?.isString())
                 // A String wrapper's only enumerable own keys are its char indices
                 // ("length" and inherited methods are non-enumerable).
-                (arrayIndexOf(k) != null and arrayIndexOf(k).? < from.prim.?.asStr().len)
+                (arrayIndexOf(k) != null and arrayIndexOf(k).? < from.boxedPrimitive().?.asStr().len)
             else if ((from.is_array or from.typed_array != null) and std.mem.eql(u8, k, "length"))
                 false
             else
@@ -1623,7 +1623,7 @@ pub fn defineOneResult(self: *Interpreter, target: *value.Object, key: []const u
             return true;
         }
     }
-    if (target.prim) |p| {
+    if (target.boxedPrimitive()) |p| {
         if (p.isString()) {
             if (std.mem.eql(u8, key, "length")) {
                 const attr: value.PropAttr = .{ .writable = false, .enumerable = false, .configurable = false };
@@ -2337,7 +2337,7 @@ pub fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, this: Value, args: []cons
     }
     if (std.mem.eql(u8, key, "prototype") and o.js_func != null and o.getOwn("prototype") == null and o.getAccessor("prototype") == null)
         _ = try self.getProperty(ov, key);
-    if (o.prim) |p| {
+    if (o.boxedPrimitive()) |p| {
         if (p.isString()) {
             if (std.mem.eql(u8, key, "length"))
                 return dataDescriptor(self, Value.num(@floatFromInt(p.asStr().len)), .{ .writable = false, .enumerable = false, .configurable = false });
@@ -2573,7 +2573,7 @@ pub fn jsonStringify(ctx: *anyopaque, this: Value, args: []const Value) HostErro
                     .number => k = try value.numberToString(a, item.asNum()),
                     // A String/Number wrapper is ToString'd (invoking its own
                     // toString, e.g. an overridden one), not unwrapped raw.
-                    .object => if (item.asObj().prim) |p| switch (p.kind()) {
+                    .object => if (item.asObj().boxedPrimitive()) |p| switch (p.kind()) {
                         .string, .number => k = try self.toStringV(item),
                         else => {},
                     },
@@ -2596,7 +2596,7 @@ pub fn jsonStringify(ctx: *anyopaque, this: Value, args: []const Value) HostErro
     // a Number wrapper is ToNumber'd and a String wrapper ToString'd (running
     // any overridden valueOf/toString), not unwrapped raw.
     var space = arg(args, 2);
-    if (space.isObject()) if (space.asObj().prim) |p| {
+    if (space.isObject()) if (space.asObj().boxedPrimitive()) |p| {
         // Compute into a temp first (result-location aliasing — see serialize).
         switch (p.kind()) {
             .number => {
@@ -2669,7 +2669,7 @@ const Stringifier = struct {
         // SerializeJSONProperty: a [[NumberData]] wrapper → ToNumber, a
         // [[StringData]] wrapper → ToString (both run overridden valueOf/toString),
         // a [[BooleanData]] wrapper → its boolean.
-        if (v.isObject()) if (v.asObj().prim) |p| {
+        if (v.isObject()) if (v.asObj().boxedPrimitive()) |p| {
             // Compute into a temp first: `v = Value.num(toNumberV(v))` would
             // clobber v's tag before toNumberV reads it (result-location aliasing).
             switch (p.kind()) {

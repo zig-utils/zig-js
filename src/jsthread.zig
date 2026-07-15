@@ -3259,7 +3259,7 @@ fn threadRestrictFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value
         !o.is_date and !o.is_regex and !o.is_map and !o.is_set and !o.is_weak and
         o.promise == null and !o.is_symbol and !o.is_bigint and o.moduleNs() == null and
         o.weakRefTarget() == null and !o.is_arguments and !o.is_error and
-        o.prim == null and o.errorCtor() == null and o.getOwn("constructor") == null;
+        o.boxedPrimitive() == null and o.errorCtor() == null and o.getOwn("constructor") == null;
     if (!plain) return self.throwError("TypeError", "cannot restrict this object");
     const tid: u64 = @intCast(std.Thread.getCurrentId());
     // Claim via CAS 0→tid so two concurrent restricts can't both win.

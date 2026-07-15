@@ -144,7 +144,7 @@ pub fn traceObject(o: *Object, v: anytype) void {
         for (o.elements.items) |el| markValue(v, el);
         if (concurrent) o.unlockElements();
     }
-    markValueOpt(v, o.prim);
+    markValueOpt(v, o.boxedPrimitive());
     if (o.is_weak_ref) markWeakObject(v, o.weakRefTargetSlot()); // stable cold-slot address
     if (o.is_finalization_registry) {
         if (o.cold) |cold| {

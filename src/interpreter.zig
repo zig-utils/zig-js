@@ -1821,7 +1821,8 @@ pub const Interpreter = struct {
             else => unreachable,
         };
         const o = try gc_mod.allocObj(self.arena);
-        o.* = .{ .prim = v };
+        o.* = .{};
+        try o.setBoxedPrimitive(self.arena, v);
         if (self.env.get(ctor_name)) |ctor| {
             if (ctor.isObject()) o.setProtoAtomic(try self.protoObject(ctor.asObj()));
         }
@@ -3300,7 +3301,7 @@ pub const Interpreter = struct {
         var cur: ?*value.Object = start;
         while (cur) |o| {
             // A String wrapper's own enumerable character indices "0".."len-1".
-            if (o.prim) |p| if (p.isString()) {
+            if (o.boxedPrimitive()) |p| if (p.isString()) {
                 var i: usize = 0;
                 while (i < utf16LenOfString(p.asStr())) : (i += 1) {
                     const key = try std.fmt.allocPrint(self.arena, "{d}", .{i});
@@ -7324,7 +7325,8 @@ pub const Interpreter = struct {
     /// `instanceof`, and `[object Number|String|Boolean]` all resolve correctly.
     pub fn makeWrapper(self: *Interpreter, p: Value) EvalError!Value {
         const o = try gc_mod.allocObj(self.arena);
-        o.* = .{ .prim = p };
+        o.* = .{};
+        try o.setBoxedPrimitive(self.arena, p);
         if (self.new_target.isObject()) {
             const intrinsic: []const u8 = switch (p.kind()) {
                 .string => "String",
@@ -9516,7 +9518,7 @@ pub const Interpreter = struct {
             try list.append(self.arena, ns.tag_key);
             return list.items;
         }
-        if (t.prim) |p| {
+        if (t.boxedPrimitive()) |p| {
             if (p.isString()) {
                 // String exotic [[OwnPropertyKeys]]: the char-index keys merged with
                 // any user integer-index keys (all ascending), then "length", then
@@ -9916,7 +9918,7 @@ pub const Interpreter = struct {
                 // A String-wrapper object exposes `length` and indexed chars as
                 // own integer-keyed properties (`new String("ab").length === 2`,
                 // `[0] === "a"`).
-                if (o.prim) |p| {
+                if (o.boxedPrimitive()) |p| {
                     if (p.isString()) {
                         if (std.mem.eql(u8, key, "length")) return Value.num(@floatFromInt(utf16LenOfString(p.asStr())));
                         if (arrayIndex(key)) |i| {
@@ -9966,7 +9968,7 @@ pub const Interpreter = struct {
                     } else if (arrayElementIndex(key)) |i| {
                         if (c.getOwn(key) == null and c.getAccessor(key) == null) if (c.denseElement(i)) |v| return v;
                     }
-                    if (c.prim) |p| {
+                    if (c.boxedPrimitive()) |p| {
                         if (p.isString()) {
                             if (std.mem.eql(u8, key, "length")) return Value.num(@floatFromInt(utf16LenOfString(p.asStr())));
                             if (arrayIndex(key)) |i| {
@@ -10039,7 +10041,7 @@ pub const Interpreter = struct {
             .boolean => "Boolean",
             .object => blk: {
                 const o = recv.asObj();
-                break :blk if (o.is_array) "Array" else if (o.is_regex) "RegExp" else if (o.is_symbol) "Symbol" else if (o.is_error) (if (o.errorName().len > 0) o.errorName() else "Error") else if (o.is_map) "Map" else if (o.is_set) "Set" else if (o.is_date) "Date" else if (o.prim) |p| (switch (p.kind()) {
+                break :blk if (o.is_array) "Array" else if (o.is_regex) "RegExp" else if (o.is_symbol) "Symbol" else if (o.is_error) (if (o.errorName().len > 0) o.errorName() else "Error") else if (o.is_map) "Map" else if (o.is_set) "Set" else if (o.is_date) "Date" else if (o.boxedPrimitive()) |p| (switch (p.kind()) {
                     .number => "Number",
                     .string => "String",
                     .boolean => "Boolean",
@@ -10685,7 +10687,7 @@ pub const Interpreter = struct {
             }
             // non-index keys fall through to ordinary [[Set]].
         }
-        if (o.prim) |p| {
+        if (o.boxedPrimitive()) |p| {
             if (p.isString()) {
                 if (std.mem.eql(u8, key, "length")) return false;
                 if (arrayIndex(key)) |i| if (i < utf16LenOfString(p.asStr())) return false;
@@ -10925,7 +10927,7 @@ pub const Interpreter = struct {
         if (o.typed_array) |ta| {
             if (canonicalNumericIndexString(key)) |n| return !isValidIntegerIndex(ta, n);
         }
-        if (o.prim) |p| {
+        if (o.boxedPrimitive()) |p| {
             if (p.isString()) {
                 if (std.mem.eql(u8, key, "length")) return false;
                 if (arrayIndex(key)) |i| if (i < utf16LenOfString(p.asStr())) return false;
@@ -11773,7 +11775,7 @@ pub const Interpreter = struct {
             return false;
         }
         if (isLazyFunctionPrototypeSlot(o, key)) return false;
-        if (o.prim) |p| {
+        if (o.boxedPrimitive()) |p| {
             if (p.isString() and std.mem.eql(u8, key, "length")) return false;
         }
         return objectHasOwn(o, key) and o.getAttr(key).enumerable and
@@ -11955,8 +11957,8 @@ pub const Interpreter = struct {
                 // A String wrapper object (`new String("…")`): its String.prototype
                 // methods take precedence over the generic Array-like coercion for
                 // names both share (slice/indexOf/lastIndexOf/includes/concat/at).
-                if (o.prim != null and o.prim.?.isString() and o.getOwn(name) == null) {
-                    if (try self.stringMethod(o.prim.?.asStr(), name, args, true)) |r| return r;
+                if (o.boxedPrimitive() != null and o.boxedPrimitive().?.isString() and o.getOwn(name) == null) {
+                    if (try self.stringMethod(o.boxedPrimitive().?.asStr(), name, args, true)) |r| return r;
                 }
                 if (o.is_array and o.getOwn(name) == null) return try self.arrayMethod(o, name, args);
                 // Generic Array.prototype methods on an array-like `this`
@@ -11972,12 +11974,12 @@ pub const Interpreter = struct {
                 // `Object.prototype.valueOf` for an ordinary object returns the
                 // object itself (ToObject(this)). Reached only after the kind
                 // dispatch above (Date/Array/Map/… handle their own valueOf) and
-                // only for a non-wrapper (a wrapper delegates to its `.prim` below).
-                if (o.getOwn(name) == null and o.prim == null and eq(name, "valueOf")) return recv;
+                // only for a non-wrapper (a wrapper delegates to its `.boxedPrimitive()` below).
+                if (o.getOwn(name) == null and o.boxedPrimitive() == null and eq(name, "valueOf")) return recv;
                 // A primitive-wrapper object (`new Number/String/Boolean`)
                 // delegates unmatched methods to its boxed primitive, so
                 // `(new Number(5)).valueOf()`, `.toFixed(2)`, `.charAt(0)`, … work.
-                if (o.prim) |p| {
+                if (o.boxedPrimitive()) |p| {
                     if (o.getOwn(name) == null) {
                         if (try self.builtinMethod(p, name, args)) |r| return r;
                     }
@@ -14265,10 +14267,10 @@ pub const Interpreter = struct {
                         // produces the boxed primitive at this position in the
                         // OrdinaryToPrimitive order, so do not continue to a later
                         // user toString accessor for default/number hints.
-                    else if (std.mem.eql(u8, m, "valueOf") and o.prim != null and fv.isCallable()) {
+                    else if (std.mem.eql(u8, m, "valueOf") and o.boxedPrimitive() != null and fv.isCallable()) {
                         const native_wrapper_value_of = fv.isObject() and
                             (fv.asObj().native == symbolValueOfFn or fv.asObj().native == bigIntValueOfFn);
-                        if (c.prim != null or native_wrapper_value_of) builtin_wrapper_value_of = true;
+                        if (c.boxedPrimitive() != null or native_wrapper_value_of) builtin_wrapper_value_of = true;
                     }
                     // A callable native `toString` thunk yields a primitive string
                     // (the built-in coercion below); it must run at *this* position
@@ -14305,7 +14307,7 @@ pub const Interpreter = struct {
         // override unwraps to its boxed primitive — except for a string hint,
         // where it stringifies (so `new Number(5) + 1 === 6` but `String hint`
         // gives "5").
-        if (o.prim) |p| {
+        if (o.boxedPrimitive()) |p| {
             if (builtin_wrapper_value_of) return p;
             if (builtin_to_string) {
                 if (builtin_to_string_method) |m| return try self.callValueWithThis(m, &.{}, v);
@@ -15942,7 +15944,7 @@ fn objectProtoToStringFn(ctx: *anyopaque, this: Value, args: []const Value) valu
         .string => "String",
         .object => blk: {
             const o = this.asObj();
-            break :blk if (o.is_arguments) "Arguments" else if (try objectToStringIsArray(self, o)) "Array" else if (o.is_error) "Error" else if (o.is_date) "Date" else if (o.is_regex) "RegExp" else if (o.prim) |p| (switch (p.kind()) {
+            break :blk if (o.is_arguments) "Arguments" else if (try objectToStringIsArray(self, o)) "Array" else if (o.is_error) "Error" else if (o.is_date) "Date" else if (o.is_regex) "RegExp" else if (o.boxedPrimitive()) |p| (switch (p.kind()) {
                 .number => "Number",
                 .string => "String",
                 .boolean => "Boolean",
@@ -16151,7 +16153,7 @@ fn booleanProtoFn(comptime to_string: bool) value.NativeFn {
             const b: bool = switch (this.kind()) {
                 .boolean => this.asBool(),
                 // A Boolean wrapper object (`new Boolean(x)`) unwraps to its boxed value.
-                .object => if (this.asObj().prim != null and this.asObj().prim.?.isBoolean()) this.asObj().prim.?.asBool() else return self.throwError("TypeError", "Boolean.prototype method requires that 'this' be a Boolean"),
+                .object => if (this.asObj().boxedPrimitive() != null and this.asObj().boxedPrimitive().?.isBoolean()) this.asObj().boxedPrimitive().?.asBool() else return self.throwError("TypeError", "Boolean.prototype method requires that 'this' be a Boolean"),
                 else => return self.throwError("TypeError", "Boolean.prototype method requires that 'this' be a Boolean"),
             };
             return if (to_string) (if (b) Value.str("true") else Value.str("false")) else Value.boolVal(b);
@@ -16200,7 +16202,7 @@ fn symbolToPrimitiveFn(ctx: *anyopaque, this: Value, args: []const Value) value.
 fn symbolThisValue(this: Value) Value {
     if (this.isObject()) {
         if (this.asObj().is_symbol) return this;
-        if (this.asObj().prim) |p| return p;
+        if (this.asObj().boxedPrimitive()) |p| return p;
     }
     return this;
 }
@@ -16210,7 +16212,7 @@ fn symbolThisValue(this: Value) Value {
 fn thisSymbol(self: *Interpreter, this: Value, method: []const u8) EvalError!*value.Object {
     if (this.isObject()) {
         if (this.asObj().is_symbol) return this.asObj();
-        if (this.asObj().prim) |p| {
+        if (this.asObj().boxedPrimitive()) |p| {
             if (p.isObject() and p.asObj().is_symbol) return p.asObj();
         }
     }
@@ -17067,7 +17069,7 @@ fn bigIntFormatWithOptions(self: *Interpreter, big: *value.Object, loc: []const 
 
 fn bigIntToLocaleStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const big = if (this.isObject() and this.asObj().is_bigint) this.asObj() else if (this.isObject() and this.asObj().prim != null and this.asObj().prim.?.isObject() and this.asObj().prim.?.asObj().is_bigint) this.asObj().prim.?.asObj() else return self.throwError("TypeError", "BigInt.prototype.toLocaleString requires that 'this' be a BigInt");
+    const big = if (this.isObject() and this.asObj().is_bigint) this.asObj() else if (this.isObject() and this.asObj().boxedPrimitive() != null and this.asObj().boxedPrimitive().?.isObject() and this.asObj().boxedPrimitive().?.asObj().is_bigint) this.asObj().boxedPrimitive().?.asObj() else return self.throwError("TypeError", "BigInt.prototype.toLocaleString requires that 'this' be a BigInt");
     const locs = try canonicalizeLocaleList(self, if (args.len > 0) args[0] else Value.undef());
     const loc = localeListFirstOr(locs, "en");
     const ro = try nfProcessOptions(self, if (args.len > 1) args[1] else Value.undef());
@@ -17077,7 +17079,7 @@ fn bigIntToLocaleStringFn(ctx: *anyopaque, this: Value, args: []const Value) val
 /// `BigInt.prototype.toString(radix)` — the BigInt rendered in `radix` (2..36).
 fn bigIntToStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const big = if (this.isObject() and this.asObj().is_bigint) this.asObj() else if (this.isObject() and this.asObj().prim != null and this.asObj().prim.?.isObject() and this.asObj().prim.?.asObj().is_bigint) this.asObj().prim.?.asObj() else return self.throwError("TypeError", "BigInt.prototype.toString requires that 'this' be a BigInt");
+    const big = if (this.isObject() and this.asObj().is_bigint) this.asObj() else if (this.isObject() and this.asObj().boxedPrimitive() != null and this.asObj().boxedPrimitive().?.isObject() and this.asObj().boxedPrimitive().?.asObj().is_bigint) this.asObj().boxedPrimitive().?.asObj() else return self.throwError("TypeError", "BigInt.prototype.toString requires that 'this' be a BigInt");
     // Validate the radix on the FLOAT before narrowing to u8: ToIntegerOrInfinity
     // then range-check, so 256/-1/Infinity/NaN/1e100 throw RangeError instead of
     // panicking in `@intFromFloat` on an out-of-range value.
@@ -17106,7 +17108,7 @@ fn bigIntValueOfFn(ctx: *anyopaque, this: Value, args: []const Value) value.Host
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (this.isObject() and this.asObj().is_bigint) return this;
     // A BigInt wrapper object (`Object(1n)`) unwraps to its boxed BigInt.
-    if (this.isObject() and this.asObj().prim != null and this.asObj().prim.?.isObject() and this.asObj().prim.?.asObj().is_bigint) return this.asObj().prim.?;
+    if (this.isObject() and this.asObj().boxedPrimitive() != null and this.asObj().boxedPrimitive().?.isObject() and this.asObj().boxedPrimitive().?.asObj().is_bigint) return this.asObj().boxedPrimitive().?;
     return self.throwError("TypeError", "BigInt.prototype.valueOf requires that 'this' be a BigInt");
 }
 
@@ -28528,7 +28530,8 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
             // Boolean.prototype is a Boolean Exotic Object with [[BooleanData]]
             // = false, so brand-checked methods (`Boolean.prototype.toString()`,
             // `valueOf()`) accept it as a Boolean and don't throw.
-            boolean_proto.* = .{ .proto = object_proto, .prim = Value.boolVal(false) };
+            boolean_proto.* = .{ .proto = object_proto };
+            try boolean_proto.setBoxedPrimitive(a, Value.boolVal(false));
             try setNative(a, root_shape, boolean_proto, "toString", 0, booleanProtoFn(true));
             try setNative(a, root_shape, boolean_proto, "valueOf", 0, booleanProtoFn(false));
             try setConstructor(a, root_shape, boolean_proto, bv.asObj());
@@ -28566,7 +28569,8 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     // String.prototype is a String Exotic Object with [[StringData]] = "",
     // so brand-checked methods accept it as a String (e.g. `String.prototype.
     // toString()` returns "" rather than throwing).
-    string_proto.* = .{ .proto = object_proto, .prim = Value.str("") };
+    string_proto.* = .{ .proto = object_proto };
+    try string_proto.setBoxedPrimitive(a, Value.str(""));
     // Generic String.prototype methods coerce `this` via ToString through a
     // String-specific thunk (so `String.prototype.m.call(x)` uses String `m`,
     // propagates `toString`/`valueOf` throws, and rejects Symbol/null/undefined).
@@ -28605,7 +28609,8 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     // Number.prototype is a Number Exotic Object with [[NumberData]] = +0, so
     // brand-checked methods (`Number.prototype.toString(radix)`, `valueOf()`,
     // `toFixed(...)`) accept it as a Number and return "0"/0 rather than throw.
-    number_proto.* = .{ .proto = object_proto, .prim = Value.num(0) };
+    number_proto.* = .{ .proto = object_proto };
+    try number_proto.setBoxedPrimitive(a, Value.num(0));
     number_ns.setProtoAtomic(func_proto);
     inline for (.{
         .{ "toString", 1 },      .{ "toFixed", 1 },     .{ "valueOf", 0 }, .{ "toLocaleString", 0 },
@@ -29345,7 +29350,7 @@ fn stringValueMethod(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const s: []const u8 = switch (this.kind()) {
         .string => this.asStr(),
-        .object => if (this.asObj().prim != null and this.asObj().prim.?.isString()) this.asObj().prim.?.asStr() else return throwStringValueTypeError(self),
+        .object => if (this.asObj().boxedPrimitive() != null and this.asObj().boxedPrimitive().?.isString()) this.asObj().boxedPrimitive().?.asStr() else return throwStringValueTypeError(self),
         else => return throwStringValueTypeError(self),
     };
     return try Value.strAlloc(self.arena, s);
@@ -29461,7 +29466,7 @@ fn numberProtoMethod(comptime name: []const u8) value.NativeFn {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
             const n: f64 = switch (this.kind()) {
                 .number => this.asNum(),
-                .object => if (this.asObj().prim != null and this.asObj().prim.?.isNumber()) this.asObj().prim.?.asNum() else return self.throwError("TypeError", "Number.prototype method called on a non-Number"),
+                .object => if (this.asObj().boxedPrimitive() != null and this.asObj().boxedPrimitive().?.isNumber()) this.asObj().boxedPrimitive().?.asNum() else return self.throwError("TypeError", "Number.prototype method called on a non-Number"),
                 else => return self.throwError("TypeError", "Number.prototype method called on a non-Number"),
             };
             return (try self.numberMethod(n, name, args)) orelse Value.undef();
@@ -42912,7 +42917,7 @@ pub fn hasProperty(o: *value.Object, name: []const u8) bool {
         if (value.canonicalIndex(name)) |idx| {
             if (c.is_array and c.denseElementPresent(idx)) return true;
             if (c.typed_array) |ta| if (idx < (ta.currentLength() orelse 0)) return true;
-            if (c.prim) |p| if (p.isString() and idx < Interpreter.utf16LenOfString(p.asStr())) return true;
+            if (c.boxedPrimitive()) |p| if (p.isString() and idx < Interpreter.utf16LenOfString(p.asStr())) return true;
         }
         cur = c.protoAtomic();
     }
@@ -42991,7 +42996,7 @@ pub fn objectHasOwn(o: *value.Object, name: []const u8) bool {
     }
     if (o.getOwn(name) != null or o.getAccessor(name) != null) return true;
     if (isLazyFunctionPrototypeSlot(o, name)) return true;
-    if (o.prim) |p| {
+    if (o.boxedPrimitive()) |p| {
         if (p.isString()) {
             if (std.mem.eql(u8, name, "length")) return true;
             if (Interpreter.arrayIndex(name)) |i| return i < Interpreter.utf16LenOfString(p.asStr());

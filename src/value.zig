@@ -617,6 +617,7 @@ pub const ObjectColdState = struct {
     weak_ref_target: ?*Object = null,
     callback: ?HostCallback = null,
     callback_context: ?*anyopaque = null,
+    boxed_primitive: ?Value = null,
     arg_map_env: ?*anyopaque = null,
     arg_map_names: [][]const u8 = &.{},
     arg_map_severed: []std.atomic.Value(bool) = &.{},
@@ -890,12 +891,7 @@ pub const Object = struct {
     /// Non-null marks a Promise object — its `then`/`catch`/`finally` are
     /// dispatched specially and it carries pending reactions + settled state.
     promise: ?*anyopaque = null,
-    /// A primitive-wrapper object's boxed [[NumberData]]/[[StringData]]/
-    /// [[BooleanData]] — set by `new Number(x)` / `new String(x)` / `new
-    /// Boolean(x)`. Non-null marks the object as a wrapper: `typeof` is still
-    /// "object", but `valueOf`/ToPrimitive unwrap it and `Object.prototype.
-    /// toString` reports `[object Number|String|Boolean]`.
-    prim: ?Value = null,
+    // Primitive-wrapper [[NumberData]]/[[StringData]]/[[BooleanData]] lives cold.
     /// `Proxy` exotic object: the wrapped target and the handler object. Both
     /// non-null marks a proxy — property operations route through the handler's
     /// traps (falling back to the target). A revoked proxy has both set to a
@@ -1087,6 +1083,15 @@ pub const Object = struct {
         const cold = try self.ensureCold(fallback);
         cold.callback = callback;
         cold.callback_context = context;
+    }
+
+    pub inline fn boxedPrimitive(self: *const Object) ?Value {
+        return if (self.cold) |cold| cold.boxed_primitive else null;
+    }
+
+    pub fn setBoxedPrimitive(self: *Object, fallback: std.mem.Allocator, primitive: Value) std.mem.Allocator.Error!void {
+        const cold = try self.ensureCold(fallback);
+        cold.boxed_primitive = primitive;
     }
 
     pub fn setErrorName(self: *Object, fallback: std.mem.Allocator, name: []const u8) std.mem.Allocator.Error!void {
@@ -2821,7 +2826,7 @@ fn bigIntEquals(a: *Object, b: *Object) bool {
 /// is `[object Object]`.
 fn objectToString(o: *Object, arena: std.mem.Allocator) error{OutOfMemory}![]const u8 {
     // A primitive-wrapper object stringifies as its boxed primitive.
-    if (o.prim) |p| return p.toString(arena);
+    if (o.boxedPrimitive()) |p| return p.toString(arena);
     if (o.is_error) {
         const name = if (o.getOwn("name")) |v|
             (if (v.isString()) v.asStr() else o.errorName())

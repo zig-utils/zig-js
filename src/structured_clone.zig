@@ -518,7 +518,7 @@ const Serializer = struct {
             }
             return;
         }
-        if (o.prim) |p| {
+        if (o.boxedPrimitive()) |p| {
             // Boolean/Number/String wrapper: the boxed primitive only.
             try s.w.tag(.wrapper);
             try s.ser(p, try s.childDepth(depth));
@@ -1044,7 +1044,7 @@ const Deserializer = struct {
                 const p = try d.deser(try d.childDepth(depth));
                 const o = (try d.self.newObject()).asObj();
                 try d.objs.append(a, o);
-                o.prim = p;
+                try o.setBoxedPrimitive(a, p);
                 const ctor_name: []const u8 = switch (p.kind()) {
                     .number => "Number",
                     .string => "String",
