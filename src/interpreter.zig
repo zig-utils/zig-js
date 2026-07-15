@@ -26151,9 +26151,21 @@ fn segIsJamo(cp: u21) bool {
 fn segNextGrapheme(str: []const u8, pos: usize) usize {
     var end = pos + segScalarLen(str, pos);
     const first = segCodePoint(str, pos);
+    // GB3: do not break between CR and LF.
+    if (first == 0x0D and end < str.len and segCodePoint(str, end) == 0x0A) {
+        return end + segScalarLen(str, end);
+    }
     if (isHighSurrogate(first) and end < str.len) {
         const next = segCodePoint(str, end);
         if (isLowSurrogate(next)) end += segScalarLen(str, end);
+    }
+    // GB12/GB13: a pair of regional indicators (flag) is a single grapheme.
+    if (first >= 0x1F1E6 and first <= 0x1F1FF) {
+        if (end < str.len) {
+            const nxt = segCodePoint(str, end);
+            if (nxt >= 0x1F1E6 and nxt <= 0x1F1FF) end += segScalarLen(str, end);
+        }
+        return end;
     }
     if (segIsJamo(first)) {
         while (end < str.len and segIsJamo(segCodePoint(str, end))) end += segScalarLen(str, end);
