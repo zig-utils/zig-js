@@ -29,6 +29,9 @@ region_short = short(terr)
 lang_short = short(langs)
 script_short = short(scripts)
 curr_names = {k: v['displayName'] for k, v in curr.items() if 'displayName' in v}
+# Plural long names for currencyDisplay:"name" (fall back to the base displayName).
+curr_one = {k: v.get('displayName-count-one', v.get('displayName')) for k, v in curr.items() if v.get('displayName')}
+curr_other = {k: v.get('displayName-count-other', v.get('displayName')) for k, v in curr.items() if v.get('displayName')}
 # ICU quirk: DisplayNames maps "und" to "root".
 lang_names['und'] = 'root'
 
@@ -64,6 +67,10 @@ parts.append("")
 parts.append(emit("scripts_short", script_short))
 parts.append("")
 parts.append(emit("language_aliases", lang_aliases))
+parts.append("")
+parts.append(emit("currency_names_one", curr_one))
+parts.append("")
+parts.append(emit("currency_names_other", curr_other))
 parts.append("")
 sys.stdout.write("\n".join(parts))
 sys.stderr.write("langs=%d regions=%d scripts=%d currencies=%d\n" % (

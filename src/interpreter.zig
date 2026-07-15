@@ -24660,6 +24660,7 @@ fn nfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Host
     var group_mode: []const u8 = "auto"; // off | min2 | auto | always
     var cur_prefix: []const u8 = ""; // currency symbol/code prefix (en places before)
     var cur_suffix: []const u8 = "";
+    var cur_name_code: []const u8 = ""; // ISO code for currencyDisplay:"name" (resolved to a plural long name after the fraction is known)
     var cur_symbol: []const u8 = ""; // the bare currency symbol, when display=symbol (placement is locale-dependent)
     var cur_code: []const u8 = ""; // the ISO currency code (for locale-dependent symbol selection)
     var unit_prefix: []const u8 = ""; // prefix unit pattern, e.g. ja "時速 <n> キロメートル"
@@ -24725,8 +24726,9 @@ fn nfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Host
                 // "USD 1.00"
                 cur_prefix = try std.fmt.allocPrint(self.arena, "{s}\u{00a0}", .{code});
             } else if (std.mem.eql(u8, ds, "name")) {
-                // "1.00 US dollars" — approximate (lowercased code as the name).
-                cur_suffix = try std.fmt.allocPrint(self.arena, " {s}", .{code});
+                // Resolved to a plural long name ("US dollar"/"US dollars") once
+                // the fraction count (hence the plural category) is known.
+                cur_name_code = code;
             } else {
                 // symbol display: placement (before/after the number) and the
                 // exact symbol are decided once we know the locale (see below).
@@ -24782,7 +24784,7 @@ fn nfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Host
     };
 
     const locale = if (this.asObj().getOwn("\x00locale")) |lv| (if (lv.isString()) lv.asStr() else "en") else "en";
-    const exact_decimal = if (input.isString() and rounding_increment == 1 and !is_percent and unit_suffix.len == 0 and cur_prefix.len == 0 and cur_suffix.len == 0 and cur_symbol.len == 0 and std.mem.eql(u8, notation, "standard") and min_sig == null and max_sig == null)
+    const exact_decimal = if (input.isString() and rounding_increment == 1 and !is_percent and unit_suffix.len == 0 and cur_prefix.len == 0 and cur_suffix.len == 0 and cur_name_code.len == 0 and cur_symbol.len == 0 and std.mem.eql(u8, notation, "standard") and min_sig == null and max_sig == null)
         nfParseExactDecimalString(input.asStr())
     else
         null;
@@ -24978,6 +24980,17 @@ fn nfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Host
     if (cur_suffix.len > 0) {
         try push(self, &parts, "literal", "\u{00a0}");
         try push(self, &parts, "currency", cur_suffix);
+    }
+    if (cur_name_code.len > 0) {
+        // en cardinal plural: "one" only for an exact integer 1 (i==1, v==0).
+        const one = @abs(n) == 1.0 and frac_str.len == 0;
+        const en_loc = std.mem.eql(u8, locale, "en") or std.mem.startsWith(u8, locale, "en-");
+        const nm: []const u8 = if (en_loc)
+            (dnLookup(if (one) &dn_data.currency_names_one else &dn_data.currency_names_other, cur_name_code) orelse cur_name_code)
+        else
+            cur_name_code;
+        try push(self, &parts, "literal", " ");
+        try push(self, &parts, "currency", nm);
     }
     if (unit_suffix.len > 0) {
         if (unit_space) try push(self, &parts, "literal", " ");
