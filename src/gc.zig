@@ -671,6 +671,14 @@ pub const Binding = struct {
         return ContextMod.GcCellBacking.usesCellSlab(total);
     }
 
+    /// Optional zig-gc batch-backing hook. Same-kind cell batches share one
+    /// size-class lock while their slabs remain private; zig-gc still owns all
+    /// header initialization and metadata publication.
+    pub fn allocateCellBatch(self: *Binding, total: usize, out: []*anyopaque) usize {
+        const backing = self.context.gc_cell_backing orelse return 0;
+        return backing.allocateCellBatch(total, out);
+    }
+
     pub fn classifyConservativeInterior(self: *Binding, address: usize) gc.InteriorOwnership {
         const backing = self.context.gc_cell_backing orelse return .outside;
         return backing.classifyConservativeInterior(address);

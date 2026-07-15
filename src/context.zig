@@ -687,6 +687,10 @@ pub const GcCellBacking = struct {
     bucket_locks: [bucket_count]std.atomic.Value(u32) = .{
         .init(0), .init(0), .init(0), .init(0), .init(0), .init(0),
     },
+    /// Test-only telemetry proving that a same-size allocation batch takes its
+    /// size-class lock once. Kept unconditional so the backing type is stable
+    /// across test and release builds.
+    bucket_lock_acquisitions_for_testing: [bucket_count]usize = .{ 0, 0, 0, 0, 0, 0 },
     inner_lock: std.atomic.Value(u32) = .init(0),
     bucket_chunks: [bucket_count]std.ArrayListUnmanaged([]align(16) u8) = .{ .empty, .empty, .empty, .empty, .empty, .empty },
     bucket_next_offsets: [bucket_count]std.ArrayListUnmanaged(usize) = .{ .empty, .empty, .empty, .empty, .empty, .empty },
@@ -737,6 +741,7 @@ pub const GcCellBacking = struct {
     }
     inline fn acquireBucket(self: *GcCellBacking, idx: usize) void {
         self.acquireLock(&self.bucket_locks[idx]);
+        if (builtin.is_test) self.bucket_lock_acquisitions_for_testing[idx] += 1;
     }
     inline fn unlockBucket(self: *GcCellBacking, idx: usize) void {
         self.unlockLock(&self.bucket_locks[idx]);
@@ -1028,6 +1033,24 @@ pub const GcCellBacking = struct {
             if (self.takeFreedSlotFromChunkLocked(idx, chunk_idx)) |ptr| return ptr;
         }
         unreachable;
+    }
+
+    /// Fill a prefix of equal-size private GC cell slabs while holding the
+    /// corresponding size-class lock once. `zig-gc` initializes and publishes
+    /// the returned headers only after this method releases the backing lock.
+    pub fn allocateCellBatch(self: *GcCellBacking, len: usize, out: []*anyopaque) usize {
+        if (out.len == 0) return 0;
+        const idx = bucketIndex(len, .@"16") orelse return 0;
+        self.acquireBucket(idx);
+        defer self.unlockBucket(idx);
+        if (self.bulk_teardown) return 0;
+
+        var allocated: usize = 0;
+        while (allocated < out.len) : (allocated += 1) {
+            const ptr = self.takeFreedSlotLocked(idx) orelse self.bumpFreshSlotLocked(idx) orelse break;
+            out[allocated] = @ptrCast(ptr);
+        }
+        return allocated;
     }
 
     fn allocFn(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
@@ -1386,6 +1409,40 @@ test "GC cell backing lazily bumps fresh chunk slots before using reuse bitmaps"
 
     a.free(two);
     a.free(recycled);
+}
+
+test "GC cell backing batches reused and fresh slabs under one bucket lock" {
+    var backing = GcCellBacking{ .inner = std.testing.allocator, .parallel = true };
+    defer backing.deinit();
+    const a = backing.allocator();
+    const len = 200;
+    const idx = GcCellBacking.bucketIndex(len, .@"16").?;
+
+    var cells: [4][]align(16) u8 = undefined;
+    for (&cells) |*cell| cell.* = try a.alignedAlloc(u8, .@"16", len);
+    a.free(cells[1]);
+    a.free(cells[3]);
+
+    var slabs: [4]*anyopaque = undefined;
+    const locks_before = backing.bucket_lock_acquisitions_for_testing[idx];
+    try std.testing.expectEqual(slabs.len, backing.allocateCellBatch(len, &slabs));
+    try std.testing.expectEqual(locks_before + 1, backing.bucket_lock_acquisitions_for_testing[idx]);
+    try std.testing.expectEqual(@intFromPtr(cells[1].ptr), @intFromPtr(slabs[0]));
+    try std.testing.expectEqual(@intFromPtr(cells[3].ptr), @intFromPtr(slabs[1]));
+    for (slabs, 0..) |slab, i| {
+        for (slabs[0..i]) |prior| try std.testing.expect(slab != prior);
+    }
+    try std.testing.expectEqual(@as(usize, 6), backing.bucket_fresh_allocs[idx]);
+    try std.testing.expectEqual(@as(usize, 2), backing.bucket_reused_allocs[idx]);
+    try std.testing.expectEqual(@as(usize, 6), backing.bucket_live_counts[idx].items[0]);
+
+    a.free(cells[0]);
+    a.free(cells[2]);
+    for (slabs) |slab| {
+        const ptr: [*]align(16) u8 = @ptrCast(@alignCast(slab));
+        const cell: []align(16) u8 = ptr[0..len];
+        a.free(cell);
+    }
 }
 
 test "GC cell backing reuses fragmented slots without writing allocator metadata into cells" {
