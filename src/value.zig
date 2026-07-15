@@ -608,19 +608,42 @@ pub const FinalizationRecord = struct {
 /// zig-js's existing 512-byte GC slab. The sidecar is allocated lazily through
 /// the same budgeted allocator and ownership accounting as other Object backing
 /// stores.
+pub const ObjectRareTag = enum {
+    none,
+    primitive,
+    error_state,
+    date,
+    module_ns,
+    weak_ref,
+    host_callback,
+    boxed_primitive,
+    generator,
+    iter_helper,
+    bound_function,
+};
+
+pub const ObjectRareState = union(ObjectRareTag) {
+    none: void,
+    primitive: ObjectPrimitiveState,
+    error_state: struct {
+        name: []const u8 = "",
+        ctor: ?[]const u8 = null,
+    },
+    date: struct { ms: f64 = 0 },
+    module_ns: struct { ptr: ?*anyopaque = null },
+    weak_ref: struct { target: ?*Object = null },
+    host_callback: struct {
+        callback: ?HostCallback = null,
+        context: ?*anyopaque = null,
+    },
+    boxed_primitive: struct { value: Value = Value.undef() },
+    generator: struct { ptr: ?*anyopaque = null },
+    iter_helper: struct { ptr: ?*IterHelper = null },
+    bound_function: struct { ptr: ?*anyopaque = null },
+};
+
 pub const ObjectColdState = struct {
-    primitive: ObjectPrimitiveState = .{ .symbol = .{} },
-    error_name: []const u8 = "",
-    error_ctor: ?[]const u8 = null,
-    date_ms: f64 = 0,
-    module_ns: ?*anyopaque = null,
-    weak_ref_target: ?*Object = null,
-    callback: ?HostCallback = null,
-    callback_context: ?*anyopaque = null,
-    boxed_primitive: ?Value = null,
-    generator: ?*anyopaque = null,
-    iter_helper: ?*IterHelper = null,
-    bound_function: ?*anyopaque = null,
+    rare: ObjectRareState = .{ .none = {} },
     arg_map_env: ?*anyopaque = null,
     arg_map_names: [][]const u8 = &.{},
     arg_map_severed: []std.atomic.Value(bool) = &.{},
@@ -1022,58 +1045,123 @@ pub const Object = struct {
         return cold;
     }
 
+    fn ensureRare(
+        self: *Object,
+        fallback: std.mem.Allocator,
+        comptime tag: ObjectRareTag,
+        initial: @FieldType(ObjectRareState, @tagName(tag)),
+    ) std.mem.Allocator.Error!*@FieldType(ObjectRareState, @tagName(tag)) {
+        const cold = try self.ensureCold(fallback);
+        const active = std.meta.activeTag(cold.rare);
+        if (active == .none) {
+            cold.rare = @unionInit(ObjectRareState, @tagName(tag), initial);
+        } else {
+            std.debug.assert(active == tag);
+        }
+        return &@field(cold.rare, @tagName(tag));
+    }
+
     pub inline fn symbolKey(self: *const Object) []const u8 {
-        return if (self.cold) |cold| cold.primitive.symbol.key.get() orelse "" else "";
+        const cold = self.cold orelse return "";
+        return switch (cold.rare) {
+            .primitive => |primitive| primitive.symbol.key.get() orelse "",
+            else => "",
+        };
     }
 
     pub inline fn symbolDescription(self: *const Object) ?[]const u8 {
-        return if (self.cold) |cold| cold.primitive.symbol.description.get() else null;
+        const cold = self.cold orelse return null;
+        return switch (cold.rare) {
+            .primitive => |primitive| primitive.symbol.description.get(),
+            else => null,
+        };
     }
 
     pub inline fn bigIntValue(self: *const Object) i128 {
-        return if (self.cold) |cold| cold.primitive.bigint.value else 0;
+        const cold = self.cold orelse return 0;
+        return switch (cold.rare) {
+            .primitive => |primitive| primitive.bigint.value,
+            else => 0,
+        };
     }
 
     pub inline fn bigIntText(self: *const Object) ?[]const u8 {
-        return if (self.cold) |cold| cold.primitive.bigint.text.get() else null;
+        const cold = self.cold orelse return null;
+        return switch (cold.rare) {
+            .primitive => |primitive| primitive.bigint.text.get(),
+            else => null,
+        };
+    }
+
+    pub fn setPrimitiveState(self: *Object, fallback: std.mem.Allocator, primitive: ObjectPrimitiveState) std.mem.Allocator.Error!void {
+        const state = try self.ensureRare(fallback, .primitive, primitive);
+        state.* = primitive;
+    }
+
+    pub fn setSymbolKey(self: *Object, key: []const u8) void {
+        self.cold.?.rare.primitive.symbol.key = .init(key);
     }
 
     pub inline fn errorName(self: *const Object) []const u8 {
-        return if (self.cold) |cold| cold.error_name else "";
+        const cold = self.cold orelse return "";
+        return switch (cold.rare) {
+            .error_state => |state| state.name,
+            else => "",
+        };
     }
 
     pub inline fn errorCtor(self: *const Object) ?[]const u8 {
-        return if (self.cold) |cold| cold.error_ctor else null;
+        const cold = self.cold orelse return null;
+        return switch (cold.rare) {
+            .error_state => |state| state.ctor,
+            else => null,
+        };
     }
 
     pub inline fn moduleNs(self: *const Object) ?*anyopaque {
-        return if (self.cold) |cold| cold.module_ns else null;
+        const cold = self.cold orelse return null;
+        return switch (cold.rare) {
+            .module_ns => |state| state.ptr,
+            else => null,
+        };
     }
 
     pub fn setModuleNs(self: *Object, fallback: std.mem.Allocator, module_ns: *anyopaque) std.mem.Allocator.Error!void {
-        const cold = try self.ensureCold(fallback);
-        cold.module_ns = module_ns;
+        const state = try self.ensureRare(fallback, .module_ns, .{});
+        state.ptr = module_ns;
     }
 
     pub inline fn weakRefTarget(self: *const Object) ?*Object {
-        return if (self.cold) |cold| cold.weak_ref_target else null;
+        const cold = self.cold orelse return null;
+        return switch (cold.rare) {
+            .weak_ref => |state| state.target,
+            else => null,
+        };
     }
 
     pub fn setWeakRefTarget(self: *Object, fallback: std.mem.Allocator, target: *Object) std.mem.Allocator.Error!void {
-        const cold = try self.ensureCold(fallback);
-        cold.weak_ref_target = target;
+        const state = try self.ensureRare(fallback, .weak_ref, .{});
+        state.target = target;
     }
 
     pub inline fn weakRefTargetSlot(self: *Object) *?*Object {
-        return &self.cold.?.weak_ref_target;
+        return &self.cold.?.rare.weak_ref.target;
     }
 
     pub inline fn hostCallback(self: *const Object) ?HostCallback {
-        return if (self.cold) |cold| cold.callback else null;
+        const cold = self.cold orelse return null;
+        return switch (cold.rare) {
+            .host_callback => |state| state.callback,
+            else => null,
+        };
     }
 
     pub inline fn hostCallbackContext(self: *const Object) ?*anyopaque {
-        return if (self.cold) |cold| cold.callback_context else null;
+        const cold = self.cold orelse return null;
+        return switch (cold.rare) {
+            .host_callback => |state| state.context,
+            else => null,
+        };
     }
 
     pub fn setHostCallback(
@@ -1082,55 +1170,71 @@ pub const Object = struct {
         callback: HostCallback,
         context: *anyopaque,
     ) std.mem.Allocator.Error!void {
-        const cold = try self.ensureCold(fallback);
-        cold.callback = callback;
-        cold.callback_context = context;
+        const state = try self.ensureRare(fallback, .host_callback, .{});
+        state.callback = callback;
+        state.context = context;
     }
 
     pub inline fn boxedPrimitive(self: *const Object) ?Value {
-        return if (self.cold) |cold| cold.boxed_primitive else null;
+        const cold = self.cold orelse return null;
+        return switch (cold.rare) {
+            .boxed_primitive => |state| state.value,
+            else => null,
+        };
     }
 
     pub fn setBoxedPrimitive(self: *Object, fallback: std.mem.Allocator, primitive: Value) std.mem.Allocator.Error!void {
-        const cold = try self.ensureCold(fallback);
-        cold.boxed_primitive = primitive;
+        const state = try self.ensureRare(fallback, .boxed_primitive, .{});
+        state.value = primitive;
     }
 
     pub inline fn generator(self: *const Object) ?*anyopaque {
-        return if (self.cold) |cold| cold.generator else null;
+        const cold = self.cold orelse return null;
+        return switch (cold.rare) {
+            .generator => |state| state.ptr,
+            else => null,
+        };
     }
 
     pub fn setGenerator(self: *Object, fallback: std.mem.Allocator, raw_generator: *anyopaque) std.mem.Allocator.Error!void {
-        const cold = try self.ensureCold(fallback);
-        cold.generator = raw_generator;
+        const state = try self.ensureRare(fallback, .generator, .{});
+        state.ptr = raw_generator;
     }
 
     pub inline fn iteratorHelper(self: *const Object) ?*IterHelper {
-        return if (self.cold) |cold| cold.iter_helper else null;
+        const cold = self.cold orelse return null;
+        return switch (cold.rare) {
+            .iter_helper => |state| state.ptr,
+            else => null,
+        };
     }
 
     pub fn setIteratorHelper(self: *Object, fallback: std.mem.Allocator, helper: *IterHelper) std.mem.Allocator.Error!void {
-        const cold = try self.ensureCold(fallback);
-        cold.iter_helper = helper;
+        const state = try self.ensureRare(fallback, .iter_helper, .{});
+        state.ptr = helper;
     }
 
     pub inline fn boundFunction(self: *const Object) ?*anyopaque {
-        return if (self.cold) |cold| cold.bound_function else null;
+        const cold = self.cold orelse return null;
+        return switch (cold.rare) {
+            .bound_function => |state| state.ptr,
+            else => null,
+        };
     }
 
     pub fn setBoundFunction(self: *Object, fallback: std.mem.Allocator, bound_function: *anyopaque) std.mem.Allocator.Error!void {
-        const cold = try self.ensureCold(fallback);
-        cold.bound_function = bound_function;
+        const state = try self.ensureRare(fallback, .bound_function, .{});
+        state.ptr = bound_function;
     }
 
     pub fn setErrorName(self: *Object, fallback: std.mem.Allocator, name: []const u8) std.mem.Allocator.Error!void {
-        const cold = try self.ensureCold(fallback);
-        cold.error_name = name;
+        const state = try self.ensureRare(fallback, .error_state, .{});
+        state.name = name;
     }
 
     pub fn setErrorCtor(self: *Object, fallback: std.mem.Allocator, name: []const u8) std.mem.Allocator.Error!void {
-        const cold = try self.ensureCold(fallback);
-        cold.error_ctor = name;
+        const state = try self.ensureRare(fallback, .error_state, .{});
+        state.ctor = name;
     }
 
     pub inline fn regexSource(self: *const Object) []const u8 {
@@ -1389,14 +1493,17 @@ pub const Object = struct {
     /// tells ThreadSanitizer the access is synchronized.
     pub fn dateMs(self: *const Object) f64 {
         const cold = @constCast(self).cold orelse return 0;
-        return @atomicLoad(f64, &cold.date_ms, .monotonic);
+        return switch (cold.rare) {
+            .date => |*state| @atomicLoad(f64, &state.ms, .monotonic),
+            else => 0,
+        };
     }
     pub fn initDateMs(self: *Object, fallback: std.mem.Allocator, v: f64) std.mem.Allocator.Error!void {
-        const cold = try self.ensureCold(fallback);
-        @atomicStore(f64, &cold.date_ms, v, .monotonic);
+        const state = try self.ensureRare(fallback, .date, .{});
+        @atomicStore(f64, &state.ms, v, .monotonic);
     }
     pub fn setDateMs(self: *Object, v: f64) void {
-        @atomicStore(f64, &self.cold.?.date_ms, v, .monotonic);
+        @atomicStore(f64, &self.cold.?.rare.date.ms, v, .monotonic);
     }
 
     pub fn elementsLen(self: *const Object) usize {

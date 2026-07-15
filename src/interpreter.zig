@@ -7234,8 +7234,7 @@ pub const Interpreter = struct {
     pub fn makeBigInt(self: *Interpreter, v: i128) EvalError!Value {
         const o = try gc_mod.allocObj(self.arena);
         o.* = .{ .is_bigint = true };
-        const cold = try o.ensureCold(self.arena);
-        cold.primitive = .{ .bigint = .{ .value = v } };
+        try o.setPrimitiveState(self.arena, .{ .bigint = .{ .value = v } });
         try self.finishBigInt(o);
         return Value.obj(o);
     }
@@ -7244,8 +7243,7 @@ pub const Interpreter = struct {
         if (std.fmt.parseInt(i128, s, 10)) |v| return self.makeBigInt(v) else |_| {}
         const o = try gc_mod.allocObj(self.arena);
         o.* = .{ .is_bigint = true };
-        const cold = try o.ensureCold(self.arena);
-        cold.primitive = .{ .bigint = .{ .text = .init(s) } };
+        try o.setPrimitiveState(self.arena, .{ .bigint = .{ .text = .init(s) } });
         try self.finishBigInt(o);
         return Value.obj(o);
     }
@@ -42394,10 +42392,9 @@ fn makeSymbolObj(a: std.mem.Allocator, rs: *Shape, desc: ?[]const u8, proto: ?*v
         .is_symbol = true,
         .proto = proto,
     };
-    const cold = try o.ensureCold(a);
-    cold.primitive = .{ .symbol = .{ .description = .init(desc) } };
+    try o.setPrimitiveState(a, .{ .symbol = .{ .description = .init(desc) } });
     const n = try mintUniqueAtomicSerial(usize, &symbol_counter);
-    cold.primitive.symbol.key = .init(try std.fmt.allocPrint(a, "\x00s{d}", .{n}));
+    o.setSymbolKey(try std.fmt.allocPrint(a, "\x00s{d}", .{n}));
     return Value.obj(o);
 }
 
