@@ -2345,6 +2345,9 @@ pub const Context = struct {
     gc_cooperative_attempts: std.atomic.Value(u64) = .init(0),
     gc_cooperative_collections: std.atomic.Value(u64) = .init(0),
     gc_cooperative_timeouts: std.atomic.Value(u64) = .init(0),
+    /// Peers that froze their stack and acknowledged a cooperative generation.
+    /// Kept separate from the abort-safe collector's non-blocking root handoffs.
+    gc_cooperative_peer_parks: std.atomic.Value(u64) = .init(0),
     gc_cooperative_exit_cleanups: std.atomic.Value(u64) = .init(0),
     gc_cooperative_pause_ns_total: std.atomic.Value(u64) = .init(0),
     gc_cooperative_pause_ns_max: std.atomic.Value(u64) = .init(0),
@@ -3281,7 +3284,10 @@ pub const Context = struct {
 
         stack_scan.beginPark();
         machine.gc_parked.store(true, .release);
-        machine.gc_published_gen.store(request, .release);
+        if (machine.gc_published_gen.load(.monotonic) != request) {
+            machine.gc_published_gen.store(request, .release);
+            _ = self.gc_cooperative_peer_parks.fetchAdd(1, .monotonic);
+        }
         var spins: usize = 0;
         while (self.gc_par_request.load(.acquire) == request) : (spins += 1) {
             if ((spins & 0xff) == 0 and !self.cooperativeCollectorIsActive()) {
@@ -13799,6 +13805,7 @@ test "parallel_js: cooperative shared nursery rendezvous bounds object churn" {
     try std.testing.expectEqual(@as(f64, 2529), result.asNum());
     try std.testing.expect(ctx.gc_cooperative_attempts.load(.monotonic) > 0);
     try std.testing.expect(ctx.gc_cooperative_collections.load(.monotonic) > 0);
+    try std.testing.expect(ctx.gc_cooperative_peer_parks.load(.monotonic) > 0);
     try std.testing.expectEqual(@as(u64, 0), ctx.gc_cooperative_timeouts.load(.monotonic));
     try std.testing.expectEqual(@as(u64, 0), ctx.gc_par_request.load(.acquire));
     try std.testing.expectEqual(@as(?*interp.Interpreter, null), ctx.gc_par_collector.load(.acquire));
@@ -14150,7 +14157,7 @@ test "parallel_js heap_limit_bytes recovers ArrayBuffer bytes while peer runs" {
     const before_attempts = ctx.gc_par_attempts.load(.monotonic);
     const before_collections = ctx.gc_par_collections.load(.monotonic);
     const before_running_peer_requests = ctx.gc_par_running_peer_requests.load(.monotonic);
-    const before_peer_publications = ctx.gc_par_peer_publications.load(.monotonic);
+    const before_cooperative_peer_parks = ctx.gc_cooperative_peer_parks.load(.monotonic);
 
     const result = try ctx.evaluate(
         \\(() => {
@@ -14193,7 +14200,7 @@ test "parallel_js heap_limit_bytes recovers ArrayBuffer bytes while peer runs" {
     try std.testing.expect(ctx.gc_par_attempts.load(.monotonic) > before_attempts);
     try std.testing.expect(ctx.gc_par_collections.load(.monotonic) > before_collections);
     try std.testing.expect(ctx.gc_par_running_peer_requests.load(.monotonic) > before_running_peer_requests);
-    try std.testing.expect(ctx.gc_par_peer_publications.load(.monotonic) > before_peer_publications);
+    try std.testing.expect(ctx.gc_cooperative_peer_parks.load(.monotonic) > before_cooperative_peer_parks);
 
     _ = try ctx.evaluate("globalThis.__abRecoveryKeep = undefined; 0");
     ctx.collectGarbage();
