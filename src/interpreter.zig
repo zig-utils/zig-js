@@ -26251,12 +26251,34 @@ fn segNext(str: []const u8, pos: usize, gran: []const u8) struct { end: usize, w
         var end = pos;
         while (end < len) {
             const c = str[end];
-            const is_term = c == '.' or c == '!' or c == '?';
-            end += segScalarLen(str, end);
-            if (is_term) {
-                while (end < len and (str[end] == ' ' or str[end] == '\t' or str[end] == '\n')) end += 1;
+            // SB4: a paragraph separator (CR/LF) ends the sentence.
+            if (c == '\n') {
+                end += 1;
                 break;
             }
+            if (c == '\r') {
+                end += 1;
+                if (end < len and str[end] == '\n') end += 1;
+                break;
+            }
+            if (c == '.' or c == '!' or c == '?') {
+                const t_end = end + segScalarLen(str, end);
+                const nxt: u8 = if (t_end < len) str[t_end] else 0;
+                // A terminator only ends a sentence when followed by whitespace, a
+                // paragraph separator, or end of text ("One.Two"/"3.5" do not break).
+                if (t_end >= len or nxt == ' ' or nxt == '\t' or nxt == '\n' or nxt == '\r') {
+                    end = t_end;
+                    while (end < len and (str[end] == ' ' or str[end] == '\t')) end += 1;
+                    if (end < len and str[end] == '\r') {
+                        end += 1;
+                        if (end < len and str[end] == '\n') end += 1;
+                    } else if (end < len and str[end] == '\n') end += 1;
+                    break;
+                }
+                end = t_end;
+                continue;
+            }
+            end += segScalarLen(str, end);
         }
         return .{ .end = end, .word_like = false };
     }
