@@ -851,7 +851,7 @@ pub fn main(init: std.process.Init) !void {
                             name, case_ms, @errorName(eval_err), msg,
                         });
                     } else |stringify_err| {
-                        const exception_kind = if (e.isObject() and e.asObj().is_error and e.asObj().errorName().len != 0)
+                        const exception_kind = if (e.isObject() and e.asObj().behavior.is_error and e.asObj().errorName().len != 0)
                             e.asObj().errorName()
                         else
                             e.typeOf();

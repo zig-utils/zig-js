@@ -1430,7 +1430,7 @@ pub fn regExpFn(ctx: *anyopaque, this: Value, args: []const Value) HostError!Val
 
     var internal_pattern: ?[]const u8 = null;
     var internal_flags: ?[]const u8 = null;
-    if (a0.isObject() and a0.asObj().is_regex) {
+    if (a0.isObject() and a0.asObj().behavior.is_regex) {
         internal_pattern = a0.asObj().regexSource();
         internal_flags = a0.asObj().regexFlags();
     }
@@ -2661,7 +2661,7 @@ const Stringifier = struct {
         if (st.replacer_fn) |rf|
             v = try self.callValueWithThis(rf, &.{ try Value.strAlloc(self.arena, key), v }, holder);
         // A JSON.rawJSON object emits its validated text verbatim.
-        if (v.isObject() and v.asObj().is_raw_json) {
+        if (v.isObject() and v.asObj().behavior.is_raw_json) {
             const raw = (v.asObj().getOwn("rawJSON") orelse Value.str("")).asStr();
             try buf.appendSlice(a, raw);
             return true;
@@ -2908,7 +2908,7 @@ pub fn jsonRawJSON(ctx: *anyopaque, this: Value, args: []const Value) HostError!
     if (v.isObject() and !v.asObj().is_bigint and !v.asObj().is_symbol)
         return self.throwError("SyntaxError", "JSON.rawJSON text must be a primitive JSON value");
     const o = try gc_mod.allocObj(self.arena);
-    o.* = .{ .proto = null, .is_raw_json = true };
+    o.* = .{ .proto = null, .behavior = .{ .is_raw_json = true } };
     try o.setOwn(self.arena, self.root_shape, "rawJSON", try Value.strAlloc(self.arena, s));
     try o.setAttr(self.arena, "rawJSON", .{ .writable = false, .enumerable = true, .configurable = false });
     o.setExtensible(false); // SetIntegrityLevel(frozen)
@@ -2920,7 +2920,7 @@ pub fn jsonIsRawJSON(ctx: *anyopaque, this: Value, args: []const Value) HostErro
     _ = ctx;
     _ = this;
     const v = arg(args, 0);
-    return Value.boolVal(v.isObject() and v.asObj().is_raw_json);
+    return Value.boolVal(v.isObject() and v.asObj().behavior.is_raw_json);
 }
 
 pub fn jsonParse(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {

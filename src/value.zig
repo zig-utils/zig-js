@@ -753,6 +753,24 @@ pub const ObjectBackingFlags = packed struct {
     arg_map_severed: bool = false,
 };
 
+/// Infrequent object behavior tags share two bytes instead of reserving one
+/// byte apiece in every ordinary object. High-traffic primitive/array/proxy
+/// tags remain direct fields until their larger migration can be benchmarked
+/// independently.
+pub const ObjectBehaviorFlags = packed struct(u16) {
+    is_htmldda: bool = false,
+    is_raw_json: bool = false,
+    is_date: bool = false,
+    is_error: bool = false,
+    is_regex: bool = false,
+    is_set_deleted: bool = false,
+    proxy_callable: bool = false,
+    is_weak_ref: bool = false,
+    is_finalization_registry: bool = false,
+    is_shadow_realm: bool = false,
+    _padding: u6 = 0,
+};
+
 pub const ObjectPrivateDataTag = enum(u8) {
     none,
     host,
@@ -823,6 +841,7 @@ pub const Object = struct {
     /// implicitly. Once [[SetPrototypeOf]] explicitly sets null, that null must be
     /// observable through [[GetPrototypeOf]] instead of falling back again.
     proto_explicit_null: bool = false,
+    behavior: ObjectBehaviorFlags = .{},
     /// Accessor metadata lives in the cold sidecar.
     /// The set of private names this object was *branded* with at construction
     /// (its class's private fields/methods/accessors). PrivateGet/PrivateSet check
@@ -854,14 +873,11 @@ pub const Object = struct {
     // Symbol key/description and BigInt value/text overlap in the cold sidecar.
     /// An `[[IsHTMLDDA]]` exotic object (e.g. `document.all`): `typeof` reports
     /// "undefined", ToBoolean is false, and it is loosely-equal to null/undefined.
-    is_htmldda: bool = false,
     /// A `JSON.rawJSON(...)` result (carries `[[IsRawJSON]]`): a frozen null-proto
     /// object with an own "rawJSON" string property emitted verbatim by stringify.
-    is_raw_json: bool = false,
     /// A `Date` instance — its [[DateValue]] (ms since the Unix epoch, or NaN
     /// for an invalid date) is the internal-slot field `date_ms`, invisible to
     /// reflection/enumeration; methods are dispatched in `dateMethod`.
-    is_date: bool = false,
     is_array: bool = false,
     // (atomic accessors for `date_ms` are defined as methods below)
     /// Test-shell `$vm.ensureArrayStorage(array)` marker. zig-js uses one
@@ -916,10 +932,8 @@ pub const Object = struct {
     promise_resolving_already: bool = false,
     /// `Thread.restrict` ownership lives in the cold sidecar.
     /// True for `Error`-family instances; drives `toString` and `instanceof`.
-    is_error: bool = false,
     /// True for `RegExp` instances (carries `source`/`flags` properties; matching
     /// is backed by zig-regex).
-    is_regex: bool = false,
     // RegExp source, flags, and compiled cache live in `cold`.
     /// True for function `arguments` objects; they are array-like internally but
     /// carry the Arguments brand for Object.prototype.toString.
@@ -931,7 +945,6 @@ pub const Object = struct {
     is_set: bool = false,
     /// Internal tombstone for SetData slots deleted during observable iteration.
     /// User code can never obtain one; Set/iterator helpers skip these slots.
-    is_set_deleted: bool = false,
     /// A WeakMap/WeakSet reuses the `is_map`/`is_set` storage but carries this
     /// flag so the brand checks can tell a Map from a WeakMap (and Set/WeakSet).
     is_weak: bool = false,
@@ -945,7 +958,6 @@ pub const Object = struct {
     proxy_revoked: bool = false,
     /// Proxies keep their [[Call]] exotic behavior even after revocation. Once
     /// revoked, the target slot is gone, so cache the callable bit at creation.
-    proxy_callable: bool = false,
     /// Module Namespace exotic object: points to an `interpreter.ModuleNs`
     /// (its sorted export names + live bindings). When set, this object is a
     /// `[[Module]]` namespace and the engine intercepts its essential internal
@@ -957,16 +969,13 @@ pub const Object = struct {
     // object kinds; their backing pointer lives in the rare-state sidecar.
     /// Marks a `WeakRef` instance. The target is a weak GC edge, so collection
     /// may clear it while the WeakRef object itself remains branded.
-    is_weak_ref: bool = false,
     /// Marks a `FinalizationRegistry`. Dead targets make records ready for
     /// automatic host cleanup delivery at quiescent collection points.
-    is_finalization_registry: bool = false,
     // Cleanup callback and records live in `cold`.
     /// Lazy Iterator-Helper state (`map`/`filter`/`take`/`drop`/`flatMap`/wrap),
     /// non-null on a helper iterator returned by those methods.
     /// Marks a `ShadowRealm` instance (its child realm's Environment is in
     /// `private_data`).
-    is_shadow_realm: bool = false,
     // Temporal internal slots live in the disjoint rare-state sidecar.
 
     fn lockBacking(self: *Object) bool {
@@ -1167,7 +1176,7 @@ pub const Object = struct {
             .proxy_target = self.proxyTarget(),
             .proxy_handler = self.proxyHandler(),
             .boxed_primitive = self.boxedPrimitive(),
-            .weak_ref_target_slot = if (self.is_weak_ref) self.weakRefTargetSlot() else null,
+            .weak_ref_target_slot = if (self.behavior.is_weak_ref) self.weakRefTargetSlot() else null,
             .js_function = self.jsFunction(),
             .bound_function = self.boundFunction(),
             .promise_data = self.promiseData(),
@@ -2428,7 +2437,7 @@ pub const Object = struct {
             if (guard > 10000) return false;
             o = t;
         }
-        if (o.proxy_revoked) return o.proxy_callable;
+        if (o.proxy_revoked) return o.behavior.proxy_callable;
         return o.hostCallback() != null or o.native != null or
             o.jsFunction() != null or o.errorCtor() != null or o.boundFunction() != null;
     }
@@ -3120,7 +3129,7 @@ pub const Value = struct {
             .boolean => self.asBool(),
             .number => self.asNum() != 0 and !std.math.isNan(self.asNum()),
             .string => self.asStr().len != 0,
-            .object => if (self.asObj().is_htmldda) false else if (self.asObj().is_bigint) !bigIntIsZero(self.asObj()) else true,
+            .object => if (self.asObj().behavior.is_htmldda) false else if (self.asObj().is_bigint) !bigIntIsZero(self.asObj()) else true,
         };
     }
 
@@ -3170,7 +3179,7 @@ pub const Value = struct {
             .boolean => "boolean",
             .number => "number",
             .string => "string",
-            .object => if (self.asObj().is_htmldda) "undefined" else if (self.asObj().is_symbol) "symbol" else if (self.asObj().is_bigint) "bigint" else if (self.asObj().isCallableObject()) "function" else "object",
+            .object => if (self.asObj().behavior.is_htmldda) "undefined" else if (self.asObj().is_symbol) "symbol" else if (self.asObj().is_bigint) "bigint" else if (self.asObj().isCallableObject()) "function" else "object",
         };
     }
 
@@ -3256,7 +3265,7 @@ fn bigIntEquals(a: *Object, b: *Object) bool {
 fn objectToString(o: *Object, arena: std.mem.Allocator) error{OutOfMemory}![]const u8 {
     // A primitive-wrapper object stringifies as its boxed primitive.
     if (o.boxedPrimitive()) |p| return p.toString(arena);
-    if (o.is_error) {
+    if (o.behavior.is_error) {
         const name = if (o.getOwn("name")) |v|
             (if (v.isString()) v.asStr() else o.errorName())
         else
@@ -3471,8 +3480,8 @@ pub fn looseEquals(a: Value, b: Value) bool {
     }
     if ((a.isNull() and b.isUndefined()) or (a.isUndefined() and b.isNull())) return true;
     // An [[IsHTMLDDA]] object is loosely equal to null and undefined.
-    if ((a.isObject() and a.asObj().is_htmldda) and (b.isNull() or b.isUndefined())) return true;
-    if ((b.isObject() and b.asObj().is_htmldda) and (a.isNull() or a.isUndefined())) return true;
+    if ((a.isObject() and a.asObj().behavior.is_htmldda) and (b.isNull() or b.isUndefined())) return true;
+    if ((b.isObject() and b.asObj().behavior.is_htmldda) and (a.isNull() or a.isUndefined())) return true;
     // BigInt == Number/Boolean/String: compare mathematically (a string is parsed
     // to a BigInt; a non-integer/unparseable comparand is unequal).
     const a_big = a.isObject() and a.asObj().is_bigint;
@@ -3818,7 +3827,7 @@ test "WeakMap and WeakSet entry delete is unordered tail removal" {
 
 test "FinalizationRegistry unregister stable-compacts matching records" {
     const a = std.testing.allocator;
-    var o = Object{ .is_finalization_registry = true };
+    var o = Object{ .behavior = .{ .is_finalization_registry = true } };
     const cold = try o.ensureCold(a);
     defer a.destroy(cold);
     defer cold.finalization_records.deinit(a);

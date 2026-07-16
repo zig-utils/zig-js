@@ -286,7 +286,7 @@ const Serializer = struct {
         o.lockElements();
         defer o.unlockElements();
         for (o.elements.items) |entry| {
-            if (entry.isObject() and entry.asObj().is_set_deleted) continue;
+            if (entry.isObject() and entry.asObj().behavior.is_set_deleted) continue;
             try s.rootSnapshotValue(entry);
             try list.append(s.w.gpa, entry);
         }
@@ -390,7 +390,7 @@ const Serializer = struct {
             return s.throwClone("DataCloneError: weak collections cannot be cloned");
         if (o.moduleNs() != null) return s.throwClone("DataCloneError: module namespaces cannot be cloned");
         if (o.is_arguments) return s.throwClone("DataCloneError: arguments objects cannot be cloned");
-        if (o.is_htmldda) return s.throwClone("DataCloneError: this object cannot be cloned");
+        if (o.behavior.is_htmldda) return s.throwClone("DataCloneError: this object cannot be cloned");
 
         const object_id = s.next_id;
         const next_id = std.math.add(u32, object_id, 1) catch
@@ -445,12 +445,12 @@ const Serializer = struct {
             try s.w.byte(@intFromBool(dv.track_length));
             return;
         }
-        if (o.is_date) {
+        if (o.behavior.is_date) {
             try s.w.tag(.date);
             try s.w.num(o.dateMs());
             return;
         }
-        if (o.is_regex) {
+        if (o.behavior.is_regex) {
             try s.w.tag(.regexp);
             try s.writeStr(o.regexSource());
             try s.writeStr(o.regexFlags());
@@ -483,7 +483,7 @@ const Serializer = struct {
             for (entries) |entry| try s.ser(entry, child_depth);
             return;
         }
-        if (o.is_error) {
+        if (o.behavior.is_error) {
             try s.w.tag(.error_obj);
             try s.writeStr(o.errorName());
             const msg = try s.self.getProperty(Value.obj(o), "message");
@@ -961,7 +961,7 @@ const Deserializer = struct {
             .date => {
                 const o = (try d.self.newObject()).asObj();
                 try d.objs.append(a, o);
-                o.is_date = true;
+                o.behavior.is_date = true;
                 try o.initDateMs(a, d.r.num() catch return d.fail());
                 if (d.protoFor("Date")) |p| o.proto = p;
                 return Value.obj(o);
@@ -1026,7 +1026,7 @@ const Deserializer = struct {
                 const name = try a.dupe(u8, d.r.str() catch return d.fail());
                 const o = (try d.self.newObject()).asObj();
                 try d.objs.append(a, o);
-                o.is_error = true;
+                o.behavior.is_error = true;
                 try o.setErrorName(a, name);
                 o.proto = d.protoFor(name) orelse d.protoFor("Error");
                 if (try d.readFlag()) {

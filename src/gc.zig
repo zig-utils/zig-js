@@ -149,7 +149,7 @@ pub fn traceObject(o: *Object, v: anytype) void {
     }
     markValueOpt(v, cold.boxed_primitive);
     if (cold.weak_ref_target_slot) |slot| markWeakObject(v, slot); // stable cold-slot address
-    if (o.is_finalization_registry) {
+    if (o.behavior.is_finalization_registry) {
         if (cold.cold) |state| {
             markValue(v, state.finalization_callback);
             // Only `held` is a strong edge (mark it by value under the entry-storage
@@ -194,7 +194,7 @@ pub fn traceObjectEphemeron(o: *Object, v: anytype) void {
 /// identical to the old markWeak-then-null-then-prune for the stop-the-world and
 /// GIL-held paths (a dead key/target is exactly an unmarked managed cell).
 pub fn pruneDeadWeakEntries(o: *Object, heap: anytype) bool {
-    if (!(o.is_weak and (o.is_map or o.is_set)) and !o.is_finalization_registry) return false;
+    if (!(o.is_weak and (o.is_map or o.is_set)) and !o.behavior.is_finalization_registry) return false;
     o.lockElements();
     defer o.unlockElements();
 
@@ -210,7 +210,7 @@ pub fn pruneDeadWeakEntries(o: *Object, heap: anytype) bool {
             }
         }
     }
-    if (o.is_finalization_registry) {
+    if (o.behavior.is_finalization_registry) {
         const cold = o.coldState() orelse return cleanup_ready;
         for (cold.finalization_records.items) |*record| {
             // Once a record is ready, its target may have been swept in an
@@ -963,7 +963,7 @@ pub const Binding = struct {
 pub const Heap = gc.Heap(Binding);
 
 test "Object and cold sidecar fit the 256-byte GC slab" {
-    try std.testing.expectEqual(@as(usize, 176), @sizeOf(Object));
+    try std.testing.expectEqual(@as(usize, 168), @sizeOf(Object));
     try std.testing.expect(Heap.cellAllocationBytes(Object) <= 256);
     try std.testing.expect(Heap.cellAllocationBytes(value.ObjectColdState) <= 256);
 }

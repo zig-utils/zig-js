@@ -2200,7 +2200,7 @@ pub const Interpreter = struct {
 
     fn makeErrorWithProto(self: *Interpreter, name: []const u8, message: []const u8, proto: ?*value.Object) EvalError!Value {
         const obj = try gc_mod.allocObj(self.arena);
-        obj.* = .{ .is_error = true };
+        obj.* = .{ .behavior = .{ .is_error = true } };
         try obj.setErrorName(self.arena, name);
         // Link to `<name>.prototype` so `name` (and `toString`) are inherited and
         // `instanceof` / `Object.getPrototypeOf` see a real chain.
@@ -2233,7 +2233,7 @@ pub const Interpreter = struct {
     /// accessors from cold error metadata and the hidden `\x00dommsg` slot.
     pub fn makeDOMException(self: *Interpreter, name: []const u8, message: []const u8) EvalError!Value {
         const obj = try gc_mod.allocObj(self.arena);
-        obj.* = .{ .is_error = true };
+        obj.* = .{ .behavior = .{ .is_error = true } };
         try obj.setErrorName(self.arena, try self.arena.dupe(u8, name));
         if (self.env.get("DOMException")) |ctor_v| if (ctor_v.isObject()) {
             if (ctor_v.asObj().getOwn("prototype")) |p| if (p.isObject()) obj.setProtoAtomic(p.asObj());
@@ -5455,7 +5455,7 @@ pub const Interpreter = struct {
             const target = obj.proxyTarget() orelse return self.throwError("TypeError", "Cannot perform 'apply' on a proxy that has been revoked");
             // A Proxy has a [[Call]] method only if its target is callable; if not,
             // calling it is a TypeError BEFORE the apply trap runs (9.5.12).
-            if (!obj.proxy_callable) return self.throwError("TypeError", "value is not a function");
+            if (!obj.behavior.proxy_callable) return self.throwError("TypeError", "value is not a function");
             if (try self.proxyTrap(obj, "apply")) |trap| {
                 const arr = try self.newArray();
                 for (args) |a| try arr.asObj().appendElement(self.arena, a);
@@ -6950,7 +6950,7 @@ pub const Interpreter = struct {
             const registry = q.items[i];
             i += 1;
             self.unlockRealm();
-            if (!registry.is_finalization_registry) continue;
+            if (!registry.behavior.is_finalization_registry) continue;
             const cb = registry.finalizationCallback();
             if (!cb.isCallable()) continue;
             // Pop each ready record (registry-internal lock); run its callback unlocked.
@@ -7574,7 +7574,7 @@ pub const Interpreter = struct {
     pub fn makeRegex(self: *Interpreter, pattern: []const u8, flags: []const u8) EvalError!Value {
         try self.validateRegExpFlags(flags);
         const o = (try self.newObject()).asObj();
-        o.is_regex = true;
+        o.behavior.is_regex = true;
         // An empty pattern's [[OriginalSource]] is "(?:)" (so `//`, `new RegExp()`,
         // `new RegExp("")` all match the empty string and report that source).
         const source = if (pattern.len == 0) "(?:)" else pattern;
@@ -7671,7 +7671,7 @@ pub const Interpreter = struct {
             var flags: []const u8 = "";
             const pattern_v = if (args.len > 0) args[0] else Value.undef();
             const flags_v = if (args.len > 1) args[1] else Value.undef();
-            if (pattern_v.isObject() and pattern_v.asObj().is_regex) {
+            if (pattern_v.isObject() and pattern_v.asObj().behavior.is_regex) {
                 if (!flags_v.isUndefined()) return self.throwError("TypeError", "flags supplied with a RegExp pattern");
                 pattern = pattern_v.asObj().regexSource();
                 flags = pattern_v.asObj().regexFlags();
@@ -7786,7 +7786,7 @@ pub const Interpreter = struct {
             if (result.isNull() or (result.isObject() and !result.asObj().is_symbol and !result.asObj().is_bigint)) return result;
             return self.throwError("TypeError", "RegExp exec result must be an object or null");
         }
-        if (rx.asObj().is_regex) return (try self.regexMethod(rx.asObj(), "exec", &.{try Value.strAlloc(self.arena, s)})).?;
+        if (rx.asObj().behavior.is_regex) return (try self.regexMethod(rx.asObj(), "exec", &.{try Value.strAlloc(self.arena, s)})).?;
         return self.throwError("TypeError", "RegExp exec property is not callable");
     }
 
@@ -7795,7 +7795,7 @@ pub const Interpreter = struct {
     }
 
     fn setRegExpLikeLastIndexValue(self: *Interpreter, rx: Value, v: Value) EvalError!void {
-        if (rx.isObject() and rx.asObj().is_regex) return self.setRegExpLastIndexValue(rx.asObj(), v);
+        if (rx.isObject() and rx.asObj().behavior.is_regex) return self.setRegExpLastIndexValue(rx.asObj(), v);
         if (rx.isObject()) {
             const was_strict = self.strict;
             self.strict = true;
@@ -8329,7 +8329,7 @@ pub const Interpreter = struct {
     /// Build a `Date` whose time is `t` ms since the Unix epoch.
     pub fn makeDate(self: *Interpreter, t: f64) EvalError!Value {
         const o = (try self.newObject()).asObj();
-        o.is_date = true;
+        o.behavior.is_date = true;
         // Proto from the in-flight constructor's new.target (`new Date`, or a
         // `class extends Date` subclass), else %Date.prototype% — so
         // `Date.prototype.isPrototypeOf(d)` and `d.constructor` resolve. Date
@@ -8936,7 +8936,7 @@ pub const Interpreter = struct {
         }
         if (eq(name, "delete")) {
             const tomb = try gc_mod.allocObj(self.arena);
-            tomb.* = .{ .is_set_deleted = true };
+            tomb.* = .{ .behavior = .{ .is_set_deleted = true } };
             o.lockElements();
             defer o.unlockElements();
             for (o.elements.items, 0..) |e, i| {
@@ -10045,7 +10045,7 @@ pub const Interpreter = struct {
             .boolean => "Boolean",
             .object => blk: {
                 const o = recv.asObj();
-                break :blk if (o.is_array) "Array" else if (o.is_regex) "RegExp" else if (o.is_symbol) "Symbol" else if (o.is_error) (if (o.errorName().len > 0) o.errorName() else "Error") else if (o.is_map) "Map" else if (o.is_set) "Set" else if (o.is_date) "Date" else if (o.boxedPrimitive()) |p| (switch (p.kind()) {
+                break :blk if (o.is_array) "Array" else if (o.behavior.is_regex) "RegExp" else if (o.is_symbol) "Symbol" else if (o.behavior.is_error) (if (o.errorName().len > 0) o.errorName() else "Error") else if (o.is_map) "Map" else if (o.is_set) "Set" else if (o.behavior.is_date) "Date" else if (o.boxedPrimitive()) |p| (switch (p.kind()) {
                     .number => "Number",
                     .string => "String",
                     .boolean => "Boolean",
@@ -11945,12 +11945,12 @@ pub const Interpreter = struct {
                     }
                     // Error.prototype.toString — before the generic Array `toString`
                     // (join) fallback below would wrongly intercept error objects.
-                    if (o.is_error and eq(name, "toString")) return try errorToStringFn(@ptrCast(self), recv, args);
+                    if (o.behavior.is_error and eq(name, "toString")) return try errorToStringFn(@ptrCast(self), recv, args);
                     if (o.is_symbol and eq(name, "toString")) return try symbolToStringFn(@ptrCast(self), recv, args);
                     if (o.is_symbol and eq(name, "valueOf")) return recv;
                 }
-                if (o.is_regex) return try self.regexMethod(o, name, args);
-                if (o.is_date) return try self.dateMethod(o, name, args);
+                if (o.behavior.is_regex) return try self.regexMethod(o, name, args);
+                if (o.behavior.is_date) return try self.dateMethod(o, name, args);
                 if (o.is_map) return try self.mapMethod(o, name, args);
                 if (o.is_set) return try self.setMethod(o, name, args);
                 // A typed array's own methods take precedence over the Array-like
@@ -13247,7 +13247,7 @@ pub const Interpreter = struct {
             const m = try self.getProperty(v, mkey);
             if (!m.isUndefined()) return m.toBoolean();
         }
-        return v.asObj().is_regex;
+        return v.asObj().behavior.is_regex;
     }
 
     fn stringProtocolDispatch(self: *Interpreter, name: []const u8, receiver: Value, args: []const Value) EvalError!?Value {
@@ -13412,7 +13412,7 @@ pub const Interpreter = struct {
             const lim: usize = if (args.len > 1 and !args[1].isUndefined()) value.Value.uint32FromF64(try self.toNumberV(args[1])) else std.math.maxInt(u32);
             // Regex separator: split on each match, inserting capture groups, per
             // the String.prototype.split(@@split) algorithm.
-            if (args[0].isObject() and args[0].asObj().is_regex) {
+            if (args[0].isObject() and args[0].asObj().behavior.is_regex) {
                 const re = try self.compileRegex(args[0].asObj());
                 if (lim == 0) return result;
                 if (s.len == 0) {
@@ -13542,7 +13542,7 @@ pub const Interpreter = struct {
 
             // Regex pattern: replace each match (all matches when global/replaceAll),
             // expanding `$` substitutions or invoking a function replacer.
-            if (!all and arg0(args).isObject() and arg0(args).asObj().is_regex) {
+            if (!all and arg0(args).isObject() and arg0(args).asObj().behavior.is_regex) {
                 const ro = arg0(args).asObj();
                 const g = all or std.mem.indexOfScalar(u8, ro.regexFlags(), 'g') != null;
                 const re = try self.compileRegex(ro);
@@ -13756,7 +13756,7 @@ pub const Interpreter = struct {
             }
             // RegExpCreate(regexp, "g"), then Invoke(rx, @@matchAll, « S ») so a
             // replaced/deleted RegExp.prototype[@@matchAll] is honoured.
-            const src = if (regexp.isObject() and regexp.asObj().is_regex)
+            const src = if (regexp.isObject() and regexp.asObj().behavior.is_regex)
                 regexp.asObj().regexSource()
             else if (regexp.isUndefined())
                 ""
@@ -13775,7 +13775,7 @@ pub const Interpreter = struct {
     /// Coerce a value to a RegExp object: a regex stays as-is; anything else
     /// becomes `new RegExp(String(v))`.
     fn toRegexObject(self: *Interpreter, v: Value) EvalError!*value.Object {
-        if (v.isObject() and v.asObj().is_regex) return v.asObj();
+        if (v.isObject() and v.asObj().behavior.is_regex) return v.asObj();
         const pat = if (v.isUndefined()) "" else try self.toStringV(v);
         return (try self.makeRegex(pat, "")).asObj();
     }
@@ -14321,7 +14321,7 @@ pub const Interpreter = struct {
         }
         // A Date with no @@toPrimitive falls back to ordinary conversion: string
         // hints use toString, while number/default hints use the time value.
-        if (o.is_date) {
+        if (o.behavior.is_date) {
             if (hint == .string) return (try self.dateMethod(o, "toString", &.{})) orelse Value.str("Invalid Date");
             return Value.num(o.dateMs());
         }
@@ -14753,7 +14753,7 @@ pub const Interpreter = struct {
             cur = try self.objectGetPrototypeValue(cur.asObj());
         }
         if (rc.errorCtor()) |name| {
-            if (lo.is_error and (std.mem.eql(u8, lo.errorName(), name) or std.mem.eql(u8, name, "Error")))
+            if (lo.behavior.is_error and (std.mem.eql(u8, lo.errorName(), name) or std.mem.eql(u8, name, "Error")))
                 return true;
         }
         return false;
@@ -15948,7 +15948,7 @@ fn objectProtoToStringFn(ctx: *anyopaque, this: Value, args: []const Value) valu
         .string => "String",
         .object => blk: {
             const o = this.asObj();
-            break :blk if (o.is_arguments) "Arguments" else if (try objectToStringIsArray(self, o)) "Array" else if (o.is_error) "Error" else if (o.is_date) "Date" else if (o.is_regex) "RegExp" else if (o.boxedPrimitive()) |p| (switch (p.kind()) {
+            break :blk if (o.is_arguments) "Arguments" else if (try objectToStringIsArray(self, o)) "Array" else if (o.behavior.is_error) "Error" else if (o.behavior.is_date) "Date" else if (o.behavior.is_regex) "RegExp" else if (o.boxedPrimitive()) |p| (switch (p.kind()) {
                 .number => "Number",
                 .string => "String",
                 .boolean => "Boolean",
@@ -15996,7 +15996,7 @@ fn errorIsErrorFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
     while (o.proxyHandler() != null) {
         if (o.proxyTarget()) |t| o = t else break;
     }
-    return Value.boolVal(o.is_error);
+    return Value.boolVal(o.behavior.is_error);
 }
 
 /// `Error.prototype.toString`: `"name: message"`, or just one when the other is
@@ -16054,7 +16054,7 @@ fn errorStackGet(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
     // off `[[ErrorData]]` rather than via [[Get]], so a hostile/recursive receiver
     // (proxy traps, getters) can't re-enter and blow the stack.
     const obj = this.asObj();
-    if (!obj.is_error) return Value.undef();
+    if (!obj.behavior.is_error) return Value.undef();
     const name = if (obj.errorName().len == 0) "Error" else obj.errorName();
     const message = if (obj.getOwn("message")) |v|
         (if (v.isString()) v.asStr() else "")
@@ -16235,7 +16235,7 @@ fn proxyConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
     if (!builtins.isRealObject(target) or !builtins.isRealObject(handler))
         return self.throwError("TypeError", "Cannot create proxy with a non-object as target or handler");
     const o = try gc_mod.allocObj(self.arena);
-    o.* = .{ .proxy_callable = target.asObj().isCallableObject() };
+    o.* = .{ .behavior = .{ .proxy_callable = target.asObj().isCallableObject() } };
     try o.setProxyState(self.arena, target.asObj(), handler.asObj());
     return Value.obj(o);
 }
@@ -16252,7 +16252,7 @@ fn proxyRevocableFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
     if (!builtins.isRealObject(target) or !builtins.isRealObject(handler))
         return self.throwError("TypeError", "Cannot create proxy with a non-object as target or handler");
     const p = try gc_mod.allocObj(self.arena);
-    p.* = .{ .proxy_callable = target.asObj().isCallableObject() };
+    p.* = .{ .behavior = .{ .proxy_callable = target.asObj().isCallableObject() } };
     try p.setProxyState(self.arena, target.asObj(), handler.asObj());
     const revoke = try gc_mod.allocObj(self.arena);
     revoke.* = .{ .native = proxyRevokeFn, .private_data = @ptrCast(p) };
@@ -16753,7 +16753,7 @@ fn shadowRealmConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) v
     defer self.env = saved_env;
     const genv = try makeChildRealm(self);
     const o = (try self.newObject()).asObj();
-    o.is_shadow_realm = true;
+    o.behavior.is_shadow_realm = true;
     o.private_data = @ptrCast(genv);
     if (self.new_target.isObject()) o.setProtoAtomic(try self.protoObject(self.new_target.asObj()));
     return Value.obj(o);
@@ -16766,7 +16766,7 @@ fn shadowRealmConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) v
 /// still gives embedders and test262 the observable Promise/export behavior.
 fn shadowRealmImportValueFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject() or !this.asObj().is_shadow_realm) return self.throwError("TypeError", "ShadowRealm.prototype.importValue called on a non-ShadowRealm");
+    if (!this.isObject() or !this.asObj().behavior.is_shadow_realm) return self.throwError("TypeError", "ShadowRealm.prototype.importValue called on a non-ShadowRealm");
     const spec = try self.toStringV(if (args.len > 0) args[0] else Value.undef()); // ToString(specifier) — may throw
     const export_name = if (args.len > 1) args[1] else Value.undef();
     if (!export_name.isString()) return self.throwError("TypeError", "ShadowRealm.prototype.importValue: exportName must be a string");
@@ -16817,7 +16817,7 @@ fn shadowRealmImportValueFn(ctx: *anyopaque, this: Value, args: []const Value) v
 fn shadowRealmEvaluateFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const caller_env = shadowRealmNativeRealm(self) orelse self.env;
-    if (!this.isObject() or !this.asObj().is_shadow_realm) return throwErrorInRealm(self, caller_env, "TypeError", "ShadowRealm.prototype.evaluate called on a non-ShadowRealm");
+    if (!this.isObject() or !this.asObj().behavior.is_shadow_realm) return throwErrorInRealm(self, caller_env, "TypeError", "ShadowRealm.prototype.evaluate called on a non-ShadowRealm");
     const src = if (args.len > 0) args[0] else Value.undef();
     if (!src.isString()) return throwErrorInRealm(self, caller_env, "TypeError", "ShadowRealm.prototype.evaluate expects a string");
     const genv: *Environment = @ptrCast(@alignCast(this.asObj().private_data orelse return throwErrorInRealm(self, caller_env, "TypeError", "ShadowRealm has no realm")));
@@ -16887,7 +16887,7 @@ pub fn install262(env: *Environment, rs: *Shape, object_proto: *value.Object) Ev
     // $262.IsHTMLDDA — an [[IsHTMLDDA]] exotic (typeof "undefined", falsy,
     // loosely-equal to null/undefined), callable per its legacy [[Call]].
     const htmldda = try gc_mod.allocObj(a);
-    htmldda.* = .{ .proto = object_proto, .native = host262IsHTMLDDACallFn, .is_htmldda = true };
+    htmldda.* = .{ .proto = object_proto, .native = host262IsHTMLDDACallFn, .behavior = .{ .is_htmldda = true } };
     try d.setOwn(a, rs, "IsHTMLDDA", Value.obj(htmldda));
     const es = try gc_mod.allocObj(a);
     es.* = .{ .native = host262EvalScriptFn, .private_data = @ptrCast(env) };
@@ -19291,7 +19291,7 @@ fn weakRefConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value
     if (!canBeHeldWeakly(target)) return self.throwError("TypeError", "WeakRef: target must be an object or a symbol");
     self.noteWeakWork();
     const o = (try self.newObject()).asObj();
-    o.is_weak_ref = true;
+    o.behavior.is_weak_ref = true;
     try o.setWeakRefTarget(self.arena, target.asObj());
     gc_mod.barrierWeak(o);
     if (try self.protoFromCtor("WeakRef")) |pr| o.setProtoAtomic(pr);
@@ -19301,7 +19301,7 @@ fn weakRefConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value
 fn weakRefDerefFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject() or !this.asObj().is_weak_ref) return self.throwError("TypeError", "WeakRef.prototype.deref called on a non-WeakRef");
+    if (!this.isObject() or !this.asObj().behavior.is_weak_ref) return self.throwError("TypeError", "WeakRef.prototype.deref called on a non-WeakRef");
     const target = this.asObj().weakRefTarget() orelse return Value.undef();
     return Value.obj(target);
 }
@@ -19314,7 +19314,7 @@ fn finalizationRegistryConstructorFn(ctx: *anyopaque, this: Value, args: []const
     if (!cb.isCallable()) return self.throwError("TypeError", "FinalizationRegistry: cleanup callback must be callable");
     self.noteWeakWork();
     const o = (try self.newObject()).asObj();
-    o.is_finalization_registry = true;
+    o.behavior.is_finalization_registry = true;
     (try o.ensureCold(self.arena)).finalization_callback = cb;
     if (try self.protoFromCtor("FinalizationRegistry")) |pr| o.setProtoAtomic(pr);
     return Value.obj(o);
@@ -19322,7 +19322,7 @@ fn finalizationRegistryConstructorFn(ctx: *anyopaque, this: Value, args: []const
 
 fn finRegRegisterFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject() or !this.asObj().is_finalization_registry) return self.throwError("TypeError", "FinalizationRegistry.prototype.register called on an incompatible receiver");
+    if (!this.isObject() or !this.asObj().behavior.is_finalization_registry) return self.throwError("TypeError", "FinalizationRegistry.prototype.register called on an incompatible receiver");
     const target = if (args.len > 0) args[0] else Value.undef();
     if (!canBeHeldWeakly(target)) return self.throwError("TypeError", "FinalizationRegistry.register: target must be an object or a symbol");
     const held = if (args.len > 1) args[1] else Value.undef();
@@ -19342,7 +19342,7 @@ fn finRegRegisterFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
 
 fn finRegUnregisterFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject() or !this.asObj().is_finalization_registry) return self.throwError("TypeError", "FinalizationRegistry.prototype.unregister called on an incompatible receiver");
+    if (!this.isObject() or !this.asObj().behavior.is_finalization_registry) return self.throwError("TypeError", "FinalizationRegistry.prototype.unregister called on an incompatible receiver");
     const token = if (args.len > 0) args[0] else Value.undef();
     if (!canBeHeldWeakly(token)) return self.throwError("TypeError", "FinalizationRegistry.unregister: token must be an object or a symbol");
     // Remove every cell whose [[UnregisterToken]] is SameValue(token); return
@@ -28988,7 +28988,7 @@ fn liveMapEntryCount(o: *value.Object) usize {
 }
 
 fn liveSetEntry(v: Value) ?Value {
-    if (v.isObject() and v.asObj().is_set_deleted) return null;
+    if (v.isObject() and v.asObj().behavior.is_set_deleted) return null;
     return v;
 }
 
@@ -29398,7 +29398,7 @@ fn dateProtoMethod(comptime name: []const u8) value.NativeFn {
     return struct {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
-            if (!this.isObject() or !this.asObj().is_date)
+            if (!this.isObject() or !this.asObj().behavior.is_date)
                 return self.throwError("TypeError", "Date.prototype method called on a non-Date");
             return (try self.dateMethod(this.asObj(), name, args)) orelse Value.undef();
         }
@@ -29420,7 +29420,7 @@ fn dateToJSONFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostErr
     // Date the numeric primitive is its [[DateValue]] (the engine's `toPrimitive`
     // skips the native valueOf, so read it directly); other objects observe
     // their own valueOf/toString.
-    if (o.is_date) {
+    if (o.behavior.is_date) {
         if (!std.math.isFinite(o.dateMs())) return Value.nul();
     } else {
         const tv = try self.toPrimitive(Value.obj(o), .number);
@@ -29434,7 +29434,7 @@ fn dateToJSONFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostErr
 fn dateToTemporalInstantFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject() or !this.asObj().is_date)
+    if (!this.isObject() or !this.asObj().behavior.is_date)
         return self.throwError("TypeError", "Date.prototype.toTemporalInstant called on a non-Date");
     const ms = this.asObj().dateMs();
     if (!std.math.isFinite(ms)) return self.throwError("RangeError", "invalid Date");
@@ -29712,7 +29712,7 @@ fn regexFlagGetter(comptime flag: u8) value.NativeFn {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
             if (!this.isObject()) return throwRegExpAccessorTypeError(self, "RegExp.prototype accessor called on a non-object");
             const o = this.asObj();
-            if (!o.is_regex) {
+            if (!o.behavior.is_regex) {
                 if (isHomeRegExpProto(self, o)) return Value.undef();
                 return throwRegExpAccessorTypeError(self, "RegExp.prototype accessor called on a non-RegExp");
             }
@@ -29726,7 +29726,7 @@ fn regexSourceGetter(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!this.isObject()) return throwRegExpAccessorTypeError(self, "RegExp.prototype.source called on a non-object");
     const o = this.asObj();
-    if (!o.is_regex) {
+    if (!o.behavior.is_regex) {
         if (isHomeRegExpProto(self, o)) return Value.str("(?:)");
         return throwRegExpAccessorTypeError(self, "RegExp.prototype.source called on a non-RegExp");
     }
@@ -29775,7 +29775,7 @@ fn regexProtoMethod(comptime name: []const u8) value.NativeFn {
                 const r = try self.regexpExecGeneric(this, str);
                 return Value.boolVal(!r.isNull());
             }
-            if (!this.isObject() or !this.asObj().is_regex) {
+            if (!this.isObject() or !this.asObj().behavior.is_regex) {
                 return self.throwError("TypeError", "RegExp.prototype." ++ name ++ " called on a non-RegExp");
             }
             return (try self.regexMethod(this.asObj(), name, args)) orelse Value.undef();
@@ -42712,7 +42712,7 @@ fn dateConstructor(ctx: *anyopaque, this: Value, args: []const Value) value.Host
     if (args.len == 1) {
         // `new Date(dateObject)` copies its time value; otherwise ToPrimitive
         // (a string would be parsed — not yet — else ToNumber).
-        if (args[0].isObject() and args[0].asObj().is_date)
+        if (args[0].isObject() and args[0].asObj().behavior.is_date)
             return self.makeDate(args[0].asObj().dateMs());
         const prim = try self.toPrimitive(args[0], .default);
         if (prim.isString()) return self.makeDate(dateParseISO(prim.asStr()));

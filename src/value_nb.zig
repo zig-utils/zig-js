@@ -107,7 +107,7 @@ pub const ValueNB = struct {
             .boolean => self.asBool(),
             .number => self.asNum() != 0 and !std.math.isNan(self.asNum()),
             .string => self.asStr().len != 0,
-            .object => if (self.asObj().is_htmldda) false else if (self.asObj().is_bigint) !value.bigIntIsZero(self.asObj()) else true,
+            .object => if (self.asObj().behavior.is_htmldda) false else if (self.asObj().is_bigint) !value.bigIntIsZero(self.asObj()) else true,
         };
     }
     pub fn toNumber(self: ValueNB) f64 {
@@ -127,7 +127,7 @@ pub const ValueNB = struct {
             .boolean => "boolean",
             .number => "number",
             .string => "string",
-            .object => if (self.asObj().is_htmldda) "undefined" else if (self.asObj().is_symbol) "symbol" else if (self.asObj().is_bigint) "bigint" else if (self.asObj().isCallableObject()) "function" else "object",
+            .object => if (self.asObj().behavior.is_htmldda) "undefined" else if (self.asObj().is_symbol) "symbol" else if (self.asObj().is_bigint) "bigint" else if (self.asObj().isCallableObject()) "function" else "object",
         };
     }
 

@@ -7694,7 +7694,7 @@ test "new on a non-constructor built-in throws TypeError" {
         const ctx = try Context.create(std.testing.allocator);
         defer ctx.destroy();
         try std.testing.expectError(error.Throw, ctx.evaluate(src));
-        try std.testing.expect(ctx.exception.?.asObj().is_error);
+        try std.testing.expect(ctx.exception.?.asObj().behavior.is_error);
         try std.testing.expectEqualStrings("TypeError", ctx.exception.?.asObj().errorName());
     }
     // The real constructors still build instances.

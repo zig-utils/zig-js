@@ -264,7 +264,7 @@ fn attachEvaluationRuntimeSourceMetadata(
 ) !void {
     if (!thrown.isObject()) return;
     const obj = thrown.asObj();
-    if (!obj.is_error) return;
+    if (!obj.behavior.is_error) return;
     if (source_url == null and starting_line_number <= 0) return;
 
     const gc_saved = gc_mod.setActiveHeap(ctx.gc);
@@ -450,7 +450,7 @@ export fn JSValueIsArray(ctx: JSContextRef, v: JSValueRef) callconv(.c) bool {
 export fn JSValueIsDate(ctx: JSContextRef, v: JSValueRef) callconv(.c) bool {
     const c = ctxForHandleInspection(ctx) orelse return false;
     const uv = valueFromContext(c, v) orelse return false;
-    return uv.isObject() and uv.asObj().is_date;
+    return uv.isObject() and uv.asObj().behavior.is_date;
 }
 
 export fn JSValueIsEqual(ctx: JSContextRef, a: JSValueRef, b: JSValueRef, exception: ExceptionRef) callconv(.c) bool {
