@@ -608,18 +608,14 @@ pub const GcCellBacking = struct {
     const bucket_sizes = [_]usize{ 64, 128, 256, 512, 1024, 2048 };
     const chunk_bytes: usize = 64 * 1024;
     const chunk_metadata_reserve_granularity: usize = 8;
-    /// Object cells dominate GC-backed contexts. Use larger chunks for the
-    /// 1024/2048-byte buckets so create/destroy-heavy workloads free fewer
-    /// backing chunks and maintain smaller address indexes for the hot object
-    /// bucket. 384 KiB keeps empty-context object chunks at three without the
-    /// larger reserved-slot overhang of a 512 KiB chunk. The lazy bump cursor
-    /// means unused slots are not prelinked. Every GC heap selects the larger
-    /// geometry for the current 256-byte Object bucket (and the adjacent
-    /// 512-byte class), reducing libc chunk growth for independent heaps and
-    /// synchronized growth for shared heaps. The 256-byte class uses a 256 KiB
-    /// chunk, keeping its 1,024 slots within `FreeBitmap` capacity; 512-byte and
-    /// larger classes use 384 KiB.
-    const object_chunk_bytes: usize = 256 * 1024;
+    /// Larger cells use wider chunks so create/destroy-heavy workloads free
+    /// fewer backing chunks and maintain smaller address indexes. The current
+    /// 128-byte Object slab intentionally stays on the base 64 KiB geometry;
+    /// the expanded configuration uses 256 KiB for the 256-byte class, 384 KiB
+    /// for 512 bytes, and 384 KiB for the always-large 1024/2048-byte classes.
+    /// The 256-byte chunk's 1,024 slots remain within `FreeBitmap` capacity,
+    /// and the lazy bump cursor means unused slots are not prelinked.
+    const medium_chunk_bytes: usize = 256 * 1024;
     const large_chunk_bytes: usize = 384 * 1024;
     const reusable_tail_chunks: usize = 8;
     const free_bitmap_words: usize = (chunk_bytes / bucket_sizes[0]) / 64;
@@ -697,7 +693,7 @@ pub const GcCellBacking = struct {
     parallel: bool = false,
     /// Allocation geometry is selected before private realm bootstrap, while
     /// `parallel` remains false so that bootstrap does not pay lock overhead.
-    large_object_chunks: bool = false,
+    expanded_chunks: bool = false,
     bulk_teardown: bool = false,
     /// Fast-path cell allocation is independent by size class. Chunk growth and
     /// delegated side-storage operations still serialize through `inner_lock`
@@ -805,10 +801,10 @@ pub const GcCellBacking = struct {
     }
 
     inline fn bucketChunkBytes(self: *const GcCellBacking, idx: usize) usize {
-        return if (self.large_object_chunks and bucket_sizes[idx] == 256)
-            object_chunk_bytes
+        return if (self.expanded_chunks and bucket_sizes[idx] == 256)
+            medium_chunk_bytes
         else if (bucket_sizes[idx] >= 1024 or
-            (self.large_object_chunks and bucket_sizes[idx] == 512))
+            (self.expanded_chunks and bucket_sizes[idx] == 512))
             large_chunk_bytes
         else
             chunk_bytes;
@@ -2089,7 +2085,7 @@ test "GC cell backing bucket stats attribute size-class pressure" {
     try std.testing.expectEqual(@as(usize, 1), buckets[object_idx].live_slots);
 }
 
-test "GC cell backing uses larger chunks for object-sized buckets" {
+test "GC cell backing uses larger chunks for large size classes" {
     var backing = GcCellBacking{ .inner = std.testing.allocator };
     defer backing.deinit();
     const a = backing.allocator();
@@ -2110,22 +2106,22 @@ test "GC cell backing uses larger chunks for object-sized buckets" {
     try std.testing.expectEqual(@as(usize, 1), stats.live_slots);
 }
 
-test "GC cell backing selects current object chunk geometry independently of locks" {
+test "GC cell backing selects expanded chunk geometry independently of locks" {
     const current_idx = GcCellBacking.bucketIndex(240, .@"16").?;
     const adjacent_idx = GcCellBacking.bucketIndex(500, .@"16").?;
     try std.testing.expectEqual(@as(usize, 256), GcCellBacking.bucket_sizes[current_idx]);
     try std.testing.expectEqual(@as(usize, 512), GcCellBacking.bucket_sizes[adjacent_idx]);
 
     var serial = GcCellBacking{ .inner = std.testing.allocator };
-    var large = GcCellBacking{ .inner = std.testing.allocator, .large_object_chunks = true };
+    var expanded = GcCellBacking{ .inner = std.testing.allocator, .expanded_chunks = true };
     try std.testing.expectEqual(GcCellBacking.chunk_bytes, serial.bucketChunkBytes(current_idx));
     try std.testing.expectEqual(GcCellBacking.chunk_bytes, serial.bucketChunkBytes(adjacent_idx));
-    try std.testing.expectEqual(GcCellBacking.object_chunk_bytes, large.bucketChunkBytes(current_idx));
-    try std.testing.expectEqual(GcCellBacking.large_chunk_bytes, large.bucketChunkBytes(adjacent_idx));
+    try std.testing.expectEqual(GcCellBacking.medium_chunk_bytes, expanded.bucketChunkBytes(current_idx));
+    try std.testing.expectEqual(GcCellBacking.large_chunk_bytes, expanded.bucketChunkBytes(adjacent_idx));
     const bitmap_slots = GcCellBacking.free_bitmap_words * 64;
-    try std.testing.expect(large.bucketChunkBytes(current_idx) / GcCellBacking.bucket_sizes[current_idx] <= bitmap_slots);
-    try std.testing.expect(large.bucketChunkBytes(adjacent_idx) / GcCellBacking.bucket_sizes[adjacent_idx] <= bitmap_slots);
-    try std.testing.expect(!large.parallel);
+    try std.testing.expect(expanded.bucketChunkBytes(current_idx) / GcCellBacking.bucket_sizes[current_idx] <= bitmap_slots);
+    try std.testing.expect(expanded.bucketChunkBytes(adjacent_idx) / GcCellBacking.bucket_sizes[adjacent_idx] <= bitmap_slots);
+    try std.testing.expect(!expanded.parallel);
 }
 
 test "GC cell backing bulk teardown skips reuse bitmap updates and still delegates side storage" {
@@ -2736,7 +2732,7 @@ pub const Context = struct {
             gc_state.backing = .{
                 .inner = context_gpa,
                 .parallel = false,
-                .large_object_chunks = true,
+                .expanded_chunks = true,
             };
             const cell_backing = gc_state.backing.allocator();
             gc_state.heap = GcHeap.init(cell_backing, &gc_state.binding);

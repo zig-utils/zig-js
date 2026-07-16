@@ -115,11 +115,10 @@ Known performance/maturity work:
   tail range instead of rescanning it once per slab.
   This cuts the old one-general-allocator-call-per-cell profile without
   changing the collector API.
-  The object-sized 1024/2048-byte buckets now use 384 KiB slab chunks, larger
-  than the small cell buckets but smaller than the over-reserving 512 KiB
-  alternative. The empty-context profile stays at three object-cell chunks with
-  1152 slots, and explicit collection trims fully unused object-heavy spike
-  chunks back to that retained baseline instead of carrying the former 83-chunk
+  The current 128-byte Object bucket uses 64 KiB chunks. Expanded 256/512-byte
+  classes use 256/384 KiB, and the 1024/2048-byte classes always use 384 KiB.
+  Explicit collection trims fully unused object-heavy spike chunks back toward
+  the current retained live baseline instead of carrying the former 83-chunk
   post-collect footprint.
   Live `SharedArrayBuffer` retain teardown is also regression covered across the
   arena path, the no-GIL threaded path, and the `.gil = true` serialized
@@ -194,9 +193,9 @@ Known performance/maturity work:
   trims fully unused tail slabs after object spikes, and multi-slab tail
   trimming compacts freelist and sorted-address-index metadata once for the
   whole trimmed range instead of rescanning it once per released slab. The
-  object-sized 1024/2048-byte buckets use larger chunks so the profile exposes
-  reduced object-cell chunk churn separately from remaining create/destroy
-  wall-clock costs. A repeated allocate-plus-collect churn table now reports
+  per-class 64/256/384 KiB geometry is reported explicitly so the profile
+  exposes chunk churn separately from remaining create/destroy wall-clock
+  costs. A repeated allocate-plus-collect churn table now reports
   fresh versus reused cells, freed cells, final chunk/live counts, and reuse
   percentage. Quiescent nursery rows now compare multiple 512-allocation
   retention shapes (ephemeral, sparse, one-quarter retained, array/object

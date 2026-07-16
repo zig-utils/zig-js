@@ -736,13 +736,13 @@ attribution is also split between empty-context destroy and destroy after the
 object workload.
 These snapshot paths use exact per-bucket free, capacity, issued-slot,
 fresh-allocation, reused-allocation, and freed-slot counters rather than walking
-every free-list node or slab chunk. The object-sized 1024/2048-byte buckets use
-384 KiB slab chunks rather than the small buckets' 64 KiB chunks, so compare
-chunk counts alongside wall-clock timings when evaluating GC allocation or
-lifecycle changes. A healthy local profile should show the empty context at
-three object-cell chunks; after explicit collection, a one-off object-heavy
-spike should trim fully unused tail slabs back toward that retained baseline
-instead of preserving the older 83-chunk post-collect footprint. Multi-slab
+every free-list node or slab chunk. The current 128-byte Object bucket uses a
+64 KiB chunk; configured 256/512-byte buckets use 256/384 KiB, while the
+1024/2048-byte buckets always use 384 KiB. Compare per-class chunk counts
+alongside wall-clock timings when evaluating allocation or lifecycle changes.
+After explicit collection, a one-off object-heavy spike should trim fully
+unused tail slabs back toward the retained live baseline instead of preserving
+the older 83-chunk post-collect footprint. Multi-slab
 tail trimming should compact freelist and sorted-address-index metadata once for
 the whole released tail range, not once per released slab. The same profile now
 prints a repeated allocate-plus-collect churn table that summarizes

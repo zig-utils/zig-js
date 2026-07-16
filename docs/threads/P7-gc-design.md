@@ -151,8 +151,10 @@ treats those as non-cells. This keeps the trace surface to runtime values only.
   dedicated blocks. Per-`Kind` size is mostly fixed (`Object` is one size), so
   size classes are few. In zig-js this first ships as `Context.GcCellBacking`:
   the `zig-gc` heap still sees a normal allocator, while 16-byte-aligned cell
-  slabs are recycled from 64 KiB size-class chunks and non-cell heap side storage
-  delegates unchanged. Fresh chunks reserve chunk/bump-offset/address-index
+  slabs are recycled from size-class chunks and non-cell heap side storage
+  delegates unchanged. The current 128-byte `Object` class uses 64 KiB chunks;
+  configured 256/512-byte classes use 256/384 KiB, and 1024/2048-byte classes
+  use 384 KiB. Fresh chunks reserve chunk/bump-offset/address-index
   metadata in fixed-size capacity chunks, then hand out cells lazily through
   bump cursors and a per-bucket bump hint rather than pre-linking every slot up
   front. Parallel allocation locks slab/free-list state independently per size
@@ -176,6 +178,14 @@ treats those as non-cells. This keeps the trace surface to runtime values only.
   bypass the `GcCellBacking` wrapper and allocate directly from the context
   allocator; true-parallel JS keeps the synchronized wrapper for those stores so
   no-GIL embedders are not required to provide a thread-safe allocator.
+  Fixed-shape shared-realm allocation keeps the exact 1,024-step safepoint
+  cadence but may reserve up to 272 default-initialized objects while multiple
+  workers contend. The unused suffix is an explicit interpreter root. For an
+  all-owned batch of at least 64 cells, zig-gc initializes and chains headers
+  privately, O(1)-splices the chain under its allocation-metadata lock, then
+  releases that lock before the binding publishes its size-class ownership
+  bitmap. Short batches and marking transitions retain the original per-cell
+  publication path.
 - **Mark:** explicit mark stack (no recursion — JS graphs are deep). Tri-color:
   white = unmarked, grey = on stack, black = traced.
 - **Weak processing:** after the strong mark stack drains, an ephemeron

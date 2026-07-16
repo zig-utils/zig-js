@@ -207,10 +207,10 @@ Issue #1 remains the umbrella status page.
   non-cell side storage still pass through a separate inner-allocator lock
   because embedder allocators are not required to be thread-safe. This is a
   contention reduction for the existing slab allocator. The
-  object-sized 1024/2048-byte buckets now use 384 KiB chunks: the local profile
-  keeps the intrinsic empty context at three object-cell chunks with 1152 slots,
-  while explicit collection trims fully unused object-heavy spike chunks back to
-  that retained baseline instead of carrying the older 83-chunk post-collect
+  current 128-byte Object bucket uses 64 KiB chunks; expanded 256/512-byte
+  classes use 256/384 KiB, and 1024/2048-byte classes use 384 KiB. Explicit
+  collection trims fully unused object-heavy spike chunks back toward the
+  retained live baseline instead of carrying the older 83-chunk post-collect
   footprint. Multi-slab tail trimming compacts the sorted address index and
   freelist metadata once for the whole trimmed range instead of rescanning those
   structures once per released slab. It also splits GC finalizer attribution
