@@ -675,6 +675,13 @@ pub const Binding = struct {
         backing.publishCellAllocation(allocation, total);
     }
 
+    /// Amortize publication synchronization for the VM's same-size object
+    /// allocation batches while preserving the same header-before-bit order.
+    pub fn publishCellAllocationBatch(self: *Binding, payloads: []*anyopaque, total: usize, payload_offset: usize) void {
+        const backing = self.context.gc_cell_backing orelse unreachable;
+        backing.publishCellAllocationBatch(payloads, total, payload_offset);
+    }
+
     /// Withdraw classification before zig-gc clears/finalizes/reuses a header.
     pub fn unpublishCellAllocation(self: *Binding, allocation: *anyopaque, total: usize) void {
         const backing = self.context.gc_cell_backing orelse unreachable;

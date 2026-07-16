@@ -1044,11 +1044,8 @@ pub const GcCellBacking = struct {
         return .outside;
     }
 
-    fn setCellPublished(self: *GcCellBacking, total: usize, allocation: *anyopaque, published: bool) void {
-        const idx = bucketIndex(total, .@"16") orelse unreachable;
+    fn setCellPublishedLocked(self: *GcCellBacking, idx: usize, allocation: *anyopaque, published: bool) void {
         const ptr: [*]u8 = @ptrCast(allocation);
-        self.acquireBucket(idx);
-        defer self.unlockBucket(idx);
         const chunk_idx = self.ownedChunkIndexLocked(idx, ptr) orelse unreachable;
         const chunk = self.bucket_chunks[idx].items[chunk_idx];
         const offset = @intFromPtr(ptr) - @intFromPtr(chunk.ptr);
@@ -1061,8 +1058,25 @@ pub const GcCellBacking = struct {
             std.debug.assert(self.bucket_published_bitmaps[idx].items[chunk_idx].remove(slot));
     }
 
+    fn setCellPublished(self: *GcCellBacking, total: usize, allocation: *anyopaque, published: bool) void {
+        const idx = bucketIndex(total, .@"16") orelse unreachable;
+        self.acquireBucket(idx);
+        defer self.unlockBucket(idx);
+        self.setCellPublishedLocked(idx, allocation, published);
+    }
+
     pub fn publishCellAllocation(self: *GcCellBacking, allocation: *anyopaque, total: usize) void {
         self.setCellPublished(total, allocation, true);
+    }
+
+    pub fn publishCellAllocationBatch(self: *GcCellBacking, payloads: []*anyopaque, total: usize, payload_offset: usize) void {
+        const idx = bucketIndex(total, .@"16") orelse unreachable;
+        self.acquireBucket(idx);
+        defer self.unlockBucket(idx);
+        for (payloads) |payload| {
+            const allocation: *anyopaque = @ptrFromInt(@intFromPtr(payload) - payload_offset);
+            self.setCellPublishedLocked(idx, allocation, true);
+        }
     }
 
     pub fn unpublishCellAllocation(self: *GcCellBacking, allocation: *anyopaque, total: usize) void {
@@ -1533,12 +1547,17 @@ test "GC cell backing batches reused and fresh slabs under one bucket lock" {
     try std.testing.expectEqual(@as(usize, 2), backing.bucket_reused_allocs[idx]);
     try std.testing.expectEqual(@as(usize, 6), backing.bucket_live_counts[idx].items[0]);
     try std.testing.expectEqual(8 * len, backing.parallelCellBytesSinceCollection());
+    const publish_locks_before = backing.bucket_lock_acquisitions_for_testing[idx];
+    backing.publishCellAllocationBatch(&slabs, len, 0);
+    try std.testing.expectEqual(publish_locks_before + 1, backing.bucket_lock_acquisitions_for_testing[idx]);
+    for (slabs) |slab| try std.testing.expect(backing.ownsCellAllocation(slab));
     backing.resetParallelCellBytesSinceCollection();
     try std.testing.expectEqual(@as(usize, 0), backing.parallelCellBytesSinceCollection());
 
     a.free(cells[0]);
     a.free(cells[2]);
     for (slabs) |slab| {
+        backing.unpublishCellAllocation(slab, len);
         const ptr: [*]align(16) u8 = @ptrCast(@alignCast(slab));
         const cell: []align(16) u8 = ptr[0..len];
         a.free(cell);
