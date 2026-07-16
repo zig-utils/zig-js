@@ -1543,6 +1543,13 @@ pub const Object = struct {
         self.slots = .{ .items = self.inline_slots[0..0], .capacity = self.inline_slots.len };
     }
 
+    /// Representation boundary for named-property values. Callers retain their
+    /// existing `property_lock` discipline; keeping the slice behind this
+    /// helper lets external slot metadata move out of the common Object cell.
+    pub inline fn slotsItems(self: *const Object) []Value {
+        return self.slots.items;
+    }
+
     /// Validate an immutable root-to-final shape chain once before a hot
     /// allocation site publishes it repeatedly. The prepared descriptor is
     /// valid for the lifetime of the owning Context because Shapes never
@@ -1587,7 +1594,7 @@ pub const Object = struct {
         values: []const Value,
     ) bool {
         if (values.len != prepared.slot_count or
-            self.shape != null or self.slots.items.len != 0 or !self.slotsAreInline() or
+            self.shape != null or self.slotsItems().len != 0 or !self.slotsAreInline() or
             self.backing_flags.slots or self.accessorsMap() != null or
             self.keyOrder() != null or self.attrsMap() != null or !self.isExtensible())
             return false;
@@ -2829,7 +2836,7 @@ pub const Object = struct {
         const sh = self.shape orelse return null;
         // `lookup` doesn't mutate; the const-cast keeps Object read-only here.
         const slot = (@constCast(sh)).lookup(name) orelse return null;
-        return self.slots.items[slot];
+        return self.slotsItems()[slot];
     }
 
     /// Set an own named property, transitioning the shape and growing `slots`
@@ -2845,7 +2852,7 @@ pub const Object = struct {
         gcBarrier(self, v); // stored into this cell's slots on either path below
         if (self.shape) |sh| {
             if (sh.lookup(name)) |slot| {
-                self.slots.items[slot] = v;
+                self.slotsItems()[slot] = v;
                 return;
             }
         }
@@ -2919,7 +2926,7 @@ pub const Object = struct {
         defer if (synchronized) self.unlockProperties();
         const parent = child.parent orelse return false;
         if ((self.shape orelse root) != parent or child.slot != slot) return false;
-        if (self.slots.items.len != @as(usize, slot) or child.count != slot + 1) return false;
+        if (self.slotsItems().len != @as(usize, slot) or child.count != slot + 1) return false;
         if (child.name == null or self.accessorsMap() != null or
             self.keyOrder() != null or self.attrsMap() != null or !self.isExtensible()) return false;
 
@@ -3592,7 +3599,7 @@ test "object named properties serialize concurrent same-name writes" {
     for (threads) |thread| thread.join();
 
     const value = object.getOwn("shared") orelse return error.TestExpectedEqual;
-    try std.testing.expectEqual(@as(usize, 1), object.slots.items.len);
+    try std.testing.expectEqual(@as(usize, 1), object.slotsItems().len);
     try std.testing.expectEqual(@as(?u32, 0), object.shape.?.lookup("shared"));
     try std.testing.expect(value.isNumber());
 }
@@ -3607,11 +3614,11 @@ test "ordinary object keeps four named property values inline before migrating" 
         try object.setOwn(std.testing.allocator, root, name, Value.num(@floatFromInt(i)));
     }
     try std.testing.expect(object.slotsAreInline());
-    try std.testing.expectEqual(@as(usize, 4), object.slots.items.len);
+    try std.testing.expectEqual(@as(usize, 4), object.slotsItems().len);
 
     try object.setOwn(std.testing.allocator, root, names[4], Value.num(4));
     try std.testing.expect(!object.slotsAreInline());
-    try std.testing.expectEqual(@as(usize, 5), object.slots.items.len);
+    try std.testing.expectEqual(@as(usize, 5), object.slotsItems().len);
     object.slots.deinit(std.testing.allocator);
 }
 
@@ -3663,7 +3670,7 @@ test "fixed-shape object allocation publishes validated literal shape into inlin
     try std.testing.expect(object.initializePreparedInlineLiteralShape(prepared, &values));
     try std.testing.expectEqual(final_shape, object.shape.?);
     try std.testing.expect(object.slotsAreInline());
-    try std.testing.expectEqualSlices(Value, &values, object.slots.items);
+    try std.testing.expectEqualSlices(Value, &values, object.slotsItems());
 
     try std.testing.expect(Object.prepareInlineLiteralShape(root, final_shape, 2) == null);
     const other_root = try Shape.createRoot(arena.allocator());
@@ -3678,7 +3685,7 @@ test "fixed-shape object allocation publishes validated literal shape into inlin
     occupied.initInlineSlots();
     try occupied.setOwn(arena.allocator(), root, "existing", Value.num(1));
     try std.testing.expect(!occupied.initializePreparedInlineLiteralShape(prepared, &values));
-    try std.testing.expectEqual(@as(usize, 1), occupied.slots.items.len);
+    try std.testing.expectEqual(@as(usize, 1), occupied.slotsItems().len);
 
     const indexed_shape = try root.transition("0");
     try std.testing.expect(Object.prepareInlineLiteralShape(root, indexed_shape, 1) == null);
@@ -3738,7 +3745,7 @@ test "object named property delete rebuild serializes with writers" {
         if (s.name != null) count += 1;
         shape = s.parent;
     }
-    try std.testing.expectEqual(count, object.slots.items.len);
+    try std.testing.expectEqual(count, object.slotsItems().len);
 }
 
 // ---- no-GIL regression tests (issue #1): the atomic/seqlock primitives that

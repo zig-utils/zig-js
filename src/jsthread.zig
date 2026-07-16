@@ -2323,7 +2323,7 @@ fn ownDataOrThrow(self: *Interpreter, o: *value.Object, key: []const u8, what: [
         o.lockProperties();
         defer o.unlockProperties();
         if (accessorUnlocked(o, key)) return self.throwError("TypeError", what);
-        if (namedSlotUnlocked(o, key)) |slot| return o.slots.items[slot];
+        if (namedSlotUnlocked(o, key)) |slot| return o.slotsItems()[slot];
         return self.throwError("TypeError", what);
     }
     if (isAccessor(o, key)) return self.throwError("TypeError", what);
@@ -2395,7 +2395,7 @@ pub fn propExchange(self: *Interpreter, args: []const Value) value.HostError!Val
         if (accessorUnlocked(o, key)) return self.throwError("TypeError", "Atomics.exchange: object has no own data property");
         const slot = namedSlotUnlocked(o, key) orelse
             return self.throwError("TypeError", "Atomics.exchange: object has no own data property");
-        const old = o.slots.items[slot];
+        const old = o.slotsItems()[slot];
         if (!attrUnlocked(o, key).writable) return self.throwError("TypeError", "Atomics.exchange: property is not writable");
         try o.setOwnUnlocked(self.arena, self.root_shape, key, argAt(args, 2));
         return old;
@@ -2418,7 +2418,7 @@ pub fn propCompareExchange(self: *Interpreter, args: []const Value) value.HostEr
         if (accessorUnlocked(o, key)) return self.throwError("TypeError", "Atomics.compareExchange: object has no own data property");
         const slot = namedSlotUnlocked(o, key) orelse
             return self.throwError("TypeError", "Atomics.compareExchange: object has no own data property");
-        const old = o.slots.items[slot];
+        const old = o.slotsItems()[slot];
         // The writability rule throws unconditionally — even when the compare
         // would fail.
         if (!attrUnlocked(o, key).writable) return self.throwError("TypeError", "Atomics.compareExchange: property is not writable");
@@ -2457,7 +2457,7 @@ pub fn propRmw(self: *Interpreter, op: PropRmwOp, args: []const Value) value.Hos
         if (accessorUnlocked(o, key)) return self.throwError("TypeError", "Atomics RMW: object has no own data property");
         const slot = namedSlotUnlocked(o, key) orelse
             return self.throwError("TypeError", "Atomics RMW: object has no own data property");
-        const old = o.slots.items[slot];
+        const old = o.slotsItems()[slot];
         if (!attrUnlocked(o, key).writable) return self.throwError("TypeError", "Atomics RMW: property is not writable");
         if (!old.isNumber()) return self.throwError("TypeError", "Atomics RMW: stored value is not a number");
         const result: f64 = switch (op) {

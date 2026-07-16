@@ -126,7 +126,7 @@ pub fn traceObject(o: *Object, v: anytype) void {
     // tears the slice. Under stop-the-world (M1) / GIL-held incremental (M2)
     // marking the world is quiescent during the read, so we skip the lock.
     if (concurrent) o.lockProperties();
-    for (o.slots.items) |slot| markValue(v, slot);
+    for (o.slotsItems()) |slot| markValue(v, slot);
     if (o.accessorsMap()) |acc| {
         var it = acc.valueIterator();
         while (it.next()) |a| {

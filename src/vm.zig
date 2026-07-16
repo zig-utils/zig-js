@@ -920,8 +920,8 @@ fn quickArrayPrototypeData(
         ic.recordMode(shape, resolved, parallel_sync);
         break :slot resolved;
     };
-    if (slot >= prototype.slots.items.len) return null;
-    return prototype.slots.items[slot];
+    if (slot >= prototype.slotsItems().len) return null;
+    return prototype.slotsItems()[slot];
 }
 
 inline fn quickArrayIndex(key: Value) ?usize {
@@ -1375,8 +1375,8 @@ inline fn quickGlobalBindingValue(chunk: *Chunk, instruction: usize, vm: *Interp
                 object_cache.object.shape != object_cache.shape)
                 break :value_ null;
             const slot: usize = @intCast(object_cache.slot);
-            if (slot >= object_cache.object.slots.items.len) break :value_ null;
-            break :value_ object_cache.object.slots.items[slot];
+            if (slot >= object_cache.object.slotsItems().len) break :value_ null;
+            break :value_ object_cache.object.slotsItems()[slot];
         },
         .environment => |environment_cache| if (vm.env == environment_cache.start)
             environment_cache.binding.getLocal(environment_cache.name)
@@ -1414,7 +1414,7 @@ fn recordQuickGlobalBinding(chunk: *Chunk, instruction: usize, vm: *Interpreter,
         if (object.proxyHandler() != null or object.proxy_revoked or object.getAccessor(name) != null) break :object;
         const shape = object.shape orelse break :object;
         const slot = shape.lookup(name) orelse break :object;
-        if (slot >= object.slots.items.len) break :object;
+        if (slot >= object.slotsItems().len) break :object;
         cache.* = .{ .object = .{ .env = start, .object = object, .shape = shape, .slot = slot } };
         return;
     }
@@ -1971,7 +1971,7 @@ fn quickOwnDataPropertyValue(
         object.accessorsMap() != null or object.attrsMap() != null)
         return null;
     const slot = quickPropertySlotMode(chunk, instruction, object, parallel_sync) orelse return null;
-    return object.slots.items[slot];
+    return object.slotsItems()[slot];
 }
 
 fn quickReceiverPropertyNumber(
@@ -2339,9 +2339,9 @@ fn runQuickObservableRecurrence(
     // dispatch and activation materialization are compiled away; checkpoint and
     // step positions stay identical to the 28-instruction function body.
     try advanceQuickObservableSteps(vm, 6); // property update through set_prop
-    const updated_counter = Value.num(state.slots.items[counter_slot].asNum() + recurrence.counter_increment);
+    const updated_counter = Value.num(state.slotsItems()[counter_slot].asNum() + recurrence.counter_increment);
     gc_mod.barrierValueFrom(state, updated_counter);
-    state.slots.items[counter_slot] = updated_counter;
+    state.slotsItems()[counter_slot] = updated_counter;
     try advanceQuickObservableSteps(vm, 5); // pop + condition + branch
     if (input < recurrence.threshold) {
         try advanceQuickObservableSteps(vm, 3); // value arm + jump + return
@@ -2361,8 +2361,8 @@ fn quickParallelCounterRead(vm: *Interpreter, state: *value.Object, name: []cons
     if (!state.is_array and state.proxyHandler() == null and !state.proxy_revoked and
         state.accessorsMap() == null and state.attrsMap() == null)
     {
-        if (state.shape) |shape| if (shape.lookup(name)) |slot| if (slot < state.slots.items.len) {
-            const result = state.slots.items[slot];
+        if (state.shape) |shape| if (shape.lookup(name)) |slot| if (slot < state.slotsItems().len) {
+            const result = state.slotsItems()[slot];
             state.unlockProperties();
             return result;
         };
@@ -2376,9 +2376,9 @@ fn quickParallelCounterWrite(vm: *Interpreter, state: *value.Object, name: []con
     if (!state.is_array and state.proxyHandler() == null and !state.proxy_revoked and
         state.accessorsMap() == null and state.attrsMap() == null)
     {
-        if (state.shape) |shape| if (shape.lookup(name)) |slot| if (slot < state.slots.items.len) {
+        if (state.shape) |shape| if (shape.lookup(name)) |slot| if (slot < state.slotsItems().len) {
             gc_mod.barrierValueFrom(state, updated);
-            state.slots.items[slot] = updated;
+            state.slotsItems()[slot] = updated;
             state.unlockProperties();
             return;
         };
@@ -2816,7 +2816,7 @@ fn tryQuickArrayLoop(
                 const next = numberRemainder((current + index) + extra, property.modulus);
                 const updated = Value.num(next);
                 gc_mod.barrierValueFrom(object, updated);
-                object.slots.items[write_slot] = updated;
+                object.slotsItems()[write_slot] = updated;
                 checksum += @floatFromInt(Value.num(next).toInt32() & property.checksum_mask);
                 index = next_index;
                 last_object = object_value;
@@ -2922,7 +2922,7 @@ inline fn quickOwnDataSlot(chunk: *Chunk, raw_instruction: u32, object: *value.O
         ic.recordMode(shape, resolved, false);
         break :slot resolved;
     };
-    if (slot >= object.slots.items.len) return null;
+    if (slot >= object.slotsItems().len) return null;
     return slot;
 }
 
@@ -2933,7 +2933,7 @@ inline fn quickPropertySlot(chunk: *Chunk, instruction: usize, object: *value.Ob
 inline fn quickPropertySlotMode(chunk: *Chunk, instruction: usize, object: *value.Object, parallel_sync: bool) ?usize {
     if (instruction >= chunk.ics.len) return null;
     const slot: usize = @intCast(chunk.ics[instruction].lookupSlotMode(object.shape, parallel_sync) orelse return null);
-    if (slot >= object.slots.items.len) return null;
+    if (slot >= object.slotsItems().len) return null;
     return slot;
 }
 
@@ -3127,10 +3127,10 @@ fn tryQuickPropertyKernel(
         counter += kernel.counter_increment;
     }
     if (iterations == 0) return null;
-    object.slots.items[writes[0]] = Value.num(a);
-    object.slots.items[writes[1]] = Value.num(b);
-    object.slots.items[writes[2]] = Value.num(c);
-    object.slots.items[writes[3]] = Value.num(d);
+    object.slotsItems()[writes[0]] = Value.num(a);
+    object.slotsItems()[writes[1]] = Value.num(b);
+    object.slotsItems()[writes[2]] = Value.num(c);
+    object.slotsItems()[writes[3]] = Value.num(d);
     frame.slots[counter_local] = Value.num(counter);
     if (builtin.is_test) _ = quick_property_kernel_hits.fetchAdd(1, .monotonic);
     return .{
@@ -3327,14 +3327,14 @@ inline fn quickPropertyNumber(
         break :object quickPlainObject(frame.slots[index]) orelse return null;
     };
     const slot = quickPropertySlot(chunk, operand.instruction, object) orelse return null;
-    const property = object.slots.items[slot];
+    const property = object.slotsItems()[slot];
     if (!property.isNumber()) return null;
     return property.asNum();
 }
 
 inline fn quickSlotNumber(object: *value.Object, slot: usize) ?f64 {
-    if (slot >= object.slots.items.len) return null;
-    const property = object.slots.items[slot];
+    if (slot >= object.slotsItems().len) return null;
+    const property = object.slotsItems()[slot];
     if (!property.isNumber()) return null;
     return property.asNum();
 }
@@ -3480,7 +3480,7 @@ fn tryNumericPropertyUpdate(chunk: *Chunk, frame: *Frame, start: usize, max_extr
     if (extra_steps > max_extra_steps) return null;
     const result = Value.num(result_number);
     gc_mod.barrierValueFrom(target, result);
-    target.slots.items[target_slot] = result;
+    target.slotsItems()[target_slot] = result;
     if (update_local) |index| {
         frame.slots[index] = Value.num(update_value);
         if (builtin.is_test) _ = quick_property_loop_tail_hits.fetchAdd(1, .monotonic);
@@ -4220,13 +4220,13 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                         if (!o.is_array and o.accessorsMap() == null and o.attrsMap() == null) {
                             const ic = &chunk.ics[ip - 1];
                             if (ic.lookupSlotMode(o.shape, parallel_sync)) |sl| {
-                                result = o.slots.items[sl];
+                                result = o.slotsItems()[sl];
                                 break :fast;
                             }
                             if (o.shape) |sh| {
                                 if (sh.lookup(name)) |slot| {
                                     ic.recordMode(sh, slot, parallel_sync);
-                                    result = o.slots.items[slot];
+                                    result = o.slotsItems()[slot];
                                     break :fast;
                                 }
                             }
@@ -4357,14 +4357,14 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                             const ic = &chunk.ics[ip - 1];
                             if (ic.lookupSlotMode(o.shape, parallel_sync)) |sl| {
                                 gc_mod.barrierValueFrom(o, v); // IC fast-path slot store
-                                o.slots.items[sl] = v;
+                                o.slotsItems()[sl] = v;
                                 break :fast;
                             }
                             if (o.shape) |sh| {
                                 if (sh.lookup(name)) |slot| {
                                     ic.recordMode(sh, slot, parallel_sync);
                                     gc_mod.barrierValueFrom(o, v); // IC fast-path slot store
-                                    o.slots.items[slot] = v;
+                                    o.slotsItems()[slot] = v;
                                     break :fast;
                                 }
                             }
