@@ -667,6 +667,20 @@ pub const Binding = struct {
         return backing.ownsCellAllocation(allocation);
     }
 
+    /// Publish owned-slot classification only after zig-gc has initialized the
+    /// complete header. The backing's bucket lock supplies the release/acquire
+    /// edge to conservative classifiers on peer threads.
+    pub fn publishCellAllocation(self: *Binding, allocation: *anyopaque, total: usize) void {
+        const backing = self.context.gc_cell_backing orelse unreachable;
+        backing.publishCellAllocation(allocation, total);
+    }
+
+    /// Withdraw classification before zig-gc clears/finalizes/reuses a header.
+    pub fn unpublishCellAllocation(self: *Binding, allocation: *anyopaque, total: usize) void {
+        const backing = self.context.gc_cell_backing orelse unreachable;
+        backing.unpublishCellAllocation(allocation, total);
+    }
+
     /// A successful eligible-size allocation necessarily came from the cell
     /// slab: this backing fails rather than delegating when slab growth OOMs.
     pub fn usesOwnedCellStorage(_: *Binding, total: usize) bool {
