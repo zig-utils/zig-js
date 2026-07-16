@@ -1140,9 +1140,15 @@ pub const Compiler = struct {
         var ph2: ?usize = null;
         if (t.catch_block) |cb| {
             catch_start = self.chunk.here();
-            // A throw inside the catch must still run the finally.
-            ph2 = try self.chunk.emitAB(.push_handler, none, none);
+            // Consume the thrown exception (bind it, or discard it) BEFORE pushing
+            // the finally-only handler, so that handler records the post-binding
+            // stack depth. Otherwise a `return` inside the catch unwinds to a depth
+            // that still counts the (now-consumed) exception and over-shrinks the
+            // operand stack. The binding is always a plain identifier (destructuring
+            // catch params are rejected above), so it can't throw before the guard.
             if (t.catch_param) |p| try self.emitDefine(p.identifier) else _ = try self.chunk.emit(.pop, 0);
+            // A throw inside the catch body must still run the finally.
+            ph2 = try self.chunk.emitAB(.push_handler, none, none);
             try self.compileStmt(cb);
             _ = try self.chunk.emit(.pop_handler, 0);
             _ = try self.chunk.emit(.push_completion, 0); // normal completion of the catch body
