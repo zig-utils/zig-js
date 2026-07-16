@@ -26,6 +26,7 @@ const dn_data = @import("intl_displaynames_data.zig");
 const units_data = @import("intl_units_data.zig");
 const weekdata = @import("intl_weekdata.zig");
 const localeinfo = @import("intl_localeinfo.zig");
+const gbd = @import("unicode_grapheme_data.zig");
 const Compiler = @import("compiler.zig").Compiler;
 const Shape = @import("shape.zig").Shape;
 const unicode_case = @import("unicode_case.zig");
@@ -26143,69 +26144,117 @@ fn segCodePoint(str: []const u8, pos: usize) u21 {
     return std.unicode.utf8Decode(str[pos .. pos + n]) catch str[pos];
 }
 
-fn segIsCombining(cp: u21) bool {
-    return (cp >= 0x0300 and cp <= 0x036F) or
-        (cp >= 0x0483 and cp <= 0x0489) or
-        (cp >= 0x0591 and cp <= 0x05BD) or
-        cp == 0x05BF or
-        (cp >= 0x05C1 and cp <= 0x05C2) or
-        (cp >= 0x05C4 and cp <= 0x05C5) or
-        cp == 0x05C7 or
-        (cp >= 0x0610 and cp <= 0x061A) or
-        (cp >= 0x064B and cp <= 0x065F) or
-        cp == 0x0670 or
-        (cp >= 0x06D6 and cp <= 0x06DC) or
-        (cp >= 0x06DF and cp <= 0x06E4) or
-        (cp >= 0x06E7 and cp <= 0x06E8) or
-        (cp >= 0x06EA and cp <= 0x06ED) or
-        (cp >= 0x0900 and cp <= 0x0DFF and !(cp >= 0x0966 and cp <= 0x096F)) or
-        // Thai Extend marks only — the leading vowels U+0E40..U+0E44 and SARA
-        // AA/AM (U+0E32/0E33) are spacing letters, not combining marks.
-        (cp == 0x0E31 or (cp >= 0x0E34 and cp <= 0x0E3A) or (cp >= 0x0E47 and cp <= 0x0E4E)) or
-        (cp >= 0xFE00 and cp <= 0xFE0F) or
-        (cp >= 0x1F3FB and cp <= 0x1F3FF) or
-        (cp >= 0xE0100 and cp <= 0xE01EF);
+fn gbClassOf(cp: u21) gbd.Class {
+    var lo: usize = 0;
+    var hi: usize = gbd.gb_class.len;
+    while (lo < hi) {
+        const mid = lo + (hi - lo) / 2;
+        const e = gbd.gb_class[mid];
+        if (cp < e.lo) hi = mid else if (cp > e.hi) lo = mid + 1 else return e.v;
+    }
+    return .other;
 }
-
-fn segIsJamo(cp: u21) bool {
-    return cp >= 0x1100 and cp <= 0x11FF;
+fn gbIsExtPict(cp: u21) bool {
+    var lo: usize = 0;
+    var hi: usize = gbd.ext_pictographic.len;
+    while (lo < hi) {
+        const mid = lo + (hi - lo) / 2;
+        const e = gbd.ext_pictographic[mid];
+        if (cp < e.lo) hi = mid else if (cp > e.hi) lo = mid + 1 else return true;
+    }
+    return false;
 }
-
+fn gbIncbOf(cp: u21) ?gbd.Incb {
+    var lo: usize = 0;
+    var hi: usize = gbd.incb.len;
+    while (lo < hi) {
+        const mid = lo + (hi - lo) / 2;
+        const e = gbd.incb[mid];
+        if (cp < e.lo) hi = mid else if (cp > e.hi) lo = mid + 1 else return e.v;
+    }
+    return null;
+}
+/// Decode one scalar at `pos`, combining a UTF-16 surrogate pair (for strings
+/// stored with the paired-surrogate encoding) into the astral code point.
+fn segScalar(str: []const u8, pos: usize) struct { cp: u21, len: usize } {
+    const cp0 = segCodePoint(str, pos);
+    const l0 = segScalarLen(str, pos);
+    if (isHighSurrogate(cp0) and pos + l0 < str.len) {
+        const cp1 = segCodePoint(str, pos + l0);
+        if (isLowSurrogate(cp1)) {
+            const astral: u21 = 0x10000 + ((@as(u21, cp0) - 0xD800) << 10) + (@as(u21, cp1) - 0xDC00);
+            return .{ .cp = astral, .len = l0 + segScalarLen(str, pos + l0) };
+        }
+    }
+    return .{ .cp = cp0, .len = l0 };
+}
+/// Advance one UAX #29 extended grapheme cluster from byte `pos`.
 fn segNextGrapheme(str: []const u8, pos: usize) usize {
-    var end = pos + segScalarLen(str, pos);
-    const first = segCodePoint(str, pos);
-    // GB3: do not break between CR and LF.
-    if (first == 0x0D and end < str.len and segCodePoint(str, end) == 0x0A) {
-        return end + segScalarLen(str, end);
-    }
-    if (isHighSurrogate(first) and end < str.len) {
-        const next = segCodePoint(str, end);
-        if (isLowSurrogate(next)) end += segScalarLen(str, end);
-    }
-    // GB12/GB13: a pair of regional indicators (flag) is a single grapheme.
-    if (first >= 0x1F1E6 and first <= 0x1F1FF) {
-        if (end < str.len) {
-            const nxt = segCodePoint(str, end);
-            if (nxt >= 0x1F1E6 and nxt <= 0x1F1FF) end += segScalarLen(str, end);
+    const len = str.len;
+    var s = segScalar(str, pos);
+    var end = pos + s.len;
+    if (end >= len) return end;
+    var pcls = gbClassOf(s.cp);
+    // GB11 (emoji ZWJ sequence): 0 none, 1 = ExtPict Extend*, 2 = …ZWJ.
+    var re11: u8 = if (gbIsExtPict(s.cp)) 1 else 0;
+    // GB9c (Indic conjunct): 0 none, 1 = Consonant …, 2 = … with a Linker seen.
+    var incb: u8 = if (gbIncbOf(s.cp) == .consonant) 1 else 0;
+    // GB12/13 (regional indicators): consecutive RI count.
+    var ri: usize = if (pcls == .ri) 1 else 0;
+    while (end < len) {
+        const n = segScalar(str, end);
+        const cls = gbClassOf(n.cp);
+        const iv = gbIncbOf(n.cp);
+        var brk = true;
+        if (pcls == .cr and cls == .lf) {
+            brk = false; // GB3
+        } else if (pcls == .control or pcls == .cr or pcls == .lf or cls == .control or cls == .cr or cls == .lf) {
+            brk = true; // GB4/GB5
+        } else if (pcls == .l and (cls == .l or cls == .v or cls == .lv or cls == .lvt)) {
+            brk = false; // GB6
+        } else if ((pcls == .lv or pcls == .v) and (cls == .v or cls == .t)) {
+            brk = false; // GB7
+        } else if ((pcls == .lvt or pcls == .t) and cls == .t) {
+            brk = false; // GB8
+        } else if (cls == .extend or cls == .zwj) {
+            brk = false; // GB9
+        } else if (cls == .spacingmark) {
+            brk = false; // GB9a
+        } else if (pcls == .prepend) {
+            brk = false; // GB9b
+        } else if (incb == 2 and iv == .consonant) {
+            brk = false; // GB9c
+        } else if (re11 == 2 and gbIsExtPict(n.cp)) {
+            brk = false; // GB11
+        } else if (pcls == .ri and cls == .ri and (ri % 2 == 1)) {
+            brk = false; // GB12/GB13
         }
-        return end;
-    }
-    if (segIsJamo(first)) {
-        while (end < str.len and segIsJamo(segCodePoint(str, end))) end += segScalarLen(str, end);
-        return end;
-    }
-    while (end < str.len) {
-        const cp = segCodePoint(str, end);
-        if (segIsCombining(cp)) {
-            end += segScalarLen(str, end);
-            continue;
+        if (brk) break;
+        end += n.len;
+        // Update trailing state.
+        if (iv == .consonant) {
+            incb = 1;
+        } else if (incb >= 1 and iv == .linker) {
+            incb = 2;
+        } else if (incb >= 1 and iv == .incb_extend) {
+            // keep incb
+        } else if (iv == null) {
+            incb = 0;
         }
-        if (cp == 0x200D) {
-            end += segScalarLen(str, end);
-            if (end < str.len) end += segScalarLen(str, end);
-            continue;
+        if (gbIsExtPict(n.cp)) {
+            re11 = 1;
+        } else if (re11 >= 1 and cls == .extend) {
+            re11 = 1;
+        } else if (re11 == 1 and cls == .zwj) {
+            re11 = 2;
+        } else {
+            re11 = 0;
         }
-        break;
+        if (cls == .ri) {
+            ri = if (pcls == .ri) ri + 1 else 1;
+        } else ri = 0;
+        pcls = cls;
+        s = n;
     }
     return end;
 }
