@@ -39824,15 +39824,22 @@ fn urlParse(self: *Interpreter, input_raw: []const u8, base: ?UrlParts) EvalErro
             host_str = hostport[0..colon];
             p.port = try urlNormalizePort(self, p.scheme, hostport[colon + 1 ..]) orelse return null;
         }
-        // Host: lowercase a domain (ASCII); reject empty for special (except file).
+        // Host: a special scheme's host is a domain (ASCII-lowercased); a
+        // non-special scheme's is an opaque host (case preserved, only C0-encoded).
         if (host_str.len == 0) {
             if (special and !std.mem.eql(u8, p.scheme, "file")) return null;
             p.host = "";
-        } else {
+        } else if (special) {
             var hb: std.ArrayListUnmanaged(u8) = .empty;
             for (host_str) |c| try hb.append(self.arena, std.ascii.toLower(c));
             p.host = hb.items;
+        } else {
+            var hb: std.ArrayListUnmanaged(u8) = .empty;
+            try urlPercentEncode(self, &hb, host_str, .c0);
+            p.host = hb.items;
         }
+        // A file URL may not carry credentials or a port.
+        if (std.mem.eql(u8, p.scheme, "file") and (p.username.len > 0 or p.password.len > 0 or p.port.len > 0)) return null;
         try urlParsePathQueryFrag(self, &p, after, special, true);
     } else {
         // No authority: opaque path (non-special) — the rest up to ?/# is the path.
@@ -39924,7 +39931,9 @@ fn urlEncodeNormalizePath(self: *Interpreter, out: *std.ArrayListUnmanaged(u8), 
         try out.append(self.arena, '/');
         try out.appendSlice(self.arena, seg);
     }
-    if (out.items.len == 0) try out.append(self.arena, '/');
+    // A special scheme defaults an empty path to "/"; a non-special scheme with
+    // an authority keeps an empty path empty ("custom://h" → pathname "").
+    if (out.items.len == 0 and (special or s.len > 0)) try out.append(self.arena, '/');
 }
 fn urlParseRelative(self: *Interpreter, p: *UrlParts, input: []const u8) EvalError!?UrlParts {
     const special = urlIsSpecialScheme(p.scheme);
