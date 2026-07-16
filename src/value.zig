@@ -2400,15 +2400,15 @@ pub const Object = struct {
         const old_uses_backing = old_backing_allocator != null;
         const backing = self.backingForTracked(arena, "key_order");
         const alloc = backing.allocator;
+        errdefer if (backing.activated) self.deactivateBacking("key_order");
         const ko = try alloc.create(std.ArrayListUnmanaged([]const u8));
         ko.* = .empty;
         errdefer {
             for (ko.items) |key| alloc.free(key);
             ko.deinit(alloc);
             alloc.destroy(ko);
-            if (backing.activated) self.deactivateBacking("key_order");
         }
-        for (names) |name| try ko.append(alloc, try alloc.dupe(u8, name));
+        for (names) |name| try appendOwnedKey(ko, alloc, name);
         if (old_key_order) |ord| {
             if (old_uses_backing) {
                 const a = old_backing_allocator.?;
@@ -2732,7 +2732,7 @@ pub const Object = struct {
         const ko = self.key_order.load(.monotonic) orelse return;
         for (ko.items) |e| if (std.mem.eql(u8, e, name)) return;
         const alloc = self.keyOrderAllocator(arena);
-        try ko.append(alloc, try alloc.dupe(u8, name));
+        try appendOwnedKey(ko, alloc, name);
     }
 
     /// Lazily build `key_order`, seeding it with the current data keys in
@@ -2745,9 +2745,16 @@ pub const Object = struct {
 
     fn ensureKeyOrderUnlocked(self: *Object, arena: std.mem.Allocator) std.mem.Allocator.Error!void {
         if (self.key_order.load(.monotonic) != null) return;
-        const alloc = self.keyOrderAllocator(arena);
+        const backing = self.backingForTracked(arena, "key_order");
+        const alloc = backing.allocator;
+        errdefer if (backing.activated) self.deactivateBacking("key_order");
         const ko = try alloc.create(std.ArrayListUnmanaged([]const u8));
         ko.* = .empty;
+        errdefer {
+            for (ko.items) |key| alloc.free(key);
+            ko.deinit(alloc);
+            alloc.destroy(ko);
+        }
         var seed: std.ArrayListUnmanaged([]const u8) = .empty;
         defer seed.deinit(arena);
         var s = self.shape;
@@ -2756,7 +2763,7 @@ pub const Object = struct {
             s = sh.parent;
         }
         std.mem.reverse([]const u8, seed.items); // newest-first → insertion order
-        for (seed.items) |n| try ko.append(alloc, try alloc.dupe(u8, n));
+        for (seed.items) |n| try appendOwnedKey(ko, alloc, n);
         self.key_order.store(ko, .monotonic);
     }
 
@@ -2922,6 +2929,21 @@ pub const Object = struct {
         return true;
     }
 };
+
+/// Append a self-owned property name without leaking the duplicate when list
+/// growth fails. Callers that build an unpublished list still own rollback for
+/// entries appended by earlier iterations.
+fn appendOwnedKey(
+    list: *std.ArrayListUnmanaged([]const u8),
+    allocator: std.mem.Allocator,
+    name: []const u8,
+) std.mem.Allocator.Error!void {
+    const owned = try allocator.dupe(u8, name);
+    list.append(allocator, owned) catch |err| {
+        allocator.free(owned);
+        return err;
+    };
+}
 
 /// An accessor property: getter and/or setter functions.
 pub const Accessor = struct { get: ?Value = null, set: ?Value = null };
@@ -3540,6 +3562,36 @@ test "ordinary object keeps four named property values inline before migrating" 
     try std.testing.expect(!object.slotsAreInline());
     try std.testing.expectEqual(@as(usize, 5), object.slots.items.len);
     object.slots.deinit(std.testing.allocator);
+}
+
+fn exerciseKeyOrderOomRollback(allocator: std.mem.Allocator) !void {
+    var root = Shape{ .parent = null, .name = null, .slot = 0, .count = 0, .arena = allocator };
+    var alpha = Shape{ .parent = &root, .name = "alpha", .slot = 0, .count = 1, .arena = allocator };
+    var beta = Shape{ .parent = &alpha, .name = "beta", .slot = 1, .count = 2, .arena = allocator };
+    var gamma = Shape{ .parent = &beta, .name = "gamma", .slot = 2, .count = 3, .arena = allocator };
+    var object = Object{ .shape = &gamma };
+    object.initInlineSlots();
+    defer if (object.key_order.load(.monotonic)) |order| {
+        for (order.items) |key| allocator.free(key);
+        order.deinit(allocator);
+        allocator.destroy(order);
+    };
+
+    try object.ensureKeyOrder(allocator);
+    try object.recordKeyOrder(allocator, "delta");
+
+    const order = object.key_order.load(.monotonic).?;
+    try std.testing.expectEqual(@as(usize, 4), order.items.len);
+    try std.testing.expectEqualStrings("alpha", order.items[0]);
+    try std.testing.expectEqualStrings("delta", order.items[3]);
+}
+
+test "object key-order construction rolls back every allocation failure" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        exerciseKeyOrderOomRollback,
+        .{},
+    );
 }
 
 test "fixed-shape object allocation publishes validated literal shape into inline slots" {
