@@ -285,7 +285,7 @@ const Serializer = struct {
         errdefer list.deinit(s.w.gpa);
         o.lockElements();
         defer o.unlockElements();
-        for (o.elements.items) |entry| {
+        for (o.elementsItems()) |entry| {
             if (entry.isObject() and entry.asObj().behavior.is_set_deleted) continue;
             try s.rootSnapshotValue(entry);
             try list.append(s.w.gpa, entry);
@@ -298,16 +298,16 @@ const Serializer = struct {
         errdefer list.deinit(s.w.gpa);
         o.lockElements();
         defer o.unlockElements();
-        for (o.elements.items) |entry_v| {
+        for (o.elementsItems()) |entry_v| {
             if (!entry_v.isObject()) return s.throwClone("DataCloneError: malformed Map entry");
             const entry = entry_v.asObj();
             {
                 entry.lockElements();
                 defer entry.unlockElements();
-                if (entry.elements.items.len == 0) continue; // deleted MapData slot
-                if (entry.elements.items.len < 2) return s.throwClone("DataCloneError: malformed Map entry");
-                const k = entry.elements.items[0];
-                const v = entry.elements.items[1];
+                if (entry.elementsItems().len == 0) continue; // deleted MapData slot
+                if (entry.elementsItems().len < 2) return s.throwClone("DataCloneError: malformed Map entry");
+                const k = entry.elementsItems()[0];
+                const v = entry.elementsItems()[1];
                 try s.rootSnapshotValue(k);
                 try s.rootSnapshotValue(v);
                 try list.append(s.w.gpa, .{ .key = k, .val = v });
@@ -319,12 +319,12 @@ const Serializer = struct {
     fn snapshotArrayElements(s: *Serializer, o: *value.Object) HostError!ArraySnapshot {
         o.lockElements();
         defer o.unlockElements();
-        const n = o.elements.items.len;
+        const n = o.elementsItems().len;
         const elements = try s.w.gpa.alloc(Value, n);
         errdefer s.w.gpa.free(elements);
         const holes = try s.w.gpa.alloc(bool, n);
         errdefer s.w.gpa.free(holes);
-        @memcpy(elements, o.elements.items);
+        @memcpy(elements, o.elementsItems());
         const hole_map = o.holesMap();
         for (elements, 0..) |el, i| {
             const hole = hole_map != null and hole_map.?.contains(i);

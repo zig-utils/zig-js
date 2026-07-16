@@ -2546,7 +2546,7 @@ fn tryQuickObjectAllocationLoopMode(
         array.has_indexed_property.load(.monotonic))
         return null;
     if (parallel_sync) array.lockElements();
-    const dense_array = array.holesMap() == null and array.arrayLengthFloor() <= array.elements.items.len;
+    const dense_array = array.holesMap() == null and array.arrayLengthFloor() <= array.elementsItems().len;
     if (parallel_sync) array.unlockElements();
     if (!dense_array) return null;
     if (!frame.slots[counter_slot].isNumber() or !frame.slots[total_slot].isNumber() or
@@ -2601,8 +2601,8 @@ fn tryQuickObjectAllocationLoopMode(
         const element_index: usize = @intCast(selected);
         const displaced_value = if (parallel_sync)
             array.denseElement(element_index) orelse break
-        else if (element_index < array.elements.items.len)
-            array.elements.items[element_index]
+        else if (element_index < array.elementsItems().len)
+            array.elementsItems()[element_index]
         else
             break;
         const previous = if (parallel_sync) previous: {
@@ -2777,7 +2777,7 @@ fn tryQuickArrayLoop(
             const array = array_value.asObj();
             if (!array.is_array or array.is_arguments or array.proxyHandler() != null or array.proxy_revoked or
                 array.accessorsMap() != null or array.holesMap() != null or
-                array.arrayLengthFloor() > array.elements.items.len)
+                array.arrayLengthFloor() > array.elementsItems().len)
                 break :quick null;
             if (!frame.slots[index_slot].isNumber() or !frame.slots[checksum_slot].isNumber() or
                 !frame.slots[extra_slot].isNumber())
@@ -2805,8 +2805,8 @@ fn tryQuickArrayLoop(
                 const selected = Value.num(index).toInt32() & property.selector_mask;
                 if (selected < 0) break;
                 const element_index: usize = @intCast(selected);
-                if (element_index >= array.elements.items.len) break;
-                const object_value = array.elements.items[element_index];
+                if (element_index >= array.elementsItems().len) break;
+                const object_value = array.elementsItems()[element_index];
                 const object = quickPlainObject(object_value) orelse break;
                 if (object.proxyHandler() != null or object.proxy_revoked or object.shape == null) break;
                 const read_slot = quickOwnDataSlot(chunk, property.get_prop_instruction, object) orelse break;
@@ -2850,7 +2850,7 @@ fn tryQuickArrayLoop(
                 break :quick null;
             if (parallel_sync) array.lockElements();
             defer if (parallel_sync) array.unlockElements();
-            if (array.accessorsMap() != null or array.holesMap() != null or array.arrayLengthFloor() > array.elements.items.len)
+            if (array.accessorsMap() != null or array.holesMap() != null or array.arrayLengthFloor() > array.elementsItems().len)
                 break :quick null;
             var index_value = frame.slots[index_slot];
             var total_value = frame.slots[total_slot];
@@ -2858,8 +2858,8 @@ fn tryQuickArrayLoop(
             var iterations: u64 = 0;
             while (iterations < max_iterations) : (iterations += 1) {
                 const index = quickArrayIndex(index_value) orelse break;
-                if (index >= array.elements.items.len) break;
-                const element = array.elements.items[index];
+                if (index >= array.elementsItems().len) break;
+                const element = array.elementsItems()[index];
                 if (!element.isNumber()) break;
                 total_value = Value.num(total_value.asNum() + element.asNum());
                 index_value = Value.num(index_value.asNum() + sum.increment);
@@ -4197,7 +4197,7 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                         if (o.is_array and !o.is_arguments and o.proxyHandler() == null and !o.proxy_revoked and
                             std.mem.eql(u8, name, "length"))
                         {
-                            const length = if (parallel_sync) o.arrayLength() else @max(o.elements.items.len, o.arrayLengthFloor());
+                            const length = if (parallel_sync) o.arrayLength() else @max(o.elementsItems().len, o.arrayLengthFloor());
                             result = Value.num(@floatFromInt(length));
                             if (builtin.is_test) _ = quick_array_length_hits.fetchAdd(1, .monotonic);
                             break :fast;
@@ -4256,8 +4256,8 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                             if (quickArrayIndex(key)) |index| {
                                 const element = if (parallel_sync)
                                     o.denseElement(index)
-                                else if (o.accessorsMap() == null and o.holesMap() == null and index < o.elements.items.len)
-                                    o.elements.items[index]
+                                else if (o.accessorsMap() == null and o.holesMap() == null and index < o.elementsItems().len)
+                                    o.elementsItems()[index]
                                 else
                                     null;
                                 if (element) |present| {

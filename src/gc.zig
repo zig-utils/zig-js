@@ -144,7 +144,7 @@ pub fn traceObject(o: *Object, v: anytype) void {
         // mutator append, and no `&entry.key` can dangle when the buffer grows.
     } else {
         if (concurrent) o.lockElements();
-        for (o.elements.items) |el| markValue(v, el);
+        for (o.elementsItems()) |el| markValue(v, el);
         if (concurrent) o.unlockElements();
     }
     markValueOpt(v, cold.boxed_primitive);

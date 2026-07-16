@@ -8806,7 +8806,7 @@ pub const Interpreter = struct {
             try pair.appendElement(self.arena, val);
             o.lockElements();
             defer o.unlockElements();
-            for (o.elements.items) |e| {
+            for (o.elementsItems()) |e| {
                 if (liveMapEntry(e)) |entry| if (mapEntryMatches(entry, key)) {
                     _ = entry.setElementAt(1, val);
                     return self_v;
@@ -8819,7 +8819,7 @@ pub const Interpreter = struct {
         if (eq(name, "get")) {
             o.lockElements();
             defer o.unlockElements();
-            for (o.elements.items) |e| {
+            for (o.elementsItems()) |e| {
                 if (liveMapEntry(e)) |entry| if (mapEntryMatches(entry, key)) return mapEntryValue(entry);
             }
             return Value.undef();
@@ -8827,7 +8827,7 @@ pub const Interpreter = struct {
         if (eq(name, "has")) {
             o.lockElements();
             defer o.unlockElements();
-            for (o.elements.items) |e| {
+            for (o.elementsItems()) |e| {
                 if (liveMapEntry(e)) |entry| if (mapEntryMatches(entry, key)) return Value.boolVal(true);
             }
             return Value.boolVal(false);
@@ -8835,7 +8835,7 @@ pub const Interpreter = struct {
         if (eq(name, "delete")) {
             o.lockElements();
             defer o.unlockElements();
-            for (o.elements.items) |e| {
+            for (o.elementsItems()) |e| {
                 if (liveMapEntry(e)) |entry| if (mapEntryMatches(entry, key)) {
                     entry.clearElementsRetainingCapacity();
                     return Value.boolVal(true);
@@ -8856,11 +8856,11 @@ pub const Interpreter = struct {
                 const entry = blk: {
                     o.lockElements();
                     defer o.unlockElements();
-                    if (i >= o.elements.items.len) {
+                    if (i >= o.elementsItems().len) {
                         end = true;
                         break :blk null;
                     }
-                    break :blk liveMapEntry(o.elements.items[i]);
+                    break :blk liveMapEntry(o.elementsItems()[i]);
                 };
                 if (end) break;
                 const live_entry = entry orelse continue;
@@ -8879,7 +8879,7 @@ pub const Interpreter = struct {
             {
                 o.lockElements();
                 defer o.unlockElements();
-                for (o.elements.items) |e| {
+                for (o.elementsItems()) |e| {
                     if (liveMapEntry(e)) |entry| if (mapEntryMatches(entry, key)) return mapEntryValue(entry);
                 }
             }
@@ -8919,7 +8919,7 @@ pub const Interpreter = struct {
         if (eq(name, "add")) {
             o.lockElements();
             defer o.unlockElements();
-            for (o.elements.items) |e| {
+            for (o.elementsItems()) |e| {
                 if (liveSetEntry(e)) |entry| if (value.sameValueZero(entry, key)) return self_v;
             }
             gc_mod.barrierValueFrom(o, key); // new key hidden behind the live set
@@ -8929,7 +8929,7 @@ pub const Interpreter = struct {
         if (eq(name, "has")) {
             o.lockElements();
             defer o.unlockElements();
-            for (o.elements.items) |e| {
+            for (o.elementsItems()) |e| {
                 if (liveSetEntry(e)) |entry| if (value.sameValueZero(entry, key)) return Value.boolVal(true);
             }
             return Value.boolVal(false);
@@ -8939,9 +8939,9 @@ pub const Interpreter = struct {
             tomb.* = .{ .behavior = .{ .is_set_deleted = true } };
             o.lockElements();
             defer o.unlockElements();
-            for (o.elements.items, 0..) |e, i| {
+            for (o.elementsItems(), 0..) |e, i| {
                 if (liveSetEntry(e)) |entry| if (value.sameValueZero(entry, key)) {
-                    o.elements.items[i] = Value.obj(tomb);
+                    o.elementsItems()[i] = Value.obj(tomb);
                     return Value.boolVal(true);
                 };
             }
@@ -8960,11 +8960,11 @@ pub const Interpreter = struct {
                 const e = blk: {
                     o.lockElements();
                     defer o.unlockElements();
-                    if (i >= o.elements.items.len) {
+                    if (i >= o.elementsItems().len) {
                         end = true;
                         break :blk null;
                     }
-                    break :blk liveSetEntry(o.elements.items[i]);
+                    break :blk liveSetEntry(o.elementsItems()[i]);
                 };
                 if (end) break;
                 const live_entry = e orelse continue;
@@ -9176,7 +9176,7 @@ pub const Interpreter = struct {
     fn setContains(o: *value.Object, elem: Value) bool {
         o.lockElements();
         defer o.unlockElements();
-        for (o.elements.items) |e| {
+        for (o.elementsItems()) |e| {
             const entry = liveSetEntry(e) orelse continue;
             if (value.sameValueZero(entry, elem)) return true;
         }
@@ -9189,7 +9189,7 @@ pub const Interpreter = struct {
         if (rec.is_set) {
             rec.obj.lockElements();
             defer rec.obj.unlockElements();
-            for (rec.obj.elements.items) |e| {
+            for (rec.obj.elementsItems()) |e| {
                 const entry = liveSetEntry(e) orelse continue;
                 if (value.sameValueZero(entry, elem)) return true;
             }
@@ -9224,7 +9224,7 @@ pub const Interpreter = struct {
         var list: std.ArrayListUnmanaged(Value) = .empty;
         o.lockElements();
         defer o.unlockElements();
-        for (o.elements.items) |e| {
+        for (o.elementsItems()) |e| {
             const entry = liveSetEntry(e) orelse continue;
             try list.append(self.arena, entry);
         }
@@ -18291,27 +18291,27 @@ fn iteratorZipFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
         // IfAbruptCloseIterators(next, iters): close every opened input (reverse
         // order) but NOT inputIter, then re-raise.
         const r = self.callValueWithThis(next_method, &.{}, input_iter) catch {
-            self.closeListKeepingThrow(iters.elements.items);
+            self.closeListKeepingThrow(iters.elementsItems());
             return error.Throw;
         };
         if (!r.isObject()) {
             self.exception = try self.makeError("TypeError", "Iterator.zip: iterator result is not an object");
-            self.closeListKeepingThrow(iters.elements.items);
+            self.closeListKeepingThrow(iters.elementsItems());
             return error.Throw;
         }
         const dn = (self.getProperty(r, "done") catch {
-            self.closeListKeepingThrow(iters.elements.items);
+            self.closeListKeepingThrow(iters.elementsItems());
             return error.Throw;
         }).toBoolean();
         if (dn) break;
         const item = self.getProperty(r, "value") catch {
-            self.closeListKeepingThrow(iters.elements.items);
+            self.closeListKeepingThrow(iters.elementsItems());
             return error.Throw;
         };
         // GetIteratorFlattenable(item) abrupt → IfAbruptCloseIterators over the
         // list-concatenation « inputIter » ++ iters (reverse): iters then input.
         const sub = self.getIteratorFlattenableObj(item) catch {
-            self.closeListKeepingThrow(iters.elements.items);
+            self.closeListKeepingThrow(iters.elementsItems());
             self.iteratorCloseKeepingThrow(input_iter);
             return error.Throw;
         };
@@ -18320,8 +18320,8 @@ fn iteratorZipFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
     // Per-source padding aligned to iterator order (longest mode only): pull
     // exactly `iterCount` values from the padding iterable, padding short. Any
     // abrupt completion here closes the opened inputs (reverse) and re-raises.
-    const pad_arr = buildZipPadding(self, mode, padding, iters.elements.items.len) catch {
-        self.closeListKeepingThrow(iters.elements.items);
+    const pad_arr = buildZipPadding(self, mode, padding, iters.elementsItems().len) catch {
+        self.closeListKeepingThrow(iters.elementsItems());
         return error.Throw;
     };
     return makeZipHelper(self, .zip, iters, Value.undef(), mode, pad_arr);
@@ -18350,18 +18350,18 @@ fn iteratorZipKeyedFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
     const all_keys = try self.objectOwnKeysList(iterables.asObj());
     for (all_keys) |key| {
         const en = self.objectProtoPropertyIsEnumerable(iterables.asObj(), key) catch {
-            self.closeListKeepingThrow(iters.elements.items);
+            self.closeListKeepingThrow(iters.elementsItems());
             return error.Throw;
         };
         if (!en) continue;
         const v = self.getProperty(iterables, key) catch {
-            self.closeListKeepingThrow(iters.elements.items);
+            self.closeListKeepingThrow(iters.elementsItems());
             return error.Throw;
         };
         // An `undefined` value excludes the key entirely (no result property).
         if (v.isUndefined()) continue;
         const sub = self.getIteratorFlattenableObj(v) catch {
-            self.closeListKeepingThrow(iters.elements.items);
+            self.closeListKeepingThrow(iters.elementsItems());
             return error.Throw;
         };
         try keys.appendInternalElement(self.arena, try Value.strAlloc(self.arena, key));
@@ -18372,10 +18372,10 @@ fn iteratorZipKeyedFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
     var pad_arr: Value = Value.undef();
     if (mode == 1) {
         const pads = (try self.newArray()).asObj();
-        for (keys.elements.items) |kv| {
+        for (keys.elementsItems()) |kv| {
             if (padding.isObject()) {
                 const pv = self.getProperty(padding, kv.asStr()) catch {
-                    self.closeListKeepingThrow(iters.elements.items);
+                    self.closeListKeepingThrow(iters.elementsItems());
                     return error.Throw;
                 };
                 try pads.appendInternalElement(self.arena, pv);
@@ -18430,7 +18430,7 @@ fn buildZipPadding(self: *Interpreter, mode: u8, padding: Value, n: usize) EvalE
 /// Build a zip/zipKeyed iterator-helper object with its per-source done flags.
 fn makeZipHelper(self: *Interpreter, kind: value.IterHelper.Kind, iters: *value.Object, keys: Value, mode: u8, padding: Value) EvalError!Value {
     const flags = (try self.newArray()).asObj();
-    for (iters.elements.items) |_| try flags.appendInternalElement(self.arena, Value.boolVal(false));
+    for (iters.elementsItems()) |_| try flags.appendInternalElement(self.arena, Value.boolVal(false));
     const o = (try self.newObject()).asObj();
     const h = try gc_mod.allocIterHelper(self.arena);
     h.* = .{ .src = Value.obj(iters), .kind = kind, .func = keys, .limit = @floatFromInt(mode), .inner = Value.obj(flags), .padding = padding };
@@ -28981,7 +28981,7 @@ fn liveMapEntryCount(o: *value.Object) usize {
     var n: usize = 0;
     o.lockElements();
     defer o.unlockElements();
-    for (o.elements.items) |entry| {
+    for (o.elementsItems()) |entry| {
         if (liveMapEntry(entry) != null) n += 1;
     }
     return n;
@@ -28995,15 +28995,15 @@ fn liveSetEntry(v: Value) ?Value {
 fn liveSetEntryAt(o: *value.Object, i: usize) ?Value {
     o.lockElements();
     defer o.unlockElements();
-    if (i >= o.elements.items.len) return null;
-    return liveSetEntry(o.elements.items[i]);
+    if (i >= o.elementsItems().len) return null;
+    return liveSetEntry(o.elementsItems()[i]);
 }
 
 fn liveSetEntryCount(o: *value.Object) usize {
     var n: usize = 0;
     o.lockElements();
     defer o.unlockElements();
-    for (o.elements.items) |entry| {
+    for (o.elementsItems()) |entry| {
         if (liveSetEntry(entry) != null) n += 1;
     }
     return n;
@@ -29114,8 +29114,8 @@ fn cursorIterNext(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
             } else if (so.is_map) {
                 var j = i;
                 so.lockElements();
-                while (j < so.elements.items.len) : (j += 1) {
-                    const entry = liveMapEntry(so.elements.items[j]) orelse continue;
+                while (j < so.elementsItems().len) : (j += 1) {
+                    const entry = liveMapEntry(so.elementsItems()[j]) orelse continue;
                     val = switch (kind) {
                         1 => entry.elementAt(0) orelse Value.undef(), // keys
                         2 => Value.obj(entry), // entries: the stored [key, value] pair
@@ -29130,8 +29130,8 @@ fn cursorIterNext(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
                 var j = i;
                 var entry_value: ?Value = null;
                 so.lockElements();
-                while (j < so.elements.items.len) : (j += 1) {
-                    const e = liveSetEntry(so.elements.items[j]) orelse continue;
+                while (j < so.elementsItems().len) : (j += 1) {
+                    const e = liveSetEntry(so.elementsItems()[j]) orelse continue;
                     entry_value = e;
                     done = false;
                     advance = j + 1 - i;
