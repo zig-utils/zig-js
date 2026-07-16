@@ -15303,7 +15303,7 @@ test "enable_gc concurrent (M3): a WeakMap survives a marker racing a mutator th
     heap.finishConcurrentMark();
 
     // Every entry present; each ephemeron value (live key) survived intact.
-    try std.testing.expectEqual(@as(usize, n), wm.cold.?.weak_entries.items.len);
+    try std.testing.expectEqual(@as(usize, n), wm.coldState().?.weak_entries.items.len);
     for (0..n) |i| {
         const got = wm.weakEntryGet(@ptrCast(keys[i])) orelse return error.TestUnexpectedResult;
         const id = got.asObj().getOwn("id") orelse return error.TestUnexpectedResult;

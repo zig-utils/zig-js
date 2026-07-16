@@ -180,7 +180,7 @@ pub fn traceObject(o: *Object, v: anytype) void {
 
 pub fn traceObjectEphemeron(o: *Object, v: anytype) void {
     if (!(o.is_weak and o.is_map)) return;
-    const cold = o.cold orelse return;
+    const cold = o.coldState() orelse return;
     for (cold.weak_entries.items) |entry| {
         if (v.isMarked(entry.key)) markValue(v, entry.value);
     }
@@ -200,7 +200,7 @@ pub fn pruneDeadWeakEntries(o: *Object, heap: anytype) bool {
 
     var cleanup_ready = false;
     if (o.is_weak and (o.is_map or o.is_set)) {
-        const cold = o.cold orelse return false;
+        const cold = o.coldState() orelse return false;
         var i: usize = 0;
         while (i < cold.weak_entries.items.len) {
             if (!heap.isLive(cold.weak_entries.items[i].key)) {
@@ -211,7 +211,7 @@ pub fn pruneDeadWeakEntries(o: *Object, heap: anytype) bool {
         }
     }
     if (o.is_finalization_registry) {
-        const cold = o.cold orelse return cleanup_ready;
+        const cold = o.coldState() orelse return cleanup_ready;
         for (cold.finalization_records.items) |*record| {
             // Once a record is ready, its target may have been swept in an
             // earlier cycle; never ask the heap about that stale pointer again.
@@ -344,7 +344,7 @@ fn finalizeObjectBacking(o: *Object, a: std.mem.Allocator) usize {
         released += 1;
     }
     if (flags.weak_entries) {
-        const cold = o.cold.?;
+        const cold = o.coldState().?;
         cold.weak_entries.deinit(a);
         cold.weak_entries = .empty;
         cold.weak_index.deinit(a);
@@ -352,8 +352,8 @@ fn finalizeObjectBacking(o: *Object, a: std.mem.Allocator) usize {
         released += 1;
     }
     if (flags.finalization_records) {
-        o.cold.?.finalization_records.deinit(a);
-        o.cold.?.finalization_records = .empty;
+        o.coldState().?.finalization_records.deinit(a);
+        o.coldState().?.finalization_records = .empty;
         released += 1;
     }
     if (flags.typed_array) {
@@ -378,18 +378,18 @@ fn finalizeObjectBacking(o: *Object, a: std.mem.Allocator) usize {
         released += 1;
     }
     if (flags.arg_map_names) {
-        a.free(o.cold.?.arg_map_names);
-        o.cold.?.arg_map_names = &.{};
+        a.free(o.coldState().?.arg_map_names);
+        o.coldState().?.arg_map_names = &.{};
         released += 1;
     }
     if (flags.arg_map_severed) {
-        a.free(o.cold.?.arg_map_severed);
-        o.cold.?.arg_map_severed = &.{};
+        a.free(o.coldState().?.arg_map_severed);
+        o.coldState().?.arg_map_severed = &.{};
         released += 1;
     }
     if (flags.cold) {
-        a.destroy(o.cold.?);
-        o.cold = null;
+        a.destroy(o.coldState().?);
+        o.cold.store(null, .release);
         released += 1;
     }
 
@@ -1276,7 +1276,7 @@ test "gc pruneDeadWeakEntries removes dead weak keys with unordered tail removal
     var dead_key_b: u8 = 3;
 
     var cold = value.ObjectColdState{};
-    var o = Object{ .is_weak = true, .is_map = true, .cold = &cold };
+    var o = Object{ .is_weak = true, .is_map = true, .cold = .init(&cold) };
     defer cold.weak_entries.deinit(a);
     try cold.weak_entries.append(a, .{ .key = @ptrCast(&dead_key_a), .value = Value.num(10) });
     try cold.weak_entries.append(a, .{ .key = @ptrCast(&dead_key_b), .value = Value.num(20) });

@@ -769,7 +769,10 @@ pub const Object = struct {
     /// finalized accurately while migration is incremental.
     backing_allocator: std.mem.Allocator = undefined,
     backing_flags: ObjectBackingFlags = .{},
-    cold: ?*ObjectColdState = null,
+    /// Lazily installed sidecar. The backing lock keeps allocation unique;
+    /// release/acquire publication lets unlocked no-GIL probes safely observe
+    /// the first sidecar installed on an already-shared ordinary object.
+    cold: std.atomic.Value(?*ObjectColdState) = .init(null),
     /// `backingFor`/`(de)activateBacking` touch `backing_flags`/`backing_allocator`
     /// while the caller holds *whichever* structure lock matches the field
     /// (elements_lock for elements, property_lock for slots/attrs/accessors), so
@@ -1074,15 +1077,19 @@ pub const Object = struct {
         // publication with the concurrent tracer's cold-edge snapshot.
         const backing_locked = self.lockBacking();
         defer self.unlockBacking(backing_locked);
-        if (self.cold) |cold| return cold;
+        if (self.cold.load(.acquire)) |cold| return cold;
         const backing = self.backingForTrackedLocked(fallback, "cold");
         const cold = backing.allocator.create(ObjectColdState) catch |err| {
             if (backing.activated) self.deactivateBackingLocked("cold");
             return err;
         };
         cold.* = .{};
-        self.cold = cold;
+        self.cold.store(cold, .release);
         return cold;
+    }
+
+    pub inline fn coldState(self: *const Object) ?*ObjectColdState {
+        return @constCast(&self.cold).load(.acquire);
     }
 
     fn ensureRare(
@@ -1128,7 +1135,7 @@ pub const Object = struct {
     pub fn traceColdSnapshot(self: *Object, concurrent: bool) TraceColdSnapshot {
         const backing_locked = if (concurrent) self.lockBacking() else false;
         defer self.unlockBacking(backing_locked);
-        const cold = self.cold;
+        const cold = self.coldState();
         return .{
             .cold = cold,
             .ctor_ref = self.ctorRef(),
@@ -1149,25 +1156,25 @@ pub const Object = struct {
     }
 
     pub inline fn symbolKey(self: *const Object) []const u8 {
-        const cold = self.cold orelse return "";
+        const cold = self.coldState() orelse return "";
         if (!cold.hasRare(.primitive)) return "";
         return cold.rare.primitive.symbol.key.get() orelse "";
     }
 
     pub inline fn symbolDescription(self: *const Object) ?[]const u8 {
-        const cold = self.cold orelse return null;
+        const cold = self.coldState() orelse return null;
         if (!cold.hasRare(.primitive)) return null;
         return cold.rare.primitive.symbol.description.get();
     }
 
     pub inline fn bigIntValue(self: *const Object) i128 {
-        const cold = self.cold orelse return 0;
+        const cold = self.coldState() orelse return 0;
         if (!cold.hasRare(.primitive)) return 0;
         return cold.rare.primitive.bigint.value;
     }
 
     pub inline fn bigIntText(self: *const Object) ?[]const u8 {
-        const cold = self.cold orelse return null;
+        const cold = self.coldState() orelse return null;
         if (!cold.hasRare(.primitive)) return null;
         return cold.rare.primitive.bigint.text.get();
     }
@@ -1178,23 +1185,23 @@ pub const Object = struct {
     }
 
     pub fn setSymbolKey(self: *Object, key: []const u8) void {
-        self.cold.?.rare.primitive.symbol.key = .init(key);
+        self.coldState().?.rare.primitive.symbol.key = .init(key);
     }
 
     pub inline fn errorName(self: *const Object) []const u8 {
-        const cold = self.cold orelse return "";
+        const cold = self.coldState() orelse return "";
         if (!cold.hasRare(.error_state)) return "";
         return cold.rare.error_state.name;
     }
 
     pub inline fn errorCtor(self: *const Object) ?[]const u8 {
-        const cold = self.cold orelse return null;
+        const cold = self.coldState() orelse return null;
         if (!cold.hasRare(.error_state)) return null;
         return cold.rare.error_state.ctor;
     }
 
     pub inline fn moduleNs(self: *const Object) ?*anyopaque {
-        const cold = self.cold orelse return null;
+        const cold = self.coldState() orelse return null;
         if (!cold.hasRare(.module_ns)) return null;
         return cold.rare.module_ns.ptr;
     }
@@ -1205,7 +1212,7 @@ pub const Object = struct {
     }
 
     pub inline fn weakRefTarget(self: *const Object) ?*Object {
-        const cold = self.cold orelse return null;
+        const cold = self.coldState() orelse return null;
         if (!cold.hasRare(.weak_ref)) return null;
         return cold.rare.weak_ref.target;
     }
@@ -1216,17 +1223,17 @@ pub const Object = struct {
     }
 
     pub inline fn weakRefTargetSlot(self: *Object) *?*Object {
-        return &self.cold.?.rare.weak_ref.target;
+        return &self.coldState().?.rare.weak_ref.target;
     }
 
     pub inline fn hostCallback(self: *const Object) ?HostCallback {
-        const cold = self.cold orelse return null;
+        const cold = self.coldState() orelse return null;
         if (!cold.hasRare(.host_callback)) return null;
         return cold.rare.host_callback.callback;
     }
 
     pub inline fn hostCallbackContext(self: *const Object) ?*anyopaque {
-        const cold = self.cold orelse return null;
+        const cold = self.coldState() orelse return null;
         if (!cold.hasRare(.host_callback)) return null;
         return cold.rare.host_callback.context;
     }
@@ -1243,7 +1250,7 @@ pub const Object = struct {
     }
 
     pub inline fn boxedPrimitive(self: *const Object) ?Value {
-        const cold = self.cold orelse return null;
+        const cold = self.coldState() orelse return null;
         if (!cold.hasRare(.boxed_primitive)) return null;
         return cold.rare.boxed_primitive.value;
     }
@@ -1254,7 +1261,7 @@ pub const Object = struct {
     }
 
     pub inline fn generator(self: *const Object) ?*anyopaque {
-        const cold = self.cold orelse return null;
+        const cold = self.coldState() orelse return null;
         if (!cold.hasRare(.generator)) return null;
         return cold.rare.generator.ptr;
     }
@@ -1265,7 +1272,7 @@ pub const Object = struct {
     }
 
     pub inline fn iteratorHelper(self: *const Object) ?*IterHelper {
-        const cold = self.cold orelse return null;
+        const cold = self.coldState() orelse return null;
         if (!cold.hasRare(.iter_helper)) return null;
         return cold.rare.iter_helper.ptr;
     }
@@ -1276,7 +1283,7 @@ pub const Object = struct {
     }
 
     pub inline fn boundFunction(self: *const Object) ?*anyopaque {
-        const cold = self.cold orelse return null;
+        const cold = self.coldState() orelse return null;
         if (!cold.hasRare(.bound_function)) return null;
         return cold.rare.bound_function.ptr;
     }
@@ -1287,13 +1294,13 @@ pub const Object = struct {
     }
 
     pub inline fn proxyTarget(self: *const Object) ?*Object {
-        const cold = self.cold orelse return null;
+        const cold = self.coldState() orelse return null;
         if (!cold.hasRare(.proxy)) return null;
         return cold.rare.proxy.target;
     }
 
     pub inline fn proxyHandler(self: *const Object) ?*Object {
-        const cold = self.cold orelse return null;
+        const cold = self.coldState() orelse return null;
         if (!cold.hasRare(.proxy)) return null;
         return cold.rare.proxy.handler;
     }
@@ -1310,26 +1317,26 @@ pub const Object = struct {
     }
 
     pub fn clearProxyState(self: *Object) void {
-        const cold = self.cold orelse return;
+        const cold = self.coldState() orelse return;
         if (!cold.hasRare(.proxy)) return;
         cold.rare.proxy.target = null;
         cold.rare.proxy.handler = null;
     }
 
     pub inline fn arrayBuffer(self: *const Object) ?*ArrayBufferData {
-        const cold = self.cold orelse return null;
+        const cold = self.coldState() orelse return null;
         if (!cold.hasRare(.buffer_view)) return null;
         return cold.rare.buffer_view.array_buffer;
     }
 
     pub inline fn typedArray(self: *const Object) ?*TypedArrayData {
-        const cold = self.cold orelse return null;
+        const cold = self.coldState() orelse return null;
         if (!cold.hasRare(.buffer_view)) return null;
         return cold.rare.buffer_view.typed_array;
     }
 
     pub inline fn dataView(self: *const Object) ?*DataViewData {
-        const cold = self.cold orelse return null;
+        const cold = self.coldState() orelse return null;
         if (!cold.hasRare(.buffer_view)) return null;
         return cold.rare.buffer_view.data_view;
     }
@@ -1354,22 +1361,22 @@ pub const Object = struct {
     }
 
     pub fn clearArrayBuffer(self: *Object) void {
-        const cold = self.cold orelse return;
+        const cold = self.coldState() orelse return;
         if (cold.hasRare(.buffer_view)) cold.rare.buffer_view.array_buffer = null;
     }
 
     pub fn clearTypedArray(self: *Object) void {
-        const cold = self.cold orelse return;
+        const cold = self.coldState() orelse return;
         if (cold.hasRare(.buffer_view)) cold.rare.buffer_view.typed_array = null;
     }
 
     pub fn clearDataView(self: *Object) void {
-        const cold = self.cold orelse return;
+        const cold = self.coldState() orelse return;
         if (cold.hasRare(.buffer_view)) cold.rare.buffer_view.data_view = null;
     }
 
     pub inline fn temporalData(self: *const Object) ?*TemporalData {
-        const cold = self.cold orelse return null;
+        const cold = self.coldState() orelse return null;
         if (!cold.hasRare(.temporal)) return null;
         return cold.rare.temporal.ptr;
     }
@@ -1380,12 +1387,12 @@ pub const Object = struct {
     }
 
     pub fn clearTemporalData(self: *Object) void {
-        const cold = self.cold orelse return;
+        const cold = self.coldState() orelse return;
         if (cold.hasRare(.temporal)) cold.rare.temporal.ptr = null;
     }
 
     pub inline fn promiseData(self: *const Object) ?*anyopaque {
-        const cold = self.cold orelse return null;
+        const cold = self.coldState() orelse return null;
         if (!cold.hasRare(.promise)) return null;
         return cold.rare.promise.ptr;
     }
@@ -1396,7 +1403,7 @@ pub const Object = struct {
     }
 
     pub inline fn ctorRef(self: *const Object) ?*Object {
-        const cold = self.cold orelse return null;
+        const cold = self.coldState() orelse return null;
         if (!cold.hasRare(.constructor)) return null;
         return cold.rare.constructor.ptr;
     }
@@ -1407,7 +1414,7 @@ pub const Object = struct {
     }
 
     pub inline fn holesMap(self: *const Object) ?*std.AutoHashMapUnmanaged(usize, void) {
-        const cold = self.cold orelse return null;
+        const cold = self.coldState() orelse return null;
         if (!cold.hasRare(.sparse_array)) return null;
         return cold.rare.sparse_array.holes;
     }
@@ -1417,12 +1424,12 @@ pub const Object = struct {
     }
 
     pub fn clearHolesMap(self: *Object) void {
-        const cold = self.cold orelse return;
+        const cold = self.coldState() orelse return;
         if (cold.hasRare(.sparse_array)) cold.rare.sparse_array.holes = null;
     }
 
     pub inline fn jsFunction(self: *const Object) ?*anyopaque {
-        const cold = self.cold orelse return null;
+        const cold = self.coldState() orelse return null;
         if (!cold.hasRare(.js_function)) return null;
         return cold.rare.js_function.ptr;
     }
@@ -1433,12 +1440,12 @@ pub const Object = struct {
     }
 
     pub inline fn privateBrands(self: *const Object) ?*std.StringHashMapUnmanaged(void) {
-        const cold = self.cold orelse return null;
+        const cold = self.coldState() orelse return null;
         return cold.private_brands;
     }
 
     pub fn clearPrivateBrands(self: *Object) void {
-        if (self.cold) |cold| cold.private_brands = null;
+        if (self.coldState()) |cold| cold.private_brands = null;
     }
 
     pub fn setErrorName(self: *Object, fallback: std.mem.Allocator, name: []const u8) std.mem.Allocator.Error!void {
@@ -1452,19 +1459,19 @@ pub const Object = struct {
     }
 
     pub inline fn regexSource(self: *const Object) []const u8 {
-        const cold = self.cold orelse return "";
+        const cold = self.coldState() orelse return "";
         if (!cold.hasRare(.regex)) return "";
         return cold.rare.regex.source;
     }
 
     pub inline fn regexFlags(self: *const Object) []const u8 {
-        const cold = self.cold orelse return "";
+        const cold = self.coldState() orelse return "";
         if (!cold.hasRare(.regex)) return "";
         return cold.rare.regex.flags;
     }
 
     pub inline fn regexCompiled(self: *const Object) ?*anyopaque {
-        const cold = self.cold orelse return null;
+        const cold = self.coldState() orelse return null;
         if (!cold.hasRare(.regex)) return null;
         return cold.rare.regex.compiled;
     }
@@ -1474,7 +1481,7 @@ pub const Object = struct {
     }
 
     pub inline fn finalizationCallback(self: *const Object) Value {
-        return if (self.cold) |cold| cold.finalization_callback else Value.undef();
+        return if (self.coldState()) |cold| cold.finalization_callback else Value.undef();
     }
 
     /// Whether new own properties may be added (see `extensible_flag`).
@@ -1722,7 +1729,7 @@ pub const Object = struct {
     /// one word, so `.monotonic` is a plain load/store (no perf cost) and just
     /// tells ThreadSanitizer the access is synchronized.
     pub fn dateMs(self: *const Object) f64 {
-        const cold = @constCast(self).cold orelse return 0;
+        const cold = self.coldState() orelse return 0;
         if (!cold.hasRare(.date)) return 0;
         return @atomicLoad(f64, &cold.rare.date.ms, .monotonic);
     }
@@ -1731,7 +1738,7 @@ pub const Object = struct {
         @atomicStore(f64, &state.ms, v, .monotonic);
     }
     pub fn setDateMs(self: *Object, v: f64) void {
-        @atomicStore(f64, &self.cold.?.rare.date.ms, v, .monotonic);
+        @atomicStore(f64, &self.coldState().?.rare.date.ms, v, .monotonic);
     }
 
     pub fn elementsLen(self: *const Object) usize {
@@ -1916,7 +1923,7 @@ pub const Object = struct {
         self.lockElements();
         defer self.unlockElements();
         const i = self.weakEntryIndexUnlocked(key) orelse return null;
-        return self.cold.?.weak_entries.items[i].value;
+        return self.coldState().?.weak_entries.items[i].value;
     }
 
     /// WeakMap/WeakSet `[[Has]]`.
@@ -1975,7 +1982,7 @@ pub const Object = struct {
     }
 
     fn weakEntryIndexUnlocked(self: *Object, key: ?*anyopaque) ?usize {
-        const cold = self.cold orelse return null;
+        const cold = self.coldState() orelse return null;
         const k = weakIndexKey(key);
         if (cold.weak_index.get(k)) |i| {
             if (i < cold.weak_entries.items.len and cold.weak_entries.items[i].key == key) return i;
@@ -1987,11 +1994,11 @@ pub const Object = struct {
     }
 
     fn weakIndexPut(self: *Object, alloc: std.mem.Allocator, key: ?*anyopaque, i: usize) void {
-        self.cold.?.weak_index.put(alloc, weakIndexKey(key), i) catch {};
+        self.coldState().?.weak_index.put(alloc, weakIndexKey(key), i) catch {};
     }
 
     pub fn weakEntrySwapRemoveAtUnlocked(self: *Object, i: usize) void {
-        const cold = self.cold.?;
+        const cold = self.coldState().?;
         const removed_key = cold.weak_entries.items[i].key;
         const last_i = cold.weak_entries.items.len - 1;
         const moved_key = cold.weak_entries.items[last_i].key;
@@ -2016,7 +2023,7 @@ pub const Object = struct {
     pub fn finRecordUnregister(self: *Object, token: ?*anyopaque) bool {
         self.lockElements();
         defer self.unlockElements();
-        const cold = self.cold orelse return false;
+        const cold = self.coldState() orelse return false;
         var removed = false;
         var write: usize = 0;
         for (cold.finalization_records.items, 0..) |record, read| {
@@ -2037,7 +2044,7 @@ pub const Object = struct {
     pub fn finRecordTakeReady(self: *Object) ?FinalizationRecord {
         self.lockElements();
         defer self.unlockElements();
-        const cold = self.cold orelse return null;
+        const cold = self.coldState() orelse return null;
         var i: usize = 0;
         while (i < cold.finalization_records.items.len) : (i += 1) {
             if (cold.finalization_records.items[i].ready)

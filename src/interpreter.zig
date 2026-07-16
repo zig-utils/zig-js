@@ -42934,7 +42934,7 @@ pub fn hasProperty(o: *value.Object, name: []const u8) bool {
 /// The parameter name a mapped-arguments index aliases, or null if `o` is not a
 /// mapped arguments object or index `i` is unmapped (out of range / severed).
 pub fn argMapName(o: *value.Object, i: usize) ?[]const u8 {
-    const cold = o.cold orelse return null;
+    const cold = o.coldState() orelse return null;
     if (cold.arg_map_env == null or i >= cold.arg_map_names.len) return null;
     if (i < cold.arg_map_severed.len and cold.arg_map_severed[i].load(.acquire)) return null;
     const nm = cold.arg_map_names[i];
@@ -42943,7 +42943,7 @@ pub fn argMapName(o: *value.Object, i: usize) ?[]const u8 {
 
 /// Atomically sever a mapped-arguments index from its parameter binding.
 pub fn argMapSever(o: *value.Object, i: usize) void {
-    const cold = o.cold orelse return;
+    const cold = o.coldState() orelse return;
     if (i >= cold.arg_map_severed.len) return;
     cold.arg_map_severed[i].store(true, .release);
 }
@@ -42951,14 +42951,14 @@ pub fn argMapSever(o: *value.Object, i: usize) void {
 /// Read a mapped index's parameter binding (null if unmapped).
 pub fn argMapGet(o: *value.Object, i: usize) ?Value {
     const nm = argMapName(o, i) orelse return null;
-    const env: *Environment = @ptrCast(@alignCast(o.cold.?.arg_map_env.?));
+    const env: *Environment = @ptrCast(@alignCast(o.coldState().?.arg_map_env.?));
     return env.getLocal(nm);
 }
 
 /// Write a mapped index's parameter binding.
 pub fn argMapSet(o: *value.Object, i: usize, v: Value) void {
     const nm = argMapName(o, i) orelse return;
-    const env: *Environment = @ptrCast(@alignCast(o.cold.?.arg_map_env.?));
+    const env: *Environment = @ptrCast(@alignCast(o.coldState().?.arg_map_env.?));
     _ = env.assignLocal(nm, v);
 }
 
