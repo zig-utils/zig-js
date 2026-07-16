@@ -158,6 +158,15 @@ zig build benchmark-comparison-test
 
 Use quick mode while changing the harness. Run the full matrix once after related changes are assembled; it is measurement work, not a per-edit correctness test.
 
+The manual-only [Performance workflow](../.github/workflows/performance.yml)
+runs the same full macOS/JSC matrix with configurable sample and lane counts,
+then retains the raw TSV and rendered report as one 90-day Actions artifact.
+It never runs on pushes or pull requests and does not gate ordinary CI: hosted
+runner timing is evidence to inspect, not an automatic comparison with the
+recorded M3 Pro baseline. Promote a workflow artifact into `docs/.data` only
+after checking that its report metadata is like-for-like with the intended
+historical baseline and rerunning any causal candidate on the reference host.
+
 ## VM and tree-walker baseline
 
 `zig build bench` remains the smaller internal baseline. It parses setup once, then times the same hot snippet through the bytecode VM and tree-walker. Its no-shared-state thread table answers whether aggregate compute throughput scales; the comparison suite above adds a second engine, repeat sampling, checksums, and a preserved report.

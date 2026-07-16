@@ -363,6 +363,12 @@ pub fn build(b: *std.Build) void {
         const run_comparison = b.addSystemCommand(&.{ "python3", "tools/benchmark-comparison.py" });
         run_comparison.addArtifactArg(comparison_zig_js);
         run_comparison.addArtifactArg(comparison_jsc);
+        if (b.option(usize, "benchmark-comparison-samples", "Full comparison samples per matrix row")) |samples| {
+            run_comparison.addArgs(&.{ "--samples", b.fmt("{d}", .{samples}) });
+        }
+        if (b.option([]const u8, "benchmark-comparison-lanes", "Comma-separated comparison lane counts above one")) |lanes| {
+            run_comparison.addArgs(&.{ "--lanes", lanes });
+        }
         if (b.option(bool, "benchmark-comparison-quick", "Run one reduced-size comparison sample for harness validation") orelse false)
             run_comparison.addArg("--quick");
         if (b.option([]const u8, "benchmark-comparison-raw-out", "Write raw comparison samples to this TSV path")) |path| {

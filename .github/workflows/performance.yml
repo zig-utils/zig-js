@@ -1,0 +1,71 @@
+name: Performance
+
+on:
+  workflow_dispatch:
+    inputs:
+      samples:
+        description: Full-matrix samples per row
+        required: true
+        default: '7'
+        type: string
+      lanes:
+        description: Comma-separated lane counts above the implicit one-lane baseline
+        required: true
+        default: '2,4,8'
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: benchmark-comparison-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  comparison:
+    # Manual evidence collection only: hosted-runner timings are artifacts for
+    # inspection and are never an ordinary-CI regression gate. Promotion into
+    # docs/README additionally requires the driver's clean-tree checks and a
+    # like-for-like environment review against the retained reference report.
+    runs-on: macos-15
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          path: zig-js
+      - uses: actions/checkout@v6
+        with:
+          repository: zig-utils/zig-regex
+          path: zig-regex
+      - uses: actions/checkout@v6
+        with:
+          repository: zig-utils/zig-gc
+          path: zig-gc
+      - uses: pantry-pm/pantry/packages/action@main
+        with:
+          packages: zig@0.17.0-dev
+
+      - name: Validate comparison harness
+        working-directory: zig-js
+        run: zig build benchmark-comparison-test
+
+      - name: Run full symmetric matrix
+        working-directory: zig-js
+        env:
+          BENCHMARK_SAMPLES: ${{ inputs.samples }}
+          BENCHMARK_LANES: ${{ inputs.lanes }}
+        run: |
+          mkdir -p benchmark-results
+          zig build benchmark-comparison \
+            -Dbenchmark-comparison-samples="$BENCHMARK_SAMPLES" \
+            -Dbenchmark-comparison-lanes="$BENCHMARK_LANES" \
+            -Dbenchmark-comparison-raw-out="benchmark-results/benchmark-comparison-${GITHUB_RUN_ID}.tsv" \
+            -Dbenchmark-comparison-markdown-out="benchmark-results/benchmark-comparison-${GITHUB_RUN_ID}.md"
+
+      - name: Upload raw evidence and report
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-comparison-${{ github.run_id }}
+          path: zig-js/benchmark-results/
+          if-no-files-found: error
+          retention-days: 90
