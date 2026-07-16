@@ -26217,6 +26217,29 @@ fn segWordCat(str: []const u8, pos: usize) bool {
     return true;
 }
 
+/// Coarse script class for word segmentation. UAX#29 keeps a run of alphabetic
+/// scripts together (Latin/Greek/Cyrillic/Arabic/… — "abcГД" is one word) but
+/// breaks at the boundary with CJK/Kana/Hangul (dictionary scripts), so
+/// "hello世界" → "hello","世界". Combining marks and other neutrals attach to the
+/// current run.
+const SegScript = enum { alpha, cjk, neutral };
+fn segScriptCat(cp: u21) SegScript {
+    // Combining marks (Mn/Mc common ranges) attach to whatever precedes them.
+    if ((cp >= 0x0300 and cp <= 0x036F) or (cp >= 0x1AB0 and cp <= 0x1AFF) or
+        (cp >= 0x1DC0 and cp <= 0x1DFF) or (cp >= 0x20D0 and cp <= 0x20FF) or
+        (cp >= 0xFE20 and cp <= 0xFE2F)) return .neutral;
+    // CJK ideographs, kana, hangul, bopomofo, and CJK symbols.
+    if ((cp >= 0x2E80 and cp <= 0x2FDF) or (cp >= 0x3005 and cp <= 0x3007) or
+        (cp >= 0x3021 and cp <= 0x3029) or (cp >= 0x3040 and cp <= 0x30FF) or
+        (cp >= 0x3100 and cp <= 0x312F) or (cp >= 0x3130 and cp <= 0x318F) or
+        (cp >= 0x31A0 and cp <= 0x31FF) or (cp >= 0x3400 and cp <= 0x4DBF) or
+        (cp >= 0x4E00 and cp <= 0x9FFF) or (cp >= 0xA960 and cp <= 0xA97F) or
+        (cp >= 0xAC00 and cp <= 0xD7FF) or (cp >= 0xF900 and cp <= 0xFAFF) or
+        (cp >= 0x1100 and cp <= 0x11FF) or (cp >= 0x20000 and cp <= 0x2FA1F)) return .cjk;
+    // Everything else that reached here is a word character → an alphabetic run.
+    return .alpha;
+}
+
 /// Advance one segment from byte `pos`; returns the end byte offset and (for the
 /// "word" granularity) whether the segment is word-like.
 fn segNext(str: []const u8, pos: usize, gran: []const u8) struct { end: usize, word_like: bool } {
@@ -26249,8 +26272,13 @@ fn segNext(str: []const u8, pos: usize, gran: []const u8) struct { end: usize, w
     const cat = segWordCat(str, pos);
     var end = pos;
     if (cat) {
+        var run_script = segScriptCat(first_cp);
         while (end < len) {
             if (segWordCat(str, end)) {
+                const sc = segScriptCat(segCodePoint(str, end));
+                // Break at an alphabetic↔CJK script boundary.
+                if ((run_script == .alpha and sc == .cjk) or (run_script == .cjk and sc == .alpha)) break;
+                if (sc != .neutral) run_script = sc;
                 end += segScalarLen(str, end);
                 continue;
             }
