@@ -26159,7 +26159,9 @@ fn segIsCombining(cp: u21) bool {
         (cp >= 0x06E7 and cp <= 0x06E8) or
         (cp >= 0x06EA and cp <= 0x06ED) or
         (cp >= 0x0900 and cp <= 0x0DFF and !(cp >= 0x0966 and cp <= 0x096F)) or
-        (cp >= 0x0E31 and cp <= 0x0E4E) or
+        // Thai Extend marks only — the leading vowels U+0E40..U+0E44 and SARA
+        // AA/AM (U+0E32/0E33) are spacing letters, not combining marks.
+        (cp == 0x0E31 or (cp >= 0x0E34 and cp <= 0x0E3A) or (cp >= 0x0E47 and cp <= 0x0E4E)) or
         (cp >= 0xFE00 and cp <= 0xFE0F) or
         (cp >= 0x1F3FB and cp <= 0x1F3FF) or
         (cp >= 0xE0100 and cp <= 0xE01EF);
