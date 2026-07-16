@@ -441,6 +441,19 @@ fn stmtListContainsNestedFuncDecl(stmts: []*Node) bool {
     return false;
 }
 
+/// A class member with a deferred body — a method/getter/setter (`func`), a
+/// field initializer (`field_init`), or a `static { … }` block. Such bodies are
+/// evaluated by the shared tree-walker (`eval_class`) and close over the current
+/// `Environment`, so in a tiered (frame-mode) function they cannot see the
+/// frame's slot-locals. A class with none of these (only computed keys, which
+/// are lowered as VM ops) captures nothing and stays tierable.
+fn classHasMemberBody(members: []const ast.ClassMember) bool {
+    for (members) |m| {
+        if (m.func != null or m.field_init != null or m.static_block != null) return true;
+    }
+    return false;
+}
+
 fn functionHasBlockNestedFuncDecl(fnode: *const ast.FunctionNode) bool {
     if (fnode.is_expr_body) return false;
     return switch (fnode.body.*) {
@@ -2059,6 +2072,18 @@ pub const Compiler = struct {
                 // element names. Lower those key expressions in source order, then
                 // let the VM delegate class construction to the shared interpreter.
                 if (c.superclass != null) return error.Unsupported;
+                // `eval_class` delegates member bodies (methods, field
+                // initializers, static blocks) to the tree-walker, which closes
+                // them over `self.env`. In a frame-mode (tiered) function the
+                // frame's slot-locals do NOT live in that env, so a member reading
+                // an enclosing local resolves it wrong (stale/global) or throws
+                // ReferenceError. Bail the whole function to the tree-walker, where
+                // those locals live in the Environment and the capture is correct.
+                // (In env-mode — `self.scope == null`, e.g. a generator body — the
+                // members capture through the Environment chain already.) Computed
+                // keys are excluded: they are lowered here as VM ops and captured
+                // as values, not deferred.
+                if (self.scope != null and classHasMemberBody(c.members)) return error.Unsupported;
                 const computed_count = try self.compileClassComputedKeys(c.members);
                 _ = try self.chunk.emitAB(.eval_class, try self.chunk.addClass(node), computed_count);
             },
