@@ -10,8 +10,7 @@
 #
 # Usage:
 #   tools/zig-cache-tool.sh report            # (default) sizes + largest entries
-#   tools/zig-cache-tool.sh prune [--dry-run] # remove the reproducible cache (o/ tmp/) + zig-out
-#   tools/zig-cache-tool.sh prune --all [...]  # also remove h/ and z/ (hashes/manifests)
+#   tools/zig-cache-tool.sh prune [--dry-run] # remove .zig-cache + zig-out
 #
 # Only ever operates on <repo>/.zig-cache and <repo>/zig-out — both are fully
 # reproducible from a build. It refuses any path that, after symlink resolution,
@@ -68,7 +67,7 @@ cmd_report() {
   echo
   if [ -d "$CACHE_DIR" ]; then
     echo ".zig-cache total: $(human_size "$CACHE_DIR")"
-    for sub in o tmp h z; do
+    for sub in o tmp h z c; do
       [ -d "$CACHE_DIR/$sub" ] && printf '  %-4s %s\n' "$sub/" "$(human_size "$CACHE_DIR/$sub")"
     done
     if [ -d "$CACHE_DIR/o" ]; then
@@ -86,27 +85,27 @@ cmd_report() {
     echo "zig-out: (none)"
   fi
   echo
-  echo "reclaimable now: $(human_size "$CACHE_DIR/o" "$CACHE_DIR/tmp" "$OUT_DIR")"
+  echo "reclaimable now: $(human_size "$CACHE_DIR" "$OUT_DIR")"
   echo "run 'tools/zig-cache-tool.sh prune' to reclaim it."
 }
 
 cmd_prune() {
-  local dry_run=0 all=0
+  local dry_run=0
   for arg in "$@"; do
     case "$arg" in
       --dry-run) dry_run=1 ;;
-      --all) all=1 ;;
+      # Retained as a harmless compatibility alias: prune is now always a
+      # coherent fully cold cleanup because Zig 0.17's c/h/z metadata retains
+      # references to o/ artifacts and cannot safely survive partial removal.
+      --all) ;;
       *) echo "unknown prune option: $arg" >&2; exit 2 ;;
     esac
   done
 
-  # The reproducible bulk: compiled outputs (o/), scratch (tmp/), and zig-out.
-  # --all additionally drops the small hash (h/) and manifest (z/) dirs, forcing
-  # a fully cold rebuild.
-  local targets=("$CACHE_DIR/o" "$CACHE_DIR/tmp" "$OUT_DIR")
-  if [ "$all" -eq 1 ]; then
-    targets+=("$CACHE_DIR/h" "$CACHE_DIR/z")
-  fi
+  # Remove the cache as one coherent unit. Partial removal of o/ and tmp/ while
+  # keeping Zig 0.17's c/h/z metadata produces stale manifest references and
+  # makes the next build fail with CacheCheckFailed.
+  local targets=("$CACHE_DIR" "$OUT_DIR")
 
   local reclaim
   reclaim="$(human_size "${targets[@]}")"

@@ -251,6 +251,9 @@ Requires Zig 0.17.0-dev.
 ```sh
 zig build                         # builds libzig-js.a
 zig build test                    # unit + C-API tests
+zig build test-jit               # small baseline-JIT production-module tests
+zig build test-vm                # small bytecode/VM production-module tests
+zig build test-concurrency       # small concurrency-primitive tests
 zig build conformance             # fast smoke suite
 zig build test262                 # configured tc39/test262 corpus
 zig build test262-bin             # build the test262 runner only
@@ -284,6 +287,9 @@ zig build threads-profile -Dthreads-profile-case='promise thenables'
 zig build midgc-profile
 zig build gc-profile
 zig build gc-profile -Dgc-profile-case='nursery'
+
+tools/zig-cache-tool.sh report      # inspect reproducible local build storage
+tools/zig-cache-tool.sh prune       # safely remove only .zig-cache and zig-out
 ```
 
 The final amplified command is the deterministic TSan watchdog-cleanup gate:

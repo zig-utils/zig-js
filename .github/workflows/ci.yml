@@ -79,6 +79,10 @@ jobs:
             cmd: zig build threads-reference-audit && python3 tools/threads-reference-audit.py --run-probes --expect-current-blockers --probe-timeout 60
           - name: benchmark-comparison-harness
             cmd: zig build benchmark-comparison-test
+          # Keep the small production-module development roots from silently
+          # drifting while the sharded full root suite remains authoritative.
+          - name: focused-engine-tests
+            cmd: zig build test-jit test-vm test-concurrency
           - name: tsan-unit (shard 0/4)
             cmd: zig build test -Dtsan=true -Dunit-shard-index=0 -Dunit-shard-count=4
           - name: tsan-unit (shard 1/4)

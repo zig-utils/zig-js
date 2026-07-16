@@ -74,6 +74,32 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run zig-js unit tests");
     test_step.dependOn(&run_tests.step);
 
+    // Small production JIT test root for tight development loops. Unlike
+    // `-Dtest-filter` on the full root, distinct filters here do not relink the
+    // Context/C-API/Worker/world-sized integration artifact (#53). It uses the
+    // same target, optimization, sanitizer, dependencies, and test runner;
+    // the full step remains the integration gate.
+    const focused_jit_tests = b.addTest(.{
+        .filters = if (test_filter) |f| &.{f} else &.{},
+        .test_runner = .{
+            .path = b.path("tools/unit_test_runner.zig"),
+            .mode = .simple,
+        },
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/focused_jit_tests.zig"),
+            .target = target,
+            .optimize = optimize,
+            .sanitize_thread = tsan,
+            .imports = &.{
+                .{ .name = "regex", .module = regex_mod },
+                .{ .name = "gc", .module = gc_mod },
+            },
+        }),
+    });
+    const run_focused_jit_tests = b.addRunArtifact(focused_jit_tests);
+    const focused_jit_step = b.step("test-jit", "Run focused production baseline-JIT tests");
+    focused_jit_step.dependOn(&run_focused_jit_tests.step);
+
     // Conformance runner: `zig build conformance` reports the pass percentage
     // over the curated (test262-style) suite.
     const conformance = b.addExecutable(.{
@@ -105,6 +131,31 @@ pub fn build(b: *std.Build) void {
             .{ .name = "gc", .module = gc_mod },
         },
     }) else mod;
+
+    // VM/concurrency semantic gates use an executable so importing the
+    // production interpreter does not recursively link every inline unit test.
+    // `-Dtest-filter` is a runtime case selector here, so changing it reuses
+    // the same compiled binary instead of creating another cache-heavy image.
+    const focused_engine_tests = b.addExecutable(.{
+        .name = "focused-engine-tests",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/focused_engine_tests.zig"),
+            .target = target,
+            .optimize = optimize,
+            .sanitize_thread = tsan,
+            .imports = &.{.{ .name = "js", .module = threads_js_mod }},
+        }),
+    });
+    for ([_]struct { step_name: []const u8, suite: []const u8, description: []const u8 }{
+        .{ .step_name = "test-vm", .suite = "vm", .description = "Run focused production bytecode/VM semantic tests" },
+        .{ .step_name = "test-concurrency", .suite = "concurrency", .description = "Run focused production concurrency semantic tests" },
+    }) |spec| {
+        const run_focused_engine_tests = b.addRunArtifact(focused_engine_tests);
+        run_focused_engine_tests.addArg(spec.suite);
+        if (test_filter) |filter| run_focused_engine_tests.addArg(filter);
+        const focused_step = b.step(spec.step_name, spec.description);
+        focused_step.dependOn(&run_focused_engine_tests.step);
+    }
     const threads_test = b.addExecutable(.{
         .name = "threads-test",
         .root_module = b.createModule(.{
