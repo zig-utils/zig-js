@@ -677,6 +677,9 @@ pub const ObjectColdState = struct {
     /// atomic RMW. Date is the only rare payload mutated after publication.
     date_ms_bits: std.atomic.Value(u64) = .init(0),
     private_brands: ?*std.StringHashMapUnmanaged(void) = null,
+    /// Accessor properties are rare and always flow through `property_lock`;
+    /// only this nullable map pointer needs atomic off-lock publication.
+    accessors: std.atomic.Value(?*std.StringHashMapUnmanaged(Accessor)) = .init(null),
     /// Mixed data/accessor insertion order is needed only after an accessor or
     /// dictionary-style rebuild. Ordinary shape-only objects stay sidecar-free.
     key_order: std.atomic.Value(?*std.ArrayListUnmanaged([]const u8)) = .init(null),
@@ -817,15 +820,7 @@ pub const Object = struct {
     /// implicitly. Once [[SetPrototypeOf]] explicitly sets null, that null must be
     /// observable through [[GetPrototypeOf]] instead of falling back again.
     proto_explicit_null: bool = false,
-    /// Accessor (get/set) properties, lazily allocated. Checked before the data
-    /// slot at each level of the prototype walk. The POINTER is accessed atomically
-    /// (`.load`/`.store(.monotonic)`, a plain mov — zero cost): under `parallel_js`
-    /// a peer's `setAccessor` publishes the map (null -> non-null) under
-    /// `lockProperties` while other threads read the many unlocked `accessors ==
-    /// null` fast-path guards, which on a plain field ThreadSanitizer flags as a
-    /// race. The map CONTENTS are only ever grown under `lockProperties`, so the
-    /// pointer is the only unsynchronized access.
-    accessors: std.atomic.Value(?*std.StringHashMapUnmanaged(Accessor)) = .init(null),
+    /// Accessor metadata lives in the cold sidecar.
     /// The set of private names this object was *branded* with at construction
     /// (its class's private fields/methods/accessors). PrivateGet/PrivateSet check
     /// brand membership here rather than via prototype inheritance, so an object
@@ -1093,6 +1088,13 @@ pub const Object = struct {
     pub inline fn keyOrder(self: *const Object) ?*std.ArrayListUnmanaged([]const u8) {
         const cold = self.coldState() orelse return null;
         return cold.key_order.load(.monotonic);
+    }
+
+    /// Atomic view of the cold accessor-map pointer. Map contents remain behind
+    /// `property_lock`; null is the data-property-only common case.
+    pub inline fn accessorsMap(self: *const Object) ?*std.StringHashMapUnmanaged(Accessor) {
+        const cold = self.coldState() orelse return null;
+        return cold.accessors.load(.monotonic);
     }
 
     inline fn setKeyOrder(self: *Object, order: ?*std.ArrayListUnmanaged([]const u8)) void {
@@ -1557,7 +1559,7 @@ pub const Object = struct {
     ) bool {
         if (values.len != prepared.slot_count or
             self.shape != null or self.slots.items.len != 0 or !self.slotsAreInline() or
-            self.backing_flags.slots or self.accessors.load(.monotonic) != null or
+            self.backing_flags.slots or self.accessorsMap() != null or
             self.keyOrder() != null or self.attrsMap() != null or !self.isExtensible())
             return false;
 
@@ -2080,7 +2082,7 @@ pub const Object = struct {
     pub fn packedDenseElementsSnapshot(self: *const Object, arena: std.mem.Allocator) std.mem.Allocator.Error!?[]Value {
         self.lockElements();
         defer self.unlockElements();
-        if (self.holesMap() != null or self.array_len > self.elements.items.len or self.accessors.load(.monotonic) != null) return null;
+        if (self.holesMap() != null or self.array_len > self.elements.items.len or self.accessorsMap() != null) return null;
         const out = try arena.alloc(Value, self.elements.items.len);
         @memcpy(out, self.elements.items);
         return out;
@@ -2430,7 +2432,7 @@ pub const Object = struct {
         var insertion: std.ArrayListUnmanaged([]const u8) = .empty;
         const has_own = struct {
             fn f(o: *const Object, k: []const u8) bool {
-                return o.getOwnUnlocked(k) != null or (o.accessors.load(.monotonic) != null and o.accessors.load(.monotonic).?.get(k) != null);
+                return o.getOwnUnlocked(k) != null or (o.accessorsMap() orelse return false).get(k) != null;
             }
         }.f;
         const contains = struct {
@@ -2460,7 +2462,7 @@ pub const Object = struct {
                 if (sh.name) |n| if (!contains(insertion.items, n)) try insertion.append(arena, n);
                 s2 = sh.parent;
             }
-            if (self.accessors.load(.monotonic)) |m| {
+            if (self.accessorsMap()) |m| {
                 var it = m.iterator();
                 while (it.next()) |entry| {
                     const k = entry.key_ptr.*;
@@ -2617,7 +2619,7 @@ pub const Object = struct {
     }
 
     fn getAccessorUnlocked(self: *const Object, name: []const u8) ?Accessor {
-        const m = self.accessors.load(.monotonic) orelse return null;
+        const m = self.accessorsMap() orelse return null;
         return m.get(name);
     }
 
@@ -2632,7 +2634,7 @@ pub const Object = struct {
     pub fn accessorKeysSnapshot(self: *const Object, arena: std.mem.Allocator) std.mem.Allocator.Error![]const []const u8 {
         self.lockProperties();
         defer self.unlockProperties();
-        const m = self.accessors.load(.monotonic) orelse return &.{};
+        const m = self.accessorsMap() orelse return &.{};
         var list: std.ArrayListUnmanaged([]const u8) = .empty;
         try list.ensureTotalCapacityPrecise(arena, m.count());
         var it = m.iterator();
@@ -2645,13 +2647,14 @@ pub const Object = struct {
     pub fn setAccessor(self: *Object, arena: std.mem.Allocator, name: []const u8, get: ?Value, set: ?Value) std.mem.Allocator.Error!void {
         self.lockProperties();
         defer self.unlockProperties();
+        const cold = try self.ensureCold(arena);
         const alloc = self.accessorsAllocator(arena);
-        if (self.accessors.load(.monotonic) == null) {
+        if (self.accessorsMap() == null) {
             const nm = try alloc.create(std.StringHashMapUnmanaged(Accessor));
             nm.* = .{};
-            self.accessors.store(nm, .monotonic); // publish under lockProperties
+            cold.accessors.store(nm, .monotonic); // publish under lockProperties
         }
-        const accessors = self.accessors.load(.monotonic).?;
+        const accessors = self.accessorsMap().?;
         var inserted = false;
         const value_ptr = accessors.getPtr(name) orelse entry: {
             const owned_name = try alloc.dupe(u8, name);
@@ -2792,7 +2795,7 @@ pub const Object = struct {
     }
 
     fn deleteAccessorOwnUnlocked(self: *Object, arena: std.mem.Allocator, key: []const u8) std.mem.Allocator.Error!AccessorDeleteResult {
-        const m = self.accessors.load(.monotonic) orelse return .absent;
+        const m = self.accessorsMap() orelse return .absent;
         if (m.getPtr(key) == null) return .absent;
         if (!self.getAttrUnlocked(key).configurable) return .blocked;
         if (m.fetchRemove(key)) |removed| {
@@ -2835,7 +2838,7 @@ pub const Object = struct {
         const parent = child.parent orelse return false;
         if ((self.shape orelse root) != parent or child.slot != slot) return false;
         if (self.slots.items.len != @as(usize, slot) or child.count != slot + 1) return false;
-        if (child.name == null or self.accessors.load(.monotonic) != null or
+        if (child.name == null or self.accessorsMap() != null or
             self.keyOrder() != null or self.attrsMap() != null or !self.isExtensible()) return false;
 
         gcBarrier(self, v);
@@ -2887,7 +2890,7 @@ pub const Object = struct {
         if (preserve_order) {
             // Data->accessor conversion keeps the property's original creation
             // position; `setAccessor` will reuse this existing key-order entry.
-        } else if (self.accessors.load(.monotonic) != null) {
+        } else if (self.accessorsMap() != null) {
             try self.replaceKeyOrderUnlocked(arena, survived.items);
         } else {
             self.deinitKeyOrderUnlocked();
@@ -3601,7 +3604,8 @@ test "fixed-shape object allocation publishes validated literal shape into inlin
     var accessor_map: std.StringHashMapUnmanaged(Accessor) = .empty;
     var accessored = Object{};
     accessored.initInlineSlots();
-    accessored.accessors.store(&accessor_map, .monotonic);
+    var accessored_cold = ObjectColdState{ .accessors = .init(&accessor_map) };
+    accessored.cold.store(&accessored_cold, .monotonic);
     try std.testing.expect(!accessored.initializePreparedInlineLiteralShape(prepared, &values));
 
     var attrs_map: std.StringHashMapUnmanaged(PropAttr) = .empty;

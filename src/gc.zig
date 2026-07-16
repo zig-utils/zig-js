@@ -126,7 +126,7 @@ pub fn traceObject(o: *Object, v: anytype) void {
     // marking the world is quiescent during the read, so we skip the lock.
     if (concurrent) o.lockProperties();
     for (o.slots.items) |slot| markValue(v, slot);
-    if (o.accessors.load(.monotonic)) |acc| {
+    if (o.accessorsMap()) |acc| {
         var it = acc.valueIterator();
         while (it.next()) |a| {
             markValueOpt(v, a.get);
@@ -297,12 +297,12 @@ fn finalizeObjectBacking(o: *Object, a: std.mem.Allocator) usize {
         released += 1;
     }
     if (flags.accessors) {
-        if (o.accessors.load(.monotonic)) |acc| {
+        if (o.accessorsMap()) |acc| {
             var it = acc.keyIterator();
             while (it.next()) |key| a.free(key.*);
             acc.deinit(a);
             a.destroy(acc);
-            o.accessors.store(null, .monotonic);
+            o.coldState().?.accessors.store(null, .monotonic);
         }
         released += 1;
     }
@@ -963,7 +963,7 @@ pub const Binding = struct {
 pub const Heap = gc.Heap(Binding);
 
 test "Object and cold sidecar fit the 256-byte GC slab" {
-    try std.testing.expectEqual(@as(usize, 192), @sizeOf(Object));
+    try std.testing.expectEqual(@as(usize, 184), @sizeOf(Object));
     try std.testing.expect(Heap.cellAllocationBytes(Object) <= 256);
     try std.testing.expect(Heap.cellAllocationBytes(value.ObjectColdState) <= 256);
 }
@@ -1233,10 +1233,11 @@ const TestEngine = struct {
         const o: *Object = @ptrCast(@alignCast(cell));
         o.slots.deinit(self.gpa);
         o.elements.deinit(self.gpa);
-        if (o.accessors.load(.monotonic)) |acc| {
+        if (o.accessorsMap()) |acc| {
             acc.deinit(self.gpa);
             self.gpa.destroy(acc);
         }
+        if (o.coldState()) |cold| self.gpa.destroy(cold);
     }
 };
 
@@ -1277,7 +1278,8 @@ test "gc binding: real Object graph — proto/slots/accessors survive, garbage s
     const map = try a.create(std.StringHashMapUnmanaged(value.Accessor));
     map.* = .{};
     try map.put(a, "x", .{ .get = Value.obj(acc_target), .set = null });
-    holder.accessors.store(map, .monotonic);
+    const holder_cold = try holder.ensureCold(a);
+    holder_cold.accessors.store(map, .monotonic);
     try eng.roots.append(a, holder);
 
     heap.collect();

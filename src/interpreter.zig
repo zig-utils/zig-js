@@ -6315,7 +6315,7 @@ pub const Interpreter = struct {
         const o = this.asObj();
         try self.checkRestricted(o);
         if (!o.is_array or o.is_arguments or o.proxyHandler() != null or o.proxy_revoked or
-            o.accessors.load(.monotonic) != null or o.attrsMap() != null or
+            o.accessorsMap() != null or o.attrsMap() != null or
             o.has_indexed_property.load(.monotonic) or !o.isExtensible() or
             !self.arrayProtoChainCleanForDenseAppend(o)) return null;
         const new_len = try o.appendPackedDenseElements(self.arena, args) orelse return null;
@@ -6337,7 +6337,7 @@ pub const Interpreter = struct {
         if (!recv.isObject()) return false;
         const o = recv.asObj();
         try self.checkRestricted(o);
-        if (!o.is_array or o.is_arguments or o.accessors.load(.monotonic) != null or o.attrsMap() != null or
+        if (!o.is_array or o.is_arguments or o.accessorsMap() != null or o.attrsMap() != null or
             o.has_indexed_property.load(.monotonic) or !o.isExtensible() or !self.arrayProtoChainCleanForIndexedSet(o))
             return false;
         const dense_cap: usize = 1 << 24;
@@ -6395,7 +6395,7 @@ pub const Interpreter = struct {
     /// Apply the deletion half of ArraySetLength after writability/coercion
     /// checks. Returns false when a non-configurable element blocks the shrink.
     pub fn setArrayLength(self: *Interpreter, o: *value.Object, requested_len: usize) EvalError!bool {
-        if (!o.is_arguments and o.attrsMap() == null and o.accessors.load(.monotonic) == null and !o.has_indexed_property.load(.monotonic)) {
+        if (!o.is_arguments and o.attrsMap() == null and o.accessorsMap() == null and !o.has_indexed_property.load(.monotonic)) {
             o.truncateDenseElementsAndSetLength(requested_len);
             return true;
         }
@@ -10850,7 +10850,7 @@ pub const Interpreter = struct {
                 ro.extendArrayLengthFloor(i + 1);
             }
         } else if (arrayElementIndex(key)) |i| {
-            if (ro.attrsMap() != null or ro.accessors.load(.monotonic) != null or ro.has_indexed_property.load(.monotonic) or
+            if (ro.attrsMap() != null or ro.accessorsMap() != null or ro.has_indexed_property.load(.monotonic) or
                 ro.keyOrder() != null or !self.arrayProtoChainCleanForIndexedSet(ro))
             {
                 try self.setProp(ro, key, v);
@@ -11592,7 +11592,7 @@ pub const Interpreter = struct {
     /// Append `v` as the next element of a method's result (an array uses its
     /// dense store; a custom species object gets a `[[Set]]` at `idx`).
     fn arrayResultPush(self: *Interpreter, result: Value, idx: usize, v: Value) EvalError!void {
-        if (result.isObject() and result.asObj().is_array and result.asObj().accessors.load(.monotonic) == null and
+        if (result.isObject() and result.asObj().is_array and result.asObj().accessorsMap() == null and
             result.asObj().attrsMap() == null and !result.asObj().proxy_revoked and result.asObj().proxyHandler() == null and
             result.asObj().isExtensible() and
             try result.asObj().appendElementIfLen(self.arena, idx, v))
@@ -12075,7 +12075,7 @@ pub const Interpreter = struct {
         // is definitely present — no per-index string allocation. A *hole*
         // falls through, because an index property inherited from the prototype
         // chain can still make it present (HasProperty walks the chain).
-        if (o.is_array and o.accessors.load(.monotonic) == null and o.denseElementPresent(i))
+        if (o.is_array and o.accessorsMap() == null and o.denseElementPresent(i))
             return true;
         if (o.typedArray()) |ta| {
             if (i < (ta.currentLength() orelse 0)) return true;
@@ -12089,7 +12089,7 @@ pub const Interpreter = struct {
     fn arrIndexGet(self: *Interpreter, o: *value.Object, i: usize) EvalError!Value {
         // Dense fast path mirrors `arrIndexPresent`; a hole goes through [[Get]]
         // so an inherited index (accessor or value) on the prototype resolves.
-        if (o.is_array and o.accessors.load(.monotonic) == null) {
+        if (o.is_array and o.accessorsMap() == null) {
             if (o.denseElement(i)) |v| return v;
         }
         const ks = try std.fmt.allocPrint(self.arena, "{d}", .{i});
@@ -12122,7 +12122,7 @@ pub const Interpreter = struct {
         // A plain dense Array result preserves holes (append + markHole); a
         // species/exotic result leaves a hole as an absent index (CreateDataProperty
         // only for present elements).
-        const dense = dst.isObject() and dst.asObj().is_array and dst.asObj().accessors.load(.monotonic) == null and
+        const dense = dst.isObject() and dst.asObj().is_array and dst.asObj().accessorsMap() == null and
             dst.asObj().attrsMap() == null and dst.asObj().proxyHandler() == null and !dst.asObj().proxy_revoked;
         var j: usize = 0;
         while (j < slen) : (j += 1) {
@@ -12316,7 +12316,7 @@ pub const Interpreter = struct {
             // the limit) BEFORE any element is set.
             if (@as(f64, @floatFromInt(len)) + @as(f64, @floatFromInt(args.len)) > 9007199254740991.0)
                 return self.throwError("TypeError", "push would exceed the maximum array length 2**53-1");
-            if (o.is_array and !o.is_arguments and o.accessors.load(.monotonic) == null and o.attrsMap() == null and
+            if (o.is_array and !o.is_arguments and o.accessorsMap() == null and o.attrsMap() == null and
                 !o.has_indexed_property.load(.monotonic) and o.isExtensible() and self.arrayProtoChainCleanForDenseAppend(o))
             {
                 if (try o.appendPackedDenseElements(self.arena, args)) |new_len|
@@ -12511,7 +12511,7 @@ pub const Interpreter = struct {
             if (count > 4294967295) return self.throwError("RangeError", "Invalid array length");
             if (count > (1 << 22)) return null;
             const result = try self.arraySpeciesCreate(Value.obj(o), count);
-            const dense = result.asObj().is_array and result.asObj().accessors.load(.monotonic) == null and result.asObj().attrsMap() == null and result.asObj().proxyHandler() == null;
+            const dense = result.asObj().is_array and result.asObj().accessorsMap() == null and result.asObj().attrsMap() == null and result.asObj().proxyHandler() == null;
             var i = start;
             var k: usize = 0; // result index, for hole preservation
             while (i < end) : (i += 1) {
@@ -12534,14 +12534,14 @@ pub const Interpreter = struct {
             for (args) |a| try self.concatProcessOne(result, a, ck, &n);
             // Set the result length (so trailing holes are reflected) when the
             // species result isn't a plain dense array that already tracks it.
-            if (!(result.isObject() and result.asObj().is_array and result.asObj().accessors.load(.monotonic) == null and result.asObj().attrsMap() == null))
+            if (!(result.isObject() and result.asObj().is_array and result.asObj().accessorsMap() == null and result.asObj().attrsMap() == null))
                 try self.setMember(result, "length", Value.num(@floatFromInt(n)));
             return result;
         }
         if (eq(name, "reverse")) {
             // Dense fast path: a plain array with no holes, no accessors, and no
             // sparse tail is a contiguous value slice — swap in place.
-            if (o.is_array and o.accessors.load(.monotonic) == null and o.attrsMap() == null and o.reversePackedDenseElements()) {
+            if (o.is_array and o.accessorsMap() == null and o.attrsMap() == null and o.reversePackedDenseElements()) {
                 return Value.obj(o);
             }
             // Generic Array.prototype.reverse: Get/Set/HasProperty/Delete keyed by
@@ -12650,7 +12650,7 @@ pub const Interpreter = struct {
             const result = try self.arraySpeciesCreate(Value.obj(o), ilen);
             // Only a freshly-created plain dense Array preserves holes by filling
             // them (a custom-species result leaves an absent index).
-            const dense = result.asObj().is_array and result.asObj().accessors.load(.monotonic) == null and result.asObj().attrsMap() == null and result.asObj().proxyHandler() == null;
+            const dense = result.asObj().is_array and result.asObj().accessorsMap() == null and result.asObj().attrsMap() == null and result.asObj().proxyHandler() == null;
             var i: usize = 0;
             while (i < ilen) : (i += 1) {
                 if (!(try self.arrIndexPresent(o, i))) {
@@ -12933,7 +12933,7 @@ pub const Interpreter = struct {
                 ps[j] = key;
             }
             const dense_plain_array = o.is_array and
-                o.accessors.load(.monotonic) == null and
+                o.accessorsMap() == null and
                 o.attrsMap() == null and
                 o.proxyHandler() == null and
                 o.packedDenseElementsCoverLength();
@@ -12968,7 +12968,7 @@ pub const Interpreter = struct {
             const removed = try self.arraySpeciesCreate(Value.obj(o), del);
             // A plain dense Array `removed` preserves holes; a custom-species
             // result is CreateDataProperty'd per present index.
-            const rdense = removed.asObj().is_array and removed.asObj().accessors.load(.monotonic) == null and removed.asObj().attrsMap() == null and removed.asObj().proxyHandler() == null;
+            const rdense = removed.asObj().is_array and removed.asObj().accessorsMap() == null and removed.asObj().attrsMap() == null and removed.asObj().proxyHandler() == null;
             var i: usize = 0;
             while (i < del) : (i += 1) {
                 if (try self.arrIndexPresent(o, start + i)) {
@@ -12982,7 +12982,7 @@ pub const Interpreter = struct {
             const inserts: []const Value = if (args.len > 2) args[2..] else &.{};
             // Dense fast path: an ordinary array with no holes/accessors/sparse
             // tail can splice its contiguous value store directly.
-            if (o.is_array and arrayLenWritable(o) and o.accessors.load(.monotonic) == null and o.attrsMap() == null and
+            if (o.is_array and arrayLenWritable(o) and o.accessorsMap() == null and o.attrsMap() == null and
                 !o.has_indexed_property.load(.monotonic) and self.arrayProtoChainCleanForIndexedSet(o) and
                 try o.splicePackedDenseElements(self.arena, start, del, inserts))
             {

@@ -886,7 +886,7 @@ var quick_observable_recurrence_hits: std.atomic.Value(u64) = .init(0);
 inline fn quickPlainObject(value_: Value) ?*value.Object {
     if (!value_.isObject()) return null;
     const object = value_.asObj();
-    if (object.is_array or object.accessors.load(.monotonic) != null or object.attrsMap() != null) return null;
+    if (object.is_array or object.accessorsMap() != null or object.attrsMap() != null) return null;
     return object;
 }
 
@@ -902,7 +902,7 @@ fn quickArrayPrototypeData(
     parallel_sync: bool,
 ) ?Value {
     if (parallel_sync) array.lockProperties();
-    const plain_receiver = array.accessors.load(.monotonic) == null and array.attrsMap() == null;
+    const plain_receiver = array.accessorsMap() == null and array.attrsMap() == null;
     const own_data = if (plain_receiver) if (array.shape) |shape| shape.lookup(name) else null else null;
     if (parallel_sync) array.unlockProperties();
     if (!plain_receiver or own_data != null) return null;
@@ -911,7 +911,7 @@ fn quickArrayPrototypeData(
     if (prototype.proxyHandler() != null or prototype.proxy_revoked) return null;
     if (parallel_sync) prototype.lockProperties();
     defer if (parallel_sync) prototype.unlockProperties();
-    if (prototype.accessors.load(.monotonic) != null) return null;
+    if (prototype.accessorsMap() != null) return null;
     if (instruction >= chunk.ics.len) return null;
     const ic = &chunk.ics[instruction];
     const slot = ic.lookupSlotMode(prototype.shape, parallel_sync) orelse slot: {
@@ -936,7 +936,7 @@ inline fn quickDenseArrayStore(vm: *Interpreter, receiver: Value, key: Value, st
     const index = quickArrayIndex(key) orelse return false;
     const object = receiver.asObj();
     if (!object.is_array or object.is_arguments or object.proxyHandler() != null or object.proxy_revoked or
-        object.accessors.load(.monotonic) != null or object.attrsMap() != null or
+        object.accessorsMap() != null or object.attrsMap() != null or
         object.has_indexed_property.load(.monotonic))
         return false;
     try vm.checkRestricted(object);
@@ -1968,7 +1968,7 @@ fn quickOwnDataPropertyValue(
     if (parallel_sync) object.lockProperties();
     defer if (parallel_sync) object.unlockProperties();
     if (object.is_array or object.proxyHandler() != null or object.proxy_revoked or
-        object.accessors.load(.monotonic) != null or object.attrsMap() != null)
+        object.accessorsMap() != null or object.attrsMap() != null)
         return null;
     const slot = quickPropertySlotMode(chunk, instruction, object, parallel_sync) orelse return null;
     return object.slots.items[slot];
@@ -2359,7 +2359,7 @@ fn runQuickObservableRecurrence(
 fn quickParallelCounterRead(vm: *Interpreter, state: *value.Object, name: []const u8) EvalError!Value {
     state.lockProperties();
     if (!state.is_array and state.proxyHandler() == null and !state.proxy_revoked and
-        state.accessors.load(.monotonic) == null and state.attrsMap() == null)
+        state.accessorsMap() == null and state.attrsMap() == null)
     {
         if (state.shape) |shape| if (shape.lookup(name)) |slot| if (slot < state.slots.items.len) {
             const result = state.slots.items[slot];
@@ -2374,7 +2374,7 @@ fn quickParallelCounterRead(vm: *Interpreter, state: *value.Object, name: []cons
 fn quickParallelCounterWrite(vm: *Interpreter, state: *value.Object, name: []const u8, updated: Value) EvalError!void {
     state.lockProperties();
     if (!state.is_array and state.proxyHandler() == null and !state.proxy_revoked and
-        state.accessors.load(.monotonic) == null and state.attrsMap() == null)
+        state.accessorsMap() == null and state.attrsMap() == null)
     {
         if (state.shape) |shape| if (shape.lookup(name)) |slot| if (slot < state.slots.items.len) {
             gc_mod.barrierValueFrom(state, updated);
@@ -2542,7 +2542,7 @@ fn tryQuickObjectAllocationLoopMode(
     if (!array_value.isObject()) return null;
     const array = array_value.asObj();
     if (!array.is_array or array.is_arguments or array.proxyHandler() != null or array.proxy_revoked or
-        array.accessors.load(.monotonic) != null or array.attrsMap() != null or
+        array.accessorsMap() != null or array.attrsMap() != null or
         array.has_indexed_property.load(.monotonic))
         return null;
     if (parallel_sync) array.lockElements();
@@ -2776,7 +2776,7 @@ fn tryQuickArrayLoop(
             if (!array_value.isObject()) break :quick null;
             const array = array_value.asObj();
             if (!array.is_array or array.is_arguments or array.proxyHandler() != null or array.proxy_revoked or
-                array.accessors.load(.monotonic) != null or array.holesMap() != null or
+                array.accessorsMap() != null or array.holesMap() != null or
                 array.array_len > array.elements.items.len)
                 break :quick null;
             if (!frame.slots[index_slot].isNumber() or !frame.slots[checksum_slot].isNumber() or
@@ -2850,7 +2850,7 @@ fn tryQuickArrayLoop(
                 break :quick null;
             if (parallel_sync) array.lockElements();
             defer if (parallel_sync) array.unlockElements();
-            if (array.accessors.load(.monotonic) != null or array.holesMap() != null or array.array_len > array.elements.items.len)
+            if (array.accessorsMap() != null or array.holesMap() != null or array.array_len > array.elements.items.len)
                 break :quick null;
             var index_value = frame.slots[index_slot];
             var total_value = frame.slots[total_slot];
@@ -3100,7 +3100,7 @@ fn tryQuickPropertyKernel(
     if (object.is_array or object.proxyHandler() != null or object.proxy_revoked) return null;
     if (parallel_sync) object.lockProperties();
     defer if (parallel_sync) object.unlockProperties();
-    if (object.accessors.load(.monotonic) != null or object.attrsMap() != null) return null;
+    if (object.accessorsMap() != null or object.attrsMap() != null) return null;
 
     var reads: [6]usize = undefined;
     var writes: [4]usize = undefined;
@@ -4217,7 +4217,7 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                         }
                         if (parallel_sync) o.lockProperties();
                         defer if (parallel_sync) o.unlockProperties();
-                        if (!o.is_array and o.accessors.load(.monotonic) == null and o.attrsMap() == null) {
+                        if (!o.is_array and o.accessorsMap() == null and o.attrsMap() == null) {
                             const ic = &chunk.ics[ip - 1];
                             if (ic.lookupSlotMode(o.shape, parallel_sync)) |sl| {
                                 result = o.slots.items[sl];
@@ -4256,7 +4256,7 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                             if (quickArrayIndex(key)) |index| {
                                 const element = if (parallel_sync)
                                     o.denseElement(index)
-                                else if (o.accessors.load(.monotonic) == null and o.holesMap() == null and index < o.elements.items.len)
+                                else if (o.accessorsMap() == null and o.holesMap() == null and index < o.elements.items.len)
                                     o.elements.items[index]
                                 else
                                     null;
@@ -4353,7 +4353,7 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                         const o = obj.asObj();
                         if (parallel_sync) o.lockProperties();
                         defer if (parallel_sync) o.unlockProperties();
-                        if (!o.is_array and o.accessors.load(.monotonic) == null and o.attrsMap() == null) {
+                        if (!o.is_array and o.accessorsMap() == null and o.attrsMap() == null) {
                             const ic = &chunk.ics[ip - 1];
                             if (ic.lookupSlotMode(o.shape, parallel_sync)) |sl| {
                                 gc_mod.barrierValueFrom(o, v); // IC fast-path slot store

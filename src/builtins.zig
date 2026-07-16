@@ -1033,7 +1033,7 @@ pub fn objectConstructor(ctx: *anyopaque, this: Value, args: []const Value) Host
 /// CreateDataPropertyOrThrow(O, ToString(k), v) — define an own enumerable,
 /// writable, configurable data property; throw if [[DefineOwnProperty]] fails.
 fn createDataIndexOrThrow(self: *Interpreter, target: Value, k: usize, v: Value) HostError!void {
-    if (target.isObject() and target.asObj().is_array and target.asObj().accessors.load(.monotonic) == null) {
+    if (target.isObject() and target.asObj().is_array and target.asObj().accessorsMap() == null) {
         // Fast path: appending the next index of a plain dense Array. The helper
         // does the next-index check and append under `elements_lock`.
         if (try target.asObj().appendDataIndexIfDense(self.arena, k, v)) return;
