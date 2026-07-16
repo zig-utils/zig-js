@@ -81,7 +81,8 @@ inline fn markManaged(v: anytype, cell: anytype) void {
 }
 
 inline fn hasObjectBacking(flags: value.ObjectBackingFlags) bool {
-    return flags.cold or
+    return flags.storage_state or
+        flags.cold or
         flags.slots or
         flags.elements_state or
         flags.elements or
@@ -286,13 +287,14 @@ fn finalizeEnv(e: *Environment) void {
 
 fn finalizeObjectBacking(o: *Object, a: std.mem.Allocator) usize {
     var released: usize = 0;
-    const flags = o.backing_flags;
+    const storage = o.storageState().?;
+    const flags = storage.backing_flags;
 
     if (flags.slots) {
         const state = o.slotsState().?;
         state.list.deinit(a);
         a.destroy(state);
-        o.slots.store(null, .release);
+        storage.slots.store(null, .release);
         released += 1;
     }
     if (flags.elements) {
@@ -302,7 +304,7 @@ fn finalizeObjectBacking(o: *Object, a: std.mem.Allocator) usize {
     }
     if (flags.elements_state) {
         a.destroy(o.elementsState().?);
-        o.elements.store(null, .release);
+        storage.elements.store(null, .release);
         released += 1;
     }
     if (flags.accessors) {
@@ -398,12 +400,15 @@ fn finalizeObjectBacking(o: *Object, a: std.mem.Allocator) usize {
     }
     if (flags.cold) {
         a.destroy(o.coldState().?);
-        o.cold.store(null, .release);
+        storage.cold.store(null, .release);
         released += 1;
     }
 
-    o.backing_flags = .{};
-    o.backing_flags.allocator_active = false;
+    if (flags.storage_state) {
+        o.storage.store(null, .release);
+        storage.owner_allocator.destroy(storage);
+        released += 1;
+    }
     return released;
 }
 
@@ -932,8 +937,9 @@ pub const Binding = struct {
                         o.clearArrayBuffer();
                     }
                 }
-                if (hasObjectBacking(o.backing_flags) or o.privateBrands() != null) {
-                    const released = finalizeObjectBacking(o, if (o.backing_flags.allocator_active) o.backing_allocator else self.context.gpa);
+                const backing_flags = o.backingFlagsSnapshot();
+                if (hasObjectBacking(backing_flags) or o.privateBrands() != null) {
+                    const released = finalizeObjectBacking(o, o.backingAllocatorIfActive() orelse self.context.gpa);
                     if (released > 0) {
                         if (self.context.gc_finalizer_stats_out) |stats| stats.object_backing_releases += released;
                         _ = @atomicRmw(usize, &self.context.gc_object_backing_stores_live, .Sub, released, .monotonic);
@@ -971,10 +977,10 @@ pub const Binding = struct {
 /// The engine's GC heap type. `Context` holds one behind `enable_gc`.
 pub const Heap = gc.Heap(Binding);
 
-test "Object and cold sidecar fit the 256-byte GC slab" {
-    try std.testing.expectEqual(@as(usize, 128), @sizeOf(Object));
+test "Object fits the 128-byte GC slab and cold sidecar fits 256 bytes" {
+    try std.testing.expectEqual(@as(usize, 96), @sizeOf(Object));
     try std.testing.expectEqual(@as(usize, 224), @sizeOf(value.ObjectColdState));
-    try std.testing.expect(Heap.cellAllocationBytes(Object) <= 256);
+    try std.testing.expectEqual(@as(usize, 128), Heap.cellAllocationBytes(Object));
     try std.testing.expect(Heap.cellAllocationBytes(value.ObjectColdState) <= 256);
 }
 
@@ -1254,6 +1260,7 @@ const TestEngine = struct {
             self.gpa.destroy(acc);
         }
         if (o.coldState()) |cold| self.gpa.destroy(cold);
+        if (o.storageState()) |storage| self.gpa.destroy(storage);
     }
 };
 
@@ -1324,7 +1331,9 @@ test "gc pruneDeadWeakEntries removes dead weak keys with unordered tail removal
     var dead_key_b: u8 = 3;
 
     var cold = value.ObjectColdState{};
-    var o = Object{ .is_weak = true, .is_map = true, .cold = .init(&cold) };
+    var storage = value.ObjectStorageState{ .owner_allocator = a };
+    storage.cold.store(&cold, .monotonic);
+    var o = Object{ .is_weak = true, .is_map = true, .storage = .init(&storage) };
     defer cold.weak_entries.deinit(a);
     try cold.weak_entries.append(a, .{ .key = @ptrCast(&dead_key_a), .value = Value.num(10) });
     try cold.weak_entries.append(a, .{ .key = @ptrCast(&dead_key_b), .value = Value.num(20) });

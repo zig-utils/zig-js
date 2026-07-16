@@ -1102,7 +1102,7 @@ const Deserializer = struct {
                     const byte_length = std.math.mul(usize, length, element_size) catch return d.fail();
                     if (byte_length > buffer_len - byte_offset) return d.fail();
                 }
-                const ta = try o.typedArrayAllocator(a).create(value.TypedArrayData);
+                const ta = try (try o.typedArrayAllocator(a)).create(value.TypedArrayData);
                 ta.* = .{
                     .buffer = buf.asObj(),
                     .byte_offset = byte_offset,
@@ -1131,7 +1131,7 @@ const Deserializer = struct {
                 if (track_length) {
                     if (!resizable or byte_length != 0) return d.fail();
                 } else if (byte_length > buffer_len - byte_offset) return d.fail();
-                const dv = try o.dataViewAllocator(a).create(value.DataViewData);
+                const dv = try (try o.dataViewAllocator(a)).create(value.DataViewData);
                 dv.* = .{
                     .buffer = buf.asObj(),
                     .byte_offset = byte_offset,

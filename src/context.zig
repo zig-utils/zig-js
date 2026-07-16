@@ -12261,8 +12261,9 @@ test "quick object replacement checks a restricted receiver before fused mutatio
     try std.testing.expect(first_before.slotsState() == null);
     try std.testing.expect(first_before.elementsState() == null);
     var restricted_cold = value.ObjectColdState{};
-    items.cold.store(&restricted_cold, .release);
-    defer items.cold.store(null, .release);
+    const items_storage = items.storageState().?;
+    items_storage.cold.store(&restricted_cold, .release);
+    defer items_storage.cold.store(null, .release);
     restricted_cold.restricted_to.store(if (current == std.math.maxInt(u64)) current - 1 else current + 1, .release);
 
     for ([_]bool{ false, true }) |parallel| {
@@ -13886,7 +13887,9 @@ test "parallel_js: cooperative shared nursery rendezvous bounds object churn" {
         .parallel_js = true,
     });
     defer ctx.destroy();
-    ctx.gc_cooperative_tranche_bytes = 1024 * 1024;
+    // Preserve the original allocation-count pressure after Object cells moved
+    // from the 256-byte to the 128-byte slab class.
+    ctx.gc_cooperative_tranche_bytes = 512 * 1024;
 
     const result = try ctx.evaluate(
         \\function cooperativeChurn(lane) {
@@ -14225,7 +14228,9 @@ test "parallel_js heap_limit_bytes recovers GC cells while sibling Thread is ali
     const ai_saved = gc_mod.setActiveInterpreter(&machine);
     defer _ = gc_mod.setActiveInterpreter(ai_saved);
 
-    try CellPressure.allocUntilCollection(ctx, before_collections, 40_000);
+    // The 128-byte Object slab needs twice the former cell count to apply the
+    // same byte pressure to this 8 MiB recovery boundary.
+    try CellPressure.allocUntilCollection(ctx, before_collections, 80_000);
     try std.testing.expect(ctx.gc_par_attempts.load(.monotonic) > before_attempts);
     try std.testing.expect(ctx.gc_par_collections.load(.monotonic) > before_collections);
     const stats = ctx.heapBudgetStats().?;
@@ -16112,8 +16117,8 @@ test "enable_gc: Object backing allocator avoids cell classifier outside paralle
 
     const v = try ctx.evaluate("globalThis.keep = { a: 1, b: 2, c: 3, d: 4, e: 5 }; globalThis.keep");
     const o = v.asObj();
-    try std.testing.expect(o.backing_flags.allocator_active);
-    const backing = o.backing_allocator;
+    try std.testing.expect(o.backingFlagsSnapshot().allocator_active);
+    const backing = o.backingAllocatorIfActive().?;
     try std.testing.expectEqual(ctx.gpa.ptr, backing.ptr);
     try std.testing.expectEqual(ctx.gpa.vtable, backing.vtable);
 }
@@ -16135,8 +16140,8 @@ test "enable_threads: Object backing allocator stays synchronized under parallel
 
     const v = try ctx.evaluate("globalThis.keep = { a: 1, b: 2, c: 3, d: 4, e: 5 }; globalThis.keep");
     const o = v.asObj();
-    try std.testing.expect(o.backing_flags.allocator_active);
-    const backing = o.backing_allocator;
+    try std.testing.expect(o.backingFlagsSnapshot().allocator_active);
+    const backing = o.backingAllocatorIfActive().?;
     try std.testing.expectEqual(@intFromPtr(ctx.gc_cell_backing.?), @intFromPtr(backing.ptr));
 }
 

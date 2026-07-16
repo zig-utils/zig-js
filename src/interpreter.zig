@@ -6107,8 +6107,8 @@ pub const Interpreter = struct {
         if (!func.is_strict and !non_simple_params and func.params.len > 0) {
             const n = @min(args.len, func.params.len);
             const cold = try args_obj.asObj().ensureCold(self.arena);
-            const names = try args_obj.asObj().argMapNamesAllocator(self.arena).alloc([]const u8, n);
-            const severed = try args_obj.asObj().argMapSeveredAllocator(self.arena).alloc(std.atomic.Value(bool), n);
+            const names = try (try args_obj.asObj().argMapNamesAllocator(self.arena)).alloc([]const u8, n);
+            const severed = try (try args_obj.asObj().argMapSeveredAllocator(self.arena)).alloc(std.atomic.Value(bool), n);
             for (names, 0..) |*nm, i| nm.* = func.params[i].name;
             for (severed) |*flag| flag.* = .init(false);
             // A duplicated parameter name maps only its last index.
@@ -11352,7 +11352,7 @@ pub const Interpreter = struct {
         const size = kind.byteSize();
         const a0 = if (args.len > 0) args[0] else Value.undef();
         const o = (try self.newObject()).asObj();
-        const ta = try o.typedArrayAllocator(self.arena).create(value.TypedArrayData);
+        const ta = try (try o.typedArrayAllocator(self.arena)).create(value.TypedArrayData);
         var ta_installed = false;
         errdefer if (!ta_installed) o.destroyUninstalledTypedArray(self.arena, ta);
 
@@ -17334,7 +17334,7 @@ fn dataViewConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) valu
     if (offset > @as(u64, @intCast(live_len))) return self.throwError("RangeError", "Start offset is outside the bounds of the buffer");
     if (!track and offset + @as(u64, @intCast(view_len)) > @as(u64, @intCast(live_len)))
         return self.throwError("RangeError", "Invalid DataView length");
-    const dv = try o.dataViewAllocator(self.arena).create(value.DataViewData);
+    const dv = try (try o.dataViewAllocator(self.arena)).create(value.DataViewData);
     dv.* = .{ .buffer = buf_v.asObj(), .byte_offset = @intCast(offset), .byte_length = view_len, .track_length = track };
     try o.setDataView(self.arena, dv);
     return Value.obj(o);
@@ -19841,7 +19841,7 @@ fn arrayBufferSliceImpl(self: *Interpreter, this: Value, args: []const Value, co
 /// Build a fresh typed array of `kind` with `len` zero-initialized elements.
 fn newTypedArray(self: *Interpreter, kind: value.TAKind, len: usize) EvalError!*value.Object {
     const o = (try self.newObject()).asObj();
-    const ta = try o.typedArrayAllocator(self.arena).create(value.TypedArrayData);
+    const ta = try (try o.typedArrayAllocator(self.arena)).create(value.TypedArrayData);
     var ta_installed = false;
     errdefer if (!ta_installed) o.destroyUninstalledTypedArray(self.arena, ta);
 
@@ -30846,7 +30846,7 @@ fn isoWeekOfYear(y: i64, m: u8, d: u8) struct { week: u8, year: i64 } {
 /// A Temporal object of `kind`, with its prototype from the env hidden binding.
 fn makeTemporal(self: *Interpreter, kind: value.TemporalData.Kind, proto_key: []const u8) EvalError!*value.Object {
     const o = (try self.newObject()).asObj();
-    const t = try o.temporalAllocator(self.arena).create(value.TemporalData);
+    const t = try (try o.temporalAllocator(self.arena)).create(value.TemporalData);
     var installed = false;
     errdefer if (!installed) o.destroyUninstalledTemporal(self.arena, t);
     t.* = .{ .kind = kind };

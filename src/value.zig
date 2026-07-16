@@ -740,6 +740,7 @@ pub const ObjectRegexState = struct {
 
 pub const ObjectBackingFlags = packed struct {
     allocator_active: bool = false,
+    storage_state: bool = false,
     cold: bool = false,
     slots: bool = false,
     elements_state: bool = false,
@@ -799,6 +800,18 @@ pub const ObjectSlotsState = struct {
     list: std.ArrayListUnmanaged(Value) = .empty,
 };
 
+pub const ObjectStorageState = struct {
+    /// Allocator that owns this wrapper itself. It can differ from
+    /// `backing_allocator` when an arena object first gains storage before its
+    /// subsequently migrated buffers become individually GC-owned.
+    owner_allocator: std.mem.Allocator,
+    backing_allocator: std.mem.Allocator = undefined,
+    backing_flags: ObjectBackingFlags = .{},
+    cold: std.atomic.Value(?*ObjectColdState) = .init(null),
+    slots: std.atomic.Value(?*ObjectSlotsState) = .init(null),
+    elements: std.atomic.Value(?*ObjectElementsState) = .init(null),
+};
+
 /// A JavaScript object. v1 keeps this deliberately small: a string-keyed
 /// property map, an optional dense array part, and three flavors of callable:
 /// a JS-defined function (`js_func`, type-erased `*Function` to avoid an
@@ -809,17 +822,13 @@ pub const ObjectSlotsState = struct {
 pub const Object = struct {
     pub const inline_slot_capacity: usize = 4;
 
-    /// Non-null when this object's lazily-allocated backing stores have moved
-    /// out of the arena for GC-mode reclamation. Individual flags below record
-    /// which stores actually use this allocator, so mixed legacy/GC state is
-    /// finalized accurately while migration is incremental.
-    backing_allocator: std.mem.Allocator = undefined,
-    backing_flags: ObjectBackingFlags = .{},
-    /// Lazily installed sidecar. The backing lock keeps allocation unique;
-    /// release/acquire publication lets unlocked no-GIL probes safely observe
-    /// the first sidecar installed on an already-shared ordinary object.
-    cold: std.atomic.Value(?*ObjectColdState) = .init(null),
-    /// `backingFor`/`(de)activateBacking` touch `backing_flags`/`backing_allocator`
+    /// One lazily installed wrapper owns all optional object storage metadata:
+    /// cold/exotic state, external named slots, dense/internal elements, and
+    /// GC backing allocator bookkeeping. A plain inline object pays for only
+    /// this nullable pointer. The backing lock keeps first installation unique;
+    /// release/acquire publication supports already-shared objects.
+    storage: std.atomic.Value(?*ObjectStorageState) = .init(null),
+    /// `backingFor`/`(de)activateBacking` touch storage-state allocator flags
     /// while the caller holds *whichever* structure lock matches the field
     /// (elements_lock for elements, property_lock for slots/attrs/accessors), so
     /// those don't mutually exclude on the shared packed `backing_flags` byte —
@@ -842,7 +851,6 @@ pub const Object = struct {
     /// metadata here; smaller objects derive their live slice from `shape.count`
     /// and keep every value in `inline_slots` without a side allocation.
     shape: ?*Shape = null,
-    slots: std.atomic.Value(?*ObjectSlotsState) = .init(null),
     /// Most ordinary objects never grow beyond a handful of named properties.
     /// Keep those values in the GC cell itself so object literals avoid a
     /// second allocator round trip.
@@ -868,7 +876,6 @@ pub const Object = struct {
     /// Dense/indexed and internal tuple storage is absent on ordinary named
     /// objects. The backing lock serializes first installation; release/acquire
     /// publication lets shared readers observe the stable list state.
-    elements: std.atomic.Value(?*ObjectElementsState) = .init(null),
     /// Per-property attribute overrides live in the cold sidecar.
     /// When false (set by `Object.preventExtensions`/`seal`/`freeze`), new own
     /// properties can't be added. Accessed atomically via `isExtensible`/
@@ -1012,26 +1019,80 @@ pub const Object = struct {
         }
     }
 
+    pub inline fn storageState(self: *const Object) ?*ObjectStorageState {
+        return @constCast(&self.storage).load(.acquire);
+    }
+
+    const StorageSelection = struct {
+        state: *ObjectStorageState,
+        created: bool,
+    };
+
+    // Assumes `backing_lock` held when object-side locks are enabled.
+    fn ensureStorageLocked(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator.Error!StorageSelection {
+        if (self.storage.load(.acquire)) |state| return .{ .state = state, .created = false };
+        const active = gc_runtime.activeObjectBacking();
+        const allocator = if (active) |state| state.allocator else fallback;
+        const state = try allocator.create(ObjectStorageState);
+        state.* = .{ .owner_allocator = allocator };
+        if (active) |tracking| {
+            state.backing_allocator = tracking.allocator;
+            state.backing_flags.allocator_active = true;
+            state.backing_flags.storage_state = true;
+            if (tracking.stores_live) |live| _ = @atomicRmw(usize, live, .Add, 1, .monotonic);
+        }
+        self.storage.store(state, .release);
+        return .{ .state = state, .created = true };
+    }
+
+    // Roll back a failed first child allocation so OOM never leaves an empty
+    // wrapper or a live-store accounting delta behind.
+    fn rollbackStorageLocked(self: *Object, selection: StorageSelection) void {
+        if (!selection.created) return;
+        const state = selection.state;
+        std.debug.assert(state.cold.load(.monotonic) == null);
+        std.debug.assert(state.slots.load(.monotonic) == null);
+        std.debug.assert(state.elements.load(.monotonic) == null);
+        if (state.backing_flags.storage_state) {
+            if (gc_runtime.activeObjectBacking()) |tracking| {
+                if (tracking.stores_live) |live| _ = @atomicRmw(usize, live, .Sub, 1, .monotonic);
+            }
+        }
+        self.storage.store(null, .release);
+        state.owner_allocator.destroy(state);
+    }
+
+    pub inline fn backingFlagsSnapshot(self: *const Object) ObjectBackingFlags {
+        return if (self.storageState()) |state| state.backing_flags else .{};
+    }
+
+    pub inline fn backingAllocatorIfActive(self: *const Object) ?std.mem.Allocator {
+        const state = self.storageState() orelse return null;
+        return if (state.backing_flags.allocator_active) state.backing_allocator else null;
+    }
+
     // Assumes `backing_lock` held (called only from `backingFor`).
     fn activateBacking(self: *Object, comptime field: []const u8) ?std.mem.Allocator {
-        const state = gc_runtime.activeObjectBacking() orelse return null;
-        if (!self.backing_flags.allocator_active) {
-            self.backing_allocator = state.allocator;
-            self.backing_flags.allocator_active = true;
+        const tracking = gc_runtime.activeObjectBacking() orelse return null;
+        const storage = self.storageState().?;
+        if (!storage.backing_flags.allocator_active) {
+            storage.backing_allocator = tracking.allocator;
+            storage.backing_flags.allocator_active = true;
         }
-        if (!@field(self.backing_flags, field)) {
-            @field(self.backing_flags, field) = true;
+        if (!@field(storage.backing_flags, field)) {
+            @field(storage.backing_flags, field) = true;
             // Atomic: parallel mutators (post-GIL) bump this shared accounting
             // counter concurrently. Identical result single-threaded.
-            if (state.stores_live) |live| _ = @atomicRmw(usize, live, .Add, 1, .monotonic);
+            if (tracking.stores_live) |live| _ = @atomicRmw(usize, live, .Add, 1, .monotonic);
         }
-        return self.backing_allocator;
+        return storage.backing_allocator;
     }
 
     // Assumes `backing_lock` held when object-side locks are enabled.
     fn deactivateBackingLocked(self: *Object, comptime field: []const u8) void {
-        if (!@field(self.backing_flags, field)) return;
-        @field(self.backing_flags, field) = false;
+        const storage = self.storageState() orelse return;
+        if (!@field(storage.backing_flags, field)) return;
+        @field(storage.backing_flags, field) = false;
         if (gc_runtime.activeObjectBacking()) |state| {
             if (state.stores_live) |live| {
                 _ = @atomicRmw(usize, live, .Sub, 1, .monotonic);
@@ -1049,6 +1110,13 @@ pub const Object = struct {
         return self.backingForTracked(fallback, field).allocator;
     }
 
+    fn ensureBackingFor(self: *Object, fallback: std.mem.Allocator, comptime field: []const u8) std.mem.Allocator.Error!std.mem.Allocator {
+        const backing_locked = self.lockBacking();
+        defer self.unlockBacking(backing_locked);
+        _ = try self.ensureStorageLocked(fallback);
+        return self.backingForTrackedLocked(fallback, field).allocator;
+    }
+
     const BackingSelection = struct {
         allocator: std.mem.Allocator,
         activated: bool,
@@ -1062,9 +1130,10 @@ pub const Object = struct {
 
     // Assumes `backing_lock` held when object-side locks are enabled.
     fn backingForTrackedLocked(self: *Object, fallback: std.mem.Allocator, comptime field: []const u8) BackingSelection {
-        if (self.backing_flags.allocator_active) {
-            const a = self.backing_allocator;
-            if (!@field(self.backing_flags, field)) {
+        const storage = self.storageState().?;
+        if (storage.backing_flags.allocator_active) {
+            const a = storage.backing_allocator;
+            if (!@field(storage.backing_flags, field)) {
                 if (self.activateBacking(field)) |active| return .{ .allocator = active, .activated = true };
             }
             return .{ .allocator = a, .activated = false };
@@ -1076,9 +1145,10 @@ pub const Object = struct {
     fn activeBackingAllocator(self: *Object, comptime field: []const u8) ?std.mem.Allocator {
         const backing_locked = self.lockBacking();
         defer self.unlockBacking(backing_locked);
-        if (!@field(self.backing_flags, field)) return null;
-        if (!self.backing_flags.allocator_active) return null;
-        return self.backing_allocator;
+        const storage = self.storageState() orelse return null;
+        if (!@field(storage.backing_flags, field)) return null;
+        if (!storage.backing_flags.allocator_active) return null;
+        return storage.backing_allocator;
     }
 
     /// Allocate the cold internal-slot sidecar on first use. Exotic objects
@@ -1089,19 +1159,22 @@ pub const Object = struct {
         // publication with the concurrent tracer's cold-edge snapshot.
         const backing_locked = self.lockBacking();
         defer self.unlockBacking(backing_locked);
-        if (self.cold.load(.acquire)) |cold| return cold;
+        const storage = try self.ensureStorageLocked(fallback);
+        if (storage.state.cold.load(.acquire)) |cold| return cold;
         const backing = self.backingForTrackedLocked(fallback, "cold");
         const cold = backing.allocator.create(ObjectColdState) catch |err| {
             if (backing.activated) self.deactivateBackingLocked("cold");
+            self.rollbackStorageLocked(storage);
             return err;
         };
         cold.* = .{};
-        self.cold.store(cold, .release);
+        storage.state.cold.store(cold, .release);
         return cold;
     }
 
     pub inline fn coldState(self: *const Object) ?*ObjectColdState {
-        return @constCast(&self.cold).load(.acquire);
+        const storage = self.storageState() orelse return null;
+        return storage.cold.load(.acquire);
     }
 
     /// Atomic view of the cold key-order pointer. Contents remain protected by
@@ -1546,11 +1619,12 @@ pub const Object = struct {
     }
 
     pub fn initInlineSlots(self: *Object) void {
-        self.slots.store(null, .monotonic);
+        if (self.storageState()) |storage| storage.slots.store(null, .monotonic);
     }
 
     pub inline fn slotsState(self: *const Object) ?*ObjectSlotsState {
-        return @constCast(&self.slots).load(.acquire);
+        const storage = self.storageState() orelse return null;
+        return storage.slots.load(.acquire);
     }
 
     /// Representation boundary for named-property values. Callers retain their
@@ -1608,7 +1682,7 @@ pub const Object = struct {
     ) bool {
         if (values.len != prepared.slot_count or
             self.shape != null or self.slotsItems().len != 0 or !self.slotsAreInline() or
-            self.backing_flags.slots or self.accessorsMap() != null or
+            self.backingFlagsSnapshot().slots or self.accessorsMap() != null or
             self.keyOrder() != null or self.attrsMap() != null or !self.isExtensible())
             return false;
 
@@ -1636,20 +1710,25 @@ pub const Object = struct {
             return;
         }
 
-        const backing = self.backingForTracked(fallback, "slots");
+        const backing_locked = self.lockBacking();
+        defer self.unlockBacking(backing_locked);
+        const storage = try self.ensureStorageLocked(fallback);
+        const backing = self.backingForTrackedLocked(fallback, "slots");
         const state = backing.allocator.create(ObjectSlotsState) catch |err| {
-            if (backing.activated) self.deactivateBacking("slots");
+            if (backing.activated) self.deactivateBackingLocked("slots");
+            self.rollbackStorageLocked(storage);
             return err;
         };
-        const storage = backing.allocator.alloc(Value, inline_slot_capacity * 2) catch |err| {
+        const values = backing.allocator.alloc(Value, inline_slot_capacity * 2) catch |err| {
             backing.allocator.destroy(state);
-            if (backing.activated) self.deactivateBacking("slots");
+            if (backing.activated) self.deactivateBackingLocked("slots");
+            self.rollbackStorageLocked(storage);
             return err;
         };
-        @memcpy(storage[0..old_slots.len], old_slots);
-        state.* = .{ .list = .{ .items = storage[0..old_slots.len], .capacity = storage.len } };
+        @memcpy(values[0..old_slots.len], old_slots);
+        state.* = .{ .list = .{ .items = values[0..old_slots.len], .capacity = values.len } };
         state.list.appendAssumeCapacity(value_);
-        self.slots.store(state, .release);
+        storage.state.slots.store(state, .release);
     }
 
     pub fn elementsAllocator(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator {
@@ -1657,77 +1736,80 @@ pub const Object = struct {
     }
 
     pub inline fn elementsState(self: *const Object) ?*ObjectElementsState {
-        return @constCast(&self.elements).load(.acquire);
+        const storage = self.storageState() orelse return null;
+        return storage.elements.load(.acquire);
     }
 
     pub fn ensureElementsList(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator.Error!*std.ArrayListUnmanaged(Value) {
         const backing_locked = self.lockBacking();
         defer self.unlockBacking(backing_locked);
-        if (self.elements.load(.acquire)) |state| return &state.list;
+        const storage = try self.ensureStorageLocked(fallback);
+        if (storage.state.elements.load(.acquire)) |state| return &state.list;
         const backing = self.backingForTrackedLocked(fallback, "elements_state");
         const state = backing.allocator.create(ObjectElementsState) catch |err| {
             if (backing.activated) self.deactivateBackingLocked("elements_state");
+            self.rollbackStorageLocked(storage);
             return err;
         };
         state.* = .{};
-        self.elements.store(state, .release);
+        storage.state.elements.store(state, .release);
         return &state.list;
     }
 
-    pub fn accessorsAllocator(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator {
-        return self.backingFor(fallback, "accessors");
+    pub fn accessorsAllocator(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator.Error!std.mem.Allocator {
+        return self.ensureBackingFor(fallback, "accessors");
     }
 
-    pub fn keyOrderAllocator(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator {
-        return self.backingFor(fallback, "key_order");
+    pub fn keyOrderAllocator(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator.Error!std.mem.Allocator {
+        return self.ensureBackingFor(fallback, "key_order");
     }
 
-    pub fn attrsAllocator(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator {
-        return self.backingFor(fallback, "attrs");
+    pub fn attrsAllocator(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator.Error!std.mem.Allocator {
+        return self.ensureBackingFor(fallback, "attrs");
     }
 
-    pub fn holesAllocator(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator {
-        return self.backingFor(fallback, "holes");
+    pub fn holesAllocator(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator.Error!std.mem.Allocator {
+        return self.ensureBackingFor(fallback, "holes");
     }
 
-    pub fn weakEntriesAllocator(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator {
-        return self.backingFor(fallback, "weak_entries");
+    pub fn weakEntriesAllocator(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator.Error!std.mem.Allocator {
+        return self.ensureBackingFor(fallback, "weak_entries");
     }
 
-    pub fn finalizationRecordsAllocator(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator {
-        return self.backingFor(fallback, "finalization_records");
+    pub fn finalizationRecordsAllocator(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator.Error!std.mem.Allocator {
+        return self.ensureBackingFor(fallback, "finalization_records");
     }
 
-    pub fn typedArrayAllocator(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator {
-        return self.backingFor(fallback, "typed_array");
+    pub fn typedArrayAllocator(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator.Error!std.mem.Allocator {
+        return self.ensureBackingFor(fallback, "typed_array");
     }
 
     pub fn destroyUninstalledTypedArray(self: *Object, fallback: std.mem.Allocator, ta: *TypedArrayData) void {
-        const a = if (self.backing_flags.allocator_active) self.backing_allocator else fallback;
+        const a = self.backingAllocatorIfActive() orelse fallback;
         a.destroy(ta);
         self.deactivateBacking("typed_array");
     }
 
-    pub fn dataViewAllocator(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator {
-        return self.backingFor(fallback, "data_view");
+    pub fn dataViewAllocator(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator.Error!std.mem.Allocator {
+        return self.ensureBackingFor(fallback, "data_view");
     }
 
-    pub fn temporalAllocator(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator {
-        return self.backingFor(fallback, "temporal");
+    pub fn temporalAllocator(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator.Error!std.mem.Allocator {
+        return self.ensureBackingFor(fallback, "temporal");
     }
 
     pub fn destroyUninstalledTemporal(self: *Object, fallback: std.mem.Allocator, data: *TemporalData) void {
-        const a = if (self.backing_flags.allocator_active) self.backing_allocator else fallback;
+        const a = self.backingAllocatorIfActive() orelse fallback;
         a.destroy(data);
         self.deactivateBacking("temporal");
     }
 
-    pub fn argMapNamesAllocator(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator {
-        return self.backingFor(fallback, "arg_map_names");
+    pub fn argMapNamesAllocator(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator.Error!std.mem.Allocator {
+        return self.ensureBackingFor(fallback, "arg_map_names");
     }
 
-    pub fn argMapSeveredAllocator(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator {
-        return self.backingFor(fallback, "arg_map_severed");
+    pub fn argMapSeveredAllocator(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator.Error!std.mem.Allocator {
+        return self.ensureBackingFor(fallback, "arg_map_severed");
     }
 
     pub fn lockProperties(self: *const Object) void {
@@ -2058,7 +2140,7 @@ pub const Object = struct {
         self.lockElements();
         defer self.unlockElements();
         const cold = try self.ensureCold(fallback);
-        const alloc = self.weakEntriesAllocator(fallback);
+        const alloc = try self.weakEntriesAllocator(fallback);
         if (self.weakEntryIndexUnlocked(key)) |i| {
             cold.weak_entries.items[i].value = v;
             self.weakIndexPut(alloc, key, i);
@@ -2075,7 +2157,7 @@ pub const Object = struct {
         self.lockElements();
         defer self.unlockElements();
         const cold = try self.ensureCold(fallback);
-        const alloc = self.weakEntriesAllocator(fallback);
+        const alloc = try self.weakEntriesAllocator(fallback);
         if (self.weakEntryIndexUnlocked(key)) |i| {
             self.weakIndexPut(alloc, key, i);
             return;
@@ -2133,7 +2215,7 @@ pub const Object = struct {
         self.lockElements();
         defer self.unlockElements();
         const cold = try self.ensureCold(fallback);
-        try cold.finalization_records.append(self.finalizationRecordsAllocator(fallback), record);
+        try cold.finalization_records.append(try self.finalizationRecordsAllocator(fallback), record);
     }
 
     /// FinalizationRegistry `unregister`: remove every record whose token matches
@@ -2214,7 +2296,7 @@ pub const Object = struct {
 
     fn markHoleUnlocked(self: *Object, arena: std.mem.Allocator, i: usize) std.mem.Allocator.Error!void {
         const state = try self.sparseArrayState(arena);
-        const a = self.holesAllocator(arena);
+        const a = try self.holesAllocator(arena);
         if (state.holes == null) {
             state.holes = try a.create(std.AutoHashMapUnmanaged(usize, void));
             state.holes.?.* = .{};
@@ -2653,7 +2735,7 @@ pub const Object = struct {
 
     fn setAttrUnlocked(self: *Object, arena: std.mem.Allocator, name: []const u8, a: PropAttr) std.mem.Allocator.Error!void {
         const cold = try self.ensureCold(arena);
-        const alloc = self.attrsAllocator(arena);
+        const alloc = try self.attrsAllocator(arena);
         if (self.attrsMap() == null) {
             const m = try alloc.create(std.StringHashMapUnmanaged(PropAttr));
             m.* = .{};
@@ -2714,7 +2796,7 @@ pub const Object = struct {
         self.lockProperties();
         defer self.unlockProperties();
         const cold = try self.ensureCold(arena);
-        const alloc = self.accessorsAllocator(arena);
+        const alloc = try self.accessorsAllocator(arena);
         if (cold.private_brands == null) {
             cold.private_brands = try alloc.create(std.StringHashMapUnmanaged(void));
             cold.private_brands.?.* = .{};
@@ -2759,7 +2841,7 @@ pub const Object = struct {
         self.lockProperties();
         defer self.unlockProperties();
         const cold = try self.ensureCold(arena);
-        const alloc = self.accessorsAllocator(arena);
+        const alloc = try self.accessorsAllocator(arena);
         if (self.accessorsMap() == null) {
             const nm = try alloc.create(std.StringHashMapUnmanaged(Accessor));
             nm.* = .{};
@@ -2810,7 +2892,7 @@ pub const Object = struct {
     fn recordKeyOrderUnlocked(self: *Object, arena: std.mem.Allocator, name: []const u8) std.mem.Allocator.Error!void {
         const ko = self.keyOrder() orelse return;
         for (ko.items) |e| if (std.mem.eql(u8, e, name)) return;
-        const alloc = self.keyOrderAllocator(arena);
+        const alloc = try self.keyOrderAllocator(arena);
         try appendOwnedKey(ko, alloc, name);
     }
 
@@ -3646,6 +3728,7 @@ test "ordinary object keeps four named property values inline before migrating" 
     const state = object.slotsState().?;
     state.list.deinit(std.testing.allocator);
     std.testing.allocator.destroy(state);
+    std.testing.allocator.destroy(object.storageState().?);
 }
 
 fn exerciseExternalSlotsOomRollback(allocator: std.mem.Allocator) !void {
@@ -3662,10 +3745,11 @@ fn exerciseExternalSlotsOomRollback(allocator: std.mem.Allocator) !void {
     object.appendSlot(allocator, Value.num(4)) catch |err| {
         try std.testing.expect(object.slotsState() == null);
         try std.testing.expectEqual(Object.inline_slot_capacity, object.slotsItems().len);
-        try std.testing.expect(!object.backing_flags.slots);
+        try std.testing.expect(!object.backingFlagsSnapshot().slots);
         return err;
     };
     const state = object.slotsState().?;
+    defer allocator.destroy(object.storageState().?);
     defer {
         state.list.deinit(allocator);
         allocator.destroy(state);
@@ -3701,6 +3785,42 @@ test "external named slot state publishes once under concurrent growth" {
     const state = object.slotsState().?;
     state.list.deinit(std.heap.page_allocator);
     std.heap.page_allocator.destroy(state);
+    std.heap.page_allocator.destroy(object.storageState().?);
+}
+
+test "Object storage wrapper converges across concurrent slot and element installation" {
+    const root = try Shape.createRoot(std.heap.page_allocator);
+    var object = Object{};
+    for ([_][]const u8{ "a", "b", "c", "d" }, 0..) |name, i| {
+        try object.setOwn(std.heap.page_allocator, root, name, Value.num(@floatFromInt(i)));
+    }
+    try std.testing.expect(object.storageState() == null);
+
+    const previous_locks = Object.element_locks_enabled.swap(true, .acq_rel);
+    defer Object.element_locks_enabled.store(previous_locks, .release);
+    const Worker = struct {
+        fn addSlot(o: *Object, root_shape: *Shape) void {
+            o.setOwn(std.heap.page_allocator, root_shape, "e", Value.num(4)) catch @panic("setOwn failed");
+        }
+        fn addElement(o: *Object) void {
+            o.appendElement(std.heap.page_allocator, Value.num(9)) catch @panic("appendElement failed");
+        }
+    };
+    const slot_thread = try std.Thread.spawn(.{}, Worker.addSlot, .{ &object, root });
+    const element_thread = try std.Thread.spawn(.{}, Worker.addElement, .{&object});
+    slot_thread.join();
+    element_thread.join();
+
+    try std.testing.expectEqual(@as(usize, 5), object.slotsItems().len);
+    try std.testing.expectEqual(@as(usize, 1), object.elementsItems().len);
+    const storage = object.storageState().?;
+    const slots = object.slotsState().?;
+    const elements = object.elementsState().?;
+    slots.list.deinit(std.heap.page_allocator);
+    elements.list.deinit(std.heap.page_allocator);
+    std.heap.page_allocator.destroy(slots);
+    std.heap.page_allocator.destroy(elements);
+    std.heap.page_allocator.destroy(storage);
 }
 
 fn exerciseKeyOrderOomRollback(allocator: std.mem.Allocator) !void {
@@ -3710,6 +3830,7 @@ fn exerciseKeyOrderOomRollback(allocator: std.mem.Allocator) !void {
     var gamma = Shape{ .parent = &beta, .name = "gamma", .slot = 2, .count = 3, .arena = allocator };
     var object = Object{ .shape = &gamma };
     object.initInlineSlots();
+    defer if (object.storageState()) |storage| allocator.destroy(storage);
     defer if (object.coldState()) |cold| allocator.destroy(cold);
     defer if (object.keyOrder()) |order| {
         for (order.items) |key| allocator.free(key);
@@ -3775,13 +3896,17 @@ test "fixed-shape object allocation publishes validated literal shape into inlin
     var accessored = Object{};
     accessored.initInlineSlots();
     var accessored_cold = ObjectColdState{ .accessors = .init(&accessor_map) };
-    accessored.cold.store(&accessored_cold, .monotonic);
+    var accessored_storage = ObjectStorageState{ .owner_allocator = arena.allocator() };
+    accessored_storage.cold.store(&accessored_cold, .monotonic);
+    accessored.storage.store(&accessored_storage, .monotonic);
     try std.testing.expect(!accessored.initializePreparedInlineLiteralShape(prepared, &values));
 
     var attrs_map: std.StringHashMapUnmanaged(PropAttr) = .empty;
     var attributed_cold = ObjectColdState{ .attrs = &attrs_map };
     var attributed = Object{};
-    attributed.cold.store(&attributed_cold, .monotonic);
+    var attributed_storage = ObjectStorageState{ .owner_allocator = arena.allocator() };
+    attributed_storage.cold.store(&attributed_cold, .monotonic);
+    attributed.storage.store(&attributed_storage, .monotonic);
     attributed.initInlineSlots();
     try std.testing.expect(!attributed.initializePreparedInlineLiteralShape(prepared, &values));
 
@@ -3789,7 +3914,9 @@ test "fixed-shape object allocation publishes validated literal shape into inlin
     var ordered = Object{};
     ordered.initInlineSlots();
     var ordered_cold = ObjectColdState{ .key_order = .init(&key_order) };
-    ordered.cold.store(&ordered_cold, .monotonic);
+    var ordered_storage = ObjectStorageState{ .owner_allocator = arena.allocator() };
+    ordered_storage.cold.store(&ordered_cold, .monotonic);
+    ordered.storage.store(&ordered_storage, .monotonic);
     try std.testing.expect(!ordered.initializePreparedInlineLiteralShape(prepared, &values));
 
     var sealed = Object{};
@@ -3935,7 +4062,9 @@ test "Object.has_indexed_property atomic flag converges under concurrent set" {
 test "Object.restricted_to CAS lets exactly one concurrent claimer win" {
     var o = Object{};
     var cold = ObjectColdState{};
-    o.cold.store(&cold, .release);
+    var storage = ObjectStorageState{ .owner_allocator = std.testing.allocator };
+    storage.cold.store(&cold, .release);
+    o.storage.store(&storage, .release);
     const Worker = struct {
         fn run(target: *Object, my_tid: u64, won: *std.atomic.Value(u32)) void {
             // Mirror Thread.restrict's claim: CAS 0 -> tid; null means we won.
@@ -3955,6 +4084,7 @@ test "WeakMap and WeakSet entry delete is unordered tail removal" {
     const a = std.testing.allocator;
     var o = Object{ .is_weak = true, .is_map = true };
     const cold = try o.ensureCold(a);
+    defer a.destroy(o.storageState().?);
     defer a.destroy(cold);
     defer cold.weak_entries.deinit(a);
     defer cold.weak_index.deinit(a);
@@ -3978,6 +4108,7 @@ test "FinalizationRegistry unregister stable-compacts matching records" {
     const a = std.testing.allocator;
     var o = Object{ .behavior = .{ .is_finalization_registry = true } };
     const cold = try o.ensureCold(a);
+    defer a.destroy(o.storageState().?);
     defer a.destroy(cold);
     defer cold.finalization_records.deinit(a);
 
