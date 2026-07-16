@@ -158,9 +158,18 @@ and shared-realm tests are required before those paths can enter native code.
 
 Performance evidence uses the symmetric JSC protocol in
 [`benchmarks.md`](benchmarks.md). Quick paired measurements guide development;
-the 1,232-sample publication matrix is rerun only after a meaningful batch of
+the 1,540-sample publication matrix is rerun only after a meaningful batch of
 optimizations. A speedup is not accepted if checksums, supported rows, or
 execution accounting differ.
+
+The [July 16 dispatch profile](.data/baseline-jit-profile-2026-07-16.md)
+captures arithmetic, properties, arrays, and recursive Fibonacci from the same
+ReleaseFast comparison runner. Arithmetic spends 93.3% of reported collapsed
+leaf samples in generated `MAP_JIT` code with no residual `runChunk` leaves;
+properties split between guarded VM kernels and residual dispatch; arrays
+remain primarily residual dispatch plus dense-array runtime helpers; Fibonacci
+spends 96.6% in the guarded observable-recurrence kernel. This is the current
+evidence boundary for broader native coverage.
 
 Repeated focused test builds grow the reproducible `.zig-cache` quickly; see
 [`dev-cache.md`](dev-cache.md) for inspecting and safely reclaiming it.

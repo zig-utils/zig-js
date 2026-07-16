@@ -144,7 +144,7 @@ The latest [exact-parent shared object-churn A/B](docs/.data/object-churn-amorti
 
 Full hosted comparison runs are available through the manual-only [Performance workflow](.github/workflows/performance.yml). Its report and raw TSV are retained as artifacts for review; hosted timing is never an ordinary-CI gate or automatically substituted for the documented reference-host baseline.
 
-Implemented performance machinery includes the bytecode VM, frame slots/upvalues, object shapes, inline caches, guarded loop and recurrence kernels, a baseline native tier, the engine-wide 8-byte NaN-boxed `Value`, GC slab backing with per-chunk reusable-slot bitmaps plus lock-amortized allocation and sweep-release batches, and an opt-in-GC one-cycle nursery that reclaims young garbage at quiescent boundaries and immediately tenures survivors. Future work includes broader native-tier coverage, nursery sizing and pause optimization, deeper generational policies, and a general optimizing tier.
+Implemented performance machinery includes the bytecode VM, frame slots/upvalues, object shapes, inline caches, guarded loop and recurrence kernels, a [profiled baseline native tier](docs/.data/baseline-jit-profile-2026-07-16.md), the engine-wide 8-byte NaN-boxed `Value`, GC slab backing with per-chunk reusable-slot bitmaps plus lock-amortized allocation and sweep-release batches, and an opt-in-GC one-cycle nursery that reclaims young garbage at quiescent boundaries and immediately tenures survivors. Future work includes broader native-tier coverage, nursery sizing and pause optimization, deeper generational policies, and a general optimizing tier.
 
 ## Language And Runtime Coverage
 
