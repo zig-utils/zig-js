@@ -124,11 +124,16 @@ size_t      JSObjectGetArrayBufferByteLength(JSContextRef, JSObjectRef, JSValueR
 ```
 
 ```c [Strings]
+JSStringRef JSStringCreateWithCharacters(const JSChar* characters, size_t length);
 JSStringRef JSStringCreateWithUTF8CString(const char* string);
 JSStringRef JSStringRetain(JSStringRef);
 void        JSStringRelease(JSStringRef);
 size_t      JSStringGetLength(JSStringRef);
+const JSChar* JSStringGetCharactersPtr(JSStringRef);
+size_t      JSStringGetMaximumUTF8CStringSize(JSStringRef);
 size_t      JSStringGetUTF8CString(JSStringRef, char* buffer, size_t bufferSize);
+bool        JSStringIsEqual(JSStringRef, JSStringRef);
+bool        JSStringIsEqualToUTF8CString(JSStringRef, const char*);
 ```
 
 ```c [Workers]

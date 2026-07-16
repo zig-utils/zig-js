@@ -1376,6 +1376,13 @@ export fn JSObjectIsConstructor(ctx: JSContextRef, object: JSObjectRef) callconv
 
 // ---- JSString lifecycle ------------------------------------------------
 
+export fn JSStringCreateWithCharacters(chars: [*c]const u16, num_chars: usize) callconv(.c) JSStringRef {
+    if (chars == null and num_chars != 0) return null;
+    const units: []const u16 = if (num_chars == 0) &.{} else chars[0..num_chars];
+    const js = JsString.createUtf16(gpa, units) catch return null;
+    return @ptrCast(js);
+}
+
 export fn JSStringCreateWithUTF8CString(utf8: [*c]const u8) callconv(.c) JSStringRef {
     if (utf8 == null) return null;
     const js = JsString.create(gpa, std.mem.sliceTo(utf8, 0)) catch return null;
@@ -1398,14 +1405,42 @@ export fn JSStringGetLength(str: JSStringRef) callconv(.c) usize {
     return s.utf16Len();
 }
 
+export fn JSStringGetCharactersPtr(str: JSStringRef) callconv(.c) [*c]const u16 {
+    const s = strFrom(str) orelse return null;
+    return s.utf16.ptr;
+}
+
+export fn JSStringGetMaximumUTF8CStringSize(str: JSStringRef) callconv(.c) usize {
+    const s = strFrom(str) orelse return 0;
+    const payload = std.math.mul(usize, s.utf16.len, 3) catch return std.math.maxInt(usize);
+    return std.math.add(usize, payload, 1) catch std.math.maxInt(usize);
+}
+
 export fn JSStringGetUTF8CString(str: JSStringRef, buffer: [*c]u8, buffer_size: usize) callconv(.c) usize {
     const s = strFrom(str) orelse return 0;
     if (buffer_size == 0) return 0;
     if (buffer == null) return 0;
-    const copy_len = @min(s.bytes.len, buffer_size - 1);
+    var copy_len = @min(s.bytes.len, buffer_size - 1);
+    if (copy_len < s.bytes.len) {
+        while (copy_len > 0 and s.bytes[copy_len] & 0xC0 == 0x80) copy_len -= 1;
+    }
     @memcpy(buffer[0..copy_len], s.bytes[0..copy_len]);
     buffer[copy_len] = 0;
     return copy_len + 1; // bytes written, including the null terminator
+}
+
+export fn JSStringIsEqual(a: JSStringRef, b: JSStringRef) callconv(.c) bool {
+    const left = strFrom(a) orelse return false;
+    const right = strFrom(b) orelse return false;
+    return std.mem.eql(u16, left.utf16, right.utf16);
+}
+
+export fn JSStringIsEqualToUTF8CString(a: JSStringRef, b: [*c]const u8) callconv(.c) bool {
+    const left = strFrom(a) orelse return false;
+    if (b == null) return false;
+    const utf16 = std.unicode.utf8ToUtf16LeAlloc(gpa, std.mem.sliceTo(b, 0)) catch return false;
+    defer gpa.free(utf16);
+    return std.mem.eql(u16, left.utf16, utf16);
 }
 
 // ---- JSWorker: embedder worker agents (issue #1 Phase 5) ----------------
@@ -1582,9 +1617,47 @@ test "C-API: round-trip a UTF-8 string" {
     try std.testing.expectEqualStrings("hello", buf[0 .. written - 1]);
 }
 
+test "C-API: JSString preserves UTF-16 and compares by code units" {
+    const units = [_]u16{ 'A', 0xD83D, 0xDE00, 0xD800, 'Z' };
+    const string = JSStringCreateWithCharacters(&units, units.len) orelse return error.StringInitFailed;
+    defer JSStringRelease(string);
+
+    try std.testing.expectEqual(units.len, JSStringGetLength(string));
+    const borrowed = JSStringGetCharactersPtr(string);
+    try std.testing.expect(borrowed != null);
+    try std.testing.expectEqualSlices(u16, &units, borrowed[0..units.len]);
+    try std.testing.expectEqual(units.len * 3 + 1, JSStringGetMaximumUTF8CStringSize(string));
+
+    const same = JSStringCreateWithCharacters(&units, units.len) orelse return error.StringInitFailed;
+    defer JSStringRelease(same);
+    try std.testing.expect(JSStringIsEqual(string, same));
+    try std.testing.expect(!JSStringIsEqualToUTF8CString(string, "A😀�Z"));
+
+    const empty = JSStringCreateWithCharacters(null, 0) orelse return error.StringInitFailed;
+    defer JSStringRelease(empty);
+    try std.testing.expectEqual(@as(usize, 0), JSStringGetLength(empty));
+    try std.testing.expect(JSStringCreateWithCharacters(null, 1) == null);
+}
+
+test "C-API: JSString UTF-8 truncation preserves code point boundaries" {
+    const string = JSStringCreateWithUTF8CString("A😀Z") orelse return error.StringInitFailed;
+    defer JSStringRelease(string);
+    try std.testing.expect(JSStringIsEqualToUTF8CString(string, "A😀Z"));
+    try std.testing.expect(!JSStringIsEqualToUTF8CString(string, "A😀X"));
+
+    var short: [4]u8 = undefined;
+    const written = JSStringGetUTF8CString(string, &short, short.len);
+    try std.testing.expectEqual(@as(usize, 2), written);
+    try std.testing.expectEqualStrings("A", short[0 .. written - 1]);
+}
+
 test "C-API: JSString null C pointers are rejected safely" {
     try std.testing.expect(JSStringCreateWithUTF8CString(null) == null);
     try std.testing.expectEqual(@as(usize, 0), JSStringGetLength(null));
+    try std.testing.expect(JSStringGetCharactersPtr(null) == null);
+    try std.testing.expectEqual(@as(usize, 0), JSStringGetMaximumUTF8CStringSize(null));
+    try std.testing.expect(!JSStringIsEqual(null, null));
+    try std.testing.expect(!JSStringIsEqualToUTF8CString(null, ""));
     try std.testing.expectEqual(@as(usize, 0), JSStringGetUTF8CString(null, null, 8));
 
     const s = JSStringCreateWithUTF8CString("hello") orelse return error.StringInitFailed;

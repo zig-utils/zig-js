@@ -25,6 +25,15 @@ int main(void)
     if (!answer || exception || JSValueToNumber(context, answer, &exception) != 42.0)
         return 2;
 
+    const JSChar utf16[] = { 'z', 'i', 'g', 0xd83d, 0xde00 };
+    JSStringRef wide = JSStringCreateWithCharacters(utf16, 5);
+    if (!wide || JSStringGetLength(wide) != 5 ||
+        JSStringGetMaximumUTF8CStringSize(wide) != 16 ||
+        JSStringGetCharactersPtr(wide)[4] != 0xde00 ||
+        !JSStringIsEqualToUTF8CString(wide, "zig\xf0\x9f\x98\x80"))
+        return 8;
+    JSStringRelease(wide);
+
     uint8_t* bytes = (uint8_t*)malloc(8);
     if (!bytes)
         return 3;
