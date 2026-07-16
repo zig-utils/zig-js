@@ -677,6 +677,9 @@ pub const ObjectColdState = struct {
     /// atomic RMW. Date is the only rare payload mutated after publication.
     date_ms_bits: std.atomic.Value(u64) = .init(0),
     private_brands: ?*std.StringHashMapUnmanaged(void) = null,
+    /// Per-property attribute overrides are rare on ordinary objects. Keep the
+    /// atomically published map pointer off the common allocation payload.
+    attrs: ?*std.StringHashMapUnmanaged(PropAttr) = null,
     arg_map_env: ?*anyopaque = null,
     arg_map_names: [][]const u8 = &.{},
     arg_map_severed: []std.atomic.Value(bool) = &.{},
@@ -841,9 +844,7 @@ pub const Object = struct {
     /// so the pointer is the only unsynchronized access (mirrors `accessors`).
     key_order: std.atomic.Value(?*std.ArrayListUnmanaged([]const u8)) = .init(null),
     elements: std.ArrayListUnmanaged(Value) = .empty,
-    /// Per-property attribute overrides, lazily allocated. Absent name = the
-    /// all-true default (a plain-assignment property). See `PropAttr`.
-    attrs: ?*std.StringHashMapUnmanaged(PropAttr) = null,
+    /// Per-property attribute overrides live in the cold sidecar.
     /// When false (set by `Object.preventExtensions`/`seal`/`freeze`), new own
     /// properties can't be added. Accessed atomically via `isExtensible`/
     /// `setExtensible`: under `parallel_js` a peer can seal/freeze a shared object
@@ -1551,7 +1552,7 @@ pub const Object = struct {
         if (values.len != prepared.slot_count or
             self.shape != null or self.slots.items.len != 0 or !self.slotsAreInline() or
             self.backing_flags.slots or self.accessors.load(.monotonic) != null or
-            self.key_order.load(.monotonic) != null or self.attrs != null or !self.isExtensible())
+            self.key_order.load(.monotonic) != null or self.attrsMap() != null or !self.isExtensible())
             return false;
 
         for (values, 0..) |value_, index| {
@@ -2505,7 +2506,8 @@ pub const Object = struct {
     /// with the atomic publish in `setAttrUnlocked`. Map *contents* stay guarded
     /// by `lockProperties`.
     pub inline fn attrsMap(self: *const Object) ?*std.StringHashMapUnmanaged(PropAttr) {
-        return @atomicLoad(?*std.StringHashMapUnmanaged(PropAttr), &self.attrs, .monotonic);
+        const cold = self.coldState() orelse return null;
+        return @atomicLoad(?*std.StringHashMapUnmanaged(PropAttr), &cold.attrs, .monotonic);
     }
 
     /// The attributes of own property `name` (all-true default if no override).
@@ -2530,13 +2532,14 @@ pub const Object = struct {
     }
 
     fn setAttrUnlocked(self: *Object, arena: std.mem.Allocator, name: []const u8, a: PropAttr) std.mem.Allocator.Error!void {
+        const cold = try self.ensureCold(arena);
         const alloc = self.attrsAllocator(arena);
         if (self.attrsMap() == null) {
             const m = try alloc.create(std.StringHashMapUnmanaged(PropAttr));
             m.* = .{};
             // Publish the map pointer atomically so off-lock `attrsMap()` readers
             // (fast-path guards) synchronize with it; content stays under the lock.
-            @atomicStore(?*std.StringHashMapUnmanaged(PropAttr), &self.attrs, m, .release);
+            @atomicStore(?*std.StringHashMapUnmanaged(PropAttr), &cold.attrs, m, .release);
         }
         const attrs = self.attrsMap().?;
         if (attrs.getPtr(name)) |value_ptr| {
@@ -2825,7 +2828,7 @@ pub const Object = struct {
         if ((self.shape orelse root) != parent or child.slot != slot) return false;
         if (self.slots.items.len != @as(usize, slot) or child.count != slot + 1) return false;
         if (child.name == null or self.accessors.load(.monotonic) != null or
-            self.key_order.load(.monotonic) != null or self.attrs != null or !self.isExtensible()) return false;
+            self.key_order.load(.monotonic) != null or self.attrsMap() != null or !self.isExtensible()) return false;
 
         gcBarrier(self, v);
         try self.appendSlot(arena, v);
@@ -3593,7 +3596,9 @@ test "fixed-shape object allocation publishes validated literal shape into inlin
     try std.testing.expect(!accessored.initializePreparedInlineLiteralShape(prepared, &values));
 
     var attrs_map: std.StringHashMapUnmanaged(PropAttr) = .empty;
-    var attributed = Object{ .attrs = &attrs_map };
+    var attributed_cold = ObjectColdState{ .attrs = &attrs_map };
+    var attributed = Object{};
+    attributed.cold.store(&attributed_cold, .monotonic);
     attributed.initInlineSlots();
     try std.testing.expect(!attributed.initializePreparedInlineLiteralShape(prepared, &values));
 

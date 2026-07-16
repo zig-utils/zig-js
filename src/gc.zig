@@ -326,12 +326,12 @@ fn finalizeObjectBacking(o: *Object, a: std.mem.Allocator) usize {
         released += 1;
     }
     if (flags.attrs) {
-        if (o.attrs) |attrs| {
+        if (o.attrsMap()) |attrs| {
             var it = attrs.keyIterator();
             while (it.next()) |key| a.free(key.*);
             attrs.deinit(a);
             a.destroy(attrs);
-            o.attrs = null;
+            o.coldState().?.attrs = null;
         }
         released += 1;
     }
@@ -963,7 +963,7 @@ pub const Binding = struct {
 pub const Heap = gc.Heap(Binding);
 
 test "Object and cold sidecar fit the 256-byte GC slab" {
-    try std.testing.expectEqual(@as(usize, 208), @sizeOf(Object));
+    try std.testing.expectEqual(@as(usize, 200), @sizeOf(Object));
     try std.testing.expect(Heap.cellAllocationBytes(Object) <= 256);
     try std.testing.expect(Heap.cellAllocationBytes(value.ObjectColdState) <= 256);
 }
