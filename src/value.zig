@@ -1735,9 +1735,12 @@ pub const Object = struct {
         // otherwise materializes `cold.rare.date` through `__tsan_memcpy` before
         // inlining `Value.load`, turning the source-level atomic read into a
         // plain TSan-visible copy. A typed pointer to the u64 storage forces the
-        // intended atomic lowering on every supported compiler revision.
-        const bits: *const u64 = &@field(cold.rare, "date").ms_bits.raw;
-        return @bitCast(@atomicLoad(u64, bits, .monotonic));
+        // intended atomic lowering on every supported compiler revision. Zig
+        // dev.1413 also mis-instruments a direct u64 `@atomicLoad` here as a
+        // memcpy, so use a zero-effect atomic RMW to force an atomic read while
+        // preserving every payload bit exactly.
+        const bits: *u64 = &@field(@constCast(cold).rare, "date").ms_bits.raw;
+        return @bitCast(@atomicRmw(u64, bits, .Or, 0, .monotonic));
     }
     pub fn initDateMs(self: *Object, fallback: std.mem.Allocator, v: f64) std.mem.Allocator.Error!void {
         const state = try self.ensureRare(fallback, .date, .{});
