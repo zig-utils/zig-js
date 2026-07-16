@@ -10851,7 +10851,7 @@ pub const Interpreter = struct {
             }
         } else if (arrayElementIndex(key)) |i| {
             if (ro.attrsMap() != null or ro.accessors.load(.monotonic) != null or ro.has_indexed_property.load(.monotonic) or
-                ro.key_order.load(.monotonic) != null or !self.arrayProtoChainCleanForIndexedSet(ro))
+                ro.keyOrder() != null or !self.arrayProtoChainCleanForIndexedSet(ro))
             {
                 try self.setProp(ro, key, v);
                 if (self.global_object != null and ro == self.global_object.? and had_receiver_own) {

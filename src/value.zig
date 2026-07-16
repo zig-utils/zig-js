@@ -677,6 +677,9 @@ pub const ObjectColdState = struct {
     /// atomic RMW. Date is the only rare payload mutated after publication.
     date_ms_bits: std.atomic.Value(u64) = .init(0),
     private_brands: ?*std.StringHashMapUnmanaged(void) = null,
+    /// Mixed data/accessor insertion order is needed only after an accessor or
+    /// dictionary-style rebuild. Ordinary shape-only objects stay sidecar-free.
+    key_order: std.atomic.Value(?*std.ArrayListUnmanaged([]const u8)) = .init(null),
     /// Per-property attribute overrides are rare on ordinary objects. Keep the
     /// atomically published map pointer off the common allocation payload.
     attrs: ?*std.StringHashMapUnmanaged(PropAttr) = null,
@@ -830,19 +833,7 @@ pub const Object = struct {
     /// returns, an instance of a different evaluation of the class) is rejected.
     /// Lazily allocated. Keyed by the (evaluation-unique) private storage name.
     // Private brand metadata lives in the cold sidecar.
-    /// All own named keys (data AND accessor) in creation order — allocated
-    /// lazily only when an accessor is first added, since data slots otherwise
-    /// keep insertion order via the shape chain. `ownKeys` uses this to interleave
-    /// data and accessor keys by creation order (the shape can't, as accessors
-    /// live in a side map). May hold stale/duplicate entries (deleted or re-added
-    /// keys) — readers re-check membership and keep each key's LAST occurrence.
-    /// The POINTER is accessed atomically (`.load`/`.store(.monotonic)`, a plain
-    /// mov): under `parallel_js` a peer publishes it null->non-null under
-    /// `lockProperties` (`ensureKeyOrderUnlocked`, first accessor) while other
-    /// threads read the unlocked `key_order == null` fast-path guards — a data race
-    /// on a plain field. The list CONTENTS are only mutated under `lockProperties`,
-    /// so the pointer is the only unsynchronized access (mirrors `accessors`).
-    key_order: std.atomic.Value(?*std.ArrayListUnmanaged([]const u8)) = .init(null),
+    /// Mixed data/accessor insertion order lives in the cold sidecar.
     elements: std.ArrayListUnmanaged(Value) = .empty,
     /// Per-property attribute overrides live in the cold sidecar.
     /// When false (set by `Object.preventExtensions`/`seal`/`freeze`), new own
@@ -1095,6 +1086,21 @@ pub const Object = struct {
 
     pub inline fn coldState(self: *const Object) ?*ObjectColdState {
         return @constCast(&self.cold).load(.acquire);
+    }
+
+    /// Atomic view of the cold key-order pointer. Contents remain protected by
+    /// `property_lock`; null is the shape-chain-only common case.
+    pub inline fn keyOrder(self: *const Object) ?*std.ArrayListUnmanaged([]const u8) {
+        const cold = self.coldState() orelse return null;
+        return cold.key_order.load(.monotonic);
+    }
+
+    inline fn setKeyOrder(self: *Object, order: ?*std.ArrayListUnmanaged([]const u8)) void {
+        const cold = self.coldState() orelse {
+            std.debug.assert(order == null);
+            return;
+        };
+        cold.key_order.store(order, .monotonic);
     }
 
     fn ensureRare(
@@ -1552,7 +1558,7 @@ pub const Object = struct {
         if (values.len != prepared.slot_count or
             self.shape != null or self.slots.items.len != 0 or !self.slotsAreInline() or
             self.backing_flags.slots or self.accessors.load(.monotonic) != null or
-            self.key_order.load(.monotonic) != null or self.attrsMap() != null or !self.isExtensible())
+            self.keyOrder() != null or self.attrsMap() != null or !self.isExtensible())
             return false;
 
         for (values, 0..) |value_, index| {
@@ -2325,7 +2331,7 @@ pub const Object = struct {
     }
 
     fn deinitKeyOrderUnlocked(self: *Object) void {
-        if (self.key_order.load(.monotonic)) |ord| {
+        if (self.keyOrder()) |ord| {
             if (self.activeBackingAllocator("key_order")) |a| {
                 for (ord.items) |key| a.free(key);
                 ord.deinit(a);
@@ -2333,7 +2339,7 @@ pub const Object = struct {
                 self.deactivateBacking("key_order");
             }
         }
-        self.key_order.store(null, .monotonic);
+        self.setKeyOrder(null);
     }
 
     pub fn replaceKeyOrder(self: *Object, arena: std.mem.Allocator, names: []const []const u8) std.mem.Allocator.Error!void {
@@ -2351,7 +2357,8 @@ pub const Object = struct {
         // call `deinitKeyOrderUnlocked` for the swap: it deactivates the backing
         // flag, but the replacement list uses that same backing store and still
         // needs to be visible to the GC finalizer.
-        const old_key_order = self.key_order.load(.monotonic);
+        const cold = try self.ensureCold(arena);
+        const old_key_order = self.keyOrder();
         const old_backing_allocator = self.activeBackingAllocator("key_order");
         const old_uses_backing = old_backing_allocator != null;
         const backing = self.backingForTracked(arena, "key_order");
@@ -2373,7 +2380,7 @@ pub const Object = struct {
                 a.destroy(ord);
             }
         }
-        self.key_order.store(ko, .monotonic);
+        cold.key_order.store(ko, .monotonic);
     }
 
     /// Whether dense array index `i` is a hole (absent).
@@ -2432,7 +2439,7 @@ pub const Object = struct {
                 return false;
             }
         }.f;
-        if (self.key_order.load(.monotonic)) |ord| {
+        if (self.keyOrder()) |ord| {
             // Creation order across data + accessor keys. Keep each present key's
             // LAST occurrence (a deleted-then-re-added key sorts to its new spot).
             for (ord.items, 0..) |k, i| {
@@ -2687,7 +2694,7 @@ pub const Object = struct {
     }
 
     fn recordKeyOrderUnlocked(self: *Object, arena: std.mem.Allocator, name: []const u8) std.mem.Allocator.Error!void {
-        const ko = self.key_order.load(.monotonic) orelse return;
+        const ko = self.keyOrder() orelse return;
         for (ko.items) |e| if (std.mem.eql(u8, e, name)) return;
         const alloc = self.keyOrderAllocator(arena);
         try appendOwnedKey(ko, alloc, name);
@@ -2702,7 +2709,8 @@ pub const Object = struct {
     }
 
     fn ensureKeyOrderUnlocked(self: *Object, arena: std.mem.Allocator) std.mem.Allocator.Error!void {
-        if (self.key_order.load(.monotonic) != null) return;
+        if (self.keyOrder() != null) return;
+        const cold = try self.ensureCold(arena);
         const backing = self.backingForTracked(arena, "key_order");
         const alloc = backing.allocator;
         errdefer if (backing.activated) self.deactivateBacking("key_order");
@@ -2722,7 +2730,7 @@ pub const Object = struct {
         }
         std.mem.reverse([]const u8, seed.items); // newest-first → insertion order
         for (seed.items) |n| try appendOwnedKey(ko, alloc, n);
-        self.key_order.store(ko, .monotonic);
+        cold.key_order.store(ko, .monotonic);
     }
 
     /// Read an own named property, or null if absent. No allocation.
@@ -2767,7 +2775,7 @@ pub const Object = struct {
         // A new data key on an accessor-bearing object records its creation order
         // (a data↔accessor conversion keeps its position; deleteOwn drops stale
         // entries so a genuinely re-added key lands at the end).
-        if (self.key_order.load(.monotonic) != null) try self.recordKeyOrderUnlocked(arena, name);
+        if (self.keyOrder() != null) try self.recordKeyOrderUnlocked(arena, name);
     }
 
     pub const AccessorDeleteResult = enum {
@@ -2828,7 +2836,7 @@ pub const Object = struct {
         if ((self.shape orelse root) != parent or child.slot != slot) return false;
         if (self.slots.items.len != @as(usize, slot) or child.count != slot + 1) return false;
         if (child.name == null or self.accessors.load(.monotonic) != null or
-            self.key_order.load(.monotonic) != null or self.attrsMap() != null or !self.isExtensible()) return false;
+            self.keyOrder() != null or self.attrsMap() != null or !self.isExtensible()) return false;
 
         gcBarrier(self, v);
         try self.appendSlot(arena, v);
@@ -2866,16 +2874,16 @@ pub const Object = struct {
             try saved.append(arena, .{ .k = k, .v = v, .a = self.getAttrUnlocked(k) });
         }
 
-        const old_key_order = self.key_order.load(.monotonic);
+        const old_key_order = self.keyOrder();
         self.shape = root;
         self.resetSlotsForRebuildUnlocked();
         self.deleteAttrUnlocked(key);
-        self.key_order.store(null, .monotonic);
+        self.setKeyOrder(null);
         for (saved.items) |entry| {
             try self.setOwnUnlocked(arena, root, entry.k, entry.v);
             try self.setAttrUnlocked(arena, entry.k, entry.a);
         }
-        self.key_order.store(old_key_order, .monotonic);
+        self.setKeyOrder(old_key_order);
         if (preserve_order) {
             // Data->accessor conversion keeps the property's original creation
             // position; `setAccessor` will reuse this existing key-order entry.
@@ -3529,7 +3537,8 @@ fn exerciseKeyOrderOomRollback(allocator: std.mem.Allocator) !void {
     var gamma = Shape{ .parent = &beta, .name = "gamma", .slot = 2, .count = 3, .arena = allocator };
     var object = Object{ .shape = &gamma };
     object.initInlineSlots();
-    defer if (object.key_order.load(.monotonic)) |order| {
+    defer if (object.coldState()) |cold| allocator.destroy(cold);
+    defer if (object.keyOrder()) |order| {
         for (order.items) |key| allocator.free(key);
         order.deinit(allocator);
         allocator.destroy(order);
@@ -3538,7 +3547,7 @@ fn exerciseKeyOrderOomRollback(allocator: std.mem.Allocator) !void {
     try object.ensureKeyOrder(allocator);
     try object.recordKeyOrder(allocator, "delta");
 
-    const order = object.key_order.load(.monotonic).?;
+    const order = object.keyOrder().?;
     try std.testing.expectEqual(@as(usize, 4), order.items.len);
     try std.testing.expectEqualStrings("alpha", order.items[0]);
     try std.testing.expectEqualStrings("delta", order.items[3]);
@@ -3605,7 +3614,8 @@ test "fixed-shape object allocation publishes validated literal shape into inlin
     var key_order: std.ArrayListUnmanaged([]const u8) = .empty;
     var ordered = Object{};
     ordered.initInlineSlots();
-    ordered.key_order.store(&key_order, .monotonic);
+    var ordered_cold = ObjectColdState{ .key_order = .init(&key_order) };
+    ordered.cold.store(&ordered_cold, .monotonic);
     try std.testing.expect(!ordered.initializePreparedInlineLiteralShape(prepared, &values));
 
     var sealed = Object{};
