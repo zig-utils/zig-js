@@ -637,7 +637,7 @@ pub const ObjectRareState = union(ObjectRareTag) {
         name: []const u8 = "",
         ctor: ?[]const u8 = null,
     },
-    date: struct { ms_bits: std.atomic.Value(u64) = .init(0) },
+    date: struct {},
     module_ns: struct { ptr: ?*anyopaque = null },
     weak_ref: struct { target: ?*Object = null },
     host_callback: struct {
@@ -672,6 +672,10 @@ pub const ObjectColdState = struct {
     /// probe for one exotic kind cannot race another kind's `none` transition.
     rare_tag: std.atomic.Value(ObjectRareTag) = .init(.none),
     rare: ObjectRareState = .{ .none = {} },
+    /// Kept outside the tagged union because Zig dev.1413 materializes even an
+    /// explicitly addressed union payload through `__tsan_memcpy` before an
+    /// atomic RMW. Date is the only rare payload mutated after publication.
+    date_ms_bits: std.atomic.Value(u64) = .init(0),
     private_brands: ?*std.StringHashMapUnmanaged(void) = null,
     arg_map_env: ?*anyopaque = null,
     arg_map_names: [][]const u8 = &.{},
@@ -1731,24 +1735,18 @@ pub const Object = struct {
     pub fn dateMs(self: *const Object) f64 {
         const cold = self.coldState() orelse return 0;
         if (!cold.hasRare(.date)) return 0;
-        // Take the address of the active union payload explicitly. Zig dev.1413
-        // otherwise materializes `cold.rare.date` through `__tsan_memcpy` before
-        // inlining `Value.load`, turning the source-level atomic read into a
-        // plain TSan-visible copy. A typed pointer to the u64 storage forces the
-        // intended atomic lowering on every supported compiler revision. Zig
-        // dev.1413 also mis-instruments a direct u64 `@atomicLoad` here as a
-        // memcpy, so use a zero-effect atomic RMW to force an atomic read while
-        // preserving every payload bit exactly.
-        const bits: *u64 = &@field(@constCast(cold).rare, "date").ms_bits.raw;
-        return @bitCast(@atomicRmw(u64, bits, .Or, 0, .monotonic));
+        // A zero-effect RMW forces atomic TSan instrumentation on every Zig
+        // revision while preserving every IEEE-754 payload bit exactly.
+        return @bitCast(@constCast(&cold.date_ms_bits).fetchOr(0, .monotonic));
     }
     pub fn initDateMs(self: *Object, fallback: std.mem.Allocator, v: f64) std.mem.Allocator.Error!void {
-        const state = try self.ensureRare(fallback, .date, .{});
-        state.ms_bits.store(@bitCast(v), .monotonic);
+        const cold = try self.ensureCold(fallback);
+        cold.date_ms_bits.store(@bitCast(v), .monotonic);
+        // `ensureRare` release-publishes the Date tag after the initial bits.
+        _ = try self.ensureRare(fallback, .date, .{});
     }
     pub fn setDateMs(self: *Object, v: f64) void {
-        const bits: *u64 = &@field(self.coldState().?.rare, "date").ms_bits.raw;
-        @atomicStore(u64, bits, @bitCast(v), .monotonic);
+        self.coldState().?.date_ms_bits.store(@bitCast(v), .monotonic);
     }
 
     pub fn elementsLen(self: *const Object) usize {
