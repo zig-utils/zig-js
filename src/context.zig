@@ -2239,6 +2239,9 @@ pub const Context = struct {
     /// direct single-owner `destroy()` contract; `JSGlobalContextCreate*` sets
     /// this to one and `JSGlobalContextRetain/Release` maintain it.
     c_api_ref_count: std.atomic.Value(usize) = .init(0),
+    /// Embedder metadata set through JSGlobalContextSetName. Store exact UTF-16
+    /// code units in the arena; the C boundary returns a fresh JSStringRef copy.
+    c_api_name_utf16: ?[]const u16 = null,
     /// Best-effort source location for the last evaluation parse failure. This
     /// lets public embedding surfaces attach sourceURL/line metadata without
     /// widening the compact `RunError` error set.
@@ -3932,6 +3935,35 @@ pub const Context = struct {
     /// so behavior is identical either way — the VM just handles the hot subset.
     pub fn evaluate(self: *Context, source: []const u8) RunError!value.Value {
         return self.evaluateWithThis(source, Value.obj(self.global_object));
+    }
+
+    /// Parse global Script source and apply the same early-error scan as
+    /// evaluation, without creating an Interpreter or executing any code.
+    pub fn checkScriptSyntax(self: *Context, source: []const u8) RunError!void {
+        if (self.gil) |g| if (!self.parallel_js) g.acquire();
+        defer if (self.gil) |g| if (!self.parallel_js) g.release();
+        self.assertOwnerThread();
+        const gc_saved = gc_mod.setActiveHeap(self.gc);
+        defer _ = gc_mod.setActiveHeap(gc_saved);
+        const sa_saved = strcell.setActiveArena(self.arena());
+        defer _ = strcell.setActiveArena(sa_saved);
+
+        const a = self.arena();
+        const owned_source = try a.dupe(u8, source);
+        self.last_evaluation_diagnostic = null;
+        var lex_diagnostic: ?parser_mod.SourceLocation = null;
+        var parser = Parser.initWithDiagnostic(a, owned_source, &lex_diagnostic) catch |err| {
+            self.last_evaluation_diagnostic = lex_diagnostic orelse parser_mod.sourceLocationAt(owned_source, 0);
+            return err;
+        };
+        const program = parser.parseProgram() catch |err| {
+            self.last_evaluation_diagnostic = parser.errorLocation();
+            return err;
+        };
+        if (program.* == .program) parser.scanEvalContext(program.program, true, true) catch |err| {
+            self.last_evaluation_diagnostic = parser.errorLocation();
+            return err;
+        };
     }
 
     /// Like `evaluate`, but with an explicit top-level `this` binding. This is

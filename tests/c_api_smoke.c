@@ -17,9 +17,21 @@ int main(void)
     JSGlobalContextRef context = JSGlobalContextCreate(NULL);
     if (!context)
         return 1;
+    if (JSContextGetGlobalContext(context) != context)
+        return 9;
+
+    JSStringRef context_name = JSStringCreateWithUTF8CString("c-smoke");
+    JSGlobalContextSetName(context, context_name);
+    JSStringRelease(context_name);
+    JSStringRef copied_name = JSGlobalContextCopyName(context);
+    if (!copied_name || !JSStringIsEqualToUTF8CString(copied_name, "c-smoke"))
+        return 10;
+    JSStringRelease(copied_name);
 
     JSStringRef source = JSStringCreateWithUTF8CString("21 * 2");
     JSValueRef exception = NULL;
+    if (!JSCheckScriptSyntax(context, source, NULL, 1, &exception) || exception)
+        return 11;
     JSValueRef answer = JSEvaluateScript(context, source, NULL, NULL, 1, &exception);
     JSStringRelease(source);
     if (!answer || exception || JSValueToNumber(context, answer, &exception) != 42.0)

@@ -46,6 +46,12 @@ JSGlobalContextRef ZJSGlobalContextCreateThreaded(bool gil);
 JSGlobalContextRef JSGlobalContextRetain(JSGlobalContextRef);
 void               JSGlobalContextRelease(JSGlobalContextRef);
 JSObjectRef        JSContextGetGlobalObject(JSContextRef);
+JSGlobalContextRef JSContextGetGlobalContext(JSContextRef);
+JSStringRef        JSGlobalContextCopyName(JSGlobalContextRef);
+void               JSGlobalContextSetName(JSGlobalContextRef, JSStringRef);
+bool               JSCheckScriptSyntax(JSContextRef, JSStringRef source,
+                                       JSStringRef sourceURL,
+                                       int startingLineNumber, JSValueRef* exception);
 JSValueRef         JSEvaluateScript(JSContextRef, JSStringRef source,
                                     JSObjectRef thisObject, JSStringRef sourceURL,
                                     int startingLineNumber, JSValueRef* exception);

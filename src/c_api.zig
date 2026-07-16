@@ -440,6 +440,47 @@ export fn JSContextGetGlobalObject(ctx: JSContextRef) callconv(.c) JSObjectRef {
     return box(c, Value.obj(c.global_object));
 }
 
+export fn JSContextGetGlobalContext(ctx: JSContextRef) callconv(.c) JSContextRef {
+    _ = ctxFrom(ctx) orelse return null;
+    return ctx;
+}
+
+export fn JSGlobalContextCopyName(ctx: JSContextRef) callconv(.c) JSStringRef {
+    const c = ctxFrom(ctx) orelse return null;
+    const units = c.c_api_name_utf16 orelse return null;
+    const copy = JsString.createUtf16(gpa, units) catch return null;
+    return @ptrCast(copy);
+}
+
+export fn JSGlobalContextSetName(ctx: JSContextRef, name: JSStringRef) callconv(.c) void {
+    const c = ctxFrom(ctx) orelse return;
+    if (name == null) {
+        c.c_api_name_utf16 = null;
+        return;
+    }
+    const string = strFrom(name) orelse return;
+    c.c_api_name_utf16 = c.arena().dupe(u16, string.utf16) catch return;
+}
+
+export fn JSCheckScriptSyntax(
+    ctx: JSContextRef,
+    script: JSStringRef,
+    source_url: JSStringRef,
+    starting_line_number: c_int,
+    exception: ExceptionRef,
+) callconv(.c) bool {
+    const c = ctxForEvaluation(ctx) orelse return false;
+    const source = strFrom(script) orelse {
+        setException(c, exception, "TypeError: script is null");
+        return false;
+    };
+    c.checkScriptSyntax(source.bytes) catch |err| {
+        setEvaluationException(c, exception, err, source_url, starting_line_number);
+        return false;
+    };
+    return true;
+}
+
 export fn JSEvaluateScript(
     ctx: JSContextRef,
     script: JSStringRef,
@@ -2552,6 +2593,58 @@ test "C-API: evaluation syntax exceptions include source URL and line" {
     var lex_buf: [128]u8 = undefined;
     const lex_written = JSStringGetUTF8CString(lex_msg, &lex_buf, lex_buf.len);
     try std.testing.expect(std.mem.indexOf(u8, lex_buf[0 .. lex_written - 1], "app.js:41:2") != null);
+}
+
+test "C-API: syntax checking shares diagnostics and never executes" {
+    const ctx = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
+    defer JSGlobalContextRelease(ctx);
+    const url = JSStringCreateWithUTF8CString("syntax.js") orelse return error.StringInitFailed;
+    defer JSStringRelease(url);
+
+    const valid = JSStringCreateWithUTF8CString("globalThis.syntaxSideEffect = 1;") orelse return error.StringInitFailed;
+    defer JSStringRelease(valid);
+    var exception: JSValueRef = null;
+    try std.testing.expect(JSCheckScriptSyntax(ctx, valid, url, 20, &exception));
+    try std.testing.expect(exception == null);
+
+    const probe = JSStringCreateWithUTF8CString("typeof globalThis.syntaxSideEffect === 'undefined'") orelse return error.StringInitFailed;
+    defer JSStringRelease(probe);
+    const result = JSEvaluateScript(ctx, probe, null, null, 1, &exception) orelse return error.EvalFailed;
+    try std.testing.expect(JSValueToBoolean(ctx, result));
+
+    const invalid = JSStringCreateWithUTF8CString("let x = ;") orelse return error.StringInitFailed;
+    defer JSStringRelease(invalid);
+    try std.testing.expect(!JSCheckScriptSyntax(ctx, invalid, url, 20, &exception));
+    try std.testing.expect(exception != null);
+    const check_message = JSValueToStringCopy(ctx, exception, null) orelse return error.StringInitFailed;
+    defer JSStringRelease(check_message);
+
+    var eval_exception: JSValueRef = null;
+    try std.testing.expect(JSEvaluateScript(ctx, invalid, null, url, 20, &eval_exception) == null);
+    try std.testing.expect(eval_exception != null);
+    const eval_message = JSValueToStringCopy(ctx, eval_exception, null) orelse return error.StringInitFailed;
+    defer JSStringRelease(eval_message);
+    try std.testing.expect(JSStringIsEqual(check_message, eval_message));
+}
+
+test "C-API: global context metadata copies exact UTF-16 ownership" {
+    const ctx = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
+    defer JSGlobalContextRelease(ctx);
+    try std.testing.expect(JSContextGetGlobalContext(ctx) == ctx);
+    try std.testing.expect(JSContextGetGlobalContext(null) == null);
+    try std.testing.expect(JSGlobalContextCopyName(ctx) == null);
+
+    const units = [_]u16{ 'v', 'm', 0, 0xD800 };
+    const name = JSStringCreateWithCharacters(&units, units.len) orelse return error.StringInitFailed;
+    JSGlobalContextSetName(ctx, name);
+    JSStringRelease(name);
+
+    const copied = JSGlobalContextCopyName(ctx) orelse return error.StringInitFailed;
+    defer JSStringRelease(copied);
+    try std.testing.expectEqualSlices(u16, &units, JSStringGetCharactersPtr(copied)[0..units.len]);
+
+    JSGlobalContextSetName(ctx, null);
+    try std.testing.expect(JSGlobalContextCopyName(ctx) == null);
 }
 
 test "C-API: evaluation runtime errors include source metadata" {
