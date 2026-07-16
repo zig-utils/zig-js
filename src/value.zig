@@ -1731,14 +1731,21 @@ pub const Object = struct {
     pub fn dateMs(self: *const Object) f64 {
         const cold = self.coldState() orelse return 0;
         if (!cold.hasRare(.date)) return 0;
-        return @bitCast(cold.rare.date.ms_bits.load(.monotonic));
+        // Take the address of the active union payload explicitly. Zig dev.1413
+        // otherwise materializes `cold.rare.date` through `__tsan_memcpy` before
+        // inlining `Value.load`, turning the source-level atomic read into a
+        // plain TSan-visible copy. A typed pointer to the u64 storage forces the
+        // intended atomic lowering on every supported compiler revision.
+        const bits: *const u64 = &@field(cold.rare, "date").ms_bits.raw;
+        return @bitCast(@atomicLoad(u64, bits, .monotonic));
     }
     pub fn initDateMs(self: *Object, fallback: std.mem.Allocator, v: f64) std.mem.Allocator.Error!void {
         const state = try self.ensureRare(fallback, .date, .{});
         state.ms_bits.store(@bitCast(v), .monotonic);
     }
     pub fn setDateMs(self: *Object, v: f64) void {
-        self.coldState().?.rare.date.ms_bits.store(@bitCast(v), .monotonic);
+        const bits: *u64 = &@field(self.coldState().?.rare, "date").ms_bits.raw;
+        @atomicStore(u64, bits, @bitCast(v), .monotonic);
     }
 
     pub fn elementsLen(self: *const Object) usize {
