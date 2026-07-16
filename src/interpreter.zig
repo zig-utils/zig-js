@@ -26267,6 +26267,16 @@ fn segNext(str: []const u8, pos: usize, gran: []const u8) struct { end: usize, w
                 // A terminator only ends a sentence when followed by whitespace, a
                 // paragraph separator, or end of text ("One.Two"/"3.5" do not break).
                 if (t_end >= len or nxt == ' ' or nxt == '\t' or nxt == '\n' or nxt == '\r') {
+                    // SB8: a period followed (after spaces) by a lowercase letter is
+                    // an abbreviation continuation, not a boundary ("U.S.A. is").
+                    if (c == '.') {
+                        var p = t_end;
+                        while (p < len and (str[p] == ' ' or str[p] == '\t')) p += 1;
+                        if (p < len and str[p] >= 'a' and str[p] <= 'z') {
+                            end = t_end;
+                            continue;
+                        }
+                    }
                     end = t_end;
                     while (end < len and (str[end] == ' ' or str[end] == '\t')) end += 1;
                     if (end < len and str[end] == '\r') {
@@ -26310,9 +26320,10 @@ fn segNext(str: []const u8, pos: usize, gran: []const u8) struct { end: usize, w
                 continue;
             }
             // WB6/WB7: an apostrophe (' or U+2019) between two letters stays in the
-            // word ("don't" is one segment), as does a MidLetter dot ("a.b").
+            // word ("don't"), as do a MidLetter dot/colon ("a.b") and an
+            // ExtendNumLet underscore ("under_score", WB13a).
             const cp = segCodePoint(str, end);
-            if ((c == '\'' or cp == 0x2019 or c == '.' or c == ':') and end > pos and segWordCat(str, end - 1)) {
+            if ((c == '\'' or cp == 0x2019 or c == '.' or c == ':' or c == '_') and end > pos and segWordCat(str, end - 1)) {
                 const after = end + segScalarLen(str, end);
                 if (after < len and segWordCat(str, after)) {
                     end = after;
