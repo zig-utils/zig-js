@@ -2675,7 +2675,7 @@ fn tryQuickObjectAllocationLoopMode(
         // Avoid the non-inlined error/TLS path for the overwhelmingly common
         // unrestricted receiver. Restricted arrays retain the full ownership
         // check and the exact error-step accounting below.
-        if (array.restricted_to.load(.acquire) != 0) vm.checkRestricted(array) catch |err| {
+        if (array.restrictionOwner() != 0) vm.checkRestricted(array) catch |err| {
             frame.slots[total_slot] = Value.num(total);
             frame.slots[counter_slot] = Value.num(counter);
             try advanceQuickObservableSteps(vm, iterations * steps_per_iteration + 39);

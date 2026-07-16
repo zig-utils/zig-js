@@ -9727,7 +9727,7 @@ pub const Interpreter = struct {
     /// `Thread.restrict` enforcement: every essential-internal-method funnel
     /// calls this (get/set/has/delete/define/ownKeys/proto/extensibility).
     pub fn checkRestricted(self: *Interpreter, o: *value.Object) EvalError!void {
-        const owner = o.restricted_to.load(.acquire);
+        const owner = o.restrictionOwner();
         if (owner != 0 and owner != @as(u64, @intCast(std.Thread.getCurrentId())))
             return self.throwError("ConcurrentAccessError", "object is restricted to another thread");
     }

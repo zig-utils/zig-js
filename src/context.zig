@@ -12256,8 +12256,11 @@ test "quick object replacement checks a restricted receiver before fused mutatio
     const items = ctx.global_object.getOwn("items").?.asObj();
     const first_before = items.elementAt(0).?.asObj();
     const current: u64 = @intCast(std.Thread.getCurrentId());
-    items.restricted_to.store(if (current == std.math.maxInt(u64)) current - 1 else current + 1, .release);
-    defer items.restricted_to.store(0, .release);
+    try std.testing.expect(items.coldState() == null);
+    var restricted_cold = value.ObjectColdState{};
+    items.cold.store(&restricted_cold, .release);
+    defer items.cold.store(null, .release);
+    restricted_cold.restricted_to.store(if (current == std.math.maxInt(u64)) current - 1 else current + 1, .release);
 
     for ([_]bool{ false, true }) |parallel| {
         bc.ic_seqlock_enabled.store(parallel, .monotonic);

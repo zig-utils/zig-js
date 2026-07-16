@@ -963,7 +963,7 @@ pub const Binding = struct {
 pub const Heap = gc.Heap(Binding);
 
 test "Object and cold sidecar fit the 256-byte GC slab" {
-    try std.testing.expectEqual(@as(usize, 184), @sizeOf(Object));
+    try std.testing.expectEqual(@as(usize, 176), @sizeOf(Object));
     try std.testing.expect(Heap.cellAllocationBytes(Object) <= 256);
     try std.testing.expect(Heap.cellAllocationBytes(value.ObjectColdState) <= 256);
 }

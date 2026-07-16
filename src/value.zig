@@ -680,6 +680,9 @@ pub const ObjectColdState = struct {
     /// Accessor properties are rare and always flow through `property_lock`;
     /// only this nullable map pointer needs atomic off-lock publication.
     accessors: std.atomic.Value(?*std.StringHashMapUnmanaged(Accessor)) = .init(null),
+    /// `Thread.restrict` is opt-in. Its owner id belongs with the other rare
+    /// cross-thread behavior instead of taxing every unrestricted object.
+    restricted_to: std.atomic.Value(u64) = .init(0),
     /// Mixed data/accessor insertion order is needed only after an accessor or
     /// dictionary-style rebuild. Ordinary shape-only objects stay sidecar-free.
     key_order: std.atomic.Value(?*std.ArrayListUnmanaged([]const u8)) = .init(null),
@@ -911,12 +914,7 @@ pub const Object = struct {
     /// object owns that tiny record directly; the reject function points at the
     /// resolve object through `private_data`.
     promise_resolving_already: bool = false,
-    /// `Thread.restrict(obj)`: the only OS thread allowed to touch this
-    /// object through the enforced internal-method funnels (0 =
-    /// unrestricted). Foreign access throws `ConcurrentAccessError`. Atomic: the
-    /// claim is a CAS (two `Thread.restrict` calls on the same object race), and
-    /// the enforcement check reads it from any thread. Thread ids are never 0.
-    restricted_to: std.atomic.Value(u64) = .init(0),
+    /// `Thread.restrict` ownership lives in the cold sidecar.
     /// True for `Error`-family instances; drives `toString` and `instanceof`.
     is_error: bool = false,
     /// True for `RegExp` instances (carries `source`/`flags` properties; matching
@@ -1095,6 +1093,20 @@ pub const Object = struct {
     pub inline fn accessorsMap(self: *const Object) ?*std.StringHashMapUnmanaged(Accessor) {
         const cold = self.coldState() orelse return null;
         return cold.accessors.load(.monotonic);
+    }
+
+    /// The owning thread id for `Thread.restrict`, or zero for the overwhelmingly
+    /// common unrestricted object. The cold pointer publication orders the
+    /// subsequent atomic owner claim.
+    pub inline fn restrictionOwner(self: *const Object) u64 {
+        const cold = self.coldState() orelse return 0;
+        return cold.restricted_to.load(.acquire);
+    }
+
+    pub fn claimRestriction(self: *Object, fallback: std.mem.Allocator, tid: u64) std.mem.Allocator.Error!?u64 {
+        std.debug.assert(tid != 0);
+        const cold = try self.ensureCold(fallback);
+        return cold.restricted_to.cmpxchgStrong(0, tid, .acq_rel, .acquire);
     }
 
     inline fn setKeyOrder(self: *Object, order: ?*std.ArrayListUnmanaged([]const u8)) void {
@@ -3764,10 +3776,12 @@ test "Object.has_indexed_property atomic flag converges under concurrent set" {
 
 test "Object.restricted_to CAS lets exactly one concurrent claimer win" {
     var o = Object{};
+    var cold = ObjectColdState{};
+    o.cold.store(&cold, .release);
     const Worker = struct {
         fn run(target: *Object, my_tid: u64, won: *std.atomic.Value(u32)) void {
             // Mirror Thread.restrict's claim: CAS 0 -> tid; null means we won.
-            if (target.restricted_to.cmpxchgStrong(0, my_tid, .acq_rel, .acquire) == null)
+            if (target.coldState().?.restricted_to.cmpxchgStrong(0, my_tid, .acq_rel, .acquire) == null)
                 _ = won.fetchAdd(1, .acq_rel);
         }
     };
@@ -3776,7 +3790,7 @@ test "Object.restricted_to CAS lets exactly one concurrent claimer win" {
     for (&threads, 0..) |*t, i| t.* = try std.Thread.spawn(.{}, Worker.run, .{ &o, @as(u64, i) + 1, &won });
     for (threads) |t| t.join();
     try std.testing.expectEqual(@as(u32, 1), won.load(.acquire));
-    try std.testing.expect(o.restricted_to.load(.acquire) != 0);
+    try std.testing.expect(o.restrictionOwner() != 0);
 }
 
 test "WeakMap and WeakSet entry delete is unordered tail removal" {
