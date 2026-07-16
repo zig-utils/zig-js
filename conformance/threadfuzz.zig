@@ -50,6 +50,16 @@ var watchdog_profile = std.atomic.Value(usize).init(0);
 var watchdog_seed = std.atomic.Value(u64).init(0);
 var watchdog_started_ms = std.atomic.Value(i64).init(0);
 var watchdog_timeout_ms = std.atomic.Value(i64).init(0);
+var watchdog_configured_timeout_ms = std.atomic.Value(i64).init(0);
+var watchdog_timeout_explicit = std.atomic.Value(bool).init(false);
+var watchdog_timed_out = std.atomic.Value(bool).init(false);
+var watchdog_cleanup_acknowledged = std.atomic.Value(bool).init(false);
+var watchdog_expect_timeout = std.atomic.Value(bool).init(false);
+var watchdog_context_lock: std.atomic.Mutex = .unlocked;
+var watchdog_context: ?*js.Context = null;
+
+const watchdog_tsan_amplify_timeout_ms: i64 = 300_000;
+const watchdog_cleanup_grace_ms: i64 = 30_000;
 
 fn watchdogNowMs() i64 {
     var ts: std.c.timespec = undefined;
@@ -80,6 +90,35 @@ fn watchdogSleep() void {
     _ = std.c.nanosleep(&req, null);
 }
 
+fn lockWatchdogContext() void {
+    var spins: usize = 0;
+    while (!watchdog_context_lock.tryLock()) : (spins += 1) {
+        if ((spins & 0xff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
+    }
+}
+
+fn armSeedContext(ctx: *js.Context) void {
+    if (!watchdog_enabled.load(.acquire)) return;
+    lockWatchdogContext();
+    defer watchdog_context_lock.unlock();
+    if (!watchdog_enabled.load(.acquire)) return;
+    if (watchdog_timed_out.load(.acquire)) {
+        ctx.requestTermination();
+        return;
+    }
+    watchdog_context = ctx;
+}
+
+fn disarmSeedContext() void {
+    lockWatchdogContext();
+    defer watchdog_context_lock.unlock();
+    watchdog_context = null;
+}
+
+fn seedTimedOut() bool {
+    return watchdog_timed_out.load(.acquire);
+}
+
 fn seedWatchdogMain() void {
     while (watchdog_enabled.load(.acquire)) {
         watchdogSleep();
@@ -89,47 +128,111 @@ fn seedWatchdogMain() void {
         const started_ms = watchdog_started_ms.load(.acquire);
         const elapsed_ms = watchdogNowMs() - started_ms;
         if (elapsed_ms < timeout_ms) continue;
+        // Revalidate and claim the same seed under the context lock. The main
+        // thread uses this lock while transitioning between seeds, preventing
+        // a late watchdog wakeup from terminating the next seed's context.
+        lockWatchdogContext();
+        const claimed_timeout_ms = watchdog_timeout_ms.load(.acquire);
+        const claimed_started_ms = watchdog_started_ms.load(.acquire);
+        if (!watchdog_active.load(.acquire) or claimed_timeout_ms <= 0 or
+            watchdogNowMs() - claimed_started_ms < claimed_timeout_ms)
+        {
+            watchdog_context_lock.unlock();
+            continue;
+        }
+        watchdog_active.store(false, .release);
+        watchdog_timed_out.store(true, .release);
         const profile_index = watchdog_profile.load(.acquire);
         const profile_name = if (profile_index < watchdog_profile_names.len)
             watchdog_profile_names[profile_index]
         else
             "unknown";
+        const claimed_seed = watchdog_seed.load(.acquire);
+        var requested_termination = false;
+        if (watchdog_context) |ctx| {
+            ctx.requestTermination();
+            requested_termination = true;
+        }
+        watchdog_context_lock.unlock();
         std.debug.print(
-            "threadfuzz {s}: seed {d} exceeded per-seed timeout {d} ms; rerun the same profile with one iteration and that seed, or set THREADFUZZ_SEED_TIMEOUT_MS=0 to disable\n",
+            "threadfuzz {s}: seed {d} exceeded per-seed timeout {d} ms; {s}; waiting up to {d} ms for clean teardown\n",
             .{
                 profile_name,
-                watchdog_seed.load(.acquire),
-                timeout_ms,
+                claimed_seed,
+                claimed_timeout_ms,
+                if (requested_termination) "requested cooperative VM termination" else "no active context was available to interrupt",
+                watchdog_cleanup_grace_ms,
             },
         );
-        std.process.exit(124);
+        const cleanup_deadline_ms = watchdogNowMs() + watchdog_cleanup_grace_ms;
+        while (watchdog_enabled.load(.acquire) and
+            !watchdog_cleanup_acknowledged.load(.acquire) and
+            watchdogNowMs() < cleanup_deadline_ms)
+        {
+            watchdogSleep();
+        }
+        if (!watchdog_enabled.load(.acquire) or watchdog_cleanup_acknowledged.load(.acquire)) continue;
+        std.debug.print(
+            "threadfuzz {s}: seed {d} did not finish teardown within {d} ms; forcing process abort\n",
+            .{ profile_name, claimed_seed, watchdog_cleanup_grace_ms },
+        );
+        std.process.exit(125);
     }
 }
 
-fn startSeedWatchdog(timeout_ms: i64) void {
+fn startSeedWatchdog(timeout_ms: i64, timeout_explicit: bool) void {
     if (timeout_ms <= 0) return;
+    watchdog_configured_timeout_ms.store(timeout_ms, .release);
     watchdog_timeout_ms.store(timeout_ms, .release);
+    watchdog_timeout_explicit.store(timeout_explicit, .release);
     watchdog_enabled.store(true, .release);
-    const thread = std.Thread.spawn(.{}, seedWatchdogMain, .{}) catch return;
+    const thread = std.Thread.spawn(.{}, seedWatchdogMain, .{}) catch {
+        watchdog_enabled.store(false, .release);
+        return;
+    };
     thread.detach();
 }
 
 fn stopSeedWatchdog() void {
-    watchdog_active.store(false, .release);
     watchdog_enabled.store(false, .release);
+    lockWatchdogContext();
+    watchdog_active.store(false, .release);
+    watchdog_context = null;
+    watchdog_context_lock.unlock();
 }
 
 fn noteSeed(profile: WatchdogProfile, seed: u64) void {
     if (!watchdog_enabled.load(.acquire)) return;
+    lockWatchdogContext();
+    defer watchdog_context_lock.unlock();
+    if (!watchdog_enabled.load(.acquire)) return;
     watchdog_active.store(false, .release);
+    watchdog_context = null;
+    watchdog_timed_out.store(false, .release);
+    watchdog_cleanup_acknowledged.store(false, .release);
     watchdog_profile.store(@intFromEnum(profile), .release);
     watchdog_seed.store(seed, .release);
+    const configured_timeout_ms = watchdog_configured_timeout_ms.load(.acquire);
+    const profile_timeout_ms = if (!watchdog_timeout_explicit.load(.acquire) and
+        builtin.sanitize_thread and profile == .amplify)
+        watchdog_tsan_amplify_timeout_ms
+    else
+        configured_timeout_ms;
+    watchdog_timeout_ms.store(profile_timeout_ms, .release);
     watchdog_started_ms.store(watchdogNowMs(), .release);
     watchdog_active.store(true, .release);
 }
 
 fn finishSeed() void {
+    lockWatchdogContext();
     watchdog_active.store(false, .release);
+    watchdog_context = null;
+    watchdog_cleanup_acknowledged.store(true, .release);
+    watchdog_context_lock.unlock();
+    if (seedTimedOut() and !watchdog_expect_timeout.load(.acquire)) {
+        std.debug.print("threadfuzz: timed-out seed teardown completed cleanly; exiting with status 124\n", .{});
+        std.process.exit(124);
+    }
 }
 
 fn runWatchedSeedCase(
@@ -145,6 +248,7 @@ fn runWatchedSeedCase(
     // before each subcase so the watchdog remains a hang detector instead of an
     // aggregate runtime cap.
     noteSeed(profile, seed);
+    defer finishSeed();
     if (!(try caseFn(gpa, seed))) failures.* += 1;
 }
 
@@ -18659,10 +18763,16 @@ fn runMultiContextCreateDestroyInterleaving(gpa: std.mem.Allocator, seed: u64) !
 pub fn main(init: std.process.Init) !void {
     const gpa = std.heap.page_allocator; // thread-safe; contexts manage their own GC
     var seed_timeout_ms: i64 = 120_000;
+    const seed_timeout_explicit = init.environ_map.get("THREADFUZZ_SEED_TIMEOUT_MS") != null;
     if (init.environ_map.get("THREADFUZZ_SEED_TIMEOUT_MS")) |raw| {
         seed_timeout_ms = std.fmt.parseInt(i64, raw, 10) catch seed_timeout_ms;
     }
-    startSeedWatchdog(seed_timeout_ms);
+    const expect_timeout = if (init.environ_map.get("THREADFUZZ_EXPECT_TIMEOUT")) |raw|
+        std.mem.eql(u8, raw, "1") or std.ascii.eqlIgnoreCase(raw, "true")
+    else
+        false;
+    watchdog_expect_timeout.store(expect_timeout, .release);
+    startSeedWatchdog(seed_timeout_ms, seed_timeout_explicit);
     defer stopSeedWatchdog();
     const run_started_ms = watchdogNowMs();
     var iters: usize = 200;
@@ -20691,6 +20801,7 @@ pub fn main(init: std.process.Init) !void {
     if (args.next()) |a| base_seed = std.fmt.parseInt(u64, a, 10) catch 1;
 
     var failures: usize = 0;
+    var observed_expected_timeout = false;
     var i: usize = 0;
     while (i < iters) : (i += 1) {
         const seed = base_seed +% i;
@@ -20699,13 +20810,24 @@ pub fn main(init: std.process.Init) !void {
         var buf: std.ArrayListUnmanaged(u8) = .empty;
         defer buf.deinit(gpa);
         try genProgram(seed, &buf, gpa, cfg);
+        if (seedTimedOut()) {
+            observed_expected_timeout = true;
+            break;
+        }
         const ctx = js.Context.createWith(gpa, .{ .enable_threads = true, .enable_gc = cfg.enable_gc }) catch {
             std.debug.print("seed {d}: context creation failed\n", .{seed});
             failures += 1;
             continue;
         };
         defer ctx.destroy();
-        if (ctx.evaluate(buf.items)) |_| {
+        armSeedContext(ctx);
+        defer disarmSeedContext();
+        const outcome = ctx.evaluate(buf.items);
+        if (seedTimedOut()) {
+            observed_expected_timeout = true;
+            break;
+        }
+        if (outcome) |_| {
             // ok — completed (no deadlock), engine TSan-clean if built with -Dtsan
         } else |e| {
             const msg = if (ctx.exception) |ex| blk: {
@@ -20715,6 +20837,14 @@ pub fn main(init: std.process.Init) !void {
             std.debug.print("seed {d}: unexpected throw {s}: {s}\n", .{ seed, @errorName(e), msg });
             failures += 1;
         }
+    }
+    if (expect_timeout) {
+        if (!observed_expected_timeout) {
+            std.debug.print("threadfuzz: expected a watchdog timeout, but all requested programs completed\n", .{});
+            std.process.exit(1);
+        }
+        std.debug.print("threadfuzz: observed expected watchdog timeout and clean teardown\n", .{});
+        return;
     }
     printProfileSummary(if (random_profile == .amplify) "amplify" else if (random_profile == .broad) "broad" else "default", iters, base_seed, failures, run_started_ms);
     if (failures != 0) std.process.exit(1);

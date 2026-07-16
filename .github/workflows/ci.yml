@@ -99,6 +99,12 @@ jobs:
           # engine access the seeded programs exercise (TSan is ~10× slower).
           - name: tsan-threadfuzz
             cmd: zig build threadfuzz -Dtsan=true -Dfuzz-iters=60
+          # Seed 107 is a deterministic ~3-minute amplified TSan workload, not
+          # a deadlock. Force its watchdog early here to prove cooperative VM
+          # termination joins every active Thread before the process succeeds;
+          # any secondary TSan leak or missed timeout fails this focused leg.
+          - name: tsan-threadfuzz-watchdog-cleanup
+            cmd: THREADFUZZ_SEED_TIMEOUT_MS=1000 THREADFUZZ_EXPECT_TIMEOUT=1 zig build threadfuzz -Dtsan=true -Dfuzz-amplify=true -Dfuzz-iters=1 -Dfuzz-seed=107
           # Specialized TSan smoke for the mid-script-GC profile. The larger
           # non-TSan leg owns breadth; this leg proves the hidden root/parked
           # waiter/microtask paths are also free of unsuppressed engine races.

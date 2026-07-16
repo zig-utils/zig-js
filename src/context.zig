@@ -2899,6 +2899,15 @@ pub const Context = struct {
         };
     }
 
+    /// Request cooperative termination of the current evaluation and any
+    /// shared-realm JavaScript threads owned by this context. This operation is
+    /// thread-safe and allocation-free, so a host watchdog may call it from a
+    /// different native thread. Treat the request as terminal for the context:
+    /// destroy it after the interrupted evaluation instead of attempting reuse.
+    pub fn requestTermination(self: *Context) void {
+        self.teardown_stop.store(true, .release);
+    }
+
     pub fn destroy(self: *Context) void {
         const host_gpa = self.host_gpa;
         const context_gpa = self.gpa;
@@ -10288,6 +10297,22 @@ test "Context is thread-affine: owner recognized, foreign thread rejected" {
     const t = try std.Thread.spawn(.{}, Probe.run, .{ ctx, &saw_owner });
     t.join();
     try std.testing.expect(!saw_owner);
+}
+
+test "Context host-requested cooperative termination interrupts evaluation" {
+    const ctx = try Context.create(std.testing.allocator);
+    defer ctx.destroy();
+
+    const Terminator = struct {
+        fn run(context: *Context) void {
+            std.Io.sleep(agent.engineIo(), .fromMilliseconds(10), .awake) catch {};
+            context.requestTermination();
+        }
+    };
+    const terminator = try std.Thread.spawn(.{}, Terminator.run, .{ctx});
+    defer terminator.join();
+
+    try std.testing.expectError(error.Throw, ctx.evaluate("for (;;) {}"));
 }
 
 test "real agents: broadcast rendezvous, blocking wait, notify, report" {

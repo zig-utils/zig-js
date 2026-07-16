@@ -272,6 +272,7 @@ python3 tools/threads-reference-audit.py --run-probes --expect-current-blockers 
 zig build threadfuzz
 zig build threadfuzz -Dfuzz-midgc=true
 zig build threadfuzz -Dfuzz-lifecycle=true
+THREADFUZZ_SEED_TIMEOUT_MS=1000 THREADFUZZ_EXPECT_TIMEOUT=1 zig build threadfuzz -Dtsan=true -Dfuzz-amplify=true -Dfuzz-iters=1 -Dfuzz-seed=107
 zig build test -Dtsan=true
 zig build threads-profile
 zig build threads-profile -Dthreads-profile-case='global binding churn' -Dthreads-profile-max-workers=1
@@ -284,6 +285,13 @@ zig build midgc-profile
 zig build gc-profile
 zig build gc-profile -Dgc-profile-case='nursery'
 ```
+
+The final amplified command is the deterministic TSan watchdog-cleanup gate:
+it intentionally interrupts the known-slow seed 107, cooperatively terminates
+the VM, and succeeds only after the context has joined its active JavaScript
+threads without a sanitizer leak. Ordinary amplified TSan replays use a
+calibrated 300-second per-seed watchdog unless
+`THREADFUZZ_SEED_TIMEOUT_MS` explicitly overrides it.
 
 The test262 corpus is vendored as the `test262/` git submodule. `zig build test262` uses it by default and skips cleanly if it is absent.
 

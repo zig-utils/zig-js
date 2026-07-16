@@ -18,6 +18,7 @@ python3 tools/threads-reference-audit.py --run-probes --expect-current-blockers 
 zig build test -Dtsan=true
 zig build test -Dtsan=true -Dtest-filter=parallel_js
 zig build threadfuzz -Dfuzz-iters=20
+THREADFUZZ_SEED_TIMEOUT_MS=1000 THREADFUZZ_EXPECT_TIMEOUT=1 zig build threadfuzz -Dtsan=true -Dfuzz-amplify=true -Dfuzz-iters=1 -Dfuzz-seed=107
 THREADFUZZ_SEED_TIMEOUT_MS=300000 zig build threadfuzz -Dtsan=true -Dfuzz-midgc=true -Dfuzz-iters=2
 zig build threadfuzz -Dtsan=true -Dfuzz-lifecycle=true -Dfuzz-iters=2
 THREADFUZZ_SEED_TIMEOUT_MS=300000 zig build threadfuzz -Dfuzz-midgc=true -Dfuzz-iters=5
@@ -88,6 +89,7 @@ push to `main`:
 ```sh
 zig build threadfuzz -Dfuzz-iters=400
 zig build threadfuzz -Dtsan=true -Dfuzz-iters=60
+THREADFUZZ_SEED_TIMEOUT_MS=1000 THREADFUZZ_EXPECT_TIMEOUT=1 zig build threadfuzz -Dtsan=true -Dfuzz-amplify=true -Dfuzz-iters=1 -Dfuzz-seed=107
 THREADFUZZ_SEED_TIMEOUT_MS=300000 zig build threadfuzz -Dtsan=true -Dfuzz-midgc=true -Dfuzz-iters=2
 zig build threadfuzz -Dtsan=true -Dfuzz-lifecycle=true -Dfuzz-iters=2
 zig build threadfuzz -Dfuzz-amplify=true -Dfuzz-iters=30
@@ -217,8 +219,25 @@ keeps safety checks under optimization; `-Dfuzz-verify=true` generates
 deterministic atomic programs whose exact result is predicted. Long sweep
 profiles also run with a per-seed watchdog by default; set
 `THREADFUZZ_SEED_TIMEOUT_MS=0` to disable it, or set a larger millisecond value
-for slow local/TSan machines. When it fires, the watchdog prints the active
-profile and seed so the stalled program is still one-command reproducible.
+for slow local/TSan machines. Amplified TSan runs default to a calibrated
+300-second window; every other profile retains the 120-second default. When it
+fires, the watchdog prints the active profile and seed, requests allocation-free
+cooperative termination from the active context, and allows 30 seconds for its
+JavaScript threads to unwind and join. A clean teardown exits with status 124;
+failure to acknowledge teardown within that grace period force-aborts with
+status 125. `THREADFUZZ_EXPECT_TIMEOUT=1` converts a clean expected timeout into
+success and fails if no timeout occurs, which makes the seed-107 command above a
+bounded regression for the cleanup path rather than a three-minute CI replay.
+The full isolated TSan replay remains:
+
+```sh
+zig build threadfuzz -Dtsan=true -Dfuzz-amplify=true -Dfuzz-iters=1 -Dfuzz-seed=107
+```
+
+On the July 16, 2026 Apple M3 Pro investigation it completed without a race or
+functional failure in 177,219 ms of fuzzer wall time, establishing sanitizer
+workload slowness rather than deadlock/livelock. The same seed without TSan
+completed in 2,406 ms.
 Aggregate profiles print `wall-ms` alongside program count, seed, and failure
 count; use those CI/nightly timings as runtime evidence for any future depth
 increase instead of raising iteration counts blindly. The broad profile
