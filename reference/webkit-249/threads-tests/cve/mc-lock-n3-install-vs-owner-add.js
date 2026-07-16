@@ -96,6 +96,8 @@ for (let r = 1; r <= ROUNDS; ++r) {
 }
 
 Atomics.store(gate, "stop", 1);
-Atomics.store(gate, "round", ROUNDS + 1);
+// Wake a waiter without publishing a synthetic work generation. A worker may
+// already have passed its loop-head stop check; advancing `round` here lets it
+// consume round ROUNDS+1 and makes the exact join oracle scheduler-dependent.
 Atomics.notify(gate, "round");
 shouldBe(foreign.join(), ROUNDS);
