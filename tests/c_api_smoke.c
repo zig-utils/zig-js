@@ -1,0 +1,46 @@
+#include <JavaScriptCore/JavaScript.h>
+
+#include <stdint.h>
+#include <stdlib.h>
+
+static unsigned deallocations;
+
+static void release_bytes(void* bytes, void* context)
+{
+    unsigned* count = (unsigned*)context;
+    ++*count;
+    free(bytes);
+}
+
+int main(void)
+{
+    JSGlobalContextRef context = JSGlobalContextCreate(NULL);
+    if (!context)
+        return 1;
+
+    JSStringRef source = JSStringCreateWithUTF8CString("21 * 2");
+    JSValueRef exception = NULL;
+    JSValueRef answer = JSEvaluateScript(context, source, NULL, NULL, 1, &exception);
+    JSStringRelease(source);
+    if (!answer || exception || JSValueToNumber(context, answer, &exception) != 42.0)
+        return 2;
+
+    uint8_t* bytes = (uint8_t*)malloc(8);
+    if (!bytes)
+        return 3;
+    bytes[0] = 0x2a;
+    JSObjectRef buffer = JSObjectMakeArrayBufferWithBytesNoCopy(
+        context, bytes, 8, release_bytes, &deallocations, &exception);
+    if (!buffer || exception || JSObjectGetArrayBufferByteLength(context, buffer, &exception) != 8)
+        return 4;
+    if (((uint8_t*)JSObjectGetArrayBufferBytesPtr(context, buffer, &exception))[0] != 0x2a)
+        return 5;
+
+    JSObjectRef view = JSObjectMakeTypedArrayWithArrayBuffer(
+        context, kJSTypedArrayTypeUint8Array, buffer, &exception);
+    if (!view || exception || JSObjectGetTypedArrayLength(context, view, &exception) != 8)
+        return 6;
+
+    JSGlobalContextRelease(context);
+    return deallocations == 1 ? 0 : 7;
+}

@@ -40,6 +40,44 @@ pub fn build(b: *std.Build) void {
         }),
     });
     b.installArtifact(lib);
+    b.getInstallStep().dependOn(&b.addInstallDirectory(.{
+        .source_dir = b.path("include"),
+        .install_dir = .header,
+        .install_subdir = "",
+    }).step);
+
+    // Pinned public-C declaration/export drift gate plus small real-host ABI
+    // checks. These stay separate from the world-sized Zig unit-test artifact.
+    const c_api_audit_cmd = b.addSystemCommand(&.{
+        "python3",
+        "tools/verify-c-api.py",
+    });
+    const c_api_audit_step = b.step("c-api-audit", "Verify pinned JSC declarations, inventory, and Zig exports");
+    c_api_audit_step.dependOn(&c_api_audit_cmd.step);
+
+    const c_api_c_smoke = b.addExecutable(.{
+        .name = "c-api-smoke-c",
+        .root_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true }),
+    });
+    c_api_c_smoke.root_module.addCSourceFile(.{ .file = b.path("tests/c_api_smoke.c") });
+    c_api_c_smoke.root_module.addIncludePath(b.path("include"));
+    c_api_c_smoke.root_module.linkLibrary(lib);
+    const run_c_api_c_smoke = b.addRunArtifact(c_api_c_smoke);
+    run_c_api_c_smoke.step.dependOn(&c_api_audit_cmd.step);
+
+    const c_api_cpp_smoke = b.addExecutable(.{
+        .name = "c-api-smoke-cpp",
+        .root_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true, .link_libcpp = true }),
+    });
+    c_api_cpp_smoke.root_module.addCSourceFile(.{ .file = b.path("tests/c_api_smoke.cpp") });
+    c_api_cpp_smoke.root_module.addIncludePath(b.path("include"));
+    c_api_cpp_smoke.root_module.linkLibrary(lib);
+    const run_c_api_cpp_smoke = b.addRunArtifact(c_api_cpp_smoke);
+    run_c_api_cpp_smoke.step.dependOn(&c_api_audit_cmd.step);
+
+    const c_api_test_step = b.step("test-c-api", "Compile, link, and run C and C++ public-ABI hosts");
+    c_api_test_step.dependOn(&run_c_api_c_smoke.step);
+    c_api_test_step.dependOn(&run_c_api_cpp_smoke.step);
 
     // Unit tests over the root module (engine core + C-API).
     // `-Dtsan` builds them under ThreadSanitizer — the concurrency gate for
