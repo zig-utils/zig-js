@@ -12774,6 +12774,10 @@ test "enable_gc concurrent (M3): the production driver marks on a thread while J
     const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true, .concurrent_gc = true });
     defer ctx.destroy();
     try std.testing.expect(ctx.gc_concurrent);
+    // This test targets the full-heap concurrent driver, not the independent
+    // nursery collector. Context creation enables the nursery by default; turn
+    // it off so old-byte growth deterministically reaches the M3 path.
+    ctx.gc.?.setNurseryEnabled(false);
 
     // 4,000 iterations (each allocating several cells + a per-iter `let` env) is
     // enough to cross the heap-growth threshold at least twice — driving multiple
