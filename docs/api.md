@@ -5,7 +5,14 @@ description: Embed zig-js through its implemented JavaScriptCore-shaped C API su
 
 # zig-js C API subset
 
-zig-js exports an implemented JavaScriptCore-shaped C API subset from `c_api.zig`. Hosts that only use this subset can link `libzig-js.a` in place of the system `JavaScriptCore.framework` and keep those documented calls unchanged.
+zig-js exports an implemented JavaScriptCore-shaped C API subset from `c_api.zig`. `zig build` installs the static library under `zig-out/lib` and compatible headers under `zig-out/include/JavaScriptCore`. Hosts that only use the completed subset can link `libzig-js.a` in place of the system `JavaScriptCore.framework` and keep those documented calls unchanged.
+
+The machine-readable [macOS 27.0 inventory](c-api/jsc-public-api-macos-27.0.json)
+is the completion authority for the full checked-in declaration surface. A
+`pending` declaration is available so hosts can compile against one header
+layout, but it must not be called until its linked implementation issue closes.
+Use `zig build c-api-audit` for the fast drift gate or `zig build test-c-api` to
+compile, link, and execute both C and C++ embedding fixtures.
 
 The project is still pre-stabilization. Compatibility-shaped entry points are an embedder convenience, not a promise to preserve inert arguments or incomplete JavaScriptCore behavior. When a compatibility shim conflicts with clear zig-js semantics, the shim should either grow real behavior or be redesigned before the API is declared stable.
 

@@ -179,7 +179,8 @@ const v = try ctx.evaluate("let x = 40; x + 2");
 
 ### As A C API Subset
 
-Link `libzig-js.a` for hosts that use the implemented subset of Apple's public `<JavaScriptCore/JSValueRef.h>` / `<JSObjectRef.h>`-shaped surface:
+Install the library and checked-in `<JavaScriptCore/JavaScript.h>`-compatible
+headers with `zig build`, then link `libzig-js.a` from `zig-out/lib`:
 
 ```c
 JSGlobalContextRef ctx = JSGlobalContextCreate(NULL);
@@ -198,6 +199,13 @@ The current exported C surface has 66 functions:
 - **Worker extension** - `JSWorkerCreate`, resource-bounded `JSWorkerCreateWithLimits`, `JSWorkerPostMessage`, `JSWorkerReceive`, `JSWorkerTerminate`, `JSWorkerRelease`.
 
 `ZJSGlobalContextCreateThreaded` and `JSWorker*` are zig-js extensions, not public JSC symbols. `JSObjectMakeDeferredPromise` returns a pending native Promise plus paired resolving functions; callers observe settlement at the next microtask checkpoint (for example, after `JSEvaluateScript` returns).
+
+The [macOS 27.0 public API inventory](docs/c-api/jsc-public-api-macos-27.0.json)
+tracks all 117 pinned C functions and links every unfinished declaration to its
+implementation issue. `zig build c-api-audit` checks declaration/export drift;
+`zig build test-c-api` additionally compiles, links, and runs real C and C++ hosts.
+Declarations marked `pending` are present for source compatibility but are not
+safe to call until their linked issue is complete.
 
 See [docs/api.md](docs/api.md) and [docs/HOME_INTEGRATION.md](docs/HOME_INTEGRATION.md) for the fuller embedding story and the important warning that zig-js is not a drop-in replacement for Bun/Home's private JSC internals.
 
@@ -246,6 +254,8 @@ zig build bench                   # VM/tree-walk and thread-scaling benchmark
 zig build benchmark-comparison    # zig-js direct/independent/shared vs system JSC (macOS)
 zig build benchmark-comparison -Dbenchmark-comparison-quick=true
 zig build benchmark-comparison-test
+zig build c-api-audit            # pinned headers/inventory/export drift
+zig build test-c-api             # C and C++ compile-link-runtime ABI gate
 zig build threads-test            # WebKit PR-249 thread allowlist
 zig build threads-reference-audit # classify non-promoted PR-249 files
 python3 tools/threads-reference-audit.py --probe-candidates
