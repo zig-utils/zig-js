@@ -671,6 +671,68 @@ export fn JSValueMakeSymbol(ctx: JSContextRef, description: JSStringRef) callcon
     return box(c, symbol);
 }
 
+const CBigIntInput = union(enum) {
+    double: f64,
+    signed: i64,
+    unsigned: u64,
+    string: []const u8,
+};
+
+fn makeCBigInt(ctx: JSContextRef, input: CBigIntInput, exception: ExceptionRef) JSValueRef {
+    const c = ctxFrom(ctx) orelse return null;
+    const gc_saved = gc_mod.setActiveHeap(c.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(c.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = c.interpreter();
+    c.pushActiveInterpreter(&machine) catch {
+        setException(c, exception, "OutOfMemory");
+        return null;
+    };
+    defer c.popActiveInterpreter(&machine);
+    const result = switch (input) {
+        .double => |number| machine.toBigIntValueImpl(Value.num(number), true),
+        .signed => |integer| machine.makeBigInt(integer),
+        .unsigned => |integer| machine.makeBigInt(integer),
+        .string => |string| blk: {
+            const string_value = Value.strAlloc(c.arena(), string) catch {
+                setException(c, exception, "OutOfMemory");
+                return null;
+            };
+            break :blk machine.toBigIntValueImpl(string_value, true);
+        },
+    } catch |err| {
+        if (err == error.Throw) {
+            if (exception != null) exception[0] = box(c, machine.exception);
+        } else {
+            setException(c, exception, @errorName(err));
+        }
+        return null;
+    };
+    return boxResult(c, exception, result);
+}
+
+export fn JSBigIntCreateWithDouble(ctx: JSContextRef, number: f64, exception: ExceptionRef) callconv(.c) JSValueRef {
+    return makeCBigInt(ctx, .{ .double = number }, exception);
+}
+
+export fn JSBigIntCreateWithInt64(ctx: JSContextRef, integer: i64, exception: ExceptionRef) callconv(.c) JSValueRef {
+    return makeCBigInt(ctx, .{ .signed = integer }, exception);
+}
+
+export fn JSBigIntCreateWithUInt64(ctx: JSContextRef, integer: u64, exception: ExceptionRef) callconv(.c) JSValueRef {
+    return makeCBigInt(ctx, .{ .unsigned = integer }, exception);
+}
+
+export fn JSBigIntCreateWithString(ctx: JSContextRef, string: JSStringRef, exception: ExceptionRef) callconv(.c) JSValueRef {
+    const source = strFrom(string) orelse {
+        const c = ctxFrom(ctx) orelse return null;
+        setException(c, exception, "TypeError: string is null");
+        return null;
+    };
+    return makeCBigInt(ctx, .{ .string = source.bytes }, exception);
+}
+
 // ---- JSValue coercion -------------------------------------------------
 
 export fn JSValueToBoolean(ctx: JSContextRef, v: JSValueRef) callconv(.c) bool {
@@ -1844,6 +1906,48 @@ test "C-API: Symbol construction preserves uniqueness and owned description" {
     const bigint = JSEvaluateScript(ctx, bigint_source, null, null, 1, null) orelse return error.EvalFailed;
     try std.testing.expect(JSValueIsBigInt(ctx, bigint));
     try std.testing.expect(!JSValueIsSymbol(ctx, bigint));
+}
+
+test "C-API: BigInt constructors preserve exact values and exceptions" {
+    const ctx = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
+    defer JSGlobalContextRelease(ctx);
+    var exception: JSValueRef = null;
+    const from_double = JSBigIntCreateWithDouble(ctx, 42.0, &exception) orelse return error.BigIntCreateFailed;
+    const from_signed = JSBigIntCreateWithInt64(ctx, std.math.minInt(i64), &exception) orelse return error.BigIntCreateFailed;
+    const from_unsigned = JSBigIntCreateWithUInt64(ctx, std.math.maxInt(u64), &exception) orelse return error.BigIntCreateFailed;
+    const text = JSStringCreateWithUTF8CString("123456789012345678901234567890") orelse return error.StringInitFailed;
+    defer JSStringRelease(text);
+    const from_text = JSBigIntCreateWithString(ctx, text, &exception) orelse return error.BigIntCreateFailed;
+    try std.testing.expect(exception == null);
+
+    const global = JSContextGetGlobalObject(ctx);
+    for ([_]struct { name: [*:0]const u8, value_ref: JSValueRef }{
+        .{ .name = "bigDouble", .value_ref = from_double },
+        .{ .name = "bigSigned", .value_ref = from_signed },
+        .{ .name = "bigUnsigned", .value_ref = from_unsigned },
+        .{ .name = "bigText", .value_ref = from_text },
+    }) |entry| {
+        const name = JSStringCreateWithUTF8CString(entry.name) orelse return error.StringInitFailed;
+        defer JSStringRelease(name);
+        JSObjectSetProperty(ctx, global, name, entry.value_ref, 0, &exception);
+    }
+    const probe = JSStringCreateWithUTF8CString(
+        "bigDouble === 42n && bigSigned === -9223372036854775808n && " ++
+            "bigUnsigned === 18446744073709551615n && " ++
+            "bigText === 123456789012345678901234567890n",
+    ) orelse return error.StringInitFailed;
+    defer JSStringRelease(probe);
+    const exact = JSEvaluateScript(ctx, probe, null, null, 1, &exception) orelse return error.EvalFailed;
+    try std.testing.expect(exception == null);
+    try std.testing.expect(JSValueToBoolean(ctx, exact));
+
+    try std.testing.expect(JSBigIntCreateWithDouble(ctx, 1.5, &exception) == null);
+    try std.testing.expect(exception != null);
+    exception = null;
+    const invalid = JSStringCreateWithUTF8CString("12x") orelse return error.StringInitFailed;
+    defer JSStringRelease(invalid);
+    try std.testing.expect(JSBigIntCreateWithString(ctx, invalid, &exception) == null);
+    try std.testing.expect(exception != null);
 }
 
 test "C-API: value inspection APIs report null handles as invalid" {

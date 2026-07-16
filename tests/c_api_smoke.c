@@ -44,6 +44,9 @@ int main(void)
     JSStringRelease(symbol_description);
     if (!symbol || !JSValueIsSymbol(context, symbol) || JSValueIsBigInt(context, symbol))
         return 12;
+    JSValueRef bigint = JSBigIntCreateWithUInt64(context, UINT64_MAX, &exception);
+    if (!bigint || exception || !JSValueIsBigInt(context, bigint))
+        return 13;
 
     const JSChar utf16[] = { 'z', 'i', 'g', 0xd83d, 0xde00 };
     JSStringRef wide = JSStringCreateWithCharacters(utf16, 5);

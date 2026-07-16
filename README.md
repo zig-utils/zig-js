@@ -189,10 +189,10 @@ JSValueRef result = JSEvaluateScript(ctx, script, NULL, NULL, 0, NULL);
 double n = JSValueToNumber(ctx, result, NULL); // 2.0
 ```
 
-The current exported C surface has 80 functions:
+The current exported C surface has 84 functions:
 
 - **Context lifecycle** - create/retain/release, global object/context lookup, owned context names, syntax-only checking, evaluation, collection, and the threaded-context extension.
-- **Values** - type and Symbol/BigInt predicates, equality, primitive and fresh-Symbol construction, coercions, and protected handles.
+- **Values** - type and Symbol/BigInt predicates, equality, primitive/fresh-Symbol/exact-BigInt construction, coercions, and protected handles.
 - **Objects** - `JSObjectMake`, `JSObjectGetPrivate`, `JSObjectSetPrivate`, `JSObjectMakeArray`, `JSObjectMakeDeferredPromise`, `JSObjectGetProperty`, `JSObjectSetProperty`, `JSObjectGetPropertyAtIndex`, `JSObjectCallAsFunction`, `JSObjectCallAsConstructor`, `JSObjectMakeFunctionWithCallback`, `JSObjectIsFunction`, `JSObjectIsConstructor`.
 - **Typed arrays and buffers** - `JSValueGetTypedArrayType`, the four public `JSObjectMakeTypedArray*` construction paths, typed-array type/bytes/length/offset/buffer queries, and no-copy `ArrayBuffer` construction/bytes/length with exactly-once embedder deallocation.
 - **Strings** - UTF-8 and UTF-16 construction, retain/release, UTF-16 length and stable borrowed characters, maximum UTF-8 sizing and conversion, and code-unit/UTF-8 equality.
