@@ -2539,6 +2539,14 @@ pub const Compiler = struct {
         // (An env-mode enclosing scope — self.scope == null — captures correctly.)
         if (fnode.is_generator and self.scope != null) return error.Unsupported;
         if (!fnode.is_generator and functionHasBlockNestedFuncDecl(fnode)) return error.Unsupported;
+        // The flat slot model can't represent a lexical binding shadowing another
+        // same-named binding (incl. a param shadowed by a block `let`), and it has
+        // no TDZ. These gates are also applied in compilePlainFunction; a NESTED
+        // function needs them too, else a tiered parent lowers it to a bytecode
+        // sub-chunk that runs those hazards incorrectly (shadow leaks / no
+        // ReferenceError). Keep such functions on the tree-walker.
+        if (!fnode.is_generator and try functionHasShadowableLexical(self.arena, fnode)) return error.Unsupported;
+        if (!fnode.is_generator and try functionHasTdzHazard(self.arena, fnode)) return error.Unsupported;
         // Build this function's slot namespace: parameters first, then every
         // function-scoped declaration in the body (not descending into nested
         // functions). The scope chains to the enclosing function for upvalues.
