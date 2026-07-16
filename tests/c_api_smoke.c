@@ -48,6 +48,15 @@ int main(void)
     if (!bigint || exception || !JSValueIsBigInt(context, bigint))
         return 13;
 
+    JSStringRef json = JSStringCreateWithUTF8CString("{\"ok\":true}");
+    JSValueRef parsed_json = JSValueMakeFromJSONString(context, json);
+    JSStringRelease(json);
+    JSStringRef rendered_json = JSValueCreateJSONString(context, parsed_json, 2, &exception);
+    if (!parsed_json || !rendered_json || exception ||
+        !JSStringIsEqualToUTF8CString(rendered_json, "{\n  \"ok\": true\n}"))
+        return 14;
+    JSStringRelease(rendered_json);
+
     const JSChar utf16[] = { 'z', 'i', 'g', 0xd83d, 0xde00 };
     JSStringRef wide = JSStringCreateWithCharacters(utf16, 5);
     if (!wide || JSStringGetLength(wide) != 5 ||

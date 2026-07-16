@@ -83,6 +83,9 @@ JSValueRef  JSBigIntCreateWithDouble(JSContextRef, double, JSValueRef* exception
 JSValueRef  JSBigIntCreateWithInt64(JSContextRef, int64_t, JSValueRef* exception);
 JSValueRef  JSBigIntCreateWithUInt64(JSContextRef, uint64_t, JSValueRef* exception);
 JSValueRef  JSBigIntCreateWithString(JSContextRef, JSStringRef, JSValueRef* exception);
+JSValueRef  JSValueMakeFromJSONString(JSContextRef, JSStringRef);
+JSStringRef JSValueCreateJSONString(JSContextRef, JSValueRef, unsigned indent,
+                                    JSValueRef* exception);
 bool        JSValueToBoolean(JSContextRef, JSValueRef);
 double      JSValueToNumber(JSContextRef, JSValueRef, JSValueRef* exception);
 JSStringRef JSValueToStringCopy(JSContextRef, JSValueRef, JSValueRef* exception);

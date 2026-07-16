@@ -34,6 +34,7 @@ const gc_mod = @import("gc.zig");
 const value = @import("value.zig");
 const ContextMod = @import("context.zig");
 const interp = @import("interpreter.zig");
+const builtins = @import("builtins.zig");
 const promise = @import("promise.zig");
 const strcell = @import("strcell.zig");
 const WorkerMod = @import("worker.zig");
@@ -731,6 +732,60 @@ export fn JSBigIntCreateWithString(ctx: JSContextRef, string: JSStringRef, excep
         return null;
     };
     return makeCBigInt(ctx, .{ .string = source.bytes }, exception);
+}
+
+export fn JSValueMakeFromJSONString(ctx: JSContextRef, string: JSStringRef) callconv(.c) JSValueRef {
+    const c = ctxFrom(ctx) orelse return null;
+    const source = strFrom(string) orelse return null;
+    const gc_saved = gc_mod.setActiveHeap(c.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(c.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = c.interpreter();
+    c.pushActiveInterpreter(&machine) catch return null;
+    defer c.popActiveInterpreter(&machine);
+    const input = Value.strAlloc(c.arena(), source.bytes) catch return null;
+    const parsed = builtins.jsonParse(&machine, Value.undef(), &.{input}) catch return null;
+    return box(c, parsed);
+}
+
+export fn JSValueCreateJSONString(
+    ctx: JSContextRef,
+    value_ref: JSValueRef,
+    indent: c_uint,
+    exception: ExceptionRef,
+) callconv(.c) JSStringRef {
+    const c = ctxFrom(ctx) orelse return null;
+    const input = valueArgFrom(c, value_ref, exception) orelse return null;
+    const gc_saved = gc_mod.setActiveHeap(c.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(c.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = c.interpreter();
+    c.pushActiveInterpreter(&machine) catch {
+        setException(c, exception, "OutOfMemory");
+        return null;
+    };
+    defer c.popActiveInterpreter(&machine);
+    const spacing = Value.num(@floatFromInt(@min(indent, 10)));
+    const rendered = builtins.jsonStringify(
+        &machine,
+        Value.undef(),
+        &.{ input, Value.undef(), spacing },
+    ) catch |err| {
+        if (err == error.Throw) {
+            if (exception != null) exception[0] = box(c, machine.exception);
+        } else {
+            setException(c, exception, @errorName(err));
+        }
+        return null;
+    };
+    if (!rendered.isString()) return null;
+    const result = JsString.create(gpa, rendered.asStr()) catch {
+        setException(c, exception, "OutOfMemory");
+        return null;
+    };
+    return @ptrCast(result);
 }
 
 // ---- JSValue coercion -------------------------------------------------
@@ -1948,6 +2003,47 @@ test "C-API: BigInt constructors preserve exact values and exceptions" {
     defer JSStringRelease(invalid);
     try std.testing.expect(JSBigIntCreateWithString(ctx, invalid, &exception) == null);
     try std.testing.expect(exception != null);
+}
+
+test "C-API: JSON parse and stringify preserve JSC contracts" {
+    const ctx = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
+    defer JSGlobalContextRelease(ctx);
+    const json = JSStringCreateWithUTF8CString("{\"a\":1,\"b\":[true,null],\"text\":\"😀\"}") orelse return error.StringInitFailed;
+    defer JSStringRelease(json);
+    const parsed = JSValueMakeFromJSONString(ctx, json) orelse return error.JsonParseFailed;
+
+    const binding = JSStringCreateWithUTF8CString("parsedFromC") orelse return error.StringInitFailed;
+    defer JSStringRelease(binding);
+    var exception: JSValueRef = null;
+    JSObjectSetProperty(ctx, JSContextGetGlobalObject(ctx), binding, parsed, 0, &exception);
+    const probe = JSStringCreateWithUTF8CString("parsedFromC.a === 1 && parsedFromC.b[0] === true && parsedFromC.b[1] === null && parsedFromC.text === '😀'") orelse return error.StringInitFailed;
+    defer JSStringRelease(probe);
+    const correct = JSEvaluateScript(ctx, probe, null, null, 1, &exception) orelse return error.EvalFailed;
+    try std.testing.expect(exception == null);
+    try std.testing.expect(JSValueToBoolean(ctx, correct));
+
+    const pretty = JSValueCreateJSONString(ctx, parsed, 99, &exception) orelse return error.JsonStringifyFailed;
+    defer JSStringRelease(pretty);
+    try std.testing.expect(exception == null);
+    var output: [256]u8 = undefined;
+    const written = JSStringGetUTF8CString(pretty, &output, output.len);
+    try std.testing.expect(std.mem.indexOf(u8, output[0 .. written - 1], "\n          \"a\": 1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output[0 .. written - 1], "\n           \"a\": 1") == null);
+
+    const invalid = JSStringCreateWithUTF8CString("{]") orelse return error.StringInitFailed;
+    defer JSStringRelease(invalid);
+    try std.testing.expect(JSValueMakeFromJSONString(ctx, invalid) == null);
+
+    const cyclic_source = JSStringCreateWithUTF8CString("(() => { const value = {}; value.self = value; return value; })()") orelse return error.StringInitFailed;
+    defer JSStringRelease(cyclic_source);
+    const cyclic = JSEvaluateScript(ctx, cyclic_source, null, null, 1, &exception) orelse return error.EvalFailed;
+    exception = null;
+    try std.testing.expect(JSValueCreateJSONString(ctx, cyclic, 0, &exception) == null);
+    try std.testing.expect(exception != null);
+
+    exception = null;
+    try std.testing.expect(JSValueCreateJSONString(ctx, JSValueMakeUndefined(ctx), 0, &exception) == null);
+    try std.testing.expect(exception == null);
 }
 
 test "C-API: value inspection APIs report null handles as invalid" {
