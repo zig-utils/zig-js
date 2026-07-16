@@ -689,6 +689,9 @@ pub const ObjectColdState = struct {
     /// Per-property attribute overrides are rare on ordinary objects. Keep the
     /// atomically published map pointer off the common allocation payload.
     attrs: ?*std.StringHashMapUnmanaged(PropAttr) = null,
+    /// Logical Array length only when it exceeds the dense element count.
+    /// Packed dense arrays derive their length directly and leave this zero.
+    array_len: u32 = 0,
     arg_map_env: ?*anyopaque = null,
     arg_map_names: [][]const u8 = &.{},
     arg_map_severed: []std.atomic.Value(bool) = &.{},
@@ -897,11 +900,8 @@ pub const Object = struct {
     /// `has_indexed_property`, this also records dense element creation and is
     /// used only when another object is consulting this object as a prototype.
     indexed_own_seen: std.atomic.Value(bool) = .init(false),
-    /// For arrays, a *logical* length floor used when it exceeds the physically
-    /// stored `elements` — so `new Array(4294967295)` / `arr.length = big` track a
-    /// length without materializing (and OOM-ing on) that many holes. The array's
-    /// observable length is `max(elements.items.len, array_len)`.
-    array_len: usize = 0,
+    /// Sparse/oversized Array length lives in the cold sidecar. Packed dense
+    /// arrays derive it from `elements.items.len` and remain sidecar-free.
     // C-API callback and owning Context live in the cold sidecar.
     native: ?NativeFn = null,
     /// For a `native` function, whether it implements [[Construct]] — i.e. is
@@ -1785,10 +1785,25 @@ pub const Object = struct {
         return self.elements.items.len;
     }
 
+    pub inline fn arrayLengthFloor(self: *const Object) usize {
+        const cold = self.coldState() orelse return 0;
+        return cold.array_len;
+    }
+
+    fn setArrayLengthFloorUnlocked(self: *Object, fallback: std.mem.Allocator, new_len: usize) std.mem.Allocator.Error!void {
+        std.debug.assert(new_len <= std.math.maxInt(u32));
+        if (new_len <= self.elements.items.len) {
+            if (self.coldState()) |cold| cold.array_len = 0;
+            return;
+        }
+        const cold = try self.ensureCold(fallback);
+        cold.array_len = @intCast(new_len);
+    }
+
     pub fn arrayLength(self: *const Object) usize {
         self.lockElements();
         defer self.unlockElements();
-        return @max(self.elements.items.len, self.array_len);
+        return @max(self.elements.items.len, self.arrayLengthFloor());
     }
 
     pub fn elementAt(self: *const Object, i: usize) ?Value {
@@ -1851,13 +1866,12 @@ pub const Object = struct {
     pub fn appendPackedDenseElements(self: *Object, arena: std.mem.Allocator, values: []const Value) std.mem.Allocator.Error!?usize {
         self.lockElements();
         defer self.unlockElements();
-        if (self.holesMap() != null or self.array_len > self.elements.items.len) return null;
+        if (self.holesMap() != null or self.arrayLengthFloor() > self.elements.items.len) return null;
         const new_len = self.elements.items.len + values.len;
         if (new_len > 4294967295) return null;
         for (values) |v| gcBarrier(self, v);
         if (values.len != 0) self.indexed_own_seen.store(true, .release);
         try self.elements.appendSlice(self.elementsAllocator(arena), values);
-        self.array_len = new_len;
         return new_len;
     }
 
@@ -1868,12 +1882,11 @@ pub const Object = struct {
     pub fn appendDataIndexIfDense(self: *Object, arena: std.mem.Allocator, i: usize, v: Value) std.mem.Allocator.Error!bool {
         self.lockElements();
         defer self.unlockElements();
-        if (self.holesMap() != null or i != self.elements.items.len or i != self.array_len) return false;
+        if (self.holesMap() != null or i != self.elements.items.len or self.arrayLengthFloor() > i) return false;
         if (i >= 4294967295) return false;
         gcBarrier(self, v);
         self.indexed_own_seen.store(true, .release);
         try self.elements.append(self.elementsAllocator(arena), v);
-        self.array_len = i + 1;
         return true;
     }
 
@@ -2094,7 +2107,7 @@ pub const Object = struct {
     pub fn packedDenseElementsCoverLength(self: *const Object) bool {
         self.lockElements();
         defer self.unlockElements();
-        return self.holesMap() == null and self.array_len <= self.elements.items.len;
+        return self.holesMap() == null and self.arrayLengthFloor() <= self.elements.items.len;
     }
 
     /// Snapshot a plain packed dense Array's iteration values under
@@ -2103,7 +2116,7 @@ pub const Object = struct {
     pub fn packedDenseElementsSnapshot(self: *const Object, arena: std.mem.Allocator) std.mem.Allocator.Error!?[]Value {
         self.lockElements();
         defer self.unlockElements();
-        if (self.holesMap() != null or self.array_len > self.elements.items.len or self.accessorsMap() != null) return null;
+        if (self.holesMap() != null or self.arrayLengthFloor() > self.elements.items.len or self.accessorsMap() != null) return null;
         const out = try arena.alloc(Value, self.elements.items.len);
         @memcpy(out, self.elements.items);
         return out;
@@ -2270,23 +2283,23 @@ pub const Object = struct {
         return true;
     }
 
-    pub fn truncateDenseElementsAndSetLength(self: *Object, new_len: usize) void {
+    pub fn truncateDenseElementsAndSetLength(self: *Object, fallback: std.mem.Allocator, new_len: usize) std.mem.Allocator.Error!void {
         self.lockElements();
         defer self.unlockElements();
         if (new_len < self.elements.items.len) self.elements.shrinkRetainingCapacity(new_len);
-        self.array_len = new_len;
+        try self.setArrayLengthFloorUnlocked(fallback, new_len);
     }
 
-    pub fn extendArrayLengthFloor(self: *Object, new_len: usize) void {
+    pub fn extendArrayLengthFloor(self: *Object, fallback: std.mem.Allocator, new_len: usize) std.mem.Allocator.Error!void {
         self.lockElements();
         defer self.unlockElements();
-        self.array_len = @max(self.array_len, new_len);
+        try self.setArrayLengthFloorUnlocked(fallback, @max(self.arrayLengthFloor(), new_len));
     }
 
     pub fn reversePackedDenseElements(self: *Object) bool {
         self.lockElements();
         defer self.unlockElements();
-        if (self.holesMap() != null or self.array_len > self.elements.items.len) return false;
+        if (self.holesMap() != null or self.arrayLengthFloor() > self.elements.items.len) return false;
         std.mem.reverse(Value, self.elements.items);
         return true;
     }
@@ -2299,12 +2312,15 @@ pub const Object = struct {
     ) std.mem.Allocator.Error!void {
         self.lockElements();
         defer self.unlockElements();
+        // If a sparse logical tail will need cold storage, reserve it before
+        // mutating an existing array so OOM cannot leave a half-replaced value.
+        if (new_len > values.len and self.coldState() == null) _ = try self.ensureCold(arena);
         self.indexed_own_seen.store(true, .release);
         for (values) |v| gcBarrier(self, v);
         self.elements.clearRetainingCapacity();
         try self.elements.appendSlice(self.elementsAllocator(arena), values);
         if (self.holesMap()) |h| h.clearRetainingCapacity();
-        self.array_len = new_len;
+        try self.setArrayLengthFloorUnlocked(arena, new_len);
     }
 
     pub fn splicePackedDenseElements(
@@ -2316,7 +2332,7 @@ pub const Object = struct {
     ) std.mem.Allocator.Error!bool {
         self.lockElements();
         defer self.unlockElements();
-        if (self.holesMap() != null or self.array_len > self.elements.items.len) return false;
+        if (self.holesMap() != null or self.arrayLengthFloor() > self.elements.items.len) return false;
         for (inserts) |v| gcBarrier(self, v);
         if (inserts.len != 0) self.indexed_own_seen.store(true, .release);
         var i: usize = 0;
@@ -2329,7 +2345,7 @@ pub const Object = struct {
         while (j > 0) : (j -= 1) {
             try self.elements.insert(self.elementsAllocator(arena), start, inserts[j - 1]);
         }
-        self.array_len = self.elements.items.len;
+        if (self.coldState()) |cold| cold.array_len = 0;
         return true;
     }
 

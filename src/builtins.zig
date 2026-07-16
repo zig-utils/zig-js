@@ -988,7 +988,7 @@ pub fn arrayConstructor(ctx: *anyopaque, this: Value, args: []const Value) HostE
         // `new Array(len)` is a sparse array — length `len`, no elements (every
         // index a hole, so `0 in new Array(1)` is false and forEach/map skip
         // them). Only the logical length is set.
-        arr.asObj().array_len = @intFromFloat(n);
+        try arr.asObj().extendArrayLengthFloor(self.arena, @intFromFloat(n));
     } else {
         for (args) |v| try arr.asObj().appendElement(self.arena, v);
     }
@@ -1727,7 +1727,7 @@ pub fn defineOneResult(self: *Interpreter, target: *value.Object, key: []const u
                 target.has_indexed_property.store(true, .monotonic);
                 // Redefining a mapped index as non-writable severs the parameter link.
                 if (am_mapped and !attr.writable) interpreter.argMapSever(target, i);
-                target.extendArrayLengthFloor(i + 1);
+                try target.extendArrayLengthFloor(self.arena, i + 1);
                 return true;
             }
         }
@@ -1811,7 +1811,7 @@ pub fn defineOneResult(self: *Interpreter, target: *value.Object, key: []const u
         if (arrayIndexOf(key)) |i| {
             // Only a valid array index (ToUint32(P) === P and < 2^32 - 1) updates
             // `length`; 2^32 - 1 and above are ordinary properties.
-            if (i < 4294967295 and i + 1 > target.arrayLength()) target.extendArrayLengthFloor(i + 1);
+            if (i < 4294967295 and i + 1 > target.arrayLength()) try target.extendArrayLengthFloor(self.arena, i + 1);
             // Defining a mapped arguments index as an accessor severs its link.
             if (target.is_arguments and (get != null or set != null)) interpreter.argMapSever(target, i);
         }

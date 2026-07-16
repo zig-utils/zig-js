@@ -331,7 +331,7 @@ const Serializer = struct {
             holes[i] = hole;
             if (!hole) try s.rootSnapshotValue(el);
         }
-        return .{ .logical_len = @max(n, o.array_len), .elements = elements, .holes = holes };
+        return .{ .logical_len = @max(n, o.arrayLengthFloor()), .elements = elements, .holes = holes };
     }
 
     fn childDepth(s: *Serializer, depth: u16) HostError!u16 {
@@ -943,6 +943,7 @@ const Deserializer = struct {
                 const arr = (try d.self.newArray()).asObj();
                 try d.objs.append(a, arr);
                 const len = try d.readUsize();
+                if (len > 4294967295) return d.fail();
                 const n = std.math.cast(usize, d.r.int(u32) catch return d.fail()) orelse return d.fail();
                 var i: usize = 0;
                 while (i < n) : (i += 1) {
@@ -954,7 +955,7 @@ const Deserializer = struct {
                         try arr.appendElement(a, try d.deser(try d.childDepth(depth)));
                     }
                 }
-                arr.array_len = len;
+                try arr.extendArrayLengthFloor(a, len);
                 try d.deserNamedProps(arr, depth);
                 return Value.obj(arr);
             },
@@ -1006,7 +1007,6 @@ const Deserializer = struct {
                     const pair = (try d.self.newArray()).asObj();
                     try pair.appendElement(a, k);
                     try pair.appendElement(a, v);
-                    pair.array_len = 2;
                     try o.appendInternalElement(a, Value.obj(pair));
                 }
                 return Value.obj(o);

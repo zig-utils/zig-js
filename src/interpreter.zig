@@ -6396,7 +6396,7 @@ pub const Interpreter = struct {
     /// checks. Returns false when a non-configurable element blocks the shrink.
     pub fn setArrayLength(self: *Interpreter, o: *value.Object, requested_len: usize) EvalError!bool {
         if (!o.is_arguments and o.attrsMap() == null and o.accessorsMap() == null and !o.has_indexed_property.load(.monotonic)) {
-            o.truncateDenseElementsAndSetLength(requested_len);
+            try o.truncateDenseElementsAndSetLength(self.arena, requested_len);
             return true;
         }
 
@@ -6433,7 +6433,7 @@ pub const Interpreter = struct {
             }
         }
 
-        o.truncateDenseElementsAndSetLength(new_len);
+        try o.truncateDenseElementsAndSetLength(self.arena, new_len);
         return !blocked;
     }
 
@@ -7377,14 +7377,14 @@ pub const Interpreter = struct {
     fn newArrayWithLength(self: *Interpreter, len: usize) EvalError!Value {
         if (len > 4294967295) return self.throwError("RangeError", "Invalid array length");
         const arr = try self.newArray();
-        arr.asObj().extendArrayLengthFloor(len);
+        try arr.asObj().extendArrayLengthFloor(self.arena, len);
         return arr;
     }
 
     fn newArrayWithLengthInRealm(self: *Interpreter, env: *Environment, len: usize) EvalError!Value {
         if (len > 4294967295) return self.throwError("RangeError", "Invalid array length");
         const arr = try self.newArrayInRealm(env);
-        arr.asObj().extendArrayLengthFloor(len);
+        try arr.asObj().extendArrayLengthFloor(self.arena, len);
         return arr;
     }
 
@@ -10847,7 +10847,7 @@ pub const Interpreter = struct {
                     _ = try ro.growDenseElement(self.arena, i, v);
                     return true;
                 }
-                ro.extendArrayLengthFloor(i + 1);
+                try ro.extendArrayLengthFloor(self.arena, i + 1);
             }
         } else if (arrayElementIndex(key)) |i| {
             if (ro.attrsMap() != null or ro.accessorsMap() != null or ro.has_indexed_property.load(.monotonic) or
@@ -12346,7 +12346,7 @@ pub const Interpreter = struct {
             if (o.is_array) {
                 if (arrayElemNonConfigurable(o, last)) return self.throwError("TypeError", "Cannot delete a non-configurable array element");
                 if (!arrayLenWritable(o)) return self.throwError("TypeError", "Cannot assign to read only property 'length'");
-                o.truncateDenseElementsAndSetLength(last);
+                try o.truncateDenseElementsAndSetLength(self.arena, last);
                 return element;
             }
             if (!try self.deleteOwn(o, idx)) return self.throwError("TypeError", "Cannot delete property");

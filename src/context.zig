@@ -12257,6 +12257,7 @@ test "quick object replacement checks a restricted receiver before fused mutatio
     const first_before = items.elementAt(0).?.asObj();
     const current: u64 = @intCast(std.Thread.getCurrentId());
     try std.testing.expect(items.coldState() == null);
+    try std.testing.expect(first_before.coldState() == null); // three-property literal stays common-layout-only
     var restricted_cold = value.ObjectColdState{};
     items.cold.store(&restricted_cold, .release);
     defer items.cold.store(null, .release);

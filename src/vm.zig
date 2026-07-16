@@ -2546,7 +2546,7 @@ fn tryQuickObjectAllocationLoopMode(
         array.has_indexed_property.load(.monotonic))
         return null;
     if (parallel_sync) array.lockElements();
-    const dense_array = array.holesMap() == null and array.array_len <= array.elements.items.len;
+    const dense_array = array.holesMap() == null and array.arrayLengthFloor() <= array.elements.items.len;
     if (parallel_sync) array.unlockElements();
     if (!dense_array) return null;
     if (!frame.slots[counter_slot].isNumber() or !frame.slots[total_slot].isNumber() or
@@ -2777,7 +2777,7 @@ fn tryQuickArrayLoop(
             const array = array_value.asObj();
             if (!array.is_array or array.is_arguments or array.proxyHandler() != null or array.proxy_revoked or
                 array.accessorsMap() != null or array.holesMap() != null or
-                array.array_len > array.elements.items.len)
+                array.arrayLengthFloor() > array.elements.items.len)
                 break :quick null;
             if (!frame.slots[index_slot].isNumber() or !frame.slots[checksum_slot].isNumber() or
                 !frame.slots[extra_slot].isNumber())
@@ -2850,7 +2850,7 @@ fn tryQuickArrayLoop(
                 break :quick null;
             if (parallel_sync) array.lockElements();
             defer if (parallel_sync) array.unlockElements();
-            if (array.accessorsMap() != null or array.holesMap() != null or array.array_len > array.elements.items.len)
+            if (array.accessorsMap() != null or array.holesMap() != null or array.arrayLengthFloor() > array.elements.items.len)
                 break :quick null;
             var index_value = frame.slots[index_slot];
             var total_value = frame.slots[total_slot];
@@ -4197,7 +4197,7 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                         if (o.is_array and !o.is_arguments and o.proxyHandler() == null and !o.proxy_revoked and
                             std.mem.eql(u8, name, "length"))
                         {
-                            const length = if (parallel_sync) o.arrayLength() else @max(o.elements.items.len, o.array_len);
+                            const length = if (parallel_sync) o.arrayLength() else @max(o.elements.items.len, o.arrayLengthFloor());
                             result = Value.num(@floatFromInt(length));
                             if (builtin.is_test) _ = quick_array_length_hits.fetchAdd(1, .monotonic);
                             break :fast;
