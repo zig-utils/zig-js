@@ -637,7 +637,7 @@ pub const ObjectRareState = union(ObjectRareTag) {
         name: []const u8 = "",
         ctor: ?[]const u8 = null,
     },
-    date: struct { ms: f64 = 0 },
+    date: struct { ms_bits: std.atomic.Value(u64) = .init(0) },
     module_ns: struct { ptr: ?*anyopaque = null },
     weak_ref: struct { target: ?*Object = null },
     host_callback: struct {
@@ -1731,14 +1731,14 @@ pub const Object = struct {
     pub fn dateMs(self: *const Object) f64 {
         const cold = self.coldState() orelse return 0;
         if (!cold.hasRare(.date)) return 0;
-        return @atomicLoad(f64, &cold.rare.date.ms, .monotonic);
+        return @bitCast(cold.rare.date.ms_bits.load(.monotonic));
     }
     pub fn initDateMs(self: *Object, fallback: std.mem.Allocator, v: f64) std.mem.Allocator.Error!void {
         const state = try self.ensureRare(fallback, .date, .{});
-        @atomicStore(f64, &state.ms, v, .monotonic);
+        state.ms_bits.store(@bitCast(v), .monotonic);
     }
     pub fn setDateMs(self: *Object, v: f64) void {
-        @atomicStore(f64, &self.coldState().?.rare.date.ms, v, .monotonic);
+        self.coldState().?.rare.date.ms_bits.store(@bitCast(v), .monotonic);
     }
 
     pub fn elementsLen(self: *const Object) usize {
