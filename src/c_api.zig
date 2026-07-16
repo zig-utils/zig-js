@@ -1639,6 +1639,21 @@ test "C-API: JSString preserves UTF-16 and compares by code units" {
     try std.testing.expect(JSStringCreateWithCharacters(null, 1) == null);
 }
 
+test "C-API: JSString preserves embedded NUL and saturates maximum UTF-8 size" {
+    const units = [_]u16{ 'a', 0, 'b' };
+    const string = JSStringCreateWithCharacters(&units, units.len) orelse return error.StringInitFailed;
+    defer JSStringRelease(string);
+    try std.testing.expectEqual(@as(usize, 3), JSStringGetLength(string));
+    try std.testing.expectEqualSlices(u16, &units, JSStringGetCharactersPtr(string)[0..units.len]);
+    try std.testing.expect(!JSStringIsEqualToUTF8CString(string, "a"));
+
+    const raw = strFrom(string) orelse return error.StringInitFailed;
+    const original = raw.utf16;
+    raw.utf16 = raw.utf16.ptr[0 .. std.math.maxInt(usize) / 3 + 1];
+    defer raw.utf16 = original;
+    try std.testing.expectEqual(std.math.maxInt(usize), JSStringGetMaximumUTF8CStringSize(string));
+}
+
 test "C-API: JSString UTF-8 truncation preserves code point boundaries" {
     const string = JSStringCreateWithUTF8CString("A😀Z") orelse return error.StringInitFailed;
     defer JSStringRelease(string);
@@ -1671,6 +1686,9 @@ test "C-API: JSString null C pointers are rejected safely" {
 test "C-API: JSString rejects invalid UTF-8 input" {
     const invalid = [_:0]u8{ 'b', 'a', 'd', 0xc0, 'u', 't', 'f', '8' };
     try std.testing.expect(JSStringCreateWithUTF8CString(&invalid) == null);
+    const valid = JSStringCreateWithUTF8CString("valid") orelse return error.StringInitFailed;
+    defer JSStringRelease(valid);
+    try std.testing.expect(!JSStringIsEqualToUTF8CString(valid, &invalid));
 }
 
 test "C-API: JSStringRetain rejects refcount overflow" {

@@ -113,6 +113,8 @@ test "JSString retain/release is atomic across threads" {
             for (0..iterations) |_| {
                 const held = str.retain();
                 if (held.bytes.len == 0) @panic("lost JSString bytes");
+                if (!std.mem.eql(u16, held.utf16, std.unicode.utf8ToUtf16LeStringLiteral("thread-safe string")))
+                    @panic("lost JSString UTF-16 backing");
                 held.release();
             }
         }

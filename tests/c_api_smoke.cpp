@@ -24,6 +24,14 @@ int main()
         return 5;
     bytes[0] = 42;
 
+    const JSChar characters[] = { 'C', '+', '+', 0xd83d, 0xde80 };
+    JSStringRef string = JSStringCreateWithCharacters(characters, 5);
+    if (!string || JSStringGetCharactersPtr(string)[4] != 0xde80 ||
+        JSStringGetMaximumUTF8CStringSize(string) != 16 ||
+        !JSStringIsEqualToUTF8CString(string, "C++\xf0\x9f\x9a\x80"))
+        return 6;
+    JSStringRelease(string);
+
     JSGlobalContextRelease(context);
     return 0;
 }
