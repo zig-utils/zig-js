@@ -557,6 +557,14 @@ export fn JSValueIsString(ctx: JSContextRef, v: JSValueRef) callconv(.c) bool {
     return if (valueFromContext(c, v)) |uv| uv.isString() else false;
 }
 
+export fn JSValueIsSymbol(ctx: JSContextRef, v: JSValueRef) callconv(.c) bool {
+    return JSValueGetType(ctx, v) == .symbol;
+}
+
+export fn JSValueIsBigInt(ctx: JSContextRef, v: JSValueRef) callconv(.c) bool {
+    return JSValueGetType(ctx, v) == .bigint;
+}
+
 export fn JSValueIsObject(ctx: JSContextRef, v: JSValueRef) callconv(.c) bool {
     const c = ctxForHandleInspection(ctx) orelse return false;
     const uv = valueFromContext(c, v) orelse return false;
@@ -643,6 +651,24 @@ export fn JSValueMakeString(ctx: JSContextRef, str: JSStringRef) callconv(.c) JS
     const s = strFrom(str) orelse return null;
     const copy = c.arena().dupe(u8, s.bytes) catch return null;
     return box(c, Value.strOwned(c.arena(), copy) catch return null);
+}
+
+export fn JSValueMakeSymbol(ctx: JSContextRef, description: JSStringRef) callconv(.c) JSValueRef {
+    const c = ctxFrom(ctx) orelse return null;
+    const desc: ?[]const u8 = if (description) |_| blk: {
+        const source = strFrom(description) orelse return null;
+        break :blk c.arena().dupe(u8, source.bytes) catch return null;
+    } else null;
+
+    const gc_saved = gc_mod.setActiveHeap(c.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(c.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = c.interpreter();
+    c.pushActiveInterpreter(&machine) catch return null;
+    defer c.popActiveInterpreter(&machine);
+    const symbol = machine.makeSymbol(desc) catch return null;
+    return box(c, symbol);
 }
 
 // ---- JSValue coercion -------------------------------------------------
@@ -1787,6 +1813,37 @@ test "C-API: primitive object-tagged values report primitive types" {
     try std.testing.expect(exception == null);
     try std.testing.expectEqual(JSType.bigint, JSValueGetType(ctx, bigint_value));
     try std.testing.expect(!JSValueIsObject(ctx, bigint_value));
+}
+
+test "C-API: Symbol construction preserves uniqueness and owned description" {
+    const ctx = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
+    defer JSGlobalContextRelease(ctx);
+    const description = JSStringCreateWithUTF8CString("native") orelse return error.StringInitFailed;
+    const first = JSValueMakeSymbol(ctx, description) orelse return error.SymbolCreateFailed;
+    JSStringRelease(description);
+    const second_description = JSStringCreateWithUTF8CString("native") orelse return error.StringInitFailed;
+    defer JSStringRelease(second_description);
+    const second = JSValueMakeSymbol(ctx, second_description) orelse return error.SymbolCreateFailed;
+
+    try std.testing.expect(JSValueIsSymbol(ctx, first));
+    try std.testing.expect(!JSValueIsBigInt(ctx, first));
+    try std.testing.expect(!JSValueIsStrictEqual(ctx, first, second));
+    const binding = JSStringCreateWithUTF8CString("nativeSymbol") orelse return error.StringInitFailed;
+    defer JSStringRelease(binding);
+    var exception: JSValueRef = null;
+    JSObjectSetProperty(ctx, JSContextGetGlobalObject(ctx), binding, first, 0, &exception);
+    try std.testing.expect(exception == null);
+    const description_probe = JSStringCreateWithUTF8CString("nativeSymbol.description === 'native' && String(nativeSymbol) === 'Symbol(native)'") orelse return error.StringInitFailed;
+    defer JSStringRelease(description_probe);
+    const description_ok = JSEvaluateScript(ctx, description_probe, null, null, 1, &exception) orelse return error.EvalFailed;
+    try std.testing.expect(exception == null);
+    try std.testing.expect(JSValueToBoolean(ctx, description_ok));
+
+    const bigint_source = JSStringCreateWithUTF8CString("123n") orelse return error.StringInitFailed;
+    defer JSStringRelease(bigint_source);
+    const bigint = JSEvaluateScript(ctx, bigint_source, null, null, 1, null) orelse return error.EvalFailed;
+    try std.testing.expect(JSValueIsBigInt(ctx, bigint));
+    try std.testing.expect(!JSValueIsSymbol(ctx, bigint));
 }
 
 test "C-API: value inspection APIs report null handles as invalid" {

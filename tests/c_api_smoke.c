@@ -39,6 +39,12 @@ int main(void)
     JSValueProtect(context, answer);
     JSValueUnprotect(context, answer);
 
+    JSStringRef symbol_description = JSStringCreateWithUTF8CString("smoke");
+    JSValueRef symbol = JSValueMakeSymbol(context, symbol_description);
+    JSStringRelease(symbol_description);
+    if (!symbol || !JSValueIsSymbol(context, symbol) || JSValueIsBigInt(context, symbol))
+        return 12;
+
     const JSChar utf16[] = { 'z', 'i', 'g', 0xd83d, 0xde00 };
     JSStringRef wide = JSStringCreateWithCharacters(utf16, 5);
     if (!wide || JSStringGetLength(wide) != 5 ||

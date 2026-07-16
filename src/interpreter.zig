@@ -7252,6 +7252,15 @@ pub const Interpreter = struct {
         return Value.obj(o);
     }
 
+    /// Create a fresh Symbol primitive linked to this realm's live
+    /// Symbol.prototype. The description storage must already outlive the
+    /// returned value (callers normally duplicate it into the realm arena).
+    pub fn makeSymbol(self: *Interpreter, description: ?[]const u8) EvalError!Value {
+        const symbol = try makeSymbolObj(self.arena, self.root_shape, description, symbolProto(self));
+        _ = self.registerSymbol(symbol.asObj());
+        return symbol;
+    }
+
     pub fn makeBigIntText(self: *Interpreter, s: []const u8) EvalError!Value {
         if (std.fmt.parseInt(i128, s, 10)) |v| return self.makeBigInt(v) else |_| {}
         const o = try gc_mod.allocObj(self.arena);
