@@ -795,6 +795,10 @@ pub const ObjectElementsState = struct {
     list: std.ArrayListUnmanaged(Value) = .empty,
 };
 
+pub const ObjectSlotsState = struct {
+    list: std.ArrayListUnmanaged(Value) = .empty,
+};
+
 /// A JavaScript object. v1 keeps this deliberately small: a string-keyed
 /// property map, an optional dense array part, and three flavors of callable:
 /// a JS-defined function (`js_func`, type-erased `*Function` to avoid an
@@ -833,13 +837,15 @@ pub const Object = struct {
     /// `elements`; Layer-C work must move each direct access behind this lock or
     /// a narrower equivalent before the GIL can go away.
     elements_lock: std.atomic.Mutex = .unlocked,
-    /// Named properties live behind a shared `Shape` (null = no own properties)
-    /// plus a flat per-object `slots` array indexed by the shape. See shape.zig.
+    /// Named properties live behind a shared `Shape` (null = no own properties).
+    /// Objects with more than four properties publish their external slot-list
+    /// metadata here; smaller objects derive their live slice from `shape.count`
+    /// and keep every value in `inline_slots` without a side allocation.
     shape: ?*Shape = null,
-    slots: std.ArrayListUnmanaged(Value) = .empty,
+    slots: std.atomic.Value(?*ObjectSlotsState) = .init(null),
     /// Most ordinary objects never grow beyond a handful of named properties.
     /// Keep those values in the GC cell itself so object literals avoid a
-    /// second allocator round trip; `slots.items` points here until growth.
+    /// second allocator round trip.
     inline_slots: [inline_slot_capacity]Value = undefined,
     /// Prototype link ([[Prototype]]): property lookup walks this chain. An
     /// instance's proto is its constructor's `.prototype`; a class's `.prototype`
@@ -1540,14 +1546,21 @@ pub const Object = struct {
     }
 
     pub fn initInlineSlots(self: *Object) void {
-        self.slots = .{ .items = self.inline_slots[0..0], .capacity = self.inline_slots.len };
+        self.slots.store(null, .monotonic);
+    }
+
+    pub inline fn slotsState(self: *const Object) ?*ObjectSlotsState {
+        return @constCast(&self.slots).load(.acquire);
     }
 
     /// Representation boundary for named-property values. Callers retain their
     /// existing `property_lock` discipline; keeping the slice behind this
     /// helper lets external slot metadata move out of the common Object cell.
     pub inline fn slotsItems(self: *const Object) []Value {
-        return self.slots.items;
+        if (self.slotsState()) |state| return state.list.items;
+        const len: usize = if (self.shape) |shape| @intCast(shape.count) else 0;
+        std.debug.assert(len <= inline_slot_capacity);
+        return @constCast(self).inline_slots[0..len];
     }
 
     /// Validate an immutable root-to-final shape chain once before a hot
@@ -1603,34 +1616,40 @@ pub const Object = struct {
             gcBarrier(self, value_);
             self.inline_slots[index] = value_;
         }
-        self.slots.items = self.inline_slots[0..values.len];
         self.shape = prepared.final_shape;
         return true;
     }
 
     fn slotsAreInline(self: *const Object) bool {
-        return self.slots.capacity == self.inline_slots.len and self.slots.items.ptr == &self.inline_slots;
+        return self.slotsState() == null;
     }
 
     fn appendSlot(self: *Object, fallback: std.mem.Allocator, value_: Value) std.mem.Allocator.Error!void {
-        if (self.slots.items.len < self.slots.capacity) {
-            self.slots.appendAssumeCapacity(value_);
-            return;
-        }
-        if (!self.slotsAreInline()) {
-            try self.slots.append(self.slotsAllocator(fallback), value_);
+        if (self.slotsState()) |state| {
+            try state.list.append(self.slotsAllocator(fallback), value_);
             return;
         }
 
-        const old_len = self.slots.items.len;
+        const old_slots = self.slotsItems();
+        if (old_slots.len < inline_slot_capacity) {
+            self.inline_slots[old_slots.len] = value_;
+            return;
+        }
+
         const backing = self.backingForTracked(fallback, "slots");
-        const storage = backing.allocator.alloc(Value, self.inline_slots.len * 2) catch |err| {
+        const state = backing.allocator.create(ObjectSlotsState) catch |err| {
             if (backing.activated) self.deactivateBacking("slots");
             return err;
         };
-        @memcpy(storage[0..old_len], self.slots.items);
-        self.slots = .{ .items = storage[0..old_len], .capacity = storage.len };
-        self.slots.appendAssumeCapacity(value_);
+        const storage = backing.allocator.alloc(Value, inline_slot_capacity * 2) catch |err| {
+            backing.allocator.destroy(state);
+            if (backing.activated) self.deactivateBacking("slots");
+            return err;
+        };
+        @memcpy(storage[0..old_slots.len], old_slots);
+        state.* = .{ .list = .{ .items = storage[0..old_slots.len], .capacity = storage.len } };
+        state.list.appendAssumeCapacity(value_);
+        self.slots.store(state, .release);
     }
 
     pub fn elementsAllocator(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator {
@@ -2408,9 +2427,12 @@ pub const Object = struct {
     }
 
     fn resetSlotsForRebuildUnlocked(self: *Object) void {
-        if (self.activeBackingAllocator("slots")) |allocator| {
-            self.slots.deinit(allocator);
-            self.deactivateBacking("slots");
+        if (self.slotsState()) |state| {
+            if (self.activeBackingAllocator("slots")) |allocator| {
+                state.list.deinit(allocator);
+                allocator.destroy(state);
+                self.deactivateBacking("slots");
+            }
         }
         self.initInlineSlots();
     }
@@ -3614,12 +3636,71 @@ test "ordinary object keeps four named property values inline before migrating" 
         try object.setOwn(std.testing.allocator, root, name, Value.num(@floatFromInt(i)));
     }
     try std.testing.expect(object.slotsAreInline());
+    try std.testing.expect(object.slotsState() == null);
     try std.testing.expectEqual(@as(usize, 4), object.slotsItems().len);
 
     try object.setOwn(std.testing.allocator, root, names[4], Value.num(4));
     try std.testing.expect(!object.slotsAreInline());
+    try std.testing.expect(object.slotsState() != null);
     try std.testing.expectEqual(@as(usize, 5), object.slotsItems().len);
-    object.slots.deinit(std.testing.allocator);
+    const state = object.slotsState().?;
+    state.list.deinit(std.testing.allocator);
+    std.testing.allocator.destroy(state);
+}
+
+fn exerciseExternalSlotsOomRollback(allocator: std.mem.Allocator) !void {
+    var four_slot_shape = Shape{
+        .parent = null,
+        .name = "d",
+        .slot = 3,
+        .count = Object.inline_slot_capacity,
+        .arena = allocator,
+    };
+    var object = Object{ .shape = &four_slot_shape };
+    for (&object.inline_slots, 0..) |*slot, i| slot.* = Value.num(@floatFromInt(i));
+
+    object.appendSlot(allocator, Value.num(4)) catch |err| {
+        try std.testing.expect(object.slotsState() == null);
+        try std.testing.expectEqual(Object.inline_slot_capacity, object.slotsItems().len);
+        try std.testing.expect(!object.backing_flags.slots);
+        return err;
+    };
+    const state = object.slotsState().?;
+    defer {
+        state.list.deinit(allocator);
+        allocator.destroy(state);
+    }
+    try std.testing.expectEqual(Object.inline_slot_capacity + 1, object.slotsItems().len);
+}
+
+test "external named slot state rolls back every allocation failure" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        exerciseExternalSlotsOomRollback,
+        .{},
+    );
+}
+
+test "external named slot state publishes once under concurrent growth" {
+    const root = try Shape.createRoot(std.heap.page_allocator);
+    var object = Object{};
+    const names = [_][]const u8{ "a", "b", "c", "d", "e", "f", "g", "h" };
+
+    const Worker = struct {
+        fn run(o: *Object, root_shape: *Shape, name: []const u8, n: usize) void {
+            o.setOwn(std.heap.page_allocator, root_shape, name, Value.num(@floatFromInt(n))) catch @panic("setOwn failed");
+        }
+    };
+    var threads: [names.len]std.Thread = undefined;
+    for (&threads, names, 0..) |*thread, name, i| {
+        thread.* = try std.Thread.spawn(.{}, Worker.run, .{ &object, root, name, i });
+    }
+    for (threads) |thread| thread.join();
+
+    try std.testing.expectEqual(names.len, object.slotsItems().len);
+    const state = object.slotsState().?;
+    state.list.deinit(std.heap.page_allocator);
+    std.heap.page_allocator.destroy(state);
 }
 
 fn exerciseKeyOrderOomRollback(allocator: std.mem.Allocator) !void {

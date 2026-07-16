@@ -29,6 +29,7 @@ const agent = @import("agent.zig");
 
 const Value = value.Value;
 const Object = value.Object;
+const Shape = @import("shape.zig").Shape;
 const Environment = interp.Environment;
 
 var object_batch_cells_for_testing: std.atomic.Value(u64) = .init(0);
@@ -288,8 +289,10 @@ fn finalizeObjectBacking(o: *Object, a: std.mem.Allocator) usize {
     const flags = o.backing_flags;
 
     if (flags.slots) {
-        o.slots.deinit(a);
-        o.slots = .empty;
+        const state = o.slotsState().?;
+        state.list.deinit(a);
+        a.destroy(state);
+        o.slots.store(null, .release);
         released += 1;
     }
     if (flags.elements) {
@@ -969,7 +972,7 @@ pub const Binding = struct {
 pub const Heap = gc.Heap(Binding);
 
 test "Object and cold sidecar fit the 256-byte GC slab" {
-    try std.testing.expectEqual(@as(usize, 144), @sizeOf(Object));
+    try std.testing.expectEqual(@as(usize, 128), @sizeOf(Object));
     try std.testing.expectEqual(@as(usize, 224), @sizeOf(value.ObjectColdState));
     try std.testing.expect(Heap.cellAllocationBytes(Object) <= 256);
     try std.testing.expect(Heap.cellAllocationBytes(value.ObjectColdState) <= 256);
@@ -1238,7 +1241,10 @@ const TestEngine = struct {
     pub fn finalize(self: *TestEngine, cell: *anyopaque, kind: @This().Kind) void {
         std.debug.assert(kind == .object);
         const o: *Object = @ptrCast(@alignCast(cell));
-        o.slots.deinit(self.gpa);
+        if (o.slotsState()) |state| {
+            state.list.deinit(self.gpa);
+            self.gpa.destroy(state);
+        }
         if (o.elementsState()) |state| {
             state.list.deinit(self.gpa);
             self.gpa.destroy(state);
@@ -1269,9 +1275,18 @@ test "gc binding: real Object graph — proto/slots/accessors survive, garbage s
     const garbage = try heap.create(Object, .object);
     garbage.* = .{};
 
-    try root.slots.append(a, Value.obj(child));
+    var occupied_shape = Shape{
+        .parent = null,
+        .name = "edge",
+        .slot = 0,
+        .count = 1,
+        .arena = a,
+    };
+    root.shape = &occupied_shape;
+    root.inline_slots[0] = Value.obj(child);
     child.proto = gp;
-    try gp.slots.append(a, Value.obj(root)); // cycle back to the root
+    gp.shape = &occupied_shape;
+    gp.inline_slots[0] = Value.obj(root); // cycle back to the root
     // `garbage` is unreferenced.
     try eng.roots.append(a, root);
     try std.testing.expectEqual(@as(usize, 4), heap.live_cells);
