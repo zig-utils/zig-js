@@ -13,6 +13,16 @@ on:
         required: true
         default: '2,4,8'
         type: string
+      baseline_raw:
+        description: Optional committed raw TSV to compare on a matching controlled runner
+        required: false
+        default: ''
+        type: string
+      baseline_report:
+        description: Optional committed Markdown report paired with baseline_raw
+        required: false
+        default: ''
+        type: string
 
 permissions:
   contents: read
@@ -62,7 +72,31 @@ jobs:
             -Dbenchmark-comparison-raw-out="benchmark-results/benchmark-comparison-${GITHUB_RUN_ID}.tsv" \
             -Dbenchmark-comparison-markdown-out="benchmark-results/benchmark-comparison-${GITHUB_RUN_ID}.md"
 
+      - name: Validate publication and generate scorecard artifact
+        working-directory: zig-js
+        run: |
+          cp README.md benchmark-results/README.generated.md
+          python3 tools/benchmark-publication.py \
+            --current-raw="benchmark-results/benchmark-comparison-${GITHUB_RUN_ID}.tsv" \
+            --current-report="benchmark-results/benchmark-comparison-${GITHUB_RUN_ID}.md" \
+            --readme=benchmark-results/README.generated.md
+
+      - name: Compare controlled historical baseline
+        if: inputs.baseline_raw != '' || inputs.baseline_report != ''
+        working-directory: zig-js
+        env:
+          BASELINE_RAW: ${{ inputs.baseline_raw }}
+          BASELINE_REPORT: ${{ inputs.baseline_report }}
+        run: |
+          python3 tools/benchmark-publication.py \
+            --current-raw="benchmark-results/benchmark-comparison-${GITHUB_RUN_ID}.tsv" \
+            --current-report="benchmark-results/benchmark-comparison-${GITHUB_RUN_ID}.md" \
+            --baseline-raw="$BASELINE_RAW" \
+            --baseline-report="$BASELINE_REPORT" \
+            --history-out="benchmark-results/benchmark-history-${GITHUB_RUN_ID}.md"
+
       - name: Upload raw evidence and report
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: benchmark-comparison-${{ github.run_id }}

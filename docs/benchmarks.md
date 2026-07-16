@@ -18,9 +18,9 @@ The latest saved run is the [July 15, 2026 128-byte-slab report](.data/benchmark
 
 | mode | lanes | wins vs JSC | zig-js / JSC throughput | zig-js scaling | JSC scaling |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| direct warmed context | 1 | 10 / 10 | **2.63x** | — | — |
-| independent steady contexts | 8 | 10 / 10 | **2.94x** | **5.14x** | 4.77x |
-| independent cold lifecycles | 8 | 10 / 10 | **2.94x** | **5.18x** | 4.76x |
+| direct warmed context | 1 | 10 / 10 | **2.67x** | — | — |
+| independent steady contexts | 8 | 10 / 10 | **2.95x** | **5.14x** | 4.77x |
+| independent cold lifecycles | 8 | 10 / 10 | **2.91x** | **5.18x** | 4.76x |
 | shared realm, no GIL | 8 | no public-JSC equivalent | — | **3.97x** | — |
 
 The saved single-thread medians are:
@@ -70,7 +70,7 @@ The separate no-GIL shared-realm path has no direct public-JSC equivalent. Its o
 | arguments calls | 71.888 | 120.298 | 4.78x |
 | Fibonacci | 296.225 | 469.612 | 5.05x |
 
-zig-js wins all 10 direct rows and all 10 eight-lane rows in both directly comparable multi-context modes. Its geometric-mean throughput lead is 2.63x direct and 2.94x in both eight-lane independent modes. Mode-local eight-lane scaling is 5.14x for zig-js versus 4.77x for JSC when warmed and 5.18x versus 4.76x when cold. Shared-realm scaling is 3.97x by geometric mean.
+zig-js wins all 10 direct rows and all 10 eight-lane rows in both directly comparable multi-context modes. Its geometric-mean throughput lead is 2.67x direct, 2.95x at eight warmed independent contexts, and 2.91x across eight cold lifecycles. Mode-local eight-lane scaling is 5.14x for zig-js versus 4.77x for JSC when warmed and 5.18x versus 4.76x when cold. Shared-realm scaling is 3.97x by geometric mean.
 
 Object instances now occupy a 128-byte GC slab (`96` bytes of payload and `128` raw bytes including collector metadata). One lazy storage wrapper owns cold/exotic state, external named-slot metadata, dense/internal element metadata, and backing-allocator bookkeeping; a plain object with four or fewer named properties keeps its values entirely inline and allocates none of those side states. Current object buckets use 256 KiB chunks, avoiding repeated allocator and synchronized address-index growth without exceeding the fixed reuse bitmap. The accepted matrix reports object-churn medians of 101.799 versus 123.020 ms direct, 168.520 versus 185.412 ms at eight warmed contexts, and 181.819 versus 190.980 ms across cold eight-context lifecycles. Shared object churn is 1,671.114 ms at eight lanes with 0.70x scaling and 7.24% RSD. The [exact-parent A/B](.data/object-churn-128-byte-slab-ab-2026-07-15.md) isolates the slab crossing from session noise and shows a faster candidate in every measured mode. Read the per-workload rows first; geometric means summarize this exact matrix and do not predict an application.
 
@@ -154,18 +154,45 @@ zig build benchmark-comparison-bin
 
 # Test matrix validation/publication guards without compiling or benchmarking.
 zig build benchmark-comparison-test
+
+# Regenerate the marker-delimited README scorecard from an accepted pair.
+python3 tools/benchmark-publication.py \
+  --current-raw docs/.data/benchmark-comparison-YYYY-MM-DD.tsv \
+  --current-report docs/.data/benchmark-comparison-YYYY-MM-DD.md \
+  --readme README.md
+
+# Compare two controlled, like-for-like pairs and retain every row's delta.
+python3 tools/benchmark-publication.py \
+  --current-raw docs/.data/benchmark-comparison-current.tsv \
+  --current-report docs/.data/benchmark-comparison-current.md \
+  --baseline-raw docs/.data/benchmark-comparison-baseline.tsv \
+  --baseline-report docs/.data/benchmark-comparison-baseline.md \
+  --history-out docs/.data/benchmark-history-current-vs-baseline.md
 ```
 
 Use quick mode while changing the harness. Run the full matrix once after related changes are assembled; it is measurement work, not a per-edit correctness test.
+
+The publication tool first reruns the complete matrix, sample-index, timing-floor,
+checksum, and workload-count validation and then reproduces the supplied report
+byte for byte from its raw TSV. README replacement is marker-delimited and
+idempotent. Historical comparison additionally requires exact host, OS, Zig,
+zig-gc, zig-regex, JavaScriptCore, matrix, jobs, and sample-count matches. It
+normalizes volatile battery details while preserving the power source and
+charging state. Every engine row is retained with both medians,
+both RSDs, and the delta. A zig-js row gates publication only when its median
+worsens by more than 10% and both runs have at most 5% RSD; JSC rows remain
+visible controls rather than gates.
 
 The manual-only [Performance workflow](../.github/workflows/performance.yml)
 runs the same full macOS/JSC matrix with configurable sample and lane counts,
 then retains the raw TSV and rendered report as one 90-day Actions artifact.
 It never runs on pushes or pull requests and does not gate ordinary CI: hosted
 runner timing is evidence to inspect, not an automatic comparison with the
-recorded M3 Pro baseline. Promote a workflow artifact into `docs/.data` only
-after checking that its report metadata is like-for-like with the intended
-historical baseline and rerunning any causal candidate on the reference host.
+recorded M3 Pro baseline. Every workflow artifact includes a freshly generated
+README scorecard. Supplying both optional baseline paths additionally produces
+a per-row history report, or rejects the run when its controlled metadata does
+not match. Promote a workflow artifact into `docs/.data` only after that review
+and rerunning any causal candidate on the reference host.
 
 ## VM and tree-walker baseline
 
