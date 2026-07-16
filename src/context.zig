@@ -2466,6 +2466,10 @@ pub const Context = struct {
     /// quiescent checkpoints; arbitrary native/Zig stack scanning is still a
     /// separate Layer-C requirement.
     active_interpreters: std.ArrayListUnmanaged(*interp.Interpreter) = .empty,
+    /// Running shared-realm Thread workers, excluding the creator/host
+    /// interpreter. Allocation quickening uses this only as an adaptive batch
+    /// hint; exact semantics never depend on the sampled value.
+    parallel_worker_count: std.atomic.Value(usize) = .init(0),
     /// Serializes `active_interpreters` push/pop + the GC's iteration of it, so
     /// parallel mutators registering/unregistering interpreters don't race each
     /// other or a collector. Uncontended under the GIL; needed once threads run
@@ -2895,6 +2899,7 @@ pub const Context = struct {
             // arena engine pays nothing (the VM/tree-walker skip on a null fn).
             .gc_safepoint_ctx = if (self.gc != null) self else null,
             .gc_safepoint_fn = if (self.gc != null) collectMidScript else null,
+            .parallel_worker_count = if (self.parallel_js) &self.parallel_worker_count else null,
             .private_name_serial = &self.private_name_serial,
         };
     }
@@ -13974,6 +13979,7 @@ test "parallel_js: fixed-shape object allocation quickens across shared Thread w
 
     const hits_before = vm.quickObjectAllocationLoopHitsForTesting();
     const batch_cells_before = gc_mod.objectBatchCellsForTesting();
+    const reserve_refills_before = vm.quickObjectAllocationReserveRefillsForTesting();
     const precise_before = ctx.gc_precise_safepoints.load(.monotonic);
     const result = try ctx.evaluate(
         \\function runAllocationLane(lane) {
@@ -14011,6 +14017,12 @@ test "parallel_js: fixed-shape object allocation quickens across shared Thread w
     try std.testing.expect(quick_hits > 3000);
     const batch_cells = gc_mod.objectBatchCellsForTesting() - batch_cells_before;
     try std.testing.expect(batch_cells >= 2048);
+    const reserve_refills = vm.quickObjectAllocationReserveRefillsForTesting() - reserve_refills_before;
+    try std.testing.expect(reserve_refills > 0);
+    // The four creator-thread oracle calls intentionally stay on 17-cell
+    // checkpoint batches; the four concurrent worker calls use the larger
+    // reserve, keeping the total far below the ~242 all-small-batch baseline.
+    try std.testing.expect(reserve_refills <= 160);
     try std.testing.expectEqual(precise_before, ctx.gc_precise_safepoints.load(.monotonic));
 }
 

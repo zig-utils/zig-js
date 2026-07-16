@@ -586,6 +586,7 @@ pub fn traceInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
         traceEnv(env, v);
     }
     for (machine.gc_temp_roots.items) |root| markValue(v, root);
+    for (machine.gc_object_reserve.items) |object| v.mark(object);
     if (machine.tdz_marker) |o| v.mark(o);
     if (machine.global_object) |o| v.mark(o);
     var sym_it = machine.symbols.valueIterator();

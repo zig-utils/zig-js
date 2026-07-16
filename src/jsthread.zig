@@ -647,6 +647,10 @@ fn acquireGilForTeardown(self: *Interpreter, g: *gil_mod.Gil) void {
 fn threadMain(rec: *ThreadRecord, fn_v: Value, args: []const Value) void {
     const g = rec.gil;
     defer markThreadExited(rec);
+    if (rec.ctx.parallel_js) _ = rec.ctx.parallel_worker_count.fetchAdd(1, .acq_rel);
+    defer {
+        if (rec.ctx.parallel_js) _ = rec.ctx.parallel_worker_count.fetchSub(1, .acq_rel);
+    }
     if (!rec.ctx.parallel_js) g.acquire();
     defer if (!rec.ctx.parallel_js) g.release();
     const gc_saved = gc_mod.setActiveHeap(rec.ctx.gc);

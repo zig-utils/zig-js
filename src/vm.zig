@@ -863,10 +863,16 @@ var quick_object_allocation_loop_hits: std.atomic.Value(u64) = .init(0);
 var quick_object_allocation_checkpoint_crossings: std.atomic.Value(u64) = .init(0);
 var quick_object_allocation_first_entry_steps: std.atomic.Value(u64) = .init(std.math.maxInt(u64));
 var quick_object_literal_shape_preparations: std.atomic.Value(u64) = .init(0);
+var quick_object_allocation_reserve_refills: std.atomic.Value(u64) = .init(0);
 
 pub fn quickObjectAllocationLoopHitsForTesting() u64 {
     std.debug.assert(builtin.is_test);
     return quick_object_allocation_loop_hits.load(.monotonic);
+}
+
+pub fn quickObjectAllocationReserveRefillsForTesting() u64 {
+    std.debug.assert(builtin.is_test);
+    return quick_object_allocation_reserve_refills.load(.monotonic);
 }
 
 var quick_global_binding_hits: std.atomic.Value(u64) = .init(0);
@@ -2586,11 +2592,12 @@ fn tryQuickObjectAllocationLoopMode(
     // lock again for every fresh literal below.
     const object_proto = vm.objectProto();
     // Seventeen 61-step iterations can straddle one 1,024-step checkpoint.
-    // Keep that crossing iteration in the same bulk allocation instead of
-    // opening a contended one-object batch at every shared-realm safepoint.
-    const max_allocation_batch = 17;
+    // Reserve up to sixteen checkpoint tranches at once and keep the unused
+    // suffix in the owning Interpreter's explicit GC roots. This reduces the
+    // shared heap/backing publication rate without delaying a checkpoint or
+    // publishing more objects than this guarded loop can still consume.
+    const max_allocation_batch = 17 * 16;
     var fresh_batch: [if (parallel_sync) max_allocation_batch else 0]*value.Object = undefined;
-    var fresh_batch_index: usize = 0;
     var fresh_batch_len: usize = 0;
     var iterations: u64 = 0;
     var completed = false;
@@ -2630,12 +2637,25 @@ fn tryQuickObjectAllocationLoopMode(
         if (completed_extra_steps > max_extra_steps) break;
 
         const fresh = if (parallel_sync) batched: {
-            if (fresh_batch_index == fresh_batch_len) {
-                const remaining: usize = @intCast(@min(
-                    max_iterations - iterations,
-                    @as(u64, max_allocation_batch),
-                ));
-                fresh_batch_len = gc_mod.allocObjectBatch(vm.gc, vm.arena, fresh_batch[0..remaining]) catch |err| {
+            if (vm.gc_object_reserve.items.len == 0) {
+                if (builtin.is_test) _ = quick_object_allocation_reserve_refills.fetchAdd(1, .monotonic);
+                const workers = if (vm.parallel_worker_count) |count| count.load(.acquire) else 1;
+                const reserve_limit: usize = if (workers > 1) max_allocation_batch else 17;
+                var wanted: usize = 0;
+                var probe = counter;
+                while (wanted < reserve_limit and probe < bound) : (wanted += 1)
+                    probe += @floatFromInt(allocation.increment);
+                std.debug.assert(wanted != 0);
+                vm.gc_object_reserve.ensureUnusedCapacity(vm.arena, wanted) catch |err| {
+                    frame.slots[index_slot] = Value.num(@floatFromInt(selected));
+                    frame.slots[displaced_slot] = displaced_value;
+                    frame.slots[value_slot] = Value.num(next);
+                    frame.slots[total_slot] = Value.num(total);
+                    frame.slots[counter_slot] = Value.num(counter);
+                    try advanceQuickObservableSteps(vm, iterations * steps_per_iteration + 24);
+                    return err;
+                };
+                fresh_batch_len = gc_mod.allocObjectBatch(vm.gc, vm.arena, fresh_batch[0..wanted]) catch |err| {
                     frame.slots[index_slot] = Value.num(@floatFromInt(selected));
                     frame.slots[displaced_slot] = displaced_value;
                     frame.slots[value_slot] = Value.num(next);
@@ -2645,10 +2665,10 @@ fn tryQuickObjectAllocationLoopMode(
                     return err;
                 };
                 std.debug.assert(fresh_batch_len != 0);
-                fresh_batch_index = 0;
+                for (fresh_batch[0..fresh_batch_len]) |reserved|
+                    vm.gc_object_reserve.appendAssumeCapacity(reserved);
             }
-            const fresh = fresh_batch[fresh_batch_index];
-            fresh_batch_index += 1;
+            const fresh = vm.gc_object_reserve.pop().?;
             break :batched fresh;
         } else gc_mod.allocObject(vm.gc, vm.arena) catch |err| {
             frame.slots[index_slot] = Value.num(@floatFromInt(selected));

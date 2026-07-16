@@ -1083,6 +1083,15 @@ pub const Interpreter = struct {
     /// live only in Zig locals. VM values are covered by `gc_execs`; this stack
     /// covers interpreter paths such as iterator records/results in `for...of`.
     gc_temp_roots: std.ArrayListUnmanaged(Value) = .empty,
+    /// Default-initialized Object cells reserved by the fixed-shape allocation
+    /// loop. A bounded per-interpreter tranche amortizes shared-heap publication
+    /// across multiple step checkpoints; tracing this list keeps the unused
+    /// suffix alive until later loop entries consume it.
+    gc_object_reserve: std.ArrayListUnmanaged(*value.Object) = .empty,
+    /// Number of currently running shared-realm Thread workers. Fixed-shape
+    /// allocation uses a larger reserve only when publication is genuinely
+    /// contended, keeping a lone worker on the checkpoint-sized batch.
+    parallel_worker_count: ?*std.atomic.Value(usize) = null,
     /// GC-owned lexical environments that are live for spec cleanup but no
     /// longer reachable through `self.env`'s parent chain, such as a `for` head
     /// environment that keeps `using` resources until loop exit.
