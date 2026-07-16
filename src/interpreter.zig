@@ -8264,7 +8264,7 @@ pub const Interpreter = struct {
     fn regexpSplit(self: *Interpreter, rx: Value, s: []const u8, limit_value: Value) EvalError!Value {
         if (!isRegExpObjectValue(rx)) return self.throwError("TypeError", "RegExp.prototype[Symbol.split] called on a non-object");
         const result = try self.newArray();
-        const out = &result.asObj().elements;
+        const out = try result.asObj().ensureElementsList(self.arena);
 
         const default_ctor = self.env.get("RegExp") orelse Value.undef();
         const ctor = try self.speciesConstructor(rx, default_ctor);
@@ -8813,7 +8813,8 @@ pub const Interpreter = struct {
                 };
             }
             gc_mod.barrierCellFrom(o, @ptrCast(pair)); // new entry hidden behind the live map
-            try o.elements.append(o.elementsAllocator(self.arena), Value.obj(pair));
+            const elements = try o.ensureElementsList(self.arena);
+            try elements.append(o.elementsAllocator(self.arena), Value.obj(pair));
             return self_v;
         }
         if (eq(name, "get")) {
@@ -8923,7 +8924,8 @@ pub const Interpreter = struct {
                 if (liveSetEntry(e)) |entry| if (value.sameValueZero(entry, key)) return self_v;
             }
             gc_mod.barrierValueFrom(o, key); // new key hidden behind the live set
-            try o.elements.append(o.elementsAllocator(self.arena), key);
+            const elements = try o.ensureElementsList(self.arena);
+            try elements.append(o.elementsAllocator(self.arena), key);
             return self_v;
         }
         if (eq(name, "has")) {
@@ -9235,7 +9237,7 @@ pub const Interpreter = struct {
         const v = try self.newArray();
         for (elems) |en| {
             if (en.* == .spread) {
-                try self.spreadInto(&v.asObj().elements, try self.eval(en.spread));
+                try self.spreadInto(try v.asObj().ensureElementsList(self.arena), try self.eval(en.spread));
             } else if (en.* == .elision) {
                 // A hole: a slot that reads as absent (skipped by iteration).
                 try v.asObj().appendArrayHole(self.arena);
@@ -13399,7 +13401,7 @@ pub const Interpreter = struct {
         }
         if (eq(name, "split")) {
             const result = try self.newArray();
-            const out = &result.asObj().elements;
+            const out = try result.asObj().ensureElementsList(self.arena);
             // No separator → the whole string as the sole element.
             if (args.len == 0 or args[0].isUndefined()) {
                 const lim: usize = if (args.len > 1 and !args[1].isUndefined()) value.Value.uint32FromF64(try self.toNumberV(args[1])) else std.math.maxInt(u32);
@@ -17735,7 +17737,8 @@ fn iterHelperNextFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
             }
             const mode: u8 = @intFromFloat(h.limit);
             const results = (try self.newArray()).asObj();
-            try results.elements.ensureTotalCapacity(results.elementsAllocator(self.arena), n);
+            const result_elements = try results.ensureElementsList(self.arena);
+            try result_elements.ensureTotalCapacity(results.elementsAllocator(self.arena), n);
             var i: usize = 0;
             while (i < n) : (i += 1) {
                 if ((flags.elementAt(i) orelse Value.undef()).toBoolean()) {

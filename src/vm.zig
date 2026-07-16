@@ -4748,7 +4748,7 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 const iterable = stack.pop().?;
                 // The array stays on the stack (peeked); append the iterable's
                 // elements into it.
-                try vm.spreadInto(&stack.items[stack.items.len - 1].asObj().elements, iterable);
+                try vm.spreadInto(try stack.items[stack.items.len - 1].asObj().ensureElementsList(vm.arena), iterable);
             },
             .throw_op => {
                 vm.exception = stack.pop().?;

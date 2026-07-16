@@ -82,6 +82,7 @@ inline fn markManaged(v: anytype, cell: anytype) void {
 inline fn hasObjectBacking(flags: value.ObjectBackingFlags) bool {
     return flags.cold or
         flags.slots or
+        flags.elements_state or
         flags.elements or
         flags.accessors or
         flags.key_order or
@@ -292,8 +293,13 @@ fn finalizeObjectBacking(o: *Object, a: std.mem.Allocator) usize {
         released += 1;
     }
     if (flags.elements) {
-        o.elements.deinit(a);
-        o.elements = .empty;
+        o.elementsState().?.list.deinit(a);
+        o.elementsState().?.list = .empty;
+        released += 1;
+    }
+    if (flags.elements_state) {
+        a.destroy(o.elementsState().?);
+        o.elements.store(null, .release);
         released += 1;
     }
     if (flags.accessors) {
@@ -963,7 +969,7 @@ pub const Binding = struct {
 pub const Heap = gc.Heap(Binding);
 
 test "Object and cold sidecar fit the 256-byte GC slab" {
-    try std.testing.expectEqual(@as(usize, 160), @sizeOf(Object));
+    try std.testing.expectEqual(@as(usize, 144), @sizeOf(Object));
     try std.testing.expectEqual(@as(usize, 224), @sizeOf(value.ObjectColdState));
     try std.testing.expect(Heap.cellAllocationBytes(Object) <= 256);
     try std.testing.expect(Heap.cellAllocationBytes(value.ObjectColdState) <= 256);
@@ -1233,7 +1239,10 @@ const TestEngine = struct {
         std.debug.assert(kind == .object);
         const o: *Object = @ptrCast(@alignCast(cell));
         o.slots.deinit(self.gpa);
-        o.elements.deinit(self.gpa);
+        if (o.elementsState()) |state| {
+            state.list.deinit(self.gpa);
+            self.gpa.destroy(state);
+        }
         if (o.accessorsMap()) |acc| {
             acc.deinit(self.gpa);
             self.gpa.destroy(acc);

@@ -742,6 +742,7 @@ pub const ObjectBackingFlags = packed struct {
     allocator_active: bool = false,
     cold: bool = false,
     slots: bool = false,
+    elements_state: bool = false,
     elements: bool = false,
     accessors: bool = false,
     key_order: bool = false,
@@ -788,6 +789,10 @@ pub const ObjectPrivateDataTag = enum(u8) {
 pub const PreparedInlineLiteralShape = struct {
     final_shape: *Shape,
     slot_count: u8,
+};
+
+pub const ObjectElementsState = struct {
+    list: std.ArrayListUnmanaged(Value) = .empty,
 };
 
 /// A JavaScript object. v1 keeps this deliberately small: a string-keyed
@@ -854,7 +859,10 @@ pub const Object = struct {
     /// Lazily allocated. Keyed by the (evaluation-unique) private storage name.
     // Private brand metadata lives in the cold sidecar.
     /// Mixed data/accessor insertion order lives in the cold sidecar.
-    elements: std.ArrayListUnmanaged(Value) = .empty,
+    /// Dense/indexed and internal tuple storage is absent on ordinary named
+    /// objects. The backing lock serializes first installation; release/acquire
+    /// publication lets shared readers observe the stable list state.
+    elements: std.atomic.Value(?*ObjectElementsState) = .init(null),
     /// Per-property attribute overrides live in the cold sidecar.
     /// When false (set by `Object.preventExtensions`/`seal`/`freeze`), new own
     /// properties can't be added. Accessed atomically via `isExtensible`/
@@ -1622,6 +1630,24 @@ pub const Object = struct {
         return self.backingFor(fallback, "elements");
     }
 
+    pub inline fn elementsState(self: *const Object) ?*ObjectElementsState {
+        return @constCast(&self.elements).load(.acquire);
+    }
+
+    pub fn ensureElementsList(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator.Error!*std.ArrayListUnmanaged(Value) {
+        const backing_locked = self.lockBacking();
+        defer self.unlockBacking(backing_locked);
+        if (self.elements.load(.acquire)) |state| return &state.list;
+        const backing = self.backingForTrackedLocked(fallback, "elements_state");
+        const state = backing.allocator.create(ObjectElementsState) catch |err| {
+            if (backing.activated) self.deactivateBackingLocked("elements_state");
+            return err;
+        };
+        state.* = .{};
+        self.elements.store(state, .release);
+        return &state.list;
+    }
+
     pub fn accessorsAllocator(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator {
         return self.backingFor(fallback, "accessors");
     }
@@ -1784,7 +1810,8 @@ pub const Object = struct {
     /// behind this helper lets the common Object move the list into lazy side
     /// state without exposing that layout throughout the engine.
     pub inline fn elementsItems(self: *const Object) []Value {
-        return self.elements.items;
+        const state = self.elementsState() orelse return &.{};
+        return state.list.items;
     }
 
     pub fn elementsLen(self: *const Object) usize {
@@ -1835,7 +1862,8 @@ pub const Object = struct {
         defer self.unlockElements();
         gcBarrier(self, v);
         self.indexed_own_seen.store(true, .release);
-        try self.elements.append(self.elementsAllocator(arena), v);
+        const elements = try self.ensureElementsList(arena);
+        try elements.append(self.elementsAllocator(arena), v);
     }
 
     pub fn appendElementIfLen(self: *Object, arena: std.mem.Allocator, expected_len: usize, v: Value) std.mem.Allocator.Error!bool {
@@ -1844,7 +1872,8 @@ pub const Object = struct {
         if (self.elementsItems().len != expected_len) return false;
         gcBarrier(self, v);
         self.indexed_own_seen.store(true, .release);
-        try self.elements.append(self.elementsAllocator(arena), v);
+        const elements = try self.ensureElementsList(arena);
+        try elements.append(self.elementsAllocator(arena), v);
         return true;
     }
 
@@ -1856,7 +1885,8 @@ pub const Object = struct {
         self.lockElements();
         defer self.unlockElements();
         gcBarrier(self, v);
-        try self.elements.append(self.elementsAllocator(arena), v);
+        const elements = try self.ensureElementsList(arena);
+        try elements.append(self.elementsAllocator(arena), v);
     }
 
     /// Append an array-literal elision at the current dense end. The slot
@@ -1865,7 +1895,8 @@ pub const Object = struct {
         self.lockElements();
         defer self.unlockElements();
         try self.markHoleUnlocked(arena, self.elementsItems().len);
-        try self.elements.append(self.elementsAllocator(arena), Value.undef());
+        const elements = try self.ensureElementsList(arena);
+        try elements.append(self.elementsAllocator(arena), Value.undef());
     }
 
     /// Atomic fast path for `Array.prototype.push` on a packed dense Array.
@@ -1879,7 +1910,8 @@ pub const Object = struct {
         if (new_len > 4294967295) return null;
         for (values) |v| gcBarrier(self, v);
         if (values.len != 0) self.indexed_own_seen.store(true, .release);
-        try self.elements.appendSlice(self.elementsAllocator(arena), values);
+        const elements = try self.ensureElementsList(arena);
+        try elements.appendSlice(self.elementsAllocator(arena), values);
         return new_len;
     }
 
@@ -1894,7 +1926,8 @@ pub const Object = struct {
         if (i >= 4294967295) return false;
         gcBarrier(self, v);
         self.indexed_own_seen.store(true, .release);
-        try self.elements.append(self.elementsAllocator(arena), v);
+        const elements = try self.ensureElementsList(arena);
+        try elements.append(self.elementsAllocator(arena), v);
         return true;
     }
 
@@ -1965,7 +1998,7 @@ pub const Object = struct {
     pub fn clearElementsRetainingCapacity(self: *Object) void {
         self.lockElements();
         defer self.unlockElements();
-        self.elements.clearRetainingCapacity();
+        if (self.elementsState()) |state| state.list.clearRetainingCapacity();
     }
 
     // --- WeakMap/WeakSet entry storage + FinalizationRegistry records --------
@@ -2248,7 +2281,8 @@ pub const Object = struct {
         gcBarrier(self, v);
         self.indexed_own_seen.store(true, .release);
         const gap_start = self.elementsItems().len;
-        while (self.elementsItems().len <= i) try self.elements.append(self.elementsAllocator(arena), Value.undef());
+        const elements = try self.ensureElementsList(arena);
+        while (self.elementsItems().len <= i) try elements.append(self.elementsAllocator(arena), Value.undef());
         self.elementsItems()[i] = v;
         self.clearHoleUnlocked(i);
         var g = gap_start;
@@ -2274,7 +2308,8 @@ pub const Object = struct {
         }
         if (i >= dense_cap or i > self.elementsItems().len + 1024) return false;
         const gap_start = self.elementsItems().len;
-        while (self.elementsItems().len <= i) try self.elements.append(self.elementsAllocator(arena), Value.undef());
+        const elements = try self.ensureElementsList(arena);
+        while (self.elementsItems().len <= i) try elements.append(self.elementsAllocator(arena), Value.undef());
         self.elementsItems()[i] = v;
         self.clearHoleUnlocked(i);
         var g = gap_start;
@@ -2294,7 +2329,7 @@ pub const Object = struct {
     pub fn truncateDenseElementsAndSetLength(self: *Object, fallback: std.mem.Allocator, new_len: usize) std.mem.Allocator.Error!void {
         self.lockElements();
         defer self.unlockElements();
-        if (new_len < self.elementsItems().len) self.elements.shrinkRetainingCapacity(new_len);
+        if (new_len < self.elementsItems().len) self.elementsState().?.list.shrinkRetainingCapacity(new_len);
         try self.setArrayLengthFloorUnlocked(fallback, new_len);
     }
 
@@ -2325,8 +2360,9 @@ pub const Object = struct {
         if (new_len > values.len and self.coldState() == null) _ = try self.ensureCold(arena);
         self.indexed_own_seen.store(true, .release);
         for (values) |v| gcBarrier(self, v);
-        self.elements.clearRetainingCapacity();
-        try self.elements.appendSlice(self.elementsAllocator(arena), values);
+        const elements = try self.ensureElementsList(arena);
+        elements.clearRetainingCapacity();
+        try elements.appendSlice(self.elementsAllocator(arena), values);
         if (self.holesMap()) |h| h.clearRetainingCapacity();
         try self.setArrayLengthFloorUnlocked(arena, new_len);
     }
@@ -2346,12 +2382,13 @@ pub const Object = struct {
         var i: usize = 0;
         while (i < delete_count) : (i += 1) {
             if (start < self.elementsItems().len) {
-                _ = self.elements.orderedRemove(start);
+                _ = self.elementsState().?.list.orderedRemove(start);
             }
         }
         var j: usize = inserts.len;
         while (j > 0) : (j -= 1) {
-            try self.elements.insert(self.elementsAllocator(arena), start, inserts[j - 1]);
+            const elements = try self.ensureElementsList(arena);
+            try elements.insert(self.elementsAllocator(arena), start, inserts[j - 1]);
         }
         if (self.coldState()) |cold| cold.array_len = 0;
         return true;
