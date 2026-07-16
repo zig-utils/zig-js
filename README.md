@@ -189,7 +189,7 @@ JSValueRef result = JSEvaluateScript(ctx, script, NULL, NULL, 0, NULL);
 double n = JSValueToNumber(ctx, result, NULL); // 2.0
 ```
 
-The current exported C surface has 75 functions:
+The current exported C surface has 77 functions:
 
 - **Context lifecycle** - create/retain/release, global object/context lookup, owned context names, syntax-only checking, evaluation, collection, and the threaded-context extension.
 - **Values** - `JSValueGetType`, `JSValueIs*`, `JSValueIsEqual`, `JSValueIsStrictEqual`, `JSValueMake*`, `JSValueTo*`, `JSValueProtect`, `JSValueUnprotect`.
@@ -198,7 +198,10 @@ The current exported C surface has 75 functions:
 - **Strings** - UTF-8 and UTF-16 construction, retain/release, UTF-16 length and stable borrowed characters, maximum UTF-8 sizing and conversion, and code-unit/UTF-8 equality.
 - **Worker extension** - `JSWorkerCreate`, resource-bounded `JSWorkerCreateWithLimits`, `JSWorkerPostMessage`, `JSWorkerReceive`, `JSWorkerTerminate`, `JSWorkerRelease`.
 
-`ZJSGlobalContextCreateThreaded` and `JSWorker*` are zig-js extensions, not public JSC symbols. `JSObjectMakeDeferredPromise` returns a pending native Promise plus paired resolving functions; callers observe settlement at the next microtask checkpoint (for example, after `JSEvaluateScript` returns).
+`ZJSGlobalContextCreateThreaded`, `ZJSValueProtect`/`ZJSValueUnprotect`, and
+`JSWorker*` are zig-js extensions, not public JSC symbols. The `ZJSValue*`
+variants report invalid handles, refcount overflow, and unmatched unprotects;
+the public JSC-compatible calls correctly return `void`. `JSObjectMakeDeferredPromise` returns a pending native Promise plus paired resolving functions; callers observe settlement at the next microtask checkpoint (for example, after `JSEvaluateScript` returns).
 
 The [macOS 27.0 public API inventory](docs/c-api/jsc-public-api-macos-27.0.json)
 tracks all 117 pinned C functions and links every unfinished declaration to its

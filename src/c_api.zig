@@ -728,7 +728,7 @@ export fn JSValueToObject(ctx: JSContextRef, v: JSValueRef, exception: Exception
     return boxResult(c, exception, Value.obj(obj));
 }
 
-export fn JSValueProtect(ctx: JSContextRef, v: JSValueRef) callconv(.c) bool {
+fn valueProtect(ctx: JSContextRef, v: JSValueRef) bool {
     const c = ctxFrom(ctx) orelse return false;
     const boxed = boxedFrom(v) orelse return false;
     if (boxed.owner != c) return false;
@@ -749,7 +749,7 @@ export fn JSValueProtect(ctx: JSContextRef, v: JSValueRef) callconv(.c) bool {
     return true;
 }
 
-export fn JSValueUnprotect(ctx: JSContextRef, v: JSValueRef) callconv(.c) bool {
+fn valueUnprotect(ctx: JSContextRef, v: JSValueRef) bool {
     const c = ctxFrom(ctx) orelse return false;
     const boxed = boxedFrom(v) orelse return false;
     if (boxed.owner != c) return false;
@@ -767,6 +767,26 @@ export fn JSValueUnprotect(ctx: JSContextRef, v: JSValueRef) callconv(.c) bool {
         return true;
     }
     return false;
+}
+
+/// Public JSC ABI: protection failures are intentionally not returned.
+export fn JSValueProtect(ctx: JSContextRef, v: JSValueRef) callconv(.c) void {
+    _ = valueProtect(ctx, v);
+}
+
+/// Public JSC ABI: unmatched or invalid unprotect calls are no-ops.
+export fn JSValueUnprotect(ctx: JSContextRef, v: JSValueRef) callconv(.c) void {
+    _ = valueUnprotect(ctx, v);
+}
+
+/// zig-js extension for hosts that need allocation/validation observability.
+export fn ZJSValueProtect(ctx: JSContextRef, v: JSValueRef) callconv(.c) bool {
+    return valueProtect(ctx, v);
+}
+
+/// zig-js extension for detecting unmatched or invalid unprotect calls.
+export fn ZJSValueUnprotect(ctx: JSContextRef, v: JSValueRef) callconv(.c) bool {
+    return valueUnprotect(ctx, v);
 }
 
 // ---- JSObject construction & properties --------------------------------
@@ -1807,7 +1827,7 @@ test "C-API: context-owned handles reject cross-context use" {
     try std.testing.expect(!JSValueIsNumber(ctx_b, number_a));
     try std.testing.expect(!JSValueToBoolean(ctx_b, number_a));
     try std.testing.expect(!JSValueIsStrictEqual(ctx_b, number_a, number_a));
-    try std.testing.expect(!JSValueProtect(ctx_b, number_a));
+    try std.testing.expect(!ZJSValueProtect(ctx_b, number_a));
 
     exception = null;
     try std.testing.expect(!JSValueIsEqual(ctx_b, number_a, JSValueMakeNumber(ctx_b, 7), &exception));
@@ -3341,8 +3361,8 @@ test "C-API: JSGarbageCollect honors JSValueProtect/Unprotect (GC on)" {
     const mk = JSStringCreateWithUTF8CString("({ tag: 123 })") orelse return error.StringInitFailed;
     defer JSStringRelease(mk);
     const held = JSEvaluateScript(ctx, mk, null, null, 0, null) orelse return error.EvalFailed;
-    try std.testing.expect(JSValueProtect(ctx, held));
-    try std.testing.expect(JSValueProtect(ctx, held));
+    try std.testing.expect(ZJSValueProtect(ctx, held));
+    try std.testing.expect(ZJSValueProtect(ctx, held));
 
     // Produce a pile of unreferenced garbage.
     const junk = JSStringCreateWithUTF8CString("for (let i = 0; i < 500; i++) { ({ a: i, b: [i] }); } 0") orelse return error.StringInitFailed;
@@ -3361,13 +3381,13 @@ test "C-API: JSGarbageCollect honors JSValueProtect/Unprotect (GC on)" {
     try std.testing.expectEqual(@as(f64, 123), JSValueToNumber(ctx, tag, null));
 
     const with_protection = ctx_obj.gc.?.live_cells;
-    try std.testing.expect(JSValueUnprotect(ctx, held));
+    try std.testing.expect(ZJSValueUnprotect(ctx, held));
     JSGarbageCollect(ctx);
     try std.testing.expectEqual(with_protection, ctx_obj.gc.?.live_cells);
-    try std.testing.expect(JSValueUnprotect(ctx, held));
+    try std.testing.expect(ZJSValueUnprotect(ctx, held));
     JSGarbageCollect(ctx);
     try std.testing.expect(ctx_obj.gc.?.live_cells < with_protection);
-    try std.testing.expect(!JSValueUnprotect(ctx, held));
+    try std.testing.expect(!ZJSValueUnprotect(ctx, held));
 }
 
 test "C-API: JSValueProtect reserves handle capacity chunks" {
@@ -3376,35 +3396,35 @@ test "C-API: JSValueProtect reserves handle capacity chunks" {
     const ctx: JSContextRef = @ptrCast(ctx_obj);
 
     const first = JSValueToObject(ctx, JSValueMakeNumber(ctx, 1), null) orelse return error.ObjectCreateFailed;
-    try std.testing.expect(JSValueProtect(ctx, first));
+    try std.testing.expect(ZJSValueProtect(ctx, first));
     try std.testing.expectEqual(@as(usize, 1), ctx_obj.c_api_handles.items.len);
     try std.testing.expect(ctx_obj.c_api_handles.capacity >= Context.c_api_handle_reserve_granularity);
     const first_capacity = ctx_obj.c_api_handles.capacity;
 
-    try std.testing.expect(JSValueProtect(ctx, first));
+    try std.testing.expect(ZJSValueProtect(ctx, first));
     try std.testing.expectEqual(@as(usize, 1), ctx_obj.c_api_handles.items.len);
     try std.testing.expectEqual(@as(usize, 2), ctx_obj.c_api_handles.items[0].count);
     try std.testing.expectEqual(first_capacity, ctx_obj.c_api_handles.capacity);
 
     ctx_obj.c_api_handles.items[0].count = std.math.maxInt(usize);
-    try std.testing.expect(!JSValueProtect(ctx, first));
+    try std.testing.expect(!ZJSValueProtect(ctx, first));
     try std.testing.expectEqual(std.math.maxInt(usize), ctx_obj.c_api_handles.items[0].count);
     ctx_obj.c_api_handles.items[0].count = 2;
 
     while (ctx_obj.c_api_handles.items.len < first_capacity) {
         const v = JSValueToObject(ctx, JSValueMakeNumber(ctx, @floatFromInt(ctx_obj.c_api_handles.items.len)), null) orelse return error.ObjectCreateFailed;
-        try std.testing.expect(JSValueProtect(ctx, v));
+        try std.testing.expect(ZJSValueProtect(ctx, v));
     }
     try std.testing.expectEqual(first_capacity, ctx_obj.c_api_handles.items.len);
     try std.testing.expectEqual(first_capacity, ctx_obj.c_api_handles.capacity);
 
     const overflow = JSValueToObject(ctx, JSValueMakeNumber(ctx, 99), null) orelse return error.ObjectCreateFailed;
-    try std.testing.expect(JSValueProtect(ctx, overflow));
+    try std.testing.expect(ZJSValueProtect(ctx, overflow));
     try std.testing.expectEqual(first_capacity + 1, ctx_obj.c_api_handles.items.len);
     try std.testing.expect(ctx_obj.c_api_handles.capacity > first_capacity);
 
-    try std.testing.expect(!JSValueProtect(ctx, null));
-    try std.testing.expect(!JSValueUnprotect(ctx, null));
+    try std.testing.expect(!ZJSValueProtect(ctx, null));
+    try std.testing.expect(!ZJSValueUnprotect(ctx, null));
 }
 
 test "C-API: JSValueProtect roots survive mid-script parallel GC" {
@@ -3423,7 +3443,7 @@ test "C-API: JSValueProtect roots survive mid-script parallel GC" {
     const mk = JSStringCreateWithUTF8CString("({ tag: 456, nested: { marker: 789 } })") orelse return error.StringInitFailed;
     defer JSStringRelease(mk);
     const held = JSEvaluateScript(ctx, mk, null, null, 0, null) orelse return error.EvalFailed;
-    try std.testing.expect(JSValueProtect(ctx, held));
+    try std.testing.expect(ZJSValueProtect(ctx, held));
 
     const src = JSStringCreateWithUTF8CString(
         \\(() => {
@@ -3490,7 +3510,7 @@ test "C-API: JSValueProtect roots survive mid-script parallel GC" {
 
     JSGarbageCollect(ctx);
     const with_protection = ctx_obj.gc.?.live_cells;
-    try std.testing.expect(JSValueUnprotect(ctx, held));
+    try std.testing.expect(ZJSValueUnprotect(ctx, held));
     JSGarbageCollect(ctx);
     try std.testing.expect(ctx_obj.gc.?.live_cells < with_protection);
 }

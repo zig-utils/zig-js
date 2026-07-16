@@ -36,6 +36,8 @@ int main(void)
     JSStringRelease(source);
     if (!answer || exception || JSValueToNumber(context, answer, &exception) != 42.0)
         return 2;
+    JSValueProtect(context, answer);
+    JSValueUnprotect(context, answer);
 
     const JSChar utf16[] = { 'z', 'i', 'g', 0xd83d, 0xde00 };
     JSStringRef wide = JSStringCreateWithCharacters(utf16, 5);

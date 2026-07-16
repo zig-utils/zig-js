@@ -1,4 +1,5 @@
 #include <JavaScriptCore/JavaScript.h>
+#include <zig-js/Extensions.h>
 
 #include <cstdint>
 
@@ -23,6 +24,8 @@ int main()
     if (!bytes || exception)
         return 5;
     bytes[0] = 42;
+    if (!ZJSValueProtect(context, array) || !ZJSValueUnprotect(context, array))
+        return 7;
 
     const JSChar characters[] = { 'C', '+', '+', 0xd83d, 0xde80 };
     JSStringRef string = JSStringCreateWithCharacters(characters, 5);

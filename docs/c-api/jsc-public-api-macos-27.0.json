@@ -131,8 +131,8 @@
     {"name":"JSValueToUInt64","header":"JSValueRef.h","status":"pending","issue":150},
     {"name":"JSValueToStringCopy","header":"JSValueRef.h","status":"implemented"},
     {"name":"JSValueToObject","header":"JSValueRef.h","status":"implemented"},
-    {"name":"JSValueProtect","header":"JSValueRef.h","status":"pending","issue":150,"note":"Symbol exists but returns bool instead of the pinned public void ABI."},
-    {"name":"JSValueUnprotect","header":"JSValueRef.h","status":"pending","issue":150,"note":"Symbol exists but returns bool instead of the pinned public void ABI."}
+    {"name":"JSValueProtect","header":"JSValueRef.h","status":"implemented"},
+    {"name":"JSValueUnprotect","header":"JSValueRef.h","status":"implemented"}
   ],
   "types": [
     {"name":"JSContextGroupRef","status":"implemented"}, {"name":"JSContextRef","status":"implemented"},
@@ -161,7 +161,8 @@
     {"name":"kJSClassDefinitionEmpty","status":"pending","issue":137}
   ],
   "zig_js_extensions": [
-    "ZJSGlobalContextCreateThreaded", "JSWorkerCreate", "JSWorkerCreateWithLimits",
+    "ZJSGlobalContextCreateThreaded", "ZJSValueProtect", "ZJSValueUnprotect",
+    "JSWorkerCreate", "JSWorkerCreateWithLimits",
     "JSWorkerPostMessage", "JSWorkerReceive", "JSWorkerTerminate", "JSWorkerRelease"
   ]
 }

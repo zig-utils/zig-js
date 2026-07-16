@@ -80,8 +80,10 @@ bool        JSValueToBoolean(JSContextRef, JSValueRef);
 double      JSValueToNumber(JSContextRef, JSValueRef, JSValueRef* exception);
 JSStringRef JSValueToStringCopy(JSContextRef, JSValueRef, JSValueRef* exception);
 JSObjectRef JSValueToObject(JSContextRef, JSValueRef, JSValueRef* exception);
-bool        JSValueProtect(JSContextRef, JSValueRef);
-bool        JSValueUnprotect(JSContextRef, JSValueRef);
+void        JSValueProtect(JSContextRef, JSValueRef);
+void        JSValueUnprotect(JSContextRef, JSValueRef);
+bool        ZJSValueProtect(JSContextRef, JSValueRef);   // zig-js extension
+bool        ZJSValueUnprotect(JSContextRef, JSValueRef); // zig-js extension
 ```
 
 ```c [Objects]
