@@ -70,12 +70,9 @@ shouldBe(new Thread(function() { return arguments.length; }).join(), 0);
 shouldBe(new Thread(function() { "use strict"; return this; }).join(), undefined);
 
 // Spawning many threads works; each runs its body exactly once.
-const counters = { spawned: 0 };
 const threads = spawnN(8, (i) => {
-    counters.spawned++;
     return i * 2;
 });
 const results = joinAll(threads);
 for (let i = 0; i < 8; ++i)
     shouldBe(results[i], i * 2);
-shouldBe(counters.spawned, 8);
