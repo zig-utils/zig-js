@@ -23718,7 +23718,8 @@ fn dtfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Hos
                 try P.num(self, &parts, "day", civ.d, false);
             }
             if (o_year.len > 0) {
-                try P.lit(self, &parts, ", ");
+                // "Month Day, Year" but "Month Year" when there is no day.
+                try P.lit(self, &parts, if (o_day.len > 0) ", " else " ");
                 try dtfAppendYearPart(self, &parts, part_calendar, display_year, o_year);
             }
         } else if (std.mem.eql(u8, parseTriple(dtf_locale).l, "de")) {
