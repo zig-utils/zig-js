@@ -2265,6 +2265,10 @@ pub const Context = struct {
     /// wrapper created here). Released in `destroy` — shared bytes live in
     /// process-wide refcounted storage, not the arena (see shared_buffer.zig).
     sab_retains: shared_buffer.RetainList,
+    /// Context-owned lifetime records for C-API no-copy ArrayBuffers. GC-mode
+    /// object finalizers may release a record early; Context teardown releases
+    /// any remaining arena-mode records and destroys every record exactly once.
+    external_buffer_owners: std.ArrayListUnmanaged(*value.ExternalBufferOwner) = .empty,
     /// Outstanding `Atomics.waitAsync` promises (entries live in the arena;
     /// the list's address is the realm's waiter-table owner token). Settled by
     /// the drain tail in `evaluate`/`evaluateModule`.
@@ -2977,6 +2981,11 @@ pub const Context = struct {
             self.gpa.destroy(state);
             self.gc_state = null;
         }
+        for (self.external_buffer_owners.items) |owner| {
+            _ = owner.release();
+            self.gpa.destroy(owner);
+        }
+        self.external_buffer_owners.deinit(self.gpa);
         if (self.locked_arena) |la| {
             la.resetLocalFor();
             self.gpa.destroy(la);
@@ -3018,6 +3027,23 @@ pub const Context = struct {
             }
             return next == 0;
         }
+    }
+
+    pub fn createExternalBufferOwner(
+        self: *Context,
+        bytes: ?*anyopaque,
+        deallocator: ?value.ExternalBufferDeallocator,
+        deallocator_context: ?*anyopaque,
+    ) !*value.ExternalBufferOwner {
+        const owner = try self.gpa.create(value.ExternalBufferOwner);
+        errdefer self.gpa.destroy(owner);
+        owner.* = .{
+            .bytes = bytes,
+            .deallocator = deallocator,
+            .deallocator_context = deallocator_context,
+        };
+        try self.external_buffer_owners.append(self.gpa, owner);
+        return owner;
     }
 
     pub fn heapBudgetStats(self: *const Context) ?HeapBudgetStats {

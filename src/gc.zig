@@ -928,6 +928,9 @@ pub const Binding = struct {
                         const sab_released = self.context.sab_retains.releaseTracked(storage);
                         std.debug.assert(sab_released);
                         if (sab_released) ab.shared = null;
+                    } else if (ab.external_owner) |owner| {
+                        _ = owner.release();
+                        ab.external_owner = null;
                     } else if (ab.gc_owned and ab.local_data.len > 0) {
                         self.context.gpa.rawFree(ab.local_data, .@"8", @returnAddress());
                         _ = @atomicRmw(usize, &self.context.gc_array_buffer_bytes_live, .Sub, ab.local_data.len, .monotonic);

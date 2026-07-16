@@ -11280,6 +11280,26 @@ pub const Interpreter = struct {
         return o;
     }
 
+    /// Create a fixed-length ArrayBuffer over embedder-owned bytes without
+    /// copying. `owner` is context-owned and idempotently releases the backing
+    /// from either the GC finalizer or arena-context teardown.
+    pub fn makeExternalArrayBuffer(self: *Interpreter, bytes: []u8, owner: *value.ExternalBufferOwner) EvalError!*value.Object {
+        const o = (try self.newObject()).asObj();
+        const ab = try self.allocArrayBufferData();
+        errdefer self.destroyArrayBufferData(ab);
+        ab.* = .{
+            .local_data = bytes,
+            .gc_owned = self.gc_backing != null,
+            .external_owner = owner,
+        };
+        try o.setArrayBuffer(self.arena, ab);
+        errdefer o.clearArrayBuffer();
+        if (self.env.get("ArrayBuffer")) |c| {
+            if (c.isObject()) o.setProtoAtomic(try self.protoObject(c.asObj()));
+        }
+        return o;
+    }
+
     /// Rebuild a Blob/File from structured-clone data (called by structured_clone).
     pub fn makeClonedBlob(self: *Interpreter, is_file: bool, bytes: []const u8, blob_type: []const u8, name: []const u8, last_mod: f64) EvalError!Value {
         const obj = try blobMake(self, if (is_file) "File" else "Blob", bytes, blob_type);

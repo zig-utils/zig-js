@@ -97,6 +97,25 @@ pub const TAKind = enum {
     }
 };
 
+/// Ownership record for an embedder-supplied ArrayBuffer backing store. The
+/// record is context-owned (not cell-owned) so arena contexts can release it at
+/// teardown while GC contexts may release it earlier from the object finalizer.
+/// `release` is idempotent because both paths can observe the same record.
+pub const ExternalBufferDeallocator = *const fn (bytes: ?*anyopaque, deallocator_context: ?*anyopaque) callconv(.c) void;
+
+pub const ExternalBufferOwner = struct {
+    bytes: ?*anyopaque,
+    deallocator: ?ExternalBufferDeallocator,
+    deallocator_context: ?*anyopaque,
+    released: std.atomic.Value(bool) = .init(false),
+
+    pub fn release(self: *ExternalBufferOwner) bool {
+        if (self.released.swap(true, .acq_rel)) return false;
+        if (self.deallocator) |deallocator| deallocator(self.bytes, self.deallocator_context);
+        return true;
+    }
+};
+
 /// An `ArrayBuffer`'s backing bytes. `detached` is set by `$262.detachArrayBuffer`
 /// / transfer; a detached buffer's views read undefined / throw on length checks.
 pub const ArrayBufferData = struct {
@@ -119,6 +138,10 @@ pub const ArrayBufferData = struct {
     /// arena. Shared buffers set this for the metadata only; their bytes are
     /// owned by `SharedBufferStorage`.
     gc_owned: bool = false,
+    /// Non-null for C-API no-copy buffers. The owner record outlives this
+    /// metadata and invokes the embedder deallocator exactly once, either from
+    /// the GC finalizer or from Context teardown in arena mode.
+    external_owner: ?*ExternalBufferOwner = null,
     detached_flag: std.atomic.Value(bool) = .init(false),
     /// For a resizable ArrayBuffer (or growable SharedArrayBuffer), the maximum
     /// byte length; null means fixed-length (not resizable/growable).
