@@ -55,6 +55,7 @@ bool        JSValueIsString(JSContextRef, JSValueRef);
 bool        JSValueIsObject(JSContextRef, JSValueRef);
 bool        JSValueIsArray(JSContextRef, JSValueRef);
 bool        JSValueIsDate(JSContextRef, JSValueRef);
+JSTypedArrayType JSValueGetTypedArrayType(JSContextRef, JSValueRef, JSValueRef* exception);
 bool        JSValueIsEqual(JSContextRef, JSValueRef, JSValueRef, JSValueRef* exception);
 bool        JSValueIsStrictEqual(JSContextRef, JSValueRef, JSValueRef);
 JSValueRef  JSValueMakeUndefined(JSContextRef);
@@ -92,6 +93,29 @@ bool        JSObjectIsFunction(JSContextRef, JSObjectRef);
 bool        JSObjectIsConstructor(JSContextRef, JSObjectRef);
 ```
 
+```c [Typed arrays]
+JSObjectRef JSObjectMakeTypedArray(JSContextRef, JSTypedArrayType, size_t length,
+                                   JSValueRef* exception);
+JSObjectRef JSObjectMakeTypedArrayWithBytesNoCopy(
+    JSContextRef, JSTypedArrayType, void* bytes, size_t byteLength,
+    JSTypedArrayBytesDeallocator, void* deallocatorContext, JSValueRef* exception);
+JSObjectRef JSObjectMakeTypedArrayWithArrayBuffer(JSContextRef, JSTypedArrayType,
+                                                  JSObjectRef buffer, JSValueRef* exception);
+JSObjectRef JSObjectMakeTypedArrayWithArrayBufferAndOffset(
+    JSContextRef, JSTypedArrayType, JSObjectRef buffer, size_t byteOffset,
+    size_t length, JSValueRef* exception);
+void*       JSObjectGetTypedArrayBytesPtr(JSContextRef, JSObjectRef, JSValueRef* exception);
+size_t      JSObjectGetTypedArrayLength(JSContextRef, JSObjectRef, JSValueRef* exception);
+size_t      JSObjectGetTypedArrayByteLength(JSContextRef, JSObjectRef, JSValueRef* exception);
+size_t      JSObjectGetTypedArrayByteOffset(JSContextRef, JSObjectRef, JSValueRef* exception);
+JSObjectRef JSObjectGetTypedArrayBuffer(JSContextRef, JSObjectRef, JSValueRef* exception);
+JSObjectRef JSObjectMakeArrayBufferWithBytesNoCopy(
+    JSContextRef, void* bytes, size_t byteLength, JSTypedArrayBytesDeallocator,
+    void* deallocatorContext, JSValueRef* exception);
+void*       JSObjectGetArrayBufferBytesPtr(JSContextRef, JSObjectRef, JSValueRef* exception);
+size_t      JSObjectGetArrayBufferByteLength(JSContextRef, JSObjectRef, JSValueRef* exception);
+```
+
 ```c [Strings]
 JSStringRef JSStringCreateWithUTF8CString(const char* string);
 JSStringRef JSStringRetain(JSStringRef);
@@ -116,6 +140,12 @@ void        JSWorkerRelease(JSWorkerRef);
 Native callbacks use the standard `JSObjectCallAsFunctionCallback` calling convention, so functions you expose to JavaScript through this subset are registered exactly as they are with JavaScriptCore. `JSObjectIsConstructor` uses the runtime's constructability check, including native constructors such as `Date` and `Array`. `JSObjectMakeArray` returns a real runtime Array object in the current realm, inheriting from that realm's `Array.prototype`. `JSObjectGetProperty` and `JSObjectGetPropertyAtIndex` perform JavaScript `[[Get]]`, including prototype lookup, accessor/proxy behavior, and exception reporting. `JSObjectSetProperty` maps `ReadOnly`, `DontEnum`, and `DontDelete` attributes to JavaScript `writable`, `enumerable`, and `configurable` descriptor fields. `JSValueIsEqual` performs JavaScript abstract equality (`==`), including object coercion and exception reporting. `JSValueGetType` reports Symbol primitives as `symbol` and BigInt primitives as the zig-js `bigint` extension instead of leaking the engine's object-tagged representation. `JSValueToNumber` performs JavaScript `ToNumber`, including object coercion and exception reporting for throwing coercions or Symbol/BigInt values. `JSValueToStringCopy` performs JavaScript `ToString`, including object coercion and exception reporting for throwing coercions or Symbol values. `JSValueToObject` performs JavaScript `ToObject` conversion, returning real primitive wrapper objects and reporting an exception for `null` / `undefined`. `JSValueIsDate` reports the runtime's Date internal slot, including invalid Date objects. `ZJSGlobalContextCreateThreaded` and `JSWorker*` are zig-js extensions rather than public JSC symbols.
 
 `JSGlobalContextRetain` and `JSGlobalContextRelease` maintain a real C-API reference count for contexts created through this C API. Releasing a retained context destroys the underlying runtime only after the final release. `JSGlobalContextRetain` returns null for a null context or if retaining would overflow the context refcount.
+
+The typed-array API uses the public JavaScriptCore enum layout through `BigUint64Array`. JavaScript `Float16Array` remains available inside the engine, but the pinned public JSC enum has no Float16 entry, so `JSValueGetTypedArrayType` reports `kJSTypedArrayTypeNone` for that runtime-only kind. ArrayBuffer-backed constructors preserve the original buffer and requested view geometry; invalid types return null, while detached, out-of-bounds, misaligned, overflowing, wrong-context, and non-ArrayBuffer inputs report through the exception out pointer.
+
+The pointers returned by `JSObjectGetTypedArrayBytesPtr` and `JSObjectGetArrayBufferBytesPtr` are borrowed and temporary. They may be invalidated by later engine calls that detach, transfer, resize, or collect the backing object. Hosts must keep the corresponding JS object reachable and must synchronize their own native access with JavaScript execution.
+
+The no-copy constructors transfer backing-store lifetime to the context. Their deallocator is invoked exactly once: immediately when construction fails, from object finalization in GC-enabled contexts, or during context teardown in arena contexts. A successful zero-length no-copy buffer may use a null byte pointer; a non-empty buffer requires a non-null pointer.
 
 `JSEvaluateScript` rejects a null source string by returning null and reporting an exception through the out pointer when one is provided. For parse/lex failures, the exception is a `SyntaxError` object whose message includes the source name and adjusted line/column; the object also carries non-enumerable `sourceURL`, `line`, `column`, and `byteOffset` properties for embedders that do not want to parse message text. For runtime throws of Error objects, `sourceURL` and `startingLineNumber` are attached as non-enumerable properties, and the default `stack` string includes that source frame when present.
 
@@ -160,7 +190,7 @@ Native callbacks installed with `JSObjectMakeFunctionWithCallback` must return a
 ## Caveats
 
 > [!WARNING]
-> The implemented subset covers the common evaluation, value, object, string, and protected-handle surface plus the zig-js worker extension. Full JavaScriptCore class definitions, Objective-C `JSValue`/`JSContext`, inspector/debugger APIs, typed-array C constructors, and other WebKit internals are out of scope. Non-null `JSClassRef` inputs to `JSGlobalContextCreate` or `JSObjectMake` are rejected rather than silently ignored. The language/runtime scope is whatever the configured conformance runner currently proves — see [Conformance](/conformance).
+> The implemented subset covers the common evaluation, value, object, string, typed-array/ArrayBuffer, and protected-handle surface plus the zig-js worker extension. Full JavaScriptCore class definitions, Objective-C `JSValue`/`JSContext`, inspector/debugger APIs, and other WebKit internals remain tracked by [the public C API roadmap](https://github.com/zig-utils/zig-js/issues/135) and [the umbrella roadmap](https://github.com/zig-utils/zig-js/issues/134). Non-null `JSClassRef` inputs to `JSGlobalContextCreate` or `JSObjectMake` are rejected rather than silently ignored. The language/runtime scope is whatever the configured conformance runner currently proves — see [Conformance](/conformance).
 
 Some functions intentionally keep JavaScriptCore-shaped signatures while zig-js is still pre-stabilization, but the documented parameters now either have real behavior or fail fast when the underlying feature is out of scope. `JSEvaluateScript` honors `thisObject`, uses `sourceURL` / `startingLineNumber` for syntax and runtime Error metadata, and parser-created SyntaxErrors expose non-enumerable line/column diagnostics instead of requiring callers to parse message text. `JSGlobalContextRetain` / `JSGlobalContextRelease` maintain a real C-API reference count, `JSObjectMakeFunctionWithCallback` honors the provided function name, and `JSObjectSetProperty` honors property attributes.
 

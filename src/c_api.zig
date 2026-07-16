@@ -72,6 +72,41 @@ pub const JSType = enum(c_uint) {
     invalid = 8,
 };
 
+/// Public JavaScriptCore `JSTypedArrayType` values. Keep the numeric layout in
+/// lockstep with the macOS 27.0 SDK headers: embedders pass this enum across the
+/// C ABI, so the declaration is deliberately non-exhaustive for defensive
+/// handling of unknown future values.
+pub const JSTypedArrayType = enum(c_uint) {
+    int8_array = 0,
+    int16_array = 1,
+    int32_array = 2,
+    uint8_array = 3,
+    uint8_clamped_array = 4,
+    uint16_array = 5,
+    uint32_array = 6,
+    float32_array = 7,
+    float64_array = 8,
+    array_buffer = 9,
+    none = 10,
+    bigint64_array = 11,
+    biguint64_array = 12,
+    _,
+};
+
+pub const kJSTypedArrayTypeInt8Array = JSTypedArrayType.int8_array;
+pub const kJSTypedArrayTypeInt16Array = JSTypedArrayType.int16_array;
+pub const kJSTypedArrayTypeInt32Array = JSTypedArrayType.int32_array;
+pub const kJSTypedArrayTypeUint8Array = JSTypedArrayType.uint8_array;
+pub const kJSTypedArrayTypeUint8ClampedArray = JSTypedArrayType.uint8_clamped_array;
+pub const kJSTypedArrayTypeUint16Array = JSTypedArrayType.uint16_array;
+pub const kJSTypedArrayTypeUint32Array = JSTypedArrayType.uint32_array;
+pub const kJSTypedArrayTypeFloat32Array = JSTypedArrayType.float32_array;
+pub const kJSTypedArrayTypeFloat64Array = JSTypedArrayType.float64_array;
+pub const kJSTypedArrayTypeArrayBuffer = JSTypedArrayType.array_buffer;
+pub const kJSTypedArrayTypeNone = JSTypedArrayType.none;
+pub const kJSTypedArrayTypeBigInt64Array = JSTypedArrayType.bigint64_array;
+pub const kJSTypedArrayTypeBigUint64Array = JSTypedArrayType.biguint64_array;
+
 pub const JSValueRef = ?*anyopaque;
 pub const JSObjectRef = ?*anyopaque;
 pub const JSContextRef = ?*anyopaque;
@@ -86,6 +121,8 @@ pub const JSObjectCallAsFunctionCallback = ?*const fn (
     arguments: [*c]const JSValueRef,
     exception: ExceptionRef,
 ) callconv(.c) JSValueRef;
+
+pub const JSTypedArrayBytesDeallocator = ?value.ExternalBufferDeallocator;
 
 pub const kJSPropertyAttributeNone: c_uint = 0;
 pub const kJSPropertyAttributeReadOnly: c_uint = 1 << 1;
@@ -312,6 +349,50 @@ fn propAttrFromC(attrs: c_uint) value.PropAttr {
     };
 }
 
+fn typedArrayKind(array_type: JSTypedArrayType) ?value.TAKind {
+    return switch (array_type) {
+        .int8_array => .i8,
+        .int16_array => .i16,
+        .int32_array => .i32,
+        .uint8_array => .u8,
+        .uint8_clamped_array => .u8c,
+        .uint16_array => .u16,
+        .uint32_array => .u32,
+        .float32_array => .f32,
+        .float64_array => .f64,
+        .bigint64_array => .i64,
+        .biguint64_array => .u64,
+        .array_buffer, .none, _ => null,
+    };
+}
+
+fn typedArrayTypeFromKind(kind: value.TAKind) JSTypedArrayType {
+    return switch (kind) {
+        .i8 => .int8_array,
+        .i16 => .int16_array,
+        .i32 => .int32_array,
+        .u8 => .uint8_array,
+        .u8c => .uint8_clamped_array,
+        .u16 => .uint16_array,
+        .u32 => .uint32_array,
+        .f32 => .float32_array,
+        .f64 => .float64_array,
+        .i64 => .bigint64_array,
+        .u64 => .biguint64_array,
+        // Float16Array is implemented by the JS runtime but is not part of the
+        // pinned public JSC enum, so it must not masquerade as another type.
+        .f16 => .none,
+    };
+}
+
+fn typedArrayTypeFromValue(v: Value) JSTypedArrayType {
+    if (!v.isObject()) return .none;
+    const obj = v.asObj();
+    if (obj.typedArray()) |ta| return typedArrayTypeFromKind(ta.kind);
+    if (obj.arrayBuffer() != null) return .array_buffer;
+    return .none;
+}
+
 // ---- VM lifecycle ------------------------------------------------------
 
 export fn JSGarbageCollect(ctx: JSContextRef) callconv(.c) void {
@@ -451,6 +532,15 @@ export fn JSValueIsDate(ctx: JSContextRef, v: JSValueRef) callconv(.c) bool {
     const c = ctxForHandleInspection(ctx) orelse return false;
     const uv = valueFromContext(c, v) orelse return false;
     return uv.isObject() and uv.asObj().behavior.is_date;
+}
+
+export fn JSValueGetTypedArrayType(ctx: JSContextRef, v: JSValueRef, exception: ExceptionRef) callconv(.c) JSTypedArrayType {
+    const c = ctxFrom(ctx) orelse return .none;
+    const uv = valueFromContext(c, v) orelse {
+        if (v != null) setException(c, exception, "TypeError: value belongs to a different context");
+        return .none;
+    };
+    return typedArrayTypeFromValue(uv);
 }
 
 export fn JSValueIsEqual(ctx: JSContextRef, a: JSValueRef, b: JSValueRef, exception: ExceptionRef) callconv(.c) bool {
@@ -775,6 +865,284 @@ fn objectArgFrom(ctx: *Context, object: JSObjectRef, exception: ExceptionRef) ?*
         setException(ctx, exception, "TypeError: object is not an object");
         return null;
     };
+}
+
+fn makeTypedArrayObject(c: *Context, kind: value.TAKind, args: []const Value, exception: ExceptionRef) JSObjectRef {
+    const gc_saved = gc_mod.setActiveHeap(c.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(c.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = c.interpreter();
+    c.pushActiveInterpreter(&machine) catch {
+        setException(c, exception, "OutOfMemory");
+        return null;
+    };
+    defer c.popActiveInterpreter(&machine);
+    const result = machine.makeTypedArray(kind, args) catch |err| {
+        if (err == error.Throw) {
+            if (exception != null) exception[0] = box(c, machine.exception);
+        } else {
+            setException(c, exception, @errorName(err));
+        }
+        return null;
+    };
+    return boxResult(c, exception, result);
+}
+
+const ExternalArrayBuffer = struct {
+    object: *Object,
+    owner: *value.ExternalBufferOwner,
+};
+
+fn releaseExternalInput(bytes: ?*anyopaque, deallocator: JSTypedArrayBytesDeallocator, deallocator_context: ?*anyopaque) void {
+    if (deallocator) |callback| callback(bytes, deallocator_context);
+}
+
+fn makeExternalArrayBuffer(
+    c: *Context,
+    bytes: ?*anyopaque,
+    byte_length: usize,
+    deallocator: JSTypedArrayBytesDeallocator,
+    deallocator_context: ?*anyopaque,
+    exception: ExceptionRef,
+) ?ExternalArrayBuffer {
+    if (byte_length > 0 and bytes == null) {
+        releaseExternalInput(bytes, deallocator, deallocator_context);
+        setException(c, exception, "TypeError: non-empty external buffer requires non-null bytes");
+        return null;
+    }
+    const owner = c.createExternalBufferOwner(bytes, deallocator, deallocator_context) catch {
+        releaseExternalInput(bytes, deallocator, deallocator_context);
+        setException(c, exception, "OutOfMemory");
+        return null;
+    };
+    var owner_transferred = false;
+    defer {
+        if (!owner_transferred) _ = owner.release();
+    }
+    const data: []u8 = if (byte_length == 0)
+        &.{}
+    else
+        @as([*]u8, @ptrCast(bytes.?))[0..byte_length];
+
+    const gc_saved = gc_mod.setActiveHeap(c.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(c.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = c.interpreter();
+    c.pushActiveInterpreter(&machine) catch {
+        setException(c, exception, "OutOfMemory");
+        return null;
+    };
+    defer c.popActiveInterpreter(&machine);
+    const object = machine.makeExternalArrayBuffer(data, owner) catch |err| {
+        if (err == error.Throw) {
+            if (exception != null) exception[0] = box(c, machine.exception);
+        } else {
+            setException(c, exception, @errorName(err));
+        }
+        return null;
+    };
+    owner_transferred = true;
+    return .{ .object = object, .owner = owner };
+}
+
+export fn JSObjectMakeTypedArray(ctx: JSContextRef, array_type: JSTypedArrayType, length: usize, exception: ExceptionRef) callconv(.c) JSObjectRef {
+    const c = ctxFrom(ctx) orelse return null;
+    const kind = typedArrayKind(array_type) orelse return null;
+    const args = [_]Value{Value.num(@floatFromInt(length))};
+    return makeTypedArrayObject(c, kind, &args, exception);
+}
+
+export fn JSObjectMakeTypedArrayWithBytesNoCopy(
+    ctx: JSContextRef,
+    array_type: JSTypedArrayType,
+    bytes: ?*anyopaque,
+    byte_length: usize,
+    bytes_deallocator: JSTypedArrayBytesDeallocator,
+    deallocator_context: ?*anyopaque,
+    exception: ExceptionRef,
+) callconv(.c) JSObjectRef {
+    const c = ctxFrom(ctx) orelse {
+        releaseExternalInput(bytes, bytes_deallocator, deallocator_context);
+        return null;
+    };
+    const kind = typedArrayKind(array_type) orelse {
+        releaseExternalInput(bytes, bytes_deallocator, deallocator_context);
+        return null;
+    };
+    const element_size = kind.byteSize();
+    if (byte_length % element_size != 0) {
+        releaseExternalInput(bytes, bytes_deallocator, deallocator_context);
+        setException(c, exception, "RangeError: external byte length is not a multiple of the element size");
+        return null;
+    }
+    const external = makeExternalArrayBuffer(c, bytes, byte_length, bytes_deallocator, deallocator_context, exception) orelse return null;
+    const args = [_]Value{Value.obj(external.object)};
+    return makeTypedArrayObject(c, kind, &args, exception) orelse {
+        _ = external.owner.release();
+        return null;
+    };
+}
+
+export fn JSObjectMakeArrayBufferWithBytesNoCopy(
+    ctx: JSContextRef,
+    bytes: ?*anyopaque,
+    byte_length: usize,
+    bytes_deallocator: JSTypedArrayBytesDeallocator,
+    deallocator_context: ?*anyopaque,
+    exception: ExceptionRef,
+) callconv(.c) JSObjectRef {
+    const c = ctxFrom(ctx) orelse {
+        releaseExternalInput(bytes, bytes_deallocator, deallocator_context);
+        return null;
+    };
+    const external = makeExternalArrayBuffer(c, bytes, byte_length, bytes_deallocator, deallocator_context, exception) orelse return null;
+    return boxResult(c, exception, Value.obj(external.object)) orelse {
+        _ = external.owner.release();
+        return null;
+    };
+}
+
+export fn JSObjectMakeTypedArrayWithArrayBuffer(ctx: JSContextRef, array_type: JSTypedArrayType, buffer: JSObjectRef, exception: ExceptionRef) callconv(.c) JSObjectRef {
+    const c = ctxFrom(ctx) orelse return null;
+    const kind = typedArrayKind(array_type) orelse return null;
+    const buffer_obj = objectArgFrom(c, buffer, exception) orelse return null;
+    const buffer_data = buffer_obj.arrayBuffer() orelse {
+        setException(c, exception, "TypeError: buffer is not an ArrayBuffer");
+        return null;
+    };
+    if (buffer_data.is_shared) {
+        setException(c, exception, "TypeError: buffer is not an ArrayBuffer");
+        return null;
+    }
+    const args = [_]Value{Value.obj(buffer_obj)};
+    return makeTypedArrayObject(c, kind, &args, exception);
+}
+
+export fn JSObjectMakeTypedArrayWithArrayBufferAndOffset(
+    ctx: JSContextRef,
+    array_type: JSTypedArrayType,
+    buffer: JSObjectRef,
+    byte_offset: usize,
+    length: usize,
+    exception: ExceptionRef,
+) callconv(.c) JSObjectRef {
+    const c = ctxFrom(ctx) orelse return null;
+    const kind = typedArrayKind(array_type) orelse return null;
+    const buffer_obj = objectArgFrom(c, buffer, exception) orelse return null;
+    const buffer_data = buffer_obj.arrayBuffer() orelse {
+        setException(c, exception, "TypeError: buffer is not an ArrayBuffer");
+        return null;
+    };
+    if (buffer_data.is_shared) {
+        setException(c, exception, "TypeError: buffer is not an ArrayBuffer");
+        return null;
+    }
+    const args = [_]Value{
+        Value.obj(buffer_obj),
+        Value.num(@floatFromInt(byte_offset)),
+        Value.num(@floatFromInt(length)),
+    };
+    return makeTypedArrayObject(c, kind, &args, exception);
+}
+
+fn typedArrayArgFrom(c: *Context, object: JSObjectRef, exception: ExceptionRef) ?*value.TypedArrayData {
+    const obj = objectArgFrom(c, object, exception) orelse return null;
+    return obj.typedArray();
+}
+
+fn currentTypedArrayLength(c: *Context, ta: *const value.TypedArrayData, exception: ExceptionRef) ?usize {
+    const buffer_data = ta.buffer.arrayBuffer() orelse {
+        setException(c, exception, "TypeError: TypedArray has no ArrayBuffer");
+        return null;
+    };
+    buffer_data.lockBuffer();
+    defer buffer_data.unlockBuffer();
+    return ta.currentLength() orelse {
+        setException(c, exception, "TypeError: TypedArray is detached or out of bounds");
+        return null;
+    };
+}
+
+export fn JSObjectGetTypedArrayBytesPtr(ctx: JSContextRef, object: JSObjectRef, exception: ExceptionRef) callconv(.c) ?*anyopaque {
+    const c = ctxFrom(ctx) orelse return null;
+    const ta = typedArrayArgFrom(c, object, exception) orelse return null;
+    const buffer_data = ta.buffer.arrayBuffer() orelse return null;
+    buffer_data.lockBuffer();
+    defer buffer_data.unlockBuffer();
+    const length = ta.currentLength() orelse {
+        setException(c, exception, "TypeError: TypedArray is detached or out of bounds");
+        return null;
+    };
+    const byte_length = std.math.mul(usize, length, ta.kind.byteSize()) catch {
+        setException(c, exception, "RangeError: TypedArray byte length overflow");
+        return null;
+    };
+    const bytes = buffer_data.bytes();
+    if (ta.byte_offset > bytes.len or byte_length > bytes.len - ta.byte_offset) {
+        setException(c, exception, "TypeError: TypedArray is detached or out of bounds");
+        return null;
+    }
+    return @ptrCast(bytes.ptr + ta.byte_offset);
+}
+
+export fn JSObjectGetTypedArrayLength(ctx: JSContextRef, object: JSObjectRef, exception: ExceptionRef) callconv(.c) usize {
+    const c = ctxFrom(ctx) orelse return 0;
+    const ta = typedArrayArgFrom(c, object, exception) orelse return 0;
+    return currentTypedArrayLength(c, ta, exception) orelse 0;
+}
+
+export fn JSObjectGetTypedArrayByteLength(ctx: JSContextRef, object: JSObjectRef, exception: ExceptionRef) callconv(.c) usize {
+    const c = ctxFrom(ctx) orelse return 0;
+    const ta = typedArrayArgFrom(c, object, exception) orelse return 0;
+    const length = currentTypedArrayLength(c, ta, exception) orelse return 0;
+    return std.math.mul(usize, length, ta.kind.byteSize()) catch {
+        setException(c, exception, "RangeError: TypedArray byte length overflow");
+        return 0;
+    };
+}
+
+export fn JSObjectGetTypedArrayByteOffset(ctx: JSContextRef, object: JSObjectRef, exception: ExceptionRef) callconv(.c) usize {
+    const c = ctxFrom(ctx) orelse return 0;
+    const ta = typedArrayArgFrom(c, object, exception) orelse return 0;
+    _ = currentTypedArrayLength(c, ta, exception) orelse return 0;
+    return ta.byte_offset;
+}
+
+export fn JSObjectGetTypedArrayBuffer(ctx: JSContextRef, object: JSObjectRef, exception: ExceptionRef) callconv(.c) JSObjectRef {
+    const c = ctxFrom(ctx) orelse return null;
+    const ta = typedArrayArgFrom(c, object, exception) orelse return null;
+    _ = currentTypedArrayLength(c, ta, exception) orelse return null;
+    return boxResult(c, exception, Value.obj(ta.buffer));
+}
+
+export fn JSObjectGetArrayBufferBytesPtr(ctx: JSContextRef, object: JSObjectRef, exception: ExceptionRef) callconv(.c) ?*anyopaque {
+    const c = ctxFrom(ctx) orelse return null;
+    const obj = objectArgFrom(c, object, exception) orelse return null;
+    const buffer_data = obj.arrayBuffer() orelse return null;
+    if (buffer_data.is_shared) return null;
+    buffer_data.lockBuffer();
+    defer buffer_data.unlockBuffer();
+    if (buffer_data.isDetached()) {
+        setException(c, exception, "TypeError: ArrayBuffer is detached");
+        return null;
+    }
+    return @ptrCast(buffer_data.bytes().ptr);
+}
+
+export fn JSObjectGetArrayBufferByteLength(ctx: JSContextRef, object: JSObjectRef, exception: ExceptionRef) callconv(.c) usize {
+    const c = ctxFrom(ctx) orelse return 0;
+    const obj = objectArgFrom(c, object, exception) orelse return 0;
+    const buffer_data = obj.arrayBuffer() orelse return 0;
+    if (buffer_data.is_shared) return 0;
+    buffer_data.lockBuffer();
+    defer buffer_data.unlockBuffer();
+    if (buffer_data.isDetached()) {
+        setException(c, exception, "TypeError: ArrayBuffer is detached");
+        return 0;
+    }
+    return buffer_data.bytes().len;
 }
 
 export fn JSObjectGetProperty(ctx: JSContextRef, object: JSObjectRef, name: JSStringRef, exception: ExceptionRef) callconv(.c) JSValueRef {
@@ -1381,6 +1749,202 @@ test "C-API: unsupported JSClassRef inputs fail fast" {
     const ctx = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
     defer JSGlobalContextRelease(ctx);
     try std.testing.expect(JSObjectMake(ctx, fake, null) == null);
+}
+
+test "C-API: owned TypedArrays expose their public type, geometry, buffer, and bytes" {
+    const ctx = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
+    defer JSGlobalContextRelease(ctx);
+
+    var exception: JSValueRef = null;
+    const typed = JSObjectMakeTypedArray(ctx, .int16_array, 4, &exception) orelse return error.TypedArrayCreateFailed;
+    try std.testing.expect(exception == null);
+    try std.testing.expectEqual(JSTypedArrayType.int16_array, JSValueGetTypedArrayType(ctx, typed, &exception));
+    try std.testing.expectEqual(@as(usize, 4), JSObjectGetTypedArrayLength(ctx, typed, &exception));
+    try std.testing.expectEqual(@as(usize, 8), JSObjectGetTypedArrayByteLength(ctx, typed, &exception));
+    try std.testing.expectEqual(@as(usize, 0), JSObjectGetTypedArrayByteOffset(ctx, typed, &exception));
+    try std.testing.expect(exception == null);
+
+    const raw = JSObjectGetTypedArrayBytesPtr(ctx, typed, &exception) orelse return error.TypedArrayBytesFailed;
+    const numbers: [*]i16 = @ptrCast(@alignCast(raw));
+    numbers[1] = 1234;
+    const element = JSObjectGetPropertyAtIndex(ctx, typed, 1, &exception) orelse return error.TypedArrayReadFailed;
+    try std.testing.expectEqual(@as(f64, 1234), JSValueToNumber(ctx, element, &exception));
+
+    const buffer = JSObjectGetTypedArrayBuffer(ctx, typed, &exception) orelse return error.ArrayBufferFailed;
+    try std.testing.expectEqual(JSTypedArrayType.array_buffer, JSValueGetTypedArrayType(ctx, buffer, &exception));
+    try std.testing.expectEqual(@as(usize, 8), JSObjectGetArrayBufferByteLength(ctx, buffer, &exception));
+    const buffer_raw = JSObjectGetArrayBufferBytesPtr(ctx, buffer, &exception) orelse return error.ArrayBufferBytesFailed;
+    try std.testing.expectEqual(@intFromPtr(raw), @intFromPtr(buffer_raw));
+    try std.testing.expect(exception == null);
+
+    const plain = JSObjectMake(ctx, null, null) orelse return error.ObjectCreateFailed;
+    try std.testing.expectEqual(JSTypedArrayType.none, JSValueGetTypedArrayType(ctx, plain, &exception));
+    try std.testing.expect(JSObjectGetTypedArrayBytesPtr(ctx, plain, &exception) == null);
+    try std.testing.expectEqual(@as(usize, 0), JSObjectGetTypedArrayLength(ctx, plain, &exception));
+    try std.testing.expect(JSObjectGetArrayBufferBytesPtr(ctx, plain, &exception) == null);
+    try std.testing.expectEqual(@as(usize, 0), JSObjectGetArrayBufferByteLength(ctx, plain, &exception));
+    try std.testing.expect(exception == null);
+}
+
+test "C-API: TypedArray ArrayBuffer views preserve offsets and reject invalid geometry" {
+    const ctx = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
+    defer JSGlobalContextRelease(ctx);
+
+    var exception: JSValueRef = null;
+    const bytes = JSObjectMakeTypedArray(ctx, .uint8_array, 12, &exception) orelse return error.TypedArrayCreateFailed;
+    const buffer = JSObjectGetTypedArrayBuffer(ctx, bytes, &exception) orelse return error.ArrayBufferFailed;
+    const view = JSObjectMakeTypedArrayWithArrayBufferAndOffset(ctx, .uint32_array, buffer, 4, 2, &exception) orelse return error.TypedArrayViewFailed;
+    try std.testing.expect(exception == null);
+    try std.testing.expectEqual(@as(usize, 2), JSObjectGetTypedArrayLength(ctx, view, &exception));
+    try std.testing.expectEqual(@as(usize, 8), JSObjectGetTypedArrayByteLength(ctx, view, &exception));
+    try std.testing.expectEqual(@as(usize, 4), JSObjectGetTypedArrayByteOffset(ctx, view, &exception));
+
+    const buffer_raw = JSObjectGetArrayBufferBytesPtr(ctx, buffer, &exception) orelse return error.ArrayBufferBytesFailed;
+    const view_raw = JSObjectGetTypedArrayBytesPtr(ctx, view, &exception) orelse return error.TypedArrayBytesFailed;
+    try std.testing.expectEqual(@intFromPtr(buffer_raw) + 4, @intFromPtr(view_raw));
+
+    const whole = JSObjectMakeTypedArrayWithArrayBuffer(ctx, .uint16_array, buffer, &exception) orelse return error.TypedArrayViewFailed;
+    try std.testing.expectEqual(@as(usize, 6), JSObjectGetTypedArrayLength(ctx, whole, &exception));
+    try std.testing.expect(exception == null);
+
+    try std.testing.expect(JSObjectMakeTypedArray(ctx, .none, 1, &exception) == null);
+    try std.testing.expect(JSObjectMakeTypedArray(ctx, .array_buffer, 1, &exception) == null);
+    try std.testing.expect(JSObjectMakeTypedArray(ctx, @enumFromInt(99), 1, &exception) == null);
+    try std.testing.expect(exception == null);
+
+    try std.testing.expect(JSObjectMakeTypedArrayWithArrayBufferAndOffset(ctx, .uint32_array, buffer, 2, 1, &exception) == null);
+    try std.testing.expect(exception != null);
+}
+
+test "C-API: TypedArray accessors reject detached and cross-context buffers" {
+    const ctx_a = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
+    defer JSGlobalContextRelease(ctx_a);
+    const ctx_b = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
+    defer JSGlobalContextRelease(ctx_b);
+
+    var exception: JSValueRef = null;
+    const typed = JSObjectMakeTypedArray(ctx_a, .uint8_array, 8, &exception) orelse return error.TypedArrayCreateFailed;
+    const buffer = JSObjectGetTypedArrayBuffer(ctx_a, typed, &exception) orelse return error.ArrayBufferFailed;
+
+    try std.testing.expect(JSObjectMakeTypedArrayWithArrayBuffer(ctx_b, .uint8_array, buffer, &exception) == null);
+    try std.testing.expect(exception != null);
+
+    const typed_value = valueFromContext(ctxRawFrom(ctx_a).?, typed) orelse return error.InvalidHandle;
+    typed_value.asObj().typedArray().?.buffer.arrayBuffer().?.setDetached(true);
+
+    exception = null;
+    try std.testing.expectEqual(@as(usize, 0), JSObjectGetTypedArrayLength(ctx_a, typed, &exception));
+    try std.testing.expect(exception != null);
+    exception = null;
+    try std.testing.expect(JSObjectGetTypedArrayBytesPtr(ctx_a, typed, &exception) == null);
+    try std.testing.expect(exception != null);
+    exception = null;
+    try std.testing.expectEqual(@as(usize, 0), JSObjectGetArrayBufferByteLength(ctx_a, buffer, &exception));
+    try std.testing.expect(exception != null);
+}
+
+test "C-API: no-copy TypedArray and ArrayBuffer preserve bytes and deallocate exactly once" {
+    const Deallocator = struct {
+        fn call(bytes: ?*anyopaque, deallocator_context: ?*anyopaque) callconv(.c) void {
+            _ = bytes;
+            const calls: *usize = @ptrCast(@alignCast(deallocator_context.?));
+            calls.* += 1;
+        }
+    };
+
+    var typed_calls: usize = 0;
+    var typed_bytes = [_]u8{ 1, 0, 2, 0, 3, 0, 4, 0 };
+    const ctx = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
+    var exception: JSValueRef = null;
+    const typed = JSObjectMakeTypedArrayWithBytesNoCopy(
+        ctx,
+        .uint16_array,
+        &typed_bytes,
+        typed_bytes.len,
+        Deallocator.call,
+        &typed_calls,
+        &exception,
+    ) orelse return error.TypedArrayCreateFailed;
+    try std.testing.expect(exception == null);
+    try std.testing.expectEqual(@as(usize, 4), JSObjectGetTypedArrayLength(ctx, typed, &exception));
+    const raw = JSObjectGetTypedArrayBytesPtr(ctx, typed, &exception) orelse return error.TypedArrayBytesFailed;
+    try std.testing.expectEqual(@intFromPtr(&typed_bytes), @intFromPtr(raw));
+    @as([*]u8, @ptrCast(raw))[0] = 9;
+    try std.testing.expectEqual(@as(u8, 9), typed_bytes[0]);
+    try std.testing.expectEqual(@as(usize, 0), typed_calls);
+    JSGlobalContextRelease(ctx);
+    try std.testing.expectEqual(@as(usize, 1), typed_calls);
+
+    var buffer_calls: usize = 0;
+    var buffer_bytes = [_]u8{ 5, 6, 7 };
+    const buffer_ctx = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
+    const buffer = JSObjectMakeArrayBufferWithBytesNoCopy(
+        buffer_ctx,
+        &buffer_bytes,
+        buffer_bytes.len,
+        Deallocator.call,
+        &buffer_calls,
+        &exception,
+    ) orelse return error.ArrayBufferCreateFailed;
+    try std.testing.expectEqual(@as(usize, 3), JSObjectGetArrayBufferByteLength(buffer_ctx, buffer, &exception));
+    const buffer_raw = JSObjectGetArrayBufferBytesPtr(buffer_ctx, buffer, &exception) orelse return error.ArrayBufferBytesFailed;
+    try std.testing.expectEqual(@intFromPtr(&buffer_bytes), @intFromPtr(buffer_raw));
+    JSGlobalContextRelease(buffer_ctx);
+    try std.testing.expectEqual(@as(usize, 1), buffer_calls);
+}
+
+test "C-API: no-copy constructors release transferred bytes immediately on failure" {
+    const Deallocator = struct {
+        fn call(bytes: ?*anyopaque, deallocator_context: ?*anyopaque) callconv(.c) void {
+            _ = bytes;
+            const calls: *usize = @ptrCast(@alignCast(deallocator_context.?));
+            calls.* += 1;
+        }
+    };
+
+    const ctx = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
+    defer JSGlobalContextRelease(ctx);
+    var bytes = [_]u8{ 1, 2, 3 };
+    var calls: usize = 0;
+    var exception: JSValueRef = null;
+
+    try std.testing.expect(JSObjectMakeTypedArrayWithBytesNoCopy(ctx, .uint16_array, &bytes, bytes.len, Deallocator.call, &calls, &exception) == null);
+    try std.testing.expect(exception != null);
+    try std.testing.expectEqual(@as(usize, 1), calls);
+
+    exception = null;
+    try std.testing.expect(JSObjectMakeTypedArrayWithBytesNoCopy(ctx, .none, &bytes, bytes.len, Deallocator.call, &calls, &exception) == null);
+    try std.testing.expect(exception == null);
+    try std.testing.expectEqual(@as(usize, 2), calls);
+
+    try std.testing.expect(JSObjectMakeArrayBufferWithBytesNoCopy(ctx, null, 1, Deallocator.call, &calls, &exception) == null);
+    try std.testing.expect(exception != null);
+    try std.testing.expectEqual(@as(usize, 3), calls);
+}
+
+test "C-API: GC finalization releases no-copy bytes before context teardown" {
+    const Deallocator = struct {
+        fn call(bytes: ?*anyopaque, deallocator_context: ?*anyopaque) callconv(.c) void {
+            _ = bytes;
+            const calls: *usize = @ptrCast(@alignCast(deallocator_context.?));
+            calls.* += 1;
+        }
+    };
+
+    const c = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    c.initCApiRef();
+    const ctx: JSContextRef = @ptrCast(c);
+    var bytes = [_]u8{ 1, 2, 3, 4 };
+    var calls: usize = 0;
+    var exception: JSValueRef = null;
+    _ = JSObjectMakeArrayBufferWithBytesNoCopy(ctx, &bytes, bytes.len, Deallocator.call, &calls, &exception) orelse return error.ArrayBufferCreateFailed;
+    try std.testing.expect(exception == null);
+    try std.testing.expectEqual(@as(usize, 0), calls);
+
+    JSGarbageCollect(ctx);
+    try std.testing.expectEqual(@as(usize, 1), calls);
+    JSGlobalContextRelease(ctx);
+    try std.testing.expectEqual(@as(usize, 1), calls);
 }
 
 test "C-API: JSValueIsEqual uses JavaScript abstract equality semantics" {

@@ -17,7 +17,7 @@ Home (`~/Code/Home/lang`) is the Bun-parity runtime. Its `home` binary does
 | Generated-class C++ bindings (`*Prototype__*`, `*Class__*`, `__construct`, `__finalize`) | **~4,325** |
 | **Public JSC C API** (what zig-js exposes today) | **only ~17** |
 
-zig-js's `src/c_api.zig` exports 50 C-API functions
+zig-js's `src/c_api.zig` exports 66 C-API functions
 (`JSGlobalContextCreate`, `JSEvaluateScript`, `JSObjectMake`,
 `JSObjectMakeFunctionWithCallback`, `JSValueMakeNumber`, …). The overlap with
 what Home actually links is ~17 symbols. **zig-js is therefore not a drop-in for
@@ -46,7 +46,8 @@ zig-js already has (verified in `src/c_api.zig`): context lifecycle, evaluate,
 value predicates/conversions, `JSObjectMake`, property get/set/index,
 call/construct, `JSObjectMakeFunctionWithCallback` (host functions),
 `JSObjectMakeDeferredPromise`, `JSValueProtect`/`JSValueUnprotect`, string
-create/get, and the `JSWorker*` extension.
+create/get, the public TypedArray/ArrayBuffer construction and borrowed-bytes
+surface (including no-copy lifetime callbacks), and the `JSWorker*` extension.
 
 Missing primitives Home depends on heavily (each blocks a large class of corpus
 tests):
@@ -61,9 +62,10 @@ tests):
    construction; the `JSValueRef* exception` out-parameter convention on every
    call/get/set. Home's invariant: a host call returns the empty value **iff**
    an exception is pending (see Home's `host_fn.zig` / `assertExceptionPresenceMatches`).
-3. **TypedArray / ArrayBuffer** — `JSObjectMakeTypedArray`,
-   `JSObjectMakeArrayBufferWithBytesNoCopy`, byte-length/bytes accessors,
-   `JSValueGetTypedArrayType`. Needed for `Buffer`, fetch/stream bodies, crypto.
+3. **Public headers and ABI conformance** — the TypedArray/ArrayBuffer symbols
+   are implemented in `src/c_api.zig`, but #135/#136 still need the checked-in
+   JSC header inventory plus C compile-link-runtime gates before Home can consume
+   them without maintaining local declarations.
 4. **Prototype & structure control** — `JSObjectGetPrototype`/`SetPrototype`
    and richer private/internal slot modeling. `JSObjectGetPrivate` /
    `JSObjectSetPrivate` now cover host-owned opaque pointers, but Home also
@@ -88,8 +90,8 @@ tests):
 2. **Class system:** implement `JSClassDefinition` in zig-js; port ONE Home
    generated class (e.g. `Glob`, which is small) onto it end-to-end, including
    finalize + a static method. Establishes the pattern + codegen target.
-3. **Exceptions + TypedArray:** close gaps (2) and (3); port `Buffer` and the
-   node validators (they throw a lot — exercises the exception invariant).
+3. **Exceptions + C ABI hardening:** close gaps (2) and (3); port `Buffer` and
+   the node validators (they throw a lot — exercises the exception invariant).
 4. **Event loop + promises:** wire (6); port `Bun.spawn` / timers.
 5. **Bulk class migration:** regenerate Home's class layer against the new
    zig-js class API (Home's classes are codegen-driven, so most of the ~4,325
