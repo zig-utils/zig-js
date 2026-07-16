@@ -56,6 +56,9 @@ int main(void)
         !JSStringIsEqualToUTF8CString(rendered_json, "{\n  \"ok\": true\n}"))
         return 14;
     JSStringRelease(rendered_json);
+    if (JSValueToInt32(context, JSValueMakeNumber(context, 4294967297.0), &exception) != 1 ||
+        JSValueToUInt64(context, bigint, &exception) != UINT64_MAX)
+        return 15;
 
     const JSChar utf16[] = { 'z', 'i', 'g', 0xd83d, 0xde00 };
     JSStringRef wide = JSStringCreateWithCharacters(utf16, 5);

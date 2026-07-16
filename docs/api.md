@@ -88,6 +88,10 @@ JSStringRef JSValueCreateJSONString(JSContextRef, JSValueRef, unsigned indent,
                                     JSValueRef* exception);
 bool        JSValueToBoolean(JSContextRef, JSValueRef);
 double      JSValueToNumber(JSContextRef, JSValueRef, JSValueRef* exception);
+int32_t     JSValueToInt32(JSContextRef, JSValueRef, JSValueRef* exception);
+uint32_t    JSValueToUInt32(JSContextRef, JSValueRef, JSValueRef* exception);
+int64_t     JSValueToInt64(JSContextRef, JSValueRef, JSValueRef* exception);
+uint64_t    JSValueToUInt64(JSContextRef, JSValueRef, JSValueRef* exception);
 JSStringRef JSValueToStringCopy(JSContextRef, JSValueRef, JSValueRef* exception);
 JSObjectRef JSValueToObject(JSContextRef, JSValueRef, JSValueRef* exception);
 void        JSValueProtect(JSContextRef, JSValueRef);

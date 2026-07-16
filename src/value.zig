@@ -3366,6 +3366,27 @@ pub const Value = struct {
         return @intFromFloat(m);
     }
 
+    /// ToUint64 over an already-coerced Number. Decode the IEEE-754 integer
+    /// bits directly so modulo 2^64 remains exact even when the input is far
+    /// outside the range of an integer cast.
+    pub fn uint64FromF64(n: f64) u64 {
+        const bits: u64 = @bitCast(n);
+        const exponent_bits: u11 = @truncate(bits >> 52);
+        if (exponent_bits == 0 or exponent_bits == 0x7ff) return 0;
+
+        const significand = (bits & ((@as(u64, 1) << 52) - 1)) | (@as(u64, 1) << 52);
+        const shift: i32 = @as(i32, exponent_bits) - 1023 - 52;
+        const magnitude: u64 = if (shift >= 64)
+            0
+        else if (shift >= 0)
+            significand << @intCast(shift)
+        else if (shift <= -53)
+            0
+        else
+            significand >> @intCast(-shift);
+        return if (bits >> 63 != 0) 0 -% magnitude else magnitude;
+    }
+
     /// The `typeof` operator result.
     pub fn typeOf(self: Value) []const u8 {
         return switch (self.kind()) {
@@ -3424,6 +3445,17 @@ test "Value is an engine-wide 8-byte NaN-boxed word" {
     try std.testing.expectEqualStrings("nan-boxed", cases[6].asStr());
     try std.testing.expect(cases[7].isObject());
     try std.testing.expectEqual(&object, cases[7].asObj());
+}
+
+test "uint64FromF64 performs exact modulo conversion" {
+    try std.testing.expectEqual(@as(u64, 0), Value.uint64FromF64(std.math.nan(f64)));
+    try std.testing.expectEqual(@as(u64, 0), Value.uint64FromF64(std.math.inf(f64)));
+    try std.testing.expectEqual(@as(u64, 1), Value.uint64FromF64(1.5));
+    try std.testing.expectEqual(std.math.maxInt(u64), Value.uint64FromF64(-1.5));
+    try std.testing.expectEqual(@as(u64, 1) << 63, Value.uint64FromF64(9223372036854775808.0));
+    try std.testing.expectEqual(@as(u64, 0), Value.uint64FromF64(18446744073709551616.0));
+    try std.testing.expectEqual(@as(u64, 4096), Value.uint64FromF64(18446744073709555712.0));
+    try std.testing.expectEqual(@as(u64, 0), Value.uint64FromF64(1.0e300));
 }
 
 pub fn bigIntIsZero(o: *Object) bool {

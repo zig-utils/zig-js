@@ -818,6 +818,72 @@ export fn JSValueToNumber(ctx: JSContextRef, v: JSValueRef, exception: Exception
     };
 }
 
+fn bigIntLow64(object: *Object) u64 {
+    if (object.bigIntText()) |text| {
+        const negative = text.len > 0 and text[0] == '-';
+        const digits = if (negative) text[1..] else text;
+        var low: u64 = 0;
+        for (digits) |digit| low = low *% 10 +% (digit - '0');
+        return if (negative) 0 -% low else low;
+    }
+    const raw: u128 = @bitCast(object.bigIntValue());
+    return @truncate(raw);
+}
+
+fn valueToIntegerBits(
+    ctx: JSContextRef,
+    value_ref: JSValueRef,
+    width: enum { bits32, bits64 },
+    exception: ExceptionRef,
+) ?u64 {
+    const c = ctxFrom(ctx) orelse return null;
+    const input = valueArgFrom(c, value_ref, exception) orelse return null;
+    var bits: u64 = if (input.isObject() and input.asObj().is_bigint)
+        bigIntLow64(input.asObj())
+    else blk: {
+        const gc_saved = gc_mod.setActiveHeap(c.gc);
+        defer _ = gc_mod.setActiveHeap(gc_saved);
+        const sa_saved = strcell.setActiveArena(c.arena());
+        defer _ = strcell.setActiveArena(sa_saved);
+        var machine = c.interpreter();
+        c.pushActiveInterpreter(&machine) catch {
+            setException(c, exception, "OutOfMemory");
+            return null;
+        };
+        defer c.popActiveInterpreter(&machine);
+        const number = machine.toNumberV(input) catch |err| {
+            if (err == error.Throw) {
+                if (exception != null) exception[0] = box(c, machine.exception);
+            } else {
+                setException(c, exception, @errorName(err));
+            }
+            return null;
+        };
+        break :blk Value.uint64FromF64(number);
+    };
+    if (width == .bits32) bits &= std.math.maxInt(u32);
+    return bits;
+}
+
+export fn JSValueToInt32(ctx: JSContextRef, value_ref: JSValueRef, exception: ExceptionRef) callconv(.c) i32 {
+    const bits = valueToIntegerBits(ctx, value_ref, .bits32, exception) orelse return 0;
+    return @bitCast(@as(u32, @truncate(bits)));
+}
+
+export fn JSValueToUInt32(ctx: JSContextRef, value_ref: JSValueRef, exception: ExceptionRef) callconv(.c) u32 {
+    const bits = valueToIntegerBits(ctx, value_ref, .bits32, exception) orelse return 0;
+    return @truncate(bits);
+}
+
+export fn JSValueToInt64(ctx: JSContextRef, value_ref: JSValueRef, exception: ExceptionRef) callconv(.c) i64 {
+    const bits = valueToIntegerBits(ctx, value_ref, .bits64, exception) orelse return 0;
+    return @bitCast(bits);
+}
+
+export fn JSValueToUInt64(ctx: JSContextRef, value_ref: JSValueRef, exception: ExceptionRef) callconv(.c) u64 {
+    return valueToIntegerBits(ctx, value_ref, .bits64, exception) orelse 0;
+}
+
 export fn JSValueToStringCopy(ctx: JSContextRef, v: JSValueRef, exception: ExceptionRef) callconv(.c) JSStringRef {
     const c = ctxFrom(ctx) orelse return null;
     const val = valueArgFrom(c, v, exception) orelse return null;
@@ -2044,6 +2110,48 @@ test "C-API: JSON parse and stringify preserve JSC contracts" {
     exception = null;
     try std.testing.expect(JSValueCreateJSONString(ctx, JSValueMakeUndefined(ctx), 0, &exception) == null);
     try std.testing.expect(exception == null);
+}
+
+test "C-API: integer conversions match JSC modulo and exception semantics" {
+    const ctx = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
+    defer JSGlobalContextRelease(ctx);
+    const Case = struct { number: f64, i32: i32, u32: u32, i64: i64, u64: u64 };
+    for ([_]Case{
+        .{ .number = std.math.nan(f64), .i32 = 0, .u32 = 0, .i64 = 0, .u64 = 0 },
+        .{ .number = std.math.inf(f64), .i32 = 0, .u32 = 0, .i64 = 0, .u64 = 0 },
+        .{ .number = -1.5, .i32 = -1, .u32 = std.math.maxInt(u32), .i64 = -1, .u64 = std.math.maxInt(u64) },
+        .{ .number = 4294967297.0, .i32 = 1, .u32 = 1, .i64 = 4294967297, .u64 = 4294967297 },
+        .{ .number = 9223372036854775808.0, .i32 = 0, .u32 = 0, .i64 = std.math.minInt(i64), .u64 = @as(u64, 1) << 63 },
+        .{ .number = 18446744073709551616.0, .i32 = 0, .u32 = 0, .i64 = 0, .u64 = 0 },
+    }) |case| {
+        const number = JSValueMakeNumber(ctx, case.number) orelse return error.ValueCreateFailed;
+        var exception: JSValueRef = null;
+        try std.testing.expectEqual(case.i32, JSValueToInt32(ctx, number, &exception));
+        try std.testing.expect(exception == null);
+        try std.testing.expectEqual(case.u32, JSValueToUInt32(ctx, number, &exception));
+        try std.testing.expectEqual(case.i64, JSValueToInt64(ctx, number, &exception));
+        try std.testing.expectEqual(case.u64, JSValueToUInt64(ctx, number, &exception));
+    }
+
+    var exception: JSValueRef = null;
+    const positive_text = JSStringCreateWithUTF8CString("18446744073709551617") orelse return error.StringInitFailed;
+    defer JSStringRelease(positive_text);
+    const positive = JSBigIntCreateWithString(ctx, positive_text, &exception) orelse return error.BigIntCreateFailed;
+    try std.testing.expectEqual(@as(i32, 1), JSValueToInt32(ctx, positive, &exception));
+    try std.testing.expectEqual(@as(u64, 1), JSValueToUInt64(ctx, positive, &exception));
+
+    const negative_text = JSStringCreateWithUTF8CString("-9223372036854775809") orelse return error.StringInitFailed;
+    defer JSStringRelease(negative_text);
+    const negative = JSBigIntCreateWithString(ctx, negative_text, &exception) orelse return error.BigIntCreateFailed;
+    try std.testing.expectEqual(std.math.maxInt(i64), JSValueToInt64(ctx, negative, &exception));
+    try std.testing.expectEqual(@as(u64, std.math.maxInt(i64)), JSValueToUInt64(ctx, negative, &exception));
+    try std.testing.expectEqual(@as(i32, -1), JSValueToInt32(ctx, negative, &exception));
+    try std.testing.expectEqual(std.math.maxInt(u32), JSValueToUInt32(ctx, negative, &exception));
+
+    const symbol = JSValueMakeSymbol(ctx, null) orelse return error.SymbolCreateFailed;
+    exception = null;
+    try std.testing.expectEqual(@as(i64, 0), JSValueToInt64(ctx, symbol, &exception));
+    try std.testing.expect(exception != null);
 }
 
 test "C-API: value inspection APIs report null handles as invalid" {
