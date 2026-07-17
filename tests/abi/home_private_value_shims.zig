@@ -126,6 +126,11 @@ extern "c" fn ZigString__toAtomicValue(*const ZigString, JSContextRef) EncodedVa
 extern "c" fn JSC__JSValue__createRopeString(EncodedValue, EncodedValue, JSContextRef) EncodedValue;
 extern "c" fn JSC__JSString__toZigString(?*anyopaque, JSContextRef, *ZigString) void;
 extern "c" fn JSC__JSValue__toZigString(EncodedValue, *ZigString, JSContextRef) void;
+extern "c" fn JSC__JSValue__createTypeError(*const ZigString, *const ZigString, JSContextRef) EncodedValue;
+extern "c" fn JSC__JSValue__createRangeError(*const ZigString, *const ZigString, JSContextRef) EncodedValue;
+extern "c" fn JSC__createError(JSContextRef, *const BunString) EncodedValue;
+extern "c" fn JSC__createTypeError(JSContextRef, *const BunString) EncodedValue;
+extern "c" fn JSC__createRangeError(JSContextRef, *const BunString) EncodedValue;
 extern "c" fn JSC__JSValue__asString(EncodedValue) ?*anyopaque;
 extern "c" fn JSC__JSString__eql(?*anyopaque, JSContextRef, ?*anyopaque) bool;
 extern "c" fn JSC__JSString__is8Bit(?*anyopaque) bool;
@@ -599,6 +604,60 @@ pub fn main() void {
     if (JSC__Exception__asJSValue(preserved_zig_string_error_exception.cellPointer()) != EncodedValue.fromInt32(197))
         fail("ZigString Error replaced pending exception");
 
+    const empty_zig_string = ZigString{ .tagged_ptr = 0, .len = 0 };
+    const type_code_bytes = "ERR_TYPE_FACTORY";
+    const type_code_string = ZigString{ .tagged_ptr = @intFromPtr(type_code_bytes.ptr), .len = type_code_bytes.len };
+    const range_code_units = [_]u16{ 'E', 'R', 'R', '_', 0xd83d, 0xde00, 0xd800 };
+    const range_code_string = ZigString{ .tagged_ptr = @intFromPtr(&range_code_units) | (@as(usize, 1) << 63), .len = range_code_units.len };
+    const coded_type_error = JSC__JSValue__createTypeError(&utf16_string.value.zig_string, &type_code_string, context);
+    const coded_type_error_second = JSC__JSValue__createTypeError(&utf16_string.value.zig_string, &type_code_string, context);
+    const coded_range_error = JSC__JSValue__createRangeError(&utf8_string.value.zig_string, &range_code_string, context);
+    const uncoded_type_error = JSC__JSValue__createTypeError(&latin1_string.value.zig_string, &empty_zig_string, context);
+    exposeCell(context, "__private_coded_type_error", coded_type_error);
+    exposeCell(context, "__private_coded_range_error", coded_range_error);
+    exposeCell(context, "__private_uncoded_type_error", uncoded_type_error);
+    if (coded_type_error == .empty or coded_range_error == .empty or uncoded_type_error == .empty or
+        JSC__JSValue__isStrictEqual(coded_type_error, coded_type_error_second, context) or
+        !JSC__JSValue__toBoolean(evaluate(context, "__private_coded_type_error instanceof TypeError && Object.getPrototypeOf(__private_coded_type_error) === TypeError.prototype && __private_coded_type_error.message === 'A😀\\uD800Z' && __private_coded_type_error.code === 'ERR_TYPE_FACTORY'")) or
+        !JSC__JSValue__toBoolean(evaluate(context, "__private_coded_range_error instanceof RangeError && Object.getPrototypeOf(__private_coded_range_error) === RangeError.prototype && __private_coded_range_error.message === 'A😀Z' && __private_coded_range_error.code === 'ERR_😀\\uD800'")) or
+        !JSC__JSValue__toBoolean(evaluate(context, "!Object.hasOwn(__private_uncoded_type_error, 'code')")))
+        fail("private ZigString coded error factory mismatch");
+    if (!JSC__JSValue__toBoolean(evaluate(context,
+        \\(() => {
+        \\  const type = Object.getOwnPropertyDescriptor(__private_coded_type_error, 'code');
+        \\  const range = Object.getOwnPropertyDescriptor(__private_coded_range_error, 'code');
+        \\  return type.writable && type.enumerable && type.configurable &&
+        \\    !range.writable && range.enumerable && range.configurable;
+        \\})()
+    ))) fail("private coded error descriptor mismatch");
+
+    const bun_empty_error = JSC__createError(context, &empty_bun_string);
+    const bun_wtf_error = JSC__createError(context, &huge_string);
+    const bun_latin1_type_error = JSC__createTypeError(context, &latin1_string);
+    const bun_utf8_type_error = JSC__createTypeError(context, &utf8_string);
+    const bun_utf16_range_error = JSC__createRangeError(context, &utf16_string);
+    exposeCell(context, "__private_bun_empty_error", bun_empty_error);
+    exposeCell(context, "__private_bun_wtf_error", bun_wtf_error);
+    exposeCell(context, "__private_bun_latin1_type_error", bun_latin1_type_error);
+    exposeCell(context, "__private_bun_utf8_type_error", bun_utf8_type_error);
+    exposeCell(context, "__private_bun_utf16_range_error", bun_utf16_range_error);
+    if (!JSC__JSValue__toBoolean(evaluate(context, "__private_bun_empty_error instanceof Error && __private_bun_empty_error.message === ''")) or
+        !JSC__JSValue__toBoolean(evaluate(context, "__private_bun_wtf_error instanceof Error && __private_bun_wtf_error.message === '184467440737095516160000000000000000000'")) or
+        !JSC__JSValue__toBoolean(evaluate(context, "__private_bun_latin1_type_error instanceof TypeError && __private_bun_latin1_type_error.message === 'café'")) or
+        !JSC__JSValue__toBoolean(evaluate(context, "__private_bun_utf8_type_error instanceof TypeError && __private_bun_utf8_type_error.message === 'A😀Z'")) or
+        !JSC__JSValue__toBoolean(evaluate(context, "__private_bun_utf16_range_error instanceof RangeError && __private_bun_utf16_range_error.message === 'A😀\\uD800Z'")))
+        fail("private BunString error factory mismatch");
+    if (JSC__createError(context, &dead_bun_string) != .empty or !JSGlobalObject__hasException(context))
+        fail("private BunString error factory accepted dead input");
+    JSGlobalObject__clearException(context);
+    JSC__VM__throwError(JSC__JSGlobalObject__vm(context), context, EncodedValue.fromInt32(201));
+    if (JSC__JSValue__createTypeError(&latin1_string.value.zig_string, &type_code_string, context) != .empty or
+        JSC__createRangeError(context, &latin1_string) != .empty)
+        fail("private error factory ignored pending exception");
+    const preserved_error_factory_exception = JSGlobalObject__tryTakeException(context);
+    if (JSC__Exception__asJSValue(preserved_error_factory_exception.cellPointer()) != EncodedValue.fromInt32(201))
+        fail("private error factory replaced pending exception");
+
     const dom_names = [_][]const u8{
         "IndexSizeError",             "HierarchyRequestError", "WrongDocumentError",       "InvalidCharacterError",
         "NoModificationAllowedError", "NotFoundError",         "NotSupportedError",        "InUseAttributeError",
@@ -644,7 +703,6 @@ pub fn main() void {
         "The request is not allowed by the user agent or the platform in the current context, possibly because the user denied permission.",
     };
     const dom_legacy_codes = [_]i32{ 1, 3, 4, 5, 7, 8, 9, 10, 11, 0, 13, 14, 15, 17, 18, 19, 20, 21, 22, 23, 24, 25, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
-    const empty_zig_string = ZigString{ .tagged_ptr = 0, .len = 0 };
     for (dom_names, dom_messages, dom_legacy_codes, 0..) |name, message, legacy_code, code| {
         const instance = ZigString__toDOMExceptionInstance(&empty_zig_string, context, @intCast(code));
         if (instance == .empty or
@@ -1066,6 +1124,14 @@ pub fn main() void {
     exposeCell(sibling_context, "__private_sibling_type_error", sibling_type_error);
     if (!JSC__JSValue__toBoolean(evaluate(sibling_context, "Object.getPrototypeOf(__private_sibling_type_error) === TypeError.prototype && __private_sibling_type_error.message === 'café'")))
         fail("ZigString Error selected-realm prototype mismatch");
+
+    const sibling_coded_error = JSC__JSValue__createTypeError(&latin1_string.value.zig_string, &type_code_string, sibling_context);
+    const sibling_bun_range_error = JSC__createRangeError(sibling_context, &utf16_string);
+    exposeCell(sibling_context, "__private_sibling_coded_error", sibling_coded_error);
+    exposeCell(sibling_context, "__private_sibling_bun_range_error", sibling_bun_range_error);
+    if (!JSC__JSValue__toBoolean(evaluate(sibling_context, "Object.getPrototypeOf(__private_sibling_coded_error) === TypeError.prototype && __private_sibling_coded_error.code === 'ERR_TYPE_FACTORY'")) or
+        !JSC__JSValue__toBoolean(evaluate(sibling_context, "Object.getPrototypeOf(__private_sibling_bun_range_error) === RangeError.prototype && __private_sibling_bun_range_error.message === 'A😀\\uD800Z'")))
+        fail("private error factory selected-realm mismatch");
 
     const sibling_dom_exception = ZigString__toDOMExceptionInstance(&empty_zig_string, sibling_context, 16);
     exposeCell(sibling_context, "__private_sibling_dom_exception", sibling_dom_exception);
@@ -1785,5 +1851,5 @@ pub fn main() void {
         JSC__JSMap__get(map_cell, context, evaluate(context, "'direct'")) != .undefined)
         fail("private JSMap clear mismatch");
 
-    std.debug.print("Home private value shims: 95/95 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 100/100 symbols linked; runtime matrix passed\n", .{});
 }

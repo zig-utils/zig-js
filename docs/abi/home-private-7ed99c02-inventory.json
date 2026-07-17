@@ -88,8 +88,8 @@
     },
     "by_status": {
       "external": 2,
-      "implemented": 112,
-      "pending": 334
+      "implemented": 117,
+      "pending": 329
     }
   },
   "declarations": [
@@ -1782,10 +1782,10 @@
       "line": 1932,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSValue__createRangeError(message: *const ZigString, code: *const ZigString, global: *JSGlobalObject) JSValue;",
       "declaration_sha256": "2b439c66cc35b4867dbf78953e94bfd455a530b7e951d222b1d3f917fb361f3f",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSValue__createRopeString",
@@ -1804,10 +1804,10 @@
       "line": 1927,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSValue__createTypeError(message: *const ZigString, code: *const ZigString, global: *JSGlobalObject) JSValue;",
       "declaration_sha256": "bb4af727de8c1a95bef484e43e02cf427b190027848952b45e874f8650245f5d",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSValue__createUninitializedUint8Array",
@@ -2915,10 +2915,10 @@
       "line": 11,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__createError(*jsc.JSGlobalObject, str: *const String) jsc.JSValue;",
       "declaration_sha256": "99fe302d8d0dc6e96cbdf19a61940ee50de23fb4ca6511be69e65cfa869fd190",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__createRangeError",
@@ -2926,10 +2926,10 @@
       "line": 13,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__createRangeError(*jsc.JSGlobalObject, str: *const String) jsc.JSValue;",
       "declaration_sha256": "7c8a69c89ef2db367a56041ef6b91e64157e0881f52c52e52e759e9a9020d5e6",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__createStructure",
@@ -2948,10 +2948,10 @@
       "line": 12,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__createTypeError(*jsc.JSGlobalObject, str: *const String) jsc.JSValue;",
       "declaration_sha256": "d5e08e8e7920df844b293b36043f4d8b3843fa857f0443fe77722ea154e1caf9",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__jsTypeStringForValue",

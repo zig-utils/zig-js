@@ -2690,6 +2690,106 @@ export fn ZigString__toSyntaxErrorInstance(string: *const PrivateZigString, glob
     return privateZigStringErrorInstance(string, global, "SyntaxError");
 }
 
+fn privateZigStringErrorWithCode(
+    message: *const PrivateZigString,
+    code: *const PrivateZigString,
+    global: JSContextRef,
+    comptime error_name: []const u8,
+    comptime code_writable: bool,
+) EncodedValue {
+    const context = ctxForEvaluation(global) orelse return .empty;
+    const opaque_group = context.c_api_group orelse return .empty;
+    const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+    if (group.pending_exception != null) return .empty;
+    const message_value = privateZigStringValue(context, message) catch |err| {
+        privatePublishBunStringError(context, err);
+        return .empty;
+    };
+    const code_value = privateZigStringValue(context, code) catch |err| {
+        privatePublishBunStringError(context, err);
+        return .empty;
+    };
+
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    defer context.popActiveInterpreter(&machine);
+    const result = machine.makeError(error_name, message_value.asStr()) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    privateSetErrorCodeWithAttributes(&machine, result, code_value.asStr(), code_writable) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    return privateEncodeResult(context, &machine, result);
+}
+
+export fn JSC__JSValue__createTypeError(
+    message: *const PrivateZigString,
+    code: *const PrivateZigString,
+    global: JSContextRef,
+) callconv(.c) EncodedValue {
+    return privateZigStringErrorWithCode(message, code, global, "TypeError", true);
+}
+
+export fn JSC__JSValue__createRangeError(
+    message: *const PrivateZigString,
+    code: *const PrivateZigString,
+    global: JSContextRef,
+) callconv(.c) EncodedValue {
+    return privateZigStringErrorWithCode(message, code, global, "RangeError", false);
+}
+
+fn privateBunStringErrorFactory(
+    global: JSContextRef,
+    message: *const PrivateBunString,
+    comptime error_name: []const u8,
+) EncodedValue {
+    const context = ctxForEvaluation(global) orelse return .empty;
+    const opaque_group = context.c_api_group orelse return .empty;
+    const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+    if (group.pending_exception != null) return .empty;
+    const message_value = privateBunStringValue(context, message, null) catch |err| {
+        privatePublishBunStringError(context, err);
+        return .empty;
+    };
+
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    defer context.popActiveInterpreter(&machine);
+    const result = machine.makeError(error_name, message_value.asStr()) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    return privateEncodeResult(context, &machine, result);
+}
+
+export fn JSC__createError(global: JSContextRef, message: *const PrivateBunString) callconv(.c) EncodedValue {
+    return privateBunStringErrorFactory(global, message, "Error");
+}
+
+export fn JSC__createTypeError(global: JSContextRef, message: *const PrivateBunString) callconv(.c) EncodedValue {
+    return privateBunStringErrorFactory(global, message, "TypeError");
+}
+
+export fn JSC__createRangeError(global: JSContextRef, message: *const PrivateBunString) callconv(.c) EncodedValue {
+    return privateBunStringErrorFactory(global, message, "RangeError");
+}
+
 const PrivateDOMExceptionDescription = struct {
     name: []const u8,
     message: []const u8,
@@ -2730,9 +2830,23 @@ const private_dom_exception_descriptions = [_]PrivateDOMExceptionDescription{
     .{ .name = "NotAllowedError", .message = "The request is not allowed by the user agent or the platform in the current context, possibly because the user denied permission." },
 };
 
-fn privateSetErrorCode(machine: *interp.Interpreter, result: Value, code: []const u8) !void {
+fn privateSetErrorCodeWithAttributes(
+    machine: *interp.Interpreter,
+    result: Value,
+    code: []const u8,
+    writable: bool,
+) !void {
     if (code.len == 0 or !result.isObject()) return;
     try result.asObj().setOwn(machine.arena, machine.root_shape, "code", try Value.strAlloc(machine.arena, code));
+    try result.asObj().setAttr(machine.arena, "code", .{
+        .writable = writable,
+        .enumerable = true,
+        .configurable = true,
+    });
+}
+
+fn privateSetErrorCode(machine: *interp.Interpreter, result: Value, code: []const u8) !void {
+    return privateSetErrorCodeWithAttributes(machine, result, code, true);
 }
 
 export fn ZigString__toDOMExceptionInstance(
