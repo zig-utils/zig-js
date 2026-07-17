@@ -64,16 +64,17 @@ blocks, and `JSExport` instance/class/renamed-selector behavior. The 17-row
 transcript matches system JavaScriptCore exactly (`189ef5b0eefd1054`), including
 same-VM cross-context value identity, exported receivers, constructors,
 prototypes, and target-context wrapper behavior.
-`JSManagedValue` and VM owner relations use real weak targets plus weak owners;
-because current context groups use the VM-lifetime arena policy, unreachable
-targets remain available until VM teardown rather than being reclaimed mid-VM.
-Issue #159 continues tracking conditional mid-VM clearing and allocation fault
-injection; #160 remains linked to the parent bridge closure gate. The checked-in
+`JSManagedValue` and VM owner relations use real weak targets plus weak owners.
+At an explicit `JSGarbageCollect` epoch, an unowned managed value is cleared when
+a cycle-safe walk across every realm finds no strong path to it; WeakRef and
+weak-collection edges do not retain the target. This is semantic weak clearing:
+the arena still reclaims physical storage at VM teardown. Issue #159 continues
+tracking allocation fault injection; #160 remains linked to the parent bridge
+closure gate. The checked-in
 lifetime gate covers duplicate managed add/remove operations, owner and context
 death, cross-context exported wrappers, typed blocks, cyclic conversion, and
 200 full VM teardowns; it currently passes ASan, UBSan, and Apple's leak checker
-with 0 leaked bytes. Conditional mid-VM clearing still follows the documented
-arena boundary.
+with 0 leaked bytes.
 
 Compare the pin against an installed SDK explicitly:
 

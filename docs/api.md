@@ -55,8 +55,8 @@ receivers, constructors, prototypes, and target-context wrapper behavior. See
 the [Objective-C bridge inventory
 guide](objc-api/README.md) for the exact boundary and reproduction details.
 The complete declared inventory does not claim compatibility with private JSC
-framework internals or stronger collection behavior than zig-js's documented
-VM-lifetime arena policy. `zig build test-objc-api-evidence` batches header,
+framework internals. Managed values clear semantically at explicit collection
+epochs while arena storage remains VM-lifetime. `zig build test-objc-api-evidence` batches header,
 runtime, system-JSC differential, 200-cycle lifetime/autorelease, ASan/UBSan,
 and Apple leak-checker gates; the current leak result is 0 leaked bytes.
 

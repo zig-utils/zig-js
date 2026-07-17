@@ -392,7 +392,7 @@ Do not read the green configured runner as "the whole JavaScript universe is fin
 
 Completion of every item—and the evidence gate for removing this section—is tracked in [issue #134](https://github.com/zig-utils/zig-js/issues/134).
 
-- Objective-C bridge lifetime/stress completion evidence, full JavaScriptCore framework/private internals, and Bun/Home private JSC ABI;
+- Objective-C bridge allocation fault-injection evidence, full JavaScriptCore framework/private internals, and Bun/Home private JSC ABI;
 - WebAssembly and JIT shell hooks from the PR-249 reference corpus;
 - moving or multi-age generational GC, parallel mid-script minor collection, and any optimizing JIT.
 
