@@ -467,6 +467,10 @@ inline fn traceMicrotask(mt: promise.Microtask, v: anytype) void {
             markValue(v, mt.job_first);
             markValue(v, mt.job_second);
         },
+        .next_tick => {
+            markValue(v, mt.job);
+            for (mt.job_args) |argument| markValue(v, argument);
+        },
     }
 }
 
@@ -571,6 +575,11 @@ pub fn traceInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
         machine.lockMicrotasks();
         for (q.pendingItems()) |mt| traceMicrotask(mt, v);
         machine.unlockMicrotasks();
+    }
+    if (machine.next_ticks) |q| {
+        machine.lockJobQueue(q);
+        for (q.pendingItems()) |mt| traceMicrotask(mt, v);
+        machine.unlockJobQueue(q);
     }
     if (machine.current_microtask) |mt| traceMicrotask(mt, v);
     for (machine.current_microtask_batch) |mt| traceMicrotask(mt, v);
@@ -802,6 +811,9 @@ pub const Binding = struct {
         if (par != null) ctx.lockMicrotasks();
         for (ctx.microtasks.pendingItems()) |mt| traceMicrotask(mt, v);
         if (par != null) ctx.unlockMicrotasks();
+        if (par != null) ctx.next_ticks.acquire();
+        for (ctx.next_ticks.pendingItems()) |mt| traceMicrotask(mt, v);
+        if (par != null) ctx.next_ticks.release();
 
         // `async_waiters` + `c_api_handles` + `finalization_cleanup_jobs` share
         // `realm_lock` (taken by their mutators only under parallel_js).
@@ -1453,4 +1465,22 @@ test "gc traces only the active microtask variant" {
     try std.testing.expect(!thenable_marks.contains(&reaction_handler));
     try std.testing.expect(!thenable_marks.contains(&inactive_argument));
     try std.testing.expect(!thenable_marks.contains(&inactive_result));
+
+    var next_tick_callback = Object{};
+    var next_tick_first = Object{};
+    var next_tick_second = Object{};
+    const next_tick_args = [_]Value{ Value.obj(&next_tick_first), Value.obj(&next_tick_second) };
+    var next_tick_marks = Recorder{};
+    traceMicrotask(.{
+        .kind = .next_tick,
+        .reaction = undefined,
+        .argument = Value.obj(&inactive_argument),
+        .fulfilled = true,
+        .job = Value.obj(&next_tick_callback),
+        .job_args = &next_tick_args,
+    }, &next_tick_marks);
+    try std.testing.expect(next_tick_marks.contains(&next_tick_callback));
+    try std.testing.expect(next_tick_marks.contains(&next_tick_first));
+    try std.testing.expect(next_tick_marks.contains(&next_tick_second));
+    try std.testing.expect(!next_tick_marks.contains(&inactive_argument));
 }

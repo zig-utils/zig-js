@@ -1031,6 +1031,10 @@ pub const Interpreter = struct {
     /// The Context-owned microtask queue (Promise reactions). Drained after the
     /// main script in `Context.evaluate` and inline by `await`.
     microtasks: ?*promise.MicrotaskQueue = null,
+    /// Realm-owned process next-tick queue. It is deliberately distinct from
+    /// PromiseJobs so host checkpoints can drain next ticks first, then
+    /// microtasks, and loop when a microtask schedules another next tick.
+    next_ticks: ?*promise.MicrotaskQueue = null,
     /// Realm-local HostPromiseRejectionTracker queue. Rejected promises remain
     /// rooted here until the explicit host notification checkpoint consumes or
     /// skips them after a later handler attachment.
@@ -6967,27 +6971,56 @@ pub const Interpreter = struct {
         return proto;
     }
 
-    /// Run queued Promise reactions to completion (the event loop's microtask
-    /// checkpoint). Each job may enqueue more; the step budget bounds runaways.
+    /// Run one complete host checkpoint: process next ticks first, then Promise
+    /// jobs, looping when the Promise phase scheduled more next-tick work.
     pub fn drainMicrotasks(self: *Interpreter) EvalError!void {
-        if (self.microtasks == null) return;
-        // Move the currently pending burst out under the current queue's lock,
-        // then run that burst unlocked. This preserves FIFO (jobs enqueued while
-        // the burst runs stay in the queue for the next burst) while avoiding one
-        // lock acquire per Promise reaction in no-GIL mode.
+        if (self.microtasks == null and self.next_ticks == null) return;
         var batch: std.ArrayListUnmanaged(promise.Microtask) = .empty;
         defer batch.deinit(self.arena);
-        while (try self.microtaskDequeueBatch(&batch)) {
+        while (true) {
+            if (self.next_ticks) |queue| try self.drainJobQueue(queue, &batch);
+            if (self.microtasks) |queue| try self.drainJobQueue(queue, &batch);
+            const more_next_ticks = if (self.next_ticks) |queue| self.jobQueueHasPending(queue) else false;
+            if (!more_next_ticks) break;
+        }
+    }
+
+    /// Move each pending burst out under its queue lock, then execute unlocked.
+    /// Jobs enqueued reentrantly form the next FIFO burst. On an abrupt failure,
+    /// untouched jobs are restored ahead of newly queued work.
+    fn drainJobQueue(
+        self: *Interpreter,
+        queue: *promise.MicrotaskQueue,
+        batch: *std.ArrayListUnmanaged(promise.Microtask),
+    ) EvalError!void {
+        while (try self.jobQueueDequeueBatch(queue, batch)) {
             var i: usize = 0;
             while (i < batch.items.len) : (i += 1) {
                 const job = batch.items[i];
                 self.current_microtask_batch = batch.items[i + 1 ..];
                 self.current_microtask = job;
                 promise.runJob(self, job) catch |err| {
-                    self.lockMicrotasks();
-                    if (self.microtasks) |queue|
-                        queue.prependSlice(self.arena, batch.items[i + 1 ..]) catch {};
-                    self.unlockMicrotasks();
+                    if (job.kind == .next_tick and err == error.Throw) {
+                        const thrown = self.exception;
+                        self.exception = Value.undef();
+                        const handled = handleProcessUncaughtException(self, thrown, false) catch |dispatch_err| {
+                            self.lockJobQueue(queue);
+                            queue.prependSlice(self.arena, batch.items[i + 1 ..]) catch {};
+                            self.unlockJobQueue(queue);
+                            self.current_microtask = null;
+                            self.current_microtask_batch = &.{};
+                            return dispatch_err;
+                        };
+                        if (handled) {
+                            self.current_microtask = null;
+                            self.serviceRequestedGcCheckpoint();
+                            continue;
+                        }
+                        self.exception = thrown;
+                    }
+                    self.lockJobQueue(queue);
+                    queue.prependSlice(self.arena, batch.items[i + 1 ..]) catch {};
+                    self.unlockJobQueue(queue);
                     self.current_microtask = null;
                     self.current_microtask_batch = &.{};
                     return err;
@@ -7015,20 +7048,37 @@ pub const Interpreter = struct {
     /// the copied burst outside the queue lock avoids serializing independent
     /// jobs on a lock while preserving per-queue FIFO: tasks enqueued by the
     /// burst (or by a peer) remain in the queue and are drained by a later burst.
-    fn microtaskDequeueBatch(self: *Interpreter, batch: *std.ArrayListUnmanaged(promise.Microtask)) EvalError!bool {
-        const q = self.microtasks orelse return false;
-        self.lockMicrotasks();
-        defer self.unlockMicrotasks();
-        const pending = q.pendingItems();
+    fn jobQueueDequeueBatch(
+        self: *Interpreter,
+        queue: *promise.MicrotaskQueue,
+        batch: *std.ArrayListUnmanaged(promise.Microtask),
+    ) EvalError!bool {
+        self.lockJobQueue(queue);
+        defer self.unlockJobQueue(queue);
+        const pending = queue.pendingItems();
         if (pending.len == 0) {
-            q.clearRetainingCapacity();
+            queue.clearRetainingCapacity();
             return false;
         }
         if (batch.capacity - batch.items.len < pending.len) promise_profile.recordMicrotaskBatchGrow();
         try batch.appendSlice(self.arena, pending);
         promise_profile.recordMicrotaskPops(pending.len);
-        q.clearRetainingCapacity();
+        queue.clearRetainingCapacity();
         return true;
+    }
+
+    fn jobQueueHasPending(self: *Interpreter, queue: *promise.MicrotaskQueue) bool {
+        self.lockJobQueue(queue);
+        defer self.unlockJobQueue(queue);
+        return !queue.isEmpty();
+    }
+
+    pub fn lockJobQueue(self: *Interpreter, queue: *promise.MicrotaskQueue) void {
+        if (self.lock_microtasks) queue.acquire();
+    }
+
+    pub fn unlockJobQueue(self: *Interpreter, queue: *promise.MicrotaskQueue) void {
+        if (self.lock_microtasks) queue.release();
     }
 
     /// Spin-acquire the current microtask queue's lock (only engaged under
@@ -41085,13 +41135,27 @@ fn processWarningJobFn(ctx: *anyopaque, this: Value, args: []const Value) value.
     return processEmitFn(self, process_obj, &.{ Value.str("warning"), warning });
 }
 
-/// Queue one process `warning` turn. The callable job owns the warning through
-/// a private JS slot, so the precise collector traces it until FIFO delivery.
+fn processNextTickFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const callback = arg(args, 0);
+    if (!callback.isCallable())
+        return self.throwError("TypeError", "The \"callback\" argument must be a function");
+    const process_obj = self.env.get("process") orelse return Value.undef();
+    if ((process_obj.asObj().getOwn("_exiting") orelse Value.boolVal(false)).toBoolean())
+        return Value.undef();
+    try promise.enqueueNextTick(self, callback, if (args.len > 1) args[1..] else &.{});
+    return Value.undef();
+}
+
+/// Queue one process `warning` turn. Bun implements warning delivery through
+/// process.nextTick, so it shares the distinct next-tick FIFO and runs before
+/// Promise jobs at the next host checkpoint.
 pub fn enqueueProcessWarning(self: *Interpreter, warning: Value) EvalError!void {
     const job = try gc_mod.allocObj(self.arena);
     job.* = .{ .native = processWarningJobFn };
     try job.setOwn(self.arena, self.root_shape, "#processWarning\x00runtime", warning);
-    try promise.enqueueCallback(self, Value.obj(job));
+    try promise.enqueueNextTick(self, Value.obj(job), &.{});
 }
 
 /// Dispatch a realm process event synchronously through the same EventEmitter
@@ -41108,6 +41172,23 @@ pub fn processEventListenerCount(self: *Interpreter, event: []const u8) EvalErro
     const process_obj = self.env.get("process") orelse return 0;
     const result = try processListenerCountFn(self, process_obj, &.{try Value.strAlloc(self.arena, event)});
     return @intFromFloat(result.asNum());
+}
+
+/// Shared fatal-dispatch policy used by the private C ABI and process.nextTick.
+/// The monitor observes first, a capture callback takes precedence over the
+/// ordinary event, and the return value says whether userland handled it.
+pub fn handleProcessUncaughtException(self: *Interpreter, thrown: Value, is_rejection: bool) EvalError!bool {
+    const origin = if (is_rejection) Value.str("unhandledRejection") else Value.str("uncaughtException");
+    const event_args = [_]Value{ thrown, origin };
+    if (try processEventListenerCount(self, "uncaughtExceptionMonitor") != 0)
+        _ = try emitProcessEvent(self, "uncaughtExceptionMonitor", &event_args);
+    if (processCaptureCallback(self)) |capture| {
+        _ = try self.callValueWithThis(capture, &event_args, Value.undef());
+        return true;
+    }
+    if (try processEventListenerCount(self, "uncaughtException") == 0) return false;
+    _ = try emitProcessEvent(self, "uncaughtException", &event_args);
+    return true;
 }
 
 /// The realm's uncaught-exception capture callback, if one is installed.
@@ -41149,6 +41230,7 @@ fn installProcess(env: *Environment, rs: *Shape, object_proto: *value.Object) Ev
     try setNative(a, rs, process_obj, "removeListener", 2, processRemoveListenerFn);
     try setNative(a, rs, process_obj, "listenerCount", 1, processListenerCountFn);
     try setNative(a, rs, process_obj, "emit", 1, processEmitFn);
+    try setNative(a, rs, process_obj, "nextTick", 1, processNextTickFn);
     try setNative(a, rs, process_obj, "setUncaughtExceptionCaptureCallback", 1, processSetCaptureCallbackFn);
     try setNative(a, rs, process_obj, "hasUncaughtExceptionCaptureCallback", 0, processHasCaptureCallbackFn);
 

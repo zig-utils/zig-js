@@ -91,7 +91,7 @@ pub const Promise = struct {
 /// A queued reaction job: run `reaction.handler(argument)` and settle
 /// `reaction.result` accordingly (a pass-through when `handler` is null).
 pub const Microtask = struct {
-    kind: enum { reaction, thenable, callback, native_callback, job } = .reaction,
+    kind: enum { reaction, thenable, callback, native_callback, job, next_tick } = .reaction,
     reaction: Reaction,
     argument: Value,
     fulfilled: bool, // whether the source settled fulfilled (vs rejected)
@@ -112,6 +112,10 @@ pub const Microtask = struct {
     job: Value = Value.undef(),
     job_first: Value = Value.undef(),
     job_second: Value = Value.undef(),
+    /// Process next-tick jobs retain their exact argument count. The slice is
+    /// arena-owned and every value is traced while queued or in an active drain
+    /// batch, so one- and two-argument private calls remain observably distinct.
+    job_args: []const Value = &.{},
 };
 
 pub const MicrotaskQueue = struct {
@@ -751,6 +755,22 @@ pub fn enqueueJob(self: *Interpreter, job: Value, first: Value, second: Value) E
     });
 }
 
+pub fn enqueueNextTick(self: *Interpreter, callback: Value, args: []const Value) EvalError!void {
+    const queue = self.next_ticks orelse return;
+    const copied_args = try self.arena.dupe(Value, args);
+    const task = Microtask{
+        .kind = .next_tick,
+        .reaction = undefined,
+        .argument = Value.undef(),
+        .fulfilled = true,
+        .job = callback,
+        .job_args = copied_args,
+    };
+    self.lockJobQueue(queue);
+    defer self.unlockJobQueue(queue);
+    try queue.append(self.arena, task);
+}
+
 fn enqueueUnhandledRejection(self: *Interpreter, rejected: *Promise) EvalError!void {
     const queue = self.unhandled_rejections orelse return;
     self.lockRealm();
@@ -836,6 +856,11 @@ pub fn runJob(self: *Interpreter, task: Microtask) EvalError!void {
     if (task.kind == .job) {
         promise_profile.recordMicrotaskRun(false);
         _ = try self.callValueWithThis(task.job, &.{ task.job_first, task.job_second }, Value.undef());
+        return;
+    }
+    if (task.kind == .next_tick) {
+        promise_profile.recordMicrotaskRun(false);
+        _ = try self.callValueWithThis(task.job, task.job_args, Value.undef());
         return;
     }
     if (task.kind == .callback) {

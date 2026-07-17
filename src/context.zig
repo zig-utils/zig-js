@@ -2319,6 +2319,9 @@ pub const Context = struct {
     /// into this realm queue when a retiring thread's local queue is no longer a
     /// safe liveness target.
     microtasks: @import("promise.zig").MicrotaskQueue = .{},
+    /// Realm-local process.nextTick FIFO. Host checkpoints drain this queue
+    /// before `microtasks`, then loop if Promise jobs enqueue another next tick.
+    next_ticks: @import("promise.zig").MicrotaskQueue = .{},
     /// Rejections awaiting the embedder's explicit notification checkpoint.
     /// Promise cells stay rooted until notified once or handled before notice.
     unhandled_rejections: std.ArrayListUnmanaged(*promise.Promise) = .empty,
@@ -3073,6 +3076,7 @@ pub const Context = struct {
             .this_value = Value.obj(self.global_object),
             .root_shape = self.root_shape,
             .microtasks = &self.microtasks,
+            .next_ticks = &self.next_ticks,
             .unhandled_rejections = &self.unhandled_rejections,
             .handled_rejections = &self.handled_rejections,
             .out_of_memory_exception = self.reserved_thread_oom_error orelse Value.undef(),

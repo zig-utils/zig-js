@@ -256,6 +256,8 @@ extern "c" fn ScriptExecutionContextIdentifier__forGlobalObject(JSContextRef) u3
 extern "c" fn Bun__noSideEffectsToString(?*anyopaque, JSContextRef, EncodedValue) EncodedValue;
 extern "c" fn Bun__promises__isErrorLike(JSContextRef, EncodedValue) bool;
 extern "c" fn Bun__Process__emitWarning(JSContextRef, EncodedValue, EncodedValue, EncodedValue, EncodedValue) void;
+extern "c" fn Bun__Process__queueNextTick1(JSContextRef, EncodedValue, EncodedValue) void;
+extern "c" fn Bun__Process__queueNextTick2(JSContextRef, EncodedValue, EncodedValue, EncodedValue) void;
 extern "c" fn Bun__promises__emitUnhandledRejectionWarning(JSContextRef, EncodedValue, EncodedValue) void;
 extern "c" fn Bun__handleUnhandledRejection(JSContextRef, EncodedValue, EncodedValue) c_int;
 extern "c" fn Bun__emitHandledPromiseEvent(JSContextRef, EncodedValue) bool;
@@ -1285,6 +1287,20 @@ pub fn main() void {
     if (!JSC__JSValue__toBoolean(evaluate(context, "__private_auto_242.length === 2 && __private_auto_242[0][0] === 'unhandled' && __private_auto_242[0][1] === __private_late_reason_242 && __private_auto_242[0][2] === __private_late_242 && __private_auto_242[1][0] === 'handled' && __private_auto_242[1][1] === __private_late_242")))
         fail("private automatic rejection tracking mismatch");
     _ = evaluate(context, "process.off('unhandledRejection', __private_auto_unhandled_242); process.off('unhandledRejection', __private_on_unhandled_242); process.off('rejectionHandled', __private_auto_handled_242); process.off('rejectionHandled', __private_on_handled_242);");
+    _ = evaluate(context, "globalThis.__private_ticks_243 = []; globalThis.__private_arg1_243 = { arg: 1 }; globalThis.__private_arg2_243 = { arg: 2 }; globalThis.__private_tick1_243 = function(a) { 'use strict'; __private_ticks_243.push(['one', arguments.length, a === __private_arg1_243, this === undefined]); }; globalThis.__private_tick2_243 = function(a, b) { 'use strict'; __private_ticks_243.push(['two', arguments.length, a === __private_arg1_243, b === __private_arg2_243, this === undefined]); }; globalThis.__private_outer_243 = function() { __private_ticks_243.push(['outer']); process.nextTick(() => __private_ticks_243.push(['inner'])); }; globalThis.__private_micro_243 = function() { __private_ticks_243.push(['micro']); process.nextTick(() => __private_ticks_243.push(['tick-from-micro'])); }; ");
+    const private_tick1_243 = evaluate(context, "__private_tick1_243");
+    const private_tick2_243 = evaluate(context, "__private_tick2_243");
+    const private_outer_243 = evaluate(context, "__private_outer_243");
+    const private_micro_243 = evaluate(context, "__private_micro_243");
+    const private_arg1_243 = evaluate(context, "__private_arg1_243");
+    const private_arg2_243 = evaluate(context, "__private_arg2_243");
+    JSC__JSGlobalObject__queueMicrotaskJob(context, private_micro_243, .undefined, .undefined);
+    Bun__Process__queueNextTick1(context, private_tick1_243, private_arg1_243);
+    Bun__Process__queueNextTick2(context, private_tick2_243, private_arg1_243, private_arg2_243);
+    Bun__Process__queueNextTick1(context, private_outer_243, .undefined);
+    _ = JSC__JSGlobalObject__drainMicrotasks(context);
+    if (!JSC__JSValue__toBoolean(evaluate(context, "JSON.stringify(__private_ticks_243) === '[[\"one\",1,true,true],[\"two\",2,true,true,true],[\"outer\"],[\"inner\"],[\"micro\"],[\"tick-from-micro\"]]'")))
+        fail("private process nextTick queue ordering/arity mismatch");
     _ = evaluate(context, "globalThis.__private_lifecycle_242 = []; process.on('beforeExit', code => __private_lifecycle_242.push('before:' + code)); process.on('exit', code => __private_lifecycle_242.push('exit:' + code));");
     Process__dispatchOnBeforeExit(context, 2);
     Process__dispatchOnExit(context, 4);
@@ -3380,5 +3396,5 @@ pub fn main() void {
         TopExceptionScope__exceptionIncludingTraps(&verification_scope) != null)
         fail("private TopExceptionScope destruction mismatch");
 
-    std.debug.print("Home private value shims: 238/238 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 240/240 symbols linked; runtime matrix passed\n", .{});
 }

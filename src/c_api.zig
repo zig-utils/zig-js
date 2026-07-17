@@ -5746,31 +5746,11 @@ export fn Bun__handleUncaughtException(
         privateSetPendingAbrupt(context, &machine, err);
         return 0;
     };
-    const origin = if (is_rejection != 0) Value.str("unhandledRejection") else Value.str("uncaughtException");
-    const event_args = [_]Value{ error_value, origin };
-
-    if (privateProcessEventCount(&machine, "uncaughtExceptionMonitor") != 0) {
-        _ = interp.emitProcessEvent(&machine, "uncaughtExceptionMonitor", &event_args) catch |err| {
-            privateSetPendingAbrupt(context, &machine, err);
-            return 1;
-        };
-    }
-    if (interp.processCaptureCallback(&machine)) |capture| {
-        _ = machine.callValueWithThis(capture, &event_args, Value.undef()) catch |err| {
-            // Bun treats this as fatal. The embedding-safe ABI boundary preserves
-            // the thrown value as the first pending exception for the host to log
-            // and terminate with its own policy.
-            privateSetPendingAbrupt(context, &machine, err);
-            return 1;
-        };
-        return 1;
-    }
-    if (privateProcessEventCount(&machine, "uncaughtException") == 0) return 0;
-    _ = interp.emitProcessEvent(&machine, "uncaughtException", &event_args) catch |err| {
+    const handled = interp.handleProcessUncaughtException(&machine, error_value, is_rejection != 0) catch |err| {
         privateSetPendingAbrupt(context, &machine, err);
         return 1;
     };
-    return 1;
+    return @intFromBool(handled);
 }
 
 const private_unhandled_rejection_error_prefix =
@@ -7418,6 +7398,65 @@ export fn JSC__JSGlobalObject__queueMicrotaskCallback(
 fn privateMicrotaskJobValue(global: JSContextRef, encoded: EncodedValue) ?Value {
     if (encoded == .empty) return Value.undef();
     return privateValueFrom(global, encoded);
+}
+
+fn privateQueueProcessNextTick(
+    global: JSContextRef,
+    encoded_callback: EncodedValue,
+    encoded_args: []const EncodedValue,
+) void {
+    const context = ctxForEvaluation(global) orelse return;
+    const group = privatePropertyBoundaryGroup(context) orelse return;
+    if (group.pending_exception != null) return;
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return;
+    };
+    defer context.popActiveInterpreter(&machine);
+
+    const callback = privateDecodeWarningArgument(context, &machine, global, encoded_callback, "nextTick callback") catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return;
+    };
+    if (!callback.isCallable()) {
+        const err = machine.throwError("TypeError", "The \"callback\" argument must be a function");
+        privateSetPendingAbrupt(context, &machine, err);
+        return;
+    }
+    const process_value = machine.env.get("process") orelse return;
+    if ((process_value.asObj().getOwn("_exiting") orelse Value.boolVal(false)).toBoolean()) return;
+
+    var args: [2]Value = undefined;
+    for (encoded_args, 0..) |encoded, i| {
+        args[i] = privateDecodeWarningArgument(context, &machine, global, encoded, "nextTick argument") catch |err| {
+            privateSetPendingAbrupt(context, &machine, err);
+            return;
+        };
+    }
+    promise.enqueueNextTick(&machine, callback, args[0..encoded_args.len]) catch |err|
+        privateSetPendingAbrupt(context, &machine, err);
+}
+
+export fn Bun__Process__queueNextTick1(
+    global: JSContextRef,
+    callback: EncodedValue,
+    arg1: EncodedValue,
+) callconv(.c) void {
+    privateQueueProcessNextTick(global, callback, &.{arg1});
+}
+
+export fn Bun__Process__queueNextTick2(
+    global: JSContextRef,
+    callback: EncodedValue,
+    arg1: EncodedValue,
+    arg2: EncodedValue,
+) callconv(.c) void {
+    privateQueueProcessNextTick(global, callback, &.{ arg1, arg2 });
 }
 
 export fn JSC__JSGlobalObject__queueMicrotaskJob(
@@ -18700,6 +18739,97 @@ test "private process rejection and uncaught dispatch preserve pinned events" {
     try std.testing.expect(JSGlobalObject__hasException(context));
     const pending = JSGlobalObject__tryTakeException(context);
     try std.testing.expectEqual(EncodedValue.fromInt32(242), JSC__Exception__asJSValue(@ptrFromInt(try pending.asCellAddress())));
+}
+
+test "private process next tick preserves queue ordering and exact arguments" {
+    const group_ref = JSContextGroupCreate() orelse return error.GroupCreateFailed;
+    defer JSContextGroupRelease(group_ref);
+    const context = JSGlobalContextCreateInGroup(group_ref, null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(context);
+    const foreign = JSGlobalContextCreate(null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(foreign);
+    const internal = ctxForEvaluation(context) orelse return error.ContextCreateFailed;
+    const foreign_internal = ctxForEvaluation(foreign) orelse return error.ContextCreateFailed;
+
+    const Probe = struct {
+        fn encoded(context_: *Context, source: []const u8) !EncodedValue {
+            return privateEncodedFromValue(context_, try context_.evaluate(source));
+        }
+    };
+
+    _ = try internal.evaluate(
+        \\globalThis.__ticks_243 = [];
+        \\globalThis.__arg1_243 = { arg: 1 };
+        \\globalThis.__arg2_243 = { arg: 2 };
+        \\globalThis.__tick1_243 = function (a) { "use strict"; __ticks_243.push(["one", arguments.length, a === __arg1_243, this === undefined]); };
+        \\globalThis.__tick2_243 = function (a, b) { "use strict"; __ticks_243.push(["two", arguments.length, a === __arg1_243, b === __arg2_243, this === undefined]); };
+        \\globalThis.__micro_243 = function () {
+        \\  __ticks_243.push(["micro-1"]);
+        \\  process.nextTick(function () { __ticks_243.push(["tick-from-micro"]); });
+        \\  queueMicrotask(function () { __ticks_243.push(["micro-2"]); });
+        \\};
+        \\globalThis.__outer_243 = function () {
+        \\  __ticks_243.push(["outer"]);
+        \\  process.nextTick(function () { __ticks_243.push(["inner"]); });
+        \\};
+    );
+    const tick1 = try Probe.encoded(internal, "__tick1_243");
+    const tick2 = try Probe.encoded(internal, "__tick2_243");
+    const arg1 = try Probe.encoded(internal, "__arg1_243");
+    const arg2 = try Probe.encoded(internal, "__arg2_243");
+    const micro = try Probe.encoded(internal, "__micro_243");
+    const outer = try Probe.encoded(internal, "__outer_243");
+    JSC__JSGlobalObject__queueMicrotaskJob(context, micro, .undefined, .undefined);
+    Bun__Process__queueNextTick1(context, tick1, arg1);
+    Bun__Process__queueNextTick2(context, tick2, arg1, arg2);
+    Bun__Process__queueNextTick1(context, outer, arg1);
+    _ = JSC__JSGlobalObject__drainMicrotasks(context);
+    try std.testing.expectEqualStrings(
+        "[[\"one\",1,true,true],[\"two\",2,true,true,true],[\"outer\"],[\"inner\"],[\"micro-1\"],[\"micro-2\"],[\"tick-from-micro\"]]",
+        (try internal.evaluate("JSON.stringify(__ticks_243)")).asStr(),
+    );
+
+    _ = try internal.evaluate(
+        \\globalThis.__fatal_ticks_243 = [];
+        \\process.on("uncaughtExceptionMonitor", function (error, origin) { __fatal_ticks_243.push("monitor:" + error + ":" + origin); });
+        \\process.on("uncaughtException", function (error, origin) { __fatal_ticks_243.push("handler:" + error + ":" + origin); });
+        \\process.nextTick(function () { throw 243; });
+        \\process.nextTick(function () { __fatal_ticks_243.push("tail"); });
+    );
+    _ = JSC__JSGlobalObject__drainMicrotasks(context);
+    try std.testing.expect(!JSGlobalObject__hasException(context));
+    try std.testing.expect((try internal.evaluate(
+        \\__fatal_ticks_243.join(",") === "monitor:243:uncaughtException,handler:243:uncaughtException,tail"
+    )).asBool());
+
+    _ = try internal.evaluate(
+        \\globalThis.__fatal_throw_listener_243 = function () { throw 2443; };
+        \\globalThis.__throw_tick_243 = function () { throw 243; };
+        \\globalThis.__tail_tick_243 = function () { __fatal_ticks_243.push("restored-tail"); };
+        \\process.on("uncaughtException", __fatal_throw_listener_243);
+    );
+    const throw_tick = try Probe.encoded(internal, "__throw_tick_243");
+    const tail_tick = try Probe.encoded(internal, "__tail_tick_243");
+    Bun__Process__queueNextTick1(context, throw_tick, .undefined);
+    Bun__Process__queueNextTick1(context, tail_tick, .undefined);
+    _ = JSC__JSGlobalObject__drainMicrotasks(context);
+    try std.testing.expect(JSGlobalObject__hasException(context));
+    const listener_pending = JSGlobalObject__tryTakeException(context);
+    try std.testing.expectEqual(EncodedValue.fromInt32(2443), JSC__Exception__asJSValue(@ptrFromInt(try listener_pending.asCellAddress())));
+    _ = try internal.evaluate("process.off('uncaughtException', __fatal_throw_listener_243)");
+    try std.testing.expect((try internal.evaluate("__fatal_ticks_243[__fatal_ticks_243.length - 1] === 'restored-tail'")).asBool());
+
+    Bun__Process__queueNextTick1(context, try Probe.encoded(foreign_internal, "(function () {})"), arg1);
+    try std.testing.expect(JSGlobalObject__hasException(context));
+    JSGlobalObject__clearException(context);
+    Bun__Process__queueNextTick1(context, EncodedValue.fromInt32(243), arg1);
+    try std.testing.expect(JSGlobalObject__hasException(context));
+    JSGlobalObject__clearException(context);
+
+    _ = try internal.evaluate("process._exiting = true");
+    Bun__Process__queueNextTick1(context, tick1, arg1);
+    _ = JSC__JSGlobalObject__drainMicrotasks(context);
+    try std.testing.expectEqual(@as(f64, 7), (try internal.evaluate("__ticks_243.length")).asNum());
 }
 
 test "private iterable callback traversal preserves protocol and abrupt completion" {
