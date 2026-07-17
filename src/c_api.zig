@@ -5652,6 +5652,221 @@ export fn Bun__promises__emitUnhandledRejectionWarning(
     };
 }
 
+fn privateProcessEventCount(machine: *interp.Interpreter, event: []const u8) usize {
+    return interp.processEventListenerCount(machine, event) catch 0;
+}
+
+export fn Bun__handleUnhandledRejection(
+    global: JSContextRef,
+    reason_encoded: EncodedValue,
+    promise_encoded: EncodedValue,
+) callconv(.c) c_int {
+    const context = ctxForEvaluation(global) orelse return 0;
+    const group = privatePropertyBoundaryGroup(context) orelse return 0;
+    if (group.pending_exception != null) return 0;
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return 0;
+    };
+    defer context.popActiveInterpreter(&machine);
+
+    const reason = privateDecodeWarningArgument(context, &machine, global, reason_encoded, "rejection reason") catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return 0;
+    };
+    const promise_value = privateDecodeWarningArgument(context, &machine, global, promise_encoded, "rejected promise") catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return 0;
+    };
+    if (privateProcessEventCount(&machine, "unhandledRejection") == 0) return 0;
+    _ = interp.emitProcessEvent(&machine, "unhandledRejection", &.{ reason, promise_value }) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return 1;
+    };
+    return 1;
+}
+
+export fn Bun__emitHandledPromiseEvent(
+    global: JSContextRef,
+    promise_encoded: EncodedValue,
+) callconv(.c) bool {
+    const context = ctxForEvaluation(global) orelse return false;
+    const group = privatePropertyBoundaryGroup(context) orelse return false;
+    if (group.pending_exception != null) return false;
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return false;
+    };
+    defer context.popActiveInterpreter(&machine);
+
+    const promise_value = privateDecodeWarningArgument(context, &machine, global, promise_encoded, "handled promise") catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return false;
+    };
+    // Bun's default `.bun` rejection policy suppresses the optional
+    // PromiseRejectionHandledWarning; the event itself remains observable.
+    if (privateProcessEventCount(&machine, "rejectionHandled") == 0) return false;
+    _ = interp.emitProcessEvent(&machine, "rejectionHandled", &.{promise_value}) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return true;
+    };
+    return true;
+}
+
+export fn Bun__handleUncaughtException(
+    global: JSContextRef,
+    error_encoded: EncodedValue,
+    is_rejection: c_int,
+) callconv(.c) c_int {
+    const context = ctxForEvaluation(global) orelse return 0;
+    const group = privatePropertyBoundaryGroup(context) orelse return 0;
+    if (group.pending_exception != null) return 0;
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return 0;
+    };
+    defer context.popActiveInterpreter(&machine);
+
+    const error_value = privateDecodeWarningArgument(context, &machine, global, error_encoded, "uncaught exception") catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return 0;
+    };
+    const origin = if (is_rejection != 0) Value.str("unhandledRejection") else Value.str("uncaughtException");
+    const event_args = [_]Value{ error_value, origin };
+
+    if (privateProcessEventCount(&machine, "uncaughtExceptionMonitor") != 0) {
+        _ = interp.emitProcessEvent(&machine, "uncaughtExceptionMonitor", &event_args) catch |err| {
+            privateSetPendingAbrupt(context, &machine, err);
+            return 1;
+        };
+    }
+    if (interp.processCaptureCallback(&machine)) |capture| {
+        _ = machine.callValueWithThis(capture, &event_args, Value.undef()) catch |err| {
+            // Bun treats this as fatal. The embedding-safe ABI boundary preserves
+            // the thrown value as the first pending exception for the host to log
+            // and terminate with its own policy.
+            privateSetPendingAbrupt(context, &machine, err);
+            return 1;
+        };
+        return 1;
+    }
+    if (privateProcessEventCount(&machine, "uncaughtException") == 0) return 0;
+    _ = interp.emitProcessEvent(&machine, "uncaughtException", &event_args) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return 1;
+    };
+    return 1;
+}
+
+const private_unhandled_rejection_error_prefix =
+    "This error originated either by throwing inside of an async function without a catch block, " ++
+    "or by rejecting a promise which was not handled with .catch(). The promise rejected with the reason \"";
+
+export fn Bun__wrapUnhandledRejectionErrorForUncaughtException(
+    global: JSContextRef,
+    reason_encoded: EncodedValue,
+) callconv(.c) EncodedValue {
+    const context = ctxForEvaluation(global) orelse return .empty;
+    const group = privatePropertyBoundaryGroup(context) orelse return .empty;
+    if (group.pending_exception != null) return .empty;
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    defer context.popActiveInterpreter(&machine);
+
+    const reason = privateDecodeWarningArgument(context, &machine, global, reason_encoded, "rejection reason") catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    const error_like = if (privateIsOrdinaryJSObject(reason))
+        machine.hasOwnPropertyResult(reason.asObj(), "stack") catch blk: {
+            machine.exception = Value.undef();
+            break :blk false;
+        }
+    else
+        false;
+    if (error_like) return reason_encoded;
+
+    const rendered = privateNoSideEffectValue(context, reason) catch Value.str("undefined");
+    const rendered_bytes = if (rendered.isString()) rendered.asStr() else "undefined";
+    const message = std.fmt.allocPrint(context.arena(), "{s}{s}\".", .{ private_unhandled_rejection_error_prefix, rendered_bytes }) catch {
+        privateSetPendingAbrupt(context, &machine, error.OutOfMemory);
+        return .empty;
+    };
+    const wrapped = machine.makeError("Error", message) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    privateSetWarningProperty(&machine, wrapped.asObj(), "name", Value.str("UnhandledPromiseRejection"), false) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    privateSetWarningProperty(&machine, wrapped.asObj(), "code", Value.str("ERR_UNHANDLED_REJECTION"), false) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    return privateEncodeResult(context, &machine, wrapped);
+}
+
+fn privateDispatchProcessCodeEvent(global: JSContextRef, event: []const u8, code: u8, once: bool) void {
+    const context = ctxForEvaluation(global) orelse return;
+    const group = privatePropertyBoundaryGroup(context) orelse return;
+    if (group.pending_exception != null) return;
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return;
+    };
+    defer context.popActiveInterpreter(&machine);
+
+    if (once) {
+        const process_value = machine.env.get("process") orelse return;
+        if (!process_value.isObject()) return;
+        if ((process_value.asObj().getOwn("#processExitDispatched\x00runtime") orelse Value.boolVal(false)).toBoolean()) return;
+        process_value.asObj().setOwn(machine.arena, machine.root_shape, "#processExitDispatched\x00runtime", Value.boolVal(true)) catch return;
+        process_value.asObj().setOwn(machine.arena, machine.root_shape, "_exiting", Value.boolVal(true)) catch return;
+    }
+    const emitted = interp.emitProcessEvent(&machine, event, &.{Value.num(@floatFromInt(code))}) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return;
+    };
+    if (emitted and !once)
+        machine.drainMicrotasks() catch |err| privateSetPendingAbrupt(context, &machine, err);
+}
+
+export fn Process__dispatchOnBeforeExit(global: JSContextRef, code: u8) callconv(.c) void {
+    privateDispatchProcessCodeEvent(global, "beforeExit", code, false);
+}
+
+export fn Process__dispatchOnExit(global: JSContextRef, code: u8) callconv(.c) void {
+    privateDispatchProcessCodeEvent(global, "exit", code, true);
+}
+
 const PrivateIterableCallback = *const fn (
     ?*anyopaque,
     JSContextRef,
@@ -18339,6 +18554,105 @@ test "private process warnings preserve pinned normalization and delivery" {
     const pending = JSGlobalObject__tryTakeException(context);
     try std.testing.expectEqual(EncodedValue.fromInt32(241), JSC__Exception__asJSValue(@ptrFromInt(try pending.asCellAddress())));
     try std.testing.expectEqual(@as(f64, 1), (try internal.evaluate("__warning_throw_count_241")).asNum());
+}
+
+test "private process rejection and uncaught dispatch preserve pinned events" {
+    const group_ref = JSContextGroupCreate() orelse return error.GroupCreateFailed;
+    defer JSContextGroupRelease(group_ref);
+    const context = JSGlobalContextCreateInGroup(group_ref, null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(context);
+    const sibling = JSGlobalContextCreateInGroup(group_ref, null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(sibling);
+    const internal = ctxForEvaluation(context) orelse return error.ContextCreateFailed;
+    const sibling_internal = ctxForEvaluation(sibling) orelse return error.ContextCreateFailed;
+
+    const Probe = struct {
+        fn encoded(context_: *Context, source: []const u8) !EncodedValue {
+            return privateEncodedFromValue(context_, try context_.evaluate(source));
+        }
+    };
+
+    const reason = try Probe.encoded(internal, "globalThis.__reason_242 = { issue: 242 }");
+    const rejected = try Probe.encoded(internal, "globalThis.__promise_242 = Promise.reject(__reason_242)");
+    try std.testing.expectEqual(@as(c_int, 0), Bun__handleUnhandledRejection(context, reason, rejected));
+    _ = try internal.evaluate(
+        \\globalThis.__events_242 = [];
+        \\process.on("unhandledRejection", function (reason, promise) {
+        \\  __events_242.push(["unhandled", reason === __reason_242, promise === __promise_242, this === process]);
+        \\});
+    );
+    try std.testing.expectEqual(@as(c_int, 1), Bun__handleUnhandledRejection(context, reason, rejected));
+    try std.testing.expect((try internal.evaluate("__events_242[0].join(',') === 'unhandled,true,true,true'")).asBool());
+
+    try std.testing.expect(!Bun__emitHandledPromiseEvent(context, rejected));
+    _ = try internal.evaluate(
+        \\process.on("rejectionHandled", function (promise) {
+        \\  __events_242.push(["handled", promise === __promise_242, this === process]);
+        \\});
+    );
+    try std.testing.expect(Bun__emitHandledPromiseEvent(context, rejected));
+    try std.testing.expect((try internal.evaluate("__events_242[1].join(',') === 'handled,true,true'")).asBool());
+
+    _ = try internal.evaluate(
+        \\globalThis.__uncaught_242 = [];
+        \\globalThis.__error_242 = new Error("uncaught-242");
+        \\process.on("uncaughtExceptionMonitor", function (error, origin) { __uncaught_242.push(["monitor", error === __error_242, origin]); });
+        \\process.on("uncaughtException", function (error, origin) { __uncaught_242.push(["handler", error === __error_242, origin]); });
+    );
+    const uncaught = try Probe.encoded(internal, "__error_242");
+    try std.testing.expectEqual(@as(c_int, 1), Bun__handleUncaughtException(context, uncaught, 0));
+    try std.testing.expect((try internal.evaluate("JSON.stringify(__uncaught_242) === '[[\"monitor\",true,\"uncaughtException\"],[\"handler\",true,\"uncaughtException\"]]' ")).asBool());
+
+    _ = try internal.evaluate(
+        \\process.setUncaughtExceptionCaptureCallback(function (error, origin) { "use strict"; __uncaught_242.push(["capture", error === __error_242, origin, this === undefined]); });
+    );
+    try std.testing.expectEqual(@as(c_int, 1), Bun__handleUncaughtException(context, uncaught, 1));
+    try std.testing.expect((try internal.evaluate(
+        \\__uncaught_242[2][0] === "monitor" && __uncaught_242[2][2] === "unhandledRejection" &&
+        \\__uncaught_242[3].join(",") === "capture,true,unhandledRejection,true" && __uncaught_242.length === 4
+    )).asBool());
+    try std.testing.expectEqual(@as(c_int, 0), Bun__handleUncaughtException(sibling, uncaught, 0));
+
+    const error_like = try Probe.encoded(internal,
+        \\globalThis.__wrap_gets_242 = 0;
+        \\globalThis.__error_like_242 = { get stack() { __wrap_gets_242++; throw 242; } };
+        \\__error_like_242
+    );
+    try std.testing.expectEqual(error_like, Bun__wrapUnhandledRejectionErrorForUncaughtException(context, error_like));
+    try std.testing.expectEqual(@as(f64, 0), (try internal.evaluate("__wrap_gets_242")).asNum());
+    const wrapped = Bun__wrapUnhandledRejectionErrorForUncaughtException(context, try Probe.encoded(internal, "Object.create({ stack: 'inherited' })"));
+    try std.testing.expect(wrapped != .empty);
+    const wrapped_value = privateValueFrom(context, wrapped) orelse return error.ValueInitFailed;
+    try internal.env.put("__wrapped_242", wrapped_value);
+    try std.testing.expect((try internal.evaluate(
+        \\__wrapped_242 instanceof Error && __wrapped_242.name === "UnhandledPromiseRejection" &&
+        \\__wrapped_242.code === "ERR_UNHANDLED_REJECTION" &&
+        \\__wrapped_242.message === "This error originated either by throwing inside of an async function without a catch block, or by rejecting a promise which was not handled with .catch(). The promise rejected with the reason \"[object Object]\"."
+    )).asBool());
+
+    _ = try internal.evaluate(
+        \\globalThis.__lifecycle_242 = [];
+        \\process.on("beforeExit", function (code) { __lifecycle_242.push("before:" + code); queueMicrotask(function () { __lifecycle_242.push("micro"); }); });
+        \\process.on("exit", function (code) { __lifecycle_242.push("exit:" + code); });
+    );
+    Process__dispatchOnBeforeExit(context, 2);
+    Process__dispatchOnBeforeExit(context, 3);
+    Process__dispatchOnExit(context, 4);
+    Process__dispatchOnExit(context, 5);
+    try std.testing.expect((try internal.evaluate("__lifecycle_242.join(',') === 'before:2,micro,before:3,micro,exit:4' && process._exiting === true")).asBool());
+
+    _ = try sibling_internal.evaluate("globalThis.__sibling_uncaught_242 = 0; process.on('uncaughtException', function (error) { if (error === globalThis.__shared_error_242) __sibling_uncaught_242++; });");
+    try sibling_internal.env.put("__shared_error_242", privateValueFrom(sibling, uncaught) orelse return error.ValueInitFailed);
+    try std.testing.expectEqual(@as(c_int, 1), Bun__handleUncaughtException(sibling, uncaught, 0));
+    try std.testing.expectEqual(@as(f64, 1), (try sibling_internal.evaluate("__sibling_uncaught_242")).asNum());
+
+    _ = try internal.evaluate(
+        \\process.setUncaughtExceptionCaptureCallback(function () { throw 242; });
+    );
+    try std.testing.expectEqual(@as(c_int, 1), Bun__handleUncaughtException(context, uncaught, 0));
+    try std.testing.expect(JSGlobalObject__hasException(context));
+    const pending = JSGlobalObject__tryTakeException(context);
+    try std.testing.expectEqual(EncodedValue.fromInt32(242), JSC__Exception__asJSValue(@ptrFromInt(try pending.asCellAddress())));
 }
 
 test "private iterable callback traversal preserves protocol and abrupt completion" {

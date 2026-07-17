@@ -41101,6 +41101,12 @@ pub fn emitProcessEvent(self: *Interpreter, event: []const u8, args: []const Val
     return (try processEmitFn(self, process_obj, call_args)).toBoolean();
 }
 
+pub fn processEventListenerCount(self: *Interpreter, event: []const u8) EvalError!usize {
+    const process_obj = self.env.get("process") orelse return 0;
+    const result = try processListenerCountFn(self, process_obj, &.{try Value.strAlloc(self.arena, event)});
+    return @intFromFloat(result.asNum());
+}
+
 /// The realm's uncaught-exception capture callback, if one is installed.
 pub fn processCaptureCallback(self: *Interpreter) ?Value {
     const process_obj = self.env.get("process") orelse return null;

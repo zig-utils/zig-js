@@ -257,6 +257,12 @@ extern "c" fn Bun__noSideEffectsToString(?*anyopaque, JSContextRef, EncodedValue
 extern "c" fn Bun__promises__isErrorLike(JSContextRef, EncodedValue) bool;
 extern "c" fn Bun__Process__emitWarning(JSContextRef, EncodedValue, EncodedValue, EncodedValue, EncodedValue) void;
 extern "c" fn Bun__promises__emitUnhandledRejectionWarning(JSContextRef, EncodedValue, EncodedValue) void;
+extern "c" fn Bun__handleUnhandledRejection(JSContextRef, EncodedValue, EncodedValue) c_int;
+extern "c" fn Bun__emitHandledPromiseEvent(JSContextRef, EncodedValue) bool;
+extern "c" fn Bun__handleUncaughtException(JSContextRef, EncodedValue, c_int) c_int;
+extern "c" fn Bun__wrapUnhandledRejectionErrorForUncaughtException(JSContextRef, EncodedValue) EncodedValue;
+extern "c" fn Process__dispatchOnBeforeExit(JSContextRef, u8) void;
+extern "c" fn Process__dispatchOnExit(JSContextRef, u8) void;
 extern "c" fn JSC__JSValue__forEach(EncodedValue, JSContextRef, ?*anyopaque, IterableCallback) void;
 extern "c" fn ZigString__toJSONObject(*const ZigString, JSContextRef) EncodedValue;
 extern "c" fn JSC__jsTypeStringForValue(JSContextRef, EncodedValue) ?*anyopaque;
@@ -1250,6 +1256,27 @@ pub fn main() void {
     _ = JSC__JSGlobalObject__drainMicrotasks(context);
     if (!JSC__JSValue__toBoolean(evaluate(context, "__private_warnings_241.length === 3 && __private_warnings_241[1].message === 'consumer-stack-241' && __private_warnings_241[2].name === 'UnhandledPromiseRejectionWarning' && Object.getOwnPropertyDescriptor(__private_warnings_241[2], 'stack').value === 'consumer-stack-241'")))
         fail("private unhandled rejection warning sequence mismatch");
+    _ = evaluate(context, "globalThis.__private_events_242 = []; globalThis.__private_reason_242 = { issue: 242 }; globalThis.__private_promise_242 = Promise.resolve(242); process.on('unhandledRejection', (reason, promise) => __private_events_242.push(reason === __private_reason_242 && promise === __private_promise_242)); process.on('rejectionHandled', promise => __private_events_242.push(promise === __private_promise_242));");
+    const private_reason_242 = evaluate(context, "__private_reason_242");
+    const private_promise_242 = evaluate(context, "__private_promise_242");
+    if (Bun__handleUnhandledRejection(context, private_reason_242, private_promise_242) != 1 or
+        !Bun__emitHandledPromiseEvent(context, private_promise_242) or
+        !JSC__JSValue__toBoolean(evaluate(context, "__private_events_242.length === 2 && __private_events_242[0] && __private_events_242[1]")))
+        fail("private rejection process event dispatch mismatch");
+    const wrapped_rejection_242 = Bun__wrapUnhandledRejectionErrorForUncaughtException(context, EncodedValue.fromInt32(242));
+    exposeCell(context, "__private_wrapped_rejection_242", wrapped_rejection_242);
+    if (!JSC__JSValue__toBoolean(evaluate(context, "__private_wrapped_rejection_242 instanceof Error && __private_wrapped_rejection_242.name === 'UnhandledPromiseRejection' && __private_wrapped_rejection_242.code === 'ERR_UNHANDLED_REJECTION' && __private_wrapped_rejection_242.message.endsWith('reason \"242\".')")))
+        fail("private rejection wrapper mismatch");
+    _ = evaluate(context, "globalThis.__private_uncaught_242 = []; globalThis.__private_error_242 = new Error('consumer-242'); process.on('uncaughtExceptionMonitor', (error, origin) => __private_uncaught_242.push('monitor:' + origin + ':' + (error === __private_error_242))); process.on('uncaughtException', (error, origin) => __private_uncaught_242.push('handler:' + origin + ':' + (error === __private_error_242)));");
+    if (Bun__handleUncaughtException(context, evaluate(context, "__private_error_242"), 1) != 1 or
+        !JSC__JSValue__toBoolean(evaluate(context, "__private_uncaught_242.join(',') === 'monitor:unhandledRejection:true,handler:unhandledRejection:true'")))
+        fail("private uncaught exception dispatch mismatch");
+    _ = evaluate(context, "globalThis.__private_lifecycle_242 = []; process.on('beforeExit', code => __private_lifecycle_242.push('before:' + code)); process.on('exit', code => __private_lifecycle_242.push('exit:' + code));");
+    Process__dispatchOnBeforeExit(context, 2);
+    Process__dispatchOnExit(context, 4);
+    Process__dispatchOnExit(context, 5);
+    if (!JSC__JSValue__toBoolean(evaluate(context, "__private_lifecycle_242.join(',') === 'before:2,exit:4' && process._exiting === true")))
+        fail("private process lifecycle dispatch mismatch");
     var iterable_state = IterableFixtureState{ .vm = JSC__JSGlobalObject__vm(context), .global = context };
     JSC__JSValue__forEach(evaluate(context, "[237, 'iterable']"), context, &iterable_state, iterableFixtureCallback);
     if (iterable_state.calls != 2 or iterable_state.values[0] != EncodedValue.fromInt32(237) or
@@ -3339,5 +3366,5 @@ pub fn main() void {
         TopExceptionScope__exceptionIncludingTraps(&verification_scope) != null)
         fail("private TopExceptionScope destruction mismatch");
 
-    std.debug.print("Home private value shims: 232/232 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 238/238 symbols linked; runtime matrix passed\n", .{});
 }
