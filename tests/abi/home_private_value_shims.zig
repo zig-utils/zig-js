@@ -101,6 +101,7 @@ extern "c" fn JSArray__constructEmptyArray(JSContextRef, usize) EncodedValue;
 extern "c" fn Bun__JSValue__toNumber(EncodedValue, JSContextRef) f64;
 extern "c" fn JSC__JSValue__isInstanceOf(EncodedValue, JSContextRef, EncodedValue) bool;
 extern "c" fn JSC__JSValue__isIterable(EncodedValue, JSContextRef) bool;
+extern "c" fn JSC__JSValue__stringIncludes(EncodedValue, JSContextRef, EncodedValue) bool;
 
 fn fail(message: []const u8) noreturn {
     std.debug.print("Home private value shims: {s}\n", .{message});
@@ -703,5 +704,37 @@ pub fn main() void {
     if (JSC__Exception__asJSValue(preserved_predicate_exception.cellPointer()) != EncodedValue.fromInt32(88))
         fail("private iterator predicate replaced existing exception");
 
-    std.debug.print("Home private value shims: 50/50 symbols linked; runtime matrix passed\n", .{});
+    if (!JSC__JSValue__stringIncludes(evaluate(context, "'abcdef'"), context, evaluate(context, "'bcd'")) or
+        JSC__JSValue__stringIncludes(evaluate(context, "'abcdef'"), context, evaluate(context, "'bd'")) or
+        !JSC__JSValue__stringIncludes(EncodedValue.fromInt32(12345), context, EncodedValue.fromInt32(234)) or
+        !JSC__JSValue__stringIncludes(evaluate(sibling_context, "'value'"), context, evaluate(context, "''")) or
+        !JSC__JSValue__stringIncludes(evaluate(context, "'😀'"), context, evaluate(context, "'\\ud83d'")) or
+        !JSC__JSValue__stringIncludes(evaluate(context, "'😀'"), context, evaluate(context, "'\\ude00'")) or
+        JSGlobalObject__hasException(context))
+        fail("private UTF-16 string inclusion mismatch");
+    const coercion_haystack = evaluate(context, "globalThis.__private_string_order = []; ({ toString() { __private_string_order.push('haystack'); return 'ordered search'; } })");
+    const coercion_needle = evaluate(context, "({ toString() { __private_string_order.push('needle'); return 'search'; } })");
+    if (!JSC__JSValue__stringIncludes(coercion_haystack, context, coercion_needle) or
+        !JSC__JSValue__isStrictEqual(evaluate(context, "__private_string_order.join(',')"), evaluate(context, "'haystack,needle'"), context))
+        fail("private string inclusion coercion order mismatch");
+    const throwing_haystack = evaluate(context, "({ toString() { throw 901; } })");
+    if (JSC__JSValue__stringIncludes(throwing_haystack, context, coercion_needle) or
+        !JSGlobalObject__hasException(context))
+        fail("private string receiver coercion did not throw");
+    const string_receiver_exception = JSGlobalObject__tryTakeException(context);
+    if (JSC__Exception__asJSValue(string_receiver_exception.cellPointer()) != EncodedValue.fromInt32(901))
+        fail("private string receiver thrown value mismatch");
+    const throwing_needle = evaluate(context, "({ toString() { throw 902; } })");
+    if (JSC__JSValue__stringIncludes(encoded_text, sibling_context, throwing_needle) or
+        !JSGlobalObject__hasException(context))
+        fail("private string search coercion did not throw");
+    const string_search_exception = JSGlobalObject__tryTakeException(context);
+    if (JSC__Exception__asJSValue(string_search_exception.cellPointer()) != EncodedValue.fromInt32(902))
+        fail("private string search thrown value mismatch");
+    if (JSC__JSValue__stringIncludes(encoded_text, context, EncodedValue.fromRef(foreign_object)) or
+        !JSGlobalObject__hasException(context))
+        fail("private string inclusion foreign value did not throw");
+    JSGlobalObject__clearException(context);
+
+    std.debug.print("Home private value shims: 51/51 symbols linked; runtime matrix passed\n", .{});
 }

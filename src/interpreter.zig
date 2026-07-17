@@ -8111,6 +8111,24 @@ pub const Interpreter = struct {
         return units;
     }
 
+    pub fn stringIncludesUtf16(haystack: []const u8, needle: []const u8) bool {
+        const haystack_len = utf16LenOfString(haystack);
+        const needle_len = utf16LenOfString(needle);
+        if (needle_len == 0) return true;
+        if (needle_len > haystack_len) return false;
+        var start: usize = 0;
+        while (start <= haystack_len - needle_len) : (start += 1) {
+            var offset: usize = 0;
+            while (offset < needle_len) : (offset += 1) {
+                const left = stringCodeUnitAt(haystack, start + offset) orelse break;
+                const right = stringCodeUnitAt(needle, offset) orelse break;
+                if (left.unit != right.unit) break;
+            }
+            if (offset == needle_len) return true;
+        }
+        return false;
+    }
+
     pub fn jsStringIs8Bit(s: []const u8) bool {
         var i: usize = 0;
         while (i < s.len) {

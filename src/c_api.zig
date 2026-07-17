@@ -1643,6 +1643,46 @@ export fn JSC__JSValue__isIterable(encoded: EncodedValue, global: JSContextRef) 
     };
 }
 
+export fn JSC__JSValue__stringIncludes(
+    encoded: EncodedValue,
+    global: JSContextRef,
+    other_encoded: EncodedValue,
+) callconv(.c) bool {
+    const context = ctxForEvaluation(global) orelse return false;
+    const opaque_group = context.c_api_group orelse return false;
+    const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+    if (group.pending_exception != null) return false;
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return false;
+    };
+    defer context.popActiveInterpreter(&machine);
+    const value_to_search = privateValueFrom(global, encoded) orelse {
+        const err = machine.throwError("TypeError", "Value belongs to another VM");
+        privateSetPendingAbrupt(context, &machine, err);
+        return false;
+    };
+    const search_value = privateValueFrom(global, other_encoded) orelse {
+        const err = machine.throwError("TypeError", "Search value belongs to another VM");
+        privateSetPendingAbrupt(context, &machine, err);
+        return false;
+    };
+    const haystack = machine.toStringV(value_to_search) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return false;
+    };
+    const needle = machine.toStringV(search_value) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return false;
+    };
+    return interp.Interpreter.stringIncludesUtf16(haystack, needle);
+}
+
 export fn JSC__JSValue__isStrictEqual(
     left: EncodedValue,
     right: EncodedValue,
