@@ -111,6 +111,15 @@ const PrivateStringBuilder = extern struct {
     metadata: usize = 0,
 };
 
+const PrivateJSStringIterator = extern struct {
+    data: ?*anyopaque,
+    stop: u8,
+    append8: ?*const fn (*PrivateJSStringIterator, [*]const u8, u32) callconv(.c) void,
+    append16: ?*const fn (*PrivateJSStringIterator, [*]const u16, u32) callconv(.c) void,
+    write8: ?*const fn (*PrivateJSStringIterator, [*]const u8, u32, u32) callconv(.c) void,
+    write16: ?*const fn (*PrivateJSStringIterator, [*]const u16, u32, u32) callconv(.c) void,
+};
+
 const private_string_builder_magic: usize = 0x5a4a_5342_0000_0000; // "ZJSB"
 const private_string_builder_overflow: usize = 0x8000_0000;
 const private_string_builder_capacity_mask: usize = 0x7fff_ffff;
@@ -149,6 +158,9 @@ comptime {
         @compileError("private BunString must retain its pinned 24-byte/8-byte ABI");
     if (@sizeOf(PrivateStringBuilder) != 24 or @alignOf(PrivateStringBuilder) != 8)
         @compileError("private StringBuilder must retain its pinned 24-byte/8-byte ABI");
+    if (@sizeOf(PrivateJSStringIterator) != 48 or @alignOf(PrivateJSStringIterator) != 8 or
+        @offsetOf(PrivateJSStringIterator, "stop") != 8 or @offsetOf(PrivateJSStringIterator, "append8") != 16)
+        @compileError("private JSString iterator layout drifted from the pinned ABI");
     if (@offsetOf(PrivateWTFStringImpl, "m_ref_count") != 0 or
         @offsetOf(PrivateWTFStringImpl, "m_length") != 4 or
         @offsetOf(PrivateWTFStringImpl, "m_ptr") != 8 or
@@ -3544,6 +3556,36 @@ export fn JSC__JSString__toZigString(
         privatePublishBunStringError(context, err);
         return;
     };
+}
+
+export fn JSC__JSString__iterator(
+    cell: ?*anyopaque,
+    global: JSContextRef,
+    raw_iterator: ?*anyopaque,
+) callconv(.c) void {
+    const context = ctxForHandleInspection(global) orelse return;
+    const opaque_group = context.c_api_group orelse return;
+    const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+    if (group.pending_exception != null) return;
+    const raw = raw_iterator orelse return;
+    if (@intFromPtr(raw) % @alignOf(PrivateJSStringIterator) != 0) return;
+    const iterator: *PrivateJSStringIterator = @ptrCast(@alignCast(raw));
+    if (iterator.stop != 0) return;
+    const boxed = privateStringBoxFromCell(cell) orelse return;
+    if (boxed.owner.c_api_group != context.c_api_group) return;
+    const view = privateBorrowedZigStringView(group, boxed.value.asStr()) catch |err| {
+        privatePublishBunStringError(context, err);
+        return;
+    };
+    const address = view.tagged_ptr & ((@as(usize, 1) << 53) - 1);
+    if (address == 0 or view.len > std.math.maxInt(u32)) return;
+    if (view.tagged_ptr & (@as(usize, 1) << 63) != 0) {
+        const callback = iterator.append16 orelse return;
+        callback(iterator, @ptrFromInt(address), @intCast(view.len));
+    } else {
+        const callback = iterator.append8 orelse return;
+        callback(iterator, @ptrFromInt(address), @intCast(view.len));
+    }
 }
 
 export fn JSC__JSValue__toZigString(

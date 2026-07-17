@@ -87,6 +87,15 @@ const StringBuilder = extern struct {
     bytes: [24]u8 align(8),
 };
 
+const JSStringIterator = extern struct {
+    data: ?*anyopaque,
+    stop: u8,
+    append8: ?*const fn (*JSStringIterator, [*]const u8, u32) callconv(.c) void,
+    append16: ?*const fn (*JSStringIterator, [*]const u16, u32) callconv(.c) void,
+    write8: ?*const fn (*JSStringIterator, [*]const u8, u32, u32) callconv(.c) void,
+    write16: ?*const fn (*JSStringIterator, [*]const u16, u32, u32) callconv(.c) void,
+};
+
 const PrivateBunArrayBuffer = extern struct {
     ptr: ?[*]u8 = null,
     len: usize = 0,
@@ -106,6 +115,8 @@ comptime {
         @compileError("WTFStringImpl fixture prefix drifted");
     if (@sizeOf(StringBuilder) != 24 or @alignOf(StringBuilder) != 8)
         @compileError("StringBuilder fixture layout drifted");
+    if (@sizeOf(JSStringIterator) != 48 or @offsetOf(JSStringIterator, "append8") != 16)
+        @compileError("JSString iterator fixture layout drifted");
     if (@sizeOf(PrivateBunArrayBuffer) != 40 or @offsetOf(PrivateBunArrayBuffer, "cell_type") != 32)
         @compileError("Bun ArrayBuffer fixture layout drifted");
 }
@@ -152,6 +163,7 @@ extern "c" fn BunString__toJS(JSContextRef, *const BunString) EncodedValue;
 extern "c" fn BunString__toJSWithLength(JSContextRef, *const BunString, usize) EncodedValue;
 extern "c" fn BunString__transferToJS(*BunString, JSContextRef) EncodedValue;
 extern "c" fn BunString__createArray(JSContextRef, [*c]const BunString, usize) EncodedValue;
+extern "c" fn JSC__JSString__iterator(?*anyopaque, JSContextRef, ?*anyopaque) void;
 extern "c" fn StringBuilder__init(*anyopaque) void;
 extern "c" fn StringBuilder__deinit(*anyopaque) void;
 extern "c" fn StringBuilder__ensureUnusedCapacity(*anyopaque, usize) void;
@@ -570,6 +582,40 @@ fn expectPromise(
     }
 }
 
+const JSStringIteratorState = struct {
+    units: [16]u16 = @splat(0),
+    len: usize = 0,
+    calls: usize = 0,
+    width: u8 = 0,
+};
+
+fn jsStringAppend8(iterator: *JSStringIterator, bytes: [*]const u8, len: u32) callconv(.c) void {
+    const state: *JSStringIteratorState = @ptrCast(@alignCast(iterator.data.?));
+    state.calls += 1;
+    state.width = 8;
+    state.len = @intCast(len);
+    for (bytes[0..@as(usize, @intCast(len))], 0..) |byte, i| state.units[i] = byte;
+}
+
+fn jsStringAppend16(iterator: *JSStringIterator, units: [*]const u16, len: u32) callconv(.c) void {
+    const state: *JSStringIteratorState = @ptrCast(@alignCast(iterator.data.?));
+    state.calls += 1;
+    state.width = 16;
+    state.len = @intCast(len);
+    @memcpy(state.units[0..@as(usize, @intCast(len))], units[0..@as(usize, @intCast(len))]);
+}
+
+fn jsStringIterator(state: *JSStringIteratorState) JSStringIterator {
+    return .{
+        .data = state,
+        .stop = 0,
+        .append8 = jsStringAppend8,
+        .append16 = jsStringAppend16,
+        .write8 = null,
+        .write16 = null,
+    };
+}
+
 pub fn main() void {
     const context = JSGlobalContextCreate(null) orelse fail("context creation failed");
     defer JSGlobalContextRelease(context);
@@ -817,6 +863,37 @@ pub fn main() void {
     exposeCell(context, "__private_empty_bun_string_array", empty_bun_string_array);
     if (!JSC__JSValue__toBoolean(evaluate(context, "__private_empty_bun_string_array.length === 0 && __private_bun_string_array.length === 3 && __private_bun_string_array[0] === '' && __private_bun_string_array[1] === 'café' && __private_bun_string_array[2] === 'A😀\\uD800Z'")))
         fail("BunString array conversion mismatch");
+
+    var iter_state = JSStringIteratorState{};
+    var string_iterator = jsStringIterator(&iter_state);
+    JSC__JSString__iterator(evaluate(context, "'café\\u0000'").cellPointer(), context, &string_iterator);
+    if (iter_state.calls != 1 or iter_state.width != 8 or iter_state.len != 5 or
+        !std.mem.eql(u16, iter_state.units[0..5], &.{ 'c', 'a', 'f', 0xe9, 0 }))
+        fail("private JSString iterator Latin-1 delivery mismatch");
+    iter_state = .{};
+    string_iterator = jsStringIterator(&iter_state);
+    JSC__JSString__iterator(evaluate(context, "'A😀\\uD800Z'").cellPointer(), context, &string_iterator);
+    if (iter_state.calls != 1 or iter_state.width != 16 or iter_state.len != utf16_units.len or
+        !std.mem.eql(u16, iter_state.units[0..iter_state.len], &utf16_units))
+        fail("private JSString iterator UTF-16 delivery mismatch");
+    iter_state = .{};
+    string_iterator = jsStringIterator(&iter_state);
+    JSC__JSString__iterator(evaluate(context, "''").cellPointer(), context, &string_iterator);
+    if (iter_state.calls != 1 or iter_state.width != 8 or iter_state.len != 0)
+        fail("private JSString iterator empty delivery mismatch");
+    string_iterator.stop = 1;
+    JSC__JSString__iterator(evaluate(context, "'stopped'").cellPointer(), context, &string_iterator);
+    JSC__JSString__iterator(evaluate(foreign_context, "'foreign'").cellPointer(), context, &string_iterator);
+    JSC__JSString__iterator(null, context, &string_iterator);
+    JSC__JSString__iterator(evaluate(context, "'null-iterator'").cellPointer(), context, null);
+    if (iter_state.calls != 1)
+        fail("private JSString iterator invalid/stop boundary invoked a callback");
+    JSC__VM__throwError(JSC__JSGlobalObject__vm(context), context, EncodedValue.fromInt32(247));
+    string_iterator.stop = 0;
+    JSC__JSString__iterator(evaluate(foreign_context, "'pending'").cellPointer(), context, &string_iterator);
+    const string_iterator_exception_247 = JSGlobalObject__tryTakeException(context);
+    if (iter_state.calls != 1 or JSC__Exception__asJSValue(string_iterator_exception_247.cellPointer()) != EncodedValue.fromInt32(247))
+        fail("private JSString iterator replaced a pending exception");
 
     var string_builder: StringBuilder = undefined;
     StringBuilder__init(&string_builder);
@@ -3517,5 +3594,5 @@ pub fn main() void {
         TopExceptionScope__exceptionIncludingTraps(&verification_scope) != null)
         fail("private TopExceptionScope destruction mismatch");
 
-    std.debug.print("Home private value shims: 246/246 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 247/247 symbols linked; runtime matrix passed\n", .{});
 }
