@@ -29,6 +29,12 @@ const EncodedValue = enum(i64) {
     fn fromRef(value: JSValueRef) EncodedValue {
         return fromBits(@intFromPtr(value.?));
     }
+
+    fn cellPointer(value: EncodedValue) ?*anyopaque {
+        const bits: u64 = @bitCast(@intFromEnum(value));
+        if (bits == 0) return null;
+        return @ptrFromInt(@as(usize, @intCast(bits)));
+    }
 };
 
 extern "c" fn JSGlobalContextCreate(?*anyopaque) JSContextRef;
@@ -37,6 +43,7 @@ extern "c" fn JSValueMakeString(JSContextRef, JSStringRef) JSValueRef;
 extern "c" fn JSStringCreateWithUTF8CString([*:0]const u8) JSStringRef;
 extern "c" fn JSStringRelease(JSStringRef) void;
 extern "c" fn JSObjectMake(JSContextRef, ?*anyopaque, ?*anyopaque) JSObjectRef;
+extern "c" fn JSObjectGetPrototype(JSContextRef, JSObjectRef) JSValueRef;
 extern "c" fn JSEvaluateScript(JSContextRef, JSStringRef, JSObjectRef, JSStringRef, c_int, [*c]JSValueRef) JSValueRef;
 
 extern "c" fn JSC__JSValue__eqlCell(EncodedValue, ?*anyopaque) bool;
@@ -60,6 +67,9 @@ extern "c" fn JSC__JSString__length(?*anyopaque) usize;
 extern "c" fn JSC__JSString__toObject(?*anyopaque, JSContextRef) JSObjectRef;
 extern "c" fn JSC__JSCell__getObject(?*anyopaque) JSObjectRef;
 extern "c" fn JSC__JSCell__toObject(?*anyopaque, JSContextRef) JSObjectRef;
+extern "c" fn JSC__JSValue__createEmptyObject(JSContextRef, usize) EncodedValue;
+extern "c" fn JSC__JSValue__createEmptyObjectWithNullPrototype(JSContextRef) EncodedValue;
+extern "c" fn JSC__JSValue__unwrapBoxedPrimitive(JSContextRef, EncodedValue) EncodedValue;
 
 fn fail(message: []const u8) noreturn {
     std.debug.print("Home private value shims: {s}\n", .{message});
@@ -238,14 +248,14 @@ pub fn main() void {
         fail("UTF-16/8-bit JSString boundary mismatch");
 
     const symbol_cell = evaluate(context, "Symbol('cell')");
+    const symbol_pointer = EncodedValue.cellPointer(symbol_cell);
     if (JSC__JSCell__getObject(object) != object or
         JSC__JSCell__getObject(text_cell) != null or
         JSC__JSCell__getObject(signed_negative_cell) != null or
-        JSC__JSCell__getObject(@ptrFromInt(@as(usize, @intCast(@intFromEnum(symbol_cell))))) != null)
+        JSC__JSCell__getObject(symbol_pointer) != null)
         fail("JSCell object access mismatch");
     const boxed_string = JSC__JSString__toObject(text_cell, context) orelse fail("string boxing failed");
     const boxed_bigint = JSC__JSCell__toObject(signed_negative_cell, context) orelse fail("BigInt boxing failed");
-    const symbol_pointer: ?*anyopaque = @ptrFromInt(@as(usize, @intCast(@intFromEnum(symbol_cell))));
     const boxed_symbol = JSC__JSCell__toObject(symbol_pointer, context) orelse fail("Symbol boxing failed");
     if (boxed_string == text_cell or boxed_bigint == signed_negative_cell or boxed_symbol == symbol_pointer or
         JSC__JSCell__getObject(boxed_string) != boxed_string or
@@ -255,5 +265,44 @@ pub fn main() void {
         JSC__JSString__toObject(text_cell, foreign_context) != null)
         fail("JSCell object coercion mismatch");
 
-    std.debug.print("Home private value shims: 21/21 symbols linked; runtime matrix passed\n", .{});
+    const empty_object = JSC__JSValue__createEmptyObject(context, 0);
+    const reserved_object = JSC__JSValue__createEmptyObject(context, 4096);
+    const null_proto_object = JSC__JSValue__createEmptyObjectWithNullPrototype(context);
+    const object_prototype = evaluate(context, "Object.prototype");
+    const empty_prototype = JSObjectGetPrototype(context, EncodedValue.cellPointer(empty_object)) orelse fail("empty object prototype lookup failed");
+    const reserved_prototype = JSObjectGetPrototype(context, EncodedValue.cellPointer(reserved_object)) orelse fail("reserved object prototype lookup failed");
+    const null_prototype = JSObjectGetPrototype(context, EncodedValue.cellPointer(null_proto_object)) orelse fail("null prototype lookup failed");
+    if (!JSC__JSValue__isStrictEqual(EncodedValue.fromRef(empty_prototype), object_prototype, context) or
+        !JSC__JSValue__isStrictEqual(EncodedValue.fromRef(reserved_prototype), object_prototype, context) or
+        !JSC__JSValue__isStrictEqual(EncodedValue.fromRef(null_prototype), .null, context) or
+        JSC__JSValue__isStrictEqual(empty_object, reserved_object, context))
+        fail("ordinary object construction mismatch");
+
+    const number_wrapper = evaluate(context, "new Number(42)");
+    const int32_min_wrapper = evaluate(context, "new Number(-2147483648)");
+    const int32_max_wrapper = evaluate(context, "new Number(2147483647)");
+    const beyond_int32_wrapper = evaluate(context, "new Number(2147483648)");
+    const negative_zero_wrapper = evaluate(context, "new Number(-0)");
+    const nan_wrapper = evaluate(context, "new Number(NaN)");
+    const string_wrapper = evaluate(context, "new String('value')");
+    const boolean_wrapper = evaluate(context, "new Boolean(false)");
+    const bigint_wrapper = evaluate(context, "Object(123n)");
+    const unwrapped_bigint = JSC__JSValue__fromInt64NoTruncate(context, 123);
+    if (JSC__JSValue__unwrapBoxedPrimitive(context, number_wrapper) != EncodedValue.fromInt32(42) or
+        JSC__JSValue__unwrapBoxedPrimitive(context, int32_min_wrapper) != EncodedValue.fromInt32(std.math.minInt(i32)) or
+        JSC__JSValue__unwrapBoxedPrimitive(context, int32_max_wrapper) != EncodedValue.fromInt32(std.math.maxInt(i32)) or
+        JSC__JSValue__unwrapBoxedPrimitive(context, beyond_int32_wrapper) != EncodedValue.fromDouble(2147483648.0) or
+        !JSC__JSValue__isSameValue(JSC__JSValue__unwrapBoxedPrimitive(context, negative_zero_wrapper), EncodedValue.fromDouble(-0.0), context) or
+        !JSC__JSValue__isSameValue(JSC__JSValue__unwrapBoxedPrimitive(context, nan_wrapper), EncodedValue.fromDouble(std.math.nan(f64)), context) or
+        !JSC__JSValue__isStrictEqual(JSC__JSValue__unwrapBoxedPrimitive(context, string_wrapper), encoded_text, context) or
+        JSC__JSValue__unwrapBoxedPrimitive(context, boolean_wrapper) != .false or
+        !JSC__JSValue__isStrictEqual(JSC__JSValue__unwrapBoxedPrimitive(context, bigint_wrapper), unwrapped_bigint, context) or
+        JSC__JSValue__unwrapBoxedPrimitive(context, empty_object) != empty_object or
+        JSC__JSValue__unwrapBoxedPrimitive(context, .true) != .true)
+        fail("boxed primitive unwrapping mismatch");
+    const foreign_wrapper = evaluate(foreign_context, "new Number(1)");
+    if (JSC__JSValue__unwrapBoxedPrimitive(context, foreign_wrapper) != .empty)
+        fail("foreign boxed primitive accepted");
+
+    std.debug.print("Home private value shims: 24/24 symbols linked; runtime matrix passed\n", .{});
 }

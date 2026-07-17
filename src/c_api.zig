@@ -1235,6 +1235,26 @@ fn privateEncodedFromRef(ref: JSValueRef) EncodedValue {
     return EncodedValue.fromCellAddress(@intFromPtr(pointer)) catch .empty;
 }
 
+fn privateEncodedFromValue(context: *Context, internal: Value) EncodedValue {
+    return switch (internal.kind()) {
+        .undefined => .undefined,
+        .null => .null,
+        .boolean => if (internal.asBool()) .true else .false,
+        .number => number: {
+            const value_ = internal.asNum();
+            if (std.math.isFinite(value_) and @trunc(value_) == value_ and
+                value_ >= @as(f64, @floatFromInt(std.math.minInt(i32))) and
+                value_ <= @as(f64, @floatFromInt(std.math.maxInt(i32))) and
+                !(value_ == 0 and std.math.signbit(value_)))
+            {
+                break :number EncodedValue.fromInt32(@intFromFloat(value_));
+            }
+            break :number EncodedValue.fromDouble(value_);
+        },
+        .string, .object => privateEncodedFromRef(box(context, internal)),
+    };
+}
+
 fn privateValueFrom(global: JSContextRef, encoded: EncodedValue) ?Value {
     const context = ctxForHandleInspection(global) orelse return null;
     return encoded.toInternalPrimitive(Value) catch |err| switch (err) {
@@ -1516,6 +1536,28 @@ export fn JSC__JSCell__toObject(cell: ?*anyopaque, global: JSContextRef) callcon
     const handle: JSValueRef = @ptrCast(boxed);
     if (valueFromContext(context, handle) == null) return null;
     return JSValueToObject(global, handle, null);
+}
+
+export fn JSC__JSValue__createEmptyObject(global: JSContextRef, initial_capacity: usize) callconv(.c) EncodedValue {
+    _ = initial_capacity;
+    return privateEncodedFromRef(JSObjectMake(global, null, null));
+}
+
+export fn JSC__JSValue__createEmptyObjectWithNullPrototype(global: JSContextRef) callconv(.c) EncodedValue {
+    const object = JSObjectMake(global, null, null) orelse return .empty;
+    const null_value = JSValueMakeNull(global) orelse return .empty;
+    JSObjectSetPrototype(global, object, null_value);
+    return privateEncodedFromRef(object);
+}
+
+export fn JSC__JSValue__unwrapBoxedPrimitive(global: JSContextRef, encoded: EncodedValue) callconv(.c) EncodedValue {
+    const context = ctxForHandleInspection(global) orelse return .empty;
+    const internal = privateValueFrom(global, encoded) orelse return .empty;
+    if (!internal.isObject()) return encoded;
+    const object = internal.asObj();
+    if (object.is_symbol or object.is_bigint) return encoded;
+    const primitive = object.boxedPrimitive() orelse return encoded;
+    return privateEncodedFromValue(context, primitive);
 }
 
 fn valueFromContext(ctx: *Context, ref: JSValueRef) ?Value {

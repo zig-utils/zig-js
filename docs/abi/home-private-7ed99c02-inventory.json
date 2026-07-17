@@ -87,8 +87,8 @@
     },
     "by_status": {
       "external": 1,
-      "implemented": 38,
-      "pending": 409
+      "implemented": 41,
+      "pending": 406
     }
   },
   "declarations": [
@@ -1737,10 +1737,10 @@
       "line": 312,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSValue__createEmptyObject(global: *JSGlobalObject, len: usize) JSValue;",
       "declaration_sha256": "0bcc3ce856554a689b0056b019b2e3589852c826cd7045c4119dc9f7e2db207c",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSValue__createEmptyObjectWithNullPrototype",
@@ -1748,10 +1748,10 @@
       "line": 307,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSValue__createEmptyObjectWithNullPrototype(globalObject: *JSGlobalObject) JSValue;",
       "declaration_sha256": "a14e951661662304a6502e33fba119155a0297413919d62b7e042cdd8949fcfc",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSValue__createInternalPromise",
@@ -2529,10 +2529,10 @@
       "line": 1353,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSValue__unwrapBoxedPrimitive(*JSGlobalObject, JSValue) JSValue;",
       "declaration_sha256": "cbd2f5e8eeabe3a8bab0b089ce936df3ebafcaf06f4a433ac804805f121eb6a6",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSValue__values",
