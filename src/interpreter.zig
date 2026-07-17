@@ -9267,6 +9267,10 @@ pub const Interpreter = struct {
         return liveMapEntryCount(map);
     }
 
+    pub fn nativeSetSize(_: *Interpreter, set: *value.Object) usize {
+        return liveSetEntryCount(set);
+    }
+
     fn setMethod(self: *Interpreter, o: *value.Object, name: []const u8, args: []const Value) EvalError!?Value {
         const self_v = Value.obj(o);
         // A WeakSet value must be holdable weakly (object or non-registered

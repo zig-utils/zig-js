@@ -2256,6 +2256,13 @@ pub const Object = struct {
         return self.weakEntryIndexUnlocked(key) != null;
     }
 
+    pub fn weakEntryCount(self: *Object) usize {
+        self.lockElements();
+        defer self.unlockElements();
+        const cold = self.coldState() orelse return 0;
+        return cold.weak_entries.items.len;
+    }
+
     /// WeakMap `[[Set]]` upsert: update the entry for `key` or append a new one.
     pub fn weakEntrySet(self: *Object, fallback: std.mem.Allocator, key: ?*anyopaque, v: Value) std.mem.Allocator.Error!void {
         gc_runtime.barrierWeak(@ptrCast(self));

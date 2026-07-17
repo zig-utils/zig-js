@@ -4485,6 +4485,49 @@ export fn JSC__JSFunction__optimizeSoon(encoded: EncodedValue) callconv(.c) void
     chunk.tier.entries.store(std.math.maxInt(u32) - 1, .release);
 }
 
+export fn JSC__JSValue__getLengthIfPropertyExistsInternal(
+    encoded: EncodedValue,
+    global: JSContextRef,
+) callconv(.c) f64 {
+    const context = ctxForEvaluation(global) orelse return 0;
+    const opaque_group = context.c_api_group orelse return 0;
+    const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+    if (group.pending_exception != null) return 0;
+    const internal = privateValueFrom(global, encoded) orelse return 0;
+    if (internal.isString()) return @floatFromInt(interp.Interpreter.utf16LenOfString(internal.asStr()));
+    if (!internal.isObject()) return 0;
+
+    const object = internal.asObj();
+    if (object.is_array and !object.is_arguments) return @floatFromInt(object.arrayLength());
+    if (object.typedArray()) |typed| return @floatFromInt(typed.currentLength() orelse 0);
+    if (object.arrayBuffer()) |buffer| return @floatFromInt(if (buffer.isDetached()) 0 else buffer.bytes().len);
+
+    var machine = context.interpreter();
+    if (object.is_map) {
+        return @floatFromInt(if (object.is_weak) object.weakEntryCount() else machine.nativeMapSize(object));
+    }
+    if (object.is_set and !object.is_weak) return @floatFromInt(machine.nativeSetSize(object));
+    if (object.is_symbol or object.is_bigint) return std.math.inf(f64);
+
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return 0;
+    };
+    defer context.popActiveInterpreter(&machine);
+    const length = machine.getPropertyIfExists(internal, "length") catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return 0;
+    } orelse return std.math.inf(f64);
+    return machine.toNumberV(length) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return 0;
+    };
+}
+
 export fn JSC__JSString__eql(
     left_cell: ?*anyopaque,
     global: JSContextRef,
@@ -15417,6 +15460,70 @@ test "private JSFunction source and tier-up controls preserve exact contracts" {
     const settled_state = chunk.tier.loadState();
     JSC__JSFunction__optimizeSoon(tier_encoded);
     try std.testing.expectEqual(settled_state, chunk.tier.loadState());
+}
+
+test "private internal length projection preserves direct kinds and observable fallback" {
+    const context = JSGlobalContextCreate(null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(context);
+    const internal = ctxForEvaluation(context) orelse return error.ContextCreateFailed;
+    const Probe = struct {
+        fn value(context_: *Context, source: []const u8) !EncodedValue {
+            return privateEncodedFromValue(context_, try context_.evaluate(source));
+        }
+    };
+
+    try std.testing.expectEqual(@as(f64, 4), JSC__JSValue__getLengthIfPropertyExistsInternal(try Probe.value(internal, "'A😀\\uD800'"), context));
+    try std.testing.expectEqual(@as(f64, 9), JSC__JSValue__getLengthIfPropertyExistsInternal(try Probe.value(internal, "new Array(9)"), context));
+    const typed_cases = [_][]const u8{
+        "new Int8Array(3)",    "new Uint8Array(3)",    "new Uint8ClampedArray(3)",
+        "new Int16Array(3)",   "new Uint16Array(3)",   "new Int32Array(3)",
+        "new Uint32Array(3)",  "new Float16Array(3)",  "new Float32Array(3)",
+        "new Float64Array(3)", "new BigInt64Array(3)", "new BigUint64Array(3)",
+    };
+    for (typed_cases) |source| {
+        try std.testing.expectEqual(@as(f64, 3), JSC__JSValue__getLengthIfPropertyExistsInternal(try Probe.value(internal, source), context));
+    }
+
+    const detached_typed = try internal.evaluate("new Uint16Array(4)");
+    detached_typed.asObj().typedArray().?.buffer.arrayBuffer().?.setDetached(true);
+    try std.testing.expectEqual(@as(f64, 0), JSC__JSValue__getLengthIfPropertyExistsInternal(privateEncodedFromValue(internal, detached_typed), context));
+    const buffer = try internal.evaluate("new ArrayBuffer(17)");
+    try std.testing.expectEqual(@as(f64, 17), JSC__JSValue__getLengthIfPropertyExistsInternal(privateEncodedFromValue(internal, buffer), context));
+    buffer.asObj().arrayBuffer().?.setDetached(true);
+    try std.testing.expectEqual(@as(f64, 0), JSC__JSValue__getLengthIfPropertyExistsInternal(privateEncodedFromValue(internal, buffer), context));
+
+    try std.testing.expectEqual(@as(f64, 2), JSC__JSValue__getLengthIfPropertyExistsInternal(try Probe.value(internal, "(() => { const m = new Map([[1, 1], [2, 2]]); Object.defineProperty(m, 'length', { get() { throw 1; } }); return m; })()"), context));
+    try std.testing.expectEqual(@as(f64, 3), JSC__JSValue__getLengthIfPropertyExistsInternal(try Probe.value(internal, "(() => { const s = new Set([1, 2, 3]); s.length = 99; return s; })()"), context));
+    try std.testing.expectEqual(@as(f64, 1), JSC__JSValue__getLengthIfPropertyExistsInternal(try Probe.value(internal, "globalThis.__weak_key_223 = {}; new WeakMap([[__weak_key_223, 1]])"), context));
+    try std.testing.expect(std.math.isPositiveInf(JSC__JSValue__getLengthIfPropertyExistsInternal(try Probe.value(internal, "new WeakSet([{}])"), context)));
+
+    const observable = try Probe.value(internal, "globalThis.__length_calls_223 = 0; ({ get length() { __length_calls_223++; return { valueOf() { __length_calls_223++; return '12'; } }; } })");
+    try std.testing.expectEqual(@as(f64, 12), JSC__JSValue__getLengthIfPropertyExistsInternal(observable, context));
+    try std.testing.expectEqual(@as(f64, 2), (try internal.evaluate("__length_calls_223")).asNum());
+    try std.testing.expectEqual(@as(f64, 7), JSC__JSValue__getLengthIfPropertyExistsInternal(try Probe.value(internal, "Object.create({ length: 7 })"), context));
+    try std.testing.expectEqual(@as(f64, 5), JSC__JSValue__getLengthIfPropertyExistsInternal(try Probe.value(internal, "new Proxy({}, { get(t, k) { if (k === 'length') return 5; } })"), context));
+    try std.testing.expect(std.math.isPositiveInf(JSC__JSValue__getLengthIfPropertyExistsInternal(try Probe.value(internal, "new DataView(new ArrayBuffer(4))"), context)));
+    try std.testing.expect(std.math.isPositiveInf(JSC__JSValue__getLengthIfPropertyExistsInternal(try Probe.value(internal, "({})"), context)));
+    try std.testing.expect(std.math.isPositiveInf(JSC__JSValue__getLengthIfPropertyExistsInternal(try Probe.value(internal, "(function() { delete arguments.length; return arguments; })()"), context)));
+
+    try std.testing.expectEqual(@as(f64, 0), JSC__JSValue__getLengthIfPropertyExistsInternal(EncodedValue.fromInt32(1), context));
+    const foreign = JSGlobalContextCreate(null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(foreign);
+    const foreign_internal = ctxForEvaluation(foreign) orelse return error.ContextCreateFailed;
+    try std.testing.expectEqual(@as(f64, 0), JSC__JSValue__getLengthIfPropertyExistsInternal(privateEncodedFromValue(foreign_internal, try foreign_internal.evaluate("({ length: 9 })")), context));
+
+    try std.testing.expectEqual(@as(f64, 0), JSC__JSValue__getLengthIfPropertyExistsInternal(try Probe.value(internal, "({ get length() { throw 2231; } })"), context));
+    var pending = JSGlobalObject__tryTakeException(context);
+    try std.testing.expectEqual(EncodedValue.fromInt32(2231), JSC__Exception__asJSValue(@ptrFromInt(try pending.asCellAddress())));
+    try std.testing.expectEqual(@as(f64, 0), JSC__JSValue__getLengthIfPropertyExistsInternal(try Probe.value(internal, "({ length: Symbol('bad') })"), context));
+    pending = JSGlobalObject__tryTakeException(context);
+    const symbol_error = privateValueFrom(context, JSC__Exception__asJSValue(@ptrFromInt(try pending.asCellAddress()))) orelse return error.MissingException;
+    try std.testing.expect(symbol_error.isObject() and symbol_error.asObj().behavior.is_error);
+
+    JSC__VM__throwError(JSC__JSGlobalObject__vm(context), context, EncodedValue.fromInt32(223));
+    try std.testing.expectEqual(@as(f64, 0), JSC__JSValue__getLengthIfPropertyExistsInternal(try Probe.value(internal, "[1, 2, 3]"), context));
+    pending = JSGlobalObject__tryTakeException(context);
+    try std.testing.expectEqual(EncodedValue.fromInt32(223), JSC__Exception__asJSValue(@ptrFromInt(try pending.asCellAddress())));
 }
 
 test "private VM entry-state query tracks nested and sibling interpreters" {

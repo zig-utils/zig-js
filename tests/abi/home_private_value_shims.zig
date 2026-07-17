@@ -229,6 +229,7 @@ extern "c" fn JSC__JSValue__getSymbolDescription(EncodedValue, JSContextRef, *Zi
 extern "c" fn JSC__JSValue__asString(EncodedValue) ?*anyopaque;
 extern "c" fn JSC__JSFunction__getSourceCode(EncodedValue, *ZigString) bool;
 extern "c" fn JSC__JSFunction__optimizeSoon(EncodedValue) void;
+extern "c" fn JSC__JSValue__getLengthIfPropertyExistsInternal(EncodedValue, JSContextRef) f64;
 extern "c" fn JSC__jsTypeStringForValue(JSContextRef, EncodedValue) ?*anyopaque;
 extern "c" fn JSC__JSString__eql(?*anyopaque, JSContextRef, ?*anyopaque) bool;
 extern "c" fn JSC__JSString__is8Bit(?*anyopaque) bool;
@@ -1061,6 +1062,23 @@ pub fn main() void {
     const tier_exception = JSGlobalObject__tryTakeException(context);
     if (JSC__Exception__asJSValue(tier_exception.cellPointer()) != EncodedValue.fromInt32(222))
         fail("private JSFunction tier-up replaced pending exception");
+
+    if (JSC__JSValue__getLengthIfPropertyExistsInternal(evaluate(context, "'A😀\\uD800'"), context) != 4 or
+        JSC__JSValue__getLengthIfPropertyExistsInternal(evaluate(context, "new Array(8)"), context) != 8 or
+        JSC__JSValue__getLengthIfPropertyExistsInternal(evaluate(context, "new Float64Array(6)"), context) != 6 or
+        JSC__JSValue__getLengthIfPropertyExistsInternal(evaluate(context, "new ArrayBuffer(17)"), context) != 17 or
+        JSC__JSValue__getLengthIfPropertyExistsInternal(evaluate(context, "(() => { const m = new Map([[1, 1], [2, 2]]); m.length = 99; return m; })()"), context) != 2 or
+        JSC__JSValue__getLengthIfPropertyExistsInternal(evaluate(context, "({ get length() { return '12'; } })"), context) != 12 or
+        !std.math.isPositiveInf(JSC__JSValue__getLengthIfPropertyExistsInternal(evaluate(context, "({})"), context)) or
+        JSC__JSValue__getLengthIfPropertyExistsInternal(EncodedValue.fromInt32(1), context) != 0 or
+        JSC__JSValue__getLengthIfPropertyExistsInternal(EncodedValue.fromRef(foreign_object), context) != 0)
+        fail("private internal length projection mismatch");
+    if (JSC__JSValue__getLengthIfPropertyExistsInternal(evaluate(context, "({ get length() { throw 223; } })"), context) != 0 or
+        !JSGlobalObject__hasException(context))
+        fail("private internal length projection missed abrupt completion");
+    const length_exception = JSGlobalObject__tryTakeException(context);
+    if (JSC__Exception__asJSValue(length_exception.cellPointer()) != EncodedValue.fromInt32(223))
+        fail("private internal length projection changed thrown identity");
 
     StringBuilder__init(&string_builder);
     StringBuilder__appendInt(&string_builder, std.math.minInt(i32));
@@ -3108,5 +3126,5 @@ pub fn main() void {
         TopExceptionScope__exceptionIncludingTraps(&verification_scope) != null)
         fail("private TopExceptionScope destruction mismatch");
 
-    std.debug.print("Home private value shims: 203/203 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 204/204 symbols linked; runtime matrix passed\n", .{});
 }
