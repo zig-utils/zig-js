@@ -796,7 +796,7 @@ fn enumerableOwnProperties(self: *Interpreter, arg0: Value, kind: EnumKind) Host
             break :blk desc.isObject() and (try self.getProperty(desc, "enumerable")).toBoolean();
         } else if (o.boxedPrimitive() != null and o.boxedPrimitive().?.isString())
             // A String wrapper exposes only its char indices as enumerable own keys.
-            (arrayIndexOf(k) != null and arrayIndexOf(k).? < o.boxedPrimitive().?.asStr().len)
+            (arrayIndexOf(k) != null and arrayIndexOf(k).? < Interpreter.utf16LenOfString(o.boxedPrimitive().?.asStr()))
         else if ((o.is_array or o.typedArray() != null) and std.mem.eql(u8, k, "length"))
             // An Array's / TypedArray's "length" is a non-enumerable own property.
             false
@@ -870,7 +870,7 @@ pub fn objectAssign(ctx: *anyopaque, this: Value, args: []const Value) HostError
             } else if (from.boxedPrimitive() != null and from.boxedPrimitive().?.isString())
                 // A String wrapper's only enumerable own keys are its char indices
                 // ("length" and inherited methods are non-enumerable).
-                (arrayIndexOf(k) != null and arrayIndexOf(k).? < from.boxedPrimitive().?.asStr().len)
+                (arrayIndexOf(k) != null and arrayIndexOf(k).? < Interpreter.utf16LenOfString(from.boxedPrimitive().?.asStr()))
             else if ((from.is_array or from.typedArray() != null) and std.mem.eql(u8, k, "length"))
                 false
             else

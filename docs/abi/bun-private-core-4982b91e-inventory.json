@@ -81,8 +81,8 @@
       "public_c_api": 15
     },
     "by_status": {
-      "implemented": 74,
-      "pending": 363
+      "implemented": 76,
+      "pending": 361
     }
   },
   "home_comparison": {
@@ -2303,10 +2303,10 @@
       "line": 767,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSValue__keys(globalThis: *JSGlobalObject, value: JSValue) JSValue;",
       "declaration_sha256": "aeb63a19c7d8a184b93ef3dc8e28c0a8415497502659285de989c69306e7d5e7",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSValue__push",
@@ -2501,10 +2501,10 @@
       "line": 775,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSValue__values(globalThis: *JSGlobalObject, value: JSValue) JSValue;",
       "declaration_sha256": "3ac17bc1f48e2cfea507c79ef46967e7bae786d802c01c6032bb1be05b708efe",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__VM__blockBytesAllocated",

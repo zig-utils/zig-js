@@ -9867,7 +9867,7 @@ pub const Interpreter = struct {
                 // other string keys in insertion order, then symbols.
                 var indices: std.ArrayListUnmanaged([]const u8) = .empty;
                 var seen: std.AutoHashMapUnmanaged(usize, void) = .empty;
-                for (p.asStr(), 0..) |_, i| {
+                for (0..utf16LenOfString(p.asStr())) |i| {
                     try indices.append(self.arena, try std.fmt.allocPrint(self.arena, "{d}", .{i}));
                     try seen.put(self.arena, i, {});
                 }

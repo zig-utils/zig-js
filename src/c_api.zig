@@ -2017,6 +2017,49 @@ export fn JSC__JSObject__getIndex(
     return privateEncodeResult(context, &machine, result);
 }
 
+fn privateObjectEnumerableProperties(
+    global: JSContextRef,
+    encoded: EncodedValue,
+    comptime keys_only: bool,
+) EncodedValue {
+    const context = ctxForEvaluation(global) orelse return .empty;
+    const opaque_group = context.c_api_group orelse return .empty;
+    const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+    if (group.pending_exception != null) return .empty;
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    defer context.popActiveInterpreter(&machine);
+    const internal = privateValueFrom(global, encoded) orelse {
+        const err = machine.throwError("TypeError", "Value belongs to another VM");
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    const result = if (keys_only)
+        builtins.objectKeys(@ptrCast(&machine), Value.undef(), &.{internal})
+    else
+        builtins.objectValues(@ptrCast(&machine), Value.undef(), &.{internal});
+    const resolved = result catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    return privateEncodeResult(context, &machine, resolved);
+}
+
+export fn JSC__JSValue__keys(global: JSContextRef, encoded: EncodedValue) callconv(.c) EncodedValue {
+    return privateObjectEnumerableProperties(global, encoded, true);
+}
+
+export fn JSC__JSValue__values(global: JSContextRef, encoded: EncodedValue) callconv(.c) EncodedValue {
+    return privateObjectEnumerableProperties(global, encoded, false);
+}
+
 export fn JSC__JSValue__unwrapBoxedPrimitive(global: JSContextRef, encoded: EncodedValue) callconv(.c) EncodedValue {
     const context = ctxForHandleInspection(global) orelse return .empty;
     const internal = privateValueFrom(global, encoded) orelse return .empty;

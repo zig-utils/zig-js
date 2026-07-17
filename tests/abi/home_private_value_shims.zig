@@ -101,6 +101,8 @@ extern "c" fn JSC__JSValue__putIndex(EncodedValue, JSContextRef, u32, EncodedVal
 extern "c" fn JSC__JSValue__push(EncodedValue, JSContextRef, EncodedValue) void;
 extern "c" fn JSC__JSValue__getDirectIndex(EncodedValue, JSContextRef, u32) EncodedValue;
 extern "c" fn JSC__JSObject__getIndex(EncodedValue, JSContextRef, u32) EncodedValue;
+extern "c" fn JSC__JSValue__keys(JSContextRef, EncodedValue) EncodedValue;
+extern "c" fn JSC__JSValue__values(JSContextRef, EncodedValue) EncodedValue;
 extern "c" fn JSArray__constructArray(JSContextRef, [*]const EncodedValue, usize) EncodedValue;
 extern "c" fn JSArray__constructEmptyArray(JSContextRef, usize) EncodedValue;
 extern "c" fn Bun__JSValue__toNumber(EncodedValue, JSContextRef) f64;
@@ -504,6 +506,71 @@ pub fn main() void {
         iso_buffer[13] != ':' or iso_buffer[16] != ':' or iso_buffer[19] != '.' or iso_buffer[23] != 'Z')
         fail("private Date-now ISO formatting mismatch");
 
+    const reflection_object = evaluate(context,
+        \\globalThis.__private_reflection_gets = 0;
+        \\const __private_reflection_symbol = Symbol('hidden');
+        \\const __private_reflection_object = { 2: 'two', b: 'bee', 1: 'one' };
+        \\Object.defineProperty(__private_reflection_object, 'hidden', { value: 9, enumerable: false });
+        \\Object.defineProperty(__private_reflection_object, 'a', { enumerable: true, get() { __private_reflection_gets++; return 'aye'; } });
+        \\__private_reflection_object[__private_reflection_symbol] = 'symbol';
+        \\__private_reflection_object;
+    );
+    const reflection_keys = JSC__JSValue__keys(context, reflection_object);
+    if (!JSC__JSValue__isStrictEqual(JSC__JSValue__getPrototype(reflection_keys, context), evaluate(context, "Array.prototype"), context) or
+        !JSC__JSValue__isStrictEqual(JSC__JSValue__getDirectIndex(reflection_keys, context, 0), evaluate(context, "'1'"), context) or
+        !JSC__JSValue__isStrictEqual(JSC__JSValue__getDirectIndex(reflection_keys, context, 1), evaluate(context, "'2'"), context) or
+        !JSC__JSValue__isStrictEqual(JSC__JSValue__getDirectIndex(reflection_keys, context, 2), evaluate(context, "'b'"), context) or
+        !JSC__JSValue__isStrictEqual(JSC__JSValue__getDirectIndex(reflection_keys, context, 3), evaluate(context, "'a'"), context) or
+        Bun__JSValue__toNumber(evaluate(context, "__private_reflection_gets"), context) != 0)
+        fail("private Object.keys ordering/getter mismatch");
+    const reflection_values = JSC__JSValue__values(sibling_context, reflection_object);
+    if (!JSC__JSValue__isStrictEqual(JSC__JSValue__getDirectIndex(reflection_values, context, 0), evaluate(context, "'one'"), context) or
+        !JSC__JSValue__isStrictEqual(JSC__JSValue__getDirectIndex(reflection_values, context, 1), evaluate(context, "'two'"), context) or
+        !JSC__JSValue__isStrictEqual(JSC__JSValue__getDirectIndex(reflection_values, context, 2), evaluate(context, "'bee'"), context) or
+        !JSC__JSValue__isStrictEqual(JSC__JSValue__getDirectIndex(reflection_values, context, 3), evaluate(context, "'aye'"), context) or
+        Bun__JSValue__toNumber(evaluate(context, "__private_reflection_gets"), context) != 1)
+        fail("private Object.values ordering/getter mismatch");
+
+    const astral_text = evaluate(context, "'💩'");
+    const astral_keys = JSC__JSValue__keys(context, astral_text);
+    const astral_values = JSC__JSValue__values(context, astral_text);
+    if (!JSC__JSValue__isStrictEqual(JSC__JSValue__getDirectIndex(astral_keys, context, 0), evaluate(context, "'0'"), context) or
+        !JSC__JSValue__isStrictEqual(JSC__JSValue__getDirectIndex(astral_keys, context, 1), evaluate(context, "'1'"), context) or
+        JSC__JSValue__getDirectIndex(astral_keys, context, 2) != .empty or
+        !JSC__JSValue__isStrictEqual(JSC__JSValue__getDirectIndex(astral_values, context, 0), evaluate(context, "'\\ud83d'"), context) or
+        !JSC__JSValue__isStrictEqual(JSC__JSValue__getDirectIndex(astral_values, context, 1), evaluate(context, "'\\udca9'"), context))
+        fail("private Object reflection UTF-16 mismatch");
+
+    const reflection_proxy = evaluate(context,
+        \\globalThis.__private_reflection_log = '';
+        \\new Proxy({ x: 7 }, {
+        \\  ownKeys() { __private_reflection_log += 'o'; return ['x']; },
+        \\  getOwnPropertyDescriptor() { __private_reflection_log += 'd'; return { enumerable: true, configurable: true }; },
+        \\  get(target, key) { __private_reflection_log += 'g'; return target[key]; }
+        \\});
+    );
+    _ = JSC__JSValue__keys(context, reflection_proxy);
+    if (!JSC__JSValue__isStrictEqual(evaluate(context, "__private_reflection_log"), evaluate(context, "'od'"), context))
+        fail("private Object.keys proxy trap mismatch");
+    _ = evaluate(context, "__private_reflection_log = ''");
+    const proxy_values = JSC__JSValue__values(context, reflection_proxy);
+    if (!JSC__JSValue__isStrictEqual(evaluate(context, "__private_reflection_log"), evaluate(context, "'odg'"), context) or
+        Bun__JSValue__toNumber(JSC__JSValue__getDirectIndex(proxy_values, context, 0), context) != 7)
+        fail("private Object.values proxy trap mismatch");
+
+    const throwing_reflection = evaluate(context, "Object.defineProperty({}, 'x', { enumerable: true, get() { throw 777; } })");
+    if (JSC__JSValue__values(context, throwing_reflection) != .empty or !JSGlobalObject__hasException(context))
+        fail("private Object.values getter did not throw");
+    const reflection_exception = JSGlobalObject__tryTakeException(context);
+    if (JSC__Exception__asJSValue(reflection_exception.cellPointer()) != EncodedValue.fromInt32(777))
+        fail("private Object.values thrown value mismatch");
+    if (JSC__JSValue__keys(context, .null) != .empty or !JSGlobalObject__hasException(context))
+        fail("private Object.keys null did not throw");
+    JSGlobalObject__clearException(context);
+    if (JSC__JSValue__keys(context, EncodedValue.fromRef(foreign_object)) != .empty or !JSGlobalObject__hasException(context))
+        fail("private Object.keys foreign value did not throw");
+    JSGlobalObject__clearException(context);
+
     JSC__VM__throwError(vm, context, EncodedValue.fromInt32(42));
     if (!JSGlobalObject__hasException(context) or !JSGlobalObject__hasException(sibling_context))
         fail("pending exception is not VM-shared");
@@ -828,5 +895,5 @@ pub fn main() void {
     if (!JSC__JSValue__isAggregateError(aggregate_error, context))
         fail("private AggregateError classification depended on mutable properties");
 
-    std.debug.print("Home private value shims: 57/57 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 59/59 symbols linked; runtime matrix passed\n", .{});
 }
