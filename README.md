@@ -236,7 +236,7 @@ claim that Home's or Bun's private `JSC__*`/`Bun__*` ABI is implemented.
 The separately generated
 [Home private inventory](docs/abi/home-private-7ed99c02-inventory.json) makes
 that remaining boundary concrete: **448 unique extern symbols from 58 pinned
-files**, classified as 432 private (**52 implemented / 380 pending**), 15
+files**, classified as 432 private (**53 implemented / 379 pending**), 15
 already-covered public-C overlaps, and one platform import, with zero duplicate
 or unclassified entries.
 Exact Home revisions `7ed99c02`, `5e829ad4`, and `38702f9e` are supported; both
@@ -246,7 +246,7 @@ The first private-ABI foundation is implemented without changing engine values:
 `private_abi.EncodedValue` translates primitives to the pinned eight-byte JSC64
 encoding (including exact int32/double/NaN/cell rules), while rejecting
 string/object conversion until a validated external cell handle exists.
-The first fifty-two private exports—encoded identity/cell equality, truthiness,
+The first fifty-three private exports—encoded identity/cell equality, truthiness,
 int32 extraction, exact signed/unsigned 64-bit BigInt construction, and
 modulo-2^64 BigInt extraction with pinned number fallbacks, plus exact `===` and
 SameValue equality, two exact cell-type queries, five opaque BigInt cell
@@ -255,7 +255,7 @@ JSCell/JSString operations, three ordinary-object foundation operations, and
 two object-coercion/prototype operations, two numeric DateInstance operations,
 nine VM-shared pending-exception operations, five array/index operations, and
 two packed/hole JSArray constructors, full ECMAScript ToNumber coercion, and
-exact has-instance/iterator-method predicates—now pass focused Zig
+exact has-instance/iterator-method predicates, and UTF-16 string inclusion—now pass focused Zig
 compile-link-runtime consumer fixtures. The string boundary covers exact UTF-16
 length for astral and lone-surrogate strings, 8-bit eligibility, value equality,
 ordinary-object access, primitive boxing, and foreign-context rejection. The
@@ -287,7 +287,9 @@ pair matches JSC's private boundaries rather than language-level shortcuts:
 has-instance prechecks internal capability before running callable/custom/proxy
 logic, while iterator detection rejects primitives and performs object
 `GetMethod`, including getters, callability errors, and VM exception
-publication. The
+publication. Private string inclusion performs full receiver-then-search
+ToString coercion and searches UTF-16 code units, including surrogate halves
+inside astral characters, while preserving thrown values and VM ownership. The
 BigInt cell gate downcasts only real owned cells, compares arbitrary-size values
 exactly against i64/u64/f64 (including 2^53, subnormal, infinity, and 10^400
 boundaries), and performs signed modulo-2^64 extraction without lossy double
@@ -298,12 +300,12 @@ constructors return real context-owned BigInt cells.
 The [full private `JSType` layout](docs/abi/private-jstype-layouts.json) proves
 that Home has 97 members while Bun has 98: Bun's one inserted tag renumbers 70
 later members. `-Dprivate-abi-consumer=home|bun` selects the exact layout, and
-separately compiled fixtures pass 20 real cell kinds for each. All fifty-two
+separately compiled fixtures pass 20 real cell kinds for each. All fifty-three
 private exports remain excluded from the 117-function public count and 19
 extensions.
 The separate pinned
 [Bun core inventory](docs/abi/bun-private-core-4982b91e-inventory.json) contains
-437 symbols from 54 `src/jsc` files: 422 private (**52 implemented / 370
+437 symbols from 54 `src/jsc` files: 422 private (**53 implemented / 369
 pending**) and 15 public overlaps. Its exact comparison with Home finds 434
 shared names, 3 Bun-only names, 14 Home-only names, and 28 changed signatures;
 neither private profile is inferred from the other.

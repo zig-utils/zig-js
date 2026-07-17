@@ -44,7 +44,7 @@ convention. The exact current denominator is:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #163 | 432 (52 implemented, 380 pending) |
+| Private JSC/Bun/WebCore ABI under #163 | 432 (53 implemented, 379 pending) |
 | Overlap with zig-js's completed public C target | 15 |
 | Platform libc import | 1 |
 | **Total** | **448** |
@@ -60,7 +60,7 @@ zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"
 ```
 
 This inventory is the denominator, not a claim that the whole surface works.
-The first fifty-two private entries are implemented; the other 380 remain pending
+The first fifty-three private entries are implemented; the other 379 remain pending
 until #163 provides their type/layout contracts, shims, and consumer evidence.
 
 Home revisions `5e829ad483bb9e5ccb19766997df6462edd8e167` and
@@ -129,7 +129,7 @@ It covers empty/immediate/int32/double/NaN/negative-zero behavior, boxed
 empty/nonempty strings, object identity/truthiness, signed minimum and unsigned
 maximum BigInts, negative modulo extraction, exact number fallbacks, and every
 invalid/non-exact boundary. Public accounting stays unchanged at 117 functions
-and 19 extensions; these fifty-two symbols are reported only as private profile
+and 19 extensions; these fifty-three symbols are reported only as private profile
 exports.
 
 The opaque BigInt cell slice additionally exports `JSC__JSBigInt__fromJS`, the
@@ -207,7 +207,9 @@ with VM pending state while ordinary NaN remains non-exceptional. The private
 has-instance predicate performs JSC's internal-capability precheck before
 ordinary, custom, host, or proxy behavior; its counterpart implements JSC
 `hasIteratorMethod`, rejecting primitives and running object GetMethod with
-getter/callability exceptions. The 50-symbol combined runtime fixture covers
+getter/callability exceptions. Private string inclusion applies full ToString
+in receiver/search order and searches UTF-16 code units, preserving surrogate
+substrings and publishing either coercion failure. The 51-symbol combined runtime fixture covers
 these semantics; the two profile-selected JSType exports retain
 their separate Home/Bun runtime fixtures.
 
@@ -250,7 +252,7 @@ profile contains 437 unique declarations from 54 hashed files:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #164 | 422 (52 implemented, 370 pending) |
+| Private JSC/Bun/WebCore ABI under #164 | 422 (53 implemented, 369 pending) |
 | Public-C overlap | 15 |
 | **Total** | **437** |
 
@@ -266,5 +268,5 @@ zig build bun-private-abi-audit -Dbun-source-root="$HOME/Code/bun"
 
 The audit rejects revision, file hash, declaration digest, classification,
 calling-convention, implementation-status, and Home-comparison drift. It does
-not claim complete Bun runtime compatibility; #164 remains open for the 370
+not claim complete Bun runtime compatibility; #164 remains open for the 369
 pending core entries and later wider/generated profiles.
