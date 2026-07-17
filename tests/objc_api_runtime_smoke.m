@@ -492,6 +492,20 @@ int main(void)
             return 79;
         if (check([constructedWrapper isInstanceOf:context[@"ExportClass"]], 77))
             return 77;
+        ZJSTestExportObject *sharedExport = [[ZJSTestExportObject alloc]
+            initWithTitle:@"shared"];
+        context[@"sharedExport"] = sharedExport;
+        siblingContext[@"sharedExport"] = sharedExport;
+        siblingContext[@"ExportClass"] = ZJSTestExportObject.class;
+        JSValue *siblingConstructed = [siblingContext evaluateScript:@"new ExportClass('sibling')"];
+        if (check(context[@"sharedExport"] != siblingContext[@"sharedExport"] &&
+                      context[@"sharedExport"].toObject == sharedExport &&
+                      siblingContext[@"sharedExport"].toObject == sharedExport &&
+                      [siblingContext evaluateScript:@"sharedExport.addTo(20, 22)"].toInt32 == 42 &&
+                      [siblingContext evaluateScript:@"new ExportClass('probe') instanceof ExportClass"].toBool &&
+                      [siblingConstructed isInstanceOf:siblingContext[@"ExportClass"]],
+                  82))
+            return 82;
     }
     return 0;
 }

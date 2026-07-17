@@ -2,6 +2,7 @@
 #include <stdio.h>
 
 static BOOL ZJSDiffExportCallbackState = NO;
+static JSContext *ZJSDiffExpectedContext = nil;
 
 @protocol ZJSDiffExports <JSExport>
 @property (nonatomic, copy) NSString *title;
@@ -30,6 +31,7 @@ JSExportAs(product,
 - (int32_t)add:(int32_t)left to:(int32_t)right
 {
     ZJSDiffExportCallbackState = JSContext.currentContext != nil &&
+        JSContext.currentContext == ZJSDiffExpectedContext &&
         JSContext.currentCallee != nil && JSContext.currentArguments.count == 2 &&
         JSContext.currentThis.toObject == self;
     return left + right;
@@ -155,6 +157,7 @@ int main(void)
         context[@"exported"] = exportObject;
         NSString *initialTitle = [context evaluateScript:@"exported.title"].toString;
         [context evaluateScript:@"exported.title = 'after'"];
+        ZJSDiffExpectedContext = context;
         int32_t exportSum = [context evaluateScript:@"exported.addTo(20, 22)"].toInt32;
         row(@"export", [NSString stringWithFormat:@"%@:%@:%d:%d:%@",
                                                    initialTitle, exportObject.title,
@@ -171,6 +174,29 @@ int main(void)
         row(@"export-class", [NSString stringWithFormat:@"%@:%@",
                                                          [context evaluateScript:@"ExportClass.classPrefix('zig-js')"].toString,
                                                          constructed.title]);
+
+        ZJSDiffExportObject *sharedExport = [[ZJSDiffExportObject alloc]
+            initWithTitle:@"shared"];
+        sharedA[@"exported"] = sharedExport;
+        sharedB[@"exported"] = sharedExport;
+        sharedA[@"ExportClass"] = ZJSDiffExportObject.class;
+        sharedB[@"ExportClass"] = ZJSDiffExportObject.class;
+        ZJSDiffExpectedContext = sharedA;
+        BOOL sharedACallback = [sharedA evaluateScript:@"exported.addTo(20, 22)"].toInt32 == 42 &&
+            ZJSDiffExportCallbackState;
+        ZJSDiffExpectedContext = sharedB;
+        BOOL sharedBCallback = [sharedB evaluateScript:@"exported.addTo(20, 22)"].toInt32 == 42 &&
+            ZJSDiffExportCallbackState;
+        JSValue *sharedConstructedA = [sharedA evaluateScript:@"new ExportClass('a')"];
+        sharedB[@"constructedA"] = sharedConstructedA;
+        row(@"cross-context-export", [NSString stringWithFormat:@"%d:%d:%d:%d:%d:%d",
+                                                                 sharedA[@"exported"] != sharedB[@"exported"],
+                                                                 sharedA[@"exported"].toObject == sharedExport &&
+                                                                     sharedB[@"exported"].toObject == sharedExport,
+                                                                 sharedACallback,
+                                                                 sharedBCallback,
+                                                                 [sharedB evaluateScript:@"new ExportClass('b') instanceof ExportClass"].toBool,
+                                                                 [sharedB evaluateScript:@"constructedA instanceof ExportClass"].toBool]);
 
         JSValue *symbolValue = [context evaluateScript:@"Symbol('edge')"];
         JSValue *bigIntValue = [context evaluateScript:@"9007199254740993n"];
