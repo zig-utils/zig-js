@@ -26,10 +26,10 @@ compile-link-runtime fixture. It remains deliberately separate from private
 Home/Bun ABI work.
 
 Private-profile exports are audited independently and never inflate the public
-or extension totals. The pinned Home inventory currently reports 220
-private exports and 211 pending private symbols; `zig build test-home-private-abi` and
+or extension totals. The pinned Home inventory currently reports 225
+private exports and 206 pending private symbols; `zig build test-home-private-abi` and
 `zig build test-private-jstype` are their focused compile-link-runtime gates.
-The 220 cover JSC64 identity, cell equality,
+The 225 cover JSC64 identity, cell equality,
 truthiness, int32 extraction, exact signed/unsigned 64-bit BigInt construction,
 modulo-2^64 BigInt extraction with the pinned int32/Int52 fallbacks, and exact
 JavaScript strict/SameValue equality across primitives and owned cells, plus
@@ -102,6 +102,10 @@ promise modes, negation, and custom marker hooks. Recursive subset matching
 uses inherited-aware single property reads, exact arrays, Symbols, independent
 cycle sets, nested object-containing exhaustiveness, and optional direct
 matched-property replacement. Ordinary deep equality remains hook-free.
+Five remote-inspector process controls use atomic, idempotent state for
+auto-start disable, explicit start, system-console logging, and the inspection
+default. The default is disabled on modern Apple-family targets and enabled
+elsewhere, and remains independently overrideable from context inspectability.
 Three fast built-in reads pin every byte-table entry and distinguish direct
 data, own-slot, and Object.prototype-cutoff lookup. Bun's fourth core-only
 `code` inquiry is deliberately pure: inherited data is visible, while
@@ -217,7 +221,7 @@ exact identity, insertion order, live size, sibling values, and failure-atomic
 foreign-VM rejection. The shared FFI slow paths perform exact signed/unsigned
 modulo-2^64 conversion for validated heap BigInts. CommonAbortReason conversion
 creates fresh selected-realm TimeoutError/AbortError DOMExceptions with the
-pinned messages and legacy codes. The combined 219-symbol fixture also
+pinned messages and legacy codes. The combined 224-symbol fixture also
 covers sibling realms, foreign-VM failures, exception clearing, callback
 reentrancy, and already-settled targets.
 
