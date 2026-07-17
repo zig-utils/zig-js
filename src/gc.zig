@@ -788,6 +788,7 @@ pub const Binding = struct {
         v.mark(ctx.tdz_marker);
         for (ctx.c_api_builtin_constructors) |constructor| markValue(v, constructor);
         if (ctx.reserved_thread_oom_error) |err| markValue(v, err);
+        if (ctx.private_pending_exception_root) |err| markValue(v, err);
         traceEnv(&ctx.env, v); // the global environment is embedded by value (binding_lock)
 
         if (par != null) ctx.lockMicrotasks();

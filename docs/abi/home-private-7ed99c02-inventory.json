@@ -87,8 +87,8 @@
     },
     "by_status": {
       "external": 1,
-      "implemented": 48,
-      "pending": 399
+      "implemented": 57,
+      "pending": 390
     }
   },
   "declarations": [
@@ -1110,10 +1110,10 @@
       "line": 19,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__Exception__asJSValue(this: *Exception) JSValue;",
       "declaration_sha256": "8804b30c22e1edbe67f8606ba778942684d393b2929d50e5bde791e731e9c1a8",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__Exception__getStackTrace",
@@ -1374,10 +1374,10 @@
       "line": 853,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSGlobalObject__vm(*JSGlobalObject) *VM;",
       "declaration_sha256": "d28af91a635b7e08ec283241d806018754b605b51e4067f8c62d7defd5952d47",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSMap__clear",
@@ -2177,10 +2177,10 @@
       "line": 1008,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSValue__isAnyError(this: JSValue) bool;",
       "declaration_sha256": "9d748db744e2a2319a8416d117e9647c0a6f0396e5b3b3673c5c650b25826201",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSValue__isClass",
@@ -2199,10 +2199,10 @@
       "line": 1170,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSValue__isException(this: JSValue, vm: *VM) bool;",
       "declaration_sha256": "d3d22daee09db5437b43e34b7b0c178e195e2ea139dfca2aa894680abb2b7c93",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSValue__isInstanceOf",
@@ -2463,10 +2463,10 @@
       "line": 1016,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSValue__toError_(this: JSValue) JSValue;",
       "declaration_sha256": "6fe6670b125cd761cc43dcf52240e4fb466be10675f8e58ac946ab37662e79ad",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSValue__toISOString",
@@ -2892,10 +2892,10 @@
       "line": 179,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__VM__throwError(*VM, *JSGlobalObject, JSValue) void;",
       "declaration_sha256": "c592e272d358fd14af509743c59bf3e7704e45615de5ab7416a4e44300215802",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__Wasm__StreamingCompiler__addBytes",
@@ -3034,10 +3034,10 @@
       "line": 855,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSGlobalObject__clearException(*JSGlobalObject) void;",
       "declaration_sha256": "2bef665721294bb4c559c9dda509e5005e0d73cb8861daa5e7cbf8f0363c0f39",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSGlobalObject__clearExceptionExceptTermination",
@@ -3078,10 +3078,10 @@
       "line": 858,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSGlobalObject__hasException(*JSGlobalObject) bool;",
       "declaration_sha256": "1d89347d537dab25fd796aa1bcc4aa235ccc101919c8fde2cc25f446a18a9281",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSGlobalObject__requestTermination",
@@ -3133,10 +3133,10 @@
       "line": 860,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSGlobalObject__tryTakeException(*JSGlobalObject) JSValue;",
       "declaration_sha256": "b3b99895947f07209e5f17677fe0b6bcb5bfbd835e83fcb69a11804f6b793788",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSModuleLoader__import",

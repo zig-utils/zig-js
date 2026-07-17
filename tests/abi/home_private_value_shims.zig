@@ -38,7 +38,9 @@ const EncodedValue = enum(i64) {
 };
 
 extern "c" fn JSGlobalContextCreate(?*anyopaque) JSContextRef;
+extern "c" fn JSGlobalContextCreateInGroup(?*anyopaque, ?*anyopaque) JSContextRef;
 extern "c" fn JSGlobalContextRelease(JSContextRef) void;
+extern "c" fn JSContextGetGroup(JSContextRef) ?*anyopaque;
 extern "c" fn JSValueMakeString(JSContextRef, JSStringRef) JSValueRef;
 extern "c" fn JSStringCreateWithUTF8CString([*:0]const u8) JSStringRef;
 extern "c" fn JSStringRelease(JSStringRef) void;
@@ -77,6 +79,15 @@ extern "c" fn JSC__JSValue__toObject(EncodedValue, JSContextRef) JSObjectRef;
 extern "c" fn JSC__JSValue__getPrototype(EncodedValue, JSContextRef) EncodedValue;
 extern "c" fn JSC__JSValue__dateInstanceFromNumber(JSContextRef, f64) EncodedValue;
 extern "c" fn JSC__JSValue__getUnixTimestamp(EncodedValue) f64;
+extern "c" fn JSC__JSGlobalObject__vm(JSContextRef) ?*anyopaque;
+extern "c" fn JSC__VM__throwError(?*anyopaque, JSContextRef, EncodedValue) void;
+extern "c" fn JSGlobalObject__hasException(JSContextRef) bool;
+extern "c" fn JSGlobalObject__clearException(JSContextRef) void;
+extern "c" fn JSGlobalObject__tryTakeException(JSContextRef) EncodedValue;
+extern "c" fn JSC__Exception__asJSValue(?*anyopaque) EncodedValue;
+extern "c" fn JSC__JSValue__isException(EncodedValue, ?*anyopaque) bool;
+extern "c" fn JSC__JSValue__toError_(EncodedValue) EncodedValue;
+extern "c" fn JSC__JSValue__isAnyError(EncodedValue) bool;
 
 fn fail(message: []const u8) noreturn {
     std.debug.print("Home private value shims: {s}\n", .{message});
@@ -393,5 +404,54 @@ pub fn main() void {
         !std.math.isNan(JSC__JSValue__getUnixTimestamp(.empty)))
         fail("private numeric DateInstance mismatch");
 
-    std.debug.print("Home private value shims: 31/31 symbols linked; runtime matrix passed\n", .{});
+    const sibling_context = JSGlobalContextCreateInGroup(JSContextGetGroup(context), null) orelse fail("sibling context creation failed");
+    defer JSGlobalContextRelease(sibling_context);
+    const vm = JSC__JSGlobalObject__vm(context) orelse fail("private VM lookup failed");
+    const sibling_vm = JSC__JSGlobalObject__vm(sibling_context) orelse fail("sibling VM lookup failed");
+    const foreign_vm = JSC__JSGlobalObject__vm(foreign_context) orelse fail("foreign VM lookup failed");
+    if (vm != sibling_vm or vm == foreign_vm or JSGlobalObject__hasException(context) or
+        JSGlobalObject__tryTakeException(context) != .empty)
+        fail("private VM identity mismatch");
+
+    JSC__VM__throwError(vm, context, EncodedValue.fromInt32(42));
+    if (!JSGlobalObject__hasException(context) or !JSGlobalObject__hasException(sibling_context))
+        fail("pending exception is not VM-shared");
+    const primitive_exception = JSGlobalObject__tryTakeException(sibling_context);
+    const primitive_exception_cell = EncodedValue.cellPointer(primitive_exception);
+    if (primitive_exception == .empty or primitive_exception_cell == null or
+        JSGlobalObject__hasException(context) or
+        !JSC__JSValue__isException(primitive_exception, vm) or
+        !JSC__JSValue__isAnyError(primitive_exception) or
+        JSC__Exception__asJSValue(primitive_exception_cell) != EncodedValue.fromInt32(42) or
+        JSC__JSValue__toError_(primitive_exception) != EncodedValue.fromInt32(42) or
+        !JSC__JSValue__isStrictEqual(primitive_exception, primitive_exception, context) or
+        JSC__JSValue__isStrictEqual(primitive_exception, EncodedValue.fromInt32(42), context))
+        fail("primitive exception-cell mismatch");
+
+    const error_value = evaluate(context, "new TypeError('private pending')");
+    if (!JSC__JSValue__isAnyError(error_value) or JSC__JSValue__toError_(error_value) != error_value or
+        JSC__JSValue__isException(error_value, vm))
+        fail("ErrorInstance classification mismatch");
+    JSC__VM__throwError(vm, context, error_value);
+    const error_exception = JSGlobalObject__tryTakeException(context);
+    if (JSC__Exception__asJSValue(EncodedValue.cellPointer(error_exception)) != error_value or
+        JSC__JSValue__toError_(error_exception) != error_value)
+        fail("ErrorInstance exception unwrapping mismatch");
+
+    JSC__VM__throwError(vm, context, EncodedValue.fromInt32(1));
+    JSC__VM__throwError(vm, context, EncodedValue.fromInt32(2));
+    const first_exception = JSGlobalObject__tryTakeException(context);
+    if (JSC__Exception__asJSValue(EncodedValue.cellPointer(first_exception)) != EncodedValue.fromInt32(1))
+        fail("pending exception replacement mismatch");
+    JSC__VM__throwError(vm, context, .true);
+    JSGlobalObject__clearException(sibling_context);
+    JSC__VM__throwError(foreign_vm, context, .false);
+    JSC__VM__throwError(vm, context, .empty);
+    if (JSGlobalObject__hasException(context) or JSC__JSGlobalObject__vm(null) != null or
+        JSC__Exception__asJSValue(object) != .empty or
+        JSC__JSValue__toError_(encoded_object) != .empty or
+        JSC__JSValue__isAnyError(encoded_object))
+        fail("pending exception invalid-input mismatch");
+
+    std.debug.print("Home private value shims: 40/40 symbols linked; runtime matrix passed\n", .{});
 }

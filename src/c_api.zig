@@ -59,6 +59,8 @@ const Boxed = struct {
     /// a `*Value` when tracing C-API handles.
     value: Value,
     owner: *Context,
+    private_kind: enum(u8) { value, exception } = .value,
+    exception_encoded: EncodedValue = .empty,
 };
 
 const ReachabilityCell = struct {
@@ -164,6 +166,9 @@ const CContextGroup = struct {
     primary: *Context,
     contexts: std.ArrayListUnmanaged(*Context) = .empty,
     collection_epoch: u64 = 0,
+    /// JavaScriptCore stores the active exception on the VM, not the realm.
+    /// Preserve a distinct cell so sibling globals observe the same identity.
+    pending_exception: ?*Boxed = null,
 
     fn retain(self: *CContextGroup) bool {
         var current = self.ref_count.load(.monotonic);
@@ -1217,6 +1222,17 @@ fn box(ctx: *Context, v: Value) JSValueRef {
     return @ptrCast(b);
 }
 
+fn privateExceptionBox(ctx: *Context, thrown: Value, encoded: EncodedValue) ?*Boxed {
+    const boxed = ctx.arena().create(Boxed) catch return null;
+    boxed.* = .{
+        .value = thrown,
+        .owner = ctx,
+        .private_kind = .exception,
+        .exception_encoded = encoded,
+    };
+    return boxed;
+}
+
 fn boxedFrom(ref: JSValueRef) ?*Boxed {
     return @ptrCast(@alignCast(ref orelse return null));
 }
@@ -1228,6 +1244,11 @@ fn privateBoxedFrom(encoded: EncodedValue) ?*Boxed {
         return null;
     boxed.owner.assertOwnerThread();
     return boxed;
+}
+
+fn privateIsExceptionCell(encoded: EncodedValue) bool {
+    const boxed = privateBoxedFrom(encoded) orelse return false;
+    return boxed.private_kind == .exception;
 }
 
 fn privateEncodedFromRef(ref: JSValueRef) EncodedValue {
@@ -1270,6 +1291,7 @@ fn privateValueFrom(global: JSContextRef, encoded: EncodedValue) ?Value {
     return encoded.toInternalPrimitive(Value) catch |err| switch (err) {
         error.CellRequiresHandle => {
             const boxed = privateBoxedFrom(encoded) orelse return null;
+            if (boxed.private_kind != .value) return null;
             if (boxed.owner != context) {
                 const group = context.c_api_group orelse return null;
                 if (boxed.owner.c_api_group != group) return null;
@@ -1301,6 +1323,7 @@ fn privateBoxFromCell(cell: ?*anyopaque) ?*Boxed {
 
 fn privateBigIntBoxFromCell(cell: ?*anyopaque) ?*Boxed {
     const boxed = privateBoxFromCell(cell) orelse return null;
+    if (boxed.private_kind != .value) return null;
     if (!boxed.value.isObject() or !boxed.value.asObj().is_bigint) return null;
     return boxed;
 }
@@ -1313,6 +1336,7 @@ fn privateBigIntObjectFrom(global: JSContextRef, encoded: EncodedValue) ?*Object
 
 fn privateStringBoxFromCell(cell: ?*anyopaque) ?*Boxed {
     const boxed = privateBoxFromCell(cell) orelse return null;
+    if (boxed.private_kind != .value) return null;
     if (!boxed.value.isString()) return null;
     return boxed;
 }
@@ -1378,6 +1402,7 @@ fn privateObjectJSType(object: *Object) private_jstype.Kind {
 
 fn privateJSType(encoded: EncodedValue) u8 {
     const boxed = privateBoxedFrom(encoded) orelse return 0;
+    if (boxed.private_kind == .exception) return 0; // JSC::CellType
     const kind: private_jstype.Kind = switch (boxed.value.kind()) {
         .string => .String,
         .object => privateObjectJSType(boxed.value.asObj()),
@@ -1405,6 +1430,7 @@ export fn JSC__JSValue__toBoolean(encoded: EncodedValue) callconv(.c) bool {
     const decoded = encoded.toInternalPrimitive(Value) catch |conversion_error| switch (conversion_error) {
         error.CellRequiresHandle => {
             const boxed = privateBoxedFrom(encoded) orelse return false;
+            if (boxed.private_kind == .exception) return true;
             // Bun's pinned shim uses pureToBoolean() and deliberately counts
             // masquerades-as-undefined objects as true at this boundary.
             if (boxed.value.isObject() and boxed.value.asObj().behavior.is_htmldda) return true;
@@ -1494,6 +1520,7 @@ export fn JSC__JSValue__toUInt64NoTruncate(encoded: EncodedValue) callconv(.c) u
         return @intFromFloat(number);
     }
     const boxed = privateBoxedFrom(encoded) orelse return 0;
+    if (boxed.private_kind != .value) return 0;
     if (!boxed.value.isObject() or !boxed.value.asObj().is_bigint) return 0;
     return privateBigIntModuloU64(boxed.value.asObj());
 }
@@ -1503,6 +1530,8 @@ export fn JSC__JSValue__isStrictEqual(
     right: EncodedValue,
     global: JSContextRef,
 ) callconv(.c) bool {
+    if (privateIsExceptionCell(left) or privateIsExceptionCell(right))
+        return left.rawBits() == right.rawBits();
     const lhs = privateValueFrom(global, left) orelse return false;
     const rhs = privateValueFrom(global, right) orelse return false;
     return value.strictEquals(lhs, rhs);
@@ -1513,6 +1542,8 @@ export fn JSC__JSValue__isSameValue(
     right: EncodedValue,
     global: JSContextRef,
 ) callconv(.c) bool {
+    if (privateIsExceptionCell(left) or privateIsExceptionCell(right))
+        return left.rawBits() == right.rawBits();
     const lhs = privateValueFrom(global, left) orelse return false;
     const rhs = privateValueFrom(global, right) orelse return false;
     return value.sameValue(lhs, rhs);
@@ -1530,6 +1561,7 @@ export fn JSC__JSCell__getType(cell: ?*anyopaque) callconv(.c) u8 {
 
 export fn JSC__JSBigInt__fromJS(encoded: EncodedValue) callconv(.c) ?*anyopaque {
     const boxed = privateBoxedFrom(encoded) orelse return null;
+    if (boxed.private_kind != .value) return null;
     if (!boxed.value.isObject() or !boxed.value.asObj().is_bigint) return null;
     return @ptrCast(boxed);
 }
@@ -1571,6 +1603,7 @@ export fn JSC__JSBigInt__toInt64(cell: ?*anyopaque) callconv(.c) i64 {
 
 export fn JSC__JSValue__asString(encoded: EncodedValue) callconv(.c) ?*anyopaque {
     const boxed = privateBoxedFrom(encoded) orelse return null;
+    if (boxed.private_kind != .value) return null;
     if (!boxed.value.isString()) return null;
     return @ptrCast(boxed);
 }
@@ -1608,6 +1641,7 @@ export fn JSC__JSString__toObject(cell: ?*anyopaque, global: JSContextRef) callc
 
 export fn JSC__JSCell__getObject(cell: ?*anyopaque) callconv(.c) JSObjectRef {
     const boxed = privateBoxFromCell(cell) orelse return null;
+    if (boxed.private_kind != .value) return null;
     if (!boxed.value.isObject()) return null;
     const object = boxed.value.asObj();
     if (object.is_symbol or object.is_bigint) return null;
@@ -1617,6 +1651,7 @@ export fn JSC__JSCell__getObject(cell: ?*anyopaque) callconv(.c) JSObjectRef {
 export fn JSC__JSCell__toObject(cell: ?*anyopaque, global: JSContextRef) callconv(.c) JSObjectRef {
     const context = ctxForHandleInspection(global) orelse return null;
     const boxed = privateBoxFromCell(cell) orelse return null;
+    if (boxed.private_kind != .value) return null;
     const handle: JSValueRef = @ptrCast(boxed);
     if (valueFromContext(context, handle) == null) return null;
     return JSValueToObject(global, handle, null);
@@ -1672,9 +1707,90 @@ export fn JSC__JSValue__dateInstanceFromNumber(global: JSContextRef, timestamp: 
 
 export fn JSC__JSValue__getUnixTimestamp(encoded: EncodedValue) callconv(.c) f64 {
     const boxed = privateBoxedFrom(encoded) orelse return std.math.nan(f64);
+    if (boxed.private_kind != .value) return std.math.nan(f64);
     if (!boxed.value.isObject() or !boxed.value.asObj().behavior.is_date)
         return std.math.nan(f64);
     return boxed.value.asObj().dateMs();
+}
+
+export fn JSC__JSGlobalObject__vm(global: JSContextRef) callconv(.c) ?*anyopaque {
+    const context = ctxForHandleInspection(global) orelse return null;
+    return context.c_api_group;
+}
+
+export fn JSGlobalObject__hasException(global: JSContextRef) callconv(.c) bool {
+    const context = ctxForHandleInspection(global) orelse return false;
+    const opaque_group = context.c_api_group orelse return false;
+    const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+    return group.pending_exception != null;
+}
+
+export fn JSGlobalObject__clearException(global: JSContextRef) callconv(.c) void {
+    const context = ctxForHandleInspection(global) orelse return;
+    const opaque_group = context.c_api_group orelse return;
+    const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+    group.pending_exception = null;
+    group.primary.private_pending_exception_root = null;
+}
+
+export fn JSGlobalObject__tryTakeException(global: JSContextRef) callconv(.c) EncodedValue {
+    const context = ctxForHandleInspection(global) orelse return .empty;
+    const opaque_group = context.c_api_group orelse return .empty;
+    const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+    const exception = group.pending_exception orelse return .empty;
+    group.pending_exception = null;
+    group.primary.private_pending_exception_root = null;
+    return EncodedValue.fromCellAddress(@intFromPtr(exception)) catch .empty;
+}
+
+export fn JSC__VM__throwError(
+    vm_ref: ?*anyopaque,
+    global: JSContextRef,
+    encoded: EncodedValue,
+) callconv(.c) void {
+    const context = ctxForHandleInspection(global) orelse return;
+    const opaque_group = context.c_api_group orelse return;
+    if (vm_ref != opaque_group) return;
+    const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+    if (group.pending_exception != null or encoded == .empty) return;
+
+    if (encoded.asCellAddress()) |_| {
+        const boxed = privateBoxedFrom(encoded) orelse return;
+        if (boxed.private_kind == .exception) {
+            group.pending_exception = boxed;
+            group.primary.private_pending_exception_root = boxed.value;
+            return;
+        }
+    } else |_| {}
+
+    const thrown = privateValueFrom(global, encoded) orelse return;
+    group.pending_exception = privateExceptionBox(context, thrown, encoded);
+    if (group.pending_exception != null)
+        group.primary.private_pending_exception_root = thrown;
+}
+
+export fn JSC__Exception__asJSValue(exception: ?*anyopaque) callconv(.c) EncodedValue {
+    const boxed = privateBoxFromCell(exception) orelse return .empty;
+    if (boxed.private_kind != .exception) return .empty;
+    return boxed.exception_encoded;
+}
+
+export fn JSC__JSValue__isException(encoded: EncodedValue, vm_ref: ?*anyopaque) callconv(.c) bool {
+    _ = vm_ref;
+    return privateIsExceptionCell(encoded);
+}
+
+export fn JSC__JSValue__toError_(encoded: EncodedValue) callconv(.c) EncodedValue {
+    const boxed = privateBoxedFrom(encoded) orelse return .empty;
+    if (boxed.private_kind == .exception) return boxed.exception_encoded;
+    if (!boxed.value.isObject() or !boxed.value.asObj().behavior.is_error) return .empty;
+    return encoded;
+}
+
+export fn JSC__JSValue__isAnyError(encoded: EncodedValue) callconv(.c) bool {
+    const boxed = privateBoxedFrom(encoded) orelse return false;
+    return boxed.private_kind == .exception or
+        (boxed.value.isObject() and boxed.value.asObj().behavior.is_error);
 }
 
 fn valueFromContext(ctx: *Context, ref: JSValueRef) ?Value {

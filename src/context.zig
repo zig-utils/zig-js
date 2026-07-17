@@ -2299,6 +2299,10 @@ pub const Context = struct {
     /// The empty root shape every object in this context transitions from.
     root_shape: *Shape,
     exception: ?value.Value = null,
+    /// Private-JSC VM exception root. The C ABI stores the distinct exception
+    /// cell on its shared group record; the primary Context keeps the thrown
+    /// value alive for precise GC until that cell is cleared or taken.
+    private_pending_exception_root: ?value.Value = null,
     /// Prebuilt, immutable-ish OOM completion object for capped shared-realm
     /// `Thread`s. It is allocated during bootstrap, while budget is still
     /// available, so an exhausted thread can publish a real Error object without
