@@ -8499,10 +8499,39 @@ comptime {
 extern fn mi_free(bytes: ?*anyopaque) callconv(.c) void;
 
 var private_default_allocator_release_count: if (builtin.is_test) std.atomic.Value(usize) else void = if (builtin.is_test) .init(0) else {};
+var private_mmap_release_count: if (builtin.is_test) std.atomic.Value(usize) else void = if (builtin.is_test) .init(0) else {};
 
 fn privateReleaseDefaultAllocatorBytes(bytes: ?*anyopaque, _: ?*anyopaque) callconv(.c) void {
     if (builtin.is_test) _ = private_default_allocator_release_count.fetchAdd(1, .monotonic);
     mi_free(bytes);
+}
+
+fn privateReleaseMmapBytes(bytes: ?*anyopaque, length_context: ?*anyopaque) callconv(.c) void {
+    const pointer = bytes orelse return;
+    const length = @intFromPtr(length_context orelse return);
+    if (length == 0) return;
+    if (builtin.is_test) _ = private_mmap_release_count.fetchAdd(1, .monotonic);
+    if (comptime builtin.os.tag == .windows) {
+        _ = std.os.windows.kernel32.UnmapViewOfFile(pointer);
+    } else {
+        const mapping: []align(std.heap.page_size_min) const u8 = @alignCast(@as([*]const u8, @ptrCast(pointer))[0..length]);
+        std.posix.munmap(mapping);
+    }
+}
+
+fn privateRejectUint8Array(context: *Context, name: []const u8, message: []const u8) EncodedValue {
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    defer context.popActiveInterpreter(&machine);
+    privateSetPendingAbrupt(context, &machine, machine.throwError(name, message));
+    return .empty;
 }
 
 fn privateMakeUint8Array(
@@ -8511,6 +8540,8 @@ fn privateMakeUint8Array(
     len: usize,
     copy: bool,
     is_buffer: bool,
+    adopt_deallocator: ?value.ExternalBufferDeallocator,
+    deallocator_context: ?*anyopaque,
 ) EncodedValue {
     const gc_saved = gc_mod.setActiveHeap(context.gc);
     defer _ = gc_mod.setActiveHeap(gc_saved);
@@ -8546,9 +8577,9 @@ fn privateMakeUint8Array(
         }
         break :copy_result typed;
     } else adopt_result: {
-        std.debug.assert(len > 0 and bytes != null and !is_buffer);
-        const owner = context.createExternalBufferOwner(bytes, privateReleaseDefaultAllocatorBytes, null) catch |err| {
-            privateReleaseDefaultAllocatorBytes(bytes, null);
+        std.debug.assert(len > 0 and bytes != null and adopt_deallocator != null);
+        const owner = context.createExternalBufferOwner(bytes, adopt_deallocator, deallocator_context) catch |err| {
+            adopt_deallocator.?(bytes, deallocator_context);
             privateSetPendingAbrupt(context, &machine, err);
             return .empty;
         };
@@ -8565,6 +8596,7 @@ fn privateMakeUint8Array(
             privateSetPendingAbrupt(context, &machine, err);
             return .empty;
         };
+        typed.asObj().typedArray().?.is_buffer = is_buffer;
         owner_transferred = true;
         break :adopt_result typed;
     };
@@ -8578,7 +8610,7 @@ export fn Bun__createUint8ArrayForCopy(
     is_buffer: bool,
 ) callconv(.c) EncodedValue {
     const context = ctxForEvaluation(global) orelse return .empty;
-    return privateMakeUint8Array(context, @constCast(bytes), len, true, is_buffer);
+    return privateMakeUint8Array(context, @constCast(bytes), len, true, is_buffer, null, null);
 }
 
 export fn JSUint8Array__fromDefaultAllocator(
@@ -8590,8 +8622,8 @@ export fn JSUint8Array__fromDefaultAllocator(
         if (len > 0) privateReleaseDefaultAllocatorBytes(bytes, null);
         return .empty;
     };
-    if (len == 0) return privateMakeUint8Array(context, null, 0, true, false);
-    return privateMakeUint8Array(context, bytes, len, false, false);
+    if (len == 0) return privateMakeUint8Array(context, null, 0, true, false, null, null);
+    return privateMakeUint8Array(context, bytes, len, false, false, privateReleaseDefaultAllocatorBytes, null);
 }
 
 export fn JSBuffer__isBuffer(global: JSContextRef, encoded: EncodedValue) callconv(.c) bool {
@@ -8599,6 +8631,54 @@ export fn JSBuffer__isBuffer(global: JSContextRef, encoded: EncodedValue) callco
     if (!internal.isObject()) return false;
     const typed = internal.asObj().typedArray() orelse return false;
     return typed.kind == .u8 and typed.is_buffer;
+}
+
+export fn JSBuffer__bufferFromLength(global: JSContextRef, requested_length: i64) callconv(.c) EncodedValue {
+    const context = ctxForEvaluation(global) orelse return .empty;
+    const length = std.math.cast(usize, requested_length) orelse
+        return privateRejectUint8Array(context, "RangeError", "Invalid array length");
+    return privateMakeUint8Array(context, null, length, true, true, null, null);
+}
+
+export fn JSBuffer__bufferFromPointerAndLengthAndDeinit(
+    global: JSContextRef,
+    bytes: [*]u8,
+    len: usize,
+    deallocator_context: ?*anyopaque,
+    deallocator: JSTypedArrayBytesDeallocator,
+) callconv(.c) EncodedValue {
+    const context = ctxForEvaluation(global) orelse {
+        if (deallocator) |callback| callback(bytes, deallocator_context);
+        return .empty;
+    };
+    if (len == 0) {
+        if (deallocator) |callback| callback(bytes, deallocator_context);
+        return privateMakeUint8Array(context, null, 0, true, true, null, null);
+    }
+    if (deallocator == null)
+        return privateRejectUint8Array(context, "TypeError", "non-empty Buffer ownership requires a deallocator");
+    return privateMakeUint8Array(context, bytes, len, false, true, deallocator, deallocator_context);
+}
+
+export fn JSBuffer__fromMmap(
+    global: JSContextRef,
+    address: *anyopaque,
+    len: usize,
+) callconv(.c) EncodedValue {
+    const context = ctxForEvaluation(global) orelse {
+        privateReleaseMmapBytes(address, if (len == 0) null else @ptrFromInt(len));
+        return .empty;
+    };
+    if (len == 0) return privateMakeUint8Array(context, null, 0, true, true, null, null);
+    return privateMakeUint8Array(
+        context,
+        address,
+        len,
+        false,
+        true,
+        privateReleaseMmapBytes,
+        @ptrFromInt(len),
+    );
 }
 
 fn makeExternalArrayBuffer(
@@ -14606,6 +14686,102 @@ test "private Uint8Array constructors preserve copy ownership and Buffer identit
     JSGlobalContextRelease(context);
     try std.testing.expectEqual(releases_before + 1, private_default_allocator_release_count.load(.monotonic));
     _ = internal;
+}
+
+test "private JSBuffer constructors preserve ranges external finalizers and mmap ownership" {
+    const DeallocatorState = struct {
+        calls: usize = 0,
+        expected_context: ?*anyopaque = null,
+
+        fn release(bytes: ?*anyopaque, raw_context: ?*anyopaque) callconv(.c) void {
+            const self: *@This() = @ptrCast(@alignCast(raw_context.?));
+            std.debug.assert(raw_context == self.expected_context);
+            self.calls += 1;
+            std.c.free(bytes);
+        }
+    };
+
+    const context = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
+
+    const allocated = JSBuffer__bufferFromLength(context, 4);
+    try std.testing.expect(JSBuffer__isBuffer(context, allocated));
+    const allocated_typed = (privateValueFrom(context, allocated) orelse return error.BufferCreateFailed).asObj().typedArray().?;
+    try std.testing.expectEqual(@as(usize, 4), allocated_typed.currentLength().?);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0, 0, 0, 0 }, allocated_typed.buffer.arrayBuffer().?.bytes());
+
+    try std.testing.expectEqual(EncodedValue.empty, JSBuffer__bufferFromLength(context, -1));
+    try std.testing.expect(JSGlobalObject__hasException(context));
+    JSGlobalObject__clearException(context);
+    try std.testing.expectEqual(EncodedValue.empty, JSBuffer__bufferFromLength(context, std.math.maxInt(i64)));
+    try std.testing.expect(JSGlobalObject__hasException(context));
+    JSGlobalObject__clearException(context);
+
+    var deallocator_state = DeallocatorState{};
+    deallocator_state.expected_context = &deallocator_state;
+    const external_pointer = std.c.malloc(4) orelse return error.OutOfMemory;
+    const external_bytes = @as([*]u8, @ptrCast(external_pointer))[0..4];
+    @memcpy(external_bytes, &[_]u8{ 11, 12, 13, 14 });
+    const external = JSBuffer__bufferFromPointerAndLengthAndDeinit(
+        context,
+        external_bytes.ptr,
+        external_bytes.len,
+        &deallocator_state,
+        DeallocatorState.release,
+    );
+    try std.testing.expect(JSBuffer__isBuffer(context, external));
+    const external_typed = (privateValueFrom(context, external) orelse return error.BufferCreateFailed).asObj().typedArray().?;
+    const external_backing = external_typed.buffer.arrayBuffer().?;
+    try std.testing.expectEqual(@intFromPtr(external_bytes.ptr), @intFromPtr(external_backing.bytes().ptr));
+    try std.testing.expectEqualSlices(u8, external_bytes, external_backing.bytes());
+    try std.testing.expect(external_backing.external_owner.?.release());
+    try std.testing.expect(!external_backing.external_owner.?.release());
+    try std.testing.expectEqual(@as(usize, 1), deallocator_state.calls);
+
+    const empty_pointer = std.c.malloc(1) orelse return error.OutOfMemory;
+    const empty = JSBuffer__bufferFromPointerAndLengthAndDeinit(
+        context,
+        @ptrCast(empty_pointer),
+        0,
+        &deallocator_state,
+        DeallocatorState.release,
+    );
+    try std.testing.expect(JSBuffer__isBuffer(context, empty));
+    try std.testing.expectEqual(@as(usize, 0), (privateValueFrom(context, empty) orelse return error.BufferCreateFailed).asObj().typedArray().?.currentLength().?);
+    try std.testing.expectEqual(@as(usize, 2), deallocator_state.calls);
+
+    var invalid_bytes = [_]u8{1};
+    try std.testing.expectEqual(
+        EncodedValue.empty,
+        JSBuffer__bufferFromPointerAndLengthAndDeinit(context, &invalid_bytes, 1, null, null),
+    );
+    try std.testing.expect(JSGlobalObject__hasException(context));
+    JSGlobalObject__clearException(context);
+
+    if (comptime builtin.os.tag != .windows) {
+        const mapping_length = std.heap.page_size_min;
+        const mapping = try std.posix.mmap(
+            null,
+            mapping_length,
+            .{ .READ = true, .WRITE = true },
+            .{ .TYPE = .PRIVATE, .ANONYMOUS = true },
+            -1,
+            0,
+        );
+        mapping[0] = 0x5a;
+        const mmap_releases_before = private_mmap_release_count.load(.monotonic);
+        const mapped = JSBuffer__fromMmap(context, mapping.ptr, mapping.len);
+        try std.testing.expect(JSBuffer__isBuffer(context, mapped));
+        const mapped_typed = (privateValueFrom(context, mapped) orelse return error.BufferCreateFailed).asObj().typedArray().?;
+        const mapped_backing = mapped_typed.buffer.arrayBuffer().?;
+        try std.testing.expectEqual(@intFromPtr(mapping.ptr), @intFromPtr(mapped_backing.bytes().ptr));
+        try std.testing.expectEqual(@as(u8, 0x5a), mapped_backing.bytes()[0]);
+        try std.testing.expect(mapped_backing.external_owner.?.release());
+        try std.testing.expect(!mapped_backing.external_owner.?.release());
+        try std.testing.expectEqual(mmap_releases_before + 1, private_mmap_release_count.load(.monotonic));
+    }
+
+    JSGlobalContextRelease(context);
+    try std.testing.expectEqual(@as(usize, 2), deallocator_state.calls);
 }
 
 test "private rooted native value containers retain and release exact cells" {

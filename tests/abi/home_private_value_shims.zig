@@ -150,6 +150,9 @@ extern "c" fn Bun__writeHTTPDate(*[32]u8, usize, u64) c_int;
 extern "c" fn Bun__createUint8ArrayForCopy(JSContextRef, ?*const anyopaque, usize, bool) EncodedValue;
 extern "c" fn JSUint8Array__fromDefaultAllocator(JSContextRef, [*]u8, usize) EncodedValue;
 extern "c" fn JSBuffer__isBuffer(JSContextRef, EncodedValue) bool;
+extern "c" fn JSBuffer__bufferFromLength(JSContextRef, i64) EncodedValue;
+extern "c" fn JSBuffer__bufferFromPointerAndLengthAndDeinit(JSContextRef, [*]u8, usize, ?*anyopaque, ?*const fn (?*anyopaque, ?*anyopaque) callconv(.c) void) EncodedValue;
+extern "c" fn JSBuffer__fromMmap(JSContextRef, *anyopaque, usize) EncodedValue;
 extern "c" fn JSObjectGetTypedArrayBytesPtr(JSContextRef, JSObjectRef, [*c]JSValueRef) ?*anyopaque;
 extern "c" fn JSObjectGetTypedArrayLength(JSContextRef, JSObjectRef, [*c]JSValueRef) usize;
 extern "c" fn ZigString__toErrorInstance(*const ZigString, JSContextRef) EncodedValue;
@@ -310,6 +313,16 @@ const PromiseCallbackState = struct {
     value: EncodedValue,
     calls: usize = 0,
 };
+
+const BufferDeallocatorState = struct {
+    calls: usize = 0,
+};
+
+fn bufferFixtureDeallocator(bytes: ?*anyopaque, raw_state: ?*anyopaque) callconv(.c) void {
+    const state: *BufferDeallocatorState = @ptrCast(@alignCast(raw_state.?));
+    state.calls += 1;
+    std.c.free(bytes);
+}
 
 const MarkedArgumentFixtureState = struct {
     vm: ?*anyopaque,
@@ -796,6 +809,60 @@ pub fn main() void {
     const empty_uint8 = JSUint8Array__fromDefaultAllocator(context, @ptrCast(&empty_sentinel), 0);
     if (JSObjectGetTypedArrayLength(context, empty_uint8.cellPointer(), &typed_exception) != 0 or typed_exception != null)
         fail("empty default-allocator Uint8Array mismatch");
+
+    const allocated_buffer = JSBuffer__bufferFromLength(context, 5);
+    if (!JSBuffer__isBuffer(context, allocated_buffer) or
+        JSObjectGetTypedArrayLength(context, allocated_buffer.cellPointer(), &typed_exception) != 5 or typed_exception != null)
+        fail("Buffer length constructor mismatch");
+    if (JSBuffer__bufferFromLength(context, -1) != .empty or !JSGlobalObject__hasException(context))
+        fail("negative Buffer length did not throw");
+    JSGlobalObject__clearException(context);
+
+    var buffer_deallocator_state = BufferDeallocatorState{};
+    const external_buffer_raw = std.c.malloc(3) orelse fail("external Buffer fixture allocation failed");
+    const external_buffer_input = @as([*]u8, @ptrCast(external_buffer_raw))[0..3];
+    @memcpy(external_buffer_input, &[_]u8{ 21, 22, 23 });
+    const external_buffer = JSBuffer__bufferFromPointerAndLengthAndDeinit(
+        context,
+        external_buffer_input.ptr,
+        external_buffer_input.len,
+        &buffer_deallocator_state,
+        bufferFixtureDeallocator,
+    );
+    const external_buffer_bytes = JSObjectGetTypedArrayBytesPtr(context, external_buffer.cellPointer(), &typed_exception) orelse
+        fail("external Buffer bytes lookup failed");
+    if (typed_exception != null or !JSBuffer__isBuffer(context, external_buffer) or
+        external_buffer_bytes != external_buffer_raw or buffer_deallocator_state.calls != 0)
+        fail("external Buffer ownership mismatch");
+
+    const empty_buffer_raw = std.c.malloc(1) orelse fail("empty Buffer fixture allocation failed");
+    const empty_buffer = JSBuffer__bufferFromPointerAndLengthAndDeinit(
+        context,
+        @ptrCast(empty_buffer_raw),
+        0,
+        &buffer_deallocator_state,
+        bufferFixtureDeallocator,
+    );
+    if (!JSBuffer__isBuffer(context, empty_buffer) or buffer_deallocator_state.calls != 1)
+        fail("empty Buffer did not release transferred storage immediately");
+
+    if (comptime @import("builtin").os.tag != .windows) {
+        const fixture_mapping = std.posix.mmap(
+            null,
+            std.heap.page_size_min,
+            .{ .READ = true, .WRITE = true },
+            .{ .TYPE = .PRIVATE, .ANONYMOUS = true },
+            -1,
+            0,
+        ) catch fail("Buffer mmap fixture allocation failed");
+        fixture_mapping[0] = 0x6b;
+        const mmap_buffer = JSBuffer__fromMmap(context, fixture_mapping.ptr, fixture_mapping.len);
+        const mmap_buffer_bytes = JSObjectGetTypedArrayBytesPtr(context, mmap_buffer.cellPointer(), &typed_exception) orelse
+            fail("mmap Buffer bytes lookup failed");
+        if (typed_exception != null or !JSBuffer__isBuffer(context, mmap_buffer) or
+            @intFromPtr(mmap_buffer_bytes) != @intFromPtr(fixture_mapping.ptr) or @as(*u8, @ptrCast(mmap_buffer_bytes)).* != 0x6b)
+            fail("mmap Buffer ownership mismatch");
+    }
 
     StringBuilder__init(&string_builder);
     StringBuilder__appendInt(&string_builder, std.math.minInt(i32));
@@ -2841,5 +2908,5 @@ pub fn main() void {
         TopExceptionScope__exceptionIncludingTraps(&verification_scope) != null)
         fail("private TopExceptionScope destruction mismatch");
 
-    std.debug.print("Home private value shims: 192/192 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 195/195 symbols linked; runtime matrix passed\n", .{});
 }
