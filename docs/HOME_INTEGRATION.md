@@ -31,6 +31,16 @@ Nevertheless, **zig-js is not yet a drop-in for the JSC that Home's production
 runtime links**: success of the 50-function public profile says nothing about
 the thousands of LLInt and private/generated binding symbols above.
 
+The first source-level private inventory is now reproducible too. At the same
+pinned Home revision, the 58 JSC source files containing legacy/private
+`extern fn` declarations require 448 unique symbols: 432 private JSC/Bun/WebCore
+entries, 15 public-C overlaps already implemented by zig-js, and one platform
+libc import. See [the exact declaration inventory](abi/home-private-7ed99c02-inventory.json)
+and run `zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"`
+to verify the live revision, every source hash, signature, classification, and
+calling convention. This replaces a vague source-level estimate, but the 432
+private entries remain unimplemented under #163.
+
 ## Two migration paths
 
 **Path A — rewrite Home's runtime onto zig-js's public C API.** (Recommended.)

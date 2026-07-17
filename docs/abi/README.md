@@ -33,3 +33,32 @@ pinned Home public consumer compiles, links, and runs against zig-js. It does
 not claim support for Home's `JSC__*`, `Bun__*`, generated-class, JSC object
 layout, LLInt, or other private interfaces; those require separate `private_abi`
 profiles tracked by GitHub issues #140, #163, and #164.
+
+## Home private inventory
+
+`home-private-7ed99c02` uses a comment/string-aware scanner over the pinned
+Home `packages/runtime/src/jsc` tree. It records every legacy/private-style
+`extern fn` declaration with its normalized signature and digest, source file
+and line, source-file digest, classification, status, and effective calling
+convention. The exact current denominator is:
+
+| Classification | Symbols |
+|---|---:|
+| Private JSC/Bun/WebCore ABI, pending under #163 | 432 |
+| Overlap with zig-js's completed public C target | 15 |
+| Platform libc import | 1 |
+| **Total** | **448** |
+
+The 448 declarations come from 58 pinned source files, with zero duplicate or
+unclassified symbols. Calling conventions are also explicit: 443 use the
+`extern` C default, four spell `.c`, and one uses Home's `jsc.conv` (x86_64
+SysV on Windows x64, C elsewhere).
+
+```sh
+zig build home-private-abi-audit
+zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"
+```
+
+This inventory is a denominator, not an implementation claim. The 432 private
+entries remain pending until #163 provides their type/layout contracts, shims,
+and consumer runtime evidence.

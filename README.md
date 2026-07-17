@@ -233,6 +233,11 @@ reports **50/50 zig-js exports with zero missing**, and its Zig fixture forces
 every symbol through the linker before running context, evaluation, retain, GC,
 and typed-array checks. This is explicitly a public embedding profile—not a
 claim that Home's or Bun's private `JSC__*`/`Bun__*` ABI is implemented.
+The separately generated
+[Home private inventory](docs/abi/home-private-7ed99c02-inventory.json) makes
+that remaining boundary concrete: **448 unique extern symbols from 58 pinned
+files**, classified as **432 private pending**, 15 already-covered public-C
+overlaps, and one platform import, with zero duplicate or unclassified entries.
 The pinned public C inventory has no pending declarations. Inspector sessions
 now publish stable scripts and exact statement locations, and provide real
 `debugger;`, explicit pause/resume control, and deterministically resolved
@@ -335,6 +340,8 @@ zig build test-c-api             # C and C++ compile-link-runtime ABI gate
 zig build home-public-abi-audit  # pinned Home revision-independent profile gate
 zig build test-home-public-abi   # Home Zig consumer compile-link-runtime gate
 zig build home-public-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"
+zig build home-private-abi-audit # 448-symbol pinned private denominator
+zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"
 zig build objc-api-audit         # pinned Objective-C header/inventory drift gate
 zig build test-objc-api-headers  # macOS ARC/blocks header compilation gate
 zig build test-objc-api          # macOS Objective-C compile-link-runtime gate
