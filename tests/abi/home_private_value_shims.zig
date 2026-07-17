@@ -41,6 +41,7 @@ extern "c" fn JSGlobalContextCreate(?*anyopaque) JSContextRef;
 extern "c" fn JSGlobalContextCreateInGroup(?*anyopaque, ?*anyopaque) JSContextRef;
 extern "c" fn JSGlobalContextRelease(JSContextRef) void;
 extern "c" fn JSContextGetGroup(JSContextRef) ?*anyopaque;
+extern "c" fn JSContextGetGlobalObject(JSContextRef) JSObjectRef;
 extern "c" fn JSValueMakeString(JSContextRef, JSStringRef) JSValueRef;
 extern "c" fn JSValueToNumber(JSContextRef, JSValueRef, [*c]JSValueRef) f64;
 extern "c" fn JSStringCreateWithUTF8CString([*:0]const u8) JSStringRef;
@@ -49,6 +50,7 @@ extern "c" fn JSObjectMake(JSContextRef, ?*anyopaque, ?*anyopaque) JSObjectRef;
 extern "c" fn JSObjectGetPrototype(JSContextRef, JSObjectRef) JSValueRef;
 extern "c" fn JSObjectSetPrototype(JSContextRef, JSObjectRef, JSValueRef) void;
 extern "c" fn JSObjectGetProperty(JSContextRef, JSObjectRef, JSStringRef, [*c]JSValueRef) JSValueRef;
+extern "c" fn JSObjectSetProperty(JSContextRef, JSObjectRef, JSStringRef, JSValueRef, c_uint, [*c]JSValueRef) void;
 extern "c" fn JSEvaluateScript(JSContextRef, JSStringRef, JSObjectRef, JSStringRef, c_int, [*c]JSValueRef) JSValueRef;
 
 extern "c" fn JSC__JSValue__eqlCell(EncodedValue, ?*anyopaque) bool;
@@ -111,6 +113,23 @@ extern "c" fn JSC__JSValue__isIterable(EncodedValue, JSContextRef) bool;
 extern "c" fn JSC__JSValue__stringIncludes(EncodedValue, JSContextRef, EncodedValue) bool;
 extern "c" fn JSC__JSValue__isClass(EncodedValue, JSContextRef) bool;
 extern "c" fn JSC__JSValue__isAggregateError(EncodedValue, JSContextRef) bool;
+extern "c" fn JSC__AnyPromise__wrap(JSContextRef, EncodedValue, *anyopaque, PromiseWrapCallback) void;
+extern "c" fn JSC__JSPromise__create(JSContextRef) ?*anyopaque;
+extern "c" fn JSC__JSPromise__rejectedPromise(JSContextRef, EncodedValue) ?*anyopaque;
+extern "c" fn JSC__JSPromise__rejectedPromiseValue(JSContextRef, EncodedValue) EncodedValue;
+extern "c" fn JSC__JSPromise__resolvedPromise(JSContextRef, EncodedValue) ?*anyopaque;
+extern "c" fn JSC__JSPromise__resolvedPromiseValue(JSContextRef, EncodedValue) EncodedValue;
+extern "c" fn JSC__JSPromise__wrap(JSContextRef, *anyopaque, PromiseWrapCallback) EncodedValue;
+extern "c" fn JSC__JSValue__asInternalPromise(EncodedValue) ?*anyopaque;
+extern "c" fn JSC__JSValue__asPromise(EncodedValue) ?*anyopaque;
+extern "c" fn JSC__JSValue__createInternalPromise(JSContextRef) EncodedValue;
+
+const PromiseWrapCallback = *const fn (*anyopaque, JSContextRef) callconv(.c) EncodedValue;
+
+const PromiseCallbackState = struct {
+    value: EncodedValue,
+    calls: usize = 0,
+};
 
 fn fail(message: []const u8) noreturn {
     std.debug.print("Home private value shims: {s}\n", .{message});
@@ -141,6 +160,58 @@ fn getNumberProperty(context: JSContextRef, object: EncodedValue, name: [*:0]con
     const result = JSValueToNumber(context, property.cellPointer(), &exception);
     if (exception != null) fail("numeric property conversion failed");
     return result;
+}
+
+fn exposeCell(context: JSContextRef, name: [*:0]const u8, encoded: EncodedValue) void {
+    const global = JSContextGetGlobalObject(context) orelse fail("global object lookup failed");
+    const property = JSStringCreateWithUTF8CString(name) orelse fail("global property string creation failed");
+    defer JSStringRelease(property);
+    const cell = encoded.cellPointer() orelse fail("attempted to expose a non-cell value");
+    var exception: JSValueRef = null;
+    JSObjectSetProperty(context, global, property, cell, 0, &exception);
+    if (exception != null) fail("global property write failed");
+}
+
+fn promiseCallback(context: *anyopaque, global: JSContextRef) callconv(.c) EncodedValue {
+    _ = global;
+    const state: *PromiseCallbackState = @ptrCast(@alignCast(context));
+    state.calls += 1;
+    return state.value;
+}
+
+fn throwingPromiseCallback(context: *anyopaque, global: JSContextRef) callconv(.c) EncodedValue {
+    const state: *PromiseCallbackState = @ptrCast(@alignCast(context));
+    state.calls += 1;
+    JSC__VM__throwError(JSC__JSGlobalObject__vm(global), global, state.value);
+    return .undefined;
+}
+
+fn expectPromise(
+    context: JSContextRef,
+    encoded: EncodedValue,
+    state: enum { pending, fulfilled, rejected },
+    expected: ?EncodedValue,
+) void {
+    exposeCell(context, "__private_observed_promise", encoded);
+    _ = evaluate(context,
+        \\globalThis.__private_promise_state = 'pending';
+        \\globalThis.__private_promise_value = undefined;
+        \\__private_observed_promise.then(
+        \\  value => { __private_promise_state = 'fulfilled'; __private_promise_value = value; },
+        \\  reason => { __private_promise_state = 'rejected'; __private_promise_value = reason; }
+        \\);
+    );
+    const expected_state = switch (state) {
+        .pending => evaluate(context, "'pending'"),
+        .fulfilled => evaluate(context, "'fulfilled'"),
+        .rejected => evaluate(context, "'rejected'"),
+    };
+    if (!JSC__JSValue__isStrictEqual(evaluate(context, "__private_promise_state"), expected_state, context))
+        fail("private Promise state mismatch");
+    if (expected) |value_| {
+        if (!JSC__JSValue__isStrictEqual(evaluate(context, "__private_promise_value"), value_, context))
+            fail("private Promise result identity mismatch");
+    }
 }
 
 pub fn main() void {
@@ -895,5 +966,139 @@ pub fn main() void {
     if (!JSC__JSValue__isAggregateError(aggregate_error, context))
         fail("private AggregateError classification depended on mutable properties");
 
-    std.debug.print("Home private value shims: 59/59 symbols linked; runtime matrix passed\n", .{});
+    const internal_promise = JSC__JSValue__createInternalPromise(context);
+    const created_promise_cell = JSC__JSPromise__create(sibling_context) orelse fail("private JSPromise creation failed");
+    const created_promise = EncodedValue.fromBits(@intFromPtr(created_promise_cell));
+    if (internal_promise == .empty or
+        JSC__JSValue__asPromise(internal_promise) != internal_promise.cellPointer() or
+        JSC__JSValue__asInternalPromise(internal_promise) != internal_promise.cellPointer() or
+        JSC__JSValue__asPromise(created_promise) != created_promise_cell or
+        JSC__JSValue__asInternalPromise(created_promise) != created_promise_cell or
+        JSC__JSValue__asPromise(.undefined) != null or
+        JSC__JSValue__asInternalPromise(encoded_object) != null or
+        JSC__JSValue__asPromise(primitive_exception) != null)
+        fail("private Promise creation/downcast mismatch");
+    if (!JSC__JSValue__isStrictEqual(
+        JSC__JSValue__getPrototype(created_promise, sibling_context),
+        evaluate(sibling_context, "Promise.prototype"),
+        sibling_context,
+    )) fail("private Promise selected-realm prototype mismatch");
+    expectPromise(context, internal_promise, .pending, null);
+    expectPromise(sibling_context, created_promise, .pending, null);
+
+    const direct_value = evaluate(context, "globalThis.__private_direct_value = { marker: 1 }; __private_direct_value");
+    const resolved_promise_cell = JSC__JSPromise__resolvedPromise(sibling_context, direct_value) orelse fail("private resolved JSPromise failed");
+    const resolved_promise = EncodedValue.fromBits(@intFromPtr(resolved_promise_cell));
+    const resolved_value_promise = JSC__JSPromise__resolvedPromiseValue(context, direct_value);
+    expectPromise(sibling_context, resolved_promise, .fulfilled, direct_value);
+    expectPromise(context, resolved_value_promise, .fulfilled, direct_value);
+
+    const direct_thenable = evaluate(context,
+        \\globalThis.__private_thenable_calls = 0;
+        \\globalThis.__private_direct_thenable = { then(resolve) { __private_thenable_calls++; resolve(99); } };
+        \\__private_direct_thenable;
+    );
+    const direct_thenable_promise = JSC__JSPromise__resolvedPromiseValue(context, direct_thenable);
+    expectPromise(context, direct_thenable_promise, .fulfilled, direct_thenable);
+    if (Bun__JSValue__toNumber(evaluate(context, "__private_thenable_calls"), context) != 0)
+        fail("private resolved Promise assimilated thenable");
+
+    const rejected_promise_cell = JSC__JSPromise__rejectedPromise(context, EncodedValue.fromInt32(321)) orelse fail("private rejected JSPromise failed");
+    const rejected_promise = EncodedValue.fromBits(@intFromPtr(rejected_promise_cell));
+    const rejected_value_promise = JSC__JSPromise__rejectedPromiseValue(sibling_context, direct_value);
+    expectPromise(context, rejected_promise, .rejected, EncodedValue.fromInt32(321));
+    expectPromise(sibling_context, rejected_value_promise, .rejected, direct_value);
+
+    const foreign_promise = JSC__JSValue__createInternalPromise(foreign_context);
+    if (JSC__JSValue__asPromise(foreign_promise) != foreign_promise.cellPointer())
+        fail("private Promise downcast rejected another live VM");
+    if (JSC__JSPromise__resolvedPromiseValue(context, EncodedValue.fromRef(foreign_object)) != .empty or
+        !JSGlobalObject__hasException(context))
+        fail("private resolved Promise accepted foreign-VM value");
+    const foreign_promise_exception = JSGlobalObject__tryTakeException(context);
+    const foreign_promise_error = JSC__Exception__asJSValue(foreign_promise_exception.cellPointer());
+    if (!JSC__JSValue__isStrictEqual(getProperty(context, foreign_promise_error, "name"), evaluate(context, "'TypeError'"), context))
+        fail("private resolved Promise foreign value error mismatch");
+
+    var passthrough_state = PromiseCallbackState{ .value = resolved_value_promise };
+    const passthrough = JSC__JSPromise__wrap(context, &passthrough_state, promiseCallback);
+    if (passthrough != resolved_value_promise or passthrough_state.calls != 1)
+        fail("private JSPromise wrap passthrough mismatch");
+
+    var fulfilled_wrap_state = PromiseCallbackState{ .value = direct_value };
+    const fulfilled_wrap = JSC__JSPromise__wrap(sibling_context, &fulfilled_wrap_state, promiseCallback);
+    expectPromise(sibling_context, fulfilled_wrap, .fulfilled, direct_value);
+    if (fulfilled_wrap_state.calls != 1)
+        fail("private JSPromise fulfilled callback count mismatch");
+
+    const wrap_error = evaluate(context, "globalThis.__private_wrap_error = new RangeError('wrapped'); __private_wrap_error");
+    var error_wrap_state = PromiseCallbackState{ .value = wrap_error };
+    const error_wrap = JSC__JSPromise__wrap(context, &error_wrap_state, promiseCallback);
+    expectPromise(context, error_wrap, .rejected, wrap_error);
+
+    var thrown_wrap_state = PromiseCallbackState{ .value = EncodedValue.fromInt32(777) };
+    const thrown_wrap = JSC__JSPromise__wrap(context, &thrown_wrap_state, throwingPromiseCallback);
+    if (JSGlobalObject__hasException(context))
+        fail("private JSPromise wrap did not consume callback exception");
+    expectPromise(context, thrown_wrap, .rejected, EncodedValue.fromInt32(777));
+
+    var foreign_wrap_state = PromiseCallbackState{ .value = EncodedValue.fromRef(foreign_object) };
+    const foreign_wrap = JSC__JSPromise__wrap(context, &foreign_wrap_state, promiseCallback);
+    if (JSGlobalObject__hasException(context))
+        fail("private JSPromise wrap leaked invalid callback exception");
+    exposeCell(context, "__private_foreign_wrap", foreign_wrap);
+    _ = evaluate(context, "globalThis.__private_foreign_wrap_name = ''; __private_foreign_wrap.catch(error => { __private_foreign_wrap_name = error.name; });");
+    if (!JSC__JSValue__isStrictEqual(evaluate(context, "__private_foreign_wrap_name"), evaluate(context, "'TypeError'"), context))
+        fail("private JSPromise wrap foreign callback error mismatch");
+
+    const any_fulfilled = JSC__JSValue__createInternalPromise(context);
+    var any_fulfilled_state = PromiseCallbackState{ .value = direct_value };
+    JSC__AnyPromise__wrap(context, any_fulfilled, &any_fulfilled_state, promiseCallback);
+    expectPromise(context, any_fulfilled, .fulfilled, direct_value);
+
+    const any_rejected = JSC__JSValue__createInternalPromise(context);
+    var any_rejected_state = PromiseCallbackState{ .value = wrap_error };
+    JSC__AnyPromise__wrap(context, any_rejected, &any_rejected_state, promiseCallback);
+    expectPromise(context, any_rejected, .rejected, wrap_error);
+
+    const any_thrown = JSC__JSValue__createInternalPromise(context);
+    var any_thrown_state = PromiseCallbackState{ .value = direct_value };
+    JSC__AnyPromise__wrap(context, any_thrown, &any_thrown_state, throwingPromiseCallback);
+    if (JSGlobalObject__hasException(context))
+        fail("private AnyPromise wrap did not consume callback exception");
+    expectPromise(context, any_thrown, .rejected, direct_value);
+
+    const assimilating_thenable = evaluate(context,
+        \\globalThis.__private_assimilating_thenable = { then(resolve) { resolve(55); } };
+        \\__private_assimilating_thenable;
+    );
+    const any_assimilated = JSC__JSValue__createInternalPromise(context);
+    var any_assimilated_state = PromiseCallbackState{ .value = assimilating_thenable };
+    JSC__AnyPromise__wrap(context, any_assimilated, &any_assimilated_state, promiseCallback);
+    expectPromise(context, any_assimilated, .fulfilled, EncodedValue.fromInt32(55));
+
+    const any_self = JSC__JSValue__createInternalPromise(context);
+    var any_self_state = PromiseCallbackState{ .value = any_self };
+    JSC__AnyPromise__wrap(context, any_self, &any_self_state, promiseCallback);
+    exposeCell(context, "__private_self_promise", any_self);
+    _ = evaluate(context, "globalThis.__private_self_name = ''; __private_self_promise.catch(error => { __private_self_name = error.name; });");
+    if (!JSC__JSValue__isStrictEqual(evaluate(context, "__private_self_name"), evaluate(context, "'TypeError'"), context))
+        fail("private AnyPromise self-resolution mismatch");
+
+    var settled_wrap_state = PromiseCallbackState{ .value = EncodedValue.fromInt32(999) };
+    JSC__AnyPromise__wrap(context, resolved_value_promise, &settled_wrap_state, promiseCallback);
+    expectPromise(context, resolved_value_promise, .fulfilled, direct_value);
+    if (settled_wrap_state.calls != 1)
+        fail("private AnyPromise settled callback count mismatch");
+
+    var invalid_target_state = PromiseCallbackState{ .value = .true };
+    JSC__AnyPromise__wrap(context, encoded_object, &invalid_target_state, promiseCallback);
+    if (invalid_target_state.calls != 0 or !JSGlobalObject__hasException(context))
+        fail("private AnyPromise invalid target handling mismatch");
+    const invalid_target_exception = JSGlobalObject__tryTakeException(context);
+    const invalid_target_error = JSC__Exception__asJSValue(invalid_target_exception.cellPointer());
+    if (!JSC__JSValue__isStrictEqual(getProperty(context, invalid_target_error, "name"), evaluate(context, "'TypeError'"), context))
+        fail("private AnyPromise invalid target error mismatch");
+
+    std.debug.print("Home private value shims: 69/69 symbols linked; runtime matrix passed\n", .{});
 }

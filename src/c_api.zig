@@ -46,6 +46,7 @@ const Context = ContextMod.Context;
 const Value = value.Value;
 const Object = value.Object;
 const EncodedValue = private_encoded_value.EncodedValue;
+const PrivatePromiseWrapCallback = *const fn (*anyopaque, JSContextRef) callconv(.c) EncodedValue;
 
 /// Global allocator for C-API-created contexts and strings. `page_allocator`
 /// needs no libc and is always available; a tuned allocator can replace it.
@@ -1354,6 +1355,69 @@ fn privateBigIntBoxFromCell(cell: ?*anyopaque) ?*Boxed {
     return boxed;
 }
 
+fn privatePromiseCellFromEncoded(encoded: EncodedValue) ?*anyopaque {
+    const boxed = privateBoxedFrom(encoded) orelse return null;
+    if (boxed.private_kind != .value or promise.promiseOf(boxed.value) == null) return null;
+    return @ptrCast(boxed);
+}
+
+fn privateTakePendingExceptionValue(context: *Context) ?Value {
+    const opaque_group = context.c_api_group orelse return null;
+    const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+    const exception = group.pending_exception orelse return null;
+    group.pending_exception = null;
+    group.primary.private_pending_exception_root = null;
+    return exception.value;
+}
+
+fn privateEncodeNativePromise(
+    context: *Context,
+    machine: *interp.Interpreter,
+    state: ?promise.State,
+    stored_value: Value,
+) EncodedValue {
+    const object = if (state) |settled_state|
+        promise.newSettledPromise(machine, settled_state, stored_value)
+    else
+        promise.newPromise(machine);
+    const result = object catch |err| {
+        privateSetPendingAbrupt(context, machine, err);
+        return .empty;
+    };
+    return privateEncodeResult(context, machine, Value.obj(result));
+}
+
+fn privateCreateNativePromise(
+    global: JSContextRef,
+    state: ?promise.State,
+    encoded_value: EncodedValue,
+) EncodedValue {
+    const context = ctxForEvaluation(global) orelse return .empty;
+    const opaque_group = context.c_api_group orelse return .empty;
+    const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+    if (group.pending_exception != null) return .empty;
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    defer context.popActiveInterpreter(&machine);
+
+    const stored_value = if (state != null) value_: {
+        const internal = privateValueFrom(global, encoded_value) orelse {
+            const err = machine.throwError("TypeError", "Promise value belongs to another VM");
+            privateSetPendingAbrupt(context, &machine, err);
+            return .empty;
+        };
+        break :value_ internal;
+    } else Value.undef();
+    return privateEncodeNativePromise(context, &machine, state, stored_value);
+}
+
 fn privateBigIntObjectFrom(global: JSContextRef, encoded: EncodedValue) ?*Object {
     const internal = privateValueFrom(global, encoded) orelse return null;
     if (!internal.isObject() or !internal.asObj().is_bigint) return null;
@@ -2230,6 +2294,147 @@ export fn JSC__JSValue__isAnyError(encoded: EncodedValue) callconv(.c) bool {
     const boxed = privateBoxedFrom(encoded) orelse return false;
     return boxed.private_kind == .exception or
         (boxed.value.isObject() and boxed.value.asObj().behavior.is_error);
+}
+
+export fn JSC__JSValue__asInternalPromise(encoded: EncodedValue) callconv(.c) ?*anyopaque {
+    return privatePromiseCellFromEncoded(encoded);
+}
+
+export fn JSC__JSValue__asPromise(encoded: EncodedValue) callconv(.c) ?*anyopaque {
+    return privatePromiseCellFromEncoded(encoded);
+}
+
+export fn JSC__JSValue__createInternalPromise(global: JSContextRef) callconv(.c) EncodedValue {
+    return privateCreateNativePromise(global, null, .undefined);
+}
+
+export fn JSC__JSPromise__create(global: JSContextRef) callconv(.c) ?*anyopaque {
+    return privatePromiseCellFromEncoded(privateCreateNativePromise(global, null, .undefined));
+}
+
+export fn JSC__JSPromise__resolvedPromise(
+    global: JSContextRef,
+    encoded: EncodedValue,
+) callconv(.c) ?*anyopaque {
+    return privatePromiseCellFromEncoded(privateCreateNativePromise(global, .fulfilled, encoded));
+}
+
+export fn JSC__JSPromise__resolvedPromiseValue(
+    global: JSContextRef,
+    encoded: EncodedValue,
+) callconv(.c) EncodedValue {
+    return privateCreateNativePromise(global, .fulfilled, encoded);
+}
+
+export fn JSC__JSPromise__rejectedPromise(
+    global: JSContextRef,
+    encoded: EncodedValue,
+) callconv(.c) ?*anyopaque {
+    return privatePromiseCellFromEncoded(privateCreateNativePromise(global, .rejected, encoded));
+}
+
+/// This deprecated value-returning constructor deliberately performs the same
+/// direct rejected-state initialization as Bun's pinned implementation. zig-js
+/// does not yet expose a host rejection tracker, so there is no notification to
+/// suppress here; adding one must preserve this entry point's distinction.
+export fn JSC__JSPromise__rejectedPromiseValue(
+    global: JSContextRef,
+    encoded: EncodedValue,
+) callconv(.c) EncodedValue {
+    return privateCreateNativePromise(global, .rejected, encoded);
+}
+
+export fn JSC__JSPromise__wrap(
+    global: JSContextRef,
+    callback_context: *anyopaque,
+    callback: PrivatePromiseWrapCallback,
+) callconv(.c) EncodedValue {
+    const context = ctxForEvaluation(global) orelse return .empty;
+    const opaque_group = context.c_api_group orelse return .empty;
+    const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+    if (group.pending_exception != null) return .empty;
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    defer context.popActiveInterpreter(&machine);
+
+    const callback_result = callback(callback_context, global);
+    if (privateTakePendingExceptionValue(context)) |thrown|
+        return privateEncodeNativePromise(context, &machine, .rejected, thrown);
+
+    const internal = privateValueFrom(global, callback_result) orelse {
+        const invalid = machine.makeError("TypeError", "Promise callback returned a value from another VM") catch |err| {
+            privateSetPendingAbrupt(context, &machine, err);
+            return .empty;
+        };
+        return privateEncodeNativePromise(context, &machine, .rejected, invalid);
+    };
+    if (promise.promiseOf(internal) != null) return callback_result;
+    if (internal.isObject() and internal.asObj().behavior.is_error)
+        return privateEncodeNativePromise(context, &machine, .rejected, internal);
+    return privateEncodeNativePromise(context, &machine, .fulfilled, internal);
+}
+
+export fn JSC__AnyPromise__wrap(
+    global: JSContextRef,
+    encoded_promise: EncodedValue,
+    callback_context: *anyopaque,
+    callback: PrivatePromiseWrapCallback,
+) callconv(.c) void {
+    const context = ctxForEvaluation(global) orelse return;
+    const opaque_group = context.c_api_group orelse return;
+    const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+    if (group.pending_exception != null) return;
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return;
+    };
+    defer context.popActiveInterpreter(&machine);
+
+    const target_value = privateValueFrom(global, encoded_promise) orelse {
+        const err = machine.throwError("TypeError", "AnyPromise target belongs to another VM");
+        privateSetPendingAbrupt(context, &machine, err);
+        return;
+    };
+    const target = promise.promiseOf(target_value) orelse {
+        const err = machine.throwError("TypeError", "AnyPromise target is not a native Promise");
+        privateSetPendingAbrupt(context, &machine, err);
+        return;
+    };
+
+    const callback_result = callback(callback_context, global);
+    if (privateTakePendingExceptionValue(context)) |thrown| {
+        promise.reject(&machine, target, thrown) catch |err|
+            privateSetPendingAbrupt(context, &machine, err);
+        return;
+    }
+    const internal = privateValueFrom(global, callback_result) orelse {
+        const invalid = machine.makeError("TypeError", "Promise callback returned a value from another VM") catch |err| {
+            privateSetPendingAbrupt(context, &machine, err);
+            return;
+        };
+        promise.reject(&machine, target, invalid) catch |err|
+            privateSetPendingAbrupt(context, &machine, err);
+        return;
+    };
+    if (internal.isObject() and internal.asObj().behavior.is_error) {
+        promise.reject(&machine, target, internal) catch |err|
+            privateSetPendingAbrupt(context, &machine, err);
+        return;
+    }
+    promise.resolve(&machine, target, internal) catch |err|
+        privateSetPendingAbrupt(context, &machine, err);
 }
 
 fn valueFromContext(ctx: *Context, ref: JSValueRef) ?Value {
