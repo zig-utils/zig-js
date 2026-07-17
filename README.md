@@ -241,6 +241,10 @@ messages while that context is paused. Explicit cross-thread worker target
 discovery and transport continue under
 [#156](https://github.com/zig-utils/zig-js/issues/156); see
 [docs/inspector.md](docs/inspector.md).
+For scripts registered while debugging, ordinary bytecode/native entry is
+disabled and asserted by both focused Zig tests and the real C host; debug-aware
+generator/async chunks retain VM statement checkpoints. Pre-attach and generated
+script discovery remains tracked by [#155](https://github.com/zig-utils/zig-js/issues/155).
 
 See [docs/api.md](docs/api.md) and [docs/HOME_INTEGRATION.md](docs/HOME_INTEGRATION.md) for the fuller embedding story and the important warning that zig-js is not a drop-in replacement for Bun/Home's private JSC internals.
 

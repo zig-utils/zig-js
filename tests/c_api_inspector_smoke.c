@@ -9,6 +9,7 @@ struct Transcript {
     ZJSInspectorSessionRef session;
     size_t pauses;
     int step_over_next;
+    int evaluate_frame_next;
 };
 
 static int contains_fragment(const char* message, size_t length, const char* fragment)
@@ -35,7 +36,16 @@ static void receive_message(const char* message, size_t length, void* user_data)
     if (contains_fragment(message, length, "Debugger.paused")) {
         const char resume[] = "{\"id\":90,\"method\":\"Debugger.resume\"}";
         const char step_over[] = "{\"id\":91,\"method\":\"Debugger.stepOver\"}";
+        const char evaluate_frame[] =
+            "{\"id\":92,\"method\":\"Debugger.evaluateOnCallFrame\","
+            "\"params\":{\"callFrameId\":0,\"expression\":\"x += 4\"}}";
         transcript->pauses++;
+        if (transcript->evaluate_frame_next) {
+            transcript->evaluate_frame_next = 0;
+            if (!ZJSInspectorSessionDispatch(
+                    transcript->session, evaluate_frame, sizeof(evaluate_frame) - 1))
+                return;
+        }
         if (transcript->step_over_next) {
             transcript->step_over_next = 0;
             ZJSInspectorSessionDispatch(transcript->session, step_over, sizeof(step_over) - 1);
@@ -50,7 +60,7 @@ int main(void)
     JSGlobalContextRef context = JSGlobalContextCreate(NULL);
     if (!context || JSGlobalContextIsInspectable(context))
         return 1;
-    struct Transcript transcript = { { 0 }, 0, NULL, 0, 0 };
+    struct Transcript transcript = { { 0 }, 0, NULL, 0, 0, 0 };
     if (ZJSInspectorSessionCreate(context, receive_message, &transcript))
         return 2;
 
@@ -79,9 +89,15 @@ int main(void)
     JSStringRef source = JSStringCreateWithUTF8CString(source_text);
     JSStringRef source_url = JSStringCreateWithUTF8CString("inspector-smoke.js");
     JSValueRef exception = NULL;
+    transcript.evaluate_frame_next = 1;
+    JSValueRef inspected_result;
     if (!ZJSInspectorSessionDispatch(session, debugger_enable, sizeof(debugger_enable) - 1) ||
-        !JSEvaluateScript(context, source, NULL, source_url, 7, &exception) || exception ||
+        !(inspected_result = JSEvaluateScript(context, source, NULL, source_url, 7, &exception)) || exception ||
         transcript.pauses != 1 || !strstr(transcript.bytes, "Debugger.scriptParsed") ||
+        !strstr(transcript.bytes, "\"callFrames\"") ||
+        !strstr(transcript.bytes, "\"scopeChain\"") ||
+        !strstr(transcript.bytes, "\"id\":92") ||
+        JSValueToNumber(context, inspected_result, &exception) != 7 || exception ||
         !strstr(transcript.bytes, "debuggerStatement") ||
         !strstr(transcript.bytes, "Debugger.resumed"))
         return 7;

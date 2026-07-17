@@ -66,8 +66,10 @@ Statement locations retain byte offsets plus adjusted line/column coordinates;
 a debugger statement pauses with reason debuggerStatement. An explicit
 Debugger.pause request pauses at the next statement boundary. Debug-enabled
 execution deliberately uses the tree walker, including ordinary synchronous
-functions parsed from that script, so bytecode/baseline compilation cannot skip
-these boundaries. Suspendable generator and async-function chunks retain the
+functions parsed from that script, exposes no native-code owner, and retains no
+ordinary-function bytecode entry, so baseline/native execution cannot skip
+these boundaries. This policy is asserted directly and through the real C host.
+Suspendable generator and async-function chunks retain the
 same statement map inside the VM; stepping survives yield/await suspension and
 VM quick paths are disabled for those debug chunks. The optimizing JIT does not
 exist yet and therefore cannot be claimed as an inspected tier (tracked by
@@ -158,3 +160,5 @@ lexical/global scope chains, frame evaluation, and expandable remote objects
 with deterministic GC-safe lifetime. Worker targets remain tracked by
 [issue #156](https://github.com/zig-utils/zig-js/issues/156). Unsupported
 commands return -32601; there are no silently accepted debugger stubs.
+Scripts parsed before debugger enable and eval/module/generated-function origins
+remain explicit work in [issue #155](https://github.com/zig-utils/zig-js/issues/155).

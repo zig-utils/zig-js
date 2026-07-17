@@ -5061,6 +5061,55 @@ test "C-API: debugger publishes scripts and synchronously pauses at source locat
     try std.testing.expect(std.mem.indexOf(u8, transcript, "\"hitBreakpoints\":[2]") != null);
 }
 
+test "C-API: debugger disables ordinary bytecode and native tier entry" {
+    const State = struct {
+        session: ZJSInspectorSessionRef = null,
+        pauses: usize = 0,
+
+        fn receive(message: [*]const u8, message_len: usize, user_data: ?*anyopaque) callconv(.c) void {
+            const self: *@This() = @ptrCast(@alignCast(user_data.?));
+            if (std.mem.indexOf(u8, message[0..message_len], "Debugger.paused") == null) return;
+            self.pauses += 1;
+            const resume_request = "{\"id\":90,\"method\":\"Debugger.resume\"}";
+            std.debug.assert(ZJSInspectorSessionDispatch(self.session, resume_request, resume_request.len));
+        }
+    };
+
+    const ctx = JSGlobalContextCreate(null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(ctx);
+    const context = ctxRawFrom(ctx) orelse return error.ContextCreateFailed;
+    JSGlobalContextSetInspectable(ctx, true);
+    var state: State = .{};
+    state.session = ZJSInspectorSessionCreate(ctx, State.receive, &state) orelse return error.SessionCreateFailed;
+    defer ZJSInspectorSessionRelease(state.session);
+    const enable = "{\"id\":1,\"method\":\"Debugger.enable\"}";
+    try std.testing.expect(ZJSInspectorSessionDispatch(state.session, enable, enable.len));
+
+    // Debug-enabled interpreters never expose an executable-code owner, and
+    // ordinary functions parsed in this mode retain no bytecode entry that
+    // could skip statement-boundary callbacks.
+    const machine = context.interpreter();
+    try std.testing.expect(machine.jit_owner == null);
+    const source = JSStringCreateWithUTF8CString(
+        "function inspectedTier(value) { var local = value + 1; debugger; return local; } inspectedTier(41);",
+    ) orelse return error.StringInitFailed;
+    defer JSStringRelease(source);
+    const url = JSStringCreateWithUTF8CString("debug-tier.js") orelse return error.StringInitFailed;
+    defer JSStringRelease(url);
+    var exception: JSValueRef = null;
+    const result = JSEvaluateScript(ctx, source, null, url, 1, &exception) orelse return error.EvalFailed;
+    try std.testing.expectEqual(@as(f64, 42), JSValueToNumber(ctx, result, &exception));
+    try std.testing.expectEqual(@as(usize, 1), state.pauses);
+
+    const name = JSStringCreateWithUTF8CString("inspectedTier") orelse return error.StringInitFailed;
+    defer JSStringRelease(name);
+    const function_ref = JSObjectGetProperty(ctx, JSContextGetGlobalObject(ctx), name, &exception) orelse return error.PropertyGetFailed;
+    const function_value = valueFromContext(context, function_ref) orelse return error.InvalidValue;
+    const erased = function_value.asObj().jsFunction() orelse return error.NotFunction;
+    const function: *interp.Function = @ptrCast(@alignCast(erased));
+    try std.testing.expect(function.chunk == null);
+}
+
 test "C-API: paused frames expose scopes and live frame evaluation" {
     const State = struct {
         session: ZJSInspectorSessionRef = null,
