@@ -4568,6 +4568,12 @@ pub const Context = struct {
         const owned_source = try a.dupe(u8, source);
         var parser = try Parser.init(a, owned_source);
         const prog = try parser.parseModule();
+        const debug_script = try self.registerDebugScript(owned_source, path, 1);
+        for (parser.statement_locations.items) |entry| try self.debug_statement_locations.put(a, entry.node, .{
+            .script_id = debug_script.id,
+            .location = entry.location,
+            .debugger_statement = entry.debugger_statement,
+        });
         const items = prog.program;
 
         const env = try gc_mod.allocEnv(a);

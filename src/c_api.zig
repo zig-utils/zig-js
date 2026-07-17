@@ -5457,6 +5457,79 @@ test "C-API: JSObjectMakeFunction preserves inspector URL and starting line" {
     try std.testing.expect(std.mem.indexOf(u8, transcript, "var local = value + 1") != null);
 }
 
+test "C-API: debugger registers and pauses across a module graph" {
+    const State = struct {
+        session: ZJSInspectorSessionRef = null,
+        pauses: usize = 0,
+        bytes: [32768]u8 = undefined,
+        len: usize = 0,
+
+        fn receive(message: [*]const u8, message_len: usize, user_data: ?*anyopaque) callconv(.c) void {
+            const self: *@This() = @ptrCast(@alignCast(user_data.?));
+            std.debug.assert(self.len + message_len + 1 <= self.bytes.len);
+            @memcpy(self.bytes[self.len .. self.len + message_len], message[0..message_len]);
+            self.len += message_len;
+            self.bytes[self.len] = '\n';
+            self.len += 1;
+            if (std.mem.indexOf(u8, message[0..message_len], "Debugger.paused") == null) return;
+            self.pauses += 1;
+            const resume_request = "{\"id\":90,\"method\":\"Debugger.resume\"}";
+            std.debug.assert(ZJSInspectorSessionDispatch(self.session, resume_request, resume_request.len));
+        }
+    };
+    const Host = struct {
+        fn load(_: *anyopaque, _: []const u8, specifier: []const u8, out_path: *[]const u8) ?[]const u8 {
+            if (!std.mem.eql(u8, specifier, "./dep.js")) return null;
+            out_path.* = "dep.js";
+            return "export const dep = 40;";
+        }
+    };
+
+    const ctx = JSGlobalContextCreate(null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(ctx);
+    const context = ctxRawFrom(ctx) orelse return error.ContextCreateFailed;
+    JSGlobalContextSetInspectable(ctx, true);
+    var state: State = .{};
+    state.session = ZJSInspectorSessionCreate(ctx, State.receive, &state) orelse return error.SessionCreateFailed;
+    defer ZJSInspectorSessionRelease(state.session);
+    const enable = "{\"id\":1,\"method\":\"Debugger.enable\"}";
+    try std.testing.expect(ZJSInspectorSessionDispatch(state.session, enable, enable.len));
+    const dep_breakpoint =
+        "{\"id\":2,\"method\":\"Debugger.setBreakpointByUrl\",\"params\":{\"url\":\"dep.js\",\"lineNumber\":0}}";
+    const entry_breakpoint =
+        "{\"id\":3,\"method\":\"Debugger.setBreakpointByUrl\",\"params\":{\"url\":\"entry.js\",\"lineNumber\":1}}";
+    try std.testing.expect(ZJSInspectorSessionDispatch(state.session, dep_breakpoint, dep_breakpoint.len));
+    try std.testing.expect(ZJSInspectorSessionDispatch(state.session, entry_breakpoint, entry_breakpoint.len));
+
+    var host_token: u8 = 0;
+    const host = Context.ModuleHost{ .ctx = &host_token, .load = Host.load };
+    _ = try context.evaluateModule(
+        "entry.js",
+        "import { dep } from './dep.js';\nvar entryLocal = dep + 1;\nentryLocal += 1;\nglobalThis.moduleDebugResult = entryLocal;",
+        host,
+    );
+    try std.testing.expectEqual(@as(usize, 2), state.pauses);
+    try std.testing.expectEqual(@as(usize, 2), context.debug_scripts.items.len);
+    const value_source = JSStringCreateWithUTF8CString("moduleDebugResult;") orelse return error.StringInitFailed;
+    defer JSStringRelease(value_source);
+    var exception: JSValueRef = null;
+    const result = JSEvaluateScript(ctx, value_source, null, null, 1, &exception) orelse return error.EvalFailed;
+    try std.testing.expectEqual(@as(f64, 42), JSValueToNumber(ctx, result, &exception));
+
+    const entry_source_request = "{\"id\":4,\"method\":\"Debugger.getScriptSource\",\"params\":{\"scriptId\":1}}";
+    const dep_source_request = "{\"id\":5,\"method\":\"Debugger.getScriptSource\",\"params\":{\"scriptId\":2}}";
+    try std.testing.expect(ZJSInspectorSessionDispatch(state.session, entry_source_request, entry_source_request.len));
+    try std.testing.expect(ZJSInspectorSessionDispatch(state.session, dep_source_request, dep_source_request.len));
+    const transcript = state.bytes[0..state.len];
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "entry.js") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "dep.js") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "import { dep }") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "export const dep = 40") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "\"scriptId\":1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "\"scriptId\":2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "\"reason\":\"breakpoint\"") != null);
+}
+
 test "C-API: paused frames expose scopes and live frame evaluation" {
     const State = struct {
         session: ZJSInspectorSessionRef = null,

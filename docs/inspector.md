@@ -79,6 +79,12 @@ for JavaScript constructors; otherwise their kind name is the URL.
 `JSObjectMakeFunction` uses its explicit sourceURL and starting-line arguments,
 so C embedders receive adjusted generated-body locations and retrievable source
 without relying on a comment directive.
+Every successfully parsed JavaScript module in an evaluated graph is registered
+under its canonical host path before linking. The per-evaluation module cache
+deduplicates a dependency imported more than once, while a later independent
+graph evaluation receives fresh monotonic IDs. Entry and dependency modules
+publish exact source, resolve URL breakpoints, pause/step in their own module
+environment, and report module-path exception locations.
 Statement locations retain byte offsets plus adjusted line/column coordinates;
 a debugger statement pauses with reason debuggerStatement. An explicit
 Debugger.pause request pauses at the next statement boundary. Debug-enabled
@@ -187,5 +193,5 @@ lexical/global scope chains, frame evaluation, and expandable remote objects
 with deterministic GC-safe lifetime. Worker targets remain tracked by
 [issue #156](https://github.com/zig-utils/zig-js/issues/156). Unsupported
 commands return -32601; there are no silently accepted debugger stubs.
-Module origins remain explicit work in
+The remaining completion/teardown matrix for these origins is tracked by
 [issue #155](https://github.com/zig-utils/zig-js/issues/155).

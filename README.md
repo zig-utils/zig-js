@@ -251,7 +251,9 @@ and frame evaluation work inside warmed functions without recompilation.
 Direct and indirect eval now publish independent sourceURL-aware scripts on
 every successful parse, including repeated identical evaluations. All supported
 generated-function constructors do the same, and `JSObjectMakeFunction` preserves
-its explicit URL/starting line. Module origins remain tracked by
+its explicit URL/starting line. JavaScript module graphs publish canonical
+entry/dependency paths and exact sources, with graph-local deduplication and
+working module breakpoints. The final origin/teardown matrix remains
 [#155](https://github.com/zig-utils/zig-js/issues/155).
 
 See [docs/api.md](docs/api.md) and [docs/HOME_INTEGRATION.md](docs/HOME_INTEGRATION.md) for the fuller embedding story and the important warning that zig-js is not a drop-in replacement for Bun/Home's private JSC internals.
