@@ -1,6 +1,29 @@
 #import <JavaScriptCore/JavaScriptCore.h>
 #include <stdio.h>
 
+static BOOL ZJSDiffExportCallbackState = NO;
+
+@protocol ZJSDiffExports <JSExport>
+@property (nonatomic, copy) NSString *title;
+- (int32_t)add:(int32_t)left to:(int32_t)right;
+@end
+
+@interface ZJSDiffExportObject : NSObject <ZJSDiffExports>
+@property (nonatomic, copy) NSString *title;
+- (NSString *)hiddenValue;
+@end
+
+@implementation ZJSDiffExportObject
+- (int32_t)add:(int32_t)left to:(int32_t)right
+{
+    ZJSDiffExportCallbackState = JSContext.currentContext != nil &&
+        JSContext.currentCallee != nil && JSContext.currentArguments.count == 2 &&
+        JSContext.currentThis.toObject == self;
+    return left + right;
+}
+- (NSString *)hiddenValue { return @"hidden"; }
+@end
+
 static void row(NSString *name, NSString *value)
 {
     printf("%s=%s\n", name.UTF8String, value.UTF8String);
@@ -96,6 +119,18 @@ int main(void)
                                                   [[context evaluateScript:@"nativeAdder.call({ marker: 7 }, 20, 22)"] toInt32] == 42,
                                                   blockStateMatches,
                                                   adderValue.toObject == adder]);
+
+        ZJSDiffExportObject *exportObject = [ZJSDiffExportObject new];
+        exportObject.title = @"before";
+        context[@"exported"] = exportObject;
+        NSString *initialTitle = [context evaluateScript:@"exported.title"].toString;
+        [context evaluateScript:@"exported.title = 'after'"];
+        int32_t exportSum = [context evaluateScript:@"exported.addTo(20, 22)"].toInt32;
+        row(@"export", [NSString stringWithFormat:@"%@:%@:%d:%d:%@",
+                                                   initialTitle, exportObject.title,
+                                                   exportSum,
+                                                   ZJSDiffExportCallbackState,
+                                                   [context evaluateScript:@"typeof exported.hiddenValue"].toString]);
     }
     return 0;
 }
