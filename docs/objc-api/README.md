@@ -8,9 +8,10 @@ the SHA-256 of `JSContext.h`, `JSValue.h`, `JSVirtualMachine.h`,
 method, property, typedef, data symbol, macro, signature, and availability
 annotation parsed from those headers.
 
-The initial inventory contains 11 containers and 108 declarations. All 108 are
-explicitly `pending` under issues #158–#160. Header availability is not a claim
-that the Objective-C runtime classes already exist.
+The inventory contains 11 containers and 108 declarations. It currently records
+**32 implemented / 76 pending** under issues #158–#160. An `implemented` entry
+has runtime behavior exercised by the compile-link-runtime host; a `pending`
+entry may be declared in the headers but must not be treated as usable.
 
 Run the checked-in drift gate on every host:
 
@@ -23,6 +24,19 @@ On macOS, compile the headers with the real Objective-C ARC/blocks frontend:
 ```sh
 zig build test-objc-api-headers
 ```
+
+Compile, link, and execute the implemented runtime slice on macOS:
+
+```sh
+zig build test-objc-api
+```
+
+That host exercises VM/context construction and identity, evaluation and
+exception capture, context naming/inspectability, C-ref round trips, primitive
+`JSValue` factories, every published type predicate, and boolean/string
+conversion. Collection/object conversion, callbacks, property helpers, managed
+references, and JSExport remain pending until their corresponding runtime and
+evidence land.
 
 Compare the pin against an installed SDK explicitly:
 

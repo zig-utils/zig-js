@@ -164,7 +164,7 @@
       "kind": "instance_method",
       "name": "evaluateScript:",
       "declaration": "- (JSValue *) evaluateScript:(NSString *)script",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -173,7 +173,7 @@
       "kind": "instance_method",
       "name": "evaluateScript:withSourceURL:",
       "declaration": "- (JSValue *) evaluateScript:(NSString *)script withSourceURL:(NSURL *)sourceURL API_AVAILABLE(macos(10.10), ios(8.0))",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -182,7 +182,7 @@
       "kind": "instance_method",
       "name": "init",
       "declaration": "- (instancetype) init",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -191,7 +191,7 @@
       "kind": "instance_method",
       "name": "initWithVirtualMachine:",
       "declaration": "- (instancetype) initWithVirtualMachine:(JSVirtualMachine *)virtualMachine",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -218,7 +218,7 @@
       "kind": "property",
       "name": "globalObject",
       "declaration": "@property (readonly, strong) JSValue *globalObject",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -227,7 +227,7 @@
       "kind": "property",
       "name": "inspectable",
       "declaration": "@property (nonatomic, getter=isInspectable) BOOL inspectable API_AVAILABLE(macos(13.3), ios(16.4)) NS_SWIFT_NAME(isInspectable)",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -236,7 +236,7 @@
       "kind": "property",
       "name": "name",
       "declaration": "@property (copy) NSString *name API_AVAILABLE(macos(10.10), ios(8.0))",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -245,7 +245,7 @@
       "kind": "property",
       "name": "virtualMachine",
       "declaration": "@property (readonly, strong) JSVirtualMachine *virtualMachine",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -254,7 +254,7 @@
       "kind": "class_method",
       "name": "contextWithJSGlobalContextRef:",
       "declaration": "+ (JSContext *) contextWithJSGlobalContextRef:(JSGlobalContextRef)jsGlobalContextRef",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -263,7 +263,7 @@
       "kind": "property",
       "name": "JSGlobalContextRef",
       "declaration": "@property (readonly) JSGlobalContextRef JSGlobalContextRef",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -335,7 +335,7 @@
       "kind": "class_method",
       "name": "valueWithBool:inContext:",
       "declaration": "+ (JSValue * _Null_unspecified) valueWithBool:(BOOL)value inContext:(JSContext * _Null_unspecified)context",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -344,7 +344,7 @@
       "kind": "class_method",
       "name": "valueWithDouble:inContext:",
       "declaration": "+ (JSValue * _Null_unspecified) valueWithDouble:(double)value inContext:(JSContext * _Null_unspecified)context",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -353,7 +353,7 @@
       "kind": "class_method",
       "name": "valueWithInt32:inContext:",
       "declaration": "+ (JSValue * _Null_unspecified) valueWithInt32:(int32_t)value inContext:(JSContext * _Null_unspecified)context",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -470,7 +470,7 @@
       "kind": "class_method",
       "name": "valueWithNullInContext:",
       "declaration": "+ (JSValue * _Null_unspecified) valueWithNullInContext:(JSContext * _Null_unspecified)context",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -488,7 +488,7 @@
       "kind": "class_method",
       "name": "valueWithUInt32:inContext:",
       "declaration": "+ (JSValue * _Null_unspecified) valueWithUInt32:(uint32_t)value inContext:(JSContext * _Null_unspecified)context",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -497,7 +497,7 @@
       "kind": "class_method",
       "name": "valueWithUndefinedInContext:",
       "declaration": "+ (JSValue * _Null_unspecified) valueWithUndefinedInContext:(JSContext * _Null_unspecified)context",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -605,7 +605,7 @@
       "kind": "instance_method",
       "name": "toBool",
       "declaration": "- (BOOL) toBool",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -686,7 +686,7 @@
       "kind": "instance_method",
       "name": "toString",
       "declaration": "- (NSString * _Null_unspecified) toString",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -713,7 +713,7 @@
       "kind": "property",
       "name": "context",
       "declaration": "@property (readonly, strong) JSContext * _Null_unspecified context",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -722,7 +722,7 @@
       "kind": "property",
       "name": "isArray",
       "declaration": "@property (readonly) BOOL isArray API_AVAILABLE(macos(10.11), ios(9.0))",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -731,7 +731,7 @@
       "kind": "property",
       "name": "isBigInt",
       "declaration": "@property (readonly) BOOL isBigInt API_AVAILABLE(macos(15.0), ios(18.0))",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -740,7 +740,7 @@
       "kind": "property",
       "name": "isBoolean",
       "declaration": "@property (readonly) BOOL isBoolean",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -749,7 +749,7 @@
       "kind": "property",
       "name": "isDate",
       "declaration": "@property (readonly) BOOL isDate API_AVAILABLE(macos(10.11), ios(9.0))",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -758,7 +758,7 @@
       "kind": "property",
       "name": "isNull",
       "declaration": "@property (readonly) BOOL isNull",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -767,7 +767,7 @@
       "kind": "property",
       "name": "isNumber",
       "declaration": "@property (readonly) BOOL isNumber",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -776,7 +776,7 @@
       "kind": "property",
       "name": "isObject",
       "declaration": "@property (readonly) BOOL isObject",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -785,7 +785,7 @@
       "kind": "property",
       "name": "isString",
       "declaration": "@property (readonly) BOOL isString",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -794,7 +794,7 @@
       "kind": "property",
       "name": "isSymbol",
       "declaration": "@property (readonly) BOOL isSymbol API_AVAILABLE(macos(10.15), ios(13.0))",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -803,7 +803,7 @@
       "kind": "property",
       "name": "isUndefined",
       "declaration": "@property (readonly) BOOL isUndefined",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -812,7 +812,7 @@
       "kind": "class_method",
       "name": "valueWithJSValueRef:inContext:",
       "declaration": "+ (JSValue * _Null_unspecified) valueWithJSValueRef:(JSValueRef _Null_unspecified)value inContext:(JSContext * _Null_unspecified)context",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -821,7 +821,7 @@
       "kind": "property",
       "name": "JSValueRef",
       "declaration": "@property (readonly) JSValueRef _Null_unspecified JSValueRef",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -1082,7 +1082,7 @@
       "kind": "instance_method",
       "name": "init",
       "declaration": "- (instancetype) init",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
