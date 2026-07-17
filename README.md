@@ -236,12 +236,16 @@ claim that Home's or Bun's private `JSC__*`/`Bun__*` ABI is implemented.
 The separately generated
 [Home private inventory](docs/abi/home-private-7ed99c02-inventory.json) makes
 that remaining boundary concrete: **448 unique extern symbols from 58 pinned
-files**, classified as **432 private pending**, 15 already-covered public-C
-overlaps, and one platform import, with zero duplicate or unclassified entries.
+files**, classified as 432 private (**4 implemented / 428 pending**), 15
+already-covered public-C overlaps, and one platform import, with zero duplicate
+or unclassified entries.
 The first private-ABI foundation is implemented without changing engine values:
 `private_abi.EncodedValue` translates primitives to the pinned eight-byte JSC64
 encoding (including exact int32/double/NaN/cell rules), while rejecting
 string/object conversion until a validated external cell handle exists.
+The first four private exports—encoded identity/cell equality, truthiness, and
+int32 extraction—now pass an exact Zig compile-link-runtime consumer fixture;
+they remain excluded from the 117-function public count and 19 extensions.
 The pinned public C inventory has no pending declarations. Inspector sessions
 now publish stable scripts and exact statement locations, and provide real
 `debugger;`, explicit pause/resume control, and deterministically resolved
@@ -347,6 +351,7 @@ zig build home-public-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"
 zig build home-private-abi-audit # 448-symbol pinned private denominator
 zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"
 zig build test-private-abi-value # exact JSC64 value codec + internal bridge
+zig build test-home-private-abi # implemented Home private shim slices
 zig build objc-api-audit         # pinned Objective-C header/inventory drift gate
 zig build test-objc-api-headers  # macOS ARC/blocks header compilation gate
 zig build test-objc-api          # macOS Objective-C compile-link-runtime gate

@@ -44,7 +44,7 @@ convention. The exact current denominator is:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI, pending under #163 | 432 |
+| Private JSC/Bun/WebCore ABI under #163 | 432 (4 implemented, 428 pending) |
 | Overlap with zig-js's completed public C target | 15 |
 | Platform libc import | 1 |
 | **Total** | **448** |
@@ -59,9 +59,9 @@ zig build home-private-abi-audit
 zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"
 ```
 
-This inventory is a denominator, not an implementation claim. The 432 private
-entries remain pending until #163 provides their type/layout contracts, shims,
-and consumer runtime evidence.
+This inventory is the denominator, not a claim that the whole surface works.
+The first four private entries are implemented; the other 428 remain pending
+until #163 provides their type/layout contracts, shims, and consumer evidence.
 
 ## JSC64 value boundary
 
@@ -87,5 +87,19 @@ real bridge executable against `js.Value`. It covers the complete signed int32
 range boundaries, finite doubles, infinities, negative zero, positive and
 negative noncanonical NaNs, cell validation, every primitive conversion, and
 the requirement that string/object conversion first acquire an external cell
-handle. This boundary solves value translation only; it does not make the 432
-private symbols callable.
+handle.
+
+The first completed shim slice exports the pinned signatures for
+`JSC__JSValue__eqlCell`, `JSC__JSValue__eqlValue`,
+`JSC__JSValue__toBoolean`, and `JSC__JSValue__toInt32`. Raw primitive words use
+the codec directly; cell words resolve through context-owned public C-API boxes
+without exposing the internal NaN-box layout. The compile-link-runtime gate is:
+
+```sh
+zig build test-home-private-abi
+```
+
+It covers empty/immediate/int32/double/NaN/negative-zero behavior and boxed
+empty/nonempty strings plus object identity/truthiness. Public accounting stays
+unchanged at 117 functions and 19 extensions; these four symbols are reported
+only as private profile exports.

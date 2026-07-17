@@ -25,6 +25,11 @@ Zig C-ABI declarations and reports 50/50 exports with a real Zig
 compile-link-runtime fixture. It remains deliberately separate from private
 Home/Bun ABI work.
 
+Private-profile exports are audited independently and never inflate the public
+or extension totals. The pinned Home inventory currently reports four private
+exports and 428 pending private symbols; `zig build test-home-private-abi` is
+their compile-link-runtime gate.
+
 `ZJSContextGetCollectionEpoch` returns the monotonic count of explicit
 `JSGarbageCollect` calls for a context group. Every realm in the group observes
 the same epoch; arena-backed groups use it as a semantic weak-processing
