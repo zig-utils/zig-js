@@ -124,6 +124,8 @@ const CInspectorState = struct {
     paused_machine: ?*interp.Interpreter = null,
     exception_mode: CInspectorExceptionMode = .none,
     next_exception_id: u64 = 1,
+    remote_objects: std.ArrayListUnmanaged(CInspectorRemoteObject) = .empty,
+    next_remote_object_id: u64 = 1,
 };
 
 const CInspectorStepMode = enum { none, into, over, out };
@@ -158,6 +160,7 @@ const InspectorRemoteValue = struct {
     type: []const u8,
     value: ?std.json.Value = null,
     description: []const u8,
+    objectId: ?u64 = null,
 };
 
 const InspectorScopeBinding = struct {
@@ -170,6 +173,7 @@ const InspectorScope = struct {
     name: []const u8,
     bindingCount: usize,
     bindings: []const InspectorScopeBinding,
+    object: InspectorRemoteValue,
 };
 
 const InspectorCallFrame = struct {
@@ -178,6 +182,17 @@ const InspectorCallFrame = struct {
     location: InspectorProtocolLocation,
     scopeChain: []const InspectorScope,
     this: InspectorRemoteValue,
+};
+
+const InspectorPropertyDescriptor = struct {
+    name: []const u8,
+    value: ?InspectorRemoteValue = null,
+    get: ?InspectorRemoteValue = null,
+    set: ?InspectorRemoteValue = null,
+    writable: bool,
+    enumerable: bool,
+    configurable: bool,
+    isOwn: bool = true,
 };
 
 const CInspectorResolvedBreakpoint = struct {
@@ -192,6 +207,19 @@ const CInspectorSession = struct {
     attached: bool = true,
     runtime_enabled: bool = false,
     debugger_enabled: bool = false,
+};
+
+const CInspectorRemoteKind = union(enum) {
+    value: JSValueRef,
+    scope: *interp.Environment,
+};
+
+const CInspectorRemoteObject = struct {
+    id: u64,
+    owner: *CInspectorSession,
+    kind: CInspectorRemoteKind,
+    group: []u8,
+    pause_only: bool,
 };
 
 /// JSC-shaped `JSType`. Values 0..6 match Apple's public enum; `bigint` and
@@ -1489,6 +1517,7 @@ fn refreshInspectorDebuggerHook(state: *CInspectorState) void {
         state.pause_requested = false;
         state.paused = false;
         state.paused_machine = null;
+        releaseInspectorRemotes(state, null, null, true);
         state.paused_at_uncaught_boundary = false;
         state.step_mode = .none;
     }
@@ -1587,6 +1616,60 @@ fn inspectorProtocolLocation(location: interp.DebugStatementLocation) InspectorP
     };
 }
 
+fn registerInspectorRemote(
+    session: *CInspectorSession,
+    kind: CInspectorRemoteKind,
+    group: []const u8,
+    pause_only: bool,
+) !u64 {
+    const state = session.state;
+    const group_copy = try gpa.dupe(u8, group);
+    errdefer gpa.free(group_copy);
+    if (kind == .value) {
+        const ctx: JSContextRef = @ptrCast(state.context);
+        if (!valueProtect(ctx, kind.value)) return error.OutOfMemory;
+        errdefer _ = valueUnprotect(ctx, kind.value);
+    }
+    const id = state.next_remote_object_id;
+    state.next_remote_object_id += 1;
+    try state.remote_objects.append(gpa, .{
+        .id = id,
+        .owner = session,
+        .kind = kind,
+        .group = group_copy,
+        .pause_only = pause_only,
+    });
+    return id;
+}
+
+fn releaseInspectorRemoteAt(state: *CInspectorState, index: usize) void {
+    const remote = state.remote_objects.swapRemove(index);
+    if (remote.kind == .value) {
+        const ctx: JSContextRef = @ptrCast(state.context);
+        _ = valueUnprotect(ctx, remote.kind.value);
+    }
+    gpa.free(remote.group);
+}
+
+fn releaseInspectorRemotes(state: *CInspectorState, owner: ?*CInspectorSession, group: ?[]const u8, pause_only: bool) void {
+    var index: usize = state.remote_objects.items.len;
+    while (index > 0) {
+        index -= 1;
+        const remote = state.remote_objects.items[index];
+        if (owner) |expected| if (remote.owner != expected) continue;
+        if (group) |expected| if (!std.mem.eql(u8, remote.group, expected)) continue;
+        if (pause_only and !remote.pause_only) continue;
+        releaseInspectorRemoteAt(state, index);
+    }
+}
+
+fn inspectorRemote(state: *CInspectorState, session: *CInspectorSession, id: u64) ?*CInspectorRemoteObject {
+    for (state.remote_objects.items) |*remote| {
+        if (remote.id == id and remote.owner == session) return remote;
+    }
+    return null;
+}
+
 fn inspectorRemoteValue(raw: Value) InspectorRemoteValue {
     return switch (raw.kind()) {
         .undefined => .{ .type = "undefined", .description = "undefined" },
@@ -1616,7 +1699,81 @@ fn inspectorRemoteValue(raw: Value) InspectorRemoteValue {
     };
 }
 
-fn inspectorScopeChain(arena: std.mem.Allocator, start: *interp.Environment) ![]const InspectorScope {
+fn inspectorRemoteValueForSession(session: *CInspectorSession, raw: Value, group: []const u8, pause_only: bool) !InspectorRemoteValue {
+    var remote = inspectorRemoteValue(raw);
+    if (raw.kind() == .object) {
+        const value_ref = box(session.state.context, raw) orelse return error.OutOfMemory;
+        remote.objectId = try registerInspectorRemote(session, .{ .value = value_ref }, group, pause_only);
+    }
+    return remote;
+}
+
+fn inspectorProperties(arena: std.mem.Allocator, session: *CInspectorSession, remote: CInspectorRemoteObject) ![]const InspectorPropertyDescriptor {
+    const RawBinding = struct { name: []const u8, value: Value, writable: bool };
+    var properties: std.ArrayListUnmanaged(InspectorPropertyDescriptor) = .empty;
+    switch (remote.kind) {
+        .scope => |environment| {
+            if (!session.state.paused or session.state.paused_machine == null) return error.InvalidRemoteObject;
+            var raw_bindings: std.ArrayListUnmanaged(RawBinding) = .empty;
+            const AliasSnapshot = struct { local_name: []const u8, target: interp.Environment.Alias };
+            var aliases: std.ArrayListUnmanaged(AliasSnapshot) = .empty;
+            environment.lockBindings();
+            {
+                defer environment.unlockBindings();
+                var iterator = environment.vars.iterator();
+                while (iterator.next()) |entry| try raw_bindings.append(arena, .{
+                    .name = entry.key_ptr.*,
+                    .value = entry.value_ptr.*,
+                    .writable = !environment.consts.contains(entry.key_ptr.*),
+                });
+                var alias_iterator = environment.aliases.iterator();
+                while (alias_iterator.next()) |entry| try aliases.append(arena, .{ .local_name = entry.key_ptr.*, .target = entry.value_ptr.* });
+            }
+            for (aliases.items) |alias| try raw_bindings.append(arena, .{
+                .name = alias.local_name,
+                .value = alias.target.env.get(alias.target.name) orelse Value.undef(),
+                .writable = false,
+            });
+            for (raw_bindings.items) |binding| try properties.append(arena, .{
+                .name = binding.name,
+                .value = try inspectorRemoteValueForSession(session, binding.value, remote.group, remote.pause_only),
+                .writable = binding.writable,
+                .enumerable = true,
+                .configurable = false,
+            });
+        },
+        .value => |value_ref| {
+            const raw = valueFromContext(session.state.context, value_ref) orelse return error.InvalidRemoteObject;
+            if (!raw.isObject() or raw.asObj().is_symbol or raw.asObj().is_bigint) return error.InvalidRemoteObject;
+            const object = raw.asObj();
+            const keys = try object.ownKeys(arena);
+            for (keys) |key| {
+                const attr = object.getAttr(key);
+                if (object.getOwn(key)) |property_value| {
+                    try properties.append(arena, .{
+                        .name = key,
+                        .value = try inspectorRemoteValueForSession(session, property_value, remote.group, remote.pause_only),
+                        .writable = attr.writable,
+                        .enumerable = attr.enumerable,
+                        .configurable = attr.configurable,
+                    });
+                } else if (object.getAccessor(key)) |accessor| {
+                    try properties.append(arena, .{
+                        .name = key,
+                        .get = if (accessor.get) |getter| try inspectorRemoteValueForSession(session, getter, remote.group, remote.pause_only) else null,
+                        .set = if (accessor.set) |setter| try inspectorRemoteValueForSession(session, setter, remote.group, remote.pause_only) else null,
+                        .writable = false,
+                        .enumerable = attr.enumerable,
+                        .configurable = attr.configurable,
+                    });
+                }
+            }
+        },
+    }
+    return properties.items;
+}
+
+fn inspectorScopeChain(arena: std.mem.Allocator, session: *CInspectorSession, start: *interp.Environment) ![]const InspectorScope {
     const AliasSnapshot = struct { local_name: []const u8, target: interp.Environment.Alias };
     var scopes: std.ArrayListUnmanaged(InspectorScope) = .empty;
     var current: ?*interp.Environment = start;
@@ -1632,7 +1789,7 @@ fn inspectorScopeChain(arena: std.mem.Allocator, start: *interp.Environment) ![]
                 var iterator = environment.vars.iterator();
                 while (iterator.next()) |entry| try bindings.append(arena, .{
                     .name = entry.key_ptr.*,
-                    .value = inspectorRemoteValue(entry.value_ptr.*),
+                    .value = try inspectorRemoteValueForSession(session, entry.value_ptr.*, "backtrace", true),
                 });
                 var alias_iterator = environment.aliases.iterator();
                 while (alias_iterator.next()) |entry| try aliases.append(arena, .{
@@ -1644,19 +1801,21 @@ fn inspectorScopeChain(arena: std.mem.Allocator, start: *interp.Environment) ![]
         };
         for (aliases.items) |alias| try bindings.append(arena, .{
             .name = alias.local_name,
-            .value = inspectorRemoteValue(alias.target.env.get(alias.target.name) orelse Value.undef()),
+            .value = try inspectorRemoteValueForSession(session, alias.target.env.get(alias.target.name) orelse Value.undef(), "backtrace", true),
         });
+        const scope_id = try registerInspectorRemote(session, .{ .scope = environment }, "backtrace", true);
         try scopes.append(arena, .{
             .type = if (is_global) "global" else if (environment.fn_scope) "local" else "block",
             .name = if (is_global) "Global" else if (environment.fn_scope) "Local" else "Block",
             .bindingCount = binding_count,
             .bindings = bindings.items,
+            .object = .{ .type = "object", .description = "Scope", .objectId = scope_id },
         });
     }
     return scopes.items;
 }
 
-fn inspectorCallFrames(arena: std.mem.Allocator, machine: *interp.Interpreter, current_location: interp.DebugStatementLocation) ![]const InspectorCallFrame {
+fn inspectorCallFrames(arena: std.mem.Allocator, session: *CInspectorSession, machine: *interp.Interpreter, current_location: interp.DebugStatementLocation) ![]const InspectorCallFrame {
     var frames: std.ArrayListUnmanaged(InspectorCallFrame) = .empty;
     var frame_id: u64 = 0;
     var current = machine.debug_call_frame;
@@ -1666,8 +1825,8 @@ fn inspectorCallFrames(arena: std.mem.Allocator, machine: *interp.Interpreter, c
             .callFrameId = frame_id,
             .functionName = if (frame.function_name.len == 0) "(anonymous)" else frame.function_name,
             .location = inspectorProtocolLocation(location),
-            .scopeChain = try inspectorScopeChain(arena, frame.environment),
-            .this = inspectorRemoteValue(frame.this_value),
+            .scopeChain = try inspectorScopeChain(arena, session, frame.environment),
+            .this = try inspectorRemoteValueForSession(session, frame.this_value, "backtrace", true),
         });
         frame_id += 1;
     }
@@ -1677,8 +1836,8 @@ fn inspectorCallFrames(arena: std.mem.Allocator, machine: *interp.Interpreter, c
         .callFrameId = frame_id,
         .functionName = "(global)",
         .location = inspectorProtocolLocation(top_location),
-        .scopeChain = try inspectorScopeChain(arena, top_environment),
-        .this = inspectorRemoteValue(if (machine.global_object) |global| Value.obj(global) else machine.this_value),
+        .scopeChain = try inspectorScopeChain(arena, session, top_environment),
+        .this = try inspectorRemoteValueForSession(session, if (machine.global_object) |global| Value.obj(global) else machine.this_value, "backtrace", true),
     });
     return frames.items;
 }
@@ -1767,9 +1926,9 @@ fn inspectorStatementBoundary(
     state.paused_machine = machine;
     var pause_arena = std.heap.ArenaAllocator.init(gpa);
     defer pause_arena.deinit();
-    const call_frames = try inspectorCallFrames(pause_arena.allocator(), machine, location);
     for (state.sessions.items) |session| {
         if (!session.attached or !session.debugger_enabled) continue;
+        const call_frames = try inspectorCallFrames(pause_arena.allocator(), session, machine, location);
         _ = sendInspectorJson(session, .{
             .method = "Debugger.paused",
             .params = .{
@@ -1791,6 +1950,7 @@ fn inspectorStatementBoundary(
     if (state.paused) {
         state.paused = false;
         state.paused_machine = null;
+        releaseInspectorRemotes(state, null, null, true);
         machine.exception = try machine.makeError("Error", "debugger pause requires a synchronous resume command");
         return error.Throw;
     }
@@ -1803,6 +1963,7 @@ fn continueInspectorExecution(session: *CInspectorSession, id: i64, mode: CInspe
     if (mode == .out and state.paused_depth == 0) return sendInspectorError(session, id, -32000, "cannot step out of top-level execution");
     state.paused = false;
     state.paused_machine = null;
+    releaseInspectorRemotes(state, null, null, true);
     state.step_mode = mode;
     state.step_depth = state.paused_depth;
     state.paused_at_uncaught_boundary = false;
@@ -1863,9 +2024,9 @@ fn inspectorExceptionBoundary(
         .script_id = 0,
         .location = .{ .line = 1, .column = 1, .byte_offset = 0 },
     };
-    const call_frames = try inspectorCallFrames(pause_arena.allocator(), machine, frame_location);
     for (state.sessions.items) |session| {
         if (!session.attached or !session.debugger_enabled) continue;
+        const call_frames = try inspectorCallFrames(pause_arena.allocator(), session, machine, frame_location);
         _ = sendInspectorJson(session, .{
             .method = "Debugger.exceptionThrown",
             .params = .{
@@ -1889,6 +2050,7 @@ fn inspectorExceptionBoundary(
     if (state.paused) {
         state.paused = false;
         state.paused_machine = null;
+        releaseInspectorRemotes(state, null, null, true);
         state.paused_at_uncaught_boundary = false;
         machine.exception = try machine.makeError("Error", "debugger exception pause requires a synchronous resume command");
         return error.Throw;
@@ -1917,39 +2079,22 @@ fn inspectorDescription(ctx: JSContextRef, value_ref: JSValueRef) ?InspectorDesc
     return .{ .allocation = allocation, .bytes = allocation[0 .. written - 1] };
 }
 
-fn sendInspectorRemoteObject(session: *CInspectorSession, id: i64, value_ref: JSValueRef, exception_ref: JSValueRef) bool {
+fn sendInspectorRemoteObject(session: *CInspectorSession, id: i64, value_ref: JSValueRef, exception_ref: JSValueRef, object_group: []const u8) bool {
     const ctx: JSContextRef = @ptrCast(session.state.context);
     const target = if (value_ref != null) value_ref else exception_ref;
     const description = inspectorDescription(ctx, target) orelse
         return sendInspectorError(session, id, -32000, "could not describe evaluation result");
     defer description.deinit();
-    const value_type = JSValueGetType(ctx, target);
-    const protocol_type: []const u8 = switch (value_type) {
-        .undefined => "undefined",
-        .null => "object",
-        .boolean => "boolean",
-        .number => "number",
-        .string => "string",
-        .symbol => "symbol",
-        .bigint => "bigint",
-        .object => if (JSObjectIsFunction(ctx, target)) "function" else "object",
-        .invalid => "undefined",
-    };
-    const primitive_value: ?std.json.Value = switch (value_type) {
-        .null => .null,
-        .boolean => .{ .bool = JSValueToBoolean(ctx, target) },
-        .number => blk: {
-            const number = JSValueToNumber(ctx, target, null);
-            break :blk if (std.math.isFinite(number)) .{ .float = number } else null;
-        },
-        .string => .{ .string = @constCast(description.bytes) },
-        else => null,
-    };
+    const raw = valueFromContext(session.state.context, target) orelse
+        return sendInspectorError(session, id, -32000, "evaluation returned an invalid value");
+    var remote = inspectorRemoteValueForSession(session, raw, object_group, false) catch
+        return sendInspectorError(session, id, -32000, "could not retain evaluation result");
+    remote.description = description.bytes;
     if (exception_ref != null) {
         return sendInspectorJson(session, .{
             .id = id,
             .result = .{
-                .result = .{ .type = protocol_type, .value = primitive_value, .description = description.bytes },
+                .result = remote,
                 .exceptionDetails = .{ .text = description.bytes },
             },
         });
@@ -1957,7 +2102,7 @@ fn sendInspectorRemoteObject(session: *CInspectorSession, id: i64, value_ref: JS
     return sendInspectorJson(session, .{
         .id = id,
         .result = .{
-            .result = .{ .type = protocol_type, .value = primitive_value, .description = description.bytes },
+            .result = remote,
         },
     });
 }
@@ -2024,6 +2169,7 @@ export fn ZJSInspectorSessionRelease(session_ref: ZJSInspectorSessionRef) callco
     const state = session.state;
     const ctx: JSContextRef = @ptrCast(state.context);
     _ = ctxFrom(ctx) orelse return;
+    releaseInspectorRemotes(state, session, null, false);
     for (state.sessions.items, 0..) |candidate, index| {
         if (candidate != session) continue;
         _ = state.sessions.swapRemove(index);
@@ -2037,6 +2183,7 @@ export fn ZJSInspectorSessionRelease(session_ref: ZJSInspectorSessionRef) callco
         state.scripts.deinit(gpa);
         state.breakpoints.deinit(gpa);
         state.resolved_breakpoints.deinit(gpa);
+        state.remote_objects.deinit(gpa);
         gpa.destroy(state);
     }
     JSGlobalContextRelease(ctx);
@@ -2145,6 +2292,10 @@ export fn ZJSInspectorSessionDispatch(
             .string => |string| string,
             else => return sendInspectorError(session, id, -32602, "expression must be a string"),
         };
+        const object_group = if (params.get("objectGroup")) |group_value| switch (group_value) {
+            .string => |group| group,
+            else => return sendInspectorError(session, id, -32602, "objectGroup must be a string"),
+        } else "";
         const frame = inspectorEvaluationFrame(machine, frame_id) orelse return sendInspectorError(session, id, -32000, "unknown callFrameId for this pause");
         const saved_exception = machine.exception;
         machine.exception = Value.undef();
@@ -2152,7 +2303,7 @@ export fn ZJSInspectorSessionDispatch(
         if (outcome) |result| {
             const result_ref = box(session.state.context, result);
             machine.exception = saved_exception;
-            return sendInspectorRemoteObject(session, id, result_ref, null);
+            return sendInspectorRemoteObject(session, id, result_ref, null, object_group);
         } else |err| {
             if (err != error.Throw) {
                 machine.exception = saved_exception;
@@ -2160,7 +2311,7 @@ export fn ZJSInspectorSessionDispatch(
             }
             const exception_ref = box(session.state.context, machine.exception);
             machine.exception = saved_exception;
-            return sendInspectorRemoteObject(session, id, null, exception_ref);
+            return sendInspectorRemoteObject(session, id, null, exception_ref, object_group);
         }
     }
     if (std.mem.eql(u8, method, "Debugger.setPauseOnExceptions")) {
@@ -2283,6 +2434,51 @@ export fn ZJSInspectorSessionDispatch(
         }
         return sendInspectorJson(session, .{ .id = id, .result = .{} });
     }
+    if (std.mem.eql(u8, method, "Runtime.getProperties")) {
+        const params_value = request.get("params") orelse return sendInspectorError(session, id, -32602, "params are required");
+        if (params_value != .object) return sendInspectorError(session, id, -32602, "params must be an object");
+        const object_id_value = params_value.object.get("objectId") orelse return sendInspectorError(session, id, -32602, "objectId is required");
+        const object_id: u64 = switch (object_id_value) {
+            .integer => |integer| if (integer >= 0) @intCast(integer) else return sendInspectorError(session, id, -32602, "objectId must be non-negative"),
+            else => return sendInspectorError(session, id, -32602, "objectId must be an integer"),
+        };
+        const remote = (inspectorRemote(session.state, session, object_id) orelse return sendInspectorError(session, id, -32000, "unknown or expired objectId")).*;
+        var property_arena = std.heap.ArenaAllocator.init(gpa);
+        defer property_arena.deinit();
+        const properties = inspectorProperties(property_arena.allocator(), session, remote) catch |err| switch (err) {
+            error.InvalidRemoteObject => return sendInspectorError(session, id, -32000, "objectId is not expandable in the current state"),
+            else => return sendInspectorError(session, id, -32000, @errorName(err)),
+        };
+        return sendInspectorJson(session, .{ .id = id, .result = .{ .result = properties } });
+    }
+    if (std.mem.eql(u8, method, "Runtime.releaseObject")) {
+        const params_value = request.get("params") orelse return sendInspectorError(session, id, -32602, "params are required");
+        if (params_value != .object) return sendInspectorError(session, id, -32602, "params must be an object");
+        const object_id_value = params_value.object.get("objectId") orelse return sendInspectorError(session, id, -32602, "objectId is required");
+        const object_id: u64 = switch (object_id_value) {
+            .integer => |integer| if (integer >= 0) @intCast(integer) else return sendInspectorError(session, id, -32602, "objectId must be non-negative"),
+            else => return sendInspectorError(session, id, -32602, "objectId must be an integer"),
+        };
+        var index: usize = 0;
+        while (index < session.state.remote_objects.items.len) : (index += 1) {
+            const remote = session.state.remote_objects.items[index];
+            if (remote.id != object_id or remote.owner != session) continue;
+            releaseInspectorRemoteAt(session.state, index);
+            return sendInspectorJson(session, .{ .id = id, .result = .{} });
+        }
+        return sendInspectorError(session, id, -32000, "unknown or expired objectId");
+    }
+    if (std.mem.eql(u8, method, "Runtime.releaseObjectGroup")) {
+        const params_value = request.get("params") orelse return sendInspectorError(session, id, -32602, "params are required");
+        if (params_value != .object) return sendInspectorError(session, id, -32602, "params must be an object");
+        const group_value = params_value.object.get("objectGroup") orelse return sendInspectorError(session, id, -32602, "objectGroup is required");
+        const group = switch (group_value) {
+            .string => |string| string,
+            else => return sendInspectorError(session, id, -32602, "objectGroup must be a string"),
+        };
+        releaseInspectorRemotes(session.state, session, group, false);
+        return sendInspectorJson(session, .{ .id = id, .result = .{} });
+    }
     if (std.mem.eql(u8, method, "Runtime.evaluate")) {
         const params_value = request.get("params") orelse return sendInspectorError(session, id, -32602, "params are required");
         if (params_value != .object) return sendInspectorError(session, id, -32602, "params must be an object");
@@ -2291,11 +2487,15 @@ export fn ZJSInspectorSessionDispatch(
             .string => |string| string,
             else => return sendInspectorError(session, id, -32602, "expression must be a string"),
         };
+        const object_group = if (params_value.object.get("objectGroup")) |group_value| switch (group_value) {
+            .string => |group| group,
+            else => return sendInspectorError(session, id, -32602, "objectGroup must be a string"),
+        } else "";
         const script = JsString.create(gpa, expression) catch return sendInspectorError(session, id, -32000, "out of memory");
         defer script.release();
         var exception: JSValueRef = null;
         const result = JSEvaluateScript(ctx, @ptrCast(script), null, null, 1, &exception);
-        return sendInspectorRemoteObject(session, id, result, exception);
+        return sendInspectorRemoteObject(session, id, result, exception, object_group);
     }
     return sendInspectorError(session, id, -32601, "method is not implemented by this protocol version");
 }
@@ -4567,7 +4767,7 @@ test "C-API: inspector protocol inventory has no hidden commands" {
     try std.testing.expect(!unsupported.get("silentAcceptance").?.bool);
     const commands = root.get("commands").?.array.items;
     const events = root.get("events").?.array.items;
-    try std.testing.expectEqual(@as(usize, 17), commands.len);
+    try std.testing.expectEqual(@as(usize, 20), commands.len);
     try std.testing.expectEqual(@as(usize, 8), events.len);
     var methods: std.StringHashMapUnmanaged(void) = .empty;
     defer methods.deinit(std.testing.allocator);
@@ -4737,6 +4937,8 @@ test "C-API: debugger publishes scripts and synchronously pauses at source locat
 test "C-API: paused frames expose scopes and live frame evaluation" {
     const State = struct {
         session: ZJSInspectorSessionRef = null,
+        held_object_id: u64 = 0,
+        scope_object_id: u64 = 0,
         bytes: [65536]u8 = undefined,
         len: usize = 0,
 
@@ -4747,6 +4949,18 @@ test "C-API: paused frames expose scopes and live frame evaluation" {
             self.len += message_len;
             self.bytes[self.len] = '\n';
             self.len += 1;
+            if (std.mem.indexOf(u8, message[0..message_len], "\"id\":96") != null) {
+                var parsed = std.json.parseFromSlice(std.json.Value, gpa, message[0..message_len], .{}) catch return;
+                defer parsed.deinit();
+                self.held_object_id = @intCast(parsed.value.object.get("result").?.object.get("result").?.object.get("objectId").?.integer);
+            }
+            if (std.mem.indexOf(u8, message[0..message_len], "Debugger.paused") != null) {
+                var parsed = std.json.parseFromSlice(std.json.Value, gpa, message[0..message_len], .{}) catch return;
+                defer parsed.deinit();
+                const first_frame = parsed.value.object.get("params").?.object.get("callFrames").?.array.items[0].object;
+                const first_scope = first_frame.get("scopeChain").?.array.items[0].object;
+                self.scope_object_id = @intCast(first_scope.get("object").?.object.get("objectId").?.integer);
+            }
             if (std.mem.indexOf(u8, message[0..message_len], "Debugger.paused") == null) return;
             const evaluate_inner =
                 "{\"id\":91,\"method\":\"Debugger.evaluateOnCallFrame\",\"params\":{\"callFrameId\":0,\"expression\":\"innerLocal = 8; innerLocal + outerLocal\"}}";
@@ -4756,10 +4970,28 @@ test "C-API: paused frames expose scopes and live frame evaluation" {
                 "{\"id\":93,\"method\":\"Debugger.evaluateOnCallFrame\",\"params\":{\"callFrameId\":99,\"expression\":\"1\"}}";
             const throwing_evaluation =
                 "{\"id\":94,\"method\":\"Debugger.evaluateOnCallFrame\",\"params\":{\"callFrameId\":0,\"expression\":\"throw \'debug-eval\';\"}}";
+            const evaluate_object =
+                "{\"id\":96,\"method\":\"Debugger.evaluateOnCallFrame\",\"params\":{\"callFrameId\":0,\"objectGroup\":\"held\",\"expression\":\"({ answer: 42, nested: { ok: true }, get boom() { throw \'getter-ran\'; } })\"}}";
             std.debug.assert(ZJSInspectorSessionDispatch(self.session, evaluate_inner, evaluate_inner.len));
             std.debug.assert(ZJSInspectorSessionDispatch(self.session, evaluate_outer, evaluate_outer.len));
             std.debug.assert(ZJSInspectorSessionDispatch(self.session, invalid_frame, invalid_frame.len));
             std.debug.assert(ZJSInspectorSessionDispatch(self.session, throwing_evaluation, throwing_evaluation.len));
+            std.debug.assert(ZJSInspectorSessionDispatch(self.session, evaluate_object, evaluate_object.len));
+            std.debug.assert(self.held_object_id != 0);
+            std.debug.assert(self.scope_object_id != 0);
+            var properties_buffer: [256]u8 = undefined;
+            const get_properties = std.fmt.bufPrint(
+                &properties_buffer,
+                "{{\"id\":97,\"method\":\"Runtime.getProperties\",\"params\":{{\"objectId\":{d}}}}}",
+                .{self.held_object_id},
+            ) catch unreachable;
+            std.debug.assert(ZJSInspectorSessionDispatch(self.session, get_properties.ptr, get_properties.len));
+            const get_scope = std.fmt.bufPrint(
+                &properties_buffer,
+                "{{\"id\":101,\"method\":\"Runtime.getProperties\",\"params\":{{\"objectId\":{d}}}}}",
+                .{self.scope_object_id},
+            ) catch unreachable;
+            std.debug.assert(ZJSInspectorSessionDispatch(self.session, get_scope.ptr, get_scope.len));
             const resume_request = "{\"id\":90,\"method\":\"Debugger.resume\"}";
             std.debug.assert(ZJSInspectorSessionDispatch(self.session, resume_request, resume_request.len));
         }
@@ -4804,6 +5036,122 @@ test "C-API: paused frames expose scopes and live frame evaluation" {
     try std.testing.expect(std.mem.indexOf(u8, transcript, "debug-eval") != null);
     try std.testing.expect(std.mem.indexOf(u8, transcript, "exceptionDetails") != null);
     try std.testing.expect(std.mem.indexOf(u8, transcript, "runtime is not paused") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "\"id\":97") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "\"name\":\"answer\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "\"name\":\"nested\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "\"name\":\"boom\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "getter-ran") == null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "\"id\":101") != null);
+
+    var properties_buffer: [256]u8 = undefined;
+    const get_held = try std.fmt.bufPrint(
+        &properties_buffer,
+        "{{\"id\":98,\"method\":\"Runtime.getProperties\",\"params\":{{\"objectId\":{d}}}}}",
+        .{state.held_object_id},
+    );
+    try std.testing.expect(ZJSInspectorSessionDispatch(state.session, get_held.ptr, get_held.len));
+    const expired_scope = try std.fmt.bufPrint(
+        &properties_buffer,
+        "{{\"id\":102,\"method\":\"Runtime.getProperties\",\"params\":{{\"objectId\":{d}}}}}",
+        .{state.scope_object_id},
+    );
+    try std.testing.expect(ZJSInspectorSessionDispatch(state.session, expired_scope.ptr, expired_scope.len));
+
+    const ObserverState = struct {
+        bytes: [2048]u8 = undefined,
+        len: usize = 0,
+        fn receive(message: [*]const u8, message_len: usize, user_data: ?*anyopaque) callconv(.c) void {
+            const self: *@This() = @ptrCast(@alignCast(user_data.?));
+            std.debug.assert(self.len + message_len <= self.bytes.len);
+            @memcpy(self.bytes[self.len .. self.len + message_len], message[0..message_len]);
+            self.len += message_len;
+        }
+    };
+    var observer_state: ObserverState = .{};
+    const observer = ZJSInspectorSessionCreate(ctx, ObserverState.receive, &observer_state) orelse return error.SessionCreateFailed;
+    defer ZJSInspectorSessionRelease(observer);
+    const foreign_get = try std.fmt.bufPrint(
+        &properties_buffer,
+        "{{\"id\":103,\"method\":\"Runtime.getProperties\",\"params\":{{\"objectId\":{d}}}}}",
+        .{state.held_object_id},
+    );
+    try std.testing.expect(ZJSInspectorSessionDispatch(observer, foreign_get.ptr, foreign_get.len));
+    try std.testing.expect(std.mem.indexOf(u8, observer_state.bytes[0..observer_state.len], "unknown or expired objectId") != null);
+    const release_group = "{\"id\":99,\"method\":\"Runtime.releaseObjectGroup\",\"params\":{\"objectGroup\":\"held\"}}";
+    try std.testing.expect(ZJSInspectorSessionDispatch(state.session, release_group, release_group.len));
+    const expired_held = try std.fmt.bufPrint(
+        &properties_buffer,
+        "{{\"id\":100,\"method\":\"Runtime.getProperties\",\"params\":{{\"objectId\":{d}}}}}",
+        .{state.held_object_id},
+    );
+    try std.testing.expect(ZJSInspectorSessionDispatch(state.session, expired_held.ptr, expired_held.len));
+    try std.testing.expect(std.mem.indexOf(u8, state.bytes[0..state.len], "unknown or expired objectId") != null);
+}
+
+test "C-API: inspector remote objects stay rooted until deterministic release" {
+    const State = struct {
+        object_id: u64 = 0,
+        bytes: [8192]u8 = undefined,
+        len: usize = 0,
+
+        fn receive(message: [*]const u8, message_len: usize, user_data: ?*anyopaque) callconv(.c) void {
+            const self: *@This() = @ptrCast(@alignCast(user_data.?));
+            std.debug.assert(self.len + message_len + 1 <= self.bytes.len);
+            @memcpy(self.bytes[self.len .. self.len + message_len], message[0..message_len]);
+            self.len += message_len;
+            self.bytes[self.len] = '\n';
+            self.len += 1;
+            if (std.mem.indexOf(u8, message[0..message_len], "\"id\":1") == null) return;
+            var parsed = std.json.parseFromSlice(std.json.Value, gpa, message[0..message_len], .{}) catch return;
+            defer parsed.deinit();
+            const result = parsed.value.object.get("result") orelse return;
+            self.object_id = @intCast(result.object.get("result").?.object.get("objectId").?.integer);
+        }
+    };
+
+    const context = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    context.initCApiRef();
+    const ctx: JSContextRef = @ptrCast(context);
+    defer JSGlobalContextRelease(ctx);
+    JSGlobalContextSetInspectable(ctx, true);
+    var state: State = .{};
+    const session = ZJSInspectorSessionCreate(ctx, State.receive, &state) orelse return error.SessionCreateFailed;
+    defer ZJSInspectorSessionRelease(session);
+
+    const evaluate =
+        "{\"id\":1,\"method\":\"Runtime.evaluate\",\"params\":{\"objectGroup\":\"gc-hold\",\"expression\":\"({ alive: 42 })\"}}";
+    try std.testing.expect(ZJSInspectorSessionDispatch(session, evaluate, evaluate.len));
+    try std.testing.expect(state.object_id != 0);
+    const junk = JSStringCreateWithUTF8CString("for (let i = 0; i < 500; i++) ({ junk: i }); 0;") orelse return error.StringInitFailed;
+    defer JSStringRelease(junk);
+    _ = JSEvaluateScript(ctx, junk, null, null, 1, null) orelse return error.EvalFailed;
+    JSGarbageCollect(ctx);
+
+    var request_buffer: [256]u8 = undefined;
+    const get_properties = try std.fmt.bufPrint(
+        &request_buffer,
+        "{{\"id\":2,\"method\":\"Runtime.getProperties\",\"params\":{{\"objectId\":{d}}}}}",
+        .{state.object_id},
+    );
+    try std.testing.expect(ZJSInspectorSessionDispatch(session, get_properties.ptr, get_properties.len));
+    try std.testing.expect(std.mem.indexOf(u8, state.bytes[0..state.len], "\"name\":\"alive\"") != null);
+    const live_while_protected = context.gc.?.live_cells;
+
+    const release = try std.fmt.bufPrint(
+        &request_buffer,
+        "{{\"id\":3,\"method\":\"Runtime.releaseObject\",\"params\":{{\"objectId\":{d}}}}}",
+        .{state.object_id},
+    );
+    try std.testing.expect(ZJSInspectorSessionDispatch(session, release.ptr, release.len));
+    JSGarbageCollect(ctx);
+    try std.testing.expect(context.gc.?.live_cells < live_while_protected);
+    const expired = try std.fmt.bufPrint(
+        &request_buffer,
+        "{{\"id\":4,\"method\":\"Runtime.getProperties\",\"params\":{{\"objectId\":{d}}}}}",
+        .{state.object_id},
+    );
+    try std.testing.expect(ZJSInspectorSessionDispatch(session, expired.ptr, expired.len));
+    try std.testing.expect(std.mem.indexOf(u8, state.bytes[0..state.len], "unknown or expired objectId") != null);
 }
 
 test "C-API: debugger stepping observes logical call depth" {

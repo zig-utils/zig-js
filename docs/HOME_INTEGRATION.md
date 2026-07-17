@@ -72,9 +72,9 @@ tests):
    evaluation, statement pause/resume, resolved breakpoints, logical-depth
    stepping, exception policy, and suspendable-function checkpoints are usable
    today. Paused events also expose live call frames and lexical/global scope
-   chains plus live evaluate-on-frame. Expandable remote objects and
-   worker-target work remain tracked in #139 before Home debugger integration
-   is complete.
+   chains plus live evaluate-on-frame and GC-rooted, session-owned remote-object
+   inspection. Worker-target work remains tracked in #139 before Home debugger
+   integration is complete.
 4. **Prototype & structure control** — `JSObjectGetPrototype`/`SetPrototype`
    and richer private/internal slot modeling. `JSObjectGetPrivate` /
    `JSObjectSetPrivate` now cover host-owned opaque pointers, but Home also

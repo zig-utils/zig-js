@@ -38,7 +38,8 @@ while claiming to be paused.
 ## Version 0.1 domains
 
 - Schema.getDomains
-- Runtime.enable, Runtime.disable, and Runtime.evaluate
+- Runtime.enable, Runtime.disable, Runtime.evaluate, Runtime.getProperties,
+  Runtime.releaseObject, and Runtime.releaseObjectGroup
 - Debugger.enable, Debugger.disable, Debugger.pause, Debugger.resume,
   Debugger.stepInto, Debugger.stepOver, Debugger.stepOut,
   Debugger.evaluateOnCallFrame,
@@ -96,6 +97,16 @@ restores the suspended program's control state and any pre-existing exception
 after returning a structured result or exceptionDetails response. Frame IDs
 expire as soon as the pause resumes.
 
+Object-valued evaluation results, `this` values, scope bindings, and accessor
+functions carry a session-owned numeric objectId. Runtime.getProperties returns
+own data/accessor descriptors without invoking getters; scope objectIds expand
+the corresponding live environment. Evaluation accepts an optional objectGroup.
+Runtime.releaseObject and Runtime.releaseObjectGroup deterministically unprotect
+handles. Value handles remain rooted across precise GC until release, while the
+`backtrace` handles attached to paused frames/scopes are released automatically
+on resume. IDs cannot be used by another session, after their group/session is
+released, or (for scopes) outside their originating pause.
+
 setPauseOnExceptions accepts none, uncaught, or all. all pauses at the original
 throwing statement even when a surrounding catch handles the value; uncaught
 pauses only after propagation reaches the C-API evaluation boundary. Origin
@@ -114,7 +125,7 @@ exceptionDetails object. Malformed requests receive deterministic protocol
 errors.
 
 The machine-readable [0.1 command/event inventory](inspector-protocol-0.1.json)
-names all 17 commands and 8 events with transcript evidence. Every listed
+names all 20 commands and 8 events with transcript evidence. Every listed
 command is implemented; an unlisted method receives -32601 and is never silently
 accepted.
 
@@ -123,7 +134,7 @@ accepted.
 Version 0.1 establishes real attachment, lifecycle, concurrent sessions, live
 runtime evaluation, stable scripts, statement-boundary pause/resume,
 breakpoints, ordinary-call stepping, exception-pause policy, live call frames,
-lexical/global scope chains, and frame evaluation. Expandable remote objects
-and worker targets remain tracked by
+lexical/global scope chains, frame evaluation, and expandable remote objects
+with deterministic GC-safe lifetime. Worker targets remain tracked by
 [issue #154](https://github.com/zig-utils/zig-js/issues/154). Unsupported
 commands return -32601; there are no silently accepted debugger stubs.

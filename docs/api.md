@@ -249,7 +249,10 @@ checkpoints and disable checkpoint-skipping quick paths. Paused events expose
 live call frames, function/source locations, `this`, and lexical through global
 scope chains. `Debugger.evaluateOnCallFrame` evaluates against a selected live
 environment and may update its bindings before resume. Expandable remote-object
-inspection and worker targets remain tracked by inspector issue #154.
+handles expose own data/accessor descriptors without invoking getters. Handles
+are session-owned, group-releasable, protected across GC, and invalidated on
+explicit release/session teardown; scope handles also expire on resume. Worker
+targets remain tracked by inspector issue #154.
 
 `JSGlobalContextRetain` and `JSGlobalContextRelease` maintain a real C-API reference count for contexts created through this C API. Releasing a retained context destroys the underlying runtime only after the final release. `JSGlobalContextRetain` returns null for a null context or if retaining would overflow the context refcount.
 

@@ -223,13 +223,15 @@ script/URL breakpoints with removal. Logical-depth step-into, step-over, and
 step-out cover ordinary calls plus suspendable generator/async VM execution,
 alongside none/all/uncaught exception pause policy and thrown-exception events.
 The [machine-readable protocol inventory](docs/inspector-protocol-0.1.json)
-contains 17 implemented commands and 8 events with no hidden accepted stubs.
+contains 20 implemented commands and 8 events with no hidden accepted stubs.
 Every paused event now includes the live JavaScript call stack with stable
 pause-local frame IDs, function/source locations, `this`, and lexical, block,
 closure, and summarized global scope chains across tree-walker and suspendable
 VM execution. `Debugger.evaluateOnCallFrame` reads and mutates those live
 lexical bindings while preserving the paused program's control/exception state.
-Expandable remote objects and worker targets continue under
+Session-owned remote values and scope handles support non-invoking own-property
+inspection plus explicit object/group release; values are protected across GC,
+while pause-only scope handles expire on resume. Worker targets continue under
 [#154](https://github.com/zig-utils/zig-js/issues/154); see
 [docs/inspector.md](docs/inspector.md).
 
