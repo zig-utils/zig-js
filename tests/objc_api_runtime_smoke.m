@@ -11,10 +11,15 @@ static BOOL ZJSTestExportCallbackState = NO;
 
 @protocol ZJSTestExports <JSExport>
 @property (nonatomic, copy) NSString *title;
+- (instancetype)initWithTitle:(NSString *)title;
 - (int32_t)add:(int32_t)left to:(int32_t)right;
+JSExportAs(product,
+- (int32_t)multiply:(int32_t)left by:(int32_t)right
+);
 - (CGPoint)offset:(CGPoint)point;
 - (NSString *)decorate:(NSString *)value;
 - (void)throwNative;
++ (NSString *)classPrefix:(NSString *)value;
 @end
 
 @interface ZJSTestExportObject : NSObject <ZJSTestExports>
@@ -23,6 +28,14 @@ static BOOL ZJSTestExportCallbackState = NO;
 @end
 
 @implementation ZJSTestExportObject
+- (instancetype)initWithTitle:(NSString *)title
+{
+    self = [super init];
+    if (self)
+        _title = [title copy];
+    return self;
+}
++ (NSString *)classPrefix:(NSString *)value { return [@"class:" stringByAppendingString:value]; }
 - (int32_t)add:(int32_t)left to:(int32_t)right
 {
     ZJSTestExportCallbackState = JSContext.currentContext != nil &&
@@ -30,6 +43,7 @@ static BOOL ZJSTestExportCallbackState = NO;
         JSContext.currentThis.toObject == self;
     return left + right;
 }
+- (int32_t)multiply:(int32_t)left by:(int32_t)right { return left * right; }
 - (CGPoint)offset:(CGPoint)point { return CGPointMake(point.x + 2, point.y - 2); }
 - (NSString *)decorate:(NSString *)value { return [@"[" stringByAppendingString:[value stringByAppendingString:@"]"]]; }
 - (void)throwNative { [NSException raise:NSInvalidArgumentException format:@"export-native-failure"]; }
@@ -442,6 +456,27 @@ int main(void)
         JSValue *exportFailure = [context evaluateScript:@"try { exported.throwNative(); 'missed'; } catch (error) { String(error); }"];
         if (check([exportFailure.toString containsString:@"export-native-failure"], 74))
             return 74;
+        if (check([[context evaluateScript:@"exported.product(6, 7)"] toInt32] == 42 &&
+                      [[[context evaluateScript:@"typeof exported.multiplyBy"] toString]
+                          isEqualToString:@"undefined"],
+                  80))
+            return 80;
+        context[@"ExportClass"] = ZJSTestExportObject.class;
+        if (check([[[context evaluateScript:@"ExportClass.classPrefix('zig-js')"] toString]
+                      isEqualToString:@"class:zig-js"],
+                  75))
+            return 75;
+        JSValue *constructedWrapper = [context evaluateScript:@"new ExportClass('made')"];
+        ZJSTestExportObject *constructedObject = constructedWrapper.toObject;
+        if (check([constructedObject.title isEqualToString:@"made"], 76))
+            return 76;
+        if (check([[context evaluateScript:@"Object.getPrototypeOf(new ExportClass('probe')) === ExportClass.prototype"] toBool], 78))
+            return 78;
+        context[@"constructed"] = constructedWrapper;
+        if (check([[context evaluateScript:@"constructed instanceof ExportClass"] toBool], 79))
+            return 79;
+        if (check([constructedWrapper isInstanceOf:context[@"ExportClass"]], 77))
+            return 77;
     }
     return 0;
 }
