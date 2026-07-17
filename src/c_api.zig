@@ -111,7 +111,6 @@ const CInspectorState = struct {
     context: *Context,
     sessions: std.ArrayListUnmanaged(*CInspectorSession) = .empty,
     scripts: std.ArrayListUnmanaged(CInspectorScript) = .empty,
-    next_script_id: u64 = 1,
     pause_requested: bool = false,
     paused: bool = false,
     breakpoints: std.ArrayListUnmanaged(CInspectorBreakpoint) = .empty,
@@ -136,12 +135,7 @@ const CInspectorState = struct {
 const CInspectorStepMode = enum { none, into, over, out };
 const CInspectorExceptionMode = enum { none, uncaught, all };
 
-const CInspectorScript = struct {
-    id: u64,
-    url: []const u8,
-    source: []const u8,
-    start_line: usize,
-};
+const CInspectorScript = Context.DebugScript;
 
 const CInspectorBreakpointKind = enum { script, url };
 
@@ -1900,24 +1894,9 @@ fn inspectorEvaluationFrame(machine: *interp.Interpreter, requested_id: u64) ?In
 
 fn beginInspectorScript(
     state: *CInspectorState,
-    source: []const u8,
-    source_url: JSStringRef,
-    starting_line_number: c_int,
+    script: CInspectorScript,
 ) ?CInspectorScript {
-    if (!inspectorHasDebugger(state)) return null;
-    const arena = state.context.arena();
-    const source_copy = arena.dupe(u8, source) catch return null;
-    const url_copy = arena.dupe(u8, evaluationSourceName(source_url)) catch return null;
-    const script = CInspectorScript{
-        .id = state.next_script_id,
-        .url = url_copy,
-        .source = source_copy,
-        .start_line = if (starting_line_number > 0) @intCast(starting_line_number) else 1,
-    };
-    state.next_script_id += 1;
     state.scripts.append(gpa, script) catch return null;
-    state.context.debug_script_id = script.id;
-    state.context.debug_script_start_line = script.start_line;
     for (state.sessions.items) |session| {
         if (session.attached and session.debugger_enabled) _ = sendInspectorScriptParsed(session, script);
     }
@@ -2217,12 +2196,18 @@ export fn ZJSInspectorSessionCreate(
     if (state == null) {
         const new_state = gpa.create(CInspectorState) catch return null;
         new_state.* = .{ .context = c };
+        for (c.debug_scripts.items) |script| new_state.scripts.append(gpa, script) catch {
+            new_state.scripts.deinit(gpa);
+            gpa.destroy(new_state);
+            return null;
+        };
         c.c_api_inspector_state = @ptrCast(new_state);
         state = new_state;
         created_state = true;
     }
     errdefer if (created_state) {
         c.c_api_inspector_state = null;
+        state.?.scripts.deinit(gpa);
         gpa.destroy(state.?);
     };
     const session = gpa.create(CInspectorSession) catch return null;
@@ -2673,7 +2658,17 @@ export fn JSEvaluateScript(
         c.debug_script_id = saved_script_id;
         c.debug_script_start_line = saved_start_line;
     }
-    if (inspectorState(c)) |state| _ = beginInspectorScript(state, s.bytes, source_url, starting_line_number);
+    const registered_script = c.registerDebugScript(
+        s.bytes,
+        evaluationSourceName(source_url),
+        if (starting_line_number > 0) @intCast(starting_line_number) else 1,
+    ) catch {
+        setException(c, exception, "OutOfMemory");
+        return null;
+    };
+    c.debug_script_id = registered_script.id;
+    c.debug_script_start_line = registered_script.start_line;
+    if (inspectorState(c)) |state| _ = beginInspectorScript(state, registered_script);
     const result = c.evaluateWithThis(s.bytes, this_value) catch |err| {
         // A JS `throw` surfaces the actual thrown value; host failures (parse
         // errors, OOM) surface their error name as a string.
@@ -5108,6 +5103,57 @@ test "C-API: debugger disables ordinary bytecode and native tier entry" {
     const erased = function_value.asObj().jsFunction() orelse return error.NotFunction;
     const function: *interp.Function = @ptrCast(@alignCast(erased));
     try std.testing.expect(function.chunk == null);
+}
+
+test "C-API: debugger preserves script history across late attach and reattach" {
+    const State = struct {
+        bytes: [16384]u8 = undefined,
+        len: usize = 0,
+
+        fn receive(message: [*]const u8, message_len: usize, user_data: ?*anyopaque) callconv(.c) void {
+            const self: *@This() = @ptrCast(@alignCast(user_data.?));
+            std.debug.assert(self.len + message_len + 1 <= self.bytes.len);
+            @memcpy(self.bytes[self.len .. self.len + message_len], message[0..message_len]);
+            self.len += message_len;
+            self.bytes[self.len] = '\n';
+            self.len += 1;
+        }
+    };
+
+    const ctx = JSGlobalContextCreate(null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(ctx);
+    const historical_source = JSStringCreateWithUTF8CString(
+        "function historical(value) { return value + 1; } historical(1);",
+    ) orelse return error.StringInitFailed;
+    defer JSStringRelease(historical_source);
+    const historical_url = JSStringCreateWithUTF8CString("historical.js") orelse return error.StringInitFailed;
+    defer JSStringRelease(historical_url);
+    var exception: JSValueRef = null;
+    const historical_result = JSEvaluateScript(ctx, historical_source, null, historical_url, 11, &exception) orelse return error.EvalFailed;
+    try std.testing.expectEqual(@as(f64, 2), JSValueToNumber(ctx, historical_result, &exception));
+
+    JSGlobalContextSetInspectable(ctx, true);
+    var first_state: State = .{};
+    const first = ZJSInspectorSessionCreate(ctx, State.receive, &first_state) orelse return error.SessionCreateFailed;
+    const enable = "{\"id\":1,\"method\":\"Debugger.enable\"}";
+    try std.testing.expect(ZJSInspectorSessionDispatch(first, enable, enable.len));
+    const get_source = "{\"id\":2,\"method\":\"Debugger.getScriptSource\",\"params\":{\"scriptId\":1}}";
+    try std.testing.expect(ZJSInspectorSessionDispatch(first, get_source, get_source.len));
+    const first_transcript = first_state.bytes[0..first_state.len];
+    try std.testing.expect(std.mem.indexOf(u8, first_transcript, "Debugger.scriptParsed") != null);
+    try std.testing.expect(std.mem.indexOf(u8, first_transcript, "historical.js") != null);
+    try std.testing.expect(std.mem.indexOf(u8, first_transcript, "\"startLine\":10") != null);
+    try std.testing.expect(std.mem.indexOf(u8, first_transcript, "function historical") != null);
+    ZJSInspectorSessionRelease(first);
+
+    // Destroying the last session must not discard context-owned script IDs.
+    var second_state: State = .{};
+    const second = ZJSInspectorSessionCreate(ctx, State.receive, &second_state) orelse return error.SessionCreateFailed;
+    defer ZJSInspectorSessionRelease(second);
+    try std.testing.expect(ZJSInspectorSessionDispatch(second, enable, enable.len));
+    const second_transcript = second_state.bytes[0..second_state.len];
+    try std.testing.expect(std.mem.indexOf(u8, second_transcript, "historical.js") != null);
+    try std.testing.expect(std.mem.indexOf(u8, second_transcript, "\"scriptId\":1") != null);
 }
 
 test "C-API: paused frames expose scopes and live frame evaluation" {

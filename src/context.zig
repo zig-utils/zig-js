@@ -2202,6 +2202,13 @@ pub fn enableParallelSync() void {
 /// (AST, strings, objects, boxed values) and a persistent global environment
 /// so variables survive across `evaluate` calls, like a real global context.
 pub const Context = struct {
+    pub const DebugScript = struct {
+        id: u64,
+        url: []const u8,
+        source: []const u8,
+        start_line: usize,
+    };
+
     pub const c_api_handle_reserve_granularity = 16;
     pub const js_thread_reserve_granularity = 16;
     pub const active_interpreter_reserve_granularity = 16;
@@ -2256,6 +2263,11 @@ pub const Context = struct {
     debug_statement_hook: ?interp.DebugStatementHook = null,
     debug_exception_hook: ?interp.DebugExceptionHook = null,
     debug_statement_locations: std.AutoHashMapUnmanaged(*const ast.Node, interp.DebugStatementLocation) = .empty,
+    /// Context-owned script history outlives inspector sessions. This preserves
+    /// stable identities/source for scripts parsed before attachment and across
+    /// detach/reattach without making the engine core depend on the C protocol.
+    debug_scripts: std.ArrayListUnmanaged(DebugScript) = .empty,
+    next_debug_script_id: u64 = 1,
     debug_script_id: u64 = 0,
     debug_script_start_line: usize = 1,
     /// Embedder metadata set through JSGlobalContextSetName. Store exact UTF-16
@@ -3022,6 +3034,19 @@ pub const Context = struct {
             .parallel_worker_count = if (self.parallel_js) &self.parallel_worker_count else null,
             .private_name_serial = &self.private_name_serial,
         };
+    }
+
+    pub fn registerDebugScript(self: *Context, source: []const u8, url: []const u8, start_line: usize) !DebugScript {
+        const allocator = self.arena();
+        const script = DebugScript{
+            .id = self.next_debug_script_id,
+            .url = try allocator.dupe(u8, url),
+            .source = try allocator.dupe(u8, source),
+            .start_line = @max(start_line, 1),
+        };
+        try self.debug_scripts.append(allocator, script);
+        self.next_debug_script_id += 1;
+        return script;
     }
 
     /// Request cooperative termination of the current evaluation and any
@@ -4200,7 +4225,7 @@ pub const Context = struct {
             self.last_evaluation_diagnostic = parser.errorLocation();
             return err;
         };
-        if (self.debug_statement_hook != null) {
+        if (self.debug_script_id != 0) {
             for (parser.statement_locations.items) |entry| {
                 try self.debug_statement_locations.put(a, entry.node, .{
                     .script_id = self.debug_script_id,
