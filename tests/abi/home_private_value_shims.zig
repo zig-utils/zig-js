@@ -37,6 +37,24 @@ const EncodedValue = enum(i64) {
     }
 };
 
+const PrivateTypedArrayType = enum(u8) {
+    none = 0,
+    i8 = 1,
+    u8 = 2,
+    u8c = 3,
+    i16 = 4,
+    u16 = 5,
+    i32 = 6,
+    u32 = 7,
+    f16 = 8,
+    f32 = 9,
+    f64 = 10,
+    i64 = 11,
+    u64 = 12,
+    data_view = 13,
+    _,
+};
+
 const BunStringTag = enum(u8) {
     dead = 0,
     wtf_string_impl = 1,
@@ -154,8 +172,13 @@ extern "c" fn JSBuffer__bufferFromLength(JSContextRef, i64) EncodedValue;
 extern "c" fn JSBuffer__bufferFromPointerAndLengthAndDeinit(JSContextRef, [*]u8, usize, ?*anyopaque, ?*const fn (?*anyopaque, ?*anyopaque) callconv(.c) void) EncodedValue;
 extern "c" fn JSBuffer__fromMmap(JSContextRef, *anyopaque, usize) EncodedValue;
 extern "c" fn JSC__JSValue__createUninitializedUint8Array(JSContextRef, usize) EncodedValue;
+extern "c" fn Bun__makeArrayBufferWithBytesNoCopy(JSContextRef, ?*anyopaque, usize, ?*const fn (?*anyopaque, ?*anyopaque) callconv(.c) void, ?*anyopaque) EncodedValue;
+extern "c" fn Bun__makeTypedArrayWithBytesNoCopy(JSContextRef, PrivateTypedArrayType, ?*anyopaque, usize, ?*const fn (?*anyopaque, ?*anyopaque) callconv(.c) void, ?*anyopaque) EncodedValue;
 extern "c" fn JSObjectGetTypedArrayBytesPtr(JSContextRef, JSObjectRef, [*c]JSValueRef) ?*anyopaque;
 extern "c" fn JSObjectGetTypedArrayLength(JSContextRef, JSObjectRef, [*c]JSValueRef) usize;
+extern "c" fn JSObjectGetTypedArrayBuffer(JSContextRef, JSObjectRef, [*c]JSValueRef) JSObjectRef;
+extern "c" fn JSObjectGetArrayBufferBytesPtr(JSContextRef, JSObjectRef, [*c]JSValueRef) ?*anyopaque;
+extern "c" fn JSObjectGetArrayBufferByteLength(JSContextRef, JSObjectRef, [*c]JSValueRef) usize;
 extern "c" fn ZigString__toErrorInstance(*const ZigString, JSContextRef) EncodedValue;
 extern "c" fn ZigString__toTypeErrorInstance(*const ZigString, JSContextRef) EncodedValue;
 extern "c" fn ZigString__toRangeErrorInstance(*const ZigString, JSContextRef) EncodedValue;
@@ -818,6 +841,67 @@ pub fn main() void {
     if (JSBuffer__bufferFromLength(context, -1) != .empty or !JSGlobalObject__hasException(context))
         fail("negative Buffer length did not throw");
     JSGlobalObject__clearException(context);
+
+    const ownership_context = JSGlobalContextCreate(null) orelse fail("no-copy ownership context creation failed");
+    var no_copy_state = BufferDeallocatorState{};
+    const adopted_array_buffer_raw = std.c.malloc(5) orelse fail("no-copy ArrayBuffer allocation failed");
+    const adopted_array_buffer = Bun__makeArrayBufferWithBytesNoCopy(
+        ownership_context,
+        adopted_array_buffer_raw,
+        5,
+        bufferFixtureDeallocator,
+        &no_copy_state,
+    );
+    var ownership_exception: JSValueRef = null;
+    const adopted_array_buffer_ptr = JSObjectGetArrayBufferBytesPtr(ownership_context, adopted_array_buffer.cellPointer(), &ownership_exception) orelse
+        fail("no-copy ArrayBuffer pointer lookup failed");
+    if (ownership_exception != null or adopted_array_buffer_ptr != adopted_array_buffer_raw or
+        JSObjectGetArrayBufferByteLength(ownership_context, adopted_array_buffer.cellPointer(), &ownership_exception) != 5)
+        fail("no-copy ArrayBuffer adoption mismatch");
+
+    const adopted_f64_raw = std.c.malloc(17) orelse fail("no-copy Float64Array allocation failed");
+    const adopted_f64 = Bun__makeTypedArrayWithBytesNoCopy(
+        ownership_context,
+        .f64,
+        adopted_f64_raw,
+        17,
+        bufferFixtureDeallocator,
+        &no_copy_state,
+    );
+    const adopted_f64_buffer = JSObjectGetTypedArrayBuffer(ownership_context, adopted_f64.cellPointer(), &ownership_exception) orelse
+        fail("no-copy Float64Array buffer lookup failed");
+    if (ownership_exception != null or
+        JSObjectGetTypedArrayLength(ownership_context, adopted_f64.cellPointer(), &ownership_exception) != 2 or
+        JSObjectGetArrayBufferBytesPtr(ownership_context, adopted_f64_buffer, &ownership_exception) != adopted_f64_raw or
+        JSObjectGetArrayBufferByteLength(ownership_context, adopted_f64_buffer, &ownership_exception) != 17)
+        fail("no-copy Float64Array trailing-byte mismatch");
+
+    const adopted_empty_raw = std.c.malloc(1) orelse fail("empty no-copy TypedArray allocation failed");
+    const adopted_empty = Bun__makeTypedArrayWithBytesNoCopy(
+        ownership_context,
+        .u16,
+        adopted_empty_raw,
+        0,
+        bufferFixtureDeallocator,
+        &no_copy_state,
+    );
+    if (JSObjectGetTypedArrayLength(ownership_context, adopted_empty.cellPointer(), &ownership_exception) != 0 or
+        ownership_exception != null or no_copy_state.calls != 0)
+        fail("empty no-copy TypedArray ownership mismatch");
+
+    const invalid_no_copy_raw = std.c.malloc(1) orelse fail("invalid no-copy TypedArray allocation failed");
+    if (Bun__makeTypedArrayWithBytesNoCopy(
+        ownership_context,
+        .data_view,
+        invalid_no_copy_raw,
+        1,
+        bufferFixtureDeallocator,
+        &no_copy_state,
+    ) != .empty or !JSGlobalObject__hasException(ownership_context) or no_copy_state.calls != 1)
+        fail("invalid no-copy TypedArray did not fail atomically");
+    JSGlobalObject__clearException(ownership_context);
+    JSGlobalContextRelease(ownership_context);
+    if (no_copy_state.calls != 4) fail("no-copy storage finalizers did not run exactly once");
 
     var buffer_deallocator_state = BufferDeallocatorState{};
     const external_buffer_raw = std.c.malloc(3) orelse fail("external Buffer fixture allocation failed");
@@ -2923,5 +3007,5 @@ pub fn main() void {
         TopExceptionScope__exceptionIncludingTraps(&verification_scope) != null)
         fail("private TopExceptionScope destruction mismatch");
 
-    std.debug.print("Home private value shims: 196/196 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 198/198 symbols linked; runtime matrix passed\n", .{});
 }

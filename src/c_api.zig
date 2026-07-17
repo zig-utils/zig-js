@@ -8703,6 +8703,140 @@ export fn JSC__JSValue__createUninitializedUint8Array(
     return privateEncodeResult(context, &machine, Value.obj(object));
 }
 
+const PrivateTypedArrayType = enum(u8) {
+    none = 0,
+    i8 = 1,
+    u8 = 2,
+    u8c = 3,
+    i16 = 4,
+    u16 = 5,
+    i32 = 6,
+    u32 = 7,
+    f16 = 8,
+    f32 = 9,
+    f64 = 10,
+    i64 = 11,
+    u64 = 12,
+    data_view = 13,
+    _,
+
+    fn kind(self: PrivateTypedArrayType) ?value.TAKind {
+        return switch (self) {
+            .i8 => .i8,
+            .u8 => .u8,
+            .u8c => .u8c,
+            .i16 => .i16,
+            .u16 => .u16,
+            .i32 => .i32,
+            .u32 => .u32,
+            .f16 => .f16,
+            .f32 => .f32,
+            .f64 => .f64,
+            .i64 => .i64,
+            .u64 => .u64,
+            .none, .data_view, _ => null,
+        };
+    }
+};
+
+fn privateReleaseTransferredInput(
+    bytes: ?*anyopaque,
+    deallocator: JSTypedArrayBytesDeallocator,
+    deallocator_context: ?*anyopaque,
+) void {
+    if (deallocator) |callback| callback(bytes, deallocator_context);
+}
+
+fn privateMakeExternalBufferValue(
+    context: *Context,
+    bytes: ?*anyopaque,
+    byte_length: usize,
+    deallocator: JSTypedArrayBytesDeallocator,
+    deallocator_context: ?*anyopaque,
+    kind: ?value.TAKind,
+) EncodedValue {
+    if (byte_length > 0 and bytes == null) {
+        privateReleaseTransferredInput(bytes, deallocator, deallocator_context);
+        return privateRejectUint8Array(context, "TypeError", "non-empty external buffer requires non-null bytes");
+    }
+
+    const owner = context.createExternalBufferOwner(bytes, deallocator, deallocator_context) catch {
+        privateReleaseTransferredInput(bytes, deallocator, deallocator_context);
+        privateSetPendingValue(context, context.reserved_thread_oom_error orelse Value.staticStr("OutOfMemory"));
+        return .empty;
+    };
+    var owner_transferred = false;
+    defer {
+        if (!owner_transferred) _ = owner.release();
+    }
+
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    defer context.popActiveInterpreter(&machine);
+
+    const data: []u8 = if (byte_length == 0)
+        &.{}
+    else
+        @as([*]u8, @ptrCast(bytes.?))[0..byte_length];
+    const buffer = machine.makeExternalArrayBuffer(data, owner) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    const result = if (kind) |typed_kind| typed: {
+        const args = [_]Value{
+            Value.obj(buffer),
+            Value.num(0),
+            Value.num(@floatFromInt(byte_length / typed_kind.byteSize())),
+        };
+        break :typed machine.makeTypedArray(typed_kind, &args) catch |err| {
+            privateSetPendingAbrupt(context, &machine, err);
+            return .empty;
+        };
+    } else Value.obj(buffer);
+    owner_transferred = true;
+    return privateEncodeResult(context, &machine, result);
+}
+
+export fn Bun__makeArrayBufferWithBytesNoCopy(
+    global: JSContextRef,
+    bytes: ?*anyopaque,
+    byte_length: usize,
+    deallocator: JSTypedArrayBytesDeallocator,
+    deallocator_context: ?*anyopaque,
+) callconv(.c) EncodedValue {
+    const context = ctxForEvaluation(global) orelse {
+        privateReleaseTransferredInput(bytes, deallocator, deallocator_context);
+        return .empty;
+    };
+    return privateMakeExternalBufferValue(context, bytes, byte_length, deallocator, deallocator_context, null);
+}
+
+export fn Bun__makeTypedArrayWithBytesNoCopy(
+    global: JSContextRef,
+    array_type: PrivateTypedArrayType,
+    bytes: ?*anyopaque,
+    byte_length: usize,
+    deallocator: JSTypedArrayBytesDeallocator,
+    deallocator_context: ?*anyopaque,
+) callconv(.c) EncodedValue {
+    const context = ctxForEvaluation(global) orelse {
+        privateReleaseTransferredInput(bytes, deallocator, deallocator_context);
+        return .empty;
+    };
+    const kind = array_type.kind() orelse {
+        privateReleaseTransferredInput(bytes, deallocator, deallocator_context);
+        return privateRejectUint8Array(context, "TypeError", "invalid external TypedArray type");
+    };
+    return privateMakeExternalBufferValue(context, bytes, byte_length, deallocator, deallocator_context, kind);
+}
+
 fn makeExternalArrayBuffer(
     c: *Context,
     bytes: ?*anyopaque,
@@ -14839,6 +14973,83 @@ test "private uninitialized Uint8Array stays explicit writable and GC-accounted"
     JSGlobalObject__clearException(context);
 
     JSGlobalContextRelease(context);
+}
+
+test "private generic no-copy buffers preserve every typed tag trailing bytes and finalizers" {
+    const State = struct {
+        calls: usize = 0,
+
+        fn release(bytes: ?*anyopaque, raw: ?*anyopaque) callconv(.c) void {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            self.calls += 1;
+            std.c.free(bytes);
+        }
+    };
+    const cases = [_]struct { PrivateTypedArrayType, value.TAKind }{
+        .{ .i8, .i8 },   .{ .u8, .u8 },   .{ .u8c, .u8c }, .{ .i16, .i16 },
+        .{ .u16, .u16 }, .{ .i32, .i32 }, .{ .u32, .u32 }, .{ .f16, .f16 },
+        .{ .f32, .f32 }, .{ .f64, .f64 }, .{ .i64, .i64 }, .{ .u64, .u64 },
+    };
+
+    const context = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
+    var state = State{};
+    for (cases) |case| {
+        const pointer = std.c.malloc(17) orelse return error.OutOfMemory;
+        const bytes = @as([*]u8, @ptrCast(pointer))[0..17];
+        @memset(bytes, @intFromEnum(case[0]));
+        const encoded = Bun__makeTypedArrayWithBytesNoCopy(
+            context,
+            case[0],
+            pointer,
+            bytes.len,
+            State.release,
+            &state,
+        );
+        const typed = (privateValueFrom(context, encoded) orelse return error.TypedArrayCreateFailed).asObj().typedArray() orelse
+            return error.TypedArrayCreateFailed;
+        try std.testing.expectEqual(case[1], typed.kind);
+        try std.testing.expectEqual(bytes.len / case[1].byteSize(), typed.currentLength().?);
+        const backing = typed.buffer.arrayBuffer().?;
+        try std.testing.expectEqual(@as(usize, 17), backing.bytes().len);
+        try std.testing.expectEqual(@intFromPtr(pointer), @intFromPtr(backing.bytes().ptr));
+        try std.testing.expect(backing.external_owner.?.release());
+        try std.testing.expect(!backing.external_owner.?.release());
+    }
+    try std.testing.expectEqual(cases.len, state.calls);
+
+    const array_buffer_pointer = std.c.malloc(5) orelse return error.OutOfMemory;
+    const array_buffer = Bun__makeArrayBufferWithBytesNoCopy(context, array_buffer_pointer, 5, State.release, &state);
+    const array_buffer_data = (privateValueFrom(context, array_buffer) orelse return error.ArrayBufferCreateFailed).asObj().arrayBuffer() orelse
+        return error.ArrayBufferCreateFailed;
+    try std.testing.expectEqual(@intFromPtr(array_buffer_pointer), @intFromPtr(array_buffer_data.bytes().ptr));
+    try std.testing.expectEqual(@as(usize, 5), array_buffer_data.bytes().len);
+    try std.testing.expect(array_buffer_data.external_owner.?.release());
+
+    const empty_pointer = std.c.malloc(1) orelse return error.OutOfMemory;
+    const empty = Bun__makeTypedArrayWithBytesNoCopy(context, .u32, empty_pointer, 0, State.release, &state);
+    const empty_backing = (privateValueFrom(context, empty) orelse return error.TypedArrayCreateFailed).asObj().typedArray().?.buffer.arrayBuffer().?;
+    try std.testing.expectEqual(@as(usize, 0), empty_backing.bytes().len);
+    try std.testing.expectEqual(cases.len + 1, state.calls);
+    try std.testing.expect(empty_backing.external_owner.?.release());
+    try std.testing.expectEqual(cases.len + 2, state.calls);
+
+    const invalid_pointer = std.c.malloc(1) orelse return error.OutOfMemory;
+    try std.testing.expectEqual(EncodedValue.empty, Bun__makeTypedArrayWithBytesNoCopy(context, .data_view, invalid_pointer, 1, State.release, &state));
+    try std.testing.expectEqual(cases.len + 3, state.calls);
+    try std.testing.expect(JSGlobalObject__hasException(context));
+    JSGlobalObject__clearException(context);
+    try std.testing.expectEqual(EncodedValue.empty, Bun__makeTypedArrayWithBytesNoCopy(context, .u8, null, 1, State.release, &state));
+    try std.testing.expectEqual(cases.len + 4, state.calls);
+    try std.testing.expect(JSGlobalObject__hasException(context));
+    JSGlobalObject__clearException(context);
+
+    var borrowed = [_]u8{ 3, 4, 5 };
+    const no_callback = Bun__makeArrayBufferWithBytesNoCopy(context, &borrowed, borrowed.len, null, null);
+    const borrowed_data = (privateValueFrom(context, no_callback) orelse return error.ArrayBufferCreateFailed).asObj().arrayBuffer().?;
+    try std.testing.expectEqual(@intFromPtr(&borrowed), @intFromPtr(borrowed_data.bytes().ptr));
+
+    JSGlobalContextRelease(context);
+    try std.testing.expectEqual(cases.len + 4, state.calls);
 }
 
 test "private rooted native value containers retain and release exact cells" {
