@@ -155,6 +155,27 @@ int main(void)
         row(@"export-class", [NSString stringWithFormat:@"%@:%@",
                                                          [context evaluateScript:@"ExportClass.classPrefix('zig-js')"].toString,
                                                          constructed.title]);
+
+        JSValue *symbolValue = [context evaluateScript:@"Symbol('edge')"];
+        JSValue *bigIntValue = [context evaluateScript:@"9007199254740993n"];
+        row(@"primitive-object", [NSString stringWithFormat:@"%d:%d",
+                                                             symbolValue.toObject == symbolValue,
+                                                             bigIntValue.toObject == bigIntValue]);
+
+        NSError *nativeError = [NSError errorWithDomain:@"zig-js" code:42 userInfo:nil];
+        JSValue *nativeErrorValue = [JSValue valueWithObject:nativeError inContext:context];
+        id scriptErrorObject = [context evaluateScript:@"new Error('edge')"].toObject;
+        row(@"errors", [NSString stringWithFormat:@"%d:%d:%lu",
+                                                   nativeErrorValue.toObject == nativeError,
+                                                   [scriptErrorObject isKindOfClass:NSDictionary.class],
+                                                   (unsigned long)[scriptErrorObject count]]);
+
+        NSDictionary *typedArray = [context evaluateScript:@"new Uint8Array([3, 4])"].toObject;
+        NSDictionary *arrayBuffer = [context evaluateScript:@"new ArrayBuffer(4)"].toObject;
+        row(@"buffers", [NSString stringWithFormat:@"%lu:%@:%@:%lu",
+                                                    (unsigned long)typedArray.count,
+                                                    typedArray[@"0"], typedArray[@"1"],
+                                                    (unsigned long)arrayBuffer.count]);
     }
     return 0;
 }
