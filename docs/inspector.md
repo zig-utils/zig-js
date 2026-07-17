@@ -77,6 +77,16 @@ shallower call depth and is rejected at top level. A step completion pauses with
 reason step; a debugger statement or breakpoint encountered first takes
 precedence. Each continuation command emits Debugger.resumed.
 
+Every Debugger.paused event includes callFrames ordered from the current
+invocation outward to the global script. A frame has a pause-local numeric
+callFrameId, function name, exact script location, `this`, and its live lexical
+scope chain. Declarative block/local scopes include their current bindings;
+global scopes publish a binding count without expanding the realm's full
+builtin table into every pause transcript. Tree-walker frames and suspendable
+generator/async VM frames use the same representation. These frames reference
+the actual activation environments, and the collector traces every paused
+caller environment and `this` value until execution continues.
+
 setPauseOnExceptions accepts none, uncaught, or all. all pauses at the original
 throwing statement even when a surrounding catch handles the value; uncaught
 pauses only after propagation reaches the C-API evaluation boundary. Origin
@@ -103,7 +113,8 @@ accepted.
 
 Version 0.1 establishes real attachment, lifecycle, concurrent sessions, live
 runtime evaluation, stable scripts, statement-boundary pause/resume,
-breakpoints, ordinary-call stepping, and exception-pause policy. Call frames,
-remote objects, and scopes remain tracked by
+breakpoints, ordinary-call stepping, exception-pause policy, live call frames,
+and lexical/global scope chains. Evaluate-on-frame, expandable remote objects,
+and worker targets remain tracked by
 [issue #154](https://github.com/zig-utils/zig-js/issues/154). Unsupported
 commands return -32601; there are no silently accepted debugger stubs.

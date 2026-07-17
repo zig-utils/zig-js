@@ -387,6 +387,19 @@ pub const DebugExceptionHook = *const fn (
     uncaught: bool,
 ) EvalError!void;
 
+/// Live JavaScript invocation metadata used by the synchronous inspector pause
+/// callback. The frame points at the activation's real lexical environment and
+/// values rather than a copied snapshot, so scope inspection observes exactly
+/// what resumed execution will use. Frames live on the host/VM activation stack
+/// and are valid only while the matching call is active.
+pub const DebugCallFrame = struct {
+    function_name: []const u8,
+    environment: *Environment,
+    this_value: Value,
+    location: ?DebugStatementLocation = null,
+    caller: ?*DebugCallFrame = null,
+};
+
 /// A lexical scope with a parent chain. Function calls push a fresh scope whose
 /// `parent` is the function's closure environment, which gives real closures.
 /// Variable names are duplicated into `arena` on first definition so they
@@ -981,6 +994,9 @@ pub const Interpreter = struct {
     debug_exception_ctx: ?*anyopaque = null,
     debug_exception_hook: ?DebugExceptionHook = null,
     debug_current_location: ?DebugStatementLocation = null,
+    debug_call_frame: ?*DebugCallFrame = null,
+    debug_top_level_location: ?DebugStatementLocation = null,
+    debug_top_level_environment: ?*Environment = null,
     debug_exception_origin_notified: bool = false,
     /// The Context-owned microtask queue (Promise reactions). Drained after the
     /// main script in `Context.evaluate` and inline by `await`.
@@ -3192,6 +3208,14 @@ pub const Interpreter = struct {
             if (self.debug_statement_locations) |locations| {
                 if (locations.get(node)) |location| {
                     self.debug_current_location = location;
+                    if (self.debug_call_frame) |frame| {
+                        frame.environment = self.env;
+                        frame.this_value = self.this_value;
+                        frame.location = location;
+                    } else {
+                        self.debug_top_level_location = location;
+                        self.debug_top_level_environment = self.env;
+                    }
                     try hook(self.debug_statement_ctx.?, self, location);
                 }
             }
@@ -5874,8 +5898,16 @@ pub const Interpreter = struct {
         const saved_dfc = self.in_default_ctor;
         const saved_pm = self.current_private_map;
         const saved_call_frame = self.active_call_frame;
+        const saved_debug_call_frame = self.debug_call_frame;
         const saved_tree_tail_allowed = self.tree_tail_allowed;
         var call_frame: LegacyCallFrame = undefined;
+        var debug_call_frame = DebugCallFrame{
+            .function_name = func.name,
+            .environment = call_env,
+            .this_value = this_val,
+            .caller = saved_debug_call_frame,
+        };
+        if (self.debug_statement_hook != null) self.debug_call_frame = &debug_call_frame;
         if (!func.is_arrow) self.current_private_map = func.private_map; // arrows inherit the enclosing class's map
         if (!func.is_arrow) {
             self.active_function = func.obj;
@@ -5983,6 +6015,7 @@ pub const Interpreter = struct {
             self.this_cell = saved_this_cell;
             self.active_function = saved_active_function;
             self.active_call_frame = saved_call_frame;
+            self.debug_call_frame = saved_debug_call_frame;
             self.tree_tail_allowed = saved_tree_tail_allowed;
             // Re-sync the ambient this-state from the (restored) enclosing derived
             // ctor's shared cell: a `super()` that ran during this call — possibly

@@ -243,6 +243,7 @@ pub const Generator = struct {
     // own lock serializes the lazy flag-set (rare — once per backing kind).
     backing_lock: std.atomic.Mutex = .unlocked,
     chunk: *Chunk,
+    function_name: []const u8 = "",
     exec: Exec = .{},
     env: *Environment,
     this_value: Value = Value.undef(),
@@ -3693,6 +3694,20 @@ fn tryRunNativeDirectCall(vm: *Interpreter, func: *Function, args: []const Value
 /// to snapshot `exec` and suspend. For a normal call `gen` is null and
 /// `gen_yield` never appears (the compiler emits it only into generator chunks).
 fn execLoop(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?*Generator) EvalError!Value {
+    const saved_debug_call_frame = vm.debug_call_frame;
+    var debug_call_frame: interp.DebugCallFrame = undefined;
+    if (gen) |activation| {
+        if (vm.debug_statement_hook != null) {
+            debug_call_frame = .{
+                .function_name = activation.function_name,
+                .environment = activation.env,
+                .this_value = activation.this_value,
+                .caller = saved_debug_call_frame,
+            };
+            vm.debug_call_frame = &debug_call_frame;
+        }
+    }
+    defer vm.debug_call_frame = saved_debug_call_frame;
     // The trampoline is off inside `execLoop`: the top-level program and
     // generator/async bodies keep native `.call` dispatch (the `.call` opcode
     // only pushes activations when `driver_active`). A JS call made here still
@@ -4942,6 +4957,7 @@ pub fn makeGenerator(vm: *Interpreter, func: *Function, args: []const Value, thi
     const g = try gc_mod.allocGenerator(vm.arena);
     g.* = .{
         .chunk = chunk,
+        .function_name = func.name,
         .env = lexical_env,
         .this_value = bound_this,
         .home_object = func.home_object,
@@ -5241,6 +5257,7 @@ pub fn runAsync(vm: *Interpreter, func: *Function, args: []const Value, this_val
     const g = try gc_mod.allocGenerator(vm.arena);
     g.* = .{
         .chunk = chunk,
+        .function_name = func.name,
         .env = lexical_env,
         .this_value = bound_this,
         .home_object = func.home_object,

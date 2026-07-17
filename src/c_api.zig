@@ -153,6 +153,32 @@ const InspectorProtocolLocation = struct {
     byteOffset: usize,
 };
 
+const InspectorRemoteValue = struct {
+    type: []const u8,
+    value: ?std.json.Value = null,
+    description: []const u8,
+};
+
+const InspectorScopeBinding = struct {
+    name: []const u8,
+    value: InspectorRemoteValue,
+};
+
+const InspectorScope = struct {
+    type: []const u8,
+    name: []const u8,
+    bindingCount: usize,
+    bindings: []const InspectorScopeBinding,
+};
+
+const InspectorCallFrame = struct {
+    callFrameId: u64,
+    functionName: []const u8,
+    location: InspectorProtocolLocation,
+    scopeChain: []const InspectorScope,
+    this: InspectorRemoteValue,
+};
+
 const CInspectorResolvedBreakpoint = struct {
     breakpoint_id: u64,
     location: InspectorProtocolLocation,
@@ -1550,6 +1576,111 @@ fn inspectorBreakpointHits(state: *const CInspectorState, location: interp.Debug
     }
 }
 
+fn inspectorProtocolLocation(location: interp.DebugStatementLocation) InspectorProtocolLocation {
+    return .{
+        .scriptId = location.script_id,
+        .lineNumber = location.location.line - 1,
+        .columnNumber = location.location.column - 1,
+        .byteOffset = location.location.byte_offset,
+    };
+}
+
+fn inspectorRemoteValue(raw: Value) InspectorRemoteValue {
+    return switch (raw.kind()) {
+        .undefined => .{ .type = "undefined", .description = "undefined" },
+        .null => .{ .type = "object", .value = .null, .description = "null" },
+        .boolean => .{
+            .type = "boolean",
+            .value = .{ .bool = raw.asBool() },
+            .description = if (raw.asBool()) "true" else "false",
+        },
+        .number => .{
+            .type = "number",
+            .value = if (std.math.isFinite(raw.asNum())) .{ .float = raw.asNum() } else null,
+            .description = "number",
+        },
+        .string => .{
+            .type = "string",
+            .value = .{ .string = @constCast(raw.asStr()) },
+            .description = raw.asStr(),
+        },
+        .object => blk: {
+            const object = raw.asObj();
+            if (object.is_symbol) break :blk .{ .type = "symbol", .description = "Symbol" };
+            if (object.is_bigint) break :blk .{ .type = "bigint", .description = "BigInt" };
+            if (object.jsFunction() != null) break :blk .{ .type = "function", .description = "Function" };
+            break :blk .{ .type = "object", .description = "Object" };
+        },
+    };
+}
+
+fn inspectorScopeChain(arena: std.mem.Allocator, start: *interp.Environment) ![]const InspectorScope {
+    const AliasSnapshot = struct { local_name: []const u8, target: interp.Environment.Alias };
+    var scopes: std.ArrayListUnmanaged(InspectorScope) = .empty;
+    var current: ?*interp.Environment = start;
+    while (current) |environment| : (current = environment.parent) {
+        const is_global = environment.parent == null;
+        var bindings: std.ArrayListUnmanaged(InspectorScopeBinding) = .empty;
+        var aliases: std.ArrayListUnmanaged(AliasSnapshot) = .empty;
+        const binding_count = locked: {
+            environment.lockBindings();
+            defer environment.unlockBindings();
+            const count = environment.vars.count() + environment.aliases.count();
+            if (!is_global) {
+                var iterator = environment.vars.iterator();
+                while (iterator.next()) |entry| try bindings.append(arena, .{
+                    .name = entry.key_ptr.*,
+                    .value = inspectorRemoteValue(entry.value_ptr.*),
+                });
+                var alias_iterator = environment.aliases.iterator();
+                while (alias_iterator.next()) |entry| try aliases.append(arena, .{
+                    .local_name = entry.key_ptr.*,
+                    .target = entry.value_ptr.*,
+                });
+            }
+            break :locked count;
+        };
+        for (aliases.items) |alias| try bindings.append(arena, .{
+            .name = alias.local_name,
+            .value = inspectorRemoteValue(alias.target.env.get(alias.target.name) orelse Value.undef()),
+        });
+        try scopes.append(arena, .{
+            .type = if (is_global) "global" else if (environment.fn_scope) "local" else "block",
+            .name = if (is_global) "Global" else if (environment.fn_scope) "Local" else "Block",
+            .bindingCount = binding_count,
+            .bindings = bindings.items,
+        });
+    }
+    return scopes.items;
+}
+
+fn inspectorCallFrames(arena: std.mem.Allocator, machine: *interp.Interpreter, current_location: interp.DebugStatementLocation) ![]const InspectorCallFrame {
+    var frames: std.ArrayListUnmanaged(InspectorCallFrame) = .empty;
+    var frame_id: u64 = 0;
+    var current = machine.debug_call_frame;
+    while (current) |frame| : (current = frame.caller) {
+        const location = frame.location orelse current_location;
+        try frames.append(arena, .{
+            .callFrameId = frame_id,
+            .functionName = if (frame.function_name.len == 0) "(anonymous)" else frame.function_name,
+            .location = inspectorProtocolLocation(location),
+            .scopeChain = try inspectorScopeChain(arena, frame.environment),
+            .this = inspectorRemoteValue(frame.this_value),
+        });
+        frame_id += 1;
+    }
+    const top_location = machine.debug_top_level_location orelse current_location;
+    const top_environment = machine.debug_top_level_environment orelse machine.env;
+    try frames.append(arena, .{
+        .callFrameId = frame_id,
+        .functionName = "(global)",
+        .location = inspectorProtocolLocation(top_location),
+        .scopeChain = try inspectorScopeChain(arena, top_environment),
+        .this = inspectorRemoteValue(if (machine.global_object) |global| Value.obj(global) else machine.this_value),
+    });
+    return frames.items;
+}
+
 fn beginInspectorScript(
     state: *CInspectorState,
     source: []const u8,
@@ -1606,6 +1737,9 @@ fn inspectorStatementBoundary(
     state.paused = true;
     state.paused_depth = machine.depth;
     state.paused_at_uncaught_boundary = false;
+    var pause_arena = std.heap.ArenaAllocator.init(gpa);
+    defer pause_arena.deinit();
+    const call_frames = try inspectorCallFrames(pause_arena.allocator(), machine, location);
     for (state.sessions.items) |session| {
         if (!session.attached or !session.debugger_enabled) continue;
         _ = sendInspectorJson(session, .{
@@ -1619,6 +1753,7 @@ fn inspectorStatementBoundary(
                     .columnNumber = location.location.column - 1,
                     .byteOffset = location.location.byte_offset,
                 },
+                .callFrames = call_frames,
             },
         });
     }
@@ -1691,6 +1826,13 @@ fn inspectorExceptionBoundary(
     state.paused_at_uncaught_boundary = uncaught;
     state.pause_requested = false;
     state.step_mode = .none;
+    var pause_arena = std.heap.ArenaAllocator.init(gpa);
+    defer pause_arena.deinit();
+    const frame_location = maybe_location orelse machine.debug_current_location orelse interp.DebugStatementLocation{
+        .script_id = 0,
+        .location = .{ .line = 1, .column = 1, .byte_offset = 0 },
+    };
+    const call_frames = try inspectorCallFrames(pause_arena.allocator(), machine, frame_location);
     for (state.sessions.items) |session| {
         if (!session.attached or !session.debugger_enabled) continue;
         _ = sendInspectorJson(session, .{
@@ -1709,6 +1851,7 @@ fn inspectorExceptionBoundary(
                 .hitBreakpoints = &[_]u64{},
                 .location = location,
                 .data = .{ .exceptionId = exception_id, .uncaught = uncaught },
+                .callFrames = call_frames,
             },
         });
     }
@@ -4524,6 +4667,55 @@ test "C-API: debugger publishes scripts and synchronously pauses at source locat
     try std.testing.expect(std.mem.indexOf(u8, transcript, "\"hitBreakpoints\":[2]") != null);
 }
 
+test "C-API: paused events publish live call frames and lexical scopes" {
+    const State = struct {
+        session: ZJSInspectorSessionRef = null,
+        bytes: [65536]u8 = undefined,
+        len: usize = 0,
+
+        fn receive(message: [*]const u8, message_len: usize, user_data: ?*anyopaque) callconv(.c) void {
+            const self: *@This() = @ptrCast(@alignCast(user_data.?));
+            std.debug.assert(self.len + message_len + 1 <= self.bytes.len);
+            @memcpy(self.bytes[self.len .. self.len + message_len], message[0..message_len]);
+            self.len += message_len;
+            self.bytes[self.len] = '\n';
+            self.len += 1;
+            if (std.mem.indexOf(u8, message[0..message_len], "Debugger.paused") == null) return;
+            const resume_request = "{\"id\":90,\"method\":\"Debugger.resume\"}";
+            std.debug.assert(ZJSInspectorSessionDispatch(self.session, resume_request, resume_request.len));
+        }
+    };
+
+    const ctx = JSGlobalContextCreate(null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(ctx);
+    JSGlobalContextSetInspectable(ctx, true);
+    var state: State = .{};
+    state.session = ZJSInspectorSessionCreate(ctx, State.receive, &state) orelse return error.SessionCreateFailed;
+    defer ZJSInspectorSessionRelease(state.session);
+    const enable = "{\"id\":1,\"method\":\"Debugger.enable\"}";
+    try std.testing.expect(ZJSInspectorSessionDispatch(state.session, enable, enable.len));
+
+    const source = JSStringCreateWithUTF8CString(
+        "function outer(alpha) { let outerLocal = alpha + 1; function inner(beta) { let innerLocal = beta + 2; debugger; return outerLocal + innerLocal; } return inner(3); } outer(4);",
+    ) orelse return error.StringInitFailed;
+    defer JSStringRelease(source);
+    const url = JSStringCreateWithUTF8CString("frames.js") orelse return error.StringInitFailed;
+    defer JSStringRelease(url);
+    var exception: JSValueRef = null;
+    const result = JSEvaluateScript(ctx, source, null, url, 1, &exception) orelse return error.EvalFailed;
+    try std.testing.expectEqual(@as(f64, 10), JSValueToNumber(ctx, result, &exception));
+
+    const transcript = state.bytes[0..state.len];
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "\"callFrames\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "\"callFrameId\":0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "\"functionName\":\"inner\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "\"functionName\":\"outer\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "\"functionName\":\"(global)\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "\"name\":\"innerLocal\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "\"name\":\"outerLocal\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "\"type\":\"global\"") != null);
+}
+
 test "C-API: debugger stepping observes logical call depth" {
     const ContinueMode = enum { into, over, out };
     const State = struct {
@@ -4789,6 +4981,8 @@ test "C-API: debugger checkpoints survive generator yield and async await" {
     try std.testing.expect(std.mem.indexOf(u8, transcript, "\"reason\":\"step\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, transcript, "\"lineNumber\":3") != null);
     try std.testing.expect(std.mem.indexOf(u8, transcript, "Debugger.exceptionThrown") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "\"functionName\":\"debugGenerator\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "\"functionName\":\"debugAsync\"") != null);
 }
 
 test "C-API: ordinary constructors keep intrinsic identity and function source metadata" {

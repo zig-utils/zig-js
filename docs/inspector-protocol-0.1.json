@@ -25,7 +25,7 @@
     { "method": "Runtime.executionContextCreated", "status": "implemented" },
     { "method": "Debugger.scriptParsed", "status": "implemented" },
     { "method": "Debugger.breakpointResolved", "status": "implemented" },
-    { "method": "Debugger.paused", "status": "implemented" },
+    { "method": "Debugger.paused", "status": "implemented", "evidence": "C-API: paused events publish live call frames and lexical scopes" },
     { "method": "Debugger.resumed", "status": "implemented" },
     { "method": "Debugger.exceptionThrown", "status": "implemented" }
   ]

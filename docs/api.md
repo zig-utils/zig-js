@@ -245,8 +245,10 @@ yield/await. While
 the debugger is enabled, execution is routed through the tree walker so the VM
 and baseline tier cannot bypass a pause point for scripts and ordinary
 synchronous functions; suspendable functions use instruction-indexed VM
-checkpoints and disable checkpoint-skipping quick paths. Call frames, scopes,
-and remote-object inspection remain tracked by inspector issue #154.
+checkpoints and disable checkpoint-skipping quick paths. Paused events expose
+live call frames, function/source locations, `this`, and lexical through global
+scope chains. Evaluate-on-frame, expandable remote-object inspection, and
+worker targets remain tracked by inspector issue #154.
 
 `JSGlobalContextRetain` and `JSGlobalContextRelease` maintain a real C-API reference count for contexts created through this C API. Releasing a retained context destroys the underlying runtime only after the final release. `JSGlobalContextRetain` returns null for a null context or if retaining would overflow the context refcount.
 

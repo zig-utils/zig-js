@@ -71,8 +71,9 @@ tests):
    differential gate, and real shared-VM context groups are in place. Runtime
    evaluation, statement pause/resume, resolved breakpoints, logical-depth
    stepping, exception policy, and suspendable-function checkpoints are usable
-   today. Call-frame, scope, remote-object, and worker-target work remains
-   tracked in #139 before Home debugger integration is complete.
+   today. Paused events also expose live call frames and lexical/global scope
+   chains. Frame evaluation, expandable remote objects, and worker-target work
+   remain tracked in #139 before Home debugger integration is complete.
 4. **Prototype & structure control** — `JSObjectGetPrototype`/`SetPrototype`
    and richer private/internal slot modeling. `JSObjectGetPrivate` /
    `JSObjectSetPrivate` now cover host-owned opaque pointers, but Home also

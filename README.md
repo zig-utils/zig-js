@@ -224,7 +224,11 @@ step-out cover ordinary calls plus suspendable generator/async VM execution,
 alongside none/all/uncaught exception pause policy and thrown-exception events.
 The [machine-readable protocol inventory](docs/inspector-protocol-0.1.json)
 contains 16 implemented commands and 8 events with no hidden accepted stubs.
-Call frames, remote objects, and scopes continue under
+Every paused event now includes the live JavaScript call stack with stable
+pause-local frame IDs, function/source locations, `this`, and lexical, block,
+closure, and summarized global scope chains across tree-walker and suspendable
+VM execution. Frame evaluation, expandable remote objects, and worker targets
+continue under
 [#154](https://github.com/zig-utils/zig-js/issues/154); see
 [docs/inspector.md](docs/inspector.md).
 

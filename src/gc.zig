@@ -605,6 +605,20 @@ pub fn traceInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
         v.mark(fr.func_obj);
         if (fr.arguments) |args| markValue(v, args);
     }
+    // Inspector frames point at the real lexical environments and `this`
+    // values used by suspended execution. Keep every caller scope alive during
+    // the synchronous paused callback, including closure calls whose caller
+    // environment is not in the callee's lexical parent chain.
+    var debug_frame = machine.debug_call_frame;
+    while (debug_frame) |fr| : (debug_frame = fr.caller) {
+        markManaged(v, fr.environment);
+        traceEnv(fr.environment, v);
+        markValue(v, fr.this_value);
+    }
+    if (machine.debug_top_level_environment) |env| {
+        markManaged(v, env);
+        traceEnv(env, v);
+    }
     if (machine.home_object) |o| v.mark(o);
     if (machine.super_ctor) |o| v.mark(o);
     for (machine.with_stack.items) |o| v.mark(o);
