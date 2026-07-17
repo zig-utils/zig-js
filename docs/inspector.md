@@ -39,18 +39,34 @@ while claiming to be paused.
 
 - Schema.getDomains
 - Runtime.enable, Runtime.disable, and Runtime.evaluate
-- Debugger.enable, Debugger.disable, Debugger.pause, and Debugger.resume
+- Debugger.enable, Debugger.disable, Debugger.pause, Debugger.resume,
+  Debugger.getScriptSource, Debugger.setBreakpoint,
+  Debugger.setBreakpointByUrl, and Debugger.removeBreakpoint
 - Inspector.attached, Inspector.detached, Runtime.executionContextCreated,
-  Debugger.scriptParsed, Debugger.paused, and Debugger.resumed events
+  Debugger.scriptParsed, Debugger.breakpointResolved, Debugger.paused, and
+  Debugger.resumed events
 
-Every evaluated C-API script receives a monotonically increasing scriptId.
-Debugger.scriptParsed publishes its URL, starting line, and source length.
+Every evaluated C-API script receives a monotonically increasing unsigned
+integer scriptId. Debugger.scriptParsed publishes its URL, zero-based starting
+line, and source length.
 Statement locations retain byte offsets plus adjusted line/column coordinates;
 a debugger statement pauses with reason debuggerStatement. An explicit
 Debugger.pause request pauses at the next statement boundary. Debug-enabled
 execution deliberately uses the tree walker, including ordinary synchronous
 functions parsed from that script, so bytecode/baseline compilation cannot skip
 these boundaries.
+
+Script breakpoints identify a scriptId; URL breakpoints apply to every matching
+present or future script. A requested location resolves deterministically to the
+first statement at or after its zero-based line/column, emits
+Debugger.breakpointResolved, and reports its id in paused.hitBreakpoints.
+Removing a breakpoint removes all of its resolved locations. Breakpoints are
+shared execution controls for the context, so every enabled session observes
+their resolution, pause, and resume events.
+
+scriptId and breakpointId are unsigned JSON integers in this protocol (they are
+not opaque strings). All protocol line and column fields are zero-based; the
+byteOffset field is zero-based UTF-8 source bytes.
 
 Requests require an integer id and string method. Responses use JSON-RPC/CDP
 style result or error objects. Evaluation exceptions include an
@@ -61,7 +77,7 @@ errors.
 
 Version 0.1 establishes real attachment, lifecycle, concurrent sessions, live
 runtime evaluation, stable scripts, and statement-boundary pause/resume. URL and
-script breakpoints, stepping, exception-pause policy, call frames, remote
+stepping, exception-pause policy, call frames, remote
 objects, and scopes remain tracked by [issue #153](https://github.com/zig-utils/zig-js/issues/153)
 and [issue #154](https://github.com/zig-utils/zig-js/issues/154). Unsupported
 commands return -32601; there are no silently accepted debugger stubs.

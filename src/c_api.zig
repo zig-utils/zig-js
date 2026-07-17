@@ -114,6 +114,9 @@ const CInspectorState = struct {
     next_script_id: u64 = 1,
     pause_requested: bool = false,
     paused: bool = false,
+    breakpoints: std.ArrayListUnmanaged(CInspectorBreakpoint) = .empty,
+    resolved_breakpoints: std.ArrayListUnmanaged(CInspectorResolvedBreakpoint) = .empty,
+    next_breakpoint_id: u64 = 1,
 };
 
 const CInspectorScript = struct {
@@ -121,6 +124,29 @@ const CInspectorScript = struct {
     url: []const u8,
     source: []const u8,
     start_line: usize,
+};
+
+const CInspectorBreakpointKind = enum { script, url };
+
+const CInspectorBreakpoint = struct {
+    id: u64,
+    kind: CInspectorBreakpointKind,
+    script_id: u64 = 0,
+    url: []const u8 = "",
+    line_number: usize,
+    column_number: usize,
+};
+
+const InspectorProtocolLocation = struct {
+    scriptId: u64,
+    lineNumber: usize,
+    columnNumber: usize,
+    byteOffset: usize,
+};
+
+const CInspectorResolvedBreakpoint = struct {
+    breakpoint_id: u64,
+    location: InspectorProtocolLocation,
 };
 
 const CInspectorSession = struct {
@@ -1433,10 +1459,82 @@ fn sendInspectorScriptParsed(session: *CInspectorSession, script: CInspectorScri
         .params = .{
             .scriptId = script.id,
             .url = script.url,
-            .startLine = script.start_line,
+            .startLine = script.start_line - 1,
             .sourceLength = script.source.len,
         },
     });
+}
+
+fn inspectorScript(state: *const CInspectorState, id: u64) ?CInspectorScript {
+    for (state.scripts.items) |script| if (script.id == id) return script;
+    return null;
+}
+
+fn inspectorResolvedLocation(state: *const CInspectorState, script_id: u64, line_number: usize, column_number: usize) ?InspectorProtocolLocation {
+    var best: ?InspectorProtocolLocation = null;
+    var it = state.context.debug_statement_locations.valueIterator();
+    while (it.next()) |entry| {
+        if (entry.script_id != script_id) continue;
+        const candidate = InspectorProtocolLocation{
+            .scriptId = script_id,
+            .lineNumber = entry.location.line - 1,
+            .columnNumber = entry.location.column - 1,
+            .byteOffset = entry.location.byte_offset,
+        };
+        if (candidate.lineNumber < line_number or
+            (candidate.lineNumber == line_number and candidate.columnNumber < column_number)) continue;
+        if (best == null or candidate.lineNumber < best.?.lineNumber or
+            (candidate.lineNumber == best.?.lineNumber and candidate.columnNumber < best.?.columnNumber) or
+            (candidate.lineNumber == best.?.lineNumber and candidate.columnNumber == best.?.columnNumber and candidate.byteOffset < best.?.byteOffset))
+        {
+            best = candidate;
+        }
+    }
+    return best;
+}
+
+fn inspectorBreakpointAlreadyResolved(state: *const CInspectorState, breakpoint_id: u64, script_id: u64) bool {
+    for (state.resolved_breakpoints.items) |resolved| {
+        if (resolved.breakpoint_id == breakpoint_id and resolved.location.scriptId == script_id) return true;
+    }
+    return false;
+}
+
+fn resolveInspectorBreakpointForScript(state: *CInspectorState, breakpoint: CInspectorBreakpoint, script: CInspectorScript) ?InspectorProtocolLocation {
+    if (inspectorBreakpointAlreadyResolved(state, breakpoint.id, script.id)) return null;
+    if (breakpoint.kind == .script and breakpoint.script_id != script.id) return null;
+    if (breakpoint.kind == .url and !std.mem.eql(u8, breakpoint.url, script.url)) return null;
+    const location = inspectorResolvedLocation(state, script.id, breakpoint.line_number, breakpoint.column_number) orelse return null;
+    state.resolved_breakpoints.append(gpa, .{ .breakpoint_id = breakpoint.id, .location = location }) catch return null;
+    for (state.sessions.items) |session| {
+        if (session.attached and session.debugger_enabled) _ = sendInspectorJson(session, .{
+            .method = "Debugger.breakpointResolved",
+            .params = .{ .breakpointId = breakpoint.id, .location = location },
+        });
+    }
+    return location;
+}
+
+fn resolveInspectorBreakpointsForScript(state: *CInspectorState, script_id: u64) void {
+    const script = inspectorScript(state, script_id) orelse return;
+    for (state.breakpoints.items) |breakpoint| _ = resolveInspectorBreakpointForScript(state, breakpoint, script);
+}
+
+fn inspectorBreakpointHits(state: *const CInspectorState, location: interp.DebugStatementLocation, hits: *std.ArrayListUnmanaged(u64)) !void {
+    for (state.resolved_breakpoints.items) |resolved| {
+        if (resolved.location.scriptId != location.script_id or
+            resolved.location.lineNumber != location.location.line - 1 or
+            resolved.location.columnNumber != location.location.column - 1 or
+            resolved.location.byteOffset != location.location.byte_offset) continue;
+        var already_hit = false;
+        for (hits.items) |id| {
+            if (id == resolved.breakpoint_id) {
+                already_hit = true;
+                break;
+            }
+        }
+        if (!already_hit) try hits.append(gpa, resolved.breakpoint_id);
+    }
 }
 
 fn beginInspectorScript(
@@ -1471,8 +1569,17 @@ fn inspectorStatementBoundary(
     location: interp.DebugStatementLocation,
 ) interp.EvalError!void {
     const state: *CInspectorState = @ptrCast(@alignCast(hook_context));
-    if (!location.debugger_statement and !state.pause_requested) return;
-    const reason: []const u8 = if (location.debugger_statement) "debuggerStatement" else "pause";
+    resolveInspectorBreakpointsForScript(state, location.script_id);
+    var hits: std.ArrayListUnmanaged(u64) = .empty;
+    defer hits.deinit(gpa);
+    try inspectorBreakpointHits(state, location, &hits);
+    if (!location.debugger_statement and !state.pause_requested and hits.items.len == 0) return;
+    const reason: []const u8 = if (location.debugger_statement)
+        "debuggerStatement"
+    else if (hits.items.len > 0)
+        "breakpoint"
+    else
+        "pause";
     state.pause_requested = false;
     state.paused = true;
     for (state.sessions.items) |session| {
@@ -1481,6 +1588,7 @@ fn inspectorStatementBoundary(
             .method = "Debugger.paused",
             .params = .{
                 .reason = reason,
+                .hitBreakpoints = hits.items,
                 .location = .{
                     .scriptId = location.script_id,
                     .lineNumber = location.location.line - 1,
@@ -1639,6 +1747,8 @@ export fn ZJSInspectorSessionRelease(session_ref: ZJSInspectorSessionRef) callco
         state.context.c_api_inspector_state = null;
         state.sessions.deinit(gpa);
         state.scripts.deinit(gpa);
+        state.breakpoints.deinit(gpa);
+        state.resolved_breakpoints.deinit(gpa);
         gpa.destroy(state);
     }
     JSGlobalContextRelease(ctx);
@@ -1729,6 +1839,107 @@ export fn ZJSInspectorSessionDispatch(
             });
         }
         return true;
+    }
+    if (std.mem.eql(u8, method, "Debugger.getScriptSource")) {
+        const params_value = request.get("params") orelse return sendInspectorError(session, id, -32602, "params are required");
+        if (params_value != .object) return sendInspectorError(session, id, -32602, "params must be an object");
+        const script_id_value = params_value.object.get("scriptId") orelse return sendInspectorError(session, id, -32602, "scriptId is required");
+        const script_id: u64 = switch (script_id_value) {
+            .integer => |integer| if (integer >= 0) @intCast(integer) else return sendInspectorError(session, id, -32602, "scriptId must be non-negative"),
+            else => return sendInspectorError(session, id, -32602, "scriptId must be an integer"),
+        };
+        const script = inspectorScript(session.state, script_id) orelse return sendInspectorError(session, id, -32000, "unknown scriptId");
+        return sendInspectorJson(session, .{ .id = id, .result = .{ .scriptSource = script.source } });
+    }
+    if (std.mem.eql(u8, method, "Debugger.setBreakpoint") or std.mem.eql(u8, method, "Debugger.setBreakpointByUrl")) {
+        if (!session.debugger_enabled) return sendInspectorError(session, id, -32000, "Debugger domain is not enabled");
+        const params_value = request.get("params") orelse return sendInspectorError(session, id, -32602, "params are required");
+        if (params_value != .object) return sendInspectorError(session, id, -32602, "params must be an object");
+        const params = params_value.object;
+        const by_url = std.mem.eql(u8, method, "Debugger.setBreakpointByUrl");
+        const location_params = if (by_url) params else blk: {
+            const location_value = params.get("location") orelse return sendInspectorError(session, id, -32602, "location is required");
+            if (location_value != .object) return sendInspectorError(session, id, -32602, "location must be an object");
+            break :blk location_value.object;
+        };
+        const line_value = location_params.get("lineNumber") orelse return sendInspectorError(session, id, -32602, "lineNumber is required");
+        const line_number: usize = switch (line_value) {
+            .integer => |integer| if (integer >= 0) @intCast(integer) else return sendInspectorError(session, id, -32602, "lineNumber must be non-negative"),
+            else => return sendInspectorError(session, id, -32602, "lineNumber must be an integer"),
+        };
+        const column_number: usize = if (location_params.get("columnNumber")) |column_value| switch (column_value) {
+            .integer => |integer| if (integer >= 0) @intCast(integer) else return sendInspectorError(session, id, -32602, "columnNumber must be non-negative"),
+            else => return sendInspectorError(session, id, -32602, "columnNumber must be an integer"),
+        } else 0;
+        var breakpoint = CInspectorBreakpoint{
+            .id = session.state.next_breakpoint_id,
+            .kind = if (by_url) .url else .script,
+            .line_number = line_number,
+            .column_number = column_number,
+        };
+        if (by_url) {
+            const url_value = params.get("url") orelse return sendInspectorError(session, id, -32602, "url is required");
+            const url = switch (url_value) {
+                .string => |string| string,
+                else => return sendInspectorError(session, id, -32602, "url must be a string"),
+            };
+            breakpoint.url = session.state.context.arena().dupe(u8, url) catch return sendInspectorError(session, id, -32000, "out of memory");
+        } else {
+            const script_id_value = location_params.get("scriptId") orelse return sendInspectorError(session, id, -32602, "scriptId is required");
+            breakpoint.script_id = switch (script_id_value) {
+                .integer => |integer| if (integer >= 0) @intCast(integer) else return sendInspectorError(session, id, -32602, "scriptId must be non-negative"),
+                else => return sendInspectorError(session, id, -32602, "scriptId must be an integer"),
+            };
+            if (inspectorScript(session.state, breakpoint.script_id) == null) return sendInspectorError(session, id, -32000, "unknown scriptId");
+        }
+        session.state.next_breakpoint_id += 1;
+        session.state.breakpoints.append(gpa, breakpoint) catch return sendInspectorError(session, id, -32000, "out of memory");
+        var locations: std.ArrayListUnmanaged(InspectorProtocolLocation) = .empty;
+        defer locations.deinit(gpa);
+        for (session.state.scripts.items) |script| {
+            if (resolveInspectorBreakpointForScript(session.state, breakpoint, script)) |location| locations.append(gpa, location) catch return sendInspectorError(session, id, -32000, "out of memory");
+        }
+        if (by_url) return sendInspectorJson(session, .{
+            .id = id,
+            .result = .{ .breakpointId = breakpoint.id, .locations = locations.items },
+        });
+        const actual = if (locations.items.len > 0) locations.items[0] else InspectorProtocolLocation{
+            .scriptId = breakpoint.script_id,
+            .lineNumber = breakpoint.line_number,
+            .columnNumber = breakpoint.column_number,
+            .byteOffset = 0,
+        };
+        return sendInspectorJson(session, .{
+            .id = id,
+            .result = .{ .breakpointId = breakpoint.id, .actualLocation = actual },
+        });
+    }
+    if (std.mem.eql(u8, method, "Debugger.removeBreakpoint")) {
+        const params_value = request.get("params") orelse return sendInspectorError(session, id, -32602, "params are required");
+        if (params_value != .object) return sendInspectorError(session, id, -32602, "params must be an object");
+        const breakpoint_id_value = params_value.object.get("breakpointId") orelse return sendInspectorError(session, id, -32602, "breakpointId is required");
+        const breakpoint_id: u64 = switch (breakpoint_id_value) {
+            .integer => |integer| if (integer >= 0) @intCast(integer) else return sendInspectorError(session, id, -32602, "breakpointId must be non-negative"),
+            else => return sendInspectorError(session, id, -32602, "breakpointId must be an integer"),
+        };
+        var found = false;
+        var breakpoint_index: usize = 0;
+        while (breakpoint_index < session.state.breakpoints.items.len) {
+            if (session.state.breakpoints.items[breakpoint_index].id == breakpoint_id) {
+                _ = session.state.breakpoints.swapRemove(breakpoint_index);
+                found = true;
+                break;
+            }
+            breakpoint_index += 1;
+        }
+        if (!found) return sendInspectorError(session, id, -32000, "unknown breakpointId");
+        var resolved_index: usize = 0;
+        while (resolved_index < session.state.resolved_breakpoints.items.len) {
+            if (session.state.resolved_breakpoints.items[resolved_index].breakpoint_id == breakpoint_id) {
+                _ = session.state.resolved_breakpoints.swapRemove(resolved_index);
+            } else resolved_index += 1;
+        }
+        return sendInspectorJson(session, .{ .id = id, .result = .{} });
     }
     if (std.mem.eql(u8, method, "Runtime.evaluate")) {
         const params_value = request.get("params") orelse return sendInspectorError(session, id, -32602, "params are required");
@@ -4076,12 +4287,48 @@ test "C-API: debugger publishes scripts and synchronously pauses at source locat
     try std.testing.expectEqual(@as(f64, 42), JSValueToNumber(ctx, second, &exception));
     try std.testing.expectEqual(@as(usize, 3), state.pause_count);
 
+    const set_url_breakpoint =
+        "{\"id\":3,\"method\":\"Debugger.setBreakpointByUrl\",\"params\":{\"url\":\"breakpoint.js\",\"lineNumber\":1}}";
+    try std.testing.expect(ZJSInspectorSessionDispatch(state.session, set_url_breakpoint, set_url_breakpoint.len));
+    const breakpoint_script = JSStringCreateWithUTF8CString("var bpValue = 40;\nbpValue += 2;\nbpValue;") orelse return error.StringInitFailed;
+    defer JSStringRelease(breakpoint_script);
+    const breakpoint_url = JSStringCreateWithUTF8CString("breakpoint.js") orelse return error.StringInitFailed;
+    defer JSStringRelease(breakpoint_url);
+    const breakpoint_result = JSEvaluateScript(ctx, breakpoint_script, null, breakpoint_url, 1, &exception) orelse return error.EvalFailed;
+    try std.testing.expectEqual(@as(f64, 42), JSValueToNumber(ctx, breakpoint_result, &exception));
+    try std.testing.expectEqual(@as(usize, 4), state.pause_count);
+    const remove_breakpoint = "{\"id\":4,\"method\":\"Debugger.removeBreakpoint\",\"params\":{\"breakpointId\":1}}";
+    try std.testing.expect(ZJSInspectorSessionDispatch(state.session, remove_breakpoint, remove_breakpoint.len));
+    _ = JSEvaluateScript(ctx, breakpoint_script, null, breakpoint_url, 1, &exception) orelse return error.EvalFailed;
+    try std.testing.expectEqual(@as(usize, 4), state.pause_count);
+
+    const get_source = "{\"id\":5,\"method\":\"Debugger.getScriptSource\",\"params\":{\"scriptId\":2}}";
+    try std.testing.expect(ZJSInspectorSessionDispatch(state.session, get_source, get_source.len));
+    const set_script_breakpoint =
+        "{\"id\":6,\"method\":\"Debugger.setBreakpoint\",\"params\":{\"location\":{\"scriptId\":2,\"lineNumber\":0,\"columnNumber\":20}}}";
+    try std.testing.expect(ZJSInspectorSessionDispatch(state.session, set_script_breakpoint, set_script_breakpoint.len));
+    const call_recursive = JSStringCreateWithUTF8CString("recur(1);") orelse return error.StringInitFailed;
+    defer JSStringRelease(call_recursive);
+    const recursive_again = JSEvaluateScript(ctx, call_recursive, null, null, 1, &exception) orelse return error.EvalFailed;
+    try std.testing.expectEqual(@as(f64, 1), JSValueToNumber(ctx, recursive_again, &exception));
+    // The resolved `if` statement runs for n=1 and n=0, then the base-case
+    // debugger statement produces its own pause.
+    try std.testing.expectEqual(@as(usize, 7), state.pause_count);
+    const remove_script_breakpoint = "{\"id\":7,\"method\":\"Debugger.removeBreakpoint\",\"params\":{\"breakpointId\":2}}";
+    try std.testing.expect(ZJSInspectorSessionDispatch(state.session, remove_script_breakpoint, remove_script_breakpoint.len));
+
     const transcript = state.bytes[0..state.len];
     try std.testing.expect(std.mem.indexOf(u8, transcript, "Debugger.scriptParsed") != null);
     try std.testing.expect(std.mem.indexOf(u8, transcript, "pause.js") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "\"startLine\":6") != null);
     try std.testing.expect(std.mem.indexOf(u8, transcript, "debuggerStatement") != null);
     try std.testing.expect(std.mem.indexOf(u8, transcript, "\"lineNumber\":7") != null);
     try std.testing.expect(std.mem.indexOf(u8, transcript, "Debugger.resumed") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "Debugger.breakpointResolved") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "\"reason\":\"breakpoint\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "\"hitBreakpoints\":[1]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "function recur") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "\"hitBreakpoints\":[2]") != null);
 }
 
 test "C-API: ordinary constructors keep intrinsic identity and function source metadata" {

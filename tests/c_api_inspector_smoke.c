@@ -81,6 +81,25 @@ int main(void)
     JSStringRelease(source_url);
     JSStringRelease(source);
 
+    const char set_breakpoint[] =
+        "{\"id\":5,\"method\":\"Debugger.setBreakpointByUrl\","
+        "\"params\":{\"url\":\"breakpoint-smoke.js\",\"lineNumber\":1}}";
+    const char breakpoint_text[] = "var answer = 40;\nanswer += 2;\nanswer;";
+    JSStringRef breakpoint_source = JSStringCreateWithUTF8CString(breakpoint_text);
+    JSStringRef breakpoint_url = JSStringCreateWithUTF8CString("breakpoint-smoke.js");
+    if (!ZJSInspectorSessionDispatch(session, set_breakpoint, sizeof(set_breakpoint) - 1) ||
+        !JSEvaluateScript(context, breakpoint_source, NULL, breakpoint_url, 1, &exception) ||
+        exception || transcript.pauses != 2 ||
+        !strstr(transcript.bytes, "Debugger.breakpointResolved") ||
+        !strstr(transcript.bytes, "\"reason\":\"breakpoint\""))
+        return 8;
+    const char remove_breakpoint[] =
+        "{\"id\":6,\"method\":\"Debugger.removeBreakpoint\",\"params\":{\"breakpointId\":1}}";
+    if (!ZJSInspectorSessionDispatch(session, remove_breakpoint, sizeof(remove_breakpoint) - 1))
+        return 9;
+    JSStringRelease(breakpoint_url);
+    JSStringRelease(breakpoint_source);
+
     JSGlobalContextRelease(context);
     if (!ZJSInspectorSessionDispatch(session, evaluate, sizeof(evaluate) - 1))
         return 6;
