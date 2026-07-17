@@ -105,6 +105,10 @@ zig-js extension):
   close/timeout.
 - `JSWorkerTerminate(worker)` / `JSWorkerRelease(worker)` (close + join +
   destroy).
+- `ZJSWorkerGetInspectorTargetInfo(worker, info)` snapshots a process-wide
+  non-zero target ID, script/module kind, and atomic lifecycle state. IDs never
+  encode a `Worker` address and are not reused; creation fails on theoretical
+  64-bit exhaustion instead of aliasing a historical target.
 
 ### Thread rules
 
@@ -116,7 +120,8 @@ context's handles are ever touched.
 
 ## Verification
 
-`src/worker.zig` tests: 4-way SAB counter + terminate-mid-loop, module-graph
+`src/worker.zig` tests: stable target identity plus script/module lifecycle,
+4-way SAB counter + terminate-mid-loop, module-graph
 import round-trip, exact host-hook wakes for multi-message replies plus
 graceful final outbox close, terminate final outbox close, and FIFO channel
 drain / zero-timeout poll behavior.

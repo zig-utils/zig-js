@@ -164,6 +164,7 @@
     "ZJSGlobalContextCreateThreaded", "ZJSValueProtect", "ZJSValueUnprotect",
     "ZJSInspectorSessionCreate", "ZJSInspectorSessionDispatch", "ZJSInspectorSessionRelease",
     "JSWorkerCreate", "JSWorkerCreateWithLimits",
-    "JSWorkerPostMessage", "JSWorkerReceive", "JSWorkerTerminate", "JSWorkerRelease"
+    "JSWorkerPostMessage", "JSWorkerReceive", "JSWorkerTerminate", "JSWorkerRelease",
+    "ZJSWorkerGetInspectorTargetInfo"
   ]
 }

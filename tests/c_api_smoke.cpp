@@ -35,6 +35,18 @@ int main()
         return 6;
     JSStringRelease(string);
 
+    JSStringRef worker_source = JSStringCreateWithUTF8CString("");
+    JSWorkerRef worker = JSWorkerCreate(worker_source);
+    ZJSInspectorTargetInfo target {};
+    if (!worker || !ZJSWorkerGetInspectorTargetInfo(worker, &target) || !target.id ||
+        target.kind != kZJSInspectorTargetKindScript ||
+        (target.state != kZJSInspectorTargetStateStarting &&
+            target.state != kZJSInspectorTargetStateRunning))
+        return 8;
+    JSWorkerTerminate(worker);
+    JSWorkerRelease(worker);
+    JSStringRelease(worker_source);
+
     JSGlobalContextRelease(context);
     return 0;
 }

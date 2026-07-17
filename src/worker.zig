@@ -26,6 +26,24 @@ const Value = value.Value;
 const alloc = std.heap.page_allocator;
 const channel_queue_reserve_granularity = 64;
 
+/// Stable inspector identity is process-wide and never derived from a Worker
+/// address. Zero remains the protocol's invalid/unset sentinel. Exhaustion is
+/// terminal instead of wrapping and aliasing a live or historical target.
+var next_inspector_target_id: std.atomic.Value(u64) = .init(1);
+
+fn allocateInspectorTargetId() error{InspectorTargetIdExhausted}!u64 {
+    var current = next_inspector_target_id.load(.monotonic);
+    while (true) {
+        if (current == 0) return error.InspectorTargetIdExhausted;
+        const next = if (current == std.math.maxInt(u64)) 0 else current + 1;
+        if (next_inspector_target_id.cmpxchgWeak(current, next, .monotonic, .monotonic)) |observed| {
+            current = observed;
+            continue;
+        }
+        return current;
+    }
+}
+
 pub const ChannelLimits = struct {
     max_message_bytes: usize = 64 * 1024 * 1024,
     max_queued_bytes: usize = 256 * 1024 * 1024,
@@ -409,6 +427,18 @@ pub const HostHooks = struct {
 };
 
 pub const Worker = struct {
+    pub const InspectorTargetKind = enum(c_uint) {
+        script = 0,
+        module = 1,
+    };
+
+    pub const InspectorTargetState = enum(c_uint) {
+        starting = 0,
+        running = 1,
+        closing = 2,
+        closed = 3,
+    };
+
     pub const Options = struct {
         inbox_limits: ChannelLimits = .{},
         outbox_limits: ChannelLimits = .{},
@@ -416,6 +446,9 @@ pub const Worker = struct {
 
     thread: ?std.Thread = null,
     owner_thread: std.Thread.Id,
+    inspector_target_id: u64,
+    inspector_target_kind: InspectorTargetKind,
+    inspector_target_state: std.atomic.Value(InspectorTargetState) = .init(.starting),
     /// main → worker messages.
     inbox: Channel = .{},
     /// worker → main messages.
@@ -444,6 +477,21 @@ pub const Worker = struct {
         return std.Thread.getCurrentId() == w.owner_thread;
     }
 
+    pub fn inspectorTargetState(w: *const Worker) InspectorTargetState {
+        return w.inspector_target_state.load(.acquire);
+    }
+
+    fn beginClosing(w: *Worker) void {
+        var current = w.inspector_target_state.load(.acquire);
+        while (current == .starting or current == .running) {
+            if (w.inspector_target_state.cmpxchgWeak(current, .closing, .acq_rel, .acquire)) |observed| {
+                current = observed;
+                continue;
+            }
+            return;
+        }
+    }
+
     fn notifyHost(w: *Worker) void {
         if (w.hooks.load(.acquire)) |h| h.notify(h.ctx);
     }
@@ -451,15 +499,17 @@ pub const Worker = struct {
     /// Spawn a worker running `src` in a fresh realm on its own thread. The
     /// returned worker must be `terminate`d or have its inbox closed, then
     /// `join`ed and `destroy`ed by the caller.
-    pub fn spawn(src: []const u8) error{OutOfMemory}!*Worker {
+    pub fn spawn(src: []const u8) error{ OutOfMemory, InspectorTargetIdExhausted }!*Worker {
         return spawnWith(src, .{});
     }
 
-    pub fn spawnWith(src: []const u8, options: Options) error{OutOfMemory}!*Worker {
+    pub fn spawnWith(src: []const u8, options: Options) error{ OutOfMemory, InspectorTargetIdExhausted }!*Worker {
         const w = try alloc.create(Worker);
         errdefer alloc.destroy(w);
         w.* = .{
             .owner_thread = std.Thread.getCurrentId(),
+            .inspector_target_id = try allocateInspectorTargetId(),
+            .inspector_target_kind = .script,
             .inbox = Channel.init(options.inbox_limits),
             .outbox = Channel.init(options.outbox_limits),
             .src = try alloc.dupe(u8, src),
@@ -478,7 +528,7 @@ pub const Worker = struct {
         entry_path: []const u8,
         entry_source: []const u8,
         host: ContextMod.Context.ModuleHost,
-    ) error{OutOfMemory}!*Worker {
+    ) error{ OutOfMemory, InspectorTargetIdExhausted }!*Worker {
         return spawnModuleWith(entry_path, entry_source, host, .{});
     }
 
@@ -487,7 +537,7 @@ pub const Worker = struct {
         entry_source: []const u8,
         host: ContextMod.Context.ModuleHost,
         options: Options,
-    ) error{OutOfMemory}!*Worker {
+    ) error{ OutOfMemory, InspectorTargetIdExhausted }!*Worker {
         const w = try alloc.create(Worker);
         errdefer alloc.destroy(w);
         const path_copy = try alloc.dupe(u8, entry_path);
@@ -496,6 +546,8 @@ pub const Worker = struct {
         errdefer alloc.free(src_copy);
         w.* = .{
             .owner_thread = std.Thread.getCurrentId(),
+            .inspector_target_id = try allocateInspectorTargetId(),
+            .inspector_target_kind = .module,
             .inbox = Channel.init(options.inbox_limits),
             .outbox = Channel.init(options.outbox_limits),
             .src = &.{},
@@ -523,6 +575,7 @@ pub const Worker = struct {
     /// Request termination: the stop word makes running JS throw at the next
     /// step checkpoint, and the closed inbox ends the delivery loop.
     pub fn terminate(w: *Worker) void {
+        w.beginClosing();
         w.stop.store(true, .monotonic);
         w.inbox.close();
     }
@@ -531,6 +584,7 @@ pub const Worker = struct {
     /// remaining messages and exits, without the stop-flag interrupt that
     /// `terminate` injects into in-flight JS.
     pub fn close(w: *Worker) void {
+        w.beginClosing();
         w.inbox.close();
     }
 
@@ -575,16 +629,20 @@ fn enqueueOwned(ch: *Channel, self: *interp.Interpreter, bytes: []u8) value.Host
 }
 
 fn workerMain(w: *Worker) void {
-    const ctx = Context.create(alloc) catch {
+    defer {
         w.outbox.close();
+        w.inspector_target_state.store(.closed, .release);
+        w.notifyHost(); // final receive observes the closed target and outbox
+    }
+    const ctx = Context.create(alloc) catch {
         return;
     };
     defer ctx.destroy();
     ctx.stop_flag = &w.stop;
     installWorkerGlobals(ctx, w) catch {
-        w.outbox.close();
         return;
     };
+    _ = w.inspector_target_state.cmpxchgStrong(.starting, .running, .release, .monotonic);
 
     if (w.module) |mc| {
         _ = ctx.evaluateModule(mc.entry_path, mc.entry_source, mc.host) catch {};
@@ -606,8 +664,6 @@ fn workerMain(w: *Worker) void {
         machine.drainMicrotasks() catch {};
         machine.settleAsyncWaiters();
     }
-    w.outbox.close();
-    w.notifyHost(); // wake the embedder so its final `receive` sees the close
 }
 
 /// Worker-realm globals: `postMessage(value)` and `close()`. Each native
@@ -647,6 +703,7 @@ fn workerCloseFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
     _ = args;
     const self: *interp.Interpreter = @ptrCast(@alignCast(ctx));
     const w = workerOf(self) orelse return Value.undef();
+    w.beginClosing();
     w.inbox.close(); // delivery loop drains the remaining messages, then exits
     return Value.undef();
 }
@@ -694,6 +751,34 @@ test "workers: 4-way round trip, shared SAB counter, terminate mid-loop" {
     spinner.destroy();
 }
 
+test "workers: inspector target ids are stable and lifecycle is atomic" {
+    const first = try Worker.spawn("");
+    defer first.destroy();
+    const second = try Worker.spawn("");
+    defer second.destroy();
+
+    try std.testing.expect(first.inspector_target_id != 0);
+    try std.testing.expect(second.inspector_target_id != 0);
+    try std.testing.expect(first.inspector_target_id != second.inspector_target_id);
+    try std.testing.expectEqual(Worker.InspectorTargetKind.script, first.inspector_target_kind);
+    try std.testing.expectEqual(Worker.InspectorTargetKind.script, second.inspector_target_kind);
+
+    var spins: usize = 0;
+    while (first.inspectorTargetState() == .starting and spins < 100_000) : (spins += 1) {
+        if ((spins & 0xff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
+    }
+    try std.testing.expectEqual(Worker.InspectorTargetState.running, first.inspectorTargetState());
+
+    first.terminate();
+    try std.testing.expect(first.inspectorTargetState() == .closing or first.inspectorTargetState() == .closed);
+    first.join();
+    try std.testing.expectEqual(Worker.InspectorTargetState.closed, first.inspectorTargetState());
+
+    second.close();
+    second.join();
+    try std.testing.expectEqual(Worker.InspectorTargetState.closed, second.inspectorTargetState());
+}
+
 // A static, read-only module map shared with module workers. Read-only after
 // construction, so the `load` callback is trivially thread-safe.
 const StaticModules = struct {
@@ -733,6 +818,16 @@ const StaticModules = struct {
         return .{ .ctx = &host_ctx, .load = load };
     }
 };
+
+test "module workers publish module inspector target metadata" {
+    const w = try Worker.spawnModule("entry.js", StaticModules.entries[1].source, StaticModules.host());
+    defer w.destroy();
+    try std.testing.expect(w.inspector_target_id != 0);
+    try std.testing.expectEqual(Worker.InspectorTargetKind.module, w.inspector_target_kind);
+    w.close();
+    w.join();
+    try std.testing.expectEqual(Worker.InspectorTargetState.closed, w.inspectorTargetState());
+}
 
 // An embedder loop integration: the wake hook bumps a counter the owning
 // thread can poll instead of blocking in `receive`.

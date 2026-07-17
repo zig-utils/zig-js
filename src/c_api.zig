@@ -4662,6 +4662,15 @@ export fn JSStringIsEqualToUTF8CString(a: JSStringRef, b: [*c]const u8) callconv
 
 pub const JSWorkerRef = ?*anyopaque;
 
+pub const ZJSInspectorTargetKind = WorkerMod.Worker.InspectorTargetKind;
+pub const ZJSInspectorTargetState = WorkerMod.Worker.InspectorTargetState;
+
+pub const ZJSInspectorTargetInfo = extern struct {
+    id: u64,
+    kind: ZJSInspectorTargetKind,
+    state: ZJSInspectorTargetState,
+};
+
 fn workerFrom(ref: JSWorkerRef) ?*WorkerMod.Worker {
     const w: *WorkerMod.Worker = @ptrCast(@alignCast(ref orelse return null));
     if (!w.isOwnerThread()) return null;
@@ -4696,6 +4705,19 @@ export fn JSWorkerCreateWithLimits(
         .outbox_limits = limits,
     }) catch return null;
     return @ptrCast(w);
+}
+
+/// Snapshot the stable inspector identity and lifecycle metadata for a worker.
+/// The id is process-wide, non-zero, and never derived from the Worker address.
+export fn ZJSWorkerGetInspectorTargetInfo(worker: JSWorkerRef, info: ?*ZJSInspectorTargetInfo) callconv(.c) bool {
+    const w = workerFrom(worker) orelse return false;
+    const out = info orelse return false;
+    out.* = .{
+        .id = w.inspector_target_id,
+        .kind = w.inspector_target_kind,
+        .state = w.inspectorTargetState(),
+    };
+    return true;
 }
 
 /// Serialize `value` from `ctx`'s realm and deliver it to the worker's inbox.
@@ -8505,6 +8527,30 @@ test "C-API: worker create, post a number, receive the doubled reply" {
 
     const reply = JSWorkerReceive(w, ctx, 10_000, null) orelse return error.NoReply;
     try std.testing.expectEqual(@as(f64, 42), JSValueToNumber(ctx, reply, null));
+}
+
+test "C-API: worker inspector target metadata is stable and validated" {
+    const src = JSStringCreateWithUTF8CString("") orelse return error.StringInitFailed;
+    defer JSStringRelease(src);
+    const first = JSWorkerCreate(src) orelse return error.WorkerSpawnFailed;
+    defer JSWorkerRelease(first);
+    const second = JSWorkerCreate(src) orelse return error.WorkerSpawnFailed;
+    defer JSWorkerRelease(second);
+
+    var first_info: ZJSInspectorTargetInfo = undefined;
+    var second_info: ZJSInspectorTargetInfo = undefined;
+    try std.testing.expect(ZJSWorkerGetInspectorTargetInfo(first, &first_info));
+    try std.testing.expect(ZJSWorkerGetInspectorTargetInfo(second, &second_info));
+    try std.testing.expect(first_info.id != 0);
+    try std.testing.expect(first_info.id != second_info.id);
+    try std.testing.expectEqual(ZJSInspectorTargetKind.script, first_info.kind);
+    try std.testing.expect(first_info.state == .starting or first_info.state == .running);
+    try std.testing.expect(!ZJSWorkerGetInspectorTargetInfo(null, &first_info));
+    try std.testing.expect(!ZJSWorkerGetInspectorTargetInfo(first, null));
+
+    JSWorkerTerminate(first);
+    try std.testing.expect(ZJSWorkerGetInspectorTargetInfo(first, &first_info));
+    try std.testing.expect(first_info.state == .closing or first_info.state == .closed);
 }
 
 test "C-API: worker post rejects uncloneable values through exception" {

@@ -215,6 +215,7 @@ bool        JSWorkerPostMessage(JSWorkerRef, JSContextRef, JSValueRef, JSValueRe
 JSValueRef  JSWorkerReceive(JSWorkerRef, JSContextRef, uint64_t timeoutMs, JSValueRef* exception);
 void        JSWorkerTerminate(JSWorkerRef);
 void        JSWorkerRelease(JSWorkerRef);
+bool        ZJSWorkerGetInspectorTargetInfo(JSWorkerRef, ZJSInspectorTargetInfo* info);
 ```
 :::
 
@@ -252,7 +253,7 @@ environment and may update its bindings before resume. Expandable remote-object
 handles expose own data/accessor descriptors without invoking getters. Handles
 are session-owned, group-releasable, protected across GC, and invalidated on
 explicit release/session teardown; scope handles also expire on resume. Worker
-targets remain tracked by inspector issue #154. When several debugger sessions
+target transport remains tracked by inspector issue #156. When several debugger sessions
 are enabled, observers receive the paused state first and only the deterministic
 owner may resume or step; explicit pause/step requests retain that ownership.
 `ZJSInspectorSessionRelease` is safe from within a protocol callback: physical
@@ -263,8 +264,10 @@ unwound, and releasing the pause owner acts as a deterministic resume.
 independent runtime on its own thread. A context inspector therefore never
 claims those workers as implicit child targets. Parent pauses leave worker
 message processing and termination live (the C transcript performs both from
-the paused callback). Stable target discovery and cross-thread inspector
-marshalling are tracked explicitly by inspector issue #156.
+the paused callback). Every worker already publishes a process-wide non-zero
+target ID, script/module kind, and atomic `starting`, `running`, `closing`, or
+`closed` lifecycle snapshot through `ZJSWorkerGetInspectorTargetInfo`; attach
+and cross-thread inspector marshalling remain tracked explicitly by issue #156.
 
 `JSGlobalContextRetain` and `JSGlobalContextRelease` maintain a real C-API reference count for contexts created through this C API. Releasing a retained context destroys the underlying runtime only after the final release. `JSGlobalContextRetain` returns null for a null context or if retaining would overflow the context refcount.
 
@@ -321,7 +324,7 @@ exceptions, and applies JSC property attributes to newly created own properties.
 
 `JSObjectMakeDeferredPromise` returns a pending native Promise and stores callable resolve/reject functions in the required out pointers. Passing a null resolve or reject out pointer is a contract error reported through the exception out pointer. The returned functions settle the promise through the normal Promise job queue; embedder-observable callbacks run at the next microtask checkpoint, such as the one performed after `JSEvaluateScript`.
 
-`JSWorkerPostMessage` and `JSWorkerReceive` use structured clone to move values between isolated worker contexts. `JSWorkerCreate` uses the default 64 MiB per-message, 256 MiB queued-byte, and 1024 queued-message caps in both directions; `JSWorkerCreateWithLimits` sets all three explicitly (zero is a real zero limit). The message cap includes frame/manifest overhead and is enforced during serialization. Rejected closed/full/oversized delivery returns `false` and reports an exception instead of silently dropping a frame. `JSWorkerRef` handles are owner-thread-affine: post, receive, terminate, and release must be called on the thread that created the worker. Null or foreign-thread worker refs are rejected; exception-capable worker APIs report through the exception out pointer. Values that structured clone rejects, such as functions and Symbols, also report through the exception out pointer.
+`JSWorkerPostMessage` and `JSWorkerReceive` use structured clone to move values between isolated worker contexts. `JSWorkerCreate` uses the default 64 MiB per-message, 256 MiB queued-byte, and 1024 queued-message caps in both directions; `JSWorkerCreateWithLimits` sets all three explicitly (zero is a real zero limit). The message cap includes frame/manifest overhead and is enforced during serialization. Rejected closed/full/oversized delivery returns `false` and reports an exception instead of silently dropping a frame. `JSWorkerRef` handles are owner-thread-affine: post, receive, terminate, release, and inspector metadata lookup must be called on the thread that created the worker. Null or foreign-thread worker refs are rejected; exception-capable worker APIs report through the exception out pointer. Values that structured clone rejects, such as functions and Symbols, also report through the exception out pointer. Inspector target IDs are process-wide non-zero integers and never encode a worker address; exhaustion fails worker creation instead of reusing an identity.
 
 `JSStringCreateWithUTF8CString(null)` returns null. `JSStringGetUTF8CString` returns 0 for null strings, null output buffers, or zero buffer size; otherwise it writes a null-terminated UTF-8 prefix and returns the number of bytes written including the terminator.
 

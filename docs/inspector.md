@@ -157,9 +157,12 @@ released, or (for scopes) outside their originating pause.
 not accept a parent `JSContextRef`. Version 0.1 therefore does not invent a child
 relationship or pause workers when an unrelated context stops. Worker message
 delivery and termination remain live during a context pause and release stays
-under the worker handle's owner-thread rules. Explicit stable target IDs,
-discovery, attach/detach, and cross-thread command/event marshalling are tracked
-by [issue #156](https://github.com/zig-utils/zig-js/issues/156); no Target-domain
+under the worker handle's owner-thread rules. Every worker now has a
+process-wide non-zero target ID, script/module kind, and atomic `starting`,
+`running`, `closing`, or `closed` state exposed through
+`ZJSWorkerGetInspectorTargetInfo`; IDs never encode or reuse raw pointers.
+Attach/detach and cross-thread command/event marshalling are tracked by
+[issue #156](https://github.com/zig-utils/zig-js/issues/156); no Target-domain
 stub is silently accepted before that transport exists.
 
 setPauseOnExceptions accepts none, uncaught, or all. all pauses at the original
