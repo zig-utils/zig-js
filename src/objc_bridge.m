@@ -1,6 +1,7 @@
 #import <JavaScriptCore/JavaScriptCore.h>
 #import <objc/runtime.h>
 #import <zig-js/Extensions.h>
+#include <ffi/ffi.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -151,6 +152,7 @@ static ZJSManagedValueState *ZJSManagedState(JSManagedValue *value)
 }
 
 static NSValue *ZJSObjectiveCIdentityKey(id object);
+static JSClassRef ZJSBlockObjectClass(void);
 
 static void ZJSOpaqueObjectFinalize(JSObjectRef object)
 {
@@ -177,13 +179,327 @@ static JSClassRef ZJSOpaqueObjectClass(void)
 
 static ZJSHostObjectRecord *ZJSHostRecord(JSValue *value)
 {
-    if (!value.isObject ||
-        !JSValueIsObjectOfClass(value.context.JSGlobalContextRef,
-                                value.JSValueRef, ZJSOpaqueObjectClass()))
+    if (!value.isObject)
+        return nil;
+    BOOL isHostObject = JSValueIsObjectOfClass(value.context.JSGlobalContextRef,
+                                               value.JSValueRef, ZJSOpaqueObjectClass()) ||
+        JSValueIsObjectOfClass(value.context.JSGlobalContextRef,
+                               value.JSValueRef, ZJSBlockObjectClass());
+    if (!isHostObject)
         return nil;
     JSObjectRef object = JSValueToObject(value.context.JSGlobalContextRef,
                                          value.JSValueRef, NULL);
     return (__bridge ZJSHostObjectRecord *)JSObjectGetPrivate(object);
+}
+
+enum {
+    ZJSBlockHasCopyDispose = 1 << 25,
+    ZJSBlockHasSignature = 1 << 30,
+};
+
+typedef struct {
+    void *isa;
+    int flags;
+    int reserved;
+    void (*invoke)(void *, ...);
+    void *descriptor;
+} ZJSBlockLiteral;
+
+typedef union {
+    int8_t sint8;
+    uint8_t uint8;
+    int16_t sint16;
+    uint16_t uint16;
+    int32_t sint32;
+    uint32_t uint32;
+    int64_t sint64;
+    uint64_t uint64;
+    float float32;
+    double float64;
+    void *pointer;
+    CGPoint point;
+    CGSize size;
+    CGRect rect;
+    NSRange range;
+} ZJSFFIStorage;
+
+static ffi_type *ZJSPointElements[] = { &ffi_type_double, &ffi_type_double, NULL };
+static ffi_type *ZJSSizeElements[] = { &ffi_type_double, &ffi_type_double, NULL };
+static ffi_type *ZJSRectElements[] = { NULL, NULL, NULL };
+static ffi_type *ZJSRangeElements[] = { &ffi_type_uint64, &ffi_type_uint64, NULL };
+static ffi_type ZJSPointType = { 0, 0, FFI_TYPE_STRUCT, ZJSPointElements };
+static ffi_type ZJSSizeType = { 0, 0, FFI_TYPE_STRUCT, ZJSSizeElements };
+static ffi_type ZJSRectType = { 0, 0, FFI_TYPE_STRUCT, ZJSRectElements };
+static ffi_type ZJSRangeType = { 0, 0, FFI_TYPE_STRUCT, ZJSRangeElements };
+
+static const char *ZJSSkipTypeQualifiers(const char *type)
+{
+    while (*type && strchr("rnNoORV", *type))
+        ++type;
+    return type;
+}
+
+static ffi_type *ZJSFFIType(const char *rawType)
+{
+    const char *type = ZJSSkipTypeQualifiers(rawType);
+    switch (*type) {
+    case 'v': return &ffi_type_void;
+    case 'c': return &ffi_type_sint8;
+    case 'C': return &ffi_type_uint8;
+    case 's': return &ffi_type_sint16;
+    case 'S': return &ffi_type_uint16;
+    case 'i': return &ffi_type_sint32;
+    case 'I': return &ffi_type_uint32;
+    case 'l': return sizeof(long) == 8 ? &ffi_type_sint64 : &ffi_type_sint32;
+    case 'L': return sizeof(unsigned long) == 8 ? &ffi_type_uint64 : &ffi_type_uint32;
+    case 'q': return &ffi_type_sint64;
+    case 'Q': return &ffi_type_uint64;
+    case 'f': return &ffi_type_float;
+    case 'd': return &ffi_type_double;
+    case 'B': return &ffi_type_uint8;
+    case '@':
+    case '#':
+    case ':':
+    case '^':
+    case '*': return &ffi_type_pointer;
+    case '{':
+        ZJSRectElements[0] = &ZJSPointType;
+        ZJSRectElements[1] = &ZJSSizeType;
+        if (!strcmp(type, @encode(CGPoint)))
+            return &ZJSPointType;
+        if (!strcmp(type, @encode(CGSize)))
+            return &ZJSSizeType;
+        if (!strcmp(type, @encode(CGRect)))
+            return &ZJSRectType;
+        if (!strcmp(type, @encode(NSRange)))
+            return &ZJSRangeType;
+        return NULL;
+    default: return NULL;
+    }
+}
+
+static const char *ZJSBlockSignature(id block)
+{
+    ZJSBlockLiteral *literal = (__bridge ZJSBlockLiteral *)block;
+    if (!(literal->flags & ZJSBlockHasSignature))
+        return NULL;
+    uint8_t *cursor = literal->descriptor;
+    cursor += sizeof(uintptr_t) * 2;
+    if (literal->flags & ZJSBlockHasCopyDispose)
+        cursor += sizeof(void *) * 2;
+    return *(const char **)cursor;
+}
+
+static void ZJSPrepareFFIArgument(JSValue *value, const char *rawType,
+                                  ZJSFFIStorage *storage,
+                                  NSMutableArray *retainedObjects)
+{
+    const char *type = ZJSSkipTypeQualifiers(rawType);
+    switch (*type) {
+    case 'c': storage->sint8 = (int8_t)value.toInt32; return;
+    case 'C': storage->uint8 = (uint8_t)value.toUInt32; return;
+    case 's': storage->sint16 = (int16_t)value.toInt32; return;
+    case 'S': storage->uint16 = (uint16_t)value.toUInt32; return;
+    case 'i': storage->sint32 = value.toInt32; return;
+    case 'I': storage->uint32 = value.toUInt32; return;
+    case 'l':
+    case 'q': storage->sint64 = value.toInt64; return;
+    case 'L':
+    case 'Q': storage->uint64 = value.toUInt64; return;
+    case 'f': storage->float32 = (float)value.toDouble; return;
+    case 'd': storage->float64 = value.toDouble; return;
+    case 'B': storage->uint8 = value.toBool; return;
+    case '@':
+    case '#': {
+        id object = value.toObject;
+        if (object)
+            [retainedObjects addObject:object];
+        storage->pointer = (__bridge void *)object;
+        return;
+    }
+    case ':': {
+        NSString *selectorName = value.toString;
+        storage->pointer = NSSelectorFromString(selectorName);
+        return;
+    }
+    case '{':
+        if (!strcmp(type, @encode(CGPoint))) {
+            storage->point = value.toPoint;
+            return;
+        }
+        if (!strcmp(type, @encode(CGSize))) {
+            storage->size = value.toSize;
+            return;
+        }
+        if (!strcmp(type, @encode(CGRect))) {
+            storage->rect = value.toRect;
+            return;
+        }
+        if (!strcmp(type, @encode(NSRange))) {
+            storage->range = value.toRange;
+            return;
+        }
+        break;
+    }
+    [NSException raise:NSInvalidArgumentException
+                format:@"Unsupported Objective-C block argument encoding %s", rawType];
+}
+
+static JSValue *ZJSValueFromFFIReturn(JSContext *context, const char *rawType,
+                                      const ZJSFFIStorage *storage)
+{
+    const char *type = ZJSSkipTypeQualifiers(rawType);
+    switch (*type) {
+    case 'v': return [JSValue valueWithUndefinedInContext:context];
+    case 'c': return [JSValue valueWithInt32:storage->sint8 inContext:context];
+    case 'C': return [JSValue valueWithUInt32:storage->uint8 inContext:context];
+    case 's': return [JSValue valueWithInt32:storage->sint16 inContext:context];
+    case 'S': return [JSValue valueWithUInt32:storage->uint16 inContext:context];
+    case 'i': return [JSValue valueWithInt32:storage->sint32 inContext:context];
+    case 'I': return [JSValue valueWithUInt32:storage->uint32 inContext:context];
+    case 'l':
+    case 'q': return [JSValue valueWithDouble:(double)storage->sint64 inContext:context];
+    case 'L':
+    case 'Q': return [JSValue valueWithDouble:(double)storage->uint64 inContext:context];
+    case 'f': return [JSValue valueWithDouble:storage->float32 inContext:context];
+    case 'd': return [JSValue valueWithDouble:storage->float64 inContext:context];
+    case 'B': return [JSValue valueWithBool:storage->uint8 inContext:context];
+    case '@':
+    case '#': return [JSValue valueWithObject:(__bridge id)storage->pointer inContext:context];
+    case ':': return [JSValue valueWithObject:NSStringFromSelector((SEL)storage->pointer)
+                                     inContext:context];
+    case '{':
+        if (!strcmp(type, @encode(CGPoint)))
+            return [JSValue valueWithPoint:storage->point inContext:context];
+        if (!strcmp(type, @encode(CGSize)))
+            return [JSValue valueWithSize:storage->size inContext:context];
+        if (!strcmp(type, @encode(CGRect)))
+            return [JSValue valueWithRect:storage->rect inContext:context];
+        if (!strcmp(type, @encode(NSRange)))
+            return [JSValue valueWithRange:storage->range inContext:context];
+        break;
+    }
+    [NSException raise:NSInvalidArgumentException
+                format:@"Unsupported Objective-C block return encoding %s", rawType];
+    return nil;
+}
+
+static JSValueRef ZJSBlockCall(JSContextRef contextRef, JSObjectRef functionRef,
+                               JSObjectRef thisRef, size_t argumentCount,
+                               const JSValueRef arguments[], JSValueRef *exception)
+{
+    JSContext *context = [JSContext contextWithJSGlobalContextRef:(JSGlobalContextRef)contextRef];
+    JSValue *function = [JSValue valueWithJSValueRef:functionRef inContext:context];
+    ZJSHostObjectRecord *record = ZJSHostRecord(function);
+    id block = record.object;
+    const char *signatureText = ZJSBlockSignature(block);
+    if (!signatureText)
+        return NULL;
+
+    NSMethodSignature *signature = [NSMethodSignature signatureWithObjCTypes:signatureText];
+    NSUInteger nativeCount = signature.numberOfArguments;
+    ffi_type **argumentTypes = calloc(nativeCount, sizeof(ffi_type *));
+    void **argumentPointers = calloc(nativeCount, sizeof(void *));
+    ZJSFFIStorage *argumentStorage = calloc(nativeCount, sizeof(ZJSFFIStorage));
+    if (!argumentTypes || !argumentPointers || !argumentStorage) {
+        free(argumentTypes);
+        free(argumentPointers);
+        free(argumentStorage);
+        return NULL;
+    }
+
+    NSMutableArray *retainedObjects = [NSMutableArray array];
+    NSMutableArray<JSValue *> *callbackArguments = [NSMutableArray array];
+    JSValue *previousException = context.exception;
+    ZJSCallbackState *previousState = ZJSCurrentCallbackState();
+    NSMutableDictionary *threadDictionary = NSThread.currentThread.threadDictionary;
+    JSValue *result = nil;
+    @try {
+        argumentTypes[0] = &ffi_type_pointer;
+        argumentStorage[0].pointer = (__bridge void *)block;
+        argumentPointers[0] = &argumentStorage[0];
+        for (NSUInteger index = 1; index < nativeCount; ++index) {
+            JSValue *value = index - 1 < argumentCount
+                ? [JSValue valueWithJSValueRef:arguments[index - 1] inContext:context]
+                : [JSValue valueWithUndefinedInContext:context];
+            [callbackArguments addObject:value];
+            const char *type = [signature getArgumentTypeAtIndex:index];
+            argumentTypes[index] = ZJSFFIType(type);
+            if (!argumentTypes[index])
+                [NSException raise:NSInvalidArgumentException
+                            format:@"Unsupported Objective-C block argument encoding %s", type];
+            ZJSPrepareFFIArgument(value, type, &argumentStorage[index], retainedObjects);
+            argumentPointers[index] = &argumentStorage[index];
+        }
+        ffi_type *returnType = ZJSFFIType(signature.methodReturnType);
+        if (!returnType)
+            [NSException raise:NSInvalidArgumentException
+                        format:@"Unsupported Objective-C block return encoding %s",
+                               signature.methodReturnType];
+        ffi_cif callInterface;
+        if (ffi_prep_cif(&callInterface, FFI_DEFAULT_ABI, (unsigned)nativeCount,
+                         returnType, argumentTypes) != FFI_OK)
+            [NSException raise:NSInvalidArgumentException format:@"Unable to prepare Objective-C block call"];
+
+        ZJSCallbackState *callbackState = [ZJSCallbackState new];
+        callbackState.context = context;
+        callbackState.callee = function;
+        callbackState.thisValue = thisRef
+            ? [JSValue valueWithJSValueRef:thisRef inContext:context]
+            : [JSValue valueWithUndefinedInContext:context];
+        callbackState.arguments = callbackArguments;
+        context.exception = nil;
+        threadDictionary[ZJSCallbackStateThreadKey] = callbackState;
+
+        ZJSFFIStorage returnStorage = { 0 };
+        ZJSBlockLiteral *literal = (__bridge ZJSBlockLiteral *)block;
+        ffi_call(&callInterface, FFI_FN(literal->invoke), &returnStorage,
+                 argumentPointers);
+        if (context.exception) {
+            if (exception)
+                *exception = context.exception.JSValueRef;
+        } else {
+            result = ZJSValueFromFFIReturn(context, signature.methodReturnType,
+                                           &returnStorage);
+        }
+    } @catch (NSException *nativeException) {
+        JSValue *error = [JSValue valueWithNewErrorFromMessage:nativeException.reason
+                                                     inContext:context];
+        if (exception)
+            *exception = error.JSValueRef;
+    } @finally {
+        context.exception = previousException;
+        if (previousState)
+            threadDictionary[ZJSCallbackStateThreadKey] = previousState;
+        else
+            [threadDictionary removeObjectForKey:ZJSCallbackStateThreadKey];
+        free(argumentTypes);
+        free(argumentPointers);
+        free(argumentStorage);
+    }
+    return result.JSValueRef;
+}
+
+static JSClassRef ZJSBlockObjectClass(void)
+{
+    static JSClassRef jsClass;
+    @synchronized([ZJSHostObjectRecord class]) {
+        if (!jsClass) {
+            JSClassDefinition definition = kJSClassDefinitionEmpty;
+            definition.className = "ZJSObjectiveCBlock";
+            definition.finalize = ZJSOpaqueObjectFinalize;
+            definition.callAsFunction = ZJSBlockCall;
+            jsClass = JSClassCreate(&definition);
+        }
+    }
+    return jsClass;
+}
+
+static BOOL ZJSIsBlock(id object)
+{
+    Class objectClass = object_getClass(object);
+    const char *name = objectClass ? class_getName(objectClass) : NULL;
+    return name && strstr(name, "Block");
 }
 
 static NSMapTable<NSValue *, JSVirtualMachine *> *ZJSVirtualMachines(void)
@@ -858,11 +1174,21 @@ static JSValue *ZJSValueFromObject(id object, JSContext *context,
     ZJSHostObjectRecord *record = [ZJSHostObjectRecord new];
     record.object = object;
     void *privateData = (void *)CFBridgingRetain(record);
+    BOOL isBlock = ZJSIsBlock(object);
+    JSClassRef wrapperClass = isBlock
+        ? ZJSBlockObjectClass()
+        : ZJSOpaqueObjectClass();
     JSObjectRef wrapped = JSObjectMake(context.JSGlobalContextRef,
-                                       ZJSOpaqueObjectClass(), privateData);
+                                       wrapperClass, privateData);
     if (!wrapped) {
         CFBridgingRelease(privateData);
         return nil;
+    }
+    if (isBlock) {
+        JSValue *function = [context.globalObject valueForProperty:@"Function"];
+        JSValue *prototype = [function valueForProperty:@"prototype"];
+        JSObjectSetPrototype(context.JSGlobalContextRef, wrapped,
+                             prototype.JSValueRef);
     }
     JSValue *result = [JSValue valueWithJSValueRef:wrapped inContext:context];
     [contextState.objectiveCValues setObject:result forKey:object];

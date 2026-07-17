@@ -327,6 +327,64 @@ int main(void)
         }
         if (check(crossVMValueRejected && crossVMManagedRejected, 59))
             return 59;
+        __block BOOL blockStateMatches = NO;
+        int32_t (^adder)(int32_t, int32_t) = ^int32_t(int32_t left, int32_t right) {
+            blockStateMatches = JSContext.currentContext == context &&
+                JSContext.currentCallee != nil &&
+                JSContext.currentArguments.count == 2 &&
+                [JSContext.currentThis[@"marker"] toInt32] == 7;
+            return left + right;
+        };
+        JSValue *adderValue = [JSValue valueWithObject:adder inContext:context];
+        context[@"nativeAdder"] = adderValue;
+        JSValue *adderResult = [context evaluateScript:@"nativeAdder.call({ marker: 7 }, 20, 22)"];
+        if (check(adderResult.toInt32 == 42, 60))
+            return 60;
+        if (check(blockStateMatches, 66))
+            return 66;
+        if (check(adderValue.toObject == adder, 67))
+            return 67;
+        NSString *(^decorate)(NSString *) = ^NSString *(NSString *value) {
+            return [@"<" stringByAppendingString:[value stringByAppendingString:@">"]];
+        };
+        if (check([[[JSValue valueWithObject:decorate inContext:context]
+                       callWithArguments:@[ @"zig-js" ]]
+                      .toString isEqualToString:@"<zig-js>"],
+                  61))
+            return 61;
+        CGPoint (^offsetPoint)(CGPoint) = ^CGPoint(CGPoint point) {
+            return CGPointMake(point.x + 1, point.y - 1);
+        };
+        CGPoint offsetResult = [[JSValue valueWithObject:offsetPoint inContext:context]
+            callWithArguments:@[ [JSValue valueWithPoint:CGPointMake(2, 4) inContext:context] ]]
+                                    .toPoint;
+        if (check(offsetResult.x == 3 && offsetResult.y == 3, 62))
+            return 62;
+        __block BOOL voidBlockCalled = NO;
+        void (^consume)(BOOL, double) = ^(BOOL flag, double number) {
+            voidBlockCalled = flag && number == 4.5;
+        };
+        JSValue *voidResult = [[JSValue valueWithObject:consume inContext:context]
+            callWithArguments:@[ @YES, @4.5 ]];
+        if (check(voidBlockCalled && voidResult.isUndefined, 63))
+            return 63;
+        id (^throwingBlock)(void) = ^id {
+            [NSException raise:NSInvalidArgumentException format:@"native-block-failure"];
+            return nil;
+        };
+        context[@"throwingBlock"] = throwingBlock;
+        JSValue *nativeFailure = [context evaluateScript:@"try { throwingBlock(); 'missed'; } catch (error) { String(error); }"];
+        if (check([nativeFailure.toString containsString:@"native-block-failure"], 64))
+            return 64;
+        context.exception = nil;
+        void (^exceptionBlock)(void) = ^{
+            context.exception = [JSValue valueWithNewErrorFromMessage:@"context-block-failure"
+                                                             inContext:context];
+        };
+        context[@"exceptionBlock"] = exceptionBlock;
+        JSValue *contextFailure = [context evaluateScript:@"try { exceptionBlock(); 'missed'; } catch (error) { String(error); }"];
+        if (check([contextFailure.toString containsString:@"context-block-failure"], 65))
+            return 65;
     }
     return 0;
 }

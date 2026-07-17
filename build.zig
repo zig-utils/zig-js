@@ -107,11 +107,12 @@ pub fn build(b: *std.Build) void {
         });
         objc_runtime_smoke.root_module.addCSourceFile(.{
             .file = b.path("tests/objc_api_runtime_smoke.m"),
-            .flags = &.{ "-fobjc-arc", "-fblocks" },
+            .flags = &.{ "-fobjc-arc", "-fblocks", "-Wno-retain-cycles" },
         });
         objc_runtime_smoke.root_module.addIncludePath(b.path("include"));
         objc_runtime_smoke.root_module.addObjectFile(installed_library.?);
         objc_runtime_smoke.root_module.linkFramework("Foundation", .{});
+        objc_runtime_smoke.root_module.linkSystemLibrary("ffi", .{});
         const run_objc_runtime_smoke = b.addRunArtifact(objc_runtime_smoke);
         run_objc_runtime_smoke.step.dependOn(&objc_api_audit_cmd.step);
         const objc_runtime_step = b.step("test-objc-api", "Compile, link, and run the Objective-C bridge host");
