@@ -294,7 +294,7 @@ int main(void)
                 return 49;
         }
         JSGarbageCollect(context.JSGlobalContextRef);
-        if (check([unrootedManaged.value[@"tag"].toString isEqualToString:@"unrooted"], 50))
+        if (check(unrootedManaged.value == nil, 50))
             return 50;
         NSObject *owner = [NSObject new];
         __block JSManagedValue *ownedManaged = nil;
@@ -307,20 +307,44 @@ int main(void)
             return 51;
         [context.virtualMachine removeManagedReference:ownedManaged withOwner:owner];
         JSGarbageCollect(context.JSGlobalContextRef);
-        if (check([ownedManaged.value[@"tag"].toString isEqualToString:@"owned"], 52))
+        if (check(ownedManaged.value == nil, 52))
             return 52;
+        JSValue *globalTarget = [context evaluateScript:@"({ tag: 'global' })"];
+        JSManagedValue *globalManaged = [JSManagedValue managedValueWithValue:globalTarget];
+        context[@"managedRoot"] = globalTarget;
+        JSGarbageCollect(context.JSGlobalContextRef);
+        if (check([globalManaged.value[@"tag"].toString isEqualToString:@"global"], 83))
+            return 83;
+        context[@"managedRoot"] = nil;
+        JSGarbageCollect(context.JSGlobalContextRef);
+        if (check(globalManaged.value == nil, 84))
+            return 84;
+        [context evaluateScript:@"globalThis.readManaged = (() => { const target = { tag: 'closure' }; return () => target; })()"];
+        JSManagedValue *closureManaged = [JSManagedValue managedValueWithValue:
+            [context evaluateScript:@"readManaged()"]];
+        JSGarbageCollect(context.JSGlobalContextRef);
+        if (check([closureManaged.value[@"tag"].toString isEqualToString:@"closure"], 85))
+            return 85;
+        context[@"readManaged"] = nil;
+        JSGarbageCollect(context.JSGlobalContextRef);
+        if (check(closureManaged.value == nil, 86))
+            return 86;
         __weak NSObject *weakOwner = nil;
+        __block JSManagedValue *ownerDeathManaged = nil;
         @autoreleasepool {
             NSObject *temporaryOwner = [NSObject new];
             weakOwner = temporaryOwner;
-            JSManagedValue *temporaryManaged = [JSManagedValue managedValueWithValue:
-                                                                    [context evaluateScript:@"({ temporary: true })"]
-                                                                                   andOwner:temporaryOwner];
-            if (check(temporaryManaged.value != nil, 53))
+            ownerDeathManaged = [JSManagedValue managedValueWithValue:
+                                              [context evaluateScript:@"({ temporary: true })"]
+                                                             andOwner:temporaryOwner];
+            if (check(ownerDeathManaged.value != nil, 53))
                 return 53;
         }
         if (check(weakOwner == nil, 54))
             return 54;
+        JSGarbageCollect(context.JSGlobalContextRef);
+        if (check(ownerDeathManaged.value == nil, 87))
+            return 87;
         ZJSTestObject *nativeObject = [ZJSTestObject new];
         nativeObject.name = @"native";
         JSValue *nativeWrapper = [JSValue valueWithObject:nativeObject inContext:context];

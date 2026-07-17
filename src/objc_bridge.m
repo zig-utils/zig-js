@@ -50,6 +50,9 @@ JS_EXPORT NSString *const JSPropertyDescriptorSetKey = @"set";
 @interface ZJSManagedValueState : NSObject
 @property (nonatomic, strong) JSValue *weakReference;
 @property (nonatomic, strong) JSValue *primitiveValue;
+@property (nonatomic, strong) NSHashTable *owners;
+@property (nonatomic) uint64_t collectionEpoch;
+@property (nonatomic) BOOL cleared;
 @end
 
 @implementation ZJSManagedValueState
@@ -1175,6 +1178,14 @@ static JSObjectRef ZJSObjectForValue(JSValue *value);
         return;
     if (value.context.virtualMachine != self)
         [NSException raise:NSInvalidArgumentException format:@"Managed JSValue belongs to a different JSVirtualMachine"];
+    if ([object isKindOfClass:[JSManagedValue class]]) {
+        ZJSManagedValueState *managedState = ZJSManagedState(object);
+        if (!managedState.owners)
+            managedState.owners = [NSHashTable weakObjectsHashTable];
+        [managedState.owners addObject:owner];
+        managedState.collectionEpoch = ZJSContextGetCollectionEpoch(
+            value.context.JSGlobalContextRef);
+    }
     @synchronized(owner) {
         NSMutableDictionary *relations = objc_getAssociatedObject(
             owner, ZJSManagedOwnerRelationsKey);
@@ -1197,6 +1208,8 @@ static JSObjectRef ZJSObjectForValue(JSValue *value);
 {
     if (!object || !owner)
         return;
+    if ([object isKindOfClass:[JSManagedValue class]])
+        [ZJSManagedState(object).owners removeObject:owner];
     @synchronized(owner) {
         NSMutableDictionary *relations = objc_getAssociatedObject(
             owner, ZJSManagedOwnerRelationsKey);
@@ -1234,6 +1247,9 @@ static JSObjectRef ZJSObjectForValue(JSValue *value);
     if (!self || !value)
         return nil;
     ZJSManagedValueState *state = [ZJSManagedValueState new];
+    state.owners = [NSHashTable weakObjectsHashTable];
+    state.collectionEpoch = ZJSContextGetCollectionEpoch(
+        value.context.JSGlobalContextRef);
     if (value.isObject) {
         JSValue *constructor = [value.context.globalObject valueForProperty:@"WeakRef"];
         state.weakReference = [constructor constructWithArguments:@[ value ]];
@@ -1250,10 +1266,28 @@ static JSObjectRef ZJSObjectForValue(JSValue *value);
 - (JSValue *)value
 {
     ZJSManagedValueState *state = ZJSManagedState(self);
+    if (state.cleared)
+        return nil;
     if (state.primitiveValue)
         return state.primitiveValue;
     JSValue *value = [state.weakReference invokeMethod:@"deref" withArguments:nil];
-    return value.isUndefined ? nil : value;
+    if (value.isUndefined)
+        return nil;
+    uint64_t epoch = ZJSContextGetCollectionEpoch(value.context.JSGlobalContextRef);
+    if (state.owners.allObjects.count != 0) {
+        state.collectionEpoch = epoch;
+        return value;
+    }
+    if (epoch != state.collectionEpoch) {
+        state.collectionEpoch = epoch;
+        if (!ZJSValueIsReachable(value.context.JSGlobalContextRef,
+                                 value.JSValueRef)) {
+            state.cleared = YES;
+            state.weakReference = nil;
+            return nil;
+        }
+    }
+    return value;
 }
 
 @end
