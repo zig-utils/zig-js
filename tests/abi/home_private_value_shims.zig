@@ -1209,7 +1209,7 @@ pub fn main() void {
     if (!Bun__promises__isErrorLike(context, evaluate(context, "({ get stack() { __private_error_like_gets++; throw 236; } })")) or
         Bun__promises__isErrorLike(context, evaluate(context, "Object.create({ stack: 1 })")) or
         Bun__promises__isErrorLike(context, EncodedValue.fromInt32(236)) or
-        getNumberProperty(context, global_value, "__private_error_like_gets") != 0)
+        Bun__JSValue__toNumber(evaluate(context, "__private_error_like_gets"), context) != 0)
         fail("private rejection error-like classification mismatch");
     json_output = .{ .tag = .dead, .value = .{ .zig_string = .{ .tagged_ptr = 0, .len = 0 } } };
     JSC__JSValue__jsonStringifyFast(json_target, context, &json_output);
