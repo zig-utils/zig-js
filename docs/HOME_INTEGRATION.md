@@ -4,8 +4,8 @@
 > (2026-07-17). Home currently links vendored JavaScriptCore. zig-js now proves
 > the exact 50-function public M1 consumer at Home revision `7ed99c02`, while
 > private profiles explicitly support `7ed99c02` and the byte-identical JSC
-> source aliases `5e829ad4` and `38702f9e`. The broader private runtime remains
-> separate work.
+> source aliases `5e829ad4`, `38702f9e`, and `4389ddee`. The broader private
+> runtime remains separate work.
 
 ## Why this is not a link-swap
 
@@ -38,9 +38,16 @@ pinned Home revision, the 58 JSC source files containing legacy/private
 `extern fn` declarations require 448 unique symbols: 432 private JSC/Bun/WebCore
 entries, 15 public-C overlaps already implemented by zig-js, and one platform
 libc import. See [the exact declaration inventory](abi/home-private-7ed99c02-inventory.json)
-and run `zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"`
-to verify the live revision, every source hash, signature, classification, and
-calling convention. This replaces a vague source-level estimate, but the 432
+and run:
+
+```sh
+zig build home-private-abi-audit \
+  -Dhome-private-abi-profile=home-private-4389ddee \
+  -Dhome-source-root="$HOME/Code/Home/lang"
+```
+
+This verifies the live revision, every source hash, signature, classification,
+and calling convention. It replaces a vague source-level estimate, but the 432
 private entries are now 71 implemented / 361 pending under #163. The implemented
 slices cover JSC64 value identity, cell equality, truthiness, int32 extraction,
 exact signed/unsigned 64-bit BigInt construction, and modulo-2^64 BigInt
@@ -93,11 +100,11 @@ resolution with thenable assimilation and self-resolution protection. Their
 reentrancy, exception clearing, and settled-target no-ops. These slices do not
 yet create a usable Home private runtime.
 
-The newer Home revisions `5e829ad4` and `38702f9e` changed no files in
-`packages/runtime/src/jsc` relative to `7ed99c02`. Their separate alias
+The newer Home revisions `5e829ad4`, `38702f9e`, and `4389ddee` changed no files
+in `packages/runtime/src/jsc` relative to `7ed99c02`. Their separate alias
 manifests still verify every source hash and declaration and report zero added,
 removed, signature-changed, or calling-convention-changed entries. This keeps
-all three exact revisions supported without weakening revision rejection.
+all four exact revisions supported without weakening revision rejection.
 
 ## Two migration paths
 

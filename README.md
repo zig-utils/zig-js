@@ -239,9 +239,9 @@ that remaining boundary concrete: **448 unique extern symbols from 58 pinned
 files**, classified as 432 private (**71 implemented / 361 pending**), 15
 already-covered public-C overlaps, and one platform import, with zero duplicate
 or unclassified entries.
-Exact Home revisions `7ed99c02`, `5e829ad4`, and `38702f9e` are supported; both
-newer revisions are verified byte-identical JSC-source aliases with zero
-added/removed/changed declarations, not unreviewed moving targets.
+Exact Home revisions `7ed99c02`, `5e829ad4`, `38702f9e`, and `4389ddee` are
+supported; all three newer revisions are verified byte-identical JSC-source
+aliases with zero added/removed/changed declarations, not unreviewed moving targets.
 The first private-ABI foundation is implemented without changing engine values:
 `private_abi.EncodedValue` translates primitives to the pinned eight-byte JSC64
 encoding (including exact int32/double/NaN/cell rules), while rejecting
@@ -437,10 +437,14 @@ zig build home-public-abi-audit  # pinned Home revision-independent profile gate
 zig build test-home-public-abi   # Home Zig consumer compile-link-runtime gate
 zig build home-public-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"
 zig build home-private-abi-audit # 448-symbol pinned private denominator
-zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"
+zig build home-private-abi-audit \
+  -Dhome-private-abi-profile=home-private-4389ddee \
+  -Dhome-source-root="$HOME/Code/Home/lang"
 zig build test-private-abi-value # exact JSC64 value codec + internal bridge
 zig build test-home-private-abi # implemented Home private shim slices
-zig build test-home-private-abi -Dhome-private-abi-profile=home-private-38702f9e -Dhome-source-root="$HOME/Code/Home/lang"
+zig build test-home-private-abi \
+  -Dhome-private-abi-profile=home-private-4389ddee \
+  -Dhome-source-root="$HOME/Code/Home/lang"
 zig build bun-private-abi-audit # pinned 437-symbol Bun core denominator
 zig build bun-private-abi-audit -Dbun-source-root="$HOME/Code/bun"
 zig build private-jstype-abi-audit # exact 97-member Home / 98-member Bun layouts

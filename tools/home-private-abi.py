@@ -21,6 +21,7 @@ REVISION = "7ed99c02e50034f869d0db6d487115bb44332fe4"
 ALIAS_PROFILES = {
     "home-private-5e829ad4": ROOT / "docs/abi/home-private-5e829ad4.json",
     "home-private-38702f9e": ROOT / "docs/abi/home-private-38702f9e.json",
+    "home-private-4389ddee": ROOT / "docs/abi/home-private-4389ddee.json",
 }
 SOURCE_ROOT = Path("packages/runtime/src/jsc")
 EXTERN_RE = re.compile(r"\b(?:pub\s+)?extern\s+fn\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(")
