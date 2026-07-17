@@ -1,5 +1,12 @@
 #import <JavaScriptCore/JavaScriptCore.h>
 
+@interface ZJSTestObject : NSObject
+@property (nonatomic, copy) NSString *name;
+@end
+
+@implementation ZJSTestObject
+@end
+
 static int check(BOOL condition, int code)
 {
     return condition ? 0 : code;
@@ -271,6 +278,39 @@ int main(void)
         }
         if (check(weakOwner == nil, 54))
             return 54;
+        ZJSTestObject *nativeObject = [ZJSTestObject new];
+        nativeObject.name = @"native";
+        JSValue *nativeWrapper = [JSValue valueWithObject:nativeObject inContext:context];
+        if (check(nativeWrapper == [JSValue valueWithObject:nativeObject inContext:context] &&
+                      nativeWrapper.toObject == nativeObject,
+                  55))
+            return 55;
+        JSValue *identityHolder = [context evaluateScript:@"(() => { const child = {}; return { child }; })()"];
+        if (check([identityHolder valueForProperty:@"child"] ==
+                      [identityHolder valueForProperty:@"child"],
+                  56))
+            return 56;
+        context[@"nativeA"] = nativeWrapper;
+        context[@"nativeB"] = nativeObject;
+        if (check([[context evaluateScript:@"nativeA === nativeB"] toBool], 57))
+            return 57;
+        __weak JSVirtualMachine *releasedVirtualMachine = nil;
+        __weak JSContext *releasedContext = nil;
+        __weak NSObject *releasedNativeObject = nil;
+        @autoreleasepool {
+            JSVirtualMachine *temporaryVirtualMachine = [JSVirtualMachine new];
+            JSContext *temporaryContext = [[JSContext alloc]
+                initWithVirtualMachine:temporaryVirtualMachine];
+            NSObject *temporaryObject = [NSObject new];
+            releasedVirtualMachine = temporaryVirtualMachine;
+            releasedContext = temporaryContext;
+            releasedNativeObject = temporaryObject;
+            [JSValue valueWithObject:temporaryObject inContext:temporaryContext];
+        }
+        if (check(releasedVirtualMachine == nil && releasedContext == nil &&
+                      releasedNativeObject == nil,
+                  58))
+            return 58;
     }
     return 0;
 }

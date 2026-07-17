@@ -30,6 +30,8 @@ JS_EXPORT NSString *const JSPropertyDescriptorSetKey = @"set";
 @property (nonatomic, strong) JSValue *exception;
 @property (nonatomic, copy) void (^exceptionHandler)(JSContext *, JSValue *);
 @property (nonatomic, strong) NSMapTable<NSValue *, JSValue *> *values;
+@property (nonatomic, strong) NSHashTable<JSValue *> *objectValues;
+@property (nonatomic, strong) NSMapTable<id, JSValue *> *objectiveCValues;
 @end
 
 @implementation ZJSContextState
@@ -51,6 +53,13 @@ JS_EXPORT NSString *const JSPropertyDescriptorSetKey = @"set";
 @end
 
 @implementation ZJSManagedValueState
+@end
+
+@interface ZJSHostObjectRecord : NSObject
+@property (nonatomic, strong) id object;
+@end
+
+@implementation ZJSHostObjectRecord
 @end
 
 @implementation ZJSValueState
@@ -142,6 +151,40 @@ static ZJSManagedValueState *ZJSManagedState(JSManagedValue *value)
 }
 
 static NSValue *ZJSObjectiveCIdentityKey(id object);
+
+static void ZJSOpaqueObjectFinalize(JSObjectRef object)
+{
+    void *privateData = JSObjectGetPrivate(object);
+    if (!privateData)
+        return;
+    JSObjectSetPrivate(object, NULL);
+    CFBridgingRelease(privateData);
+}
+
+static JSClassRef ZJSOpaqueObjectClass(void)
+{
+    static JSClassRef jsClass;
+    @synchronized([ZJSHostObjectRecord class]) {
+        if (!jsClass) {
+            JSClassDefinition definition = kJSClassDefinitionEmpty;
+            definition.className = "ZJSObjectiveCObject";
+            definition.finalize = ZJSOpaqueObjectFinalize;
+            jsClass = JSClassCreate(&definition);
+        }
+    }
+    return jsClass;
+}
+
+static ZJSHostObjectRecord *ZJSHostRecord(JSValue *value)
+{
+    if (!value.isObject ||
+        !JSValueIsObjectOfClass(value.context.JSGlobalContextRef,
+                                value.JSValueRef, ZJSOpaqueObjectClass()))
+        return nil;
+    JSObjectRef object = JSValueToObject(value.context.JSGlobalContextRef,
+                                         value.JSValueRef, NULL);
+    return (__bridge ZJSHostObjectRecord *)JSObjectGetPrivate(object);
+}
 
 static NSMapTable<NSValue *, JSVirtualMachine *> *ZJSVirtualMachines(void)
 {
@@ -366,6 +409,10 @@ static JSVirtualMachine *ZJSVirtualMachineForGroup(JSContextGroupRef group)
     state.context = retain ? JSGlobalContextRetain(context) : context;
     state.virtualMachine = virtualMachine;
     state.values = [NSMapTable strongToWeakObjectsMapTable];
+    state.objectValues = [NSHashTable weakObjectsHashTable];
+    state.objectiveCValues = [NSMapTable
+        mapTableWithKeyOptions:NSPointerFunctionsWeakMemory | NSPointerFunctionsObjectPointerPersonality
+                  valueOptions:NSPointerFunctionsWeakMemory];
     __weak JSContext *weakContext = self;
     state.exceptionHandler = ^(JSContext *callbackContext, JSValue *exception) {
         ZJSCtxState(weakContext ?: callbackContext).exception = exception;
@@ -505,8 +552,23 @@ static JSVirtualMachine *ZJSVirtualMachineForGroup(JSContextGroupRef group)
 {
     if (!value || !context)
         return nil;
-    JSValue *existing = [ZJSCtxState(context).values objectForKey:ZJSPointerKey(value)];
-    return existing ?: [[JSValue alloc] zjs_initWithValue:value context:context];
+    ZJSContextState *state = ZJSCtxState(context);
+    JSValue *existing = [state.values objectForKey:ZJSPointerKey(value)];
+    if (existing)
+        return existing;
+    if (JSValueIsObject(context.JSGlobalContextRef, value)) {
+        for (JSValue *candidate in state.objectValues) {
+            if (JSValueIsStrictEqual(context.JSGlobalContextRef,
+                                     value, candidate.JSValueRef)) {
+                [state.values setObject:candidate forKey:ZJSPointerKey(value)];
+                return candidate;
+            }
+        }
+    }
+    JSValue *result = [[JSValue alloc] zjs_initWithValue:value context:context];
+    if (result.isObject)
+        [state.objectValues addObject:result];
+    return result;
 }
 
 - (JSValueRef)JSValueRef { return ZJSValState(self).value; }
@@ -789,9 +851,22 @@ static JSValue *ZJSValueFromObject(id object, JSContext *context,
         }
         return result;
     }
-    [NSException raise:NSInvalidArgumentException
-                format:@"Unsupported Objective-C value class %@", [object class]];
-    return nil;
+    ZJSContextState *contextState = ZJSCtxState(context);
+    JSValue *existing = [contextState.objectiveCValues objectForKey:object];
+    if (existing)
+        return existing;
+    ZJSHostObjectRecord *record = [ZJSHostObjectRecord new];
+    record.object = object;
+    void *privateData = (void *)CFBridgingRetain(record);
+    JSObjectRef wrapped = JSObjectMake(context.JSGlobalContextRef,
+                                       ZJSOpaqueObjectClass(), privateData);
+    if (!wrapped) {
+        CFBridgingRelease(privateData);
+        return nil;
+    }
+    JSValue *result = [JSValue valueWithJSValueRef:wrapped inContext:context];
+    [contextState.objectiveCValues setObject:result forKey:object];
+    return result;
 }
 
 + (JSValue *)valueWithObject:(id)object inContext:(JSContext *)context
@@ -974,6 +1049,9 @@ static id ZJSObjectFromValue(JSValue *value, ZJSObjectConversionState *state)
         return [value toNumber];
     if (value.isString)
         return [value toString];
+    ZJSHostObjectRecord *hostRecord = ZJSHostRecord(value);
+    if (hostRecord)
+        return hostRecord.object;
     if (value.isDate)
         return [value toDate];
     if (value.isArray)
