@@ -88,8 +88,8 @@
     },
     "by_status": {
       "external": 2,
-      "implemented": 214,
-      "pending": 232
+      "implemented": 215,
+      "pending": 231
     }
   },
   "declarations": [
@@ -1650,10 +1650,10 @@
       "line": 1208,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSValue__asArrayBuffer(this: JSValue, global: *JSGlobalObject, out: *ArrayBuffer) bool;",
       "declaration_sha256": "3b11295de76d069d95c3fc17ac625b7ec0e077c540e8dd692d5e13f0509cbd12",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSValue__asBigIntCompare",
