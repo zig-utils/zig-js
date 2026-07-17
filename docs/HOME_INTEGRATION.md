@@ -49,7 +49,7 @@ zig build home-private-abi-audit \
 
 This verifies the live revision, every source hash, signature, classification,
 and calling convention. It replaces a vague source-level estimate, but the 431
-private imports are now 247 implemented / 184 pending under #163. The generated
+private imports are now 248 implemented / 183 pending under #163. The generated
 FFI wrapper emits and resolves `JSFunctionCall` inside its own compiled module,
 so zig-js must not provide a duplicate symbol. The implemented
 slices cover JSC64 value identity, cell equality, truthiness, int32 extraction,
@@ -251,8 +251,10 @@ callback Promise passthrough, Error/throw rejection, and normal AnyPromise
 resolution with thenable assimilation and self-resolution protection. Three
 private module-loader shims provide persistent supplied/file sources, canonical
 relative resolution, cached namespace identity, exact Promise and exception
-channels, top-level-await settlement, and precise module-graph roots. Their
-246-symbol combined fixture covers sibling realms, foreign VMs, callback
+channels, top-level-await settlement, and precise module-graph roots. The
+JSString backing iterator additionally delivers exact Latin-1 or UTF-16 units
+through the pinned caller-owned callback layout. The 247-symbol combined
+fixture covers sibling realms, foreign VMs, callback
 reentrancy, exception clearing, settled-target no-ops, and the complete
 DOMException code matrix. Seven Home-only
 JSMap shims create selected-realm native maps and directly implement

@@ -44,7 +44,7 @@ convention. The exact current denominator is:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #163 | 431 (247 implemented, 184 pending) |
+| Private JSC/Bun/WebCore ABI under #163 | 431 (248 implemented, 183 pending) |
 | Overlap with zig-js's completed public C target | 15 |
 | Platform libc import | 1 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
@@ -61,7 +61,7 @@ zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"
 ```
 
 This inventory is the denominator, not a claim that the whole surface works.
-The first 247 private entries are implemented; the other 184 remain pending
+The first 248 private entries are implemented; the other 183 remain pending
 until #163 provides their type/layout contracts, shims, and consumer evidence.
 `JSFunctionCall` remains revision-pinned in the declaration inventory but is
 not part of that denominator: each runtime-generated FFI module defines the
@@ -614,7 +614,9 @@ arguments and per-realm CommonJS function registries with precise-GC rooting,
 cross-VM rejection, and exact append/set/swap-remove behavior. The private
 module-loader slice adds persistent supplied/file sources, canonical relative
 resolution, cache/namespace identity, exact Promise and exception channels,
-top-level-await settlement, and complete module-graph tracing. The 246-symbol
+top-level-await settlement, and complete module-graph tracing. The JSString
+backing iterator adds pinned callback-layout validation and exact Latin-1 or
+UTF-16 unit delivery. The 247-symbol
 combined runtime fixture covers these semantics; the two
 profile-selected JSType exports retain
 their separate Home/Bun runtime fixtures.
@@ -658,7 +660,7 @@ profile contains 437 unique declarations from 54 hashed files:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #164 | 421 (241 implemented, 180 pending) |
+| Private JSC/Bun/WebCore ABI under #164 | 421 (242 implemented, 179 pending) |
 | Public-C overlap | 15 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
 | **Total** | **437** |
