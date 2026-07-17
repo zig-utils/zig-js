@@ -29,7 +29,7 @@
     { "method": "Runtime.executionContextCreated", "status": "implemented" },
     { "method": "Debugger.scriptParsed", "status": "implemented" },
     { "method": "Debugger.breakpointResolved", "status": "implemented" },
-    { "method": "Debugger.paused", "status": "implemented", "evidence": "C-API: paused frames expose scopes and live frame evaluation" },
+    { "method": "Debugger.paused", "status": "implemented", "evidence": "C-API: concurrent inspector sessions have deterministic pause ownership" },
     { "method": "Debugger.resumed", "status": "implemented" },
     { "method": "Debugger.exceptionThrown", "status": "implemented" }
   ]

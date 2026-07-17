@@ -252,7 +252,9 @@ environment and may update its bindings before resume. Expandable remote-object
 handles expose own data/accessor descriptors without invoking getters. Handles
 are session-owned, group-releasable, protected across GC, and invalidated on
 explicit release/session teardown; scope handles also expire on resume. Worker
-targets remain tracked by inspector issue #154.
+targets remain tracked by inspector issue #154. When several debugger sessions
+are enabled, observers receive the paused state first and only the deterministic
+owner may resume or step; explicit pause/step requests retain that ownership.
 
 `JSGlobalContextRetain` and `JSGlobalContextRelease` maintain a real C-API reference count for contexts created through this C API. Releasing a retained context destroys the underlying runtime only after the final release. `JSGlobalContextRetain` returns null for a null context or if retaining would overflow the context refcount.
 

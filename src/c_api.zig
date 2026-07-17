@@ -122,6 +122,8 @@ const CInspectorState = struct {
     paused_depth: u32 = 0,
     paused_at_uncaught_boundary: bool = false,
     paused_machine: ?*interp.Interpreter = null,
+    pause_owner: ?*CInspectorSession = null,
+    next_pause_owner: ?*CInspectorSession = null,
     exception_mode: CInspectorExceptionMode = .none,
     next_exception_id: u64 = 1,
     remote_objects: std.ArrayListUnmanaged(CInspectorRemoteObject) = .empty,
@@ -1504,6 +1506,21 @@ fn inspectorHasDebugger(state: *const CInspectorState) bool {
     return false;
 }
 
+fn inspectorSessionCanOwnPause(session: *const CInspectorSession) bool {
+    return session.attached and session.debugger_enabled;
+}
+
+fn chooseInspectorPauseOwner(state: *CInspectorState) ?*CInspectorSession {
+    if (state.next_pause_owner) |preferred| {
+        state.next_pause_owner = null;
+        for (state.sessions.items) |session| {
+            if (session == preferred and inspectorSessionCanOwnPause(session)) return session;
+        }
+    }
+    for (state.sessions.items) |session| if (inspectorSessionCanOwnPause(session)) return session;
+    return null;
+}
+
 fn refreshInspectorDebuggerHook(state: *CInspectorState) void {
     const context = state.context;
     if (inspectorHasDebugger(state)) {
@@ -1517,6 +1534,8 @@ fn refreshInspectorDebuggerHook(state: *CInspectorState) void {
         state.pause_requested = false;
         state.paused = false;
         state.paused_machine = null;
+        state.pause_owner = null;
+        state.next_pause_owner = null;
         releaseInspectorRemotes(state, null, null, true);
         state.paused_at_uncaught_boundary = false;
         state.step_mode = .none;
@@ -1924,25 +1943,30 @@ fn inspectorStatementBoundary(
     state.paused_depth = machine.depth;
     state.paused_at_uncaught_boundary = false;
     state.paused_machine = machine;
+    state.pause_owner = chooseInspectorPauseOwner(state);
     var pause_arena = std.heap.ArenaAllocator.init(gpa);
     defer pause_arena.deinit();
-    for (state.sessions.items) |session| {
-        if (!session.attached or !session.debugger_enabled) continue;
-        const call_frames = try inspectorCallFrames(pause_arena.allocator(), session, machine, location);
-        _ = sendInspectorJson(session, .{
-            .method = "Debugger.paused",
-            .params = .{
-                .reason = reason,
-                .hitBreakpoints = hits.items,
-                .location = .{
-                    .scriptId = location.script_id,
-                    .lineNumber = location.location.line - 1,
-                    .columnNumber = location.location.column - 1,
-                    .byteOffset = location.location.byte_offset,
+    var owner_pass = false;
+    while (true) : (owner_pass = true) {
+        for (state.sessions.items) |session| {
+            if (!inspectorSessionCanOwnPause(session) or (session == state.pause_owner) != owner_pass) continue;
+            const call_frames = try inspectorCallFrames(pause_arena.allocator(), session, machine, location);
+            _ = sendInspectorJson(session, .{
+                .method = "Debugger.paused",
+                .params = .{
+                    .reason = reason,
+                    .hitBreakpoints = hits.items,
+                    .location = .{
+                        .scriptId = location.script_id,
+                        .lineNumber = location.location.line - 1,
+                        .columnNumber = location.location.column - 1,
+                        .byteOffset = location.location.byte_offset,
+                    },
+                    .callFrames = call_frames,
                 },
-                .callFrames = call_frames,
-            },
-        });
+            });
+        }
+        if (owner_pass) break;
     }
     // The transport is synchronous and the Context is thread-affine: a client
     // resumes from its paused-event callback. Returning to JS while still marked
@@ -1950,6 +1974,7 @@ fn inspectorStatementBoundary(
     if (state.paused) {
         state.paused = false;
         state.paused_machine = null;
+        state.pause_owner = null;
         releaseInspectorRemotes(state, null, null, true);
         machine.exception = try machine.makeError("Error", "debugger pause requires a synchronous resume command");
         return error.Throw;
@@ -1959,10 +1984,13 @@ fn inspectorStatementBoundary(
 fn continueInspectorExecution(session: *CInspectorSession, id: i64, mode: CInspectorStepMode) bool {
     const state = session.state;
     if (!state.paused) return sendInspectorError(session, id, -32000, "runtime is not paused");
+    if (state.pause_owner != session) return sendInspectorError(session, id, -32000, "session does not own continuation for this pause");
     if (state.paused_at_uncaught_boundary and mode != .none) return sendInspectorError(session, id, -32000, "cannot step after an uncaught exception left the runtime");
     if (mode == .out and state.paused_depth == 0) return sendInspectorError(session, id, -32000, "cannot step out of top-level execution");
     state.paused = false;
     state.paused_machine = null;
+    state.pause_owner = null;
+    state.next_pause_owner = if (mode == .none) null else session;
     releaseInspectorRemotes(state, null, null, true);
     state.step_mode = mode;
     state.step_depth = state.paused_depth;
@@ -2016,6 +2044,7 @@ fn inspectorExceptionBoundary(
     state.paused_depth = machine.depth;
     state.paused_at_uncaught_boundary = uncaught;
     state.paused_machine = machine;
+    state.pause_owner = chooseInspectorPauseOwner(state);
     state.pause_requested = false;
     state.step_mode = .none;
     var pause_arena = std.heap.ArenaAllocator.init(gpa);
@@ -2024,32 +2053,37 @@ fn inspectorExceptionBoundary(
         .script_id = 0,
         .location = .{ .line = 1, .column = 1, .byte_offset = 0 },
     };
-    for (state.sessions.items) |session| {
-        if (!session.attached or !session.debugger_enabled) continue;
-        const call_frames = try inspectorCallFrames(pause_arena.allocator(), session, machine, frame_location);
-        _ = sendInspectorJson(session, .{
-            .method = "Debugger.exceptionThrown",
-            .params = .{
-                .exceptionId = exception_id,
-                .uncaught = uncaught,
-                .location = location,
-                .exception = .{ .type = protocol_type, .description = "JavaScript exception" },
-            },
-        });
-        _ = sendInspectorJson(session, .{
-            .method = "Debugger.paused",
-            .params = .{
-                .reason = "exception",
-                .hitBreakpoints = &[_]u64{},
-                .location = location,
-                .data = .{ .exceptionId = exception_id, .uncaught = uncaught },
-                .callFrames = call_frames,
-            },
-        });
+    var owner_pass = false;
+    while (true) : (owner_pass = true) {
+        for (state.sessions.items) |session| {
+            if (!inspectorSessionCanOwnPause(session) or (session == state.pause_owner) != owner_pass) continue;
+            const call_frames = try inspectorCallFrames(pause_arena.allocator(), session, machine, frame_location);
+            _ = sendInspectorJson(session, .{
+                .method = "Debugger.exceptionThrown",
+                .params = .{
+                    .exceptionId = exception_id,
+                    .uncaught = uncaught,
+                    .location = location,
+                    .exception = .{ .type = protocol_type, .description = "JavaScript exception" },
+                },
+            });
+            _ = sendInspectorJson(session, .{
+                .method = "Debugger.paused",
+                .params = .{
+                    .reason = "exception",
+                    .hitBreakpoints = &[_]u64{},
+                    .location = location,
+                    .data = .{ .exceptionId = exception_id, .uncaught = uncaught },
+                    .callFrames = call_frames,
+                },
+            });
+        }
+        if (owner_pass) break;
     }
     if (state.paused) {
         state.paused = false;
         state.paused_machine = null;
+        state.pause_owner = null;
         releaseInspectorRemotes(state, null, null, true);
         state.paused_at_uncaught_boundary = false;
         machine.exception = try machine.makeError("Error", "debugger exception pause requires a synchronous resume command");
@@ -2169,6 +2203,7 @@ export fn ZJSInspectorSessionRelease(session_ref: ZJSInspectorSessionRef) callco
     const state = session.state;
     const ctx: JSContextRef = @ptrCast(state.context);
     _ = ctxFrom(ctx) orelse return;
+    if (state.next_pause_owner == session) state.next_pause_owner = null;
     releaseInspectorRemotes(state, session, null, false);
     for (state.sessions.items, 0..) |candidate, index| {
         if (candidate != session) continue;
@@ -2254,6 +2289,8 @@ export fn ZJSInspectorSessionDispatch(
         return true;
     }
     if (std.mem.eql(u8, method, "Debugger.disable")) {
+        if (session.state.paused and session.state.pause_owner == session)
+            return sendInspectorError(session, id, -32000, "continuation owner must resume before disabling Debugger");
         session.debugger_enabled = false;
         refreshInspectorDebuggerHook(session.state);
         return sendInspectorJson(session, .{ .id = id, .result = .{} });
@@ -2261,6 +2298,7 @@ export fn ZJSInspectorSessionDispatch(
     if (std.mem.eql(u8, method, "Debugger.pause")) {
         if (!session.debugger_enabled) return sendInspectorError(session, id, -32000, "Debugger domain is not enabled");
         session.state.pause_requested = true;
+        session.state.next_pause_owner = session;
         return sendInspectorJson(session, .{ .id = id, .result = .{} });
     }
     if (std.mem.eql(u8, method, "Debugger.resume")) {
@@ -5086,6 +5124,59 @@ test "C-API: paused frames expose scopes and live frame evaluation" {
     );
     try std.testing.expect(ZJSInspectorSessionDispatch(state.session, expired_held.ptr, expired_held.len));
     try std.testing.expect(std.mem.indexOf(u8, state.bytes[0..state.len], "unknown or expired objectId") != null);
+}
+
+test "C-API: concurrent inspector sessions have deterministic pause ownership" {
+    const Coordinator = struct { observer_saw_pause: bool = false };
+    const State = struct {
+        session: ZJSInspectorSessionRef = null,
+        coordinator: *Coordinator,
+        owns_pause: bool,
+        bytes: [8192]u8 = undefined,
+        len: usize = 0,
+
+        fn receive(message: [*]const u8, message_len: usize, user_data: ?*anyopaque) callconv(.c) void {
+            const self: *@This() = @ptrCast(@alignCast(user_data.?));
+            std.debug.assert(self.len + message_len + 1 <= self.bytes.len);
+            @memcpy(self.bytes[self.len .. self.len + message_len], message[0..message_len]);
+            self.len += message_len;
+            self.bytes[self.len] = '\n';
+            self.len += 1;
+            if (std.mem.indexOf(u8, message[0..message_len], "Debugger.paused") == null) return;
+            const resume_request = "{\"id\":50,\"method\":\"Debugger.resume\"}";
+            if (self.owns_pause) {
+                std.debug.assert(self.coordinator.observer_saw_pause);
+                std.debug.assert(ZJSInspectorSessionDispatch(self.session, resume_request, resume_request.len));
+            } else {
+                self.coordinator.observer_saw_pause = true;
+                std.debug.assert(ZJSInspectorSessionDispatch(self.session, resume_request, resume_request.len));
+            }
+        }
+    };
+
+    const ctx = JSGlobalContextCreate(null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(ctx);
+    JSGlobalContextSetInspectable(ctx, true);
+    var coordinator: Coordinator = .{};
+    var owner_state = State{ .coordinator = &coordinator, .owns_pause = true };
+    var observer_state = State{ .coordinator = &coordinator, .owns_pause = false };
+    owner_state.session = ZJSInspectorSessionCreate(ctx, State.receive, &owner_state) orelse return error.SessionCreateFailed;
+    defer ZJSInspectorSessionRelease(owner_state.session);
+    observer_state.session = ZJSInspectorSessionCreate(ctx, State.receive, &observer_state) orelse return error.SessionCreateFailed;
+    defer ZJSInspectorSessionRelease(observer_state.session);
+    const enable = "{\"id\":1,\"method\":\"Debugger.enable\"}";
+    try std.testing.expect(ZJSInspectorSessionDispatch(owner_state.session, enable, enable.len));
+    try std.testing.expect(ZJSInspectorSessionDispatch(observer_state.session, enable, enable.len));
+
+    const source = JSStringCreateWithUTF8CString("debugger; 42;") orelse return error.StringInitFailed;
+    defer JSStringRelease(source);
+    var exception: JSValueRef = null;
+    const result = JSEvaluateScript(ctx, source, null, null, 1, &exception) orelse return error.EvalFailed;
+    try std.testing.expectEqual(@as(f64, 42), JSValueToNumber(ctx, result, &exception));
+    try std.testing.expect(coordinator.observer_saw_pause);
+    try std.testing.expect(std.mem.indexOf(u8, observer_state.bytes[0..observer_state.len], "session does not own continuation for this pause") != null);
+    try std.testing.expect(std.mem.indexOf(u8, owner_state.bytes[0..owner_state.len], "Debugger.resumed") != null);
+    try std.testing.expect(std.mem.indexOf(u8, observer_state.bytes[0..observer_state.len], "Debugger.resumed") != null);
 }
 
 test "C-API: inspector remote objects stay rooted until deterministic release" {

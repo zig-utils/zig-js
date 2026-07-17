@@ -17,6 +17,11 @@ decisions and should expose dispatch only to an authenticated debugger peer.
 Sessions and their context group are thread-affine. A session retains its global
 context until ZJSInspectorSessionRelease, supports multiple simultaneous
 sessions, and is detached deterministically when inspectability is disabled.
+At each stop, the first enabled session (or the session that requested the
+pending pause/step) owns continuation. Observer sessions receive and may inspect
+the paused snapshot before the owner callback runs, but their resume/step
+commands receive a deterministic error. The owner receives the pause last and
+must continue synchronously; step ownership carries into the resulting stop.
 Because transport callbacks are synchronous and contexts are thread-affine, a
 client that receives Debugger.paused must dispatch Debugger.resume from that
 callback. If it returns without a continuation command, zig-js aborts that

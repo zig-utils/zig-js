@@ -231,7 +231,9 @@ VM execution. `Debugger.evaluateOnCallFrame` reads and mutates those live
 lexical bindings while preserving the paused program's control/exception state.
 Session-owned remote values and scope handles support non-invoking own-property
 inspection plus explicit object/group release; values are protected across GC,
-while pause-only scope handles expire on resume. Worker targets continue under
+while pause-only scope handles expire on resume. With multiple sessions, one
+deterministic owner controls continuation after observers receive the pause
+snapshot; observer resume attempts are rejected. Worker targets continue under
 [#154](https://github.com/zig-utils/zig-js/issues/154); see
 [docs/inspector.md](docs/inspector.md).
 
