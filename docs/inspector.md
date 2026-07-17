@@ -171,7 +171,10 @@ waits for the runtime-side session/root cleanup before freeing the owner handle.
 Focused transcripts cover script and module graphs, active message-handler
 pauses (including a first-statement `debugger;`), deterministic continuation
 ownership across two sessions, owner-callback detach, and termination while
-paused. The remaining feature/GC/concurrency evidence is tracked by
+paused. The worker transport also has end-to-end coverage for URL breakpoints,
+stepping, caught-exception policy/events, live call frames and scopes, frame
+evaluation, and retained remote-object property inspection. The remaining
+GC/concurrency/teardown evidence is tracked by
 [issue #156](https://github.com/zig-utils/zig-js/issues/156).
 
 setPauseOnExceptions accepts none, uncaught, or all. all pauses at the original

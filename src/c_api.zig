@@ -8746,6 +8746,137 @@ test "C-API: worker inspector marshals commands and callbacks across threads" {
     try std.testing.expect(std.mem.indexOf(u8, state.bytes[0..state.len], "Debugger.paused") != null);
 }
 
+test "C-API: worker inspector supports breakpoints stepping exceptions frames scopes and remotes" {
+    const State = struct {
+        session: ZJSWorkerInspectorSessionRef = null,
+        transcript: [65536]u8 = undefined,
+        transcript_len: usize = 0,
+        breakpoint_pauses: usize = 0,
+        step_pauses: usize = 0,
+        exception_pauses: usize = 0,
+        scope_object_id: u64 = 0,
+        held_object_id: u64 = 0,
+
+        fn dispatch(self: *@This(), command: []const u8) void {
+            std.debug.assert(ZJSWorkerInspectorSessionDispatch(self.session, command.ptr, command.len));
+        }
+
+        fn receive(message: [*]const u8, message_len: usize, user_data: ?*anyopaque) callconv(.c) void {
+            const self: *@This() = @ptrCast(@alignCast(user_data.?));
+            std.debug.assert(self.transcript_len + message_len + 1 <= self.transcript.len);
+            @memcpy(self.transcript[self.transcript_len .. self.transcript_len + message_len], message[0..message_len]);
+            self.transcript_len += message_len;
+            self.transcript[self.transcript_len] = '\n';
+            self.transcript_len += 1;
+            const bytes = message[0..message_len];
+
+            if (std.mem.indexOf(u8, bytes, "\"id\":13") != null) {
+                var parsed = std.json.parseFromSlice(std.json.Value, gpa, bytes, .{}) catch return;
+                defer parsed.deinit();
+                self.held_object_id = @intCast(parsed.value.object.get("result").?.object.get("result").?.object.get("objectId").?.integer);
+                var command_buffer: [256]u8 = undefined;
+                const get_properties = std.fmt.bufPrint(
+                    &command_buffer,
+                    "{{\"id\":14,\"method\":\"Runtime.getProperties\",\"params\":{{\"objectId\":{d}}}}}",
+                    .{self.held_object_id},
+                ) catch unreachable;
+                self.dispatch(get_properties);
+            }
+
+            if (std.mem.indexOf(u8, bytes, "Debugger.paused") == null) return;
+            var parsed = std.json.parseFromSlice(std.json.Value, gpa, bytes, .{}) catch return;
+            defer parsed.deinit();
+            const params = parsed.value.object.get("params").?.object;
+            const reason = params.get("reason").?.string;
+            if (std.mem.eql(u8, reason, "breakpoint")) {
+                self.breakpoint_pauses += 1;
+                const first_frame = params.get("callFrames").?.array.items[0].object;
+                const first_scope = first_frame.get("scopeChain").?.array.items[0].object;
+                self.scope_object_id = @intCast(first_scope.get("object").?.object.get("objectId").?.integer);
+                var command_buffer: [256]u8 = undefined;
+                const get_scope = std.fmt.bufPrint(
+                    &command_buffer,
+                    "{{\"id\":11,\"method\":\"Runtime.getProperties\",\"params\":{{\"objectId\":{d}}}}}",
+                    .{self.scope_object_id},
+                ) catch unreachable;
+                self.dispatch(get_scope);
+                self.dispatch("{\"id\":12,\"method\":\"Debugger.evaluateOnCallFrame\",\"params\":{\"callFrameId\":0,\"expression\":\"x = 100; x\"}}");
+                self.dispatch("{\"id\":13,\"method\":\"Debugger.evaluateOnCallFrame\",\"params\":{\"callFrameId\":0,\"objectGroup\":\"worker-held\",\"expression\":\"({ answer: 42, nested: { ok: true } })\"}}");
+                self.dispatch("{\"id\":15,\"method\":\"Debugger.stepOver\"}");
+            } else if (std.mem.eql(u8, reason, "step")) {
+                self.step_pauses += 1;
+                self.dispatch("{\"id\":16,\"method\":\"Debugger.resume\"}");
+            } else if (std.mem.eql(u8, reason, "exception")) {
+                self.exception_pauses += 1;
+                self.dispatch("{\"id\":17,\"method\":\"Debugger.resume\"}");
+            }
+        }
+    };
+
+    const ctx = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
+    defer JSGlobalContextRelease(ctx);
+    const source = JSStringCreateWithUTF8CString(
+        \\globalThis.onmessage = (e) => {
+        \\  let x = e.data;
+        \\  x += 1;
+        \\  x += 2;
+        \\  try { throw x; } catch (caught) { x = caught + 1; }
+        \\  postMessage(x);
+        \\  close();
+        \\};
+    ) orelse return error.StringInitFailed;
+    defer JSStringRelease(source);
+    const worker = JSWorkerCreate(source) orelse return error.WorkerSpawnFailed;
+    defer JSWorkerRelease(worker);
+    var target: ZJSInspectorTargetInfo = undefined;
+    try std.testing.expect(ZJSWorkerGetInspectorTargetInfo(worker, &target));
+
+    var state: State = .{};
+    state.session = ZJSWorkerInspectorSessionCreate(worker, State.receive, &state) orelse return error.SessionCreateFailed;
+    defer ZJSWorkerInspectorSessionRelease(state.session);
+    try std.testing.expectEqual(ZJSWorkerInspectorPumpResult.message, ZJSWorkerInspectorSessionPump(state.session, 10_000));
+    const enable = "{\"id\":1,\"method\":\"Debugger.enable\"}";
+    try std.testing.expect(ZJSWorkerInspectorSessionDispatch(state.session, enable, enable.len));
+    try std.testing.expectEqual(ZJSWorkerInspectorPumpResult.message, ZJSWorkerInspectorSessionPump(state.session, 10_000));
+    const pause_exceptions = "{\"id\":2,\"method\":\"Debugger.setPauseOnExceptions\",\"params\":{\"state\":\"all\"}}";
+    try std.testing.expect(ZJSWorkerInspectorSessionDispatch(state.session, pause_exceptions, pause_exceptions.len));
+    try std.testing.expectEqual(ZJSWorkerInspectorPumpResult.message, ZJSWorkerInspectorSessionPump(state.session, 10_000));
+    var breakpoint_buffer: [256]u8 = undefined;
+    const breakpoint = try std.fmt.bufPrint(
+        &breakpoint_buffer,
+        "{{\"id\":3,\"method\":\"Debugger.setBreakpointByUrl\",\"params\":{{\"url\":\"worker://{d}/script\",\"lineNumber\":2}}}}",
+        .{target.id},
+    );
+    try std.testing.expect(ZJSWorkerInspectorSessionDispatch(state.session, breakpoint.ptr, breakpoint.len));
+    try std.testing.expectEqual(ZJSWorkerInspectorPumpResult.message, ZJSWorkerInspectorSessionPump(state.session, 10_000));
+
+    try std.testing.expect(JSWorkerPostMessage(worker, ctx, JSValueMakeNumber(ctx, 1), null));
+    var pumps: usize = 0;
+    while ((state.breakpoint_pauses == 0 or state.step_pauses == 0 or state.exception_pauses == 0 or state.held_object_id == 0) and pumps < 64) : (pumps += 1) {
+        try std.testing.expectEqual(ZJSWorkerInspectorPumpResult.message, ZJSWorkerInspectorSessionPump(state.session, 10_000));
+    }
+    const reply = JSWorkerReceive(worker, ctx, 10_000, null) orelse return error.NoReply;
+    try std.testing.expectEqual(@as(f64, 104), JSValueToNumber(ctx, reply, null));
+    try std.testing.expectEqual(@as(usize, 1), state.breakpoint_pauses);
+    try std.testing.expectEqual(@as(usize, 1), state.step_pauses);
+    try std.testing.expectEqual(@as(usize, 1), state.exception_pauses);
+    try std.testing.expect(state.scope_object_id != 0);
+    try std.testing.expect(state.held_object_id != 0);
+
+    const transcript = state.transcript[0..state.transcript_len];
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "\"reason\":\"breakpoint\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "\"reason\":\"step\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "\"reason\":\"exception\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "Debugger.exceptionThrown") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "\"callFrames\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "\"scopeChain\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "\"id\":12") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "\"value\":100") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "\"id\":14") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "\"name\":\"answer\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "\"name\":\"x\"") != null);
+}
+
 test "C-API: worker inspector detach and termination unblock paused execution" {
     const Action = enum { detach, terminate };
     const State = struct {

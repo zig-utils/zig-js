@@ -242,7 +242,10 @@ run only on the worker runtime thread, including while paused, while callbacks
 run only on the worker-handle owner thread. Script and module targets publish
 their source graphs, first-statement `debugger;` pauses are retained in bytecode,
 multiple sessions preserve deterministic continuation ownership, and detach or
-termination unblocks a paused target. The remaining parity/GC/concurrency matrix
+termination unblocks a paused target. Worker transcripts also cover URL
+breakpoints, stepping, caught-exception pauses, live frames/scopes and frame
+evaluation, and GC-rooted remote-object property inspection. The remaining
+GC/concurrency/teardown matrix
 continues under [#156](https://github.com/zig-utils/zig-js/issues/156); see
 [docs/inspector.md](docs/inspector.md).
 For scripts registered while debugging, ordinary bytecode/native entry is
