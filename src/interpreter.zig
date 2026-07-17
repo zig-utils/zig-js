@@ -8069,7 +8069,7 @@ pub const Interpreter = struct {
         return if (utf8SeqLen(s, i) == 4) @as(usize, 2) else 1;
     }
 
-    fn utf16LenOfString(s: []const u8) usize {
+    pub fn utf16LenOfString(s: []const u8) usize {
         var units: usize = 0;
         var i: usize = 0;
         while (i < s.len) {
@@ -8077,6 +8077,18 @@ pub const Interpreter = struct {
             i += jsStringSeqLen(s, i);
         }
         return units;
+    }
+
+    pub fn jsStringIs8Bit(s: []const u8) bool {
+        var i: usize = 0;
+        while (i < s.len) {
+            if (wtf8SurrogateAt(s, i) != null) return false;
+            const sequence_len = utf8SeqLen(s, i);
+            const codepoint = std.unicode.utf8Decode(s[i .. i + sequence_len]) catch return false;
+            if (codepoint > 0xff) return false;
+            i += sequence_len;
+        }
+        return true;
     }
 
     fn utf16IndexFromByteOffset(s: []const u8, offset: usize) usize {

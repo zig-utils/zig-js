@@ -53,6 +53,13 @@ extern "c" fn JSC__JSBigInt__orderDouble(?*anyopaque, f64) i8;
 extern "c" fn JSC__JSBigInt__orderInt64(?*anyopaque, i64) i8;
 extern "c" fn JSC__JSBigInt__orderUint64(?*anyopaque, u64) i8;
 extern "c" fn JSC__JSBigInt__toInt64(?*anyopaque) i64;
+extern "c" fn JSC__JSValue__asString(EncodedValue) ?*anyopaque;
+extern "c" fn JSC__JSString__eql(?*anyopaque, JSContextRef, ?*anyopaque) bool;
+extern "c" fn JSC__JSString__is8Bit(?*anyopaque) bool;
+extern "c" fn JSC__JSString__length(?*anyopaque) usize;
+extern "c" fn JSC__JSString__toObject(?*anyopaque, JSContextRef) JSObjectRef;
+extern "c" fn JSC__JSCell__getObject(?*anyopaque) JSObjectRef;
+extern "c" fn JSC__JSCell__toObject(?*anyopaque, JSContextRef) JSObjectRef;
 
 fn fail(message: []const u8) noreturn {
     std.debug.print("Home private value shims: {s}\n", .{message});
@@ -211,5 +218,42 @@ pub fn main() void {
         JSC__JSBigInt__toInt64(modulo_one) != 1)
         fail("signed modulo extraction mismatch");
 
-    std.debug.print("Home private value shims: 14/14 symbols linked; runtime matrix passed\n", .{});
+    const text_cell = JSC__JSValue__asString(encoded_text) orelse fail("string downcast failed");
+    const same_text_cell = JSC__JSValue__asString(EncodedValue.fromRef(same_text_value)) orelse fail("same string downcast failed");
+    if (JSC__JSValue__asString(.true) != null or
+        JSC__JSValue__asString(encoded_object) != null or
+        !JSC__JSString__eql(text_cell, context, same_text_cell) or
+        !JSC__JSString__is8Bit(text_cell) or
+        JSC__JSString__length(text_cell) != 5)
+        fail("basic JSString bridge mismatch");
+
+    const latin1_cell = JSC__JSValue__asString(evaluate(context, "'é'")) orelse fail("Latin-1 downcast failed");
+    const bmp_cell = JSC__JSValue__asString(evaluate(context, "'€'")) orelse fail("BMP downcast failed");
+    const astral_cell = JSC__JSValue__asString(evaluate(context, "'😀'")) orelse fail("astral downcast failed");
+    const surrogate_cell = JSC__JSValue__asString(evaluate(context, "'\\uD800'")) orelse fail("surrogate downcast failed");
+    if (!JSC__JSString__is8Bit(latin1_cell) or JSC__JSString__length(latin1_cell) != 1 or
+        JSC__JSString__is8Bit(bmp_cell) or JSC__JSString__length(bmp_cell) != 1 or
+        JSC__JSString__is8Bit(astral_cell) or JSC__JSString__length(astral_cell) != 2 or
+        JSC__JSString__is8Bit(surrogate_cell) or JSC__JSString__length(surrogate_cell) != 1)
+        fail("UTF-16/8-bit JSString boundary mismatch");
+
+    const symbol_cell = evaluate(context, "Symbol('cell')");
+    if (JSC__JSCell__getObject(object) != object or
+        JSC__JSCell__getObject(text_cell) != null or
+        JSC__JSCell__getObject(signed_negative_cell) != null or
+        JSC__JSCell__getObject(@ptrFromInt(@as(usize, @intCast(@intFromEnum(symbol_cell))))) != null)
+        fail("JSCell object access mismatch");
+    const boxed_string = JSC__JSString__toObject(text_cell, context) orelse fail("string boxing failed");
+    const boxed_bigint = JSC__JSCell__toObject(signed_negative_cell, context) orelse fail("BigInt boxing failed");
+    const symbol_pointer: ?*anyopaque = @ptrFromInt(@as(usize, @intCast(@intFromEnum(symbol_cell))));
+    const boxed_symbol = JSC__JSCell__toObject(symbol_pointer, context) orelse fail("Symbol boxing failed");
+    if (boxed_string == text_cell or boxed_bigint == signed_negative_cell or boxed_symbol == symbol_pointer or
+        JSC__JSCell__getObject(boxed_string) != boxed_string or
+        JSC__JSCell__getObject(boxed_bigint) != boxed_bigint or
+        JSC__JSCell__getObject(boxed_symbol) != boxed_symbol or
+        JSC__JSCell__toObject(object, context) != object or
+        JSC__JSString__toObject(text_cell, foreign_context) != null)
+        fail("JSCell object coercion mismatch");
+
+    std.debug.print("Home private value shims: 21/21 symbols linked; runtime matrix passed\n", .{});
 }

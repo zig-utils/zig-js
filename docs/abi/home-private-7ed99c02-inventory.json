@@ -87,8 +87,8 @@
     },
     "by_status": {
       "external": 1,
-      "implemented": 31,
-      "pending": 416
+      "implemented": 38,
+      "pending": 409
     }
   },
   "declarations": [
@@ -1220,10 +1220,10 @@
       "line": 48,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSCell__getObject(this: *JSCell) *jsc.JSObject;",
       "declaration_sha256": "be37ca1a33969d475caed8c7c28b514aa22c8bec9f7dd8f188ef037d31fa6ccf",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSCell__getType",
@@ -1242,10 +1242,10 @@
       "line": 49,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSCell__toObject(this: *JSCell, *JSGlobalObject) *jsc.JSObject;",
       "declaration_sha256": "d6e54ee30055b9739a3369b5fb21ef59800eb3a23d5356537cf0cb8e9569e623",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSFunction__getSourceCode",
@@ -1561,10 +1561,10 @@
       "line": 4,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSString__eql(this: *const JSString, global: *JSGlobalObject, other: *JSString) bool;",
       "declaration_sha256": "6f7ff11a97a7e102930f44f5d557913a63bb8d68bbfc2e8145253876c6c2ed6c",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSString__is8Bit",
@@ -1572,10 +1572,10 @@
       "line": 7,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSString__is8Bit(this: *const JSString) bool;",
       "declaration_sha256": "fa16606a366944b2d6b70a28a23cf937d066aaa48110f4186e7b242b261bae58",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSString__iterator",
@@ -1594,10 +1594,10 @@
       "line": 6,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSString__length(this: *const JSString) usize;",
       "declaration_sha256": "f227f9c7eebde61d93c7d9addc31f14130834cafbe71297a247c1b37ee3bc867",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSString__toObject",
@@ -1605,10 +1605,10 @@
       "line": 2,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSString__toObject(this: *JSString, global: *JSGlobalObject) ?*JSObject;",
       "declaration_sha256": "00dbe952ff3ac5d2d92d9ebabb1edb43bfb9aa73c542a5f35a0e4404ab7d5ff8",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSString__toZigString",
@@ -1693,10 +1693,10 @@
       "line": 2005,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSValue__asString(this: JSValue) *JSString;",
       "declaration_sha256": "ff0e4e7999186fc3e431d53d9b3ee1c731fe8b080d3d44170b2a68ef84528a33",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSValue__bigIntSum",

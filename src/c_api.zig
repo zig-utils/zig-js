@@ -1263,11 +1263,21 @@ fn privateBigIntModuloU64(object: *Object) u64 {
     return @truncate(@as(u128, @bitCast(object.bigIntValue())));
 }
 
-fn privateBigIntBoxFromCell(cell: ?*anyopaque) ?*Boxed {
+fn privateBoxFromCell(cell: ?*anyopaque) ?*Boxed {
     const pointer = cell orelse return null;
     const encoded = EncodedValue.fromCellAddress(@intFromPtr(pointer)) catch return null;
-    const boxed = privateBoxedFrom(encoded) orelse return null;
+    return privateBoxedFrom(encoded);
+}
+
+fn privateBigIntBoxFromCell(cell: ?*anyopaque) ?*Boxed {
+    const boxed = privateBoxFromCell(cell) orelse return null;
     if (!boxed.value.isObject() or !boxed.value.asObj().is_bigint) return null;
+    return boxed;
+}
+
+fn privateStringBoxFromCell(cell: ?*anyopaque) ?*Boxed {
+    const boxed = privateBoxFromCell(cell) orelse return null;
+    if (!boxed.value.isString()) return null;
     return boxed;
 }
 
@@ -1453,6 +1463,59 @@ export fn JSC__JSBigInt__orderUint64(cell: ?*anyopaque, number: u64) callconv(.c
 export fn JSC__JSBigInt__toInt64(cell: ?*anyopaque) callconv(.c) i64 {
     const boxed = privateBigIntBoxFromCell(cell) orelse return 0;
     return @bitCast(privateBigIntModuloU64(boxed.value.asObj()));
+}
+
+export fn JSC__JSValue__asString(encoded: EncodedValue) callconv(.c) ?*anyopaque {
+    const boxed = privateBoxedFrom(encoded) orelse return null;
+    if (!boxed.value.isString()) return null;
+    return @ptrCast(boxed);
+}
+
+export fn JSC__JSString__eql(
+    left_cell: ?*anyopaque,
+    global: JSContextRef,
+    right_cell: ?*anyopaque,
+) callconv(.c) bool {
+    const context = ctxForHandleInspection(global) orelse return false;
+    const left_box = privateStringBoxFromCell(left_cell) orelse return false;
+    const right_box = privateStringBoxFromCell(right_cell) orelse return false;
+    const left = valueFromContext(context, @ptrCast(left_box)) orelse return false;
+    const right = valueFromContext(context, @ptrCast(right_box)) orelse return false;
+    return std.mem.eql(u8, left.asStr(), right.asStr());
+}
+
+export fn JSC__JSString__is8Bit(cell: ?*anyopaque) callconv(.c) bool {
+    const boxed = privateStringBoxFromCell(cell) orelse return false;
+    return interp.Interpreter.jsStringIs8Bit(boxed.value.asStr());
+}
+
+export fn JSC__JSString__length(cell: ?*anyopaque) callconv(.c) usize {
+    const boxed = privateStringBoxFromCell(cell) orelse return 0;
+    return interp.Interpreter.utf16LenOfString(boxed.value.asStr());
+}
+
+export fn JSC__JSString__toObject(cell: ?*anyopaque, global: JSContextRef) callconv(.c) JSObjectRef {
+    const context = ctxForHandleInspection(global) orelse return null;
+    const boxed = privateStringBoxFromCell(cell) orelse return null;
+    const handle: JSValueRef = @ptrCast(boxed);
+    if (valueFromContext(context, handle) == null) return null;
+    return JSValueToObject(global, handle, null);
+}
+
+export fn JSC__JSCell__getObject(cell: ?*anyopaque) callconv(.c) JSObjectRef {
+    const boxed = privateBoxFromCell(cell) orelse return null;
+    if (!boxed.value.isObject()) return null;
+    const object = boxed.value.asObj();
+    if (object.is_symbol or object.is_bigint) return null;
+    return @ptrCast(boxed);
+}
+
+export fn JSC__JSCell__toObject(cell: ?*anyopaque, global: JSContextRef) callconv(.c) JSObjectRef {
+    const context = ctxForHandleInspection(global) orelse return null;
+    const boxed = privateBoxFromCell(cell) orelse return null;
+    const handle: JSValueRef = @ptrCast(boxed);
+    if (valueFromContext(context, handle) == null) return null;
+    return JSValueToObject(global, handle, null);
 }
 
 fn valueFromContext(ctx: *Context, ref: JSValueRef) ?Value {
