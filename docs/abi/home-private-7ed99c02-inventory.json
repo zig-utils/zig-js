@@ -88,8 +88,8 @@
     },
     "by_status": {
       "external": 2,
-      "implemented": 256,
-      "pending": 190
+      "implemented": 259,
+      "pending": 187
     }
   },
   "declarations": [
@@ -3438,10 +3438,10 @@
       "line": 3960,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn Process__emitDisconnectEvent(global: *JSGlobalObject) void;",
       "declaration_sha256": "094cc4bfbf4fe66f8273c99ee7bf37e39a7e9341ca99133fec9d8b607364333c",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Process__emitErrorEvent",
@@ -3449,10 +3449,10 @@
       "line": 3961,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "pub extern fn Process__emitErrorEvent(global: *JSGlobalObject, value: JSValue) void;",
       "declaration_sha256": "f5d69871ea1933d13ec2145b12b35f724f942e0d1b11f3e0719bb510ec4339cb",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Process__emitMessageEvent",
@@ -3460,10 +3460,10 @@
       "line": 3959,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn Process__emitMessageEvent(global: *JSGlobalObject, value: JSValue, handle: JSValue) void;",
       "declaration_sha256": "913487f7888bd23684fc6e1a5e4e3aebc55ad1f4a626f0e375d357577a459bf7",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "ScriptExecutionContextIdentifier__forGlobalObject",
