@@ -55,6 +55,29 @@ pub fn build(b: *std.Build) void {
     const c_api_audit_step = b.step("c-api-audit", "Verify pinned JSC declarations, inventory, and Zig exports");
     c_api_audit_step.dependOn(&c_api_audit_cmd.step);
 
+    const objc_api_audit_cmd = b.addSystemCommand(&.{
+        "python3",
+        "tools/verify-objc-api.py",
+    });
+    const objc_api_audit_step = b.step("objc-api-audit", "Verify the pinned Objective-C JSC inventory");
+    objc_api_audit_step.dependOn(&objc_api_audit_cmd.step);
+    if (target.result.os.tag == .macos) {
+        const objc_header_smoke = b.addSystemCommand(&.{
+            "xcrun",
+            "--sdk",
+            "macosx",
+            "clang",
+            "-fsyntax-only",
+            "-fobjc-arc",
+            "-fblocks",
+            "-Iinclude",
+            "tests/objc_api_headers_smoke.m",
+        });
+        objc_header_smoke.step.dependOn(&objc_api_audit_cmd.step);
+        const objc_header_step = b.step("test-objc-api-headers", "Compile the Objective-C bridge headers on macOS");
+        objc_header_step.dependOn(&objc_header_smoke.step);
+    }
+
     const c_api_c_smoke = b.addExecutable(.{
         .name = "c-api-smoke-c",
         .root_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true }),
