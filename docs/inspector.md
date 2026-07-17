@@ -173,7 +173,9 @@ pauses (including a first-statement `debugger;`), deterministic continuation
 ownership across two sessions, owner-callback detach, and termination while
 paused. The worker transport also has end-to-end coverage for URL breakpoints,
 stepping, caught-exception policy/events, live call frames and scopes, frame
-evaluation, and retained remote-object property inspection. The remaining
+evaluation, and retained remote-object property inspection. A concurrency
+transcript holds two workers paused while an independently inspected main
+context pauses/resumes, then resumes each worker separately. The remaining
 GC/concurrency/teardown evidence is tracked by
 [issue #156](https://github.com/zig-utils/zig-js/issues/156).
 

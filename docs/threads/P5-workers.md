@@ -137,7 +137,8 @@ drain / zero-timeout poll behavior.
 script and module inspector graphs, active-handler pauses, owner-pumped resume,
 URL breakpoints, stepping, caught-exception pauses, live frames/scopes and frame
 evaluation, retained remote-object inspection, observer continuation rejection,
-callback detach, and termination while paused.
+callback detach, termination while paused, and independent simultaneous pauses
+across two workers plus the main context.
 The real C++ host covers attach/schema dispatch/pump/release. All worker tests
 are TSan-clean. `worker.zig` and the C-API are not exercised by the test262
 shards, so the conformance total is unaffected.

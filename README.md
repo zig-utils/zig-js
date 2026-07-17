@@ -244,7 +244,8 @@ their source graphs, first-statement `debugger;` pauses are retained in bytecode
 multiple sessions preserve deterministic continuation ownership, and detach or
 termination unblocks a paused target. Worker transcripts also cover URL
 breakpoints, stepping, caught-exception pauses, live frames/scopes and frame
-evaluation, and GC-rooted remote-object property inspection. The remaining
+evaluation, and GC-rooted remote-object property inspection. Two workers and a
+main context can pause simultaneously and resume independently. The remaining
 GC/concurrency/teardown matrix
 continues under [#156](https://github.com/zig-utils/zig-js/issues/156); see
 [docs/inspector.md](docs/inspector.md).

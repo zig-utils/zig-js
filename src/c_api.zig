@@ -8994,6 +8994,93 @@ test "C-API: worker inspector continuation owner is deterministic across session
     try std.testing.expectEqual(@as(f64, 11), JSValueToNumber(ctx, reply, null));
 }
 
+test "C-API: workers and main context pause and continue independently" {
+    const WorkerState = struct {
+        paused: bool = false,
+
+        fn receive(message: [*]const u8, message_len: usize, user_data: ?*anyopaque) callconv(.c) void {
+            const self: *@This() = @ptrCast(@alignCast(user_data.?));
+            if (std.mem.indexOf(u8, message[0..message_len], "Debugger.paused") != null) self.paused = true;
+        }
+    };
+    const MainState = struct {
+        session: ZJSInspectorSessionRef = null,
+        pauses: usize = 0,
+
+        fn receive(message: [*]const u8, message_len: usize, user_data: ?*anyopaque) callconv(.c) void {
+            const self: *@This() = @ptrCast(@alignCast(user_data.?));
+            if (std.mem.indexOf(u8, message[0..message_len], "Debugger.paused") == null) return;
+            self.pauses += 1;
+            const resume_command = "{\"id\":2,\"method\":\"Debugger.resume\"}";
+            std.debug.assert(ZJSInspectorSessionDispatch(self.session, resume_command, resume_command.len));
+        }
+    };
+
+    const ctx = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
+    defer JSGlobalContextRelease(ctx);
+    JSGlobalContextSetInspectable(ctx, true);
+    const source = JSStringCreateWithUTF8CString(
+        "globalThis.onmessage = (e) => { debugger; postMessage(e.data); close(); };",
+    ) orelse return error.StringInitFailed;
+    defer JSStringRelease(source);
+    const first_worker = JSWorkerCreate(source) orelse return error.WorkerSpawnFailed;
+    defer JSWorkerRelease(first_worker);
+    const second_worker = JSWorkerCreate(source) orelse return error.WorkerSpawnFailed;
+    defer JSWorkerRelease(second_worker);
+
+    var first_state: WorkerState = .{};
+    var second_state: WorkerState = .{};
+    const first_session = ZJSWorkerInspectorSessionCreate(first_worker, WorkerState.receive, &first_state) orelse return error.SessionCreateFailed;
+    defer ZJSWorkerInspectorSessionRelease(first_session);
+    const second_session = ZJSWorkerInspectorSessionCreate(second_worker, WorkerState.receive, &second_state) orelse return error.SessionCreateFailed;
+    defer ZJSWorkerInspectorSessionRelease(second_session);
+    try std.testing.expectEqual(ZJSWorkerInspectorPumpResult.message, ZJSWorkerInspectorSessionPump(first_session, 10_000));
+    try std.testing.expectEqual(ZJSWorkerInspectorPumpResult.message, ZJSWorkerInspectorSessionPump(second_session, 10_000));
+    const enable = "{\"id\":1,\"method\":\"Debugger.enable\"}";
+    try std.testing.expect(ZJSWorkerInspectorSessionDispatch(first_session, enable, enable.len));
+    try std.testing.expect(ZJSWorkerInspectorSessionDispatch(second_session, enable, enable.len));
+    try std.testing.expectEqual(ZJSWorkerInspectorPumpResult.message, ZJSWorkerInspectorSessionPump(first_session, 10_000));
+    try std.testing.expectEqual(ZJSWorkerInspectorPumpResult.message, ZJSWorkerInspectorSessionPump(second_session, 10_000));
+    try std.testing.expect(JSWorkerPostMessage(first_worker, ctx, JSValueMakeNumber(ctx, 1), null));
+    try std.testing.expect(JSWorkerPostMessage(second_worker, ctx, JSValueMakeNumber(ctx, 2), null));
+
+    var pumps: usize = 0;
+    while (!first_state.paused and pumps < 8) : (pumps += 1) try std.testing.expectEqual(
+        ZJSWorkerInspectorPumpResult.message,
+        ZJSWorkerInspectorSessionPump(first_session, 10_000),
+    );
+    pumps = 0;
+    while (!second_state.paused and pumps < 8) : (pumps += 1) try std.testing.expectEqual(
+        ZJSWorkerInspectorPumpResult.message,
+        ZJSWorkerInspectorSessionPump(second_session, 10_000),
+    );
+    try std.testing.expect(first_state.paused);
+    try std.testing.expect(second_state.paused);
+
+    var main_state: MainState = .{};
+    main_state.session = ZJSInspectorSessionCreate(ctx, MainState.receive, &main_state) orelse return error.SessionCreateFailed;
+    defer ZJSInspectorSessionRelease(main_state.session);
+    try std.testing.expect(ZJSInspectorSessionDispatch(main_state.session, enable, enable.len));
+    const main_source = JSStringCreateWithUTF8CString("debugger; 40 + 2;") orelse return error.StringInitFailed;
+    defer JSStringRelease(main_source);
+    const main_result = JSEvaluateScript(ctx, main_source, null, null, 0, null) orelse return error.EvalFailed;
+    try std.testing.expectEqual(@as(f64, 42), JSValueToNumber(ctx, main_result, null));
+    try std.testing.expectEqual(@as(usize, 1), main_state.pauses);
+    try std.testing.expect(first_state.paused);
+    try std.testing.expect(second_state.paused);
+
+    const resume_first = "{\"id\":10,\"method\":\"Debugger.resume\"}";
+    try std.testing.expect(ZJSWorkerInspectorSessionDispatch(first_session, resume_first, resume_first.len));
+    const first_reply = JSWorkerReceive(first_worker, ctx, 10_000, null) orelse return error.NoReply;
+    try std.testing.expectEqual(@as(f64, 1), JSValueToNumber(ctx, first_reply, null));
+    try std.testing.expect(JSWorkerReceive(second_worker, ctx, 1, null) == null);
+
+    const resume_second = "{\"id\":11,\"method\":\"Debugger.resume\"}";
+    try std.testing.expect(ZJSWorkerInspectorSessionDispatch(second_session, resume_second, resume_second.len));
+    const second_reply = JSWorkerReceive(second_worker, ctx, 10_000, null) orelse return error.NoReply;
+    try std.testing.expectEqual(@as(f64, 2), JSValueToNumber(ctx, second_reply, null));
+}
+
 test "C-API: module worker inspector publishes graph and pauses in handler" {
     const Modules = struct {
         var token: u8 = 0;
