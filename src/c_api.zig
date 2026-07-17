@@ -3763,6 +3763,114 @@ test "C-API: constructor objects retain their instance class through precise GC"
     JSGlobalContextRelease(ctx);
 }
 
+test "C-API: class callbacks reject foreign-context and invalid return handles" {
+    const State = struct {
+        const Mode = enum { foreign_return, foreign_exception, invalid_return };
+        var mode: Mode = .foreign_return;
+        var foreign_value: JSValueRef = null;
+        var foreign_object: JSObjectRef = null;
+
+        fn get(
+            _: JSContextRef,
+            _: JSObjectRef,
+            _: JSStringRef,
+            exception: ExceptionRef,
+        ) callconv(.c) JSValueRef {
+            return switch (mode) {
+                .foreign_return => foreign_value,
+                .foreign_exception => blk: {
+                    exception[0] = foreign_value;
+                    break :blk null;
+                },
+                .invalid_return => null,
+            };
+        }
+
+        fn call(
+            _: JSContextRef,
+            _: JSObjectRef,
+            _: JSObjectRef,
+            _: usize,
+            _: [*c]const JSValueRef,
+            _: ExceptionRef,
+        ) callconv(.c) JSValueRef {
+            return if (mode == .invalid_return) null else foreign_value;
+        }
+
+        fn construct(
+            ctx: JSContextRef,
+            _: JSObjectRef,
+            _: usize,
+            _: [*c]const JSValueRef,
+            _: ExceptionRef,
+        ) callconv(.c) JSObjectRef {
+            if (mode == .foreign_return) return foreign_object;
+            return if (mode == .invalid_return) JSValueMakeNumber(ctx, 1) else null;
+        }
+
+        fn convert(
+            ctx: JSContextRef,
+            _: JSObjectRef,
+            _: JSType,
+            _: ExceptionRef,
+        ) callconv(.c) JSValueRef {
+            if (mode == .foreign_return) return foreign_value;
+            return if (mode == .invalid_return) JSObjectMake(ctx, null, null) else null;
+        }
+    };
+
+    const ctx_a = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
+    defer JSGlobalContextRelease(ctx_a);
+    const context_a = ctxRawFrom(ctx_a).?;
+    const ctx_b = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
+    defer JSGlobalContextRelease(ctx_b);
+    State.foreign_value = JSValueMakeNumber(ctx_b, 7);
+    State.foreign_object = JSObjectMake(ctx_b, null, null);
+
+    var definition: JSClassDefinition = .{
+        .get_property = State.get,
+        .call_as_function = State.call,
+        .call_as_constructor = State.construct,
+        .convert_to_type = State.convert,
+    };
+    const class = JSClassCreate(&definition) orelse return error.ClassCreateFailed;
+    defer JSClassRelease(class);
+    const object = JSObjectMake(ctx_a, class, null) orelse return error.ObjectCreateFailed;
+    const name = JSStringCreateWithUTF8CString("foreign") orelse return error.StringInitFailed;
+    defer JSStringRelease(name);
+
+    State.mode = .foreign_return;
+    var exception: JSValueRef = null;
+    try std.testing.expect(JSObjectGetProperty(ctx_a, object, name, &exception) == null);
+    try std.testing.expect(valueFromContext(context_a, exception) != null);
+    exception = null;
+    try std.testing.expect(JSObjectCallAsFunction(ctx_a, object, null, 0, null, &exception) == null);
+    try std.testing.expect(valueFromContext(context_a, exception) != null);
+    exception = null;
+    try std.testing.expect(JSObjectCallAsConstructor(ctx_a, object, 0, null, &exception) == null);
+    try std.testing.expect(valueFromContext(context_a, exception) != null);
+    exception = null;
+    try std.testing.expect(std.math.isNan(JSValueToNumber(ctx_a, object, &exception)));
+    try std.testing.expect(valueFromContext(context_a, exception) != null);
+
+    State.mode = .foreign_exception;
+    exception = null;
+    try std.testing.expect(JSObjectGetProperty(ctx_a, object, name, &exception) == null);
+    try std.testing.expect(valueFromContext(context_a, exception) != null);
+    try std.testing.expect(exception != State.foreign_value);
+
+    State.mode = .invalid_return;
+    exception = null;
+    try std.testing.expect(JSObjectCallAsFunction(ctx_a, object, null, 0, null, &exception) == null);
+    try std.testing.expect(valueFromContext(context_a, exception) != null);
+    exception = null;
+    try std.testing.expect(JSObjectCallAsConstructor(ctx_a, object, 0, null, &exception) == null);
+    try std.testing.expect(valueFromContext(context_a, exception) != null);
+    exception = null;
+    try std.testing.expect(std.math.isNan(JSValueToNumber(ctx_a, object, &exception)));
+    try std.testing.expect(valueFromContext(context_a, exception) != null);
+}
+
 test "C-API: owned TypedArrays expose their public type, geometry, buffer, and bytes" {
     const ctx = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
     defer JSGlobalContextRelease(ctx);

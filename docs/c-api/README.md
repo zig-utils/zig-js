@@ -13,7 +13,7 @@ The matrix deliberately separates declarations from completion:
   the linked GitHub issue still owns missing behavior, a missing symbol, or an
   ABI mismatch. Pending calls must not be used by hosts yet.
 
-Current result: 104 of 117 functions are implemented, 13 remain linked to open
+Current result: 105 of 117 functions are implemented, 12 remain linked to open
 issues, and the library exports 105 public functions plus 9 zig-js extensions.
 
 Run `zig build c-api-audit` after changing `src/c_api.zig`, the headers, or the

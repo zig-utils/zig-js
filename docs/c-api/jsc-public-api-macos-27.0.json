@@ -36,7 +36,7 @@
     {"name":"JSClassCreate","header":"JSObjectRef.h","status":"implemented"},
     {"name":"JSClassRetain","header":"JSObjectRef.h","status":"implemented"},
     {"name":"JSClassRelease","header":"JSObjectRef.h","status":"implemented"},
-    {"name":"JSObjectMake","header":"JSObjectRef.h","status":"pending","issue":137,"note":"All class ownership, lifecycle, static-member, property-name, call/constructor, hasInstance, and conversion callback families are implemented; invalid-return and wrong-context hardening remain."},
+    {"name":"JSObjectMake","header":"JSObjectRef.h","status":"implemented"},
     {"name":"JSObjectMakeFunctionWithCallback","header":"JSObjectRef.h","status":"implemented"},
     {"name":"JSObjectMakeConstructor","header":"JSObjectRef.h","status":"implemented"},
     {"name":"JSObjectMakeArray","header":"JSObjectRef.h","status":"implemented"},
@@ -141,7 +141,7 @@
     {"name":"JSPropertyNameAccumulatorRef","status":"implemented"}, {"name":"JSValueRef","status":"implemented"},
     {"name":"JSObjectRef","status":"implemented"}, {"name":"JSChar","status":"implemented"},
     {"name":"JSStaticValue","status":"implemented"}, {"name":"JSStaticFunction","status":"implemented"},
-    {"name":"JSClassDefinition","status":"pending","issue":137}
+    {"name":"JSClassDefinition","status":"implemented"}
   ],
   "callbacks": [
     {"name":"JSTypedArrayBytesDeallocator","status":"implemented"},
