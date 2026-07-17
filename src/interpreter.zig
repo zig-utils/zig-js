@@ -1035,6 +1035,9 @@ pub const Interpreter = struct {
     /// rooted here until the explicit host notification checkpoint consumes or
     /// skips them after a later handler attachment.
     unhandled_rejections: ?*std.ArrayListUnmanaged(*promise.Promise) = null,
+    /// Promises first handled after host notification. The explicit host
+    /// checkpoint consumes this queue to emit one `rejectionHandled` event.
+    handled_rejections: ?*std.ArrayListUnmanaged(*promise.Promise) = null,
     /// True under `parallel_js`: serialize content mutation of whichever
     /// microtask queue this interpreter is currently targeting. The lock lives
     /// on the queue itself so independent spawned-thread queues do not contend

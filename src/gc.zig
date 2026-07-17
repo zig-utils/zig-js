@@ -432,6 +432,7 @@ pub fn tracePromise(p: *promise.Promise, v: anytype) void {
     p.lockState();
     defer p.unlockState();
     markValue(v, p.value);
+    if (p.wrapper) |wrapper| v.mark(wrapper);
     if (p.on_fulfill_inline) |r| traceReaction(r, v);
     if (p.on_reject_inline) |r| traceReaction(r, v);
     for (p.on_fulfill.items) |r| traceReaction(r, v);
@@ -806,6 +807,7 @@ pub const Binding = struct {
         // `realm_lock` (taken by their mutators only under parallel_js).
         ctx.realmLock();
         for (ctx.unhandled_rejections.items) |rejected| markManaged(v, rejected);
+        for (ctx.handled_rejections.items) |handled| markManaged(v, handled);
         traceModuleGraph(&ctx.module_registry, v);
         if (ctx.mod_cache) |cache|
             if (cache != &ctx.module_registry) traceModuleGraph(cache, v);

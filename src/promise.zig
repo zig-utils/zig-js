@@ -48,6 +48,9 @@ pub const Promise = struct {
     lock: std.atomic.Mutex = .unlocked,
     state: State = .pending,
     value: Value = Value.undef(),
+    /// The unique JavaScript wrapper for this internal Promise cell. The host
+    /// rejection tracker needs its exact identity for process events.
+    wrapper: ?*Object = null,
     /// Reaction list buffers are owned by the GC backing allocator when this
     /// promise cell is GC-owned; arena contexts keep the legacy arena path.
     gc_owned: bool = false,
@@ -63,6 +66,7 @@ pub const Promise = struct {
     is_handled: bool = false,
     rejection_queued: bool = false,
     rejection_notified: bool = false,
+    rejection_handled_notified: bool = false,
 
     pub fn lockState(self: *Promise) void {
         promise_profile.recordPromiseLockAcquire();
@@ -423,6 +427,8 @@ pub fn newPromise(self: *Interpreter) EvalError!*Object {
     promise_profile.recordPromiseWrapperObject();
     obj.* = .{};
     try obj.setPromiseData(self.arena, @ptrCast(p));
+    gc_mod.barrierCellFrom(p, @ptrCast(obj));
+    p.wrapper = obj;
     const promise_ctor = self.env.get("\x00Promise") orelse self.env.get("Promise");
     if (promise_ctor) |ctor| {
         if (ctor.isObject()) obj.proto = try self.protoObject(ctor.asObj());
@@ -679,8 +685,14 @@ pub fn then(self: *Interpreter, p: *Promise, on_f: Value, on_r: Value) EvalError
 }
 
 fn performThenReactions(self: *Interpreter, p: *Promise, react_f: Reaction, react_r: Reaction) EvalError!void {
+    var queue_handled = false;
     p.lockState();
-    errdefer p.unlockState();
+    var state_locked = true;
+    errdefer if (state_locked) p.unlockState();
+    if (!p.is_handled and p.state == .rejected and p.rejection_notified and !p.rejection_handled_notified) {
+        p.rejection_handled_notified = true;
+        queue_handled = true;
+    }
     p.is_handled = true;
     const snap = .{ .state = p.state, .value = p.value };
     switch (snap.state) {
@@ -689,11 +701,15 @@ fn performThenReactions(self: *Interpreter, p: *Promise, react_f: Reaction, reac
             errdefer popReactionUnlocked(self, p, &p.on_fulfill_inline, &p.on_fulfill);
             try appendReactionUnlocked(self, p, &p.on_reject_inline, &p.on_reject, react_r);
             p.unlockState();
+            state_locked = false;
+            if (queue_handled) try enqueueHandledRejection(self, p);
             return;
         },
         .fulfilled, .rejected => {},
     }
     p.unlockState();
+    state_locked = false;
+    if (queue_handled) try enqueueHandledRejection(self, p);
 
     switch (snap.state) {
         .pending => unreachable,
@@ -742,9 +758,32 @@ fn enqueueUnhandledRejection(self: *Interpreter, rejected: *Promise) EvalError!v
     try queue.append(self.arena, rejected);
 }
 
+fn enqueueHandledRejection(self: *Interpreter, handled: *Promise) EvalError!void {
+    const queue = self.handled_rejections orelse return;
+    self.lockRealm();
+    defer self.unlockRealm();
+    try queue.append(self.arena, handled);
+}
+
+pub fn takeHandledRejection(self: *Interpreter) ?Value {
+    const queue = self.handled_rejections orelse return null;
+    self.lockRealm();
+    defer self.unlockRealm();
+    if (queue.items.len == 0) return null;
+    const handled = queue.orderedRemove(0);
+    handled.lockState();
+    defer handled.unlockState();
+    return if (handled.wrapper) |wrapper| Value.obj(wrapper) else Value.undef();
+}
+
 /// Consume the next still-unhandled rejection notification. Promises handled
 /// between rejection and this host checkpoint are silently skipped.
-pub fn takeUnhandledRejection(self: *Interpreter) ?Value {
+pub const RejectionNotification = struct {
+    reason: Value,
+    promise: Value,
+};
+
+pub fn takeUnhandledRejection(self: *Interpreter) ?RejectionNotification {
     const queue = self.unhandled_rejections orelse return null;
     self.lockRealm();
     defer self.unlockRealm();
@@ -757,9 +796,12 @@ pub fn takeUnhandledRejection(self: *Interpreter) ?Value {
             continue;
         }
         rejected.rejection_notified = true;
-        const reason = rejected.value;
+        const notification = RejectionNotification{
+            .reason = rejected.value,
+            .promise = if (rejected.wrapper) |wrapper| Value.obj(wrapper) else Value.undef(),
+        };
         rejected.unlockState();
-        return reason;
+        return notification;
     }
     return null;
 }

@@ -2322,6 +2322,8 @@ pub const Context = struct {
     /// Rejections awaiting the embedder's explicit notification checkpoint.
     /// Promise cells stay rooted until notified once or handled before notice.
     unhandled_rejections: std.ArrayListUnmanaged(*promise.Promise) = .empty,
+    /// Previously-notified rejections that acquired their first handler later.
+    handled_rejections: std.ArrayListUnmanaged(*promise.Promise) = .empty,
     print_buffer: std.ArrayListUnmanaged(u8) = .empty,
     /// SharedArrayBuffer storage references this realm holds (one per SAB
     /// wrapper created here). Released in `destroy` — shared bytes live in
@@ -3072,6 +3074,7 @@ pub const Context = struct {
             .root_shape = self.root_shape,
             .microtasks = &self.microtasks,
             .unhandled_rejections = &self.unhandled_rejections,
+            .handled_rejections = &self.handled_rejections,
             .out_of_memory_exception = self.reserved_thread_oom_error orelse Value.undef(),
             // Only engage per-queue microtask locking in no-GIL mode;
             // single-threaded and `.gil = true` execution stay lock-free.
@@ -3227,6 +3230,7 @@ pub const Context = struct {
         self.external_buffer_owners.deinit(self.gpa);
         self.module_registry.deinit(self.arena());
         self.unhandled_rejections.deinit(self.arena());
+        self.handled_rejections.deinit(self.arena());
         if (self.locked_arena) |la| {
             la.resetLocalFor();
             self.gpa.destroy(la);
@@ -3275,6 +3279,7 @@ pub const Context = struct {
         self.external_buffer_owners.deinit(self.gpa);
         self.module_registry.deinit(self.arena());
         self.unhandled_rejections.deinit(self.arena());
+        self.handled_rejections.deinit(self.arena());
         self.sab_retains.deinit();
         self.jit_owner.deinit();
         self.gpa.destroy(self);

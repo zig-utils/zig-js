@@ -1256,7 +1256,7 @@ pub fn main() void {
     _ = JSC__JSGlobalObject__drainMicrotasks(context);
     if (!JSC__JSValue__toBoolean(evaluate(context, "__private_warnings_241.length === 3 && __private_warnings_241[1].message === 'consumer-stack-241' && __private_warnings_241[2].name === 'UnhandledPromiseRejectionWarning' && Object.getOwnPropertyDescriptor(__private_warnings_241[2], 'stack').value === 'consumer-stack-241'")))
         fail("private unhandled rejection warning sequence mismatch");
-    _ = evaluate(context, "globalThis.__private_events_242 = []; globalThis.__private_reason_242 = { issue: 242 }; globalThis.__private_promise_242 = Promise.resolve(242); process.on('unhandledRejection', (reason, promise) => __private_events_242.push(reason === __private_reason_242 && promise === __private_promise_242)); process.on('rejectionHandled', promise => __private_events_242.push(promise === __private_promise_242));");
+    _ = evaluate(context, "globalThis.__private_events_242 = []; globalThis.__private_reason_242 = { issue: 242 }; globalThis.__private_promise_242 = Promise.resolve(242); globalThis.__private_on_unhandled_242 = (reason, promise) => __private_events_242.push(reason === __private_reason_242 && promise === __private_promise_242); globalThis.__private_on_handled_242 = promise => __private_events_242.push(promise === __private_promise_242); process.on('unhandledRejection', __private_on_unhandled_242); process.on('rejectionHandled', __private_on_handled_242);");
     const private_reason_242 = evaluate(context, "__private_reason_242");
     const private_promise_242 = evaluate(context, "__private_promise_242");
     if (Bun__handleUnhandledRejection(context, private_reason_242, private_promise_242) != 1 or
@@ -1271,6 +1271,20 @@ pub fn main() void {
     if (Bun__handleUncaughtException(context, evaluate(context, "__private_error_242"), 1) != 1 or
         !JSC__JSValue__toBoolean(evaluate(context, "__private_uncaught_242.join(',') === 'monitor:unhandledRejection:true,handler:unhandledRejection:true'")))
         fail("private uncaught exception dispatch mismatch");
+    JSC__JSGlobalObject__handleRejectedPromises(context);
+    _ = evaluate(context, "globalThis.__private_auto_242 = []; globalThis.__private_auto_unhandled_242 = (reason, promise) => __private_auto_242.push(['unhandled', reason, promise]); globalThis.__private_auto_handled_242 = promise => __private_auto_242.push(['handled', promise]); process.on('unhandledRejection', __private_auto_unhandled_242); process.on('rejectionHandled', __private_auto_handled_242); globalThis.__private_early_242 = Promise.reject('early'); __private_early_242.catch(() => {});");
+    JSC__JSGlobalObject__handleRejectedPromises(context);
+    if (Bun__JSValue__toNumber(evaluate(context, "__private_auto_242.length"), context) != 0)
+        fail("private early-handled rejection emitted an event");
+    _ = evaluate(context, "globalThis.__private_late_reason_242 = { late: 242 }; globalThis.__private_late_242 = Promise.reject(__private_late_reason_242);");
+    JSC__JSGlobalObject__handleRejectedPromises(context);
+    JSC__JSGlobalObject__handleRejectedPromises(context);
+    _ = evaluate(context, "__private_late_242.catch(() => {});");
+    JSC__JSGlobalObject__handleRejectedPromises(context);
+    JSC__JSGlobalObject__handleRejectedPromises(context);
+    if (!JSC__JSValue__toBoolean(evaluate(context, "__private_auto_242.length === 2 && __private_auto_242[0][0] === 'unhandled' && __private_auto_242[0][1] === __private_late_reason_242 && __private_auto_242[0][2] === __private_late_242 && __private_auto_242[1][0] === 'handled' && __private_auto_242[1][1] === __private_late_242")))
+        fail("private automatic rejection tracking mismatch");
+    _ = evaluate(context, "process.off('unhandledRejection', __private_auto_unhandled_242); process.off('unhandledRejection', __private_on_unhandled_242); process.off('rejectionHandled', __private_auto_handled_242); process.off('rejectionHandled', __private_on_handled_242);");
     _ = evaluate(context, "globalThis.__private_lifecycle_242 = []; process.on('beforeExit', code => __private_lifecycle_242.push('before:' + code)); process.on('exit', code => __private_lifecycle_242.push('exit:' + code));");
     Process__dispatchOnBeforeExit(context, 2);
     Process__dispatchOnExit(context, 4);

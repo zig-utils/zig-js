@@ -7496,7 +7496,16 @@ export fn JSC__JSGlobalObject__handleRejectedPromises(global: JSContextRef) call
     };
     defer context.popActiveInterpreter(&machine);
 
-    while (promise.takeUnhandledRejection(&machine)) |reason| {
+    while (promise.takeUnhandledRejection(&machine)) |notification| {
+        const reason = notification.reason;
+        if (privateProcessEventCount(&machine, "unhandledRejection") != 0) {
+            _ = interp.emitProcessEvent(&machine, "unhandledRejection", &.{ reason, notification.promise }) catch |err| {
+                privateSetPendingAbrupt(context, &machine, err);
+                machine.exception = Value.undef();
+                continue;
+            };
+            continue;
+        }
         const handler = context.global_object.getOwn("onunhandledrejection") orelse Value.undef();
         if (handler.isCallable()) {
             _ = machine.callValueWithThis(handler, &.{reason}, Value.obj(context.global_object)) catch |err| {
@@ -7509,6 +7518,14 @@ export fn JSC__JSGlobalObject__handleRejectedPromises(global: JSContextRef) call
             // host-visible uncaught completion instead of silently dropping it.
             privateSetPendingValue(context, reason);
         }
+    }
+    while (promise.takeHandledRejection(&machine)) |handled| {
+        if (privateProcessEventCount(&machine, "rejectionHandled") == 0) continue;
+        _ = interp.emitProcessEvent(&machine, "rejectionHandled", &.{handled}) catch |err| {
+            privateSetPendingAbrupt(context, &machine, err);
+            machine.exception = Value.undef();
+            continue;
+        };
     }
 }
 
@@ -18645,6 +18662,36 @@ test "private process rejection and uncaught dispatch preserve pinned events" {
     try sibling_internal.env.put("__shared_error_242", privateValueFrom(sibling, uncaught) orelse return error.ValueInitFailed);
     try std.testing.expectEqual(@as(c_int, 1), Bun__handleUncaughtException(sibling, uncaught, 0));
     try std.testing.expectEqual(@as(f64, 1), (try sibling_internal.evaluate("__sibling_uncaught_242")).asNum());
+
+    // Consume the earlier directly-dispatched rejection before isolating the
+    // automatic HostPromiseRejectionTracker assertions below.
+    JSC__JSGlobalObject__handleRejectedPromises(context);
+    _ = try internal.evaluate(
+        \\globalThis.__auto_events_242 = [];
+        \\process.on("unhandledRejection", function (reason, promise) { __auto_events_242.push(["unhandled", reason, promise]); });
+        \\process.on("rejectionHandled", function (promise) { __auto_events_242.push(["handled", promise]); });
+        \\globalThis.__early_242 = Promise.reject("early-242");
+        \\__early_242.catch(function () {});
+    );
+    JSC__JSGlobalObject__handleRejectedPromises(context);
+    try std.testing.expectEqual(@as(f64, 0), (try internal.evaluate("__auto_events_242.length")).asNum());
+    _ = try internal.evaluate(
+        \\globalThis.__late_reason_242 = { late: 242 };
+        \\globalThis.__late_242 = Promise.reject(__late_reason_242);
+    );
+    JSC__JSGlobalObject__handleRejectedPromises(context);
+    JSC__JSGlobalObject__handleRejectedPromises(context);
+    try std.testing.expect((try internal.evaluate(
+        \\__auto_events_242.length === 1 && __auto_events_242[0][0] === "unhandled" &&
+        \\__auto_events_242[0][1] === __late_reason_242 && __auto_events_242[0][2] === __late_242
+    )).asBool());
+    _ = try internal.evaluate("__late_242.catch(function () {});");
+    JSC__JSGlobalObject__handleRejectedPromises(context);
+    JSC__JSGlobalObject__handleRejectedPromises(context);
+    try std.testing.expect((try internal.evaluate(
+        \\__auto_events_242.length === 2 && __auto_events_242[1][0] === "handled" &&
+        \\__auto_events_242[1][1] === __late_242
+    )).asBool());
 
     _ = try internal.evaluate(
         \\process.setUncaughtExceptionCaptureCallback(function () { throw 242; });
