@@ -38,8 +38,9 @@ The implemented slice covers VM/context construction, evaluation, C-ref wrapper
 identity, context metadata, primitive and native object factories, type
 predicates, numeric/string and geometry conversion, exact comparisons, indexed
 reads, recursive array/dictionary/date conversion, promise executor callback
-state, managed owner/value relations, and property-descriptor symbols. The seven-row Objective-C transcript matches system
-JavaScriptCore exactly. See the [Objective-C bridge inventory
+state, managed owner/value relations, exact wrapper identity, and
+property-descriptor symbols. The eight-row Objective-C transcript matches
+system JavaScriptCore exactly (`bc1860c0e6e8d919`). See the [Objective-C bridge inventory
 guide](objc-api/README.md) for the exact boundary and reproduction details;
 header availability alone does not imply implemented runtime behavior.
 

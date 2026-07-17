@@ -46,9 +46,11 @@ covered. Recursive array/dictionary/date conversion matches all six rows in the
 pinned system-JSC transcript and handles cyclic graphs by strict JavaScript
 identity. Promise executors preserve nested callback state and match system JSC's
 context/callee/this/two-argument contract. Arbitrary Objective-C wrappers,
-general exported callbacks, general property helpers, managed
-wrapper export, and JSExport remain pending until their corresponding runtime
-and evidence land. `JSManagedValue` and VM owner relations are implemented with
+general exported callbacks, general property helpers, and JSExport remain
+pending until their corresponding runtime and evidence land. Opaque
+Objective-C objects preserve bidirectional identity, JS object wrappers are
+canonical by strict identity, and all 8 differential rows match system JSC
+(`bc1860c0e6e8d919`). `JSManagedValue` and VM owner relations are implemented with
 real weak targets plus weak owners; because current context groups use the
 VM-lifetime arena policy, unreachable targets remain available until VM teardown
 rather than being reclaimed mid-VM.
