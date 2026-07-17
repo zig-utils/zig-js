@@ -81,6 +81,21 @@ int main(void)
                                                      nativeA == nativeB,
                                                      nativeA.toObject == nativeObject,
                                                      holder[@"child"] == holder[@"child"]]);
+
+        __block BOOL blockStateMatches = NO;
+        int32_t (^adder)(int32_t, int32_t) = ^int32_t(int32_t left, int32_t right) {
+            blockStateMatches = JSContext.currentContext == context &&
+                JSContext.currentCallee != nil &&
+                JSContext.currentArguments.count == 2 &&
+                [JSContext.currentThis[@"marker"] toInt32] == 7;
+            return left + right;
+        };
+        JSValue *adderValue = [JSValue valueWithObject:adder inContext:context];
+        context[@"nativeAdder"] = adderValue;
+        row(@"block", [NSString stringWithFormat:@"%d:%d:%d",
+                                                  [[context evaluateScript:@"nativeAdder.call({ marker: 7 }, 20, 22)"] toInt32] == 42,
+                                                  blockStateMatches,
+                                                  adderValue.toObject == adder]);
     }
     return 0;
 }
