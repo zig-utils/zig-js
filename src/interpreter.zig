@@ -391,6 +391,11 @@ pub const DebugStatementHook = *const fn (
     location: DebugStatementLocation,
 ) EvalError!void;
 
+/// Embedder-owned statement checkpoint. Unlike the debugger hook this does not
+/// itself imply a pause; worker transports use it to marshal queued commands
+/// onto the runtime thread before the debugger observes the same statement.
+pub const HostStatementHook = *const fn (ctx: *anyopaque, interpreter: *Interpreter) void;
+
 pub const DebugExceptionHook = *const fn (
     ctx: *anyopaque,
     interpreter: *Interpreter,
@@ -1004,6 +1009,8 @@ pub const Interpreter = struct {
     /// the same source locations and pause semantics.
     debug_statement_ctx: ?*anyopaque = null,
     debug_statement_hook: ?DebugStatementHook = null,
+    host_statement_ctx: ?*anyopaque = null,
+    host_statement_hook: ?HostStatementHook = null,
     debug_statement_locations: ?*std.AutoHashMapUnmanaged(*const Node, DebugStatementLocation) = null,
     debug_script_ctx: ?*anyopaque = null,
     debug_script_hook: ?DebugScriptHook = null,
@@ -3223,6 +3230,7 @@ pub const Interpreter = struct {
     }
 
     pub fn serviceDebugStatement(self: *Interpreter, node: *const Node) EvalError!void {
+        if (self.host_statement_hook) |hook| hook(self.host_statement_ctx.?, self);
         if (self.debug_statement_hook) |hook| {
             if (self.debug_statement_locations) |locations| {
                 if (locations.get(node)) |location| {
@@ -5994,7 +6002,7 @@ pub const Interpreter = struct {
             .strict = func.is_strict,
             .caller = saved_debug_call_frame,
         };
-        if (self.debug_statement_hook != null) self.debug_call_frame = &debug_call_frame;
+        if (self.debug_statement_hook != null or self.host_statement_hook != null) self.debug_call_frame = &debug_call_frame;
         if (!func.is_arrow) self.current_private_map = func.private_map; // arrows inherit the enclosing class's map
         if (!func.is_arrow) {
             self.active_function = func.obj;

@@ -11,6 +11,9 @@ extern "C" {
 JS_EXPORT bool ZJSValueProtect(JSContextRef ctx, JSValueRef value);
 JS_EXPORT bool ZJSValueUnprotect(JSContextRef ctx, JSValueRef value);
 
+typedef void (*ZJSInspectorMessageCallback)(
+    const char* message, size_t messageLength, void* userData);
+
 /*
  * Isolated worker runtimes. Worker handles are affine to the thread that
  * creates them; values cross the boundary through structured clone only.
@@ -51,14 +54,30 @@ typedef struct ZJSInspectorTargetInfo {
 JS_EXPORT bool ZJSWorkerGetInspectorTargetInfo(
     JSWorkerRef worker, ZJSInspectorTargetInfo* info);
 
+typedef struct OpaqueZJSWorkerInspectorSession* ZJSWorkerInspectorSessionRef;
+
+typedef enum ZJSWorkerInspectorPumpResult {
+    kZJSWorkerInspectorPumpMessage = 0,
+    kZJSWorkerInspectorPumpTimeout = 1,
+    kZJSWorkerInspectorPumpClosed = 2,
+} ZJSWorkerInspectorPumpResult;
+
+JS_EXPORT ZJSWorkerInspectorSessionRef ZJSWorkerInspectorSessionCreate(
+    JSWorkerRef worker, ZJSInspectorMessageCallback callback, void* userData);
+JS_EXPORT bool ZJSWorkerInspectorSessionDispatch(
+    ZJSWorkerInspectorSessionRef session,
+    const char* message, size_t messageLength);
+JS_EXPORT ZJSWorkerInspectorPumpResult ZJSWorkerInspectorSessionPump(
+    ZJSWorkerInspectorSessionRef session, uint64_t timeoutMs);
+JS_EXPORT void ZJSWorkerInspectorSessionRelease(
+    ZJSWorkerInspectorSessionRef session);
+
 /*
  * In-process inspector transport. The embedder owns authentication and message
  * transport; zig-js synchronously emits versioned JSON protocol responses and
  * events through the callback.
  */
 typedef struct OpaqueZJSInspectorSession* ZJSInspectorSessionRef;
-typedef void (*ZJSInspectorMessageCallback)(
-    const char* message, size_t messageLength, void* userData);
 
 JS_EXPORT ZJSInspectorSessionRef ZJSInspectorSessionCreate(
     JSGlobalContextRef ctx, ZJSInspectorMessageCallback callback, void* userData);

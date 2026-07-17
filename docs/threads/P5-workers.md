@@ -109,6 +109,11 @@ zig-js extension):
   non-zero target ID, script/module kind, and atomic lifecycle state. IDs never
   encode a `Worker` address and are not reused; creation fails on theoretical
   64-bit exhaustion instead of aliasing a historical target.
+- `ZJSWorkerInspectorSessionCreate/Dispatch/Pump/Release` is the worker-target
+  inspector transport. Dispatch copies JSON into the worker queue; Pump invokes
+  one message callback on the worker-handle owner thread and returns an explicit
+  message/timeout/closed result. Paused runtimes continue draining inspector
+  commands, so a pump callback can enqueue evaluation and the continuation.
 
 ### Thread rules
 

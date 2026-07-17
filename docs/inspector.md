@@ -161,9 +161,15 @@ under the worker handle's owner-thread rules. Every worker now has a
 process-wide non-zero target ID, script/module kind, and atomic `starting`,
 `running`, `closing`, or `closed` state exposed through
 `ZJSWorkerGetInspectorTargetInfo`; IDs never encode or reuse raw pointers.
-Attach/detach and cross-thread command/event marshalling are tracked by
-[issue #156](https://github.com/zig-utils/zig-js/issues/156); no Target-domain
-stub is silently accepted before that transport exists.
+`ZJSWorkerInspectorSessionCreate` explicitly attaches to one such target.
+Dispatch copies commands into a synchronized worker queue; the runtime executes
+them only on its own thread, including while paused. Responses and events are
+copied back and `ZJSWorkerInspectorSessionPump` invokes exactly one callback on
+the `JSWorkerRef` owner thread, returning message, timeout, or closed. A pump
+callback may enqueue the continuation for a paused event. Release detaches and
+waits for the runtime-side session/root cleanup before freeing the owner handle.
+The remaining feature/termination/concurrency evidence is tracked by
+[issue #156](https://github.com/zig-utils/zig-js/issues/156).
 
 setPauseOnExceptions accepts none, uncaught, or all. all pauses at the original
 throwing statement even when a surrounding catch handles the value; uncaught

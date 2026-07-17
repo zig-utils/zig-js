@@ -3698,7 +3698,7 @@ fn execLoop(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
     const saved_debug_call_frame = vm.debug_call_frame;
     var debug_call_frame: interp.DebugCallFrame = undefined;
     if (gen) |activation| {
-        if (vm.debug_statement_hook != null) {
+        if (vm.debug_statement_hook != null or vm.host_statement_hook != null) {
             debug_call_frame = .{
                 .function_name = activation.function_name,
                 .environment = activation.env,
@@ -3776,7 +3776,8 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
     var acc: Value = exec.acc;
     var ip: usize = exec.ip;
     const code = chunk.code.items;
-    const debug_execution = chunk.debug_nodes.len != 0 and vm.debug_statement_hook != null;
+    const debug_execution = chunk.debug_nodes.len != 0 and
+        (vm.debug_statement_hook != null or vm.host_statement_hook != null);
     // Parallel-mode flag hoisted out of the hot loop: in the default engine this
     // is false, so frame slots and monomorphic property IC hits avoid locks and
     // repeated atomic mode loads. Shared/concurrent-GC contexts enable the flag
@@ -6242,7 +6243,7 @@ fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
         releaseActivation(vm, act);
         return e;
     };
-    if (vm.debug_statement_hook != null) {
+    if (vm.debug_statement_hook != null or vm.host_statement_hook != null) {
         const debug_environment = try gc_mod.allocEnv(vm.arena);
         vm.initEnvironment(debug_environment, func.closure, true);
         for (fchunk.debug_local_names, frame.slots) |name, slot| {

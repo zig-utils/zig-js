@@ -130,6 +130,8 @@ const CInspectorState = struct {
     callback_depth: usize = 0,
     operation_depth: usize = 0,
     detached_resume_pending: bool = false,
+    pause_wait_ctx: ?*anyopaque = null,
+    pause_wait_hook: ?WorkerMod.InspectorPauseWaitHook = null,
 };
 
 const CInspectorStepMode = enum { none, into, over, out };
@@ -1977,9 +1979,14 @@ fn inspectorStatementBoundary(
             });
         }
     }
-    // The transport is synchronous and the Context is thread-affine: a client
-    // resumes from its paused-event callback. Returning to JS while still marked
-    // paused would silently violate the protocol, so abort deterministically.
+    while (state.paused) {
+        const wait_hook = state.pause_wait_hook orelse break;
+        if (!wait_hook(state.pause_wait_ctx.?)) break;
+    }
+    // Direct sessions resume synchronously from their callback. Worker sessions
+    // install a wait hook that drains owner-queued commands on this runtime
+    // thread. Returning to JS while still marked paused would violate either
+    // contract, so abort deterministically.
     if (state.paused) {
         state.paused = false;
         state.paused_machine = null;
@@ -2100,6 +2107,10 @@ fn inspectorExceptionBoundary(
             });
         }
     }
+    while (state.paused) {
+        const wait_hook = state.pause_wait_hook orelse break;
+        if (!wait_hook(state.pause_wait_ctx.?)) break;
+    }
     if (state.paused) {
         state.paused = false;
         state.paused_machine = null;
@@ -2187,11 +2198,13 @@ export fn JSGlobalContextSetInspectable(ctx: JSContextRef, inspectable: bool) ca
     }
 }
 
-export fn ZJSInspectorSessionCreate(
+fn createInspectorSession(
     ctx: JSContextRef,
     callback: ZJSInspectorMessageCallback,
     user_data: ?*anyopaque,
-) callconv(.c) ZJSInspectorSessionRef {
+    pause_wait_ctx: ?*anyopaque,
+    pause_wait_hook: ?WorkerMod.InspectorPauseWaitHook,
+) ZJSInspectorSessionRef {
     const c = ctxFrom(ctx) orelse return null;
     const cb = callback orelse return null;
     if (!c.c_api_inspectable) return null;
@@ -2202,7 +2215,11 @@ export fn ZJSInspectorSessionCreate(
     var created_state = false;
     if (state == null) {
         const new_state = gpa.create(CInspectorState) catch return null;
-        new_state.* = .{ .context = c };
+        new_state.* = .{
+            .context = c,
+            .pause_wait_ctx = pause_wait_ctx,
+            .pause_wait_hook = pause_wait_hook,
+        };
         for (c.debug_scripts.items) |script| new_state.scripts.append(gpa, script) catch {
             new_state.scripts.deinit(gpa);
             gpa.destroy(new_state);
@@ -2230,6 +2247,14 @@ export fn ZJSInspectorSessionCreate(
         .params = .{ .protocolVersion = "zig-js-inspector/0.1" },
     });
     return @ptrCast(session);
+}
+
+export fn ZJSInspectorSessionCreate(
+    ctx: JSContextRef,
+    callback: ZJSInspectorMessageCallback,
+    user_data: ?*anyopaque,
+) callconv(.c) ZJSInspectorSessionRef {
+    return createInspectorSession(ctx, callback, user_data, null, null);
 }
 
 fn releaseInspectorSessionNow(session: *CInspectorSession) bool {
@@ -4661,6 +4686,7 @@ export fn JSStringIsEqualToUTF8CString(a: JSStringRef, b: [*c]const u8) callconv
 // passed to each call, so only that context's handles are ever touched here.
 
 pub const JSWorkerRef = ?*anyopaque;
+pub const ZJSWorkerInspectorSessionRef = ?*anyopaque;
 
 pub const ZJSInspectorTargetKind = WorkerMod.Worker.InspectorTargetKind;
 pub const ZJSInspectorTargetState = WorkerMod.Worker.InspectorTargetState;
@@ -4669,6 +4695,49 @@ pub const ZJSInspectorTargetInfo = extern struct {
     id: u64,
     kind: ZJSInspectorTargetKind,
     state: ZJSInspectorTargetState,
+};
+
+pub const ZJSWorkerInspectorPumpResult = enum(c_uint) {
+    message = 0,
+    timeout = 1,
+    closed = 2,
+};
+
+const CWorkerInspectorSession = struct {
+    client: *WorkerMod.InspectorClient,
+    callback: *const fn ([*]const u8, usize, ?*anyopaque) callconv(.c) void,
+    user_data: ?*anyopaque,
+};
+
+fn workerInspectorBackendCreate(
+    ctx: *Context,
+    callback: WorkerMod.InspectorMessageCallback,
+    user_data: ?*anyopaque,
+    pause_wait_ctx: *anyopaque,
+    pause_wait_hook: WorkerMod.InspectorPauseWaitHook,
+) ?*anyopaque {
+    JSGlobalContextSetInspectable(@ptrCast(ctx), true);
+    return createInspectorSession(
+        @ptrCast(ctx),
+        callback,
+        user_data,
+        pause_wait_ctx,
+        pause_wait_hook,
+    );
+}
+
+fn workerInspectorBackendDispatch(session: *anyopaque, message: []const u8) bool {
+    return ZJSInspectorSessionDispatch(session, message.ptr, message.len);
+}
+
+fn workerInspectorBackendRelease(session: *anyopaque) void {
+    ZJSInspectorSessionRelease(session);
+}
+
+const worker_inspector_backend: WorkerMod.InspectorBackend = .{
+    .create = workerInspectorBackendCreate,
+    .dispatch = workerInspectorBackendDispatch,
+    .release = workerInspectorBackendRelease,
 };
 
 fn workerFrom(ref: JSWorkerRef) ?*WorkerMod.Worker {
@@ -4682,7 +4751,7 @@ fn workerFrom(ref: JSWorkerRef) ?*WorkerMod.Worker {
 /// `globalThis.onmessage` from its own script and replies via `postMessage`.
 export fn JSWorkerCreate(source: JSStringRef) callconv(.c) JSWorkerRef {
     const s = strFrom(source) orelse return null;
-    const w = WorkerMod.Worker.spawn(s.bytes) catch return null;
+    const w = WorkerMod.Worker.spawnWith(s.bytes, .{ .inspector_backend = &worker_inspector_backend }) catch return null;
     return @ptrCast(w);
 }
 
@@ -4703,6 +4772,7 @@ export fn JSWorkerCreateWithLimits(
     const w = WorkerMod.Worker.spawnWith(s.bytes, .{
         .inbox_limits = limits,
         .outbox_limits = limits,
+        .inspector_backend = &worker_inspector_backend,
     }) catch return null;
     return @ptrCast(w);
 }
@@ -4718,6 +4788,61 @@ export fn ZJSWorkerGetInspectorTargetInfo(worker: JSWorkerRef, info: ?*ZJSInspec
         .state = w.inspectorTargetState(),
     };
     return true;
+}
+
+/// Attach an asynchronous inspector session to a worker target. Commands are
+/// queued to the runtime thread; callbacks run only when the worker owner calls
+/// `ZJSWorkerInspectorSessionPump`, never on the worker thread.
+export fn ZJSWorkerInspectorSessionCreate(
+    worker: JSWorkerRef,
+    callback: ZJSInspectorMessageCallback,
+    user_data: ?*anyopaque,
+) callconv(.c) ZJSWorkerInspectorSessionRef {
+    const w = workerFrom(worker) orelse return null;
+    const cb = callback orelse return null;
+    const client = w.createInspectorClient() catch return null;
+    const session = gpa.create(CWorkerInspectorSession) catch {
+        WorkerMod.Worker.releaseInspectorClient(client);
+        return null;
+    };
+    session.* = .{ .client = client, .callback = cb, .user_data = user_data };
+    return @ptrCast(session);
+}
+
+fn workerInspectorSession(ref: ZJSWorkerInspectorSessionRef) ?*CWorkerInspectorSession {
+    const session: *CWorkerInspectorSession = @ptrCast(@alignCast(ref orelse return null));
+    if (!session.client.isOwnerThread()) return null;
+    return session;
+}
+
+export fn ZJSWorkerInspectorSessionDispatch(
+    session_ref: ZJSWorkerInspectorSessionRef,
+    message: [*c]const u8,
+    message_length: usize,
+) callconv(.c) bool {
+    const session = workerInspectorSession(session_ref) orelse return false;
+    if (message == null or message_length == 0) return false;
+    return WorkerMod.Worker.dispatchInspector(session.client, message[0..message_length]);
+}
+
+export fn ZJSWorkerInspectorSessionPump(
+    session_ref: ZJSWorkerInspectorSessionRef,
+    timeout_ms: u64,
+) callconv(.c) ZJSWorkerInspectorPumpResult {
+    const session = workerInspectorSession(session_ref) orelse return .closed;
+    const timeout: ?u64 = if (timeout_ms == 0) null else timeout_ms;
+    var event = WorkerMod.Worker.receiveInspector(session.client, timeout) orelse
+        return if (session.client.transport_closed.load(.acquire)) .closed else .timeout;
+    defer event.deinit();
+    if (event.kind == .detached) return .closed;
+    session.callback(event.message.ptr, event.message.len, session.user_data);
+    return .message;
+}
+
+export fn ZJSWorkerInspectorSessionRelease(session_ref: ZJSWorkerInspectorSessionRef) callconv(.c) void {
+    const session = workerInspectorSession(session_ref) orelse return;
+    WorkerMod.Worker.releaseInspectorClient(session.client);
+    gpa.destroy(session);
 }
 
 /// Serialize `value` from `ctx`'s realm and deliver it to the worker's inbox.
@@ -8551,6 +8676,66 @@ test "C-API: worker inspector target metadata is stable and validated" {
     JSWorkerTerminate(first);
     try std.testing.expect(ZJSWorkerGetInspectorTargetInfo(first, &first_info));
     try std.testing.expect(first_info.state == .closing or first_info.state == .closed);
+}
+
+test "C-API: worker inspector marshals commands and callbacks across threads" {
+    const State = struct {
+        owner: std.Thread.Id,
+        session: ZJSWorkerInspectorSessionRef = null,
+        bytes: [8192]u8 = undefined,
+        len: usize = 0,
+        wrong_thread: bool = false,
+        pauses: usize = 0,
+
+        fn receive(message: [*]const u8, message_len: usize, user_data: ?*anyopaque) callconv(.c) void {
+            const self: *@This() = @ptrCast(@alignCast(user_data.?));
+            if (std.Thread.getCurrentId() != self.owner) self.wrong_thread = true;
+            const available = self.bytes.len - self.len;
+            const copied = @min(available, message_len);
+            @memcpy(self.bytes[self.len..][0..copied], message[0..copied]);
+            self.len += copied;
+            if (std.mem.indexOf(u8, message[0..message_len], "Debugger.paused") != null) {
+                self.pauses += 1;
+                const resume_command = "{\"id\":9,\"method\":\"Debugger.resume\"}";
+                std.debug.assert(ZJSWorkerInspectorSessionDispatch(self.session, resume_command, resume_command.len));
+            }
+        }
+    };
+
+    const ctx = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
+    defer JSGlobalContextRelease(ctx);
+    const source = JSStringCreateWithUTF8CString(
+        "globalThis.onmessage = (e) => { let x = e.data; debugger; x += 2; postMessage(x); close(); };",
+    ) orelse return error.StringInitFailed;
+    defer JSStringRelease(source);
+    const worker = JSWorkerCreate(source) orelse return error.WorkerSpawnFailed;
+    defer JSWorkerRelease(worker);
+
+    var state = State{ .owner = std.Thread.getCurrentId() };
+    state.session = ZJSWorkerInspectorSessionCreate(worker, State.receive, &state) orelse return error.SessionCreateFailed;
+    defer ZJSWorkerInspectorSessionRelease(state.session);
+
+    try std.testing.expectEqual(ZJSWorkerInspectorPumpResult.message, ZJSWorkerInspectorSessionPump(state.session, 10_000));
+    const schema = "{\"id\":1,\"method\":\"Schema.getDomains\"}";
+    try std.testing.expect(ZJSWorkerInspectorSessionDispatch(state.session, schema, schema.len));
+    try std.testing.expectEqual(ZJSWorkerInspectorPumpResult.message, ZJSWorkerInspectorSessionPump(state.session, 10_000));
+    const enable = "{\"id\":2,\"method\":\"Debugger.enable\"}";
+    try std.testing.expect(ZJSWorkerInspectorSessionDispatch(state.session, enable, enable.len));
+    try std.testing.expectEqual(ZJSWorkerInspectorPumpResult.message, ZJSWorkerInspectorSessionPump(state.session, 10_000));
+
+    try std.testing.expect(JSWorkerPostMessage(worker, ctx, JSValueMakeNumber(ctx, 40), null));
+    var pumps: usize = 0;
+    while (state.pauses == 0 and pumps < 8) : (pumps += 1) {
+        const pump_result = ZJSWorkerInspectorSessionPump(state.session, 10_000);
+        try std.testing.expectEqual(ZJSWorkerInspectorPumpResult.message, pump_result);
+    }
+    try std.testing.expectEqual(@as(usize, 1), state.pauses);
+    const reply = JSWorkerReceive(worker, ctx, 10_000, null) orelse return error.NoReply;
+    try std.testing.expectEqual(@as(f64, 42), JSValueToNumber(ctx, reply, null));
+    try std.testing.expect(!state.wrong_thread);
+    try std.testing.expect(std.mem.indexOf(u8, state.bytes[0..state.len], "zig-js-inspector/0.1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, state.bytes[0..state.len], "Schema") != null);
+    try std.testing.expect(std.mem.indexOf(u8, state.bytes[0..state.len], "Debugger.paused") != null);
 }
 
 test "C-API: worker post rejects uncloneable values through exception" {

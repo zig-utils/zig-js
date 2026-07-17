@@ -2262,6 +2262,10 @@ pub const Context = struct {
     /// boundaries but remains independent of the C inspector protocol.
     debug_statement_ctx: ?*anyopaque = null,
     debug_statement_hook: ?interp.DebugStatementHook = null,
+    /// Runtime-thread checkpoint for cross-thread embedder work. Kept separate
+    /// from the debugger hook so transport plumbing never impersonates a pause.
+    host_statement_ctx: ?*anyopaque = null,
+    host_statement_hook: ?interp.HostStatementHook = null,
     debug_exception_hook: ?interp.DebugExceptionHook = null,
     debug_statement_locations: std.AutoHashMapUnmanaged(*const ast.Node, interp.DebugStatementLocation) = .empty,
     /// Context-owned script history outlives inspector sessions. This preserves
@@ -2995,9 +2999,11 @@ pub const Context = struct {
         return .{
             .arena = self.arena(),
             .env = &self.env,
-            .jit_owner = if (self.enable_jit and self.debug_statement_hook == null) (self.shared_jit_owner orelse &self.jit_owner) else null,
+            .jit_owner = if (self.enable_jit and self.debug_statement_hook == null and self.host_statement_hook == null) (self.shared_jit_owner orelse &self.jit_owner) else null,
             .debug_statement_ctx = self.debug_statement_ctx,
             .debug_statement_hook = self.debug_statement_hook,
+            .host_statement_ctx = self.host_statement_ctx,
+            .host_statement_hook = self.host_statement_hook,
             .debug_statement_locations = &self.debug_statement_locations,
             .debug_script_ctx = self,
             .debug_script_hook = registerInterpreterDebugScript,

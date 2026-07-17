@@ -161,10 +161,18 @@ const Channel = struct {
     /// Next message (caller frees), or null when the channel is closed and
     /// drained, or `timeout_ms` elapsed (null = wait indefinitely).
     fn pop(ch: *Channel, timeout_ms: ?u64) ?[]u8 {
+        return ch.popInterruptible(timeout_ms, null);
+    }
+
+    /// `interrupt` lets the worker's single event loop share this wait with its
+    /// inspector command queue. A non-zero value returns null without consuming
+    /// a message; the caller services commands and then re-enters the wait.
+    fn popInterruptible(ch: *Channel, timeout_ms: ?u64, interrupt: ?*const std.atomic.Value(u32)) ?[]u8 {
         const io = agent.engineIo();
         ch.mutex.lockUncancelable(io);
         defer ch.mutex.unlock(io);
         while (!ch.hasQueued()) {
+            if (interrupt) |pending| if (pending.load(.acquire) != 0) return null;
             if (ch.closed) {
                 jsthread.recordWorkerChannelEmptyPop();
                 return null;
@@ -196,6 +204,13 @@ const Channel = struct {
         return bytes;
     }
 
+    fn wake(ch: *Channel) void {
+        const io = agent.engineIo();
+        ch.mutex.lockUncancelable(io);
+        ch.cond.broadcast(io);
+        ch.mutex.unlock(io);
+    }
+
     fn close(ch: *Channel) void {
         const io = agent.engineIo();
         ch.mutex.lockUncancelable(io);
@@ -214,6 +229,190 @@ const Channel = struct {
         ch.queue.deinit(ch.queue_allocator);
         ch.queue_head = 0;
     }
+};
+
+pub const InspectorMessageCallback = *const fn ([*]const u8, usize, ?*anyopaque) callconv(.c) void;
+pub const InspectorPauseWaitHook = *const fn (ctx: *anyopaque) bool;
+
+/// Type-erased bridge supplied by the C binding. Worker stays independent of
+/// the protocol implementation; every backend call runs on the worker runtime
+/// thread and therefore preserves Context affinity.
+pub const InspectorBackend = struct {
+    create: *const fn (
+        ctx: *Context,
+        callback: InspectorMessageCallback,
+        user_data: ?*anyopaque,
+        pause_wait_ctx: *anyopaque,
+        pause_wait_hook: InspectorPauseWaitHook,
+    ) ?*anyopaque,
+    dispatch: *const fn (session: *anyopaque, message: []const u8) bool,
+    release: *const fn (session: *anyopaque) void,
+};
+
+pub const InspectorEventKind = enum { message, detached };
+
+pub const InspectorEvent = struct {
+    kind: InspectorEventKind,
+    message: []u8 = &.{},
+
+    pub fn deinit(event: *InspectorEvent) void {
+        if (event.message.len != 0) alloc.free(event.message);
+        event.* = undefined;
+    }
+};
+
+const InspectorEventQueue = struct {
+    mutex: std.Io.Mutex = .init,
+    cond: std.Io.Condition = .init,
+    items: std.ArrayListUnmanaged(InspectorEvent) = .empty,
+    head: usize = 0,
+    closed: bool = false,
+
+    fn push(q: *InspectorEventQueue, event: InspectorEvent) !void {
+        const io = agent.engineIo();
+        q.mutex.lockUncancelable(io);
+        defer q.mutex.unlock(io);
+        if (q.closed) return error.Closed;
+        try q.items.append(alloc, event);
+        q.cond.signal(io);
+    }
+
+    fn pop(q: *InspectorEventQueue, timeout_ms: ?u64) ?InspectorEvent {
+        const io = agent.engineIo();
+        q.mutex.lockUncancelable(io);
+        defer q.mutex.unlock(io);
+        while (q.head == q.items.items.len) {
+            if (q.closed) return null;
+            if (timeout_ms) |ms| if (ms == 0) return null;
+            if (q.head != 0) {
+                q.items.clearRetainingCapacity();
+                q.head = 0;
+            }
+            const tmo: std.Io.Timeout = if (timeout_ms) |ms| .{ .duration = .{
+                .raw = boundedWaitDuration(ms),
+                .clock = .awake,
+            } } else .none;
+            io_compat.conditionWaitTimeout(&q.cond, io, &q.mutex, tmo) catch |err| switch (err) {
+                error.Timeout => return null,
+                error.Canceled => continue,
+            };
+        }
+        const event = q.items.items[q.head];
+        q.head += 1;
+        if (q.head == q.items.items.len) {
+            q.items.clearRetainingCapacity();
+            q.head = 0;
+        }
+        return event;
+    }
+
+    fn close(q: *InspectorEventQueue) void {
+        const io = agent.engineIo();
+        q.mutex.lockUncancelable(io);
+        q.closed = true;
+        q.cond.broadcast(io);
+        q.mutex.unlock(io);
+    }
+
+    fn deinit(q: *InspectorEventQueue) void {
+        for (q.items.items[q.head..]) |*event| event.deinit();
+        q.items.deinit(alloc);
+    }
+};
+
+pub const InspectorClient = struct {
+    worker: *Worker,
+    id: u64,
+    owner_thread: std.Thread.Id,
+    events: InspectorEventQueue = .{},
+    transport_closed: std.atomic.Value(bool) = .init(false),
+
+    pub fn isOwnerThread(client: *const InspectorClient) bool {
+        return client.owner_thread == std.Thread.getCurrentId();
+    }
+};
+
+const InspectorCommandKind = enum { attach, dispatch, detach };
+
+const InspectorCommand = struct {
+    kind: InspectorCommandKind,
+    client: *InspectorClient,
+    message: []u8 = &.{},
+
+    fn deinit(command: *InspectorCommand) void {
+        if (command.message.len != 0) alloc.free(command.message);
+        command.* = undefined;
+    }
+};
+
+const InspectorCommandQueue = struct {
+    mutex: std.Io.Mutex = .init,
+    cond: std.Io.Condition = .init,
+    items: std.ArrayListUnmanaged(InspectorCommand) = .empty,
+    head: usize = 0,
+    pending: std.atomic.Value(u32) = .init(0),
+    closed: bool = false,
+
+    fn push(q: *InspectorCommandQueue, command: InspectorCommand) !void {
+        const io = agent.engineIo();
+        q.mutex.lockUncancelable(io);
+        defer q.mutex.unlock(io);
+        if (q.closed) return error.Closed;
+        try q.items.append(alloc, command);
+        _ = q.pending.fetchAdd(1, .release);
+        q.cond.signal(io);
+    }
+
+    fn pop(q: *InspectorCommandQueue, block: bool, abort_wait: *const std.atomic.Value(bool)) ?InspectorCommand {
+        const io = agent.engineIo();
+        q.mutex.lockUncancelable(io);
+        defer q.mutex.unlock(io);
+        while (q.head == q.items.items.len) {
+            if (!block or q.closed or abort_wait.load(.acquire)) return null;
+            if (q.head != 0) {
+                q.items.clearRetainingCapacity();
+                q.head = 0;
+            }
+            q.cond.wait(io, &q.mutex) catch continue;
+        }
+        const command = q.items.items[q.head];
+        q.head += 1;
+        _ = q.pending.fetchSub(1, .acq_rel);
+        if (q.head == q.items.items.len) {
+            q.items.clearRetainingCapacity();
+            q.head = 0;
+        }
+        return command;
+    }
+
+    fn wake(q: *InspectorCommandQueue) void {
+        const io = agent.engineIo();
+        q.mutex.lockUncancelable(io);
+        q.cond.broadcast(io);
+        q.mutex.unlock(io);
+    }
+
+    fn close(q: *InspectorCommandQueue) void {
+        const io = agent.engineIo();
+        q.mutex.lockUncancelable(io);
+        q.closed = true;
+        q.cond.broadcast(io);
+        q.mutex.unlock(io);
+    }
+
+    fn deinit(q: *InspectorCommandQueue) void {
+        for (q.items.items[q.head..]) |*command| {
+            command.client.transport_closed.store(true, .release);
+            command.client.events.close();
+            command.deinit();
+        }
+        q.items.deinit(alloc);
+    }
+};
+
+const ActiveInspectorSession = struct {
+    client: *InspectorClient,
+    backend_session: *anyopaque,
 };
 
 test "worker channel pops FIFO without front shifts" {
@@ -442,6 +641,7 @@ pub const Worker = struct {
     pub const Options = struct {
         inbox_limits: ChannelLimits = .{},
         outbox_limits: ChannelLimits = .{},
+        inspector_backend: ?*const InspectorBackend = null,
     };
 
     thread: ?std.Thread = null,
@@ -449,6 +649,12 @@ pub const Worker = struct {
     inspector_target_id: u64,
     inspector_target_kind: InspectorTargetKind,
     inspector_target_state: std.atomic.Value(InspectorTargetState) = .init(.starting),
+    inspector_backend: ?*const InspectorBackend = null,
+    inspector_commands: InspectorCommandQueue = .{},
+    inspector_sessions: std.ArrayListUnmanaged(ActiveInspectorSession) = .empty,
+    inspector_context: ?*Context = null,
+    next_inspector_session_id: u64 = 1,
+    inspector_wait_abort: std.atomic.Value(bool) = .init(false),
     /// main → worker messages.
     inbox: Channel = .{},
     /// worker → main messages.
@@ -496,6 +702,61 @@ pub const Worker = struct {
         if (w.hooks.load(.acquire)) |h| h.notify(h.ctx);
     }
 
+    fn enqueueInspectorCommand(w: *Worker, kind: InspectorCommandKind, client: *InspectorClient, message: []const u8) !void {
+        const copy: []u8 = if (message.len == 0) @constCast(&.{}) else try alloc.dupe(u8, message);
+        errdefer if (copy.len != 0) alloc.free(copy);
+        try w.inspector_commands.push(.{ .kind = kind, .client = client, .message = copy });
+        w.inbox.wake();
+    }
+
+    pub fn createInspectorClient(w: *Worker) !*InspectorClient {
+        if (!w.isOwnerThread() or w.inspector_backend == null) return error.InspectorUnavailable;
+        const state = w.inspectorTargetState();
+        if (state == .closing or state == .closed) return error.WorkerClosed;
+        if (w.next_inspector_session_id == 0) return error.InspectorSessionIdExhausted;
+        const client = try alloc.create(InspectorClient);
+        errdefer alloc.destroy(client);
+        client.* = .{
+            .worker = w,
+            .id = w.next_inspector_session_id,
+            .owner_thread = w.owner_thread,
+        };
+        w.next_inspector_session_id = if (w.next_inspector_session_id == std.math.maxInt(u64)) 0 else w.next_inspector_session_id + 1;
+        try w.enqueueInspectorCommand(.attach, client, "");
+        return client;
+    }
+
+    pub fn dispatchInspector(client: *InspectorClient, message: []const u8) bool {
+        if (!client.isOwnerThread() or message.len == 0 or client.transport_closed.load(.acquire)) return false;
+        client.worker.enqueueInspectorCommand(.dispatch, client, message) catch return false;
+        return true;
+    }
+
+    pub fn receiveInspector(client: *InspectorClient, timeout_ms: ?u64) ?InspectorEvent {
+        if (!client.isOwnerThread()) return null;
+        return client.events.pop(timeout_ms);
+    }
+
+    pub fn releaseInspectorClient(client: *InspectorClient) void {
+        if (!client.isOwnerThread()) return;
+        if (!client.transport_closed.load(.acquire)) {
+            client.worker.enqueueInspectorCommand(.detach, client, "") catch {
+                client.transport_closed.store(true, .release);
+                client.events.close();
+            };
+            while (client.events.pop(null)) |event_value| {
+                var event = event_value;
+                const detached = event.kind == .detached;
+                event.deinit();
+                if (detached) break;
+            }
+        }
+        client.transport_closed.store(true, .release);
+        client.events.close();
+        client.events.deinit();
+        alloc.destroy(client);
+    }
+
     /// Spawn a worker running `src` in a fresh realm on its own thread. The
     /// returned worker must be `terminate`d or have its inbox closed, then
     /// `join`ed and `destroy`ed by the caller.
@@ -510,6 +771,7 @@ pub const Worker = struct {
             .owner_thread = std.Thread.getCurrentId(),
             .inspector_target_id = try allocateInspectorTargetId(),
             .inspector_target_kind = .script,
+            .inspector_backend = options.inspector_backend,
             .inbox = Channel.init(options.inbox_limits),
             .outbox = Channel.init(options.outbox_limits),
             .src = try alloc.dupe(u8, src),
@@ -548,6 +810,7 @@ pub const Worker = struct {
             .owner_thread = std.Thread.getCurrentId(),
             .inspector_target_id = try allocateInspectorTargetId(),
             .inspector_target_kind = .module,
+            .inspector_backend = options.inspector_backend,
             .inbox = Channel.init(options.inbox_limits),
             .outbox = Channel.init(options.outbox_limits),
             .src = &.{},
@@ -576,8 +839,10 @@ pub const Worker = struct {
     /// step checkpoint, and the closed inbox ends the delivery loop.
     pub fn terminate(w: *Worker) void {
         w.beginClosing();
+        w.inspector_wait_abort.store(true, .release);
         w.stop.store(true, .monotonic);
         w.inbox.close();
+        w.inspector_commands.wake();
     }
 
     /// Graceful shutdown: close the inbox so the delivery loop drains any
@@ -585,7 +850,9 @@ pub const Worker = struct {
     /// `terminate` injects into in-flight JS.
     pub fn close(w: *Worker) void {
         w.beginClosing();
+        w.inspector_wait_abort.store(true, .release);
         w.inbox.close();
+        w.inspector_commands.wake();
     }
 
     pub fn join(w: *Worker) void {
@@ -606,6 +873,9 @@ pub const Worker = struct {
         } else {
             alloc.free(w.src);
         }
+        w.inspector_commands.close();
+        w.inspector_commands.deinit();
+        w.inspector_sessions.deinit(alloc);
         alloc.destroy(w);
     }
 };
@@ -628,8 +898,132 @@ fn enqueueOwned(ch: *Channel, self: *interp.Interpreter, bytes: []u8) value.Host
     };
 }
 
+fn inspectorEventSink(message: [*]const u8, message_len: usize, user_data: ?*anyopaque) callconv(.c) void {
+    const client: *InspectorClient = @ptrCast(@alignCast(user_data orelse return));
+    const copy = alloc.dupe(u8, message[0..message_len]) catch {
+        client.transport_closed.store(true, .release);
+        client.events.close();
+        return;
+    };
+    client.events.push(.{ .kind = .message, .message = copy }) catch {
+        alloc.free(copy);
+        client.transport_closed.store(true, .release);
+        client.events.close();
+    };
+}
+
+fn activeInspectorSessionIndex(w: *Worker, client: *InspectorClient) ?usize {
+    for (w.inspector_sessions.items, 0..) |session, index| {
+        if (session.client == client) return index;
+    }
+    return null;
+}
+
+fn finishInspectorClient(client: *InspectorClient, reason: []const u8) void {
+    if (!client.transport_closed.load(.acquire)) {
+        const message = std.fmt.allocPrint(
+            alloc,
+            "{{\"method\":\"Inspector.detached\",\"params\":{{\"reason\":\"{s}\"}}}}",
+            .{reason},
+        ) catch null;
+        if (message) |owned| client.events.push(.{ .kind = .message, .message = owned }) catch alloc.free(owned);
+        client.events.push(.{ .kind = .detached }) catch {};
+    }
+    client.transport_closed.store(true, .release);
+    client.events.close();
+}
+
+fn serviceInspectorCommand(w: *Worker, ctx: *Context, block: bool) bool {
+    var command = w.inspector_commands.pop(block, &w.inspector_wait_abort) orelse return false;
+    defer command.deinit();
+    const backend = w.inspector_backend orelse {
+        finishInspectorClient(command.client, "worker inspector backend is unavailable");
+        return true;
+    };
+    switch (command.kind) {
+        .attach => {
+            if (command.client.transport_closed.load(.acquire)) return true;
+            const session = backend.create(
+                ctx,
+                inspectorEventSink,
+                command.client,
+                w,
+                workerInspectorPauseWait,
+            ) orelse {
+                finishInspectorClient(command.client, "worker inspector attach failed");
+                return true;
+            };
+            w.inspector_sessions.append(alloc, .{
+                .client = command.client,
+                .backend_session = session,
+            }) catch {
+                backend.release(session);
+                finishInspectorClient(command.client, "worker inspector attach ran out of memory");
+            };
+        },
+        .dispatch => {
+            const index = activeInspectorSessionIndex(w, command.client) orelse {
+                finishInspectorClient(command.client, "worker inspector session is not attached");
+                return true;
+            };
+            _ = backend.dispatch(w.inspector_sessions.items[index].backend_session, command.message);
+        },
+        .detach => {
+            if (activeInspectorSessionIndex(w, command.client)) |index| {
+                const session = w.inspector_sessions.swapRemove(index);
+                backend.release(session.backend_session);
+            }
+            finishInspectorClient(command.client, "worker inspector session released");
+        },
+    }
+    return true;
+}
+
+fn serviceInspectorCommands(w: *Worker, ctx: *Context) void {
+    while (serviceInspectorCommand(w, ctx, false)) {}
+}
+
+fn workerInspectorStatementCheckpoint(ctx: *anyopaque, _: *interp.Interpreter) void {
+    const w: *Worker = @ptrCast(@alignCast(ctx));
+    const runtime = w.inspector_context orelse return;
+    serviceInspectorCommands(w, runtime);
+}
+
+fn workerInspectorPauseWait(ctx: *anyopaque) bool {
+    const w: *Worker = @ptrCast(@alignCast(ctx));
+    const runtime = w.inspector_context orelse return false;
+    return serviceInspectorCommand(w, runtime, true);
+}
+
+fn closeWorkerInspector(w: *Worker) void {
+    w.inspector_commands.close();
+    const backend = w.inspector_backend;
+    while (w.inspector_sessions.pop()) |session| {
+        if (backend) |implementation| implementation.release(session.backend_session);
+        finishInspectorClient(session.client, "worker target closed");
+    }
+    // Pending attaches never acquired a backend session, but their public
+    // handles must still wake and become safely releasable.
+    while (w.inspector_commands.pop(false, &w.inspector_wait_abort)) |command_value| {
+        var command = command_value;
+        finishInspectorClient(command.client, "worker target closed before command dispatch");
+        command.deinit();
+    }
+    w.inspector_context = null;
+}
+
+fn closePendingInspectorCommands(w: *Worker) void {
+    w.inspector_commands.close();
+    while (w.inspector_commands.pop(false, &w.inspector_wait_abort)) |command_value| {
+        var command = command_value;
+        finishInspectorClient(command.client, "worker target closed before command dispatch");
+        command.deinit();
+    }
+}
+
 fn workerMain(w: *Worker) void {
     defer {
+        closePendingInspectorCommands(w);
         w.outbox.close();
         w.inspector_target_state.store(.closed, .release);
         w.notifyHost(); // final receive observes the closed target and outbox
@@ -637,8 +1031,19 @@ fn workerMain(w: *Worker) void {
     const ctx = Context.create(alloc) catch {
         return;
     };
-    defer ctx.destroy();
+    if (w.inspector_backend != null) ctx.initCApiRef();
+    defer {
+        if (w.inspector_backend != null) std.debug.assert(ctx.releaseCApiRef());
+        ctx.destroy();
+    }
+    w.inspector_context = ctx;
+    defer closeWorkerInspector(w);
     ctx.stop_flag = &w.stop;
+    if (w.inspector_backend != null) {
+        ctx.host_statement_ctx = w;
+        ctx.host_statement_hook = workerInspectorStatementCheckpoint;
+        serviceInspectorCommands(w, ctx);
+    }
     installWorkerGlobals(ctx, w) catch {
         return;
     };
@@ -647,12 +1052,22 @@ fn workerMain(w: *Worker) void {
     if (w.module) |mc| {
         _ = ctx.evaluateModule(mc.entry_path, mc.entry_source, mc.host) catch {};
     } else {
+        const script_url = std.fmt.allocPrint(ctx.arena(), "worker://{d}/script", .{w.inspector_target_id}) catch return;
+        const script = ctx.registerDebugScript(w.src, script_url, 1) catch return;
+        ctx.debug_script_id = script.id;
+        ctx.debug_script_start_line = script.start_line;
         _ = ctx.evaluate(w.src) catch {};
+        ctx.debug_script_id = 0;
+        ctx.debug_script_start_line = 1;
     }
 
     // Delivery loop: park on the inbox, hand each message to onmessage.
     while (!w.stop.load(.monotonic)) {
-        const bytes = w.inbox.pop(null) orelse break; // closed + drained
+        serviceInspectorCommands(w, ctx);
+        const bytes = w.inbox.popInterruptible(null, &w.inspector_commands.pending) orelse {
+            if (w.inspector_commands.pending.load(.acquire) != 0) continue;
+            break; // inbox closed + drained
+        };
         defer alloc.free(bytes);
         var machine = ctx.interpreter();
         const data = structured_clone.deserialize(&machine, bytes) catch continue;
@@ -703,8 +1118,7 @@ fn workerCloseFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
     _ = args;
     const self: *interp.Interpreter = @ptrCast(@alignCast(ctx));
     const w = workerOf(self) orelse return Value.undef();
-    w.beginClosing();
-    w.inbox.close(); // delivery loop drains the remaining messages, then exits
+    w.close(); // delivery loop drains queued messages and paused transport wakes
     return Value.undef();
 }
 

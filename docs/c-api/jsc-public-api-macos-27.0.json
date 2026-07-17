@@ -165,6 +165,8 @@
     "ZJSInspectorSessionCreate", "ZJSInspectorSessionDispatch", "ZJSInspectorSessionRelease",
     "JSWorkerCreate", "JSWorkerCreateWithLimits",
     "JSWorkerPostMessage", "JSWorkerReceive", "JSWorkerTerminate", "JSWorkerRelease",
-    "ZJSWorkerGetInspectorTargetInfo"
+    "ZJSWorkerGetInspectorTargetInfo",
+    "ZJSWorkerInspectorSessionCreate", "ZJSWorkerInspectorSessionDispatch",
+    "ZJSWorkerInspectorSessionPump", "ZJSWorkerInspectorSessionRelease"
   ]
 }

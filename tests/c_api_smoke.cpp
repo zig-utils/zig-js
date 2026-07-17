@@ -2,6 +2,23 @@
 #include <zig-js/Extensions.h>
 
 #include <cstdint>
+#include <cstring>
+
+struct WorkerInspectorTranscript {
+    char bytes[1024] {};
+    std::size_t length { 0 };
+};
+
+static void receive_worker_inspector(const char* message, std::size_t length, void* user_data)
+{
+    auto* transcript = static_cast<WorkerInspectorTranscript*>(user_data);
+    const auto copied = length < sizeof(transcript->bytes) - transcript->length - 1
+        ? length
+        : sizeof(transcript->bytes) - transcript->length - 1;
+    std::memcpy(transcript->bytes + transcript->length, message, copied);
+    transcript->length += copied;
+    transcript->bytes[transcript->length] = '\0';
+}
 
 int main()
 {
@@ -43,6 +60,18 @@ int main()
         (target.state != kZJSInspectorTargetStateStarting &&
             target.state != kZJSInspectorTargetStateRunning))
         return 8;
+    WorkerInspectorTranscript worker_transcript;
+    auto worker_inspector = ZJSWorkerInspectorSessionCreate(
+        worker, receive_worker_inspector, &worker_transcript);
+    if (!worker_inspector ||
+        ZJSWorkerInspectorSessionPump(worker_inspector, 10000) != kZJSWorkerInspectorPumpMessage)
+        return 9;
+    const char schema[] = "{\"id\":1,\"method\":\"Schema.getDomains\"}";
+    if (!ZJSWorkerInspectorSessionDispatch(worker_inspector, schema, sizeof(schema) - 1) ||
+        ZJSWorkerInspectorSessionPump(worker_inspector, 10000) != kZJSWorkerInspectorPumpMessage ||
+        !std::strstr(worker_transcript.bytes, "Schema"))
+        return 10;
+    ZJSWorkerInspectorSessionRelease(worker_inspector);
     JSWorkerTerminate(worker);
     JSWorkerRelease(worker);
     JSStringRelease(worker_source);
