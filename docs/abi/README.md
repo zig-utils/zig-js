@@ -44,7 +44,7 @@ convention. The exact current denominator is:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #163 | 431 (185 implemented, 246 pending) |
+| Private JSC/Bun/WebCore ABI under #163 | 431 (190 implemented, 241 pending) |
 | Overlap with zig-js's completed public C target | 15 |
 | Platform libc import | 1 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
@@ -61,7 +61,7 @@ zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"
 ```
 
 This inventory is the denominator, not a claim that the whole surface works.
-The first 185 private entries are implemented; the other 246 remain pending
+The first 190 private entries are implemented; the other 241 remain pending
 until #163 provides their type/layout contracts, shims, and consumer evidence.
 `JSFunctionCall` remains revision-pinned in the declaration inventory but is
 not part of that denominator: each runtime-generated FFI module defines the
@@ -135,7 +135,7 @@ It covers empty/immediate/int32/double/NaN/negative-zero behavior, boxed
 empty/nonempty strings, object identity/truthiness, signed minimum and unsigned
 maximum BigInts, negative modulo extraction, exact number fallbacks, and every
 invalid/non-exact boundary. Public accounting stays unchanged at 117 functions
-and 19 extensions; these 185 symbols are reported only as private profile
+and 19 extensions; these 190 symbols are reported only as private profile
 exports.
 
 The opaque BigInt cell slice additionally exports `JSC__JSBigInt__fromJS`, the
@@ -242,6 +242,19 @@ overlap, subset replacement, empty patterns, invalid state, and match-state
 reset. The underlying empty-pattern and Unicode-surrogate corrections are
 tracked and completed in [zig-regex #11](https://github.com/zig-utils/zig-regex/issues/11)
 and [zig-regex #12](https://github.com/zig-utils/zig-regex/issues/12).
+
+The five-symbol WTF helper slice mirrors WebKit's stateless runtime boundary.
+Decimal parsing accepts the longest signed decimal/fraction/exponent prefix,
+reports its exact byte count, rejects leading whitespace and Infinity/NaN
+spellings, and preserves signed zero and overflow-to-infinity behavior. The ES5
+date parser is separate from JavaScript `Date.parse`: it implements WebKit's
+strict date/time field widths, lenient space-separated and fractional forms,
+timezone variants, leap-year validation, leap-second normalization, and NaN
+failure contract. CPU discovery reports at least one online processor and
+clamps to `c_int`. FastMalloc release is already satisfied because zig-js owns
+no WTF allocator or per-thread FastMalloc cache. HTTP dates use exact 29-byte
+RFC 7231 IMF-fixdate text, timestamp-zero suppression, and bounded
+`snprintf`-style truncation with a terminator and full required-length return.
 
 The VM exception slice exports the shared `JSGlobalObject`/`VM` pending-state
 boundary plus exception-cell conversion and classification. Sibling realms in
@@ -426,7 +439,7 @@ profile contains 437 unique declarations from 54 hashed files:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #164 | 421 (179 implemented, 242 pending) |
+| Private JSC/Bun/WebCore ABI under #164 | 421 (184 implemented, 237 pending) |
 | Public-C overlap | 15 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
 | **Total** | **437** |
@@ -443,5 +456,5 @@ zig build bun-private-abi-audit -Dbun-source-root="$HOME/Code/bun"
 
 The audit rejects revision, file hash, declaration digest, classification,
 calling-convention, implementation-status, and Home-comparison drift. It does
-not claim complete Bun runtime compatibility; #164 remains open for the 242
+not claim complete Bun runtime compatibility; #164 remains open for the 237
 pending core entries and later wider/generated profiles.

@@ -88,8 +88,8 @@
     },
     "by_status": {
       "external": 2,
-      "implemented": 200,
-      "pending": 246
+      "implemented": 205,
+      "pending": 241
     }
   },
   "declarations": [
@@ -902,10 +902,10 @@
       "line": 68,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn Bun__writeHTTPDate(buffer: *[32]u8, length: usize, timestampMs: u64) c_int;",
       "declaration_sha256": "6f79d1cabad39138eeb7ae0ce67fe5f7d05c2fdf2e308b36a4f88fe73443a8df",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "DOMFormData__forEach",
@@ -3966,10 +3966,10 @@
       "line": 22,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn WTF__numberOfProcessorCores() c_int;",
       "declaration_sha256": "96c258376779fe6a0eb34f27b56c1200ce53f2286fc0263c999a1ecb53eab0a6",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "WTF__parseDouble",
@@ -3977,10 +3977,10 @@
       "line": 20,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn WTF__parseDouble(bytes: [*]const u8, length: usize, counted: *usize) f64;",
       "declaration_sha256": "a299b2a9be37fee5636e71b00b06f96c497dfa3b5103e4aef335d3aca6283e7f",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "WTF__parseES5Date",
@@ -3988,10 +3988,10 @@
       "line": 52,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn WTF__parseES5Date(bytes: [*]const u8, length: usize) f64;",
       "declaration_sha256": "896befd6d86c6d95a4c41a20d917295befce69418e945c54ed979448a9d8b22b",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "WTF__releaseFastMallocFreeMemoryForThisThread",
@@ -3999,10 +3999,10 @@
       "line": 31,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn WTF__releaseFastMallocFreeMemoryForThisThread() void;",
       "declaration_sha256": "7c8844f8f1d9829a9120ec66369d53e9fb5318670fb9d071e182efaf0bfe0c8b",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "WebCore__AbortSignal__abortReason",
