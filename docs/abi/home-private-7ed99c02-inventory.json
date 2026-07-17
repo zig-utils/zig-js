@@ -88,8 +88,8 @@
     },
     "by_status": {
       "external": 2,
-      "implemented": 246,
-      "pending": 200
+      "implemented": 248,
+      "pending": 198
     }
   },
   "declarations": [
@@ -396,10 +396,10 @@
       "line": 464,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn Bun__Process__emitWarning(globalObject: *JSGlobalObject, warning: JSValue, @\"type\": JSValue, code: JSValue, ctor: JSValue) void;",
       "declaration_sha256": "ff7694c162b1c5c2113c8d0950d715f5babca55d5ccc83580bea2bf7154abb3c",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Bun__Process__queueNextTick1",
@@ -781,10 +781,10 @@
       "line": 568,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn Bun__promises__emitUnhandledRejectionWarning(*JSGlobalObject, reason: JSValue, promise: JSValue) void;",
       "declaration_sha256": "aa7fde888f7f5f919db6de35e8f0335d7580671f7b130afdc32fedc71eced057",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Bun__promises__isErrorLike",

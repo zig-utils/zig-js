@@ -3339,5 +3339,5 @@ pub fn main() void {
         TopExceptionScope__exceptionIncludingTraps(&verification_scope) != null)
         fail("private TopExceptionScope destruction mismatch");
 
-    std.debug.print("Home private value shims: 230/230 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 232/232 symbols linked; runtime matrix passed\n", .{});
 }
