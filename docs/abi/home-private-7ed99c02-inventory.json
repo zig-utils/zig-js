@@ -88,8 +88,8 @@
     },
     "by_status": {
       "external": 2,
-      "implemented": 211,
-      "pending": 235
+      "implemented": 212,
+      "pending": 234
     }
   },
   "declarations": [
@@ -1815,10 +1815,10 @@
       "line": 600,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSValue__createUninitializedUint8Array(globalObject: *JSGlobalObject, len: usize) JSValue;",
       "declaration_sha256": "1f1807b9bc8a222a9603cbe16c56969977cb00bb45902d77af25a9ff0cb99d8d",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSValue__dateInstanceFromNullTerminatedString",
