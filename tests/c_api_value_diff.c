@@ -4,6 +4,8 @@
 #include <math.h>
 #include <stdio.h>
 
+static int print_json_string(JSStringRef string);
+
 static JSValueRef evaluate(JSContextRef context, const char* source)
 {
     JSStringRef script = JSStringCreateWithUTF8CString(source);
@@ -121,6 +123,30 @@ static bool class_set(JSContextRef context, JSObjectRef object,
         return true;
     }
     return false;
+}
+
+static void class_property_names(JSContextRef context, JSObjectRef object,
+    JSPropertyNameAccumulatorRef names)
+{
+    (void)context; (void)object;
+    JSStringRef virtual_name = JSStringCreateWithUTF8CString("virtual");
+    JSStringRef duplicate_name = JSStringCreateWithUTF8CString("own");
+    JSPropertyNameAccumulatorAddName(names, virtual_name);
+    JSPropertyNameAccumulatorAddName(names, duplicate_name);
+    JSPropertyNameAccumulatorAddName(names, virtual_name);
+    JSStringRelease(virtual_name);
+    JSStringRelease(duplicate_name);
+}
+
+static int print_property_names(JSPropertyNameArrayRef names)
+{
+    printf("%zu", JSPropertyNameArrayGetCount(names));
+    for (size_t index = 0; index < JSPropertyNameArrayGetCount(names); ++index) {
+        fputc(' ', stdout);
+        if (!print_json_string(JSPropertyNameArrayGetNameAtIndex(names, index)))
+            return 0;
+    }
+    return 1;
 }
 
 static int print_json_string(JSStringRef string)
@@ -434,6 +460,41 @@ int main(void)
     JSStringRelease(get_only_name); JSStringRelease(handled_set_name);
     JSStringRelease(missing_name);
     JSClassRelease(get_only_class);
+
+    JSClassDefinition names_definition = kJSClassDefinitionEmpty;
+    names_definition.getPropertyNames = class_property_names;
+    JSClassRef names_class = JSClassCreate(&names_definition);
+    JSObjectRef names_object = JSObjectMake(context, names_class, NULL);
+    JSObjectRef names_prototype = JSObjectMake(context, NULL, NULL);
+    JSStringRef own_name = JSStringCreateWithUTF8CString("own");
+    JSStringRef inherited_names_name = JSStringCreateWithUTF8CString("inherited");
+    JSObjectSetProperty(context, names_object, own_name,
+        JSValueMakeNumber(context, 1), kJSPropertyAttributeNone, &exception);
+    JSObjectSetProperty(context, names_prototype, inherited_names_name,
+        JSValueMakeNumber(context, 2), kJSPropertyAttributeNone, &exception);
+    JSObjectSetPrototype(context, names_object, names_prototype);
+    JSStringRef names_object_name = JSStringCreateWithUTF8CString("namesObject");
+    JSObjectSetProperty(context, JSContextGetGlobalObject(context), names_object_name,
+        names_object, kJSPropertyAttributeNone, &exception);
+    JSPropertyNameArrayRef property_names = JSObjectCopyPropertyNames(context, names_object);
+    JSPropertyNameArrayRef retained_property_names = JSPropertyNameArrayRetain(property_names);
+    JSPropertyNameArrayRelease(property_names);
+    fputs("property-names ", stdout);
+    if (!retained_property_names || !print_property_names(retained_property_names))
+        return 9;
+    fputc('\n', stdout);
+    JSPropertyNameArrayRelease(retained_property_names);
+    JSValueRef names_reflection = evaluate(context,
+        "JSON.stringify([Object.keys(namesObject),Reflect.ownKeys(namesObject),Object.getOwnPropertyDescriptor(namesObject,'virtual')??null,(function(){const r=[];for(const k in namesObject)r.push(k);return r})()])");
+    JSStringRef names_reflection_string = JSValueToStringCopy(context, names_reflection, &exception);
+    fputs("property-names-js ", stdout);
+    if (!names_reflection_string || !print_json_string(names_reflection_string))
+        return 10;
+    fputc('\n', stdout);
+    JSStringRelease(names_reflection_string);
+    JSStringRelease(own_name); JSStringRelease(inherited_names_name);
+    JSStringRelease(names_object_name);
+    JSClassRelease(names_class);
 
     JSObjectRef prototype = JSObjectMake(context, NULL, NULL);
     JSObjectRef object = JSObjectMake(context, NULL, NULL);

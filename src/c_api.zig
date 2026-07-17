@@ -121,6 +121,7 @@ pub const JSObjectRef = ?*anyopaque;
 pub const JSContextRef = ?*anyopaque;
 pub const JSStringRef = ?*anyopaque;
 pub const JSClassRef = ?*anyopaque;
+pub const JSPropertyNameArrayRef = ?*anyopaque;
 pub const JSPropertyNameAccumulatorRef = ?*anyopaque;
 pub const ExceptionRef = [*c]JSValueRef;
 
@@ -197,6 +198,52 @@ const CClass = struct {
     static_functions: []JSStaticFunction = &.{},
     parent: ?*CClass = null,
 };
+
+const PropertyNameAccumulator = struct {
+    names: std.ArrayListUnmanaged(*JsString) = .empty,
+    seen: std.StringHashMapUnmanaged(void) = .empty,
+    failed: bool = false,
+
+    fn addBytes(self: *PropertyNameAccumulator, bytes: []const u8) void {
+        if (self.failed or self.seen.contains(bytes)) return;
+        const string = JsString.create(gpa, bytes) catch {
+            self.failed = true;
+            return;
+        };
+        self.seen.put(gpa, string.bytes, {}) catch {
+            string.release();
+            self.failed = true;
+            return;
+        };
+        self.names.append(gpa, string) catch {
+            _ = self.seen.remove(string.bytes);
+            string.release();
+            self.failed = true;
+        };
+    }
+
+    fn deinit(self: *PropertyNameAccumulator) void {
+        for (self.names.items) |name| name.release();
+        self.names.deinit(gpa);
+        self.seen.deinit(gpa);
+        self.* = .{};
+    }
+};
+
+const PropertyNameArray = struct {
+    ref_count: std.atomic.Value(usize) = .init(1),
+    names: []*JsString,
+};
+
+fn propertyNameArrayFrom(ref: JSPropertyNameArrayRef) ?*PropertyNameArray {
+    return @ptrCast(@alignCast(ref orelse return null));
+}
+
+fn destroyPropertyNameArray(array: *PropertyNameArray) void {
+    for (array.names) |name| name.release();
+    gpa.free(array.names);
+    gpa.destroy(array);
+}
 
 fn classFrom(ref: JSClassRef) ?*CClass {
     return @ptrCast(@alignCast(ref orelse return null));
@@ -523,34 +570,42 @@ fn staticValueAttributes(
     const machine: *interp.Interpreter = @ptrCast(@alignCast(raw_machine));
     const target = try classCallbackTarget(machine, object);
     var class: ?*CClass = target.class;
+    var has_name_callback = false;
     while (class) |item| : (class = item.parent) {
+        has_name_callback = has_name_callback or item.definition.get_property_names != null;
         for (item.static_values) |entry| {
             const name = entry.name orelse continue;
             if (std.mem.eql(u8, std.mem.span(name), key)) return propAttrFromC(entry.attributes);
         }
     }
+    if (has_name_callback) return .{ .writable = false, .enumerable = true, .configurable = true };
     return null;
 }
 
-fn staticValueOwnKeys(
+fn classOwnKeys(
     raw_machine: *anyopaque,
     object: *Object,
 ) value.HostError![]const []const u8 {
     const machine: *interp.Interpreter = @ptrCast(@alignCast(raw_machine));
     const target = try classCallbackTarget(machine, object);
-    var result: std.ArrayListUnmanaged([]const u8) = .empty;
-    var seen: std.StringHashMapUnmanaged(void) = .empty;
+    var accumulator: PropertyNameAccumulator = .{};
+    defer accumulator.deinit();
     var class: ?*CClass = target.class;
     while (class) |item| : (class = item.parent) {
+        if (item.definition.get_property_names) |callback| {
+            callback(@ptrCast(target.context), target.object_ref, @ptrCast(&accumulator));
+            if (accumulator.failed) return error.OutOfMemory;
+        }
         for (item.static_values) |entry| {
             const name_ptr = entry.name orelse continue;
-            const name = std.mem.span(name_ptr);
-            if (seen.contains(name)) continue;
-            try seen.put(machine.arena, name, {});
-            try result.append(machine.arena, name);
+            accumulator.addBytes(std.mem.span(name_ptr));
+            if (accumulator.failed) return error.OutOfMemory;
         }
     }
-    return result.items;
+    const result = try machine.arena.alloc([]const u8, accumulator.names.items.len);
+    for (accumulator.names.items, result) |name, *slot|
+        slot.* = try machine.arena.dupe(u8, name.bytes);
+    return result;
 }
 
 const c_api_class_hooks: value.HostClassHooks = .{
@@ -559,7 +614,7 @@ const c_api_class_hooks: value.HostClassHooks = .{
     .has = classHas,
     .delete = classDelete,
     .attributes = staticValueAttributes,
-    .own_keys = staticValueOwnKeys,
+    .own_keys = classOwnKeys,
 };
 
 // ---- internal helpers --------------------------------------------------
@@ -2497,6 +2552,72 @@ export fn JSObjectIsConstructor(ctx: JSContextRef, object: JSObjectRef) callconv
     const c = ctxForHandleInspection(ctx) orelse return false;
     const val = valueFromContext(c, object) orelse return false;
     return val.isObject() and interp.isConstructorValue(val);
+}
+
+export fn JSObjectCopyPropertyNames(ctx: JSContextRef, object: JSObjectRef) callconv(.c) JSPropertyNameArrayRef {
+    const c = ctxFrom(ctx) orelse return null;
+    const obj = objectArgFrom(c, object, null) orelse return null;
+    const gc_saved = gc_mod.setActiveHeap(c.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(c.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = c.interpreter();
+    c.pushActiveInterpreter(&machine) catch return null;
+    defer c.popActiveInterpreter(&machine);
+    const keys = machine.cApiPropertyNameSnapshot(obj) catch return null;
+    const array = gpa.create(PropertyNameArray) catch return null;
+    errdefer gpa.destroy(array);
+    const names = gpa.alloc(*JsString, keys.len) catch return null;
+    errdefer gpa.free(names);
+    var initialized: usize = 0;
+    errdefer for (names[0..initialized]) |name| name.release();
+    for (keys, names) |key, *slot| {
+        slot.* = JsString.create(gpa, key) catch return null;
+        initialized += 1;
+    }
+    array.* = .{ .names = names };
+    return @ptrCast(array);
+}
+
+export fn JSPropertyNameArrayRetain(ref: JSPropertyNameArrayRef) callconv(.c) JSPropertyNameArrayRef {
+    const array = propertyNameArrayFrom(ref) orelse return null;
+    var current = array.ref_count.load(.acquire);
+    while (true) {
+        if (current == std.math.maxInt(usize)) return null;
+        if (array.ref_count.cmpxchgWeak(current, current + 1, .acq_rel, .acquire)) |actual| {
+            current = actual;
+        } else return ref;
+    }
+}
+
+export fn JSPropertyNameArrayRelease(ref: JSPropertyNameArrayRef) callconv(.c) void {
+    const array = propertyNameArrayFrom(ref) orelse return;
+    var current = array.ref_count.load(.acquire);
+    while (true) {
+        std.debug.assert(current > 0);
+        if (array.ref_count.cmpxchgWeak(current, current - 1, .acq_rel, .acquire)) |actual| {
+            current = actual;
+        } else {
+            if (current == 1) destroyPropertyNameArray(array);
+            return;
+        }
+    }
+}
+
+export fn JSPropertyNameArrayGetCount(ref: JSPropertyNameArrayRef) callconv(.c) usize {
+    return if (propertyNameArrayFrom(ref)) |array| array.names.len else 0;
+}
+
+export fn JSPropertyNameArrayGetNameAtIndex(ref: JSPropertyNameArrayRef, index: usize) callconv(.c) JSStringRef {
+    const array = propertyNameArrayFrom(ref) orelse return null;
+    if (index >= array.names.len) return null;
+    return @ptrCast(array.names[index]);
+}
+
+export fn JSPropertyNameAccumulatorAddName(ref: JSPropertyNameAccumulatorRef, property_name: JSStringRef) callconv(.c) void {
+    const accumulator: *PropertyNameAccumulator = @ptrCast(@alignCast(ref orelse return));
+    const name = strFrom(property_name) orelse return;
+    accumulator.addBytes(name.bytes);
 }
 
 // ---- JSString lifecycle ------------------------------------------------

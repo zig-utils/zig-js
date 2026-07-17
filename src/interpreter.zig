@@ -3368,6 +3368,32 @@ pub const Interpreter = struct {
         return out.items;
     }
 
+    /// JavaScriptCore's `JSObjectCopyPropertyNames` snapshot: enumerable string
+    /// names from the object and its prototype chain, with first occurrence
+    /// winning. Unlike language `for-in`, host `getPropertyNames` callback keys
+    /// participate through the host-class own-key bridge.
+    pub fn cApiPropertyNameSnapshot(self: *Interpreter, start: *value.Object) EvalError![]const []const u8 {
+        var out: std.ArrayListUnmanaged([]const u8) = .empty;
+        var visited: std.StringHashMapUnmanaged(void) = .empty;
+        var cur: ?*value.Object = start;
+        while (cur) |object| {
+            for (try self.objectOwnKeysList(object)) |key| {
+                if (value.isSymbolKey(key) or value.isPrivateKey(key) or visited.contains(key)) continue;
+                try visited.put(self.arena, key, {});
+                const enumerable = if (moduleNsOf(object) != null) blk: {
+                    const desc = try moduleNsDesc(self, object, key);
+                    break :blk desc.isObject() and if (desc.asObj().getOwn("enumerable")) |entry| entry.toBoolean() else false;
+                } else if (object.proxyHandler() != null or object.proxy_revoked) blk: {
+                    const desc = try builtins.objectGetOwnPropertyDescriptor(@ptrCast(self), Value.undef(), &.{ Value.obj(object), try self.keyToValue(key) });
+                    break :blk desc.isObject() and if (desc.asObj().getOwn("enumerable")) |entry| entry.toBoolean() else false;
+                } else try self.enumerableOwnPropertyResult(object, key);
+                if (enumerable) try out.append(self.arena, key);
+            }
+            cur = object.protoAtomic();
+        }
+        return out.items;
+    }
+
     /// The for-in key list of `v` as a fresh array. Null/undefined (and
     /// primitives) yield an empty array. Used by the generator VM's `enum_keys`
     /// opcode to drive for-in via the for-of machinery.

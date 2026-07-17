@@ -36,7 +36,7 @@
     {"name":"JSClassCreate","header":"JSObjectRef.h","status":"implemented"},
     {"name":"JSClassRetain","header":"JSObjectRef.h","status":"implemented"},
     {"name":"JSClassRelease","header":"JSObjectRef.h","status":"implemented"},
-    {"name":"JSObjectMake","header":"JSObjectRef.h","status":"pending","issue":137,"note":"Class ownership, identity, initialize/finalize, shared prototypes, static functions, static value reflection/deletion, and inherited dynamic has/get/set/delete callbacks are implemented; property-name, call/constructor, hasInstance, and conversion callbacks remain pending."},
+    {"name":"JSObjectMake","header":"JSObjectRef.h","status":"pending","issue":137,"note":"Class ownership, identity, initialize/finalize, shared prototypes, static functions, static value reflection/deletion, and inherited dynamic has/get/set/delete/property-name callbacks are implemented; call/constructor, hasInstance, and conversion callbacks remain pending."},
     {"name":"JSObjectMakeFunctionWithCallback","header":"JSObjectRef.h","status":"implemented"},
     {"name":"JSObjectMakeConstructor","header":"JSObjectRef.h","status":"pending","issue":137},
     {"name":"JSObjectMakeArray","header":"JSObjectRef.h","status":"implemented"},
@@ -63,12 +63,12 @@
     {"name":"JSObjectCallAsFunction","header":"JSObjectRef.h","status":"implemented"},
     {"name":"JSObjectIsConstructor","header":"JSObjectRef.h","status":"implemented"},
     {"name":"JSObjectCallAsConstructor","header":"JSObjectRef.h","status":"implemented"},
-    {"name":"JSObjectCopyPropertyNames","header":"JSObjectRef.h","status":"pending","issue":137},
-    {"name":"JSPropertyNameArrayRetain","header":"JSObjectRef.h","status":"pending","issue":137},
-    {"name":"JSPropertyNameArrayRelease","header":"JSObjectRef.h","status":"pending","issue":137},
-    {"name":"JSPropertyNameArrayGetCount","header":"JSObjectRef.h","status":"pending","issue":137},
-    {"name":"JSPropertyNameArrayGetNameAtIndex","header":"JSObjectRef.h","status":"pending","issue":137},
-    {"name":"JSPropertyNameAccumulatorAddName","header":"JSObjectRef.h","status":"pending","issue":137},
+    {"name":"JSObjectCopyPropertyNames","header":"JSObjectRef.h","status":"implemented"},
+    {"name":"JSPropertyNameArrayRetain","header":"JSObjectRef.h","status":"implemented"},
+    {"name":"JSPropertyNameArrayRelease","header":"JSObjectRef.h","status":"implemented"},
+    {"name":"JSPropertyNameArrayGetCount","header":"JSObjectRef.h","status":"implemented"},
+    {"name":"JSPropertyNameArrayGetNameAtIndex","header":"JSObjectRef.h","status":"implemented"},
+    {"name":"JSPropertyNameAccumulatorAddName","header":"JSObjectRef.h","status":"implemented"},
     {"name":"JSStringCreateWithCharacters","header":"JSStringRef.h","status":"implemented"},
     {"name":"JSStringCreateWithUTF8CString","header":"JSStringRef.h","status":"implemented"},
     {"name":"JSStringRetain","header":"JSStringRef.h","status":"implemented"},
@@ -137,28 +137,28 @@
   "types": [
     {"name":"JSContextGroupRef","status":"implemented"}, {"name":"JSContextRef","status":"implemented"},
     {"name":"JSGlobalContextRef","status":"implemented"}, {"name":"JSStringRef","status":"implemented"},
-    {"name":"JSClassRef","status":"pending","issue":137}, {"name":"JSPropertyNameArrayRef","status":"pending","issue":137},
-    {"name":"JSPropertyNameAccumulatorRef","status":"pending","issue":137}, {"name":"JSValueRef","status":"implemented"},
+    {"name":"JSClassRef","status":"implemented"}, {"name":"JSPropertyNameArrayRef","status":"implemented"},
+    {"name":"JSPropertyNameAccumulatorRef","status":"implemented"}, {"name":"JSValueRef","status":"implemented"},
     {"name":"JSObjectRef","status":"implemented"}, {"name":"JSChar","status":"implemented"},
-    {"name":"JSStaticValue","status":"pending","issue":137}, {"name":"JSStaticFunction","status":"pending","issue":137},
+    {"name":"JSStaticValue","status":"implemented"}, {"name":"JSStaticFunction","status":"implemented"},
     {"name":"JSClassDefinition","status":"pending","issue":137}
   ],
   "callbacks": [
     {"name":"JSTypedArrayBytesDeallocator","status":"implemented"},
-    {"name":"JSObjectInitializeCallback","status":"pending","issue":137}, {"name":"JSObjectFinalizeCallback","status":"pending","issue":137},
-    {"name":"JSObjectHasPropertyCallback","status":"pending","issue":137}, {"name":"JSObjectGetPropertyCallback","status":"pending","issue":137},
-    {"name":"JSObjectSetPropertyCallback","status":"pending","issue":137}, {"name":"JSObjectDeletePropertyCallback","status":"pending","issue":137},
-    {"name":"JSObjectGetPropertyNamesCallback","status":"pending","issue":137}, {"name":"JSObjectCallAsFunctionCallback","status":"implemented"},
+    {"name":"JSObjectInitializeCallback","status":"implemented"}, {"name":"JSObjectFinalizeCallback","status":"implemented"},
+    {"name":"JSObjectHasPropertyCallback","status":"implemented"}, {"name":"JSObjectGetPropertyCallback","status":"implemented"},
+    {"name":"JSObjectSetPropertyCallback","status":"implemented"}, {"name":"JSObjectDeletePropertyCallback","status":"implemented"},
+    {"name":"JSObjectGetPropertyNamesCallback","status":"implemented"}, {"name":"JSObjectCallAsFunctionCallback","status":"implemented"},
     {"name":"JSObjectCallAsConstructorCallback","status":"pending","issue":137}, {"name":"JSObjectHasInstanceCallback","status":"pending","issue":137},
     {"name":"JSObjectConvertToTypeCallback","status":"pending","issue":137}
   ],
   "enums": [
     {"name":"JSType","status":"implemented"}, {"name":"JSTypedArrayType","status":"implemented"},
     {"name":"JSRelationCondition","status":"implemented"}, {"name":"JSPropertyAttributes","status":"implemented"},
-    {"name":"JSClassAttributes","status":"pending","issue":137}
+    {"name":"JSClassAttributes","status":"implemented"}
   ],
   "data_symbols": [
-    {"name":"kJSClassDefinitionEmpty","status":"pending","issue":137}
+    {"name":"kJSClassDefinitionEmpty","status":"implemented"}
   ],
   "zig_js_extensions": [
     "ZJSGlobalContextCreateThreaded", "ZJSValueProtect", "ZJSValueUnprotect",

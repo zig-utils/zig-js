@@ -189,11 +189,11 @@ JSValueRef result = JSEvaluateScript(ctx, script, NULL, NULL, 0, NULL);
 double n = JSValueToNumber(ctx, result, NULL); // 2.0
 ```
 
-The current exported C surface has 107 functions:
+The current exported C surface has 113 functions:
 
 - **Context lifecycle** - create/retain/release, global object/context lookup, owned context names, syntax-only checking, evaluation, collection, and the threaded-context extension.
 - **Values** - type and Symbol/BigInt predicates, equality/relations/`instanceof`, public-class identity, primitive/fresh-Symbol/exact-BigInt construction, JSON parse/stringify, exact 32/64-bit conversions, coercions, and protected handles.
-- **Objects and class ownership** - deep-copied, atomically retained `JSClassRef` definitions with retained parents, inherited instance identity, parent-first initialization/child-first finalization, GC-rooted shared class prototypes, static functions (including `NoAutomaticPrototype` placement), static value get/set/has/delete dispatch, JSC-compatible static-value descriptors, deterministic own-key enumeration, and inherited dynamic has/get/set/delete callbacks with exception propagation. `JSObjectMake` private data, prototype get/set, property queries/deletion, indexed reads/writes, arrays/deferred promises, and function call/construct helpers are also implemented. Property-name, call/constructor, `hasInstance`, and conversion callbacks stay tracked in [#137](https://github.com/zig-utils/zig-js/issues/137).
+- **Objects and class ownership** - deep-copied, atomically retained `JSClassRef` definitions with retained parents, inherited instance identity, parent-first initialization/child-first finalization, GC-rooted shared class prototypes, static functions (including `NoAutomaticPrototype` placement), static value get/set/has/delete dispatch, JSC-compatible static-value descriptors, deterministic own-key enumeration, inherited dynamic has/get/set/delete/property-name callbacks, and retained property-name snapshots. `JSObjectMake` private data, prototype get/set, property queries/deletion, indexed reads/writes, arrays/deferred promises, and function call/construct helpers are also implemented. Call/constructor, `hasInstance`, and conversion callbacks stay tracked in [#137](https://github.com/zig-utils/zig-js/issues/137).
 - **Typed arrays and buffers** - `JSValueGetTypedArrayType`, the four public `JSObjectMakeTypedArray*` construction paths, typed-array type/bytes/length/offset/buffer queries, and no-copy `ArrayBuffer` construction/bytes/length with exactly-once embedder deallocation.
 - **Strings** - UTF-8 and UTF-16 construction, retain/release, UTF-16 length and stable borrowed characters, maximum UTF-8 sizing and conversion, and code-unit/UTF-8 equality.
 - **Worker extension** - `JSWorkerCreate`, resource-bounded `JSWorkerCreateWithLimits`, `JSWorkerPostMessage`, `JSWorkerReceive`, `JSWorkerTerminate`, `JSWorkerRelease`.
@@ -205,14 +205,15 @@ the public JSC-compatible calls correctly return `void`. `JSObjectMakeDeferredPr
 
 The [macOS 27.0 public API inventory](docs/c-api/jsc-public-api-macos-27.0.json)
 tracks all 117 pinned C functions and links every unfinished declaration to its
-implementation issue. The current audit is **97 implemented / 20 pending**, with
-**98 public functions + 9 zig-js extensions** exported. `zig build c-api-audit` checks declaration/export drift;
+implementation issue. The current audit is **103 implemented / 14 pending**, with
+**104 public functions + 9 zig-js extensions** exported. `zig build c-api-audit` checks declaration/export drift;
 `zig build test-c-api` additionally compiles, links, and runs real C and C++ hosts.
 On macOS, `zig build c-api-jsc-diff` verifies the pinned SDK hashes, compiles the
 same value/class-API fixture against zig-js and system JavaScriptCore, and requires
-byte-for-byte identical results. The current fixture matches all **23 rows**
-(`086732cdbe02b61a`), including static and dynamic class properties, reflection,
-attribute-aware deletion, inherited callbacks, fallback behavior, and callback throws.
+byte-for-byte identical results. The current fixture matches all **25 rows**
+(`6cd37c97bdb91aa0`), including static and dynamic class properties, reflection,
+attribute-aware deletion, inherited callbacks, property-name snapshots, fallback
+behavior, and callback throws.
 Declarations marked `pending` are present for source compatibility but are not
 safe to call until their linked issue is complete.
 
