@@ -247,6 +247,23 @@ extern "c" fn WebCore__CommonAbortReason__toJS(JSContextRef, u8) EncodedValue;
 
 const PromiseWrapCallback = *const fn (*anyopaque, JSContextRef) callconv(.c) EncodedValue;
 
+const StrongRef = opaque {};
+const WeakRef = opaque {};
+const WeakRefType = enum(u32) {
+    none = 0,
+    fetch_response = 1,
+    postgresql_query_client = 2,
+};
+
+extern "c" fn Bun__StrongRef__new(JSContextRef, EncodedValue) ?*StrongRef;
+extern "c" fn Bun__StrongRef__set(?*StrongRef, JSContextRef, EncodedValue) void;
+extern "c" fn Bun__StrongRef__clear(?*StrongRef) void;
+extern "c" fn Bun__StrongRef__delete(?*StrongRef) void;
+extern "c" fn Bun__WeakRef__new(JSContextRef, EncodedValue, WeakRefType, ?*anyopaque) ?*WeakRef;
+extern "c" fn Bun__WeakRef__get(?*WeakRef) EncodedValue;
+extern "c" fn Bun__WeakRef__clear(?*WeakRef) void;
+extern "c" fn Bun__WeakRef__delete(?*WeakRef) void;
+
 const PromiseCallbackState = struct {
     value: EncodedValue,
     calls: usize = 0,
@@ -2097,6 +2114,40 @@ pub fn main() void {
     expectPromise(sibling_context, created_promise, .pending, null);
 
     const direct_value = evaluate(context, "globalThis.__private_direct_value = { marker: 1 }; __private_direct_value");
+    const strong = Bun__StrongRef__new(context, direct_value) orelse fail("private StrongRef creation failed");
+    const strong_slot: *const EncodedValue = @ptrCast(@alignCast(strong));
+    if (strong_slot.* != direct_value)
+        fail("private StrongRef direct slot identity mismatch");
+    const sibling_strong_value = evaluate(sibling_context, "globalThis.__private_strong_sibling = { marker: 2 }; __private_strong_sibling");
+    Bun__StrongRef__set(strong, sibling_context, sibling_strong_value);
+    if (strong_slot.* != sibling_strong_value)
+        fail("private StrongRef sibling set mismatch");
+    Bun__StrongRef__set(strong, foreign_context, evaluate(foreign_context, "({ foreign: true })"));
+    if (strong_slot.* != sibling_strong_value)
+        fail("private StrongRef accepted foreign VM set");
+    Bun__StrongRef__clear(strong);
+    Bun__StrongRef__clear(strong);
+    if (strong_slot.* != .empty)
+        fail("private StrongRef clear mismatch");
+    Bun__StrongRef__delete(strong);
+    Bun__StrongRef__clear(null);
+    Bun__StrongRef__delete(null);
+
+    const weak_context: *anyopaque = @ptrFromInt(0x209);
+    const weak = Bun__WeakRef__new(context, direct_value, .fetch_response, weak_context) orelse fail("private WeakRef creation failed");
+    if (!JSC__JSValue__isStrictEqual(Bun__WeakRef__get(weak), direct_value, context))
+        fail("private WeakRef live identity mismatch");
+    Bun__WeakRef__clear(weak);
+    Bun__WeakRef__clear(weak);
+    if (Bun__WeakRef__get(weak) != .empty)
+        fail("private WeakRef clear mismatch");
+    Bun__WeakRef__delete(weak);
+    if (Bun__WeakRef__new(context, direct_value, .none, null) != null or
+        Bun__WeakRef__new(context, EncodedValue.fromInt32(1), .fetch_response, null) != null or
+        Bun__WeakRef__get(null) != .empty)
+        fail("private WeakRef invalid-input mismatch");
+    Bun__WeakRef__clear(null);
+    Bun__WeakRef__delete(null);
     const resolved_promise_cell = JSC__JSPromise__resolvedPromise(sibling_context, direct_value) orelse fail("private resolved JSPromise failed");
     const resolved_promise = EncodedValue.fromBits(@intFromPtr(resolved_promise_cell));
     const resolved_value_promise = JSC__JSPromise__resolvedPromiseValue(context, direct_value);
@@ -2571,5 +2622,5 @@ pub fn main() void {
         TopExceptionScope__exceptionIncludingTraps(&verification_scope) != null)
         fail("private TopExceptionScope destruction mismatch");
 
-    std.debug.print("Home private value shims: 152/152 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 160/160 symbols linked; runtime matrix passed\n", .{});
 }

@@ -647,6 +647,7 @@ const RootPublishVisitor = struct {
     // Roots are strong; weak edges are reconciled by the marker at the
     // world-stopped finish, so a publishing mutator must not shade them.
     pub fn markWeak(_: *RootPublishVisitor, _: *?*anyopaque) void {}
+    pub fn markWeakAtomic(_: *RootPublishVisitor, _: *std.atomic.Value(?*anyopaque)) void {}
     // The interpreter root set is precise; no conservative words to publish.
     pub fn markConservativeWord(_: *RootPublishVisitor, _: usize) void {}
     pub fn markConservativeWords(_: *RootPublishVisitor, _: [*]const usize, _: usize) void {}
@@ -816,6 +817,8 @@ pub const Binding = struct {
             const vp: *const Value = @ptrCast(@alignCast(h.ref));
             markValue(v, vp.*);
         }
+        for (ctx.private_strong_roots.items) |root| markValue(v, root.value);
+        for (ctx.private_weak_roots.items) |root| v.markWeakAtomic(&root.target);
         ctx.realmUnlock();
 
         if (ctx.gil) |g| jsthread.traceGilTaskRoots(g, v);
@@ -932,6 +935,10 @@ pub const Binding = struct {
             },
             else => {},
         }
+    }
+
+    pub fn afterWeakRoots(self: *Binding) void {
+        self.context.runPrivateWeakFinalizers();
     }
 
     /// A cell is being reclaimed. Arena-mode `ArrayBufferData` is released with

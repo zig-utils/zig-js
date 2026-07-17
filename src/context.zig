@@ -2523,6 +2523,11 @@ pub const Context = struct {
     /// aliases `*Value`, its first field); `gc.zig`'s `traceRoots` marks them
     /// until matching `JSValueUnprotect` calls remove the entry.
     c_api_handles: std.ArrayListUnmanaged(CApiHandle) = .empty,
+    /// VM-scoped private embedding handles. Records live in the VM arena and
+    /// remain address-stable because zig-gc retains weak-slot addresses through
+    /// the end of each collection cycle.
+    private_strong_roots: std.ArrayListUnmanaged(*PrivateStrongRoot) = .empty,
+    private_weak_roots: std.ArrayListUnmanaged(*PrivateWeakRoot) = .empty,
     /// `Thread` records spawned in this realm (the records live in the
     /// arena; the list is gpa-backed). `destroy` waits for all of them.
     js_threads: std.ArrayListUnmanaged(*jsthread.ThreadRecord) = .empty,
@@ -2652,6 +2657,20 @@ pub const Context = struct {
     pub const CApiHandle = struct {
         ref: *anyopaque,
         count: usize,
+    };
+    /// Stable storage embedded in a private strong-reference handle. The C ABI
+    /// owns the wrapper; the Context owns only this root-list entry.
+    pub const PrivateStrongRoot = struct {
+        value: value.Value,
+    };
+    pub const PrivateWeakFinalizeFn = *const fn (?*anyopaque) callconv(.c) void;
+    /// Stable storage embedded in a private weak-reference handle. Atomic
+    /// clearing lets the collector race safely with embedder `get`/`clear`.
+    pub const PrivateWeakRoot = struct {
+        target: std.atomic.Value(?*anyopaque) = .init(null),
+        notify_on_collect: std.atomic.Value(bool) = .init(false),
+        finalize_fn: ?PrivateWeakFinalizeFn = null,
+        finalize_context: ?*anyopaque = null,
     };
     /// Heap, root binding, and cell backing are allocated together so
     /// GC-enabled context creation/destruction pays one GPA allocation instead
@@ -3149,6 +3168,8 @@ pub const Context = struct {
         self.active_interpreters.deinit(self.gpa);
         self.finalization_cleanup_jobs.deinit(self.gpa);
         self.c_api_handles.deinit(self.gpa);
+        self.private_strong_roots.deinit(self.gpa);
+        self.private_weak_roots.deinit(self.gpa);
         // Reclaim every GC cell (running finalizers) before the arena and the
         // Context itself go away — GC cells are gpa-backed and disjoint from the
         // arena. Keep `sab_retains` alive until after finalizers run: live
@@ -3223,6 +3244,8 @@ pub const Context = struct {
         self.active_interpreters.deinit(self.gpa);
         self.finalization_cleanup_jobs.deinit(self.gpa);
         self.c_api_handles.deinit(self.gpa);
+        self.private_strong_roots.deinit(self.gpa);
+        self.private_weak_roots.deinit(self.gpa);
         for (self.c_api_object_owners.items) |owner| {
             owner.finishOnce();
             self.gpa.destroy(owner);
@@ -3452,6 +3475,29 @@ pub const Context = struct {
         if (self.parallel_js) {
             gc_runtime.leaveTraceSensitiveLock();
             self.realm_lock.unlock();
+        }
+    }
+
+    /// Deliver private weak-owner cleanup after zig-gc has atomically cleared
+    /// dead targets. Claim one callback under the realm lock, then invoke it
+    /// unlocked because host cleanup may delete handles or otherwise re-enter.
+    pub fn runPrivateWeakFinalizers(self: *Context) void {
+        while (true) {
+            var found = false;
+            var finalize_fn: ?PrivateWeakFinalizeFn = null;
+            var finalize_context: ?*anyopaque = null;
+            self.realmLock();
+            for (self.private_weak_roots.items) |root| {
+                if (root.target.load(.acquire) != null) continue;
+                if (root.notify_on_collect.cmpxchgStrong(true, false, .acq_rel, .acquire) != null) continue;
+                found = true;
+                finalize_fn = root.finalize_fn;
+                finalize_context = root.finalize_context;
+                break;
+            }
+            self.realmUnlock();
+            if (!found) return;
+            if (finalize_fn) |function| function(finalize_context);
         }
     }
 

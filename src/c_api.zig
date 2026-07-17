@@ -166,6 +166,7 @@ const ReachabilityVisitor = struct {
         return false;
     }
     pub fn markWeak(_: *ReachabilityVisitor, _: *?*anyopaque) void {}
+    pub fn markWeakAtomic(_: *ReachabilityVisitor, _: *std.atomic.Value(?*anyopaque)) void {}
     pub fn deferToFinish(_: *ReachabilityVisitor, _: *anyopaque) void {}
     pub fn isManaged(_: *ReachabilityVisitor, cell: ?*anyopaque) bool {
         return cell != null;
@@ -314,6 +315,48 @@ const CContextGroup = struct {
         gpa.destroy(self);
     }
 };
+
+/// Bun's `Strong.Impl` reads the first machine word directly as an
+/// EncodedJSValue, so keep the encoded slot at offset zero. The paired internal
+/// value is what zig-js traces; cell encodings point at arena-stable `Boxed`
+/// handles and therefore remain valid until the VM dies.
+const PrivateStrongRef = struct {
+    encoded: EncodedValue,
+    root: Context.PrivateStrongRoot,
+    group: *CContextGroup,
+    alive: bool = true,
+};
+
+const PrivateWeakRefType = enum(u32) {
+    none = 0,
+    fetch_response = 1,
+    postgresql_query_client = 2,
+    _,
+};
+
+const PrivateWeakRef = struct {
+    root: Context.PrivateWeakRoot,
+    group: *CContextGroup,
+    ref_type: PrivateWeakRefType,
+    callback_context: ?*anyopaque,
+    alive: bool = true,
+};
+
+fn privateDefaultFetchResponseFinalize(_: ?*anyopaque) callconv(.c) void {}
+
+comptime {
+    @export(&privateDefaultFetchResponseFinalize, .{
+        .name = "Bun__FetchResponse_finalize",
+        .linkage = .weak,
+    });
+}
+
+extern fn Bun__FetchResponse_finalize(?*anyopaque) callconv(.c) void;
+
+comptime {
+    if (@offsetOf(PrivateStrongRef, "encoded") != 0 or @sizeOf(EncodedValue) != @sizeOf(i64))
+        @compileError("private StrongRef must expose one EncodedJSValue at offset zero");
+}
 
 pub const ZJSInspectorMessageCallback = ?*const fn ([*]const u8, usize, ?*anyopaque) callconv(.c) void;
 pub const ZJSInspectorSessionRef = ?*anyopaque;
@@ -4353,6 +4396,158 @@ export fn JSC__VM__deleteAllCode(vm_ref: ?*anyopaque, global: JSContextRef) call
     context.clearModuleRegistry();
     group.primary.jit_owner.clear();
     group.primary.requestGarbageCollection();
+}
+
+fn privateStrongRefRemove(ref: *PrivateStrongRef) void {
+    const primary = ref.group.primary;
+    primary.realmLock();
+    defer primary.realmUnlock();
+    if (!ref.alive) return;
+    ref.alive = false;
+    ref.encoded = .empty;
+    ref.root.value = Value.undef();
+    for (primary.private_strong_roots.items, 0..) |root, index| {
+        if (root == &ref.root) {
+            _ = primary.private_strong_roots.swapRemove(index);
+            return;
+        }
+    }
+}
+
+export fn Bun__StrongRef__new(global: JSContextRef, encoded: EncodedValue) callconv(.c) ?*PrivateStrongRef {
+    const context = ctxForHandleInspection(global) orelse return null;
+    const opaque_group = context.c_api_group orelse return null;
+    const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+    const internal = privateValueFrom(global, encoded) orelse return null;
+    if (!group.retain()) return null;
+    errdefer if (group.release()) group.destroy();
+
+    const ref = group.primary.arena().create(PrivateStrongRef) catch return null;
+    ref.* = .{
+        .encoded = encoded,
+        .root = .{ .value = internal },
+        .group = group,
+    };
+    group.primary.realmLock();
+    defer group.primary.realmUnlock();
+    group.primary.private_strong_roots.append(group.primary.gpa, &ref.root) catch return null;
+    return ref;
+}
+
+export fn Bun__StrongRef__set(ref: ?*PrivateStrongRef, global: JSContextRef, encoded: EncodedValue) callconv(.c) void {
+    const strong = ref orelse return;
+    const context = ctxForHandleInspection(global) orelse return;
+    if (context.c_api_group != @as(?*anyopaque, @ptrCast(strong.group))) return;
+    const internal = privateValueFrom(global, encoded) orelse return;
+    const primary = strong.group.primary;
+    primary.realmLock();
+    defer primary.realmUnlock();
+    if (!strong.alive) return;
+    // Publish the traced value and consumer-visible encoding as one operation
+    // with respect to the collector's root snapshot.
+    strong.root.value = internal;
+    strong.encoded = encoded;
+}
+
+export fn Bun__StrongRef__clear(ref: ?*PrivateStrongRef) callconv(.c) void {
+    const strong = ref orelse return;
+    const primary = strong.group.primary;
+    primary.assertOwnerThread();
+    primary.realmLock();
+    defer primary.realmUnlock();
+    if (!strong.alive) return;
+    strong.root.value = Value.undef();
+    strong.encoded = .empty;
+}
+
+export fn Bun__StrongRef__delete(ref: ?*PrivateStrongRef) callconv(.c) void {
+    const strong = ref orelse return;
+    const group = strong.group;
+    group.primary.assertOwnerThread();
+    privateStrongRefRemove(strong);
+    if (group.release()) group.destroy();
+}
+
+fn privateWeakRefRemove(ref: *PrivateWeakRef) void {
+    const primary = ref.group.primary;
+    primary.realmLock();
+    defer primary.realmUnlock();
+    if (!ref.alive) return;
+    ref.alive = false;
+    ref.root.notify_on_collect.store(false, .release);
+    _ = ref.root.target.swap(null, .acq_rel);
+    for (primary.private_weak_roots.items, 0..) |root, index| {
+        if (root == &ref.root) {
+            _ = primary.private_weak_roots.swapRemove(index);
+            return;
+        }
+    }
+}
+
+export fn Bun__WeakRef__new(
+    global: JSContextRef,
+    encoded: EncodedValue,
+    ref_type: PrivateWeakRefType,
+    callback_context: ?*anyopaque,
+) callconv(.c) ?*PrivateWeakRef {
+    const context = ctxForHandleInspection(global) orelse return null;
+    const opaque_group = context.c_api_group orelse return null;
+    const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+    const internal = privateValueFrom(global, encoded) orelse return null;
+    if (!internal.isObject() or internal.asObj().is_symbol or internal.asObj().is_bigint) return null;
+    switch (ref_type) {
+        .fetch_response, .postgresql_query_client => {},
+        else => return null,
+    }
+    if (!group.retain()) return null;
+    errdefer if (group.release()) group.destroy();
+
+    const ref = group.primary.arena().create(PrivateWeakRef) catch return null;
+    const finalize_fn: ?Context.PrivateWeakFinalizeFn = switch (ref_type) {
+        .fetch_response => Bun__FetchResponse_finalize,
+        .postgresql_query_client => null,
+        else => unreachable,
+    };
+    ref.* = .{
+        .root = .{
+            .target = .init(@ptrCast(internal.asObj())),
+            .notify_on_collect = .init(finalize_fn != null and callback_context != null),
+            .finalize_fn = finalize_fn,
+            .finalize_context = callback_context,
+        },
+        .group = group,
+        .ref_type = ref_type,
+        .callback_context = callback_context,
+    };
+    group.primary.realmLock();
+    defer group.primary.realmUnlock();
+    group.primary.private_weak_roots.append(group.primary.gpa, &ref.root) catch return null;
+    // Permit zig-gc's weak passes even when no JavaScript WeakRef/WeakMap has
+    // been constructed in this realm.
+    group.primary.gc_weak_work.store(true, .release);
+    return ref;
+}
+
+export fn Bun__WeakRef__get(ref: ?*PrivateWeakRef) callconv(.c) EncodedValue {
+    const weak = ref orelse return .empty;
+    if (!weak.alive) return .empty;
+    const target = weak.root.target.load(.acquire) orelse return .empty;
+    return privateEncodedFromValue(weak.group.primary, Value.obj(@ptrCast(@alignCast(target))));
+}
+
+export fn Bun__WeakRef__clear(ref: ?*PrivateWeakRef) callconv(.c) void {
+    const weak = ref orelse return;
+    if (!weak.alive) return;
+    weak.root.notify_on_collect.store(false, .release);
+    _ = weak.root.target.swap(null, .acq_rel);
+}
+
+export fn Bun__WeakRef__delete(ref: ?*PrivateWeakRef) callconv(.c) void {
+    const weak = ref orelse return;
+    const group = weak.group;
+    group.primary.assertOwnerThread();
+    privateWeakRefRemove(weak);
+    if (group.release()) group.destroy();
 }
 
 fn privateRunFullCollection(group: *CContextGroup) usize {
@@ -12985,6 +13180,85 @@ test "C-API: worker handles are owner-thread affine" {
     const t = try std.Thread.spawn(.{}, Probe.run, .{ w, &rejected });
     t.join();
     try std.testing.expect(rejected);
+}
+
+test "private embedding references retain strong targets and clear weak targets" {
+    const Factory = struct {
+        fn create() !*CContextGroup {
+            const primary = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+            errdefer primary.destroy();
+            const group = try gpa.create(CContextGroup);
+            group.* = .{
+                .owner_thread = std.Thread.getCurrentId(),
+                .primary = primary,
+                .atom_strings = strcell.InternTable.init(gpa),
+            };
+            primary.c_api_group = @ptrCast(group);
+            primary.initCApiRef();
+            return group;
+        }
+    };
+    const Finalizer = struct {
+        fn run(raw: ?*anyopaque) callconv(.c) void {
+            const calls: *usize = @ptrCast(@alignCast(raw.?));
+            calls.* += 1;
+        }
+    };
+
+    const group = try Factory.create();
+    defer if (group.release()) group.destroy();
+    const context = group.primary;
+    const global: JSContextRef = @ptrCast(context);
+
+    const target = try context.evaluate("({ tag: 209 })");
+    const encoded = privateEncodedFromValue(context, target);
+    const strong = Bun__StrongRef__new(global, encoded) orelse return error.StrongRefCreateFailed;
+    defer Bun__StrongRef__delete(strong);
+    const callback_context: *anyopaque = @ptrFromInt(0x209);
+    const weak = Bun__WeakRef__new(global, encoded, .fetch_response, callback_context) orelse return error.WeakRefCreateFailed;
+    defer Bun__WeakRef__delete(weak);
+    var finalizer_calls: usize = 0;
+    weak.root.finalize_fn = Finalizer.run;
+    weak.root.finalize_context = &finalizer_calls;
+
+    try std.testing.expectEqual(@as(usize, 0), @offsetOf(PrivateStrongRef, "encoded"));
+    try std.testing.expectEqual(encoded, strong.encoded);
+    try std.testing.expectEqual(PrivateWeakRefType.fetch_response, weak.ref_type);
+    try std.testing.expectEqual(callback_context, weak.callback_context.?);
+    try std.testing.expectEqual(@as(usize, 1), context.private_strong_roots.items.len);
+    try std.testing.expectEqual(@as(usize, 1), context.private_weak_roots.items.len);
+
+    _ = JSC__VM__runGC(@ptrCast(group), true);
+    const live = Bun__WeakRef__get(weak);
+    try std.testing.expect(live != .empty);
+    try std.testing.expect(value.strictEquals(privateValueFrom(global, live).?, target));
+
+    Bun__StrongRef__clear(strong);
+    Bun__StrongRef__clear(strong);
+    try std.testing.expectEqual(EncodedValue.empty, strong.encoded);
+    _ = JSC__VM__runGC(@ptrCast(group), true);
+    try std.testing.expectEqual(EncodedValue.empty, Bun__WeakRef__get(weak));
+    try std.testing.expectEqual(@as(usize, 1), finalizer_calls);
+    _ = JSC__VM__runGC(@ptrCast(group), true);
+    try std.testing.expectEqual(@as(usize, 1), finalizer_calls);
+
+    const manually_cleared_target = try context.evaluate("({ tag: 'manual-clear' })");
+    const manually_cleared_encoded = privateEncodedFromValue(context, manually_cleared_target);
+    const manually_cleared = Bun__WeakRef__new(global, manually_cleared_encoded, .fetch_response, callback_context) orelse
+        return error.WeakRefCreateFailed;
+    defer Bun__WeakRef__delete(manually_cleared);
+    var manual_finalizer_calls: usize = 0;
+    manually_cleared.root.finalize_fn = Finalizer.run;
+    manually_cleared.root.finalize_context = &manual_finalizer_calls;
+    Bun__WeakRef__clear(manually_cleared);
+    _ = JSC__VM__runGC(@ptrCast(group), true);
+    try std.testing.expectEqual(@as(usize, 0), manual_finalizer_calls);
+
+    Bun__WeakRef__clear(weak);
+    Bun__WeakRef__clear(weak);
+    try std.testing.expectEqual(EncodedValue.empty, Bun__WeakRef__get(weak));
+    try std.testing.expect(Bun__WeakRef__new(global, EncodedValue.fromInt32(1), .fetch_response, null) == null);
+    try std.testing.expect(Bun__WeakRef__new(global, encoded, .none, null) == null);
 }
 
 test "C-API: JSGarbageCollect honors JSValueProtect/Unprotect (GC on)" {
