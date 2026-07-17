@@ -1953,7 +1953,7 @@ static id ZJSObjectFromValue(JSValue *value, ZJSObjectConversionState *state)
         return ZJSArrayFromValue(value, state);
     if (value.isObject)
         return ZJSDictionaryFromValue(value, state);
-    return value;
+    return nil;
 }
 
 - (id)toObject
