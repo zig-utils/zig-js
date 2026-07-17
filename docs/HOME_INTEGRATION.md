@@ -49,7 +49,7 @@ zig build home-private-abi-audit \
 
 This verifies the live revision, every source hash, signature, classification,
 and calling convention. It replaces a vague source-level estimate, but the 431
-private imports are now 119 implemented / 312 pending under #163. The generated
+private imports are now 137 implemented / 294 pending under #163. The generated
 FFI wrapper emits and resolves `JSFunctionCall` inside its own compiled module,
 so zig-js must not provide a duplicate symbol. The implemented
 slices cover JSC64 value identity, cell equality, truthiness, int32 extraction,
@@ -120,7 +120,12 @@ ordinary/extended UTC ISO text failure-atomically; the Date-now writer shares
 the real Unix wall clock used by JavaScript Date construction. Nine VM exception
 shims add shared pending state
 across sibling realms, stable exception-cell identity, primitive/Error
-preservation, and exact has/clear/take/rethrow classification. Five array/index
+preservation, and exact has/clear/take/rethrow classification. Eighteen top-
+scope, termination, and native-error shims add caller-
+owned 8/56-byte scope storage, pure versus trap-aware reads, stable VM-wide
+termination identity, atomic request/clear and execution-forbidden controls,
+termination-preserving selective clear, and selected-realm OOM/stack errors
+with first-exception preservation. Five array/index
 shims add exact logical lengths and holes, direct put/push/read behavior that
 bypasses inherited setters, observable prototype/getter reads with VM exception
 publication, sparse growth, and the maximum-u32 boundary. Two JSArray
@@ -142,7 +147,7 @@ behavior, and VM exception propagation. Ten Promise/InternalPromise shims add
 selected-realm pending and directly settled promises, exact native downcasts,
 callback Promise passthrough, Error/throw rejection, and normal AnyPromise
 resolution with thenable assimilation and self-resolution protection. Their
-118-symbol combined fixture covers sibling realms, foreign VMs, callback
+136-symbol combined fixture covers sibling realms, foreign VMs, callback
 reentrancy, exception clearing, settled-target no-ops, and the complete
 DOMException code matrix. Seven Home-only
 JSMap shims create selected-realm native maps and directly implement
