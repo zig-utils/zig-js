@@ -227,6 +227,8 @@ extern "c" fn JSC__JSValue__symbolFor(JSContextRef, *const ZigString) EncodedVal
 extern "c" fn JSC__JSValue__symbolKeyFor(EncodedValue, JSContextRef, *ZigString) bool;
 extern "c" fn JSC__JSValue__getSymbolDescription(EncodedValue, JSContextRef, *ZigString) void;
 extern "c" fn JSC__JSValue__asString(EncodedValue) ?*anyopaque;
+extern "c" fn JSC__JSFunction__getSourceCode(EncodedValue, *ZigString) bool;
+extern "c" fn JSC__JSFunction__optimizeSoon(EncodedValue) void;
 extern "c" fn JSC__jsTypeStringForValue(JSContextRef, EncodedValue) ?*anyopaque;
 extern "c" fn JSC__JSString__eql(?*anyopaque, JSContextRef, ?*anyopaque) bool;
 extern "c" fn JSC__JSString__is8Bit(?*anyopaque) bool;
@@ -1038,6 +1040,27 @@ pub fn main() void {
     const typeof_exception = JSGlobalObject__tryTakeException(context);
     if (JSC__Exception__asJSValue(typeof_exception.cellPointer()) != EncodedValue.fromInt32(220))
         fail("typeof projection replaced pending exception");
+
+    const tier_source = "function tier222(n) { if (n <= 0) return 0; return tier222(n - 1) + 1; }";
+    const tier_function = evaluate(context, "(function tier222(n) { if (n <= 0) return 0; return tier222(n - 1) + 1; })");
+    var tier_source_view = ZigString{ .tagged_ptr = 0x222, .len = 222 };
+    if (!JSC__JSFunction__getSourceCode(tier_function, &tier_source_view) or
+        tier_source_view.tagged_ptr >> 63 != 0 or tier_source_view.len != tier_source.len or
+        !JSC__JSValue__isStrictEqual(ZigString__toValueGC(&tier_source_view, context), evaluate(context, "'function tier222(n) { if (n <= 0) return 0; return tier222(n - 1) + 1; }'"), context))
+        fail("private JSFunction source projection mismatch");
+    var rejected_source = ZigString{ .tagged_ptr = 0x222, .len = 222 };
+    if (JSC__JSFunction__getSourceCode(evaluate(context, "Math.max"), &rejected_source) or
+        rejected_source.tagged_ptr != 0x222 or rejected_source.len != 222)
+        fail("private native function source rejection mismatch");
+    exposeCell(context, "__private_tier_222", tier_function);
+    JSC__JSFunction__optimizeSoon(tier_function);
+    if (Bun__JSValue__toNumber(evaluate(context, "__private_tier_222(4)"), context) != 4)
+        fail("private JSFunction tier-up changed execution");
+    JSC__VM__throwError(JSC__JSGlobalObject__vm(context), context, EncodedValue.fromInt32(222));
+    JSC__JSFunction__optimizeSoon(tier_function);
+    const tier_exception = JSGlobalObject__tryTakeException(context);
+    if (JSC__Exception__asJSValue(tier_exception.cellPointer()) != EncodedValue.fromInt32(222))
+        fail("private JSFunction tier-up replaced pending exception");
 
     StringBuilder__init(&string_builder);
     StringBuilder__appendInt(&string_builder, std.math.minInt(i32));
@@ -3085,5 +3108,5 @@ pub fn main() void {
         TopExceptionScope__exceptionIncludingTraps(&verification_scope) != null)
         fail("private TopExceptionScope destruction mismatch");
 
-    std.debug.print("Home private value shims: 201/201 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 203/203 symbols linked; runtime matrix passed\n", .{});
 }

@@ -4458,6 +4458,33 @@ export fn JSC__jsTypeStringForValue(
     return @ptrCast(boxed);
 }
 
+export fn JSC__JSFunction__getSourceCode(
+    encoded: EncodedValue,
+    output: *PrivateZigString,
+) callconv(.c) bool {
+    const boxed = privateBoxedFrom(encoded) orelse return false;
+    if (boxed.private_kind != .value) return false;
+    const function = interp.Interpreter.funcOf(boxed.value) orelse return false;
+    if (function.source.len == 0) return false;
+    const opaque_group = boxed.owner.c_api_group orelse return false;
+    const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+    const view = privateBorrowedZigStringView(group, function.source) catch return false;
+    output.* = view;
+    return true;
+}
+
+export fn JSC__JSFunction__optimizeSoon(encoded: EncodedValue) callconv(.c) void {
+    const boxed = privateBoxedFrom(encoded) orelse return;
+    if (boxed.private_kind != .value) return;
+    const function = interp.Interpreter.funcOf(boxed.value) orelse return;
+    const chunk = function.chunk orelse return;
+    if (chunk.tier.loadState() != .cold) return;
+    // `observeEntry` increments before checking its threshold. A saturated
+    // pre-threshold count therefore makes the next invocation claim compilation
+    // while leaving this scheduling request itself allocation- and codegen-free.
+    chunk.tier.entries.store(std.math.maxInt(u32) - 1, .release);
+}
+
 export fn JSC__JSString__eql(
     left_cell: ?*anyopaque,
     global: JSContextRef,
@@ -15320,6 +15347,76 @@ test "private typeof string projection is exact VM-owned and exception neutral" 
     try std.testing.expectEqual(undefined_cell, try Probe.expect(first, .undefined, "undefined"));
     const preserved = JSGlobalObject__tryTakeException(first);
     try std.testing.expectEqual(EncodedValue.fromInt32(220), JSC__Exception__asJSValue(@ptrFromInt(try preserved.asCellAddress())));
+}
+
+test "private JSFunction source and tier-up controls preserve exact contracts" {
+    const Probe = struct {
+        fn expectSource(context: *Context, encoded: EncodedValue, expected: []const u8) !PrivateZigString {
+            var output = PrivateZigString{ .tagged_ptr = 0x222, .len = 222 };
+            try std.testing.expect(JSC__JSFunction__getSourceCode(encoded, &output));
+            const decoded = try privateZigStringValue(context, &output);
+            try std.testing.expectEqualStrings(expected, decoded.asStr());
+            try std.testing.expectEqual(interp.Interpreter.utf16LenOfString(expected), output.len);
+            return output;
+        }
+    };
+
+    const context = JSGlobalContextCreate(null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(context);
+    const internal = ctxForEvaluation(context) orelse return error.ContextCreateFailed;
+    const cases = [_]struct { []const u8, []const u8 }{
+        .{ "(function named(a) { return a + 1; })", "function named(a) { return a + 1; }" },
+        .{ "x => x * 2", "x => x * 2" },
+        .{ "({ method(x) { return x; } }).method", "method(x) { return x; }" },
+        .{ "(function* gen() { yield 1; })", "function* gen() { yield 1; }" },
+        .{ "(async function task() { return 1; })", "async function task() { return 1; }" },
+        .{ "(class C { constructor(x) { this.x = x; } })", "class C { constructor(x) { this.x = x; } }" },
+    };
+    for (cases) |case| {
+        const encoded = privateEncodedFromValue(internal, try internal.evaluate(case[0]));
+        _ = try Probe.expectSource(internal, encoded, case[1]);
+    }
+
+    const unicode_source = "x => \"😀\"";
+    const unicode_encoded = privateEncodedFromValue(internal, try internal.evaluate(unicode_source));
+    const first_unicode = try Probe.expectSource(internal, unicode_encoded, unicode_source);
+    const second_unicode = try Probe.expectSource(internal, unicode_encoded, unicode_source);
+    try std.testing.expect(first_unicode.tagged_ptr >> 63 == 1);
+    try std.testing.expectEqual(first_unicode.tagged_ptr, second_unicode.tagged_ptr);
+
+    var untouched = PrivateZigString{ .tagged_ptr = 0x222, .len = 222 };
+    for ([_]EncodedValue{
+        EncodedValue.fromInt32(1),
+        privateEncodedFromValue(internal, try internal.evaluate("({})")),
+        privateEncodedFromValue(internal, try internal.evaluate("Math.max")),
+        privateEncodedFromValue(internal, try internal.evaluate("(function f() {}).bind(null)")),
+    }) |invalid| {
+        try std.testing.expect(!JSC__JSFunction__getSourceCode(invalid, &untouched));
+        try std.testing.expectEqual(@as(usize, 0x222), untouched.tagged_ptr);
+        try std.testing.expectEqual(@as(usize, 222), untouched.len);
+        JSC__JSFunction__optimizeSoon(invalid);
+    }
+
+    const tier_value = try internal.evaluate("(function tier(n) { if (n <= 0) return 0; return tier(n - 1) + 1; })");
+    const tier_encoded = privateEncodedFromValue(internal, tier_value);
+    const tier_function = interp.Interpreter.funcOf(tier_value) orelse return error.MissingFunction;
+    const chunk = tier_function.chunk orelse return error.MissingBytecode;
+    try std.testing.expectEqual(@as(u32, 0), chunk.tier.entries.load(.acquire));
+    try std.testing.expectEqual(.cold, chunk.tier.loadState());
+    try internal.global_object.setOwn(internal.arena(), internal.root_shape, "__private_tier_222", tier_value);
+
+    JSC__VM__throwError(JSC__JSGlobalObject__vm(context), context, EncodedValue.fromInt32(222));
+    JSC__JSFunction__optimizeSoon(tier_encoded);
+    try std.testing.expectEqual(@as(u32, std.math.maxInt(u32) - 1), chunk.tier.entries.load(.acquire));
+    const preserved = JSGlobalObject__tryTakeException(context);
+    try std.testing.expectEqual(EncodedValue.fromInt32(222), JSC__Exception__asJSValue(@ptrFromInt(try preserved.asCellAddress())));
+
+    const result = try internal.evaluate("__private_tier_222(4)");
+    try std.testing.expect(result.isNumber() and result.asNum() == 4);
+    try std.testing.expect(chunk.tier.loadState() != .cold);
+    const settled_state = chunk.tier.loadState();
+    JSC__JSFunction__optimizeSoon(tier_encoded);
+    try std.testing.expectEqual(settled_state, chunk.tier.loadState());
 }
 
 test "private VM entry-state query tracks nested and sibling interpreters" {
