@@ -2528,6 +2528,10 @@ pub const Context = struct {
     /// the end of each collection cycle.
     private_strong_roots: std.ArrayListUnmanaged(*PrivateStrongRoot) = .empty,
     private_weak_roots: std.ArrayListUnmanaged(*PrivateWeakRoot) = .empty,
+    /// Per-realm CommonJS extension callbacks. The pointed-to records live in
+    /// the VM arena; their addresses are also present in `private_strong_roots`
+    /// while registered so precise collection retains the functions.
+    private_commonjs_functions: std.ArrayListUnmanaged(*PrivateStrongRoot) = .empty,
     /// `Thread` records spawned in this realm (the records live in the
     /// arena; the list is gpa-backed). `destroy` waits for all of them.
     js_threads: std.ArrayListUnmanaged(*jsthread.ThreadRecord) = .empty,
@@ -3170,6 +3174,8 @@ pub const Context = struct {
         self.c_api_handles.deinit(self.gpa);
         self.private_strong_roots.deinit(self.gpa);
         self.private_weak_roots.deinit(self.gpa);
+        for (self.private_commonjs_functions.items) |root| self.gpa.destroy(root);
+        self.private_commonjs_functions.deinit(self.gpa);
         // Reclaim every GC cell (running finalizers) before the arena and the
         // Context itself go away — GC cells are gpa-backed and disjoint from the
         // arena. Keep `sab_retains` alive until after finalizers run: live
@@ -3246,6 +3252,8 @@ pub const Context = struct {
         self.c_api_handles.deinit(self.gpa);
         self.private_strong_roots.deinit(self.gpa);
         self.private_weak_roots.deinit(self.gpa);
+        for (self.private_commonjs_functions.items) |root| self.gpa.destroy(root);
+        self.private_commonjs_functions.deinit(self.gpa);
         for (self.c_api_object_owners.items) |owner| {
             owner.finishOnce();
             self.gpa.destroy(owner);

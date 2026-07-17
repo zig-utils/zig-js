@@ -360,6 +360,16 @@ const PrivateWeakRef = struct {
     alive: bool = true,
 };
 
+const PrivateMarkedArgumentBuffer = struct {
+    magic: u64 = private_marked_argument_buffer_magic,
+    values: std.ArrayListUnmanaged(EncodedValue) = .empty,
+    roots: std.ArrayListUnmanaged(*Context.PrivateStrongRoot) = .empty,
+    group: ?*CContextGroup = null,
+};
+
+const private_marked_argument_buffer_magic: u64 = 0x5a4a_534d_4142_5546; // "ZJSMABUF"
+const PrivateMarkedArgumentCallback = *const fn (?*anyopaque, ?*anyopaque) callconv(.c) void;
+
 fn privateDefaultFetchResponseFinalize(_: ?*anyopaque) callconv(.c) void {}
 
 comptime {
@@ -4917,6 +4927,139 @@ export fn Bun__WeakRef__delete(ref: ?*PrivateWeakRef) callconv(.c) void {
     group.primary.assertOwnerThread();
     privateWeakRefRemove(weak);
     if (group.release()) group.destroy();
+}
+
+fn privateRemoveStrongRootLocked(context: *Context, target: *Context.PrivateStrongRoot) void {
+    for (context.private_strong_roots.items, 0..) |root, index| {
+        if (root == target) {
+            _ = context.private_strong_roots.swapRemove(index);
+            return;
+        }
+    }
+}
+
+fn privateMarkedArgumentBufferCleanup(buffer: *PrivateMarkedArgumentBuffer) void {
+    if (buffer.magic != private_marked_argument_buffer_magic) return;
+    if (buffer.group) |group| {
+        const primary = group.primary;
+        primary.realmLock();
+        for (buffer.roots.items) |root| privateRemoveStrongRootLocked(primary, root);
+        primary.realmUnlock();
+        for (buffer.roots.items) |root| primary.gpa.destroy(root);
+    }
+    buffer.values.deinit(gpa);
+    buffer.roots.deinit(gpa);
+    buffer.* = .{ .magic = 0 };
+}
+
+export fn MarkedArgumentBuffer__run(
+    callback_context: ?*anyopaque,
+    callback: ?PrivateMarkedArgumentCallback,
+) callconv(.c) void {
+    const function = callback orelse return;
+    var buffer: PrivateMarkedArgumentBuffer = .{};
+    defer privateMarkedArgumentBufferCleanup(&buffer);
+    function(callback_context, &buffer);
+}
+
+export fn MarkedArgumentBuffer__append(raw: ?*anyopaque, encoded: EncodedValue) callconv(.c) void {
+    const pointer = raw orelse return;
+    if (@intFromPtr(pointer) % @alignOf(PrivateMarkedArgumentBuffer) != 0) return;
+    const buffer: *PrivateMarkedArgumentBuffer = @ptrCast(@alignCast(pointer));
+    if (buffer.magic != private_marked_argument_buffer_magic) return;
+
+    if (!encoded.isCell()) {
+        _ = encoded.toInternalPrimitive(Value) catch return;
+        buffer.values.append(gpa, encoded) catch return;
+        return;
+    }
+    const boxed = privateBoxedFrom(encoded) orelse return;
+    if (boxed.private_kind != .value) return;
+    const erased_group = boxed.owner.c_api_group orelse return;
+    const group: *CContextGroup = @ptrCast(@alignCast(erased_group));
+    if (buffer.group) |existing| {
+        if (existing != group) return;
+    }
+
+    buffer.values.ensureUnusedCapacity(gpa, 1) catch return;
+    buffer.roots.ensureUnusedCapacity(gpa, 1) catch return;
+    const root = group.primary.gpa.create(Context.PrivateStrongRoot) catch return;
+    root.* = .{ .value = boxed.value };
+    const primary = group.primary;
+    primary.realmLock();
+    primary.private_strong_roots.ensureUnusedCapacity(primary.gpa, 1) catch {
+        primary.realmUnlock();
+        primary.gpa.destroy(root);
+        return;
+    };
+    primary.private_strong_roots.appendAssumeCapacity(root);
+    buffer.roots.appendAssumeCapacity(root);
+    buffer.values.appendAssumeCapacity(encoded);
+    buffer.group = group;
+    primary.realmUnlock();
+}
+
+fn privateCommonJSExtensionContext(global: JSContextRef) ?*Context {
+    const context = ctxForHandleInspection(global) orelse return null;
+    const erased_group = context.c_api_group orelse return null;
+    const group: *CContextGroup = @ptrCast(@alignCast(erased_group));
+    if (group.pending_exception != null) return null;
+    return context;
+}
+
+export fn JSCommonJSExtensions__appendFunction(global: JSContextRef, encoded: EncodedValue) callconv(.c) u32 {
+    const context = privateCommonJSExtensionContext(global) orelse return std.math.maxInt(u32);
+    const internal = privateValueFrom(global, encoded) orelse return std.math.maxInt(u32);
+    if (context.private_commonjs_functions.items.len > std.math.maxInt(u32)) return std.math.maxInt(u32);
+    const root = context.gpa.create(Context.PrivateStrongRoot) catch {
+        privatePublishBunStringError(context, error.OutOfMemory);
+        return std.math.maxInt(u32);
+    };
+    root.* = .{ .value = internal };
+
+    context.realmLock();
+    context.private_commonjs_functions.ensureUnusedCapacity(context.gpa, 1) catch {
+        context.realmUnlock();
+        context.gpa.destroy(root);
+        privatePublishBunStringError(context, error.OutOfMemory);
+        return std.math.maxInt(u32);
+    };
+    context.private_strong_roots.ensureUnusedCapacity(context.gpa, 1) catch {
+        context.realmUnlock();
+        context.gpa.destroy(root);
+        privatePublishBunStringError(context, error.OutOfMemory);
+        return std.math.maxInt(u32);
+    };
+    const index: u32 = @intCast(context.private_commonjs_functions.items.len);
+    context.private_commonjs_functions.appendAssumeCapacity(root);
+    context.private_strong_roots.appendAssumeCapacity(root);
+    context.realmUnlock();
+    return index;
+}
+
+export fn JSCommonJSExtensions__setFunction(global: JSContextRef, index: u32, encoded: EncodedValue) callconv(.c) void {
+    const context = privateCommonJSExtensionContext(global) orelse return;
+    const internal = privateValueFrom(global, encoded) orelse return;
+    context.realmLock();
+    defer context.realmUnlock();
+    if (index >= context.private_commonjs_functions.items.len) return;
+    context.private_commonjs_functions.items[index].value = internal;
+}
+
+export fn JSCommonJSExtensions__swapRemove(global: JSContextRef, index: u32) callconv(.c) u32 {
+    const context = privateCommonJSExtensionContext(global) orelse return index;
+    context.realmLock();
+    if (index >= context.private_commonjs_functions.items.len) {
+        context.realmUnlock();
+        return index;
+    }
+    const removed = context.private_commonjs_functions.items[index];
+    const last_index: u32 = @intCast(context.private_commonjs_functions.items.len - 1);
+    _ = context.private_commonjs_functions.swapRemove(index);
+    privateRemoveStrongRootLocked(context, removed);
+    context.realmUnlock();
+    context.gpa.destroy(removed);
+    return if (index < last_index) last_index else index;
 }
 
 fn privateRunFullCollection(group: *CContextGroup) usize {
@@ -13730,6 +13873,107 @@ test "private StringBuilder preserves UTF-16 formatting quoting and overflow" {
     JSGlobalObject__clearException(global);
     StringBuilder__init(null);
     StringBuilder__deinit(null);
+}
+
+test "private rooted native value containers retain and release exact cells" {
+    const Factory = struct {
+        fn create() !*CContextGroup {
+            const primary = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+            errdefer primary.destroy();
+            const group = try gpa.create(CContextGroup);
+            group.* = .{
+                .owner_thread = std.Thread.getCurrentId(),
+                .primary = primary,
+                .atom_strings = strcell.InternTable.init(gpa),
+            };
+            primary.c_api_group = @ptrCast(group);
+            primary.initCApiRef();
+            return group;
+        }
+    };
+    const CallbackState = struct {
+        global: JSContextRef,
+        encoded: EncodedValue,
+        foreign: EncodedValue,
+        failed: bool = false,
+
+        fn run(raw: ?*anyopaque, opaque_buffer: ?*anyopaque) callconv(.c) void {
+            const state: *@This() = @ptrCast(@alignCast(raw.?));
+            MarkedArgumentBuffer__append(opaque_buffer, EncodedValue.fromInt32(7));
+            MarkedArgumentBuffer__append(opaque_buffer, state.encoded);
+            MarkedArgumentBuffer__append(opaque_buffer, state.foreign);
+            const buffer: *PrivateMarkedArgumentBuffer = @ptrCast(@alignCast(opaque_buffer.?));
+            if (buffer.values.items.len != 2 or buffer.roots.items.len != 1 or
+                buffer.group == null or buffer.group.?.primary.private_strong_roots.items.len != 1)
+            {
+                state.failed = true;
+                return;
+            }
+            _ = JSC__VM__runGC(@ptrCast(buffer.group.?), true);
+            if (!value.strictEquals(buffer.roots.items[0].value, privateValueFrom(state.global, state.encoded) orelse {
+                state.failed = true;
+                return;
+            })) state.failed = true;
+        }
+    };
+
+    const group = try Factory.create();
+    defer if (group.release()) group.destroy();
+    const foreign_group = try Factory.create();
+    defer if (foreign_group.release()) foreign_group.destroy();
+    const global: JSContextRef = @ptrCast(group.primary);
+    const foreign_global: JSContextRef = @ptrCast(foreign_group.primary);
+
+    const target = try group.primary.evaluate("({ issue: 212 })");
+    const foreign_target = try foreign_group.primary.evaluate("({ foreign: true })");
+    var state = CallbackState{
+        .global = global,
+        .encoded = privateEncodedFromValue(group.primary, target),
+        .foreign = privateEncodedFromValue(foreign_group.primary, foreign_target),
+    };
+    MarkedArgumentBuffer__run(&state, CallbackState.run);
+    try std.testing.expect(!state.failed);
+    try std.testing.expectEqual(@as(usize, 0), group.primary.private_strong_roots.items.len);
+    MarkedArgumentBuffer__run(null, null);
+    MarkedArgumentBuffer__append(null, state.encoded);
+
+    const first = privateEncodedFromValue(group.primary, try group.primary.evaluate("() => 'first'"));
+    const second = privateEncodedFromValue(group.primary, try group.primary.evaluate("() => 'second'"));
+    const last = privateEncodedFromValue(group.primary, try group.primary.evaluate("() => 'last'"));
+    try std.testing.expectEqual(@as(u32, 0), JSCommonJSExtensions__appendFunction(global, first));
+    try std.testing.expectEqual(@as(u32, 1), JSCommonJSExtensions__appendFunction(global, second));
+    try std.testing.expectEqual(@as(u32, 2), JSCommonJSExtensions__appendFunction(global, last));
+    try std.testing.expectEqual(@as(usize, 3), group.primary.private_commonjs_functions.items.len);
+    try std.testing.expectEqual(@as(usize, 3), group.primary.private_strong_roots.items.len);
+
+    JSCommonJSExtensions__setFunction(global, 1, second);
+    try std.testing.expect(value.strictEquals(
+        group.primary.private_commonjs_functions.items[1].value,
+        privateValueFrom(global, second).?,
+    ));
+    JSCommonJSExtensions__setFunction(global, 99, first);
+    JSCommonJSExtensions__setFunction(global, 1, state.foreign);
+    try std.testing.expectEqual(@as(u32, 2), JSCommonJSExtensions__swapRemove(global, 0));
+    try std.testing.expect(value.strictEquals(
+        group.primary.private_commonjs_functions.items[0].value,
+        privateValueFrom(global, last).?,
+    ));
+    try std.testing.expectEqual(@as(u32, 1), JSCommonJSExtensions__swapRemove(global, 1));
+    try std.testing.expectEqual(@as(u32, 0), JSCommonJSExtensions__swapRemove(global, 0));
+    try std.testing.expectEqual(@as(usize, 0), group.primary.private_commonjs_functions.items.len);
+    try std.testing.expectEqual(@as(usize, 0), group.primary.private_strong_roots.items.len);
+
+    try std.testing.expectEqual(@as(u32, 0), JSCommonJSExtensions__appendFunction(foreign_global, state.foreign));
+    try std.testing.expectEqual(@as(usize, 1), foreign_group.primary.private_commonjs_functions.items.len);
+    try std.testing.expectEqual(@as(usize, 0), group.primary.private_commonjs_functions.items.len);
+    try std.testing.expectEqual(std.math.maxInt(u32), JSCommonJSExtensions__appendFunction(global, state.foreign));
+    _ = JSCommonJSExtensions__swapRemove(foreign_global, 0);
+
+    JSC__VM__throwError(JSC__JSGlobalObject__vm(global), global, EncodedValue.fromInt32(212));
+    try std.testing.expectEqual(std.math.maxInt(u32), JSCommonJSExtensions__appendFunction(global, first));
+    const preserved = JSGlobalObject__tryTakeException(global);
+    const preserved_pointer: *anyopaque = @ptrFromInt(try preserved.asCellAddress());
+    try std.testing.expectEqual(EncodedValue.fromInt32(212), JSC__Exception__asJSValue(preserved_pointer));
 }
 
 test "C-API: JSGarbageCollect honors JSValueProtect/Unprotect (GC on)" {
