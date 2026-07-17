@@ -52,6 +52,9 @@ extern "c" fn JSC__JSValue__toBoolean(EncodedValue) bool;
 extern "c" fn JSC__JSValue__toInt32(EncodedValue) i32;
 extern "c" fn JSC__JSValue__fromInt64NoTruncate(JSContextRef, i64) EncodedValue;
 extern "c" fn JSC__JSValue__fromUInt64NoTruncate(JSContextRef, u64) EncodedValue;
+extern "c" fn JSC__JSValue__asBigIntCompare(EncodedValue, JSContextRef, EncodedValue) u8;
+extern "c" fn JSC__JSValue__bigIntSum(JSContextRef, EncodedValue, EncodedValue) EncodedValue;
+extern "c" fn JSC__JSValue__fromTimevalNoTruncate(JSContextRef, i64, i64) EncodedValue;
 extern "c" fn JSC__JSValue__toUInt64NoTruncate(EncodedValue) u64;
 extern "c" fn JSC__JSValue__isStrictEqual(EncodedValue, EncodedValue, JSContextRef) bool;
 extern "c" fn JSC__JSValue__isSameValue(EncodedValue, EncodedValue, JSContextRef) bool;
@@ -221,6 +224,33 @@ pub fn main() void {
     if (JSC__JSBigInt__orderDouble(beyond_double, std.math.floatMax(f64)) != 1)
         fail("extreme double ordering mismatch");
 
+    if (JSC__JSValue__asBigIntCompare(signed_negative, context, EncodedValue.fromInt32(-1)) != 0 or
+        JSC__JSValue__asBigIntCompare(signed_negative, context, EncodedValue.fromDouble(std.math.nan(f64))) != 1 or
+        JSC__JSValue__asBigIntCompare(evaluate(context, "9007199254740993n"), context, EncodedValue.fromDouble(9007199254740992.0)) != 2 or
+        JSC__JSValue__asBigIntCompare(evaluate(context, "-2n"), context, EncodedValue.fromDouble(-1.5)) != 3 or
+        JSC__JSValue__asBigIntCompare(evaluate(context, "0n"), context, EncodedValue.fromDouble(-0.0)) != 0 or
+        JSC__JSValue__asBigIntCompare(evaluate(context, "0n"), context, EncodedValue.fromDouble(std.math.inf(f64))) != 3 or
+        JSC__JSValue__asBigIntCompare(evaluate(context, "0n"), context, EncodedValue.fromDouble(-std.math.inf(f64))) != 2 or
+        JSC__JSValue__asBigIntCompare(evaluate(context, "10n ** 400n"), context, evaluate(context, "10n ** 399n")) != 2 or
+        JSC__JSValue__asBigIntCompare(.true, context, .true) != 4)
+        fail("private BigInt comparison mismatch");
+
+    const overflow_sum = JSC__JSValue__bigIntSum(
+        context,
+        evaluate(context, "184467440737095516160000000000000000000n"),
+        evaluate(context, "-184467440737095516159999999999999999999n"),
+    );
+    const timeval_max = JSC__JSValue__fromTimevalNoTruncate(context, std.math.maxInt(i64), std.math.maxInt(i64));
+    const timeval_min = JSC__JSValue__fromTimevalNoTruncate(context, std.math.minInt(i64), std.math.minInt(i64));
+    const foreign_bigint = evaluate(foreign_context, "1n");
+    if (!JSC__JSValue__isStrictEqual(overflow_sum, evaluate(context, "1n"), context) or
+        !JSC__JSValue__isStrictEqual(timeval_max, evaluate(context, "9223372036854775807n * 1000000n + 9223372036854775807n"), context) or
+        !JSC__JSValue__isStrictEqual(timeval_min, evaluate(context, "-9223372036854775808n * 1000000n - 9223372036854775808n"), context) or
+        JSC__JSValue__bigIntSum(context, .true, signed_negative) != .empty or
+        JSC__JSValue__bigIntSum(context, signed_negative, foreign_bigint) != .empty or
+        JSC__JSValue__asBigIntCompare(signed_negative, context, foreign_bigint) != 4)
+        fail("private BigInt arithmetic mismatch");
+
     const modulo_one = JSC__JSBigInt__fromJS(evaluate(context, "18446744073709551617n")) orelse fail("modulo BigInt downcast failed");
     if (JSC__JSBigInt__toInt64(signed_min_cell) != std.math.minInt(i64) or
         JSC__JSBigInt__toInt64(signed_negative_cell) != -1 or
@@ -304,5 +334,5 @@ pub fn main() void {
     if (JSC__JSValue__unwrapBoxedPrimitive(context, foreign_wrapper) != .empty)
         fail("foreign boxed primitive accepted");
 
-    std.debug.print("Home private value shims: 24/24 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 27/27 symbols linked; runtime matrix passed\n", .{});
 }

@@ -87,8 +87,8 @@
     },
     "by_status": {
       "external": 1,
-      "implemented": 41,
-      "pending": 406
+      "implemented": 44,
+      "pending": 403
     }
   },
   "declarations": [
@@ -1660,10 +1660,10 @@
       "line": 933,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSValue__asBigIntCompare(this: JSValue, global: *JSGlobalObject, other: JSValue) ComparisonResult;",
       "declaration_sha256": "78bcfe77289360b9e06ea4b042614777663eb293a9688dd6faac0b769f98b1c9",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSValue__asInternalPromise",
@@ -1704,10 +1704,10 @@
       "line": 1232,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSValue__bigIntSum(globalObject: *JSGlobalObject, a: JSValue, b: JSValue) JSValue;",
       "declaration_sha256": "1d8447b393182e85fc1eec3d49f4f89d7c0bf2f21829cbb83a6acd8426b33c9e",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSValue__callCustomInspectFunction",
@@ -1968,10 +1968,10 @@
       "line": 1227,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSValue__fromTimevalNoTruncate(globalObject: *JSGlobalObject, nsec: i64, sec: i64) JSValue;",
       "declaration_sha256": "92951dda7d018cb3d960f72540b8fcbddfc1d57ffed1104b884e8adb34e74cbd",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSValue__fromUInt64NoTruncate",

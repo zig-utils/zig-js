@@ -17595,6 +17595,16 @@ pub fn orderBigIntObjectAgainstDouble(
     return bigVsFiniteF64(arena, &lhs, number);
 }
 
+pub fn orderBigIntObjects(
+    arena: std.mem.Allocator,
+    lhs_object: *value.Object,
+    rhs_object: *value.Object,
+) error{OutOfMemory}!std.math.Order {
+    var lhs = try managedBigIntFromObject(arena, lhs_object);
+    var rhs = try managedBigIntFromObject(arena, rhs_object);
+    return lhs.toConst().order(rhs.toConst());
+}
+
 fn makeBigIntFromManaged(self: *Interpreter, managed: *const std.math.big.int.Managed) EvalError!Value {
     if (managed.toInt(i128)) |small| {
         return self.makeBigInt(small);
@@ -17604,6 +17614,25 @@ fn makeBigIntFromManaged(self: *Interpreter, managed: *const std.math.big.int.Ma
         else => unreachable,
     };
     return self.makeBigIntText(text);
+}
+
+pub fn addBigIntObjects(self: *Interpreter, lhs_object: *value.Object, rhs_object: *value.Object) EvalError!Value {
+    var lhs = try managedBigIntFromObject(self.arena, lhs_object);
+    var rhs = try managedBigIntFromObject(self.arena, rhs_object);
+    var result = try std.math.big.int.Managed.init(self.arena);
+    try result.add(&lhs, &rhs);
+    return makeBigIntFromManaged(self, &result);
+}
+
+pub fn makeTimevalBigInt(self: *Interpreter, nsec: i64, sec: i64) EvalError!Value {
+    var big_nsec = try std.math.big.int.Managed.initSet(self.arena, nsec);
+    var big_sec = try std.math.big.int.Managed.initSet(self.arena, sec);
+    var million = try std.math.big.int.Managed.initSet(self.arena, 1_000_000);
+    var product = try std.math.big.int.Managed.init(self.arena);
+    var result = try std.math.big.int.Managed.init(self.arena);
+    try product.mul(&big_sec, &million);
+    try result.add(&product, &big_nsec);
+    return makeBigIntFromManaged(self, &result);
 }
 
 pub fn negateBigIntObject(self: *Interpreter, big: *value.Object) EvalError!Value {

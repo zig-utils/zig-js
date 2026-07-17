@@ -1295,6 +1295,12 @@ fn privateBigIntBoxFromCell(cell: ?*anyopaque) ?*Boxed {
     return boxed;
 }
 
+fn privateBigIntObjectFrom(global: JSContextRef, encoded: EncodedValue) ?*Object {
+    const internal = privateValueFrom(global, encoded) orelse return null;
+    if (!internal.isObject() or !internal.asObj().is_bigint) return null;
+    return internal.asObj();
+}
+
 fn privateStringBoxFromCell(cell: ?*anyopaque) ?*Boxed {
     const boxed = privateBoxFromCell(cell) orelse return null;
     if (!boxed.value.isString()) return null;
@@ -1306,6 +1312,14 @@ fn privateOrderResult(order: std.math.Order) i8 {
         .lt => -1,
         .eq => 0,
         .gt => 1,
+    };
+}
+
+fn privateBigIntComparisonResult(order: std.math.Order) u8 {
+    return switch (order) {
+        .eq => 0,
+        .gt => 2,
+        .lt => 3,
     };
 }
 
@@ -1397,6 +1411,66 @@ export fn JSC__JSValue__fromInt64NoTruncate(global: JSContextRef, number: i64) c
 
 export fn JSC__JSValue__fromUInt64NoTruncate(global: JSContextRef, number: u64) callconv(.c) EncodedValue {
     return privateEncodedFromRef(JSBigIntCreateWithUInt64(global, number, null));
+}
+
+export fn JSC__JSValue__asBigIntCompare(
+    encoded: EncodedValue,
+    global: JSContextRef,
+    other_encoded: EncodedValue,
+) callconv(.c) u8 {
+    const context = ctxForHandleInspection(global) orelse return 4;
+    const lhs = privateBigIntObjectFrom(global, encoded) orelse return 4;
+    const other = privateValueFrom(global, other_encoded) orelse return 4;
+    const order = switch (other.kind()) {
+        .number => number: {
+            const rhs = other.asNum();
+            if (std.math.isNan(rhs)) return 1;
+            break :number interp.orderBigIntObjectAgainstDouble(context.arena(), lhs, rhs) catch return 4;
+        },
+        .object => object: {
+            const rhs = other.asObj();
+            if (!rhs.is_bigint) return 4;
+            break :object interp.orderBigIntObjects(context.arena(), lhs, rhs) catch return 4;
+        },
+        else => return 4,
+    };
+    return privateBigIntComparisonResult(order);
+}
+
+export fn JSC__JSValue__bigIntSum(
+    global: JSContextRef,
+    left: EncodedValue,
+    right: EncodedValue,
+) callconv(.c) EncodedValue {
+    const context = ctxForEvaluation(global) orelse return .empty;
+    const lhs = privateBigIntObjectFrom(global, left) orelse return .empty;
+    const rhs = privateBigIntObjectFrom(global, right) orelse return .empty;
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch return .empty;
+    defer context.popActiveInterpreter(&machine);
+    const result = interp.addBigIntObjects(&machine, lhs, rhs) catch return .empty;
+    return privateEncodedFromValue(context, result);
+}
+
+export fn JSC__JSValue__fromTimevalNoTruncate(
+    global: JSContextRef,
+    nsec: i64,
+    sec: i64,
+) callconv(.c) EncodedValue {
+    const context = ctxForEvaluation(global) orelse return .empty;
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch return .empty;
+    defer context.popActiveInterpreter(&machine);
+    const result = interp.makeTimevalBigInt(&machine, nsec, sec) catch return .empty;
+    return privateEncodedFromValue(context, result);
 }
 
 export fn JSC__JSValue__toUInt64NoTruncate(encoded: EncodedValue) callconv(.c) u64 {
