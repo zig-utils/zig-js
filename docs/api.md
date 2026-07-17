@@ -73,6 +73,9 @@ bool        JSValueIsDate(JSContextRef, JSValueRef);
 JSTypedArrayType JSValueGetTypedArrayType(JSContextRef, JSValueRef, JSValueRef* exception);
 bool        JSValueIsEqual(JSContextRef, JSValueRef, JSValueRef, JSValueRef* exception);
 bool        JSValueIsStrictEqual(JSContextRef, JSValueRef, JSValueRef);
+bool        JSValueIsInstanceOfConstructor(JSContextRef, JSValueRef,
+                                           JSObjectRef constructor,
+                                           JSValueRef* exception);
 JSRelationCondition JSValueCompare(JSContextRef, JSValueRef, JSValueRef,
                                    JSValueRef* exception);
 JSRelationCondition JSValueCompareInt64(JSContextRef, JSValueRef, int64_t,

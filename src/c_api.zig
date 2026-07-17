@@ -633,6 +633,35 @@ export fn JSValueIsStrictEqual(ctx: JSContextRef, a: JSValueRef, b: JSValueRef) 
     return value.strictEquals(lhs, rhs);
 }
 
+export fn JSValueIsInstanceOfConstructor(
+    ctx: JSContextRef,
+    value_ref: JSValueRef,
+    constructor_ref: JSObjectRef,
+    exception: ExceptionRef,
+) callconv(.c) bool {
+    const c = ctxFrom(ctx) orelse return false;
+    const candidate = valueArgFrom(c, value_ref, exception) orelse return false;
+    const constructor = objectArgFrom(c, constructor_ref, exception) orelse return false;
+    const gc_saved = gc_mod.setActiveHeap(c.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(c.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = c.interpreter();
+    c.pushActiveInterpreter(&machine) catch {
+        setException(c, exception, "OutOfMemory");
+        return false;
+    };
+    defer c.popActiveInterpreter(&machine);
+    return machine.instanceOf(candidate, Value.obj(constructor)) catch |err| {
+        if (err == error.Throw) {
+            if (exception != null) exception[0] = box(c, machine.exception);
+        } else {
+            setException(c, exception, @errorName(err));
+        }
+        return false;
+    };
+}
+
 export fn JSValueCompare(
     ctx: JSContextRef,
     left_ref: JSValueRef,
@@ -2262,6 +2291,39 @@ test "C-API: relation conditions and Number conversion match JSC" {
     const symbol = JSValueMakeSymbol(ctx, null) orelse return error.SymbolCreateFailed;
     exception = null;
     try std.testing.expectEqual(JSRelationCondition.undefined, JSValueCompareInt64(ctx, symbol, 0, &exception));
+    try std.testing.expect(exception != null);
+}
+
+test "C-API: instanceof honors constructors and Symbol.hasInstance" {
+    const ctx = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
+    defer JSGlobalContextRelease(ctx);
+    var exception: JSValueRef = null;
+    const setup = JSStringCreateWithUTF8CString(
+        "class NativeCheck {}; globalThis.nativeCtor = NativeCheck; " ++
+            "globalThis.nativeInstance = new NativeCheck(); globalThis.nativeOther = {}; " ++
+            "globalThis.customCtor = { [Symbol.hasInstance](value) { return value === nativeOther; } };",
+    ) orelse return error.StringInitFailed;
+    defer JSStringRelease(setup);
+    _ = JSEvaluateScript(ctx, setup, null, null, 1, &exception) orelse return error.EvalFailed;
+    const global = JSContextGetGlobalObject(ctx);
+    const ctor_name = JSStringCreateWithUTF8CString("nativeCtor") orelse return error.StringInitFailed;
+    defer JSStringRelease(ctor_name);
+    const instance_name = JSStringCreateWithUTF8CString("nativeInstance") orelse return error.StringInitFailed;
+    defer JSStringRelease(instance_name);
+    const other_name = JSStringCreateWithUTF8CString("nativeOther") orelse return error.StringInitFailed;
+    defer JSStringRelease(other_name);
+    const custom_name = JSStringCreateWithUTF8CString("customCtor") orelse return error.StringInitFailed;
+    defer JSStringRelease(custom_name);
+    const ctor = JSObjectGetProperty(ctx, global, ctor_name, &exception) orelse return error.PropFailed;
+    const instance = JSObjectGetProperty(ctx, global, instance_name, &exception) orelse return error.PropFailed;
+    const other = JSObjectGetProperty(ctx, global, other_name, &exception) orelse return error.PropFailed;
+    const custom = JSObjectGetProperty(ctx, global, custom_name, &exception) orelse return error.PropFailed;
+    try std.testing.expect(JSValueIsInstanceOfConstructor(ctx, instance, ctor, &exception));
+    try std.testing.expect(!JSValueIsInstanceOfConstructor(ctx, other, ctor, &exception));
+    try std.testing.expect(JSValueIsInstanceOfConstructor(ctx, other, custom, &exception));
+
+    exception = null;
+    try std.testing.expect(!JSValueIsInstanceOfConstructor(ctx, other, other, &exception));
     try std.testing.expect(exception != null);
 }
 

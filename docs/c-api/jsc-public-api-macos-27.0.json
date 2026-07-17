@@ -106,7 +106,7 @@
     {"name":"JSValueGetTypedArrayType","header":"JSValueRef.h","status":"implemented"},
     {"name":"JSValueIsEqual","header":"JSValueRef.h","status":"implemented"},
     {"name":"JSValueIsStrictEqual","header":"JSValueRef.h","status":"implemented"},
-    {"name":"JSValueIsInstanceOfConstructor","header":"JSValueRef.h","status":"pending","issue":150},
+    {"name":"JSValueIsInstanceOfConstructor","header":"JSValueRef.h","status":"implemented"},
     {"name":"JSValueCompare","header":"JSValueRef.h","status":"implemented"},
     {"name":"JSValueCompareInt64","header":"JSValueRef.h","status":"implemented"},
     {"name":"JSValueCompareUInt64","header":"JSValueRef.h","status":"implemented"},

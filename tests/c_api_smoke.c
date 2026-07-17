@@ -62,6 +62,13 @@ int main(void)
     if (JSValueCompareInt64(context, answer, 42, &exception) != kJSRelationConditionEqual ||
         JSValueCompareDouble(context, answer, 41.5, &exception) != kJSRelationConditionGreaterThan)
         return 16;
+    JSStringRef array_name = JSStringCreateWithUTF8CString("Array");
+    JSObjectRef array_ctor = (JSObjectRef)JSObjectGetProperty(
+        context, JSContextGetGlobalObject(context), array_name, &exception);
+    JSStringRelease(array_name);
+    JSObjectRef array = JSObjectMakeArray(context, 0, NULL, &exception);
+    if (!array_ctor || !array || !JSValueIsInstanceOfConstructor(context, array, array_ctor, &exception))
+        return 17;
 
     const JSChar utf16[] = { 'z', 'i', 'g', 0xd83d, 0xde00 };
     JSStringRef wide = JSStringCreateWithCharacters(utf16, 5);
