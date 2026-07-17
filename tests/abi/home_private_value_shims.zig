@@ -172,11 +172,29 @@ extern "c" fn JSC__JSGlobalObject__vm(JSContextRef) ?*anyopaque;
 extern "c" fn JSC__VM__throwError(?*anyopaque, JSContextRef, EncodedValue) void;
 extern "c" fn JSGlobalObject__hasException(JSContextRef) bool;
 extern "c" fn JSGlobalObject__clearException(JSContextRef) void;
+extern "c" fn JSGlobalObject__clearExceptionExceptTermination(JSContextRef) bool;
+extern "c" fn JSGlobalObject__clearTerminationException(JSContextRef) void;
+extern "c" fn JSGlobalObject__createOutOfMemoryError(JSContextRef) EncodedValue;
+extern "c" fn JSGlobalObject__requestTermination(JSContextRef) void;
+extern "c" fn JSGlobalObject__throwOutOfMemoryError(JSContextRef) void;
+extern "c" fn JSGlobalObject__throwStackOverflow(JSContextRef) void;
 extern "c" fn JSGlobalObject__tryTakeException(JSContextRef) EncodedValue;
 extern "c" fn JSC__Exception__asJSValue(?*anyopaque) EncodedValue;
 extern "c" fn JSC__JSValue__isException(EncodedValue, ?*anyopaque) bool;
+extern "c" fn JSC__JSValue__isTerminationException(EncodedValue) bool;
 extern "c" fn JSC__JSValue__toError_(EncodedValue) EncodedValue;
 extern "c" fn JSC__JSValue__isAnyError(EncodedValue) bool;
+extern "c" fn JSC__VM__clearHasTerminationRequest(?*anyopaque) void;
+extern "c" fn JSC__VM__executionForbidden(?*anyopaque) bool;
+extern "c" fn JSC__VM__hasTerminationRequest(?*anyopaque) bool;
+extern "c" fn JSC__VM__notifyNeedTermination(?*anyopaque) void;
+extern "c" fn JSC__VM__setExecutionForbidden(?*anyopaque, bool) void;
+extern "c" fn TopExceptionScope__construct(?*anyopaque, JSContextRef, [*:0]const u8, [*:0]const u8, c_uint, usize, usize) void;
+extern "c" fn TopExceptionScope__pureException(?*anyopaque) ?*anyopaque;
+extern "c" fn TopExceptionScope__exceptionIncludingTraps(?*anyopaque) ?*anyopaque;
+extern "c" fn TopExceptionScope__clearException(?*anyopaque) void;
+extern "c" fn TopExceptionScope__assertNoException(?*anyopaque) void;
+extern "c" fn TopExceptionScope__destruct(?*anyopaque) void;
 extern "c" fn JSC__JSValue__createEmptyArray(JSContextRef, usize) EncodedValue;
 extern "c" fn JSC__JSValue__putIndex(EncodedValue, JSContextRef, u32, EncodedValue) void;
 extern "c" fn JSC__JSValue__push(EncodedValue, JSContextRef, EncodedValue) void;
@@ -2264,5 +2282,128 @@ pub fn main() void {
         JSC__JSMap__get(map_cell, context, evaluate(context, "'direct'")) != .undefined)
         fail("private JSMap clear mismatch");
 
-    std.debug.print("Home private value shims: 118/118 symbols linked; runtime matrix passed\n", .{});
+    var release_scope: [8]u8 align(8) = @splat(0xa5);
+    var verification_scope: [56]u8 align(8) = @splat(0xa5);
+    var foreign_scope: [8]u8 align(8) = @splat(0xa5);
+    TopExceptionScope__construct(&release_scope, context, "main", "home_private_value_shims.zig", 1, release_scope.len, 8);
+    TopExceptionScope__construct(&verification_scope, sibling_context, "main", "home_private_value_shims.zig", 2, verification_scope.len, 8);
+    TopExceptionScope__construct(&foreign_scope, foreign_context, "main", "home_private_value_shims.zig", 3, foreign_scope.len, 8);
+    if (TopExceptionScope__pureException(&release_scope) != null or
+        TopExceptionScope__exceptionIncludingTraps(&verification_scope) != null or
+        TopExceptionScope__pureException(null) != null or
+        TopExceptionScope__exceptionIncludingTraps(null) != null)
+        fail("private TopExceptionScope initial state mismatch");
+
+    JSC__VM__throwError(vm, sibling_context, EncodedValue.fromInt32(2061));
+    const normal_scope_exception = TopExceptionScope__pureException(&release_scope) orelse fail("private scope missed normal exception");
+    if (TopExceptionScope__exceptionIncludingTraps(&verification_scope) != normal_scope_exception or
+        JSC__Exception__asJSValue(normal_scope_exception) != EncodedValue.fromInt32(2061) or
+        JSC__JSValue__isTerminationException(JSC__Exception__asJSValue(normal_scope_exception)))
+        fail("private TopExceptionScope normal exception mismatch");
+    TopExceptionScope__clearException(&verification_scope);
+    TopExceptionScope__assertNoException(&release_scope);
+    if (JSGlobalObject__hasException(context))
+        fail("private TopExceptionScope clear was not VM-shared");
+
+    JSGlobalObject__requestTermination(sibling_context);
+    if (!JSC__VM__hasTerminationRequest(vm) or !JSC__VM__hasTerminationRequest(sibling_vm) or
+        JSC__VM__hasTerminationRequest(foreign_vm) or
+        TopExceptionScope__pureException(&release_scope) != null)
+        fail("private termination request sharing/pure lookup mismatch");
+    const termination_exception = TopExceptionScope__exceptionIncludingTraps(&verification_scope) orelse fail("private trap lookup missed termination");
+    const encoded_termination = JSC__Exception__asJSValue(termination_exception);
+    if (TopExceptionScope__pureException(&release_scope) != termination_exception)
+        fail("private termination materialization identity mismatch");
+    if (!JSC__JSValue__isTerminationException(encoded_termination))
+        fail("private termination exception classification mismatch");
+    if (!JSGlobalObject__hasException(context))
+        fail("private termination materialization did not publish");
+    if (JSGlobalObject__clearExceptionExceptTermination(context))
+        fail("private selective clear removed termination");
+
+    TopExceptionScope__clearException(&release_scope);
+    if (JSGlobalObject__hasException(context) or !JSC__VM__hasTerminationRequest(vm) or
+        TopExceptionScope__exceptionIncludingTraps(&verification_scope) != termination_exception)
+        fail("private termination identity/rematerialization mismatch");
+    JSGlobalObject__clearTerminationException(sibling_context);
+    if (JSC__VM__hasTerminationRequest(vm) or JSGlobalObject__hasException(context) or
+        TopExceptionScope__pureException(&release_scope) != null)
+        fail("private termination clear mismatch");
+    TopExceptionScope__assertNoException(&verification_scope);
+
+    JSC__VM__throwError(vm, context, EncodedValue.fromInt32(2062));
+    if (!JSGlobalObject__clearExceptionExceptTermination(sibling_context) or JSGlobalObject__hasException(context))
+        fail("private normal exception selective clear mismatch");
+    JSC__VM__notifyNeedTermination(sibling_vm);
+    if (!JSC__VM__hasTerminationRequest(vm))
+        fail("private VM termination notification mismatch");
+    JSC__VM__clearHasTerminationRequest(vm);
+    if (JSC__VM__hasTerminationRequest(sibling_vm))
+        fail("private VM termination request clear mismatch");
+    JSC__VM__notifyNeedTermination(foreign_vm);
+    if (!JSC__VM__hasTerminationRequest(foreign_vm) or JSC__VM__hasTerminationRequest(vm))
+        fail("private foreign VM termination isolation mismatch");
+    JSC__VM__clearHasTerminationRequest(foreign_vm);
+
+    if (JSC__VM__executionForbidden(vm) or JSC__VM__executionForbidden(null))
+        fail("private VM execution-forbidden initial state mismatch");
+    JSC__VM__setExecutionForbidden(vm, false);
+    if (!JSC__VM__executionForbidden(sibling_vm) or JSC__VM__executionForbidden(foreign_vm))
+        fail("private VM execution-forbidden pinned behavior mismatch");
+
+    const created_oom = JSGlobalObject__createOutOfMemoryError(sibling_context);
+    if (created_oom == .empty or JSGlobalObject__hasException(context) or !JSC__JSValue__isAnyError(created_oom))
+        fail("private OOM creation mismatch");
+    exposeCell(sibling_context, "__private_created_oom", created_oom);
+    if (!JSC__JSValue__toBoolean(evaluate(sibling_context, "__private_created_oom instanceof OutOfMemoryError && Object.getPrototypeOf(__private_created_oom) === OutOfMemoryError.prototype && __private_created_oom.name === 'OutOfMemoryError' && __private_created_oom.message === 'Out of memory'")))
+        fail("private OOM selected-realm metadata mismatch");
+
+    JSGlobalObject__throwOutOfMemoryError(context);
+    const thrown_oom_cell = TopExceptionScope__pureException(&verification_scope) orelse fail("private OOM throw did not publish");
+    const thrown_oom = JSC__Exception__asJSValue(thrown_oom_cell);
+    exposeCell(context, "__private_thrown_oom", thrown_oom);
+    if (!JSC__JSValue__toBoolean(evaluate(context, "__private_thrown_oom instanceof OutOfMemoryError && Object.getPrototypeOf(__private_thrown_oom) === OutOfMemoryError.prototype && __private_thrown_oom.name === 'OutOfMemoryError' && __private_thrown_oom.message === 'Out of memory'")))
+        fail("private OOM throw metadata mismatch");
+    TopExceptionScope__clearException(&release_scope);
+
+    JSGlobalObject__throwStackOverflow(sibling_context);
+    const thrown_stack_cell = TopExceptionScope__pureException(&release_scope) orelse fail("private stack overflow did not publish");
+    const thrown_stack = JSC__Exception__asJSValue(thrown_stack_cell);
+    exposeCell(sibling_context, "__private_thrown_stack", thrown_stack);
+    if (!JSC__JSValue__toBoolean(evaluate(sibling_context, "Object.getPrototypeOf(__private_thrown_stack) === RangeError.prototype && __private_thrown_stack.name === 'RangeError' && __private_thrown_stack.message === 'Maximum call stack size exceeded'")))
+        fail("private stack overflow metadata mismatch");
+    TopExceptionScope__clearException(&verification_scope);
+
+    JSC__VM__throwError(vm, context, EncodedValue.fromInt32(2063));
+    JSGlobalObject__throwOutOfMemoryError(context);
+    JSGlobalObject__throwStackOverflow(context);
+    JSGlobalObject__requestTermination(context);
+    const preserved_scope_exception = TopExceptionScope__exceptionIncludingTraps(&release_scope) orelse fail("private first pending exception disappeared");
+    if (JSC__Exception__asJSValue(preserved_scope_exception) != EncodedValue.fromInt32(2063) or
+        JSC__JSValue__isTerminationException(JSC__Exception__asJSValue(preserved_scope_exception)))
+        fail("private exception/termination first-wins mismatch");
+    TopExceptionScope__clearException(&release_scope);
+    if (TopExceptionScope__exceptionIncludingTraps(&verification_scope) != termination_exception)
+        fail("private termination exception identity was not stable");
+    JSGlobalObject__clearTerminationException(context);
+
+    JSGlobalObject__requestTermination(foreign_context);
+    if (TopExceptionScope__exceptionIncludingTraps(&foreign_scope) == null or
+        TopExceptionScope__pureException(&release_scope) != null or
+        JSC__VM__hasTerminationRequest(vm))
+        fail("private foreign TopExceptionScope isolation mismatch");
+    JSGlobalObject__clearTerminationException(foreign_context);
+    TopExceptionScope__assertNoException(&foreign_scope);
+
+    TopExceptionScope__clearException(null);
+    TopExceptionScope__assertNoException(null);
+    TopExceptionScope__destruct(null);
+    TopExceptionScope__destruct(&foreign_scope);
+    TopExceptionScope__destruct(&verification_scope);
+    TopExceptionScope__destruct(&release_scope);
+    if (TopExceptionScope__pureException(&release_scope) != null or
+        TopExceptionScope__exceptionIncludingTraps(&verification_scope) != null)
+        fail("private TopExceptionScope destruction mismatch");
+
+    std.debug.print("Home private value shims: 136/136 symbols linked; runtime matrix passed\n", .{});
 }

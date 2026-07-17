@@ -88,8 +88,8 @@
     },
     "by_status": {
       "external": 2,
-      "implemented": 134,
-      "pending": 312
+      "implemented": 152,
+      "pending": 294
     }
   },
   "declarations": [
@@ -2266,10 +2266,10 @@
       "line": 1183,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSValue__isTerminationException(this: JSValue) bool;",
       "declaration_sha256": "502cfe27f1e7072e7f9166d8e6389380ade03a921a91c3879a6cdd2d2b5d8ad9",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSValue__jestDeepEquals",
@@ -2585,10 +2585,10 @@
       "line": 174,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__VM__clearHasTerminationRequest(vm: *VM) void;",
       "declaration_sha256": "f851f75a4d60a3839234f90734e1f819b5c049e8f94776d2f8c223b8bb90274a",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__VM__collectAsync",
@@ -2662,10 +2662,10 @@
       "line": 128,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__VM__executionForbidden(vm: *VM) bool;",
       "declaration_sha256": "2dc854bea309c93f2586290d2e119b99a6782a784628f64f07ac2f78603917e3",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__VM__externalMemorySize",
@@ -2706,10 +2706,10 @@
       "line": 169,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__VM__hasTerminationRequest(vm: *VM) bool;",
       "declaration_sha256": "0bc5d56f79b8af5f37583302f5326fc3bfb1c685b64446b81e600848c7e537c6",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__VM__heapSize",
@@ -2772,10 +2772,10 @@
       "line": 136,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__VM__notifyNeedTermination(vm: *VM) void;",
       "declaration_sha256": "bf83b598040368c1b85b85f00b150b9ade273bf09f7053419b87f28bf16695e1",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__VM__notifyNeedWatchdogCheck",
@@ -2860,10 +2860,10 @@
       "line": 113,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__VM__setExecutionForbidden(vm: *VM, forbidden: bool) void;",
       "declaration_sha256": "8790d91de107d23977d3b33d89571d390dd253fd7259bd59d56aa23a6c02d9b8",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__VM__setExecutionTimeLimit",
@@ -3045,10 +3045,10 @@
       "line": 856,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSGlobalObject__clearExceptionExceptTermination(*JSGlobalObject) bool;",
       "declaration_sha256": "4b1d514c52a1c97e2901ce0db925d48eaeb68cb7fbd073fe41fc2bc5a21509fb",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSGlobalObject__clearTerminationException",
@@ -3056,10 +3056,10 @@
       "line": 857,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSGlobalObject__clearTerminationException(this: *JSGlobalObject) void;",
       "declaration_sha256": "b2067d57679b7d70bb6f56b9b0989bf359b9ce01b2bc75a3a91d932d1d296cd9",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSGlobalObject__createOutOfMemoryError",
@@ -3067,10 +3067,10 @@
       "line": 16,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSGlobalObject__createOutOfMemoryError(this: *JSGlobalObject) JSValue;",
       "declaration_sha256": "b0c65ae4cde8981630f48a353095bf06d5b520cae2bcbf051c9cf17bede2313b",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSGlobalObject__hasException",
@@ -3089,10 +3089,10 @@
       "line": 861,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSGlobalObject__requestTermination(this: *JSGlobalObject) void;",
       "declaration_sha256": "9c9e0e52265188f9243922418257695fcd06bc78a645052474bb29271af8456b",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSGlobalObject__setTimeZone",
@@ -3111,10 +3111,10 @@
       "line": 10,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSGlobalObject__throwOutOfMemoryError(this: *JSGlobalObject) void;",
       "declaration_sha256": "793f74739c7ff48e71a32174a41313ac7ded211890496cf4f538e689bc06cc1c",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSGlobalObject__throwStackOverflow",
@@ -3122,10 +3122,10 @@
       "line": 5,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSGlobalObject__throwStackOverflow(this: *JSGlobalObject) void;",
       "declaration_sha256": "1a5a33c1fdddcd409bf2a2f1f12d42977b32e67d2f86b460c12a99706677a07e",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSGlobalObject__tryTakeException",
@@ -3647,10 +3647,10 @@
       "line": 265,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn TopExceptionScope__assertNoException(ptr: *align(alignment) [size]u8) void;",
       "declaration_sha256": "37f19a96424a7dd141aabe8efef28031902a227c422f7b05e0ba13f9774e4afc",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "TopExceptionScope__clearException",
@@ -3658,10 +3658,10 @@
       "line": 261,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn TopExceptionScope__clearException(ptr: *align(alignment) [size]u8) void;",
       "declaration_sha256": "e8b7c610cc57f7cf3bffd7adb2eefc470c519f7e4aab8bbdcc7c73f476824e63",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "TopExceptionScope__construct",
@@ -3669,10 +3669,10 @@
       "line": 250,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn TopExceptionScope__construct( ptr: *align(alignment) [size]u8, global: *JSGlobalObject, function: [*:0]const u8, file: [*:0]const u8, line: c_uint, size: usize, alignment: usize, ) void;",
       "declaration_sha256": "2039f8f7c94453ba797df4b65848dec5150e9d91df6d01c19b2abb7b3be8df05",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "TopExceptionScope__destruct",
@@ -3680,10 +3680,10 @@
       "line": 266,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn TopExceptionScope__destruct(ptr: *align(alignment) [size]u8) void;",
       "declaration_sha256": "a66854408f3cc9adb67c4aa22df440f8654fd45638388361b702d219cf753ce1",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "TopExceptionScope__exceptionIncludingTraps",
@@ -3691,10 +3691,10 @@
       "line": 264,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn TopExceptionScope__exceptionIncludingTraps(ptr: *align(alignment) [size]u8) ?*Exception;",
       "declaration_sha256": "62a58ed6281948c4304ac45789297961b893d9cfd0403509e41c92233b3fe9da",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "TopExceptionScope__pureException",
@@ -3702,10 +3702,10 @@
       "line": 260,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn TopExceptionScope__pureException(ptr: *align(alignment) [size]u8) ?*Exception;",
       "declaration_sha256": "4a1478d531acc8a46890591e53899ce523545c12f799a7aba8897f4bd714079a",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "URLSearchParams__create",

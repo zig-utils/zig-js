@@ -260,6 +260,9 @@ const CContextGroup = struct {
     /// JavaScriptCore stores the active exception on the VM, not the realm.
     /// Preserve a distinct cell so sibling globals observe the same identity.
     pending_exception: ?*Boxed = null,
+    termination_exception: ?*Boxed = null,
+    termination_requested: std.atomic.Value(bool) = .init(false),
+    execution_forbidden: std.atomic.Value(bool) = .init(false),
 
     fn retain(self: *CContextGroup) bool {
         var current = self.ref_count.load(.monotonic);
@@ -1341,8 +1344,9 @@ fn boxedFrom(ref: JSValueRef) ?*Boxed {
 fn privateBoxedFrom(encoded: EncodedValue) ?*Boxed {
     const address = encoded.asCellAddress() catch return null;
     const boxed: *Boxed = @ptrFromInt(address);
-    if (boxed.owner.c_api_group == null or boxed.owner.c_api_ref_count.load(.acquire) == 0)
-        return null;
+    const opaque_group = boxed.owner.c_api_group orelse return null;
+    const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+    if (boxed.owner != group.primary and boxed.owner.c_api_ref_count.load(.acquire) == 0) return null;
     boxed.owner.assertOwnerThread();
     return boxed;
 }
@@ -3954,6 +3958,206 @@ export fn JSGlobalObject__clearException(global: JSContextRef) callconv(.c) void
     const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
     group.pending_exception = null;
     group.primary.private_pending_exception_root = null;
+}
+
+fn privateGroupFromVM(vm_ref: ?*anyopaque) ?*CContextGroup {
+    return @ptrCast(@alignCast(vm_ref orelse return null));
+}
+
+fn privateMaterializeTermination(group: *CContextGroup) ?*Boxed {
+    if (group.pending_exception) |pending| return pending;
+    if (!group.termination_requested.load(.acquire)) return null;
+    if (group.termination_exception) |termination| {
+        group.pending_exception = termination;
+        group.primary.private_pending_exception_root = termination.value;
+        return termination;
+    }
+
+    const context = group.primary;
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch return null;
+    defer context.popActiveInterpreter(&machine);
+    const thrown = machine.makeError("TerminationError", "JavaScript execution terminated") catch return null;
+    const encoded = privateEncodedFromValue(context, thrown);
+    if (encoded == .empty) return null;
+    const exception = privateExceptionBox(context, thrown, encoded) orelse return null;
+    group.termination_exception = exception;
+    group.pending_exception = exception;
+    group.primary.private_pending_exception_root = thrown;
+    return exception;
+}
+
+const PrivateTopExceptionScope = extern struct {
+    group: ?*CContextGroup,
+};
+
+fn privateTopExceptionScope(ptr: ?*anyopaque) ?*PrivateTopExceptionScope {
+    const raw = ptr orelse return null;
+    if (@intFromPtr(raw) % @alignOf(PrivateTopExceptionScope) != 0) return null;
+    return @ptrCast(@alignCast(raw));
+}
+
+export fn TopExceptionScope__construct(
+    ptr: ?*anyopaque,
+    global: JSContextRef,
+    function_name: [*:0]const u8,
+    file_name: [*:0]const u8,
+    line: c_uint,
+    size: usize,
+    alignment: usize,
+) callconv(.c) void {
+    _ = function_name;
+    _ = file_name;
+    _ = line;
+    if (size < @sizeOf(PrivateTopExceptionScope) or alignment < @alignOf(PrivateTopExceptionScope)) return;
+    const scope = privateTopExceptionScope(ptr) orelse return;
+    const context = ctxForHandleInspection(global) orelse {
+        scope.* = .{ .group = null };
+        return;
+    };
+    scope.* = .{ .group = privatePropertyBoundaryGroup(context) };
+}
+
+export fn TopExceptionScope__pureException(ptr: ?*anyopaque) callconv(.c) ?*anyopaque {
+    const scope = privateTopExceptionScope(ptr) orelse return null;
+    const group = scope.group orelse return null;
+    return @ptrCast(group.pending_exception orelse return null);
+}
+
+export fn TopExceptionScope__exceptionIncludingTraps(ptr: ?*anyopaque) callconv(.c) ?*anyopaque {
+    const scope = privateTopExceptionScope(ptr) orelse return null;
+    const group = scope.group orelse return null;
+    return @ptrCast(privateMaterializeTermination(group) orelse return null);
+}
+
+export fn TopExceptionScope__clearException(ptr: ?*anyopaque) callconv(.c) void {
+    const scope = privateTopExceptionScope(ptr) orelse return;
+    const group = scope.group orelse return;
+    group.pending_exception = null;
+    group.primary.private_pending_exception_root = null;
+}
+
+export fn TopExceptionScope__assertNoException(ptr: ?*anyopaque) callconv(.c) void {
+    const scope = privateTopExceptionScope(ptr) orelse return;
+    const group = scope.group orelse return;
+    if (group.pending_exception != null) @panic("TopExceptionScope expected no pending exception");
+}
+
+export fn TopExceptionScope__destruct(ptr: ?*anyopaque) callconv(.c) void {
+    const scope = privateTopExceptionScope(ptr) orelse return;
+    scope.* = .{ .group = null };
+}
+
+export fn JSGlobalObject__clearExceptionExceptTermination(global: JSContextRef) callconv(.c) bool {
+    const context = ctxForHandleInspection(global) orelse return false;
+    const group = privatePropertyBoundaryGroup(context) orelse return false;
+    if (group.pending_exception) |pending| {
+        if (group.termination_exception == pending) return false;
+        group.pending_exception = null;
+        group.primary.private_pending_exception_root = null;
+    }
+    return true;
+}
+
+export fn JSGlobalObject__requestTermination(global: JSContextRef) callconv(.c) void {
+    const context = ctxForHandleInspection(global) orelse return;
+    const group = privatePropertyBoundaryGroup(context) orelse return;
+    group.termination_requested.store(true, .release);
+}
+
+export fn JSGlobalObject__clearTerminationException(global: JSContextRef) callconv(.c) void {
+    const context = ctxForHandleInspection(global) orelse return;
+    const group = privatePropertyBoundaryGroup(context) orelse return;
+    group.termination_requested.store(false, .release);
+    if (group.pending_exception) |pending| {
+        if (group.termination_exception == pending) {
+            group.pending_exception = null;
+            group.primary.private_pending_exception_root = null;
+        }
+    }
+}
+
+fn privateCreateNativeError(
+    global: JSContextRef,
+    name: []const u8,
+    message: []const u8,
+) EncodedValue {
+    const context = ctxForEvaluation(global) orelse return .empty;
+    const group = privatePropertyBoundaryGroup(context) orelse return .empty;
+    if (group.pending_exception != null) return .empty;
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    defer context.popActiveInterpreter(&machine);
+    const result = machine.makeError(name, message) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    return privateEncodeResult(context, &machine, result);
+}
+
+export fn JSGlobalObject__createOutOfMemoryError(global: JSContextRef) callconv(.c) EncodedValue {
+    return privateCreateNativeError(global, "OutOfMemoryError", "Out of memory");
+}
+
+export fn JSGlobalObject__throwOutOfMemoryError(global: JSContextRef) callconv(.c) void {
+    const context = ctxForHandleInspection(global) orelse return;
+    const result = privateCreateNativeError(global, "OutOfMemoryError", "Out of memory");
+    if (result == .empty) return;
+    const thrown = privateValueFrom(global, result) orelse return;
+    privateSetPendingValue(context, thrown);
+}
+
+export fn JSGlobalObject__throwStackOverflow(global: JSContextRef) callconv(.c) void {
+    const context = ctxForHandleInspection(global) orelse return;
+    const result = privateCreateNativeError(global, "RangeError", "Maximum call stack size exceeded");
+    if (result == .empty) return;
+    const thrown = privateValueFrom(global, result) orelse return;
+    privateSetPendingValue(context, thrown);
+}
+
+export fn JSC__JSValue__isTerminationException(encoded: EncodedValue) callconv(.c) bool {
+    const boxed = privateBoxedFrom(encoded) orelse return false;
+    const opaque_group = boxed.owner.c_api_group orelse return false;
+    const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+    const termination = group.termination_exception orelse return false;
+    return termination == boxed or termination.exception_encoded == encoded;
+}
+
+export fn JSC__VM__clearHasTerminationRequest(vm_ref: ?*anyopaque) callconv(.c) void {
+    const group = privateGroupFromVM(vm_ref) orelse return;
+    group.termination_requested.store(false, .release);
+}
+
+export fn JSC__VM__hasTerminationRequest(vm_ref: ?*anyopaque) callconv(.c) bool {
+    const group = privateGroupFromVM(vm_ref) orelse return false;
+    return group.termination_requested.load(.acquire);
+}
+
+export fn JSC__VM__notifyNeedTermination(vm_ref: ?*anyopaque) callconv(.c) void {
+    const group = privateGroupFromVM(vm_ref) orelse return;
+    group.termination_requested.store(true, .release);
+}
+
+export fn JSC__VM__executionForbidden(vm_ref: ?*anyopaque) callconv(.c) bool {
+    const group = privateGroupFromVM(vm_ref) orelse return false;
+    return group.execution_forbidden.load(.acquire);
+}
+
+export fn JSC__VM__setExecutionForbidden(vm_ref: ?*anyopaque, forbidden: bool) callconv(.c) void {
+    _ = forbidden; // Pinned JSC binding ignores the argument and only sets true.
+    const group = privateGroupFromVM(vm_ref) orelse return;
+    group.execution_forbidden.store(true, .release);
 }
 
 export fn JSGlobalObject__tryTakeException(global: JSContextRef) callconv(.c) EncodedValue {
