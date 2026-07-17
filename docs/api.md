@@ -30,6 +30,11 @@ or extension totals. The pinned Home inventory currently reports four private
 exports and 428 pending private symbols; `zig build test-home-private-abi` is
 their compile-link-runtime gate.
 
+Bun's separately pinned core `src/jsc` inventory reports 422 private symbols,
+of which the same four value shims are implemented and 418 remain pending. Its
+source/signature audit is `zig build bun-private-abi-audit`; broader Bun runtime
+and generated bindings are outside that first core profile.
+
 `ZJSContextGetCollectionEpoch` returns the monotonic count of explicit
 `JSGarbageCollect` calls for a context group. Every realm in the group observes
 the same epoch; arena-backed groups use it as a semantic weak-processing

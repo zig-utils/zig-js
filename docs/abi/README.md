@@ -117,3 +117,32 @@ It covers empty/immediate/int32/double/NaN/negative-zero behavior and boxed
 empty/nonempty strings plus object identity/truthiness. Public accounting stays
 unchanged at 117 functions and 19 extensions; these four symbols are reported
 only as private profile exports.
+
+## Bun core private inventory
+
+`bun-private-core-4982b91e` pins Bun revision
+`4982b91e3702094330f3be3883354c52b8c01323` and scopes the first Bun profile to
+`src/jsc`. Bundled C libraries, N-API, wider runtime/WebCore code, and generated
+bindings are deliberately excluded until separately inventoried. The core
+profile contains 437 unique declarations from 54 hashed files:
+
+| Classification | Symbols |
+|---|---:|
+| Private JSC/Bun/WebCore ABI under #164 | 422 (4 implemented, 418 pending) |
+| Public-C overlap | 15 |
+| **Total** | **437** |
+
+The checked-in comparison proves that Home cannot stand in for Bun: 434 symbol
+names are shared, Bun has 3 core-only symbols, Home has 14 core-only symbols,
+and 28 shared names have different normalized signatures. The inventory lists
+every name in each category rather than reducing that result to counts.
+
+```sh
+zig build bun-private-abi-audit
+zig build bun-private-abi-audit -Dbun-source-root="$HOME/Code/bun"
+```
+
+The audit rejects revision, file hash, declaration digest, classification,
+calling-convention, implementation-status, and Home-comparison drift. It does
+not claim complete Bun runtime compatibility; #164 remains open for the 418
+pending core entries and later wider/generated profiles.

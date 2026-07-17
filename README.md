@@ -249,6 +249,12 @@ string/object conversion until a validated external cell handle exists.
 The first four private exports—encoded identity/cell equality, truthiness, and
 int32 extraction—now pass an exact Zig compile-link-runtime consumer fixture;
 they remain excluded from the 117-function public count and 19 extensions.
+The separate pinned
+[Bun core inventory](docs/abi/bun-private-core-4982b91e-inventory.json) contains
+437 symbols from 54 `src/jsc` files: 422 private (**4 implemented / 418
+pending**) and 15 public overlaps. Its exact comparison with Home finds 434
+shared names, 3 Bun-only names, 14 Home-only names, and 28 changed signatures;
+neither private profile is inferred from the other.
 The pinned public C inventory has no pending declarations. Inspector sessions
 now publish stable scripts and exact statement locations, and provide real
 `debugger;`, explicit pause/resume control, and deterministically resolved
@@ -356,6 +362,8 @@ zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"
 zig build test-private-abi-value # exact JSC64 value codec + internal bridge
 zig build test-home-private-abi # implemented Home private shim slices
 zig build test-home-private-abi -Dhome-private-abi-profile=home-private-5e829ad4 -Dhome-source-root="$HOME/Code/Home/lang"
+zig build bun-private-abi-audit # pinned 437-symbol Bun core denominator
+zig build bun-private-abi-audit -Dbun-source-root="$HOME/Code/bun"
 zig build objc-api-audit         # pinned Objective-C header/inventory drift gate
 zig build test-objc-api-headers  # macOS ARC/blocks header compilation gate
 zig build test-objc-api          # macOS Objective-C compile-link-runtime gate
