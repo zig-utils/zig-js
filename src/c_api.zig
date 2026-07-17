@@ -1229,6 +1229,24 @@ fn privateBoxedFrom(encoded: EncodedValue) ?*Boxed {
     return boxed;
 }
 
+fn privateEncodedFromRef(ref: JSValueRef) EncodedValue {
+    const pointer = ref orelse return .empty;
+    return EncodedValue.fromCellAddress(@intFromPtr(pointer)) catch .empty;
+}
+
+fn privateBigIntModuloU64(object: *Object) u64 {
+    if (object.bigIntText()) |text| {
+        const negative = text.len > 0 and text[0] == '-';
+        var result: u64 = 0;
+        for (text[@intFromBool(negative)..]) |digit| {
+            if (digit < '0' or digit > '9') return 0;
+            result = result *% 10 +% (digit - '0');
+        }
+        return if (negative) 0 -% result else result;
+    }
+    return @truncate(@as(u128, @bitCast(object.bigIntValue())));
+}
+
 /// First revision-pinned Home private-ABI slice. These symbols consume JSC64
 /// words, not zig-js's internal NaN-box representation.
 export fn JSC__JSValue__eqlCell(encoded: EncodedValue, cell: ?*anyopaque) callconv(.c) bool {
@@ -1256,6 +1274,29 @@ export fn JSC__JSValue__toBoolean(encoded: EncodedValue) callconv(.c) bool {
         else => return false,
     };
     return decoded.toBoolean();
+}
+
+export fn JSC__JSValue__fromInt64NoTruncate(global: JSContextRef, number: i64) callconv(.c) EncodedValue {
+    return privateEncodedFromRef(JSBigIntCreateWithInt64(global, number, null));
+}
+
+export fn JSC__JSValue__fromUInt64NoTruncate(global: JSContextRef, number: u64) callconv(.c) EncodedValue {
+    return privateEncodedFromRef(JSBigIntCreateWithUInt64(global, number, null));
+}
+
+export fn JSC__JSValue__toUInt64NoTruncate(encoded: EncodedValue) callconv(.c) u64 {
+    if (encoded.isInt32()) return @bitCast(@as(i64, encoded.asInt32()));
+    if (encoded.isDouble()) {
+        const number = encoded.asDouble();
+        const int52_limit: f64 = @floatFromInt(@as(u64, 1) << 51);
+        if (!std.math.isFinite(number) or @trunc(number) != number or
+            number < 0 or number >= int52_limit)
+            return 0;
+        return @intFromFloat(number);
+    }
+    const boxed = privateBoxedFrom(encoded) orelse return 0;
+    if (!boxed.value.isObject() or !boxed.value.asObj().is_bigint) return 0;
+    return privateBigIntModuloU64(boxed.value.asObj());
 }
 
 fn valueFromContext(ctx: *Context, ref: JSValueRef) ?Value {

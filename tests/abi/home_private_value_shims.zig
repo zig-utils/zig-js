@@ -42,6 +42,9 @@ extern "c" fn JSC__JSValue__eqlCell(EncodedValue, ?*anyopaque) bool;
 extern "c" fn JSC__JSValue__eqlValue(EncodedValue, EncodedValue) bool;
 extern "c" fn JSC__JSValue__toBoolean(EncodedValue) bool;
 extern "c" fn JSC__JSValue__toInt32(EncodedValue) i32;
+extern "c" fn JSC__JSValue__fromInt64NoTruncate(JSContextRef, i64) EncodedValue;
+extern "c" fn JSC__JSValue__fromUInt64NoTruncate(JSContextRef, u64) EncodedValue;
+extern "c" fn JSC__JSValue__toUInt64NoTruncate(EncodedValue) u64;
 
 fn fail(message: []const u8) noreturn {
     std.debug.print("Home private value shims: {s}\n", .{message});
@@ -93,5 +96,21 @@ pub fn main() void {
         JSC__JSValue__eqlValue(encoded_object, encoded_text))
         fail("boxed identity mismatch");
 
-    std.debug.print("Home private value shims: 4/4 symbols linked; runtime matrix passed\n", .{});
+    const signed_min = JSC__JSValue__fromInt64NoTruncate(context, std.math.minInt(i64));
+    const signed_negative = JSC__JSValue__fromInt64NoTruncate(context, -1);
+    const unsigned_max = JSC__JSValue__fromUInt64NoTruncate(context, std.math.maxInt(u64));
+    if (JSC__JSValue__toUInt64NoTruncate(signed_min) != (@as(u64, 1) << 63) or
+        JSC__JSValue__toUInt64NoTruncate(signed_negative) != std.math.maxInt(u64) or
+        JSC__JSValue__toUInt64NoTruncate(unsigned_max) != std.math.maxInt(u64) or
+        JSC__JSValue__toUInt64NoTruncate(JSC__JSValue__fromUInt64NoTruncate(context, 0)) != 0)
+        fail("BigInt modulo extraction mismatch");
+    if (JSC__JSValue__toUInt64NoTruncate(EncodedValue.fromInt32(-1)) != std.math.maxInt(u64) or
+        JSC__JSValue__toUInt64NoTruncate(EncodedValue.fromDouble(42.0)) != 42 or
+        JSC__JSValue__toUInt64NoTruncate(EncodedValue.fromDouble(-1.0)) != 0 or
+        JSC__JSValue__toUInt64NoTruncate(EncodedValue.fromDouble(1.5)) != 0 or
+        JSC__JSValue__toUInt64NoTruncate(EncodedValue.fromDouble(@floatFromInt(@as(u64, 1) << 51))) != 0 or
+        JSC__JSValue__toUInt64NoTruncate(.true) != 0)
+        fail("number fallback extraction mismatch");
+
+    std.debug.print("Home private value shims: 7/7 symbols linked; runtime matrix passed\n", .{});
 }

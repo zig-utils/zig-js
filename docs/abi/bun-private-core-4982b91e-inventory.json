@@ -81,8 +81,8 @@
       "public_c_api": 15
     },
     "by_status": {
-      "implemented": 19,
-      "pending": 418
+      "implemented": 22,
+      "pending": 415
     }
   },
   "home_comparison": {
@@ -1918,10 +1918,10 @@
       "line": 1215,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSValue__fromInt64NoTruncate(globalObject: *JSGlobalObject, i: i64) JSValue;",
       "declaration_sha256": "daa716c335ef89f4592329b95c215a65ae191da083e722bdab7ee9e718751201",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSValue__fromTimevalNoTruncate",
@@ -1940,10 +1940,10 @@
       "line": 1220,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSValue__fromUInt64NoTruncate(globalObject: *JSGlobalObject, i: u64) JSValue;",
       "declaration_sha256": "b0d50b99769ee4f828e78726e680b8340e5ecd5d8c887999c80ebe636ef6ffbb",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSValue__getClassInfoName",
@@ -2468,10 +2468,10 @@
       "line": 1240,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSValue__toUInt64NoTruncate(this: JSValue) u64;",
       "declaration_sha256": "7dd77aafb476ca68eec24778e095b1a68482814ffd26777d9d1b34b7a5c5ed96",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSValue__toZigString",
