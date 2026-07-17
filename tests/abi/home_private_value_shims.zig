@@ -37,6 +37,40 @@ const EncodedValue = enum(i64) {
     }
 };
 
+const BunStringTag = enum(u8) {
+    dead = 0,
+    wtf_string_impl = 1,
+    zig_string = 2,
+    static_zig_string = 3,
+    empty = 4,
+};
+
+const WTFStringImpl = extern struct {
+    ref_count: u32,
+    length: u32,
+    bytes: [*]const u8,
+    hash_and_flags: u32,
+};
+
+const BunStringImpl = extern union {
+    zig_string: extern struct { tagged_ptr: usize, len: usize },
+    wtf_string_impl: ?*WTFStringImpl,
+};
+
+const BunString = extern struct {
+    tag: BunStringTag,
+    value: BunStringImpl,
+};
+
+comptime {
+    if (@sizeOf(BunString) != 24 or @alignOf(BunString) != 8 or
+        @offsetOf(BunString, "value") != 8)
+        @compileError("BunString fixture layout drifted");
+    if (@offsetOf(WTFStringImpl, "bytes") != 8 or
+        @offsetOf(WTFStringImpl, "hash_and_flags") != 16)
+        @compileError("WTFStringImpl fixture prefix drifted");
+}
+
 extern "c" fn JSGlobalContextCreate(?*anyopaque) JSContextRef;
 extern "c" fn JSGlobalContextCreateInGroup(?*anyopaque, ?*anyopaque) JSContextRef;
 extern "c" fn JSGlobalContextRelease(JSContextRef) void;
@@ -72,6 +106,9 @@ extern "c" fn JSC__JSBigInt__orderDouble(?*anyopaque, f64) i8;
 extern "c" fn JSC__JSBigInt__orderInt64(?*anyopaque, i64) i8;
 extern "c" fn JSC__JSBigInt__orderUint64(?*anyopaque, u64) i8;
 extern "c" fn JSC__JSBigInt__toInt64(?*anyopaque) i64;
+extern "c" fn JSC__JSBigInt__toString(?*anyopaque, JSContextRef) BunString;
+extern "c" fn Bun__WTFStringImpl__ref(?*WTFStringImpl) void;
+extern "c" fn Bun__WTFStringImpl__deref(?*WTFStringImpl) void;
 extern "c" fn JSC__JSValue__asString(EncodedValue) ?*anyopaque;
 extern "c" fn JSC__JSString__eql(?*anyopaque, JSContextRef, ?*anyopaque) bool;
 extern "c" fn JSC__JSString__is8Bit(?*anyopaque) bool;
@@ -413,6 +450,38 @@ pub fn main() void {
         JSC__JSBigInt__toInt64(modulo_one) != 1)
         fail("signed modulo extraction mismatch");
 
+    const signed_min_string = JSC__JSBigInt__toString(signed_min_cell, context);
+    const huge_string = JSC__JSBigInt__toString(huge_positive, context);
+    const huge_string_second = JSC__JSBigInt__toString(huge_positive, context);
+    const signed_min_impl = signed_min_string.value.wtf_string_impl orelse fail("BigInt string missing StringImpl");
+    const huge_impl = huge_string.value.wtf_string_impl orelse fail("huge BigInt string missing StringImpl");
+    const huge_second_impl = huge_string_second.value.wtf_string_impl orelse fail("fresh BigInt string missing StringImpl");
+    if (signed_min_string.tag != .wtf_string_impl or huge_string.tag != .wtf_string_impl or
+        signed_min_impl.length != "-9223372036854775808".len or
+        !std.mem.eql(u8, signed_min_impl.bytes[0..signed_min_impl.length], "-9223372036854775808") or
+        !std.mem.eql(u8, huge_impl.bytes[0..huge_impl.length], "184467440737095516160000000000000000000") or
+        huge_impl == huge_second_impl or
+        signed_min_impl.ref_count != 2 or huge_impl.ref_count != 2 or
+        signed_min_impl.hash_and_flags & 4 == 0)
+        fail("owned BunString BigInt conversion mismatch");
+
+    Bun__WTFStringImpl__ref(signed_min_impl);
+    if (@atomicLoad(u32, &signed_min_impl.ref_count, .acquire) != 4)
+        fail("BunString retain mismatch");
+    Bun__WTFStringImpl__deref(signed_min_impl);
+    if (@atomicLoad(u32, &signed_min_impl.ref_count, .acquire) != 2)
+        fail("BunString release mismatch");
+    Bun__WTFStringImpl__deref(signed_min_impl);
+    Bun__WTFStringImpl__deref(huge_impl);
+    Bun__WTFStringImpl__deref(huge_second_impl);
+
+    JSC__VM__throwError(JSC__JSGlobalObject__vm(context), context, EncodedValue.fromInt32(195));
+    const blocked_bigint_string = JSC__JSBigInt__toString(signed_negative_cell, context);
+    const preserved_bigint_string_exception = JSGlobalObject__tryTakeException(context);
+    if (blocked_bigint_string.tag != .dead or
+        JSC__Exception__asJSValue(preserved_bigint_string_exception.cellPointer()) != EncodedValue.fromInt32(195))
+        fail("BigInt string replaced a pending exception");
+
     const text_cell = JSC__JSValue__asString(encoded_text) orelse fail("string downcast failed");
     const same_text_cell = JSC__JSValue__asString(EncodedValue.fromRef(same_text_value)) orelse fail("same string downcast failed");
     if (JSC__JSValue__asString(.true) != null or
@@ -587,6 +656,13 @@ pub fn main() void {
     const vm = JSC__JSGlobalObject__vm(context) orelse fail("private VM lookup failed");
     const sibling_vm = JSC__JSGlobalObject__vm(sibling_context) orelse fail("sibling VM lookup failed");
     const foreign_vm = JSC__JSGlobalObject__vm(foreign_context) orelse fail("foreign VM lookup failed");
+
+    const sibling_bigint_string = JSC__JSBigInt__toString(signed_negative_cell, sibling_context);
+    const sibling_bigint_impl = sibling_bigint_string.value.wtf_string_impl orelse fail("sibling BigInt string missing StringImpl");
+    if (sibling_bigint_string.tag != .wtf_string_impl or
+        !std.mem.eql(u8, sibling_bigint_impl.bytes[0..sibling_bigint_impl.length], "-1"))
+        fail("same-VM sibling BigInt string conversion mismatch");
+    Bun__WTFStringImpl__deref(sibling_bigint_impl);
 
     const timeout_reason = WebCore__CommonAbortReason__toJS(sibling_context, 1);
     const timeout_reason_second = WebCore__CommonAbortReason__toJS(sibling_context, 1);
@@ -1263,5 +1339,5 @@ pub fn main() void {
         JSC__JSMap__get(map_cell, context, evaluate(context, "'direct'")) != .undefined)
         fail("private JSMap clear mismatch");
 
-    std.debug.print("Home private value shims: 79/79 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 80/80 symbols linked; runtime matrix passed\n", .{});
 }

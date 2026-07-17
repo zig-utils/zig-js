@@ -55,9 +55,74 @@ const PrivateCommonAbortReason = enum(u8) {
     _,
 };
 
+/// Bun/Home pass `bun.String` by value across the private ABI. On 64-bit
+/// targets this is the 24-byte `BunString` C layout from
+/// `headers-handwritten.h`: one byte of tag, natural padding, then a 16-byte
+/// union large enough for `ZigString { ptr, len }`.
+const PrivateBunStringTag = enum(u8) {
+    dead = 0,
+    wtf_string_impl = 1,
+    zig_string = 2,
+    static_zig_string = 3,
+    empty = 4,
+};
+
+const PrivateZigString = extern struct {
+    tagged_ptr: usize = 0,
+    len: usize = 0,
+};
+
+const PrivateBunStringImpl = extern union {
+    zig_string: PrivateZigString,
+    wtf_string_impl: ?*PrivateWTFStringImpl,
+};
+
+const PrivateBunString = extern struct {
+    tag: PrivateBunStringTag,
+    value: PrivateBunStringImpl,
+
+    fn dead() PrivateBunString {
+        return .{ .tag = .dead, .value = .{ .zig_string = .{} } };
+    }
+
+    fn empty() PrivateBunString {
+        return .{ .tag = .empty, .value = .{ .zig_string = .{} } };
+    }
+};
+
+/// Prefix-compatible with WTF::StringImpl's pinned 64-bit data layout. The
+/// trailing fields are private allocator metadata and are never exposed to the
+/// consumer. BigInt decimal output is ASCII, so every instance is an 8-bit
+/// StringImpl and `m_length` is also the owned byte allocation length.
+const PrivateWTFStringImpl = extern struct {
+    m_ref_count: u32,
+    m_length: u32,
+    m_ptr: [*]const u8,
+    m_hash_and_flags: u32,
+    private_magic: u32,
+};
+
+const private_wtf_ref_increment: u32 = 2;
+const private_wtf_flag_8_bit_buffer: u32 = 1 << 2;
+const private_wtf_magic: u32 = 0x5a4a_5354; // "ZJST"
+
+comptime {
+    if (@sizeOf(PrivateZigString) != 16 or @alignOf(PrivateZigString) != 8)
+        @compileError("private ZigString must retain its pinned 16-byte/8-byte ABI");
+    if (@sizeOf(PrivateBunString) != 24 or @alignOf(PrivateBunString) != 8 or
+        @offsetOf(PrivateBunString, "value") != 8)
+        @compileError("private BunString must retain its pinned 24-byte/8-byte ABI");
+    if (@offsetOf(PrivateWTFStringImpl, "m_ref_count") != 0 or
+        @offsetOf(PrivateWTFStringImpl, "m_length") != 4 or
+        @offsetOf(PrivateWTFStringImpl, "m_ptr") != 8 or
+        @offsetOf(PrivateWTFStringImpl, "m_hash_and_flags") != 16)
+        @compileError("private WTFStringImpl prefix drifted from the pinned ABI");
+}
+
 /// Global allocator for C-API-created contexts and strings. `page_allocator`
 /// needs no libc and is always available; a tuned allocator can replace it.
 const gpa = std.heap.page_allocator;
+const private_string_allocator = std.heap.c_allocator;
 
 /// Boxed interpreter value handed across the C boundary as a `JSValueRef`.
 /// Handles are realm-affine: APIs that receive a `JSContextRef` reject boxes
@@ -88,10 +153,14 @@ const ReachabilityVisitor = struct {
         self.objects.deinit(self.allocator);
     }
 
-    pub fn concurrent(_: *ReachabilityVisitor) bool { return false; }
+    pub fn concurrent(_: *ReachabilityVisitor) bool {
+        return false;
+    }
     pub fn markWeak(_: *ReachabilityVisitor, _: *?*anyopaque) void {}
     pub fn deferToFinish(_: *ReachabilityVisitor, _: *anyopaque) void {}
-    pub fn isManaged(_: *ReachabilityVisitor, cell: ?*anyopaque) bool { return cell != null; }
+    pub fn isManaged(_: *ReachabilityVisitor, cell: ?*anyopaque) bool {
+        return cell != null;
+    }
     pub fn markConservativeWord(_: *ReachabilityVisitor, _: usize) void {}
     pub fn markConservativeWords(_: *ReachabilityVisitor, _: [*]const usize, _: usize) void {}
 
@@ -2019,6 +2088,74 @@ export fn JSC__JSBigInt__orderUint64(cell: ?*anyopaque, number: u64) callconv(.c
 export fn JSC__JSBigInt__toInt64(cell: ?*anyopaque) callconv(.c) i64 {
     const boxed = privateBigIntBoxFromCell(cell) orelse return 0;
     return @bitCast(privateBigIntModuloU64(boxed.value.asObj()));
+}
+
+fn privateDestroyWTFStringImpl(impl: *PrivateWTFStringImpl) void {
+    if (impl.private_magic != private_wtf_magic) return;
+    const bytes = @constCast(impl.m_ptr[0..impl.m_length]);
+    impl.private_magic = 0;
+    private_string_allocator.free(bytes);
+    private_string_allocator.destroy(impl);
+}
+
+export fn Bun__WTFStringImpl__ref(impl: ?*PrivateWTFStringImpl) callconv(.c) void {
+    const string = impl orelse return;
+    if (string.private_magic != private_wtf_magic) return;
+    _ = @atomicRmw(u32, &string.m_ref_count, .Add, private_wtf_ref_increment, .monotonic);
+}
+
+export fn Bun__WTFStringImpl__deref(impl: ?*PrivateWTFStringImpl) callconv(.c) void {
+    const string = impl orelse return;
+    if (string.private_magic != private_wtf_magic) return;
+    const previous = @atomicRmw(u32, &string.m_ref_count, .Sub, private_wtf_ref_increment, .acq_rel);
+    if (previous == private_wtf_ref_increment) privateDestroyWTFStringImpl(string);
+}
+
+/// Rust-side Bun strings use an inline atomic decrement and call this cold
+/// destroy path only after they brought the count to zero themselves.
+export fn Bun__WTFStringImpl__destroy(impl: ?*PrivateWTFStringImpl) callconv(.c) void {
+    const string = impl orelse return;
+    if (@atomicLoad(u32, &string.m_ref_count, .acquire) != 0) return;
+    privateDestroyWTFStringImpl(string);
+}
+
+fn privateOwnedLatin1String(bytes: []const u8) error{OutOfMemory}!PrivateBunString {
+    if (bytes.len == 0) return PrivateBunString.empty();
+    const owned = try private_string_allocator.dupe(u8, bytes);
+    errdefer private_string_allocator.free(owned);
+    const impl = try private_string_allocator.create(PrivateWTFStringImpl);
+    impl.* = .{
+        .m_ref_count = private_wtf_ref_increment,
+        .m_length = @intCast(owned.len),
+        .m_ptr = owned.ptr,
+        .m_hash_and_flags = private_wtf_flag_8_bit_buffer,
+        .private_magic = private_wtf_magic,
+    };
+    return .{ .tag = .wtf_string_impl, .value = .{ .wtf_string_impl = impl } };
+}
+
+export fn JSC__JSBigInt__toString(
+    cell: ?*anyopaque,
+    global: JSContextRef,
+) callconv(.c) PrivateBunString {
+    const context = ctxForHandleInspection(global) orelse return PrivateBunString.dead();
+    const opaque_group = context.c_api_group orelse return PrivateBunString.dead();
+    const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+    if (group.pending_exception != null) return PrivateBunString.dead();
+
+    const boxed = privateBigIntBoxFromCell(cell) orelse return PrivateBunString.dead();
+    if (boxed.owner.c_api_group != context.c_api_group) return PrivateBunString.dead();
+    const object = boxed.value.asObj();
+
+    var stack: [42]u8 = undefined;
+    const decimal = object.bigIntText() orelse std.fmt.bufPrint(&stack, "{d}", .{object.bigIntValue()}) catch {
+        privateSetPendingValue(context, context.reserved_thread_oom_error orelse Value.staticStr("OutOfMemory"));
+        return PrivateBunString.dead();
+    };
+    return privateOwnedLatin1String(decimal) catch {
+        privateSetPendingValue(context, context.reserved_thread_oom_error orelse Value.staticStr("OutOfMemory"));
+        return PrivateBunString.dead();
+    };
 }
 
 export fn JSC__JSValue__asString(encoded: EncodedValue) callconv(.c) ?*anyopaque {
