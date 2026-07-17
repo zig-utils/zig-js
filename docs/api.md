@@ -40,8 +40,9 @@ numeric/string/geometry/Foundation conversion, comparisons, calls,
 construction, property operations, promise callback state, managed owner/value
 relations, exact wrapper identity, typed Objective-C blocks, `JSExport`
 instances/classes/renamed selectors, and property-descriptor symbols. The
-15-row Objective-C transcript matches system JavaScriptCore exactly
-(`73e8bff0363ae6c5`). See the [Objective-C bridge inventory
+16-row Objective-C transcript matches system JavaScriptCore exactly
+(`0e971dec6ec2caaf`), including same-VM cross-context value identity and
+target-context wrapper behavior. See the [Objective-C bridge inventory
 guide](objc-api/README.md) for the exact boundary and reproduction details.
 The complete declared inventory does not claim compatibility with private JSC
 framework internals or stronger collection behavior than zig-js's documented
