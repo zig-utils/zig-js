@@ -41,7 +41,7 @@ libc import. See [the exact declaration inventory](abi/home-private-7ed99c02-inv
 and run `zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"`
 to verify the live revision, every source hash, signature, classification, and
 calling convention. This replaces a vague source-level estimate, but the 432
-private entries are now 53 implemented / 379 pending under #163. The implemented
+private entries are now 55 implemented / 377 pending under #163. The implemented
 slices cover JSC64 value identity, cell equality, truthiness, int32 extraction,
 exact signed/unsigned 64-bit BigInt construction, and modulo-2^64 BigInt
 extraction with the pinned number fallbacks, plus exact strict and SameValue
@@ -77,7 +77,10 @@ preservation. Two predicates add JSC-exact internal has-instance prechecks and
 object-only iterator GetMethod behavior, including custom/proxy hooks, getter
 execution, callability validation, and VM exception publication. Private
 string inclusion adds ordered full ToString coercion and exact UTF-16
-code-unit matching across astral and surrogate boundaries. These slices do not
+code-unit matching across astral and surrogate boundaries. Class and
+AggregateError classification now follows executable/native and immutable error
+metadata, while sibling C-API realms share VM well-known Symbols and the Symbol
+registry. These slices do not
 yet create a usable Home private runtime.
 
 The newer Home revisions `5e829ad4` and `38702f9e` changed no files in
