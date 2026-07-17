@@ -38,6 +38,30 @@ int main(void)
                       [context.exception.toString containsString:@"bridge-smoke"],
                   11))
             return 11;
+
+        JSContext *defaultContext = [JSContext new];
+        if (check(defaultContext && defaultContext.virtualMachine && defaultContext.globalObject.isObject, 12))
+            return 12;
+        if (check([JSValue valueWithUndefinedInContext:context].isUndefined, 13))
+            return 13;
+        if (check([JSValue valueWithNullInContext:context].isNull, 14))
+            return 14;
+        JSValue *boolean = [JSValue valueWithBool:YES inContext:context];
+        if (check(boolean.isBoolean && boolean.toBool && boolean.context == context, 15))
+            return 15;
+        if (check([JSValue valueWithDouble:1.5 inContext:context].isNumber, 16))
+            return 16;
+        if (check([JSValue valueWithInt32:-7 inContext:context].isNumber, 17))
+            return 17;
+        if (check([JSValue valueWithUInt32:7 inContext:context].isNumber, 18))
+            return 18;
+        if (check([[context evaluateScript:@"'s'"] isString] &&
+                      [[context evaluateScript:@"[]"] isArray] &&
+                      [[context evaluateScript:@"new Date(0)"] isDate] &&
+                      [[context evaluateScript:@"Symbol('s')"] isSymbol] &&
+                      [[context evaluateScript:@"1n"] isBigInt],
+                  19))
+            return 19;
     }
     return 0;
 }
