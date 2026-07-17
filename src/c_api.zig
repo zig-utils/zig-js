@@ -414,10 +414,50 @@ fn staticValueHas(
     };
 }
 
+fn staticValueAttributes(
+    raw_machine: *anyopaque,
+    object: *Object,
+    key: []const u8,
+) value.HostError!?value.PropAttr {
+    const machine: *interp.Interpreter = @ptrCast(@alignCast(raw_machine));
+    const target = try classCallbackTarget(machine, object);
+    var class: ?*CClass = target.class;
+    while (class) |item| : (class = item.parent) {
+        for (item.static_values) |entry| {
+            const name = entry.name orelse continue;
+            if (std.mem.eql(u8, std.mem.span(name), key)) return propAttrFromC(entry.attributes);
+        }
+    }
+    return null;
+}
+
+fn staticValueOwnKeys(
+    raw_machine: *anyopaque,
+    object: *Object,
+) value.HostError![]const []const u8 {
+    const machine: *interp.Interpreter = @ptrCast(@alignCast(raw_machine));
+    const target = try classCallbackTarget(machine, object);
+    var result: std.ArrayListUnmanaged([]const u8) = .empty;
+    var seen: std.StringHashMapUnmanaged(void) = .empty;
+    var class: ?*CClass = target.class;
+    while (class) |item| : (class = item.parent) {
+        for (item.static_values) |entry| {
+            const name_ptr = entry.name orelse continue;
+            const name = std.mem.span(name_ptr);
+            if (seen.contains(name)) continue;
+            try seen.put(machine.arena, name, {});
+            try result.append(machine.arena, name);
+        }
+    }
+    return result.items;
+}
+
 const c_api_class_hooks: value.HostClassHooks = .{
     .get = staticValueGet,
     .set = staticValueSet,
     .has = staticValueHas,
+    .attributes = staticValueAttributes,
+    .own_keys = staticValueOwnKeys,
 };
 
 // ---- internal helpers --------------------------------------------------

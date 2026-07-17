@@ -9655,6 +9655,21 @@ pub const Interpreter = struct {
         }
         var strings: std.ArrayListUnmanaged([]const u8) = .empty;
         var symbols: std.ArrayListUnmanaged([]const u8) = .empty;
+        var seen_strings: std.StringHashMapUnmanaged(void) = .empty;
+        if (t.hostClassHooks()) |hooks| if (hooks.own_keys) |own_keys| {
+            for (try own_keys(@ptrCast(self), t)) |k| {
+                if (value.isPrivateKey(k) or value.isSymbolKey(k)) continue;
+                if (value.canonicalIndex(k)) |idx| {
+                    if (!seen.contains(idx)) {
+                        try seen.put(self.arena, idx, {});
+                        try indices.append(self.arena, k);
+                    }
+                } else if (!seen_strings.contains(k)) {
+                    try seen_strings.put(self.arena, k, {});
+                    try strings.append(self.arena, k);
+                }
+            }
+        };
         for (try t.ownKeys(self.arena)) |k| {
             if (value.isPrivateKey(k)) continue;
             if (value.isSymbolKey(k)) {
@@ -9664,7 +9679,8 @@ pub const Interpreter = struct {
                     try seen.put(self.arena, idx, {});
                     try indices.append(self.arena, k);
                 }
-            } else {
+            } else if (!seen_strings.contains(k)) {
+                try seen_strings.put(self.arena, k, {});
                 try strings.append(self.arena, k);
             }
         }
@@ -11853,6 +11869,19 @@ pub const Interpreter = struct {
         }
         return objectHasOwn(o, key) and o.getAttr(key).enumerable and
             !(o.is_array and std.mem.eql(u8, key, "length"));
+    }
+
+    pub fn propertyIsEnumerableResult(self: *Interpreter, o: *value.Object, key: []const u8) EvalError!bool {
+        return self.objectProtoPropertyIsEnumerable(o, key);
+    }
+
+    pub fn enumerableOwnPropertyResult(self: *Interpreter, o: *value.Object, key: []const u8) EvalError!bool {
+        if (objectHasOwn(o, key)) return o.getAttr(key).enumerable and
+            !(o.is_array and std.mem.eql(u8, key, "length"));
+        if (o.hostClassHooks()) |hooks| if (hooks.attributes) |attributes| {
+            return if (try attributes(@ptrCast(self), o, key)) |attr| attr.enumerable else false;
+        };
+        return false;
     }
 
     /// Dispatch `Array.prototype` / `String.prototype` methods (which aren't

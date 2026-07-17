@@ -54,9 +54,9 @@ tests):
 
 1. **Complete custom native classes** — class ownership, inheritance,
    initialize/finalize, class identity, shared prototypes, and static functions
-   and tri-state static value get/set/has dispatch are implemented; static-value
-   descriptors/enumeration,
-   `hasInstance`, `callAsConstructor`, parent class). Home defines ~100+
+   plus static-value get/set/has, descriptor, and key-enumeration dispatch are
+   implemented; static-value deletion, dynamic property callbacks,
+   `hasInstance`, `callAsConstructor`, and conversion callbacks remain. Home defines ~100+
    JS-exposed classes (Subprocess, Glob, Server, Crypto hashers, FSWatcher,
    Stats, …) via the generated-class machinery. This is the single biggest gap.
 2. **Exception model** — set/get/clear a pending exception on the context;
@@ -64,7 +64,7 @@ tests):
    construction; the `JSValueRef* exception` out-parameter convention on every
    call/get/set. Home's invariant: a host call returns the empty value **iff**
    an exception is pending (see Home's `host_fn.zig` / `assertExceptionPresenceMatches`).
-3. **Remaining public property/enumeration APIs** — checked-in macOS 27.0
+3. **Remaining public property/name APIs** — checked-in macOS 27.0
    headers, inventory verification, C/C++ hosts, and the JSC differential gate
    are in place; property-key variants and name snapshots remain.
 4. **Prototype & structure control** — `JSObjectGetPrototype`/`SetPrototype`

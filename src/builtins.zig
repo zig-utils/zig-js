@@ -800,10 +800,7 @@ fn enumerableOwnProperties(self: *Interpreter, arg0: Value, kind: EnumKind) Host
             // An Array's / TypedArray's "length" is a non-enumerable own property.
             false
         else
-            ((interpreter.objectHasOwn(o, k) or (if (o.is_array) blk: {
-                const idx = arrayIndexOf(k) orelse break :blk false;
-                break :blk o.denseElementPresent(idx);
-            } else false)) and o.getAttr(k).enumerable);
+            try self.enumerableOwnPropertyResult(o, k);
         if (!enumerable) continue;
         if (kind == .key) {
             try result.asObj().appendElement(self.arena, try Value.strAlloc(self.arena, k));
@@ -2347,6 +2344,22 @@ pub fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, this: Value, args: []cons
             }
         }
     }
+    if (o.hostClassHooks()) |hooks| if (hooks.get) |get| {
+        switch (try get(@ptrCast(self), o, key)) {
+            .unhandled => {},
+            .value => |v| {
+                const configurable = if (hooks.attributes) |attributes|
+                    if (try attributes(@ptrCast(self), o, key)) |attr| attr.configurable else true
+                else
+                    true;
+                return dataDescriptor(self, v, .{
+                    .writable = false,
+                    .enumerable = false,
+                    .configurable = configurable,
+                });
+            },
+        }
+    };
     if (o.getAccessor(key)) |acc| {
         const a = o.getAttr(key);
         const desc = try self.newObject();

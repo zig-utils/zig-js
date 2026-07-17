@@ -175,6 +175,7 @@ int main(void)
         { "x", static_get_seven, static_set_false, kJSPropertyAttributeNone },
         { "y", static_get_stored, static_set_true, kJSPropertyAttributeNone },
         { "z", static_get_null, NULL, kJSPropertyAttributeNone },
+        { "hidden", static_get_seven, NULL, kJSPropertyAttributeDontEnum },
         { NULL, NULL, NULL, 0 }
     };
     JSClassDefinition value_definition = kJSClassDefinitionEmpty;
@@ -209,6 +210,22 @@ int main(void)
         return 4;
     fputc('\n', stdout);
     JSStringRelease(js_static_string);
+    JSValueRef js_static_keys = evaluate(context,
+        "JSON.stringify([Object.keys(valueObject),valueObject.propertyIsEnumerable('x'),valueObject.propertyIsEnumerable('hidden'),valueObject.propertyIsEnumerable('z')])");
+    JSStringRef js_static_keys_string = JSValueToStringCopy(context, js_static_keys, &exception);
+    fputs("static-keys ", stdout);
+    if (!js_static_keys_string || !print_json_string(js_static_keys_string))
+        return 5;
+    fputc('\n', stdout);
+    JSStringRelease(js_static_keys_string);
+    JSValueRef js_static_descriptors = evaluate(context,
+        "JSON.stringify([Object.getOwnPropertyDescriptor(valueObject,'x')??null,Reflect.ownKeys(valueObject).sort()])");
+    JSStringRef js_static_descriptors_string = JSValueToStringCopy(context, js_static_descriptors, &exception);
+    fputs("static-reflection ", stdout);
+    if (!js_static_descriptors_string || !print_json_string(js_static_descriptors_string))
+        return 6;
+    fputc('\n', stdout);
+    JSStringRelease(js_static_descriptors_string);
     JSStringRelease(x_name); JSStringRelease(y_name); JSStringRelease(z_name);
     JSClassRelease(value_class);
 

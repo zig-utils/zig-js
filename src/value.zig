@@ -58,6 +58,8 @@ pub const HostClassHooks = struct {
     get: ?*const fn (*anyopaque, *Object, []const u8) HostError!HostClassGetResult = null,
     set: ?*const fn (*anyopaque, *Object, []const u8, Value) HostError!HostClassSetResult = null,
     has: ?*const fn (*anyopaque, *Object, []const u8) HostError!bool = null,
+    attributes: ?*const fn (*anyopaque, *Object, []const u8) HostError!?PropAttr = null,
+    own_keys: ?*const fn (*anyopaque, *Object) HostError![]const []const u8 = null,
 };
 
 /// The element type of a typed array (no BigInt variants — those need a BigInt
