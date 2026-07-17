@@ -62,3 +62,30 @@ zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"
 This inventory is a denominator, not an implementation claim. The 432 private
 entries remain pending until #163 provides their type/layout contracts, shims,
 and consumer runtime evidence.
+
+## JSC64 value boundary
+
+Private shims must use `private_abi.EncodedValue`; they must never expose
+zig-js's internal `Value.rawBits()` as though it were JavaScriptCore. The two
+types are both eight-byte NaN boxes but intentionally use different tags.
+
+The pinned boundary implements the Home/Bun JSC64 encodings exactly:
+
+| Value | Encoded word |
+|---|---:|
+| empty / thrown sentinel | `0x0` |
+| null | `0x2` |
+| deleted-property sentinel | `0x4` |
+| false / true | `0x6` / `0x7` |
+| undefined | `0xa` |
+| int32 tag | `0xfffe000000000000 \| uint32(payload)` |
+| double | raw IEEE-754 bits plus `1 << 49`, wrapping |
+| cell | aligned non-null pointer word |
+
+`zig build test-private-abi-value` runs the focused layout/codec tests and a
+real bridge executable against `js.Value`. It covers the complete signed int32
+range boundaries, finite doubles, infinities, negative zero, positive and
+negative noncanonical NaNs, cell validation, every primitive conversion, and
+the requirement that string/object conversion first acquire an external cell
+handle. This boundary solves value translation only; it does not make the 432
+private symbols callable.
