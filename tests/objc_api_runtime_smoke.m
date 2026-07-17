@@ -130,6 +130,23 @@ int main(void)
                       [JSPropertyDescriptorSetKey isEqualToString:@"set"],
                   34))
             return 34;
+        CGPoint point = CGPointMake(1.25, -2.5);
+        CGPoint pointResult = [JSValue valueWithPoint:point inContext:context].toPoint;
+        if (check(pointResult.x == point.x && pointResult.y == point.y, 35))
+            return 35;
+        NSRange range = NSMakeRange(3, 7);
+        if (check(NSEqualRanges([JSValue valueWithRange:range inContext:context].toRange, range), 36))
+            return 36;
+        CGRect rect = CGRectMake(1, 2, 3, 4);
+        CGRect rectResult = [JSValue valueWithRect:rect inContext:context].toRect;
+        if (check(rectResult.origin.x == rect.origin.x && rectResult.origin.y == rect.origin.y &&
+                      rectResult.size.width == rect.size.width && rectResult.size.height == rect.size.height,
+                  37))
+            return 37;
+        CGSize size = CGSizeMake(8, 9);
+        CGSize sizeResult = [JSValue valueWithSize:size inContext:context].toSize;
+        if (check(sizeResult.width == size.width && sizeResult.height == size.height, 38))
+            return 38;
     }
     return 0;
 }

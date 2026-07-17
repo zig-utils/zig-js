@@ -827,6 +827,66 @@ static JSValueRef *ZJSCreateArguments(NSArray *arguments, JSContext *context,
 - (void)setObject:(id)object forKeyedSubscript:(id)key { [self setValue:object forProperty:key]; }
 - (void)setObject:(id)object atIndexedSubscript:(NSUInteger)index { [self setValue:object atIndex:index]; }
 
++ (JSValue *)valueWithPoint:(CGPoint)point inContext:(JSContext *)context
+{
+    JSValue *value = [self valueWithNewObjectInContext:context];
+    [value setValue:@(point.x) forProperty:@"x"];
+    [value setValue:@(point.y) forProperty:@"y"];
+    return value;
+}
+
++ (JSValue *)valueWithRange:(NSRange)range inContext:(JSContext *)context
+{
+    JSValue *value = [self valueWithNewObjectInContext:context];
+    [value setValue:@(range.location) forProperty:@"location"];
+    [value setValue:@(range.length) forProperty:@"length"];
+    return value;
+}
+
++ (JSValue *)valueWithRect:(CGRect)rect inContext:(JSContext *)context
+{
+    JSValue *value = [self valueWithNewObjectInContext:context];
+    [value setValue:@(rect.origin.x) forProperty:@"x"];
+    [value setValue:@(rect.origin.y) forProperty:@"y"];
+    [value setValue:@(rect.size.width) forProperty:@"width"];
+    [value setValue:@(rect.size.height) forProperty:@"height"];
+    return value;
+}
+
++ (JSValue *)valueWithSize:(CGSize)size inContext:(JSContext *)context
+{
+    JSValue *value = [self valueWithNewObjectInContext:context];
+    [value setValue:@(size.width) forProperty:@"width"];
+    [value setValue:@(size.height) forProperty:@"height"];
+    return value;
+}
+
+- (CGPoint)toPoint
+{
+    return CGPointMake([[self valueForProperty:@"x"] toDouble],
+                       [[self valueForProperty:@"y"] toDouble]);
+}
+
+- (NSRange)toRange
+{
+    return NSMakeRange((NSUInteger)[[self valueForProperty:@"location"] toDouble],
+                       (NSUInteger)[[self valueForProperty:@"length"] toDouble]);
+}
+
+- (CGRect)toRect
+{
+    return CGRectMake([[self valueForProperty:@"x"] toDouble],
+                      [[self valueForProperty:@"y"] toDouble],
+                      [[self valueForProperty:@"width"] toDouble],
+                      [[self valueForProperty:@"height"] toDouble]);
+}
+
+- (CGSize)toSize
+{
+    return CGSizeMake([[self valueForProperty:@"width"] toDouble],
+                      [[self valueForProperty:@"height"] toDouble]);
+}
+
 - (JSRelationCondition)compareJSValue:(JSValue *)other
 {
     if (other.context.virtualMachine != self.context.virtualMachine)
