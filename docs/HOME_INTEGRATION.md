@@ -49,7 +49,7 @@ zig build home-private-abi-audit \
 
 This verifies the live revision, every source hash, signature, classification,
 and calling convention. It replaces a vague source-level estimate, but the 431
-private imports are now 116 implemented / 315 pending under #163. The generated
+private imports are now 119 implemented / 312 pending under #163. The generated
 FFI wrapper emits and resolves `JSFunctionCall` inside its own compiled module,
 so zig-js must not provide a duplicate symbol. The implemented
 slices cover JSC64 value identity, cell equality, truthiness, int32 extraction,
@@ -99,6 +99,9 @@ same-VM siblings, foreign values, and exact empty/deleted exception sentinels.
 Three fast built-in-name reads cover all 24 pinned byte IDs and keep direct
 data, own-slot, and Object.prototype-cutoff lookup observably distinct. The
 Bun-only pure `code` VM inquiry is tracked solely in the Bun denominator.
+Three shared Symbol bridges add exact VM-registry creation and stable borrowed
+description/key output. Sibling C-API realms share one registry from bootstrap,
+including when their first registration happens after both realms exist.
 Two ordinary-object constructors and the wrapper-unboxing shim add exact prototype,
 freshness, int32/double, negative-zero, NaN, and primitive-value behavior. Three
 value-level BigInt shims add four-way BigInt/Number comparison,
@@ -139,7 +142,7 @@ behavior, and VM exception propagation. Ten Promise/InternalPromise shims add
 selected-realm pending and directly settled promises, exact native downcasts,
 callback Promise passthrough, Error/throw rejection, and normal AnyPromise
 resolution with thenable assimilation and self-resolution protection. Their
-115-symbol combined fixture covers sibling realms, foreign VMs, callback
+118-symbol combined fixture covers sibling realms, foreign VMs, callback
 reentrancy, exception clearing, settled-target no-ops, and the complete
 DOMException code matrix. Seven Home-only
 JSMap shims create selected-realm native maps and directly implement

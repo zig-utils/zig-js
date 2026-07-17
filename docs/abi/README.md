@@ -44,7 +44,7 @@ convention. The exact current denominator is:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #163 | 431 (116 implemented, 315 pending) |
+| Private JSC/Bun/WebCore ABI under #163 | 431 (119 implemented, 312 pending) |
 | Overlap with zig-js's completed public C target | 15 |
 | Platform libc import | 1 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
@@ -61,7 +61,7 @@ zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"
 ```
 
 This inventory is the denominator, not a claim that the whole surface works.
-The first 116 private entries are implemented; the other 315 remain pending
+The first 119 private entries are implemented; the other 312 remain pending
 until #163 provides their type/layout contracts, shims, and consumer evidence.
 `JSFunctionCall` remains revision-pinned in the declaration inventory but is
 not part of that denominator: each runtime-generated FFI module defines the
@@ -311,7 +311,11 @@ exceptions are covered.
 Three shared fast reads pin all 24 built-in IDs and distinguish direct data,
 own-slot resolution, and pollution-mitigated lookup. Bun additionally exposes
 a pure inherited-data `code` inquiry that rejects accessors, custom slots, and
-proxies without executing them. The 115-symbol combined runtime
+proxies without executing them.
+Three Symbol bridges share one registry across C-API sibling realms and expose
+stable description/registry-key views for exact Latin-1 and UTF-16 content;
+local and well-known Symbols correctly fail registry-key lookup. The
+118-symbol combined runtime
 fixture covers these semantics; the two profile-selected JSType exports retain
 their separate Home/Bun runtime fixtures.
 
@@ -354,7 +358,7 @@ profile contains 437 unique declarations from 54 hashed files:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #164 | 421 (110 implemented, 311 pending) |
+| Private JSC/Bun/WebCore ABI under #164 | 421 (113 implemented, 308 pending) |
 | Public-C overlap | 15 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
 | **Total** | **437** |
