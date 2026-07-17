@@ -16,6 +16,11 @@ compile, link, and execute both C and C++ embedding fixtures.
 `zig build c-api-jsc-diff` is the macOS-only semantic gate for completed value
 APIs against the hash-pinned system JavaScriptCore headers and framework.
 
+`ZJSContextGetCollectionEpoch` returns the monotonic count of explicit
+`JSGarbageCollect` calls for a context group. Every realm in the group observes
+the same epoch; arena-backed groups use it as a semantic weak-processing
+boundary even though physical storage remains allocated until VM teardown.
+
 ## Objective-C bridge target
 
 The Objective-C compatibility target is separately pinned to macOS SDK 27.0

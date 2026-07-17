@@ -11,6 +11,9 @@ extern "C" {
 JS_EXPORT bool ZJSValueProtect(JSContextRef ctx, JSValueRef value);
 JS_EXPORT bool ZJSValueUnprotect(JSContextRef ctx, JSValueRef value);
 
+/* Monotonic explicit-collection epoch shared by every realm in a context group. */
+JS_EXPORT uint64_t ZJSContextGetCollectionEpoch(JSContextRef ctx);
+
 typedef void (*ZJSInspectorMessageCallback)(
     const char* message, size_t messageLength, void* userData);
 

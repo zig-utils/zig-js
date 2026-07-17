@@ -65,6 +65,7 @@ const CContextGroup = struct {
     owner_thread: std.Thread.Id,
     primary: *Context,
     contexts: std.ArrayListUnmanaged(*Context) = .empty,
+    collection_epoch: u64 = 0,
 
     fn retain(self: *CContextGroup) bool {
         var current = self.ref_count.load(.monotonic);
@@ -1366,7 +1367,22 @@ export fn JSGarbageCollect(ctx: JSContextRef) callconv(.c) void {
     // quiescent point (no JS executing); embedder-held `JSValueRef`s that must
     // survive this call are rooted by JSValueProtect's counted handle table.
     const c = ctxFrom(ctx) orelse return;
+    if (c.c_api_group) |opaque_group| {
+        const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+        if (group.collection_epoch != std.math.maxInt(u64))
+            group.collection_epoch += 1;
+    }
     c.collectGarbage();
+}
+
+/// zig-js extension: monotonically counts explicit collection points for the
+/// context group. Arena-backed groups use this epoch for semantic weak-value
+/// processing even though physical storage remains VM-lifetime.
+export fn ZJSContextGetCollectionEpoch(ctx: JSContextRef) callconv(.c) u64 {
+    const c = ctxFrom(ctx) orelse return 0;
+    const opaque_group = c.c_api_group orelse return 0;
+    const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+    return group.collection_epoch;
 }
 
 export fn JSGlobalContextCreate(global_class: ?*anyopaque) callconv(.c) JSContextRef {
@@ -4944,6 +4960,10 @@ test "C-API: context groups share values while preserving distinct realms and li
     var exception: JSValueRef = null;
     const shared = JSEvaluateScript(first, make_object, null, null, 1, &exception) orelse return error.EvalFailed;
     try std.testing.expect(exception == null);
+    try std.testing.expectEqual(@as(u64, 0), ZJSContextGetCollectionEpoch(first));
+    JSGarbageCollect(first);
+    try std.testing.expectEqual(@as(u64, 1), ZJSContextGetCollectionEpoch(first));
+    try std.testing.expectEqual(@as(u64, 1), ZJSContextGetCollectionEpoch(second));
     const shared_name = JSStringCreateWithUTF8CString("sharedFromFirst") orelse return error.StringInitFailed;
     defer JSStringRelease(shared_name);
     JSObjectSetProperty(second, second_global, shared_name, shared, 0, &exception);
