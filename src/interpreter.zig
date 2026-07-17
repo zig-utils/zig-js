@@ -1027,6 +1027,10 @@ pub const Interpreter = struct {
     /// The Context-owned microtask queue (Promise reactions). Drained after the
     /// main script in `Context.evaluate` and inline by `await`.
     microtasks: ?*promise.MicrotaskQueue = null,
+    /// Realm-local HostPromiseRejectionTracker queue. Rejected promises remain
+    /// rooted here until the explicit host notification checkpoint consumes or
+    /// skips them after a later handler attachment.
+    unhandled_rejections: ?*std.ArrayListUnmanaged(*promise.Promise) = null,
     /// True under `parallel_js`: serialize content mutation of whichever
     /// microtask queue this interpreter is currently targeting. The lock lives
     /// on the queue itself so independent spawned-thread queues do not contend
@@ -6973,6 +6977,10 @@ pub const Interpreter = struct {
                 self.current_microtask_batch = batch.items[i + 1 ..];
                 self.current_microtask = job;
                 promise.runJob(self, job) catch |err| {
+                    self.lockMicrotasks();
+                    if (self.microtasks) |queue|
+                        queue.prependSlice(self.arena, batch.items[i + 1 ..]) catch {};
+                    self.unlockMicrotasks();
                     self.current_microtask = null;
                     self.current_microtask_batch = &.{};
                     return err;
@@ -15706,7 +15714,7 @@ fn promiseResolveAfterTick(self: *Interpreter, v: Value) EvalError!Value {
 
 /// A fresh promise already rejected with `reason`.
 fn promiseRejectValue(self: *Interpreter, reason: Value) EvalError!Value {
-    return Value.obj(try promise.newSettledPromise(self, .rejected, reason));
+    return Value.obj(try promise.newRejectedPromise(self, reason));
 }
 
 fn isIntrinsicPromiseConstructor(self: *Interpreter, c: Value) bool {
@@ -42582,7 +42590,7 @@ fn bodyJsonFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError
         if (err == error.Throw) {
             const reason = self.exception;
             self.exception = Value.undef();
-            return Value.obj(try promise.newSettledPromise(self, .rejected, reason));
+            return Value.obj(try promise.newRejectedPromise(self, reason));
         }
         return err;
     }

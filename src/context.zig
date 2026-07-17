@@ -2315,6 +2315,9 @@ pub const Context = struct {
     /// into this realm queue when a retiring thread's local queue is no longer a
     /// safe liveness target.
     microtasks: @import("promise.zig").MicrotaskQueue = .{},
+    /// Rejections awaiting the embedder's explicit notification checkpoint.
+    /// Promise cells stay rooted until notified once or handled before notice.
+    unhandled_rejections: std.ArrayListUnmanaged(*promise.Promise) = .empty,
     print_buffer: std.ArrayListUnmanaged(u8) = .empty,
     /// SharedArrayBuffer storage references this realm holds (one per SAB
     /// wrapper created here). Released in `destroy` — shared bytes live in
@@ -2545,6 +2548,9 @@ pub const Context = struct {
     /// (dynamic import) can resolve+load+evaluate further modules on demand.
     mod_host: ?ModuleHost = null,
     mod_cache: ?*std.StringHashMapUnmanaged(*Module) = null,
+    /// Persistent per-realm module-loader registry. Repeated evaluations reuse
+    /// entries until the private JSC deletion boundary removes an exact key.
+    module_registry: std.StringHashMapUnmanaged(*Module) = .empty,
     module_dependency_depth: usize = 0,
     deferred_async_queue: std.ArrayListUnmanaged(*Module) = .empty,
     deferred_async_started: std.ArrayListUnmanaged(*Module) = .empty,
@@ -3038,6 +3044,7 @@ pub const Context = struct {
             .this_value = Value.obj(self.global_object),
             .root_shape = self.root_shape,
             .microtasks = &self.microtasks,
+            .unhandled_rejections = &self.unhandled_rejections,
             .out_of_memory_exception = self.reserved_thread_oom_error orelse Value.undef(),
             // Only engage per-queue microtask locking in no-GIL mode;
             // single-threaded and `.gil = true` execution stay lock-free.
@@ -3187,6 +3194,8 @@ pub const Context = struct {
             self.gpa.destroy(owner);
         }
         self.external_buffer_owners.deinit(self.gpa);
+        self.module_registry.deinit(self.arena());
+        self.unhandled_rejections.deinit(self.arena());
         if (self.locked_arena) |la| {
             la.resetLocalFor();
             self.gpa.destroy(la);
@@ -3229,6 +3238,8 @@ pub const Context = struct {
             self.gpa.destroy(owner);
         }
         self.external_buffer_owners.deinit(self.gpa);
+        self.module_registry.deinit(self.arena());
+        self.unhandled_rejections.deinit(self.arena());
         self.sab_retains.deinit();
         self.jit_owner.deinit();
         self.gpa.destroy(self);
@@ -4584,8 +4595,7 @@ pub const Context = struct {
         // can be serviced before the live module graph is installed.
         self.collectQuiescentGarbage();
         self.collectRequestedGarbage();
-        var cache: std.StringHashMapUnmanaged(*Module) = .{};
-        const root = try self.loadModule(entry_path, entry_source, host, &cache);
+        const root = try self.loadModule(entry_path, entry_source, host, &self.module_registry);
         try self.linkModule(root);
         var machine = self.interpreter();
         try self.pushActiveInterpreter(&machine);
@@ -4595,7 +4605,7 @@ pub const Context = struct {
         machine.strict = true;
         // Expose the graph to runtime dynamic `import()`.
         self.mod_host = host;
-        self.mod_cache = &cache;
+        self.mod_cache = &self.module_registry;
         defer {
             self.mod_cache = null;
             self.mod_host = null;
@@ -4623,6 +4633,36 @@ pub const Context = struct {
             return err;
         };
         return Value.undef();
+    }
+
+    /// Remove one exact loader key from this realm. Module graph tracing takes
+    /// the same realm lock under parallel collection, matching JSC's cellLock
+    /// synchronization without serializing the ordinary single-thread path.
+    pub fn deleteModuleRegistryEntry(self: *Context, key: []const u8) bool {
+        self.realmLock();
+        defer self.realmUnlock();
+        return self.module_registry.remove(key);
+    }
+
+    /// Clear loader-visible modules and the cached module-source object for the
+    /// pinned delete-all-code boundary.
+    pub fn clearModuleRegistry(self: *Context) void {
+        self.realmLock();
+        defer self.realmUnlock();
+        self.module_registry.clearRetainingCapacity();
+        self.module_source_object = null;
+    }
+
+    fn putModuleCache(
+        self: *Context,
+        cache: *std.StringHashMapUnmanaged(*Module),
+        key: []const u8,
+        module: *Module,
+    ) RunError!void {
+        try cache.ensureUnusedCapacity(self.arena(), 1);
+        if (cache == &self.module_registry) self.realmLock();
+        defer if (cache == &self.module_registry) self.realmUnlock();
+        cache.putAssumeCapacity(key, module);
     }
 
     /// Recursively load and parse a module and its dependencies into `cache`
@@ -4656,7 +4696,7 @@ pub const Context = struct {
 
         const m = try a.create(Module);
         m.* = .{ .path = try a.dupe(u8, path), .items = items, .env = env, .has_tla = moduleItemsHaveTopLevelAwait(items) };
-        try cache.put(a, m.path, m);
+        try self.putModuleCache(cache, m.path, m);
 
         // Load every dependency and record this module's export map.
         for (items) |item| switch (item.*) {
@@ -4791,7 +4831,7 @@ pub const Context = struct {
         const m = try a.create(Module);
         m.* = .{ .path = cache_key, .items = &.{}, .env = env, .syn_source = try a.dupe(u8, source), .syn_type = syn_type };
         try m.exports.put(a, "default", .{ .local = "*default*" });
-        try cache.put(a, m.path, m);
+        try self.putModuleCache(cache, m.path, m);
         return m;
     }
 
@@ -15931,7 +15971,7 @@ test "enable_gc: active module cache roots module environments during collection
     try std.testing.expect(ctx.gc.?.live_cells < after);
 }
 
-test "enable_gc: evaluateModule clears transient module cache so later GC can run" {
+test "enable_gc: persistent module registry roots entries until exact deletion" {
     const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
     defer ctx.destroy();
 
@@ -15945,10 +15985,35 @@ test "enable_gc: evaluateModule clears transient module cache so later GC can ru
     _ = try ctx.evaluateModule("entry.js", "export const value = { tag: 1 };", mh);
     try std.testing.expect(ctx.mod_cache == null);
     try std.testing.expect(ctx.mod_host == null);
+    try std.testing.expect(ctx.module_registry.get("entry.js") != null);
+    try std.testing.expect(!ctx.deleteModuleRegistryEntry("other.js"));
+    try std.testing.expect(ctx.deleteModuleRegistryEntry("entry.js"));
+    try std.testing.expect(ctx.module_registry.get("entry.js") == null);
 
     const before = ctx.gc.?.collections;
     ctx.collectGarbage();
     try std.testing.expect(ctx.gc.?.collections > before);
+}
+
+test "module registry reuses an evaluation until deletion then reloads" {
+    const ctx = try Context.create(std.testing.allocator);
+    defer ctx.destroy();
+
+    const Host = struct {
+        fn load(_: *anyopaque, _: []const u8, _: []const u8, _: *[]const u8) ?[]const u8 {
+            return null;
+        }
+    };
+    var dummy: u8 = 0;
+    const mh = Context.ModuleHost{ .ctx = &dummy, .load = Host.load };
+    const source = "globalThis.__module_registry_runs = (globalThis.__module_registry_runs || 0) + 1;";
+    _ = try ctx.evaluateModule("reload.js", source, mh);
+    _ = try ctx.evaluateModule("reload.js", "throw new Error('cached module source must win');", mh);
+    try std.testing.expectEqual(@as(f64, 1), (try ctx.evaluate("__module_registry_runs")).asNum());
+
+    try std.testing.expect(ctx.deleteModuleRegistryEntry("reload.js"));
+    _ = try ctx.evaluateModule("reload.js", source, mh);
+    try std.testing.expectEqual(@as(f64, 2), (try ctx.evaluate("__module_registry_runs")).asNum());
 }
 
 test "enable_gc: active module interpreter roots import.meta during requested microtask GC" {

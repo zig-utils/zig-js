@@ -88,8 +88,8 @@
     },
     "by_status": {
       "external": 2,
-      "implemented": 161,
-      "pending": 285
+      "implemented": 168,
+      "pending": 278
     }
   },
   "declarations": [
@@ -1309,10 +1309,10 @@
       "line": 854,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSGlobalObject__deleteModuleRegistryEntry(*JSGlobalObject, *const ZigString) void;",
       "declaration_sha256": "508e308eaf080866eb364828c396ebea297f4d5832b60948f2cec7a0db30c4eb",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSGlobalObject__drainMicrotasks",
@@ -1320,10 +1320,10 @@
       "line": 126,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSGlobalObject__drainMicrotasks(*jsc.JSGlobalObject) DrainMicrotasksResult;",
       "declaration_sha256": "29e34073a6f66cec8926328571e592d745e7c464ee720461e4d7b0ba8e159297",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSGlobalObject__generateHeapSnapshot",
@@ -1342,10 +1342,10 @@
       "line": 659,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSGlobalObject__handleRejectedPromises(*JSGlobalObject) void;",
       "declaration_sha256": "fa1bc582dd13109436d85452b95e0f40040da6d1fae7b100111393f18f1dda4a",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSGlobalObject__queueMicrotaskCallback",
@@ -1353,10 +1353,10 @@
       "line": 438,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSGlobalObject__queueMicrotaskCallback(*JSGlobalObject, *anyopaque, Function: *const (fn (*anyopaque) callconv(.c) void)) void;",
       "declaration_sha256": "e25004a082ad60d2e754230db384bcd307a072aa4164a786d26fc1a8ebab8080",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSGlobalObject__queueMicrotaskJob",
@@ -1364,10 +1364,10 @@
       "line": 469,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSGlobalObject__queueMicrotaskJob(JSC__JSGlobalObject__ptr: *JSGlobalObject, JSValue, JSValue, JSValue) void;",
       "declaration_sha256": "5223d175082e12423d5c63fc6b2baa0067adb5a2373e191fd8b4ee77cde78049",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSGlobalObject__vm",
@@ -2640,10 +2640,10 @@
       "line": 88,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__VM__deleteAllCode(vm: *VM, global_object: *JSGlobalObject) void;",
       "declaration_sha256": "dbc1acddae6b77b83c81685f91cf939ba153f33a51119533555c0f2bbc815a34",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__VM__drainMicrotasks",
@@ -2651,10 +2651,10 @@
       "line": 195,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__VM__drainMicrotasks(vm: *VM) void;",
       "declaration_sha256": "76bbb3f49a39349db3e8e656b993d477a7a1faca9ef78a7b2e414eb086aa4671",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__VM__executionForbidden",

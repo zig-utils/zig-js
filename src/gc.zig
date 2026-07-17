@@ -460,6 +460,12 @@ inline fn traceMicrotask(mt: promise.Microtask, v: anytype) void {
             if (mt.promise) |p| markManaged(v, p);
         },
         .callback => markValue(v, mt.callback),
+        .native_callback => {},
+        .job => {
+            markValue(v, mt.job);
+            markValue(v, mt.job_first);
+            markValue(v, mt.job_second);
+        },
     }
 }
 
@@ -798,6 +804,10 @@ pub const Binding = struct {
         // `async_waiters` + `c_api_handles` + `finalization_cleanup_jobs` share
         // `realm_lock` (taken by their mutators only under parallel_js).
         ctx.realmLock();
+        for (ctx.unhandled_rejections.items) |rejected| markManaged(v, rejected);
+        traceModuleGraph(&ctx.module_registry, v);
+        if (ctx.mod_cache) |cache|
+            if (cache != &ctx.module_registry) traceModuleGraph(cache, v);
         for (ctx.async_waiters.items) |aw| markValue(v, aw.promise);
         for (ctx.finalization_cleanup_jobs.items) |registry| v.mark(registry);
         for (ctx.c_api_class_prototypes.items) |prototype| v.mark(prototype.object);
@@ -861,7 +871,6 @@ pub const Binding = struct {
                 v.mark(t.promise);
             }
         }
-        if (ctx.mod_cache) |cache| traceModuleGraph(cache, v);
         // `ctx.exception` is the host/join hand-off slot — redundant with each
         // active interpreter's own `exception` (traced above) and mutated by
         // peers without a lock, so skip it under a parallel collection.

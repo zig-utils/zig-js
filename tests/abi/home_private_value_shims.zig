@@ -198,6 +198,13 @@ extern "c" fn JSC__VM__releaseWeakRefs(?*anyopaque) void;
 extern "c" fn JSC__VM__reportExtraMemory(?*anyopaque, usize) void;
 extern "c" fn JSC__VM__runGC(?*anyopaque, bool) usize;
 extern "c" fn JSC__VM__shrinkFootprint(?*anyopaque) void;
+extern "c" fn JSC__JSGlobalObject__deleteModuleRegistryEntry(JSContextRef, *const ZigString) void;
+extern "c" fn JSC__JSGlobalObject__drainMicrotasks(JSContextRef) u8;
+extern "c" fn JSC__JSGlobalObject__handleRejectedPromises(JSContextRef) void;
+extern "c" fn JSC__JSGlobalObject__queueMicrotaskCallback(JSContextRef, ?*anyopaque, *const fn (?*anyopaque) callconv(.c) void) void;
+extern "c" fn JSC__JSGlobalObject__queueMicrotaskJob(JSContextRef, EncodedValue, EncodedValue, EncodedValue) void;
+extern "c" fn JSC__VM__deleteAllCode(?*anyopaque, JSContextRef) void;
+extern "c" fn JSC__VM__drainMicrotasks(?*anyopaque) void;
 extern "c" fn TopExceptionScope__construct(?*anyopaque, JSContextRef, [*:0]const u8, [*:0]const u8, c_uint, usize, usize) void;
 extern "c" fn TopExceptionScope__pureException(?*anyopaque) ?*anyopaque;
 extern "c" fn TopExceptionScope__exceptionIncludingTraps(?*anyopaque) ?*anyopaque;
@@ -328,6 +335,21 @@ fn throwingPromiseCallback(context: *anyopaque, global: JSContextRef) callconv(.
     state.calls += 1;
     JSC__VM__throwError(JSC__JSGlobalObject__vm(global), global, state.value);
     return .undefined;
+}
+
+const MicrotaskCallbackState = struct {
+    global: JSContextRef,
+    calls: usize = 0,
+    requeue: bool = false,
+};
+
+fn microtaskCallback(raw: ?*anyopaque) callconv(.c) void {
+    const state: *MicrotaskCallbackState = @ptrCast(@alignCast(raw orelse return));
+    state.calls += 1;
+    if (state.requeue) {
+        state.requeue = false;
+        JSC__JSGlobalObject__queueMicrotaskCallback(state.global, state, microtaskCallback);
+    }
 }
 
 fn expectPromise(
@@ -2442,6 +2464,80 @@ pub fn main() void {
     if (getNumberProperty(context, global_value, "__private_idle_done") != 1 or idle_state.calls != 1)
         fail("private VM opportunistic checkpoint mismatch");
 
+    var native_microtask = MicrotaskCallbackState{ .global = context, .requeue = true };
+    JSC__JSGlobalObject__queueMicrotaskCallback(context, &native_microtask, microtaskCallback);
+    const sibling_job = evaluate(sibling_context,
+        \\globalThis.__private_job_calls = 0;
+        \\globalThis.__private_job_first = undefined;
+        \\globalThis.__private_job_second = 1;
+        \\(first, second) => { __private_job_calls++; __private_job_first = first; __private_job_second = second; };
+    );
+    JSC__JSGlobalObject__queueMicrotaskJob(sibling_context, sibling_job, direct_value, .empty);
+    if (JSC__JSGlobalObject__drainMicrotasks(context) != 0 or native_microtask.calls != 2 or
+        getNumberProperty(sibling_context, EncodedValue.fromBits(@intFromPtr(JSContextGetGlobalObject(sibling_context).?)), "__private_job_calls") != 0)
+        fail("private selected-realm/reentrant microtask drain mismatch");
+    JSC__VM__drainMicrotasks(vm);
+    if (getNumberProperty(sibling_context, EncodedValue.fromBits(@intFromPtr(JSContextGetGlobalObject(sibling_context).?)), "__private_job_calls") != 1)
+        fail("private VM microtask job call-count mismatch");
+    if (!JSC__JSValue__isStrictEqual(evaluate(sibling_context, "__private_job_first"), direct_value, sibling_context))
+        fail("private VM microtask first-argument identity mismatch");
+    if (!JSC__JSValue__isStrictEqual(evaluate(sibling_context, "__private_job_second"), .undefined, sibling_context))
+        fail("private VM microtask empty-argument normalization mismatch");
+
+    const throwing_job = evaluate(context, "() => { throw 2081; }");
+    const following_job = evaluate(context, "() => { globalThis.__private_after_throw = 1; }");
+    _ = evaluate(context, "globalThis.__private_after_throw = 0");
+    JSC__JSGlobalObject__queueMicrotaskJob(context, throwing_job, .empty, .empty);
+    JSC__JSGlobalObject__queueMicrotaskJob(context, following_job, .empty, .empty);
+    if (JSC__JSGlobalObject__drainMicrotasks(context) != 0 or !JSGlobalObject__hasException(context) or
+        getNumberProperty(context, global_value, "__private_after_throw") != 0)
+        fail("private throwing microtask checkpoint mismatch");
+    const microtask_exception = JSGlobalObject__tryTakeException(context);
+    if (JSC__Exception__asJSValue(microtask_exception.cellPointer()) != EncodedValue.fromInt32(2081))
+        fail("private microtask throw identity mismatch");
+    if (JSC__JSGlobalObject__drainMicrotasks(context) != 0 or
+        getNumberProperty(context, global_value, "__private_after_throw") != 1)
+        fail("private post-throw microtask preservation mismatch");
+
+    const foreign_job = evaluate(foreign_context, "() => 1");
+    JSC__JSGlobalObject__queueMicrotaskJob(context, foreign_job, .empty, .empty);
+    if (!JSGlobalObject__hasException(context))
+        fail("private microtask accepted foreign-VM callable");
+    JSGlobalObject__clearException(context);
+
+    _ = evaluate(context,
+        \\globalThis.__private_unhandled = [];
+        \\globalThis.onunhandledrejection = reason => { __private_unhandled.push(reason); };
+        \\Promise.reject(2082);
+    );
+    JSC__JSGlobalObject__handleRejectedPromises(context);
+    JSC__JSGlobalObject__handleRejectedPromises(context);
+    if (!JSC__JSValue__isStrictEqual(evaluate(context, "__private_unhandled.join(',')"), evaluate(context, "'2082'"), context))
+        fail("private unhandled rejection notification count mismatch");
+    _ = evaluate(context, "const __private_late_handled = Promise.reject(2083); __private_late_handled.catch(() => {});");
+    JSC__JSGlobalObject__handleRejectedPromises(context);
+    if (!JSC__JSValue__isStrictEqual(evaluate(context, "__private_unhandled.join(',')"), evaluate(context, "'2082'"), context))
+        fail("private handled rejection emitted notification");
+
+    JSGlobalObject__requestTermination(context);
+    if (JSC__JSGlobalObject__drainMicrotasks(sibling_context) != 1)
+        fail("private microtask drain missed VM termination");
+    JSGlobalObject__clearTerminationException(context);
+
+    const unused_module_key_bytes = "not-loaded.js";
+    const unused_module_key = ZigString{ .tagged_ptr = @intFromPtr(unused_module_key_bytes.ptr), .len = unused_module_key_bytes.len };
+    JSC__JSGlobalObject__deleteModuleRegistryEntry(context, &unused_module_key);
+    JSC__JSGlobalObject__deleteModuleRegistryEntry(null, &unused_module_key);
+    _ = evaluate(context,
+        \\function __private_hot_after_delete(n) { let total = 0; for (let i = 0; i < n; i++) total += i; return total; }
+        \\for (let i = 0; i < 4; i++) __private_hot_after_delete(1000);
+    );
+    JSC__VM__deleteAllCode(foreign_vm, context);
+    JSC__VM__deleteAllCode(vm, context);
+    JSC__VM__deleteAllCode(null, context);
+    if (Bun__JSValue__toNumber(evaluate(context, "__private_hot_after_delete(10)"), context) != 45)
+        fail("private delete-all-code bytecode fallback mismatch");
+
     const heap_after_checkpoint = JSC__VM__heapSize(vm);
     if (JSC__VM__runGC(vm, false) != heap_after_checkpoint or
         JSC__VM__runGC(sibling_vm, true) != JSC__VM__heapSize(vm))
@@ -2475,5 +2571,5 @@ pub fn main() void {
         TopExceptionScope__exceptionIncludingTraps(&verification_scope) != null)
         fail("private TopExceptionScope destruction mismatch");
 
-    std.debug.print("Home private value shims: 145/145 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 152/152 symbols linked; runtime matrix passed\n", .{});
 }

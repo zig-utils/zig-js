@@ -58,6 +58,11 @@ pub const Promise = struct {
     on_reject_inline: ?Reaction = null,
     on_fulfill: std.ArrayListUnmanaged(Reaction) = .empty,
     on_reject: std.ArrayListUnmanaged(Reaction) = .empty,
+    /// HostPromiseRejectionTracker state. A rejection is queued only when no
+    /// reaction has handled this promise; the host checkpoint consumes it once.
+    is_handled: bool = false,
+    rejection_queued: bool = false,
+    rejection_notified: bool = false,
 
     pub fn lockState(self: *Promise) void {
         promise_profile.recordPromiseLockAcquire();
@@ -82,7 +87,7 @@ pub const Promise = struct {
 /// A queued reaction job: run `reaction.handler(argument)` and settle
 /// `reaction.result` accordingly (a pass-through when `handler` is null).
 pub const Microtask = struct {
-    kind: enum { reaction, thenable, callback } = .reaction,
+    kind: enum { reaction, thenable, callback, native_callback, job } = .reaction,
     reaction: Reaction,
     argument: Value,
     fulfilled: bool, // whether the source settled fulfilled (vs rejected)
@@ -92,6 +97,17 @@ pub const Microtask = struct {
     /// `.callback` jobs (HTML queueMicrotask): the function to invoke with no
     /// arguments. Settles no promise; a throw propagates as a reported exception.
     callback: Value = Value.undef(),
+    /// Private-JSC native microtask callback. These are opaque host bits, not GC
+    /// pointers; copying both fields into the queue retains their exact identity
+    /// until the callback has run once.
+    native_callback_context: ?*anyopaque = null,
+    native_callback: ?*const fn (?*anyopaque) callconv(.c) void = null,
+    /// BunPerformMicrotaskJob payload. The async-context slot is intentionally
+    /// absent until AsyncContextFrame exists; the callable receives the exact
+    /// two pinned encoded arguments (empty values normalize to undefined).
+    job: Value = Value.undef(),
+    job_first: Value = Value.undef(),
+    job_second: Value = Value.undef(),
 };
 
 pub const MicrotaskQueue = struct {
@@ -134,6 +150,23 @@ pub const MicrotaskQueue = struct {
         try self.reserve(a, pending.len);
         self.items.appendSliceAssumeCapacity(pending);
         if (pending.len > 0) _ = self.generation.fetchAdd(@intCast(pending.len), .release);
+    }
+
+    /// Restore jobs that were dequeued behind a throwing job. They must precede
+    /// tasks enqueued reentrantly by the throwing callback.
+    pub fn prependSlice(self: *MicrotaskQueue, a: std.mem.Allocator, tasks: []const Microtask) !void {
+        if (tasks.len == 0) return;
+        const pending = self.pendingItems();
+        const pending_len = pending.len;
+        if (self.head != 0 and pending_len != 0)
+            std.mem.copyForwards(Microtask, self.items.items[0..pending_len], pending);
+        self.items.items.len = pending_len;
+        self.head = 0;
+        try self.reserve(a, tasks.len);
+        self.items.items.len = pending_len + tasks.len;
+        std.mem.copyBackwards(Microtask, self.items.items[tasks.len..], self.items.items[0..pending_len]);
+        @memcpy(self.items.items[0..tasks.len], tasks);
+        _ = self.generation.fetchAdd(@intCast(tasks.len), .release);
     }
 
     fn reserve(self: *MicrotaskQueue, a: std.mem.Allocator, additional: usize) !void {
@@ -411,6 +444,15 @@ pub fn newSettledPromise(self: *Interpreter, state: State, v: Value) EvalError!*
     return obj;
 }
 
+/// Create a rejected promise through the ordinary RejectPromise path so the
+/// realm's HostPromiseRejectionTracker observes it. Private ABI constructors
+/// that deliberately suppress tracking keep using `newSettledPromise`.
+pub fn newRejectedPromise(self: *Interpreter, reason: Value) EvalError!*Object {
+    const obj = try newPromise(self);
+    try reject(self, @ptrCast(@alignCast(obj.promiseData().?)), reason);
+    return obj;
+}
+
 inline fn reactionAllocator(self: *Interpreter) std.mem.Allocator {
     return self.gc_backing orelse self.arena;
 }
@@ -500,6 +542,7 @@ fn settle(self: *Interpreter, p: *Promise, state: State, v: Value) EvalError!voi
     var fulfill_inline: ?Reaction = null;
     var reject_inline: ?Reaction = null;
     var removed_count: usize = 0;
+    var queue_unhandled = false;
 
     p.lockState();
     if (p.state != .pending) {
@@ -509,6 +552,10 @@ fn settle(self: *Interpreter, p: *Promise, state: State, v: Value) EvalError!voi
     p.state = state;
     gc_mod.barrierValueFrom(p, v); // settlement value stored into the live promise cell
     p.value = v;
+    if (state == .rejected and !p.is_handled and !p.rejection_queued and !p.rejection_notified) {
+        p.rejection_queued = true;
+        queue_unhandled = true;
+    }
     fulfill_inline = p.on_fulfill_inline;
     reject_inline = p.on_reject_inline;
     fulfill = p.on_fulfill;
@@ -516,6 +563,8 @@ fn settle(self: *Interpreter, p: *Promise, state: State, v: Value) EvalError!voi
     removed_count = fulfill.items.len + reject_list.items.len +
         @intFromBool(fulfill_inline != null) + @intFromBool(reject_inline != null);
     p.unlockState();
+
+    if (queue_unhandled) try enqueueUnhandledRejection(self, p);
 
     errdefer {
         p.lockState();
@@ -632,6 +681,7 @@ pub fn then(self: *Interpreter, p: *Promise, on_f: Value, on_r: Value) EvalError
 fn performThenReactions(self: *Interpreter, p: *Promise, react_f: Reaction, react_r: Reaction) EvalError!void {
     p.lockState();
     errdefer p.unlockState();
+    p.is_handled = true;
     const snap = .{ .state = p.state, .value = p.value };
     switch (snap.state) {
         .pending => {
@@ -658,6 +708,62 @@ pub fn enqueueCallback(self: *Interpreter, callback: Value) EvalError!void {
     try enqueue(self, .{ .kind = .callback, .reaction = undefined, .argument = Value.undef(), .fulfilled = true, .callback = callback });
 }
 
+pub fn enqueueNativeCallback(
+    self: *Interpreter,
+    callback_context: ?*anyopaque,
+    callback: *const fn (?*anyopaque) callconv(.c) void,
+) EvalError!void {
+    try enqueue(self, .{
+        .kind = .native_callback,
+        .reaction = undefined,
+        .argument = Value.undef(),
+        .fulfilled = true,
+        .native_callback_context = callback_context,
+        .native_callback = callback,
+    });
+}
+
+pub fn enqueueJob(self: *Interpreter, job: Value, first: Value, second: Value) EvalError!void {
+    try enqueue(self, .{
+        .kind = .job,
+        .reaction = undefined,
+        .argument = Value.undef(),
+        .fulfilled = true,
+        .job = job,
+        .job_first = first,
+        .job_second = second,
+    });
+}
+
+fn enqueueUnhandledRejection(self: *Interpreter, rejected: *Promise) EvalError!void {
+    const queue = self.unhandled_rejections orelse return;
+    self.lockRealm();
+    defer self.unlockRealm();
+    try queue.append(self.arena, rejected);
+}
+
+/// Consume the next still-unhandled rejection notification. Promises handled
+/// between rejection and this host checkpoint are silently skipped.
+pub fn takeUnhandledRejection(self: *Interpreter) ?Value {
+    const queue = self.unhandled_rejections orelse return null;
+    self.lockRealm();
+    defer self.unlockRealm();
+    while (queue.items.len != 0) {
+        const rejected = queue.orderedRemove(0);
+        rejected.lockState();
+        rejected.rejection_queued = false;
+        if (rejected.is_handled or rejected.rejection_notified or rejected.state != .rejected) {
+            rejected.unlockState();
+            continue;
+        }
+        rejected.rejection_notified = true;
+        const reason = rejected.value;
+        rejected.unlockState();
+        return reason;
+    }
+    return null;
+}
+
 fn enqueue(self: *Interpreter, task: Microtask) EvalError!void {
     const q = self.microtasks orelse return; // no queue wired → drop (shouldn't happen)
     // Under `parallel_js` a peer thread may drain this queue concurrently; the
@@ -680,6 +786,16 @@ fn settleReaction(self: *Interpreter, r: Reaction, fulfilled: bool, arg: Value) 
 }
 
 pub fn runJob(self: *Interpreter, task: Microtask) EvalError!void {
+    if (task.kind == .native_callback) {
+        promise_profile.recordMicrotaskRun(false);
+        if (task.native_callback) |callback| callback(task.native_callback_context);
+        return;
+    }
+    if (task.kind == .job) {
+        promise_profile.recordMicrotaskRun(false);
+        _ = try self.callValueWithThis(task.job, &.{ task.job_first, task.job_second }, Value.undef());
+        return;
+    }
     if (task.kind == .callback) {
         promise_profile.recordMicrotaskRun(false);
         _ = try self.callValueWithThis(task.callback, &.{}, Value.undef());

@@ -47,6 +47,7 @@ const Value = value.Value;
 const Object = value.Object;
 const EncodedValue = private_encoded_value.EncodedValue;
 const PrivatePromiseWrapCallback = *const fn (*anyopaque, JSContextRef) callconv(.c) EncodedValue;
+const PrivateMicrotaskCallback = *const fn (?*anyopaque) callconv(.c) void;
 
 const PrivateCommonAbortReason = enum(u8) {
     timeout = 1,
@@ -4193,9 +4194,165 @@ fn privateDrainMicrotasks(context: *Context) void {
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
-    context.pushActiveInterpreter(&machine) catch return;
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return;
+    };
     defer context.popActiveInterpreter(&machine);
     machine.drainMicrotasks() catch |err| privateSetPendingAbrupt(context, &machine, err);
+}
+
+fn privateVMDrainMicrotasks(group: *CContextGroup) void {
+    if (group.pending_exception != null) return;
+    privateDrainMicrotasks(group.primary);
+    if (group.pending_exception != null) return;
+    for (group.contexts.items) |context| {
+        if (context.c_api_ref_count.load(.acquire) != 0) {
+            privateDrainMicrotasks(context);
+            if (group.pending_exception != null) return;
+        }
+    }
+}
+
+export fn JSC__JSGlobalObject__queueMicrotaskCallback(
+    global: JSContextRef,
+    callback_context: ?*anyopaque,
+    callback: ?PrivateMicrotaskCallback,
+) callconv(.c) void {
+    const context = ctxForEvaluation(global) orelse return;
+    const group = privatePropertyBoundaryGroup(context) orelse return;
+    if (group.pending_exception != null) return;
+    const function = callback orelse return;
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return;
+    };
+    defer context.popActiveInterpreter(&machine);
+    promise.enqueueNativeCallback(&machine, callback_context, function) catch |err|
+        privateSetPendingAbrupt(context, &machine, err);
+}
+
+fn privateMicrotaskJobValue(global: JSContextRef, encoded: EncodedValue) ?Value {
+    if (encoded == .empty) return Value.undef();
+    return privateValueFrom(global, encoded);
+}
+
+export fn JSC__JSGlobalObject__queueMicrotaskJob(
+    global: JSContextRef,
+    encoded_job: EncodedValue,
+    encoded_first: EncodedValue,
+    encoded_second: EncodedValue,
+) callconv(.c) void {
+    const context = ctxForEvaluation(global) orelse return;
+    const group = privatePropertyBoundaryGroup(context) orelse return;
+    if (group.pending_exception != null) return;
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return;
+    };
+    defer context.popActiveInterpreter(&machine);
+
+    const job = privateMicrotaskJobValue(global, encoded_job) orelse {
+        const err = machine.throwError("TypeError", "Microtask job belongs to another VM");
+        privateSetPendingAbrupt(context, &machine, err);
+        return;
+    };
+    const first = privateMicrotaskJobValue(global, encoded_first) orelse {
+        const err = machine.throwError("TypeError", "Microtask argument belongs to another VM");
+        privateSetPendingAbrupt(context, &machine, err);
+        return;
+    };
+    const second = privateMicrotaskJobValue(global, encoded_second) orelse {
+        const err = machine.throwError("TypeError", "Microtask argument belongs to another VM");
+        privateSetPendingAbrupt(context, &machine, err);
+        return;
+    };
+    if (!job.isCallable()) {
+        const err = machine.throwError("TypeError", "Microtask job must be callable");
+        privateSetPendingAbrupt(context, &machine, err);
+        return;
+    }
+    promise.enqueueJob(&machine, job, first, second) catch |err|
+        privateSetPendingAbrupt(context, &machine, err);
+}
+
+export fn JSC__JSGlobalObject__drainMicrotasks(global: JSContextRef) callconv(.c) u8 {
+    const context = ctxForEvaluation(global) orelse return 0;
+    const group = privatePropertyBoundaryGroup(context) orelse return 0;
+    if (privateMaterializeTermination(group)) |exception|
+        if (group.termination_exception == exception) return 1;
+    if (group.pending_exception != null) return 0;
+    privateDrainMicrotasks(context);
+    if (privateMaterializeTermination(group)) |exception|
+        if (group.termination_exception == exception) return 1;
+    return 0;
+}
+
+export fn JSC__VM__drainMicrotasks(vm_ref: ?*anyopaque) callconv(.c) void {
+    const group = privateGroupFromVM(vm_ref) orelse return;
+    if (group.pending_exception != null) return;
+    privateVMDrainMicrotasks(group);
+}
+
+export fn JSC__JSGlobalObject__handleRejectedPromises(global: JSContextRef) callconv(.c) void {
+    const context = ctxForEvaluation(global) orelse return;
+    const group = privatePropertyBoundaryGroup(context) orelse return;
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return;
+    };
+    defer context.popActiveInterpreter(&machine);
+
+    while (promise.takeUnhandledRejection(&machine)) |reason| {
+        const handler = context.global_object.getOwn("onunhandledrejection") orelse Value.undef();
+        if (handler.isCallable()) {
+            _ = machine.callValueWithThis(handler, &.{reason}, Value.obj(context.global_object)) catch |err| {
+                privateSetPendingAbrupt(context, &machine, err);
+                machine.exception = Value.undef();
+                continue;
+            };
+        } else if (group.pending_exception == null) {
+            // With no installed event hook, preserve the first rejection as the
+            // host-visible uncaught completion instead of silently dropping it.
+            privateSetPendingValue(context, reason);
+        }
+    }
+}
+
+export fn JSC__JSGlobalObject__deleteModuleRegistryEntry(
+    global: JSContextRef,
+    key: *const PrivateZigString,
+) callconv(.c) void {
+    const context = ctxForEvaluation(global) orelse return;
+    const group = privatePropertyBoundaryGroup(context) orelse return;
+    if (group.pending_exception != null) return;
+    const decoded = privateZigStringPropertyKey(context, key) orelse return;
+    _ = context.deleteModuleRegistryEntry(decoded);
+}
+
+export fn JSC__VM__deleteAllCode(vm_ref: ?*anyopaque, global: JSContextRef) callconv(.c) void {
+    const group = privateGroupFromVM(vm_ref) orelse return;
+    const context = ctxForEvaluation(global) orelse return;
+    if (context.c_api_group != vm_ref) return;
+    privateVMDrainMicrotasks(group);
+    context.clearModuleRegistry();
+    group.primary.jit_owner.clear();
+    group.primary.requestGarbageCollection();
 }
 
 fn privateRunFullCollection(group: *CContextGroup) usize {
@@ -4232,10 +4389,7 @@ export fn JSC__VM__performOpportunisticallyScheduledTasks(vm_ref: ?*anyopaque, u
     const group = privateGroupFromVM(vm_ref) orelse return;
     if (std.math.isNan(until) or until <= 0) return;
     if (group.async_gc_requested.load(.acquire)) _ = privateRunFullCollection(group);
-    privateDrainMicrotasks(group.primary);
-    for (group.contexts.items) |context| {
-        if (context.c_api_ref_count.load(.acquire) != 0) privateDrainMicrotasks(context);
-    }
+    privateVMDrainMicrotasks(group);
 }
 
 export fn JSC__VM__releaseWeakRefs(vm_ref: ?*anyopaque) callconv(.c) void {
