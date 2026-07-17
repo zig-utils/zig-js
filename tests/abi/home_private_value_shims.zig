@@ -227,6 +227,7 @@ extern "c" fn JSC__JSValue__symbolFor(JSContextRef, *const ZigString) EncodedVal
 extern "c" fn JSC__JSValue__symbolKeyFor(EncodedValue, JSContextRef, *ZigString) bool;
 extern "c" fn JSC__JSValue__getSymbolDescription(EncodedValue, JSContextRef, *ZigString) void;
 extern "c" fn JSC__JSValue__asString(EncodedValue) ?*anyopaque;
+extern "c" fn JSC__jsTypeStringForValue(JSContextRef, EncodedValue) ?*anyopaque;
 extern "c" fn JSC__JSString__eql(?*anyopaque, JSContextRef, ?*anyopaque) bool;
 extern "c" fn JSC__JSString__is8Bit(?*anyopaque) bool;
 extern "c" fn JSC__JSString__length(?*anyopaque) usize;
@@ -998,6 +999,42 @@ pub fn main() void {
     if (JSC__JSValue__asArrayBuffer(.undefined, context, &untouched_projection) or
         untouched_projection.len != 77 or untouched_projection.byte_len != 88)
         fail("invalid ArrayBuffer projection modified output");
+
+    const typeof_cases = [_]struct { EncodedValue, []const u8, EncodedValue }{
+        .{ .undefined, "undefined", evaluate(context, "'undefined'") },
+        .{ .null, "object", evaluate(context, "'object'") },
+        .{ .true, "boolean", evaluate(context, "'boolean'") },
+        .{ EncodedValue.fromInt32(220), "number", evaluate(context, "'number'") },
+        .{ evaluate(context, "'value'"), "string", evaluate(context, "'string'") },
+        .{ evaluate(context, "Symbol('value')"), "symbol", evaluate(context, "'symbol'") },
+        .{ evaluate(context, "220n"), "bigint", evaluate(context, "'bigint'") },
+        .{ evaluate(context, "({ value: 220 })"), "object", evaluate(context, "'object'") },
+        .{ evaluate(context, "(function named() {})"), "function", evaluate(context, "'function'") },
+    };
+    var typeof_undefined: ?*anyopaque = null;
+    var typeof_object: ?*anyopaque = null;
+    for (typeof_cases) |case| {
+        const cell = JSC__jsTypeStringForValue(context, case[0]) orelse fail("typeof string projection failed");
+        if (!JSC__JSString__is8Bit(cell) or JSC__JSString__length(cell) != case[1].len or
+            !JSC__JSValue__isStrictEqual(EncodedValue.fromBits(@intFromPtr(cell)), case[2], context))
+            fail("typeof string contents mismatch");
+        if (std.mem.eql(u8, case[1], "undefined")) typeof_undefined = cell;
+        if (std.mem.eql(u8, case[1], "object")) {
+            if (typeof_object) |first_object| {
+                if (first_object != cell) fail("typeof object small string identity mismatch");
+            } else typeof_object = cell;
+        }
+    }
+    if (JSC__jsTypeStringForValue(context, .undefined) != typeof_undefined or
+        JSC__jsTypeStringForValue(context, evaluate(foreign_context, "({})")) != null or
+        JSC__jsTypeStringForValue(context, .empty) != null)
+        fail("typeof VM ownership/rejection mismatch");
+    JSC__VM__throwError(JSC__JSGlobalObject__vm(context), context, EncodedValue.fromInt32(220));
+    if (JSC__jsTypeStringForValue(context, .undefined) != typeof_undefined)
+        fail("typeof projection was blocked by pending exception");
+    const typeof_exception = JSGlobalObject__tryTakeException(context);
+    if (JSC__Exception__asJSValue(typeof_exception.cellPointer()) != EncodedValue.fromInt32(220))
+        fail("typeof projection replaced pending exception");
 
     StringBuilder__init(&string_builder);
     StringBuilder__appendInt(&string_builder, std.math.minInt(i32));
@@ -3043,5 +3080,5 @@ pub fn main() void {
         TopExceptionScope__exceptionIncludingTraps(&verification_scope) != null)
         fail("private TopExceptionScope destruction mismatch");
 
-    std.debug.print("Home private value shims: 199/199 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 200/200 symbols linked; runtime matrix passed\n", .{});
 }

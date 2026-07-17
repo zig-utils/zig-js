@@ -283,6 +283,10 @@ const CContextGroup = struct {
     /// VM-owned atom strings. Equal `ZigString__toAtomicValue` inputs share
     /// one immutable backing cell inside this context group, never across VMs.
     atom_strings: strcell.InternTable,
+    /// JavaScriptCore's `jsTypeStringForValue` returns one of the VM's immortal
+    /// small strings. Keep the eight possible private JSString handles stable
+    /// across sibling realms for the same VM, without sharing them across VMs.
+    typeof_strings: [8]?*Boxed = @splat(null),
     /// Stable borrowed Latin-1/UTF-16 views returned to private ABI consumers.
     /// Keys and backing buffers are group-owned so sibling realms share them.
     zig_string_views: std.StringHashMapUnmanaged(PrivateZigStringView) = .empty,
@@ -4415,6 +4419,42 @@ export fn JSC__JSValue__asString(encoded: EncodedValue) callconv(.c) ?*anyopaque
     const boxed = privateBoxedFrom(encoded) orelse return null;
     if (boxed.private_kind != .value) return null;
     if (!boxed.value.isString()) return null;
+    return @ptrCast(boxed);
+}
+
+fn privateTypeofStringIndex(bytes: []const u8) usize {
+    return if (std.mem.eql(u8, bytes, "undefined")) 0 else if (std.mem.eql(u8, bytes, "boolean")) 1 else if (std.mem.eql(u8, bytes, "number")) 2 else if (std.mem.eql(u8, bytes, "string")) 3 else if (std.mem.eql(u8, bytes, "symbol")) 4 else if (std.mem.eql(u8, bytes, "bigint")) 5 else if (std.mem.eql(u8, bytes, "function")) 6 else 7;
+}
+
+fn privateTypeofStringValue(index: usize) Value {
+    return switch (index) {
+        0 => Value.str("undefined"),
+        1 => Value.str("boolean"),
+        2 => Value.str("number"),
+        3 => Value.str("string"),
+        4 => Value.str("symbol"),
+        5 => Value.str("bigint"),
+        6 => Value.str("function"),
+        else => Value.str("object"),
+    };
+}
+
+export fn JSC__jsTypeStringForValue(
+    global: JSContextRef,
+    encoded: EncodedValue,
+) callconv(.c) ?*anyopaque {
+    const context = ctxForHandleInspection(global) orelse return null;
+    const opaque_group = context.c_api_group orelse return null;
+    const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+    const internal = privateValueFrom(global, encoded) orelse return null;
+    const bytes = internal.typeOf();
+    const index = privateTypeofStringIndex(bytes);
+    const slot = &group.typeof_strings[index];
+    if (slot.*) |boxed| return @ptrCast(boxed);
+
+    const handle = box(group.primary, privateTypeofStringValue(index)) orelse return null;
+    const boxed: *Boxed = @ptrCast(@alignCast(handle));
+    slot.* = boxed;
     return @ptrCast(boxed);
 }
 
@@ -15209,6 +15249,62 @@ test "private JSValue ArrayBuffer projection preserves views offsets metadata an
     try std.testing.expectEqual(EncodedValue.fromInt32(219), JSC__Exception__asJSValue(@ptrFromInt(try preserved.asCellAddress())));
 
     JSGlobalContextRelease(context);
+}
+
+test "private typeof string projection is exact VM-owned and exception neutral" {
+    const Probe = struct {
+        fn expect(global: JSContextRef, encoded: EncodedValue, expected: []const u8) !*anyopaque {
+            const cell = JSC__jsTypeStringForValue(global, encoded) orelse return error.MissingTypeofString;
+            const boxed = privateStringBoxFromCell(cell) orelse return error.InvalidTypeofString;
+            try std.testing.expectEqualStrings(expected, boxed.value.asStr());
+            try std.testing.expectEqual(expected.len, JSC__JSString__length(cell));
+            try std.testing.expect(JSC__JSString__is8Bit(cell));
+            return cell;
+        }
+    };
+
+    const group = JSContextGroupCreate() orelse return error.GroupCreateFailed;
+    defer JSContextGroupRelease(group);
+    const first = JSGlobalContextCreateInGroup(group, null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(first);
+    const sibling = JSGlobalContextCreateInGroup(group, null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(sibling);
+    const internal = ctxForEvaluation(first) orelse return error.ContextCreateFailed;
+
+    const string_value = try internal.evaluate("'value'");
+    const symbol_value = try internal.evaluate("Symbol('value')");
+    const bigint_value = try internal.evaluate("123n");
+    const ordinary_value = try internal.evaluate("({ value: 1 })");
+    const callable_value = try internal.evaluate("(function named() {})");
+    const html_dda_value = try internal.evaluate("(() => 1)");
+    html_dda_value.asObj().behavior.is_htmldda = true;
+
+    const undefined_cell = try Probe.expect(first, .undefined, "undefined");
+    _ = try Probe.expect(first, .null, "object");
+    _ = try Probe.expect(first, .true, "boolean");
+    _ = try Probe.expect(first, EncodedValue.fromInt32(42), "number");
+    _ = try Probe.expect(first, privateEncodedFromValue(internal, string_value), "string");
+    _ = try Probe.expect(first, privateEncodedFromValue(internal, symbol_value), "symbol");
+    _ = try Probe.expect(first, privateEncodedFromValue(internal, bigint_value), "bigint");
+    const object_cell = try Probe.expect(first, privateEncodedFromValue(internal, ordinary_value), "object");
+    _ = try Probe.expect(first, privateEncodedFromValue(internal, callable_value), "function");
+    try std.testing.expectEqual(undefined_cell, try Probe.expect(first, privateEncodedFromValue(internal, html_dda_value), "undefined"));
+
+    try std.testing.expectEqual(undefined_cell, try Probe.expect(sibling, .undefined, "undefined"));
+    try std.testing.expectEqual(object_cell, try Probe.expect(sibling, .null, "object"));
+
+    const foreign = JSGlobalContextCreate(null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(foreign);
+    const foreign_internal = ctxForEvaluation(foreign) orelse return error.ContextCreateFailed;
+    const foreign_object = privateEncodedFromValue(foreign_internal, try foreign_internal.evaluate("({})"));
+    try std.testing.expect(JSC__jsTypeStringForValue(first, foreign_object) == null);
+    try std.testing.expect(try Probe.expect(foreign, .undefined, "undefined") != undefined_cell);
+    try std.testing.expect(JSC__jsTypeStringForValue(first, .empty) == null);
+
+    JSC__VM__throwError(JSC__JSGlobalObject__vm(first), first, EncodedValue.fromInt32(220));
+    try std.testing.expectEqual(undefined_cell, try Probe.expect(first, .undefined, "undefined"));
+    const preserved = JSGlobalObject__tryTakeException(first);
+    try std.testing.expectEqual(EncodedValue.fromInt32(220), JSC__Exception__asJSValue(@ptrFromInt(try preserved.asCellAddress())));
 }
 
 test "private rooted native value containers retain and release exact cells" {
