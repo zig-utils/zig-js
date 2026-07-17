@@ -83,8 +83,8 @@
     },
     "by_status": {
       "external": 1,
-      "implemented": 188,
-      "pending": 248
+      "implemented": 194,
+      "pending": 242
     }
   },
   "home_comparison": {
@@ -4566,10 +4566,10 @@
       "line": 16,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn Yarr__RegularExpression__deinit(pattern: *RegularExpression) void;",
       "declaration_sha256": "0aaf33779e4bc722a2e3e4ff8a64d32fc8fd29fa1c1c92abcea0f6afb7e8d9ec",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Yarr__RegularExpression__init",
@@ -4577,10 +4577,10 @@
       "line": 15,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn Yarr__RegularExpression__init(pattern: bun.String, flags: u16) *RegularExpression;",
       "declaration_sha256": "57b802e9f8494b34b96b011dc653b755d7bea9ed3309ef57833bc7237e067d3d",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Yarr__RegularExpression__isValid",
@@ -4588,10 +4588,10 @@
       "line": 17,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn Yarr__RegularExpression__isValid(this: *RegularExpression) bool;",
       "declaration_sha256": "eb3bc612b863cda72fe776304360188d3230f078c70c4cc25496cfee3343d7fe",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Yarr__RegularExpression__matchedLength",
@@ -4599,10 +4599,10 @@
       "line": 18,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn Yarr__RegularExpression__matchedLength(this: *RegularExpression) i32;",
       "declaration_sha256": "301c5fac71de6c26d3c169fc8ad8d8b0b4593a157024da9fab9ef0bf77d9082d",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Yarr__RegularExpression__matches",
@@ -4610,10 +4610,10 @@
       "line": 20,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn Yarr__RegularExpression__matches(this: *RegularExpression, string: bun.String) i32;",
       "declaration_sha256": "db4023f0a701f656224c6e6e5fbf561708684af704a165c8dc4520223748e2e1",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Yarr__RegularExpression__searchRev",
@@ -4621,10 +4621,10 @@
       "line": 19,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn Yarr__RegularExpression__searchRev(this: *RegularExpression) i32;",
       "declaration_sha256": "05cd094982aaca1760e205cc4a55b4831145db2409f3f573333396fce041bd20",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "ZigException__collectSourceLines",

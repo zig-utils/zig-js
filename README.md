@@ -236,7 +236,7 @@ claim that Home's or Bun's private `JSC__*`/`Bun__*` ABI is implemented.
 The separately generated
 [Home private inventory](docs/abi/home-private-7ed99c02-inventory.json) makes
 that remaining boundary concrete: **448 unique extern symbols from 58 pinned
-files**, classified as 431 private (**179 implemented / 252 pending**), 15
+files**, classified as 431 private (**185 implemented / 246 pending**), 15
 already-covered public-C overlaps, one platform import, and one
 consumer-generated `JSFunctionCall` definition, with zero duplicate or
 unclassified entries.
@@ -247,7 +247,7 @@ The first private-ABI foundation is implemented without changing engine values:
 `private_abi.EncodedValue` translates primitives to the pinned eight-byte JSC64
 encoding (including exact int32/double/NaN/cell rules), while rejecting
 string/object conversion until a validated external cell handle exists.
-The first 179 private exports—encoded identity/cell equality, truthiness,
+The first 185 private exports—encoded identity/cell equality, truthiness,
 int32 extraction, exact signed/unsigned 64-bit BigInt construction, and
 modulo-2^64 BigInt extraction with pinned number fallbacks, plus exact `===` and
 SameValue equality, two exact cell-type queries, six opaque BigInt cell
@@ -261,6 +261,7 @@ seven realm/VM job, rejection, module-registry, and code-invalidation operations
 eight VM-owned strong/weak embedding-reference operations,
 13 caller-owned native StringBuilder operations,
 five rooted native argument/registry container operations,
+six stateful Yarr RegularExpression operations,
 five array/index operations, and
 two packed/hole JSArray constructors, full ECMAScript ToNumber coercion, and
 exact has-instance/iterator-method predicates, UTF-16 string inclusion,
@@ -409,7 +410,7 @@ Three Symbol bridges decode every ZigString form into the VM-wide global
 registry and expose stable borrowed description/registry-key views. C-API
 sibling realms now share the registry even before their first `Symbol.for`,
 while local and well-known Symbols remain correctly absent from `keyFor`.
-The 178-symbol combined fixture covers sibling realms,
+The 184-symbol combined fixture covers sibling realms,
 foreign-VM rejection, callback
 reentrancy, exception clearing, and already-settled targets.
 The BigInt cell gate downcasts only real owned cells, compares arbitrary-size
@@ -423,12 +424,12 @@ constructors return real context-owned BigInt cells.
 The [full private `JSType` layout](docs/abi/private-jstype-layouts.json) proves
 that Home has 97 members while Bun has 98: Bun's one inserted tag renumbers 70
 later members. `-Dprivate-abi-consumer=home|bun` selects the exact layout, and
-separately compiled fixtures pass 20 real cell kinds for each. All 179
+separately compiled fixtures pass 20 real cell kinds for each. All 185
 private exports remain excluded from the 117-function public count and 19
 extensions.
 The separate pinned
 [Bun core inventory](docs/abi/bun-private-core-4982b91e-inventory.json) contains
-437 symbols from 54 `src/jsc` files: 421 private (**173 implemented / 248
+437 symbols from 54 `src/jsc` files: 421 private (**179 implemented / 242
 pending**), 15 public overlaps, and one consumer-generated `JSFunctionCall`
 definition. Its exact comparison with Home finds 434
 shared names, 3 Bun-only names, 14 Home-only names, and 28 changed signatures;

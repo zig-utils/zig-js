@@ -44,7 +44,7 @@ convention. The exact current denominator is:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #163 | 431 (179 implemented, 252 pending) |
+| Private JSC/Bun/WebCore ABI under #163 | 431 (185 implemented, 246 pending) |
 | Overlap with zig-js's completed public C target | 15 |
 | Platform libc import | 1 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
@@ -61,7 +61,7 @@ zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"
 ```
 
 This inventory is the denominator, not a claim that the whole surface works.
-The first 179 private entries are implemented; the other 252 remain pending
+The first 185 private entries are implemented; the other 246 remain pending
 until #163 provides their type/layout contracts, shims, and consumer evidence.
 `JSFunctionCall` remains revision-pinned in the declaration inventory but is
 not part of that denominator: each runtime-generated FFI module defines the
@@ -135,7 +135,7 @@ It covers empty/immediate/int32/double/NaN/negative-zero behavior, boxed
 empty/nonempty strings, object identity/truthiness, signed minimum and unsigned
 maximum BigInts, negative modulo extraction, exact number fallbacks, and every
 invalid/non-exact boundary. Public accounting stays unchanged at 117 functions
-and 19 extensions; these 179 symbols are reported only as private profile
+and 19 extensions; these 185 symbols are reported only as private profile
 exports.
 
 The opaque BigInt cell slice additionally exports `JSC__JSBigInt__fromJS`, the
@@ -218,13 +218,30 @@ without a terminator. All failures return `-1` without modifying the output
 buffer. JavaScript Date construction and `Date.now()` now use the same real
 Unix wall clock as the Date-now writer.
 
-The pinned consumer sources contain two defects that the name-based inventory
+The pinned consumer sources contain three defects that the name-based inventory
 cannot express: Bun's Zig declaration gives `DateNowISOString` the incompatible
 `(*JSGlobalObject, f64) JSValue` signature even though its wrapper and C++ body
 use `(*JSGlobalObject, *[28]u8) c_int`, and `getUTCTimestamp` is declared but has
-no C++ definition. The runtime fixture therefore pins the executable writer
-contract and the coherent owned-Date UTC internal-time contract, rather than
-claiming those two source inconsistencies match.
+no C++ definition. Both pinned Zig `RegularExpression` declarations also omit
+the BunString argument from `searchRev`, while the C++ implementation and
+current Rust binding expose `searchRev(RegularExpression*, BunString)`. The
+runtime fixture therefore pins the executable writer, coherent owned-Date UTC
+internal-time, and two-argument reverse-search contracts rather than claiming
+those source inconsistencies match.
+
+The six-symbol Yarr boundary owns a compiled zig-regex expression and mirrors
+JavaScriptCore's stateful validity and last-match-length behavior. BunString
+patterns and inputs preserve UTF-16 code units through WTF-8, so legacy dot can
+consume one surrogate half while Unicode dot consumes a valid pair atomically;
+all returned positions and lengths are UTF-16 offsets. Reverse search scans
+forward from successive code-unit positions exactly like JSC, retaining the
+last later non-subset match and handling overlaps and zero-width matches without
+looping. Null BunStrings and invalid patterns remain non-matches. The fixture
+uses the real two-argument executable ABI and covers flags, astral input,
+overlap, subset replacement, empty patterns, invalid state, and match-state
+reset. The underlying empty-pattern and Unicode-surrogate corrections are
+tracked and completed in [zig-regex #11](https://github.com/zig-utils/zig-regex/issues/11)
+and [zig-regex #12](https://github.com/zig-utils/zig-regex/issues/12).
 
 The VM exception slice exports the shared `JSGlobalObject`/`VM` pending-state
 boundary plus exception-cell conversion and classification. Sibling realms in
@@ -409,7 +426,7 @@ profile contains 437 unique declarations from 54 hashed files:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #164 | 421 (173 implemented, 248 pending) |
+| Private JSC/Bun/WebCore ABI under #164 | 421 (179 implemented, 242 pending) |
 | Public-C overlap | 15 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
 | **Total** | **437** |
@@ -426,5 +443,5 @@ zig build bun-private-abi-audit -Dbun-source-root="$HOME/Code/bun"
 
 The audit rejects revision, file hash, declaration digest, classification,
 calling-convention, implementation-status, and Home-comparison drift. It does
-not claim complete Bun runtime compatibility; #164 remains open for the 248
+not claim complete Bun runtime compatibility; #164 remains open for the 242
 pending core entries and later wider/generated profiles.
