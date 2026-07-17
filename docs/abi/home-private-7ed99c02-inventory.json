@@ -88,8 +88,8 @@
     },
     "by_status": {
       "external": 2,
-      "implemented": 205,
-      "pending": 241
+      "implemented": 208,
+      "pending": 238
     }
   },
   "declarations": [
@@ -627,10 +627,10 @@
       "line": 40,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn Bun__createUint8ArrayForCopy(*JSGlobalObject, ptr: ?*const anyopaque, len: usize, buffer: bool) JSValue;",
       "declaration_sha256": "420dd91e52aaf5f7b989077d81eda9c1c933d23dfbaa5531bdcd1dfc0e4c8b44",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Bun__decodeWithTextCodec",
@@ -1034,10 +1034,10 @@
       "line": 493,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSBuffer__isBuffer(*JSGlobalObject, JSValue) bool;",
       "declaration_sha256": "6cac43e428e71c4a4e16936f7fa7ed66d4199ef118d68002d370d088f3efd9d2",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__AnyPromise__wrap",
@@ -3310,10 +3310,10 @@
       "line": 34,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSUint8Array__fromDefaultAllocator(*JSGlobalObject, ptr: [*]u8, len: usize) JSValue;",
       "declaration_sha256": "f34119db4b36ef9fa4dfe88873126b041891a2cd37b34df63fe7f78816b04a06",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSVALUE_TO_INT64_SLOW",

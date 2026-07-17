@@ -44,7 +44,7 @@ convention. The exact current denominator is:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #163 | 431 (190 implemented, 241 pending) |
+| Private JSC/Bun/WebCore ABI under #163 | 431 (193 implemented, 238 pending) |
 | Overlap with zig-js's completed public C target | 15 |
 | Platform libc import | 1 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
@@ -61,7 +61,7 @@ zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"
 ```
 
 This inventory is the denominator, not a claim that the whole surface works.
-The first 190 private entries are implemented; the other 241 remain pending
+The first 193 private entries are implemented; the other 238 remain pending
 until #163 provides their type/layout contracts, shims, and consumer evidence.
 `JSFunctionCall` remains revision-pinned in the declaration inventory but is
 not part of that denominator: each runtime-generated FFI module defines the
@@ -135,7 +135,7 @@ It covers empty/immediate/int32/double/NaN/negative-zero behavior, boxed
 empty/nonempty strings, object identity/truthiness, signed minimum and unsigned
 maximum BigInts, negative modulo extraction, exact number fallbacks, and every
 invalid/non-exact boundary. Public accounting stays unchanged at 117 functions
-and 19 extensions; these 190 symbols are reported only as private profile
+and 19 extensions; these 193 symbols are reported only as private profile
 exports.
 
 The opaque BigInt cell slice additionally exports `JSC__JSBigInt__fromJS`, the
@@ -255,6 +255,18 @@ clamps to `c_int`. FastMalloc release is already satisfied because zig-js owns
 no WTF allocator or per-thread FastMalloc cache. HTTP dates use exact 29-byte
 RFC 7231 IMF-fixdate text, timestamp-zero suppression, and bounded
 `snprintf`-style truncation with a terminator and full required-length return.
+
+The three-symbol Uint8Array/Buffer slice constructs live selected-realm
+`Uint8Array` objects. Copy creation owns an isolated backing store, accepts
+empty input, and safely allocates writable storage for a null source. The
+`buffer` selector persists Bun Buffer subclass identity separately from the
+ordinary Uint8Array kind, which `JSBuffer__isBuffer` reads without accepting
+lookalikes. Default-allocator creation adopts the caller's non-empty byte slab
+without copying and attaches it to the existing idempotent external-buffer
+owner, so GC or realm teardown invokes `mi_free` exactly once. A weak libc
+fallback keeps standalone builds linkable; Home/Bun's strong mimalloc export
+replaces it in consumer builds. Allocation failures use the normal private
+pending-exception boundary rather than returning a half-created view.
 
 The VM exception slice exports the shared `JSGlobalObject`/`VM` pending-state
 boundary plus exception-cell conversion and classification. Sibling realms in
@@ -439,7 +451,7 @@ profile contains 437 unique declarations from 54 hashed files:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #164 | 421 (184 implemented, 237 pending) |
+| Private JSC/Bun/WebCore ABI under #164 | 421 (187 implemented, 234 pending) |
 | Public-C overlap | 15 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
 | **Total** | **437** |
@@ -456,5 +468,5 @@ zig build bun-private-abi-audit -Dbun-source-root="$HOME/Code/bun"
 
 The audit rejects revision, file hash, declaration digest, classification,
 calling-convention, implementation-status, and Home-comparison drift. It does
-not claim complete Bun runtime compatibility; #164 remains open for the 237
+not claim complete Bun runtime compatibility; #164 remains open for the 234
 pending core entries and later wider/generated profiles.
