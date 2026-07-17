@@ -44,7 +44,7 @@ convention. The exact current denominator is:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #163 | 432 (9 implemented, 423 pending) |
+| Private JSC/Bun/WebCore ABI under #163 | 432 (11 implemented, 421 pending) |
 | Overlap with zig-js's completed public C target | 15 |
 | Platform libc import | 1 |
 | **Total** | **448** |
@@ -60,7 +60,7 @@ zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"
 ```
 
 This inventory is the denominator, not a claim that the whole surface works.
-The first nine private entries are implemented; the other 423 remain pending
+The first eleven private entries are implemented; the other 421 remain pending
 until #163 provides their type/layout contracts, shims, and consumer evidence.
 
 Home revision `5e829ad483bb9e5ccb19766997df6462edd8e167` is supported as
@@ -128,8 +128,37 @@ It covers empty/immediate/int32/double/NaN/negative-zero behavior, boxed
 empty/nonempty strings, object identity/truthiness, signed minimum and unsigned
 maximum BigInts, negative modulo extraction, exact number fallbacks, and every
 invalid/non-exact boundary. Public accounting stays unchanged at 117 functions
-and 19 extensions; these nine symbols are reported only as private profile
+and 19 extensions; these eleven symbols are reported only as private profile
 exports.
+
+## Profile-selectable JSType layout
+
+[`private-jstype-layouts.json`](private-jstype-layouts.json) pins the complete
+private enum from both consumer sources: 97 Home members and 98 Bun members.
+All 97 Home names are shared, but Bun inserts
+`WebAssemblyStreamingContext = 27`, renumbering 70 later shared tags. For
+example, `FinalObject` is 34 for Home and 35 for Bun. The source revisions,
+paths, SHA-256 digests, all member values, and the exact added/removed/renumbered
+comparison are audited rather than inferred from declaration compatibility.
+
+The library therefore requires an explicit compile-time profile whenever Bun
+numbering is wanted; Home is the default and every other value is rejected:
+
+```sh
+zig build private-jstype-abi-audit
+zig build private-jstype-abi-audit \
+  -Dhome-source-root="$HOME/Code/Home/lang" \
+  -Dbun-source-root="$HOME/Code/bun"
+zig build test-private-jstype
+zig build test-private-jstype -Dprivate-abi-consumer=bun
+```
+
+`JSC__JSValue__jsType` and `JSC__JSCell__getType` return the selected exact
+tags without exposing zig-js object flags. Both separately compiled runtime
+fixtures cover 20 real cell kinds, including strings, Symbols, BigInts,
+ordinary objects, JavaScript/native functions, errors, arrays, buffers,
+typed arrays, DataView, RegExp, Date, Promise, Map/Set/weak collections, and a
+boxed string.
 
 ## Bun core private inventory
 
@@ -141,7 +170,7 @@ profile contains 437 unique declarations from 54 hashed files:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #164 | 422 (9 implemented, 413 pending) |
+| Private JSC/Bun/WebCore ABI under #164 | 422 (11 implemented, 411 pending) |
 | Public-C overlap | 15 |
 | **Total** | **437** |
 
@@ -157,5 +186,5 @@ zig build bun-private-abi-audit -Dbun-source-root="$HOME/Code/bun"
 
 The audit rejects revision, file hash, declaration digest, classification,
 calling-convention, implementation-status, and Home-comparison drift. It does
-not claim complete Bun runtime compatibility; #164 remains open for the 413
+not claim complete Bun runtime compatibility; #164 remains open for the 411
 pending core entries and later wider/generated profiles.
