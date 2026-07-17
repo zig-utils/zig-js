@@ -784,6 +784,7 @@ pub const Binding = struct {
         ctx.realmLock();
         for (ctx.async_waiters.items) |aw| markValue(v, aw.promise);
         for (ctx.finalization_cleanup_jobs.items) |registry| v.mark(registry);
+        for (ctx.c_api_class_prototypes.items) |prototype| v.mark(prototype.object);
         for (ctx.c_api_handles.items) |h| {
             // each ref is a `*Boxed` ({ value: Value }), so the pointer aliases `*Value`.
             const vp: *const Value = @ptrCast(@alignCast(h.ref));

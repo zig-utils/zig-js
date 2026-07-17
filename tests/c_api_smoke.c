@@ -34,6 +34,16 @@ static void child_finalize(JSObjectRef object)
     class_events[class_event_count++] = 3;
 }
 
+static JSValueRef class_static_function(JSContextRef context, JSObjectRef function,
+    JSObjectRef this_object, size_t argument_count, const JSValueRef arguments[], JSValueRef* exception)
+{
+    (void)function;
+    (void)argument_count;
+    (void)arguments;
+    (void)exception;
+    return JSValueMakeBoolean(context, JSObjectGetPrivate(this_object) == &private_token);
+}
+
 static void release_bytes(void* bytes, void* context)
 {
     unsigned* count = (unsigned*)context;
@@ -113,6 +123,43 @@ int main(void)
     if (!parent_class || !child_class || JSClassRetain(child_class) != child_class)
         return 18;
     JSClassRelease(child_class);
+
+    JSStaticFunction static_functions[] = {
+        { "checkThis", class_static_function, kJSPropertyAttributeNone },
+        { NULL, NULL, 0 }
+    };
+    JSClassDefinition static_definition = kJSClassDefinitionEmpty;
+    static_definition.className = "StaticClass";
+    static_definition.staticFunctions = static_functions;
+    JSClassRef static_class = JSClassCreate(&static_definition);
+    if (!static_class)
+        return 28;
+    JSObjectRef static_a = JSObjectMake(context, static_class, &private_token);
+    JSObjectRef static_b = JSObjectMake(context, static_class, NULL);
+    JSStringRef check_this_name = JSStringCreateWithUTF8CString("checkThis");
+    JSValueRef static_a_function = JSObjectGetProperty(context, static_a, check_this_name, &exception);
+    JSValueRef static_b_function = JSObjectGetProperty(context, static_b, check_this_name, &exception);
+    if (!static_a || !static_b || exception ||
+        !JSValueIsStrictEqual(context, static_a_function, static_b_function) ||
+        !JSValueToBoolean(context, JSObjectCallAsFunction(context,
+            (JSObjectRef)static_a_function, static_a, 0, NULL, &exception)))
+        return 28;
+    JSClassRelease(static_class);
+
+    JSClassDefinition direct_definition = static_definition;
+    direct_definition.attributes = kJSClassAttributeNoAutomaticPrototype;
+    JSClassRef direct_class = JSClassCreate(&direct_definition);
+    if (!direct_class)
+        return 29;
+    JSObjectRef direct_a = JSObjectMake(context, direct_class, &private_token);
+    JSObjectRef direct_b = JSObjectMake(context, direct_class, NULL);
+    JSValueRef direct_a_function = JSObjectGetProperty(context, direct_a, check_this_name, &exception);
+    JSValueRef direct_b_function = JSObjectGetProperty(context, direct_b, check_this_name, &exception);
+    if (!direct_a || !direct_b || exception ||
+        JSValueIsStrictEqual(context, direct_a_function, direct_b_function))
+        return 29;
+    JSClassRelease(direct_class);
+    JSStringRelease(check_this_name);
     JSClassRelease(parent_class);
     JSObjectRef class_object = JSObjectMake(context, child_class, &private_token);
     if (!class_object || class_event_count != 2 || class_events[0] != 1 || class_events[1] != 2)

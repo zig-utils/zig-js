@@ -293,6 +293,10 @@ fn initializeClassObject(ctx: JSContextRef, object_ref: JSObjectRef, class: *CCl
     if (class.definition.initialize) |initialize| initialize(ctx, object_ref);
 }
 
+fn finishClassPrototype(owner: *value.CApiClassPrototypeOwner) void {
+    releaseClass(classFrom(owner.class_ref).?);
+}
+
 // ---- internal helpers --------------------------------------------------
 
 fn ctxRawFrom(ref: JSContextRef) ?*Context {
@@ -1325,6 +1329,12 @@ export fn JSObjectMake(ctx: JSContextRef, js_class: JSClassRef, data: ?*anyopaqu
     const class = classFrom(js_class);
     var owner: ?*value.CApiObjectOwner = null;
     if (class) |item| {
+        if ((item.definition.attributes & kJSClassAttributeNoAutomaticPrototype) != 0) {
+            installStaticFunctionChain(c, &machine, obj, item) catch return null;
+        } else {
+            const prototype = ensureClassPrototype(c, &machine, item) catch return null;
+            obj.setProtoAtomic(prototype);
+        }
         if (!retainClass(item)) return null;
         const created = c.createCApiObjectOwner(@ptrCast(item), finishClassObject) catch {
             releaseClass(item);
@@ -2096,6 +2106,69 @@ fn hostCallbackNative(ctx: *anyopaque, this: Value, args: []const Value) value.H
     return machine.throwError("TypeError", "host callback returned null without exception");
 }
 
+fn makeHostFunctionObject(
+    c: *Context,
+    machine: *interp.Interpreter,
+    name: []const u8,
+    callback: JSObjectCallAsFunctionCallback,
+) !*Object {
+    const cb = callback orelse return error.InvalidCallback;
+    const obj = try gc_mod.allocObject(c.gc, c.arena());
+    obj.* = .{ .native = hostCallbackNative, .proto = machine.functionProto() };
+    try obj.setHostCallback(c.arena(), cb, c);
+    const name_copy = try c.arena().dupe(u8, name);
+    try obj.setOwn(c.arena(), c.root_shape, "name", try Value.strOwned(c.arena(), name_copy));
+    try obj.setAttr(c.arena(), "name", .{ .writable = false, .enumerable = false, .configurable = true });
+    return obj;
+}
+
+fn installStaticFunctions(
+    c: *Context,
+    machine: *interp.Interpreter,
+    target: *Object,
+    class: *CClass,
+) !void {
+    for (class.static_functions) |entry| {
+        const name_ptr = entry.name orelse continue;
+        const callback = entry.call_as_function orelse continue;
+        const name = std.mem.span(name_ptr);
+        const function = try makeHostFunctionObject(c, machine, name, callback);
+        try target.setOwn(c.arena(), c.root_shape, name, Value.obj(function));
+        try target.setAttr(c.arena(), name, propAttrFromC(entry.attributes));
+    }
+}
+
+fn installStaticFunctionChain(
+    c: *Context,
+    machine: *interp.Interpreter,
+    target: *Object,
+    class: *CClass,
+) !void {
+    if (class.parent) |parent| try installStaticFunctionChain(c, machine, target, parent);
+    try installStaticFunctions(c, machine, target, class);
+}
+
+fn ensureClassPrototype(c: *Context, machine: *interp.Interpreter, class: *CClass) !*Object {
+    const class_ref: *anyopaque = @ptrCast(class);
+    if (c.findCApiClassPrototype(class_ref)) |prototype| return prototype;
+
+    const prototype = (try machine.newObject()).asObj();
+    if (class.parent) |parent| {
+        if ((parent.definition.attributes & kJSClassAttributeNoAutomaticPrototype) == 0) {
+            prototype.setProtoAtomic(try ensureClassPrototype(c, machine, parent));
+        } else {
+            try installStaticFunctionChain(c, machine, prototype, parent);
+        }
+    }
+    try installStaticFunctions(c, machine, prototype, class);
+    if (!retainClass(class)) return error.ReferenceCountOverflow;
+    c.createCApiClassPrototype(class_ref, prototype, finishClassPrototype) catch |err| {
+        releaseClass(class);
+        return err;
+    };
+    return prototype;
+}
+
 export fn JSObjectMakeFunctionWithCallback(ctx: JSContextRef, name: JSStringRef, callback: JSObjectCallAsFunctionCallback) callconv(.c) JSObjectRef {
     const c = ctxFrom(ctx) orelse return null;
     const cb = callback orelse return null;
@@ -2106,13 +2179,8 @@ export fn JSObjectMakeFunctionWithCallback(ctx: JSContextRef, name: JSStringRef,
     var machine = c.interpreter();
     c.pushActiveInterpreter(&machine) catch return null;
     defer c.popActiveInterpreter(&machine);
-    const obj = gc_mod.allocObject(c.gc, c.arena()) catch return null;
-    obj.* = .{ .native = hostCallbackNative, .proto = machine.functionProto() };
-    obj.setHostCallback(c.arena(), cb, c) catch return null;
     const name_bytes = if (strFrom(name)) |s| s.bytes else "";
-    const name_copy = c.arena().dupe(u8, name_bytes) catch return null;
-    obj.setOwn(c.arena(), c.root_shape, "name", Value.strOwned(c.arena(), name_copy) catch return null) catch return null;
-    obj.setAttr(c.arena(), "name", .{ .writable = false, .enumerable = false, .configurable = true }) catch return null;
+    const obj = makeHostFunctionObject(c, &machine, name_bytes, cb) catch return null;
     return box(c, Value.obj(obj));
 }
 
@@ -2958,6 +3026,44 @@ test "C-API: GC and context teardown finalize class instances exactly once" {
     try std.testing.expectEqual(@as(usize, 1), State.finalizations);
     JSGlobalContextRelease(ctx);
     try std.testing.expectEqual(@as(usize, 1), State.finalizations);
+}
+
+test "C-API: GC roots shared class prototypes and static functions" {
+    const State = struct {
+        fn call(
+            ctx: JSContextRef,
+            _: JSObjectRef,
+            _: JSObjectRef,
+            _: usize,
+            _: [*c]const JSValueRef,
+            _: ExceptionRef,
+        ) callconv(.c) JSValueRef {
+            return JSValueMakeNumber(ctx, 17);
+        }
+    };
+    var functions = [_]JSStaticFunction{
+        .{ .name = "run", .call_as_function = State.call },
+        .{},
+    };
+    var definition: JSClassDefinition = .{ .static_functions = &functions };
+    const class = JSClassCreate(&definition) orelse return error.ClassCreateFailed;
+    const context = Context.createWith(gpa, .{ .enable_gc = true }) catch return error.JSCInitFailed;
+    context.initCApiRef();
+    const ctx: JSContextRef = @ptrCast(context);
+    const name = JSStringCreateWithUTF8CString("run") orelse return error.StringInitFailed;
+    defer JSStringRelease(name);
+
+    const first = JSObjectMake(ctx, class, null) orelse return error.ObjectCreateFailed;
+    const first_function = JSObjectGetProperty(ctx, first, name, null) orelse return error.PropertyGetFailed;
+    JSGarbageCollect(ctx);
+    const second = JSObjectMake(ctx, class, null) orelse return error.ObjectCreateFailed;
+    const second_function = JSObjectGetProperty(ctx, second, name, null) orelse return error.PropertyGetFailed;
+    try std.testing.expect(JSValueIsStrictEqual(ctx, first_function, second_function));
+    const result = JSObjectCallAsFunction(ctx, second_function, second, 0, null, null) orelse return error.CallFailed;
+    try std.testing.expectEqual(@as(f64, 17), JSValueToNumber(ctx, result, null));
+
+    JSClassRelease(class);
+    JSGlobalContextRelease(ctx);
 }
 
 test "C-API: owned TypedArrays expose their public type, geometry, buffer, and bytes" {

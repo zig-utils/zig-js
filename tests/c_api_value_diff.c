@@ -13,6 +13,17 @@ static JSValueRef evaluate(JSContextRef context, const char* source)
     return exception ? NULL : result;
 }
 
+static JSValueRef static_function(JSContextRef context, JSObjectRef function,
+    JSObjectRef this_object, size_t argument_count, const JSValueRef arguments[], JSValueRef* exception)
+{
+    (void)function;
+    (void)this_object;
+    (void)argument_count;
+    (void)arguments;
+    (void)exception;
+    return JSValueMakeNumber(context, 17);
+}
+
 static int print_json_string(JSStringRef string)
 {
     char bytes[512];
@@ -98,6 +109,33 @@ int main(void)
         JSValueIsObjectOfClass(context, plain_object, child_class));
     JSClassRelease(parent_class);
     JSClassRelease(child_class);
+
+    JSStaticFunction static_functions[] = {
+        { "run", static_function, kJSPropertyAttributeNone }, { NULL, NULL, 0 }
+    };
+    JSClassDefinition static_definition = kJSClassDefinitionEmpty;
+    static_definition.staticFunctions = static_functions;
+    JSClassRef static_class = JSClassCreate(&static_definition);
+    JSObjectRef static_a = JSObjectMake(context, static_class, NULL);
+    JSObjectRef static_b = JSObjectMake(context, static_class, NULL);
+    JSStringRef run_name = JSStringCreateWithUTF8CString("run");
+    JSValueRef static_fn_a = JSObjectGetProperty(context, static_a, run_name, &exception);
+    JSValueRef static_fn_b = JSObjectGetProperty(context, static_b, run_name, &exception);
+    JSClassDefinition direct_definition = static_definition;
+    direct_definition.attributes = kJSClassAttributeNoAutomaticPrototype;
+    JSClassRef direct_class = JSClassCreate(&direct_definition);
+    JSObjectRef direct_a = JSObjectMake(context, direct_class, NULL);
+    JSObjectRef direct_b = JSObjectMake(context, direct_class, NULL);
+    JSValueRef direct_fn_a = JSObjectGetProperty(context, direct_a, run_name, &exception);
+    JSValueRef direct_fn_b = JSObjectGetProperty(context, direct_b, run_name, &exception);
+    printf("static-functions %d %d %.0f\n",
+        JSValueIsStrictEqual(context, static_fn_a, static_fn_b),
+        JSValueIsStrictEqual(context, direct_fn_a, direct_fn_b),
+        JSValueToNumber(context, JSObjectCallAsFunction(context,
+            (JSObjectRef)static_fn_a, static_a, 0, NULL, &exception), &exception));
+    JSStringRelease(run_name);
+    JSClassRelease(static_class);
+    JSClassRelease(direct_class);
 
     JSObjectRef prototype = JSObjectMake(context, NULL, NULL);
     JSObjectRef object = JSObjectMake(context, NULL, NULL);

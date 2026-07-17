@@ -53,8 +53,8 @@ Missing primitives Home depends on heavily (each blocks a large class of corpus
 tests):
 
 1. **Complete custom native classes** — class ownership, inheritance,
-   initialize/finalize, and class identity are implemented; static functions,
-   static value accessors with getter/setter,
+   initialize/finalize, class identity, shared prototypes, and static functions
+   are implemented; static value accessors with getter/setter,
    `hasInstance`, `callAsConstructor`, parent class). Home defines ~100+
    JS-exposed classes (Subprocess, Glob, Server, Crypto hashers, FSWatcher,
    Stats, …) via the generated-class machinery. This is the single biggest gap.

@@ -2276,6 +2276,9 @@ pub const Context = struct {
     /// may finish a record early; teardown finishes arena-mode survivors and
     /// destroys every record after all object cells are gone.
     c_api_object_owners: std.ArrayListUnmanaged(*value.CApiObjectOwner) = .empty,
+    /// Shared automatic JSClassRef prototypes. These are explicit GC roots and
+    /// each record retains its class until Context teardown.
+    c_api_class_prototypes: std.ArrayListUnmanaged(*value.CApiClassPrototypeOwner) = .empty,
     /// Outstanding `Atomics.waitAsync` promises (entries live in the arena;
     /// the list's address is the realm's waiter-table owner token). Settled by
     /// the drain tail in `evaluate`/`evaluateModule`.
@@ -2993,6 +2996,11 @@ pub const Context = struct {
             self.gpa.destroy(owner);
         }
         self.c_api_object_owners.deinit(self.gpa);
+        for (self.c_api_class_prototypes.items) |owner| {
+            owner.finish();
+            self.gpa.destroy(owner);
+        }
+        self.c_api_class_prototypes.deinit(self.gpa);
         for (self.external_buffer_owners.items) |owner| {
             _ = owner.release();
             self.gpa.destroy(owner);
@@ -3068,6 +3076,29 @@ pub const Context = struct {
         owner.* = .{ .class_ref = class_ref, .finish_fn = finish_fn };
         try self.c_api_object_owners.append(self.gpa, owner);
         return owner;
+    }
+
+    pub fn findCApiClassPrototype(self: *Context, class_ref: *anyopaque) ?*value.Object {
+        self.realmLock();
+        defer self.realmUnlock();
+        for (self.c_api_class_prototypes.items) |owner| {
+            if (owner.class_ref == class_ref) return owner.object;
+        }
+        return null;
+    }
+
+    pub fn createCApiClassPrototype(
+        self: *Context,
+        class_ref: *anyopaque,
+        object: *value.Object,
+        finish_fn: *const fn (*value.CApiClassPrototypeOwner) void,
+    ) !void {
+        const owner = try self.gpa.create(value.CApiClassPrototypeOwner);
+        errdefer self.gpa.destroy(owner);
+        owner.* = .{ .class_ref = class_ref, .object = object, .finish_fn = finish_fn };
+        self.realmLock();
+        defer self.realmUnlock();
+        try self.c_api_class_prototypes.append(self.gpa, owner);
     }
 
     pub fn heapBudgetStats(self: *const Context) ?HeapBudgetStats {

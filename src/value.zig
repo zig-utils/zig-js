@@ -642,6 +642,19 @@ pub const CApiObjectOwner = struct {
     }
 };
 
+/// A shared automatic prototype created for one JSClassRef in one Context.
+/// Context root tracing keeps `object` alive; the opaque finish callback drops
+/// the cache's class retain during teardown without importing `c_api.zig`.
+pub const CApiClassPrototypeOwner = struct {
+    class_ref: *anyopaque,
+    object: *Object,
+    finish_fn: *const fn (*CApiClassPrototypeOwner) void,
+
+    pub fn finish(self: *CApiClassPrototypeOwner) void {
+        self.finish_fn(self);
+    }
+};
+
 /// Rare internal slots kept out of every ordinary object. These states belong
 /// to disjoint exotic object kinds, but a single sidecar keeps access simple
 /// while removing enough default-initialized payload to place Object cells in
