@@ -86,7 +86,8 @@ pub fn build(b: *std.Build) void {
         "--profile",
         home_public_abi_profile,
     });
-    if (b.option([]const u8, "home-source-root", "Optional pinned Home checkout to verify")) |root| {
+    const home_source_root = b.option([]const u8, "home-source-root", "Optional pinned Home checkout to verify");
+    if (home_source_root) |root| {
         home_public_abi_audit_cmd.addArgs(&.{ "--home-root", root });
     }
     const home_public_abi_audit_step = b.step(
@@ -94,6 +95,17 @@ pub fn build(b: *std.Build) void {
         "Verify the revision-pinned Home public C consumer profile",
     );
     home_public_abi_audit_step.dependOn(&home_public_abi_audit_cmd.step);
+
+    const home_private_abi_audit_cmd = b.addSystemCommand(&.{
+        "python3",
+        "tools/home-private-abi.py",
+    });
+    if (home_source_root) |root| home_private_abi_audit_cmd.addArgs(&.{ "--home-root", root });
+    const home_private_abi_audit_step = b.step(
+        "home-private-abi-audit",
+        "Verify the pinned Home private extern-fn inventory",
+    );
+    home_private_abi_audit_step.dependOn(&home_private_abi_audit_cmd.step);
 
     const objc_api_audit_cmd = b.addSystemCommand(&.{
         "python3",
