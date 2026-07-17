@@ -2250,6 +2250,13 @@ pub const Context = struct {
     /// before engine teardown.
     c_api_inspectable: bool = false,
     c_api_inspector_state: ?*anyopaque = null,
+    /// Type-erased debugger bridge. The core evaluator knows statement
+    /// boundaries but remains independent of the C inspector protocol.
+    debug_statement_ctx: ?*anyopaque = null,
+    debug_statement_hook: ?interp.DebugStatementHook = null,
+    debug_statement_locations: std.AutoHashMapUnmanaged(*const ast.Node, interp.DebugStatementLocation) = .empty,
+    debug_script_id: u64 = 0,
+    debug_script_start_line: usize = 1,
     /// Embedder metadata set through JSGlobalContextSetName. Store exact UTF-16
     /// code units in the arena; the C boundary returns a fresh JSStringRef copy.
     c_api_name_utf16: ?[]const u16 = null,
@@ -2972,7 +2979,10 @@ pub const Context = struct {
         return .{
             .arena = self.arena(),
             .env = &self.env,
-            .jit_owner = if (self.enable_jit) (self.shared_jit_owner orelse &self.jit_owner) else null,
+            .jit_owner = if (self.enable_jit and self.debug_statement_hook == null) (self.shared_jit_owner orelse &self.jit_owner) else null,
+            .debug_statement_ctx = self.debug_statement_ctx,
+            .debug_statement_hook = self.debug_statement_hook,
+            .debug_statement_locations = if (self.debug_statement_hook != null) &self.debug_statement_locations else null,
             .global_object = self.global_object,
             .this_value = Value.obj(self.global_object),
             .root_shape = self.root_shape,
@@ -4187,6 +4197,19 @@ pub const Context = struct {
             self.last_evaluation_diagnostic = parser.errorLocation();
             return err;
         };
+        if (self.debug_statement_hook != null) {
+            for (parser.statement_locations.items) |entry| {
+                try self.debug_statement_locations.put(a, entry.node, .{
+                    .script_id = self.debug_script_id,
+                    .location = .{
+                        .byte_offset = entry.location.byte_offset,
+                        .line = entry.location.line + self.debug_script_start_line - 1,
+                        .column = entry.location.column,
+                    },
+                    .debugger_statement = entry.debugger_statement,
+                });
+            }
+        }
         // Global (Script) code has no `super` binding, so a top-level SuperCall or
         // SuperProperty — including inside a top-level arrow — is an early
         // SyntaxError. (Direct/indirect `eval` runs its own context-aware scan
@@ -4216,7 +4239,7 @@ pub const Context = struct {
             machine.cur_module = self.script_referrer;
         }
 
-        const outcome: interp.EvalError!value.Value = if (scriptNeedsTreeWalk(owned_source))
+        const outcome: interp.EvalError!value.Value = if (self.debug_statement_hook != null or scriptNeedsTreeWalk(owned_source))
             machine.eval(prog)
         else if (compiler.Compiler.compileProgram(a, prog)) |chunk|
             vm.run(&machine, chunk, null)

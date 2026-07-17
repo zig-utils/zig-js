@@ -110,6 +110,17 @@ pub const ZJSInspectorSessionRef = ?*anyopaque;
 const CInspectorState = struct {
     context: *Context,
     sessions: std.ArrayListUnmanaged(*CInspectorSession) = .empty,
+    scripts: std.ArrayListUnmanaged(CInspectorScript) = .empty,
+    next_script_id: u64 = 1,
+    pause_requested: bool = false,
+    paused: bool = false,
+};
+
+const CInspectorScript = struct {
+    id: u64,
+    url: []const u8,
+    source: []const u8,
+    start_line: usize,
 };
 
 const CInspectorSession = struct {
@@ -1396,6 +1407,98 @@ fn sendInspectorError(session: *CInspectorSession, id: i64, code: i64, message: 
     });
 }
 
+fn inspectorHasDebugger(state: *const CInspectorState) bool {
+    for (state.sessions.items) |session| {
+        if (session.attached and session.debugger_enabled) return true;
+    }
+    return false;
+}
+
+fn refreshInspectorDebuggerHook(state: *CInspectorState) void {
+    const context = state.context;
+    if (inspectorHasDebugger(state)) {
+        context.debug_statement_ctx = state;
+        context.debug_statement_hook = inspectorStatementBoundary;
+    } else {
+        context.debug_statement_ctx = null;
+        context.debug_statement_hook = null;
+        state.pause_requested = false;
+        state.paused = false;
+    }
+}
+
+fn sendInspectorScriptParsed(session: *CInspectorSession, script: CInspectorScript) bool {
+    return sendInspectorJson(session, .{
+        .method = "Debugger.scriptParsed",
+        .params = .{
+            .scriptId = script.id,
+            .url = script.url,
+            .startLine = script.start_line,
+            .sourceLength = script.source.len,
+        },
+    });
+}
+
+fn beginInspectorScript(
+    state: *CInspectorState,
+    source: []const u8,
+    source_url: JSStringRef,
+    starting_line_number: c_int,
+) ?CInspectorScript {
+    if (!inspectorHasDebugger(state)) return null;
+    const arena = state.context.arena();
+    const source_copy = arena.dupe(u8, source) catch return null;
+    const url_copy = arena.dupe(u8, evaluationSourceName(source_url)) catch return null;
+    const script = CInspectorScript{
+        .id = state.next_script_id,
+        .url = url_copy,
+        .source = source_copy,
+        .start_line = if (starting_line_number > 0) @intCast(starting_line_number) else 1,
+    };
+    state.next_script_id += 1;
+    state.scripts.append(gpa, script) catch return null;
+    state.context.debug_script_id = script.id;
+    state.context.debug_script_start_line = script.start_line;
+    for (state.sessions.items) |session| {
+        if (session.attached and session.debugger_enabled) _ = sendInspectorScriptParsed(session, script);
+    }
+    return script;
+}
+
+fn inspectorStatementBoundary(
+    hook_context: *anyopaque,
+    machine: *interp.Interpreter,
+    location: interp.DebugStatementLocation,
+) interp.EvalError!void {
+    const state: *CInspectorState = @ptrCast(@alignCast(hook_context));
+    if (!location.debugger_statement and !state.pause_requested) return;
+    const reason: []const u8 = if (location.debugger_statement) "debuggerStatement" else "pause";
+    state.pause_requested = false;
+    state.paused = true;
+    for (state.sessions.items) |session| {
+        if (!session.attached or !session.debugger_enabled) continue;
+        _ = sendInspectorJson(session, .{
+            .method = "Debugger.paused",
+            .params = .{
+                .reason = reason,
+                .location = .{
+                    .scriptId = location.script_id,
+                    .lineNumber = location.location.line - 1,
+                    .columnNumber = location.location.column - 1,
+                    .byteOffset = location.location.byte_offset,
+                },
+            },
+        });
+    }
+    // The transport is synchronous and the Context is thread-affine: a client
+    // resumes from its paused-event callback. Returning to JS while still marked
+    // paused would silently violate the protocol, so abort deterministically.
+    if (state.paused) {
+        state.paused = false;
+        return machine.throwError("Error", "debugger pause requires a synchronous resume command");
+    }
+}
+
 const InspectorDescription = struct {
     allocation: []u8,
     bytes: []const u8,
@@ -1481,6 +1584,7 @@ export fn JSGlobalContextSetInspectable(ctx: JSContextRef, inspectable: bool) ca
                 .params = .{ .reason = "context is no longer inspectable" },
             });
         };
+        if (inspectorState(c)) |state| refreshInspectorDebuggerHook(state);
     }
 }
 
@@ -1530,9 +1634,11 @@ export fn ZJSInspectorSessionRelease(session_ref: ZJSInspectorSessionRef) callco
         break;
     }
     gpa.destroy(session);
+    refreshInspectorDebuggerHook(state);
     if (state.sessions.items.len == 0) {
         state.context.c_api_inspector_state = null;
         state.sessions.deinit(gpa);
+        state.scripts.deinit(gpa);
         gpa.destroy(state);
     }
     JSGlobalContextRelease(ctx);
@@ -1592,14 +1698,37 @@ export fn ZJSInspectorSessionDispatch(
     }
     if (std.mem.eql(u8, method, "Debugger.enable")) {
         session.debugger_enabled = true;
-        return sendInspectorJson(session, .{
+        refreshInspectorDebuggerHook(session.state);
+        if (!sendInspectorJson(session, .{
             .id = id,
             .result = .{ .debuggerId = "zig-js-debugger-0.1" },
-        });
+        })) return false;
+        for (session.state.scripts.items) |script| {
+            if (!sendInspectorScriptParsed(session, script)) return false;
+        }
+        return true;
     }
     if (std.mem.eql(u8, method, "Debugger.disable")) {
         session.debugger_enabled = false;
+        refreshInspectorDebuggerHook(session.state);
         return sendInspectorJson(session, .{ .id = id, .result = .{} });
+    }
+    if (std.mem.eql(u8, method, "Debugger.pause")) {
+        if (!session.debugger_enabled) return sendInspectorError(session, id, -32000, "Debugger domain is not enabled");
+        session.state.pause_requested = true;
+        return sendInspectorJson(session, .{ .id = id, .result = .{} });
+    }
+    if (std.mem.eql(u8, method, "Debugger.resume")) {
+        if (!session.state.paused) return sendInspectorError(session, id, -32000, "runtime is not paused");
+        session.state.paused = false;
+        if (!sendInspectorJson(session, .{ .id = id, .result = .{} })) return false;
+        for (session.state.sessions.items) |candidate| {
+            if (candidate.attached and candidate.debugger_enabled) _ = sendInspectorJson(candidate, .{
+                .method = "Debugger.resumed",
+                .params = .{},
+            });
+        }
+        return true;
     }
     if (std.mem.eql(u8, method, "Runtime.evaluate")) {
         const params_value = request.get("params") orelse return sendInspectorError(session, id, -32602, "params are required");
@@ -1658,6 +1787,13 @@ export fn JSEvaluateScript(
         Value.obj(objectArgFrom(c, this_object, exception) orelse return null)
     else
         Value.obj(c.global_object);
+    const saved_script_id = c.debug_script_id;
+    const saved_start_line = c.debug_script_start_line;
+    defer {
+        c.debug_script_id = saved_script_id;
+        c.debug_script_start_line = saved_start_line;
+    }
+    if (inspectorState(c)) |state| _ = beginInspectorScript(state, s.bytes, source_url, starting_line_number);
     const result = c.evaluateWithThis(s.bytes, this_value) catch |err| {
         // A JS `throw` surfaces the actual thrown value; host failures (parse
         // errors, OOM) surface their error name as a string.
@@ -3881,6 +4017,71 @@ test "C-API: inspector session retains its context until deterministic release" 
     try std.testing.expect(ZJSInspectorSessionDispatch(session, request, request.len));
     try std.testing.expect(received >= 2);
     ZJSInspectorSessionRelease(session);
+}
+
+test "C-API: debugger publishes scripts and synchronously pauses at source locations" {
+    const State = struct {
+        session: ZJSInspectorSessionRef = null,
+        bytes: [16384]u8 = undefined,
+        len: usize = 0,
+        pause_count: usize = 0,
+
+        fn receive(message: [*]const u8, message_len: usize, user_data: ?*anyopaque) callconv(.c) void {
+            const self: *@This() = @ptrCast(@alignCast(user_data.?));
+            std.debug.assert(self.len + message_len + 1 <= self.bytes.len);
+            @memcpy(self.bytes[self.len .. self.len + message_len], message[0..message_len]);
+            self.len += message_len;
+            self.bytes[self.len] = '\n';
+            self.len += 1;
+            if (std.mem.indexOf(u8, message[0..message_len], "Debugger.paused") != null) {
+                self.pause_count += 1;
+                const resume_request = "{\"id\":90,\"method\":\"Debugger.resume\"}";
+                std.debug.assert(ZJSInspectorSessionDispatch(self.session, resume_request, resume_request.len));
+            }
+        }
+    };
+
+    const ctx = JSGlobalContextCreate(null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(ctx);
+    JSGlobalContextSetInspectable(ctx, true);
+    var state: State = .{};
+    state.session = ZJSInspectorSessionCreate(ctx, State.receive, &state) orelse return error.SessionCreateFailed;
+    defer ZJSInspectorSessionRelease(state.session);
+
+    const enable = "{\"id\":1,\"method\":\"Debugger.enable\"}";
+    try std.testing.expect(ZJSInspectorSessionDispatch(state.session, enable, enable.len));
+    const script = JSStringCreateWithUTF8CString("let x = 1;\ndebugger;\nx += 2;\nx;") orelse return error.StringInitFailed;
+    defer JSStringRelease(script);
+    const url = JSStringCreateWithUTF8CString("pause.js") orelse return error.StringInitFailed;
+    defer JSStringRelease(url);
+    var exception: JSValueRef = null;
+    const result = JSEvaluateScript(ctx, script, null, url, 7, &exception) orelse return error.EvalFailed;
+    try std.testing.expect(exception == null);
+    try std.testing.expectEqual(@as(f64, 3), JSValueToNumber(ctx, result, &exception));
+    try std.testing.expectEqual(@as(usize, 1), state.pause_count);
+
+    const recursive_script = JSStringCreateWithUTF8CString(
+        "function recur(n) { if (n === 0) { debugger; return 0; } return recur(n - 1) + 1; } recur(2);",
+    ) orelse return error.StringInitFailed;
+    defer JSStringRelease(recursive_script);
+    const recursive = JSEvaluateScript(ctx, recursive_script, null, url, 1, &exception) orelse return error.EvalFailed;
+    try std.testing.expectEqual(@as(f64, 2), JSValueToNumber(ctx, recursive, &exception));
+    try std.testing.expectEqual(@as(usize, 2), state.pause_count);
+
+    const pause = "{\"id\":2,\"method\":\"Debugger.pause\"}";
+    try std.testing.expect(ZJSInspectorSessionDispatch(state.session, pause, pause.len));
+    const second_script = JSStringCreateWithUTF8CString("40 + 2;") orelse return error.StringInitFailed;
+    defer JSStringRelease(second_script);
+    const second = JSEvaluateScript(ctx, second_script, null, null, 1, &exception) orelse return error.EvalFailed;
+    try std.testing.expectEqual(@as(f64, 42), JSValueToNumber(ctx, second, &exception));
+    try std.testing.expectEqual(@as(usize, 3), state.pause_count);
+
+    const transcript = state.bytes[0..state.len];
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "Debugger.scriptParsed") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "pause.js") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "debuggerStatement") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "\"lineNumber\":7") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "Debugger.resumed") != null);
 }
 
 test "C-API: ordinary constructors keep intrinsic identity and function source metadata" {

@@ -17,6 +17,11 @@ decisions and should expose dispatch only to an authenticated debugger peer.
 Sessions and their context group are thread-affine. A session retains its global
 context until ZJSInspectorSessionRelease, supports multiple simultaneous
 sessions, and is detached deterministically when inspectability is disabled.
+Because transport callbacks are synchronous and contexts are thread-affine, a
+client that receives Debugger.paused must dispatch Debugger.resume from that
+callback. If it returns without a continuation command, zig-js aborts that
+evaluation with a deterministic JavaScript Error instead of silently running
+while claiming to be paused.
 
     static void receive(const char* json, size_t length, void* userData);
 
@@ -34,9 +39,18 @@ sessions, and is detached deterministically when inspectability is disabled.
 
 - Schema.getDomains
 - Runtime.enable, Runtime.disable, and Runtime.evaluate
-- Debugger.enable and Debugger.disable
-- Inspector.attached, Inspector.detached, and Runtime.executionContextCreated
-  events
+- Debugger.enable, Debugger.disable, Debugger.pause, and Debugger.resume
+- Inspector.attached, Inspector.detached, Runtime.executionContextCreated,
+  Debugger.scriptParsed, Debugger.paused, and Debugger.resumed events
+
+Every evaluated C-API script receives a monotonically increasing scriptId.
+Debugger.scriptParsed publishes its URL, starting line, and source length.
+Statement locations retain byte offsets plus adjusted line/column coordinates;
+a debugger statement pauses with reason debuggerStatement. An explicit
+Debugger.pause request pauses at the next statement boundary. Debug-enabled
+execution deliberately uses the tree walker, including ordinary synchronous
+functions parsed from that script, so bytecode/baseline compilation cannot skip
+these boundaries.
 
 Requests require an integer id and string method. Responses use JSON-RPC/CDP
 style result or error objects. Evaluation exceptions include an
@@ -45,9 +59,11 @@ errors.
 
 ## Current debugger boundary
 
-Version 0.1 establishes real attachment, lifecycle, concurrent sessions, and
-live runtime evaluation. It does not yet advertise pause/resume, breakpoints,
-stepping, exception pause, script/source events, call frames, or scopes. Those
-execution hooks and their protocol transcripts remain tracked by
-[GitHub issue #139](https://github.com/zig-utils/zig-js/issues/139). Unsupported
+Version 0.1 establishes real attachment, lifecycle, concurrent sessions, live
+runtime evaluation, stable scripts, and statement-boundary pause/resume. URL and
+script breakpoints, stepping, exception-pause policy, call frames, remote
+objects, and scopes remain tracked by [issue #153](https://github.com/zig-utils/zig-js/issues/153)
+and [issue #154](https://github.com/zig-utils/zig-js/issues/154). Unsupported
 commands return -32601; there are no silently accepted debugger stubs.
+Suspendable generator/async execution still uses its VM and does not yet expose
+statement pause points; that tier-coherence work remains in #153.

@@ -364,6 +364,21 @@ fn lithuanianUpper(self: *Interpreter, s: []const u8) EvalError![]const u8 {
 /// catchable JS `Error` objects raised via `error.Throw`.)
 pub const EvalError = error{ OutOfMemory, Throw, OptShortCircuit };
 
+/// Context-owned source identity attached to a parsed statement. Protocol
+/// adapters keep their own script registry; the evaluator only needs a stable
+/// id and exact source coordinates at each statement boundary.
+pub const DebugStatementLocation = struct {
+    script_id: u64,
+    location: parser_mod.SourceLocation,
+    debugger_statement: bool = false,
+};
+
+pub const DebugStatementHook = *const fn (
+    ctx: *anyopaque,
+    interpreter: *Interpreter,
+    location: DebugStatementLocation,
+) EvalError!void;
+
 /// A lexical scope with a parent chain. Function calls push a fresh scope whose
 /// `parent` is the function's closure environment, which gives real closures.
 /// Variable names are duplicated into `arena` on first definition so they
@@ -949,6 +964,12 @@ pub const Interpreter = struct {
     /// Context-owned registry for immutable native code. Null in standalone
     /// interpreter helpers and agent realms, which remain bytecode-only.
     jit_owner: ?*jit.Owner = null,
+    /// Optional statement-boundary debugger hook. When installed by a Context,
+    /// execution is deliberately kept on the tree walker so every tier observes
+    /// the same source locations and pause semantics.
+    debug_statement_ctx: ?*anyopaque = null,
+    debug_statement_hook: ?DebugStatementHook = null,
+    debug_statement_locations: ?*const std.AutoHashMapUnmanaged(*const Node, DebugStatementLocation) = null,
     /// The Context-owned microtask queue (Promise reactions). Drained after the
     /// main script in `Context.evaluate` and inline by `await`.
     microtasks: ?*promise.MicrotaskQueue = null,
@@ -2314,6 +2335,12 @@ pub const Interpreter = struct {
     }
 
     pub fn eval(self: *Interpreter, node: *const Node) EvalError!Value {
+        if (self.debug_statement_hook) |hook| {
+            if (self.debug_statement_locations) |locations| {
+                if (locations.get(node)) |location|
+                    try hook(self.debug_statement_ctx.?, self, location);
+            }
+        }
         self.steps += 1;
         if (self.steps > max_steps) return self.throwError("RangeError", "evaluation step budget exceeded");
         if ((self.steps & 1023) == 0) {
@@ -4290,7 +4317,7 @@ pub const Interpreter = struct {
                 error.Unsupported => null,
                 error.OutOfMemory => return error.OutOfMemory,
             };
-        } else if (plainFunctionMayUseBytecode(fnode)) {
+        } else if (self.debug_statement_hook == null and plainFunctionMayUseBytecode(fnode)) {
             const compiled = Compiler.compilePlainFunction(self.arena, fnode) catch |e| switch (e) {
                 error.Unsupported => null,
                 error.OutOfMemory => return error.OutOfMemory,

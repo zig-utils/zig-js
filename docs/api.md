@@ -233,6 +233,13 @@ static members and initialize/finalize lifetime callbacks.
 The zig-js extension header exposes `ZJSInspectorSessionCreate`,
 `ZJSInspectorSessionDispatch`, and `ZJSInspectorSessionRelease` for the
 versioned in-process JSON transport documented in [Inspector protocol](/inspector).
+Debugger-enabled C-API evaluations publish stable script IDs and exact adjusted
+statement locations. `debugger;` and explicit pause requests stop at those
+boundaries; the synchronous callback must issue resume before returning. While
+the debugger is enabled, execution is routed through the tree walker so the VM
+and baseline tier cannot bypass a pause point for scripts and ordinary
+synchronous functions. Suspendable generator/async pause coherence remains
+tracked by inspector issue #153.
 
 `JSGlobalContextRetain` and `JSGlobalContextRelease` maintain a real C-API reference count for contexts created through this C API. Releasing a retained context destroys the underlying runtime only after the final release. `JSGlobalContextRetain` returns null for a null context or if retaining would overflow the context refcount.
 

@@ -216,9 +216,13 @@ every class callback family, inherited call and
 conversion behavior, ordinary and callback-backed constructors, property-name
 snapshots, coerced and Symbol keys, fallback behavior, reflection, attributes,
 and callback throws.
-The pinned public C inventory has no pending declarations. Full pause,
-breakpoint, stepping, stack, and scope support in the zig-js inspector protocol
-continues under #139; see [docs/inspector.md](docs/inspector.md).
+The pinned public C inventory has no pending declarations. Inspector sessions
+now publish stable scripts and exact statement locations, and provide real
+`debugger;` plus explicit pause/resume control. Breakpoints, stepping,
+exception policy, call frames, remote objects, and scopes continue under
+[#153](https://github.com/zig-utils/zig-js/issues/153) and
+[#154](https://github.com/zig-utils/zig-js/issues/154); see
+[docs/inspector.md](docs/inspector.md).
 
 See [docs/api.md](docs/api.md) and [docs/HOME_INTEGRATION.md](docs/HOME_INTEGRATION.md) for the fuller embedding story and the important warning that zig-js is not a drop-in replacement for Bun/Home's private JSC internals.
 
@@ -330,7 +334,7 @@ Do not read the green configured runner as "the whole JavaScript universe is fin
 
 Completion of every item—and the evidence gate for removing this section—is tracked in [issue #134](https://github.com/zig-utils/zig-js/issues/134).
 
-- full JavaScriptCore framework/private internals, Objective-C bridge, inspector/debugger APIs, and Bun/Home private JSC ABI;
+- full JavaScriptCore framework/private internals, Objective-C bridge, remaining debugger execution/paused-state APIs, and Bun/Home private JSC ABI;
 - WebAssembly and JIT shell hooks from the PR-249 reference corpus;
 - moving or multi-age generational GC, parallel mid-script minor collection, and any optimizing JIT.
 

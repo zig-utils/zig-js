@@ -4,9 +4,23 @@
 #include <string.h>
 
 struct Transcript {
-    char bytes[4096];
+    char bytes[16384];
     size_t length;
+    ZJSInspectorSessionRef session;
+    size_t pauses;
 };
+
+static int contains_fragment(const char* message, size_t length, const char* fragment)
+{
+    size_t fragment_length = strlen(fragment);
+    if (fragment_length > length)
+        return 0;
+    for (size_t i = 0; i + fragment_length <= length; i++) {
+        if (!memcmp(message + i, fragment, fragment_length))
+            return 1;
+    }
+    return 0;
+}
 
 static void receive_message(const char* message, size_t length, void* user_data)
 {
@@ -17,6 +31,11 @@ static void receive_message(const char* message, size_t length, void* user_data)
     transcript->length += length;
     transcript->bytes[transcript->length++] = '\n';
     transcript->bytes[transcript->length] = '\0';
+    if (contains_fragment(message, length, "Debugger.paused")) {
+        const char resume[] = "{\"id\":90,\"method\":\"Debugger.resume\"}";
+        transcript->pauses++;
+        ZJSInspectorSessionDispatch(transcript->session, resume, sizeof(resume) - 1);
+    }
 }
 
 int main(void)
@@ -24,13 +43,14 @@ int main(void)
     JSGlobalContextRef context = JSGlobalContextCreate(NULL);
     if (!context || JSGlobalContextIsInspectable(context))
         return 1;
-    struct Transcript transcript = { { 0 }, 0 };
+    struct Transcript transcript = { { 0 }, 0, NULL, 0 };
     if (ZJSInspectorSessionCreate(context, receive_message, &transcript))
         return 2;
 
     JSGlobalContextSetInspectable(context, true);
     ZJSInspectorSessionRef session =
         ZJSInspectorSessionCreate(context, receive_message, &transcript);
+    transcript.session = session;
     if (!session || !strstr(transcript.bytes, "zig-js-inspector/0.1"))
         return 3;
 
@@ -46,6 +66,20 @@ int main(void)
         !strstr(transcript.bytes, "Runtime.executionContextCreated") ||
         !strstr(transcript.bytes, "\"description\":\"42\""))
         return 5;
+
+    const char debugger_enable[] = "{\"id\":4,\"method\":\"Debugger.enable\"}";
+    const char source_text[] = "let x = 1;\ndebugger;\nx += 2;\nx;";
+    JSStringRef source = JSStringCreateWithUTF8CString(source_text);
+    JSStringRef source_url = JSStringCreateWithUTF8CString("inspector-smoke.js");
+    JSValueRef exception = NULL;
+    if (!ZJSInspectorSessionDispatch(session, debugger_enable, sizeof(debugger_enable) - 1) ||
+        !JSEvaluateScript(context, source, NULL, source_url, 7, &exception) || exception ||
+        transcript.pauses != 1 || !strstr(transcript.bytes, "Debugger.scriptParsed") ||
+        !strstr(transcript.bytes, "debuggerStatement") ||
+        !strstr(transcript.bytes, "Debugger.resumed"))
+        return 7;
+    JSStringRelease(source_url);
+    JSStringRelease(source);
 
     JSGlobalContextRelease(context);
     if (!ZJSInspectorSessionDispatch(session, evaluate, sizeof(evaluate) - 1))

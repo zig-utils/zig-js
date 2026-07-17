@@ -17,6 +17,16 @@ pub const SourceLocation = struct {
     column: usize,
 };
 
+/// Source metadata retained for every parsed statement. Keeping this separate
+/// from `ast.Node` avoids widening every AST node while still giving debugger
+/// clients exact statement boundaries. The node and source bytes share the
+/// parser arena lifetime.
+pub const StatementLocation = struct {
+    node: *const Node,
+    location: SourceLocation,
+    debugger_statement: bool = false,
+};
+
 pub fn sourceLocationAt(source: []const u8, raw_offset: usize) SourceLocation {
     const offset = @min(raw_offset, source.len);
     var line: usize = 1;
@@ -165,6 +175,10 @@ pub const Parser = struct {
     /// still returns compact Zig error tags, but embedders can combine this with
     /// `sourceLocationAt` to report useful source diagnostics.
     last_error_offset: ?usize = null,
+    /// Statement locations accumulated while parsing, including nested function
+    /// bodies. Consumers copy these entries into their context-owned registry
+    /// before the parser value leaves scope.
+    statement_locations: std.ArrayListUnmanaged(StatementLocation) = .empty,
 
     pub fn init(arena: std.mem.Allocator, source: []const u8) ParseError!Parser {
         var ignored: ?SourceLocation = null;
@@ -1184,6 +1198,19 @@ pub const Parser = struct {
     }
 
     fn parseStatement(self: *Parser) ParseError!*Node {
+        const token = self.cur();
+        const is_debugger = token.kind == .identifier and
+            std.mem.eql(u8, token.text, "debugger") and !token.escaped_identifier;
+        const node = try self.parseStatementInner();
+        try self.statement_locations.append(self.arena, .{
+            .node = node,
+            .location = sourceLocationAt(self.source, token.pos),
+            .debugger_statement = is_debugger,
+        });
+        return node;
+    }
+
+    fn parseStatementInner(self: *Parser) ParseError!*Node {
         // Consume the Statement-only marker: it applies to exactly this statement
         // (suppressing `let`-declaration recognition), never to a nested block.
         const suppress_let = self.suppress_let_decl;
