@@ -88,8 +88,8 @@
     },
     "by_status": {
       "external": 2,
-      "implemented": 245,
-      "pending": 201
+      "implemented": 246,
+      "pending": 200
     }
   },
   "declarations": [
@@ -4868,10 +4868,10 @@
       "line": 141,
       "calling_convention": ".c",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn ZigString__toJSONObject(this: *const ZigString, *jsc.JSGlobalObject) callconv(.c) jsc.JSValue;",
       "declaration_sha256": "48f86d23aba6018f19ed7a3adf65f16952c710bd753fcb3de79692271a93d27a",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "ZigString__toRangeErrorInstance",
