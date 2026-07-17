@@ -109,6 +109,10 @@ extern "c" fn JSC__JSBigInt__toInt64(?*anyopaque) i64;
 extern "c" fn JSC__JSBigInt__toString(?*anyopaque, JSContextRef) BunString;
 extern "c" fn Bun__WTFStringImpl__ref(?*WTFStringImpl) void;
 extern "c" fn Bun__WTFStringImpl__deref(?*WTFStringImpl) void;
+extern "c" fn BunString__toJS(JSContextRef, *const BunString) EncodedValue;
+extern "c" fn BunString__toJSWithLength(JSContextRef, *const BunString, usize) EncodedValue;
+extern "c" fn BunString__transferToJS(*BunString, JSContextRef) EncodedValue;
+extern "c" fn BunString__createArray(JSContextRef, [*c]const BunString, usize) EncodedValue;
 extern "c" fn JSC__JSValue__asString(EncodedValue) ?*anyopaque;
 extern "c" fn JSC__JSString__eql(?*anyopaque, JSContextRef, ?*anyopaque) bool;
 extern "c" fn JSC__JSString__is8Bit(?*anyopaque) bool;
@@ -465,6 +469,68 @@ pub fn main() void {
         signed_min_impl.hash_and_flags & 4 == 0)
         fail("owned BunString BigInt conversion mismatch");
 
+    const latin1_bytes = "caf\xe9";
+    var latin1_string = BunString{
+        .tag = .zig_string,
+        .value = .{ .zig_string = .{ .tagged_ptr = @intFromPtr(latin1_bytes.ptr), .len = latin1_bytes.len } },
+    };
+    const utf8_bytes = "A😀Z";
+    var utf8_string = BunString{
+        .tag = .zig_string,
+        .value = .{ .zig_string = .{ .tagged_ptr = @intFromPtr(utf8_bytes.ptr) | (@as(usize, 1) << 61), .len = utf8_bytes.len } },
+    };
+    const utf16_units = [_]u16{ 'A', 0xd83d, 0xde00, 0xd800, 'Z' };
+    var utf16_string = BunString{
+        .tag = .static_zig_string,
+        .value = .{ .zig_string = .{ .tagged_ptr = @intFromPtr(&utf16_units) | (@as(usize, 1) << 63), .len = utf16_units.len } },
+    };
+    var empty_bun_string = BunString{ .tag = .empty, .value = .{ .zig_string = .{ .tagged_ptr = 0, .len = 0 } } };
+    if (!JSC__JSValue__isStrictEqual(BunString__toJS(context, &latin1_string), evaluate(context, "'café'"), context) or
+        !JSC__JSValue__isStrictEqual(BunString__toJS(context, &utf8_string), evaluate(context, "'A😀Z'"), context) or
+        !JSC__JSValue__isStrictEqual(BunString__toJS(context, &utf16_string), evaluate(context, "'A😀\\uD800Z'"), context) or
+        !JSC__JSValue__isStrictEqual(BunString__toJS(context, &huge_string), evaluate(context, "'184467440737095516160000000000000000000'"), context) or
+        !JSC__JSValue__isStrictEqual(BunString__toJS(context, &empty_bun_string), evaluate(context, "''"), context) or
+        huge_impl.ref_count != 2)
+        fail("BunString representation conversion mismatch");
+    if (!JSC__JSValue__isStrictEqual(BunString__toJSWithLength(context, &utf8_string, 2), evaluate(context, "'A\\uD83D'"), context) or
+        !JSC__JSValue__isStrictEqual(BunString__toJSWithLength(context, &utf16_string, 4), evaluate(context, "'A😀\\uD800'"), context) or
+        !JSC__JSValue__isStrictEqual(BunString__toJSWithLength(context, &latin1_string, 3), evaluate(context, "'caf'"), context))
+        fail("BunString UTF-16 length conversion mismatch");
+
+    var transfer_string = JSC__JSBigInt__toString(unsigned_max_cell, context);
+    if (!JSC__JSValue__isStrictEqual(BunString__transferToJS(&transfer_string, context), evaluate(context, "'18446744073709551615'"), context) or
+        transfer_string.tag != .dead)
+        fail("BunString owned transfer mismatch");
+    if (!JSC__JSValue__isStrictEqual(BunString__transferToJS(&empty_bun_string, context), evaluate(context, "''"), context) or
+        empty_bun_string.tag != .empty)
+        fail("BunString empty transfer mismatch");
+
+    const bun_strings = [_]BunString{ empty_bun_string, latin1_string, utf16_string };
+    const bun_string_array = BunString__createArray(context, &bun_strings, bun_strings.len);
+    const empty_bun_string_array = BunString__createArray(context, null, 0);
+    exposeCell(context, "__private_bun_string_array", bun_string_array);
+    exposeCell(context, "__private_empty_bun_string_array", empty_bun_string_array);
+    if (!JSC__JSValue__toBoolean(evaluate(context, "__private_empty_bun_string_array.length === 0 && __private_bun_string_array.length === 3 && __private_bun_string_array[0] === '' && __private_bun_string_array[1] === 'café' && __private_bun_string_array[2] === 'A😀\\uD800Z'")))
+        fail("BunString array conversion mismatch");
+
+    var blocked_transfer = JSC__JSBigInt__toString(signed_negative_cell, context);
+    JSC__VM__throwError(JSC__JSGlobalObject__vm(context), context, EncodedValue.fromInt32(196));
+    if (BunString__transferToJS(&blocked_transfer, context) != .empty or blocked_transfer.tag != .wtf_string_impl)
+        fail("BunString transfer ignored pending exception");
+    const preserved_transfer_exception = JSGlobalObject__tryTakeException(context);
+    if (JSC__Exception__asJSValue(preserved_transfer_exception.cellPointer()) != EncodedValue.fromInt32(196))
+        fail("BunString transfer replaced pending exception");
+    Bun__WTFStringImpl__deref(blocked_transfer.value.wtf_string_impl);
+
+    var dead_bun_string = BunString{ .tag = .dead, .value = .{ .zig_string = .{ .tagged_ptr = 0, .len = 0 } } };
+    if (BunString__toJS(context, &dead_bun_string) != .empty or !JSGlobalObject__hasException(context))
+        fail("dead BunString did not throw");
+    JSGlobalObject__clearException(context);
+    const invalid_array = [_]BunString{ latin1_string, dead_bun_string, utf8_string };
+    if (BunString__createArray(context, &invalid_array, invalid_array.len) != .empty or !JSGlobalObject__hasException(context))
+        fail("BunString array failure was not atomic");
+    JSGlobalObject__clearException(context);
+
     Bun__WTFStringImpl__ref(signed_min_impl);
     if (@atomicLoad(u32, &signed_min_impl.ref_count, .acquire) != 4)
         fail("BunString retain mismatch");
@@ -656,6 +722,12 @@ pub fn main() void {
     const vm = JSC__JSGlobalObject__vm(context) orelse fail("private VM lookup failed");
     const sibling_vm = JSC__JSGlobalObject__vm(sibling_context) orelse fail("sibling VM lookup failed");
     const foreign_vm = JSC__JSGlobalObject__vm(foreign_context) orelse fail("foreign VM lookup failed");
+
+    const sibling_bun_string_array = BunString__createArray(sibling_context, &bun_strings, bun_strings.len);
+    exposeCell(sibling_context, "__private_sibling_bun_string_array", sibling_bun_string_array);
+    if (!JSC__JSValue__isStrictEqual(BunString__toJS(sibling_context, &latin1_string), evaluate(sibling_context, "'café'"), sibling_context) or
+        !JSC__JSValue__toBoolean(evaluate(sibling_context, "Object.getPrototypeOf(__private_sibling_bun_string_array) === Array.prototype")))
+        fail("BunString selected-realm conversion mismatch");
 
     const sibling_bigint_string = JSC__JSBigInt__toString(signed_negative_cell, sibling_context);
     const sibling_bigint_impl = sibling_bigint_string.value.wtf_string_impl orelse fail("sibling BigInt string missing StringImpl");
@@ -1339,5 +1411,5 @@ pub fn main() void {
         JSC__JSMap__get(map_cell, context, evaluate(context, "'direct'")) != .undefined)
         fail("private JSMap clear mismatch");
 
-    std.debug.print("Home private value shims: 80/80 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 84/84 symbols linked; runtime matrix passed\n", .{});
 }

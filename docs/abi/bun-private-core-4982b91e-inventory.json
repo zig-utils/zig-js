@@ -83,8 +83,8 @@
     },
     "by_status": {
       "external": 1,
-      "implemented": 90,
-      "pending": 346
+      "implemented": 94,
+      "pending": 342
     }
   },
   "home_comparison": {
@@ -193,10 +193,10 @@
       "line": 10,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn BunString__createArray(globalObject: *jsc.JSGlobalObject, ptr: [*]const String, len: usize) jsc.JSValue;",
       "declaration_sha256": "c827681d427aac9368a4b6a8b4ad680d47e3315d7679679da4dd42f1ef50adaa",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "BunString__toJS",
@@ -204,10 +204,10 @@
       "line": 7,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn BunString__toJS(globalObject: *jsc.JSGlobalObject, in: *const String) jsc.JSValue;",
       "declaration_sha256": "60759c3b945054038a442eb9de2efcd16fb5509a75815077268543c037a2ea9a",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "BunString__toJSDOMURL",
@@ -226,10 +226,10 @@
       "line": 8,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn BunString__toJSWithLength(globalObject: *jsc.JSGlobalObject, in: *const String, usize) jsc.JSValue;",
       "declaration_sha256": "c490af75938a86dec8ac3aad549b1de3541161a825a665dba3dbc7ad40eab0a8",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "BunString__toURL",
@@ -248,10 +248,10 @@
       "line": 6,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn BunString__transferToJS(this: *String, globalThis: *jsc.JSGlobalObject) jsc.JSValue;",
       "declaration_sha256": "2eac972e59e82f3aea51798538393a39fbcfa0c0e9db3f0cc1b7f10811f6087c",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Bun__CallFrame__describeFrame",

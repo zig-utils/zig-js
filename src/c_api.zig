@@ -2134,6 +2134,226 @@ fn privateOwnedLatin1String(bytes: []const u8) error{OutOfMemory}!PrivateBunStri
     return .{ .tag = .wtf_string_impl, .value = .{ .wtf_string_impl = impl } };
 }
 
+const PrivateBunStringError = error{ OutOfMemory, StringTooLong, InvalidString };
+
+fn privateLatin1ToWTF8(allocator: std.mem.Allocator, bytes: []const u8) error{OutOfMemory}![]u8 {
+    const capacity = std.math.mul(usize, bytes.len, 2) catch return error.OutOfMemory;
+    const out = try allocator.alloc(u8, capacity);
+    var used: usize = 0;
+    for (bytes) |byte| {
+        if (byte < 0x80) {
+            out[used] = byte;
+            used += 1;
+        } else {
+            out[used] = 0xc0 | (byte >> 6);
+            out[used + 1] = 0x80 | (byte & 0x3f);
+            used += 2;
+        }
+    }
+    return allocator.realloc(out, used) catch out[0..used];
+}
+
+fn privateAppendWTF8CodeUnit(out: []u8, used: *usize, unit: u16) void {
+    if (unit < 0x80) {
+        out[used.*] = @intCast(unit);
+        used.* += 1;
+    } else if (unit < 0x800) {
+        out[used.*] = 0xc0 | @as(u8, @intCast(unit >> 6));
+        out[used.* + 1] = 0x80 | @as(u8, @intCast(unit & 0x3f));
+        used.* += 2;
+    } else {
+        out[used.*] = 0xe0 | @as(u8, @intCast(unit >> 12));
+        out[used.* + 1] = 0x80 | @as(u8, @intCast((unit >> 6) & 0x3f));
+        out[used.* + 2] = 0x80 | @as(u8, @intCast(unit & 0x3f));
+        used.* += 3;
+    }
+}
+
+fn privateUTF16ToWTF8(allocator: std.mem.Allocator, units: []align(1) const u16) error{OutOfMemory}![]u8 {
+    const capacity = std.math.mul(usize, units.len, 3) catch return error.OutOfMemory;
+    const out = try allocator.alloc(u8, capacity);
+    var input: usize = 0;
+    var used: usize = 0;
+    while (input < units.len) : (input += 1) {
+        const first = units[input];
+        if (first >= 0xd800 and first <= 0xdbff and input + 1 < units.len and
+            units[input + 1] >= 0xdc00 and units[input + 1] <= 0xdfff)
+        {
+            const codepoint: u21 = @intCast(0x10000 +
+                ((@as(u32, first) - 0xd800) << 10) +
+                (@as(u32, units[input + 1]) - 0xdc00));
+            out[used] = 0xf0 | @as(u8, @intCast(codepoint >> 18));
+            out[used + 1] = 0x80 | @as(u8, @intCast((codepoint >> 12) & 0x3f));
+            out[used + 2] = 0x80 | @as(u8, @intCast((codepoint >> 6) & 0x3f));
+            out[used + 3] = 0x80 | @as(u8, @intCast(codepoint & 0x3f));
+            used += 4;
+            input += 1;
+        } else {
+            privateAppendWTF8CodeUnit(out, &used, first);
+        }
+    }
+    return allocator.realloc(out, used) catch out[0..used];
+}
+
+fn privateUTF8PrefixAsWTF8(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    max_utf16_units: ?usize,
+) PrivateBunStringError![]u8 {
+    if (max_utf16_units == null) return allocator.dupe(u8, bytes);
+    const limit = max_utf16_units.?;
+    const capacity = std.math.add(usize, bytes.len, 3) catch return error.OutOfMemory;
+    const out = try allocator.alloc(u8, capacity);
+    var input: usize = 0;
+    var used: usize = 0;
+    var units: usize = 0;
+    while (input < bytes.len and units < limit) {
+        const sequence_len = std.unicode.utf8ByteSequenceLength(bytes[input]) catch return error.InvalidString;
+        if (input + sequence_len > bytes.len) return error.InvalidString;
+        const codepoint = std.unicode.utf8Decode(bytes[input .. input + sequence_len]) catch return error.InvalidString;
+        if (codepoint > 0xffff) {
+            const remaining = limit - units;
+            if (remaining == 1) {
+                const high: u16 = @intCast(0xd800 + ((codepoint - 0x10000) >> 10));
+                privateAppendWTF8CodeUnit(out, &used, high);
+                units += 1;
+                break;
+            }
+            units += 2;
+        } else {
+            units += 1;
+        }
+        @memcpy(out[used .. used + sequence_len], bytes[input .. input + sequence_len]);
+        used += sequence_len;
+        input += sequence_len;
+    }
+    return allocator.realloc(out, used) catch out[0..used];
+}
+
+fn privateBunStringValue(
+    context: *Context,
+    string: *const PrivateBunString,
+    max_utf16_units: ?usize,
+) PrivateBunStringError!Value {
+    if (string.tag == .empty) return Value.staticStr("");
+    if (string.tag == .dead) return error.StringTooLong;
+
+    const allocator = context.arena();
+    const bytes = switch (string.tag) {
+        .wtf_string_impl => blk: {
+            const impl = string.value.wtf_string_impl orelse return error.InvalidString;
+            if (impl.m_length == 0) return Value.staticStr("");
+            const length: usize = if (max_utf16_units) |limit| @min(limit, impl.m_length) else impl.m_length;
+            if (impl.m_hash_and_flags & private_wtf_flag_8_bit_buffer != 0)
+                break :blk try privateLatin1ToWTF8(allocator, impl.m_ptr[0..length]);
+            const units: [*]align(1) const u16 = @ptrCast(impl.m_ptr);
+            break :blk try privateUTF16ToWTF8(allocator, units[0..length]);
+        },
+        .zig_string, .static_zig_string => blk: {
+            const zig_string = string.value.zig_string;
+            if (zig_string.len == 0) return Value.staticStr("");
+            const untagged = zig_string.tagged_ptr & ((@as(usize, 1) << 53) - 1);
+            if (untagged == 0) return error.InvalidString;
+            if (zig_string.tagged_ptr & (@as(usize, 1) << 63) != 0) {
+                const length = if (max_utf16_units) |limit| @min(limit, zig_string.len) else zig_string.len;
+                const units: [*]align(1) const u16 = @ptrFromInt(untagged);
+                break :blk try privateUTF16ToWTF8(allocator, units[0..length]);
+            }
+            const source: [*]const u8 = @ptrFromInt(untagged);
+            if (zig_string.tagged_ptr & (@as(usize, 1) << 61) != 0)
+                break :blk try privateUTF8PrefixAsWTF8(allocator, source[0..zig_string.len], max_utf16_units);
+            const length = if (max_utf16_units) |limit| @min(limit, zig_string.len) else zig_string.len;
+            break :blk try privateLatin1ToWTF8(allocator, source[0..length]);
+        },
+        else => return error.InvalidString,
+    };
+    return Value.strOwned(allocator, bytes);
+}
+
+fn privatePublishBunStringError(context: *Context, err: PrivateBunStringError) void {
+    if (err == error.OutOfMemory) {
+        privateSetPendingValue(context, context.reserved_thread_oom_error orelse Value.staticStr("OutOfMemory"));
+        return;
+    }
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |push_err| {
+        privateSetPendingAbrupt(context, &machine, push_err);
+        return;
+    };
+    defer context.popActiveInterpreter(&machine);
+    const abrupt = switch (err) {
+        error.StringTooLong => machine.throwError("RangeError", "Cannot create a string longer than the runtime limit"),
+        error.InvalidString => machine.throwError("TypeError", "Invalid BunString representation"),
+        error.OutOfMemory => unreachable,
+    };
+    privateSetPendingAbrupt(context, &machine, abrupt);
+}
+
+fn privateBunStringToEncoded(
+    global: JSContextRef,
+    string: *const PrivateBunString,
+    max_utf16_units: ?usize,
+) EncodedValue {
+    const context = ctxForHandleInspection(global) orelse return .empty;
+    const opaque_group = context.c_api_group orelse return .empty;
+    const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+    if (group.pending_exception != null) return .empty;
+    const result = privateBunStringValue(context, string, max_utf16_units) catch |err| {
+        privatePublishBunStringError(context, err);
+        return .empty;
+    };
+    const encoded = privateEncodedFromValue(context, result);
+    if (encoded == .empty) privatePublishBunStringError(context, error.OutOfMemory);
+    return encoded;
+}
+
+export fn BunString__toJS(global: JSContextRef, string: *const PrivateBunString) callconv(.c) EncodedValue {
+    return privateBunStringToEncoded(global, string, null);
+}
+
+export fn BunString__toJSWithLength(
+    global: JSContextRef,
+    string: *const PrivateBunString,
+    max_utf16_units: usize,
+) callconv(.c) EncodedValue {
+    return privateBunStringToEncoded(global, string, max_utf16_units);
+}
+
+export fn BunString__transferToJS(string: *PrivateBunString, global: JSContextRef) callconv(.c) EncodedValue {
+    const original_tag = string.tag;
+    const result = privateBunStringToEncoded(global, string, null);
+    if (result == .empty) return .empty;
+    if (original_tag == .empty) return result;
+    if (original_tag == .wtf_string_impl) Bun__WTFStringImpl__deref(string.value.wtf_string_impl);
+    string.* = PrivateBunString.dead();
+    return result;
+}
+
+export fn BunString__createArray(
+    global: JSContextRef,
+    strings: [*c]const PrivateBunString,
+    len: usize,
+) callconv(.c) EncodedValue {
+    const context = ctxForHandleInspection(global) orelse return .empty;
+    const opaque_group = context.c_api_group orelse return .empty;
+    const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+    if (group.pending_exception != null or (strings == null and len != 0)) return .empty;
+    if (len == 0) return JSArray__constructEmptyArray(global, 0);
+    const encoded = context.arena().alloc(EncodedValue, len) catch {
+        privatePublishBunStringError(context, error.OutOfMemory);
+        return .empty;
+    };
+    for (strings[0..len], encoded) |*string, *slot| {
+        slot.* = privateBunStringToEncoded(global, string, null);
+        if (slot.* == .empty) return .empty;
+    }
+    return JSArray__constructArray(global, encoded.ptr, encoded.len);
+}
+
 export fn JSC__JSBigInt__toString(
     cell: ?*anyopaque,
     global: JSContextRef,
