@@ -245,9 +245,11 @@ multiple sessions preserve deterministic continuation ownership, and detach or
 termination unblocks a paused target. Worker transcripts also cover URL
 breakpoints, stepping, caught-exception pauses, live frames/scopes and frame
 evaluation, and GC-rooted remote-object property inspection. Two workers and a
-main context can pause simultaneously and resume independently. The remaining
-GC/concurrency/teardown matrix
-continues under [#156](https://github.com/zig-utils/zig-js/issues/156); see
+main context can pause simultaneously and resume independently. Session detach
+and whole-worker release each synchronously complete runtime-side cleanup,
+unroot retained values exactly once, and close accepted pending traffic. The
+completed worker-target matrix is recorded in
+[#156](https://github.com/zig-utils/zig-js/issues/156); see
 [docs/inspector.md](docs/inspector.md).
 For scripts registered while debugging, ordinary bytecode/native entry is
 disabled and asserted by both focused Zig tests and the real C host; debug-aware
@@ -374,7 +376,7 @@ Do not read the green configured runner as "the whole JavaScript universe is fin
 
 Completion of every item—and the evidence gate for removing this section—is tracked in [issue #134](https://github.com/zig-utils/zig-js/issues/134).
 
-- full JavaScriptCore framework/private internals, Objective-C bridge, complete worker-target inspector parity/teardown evidence, and Bun/Home private JSC ABI;
+- full JavaScriptCore framework/private internals, Objective-C bridge, and Bun/Home private JSC ABI;
 - WebAssembly and JIT shell hooks from the PR-249 reference corpus;
 - moving or multi-age generational GC, parallel mid-script minor collection, and any optimizing JIT.
 

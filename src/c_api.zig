@@ -8922,6 +8922,130 @@ test "C-API: worker inspector detach and termination unblock paused execution" {
     }
 }
 
+test "C-API: worker inspector detach and worker release unroot remotes exactly once" {
+    const TrackingBackend = struct {
+        var release_calls: std.atomic.Value(usize) = .init(0);
+        var remotes_before: std.atomic.Value(usize) = .init(0);
+        var handles_before: std.atomic.Value(usize) = .init(0);
+        var handles_after: std.atomic.Value(usize) = .init(0);
+
+        fn reset() void {
+            release_calls.store(0, .release);
+            remotes_before.store(0, .release);
+            handles_before.store(0, .release);
+            handles_after.store(0, .release);
+        }
+
+        fn create(
+            ctx: *Context,
+            callback: WorkerMod.InspectorMessageCallback,
+            user_data: ?*anyopaque,
+            pause_wait_ctx: *anyopaque,
+            pause_wait_hook: WorkerMod.InspectorPauseWaitHook,
+        ) ?*anyopaque {
+            return workerInspectorBackendCreate(ctx, callback, user_data, pause_wait_ctx, pause_wait_hook);
+        }
+
+        fn dispatch(session: *anyopaque, message: []const u8) bool {
+            return workerInspectorBackendDispatch(session, message);
+        }
+
+        fn release(session_ref: *anyopaque) void {
+            const session: *CInspectorSession = @ptrCast(@alignCast(session_ref));
+            const context = session.state.context;
+            remotes_before.store(session.state.remote_objects.items.len, .release);
+            handles_before.store(context.c_api_handles.items.len, .release);
+            _ = release_calls.fetchAdd(1, .acq_rel);
+            workerInspectorBackendRelease(session_ref);
+            handles_after.store(context.c_api_handles.items.len, .release);
+        }
+
+        const implementation: WorkerMod.InspectorBackend = .{
+            .create = create,
+            .dispatch = dispatch,
+            .release = release,
+        };
+    };
+    const State = struct {
+        object_id: u64 = 0,
+
+        fn receive(message: [*]const u8, message_len: usize, user_data: ?*anyopaque) callconv(.c) void {
+            const self: *@This() = @ptrCast(@alignCast(user_data.?));
+            const bytes = message[0..message_len];
+            if (std.mem.indexOf(u8, bytes, "\"id\":7") == null) return;
+            var parsed = std.json.parseFromSlice(std.json.Value, gpa, bytes, .{}) catch return;
+            defer parsed.deinit();
+            self.object_id = @intCast(parsed.value.object.get("result").?.object.get("result").?.object.get("objectId").?.integer);
+        }
+    };
+    const Action = enum { detach, worker_release };
+
+    for ([_]Action{ .detach, .worker_release }) |action| {
+        TrackingBackend.reset();
+        const worker_ptr = WorkerMod.Worker.spawnWith("", .{ .inspector_backend = &TrackingBackend.implementation }) catch return error.WorkerSpawnFailed;
+        const worker: JSWorkerRef = @ptrCast(worker_ptr);
+        var state: State = .{};
+        const session = ZJSWorkerInspectorSessionCreate(worker, State.receive, &state) orelse return error.SessionCreateFailed;
+        try std.testing.expectEqual(ZJSWorkerInspectorPumpResult.message, ZJSWorkerInspectorSessionPump(session, 10_000));
+        const evaluate = "{\"id\":7,\"method\":\"Runtime.evaluate\",\"params\":{\"objectGroup\":\"teardown\",\"expression\":\"({ alive: 42 })\"}}";
+        try std.testing.expect(ZJSWorkerInspectorSessionDispatch(session, evaluate, evaluate.len));
+        try std.testing.expectEqual(ZJSWorkerInspectorPumpResult.message, ZJSWorkerInspectorSessionPump(session, 10_000));
+        try std.testing.expect(state.object_id != 0);
+
+        switch (action) {
+            .detach => {
+                ZJSWorkerInspectorSessionRelease(session);
+                JSWorkerRelease(worker);
+            },
+            .worker_release => {
+                JSWorkerRelease(worker);
+                var pumps: usize = 0;
+                while (pumps < 8) : (pumps += 1) {
+                    if (ZJSWorkerInspectorSessionPump(session, 100) == .closed) break;
+                }
+                try std.testing.expect(pumps < 8);
+                ZJSWorkerInspectorSessionRelease(session);
+            },
+        }
+        try std.testing.expectEqual(@as(usize, 1), TrackingBackend.release_calls.load(.acquire));
+        try std.testing.expectEqual(@as(usize, 1), TrackingBackend.remotes_before.load(.acquire));
+        try std.testing.expectEqual(@as(usize, 1), TrackingBackend.handles_before.load(.acquire));
+        try std.testing.expectEqual(@as(usize, 0), TrackingBackend.handles_after.load(.acquire));
+    }
+}
+
+test "C-API: worker release closes accepted pending inspector traffic" {
+    const State = struct {
+        callbacks: usize = 0,
+
+        fn receive(_: [*]const u8, _: usize, user_data: ?*anyopaque) callconv(.c) void {
+            const self: *@This() = @ptrCast(@alignCast(user_data.?));
+            self.callbacks += 1;
+        }
+    };
+
+    const source = JSStringCreateWithUTF8CString("") orelse return error.StringInitFailed;
+    defer JSStringRelease(source);
+    const worker = JSWorkerCreate(source) orelse return error.WorkerSpawnFailed;
+    var state: State = .{};
+    const session = ZJSWorkerInspectorSessionCreate(worker, State.receive, &state) orelse return error.SessionCreateFailed;
+    const schema = "{\"id\":1,\"method\":\"Schema.getDomains\"}";
+    try std.testing.expect(ZJSWorkerInspectorSessionDispatch(session, schema, schema.len));
+    JSWorkerRelease(worker);
+
+    var closed = false;
+    var pumps: usize = 0;
+    while (pumps < 8) : (pumps += 1) {
+        if (ZJSWorkerInspectorSessionPump(session, 100) == .closed) {
+            closed = true;
+            break;
+        }
+    }
+    try std.testing.expect(closed);
+    try std.testing.expect(state.callbacks >= 1);
+    ZJSWorkerInspectorSessionRelease(session);
+}
+
 test "C-API: worker inspector continuation owner is deterministic across sessions" {
     const State = struct {
         session: ZJSWorkerInspectorSessionRef = null,

@@ -276,7 +276,11 @@ target ID, script/module kind, and atomic `starting`, `running`, `closing`, or
 `closed` lifecycle snapshot through `ZJSWorkerGetInspectorTargetInfo`.
 `ZJSWorkerInspectorSession*` attaches to that isolated runtime, queues commands
 to its owner thread, and returns events through an explicit owner-side pump.
-The remaining coverage and teardown matrix is tracked by issue #156.
+Session release waits until runtime-side backend/root cleanup completes, with an
+embedded allocation-independent detach fallback if the command queue cannot
+grow. Worker-first release closes accepted pending traffic and leaves a session
+safe to pump to `closed` and release afterward. The completed evidence matrix
+is recorded in issue #156.
 
 `JSGlobalContextRetain` and `JSGlobalContextRelease` maintain a real C-API reference count for contexts created through this C API. Releasing a retained context destroys the underlying runtime only after the final release. `JSGlobalContextRetain` returns null for a null context or if retaining would overflow the context refcount.
 

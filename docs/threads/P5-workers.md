@@ -117,6 +117,9 @@ zig-js extension):
   one message callback on the worker-handle owner thread and returns an explicit
   message/timeout/closed result. Paused runtimes continue draining inspector
   commands, so a pump callback can enqueue evaluation and the continuation.
+  Release waits for runtime-side session/root cleanup; a no-allocation fallback
+  detach path covers command-queue allocation failure, and worker-first release
+  leaves the owner session safe to pump closed and release.
 
 ### Thread rules
 
@@ -138,7 +141,9 @@ script and module inspector graphs, active-handler pauses, owner-pumped resume,
 URL breakpoints, stepping, caught-exception pauses, live frames/scopes and frame
 evaluation, retained remote-object inspection, observer continuation rejection,
 callback detach, termination while paused, and independent simultaneous pauses
-across two workers plus the main context.
+across two workers plus the main context. Instrumented teardown cases verify one
+backend release and one precise-GC root removal for both session detach and
+worker-first release, plus deterministic closure of accepted pending traffic.
 The real C++ host covers attach/schema dispatch/pump/release. All worker tests
 are TSan-clean. `worker.zig` and the C-API are not exercised by the test262
 shards, so the conformance total is unaffected.

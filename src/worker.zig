@@ -314,6 +314,13 @@ const InspectorEventQueue = struct {
         q.mutex.unlock(io);
     }
 
+    fn waitUntilDetached(q: *InspectorEventQueue, runtime_detached: *const std.atomic.Value(bool)) void {
+        const io = agent.engineIo();
+        q.mutex.lockUncancelable(io);
+        defer q.mutex.unlock(io);
+        while (!runtime_detached.load(.acquire)) q.cond.wait(io, &q.mutex) catch continue;
+    }
+
     fn deinit(q: *InspectorEventQueue) void {
         for (q.items.items[q.head..]) |*event| event.deinit();
         q.items.deinit(alloc);
@@ -326,6 +333,14 @@ pub const InspectorClient = struct {
     owner_thread: std.Thread.Id,
     events: InspectorEventQueue = .{},
     transport_closed: std.atomic.Value(bool) = .init(false),
+    /// Set only after the runtime has released (or declined to create) its
+    /// backend session. This is deliberately distinct from event delivery
+    /// failure: a closed callback queue does not make a runtime pointer safe
+    /// to free.
+    runtime_detached: std.atomic.Value(bool) = .init(false),
+    /// Allocation-independent release path used only if the ordinary detach
+    /// command cannot be appended.
+    detach_fallback: std.atomic.Value(bool) = .init(false),
 
     pub fn isOwnerThread(client: *const InspectorClient) bool {
         return client.owner_thread == std.Thread.getCurrentId();
@@ -368,7 +383,10 @@ const InspectorCommandQueue = struct {
         q.mutex.lockUncancelable(io);
         defer q.mutex.unlock(io);
         while (q.head == q.items.items.len) {
-            if (!block or q.closed or abort_wait.load(.acquire)) return null;
+            // A nonzero pending count with no queued command is an embedded
+            // fallback-detach request; let the runtime service it without
+            // allocating a queue node.
+            if (!block or q.closed or abort_wait.load(.acquire) or q.pending.load(.acquire) != 0) return null;
             if (q.head != 0) {
                 q.items.clearRetainingCapacity();
                 q.head = 0;
@@ -744,17 +762,16 @@ pub const Worker = struct {
 
     pub fn releaseInspectorClient(client: *InspectorClient) void {
         if (!client.isOwnerThread()) return;
-        if (!client.transport_closed.load(.acquire)) {
+        if (!client.runtime_detached.load(.acquire)) {
             client.worker.enqueueInspectorCommand(.detach, client, "") catch {
-                client.transport_closed.store(true, .release);
-                client.events.close();
+                // The client itself carries the fallback request, so teardown
+                // remains guaranteed even when the command queue cannot grow.
+                if (!client.detach_fallback.swap(true, .acq_rel))
+                    _ = client.worker.inspector_commands.pending.fetchAdd(1, .release);
+                client.worker.inbox.wake();
+                client.worker.inspector_commands.wake();
             };
-            while (client.events.pop(null)) |event_value| {
-                var event = event_value;
-                const detached = event.kind == .detached;
-                event.deinit();
-                if (detached) break;
-            }
+            client.events.waitUntilDetached(&client.runtime_detached);
         }
         client.transport_closed.store(true, .release);
         client.events.close();
@@ -927,6 +944,9 @@ fn activeInspectorSessionIndex(w: *Worker, client: *InspectorClient) ?usize {
 }
 
 fn finishInspectorClient(client: *InspectorClient, reason: []const u8) void {
+    if (client.runtime_detached.swap(true, .acq_rel)) return;
+    if (client.detach_fallback.swap(false, .acq_rel))
+        _ = client.worker.inspector_commands.pending.fetchSub(1, .acq_rel);
     if (!client.transport_closed.load(.acquire)) {
         const message = std.fmt.allocPrint(
             alloc,
@@ -938,6 +958,22 @@ fn finishInspectorClient(client: *InspectorClient, reason: []const u8) void {
     }
     client.transport_closed.store(true, .release);
     client.events.close();
+}
+
+fn serviceInspectorFallbackDetaches(w: *Worker) bool {
+    const backend = w.inspector_backend orelse return false;
+    var serviced = false;
+    var index = w.inspector_sessions.items.len;
+    while (index > 0) {
+        index -= 1;
+        const active = w.inspector_sessions.items[index];
+        if (!active.client.detach_fallback.load(.acquire)) continue;
+        _ = w.inspector_sessions.swapRemove(index);
+        backend.release(active.backend_session);
+        finishInspectorClient(active.client, "worker inspector session released");
+        serviced = true;
+    }
+    return serviced;
 }
 
 fn serviceInspectorCommand(w: *Worker, ctx: *Context, block: bool) bool {
@@ -988,6 +1024,7 @@ fn serviceInspectorCommand(w: *Worker, ctx: *Context, block: bool) bool {
 
 fn serviceInspectorCommands(w: *Worker, ctx: *Context) void {
     while (serviceInspectorCommand(w, ctx, false)) {}
+    _ = serviceInspectorFallbackDetaches(w);
 }
 
 fn workerInspectorStatementCheckpoint(ctx: *anyopaque, _: *interp.Interpreter) void {
@@ -999,22 +1036,25 @@ fn workerInspectorStatementCheckpoint(ctx: *anyopaque, _: *interp.Interpreter) v
 fn workerInspectorPauseWait(ctx: *anyopaque) bool {
     const w: *Worker = @ptrCast(@alignCast(ctx));
     const runtime = w.inspector_context orelse return false;
-    return serviceInspectorCommand(w, runtime, true);
+    if (serviceInspectorCommand(w, runtime, true)) return true;
+    return serviceInspectorFallbackDetaches(w);
 }
 
 fn closeWorkerInspector(w: *Worker) void {
     w.inspector_commands.close();
+    // Eliminate every queued raw client pointer before publishing
+    // runtime_detached. Once that flag wakes the owner it may immediately free
+    // the client, so no later runtime cleanup may dereference a command.
+    while (w.inspector_commands.pop(false, &w.inspector_wait_abort)) |command_value| {
+        var command = command_value;
+        if (command.kind == .attach)
+            finishInspectorClient(command.client, "worker target closed before inspector attach");
+        command.deinit();
+    }
     const backend = w.inspector_backend;
     while (w.inspector_sessions.pop()) |session| {
         if (backend) |implementation| implementation.release(session.backend_session);
         finishInspectorClient(session.client, "worker target closed");
-    }
-    // Pending attaches never acquired a backend session, but their public
-    // handles must still wake and become safely releasable.
-    while (w.inspector_commands.pop(false, &w.inspector_wait_abort)) |command_value| {
-        var command = command_value;
-        finishInspectorClient(command.client, "worker target closed before command dispatch");
-        command.deinit();
     }
     w.inspector_context = null;
 }
@@ -1023,7 +1063,11 @@ fn closePendingInspectorCommands(w: *Worker) void {
     w.inspector_commands.close();
     while (w.inspector_commands.pop(false, &w.inspector_wait_abort)) |command_value| {
         var command = command_value;
-        finishInspectorClient(command.client, "worker target closed before command dispatch");
+        // With no Context, only the queued attach owns a client lifecycle.
+        // Later dispatch/detach commands may retain its raw pointer but need no
+        // dereference while their owned message bytes are discarded.
+        if (command.kind == .attach)
+            finishInspectorClient(command.client, "worker target closed before inspector attach");
         command.deinit();
     }
 }
