@@ -3,7 +3,8 @@
 > Status: **public profile verified; private migration not started**
 > (2026-07-17). Home currently links vendored JavaScriptCore. zig-js now proves
 > the exact 50-function public M1 consumer at Home revision `7ed99c02`, while
-> the private Bun/JSC runtime surface remains separate work.
+> private profiles explicitly support `7ed99c02` and the byte-identical JSC
+> source alias `5e829ad4`. The broader private runtime remains separate work.
 
 ## Why this is not a link-swap
 
@@ -42,6 +43,12 @@ calling convention. This replaces a vague source-level estimate, but the 432
 private entries are now 4 implemented / 428 pending under #163. The implemented
 slice is limited to JSC64 value identity, cell equality, truthiness, and int32
 extraction; it does not yet create a usable Home private runtime.
+
+The newer local Home revision `5e829ad4` changed no files in
+`packages/runtime/src/jsc` relative to `7ed99c02`. Its separate alias manifest
+still verifies every source hash and declaration and reports zero added,
+removed, signature-changed, or calling-convention-changed entries. This keeps
+both exact revisions supported without weakening revision rejection.
 
 ## Two migration paths
 

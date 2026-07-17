@@ -63,6 +63,20 @@ This inventory is the denominator, not a claim that the whole surface works.
 The first four private entries are implemented; the other 428 remain pending
 until #163 provides their type/layout contracts, shims, and consumer evidence.
 
+Home revision `5e829ad483bb9e5ccb19766997df6462edd8e167` is supported as
+`home-private-5e829ad4`. It is an explicit alias, not a silent repin: the full
+`packages/runtime/src/jsc` diff against `7ed99c02` has zero changed files, and
+the audit rechecks all 58 source hashes plus all 448 normalized declarations,
+locations, classifications, and calling conventions against the immutable base
+inventory. The alias manifest reports zero additions, removals, signature
+changes, and calling-convention changes.
+
+```sh
+zig build test-home-private-abi \
+  -Dhome-private-abi-profile=home-private-5e829ad4 \
+  -Dhome-source-root="$HOME/Code/Home/lang"
+```
+
 ## JSC64 value boundary
 
 Private shims must use `private_abi.EncodedValue`; they must never expose
