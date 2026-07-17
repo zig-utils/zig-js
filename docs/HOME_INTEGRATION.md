@@ -4,7 +4,8 @@
 > (2026-07-17). Home currently links vendored JavaScriptCore. zig-js now proves
 > the exact 50-function public M1 consumer at Home revision `7ed99c02`, while
 > private profiles explicitly support `7ed99c02` and the byte-identical JSC
-> source alias `5e829ad4`. The broader private runtime remains separate work.
+> source aliases `5e829ad4` and `38702f9e`. The broader private runtime remains
+> separate work.
 
 ## Why this is not a link-swap
 
@@ -49,11 +50,11 @@ Home's exact 97-member JSType layout by default; Bun's distinct 98-member layout
 requires `-Dprivate-abi-consumer=bun`. These slices do not yet create a usable
 Home private runtime.
 
-The newer local Home revision `5e829ad4` changed no files in
-`packages/runtime/src/jsc` relative to `7ed99c02`. Its separate alias manifest
-still verifies every source hash and declaration and reports zero added,
+The newer Home revisions `5e829ad4` and `38702f9e` changed no files in
+`packages/runtime/src/jsc` relative to `7ed99c02`. Their separate alias
+manifests still verify every source hash and declaration and report zero added,
 removed, signature-changed, or calling-convention-changed entries. This keeps
-both exact revisions supported without weakening revision rejection.
+all three exact revisions supported without weakening revision rejection.
 
 ## Two migration paths
 

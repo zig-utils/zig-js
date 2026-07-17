@@ -63,17 +63,18 @@ This inventory is the denominator, not a claim that the whole surface works.
 The first eleven private entries are implemented; the other 421 remain pending
 until #163 provides their type/layout contracts, shims, and consumer evidence.
 
-Home revision `5e829ad483bb9e5ccb19766997df6462edd8e167` is supported as
-`home-private-5e829ad4`. It is an explicit alias, not a silent repin: the full
-`packages/runtime/src/jsc` diff against `7ed99c02` has zero changed files, and
-the audit rechecks all 58 source hashes plus all 448 normalized declarations,
-locations, classifications, and calling conventions against the immutable base
-inventory. The alias manifest reports zero additions, removals, signature
-changes, and calling-convention changes.
+Home revisions `5e829ad483bb9e5ccb19766997df6462edd8e167` and
+`38702f9e43b3aecbee7d5b7aa48cc66d41cabde7` are supported as the explicit
+`home-private-5e829ad4` and `home-private-38702f9e` aliases. Neither is a silent
+repin: the full `packages/runtime/src/jsc` diff against `7ed99c02` has zero
+changed files, and each audit rechecks all 58 source hashes plus all 448
+normalized declarations, locations, classifications, and calling conventions
+against the immutable base inventory. Both alias manifests report zero
+additions, removals, signature changes, and calling-convention changes.
 
 ```sh
 zig build test-home-private-abi \
-  -Dhome-private-abi-profile=home-private-5e829ad4 \
+  -Dhome-private-abi-profile=home-private-38702f9e \
   -Dhome-source-root="$HOME/Code/Home/lang"
 ```
 
