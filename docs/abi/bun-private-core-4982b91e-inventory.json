@@ -81,8 +81,8 @@
       "public_c_api": 15
     },
     "by_status": {
-      "implemented": 70,
-      "pending": 367
+      "implemented": 74,
+      "pending": 363
     }
   },
   "home_comparison": {
@@ -1588,10 +1588,10 @@
       "line": 417,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSValue__DateNowISOString(*JSGlobalObject, f64) JSValue;",
       "declaration_sha256": "36347d24cb245ec154dc072a28a5bbb656b917f06fcf8439e436f6a974d407a9",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSValue___then",
@@ -1786,10 +1786,10 @@
       "line": 478,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSValue__dateInstanceFromNullTerminatedString(*JSGlobalObject, [*:0]const u8) JSValue;",
       "declaration_sha256": "5d6767b1a090a8d3488fbd922e607f251bcf52203d12886cd4b89ce1c4067cd7",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSValue__dateInstanceFromNumber",
@@ -2105,10 +2105,10 @@
       "line": 2013,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSValue__getUTCTimestamp(globalObject: *jsc.JSGlobalObject, this: JSValue) f64;",
       "declaration_sha256": "029f1e479677c7d570b56ed45e081a633c58376b125bddd4e1c516af5c3c6de8",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSValue__getUnixTimestamp",
@@ -2435,10 +2435,10 @@
       "line": 408,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSValue__toISOString(*jsc.JSGlobalObject, jsc.JSValue, *[28]u8) c_int;",
       "declaration_sha256": "4fe03ef2d7b0aaf7501db4a0545ad603723c7dc96bf32cea1544ca21925bc7b1",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSValue__toInt32",

@@ -299,6 +299,13 @@ pub fn monotonicNowMs() f64 {
     return @floatFromInt(@divTrunc(@max(0, now - base), std.time.ns_per_ms));
 }
 
+/// Unix epoch milliseconds from the system wall clock. JavaScript Date uses
+/// this clock; agent deadlines continue to use the monotonic clock above.
+pub fn wallNowMs() f64 {
+    const now: i64 = @intCast(std.Io.Timestamp.now(engineIo(), .real).nanoseconds);
+    return @floatFromInt(@divTrunc(now, std.time.ns_per_ms));
+}
+
 // ---- Atomics waiter table ----------------------------------------------------
 // One FIFO waiter list per (storage, byte offset); the table mutex is the
 // spec's per-list "critical section" (re-validate the element under it, then

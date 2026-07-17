@@ -431,6 +431,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+    tests.root_module.addOptions("private_abi_options", private_abi_options);
     const run_tests = b.addRunArtifact(tests);
     if (unit_shard_count) |count| {
         run_tests.setEnvironmentVariable("UNIT_SHARD_INDEX", b.fmt("{d}", .{unit_shard_index orelse 0}));
@@ -462,6 +463,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+    focused_jit_tests.root_module.addOptions("private_abi_options", private_abi_options);
     const run_focused_jit_tests = b.addRunArtifact(focused_jit_tests);
     const focused_jit_step = b.step("test-jit", "Run focused production baseline-JIT tests");
     focused_jit_step.dependOn(&run_focused_jit_tests.step);

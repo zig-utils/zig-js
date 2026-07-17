@@ -8724,12 +8724,6 @@ pub const Interpreter = struct {
         return std.fmt.allocPrint(self.arena, "{d:0>4}", .{@as(u64, @intCast(y))});
     }
 
-    fn dateISOYearString(self: *Interpreter, y: i64) EvalError![]const u8 {
-        if (y >= 0 and y <= 9999) return std.fmt.allocPrint(self.arena, "{d:0>4}", .{@as(u64, @intCast(y))});
-        if (y < 0) return std.fmt.allocPrint(self.arena, "-{d:0>6}", .{@as(u64, @intCast(-y))});
-        return std.fmt.allocPrint(self.arena, "+{d:0>6}", .{@as(u64, @intCast(y))});
-    }
-
     fn dateTimeClip(t: f64) f64 {
         if (!std.math.isFinite(t) or @abs(t) > 8.64e15) return std.math.nan(f64);
         const tr = @trunc(t);
@@ -8865,13 +8859,13 @@ pub const Interpreter = struct {
 
         // ---- string conversions ----------------------------------------------
         if (eq(name, "toISOString")) {
-            if (std.math.isNan(t)) return self.throwError("RangeError", "Invalid time value");
+            if (!std.math.isFinite(t) or @abs(t) > 8.64e15) return self.throwError("RangeError", "Invalid time value");
             return try Value.strAlloc(self.arena, try self.dateISO(t));
         }
         if (eq(name, "toJSON")) {
             // The Date-receiver fast path (the generic `dateToJSONFn` native
             // handles a borrowed/non-Date `this`): a non-finite time is null.
-            if (!std.math.isFinite(t)) return Value.nul();
+            if (!std.math.isFinite(t) or @abs(t) > 8.64e15) return Value.nul();
             return try Value.strAlloc(self.arena, try self.dateISO(t));
         }
         if (eq(name, "toUTCString") or eq(name, "toGMTString")) {
@@ -8912,12 +8906,34 @@ pub const Interpreter = struct {
         return null;
     }
 
+    /// Write exact ECMAScript UTC ISO text into a caller-owned 28-byte buffer.
+    /// Ordinary years use 24 bytes and extended years use 27; no terminator is
+    /// written. Invalid Date time values leave the caller buffer untouched.
+    pub fn writeDateISOString(t: f64, out: *[28]u8) ?usize {
+        if (!std.math.isFinite(t) or @abs(t) > 8.64e15) return null;
+        const c = dateDecompose(t);
+        var buffer: [28]u8 = undefined;
+        const rendered = if (c.y >= 0 and c.y <= 9999)
+            std.fmt.bufPrint(&buffer, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}.{d:0>3}Z", .{
+                dnz(c.y), dnz(c.mo + 1), dnz(c.d), dnz(c.h), dnz(c.mi), dnz(c.s), dnz(c.ms),
+            }) catch return null
+        else if (c.y < 0)
+            std.fmt.bufPrint(&buffer, "-{d:0>6}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}.{d:0>3}Z", .{
+                @as(u64, @intCast(-c.y)), dnz(c.mo + 1), dnz(c.d), dnz(c.h), dnz(c.mi), dnz(c.s), dnz(c.ms),
+            }) catch return null
+        else
+            std.fmt.bufPrint(&buffer, "+{d:0>6}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}.{d:0>3}Z", .{
+                @as(u64, @intCast(c.y)), dnz(c.mo + 1), dnz(c.d), dnz(c.h), dnz(c.mi), dnz(c.s), dnz(c.ms),
+            }) catch return null;
+        @memcpy(out[0..rendered.len], rendered);
+        return rendered.len;
+    }
+
     /// ISO 8601 rendering of a finite epoch-ms time (`2020-01-15T00:00:00.000Z`).
     fn dateISO(self: *Interpreter, t: f64) EvalError![]const u8 {
-        const c = dateDecompose(t);
-        return std.fmt.allocPrint(self.arena, "{s}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}.{d:0>3}Z", .{
-            try self.dateISOYearString(c.y), dnz(c.mo + 1), dnz(c.d), dnz(c.h), dnz(c.mi), dnz(c.s), dnz(c.ms),
-        });
+        var buffer: [28]u8 = undefined;
+        const len = writeDateISOString(t, &buffer) orelse unreachable;
+        return self.arena.dupe(u8, buffer[0..len]);
     }
 
     /// Compute a Date's epoch-ms from constructor arguments.
@@ -43057,7 +43073,7 @@ fn symbolProto(self: *Interpreter) ?*value.Object {
 /// epoch), or NaN. Handles YYYY[-MM[-DD]][THH:mm[:ss[.sss]]][Z|±HH:mm]; a
 /// date-only or zoneless date-time is interpreted as UTC (this engine has no
 /// local time zone).
-fn dateParseISO(s_in: []const u8) f64 {
+pub fn parseDateString(s_in: []const u8) f64 {
     const nan = std.math.nan(f64);
     const s = std.mem.trim(u8, s_in, " \t\n\r\x0c\x0b");
     if (s.len == 0) return nan;
@@ -43326,14 +43342,14 @@ fn dateParseFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostErro
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const s = try self.toStringV(if (args.len > 0) args[0] else Value.undef());
-    return Value.num(dateParseISO(s));
+    return Value.num(parseDateString(s));
 }
 
 fn dateConstructor(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (self.new_target.isUndefined()) {
-        const d = (try self.makeDate(0)).asObj();
+        const d = (try self.makeDate(currentTimeMilliseconds())).asObj();
         return (try self.dateMethod(d, "toString", &.{})) orelse Value.str("Invalid Date");
     }
     if (args.len >= 2) {
@@ -43351,11 +43367,11 @@ fn dateConstructor(ctx: *anyopaque, this: Value, args: []const Value) value.Host
         if (args[0].isObject() and args[0].asObj().behavior.is_date)
             return self.makeDate(args[0].asObj().dateMs());
         const prim = try self.toPrimitive(args[0], .default);
-        if (prim.isString()) return self.makeDate(dateParseISO(prim.asStr()));
+        if (prim.isString()) return self.makeDate(parseDateString(prim.asStr()));
         // ToNumber(prim): a Symbol or BigInt primitive throws a TypeError.
         return self.makeDate(try self.toNumberV(prim));
     }
-    return self.makeDate(0);
+    return self.makeDate(currentTimeMilliseconds());
 }
 
 /// `Date.UTC(year [, month, day, hours, min, sec, ms])` — the time value for
@@ -43387,14 +43403,17 @@ fn dateUTCFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!
     return Value.num(Interpreter.dateTimeFromArgs(buf[0..len]));
 }
 
-/// `Date.now()` — monotonic milliseconds for progress-sensitive code. `new Date()`
-/// and `Date()` remain deterministic epoch-based until wall-clock Date objects
-/// are wired more broadly.
+/// Current Unix epoch milliseconds shared by Date construction and private ABI.
+pub fn currentTimeMilliseconds() f64 {
+    return agent.wallNowMs();
+}
+
+/// `Date.now()` — Unix epoch milliseconds from the system wall clock.
 fn dateNow(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     _ = args;
     _ = ctx;
-    return Value.num(agent.monotonicNowMs());
+    return Value.num(currentTimeMilliseconds());
 }
 
 /// `Symbol([description])` — returns a fresh unique symbol. It has [[Construct]]

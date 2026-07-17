@@ -81,7 +81,12 @@ extern "c" fn JSC__JSValue__unwrapBoxedPrimitive(JSContextRef, EncodedValue) Enc
 extern "c" fn JSC__JSValue__toObject(EncodedValue, JSContextRef) JSObjectRef;
 extern "c" fn JSC__JSValue__getPrototype(EncodedValue, JSContextRef) EncodedValue;
 extern "c" fn JSC__JSValue__dateInstanceFromNumber(JSContextRef, f64) EncodedValue;
+extern "c" fn JSC__JSValue__dateInstanceFromNullTerminatedString(JSContextRef, [*:0]const u8) EncodedValue;
 extern "c" fn JSC__JSValue__getUnixTimestamp(EncodedValue) f64;
+extern "c" fn JSC__JSValue__getUTCTimestamp(JSContextRef, EncodedValue) f64;
+extern "c" fn JSC__JSValue__toISOString(JSContextRef, EncodedValue, *[28]u8) c_int;
+// The pinned Zig declaration is stale; this is Bun's executable wrapper/C++ ABI.
+extern "c" fn JSC__JSValue__DateNowISOString(JSContextRef, *[28]u8) c_int;
 extern "c" fn JSC__JSGlobalObject__vm(JSContextRef) ?*anyopaque;
 extern "c" fn JSC__VM__throwError(?*anyopaque, JSContextRef, EncodedValue) void;
 extern "c" fn JSGlobalObject__hasException(JSContextRef) bool;
@@ -437,6 +442,44 @@ pub fn main() void {
         !std.math.isNan(JSC__JSValue__getUnixTimestamp(.empty)))
         fail("private numeric DateInstance mismatch");
 
+    const parsed_epoch = JSC__JSValue__dateInstanceFromNullTerminatedString(context, "1970-01-01T00:00:00.000Z");
+    const parsed_offset = JSC__JSValue__dateInstanceFromNullTerminatedString(context, "2020-02-29T12:34:56.789+02:30");
+    const parsed_pre_epoch = JSC__JSValue__dateInstanceFromNullTerminatedString(context, "1969-12-31T23:59:59.999Z");
+    const parsed_extended = JSC__JSValue__dateInstanceFromNullTerminatedString(context, "+010000-01-01T00:00:00.000Z");
+    const parsed_invalid = JSC__JSValue__dateInstanceFromNullTerminatedString(context, "not a date");
+    if (JSC__JSValue__getUTCTimestamp(context, parsed_epoch) != 0 or
+        JSC__JSValue__getUTCTimestamp(context, parsed_pre_epoch) != -1 or
+        !std.math.isNan(JSC__JSValue__getUTCTimestamp(context, parsed_invalid)) or
+        !std.math.isNan(JSC__JSValue__getUTCTimestamp(context, encoded_object)) or
+        !std.math.isNan(JSC__JSValue__getUTCTimestamp(foreign_context, parsed_epoch)))
+        fail("private parsed Date UTC extraction mismatch");
+
+    var iso_buffer: [28]u8 = @splat(0xa5);
+    if (JSC__JSValue__toISOString(context, parsed_epoch, &iso_buffer) != 24 or
+        !std.mem.eql(u8, iso_buffer[0..24], "1970-01-01T00:00:00.000Z") or
+        !std.mem.allEqual(u8, iso_buffer[24..], 0xa5))
+        fail("private epoch ISO formatting mismatch");
+    iso_buffer = @splat(0xa5);
+    if (JSC__JSValue__toISOString(context, fractional_date, &iso_buffer) != 24 or
+        !std.mem.eql(u8, iso_buffer[0..24], "1970-01-01T00:00:00.001Z") or
+        JSC__JSValue__toISOString(context, parsed_pre_epoch, &iso_buffer) != 24 or
+        !std.mem.eql(u8, iso_buffer[0..24], "1969-12-31T23:59:59.999Z"))
+        fail("private fractional/pre-epoch ISO formatting mismatch");
+    iso_buffer = @splat(0xa5);
+    if (JSC__JSValue__toISOString(context, parsed_offset, &iso_buffer) != 24 or
+        !std.mem.eql(u8, iso_buffer[0..24], "2020-02-29T10:04:56.789Z"))
+        fail("private offset ISO formatting mismatch");
+    iso_buffer = @splat(0xa5);
+    if (JSC__JSValue__toISOString(context, parsed_extended, &iso_buffer) != 27 or
+        !std.mem.eql(u8, iso_buffer[0..27], "+010000-01-01T00:00:00.000Z"))
+        fail("private extended-year ISO formatting mismatch");
+    iso_buffer = @splat(0xa5);
+    if (JSC__JSValue__toISOString(context, parsed_invalid, &iso_buffer) != -1 or
+        !std.mem.allEqual(u8, &iso_buffer, 0xa5) or
+        JSC__JSValue__toISOString(context, encoded_object, &iso_buffer) != -1 or
+        !std.mem.allEqual(u8, &iso_buffer, 0xa5))
+        fail("private ISO failure atomicity mismatch");
+
     const sibling_context = JSGlobalContextCreateInGroup(JSContextGetGroup(context), null) orelse fail("sibling context creation failed");
     defer JSGlobalContextRelease(sibling_context);
     const vm = JSC__JSGlobalObject__vm(context) orelse fail("private VM lookup failed");
@@ -445,6 +488,21 @@ pub fn main() void {
     if (vm != sibling_vm or vm == foreign_vm or JSGlobalObject__hasException(context) or
         JSGlobalObject__tryTakeException(context) != .empty)
         fail("private VM identity mismatch");
+
+    iso_buffer = @splat(0xa5);
+    if (JSC__JSValue__getUTCTimestamp(sibling_context, parsed_offset) != JSC__JSValue__getUnixTimestamp(parsed_offset) or
+        JSC__JSValue__toISOString(sibling_context, parsed_offset, &iso_buffer) != 24 or
+        !std.mem.eql(u8, iso_buffer[0..24], "2020-02-29T10:04:56.789Z"))
+        fail("private Date sibling-realm mismatch");
+    iso_buffer = @splat(0xa5);
+    if (JSC__JSValue__toISOString(foreign_context, parsed_offset, &iso_buffer) != -1 or
+        !std.mem.allEqual(u8, &iso_buffer, 0xa5))
+        fail("private Date foreign-VM rejection mismatch");
+    iso_buffer = @splat(0xa5);
+    if (JSC__JSValue__DateNowISOString(context, &iso_buffer) != 24 or
+        iso_buffer[4] != '-' or iso_buffer[7] != '-' or iso_buffer[10] != 'T' or
+        iso_buffer[13] != ':' or iso_buffer[16] != ':' or iso_buffer[19] != '.' or iso_buffer[23] != 'Z')
+        fail("private Date-now ISO formatting mismatch");
 
     JSC__VM__throwError(vm, context, EncodedValue.fromInt32(42));
     if (!JSGlobalObject__hasException(context) or !JSGlobalObject__hasException(sibling_context))
@@ -770,5 +828,5 @@ pub fn main() void {
     if (!JSC__JSValue__isAggregateError(aggregate_error, context))
         fail("private AggregateError classification depended on mutable properties");
 
-    std.debug.print("Home private value shims: 53/53 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 57/57 symbols linked; runtime matrix passed\n", .{});
 }

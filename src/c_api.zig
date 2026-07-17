@@ -2053,12 +2053,60 @@ export fn JSC__JSValue__dateInstanceFromNumber(global: JSContextRef, timestamp: 
     return privateEncodedFromValue(context, result);
 }
 
+export fn JSC__JSValue__dateInstanceFromNullTerminatedString(
+    global: JSContextRef,
+    chars: [*:0]const u8,
+) callconv(.c) EncodedValue {
+    const context = ctxForEvaluation(global) orelse return .empty;
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch return .empty;
+    defer context.popActiveInterpreter(&machine);
+    const timestamp = interp.parseDateString(std.mem.span(chars));
+    const result = machine.makeDateWithRawNumber(timestamp) catch return .empty;
+    return privateEncodedFromValue(context, result);
+}
+
 export fn JSC__JSValue__getUnixTimestamp(encoded: EncodedValue) callconv(.c) f64 {
     const boxed = privateBoxedFrom(encoded) orelse return std.math.nan(f64);
     if (boxed.private_kind != .value) return std.math.nan(f64);
     if (!boxed.value.isObject() or !boxed.value.asObj().behavior.is_date)
         return std.math.nan(f64);
     return boxed.value.asObj().dateMs();
+}
+
+export fn JSC__JSValue__getUTCTimestamp(global: JSContextRef, encoded: EncodedValue) callconv(.c) f64 {
+    const internal = privateValueFrom(global, encoded) orelse return std.math.nan(f64);
+    if (!internal.isObject() or !internal.asObj().behavior.is_date)
+        return std.math.nan(f64);
+    return internal.asObj().dateMs();
+}
+
+fn privateWriteDateISOString(timestamp: f64, out: *[28]u8) c_int {
+    var buffer: [28]u8 = undefined;
+    const len = interp.Interpreter.writeDateISOString(timestamp, &buffer) orelse return -1;
+    @memcpy(out[0..len], buffer[0..len]);
+    return @intCast(len);
+}
+
+export fn JSC__JSValue__toISOString(
+    global: JSContextRef,
+    encoded: EncodedValue,
+    out: *[28]u8,
+) callconv(.c) c_int {
+    const internal = privateValueFrom(global, encoded) orelse return -1;
+    if (!internal.isObject() or !internal.asObj().behavior.is_date) return -1;
+    return privateWriteDateISOString(internal.asObj().dateMs(), out);
+}
+
+/// Bun's pinned Zig declaration accidentally says `(global, f64) JSValue`,
+/// while its wrapper and C++ body both use this 28-byte writer contract.
+export fn JSC__JSValue__DateNowISOString(global: JSContextRef, out: *[28]u8) callconv(.c) c_int {
+    _ = ctxForHandleInspection(global) orelse return -1;
+    return privateWriteDateISOString(interp.currentTimeMilliseconds(), out);
 }
 
 export fn JSC__JSGlobalObject__vm(global: JSContextRef) callconv(.c) ?*anyopaque {
