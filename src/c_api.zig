@@ -13,11 +13,9 @@
 //!
 //! ## Threading rules
 //!
-//! Every handle is affine to the context and thread that created it:
-//! a `JSContextRef` — and every `JSValueRef`/`JSObjectRef` obtained through it —
-//! may only be used on the thread that called `JSGlobalContextCreate`.
-//! `JSValueRef`/`JSObjectRef` boxes carry their owning context, and context-taking
-//! C APIs reject handles from a different context. Cross-thread use is still
+//! Every handle is affine to its context group and creator thread. Values may be
+//! exchanged by distinct global contexts in the same `JSContextGroupRef`; APIs
+//! reject handles from another group. Cross-thread use is still
 //! undefined behavior (the arena, object graph, and microtask queue are
 //! unsynchronized by design); debug builds panic on it.
 //! The supported multithreading pattern is one context per thread, sharing
@@ -57,6 +55,53 @@ const Boxed = struct {
     /// a `*Value` when tracing C-API handles.
     value: Value,
     owner: *Context,
+};
+
+/// One public JavaScriptCore VM lifetime. The hidden primary Context owns the
+/// shared arena/JIT runtime; every exposed global context is a distinct realm on
+/// that runtime and retains this record until its own final release.
+const CContextGroup = struct {
+    ref_count: std.atomic.Value(usize) = .init(1),
+    owner_thread: std.Thread.Id,
+    primary: *Context,
+    contexts: std.ArrayListUnmanaged(*Context) = .empty,
+
+    fn retain(self: *CContextGroup) bool {
+        var current = self.ref_count.load(.monotonic);
+        while (true) {
+            if (current == 0 or current == std.math.maxInt(usize)) return false;
+            if (self.ref_count.cmpxchgWeak(current, current + 1, .monotonic, .monotonic)) |observed| {
+                current = observed;
+                continue;
+            }
+            return true;
+        }
+    }
+
+    fn release(self: *CContextGroup) bool {
+        var current = self.ref_count.load(.acquire);
+        while (true) {
+            if (current == 0) return false;
+            const next = current - 1;
+            if (self.ref_count.cmpxchgWeak(current, next, .acq_rel, .acquire)) |observed| {
+                current = observed;
+                continue;
+            }
+            return next == 0;
+        }
+    }
+
+    fn destroy(self: *CContextGroup) void {
+        var index = self.contexts.items.len;
+        while (index > 0) {
+            index -= 1;
+            self.contexts.items[index].destroySharedArenaRealm();
+        }
+        self.contexts.deinit(gpa);
+        self.primary.c_api_group = null;
+        self.primary.destroy();
+        gpa.destroy(self);
+    }
 };
 
 /// JSC-shaped `JSType`. Values 0..6 match Apple's public enum; `bigint` and
@@ -119,6 +164,7 @@ pub const kJSTypedArrayTypeBigUint64Array = JSTypedArrayType.biguint64_array;
 pub const JSValueRef = ?*anyopaque;
 pub const JSObjectRef = ?*anyopaque;
 pub const JSContextRef = ?*anyopaque;
+pub const JSContextGroupRef = ?*anyopaque;
 pub const JSStringRef = ?*anyopaque;
 pub const JSClassRef = ?*anyopaque;
 pub const JSPropertyNameArrayRef = ?*anyopaque;
@@ -338,6 +384,49 @@ fn finishClassObject(owner: *value.CApiObjectOwner) void {
 fn initializeClassObject(ctx: JSContextRef, object_ref: JSObjectRef, class: *CClass) void {
     if (class.parent) |parent| initializeClassObject(ctx, object_ref, parent);
     if (class.definition.initialize) |initialize| initialize(ctx, object_ref);
+}
+
+fn attachClassToExistingObject(ctx: JSContextRef, c: *Context, obj: *Object, class: *CClass, data: ?*anyopaque) bool {
+    const gc_saved = gc_mod.setActiveHeap(c.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(c.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = c.interpreter();
+    c.pushActiveInterpreter(&machine) catch return false;
+    defer c.popActiveInterpreter(&machine);
+
+    if ((class.definition.attributes & kJSClassAttributeNoAutomaticPrototype) != 0) {
+        installStaticFunctionChain(c, &machine, obj, class) catch return false;
+    } else {
+        const prototype = ensureClassPrototype(c, &machine, class) catch return false;
+        obj.setProtoAtomic(prototype);
+    }
+    if (!retainClass(class)) return false;
+    const owner = c.createCApiObjectOwner(@ptrCast(class), finishClassObject) catch {
+        releaseClass(class);
+        return false;
+    };
+    obj.private_data = data;
+    obj.private_data_tag = .host;
+    obj.setCApiObjectOwner(c.arena(), owner) catch {
+        owner.finishOnce();
+        return false;
+    };
+    obj.setHostClassHooks(c.arena(), &c_api_class_hooks) catch {
+        owner.finishOnce();
+        return false;
+    };
+    const object_ref = box(c, Value.obj(obj)) orelse {
+        owner.finishOnce();
+        return false;
+    };
+    owner.object_ref = object_ref;
+    const protected = valueProtect(ctx, object_ref);
+    defer {
+        if (protected) _ = valueUnprotect(ctx, object_ref);
+    }
+    initializeClassObject(ctx, object_ref, class);
+    return true;
 }
 
 fn finishClassPrototype(owner: *value.CApiClassPrototypeOwner) void {
@@ -855,6 +944,7 @@ fn ctxRawFrom(ref: JSContextRef) ?*Context {
 
 fn ctxFrom(ref: JSContextRef) ?*Context {
     const c = ctxRawFrom(ref) orelse return null;
+    if (c.c_api_group != null and c.c_api_ref_count.load(.acquire) == 0) return null;
     // Single funnel for every C-API entry point: enforce context thread
     // affinity in debug builds (see "Threading rules" above).
     c.assertOwnerThread();
@@ -863,6 +953,7 @@ fn ctxFrom(ref: JSContextRef) ?*Context {
 
 fn ctxForHandleInspection(ref: JSContextRef) ?*Context {
     const c = ctxRawFrom(ref) orelse return null;
+    if (c.c_api_group != null and c.c_api_ref_count.load(.acquire) == 0) return null;
     if (comptime builtin.mode == .Debug) {
         if (!c.isOwnerThread()) std.debug.panic(
             "Context is single-thread-affine: used from thread {d}, owned by thread {d} (docs/threads/bindings.md)",
@@ -874,6 +965,7 @@ fn ctxForHandleInspection(ref: JSContextRef) ?*Context {
 
 fn ctxForEvaluation(ref: JSContextRef) ?*Context {
     const c = ctxRawFrom(ref) orelse return null;
+    if (c.c_api_group != null and c.c_api_ref_count.load(.acquire) == 0) return null;
     if (comptime builtin.mode == .Debug) {
         // Serialized threaded contexts acquire the GIL inside
         // `Context.evaluateWithThis`, then assert that ownership there. For
@@ -891,6 +983,7 @@ fn ctxForEvaluation(ref: JSContextRef) ?*Context {
 
 fn ctxForLifecycle(ref: JSContextRef) ?*Context {
     const c = ctxRawFrom(ref) orelse return null;
+    if (c.c_api_group != null and c.c_api_ref_count.load(.acquire) == 0) return null;
     if (comptime builtin.mode == .Debug) {
         // Retain/release are host lifecycle operations, not VM execution. They
         // must preserve context thread-affinity without requiring the serialized
@@ -915,7 +1008,10 @@ fn boxedFrom(ref: JSValueRef) ?*Boxed {
 
 fn valueFromContext(ctx: *Context, ref: JSValueRef) ?Value {
     const b = boxedFrom(ref) orelse return null;
-    if (b.owner != ctx) return null;
+    if (b.owner != ctx) {
+        const group = ctx.c_api_group orelse return null;
+        if (b.owner.c_api_group != group) return null;
+    }
     return b.value;
 }
 
@@ -1113,6 +1209,41 @@ fn typedArrayTypeFromValue(v: Value) JSTypedArrayType {
 
 // ---- VM lifecycle ------------------------------------------------------
 
+fn contextGroupFrom(ref: JSContextGroupRef) ?*CContextGroup {
+    const group: *CContextGroup = @ptrCast(@alignCast(ref orelse return null));
+    if (comptime builtin.mode == .Debug) {
+        if (group.owner_thread != std.Thread.getCurrentId()) std.debug.panic(
+            "JSContextGroupRef is thread-affine: used from thread {d}, owned by thread {d}",
+            .{ std.Thread.getCurrentId(), group.owner_thread },
+        );
+    }
+    return group;
+}
+
+export fn JSContextGroupCreate() callconv(.c) JSContextGroupRef {
+    const primary = Context.create(gpa) catch return null;
+    const group = gpa.create(CContextGroup) catch {
+        primary.destroy();
+        return null;
+    };
+    group.* = .{
+        .owner_thread = std.Thread.getCurrentId(),
+        .primary = primary,
+    };
+    primary.c_api_group = @ptrCast(group);
+    return @ptrCast(group);
+}
+
+export fn JSContextGroupRetain(group_ref: JSContextGroupRef) callconv(.c) JSContextGroupRef {
+    const group = contextGroupFrom(group_ref) orelse return null;
+    return if (group.retain()) group_ref else null;
+}
+
+export fn JSContextGroupRelease(group_ref: JSContextGroupRef) callconv(.c) void {
+    const group = contextGroupFrom(group_ref) orelse return;
+    if (group.release()) group.destroy();
+}
+
 export fn JSGarbageCollect(ctx: JSContextRef) callconv(.c) void {
     // Real precise mark-sweep when the context has the GC enabled; a no-op on
     // the default arena engine. Sound here because the C-API entry point is a
@@ -1123,10 +1254,47 @@ export fn JSGarbageCollect(ctx: JSContextRef) callconv(.c) void {
 }
 
 export fn JSGlobalContextCreate(global_class: ?*anyopaque) callconv(.c) JSContextRef {
-    if (global_class != null) return null;
-    const ctx = Context.create(gpa) catch return null;
+    return JSGlobalContextCreateInGroup(null, global_class);
+}
+
+export fn JSGlobalContextCreateInGroup(group_ref: JSContextGroupRef, global_class: JSClassRef) callconv(.c) JSContextRef {
+    const created_group = group_ref == null;
+    const effective_ref = if (created_group) JSContextGroupCreate() else group_ref;
+    const group = contextGroupFrom(effective_ref) orelse return null;
+    if (!group.retain()) {
+        if (created_group) JSContextGroupRelease(effective_ref);
+        return null;
+    }
+    const ctx = Context.createSharedArenaRealm(group.primary) catch {
+        if (group.release()) group.destroy();
+        if (created_group) JSContextGroupRelease(effective_ref);
+        return null;
+    };
+    ctx.c_api_group = @ptrCast(group);
     ctx.initCApiRef();
-    return @ptrCast(ctx);
+    const ctx_ref: JSContextRef = @ptrCast(ctx);
+    if (global_class != null) {
+        const class = classFrom(global_class) orelse {
+            ctx.destroySharedArenaRealm();
+            _ = group.release();
+            if (created_group) JSContextGroupRelease(effective_ref);
+            return null;
+        };
+        if (!attachClassToExistingObject(ctx_ref, ctx, ctx.global_object, class, null)) {
+            ctx.destroySharedArenaRealm();
+            _ = group.release();
+            if (created_group) JSContextGroupRelease(effective_ref);
+            return null;
+        }
+    }
+    group.contexts.append(gpa, ctx) catch {
+        ctx.destroySharedArenaRealm();
+        _ = group.release();
+        if (created_group) JSContextGroupRelease(effective_ref);
+        return null;
+    };
+    if (created_group) JSContextGroupRelease(effective_ref);
+    return ctx_ref;
 }
 
 /// zig-js extension (issue #1): create a context with the `Thread` API enabled.
@@ -1144,7 +1312,11 @@ export fn JSGlobalContextRelease(ctx: JSContextRef) callconv(.c) void {
     // A `.gil = true` threaded context is released from outside JS execution;
     // `Context.destroy()` performs the serialized teardown itself.
     const c = ctxForLifecycle(ctx) orelse return;
-    if (c.releaseCApiRef()) c.destroy();
+    if (!c.releaseCApiRef()) return;
+    if (c.c_api_group) |opaque_group| {
+        const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+        if (group.release()) group.destroy();
+    } else c.destroy();
 }
 
 export fn JSGlobalContextRetain(ctx: JSContextRef) callconv(.c) JSContextRef {
@@ -1156,6 +1328,11 @@ export fn JSGlobalContextRetain(ctx: JSContextRef) callconv(.c) JSContextRef {
 export fn JSContextGetGlobalObject(ctx: JSContextRef) callconv(.c) JSObjectRef {
     const c = ctxFrom(ctx) orelse return null;
     return box(c, Value.obj(c.global_object));
+}
+
+export fn JSContextGetGroup(ctx: JSContextRef) callconv(.c) JSContextGroupRef {
+    const c = ctxFrom(ctx) orelse return null;
+    return c.c_api_group;
 }
 
 export fn JSContextGetGlobalContext(ctx: JSContextRef) callconv(.c) JSContextRef {
@@ -3314,6 +3491,63 @@ test "C-API: create + release context, round-trip a number" {
     try std.testing.expectEqual(@as(f64, 42.5), JSValueToNumber(ctx, num, null));
 }
 
+test "C-API: context groups share values while preserving distinct realms and lifetime" {
+    const group = JSContextGroupCreate() orelse return error.GroupCreateFailed;
+    try std.testing.expectEqual(group, JSContextGroupRetain(group));
+    JSContextGroupRelease(group);
+
+    const first = JSGlobalContextCreateInGroup(group, null) orelse return error.ContextCreateFailed;
+    const second = JSGlobalContextCreateInGroup(group, null) orelse return error.ContextCreateFailed;
+    try std.testing.expectEqual(group, JSContextGetGroup(first));
+    try std.testing.expectEqual(group, JSContextGetGroup(second));
+    const first_global = JSContextGetGlobalObject(first) orelse return error.GlobalObjectFailed;
+    const second_global = JSContextGetGlobalObject(second) orelse return error.GlobalObjectFailed;
+    try std.testing.expect(!JSValueIsStrictEqual(second, first_global, second_global));
+
+    const make_object = JSStringCreateWithUTF8CString("({ answer: 42 })") orelse return error.StringInitFailed;
+    defer JSStringRelease(make_object);
+    var exception: JSValueRef = null;
+    const shared = JSEvaluateScript(first, make_object, null, null, 1, &exception) orelse return error.EvalFailed;
+    try std.testing.expect(exception == null);
+    const shared_name = JSStringCreateWithUTF8CString("sharedFromFirst") orelse return error.StringInitFailed;
+    defer JSStringRelease(shared_name);
+    JSObjectSetProperty(second, second_global, shared_name, shared, 0, &exception);
+    try std.testing.expect(exception == null);
+    const read_shared = JSStringCreateWithUTF8CString("sharedFromFirst.answer") orelse return error.StringInitFailed;
+    defer JSStringRelease(read_shared);
+    const answer = JSEvaluateScript(second, read_shared, null, null, 1, &exception) orelse return error.EvalFailed;
+    try std.testing.expectEqual(@as(f64, 42), JSValueToNumber(second, answer, &exception));
+    const fetched = JSObjectGetProperty(second, second_global, shared_name, &exception) orelse return error.PropertyGetFailed;
+    try std.testing.expect(JSValueIsStrictEqual(second, shared, fetched));
+
+    const first_array_proto_source = JSStringCreateWithUTF8CString("Array.prototype") orelse return error.StringInitFailed;
+    defer JSStringRelease(first_array_proto_source);
+    const second_array_proto_source = JSStringCreateWithUTF8CString("Array.prototype") orelse return error.StringInitFailed;
+    defer JSStringRelease(second_array_proto_source);
+    const first_array_proto = JSEvaluateScript(first, first_array_proto_source, null, null, 1, &exception) orelse return error.EvalFailed;
+    const second_array_proto = JSEvaluateScript(second, second_array_proto_source, null, null, 1, &exception) orelse return error.EvalFailed;
+    try std.testing.expect(!JSValueIsStrictEqual(second, first_array_proto, second_array_proto));
+
+    // Releasing a realm handle does not invalidate values retained by another
+    // realm in the VM; the group keeps every realm allocation alive to teardown.
+    JSGlobalContextRelease(first);
+    const answer_after_release = JSEvaluateScript(second, read_shared, null, null, 1, &exception) orelse return error.EvalFailed;
+    try std.testing.expectEqual(@as(f64, 42), JSValueToNumber(second, answer_after_release, &exception));
+
+    const foreign = JSGlobalContextCreate(null) orelse return error.ContextCreateFailed;
+    const foreign_name = JSStringCreateWithUTF8CString("foreign") orelse return error.StringInitFailed;
+    defer JSStringRelease(foreign_name);
+    exception = null;
+    JSObjectSetProperty(foreign, JSContextGetGlobalObject(foreign), foreign_name, shared, 0, &exception);
+    try std.testing.expect(exception != null);
+    JSGlobalContextRelease(foreign);
+
+    // Drop the caller's group retain before its final realm: the realm retain is
+    // sufficient, and its release performs the one shared-VM teardown.
+    JSContextGroupRelease(group);
+    JSGlobalContextRelease(second);
+}
+
 test "C-API: ordinary constructors keep intrinsic identity and function source metadata" {
     const ctx = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
     defer JSGlobalContextRelease(ctx);
@@ -3909,10 +4143,47 @@ test "C-API: JSEvaluateScript rejects null script with exception" {
     try std.testing.expect(std.mem.indexOf(u8, buf[0 .. written - 1], "script is null") != null);
 }
 
-test "C-API: unsupported global JSClassRef input fails fast" {
-    var fake_class: u8 = 0;
-    const fake: *anyopaque = @ptrCast(&fake_class);
-    try std.testing.expect(JSGlobalContextCreate(fake) == null);
+test "C-API: global JSClassRef attaches callbacks and static values" {
+    const State = struct {
+        var initialized: usize = 0;
+        var finalized: usize = 0;
+
+        fn initialize(_: JSContextRef, _: JSObjectRef) callconv(.c) void {
+            initialized += 1;
+        }
+        fn finalize(_: JSObjectRef) callconv(.c) void {
+            finalized += 1;
+        }
+        fn getValue(ctx: JSContextRef, _: JSObjectRef, _: JSStringRef, _: ExceptionRef) callconv(.c) JSValueRef {
+            return JSValueMakeNumber(ctx, 77);
+        }
+    };
+    State.initialized = 0;
+    State.finalized = 0;
+    const values = [_]JSStaticValue{
+        .{ .name = "globalValue", .get_property = State.getValue },
+        .{},
+    };
+    var definition: JSClassDefinition = .{
+        .class_name = "CustomGlobal",
+        .static_values = &values,
+        .initialize = State.initialize,
+        .finalize = State.finalize,
+    };
+    const class = JSClassCreate(&definition) orelse return error.ClassCreateFailed;
+    const ctx = JSGlobalContextCreate(class) orelse return error.ContextCreateFailed;
+    JSClassRelease(class);
+    try std.testing.expectEqual(@as(usize, 1), State.initialized);
+
+    const key = JSStringCreateWithUTF8CString("globalValue") orelse return error.StringInitFailed;
+    defer JSStringRelease(key);
+    var exception: JSValueRef = null;
+    const global = JSContextGetGlobalObject(ctx) orelse return error.GlobalObjectFailed;
+    const result = JSObjectGetProperty(ctx, global, key, &exception) orelse return error.PropertyGetFailed;
+    try std.testing.expect(exception == null);
+    try std.testing.expectEqual(@as(f64, 77), JSValueToNumber(ctx, result, &exception));
+    JSGlobalContextRelease(ctx);
+    try std.testing.expectEqual(@as(usize, 1), State.finalized);
 }
 
 test "C-API: JSClassRef copies definitions and owns inherited instance lifecycle" {

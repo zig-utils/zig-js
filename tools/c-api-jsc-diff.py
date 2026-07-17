@@ -12,7 +12,10 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-FIXTURE = ROOT / "tests/c_api_value_diff.c"
+FIXTURES = (
+    ROOT / "tests/c_api_value_diff.c",
+    ROOT / "tests/c_api_context_group_diff.c",
+)
 
 
 def run(command: list[str]) -> bytes:
@@ -20,8 +23,8 @@ def run(command: list[str]) -> bytes:
 
 
 def main() -> None:
-    if len(sys.argv) != 2:
-        raise SystemExit("usage: c-api-jsc-diff.py <zig-js fixture executable>")
+    if len(sys.argv) != len(FIXTURES) + 1:
+        raise SystemExit("usage: c-api-jsc-diff.py <zig-js value fixture> <zig-js context-group fixture>")
     if platform.system() != "Darwin":
         raise SystemExit("the pinned JavaScriptCore differential gate requires macOS")
 
@@ -32,17 +35,22 @@ def main() -> None:
         check=True,
     )
     with tempfile.TemporaryDirectory(prefix="zig-js-jsc-diff-") as directory:
-        reference = Path(directory) / "jsc-value-diff"
-        subprocess.run(
-            [
-                "xcrun", "--sdk", "macosx", "clang",
-                str(FIXTURE), "-framework", "JavaScriptCore", "-o", str(reference),
-            ],
-            cwd=ROOT,
-            check=True,
-        )
-        expected = run([str(reference)])
-        actual = run([sys.argv[1]])
+        expected_parts: list[bytes] = []
+        actual_parts: list[bytes] = []
+        for index, (fixture, actual_path) in enumerate(zip(FIXTURES, sys.argv[1:])):
+            reference = Path(directory) / f"jsc-diff-{index}"
+            subprocess.run(
+                [
+                    "xcrun", "--sdk", "macosx", "clang",
+                    str(fixture), "-framework", "JavaScriptCore", "-o", str(reference),
+                ],
+                cwd=ROOT,
+                check=True,
+            )
+            expected_parts.append(run([str(reference)]))
+            actual_parts.append(run([actual_path]))
+        expected = b"".join(expected_parts)
+        actual = b"".join(actual_parts)
 
     if actual != expected:
         difference = difflib.unified_diff(

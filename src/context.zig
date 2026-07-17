@@ -2220,6 +2220,9 @@ pub const Context = struct {
     /// Executable mappings outlive individual Interpreter values and are freed
     /// after every shared-realm JavaScript thread has joined.
     jit_owner: jit.Owner = .{},
+    /// C-API contexts in one JSContextGroup share the primary realm's executable
+    /// owner along with its arena heap. Standalone contexts leave this null.
+    shared_jit_owner: ?*jit.Owner = null,
     enable_jit: bool = true,
     /// Reusable allocator used as the GC heap's cell backing. It recycles
     /// per-cell slabs for allocation/lifecycle performance and becomes
@@ -2239,6 +2242,9 @@ pub const Context = struct {
     /// direct single-owner `destroy()` contract; `JSGlobalContextCreate*` sets
     /// this to one and `JSGlobalContextRetain/Release` maintain it.
     c_api_ref_count: std.atomic.Value(usize) = .init(0),
+    /// Opaque owner installed by the C API for grouped contexts. Kept opaque so
+    /// the engine core does not depend on the public ABI wrapper type.
+    c_api_group: ?*anyopaque = null,
     /// Embedder metadata set through JSGlobalContextSetName. Store exact UTF-16
     /// code units in the arena; the C boundary returns a fresh JSStringRef copy.
     c_api_name_utf16: ?[]const u16 = null,
@@ -2666,6 +2672,79 @@ pub const Context = struct {
         });
     }
 
+    /// Create another global realm on a standalone arena context's allocation
+    /// heap. This is the C-API context-group path: realms have distinct globals,
+    /// intrinsic objects, environments, shapes, and microtask queues, while all
+    /// values and executable mappings share one VM lifetime. The primary owns
+    /// the arena and must outlive every realm created here.
+    pub fn createSharedArenaRealm(primary: *Context) !*Context {
+        if (primary.gc != null or primary.locked_arena != null or primary.gil != null)
+            return error.UnsupportedSharedRuntime;
+        primary.assertOwnerThread();
+        const a = primary.arena();
+        const allocator = primary.gpa;
+        const self = try allocator.create(Context);
+        errdefer allocator.destroy(self);
+        self.* = .{
+            .host_gpa = primary.host_gpa,
+            .gpa = allocator,
+            .arena_state = primary.arena_state,
+            .jit_owner = jit.Owner.init(allocator),
+            .shared_jit_owner = primary.shared_jit_owner orelse &primary.jit_owner,
+            .enable_jit = primary.enable_jit,
+            .owner_thread = primary.owner_thread,
+            .sab_retains = .{ .gpa = allocator },
+            .env = .{ .arena = a, .fn_scope = true },
+            .global_object = undefined,
+            .root_shape = try Shape.createRoot(a),
+            .tdz_marker = undefined,
+            .main_can_block = primary.main_can_block,
+            .max_js_threads = 0,
+            .parallel_js = false,
+        };
+        errdefer self.jit_owner.deinit();
+
+        const gc_saved = gc_mod.setActiveHeap(null);
+        defer _ = gc_mod.setActiveHeap(gc_saved);
+        const sa_saved = strcell.setActiveArena(a);
+        defer _ = strcell.setActiveArena(sa_saved);
+
+        const global_obj = try gc_mod.allocObj(a);
+        global_obj.* = .{};
+        self.global_object = global_obj;
+        const tdz = try gc_mod.allocObj(a);
+        tdz.* = .{};
+        self.tdz_marker = tdz;
+
+        try interp.installGlobals(&self.env, self.root_shape);
+        inline for (.{ "Date", "Error", "RegExp", "Function" }, 0..) |name, index| {
+            self.c_api_builtin_constructors[index] = self.env.get(name) orelse Value.undef();
+        }
+        try self.env.put("globalThis", Value.obj(global_obj));
+        if (self.env.get("Object")) |object_ctor| {
+            if (object_ctor.isObject()) {
+                if (object_ctor.asObj().getOwn("prototype")) |object_proto| {
+                    if (object_proto.isObject()) global_obj.proto = object_proto.asObj();
+                }
+            }
+        }
+        var it = self.env.vars.iterator();
+        while (it.next()) |entry| {
+            const name = entry.key_ptr.*;
+            try global_obj.setOwn(a, self.root_shape, name, entry.value_ptr.*);
+            const frozen = std.mem.eql(u8, name, "undefined") or
+                std.mem.eql(u8, name, "NaN") or std.mem.eql(u8, name, "Infinity");
+            try global_obj.setAttr(a, name, if (frozen)
+                .{ .writable = false, .enumerable = false, .configurable = false }
+            else
+                .{ .writable = true, .enumerable = false, .configurable = true });
+        }
+        if (self.env.get("$262")) |harness| {
+            if (harness.isObject()) try harness.asObj().setOwn(a, self.root_shape, "global", Value.obj(global_obj));
+        }
+        return self;
+    }
+
     pub fn createWithTestingOptions(gpa: std.mem.Allocator, options: TestingOptions) !*Context {
         // Validate option dependencies before allocating anything, so the error
         // path leaks nothing.
@@ -2888,7 +2967,7 @@ pub const Context = struct {
         return .{
             .arena = self.arena(),
             .env = &self.env,
-            .jit_owner = if (self.enable_jit) &self.jit_owner else null,
+            .jit_owner = if (self.enable_jit) (self.shared_jit_owner orelse &self.jit_owner) else null,
             .global_object = self.global_object,
             .this_value = Value.obj(self.global_object),
             .root_shape = self.root_shape,
@@ -3031,6 +3110,38 @@ pub const Context = struct {
         context_gpa.destroy(self);
         if (budget_allocator) |ba| host_gpa.destroy(ba);
         if (host_allocator_lock) |lock| host_gpa.destroy(lock);
+    }
+
+    /// Tear down one secondary shared-arena realm without releasing the primary
+    /// VM heap. The group calls this only after its last external/context retain
+    /// is gone, so callbacks and embedder deallocators run while every realm and
+    /// every cross-realm value is still allocated.
+    pub fn destroySharedArenaRealm(self: *Context) void {
+        self.assertOwnerThread();
+        std.debug.assert(self.gc == null and self.locked_arena == null and self.gil == null);
+        std.debug.assert(self.shared_jit_owner != null);
+        self.js_threads.deinit(self.gpa);
+        self.active_interpreters.deinit(self.gpa);
+        self.finalization_cleanup_jobs.deinit(self.gpa);
+        self.c_api_handles.deinit(self.gpa);
+        for (self.c_api_object_owners.items) |owner| {
+            owner.finishOnce();
+            self.gpa.destroy(owner);
+        }
+        self.c_api_object_owners.deinit(self.gpa);
+        for (self.c_api_class_prototypes.items) |owner| {
+            owner.finish();
+            self.gpa.destroy(owner);
+        }
+        self.c_api_class_prototypes.deinit(self.gpa);
+        for (self.external_buffer_owners.items) |owner| {
+            _ = owner.release();
+            self.gpa.destroy(owner);
+        }
+        self.external_buffer_owners.deinit(self.gpa);
+        self.sab_retains.deinit();
+        self.jit_owner.deinit();
+        self.gpa.destroy(self);
     }
 
     pub fn initCApiRef(self: *Context) void {
