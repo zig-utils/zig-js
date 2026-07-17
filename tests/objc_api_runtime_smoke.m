@@ -7,6 +7,35 @@
 @implementation ZJSTestObject
 @end
 
+static BOOL ZJSTestExportCallbackState = NO;
+
+@protocol ZJSTestExports <JSExport>
+@property (nonatomic, copy) NSString *title;
+- (int32_t)add:(int32_t)left to:(int32_t)right;
+- (CGPoint)offset:(CGPoint)point;
+- (NSString *)decorate:(NSString *)value;
+- (void)throwNative;
+@end
+
+@interface ZJSTestExportObject : NSObject <ZJSTestExports>
+@property (nonatomic, copy) NSString *title;
+- (NSString *)hiddenValue;
+@end
+
+@implementation ZJSTestExportObject
+- (int32_t)add:(int32_t)left to:(int32_t)right
+{
+    ZJSTestExportCallbackState = JSContext.currentContext != nil &&
+        JSContext.currentCallee != nil && JSContext.currentArguments.count == 2 &&
+        JSContext.currentThis.toObject == self;
+    return left + right;
+}
+- (CGPoint)offset:(CGPoint)point { return CGPointMake(point.x + 2, point.y - 2); }
+- (NSString *)decorate:(NSString *)value { return [@"[" stringByAppendingString:[value stringByAppendingString:@"]"]]; }
+- (void)throwNative { [NSException raise:NSInvalidArgumentException format:@"export-native-failure"]; }
+- (NSString *)hiddenValue { return @"hidden"; }
+@end
+
 static int check(BOOL condition, int code)
 {
     return condition ? 0 : code;
@@ -385,6 +414,34 @@ int main(void)
         JSValue *contextFailure = [context evaluateScript:@"try { exceptionBlock(); 'missed'; } catch (error) { String(error); }"];
         if (check([contextFailure.toString containsString:@"context-block-failure"], 65))
             return 65;
+        ZJSTestExportObject *exportObject = [ZJSTestExportObject new];
+        exportObject.title = @"before";
+        context[@"exported"] = exportObject;
+        if (check([context evaluateScript:@"exported.title"].toString.length == 6, 68))
+            return 68;
+        [context evaluateScript:@"exported.title = 'after'"];
+        if (check([exportObject.title isEqualToString:@"after"], 69))
+            return 69;
+        if (check([[context evaluateScript:@"exported.addTo(20, 22)"] toInt32] == 42 &&
+                      ZJSTestExportCallbackState,
+                  70))
+            return 70;
+        JSValue *exportedWrapper = context[@"exported"];
+        if (check([exportedWrapper valueForProperty:@"addTo"] ==
+                      [exportedWrapper valueForProperty:@"addTo"] &&
+                      [[context evaluateScript:@"exported.decorate('zig-js')"] toString].length == 8,
+                  71))
+            return 71;
+        JSValue *exportedPoint = [context evaluateScript:@"exported.offset({ x: 3, y: 5 })"];
+        if (check(exportedPoint.toPoint.x == 5 && exportedPoint.toPoint.y == 3, 72))
+            return 72;
+        if (check([[[context evaluateScript:@"typeof exported.hiddenValue"] toString]
+                      isEqualToString:@"undefined"],
+                  73))
+            return 73;
+        JSValue *exportFailure = [context evaluateScript:@"try { exported.throwNative(); 'missed'; } catch (error) { String(error); }"];
+        if (check([exportFailure.toString containsString:@"export-native-failure"], 74))
+            return 74;
     }
     return 0;
 }

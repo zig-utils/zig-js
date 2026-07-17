@@ -107,7 +107,7 @@ pub fn build(b: *std.Build) void {
         });
         objc_runtime_smoke.root_module.addCSourceFile(.{
             .file = b.path("tests/objc_api_runtime_smoke.m"),
-            .flags = &.{ "-fobjc-arc", "-fblocks", "-Wno-retain-cycles" },
+            .flags = &.{ "-fobjc-arc", "-fblocks", "-Wno-arc-retain-cycles" },
         });
         objc_runtime_smoke.root_module.addIncludePath(b.path("include"));
         objc_runtime_smoke.root_module.addObjectFile(installed_library.?);

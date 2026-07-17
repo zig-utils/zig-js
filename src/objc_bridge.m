@@ -58,9 +58,17 @@ JS_EXPORT NSString *const JSPropertyDescriptorSetKey = @"set";
 
 @interface ZJSHostObjectRecord : NSObject
 @property (nonatomic, strong) id object;
+@property (nonatomic, strong) NSMutableDictionary<NSString *, JSValue *> *methods;
 @end
 
 @implementation ZJSHostObjectRecord
+@end
+
+@interface ZJSHostMethodRecord : ZJSHostObjectRecord
+@property (nonatomic) SEL selector;
+@end
+
+@implementation ZJSHostMethodRecord
 @end
 
 @implementation ZJSValueState
@@ -152,7 +160,19 @@ static ZJSManagedValueState *ZJSManagedState(JSManagedValue *value)
 }
 
 static NSValue *ZJSObjectiveCIdentityKey(id object);
+static JSStringRef ZJSStringCreate(NSString *string);
+static NSString *ZJSStringCopy(JSStringRef string);
 static JSClassRef ZJSBlockObjectClass(void);
+static bool ZJSExportHasProperty(JSContextRef context, JSObjectRef object,
+                                 JSStringRef propertyName);
+static JSValueRef ZJSExportGetProperty(JSContextRef context, JSObjectRef object,
+                                       JSStringRef propertyName,
+                                       JSValueRef *exception);
+static bool ZJSExportSetProperty(JSContextRef context, JSObjectRef object,
+                                 JSStringRef propertyName, JSValueRef value,
+                                 JSValueRef *exception);
+static void ZJSExportGetPropertyNames(JSContextRef context, JSObjectRef object,
+                                      JSPropertyNameAccumulatorRef names);
 
 static void ZJSOpaqueObjectFinalize(JSObjectRef object)
 {
@@ -171,6 +191,10 @@ static JSClassRef ZJSOpaqueObjectClass(void)
             JSClassDefinition definition = kJSClassDefinitionEmpty;
             definition.className = "ZJSObjectiveCObject";
             definition.finalize = ZJSOpaqueObjectFinalize;
+            definition.hasProperty = ZJSExportHasProperty;
+            definition.getProperty = ZJSExportGetProperty;
+            definition.setProperty = ZJSExportSetProperty;
+            definition.getPropertyNames = ZJSExportGetPropertyNames;
             jsClass = JSClassCreate(&definition);
         }
     }
@@ -500,6 +524,394 @@ static BOOL ZJSIsBlock(id object)
     Class objectClass = object_getClass(object);
     const char *name = objectClass ? class_getName(objectClass) : NULL;
     return name && strstr(name, "Block");
+}
+
+static void ZJSAddExportProtocol(Protocol *protocol,
+                                 NSMutableArray<Protocol *> *protocols)
+{
+    if (protocol != @protocol(JSExport) &&
+        protocol_conformsToProtocol(protocol, @protocol(JSExport)) &&
+        ![protocols containsObject:protocol])
+        [protocols addObject:protocol];
+    unsigned count = 0;
+    Protocol *__unsafe_unretained *adopted = protocol_copyProtocolList(protocol, &count);
+    for (unsigned index = 0; index < count; ++index)
+        ZJSAddExportProtocol(adopted[index], protocols);
+    free(adopted);
+}
+
+static NSArray<Protocol *> *ZJSExportProtocols(id target)
+{
+    NSMutableArray<Protocol *> *result = [NSMutableArray array];
+    Class targetClass = object_isClass(target) ? target : [target class];
+    for (Class current = targetClass; current; current = class_getSuperclass(current)) {
+        unsigned count = 0;
+        Protocol *__unsafe_unretained *protocols = class_copyProtocolList(current, &count);
+        for (unsigned index = 0; index < count; ++index)
+            ZJSAddExportProtocol(protocols[index], result);
+        free(protocols);
+    }
+    return result;
+}
+
+static NSString *ZJSJavaScriptNameForSelector(SEL selector)
+{
+    NSArray<NSString *> *parts = [NSStringFromSelector(selector)
+        componentsSeparatedByString:@":"];
+    NSMutableString *result = [parts.firstObject mutableCopy];
+    for (NSUInteger index = 1; index + 1 < parts.count; ++index) {
+        NSString *part = parts[index];
+        if (!part.length)
+            continue;
+        [result appendString:[[part substringToIndex:1] uppercaseString]];
+        [result appendString:[part substringFromIndex:1]];
+    }
+    return result;
+}
+
+static objc_property_t ZJSExportedProperty(id target, NSString *name)
+{
+    if (object_isClass(target))
+        return NULL;
+    for (Protocol *protocol in ZJSExportProtocols(target)) {
+        unsigned count = 0;
+        objc_property_t *properties = protocol_copyPropertyList(protocol, &count);
+        for (unsigned index = 0; index < count; ++index) {
+            objc_property_t property = properties[index];
+            if ([name isEqualToString:@(property_getName(property))]) {
+                free(properties);
+                return property;
+            }
+        }
+        free(properties);
+    }
+    return NULL;
+}
+
+static BOOL ZJSPropertyIsReadonly(objc_property_t property)
+{
+    const char *attributes = property_getAttributes(property);
+    return attributes && (strstr(attributes, ",R") != NULL);
+}
+
+static SEL ZJSPropertyGetter(objc_property_t property)
+{
+    const char *attributes = property_getAttributes(property);
+    const char *custom = attributes ? strstr(attributes, ",G") : NULL;
+    if (!custom)
+        return sel_registerName(property_getName(property));
+    custom += 2;
+    const char *end = strchr(custom, ',');
+    size_t length = end ? (size_t)(end - custom) : strlen(custom);
+    char *name = strndup(custom, length);
+    SEL selector = sel_registerName(name);
+    free(name);
+    return selector;
+}
+
+static SEL ZJSPropertySetter(objc_property_t property)
+{
+    if (ZJSPropertyIsReadonly(property))
+        return NULL;
+    const char *attributes = property_getAttributes(property);
+    const char *custom = attributes ? strstr(attributes, ",S") : NULL;
+    if (custom) {
+        custom += 2;
+        const char *end = strchr(custom, ',');
+        size_t length = end ? (size_t)(end - custom) : strlen(custom);
+        char *name = strndup(custom, length);
+        SEL selector = sel_registerName(name);
+        free(name);
+        return selector;
+    }
+    NSString *propertyName = @(property_getName(property));
+    NSString *setterName = [NSString stringWithFormat:@"set%@%@:",
+                                                       [[propertyName substringToIndex:1] uppercaseString],
+                                                       [propertyName substringFromIndex:1]];
+    return NSSelectorFromString(setterName);
+}
+
+static BOOL ZJSSelectorIsPropertyAccessor(id target, SEL selector)
+{
+    if (object_isClass(target))
+        return NO;
+    for (Protocol *protocol in ZJSExportProtocols(target)) {
+        unsigned count = 0;
+        objc_property_t *properties = protocol_copyPropertyList(protocol, &count);
+        for (unsigned index = 0; index < count; ++index) {
+            BOOL matches = selector == ZJSPropertyGetter(properties[index]) ||
+                selector == ZJSPropertySetter(properties[index]);
+            if (matches) {
+                free(properties);
+                return YES;
+            }
+        }
+        free(properties);
+    }
+    return NO;
+}
+
+static SEL ZJSExportedSelector(id target, NSString *name)
+{
+    BOOL instanceMethod = !object_isClass(target);
+    for (Protocol *protocol in ZJSExportProtocols(target)) {
+        for (NSUInteger requiredIndex = 0; requiredIndex < 2; ++requiredIndex) {
+            BOOL required = requiredIndex == 0;
+            unsigned count = 0;
+            struct objc_method_description *methods =
+                protocol_copyMethodDescriptionList(protocol, required,
+                                                   instanceMethod, &count);
+            for (unsigned index = 0; index < count; ++index) {
+                SEL selector = methods[index].name;
+                if (!selector || ZJSSelectorIsPropertyAccessor(target, selector))
+                    continue;
+                if ([name isEqualToString:ZJSJavaScriptNameForSelector(selector)] &&
+                    [target respondsToSelector:selector]) {
+                    free(methods);
+                    return selector;
+                }
+            }
+            free(methods);
+        }
+    }
+    return NULL;
+}
+
+static JSValue *ZJSInvokeSelector(JSContext *context, id target, SEL selector,
+                                  JSValue *callee, JSValue *thisValue,
+                                  NSArray<JSValue *> *arguments,
+                                  JSValueRef *exception)
+{
+    NSMethodSignature *signature = [target methodSignatureForSelector:selector];
+    if (!signature)
+        return nil;
+    NSUInteger nativeCount = signature.numberOfArguments;
+    ffi_type **argumentTypes = calloc(nativeCount, sizeof(ffi_type *));
+    void **argumentPointers = calloc(nativeCount, sizeof(void *));
+    ZJSFFIStorage *argumentStorage = calloc(nativeCount, sizeof(ZJSFFIStorage));
+    if (!argumentTypes || !argumentPointers || !argumentStorage) {
+        free(argumentTypes);
+        free(argumentPointers);
+        free(argumentStorage);
+        return nil;
+    }
+
+    NSMutableArray *retainedObjects = [NSMutableArray array];
+    JSValue *previousException = context.exception;
+    ZJSCallbackState *previousState = ZJSCurrentCallbackState();
+    NSMutableDictionary *threadDictionary = NSThread.currentThread.threadDictionary;
+    JSValue *result = nil;
+    @try {
+        argumentTypes[0] = &ffi_type_pointer;
+        argumentStorage[0].pointer = (__bridge void *)target;
+        argumentPointers[0] = &argumentStorage[0];
+        argumentTypes[1] = &ffi_type_pointer;
+        argumentStorage[1].pointer = selector;
+        argumentPointers[1] = &argumentStorage[1];
+        for (NSUInteger index = 2; index < nativeCount; ++index) {
+            JSValue *value = index - 2 < arguments.count
+                ? arguments[index - 2]
+                : [JSValue valueWithUndefinedInContext:context];
+            const char *type = [signature getArgumentTypeAtIndex:index];
+            argumentTypes[index] = ZJSFFIType(type);
+            if (!argumentTypes[index])
+                [NSException raise:NSInvalidArgumentException
+                            format:@"Unsupported JSExport argument encoding %s", type];
+            ZJSPrepareFFIArgument(value, type, &argumentStorage[index], retainedObjects);
+            argumentPointers[index] = &argumentStorage[index];
+        }
+        ffi_type *returnType = ZJSFFIType(signature.methodReturnType);
+        if (!returnType)
+            [NSException raise:NSInvalidArgumentException
+                        format:@"Unsupported JSExport return encoding %s",
+                               signature.methodReturnType];
+        ffi_cif callInterface;
+        if (ffi_prep_cif(&callInterface, FFI_DEFAULT_ABI, (unsigned)nativeCount,
+                         returnType, argumentTypes) != FFI_OK)
+            [NSException raise:NSInvalidArgumentException format:@"Unable to prepare JSExport call"];
+
+        ZJSCallbackState *callbackState = [ZJSCallbackState new];
+        callbackState.context = context;
+        callbackState.callee = callee;
+        callbackState.thisValue = thisValue;
+        callbackState.arguments = arguments;
+        context.exception = nil;
+        threadDictionary[ZJSCallbackStateThreadKey] = callbackState;
+
+        ZJSFFIStorage returnStorage = { 0 };
+        IMP implementation = [target methodForSelector:selector];
+        ffi_call(&callInterface, FFI_FN(implementation), &returnStorage,
+                 argumentPointers);
+        if (context.exception) {
+            if (exception)
+                *exception = context.exception.JSValueRef;
+        } else {
+            result = ZJSValueFromFFIReturn(context, signature.methodReturnType,
+                                           &returnStorage);
+        }
+    } @catch (NSException *nativeException) {
+        JSValue *error = [JSValue valueWithNewErrorFromMessage:nativeException.reason
+                                                     inContext:context];
+        if (exception)
+            *exception = error.JSValueRef;
+    } @finally {
+        context.exception = previousException;
+        if (previousState)
+            threadDictionary[ZJSCallbackStateThreadKey] = previousState;
+        else
+            [threadDictionary removeObjectForKey:ZJSCallbackStateThreadKey];
+        free(argumentTypes);
+        free(argumentPointers);
+        free(argumentStorage);
+    }
+    return result;
+}
+
+static JSValueRef ZJSMethodCall(JSContextRef contextRef, JSObjectRef functionRef,
+                                JSObjectRef thisRef, size_t argumentCount,
+                                const JSValueRef arguments[],
+                                JSValueRef *exception)
+{
+    JSContext *context = [JSContext contextWithJSGlobalContextRef:(JSGlobalContextRef)contextRef];
+    ZJSHostMethodRecord *record = (__bridge ZJSHostMethodRecord *)JSObjectGetPrivate(functionRef);
+    JSValue *callee = [JSValue valueWithJSValueRef:functionRef inContext:context];
+    JSValue *thisValue = [JSValue valueWithJSValueRef:thisRef inContext:context];
+    NSMutableArray<JSValue *> *values = [NSMutableArray arrayWithCapacity:argumentCount];
+    for (size_t index = 0; index < argumentCount; ++index)
+        [values addObject:[JSValue valueWithJSValueRef:arguments[index]
+                                              inContext:context]];
+    return ZJSInvokeSelector(context, record.object, record.selector, callee,
+                             thisValue, values, exception).JSValueRef;
+}
+
+static JSClassRef ZJSMethodObjectClass(void)
+{
+    static JSClassRef jsClass;
+    @synchronized([ZJSHostMethodRecord class]) {
+        if (!jsClass) {
+            JSClassDefinition definition = kJSClassDefinitionEmpty;
+            definition.className = "ZJSObjectiveCMethod";
+            definition.finalize = ZJSOpaqueObjectFinalize;
+            definition.callAsFunction = ZJSMethodCall;
+            jsClass = JSClassCreate(&definition);
+        }
+    }
+    return jsClass;
+}
+
+static JSValue *ZJSMethodValue(JSContext *context, ZJSHostObjectRecord *hostRecord,
+                               NSString *name, SEL selector)
+{
+    JSValue *existing = hostRecord.methods[name];
+    if (existing)
+        return existing;
+    ZJSHostMethodRecord *record = [ZJSHostMethodRecord new];
+    record.object = hostRecord.object;
+    record.selector = selector;
+    void *privateData = (void *)CFBridgingRetain(record);
+    JSObjectRef functionRef = JSObjectMake(context.JSGlobalContextRef,
+                                           ZJSMethodObjectClass(), privateData);
+    if (!functionRef) {
+        CFBridgingRelease(privateData);
+        return nil;
+    }
+    JSValue *function = [context.globalObject valueForProperty:@"Function"];
+    JSValue *prototype = [function valueForProperty:@"prototype"];
+    JSObjectSetPrototype(context.JSGlobalContextRef, functionRef,
+                         prototype.JSValueRef);
+    JSValue *result = [JSValue valueWithJSValueRef:functionRef inContext:context];
+    if (!hostRecord.methods)
+        hostRecord.methods = [NSMutableDictionary dictionary];
+    hostRecord.methods[name] = result;
+    return result;
+}
+
+static bool ZJSExportHasProperty(JSContextRef contextRef, JSObjectRef objectRef,
+                                 JSStringRef propertyName)
+{
+    JSContext *context = [JSContext contextWithJSGlobalContextRef:(JSGlobalContextRef)contextRef];
+    JSValue *object = [JSValue valueWithJSValueRef:objectRef inContext:context];
+    id target = ZJSHostRecord(object).object;
+    NSString *name = ZJSStringCopy(propertyName);
+    return ZJSExportedProperty(target, name) != NULL ||
+        ZJSExportedSelector(target, name) != NULL;
+}
+
+static JSValueRef ZJSExportGetProperty(JSContextRef contextRef, JSObjectRef objectRef,
+                                       JSStringRef propertyName,
+                                       JSValueRef *exception)
+{
+    JSContext *context = [JSContext contextWithJSGlobalContextRef:(JSGlobalContextRef)contextRef];
+    JSValue *object = [JSValue valueWithJSValueRef:objectRef inContext:context];
+    ZJSHostObjectRecord *record = ZJSHostRecord(object);
+    NSString *name = ZJSStringCopy(propertyName);
+    objc_property_t property = ZJSExportedProperty(record.object, name);
+    if (property) {
+        JSValue *result = ZJSInvokeSelector(context, record.object,
+                                            ZJSPropertyGetter(property), nil,
+                                            object, @[], exception);
+        return result.JSValueRef;
+    }
+    SEL selector = ZJSExportedSelector(record.object, name);
+    if (!selector)
+        return NULL;
+    return ZJSMethodValue(context, record, name, selector).JSValueRef;
+}
+
+static bool ZJSExportSetProperty(JSContextRef contextRef, JSObjectRef objectRef,
+                                 JSStringRef propertyName, JSValueRef valueRef,
+                                 JSValueRef *exception)
+{
+    JSContext *context = [JSContext contextWithJSGlobalContextRef:(JSGlobalContextRef)contextRef];
+    JSValue *object = [JSValue valueWithJSValueRef:objectRef inContext:context];
+    ZJSHostObjectRecord *record = ZJSHostRecord(object);
+    NSString *name = ZJSStringCopy(propertyName);
+    objc_property_t property = ZJSExportedProperty(record.object, name);
+    SEL setter = property ? ZJSPropertySetter(property) : NULL;
+    if (!setter)
+        return false;
+    JSValue *value = [JSValue valueWithJSValueRef:valueRef inContext:context];
+    ZJSInvokeSelector(context, record.object, setter, nil, object,
+                      @[ value ], exception);
+    return exception == NULL || *exception == NULL;
+}
+
+static void ZJSExportGetPropertyNames(JSContextRef contextRef,
+                                      JSObjectRef objectRef,
+                                      JSPropertyNameAccumulatorRef names)
+{
+    JSContext *context = [JSContext contextWithJSGlobalContextRef:(JSGlobalContextRef)contextRef];
+    JSValue *object = [JSValue valueWithJSValueRef:objectRef inContext:context];
+    id target = ZJSHostRecord(object).object;
+    BOOL instanceMethod = !object_isClass(target);
+    NSMutableSet<NSString *> *published = [NSMutableSet set];
+    for (Protocol *protocol in ZJSExportProtocols(target)) {
+        if (instanceMethod) {
+            unsigned propertyCount = 0;
+            objc_property_t *properties = protocol_copyPropertyList(protocol,
+                                                                     &propertyCount);
+            for (unsigned index = 0; index < propertyCount; ++index)
+                [published addObject:@(property_getName(properties[index]))];
+            free(properties);
+        }
+        for (NSUInteger requiredIndex = 0; requiredIndex < 2; ++requiredIndex) {
+            unsigned methodCount = 0;
+            struct objc_method_description *methods =
+                protocol_copyMethodDescriptionList(protocol, requiredIndex == 0,
+                                                   instanceMethod, &methodCount);
+            for (unsigned index = 0; index < methodCount; ++index) {
+                SEL selector = methods[index].name;
+                if (selector && !ZJSSelectorIsPropertyAccessor(target, selector))
+                    [published addObject:ZJSJavaScriptNameForSelector(selector)];
+            }
+            free(methods);
+        }
+    }
+    for (NSString *name in published) {
+        JSStringRef string = ZJSStringCreate(name);
+        JSPropertyNameAccumulatorAddName(names, string);
+        JSStringRelease(string);
+    }
 }
 
 static NSMapTable<NSValue *, JSVirtualMachine *> *ZJSVirtualMachines(void)
