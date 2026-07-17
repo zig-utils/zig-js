@@ -117,6 +117,10 @@ pub fn build(b: *std.Build) void {
         const objc_runtime_step = b.step("test-objc-api", "Compile, link, and run the Objective-C bridge host");
         objc_runtime_step.dependOn(&run_objc_runtime_smoke.step);
 
+        const objc_jsc_diff_cmd = b.addSystemCommand(&.{ "python3", "tools/objc-api-jsc-diff.py" });
+        objc_jsc_diff_cmd.addFileArg(installed_library.?);
+        const objc_jsc_diff_step = b.step("objc-api-jsc-diff", "Compare Objective-C bridge behavior with pinned system JSC");
+        objc_jsc_diff_step.dependOn(&objc_jsc_diff_cmd.step);
     }
 
     const c_api_c_smoke = b.addExecutable(.{
