@@ -41072,6 +41072,44 @@ fn processEmitFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
     return Value.boolVal(emitted);
 }
 
+fn processWarningJobFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const job = self.active_native orelse return Value.undef();
+    const warning = job.getOwn("#processWarning\x00runtime") orelse return Value.undef();
+    const process_obj = self.env.get("process") orelse return Value.undef();
+    return processEmitFn(self, process_obj, &.{ Value.str("warning"), warning });
+}
+
+/// Queue one process `warning` turn. The callable job owns the warning through
+/// a private JS slot, so the precise collector traces it until FIFO delivery.
+pub fn enqueueProcessWarning(self: *Interpreter, warning: Value) EvalError!void {
+    const job = try gc_mod.allocObj(self.arena);
+    job.* = .{ .native = processWarningJobFn };
+    try job.setOwn(self.arena, self.root_shape, "#processWarning\x00runtime", warning);
+    try promise.enqueueCallback(self, Value.obj(job));
+}
+
+/// Dispatch a realm process event synchronously through the same EventEmitter
+/// path used by JavaScript. The return value reports whether listeners ran.
+pub fn emitProcessEvent(self: *Interpreter, event: []const u8, args: []const Value) EvalError!bool {
+    const process_obj = self.env.get("process") orelse return false;
+    var call_args = try self.arena.alloc(Value, args.len + 1);
+    call_args[0] = try Value.strAlloc(self.arena, event);
+    @memcpy(call_args[1..], args);
+    return (try processEmitFn(self, process_obj, call_args)).toBoolean();
+}
+
+/// The realm's uncaught-exception capture callback, if one is installed.
+pub fn processCaptureCallback(self: *Interpreter) ?Value {
+    const process_obj = self.env.get("process") orelse return null;
+    if (!processIsProcess(process_obj)) return null;
+    const callback = process_obj.asObj().getOwn("#processCapture\x00runtime") orelse return null;
+    if (!callback.isObject() or !callback.asObj().isCallableObject()) return null;
+    return callback;
+}
+
 fn processSetCaptureCallbackFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!processIsProcess(this)) return self.throwError("TypeError", "process EventEmitter method called on an incompatible receiver");

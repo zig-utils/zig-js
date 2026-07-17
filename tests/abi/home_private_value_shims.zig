@@ -255,6 +255,8 @@ extern "c" fn JSRemoteInspectorSetInspectionEnabledByDefault(bool) void;
 extern "c" fn ScriptExecutionContextIdentifier__forGlobalObject(JSContextRef) u32;
 extern "c" fn Bun__noSideEffectsToString(?*anyopaque, JSContextRef, EncodedValue) EncodedValue;
 extern "c" fn Bun__promises__isErrorLike(JSContextRef, EncodedValue) bool;
+extern "c" fn Bun__Process__emitWarning(JSContextRef, EncodedValue, EncodedValue, EncodedValue, EncodedValue) void;
+extern "c" fn Bun__promises__emitUnhandledRejectionWarning(JSContextRef, EncodedValue, EncodedValue) void;
 extern "c" fn JSC__JSValue__forEach(EncodedValue, JSContextRef, ?*anyopaque, IterableCallback) void;
 extern "c" fn ZigString__toJSONObject(*const ZigString, JSContextRef) EncodedValue;
 extern "c" fn JSC__jsTypeStringForValue(JSContextRef, EncodedValue) ?*anyopaque;
@@ -1229,6 +1231,25 @@ pub fn main() void {
         Bun__promises__isErrorLike(context, EncodedValue.fromInt32(236)) or
         Bun__JSValue__toNumber(evaluate(context, "__private_error_like_gets"), context) != 0)
         fail("private rejection error-like classification mismatch");
+    _ = evaluate(context, "globalThis.__private_warnings_241 = []; process.on('warning', warning => __private_warnings_241.push(warning));");
+    Bun__Process__emitWarning(
+        context,
+        evaluate(context, "'consumer warning 241'"),
+        evaluate(context, "({ type: 'ConsumerWarning', code: 'W241', detail: 'consumer-detail' })"),
+        .undefined,
+        .undefined,
+    );
+    _ = JSC__JSGlobalObject__drainMicrotasks(context);
+    if (!JSC__JSValue__toBoolean(evaluate(context, "__private_warnings_241.length === 1 && __private_warnings_241[0] instanceof Error && __private_warnings_241[0].name === 'ConsumerWarning' && __private_warnings_241[0].code === 'W241' && __private_warnings_241[0].detail === 'consumer-detail'")))
+        fail("private process warning normalization mismatch");
+    Bun__promises__emitUnhandledRejectionWarning(
+        context,
+        evaluate(context, "({ stack: 'consumer-stack-241' })"),
+        evaluate(context, "Promise.resolve(241)"),
+    );
+    _ = JSC__JSGlobalObject__drainMicrotasks(context);
+    if (!JSC__JSValue__toBoolean(evaluate(context, "__private_warnings_241.length === 3 && __private_warnings_241[1].message === 'consumer-stack-241' && __private_warnings_241[2].name === 'UnhandledPromiseRejectionWarning' && Object.getOwnPropertyDescriptor(__private_warnings_241[2], 'stack').value === 'consumer-stack-241'")))
+        fail("private unhandled rejection warning sequence mismatch");
     var iterable_state = IterableFixtureState{ .vm = JSC__JSGlobalObject__vm(context), .global = context };
     JSC__JSValue__forEach(evaluate(context, "[237, 'iterable']"), context, &iterable_state, iterableFixtureCallback);
     if (iterable_state.calls != 2 or iterable_state.values[0] != EncodedValue.fromInt32(237) or

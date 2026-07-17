@@ -5391,6 +5391,26 @@ fn privateNoSideEffectOwnedString(context: *Context, bytes: []const u8) EncodedV
     return privateEncodedFromValue(context, projected);
 }
 
+fn privateNoSideEffectValue(context: *Context, input: Value) !Value {
+    return switch (input.kind()) {
+        .undefined => Value.str("undefined"),
+        .null => Value.str("null"),
+        .boolean => if (input.asBool()) Value.str("true") else Value.str("false"),
+        .number => Value.strAlloc(context.arena(), try value.numberToString(context.arena(), input.asNum())),
+        .string => input,
+        .object => object: {
+            const object = input.asObj();
+            if (object.is_symbol) {
+                const description = object.symbolDescription() orelse break :object Value.str("Symbol");
+                break :object Value.strAlloc(context.arena(), try std.fmt.allocPrint(context.arena(), "Symbol({s})", .{description}));
+            }
+            if (object.is_bigint)
+                break :object Value.strAlloc(context.arena(), try value.bigIntToString(object, context.arena()));
+            break :object Value.str("[object Object]");
+        },
+    };
+}
+
 /// Pinned fatal-error projection: this deliberately bypasses every observable
 /// JavaScript conversion hook and mutable intrinsic.
 export fn Bun__noSideEffectsToString(
@@ -5402,26 +5422,13 @@ export fn Bun__noSideEffectsToString(
     const group = privateGroupFromVM(vm_ref) orelse return .empty;
     if (context.c_api_group != vm_ref) return .empty;
     const input = privateValueFrom(global, encoded) orelse return .empty;
+    // Preserve the pinned primitive singletons and string-handle identity.
     return switch (input.kind()) {
         .undefined => privateNoSideEffectStaticString(context, group, .undefined_value),
         .null => privateNoSideEffectStaticString(context, group, .null_value),
         .boolean => privateNoSideEffectStaticString(context, group, if (input.asBool()) .true_value else .false_value),
-        .number => privateNoSideEffectOwnedString(context, value.numberToString(context.arena(), input.asNum()) catch return .empty),
         .string => encoded,
-        .object => object: {
-            const object = input.asObj();
-            if (object.is_symbol) {
-                const description = object.symbolDescription() orelse
-                    break :object privateNoSideEffectStaticString(context, group, .symbol);
-                const rendered = std.fmt.allocPrint(context.arena(), "Symbol({s})", .{description}) catch return .empty;
-                break :object privateNoSideEffectOwnedString(context, rendered);
-            }
-            if (object.is_bigint) {
-                const rendered = value.bigIntToString(object, context.arena()) catch return .empty;
-                break :object privateNoSideEffectOwnedString(context, rendered);
-            }
-            break :object privateNoSideEffectStaticString(context, group, .object);
-        },
+        else => privateEncodedFromValue(context, privateNoSideEffectValue(context, input) catch return .empty),
     };
 }
 
@@ -5455,6 +5462,193 @@ export fn Bun__promises__isErrorLike(
     return machine.hasOwnPropertyResult(reason.asObj(), "stack") catch |err| {
         privateSetPendingAbrupt(context, &machine, err);
         return false;
+    };
+}
+
+fn privateIsOrdinaryJSObject(input: Value) bool {
+    return input.isObject() and !input.asObj().is_symbol and !input.asObj().is_bigint;
+}
+
+fn privateSetWarningProperty(
+    machine: *interp.Interpreter,
+    object: *Object,
+    name: []const u8,
+    property_value: Value,
+    enumerable: bool,
+) !void {
+    try object.setOwn(machine.arena, machine.root_shape, name, property_value);
+    try object.setAttr(machine.arena, name, .{ .writable = true, .enumerable = enumerable, .configurable = true });
+}
+
+/// Pinned Process::emitWarning normalization. Delivery is queued through the
+/// selected realm so multiple warnings preserve FIFO order and listener throws
+/// surface at the later microtask checkpoint, matching Bun's nextTick turn.
+fn privateEmitProcessWarning(
+    machine: *interp.Interpreter,
+    warning: Value,
+    warning_type_input: Value,
+    code_input: Value,
+    ctor_input: Value,
+) !void {
+    var warning_type = warning_type_input;
+    var code = code_input;
+    _ = ctor_input; // Pinned Bun currently leaves constructor-based stack trimming disabled.
+    var detail = Value.undef();
+
+    if (!warning_type.isNull() and privateIsOrdinaryJSObject(warning_type) and !warning_type.asObj().is_array) {
+        _ = try machine.getProperty(warning_type, "ctor");
+        code = try machine.getProperty(warning_type, "code");
+        detail = try machine.getProperty(warning_type, "detail");
+        if (!detail.isString()) detail = Value.undef();
+        warning_type = try machine.getProperty(warning_type, "type");
+        if (!warning_type.toBoolean()) warning_type = Value.str("Warning");
+    } else if (warning_type.isCallable()) {
+        code = Value.undef();
+        warning_type = Value.str("Warning");
+    }
+
+    if (warning_type.isUndefined()) {
+        warning_type = Value.str("Warning");
+    } else if (!warning_type.isString()) {
+        return machine.throwError("TypeError", "The \"type\" argument must be a string");
+    }
+
+    if (code.isCallable()) {
+        code = Value.undef();
+    } else if (!code.isUndefined() and !code.isString()) {
+        return machine.throwError("TypeError", "The \"code\" argument must be a string");
+    }
+    const error_instance: *Object = if (warning.isString()) blk: {
+        const message = if (warning.asStr().len == 0) "Warning" else warning.asStr();
+        const created = try machine.makeError("Error", message);
+        try privateSetWarningProperty(machine, created.asObj(), "name", warning_type, false);
+        break :blk created.asObj();
+    } else if (privateIsOrdinaryJSObject(warning) and warning.asObj().behavior.is_error)
+        warning.asObj()
+    else
+        return machine.throwError("TypeError", "The \"warning\" argument must be a string or Error");
+
+    if (!code.isUndefined()) try privateSetWarningProperty(machine, error_instance, "code", code, false);
+    if (!detail.isUndefined()) try privateSetWarningProperty(machine, error_instance, "detail", detail, false);
+    try interp.enqueueProcessWarning(machine, Value.obj(error_instance));
+}
+
+fn privateDecodeWarningArgument(
+    context: *Context,
+    machine: *interp.Interpreter,
+    global: JSContextRef,
+    encoded: EncodedValue,
+    label: []const u8,
+) !Value {
+    return privateValueFrom(global, encoded) orelse
+        return machine.throwError("TypeError", try std.fmt.allocPrint(context.arena(), "{s} belongs to another VM", .{label}));
+}
+
+export fn Bun__Process__emitWarning(
+    global: JSContextRef,
+    warning_encoded: EncodedValue,
+    type_encoded: EncodedValue,
+    code_encoded: EncodedValue,
+    ctor_encoded: EncodedValue,
+) callconv(.c) void {
+    const context = ctxForEvaluation(global) orelse return;
+    const group = privatePropertyBoundaryGroup(context) orelse return;
+    if (group.pending_exception != null) return;
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return;
+    };
+    defer context.popActiveInterpreter(&machine);
+
+    const warning = privateDecodeWarningArgument(context, &machine, global, warning_encoded, "warning") catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return;
+    };
+    const warning_type = privateDecodeWarningArgument(context, &machine, global, type_encoded, "warning type") catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return;
+    };
+    const code = privateDecodeWarningArgument(context, &machine, global, code_encoded, "warning code") catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return;
+    };
+    const ctor = privateDecodeWarningArgument(context, &machine, global, ctor_encoded, "warning constructor") catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return;
+    };
+    privateEmitProcessWarning(&machine, warning, warning_type, code, ctor) catch |err|
+        privateSetPendingAbrupt(context, &machine, err);
+}
+
+const private_unhandled_rejection_warning_message =
+    "Unhandled promise rejection. This error originated either by " ++
+    "throwing inside of an async function without a catch block, " ++
+    "or by rejecting a promise which was not handled with .catch(). " ++
+    "To terminate the bun process on unhandled promise " ++
+    "rejection, use the CLI flag `--unhandled-rejections=strict`.";
+
+export fn Bun__promises__emitUnhandledRejectionWarning(
+    global: JSContextRef,
+    reason_encoded: EncodedValue,
+    promise_encoded: EncodedValue,
+) callconv(.c) void {
+    const context = ctxForEvaluation(global) orelse return;
+    const group = privatePropertyBoundaryGroup(context) orelse return;
+    if (group.pending_exception != null) return;
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return;
+    };
+    defer context.popActiveInterpreter(&machine);
+
+    const reason = privateValueFrom(global, reason_encoded) orelse return;
+    // The pinned implementation receives the promise for ABI symmetry but the
+    // warning text and warning events do not expose it.
+    _ = privateValueFrom(global, promise_encoded) orelse return;
+
+    const warning = machine.makeError("Error", private_unhandled_rejection_warning_message) catch return;
+    privateSetWarningProperty(&machine, warning.asObj(), "name", Value.str("UnhandledPromiseRejectionWarning"), false) catch return;
+
+    var reason_stack: ?Value = null;
+    const error_like = if (privateIsOrdinaryJSObject(reason))
+        machine.hasOwnPropertyResult(reason.asObj(), "stack") catch blk: {
+            machine.exception = Value.undef();
+            break :blk false;
+        }
+    else
+        false;
+    if (error_like) {
+        reason_stack = machine.getProperty(reason, "stack") catch blk: {
+            machine.exception = Value.undef();
+            break :blk null;
+        };
+        if (reason_stack) |stack|
+            privateSetWarningProperty(&machine, warning.asObj(), "stack", stack, true) catch {};
+    }
+    if (reason_stack == null)
+        reason_stack = privateNoSideEffectValue(context, reason) catch Value.undef();
+
+    privateEmitProcessWarning(
+        &machine,
+        reason_stack orelse Value.undef(),
+        Value.str("UnhandledPromiseRejectionWarning"),
+        Value.undef(),
+        Value.undef(),
+    ) catch {
+        machine.exception = Value.undef();
+    };
+    interp.enqueueProcessWarning(&machine, warning) catch {
+        machine.exception = Value.undef();
     };
 }
 
@@ -18033,6 +18227,118 @@ test "private rejection error-like classification uses exact own descriptors" {
     pending = JSGlobalObject__tryTakeException(context);
     try std.testing.expectEqual(EncodedValue.fromInt32(236), JSC__Exception__asJSValue(@ptrFromInt(try pending.asCellAddress())));
     try std.testing.expectEqual(@as(f64, 3), (try internal.evaluate("__error_like_traps_236")).asNum());
+}
+
+test "private process warnings preserve pinned normalization and delivery" {
+    const group_ref = JSContextGroupCreate() orelse return error.GroupCreateFailed;
+    defer JSContextGroupRelease(group_ref);
+    const context = JSGlobalContextCreateInGroup(group_ref, null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(context);
+    const sibling = JSGlobalContextCreateInGroup(group_ref, null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(sibling);
+    const internal = ctxForEvaluation(context) orelse return error.ContextCreateFailed;
+    const sibling_internal = ctxForEvaluation(sibling) orelse return error.ContextCreateFailed;
+
+    const Probe = struct {
+        fn encoded(context_: *Context, source: []const u8) !EncodedValue {
+            return privateEncodedFromValue(context_, try context_.evaluate(source));
+        }
+    };
+
+    _ = try internal.evaluate(
+        \\globalThis.__warnings_241 = [];
+        \\globalThis.__warning_reads_241 = "";
+        \\process.on("warning", function (warning) { __warnings_241.push(warning); });
+    );
+    const options = try Probe.encoded(internal,
+        \\({
+        \\  get ctor() { __warning_reads_241 += "ctor,"; return function ctor() {}; },
+        \\  get code() { __warning_reads_241 += "code,"; return "W241"; },
+        \\  get detail() { __warning_reads_241 += "detail,"; return "detail-241"; },
+        \\  get type() { __warning_reads_241 += "type"; return "PinnedWarning"; }
+        \\})
+    );
+    Bun__Process__emitWarning(context, try Probe.encoded(internal, "'warning-241'"), options, .undefined, .undefined);
+    try std.testing.expectEqualStrings("ctor,code,detail,type", (try internal.evaluate("__warning_reads_241")).asStr());
+    _ = JSC__JSGlobalObject__drainMicrotasks(context);
+    try std.testing.expect((try internal.evaluate(
+        \\let w = __warnings_241[0];
+        \\let name = Object.getOwnPropertyDescriptor(w, "name");
+        \\let code = Object.getOwnPropertyDescriptor(w, "code");
+        \\let detail = Object.getOwnPropertyDescriptor(w, "detail");
+        \\__warnings_241.length === 1 && w instanceof Error && w.message === "warning-241" &&
+        \\w.name === "PinnedWarning" && w.code === "W241" && w.detail === "detail-241" &&
+        \\name.enumerable === false && code.enumerable === false && detail.enumerable === false
+    )).asBool());
+
+    const existing = try Probe.encoded(internal, "globalThis.__existing_warning_241 = new RangeError('existing-241')");
+    Bun__Process__emitWarning(context, existing, .undefined, try Probe.encoded(internal, "'E241'"), .undefined);
+    _ = JSC__JSGlobalObject__drainMicrotasks(context);
+    try std.testing.expect((try internal.evaluate("__warnings_241[1] === __existing_warning_241 && __warnings_241[1].code === 'E241'")).asBool());
+
+    _ = try sibling_internal.evaluate(
+        \\globalThis.__warnings_241 = [];
+        \\process.on("warning", function (warning) { __warnings_241.push(warning); });
+    );
+    Bun__Process__emitWarning(sibling, try Probe.encoded(internal, "'sibling-241'"), .undefined, .undefined, .undefined);
+    _ = JSC__JSGlobalObject__drainMicrotasks(sibling);
+    try std.testing.expect((try sibling_internal.evaluate("__warnings_241.length === 1 && Object.getPrototypeOf(__warnings_241[0]) === Error.prototype")).asBool());
+    try std.testing.expectEqual(@as(f64, 2), (try internal.evaluate("__warnings_241.length")).asNum());
+
+    const foreign = JSGlobalContextCreate(null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(foreign);
+    const foreign_internal = ctxForEvaluation(foreign) orelse return error.ContextCreateFailed;
+    Bun__Process__emitWarning(context, try Probe.encoded(foreign_internal, "'foreign-241'"), .undefined, .undefined, .undefined);
+    try std.testing.expect(JSGlobalObject__hasException(context));
+    JSGlobalObject__clearException(context);
+
+    _ = try internal.evaluate(
+        \\globalThis.__rejection_warnings_241 = [];
+        \\globalThis.__stack_reads_241 = 0;
+        \\globalThis.__rejection_reason_241 = { get stack() { __stack_reads_241++; throw 241; } };
+        \\globalThis.__rejection_promise_241 = Promise.resolve(241);
+        \\process.on("warning", function (warning) { __rejection_warnings_241.push(warning); });
+    );
+    Bun__promises__emitUnhandledRejectionWarning(
+        context,
+        try Probe.encoded(internal, "__rejection_reason_241"),
+        try Probe.encoded(internal, "__rejection_promise_241"),
+    );
+    try std.testing.expect(!JSGlobalObject__hasException(context));
+    _ = JSC__JSGlobalObject__drainMicrotasks(context);
+    try std.testing.expect((try internal.evaluate(
+        \\let pair = __rejection_warnings_241;
+        \\pair.length === 2 && __stack_reads_241 === 1 &&
+        \\pair[0].name === "UnhandledPromiseRejectionWarning" && pair[0].message === "[object Object]" &&
+        \\pair[1].name === "UnhandledPromiseRejectionWarning" &&
+        \\pair[1].message.indexOf("Unhandled promise rejection.") === 0
+    )).asBool());
+
+    _ = try internal.evaluate(
+        \\globalThis.__stack_reason_241 = { stack: "stack-241" };
+    );
+    Bun__promises__emitUnhandledRejectionWarning(
+        context,
+        try Probe.encoded(internal, "__stack_reason_241"),
+        try Probe.encoded(internal, "__rejection_promise_241"),
+    );
+    _ = JSC__JSGlobalObject__drainMicrotasks(context);
+    try std.testing.expect((try internal.evaluate(
+        \\__rejection_warnings_241[2].message === "stack-241" &&
+        \\Object.getOwnPropertyDescriptor(__rejection_warnings_241[3], "stack").value === "stack-241"
+    )).asBool());
+
+    _ = try internal.evaluate(
+        \\globalThis.__warning_throw_count_241 = 0;
+        \\process.on("warningThrow241", function () {});
+        \\process.on("warning", function () { __warning_throw_count_241++; throw 241; });
+    );
+    Bun__Process__emitWarning(context, try Probe.encoded(internal, "'throws-241'"), .undefined, .undefined, .undefined);
+    _ = JSC__JSGlobalObject__drainMicrotasks(context);
+    try std.testing.expect(JSGlobalObject__hasException(context));
+    const pending = JSGlobalObject__tryTakeException(context);
+    try std.testing.expectEqual(EncodedValue.fromInt32(241), JSC__Exception__asJSValue(@ptrFromInt(try pending.asCellAddress())));
+    try std.testing.expectEqual(@as(f64, 1), (try internal.evaluate("__warning_throw_count_241")).asNum());
 }
 
 test "private iterable callback traversal preserves protocol and abrupt completion" {
