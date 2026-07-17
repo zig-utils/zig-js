@@ -49,7 +49,7 @@ zig build home-private-abi-audit \
 
 This verifies the live revision, every source hash, signature, classification,
 and calling convention. It replaces a vague source-level estimate, but the 431
-private imports are now 225 implemented / 206 pending under #163. The generated
+private imports are now 226 implemented / 205 pending under #163. The generated
 FFI wrapper emits and resolves `JSFunctionCall` inside its own compiled module,
 so zig-js must not provide a duplicate symbol. The implemented
 slices cover JSC64 value identity, cell equality, truthiness, int32 extraction,
@@ -139,6 +139,11 @@ explicit start, system-console logging, and inspection-default state. The
 default is deterministically disabled on modern Apple-family targets and
 enabled elsewhere, and can be overridden independently of context
 inspectability.
+The proxy internal-field shim projects exact target/handler identities without
+running traps, returns null fields after revocation, and safely rejects invalid
+selectors and non-proxies. Canonical per-VM private object handles keep repeated
+and sibling-realm EncodedJSValue publication bit-identical without crossing VM
+boundaries.
 Three fast built-in-name reads cover all 24 pinned byte IDs and keep direct
 data, own-slot, and Object.prototype-cutoff lookup observably distinct. The
 Bun-only pure `code` VM inquiry is tracked solely in the Bun denominator.
@@ -204,7 +209,7 @@ behavior, and VM exception propagation. Ten Promise/InternalPromise shims add
 selected-realm pending and directly settled promises, exact native downcasts,
 callback Promise passthrough, Error/throw rejection, and normal AnyPromise
 resolution with thenable assimilation and self-resolution protection. Their
-224-symbol combined fixture covers sibling realms, foreign VMs, callback
+225-symbol combined fixture covers sibling realms, foreign VMs, callback
 reentrancy, exception clearing, settled-target no-ops, and the complete
 DOMException code matrix. Seven Home-only
 JSMap shims create selected-realm native maps and directly implement

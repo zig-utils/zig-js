@@ -44,7 +44,7 @@ convention. The exact current denominator is:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #163 | 431 (225 implemented, 206 pending) |
+| Private JSC/Bun/WebCore ABI under #163 | 431 (226 implemented, 205 pending) |
 | Overlap with zig-js's completed public C target | 15 |
 | Platform libc import | 1 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
@@ -61,7 +61,7 @@ zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"
 ```
 
 This inventory is the denominator, not a claim that the whole surface works.
-The first 225 private entries are implemented; the other 206 remain pending
+The first 226 private entries are implemented; the other 205 remain pending
 until #163 provides their type/layout contracts, shims, and consumer evidence.
 `JSFunctionCall` remains revision-pinned in the declaration inventory but is
 not part of that denominator: each runtime-generated FFI module defines the
@@ -407,6 +407,12 @@ inspection policy. Apple-family targets deterministically follow modern JSC's
 disabled default and non-Apple targets default enabled; explicit policy changes
 remain separate from each context's inspectability flag.
 
+The proxy internal-field projection returns exact live target/handler cells
+without ordinary property access or userland traps. Revoked fields become
+JavaScript `null`; invalid field IDs and non-proxies return the empty ABI value.
+A per-VM canonical object-handle table keeps re-published EncodedJSValues
+bit-identical across sibling realms while isolating independent VMs.
+
 The VM exception slice exports the shared `JSGlobalObject`/`VM` pending-state
 boundary plus exception-cell conversion and classification. Sibling realms in
 one context group observe the same VM pointer and pending cell; taking or
@@ -546,7 +552,7 @@ layout, exact UTF-16 and BunString decoding, shortest numeric formatting,
 WebKit JSON escaping, sticky overflow/OOM, and non-destructive conversion.
 The five rooted native-container entry points add callback-scoped marked
 arguments and per-realm CommonJS function registries with precise-GC rooting,
-cross-VM rejection, and exact append/set/swap-remove behavior. The 224-symbol
+cross-VM rejection, and exact append/set/swap-remove behavior. The 225-symbol
 combined runtime fixture covers these semantics; the two
 profile-selected JSType exports retain
 their separate Home/Bun runtime fixtures.
@@ -590,7 +596,7 @@ profile contains 437 unique declarations from 54 hashed files:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #164 | 421 (219 implemented, 202 pending) |
+| Private JSC/Bun/WebCore ABI under #164 | 421 (220 implemented, 201 pending) |
 | Public-C overlap | 15 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
 | **Total** | **437** |
