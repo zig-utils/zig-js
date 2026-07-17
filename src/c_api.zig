@@ -99,6 +99,22 @@ const PrivateBunString = extern struct {
     }
 };
 
+/// Pure-Zig storage for the pinned 24-byte/8-byte WTF::StringBuilder boundary.
+/// The consumer owns these bytes. Keeping the UTF-16 buffer pointer, length,
+/// and tagged capacity inline makes construction allocation-free just like the
+/// C++ object. The upper half of `metadata` rejects stale/uninitialized bytes;
+/// the low 31 bits hold capacity and bit 31 records sticky overflow.
+const PrivateStringBuilder = extern struct {
+    units: ?[*]u16 = null,
+    length: usize = 0,
+    metadata: usize = 0,
+};
+
+const private_string_builder_magic: usize = 0x5a4a_5342_0000_0000; // "ZJSB"
+const private_string_builder_overflow: usize = 0x8000_0000;
+const private_string_builder_capacity_mask: usize = 0x7fff_ffff;
+const private_string_builder_max_length: usize = std.math.maxInt(i32);
+
 /// Prefix-compatible with WTF::StringImpl's pinned 64-bit data layout. The
 /// trailing fields are private allocator metadata and are never exposed to the
 /// consumer. BigInt decimal output is ASCII, so every instance is an 8-bit
@@ -121,6 +137,8 @@ comptime {
     if (@sizeOf(PrivateBunString) != 24 or @alignOf(PrivateBunString) != 8 or
         @offsetOf(PrivateBunString, "value") != 8)
         @compileError("private BunString must retain its pinned 24-byte/8-byte ABI");
+    if (@sizeOf(PrivateStringBuilder) != 24 or @alignOf(PrivateStringBuilder) != 8)
+        @compileError("private StringBuilder must retain its pinned 24-byte/8-byte ABI");
     if (@offsetOf(PrivateWTFStringImpl, "m_ref_count") != 0 or
         @offsetOf(PrivateWTFStringImpl, "m_length") != 4 or
         @offsetOf(PrivateWTFStringImpl, "m_ptr") != 8 or
@@ -2596,6 +2614,357 @@ fn privateWTF8ToUTF16(allocator: std.mem.Allocator, bytes: []const u8) PrivateBu
     }
     std.debug.assert(output == units.len);
     return units;
+}
+
+fn privateStringBuilderFromOpaque(raw: ?*anyopaque) ?*PrivateStringBuilder {
+    const pointer = raw orelse return null;
+    if (@intFromPtr(pointer) % @alignOf(PrivateStringBuilder) != 0) return null;
+    const builder: *PrivateStringBuilder = @ptrCast(@alignCast(pointer));
+    if (builder.metadata & ~private_string_builder_capacity_mask & ~private_string_builder_overflow !=
+        private_string_builder_magic)
+        return null;
+    const capacity = builder.metadata & private_string_builder_capacity_mask;
+    if (builder.length > capacity or (capacity == 0) != (builder.units == null)) return null;
+    return builder;
+}
+
+fn privateStringBuilderCapacity(builder: *const PrivateStringBuilder) usize {
+    return builder.metadata & private_string_builder_capacity_mask;
+}
+
+fn privateStringBuilderHasOverflowed(builder: *const PrivateStringBuilder) bool {
+    return builder.metadata & private_string_builder_overflow != 0;
+}
+
+fn privateStringBuilderDidOverflow(builder: *PrivateStringBuilder) void {
+    builder.metadata |= private_string_builder_overflow;
+}
+
+fn privateStringBuilderReserve(builder: *PrivateStringBuilder, required: usize) bool {
+    if (privateStringBuilderHasOverflowed(builder)) return false;
+    if (required > private_string_builder_max_length) {
+        privateStringBuilderDidOverflow(builder);
+        return false;
+    }
+    const old_capacity = privateStringBuilderCapacity(builder);
+    if (required <= old_capacity) return true;
+    const doubled = std.math.mul(usize, old_capacity, 2) catch private_string_builder_max_length;
+    const new_capacity = @min(
+        private_string_builder_max_length,
+        @max(required, @max(@as(usize, 16), doubled)),
+    );
+    const resized = if (builder.units) |units|
+        private_string_allocator.realloc(units[0..old_capacity], new_capacity)
+    else
+        private_string_allocator.alloc(u16, new_capacity);
+    const allocation = resized catch {
+        privateStringBuilderDidOverflow(builder);
+        return false;
+    };
+    builder.units = allocation.ptr;
+    builder.metadata = private_string_builder_magic |
+        (builder.metadata & private_string_builder_overflow) |
+        new_capacity;
+    return true;
+}
+
+fn privateStringBuilderReserveAdditional(builder: *PrivateStringBuilder, additional: usize) bool {
+    const required = std.math.add(usize, builder.length, additional) catch {
+        privateStringBuilderDidOverflow(builder);
+        return false;
+    };
+    return privateStringBuilderReserve(builder, required);
+}
+
+fn privateStringBuilderAppendUnits(builder: *PrivateStringBuilder, units: []align(1) const u16) void {
+    if (units.len == 0 or !privateStringBuilderReserveAdditional(builder, units.len)) return;
+    const end = builder.length + units.len;
+    @memcpy(builder.units.?[builder.length..end], units);
+    builder.length = end;
+}
+
+fn privateStringBuilderAppendLatin1Slice(builder: *PrivateStringBuilder, bytes: []const u8) void {
+    if (bytes.len == 0 or !privateStringBuilderReserveAdditional(builder, bytes.len)) return;
+    const start = builder.length;
+    for (bytes, builder.units.?[start .. start + bytes.len]) |byte, *unit| unit.* = byte;
+    builder.length += bytes.len;
+}
+
+/// Bun's tagged UTF-8 path uses `fromUTF8ReplacingInvalidSequences`. Decode to
+/// UTF-16 while consuming one byte for every malformed lead/sequence, matching
+/// the replacement behavior used elsewhere by this runtime's TextDecoder.
+fn privateStringBuilderUTF8ReplacingInvalid(allocator: std.mem.Allocator, bytes: []const u8) error{OutOfMemory}![]u16 {
+    const units = try allocator.alloc(u16, bytes.len);
+    errdefer allocator.free(units);
+    var input: usize = 0;
+    var output: usize = 0;
+    while (input < bytes.len) {
+        const sequence_len = std.unicode.utf8ByteSequenceLength(bytes[input]) catch {
+            units[output] = 0xfffd;
+            output += 1;
+            input += 1;
+            continue;
+        };
+        if (input + sequence_len > bytes.len) {
+            units[output] = 0xfffd;
+            output += 1;
+            input += 1;
+            continue;
+        }
+        const codepoint = std.unicode.utf8Decode(bytes[input .. input + sequence_len]) catch {
+            units[output] = 0xfffd;
+            output += 1;
+            input += 1;
+            continue;
+        };
+        if (codepoint <= 0xffff) {
+            units[output] = @intCast(codepoint);
+            output += 1;
+        } else {
+            const pair = codepoint - 0x10000;
+            units[output] = @intCast(0xd800 + (pair >> 10));
+            units[output + 1] = @intCast(0xdc00 + (pair & 0x3ff));
+            output += 2;
+        }
+        input += sequence_len;
+    }
+    return allocator.realloc(units, output) catch units[0..output];
+}
+
+fn privateStringBuilderBunStringUnits(
+    allocator: std.mem.Allocator,
+    string: *const PrivateBunString,
+) PrivateBunStringError![]u16 {
+    switch (string.tag) {
+        .dead, .empty => return allocator.alloc(u16, 0),
+        .wtf_string_impl => {
+            const impl = string.value.wtf_string_impl orelse return allocator.alloc(u16, 0);
+            const length: usize = impl.m_length;
+            if (length > private_string_builder_max_length) return error.StringTooLong;
+            const units = try allocator.alloc(u16, length);
+            if (impl.m_hash_and_flags & private_wtf_flag_8_bit_buffer != 0) {
+                for (impl.m_ptr[0..length], units) |byte, *unit| unit.* = byte;
+            } else {
+                const source: [*]align(1) const u16 = @ptrCast(impl.m_ptr);
+                @memcpy(units, source[0..length]);
+            }
+            return units;
+        },
+        .zig_string, .static_zig_string => {
+            const zig_string = string.value.zig_string;
+            if (zig_string.len == 0) return allocator.alloc(u16, 0);
+            const address = zig_string.tagged_ptr & ((@as(usize, 1) << 53) - 1);
+            if (address == 0) return allocator.alloc(u16, 0);
+            if (zig_string.len > private_string_builder_max_length) return error.StringTooLong;
+            if (zig_string.tagged_ptr & (@as(usize, 1) << 63) != 0) {
+                const source: [*]align(1) const u16 = @ptrFromInt(address);
+                const units = try allocator.alloc(u16, zig_string.len);
+                @memcpy(units, source[0..zig_string.len]);
+                return units;
+            }
+            const source: [*]const u8 = @ptrFromInt(address);
+            if (zig_string.tagged_ptr & (@as(usize, 1) << 61) != 0)
+                return privateStringBuilderUTF8ReplacingInvalid(allocator, source[0..zig_string.len]);
+            const units = try allocator.alloc(u16, zig_string.len);
+            for (source[0..zig_string.len], units) |byte, *unit| unit.* = byte;
+            return units;
+        },
+    }
+}
+
+fn privateStringBuilderAppendBunString(builder: *PrivateStringBuilder, string: *const PrivateBunString) void {
+    const units = privateStringBuilderBunStringUnits(private_string_allocator, string) catch {
+        privateStringBuilderDidOverflow(builder);
+        return;
+    };
+    defer private_string_allocator.free(units);
+    privateStringBuilderAppendUnits(builder, units);
+}
+
+fn privateStringBuilderHexDigit(nibble: u16) u16 {
+    return if (nibble < 10) '0' + nibble else 'a' + (nibble - 10);
+}
+
+fn privateStringBuilderAppendQuoted(builder: *PrivateStringBuilder, string: *const PrivateBunString) void {
+    const units = privateStringBuilderBunStringUnits(private_string_allocator, string) catch {
+        privateStringBuilderDidOverflow(builder);
+        return;
+    };
+    defer private_string_allocator.free(units);
+
+    const worst_content = std.math.mul(usize, units.len, 6) catch {
+        privateStringBuilderDidOverflow(builder);
+        return;
+    };
+    const worst_total = std.math.add(usize, worst_content, 2) catch {
+        privateStringBuilderDidOverflow(builder);
+        return;
+    };
+    if (!privateStringBuilderReserveAdditional(builder, worst_total)) return;
+
+    var output = builder.length;
+    const destination = builder.units.?;
+    destination[output] = '"';
+    output += 1;
+    var index: usize = 0;
+    while (index < units.len) : (index += 1) {
+        const unit = units[index];
+        const short_escape: ?u16 = switch (unit) {
+            '"' => '"',
+            '\\' => '\\',
+            0x08 => 'b',
+            0x09 => 't',
+            0x0a => 'n',
+            0x0c => 'f',
+            0x0d => 'r',
+            else => null,
+        };
+        if (short_escape) |escaped| {
+            destination[output] = '\\';
+            destination[output + 1] = escaped;
+            output += 2;
+            continue;
+        }
+        if (unit < 0x20) {
+            destination[output] = '\\';
+            destination[output + 1] = 'u';
+            destination[output + 2] = '0';
+            destination[output + 3] = '0';
+            destination[output + 4] = privateStringBuilderHexDigit(unit >> 4);
+            destination[output + 5] = privateStringBuilderHexDigit(unit & 0xf);
+            output += 6;
+            continue;
+        }
+        if (unit >= 0xd800 and unit <= 0xdfff) {
+            const valid_pair = unit <= 0xdbff and index + 1 < units.len and
+                units[index + 1] >= 0xdc00 and units[index + 1] <= 0xdfff;
+            if (valid_pair) {
+                destination[output] = unit;
+                destination[output + 1] = units[index + 1];
+                output += 2;
+                index += 1;
+                continue;
+            }
+            destination[output] = '\\';
+            destination[output + 1] = 'u';
+            destination[output + 2] = privateStringBuilderHexDigit((unit >> 12) & 0xf);
+            destination[output + 3] = privateStringBuilderHexDigit((unit >> 8) & 0xf);
+            destination[output + 4] = privateStringBuilderHexDigit((unit >> 4) & 0xf);
+            destination[output + 5] = privateStringBuilderHexDigit(unit & 0xf);
+            output += 6;
+            continue;
+        }
+        destination[output] = unit;
+        output += 1;
+    }
+    destination[output] = '"';
+    output += 1;
+    builder.length = output;
+}
+
+export fn StringBuilder__init(raw: ?*anyopaque) callconv(.c) void {
+    const pointer = raw orelse return;
+    if (@intFromPtr(pointer) % @alignOf(PrivateStringBuilder) != 0) return;
+    const builder: *PrivateStringBuilder = @ptrCast(@alignCast(pointer));
+    builder.* = .{ .metadata = private_string_builder_magic };
+}
+
+export fn StringBuilder__deinit(raw: ?*anyopaque) callconv(.c) void {
+    const builder = privateStringBuilderFromOpaque(raw) orelse return;
+    if (builder.units) |units| private_string_allocator.free(units[0..privateStringBuilderCapacity(builder)]);
+    builder.* = .{};
+}
+
+export fn StringBuilder__ensureUnusedCapacity(raw: ?*anyopaque, additional: usize) callconv(.c) void {
+    const builder = privateStringBuilderFromOpaque(raw) orelse return;
+    _ = privateStringBuilderReserveAdditional(builder, additional);
+}
+
+export fn StringBuilder__appendLatin1(raw: ?*anyopaque, characters: [*c]const u8, len: usize) callconv(.c) void {
+    const builder = privateStringBuilderFromOpaque(raw) orelse return;
+    if (characters == null and len != 0) return privateStringBuilderDidOverflow(builder);
+    privateStringBuilderAppendLatin1Slice(builder, characters[0..len]);
+}
+
+export fn StringBuilder__appendUtf16(raw: ?*anyopaque, characters: [*c]const u16, len: usize) callconv(.c) void {
+    const builder = privateStringBuilderFromOpaque(raw) orelse return;
+    if (characters == null and len != 0) return privateStringBuilderDidOverflow(builder);
+    privateStringBuilderAppendUnits(builder, characters[0..len]);
+}
+
+export fn StringBuilder__appendString(raw: ?*anyopaque, string: PrivateBunString) callconv(.c) void {
+    const builder = privateStringBuilderFromOpaque(raw) orelse return;
+    privateStringBuilderAppendBunString(builder, &string);
+}
+
+export fn StringBuilder__appendLChar(raw: ?*anyopaque, character: u8) callconv(.c) void {
+    const builder = privateStringBuilderFromOpaque(raw) orelse return;
+    privateStringBuilderAppendLatin1Slice(builder, @as(*const [1]u8, &character));
+}
+
+export fn StringBuilder__appendUChar(raw: ?*anyopaque, character: u16) callconv(.c) void {
+    const builder = privateStringBuilderFromOpaque(raw) orelse return;
+    privateStringBuilderAppendUnits(builder, @as(*const [1]u16, &character));
+}
+
+export fn StringBuilder__appendInt(raw: ?*anyopaque, number: i32) callconv(.c) void {
+    const builder = privateStringBuilderFromOpaque(raw) orelse return;
+    var buffer: [16]u8 = undefined;
+    const rendered = std.fmt.bufPrint(&buffer, "{d}", .{number}) catch {
+        privateStringBuilderDidOverflow(builder);
+        return;
+    };
+    privateStringBuilderAppendLatin1Slice(builder, rendered);
+}
+
+export fn StringBuilder__appendUsize(raw: ?*anyopaque, number: usize) callconv(.c) void {
+    const builder = privateStringBuilderFromOpaque(raw) orelse return;
+    var buffer: [32]u8 = undefined;
+    const rendered = std.fmt.bufPrint(&buffer, "{d}", .{number}) catch {
+        privateStringBuilderDidOverflow(builder);
+        return;
+    };
+    privateStringBuilderAppendLatin1Slice(builder, rendered);
+}
+
+export fn StringBuilder__appendDouble(raw: ?*anyopaque, number: f64) callconv(.c) void {
+    const builder = privateStringBuilderFromOpaque(raw) orelse return;
+    var storage: [512]u8 = undefined;
+    var fixed = std.heap.FixedBufferAllocator.init(&storage);
+    const rendered = value.numberToString(fixed.allocator(), number) catch {
+        privateStringBuilderDidOverflow(builder);
+        return;
+    };
+    privateStringBuilderAppendLatin1Slice(builder, rendered);
+}
+
+export fn StringBuilder__appendQuotedJsonString(raw: ?*anyopaque, string: PrivateBunString) callconv(.c) void {
+    const builder = privateStringBuilderFromOpaque(raw) orelse return;
+    privateStringBuilderAppendQuoted(builder, &string);
+}
+
+export fn StringBuilder__toString(raw: ?*anyopaque, global: JSContextRef) callconv(.c) EncodedValue {
+    const context = ctxForHandleInspection(global) orelse return .empty;
+    const opaque_group = context.c_api_group orelse return .empty;
+    const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+    if (group.pending_exception != null) return .empty;
+    const builder = privateStringBuilderFromOpaque(raw) orelse return .empty;
+    if (privateStringBuilderHasOverflowed(builder)) {
+        privatePublishBunStringError(context, error.OutOfMemory);
+        return .empty;
+    }
+    const units: []const u16 = if (builder.units) |pointer| pointer[0..builder.length] else &.{};
+    const bytes = privateUTF16ToWTF8(context.arena(), units) catch {
+        privatePublishBunStringError(context, error.OutOfMemory);
+        return .empty;
+    };
+    const result = Value.strOwned(context.arena(), bytes) catch {
+        privatePublishBunStringError(context, error.OutOfMemory);
+        return .empty;
+    };
+    const encoded = privateEncodedFromValue(context, result);
+    if (encoded == .empty) privatePublishBunStringError(context, error.OutOfMemory);
+    return encoded;
 }
 
 fn privateBorrowedZigStringView(
@@ -13259,6 +13628,108 @@ test "private embedding references retain strong targets and clear weak targets"
     try std.testing.expectEqual(EncodedValue.empty, Bun__WeakRef__get(weak));
     try std.testing.expect(Bun__WeakRef__new(global, EncodedValue.fromInt32(1), .fetch_response, null) == null);
     try std.testing.expect(Bun__WeakRef__new(global, encoded, .none, null) == null);
+}
+
+test "private StringBuilder preserves UTF-16 formatting quoting and overflow" {
+    const global = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
+    defer JSGlobalContextRelease(global);
+
+    var storage: [24]u8 align(8) = undefined;
+    StringBuilder__init(&storage);
+    defer StringBuilder__deinit(&storage);
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(@TypeOf(storage)));
+    try std.testing.expect(privateStringBuilderFromOpaque(&storage) != null);
+
+    StringBuilder__ensureUnusedCapacity(&storage, 4);
+    StringBuilder__appendLatin1(&storage, "A\xe9", 2);
+    const direct_utf16 = [_]u16{ 0xd83d, 0xde00, 0xd800 };
+    StringBuilder__appendUtf16(&storage, &direct_utf16, direct_utf16.len);
+    const utf8 = "Z😀";
+    const bun_utf8 = PrivateBunString{
+        .tag = .zig_string,
+        .value = .{ .zig_string = .{
+            .tagged_ptr = @intFromPtr(utf8.ptr) | (@as(usize, 1) << 61),
+            .len = utf8.len,
+        } },
+    };
+    StringBuilder__appendString(&storage, bun_utf8);
+    StringBuilder__appendLChar(&storage, '!');
+    StringBuilder__appendUChar(&storage, 0x03a9);
+
+    const first = StringBuilder__toString(&storage, global);
+    const second = StringBuilder__toString(&storage, global);
+    try std.testing.expect(first != .empty and second != .empty);
+    const first_value = privateValueFrom(global, first) orelse return error.ValueInitFailed;
+    const second_value = privateValueFrom(global, second) orelse return error.ValueInitFailed;
+    try std.testing.expect(value.strictEquals(first_value, second_value));
+    const actual_units = try privateWTF8ToUTF16(std.testing.allocator, first_value.asStr());
+    defer std.testing.allocator.free(actual_units);
+    const expected_units = [_]u16{ 'A', 0xe9, 0xd83d, 0xde00, 0xd800, 'Z', 0xd83d, 0xde00, '!', 0x03a9 };
+    try std.testing.expectEqualSlices(u16, &expected_units, actual_units);
+
+    StringBuilder__deinit(&storage);
+    StringBuilder__deinit(&storage);
+    StringBuilder__appendLChar(&storage, 'x');
+    try std.testing.expectEqual(EncodedValue.empty, StringBuilder__toString(&storage, global));
+
+    StringBuilder__init(&storage);
+    StringBuilder__appendInt(&storage, std.math.minInt(i32));
+    StringBuilder__appendLChar(&storage, '|');
+    StringBuilder__appendUsize(&storage, std.math.maxInt(usize));
+    for ([_]f64{ -0.0, std.math.nan(f64), std.math.inf(f64), -std.math.inf(f64), 1e21 }) |number| {
+        StringBuilder__appendLChar(&storage, '|');
+        StringBuilder__appendDouble(&storage, number);
+    }
+    const formatted = privateValueFrom(global, StringBuilder__toString(&storage, global)) orelse return error.ValueInitFailed;
+    var expected_numeric_buffer: [160]u8 = undefined;
+    const expected_numeric = try std.fmt.bufPrint(
+        &expected_numeric_buffer,
+        "-2147483648|{d}|0|NaN|Infinity|-Infinity|1e+21",
+        .{std.math.maxInt(usize)},
+    );
+    try std.testing.expectEqualStrings(expected_numeric, formatted.asStr());
+
+    StringBuilder__deinit(&storage);
+    StringBuilder__init(&storage);
+    const quoted_input_units = [_]u16{ 'q', '"', '\\', '\n', 0x0b, 0xd83d, 0xde00, 0xd800 };
+    const quoted_input = PrivateBunString{
+        .tag = .static_zig_string,
+        .value = .{ .zig_string = .{
+            .tagged_ptr = @intFromPtr(&quoted_input_units) | (@as(usize, 1) << 63),
+            .len = quoted_input_units.len,
+        } },
+    };
+    StringBuilder__appendQuotedJsonString(&storage, quoted_input);
+    const quoted = privateValueFrom(global, StringBuilder__toString(&storage, global)) orelse return error.ValueInitFailed;
+    const quoted_units = try privateWTF8ToUTF16(std.testing.allocator, quoted.asStr());
+    defer std.testing.allocator.free(quoted_units);
+    const expected_quoted = [_]u16{
+        '"',    'q',    '\\', '"', '\\', '\\', '\\', 'n', '\\', 'u', '0', '0', '0', 'b',
+        0xd83d, 0xde00, '\\', 'u', 'd',  '8',  '0',  '0', '"',
+    };
+    try std.testing.expectEqualSlices(u16, &expected_quoted, quoted_units);
+
+    StringBuilder__deinit(&storage);
+    StringBuilder__init(&storage);
+    StringBuilder__appendLatin1(&storage, null, 1);
+    try std.testing.expectEqual(EncodedValue.empty, StringBuilder__toString(&storage, global));
+    try std.testing.expect(JSGlobalObject__hasException(global));
+    JSGlobalObject__clearException(global);
+
+    JSC__VM__throwError(JSC__JSGlobalObject__vm(global), global, EncodedValue.fromInt32(210));
+    try std.testing.expectEqual(EncodedValue.empty, StringBuilder__toString(&storage, global));
+    const preserved = JSGlobalObject__tryTakeException(global);
+    const preserved_pointer: *anyopaque = @ptrFromInt(try preserved.asCellAddress());
+    try std.testing.expectEqual(EncodedValue.fromInt32(210), JSC__Exception__asJSValue(preserved_pointer));
+
+    StringBuilder__deinit(&storage);
+    StringBuilder__init(&storage);
+    StringBuilder__ensureUnusedCapacity(&storage, std.math.maxInt(usize));
+    try std.testing.expectEqual(EncodedValue.empty, StringBuilder__toString(&storage, global));
+    try std.testing.expect(JSGlobalObject__hasException(global));
+    JSGlobalObject__clearException(global);
+    StringBuilder__init(null);
+    StringBuilder__deinit(null);
 }
 
 test "C-API: JSGarbageCollect honors JSValueProtect/Unprotect (GC on)" {
