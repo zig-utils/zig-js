@@ -3610,7 +3610,7 @@ fn tryRunNative(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, ge
     if (gen != null or exec.ip != 0 or exec.stack.items.len != 0 or exec.handlers.items.len != 0) return null;
     const owner = vm.jit_owner orelse return null;
 
-    var code = chunk.tier.loadCode();
+    var lease = owner.acquire(&chunk.tier);
     // Candidate numeric chunks compile on their first call: a substantial loop
     // repays the baseline compiler cost immediately, and cold contexts have no
     // second call. Object/call-heavy chunks retain the ordinary hot threshold
@@ -3619,20 +3619,25 @@ fn tryRunNative(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, ge
         eager_native_tier_entry_threshold
     else
         native_tier_entry_threshold;
-    if (code == null and chunk.tier.observeEntry(tier_threshold)) {
+    if (lease == null) if (owner.claimCompilation(&chunk.tier, tier_threshold)) |claim_value| {
+        var claim = claim_value;
         var compiled = jit_compiler.compile(chunk) catch {
             chunk.tier.publishRejected();
+            claim.release();
             return null;
         };
-        const owned = owner.adopt(compiled) catch {
+        _ = owner.adoptAndPublish(&chunk.tier, compiled) catch |err| {
             compiled.deinit();
-            chunk.tier.publishRejected();
+            if (err == error.Invalidated) chunk.tier.invalidate() else chunk.tier.publishRejected();
+            claim.release();
             return null;
         };
-        chunk.tier.publishReady(owned);
-        code = owned;
-    }
-    const native = code orelse return null;
+        claim.release();
+        lease = owner.acquire(&chunk.tier);
+    };
+    var native_lease = lease orelse return null;
+    defer native_lease.release();
+    const native = native_lease.code;
 
     if (native.manages_steps) {
         const current_frame = frame;
@@ -3669,10 +3674,12 @@ fn tryRunNative(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, ge
 /// and recycling a heap activation. Extra arguments stay rooted on the caller's
 /// operand stack; only formal parameters are copied, matching buildActivation.
 fn tryRunNativeDirectCall(vm: *Interpreter, func: *Function, args: []const Value) EvalError!?Value {
-    if (vm.jit_owner == null) return null;
+    const owner = vm.jit_owner orelse return null;
     if (func.is_class_constructor or func.uses_arguments) return null;
     const chunk = func.chunk orelse return null;
-    const native = chunk.tier.loadCode() orelse return null;
+    var native_lease = owner.acquire(&chunk.tier) orelse return null;
+    defer native_lease.release();
+    const native = native_lease.code;
     if (!native.manages_steps) return null;
     const slot_count: usize = @intCast(native.frame_slots);
     if (slot_count != func.local_count or slot_count > 64 or native.frame_slots != chunk.local_count) return null;

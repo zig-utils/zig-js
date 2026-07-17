@@ -59,6 +59,16 @@ pub const Tier = struct {
         std.debug.assert(self.state.load(.monotonic) == .compiling);
         self.state.store(.rejected, .release);
     }
+
+    /// Return this tier to bytecode-only cold state. The owning executable-code
+    /// registry calls this only while new native leases are blocked and every
+    /// prior lease has retired, so clearing the non-atomic code pointer cannot
+    /// race a native entrant.
+    pub fn invalidate(self: *Tier) void {
+        self.code = null;
+        self.entries.store(0, .monotonic);
+        self.state.store(.cold, .release);
+    }
 };
 
 pub const ExitStatus = enum(u32) { complete, side_exit, throw, stop };
@@ -128,31 +138,126 @@ pub const Owner = struct {
     allocator: ?std.mem.Allocator = null,
     lock: std.atomic.Mutex = .unlocked,
     codes: std.ArrayListUnmanaged(*CompiledCode) = .empty,
+    tiers: std.ArrayListUnmanaged(*Tier) = .empty,
+    active_leases: std.atomic.Value(usize) = .init(0),
+    invalidating: std.atomic.Value(bool) = .init(false),
+
+    pub const AdoptError = std.mem.Allocator.Error || error{Invalidated};
+
+    pub const Lease = struct {
+        owner: *Owner,
+        code: *const CompiledCode,
+
+        pub fn release(self: *Lease) void {
+            _ = self.owner.active_leases.fetchSub(1, .release);
+            self.* = undefined;
+        }
+    };
+
+    pub const Compilation = struct {
+        owner: *Owner,
+
+        pub fn release(self: *Compilation) void {
+            _ = self.owner.active_leases.fetchSub(1, .release);
+            self.* = undefined;
+        }
+    };
 
     pub fn init(allocator: std.mem.Allocator) Owner {
         return .{ .allocator = allocator };
     }
 
-    pub fn adopt(self: *Owner, compiled: CompiledCode) std.mem.Allocator.Error!*CompiledCode {
+    /// Atomically adopt a mapping, register its tier for later invalidation,
+    /// and publish the ready entry. Publication under the owner lock closes the
+    /// race where code deletion could otherwise miss a just-compiled tier.
+    pub fn adoptAndPublish(self: *Owner, tier: *Tier, compiled: CompiledCode) AdoptError!*CompiledCode {
         const allocator = self.allocator orelse return error.OutOfMemory;
         const owned = try allocator.create(CompiledCode);
         errdefer allocator.destroy(owned);
 
-        while (!self.lock.tryLock()) std.atomic.spinLoopHint();
+        self.acquireLock();
         defer self.lock.unlock();
-        try self.codes.append(allocator, owned);
+        if (self.invalidating.load(.acquire)) return error.Invalidated;
+        try self.codes.ensureUnusedCapacity(allocator, 1);
+        try self.tiers.ensureUnusedCapacity(allocator, 1);
         owned.* = compiled;
+        self.codes.appendAssumeCapacity(owned);
+        self.tiers.appendAssumeCapacity(tier);
+        tier.publishReady(owned);
         return owned;
+    }
+
+    /// Acquire a stable native mapping. Code deletion first blocks new leases,
+    /// then waits for this count to reach zero before touching tiers or pages.
+    pub fn acquire(self: *Owner, tier: *const Tier) ?Lease {
+        if (self.invalidating.load(.acquire)) return null;
+        _ = self.active_leases.fetchAdd(1, .acquire);
+        if (self.invalidating.load(.acquire)) {
+            _ = self.active_leases.fetchSub(1, .release);
+            return null;
+        }
+        const code = tier.loadCode() orelse {
+            _ = self.active_leases.fetchSub(1, .release);
+            return null;
+        };
+        return .{ .owner = self, .code = code };
+    }
+
+    /// Claim compilation as an owner operation so invalidation cannot finish
+    /// while a pre-existing compiler is still capable of publishing code.
+    pub fn claimCompilation(self: *Owner, tier: *Tier, threshold: u32) ?Compilation {
+        if (self.invalidating.load(.acquire)) return null;
+        _ = self.active_leases.fetchAdd(1, .acquire);
+        if (self.invalidating.load(.acquire) or !tier.observeEntry(threshold)) {
+            _ = self.active_leases.fetchSub(1, .release);
+            return null;
+        }
+        return .{ .owner = self };
+    }
+
+    /// Invalidate every published tier before releasing executable mappings.
+    /// A later entry observes `.cold` and may compile a fresh mapping.
+    pub fn clear(self: *Owner) void {
+        if (self.allocator == null) return;
+        self.beginInvalidation();
+        while (self.active_leases.load(.acquire) != 0) std.Thread.yield() catch {};
+
+        self.acquireLock();
+        for (self.tiers.items) |tier| tier.invalidate();
+        self.tiers.clearRetainingCapacity();
+        const allocator = self.allocator.?;
+        for (self.codes.items) |code| {
+            code.deinit();
+            allocator.destroy(code);
+        }
+        self.codes.clearRetainingCapacity();
+        self.lock.unlock();
+        self.invalidating.store(false, .release);
     }
 
     pub fn deinit(self: *Owner) void {
         const allocator = self.allocator orelse return;
+        self.beginInvalidation();
+        while (self.active_leases.load(.acquire) != 0) std.Thread.yield() catch {};
+        self.acquireLock();
         for (self.codes.items) |code| {
             code.deinit();
             allocator.destroy(code);
         }
         self.codes.deinit(allocator);
+        self.tiers.deinit(allocator);
+        self.lock.unlock();
         self.* = .{};
+    }
+
+    fn acquireLock(self: *Owner) void {
+        while (!self.lock.tryLock()) std.atomic.spinLoopHint();
+    }
+
+    fn beginInvalidation(self: *Owner) void {
+        while (self.invalidating.cmpxchgStrong(false, true, .acq_rel, .acquire) != null) {
+            while (self.invalidating.load(.acquire)) std.Thread.yield() catch {};
+        }
     }
 };
 
@@ -304,10 +409,55 @@ test "Owner releases adopted executable mappings" {
 
     var owner = Owner.init(std.testing.allocator);
     defer owner.deinit();
-    const code = try owner.adopt(try compileConstantEntry(0x1234));
+    var tier = Tier{};
+    var compilation = owner.claimCompilation(&tier, 1) orelse return error.TestUnexpectedResult;
+    _ = try owner.adoptAndPublish(&tier, try compileConstantEntry(0x1234));
+    compilation.release();
+    var lease = owner.acquire(&tier) orelse return error.TestUnexpectedResult;
+    defer lease.release();
     var frame = NativeFrame{};
-    try std.testing.expectEqual(ExitStatus.complete, code.run(&frame));
+    try std.testing.expectEqual(ExitStatus.complete, lease.code.run(&frame));
     try std.testing.expectEqual(@as(u64, 0x1234), frame.result_bits);
+}
+
+test "Owner invalidates tiers only after active native leases retire" {
+    if (!supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+
+    var owner = Owner.init(std.testing.allocator);
+    defer owner.deinit();
+    var tier = Tier{};
+    var compilation = owner.claimCompilation(&tier, 1) orelse return error.TestUnexpectedResult;
+    _ = try owner.adoptAndPublish(&tier, try compileConstantEntry(0x5678));
+    compilation.release();
+    var lease = owner.acquire(&tier) orelse return error.TestUnexpectedResult;
+    var frame = NativeFrame{};
+    try std.testing.expectEqual(ExitStatus.complete, lease.code.run(&frame));
+    try std.testing.expectEqual(@as(u64, 0x5678), frame.result_bits);
+
+    const Shared = struct {
+        owner: *Owner,
+        started: std.atomic.Value(bool) = .init(false),
+        finished: std.atomic.Value(bool) = .init(false),
+
+        fn clear(shared: *@This()) void {
+            shared.started.store(true, .release);
+            shared.owner.clear();
+            shared.finished.store(true, .release);
+        }
+    };
+    var shared = Shared{ .owner = &owner };
+    var thread = try std.Thread.spawn(.{}, Shared.clear, .{&shared});
+    while (!shared.started.load(.acquire)) std.atomic.spinLoopHint();
+    for (0..32) |_| std.Thread.yield() catch {};
+    try std.testing.expect(!shared.finished.load(.acquire));
+    lease.release();
+    thread.join();
+
+    try std.testing.expect(shared.finished.load(.acquire));
+    try std.testing.expectEqual(TierState.cold, tier.loadState());
+    try std.testing.expect(tier.loadCode() == null);
+    try std.testing.expectEqual(@as(usize, 0), owner.codes.items.len);
+    try std.testing.expectEqual(@as(usize, 0), owner.tiers.items.len);
 }
 
 test "CodeMemory publishes and executes native code" {
