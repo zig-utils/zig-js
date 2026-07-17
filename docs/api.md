@@ -33,10 +33,11 @@ python3 tools/verify-objc-api.py \
   --sdk-root "$(xcrun --sdk macosx --show-sdk-path)"
 ```
 
-The inventory currently records **51 implemented / 57 pending** declarations.
+The inventory currently records **69 implemented / 39 pending** declarations.
 The implemented slice covers VM/context construction, evaluation, C-ref wrapper
 identity, context metadata, primitive and native object factories, type
-predicates, numeric/string conversion, and exact comparison methods. See the [Objective-C bridge inventory
+predicates, numeric/string and geometry conversion, exact comparisons, indexed
+reads, and property-descriptor symbols. See the [Objective-C bridge inventory
 guide](objc-api/README.md) for the exact boundary and reproduction details;
 header availability alone does not imply implemented runtime behavior.
 

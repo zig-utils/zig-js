@@ -875,7 +875,7 @@
       "kind": "instance_method",
       "name": "valueAtIndex:",
       "declaration": "- (JSValue * _Null_unspecified) valueAtIndex:(NSUInteger)index",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -893,7 +893,7 @@
       "kind": "class_method",
       "name": "valueWithPoint:inContext:",
       "declaration": "+ (JSValue * _Null_unspecified) valueWithPoint:(CGPoint)point inContext:(JSContext * _Null_unspecified)context",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -902,7 +902,7 @@
       "kind": "class_method",
       "name": "valueWithRange:inContext:",
       "declaration": "+ (JSValue * _Null_unspecified) valueWithRange:(NSRange)range inContext:(JSContext * _Null_unspecified)context",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -911,7 +911,7 @@
       "kind": "class_method",
       "name": "valueWithRect:inContext:",
       "declaration": "+ (JSValue * _Null_unspecified) valueWithRect:(CGRect)rect inContext:(JSContext * _Null_unspecified)context",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -920,7 +920,7 @@
       "kind": "class_method",
       "name": "valueWithSize:inContext:",
       "declaration": "+ (JSValue * _Null_unspecified) valueWithSize:(CGSize)size inContext:(JSContext * _Null_unspecified)context",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -929,7 +929,7 @@
       "kind": "instance_method",
       "name": "toPoint",
       "declaration": "- (CGPoint) toPoint",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -938,7 +938,7 @@
       "kind": "instance_method",
       "name": "toRange",
       "declaration": "- (NSRange) toRange",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -947,7 +947,7 @@
       "kind": "instance_method",
       "name": "toRect",
       "declaration": "- (CGRect) toRect",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -956,7 +956,7 @@
       "kind": "instance_method",
       "name": "toSize",
       "declaration": "- (CGSize) toSize",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -965,7 +965,7 @@
       "kind": "instance_method",
       "name": "objectAtIndexedSubscript:",
       "declaration": "- (JSValue * _Null_unspecified) objectAtIndexedSubscript:(NSUInteger)index",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -1001,7 +1001,7 @@
       "kind": "data_symbol",
       "name": "JSPropertyDescriptorConfigurableKey",
       "declaration": "JS_EXPORT extern NSString * _Null_unspecified const JSPropertyDescriptorConfigurableKey",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -1010,7 +1010,7 @@
       "kind": "data_symbol",
       "name": "JSPropertyDescriptorEnumerableKey",
       "declaration": "JS_EXPORT extern NSString * _Null_unspecified const JSPropertyDescriptorEnumerableKey",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -1019,7 +1019,7 @@
       "kind": "data_symbol",
       "name": "JSPropertyDescriptorGetKey",
       "declaration": "JS_EXPORT extern NSString * _Null_unspecified const JSPropertyDescriptorGetKey",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -1028,7 +1028,7 @@
       "kind": "data_symbol",
       "name": "JSPropertyDescriptorSetKey",
       "declaration": "JS_EXPORT extern NSString * _Null_unspecified const JSPropertyDescriptorSetKey",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -1037,7 +1037,7 @@
       "kind": "data_symbol",
       "name": "JSPropertyDescriptorValueKey",
       "declaration": "JS_EXPORT extern NSString * _Null_unspecified const JSPropertyDescriptorValueKey",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -1046,7 +1046,7 @@
       "kind": "data_symbol",
       "name": "JSPropertyDescriptorWritableKey",
       "declaration": "JS_EXPORT extern NSString * _Null_unspecified const JSPropertyDescriptorWritableKey",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -1055,7 +1055,7 @@
       "kind": "typedef",
       "name": "JSValueProperty",
       "declaration": "typedef NSString * _Null_unspecified JSValueProperty",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -1064,7 +1064,7 @@
       "kind": "typedef",
       "name": "JSValueProperty",
       "declaration": "typedef id _Null_unspecified JSValueProperty",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
