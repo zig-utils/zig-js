@@ -83,8 +83,8 @@
     },
     "by_status": {
       "external": 1,
-      "implemented": 224,
-      "pending": 212
+      "implemented": 226,
+      "pending": 210
     }
   },
   "home_comparison": {
@@ -1810,10 +1810,10 @@
       "line": 1953,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSValue__deepEquals(this: JSValue, other: JSValue, global: *JSGlobalObject) bool;",
       "declaration_sha256": "0e92b76057a288f6e48af89952eda30055e3eabcbf9b959f0b8eb0091e91a0f7",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSValue__deleteProperty",
@@ -2371,10 +2371,10 @@
       "line": 1963,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSValue__strictDeepEquals(this: JSValue, other: JSValue, global: *JSGlobalObject) bool;",
       "declaration_sha256": "4f41c8c0d7aefa70e19bbd57e59d5eaedd735abf5fcacade7bcde3ab8e1667c9",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSValue__stringIncludes",

@@ -240,6 +240,8 @@ extern "c" fn JSC__JSValue__getName(EncodedValue, JSContextRef, *BunString) void
 extern "c" fn JSC__JSValue__jsonStringify(EncodedValue, JSContextRef, u32, *BunString) void;
 extern "c" fn JSC__JSValue__jsonStringifyFast(EncodedValue, JSContextRef, *BunString) void;
 extern "c" fn JSC__JSValue__isJSXElement(EncodedValue, JSContextRef) bool;
+extern "c" fn JSC__JSValue__deepEquals(EncodedValue, EncodedValue, JSContextRef) bool;
+extern "c" fn JSC__JSValue__strictDeepEquals(EncodedValue, EncodedValue, JSContextRef) bool;
 extern "c" fn JSC__jsTypeStringForValue(JSContextRef, EncodedValue) ?*anyopaque;
 extern "c" fn JSC__JSString__eql(?*anyopaque, JSContextRef, ?*anyopaque) bool;
 extern "c" fn JSC__JSString__is8Bit(?*anyopaque) bool;
@@ -1151,6 +1153,13 @@ pub fn main() void {
         !JSC__JSValue__isJSXElement(evaluate(context, "({ $$typeof: Symbol.for('react.transitional.element') })"), context) or
         JSC__JSValue__isJSXElement(evaluate(context, "({ $$typeof: Symbol('react.element') })"), context))
         fail("private JSX element registry predicate mismatch");
+    const cyclic_left = evaluate(context, "(() => { const value = { key: [1, undefined] }; value.self = value; return value; })()");
+    const cyclic_right = evaluate(context, "(() => { const value = { key: [1, undefined] }; value.self = value; return value; })()");
+    if (!JSC__JSValue__deepEquals(cyclic_left, cyclic_right, context) or
+        !JSC__JSValue__strictDeepEquals(cyclic_left, cyclic_right, context) or
+        !JSC__JSValue__deepEquals(evaluate(context, "({ missing: undefined })"), evaluate(context, "({})"), context) or
+        JSC__JSValue__strictDeepEquals(evaluate(context, "({ missing: undefined })"), evaluate(context, "({})"), context))
+        fail("private core deep-equality semantics mismatch");
     json_output = .{ .tag = .dead, .value = .{ .zig_string = .{ .tagged_ptr = 0, .len = 0 } } };
     JSC__JSValue__jsonStringifyFast(json_target, context, &json_output);
     if (json_output.tag != .wtf_string_impl or
@@ -3230,5 +3239,5 @@ pub fn main() void {
         TopExceptionScope__exceptionIncludingTraps(&verification_scope) != null)
         fail("private TopExceptionScope destruction mismatch");
 
-    std.debug.print("Home private value shims: 214/214 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 216/216 symbols linked; runtime matrix passed\n", .{});
 }

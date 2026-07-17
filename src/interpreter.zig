@@ -12002,7 +12002,7 @@ pub const Interpreter = struct {
 
     /// Read typed-array element `i` as a Value (a BigInt for a BigInt view, a
     /// Number otherwise).
-    fn taLoad(self: *Interpreter, ta: *const value.TypedArrayData, i: usize) EvalError!Value {
+    pub fn taLoad(self: *Interpreter, ta: *const value.TypedArrayData, i: usize) EvalError!Value {
         if (ta.kind.isBigInt()) return self.makeBigInt(value.taReadBig(ta, i));
         return value.taRead(ta, i);
     }

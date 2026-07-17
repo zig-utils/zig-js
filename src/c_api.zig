@@ -5247,6 +5247,387 @@ export fn JSC__JSValue__isJSXElement(
     return value.strictEquals(type_value, transitional);
 }
 
+const PrivateDeepPair = struct {
+    left: *Object,
+    right: *Object,
+};
+
+const PrivateDeepMapEntry = struct {
+    key: Value,
+    value_: Value,
+};
+
+fn privateDeepObject(input: Value) ?*Object {
+    if (!input.isObject()) return null;
+    const object = input.asObj();
+    if (object.is_symbol or object.is_bigint) return null;
+    return object;
+}
+
+fn privateDeepElementSnapshot(machine: *interp.Interpreter, object: *Object) ![]Value {
+    object.lockElements();
+    defer object.unlockElements();
+    const result = try machine.arena.alloc(Value, object.elementsItems().len);
+    @memcpy(result, object.elementsItems());
+    return result;
+}
+
+fn privateDeepMapEntry(input: Value) ?PrivateDeepMapEntry {
+    const object = privateDeepObject(input) orelse return null;
+    if (object.elementsLen() < 2) return null;
+    return .{
+        .key = object.elementAt(0) orelse return null,
+        .value_ = object.elementAt(1) orelse Value.undef(),
+    };
+}
+
+fn privateDeepSetEntry(input: Value) ?Value {
+    if (input.isObject() and input.asObj().behavior.is_set_deleted) return null;
+    return input;
+}
+
+fn privateDeepArrayIndex(machine: *interp.Interpreter, object: *Object, index: usize) !?Value {
+    if (index > std.math.maxInt(u32)) return null;
+    return machine.getDirectIndex(object, @intCast(index));
+}
+
+fn privateDeepClassName(machine: *interp.Interpreter, object: *Object) []const u8 {
+    var target = object;
+    var guard: usize = 0;
+    while (target.proxyTarget()) |next| {
+        guard += 1;
+        if (guard > 10_000) break;
+        target = next;
+    }
+    return privateCalculatedClassName(machine, target, privateStaticClassInfoName(Value.obj(target)) orelse "Object");
+}
+
+fn privateDeepCompareEnumerable(
+    machine: *interp.Interpreter,
+    left: *Object,
+    right: *Object,
+    strict: bool,
+    stack: *std.ArrayListUnmanaged(PrivateDeepPair),
+    symbols_only: bool,
+    skip_error_stack: bool,
+) interp.EvalError!bool {
+    const left_all = try builtins.ownEnumerablePropertyKeys(machine, left, true);
+    const right_all = try builtins.ownEnumerablePropertyKeys(machine, right, true);
+    var left_keys: std.ArrayListUnmanaged([]const u8) = .empty;
+    var right_keys: std.ArrayListUnmanaged([]const u8) = .empty;
+    for (left_all) |key| {
+        if (symbols_only and !value.isRealSymbolKey(key)) continue;
+        if (skip_error_stack and std.mem.eql(u8, key, "stack")) continue;
+        try left_keys.append(machine.arena, key);
+    }
+    for (right_all) |key| {
+        if (symbols_only and !value.isRealSymbolKey(key)) continue;
+        if (skip_error_stack and std.mem.eql(u8, key, "stack")) continue;
+        try right_keys.append(machine.arena, key);
+    }
+    if (strict and left_keys.items.len != right_keys.items.len) return false;
+
+    for (left_keys.items) |key| {
+        const left_value = try machine.getProperty(Value.obj(left), key);
+        var present = false;
+        for (right_keys.items) |right_key| {
+            if (std.mem.eql(u8, key, right_key)) {
+                present = true;
+                break;
+            }
+        }
+        if (!present) {
+            if (!strict and left_value.isUndefined()) continue;
+            return false;
+        }
+        const right_value = try machine.getProperty(Value.obj(right), key);
+        if (!try privateDeepCompare(machine, left_value, right_value, strict, stack, true)) return false;
+    }
+    for (right_keys.items) |key| {
+        var present = false;
+        for (left_keys.items) |left_key| {
+            if (std.mem.eql(u8, key, left_key)) {
+                present = true;
+                break;
+            }
+        }
+        if (present) continue;
+        if (strict) return false;
+        if (!(try machine.getProperty(Value.obj(right), key)).isUndefined()) return false;
+    }
+    return true;
+}
+
+fn privateDeepCompareMap(
+    machine: *interp.Interpreter,
+    left: *Object,
+    right: *Object,
+    strict: bool,
+    stack: *std.ArrayListUnmanaged(PrivateDeepPair),
+) interp.EvalError!bool {
+    const left_raw = try privateDeepElementSnapshot(machine, left);
+    const right_raw = try privateDeepElementSnapshot(machine, right);
+    var left_entries: std.ArrayListUnmanaged(PrivateDeepMapEntry) = .empty;
+    var right_entries: std.ArrayListUnmanaged(PrivateDeepMapEntry) = .empty;
+    for (left_raw) |item| if (privateDeepMapEntry(item)) |entry| try left_entries.append(machine.arena, entry);
+    for (right_raw) |item| if (privateDeepMapEntry(item)) |entry| try right_entries.append(machine.arena, entry);
+    if (left_entries.items.len != right_entries.items.len) return false;
+    for (left_entries.items) |left_entry| {
+        var right_value = Value.undef();
+        var found_direct = false;
+        for (right_entries.items) |right_entry| {
+            if (value.sameValueZero(left_entry.key, right_entry.key)) {
+                right_value = right_entry.value_;
+                found_direct = true;
+                break;
+            }
+        }
+        // Bun falls back to a linear structural-key search when Map#get yields
+        // undefined, including when the direct key exists with an undefined
+        // value. Preserve that observable candidate-selection order.
+        if (!found_direct or right_value.isUndefined()) {
+            var found_structural = false;
+            for (right_entries.items) |right_entry| {
+                if (try privateDeepCompare(machine, left_entry.key, right_entry.key, strict, stack, false)) {
+                    right_value = right_entry.value_;
+                    found_structural = true;
+                    break;
+                }
+            }
+            if (!found_structural) return false;
+        }
+        if (!try privateDeepCompare(machine, left_entry.value_, right_value, strict, stack, false)) return false;
+    }
+    return true;
+}
+
+fn privateDeepCompareSet(
+    machine: *interp.Interpreter,
+    left: *Object,
+    right: *Object,
+    strict: bool,
+    stack: *std.ArrayListUnmanaged(PrivateDeepPair),
+) interp.EvalError!bool {
+    const left_raw = try privateDeepElementSnapshot(machine, left);
+    const right_raw = try privateDeepElementSnapshot(machine, right);
+    var left_entries: std.ArrayListUnmanaged(Value) = .empty;
+    var right_entries: std.ArrayListUnmanaged(Value) = .empty;
+    for (left_raw) |item| if (privateDeepSetEntry(item)) |entry| try left_entries.append(machine.arena, entry);
+    for (right_raw) |item| if (privateDeepSetEntry(item)) |entry| try right_entries.append(machine.arena, entry);
+    if (left_entries.items.len != right_entries.items.len) return false;
+    for (left_entries.items) |left_entry| {
+        var found = false;
+        for (right_entries.items) |right_entry| {
+            if (value.sameValueZero(left_entry, right_entry)) {
+                found = true;
+                break;
+            }
+        }
+        if (found) continue;
+        for (right_entries.items) |right_entry| {
+            if (try privateDeepCompare(machine, left_entry, right_entry, strict, stack, false)) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) return false;
+    }
+    return true;
+}
+
+fn privateDeepCompareTypedArray(
+    machine: *interp.Interpreter,
+    left: *const value.TypedArrayData,
+    right: *const value.TypedArrayData,
+    strict: bool,
+) !bool {
+    if (left.kind != right.kind) return false;
+    // JSC reports a detached or out-of-bounds view's byteLength as zero and
+    // accepts two zero-byte views before consulting the detached bit.
+    const left_len = left.currentLength() orelse 0;
+    const right_len = right.currentLength() orelse 0;
+    if (left_len != right_len) return false;
+    if (left_len == 0) return true;
+    const left_buffer = left.buffer.arrayBuffer() orelse return false;
+    const right_buffer = right.buffer.arrayBuffer() orelse return false;
+    if (left_buffer.isDetached() or right_buffer.isDetached()) return false;
+    if (!strict and (left.kind == .f16 or left.kind == .f32 or left.kind == .f64)) {
+        for (0..left_len) |index| {
+            const a = (try machine.taLoad(left, index)).asNum();
+            const b = (try machine.taLoad(right, index)).asNum();
+            if (a != b) return false;
+        }
+        return true;
+    }
+    const byte_len = left_len * left.kind.byteSize();
+    const left_bytes = left.buffer.arrayBuffer().?.bytes()[left.byte_offset .. left.byte_offset + byte_len];
+    const right_bytes = right.buffer.arrayBuffer().?.bytes()[right.byte_offset .. right.byte_offset + byte_len];
+    return std.mem.eql(u8, left_bytes, right_bytes);
+}
+
+fn privateDeepCompare(
+    machine: *interp.Interpreter,
+    left_value: Value,
+    right_value: Value,
+    strict: bool,
+    stack: *std.ArrayListUnmanaged(PrivateDeepPair),
+    add_to_stack: bool,
+) interp.EvalError!bool {
+    try machine.stackGuard();
+    machine.depth += 1;
+    defer machine.depth -= 1;
+    if (value.sameValue(left_value, right_value)) return true;
+    const left = privateDeepObject(left_value) orelse return false;
+    const right = privateDeepObject(right_value) orelse return false;
+
+    for (stack.items) |pair| {
+        if (pair.left == left) return pair.right == right;
+        if (pair.right == right) return false;
+    }
+    if (add_to_stack) try stack.append(machine.arena, .{ .left = left, .right = right });
+    defer {
+        if (add_to_stack) _ = stack.pop();
+    }
+
+    if (privateObjectJSType(left) == .JSFunction or privateObjectJSType(right) == .JSFunction) return false;
+
+    const left_is_array = try builtins.isArrayValue(machine, left_value);
+    const right_is_array = try builtins.isArrayValue(machine, right_value);
+    if (left_is_array != right_is_array) return false;
+    if (left_is_array and left.proxyHandler() == null and right.proxyHandler() == null) {
+        const left_len = left.arrayLength();
+        const right_len = right.arrayLength();
+        if (strict and left_len != right_len) return false;
+        for (0..left_len) |index| {
+            const a = try privateDeepArrayIndex(machine, left, index);
+            const b = try privateDeepArrayIndex(machine, right, index);
+            if (strict) {
+                if (a == null and b == null) continue;
+                if (a == null or b == null) return false;
+            } else {
+                if (a == null and b == null) continue;
+                if ((a == null and b.?.isUndefined()) or (b == null and a.?.isUndefined())) continue;
+                if (a == null or b == null) return false;
+            }
+            if (!try privateDeepCompare(machine, a.?, b.?, strict, stack, true)) return false;
+        }
+        if (right_len > left_len) for (left_len..right_len) |index| {
+            const item = try privateDeepArrayIndex(machine, right, index);
+            if (item != null and !item.?.isUndefined()) return false;
+        };
+        return privateDeepCompareEnumerable(machine, left, right, strict, stack, true, false);
+    }
+
+    if (left.is_set or right.is_set) {
+        if (!left.is_set or !right.is_set or left.is_weak != right.is_weak) return false;
+        if (!left.is_weak) return privateDeepCompareSet(machine, left, right, strict, stack);
+    }
+    if (left.is_map or right.is_map) {
+        if (!left.is_map or !right.is_map or left.is_weak != right.is_weak) return false;
+        if (!left.is_weak) return privateDeepCompareMap(machine, left, right, strict, stack);
+    }
+
+    const left_buffer = left.arrayBuffer();
+    const right_buffer = right.arrayBuffer();
+    if (left_buffer != null or right_buffer != null) {
+        if (left_buffer == null or right_buffer == null) return false;
+        const a = left_buffer.?;
+        const b = right_buffer.?;
+        const a_bytes = if (a.isDetached()) a.bytes()[0..0] else a.bytes();
+        const b_bytes = if (b.isDetached()) b.bytes()[0..0] else b.bytes();
+        if (a_bytes.len != b_bytes.len or a.is_shared != b.is_shared) return false;
+        if (a_bytes.len == 0) return true;
+        if (a.isDetached() or b.isDetached()) return false;
+        return std.mem.eql(u8, a_bytes, b_bytes);
+    }
+    const left_typed = left.typedArray();
+    const right_typed = right.typedArray();
+    if (left_typed != null or right_typed != null) {
+        if (left_typed == null or right_typed == null) return false;
+        return privateDeepCompareTypedArray(machine, left_typed.?, right_typed.?, strict);
+    }
+
+    if (left.behavior.is_date or right.behavior.is_date)
+        return left.behavior.is_date and right.behavior.is_date and left.dateMs() == right.dateMs();
+    if (left.behavior.is_regex or right.behavior.is_regex)
+        return left.behavior.is_regex and right.behavior.is_regex and
+            std.mem.eql(u8, left.regexSource(), right.regexSource()) and
+            std.mem.eql(u8, left.regexFlags(), right.regexFlags());
+    if (left.behavior.is_error or right.behavior.is_error) {
+        if (!left.behavior.is_error or !right.behavior.is_error) return false;
+        if (!std.mem.eql(u8, left.errorName(), right.errorName())) return false;
+        for ([_][]const u8{ "name", "message" }) |key| {
+            if (!try privateDeepCompare(machine, try machine.getProperty(left_value, key), try machine.getProperty(right_value, key), strict, stack, true)) return false;
+        }
+        if (strict and (try machine.hasPropertyResult(left, "cause")) != (try machine.hasPropertyResult(right, "cause"))) return false;
+        if (!try privateDeepCompare(machine, try machine.getProperty(left_value, "cause"), try machine.getProperty(right_value, "cause"), strict, stack, true)) return false;
+        return privateDeepCompareEnumerable(machine, left, right, strict, stack, false, true);
+    }
+    if (left.boxedPrimitive()) |boxed_left| {
+        if (boxed_left.isString()) {
+            const boxed_right = right.boxedPrimitive() orelse return false;
+            return boxed_right.isString() and
+                std.mem.eql(u8, privateDeepClassName(machine, left), privateDeepClassName(machine, right)) and
+                std.mem.eql(u8, boxed_left.asStr(), boxed_right.asStr());
+        }
+    }
+
+    if (strict and !std.mem.eql(u8, privateDeepClassName(machine, left), privateDeepClassName(machine, right))) return false;
+    return privateDeepCompareEnumerable(machine, left, right, strict, stack, false, false);
+}
+
+fn privateDeepEqualsBoundary(
+    left_encoded: EncodedValue,
+    right_encoded: EncodedValue,
+    global: JSContextRef,
+    strict: bool,
+) bool {
+    const context = ctxForEvaluation(global) orelse return false;
+    const group = privatePropertyBoundaryGroup(context) orelse return false;
+    if (group.pending_exception != null) return false;
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return false;
+    };
+    defer context.popActiveInterpreter(&machine);
+    const left = privateValueFrom(global, left_encoded) orelse {
+        const err = machine.throwError("TypeError", "Deep-equality value belongs to another VM");
+        privateSetPendingAbrupt(context, &machine, err);
+        return false;
+    };
+    const right = privateValueFrom(global, right_encoded) orelse {
+        const err = machine.throwError("TypeError", "Deep-equality value belongs to another VM");
+        privateSetPendingAbrupt(context, &machine, err);
+        return false;
+    };
+    var stack: std.ArrayListUnmanaged(PrivateDeepPair) = .empty;
+    return privateDeepCompare(&machine, left, right, strict, &stack, true) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return false;
+    };
+}
+
+export fn JSC__JSValue__deepEquals(
+    left: EncodedValue,
+    right: EncodedValue,
+    global: JSContextRef,
+) callconv(.c) bool {
+    return privateDeepEqualsBoundary(left, right, global, false);
+}
+
+export fn JSC__JSValue__strictDeepEquals(
+    left: EncodedValue,
+    right: EncodedValue,
+    global: JSContextRef,
+) callconv(.c) bool {
+    return privateDeepEqualsBoundary(left, right, global, true);
+}
+
 export fn JSC__JSString__eql(
     left_cell: ?*anyopaque,
     global: JSContextRef,
@@ -16710,6 +17091,160 @@ test "private JSX element predicate preserves registry identity and ordinary get
     pending = JSGlobalObject__tryTakeException(context);
     try std.testing.expectEqual(EncodedValue.fromInt32(228), JSC__Exception__asJSValue(@ptrFromInt(try pending.asCellAddress())));
     try std.testing.expectEqual(@as(f64, 0), (try internal.evaluate("__jsx_blocked_gets_228")).asNum());
+}
+
+test "private deep equality preserves pinned structural semantics and boundaries" {
+    const group_ref = JSContextGroupCreate() orelse return error.GroupCreateFailed;
+    defer JSContextGroupRelease(group_ref);
+    const context = JSGlobalContextCreateInGroup(group_ref, null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(context);
+    const sibling = JSGlobalContextCreateInGroup(group_ref, null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(sibling);
+    const internal = ctxForEvaluation(context) orelse return error.ContextCreateFailed;
+
+    const Probe = struct {
+        fn encoded(context_: *Context, source: []const u8) !EncodedValue {
+            return privateEncodedFromValue(context_, try context_.evaluate(source));
+        }
+
+        fn expectPair(
+            context_: *Context,
+            global: JSContextRef,
+            left_source: []const u8,
+            right_source: []const u8,
+            loose_expected: bool,
+            strict_expected: bool,
+        ) !void {
+            const left = try encoded(context_, left_source);
+            const right = try encoded(context_, right_source);
+            try std.testing.expectEqual(loose_expected, JSC__JSValue__deepEquals(left, right, global));
+            try std.testing.expectEqual(strict_expected, JSC__JSValue__strictDeepEquals(left, right, global));
+        }
+    };
+
+    // SameValue is the primitive fast path in both modes.
+    try Probe.expectPair(internal, context, "NaN", "NaN", true, true);
+    try Probe.expectPair(internal, context, "+0", "-0", false, false);
+    try Probe.expectPair(internal, context, "({ a: 1, b: { c: 2 } })", "({ b: { c: 2 }, a: 1 })", true, true);
+    try Probe.expectPair(internal, context, "({ missing: undefined })", "({})", true, false);
+    try Probe.expectPair(internal, context, "new (class Widget { constructor() { this.x = 1; } })", "({ x: 1 })", true, false);
+    try Probe.expectPair(internal, context, "Object.create(null)", "({})", true, true);
+    try Probe.expectPair(internal, context, "new String('zig-js')", "new String('zig-js')", true, true);
+    try Probe.expectPair(internal, context, "new (class Wrapped extends String {})('zig-js')", "new String('zig-js')", false, false);
+    try Probe.expectPair(internal, context, "(function named() {})", "(function named() {})", false, false);
+
+    // Arrays use direct, non-accessor indexed storage, distinguish holes only
+    // in strict mode, ignore enumerable string extras, and compare Symbols.
+    try Probe.expectPair(internal, context, "[, 1]", "[undefined, 1]", true, false);
+    try Probe.expectPair(internal, context, "[1]", "[1, undefined]", true, false);
+    try Probe.expectPair(internal, context, "(() => { const a = [1]; a.extra = 1; return a; })()", "(() => { const a = [1]; a.extra = 2; return a; })()", true, true);
+    try Probe.expectPair(
+        internal,
+        context,
+        "(() => { const a = [1]; a[Symbol.for('deep')] = { x: 1 }; return a; })()",
+        "(() => { const a = [1]; a[Symbol.for('deep')] = { x: 2 }; return a; })()",
+        false,
+        false,
+    );
+    try Probe.expectPair(
+        internal,
+        context,
+        "(() => { const a = []; Object.defineProperty(a, '0', { get() { throw 2300; }, enumerable: true }); return a; })()",
+        "[,]",
+        true,
+        true,
+    );
+    try Probe.expectPair(internal, context, "new Proxy([1], {})", "({ 0: 1 })", false, false);
+    try Probe.expectPair(internal, context, "new Proxy([1], {})", "[1]", true, true);
+
+    // Active pair tracking terminates equal cycles and rejects incompatible
+    // cyclic correspondence without imposing global alias-identity rules.
+    try Probe.expectPair(internal, context, "(() => { const a = { n: 1 }; a.self = a; return a; })()", "(() => { const a = { n: 1 }; a.self = a; return a; })()", true, true);
+    try Probe.expectPair(
+        internal,
+        context,
+        "(() => { const a = {}; a.self = a; return a; })()",
+        "(() => { const a = {}; const b = {}; a.self = b; b.self = b; return a; })()",
+        false,
+        false,
+    );
+
+    try Probe.expectPair(internal, context, "new Date(230)", "new Date(230)", true, true);
+    try Probe.expectPair(internal, context, "new Date(NaN)", "new Date(NaN)", false, false);
+    try Probe.expectPair(internal, context, "/deep/giu", "/deep/giu", true, true);
+    try Probe.expectPair(internal, context, "/deep/g", "/deep/i", false, false);
+    try Probe.expectPair(internal, context, "new Error('boom', { cause: { code: 230 } })", "new Error('boom', { cause: { code: 230 } })", true, true);
+    try Probe.expectPair(internal, context, "new Error('boom')", "new Error('boom', { cause: undefined })", true, false);
+    try Probe.expectPair(internal, context, "(() => { const e = new TypeError('boom'); e.name = 'Same'; return e; })()", "(() => { const e = new Error('boom'); e.name = 'Same'; return e; })()", false, false);
+
+    try Probe.expectPair(
+        internal,
+        context,
+        "new Set([{ x: 1 }, { y: 2 }])",
+        "new Set([{ y: 2 }, { x: 1 }])",
+        true,
+        true,
+    );
+    try Probe.expectPair(
+        internal,
+        context,
+        "new Map([[{ x: 1 }, { value: 2 }], ['direct', 3]])",
+        "new Map([['direct', 3], [{ x: 1 }, { value: 2 }]])",
+        true,
+        true,
+    );
+    try Probe.expectPair(internal, context, "new Uint8Array([1, 2, 3]).buffer", "new Uint8Array([1, 2, 3]).buffer", true, true);
+    try Probe.expectPair(internal, context, "new Uint8Array([1, 2, 3]).buffer", "new Uint8Array([1, 2, 4]).buffer", false, false);
+    try Probe.expectPair(internal, context, "new Float64Array([+0])", "new Float64Array([-0])", true, false);
+    try Probe.expectPair(internal, context, "new Float32Array([NaN])", "new Float32Array([NaN])", false, true);
+    try Probe.expectPair(internal, context, "new Uint16Array([1, 2])", "new Uint8Array([1, 2])", false, false);
+    // The pinned switch has no DataView case; distinct views therefore use the
+    // ordinary class/property path and do not compare backing bytes.
+    try Probe.expectPair(internal, context, "new DataView(new Uint8Array([1]).buffer)", "new DataView(new Uint8Array([2]).buffer)", true, true);
+
+    const proxy = try Probe.encoded(
+        internal,
+        "globalThis.__deep_own_230 = 0; globalThis.__deep_desc_230 = 0; globalThis.__deep_get_230 = 0; " ++
+            "new Proxy({ value: { ok: true } }, { " ++
+            "ownKeys(target) { __deep_own_230++; return Reflect.ownKeys(target); }, " ++
+            "getOwnPropertyDescriptor(target, key) { __deep_desc_230++; return Reflect.getOwnPropertyDescriptor(target, key); }, " ++
+            "get(target, key, receiver) { __deep_get_230++; return Reflect.get(target, key, receiver); } })",
+    );
+    const plain = try Probe.encoded(internal, "({ value: { ok: true } })");
+    try std.testing.expect(JSC__JSValue__deepEquals(proxy, plain, context));
+    try std.testing.expectEqual(@as(f64, 1), (try internal.evaluate("__deep_own_230")).asNum());
+    try std.testing.expectEqual(@as(f64, 1), (try internal.evaluate("__deep_desc_230")).asNum());
+    try std.testing.expectEqual(@as(f64, 1), (try internal.evaluate("__deep_get_230")).asNum());
+
+    const throwing = try Probe.encoded(internal, "({ get value() { throw 2301; } })");
+    try std.testing.expect(!JSC__JSValue__deepEquals(throwing, plain, context));
+    var pending = JSGlobalObject__tryTakeException(context);
+    try std.testing.expectEqual(EncodedValue.fromInt32(2301), JSC__Exception__asJSValue(@ptrFromInt(try pending.asCellAddress())));
+
+    const shared_left = try Probe.encoded(internal, "(() => { const a = { sibling: true }; a.self = a; return a; })()");
+    const shared_right = try Probe.encoded(internal, "(() => { const a = { sibling: true }; a.self = a; return a; })()");
+    try std.testing.expect(JSC__JSValue__strictDeepEquals(shared_left, shared_right, sibling));
+
+    const foreign = JSGlobalContextCreate(null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(foreign);
+    const foreign_internal = ctxForEvaluation(foreign) orelse return error.ContextCreateFailed;
+    const foreign_value = privateEncodedFromValue(foreign_internal, try foreign_internal.evaluate("({ foreign: true })"));
+    try std.testing.expect(!JSC__JSValue__deepEquals(foreign_value, plain, context));
+    try std.testing.expect(JSGlobalObject__hasException(context));
+    JSGlobalObject__clearException(context);
+
+    const blocked_left = try Probe.encoded(internal, "globalThis.__deep_blocked_230 = 0; ({ get value() { __deep_blocked_230++; return 1; } })");
+    JSC__VM__throwError(JSC__JSGlobalObject__vm(context), context, EncodedValue.fromInt32(230));
+    try std.testing.expect(!JSC__JSValue__deepEquals(blocked_left, plain, context));
+    pending = JSGlobalObject__tryTakeException(context);
+    try std.testing.expectEqual(EncodedValue.fromInt32(230), JSC__Exception__asJSValue(@ptrFromInt(try pending.asCellAddress())));
+    try std.testing.expectEqual(@as(f64, 0), (try internal.evaluate("__deep_blocked_230")).asNum());
+
+    const deep_left = try Probe.encoded(internal, "(() => { let root = {}, cursor = root; for (let i = 0; i < 20000; i++) cursor = cursor.next = {}; return root; })()");
+    const deep_right = try Probe.encoded(internal, "(() => { let root = {}, cursor = root; for (let i = 0; i < 20000; i++) cursor = cursor.next = {}; return root; })()");
+    try std.testing.expect(!JSC__JSValue__deepEquals(deep_left, deep_right, context));
+    try std.testing.expect(JSGlobalObject__hasException(context));
+    JSGlobalObject__clearException(context);
 }
 
 test "private VM entry-state query tracks nested and sibling interpreters" {

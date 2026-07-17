@@ -739,10 +739,23 @@ pub fn mathRandom(ctx: *anyopaque, this: Value, args: []const Value) HostError!V
 /// module namespace exports, Proxy traps, array dense elements) are included,
 /// then filter through [[GetOwnProperty]] for the live enumerable bit.
 pub fn ownEnumerableKeys(self: *Interpreter, o: *value.Object) HostError![]const []const u8 {
+    return ownEnumerablePropertyKeys(self, o, false);
+}
+
+/// Own enumerable string and (optionally) Symbol keys in exact
+/// [[OwnPropertyKeys]] order. Structural comparison needs the Symbol-inclusive
+/// form; Object.keys uses the string-only wrapper above. Both paths share the
+/// same live proxy-aware [[GetOwnProperty]] enumerable check.
+pub fn ownEnumerablePropertyKeys(
+    self: *Interpreter,
+    o: *value.Object,
+    include_symbols: bool,
+) HostError![]const []const u8 {
     try self.checkRestricted(o);
     var list: std.ArrayListUnmanaged([]const u8) = .empty;
     for (try self.objectOwnKeysList(o)) |k| {
-        if (value.isSymbolKey(k) or value.isPrivateKey(k)) continue;
+        if (value.isPrivateKey(k)) continue;
+        if (value.isSymbolKey(k) and (!include_symbols or !value.isRealSymbolKey(k))) continue;
         const desc = try objectGetOwnPropertyDescriptor(self, Value.undef(), &.{ Value.obj(o), try self.keyToValue(k) });
         if (desc.isObject() and (try self.getProperty(desc, "enumerable")).toBoolean())
             try list.append(self.arena, k);
@@ -1368,7 +1381,7 @@ pub fn arrayIsArray(ctx: *anyopaque, this: Value, args: []const Value) HostError
     return Value.boolVal(try isArrayValue(interp(ctx), arg(args, 0)));
 }
 
-fn isArrayValue(self: *Interpreter, v: Value) HostError!bool {
+pub fn isArrayValue(self: *Interpreter, v: Value) HostError!bool {
     if (!v.isObject()) return false;
     var o = v.asObj();
     while (true) {
