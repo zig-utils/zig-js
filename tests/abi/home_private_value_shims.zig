@@ -245,6 +245,11 @@ extern "c" fn JSC__JSValue__strictDeepEquals(EncodedValue, EncodedValue, JSConte
 extern "c" fn JSC__JSValue__jestDeepEquals(EncodedValue, EncodedValue, JSContextRef) bool;
 extern "c" fn JSC__JSValue__jestStrictDeepEquals(EncodedValue, EncodedValue, JSContextRef) bool;
 extern "c" fn JSC__JSValue__jestDeepMatch(EncodedValue, EncodedValue, JSContextRef, bool) bool;
+extern "c" fn JSRemoteInspectorDisableAutoStart() void;
+extern "c" fn JSRemoteInspectorStart() void;
+extern "c" fn JSRemoteInspectorSetLogToSystemConsole(bool) void;
+extern "c" fn JSRemoteInspectorGetInspectionEnabledByDefault() bool;
+extern "c" fn JSRemoteInspectorSetInspectionEnabledByDefault(bool) void;
 extern "c" fn JSC__jsTypeStringForValue(JSContextRef, EncodedValue) ?*anyopaque;
 extern "c" fn JSC__JSString__eql(?*anyopaque, JSContextRef, ?*anyopaque) bool;
 extern "c" fn JSC__JSString__is8Bit(?*anyopaque) bool;
@@ -1171,6 +1176,14 @@ pub fn main() void {
         !JSC__JSValue__jestDeepMatch(deep_match_target, deep_match_subset, context, true) or
         !JSC__JSValue__toBoolean(evaluate(context, "__private_deep_match_target.nested.value === __private_asymmetric_anything")))
         fail("private Jest equality/deep-match semantics mismatch");
+    const remote_inspection_default = JSRemoteInspectorGetInspectionEnabledByDefault();
+    JSRemoteInspectorSetInspectionEnabledByDefault(!remote_inspection_default);
+    if (JSRemoteInspectorGetInspectionEnabledByDefault() == remote_inspection_default)
+        fail("private remote-inspector default did not update");
+    JSRemoteInspectorSetInspectionEnabledByDefault(remote_inspection_default);
+    JSRemoteInspectorSetLogToSystemConsole(false);
+    JSRemoteInspectorDisableAutoStart();
+    JSRemoteInspectorStart();
     json_output = .{ .tag = .dead, .value = .{ .zig_string = .{ .tagged_ptr = 0, .len = 0 } } };
     JSC__JSValue__jsonStringifyFast(json_target, context, &json_output);
     if (json_output.tag != .wtf_string_impl or
@@ -3250,5 +3263,5 @@ pub fn main() void {
         TopExceptionScope__exceptionIncludingTraps(&verification_scope) != null)
         fail("private TopExceptionScope destruction mismatch");
 
-    std.debug.print("Home private value shims: 219/219 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 224/224 symbols linked; runtime matrix passed\n", .{});
 }

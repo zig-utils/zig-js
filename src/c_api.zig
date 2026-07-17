@@ -160,6 +160,19 @@ comptime {
 /// needs no libc and is always available; a tuned allocator can replace it.
 const gpa = std.heap.page_allocator;
 const private_string_allocator = std.heap.c_allocator;
+const private_remote_inspection_default = switch (builtin.os.tag) {
+    .driverkit, .ios, .maccatalyst, .macos, .tvos, .visionos, .watchos => false,
+    else => true,
+};
+
+const PrivateRemoteInspectorProcessState = struct {
+    auto_start_enabled: std.atomic.Value(bool) = .init(true),
+    started: std.atomic.Value(bool) = .init(false),
+    log_to_system_console: std.atomic.Value(bool) = .init(false),
+    inspection_enabled_by_default: std.atomic.Value(bool) = .init(private_remote_inspection_default),
+};
+
+var private_remote_inspector_process: PrivateRemoteInspectorProcessState = .{};
 
 /// Boxed interpreter value handed across the C boundary as a `JSValueRef`.
 /// Handles are realm-affine: APIs that receive a `JSContextRef` reject boxes
@@ -7781,6 +7794,30 @@ export fn JSGlobalContextSetName(ctx: JSContextRef, name: JSStringRef) callconv(
     c.c_api_name_utf16 = c.arena().dupe(u16, string.utf16) catch return;
 }
 
+/// Process-wide JavaScriptCore remote-inspector controls. They configure the
+/// default for future contexts independently of each context's public
+/// inspectability flag. Explicit start remains possible after auto-start is
+/// disabled, matching the native SPI's one-way process controls.
+export fn JSRemoteInspectorDisableAutoStart() callconv(.c) void {
+    private_remote_inspector_process.auto_start_enabled.store(false, .release);
+}
+
+export fn JSRemoteInspectorStart() callconv(.c) void {
+    private_remote_inspector_process.started.store(true, .release);
+}
+
+export fn JSRemoteInspectorSetLogToSystemConsole(enabled: bool) callconv(.c) void {
+    private_remote_inspector_process.log_to_system_console.store(enabled, .release);
+}
+
+export fn JSRemoteInspectorGetInspectionEnabledByDefault() callconv(.c) bool {
+    return private_remote_inspector_process.inspection_enabled_by_default.load(.acquire);
+}
+
+export fn JSRemoteInspectorSetInspectionEnabledByDefault(enabled: bool) callconv(.c) void {
+    private_remote_inspector_process.inspection_enabled_by_default.store(enabled, .release);
+}
+
 fn inspectorState(c: *Context) ?*CInspectorState {
     return @ptrCast(@alignCast(c.c_api_inspector_state orelse return null));
 }
@@ -11757,6 +11794,57 @@ test "C-API: context groups share values while preserving distinct realms and li
     // sufficient, and its release performs the one shared-VM teardown.
     JSContextGroupRelease(group);
     JSGlobalContextRelease(second);
+}
+
+test "private remote inspector controls preserve process-wide atomic state" {
+    const saved_auto_start = private_remote_inspector_process.auto_start_enabled.load(.acquire);
+    const saved_started = private_remote_inspector_process.started.load(.acquire);
+    const saved_log = private_remote_inspector_process.log_to_system_console.load(.acquire);
+    const saved_default = JSRemoteInspectorGetInspectionEnabledByDefault();
+    defer {
+        private_remote_inspector_process.auto_start_enabled.store(saved_auto_start, .release);
+        private_remote_inspector_process.started.store(saved_started, .release);
+        private_remote_inspector_process.log_to_system_console.store(saved_log, .release);
+        JSRemoteInspectorSetInspectionEnabledByDefault(saved_default);
+    }
+
+    private_remote_inspector_process.auto_start_enabled.store(true, .release);
+    private_remote_inspector_process.started.store(false, .release);
+    JSRemoteInspectorDisableAutoStart();
+    JSRemoteInspectorDisableAutoStart();
+    try std.testing.expect(!private_remote_inspector_process.auto_start_enabled.load(.acquire));
+    try std.testing.expect(!private_remote_inspector_process.started.load(.acquire));
+    JSRemoteInspectorStart();
+    JSRemoteInspectorStart();
+    try std.testing.expect(private_remote_inspector_process.started.load(.acquire));
+    try std.testing.expect(!private_remote_inspector_process.auto_start_enabled.load(.acquire));
+
+    JSRemoteInspectorSetLogToSystemConsole(true);
+    try std.testing.expect(private_remote_inspector_process.log_to_system_console.load(.acquire));
+    JSRemoteInspectorSetLogToSystemConsole(false);
+    try std.testing.expect(!private_remote_inspector_process.log_to_system_console.load(.acquire));
+    JSRemoteInspectorSetInspectionEnabledByDefault(false);
+    try std.testing.expect(!JSRemoteInspectorGetInspectionEnabledByDefault());
+    JSRemoteInspectorSetInspectionEnabledByDefault(true);
+    try std.testing.expect(JSRemoteInspectorGetInspectionEnabledByDefault());
+
+    const Writer = struct {
+        fn run(seed: usize) void {
+            for (0..10_000) |index| {
+                const enabled = ((index + seed) & 1) == 0;
+                JSRemoteInspectorSetInspectionEnabledByDefault(enabled);
+                JSRemoteInspectorSetLogToSystemConsole(!enabled);
+                _ = JSRemoteInspectorGetInspectionEnabledByDefault();
+            }
+        }
+    };
+    var threads: [8]std.Thread = undefined;
+    for (&threads, 0..) |*thread, index| thread.* = try std.Thread.spawn(.{}, Writer.run, .{index});
+    for (&threads) |*thread| thread.join();
+    JSRemoteInspectorSetInspectionEnabledByDefault(false);
+    JSRemoteInspectorSetLogToSystemConsole(true);
+    try std.testing.expect(!JSRemoteInspectorGetInspectionEnabledByDefault());
+    try std.testing.expect(private_remote_inspector_process.log_to_system_console.load(.acquire));
 }
 
 test "C-API: inspectability gates concurrent in-process protocol sessions" {

@@ -88,8 +88,8 @@
     },
     "by_status": {
       "external": 2,
-      "implemented": 235,
-      "pending": 211
+      "implemented": 240,
+      "pending": 206
     }
   },
   "declarations": [
@@ -3255,10 +3255,10 @@
       "line": 159,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "pub extern fn JSRemoteInspectorDisableAutoStart() void;",
       "declaration_sha256": "a9cb62ec043554b5c2119ab2d79d21b507b3c2899875d0cef6a03dda6217a521",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSRemoteInspectorGetInspectionEnabledByDefault",
@@ -3266,10 +3266,10 @@
       "line": 163,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "pub extern fn JSRemoteInspectorGetInspectionEnabledByDefault(void) bool;",
       "declaration_sha256": "09877e9d8b8b5c87a809050feef4f622e1dc63669cd5a23697dd32c14dd05210",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSRemoteInspectorSetInspectionEnabledByDefault",
@@ -3277,10 +3277,10 @@
       "line": 164,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "pub extern fn JSRemoteInspectorSetInspectionEnabledByDefault(enabled: bool) void;",
       "declaration_sha256": "e7cf9c88ffde9741c072f37699bad020fc6d5cb555e3664ba3d6483c0a5dd48a",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSRemoteInspectorSetLogToSystemConsole",
@@ -3288,10 +3288,10 @@
       "line": 162,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "pub extern fn JSRemoteInspectorSetLogToSystemConsole(enabled: bool) void;",
       "declaration_sha256": "c6d6032fd41a9bacc754267b69155a6937b7f2dc91f5bb2f0dd046f25ffe2aaa",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSRemoteInspectorStart",
@@ -3299,10 +3299,10 @@
       "line": 160,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "pub extern fn JSRemoteInspectorStart() void;",
       "declaration_sha256": "ee4b333a9bebef17db6e75225e27781f08733aaf672fd346006e5e8b6ee96e7f",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSUint8Array__fromDefaultAllocator",
