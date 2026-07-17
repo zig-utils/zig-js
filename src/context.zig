@@ -2758,11 +2758,20 @@ pub const Context = struct {
             null;
         try interp.installGlobalsInner(&self.env, self.root_shape, parent_symbol);
         if (parent_symbol) |source_symbol| {
-            if (source_symbol.getOwn("\x00registry")) |registry| {
-                if (self.env.get("Symbol")) |symbol| {
-                    if (symbol.isObject())
-                        try symbol.asObj().setOwn(a, self.root_shape, "\x00registry", registry);
-                }
+            // Every exposed C-API realm must point at one VM-wide
+            // GlobalSymbolRegistry even when no realm has called Symbol.for yet.
+            // Lazily creating a separate registry after sibling construction
+            // breaks Symbol identity across a context group.
+            const registry = source_symbol.getOwn("\x00registry") orelse create: {
+                const object = try gc_mod.allocObj(a);
+                object.* = .{};
+                const value_ = Value.obj(object);
+                try source_symbol.setOwn(a, primary.root_shape, "\x00registry", value_);
+                break :create value_;
+            };
+            if (self.env.get("Symbol")) |symbol| {
+                if (symbol.isObject())
+                    try symbol.asObj().setOwn(a, self.root_shape, "\x00registry", registry);
             }
         }
         inline for (.{ "Date", "Error", "RegExp", "Function" }, 0..) |name, index| {

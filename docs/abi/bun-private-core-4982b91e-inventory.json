@@ -83,8 +83,8 @@
     },
     "by_status": {
       "external": 1,
-      "implemented": 125,
-      "pending": 311
+      "implemented": 128,
+      "pending": 308
     }
   },
   "home_comparison": {
@@ -2096,10 +2096,10 @@
       "line": 1467,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSValue__getSymbolDescription(this: JSValue, global: *JSGlobalObject, str: *ZigString) void;",
       "declaration_sha256": "1efe635d10da31ff41005811989bf6a86a93192fe9911910cd78685f8afaa5e5",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSValue__getUTCTimestamp",
@@ -2393,10 +2393,10 @@
       "line": 1472,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSValue__symbolFor(global: *JSGlobalObject, str: *ZigString) JSValue;",
       "declaration_sha256": "2eb7d2dc1c0daccfc7a1b3aba30bef83573ff501c9ab6a6184ab7dc55102b5a8",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSValue__symbolKeyFor",
@@ -2404,10 +2404,10 @@
       "line": 1477,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSValue__symbolKeyFor(this: JSValue, global: *JSGlobalObject, str: *ZigString) bool;",
       "declaration_sha256": "6d14d07b951af14708bd1e812eea1397b4510018696761105f5502be594fa0b7",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSValue__toBoolean",

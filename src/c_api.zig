@@ -3349,6 +3349,67 @@ export fn Bun__JSObject__getCodePropertyVMInquiry(
     return .empty;
 }
 
+export fn JSC__JSValue__symbolFor(
+    global: JSContextRef,
+    key: *const PrivateZigString,
+) callconv(.c) EncodedValue {
+    const context = ctxForEvaluation(global) orelse return .empty;
+    const group = privatePropertyBoundaryGroup(context) orelse return .empty;
+    if (group.pending_exception != null) return .empty;
+    const property = privateZigStringPropertyKey(context, key) orelse return .empty;
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    defer context.popActiveInterpreter(&machine);
+    const result = interp.symbolForKey(&machine, property) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    return privateEncodeResult(context, &machine, result);
+}
+
+export fn JSC__JSValue__getSymbolDescription(
+    symbol_encoded: EncodedValue,
+    global: JSContextRef,
+    output: *PrivateZigString,
+) callconv(.c) void {
+    const context = ctxForHandleInspection(global) orelse return;
+    const group = privatePropertyBoundaryGroup(context) orelse return;
+    if (group.pending_exception != null) return;
+    const symbol = privateValueFrom(global, symbol_encoded) orelse return;
+    if (!symbol.isObject() or !symbol.asObj().is_symbol) return;
+    const description = symbol.asObj().symbolDescription() orelse "";
+    output.* = privateBorrowedZigStringView(group, description) catch |err| {
+        privatePublishBunStringError(context, err);
+        return;
+    };
+}
+
+export fn JSC__JSValue__symbolKeyFor(
+    symbol_encoded: EncodedValue,
+    global: JSContextRef,
+    output: *PrivateZigString,
+) callconv(.c) bool {
+    const context = ctxForHandleInspection(global) orelse return false;
+    const group = privatePropertyBoundaryGroup(context) orelse return false;
+    if (group.pending_exception != null) return false;
+    const symbol = privateValueFrom(global, symbol_encoded) orelse return false;
+    if (!symbol.isObject() or !symbol.asObj().is_symbol) return false;
+    const registry_key = symbol.asObj().getOwn("\x00forKey") orelse return false;
+    if (!registry_key.isString()) return false;
+    output.* = privateBorrowedZigStringView(group, registry_key.asStr()) catch |err| {
+        privatePublishBunStringError(context, err);
+        return false;
+    };
+    return true;
+}
+
 const PrivateDOMExceptionDescription = struct {
     name: []const u8,
     message: []const u8,

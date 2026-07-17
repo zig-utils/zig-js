@@ -146,6 +146,9 @@ extern "c" fn JSC__JSValue__fastGetDirect_(EncodedValue, JSContextRef, u8) Encod
 extern "c" fn JSC__JSValue__fastGet(EncodedValue, JSContextRef, u8) EncodedValue;
 extern "c" fn JSC__JSValue__fastGetOwn(EncodedValue, JSContextRef, u8) EncodedValue;
 extern "c" fn Bun__JSObject__getCodePropertyVMInquiry(JSContextRef, ?*anyopaque) EncodedValue;
+extern "c" fn JSC__JSValue__symbolFor(JSContextRef, *const ZigString) EncodedValue;
+extern "c" fn JSC__JSValue__symbolKeyFor(EncodedValue, JSContextRef, *ZigString) bool;
+extern "c" fn JSC__JSValue__getSymbolDescription(EncodedValue, JSContextRef, *ZigString) void;
 extern "c" fn JSC__JSValue__asString(EncodedValue) ?*anyopaque;
 extern "c" fn JSC__JSString__eql(?*anyopaque, JSContextRef, ?*anyopaque) bool;
 extern "c" fn JSC__JSString__is8Bit(?*anyopaque) bool;
@@ -1481,6 +1484,68 @@ pub fn main() void {
     if (JSC__Exception__asJSValue(preserved_fast_exception.cellPointer()) != EncodedValue.fromInt32(204))
         fail("private fast property reads replaced pending exception");
 
+    const registry_latin1 = JSC__JSValue__symbolFor(context, &latin1_string.value.zig_string);
+    const registry_utf8 = JSC__JSValue__symbolFor(sibling_context, &utf8_string.value.zig_string);
+    const registry_utf16 = JSC__JSValue__symbolFor(context, &utf16_string.value.zig_string);
+    const registry_empty = JSC__JSValue__symbolFor(context, &empty_zig_string);
+    if (!JSC__JSValue__isStrictEqual(registry_latin1, evaluate(sibling_context, "Symbol.for('café')"), sibling_context))
+        fail("private Symbol.for Latin-1/sibling identity mismatch");
+    if (!JSC__JSValue__isStrictEqual(registry_utf8, evaluate(context, "Symbol.for('A😀Z')"), context))
+        fail("private Symbol.for UTF-8/sibling identity mismatch");
+    if (!JSC__JSValue__isStrictEqual(registry_utf16, evaluate(context, "Symbol.for('A😀\\uD800Z')"), context))
+        fail("private Symbol.for UTF-16 identity mismatch");
+    if (!JSC__JSValue__isStrictEqual(registry_empty, evaluate(context, "Symbol.for('')"), context))
+        fail("private Symbol.for empty identity mismatch");
+
+    var mutable_symbol_bytes = [_]u8{ 'm', 'u', 't', 'a', 'b', 'l', 'e' };
+    const mutable_symbol_key = ZigString{ .tagged_ptr = @intFromPtr(&mutable_symbol_bytes), .len = mutable_symbol_bytes.len };
+    const mutation_safe_symbol = JSC__JSValue__symbolFor(context, &mutable_symbol_key);
+    mutable_symbol_bytes[0] = 'X';
+    if (!JSC__JSValue__isStrictEqual(mutation_safe_symbol, evaluate(context, "Symbol.for('mutable')"), context))
+        fail("private Symbol.for retained caller storage");
+
+    var symbol_output = ZigString{ .tagged_ptr = 1, .len = 999 };
+    JSC__JSValue__getSymbolDescription(registry_latin1, sibling_context, &symbol_output);
+    expectZigStringUnits(symbol_output, &[_]u16{ 'c', 'a', 'f', 0x00e9 }, false, "private registered Symbol description mismatch");
+    const local_symbol = evaluate(context, "Symbol('local😀')");
+    JSC__JSValue__getSymbolDescription(local_symbol, context, &symbol_output);
+    expectZigStringUnits(symbol_output, &[_]u16{ 'l', 'o', 'c', 'a', 'l', 0xd83d, 0xde00 }, true, "private local Symbol description mismatch");
+    JSC__JSValue__getSymbolDescription(evaluate(context, "Symbol()"), context, &symbol_output);
+    expectZigStringUnits(symbol_output, &[_]u16{}, false, "private empty Symbol description mismatch");
+    JSC__JSValue__getSymbolDescription(evaluate(context, "Symbol.iterator"), sibling_context, &symbol_output);
+    expectZigStringUnits(symbol_output, &[_]u16{ 'S', 'y', 'm', 'b', 'o', 'l', '.', 'i', 't', 'e', 'r', 'a', 't', 'o', 'r' }, false, "private well-known Symbol description mismatch");
+
+    symbol_output = .{ .tagged_ptr = 1, .len = 999 };
+    if (!JSC__JSValue__symbolKeyFor(registry_utf16, sibling_context, &symbol_output))
+        fail("private Symbol.keyFor rejected registered symbol");
+    expectZigStringUnits(symbol_output, &[_]u16{ 'A', 0xd83d, 0xde00, 0xd800, 'Z' }, true, "private Symbol.keyFor UTF-16 key mismatch");
+    const untouched_symbol_output = ZigString{ .tagged_ptr = 7, .len = 77 };
+    symbol_output = untouched_symbol_output;
+    if (JSC__JSValue__symbolKeyFor(local_symbol, context, &symbol_output) or
+        symbol_output.tagged_ptr != untouched_symbol_output.tagged_ptr or symbol_output.len != untouched_symbol_output.len)
+        fail("private Symbol.keyFor accepted local symbol or modified output");
+    if (JSC__JSValue__symbolKeyFor(evaluate(context, "Symbol.iterator"), context, &symbol_output) or
+        symbol_output.tagged_ptr != untouched_symbol_output.tagged_ptr or symbol_output.len != untouched_symbol_output.len)
+        fail("private Symbol.keyFor accepted well-known symbol or modified output");
+    JSC__JSValue__getSymbolDescription(.true, context, &symbol_output);
+    if (symbol_output.tagged_ptr != untouched_symbol_output.tagged_ptr or symbol_output.len != untouched_symbol_output.len)
+        fail("private Symbol description modified output for non-symbol");
+    const foreign_registry_symbol = JSC__JSValue__symbolFor(foreign_context, &latin1_string.value.zig_string);
+    if (JSC__JSValue__isStrictEqual(registry_latin1, foreign_registry_symbol, context) or
+        JSC__JSValue__symbolKeyFor(foreign_registry_symbol, context, &symbol_output))
+        fail("private Symbol registry crossed VM boundary");
+
+    JSC__VM__throwError(vm, context, EncodedValue.fromInt32(205));
+    symbol_output = untouched_symbol_output;
+    if (JSC__JSValue__symbolFor(context, &latin1_string.value.zig_string) != .empty or
+        JSC__JSValue__symbolKeyFor(registry_latin1, context, &symbol_output))
+        fail("private Symbol bridges ignored pending exception");
+    JSC__JSValue__getSymbolDescription(registry_latin1, context, &symbol_output);
+    const preserved_symbol_exception = JSGlobalObject__tryTakeException(context);
+    if (JSC__Exception__asJSValue(preserved_symbol_exception.cellPointer()) != EncodedValue.fromInt32(205) or
+        symbol_output.tagged_ptr != untouched_symbol_output.tagged_ptr or symbol_output.len != untouched_symbol_output.len)
+        fail("private Symbol bridges replaced pending exception or modified output");
+
     const sibling_dom_exception = ZigString__toDOMExceptionInstance(&empty_zig_string, sibling_context, 16);
     exposeCell(sibling_context, "__private_sibling_dom_exception", sibling_dom_exception);
     if (!JSC__JSValue__toBoolean(evaluate(sibling_context, "Object.getPrototypeOf(__private_sibling_dom_exception) === DOMException.prototype && __private_sibling_dom_exception.name === 'AbortError'")))
@@ -2199,5 +2264,5 @@ pub fn main() void {
         JSC__JSMap__get(map_cell, context, evaluate(context, "'direct'")) != .undefined)
         fail("private JSMap clear mismatch");
 
-    std.debug.print("Home private value shims: 115/115 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 118/118 symbols linked; runtime matrix passed\n", .{});
 }
