@@ -235,8 +235,11 @@ while pause-only scope handles expire on resume. With multiple sessions, one
 deterministic owner controls continuation after observers receive the pause
 snapshot; observer resume attempts are rejected. Releasing a session from its
 own synchronous callback is lifetime-guarded, including pause, response, and
-detach callbacks. Worker targets continue under
-[#154](https://github.com/zig-utils/zig-js/issues/154); see
+detach callbacks. Independently-created `JSWorkerRef` runtimes are not falsely
+reported as children of an unrelated context session; they continue processing
+messages while that context is paused. Explicit cross-thread worker target
+discovery and transport continue under
+[#156](https://github.com/zig-utils/zig-js/issues/156); see
 [docs/inspector.md](docs/inspector.md).
 
 See [docs/api.md](docs/api.md) and [docs/HOME_INTEGRATION.md](docs/HOME_INTEGRATION.md) for the fuller embedding story and the important warning that zig-js is not a drop-in replacement for Bun/Home's private JSC internals.

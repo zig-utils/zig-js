@@ -259,6 +259,13 @@ owner may resume or step; explicit pause/step requests retain that ownership.
 teardown is deferred until the enclosing dispatch/pause/detach operation has
 unwound, and releasing the pause owner acts as a deterministic resume.
 
+`JSWorkerCreate*` does not take a parent `JSContextRef`; each worker owns an
+independent runtime on its own thread. A context inspector therefore never
+claims those workers as implicit child targets. Parent pauses leave worker
+message processing and termination live (the C transcript performs both from
+the paused callback). Stable target discovery and cross-thread inspector
+marshalling are tracked explicitly by inspector issue #156.
+
 `JSGlobalContextRetain` and `JSGlobalContextRelease` maintain a real C-API reference count for contexts created through this C API. Releasing a retained context destroys the underlying runtime only after the final release. `JSGlobalContextRetain` returns null for a null context or if retaining would overflow the context refcount.
 
 The typed-array API uses the public JavaScriptCore enum layout through `BigUint64Array`. JavaScript `Float16Array` remains available inside the engine, but the pinned public JSC enum has no Float16 entry, so `JSValueGetTypedArrayType` reports `kJSTypedArrayTypeNone` for that runtime-only kind. ArrayBuffer-backed constructors preserve the original buffer and requested view geometry; invalid types return null, while detached, out-of-bounds, misaligned, overflowing, wrong-context, and non-ArrayBuffer inputs report through the exception out pointer.

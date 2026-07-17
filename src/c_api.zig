@@ -5268,6 +5268,50 @@ test "C-API: concurrent inspector sessions have deterministic pause ownership" {
     try std.testing.expect(std.mem.indexOf(u8, observer_state.bytes[0..observer_state.len], "Debugger.resumed") != null);
 }
 
+test "C-API: parent inspector pauses preserve isolated worker progress" {
+    const State = struct {
+        session: ZJSInspectorSessionRef = null,
+        ctx: JSContextRef,
+        worker: JSWorkerRef,
+        reply: f64 = 0,
+        terminated: bool = false,
+
+        fn receive(message: [*]const u8, message_len: usize, user_data: ?*anyopaque) callconv(.c) void {
+            const self: *@This() = @ptrCast(@alignCast(user_data.?));
+            if (std.mem.indexOf(u8, message[0..message_len], "Debugger.paused") == null) return;
+            const message_value = JSValueMakeNumber(self.ctx, 21);
+            std.debug.assert(JSWorkerPostMessage(self.worker, self.ctx, message_value, null));
+            const response = JSWorkerReceive(self.worker, self.ctx, 10_000, null) orelse unreachable;
+            self.reply = JSValueToNumber(self.ctx, response, null);
+            JSWorkerTerminate(self.worker);
+            self.terminated = true;
+            const resume_request = "{\"id\":70,\"method\":\"Debugger.resume\"}";
+            std.debug.assert(ZJSInspectorSessionDispatch(self.session, resume_request, resume_request.len));
+        }
+    };
+
+    const worker_source = JSStringCreateWithUTF8CString(
+        "onmessage = function(event) { postMessage(event.data * 2); };",
+    ) orelse return error.StringInitFailed;
+    defer JSStringRelease(worker_source);
+    const worker = JSWorkerCreate(worker_source) orelse return error.WorkerSpawnFailed;
+    defer JSWorkerRelease(worker);
+    const ctx = JSGlobalContextCreate(null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(ctx);
+    JSGlobalContextSetInspectable(ctx, true);
+    var state = State{ .ctx = ctx, .worker = worker };
+    state.session = ZJSInspectorSessionCreate(ctx, State.receive, &state) orelse return error.SessionCreateFailed;
+    defer ZJSInspectorSessionRelease(state.session);
+    const enable = "{\"id\":1,\"method\":\"Debugger.enable\"}";
+    try std.testing.expect(ZJSInspectorSessionDispatch(state.session, enable, enable.len));
+    const source = JSStringCreateWithUTF8CString("debugger; 42;") orelse return error.StringInitFailed;
+    defer JSStringRelease(source);
+    const result = JSEvaluateScript(ctx, source, null, null, 1, null) orelse return error.EvalFailed;
+    try std.testing.expectEqual(@as(f64, 42), JSValueToNumber(ctx, result, null));
+    try std.testing.expectEqual(@as(f64, 42), state.reply);
+    try std.testing.expect(state.terminated);
+}
+
 test "C-API: inspector release is safe inside pause response and detach callbacks" {
     const State = struct {
         const Trigger = enum { pause, response, detach };

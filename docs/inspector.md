@@ -116,6 +116,17 @@ handles. Value handles remain rooted across precise GC until release, while the
 on resume. IDs cannot be used by another session, after their group/session is
 released, or (for scopes) outside their originating pause.
 
+## Worker isolation and future targets
+
+`JSWorkerCreate*` creates an independent context on a new owner thread and does
+not accept a parent `JSContextRef`. Version 0.1 therefore does not invent a child
+relationship or pause workers when an unrelated context stops. Worker message
+delivery and termination remain live during a context pause and release stays
+under the worker handle's owner-thread rules. Explicit stable target IDs,
+discovery, attach/detach, and cross-thread command/event marshalling are tracked
+by [issue #156](https://github.com/zig-utils/zig-js/issues/156); no Target-domain
+stub is silently accepted before that transport exists.
+
 setPauseOnExceptions accepts none, uncaught, or all. all pauses at the original
 throwing statement even when a surrounding catch handles the value; uncaught
 pauses only after propagation reaches the C-API evaluation boundary. Origin
@@ -145,5 +156,5 @@ runtime evaluation, stable scripts, statement-boundary pause/resume,
 breakpoints, ordinary-call stepping, exception-pause policy, live call frames,
 lexical/global scope chains, frame evaluation, and expandable remote objects
 with deterministic GC-safe lifetime. Worker targets remain tracked by
-[issue #154](https://github.com/zig-utils/zig-js/issues/154). Unsupported
+[issue #156](https://github.com/zig-utils/zig-js/issues/156). Unsupported
 commands return -32601; there are no silently accepted debugger stubs.
