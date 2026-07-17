@@ -5,7 +5,12 @@ static BOOL ZJSDiffExportCallbackState = NO;
 
 @protocol ZJSDiffExports <JSExport>
 @property (nonatomic, copy) NSString *title;
+- (instancetype)initWithTitle:(NSString *)title;
 - (int32_t)add:(int32_t)left to:(int32_t)right;
+JSExportAs(product,
+- (int32_t)multiply:(int32_t)left by:(int32_t)right
+);
++ (NSString *)classPrefix:(NSString *)value;
 @end
 
 @interface ZJSDiffExportObject : NSObject <ZJSDiffExports>
@@ -14,6 +19,14 @@ static BOOL ZJSDiffExportCallbackState = NO;
 @end
 
 @implementation ZJSDiffExportObject
+- (instancetype)initWithTitle:(NSString *)title
+{
+    self = [super init];
+    if (self)
+        _title = [title copy];
+    return self;
+}
++ (NSString *)classPrefix:(NSString *)value { return [@"class:" stringByAppendingString:value]; }
 - (int32_t)add:(int32_t)left to:(int32_t)right
 {
     ZJSDiffExportCallbackState = JSContext.currentContext != nil &&
@@ -21,6 +34,7 @@ static BOOL ZJSDiffExportCallbackState = NO;
         JSContext.currentThis.toObject == self;
     return left + right;
 }
+- (int32_t)multiply:(int32_t)left by:(int32_t)right { return left * right; }
 - (NSString *)hiddenValue { return @"hidden"; }
 @end
 
@@ -131,6 +145,16 @@ int main(void)
                                                    exportSum,
                                                    ZJSDiffExportCallbackState,
                                                    [context evaluateScript:@"typeof exported.hiddenValue"].toString]);
+        row(@"export-rename", [NSString stringWithFormat:@"%d:%@",
+                                                          [context evaluateScript:@"exported.product(6, 7)"].toInt32,
+                                                          [context evaluateScript:@"typeof exported.multiplyBy"].toString]);
+
+        context[@"ExportClass"] = ZJSDiffExportObject.class;
+        ZJSDiffExportObject *constructed =
+            (ZJSDiffExportObject *)[context evaluateScript:@"new ExportClass('made')"].toObject;
+        row(@"export-class", [NSString stringWithFormat:@"%@:%@",
+                                                         [context evaluateScript:@"ExportClass.classPrefix('zig-js')"].toString,
+                                                         constructed.title]);
     }
     return 0;
 }
