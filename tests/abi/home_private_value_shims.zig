@@ -242,6 +242,9 @@ extern "c" fn JSC__JSValue__jsonStringifyFast(EncodedValue, JSContextRef, *BunSt
 extern "c" fn JSC__JSValue__isJSXElement(EncodedValue, JSContextRef) bool;
 extern "c" fn JSC__JSValue__deepEquals(EncodedValue, EncodedValue, JSContextRef) bool;
 extern "c" fn JSC__JSValue__strictDeepEquals(EncodedValue, EncodedValue, JSContextRef) bool;
+extern "c" fn JSC__JSValue__jestDeepEquals(EncodedValue, EncodedValue, JSContextRef) bool;
+extern "c" fn JSC__JSValue__jestStrictDeepEquals(EncodedValue, EncodedValue, JSContextRef) bool;
+extern "c" fn JSC__JSValue__jestDeepMatch(EncodedValue, EncodedValue, JSContextRef, bool) bool;
 extern "c" fn JSC__jsTypeStringForValue(JSContextRef, EncodedValue) ?*anyopaque;
 extern "c" fn JSC__JSString__eql(?*anyopaque, JSContextRef, ?*anyopaque) bool;
 extern "c" fn JSC__JSString__is8Bit(?*anyopaque) bool;
@@ -1160,6 +1163,14 @@ pub fn main() void {
         !JSC__JSValue__deepEquals(evaluate(context, "({ missing: undefined })"), evaluate(context, "({})"), context) or
         JSC__JSValue__strictDeepEquals(evaluate(context, "({ missing: undefined })"), evaluate(context, "({})"), context))
         fail("private core deep-equality semantics mismatch");
+    const asymmetric_anything = evaluate(context, "globalThis.__private_asymmetric_anything = { __zig_js_asymmetric_matcher__: 'anything' }; __private_asymmetric_anything");
+    const deep_match_target = evaluate(context, "globalThis.__private_deep_match_target = { nested: { value: 231, extra: true } }; __private_deep_match_target");
+    const deep_match_subset = evaluate(context, "({ nested: { value: __private_asymmetric_anything } })");
+    if (!JSC__JSValue__jestDeepEquals(EncodedValue.fromInt32(231), asymmetric_anything, context) or
+        !JSC__JSValue__jestStrictDeepEquals(asymmetric_anything, EncodedValue.fromInt32(231), context) or
+        !JSC__JSValue__jestDeepMatch(deep_match_target, deep_match_subset, context, true) or
+        !JSC__JSValue__toBoolean(evaluate(context, "__private_deep_match_target.nested.value === __private_asymmetric_anything")))
+        fail("private Jest equality/deep-match semantics mismatch");
     json_output = .{ .tag = .dead, .value = .{ .zig_string = .{ .tagged_ptr = 0, .len = 0 } } };
     JSC__JSValue__jsonStringifyFast(json_target, context, &json_output);
     if (json_output.tag != .wtf_string_impl or
@@ -3239,5 +3250,5 @@ pub fn main() void {
         TopExceptionScope__exceptionIncludingTraps(&verification_scope) != null)
         fail("private TopExceptionScope destruction mismatch");
 
-    std.debug.print("Home private value shims: 216/216 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 219/219 symbols linked; runtime matrix passed\n", .{});
 }

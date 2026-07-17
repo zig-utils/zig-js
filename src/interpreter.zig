@@ -8033,7 +8033,7 @@ pub const Interpreter = struct {
         return null;
     }
 
-    fn regexpTestBuiltin(self: *Interpreter, o: *value.Object, input_arg: Value) EvalError!bool {
+    pub fn regexpTestBuiltin(self: *Interpreter, o: *value.Object, input_arg: Value) EvalError!bool {
         const input = try self.toStringV(input_arg);
         const li = toLen(try self.toNumberV(try self.getProperty(Value.obj(o), "lastIndex")));
         const flags = o.regexFlags();

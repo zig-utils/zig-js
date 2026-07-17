@@ -88,8 +88,8 @@
     },
     "by_status": {
       "external": 2,
-      "implemented": 232,
-      "pending": 214
+      "implemented": 235,
+      "pending": 211
     }
   },
   "declarations": [
@@ -2277,10 +2277,10 @@
       "line": 1959,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSValue__jestDeepEquals(this: JSValue, other: JSValue, global: *JSGlobalObject) bool;",
       "declaration_sha256": "dc1bd65999246b9279e180fc1f33800946d2d8351a017b5e04cb3384aef394ee",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSValue__jestDeepMatch",
@@ -2288,10 +2288,10 @@
       "line": 1974,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSValue__jestDeepMatch(this: JSValue, subset: JSValue, global: *JSGlobalObject, replace_props_with_asymmetric_matchers: bool) bool;",
       "declaration_sha256": "ea9c0a0ec1b6478702f6ec84aeb90a26aea5541447038deb8b3135fa34390d58",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSValue__jestStrictDeepEquals",
@@ -2299,10 +2299,10 @@
       "line": 1969,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSValue__jestStrictDeepEquals(this: JSValue, other: JSValue, global: *JSGlobalObject) bool;",
       "declaration_sha256": "a9a8faa4217e08b333157ac68290cd3aeb2c41c12a233ad0d8cca450fb770e23",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSValue__jsType",
