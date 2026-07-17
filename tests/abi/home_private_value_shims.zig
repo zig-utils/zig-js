@@ -73,6 +73,8 @@ extern "c" fn JSC__JSCell__toObject(?*anyopaque, JSContextRef) JSObjectRef;
 extern "c" fn JSC__JSValue__createEmptyObject(JSContextRef, usize) EncodedValue;
 extern "c" fn JSC__JSValue__createEmptyObjectWithNullPrototype(JSContextRef) EncodedValue;
 extern "c" fn JSC__JSValue__unwrapBoxedPrimitive(JSContextRef, EncodedValue) EncodedValue;
+extern "c" fn JSC__JSValue__toObject(EncodedValue, JSContextRef) JSObjectRef;
+extern "c" fn JSC__JSValue__getPrototype(EncodedValue, JSContextRef) EncodedValue;
 
 fn fail(message: []const u8) noreturn {
     std.debug.print("Home private value shims: {s}\n", .{message});
@@ -334,5 +336,39 @@ pub fn main() void {
     if (JSC__JSValue__unwrapBoxedPrimitive(context, foreign_wrapper) != .empty)
         fail("foreign boxed primitive accepted");
 
-    std.debug.print("Home private value shims: 27/27 symbols linked; runtime matrix passed\n", .{});
+    const number_object = JSC__JSValue__toObject(EncodedValue.fromInt32(42), context) orelse fail("number ToObject failed");
+    const boolean_object = JSC__JSValue__toObject(.true, context) orelse fail("boolean ToObject failed");
+    const string_object = JSC__JSValue__toObject(encoded_text, context) orelse fail("string ToObject failed");
+    const symbol_object = JSC__JSValue__toObject(symbol_cell, context) orelse fail("Symbol ToObject failed");
+    const bigint_object = JSC__JSValue__toObject(signed_negative, context) orelse fail("BigInt ToObject failed");
+    if (JSC__JSValue__toObject(encoded_object, context) != object or
+        number_object == object or boolean_object == object or string_object == text_cell or
+        symbol_object == symbol_pointer or bigint_object == signed_negative_cell or
+        JSC__JSValue__toObject(.null, context) != null or
+        JSC__JSValue__toObject(.undefined, context) != null or
+        JSC__JSValue__toObject(encoded_object, foreign_context) != null)
+        fail("private ToObject mismatch");
+
+    if (!JSC__JSValue__isStrictEqual(JSC__JSValue__getPrototype(encoded_object, context), object_prototype, context))
+        fail("ordinary object prototype mismatch");
+    if (!JSC__JSValue__isStrictEqual(JSC__JSValue__getPrototype(EncodedValue.fromInt32(42), context), evaluate(context, "Number.prototype"), context))
+        fail("Number primitive prototype mismatch");
+    if (!JSC__JSValue__isStrictEqual(JSC__JSValue__getPrototype(.true, context), evaluate(context, "Boolean.prototype"), context))
+        fail("Boolean primitive prototype mismatch");
+    if (!JSC__JSValue__isStrictEqual(JSC__JSValue__getPrototype(encoded_text, context), evaluate(context, "String.prototype"), context))
+        fail("String primitive prototype mismatch");
+    if (!JSC__JSValue__isStrictEqual(JSC__JSValue__getPrototype(symbol_cell, context), evaluate(context, "Symbol.prototype"), context))
+        fail("Symbol primitive prototype mismatch");
+    if (!JSC__JSValue__isStrictEqual(JSC__JSValue__getPrototype(signed_negative, context), evaluate(context, "BigInt.prototype"), context))
+        fail("BigInt primitive prototype mismatch");
+    if (JSC__JSValue__getPrototype(null_proto_object, context) != .null or
+        JSC__JSValue__getPrototype(.null, context) != .empty)
+        fail("null prototype mismatch");
+
+    const proxy = evaluate(context, "globalThis.__private_proto = {}; new Proxy({}, { getPrototypeOf() { return __private_proto; } })");
+    if (!JSC__JSValue__isStrictEqual(JSC__JSValue__getPrototype(proxy, context), evaluate(context, "__private_proto"), context) or
+        JSC__JSValue__getPrototype(EncodedValue.fromRef(foreign_object), context) != .empty)
+        fail("private object prototype mismatch");
+
+    std.debug.print("Home private value shims: 29/29 symbols linked; runtime matrix passed\n", .{});
 }

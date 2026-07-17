@@ -87,8 +87,8 @@
     },
     "by_status": {
       "external": 1,
-      "implemented": 44,
-      "pending": 403
+      "implemented": 46,
+      "pending": 401
     }
   },
   "declarations": [
@@ -2122,10 +2122,10 @@
       "line": 1355,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSValue__getPrototype(this: JSValue, globalObject: *JSGlobalObject) JSValue;",
       "declaration_sha256": "819f355dffd3e9aec7327a7d75bfc32ac6d4d932038db4dd00d56d0ce978974a",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSValue__getSymbolDescription",
@@ -2496,10 +2496,10 @@
       "line": 1332,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSValue__toObject(this: JSValue, globalThis: *JSGlobalObject) ?*JSObject;",
       "declaration_sha256": "b44bef0d4f89a034a7e6d7718d0a05649d2bcc3163e0c2c3d6c0ab17513dc72a",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSValue__toUInt64NoTruncate",
