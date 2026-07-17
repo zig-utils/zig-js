@@ -2250,6 +2250,10 @@ pub const Context = struct {
     /// direct single-owner `destroy()` contract; `JSGlobalContextCreate*` sets
     /// this to one and `JSGlobalContextRetain/Release` maintain it.
     c_api_ref_count: std.atomic.Value(usize) = .init(0),
+    /// Lazily assigned process-wide ScriptExecutionContextIdentifier used by
+    /// the pinned private ABI. Zero means not assigned; published IDs are never
+    /// changed or recycled during the process lifetime.
+    c_api_script_execution_context_id: std.atomic.Value(u32) = .init(0),
     /// Opaque owner installed by the C API for grouped contexts. Kept opaque so
     /// the engine core does not depend on the public ABI wrapper type.
     c_api_group: ?*anyopaque = null,

@@ -251,6 +251,7 @@ extern "c" fn JSRemoteInspectorStart() void;
 extern "c" fn JSRemoteInspectorSetLogToSystemConsole(bool) void;
 extern "c" fn JSRemoteInspectorGetInspectionEnabledByDefault() bool;
 extern "c" fn JSRemoteInspectorSetInspectionEnabledByDefault(bool) void;
+extern "c" fn ScriptExecutionContextIdentifier__forGlobalObject(JSContextRef) u32;
 extern "c" fn JSC__jsTypeStringForValue(JSContextRef, EncodedValue) ?*anyopaque;
 extern "c" fn JSC__JSString__eql(?*anyopaque, JSContextRef, ?*anyopaque) bool;
 extern "c" fn JSC__JSString__is8Bit(?*anyopaque) bool;
@@ -1192,6 +1193,11 @@ pub fn main() void {
     JSRemoteInspectorSetLogToSystemConsole(false);
     JSRemoteInspectorDisableAutoStart();
     JSRemoteInspectorStart();
+    const script_execution_context_id = ScriptExecutionContextIdentifier__forGlobalObject(context);
+    if (script_execution_context_id == 0 or
+        ScriptExecutionContextIdentifier__forGlobalObject(context) != script_execution_context_id or
+        ScriptExecutionContextIdentifier__forGlobalObject(null) != 0)
+        fail("private script execution context identifier mismatch");
     json_output = .{ .tag = .dead, .value = .{ .zig_string = .{ .tagged_ptr = 0, .len = 0 } } };
     JSC__JSValue__jsonStringifyFast(json_target, context, &json_output);
     if (json_output.tag != .wtf_string_impl or
@@ -3271,5 +3277,5 @@ pub fn main() void {
         TopExceptionScope__exceptionIncludingTraps(&verification_scope) != null)
         fail("private TopExceptionScope destruction mismatch");
 
-    std.debug.print("Home private value shims: 225/225 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 226/226 symbols linked; runtime matrix passed\n", .{});
 }

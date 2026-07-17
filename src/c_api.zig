@@ -173,6 +173,24 @@ const PrivateRemoteInspectorProcessState = struct {
 };
 
 var private_remote_inspector_process: PrivateRemoteInspectorProcessState = .{};
+var next_private_script_execution_context_id: std.atomic.Value(u32) = .init(1);
+
+fn privateScriptExecutionContextIdentifier(context: *Context) u32 {
+    const existing = context.c_api_script_execution_context_id.load(.acquire);
+    if (existing != 0) return existing;
+    var current = next_private_script_execution_context_id.load(.monotonic);
+    while (true) {
+        if (current == 0 or current == std.math.maxInt(u32)) return 0;
+        if (next_private_script_execution_context_id.cmpxchgWeak(current, current + 1, .acq_rel, .monotonic)) |observed| {
+            current = observed;
+            continue;
+        }
+        break;
+    }
+    if (context.c_api_script_execution_context_id.cmpxchgStrong(0, current, .release, .acquire)) |winner|
+        return winner;
+    return current;
+}
 
 /// Boxed interpreter value handed across the C boundary as a `JSValueRef`.
 /// Handles are realm-affine: APIs that receive a `JSContextRef` reject boxes
@@ -7862,6 +7880,11 @@ export fn JSRemoteInspectorSetInspectionEnabledByDefault(enabled: bool) callconv
     private_remote_inspector_process.inspection_enabled_by_default.store(enabled, .release);
 }
 
+export fn ScriptExecutionContextIdentifier__forGlobalObject(global: JSContextRef) callconv(.c) u32 {
+    const context = ctxForHandleInspection(global) orelse return 0;
+    return privateScriptExecutionContextIdentifier(context);
+}
+
 fn inspectorState(c: *Context) ?*CInspectorState {
     return @ptrCast(@alignCast(c.c_api_inspector_state orelse return null));
 }
@@ -11889,6 +11912,45 @@ test "private remote inspector controls preserve process-wide atomic state" {
     JSRemoteInspectorSetLogToSystemConsole(true);
     try std.testing.expect(!JSRemoteInspectorGetInspectionEnabledByDefault());
     try std.testing.expect(private_remote_inspector_process.log_to_system_console.load(.acquire));
+}
+
+test "private script execution context identifiers are stable and process unique" {
+    try std.testing.expectEqual(@as(u32, 0), ScriptExecutionContextIdentifier__forGlobalObject(null));
+
+    const group = JSContextGroupCreate() orelse return error.GroupCreateFailed;
+    defer JSContextGroupRelease(group);
+    const first = JSGlobalContextCreateInGroup(group, null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(first);
+    const second = JSGlobalContextCreateInGroup(group, null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(second);
+    const first_id = ScriptExecutionContextIdentifier__forGlobalObject(first);
+    const second_id = ScriptExecutionContextIdentifier__forGlobalObject(second);
+    try std.testing.expect(first_id != 0 and second_id != 0 and first_id != second_id);
+    try std.testing.expectEqual(first_id, ScriptExecutionContextIdentifier__forGlobalObject(first));
+    try std.testing.expectEqual(second_id, ScriptExecutionContextIdentifier__forGlobalObject(second));
+
+    JSC__VM__throwError(JSC__JSGlobalObject__vm(first), first, EncodedValue.fromInt32(234));
+    try std.testing.expectEqual(first_id, ScriptExecutionContextIdentifier__forGlobalObject(first));
+    const pending = JSGlobalObject__tryTakeException(first);
+    try std.testing.expectEqual(EncodedValue.fromInt32(234), JSC__Exception__asJSValue(@ptrFromInt(try pending.asCellAddress())));
+
+    const Worker = struct {
+        fn run(slot: *u32) void {
+            const context = JSGlobalContextCreate(null) orelse return;
+            defer JSGlobalContextRelease(context);
+            const id = ScriptExecutionContextIdentifier__forGlobalObject(context);
+            if (id != 0 and ScriptExecutionContextIdentifier__forGlobalObject(context) == id)
+                slot.* = id;
+        }
+    };
+    var ids: [8]u32 = @splat(0);
+    var threads: [8]std.Thread = undefined;
+    for (&threads, &ids) |*thread, *slot| thread.* = try std.Thread.spawn(.{}, Worker.run, .{slot});
+    for (&threads) |*thread| thread.join();
+    for (ids, 0..) |id, index| {
+        try std.testing.expect(id != 0 and id != first_id and id != second_id);
+        for (ids[0..index]) |prior| try std.testing.expect(id != prior);
+    }
 }
 
 test "C-API: inspectability gates concurrent in-process protocol sessions" {
