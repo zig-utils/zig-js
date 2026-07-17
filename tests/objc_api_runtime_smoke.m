@@ -232,6 +232,45 @@ int main(void)
                       context.exception == nil,
                   47))
             return 47;
+        JSManagedValue *managedPrimitive = [JSManagedValue managedValueWithValue:
+                                                               [JSValue valueWithInt32:9 inContext:context]];
+        if (check(managedPrimitive.value.toInt32 == 9, 48))
+            return 48;
+        __block JSManagedValue *unrootedManaged = nil;
+        @autoreleasepool {
+            JSValue *collectible = [context evaluateScript:@"({ tag: 'unrooted' })"];
+            unrootedManaged = [JSManagedValue managedValueWithValue:collectible];
+            if (check([unrootedManaged.value[@"tag"].toString isEqualToString:@"unrooted"], 49))
+                return 49;
+        }
+        JSGarbageCollect(context.JSGlobalContextRef);
+        if (check([unrootedManaged.value[@"tag"].toString isEqualToString:@"unrooted"], 50))
+            return 50;
+        NSObject *owner = [NSObject new];
+        __block JSManagedValue *ownedManaged = nil;
+        @autoreleasepool {
+            JSValue *collectible = [context evaluateScript:@"({ tag: 'owned' })"];
+            ownedManaged = [JSManagedValue managedValueWithValue:collectible andOwner:owner];
+        }
+        JSGarbageCollect(context.JSGlobalContextRef);
+        if (check([ownedManaged.value[@"tag"].toString isEqualToString:@"owned"], 51))
+            return 51;
+        [context.virtualMachine removeManagedReference:ownedManaged withOwner:owner];
+        JSGarbageCollect(context.JSGlobalContextRef);
+        if (check([ownedManaged.value[@"tag"].toString isEqualToString:@"owned"], 52))
+            return 52;
+        __weak NSObject *weakOwner = nil;
+        @autoreleasepool {
+            NSObject *temporaryOwner = [NSObject new];
+            weakOwner = temporaryOwner;
+            JSManagedValue *temporaryManaged = [JSManagedValue managedValueWithValue:
+                                                                    [context evaluateScript:@"({ temporary: true })"]
+                                                                                   andOwner:temporaryOwner];
+            if (check(temporaryManaged.value != nil, 53))
+                return 53;
+        }
+        if (check(weakOwner == nil, 54))
+            return 54;
     }
     return 0;
 }

@@ -13,6 +13,7 @@ JS_EXPORT NSString *const JSPropertyDescriptorSetKey = @"set";
 
 @interface ZJSVirtualMachineState : NSObject
 @property (nonatomic) JSContextGroupRef group;
+@property (nonatomic, strong) NSMapTable<id, NSMutableDictionary<NSValue *, JSValue *> *> *managedReferences;
 @end
 
 @implementation ZJSVirtualMachineState
@@ -42,6 +43,14 @@ JS_EXPORT NSString *const JSPropertyDescriptorSetKey = @"set";
 @interface ZJSValueState : NSObject
 @property (nonatomic) JSValueRef value;
 @property (nonatomic, strong) JSContext *context;
+@end
+
+@interface ZJSManagedValueState : NSObject
+@property (nonatomic, strong) JSValue *weakReference;
+@property (nonatomic, strong) JSValue *primitiveValue;
+@end
+
+@implementation ZJSManagedValueState
 @end
 
 @implementation ZJSValueState
@@ -110,6 +119,7 @@ static ZJSCallbackState *ZJSCurrentCallbackState(void)
 static const void *ZJSVirtualMachineStateKey = &ZJSVirtualMachineStateKey;
 static const void *ZJSContextStateKey = &ZJSContextStateKey;
 static const void *ZJSValueStateKey = &ZJSValueStateKey;
+static const void *ZJSManagedValueStateKey = &ZJSManagedValueStateKey;
 
 static ZJSVirtualMachineState *ZJSVMState(JSVirtualMachine *virtualMachine)
 {
@@ -125,6 +135,13 @@ static ZJSValueState *ZJSValState(JSValue *value)
 {
     return objc_getAssociatedObject(value, ZJSValueStateKey);
 }
+
+static ZJSManagedValueState *ZJSManagedState(JSManagedValue *value)
+{
+    return objc_getAssociatedObject(value, ZJSManagedValueStateKey);
+}
+
+static NSValue *ZJSObjectiveCIdentityKey(id object);
 
 static NSMapTable<NSValue *, JSVirtualMachine *> *ZJSVirtualMachines(void)
 {
@@ -211,6 +228,7 @@ static JSObjectRef ZJSObjectForValue(JSValue *value);
         return nil;
     ZJSVirtualMachineState *state = [ZJSVirtualMachineState new];
     state.group = retain ? JSContextGroupRetain(group) : group;
+    state.managedReferences = [NSMapTable weakToStrongObjectsMapTable];
     if (!state.group)
         return nil;
     objc_setAssociatedObject(self, ZJSVirtualMachineStateKey, state,
@@ -219,6 +237,87 @@ static JSObjectRef ZJSObjectForValue(JSValue *value);
         [ZJSVirtualMachines() setObject:self forKey:ZJSPointerKey(state.group)];
     }
     return self;
+}
+
+- (void)addManagedReference:(id)object withOwner:(id)owner
+{
+    if (!object || !owner)
+        return;
+    JSValue *value = nil;
+    if ([object isKindOfClass:[JSManagedValue class]])
+        value = [object value];
+    else if ([object isKindOfClass:[JSValue class]])
+        value = object;
+    if (!value)
+        return;
+    if (value.context.virtualMachine != self)
+        [NSException raise:NSInvalidArgumentException format:@"Managed JSValue belongs to a different JSVirtualMachine"];
+    @synchronized(self) {
+        ZJSVirtualMachineState *state = ZJSVMState(self);
+        NSMutableDictionary *references = [state.managedReferences objectForKey:owner];
+        if (!references) {
+            references = [NSMutableDictionary dictionary];
+            [state.managedReferences setObject:references forKey:owner];
+        }
+        references[ZJSObjectiveCIdentityKey(object)] = value;
+    }
+}
+
+- (void)removeManagedReference:(id)object withOwner:(id)owner
+{
+    if (!object || !owner)
+        return;
+    @synchronized(self) {
+        ZJSVirtualMachineState *state = ZJSVMState(self);
+        NSMutableDictionary *references = [state.managedReferences objectForKey:owner];
+        [references removeObjectForKey:ZJSObjectiveCIdentityKey(object)];
+        if (references.count == 0)
+            [state.managedReferences removeObjectForKey:owner];
+    }
+}
+
+@end
+
+@implementation JSManagedValue
+
++ (JSManagedValue *)managedValueWithValue:(JSValue *)value
+{
+    return [[self alloc] initWithValue:value];
+}
+
++ (JSManagedValue *)managedValueWithValue:(JSValue *)value andOwner:(id)owner
+{
+    JSManagedValue *managed = [[self alloc] initWithValue:value];
+    [value.context.virtualMachine addManagedReference:managed withOwner:owner];
+    return managed;
+}
+
+- (instancetype)initWithValue:(JSValue *)value
+{
+    self = [super init];
+    if (!self || !value)
+        return nil;
+    ZJSManagedValueState *state = [ZJSManagedValueState new];
+    if (value.isObject) {
+        JSValue *constructor = [value.context.globalObject valueForProperty:@"WeakRef"];
+        state.weakReference = [constructor constructWithArguments:@[ value ]];
+        if (!state.weakReference)
+            return nil;
+    } else {
+        state.primitiveValue = value;
+    }
+    objc_setAssociatedObject(self, ZJSManagedValueStateKey, state,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    return self;
+}
+
+- (JSValue *)value
+{
+    ZJSManagedValueState *state = ZJSManagedState(self);
+    if (state.primitiveValue)
+        return state.primitiveValue;
+    JSValue *value = [state.weakReference invokeMethod:@"deref" withArguments:nil];
+    return value.isUndefined ? nil : value;
 }
 
 @end
