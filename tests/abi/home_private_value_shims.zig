@@ -282,11 +282,32 @@ extern "c" fn Bun__WeakRef__new(JSContextRef, EncodedValue, WeakRefType, ?*anyop
 extern "c" fn Bun__WeakRef__get(?*WeakRef) EncodedValue;
 extern "c" fn Bun__WeakRef__clear(?*WeakRef) void;
 extern "c" fn Bun__WeakRef__delete(?*WeakRef) void;
+extern "c" fn MarkedArgumentBuffer__run(?*anyopaque, ?*const fn (?*anyopaque, ?*anyopaque) callconv(.c) void) void;
+extern "c" fn MarkedArgumentBuffer__append(?*anyopaque, EncodedValue) void;
+extern "c" fn JSCommonJSExtensions__appendFunction(JSContextRef, EncodedValue) u32;
+extern "c" fn JSCommonJSExtensions__setFunction(JSContextRef, u32, EncodedValue) void;
+extern "c" fn JSCommonJSExtensions__swapRemove(JSContextRef, u32) u32;
 
 const PromiseCallbackState = struct {
     value: EncodedValue,
     calls: usize = 0,
 };
+
+const MarkedArgumentFixtureState = struct {
+    vm: ?*anyopaque,
+    value: EncodedValue,
+    foreign: EncodedValue,
+    calls: usize = 0,
+};
+
+fn markedArgumentFixtureCallback(raw: ?*anyopaque, buffer: ?*anyopaque) callconv(.c) void {
+    const state: *MarkedArgumentFixtureState = @ptrCast(@alignCast(raw.?));
+    state.calls += 1;
+    MarkedArgumentBuffer__append(buffer, EncodedValue.fromInt32(212));
+    MarkedArgumentBuffer__append(buffer, state.value);
+    MarkedArgumentBuffer__append(buffer, state.foreign);
+    _ = JSC__VM__runGC(state.vm, true);
+}
 
 fn fail(message: []const u8) noreturn {
     std.debug.print("Home private value shims: {s}\n", .{message});
@@ -2215,6 +2236,42 @@ pub fn main() void {
         fail("private WeakRef invalid-input mismatch");
     Bun__WeakRef__clear(null);
     Bun__WeakRef__delete(null);
+
+    const rooted_foreign = evaluate(foreign_context, "({ rootedForeign: true })");
+    var marked_state = MarkedArgumentFixtureState{
+        .vm = vm,
+        .value = direct_value,
+        .foreign = rooted_foreign,
+    };
+    MarkedArgumentBuffer__run(&marked_state, markedArgumentFixtureCallback);
+    MarkedArgumentBuffer__run(null, null);
+    MarkedArgumentBuffer__append(null, direct_value);
+    if (marked_state.calls != 1 or !JSC__JSValue__isStrictEqual(marked_state.value, direct_value, context))
+        fail("private MarkedArgumentBuffer callback/root mismatch");
+
+    if (JSCommonJSExtensions__appendFunction(context, direct_value) != 0 or
+        JSCommonJSExtensions__appendFunction(context, encoded_text) != 1 or
+        JSCommonJSExtensions__appendFunction(context, sibling_strong_value) != 2)
+        fail("private CommonJS extension append indices mismatch");
+    JSCommonJSExtensions__setFunction(context, 1, sibling_strong_value);
+    JSCommonJSExtensions__setFunction(context, 99, direct_value);
+    JSCommonJSExtensions__setFunction(context, 1, rooted_foreign);
+    if (JSCommonJSExtensions__swapRemove(context, 0) != 2 or
+        JSCommonJSExtensions__swapRemove(context, 1) != 1 or
+        JSCommonJSExtensions__swapRemove(context, 0) != 0 or
+        JSCommonJSExtensions__swapRemove(context, 99) != 99)
+        fail("private CommonJS extension swap-remove mismatch");
+    if (JSCommonJSExtensions__appendFunction(sibling_context, sibling_strong_value) != 0 or
+        JSCommonJSExtensions__swapRemove(sibling_context, 0) != 0 or
+        JSCommonJSExtensions__appendFunction(context, rooted_foreign) != std.math.maxInt(u32))
+        fail("private CommonJS extension realm/VM ownership mismatch");
+    JSC__VM__throwError(vm, context, EncodedValue.fromInt32(212));
+    if (JSCommonJSExtensions__appendFunction(context, direct_value) != std.math.maxInt(u32))
+        fail("private CommonJS extension ignored pending exception");
+    const rooted_container_exception = JSGlobalObject__tryTakeException(context);
+    if (JSC__Exception__asJSValue(rooted_container_exception.cellPointer()) != EncodedValue.fromInt32(212))
+        fail("private CommonJS extension replaced pending exception");
+
     const resolved_promise_cell = JSC__JSPromise__resolvedPromise(sibling_context, direct_value) orelse fail("private resolved JSPromise failed");
     const resolved_promise = EncodedValue.fromBits(@intFromPtr(resolved_promise_cell));
     const resolved_value_promise = JSC__JSPromise__resolvedPromiseValue(context, direct_value);
@@ -2689,5 +2746,5 @@ pub fn main() void {
         TopExceptionScope__exceptionIncludingTraps(&verification_scope) != null)
         fail("private TopExceptionScope destruction mismatch");
 
-    std.debug.print("Home private value shims: 173/173 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 178/178 symbols linked; runtime matrix passed\n", .{});
 }

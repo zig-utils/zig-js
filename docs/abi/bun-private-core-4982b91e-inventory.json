@@ -83,8 +83,8 @@
     },
     "by_status": {
       "external": 1,
-      "implemented": 183,
-      "pending": 253
+      "implemented": 188,
+      "pending": 248
     }
   },
   "home_comparison": {
@@ -2921,10 +2921,10 @@
       "line": 82,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSCommonJSExtensions__appendFunction(global: *jsc.JSGlobalObject, value: jsc.JSValue) u32;",
       "declaration_sha256": "e67d0a87f7709a9361f02a65e1ffe2f8e2e8bc574dbcef6a672d29169c496e37",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSCommonJSExtensions__setFunction",
@@ -2932,10 +2932,10 @@
       "line": 83,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSCommonJSExtensions__setFunction(global: *jsc.JSGlobalObject, index: u32, value: jsc.JSValue) void;",
       "declaration_sha256": "bcb3df15f55a9678df35b352da78bd12aa6c136fc17543afb90d76d81730148d",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSCommonJSExtensions__swapRemove",
@@ -2943,10 +2943,10 @@
       "line": 85,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSCommonJSExtensions__swapRemove(global: *jsc.JSGlobalObject, index: u32) u32;",
       "declaration_sha256": "5fc4668dbdc56a9cda7b07128d2063eec2e0834f37c7054ce8064167dd43a75d",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSFunctionCall",
@@ -3334,10 +3334,10 @@
       "line": 2,
       "calling_convention": ".c",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn MarkedArgumentBuffer__append(args: *MarkedArgumentBuffer, value: JSValue) callconv(.c) void;",
       "declaration_sha256": "e471bdf745146ba6fc520c03b60e75e9dc0bb9bd5f5be5be28bb12f3491b0c27",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "MarkedArgumentBuffer__run",
@@ -3345,10 +3345,10 @@
       "line": 7,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn MarkedArgumentBuffer__run(ctx: *anyopaque, *const fn (ctx: *anyopaque, args: *anyopaque) callconv(.c) void) void;",
       "declaration_sha256": "5f14a94a88f58964ef1761d9de389624953e3f9fe4e86aa3901c6dd3a294d6e7",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "NodeModuleModule__callOverriddenRunMain",
