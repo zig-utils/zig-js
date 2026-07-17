@@ -148,6 +148,24 @@ int main(void)
         return 25;
     JSStringRelease(locked_name);
 
+    JSStringRef symbol_object_source = JSStringCreateWithUTF8CString(
+        "(() => { const key = Symbol('key'); return [{ [key]: 42 }, key]; })()");
+    JSValueRef symbol_object_pair = JSEvaluateScript(
+        context, symbol_object_source, NULL, NULL, 1, &exception);
+    JSStringRelease(symbol_object_source);
+    JSObjectRef symbol_object = (JSObjectRef)JSObjectGetPropertyAtIndex(
+        context, (JSObjectRef)symbol_object_pair, 0, &exception);
+    JSValueRef symbol_key = JSObjectGetPropertyAtIndex(
+        context, (JSObjectRef)symbol_object_pair, 1, &exception);
+    if (!symbol_object || !symbol_key || exception ||
+        !JSObjectHasPropertyForKey(context, symbol_object, symbol_key, &exception) ||
+        JSValueToNumber(context,
+            JSObjectGetPropertyForKey(context, symbol_object, symbol_key, &exception), &exception) != 42.0)
+        return 26;
+    if (!JSObjectDeletePropertyForKey(context, symbol_object, symbol_key, &exception) ||
+        JSObjectHasPropertyForKey(context, symbol_object, symbol_key, &exception) || exception)
+        return 27;
+
     const JSChar utf16[] = { 'z', 'i', 'g', 0xd83d, 0xde00 };
     JSStringRef wide = JSStringCreateWithCharacters(utf16, 5);
     if (!wide || JSStringGetLength(wide) != 5 ||

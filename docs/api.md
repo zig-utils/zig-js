@@ -122,6 +122,10 @@ JSObjectRef JSObjectMake(JSContextRef, JSClassRef, void* data);
 JSValueRef  JSObjectGetPrototype(JSContextRef, JSObjectRef);
 void        JSObjectSetPrototype(JSContextRef, JSObjectRef, JSValueRef);
 bool        JSObjectHasProperty(JSContextRef, JSObjectRef, JSStringRef);
+bool        JSObjectHasPropertyForKey(JSContextRef, JSObjectRef, JSValueRef key,
+                                      JSValueRef* exception);
+JSValueRef  JSObjectGetPropertyForKey(JSContextRef, JSObjectRef, JSValueRef key,
+                                      JSValueRef* exception);
 void*       JSObjectGetPrivate(JSObjectRef);
 bool        JSObjectSetPrivate(JSObjectRef, void* data);
 JSObjectRef JSObjectMakeArray(JSContextRef, size_t argc, const JSValueRef args[], JSValueRef* exception);
@@ -136,6 +140,8 @@ void        JSObjectSetPropertyAtIndex(JSContextRef, JSObjectRef, unsigned index
                                        JSValueRef value, JSValueRef* exception);
 bool        JSObjectDeleteProperty(JSContextRef, JSObjectRef, JSStringRef,
                                    JSValueRef* exception);
+bool        JSObjectDeletePropertyForKey(JSContextRef, JSObjectRef, JSValueRef key,
+                                         JSValueRef* exception);
 JSValueRef  JSObjectCallAsFunction(JSContextRef, JSObjectRef, JSObjectRef thisObject,
                                    size_t argc, const JSValueRef args[], JSValueRef* exception);
 JSObjectRef JSObjectMakeFunctionWithCallback(JSContextRef, JSStringRef name,

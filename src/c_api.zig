@@ -1796,6 +1796,42 @@ export fn JSObjectHasProperty(ctx: JSContextRef, object: JSObjectRef, name: JSSt
     return machine.hasPropertyResult(obj, key.bytes) catch false;
 }
 
+fn propertyKeyBytes(c: *Context, machine: *interp.Interpreter, key_ref: JSValueRef, exception: ExceptionRef) ?[]const u8 {
+    const input = valueArgFrom(c, key_ref, exception) orelse return null;
+    const key = machine.toPropertyKeyValue(input) catch |err| {
+        if (err == error.Throw) {
+            if (exception != null) exception[0] = box(c, machine.exception);
+        } else setException(c, exception, @errorName(err));
+        return null;
+    };
+    if (key.isString()) return key.asStr();
+    if (key.isObject() and key.asObj().is_symbol) return key.asObj().symbolKey();
+    setException(c, exception, "TypeError: value cannot be converted to a property key");
+    return null;
+}
+
+export fn JSObjectHasPropertyForKey(ctx: JSContextRef, object: JSObjectRef, property_key: JSValueRef, exception: ExceptionRef) callconv(.c) bool {
+    const c = ctxFrom(ctx) orelse return false;
+    const obj = objectArgFrom(c, object, exception) orelse return false;
+    const gc_saved = gc_mod.setActiveHeap(c.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(c.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = c.interpreter();
+    c.pushActiveInterpreter(&machine) catch {
+        setException(c, exception, "OutOfMemory");
+        return false;
+    };
+    defer c.popActiveInterpreter(&machine);
+    const key = propertyKeyBytes(c, &machine, property_key, exception) orelse return false;
+    return machine.hasPropertyResult(obj, key) catch |err| {
+        if (err == error.Throw) {
+            if (exception != null) exception[0] = box(c, machine.exception);
+        } else setException(c, exception, @errorName(err));
+        return false;
+    };
+}
+
 export fn JSObjectGetProperty(ctx: JSContextRef, object: JSObjectRef, name: JSStringRef, exception: ExceptionRef) callconv(.c) JSValueRef {
     const c = ctxFrom(ctx) orelse return null;
     const obj = objectArgFrom(c, object, exception) orelse return null;
@@ -1819,6 +1855,29 @@ export fn JSObjectGetProperty(ctx: JSContextRef, object: JSObjectRef, name: JSSt
         } else {
             setException(c, exception, @errorName(err));
         }
+        return null;
+    };
+    return boxResult(c, exception, result);
+}
+
+export fn JSObjectGetPropertyForKey(ctx: JSContextRef, object: JSObjectRef, property_key: JSValueRef, exception: ExceptionRef) callconv(.c) JSValueRef {
+    const c = ctxFrom(ctx) orelse return null;
+    const obj = objectArgFrom(c, object, exception) orelse return null;
+    const gc_saved = gc_mod.setActiveHeap(c.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(c.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = c.interpreter();
+    c.pushActiveInterpreter(&machine) catch {
+        setException(c, exception, "OutOfMemory");
+        return null;
+    };
+    defer c.popActiveInterpreter(&machine);
+    const key = propertyKeyBytes(c, &machine, property_key, exception) orelse return null;
+    const result = machine.getProperty(Value.obj(obj), key) catch |err| {
+        if (err == error.Throw) {
+            if (exception != null) exception[0] = box(c, machine.exception);
+        } else setException(c, exception, @errorName(err));
         return null;
     };
     return boxResult(c, exception, result);
@@ -1874,6 +1933,28 @@ export fn JSObjectDeleteProperty(ctx: JSContextRef, object: JSObjectRef, name: J
     };
     defer c.popActiveInterpreter(&machine);
     return machine.deleteOwn(obj, key.bytes) catch |err| {
+        if (err == error.Throw) {
+            if (exception != null) exception[0] = box(c, machine.exception);
+        } else setException(c, exception, @errorName(err));
+        return false;
+    };
+}
+
+export fn JSObjectDeletePropertyForKey(ctx: JSContextRef, object: JSObjectRef, property_key: JSValueRef, exception: ExceptionRef) callconv(.c) bool {
+    const c = ctxFrom(ctx) orelse return false;
+    const obj = objectArgFrom(c, object, exception) orelse return false;
+    const gc_saved = gc_mod.setActiveHeap(c.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(c.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = c.interpreter();
+    c.pushActiveInterpreter(&machine) catch {
+        setException(c, exception, "OutOfMemory");
+        return false;
+    };
+    defer c.popActiveInterpreter(&machine);
+    const key = propertyKeyBytes(c, &machine, property_key, exception) orelse return false;
+    return machine.deleteOwn(obj, key) catch |err| {
         if (err == error.Throw) {
             if (exception != null) exception[0] = box(c, machine.exception);
         } else setException(c, exception, @errorName(err));

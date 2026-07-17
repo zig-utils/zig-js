@@ -118,6 +118,20 @@ int main(void)
     JSStringRelease(inherited_name);
     JSStringRelease(temporary_name);
 
+    JSValueRef symbol_pair = evaluate(context,
+        "(() => { const key = Symbol('key'); return [{ [key]: 13 }, key]; })()");
+    JSObjectRef symbol_object = (JSObjectRef)JSObjectGetPropertyAtIndex(
+        context, (JSObjectRef)symbol_pair, 0, &exception);
+    JSValueRef symbol_key = JSObjectGetPropertyAtIndex(
+        context, (JSObjectRef)symbol_pair, 1, &exception);
+    int symbol_has = JSObjectHasPropertyForKey(context, symbol_object, symbol_key, &exception);
+    double symbol_value = JSValueToNumber(context,
+        JSObjectGetPropertyForKey(context, symbol_object, symbol_key, &exception), &exception);
+    int symbol_deleted = JSObjectDeletePropertyForKey(
+        context, symbol_object, symbol_key, &exception);
+    printf("property-keys %d %.0f %d %d\n", symbol_has, symbol_value,
+        symbol_deleted, JSObjectHasPropertyForKey(context, symbol_object, symbol_key, &exception));
+
     JSValueProtect(context, json);
     JSValueUnprotect(context, json);
     if (exception)
