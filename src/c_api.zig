@@ -38,6 +38,7 @@ const promise = @import("promise.zig");
 const vm = @import("vm.zig");
 const strcell = @import("strcell.zig");
 const private_encoded_value = @import("private_abi/encoded_value.zig");
+const private_jstype = @import("private_abi/jstype.zig");
 const WorkerMod = @import("worker.zig");
 const JsString = @import("jsstring.zig").JsString;
 
@@ -1262,6 +1263,59 @@ fn privateBigIntModuloU64(object: *Object) u64 {
     return @truncate(@as(u128, @bitCast(object.bigIntValue())));
 }
 
+fn privateObjectJSType(object: *Object) private_jstype.Kind {
+    if (object.is_symbol) return .Symbol;
+    if (object.is_bigint) return .HeapBigInt;
+    if (object.behavior.is_error) return .ErrorInstance;
+    if (object.arrayBuffer() != null) return .ArrayBuffer;
+    if (object.typedArray()) |typed_array| return switch (typed_array.kind) {
+        .i8 => .Int8Array,
+        .u8 => .Uint8Array,
+        .u8c => .Uint8ClampedArray,
+        .i16 => .Int16Array,
+        .u16 => .Uint16Array,
+        .i32 => .Int32Array,
+        .u32 => .Uint32Array,
+        .f16 => .Float16Array,
+        .f32 => .Float32Array,
+        .f64 => .Float64Array,
+        .i64 => .BigInt64Array,
+        .u64 => .BigUint64Array,
+    };
+    if (object.dataView() != null) return .DataView;
+    if (object.moduleNs() != null) return .ModuleNamespaceObject;
+    if (object.behavior.is_shadow_realm) return .ShadowRealm;
+    if (object.behavior.is_regex) return .RegExpObject;
+    if (object.behavior.is_date) return .JSDate;
+    if (object.proxy_revoked or object.proxyTarget() != null) return .ProxyObject;
+    if (object.generator() != null) return .Generator;
+    if (object.iteratorHelper() != null) return .IteratorHelper;
+    if (object.promiseData() != null) return .JSPromise;
+    if (object.is_map) return if (object.is_weak) .WeakMap else .Map;
+    if (object.is_set) return if (object.is_weak) .WeakSet else .Set;
+    if (object.is_arguments) return .DirectArguments;
+    if (object.is_array) return .Array;
+    if (object.boxedPrimitive()) |primitive| return switch (primitive.kind()) {
+        .boolean => .BooleanObject,
+        .number => .NumberObject,
+        .string => .StringObject,
+        else => .FinalObject,
+    };
+    if (object.jsFunction() != null) return .JSFunction;
+    if (object.isCallableObject()) return .InternalFunction;
+    return .FinalObject;
+}
+
+fn privateJSType(encoded: EncodedValue) u8 {
+    const boxed = privateBoxedFrom(encoded) orelse return 0;
+    const kind: private_jstype.Kind = switch (boxed.value.kind()) {
+        .string => .String,
+        .object => privateObjectJSType(boxed.value.asObj()),
+        else => return 0,
+    };
+    return private_jstype.selectedTag(kind);
+}
+
 /// First revision-pinned Home private-ABI slice. These symbols consume JSC64
 /// words, not zig-js's internal NaN-box representation.
 export fn JSC__JSValue__eqlCell(encoded: EncodedValue, cell: ?*anyopaque) callconv(.c) bool {
@@ -1332,6 +1386,16 @@ export fn JSC__JSValue__isSameValue(
     const lhs = privateValueFrom(global, left) orelse return false;
     const rhs = privateValueFrom(global, right) orelse return false;
     return value.sameValue(lhs, rhs);
+}
+
+export fn JSC__JSValue__jsType(encoded: EncodedValue) callconv(.c) u8 {
+    return privateJSType(encoded);
+}
+
+export fn JSC__JSCell__getType(cell: ?*anyopaque) callconv(.c) u8 {
+    const pointer = cell orelse return 0;
+    const encoded = EncodedValue.fromCellAddress(@intFromPtr(pointer)) catch return 0;
+    return privateJSType(encoded);
 }
 
 fn valueFromContext(ctx: *Context, ref: JSValueRef) ?Value {

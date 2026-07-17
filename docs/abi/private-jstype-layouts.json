@@ -1,0 +1,574 @@
+{
+  "schema_version": 1,
+  "kind": "private_jstype_layouts",
+  "profiles": {
+    "home": {
+      "revision": "38702f9e43b3aecbee7d5b7aa48cc66d41cabde7",
+      "source": "packages/runtime/src/jsc/JSType.zig",
+      "source_sha256": "93abf0de1e71007acea7d2b41da258130d676be1d94494d5a572da511b9299dc",
+      "members": {
+        "Cell": 0,
+        "Structure": 1,
+        "String": 2,
+        "HeapBigInt": 3,
+        "HeapDouble": 4,
+        "HeapInt32": 5,
+        "Symbol": 6,
+        "GetterSetter": 7,
+        "CustomGetterSetter": 8,
+        "APIValueWrapper": 9,
+        "NativeExecutable": 10,
+        "ProgramExecutable": 11,
+        "ModuleProgramExecutable": 12,
+        "EvalExecutable": 13,
+        "FunctionExecutable": 14,
+        "UnlinkedFunctionExecutable": 15,
+        "UnlinkedProgramCodeBlock": 16,
+        "UnlinkedModuleProgramCodeBlock": 17,
+        "UnlinkedEvalCodeBlock": 18,
+        "UnlinkedFunctionCodeBlock": 19,
+        "CodeBlock": 20,
+        "JSCellButterfly": 21,
+        "JSSourceCode": 22,
+        "SlimPromiseReaction": 23,
+        "FullPromiseReaction": 24,
+        "PromiseAllContext": 25,
+        "PromiseAllGlobalContext": 26,
+        "JSMicrotaskDispatcher": 27,
+        "ModuleRegistryEntry": 28,
+        "ModuleLoadingContext": 29,
+        "ModuleLoaderPayload": 30,
+        "ModuleGraphLoadingState": 31,
+        "JSModuleLoader": 32,
+        "Object": 33,
+        "FinalObject": 34,
+        "JSCallee": 35,
+        "JSFunction": 36,
+        "InternalFunction": 37,
+        "NullSetterFunction": 38,
+        "BooleanObject": 39,
+        "NumberObject": 40,
+        "ErrorInstance": 41,
+        "GlobalProxy": 42,
+        "DirectArguments": 43,
+        "ScopedArguments": 44,
+        "ClonedArguments": 45,
+        "Array": 46,
+        "DerivedArray": 47,
+        "ArrayBuffer": 48,
+        "Int8Array": 49,
+        "Uint8Array": 50,
+        "Uint8ClampedArray": 51,
+        "Int16Array": 52,
+        "Uint16Array": 53,
+        "Int32Array": 54,
+        "Uint32Array": 55,
+        "Float16Array": 56,
+        "Float32Array": 57,
+        "Float64Array": 58,
+        "BigInt64Array": 59,
+        "BigUint64Array": 60,
+        "DataView": 61,
+        "GlobalObject": 62,
+        "GlobalLexicalEnvironment": 63,
+        "LexicalEnvironment": 64,
+        "ModuleEnvironment": 65,
+        "StrictEvalActivation": 66,
+        "WithScope": 67,
+        "AsyncDisposableStack": 68,
+        "DisposableStack": 69,
+        "ModuleNamespaceObject": 70,
+        "ShadowRealm": 71,
+        "RegExpObject": 72,
+        "JSDate": 73,
+        "ProxyObject": 74,
+        "Generator": 75,
+        "AsyncGenerator": 76,
+        "JSArrayIterator": 77,
+        "Iterator": 78,
+        "IteratorHelper": 79,
+        "MapIterator": 80,
+        "SetIterator": 81,
+        "StringIterator": 82,
+        "WrapForValidIterator": 83,
+        "RegExpStringIterator": 84,
+        "AsyncFromSyncIterator": 85,
+        "JSPromise": 86,
+        "Map": 87,
+        "Set": 88,
+        "WeakMap": 89,
+        "WeakSet": 90,
+        "WebAssemblyModule": 91,
+        "WebAssemblyInstance": 92,
+        "WebAssemblyGCObject": 93,
+        "StringObject": 94,
+        "DerivedStringObject": 95,
+        "InternalFieldTuple": 96
+      }
+    },
+    "bun": {
+      "revision": "4982b91e3702094330f3be3883354c52b8c01323",
+      "source": "src/jsc/JSType.zig",
+      "source_sha256": "34370d4e5230020e38d162fd0e2f047160bf94a1408670cedde168ca2b6555ee",
+      "members": {
+        "Cell": 0,
+        "Structure": 1,
+        "String": 2,
+        "HeapBigInt": 3,
+        "HeapDouble": 4,
+        "HeapInt32": 5,
+        "Symbol": 6,
+        "GetterSetter": 7,
+        "CustomGetterSetter": 8,
+        "APIValueWrapper": 9,
+        "NativeExecutable": 10,
+        "ProgramExecutable": 11,
+        "ModuleProgramExecutable": 12,
+        "EvalExecutable": 13,
+        "FunctionExecutable": 14,
+        "UnlinkedFunctionExecutable": 15,
+        "UnlinkedProgramCodeBlock": 16,
+        "UnlinkedModuleProgramCodeBlock": 17,
+        "UnlinkedEvalCodeBlock": 18,
+        "UnlinkedFunctionCodeBlock": 19,
+        "CodeBlock": 20,
+        "JSCellButterfly": 21,
+        "JSSourceCode": 22,
+        "SlimPromiseReaction": 23,
+        "FullPromiseReaction": 24,
+        "PromiseAllContext": 25,
+        "PromiseAllGlobalContext": 26,
+        "WebAssemblyStreamingContext": 27,
+        "JSMicrotaskDispatcher": 28,
+        "ModuleRegistryEntry": 29,
+        "ModuleLoadingContext": 30,
+        "ModuleLoaderPayload": 31,
+        "ModuleGraphLoadingState": 32,
+        "JSModuleLoader": 33,
+        "Object": 34,
+        "FinalObject": 35,
+        "JSCallee": 36,
+        "JSFunction": 37,
+        "InternalFunction": 38,
+        "NullSetterFunction": 39,
+        "BooleanObject": 40,
+        "NumberObject": 41,
+        "ErrorInstance": 42,
+        "GlobalProxy": 43,
+        "DirectArguments": 44,
+        "ScopedArguments": 45,
+        "ClonedArguments": 46,
+        "Array": 47,
+        "DerivedArray": 48,
+        "ArrayBuffer": 49,
+        "Int8Array": 50,
+        "Uint8Array": 51,
+        "Uint8ClampedArray": 52,
+        "Int16Array": 53,
+        "Uint16Array": 54,
+        "Int32Array": 55,
+        "Uint32Array": 56,
+        "Float16Array": 57,
+        "Float32Array": 58,
+        "Float64Array": 59,
+        "BigInt64Array": 60,
+        "BigUint64Array": 61,
+        "DataView": 62,
+        "GlobalObject": 63,
+        "GlobalLexicalEnvironment": 64,
+        "LexicalEnvironment": 65,
+        "ModuleEnvironment": 66,
+        "StrictEvalActivation": 67,
+        "WithScope": 68,
+        "AsyncDisposableStack": 69,
+        "DisposableStack": 70,
+        "ModuleNamespaceObject": 71,
+        "ShadowRealm": 72,
+        "RegExpObject": 73,
+        "JSDate": 74,
+        "ProxyObject": 75,
+        "Generator": 76,
+        "AsyncGenerator": 77,
+        "JSArrayIterator": 78,
+        "Iterator": 79,
+        "IteratorHelper": 80,
+        "MapIterator": 81,
+        "SetIterator": 82,
+        "StringIterator": 83,
+        "WrapForValidIterator": 84,
+        "RegExpStringIterator": 85,
+        "AsyncFromSyncIterator": 86,
+        "JSPromise": 87,
+        "Map": 88,
+        "Set": 89,
+        "WeakMap": 90,
+        "WeakSet": 91,
+        "WebAssemblyModule": 92,
+        "WebAssemblyInstance": 93,
+        "WebAssemblyGCObject": 94,
+        "StringObject": 95,
+        "DerivedStringObject": 96,
+        "InternalFieldTuple": 97
+      }
+    }
+  },
+  "comparison": {
+    "shared_members": 97,
+    "home_only": [],
+    "bun_only": [
+      "WebAssemblyStreamingContext"
+    ],
+    "renumbered": [
+      {
+        "name": "Array",
+        "home": 46,
+        "bun": 47
+      },
+      {
+        "name": "ArrayBuffer",
+        "home": 48,
+        "bun": 49
+      },
+      {
+        "name": "AsyncDisposableStack",
+        "home": 68,
+        "bun": 69
+      },
+      {
+        "name": "AsyncFromSyncIterator",
+        "home": 85,
+        "bun": 86
+      },
+      {
+        "name": "AsyncGenerator",
+        "home": 76,
+        "bun": 77
+      },
+      {
+        "name": "BigInt64Array",
+        "home": 59,
+        "bun": 60
+      },
+      {
+        "name": "BigUint64Array",
+        "home": 60,
+        "bun": 61
+      },
+      {
+        "name": "BooleanObject",
+        "home": 39,
+        "bun": 40
+      },
+      {
+        "name": "ClonedArguments",
+        "home": 45,
+        "bun": 46
+      },
+      {
+        "name": "DataView",
+        "home": 61,
+        "bun": 62
+      },
+      {
+        "name": "DerivedArray",
+        "home": 47,
+        "bun": 48
+      },
+      {
+        "name": "DerivedStringObject",
+        "home": 95,
+        "bun": 96
+      },
+      {
+        "name": "DirectArguments",
+        "home": 43,
+        "bun": 44
+      },
+      {
+        "name": "DisposableStack",
+        "home": 69,
+        "bun": 70
+      },
+      {
+        "name": "ErrorInstance",
+        "home": 41,
+        "bun": 42
+      },
+      {
+        "name": "FinalObject",
+        "home": 34,
+        "bun": 35
+      },
+      {
+        "name": "Float16Array",
+        "home": 56,
+        "bun": 57
+      },
+      {
+        "name": "Float32Array",
+        "home": 57,
+        "bun": 58
+      },
+      {
+        "name": "Float64Array",
+        "home": 58,
+        "bun": 59
+      },
+      {
+        "name": "Generator",
+        "home": 75,
+        "bun": 76
+      },
+      {
+        "name": "GlobalLexicalEnvironment",
+        "home": 63,
+        "bun": 64
+      },
+      {
+        "name": "GlobalObject",
+        "home": 62,
+        "bun": 63
+      },
+      {
+        "name": "GlobalProxy",
+        "home": 42,
+        "bun": 43
+      },
+      {
+        "name": "Int16Array",
+        "home": 52,
+        "bun": 53
+      },
+      {
+        "name": "Int32Array",
+        "home": 54,
+        "bun": 55
+      },
+      {
+        "name": "Int8Array",
+        "home": 49,
+        "bun": 50
+      },
+      {
+        "name": "InternalFieldTuple",
+        "home": 96,
+        "bun": 97
+      },
+      {
+        "name": "InternalFunction",
+        "home": 37,
+        "bun": 38
+      },
+      {
+        "name": "Iterator",
+        "home": 78,
+        "bun": 79
+      },
+      {
+        "name": "IteratorHelper",
+        "home": 79,
+        "bun": 80
+      },
+      {
+        "name": "JSArrayIterator",
+        "home": 77,
+        "bun": 78
+      },
+      {
+        "name": "JSCallee",
+        "home": 35,
+        "bun": 36
+      },
+      {
+        "name": "JSDate",
+        "home": 73,
+        "bun": 74
+      },
+      {
+        "name": "JSFunction",
+        "home": 36,
+        "bun": 37
+      },
+      {
+        "name": "JSMicrotaskDispatcher",
+        "home": 27,
+        "bun": 28
+      },
+      {
+        "name": "JSModuleLoader",
+        "home": 32,
+        "bun": 33
+      },
+      {
+        "name": "JSPromise",
+        "home": 86,
+        "bun": 87
+      },
+      {
+        "name": "LexicalEnvironment",
+        "home": 64,
+        "bun": 65
+      },
+      {
+        "name": "Map",
+        "home": 87,
+        "bun": 88
+      },
+      {
+        "name": "MapIterator",
+        "home": 80,
+        "bun": 81
+      },
+      {
+        "name": "ModuleEnvironment",
+        "home": 65,
+        "bun": 66
+      },
+      {
+        "name": "ModuleGraphLoadingState",
+        "home": 31,
+        "bun": 32
+      },
+      {
+        "name": "ModuleLoaderPayload",
+        "home": 30,
+        "bun": 31
+      },
+      {
+        "name": "ModuleLoadingContext",
+        "home": 29,
+        "bun": 30
+      },
+      {
+        "name": "ModuleNamespaceObject",
+        "home": 70,
+        "bun": 71
+      },
+      {
+        "name": "ModuleRegistryEntry",
+        "home": 28,
+        "bun": 29
+      },
+      {
+        "name": "NullSetterFunction",
+        "home": 38,
+        "bun": 39
+      },
+      {
+        "name": "NumberObject",
+        "home": 40,
+        "bun": 41
+      },
+      {
+        "name": "Object",
+        "home": 33,
+        "bun": 34
+      },
+      {
+        "name": "ProxyObject",
+        "home": 74,
+        "bun": 75
+      },
+      {
+        "name": "RegExpObject",
+        "home": 72,
+        "bun": 73
+      },
+      {
+        "name": "RegExpStringIterator",
+        "home": 84,
+        "bun": 85
+      },
+      {
+        "name": "ScopedArguments",
+        "home": 44,
+        "bun": 45
+      },
+      {
+        "name": "Set",
+        "home": 88,
+        "bun": 89
+      },
+      {
+        "name": "SetIterator",
+        "home": 81,
+        "bun": 82
+      },
+      {
+        "name": "ShadowRealm",
+        "home": 71,
+        "bun": 72
+      },
+      {
+        "name": "StrictEvalActivation",
+        "home": 66,
+        "bun": 67
+      },
+      {
+        "name": "StringIterator",
+        "home": 82,
+        "bun": 83
+      },
+      {
+        "name": "StringObject",
+        "home": 94,
+        "bun": 95
+      },
+      {
+        "name": "Uint16Array",
+        "home": 53,
+        "bun": 54
+      },
+      {
+        "name": "Uint32Array",
+        "home": 55,
+        "bun": 56
+      },
+      {
+        "name": "Uint8Array",
+        "home": 50,
+        "bun": 51
+      },
+      {
+        "name": "Uint8ClampedArray",
+        "home": 51,
+        "bun": 52
+      },
+      {
+        "name": "WeakMap",
+        "home": 89,
+        "bun": 90
+      },
+      {
+        "name": "WeakSet",
+        "home": 90,
+        "bun": 91
+      },
+      {
+        "name": "WebAssemblyGCObject",
+        "home": 93,
+        "bun": 94
+      },
+      {
+        "name": "WebAssemblyInstance",
+        "home": 92,
+        "bun": 93
+      },
+      {
+        "name": "WebAssemblyModule",
+        "home": 91,
+        "bun": 92
+      },
+      {
+        "name": "WithScope",
+        "home": 67,
+        "bun": 68
+      },
+      {
+        "name": "WrapForValidIterator",
+        "home": 83,
+        "bun": 84
+      }
+    ]
+  }
+}

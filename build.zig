@@ -39,6 +39,21 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+    const private_abi_consumer = b.option(
+        []const u8,
+        "private-abi-consumer",
+        "Private ABI tag layout to compile: home or bun",
+    ) orelse "home";
+    const private_abi_is_bun = if (std.mem.eql(u8, private_abi_consumer, "home"))
+        false
+    else if (std.mem.eql(u8, private_abi_consumer, "bun"))
+        true
+    else
+        std.debug.panic("unknown private-abi-consumer '{s}'; expected home or bun", .{private_abi_consumer});
+    const private_abi_options = b.addOptions();
+    private_abi_options.addOption(bool, "is_bun", private_abi_is_bun);
+    mod.addOptions("private_abi_options", private_abi_options);
+    lib.root_module.addOptions("private_abi_options", private_abi_options);
     var installed_library: ?std.Build.LazyPath = null;
     var objc_bridge_object: ?std.Build.LazyPath = null;
     if (target.result.os.tag == .macos) {
@@ -113,7 +128,8 @@ pub fn build(b: *std.Build) void {
         "python3",
         "tools/bun-private-abi.py",
     });
-    if (b.option([]const u8, "bun-source-root", "Optional pinned Bun checkout to verify")) |root| {
+    const bun_source_root = b.option([]const u8, "bun-source-root", "Optional pinned Bun checkout to verify");
+    if (bun_source_root) |root| {
         bun_private_abi_audit_cmd.addArgs(&.{ "--bun-root", root });
     }
     const bun_private_abi_audit_step = b.step(
@@ -121,6 +137,21 @@ pub fn build(b: *std.Build) void {
         "Verify the pinned Bun core private extern-fn inventory",
     );
     bun_private_abi_audit_step.dependOn(&bun_private_abi_audit_cmd.step);
+
+    const private_jstype_abi_audit_cmd = b.addSystemCommand(&.{
+        "python3",
+        "tools/private-jstype-abi.py",
+    });
+    if (home_source_root) |root| {
+        if (bun_source_root) |bun_root| {
+            private_jstype_abi_audit_cmd.addArgs(&.{ "--home-root", root, "--bun-root", bun_root });
+        }
+    }
+    const private_jstype_abi_audit_step = b.step(
+        "private-jstype-abi-audit",
+        "Verify pinned Home and Bun private JSType layouts",
+    );
+    private_jstype_abi_audit_step.dependOn(&private_jstype_abi_audit_cmd.step);
 
     const objc_api_audit_cmd = b.addSystemCommand(&.{
         "python3",
@@ -333,6 +364,28 @@ pub fn build(b: *std.Build) void {
         "Compile, link, and run implemented Home private-ABI slices",
     );
     home_private_abi_test_step.dependOn(&run_home_private_value_fixture.step);
+
+    const private_jstype_fixture = b.addExecutable(.{
+        .name = "private-jstype-shims",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/abi/private_jstype_shims.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    private_jstype_fixture.root_module.addOptions("private_abi_options", private_abi_options);
+    private_jstype_fixture.root_module.linkLibrary(lib);
+    const run_private_jstype_fixture = b.addRunArtifact(private_jstype_fixture);
+    run_private_jstype_fixture.step.dependOn(&private_jstype_abi_audit_cmd.step);
+    run_private_jstype_fixture.step.dependOn(if (private_abi_is_bun)
+        &bun_private_abi_audit_cmd.step
+    else
+        &home_private_abi_audit_cmd.step);
+    const private_jstype_test_step = b.step(
+        "test-private-jstype",
+        "Compile, link, and run the selected private JSType profile",
+    );
+    private_jstype_test_step.dependOn(&run_private_jstype_fixture.step);
 
     const c_api_value_diff = b.addExecutable(.{
         .name = "c-api-value-diff-zig-js",

@@ -81,8 +81,8 @@
       "public_c_api": 15
     },
     "by_status": {
-      "implemented": 24,
-      "pending": 413
+      "implemented": 26,
+      "pending": 411
     }
   },
   "home_comparison": {
@@ -1258,10 +1258,10 @@
       "line": 54,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSCell__getType(this: *JSCell) u8;",
       "declaration_sha256": "aef903dbb2d709f8cf3436597d2ab901e30f6cc365f3ac501bdd72c970f6c2ca",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSCell__toObject",
@@ -2270,10 +2270,10 @@
       "line": 282,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSValue__jsType(this: JSValue) JSType;",
       "declaration_sha256": "70a7c7b0f45cfbbb8578264e37d08ebb46ff31fa2260854c32b117cc7610f102",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSValue__jsonStringify",
