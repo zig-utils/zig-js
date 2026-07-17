@@ -1302,6 +1302,32 @@ fn privateValueFrom(global: JSContextRef, encoded: EncodedValue) ?Value {
     };
 }
 
+fn privateSetPendingValue(context: *Context, thrown: Value) void {
+    const opaque_group = context.c_api_group orelse return;
+    const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+    if (group.pending_exception != null) return;
+    const encoded = privateEncodedFromValue(context, thrown);
+    if (encoded == .empty) return;
+    group.pending_exception = privateExceptionBox(context, thrown, encoded);
+    if (group.pending_exception != null)
+        group.primary.private_pending_exception_root = thrown;
+}
+
+fn privateSetPendingAbrupt(context: *Context, machine: *interp.Interpreter, err: anyerror) void {
+    const thrown = if (err == error.Throw)
+        machine.exception
+    else
+        context.reserved_thread_oom_error orelse Value.staticStr("OutOfMemory");
+    privateSetPendingValue(context, thrown);
+}
+
+fn privateEncodeResult(context: *Context, machine: *interp.Interpreter, result: Value) EncodedValue {
+    const encoded = privateEncodedFromValue(context, result);
+    if (encoded == .empty)
+        privateSetPendingAbrupt(context, machine, error.OutOfMemory);
+    return encoded;
+}
+
 fn privateBigIntModuloU64(object: *Object) u64 {
     if (object.bigIntText()) |text| {
         const negative = text.len > 0 and text[0] == '-';
@@ -1669,6 +1695,129 @@ export fn JSC__JSValue__createEmptyObjectWithNullPrototype(global: JSContextRef)
     return privateEncodedFromRef(object);
 }
 
+export fn JSC__JSValue__createEmptyArray(global: JSContextRef, len: usize) callconv(.c) EncodedValue {
+    const context = ctxForEvaluation(global) orelse return .empty;
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    defer context.popActiveInterpreter(&machine);
+    const result = machine.newArrayWithLength(len) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    return privateEncodeResult(context, &machine, result);
+}
+
+export fn JSC__JSValue__putIndex(
+    encoded: EncodedValue,
+    global: JSContextRef,
+    index: u32,
+    out: EncodedValue,
+) callconv(.c) void {
+    const context = ctxForEvaluation(global) orelse return;
+    const target = privateValueFrom(global, encoded) orelse return;
+    const result = privateValueFrom(global, out) orelse return;
+    if (!target.isObject() or !target.asObj().is_array) return;
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return;
+    };
+    defer context.popActiveInterpreter(&machine);
+    machine.putArrayDirectIndex(target.asObj(), index, result) catch |err|
+        privateSetPendingAbrupt(context, &machine, err);
+}
+
+export fn JSC__JSValue__push(
+    encoded: EncodedValue,
+    global: JSContextRef,
+    out: EncodedValue,
+) callconv(.c) void {
+    const context = ctxForEvaluation(global) orelse return;
+    const target = privateValueFrom(global, encoded) orelse return;
+    const result = privateValueFrom(global, out) orelse return;
+    if (!target.isObject() or !target.asObj().is_array) return;
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return;
+    };
+    defer context.popActiveInterpreter(&machine);
+    machine.pushArrayDirect(target.asObj(), result) catch |err|
+        privateSetPendingAbrupt(context, &machine, err);
+}
+
+export fn JSC__JSValue__getDirectIndex(
+    encoded: EncodedValue,
+    global: JSContextRef,
+    index: u32,
+) callconv(.c) EncodedValue {
+    const context = ctxForEvaluation(global) orelse return .empty;
+    const target = privateValueFrom(global, encoded) orelse return .empty;
+    if (!target.isObject()) return .empty;
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    defer context.popActiveInterpreter(&machine);
+    const result = machine.getDirectIndex(target.asObj(), index) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    return privateEncodeResult(context, &machine, result orelse return .empty);
+}
+
+export fn JSC__JSObject__getIndex(
+    encoded: EncodedValue,
+    global: JSContextRef,
+    index: u32,
+) callconv(.c) EncodedValue {
+    const context = ctxForEvaluation(global) orelse return .empty;
+    const target = privateValueFrom(global, encoded) orelse return .empty;
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    defer context.popActiveInterpreter(&machine);
+    const object = machine.toObject(target) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    const key = std.fmt.allocPrint(context.arena(), "{d}", .{index}) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    const result = machine.getProperty(Value.obj(object), key) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    return privateEncodeResult(context, &machine, result);
+}
+
 export fn JSC__JSValue__unwrapBoxedPrimitive(global: JSContextRef, encoded: EncodedValue) callconv(.c) EncodedValue {
     const context = ctxForHandleInspection(global) orelse return .empty;
     const internal = privateValueFrom(global, encoded) orelse return .empty;
@@ -1795,6 +1944,7 @@ export fn JSC__JSValue__isAnyError(encoded: EncodedValue) callconv(.c) bool {
 
 fn valueFromContext(ctx: *Context, ref: JSValueRef) ?Value {
     const b = boxedFrom(ref) orelse return null;
+    if (b.private_kind != .value) return null;
     if (b.owner != ctx) {
         const group = ctx.c_api_group orelse return null;
         if (b.owner.c_api_group != group) return null;

@@ -87,8 +87,8 @@
     },
     "by_status": {
       "external": 1,
-      "implemented": 57,
-      "pending": 390
+      "implemented": 62,
+      "pending": 385
     }
   },
   "declarations": [
@@ -1484,10 +1484,10 @@
       "line": 88,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSObject__getIndex(this: home_rt.jsc.JSValue, globalThis: *home_rt.jsc.JSGlobalObject, i: u32) home_rt.jsc.JSValue;",
       "declaration_sha256": "8f1032518198cfe605f2d9ccbb30a60a449ef03063aee48fd175c8fd943fddda",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSPromise__create",
@@ -1726,10 +1726,10 @@
       "line": 318,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSValue__createEmptyArray(global: *JSGlobalObject, len: usize) JSValue;",
       "declaration_sha256": "0a835bbe2f8275ab15e236d1e432039d53861cfade90cd3450b66ed27ad54933",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSValue__createEmptyObject",
@@ -2012,10 +2012,10 @@
       "line": 65,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSValue__getDirectIndex(JSValue, *JSGlobalObject, u32) JSValue;",
       "declaration_sha256": "0c0f630ad67915059e733cbf9b5262f1bc1525e9f569f2ebf7fcf379ae0bddad",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSValue__getErrorsProperty",
@@ -2353,10 +2353,10 @@
       "line": 403,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSValue__push(value: JSValue, globalObject: *JSGlobalObject, out: JSValue) void;",
       "declaration_sha256": "494b0bc1bde697953bb6b685a0dd73bd349cff6338bb61eae1b6c5ef52f87cb2",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSValue__put",
@@ -2375,10 +2375,10 @@
       "line": 398,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSValue__putIndex(value: JSValue, globalObject: *JSGlobalObject, i: u32, out: JSValue) void;",
       "declaration_sha256": "820fe1df76b579bdda8627b3baa153ec1348c6c6f129a7aea3d34cb0bccb79f8",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSValue__putRecord",

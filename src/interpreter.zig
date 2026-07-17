@@ -7617,11 +7617,43 @@ pub const Interpreter = struct {
     }
 
     /// ArrayCreate(length): allocate a fresh array with a logical length.
-    fn newArrayWithLength(self: *Interpreter, len: usize) EvalError!Value {
+    pub fn newArrayWithLength(self: *Interpreter, len: usize) EvalError!Value {
         if (len > 4294967295) return self.throwError("RangeError", "Invalid array length");
         const arr = try self.newArray();
         try arr.asObj().extendArrayLengthFloor(self.arena, len);
         return arr;
+    }
+
+    /// JSC's private JSArray::putDirectIndex boundary: define/replace an own
+    /// indexed value without running prototype setters. Dense nearby writes
+    /// preserve holes; distant writes use sparse own storage and advance length.
+    pub fn putArrayDirectIndex(self: *Interpreter, array: *value.Object, index: u32, out: Value) EvalError!void {
+        if (!array.is_array) return;
+        const i: usize = index;
+        const dense_cap: usize = 1 << 24;
+        const dense_len = array.elementsLen();
+        if (i < dense_cap and i <= dense_len + 1024) {
+            _ = try array.growDenseElement(self.arena, i, out);
+            return;
+        }
+        if (index < std.math.maxInt(u32))
+            try array.extendArrayLengthFloor(self.arena, i + 1);
+        const key = try std.fmt.allocPrint(self.arena, "{d}", .{index});
+        try self.setProp(array, key, out);
+    }
+
+    pub fn pushArrayDirect(self: *Interpreter, array: *value.Object, out: Value) EvalError!void {
+        if (!array.is_array) return;
+        const len = array.arrayLength();
+        if (len >= std.math.maxInt(u32))
+            return self.throwError("RangeError", "Invalid array length");
+        try self.putArrayDirectIndex(array, @intCast(len), out);
+    }
+
+    pub fn getDirectIndex(self: *Interpreter, object: *value.Object, index: u32) EvalError!?Value {
+        if (object.denseElement(index)) |direct| return direct;
+        const key = try std.fmt.allocPrint(self.arena, "{d}", .{index});
+        return object.getOwn(key);
     }
 
     fn newArrayWithLengthInRealm(self: *Interpreter, env: *Environment, len: usize) EvalError!Value {

@@ -42,10 +42,13 @@ extern "c" fn JSGlobalContextCreateInGroup(?*anyopaque, ?*anyopaque) JSContextRe
 extern "c" fn JSGlobalContextRelease(JSContextRef) void;
 extern "c" fn JSContextGetGroup(JSContextRef) ?*anyopaque;
 extern "c" fn JSValueMakeString(JSContextRef, JSStringRef) JSValueRef;
+extern "c" fn JSValueToNumber(JSContextRef, JSValueRef, [*c]JSValueRef) f64;
 extern "c" fn JSStringCreateWithUTF8CString([*:0]const u8) JSStringRef;
 extern "c" fn JSStringRelease(JSStringRef) void;
 extern "c" fn JSObjectMake(JSContextRef, ?*anyopaque, ?*anyopaque) JSObjectRef;
 extern "c" fn JSObjectGetPrototype(JSContextRef, JSObjectRef) JSValueRef;
+extern "c" fn JSObjectSetPrototype(JSContextRef, JSObjectRef, JSValueRef) void;
+extern "c" fn JSObjectGetProperty(JSContextRef, JSObjectRef, JSStringRef, [*c]JSValueRef) JSValueRef;
 extern "c" fn JSEvaluateScript(JSContextRef, JSStringRef, JSObjectRef, JSStringRef, c_int, [*c]JSValueRef) JSValueRef;
 
 extern "c" fn JSC__JSValue__eqlCell(EncodedValue, ?*anyopaque) bool;
@@ -88,6 +91,11 @@ extern "c" fn JSC__Exception__asJSValue(?*anyopaque) EncodedValue;
 extern "c" fn JSC__JSValue__isException(EncodedValue, ?*anyopaque) bool;
 extern "c" fn JSC__JSValue__toError_(EncodedValue) EncodedValue;
 extern "c" fn JSC__JSValue__isAnyError(EncodedValue) bool;
+extern "c" fn JSC__JSValue__createEmptyArray(JSContextRef, usize) EncodedValue;
+extern "c" fn JSC__JSValue__putIndex(EncodedValue, JSContextRef, u32, EncodedValue) void;
+extern "c" fn JSC__JSValue__push(EncodedValue, JSContextRef, EncodedValue) void;
+extern "c" fn JSC__JSValue__getDirectIndex(EncodedValue, JSContextRef, u32) EncodedValue;
+extern "c" fn JSC__JSObject__getIndex(EncodedValue, JSContextRef, u32) EncodedValue;
 
 fn fail(message: []const u8) noreturn {
     std.debug.print("Home private value shims: {s}\n", .{message});
@@ -101,6 +109,23 @@ fn evaluate(context: JSContextRef, source: [*:0]const u8) EncodedValue {
     const result = JSEvaluateScript(context, script, null, null, 1, &exception);
     if (result == null or exception != null) fail("BigInt fixture evaluation failed");
     return EncodedValue.fromRef(result);
+}
+
+fn getProperty(context: JSContextRef, object: EncodedValue, name: [*:0]const u8) EncodedValue {
+    const property = JSStringCreateWithUTF8CString(name) orelse fail("property string creation failed");
+    defer JSStringRelease(property);
+    var exception: JSValueRef = null;
+    const result = JSObjectGetProperty(context, object.cellPointer(), property, &exception);
+    if (result == null or exception != null) fail("property read failed");
+    return EncodedValue.fromRef(result);
+}
+
+fn getNumberProperty(context: JSContextRef, object: EncodedValue, name: [*:0]const u8) f64 {
+    const property = getProperty(context, object, name);
+    var exception: JSValueRef = null;
+    const result = JSValueToNumber(context, property.cellPointer(), &exception);
+    if (exception != null) fail("numeric property conversion failed");
+    return result;
 }
 
 pub fn main() void {
@@ -453,5 +478,69 @@ pub fn main() void {
         JSC__JSValue__isAnyError(encoded_object))
         fail("pending exception invalid-input mismatch");
 
-    std.debug.print("Home private value shims: 40/40 symbols linked; runtime matrix passed\n", .{});
+    const array = JSC__JSValue__createEmptyArray(context, 4);
+    if (array == .empty or JSC__JSValue__getDirectIndex(array, context, 0) != .empty or
+        getNumberProperty(context, array, "length") != 4)
+        fail("private empty array hole/length mismatch");
+    const indexed_prototype = evaluate(context, "globalThis.__private_array_setter_hits = 0; ({ get 1() { return 77; }, set 2(v) { __private_array_setter_hits++; }, get 3() { throw 99; } })");
+    JSObjectSetPrototype(context, array.cellPointer(), indexed_prototype.cellPointer());
+    if (JSC__JSObject__getIndex(array, context, 1) != EncodedValue.fromInt32(77) or
+        JSC__JSValue__getDirectIndex(array, context, 1) != .empty)
+        fail("private observable/direct inherited index mismatch");
+    JSC__JSValue__putIndex(array, context, 2, EncodedValue.fromInt32(55));
+    if (JSC__JSValue__getDirectIndex(array, context, 2) != EncodedValue.fromInt32(55) or
+        JSC__JSObject__getIndex(array, context, 2) != EncodedValue.fromInt32(55) or
+        JSC__JSValue__toInt32(evaluate(context, "__private_array_setter_hits")) != 0)
+        fail("private direct write invoked inherited setter");
+    if (JSC__JSObject__getIndex(array, sibling_context, 3) != .empty or
+        !JSGlobalObject__hasException(context))
+        fail("indexed getter throw did not publish VM exception");
+    const getter_exception = JSGlobalObject__tryTakeException(sibling_context);
+    if (JSC__Exception__asJSValue(getter_exception.cellPointer()) != EncodedValue.fromInt32(99))
+        fail("indexed getter exception value mismatch");
+
+    JSC__JSValue__putIndex(array, context, 0, .undefined);
+    if (JSC__JSValue__getDirectIndex(array, context, 0) != .undefined)
+        fail("present undefined was confused with an array hole");
+    JSC__JSValue__push(array, context, EncodedValue.fromInt32(88));
+    if (JSC__JSValue__getDirectIndex(array, context, 4) != EncodedValue.fromInt32(88) or
+        getNumberProperty(context, array, "length") != 5)
+        fail("private array push mismatch");
+    JSC__JSValue__putIndex(array, context, 10000, EncodedValue.fromInt32(12));
+    if (JSC__JSValue__getDirectIndex(array, context, 9999) != .empty or
+        JSC__JSValue__getDirectIndex(array, context, 10000) != EncodedValue.fromInt32(12) or
+        getNumberProperty(context, array, "length") != 10001)
+        fail("private sparse array write mismatch");
+
+    const max_length_array = JSC__JSValue__createEmptyArray(context, std.math.maxInt(u32));
+    JSC__JSValue__putIndex(max_length_array, context, std.math.maxInt(u32), EncodedValue.fromInt32(7));
+    if (max_length_array == .empty or
+        JSC__JSValue__getDirectIndex(max_length_array, context, std.math.maxInt(u32)) != EncodedValue.fromInt32(7) or
+        getNumberProperty(context, max_length_array, "length") != @as(f64, @floatFromInt(std.math.maxInt(u32))))
+        fail("maximum private array length/index mismatch");
+    JSC__JSValue__push(max_length_array, context, .true);
+    if (!JSGlobalObject__hasException(context)) fail("maximum-length push did not throw");
+    const range_exception = JSGlobalObject__tryTakeException(context);
+    const range_error = JSC__Exception__asJSValue(range_exception.cellPointer());
+    if (!JSC__JSValue__isAnyError(range_error) or
+        !JSC__JSValue__isStrictEqual(getProperty(context, range_error, "name"), evaluate(context, "'RangeError'"), context))
+        fail("maximum-length push did not produce RangeError");
+    if (@bitSizeOf(usize) > 32) {
+        const invalid_length = JSC__JSValue__createEmptyArray(context, @as(usize, std.math.maxInt(u32)) + 1);
+        if (invalid_length != .empty or !JSGlobalObject__hasException(context))
+            fail("invalid private array length did not throw");
+        JSGlobalObject__clearException(context);
+    }
+
+    if (JSC__JSObject__getIndex(.null, context, 0) != .empty or !JSGlobalObject__hasException(context))
+        fail("private indexed ToObject null mismatch");
+    JSGlobalObject__clearException(context);
+    JSC__JSValue__putIndex(EncodedValue.fromRef(foreign_object), context, 0, .true);
+    JSC__JSValue__putIndex(array, context, 6, EncodedValue.fromRef(foreign_object));
+    if (JSGlobalObject__hasException(context) or
+        JSC__JSValue__getDirectIndex(EncodedValue.fromInt32(1), context, 0) != .empty or
+        JSC__JSObject__getIndex(EncodedValue.fromInt32(1), context, 0) != .undefined)
+        fail("private array invalid/primitive input mismatch");
+
+    std.debug.print("Home private value shims: 45/45 symbols linked; runtime matrix passed\n", .{});
 }
