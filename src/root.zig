@@ -30,6 +30,9 @@ pub const JsString = @import("jsstring.zig").JsString;
 pub const installGlobals = @import("interpreter.zig").installGlobals;
 pub const shape = @import("shape.zig");
 pub const promise_profile = @import("promise_profile.zig");
+/// Revision-pinned private consumer ABI pieces. These are deliberately
+/// separate from the stable engine `Value` representation and public C API.
+pub const private_abi = @import("private_abi.zig");
 
 // Agent/threading infrastructure ($262.agent, Atomics waiter table). Conformance
 // runners use `Context.TestingOptions.main_can_block` to model [[CanBlock]].
@@ -95,6 +98,7 @@ test {
     _ = @import("value_nb.zig");
     _ = @import("root_handshake.zig");
     _ = @import("parallel_lock.zig");
+    _ = @import("private_abi.zig");
 }
 
 test "evalNumber convenience" {

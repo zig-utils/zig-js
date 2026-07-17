@@ -277,6 +277,31 @@ pub fn build(b: *std.Build) void {
     );
     home_public_abi_test_step.dependOn(&run_home_public_abi_fixture.step);
 
+    const private_encoded_value_fixture = b.addExecutable(.{
+        .name = "private-encoded-value-smoke",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/abi/private_encoded_value_smoke.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "js", .module = mod }},
+        }),
+    });
+    const run_private_encoded_value_fixture = b.addRunArtifact(private_encoded_value_fixture);
+    const private_encoded_value_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/private_abi/encoded_value.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_private_encoded_value_tests = b.addRunArtifact(private_encoded_value_tests);
+    const private_encoded_value_step = b.step(
+        "test-private-abi-value",
+        "Verify the pinned JSC64 EncodedJSValue boundary codec",
+    );
+    private_encoded_value_step.dependOn(&run_private_encoded_value_fixture.step);
+    private_encoded_value_step.dependOn(&run_private_encoded_value_tests.step);
+
     const c_api_value_diff = b.addExecutable(.{
         .name = "c-api-value-diff-zig-js",
         .root_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true }),
