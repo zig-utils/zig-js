@@ -1657,6 +1657,26 @@ export fn JSC__JSValue__getPrototype(encoded: EncodedValue, global: JSContextRef
     return privateEncodedFromValue(context, internal);
 }
 
+export fn JSC__JSValue__dateInstanceFromNumber(global: JSContextRef, timestamp: f64) callconv(.c) EncodedValue {
+    const context = ctxForEvaluation(global) orelse return .empty;
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch return .empty;
+    defer context.popActiveInterpreter(&machine);
+    const result = machine.makeDateWithRawNumber(timestamp) catch return .empty;
+    return privateEncodedFromValue(context, result);
+}
+
+export fn JSC__JSValue__getUnixTimestamp(encoded: EncodedValue) callconv(.c) f64 {
+    const boxed = privateBoxedFrom(encoded) orelse return std.math.nan(f64);
+    if (!boxed.value.isObject() or !boxed.value.asObj().behavior.is_date)
+        return std.math.nan(f64);
+    return boxed.value.asObj().dateMs();
+}
+
 fn valueFromContext(ctx: *Context, ref: JSValueRef) ?Value {
     const b = boxedFrom(ref) orelse return null;
     if (b.owner != ctx) {

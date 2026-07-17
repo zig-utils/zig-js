@@ -87,8 +87,8 @@
     },
     "by_status": {
       "external": 1,
-      "implemented": 46,
-      "pending": 401
+      "implemented": 48,
+      "pending": 399
     }
   },
   "declarations": [
@@ -1836,10 +1836,10 @@
       "line": 486,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSValue__dateInstanceFromNumber(*JSGlobalObject, f64) JSValue;",
       "declaration_sha256": "ad98bc5f9a9e4cf56db12e08bf60268ed8d5fe472c6f8a79e99fb9674f41608d",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSValue__deepEquals",
@@ -2155,10 +2155,10 @@
       "line": 2007,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSValue__getUnixTimestamp(this: JSValue) f64;",
       "declaration_sha256": "6776cbff11725d71e4c59d6b9f5c8197a35ebb4ebff53080ecede5fcd81cde6f",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSValue__isAggregateError",

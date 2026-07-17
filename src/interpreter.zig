@@ -8583,6 +8583,19 @@ pub const Interpreter = struct {
 
     /// Build a `Date` whose time is `t` ms since the Unix epoch.
     pub fn makeDate(self: *Interpreter, t: f64) EvalError!Value {
+        // TimeClip(t): a non-finite or out-of-±8.64e15 time is NaN, otherwise the
+        // integer part (toward zero), with -0 normalized to +0.
+        const clipped = if (std.math.isNan(t) or @abs(t) > 8.64e15) std.math.nan(f64) else blk: {
+            const tr = @trunc(t);
+            break :blk if (tr == 0) 0 else tr;
+        };
+        return self.makeDateWithRawNumber(clipped);
+    }
+
+    /// Build a DateInstance around an already-computed internal time value.
+    /// Private JSC consumers use this lower boundary and intentionally bypass
+    /// the ECMAScript Date-constructor TimeClip performed by `makeDate`.
+    pub fn makeDateWithRawNumber(self: *Interpreter, t: f64) EvalError!Value {
         const o = (try self.newObject()).asObj();
         o.behavior.is_date = true;
         // Proto from the in-flight constructor's new.target (`new Date`, or a
@@ -8598,12 +8611,7 @@ pub const Interpreter = struct {
                 }
             }
         }
-        // TimeClip(t): a non-finite or out-of-±8.64e15 time is NaN, otherwise the
-        // integer part (toward zero), with -0 normalized to +0.
-        try o.initDateMs(self.arena, if (std.math.isNan(t) or @abs(t) > 8.64e15) std.math.nan(f64) else blk: {
-            const tr = @trunc(t);
-            break :blk if (tr == 0) 0 else tr;
-        });
+        try o.initDateMs(self.arena, t);
         return Value.obj(o);
     }
 

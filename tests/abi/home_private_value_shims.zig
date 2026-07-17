@@ -75,6 +75,8 @@ extern "c" fn JSC__JSValue__createEmptyObjectWithNullPrototype(JSContextRef) Enc
 extern "c" fn JSC__JSValue__unwrapBoxedPrimitive(JSContextRef, EncodedValue) EncodedValue;
 extern "c" fn JSC__JSValue__toObject(EncodedValue, JSContextRef) JSObjectRef;
 extern "c" fn JSC__JSValue__getPrototype(EncodedValue, JSContextRef) EncodedValue;
+extern "c" fn JSC__JSValue__dateInstanceFromNumber(JSContextRef, f64) EncodedValue;
+extern "c" fn JSC__JSValue__getUnixTimestamp(EncodedValue) f64;
 
 fn fail(message: []const u8) noreturn {
     std.debug.print("Home private value shims: {s}\n", .{message});
@@ -370,5 +372,26 @@ pub fn main() void {
         JSC__JSValue__getPrototype(EncodedValue.fromRef(foreign_object), context) != .empty)
         fail("private object prototype mismatch");
 
-    std.debug.print("Home private value shims: 29/29 symbols linked; runtime matrix passed\n", .{});
+    const epoch_date = JSC__JSValue__dateInstanceFromNumber(context, 0.0);
+    const epoch_date_copy = JSC__JSValue__dateInstanceFromNumber(context, 0.0);
+    const fractional_date = JSC__JSValue__dateInstanceFromNumber(context, 1.25);
+    const negative_zero_date = JSC__JSValue__dateInstanceFromNumber(context, -0.0);
+    const nan_date = JSC__JSValue__dateInstanceFromNumber(context, std.math.nan(f64));
+    const positive_infinity_date = JSC__JSValue__dateInstanceFromNumber(context, std.math.inf(f64));
+    const beyond_time_clip_date = JSC__JSValue__dateInstanceFromNumber(context, 8.64e15 + 1.0);
+    const foreign_date = JSC__JSValue__dateInstanceFromNumber(foreign_context, -123.5);
+    if (!JSC__JSValue__isStrictEqual(JSC__JSValue__getPrototype(epoch_date, context), evaluate(context, "Date.prototype"), context) or
+        JSC__JSValue__isStrictEqual(epoch_date, epoch_date_copy, context) or
+        JSC__JSValue__getUnixTimestamp(epoch_date) != 0.0 or
+        JSC__JSValue__getUnixTimestamp(fractional_date) != 1.25 or
+        !std.math.signbit(JSC__JSValue__getUnixTimestamp(negative_zero_date)) or
+        !std.math.isNan(JSC__JSValue__getUnixTimestamp(nan_date)) or
+        JSC__JSValue__getUnixTimestamp(positive_infinity_date) != std.math.inf(f64) or
+        JSC__JSValue__getUnixTimestamp(beyond_time_clip_date) != 8.64e15 + 1.0 or
+        JSC__JSValue__getUnixTimestamp(foreign_date) != -123.5 or
+        !std.math.isNan(JSC__JSValue__getUnixTimestamp(encoded_object)) or
+        !std.math.isNan(JSC__JSValue__getUnixTimestamp(.empty)))
+        fail("private numeric DateInstance mismatch");
+
+    std.debug.print("Home private value shims: 31/31 symbols linked; runtime matrix passed\n", .{});
 }
