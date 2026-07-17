@@ -83,8 +83,8 @@
     },
     "by_status": {
       "external": 1,
-      "implemented": 221,
-      "pending": 215
+      "implemented": 223,
+      "pending": 213
     }
   },
   "home_comparison": {
@@ -1909,10 +1909,10 @@
       "line": 756,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSValue__fromEntries(globalThis: *JSGlobalObject, keys_array: [*c]ZigString, values_array: [*c]ZigString, strings_count: usize, clone: bool) JSValue;",
       "declaration_sha256": "92197faf0153a9cbcdf814c9bcf49e57bfa2c78a21429df052000c9cad8db651",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSValue__fromInt64NoTruncate",
@@ -2349,10 +2349,10 @@
       "line": 323,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSValue__putRecord(value: JSValue, global: *JSGlobalObject, key: *ZigString, values_array: [*]ZigString, values_len: usize) void;",
       "declaration_sha256": "1946f24b51e5b7a442ffd761a4b064a398298ccf995c54f0cfc73f4b1231bca6",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSValue__putToPropertyKey",

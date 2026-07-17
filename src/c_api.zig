@@ -3927,6 +3927,175 @@ export fn JSC__JSValue__createObject2(
     return privateEncodeResult(context, &machine, result);
 }
 
+fn privateRecordString(context: *Context, string: *const PrivateZigString) ?Value {
+    return privateZigStringValue(context, string) catch |err| {
+        privatePublishBunStringError(context, err);
+        return null;
+    };
+}
+
+export fn JSC__JSValue__putRecord(
+    target_encoded: EncodedValue,
+    global: JSContextRef,
+    key: ?*const PrivateZigString,
+    values: [*c]const PrivateZigString,
+    values_len: usize,
+) callconv(.c) void {
+    const context = ctxForEvaluation(global) orelse return;
+    const group = privatePropertyBoundaryGroup(context) orelse return;
+    if (group.pending_exception != null) return;
+    const key_string = key orelse {
+        privatePublishBunStringError(context, error.InvalidString);
+        return;
+    };
+    if (values == null and values_len != 0) {
+        privatePublishBunStringError(context, error.InvalidString);
+        return;
+    }
+    if (values_len > std.math.maxInt(u32)) {
+        privatePublishBunStringError(context, error.StringTooLong);
+        return;
+    }
+    const values_ptr: [*]const PrivateZigString = if (values_len == 0)
+        undefined
+    else
+        @ptrFromInt(@intFromPtr(values));
+    const property = privateZigStringPropertyKey(context, key_string) orelse return;
+    const target = privateValueFrom(global, target_encoded) orelse {
+        privatePublishBunStringError(context, error.InvalidString);
+        return;
+    };
+    if (!target.isObject() or target.asObj().is_symbol or target.asObj().is_bigint) {
+        privatePublishBunStringError(context, error.InvalidString);
+        return;
+    }
+
+    // The pinned boundary converts every native string before allocating the
+    // many-value array.  Besides matching JSC's abrupt-completion point, this
+    // keeps a failed call from publishing a partially initialized aggregate.
+    var stored = Value.undef();
+    if (values_len == 1) {
+        stored = privateRecordString(context, &values_ptr[0]) orelse return;
+    } else {
+        const converted = context.arena().alloc(Value, values_len) catch {
+            privatePublishBunStringError(context, error.OutOfMemory);
+            return;
+        };
+        for (values_ptr[0..values_len], converted) |*string, *slot|
+            slot.* = privateRecordString(context, string) orelse return;
+
+        const gc_saved = gc_mod.setActiveHeap(context.gc);
+        defer _ = gc_mod.setActiveHeap(gc_saved);
+        const sa_saved = strcell.setActiveArena(context.arena());
+        defer _ = strcell.setActiveArena(sa_saved);
+        var array_machine = context.interpreter();
+        context.pushActiveInterpreter(&array_machine) catch |err| {
+            privateSetPendingAbrupt(context, &array_machine, err);
+            return;
+        };
+        defer context.popActiveInterpreter(&array_machine);
+        const array = array_machine.newArrayWithLength(values_len) catch |err| {
+            privateSetPendingAbrupt(context, &array_machine, err);
+            return;
+        };
+        for (converted, 0..) |item, index|
+            array_machine.putArrayDirectIndex(array.asObj(), @intCast(index), item) catch |err| {
+                privateSetPendingAbrupt(context, &array_machine, err);
+                return;
+            };
+        stored = array;
+    }
+
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return;
+    };
+    defer context.popActiveInterpreter(&machine);
+    // defineOwnProperty(..., { writable, enumerable, configurable: true }) plus
+    // putDirect: replace a configurable own accessor and never run a prototype
+    // setter.  Default PropAttr is the exact all-true descriptor.
+    switch (target.asObj().deleteAccessorOwn(machine.arena, property) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return;
+    }) {
+        .blocked => {
+            const err = machine.throwError("TypeError", "Cannot redefine non-configurable property");
+            privateSetPendingAbrupt(context, &machine, err);
+            return;
+        },
+        else => {},
+    }
+    machine.setProp(target.asObj(), property, stored) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return;
+    };
+    target.asObj().setAttr(machine.arena, property, .{}) catch |err|
+        privateSetPendingAbrupt(context, &machine, err);
+}
+
+export fn JSC__JSValue__fromEntries(
+    global: JSContextRef,
+    keys: [*c]const PrivateZigString,
+    values: [*c]const PrivateZigString,
+    count: usize,
+    clone: bool,
+) callconv(.c) EncodedValue {
+    const context = ctxForEvaluation(global) orelse return .empty;
+    const group = privatePropertyBoundaryGroup(context) orelse return .empty;
+    if (group.pending_exception != null) return .empty;
+    if (count != 0 and (keys == null or values == null)) {
+        privatePublishBunStringError(context, error.InvalidString);
+        return .empty;
+    }
+    if (count > std.math.maxInt(u32)) {
+        privatePublishBunStringError(context, error.StringTooLong);
+        return .empty;
+    }
+    const keys_ptr: [*]const PrivateZigString = if (count == 0)
+        undefined
+    else
+        @ptrFromInt(@intFromPtr(keys));
+    const values_ptr: [*]const PrivateZigString = if (count == 0)
+        undefined
+    else
+        @ptrFromInt(@intFromPtr(values));
+    // Both pinned branches intern/copy the final Identifier. `clone` only
+    // changes whether the temporary native WTF::String borrows or copies its
+    // input before interning; all observable result strings are independent of
+    // the caller's buffers in either branch. Our WTF-8 decoding already copies
+    // that temporary, so no second semantic branch is required.
+    _ = clone;
+
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    defer context.popActiveInterpreter(&machine);
+    const result = machine.newObject() catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    for (0..count) |index| {
+        const property = privateZigStringPropertyKey(context, &keys_ptr[index]) orelse return .empty;
+        const stored = privateRecordString(context, &values_ptr[index]) orelse return .empty;
+        machine.setProp(result.asObj(), property, stored) catch |err| {
+            privateSetPendingAbrupt(context, &machine, err);
+            return .empty;
+        };
+    }
+    return privateEncodeResult(context, &machine, result);
+}
+
 export fn JSC__JSValue__put(
     target_encoded: EncodedValue,
     global: JSContextRef,
@@ -16238,6 +16407,134 @@ test "private class and display names preserve metadata and observable tag rules
     try std.testing.expectEqual(@as(usize, 225), blocked_output.len);
     pending = JSGlobalObject__tryTakeException(context);
     try std.testing.expectEqual(EncodedValue.fromInt32(225), JSC__Exception__asJSValue(@ptrFromInt(try pending.asCellAddress())));
+}
+
+test "private record construction preserves cardinality ownership and direct insertion" {
+    const group_ref = JSContextGroupCreate() orelse return error.GroupCreateFailed;
+    defer JSContextGroupRelease(group_ref);
+    const context = JSGlobalContextCreateInGroup(group_ref, null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(context);
+    const sibling = JSGlobalContextCreateInGroup(group_ref, null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(sibling);
+    const internal = ctxForEvaluation(context) orelse return error.ContextCreateFailed;
+    const sibling_internal = ctxForEvaluation(sibling) orelse return error.ContextCreateFailed;
+    const utf8_tag = @as(usize, 1) << 61;
+    const utf16_tag = @as(usize, 1) << 63;
+
+    const empty_encoded = JSC__JSValue__fromEntries(sibling, null, null, 0, false);
+    const empty = privateValueFrom(sibling, empty_encoded) orelse return error.ValueInitFailed;
+    var sibling_machine = sibling_internal.interpreter();
+    try std.testing.expect(empty.isObject());
+    try std.testing.expect(empty.asObj().protoAtomic() == sibling_machine.objectProto());
+    try std.testing.expectEqual(@as(usize, 0), (try empty.asObj().ownKeys(sibling_internal.arena())).len);
+
+    var later_key_bytes = [_]u8{ 'l', 'a', 't', 'e', 'r' };
+    const numeric_key_bytes = "2";
+    var unicode_key_units = [_]u16{ 0x540d, 0x5b57, 0xd83d, 0xde00 };
+    const first_value_bytes = "first";
+    var latin1_value_bytes = [_]u8{ 'c', 'a', 'f', 0xe9 };
+    var last_value_bytes = [_]u8{ 'l', 'a', 's', 't' };
+    const utf8_value_bytes = "值😀";
+    var keys = [_]PrivateZigString{
+        .{ .tagged_ptr = @intFromPtr(later_key_bytes[0..].ptr), .len = later_key_bytes.len },
+        .{ .tagged_ptr = @intFromPtr(numeric_key_bytes.ptr), .len = numeric_key_bytes.len },
+        .{ .tagged_ptr = @intFromPtr(later_key_bytes[0..].ptr), .len = later_key_bytes.len },
+        .{ .tagged_ptr = @intFromPtr(unicode_key_units[0..].ptr) | utf16_tag, .len = unicode_key_units.len },
+    };
+    var entries = [_]PrivateZigString{
+        .{ .tagged_ptr = @intFromPtr(first_value_bytes.ptr), .len = first_value_bytes.len },
+        .{ .tagged_ptr = @intFromPtr(latin1_value_bytes[0..].ptr), .len = latin1_value_bytes.len },
+        .{ .tagged_ptr = @intFromPtr(last_value_bytes[0..].ptr), .len = last_value_bytes.len },
+        .{ .tagged_ptr = @intFromPtr(utf8_value_bytes.ptr) | utf8_tag, .len = utf8_value_bytes.len },
+    };
+    const entries_encoded = JSC__JSValue__fromEntries(sibling, keys[0..].ptr, entries[0..].ptr, keys.len, false);
+    const entries_value = privateValueFrom(sibling, entries_encoded) orelse return error.ValueInitFailed;
+    @memset(&later_key_bytes, 'x');
+    @memset(&latin1_value_bytes, 'x');
+    @memset(&last_value_bytes, 'x');
+    @memset(&unicode_key_units, 0x78);
+    try sibling_internal.global_object.setOwn(sibling_internal.arena(), sibling_internal.root_shape, "__record_entries_227", entries_value);
+    try std.testing.expect((try sibling_internal.evaluate(
+        "Object.getPrototypeOf(__record_entries_227) === Object.prototype && " ++
+            "Object.keys(__record_entries_227).join(',') === '2,later,名字😀' && " ++
+            "__record_entries_227.later === 'last' && __record_entries_227[2] === 'café' && " ++
+            "__record_entries_227['名字😀'] === '值😀'",
+    )).asBool());
+
+    var clone_key_bytes = [_]u8{ 'o', 'w', 'n', 'e', 'd' };
+    var clone_value_units = [_]u16{ 's', 'a', 'f', 'e', 0xd83d, 0xde00 };
+    var clone_keys = [_]PrivateZigString{.{ .tagged_ptr = @intFromPtr(clone_key_bytes[0..].ptr), .len = clone_key_bytes.len }};
+    var clone_values = [_]PrivateZigString{.{ .tagged_ptr = @intFromPtr(clone_value_units[0..].ptr) | utf16_tag, .len = clone_value_units.len }};
+    const cloned_encoded = JSC__JSValue__fromEntries(context, clone_keys[0..].ptr, clone_values[0..].ptr, 1, true);
+    const cloned = privateValueFrom(context, cloned_encoded) orelse return error.ValueInitFailed;
+    @memset(&clone_key_bytes, 'x');
+    @memset(&clone_value_units, 0x78);
+    try std.testing.expectEqualStrings("safe😀", cloned.asObj().getOwn("owned").?.asStr());
+
+    const target = try internal.evaluate(
+        "globalThis.__record_hits_227 = 0; " ++
+            "globalThis.__record_target_227 = Object.create({ set many(value) { __record_hits_227++; } }); " ++
+            "Object.defineProperty(__record_target_227, 'replace', { get() { return 'old'; }, configurable: true }); " ++
+            "__record_target_227",
+    );
+    const target_encoded = privateEncodedFromValue(internal, target);
+    const zero_key_bytes = "zero";
+    const one_key_bytes = "one";
+    const many_key_bytes = "many";
+    const replace_key_bytes = "replace";
+    const zero_key = PrivateZigString{ .tagged_ptr = @intFromPtr(zero_key_bytes.ptr), .len = zero_key_bytes.len };
+    const one_key = PrivateZigString{ .tagged_ptr = @intFromPtr(one_key_bytes.ptr), .len = one_key_bytes.len };
+    const many_key = PrivateZigString{ .tagged_ptr = @intFromPtr(many_key_bytes.ptr), .len = many_key_bytes.len };
+    const replace_key = PrivateZigString{ .tagged_ptr = @intFromPtr(replace_key_bytes.ptr), .len = replace_key_bytes.len };
+    var one_values = [_]PrivateZigString{.{ .tagged_ptr = @intFromPtr(utf8_value_bytes.ptr) | utf8_tag, .len = utf8_value_bytes.len }};
+    const alpha_bytes = "alpha";
+    var many_values = [_]PrivateZigString{
+        .{ .tagged_ptr = @intFromPtr(alpha_bytes.ptr), .len = alpha_bytes.len },
+        .{ .tagged_ptr = @intFromPtr(clone_value_units[0..].ptr) | utf16_tag, .len = 4 },
+    };
+    // Restore the four UTF-16 code units used by the many-value call after the
+    // ownership test deliberately overwrote the original caller buffer.
+    clone_value_units[0] = 'b';
+    clone_value_units[1] = 'e';
+    clone_value_units[2] = 't';
+    clone_value_units[3] = 'a';
+    JSC__JSValue__putRecord(target_encoded, context, &zero_key, null, 0);
+    JSC__JSValue__putRecord(target_encoded, context, &one_key, one_values[0..].ptr, 1);
+    JSC__JSValue__putRecord(target_encoded, context, &many_key, many_values[0..].ptr, many_values.len);
+    JSC__JSValue__putRecord(target_encoded, context, &replace_key, one_values[0..].ptr, 1);
+    try std.testing.expect((try internal.evaluate(
+        "__record_hits_227 === 0 && Array.isArray(__record_target_227.zero) && __record_target_227.zero.length === 0 && " ++
+            "__record_target_227.one === '值😀' && Array.isArray(__record_target_227.many) && " ++
+            "__record_target_227.many.join(',') === 'alpha,beta' && __record_target_227.replace === '值😀' && " ++
+            "['zero','one','many','replace'].every(key => { const d = Object.getOwnPropertyDescriptor(__record_target_227, key); return d.writable && d.enumerable && d.configurable; })",
+    )).asBool());
+
+    try std.testing.expectEqual(EncodedValue.empty, JSC__JSValue__fromEntries(context, null, null, 1, false));
+    try std.testing.expect(JSGlobalObject__hasException(context));
+    JSGlobalObject__clearException(context);
+    try std.testing.expectEqual(EncodedValue.empty, JSC__JSValue__fromEntries(context, keys[0..].ptr, entries[0..].ptr, @as(usize, std.math.maxInt(u32)) + 1, false));
+    try std.testing.expect(JSGlobalObject__hasException(context));
+    JSGlobalObject__clearException(context);
+    JSC__JSValue__putRecord(target_encoded, context, null, null, 0);
+    try std.testing.expect(JSGlobalObject__hasException(context));
+    JSGlobalObject__clearException(context);
+
+    const foreign = JSGlobalContextCreate(null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(foreign);
+    const foreign_internal = ctxForEvaluation(foreign) orelse return error.ContextCreateFailed;
+    const foreign_target = privateEncodedFromValue(foreign_internal, try foreign_internal.evaluate("({})"));
+    JSC__JSValue__putRecord(foreign_target, context, &one_key, one_values[0..].ptr, 1);
+    try std.testing.expect(JSGlobalObject__hasException(context));
+    JSGlobalObject__clearException(context);
+
+    const blocked_key_bytes = "blocked";
+    const blocked_key = PrivateZigString{ .tagged_ptr = @intFromPtr(blocked_key_bytes.ptr), .len = blocked_key_bytes.len };
+    JSC__VM__throwError(JSC__JSGlobalObject__vm(context), context, EncodedValue.fromInt32(227));
+    JSC__JSValue__putRecord(target_encoded, context, &blocked_key, one_values[0..].ptr, 1);
+    try std.testing.expectEqual(EncodedValue.empty, JSC__JSValue__fromEntries(context, clone_keys[0..].ptr, clone_values[0..].ptr, 1, true));
+    const pending = JSGlobalObject__tryTakeException(context);
+    try std.testing.expectEqual(EncodedValue.fromInt32(227), JSC__Exception__asJSValue(@ptrFromInt(try pending.asCellAddress())));
+    try std.testing.expect(target.asObj().getOwn("blocked") == null);
 }
 
 test "private JSON stringification preserves normal and undefined-space semantics" {

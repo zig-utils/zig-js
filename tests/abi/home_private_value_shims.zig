@@ -212,6 +212,8 @@ extern "c" fn JSC__JSGlobalObject__createAggregateError(JSContextRef, [*c]const 
 extern "c" fn JSC__JSGlobalObject__createAggregateErrorWithArray(JSContextRef, EncodedValue, BunString, EncodedValue) EncodedValue;
 extern "c" fn JSC__JSValue__getErrorsProperty(EncodedValue, JSContextRef) EncodedValue;
 extern "c" fn JSC__JSValue__createObject2(JSContextRef, *const ZigString, *const ZigString, EncodedValue, EncodedValue) EncodedValue;
+extern "c" fn JSC__JSValue__putRecord(EncodedValue, JSContextRef, ?*const ZigString, [*c]const ZigString, usize) void;
+extern "c" fn JSC__JSValue__fromEntries(JSContextRef, [*c]const ZigString, [*c]const ZigString, usize, bool) EncodedValue;
 extern "c" fn JSC__JSValue__put(EncodedValue, JSContextRef, *const ZigString, EncodedValue) void;
 extern "c" fn JSC__JSValue__putToPropertyKey(EncodedValue, JSContextRef, EncodedValue, EncodedValue) void;
 extern "c" fn JSC__JSValue__deleteProperty(EncodedValue, JSContextRef, *const ZigString) bool;
@@ -1866,6 +1868,23 @@ pub fn main() void {
     )) or !JSC__JSValue__toBoolean(evaluate(context, "Object.keys(__private_duplicate_pair).join(',') === 'first' && __private_duplicate_pair.first === 11")))
         fail("private createObject2 order/descriptor/realm mismatch");
 
+    const entry_first_value_bytes = "entry-first";
+    const entry_second_value_bytes = "entry-second";
+    const entry_last_value_bytes = "entry-last";
+    const entry_keys = [_]ZigString{ first_key, second_key, first_key };
+    const entry_values = [_]ZigString{
+        .{ .tagged_ptr = @intFromPtr(entry_first_value_bytes.ptr), .len = entry_first_value_bytes.len },
+        .{ .tagged_ptr = @intFromPtr(entry_second_value_bytes.ptr), .len = entry_second_value_bytes.len },
+        .{ .tagged_ptr = @intFromPtr(entry_last_value_bytes.ptr), .len = entry_last_value_bytes.len },
+    };
+    const from_entries = JSC__JSValue__fromEntries(sibling_context, &entry_keys, &entry_values, entry_keys.len, true);
+    exposeCell(sibling_context, "__private_from_entries", from_entries);
+    if (!JSC__JSValue__toBoolean(evaluate(
+        sibling_context,
+        "Object.getPrototypeOf(__private_from_entries) === Object.prototype && Object.keys(__private_from_entries).join(',') === 'first,second' && __private_from_entries.first === 'entry-last' && __private_from_entries.second === 'entry-second'",
+    )))
+        fail("private fromEntries realm/order/duplicate mismatch");
+
     const direct_target = evaluate(context,
         \\globalThis.__private_direct_setter_hits = 0;
         \\globalThis.__private_direct_target = Object.create({ set direct(value) { __private_direct_setter_hits++; } });
@@ -1876,6 +1895,15 @@ pub fn main() void {
     JSC__JSValue__put(direct_target, context, &direct_key, encoded_object);
     if (!JSC__JSValue__toBoolean(evaluate(context, "__private_direct_setter_hits === 0 && Object.hasOwn(__private_direct_target, 'direct') && __private_direct_target.direct === __private_aggregate_identity")))
         fail("private direct put invoked prototype setter or lost identity");
+    const record_key_bytes = "record";
+    const record_key = ZigString{ .tagged_ptr = @intFromPtr(record_key_bytes.ptr), .len = record_key_bytes.len };
+    const record_values = [_]ZigString{ entry_values[0], entry_values[1] };
+    JSC__JSValue__putRecord(direct_target, context, &record_key, &record_values, record_values.len);
+    if (!JSC__JSValue__toBoolean(evaluate(
+        context,
+        "Array.isArray(__private_direct_target.record) && __private_direct_target.record.join(',') === 'entry-first,entry-second' && Object.keys(__private_direct_target).includes('record')",
+    )))
+        fail("private putRecord array/direct descriptor mismatch");
 
     const property_key_target = evaluate(context, "globalThis.__private_property_key_target = []; __private_property_key_target");
     const coercing_key = evaluate(context,
@@ -3196,5 +3224,5 @@ pub fn main() void {
         TopExceptionScope__exceptionIncludingTraps(&verification_scope) != null)
         fail("private TopExceptionScope destruction mismatch");
 
-    std.debug.print("Home private value shims: 211/211 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 213/213 symbols linked; runtime matrix passed\n", .{});
 }
