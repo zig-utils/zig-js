@@ -236,7 +236,7 @@ claim that Home's or Bun's private `JSC__*`/`Bun__*` ABI is implemented.
 The separately generated
 [Home private inventory](docs/abi/home-private-7ed99c02-inventory.json) makes
 that remaining boundary concrete: **448 unique extern symbols from 58 pinned
-files**, classified as 431 private (**212 implemented / 219 pending**), 15
+files**, classified as 431 private (**214 implemented / 217 pending**), 15
 already-covered public-C overlaps, one platform import, and one
 consumer-generated `JSFunctionCall` definition, with zero duplicate or
 unclassified entries.
@@ -247,7 +247,7 @@ The first private-ABI foundation is implemented without changing engine values:
 `private_abi.EncodedValue` translates primitives to the pinned eight-byte JSC64
 encoding (including exact int32/double/NaN/cell rules), while rejecting
 string/object conversion until a validated external cell handle exists.
-The first 212 private exports—encoded identity/cell equality, truthiness,
+The first 214 private exports—encoded identity/cell equality, truthiness,
 int32 extraction, exact signed/unsigned 64-bit BigInt construction, and
 modulo-2^64 BigInt extraction with pinned number fallbacks, plus exact `===` and
 SameValue equality, two exact cell-type queries, six opaque BigInt cell
@@ -429,6 +429,15 @@ serializer while preserving their pinned space arguments: an unsigned,
 ten-space-clamped indent versus `undefined` for compact output. Both retain
 `toJSON`, getters/proxies, ordering, omission/null, BigInt/cycle errors, Unicode
 escaping, selected-realm execution, and owned BunString lifetime.
+Two native record-construction exports now reproduce the pinned direct object
+boundary. `fromEntries` creates a selected-realm ordinary object, copies every
+ZigString key/value, preserves duplicate last-value and integer-key ordering,
+and makes both clone modes independent of caller-buffer mutation. `putRecord`
+maps zero, one, or multiple values to an empty array, scalar string, or ordered
+string array, then defines a writable/enumerable/configurable own property
+without invoking inherited setters. Invalid pointers, oversized counts,
+foreign VMs, allocation failure, and existing exceptions fail without exposing
+a partial object or replacing the first exception.
 Three fast built-in-name reads pin all 24 byte IDs, including the two Symbol
 keys, and preserve direct-data, own-slot, and pollution-mitigated lookup as
 separate operations. Bun's additional pure `code` VM inquiry walks data slots
@@ -437,7 +446,7 @@ Three Symbol bridges decode every ZigString form into the VM-wide global
 registry and expose stable borrowed description/registry-key views. C-API
 sibling realms now share the registry even before their first `Symbol.for`,
 while local and well-known Symbols remain correctly absent from `keyFor`.
-The 211-symbol combined fixture covers sibling realms,
+The 213-symbol combined fixture covers sibling realms,
 foreign-VM rejection, callback
 reentrancy, exception clearing, and already-settled targets.
 The BigInt cell gate downcasts only real owned cells, compares arbitrary-size
@@ -451,12 +460,12 @@ constructors return real context-owned BigInt cells.
 The [full private `JSType` layout](docs/abi/private-jstype-layouts.json) proves
 that Home has 97 members while Bun has 98: Bun's one inserted tag renumbers 70
 later members. `-Dprivate-abi-consumer=home|bun` selects the exact layout, and
-separately compiled fixtures pass 20 real cell kinds for each. All 212
+separately compiled fixtures pass 20 real cell kinds for each. All 214
 private exports remain excluded from the 117-function public count and 19
 extensions.
 The separate pinned
 [Bun core inventory](docs/abi/bun-private-core-4982b91e-inventory.json) contains
-437 symbols from 54 `src/jsc` files: 421 private (**206 implemented / 215
+437 symbols from 54 `src/jsc` files: 421 private (**208 implemented / 213
 pending**), 15 public overlaps, and one consumer-generated `JSFunctionCall`
 definition. Its exact comparison with Home finds 434
 shared names, 3 Bun-only names, 14 Home-only names, and 28 changed signatures;
