@@ -118,10 +118,62 @@ pub fn build(b: *std.Build) void {
         const objc_runtime_step = b.step("test-objc-api", "Compile, link, and run the Objective-C bridge host");
         objc_runtime_step.dependOn(&run_objc_runtime_smoke.step);
 
+        const objc_lifetime_stress = b.addExecutable(.{
+            .name = "objc-api-lifetime-stress",
+            .root_module = b.createModule(.{
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+            }),
+        });
+        objc_lifetime_stress.root_module.addCSourceFile(.{
+            .file = b.path("tests/objc_api_lifetime_stress.m"),
+            .flags = &.{ "-fobjc-arc", "-fblocks", "-Wno-arc-retain-cycles", "-Wno-objc-circular-container" },
+        });
+        objc_lifetime_stress.root_module.addIncludePath(b.path("include"));
+        objc_lifetime_stress.root_module.addObjectFile(installed_library.?);
+        objc_lifetime_stress.root_module.linkFramework("Foundation", .{});
+        objc_lifetime_stress.root_module.linkSystemLibrary("ffi", .{});
+        const run_objc_lifetime_stress = b.addRunArtifact(objc_lifetime_stress);
+        run_objc_lifetime_stress.step.dependOn(&objc_api_audit_cmd.step);
+        const objc_lifetime_step = b.step("test-objc-api-lifetime", "Stress Objective-C VM, wrapper, managed-reference, and autorelease teardown");
+        objc_lifetime_step.dependOn(&run_objc_lifetime_stress.step);
+
+        const objc_sanitized_stress = b.addSystemCommand(&.{
+            "xcrun", "--sdk", "macosx", "clang",
+            "-fobjc-arc", "-fblocks", "-Wno-arc-retain-cycles",
+            "-Wno-objc-circular-container", "-Wno-incomplete-implementation",
+            "-fsanitize=address,undefined",
+        });
+        objc_sanitized_stress.addPrefixedDirectoryArg("-I", b.path("include"));
+        objc_sanitized_stress.addFileArg(b.path("tests/objc_api_lifetime_stress.m"));
+        objc_sanitized_stress.addFileArg(b.path("src/objc_bridge.m"));
+        objc_sanitized_stress.addArtifactArg(lib);
+        objc_sanitized_stress.addArgs(&.{ "-lffi", "-framework", "Foundation", "-o" });
+        const objc_sanitized_executable = objc_sanitized_stress.addOutputFileArg("objc-api-lifetime-sanitized");
+        const run_objc_sanitized_stress = b.addSystemCommand(&.{ "env" });
+        run_objc_sanitized_stress.addFileArg(objc_sanitized_executable);
+        const objc_sanitize_step = b.step("test-objc-api-sanitize", "Run Objective-C lifetime stress under ASan and UBSan");
+        objc_sanitize_step.dependOn(&run_objc_sanitized_stress.step);
+
+        const objc_leak_stress = b.addSystemCommand(&.{ "leaks", "-q", "--atExit", "--" });
+        objc_leak_stress.addArtifactArg(objc_lifetime_stress);
+        objc_leak_stress.step.dependOn(&objc_api_audit_cmd.step);
+        const objc_leak_step = b.step("test-objc-api-leaks", "Run Objective-C lifetime stress under the macOS leak checker");
+        objc_leak_step.dependOn(&objc_leak_stress.step);
+
         const objc_jsc_diff_cmd = b.addSystemCommand(&.{ "python3", "tools/objc-api-jsc-diff.py" });
         objc_jsc_diff_cmd.addFileArg(installed_library.?);
         const objc_jsc_diff_step = b.step("objc-api-jsc-diff", "Compare Objective-C bridge behavior with pinned system JSC");
         objc_jsc_diff_step.dependOn(&objc_jsc_diff_cmd.step);
+
+        const objc_evidence_step = b.step("test-objc-api-evidence", "Run the complete Objective-C bridge evidence matrix");
+        objc_evidence_step.dependOn(&objc_header_smoke.step);
+        objc_evidence_step.dependOn(&run_objc_runtime_smoke.step);
+        objc_evidence_step.dependOn(&objc_jsc_diff_cmd.step);
+        objc_evidence_step.dependOn(&run_objc_lifetime_stress.step);
+        objc_evidence_step.dependOn(&run_objc_sanitized_stress.step);
+        objc_evidence_step.dependOn(&objc_leak_stress.step);
     }
 
     const c_api_c_smoke = b.addExecutable(.{
