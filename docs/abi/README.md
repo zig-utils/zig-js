@@ -44,7 +44,7 @@ convention. The exact current denominator is:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #163 | 431 (214 implemented, 217 pending) |
+| Private JSC/Bun/WebCore ABI under #163 | 431 (215 implemented, 216 pending) |
 | Overlap with zig-js's completed public C target | 15 |
 | Platform libc import | 1 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
@@ -61,7 +61,7 @@ zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"
 ```
 
 This inventory is the denominator, not a claim that the whole surface works.
-The first 214 private entries are implemented; the other 217 remain pending
+The first 215 private entries are implemented; the other 216 remain pending
 until #163 provides their type/layout contracts, shims, and consumer evidence.
 `JSFunctionCall` remains revision-pinned in the declaration inventory but is
 not part of that denominator: each runtime-generated FFI module defines the
@@ -377,6 +377,13 @@ array, then installs an all-true own data descriptor without invoking inherited
 setters. Null/oversized/foreign/OOM paths are failure-atomic and the shared
 pending-exception boundary remains first-wins.
 
+The JSX element predicate performs one ordinary `$$typeof` Get and compares
+only against the VM registry identities for `react.element` and
+`react.transitional.element`. Inherited properties, getters, proxies, and
+same-VM sibling realms preserve their observable behavior. Local Symbols,
+same-description impostors, primitives, foreign cells, thrown accessors, and
+pre-existing exceptions retain the pinned false/abrupt boundary.
+
 The VM exception slice exports the shared `JSGlobalObject`/`VM` pending-state
 boundary plus exception-cell conversion and classification. Sibling realms in
 one context group observe the same VM pointer and pending cell; taking or
@@ -516,7 +523,7 @@ layout, exact UTF-16 and BunString decoding, shortest numeric formatting,
 WebKit JSON escaping, sticky overflow/OOM, and non-destructive conversion.
 The five rooted native-container entry points add callback-scoped marked
 arguments and per-realm CommonJS function registries with precise-GC rooting,
-cross-VM rejection, and exact append/set/swap-remove behavior. The 213-symbol
+cross-VM rejection, and exact append/set/swap-remove behavior. The 214-symbol
 combined runtime fixture covers these semantics; the two
 profile-selected JSType exports retain
 their separate Home/Bun runtime fixtures.
@@ -560,7 +567,7 @@ profile contains 437 unique declarations from 54 hashed files:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #164 | 421 (208 implemented, 213 pending) |
+| Private JSC/Bun/WebCore ABI under #164 | 421 (209 implemented, 212 pending) |
 | Public-C overlap | 15 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
 | **Total** | **437** |
