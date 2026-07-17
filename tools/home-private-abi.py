@@ -14,12 +14,14 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 OUTPUT = ROOT / "docs/abi/home-private-7ed99c02-inventory.json"
-ALIAS_PROFILE = ROOT / "docs/abi/home-private-5e829ad4.json"
 PUBLIC_INVENTORY = ROOT / "docs/c-api/jsc-public-api-macos-27.0.json"
 EXPORT_SOURCE = ROOT / "src/c_api.zig"
 PROFILE_ID = "home-private-7ed99c02"
 REVISION = "7ed99c02e50034f869d0db6d487115bb44332fe4"
-ALIAS_PROFILE_ID = "home-private-5e829ad4"
+ALIAS_PROFILES = {
+    "home-private-5e829ad4": ROOT / "docs/abi/home-private-5e829ad4.json",
+    "home-private-38702f9e": ROOT / "docs/abi/home-private-38702f9e.json",
+}
 SOURCE_ROOT = Path("packages/runtime/src/jsc")
 EXTERN_RE = re.compile(r"\b(?:pub\s+)?extern\s+fn\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(")
 PLATFORM_IMPORTS = {"gnu_get_libc_version"}
@@ -263,9 +265,9 @@ def refresh_implementation_status(data: dict[str, object]) -> None:
     data["totals"]["by_status"] = dict(sorted(statuses.items()))
 
 
-def verify_alias(home_root: Path, stored: dict[str, object]) -> None:
-    alias = json.loads(ALIAS_PROFILE.read_text())
-    if alias.get("schema_version") != 1 or alias.get("profile_id") != ALIAS_PROFILE_ID:
+def verify_alias(home_root: Path, stored: dict[str, object], profile_id: str) -> None:
+    alias = json.loads(ALIAS_PROFILES[profile_id].read_text())
+    if alias.get("schema_version") != 1 or alias.get("profile_id") != profile_id:
         fail("alias profile schema or identity mismatch")
     if alias.get("base_profile") != PROFILE_ID or alias.get("base_revision") != REVISION:
         fail("alias base-profile identity mismatch")
@@ -364,7 +366,7 @@ def validate_stored(data: dict[str, object]) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--profile", choices=(PROFILE_ID, ALIAS_PROFILE_ID), default=PROFILE_ID)
+    parser.add_argument("--profile", choices=(PROFILE_ID, *ALIAS_PROFILES), default=PROFILE_ID)
     parser.add_argument("--home-root", type=Path)
     parser.add_argument("--write", action="store_true")
     parser.add_argument("--refresh-implementation-status", action="store_true")
@@ -390,8 +392,8 @@ def main() -> None:
         refresh_implementation_status(stored)
         OUTPUT.write_text(json.dumps(stored, indent=2) + "\n")
     validate_stored(stored)
-    if args.home_root and args.profile == ALIAS_PROFILE_ID:
-        verify_alias(args.home_root.resolve(), stored)
+    if args.home_root and args.profile in ALIAS_PROFILES:
+        verify_alias(args.home_root.resolve(), stored, args.profile)
     totals = stored["totals"]
     classes = totals["by_classification"]
     statuses = totals["by_status"]
