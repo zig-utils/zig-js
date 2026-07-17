@@ -528,11 +528,7 @@ fn attachClassToExistingObject(ctx: JSContextRef, c: *Context, obj: *Object, cla
     };
     obj.private_data = data;
     obj.private_data_tag = .host;
-    obj.setCApiObjectOwner(c.arena(), owner) catch {
-        owner.finishOnce();
-        return false;
-    };
-    obj.setHostClassHooks(c.arena(), &c_api_class_hooks) catch {
+    obj.setCApiObjectClass(c.arena(), owner, &c_api_class_hooks) catch {
         owner.finishOnce();
         return false;
     };
@@ -3377,11 +3373,7 @@ export fn JSObjectMake(ctx: JSContextRef, js_class: JSClassRef, data: ?*anyopaqu
             return null;
         };
         owner = created;
-        obj.setCApiObjectOwner(c.arena(), created) catch {
-            created.finishOnce();
-            return null;
-        };
-        obj.setHostClassHooks(c.arena(), &c_api_class_hooks) catch {
+        obj.setCApiObjectClass(c.arena(), created, &c_api_class_hooks) catch {
             created.finishOnce();
             return null;
         };
@@ -3434,11 +3426,7 @@ export fn JSObjectMakeConstructor(
         return null;
     };
     owner.payload = data;
-    obj.setCApiObjectOwner(c.arena(), owner) catch {
-        owner.finishOnce();
-        return null;
-    };
-    obj.setHostClassHooks(c.arena(), &c_api_constructor_hooks) catch {
+    obj.setCApiObjectClass(c.arena(), owner, &c_api_constructor_hooks) catch {
         owner.finishOnce();
         return null;
     };

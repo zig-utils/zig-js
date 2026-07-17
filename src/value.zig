@@ -670,6 +670,7 @@ pub const CApiObjectOwner = struct {
     object_ref: ?*anyopaque = null,
     class_ref: ?*anyopaque,
     payload: ?*anyopaque = null,
+    hooks: ?*const HostClassHooks = null,
     finish_fn: *const fn (*CApiObjectOwner) void,
 
     pub fn finishOnce(self: *CApiObjectOwner) void {
@@ -789,12 +790,6 @@ pub const ObjectColdState = struct {
     weak_index: std.AutoHashMapUnmanaged(usize, usize) = .empty,
     finalization_callback: Value = Value.undef(),
     finalization_records: std.ArrayListUnmanaged(FinalizationRecord) = .empty,
-    /// Non-GC metadata for objects created from a public JSClassRef. The owner
-    /// itself is context-owned so this borrowed pointer remains valid until
-    /// after every object finalizer has run.
-    c_api_object_owner: ?*CApiObjectOwner = null,
-    host_class_hooks: ?*const HostClassHooks = null,
-
     pub inline fn hasRare(self: *const ObjectColdState, tag: ObjectRareTag) bool {
         return @constCast(&self.rare_tag).load(.acquire) == tag;
     }
@@ -905,6 +900,10 @@ pub const ObjectStorageState = struct {
     cold: std.atomic.Value(?*ObjectColdState) = .init(null),
     slots: std.atomic.Value(?*ObjectSlotsState) = .init(null),
     elements: std.atomic.Value(?*ObjectElementsState) = .init(null),
+    /// Context-owned C-class metadata. It belongs in the wrapper already
+    /// required by a host-class object, keeping the cold sidecar inside its
+    /// 256-byte GC allocation class.
+    c_api_object_owner: std.atomic.Value(?*CApiObjectOwner) = .init(null),
 };
 
 /// A JavaScript object. v1 keeps this deliberately small: a string-keyed
@@ -1148,6 +1147,7 @@ pub const Object = struct {
         std.debug.assert(state.cold.load(.monotonic) == null);
         std.debug.assert(state.slots.load(.monotonic) == null);
         std.debug.assert(state.elements.load(.monotonic) == null);
+        std.debug.assert(state.c_api_object_owner.load(.monotonic) == null);
         if (state.backing_flags.storage_state) {
             if (gc_runtime.activeObjectBacking()) |tracking| {
                 if (tracking.stores_live) |live| _ = @atomicRmw(usize, live, .Sub, 1, .monotonic);
@@ -1273,32 +1273,27 @@ pub const Object = struct {
     }
 
     pub inline fn cApiObjectOwner(self: *const Object) ?*CApiObjectOwner {
-        const cold = self.coldState() orelse return null;
-        return cold.c_api_object_owner;
+        const storage = self.storageState() orelse return null;
+        return storage.c_api_object_owner.load(.acquire);
     }
 
-    pub fn setCApiObjectOwner(
+    pub fn setCApiObjectClass(
         self: *Object,
         fallback: std.mem.Allocator,
         owner: *CApiObjectOwner,
+        hooks: *const HostClassHooks,
     ) std.mem.Allocator.Error!void {
-        const cold = try self.ensureCold(fallback);
-        std.debug.assert(cold.c_api_object_owner == null);
-        cold.c_api_object_owner = owner;
+        const backing_locked = self.lockBacking();
+        defer self.unlockBacking(backing_locked);
+        const storage = (try self.ensureStorageLocked(fallback)).state;
+        std.debug.assert(storage.c_api_object_owner.load(.monotonic) == null);
+        owner.hooks = hooks;
+        storage.c_api_object_owner.store(owner, .release);
     }
 
     pub inline fn hostClassHooks(self: *const Object) ?*const HostClassHooks {
-        const cold = self.coldState() orelse return null;
-        return cold.host_class_hooks;
-    }
-
-    pub fn setHostClassHooks(
-        self: *Object,
-        fallback: std.mem.Allocator,
-        hooks: *const HostClassHooks,
-    ) std.mem.Allocator.Error!void {
-        const cold = try self.ensureCold(fallback);
-        cold.host_class_hooks = hooks;
+        const owner = self.cApiObjectOwner() orelse return null;
+        return owner.hooks;
     }
 
     /// Atomic view of the cold key-order pointer. Contents remain protected by
