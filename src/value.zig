@@ -56,6 +56,8 @@ pub const HostClassDeleteResult = union(enum) {
     accepted: bool,
 };
 
+pub const HostClassConvertHint = enum { number, string };
+
 /// Type-erased essential-internal-method bridge for embedding-defined classes.
 /// The Interpreter pointer is opaque here to avoid a value/interpreter import
 /// cycle; C-API implementations cast it back at the boundary.
@@ -66,6 +68,12 @@ pub const HostClassHooks = struct {
     delete: ?*const fn (*anyopaque, *Object, []const u8) HostError!HostClassDeleteResult = null,
     attributes: ?*const fn (*anyopaque, *Object, []const u8) HostError!?PropAttr = null,
     own_keys: ?*const fn (*anyopaque, *Object) HostError![]const []const u8 = null,
+    is_callable: ?*const fn (*const Object) bool = null,
+    is_constructor: ?*const fn (*const Object) bool = null,
+    call: ?*const fn (*anyopaque, *Object, Value, []const Value) HostError!Value = null,
+    construct: ?*const fn (*anyopaque, *Object, []const Value) HostError!Value = null,
+    has_instance: ?*const fn (*anyopaque, *Object, Value) HostError!bool = null,
+    convert: ?*const fn (*anyopaque, *Object, HostClassConvertHint) HostError!Value = null,
 };
 
 /// The element type of a typed array (no BigInt variants — those need a BigInt
@@ -661,6 +669,7 @@ pub const CApiObjectOwner = struct {
     finalized: std.atomic.Value(bool) = .init(false),
     object_ref: ?*anyopaque = null,
     class_ref: ?*anyopaque,
+    payload: ?*anyopaque = null,
     finish_fn: *const fn (*CApiObjectOwner) void,
 
     pub fn finishOnce(self: *CApiObjectOwner) void {
@@ -2726,6 +2735,7 @@ pub const Object = struct {
         }
         if (o.proxy_revoked) return o.behavior.proxy_callable;
         return o.hostCallback() != null or o.native != null or
+            (if (o.hostClassHooks()) |hooks| if (hooks.is_callable) |is_callable| is_callable(o) else false else false) or
             o.jsFunction() != null or o.errorCtor() != null or o.boundFunction() != null;
     }
 

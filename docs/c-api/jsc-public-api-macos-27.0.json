@@ -36,9 +36,9 @@
     {"name":"JSClassCreate","header":"JSObjectRef.h","status":"implemented"},
     {"name":"JSClassRetain","header":"JSObjectRef.h","status":"implemented"},
     {"name":"JSClassRelease","header":"JSObjectRef.h","status":"implemented"},
-    {"name":"JSObjectMake","header":"JSObjectRef.h","status":"pending","issue":137,"note":"Class ownership, identity, initialize/finalize, shared prototypes, static functions, static value reflection/deletion, and inherited dynamic has/get/set/delete/property-name callbacks are implemented; call/constructor, hasInstance, and conversion callbacks remain pending."},
+    {"name":"JSObjectMake","header":"JSObjectRef.h","status":"pending","issue":137,"note":"All class ownership, lifecycle, static-member, property-name, call/constructor, hasInstance, and conversion callback families are implemented; invalid-return and wrong-context hardening remain."},
     {"name":"JSObjectMakeFunctionWithCallback","header":"JSObjectRef.h","status":"implemented"},
-    {"name":"JSObjectMakeConstructor","header":"JSObjectRef.h","status":"pending","issue":137},
+    {"name":"JSObjectMakeConstructor","header":"JSObjectRef.h","status":"implemented"},
     {"name":"JSObjectMakeArray","header":"JSObjectRef.h","status":"implemented"},
     {"name":"JSObjectMakeDate","header":"JSObjectRef.h","status":"pending","issue":151},
     {"name":"JSObjectMakeError","header":"JSObjectRef.h","status":"pending","issue":151},
@@ -149,8 +149,8 @@
     {"name":"JSObjectHasPropertyCallback","status":"implemented"}, {"name":"JSObjectGetPropertyCallback","status":"implemented"},
     {"name":"JSObjectSetPropertyCallback","status":"implemented"}, {"name":"JSObjectDeletePropertyCallback","status":"implemented"},
     {"name":"JSObjectGetPropertyNamesCallback","status":"implemented"}, {"name":"JSObjectCallAsFunctionCallback","status":"implemented"},
-    {"name":"JSObjectCallAsConstructorCallback","status":"pending","issue":137}, {"name":"JSObjectHasInstanceCallback","status":"pending","issue":137},
-    {"name":"JSObjectConvertToTypeCallback","status":"pending","issue":137}
+    {"name":"JSObjectCallAsConstructorCallback","status":"implemented"}, {"name":"JSObjectHasInstanceCallback","status":"implemented"},
+    {"name":"JSObjectConvertToTypeCallback","status":"implemented"}
   ],
   "enums": [
     {"name":"JSType","status":"implemented"}, {"name":"JSTypedArrayType","status":"implemented"},

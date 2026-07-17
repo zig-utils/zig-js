@@ -55,9 +55,9 @@ tests):
 1. **Complete custom native classes** — class ownership, inheritance,
    initialize/finalize, class identity, shared prototypes, and static functions
    plus static-value get/set/has/delete, descriptor, and key-enumeration dispatch
-   are implemented. Dynamic has/get/set/delete/property-name callbacks are also
-   implemented, while `hasInstance`, `callAsConstructor`, and conversion
-   callbacks remain. Home defines ~100+
+   are implemented. Every dynamic callback family, including property names,
+   calls, construction, `hasInstance`, and conversion, is implemented; final
+   validation and wrong-context hardening remain. Home defines ~100+
    JS-exposed classes (Subprocess, Glob, Server, Crypto hashers, FSWatcher,
    Stats, …) via the generated-class machinery. This is the single biggest gap.
 2. **Exception model** — set/get/clear a pending exception on the context;

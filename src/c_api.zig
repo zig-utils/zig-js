@@ -344,6 +344,76 @@ fn finishClassPrototype(owner: *value.CApiClassPrototypeOwner) void {
     releaseClass(classFrom(owner.class_ref).?);
 }
 
+const CApiConstructorData = struct {
+    context: *Context,
+    class: ?*CClass,
+    callback: JSObjectCallAsConstructorCallback,
+    constructor_ref: JSObjectRef = null,
+};
+
+fn finishCApiConstructor(owner: *value.CApiObjectOwner) void {
+    const data: *CApiConstructorData = @ptrCast(@alignCast(owner.payload.?));
+    if (data.class) |class| releaseClass(class);
+}
+
+fn cApiConstructorData(object: *const Object) ?*CApiConstructorData {
+    const owner = object.cApiObjectOwner() orelse return null;
+    return @ptrCast(@alignCast(owner.payload orelse return null));
+}
+
+fn cApiConstructorIsConstructor(object: *const Object) bool {
+    return cApiConstructorData(object) != null;
+}
+
+fn cApiConstructorConstruct(
+    raw_machine: *anyopaque,
+    object: *Object,
+    args: []const Value,
+) value.HostError!Value {
+    const machine: *interp.Interpreter = @ptrCast(@alignCast(raw_machine));
+    const data = cApiConstructorData(object) orelse {
+        machine.exception = Value.str("TypeError: constructor metadata is missing");
+        return error.Throw;
+    };
+    if (data.callback) |callback| {
+        const js_args = try machine.arena.alloc(JSValueRef, args.len);
+        for (args, js_args) |arg, *slot| slot.* = box(data.context, arg) orelse return error.OutOfMemory;
+        var exception: JSValueRef = null;
+        const result = callback(
+            @ptrCast(data.context),
+            data.constructor_ref,
+            js_args.len,
+            js_args.ptr,
+            &exception,
+        );
+        try applyCallbackException(machine, data.context, exception);
+        const result_ref = result orelse {
+            machine.exception = Value.str("TypeError: constructor callback returned null without exception");
+            return error.Throw;
+        };
+        const result_value = valueFromContext(data.context, result_ref) orelse {
+            machine.exception = Value.str("TypeError: constructor callback returned an invalid object");
+            return error.Throw;
+        };
+        if (!result_value.isObject() or result_value.asObj().is_symbol or result_value.asObj().is_bigint) {
+            machine.exception = Value.str("TypeError: constructor callback returned a non-object");
+            return error.Throw;
+        }
+        return result_value;
+    }
+    const class_ref: JSClassRef = if (data.class) |class| @ptrCast(class) else null;
+    const result_ref = JSObjectMake(@ptrCast(data.context), class_ref, null) orelse {
+        machine.exception = Value.str("OutOfMemory");
+        return error.OutOfMemory;
+    };
+    return valueFromContext(data.context, result_ref).?;
+}
+
+const c_api_constructor_hooks: value.HostClassHooks = .{
+    .is_constructor = cApiConstructorIsConstructor,
+    .construct = cApiConstructorConstruct,
+};
+
 const ClassCallbackTarget = struct {
     context: *Context,
     object_ref: JSObjectRef,
@@ -608,6 +678,160 @@ fn classOwnKeys(
     return result;
 }
 
+fn classForObject(object: *const Object) ?*CClass {
+    const owner = object.cApiObjectOwner() orelse return null;
+    return classFrom(owner.class_ref);
+}
+
+fn classIsCallable(object: *const Object) bool {
+    var class: ?*CClass = classForObject(object);
+    while (class) |item| : (class = item.parent)
+        if (item.definition.call_as_function != null) return true;
+    return false;
+}
+
+fn classIsConstructor(object: *const Object) bool {
+    var class: ?*CClass = classForObject(object);
+    while (class) |item| : (class = item.parent)
+        if (item.definition.call_as_constructor != null) return true;
+    return false;
+}
+
+fn classCall(
+    raw_machine: *anyopaque,
+    object: *Object,
+    this_value: Value,
+    args: []const Value,
+) value.HostError!Value {
+    const machine: *interp.Interpreter = @ptrCast(@alignCast(raw_machine));
+    const target = try classCallbackTarget(machine, object);
+    var class: ?*CClass = target.class;
+    while (class) |item| : (class = item.parent) {
+        const callback = item.definition.call_as_function orelse continue;
+        const js_args = try machine.arena.alloc(JSValueRef, args.len);
+        for (args, js_args) |arg, *slot| slot.* = box(target.context, arg) orelse return error.OutOfMemory;
+        const this_ref = if (this_value.isObject() and !this_value.asObj().is_symbol and !this_value.asObj().is_bigint)
+            box(target.context, this_value)
+        else
+            box(target.context, Value.obj(target.context.global_object));
+        if (this_ref == null) return error.OutOfMemory;
+        var exception: JSValueRef = null;
+        const result = callback(
+            @ptrCast(target.context),
+            target.object_ref,
+            this_ref,
+            js_args.len,
+            js_args.ptr,
+            &exception,
+        );
+        try applyCallbackException(machine, target.context, exception);
+        const result_ref = result orelse {
+            machine.exception = Value.str("TypeError: class call callback returned null without exception");
+            return error.Throw;
+        };
+        return valueFromContext(target.context, result_ref) orelse {
+            machine.exception = Value.str("TypeError: class call callback returned an invalid value");
+            return error.Throw;
+        };
+    }
+    machine.exception = Value.str("TypeError: class object is not callable");
+    return error.Throw;
+}
+
+fn classConstruct(
+    raw_machine: *anyopaque,
+    object: *Object,
+    args: []const Value,
+) value.HostError!Value {
+    const machine: *interp.Interpreter = @ptrCast(@alignCast(raw_machine));
+    const target = try classCallbackTarget(machine, object);
+    var class: ?*CClass = target.class;
+    while (class) |item| : (class = item.parent) {
+        const callback = item.definition.call_as_constructor orelse continue;
+        const js_args = try machine.arena.alloc(JSValueRef, args.len);
+        for (args, js_args) |arg, *slot| slot.* = box(target.context, arg) orelse return error.OutOfMemory;
+        var exception: JSValueRef = null;
+        const result = callback(
+            @ptrCast(target.context),
+            target.object_ref,
+            js_args.len,
+            js_args.ptr,
+            &exception,
+        );
+        try applyCallbackException(machine, target.context, exception);
+        const result_ref = result orelse {
+            machine.exception = Value.str("TypeError: class constructor callback returned null without exception");
+            return error.Throw;
+        };
+        const result_value = valueFromContext(target.context, result_ref) orelse {
+            machine.exception = Value.str("TypeError: class constructor callback returned an invalid object");
+            return error.Throw;
+        };
+        if (!result_value.isObject() or result_value.asObj().is_symbol or result_value.asObj().is_bigint) {
+            machine.exception = Value.str("TypeError: class constructor callback returned a non-object");
+            return error.Throw;
+        }
+        return result_value;
+    }
+    machine.exception = Value.str("TypeError: class object is not a constructor");
+    return error.Throw;
+}
+
+fn classHasInstance(
+    raw_machine: *anyopaque,
+    object: *Object,
+    candidate: Value,
+) value.HostError!bool {
+    const machine: *interp.Interpreter = @ptrCast(@alignCast(raw_machine));
+    const target = try classCallbackTarget(machine, object);
+    var class: ?*CClass = target.class;
+    while (class) |item| : (class = item.parent) {
+        const callback = item.definition.has_instance orelse continue;
+        var exception: JSValueRef = null;
+        const candidate_ref = box(target.context, candidate) orelse return error.OutOfMemory;
+        const result = callback(
+            @ptrCast(target.context),
+            target.object_ref,
+            candidate_ref,
+            &exception,
+        );
+        try applyCallbackException(machine, target.context, exception);
+        return result;
+    }
+    return false;
+}
+
+fn classConvert(
+    raw_machine: *anyopaque,
+    object: *Object,
+    hint: value.HostClassConvertHint,
+) value.HostError!Value {
+    const machine: *interp.Interpreter = @ptrCast(@alignCast(raw_machine));
+    const target = try classCallbackTarget(machine, object);
+    var class: ?*CClass = target.class;
+    while (class) |item| : (class = item.parent) {
+        const callback = item.definition.convert_to_type orelse continue;
+        var exception: JSValueRef = null;
+        const result = callback(
+            @ptrCast(target.context),
+            target.object_ref,
+            if (hint == .string) .string else .number,
+            &exception,
+        );
+        try applyCallbackException(machine, target.context, exception);
+        const result_ref = result orelse {
+            machine.exception = Value.str("TypeError: class conversion callback returned null without exception");
+            return error.Throw;
+        };
+        return valueFromContext(target.context, result_ref) orelse {
+            machine.exception = Value.str("TypeError: class conversion callback returned an invalid value");
+            return error.Throw;
+        };
+    }
+    machine.exception = Value.str("TypeError: class object has no conversion callback");
+    return error.Throw;
+}
+
 const c_api_class_hooks: value.HostClassHooks = .{
     .get = classGet,
     .set = classSet,
@@ -615,6 +839,12 @@ const c_api_class_hooks: value.HostClassHooks = .{
     .delete = classDelete,
     .attributes = staticValueAttributes,
     .own_keys = classOwnKeys,
+    .is_callable = classIsCallable,
+    .is_constructor = classIsConstructor,
+    .call = classCall,
+    .construct = classConstruct,
+    .has_instance = classHasInstance,
+    .convert = classConvert,
 };
 
 // ---- internal helpers --------------------------------------------------
@@ -1685,6 +1915,56 @@ export fn JSObjectMake(ctx: JSContextRef, js_class: JSClassRef, data: ?*anyopaqu
     return object_ref;
 }
 
+export fn JSObjectMakeConstructor(
+    ctx: JSContextRef,
+    js_class: JSClassRef,
+    callback: JSObjectCallAsConstructorCallback,
+) callconv(.c) JSObjectRef {
+    const c = ctxFrom(ctx) orelse return null;
+    const class = classFrom(js_class);
+    if (class) |item| if (!retainClass(item)) return null;
+    const data = c.arena().create(CApiConstructorData) catch {
+        if (class) |item| releaseClass(item);
+        return null;
+    };
+    data.* = .{ .context = c, .class = class, .callback = callback };
+    const gc_saved = gc_mod.setActiveHeap(c.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(c.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = c.interpreter();
+    c.pushActiveInterpreter(&machine) catch {
+        if (class) |item| releaseClass(item);
+        return null;
+    };
+    defer c.popActiveInterpreter(&machine);
+    const obj = (machine.newObject() catch {
+        if (class) |item| releaseClass(item);
+        return null;
+    }).asObj();
+    const owner_class_ref: *anyopaque = if (class) |item| @ptrCast(item) else @ptrCast(data);
+    const owner = c.createCApiObjectOwner(owner_class_ref, finishCApiConstructor) catch {
+        if (class) |item| releaseClass(item);
+        return null;
+    };
+    owner.payload = data;
+    obj.setCApiObjectOwner(c.arena(), owner) catch {
+        owner.finishOnce();
+        return null;
+    };
+    obj.setHostClassHooks(c.arena(), &c_api_constructor_hooks) catch {
+        owner.finishOnce();
+        return null;
+    };
+    const constructor_ref = box(c, Value.obj(obj)) orelse {
+        owner.finishOnce();
+        return null;
+    };
+    owner.object_ref = constructor_ref;
+    data.constructor_ref = constructor_ref;
+    return constructor_ref;
+}
+
 export fn JSObjectGetPrivate(object: JSObjectRef) callconv(.c) ?*anyopaque {
     const obj = objectFromHandleInspection(object) orelse return null;
     return if (obj.private_data_tag == .host) obj.private_data else null;
@@ -2373,6 +2653,7 @@ export fn JSObjectCallAsFunction(ctx: JSContextRef, function: JSObjectRef, this_
             return null;
         };
     const args = collectArgs(c, argc, argv, exception) orelse return null;
+    if (!obj.isCallableObject()) return null;
     // C-ABI host callbacks run directly across the FFI boundary.
     if (obj.hostCallback()) |cb| {
         const result = cb(ctx, function, this_ref, argc, argv, exception);
@@ -3457,6 +3738,28 @@ test "C-API: GC roots shared class prototypes and static functions" {
     try std.testing.expectEqual(@as(f64, 17), JSValueToNumber(ctx, result, null));
 
     JSClassRelease(class);
+    JSGlobalContextRelease(ctx);
+}
+
+test "C-API: constructor objects retain their instance class through precise GC" {
+    var definition: JSClassDefinition = .{ .class_name = "RetainedByConstructor" };
+    const class = JSClassCreate(&definition) orelse return error.ClassCreateFailed;
+    const context = Context.createWith(gpa, .{ .enable_gc = true }) catch return error.JSCInitFailed;
+    context.initCApiRef();
+    const ctx: JSContextRef = @ptrCast(context);
+    const constructor = JSObjectMakeConstructor(ctx, class, null) orelse return error.ConstructorCreateFailed;
+    const name = JSStringCreateWithUTF8CString("RetainedConstructor") orelse return error.StringInitFailed;
+    defer JSStringRelease(name);
+    var exception: JSValueRef = null;
+    JSObjectSetProperty(ctx, JSContextGetGlobalObject(ctx), name, constructor, 0, &exception);
+    try std.testing.expect(exception == null);
+    JSClassRelease(class);
+
+    JSGarbageCollect(ctx);
+    const instance = JSObjectCallAsConstructor(ctx, constructor, 0, null, &exception) orelse return error.ConstructFailed;
+    try std.testing.expect(exception == null);
+    try std.testing.expect(JSValueIsObject(ctx, instance));
+
     JSGlobalContextRelease(ctx);
 }
 

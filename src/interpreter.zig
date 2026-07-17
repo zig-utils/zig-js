@@ -5504,6 +5504,14 @@ pub const Interpreter = struct {
             return self.callValueWithThis(bf.target, try self.concatArgs(bf.args, args), bf.this);
         }
         if (obj.errorCtor()) |name| return self.makeErrorWithArgs(name, args);
+        if (obj.hostClassHooks()) |hooks| if (hooks.call) |call| {
+            if (hooks.is_callable == null or hooks.is_callable.?(obj)) {
+                try self.stackGuard();
+                self.depth += 1;
+                defer self.depth -= 1;
+                return call(@ptrCast(self), obj, this_val, args);
+            }
+        };
         if (obj.native) |nf| {
             try self.stackGuard();
             self.depth += 1;
@@ -6269,6 +6277,10 @@ pub const Interpreter = struct {
             return self.constructNT(bf.target, try self.concatArgs(bf.args, args), nt);
         }
         if (obj.errorCtor()) |name| return self.makeErrorWithArgsNT(name, args, new_target);
+        if (obj.hostClassHooks()) |hooks| if (hooks.construct) |construct_callback| {
+            if (hooks.is_constructor != null and hooks.is_constructor.?(obj))
+                return construct_callback(@ptrCast(self), obj, args);
+        };
         if (obj.native) |nf| {
             // Most built-ins aren't constructors; only flagged ones are `new`-able.
             if (!obj.native_ctor) return self.throwError("TypeError", "value is not a constructor");
@@ -14353,6 +14365,12 @@ pub const Interpreter = struct {
                 return self.throwError("TypeError", "Cannot convert object to primitive value");
             }
         }
+        if (o.hostClassHooks()) |hooks| if (hooks.convert) |convert| {
+            const converted = try convert(@ptrCast(self), o, if (hint == .string) .string else .number);
+            if (!converted.isObject() or converted.asObj().is_symbol or converted.asObj().is_bigint)
+                return converted;
+            return self.throwError("TypeError", "class conversion callback returned an object");
+        };
         // Honor a *user-defined* valueOf/toString (a JS function found on the
         // object or its prototype chain — e.g. `{ valueOf() {…} }` or a class
         // method) in the hint's order; the first primitive result wins. The
@@ -14852,6 +14870,9 @@ pub const Interpreter = struct {
                 return (try self.callValueWithThis(handler, &.{l}, r)).toBoolean();
             }
         }
+        if (r.asObj().hostClassHooks()) |hooks| if (hooks.has_instance) |has_instance| {
+            return has_instance(@ptrCast(self), r.asObj(), l);
+        };
         if (!r.asObj().isCallableObject())
             return self.throwError("TypeError", "Right-hand side of 'instanceof' is not callable");
         return self.ordinaryHasInstance(r.asObj(), l);
@@ -16579,6 +16600,8 @@ pub fn isConstructorValue(v: Value) bool {
         return isConstructorValue(bf.target);
     }
     if (o.errorCtor() != null) return true;
+    if (o.hostClassHooks()) |hooks| if (hooks.is_constructor) |is_constructor|
+        if (is_constructor(o)) return true;
     if (o.native != null) return o.native_ctor;
     if (o.jsFunction()) |erased| {
         const f: *Function = @ptrCast(@alignCast(erased));

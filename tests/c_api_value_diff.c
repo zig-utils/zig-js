@@ -138,6 +138,66 @@ static void class_property_names(JSContextRef context, JSObjectRef object,
     JSStringRelease(duplicate_name);
 }
 
+static JSValueRef class_call(JSContextRef context, JSObjectRef function,
+    JSObjectRef this_object, size_t argument_count, const JSValueRef arguments[],
+    JSValueRef* exception)
+{
+    (void)function; (void)this_object;
+    double first = argument_count ? JSValueToNumber(context, arguments[0], exception) : 0;
+    if (first == -1) {
+        *exception = JSValueMakeNumber(context, 93);
+        return NULL;
+    }
+    return JSValueMakeNumber(context, 70 + first);
+}
+
+static JSObjectRef class_construct(JSContextRef context, JSObjectRef constructor,
+    size_t argument_count, const JSValueRef arguments[], JSValueRef* exception)
+{
+    (void)constructor;
+    if (argument_count && JSValueToNumber(context, arguments[0], exception) == -1) {
+        *exception = JSValueMakeNumber(context, 94);
+        return NULL;
+    }
+    JSObjectRef result = JSObjectMake(context, NULL, NULL);
+    JSStringRef name = JSStringCreateWithUTF8CString("constructed");
+    JSValueRef value = argument_count ? arguments[0] : JSValueMakeNumber(context, 0);
+    JSObjectSetProperty(context, result, name, value,
+        kJSPropertyAttributeNone, exception);
+    JSStringRelease(name);
+    return result;
+}
+
+static bool class_has_instance(JSContextRef context, JSObjectRef constructor,
+    JSValueRef possible_instance, JSValueRef* exception)
+{
+    (void)constructor;
+    double candidate = JSValueToNumber(context, possible_instance, exception);
+    if (candidate == -1) {
+        *exception = JSValueMakeNumber(context, 95);
+        return false;
+    }
+    return candidate == 42;
+}
+
+static int throw_convert;
+static JSValueRef class_convert(JSContextRef context, JSObjectRef object,
+    JSType type, JSValueRef* exception)
+{
+    (void)object; (void)exception;
+    if (throw_convert) {
+        *exception = JSValueMakeNumber(context, 96);
+        return NULL;
+    }
+    if (type == kJSTypeString) {
+        JSStringRef text = JSStringCreateWithUTF8CString("converted");
+        JSValueRef result = JSValueMakeString(context, text);
+        JSStringRelease(text);
+        return result;
+    }
+    return JSValueMakeNumber(context, 88);
+}
+
 static int print_property_names(JSPropertyNameArrayRef names)
 {
     printf("%zu", JSPropertyNameArrayGetCount(names));
@@ -495,6 +555,108 @@ int main(void)
     JSStringRelease(own_name); JSStringRelease(inherited_names_name);
     JSStringRelease(names_object_name);
     JSClassRelease(names_class);
+
+    JSClassDefinition callable_definition = kJSClassDefinitionEmpty;
+    callable_definition.callAsFunction = class_call;
+    callable_definition.callAsConstructor = class_construct;
+    callable_definition.hasInstance = class_has_instance;
+    callable_definition.convertToType = class_convert;
+    JSClassRef callable_class = JSClassCreate(&callable_definition);
+    JSObjectRef callable_object = JSObjectMake(context, callable_class, NULL);
+    JSValueRef call_argument = JSValueMakeNumber(context, 5);
+    JSValueRef call_result = JSObjectCallAsFunction(context, callable_object, NULL,
+        1, &call_argument, &exception);
+    JSValueRef construct_argument = JSValueMakeNumber(context, 6);
+    JSObjectRef construct_result = JSObjectCallAsConstructor(context, callable_object,
+        1, &construct_argument, &exception);
+    JSStringRef constructed_name = JSStringCreateWithUTF8CString("constructed");
+    printf("class-callable %d %d %.0f %.0f %d\n",
+        JSObjectIsFunction(context, callable_object),
+        JSObjectIsConstructor(context, callable_object),
+        JSValueToNumber(context, call_result, &exception),
+        JSValueToNumber(context, JSObjectGetProperty(context, construct_result,
+            constructed_name, &exception), &exception),
+        JSValueIsInstanceOfConstructor(context, JSValueMakeNumber(context, 42),
+            callable_object, &exception));
+    JSStringRef callable_object_name = JSStringCreateWithUTF8CString("callableObject");
+    JSObjectSetProperty(context, JSContextGetGlobalObject(context), callable_object_name,
+        callable_object, kJSPropertyAttributeNone, &exception);
+    JSValueRef callable_js = evaluate(context,
+        "JSON.stringify([callableObject(5),new callableObject(6).constructed,42 instanceof callableObject,7 instanceof callableObject,String(callableObject),Number(callableObject)])");
+    JSStringRef callable_js_string = JSValueToStringCopy(context, callable_js, &exception);
+    fputs("class-callable-js ", stdout);
+    if (!callable_js_string || !print_json_string(callable_js_string))
+        return 11;
+    fputc('\n', stdout);
+    JSStringRelease(callable_js_string);
+    JSValueRef throw_argument = JSValueMakeNumber(context, -1);
+    exception = NULL;
+    JSValueRef thrown_call = JSObjectCallAsFunction(context, callable_object, NULL,
+        1, &throw_argument, &exception);
+    double call_exception = JSValueToNumber(context, exception, NULL);
+    exception = NULL;
+    JSObjectRef thrown_construct = JSObjectCallAsConstructor(context, callable_object,
+        1, &throw_argument, &exception);
+    double construct_exception = JSValueToNumber(context, exception, NULL);
+    exception = NULL;
+    int thrown_instance = JSValueIsInstanceOfConstructor(context, throw_argument,
+        callable_object, &exception);
+    double instance_exception = JSValueToNumber(context, exception, NULL);
+    exception = NULL;
+    throw_convert = 1;
+    double thrown_conversion = JSValueToNumber(context, callable_object, &exception);
+    throw_convert = 0;
+    double conversion_exception = JSValueToNumber(context, exception, NULL);
+    printf("class-callable-throws %d %.0f %d %.0f %d %.0f %d %.0f\n",
+        thrown_call == NULL, call_exception, thrown_construct == NULL,
+        construct_exception, !thrown_instance, instance_exception,
+        isnan(thrown_conversion), conversion_exception);
+    exception = NULL;
+    JSClassRef callable_parent_class = JSClassCreate(&callable_definition);
+    JSClassDefinition callable_child_definition = kJSClassDefinitionEmpty;
+    callable_child_definition.parentClass = callable_parent_class;
+    JSClassRef callable_child_class = JSClassCreate(&callable_child_definition);
+    JSClassRelease(callable_parent_class);
+    JSObjectRef inherited_callable = JSObjectMake(context, callable_child_class, NULL);
+    JSValueRef inherited_argument = JSValueMakeNumber(context, 2);
+    JSValueRef inherited_call = JSObjectCallAsFunction(context, inherited_callable,
+        NULL, 1, &inherited_argument, &exception);
+    JSObjectRef inherited_construct = JSObjectCallAsConstructor(context,
+        inherited_callable, 1, &inherited_argument, &exception);
+    printf("class-callable-inherited %.0f %.0f %d %.0f\n",
+        JSValueToNumber(context, inherited_call, &exception),
+        JSValueToNumber(context, JSObjectGetProperty(context, inherited_construct,
+            constructed_name, &exception), &exception),
+        JSValueIsInstanceOfConstructor(context, JSValueMakeNumber(context, 42),
+            inherited_callable, &exception),
+        JSValueToNumber(context, inherited_callable, &exception));
+    JSClassRelease(callable_child_class);
+    JSStringRelease(callable_object_name);
+    JSClassRelease(callable_class);
+
+    JSClassDefinition instance_definition = kJSClassDefinitionEmpty;
+    JSClassRef instance_class = JSClassCreate(&instance_definition);
+    JSObjectRef default_constructor = JSObjectMakeConstructor(context, instance_class, NULL);
+    JSObjectRef default_instance = JSObjectCallAsConstructor(context, default_constructor,
+        0, NULL, &exception);
+    exception = NULL;
+    JSValueRef default_call = JSObjectCallAsFunction(context, default_constructor,
+        NULL, 0, NULL, &exception);
+    int default_call_threw = exception != NULL;
+    exception = NULL;
+    JSObjectRef explicit_constructor = JSObjectMakeConstructor(context, instance_class,
+        class_construct);
+    JSObjectRef explicit_instance = JSObjectCallAsConstructor(context, explicit_constructor,
+        1, &construct_argument, &exception);
+    printf("made-constructor %d %d %d %d %d %.0f\n",
+        JSObjectIsFunction(context, default_constructor),
+        JSObjectIsConstructor(context, default_constructor),
+        JSValueIsObjectOfClass(context, default_instance, instance_class),
+        default_call != NULL, default_call_threw,
+        JSValueToNumber(context, JSObjectGetProperty(context, explicit_instance,
+            constructed_name, &exception), &exception));
+    JSStringRelease(constructed_name);
+    JSClassRelease(instance_class);
 
     JSObjectRef prototype = JSObjectMake(context, NULL, NULL);
     JSObjectRef object = JSObjectMake(context, NULL, NULL);
