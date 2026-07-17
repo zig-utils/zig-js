@@ -299,7 +299,7 @@
       "kind": "class_method",
       "name": "managedValueWithValue:",
       "declaration": "+ (JSManagedValue *) managedValueWithValue:(JSValue *)value",
-      "status": "pending",
+      "status": "implemented",
       "issue": 159
     },
     {
@@ -308,7 +308,7 @@
       "kind": "class_method",
       "name": "managedValueWithValue:andOwner:",
       "declaration": "+ (JSManagedValue *) managedValueWithValue:(JSValue *)value andOwner:(id)owner API_AVAILABLE(macos(10.10), ios(8.0))",
-      "status": "pending",
+      "status": "implemented",
       "issue": 159
     },
     {
@@ -317,7 +317,7 @@
       "kind": "instance_method",
       "name": "initWithValue:",
       "declaration": "- (instancetype) initWithValue:(JSValue *)value",
-      "status": "pending",
+      "status": "implemented",
       "issue": 159
     },
     {
@@ -326,7 +326,7 @@
       "kind": "property",
       "name": "value",
       "declaration": "@property (readonly, strong) JSValue *value",
-      "status": "pending",
+      "status": "implemented",
       "issue": 159
     },
     {
@@ -1073,7 +1073,7 @@
       "kind": "instance_method",
       "name": "addManagedReference:withOwner:",
       "declaration": "- (void) addManagedReference:(id)object withOwner:(id)owner",
-      "status": "pending",
+      "status": "implemented",
       "issue": 159
     },
     {
@@ -1091,7 +1091,7 @@
       "kind": "instance_method",
       "name": "removeManagedReference:withOwner:",
       "declaration": "- (void) removeManagedReference:(id)object withOwner:(id)owner",
-      "status": "pending",
+      "status": "implemented",
       "issue": 159
     }
   ]

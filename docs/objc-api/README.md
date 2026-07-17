@@ -9,7 +9,7 @@ method, property, typedef, data symbol, macro, signature, and availability
 annotation parsed from those headers.
 
 The inventory contains 11 containers and 108 declarations. It currently records
-**73 implemented / 35 pending** under issues #158–#160. An `implemented` entry
+**79 implemented / 29 pending** under issues #158–#160. An `implemented` entry
 has runtime behavior exercised by the compile-link-runtime host; a `pending`
 entry may be declared in the headers but must not be treated as usable.
 
@@ -47,8 +47,11 @@ pinned system-JSC transcript and handles cyclic graphs by strict JavaScript
 identity. Promise executors preserve nested callback state and match system JSC's
 context/callee/this/two-argument contract. Arbitrary Objective-C wrappers,
 general exported callbacks, general property helpers, managed
-references, and JSExport remain pending until their corresponding runtime and
-evidence land.
+wrapper export, and JSExport remain pending until their corresponding runtime
+and evidence land. `JSManagedValue` and VM owner relations are implemented with
+real weak targets plus weak owners; because current context groups use the
+VM-lifetime arena policy, unreachable targets remain available until VM teardown
+rather than being reclaimed mid-VM.
 
 Compare the pin against an installed SDK explicitly:
 

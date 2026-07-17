@@ -33,12 +33,12 @@ python3 tools/verify-objc-api.py \
   --sdk-root "$(xcrun --sdk macosx --show-sdk-path)"
 ```
 
-The inventory currently records **73 implemented / 35 pending** declarations.
+The inventory currently records **79 implemented / 29 pending** declarations.
 The implemented slice covers VM/context construction, evaluation, C-ref wrapper
 identity, context metadata, primitive and native object factories, type
 predicates, numeric/string and geometry conversion, exact comparisons, indexed
 reads, recursive array/dictionary/date conversion, promise executor callback
-state, and property-descriptor symbols. The seven-row Objective-C transcript matches system
+state, managed owner/value relations, and property-descriptor symbols. The seven-row Objective-C transcript matches system
 JavaScriptCore exactly. See the [Objective-C bridge inventory
 guide](objc-api/README.md) for the exact boundary and reproduction details;
 header availability alone does not imply implemented runtime behavior.
