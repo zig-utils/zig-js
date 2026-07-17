@@ -64,6 +64,10 @@ const BunString = extern struct {
     value: BunStringImpl,
 };
 
+const StringBuilder = extern struct {
+    bytes: [24]u8 align(8),
+};
+
 comptime {
     if (@sizeOf(BunString) != 24 or @alignOf(BunString) != 8 or
         @offsetOf(BunString, "value") != 8)
@@ -71,6 +75,8 @@ comptime {
     if (@offsetOf(WTFStringImpl, "bytes") != 8 or
         @offsetOf(WTFStringImpl, "hash_and_flags") != 16)
         @compileError("WTFStringImpl fixture prefix drifted");
+    if (@sizeOf(StringBuilder) != 24 or @alignOf(StringBuilder) != 8)
+        @compileError("StringBuilder fixture layout drifted");
 }
 
 extern "c" fn JSGlobalContextCreate(?*anyopaque) JSContextRef;
@@ -115,6 +121,19 @@ extern "c" fn BunString__toJS(JSContextRef, *const BunString) EncodedValue;
 extern "c" fn BunString__toJSWithLength(JSContextRef, *const BunString, usize) EncodedValue;
 extern "c" fn BunString__transferToJS(*BunString, JSContextRef) EncodedValue;
 extern "c" fn BunString__createArray(JSContextRef, [*c]const BunString, usize) EncodedValue;
+extern "c" fn StringBuilder__init(*anyopaque) void;
+extern "c" fn StringBuilder__deinit(*anyopaque) void;
+extern "c" fn StringBuilder__ensureUnusedCapacity(*anyopaque, usize) void;
+extern "c" fn StringBuilder__appendLatin1(*anyopaque, [*]const u8, usize) void;
+extern "c" fn StringBuilder__appendUtf16(*anyopaque, [*]const u16, usize) void;
+extern "c" fn StringBuilder__appendString(*anyopaque, BunString) void;
+extern "c" fn StringBuilder__appendLChar(*anyopaque, u8) void;
+extern "c" fn StringBuilder__appendUChar(*anyopaque, u16) void;
+extern "c" fn StringBuilder__appendInt(*anyopaque, i32) void;
+extern "c" fn StringBuilder__appendUsize(*anyopaque, usize) void;
+extern "c" fn StringBuilder__appendDouble(*anyopaque, f64) void;
+extern "c" fn StringBuilder__appendQuotedJsonString(*anyopaque, BunString) void;
+extern "c" fn StringBuilder__toString(*anyopaque, JSContextRef) EncodedValue;
 extern "c" fn ZigString__toErrorInstance(*const ZigString, JSContextRef) EncodedValue;
 extern "c" fn ZigString__toTypeErrorInstance(*const ZigString, JSContextRef) EncodedValue;
 extern "c" fn ZigString__toRangeErrorInstance(*const ZigString, JSContextRef) EncodedValue;
@@ -644,6 +663,54 @@ pub fn main() void {
     exposeCell(context, "__private_empty_bun_string_array", empty_bun_string_array);
     if (!JSC__JSValue__toBoolean(evaluate(context, "__private_empty_bun_string_array.length === 0 && __private_bun_string_array.length === 3 && __private_bun_string_array[0] === '' && __private_bun_string_array[1] === 'café' && __private_bun_string_array[2] === 'A😀\\uD800Z'")))
         fail("BunString array conversion mismatch");
+
+    var string_builder: StringBuilder = undefined;
+    StringBuilder__init(&string_builder);
+    StringBuilder__ensureUnusedCapacity(&string_builder, 4);
+    StringBuilder__appendLatin1(&string_builder, "pre:", 4);
+    StringBuilder__appendUtf16(&string_builder, &utf16_units, utf16_units.len);
+    StringBuilder__appendLChar(&string_builder, '|');
+    StringBuilder__appendString(&string_builder, latin1_string);
+    StringBuilder__appendUChar(&string_builder, 0x03a9);
+    StringBuilder__appendString(&string_builder, huge_string);
+    const built_string = StringBuilder__toString(&string_builder, context);
+    const built_string_again = StringBuilder__toString(&string_builder, context);
+    if (!JSC__JSValue__isStrictEqual(built_string, evaluate(context, "'pre:A😀\\uD800Z|caféΩ184467440737095516160000000000000000000'"), context) or
+        !JSC__JSValue__isStrictEqual(built_string, built_string_again, context) or
+        huge_impl.ref_count != 2)
+        fail("private StringBuilder text/repeated conversion mismatch");
+    StringBuilder__deinit(&string_builder);
+
+    StringBuilder__init(&string_builder);
+    StringBuilder__appendInt(&string_builder, std.math.minInt(i32));
+    StringBuilder__appendLChar(&string_builder, '|');
+    StringBuilder__appendUsize(&string_builder, std.math.maxInt(usize));
+    for ([_]f64{ -0.0, std.math.nan(f64), std.math.inf(f64), -std.math.inf(f64), 1e21 }) |number| {
+        StringBuilder__appendLChar(&string_builder, '|');
+        StringBuilder__appendDouble(&string_builder, number);
+    }
+    if (!JSC__JSValue__isStrictEqual(
+        StringBuilder__toString(&string_builder, context),
+        evaluate(context, "'-2147483648|18446744073709551615|0|NaN|Infinity|-Infinity|1e+21'"),
+        context,
+    )) fail("private StringBuilder numeric formatting mismatch");
+    StringBuilder__deinit(&string_builder);
+
+    StringBuilder__init(&string_builder);
+    StringBuilder__appendQuotedJsonString(&string_builder, utf16_string);
+    if (!JSC__JSValue__isStrictEqual(
+        StringBuilder__toString(&string_builder, context),
+        evaluate(context, "JSON.stringify('A😀\\uD800Z')"),
+        context,
+    )) fail("private StringBuilder JSON quoting mismatch");
+    StringBuilder__deinit(&string_builder);
+
+    StringBuilder__init(&string_builder);
+    StringBuilder__ensureUnusedCapacity(&string_builder, std.math.maxInt(usize));
+    if (StringBuilder__toString(&string_builder, context) != .empty or !JSGlobalObject__hasException(context))
+        fail("private StringBuilder overflow did not throw OOM");
+    JSGlobalObject__clearException(context);
+    StringBuilder__deinit(&string_builder);
 
     var blocked_transfer = JSC__JSBigInt__toString(signed_negative_cell, context);
     JSC__VM__throwError(JSC__JSGlobalObject__vm(context), context, EncodedValue.fromInt32(196));
@@ -2622,5 +2689,5 @@ pub fn main() void {
         TopExceptionScope__exceptionIncludingTraps(&verification_scope) != null)
         fail("private TopExceptionScope destruction mismatch");
 
-    std.debug.print("Home private value shims: 160/160 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 173/173 symbols linked; runtime matrix passed\n", .{});
 }

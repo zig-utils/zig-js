@@ -49,7 +49,7 @@ zig build home-private-abi-audit \
 
 This verifies the live revision, every source hash, signature, classification,
 and calling convention. It replaces a vague source-level estimate, but the 431
-private imports are now 161 implemented / 270 pending under #163. The generated
+private imports are now 174 implemented / 257 pending under #163. The generated
 FFI wrapper emits and resolves `JSFunctionCall` inside its own compiled module,
 so zig-js must not provide a duplicate symbol. The implemented
 slices cover JSC64 value identity, cell equality, truthiness, int32 extraction,
@@ -161,7 +161,7 @@ behavior, and VM exception propagation. Ten Promise/InternalPromise shims add
 selected-realm pending and directly settled promises, exact native downcasts,
 callback Promise passthrough, Error/throw rejection, and normal AnyPromise
 resolution with thenable assimilation and self-resolution protection. Their
-160-symbol combined fixture covers sibling realms, foreign VMs, callback
+173-symbol combined fixture covers sibling realms, foreign VMs, callback
 reentrancy, exception clearing, settled-target no-ops, and the complete
 DOMException code matrix. Seven Home-only
 JSMap shims create selected-realm native maps and directly implement
@@ -172,6 +172,12 @@ validated BigInt cells. The shared CommonAbortReason shim creates fresh
 selected-realm DOMExceptions with Bun's exact TimeoutError/AbortError names,
 messages, and legacy codes while preserving an existing VM exception. They do
 not yet create a usable Home private runtime.
+
+The native StringBuilder slice adds all 13 pinned operations over Home's
+caller-owned 24-byte, 8-byte-aligned buffer. It preserves exact UTF-16 across
+every BunString form, uses WebKit-compatible numeric and JSON formatting,
+keeps overflow sticky, returns non-destructive selected-realm strings, and
+surfaces OOM without replacing a pending exception.
 
 The newer Home revisions `5e829ad4`, `38702f9e`, and `4389ddee` changed no files
 in `packages/runtime/src/jsc` relative to `7ed99c02`. Their separate alias

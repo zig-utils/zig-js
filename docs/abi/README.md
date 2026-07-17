@@ -44,7 +44,7 @@ convention. The exact current denominator is:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #163 | 431 (161 implemented, 270 pending) |
+| Private JSC/Bun/WebCore ABI under #163 | 431 (174 implemented, 257 pending) |
 | Overlap with zig-js's completed public C target | 15 |
 | Platform libc import | 1 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
@@ -61,7 +61,7 @@ zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"
 ```
 
 This inventory is the denominator, not a claim that the whole surface works.
-The first 161 private entries are implemented; the other 270 remain pending
+The first 174 private entries are implemented; the other 257 remain pending
 until #163 provides their type/layout contracts, shims, and consumer evidence.
 `JSFunctionCall` remains revision-pinned in the declaration inventory but is
 not part of that denominator: each runtime-generated FFI module defines the
@@ -135,7 +135,7 @@ It covers empty/immediate/int32/double/NaN/negative-zero behavior, boxed
 empty/nonempty strings, object identity/truthiness, signed minimum and unsigned
 maximum BigInts, negative modulo extraction, exact number fallbacks, and every
 invalid/non-exact boundary. Public accounting stays unchanged at 117 functions
-and 19 extensions; these 161 symbols are reported only as private profile
+and 19 extensions; these 174 symbols are reported only as private profile
 exports.
 
 The opaque BigInt cell slice additionally exports `JSC__JSBigInt__fromJS`, the
@@ -359,9 +359,12 @@ a pure inherited-data `code` inquiry that rejects accessors, custom slots, and
 proxies without executing them.
 Three Symbol bridges share one registry across C-API sibling realms and expose
 stable description/registry-key views for exact Latin-1 and UTF-16 content;
-local and well-known Symbols correctly fail registry-key lookup. The
-160-symbol combined runtime
-fixture covers these semantics; the two profile-selected JSType exports retain
+local and well-known Symbols correctly fail registry-key lookup. The native
+StringBuilder slice adds all 13 pinned entry points with its 24-byte/8-byte
+layout, exact UTF-16 and BunString decoding, shortest numeric formatting,
+WebKit JSON escaping, sticky overflow/OOM, and non-destructive conversion.
+The 173-symbol combined runtime fixture covers these semantics; the two
+profile-selected JSType exports retain
 their separate Home/Bun runtime fixtures.
 
 ## Profile-selectable JSType layout
@@ -403,7 +406,7 @@ profile contains 437 unique declarations from 54 hashed files:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #164 | 421 (155 implemented, 266 pending) |
+| Private JSC/Bun/WebCore ABI under #164 | 421 (168 implemented, 253 pending) |
 | Public-C overlap | 15 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
 | **Total** | **437** |
@@ -420,5 +423,5 @@ zig build bun-private-abi-audit -Dbun-source-root="$HOME/Code/bun"
 
 The audit rejects revision, file hash, declaration digest, classification,
 calling-convention, implementation-status, and Home-comparison drift. It does
-not claim complete Bun runtime compatibility; #164 remains open for the 266
+not claim complete Bun runtime compatibility; #164 remains open for the 253
 pending core entries and later wider/generated profiles.

@@ -83,8 +83,8 @@
     },
     "by_status": {
       "external": 1,
-      "implemented": 170,
-      "pending": 266
+      "implemented": 183,
+      "pending": 253
     }
   },
   "home_comparison": {
@@ -3433,10 +3433,10 @@
       "line": 61,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn StringBuilder__appendDouble(*anyopaque, num: f64) void;",
       "declaration_sha256": "6dd8e4cc837f7f551751e4373ddeccb841f04d60ca057f62cd7fdbf717c38b8b",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "StringBuilder__appendInt",
@@ -3444,10 +3444,10 @@
       "line": 62,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn StringBuilder__appendInt(*anyopaque, num: i32) void;",
       "declaration_sha256": "872e55db238944b38f5e3c0985a0982da7023bd0a44639345ffcd036e3f4f0ea",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "StringBuilder__appendLChar",
@@ -3455,10 +3455,10 @@
       "line": 65,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn StringBuilder__appendLChar(*anyopaque, c: u8) void;",
       "declaration_sha256": "9f16cf98a90adb8d8c53a5d98568f50e58b337845877f4602aff1a39257a329d",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "StringBuilder__appendLatin1",
@@ -3466,10 +3466,10 @@
       "line": 59,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn StringBuilder__appendLatin1(*anyopaque, str: [*]const u8, len: usize) void;",
       "declaration_sha256": "9a4e2f12b78f19d21d4fa845ab7af0ab4885f0783310d004bf241e8be09f312b",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "StringBuilder__appendQuotedJsonString",
@@ -3477,10 +3477,10 @@
       "line": 67,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn StringBuilder__appendQuotedJsonString(*anyopaque, str: String) void;",
       "declaration_sha256": "6aadca03abf67669d58cc8018dd5bc874913cf63a4910a7cf1de137091158572",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "StringBuilder__appendString",
@@ -3488,10 +3488,10 @@
       "line": 64,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn StringBuilder__appendString(*anyopaque, str: String) void;",
       "declaration_sha256": "e023e44c344b16330fc48873d80c90e09ca05a6e58edf6b27f016de4450e22fc",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "StringBuilder__appendUChar",
@@ -3499,10 +3499,10 @@
       "line": 66,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn StringBuilder__appendUChar(*anyopaque, c: u16) void;",
       "declaration_sha256": "73ec3c69f65092ec8d8847c972a0f3a49bcbb2264af351e076401d46573044c8",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "StringBuilder__appendUsize",
@@ -3510,10 +3510,10 @@
       "line": 63,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn StringBuilder__appendUsize(*anyopaque, num: usize) void;",
       "declaration_sha256": "13481ded42f55c3bc4acccc55483061654bd603c94cfb89d59595a81734cc520",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "StringBuilder__appendUtf16",
@@ -3521,10 +3521,10 @@
       "line": 60,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn StringBuilder__appendUtf16(*anyopaque, str: [*]const u16, len: usize) void;",
       "declaration_sha256": "35f778b3de7fb1ee9f9f1d3ea8427c8fadad522408d46cbdeca125810cec4379",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "StringBuilder__deinit",
@@ -3532,10 +3532,10 @@
       "line": 18,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn StringBuilder__deinit(*anyopaque) void;",
       "declaration_sha256": "f85b88d40e2f66b4f0c642e494e60a2d4443a1a029301a0319cd3c425b81f092",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "StringBuilder__ensureUnusedCapacity",
@@ -3543,10 +3543,10 @@
       "line": 83,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn StringBuilder__ensureUnusedCapacity(*anyopaque, usize) void;",
       "declaration_sha256": "fbb9f64addbfefa90fe6be3bcf3d146221805c892dfcf244293f2ef86890474e",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "StringBuilder__init",
@@ -3554,10 +3554,10 @@
       "line": 13,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn StringBuilder__init(*anyopaque) void;",
       "declaration_sha256": "0ae432493aecce2828a0664531f17eeb5e24ce57f8bd530868838b531054ba85",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "StringBuilder__toString",
@@ -3565,10 +3565,10 @@
       "line": 78,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn StringBuilder__toString(*anyopaque, global: *JSGlobalObject) JSValue;",
       "declaration_sha256": "8c27d72e26b89f845a7a806642cc76bed5c590d00974c6365cf61a757d91e005",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "SystemError__toErrorInstance",
