@@ -88,8 +88,8 @@
     },
     "by_status": {
       "external": 2,
-      "implemented": 225,
-      "pending": 221
+      "implemented": 227,
+      "pending": 219
     }
   },
   "declarations": [
@@ -2321,10 +2321,10 @@
       "line": 1279,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSValue__jsonStringify(this: JSValue, globalThis: *JSGlobalObject, indent: u32, out: *bun.String) void;",
       "declaration_sha256": "dda1b4a180fcd67701e3fd4d3065c1e5b2f48c2d4778ca401b769f535b5b92c7",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSValue__jsonStringifyFast",
@@ -2332,10 +2332,10 @@
       "line": 1284,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSValue__jsonStringifyFast(this: JSValue, globalThis: *JSGlobalObject, out: *bun.String) void;",
       "declaration_sha256": "78561df06bdcdb64bf402a8c034ca5d378760bf6ee20f70d255b1fc70b6bb314",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSValue__keys",

@@ -235,6 +235,8 @@ extern "c" fn JSC__JSValue__getClassInfoName(EncodedValue, *[*:0]const u8, *usiz
 extern "c" fn JSC__JSValue__getClassName(EncodedValue, JSContextRef, *ZigString) void;
 extern "c" fn JSC__JSValue__getNameProperty(EncodedValue, JSContextRef, *ZigString) void;
 extern "c" fn JSC__JSValue__getName(EncodedValue, JSContextRef, *BunString) void;
+extern "c" fn JSC__JSValue__jsonStringify(EncodedValue, JSContextRef, u32, *BunString) void;
+extern "c" fn JSC__JSValue__jsonStringifyFast(EncodedValue, JSContextRef, *BunString) void;
 extern "c" fn JSC__jsTypeStringForValue(JSContextRef, EncodedValue) ?*anyopaque;
 extern "c" fn JSC__JSString__eql(?*anyopaque, JSContextRef, ?*anyopaque) bool;
 extern "c" fn JSC__JSString__is8Bit(?*anyopaque) bool;
@@ -1133,6 +1135,20 @@ pub fn main() void {
         !JSC__JSValue__isStrictEqual(BunString__toJS(context, &owned_display_name), evaluate(context, "'名字😀'"), context))
         fail("private owned display-name projection mismatch");
     Bun__WTFStringImpl__deref(owned_display_name.value.wtf_string_impl);
+
+    var json_output = BunString{ .tag = .dead, .value = .{ .zig_string = .{ .tagged_ptr = 0, .len = 0 } } };
+    const json_target = evaluate(context, "({ z: 1, a: [true, null] })");
+    JSC__JSValue__jsonStringify(json_target, context, 2, &json_output);
+    if (json_output.tag != .wtf_string_impl or
+        !JSC__JSValue__isStrictEqual(BunString__toJS(context, &json_output), evaluate(context, "'{\\n  \\\"z\\\": 1,\\n  \\\"a\\\": [\\n    true,\\n    null\\n  ]\\n}'"), context))
+        fail("private indented JSON stringification mismatch");
+    Bun__WTFStringImpl__deref(json_output.value.wtf_string_impl);
+    json_output = .{ .tag = .dead, .value = .{ .zig_string = .{ .tagged_ptr = 0, .len = 0 } } };
+    JSC__JSValue__jsonStringifyFast(json_target, context, &json_output);
+    if (json_output.tag != .wtf_string_impl or
+        !JSC__JSValue__isStrictEqual(BunString__toJS(context, &json_output), evaluate(context, "'{\\\"z\\\":1,\\\"a\\\":[true,null]}'"), context))
+        fail("private compact JSON stringification mismatch");
+    Bun__WTFStringImpl__deref(json_output.value.wtf_string_impl);
 
     StringBuilder__init(&string_builder);
     StringBuilder__appendInt(&string_builder, std.math.minInt(i32));
@@ -3180,5 +3196,5 @@ pub fn main() void {
         TopExceptionScope__exceptionIncludingTraps(&verification_scope) != null)
         fail("private TopExceptionScope destruction mismatch");
 
-    std.debug.print("Home private value shims: 209/209 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 211/211 symbols linked; runtime matrix passed\n", .{});
 }

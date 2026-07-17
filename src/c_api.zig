@@ -4976,6 +4976,66 @@ export fn JSC__JSValue__getName(
     };
 }
 
+fn privateJSONStringify(
+    encoded: EncodedValue,
+    global: JSContextRef,
+    indent: ?u32,
+    output: *PrivateBunString,
+) void {
+    const context = ctxForEvaluation(global) orelse return;
+    const group = privatePropertyBoundaryGroup(context) orelse return;
+    if (group.pending_exception != null) return;
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return;
+    };
+    defer context.popActiveInterpreter(&machine);
+    const internal = privateValueFrom(global, encoded) orelse {
+        const err = machine.throwError("TypeError", "JSON value belongs to another VM");
+        privateSetPendingAbrupt(context, &machine, err);
+        return;
+    };
+    const spacing = if (indent) |width| Value.num(@floatFromInt(width)) else Value.undef();
+    const rendered = builtins.jsonStringify(
+        &machine,
+        Value.undef(),
+        &.{ internal, Value.undef(), spacing },
+    ) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return;
+    };
+    if (!rendered.isString()) {
+        output.* = PrivateBunString.empty();
+        return;
+    }
+    output.* = privateOwnedWTF8String(rendered.asStr()) catch |err| {
+        privatePublishBunStringError(context, err);
+        return;
+    };
+}
+
+export fn JSC__JSValue__jsonStringify(
+    encoded: EncodedValue,
+    global: JSContextRef,
+    indent: u32,
+    output: *PrivateBunString,
+) callconv(.c) void {
+    privateJSONStringify(encoded, global, indent, output);
+}
+
+export fn JSC__JSValue__jsonStringifyFast(
+    encoded: EncodedValue,
+    global: JSContextRef,
+    output: *PrivateBunString,
+) callconv(.c) void {
+    privateJSONStringify(encoded, global, null, output);
+}
+
 export fn JSC__JSString__eql(
     left_cell: ?*anyopaque,
     global: JSContextRef,
@@ -16178,6 +16238,77 @@ test "private class and display names preserve metadata and observable tag rules
     try std.testing.expectEqual(@as(usize, 225), blocked_output.len);
     pending = JSGlobalObject__tryTakeException(context);
     try std.testing.expectEqual(EncodedValue.fromInt32(225), JSC__Exception__asJSValue(@ptrFromInt(try pending.asCellAddress())));
+}
+
+test "private JSON stringification preserves normal and undefined-space semantics" {
+    const group_ref = JSContextGroupCreate() orelse return error.GroupCreateFailed;
+    defer JSContextGroupRelease(group_ref);
+    const context = JSGlobalContextCreateInGroup(group_ref, null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(context);
+    const sibling = JSGlobalContextCreateInGroup(group_ref, null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(sibling);
+    const internal = ctxForEvaluation(context) orelse return error.ContextCreateFailed;
+    const Probe = struct {
+        fn encoded(context_: *Context, source: []const u8) !EncodedValue {
+            return privateEncodedFromValue(context_, try context_.evaluate(source));
+        }
+
+        fn run(context_: *Context, global: JSContextRef, value_encoded: EncodedValue, indent: ?u32) ![]const u8 {
+            var output = PrivateBunString.dead();
+            if (indent) |width|
+                JSC__JSValue__jsonStringify(value_encoded, global, width, &output)
+            else
+                JSC__JSValue__jsonStringifyFast(value_encoded, global, &output);
+            defer if (output.tag == .wtf_string_impl) Bun__WTFStringImpl__deref(output.value.wtf_string_impl);
+            const value_ = try privateBunStringValue(context_, &output, null);
+            return context_.arena().dupe(u8, value_.asStr());
+        }
+    };
+
+    const object = try Probe.encoded(internal, "({ z: 1, a: [true, null] })");
+    try std.testing.expectEqualStrings("{\n  \"z\": 1,\n  \"a\": [\n    true,\n    null\n  ]\n}", try Probe.run(internal, context, object, 2));
+    try std.testing.expectEqualStrings("{\"z\":1,\"a\":[true,null]}", try Probe.run(internal, context, object, null));
+    try std.testing.expectEqualStrings("{\n          \"a\": 1\n}", try Probe.run(internal, context, try Probe.encoded(internal, "({ a: 1 })"), 100));
+    try std.testing.expectEqualStrings("[null,null,null]", try Probe.run(internal, context, try Probe.encoded(internal, "[undefined, function(){}, Symbol('x')]"), null));
+    try std.testing.expectEqualStrings("{\"emoji\":\"😀\",\"lone\":\"\\ud800\"}", try Probe.run(internal, context, try Probe.encoded(internal, "({ emoji: '😀', lone: '\\uD800' })"), null));
+
+    const observable = try Probe.encoded(internal, "globalThis.__json_gets_226 = 0; ({ get value() { __json_gets_226++; return 7; }, toJSON() { return { wrapped: this.value }; } })");
+    try std.testing.expectEqualStrings("{\"wrapped\":7}", try Probe.run(internal, context, observable, null));
+    try std.testing.expectEqual(@as(f64, 1), (try internal.evaluate("__json_gets_226")).asNum());
+
+    var empty_output = PrivateBunString.dead();
+    JSC__JSValue__jsonStringifyFast(.undefined, context, &empty_output);
+    try std.testing.expectEqual(PrivateBunStringTag.empty, empty_output.tag);
+    JSC__JSValue__jsonStringify(try Probe.encoded(internal, "(function(){})"), context, 2, &empty_output);
+    try std.testing.expectEqual(PrivateBunStringTag.empty, empty_output.tag);
+
+    try std.testing.expectEqualStrings("{\"sibling\":true}", try Probe.run(internal, sibling, try Probe.encoded(internal, "({ sibling: true })"), null));
+
+    var abrupt = PrivateBunString.dead();
+    JSC__JSValue__jsonStringifyFast(try Probe.encoded(internal, "1n"), context, &abrupt);
+    try std.testing.expectEqual(PrivateBunStringTag.dead, abrupt.tag);
+    var pending = JSGlobalObject__tryTakeException(context);
+    const bigint_error = privateValueFrom(context, JSC__Exception__asJSValue(@ptrFromInt(try pending.asCellAddress()))) orelse return error.MissingException;
+    try std.testing.expect(bigint_error.isObject() and bigint_error.asObj().behavior.is_error);
+    JSC__JSValue__jsonStringifyFast(try Probe.encoded(internal, "(() => { const x = {}; x.self = x; return x; })()"), context, &abrupt);
+    try std.testing.expectEqual(PrivateBunStringTag.dead, abrupt.tag);
+    try std.testing.expect(JSGlobalObject__hasException(context));
+    JSGlobalObject__clearException(context);
+
+    const foreign = JSGlobalContextCreate(null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(foreign);
+    const foreign_internal = ctxForEvaluation(foreign) orelse return error.ContextCreateFailed;
+    JSC__JSValue__jsonStringifyFast(privateEncodedFromValue(foreign_internal, try foreign_internal.evaluate("({})")), context, &abrupt);
+    try std.testing.expectEqual(PrivateBunStringTag.dead, abrupt.tag);
+    try std.testing.expect(JSGlobalObject__hasException(context));
+    JSGlobalObject__clearException(context);
+
+    const blocked = try Probe.encoded(internal, "({ blocked: true })");
+    JSC__VM__throwError(JSC__JSGlobalObject__vm(context), context, EncodedValue.fromInt32(226));
+    JSC__JSValue__jsonStringifyFast(blocked, context, &abrupt);
+    try std.testing.expectEqual(PrivateBunStringTag.dead, abrupt.tag);
+    pending = JSGlobalObject__tryTakeException(context);
+    try std.testing.expectEqual(EncodedValue.fromInt32(226), JSC__Exception__asJSValue(@ptrFromInt(try pending.asCellAddress())));
 }
 
 test "private VM entry-state query tracks nested and sibling interpreters" {
