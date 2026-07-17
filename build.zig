@@ -33,21 +33,33 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/c_api.zig"),
             .target = target,
             .optimize = optimize,
-            .link_libc = target.result.os.tag == .macos,
             .imports = &.{
                 .{ .name = "regex", .module = regex_mod },
                 .{ .name = "gc", .module = gc_mod },
             },
         }),
     });
-    lib.root_module.addIncludePath(b.path("include"));
+    var installed_library: ?std.Build.LazyPath = null;
+    var objc_bridge_object: ?std.Build.LazyPath = null;
     if (target.result.os.tag == .macos) {
-        lib.root_module.addCSourceFile(.{
-            .file = b.path("src/objc_bridge.m"),
-            .flags = &.{ "-fobjc-arc", "-fblocks", "-Wno-incomplete-implementation" },
+        const compile_objc_bridge = b.addSystemCommand(&.{
+            "xcrun",      "--sdk",    "macosx",                         "clang",
+            "-fobjc-arc", "-fblocks", "-Wno-incomplete-implementation",
         });
+        compile_objc_bridge.addPrefixedDirectoryArg("-I", b.path("include"));
+        compile_objc_bridge.addArg("-c");
+        compile_objc_bridge.addFileArg(b.path("src/objc_bridge.m"));
+        compile_objc_bridge.addArg("-o");
+        objc_bridge_object = compile_objc_bridge.addOutputFileArg("objc_bridge.o");
+
+        const merge_library = b.addSystemCommand(&.{ "xcrun", "libtool", "-static", "-o" });
+        installed_library = merge_library.addOutputFileArg("libzig-js.a");
+        merge_library.addArtifactArg(lib);
+        merge_library.addFileArg(objc_bridge_object.?);
+        b.getInstallStep().dependOn(&b.addInstallLibFile(installed_library.?, "libzig-js.a").step);
+    } else {
+        b.installArtifact(lib);
     }
-    b.installArtifact(lib);
     b.getInstallStep().dependOn(&b.addInstallDirectory(.{
         .source_dir = b.path("include"),
         .install_dir = .header,
@@ -98,12 +110,13 @@ pub fn build(b: *std.Build) void {
             .flags = &.{ "-fobjc-arc", "-fblocks" },
         });
         objc_runtime_smoke.root_module.addIncludePath(b.path("include"));
-        objc_runtime_smoke.root_module.linkLibrary(lib);
+        objc_runtime_smoke.root_module.addObjectFile(installed_library.?);
         objc_runtime_smoke.root_module.linkFramework("Foundation", .{});
         const run_objc_runtime_smoke = b.addRunArtifact(objc_runtime_smoke);
         run_objc_runtime_smoke.step.dependOn(&objc_api_audit_cmd.step);
         const objc_runtime_step = b.step("test-objc-api", "Compile, link, and run the Objective-C bridge host");
         objc_runtime_step.dependOn(&run_objc_runtime_smoke.step);
+
     }
 
     const c_api_c_smoke = b.addExecutable(.{
