@@ -2790,6 +2790,148 @@ export fn JSC__createRangeError(global: JSContextRef, message: *const PrivateBun
     return privateBunStringErrorFactory(global, message, "RangeError");
 }
 
+fn privateMakeAggregateError(
+    machine: *interp.Interpreter,
+    errors: Value,
+    message: []const u8,
+    cause: Value,
+) !Value {
+    const result = try machine.makeError("AggregateError", message);
+    const object = result.asObj();
+    try object.setOwn(machine.arena, machine.root_shape, "errors", errors);
+    try object.setAttr(machine.arena, "errors", .{
+        .writable = true,
+        .enumerable = false,
+        .configurable = true,
+    });
+    if (!cause.isUndefined()) {
+        try object.setOwn(machine.arena, machine.root_shape, "cause", cause);
+        try object.setAttr(machine.arena, "cause", .{
+            .writable = true,
+            .enumerable = false,
+            .configurable = true,
+        });
+    }
+    return result;
+}
+
+export fn JSC__JSGlobalObject__createAggregateError(
+    global: JSContextRef,
+    errors: [*c]const EncodedValue,
+    errors_count: usize,
+    message: *const PrivateZigString,
+) callconv(.c) EncodedValue {
+    const context = ctxForEvaluation(global) orelse return .empty;
+    const opaque_group = context.c_api_group orelse return .empty;
+    const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+    if (group.pending_exception != null) return .empty;
+
+    const message_value = privateZigStringValue(context, message) catch |err| {
+        privatePublishBunStringError(context, err);
+        return .empty;
+    };
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    defer context.popActiveInterpreter(&machine);
+
+    if (errors_count > std.math.maxInt(u32) or (errors == null and errors_count != 0)) {
+        const err = machine.throwError("RangeError", "Invalid AggregateError length");
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    }
+    const values: []Value = if (errors_count == 0) &.{} else context.arena().alloc(Value, errors_count) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    if (errors_count > 0) {
+        for (errors[0..errors_count], values) |encoded, *slot| {
+            slot.* = privateValueFrom(global, encoded) orelse {
+                const err = machine.throwError("TypeError", "AggregateError value belongs to another VM");
+                privateSetPendingAbrupt(context, &machine, err);
+                return .empty;
+            };
+        }
+    }
+    const array = machine.newArray() catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    for (values) |item| array.asObj().appendElement(context.arena(), item) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    const result = privateMakeAggregateError(&machine, array, message_value.asStr(), Value.undef()) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    return privateEncodeResult(context, &machine, result);
+}
+
+export fn JSC__JSGlobalObject__createAggregateErrorWithArray(
+    global: JSContextRef,
+    errors_encoded: EncodedValue,
+    message: PrivateBunString,
+    cause_encoded: EncodedValue,
+) callconv(.c) EncodedValue {
+    const context = ctxForEvaluation(global) orelse return .empty;
+    const opaque_group = context.c_api_group orelse return .empty;
+    const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+    if (group.pending_exception != null) return .empty;
+
+    const message_value = privateBunStringValue(context, &message, null) catch |err| {
+        privatePublishBunStringError(context, err);
+        return .empty;
+    };
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    defer context.popActiveInterpreter(&machine);
+
+    const errors_value = privateValueFrom(global, errors_encoded) orelse {
+        const err = machine.throwError("TypeError", "AggregateError array belongs to another VM");
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    if (!errors_value.isObject() or !errors_value.asObj().is_array) {
+        const err = machine.throwError("TypeError", "AggregateError errors must be an array");
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    }
+    const cause = privateValueFrom(global, cause_encoded) orelse {
+        const err = machine.throwError("TypeError", "AggregateError cause belongs to another VM");
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    const result = privateMakeAggregateError(&machine, errors_value, message_value.asStr(), cause) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    return privateEncodeResult(context, &machine, result);
+}
+
+export fn JSC__JSValue__getErrorsProperty(encoded: EncodedValue, global: JSContextRef) callconv(.c) EncodedValue {
+    const context = ctxForHandleInspection(global) orelse return .empty;
+    const opaque_group = context.c_api_group orelse return .empty;
+    const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+    if (group.pending_exception != null) return .empty;
+    const internal = privateValueFrom(global, encoded) orelse return .empty;
+    if (!internal.isObject()) return .undefined;
+    return privateEncodedFromValue(context, internal.asObj().getOwn("errors") orelse Value.undef());
+}
+
 const PrivateDOMExceptionDescription = struct {
     name: []const u8,
     message: []const u8,

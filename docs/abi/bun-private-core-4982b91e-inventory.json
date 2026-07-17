@@ -83,8 +83,8 @@
     },
     "by_status": {
       "external": 1,
-      "implemented": 110,
-      "pending": 326
+      "implemented": 113,
+      "pending": 323
     }
   },
   "home_comparison": {
@@ -1315,10 +1315,10 @@
       "line": 518,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSGlobalObject__createAggregateError(*JSGlobalObject, [*]const JSValue, usize, *const ZigString) JSValue;",
       "declaration_sha256": "da8ed126d12ad89ab4e19d740fdcd7c7847951db4e252103fefee41497f585a2",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSGlobalObject__createAggregateErrorWithArray",
@@ -1326,10 +1326,10 @@
       "line": 523,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSGlobalObject__createAggregateErrorWithArray(*JSGlobalObject, JSValue, bun.String, JSValue) JSValue;",
       "declaration_sha256": "f21fc3fa7ae8bec75fc9b53965df117e13818a24b1928a0478fa929c7d07b1d3",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSGlobalObject__deleteModuleRegistryEntry",
@@ -1986,10 +1986,10 @@
       "line": 552,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSValue__getErrorsProperty(this: JSValue, globalObject: *JSGlobalObject) JSValue;",
       "declaration_sha256": "2e95de0d99a3f31c350a737b743484bfa2a37c152ec872ce8bfa99edf9e90896",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSValue__getIfPropertyExistsFromPath",

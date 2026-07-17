@@ -131,6 +131,9 @@ extern "c" fn JSC__JSValue__createRangeError(*const ZigString, *const ZigString,
 extern "c" fn JSC__createError(JSContextRef, *const BunString) EncodedValue;
 extern "c" fn JSC__createTypeError(JSContextRef, *const BunString) EncodedValue;
 extern "c" fn JSC__createRangeError(JSContextRef, *const BunString) EncodedValue;
+extern "c" fn JSC__JSGlobalObject__createAggregateError(JSContextRef, [*c]const EncodedValue, usize, *const ZigString) EncodedValue;
+extern "c" fn JSC__JSGlobalObject__createAggregateErrorWithArray(JSContextRef, EncodedValue, BunString, EncodedValue) EncodedValue;
+extern "c" fn JSC__JSValue__getErrorsProperty(EncodedValue, JSContextRef) EncodedValue;
 extern "c" fn JSC__JSValue__asString(EncodedValue) ?*anyopaque;
 extern "c" fn JSC__JSString__eql(?*anyopaque, JSContextRef, ?*anyopaque) bool;
 extern "c" fn JSC__JSString__is8Bit(?*anyopaque) bool;
@@ -658,6 +661,64 @@ pub fn main() void {
     if (JSC__Exception__asJSValue(preserved_error_factory_exception.cellPointer()) != EncodedValue.fromInt32(201))
         fail("private error factory replaced pending exception");
 
+    exposeCell(context, "__private_aggregate_identity", encoded_object);
+    const aggregate_items = [_]EncodedValue{ EncodedValue.fromInt32(7), encoded_object, evaluate(context, "'tail'") };
+    const slice_aggregate = JSC__JSGlobalObject__createAggregateError(
+        context,
+        &aggregate_items,
+        aggregate_items.len,
+        &utf16_string.value.zig_string,
+    );
+    const empty_slice_aggregate = JSC__JSGlobalObject__createAggregateError(context, null, 0, &empty_zig_string);
+    exposeCell(context, "__private_slice_aggregate", slice_aggregate);
+    exposeCell(context, "__private_empty_slice_aggregate", empty_slice_aggregate);
+    const slice_errors = JSC__JSValue__getErrorsProperty(slice_aggregate, context);
+    if (!JSC__JSValue__isAggregateError(slice_aggregate, context) or
+        !JSC__JSValue__isStrictEqual(slice_errors, getProperty(context, slice_aggregate, "errors"), context) or
+        !JSC__JSValue__toBoolean(evaluate(context, "__private_slice_aggregate instanceof AggregateError && Object.getPrototypeOf(__private_slice_aggregate) === AggregateError.prototype && __private_slice_aggregate.message === 'A😀\\uD800Z' && __private_slice_aggregate.errors.length === 3 && __private_slice_aggregate.errors[0] === 7 && __private_slice_aggregate.errors[1] === __private_aggregate_identity && __private_slice_aggregate.errors[2] === 'tail' && !Object.hasOwn(__private_slice_aggregate, 'cause')")) or
+        !JSC__JSValue__toBoolean(evaluate(context, "__private_empty_slice_aggregate.errors.length === 0 && __private_empty_slice_aggregate.message === ''")))
+        fail("private AggregateError slice construction mismatch");
+
+    const existing_errors = evaluate(context, "globalThis.__private_existing_errors = [1, { exact: true }]; __private_existing_errors");
+    const with_array_aggregate = JSC__JSGlobalObject__createAggregateErrorWithArray(context, existing_errors, latin1_string, encoded_object);
+    const without_cause_aggregate = JSC__JSGlobalObject__createAggregateErrorWithArray(context, existing_errors, empty_bun_string, .undefined);
+    exposeCell(context, "__private_with_array_aggregate", with_array_aggregate);
+    exposeCell(context, "__private_without_cause_aggregate", without_cause_aggregate);
+    if (!JSC__JSValue__isStrictEqual(JSC__JSValue__getErrorsProperty(with_array_aggregate, context), existing_errors, context) or
+        !JSC__JSValue__isStrictEqual(getProperty(context, with_array_aggregate, "cause"), encoded_object, context) or
+        !JSC__JSValue__toBoolean(evaluate(context, "__private_with_array_aggregate.errors === __private_existing_errors && __private_with_array_aggregate.message === 'café' && __private_with_array_aggregate.cause === __private_aggregate_identity && !Object.hasOwn(__private_without_cause_aggregate, 'cause')")))
+        fail("private AggregateError existing-array/cause identity mismatch");
+    if (!JSC__JSValue__toBoolean(evaluate(context,
+        \\(() => {
+        \\  for (const key of ['errors', 'message', 'cause']) {
+        \\    const descriptor = Object.getOwnPropertyDescriptor(__private_with_array_aggregate, key);
+        \\    if (!descriptor.writable || descriptor.enumerable || !descriptor.configurable) return false;
+        \\  }
+        \\  return true;
+        \\})()
+    ))) fail("private AggregateError descriptor mismatch");
+
+    _ = evaluate(context, "Object.defineProperty(Object.prototype, 'errors', { get() { throw 2021; }, configurable: true })");
+    if (JSC__JSValue__getErrorsProperty(encoded_object, context) != .undefined or JSGlobalObject__hasException(context))
+        fail("private AggregateError errors read consulted prototype");
+    _ = evaluate(context, "delete Object.prototype.errors");
+    if (JSC__JSGlobalObject__createAggregateErrorWithArray(context, encoded_object, latin1_string, .undefined) != .empty or
+        !JSGlobalObject__hasException(context))
+        fail("private AggregateError accepted non-array errors");
+    JSGlobalObject__clearException(context);
+    const foreign_aggregate_items = [_]EncodedValue{EncodedValue.fromRef(foreign_object)};
+    if (JSC__JSGlobalObject__createAggregateError(context, &foreign_aggregate_items, 1, &empty_zig_string) != .empty or
+        !JSGlobalObject__hasException(context))
+        fail("private AggregateError accepted foreign error value");
+    JSGlobalObject__clearException(context);
+    JSC__VM__throwError(JSC__JSGlobalObject__vm(context), context, EncodedValue.fromInt32(202));
+    if (JSC__JSGlobalObject__createAggregateError(context, &aggregate_items, aggregate_items.len, &empty_zig_string) != .empty or
+        JSC__JSValue__getErrorsProperty(slice_aggregate, context) != .empty)
+        fail("private AggregateError ignored pending exception");
+    const preserved_aggregate_exception = JSGlobalObject__tryTakeException(context);
+    if (JSC__Exception__asJSValue(preserved_aggregate_exception.cellPointer()) != EncodedValue.fromInt32(202))
+        fail("private AggregateError replaced pending exception");
+
     const dom_names = [_][]const u8{
         "IndexSizeError",             "HierarchyRequestError", "WrongDocumentError",       "InvalidCharacterError",
         "NoModificationAllowedError", "NotFoundError",         "NotSupportedError",        "InUseAttributeError",
@@ -1132,6 +1193,26 @@ pub fn main() void {
     if (!JSC__JSValue__toBoolean(evaluate(sibling_context, "Object.getPrototypeOf(__private_sibling_coded_error) === TypeError.prototype && __private_sibling_coded_error.code === 'ERR_TYPE_FACTORY'")) or
         !JSC__JSValue__toBoolean(evaluate(sibling_context, "Object.getPrototypeOf(__private_sibling_bun_range_error) === RangeError.prototype && __private_sibling_bun_range_error.message === 'A😀\\uD800Z'")))
         fail("private error factory selected-realm mismatch");
+
+    const sibling_aggregate_items = [_]EncodedValue{ encoded_object, evaluate(sibling_context, "'sibling-error'") };
+    const sibling_aggregate = JSC__JSGlobalObject__createAggregateError(
+        sibling_context,
+        &sibling_aggregate_items,
+        sibling_aggregate_items.len,
+        &latin1_string.value.zig_string,
+    );
+    const sibling_existing_aggregate = JSC__JSGlobalObject__createAggregateErrorWithArray(
+        sibling_context,
+        existing_errors,
+        utf8_string,
+        encoded_object,
+    );
+    exposeCell(sibling_context, "__private_sibling_aggregate", sibling_aggregate);
+    exposeCell(sibling_context, "__private_sibling_existing_aggregate", sibling_existing_aggregate);
+    exposeCell(sibling_context, "__private_sibling_primary_identity", encoded_object);
+    if (!JSC__JSValue__toBoolean(evaluate(sibling_context, "Object.getPrototypeOf(__private_sibling_aggregate) === AggregateError.prototype && Object.getPrototypeOf(__private_sibling_aggregate.errors) === Array.prototype && __private_sibling_aggregate.errors[0] === __private_sibling_primary_identity")) or
+        !JSC__JSValue__isStrictEqual(JSC__JSValue__getErrorsProperty(sibling_existing_aggregate, sibling_context), existing_errors, sibling_context))
+        fail("private AggregateError sibling realm/identity mismatch");
 
     const sibling_dom_exception = ZigString__toDOMExceptionInstance(&empty_zig_string, sibling_context, 16);
     exposeCell(sibling_context, "__private_sibling_dom_exception", sibling_dom_exception);
@@ -1851,5 +1932,5 @@ pub fn main() void {
         JSC__JSMap__get(map_cell, context, evaluate(context, "'direct'")) != .undefined)
         fail("private JSMap clear mismatch");
 
-    std.debug.print("Home private value shims: 100/100 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 103/103 symbols linked; runtime matrix passed\n", .{});
 }
