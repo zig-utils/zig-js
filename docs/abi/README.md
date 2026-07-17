@@ -44,7 +44,7 @@ convention. The exact current denominator is:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #163 | 432 (59 implemented, 373 pending) |
+| Private JSC/Bun/WebCore ABI under #163 | 432 (61 implemented, 371 pending) |
 | Overlap with zig-js's completed public C target | 15 |
 | Platform libc import | 1 |
 | **Total** | **448** |
@@ -60,7 +60,7 @@ zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"
 ```
 
 This inventory is the denominator, not a claim that the whole surface works.
-The first fifty-nine private entries are implemented; the other 373 remain pending
+The first sixty-one private entries are implemented; the other 371 remain pending
 until #163 provides their type/layout contracts, shims, and consumer evidence.
 
 Home revisions `5e829ad483bb9e5ccb19766997df6462edd8e167` and
@@ -129,7 +129,7 @@ It covers empty/immediate/int32/double/NaN/negative-zero behavior, boxed
 empty/nonempty strings, object identity/truthiness, signed minimum and unsigned
 maximum BigInts, negative modulo extraction, exact number fallbacks, and every
 invalid/non-exact boundary. Public accounting stays unchanged at 117 functions
-and 19 extensions; these fifty-nine symbols are reported only as private profile
+and 19 extensions; these sixty-one symbols are reported only as private profile
 exports.
 
 The opaque BigInt cell slice additionally exports `JSC__JSBigInt__fromJS`, the
@@ -230,7 +230,12 @@ in receiver/search order and searches UTF-16 code units, preserving surrogate
 substrings and publishing either coercion failure. Class classification follows
 JSC call-data rules for JS classes, native constructors, bound functions, and
 proxies; AggregateError checks immutable internal error kind. Shared C-API
-realms reuse VM well-known Symbols and the Symbol registry. The 57-symbol combined runtime fixture covers
+realms reuse VM well-known Symbols and the Symbol registry. Private Object
+keys/values create fresh selected-realm arrays of
+own enumerable string properties in ECMAScript order; keys never read values,
+while values re-check enumerability and perform Get in order. Proxy traps,
+getters, abrupt completion, same-VM siblings, foreign VMs, and UTF-16 string
+wrapper indices are covered. The 59-symbol combined runtime fixture covers
 these semantics; the two profile-selected JSType exports retain
 their separate Home/Bun runtime fixtures.
 
@@ -273,7 +278,7 @@ profile contains 437 unique declarations from 54 hashed files:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #164 | 422 (59 implemented, 363 pending) |
+| Private JSC/Bun/WebCore ABI under #164 | 422 (61 implemented, 361 pending) |
 | Public-C overlap | 15 |
 | **Total** | **437** |
 
@@ -289,5 +294,5 @@ zig build bun-private-abi-audit -Dbun-source-root="$HOME/Code/bun"
 
 The audit rejects revision, file hash, declaration digest, classification,
 calling-convention, implementation-status, and Home-comparison drift. It does
-not claim complete Bun runtime compatibility; #164 remains open for the 363
+not claim complete Bun runtime compatibility; #164 remains open for the 361
 pending core entries and later wider/generated profiles.
