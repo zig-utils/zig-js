@@ -96,6 +96,8 @@ extern "c" fn JSC__JSValue__putIndex(EncodedValue, JSContextRef, u32, EncodedVal
 extern "c" fn JSC__JSValue__push(EncodedValue, JSContextRef, EncodedValue) void;
 extern "c" fn JSC__JSValue__getDirectIndex(EncodedValue, JSContextRef, u32) EncodedValue;
 extern "c" fn JSC__JSObject__getIndex(EncodedValue, JSContextRef, u32) EncodedValue;
+extern "c" fn JSArray__constructArray(JSContextRef, [*]const EncodedValue, usize) EncodedValue;
+extern "c" fn JSArray__constructEmptyArray(JSContextRef, usize) EncodedValue;
 
 fn fail(message: []const u8) noreturn {
     std.debug.print("Home private value shims: {s}\n", .{message});
@@ -542,5 +544,43 @@ pub fn main() void {
         JSC__JSObject__getIndex(EncodedValue.fromInt32(1), context, 0) != .undefined)
         fail("private array invalid/primitive input mismatch");
 
-    std.debug.print("Home private value shims: 45/45 symbols linked; runtime matrix passed\n", .{});
+    const sibling_item = evaluate(sibling_context, "({ sibling: true })");
+    const constructed_items = [_]EncodedValue{ .true, EncodedValue.fromInt32(-7), encoded_object, sibling_item };
+    const constructed = JSArray__constructArray(context, constructed_items[0..].ptr, constructed_items.len);
+    if (constructed == .empty or
+        JSC__JSValue__getDirectIndex(constructed, context, 0) != .true or
+        JSC__JSValue__getDirectIndex(constructed, context, 1) != EncodedValue.fromInt32(-7) or
+        !JSC__JSValue__isStrictEqual(JSC__JSValue__getDirectIndex(constructed, context, 2), encoded_object, context) or
+        !JSC__JSValue__isStrictEqual(JSC__JSValue__getDirectIndex(constructed, context, 3), sibling_item, context) or
+        getNumberProperty(context, constructed, "length") != @as(f64, @floatFromInt(constructed_items.len)) or
+        !JSC__JSValue__isStrictEqual(JSC__JSValue__getPrototype(constructed, context), evaluate(context, "Array.prototype"), context))
+        fail("private packed JSArray construction mismatch");
+    const zero_items = [_]EncodedValue{};
+    const constructed_zero = JSArray__constructArray(context, zero_items[0..].ptr, 0);
+    const constructed_holes = JSArray__constructEmptyArray(context, 3);
+    const constructed_max = JSArray__constructEmptyArray(context, std.math.maxInt(u32));
+    if (constructed_zero == .empty or getNumberProperty(context, constructed_zero, "length") != 0 or
+        constructed_holes == .empty or getNumberProperty(context, constructed_holes, "length") != 3 or
+        JSC__JSValue__getDirectIndex(constructed_holes, context, 0) != .empty or
+        JSC__JSValue__getDirectIndex(constructed_holes, context, 2) != .empty or
+        constructed_max == .empty or
+        getNumberProperty(context, constructed_max, "length") != @as(f64, @floatFromInt(std.math.maxInt(u32))))
+        fail("private empty JSArray construction mismatch");
+
+    const invalid_items = [_]EncodedValue{ EncodedValue.fromInt32(1), EncodedValue.fromRef(foreign_object) };
+    if (JSArray__constructArray(context, invalid_items[0..].ptr, invalid_items.len) != .empty or
+        !JSGlobalObject__hasException(context))
+        fail("foreign private JSArray item did not fail atomically");
+    const foreign_item_exception = JSGlobalObject__tryTakeException(context);
+    const foreign_item_error = JSC__Exception__asJSValue(foreign_item_exception.cellPointer());
+    if (!JSC__JSValue__isStrictEqual(getProperty(context, foreign_item_error, "name"), evaluate(context, "'TypeError'"), context))
+        fail("foreign private JSArray item did not produce TypeError");
+    if (@bitSizeOf(usize) > 32) {
+        if (JSArray__constructEmptyArray(context, @as(usize, std.math.maxInt(u32)) + 1) != .empty or
+            !JSGlobalObject__hasException(context))
+            fail("invalid private JSArray length did not publish exception");
+        JSGlobalObject__clearException(context);
+    }
+
+    std.debug.print("Home private value shims: 47/47 symbols linked; runtime matrix passed\n", .{});
 }

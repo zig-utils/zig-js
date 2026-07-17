@@ -81,8 +81,8 @@
       "public_c_api": 15
     },
     "by_status": {
-      "implemented": 62,
-      "pending": 375
+      "implemented": 64,
+      "pending": 373
     }
   },
   "home_comparison": {
@@ -1027,10 +1027,10 @@
       "line": 3,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSArray__constructArray(*JSGlobalObject, [*]const JSValue, usize) JSValue;",
       "declaration_sha256": "68c0abd07d56015dd8a32ad792de54167c272960e70f1cdda68e4c390d00cc1f",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSArray__constructEmptyArray",
@@ -1038,10 +1038,10 @@
       "line": 9,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSArray__constructEmptyArray(*JSGlobalObject, usize) JSValue;",
       "declaration_sha256": "5e6f3d75c7cceb5d946285ab3a7aa229e6a82851770316bc234ed23856e49ef1",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSBuffer__bufferFromLength",

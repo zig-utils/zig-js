@@ -1714,6 +1714,54 @@ export fn JSC__JSValue__createEmptyArray(global: JSContextRef, len: usize) callc
     return privateEncodeResult(context, &machine, result);
 }
 
+export fn JSArray__constructEmptyArray(global: JSContextRef, len: usize) callconv(.c) EncodedValue {
+    return JSC__JSValue__createEmptyArray(global, len);
+}
+
+export fn JSArray__constructArray(
+    global: JSContextRef,
+    items: [*]const EncodedValue,
+    len: usize,
+) callconv(.c) EncodedValue {
+    const context = ctxForEvaluation(global) orelse return .empty;
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    defer context.popActiveInterpreter(&machine);
+
+    if (len > std.math.maxInt(u32)) {
+        const err = machine.throwError("RangeError", "Invalid array length");
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    }
+    const values = context.arena().alloc(Value, len) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    for (items[0..len], values) |encoded, *slot| {
+        slot.* = privateValueFrom(global, encoded) orelse {
+            const err = machine.throwError("TypeError", "Array item belongs to another VM");
+            privateSetPendingAbrupt(context, &machine, err);
+            return .empty;
+        };
+    }
+    const array = machine.newArray() catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    for (values) |item| array.asObj().appendElement(context.arena(), item) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    return privateEncodeResult(context, &machine, array);
+}
+
 export fn JSC__JSValue__putIndex(
     encoded: EncodedValue,
     global: JSContextRef,
