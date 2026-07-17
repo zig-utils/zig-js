@@ -72,6 +72,14 @@ const PrivateZigString = extern struct {
     len: usize = 0,
 };
 
+const PrivateZigStringView = struct {
+    result: PrivateZigString,
+    storage: union(enum) {
+        latin1: []u8,
+        utf16: []u16,
+    },
+};
+
 const PrivateBunStringImpl = extern union {
     zig_string: PrivateZigString,
     wtf_string_impl: ?*PrivateWTFStringImpl,
@@ -245,6 +253,9 @@ const CContextGroup = struct {
     /// VM-owned atom strings. Equal `ZigString__toAtomicValue` inputs share
     /// one immutable backing cell inside this context group, never across VMs.
     atom_strings: strcell.InternTable,
+    /// Stable borrowed Latin-1/UTF-16 views returned to private ABI consumers.
+    /// Keys and backing buffers are group-owned so sibling realms share them.
+    zig_string_views: std.StringHashMapUnmanaged(PrivateZigStringView) = .empty,
     collection_epoch: u64 = 0,
     /// JavaScriptCore stores the active exception on the VM, not the realm.
     /// Preserve a distinct cell so sibling globals observe the same identity.
@@ -285,6 +296,15 @@ const CContextGroup = struct {
         self.primary.c_api_group = null;
         self.primary.destroy();
         self.atom_strings.deinit();
+        var views = self.zig_string_views.iterator();
+        while (views.next()) |entry| {
+            gpa.free(entry.key_ptr.*);
+            switch (entry.value_ptr.storage) {
+                .latin1 => |bytes| gpa.free(bytes),
+                .utf16 => |units| gpa.free(units),
+            }
+        }
+        self.zig_string_views.deinit(gpa);
         gpa.destroy(self);
     }
 };
@@ -2486,6 +2506,136 @@ export fn JSC__JSValue__createRopeString(
         return .empty;
     };
     return privateEncodeResult(context, &machine, result);
+}
+
+fn privateWTF8SurrogateAt(bytes: []const u8, index: usize) ?u16 {
+    if (index + 2 >= bytes.len or bytes[index] != 0xed or
+        bytes[index + 1] < 0xa0 or bytes[index + 1] > 0xbf or
+        bytes[index + 2] & 0xc0 != 0x80)
+        return null;
+    return @intCast((@as(u21, bytes[index] & 0x0f) << 12) |
+        (@as(u21, bytes[index + 1] & 0x3f) << 6) |
+        @as(u21, bytes[index + 2] & 0x3f));
+}
+
+fn privateWTF8ToUTF16(allocator: std.mem.Allocator, bytes: []const u8) PrivateBunStringError![]u16 {
+    const units = try allocator.alloc(u16, interp.Interpreter.utf16LenOfString(bytes));
+    errdefer allocator.free(units);
+    var input: usize = 0;
+    var output: usize = 0;
+    while (input < bytes.len) {
+        if (privateWTF8SurrogateAt(bytes, input)) |surrogate| {
+            units[output] = surrogate;
+            input += 3;
+            output += 1;
+            continue;
+        }
+        const sequence_len = std.unicode.utf8ByteSequenceLength(bytes[input]) catch return error.InvalidString;
+        if (input + sequence_len > bytes.len) return error.InvalidString;
+        const codepoint = std.unicode.utf8Decode(bytes[input .. input + sequence_len]) catch return error.InvalidString;
+        if (codepoint <= 0xffff) {
+            units[output] = @intCast(codepoint);
+            output += 1;
+        } else {
+            const pair = codepoint - 0x10000;
+            units[output] = @intCast(0xd800 + (pair >> 10));
+            units[output + 1] = @intCast(0xdc00 + (pair & 0x3ff));
+            output += 2;
+        }
+        input += sequence_len;
+    }
+    std.debug.assert(output == units.len);
+    return units;
+}
+
+fn privateBorrowedZigStringView(
+    group: *CContextGroup,
+    bytes: []const u8,
+) PrivateBunStringError!PrivateZigString {
+    if (bytes.len == 0) return .{ .tagged_ptr = @intFromPtr("".ptr), .len = 0 };
+    if (group.zig_string_views.get(bytes)) |view| return view.result;
+
+    const units = try privateWTF8ToUTF16(gpa, bytes);
+    var owns_units = true;
+    errdefer if (owns_units) gpa.free(units);
+    const view: PrivateZigStringView = if (interp.Interpreter.jsStringIs8Bit(bytes)) latin1: {
+        const latin1_bytes = try gpa.alloc(u8, units.len);
+        errdefer gpa.free(latin1_bytes);
+        for (units, latin1_bytes) |unit, *byte| byte.* = @intCast(unit);
+        gpa.free(units);
+        owns_units = false;
+        break :latin1 .{
+            .result = .{ .tagged_ptr = @intFromPtr(latin1_bytes.ptr), .len = latin1_bytes.len },
+            .storage = .{ .latin1 = latin1_bytes },
+        };
+    } else .{
+        .result = .{ .tagged_ptr = @intFromPtr(units.ptr) | (@as(usize, 1) << 63), .len = units.len },
+        .storage = .{ .utf16 = units },
+    };
+    owns_units = false;
+    errdefer switch (view.storage) {
+        .latin1 => |storage| gpa.free(storage),
+        .utf16 => |storage| gpa.free(storage),
+    };
+    const key = try gpa.dupe(u8, bytes);
+    errdefer gpa.free(key);
+    try group.zig_string_views.put(gpa, key, view);
+    return view.result;
+}
+
+export fn JSC__JSString__toZigString(
+    cell: ?*anyopaque,
+    global: JSContextRef,
+    output: *PrivateZigString,
+) callconv(.c) void {
+    output.* = .{};
+    const context = ctxForHandleInspection(global) orelse return;
+    const opaque_group = context.c_api_group orelse return;
+    const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+    if (group.pending_exception != null) return;
+    const boxed = privateStringBoxFromCell(cell) orelse return;
+    if (boxed.owner.c_api_group != context.c_api_group) return;
+    output.* = privateBorrowedZigStringView(group, boxed.value.asStr()) catch |err| {
+        privatePublishBunStringError(context, err);
+        return;
+    };
+}
+
+export fn JSC__JSValue__toZigString(
+    encoded: EncodedValue,
+    output: *PrivateZigString,
+    global: JSContextRef,
+) callconv(.c) void {
+    output.* = .{};
+    const context = ctxForEvaluation(global) orelse return;
+    const opaque_group = context.c_api_group orelse return;
+    const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+    if (group.pending_exception != null) return;
+
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return;
+    };
+    defer context.popActiveInterpreter(&machine);
+
+    const internal = privateValueFrom(global, encoded) orelse {
+        const err = machine.throwError("TypeError", "String value belongs to another VM");
+        privateSetPendingAbrupt(context, &machine, err);
+        return;
+    };
+    const bytes = machine.toStringV(internal) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return;
+    };
+    output.* = privateBorrowedZigStringView(group, bytes) catch |err| {
+        privatePublishBunStringError(context, err);
+        return;
+    };
 }
 
 fn privateZigStringErrorInstance(

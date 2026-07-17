@@ -83,8 +83,8 @@
     },
     "by_status": {
       "external": 1,
-      "implemented": 103,
-      "pending": 333
+      "implemented": 105,
+      "pending": 331
     }
   },
   "home_comparison": {
@@ -1579,10 +1579,10 @@
       "line": 3,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSString__toZigString(this: *JSString, global: *JSGlobalObject, zig_str: *jsc.ZigString) void;",
       "declaration_sha256": "980fd9241907f9d62abefe4a7f0211dc14236ff21233cac312c9985d29767050",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSValue__DateNowISOString",
@@ -2481,10 +2481,10 @@
       "line": 1190,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSValue__toZigString(this: JSValue, out: *ZigString, global: *JSGlobalObject) void;",
       "declaration_sha256": "ad18ccac835945f7f96d6953b31099338c7280e2fa618fa1f8e22a075f8f97ad",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSValue__unwrapBoxedPrimitive",

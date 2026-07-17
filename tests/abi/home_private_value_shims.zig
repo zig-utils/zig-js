@@ -124,6 +124,8 @@ extern "c" fn ZigString__toValueGC(*const ZigString, JSContextRef) EncodedValue;
 extern "c" fn ZigString__to16BitValue(*const ZigString, JSContextRef) EncodedValue;
 extern "c" fn ZigString__toAtomicValue(*const ZigString, JSContextRef) EncodedValue;
 extern "c" fn JSC__JSValue__createRopeString(EncodedValue, EncodedValue, JSContextRef) EncodedValue;
+extern "c" fn JSC__JSString__toZigString(?*anyopaque, JSContextRef, *ZigString) void;
+extern "c" fn JSC__JSValue__toZigString(EncodedValue, *ZigString, JSContextRef) void;
 extern "c" fn JSC__JSValue__asString(EncodedValue) ?*anyopaque;
 extern "c" fn JSC__JSString__eql(?*anyopaque, JSContextRef, ?*anyopaque) bool;
 extern "c" fn JSC__JSString__is8Bit(?*anyopaque) bool;
@@ -222,6 +224,28 @@ fn encodedLatin1(context: JSContextRef, bytes: []const u8) EncodedValue {
         .value = .{ .zig_string = .{ .tagged_ptr = @intFromPtr(bytes.ptr), .len = bytes.len } },
     };
     return BunString__toJS(context, &string);
+}
+
+fn expectZigStringUnits(actual: ZigString, expected: []const u16, utf16: bool, message: []const u8) void {
+    if (actual.len != expected.len or (actual.tagged_ptr & (@as(usize, 1) << 63) != 0) != utf16)
+        fail(message);
+    if (actual.len == 0) {
+        if (actual.tagged_ptr == 0) fail(message);
+        return;
+    }
+    const address = actual.tagged_ptr & ((@as(usize, 1) << 53) - 1);
+    if (address == 0) fail(message);
+    if (utf16) {
+        const units: [*]align(1) const u16 = @ptrFromInt(address);
+        for (units[0..actual.len], expected) |unit, expected_unit| {
+            if (unit != expected_unit) fail(message);
+        }
+    } else {
+        const bytes: [*]const u8 = @ptrFromInt(address);
+        for (bytes[0..actual.len], expected) |byte, unit| {
+            if (byte != @as(u8, @intCast(unit))) fail(message);
+        }
+    }
 }
 
 fn getNumberProperty(context: JSContextRef, object: EncodedValue, name: [*:0]const u8) f64 {
@@ -756,6 +780,90 @@ pub fn main() void {
     if (JSC__Exception__asJSValue(preserved_string_construction_exception.cellPointer()) != EncodedValue.fromInt32(199))
         fail("private string construction replaced pending exception");
 
+    const view_values = [_]EncodedValue{
+        evaluate(context, "''"),
+        evaluate(context, "'ASCII'"),
+        evaluate(context, "'café'"),
+        evaluate(context, "'€'"),
+        evaluate(context, "'😀'"),
+        evaluate(context, "'\\uD800'"),
+    };
+    const empty_units = [_]u16{};
+    const ascii_units = [_]u16{ 'A', 'S', 'C', 'I', 'I' };
+    const latin1_units = [_]u16{ 'c', 'a', 'f', 0xe9 };
+    const bmp_units = [_]u16{0x20ac};
+    const astral_units = [_]u16{ 0xd83d, 0xde00 };
+    const surrogate_units = [_]u16{0xd800};
+    const expected_view_units = [_][]const u16{ &empty_units, &ascii_units, &latin1_units, &bmp_units, &astral_units, &surrogate_units };
+    const expected_view_tags = [_]bool{ false, false, false, true, true, true };
+    var borrowed_views: [view_values.len]ZigString = undefined;
+    for (view_values, expected_view_units, expected_view_tags, &borrowed_views) |encoded, expected, expected_utf16, *out| {
+        const cell = JSC__JSValue__asString(encoded) orelse fail("borrowed ZigString test downcast failed");
+        JSC__JSString__toZigString(cell, context, out);
+        expectZigStringUnits(out.*, expected, expected_utf16, "borrowed JSString ZigString view mismatch");
+    }
+    _ = evaluate(context, "Array.from({ length: 128 }, (_, i) => 'allocation-' + i).join('|')");
+    var repeated_latin1_view: ZigString = undefined;
+    JSC__JSString__toZigString(
+        JSC__JSValue__asString(evaluate(context, "'café'")),
+        context,
+        &repeated_latin1_view,
+    );
+    if (repeated_latin1_view.tagged_ptr != borrowed_views[2].tagged_ptr)
+        fail("borrowed ZigString view was not stable across allocations");
+    expectZigStringUnits(borrowed_views[2], &latin1_units, false, "borrowed ZigString storage changed after allocation");
+
+    const primitive_view_values = [_]EncodedValue{ .undefined, .null, .true, EncodedValue.fromInt32(-42), EncodedValue.fromDouble(1.5) };
+    const primitive_view_units = [_][]const u16{
+        &[_]u16{ 'u', 'n', 'd', 'e', 'f', 'i', 'n', 'e', 'd' },
+        &[_]u16{ 'n', 'u', 'l', 'l' },
+        &[_]u16{ 't', 'r', 'u', 'e' },
+        &[_]u16{ '-', '4', '2' },
+        &[_]u16{ '1', '.', '5' },
+    };
+    for (primitive_view_values, primitive_view_units) |encoded, expected| {
+        var out: ZigString = undefined;
+        JSC__JSValue__toZigString(encoded, &out, context);
+        expectZigStringUnits(out, expected, false, "borrowed JSValue primitive conversion mismatch");
+    }
+
+    const coercible_view = evaluate(context,
+        \\globalThis.__private_view_order = [];
+        \\({ toString() { __private_view_order.push('toString'); return 'object-view'; }, valueOf() { __private_view_order.push('valueOf'); return 1; } });
+    );
+    var coercible_output: ZigString = undefined;
+    JSC__JSValue__toZigString(coercible_view, &coercible_output, context);
+    expectZigStringUnits(coercible_output, &[_]u16{ 'o', 'b', 'j', 'e', 'c', 't', '-', 'v', 'i', 'e', 'w' }, false, "borrowed JSValue object conversion mismatch");
+    if (!JSC__JSValue__isStrictEqual(evaluate(context, "__private_view_order.join(',')"), evaluate(context, "'toString'"), context))
+        fail("borrowed JSValue ToString order mismatch");
+
+    var failed_view = ZigString{ .tagged_ptr = 1, .len = 1 };
+    JSC__JSValue__toZigString(evaluate(context, "Symbol('view')"), &failed_view, context);
+    if (failed_view.tagged_ptr != 0 or failed_view.len != 0 or !JSGlobalObject__hasException(context))
+        fail("borrowed JSValue Symbol conversion mismatch");
+    JSGlobalObject__clearException(context);
+    JSC__JSValue__toZigString(evaluate(context, "({ toString() { throw 2001; } })"), &failed_view, context);
+    const thrown_view_exception = JSGlobalObject__tryTakeException(context);
+    if (failed_view.tagged_ptr != 0 or failed_view.len != 0 or
+        JSC__Exception__asJSValue(thrown_view_exception.cellPointer()) != EncodedValue.fromInt32(2001))
+        fail("borrowed JSValue thrown conversion mismatch");
+
+    failed_view = .{ .tagged_ptr = 1, .len = 1 };
+    JSC__JSString__toZigString(encoded_object.cellPointer(), context, &failed_view);
+    if (failed_view.tagged_ptr != 0 or failed_view.len != 0)
+        fail("borrowed JSString accepted non-string cell");
+    JSC__JSValue__toZigString(EncodedValue.fromRef(foreign_object), &failed_view, context);
+    if (failed_view.tagged_ptr != 0 or failed_view.len != 0 or !JSGlobalObject__hasException(context))
+        fail("borrowed JSValue accepted foreign-VM value");
+    JSGlobalObject__clearException(context);
+
+    JSC__VM__throwError(JSC__JSGlobalObject__vm(context), context, EncodedValue.fromInt32(200));
+    JSC__JSValue__toZigString(.true, &failed_view, context);
+    const preserved_view_exception = JSGlobalObject__tryTakeException(context);
+    if (failed_view.tagged_ptr != 0 or failed_view.len != 0 or
+        JSC__Exception__asJSValue(preserved_view_exception.cellPointer()) != EncodedValue.fromInt32(200))
+        fail("borrowed ZigString view replaced pending exception");
+
     Bun__WTFStringImpl__ref(signed_min_impl);
     if (@atomicLoad(u32, &signed_min_impl.ref_count, .acquire) != 4)
         fail("BunString retain mismatch");
@@ -981,6 +1089,19 @@ pub fn main() void {
     );
     if (!JSC__JSValue__isStrictEqual(sibling_rope, evaluate(sibling_context, "'primary-sibling'"), sibling_context))
         fail("private rope string same-VM sibling mismatch");
+
+    var sibling_borrowed_view: ZigString = undefined;
+    JSC__JSString__toZigString(JSC__JSValue__asString(view_values[2]), sibling_context, &sibling_borrowed_view);
+    if (sibling_borrowed_view.tagged_ptr != borrowed_views[2].tagged_ptr)
+        fail("borrowed ZigString cache was not shared by sibling realms");
+    const sibling_view_object = evaluate(sibling_context, "({ toString() { return 'sibling-view'; } })");
+    JSC__JSValue__toZigString(sibling_view_object, &sibling_borrowed_view, context);
+    expectZigStringUnits(
+        sibling_borrowed_view,
+        &[_]u16{ 's', 'i', 'b', 'l', 'i', 'n', 'g', '-', 'v', 'i', 'e', 'w' },
+        false,
+        "borrowed ZigString sibling JSValue conversion mismatch",
+    );
 
     const sibling_bigint_string = JSC__JSBigInt__toString(signed_negative_cell, sibling_context);
     const sibling_bigint_impl = sibling_bigint_string.value.wtf_string_impl orelse fail("sibling BigInt string missing StringImpl");
@@ -1664,5 +1785,5 @@ pub fn main() void {
         JSC__JSMap__get(map_cell, context, evaluate(context, "'direct'")) != .undefined)
         fail("private JSMap clear mismatch");
 
-    std.debug.print("Home private value shims: 93/93 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 95/95 symbols linked; runtime matrix passed\n", .{});
 }
