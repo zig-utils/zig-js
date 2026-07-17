@@ -37,6 +37,7 @@ extern "c" fn JSValueMakeString(JSContextRef, JSStringRef) JSValueRef;
 extern "c" fn JSStringCreateWithUTF8CString([*:0]const u8) JSStringRef;
 extern "c" fn JSStringRelease(JSStringRef) void;
 extern "c" fn JSObjectMake(JSContextRef, ?*anyopaque, ?*anyopaque) JSObjectRef;
+extern "c" fn JSEvaluateScript(JSContextRef, JSStringRef, JSObjectRef, JSStringRef, c_int, [*c]JSValueRef) JSValueRef;
 
 extern "c" fn JSC__JSValue__eqlCell(EncodedValue, ?*anyopaque) bool;
 extern "c" fn JSC__JSValue__eqlValue(EncodedValue, EncodedValue) bool;
@@ -47,10 +48,24 @@ extern "c" fn JSC__JSValue__fromUInt64NoTruncate(JSContextRef, u64) EncodedValue
 extern "c" fn JSC__JSValue__toUInt64NoTruncate(EncodedValue) u64;
 extern "c" fn JSC__JSValue__isStrictEqual(EncodedValue, EncodedValue, JSContextRef) bool;
 extern "c" fn JSC__JSValue__isSameValue(EncodedValue, EncodedValue, JSContextRef) bool;
+extern "c" fn JSC__JSBigInt__fromJS(EncodedValue) ?*anyopaque;
+extern "c" fn JSC__JSBigInt__orderDouble(?*anyopaque, f64) i8;
+extern "c" fn JSC__JSBigInt__orderInt64(?*anyopaque, i64) i8;
+extern "c" fn JSC__JSBigInt__orderUint64(?*anyopaque, u64) i8;
+extern "c" fn JSC__JSBigInt__toInt64(?*anyopaque) i64;
 
 fn fail(message: []const u8) noreturn {
     std.debug.print("Home private value shims: {s}\n", .{message});
     std.process.exit(1);
+}
+
+fn evaluate(context: JSContextRef, source: [*:0]const u8) EncodedValue {
+    const script = JSStringCreateWithUTF8CString(source) orelse fail("script string creation failed");
+    defer JSStringRelease(script);
+    var exception: JSValueRef = null;
+    const result = JSEvaluateScript(context, script, null, null, 1, &exception);
+    if (result == null or exception != null) fail("BigInt fixture evaluation failed");
+    return EncodedValue.fromRef(result);
 }
 
 pub fn main() void {
@@ -150,5 +165,51 @@ pub fn main() void {
         JSC__JSValue__isSameValue(EncodedValue.fromRef(foreign_object), EncodedValue.fromRef(foreign_object), context))
         fail("foreign context cell accepted");
 
-    std.debug.print("Home private value shims: 9/9 symbols linked; runtime matrix passed\n", .{});
+    const signed_min_cell = JSC__JSBigInt__fromJS(signed_min) orelse fail("signed BigInt downcast failed");
+    const signed_negative_cell = JSC__JSBigInt__fromJS(signed_negative) orelse fail("negative BigInt downcast failed");
+    const unsigned_max_cell = JSC__JSBigInt__fromJS(unsigned_max) orelse fail("unsigned BigInt downcast failed");
+    if (JSC__JSBigInt__fromJS(.true) != null or
+        JSC__JSBigInt__fromJS(encoded_text) != null or
+        JSC__JSBigInt__fromJS(.empty) != null)
+        fail("non-BigInt downcast accepted");
+    if (JSC__JSBigInt__orderInt64(signed_min_cell, std.math.minInt(i64)) != 0 or
+        JSC__JSBigInt__orderInt64(signed_negative_cell, 0) != -1 or
+        JSC__JSBigInt__orderUint64(unsigned_max_cell, std.math.maxInt(u64)) != 0 or
+        JSC__JSBigInt__orderUint64(signed_negative_cell, 0) != -1)
+        fail("64-bit BigInt ordering mismatch");
+
+    const huge_positive = JSC__JSBigInt__fromJS(evaluate(context, "184467440737095516160000000000000000000n")) orelse fail("huge positive downcast failed");
+    const huge_negative = JSC__JSBigInt__fromJS(evaluate(context, "-184467440737095516160000000000000000000n")) orelse fail("huge negative downcast failed");
+    if (JSC__JSBigInt__orderUint64(huge_positive, std.math.maxInt(u64)) != 1 or
+        JSC__JSBigInt__orderInt64(huge_negative, std.math.minInt(i64)) != -1)
+        fail("arbitrary-size integer ordering mismatch");
+
+    const above_safe = JSC__JSBigInt__fromJS(evaluate(context, "9007199254740993n")) orelse fail("above-safe BigInt downcast failed");
+    const exact_safe = JSC__JSBigInt__fromJS(evaluate(context, "9007199254740992n")) orelse fail("safe BigInt downcast failed");
+    const zero_cell = JSC__JSBigInt__fromJS(JSC__JSValue__fromUInt64NoTruncate(context, 0)) orelse fail("zero BigInt downcast failed");
+    const two_cell = JSC__JSBigInt__fromJS(JSC__JSValue__fromUInt64NoTruncate(context, 2)) orelse fail("two BigInt downcast failed");
+    const negative_two = JSC__JSBigInt__fromJS(JSC__JSValue__fromInt64NoTruncate(context, -2)) orelse fail("negative two downcast failed");
+    const min_subnormal: f64 = @bitCast(@as(u64, 1));
+    if (JSC__JSBigInt__orderDouble(above_safe, 9007199254740992.0) != 1 or
+        JSC__JSBigInt__orderDouble(exact_safe, 9007199254740992.0) != 0 or
+        JSC__JSBigInt__orderDouble(signed_negative_cell, -1.5) != 1 or
+        JSC__JSBigInt__orderDouble(negative_two, -1.5) != -1 or
+        JSC__JSBigInt__orderDouble(two_cell, 1.5) != 1 or
+        JSC__JSBigInt__orderDouble(zero_cell, min_subnormal) != -1 or
+        JSC__JSBigInt__orderDouble(huge_positive, std.math.inf(f64)) != -1 or
+        JSC__JSBigInt__orderDouble(huge_negative, -std.math.inf(f64)) != 1)
+        fail("exact double ordering mismatch");
+
+    const beyond_double = JSC__JSBigInt__fromJS(evaluate(context, "10n ** 400n")) orelse fail("extreme BigInt downcast failed");
+    if (JSC__JSBigInt__orderDouble(beyond_double, std.math.floatMax(f64)) != 1)
+        fail("extreme double ordering mismatch");
+
+    const modulo_one = JSC__JSBigInt__fromJS(evaluate(context, "18446744073709551617n")) orelse fail("modulo BigInt downcast failed");
+    if (JSC__JSBigInt__toInt64(signed_min_cell) != std.math.minInt(i64) or
+        JSC__JSBigInt__toInt64(signed_negative_cell) != -1 or
+        JSC__JSBigInt__toInt64(unsigned_max_cell) != -1 or
+        JSC__JSBigInt__toInt64(modulo_one) != 1)
+        fail("signed modulo extraction mismatch");
+
+    std.debug.print("Home private value shims: 14/14 symbols linked; runtime matrix passed\n", .{});
 }

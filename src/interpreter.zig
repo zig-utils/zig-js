@@ -17558,6 +17558,31 @@ fn managedBigIntFromObject(arena: std.mem.Allocator, big: *value.Object) error{O
     return out;
 }
 
+pub fn orderBigIntObjectAgainstInteger(
+    arena: std.mem.Allocator,
+    big: *value.Object,
+    number: anytype,
+) error{OutOfMemory}!std.math.Order {
+    if (big.bigIntText() == null) {
+        return std.math.order(big.bigIntValue(), @as(i128, number));
+    }
+    var lhs = try managedBigIntFromObject(arena, big);
+    var rhs = try std.math.big.int.Managed.initSet(arena, number);
+    return lhs.toConst().order(rhs.toConst());
+}
+
+pub fn orderBigIntObjectAgainstDouble(
+    arena: std.mem.Allocator,
+    big: *value.Object,
+    number: f64,
+) error{OutOfMemory}!std.math.Order {
+    if (std.math.isNan(number)) return .eq;
+    if (number == std.math.inf(f64)) return .lt;
+    if (number == -std.math.inf(f64)) return .gt;
+    var lhs = try managedBigIntFromObject(arena, big);
+    return bigVsFiniteF64(arena, &lhs, number);
+}
+
 fn makeBigIntFromManaged(self: *Interpreter, managed: *const std.math.big.int.Managed) EvalError!Value {
     if (managed.toInt(i128)) |small| {
         return self.makeBigInt(small);

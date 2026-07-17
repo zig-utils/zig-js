@@ -1263,6 +1263,22 @@ fn privateBigIntModuloU64(object: *Object) u64 {
     return @truncate(@as(u128, @bitCast(object.bigIntValue())));
 }
 
+fn privateBigIntBoxFromCell(cell: ?*anyopaque) ?*Boxed {
+    const pointer = cell orelse return null;
+    const encoded = EncodedValue.fromCellAddress(@intFromPtr(pointer)) catch return null;
+    const boxed = privateBoxedFrom(encoded) orelse return null;
+    if (!boxed.value.isObject() or !boxed.value.asObj().is_bigint) return null;
+    return boxed;
+}
+
+fn privateOrderResult(order: std.math.Order) i8 {
+    return switch (order) {
+        .lt => -1,
+        .eq => 0,
+        .gt => 1,
+    };
+}
+
 fn privateObjectJSType(object: *Object) private_jstype.Kind {
     if (object.is_symbol) return .Symbol;
     if (object.is_bigint) return .HeapBigInt;
@@ -1396,6 +1412,47 @@ export fn JSC__JSCell__getType(cell: ?*anyopaque) callconv(.c) u8 {
     const pointer = cell orelse return 0;
     const encoded = EncodedValue.fromCellAddress(@intFromPtr(pointer)) catch return 0;
     return privateJSType(encoded);
+}
+
+export fn JSC__JSBigInt__fromJS(encoded: EncodedValue) callconv(.c) ?*anyopaque {
+    const boxed = privateBoxedFrom(encoded) orelse return null;
+    if (!boxed.value.isObject() or !boxed.value.asObj().is_bigint) return null;
+    return @ptrCast(boxed);
+}
+
+export fn JSC__JSBigInt__orderDouble(cell: ?*anyopaque, number: f64) callconv(.c) i8 {
+    const boxed = privateBigIntBoxFromCell(cell) orelse return 0;
+    const order = interp.orderBigIntObjectAgainstDouble(
+        boxed.owner.arena(),
+        boxed.value.asObj(),
+        number,
+    ) catch return 0;
+    return privateOrderResult(order);
+}
+
+export fn JSC__JSBigInt__orderInt64(cell: ?*anyopaque, number: i64) callconv(.c) i8 {
+    const boxed = privateBigIntBoxFromCell(cell) orelse return 0;
+    const order = interp.orderBigIntObjectAgainstInteger(
+        boxed.owner.arena(),
+        boxed.value.asObj(),
+        number,
+    ) catch return 0;
+    return privateOrderResult(order);
+}
+
+export fn JSC__JSBigInt__orderUint64(cell: ?*anyopaque, number: u64) callconv(.c) i8 {
+    const boxed = privateBigIntBoxFromCell(cell) orelse return 0;
+    const order = interp.orderBigIntObjectAgainstInteger(
+        boxed.owner.arena(),
+        boxed.value.asObj(),
+        number,
+    ) catch return 0;
+    return privateOrderResult(order);
+}
+
+export fn JSC__JSBigInt__toInt64(cell: ?*anyopaque) callconv(.c) i64 {
+    const boxed = privateBigIntBoxFromCell(cell) orelse return 0;
+    return @bitCast(privateBigIntModuloU64(boxed.value.asObj()));
 }
 
 fn valueFromContext(ctx: *Context, ref: JSValueRef) ?Value {

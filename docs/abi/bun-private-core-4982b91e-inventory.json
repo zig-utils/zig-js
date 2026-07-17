@@ -81,8 +81,8 @@
       "public_c_api": 15
     },
     "by_status": {
-      "implemented": 26,
-      "pending": 411
+      "implemented": 31,
+      "pending": 406
     }
   },
   "home_comparison": {
@@ -1181,10 +1181,10 @@
       "line": 2,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSBigInt__fromJS(JSValue) ?*JSBigInt;",
       "declaration_sha256": "ece79c3535aeb2ba5da46b3d89948825467b05e2da478ef62f4a456f742281bc",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSBigInt__orderDouble",
@@ -1192,10 +1192,10 @@
       "line": 7,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSBigInt__orderDouble(*JSBigInt, f64) i8;",
       "declaration_sha256": "3d7b37c35f080d446066e8da9f9fe6afd3806c419f35dc3d25f3b85d202822f9",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSBigInt__orderInt64",
@@ -1203,10 +1203,10 @@
       "line": 9,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSBigInt__orderInt64(*JSBigInt, i64) i8;",
       "declaration_sha256": "e210c70384d1a6a3632821f7d0ead7ed9c7feb42e8c53399c27c620c882e2764",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSBigInt__orderUint64",
@@ -1214,10 +1214,10 @@
       "line": 8,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSBigInt__orderUint64(*JSBigInt, u64) i8;",
       "declaration_sha256": "10516c68c91d5f864f5f290c0f76a84333f8ccdea13e242daa858f2bfc8ffa9e",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSBigInt__toInt64",
@@ -1225,10 +1225,10 @@
       "line": 25,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSBigInt__toInt64(*JSBigInt) i64;",
       "declaration_sha256": "f0189ede8a43d78c76a9d5a6b1f4529a54c2dcf9311d5b81daee8f25247fda21",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSBigInt__toString",
