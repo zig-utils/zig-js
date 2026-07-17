@@ -44,7 +44,7 @@ convention. The exact current denominator is:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #163 | 431 (113 implemented, 318 pending) |
+| Private JSC/Bun/WebCore ABI under #163 | 431 (116 implemented, 315 pending) |
 | Overlap with zig-js's completed public C target | 15 |
 | Platform libc import | 1 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
@@ -61,7 +61,7 @@ zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"
 ```
 
 This inventory is the denominator, not a claim that the whole surface works.
-The first 113 private entries are implemented; the other 318 remain pending
+The first 116 private entries are implemented; the other 315 remain pending
 until #163 provides their type/layout contracts, shims, and consumer evidence.
 `JSFunctionCall` remains revision-pinned in the declaration inventory but is
 not part of that denominator: each runtime-generated FFI module defines the
@@ -307,7 +307,11 @@ direct ZigString own writes, exact ToPropertyKey writes, ordinary deletion,
 prototype-aware and Object.prototype-cutoff lookup, and own-only BunString or
 value-key reads. Numeric/Symbol keys, accessors, proxies, duplicate insertion
 order, Latin-1 names, sentinels, sibling realms, foreign values, and pending
-exceptions are covered. The 111-symbol combined runtime
+exceptions are covered.
+Three shared fast reads pin all 24 built-in IDs and distinguish direct data,
+own-slot resolution, and pollution-mitigated lookup. Bun additionally exposes
+a pure inherited-data `code` inquiry that rejects accessors, custom slots, and
+proxies without executing them. The 115-symbol combined runtime
 fixture covers these semantics; the two profile-selected JSType exports retain
 their separate Home/Bun runtime fixtures.
 
@@ -350,7 +354,7 @@ profile contains 437 unique declarations from 54 hashed files:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #164 | 421 (106 implemented, 315 pending) |
+| Private JSC/Bun/WebCore ABI under #164 | 421 (110 implemented, 311 pending) |
 | Public-C overlap | 15 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
 | **Total** | **437** |
