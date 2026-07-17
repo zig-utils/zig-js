@@ -9,7 +9,7 @@ method, property, typedef, data symbol, macro, signature, and availability
 annotation parsed from those headers.
 
 The inventory contains 11 containers and 108 declarations. It currently records
-**69 implemented / 39 pending** under issues #158–#160. An `implemented` entry
+**72 implemented / 36 pending** under issues #158–#160. An `implemented` entry
 has runtime behavior exercised by the compile-link-runtime host; a `pending`
 entry may be declared in the headers but must not be treated as usable.
 
@@ -31,12 +31,20 @@ Compile, link, and execute the implemented runtime slice on macOS:
 zig build test-objc-api
 ```
 
+Compare the completed Foundation conversion rows with system JavaScriptCore:
+
+```sh
+zig build objc-api-jsc-diff
+```
+
 That host exercises VM/context construction and identity, evaluation and
 exception capture, context naming/inspectability, C-ref round trips, primitive
 and native object `JSValue` factories, every published type predicate,
 exception-aware numeric/string conversion, and exact comparisons.
 Indexed reads, geometry structs, and the property-descriptor constants are also
-covered. Collection/object conversion, callbacks, general property helpers, managed
+covered. Recursive array/dictionary/date conversion matches all six rows in the
+pinned system-JSC transcript and handles cyclic graphs by strict JavaScript
+identity. Arbitrary Objective-C wrappers, callbacks, general property helpers, managed
 references, and JSExport remain pending until their corresponding runtime and
 evidence land.
 

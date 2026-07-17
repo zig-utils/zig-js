@@ -199,9 +199,9 @@ The current exported C surface has 134 functions:
 - **Extensions** - resource-bounded `JSWorker*`, stable worker inspector target metadata and owner-pumped cross-thread sessions, observable `ZJSValueProtect`/`ZJSValueUnprotect`, threaded contexts, and authenticated-transport-neutral `ZJSInspectorSession*`.
 - **Objective-C inventory** - macOS SDK 27.0 build 26A5368g is pinned at 11
   containers / 108 declarations with byte-for-byte header and selector-level
-  drift checks. Runtime coverage is 69/108 declarations for `JSVirtualMachine`,
+  drift checks. Runtime coverage is 72/108 declarations for `JSVirtualMachine`,
   `JSContext`, and native factory/conversion/comparison `JSValue` behavior; the
-  remaining 39 stay explicit under #158–#160.
+  remaining 36 stay explicit under #158–#160.
 
 `ZJSGlobalContextCreateThreaded`, `ZJSValueProtect`/`ZJSValueUnprotect`,
 `ZJSInspectorSession*`, and `JSWorker*` are zig-js extensions, not public JSC symbols. The `ZJSValue*`
@@ -323,6 +323,7 @@ zig build test-c-api             # C and C++ compile-link-runtime ABI gate
 zig build objc-api-audit         # pinned Objective-C header/inventory drift gate
 zig build test-objc-api-headers  # macOS ARC/blocks header compilation gate
 zig build test-objc-api          # macOS Objective-C compile-link-runtime gate
+zig build objc-api-jsc-diff      # Objective-C Foundation conversion vs system JSC
 zig build c-api-jsc-diff         # completed value APIs vs pinned system JSC (macOS)
 zig build threads-test            # WebKit PR-249 thread allowlist
 zig build threads-reference-audit # classify non-promoted PR-249 files

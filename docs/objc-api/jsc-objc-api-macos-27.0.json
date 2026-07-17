@@ -596,7 +596,7 @@
       "kind": "instance_method",
       "name": "toArray",
       "declaration": "- (NSArray * _Null_unspecified) toArray",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -614,7 +614,7 @@
       "kind": "instance_method",
       "name": "toDate",
       "declaration": "- (NSDate * _Null_unspecified) toDate",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -623,7 +623,7 @@
       "kind": "instance_method",
       "name": "toDictionary",
       "declaration": "- (NSDictionary * _Null_unspecified) toDictionary",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
