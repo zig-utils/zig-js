@@ -13,6 +13,8 @@ is the completion authority for the full checked-in declaration surface. A
 layout, but it must not be called until its linked implementation issue closes.
 Use `zig build c-api-audit` for the fast drift gate or `zig build test-c-api` to
 compile, link, and execute both C and C++ embedding fixtures.
+`zig build c-api-jsc-diff` is the macOS-only semantic gate for completed value
+APIs against the hash-pinned system JavaScriptCore headers and framework.
 
 The project is still pre-stabilization. Compatibility-shaped entry points are an embedder convenience, not a promise to preserve inert arguments or incomplete JavaScriptCore behavior. When a compatibility shim conflicts with clear zig-js semantics, the shim should either grow real behavior or be redesigned before the API is declared stable.
 

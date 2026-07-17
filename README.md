@@ -207,6 +207,9 @@ The [macOS 27.0 public API inventory](docs/c-api/jsc-public-api-macos-27.0.json)
 tracks all 117 pinned C functions and links every unfinished declaration to its
 implementation issue. `zig build c-api-audit` checks declaration/export drift;
 `zig build test-c-api` additionally compiles, links, and runs real C and C++ hosts.
+On macOS, `zig build c-api-jsc-diff` verifies the pinned SDK hashes, compiles the
+same value-API fixture against zig-js and system JavaScriptCore, and requires
+byte-for-byte identical results.
 Declarations marked `pending` are present for source compatibility but are not
 safe to call until their linked issue is complete.
 
@@ -259,6 +262,7 @@ zig build benchmark-comparison -Dbenchmark-comparison-quick=true
 zig build benchmark-comparison-test
 zig build c-api-audit            # pinned headers/inventory/export drift
 zig build test-c-api             # C and C++ compile-link-runtime ABI gate
+zig build c-api-jsc-diff         # completed value APIs vs pinned system JSC (macOS)
 zig build threads-test            # WebKit PR-249 thread allowlist
 zig build threads-reference-audit # classify non-promoted PR-249 files
 python3 tools/threads-reference-audit.py --probe-candidates

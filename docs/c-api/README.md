@@ -17,3 +17,6 @@ Run `zig build c-api-audit` after changing `src/c_api.zig`, the headers, or the
 inventory. On a machine with the pinned SDK, pass its root to
 `tools/verify-c-api.py --sdk-root <path>` to detect upstream header drift.
 `zig build test-c-api` additionally compiles, links, and runs C and C++ hosts.
+On macOS, `zig build c-api-jsc-diff` verifies those hashes, compiles
+`tests/c_api_value_diff.c` against both zig-js and the system JavaScriptCore
+framework, and compares their output byte-for-byte.

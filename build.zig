@@ -79,6 +79,18 @@ pub fn build(b: *std.Build) void {
     c_api_test_step.dependOn(&run_c_api_c_smoke.step);
     c_api_test_step.dependOn(&run_c_api_cpp_smoke.step);
 
+    const c_api_value_diff = b.addExecutable(.{
+        .name = "c-api-value-diff-zig-js",
+        .root_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true }),
+    });
+    c_api_value_diff.root_module.addCSourceFile(.{ .file = b.path("tests/c_api_value_diff.c") });
+    c_api_value_diff.root_module.addIncludePath(b.path("include"));
+    c_api_value_diff.root_module.linkLibrary(lib);
+    const c_api_jsc_diff_cmd = b.addSystemCommand(&.{ "python3", "tools/c-api-jsc-diff.py" });
+    c_api_jsc_diff_cmd.addArtifactArg(c_api_value_diff);
+    const c_api_jsc_diff_step = b.step("c-api-jsc-diff", "Compare the completed value C API against pinned system JSC");
+    c_api_jsc_diff_step.dependOn(&c_api_jsc_diff_cmd.step);
+
     // Unit tests over the root module (engine core + C-API).
     // `-Dtsan` builds them under ThreadSanitizer — the concurrency gate for
     // the agent/worker/waiter machinery (issue #1).
