@@ -120,9 +120,13 @@ const CInspectorState = struct {
     step_mode: CInspectorStepMode = .none,
     step_depth: u32 = 0,
     paused_depth: u32 = 0,
+    paused_at_uncaught_boundary: bool = false,
+    exception_mode: CInspectorExceptionMode = .none,
+    next_exception_id: u64 = 1,
 };
 
 const CInspectorStepMode = enum { none, into, over, out };
+const CInspectorExceptionMode = enum { none, uncaught, all };
 
 const CInspectorScript = struct {
     id: u64,
@@ -1450,11 +1454,14 @@ fn refreshInspectorDebuggerHook(state: *CInspectorState) void {
     if (inspectorHasDebugger(state)) {
         context.debug_statement_ctx = state;
         context.debug_statement_hook = inspectorStatementBoundary;
+        context.debug_exception_hook = inspectorExceptionBoundary;
     } else {
         context.debug_statement_ctx = null;
         context.debug_statement_hook = null;
+        context.debug_exception_hook = null;
         state.pause_requested = false;
         state.paused = false;
+        state.paused_at_uncaught_boundary = false;
         state.step_mode = .none;
     }
 }
@@ -1598,6 +1605,7 @@ fn inspectorStatementBoundary(
     state.step_mode = .none;
     state.paused = true;
     state.paused_depth = machine.depth;
+    state.paused_at_uncaught_boundary = false;
     for (state.sessions.items) |session| {
         if (!session.attached or !session.debugger_enabled) continue;
         _ = sendInspectorJson(session, .{
@@ -1619,17 +1627,20 @@ fn inspectorStatementBoundary(
     // paused would silently violate the protocol, so abort deterministically.
     if (state.paused) {
         state.paused = false;
-        return machine.throwError("Error", "debugger pause requires a synchronous resume command");
+        machine.exception = try machine.makeError("Error", "debugger pause requires a synchronous resume command");
+        return error.Throw;
     }
 }
 
 fn continueInspectorExecution(session: *CInspectorSession, id: i64, mode: CInspectorStepMode) bool {
     const state = session.state;
     if (!state.paused) return sendInspectorError(session, id, -32000, "runtime is not paused");
+    if (state.paused_at_uncaught_boundary and mode != .none) return sendInspectorError(session, id, -32000, "cannot step after an uncaught exception left the runtime");
     if (mode == .out and state.paused_depth == 0) return sendInspectorError(session, id, -32000, "cannot step out of top-level execution");
     state.paused = false;
     state.step_mode = mode;
     state.step_depth = state.paused_depth;
+    state.paused_at_uncaught_boundary = false;
     if (!sendInspectorJson(session, .{ .id = id, .result = .{} })) return false;
     for (state.sessions.items) |candidate| {
         if (candidate.attached and candidate.debugger_enabled) _ = sendInspectorJson(candidate, .{
@@ -1638,6 +1649,75 @@ fn continueInspectorExecution(session: *CInspectorSession, id: i64, mode: CInspe
         });
     }
     return true;
+}
+
+fn inspectorExceptionBoundary(
+    hook_context: *anyopaque,
+    machine: *interp.Interpreter,
+    exception: Value,
+    maybe_location: ?interp.DebugStatementLocation,
+    uncaught: bool,
+) interp.EvalError!void {
+    const state: *CInspectorState = @ptrCast(@alignCast(hook_context));
+    const should_pause = switch (state.exception_mode) {
+        .none => false,
+        .all => !uncaught,
+        .uncaught => uncaught,
+    };
+    if (!should_pause) return;
+    const exception_id = state.next_exception_id;
+    state.next_exception_id += 1;
+    const protocol_type: []const u8 = switch (exception.kind()) {
+        .undefined => "undefined",
+        .null => "object",
+        .boolean => "boolean",
+        .number => "number",
+        .string => "string",
+        .object => if (exception.asObj().is_symbol) "symbol" else if (exception.asObj().is_bigint) "bigint" else "object",
+    };
+    const location = if (maybe_location) |source_location| InspectorProtocolLocation{
+        .scriptId = source_location.script_id,
+        .lineNumber = source_location.location.line - 1,
+        .columnNumber = source_location.location.column - 1,
+        .byteOffset = source_location.location.byte_offset,
+    } else InspectorProtocolLocation{
+        .scriptId = 0,
+        .lineNumber = 0,
+        .columnNumber = 0,
+        .byteOffset = 0,
+    };
+    state.paused = true;
+    state.paused_depth = machine.depth;
+    state.paused_at_uncaught_boundary = uncaught;
+    state.pause_requested = false;
+    state.step_mode = .none;
+    for (state.sessions.items) |session| {
+        if (!session.attached or !session.debugger_enabled) continue;
+        _ = sendInspectorJson(session, .{
+            .method = "Debugger.exceptionThrown",
+            .params = .{
+                .exceptionId = exception_id,
+                .uncaught = uncaught,
+                .location = location,
+                .exception = .{ .type = protocol_type, .description = "JavaScript exception" },
+            },
+        });
+        _ = sendInspectorJson(session, .{
+            .method = "Debugger.paused",
+            .params = .{
+                .reason = "exception",
+                .hitBreakpoints = &[_]u64{},
+                .location = location,
+                .data = .{ .exceptionId = exception_id, .uncaught = uncaught },
+            },
+        });
+    }
+    if (state.paused) {
+        state.paused = false;
+        state.paused_at_uncaught_boundary = false;
+        machine.exception = try machine.makeError("Error", "debugger exception pause requires a synchronous resume command");
+        return error.Throw;
+    }
 }
 
 const InspectorDescription = struct {
@@ -1872,6 +1952,25 @@ export fn ZJSInspectorSessionDispatch(
     }
     if (std.mem.eql(u8, method, "Debugger.stepOut")) {
         return continueInspectorExecution(session, id, .out);
+    }
+    if (std.mem.eql(u8, method, "Debugger.setPauseOnExceptions")) {
+        if (!session.debugger_enabled) return sendInspectorError(session, id, -32000, "Debugger domain is not enabled");
+        const params_value = request.get("params") orelse return sendInspectorError(session, id, -32602, "params are required");
+        if (params_value != .object) return sendInspectorError(session, id, -32602, "params must be an object");
+        const state_value = params_value.object.get("state") orelse return sendInspectorError(session, id, -32602, "state is required");
+        const requested_state = switch (state_value) {
+            .string => |string| string,
+            else => return sendInspectorError(session, id, -32602, "state must be a string"),
+        };
+        session.state.exception_mode = if (std.mem.eql(u8, requested_state, "none"))
+            .none
+        else if (std.mem.eql(u8, requested_state, "uncaught"))
+            .uncaught
+        else if (std.mem.eql(u8, requested_state, "all"))
+            .all
+        else
+            return sendInspectorError(session, id, -32602, "state must be none, uncaught, or all");
+        return sendInspectorJson(session, .{ .id = id, .result = .{} });
     }
     if (std.mem.eql(u8, method, "Debugger.getScriptSource")) {
         const params_value = request.get("params") orelse return sendInspectorError(session, id, -32602, "params are required");
@@ -4472,6 +4571,77 @@ test "C-API: debugger stepping observes logical call depth" {
     try std.testing.expectEqual(@as(usize, 8), state.pauses);
     try std.testing.expect(std.mem.indexOf(u8, state.bytes[exception_start..state.len], "\"reason\":\"step\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, state.bytes[exception_start..state.len], "\"lineNumber\":7") != null);
+}
+
+test "C-API: debugger exception policy distinguishes caught and uncaught throws" {
+    const State = struct {
+        session: ZJSInspectorSessionRef = null,
+        pauses: usize = 0,
+        bytes: [32768]u8 = undefined,
+        len: usize = 0,
+
+        fn receive(message: [*]const u8, message_len: usize, user_data: ?*anyopaque) callconv(.c) void {
+            const self: *@This() = @ptrCast(@alignCast(user_data.?));
+            std.debug.assert(self.len + message_len + 1 <= self.bytes.len);
+            @memcpy(self.bytes[self.len .. self.len + message_len], message[0..message_len]);
+            self.len += message_len;
+            self.bytes[self.len] = '\n';
+            self.len += 1;
+            if (std.mem.indexOf(u8, message[0..message_len], "Debugger.paused") == null) return;
+            self.pauses += 1;
+            const resume_request = "{\"id\":90,\"method\":\"Debugger.resume\"}";
+            std.debug.assert(ZJSInspectorSessionDispatch(self.session, resume_request, resume_request.len));
+        }
+    };
+
+    const ctx = JSGlobalContextCreate(null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(ctx);
+    JSGlobalContextSetInspectable(ctx, true);
+    var state: State = .{};
+    state.session = ZJSInspectorSessionCreate(ctx, State.receive, &state) orelse return error.SessionCreateFailed;
+    defer ZJSInspectorSessionRelease(state.session);
+    const enable = "{\"id\":1,\"method\":\"Debugger.enable\"}";
+    try std.testing.expect(ZJSInspectorSessionDispatch(state.session, enable, enable.len));
+
+    const pause_all = "{\"id\":2,\"method\":\"Debugger.setPauseOnExceptions\",\"params\":{\"state\":\"all\"}}";
+    try std.testing.expect(ZJSInspectorSessionDispatch(state.session, pause_all, pause_all.len));
+    const caught_source = JSStringCreateWithUTF8CString("var caught = 0;\ntry { throw 'caught'; } catch (value) { caught = 1; }\ncaught;") orelse return error.StringInitFailed;
+    defer JSStringRelease(caught_source);
+    const exception_url = JSStringCreateWithUTF8CString("exceptions.js") orelse return error.StringInitFailed;
+    defer JSStringRelease(exception_url);
+    var exception: JSValueRef = null;
+    const caught = JSEvaluateScript(ctx, caught_source, null, exception_url, 10, &exception) orelse return error.EvalFailed;
+    try std.testing.expectEqual(@as(f64, 1), JSValueToNumber(ctx, caught, &exception));
+    try std.testing.expectEqual(@as(usize, 1), state.pauses);
+
+    // Engine-created errors use the same origin hook, not just explicit throw.
+    const type_error_source = JSStringCreateWithUTF8CString("try { null.missing; } catch (value) { 2; }") orelse return error.StringInitFailed;
+    defer JSStringRelease(type_error_source);
+    _ = JSEvaluateScript(ctx, type_error_source, null, exception_url, 20, &exception) orelse return error.EvalFailed;
+    try std.testing.expectEqual(@as(usize, 2), state.pauses);
+
+    const pause_uncaught = "{\"id\":3,\"method\":\"Debugger.setPauseOnExceptions\",\"params\":{\"state\":\"uncaught\"}}";
+    try std.testing.expect(ZJSInspectorSessionDispatch(state.session, pause_uncaught, pause_uncaught.len));
+    _ = JSEvaluateScript(ctx, caught_source, null, exception_url, 30, &exception) orelse return error.EvalFailed;
+    try std.testing.expectEqual(@as(usize, 2), state.pauses);
+    const uncaught_source = JSStringCreateWithUTF8CString("throw new Error('uncaught');") orelse return error.StringInitFailed;
+    defer JSStringRelease(uncaught_source);
+    try std.testing.expect(JSEvaluateScript(ctx, uncaught_source, null, exception_url, 40, &exception) == null);
+    try std.testing.expect(exception != null);
+    try std.testing.expectEqual(@as(usize, 3), state.pauses);
+
+    const pause_none = "{\"id\":4,\"method\":\"Debugger.setPauseOnExceptions\",\"params\":{\"state\":\"none\"}}";
+    try std.testing.expect(ZJSInspectorSessionDispatch(state.session, pause_none, pause_none.len));
+    exception = null;
+    try std.testing.expect(JSEvaluateScript(ctx, uncaught_source, null, exception_url, 50, &exception) == null);
+    try std.testing.expectEqual(@as(usize, 3), state.pauses);
+
+    const transcript = state.bytes[0..state.len];
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "Debugger.exceptionThrown") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "\"reason\":\"exception\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "\"uncaught\":false") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "\"uncaught\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "\"lineNumber\":10") != null);
 }
 
 test "C-API: ordinary constructors keep intrinsic identity and function source metadata" {

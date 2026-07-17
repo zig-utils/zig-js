@@ -4,7 +4,7 @@
 #include <string.h>
 
 struct Transcript {
-    char bytes[16384];
+    char bytes[32768];
     size_t length;
     ZJSInspectorSessionRef session;
     size_t pauses;
@@ -126,6 +126,24 @@ int main(void)
         return 11;
     JSStringRelease(step_url);
     JSStringRelease(step_source);
+
+    const char pause_all[] =
+        "{\"id\":9,\"method\":\"Debugger.setPauseOnExceptions\",\"params\":{\"state\":\"all\"}}";
+    const char caught_text[] = "var caught = 0;\ntry { throw 'caught'; } catch (value) { caught = 1; }\ncaught;";
+    JSStringRef caught_source = JSStringCreateWithUTF8CString(caught_text);
+    JSStringRef exception_url = JSStringCreateWithUTF8CString("exception-smoke.js");
+    if (!ZJSInspectorSessionDispatch(session, pause_all, sizeof(pause_all) - 1) ||
+        !JSEvaluateScript(context, caught_source, NULL, exception_url, 1, &exception) ||
+        exception || transcript.pauses != 5 ||
+        !strstr(transcript.bytes, "Debugger.exceptionThrown") ||
+        !strstr(transcript.bytes, "\"uncaught\":false"))
+        return 12;
+    const char pause_none[] =
+        "{\"id\":10,\"method\":\"Debugger.setPauseOnExceptions\",\"params\":{\"state\":\"none\"}}";
+    if (!ZJSInspectorSessionDispatch(session, pause_none, sizeof(pause_none) - 1))
+        return 13;
+    JSStringRelease(exception_url);
+    JSStringRelease(caught_source);
 
     JSGlobalContextRelease(context);
     if (!ZJSInspectorSessionDispatch(session, evaluate, sizeof(evaluate) - 1))

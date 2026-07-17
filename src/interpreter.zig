@@ -379,6 +379,14 @@ pub const DebugStatementHook = *const fn (
     location: DebugStatementLocation,
 ) EvalError!void;
 
+pub const DebugExceptionHook = *const fn (
+    ctx: *anyopaque,
+    interpreter: *Interpreter,
+    exception: Value,
+    location: ?DebugStatementLocation,
+    uncaught: bool,
+) EvalError!void;
+
 /// A lexical scope with a parent chain. Function calls push a fresh scope whose
 /// `parent` is the function's closure environment, which gives real closures.
 /// Variable names are duplicated into `arena` on first definition so they
@@ -970,6 +978,10 @@ pub const Interpreter = struct {
     debug_statement_ctx: ?*anyopaque = null,
     debug_statement_hook: ?DebugStatementHook = null,
     debug_statement_locations: ?*const std.AutoHashMapUnmanaged(*const Node, DebugStatementLocation) = null,
+    debug_exception_ctx: ?*anyopaque = null,
+    debug_exception_hook: ?DebugExceptionHook = null,
+    debug_current_location: ?DebugStatementLocation = null,
+    debug_exception_origin_notified: bool = false,
     /// The Context-owned microtask queue (Promise reactions). Drained after the
     /// main script in `Context.evaluate` and inline by `await`.
     microtasks: ?*promise.MicrotaskQueue = null,
@@ -2276,6 +2288,7 @@ pub const Interpreter = struct {
 
     pub fn throwDOMException(self: *Interpreter, name: []const u8, message: []const u8) EvalError {
         self.exception = try self.makeDOMException(name, message);
+        try self.notifyDebuggerException(false);
         return error.Throw;
     }
 
@@ -2283,7 +2296,15 @@ pub const Interpreter = struct {
     /// `error.Throw` (or `error.OutOfMemory` if the error object can't be built).
     pub fn throwError(self: *Interpreter, name: []const u8, message: []const u8) EvalError {
         self.exception = try self.makeError(name, message);
+        try self.notifyDebuggerException(false);
         return error.Throw;
+    }
+
+    pub fn notifyDebuggerException(self: *Interpreter, uncaught: bool) EvalError!void {
+        if (self.debug_exception_hook) |hook| {
+            if (!uncaught) self.debug_exception_origin_notified = true;
+            try hook(self.debug_exception_ctx.?, self, self.exception, self.debug_current_location, uncaught);
+        }
     }
 
     pub fn catchableOutOfMemory(self: *Interpreter, err: EvalError) EvalError {
@@ -2312,6 +2333,7 @@ pub const Interpreter = struct {
         try obj.setAttr(self.arena, "column", .{ .writable = true, .enumerable = false, .configurable = true });
         try obj.setOwn(self.arena, self.root_shape, "byteOffset", Value.num(@floatFromInt(loc.byte_offset)));
         try obj.setAttr(self.arena, "byteOffset", .{ .writable = true, .enumerable = false, .configurable = true });
+        try self.notifyDebuggerException(false);
         return error.Throw;
     }
 
@@ -2337,8 +2359,10 @@ pub const Interpreter = struct {
     pub fn eval(self: *Interpreter, node: *const Node) EvalError!Value {
         if (self.debug_statement_hook) |hook| {
             if (self.debug_statement_locations) |locations| {
-                if (locations.get(node)) |location|
+                if (locations.get(node)) |location| {
+                    self.debug_current_location = location;
                     try hook(self.debug_statement_ctx.?, self, location);
+                }
             }
         }
         self.steps += 1;
@@ -3087,6 +3111,7 @@ pub const Interpreter = struct {
 
             .throw_stmt => |e| {
                 self.exception = try self.eval(e);
+                try self.notifyDebuggerException(false);
                 return error.Throw;
             },
 
@@ -14217,8 +14242,10 @@ pub const Interpreter = struct {
         } else |err| {
             const abrupt = self.catchableOutOfMemory(err);
             if (abrupt == error.Throw and t.catch_block != null) {
+                if (!self.debug_exception_origin_notified) try self.notifyDebuggerException(false);
                 const exc = self.exception;
                 self.exception = Value.undef();
+                self.debug_exception_origin_notified = false;
                 const saved = self.env;
                 // Bind the catch target (identifier or destructuring pattern)
                 // into a dedicated catch scope. A simple identifier binding is

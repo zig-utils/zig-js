@@ -41,6 +41,7 @@ while claiming to be paused.
 - Runtime.enable, Runtime.disable, and Runtime.evaluate
 - Debugger.enable, Debugger.disable, Debugger.pause, Debugger.resume,
   Debugger.stepInto, Debugger.stepOver, Debugger.stepOut,
+  Debugger.setPauseOnExceptions,
   Debugger.getScriptSource, Debugger.setBreakpoint,
   Debugger.setBreakpointByUrl, and Debugger.removeBreakpoint
 - Inspector.attached, Inspector.detached, Runtime.executionContextCreated,
@@ -72,6 +73,14 @@ shallower call depth and is rejected at top level. A step completion pauses with
 reason step; a debugger statement or breakpoint encountered first takes
 precedence. Each continuation command emits Debugger.resumed.
 
+setPauseOnExceptions accepts none, uncaught, or all. all pauses at the original
+throwing statement even when a surrounding catch handles the value; uncaught
+pauses only after propagation reaches the C-API evaluation boundary. Origin
+events cover explicit throws, engine-created Error/DOMException/parser errors,
+and fallback detection at the nearest catch/host boundary. Each selected throw
+emits Debugger.exceptionThrown followed by a paused event with reason exception,
+an exceptionId, the source location, and an uncaught flag.
+
 scriptId and breakpointId are unsigned JSON integers in this protocol (they are
 not opaque strings). All protocol line and column fields are zero-based; the
 byteOffset field is zero-based UTF-8 source bytes.
@@ -85,9 +94,9 @@ errors.
 
 Version 0.1 establishes real attachment, lifecycle, concurrent sessions, live
 runtime evaluation, stable scripts, statement-boundary pause/resume,
-breakpoints, and ordinary-call stepping. Exception-pause policy, call frames,
-remote objects, and scopes remain tracked by [issue #153](https://github.com/zig-utils/zig-js/issues/153)
-and [issue #154](https://github.com/zig-utils/zig-js/issues/154). Unsupported
+breakpoints, ordinary-call stepping, and exception-pause policy. Call frames,
+remote objects, and scopes remain tracked by
+[issue #154](https://github.com/zig-utils/zig-js/issues/154). Unsupported
 commands return -32601; there are no silently accepted debugger stubs.
 Suspendable generator/async execution still uses its VM and does not yet expose
 statement pause points; that tier-coherence work remains in #153.

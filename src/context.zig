@@ -2254,6 +2254,7 @@ pub const Context = struct {
     /// boundaries but remains independent of the C inspector protocol.
     debug_statement_ctx: ?*anyopaque = null,
     debug_statement_hook: ?interp.DebugStatementHook = null,
+    debug_exception_hook: ?interp.DebugExceptionHook = null,
     debug_statement_locations: std.AutoHashMapUnmanaged(*const ast.Node, interp.DebugStatementLocation) = .empty,
     debug_script_id: u64 = 0,
     debug_script_start_line: usize = 1,
@@ -2983,6 +2984,8 @@ pub const Context = struct {
             .debug_statement_ctx = self.debug_statement_ctx,
             .debug_statement_hook = self.debug_statement_hook,
             .debug_statement_locations = if (self.debug_statement_hook != null) &self.debug_statement_locations else null,
+            .debug_exception_ctx = self.debug_statement_ctx,
+            .debug_exception_hook = self.debug_exception_hook,
             .global_object = self.global_object,
             .this_value = Value.obj(self.global_object),
             .root_shape = self.root_shape,
@@ -4248,6 +4251,16 @@ pub const Context = struct {
             error.OutOfMemory => return error.OutOfMemory,
         };
         const top_level_failed = if (outcome) |_| false else |_| true;
+        if (outcome) |_| {} else |err| {
+            if (err == error.Throw) {
+                if (!machine.debug_exception_origin_notified) machine.notifyDebuggerException(false) catch |notify_err| {
+                    if (notify_err != error.Throw) return notify_err;
+                };
+                machine.notifyDebuggerException(true) catch |notify_err| {
+                    if (notify_err != error.Throw) return notify_err;
+                };
+            }
+        }
 
         // Microtask checkpoint: run queued Promise reactions before returning, so
         // settled `.then`/`await` continuations and the async harness's `$DONE`
