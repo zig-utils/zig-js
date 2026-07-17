@@ -83,8 +83,8 @@
     },
     "by_status": {
       "external": 1,
-      "implemented": 99,
-      "pending": 337
+      "implemented": 103,
+      "pending": 333
     }
   },
   "home_comparison": {
@@ -1755,10 +1755,10 @@
       "line": 547,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSValue__createRopeString(this: JSValue, rhs: JSValue, globalThis: *jsc.JSGlobalObject) JSValue;",
       "declaration_sha256": "8cf4899c406a76f64dc6fd29793f59ce1c67f3b70489337c5facfbcd14e27722",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSValue__createTypeError",
@@ -4742,10 +4742,10 @@
       "line": 776,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn ZigString__to16BitValue(this: *const ZigString, global: *JSGlobalObject) JSValue;",
       "declaration_sha256": "f07bf5fd73d6d533192d372ec23d024e640fb9df439d74732a7e4e95e1b55fe5",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "ZigString__toAtomicValue",
@@ -4753,10 +4753,10 @@
       "line": 522,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn ZigString__toAtomicValue(this: *const ZigString, globalThis: *jsc.JSGlobalObject) JSValue;",
       "declaration_sha256": "069af944f4a257d0eeb92180ddf74a7ef6f189f7c74d948a502ea14b1430d272",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "ZigString__toDOMExceptionInstance",
@@ -4852,10 +4852,10 @@
       "line": 51,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn ZigString__toValueGC(arg0: *const ZigString, arg1: *JSGlobalObject) jsc.JSValue;",
       "declaration_sha256": "3b613d0e5cdbd31a0f88ed05340cee2f0661f7f2db94dc778bc643aa456b29c5",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Zig__GlobalObject__create",

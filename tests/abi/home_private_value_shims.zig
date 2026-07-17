@@ -120,6 +120,10 @@ extern "c" fn ZigString__toTypeErrorInstance(*const ZigString, JSContextRef) Enc
 extern "c" fn ZigString__toRangeErrorInstance(*const ZigString, JSContextRef) EncodedValue;
 extern "c" fn ZigString__toSyntaxErrorInstance(*const ZigString, JSContextRef) EncodedValue;
 extern "c" fn ZigString__toDOMExceptionInstance(*const ZigString, JSContextRef, u8) EncodedValue;
+extern "c" fn ZigString__toValueGC(*const ZigString, JSContextRef) EncodedValue;
+extern "c" fn ZigString__to16BitValue(*const ZigString, JSContextRef) EncodedValue;
+extern "c" fn ZigString__toAtomicValue(*const ZigString, JSContextRef) EncodedValue;
+extern "c" fn JSC__JSValue__createRopeString(EncodedValue, EncodedValue, JSContextRef) EncodedValue;
 extern "c" fn JSC__JSValue__asString(EncodedValue) ?*anyopaque;
 extern "c" fn JSC__JSString__eql(?*anyopaque, JSContextRef, ?*anyopaque) bool;
 extern "c" fn JSC__JSString__is8Bit(?*anyopaque) bool;
@@ -670,6 +674,88 @@ pub fn main() void {
     if (JSC__Exception__asJSValue(preserved_dom_exception.cellPointer()) != EncodedValue.fromInt32(198))
         fail("DOMException matrix replaced pending exception");
 
+    var mutable_latin1 = [_]u8{ 'c', 'a', 'f', 0xe9 };
+    const mutable_latin1_string = ZigString{ .tagged_ptr = @intFromPtr(&mutable_latin1), .len = mutable_latin1.len };
+    const copied_latin1 = ZigString__toValueGC(&mutable_latin1_string, context);
+    mutable_latin1[0] = 'X';
+    if (!JSC__JSValue__isStrictEqual(copied_latin1, evaluate(context, "'café'"), context) or
+        !JSC__JSValue__isStrictEqual(ZigString__toValueGC(&utf8_string.value.zig_string, context), evaluate(context, "'A😀Z'"), context) or
+        !JSC__JSValue__isStrictEqual(ZigString__toValueGC(&utf16_string.value.zig_string, context), evaluate(context, "'A😀\\uD800Z'"), context) or
+        !JSC__JSValue__isStrictEqual(ZigString__toValueGC(&empty_zig_string, context), evaluate(context, "''"), context))
+        fail("ZigString copied value construction mismatch");
+
+    const raw_utf8_string = ZigString{ .tagged_ptr = @intFromPtr(utf8_bytes.ptr), .len = utf8_bytes.len };
+    if (!JSC__JSValue__isStrictEqual(ZigString__to16BitValue(&raw_utf8_string, context), evaluate(context, "'A😀Z'"), context) or
+        !JSC__JSValue__isStrictEqual(ZigString__to16BitValue(&empty_zig_string, context), evaluate(context, "''"), context))
+        fail("ZigString UTF-8-to-16-bit value mismatch");
+    const invalid_utf8_bytes = [_]u8{ 0xc0, 0x80 };
+    const invalid_utf8_string = ZigString{ .tagged_ptr = @intFromPtr(&invalid_utf8_bytes), .len = invalid_utf8_bytes.len };
+    if (ZigString__to16BitValue(&invalid_utf8_string, context) != .empty or !JSGlobalObject__hasException(context))
+        fail("ZigString 16-bit conversion accepted invalid UTF-8");
+    JSGlobalObject__clearException(context);
+
+    var mutable_atom = [_]u8{ 'a', 't', 'o', 'm' };
+    const mutable_atom_string = ZigString{ .tagged_ptr = @intFromPtr(&mutable_atom), .len = mutable_atom.len };
+    const atomic_first = ZigString__toAtomicValue(&mutable_atom_string, context);
+    const atomic_second = ZigString__toAtomicValue(&mutable_atom_string, context);
+    mutable_atom[0] = 'X';
+    if (!JSC__JSString__eql(
+        JSC__JSValue__asString(atomic_first),
+        context,
+        JSC__JSValue__asString(atomic_second),
+    ) or !JSC__JSValue__isStrictEqual(atomic_first, evaluate(context, "'atom'"), context))
+        fail("ZigString atomic value canonicalization/copy mismatch");
+
+    const rope_left_units = [_]u16{ 'A', 0xd83d };
+    const rope_right_units = [_]u16{ 0xde00, 'Z' };
+    const rope_left_string = ZigString{ .tagged_ptr = @intFromPtr(&rope_left_units) | (@as(usize, 1) << 63), .len = rope_left_units.len };
+    const rope_right_string = ZigString{ .tagged_ptr = @intFromPtr(&rope_right_units) | (@as(usize, 1) << 63), .len = rope_right_units.len };
+    exposeCell(context, "__private_rope_left_value", ZigString__toValueGC(&rope_left_string, context));
+    exposeCell(context, "__private_rope_right_value", ZigString__toValueGC(&rope_right_string, context));
+    const rope_left = evaluate(context,
+        \\globalThis.__private_rope_log = [];
+        \\({ toString() { __private_rope_log.push('left'); return __private_rope_left_value; } });
+    );
+    const rope_right = evaluate(context,
+        \\({ toString() { __private_rope_log.push('right'); return __private_rope_right_value; } });
+    );
+    const rope = JSC__JSValue__createRopeString(rope_left, rope_right, context);
+    if (!JSC__JSValue__isStrictEqual(rope, evaluate(context, "'A😀Z'"), context) or
+        !JSC__JSValue__isStrictEqual(evaluate(context, "__private_rope_log.join(',')"), evaluate(context, "'left,right'"), context))
+        fail("private rope string coercion/order mismatch");
+
+    const throwing_rope_left = evaluate(context,
+        \\globalThis.__private_rope_right_called = false;
+        \\({ toString() { throw 1991; } });
+    );
+    const uncalled_rope_right = evaluate(context,
+        \\({ toString() { __private_rope_right_called = true; return 'bad'; } });
+    );
+    if (JSC__JSValue__createRopeString(throwing_rope_left, uncalled_rope_right, context) != .empty or
+        !JSGlobalObject__hasException(context))
+        fail("private rope string did not publish left coercion failure");
+    const rope_throw = JSGlobalObject__tryTakeException(context);
+    if (JSC__Exception__asJSValue(rope_throw.cellPointer()) != EncodedValue.fromInt32(1991) or
+        JSC__JSValue__toBoolean(evaluate(context, "__private_rope_right_called")))
+        fail("private rope string evaluated right after left failure");
+
+    if (JSC__JSValue__createRopeString(evaluate(context, "'local'"), EncodedValue.fromRef(foreign_object), context) != .empty or
+        !JSGlobalObject__hasException(context))
+        fail("private rope string accepted foreign-VM input");
+    const foreign_rope_exception = JSGlobalObject__tryTakeException(context);
+    const foreign_rope_error = JSC__Exception__asJSValue(foreign_rope_exception.cellPointer());
+    if (!JSC__JSValue__isStrictEqual(getProperty(context, foreign_rope_error, "name"), evaluate(context, "'TypeError'"), context))
+        fail("private rope string foreign-VM error mismatch");
+
+    JSC__VM__throwError(JSC__JSGlobalObject__vm(context), context, EncodedValue.fromInt32(199));
+    if (ZigString__toValueGC(&latin1_string.value.zig_string, context) != .empty or
+        ZigString__toAtomicValue(&latin1_string.value.zig_string, context) != .empty or
+        JSC__JSValue__createRopeString(.true, .false, context) != .empty)
+        fail("private string construction ignored pending exception");
+    const preserved_string_construction_exception = JSGlobalObject__tryTakeException(context);
+    if (JSC__Exception__asJSValue(preserved_string_construction_exception.cellPointer()) != EncodedValue.fromInt32(199))
+        fail("private string construction replaced pending exception");
+
     Bun__WTFStringImpl__ref(signed_min_impl);
     if (@atomicLoad(u32, &signed_min_impl.ref_count, .acquire) != 4)
         fail("BunString retain mismatch");
@@ -877,6 +963,24 @@ pub fn main() void {
     exposeCell(sibling_context, "__private_sibling_dom_exception", sibling_dom_exception);
     if (!JSC__JSValue__toBoolean(evaluate(sibling_context, "Object.getPrototypeOf(__private_sibling_dom_exception) === DOMException.prototype && __private_sibling_dom_exception.name === 'AbortError'")))
         fail("DOMException matrix selected-realm prototype mismatch");
+
+    const atom_bytes = "shared-atom";
+    const atom_string = ZigString{ .tagged_ptr = @intFromPtr(atom_bytes.ptr), .len = atom_bytes.len };
+    const sibling_atom = ZigString__toAtomicValue(&atom_string, sibling_context);
+    const primary_atom = ZigString__toAtomicValue(&atom_string, context);
+    const foreign_atom = ZigString__toAtomicValue(&atom_string, foreign_context);
+    if (!JSC__JSValue__isStrictEqual(sibling_atom, primary_atom, context) or
+        !JSC__JSValue__isStrictEqual(sibling_atom, evaluate(sibling_context, "'shared-atom'"), sibling_context) or
+        JSC__JSValue__isStrictEqual(primary_atom, foreign_atom, context))
+        fail("private atomic string VM sharing/isolation mismatch");
+
+    const sibling_rope = JSC__JSValue__createRopeString(
+        evaluate(context, "'primary-'"),
+        evaluate(sibling_context, "'sibling'"),
+        sibling_context,
+    );
+    if (!JSC__JSValue__isStrictEqual(sibling_rope, evaluate(sibling_context, "'primary-sibling'"), sibling_context))
+        fail("private rope string same-VM sibling mismatch");
 
     const sibling_bigint_string = JSC__JSBigInt__toString(signed_negative_cell, sibling_context);
     const sibling_bigint_impl = sibling_bigint_string.value.wtf_string_impl orelse fail("sibling BigInt string missing StringImpl");
@@ -1560,5 +1664,5 @@ pub fn main() void {
         JSC__JSMap__get(map_cell, context, evaluate(context, "'direct'")) != .undefined)
         fail("private JSMap clear mismatch");
 
-    std.debug.print("Home private value shims: 89/89 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 93/93 symbols linked; runtime matrix passed\n", .{});
 }

@@ -242,6 +242,9 @@ const CContextGroup = struct {
     owner_thread: std.Thread.Id,
     primary: *Context,
     contexts: std.ArrayListUnmanaged(*Context) = .empty,
+    /// VM-owned atom strings. Equal `ZigString__toAtomicValue` inputs share
+    /// one immutable backing cell inside this context group, never across VMs.
+    atom_strings: strcell.InternTable,
     collection_epoch: u64 = 0,
     /// JavaScriptCore stores the active exception on the VM, not the realm.
     /// Preserve a distinct cell so sibling globals observe the same identity.
@@ -281,6 +284,7 @@ const CContextGroup = struct {
         self.contexts.deinit(gpa);
         self.primary.c_api_group = null;
         self.primary.destroy();
+        self.atom_strings.deinit();
         gpa.destroy(self);
     }
 };
@@ -2354,6 +2358,136 @@ export fn BunString__createArray(
     return JSArray__constructArray(global, encoded.ptr, encoded.len);
 }
 
+fn privateZigStringValue(context: *Context, string: *const PrivateZigString) PrivateBunStringError!Value {
+    const bun_string = PrivateBunString{
+        .tag = .zig_string,
+        .value = .{ .zig_string = string.* },
+    };
+    return privateBunStringValue(context, &bun_string, null);
+}
+
+fn privateZigStringToCopiedValue(
+    string: *const PrivateZigString,
+    global: JSContextRef,
+) EncodedValue {
+    const context = ctxForHandleInspection(global) orelse return .empty;
+    const opaque_group = context.c_api_group orelse return .empty;
+    const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+    if (group.pending_exception != null) return .empty;
+    const result = privateZigStringValue(context, string) catch |err| {
+        privatePublishBunStringError(context, err);
+        return .empty;
+    };
+    const encoded = privateEncodedFromValue(context, result);
+    if (encoded == .empty) privatePublishBunStringError(context, error.OutOfMemory);
+    return encoded;
+}
+
+export fn ZigString__toValueGC(
+    string: *const PrivateZigString,
+    global: JSContextRef,
+) callconv(.c) EncodedValue {
+    return privateZigStringToCopiedValue(string, global);
+}
+
+export fn ZigString__to16BitValue(
+    string: *const PrivateZigString,
+    global: JSContextRef,
+) callconv(.c) EncodedValue {
+    if (string.len == 0) {
+        const empty: PrivateZigString = .{};
+        return privateZigStringToCopiedValue(&empty, global);
+    }
+    const address = string.tagged_ptr & ((@as(usize, 1) << 53) - 1);
+    if (address == 0) {
+        const context = ctxForHandleInspection(global) orelse return .empty;
+        privatePublishBunStringError(context, error.InvalidString);
+        return .empty;
+    }
+    const raw: [*]const u8 = @ptrFromInt(address);
+    if (!std.unicode.utf8ValidateSlice(raw[0..string.len])) {
+        const context = ctxForHandleInspection(global) orelse return .empty;
+        privatePublishBunStringError(context, error.InvalidString);
+        return .empty;
+    }
+    const utf8 = PrivateZigString{
+        .tagged_ptr = address | (@as(usize, 1) << 61),
+        .len = string.len,
+    };
+    return privateZigStringToCopiedValue(&utf8, global);
+}
+
+export fn ZigString__toAtomicValue(
+    string: *const PrivateZigString,
+    global: JSContextRef,
+) callconv(.c) EncodedValue {
+    const context = ctxForHandleInspection(global) orelse return .empty;
+    const opaque_group = context.c_api_group orelse return .empty;
+    const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+    if (group.pending_exception != null) return .empty;
+    const copied = privateZigStringValue(context, string) catch |err| {
+        privatePublishBunStringError(context, err);
+        return .empty;
+    };
+    const cell = group.atom_strings.intern(copied.asStr()) catch {
+        privatePublishBunStringError(context, error.OutOfMemory);
+        return .empty;
+    };
+    const encoded = privateEncodedFromValue(context, Value.strCell(cell));
+    if (encoded == .empty) privatePublishBunStringError(context, error.OutOfMemory);
+    return encoded;
+}
+
+export fn JSC__JSValue__createRopeString(
+    left_encoded: EncodedValue,
+    right_encoded: EncodedValue,
+    global: JSContextRef,
+) callconv(.c) EncodedValue {
+    const context = ctxForEvaluation(global) orelse return .empty;
+    const opaque_group = context.c_api_group orelse return .empty;
+    const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+    if (group.pending_exception != null) return .empty;
+
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    defer context.popActiveInterpreter(&machine);
+
+    const left = privateValueFrom(global, left_encoded) orelse {
+        const err = machine.throwError("TypeError", "Rope string value belongs to another VM");
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    const left_string = machine.toStringV(left) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    const right = privateValueFrom(global, right_encoded) orelse {
+        const err = machine.throwError("TypeError", "Rope string value belongs to another VM");
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    const right_string = machine.toStringV(right) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    const joined = std.mem.concat(context.arena(), u8, &.{ left_string, right_string }) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    const result = Value.strOwned(context.arena(), joined) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    return privateEncodeResult(context, &machine, result);
+}
+
 fn privateZigStringErrorInstance(
     string: *const PrivateZigString,
     global: JSContextRef,
@@ -3416,6 +3550,7 @@ export fn JSContextGroupCreate() callconv(.c) JSContextGroupRef {
     group.* = .{
         .owner_thread = std.Thread.getCurrentId(),
         .primary = primary,
+        .atom_strings = strcell.InternTable.init(gpa),
     };
     primary.c_api_group = @ptrCast(group);
     return @ptrCast(group);
