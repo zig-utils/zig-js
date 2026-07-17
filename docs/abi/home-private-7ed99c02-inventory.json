@@ -88,8 +88,8 @@
     },
     "by_status": {
       "external": 2,
-      "implemented": 105,
-      "pending": 341
+      "implemented": 106,
+      "pending": 340
     }
   },
   "declarations": [
@@ -4824,10 +4824,10 @@
       "line": 809,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn ZigString__toDOMExceptionInstance(this: *const ZigString, global: *JSGlobalObject, code: u8) JSValue;",
       "declaration_sha256": "15174f32d86afe766d4d4a492d0afab755edc24c5ba69f0ebde4c63239c87170",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "ZigString__toErrorInstance",

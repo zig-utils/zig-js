@@ -119,6 +119,7 @@ extern "c" fn ZigString__toErrorInstance(*const ZigString, JSContextRef) Encoded
 extern "c" fn ZigString__toTypeErrorInstance(*const ZigString, JSContextRef) EncodedValue;
 extern "c" fn ZigString__toRangeErrorInstance(*const ZigString, JSContextRef) EncodedValue;
 extern "c" fn ZigString__toSyntaxErrorInstance(*const ZigString, JSContextRef) EncodedValue;
+extern "c" fn ZigString__toDOMExceptionInstance(*const ZigString, JSContextRef, u8) EncodedValue;
 extern "c" fn JSC__JSValue__asString(EncodedValue) ?*anyopaque;
 extern "c" fn JSC__JSString__eql(?*anyopaque, JSContextRef, ?*anyopaque) bool;
 extern "c" fn JSC__JSString__is8Bit(?*anyopaque) bool;
@@ -209,6 +210,14 @@ fn getProperty(context: JSContextRef, object: EncodedValue, name: [*:0]const u8)
     const result = JSObjectGetProperty(context, object.cellPointer(), property, &exception);
     if (result == null or exception != null) fail("property read failed");
     return EncodedValue.fromRef(result);
+}
+
+fn encodedLatin1(context: JSContextRef, bytes: []const u8) EncodedValue {
+    const string = BunString{
+        .tag = .zig_string,
+        .value = .{ .zig_string = .{ .tagged_ptr = @intFromPtr(bytes.ptr), .len = bytes.len } },
+    };
+    return BunString__toJS(context, &string);
 }
 
 fn getNumberProperty(context: JSContextRef, object: EncodedValue, name: [*:0]const u8) f64 {
@@ -562,6 +571,105 @@ pub fn main() void {
     if (JSC__Exception__asJSValue(preserved_zig_string_error_exception.cellPointer()) != EncodedValue.fromInt32(197))
         fail("ZigString Error replaced pending exception");
 
+    const dom_names = [_][]const u8{
+        "IndexSizeError",             "HierarchyRequestError", "WrongDocumentError",       "InvalidCharacterError",
+        "NoModificationAllowedError", "NotFoundError",         "NotSupportedError",        "InUseAttributeError",
+        "InvalidStateError",          "SyntaxError",           "InvalidModificationError", "NamespaceError",
+        "InvalidAccessError",         "TypeMismatchError",     "SecurityError",            "NetworkError",
+        "AbortError",                 "URLMismatchError",      "QuotaExceededError",       "TimeoutError",
+        "InvalidNodeTypeError",       "DataCloneError",        "EncodingError",            "NotReadableError",
+        "UnknownError",               "ConstraintError",       "DataError",                "TransactionInactiveError",
+        "ReadOnlyError",              "VersionError",          "OperationError",           "NotAllowedError",
+    };
+    const dom_messages = [_][]const u8{
+        "The index is not in the allowed range.",
+        "The operation would yield an incorrect node tree.",
+        "The object is in the wrong document.",
+        "The string contains invalid characters.",
+        "The object can not be modified.",
+        "The object can not be found here.",
+        "The operation is not supported.",
+        "The attribute is in use.",
+        "The object is in an invalid state.",
+        "",
+        " The object can not be modified in this way.",
+        "The operation is not allowed by Namespaces in XML.",
+        "The object does not support the operation or argument.",
+        "The type of an object was incompatible with the expected type of the parameter associated to the object.",
+        "The operation is insecure.",
+        " A network error occurred.",
+        "The operation was aborted.",
+        "The given URL does not match another URL.",
+        "The quota has been exceeded.",
+        "The operation timed out.",
+        "The supplied node is incorrect or has an incorrect ancestor for this operation.",
+        "The object can not be cloned.",
+        "The encoding operation (either encoded or decoding) failed.",
+        "The I/O read operation failed.",
+        "The operation failed for an unknown transient reason (e.g. out of memory).",
+        "A mutation operation in a transaction failed because a constraint was not satisfied.",
+        "Provided data is inadequate.",
+        "A request was placed against a transaction which is currently not active, or which is finished.",
+        "The mutating operation was attempted in a \"readonly\" transaction.",
+        "An attempt was made to open a database using a lower version than the existing version.",
+        "The operation failed for an operation-specific reason.",
+        "The request is not allowed by the user agent or the platform in the current context, possibly because the user denied permission.",
+    };
+    const dom_legacy_codes = [_]i32{ 1, 3, 4, 5, 7, 8, 9, 10, 11, 0, 13, 14, 15, 17, 18, 19, 20, 21, 22, 23, 24, 25, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+    const empty_zig_string = ZigString{ .tagged_ptr = 0, .len = 0 };
+    for (dom_names, dom_messages, dom_legacy_codes, 0..) |name, message, legacy_code, code| {
+        const instance = ZigString__toDOMExceptionInstance(&empty_zig_string, context, @intCast(code));
+        if (instance == .empty or
+            !JSC__JSValue__isStrictEqual(getProperty(context, instance, "name"), encodedLatin1(context, name), context) or
+            !JSC__JSValue__isStrictEqual(getProperty(context, instance, "message"), encodedLatin1(context, message), context))
+            fail("DOMException description matrix mismatch");
+        if (code == 9) {
+            if (!JSC__JSValue__isInstanceOf(instance, context, evaluate(context, "SyntaxError")))
+                fail("Bun DOM SyntaxError divergence mismatch");
+        } else {
+            const is_dom = JSC__JSValue__isInstanceOf(instance, context, evaluate(context, "DOMException"));
+            const actual_code: i32 = @intFromFloat(Bun__JSValue__toNumber(getProperty(context, instance, "code"), context));
+            if (!is_dom or actual_code != legacy_code) {
+                std.debug.print("DOMException row {d}: isDOM={} code={d} expected={d}\n", .{ code, is_dom, actual_code, legacy_code });
+                fail("DOMException legacy code/class mismatch");
+            }
+        }
+    }
+
+    const special_names = [_][]const u8{ "RangeError", "TypeError", "SyntaxError", "RangeError", "Error", "undefined", "TypeError", "TypeError", "Error" };
+    const special_messages = [_][]const u8{ "Bad value", "", "", "Maximum call stack size exceeded", "Out of memory", "", "Expected this to be of a different type", "Invalid URL", "Crypto operation failed" };
+    const special_node_codes = [_][]const u8{ "", "", "", "", "", "", "ERR_INVALID_THIS", "ERR_INVALID_URL", "ERR_CRYPTO_OPERATION_FAILED" };
+    for (special_names, special_messages, special_node_codes, 32..) |name, message, node_code, code| {
+        const instance = ZigString__toDOMExceptionInstance(&empty_zig_string, context, @intCast(code));
+        if (code == 37) {
+            if (instance != .undefined) fail("ExistingExceptionError did not return undefined");
+            continue;
+        }
+        if (instance == .empty or
+            !JSC__JSValue__isStrictEqual(getProperty(context, instance, "name"), encodedLatin1(context, name), context) or
+            !JSC__JSValue__isStrictEqual(getProperty(context, instance, "message"), encodedLatin1(context, message), context) or
+            !JSC__JSValue__isInstanceOf(instance, context, evaluate(context, @ptrCast(name.ptr))))
+            fail("DOMException special error matrix mismatch");
+        if (node_code.len > 0 and !JSC__JSValue__isStrictEqual(getProperty(context, instance, "code"), encodedLatin1(context, node_code), context))
+            fail("DOMException special Node code mismatch");
+    }
+
+    const override_dom = ZigString__toDOMExceptionInstance(&utf16_string.value.zig_string, context, 16);
+    const unknown_dom = ZigString__toDOMExceptionInstance(&latin1_string.value.zig_string, context, 255);
+    const override_ok = JSC__JSValue__isStrictEqual(getProperty(context, override_dom, "message"), evaluate(context, "'A😀\\uD800Z'"), context);
+    const unknown_name_ok = JSC__JSValue__isStrictEqual(getProperty(context, unknown_dom, "name"), evaluate(context, "''"), context);
+    const unknown_message_ok = JSC__JSValue__isStrictEqual(getProperty(context, unknown_dom, "message"), evaluate(context, "'café'"), context);
+    if (!override_ok or !unknown_name_ok or !unknown_message_ok) {
+        std.debug.print("DOMException override={} unknownName={} unknownMessage={}\n", .{ override_ok, unknown_name_ok, unknown_message_ok });
+        fail("DOMException override/unknown-code disposition mismatch");
+    }
+    JSC__VM__throwError(JSC__JSGlobalObject__vm(context), context, EncodedValue.fromInt32(198));
+    if (ZigString__toDOMExceptionInstance(&empty_zig_string, context, 16) != .empty)
+        fail("DOMException matrix ignored pending exception");
+    const preserved_dom_exception = JSGlobalObject__tryTakeException(context);
+    if (JSC__Exception__asJSValue(preserved_dom_exception.cellPointer()) != EncodedValue.fromInt32(198))
+        fail("DOMException matrix replaced pending exception");
+
     Bun__WTFStringImpl__ref(signed_min_impl);
     if (@atomicLoad(u32, &signed_min_impl.ref_count, .acquire) != 4)
         fail("BunString retain mismatch");
@@ -764,6 +872,11 @@ pub fn main() void {
     exposeCell(sibling_context, "__private_sibling_type_error", sibling_type_error);
     if (!JSC__JSValue__toBoolean(evaluate(sibling_context, "Object.getPrototypeOf(__private_sibling_type_error) === TypeError.prototype && __private_sibling_type_error.message === 'café'")))
         fail("ZigString Error selected-realm prototype mismatch");
+
+    const sibling_dom_exception = ZigString__toDOMExceptionInstance(&empty_zig_string, sibling_context, 16);
+    exposeCell(sibling_context, "__private_sibling_dom_exception", sibling_dom_exception);
+    if (!JSC__JSValue__toBoolean(evaluate(sibling_context, "Object.getPrototypeOf(__private_sibling_dom_exception) === DOMException.prototype && __private_sibling_dom_exception.name === 'AbortError'")))
+        fail("DOMException matrix selected-realm prototype mismatch");
 
     const sibling_bigint_string = JSC__JSBigInt__toString(signed_negative_cell, sibling_context);
     const sibling_bigint_impl = sibling_bigint_string.value.wtf_string_impl orelse fail("sibling BigInt string missing StringImpl");
@@ -1447,5 +1560,5 @@ pub fn main() void {
         JSC__JSMap__get(map_cell, context, evaluate(context, "'direct'")) != .undefined)
         fail("private JSMap clear mismatch");
 
-    std.debug.print("Home private value shims: 88/88 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 89/89 symbols linked; runtime matrix passed\n", .{});
 }

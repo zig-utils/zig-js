@@ -2406,6 +2406,120 @@ export fn ZigString__toSyntaxErrorInstance(string: *const PrivateZigString, glob
     return privateZigStringErrorInstance(string, global, "SyntaxError");
 }
 
+const PrivateDOMExceptionDescription = struct {
+    name: []const u8,
+    message: []const u8,
+};
+
+const private_dom_exception_descriptions = [_]PrivateDOMExceptionDescription{
+    .{ .name = "IndexSizeError", .message = "The index is not in the allowed range." },
+    .{ .name = "HierarchyRequestError", .message = "The operation would yield an incorrect node tree." },
+    .{ .name = "WrongDocumentError", .message = "The object is in the wrong document." },
+    .{ .name = "InvalidCharacterError", .message = "The string contains invalid characters." },
+    .{ .name = "NoModificationAllowedError", .message = "The object can not be modified." },
+    .{ .name = "NotFoundError", .message = "The object can not be found here." },
+    .{ .name = "NotSupportedError", .message = "The operation is not supported." },
+    .{ .name = "InUseAttributeError", .message = "The attribute is in use." },
+    .{ .name = "InvalidStateError", .message = "The object is in an invalid state." },
+    .{ .name = "SyntaxError", .message = "The string did not match the expected pattern." },
+    .{ .name = "InvalidModificationError", .message = " The object can not be modified in this way." },
+    .{ .name = "NamespaceError", .message = "The operation is not allowed by Namespaces in XML." },
+    .{ .name = "InvalidAccessError", .message = "The object does not support the operation or argument." },
+    .{ .name = "TypeMismatchError", .message = "The type of an object was incompatible with the expected type of the parameter associated to the object." },
+    .{ .name = "SecurityError", .message = "The operation is insecure." },
+    .{ .name = "NetworkError", .message = " A network error occurred." },
+    .{ .name = "AbortError", .message = "The operation was aborted." },
+    .{ .name = "URLMismatchError", .message = "The given URL does not match another URL." },
+    .{ .name = "QuotaExceededError", .message = "The quota has been exceeded." },
+    .{ .name = "TimeoutError", .message = "The operation timed out." },
+    .{ .name = "InvalidNodeTypeError", .message = "The supplied node is incorrect or has an incorrect ancestor for this operation." },
+    .{ .name = "DataCloneError", .message = "The object can not be cloned." },
+    .{ .name = "EncodingError", .message = "The encoding operation (either encoded or decoding) failed." },
+    .{ .name = "NotReadableError", .message = "The I/O read operation failed." },
+    .{ .name = "UnknownError", .message = "The operation failed for an unknown transient reason (e.g. out of memory)." },
+    .{ .name = "ConstraintError", .message = "A mutation operation in a transaction failed because a constraint was not satisfied." },
+    .{ .name = "DataError", .message = "Provided data is inadequate." },
+    .{ .name = "TransactionInactiveError", .message = "A request was placed against a transaction which is currently not active, or which is finished." },
+    .{ .name = "ReadOnlyError", .message = "The mutating operation was attempted in a \"readonly\" transaction." },
+    .{ .name = "VersionError", .message = "An attempt was made to open a database using a lower version than the existing version." },
+    .{ .name = "OperationError", .message = "The operation failed for an operation-specific reason." },
+    .{ .name = "NotAllowedError", .message = "The request is not allowed by the user agent or the platform in the current context, possibly because the user denied permission." },
+};
+
+fn privateSetErrorCode(machine: *interp.Interpreter, result: Value, code: []const u8) !void {
+    if (code.len == 0 or !result.isObject()) return;
+    try result.asObj().setOwn(machine.arena, machine.root_shape, "code", try Value.strAlloc(machine.arena, code));
+}
+
+export fn ZigString__toDOMExceptionInstance(
+    string: *const PrivateZigString,
+    global: JSContextRef,
+    code: u8,
+) callconv(.c) EncodedValue {
+    const context = ctxForEvaluation(global) orelse return .empty;
+    const opaque_group = context.c_api_group orelse return .empty;
+    const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+    if (group.pending_exception != null) return .empty;
+    const bun_string = PrivateBunString{ .tag = .zig_string, .value = .{ .zig_string = string.* } };
+    const message_value = privateBunStringValue(context, &bun_string, null) catch |err| {
+        privatePublishBunStringError(context, err);
+        return .empty;
+    };
+    const supplied_message = message_value.asStr();
+
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    defer context.popActiveInterpreter(&machine);
+
+    const result: Value = blk: {
+        if (code < private_dom_exception_descriptions.len and code != 9) {
+            const description = private_dom_exception_descriptions[code];
+            break :blk machine.makeDOMException(
+                description.name,
+                if (supplied_message.len > 0) supplied_message else description.message,
+            ) catch |err| {
+                privateSetPendingAbrupt(context, &machine, err);
+                return .empty;
+            };
+        }
+        const error_contract: struct { name: []const u8, fallback: []const u8, node_code: []const u8 } = switch (code) {
+            9, 34 => .{ .name = "SyntaxError", .fallback = "", .node_code = "" },
+            32 => .{ .name = "RangeError", .fallback = "Bad value", .node_code = "" },
+            33 => .{ .name = "TypeError", .fallback = "", .node_code = "" },
+            35 => .{ .name = "RangeError", .fallback = "Maximum call stack size exceeded", .node_code = "" },
+            36 => .{ .name = "Error", .fallback = "Out of memory", .node_code = "" },
+            37 => break :blk Value.undef(),
+            38 => .{ .name = "TypeError", .fallback = "Expected this to be of a different type", .node_code = "ERR_INVALID_THIS" },
+            39 => .{ .name = "TypeError", .fallback = "Invalid URL", .node_code = "ERR_INVALID_URL" },
+            40 => .{ .name = "Error", .fallback = "Crypto operation failed", .node_code = "ERR_CRYPTO_OPERATION_FAILED" },
+            else => break :blk machine.makeDOMException("", supplied_message) catch |err| {
+                privateSetPendingAbrupt(context, &machine, err);
+                return .empty;
+            },
+        };
+        const error_value = machine.makeError(
+            error_contract.name,
+            if (supplied_message.len > 0) supplied_message else error_contract.fallback,
+        ) catch |err| {
+            privateSetPendingAbrupt(context, &machine, err);
+            return .empty;
+        };
+        privateSetErrorCode(&machine, error_value, error_contract.node_code) catch |err| {
+            privateSetPendingAbrupt(context, &machine, err);
+            return .empty;
+        };
+        break :blk error_value;
+    };
+    return privateEncodeResult(context, &machine, result);
+}
+
 export fn JSC__JSBigInt__toString(
     cell: ?*anyopaque,
     global: JSContextRef,

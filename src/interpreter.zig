@@ -39843,7 +39843,7 @@ fn domExceptionNameGet(ctx: *anyopaque, this: Value, args: []const Value) value.
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!this.isObject()) return self.throwError("TypeError", "DOMException name getter called on non-object");
     const en = this.asObj().errorName();
-    return try Value.strAlloc(self.arena, if (en.len == 0) "Error" else en);
+    return try Value.strAlloc(self.arena, en);
 }
 fn domExceptionMessageGet(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
