@@ -2354,6 +2354,58 @@ export fn BunString__createArray(
     return JSArray__constructArray(global, encoded.ptr, encoded.len);
 }
 
+fn privateZigStringErrorInstance(
+    string: *const PrivateZigString,
+    global: JSContextRef,
+    comptime error_name: []const u8,
+) EncodedValue {
+    const context = ctxForEvaluation(global) orelse return .empty;
+    const opaque_group = context.c_api_group orelse return .empty;
+    const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+    if (group.pending_exception != null) return .empty;
+
+    const bun_string = PrivateBunString{
+        .tag = .zig_string,
+        .value = .{ .zig_string = string.* },
+    };
+    const message_value = privateBunStringValue(context, &bun_string, null) catch |err| {
+        privatePublishBunStringError(context, err);
+        return .empty;
+    };
+
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    defer context.popActiveInterpreter(&machine);
+    const result = machine.makeError(error_name, message_value.asStr()) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    return privateEncodeResult(context, &machine, result);
+}
+
+export fn ZigString__toErrorInstance(string: *const PrivateZigString, global: JSContextRef) callconv(.c) EncodedValue {
+    return privateZigStringErrorInstance(string, global, "Error");
+}
+
+export fn ZigString__toTypeErrorInstance(string: *const PrivateZigString, global: JSContextRef) callconv(.c) EncodedValue {
+    return privateZigStringErrorInstance(string, global, "TypeError");
+}
+
+export fn ZigString__toRangeErrorInstance(string: *const PrivateZigString, global: JSContextRef) callconv(.c) EncodedValue {
+    return privateZigStringErrorInstance(string, global, "RangeError");
+}
+
+export fn ZigString__toSyntaxErrorInstance(string: *const PrivateZigString, global: JSContextRef) callconv(.c) EncodedValue {
+    return privateZigStringErrorInstance(string, global, "SyntaxError");
+}
+
 export fn JSC__JSBigInt__toString(
     cell: ?*anyopaque,
     global: JSContextRef,

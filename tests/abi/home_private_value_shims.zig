@@ -52,8 +52,10 @@ const WTFStringImpl = extern struct {
     hash_and_flags: u32,
 };
 
+const ZigString = extern struct { tagged_ptr: usize, len: usize };
+
 const BunStringImpl = extern union {
-    zig_string: extern struct { tagged_ptr: usize, len: usize },
+    zig_string: ZigString,
     wtf_string_impl: ?*WTFStringImpl,
 };
 
@@ -113,6 +115,10 @@ extern "c" fn BunString__toJS(JSContextRef, *const BunString) EncodedValue;
 extern "c" fn BunString__toJSWithLength(JSContextRef, *const BunString, usize) EncodedValue;
 extern "c" fn BunString__transferToJS(*BunString, JSContextRef) EncodedValue;
 extern "c" fn BunString__createArray(JSContextRef, [*c]const BunString, usize) EncodedValue;
+extern "c" fn ZigString__toErrorInstance(*const ZigString, JSContextRef) EncodedValue;
+extern "c" fn ZigString__toTypeErrorInstance(*const ZigString, JSContextRef) EncodedValue;
+extern "c" fn ZigString__toRangeErrorInstance(*const ZigString, JSContextRef) EncodedValue;
+extern "c" fn ZigString__toSyntaxErrorInstance(*const ZigString, JSContextRef) EncodedValue;
 extern "c" fn JSC__JSValue__asString(EncodedValue) ?*anyopaque;
 extern "c" fn JSC__JSString__eql(?*anyopaque, JSContextRef, ?*anyopaque) bool;
 extern "c" fn JSC__JSString__is8Bit(?*anyopaque) bool;
@@ -531,6 +537,31 @@ pub fn main() void {
         fail("BunString array failure was not atomic");
     JSGlobalObject__clearException(context);
 
+    const plain_error = ZigString__toErrorInstance(&latin1_string.value.zig_string, context);
+    const zig_type_error = ZigString__toTypeErrorInstance(&utf8_string.value.zig_string, context);
+    const type_error_second = ZigString__toTypeErrorInstance(&utf8_string.value.zig_string, context);
+    const zig_range_error = ZigString__toRangeErrorInstance(&utf16_string.value.zig_string, context);
+    const syntax_error = ZigString__toSyntaxErrorInstance(&empty_bun_string.value.zig_string, context);
+    if (plain_error == .empty or zig_type_error == .empty or zig_range_error == .empty or syntax_error == .empty or
+        !JSC__JSValue__isAnyError(plain_error) or !JSC__JSValue__isAnyError(zig_type_error) or
+        JSC__JSValue__isStrictEqual(zig_type_error, type_error_second, context))
+        fail("ZigString Error construction/freshness mismatch");
+    exposeCell(context, "__private_plain_error", plain_error);
+    exposeCell(context, "__private_type_error", zig_type_error);
+    exposeCell(context, "__private_range_error", zig_range_error);
+    exposeCell(context, "__private_syntax_error", syntax_error);
+    if (!JSC__JSValue__toBoolean(evaluate(context, "__private_plain_error instanceof Error && Object.getPrototypeOf(__private_plain_error) === Error.prototype && __private_plain_error.name === 'Error' && __private_plain_error.message === 'café'")) or
+        !JSC__JSValue__toBoolean(evaluate(context, "__private_type_error instanceof TypeError && Object.getPrototypeOf(__private_type_error) === TypeError.prototype && __private_type_error.name === 'TypeError' && __private_type_error.message === 'A😀Z'")) or
+        !JSC__JSValue__toBoolean(evaluate(context, "__private_range_error instanceof RangeError && Object.getPrototypeOf(__private_range_error) === RangeError.prototype && __private_range_error.name === 'RangeError' && __private_range_error.message === 'A😀\\uD800Z'")) or
+        !JSC__JSValue__toBoolean(evaluate(context, "__private_syntax_error instanceof SyntaxError && Object.getPrototypeOf(__private_syntax_error) === SyntaxError.prototype && __private_syntax_error.name === 'SyntaxError' && __private_syntax_error.message === ''")))
+        fail("ZigString Error metadata/prototype mismatch");
+    JSC__VM__throwError(JSC__JSGlobalObject__vm(context), context, EncodedValue.fromInt32(197));
+    if (ZigString__toErrorInstance(&latin1_string.value.zig_string, context) != .empty)
+        fail("ZigString Error ignored pending exception");
+    const preserved_zig_string_error_exception = JSGlobalObject__tryTakeException(context);
+    if (JSC__Exception__asJSValue(preserved_zig_string_error_exception.cellPointer()) != EncodedValue.fromInt32(197))
+        fail("ZigString Error replaced pending exception");
+
     Bun__WTFStringImpl__ref(signed_min_impl);
     if (@atomicLoad(u32, &signed_min_impl.ref_count, .acquire) != 4)
         fail("BunString retain mismatch");
@@ -728,6 +759,11 @@ pub fn main() void {
     if (!JSC__JSValue__isStrictEqual(BunString__toJS(sibling_context, &latin1_string), evaluate(sibling_context, "'café'"), sibling_context) or
         !JSC__JSValue__toBoolean(evaluate(sibling_context, "Object.getPrototypeOf(__private_sibling_bun_string_array) === Array.prototype")))
         fail("BunString selected-realm conversion mismatch");
+
+    const sibling_type_error = ZigString__toTypeErrorInstance(&latin1_string.value.zig_string, sibling_context);
+    exposeCell(sibling_context, "__private_sibling_type_error", sibling_type_error);
+    if (!JSC__JSValue__toBoolean(evaluate(sibling_context, "Object.getPrototypeOf(__private_sibling_type_error) === TypeError.prototype && __private_sibling_type_error.message === 'café'")))
+        fail("ZigString Error selected-realm prototype mismatch");
 
     const sibling_bigint_string = JSC__JSBigInt__toString(signed_negative_cell, sibling_context);
     const sibling_bigint_impl = sibling_bigint_string.value.wtf_string_impl orelse fail("sibling BigInt string missing StringImpl");
@@ -1411,5 +1447,5 @@ pub fn main() void {
         JSC__JSMap__get(map_cell, context, evaluate(context, "'direct'")) != .undefined)
         fail("private JSMap clear mismatch");
 
-    std.debug.print("Home private value shims: 84/84 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 88/88 symbols linked; runtime matrix passed\n", .{});
 }
