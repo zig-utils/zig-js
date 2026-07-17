@@ -83,8 +83,8 @@
     },
     "by_status": {
       "external": 1,
-      "implemented": 237,
-      "pending": 199
+      "implemented": 238,
+      "pending": 198
     }
   },
   "home_comparison": {
@@ -842,10 +842,10 @@
       "line": 567,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn Bun__promises__isErrorLike(*JSGlobalObject, reason: JSValue) bool;",
       "declaration_sha256": "dfd548d17810fbd4a6af189e441793ef69ae8401ae0909b1cc03a407133469a0",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Bun__runDeferredWork",
