@@ -8,6 +8,7 @@ struct Transcript {
     size_t length;
     ZJSInspectorSessionRef session;
     size_t pauses;
+    int step_over_next;
 };
 
 static int contains_fragment(const char* message, size_t length, const char* fragment)
@@ -33,8 +34,14 @@ static void receive_message(const char* message, size_t length, void* user_data)
     transcript->bytes[transcript->length] = '\0';
     if (contains_fragment(message, length, "Debugger.paused")) {
         const char resume[] = "{\"id\":90,\"method\":\"Debugger.resume\"}";
+        const char step_over[] = "{\"id\":91,\"method\":\"Debugger.stepOver\"}";
         transcript->pauses++;
-        ZJSInspectorSessionDispatch(transcript->session, resume, sizeof(resume) - 1);
+        if (transcript->step_over_next) {
+            transcript->step_over_next = 0;
+            ZJSInspectorSessionDispatch(transcript->session, step_over, sizeof(step_over) - 1);
+        } else {
+            ZJSInspectorSessionDispatch(transcript->session, resume, sizeof(resume) - 1);
+        }
     }
 }
 
@@ -43,7 +50,7 @@ int main(void)
     JSGlobalContextRef context = JSGlobalContextCreate(NULL);
     if (!context || JSGlobalContextIsInspectable(context))
         return 1;
-    struct Transcript transcript = { { 0 }, 0, NULL, 0 };
+    struct Transcript transcript = { { 0 }, 0, NULL, 0, 0 };
     if (ZJSInspectorSessionCreate(context, receive_message, &transcript))
         return 2;
 
@@ -99,6 +106,26 @@ int main(void)
         return 9;
     JSStringRelease(breakpoint_url);
     JSStringRelease(breakpoint_source);
+
+    const char set_step_breakpoint[] =
+        "{\"id\":7,\"method\":\"Debugger.setBreakpointByUrl\","
+        "\"params\":{\"url\":\"step-smoke.js\",\"lineNumber\":4}}";
+    const char step_text[] =
+        "function stepFn() {\n var inner = 1;\n return inner;\n}\n"
+        "var stepped = stepFn();\nstepped += 1;\nstepped;";
+    JSStringRef step_source = JSStringCreateWithUTF8CString(step_text);
+    JSStringRef step_url = JSStringCreateWithUTF8CString("step-smoke.js");
+    transcript.step_over_next = 1;
+    if (!ZJSInspectorSessionDispatch(session, set_step_breakpoint, sizeof(set_step_breakpoint) - 1) ||
+        !JSEvaluateScript(context, step_source, NULL, step_url, 1, &exception) ||
+        exception || transcript.pauses != 4 || !strstr(transcript.bytes, "\"reason\":\"step\""))
+        return 10;
+    const char remove_step_breakpoint[] =
+        "{\"id\":8,\"method\":\"Debugger.removeBreakpoint\",\"params\":{\"breakpointId\":2}}";
+    if (!ZJSInspectorSessionDispatch(session, remove_step_breakpoint, sizeof(remove_step_breakpoint) - 1))
+        return 11;
+    JSStringRelease(step_url);
+    JSStringRelease(step_source);
 
     JSGlobalContextRelease(context);
     if (!ZJSInspectorSessionDispatch(session, evaluate, sizeof(evaluate) - 1))

@@ -117,7 +117,12 @@ const CInspectorState = struct {
     breakpoints: std.ArrayListUnmanaged(CInspectorBreakpoint) = .empty,
     resolved_breakpoints: std.ArrayListUnmanaged(CInspectorResolvedBreakpoint) = .empty,
     next_breakpoint_id: u64 = 1,
+    step_mode: CInspectorStepMode = .none,
+    step_depth: u32 = 0,
+    paused_depth: u32 = 0,
 };
+
+const CInspectorStepMode = enum { none, into, over, out };
 
 const CInspectorScript = struct {
     id: u64,
@@ -1450,6 +1455,7 @@ fn refreshInspectorDebuggerHook(state: *CInspectorState) void {
         context.debug_statement_hook = null;
         state.pause_requested = false;
         state.paused = false;
+        state.step_mode = .none;
     }
 }
 
@@ -1573,15 +1579,25 @@ fn inspectorStatementBoundary(
     var hits: std.ArrayListUnmanaged(u64) = .empty;
     defer hits.deinit(gpa);
     try inspectorBreakpointHits(state, location, &hits);
-    if (!location.debugger_statement and !state.pause_requested and hits.items.len == 0) return;
+    const step_hit = switch (state.step_mode) {
+        .none => false,
+        .into => true,
+        .over => machine.depth <= state.step_depth,
+        .out => machine.depth < state.step_depth,
+    };
+    if (!location.debugger_statement and !state.pause_requested and hits.items.len == 0 and !step_hit) return;
     const reason: []const u8 = if (location.debugger_statement)
         "debuggerStatement"
     else if (hits.items.len > 0)
         "breakpoint"
+    else if (step_hit)
+        "step"
     else
         "pause";
     state.pause_requested = false;
+    state.step_mode = .none;
     state.paused = true;
+    state.paused_depth = machine.depth;
     for (state.sessions.items) |session| {
         if (!session.attached or !session.debugger_enabled) continue;
         _ = sendInspectorJson(session, .{
@@ -1605,6 +1621,23 @@ fn inspectorStatementBoundary(
         state.paused = false;
         return machine.throwError("Error", "debugger pause requires a synchronous resume command");
     }
+}
+
+fn continueInspectorExecution(session: *CInspectorSession, id: i64, mode: CInspectorStepMode) bool {
+    const state = session.state;
+    if (!state.paused) return sendInspectorError(session, id, -32000, "runtime is not paused");
+    if (mode == .out and state.paused_depth == 0) return sendInspectorError(session, id, -32000, "cannot step out of top-level execution");
+    state.paused = false;
+    state.step_mode = mode;
+    state.step_depth = state.paused_depth;
+    if (!sendInspectorJson(session, .{ .id = id, .result = .{} })) return false;
+    for (state.sessions.items) |candidate| {
+        if (candidate.attached and candidate.debugger_enabled) _ = sendInspectorJson(candidate, .{
+            .method = "Debugger.resumed",
+            .params = .{},
+        });
+    }
+    return true;
 }
 
 const InspectorDescription = struct {
@@ -1829,16 +1862,16 @@ export fn ZJSInspectorSessionDispatch(
         return sendInspectorJson(session, .{ .id = id, .result = .{} });
     }
     if (std.mem.eql(u8, method, "Debugger.resume")) {
-        if (!session.state.paused) return sendInspectorError(session, id, -32000, "runtime is not paused");
-        session.state.paused = false;
-        if (!sendInspectorJson(session, .{ .id = id, .result = .{} })) return false;
-        for (session.state.sessions.items) |candidate| {
-            if (candidate.attached and candidate.debugger_enabled) _ = sendInspectorJson(candidate, .{
-                .method = "Debugger.resumed",
-                .params = .{},
-            });
-        }
-        return true;
+        return continueInspectorExecution(session, id, .none);
+    }
+    if (std.mem.eql(u8, method, "Debugger.stepInto")) {
+        return continueInspectorExecution(session, id, .into);
+    }
+    if (std.mem.eql(u8, method, "Debugger.stepOver")) {
+        return continueInspectorExecution(session, id, .over);
+    }
+    if (std.mem.eql(u8, method, "Debugger.stepOut")) {
+        return continueInspectorExecution(session, id, .out);
     }
     if (std.mem.eql(u8, method, "Debugger.getScriptSource")) {
         const params_value = request.get("params") orelse return sendInspectorError(session, id, -32602, "params are required");
@@ -4329,6 +4362,116 @@ test "C-API: debugger publishes scripts and synchronously pauses at source locat
     try std.testing.expect(std.mem.indexOf(u8, transcript, "\"hitBreakpoints\":[1]") != null);
     try std.testing.expect(std.mem.indexOf(u8, transcript, "function recur") != null);
     try std.testing.expect(std.mem.indexOf(u8, transcript, "\"hitBreakpoints\":[2]") != null);
+}
+
+test "C-API: debugger stepping observes logical call depth" {
+    const ContinueMode = enum { into, over, out };
+    const State = struct {
+        session: ZJSInspectorSessionRef = null,
+        mode: ContinueMode = .into,
+        used_step: bool = false,
+        pauses: usize = 0,
+        bytes: [32768]u8 = undefined,
+        len: usize = 0,
+
+        fn receive(message: [*]const u8, message_len: usize, user_data: ?*anyopaque) callconv(.c) void {
+            const self: *@This() = @ptrCast(@alignCast(user_data.?));
+            std.debug.assert(self.len + message_len + 1 <= self.bytes.len);
+            @memcpy(self.bytes[self.len .. self.len + message_len], message[0..message_len]);
+            self.len += message_len;
+            self.bytes[self.len] = '\n';
+            self.len += 1;
+            if (std.mem.indexOf(u8, message[0..message_len], "Debugger.paused") == null) return;
+            self.pauses += 1;
+            const command = if (!self.used_step) switch (self.mode) {
+                .into => "{\"id\":80,\"method\":\"Debugger.stepInto\"}",
+                .over => "{\"id\":81,\"method\":\"Debugger.stepOver\"}",
+                .out => "{\"id\":82,\"method\":\"Debugger.stepOut\"}",
+            } else "{\"id\":89,\"method\":\"Debugger.resume\"}";
+            self.used_step = true;
+            std.debug.assert(ZJSInspectorSessionDispatch(self.session, command, command.len));
+        }
+    };
+
+    const ctx = JSGlobalContextCreate(null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(ctx);
+    JSGlobalContextSetInspectable(ctx, true);
+    var state: State = .{};
+    state.session = ZJSInspectorSessionCreate(ctx, State.receive, &state) orelse return error.SessionCreateFailed;
+    defer ZJSInspectorSessionRelease(state.session);
+    const enable = "{\"id\":1,\"method\":\"Debugger.enable\"}";
+    try std.testing.expect(ZJSInspectorSessionDispatch(state.session, enable, enable.len));
+
+    const step_into_breakpoint =
+        "{\"id\":2,\"method\":\"Debugger.setBreakpointByUrl\",\"params\":{\"url\":\"step-into.js\",\"lineNumber\":4}}";
+    try std.testing.expect(ZJSInspectorSessionDispatch(state.session, step_into_breakpoint, step_into_breakpoint.len));
+    const into_source = JSStringCreateWithUTF8CString(
+        "function intoFn() {\n var insideInto = 1;\n return insideInto;\n}\nvar intoResult = intoFn();\nintoResult += 1;\nintoResult;",
+    ) orelse return error.StringInitFailed;
+    defer JSStringRelease(into_source);
+    const into_url = JSStringCreateWithUTF8CString("step-into.js") orelse return error.StringInitFailed;
+    defer JSStringRelease(into_url);
+    var exception: JSValueRef = null;
+    const into_start = state.len;
+    const into_result = JSEvaluateScript(ctx, into_source, null, into_url, 1, &exception) orelse return error.EvalFailed;
+    try std.testing.expectEqual(@as(f64, 2), JSValueToNumber(ctx, into_result, &exception));
+    try std.testing.expectEqual(@as(usize, 2), state.pauses);
+    try std.testing.expect(std.mem.indexOf(u8, state.bytes[into_start..state.len], "\"reason\":\"step\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, state.bytes[into_start..state.len], "\"lineNumber\":1") != null);
+
+    state.mode = .over;
+    state.used_step = false;
+    const step_over_breakpoint =
+        "{\"id\":3,\"method\":\"Debugger.setBreakpointByUrl\",\"params\":{\"url\":\"step-over.js\",\"lineNumber\":4}}";
+    try std.testing.expect(ZJSInspectorSessionDispatch(state.session, step_over_breakpoint, step_over_breakpoint.len));
+    const over_source = JSStringCreateWithUTF8CString(
+        "function overFn() {\n var insideOver = 1;\n return insideOver;\n}\nvar overResult = overFn();\noverResult += 1;\noverResult;",
+    ) orelse return error.StringInitFailed;
+    defer JSStringRelease(over_source);
+    const over_url = JSStringCreateWithUTF8CString("step-over.js") orelse return error.StringInitFailed;
+    defer JSStringRelease(over_url);
+    const over_start = state.len;
+    const over_result = JSEvaluateScript(ctx, over_source, null, over_url, 1, &exception) orelse return error.EvalFailed;
+    try std.testing.expectEqual(@as(f64, 2), JSValueToNumber(ctx, over_result, &exception));
+    try std.testing.expectEqual(@as(usize, 4), state.pauses);
+    try std.testing.expect(std.mem.indexOf(u8, state.bytes[over_start..state.len], "\"reason\":\"step\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, state.bytes[over_start..state.len], "\"lineNumber\":5") != null);
+
+    state.mode = .out;
+    state.used_step = false;
+    const step_out_breakpoint =
+        "{\"id\":4,\"method\":\"Debugger.setBreakpointByUrl\",\"params\":{\"url\":\"step-out.js\",\"lineNumber\":1}}";
+    try std.testing.expect(ZJSInspectorSessionDispatch(state.session, step_out_breakpoint, step_out_breakpoint.len));
+    const out_source = JSStringCreateWithUTF8CString(
+        "function outFn() {\n var insideOut = 1;\n return insideOut;\n}\nvar outResult = outFn();\noutResult += 1;\noutResult;",
+    ) orelse return error.StringInitFailed;
+    defer JSStringRelease(out_source);
+    const out_url = JSStringCreateWithUTF8CString("step-out.js") orelse return error.StringInitFailed;
+    defer JSStringRelease(out_url);
+    const out_start = state.len;
+    const out_result = JSEvaluateScript(ctx, out_source, null, out_url, 1, &exception) orelse return error.EvalFailed;
+    try std.testing.expectEqual(@as(f64, 2), JSValueToNumber(ctx, out_result, &exception));
+    try std.testing.expectEqual(@as(usize, 6), state.pauses);
+    try std.testing.expect(std.mem.indexOf(u8, state.bytes[out_start..state.len], "\"reason\":\"step\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, state.bytes[out_start..state.len], "\"lineNumber\":5") != null);
+
+    state.mode = .over;
+    state.used_step = false;
+    const step_exception_breakpoint =
+        "{\"id\":5,\"method\":\"Debugger.setBreakpointByUrl\",\"params\":{\"url\":\"step-exception.js\",\"lineNumber\":5}}";
+    try std.testing.expect(ZJSInspectorSessionDispatch(state.session, step_exception_breakpoint, step_exception_breakpoint.len));
+    const exception_source = JSStringCreateWithUTF8CString(
+        "function throwFn() {\n throw 1;\n}\nvar afterThrow = 0;\ntry {\n throwFn();\n} catch (errorValue) {\n afterThrow = 2;\n}\nafterThrow;",
+    ) orelse return error.StringInitFailed;
+    defer JSStringRelease(exception_source);
+    const exception_url = JSStringCreateWithUTF8CString("step-exception.js") orelse return error.StringInitFailed;
+    defer JSStringRelease(exception_url);
+    const exception_start = state.len;
+    const exception_result = JSEvaluateScript(ctx, exception_source, null, exception_url, 1, &exception) orelse return error.EvalFailed;
+    try std.testing.expectEqual(@as(f64, 2), JSValueToNumber(ctx, exception_result, &exception));
+    try std.testing.expectEqual(@as(usize, 8), state.pauses);
+    try std.testing.expect(std.mem.indexOf(u8, state.bytes[exception_start..state.len], "\"reason\":\"step\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, state.bytes[exception_start..state.len], "\"lineNumber\":7") != null);
 }
 
 test "C-API: ordinary constructors keep intrinsic identity and function source metadata" {

@@ -219,8 +219,9 @@ and callback throws.
 The pinned public C inventory has no pending declarations. Inspector sessions
 now publish stable scripts and exact statement locations, and provide real
 `debugger;`, explicit pause/resume control, and deterministically resolved
-script/URL breakpoints with removal. Stepping, exception policy, call frames,
-remote objects, and scopes continue under
+script/URL breakpoints with removal. Logical-depth step-into, step-over, and
+step-out are implemented for ordinary synchronous calls. Exception policy,
+call frames, remote objects, and scopes continue under
 [#153](https://github.com/zig-utils/zig-js/issues/153) and
 [#154](https://github.com/zig-utils/zig-js/issues/154); see
 [docs/inspector.md](docs/inspector.md).

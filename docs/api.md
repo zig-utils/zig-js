@@ -236,8 +236,9 @@ versioned in-process JSON transport documented in [Inspector protocol](/inspecto
 Debugger-enabled C-API evaluations publish stable script IDs and exact adjusted
 statement locations. `debugger;` and explicit pause requests stop at those
 boundaries; URL/script breakpoints resolve to the nearest following statement
-and may be removed deterministically. The synchronous callback must issue
-resume before returning. While
+and may be removed deterministically. Step-into, step-over, and step-out use
+ordinary-function logical call depth. The synchronous callback must issue a
+continuation before returning. While
 the debugger is enabled, execution is routed through the tree walker so the VM
 and baseline tier cannot bypass a pause point for scripts and ordinary
 synchronous functions. Suspendable generator/async pause coherence remains
