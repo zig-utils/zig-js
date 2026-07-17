@@ -9224,6 +9224,37 @@ pub const Interpreter = struct {
         return null;
     }
 
+    /// Private embedding boundary for native Map cells. These helpers bypass
+    /// mutable userland Map.prototype methods and operate on [[MapData]] through
+    /// the same internal implementation as the builtins.
+    pub fn createNativeMap(self: *Interpreter) EvalError!Value {
+        return self.makeMap(Value.undef());
+    }
+
+    pub fn nativeMapGet(self: *Interpreter, map: *value.Object, key: Value) EvalError!Value {
+        return (try self.mapMethod(map, "get", &.{key})) orelse Value.undef();
+    }
+
+    pub fn nativeMapHas(self: *Interpreter, map: *value.Object, key: Value) EvalError!bool {
+        return ((try self.mapMethod(map, "has", &.{key})) orelse Value.boolVal(false)).toBoolean();
+    }
+
+    pub fn nativeMapRemove(self: *Interpreter, map: *value.Object, key: Value) EvalError!bool {
+        return ((try self.mapMethod(map, "delete", &.{key})) orelse Value.boolVal(false)).toBoolean();
+    }
+
+    pub fn nativeMapSet(self: *Interpreter, map: *value.Object, key: Value, stored_value: Value) EvalError!void {
+        _ = (try self.mapMethod(map, "set", &.{ key, stored_value })) orelse Value.undef();
+    }
+
+    pub fn nativeMapClear(self: *Interpreter, map: *value.Object) EvalError!void {
+        _ = (try self.mapMethod(map, "clear", &.{})) orelse Value.undef();
+    }
+
+    pub fn nativeMapSize(_: *Interpreter, map: *value.Object) usize {
+        return liveMapEntryCount(map);
+    }
+
     fn setMethod(self: *Interpreter, o: *value.Object, name: []const u8, args: []const Value) EvalError!?Value {
         const self_v = Value.obj(o);
         // A WeakSet value must be holdable weakly (object or non-registered

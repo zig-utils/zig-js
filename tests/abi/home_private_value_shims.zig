@@ -123,6 +123,13 @@ extern "c" fn JSC__JSPromise__wrap(JSContextRef, *anyopaque, PromiseWrapCallback
 extern "c" fn JSC__JSValue__asInternalPromise(EncodedValue) ?*anyopaque;
 extern "c" fn JSC__JSValue__asPromise(EncodedValue) ?*anyopaque;
 extern "c" fn JSC__JSValue__createInternalPromise(JSContextRef) EncodedValue;
+extern "c" fn JSC__JSMap__create(JSContextRef) ?*anyopaque;
+extern "c" fn JSC__JSMap__set(?*anyopaque, JSContextRef, EncodedValue, EncodedValue) void;
+extern "c" fn JSC__JSMap__get(?*anyopaque, JSContextRef, EncodedValue) EncodedValue;
+extern "c" fn JSC__JSMap__has(?*anyopaque, JSContextRef, EncodedValue) bool;
+extern "c" fn JSC__JSMap__remove(?*anyopaque, JSContextRef, EncodedValue) bool;
+extern "c" fn JSC__JSMap__clear(?*anyopaque, JSContextRef) void;
+extern "c" fn JSC__JSMap__size(?*anyopaque, JSContextRef) usize;
 
 const PromiseWrapCallback = *const fn (*anyopaque, JSContextRef) callconv(.c) EncodedValue;
 
@@ -1100,5 +1107,108 @@ pub fn main() void {
     if (!JSC__JSValue__isStrictEqual(getProperty(context, invalid_target_error, "name"), evaluate(context, "'TypeError'"), context))
         fail("private AnyPromise invalid target error mismatch");
 
-    std.debug.print("Home private value shims: 69/69 symbols linked; runtime matrix passed\n", .{});
+    const map_cell = JSC__JSMap__create(sibling_context) orelse fail("private JSMap creation failed");
+    const map_value = EncodedValue.fromBits(@intFromPtr(map_cell));
+    exposeCell(sibling_context, "__private_native_map", map_value);
+    if (!JSC__JSValue__isStrictEqual(
+        JSC__JSValue__getPrototype(map_value, sibling_context),
+        evaluate(sibling_context, "Map.prototype"),
+        sibling_context,
+    ) or JSC__JSMap__size(map_cell, context) != 0 or
+        JSC__JSMap__get(map_cell, context, EncodedValue.fromInt32(1)) != .undefined or
+        JSC__JSMap__has(map_cell, context, EncodedValue.fromInt32(1)) or
+        JSC__JSMap__remove(map_cell, context, EncodedValue.fromInt32(1)))
+        fail("private JSMap empty/realm mismatch");
+
+    const sibling_map_value = evaluate(sibling_context, "globalThis.__private_map_value = { sibling: true }; __private_map_value");
+    JSC__JSMap__set(map_cell, context, evaluate(context, "'a'"), direct_value);
+    JSC__JSMap__set(map_cell, sibling_context, evaluate(sibling_context, "'b'"), sibling_map_value);
+    JSC__JSMap__set(map_cell, context, evaluate(context, "'a'"), wrap_error);
+    if (JSC__JSMap__size(map_cell, context) != 2 or
+        !JSC__JSValue__isStrictEqual(JSC__JSMap__get(map_cell, context, evaluate(context, "'a'")), wrap_error, context) or
+        !JSC__JSValue__isStrictEqual(JSC__JSMap__get(map_cell, context, evaluate(context, "'b'")), sibling_map_value, context) or
+        !JSC__JSValue__isStrictEqual(evaluate(sibling_context, "Array.from(__private_native_map.keys()).join(',')"), evaluate(context, "'a,b'"), context))
+        fail("private JSMap insert/update/order mismatch");
+
+    JSC__JSMap__set(map_cell, context, evaluate(context, "NaN"), EncodedValue.fromInt32(11));
+    JSC__JSMap__set(map_cell, context, EncodedValue.fromDouble(-0.0), EncodedValue.fromInt32(12));
+    const equal_string_key = evaluate(context, "'same-key'");
+    JSC__JSMap__set(map_cell, context, equal_string_key, EncodedValue.fromInt32(13));
+    if (JSC__JSMap__get(map_cell, context, EncodedValue.fromDouble(std.math.nan(f64))) != EncodedValue.fromInt32(11) or
+        JSC__JSMap__get(map_cell, context, EncodedValue.fromDouble(0.0)) != EncodedValue.fromInt32(12) or
+        JSC__JSMap__get(map_cell, context, evaluate(context, "'same-' + 'key'")) != EncodedValue.fromInt32(13) or
+        !JSC__JSMap__has(map_cell, context, EncodedValue.fromDouble(std.math.nan(f64))))
+        fail("private JSMap SameValueZero mismatch");
+
+    const identity_key = evaluate(context, "globalThis.__private_map_identity_key = {}; __private_map_identity_key");
+    const other_identity_key = evaluate(context, "({})");
+    JSC__JSMap__set(map_cell, context, identity_key, EncodedValue.fromInt32(14));
+    if (JSC__JSMap__get(map_cell, context, identity_key) != EncodedValue.fromInt32(14) or
+        JSC__JSMap__has(map_cell, context, other_identity_key))
+        fail("private JSMap object identity mismatch");
+
+    if (!JSC__JSMap__remove(map_cell, context, evaluate(context, "'a'")) or
+        JSC__JSMap__remove(map_cell, context, evaluate(context, "'a'")))
+        fail("private JSMap removal mismatch");
+    JSC__JSMap__set(map_cell, context, evaluate(context, "'a'"), direct_value);
+    if (!JSC__JSValue__isStrictEqual(
+        evaluate(sibling_context, "Array.from(__private_native_map.keys()).slice(-2).join(',')"),
+        evaluate(context, "'[object Object],a'"),
+        context,
+    )) fail("private JSMap reinsertion order mismatch");
+
+    _ = evaluate(sibling_context,
+        \\Map.prototype.set = function () { throw 901; };
+        \\Map.prototype.get = function () { throw 902; };
+        \\Object.defineProperty(Map.prototype, 'size', { get() { throw 903; }, configurable: true });
+    );
+    JSC__JSMap__set(map_cell, sibling_context, evaluate(context, "'direct'"), EncodedValue.fromInt32(15));
+    if (JSC__JSMap__get(map_cell, sibling_context, evaluate(context, "'direct'")) != EncodedValue.fromInt32(15) or
+        JSC__JSMap__size(map_cell, sibling_context) == 0 or JSGlobalObject__hasException(context))
+        fail("private JSMap invoked mutable prototype methods");
+
+    const size_before_foreign = JSC__JSMap__size(map_cell, context);
+    JSC__JSMap__set(map_cell, context, EncodedValue.fromRef(foreign_object), direct_value);
+    if (!JSGlobalObject__hasException(context))
+        fail("private JSMap foreign key did not preserve first exception");
+    const foreign_map_key_exception = JSGlobalObject__tryTakeException(context);
+    const foreign_map_key_error = JSC__Exception__asJSValue(foreign_map_key_exception.cellPointer());
+    if (!JSC__JSValue__isStrictEqual(getProperty(context, foreign_map_key_error, "name"), evaluate(context, "'TypeError'"), context) or
+        JSC__JSMap__size(map_cell, context) != size_before_foreign)
+        fail("private JSMap foreign key failure atomicity mismatch");
+
+    JSC__JSMap__set(map_cell, context, evaluate(context, "'foreign-value'"), EncodedValue.fromRef(foreign_object));
+    if (!JSGlobalObject__hasException(context))
+        fail("private JSMap foreign value did not throw");
+    JSGlobalObject__clearException(context);
+    if (JSC__JSMap__has(map_cell, context, evaluate(context, "'foreign-value'")))
+        fail("private JSMap foreign value mutated map");
+
+    const weak_map = evaluate(context, "new WeakMap()");
+    if (JSC__JSMap__get(encoded_object.cellPointer(), context, .true) != .empty or
+        !JSGlobalObject__hasException(context))
+        fail("private JSMap ordinary-object receiver accepted");
+    JSGlobalObject__clearException(context);
+    if (JSC__JSMap__size(weak_map.cellPointer(), context) != 0 or !JSGlobalObject__hasException(context))
+        fail("private JSMap WeakMap receiver accepted");
+    JSGlobalObject__clearException(context);
+    const foreign_map_cell = JSC__JSMap__create(foreign_context) orelse fail("foreign private JSMap creation failed");
+    if (JSC__JSMap__has(foreign_map_cell, context, .true) or !JSGlobalObject__hasException(context))
+        fail("private JSMap foreign receiver accepted");
+    JSGlobalObject__clearException(context);
+
+    JSC__VM__throwError(vm, context, EncodedValue.fromInt32(444));
+    JSC__JSMap__set(map_cell, context, evaluate(context, "'blocked'"), .true);
+    const preserved_map_exception = JSGlobalObject__tryTakeException(context);
+    if (JSC__Exception__asJSValue(preserved_map_exception.cellPointer()) != EncodedValue.fromInt32(444) or
+        JSC__JSMap__has(map_cell, context, evaluate(context, "'blocked'")))
+        fail("private JSMap replaced pending exception or mutated state");
+
+    JSC__JSMap__clear(map_cell, context);
+    if (JSC__JSMap__size(map_cell, context) != 0 or
+        JSC__JSMap__has(map_cell, context, evaluate(context, "NaN")) or
+        JSC__JSMap__get(map_cell, context, evaluate(context, "'direct'")) != .undefined)
+        fail("private JSMap clear mismatch");
+
+    std.debug.print("Home private value shims: 76/76 symbols linked; runtime matrix passed\n", .{});
 }

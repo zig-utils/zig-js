@@ -1361,6 +1361,124 @@ fn privatePromiseCellFromEncoded(encoded: EncodedValue) ?*anyopaque {
     return @ptrCast(boxed);
 }
 
+const PrivateMapOperation = enum { create, get, has, remove, clear, set, size };
+
+const PrivateMapResult = struct {
+    encoded: EncodedValue = .empty,
+    boolean: bool = false,
+    size: usize = 0,
+};
+
+fn privateMapCellFromEncoded(encoded: EncodedValue) ?*anyopaque {
+    const boxed = privateBoxedFrom(encoded) orelse return null;
+    if (boxed.private_kind != .value or !boxed.value.isObject()) return null;
+    const object = boxed.value.asObj();
+    if (!object.is_map or object.is_weak) return null;
+    return @ptrCast(boxed);
+}
+
+fn privateMapObjectFromCell(global: JSContextRef, cell: ?*anyopaque) ?*Object {
+    const context = ctxForHandleInspection(global) orelse return null;
+    const boxed = privateBoxFromCell(cell) orelse return null;
+    if (boxed.private_kind != .value) return null;
+    if (boxed.owner != context) {
+        const group = context.c_api_group orelse return null;
+        if (boxed.owner.c_api_group != group) return null;
+    }
+    if (!boxed.value.isObject()) return null;
+    const object = boxed.value.asObj();
+    if (!object.is_map or object.is_weak) return null;
+    return object;
+}
+
+fn privateApplyNativeMap(
+    global: JSContextRef,
+    cell: ?*anyopaque,
+    operation: PrivateMapOperation,
+    encoded_key: EncodedValue,
+    encoded_value: EncodedValue,
+) PrivateMapResult {
+    const context = ctxForEvaluation(global) orelse return .{};
+    const opaque_group = context.c_api_group orelse return .{};
+    const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+    if (group.pending_exception != null) return .{};
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .{};
+    };
+    defer context.popActiveInterpreter(&machine);
+
+    if (operation == .create) {
+        const created = machine.createNativeMap() catch |err| {
+            privateSetPendingAbrupt(context, &machine, err);
+            return .{};
+        };
+        return .{ .encoded = privateEncodeResult(context, &machine, created) };
+    }
+
+    const map = privateMapObjectFromCell(global, cell) orelse {
+        const err = machine.throwError("TypeError", "JSMap receiver is not a native Map in this VM");
+        privateSetPendingAbrupt(context, &machine, err);
+        return .{};
+    };
+    const needs_key = operation == .get or operation == .has or operation == .remove or operation == .set;
+    const key = if (needs_key) privateValueFrom(global, encoded_key) orelse {
+        const err = machine.throwError("TypeError", "JSMap key belongs to another VM");
+        privateSetPendingAbrupt(context, &machine, err);
+        return .{};
+    } else Value.undef();
+    const stored_value = if (operation == .set) privateValueFrom(global, encoded_value) orelse {
+        const err = machine.throwError("TypeError", "JSMap value belongs to another VM");
+        privateSetPendingAbrupt(context, &machine, err);
+        return .{};
+    } else Value.undef();
+
+    return switch (operation) {
+        .create => unreachable,
+        .get => result: {
+            const found = machine.nativeMapGet(map, key) catch |err| {
+                privateSetPendingAbrupt(context, &machine, err);
+                break :result .{};
+            };
+            break :result .{ .encoded = privateEncodeResult(context, &machine, found) };
+        },
+        .has => result: {
+            const found = machine.nativeMapHas(map, key) catch |err| {
+                privateSetPendingAbrupt(context, &machine, err);
+                break :result .{};
+            };
+            break :result .{ .boolean = found };
+        },
+        .remove => result: {
+            const removed = machine.nativeMapRemove(map, key) catch |err| {
+                privateSetPendingAbrupt(context, &machine, err);
+                break :result .{};
+            };
+            break :result .{ .boolean = removed };
+        },
+        .clear => result: {
+            machine.nativeMapClear(map) catch |err| {
+                privateSetPendingAbrupt(context, &machine, err);
+                break :result .{};
+            };
+            break :result .{};
+        },
+        .set => result: {
+            machine.nativeMapSet(map, key, stored_value) catch |err| {
+                privateSetPendingAbrupt(context, &machine, err);
+                break :result .{};
+            };
+            break :result .{};
+        },
+        .size => .{ .size = machine.nativeMapSize(map) },
+    };
+}
+
 fn privateTakePendingExceptionValue(context: *Context) ?Value {
     const opaque_group = context.c_api_group orelse return null;
     const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
@@ -2435,6 +2553,52 @@ export fn JSC__AnyPromise__wrap(
     }
     promise.resolve(&machine, target, internal) catch |err|
         privateSetPendingAbrupt(context, &machine, err);
+}
+
+export fn JSC__JSMap__create(global: JSContextRef) callconv(.c) ?*anyopaque {
+    const result = privateApplyNativeMap(global, null, .create, .undefined, .undefined);
+    return privateMapCellFromEncoded(result.encoded);
+}
+
+export fn JSC__JSMap__get(
+    map: ?*anyopaque,
+    global: JSContextRef,
+    key: EncodedValue,
+) callconv(.c) EncodedValue {
+    return privateApplyNativeMap(global, map, .get, key, .undefined).encoded;
+}
+
+export fn JSC__JSMap__has(
+    map: ?*anyopaque,
+    global: JSContextRef,
+    key: EncodedValue,
+) callconv(.c) bool {
+    return privateApplyNativeMap(global, map, .has, key, .undefined).boolean;
+}
+
+export fn JSC__JSMap__remove(
+    map: ?*anyopaque,
+    global: JSContextRef,
+    key: EncodedValue,
+) callconv(.c) bool {
+    return privateApplyNativeMap(global, map, .remove, key, .undefined).boolean;
+}
+
+export fn JSC__JSMap__clear(map: ?*anyopaque, global: JSContextRef) callconv(.c) void {
+    _ = privateApplyNativeMap(global, map, .clear, .undefined, .undefined);
+}
+
+export fn JSC__JSMap__set(
+    map: ?*anyopaque,
+    global: JSContextRef,
+    key: EncodedValue,
+    stored_value: EncodedValue,
+) callconv(.c) void {
+    _ = privateApplyNativeMap(global, map, .set, key, stored_value);
+}
+
+export fn JSC__JSMap__size(map: ?*anyopaque, global: JSContextRef) callconv(.c) usize {
+    return privateApplyNativeMap(global, map, .size, .undefined, .undefined).size;
 }
 
 fn valueFromContext(ctx: *Context, ref: JSValueRef) ?Value {

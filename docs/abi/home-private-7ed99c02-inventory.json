@@ -87,8 +87,8 @@
     },
     "by_status": {
       "external": 1,
-      "implemented": 86,
-      "pending": 361
+      "implemented": 93,
+      "pending": 354
     }
   },
   "declarations": [
@@ -1385,10 +1385,10 @@
       "line": 20,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSMap__clear(*JSMap, *anyopaque) void;",
       "declaration_sha256": "2880f03a1ca647b4d2110dfced7f9e3a12dd5d75770479f1f9f82f066e36c651",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSMap__create",
@@ -1396,10 +1396,10 @@
       "line": 15,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSMap__create(*anyopaque) *JSMap;",
       "declaration_sha256": "023cd7b6980bd8e928bcfd4786d233e08b357362b5b87659f1fe524346721dc9",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSMap__get",
@@ -1407,10 +1407,10 @@
       "line": 17,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSMap__get(*JSMap, *anyopaque, JSValue) JSValue;",
       "declaration_sha256": "a78bee17eca0ef3d445588349183c4a9b7c1a7fd768aa71a09619921b6691c8c",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSMap__has",
@@ -1418,10 +1418,10 @@
       "line": 18,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSMap__has(*JSMap, *anyopaque, JSValue) bool;",
       "declaration_sha256": "a019eefb7510de5521e18ec8a3edabe715c30576d1abb83e829db8d5f001aa9c",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSMap__remove",
@@ -1429,10 +1429,10 @@
       "line": 19,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSMap__remove(*JSMap, *anyopaque, JSValue) bool;",
       "declaration_sha256": "259796e35e306ee8d35a4aff288eb866cb98ac33fdb151bd7a3bdfc63503de84",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSMap__set",
@@ -1440,10 +1440,10 @@
       "line": 16,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSMap__set(*JSMap, *anyopaque, JSValue, JSValue) void;",
       "declaration_sha256": "0dc2004b544d715be18f17d3c9ad27974d7c66253cc2d5b705ed02e04188e2ee",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSMap__size",
@@ -1451,10 +1451,10 @@
       "line": 21,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSMap__size(*JSMap, *anyopaque) usize;",
       "declaration_sha256": "4c0d81441af371a80a94679dd1e020634d01e0a20201f71f8e2f24d94cf1807b",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSModuleLoader__evaluate",
