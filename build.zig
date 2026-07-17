@@ -33,12 +33,20 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/c_api.zig"),
             .target = target,
             .optimize = optimize,
+            .link_libc = target.result.os.tag == .macos,
             .imports = &.{
                 .{ .name = "regex", .module = regex_mod },
                 .{ .name = "gc", .module = gc_mod },
             },
         }),
     });
+    lib.root_module.addIncludePath(b.path("include"));
+    if (target.result.os.tag == .macos) {
+        lib.root_module.addCSourceFile(.{
+            .file = b.path("src/objc_bridge.m"),
+            .flags = &.{ "-fobjc-arc", "-fblocks", "-Wno-incomplete-implementation" },
+        });
+    }
     b.installArtifact(lib);
     b.getInstallStep().dependOn(&b.addInstallDirectory(.{
         .source_dir = b.path("include"),
@@ -76,6 +84,26 @@ pub fn build(b: *std.Build) void {
         objc_header_smoke.step.dependOn(&objc_api_audit_cmd.step);
         const objc_header_step = b.step("test-objc-api-headers", "Compile the Objective-C bridge headers on macOS");
         objc_header_step.dependOn(&objc_header_smoke.step);
+
+        const objc_runtime_smoke = b.addExecutable(.{
+            .name = "objc-api-runtime-smoke",
+            .root_module = b.createModule(.{
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+            }),
+        });
+        objc_runtime_smoke.root_module.addCSourceFile(.{
+            .file = b.path("tests/objc_api_runtime_smoke.m"),
+            .flags = &.{ "-fobjc-arc", "-fblocks" },
+        });
+        objc_runtime_smoke.root_module.addIncludePath(b.path("include"));
+        objc_runtime_smoke.root_module.linkLibrary(lib);
+        objc_runtime_smoke.root_module.linkFramework("Foundation", .{});
+        const run_objc_runtime_smoke = b.addRunArtifact(objc_runtime_smoke);
+        run_objc_runtime_smoke.step.dependOn(&objc_api_audit_cmd.step);
+        const objc_runtime_step = b.step("test-objc-api", "Compile, link, and run the Objective-C bridge host");
+        objc_runtime_step.dependOn(&run_objc_runtime_smoke.step);
     }
 
     const c_api_c_smoke = b.addExecutable(.{
