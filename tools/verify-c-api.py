@@ -12,7 +12,20 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 INVENTORY = ROOT / "docs/c-api/jsc-public-api-macos-27.0.json"
-PRIVATE_INVENTORY = ROOT / "docs/abi/home-private-7ed99c02-inventory.json"
+PRIVATE_INVENTORIES = (
+    ROOT / "docs/abi/home-private-7ed99c02-inventory.json",
+    ROOT / "docs/abi/bun-private-core-4982b91e-inventory.json",
+)
+# Bun's StringImpl retain/release helpers are native support for by-value
+# BunString results. The pinned Zig source inventories do not declare them:
+# Zig performs ref/deref inline and calls only the cold destroy path, while the
+# Rust consumer uses the full explicit trio. Keep this exception closed and
+# auditable instead of accepting arbitrary Bun__ exports.
+PRIVATE_SUPPORT_EXPORTS = {
+    "Bun__WTFStringImpl__ref",
+    "Bun__WTFStringImpl__deref",
+    "Bun__WTFStringImpl__destroy",
+}
 INCLUDE = ROOT / "include/JavaScriptCore"
 SOURCE = ROOT / "src/c_api.zig"
 
@@ -95,11 +108,13 @@ def main() -> None:
         fail(f"implemented functions missing Zig exports: {missing_exports}")
 
     extensions = set(data["zig_js_extensions"])
-    private_data = json.loads(PRIVATE_INVENTORY.read_text())
-    private_exports = {
-        entry["name"] for entry in private_data["declarations"]
-        if entry["classification"] == "private_jsc" and entry["status"] == "implemented"
-    }
+    private_exports = set(PRIVATE_SUPPORT_EXPORTS)
+    for private_inventory in PRIVATE_INVENTORIES:
+        private_data = json.loads(private_inventory.read_text())
+        private_exports.update(
+            entry["name"] for entry in private_data["declarations"]
+            if entry["classification"] == "private_jsc" and entry["status"] == "implemented"
+        )
     unexpected_exports = sorted(exports - inventory_names - extensions - private_exports)
     missing_extensions = sorted(extensions - exports)
     if unexpected_exports or missing_extensions:
