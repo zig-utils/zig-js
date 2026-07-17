@@ -2752,7 +2752,19 @@ pub const Context = struct {
         tdz.* = .{};
         self.tdz_marker = tdz;
 
-        try interp.installGlobals(&self.env, self.root_shape);
+        const parent_symbol: ?*value.Object = if (primary.env.get("Symbol")) |symbol|
+            if (symbol.isObject()) symbol.asObj() else null
+        else
+            null;
+        try interp.installGlobalsInner(&self.env, self.root_shape, parent_symbol);
+        if (parent_symbol) |source_symbol| {
+            if (source_symbol.getOwn("\x00registry")) |registry| {
+                if (self.env.get("Symbol")) |symbol| {
+                    if (symbol.isObject())
+                        try symbol.asObj().setOwn(a, self.root_shape, "\x00registry", registry);
+                }
+            }
+        }
         inline for (.{ "Date", "Error", "RegExp", "Function" }, 0..) |name, index| {
             self.c_api_builtin_constructors[index] = self.env.get(name) orelse Value.undef();
         }

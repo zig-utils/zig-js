@@ -1683,6 +1683,25 @@ export fn JSC__JSValue__stringIncludes(
     return interp.Interpreter.stringIncludesUtf16(haystack, needle);
 }
 
+export fn JSC__JSValue__isClass(encoded: EncodedValue, global: JSContextRef) callconv(.c) bool {
+    const internal = privateValueFrom(global, encoded) orelse return false;
+    if (!internal.isObject() or internal.asObj().is_symbol or internal.asObj().is_bigint) return false;
+    const object = internal.asObj();
+    if (object.jsFunction()) |erased| {
+        const function: *interp.Function = @ptrCast(@alignCast(erased));
+        return function.is_class_constructor;
+    }
+    if (object.boundFunction() != null) return false;
+    return interp.isConstructorValue(internal);
+}
+
+export fn JSC__JSValue__isAggregateError(encoded: EncodedValue, global: JSContextRef) callconv(.c) bool {
+    const internal = privateValueFrom(global, encoded) orelse return false;
+    if (!internal.isObject()) return false;
+    const object = internal.asObj();
+    return object.behavior.is_error and std.mem.eql(u8, object.errorName(), "AggregateError");
+}
+
 export fn JSC__JSValue__isStrictEqual(
     left: EncodedValue,
     right: EncodedValue,

@@ -102,6 +102,8 @@ extern "c" fn Bun__JSValue__toNumber(EncodedValue, JSContextRef) f64;
 extern "c" fn JSC__JSValue__isInstanceOf(EncodedValue, JSContextRef, EncodedValue) bool;
 extern "c" fn JSC__JSValue__isIterable(EncodedValue, JSContextRef) bool;
 extern "c" fn JSC__JSValue__stringIncludes(EncodedValue, JSContextRef, EncodedValue) bool;
+extern "c" fn JSC__JSValue__isClass(EncodedValue, JSContextRef) bool;
+extern "c" fn JSC__JSValue__isAggregateError(EncodedValue, JSContextRef) bool;
 
 fn fail(message: []const u8) noreturn {
     std.debug.print("Home private value shims: {s}\n", .{message});
@@ -646,11 +648,11 @@ pub fn main() void {
     const custom_constructor = evaluate(context, "globalThis.__private_has_instance_hits = 0; Object.defineProperty(function CustomCtor() {}, Symbol.hasInstance, { value(v) { __private_has_instance_hits++; return v === 42; } })");
     if (!JSC__JSValue__isInstanceOf(EncodedValue.fromInt32(42), context, custom_constructor) or
         JSC__JSValue__isInstanceOf(EncodedValue.fromInt32(41), context, custom_constructor) or
-        JSC__JSValue__toInt32(evaluate(context, "__private_has_instance_hits")) != 2)
+        Bun__JSValue__toNumber(evaluate(context, "__private_has_instance_hits"), context) != 2)
         fail("private Symbol.hasInstance mismatch");
     const inert_has_instance = evaluate(context, "({ [Symbol.hasInstance]() { __private_has_instance_hits += 100; return true; } })");
     if (JSC__JSValue__isInstanceOf(encoded_object, context, inert_has_instance) or
-        JSC__JSValue__toInt32(evaluate(context, "__private_has_instance_hits")) != 2 or
+        Bun__JSValue__toNumber(evaluate(context, "__private_has_instance_hits"), context) != 2 or
         JSGlobalObject__hasException(context))
         fail("private non-has-instance object precheck mismatch");
     const proxy_constructor = evaluate(context, "new Proxy(function ProxyCtor() {}, { get(target, key, receiver) { if (key === Symbol.hasInstance) return () => true; return Reflect.get(target, key, receiver); } })");
@@ -670,14 +672,17 @@ pub fn main() void {
     JSGlobalObject__clearException(context);
 
     const explicit_iterable = evaluate(context, "globalThis.__private_iterator_gets = 0; ({ get [Symbol.iterator]() { __private_iterator_gets++; return function* () {}; } })");
-    if (!JSC__JSValue__isIterable(evaluate(context, "[]"), context) or
-        !JSC__JSValue__isIterable(explicit_iterable, sibling_context) or
-        JSC__JSValue__toInt32(evaluate(context, "__private_iterator_gets")) != 1 or
-        JSC__JSValue__isIterable(encoded_text, context) or
+    if (!JSC__JSValue__isIterable(evaluate(context, "[]"), context))
+        fail("private array iterator method mismatch");
+    if (!JSC__JSValue__isIterable(explicit_iterable, sibling_context))
+        fail("private sibling iterator method mismatch");
+    if (Bun__JSValue__toNumber(evaluate(context, "__private_iterator_gets"), context) != 1)
+        fail("private iterator getter count mismatch");
+    if (JSC__JSValue__isIterable(encoded_text, context) or
         JSC__JSValue__isIterable(.null, context) or
         JSC__JSValue__isIterable(evaluate(context, "({ [Symbol.iterator]: null })"), context) or
         JSGlobalObject__hasException(context))
-        fail("private iterator-method predicate mismatch");
+        fail("private absent iterator-method mismatch");
     if (JSC__JSValue__isIterable(evaluate(context, "({ [Symbol.iterator]: 1 })"), context) or
         !JSGlobalObject__hasException(context))
         fail("private non-callable iterator did not throw");
@@ -736,5 +741,34 @@ pub fn main() void {
         fail("private string inclusion foreign value did not throw");
     JSGlobalObject__clearException(context);
 
-    std.debug.print("Home private value shims: 51/51 symbols linked; runtime matrix passed\n", .{});
+    const class_constructor = evaluate(context, "class PrivateClass {}; PrivateClass");
+    const ordinary_function = evaluate(context, "function ordinary() {}; ordinary");
+    const bound_class = evaluate(context, "(class BoundClass {}).bind(null)");
+    const proxied_class = evaluate(context, "new Proxy(class ProxiedClass {}, {})");
+    if (!JSC__JSValue__isClass(class_constructor, context) or
+        JSC__JSValue__isClass(ordinary_function, context) or
+        JSC__JSValue__isClass(evaluate(context, "() => {}"), context) or
+        JSC__JSValue__isClass(bound_class, context) or
+        !JSC__JSValue__isClass(evaluate(context, "Array"), context) or
+        !JSC__JSValue__isClass(proxied_class, sibling_context) or
+        JSC__JSValue__isClass(encoded_object, context) or
+        JSC__JSValue__isClass(.null, context) or
+        JSC__JSValue__isClass(EncodedValue.fromRef(foreign_object), context))
+        fail("private class classification mismatch");
+
+    const aggregate_error = evaluate(context, "globalThis.__private_aggregate = new AggregateError([], 'x'); __private_aggregate");
+    const aggregate_subclass = evaluate(context, "class PrivateAggregate extends AggregateError {}; new PrivateAggregate([])");
+    const spoofed_aggregate = evaluate(context, "({ name: 'AggregateError', __proto__: AggregateError.prototype })");
+    if (!JSC__JSValue__isAggregateError(aggregate_error, context) or
+        !JSC__JSValue__isAggregateError(aggregate_subclass, sibling_context) or
+        JSC__JSValue__isAggregateError(evaluate(context, "new Error('x')"), context) or
+        JSC__JSValue__isAggregateError(spoofed_aggregate, context) or
+        JSC__JSValue__isAggregateError(.undefined, context) or
+        JSC__JSValue__isAggregateError(EncodedValue.fromRef(foreign_object), context))
+        fail("private AggregateError classification mismatch");
+    _ = evaluate(context, "__private_aggregate.name = 'Error'; Object.setPrototypeOf(__private_aggregate, null)");
+    if (!JSC__JSValue__isAggregateError(aggregate_error, context))
+        fail("private AggregateError classification depended on mutable properties");
+
+    std.debug.print("Home private value shims: 53/53 symbols linked; runtime matrix passed\n", .{});
 }

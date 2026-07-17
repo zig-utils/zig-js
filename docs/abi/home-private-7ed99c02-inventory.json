@@ -87,8 +87,8 @@
     },
     "by_status": {
       "external": 1,
-      "implemented": 68,
-      "pending": 379
+      "implemented": 70,
+      "pending": 377
     }
   },
   "declarations": [
@@ -2166,10 +2166,10 @@
       "line": 2195,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSValue__isAggregateError(this: JSValue, globalObject: *JSGlobalObject) bool;",
       "declaration_sha256": "1fd9677a66e9e43e00a06115e3b05282385f7a8cc947f0dc4a6ef4d6ce34a1b4",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSValue__isAnyError",
@@ -2188,10 +2188,10 @@
       "line": 1110,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSValue__isClass(this: JSValue, global: *JSGlobalObject) bool;",
       "declaration_sha256": "0454ae0a05e69b66de5469b1bec7d98cb64c96cef8e044d5c983c899818d6f8e",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSValue__isException",
