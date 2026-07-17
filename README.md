@@ -236,7 +236,7 @@ claim that Home's or Bun's private `JSC__*`/`Bun__*` ABI is implemented.
 The separately generated
 [Home private inventory](docs/abi/home-private-7ed99c02-inventory.json) makes
 that remaining boundary concrete: **448 unique extern symbols from 58 pinned
-files**, classified as 431 private (**81 implemented / 350 pending**), 15
+files**, classified as 431 private (**82 implemented / 349 pending**), 15
 already-covered public-C overlaps, one platform import, and one
 consumer-generated `JSFunctionCall` definition, with zero duplicate or
 unclassified entries.
@@ -247,10 +247,10 @@ The first private-ABI foundation is implemented without changing engine values:
 `private_abi.EncodedValue` translates primitives to the pinned eight-byte JSC64
 encoding (including exact int32/double/NaN/cell rules), while rejecting
 string/object conversion until a validated external cell handle exists.
-The first eighty-one private exports—encoded identity/cell equality, truthiness,
+The first eighty-two private exports—encoded identity/cell equality, truthiness,
 int32 extraction, exact signed/unsigned 64-bit BigInt construction, and
 modulo-2^64 BigInt extraction with pinned number fallbacks, plus exact `===` and
-SameValue equality, two exact cell-type queries, five opaque BigInt cell
+SameValue equality, two exact cell-type queries, six opaque BigInt cell
 operations, three exact BigInt comparison/arithmetic operations, seven
 JSCell/JSString operations, three ordinary-object foundation operations, and
 two object-coercion/prototype operations, two numeric DateInstance operations,
@@ -323,24 +323,28 @@ and failure-atomic same-VM ownership checks. The shared FFI slow paths convert
 validated JSC64 BigInt cells with exact signed/unsigned modulo-2^64 behavior,
 including arbitrary-size values. Common abort reasons now create fresh
 selected-realm `TimeoutError`/`AbortError` DOMExceptions with the pinned
-messages and legacy codes. The 79-symbol combined fixture
+messages and legacy codes. BigInt decimal conversion returns the pinned
+24-byte `BunString` with a fresh refcount-one 8-bit `WTFStringImpl`; matching
+atomic ref/deref/destroy exports make ownership explicit for Zig and Rust
+consumers. The 80-symbol combined fixture
 covers sibling realms, foreign-VM rejection, callback reentrancy, exception clearing, and already-settled targets.
 The BigInt cell gate downcasts only real owned cells, compares arbitrary-size
 values exactly against i64/u64/f64 (including 2^53, subnormal, infinity, and 10^400
-boundaries), and performs signed modulo-2^64 extraction without lossy double
-conversion. The value-level BigInt gate preserves JSC's four comparison results,
+boundaries), performs signed modulo-2^64 extraction without lossy double
+conversion, and returns owned decimal text across same-VM sibling realms. The
+value-level BigInt gate preserves JSC's four comparison results,
 adds arbitrary-size values without narrowing, and reproduces the pinned
 `sec * 1_000_000 + nsec` timeval formula at both signed i64 extremes. The
 constructors return real context-owned BigInt cells.
 The [full private `JSType` layout](docs/abi/private-jstype-layouts.json) proves
 that Home has 97 members while Bun has 98: Bun's one inserted tag renumbers 70
 later members. `-Dprivate-abi-consumer=home|bun` selects the exact layout, and
-separately compiled fixtures pass 20 real cell kinds for each. All eighty-one
+separately compiled fixtures pass 20 real cell kinds for each. All eighty-two
 private exports remain excluded from the 117-function public count and 19
 extensions.
 The separate pinned
 [Bun core inventory](docs/abi/bun-private-core-4982b91e-inventory.json) contains
-437 symbols from 54 `src/jsc` files: 421 private (**74 implemented / 347
+437 symbols from 54 `src/jsc` files: 421 private (**75 implemented / 346
 pending**), 15 public overlaps, and one consumer-generated `JSFunctionCall`
 definition. Its exact comparison with Home finds 434
 shared names, 3 Bun-only names, 14 Home-only names, and 28 changed signatures;

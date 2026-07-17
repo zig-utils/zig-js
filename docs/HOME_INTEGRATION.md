@@ -49,15 +49,16 @@ zig build home-private-abi-audit \
 
 This verifies the live revision, every source hash, signature, classification,
 and calling convention. It replaces a vague source-level estimate, but the 431
-private imports are now 81 implemented / 350 pending under #163. The generated
+private imports are now 82 implemented / 349 pending under #163. The generated
 FFI wrapper emits and resolves `JSFunctionCall` inside its own compiled module,
 so zig-js must not provide a duplicate symbol. The implemented
 slices cover JSC64 value identity, cell equality, truthiness, int32 extraction,
 exact signed/unsigned 64-bit BigInt construction, and modulo-2^64 BigInt
 extraction with the pinned number fallbacks, plus exact strict and SameValue
-equality for primitives and context-owned cells. Five opaque BigInt cell shims
-add exact arbitrary-size ordering against i64/u64/f64 plus signed modulo-2^64
-extraction. Seven JSCell/JSString shims add exact UTF-16 and 8-bit string
+equality for primitives and context-owned cells. Six opaque BigInt cell shims
+add exact arbitrary-size ordering against i64/u64/f64, signed modulo-2^64
+extraction, and owned decimal conversion through the pinned 24-byte
+`BunString`/refcounted `WTFStringImpl` ABI. Seven JSCell/JSString shims add exact UTF-16 and 8-bit string
 semantics, value equality, object identity, and primitive boxing. The two
 ordinary-object constructors and wrapper-unboxing shim add exact prototype,
 freshness, int32/double, negative-zero, NaN, and primitive-value behavior. Three
@@ -99,7 +100,7 @@ behavior, and VM exception propagation. Ten Promise/InternalPromise shims add
 selected-realm pending and directly settled promises, exact native downcasts,
 callback Promise passthrough, Error/throw rejection, and normal AnyPromise
 resolution with thenable assimilation and self-resolution protection. Their
-79-symbol combined fixture covers sibling realms, foreign VMs, callback
+80-symbol combined fixture covers sibling realms, foreign VMs, callback
 reentrancy, exception clearing, and settled-target no-ops. Seven Home-only
 JSMap shims create selected-realm native maps and directly implement
 SameValueZero get/has/set/remove/clear/size semantics without invoking mutable

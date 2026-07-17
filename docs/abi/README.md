@@ -44,7 +44,7 @@ convention. The exact current denominator is:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #163 | 431 (81 implemented, 350 pending) |
+| Private JSC/Bun/WebCore ABI under #163 | 431 (82 implemented, 349 pending) |
 | Overlap with zig-js's completed public C target | 15 |
 | Platform libc import | 1 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
@@ -61,7 +61,7 @@ zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"
 ```
 
 This inventory is the denominator, not a claim that the whole surface works.
-The first eighty-one private entries are implemented; the other 350 remain pending
+The first eighty-two private entries are implemented; the other 349 remain pending
 until #163 provides their type/layout contracts, shims, and consumer evidence.
 `JSFunctionCall` remains revision-pinned in the declaration inventory but is
 not part of that denominator: each runtime-generated FFI module defines the
@@ -135,7 +135,7 @@ It covers empty/immediate/int32/double/NaN/negative-zero behavior, boxed
 empty/nonempty strings, object identity/truthiness, signed minimum and unsigned
 maximum BigInts, negative modulo extraction, exact number fallbacks, and every
 invalid/non-exact boundary. Public accounting stays unchanged at 117 functions
-and 19 extensions; these eighty-one symbols are reported only as private profile
+and 19 extensions; these eighty-two symbols are reported only as private profile
 exports.
 
 The opaque BigInt cell slice additionally exports `JSC__JSBigInt__fromJS`, the
@@ -144,8 +144,12 @@ It reuses zig-js's arbitrary-precision integer comparison rather than narrowing
 through `f64`: the runtime matrix covers values beyond i128, the 2^53 rounding
 boundary, positive and negative fractional comparisons, the minimum positive
 subnormal, infinities, a 10^400 BigInt against `floatMax`, and signed
-modulo-2^64 extraction. `JSC__JSBigInt__toString` remains pending until its
-separate Bun/Home string-return layout is pinned.
+modulo-2^64 extraction. `JSC__JSBigInt__toString` now mirrors the pinned
+24-byte `BunString` tagged union and returns a fresh, owned, 8-bit
+`WTFStringImpl` decimal result with refcount one. The fixture covers signed and
+oversized values, same-VM sibling realms, fresh allocation identity, atomic
+retain/release, exact layout/flags, and first-pending-exception preservation.
+The cold destroy export also supports Bun's Rust-side inline atomic release.
 
 The value-level BigInt slice exports `JSC__JSValue__asBigIntCompare`,
 `JSC__JSValue__bigIntSum`, and `JSC__JSValue__fromTimevalNoTruncate`. It returns
@@ -259,7 +263,7 @@ decode validated JSC64 cells and apply exact signed/unsigned modulo-2^64 BigInt
 conversion, including values beyond i128. CommonAbortReason conversion creates
 fresh selected-realm TimeoutError/AbortError DOMExceptions with the pinned
 messages and legacy codes and preserves a pre-existing VM exception. The
-79-symbol combined runtime
+80-symbol combined runtime
 fixture covers these semantics; the two profile-selected JSType exports retain
 their separate Home/Bun runtime fixtures.
 
@@ -302,7 +306,7 @@ profile contains 437 unique declarations from 54 hashed files:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #164 | 421 (74 implemented, 347 pending) |
+| Private JSC/Bun/WebCore ABI under #164 | 421 (75 implemented, 346 pending) |
 | Public-C overlap | 15 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
 | **Total** | **437** |
@@ -319,5 +323,5 @@ zig build bun-private-abi-audit -Dbun-source-root="$HOME/Code/bun"
 
 The audit rejects revision, file hash, declaration digest, classification,
 calling-convention, implementation-status, and Home-comparison drift. It does
-not claim complete Bun runtime compatibility; #164 remains open for the 347
+not claim complete Bun runtime compatibility; #164 remains open for the 346
 pending core entries and later wider/generated profiles.
