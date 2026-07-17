@@ -142,6 +142,11 @@ extern "c" fn Yarr__RegularExpression__matchedLength(?*anyopaque) i32;
 // missing BunString parameter is tracked as source drift in issue #213.
 extern "c" fn Yarr__RegularExpression__searchRev(?*anyopaque, BunString) i32;
 extern "c" fn Yarr__RegularExpression__matches(?*anyopaque, BunString) i32;
+extern "c" fn WTF__parseDouble([*]const u8, usize, *usize) f64;
+extern "c" fn WTF__parseES5Date([*]const u8, usize) f64;
+extern "c" fn WTF__numberOfProcessorCores() c_int;
+extern "c" fn WTF__releaseFastMallocFreeMemoryForThisThread() void;
+extern "c" fn Bun__writeHTTPDate(*[32]u8, usize, u64) c_int;
 extern "c" fn ZigString__toErrorInstance(*const ZigString, JSContextRef) EncodedValue;
 extern "c" fn ZigString__toTypeErrorInstance(*const ZigString, JSContextRef) EncodedValue;
 extern "c" fn ZigString__toRangeErrorInstance(*const ZigString, JSContextRef) EncodedValue;
@@ -740,6 +745,17 @@ pub fn main() void {
         Yarr__RegularExpression__matchedLength(invalid_regular_expression) != -1)
         fail("invalid RegularExpression state mismatch");
     Yarr__RegularExpression__deinit(invalid_regular_expression);
+
+    var parsed_length: usize = 0;
+    if (WTF__parseDouble("12.5tail", 8, &parsed_length) != 12.5 or parsed_length != 4 or
+        WTF__parseES5Date("2000-01-01T00:00:00.000Z", 24) != 946_684_800_000 or
+        WTF__numberOfProcessorCores() < 1)
+        fail("WTF parse/processor helper mismatch");
+    WTF__releaseFastMallocFreeMemoryForThisThread();
+    var http_date: [32]u8 = @splat(0);
+    if (Bun__writeHTTPDate(&http_date, http_date.len, 784_111_777_000) != 29 or
+        !std.mem.eql(u8, http_date[0..29], "Sun, 06 Nov 1994 08:49:37 GMT"))
+        fail("WTF HTTP date helper mismatch");
 
     StringBuilder__init(&string_builder);
     StringBuilder__appendInt(&string_builder, std.math.minInt(i32));
@@ -2785,5 +2801,5 @@ pub fn main() void {
         TopExceptionScope__exceptionIncludingTraps(&verification_scope) != null)
         fail("private TopExceptionScope destruction mismatch");
 
-    std.debug.print("Home private value shims: 184/184 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 189/189 symbols linked; runtime matrix passed\n", .{});
 }

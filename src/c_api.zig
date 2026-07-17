@@ -2980,6 +2980,228 @@ export fn Yarr__RegularExpression__searchRev(
     return @intCast(result.position);
 }
 
+export fn WTF__parseDouble(bytes: [*]const u8, length: usize, counted: *usize) callconv(.c) f64 {
+    counted.* = 0;
+    const input = bytes[0..length];
+    var index: usize = 0;
+    if (index < input.len and (input[index] == '+' or input[index] == '-')) index += 1;
+
+    var saw_digit = false;
+    while (index < input.len and std.ascii.isDigit(input[index])) : (index += 1) saw_digit = true;
+    if (index < input.len and input[index] == '.') {
+        index += 1;
+        while (index < input.len and std.ascii.isDigit(input[index])) : (index += 1) saw_digit = true;
+    }
+    if (!saw_digit) return 0;
+
+    if (index < input.len and (input[index] == 'e' or input[index] == 'E')) {
+        var exponent_end = index + 1;
+        if (exponent_end < input.len and (input[exponent_end] == '+' or input[exponent_end] == '-'))
+            exponent_end += 1;
+        const exponent_start = exponent_end;
+        while (exponent_end < input.len and std.ascii.isDigit(input[exponent_end])) : (exponent_end += 1) {}
+        if (exponent_end != exponent_start) index = exponent_end;
+    }
+
+    const result = std.fmt.parseFloat(f64, input[0..index]) catch return 0;
+    counted.* = index;
+    return result;
+}
+
+fn privateES5DateInteger(input: []const u8, index: *usize, minimum: i64, maximum: i64) ?i64 {
+    while (index.* < input.len and switch (input[index.*]) {
+        ' ', '\t', '\n', '\r', 0x0b, 0x0c => true,
+        else => false,
+    }) index.* += 1;
+    if (index.* < input.len and input[index.*] == '+') index.* += 1;
+    var negative = false;
+    if (index.* < input.len and input[index.*] == '-') {
+        negative = true;
+        index.* += 1;
+    }
+    const digit_start = index.*;
+    var magnitude: i128 = 0;
+    while (index.* < input.len and std.ascii.isDigit(input[index.*])) : (index.* += 1) {
+        const digit: i128 = input[index.*] - '0';
+        const limit = @as(i128, std.math.maxInt(i64)) + 1;
+        if (magnitude > @divTrunc(limit - digit, 10)) return null;
+        magnitude = magnitude * 10 + digit;
+    }
+    if (index.* == digit_start) return null;
+    const signed = if (negative) -magnitude else magnitude;
+    if (signed <= minimum or signed >= maximum) return null;
+    return @intCast(signed);
+}
+
+fn privateES5LeapYear(year: i64) bool {
+    return @mod(year, 4) == 0 and (@mod(year, 100) != 0 or @mod(year, 400) == 0);
+}
+
+fn privateES5DaysFromCivil(year_input: i64, month: i64, day: i64) i64 {
+    const year = year_input - @as(i64, if (month <= 2) 1 else 0);
+    const era = @divTrunc(if (year >= 0) year else year - 399, 400);
+    const year_of_era = year - era * 400;
+    const shifted_month = if (month > 2) month - 3 else month + 9;
+    const day_of_year = @divFloor(153 * shifted_month + 2, 5) + day - 1;
+    const day_of_era = year_of_era * 365 + @divFloor(year_of_era, 4) -
+        @divFloor(year_of_era, 100) + day_of_year;
+    return era * 146097 + day_of_era - 719468;
+}
+
+fn privateParseES5Date(input: []const u8) f64 {
+    const nan = std.math.nan(f64);
+    var index: usize = 0;
+    const negative_year = input.len != 0 and input[0] == '-';
+    const year = privateES5DateInteger(input, &index, std.math.minInt(i32), std.math.maxInt(i32)) orelse return nan;
+    if (year == 0 and negative_year) return nan;
+
+    var month: i64 = 1;
+    var day: i64 = 1;
+    var single_digit = false;
+    if (index < input.len and input[index] == '-') {
+        index += 1;
+        if (index >= input.len or !std.ascii.isDigit(input[index])) return nan;
+        const start = index;
+        month = privateES5DateInteger(input, &index, std.math.minInt(i64), std.math.maxInt(i64)) orelse return nan;
+        const digits = index - start;
+        if (digits == 1) single_digit = true else if (digits != 2) return nan;
+        if (index < input.len and input[index] == '-') {
+            index += 1;
+            if (index >= input.len or !std.ascii.isDigit(input[index])) return nan;
+            const day_start = index;
+            day = privateES5DateInteger(input, &index, std.math.minInt(i64), std.math.maxInt(i64)) orelse return nan;
+            const day_digits = index - day_start;
+            if (day_digits == 1) single_digit = true else if (day_digits != 2) return nan;
+        }
+    }
+
+    var hours: i64 = 0;
+    var minutes: i64 = 0;
+    var seconds: i64 = 0;
+    var milliseconds: f64 = 0;
+    var timezone_seconds: i64 = 0;
+    if (index < input.len and (input[index] == 'T' or input[index] == 't' or input[index] == ' ')) {
+        const has_t = input[index] == 'T' or input[index] == 't';
+        index += 1;
+        if (single_digit and has_t) return nan;
+        if (index >= input.len or !std.ascii.isDigit(input[index])) return nan;
+
+        var start = index;
+        hours = privateES5DateInteger(input, &index, std.math.minInt(i64), std.math.maxInt(i64)) orelse return nan;
+        if (index >= input.len or input[index] != ':' or (has_t and index - start != 2)) return nan;
+        index += 1;
+        if (index >= input.len or !std.ascii.isDigit(input[index])) return nan;
+        start = index;
+        minutes = privateES5DateInteger(input, &index, std.math.minInt(i64), std.math.maxInt(i64)) orelse return nan;
+        if (has_t and index - start != 2) return nan;
+
+        if (index < input.len and input[index] == ':') {
+            index += 1;
+            if (index >= input.len or !std.ascii.isDigit(input[index])) return nan;
+            start = index;
+            seconds = privateES5DateInteger(input, &index, std.math.minInt(i64), std.math.maxInt(i64)) orelse return nan;
+            if (has_t and index - start != 2) return nan;
+            if (index < input.len and input[index] == '.') {
+                index += 1;
+                if (index >= input.len or !std.ascii.isDigit(input[index])) return nan;
+                const fraction_start = index;
+                const fraction = privateES5DateInteger(input, &index, std.math.minInt(i64), std.math.maxInt(i64)) orelse return nan;
+                const fraction_digits: i32 = @intCast(index - fraction_start);
+                milliseconds = @as(f64, @floatFromInt(fraction)) * std.math.pow(f64, 10, @as(f64, @floatFromInt(3 - fraction_digits)));
+            }
+        }
+
+        if (index < input.len and input[index] == 'Z') {
+            index += 1;
+        } else if (index < input.len and (input[index] == '+' or input[index] == '-')) {
+            const timezone_negative = input[index] == '-';
+            index += 1;
+            if (index >= input.len or !std.ascii.isDigit(input[index])) return nan;
+            const timezone_start = index;
+            const timezone = privateES5DateInteger(input, &index, std.math.minInt(i64), std.math.maxInt(i64)) orelse return nan;
+            const timezone_digits = index - timezone_start;
+            var timezone_hours: i64 = undefined;
+            var timezone_minutes: i64 = 0;
+            if (index < input.len and input[index] == ':') {
+                if (has_t and timezone_digits != 2) return nan;
+                timezone_hours = timezone;
+                index += 1;
+                if (index >= input.len or !std.ascii.isDigit(input[index])) return nan;
+                const minute_start = index;
+                timezone_minutes = privateES5DateInteger(input, &index, std.math.minInt(i64), std.math.maxInt(i64)) orelse return nan;
+                if (has_t and index - minute_start != 2) return nan;
+            } else if (!has_t and timezone_digits == 2) {
+                timezone_hours = timezone;
+            } else if (timezone_digits == 4) {
+                timezone_hours = @divTrunc(timezone, 100);
+                timezone_minutes = @mod(timezone, 100);
+            } else return nan;
+            if (timezone_hours > 23 or timezone_minutes < 0 or timezone_minutes > 59) return nan;
+            timezone_seconds = 60 * (timezone_minutes + 60 * timezone_hours);
+            if (timezone_negative) timezone_seconds = -timezone_seconds;
+        }
+    }
+
+    if (index != input.len) return nan;
+    const days_per_month = [_]i64{ 31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+    if (month < 1 or month > 12) return nan;
+    if (day < 1 or day > days_per_month[@intCast(month - 1)]) return nan;
+    if (month == 2 and day > 28 and !privateES5LeapYear(year)) return nan;
+    if (hours < 0 or hours > 24 or minutes < 0 or minutes > 59 or seconds < 0 or seconds >= 61) return nan;
+    if (hours == 24 and (minutes != 0 or seconds != 0)) return nan;
+    if (seconds == 60) milliseconds = 0;
+
+    const day_value: f64 = @floatFromInt(privateES5DaysFromCivil(year, month, day));
+    return day_value * 86_400_000.0 + @as(f64, @floatFromInt(hours)) * 3_600_000.0 +
+        @as(f64, @floatFromInt(minutes)) * 60_000.0 + @as(f64, @floatFromInt(seconds)) * 1_000.0 +
+        milliseconds - @as(f64, @floatFromInt(timezone_seconds)) * 1_000.0;
+}
+
+export fn WTF__parseES5Date(bytes: [*]const u8, length: usize) callconv(.c) f64 {
+    return privateParseES5Date(bytes[0..length]);
+}
+
+export fn WTF__numberOfProcessorCores() callconv(.c) c_int {
+    const count = std.Thread.getCpuCount() catch 1;
+    return @intCast(@max(1, @min(count, @as(usize, std.math.maxInt(c_int)))));
+}
+
+/// zig-js does not use WTF FastMalloc and retains no per-thread FastMalloc
+/// cache, so the release request is already satisfied when it reaches us.
+export fn WTF__releaseFastMallocFreeMemoryForThisThread() callconv(.c) void {}
+
+export fn Bun__writeHTTPDate(buffer: *[32]u8, length: usize, timestamp_ms: u64) callconv(.c) c_int {
+    if (timestamp_ms == 0) return 0;
+    const seconds = timestamp_ms / 1000;
+    const max_epoch_seconds: u64 = @intCast(privateES5DaysFromCivil(std.math.maxInt(std.time.epoch.Year), 12, 31) *
+        std.time.epoch.secs_per_day + (std.time.epoch.secs_per_day - 1));
+    if (seconds > max_epoch_seconds) return -1;
+    const epoch_seconds = std.time.epoch.EpochSeconds{ .secs = seconds };
+    const year_day = epoch_seconds.getEpochDay().calculateYearDay();
+    const month_day = year_day.calculateMonthDay();
+    const day_seconds = epoch_seconds.getDaySeconds();
+    const weekday_names = [_][]const u8{ "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
+    const month_names = [_][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+    const weekday: usize = @intCast(@mod(epoch_seconds.getEpochDay().day + 4, 7));
+    var rendered_storage: [31]u8 = undefined;
+    const rendered = std.fmt.bufPrint(&rendered_storage, "{s}, {d:0>2} {s} {d:0>4} {d:0>2}:{d:0>2}:{d:0>2} GMT", .{
+        weekday_names[weekday],
+        month_day.day_index + 1,
+        month_names[@intFromEnum(month_day.month) - 1],
+        @as(u32, year_day.year) % 9999,
+        day_seconds.getHoursIntoDay(),
+        day_seconds.getMinutesIntoHour(),
+        day_seconds.getSecondsIntoMinute(),
+    }) catch return -1;
+    const writable = @min(length, buffer.len);
+    if (writable != 0) {
+        const copied = @min(rendered.len, writable - 1);
+        @memcpy(buffer[0..copied], rendered[0..copied]);
+        buffer[copied] = 0;
+    }
+    return @intCast(rendered.len);
+}
+
 fn privateStringBuilderAppendBunString(builder: *PrivateStringBuilder, string: *const PrivateBunString) void {
     const units = privateStringBuilderBunStringUnits(private_string_allocator, string) catch {
         privateStringBuilderDidOverflow(builder);
@@ -14171,6 +14393,46 @@ test "private Yarr RegularExpression preserves UTF-16 match state and reverse se
     try std.testing.expect(!Yarr__RegularExpression__isValid(null));
     try std.testing.expectEqual(@as(i32, -1), Yarr__RegularExpression__matchedLength(null));
     Yarr__RegularExpression__deinit(null);
+}
+
+test "private WTF helpers preserve prefix date CPU and HTTP boundary semantics" {
+    var counted: usize = 999;
+    try std.testing.expectEqual(@as(f64, 12.5), WTF__parseDouble("12.5tail", 8, &counted));
+    try std.testing.expectEqual(@as(usize, 4), counted);
+    try std.testing.expectEqual(@as(f64, 50), WTF__parseDouble("+.5e2!", 6, &counted));
+    try std.testing.expectEqual(@as(usize, 5), counted);
+    try std.testing.expectEqual(@as(f64, 1), WTF__parseDouble("1e+", 3, &counted));
+    try std.testing.expectEqual(@as(usize, 1), counted);
+    try std.testing.expectEqual(@as(f64, 0), WTF__parseDouble("Infinity", 8, &counted));
+    try std.testing.expectEqual(@as(usize, 0), counted);
+    const negative_zero = WTF__parseDouble("-0x", 3, &counted);
+    try std.testing.expectEqual(@as(usize, 2), counted);
+    try std.testing.expect(std.math.signbit(negative_zero));
+
+    try std.testing.expectEqual(@as(f64, 946_684_800_000), WTF__parseES5Date("2000-01-01T00:00:00.000Z", 24));
+    try std.testing.expectEqual(@as(f64, 951_827_696_789), WTF__parseES5Date("2000-02-29T12:34:56.789Z", 24));
+    try std.testing.expectEqual(@as(f64, 946_684_800_000), WTF__parseES5Date("2000-01-01T01:30:00+01:30", 25));
+    try std.testing.expectEqual(@as(f64, 662_688_000_000), WTF__parseES5Date("1990-12-31T23:59:60.999Z", 24));
+    try std.testing.expect(std.math.isNan(WTF__parseES5Date("2001-02-29", 10)));
+    try std.testing.expect(std.math.isNan(WTF__parseES5Date("Sat, 01 Jan 2000 00:00:00 GMT", 29)));
+
+    try std.testing.expect(WTF__numberOfProcessorCores() >= 1);
+    WTF__releaseFastMallocFreeMemoryForThisThread();
+
+    var http_date: [32]u8 = @splat(0xaa);
+    try std.testing.expectEqual(@as(c_int, 29), Bun__writeHTTPDate(&http_date, http_date.len, 784_111_777_000));
+    try std.testing.expectEqualStrings("Sun, 06 Nov 1994 08:49:37 GMT", http_date[0..29]);
+    try std.testing.expectEqual(@as(u8, 0), http_date[29]);
+
+    http_date = @splat(0xaa);
+    try std.testing.expectEqual(@as(c_int, 29), Bun__writeHTTPDate(&http_date, 10, 784_111_777_000));
+    try std.testing.expectEqualStrings("Sun, 06 N", http_date[0..9]);
+    try std.testing.expectEqual(@as(u8, 0), http_date[9]);
+    try std.testing.expectEqual(@as(u8, 0xaa), http_date[10]);
+
+    http_date = @splat(0xaa);
+    try std.testing.expectEqual(@as(c_int, 0), Bun__writeHTTPDate(&http_date, http_date.len, 0));
+    try std.testing.expectEqual(@as(u8, 0xaa), http_date[0]);
 }
 
 test "private rooted native value containers retain and release exact cells" {
