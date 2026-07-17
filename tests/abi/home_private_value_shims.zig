@@ -147,6 +147,11 @@ extern "c" fn WTF__parseES5Date([*]const u8, usize) f64;
 extern "c" fn WTF__numberOfProcessorCores() c_int;
 extern "c" fn WTF__releaseFastMallocFreeMemoryForThisThread() void;
 extern "c" fn Bun__writeHTTPDate(*[32]u8, usize, u64) c_int;
+extern "c" fn Bun__createUint8ArrayForCopy(JSContextRef, ?*const anyopaque, usize, bool) EncodedValue;
+extern "c" fn JSUint8Array__fromDefaultAllocator(JSContextRef, [*]u8, usize) EncodedValue;
+extern "c" fn JSBuffer__isBuffer(JSContextRef, EncodedValue) bool;
+extern "c" fn JSObjectGetTypedArrayBytesPtr(JSContextRef, JSObjectRef, [*c]JSValueRef) ?*anyopaque;
+extern "c" fn JSObjectGetTypedArrayLength(JSContextRef, JSObjectRef, [*c]JSValueRef) usize;
 extern "c" fn ZigString__toErrorInstance(*const ZigString, JSContextRef) EncodedValue;
 extern "c" fn ZigString__toTypeErrorInstance(*const ZigString, JSContextRef) EncodedValue;
 extern "c" fn ZigString__toRangeErrorInstance(*const ZigString, JSContextRef) EncodedValue;
@@ -756,6 +761,41 @@ pub fn main() void {
     if (Bun__writeHTTPDate(&http_date, http_date.len, 784_111_777_000) != 29 or
         !std.mem.eql(u8, http_date[0..29], "Sun, 06 Nov 1994 08:49:37 GMT"))
         fail("WTF HTTP date helper mismatch");
+
+    var uint8_source = [_]u8{ 1, 2, 3, 4 };
+    const copied_uint8 = Bun__createUint8ArrayForCopy(context, &uint8_source, uint8_source.len, false);
+    var typed_exception: JSValueRef = null;
+    const copied_bytes_raw = JSObjectGetTypedArrayBytesPtr(context, copied_uint8.cellPointer(), &typed_exception) orelse
+        fail("Uint8Array copy bytes lookup failed");
+    const copied_bytes = @as([*]u8, @ptrCast(copied_bytes_raw))[0..uint8_source.len];
+    if (typed_exception != null or JSObjectGetTypedArrayLength(context, copied_uint8.cellPointer(), &typed_exception) != uint8_source.len or
+        !std.mem.eql(u8, copied_bytes, &uint8_source) or JSBuffer__isBuffer(context, copied_uint8))
+        fail("Uint8Array copy constructor mismatch");
+    uint8_source[0] = 99;
+    if (copied_bytes[0] != 1) fail("Uint8Array copy aliases its source");
+
+    const private_buffer = Bun__createUint8ArrayForCopy(context, null, 3, true);
+    const private_buffer_bytes_raw = JSObjectGetTypedArrayBytesPtr(context, private_buffer.cellPointer(), &typed_exception) orelse
+        fail("Buffer bytes lookup failed");
+    const private_buffer_bytes = @as([*]u8, @ptrCast(private_buffer_bytes_raw))[0..3];
+    private_buffer_bytes[1] = 42;
+    if (typed_exception != null or !JSBuffer__isBuffer(context, private_buffer) or private_buffer_bytes[1] != 42)
+        fail("Buffer identity/allocation mismatch");
+
+    const adopted_raw = std.c.malloc(4) orelse fail("default-allocator fixture allocation failed");
+    const adopted_input = @as([*]u8, @ptrCast(adopted_raw))[0..4];
+    @memcpy(adopted_input, &[_]u8{ 7, 8, 9, 10 });
+    const adopted_uint8 = JSUint8Array__fromDefaultAllocator(context, adopted_input.ptr, adopted_input.len);
+    const adopted_bytes_raw = JSObjectGetTypedArrayBytesPtr(context, adopted_uint8.cellPointer(), &typed_exception) orelse
+        fail("adopted Uint8Array bytes lookup failed");
+    if (typed_exception != null or adopted_bytes_raw != adopted_raw or
+        !std.mem.eql(u8, @as([*]const u8, @ptrCast(adopted_bytes_raw))[0..4], adopted_input))
+        fail("default-allocator Uint8Array did not adopt its bytes");
+
+    var empty_sentinel: u8 = 0;
+    const empty_uint8 = JSUint8Array__fromDefaultAllocator(context, @ptrCast(&empty_sentinel), 0);
+    if (JSObjectGetTypedArrayLength(context, empty_uint8.cellPointer(), &typed_exception) != 0 or typed_exception != null)
+        fail("empty default-allocator Uint8Array mismatch");
 
     StringBuilder__init(&string_builder);
     StringBuilder__appendInt(&string_builder, std.math.minInt(i32));
@@ -2801,5 +2841,5 @@ pub fn main() void {
         TopExceptionScope__exceptionIncludingTraps(&verification_scope) != null)
         fail("private TopExceptionScope destruction mismatch");
 
-    std.debug.print("Home private value shims: 189/189 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 192/192 symbols linked; runtime matrix passed\n", .{});
 }

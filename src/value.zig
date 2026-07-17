@@ -544,6 +544,10 @@ pub const TypedArrayData = struct {
     byte_offset: usize,
     length: usize,
     kind: TAKind,
+    /// Bun's `Buffer` is a Uint8Array subclass. Keep that identity on the live
+    /// view even before the rest of the Buffer private ABI is installed so
+    /// native constructors and the later `JSBuffer__isBuffer` boundary agree.
+    is_buffer: bool = false,
     /// A length-tracking view (created without an explicit length on a resizable
     /// ArrayBuffer): its length follows the buffer's current size rather than the
     /// cached `length`.

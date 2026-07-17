@@ -8486,6 +8486,121 @@ fn releaseExternalInput(bytes: ?*anyopaque, deallocator: JSTypedArrayBytesDeallo
     if (deallocator) |callback| callback(bytes, deallocator_context);
 }
 
+fn privateStandaloneMiFree(bytes: ?*anyopaque) callconv(.c) void {
+    std.c.free(bytes);
+}
+
+comptime {
+    // Home/Bun provide a strong mimalloc `mi_free`. The weak libc fallback
+    // keeps standalone zig-js builds linkable and matches Home's non-JSC shim.
+    @export(&privateStandaloneMiFree, .{ .name = "mi_free", .linkage = .weak });
+}
+
+extern fn mi_free(bytes: ?*anyopaque) callconv(.c) void;
+
+var private_default_allocator_release_count: if (builtin.is_test) std.atomic.Value(usize) else void = if (builtin.is_test) .init(0) else {};
+
+fn privateReleaseDefaultAllocatorBytes(bytes: ?*anyopaque, _: ?*anyopaque) callconv(.c) void {
+    if (builtin.is_test) _ = private_default_allocator_release_count.fetchAdd(1, .monotonic);
+    mi_free(bytes);
+}
+
+fn privateMakeUint8Array(
+    context: *Context,
+    bytes: ?*anyopaque,
+    len: usize,
+    copy: bool,
+    is_buffer: bool,
+) EncodedValue {
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    defer context.popActiveInterpreter(&machine);
+
+    var external_owner: ?*value.ExternalBufferOwner = null;
+    var owner_transferred = false;
+    defer if (external_owner) |owner| {
+        if (!owner_transferred) _ = owner.release();
+    };
+
+    const result = if (copy) copy_result: {
+        const args = [_]Value{Value.num(@floatFromInt(len))};
+        const typed = machine.makeTypedArray(.u8, &args) catch |err| {
+            privateSetPendingAbrupt(context, &machine, err);
+            return .empty;
+        };
+        const object = typed.asObj();
+        const typed_data = object.typedArray().?;
+        typed_data.is_buffer = is_buffer;
+        if (bytes) |source| {
+            if (len > 0) {
+                const destination = typed_data.buffer.arrayBuffer().?.bytes();
+                @memcpy(destination[0..len], @as([*]const u8, @ptrCast(source))[0..len]);
+            }
+        }
+        break :copy_result typed;
+    } else adopt_result: {
+        std.debug.assert(len > 0 and bytes != null and !is_buffer);
+        const owner = context.createExternalBufferOwner(bytes, privateReleaseDefaultAllocatorBytes, null) catch |err| {
+            privateReleaseDefaultAllocatorBytes(bytes, null);
+            privateSetPendingAbrupt(context, &machine, err);
+            return .empty;
+        };
+        external_owner = owner;
+        const buffer = machine.makeExternalArrayBuffer(
+            @as([*]u8, @ptrCast(bytes.?))[0..len],
+            owner,
+        ) catch |err| {
+            privateSetPendingAbrupt(context, &machine, err);
+            return .empty;
+        };
+        const args = [_]Value{Value.obj(buffer)};
+        const typed = machine.makeTypedArray(.u8, &args) catch |err| {
+            privateSetPendingAbrupt(context, &machine, err);
+            return .empty;
+        };
+        owner_transferred = true;
+        break :adopt_result typed;
+    };
+    return privateEncodeResult(context, &machine, result);
+}
+
+export fn Bun__createUint8ArrayForCopy(
+    global: JSContextRef,
+    bytes: ?*const anyopaque,
+    len: usize,
+    is_buffer: bool,
+) callconv(.c) EncodedValue {
+    const context = ctxForEvaluation(global) orelse return .empty;
+    return privateMakeUint8Array(context, @constCast(bytes), len, true, is_buffer);
+}
+
+export fn JSUint8Array__fromDefaultAllocator(
+    global: JSContextRef,
+    bytes: [*]u8,
+    len: usize,
+) callconv(.c) EncodedValue {
+    const context = ctxForEvaluation(global) orelse {
+        if (len > 0) privateReleaseDefaultAllocatorBytes(bytes, null);
+        return .empty;
+    };
+    if (len == 0) return privateMakeUint8Array(context, null, 0, true, false);
+    return privateMakeUint8Array(context, bytes, len, false, false);
+}
+
+export fn JSBuffer__isBuffer(global: JSContextRef, encoded: EncodedValue) callconv(.c) bool {
+    const internal = privateValueFrom(global, encoded) orelse return false;
+    if (!internal.isObject()) return false;
+    const typed = internal.asObj().typedArray() orelse return false;
+    return typed.kind == .u8 and typed.is_buffer;
+}
+
 fn makeExternalArrayBuffer(
     c: *Context,
     bytes: ?*anyopaque,
@@ -14433,6 +14548,64 @@ test "private WTF helpers preserve prefix date CPU and HTTP boundary semantics" 
     http_date = @splat(0xaa);
     try std.testing.expectEqual(@as(c_int, 0), Bun__writeHTTPDate(&http_date, http_date.len, 0));
     try std.testing.expectEqual(@as(u8, 0xaa), http_date[0]);
+}
+
+test "private Uint8Array constructors preserve copy ownership and Buffer identity" {
+    const context = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
+    const internal = ctxForEvaluation(context) orelse return error.JSCInitFailed;
+    const releases_before = private_default_allocator_release_count.load(.monotonic);
+
+    var source = [_]u8{ 1, 2, 3, 4 };
+    const copied = Bun__createUint8ArrayForCopy(context, &source, source.len, false);
+    const copied_value = privateValueFrom(context, copied) orelse return error.Uint8ArrayCreateFailed;
+    const copied_typed = copied_value.asObj().typedArray() orelse return error.Uint8ArrayCreateFailed;
+    try std.testing.expectEqual(value.TAKind.u8, copied_typed.kind);
+    try std.testing.expectEqual(@as(usize, 4), copied_typed.currentLength().?);
+    try std.testing.expect(!copied_typed.is_buffer);
+    try std.testing.expectEqualSlices(u8, &source, copied_typed.buffer.arrayBuffer().?.bytes());
+    source[0] = 99;
+    try std.testing.expectEqual(@as(u8, 1), copied_typed.buffer.arrayBuffer().?.bytes()[0]);
+
+    const buffer = Bun__createUint8ArrayForCopy(context, null, 3, true);
+    const buffer_value = privateValueFrom(context, buffer) orelse return error.BufferCreateFailed;
+    const buffer_typed = buffer_value.asObj().typedArray() orelse return error.BufferCreateFailed;
+    try std.testing.expect(buffer_typed.is_buffer);
+    try std.testing.expect(JSBuffer__isBuffer(context, buffer));
+    try std.testing.expect(!JSBuffer__isBuffer(context, copied));
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0, 0, 0 }, buffer_typed.buffer.arrayBuffer().?.bytes());
+    buffer_typed.buffer.arrayBuffer().?.bytes()[1] = 42;
+    try std.testing.expectEqual(@as(u8, 42), buffer_typed.buffer.arrayBuffer().?.bytes()[1]);
+
+    const empty = Bun__createUint8ArrayForCopy(context, null, 0, false);
+    const empty_value = privateValueFrom(context, empty) orelse return error.Uint8ArrayCreateFailed;
+    try std.testing.expectEqual(@as(usize, 0), empty_value.asObj().typedArray().?.currentLength().?);
+
+    const adopted_pointer = std.c.malloc(4) orelse return error.OutOfMemory;
+    const adopted_bytes = @as([*]u8, @ptrCast(adopted_pointer))[0..4];
+    @memcpy(adopted_bytes, &[_]u8{ 7, 8, 9, 10 });
+    const adopted = JSUint8Array__fromDefaultAllocator(context, adopted_bytes.ptr, adopted_bytes.len);
+    const adopted_value = privateValueFrom(context, adopted) orelse return error.Uint8ArrayCreateFailed;
+    const adopted_typed = adopted_value.asObj().typedArray() orelse return error.Uint8ArrayCreateFailed;
+    const adopted_backing = adopted_typed.buffer.arrayBuffer().?;
+    try std.testing.expectEqual(@intFromPtr(adopted_bytes.ptr), @intFromPtr(adopted_backing.bytes().ptr));
+    try std.testing.expectEqualSlices(u8, adopted_bytes, adopted_backing.bytes());
+    try std.testing.expect(adopted_backing.external_owner != null);
+    try std.testing.expect(adopted_backing.external_owner.?.release());
+    try std.testing.expect(!adopted_backing.external_owner.?.release());
+    try std.testing.expectEqual(releases_before + 1, private_default_allocator_release_count.load(.monotonic));
+
+    var zero_length_sentinel: u8 = 0;
+    const adopted_empty = JSUint8Array__fromDefaultAllocator(context, @ptrCast(&zero_length_sentinel), 0);
+    try std.testing.expectEqual(@as(usize, 0), (privateValueFrom(context, adopted_empty) orelse return error.Uint8ArrayCreateFailed).asObj().typedArray().?.currentLength().?);
+
+    const oversized = Bun__createUint8ArrayForCopy(context, null, std.math.maxInt(usize), false);
+    try std.testing.expectEqual(EncodedValue.empty, oversized);
+    try std.testing.expect(JSGlobalObject__hasException(context));
+    JSGlobalObject__clearException(context);
+
+    JSGlobalContextRelease(context);
+    try std.testing.expectEqual(releases_before + 1, private_default_allocator_release_count.load(.monotonic));
+    _ = internal;
 }
 
 test "private rooted native value containers retain and release exact cells" {
