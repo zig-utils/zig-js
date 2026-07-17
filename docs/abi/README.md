@@ -44,7 +44,7 @@ convention. The exact current denominator is:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #163 | 431 (102 implemented, 329 pending) |
+| Private JSC/Bun/WebCore ABI under #163 | 431 (105 implemented, 326 pending) |
 | Overlap with zig-js's completed public C target | 15 |
 | Platform libc import | 1 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
@@ -61,7 +61,7 @@ zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"
 ```
 
 This inventory is the denominator, not a claim that the whole surface works.
-The first 102 private entries are implemented; the other 329 remain pending
+The first 105 private entries are implemented; the other 326 remain pending
 until #163 provides their type/layout contracts, shims, and consumer evidence.
 `JSFunctionCall` remains revision-pinned in the declaration inventory but is
 not part of that denominator: each runtime-generated FFI module defines the
@@ -135,7 +135,7 @@ It covers empty/immediate/int32/double/NaN/negative-zero behavior, boxed
 empty/nonempty strings, object identity/truthiness, signed minimum and unsigned
 maximum BigInts, negative modulo extraction, exact number fallbacks, and every
 invalid/non-exact boundary. Public accounting stays unchanged at 117 functions
-and 19 extensions; these 102 symbols are reported only as private profile
+and 19 extensions; these 105 symbols are reported only as private profile
 exports.
 
 The opaque BigInt cell slice additionally exports `JSC__JSBigInt__fromJS`, the
@@ -297,9 +297,13 @@ exception slot. Five error factories construct fresh selected-realm Error,
 TypeError, and RangeError instances from ZigString message/code pairs and every
 BunString representation. They preserve the pinned writable TypeError `code`
 and read-only RangeError `code` descriptors, omit empty codes, reject dead
-strings, and retain the first exception. The 100-symbol combined runtime fixture
-covers these semantics; the two profile-selected JSType exports retain their
-separate Home/Bun runtime fixtures.
+strings, and retain the first exception. Three AggregateError bridges create
+fresh ordered error arrays from encoded
+slices or preserve an exact existing array and cause. Standard message/errors/
+cause descriptors, direct own `errors` reads, selected realms, foreign-input
+rejection, and failure atomicity are covered. The 103-symbol combined runtime
+fixture covers these semantics; the two profile-selected JSType exports retain
+their separate Home/Bun runtime fixtures.
 
 ## Profile-selectable JSType layout
 
@@ -340,7 +344,7 @@ profile contains 437 unique declarations from 54 hashed files:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #164 | 421 (95 implemented, 326 pending) |
+| Private JSC/Bun/WebCore ABI under #164 | 421 (98 implemented, 323 pending) |
 | Public-C overlap | 15 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
 | **Total** | **437** |
@@ -357,5 +361,5 @@ zig build bun-private-abi-audit -Dbun-source-root="$HOME/Code/bun"
 
 The audit rejects revision, file hash, declaration digest, classification,
 calling-convention, implementation-status, and Home-comparison drift. It does
-not claim complete Bun runtime compatibility; #164 remains open for the 326
+not claim complete Bun runtime compatibility; #164 remains open for the 323
 pending core entries and later wider/generated profiles.
