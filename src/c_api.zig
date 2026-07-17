@@ -315,6 +315,9 @@ const CContextGroup = struct {
     /// publishing the same object twice must return the same encoded handle.
     /// Keep one canonical Boxed cell per VM-owned object across sibling realms.
     private_object_boxes: std.AutoHashMapUnmanaged(*Object, *Boxed) = .empty,
+    /// JSC returns VM small strings for these pure diagnostic projections.
+    /// Preserve that raw EncodedJSValue stability across repeated calls.
+    no_side_effect_strings: [6]?*Boxed = @splat(null),
     /// VM-owned atom strings. Equal `ZigString__toAtomicValue` inputs share
     /// one immutable backing cell inside this context group, never across VMs.
     atom_strings: strcell.InternTable,
@@ -5299,6 +5302,78 @@ const PrivateProxyInternalField = enum(u32) {
     handler = 1,
     _,
 };
+
+const PrivateNoSideEffectString = enum(usize) {
+    symbol,
+    true_value,
+    false_value,
+    null_value,
+    undefined_value,
+    object,
+};
+
+fn privateNoSideEffectStaticString(
+    context: *Context,
+    group: *CContextGroup,
+    kind: PrivateNoSideEffectString,
+) EncodedValue {
+    const slot = &group.no_side_effect_strings[@intFromEnum(kind)];
+    if (slot.*) |existing| return privateEncodedFromRef(@ptrCast(existing));
+    const projected = switch (kind) {
+        .symbol => Value.str("Symbol"),
+        .true_value => Value.str("true"),
+        .false_value => Value.str("false"),
+        .null_value => Value.str("null"),
+        .undefined_value => Value.str("undefined"),
+        .object => Value.str("[object Object]"),
+    };
+    const created: *Boxed = @ptrCast(@alignCast(box(context, projected) orelse return .empty));
+    slot.* = created;
+    return privateEncodedFromRef(@ptrCast(created));
+}
+
+fn privateNoSideEffectOwnedString(context: *Context, bytes: []const u8) EncodedValue {
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    const projected = Value.strAlloc(context.arena(), bytes) catch return .empty;
+    return privateEncodedFromValue(context, projected);
+}
+
+/// Pinned fatal-error projection: this deliberately bypasses every observable
+/// JavaScript conversion hook and mutable intrinsic.
+export fn Bun__noSideEffectsToString(
+    vm_ref: ?*anyopaque,
+    global: JSContextRef,
+    encoded: EncodedValue,
+) callconv(.c) EncodedValue {
+    const context = ctxForHandleInspection(global) orelse return .empty;
+    const group = privateGroupFromVM(vm_ref) orelse return .empty;
+    if (context.c_api_group != vm_ref) return .empty;
+    const input = privateValueFrom(global, encoded) orelse return .empty;
+    return switch (input.kind()) {
+        .undefined => privateNoSideEffectStaticString(context, group, .undefined_value),
+        .null => privateNoSideEffectStaticString(context, group, .null_value),
+        .boolean => privateNoSideEffectStaticString(context, group, if (input.asBool()) .true_value else .false_value),
+        .number => privateNoSideEffectOwnedString(context, value.numberToString(context.arena(), input.asNum()) catch return .empty),
+        .string => encoded,
+        .object => object: {
+            const object = input.asObj();
+            if (object.is_symbol) {
+                const description = object.symbolDescription() orelse
+                    break :object privateNoSideEffectStaticString(context, group, .symbol);
+                const rendered = std.fmt.allocPrint(context.arena(), "Symbol({s})", .{description}) catch return .empty;
+                break :object privateNoSideEffectOwnedString(context, rendered);
+            }
+            if (object.is_bigint) {
+                const rendered = value.bigIntToString(object, context.arena()) catch return .empty;
+                break :object privateNoSideEffectOwnedString(context, rendered);
+            }
+            break :object privateNoSideEffectStaticString(context, group, .object);
+        },
+    };
+}
 
 /// Pure projection of JSC::ProxyObject's two write-barrier fields. This is an
 /// inspector primitive: it never performs an ordinary property read or invokes
@@ -17654,6 +17729,63 @@ test "private JSX element predicate preserves registry identity and ordinary get
     pending = JSGlobalObject__tryTakeException(context);
     try std.testing.expectEqual(EncodedValue.fromInt32(228), JSC__Exception__asJSValue(@ptrFromInt(try pending.asCellAddress())));
     try std.testing.expectEqual(@as(f64, 0), (try internal.evaluate("__jsx_blocked_gets_228")).asNum());
+}
+
+test "private no-side-effects stringification is exact and non-observable" {
+    const group_ref = JSContextGroupCreate() orelse return error.GroupCreateFailed;
+    defer JSContextGroupRelease(group_ref);
+    const context = JSGlobalContextCreateInGroup(group_ref, null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(context);
+    const sibling = JSGlobalContextCreateInGroup(group_ref, null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(sibling);
+    const internal = ctxForEvaluation(context) orelse return error.ContextCreateFailed;
+    const vm_ref = JSC__JSGlobalObject__vm(context);
+
+    const Probe = struct {
+        fn encoded(context_: *Context, source: []const u8) !EncodedValue {
+            return privateEncodedFromValue(context_, try context_.evaluate(source));
+        }
+
+        fn expect(context_: *Context, global: JSContextRef, vm_: ?*anyopaque, source: []const u8, expected: []const u8) !void {
+            const projected = Bun__noSideEffectsToString(vm_, global, try encoded(context_, source));
+            const actual = privateValueFrom(global, projected) orelse return error.ValueInitFailed;
+            try std.testing.expect(actual.isString());
+            try std.testing.expectEqualStrings(expected, actual.asStr());
+        }
+    };
+
+    try Probe.expect(internal, context, vm_ref, "undefined", "undefined");
+    try Probe.expect(internal, context, vm_ref, "null", "null");
+    try Probe.expect(internal, context, vm_ref, "true", "true");
+    try Probe.expect(internal, context, vm_ref, "false", "false");
+    try Probe.expect(internal, context, vm_ref, "-0", "0");
+    try Probe.expect(internal, context, vm_ref, "1e21", "1e+21");
+    try Probe.expect(internal, context, vm_ref, "NaN", "NaN");
+    try Probe.expect(internal, context, vm_ref, "Infinity", "Infinity");
+    try Probe.expect(internal, context, vm_ref, "-Infinity", "-Infinity");
+    try Probe.expect(internal, context, vm_ref, "1234567890123456789012345678901234567890n", "1234567890123456789012345678901234567890");
+    try Probe.expect(internal, context, vm_ref, "Symbol('detail')", "Symbol(detail)");
+    try Probe.expect(internal, context, vm_ref, "Symbol()", "Symbol");
+    try Probe.expect(internal, context, vm_ref, "[]", "[object Object]");
+    try Probe.expect(internal, context, vm_ref, "(function named() {})", "[object Object]");
+    try Probe.expect(internal, context, vm_ref, "new Error('hidden')", "[object Object]");
+
+    const original_string = try Probe.encoded(internal, "'identity-235'");
+    try std.testing.expectEqual(original_string, Bun__noSideEffectsToString(vm_ref, context, original_string));
+
+    const proxy = try Probe.encoded(internal, "globalThis.__no_side_effect_traps_235 = 0; new Proxy({}, { get() { __no_side_effect_traps_235++; throw 235; }, getPrototypeOf() { __no_side_effect_traps_235++; throw 235; } })");
+    try std.testing.expectEqualStrings("[object Object]", (privateValueFrom(context, Bun__noSideEffectsToString(vm_ref, context, proxy)) orelse return error.ValueInitFailed).asStr());
+    try std.testing.expectEqual(@as(f64, 0), (try internal.evaluate("__no_side_effect_traps_235")).asNum());
+
+    try std.testing.expectEqual(original_string, Bun__noSideEffectsToString(JSC__JSGlobalObject__vm(sibling), sibling, original_string));
+    JSC__VM__throwError(vm_ref, context, EncodedValue.fromInt32(235));
+    try std.testing.expectEqualStrings("true", (privateValueFrom(context, Bun__noSideEffectsToString(vm_ref, context, .true)) orelse return error.ValueInitFailed).asStr());
+    const pending = JSGlobalObject__tryTakeException(context);
+    try std.testing.expectEqual(EncodedValue.fromInt32(235), JSC__Exception__asJSValue(@ptrFromInt(try pending.asCellAddress())));
+
+    const foreign = JSGlobalContextCreate(null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(foreign);
+    try std.testing.expectEqual(EncodedValue.empty, Bun__noSideEffectsToString(JSC__JSGlobalObject__vm(foreign), context, .true));
 }
 
 test "private proxy internal-field projection is pure and identity preserving" {
