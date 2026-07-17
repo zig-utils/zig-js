@@ -44,7 +44,7 @@ convention. The exact current denominator is:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #163 | 432 (26 implemented, 406 pending) |
+| Private JSC/Bun/WebCore ABI under #163 | 432 (29 implemented, 403 pending) |
 | Overlap with zig-js's completed public C target | 15 |
 | Platform libc import | 1 |
 | **Total** | **448** |
@@ -60,7 +60,7 @@ zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"
 ```
 
 This inventory is the denominator, not a claim that the whole surface works.
-The first twenty-six private entries are implemented; the other 406 remain pending
+The first twenty-nine private entries are implemented; the other 403 remain pending
 until #163 provides their type/layout contracts, shims, and consumer evidence.
 
 Home revisions `5e829ad483bb9e5ccb19766997df6462edd8e167` and
@@ -129,7 +129,7 @@ It covers empty/immediate/int32/double/NaN/negative-zero behavior, boxed
 empty/nonempty strings, object identity/truthiness, signed minimum and unsigned
 maximum BigInts, negative modulo extraction, exact number fallbacks, and every
 invalid/non-exact boundary. Public accounting stays unchanged at 117 functions
-and 19 extensions; these twenty-six symbols are reported only as private profile
+and 19 extensions; these twenty-nine symbols are reported only as private profile
 exports.
 
 The opaque BigInt cell slice additionally exports `JSC__JSBigInt__fromJS`, the
@@ -140,6 +140,15 @@ boundary, positive and negative fractional comparisons, the minimum positive
 subnormal, infinities, a 10^400 BigInt against `floatMax`, and signed
 modulo-2^64 extraction. `JSC__JSBigInt__toString` remains pending until its
 separate Bun/Home string-return layout is pinned.
+
+The value-level BigInt slice exports `JSC__JSValue__asBigIntCompare`,
+`JSC__JSValue__bigIntSum`, and `JSC__JSValue__fromTimevalNoTruncate`. It returns
+the pinned equal/undefined/greater/less enum values, including undefined for
+NaN; compares arbitrary-size BigInts against BigInts, exact and fractional
+doubles, signed zero, and infinities; and adds without narrowing. The timeval
+constructor deliberately matches the pinned consumer formula
+`sec * 1_000_000 + nsec` despite its parameter name, with signed i64 extremes
+covered by the runtime fixture. Invalid and foreign-context cells are rejected.
 
 The JSCell/JSString slice adds exact opaque downcast, equality, storage-width,
 UTF-16 length, object access, and object-coercion boundaries. Its fixture covers
@@ -195,7 +204,7 @@ profile contains 437 unique declarations from 54 hashed files:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #164 | 422 (26 implemented, 396 pending) |
+| Private JSC/Bun/WebCore ABI under #164 | 422 (29 implemented, 393 pending) |
 | Public-C overlap | 15 |
 | **Total** | **437** |
 
@@ -211,5 +220,5 @@ zig build bun-private-abi-audit -Dbun-source-root="$HOME/Code/bun"
 
 The audit rejects revision, file hash, declaration digest, classification,
 calling-convention, implementation-status, and Home-comparison drift. It does
-not claim complete Bun runtime compatibility; #164 remains open for the 396
+not claim complete Bun runtime compatibility; #164 remains open for the 393
 pending core entries and later wider/generated profiles.

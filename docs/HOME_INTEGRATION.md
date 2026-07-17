@@ -41,7 +41,7 @@ libc import. See [the exact declaration inventory](abi/home-private-7ed99c02-inv
 and run `zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"`
 to verify the live revision, every source hash, signature, classification, and
 calling convention. This replaces a vague source-level estimate, but the 432
-private entries are now 26 implemented / 406 pending under #163. The implemented
+private entries are now 29 implemented / 403 pending under #163. The implemented
 slices cover JSC64 value identity, cell equality, truthiness, int32 extraction,
 exact signed/unsigned 64-bit BigInt construction, and modulo-2^64 BigInt
 extraction with the pinned number fallbacks, plus exact strict and SameValue
@@ -50,7 +50,10 @@ add exact arbitrary-size ordering against i64/u64/f64 plus signed modulo-2^64
 extraction. Seven JSCell/JSString shims add exact UTF-16 and 8-bit string
 semantics, value equality, object identity, and primitive boxing. The two
 ordinary-object constructors and wrapper-unboxing shim add exact prototype,
-freshness, int32/double, negative-zero, NaN, and primitive-value behavior. The two
+freshness, int32/double, negative-zero, NaN, and primitive-value behavior. Three
+value-level BigInt shims add four-way BigInt/Number comparison,
+arbitrary-precision addition, and the exact pinned `sec * 1_000_000 + nsec`
+timeval formula. The two
 cell-type shims use
 Home's exact 97-member JSType layout by default; Bun's distinct 98-member layout
 requires `-Dprivate-abi-consumer=bun`. These slices do not yet create a usable
