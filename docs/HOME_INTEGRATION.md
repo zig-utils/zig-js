@@ -49,7 +49,7 @@ zig build home-private-abi-audit \
 
 This verifies the live revision, every source hash, signature, classification,
 and calling convention. It replaces a vague source-level estimate, but the 431
-private imports are now 179 implemented / 252 pending under #163. The generated
+private imports are now 206 implemented / 225 pending under #163. The generated
 FFI wrapper emits and resolves `JSFunctionCall` inside its own compiled module,
 so zig-js must not provide a duplicate symbol. The implemented
 slices cover JSC64 value identity, cell equality, truthiness, int32 extraction,
@@ -96,6 +96,11 @@ writes, delete through ordinary internal methods, and expose prototype-aware,
 Object.prototype-cutoff, or own-only reads as required. Their focused cases
 cover numeric/Symbol keys, accessors, proxies, duplicate keys, Latin-1 names,
 same-VM siblings, foreign values, and exact empty/deleted exception sentinels.
+The separate property-path shim implements the pinned UTF-16 dot/bracket
+grammar and string/number array paths with one ordinary `Get` per traversed
+segment. It preserves empty-key edge cases, present `undefined`, inherited
+array entries, proxies, primitive boxing, and abrupt completion without an
+extra observable `has` lookup.
 Three fast built-in-name reads cover all 24 pinned byte IDs and keep direct
 data, own-slot, and Object.prototype-cutoff lookup observably distinct. The
 Bun-only pure `code` VM inquiry is tracked solely in the Bun denominator.
@@ -161,7 +166,7 @@ behavior, and VM exception propagation. Ten Promise/InternalPromise shims add
 selected-realm pending and directly settled promises, exact native downcasts,
 callback Promise passthrough, Error/throw rejection, and normal AnyPromise
 resolution with thenable assimilation and self-resolution protection. Their
-178-symbol combined fixture covers sibling realms, foreign VMs, callback
+205-symbol combined fixture covers sibling realms, foreign VMs, callback
 reentrancy, exception clearing, settled-target no-ops, and the complete
 DOMException code matrix. Seven Home-only
 JSMap shims create selected-realm native maps and directly implement

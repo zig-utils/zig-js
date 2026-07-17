@@ -44,7 +44,7 @@ convention. The exact current denominator is:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #163 | 431 (205 implemented, 226 pending) |
+| Private JSC/Bun/WebCore ABI under #163 | 431 (206 implemented, 225 pending) |
 | Overlap with zig-js's completed public C target | 15 |
 | Platform libc import | 1 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
@@ -61,7 +61,7 @@ zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"
 ```
 
 This inventory is the denominator, not a claim that the whole surface works.
-The first 200 private entries are implemented; the other 231 remain pending
+The first 206 private entries are implemented; the other 225 remain pending
 until #163 provides their type/layout contracts, shims, and consumer evidence.
 `JSFunctionCall` remains revision-pinned in the declaration inventory but is
 not part of that denominator: each runtime-generated FFI module defines the
@@ -343,6 +343,15 @@ proxies, conversion hooks, and abrupt completion remain observable. Missing or
 unsupported cells return positive Infinity, while primitive/invalid/foreign
 inputs return zero and an existing VM exception remains first.
 
+The private property-path export reproduces Bun's pinned permissive Jest
+grammar over UTF-16 code units: dots and brackets separate segments, while
+empty, leading/trailing, and consecutive-dot cases retain their exact empty-key
+behavior. Array paths accept only string/number entries and use JSC's
+`ToLength`-plus-indexed-`Get` traversal, including holes, inherited entries,
+proxies, and exact number-to-string keys. Each target segment is boxed through
+`ToObject` and read once without a preliminary `has` lookup, preserving present
+`undefined`, accessors, abrupt completion, and first-exception state.
+
 The VM exception slice exports the shared `JSGlobalObject`/`VM` pending-state
 boundary plus exception-cell conversion and classification. Sibling realms in
 one context group observe the same VM pointer and pending cell; taking or
@@ -482,7 +491,7 @@ layout, exact UTF-16 and BunString decoding, shortest numeric formatting,
 WebKit JSON escaping, sticky overflow/OOM, and non-destructive conversion.
 The five rooted native-container entry points add callback-scoped marked
 arguments and per-realm CommonJS function registries with precise-GC rooting,
-cross-VM rejection, and exact append/set/swap-remove behavior. The 178-symbol
+cross-VM rejection, and exact append/set/swap-remove behavior. The 205-symbol
 combined runtime fixture covers these semantics; the two
 profile-selected JSType exports retain
 their separate Home/Bun runtime fixtures.
@@ -526,7 +535,7 @@ profile contains 437 unique declarations from 54 hashed files:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #164 | 421 (199 implemented, 222 pending) |
+| Private JSC/Bun/WebCore ABI under #164 | 421 (200 implemented, 221 pending) |
 | Public-C overlap | 15 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
 | **Total** | **437** |
@@ -543,5 +552,5 @@ zig build bun-private-abi-audit -Dbun-source-root="$HOME/Code/bun"
 
 The audit rejects revision, file hash, declaration digest, classification,
 calling-convention, implementation-status, and Home-comparison drift. It does
-not claim complete Bun runtime compatibility; #164 remains open for the 227
+not claim complete Bun runtime compatibility; #164 remains open for the 221
 pending core entries and later wider/generated profiles.
