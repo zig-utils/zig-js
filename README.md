@@ -236,7 +236,7 @@ claim that Home's or Bun's private `JSC__*`/`Bun__*` ABI is implemented.
 The separately generated
 [Home private inventory](docs/abi/home-private-7ed99c02-inventory.json) makes
 that remaining boundary concrete: **448 unique extern symbols from 58 pinned
-files**, classified as 432 private (**78 implemented / 354 pending**), 15
+files**, classified as 432 private (**80 implemented / 352 pending**), 15
 already-covered public-C overlaps, and one platform import, with zero duplicate
 or unclassified entries.
 Exact Home revisions `7ed99c02`, `5e829ad4`, `38702f9e`, and `4389ddee` are
@@ -246,7 +246,7 @@ The first private-ABI foundation is implemented without changing engine values:
 `private_abi.EncodedValue` translates primitives to the pinned eight-byte JSC64
 encoding (including exact int32/double/NaN/cell rules), while rejecting
 string/object conversion until a validated external cell handle exists.
-The first seventy-eight private exports—encoded identity/cell equality, truthiness,
+The first eighty private exports—encoded identity/cell equality, truthiness,
 int32 extraction, exact signed/unsigned 64-bit BigInt construction, and
 modulo-2^64 BigInt extraction with pinned number fallbacks, plus exact `===` and
 SameValue equality, two exact cell-type queries, five opaque BigInt cell
@@ -317,7 +317,9 @@ thenable assimilation and self-resolution rejection—when settling an existing
 AnyPromise. The private Map boundary creates selected-realm native maps and
 operates directly on `[[MapData]]`, bypassing mutable userland prototypes while
 preserving SameValueZero keys, insertion/reinsertion order, exact value identity,
-and failure-atomic same-VM ownership checks. The 76-symbol combined fixture
+and failure-atomic same-VM ownership checks. The shared FFI slow paths convert
+validated JSC64 BigInt cells with exact signed/unsigned modulo-2^64 behavior,
+including arbitrary-size values. The 78-symbol combined fixture
 covers sibling realms, foreign-VM rejection, callback reentrancy, exception clearing, and already-settled targets.
 The BigInt cell gate downcasts only real owned cells, compares arbitrary-size
 values exactly against i64/u64/f64 (including 2^53, subnormal, infinity, and 10^400
@@ -329,12 +331,12 @@ constructors return real context-owned BigInt cells.
 The [full private `JSType` layout](docs/abi/private-jstype-layouts.json) proves
 that Home has 97 members while Bun has 98: Bun's one inserted tag renumbers 70
 later members. `-Dprivate-abi-consumer=home|bun` selects the exact layout, and
-separately compiled fixtures pass 20 real cell kinds for each. All seventy-eight
+separately compiled fixtures pass 20 real cell kinds for each. All eighty
 private exports remain excluded from the 117-function public count and 19
 extensions.
 The separate pinned
 [Bun core inventory](docs/abi/bun-private-core-4982b91e-inventory.json) contains
-437 symbols from 54 `src/jsc` files: 422 private (**71 implemented / 351
+437 symbols from 54 `src/jsc` files: 422 private (**73 implemented / 349
 pending**) and 15 public overlaps. Its exact comparison with Home finds 434
 shared names, 3 Bun-only names, 14 Home-only names, and 28 changed signatures;
 neither private profile is inferred from the other.
