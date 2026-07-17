@@ -81,8 +81,8 @@
       "public_c_api": 15
     },
     "by_status": {
-      "implemented": 64,
-      "pending": 373
+      "implemented": 65,
+      "pending": 372
     }
   },
   "home_comparison": {
@@ -444,10 +444,10 @@
       "line": 114,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn Bun__JSValue__toNumber(value: JSValue, global: *JSGlobalObject) f64;",
       "declaration_sha256": "f696295ea52f2387080c89082714c6228e26a17149109f064af567a61b1ffbfe",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Bun__Process__emitWarning",

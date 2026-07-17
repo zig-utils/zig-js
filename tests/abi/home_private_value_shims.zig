@@ -98,6 +98,7 @@ extern "c" fn JSC__JSValue__getDirectIndex(EncodedValue, JSContextRef, u32) Enco
 extern "c" fn JSC__JSObject__getIndex(EncodedValue, JSContextRef, u32) EncodedValue;
 extern "c" fn JSArray__constructArray(JSContextRef, [*]const EncodedValue, usize) EncodedValue;
 extern "c" fn JSArray__constructEmptyArray(JSContextRef, usize) EncodedValue;
+extern "c" fn Bun__JSValue__toNumber(EncodedValue, JSContextRef) f64;
 
 fn fail(message: []const u8) noreturn {
     std.debug.print("Home private value shims: {s}\n", .{message});
@@ -582,5 +583,54 @@ pub fn main() void {
         JSGlobalObject__clearException(context);
     }
 
-    std.debug.print("Home private value shims: 47/47 symbols linked; runtime matrix passed\n", .{});
+    if (!std.math.isNan(Bun__JSValue__toNumber(.undefined, context)) or
+        JSGlobalObject__hasException(context) or
+        Bun__JSValue__toNumber(.null, context) != 0 or
+        Bun__JSValue__toNumber(.false, context) != 0 or
+        Bun__JSValue__toNumber(.true, context) != 1 or
+        Bun__JSValue__toNumber(EncodedValue.fromInt32(-42), context) != -42 or
+        Bun__JSValue__toNumber(EncodedValue.fromDouble(-0.0), context) != 0 or
+        !std.math.signbit(Bun__JSValue__toNumber(EncodedValue.fromDouble(-0.0), context)) or
+        Bun__JSValue__toNumber(evaluate(sibling_context, "' 0x10 '"), context) != 16 or
+        !std.math.isNan(Bun__JSValue__toNumber(evaluate(context, "'not a number'"), context)) or
+        JSGlobalObject__hasException(context))
+        fail("private ToNumber primitive mismatch");
+
+    const custom_number = evaluate(context, "globalThis.__private_number_order = []; ({ [Symbol.toPrimitive](hint) { __private_number_order.push(hint); return 12.5; } })");
+    if (Bun__JSValue__toNumber(custom_number, context) != 12.5 or
+        !JSC__JSValue__isStrictEqual(evaluate(context, "__private_number_order.join(',')"), evaluate(context, "'number'"), context))
+        fail("private ToNumber Symbol.toPrimitive mismatch");
+    const fallback_number = evaluate(context, "__private_number_order = []; ({ valueOf() { __private_number_order.push('valueOf'); return {}; }, toString() { __private_number_order.push('toString'); return '31'; } })");
+    if (Bun__JSValue__toNumber(fallback_number, context) != 31 or
+        !JSC__JSValue__isStrictEqual(evaluate(context, "__private_number_order.join(',')"), evaluate(context, "'valueOf,toString'"), context))
+        fail("private ToNumber ordinary coercion order mismatch");
+
+    const throwing_number = evaluate(context, "({ valueOf() { throw 123; } })");
+    if (!std.math.isNan(Bun__JSValue__toNumber(throwing_number, sibling_context)) or
+        !JSGlobalObject__hasException(context))
+        fail("private ToNumber throw did not publish exception");
+    const number_exception = JSGlobalObject__tryTakeException(context);
+    if (JSC__Exception__asJSValue(number_exception.cellPointer()) != EncodedValue.fromInt32(123))
+        fail("private ToNumber thrown value mismatch");
+    for ([_]EncodedValue{ evaluate(context, "Symbol('n')"), signed_negative }) |non_number| {
+        if (!std.math.isNan(Bun__JSValue__toNumber(non_number, context)) or
+            !JSGlobalObject__hasException(context))
+            fail("private ToNumber Symbol/BigInt did not throw");
+        const type_exception = JSGlobalObject__tryTakeException(context);
+        const type_error = JSC__Exception__asJSValue(type_exception.cellPointer());
+        if (!JSC__JSValue__isStrictEqual(getProperty(context, type_error, "name"), evaluate(context, "'TypeError'"), context))
+            fail("private ToNumber Symbol/BigInt error type mismatch");
+    }
+    if (!std.math.isNan(Bun__JSValue__toNumber(EncodedValue.fromRef(foreign_object), context)) or
+        !JSGlobalObject__hasException(context))
+        fail("private ToNumber foreign value did not throw");
+    JSGlobalObject__clearException(context);
+    JSC__VM__throwError(vm, context, EncodedValue.fromInt32(77));
+    if (!std.math.isNan(Bun__JSValue__toNumber(EncodedValue.fromInt32(1), context)))
+        fail("private ToNumber ignored existing exception");
+    const preserved_number_exception = JSGlobalObject__tryTakeException(context);
+    if (JSC__Exception__asJSValue(preserved_number_exception.cellPointer()) != EncodedValue.fromInt32(77))
+        fail("private ToNumber replaced existing exception");
+
+    std.debug.print("Home private value shims: 48/48 symbols linked; runtime matrix passed\n", .{});
 }

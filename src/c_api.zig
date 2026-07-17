@@ -1551,6 +1551,32 @@ export fn JSC__JSValue__toUInt64NoTruncate(encoded: EncodedValue) callconv(.c) u
     return privateBigIntModuloU64(boxed.value.asObj());
 }
 
+export fn Bun__JSValue__toNumber(encoded: EncodedValue, global: JSContextRef) callconv(.c) f64 {
+    const context = ctxForEvaluation(global) orelse return std.math.nan(f64);
+    const opaque_group = context.c_api_group orelse return std.math.nan(f64);
+    const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+    if (group.pending_exception != null) return std.math.nan(f64);
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return std.math.nan(f64);
+    };
+    defer context.popActiveInterpreter(&machine);
+    const internal = privateValueFrom(global, encoded) orelse {
+        const err = machine.throwError("TypeError", "Value belongs to another VM");
+        privateSetPendingAbrupt(context, &machine, err);
+        return std.math.nan(f64);
+    };
+    return machine.toNumberV(internal) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return std.math.nan(f64);
+    };
+}
+
 export fn JSC__JSValue__isStrictEqual(
     left: EncodedValue,
     right: EncodedValue,
