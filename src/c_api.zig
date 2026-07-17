@@ -5059,8 +5059,16 @@ test "C-API: inspector protocol inventory has no hidden commands" {
     try std.testing.expect(!unsupported.get("silentAcceptance").?.bool);
     const commands = root.get("commands").?.array.items;
     const events = root.get("events").?.array.items;
+    const transports = root.get("transports").?.array.items;
     try std.testing.expectEqual(@as(usize, 20), commands.len);
     try std.testing.expectEqual(@as(usize, 8), events.len);
+    try std.testing.expectEqual(@as(usize, 2), transports.len);
+    for (transports) |transport_value| {
+        const transport = transport_value.object;
+        try std.testing.expectEqualStrings("implemented", transport.get("status").?.string);
+        try std.testing.expect(transport.get("name").?.string.len > 0);
+        try std.testing.expect(transport.get("evidence").?.string.len > 0);
+    }
     var methods: std.StringHashMapUnmanaged(void) = .empty;
     defer methods.deinit(std.testing.allocator);
     for (commands) |command_value| {

@@ -192,9 +192,9 @@ exceptionDetails object. Malformed requests receive deterministic protocol
 errors.
 
 The machine-readable [0.1 command/event inventory](inspector-protocol-0.1.json)
-names all 20 commands and 8 events with transcript evidence. Every listed
-command is implemented; an unlisted method receives -32601 and is never silently
-accepted.
+names both context-synchronous and worker-owner-pump transports plus all 20
+commands and 8 events with transcript evidence. Every listed command is
+implemented; an unlisted method receives -32601 and is never silently accepted.
 
 ## Current debugger boundary
 

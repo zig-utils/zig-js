@@ -1,6 +1,18 @@
 {
   "protocolVersion": "zig-js-inspector/0.1",
   "unsupportedCommandBehavior": { "code": -32601, "silentAcceptance": false },
+  "transports": [
+    {
+      "name": "context-synchronous",
+      "status": "implemented",
+      "evidence": "C-API: debugger publishes scripts and synchronously pauses at source locations"
+    },
+    {
+      "name": "worker-owner-pump",
+      "status": "implemented",
+      "evidence": "C-API: worker inspector marshals commands and callbacks across threads"
+    }
+  ],
   "commands": [
     { "method": "Schema.getDomains", "status": "implemented", "evidence": "C-API: inspectability gates concurrent in-process protocol sessions" },
     { "method": "Runtime.enable", "status": "implemented", "evidence": "C-API: inspectability gates concurrent in-process protocol sessions" },
