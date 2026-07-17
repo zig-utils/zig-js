@@ -64,6 +64,14 @@ const FnScope = struct {
     }
 };
 
+fn retainDebugLocalNames(arena: std.mem.Allocator, chunk: *Chunk, scope: *const FnScope) CompileError!void {
+    const names = try arena.alloc([]const u8, scope.count);
+    @memset(names, "");
+    var iterator = scope.names.iterator();
+    while (iterator.next()) |entry| names[entry.value_ptr.*] = entry.key_ptr.*;
+    chunk.debug_local_names = names;
+}
+
 /// Whether a node embeds a `yield` reachable without crossing a function
 /// boundary — used to decide whether a destructuring assignment must be lowered
 /// to bytecode (yield present) or can defer to the tree-walker via `bind_pattern`.
@@ -559,7 +567,11 @@ pub const Compiler = struct {
     pub fn compileProgram(arena: std.mem.Allocator, program: *Node) CompileError!*Chunk {
         const chunk = try arena.create(Chunk);
         chunk.* = Chunk.init(arena);
-        var c = Compiler{ .arena = arena, .chunk = chunk, .mode = .program };
+        // Keep latent source-node checkpoints in every chunk. With no debugger
+        // hook the VM performs no checkpoint work; retaining the metadata lets a
+        // later attachment inspect already-compiled functions without rebuilding
+        // their frame/upvalue layout.
+        var c = Compiler{ .arena = arena, .chunk = chunk, .mode = .program, .debug_checkpoints = true };
         if (program.* != .program) return error.Unsupported;
         try c.compileStmtList(program.program);
         _ = try chunk.emit(.halt, 0);
@@ -830,7 +842,8 @@ pub const Compiler = struct {
         chunk.* = Chunk.init(arena);
         chunk.param_count = @intCast(fnode.params.len);
         chunk.local_count = scope.count;
-        var c = Compiler{ .arena = arena, .chunk = chunk, .mode = .function, .scope = scope, .is_strict = fnode.is_strict };
+        try retainDebugLocalNames(arena, chunk, scope);
+        var c = Compiler{ .arena = arena, .chunk = chunk, .mode = .function, .scope = scope, .is_strict = fnode.is_strict, .debug_checkpoints = true };
         if (fnode.is_expr_body) {
             try c.compileTailExpr(fnode.body);
         } else {
@@ -2609,6 +2622,7 @@ pub const Compiler = struct {
 
             compiled.param_count = @intCast(fnode.params.len);
             compiled.local_count = scope.count;
+            try retainDebugLocalNames(self.arena, compiled, scope);
 
             var sub_c = Compiler{ .arena = self.arena, .chunk = compiled, .mode = .function, .scope = scope, .is_strict = fnode.is_strict, .debug_checkpoints = self.debug_checkpoints };
             if (fnode.is_expr_body) {

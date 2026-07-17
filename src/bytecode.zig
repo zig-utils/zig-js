@@ -489,12 +489,15 @@ pub const Chunk = struct {
     /// `Function` object's private layout.
     param_count: u32 = 0,
     local_count: u32 = 0,
+    /// Stable source names for frame slots. Empty for program/env-mode chunks.
+    /// The VM consults this only while an inspector hook is active.
+    debug_local_names: []const []const u8 = &.{},
     code: std.ArrayListUnmanaged(Inst) = .empty,
     consts: std.ArrayListUnmanaged(Value) = .empty,
     names: std.ArrayListUnmanaged([]const u8) = .empty,
     fns: std.ArrayListUnmanaged(*FnTemplate) = .empty,
-    /// Optional statement-boundary metadata for debugger-enabled suspendable
-    /// chunks. Ordinary chunks leave this empty and pay no dispatch cost.
+    /// Optional statement-boundary metadata. Chunks retain it eagerly so late
+    /// debugger attachment works; a null hook keeps dispatch disabled.
     debug_sites: std.ArrayListUnmanaged(DebugSite) = .empty,
     debug_nodes: []?*const ast.Node = &.{},
     /// Destructuring-pattern AST nodes referenced by `bind_pattern` (the VM

@@ -78,6 +78,16 @@ VM quick paths are disabled for those debug chunks. The optimizing JIT does not
 exist yet and therefore cannot be claimed as an inspected tier (tracked by
 [issue #146](https://github.com/zig-utils/zig-js/issues/146)).
 
+Chunks compiled before attachment retain latent source-node checkpoints while
+normal execution keeps the hook null. Once Debugger is enabled, the context
+withholds its native-code owner and those existing bytecode checkpoints become
+live without recompiling the function or changing its upvalue/frame layout.
+Ordinary VM activations publish named local slots as a live inspector scope;
+evaluate-on-call-frame writes are synchronized back into the slots before the
+paused statement resumes. Breakpoints and stepping therefore enter functions
+warmed before the first session, including functions that had reached a native
+candidate before attachment.
+
 Script breakpoints identify a scriptId; URL breakpoints apply to every matching
 present or future script. A requested location resolves deterministically to the
 first statement at or after its zero-based line/column, emits
@@ -163,6 +173,5 @@ lexical/global scope chains, frame evaluation, and expandable remote objects
 with deterministic GC-safe lifetime. Worker targets remain tracked by
 [issue #156](https://github.com/zig-utils/zig-js/issues/156). Unsupported
 commands return -32601; there are no silently accepted debugger stubs.
-Breakpoint/stepping instrumentation for functions warmed before attachment and
-eval/module/generated-function origins remain explicit work in
+Eval/module/generated-function origins remain explicit work in
 [issue #155](https://github.com/zig-utils/zig-js/issues/155).

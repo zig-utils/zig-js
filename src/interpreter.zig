@@ -399,6 +399,7 @@ pub const DebugCallFrame = struct {
     strict: bool,
     location: ?DebugStatementLocation = null,
     caller: ?*DebugCallFrame = null,
+    environment_is_vm_activation: bool = false,
 };
 
 /// A lexical scope with a parent chain. Function calls push a fresh scope whose
@@ -3211,7 +3212,7 @@ pub const Interpreter = struct {
                 if (locations.get(node)) |location| {
                     self.debug_current_location = location;
                     if (self.debug_call_frame) |frame| {
-                        frame.environment = self.env;
+                        if (!frame.environment_is_vm_activation) frame.environment = self.env;
                         frame.this_value = self.this_value;
                         frame.location = location;
                     } else {
@@ -4404,14 +4405,14 @@ pub const Interpreter = struct {
         // outside the VM's lowered subset leave `gen_chunk` null, so calling the
         // generator throws a clear TypeError rather than running incorrectly.
         if (fnode.is_generator) {
-            func.gen_chunk = Compiler.compileGenerator(self.arena, fnode, self.debug_statement_hook != null) catch |e| switch (e) {
+            func.gen_chunk = Compiler.compileGenerator(self.arena, fnode, true) catch |e| switch (e) {
                 error.Unsupported => null,
                 error.OutOfMemory => return error.OutOfMemory,
             };
         } else if (fnode.is_async) {
             // A plain async function compiles to a suspendable body (await is a
             // suspend point); null on unsupported syntax → tree-walk fallback.
-            func.async_chunk = Compiler.compileAsync(self.arena, fnode, self.debug_statement_hook != null) catch |e| switch (e) {
+            func.async_chunk = Compiler.compileAsync(self.arena, fnode, true) catch |e| switch (e) {
                 error.Unsupported => null,
                 error.OutOfMemory => return error.OutOfMemory,
             };

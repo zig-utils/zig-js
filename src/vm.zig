@@ -3753,6 +3753,19 @@ fn execLoop(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
     }
 }
 
+fn serviceVmDebugStatement(vm: *Interpreter, node: *const ast.Node, chunk: *Chunk, maybe_frame: ?*Frame) EvalError!void {
+    const frame = maybe_frame orelse return vm.serviceDebugStatement(node);
+    const call_frame = vm.debug_call_frame orelse return vm.serviceDebugStatement(node);
+    if (!call_frame.environment_is_vm_activation) return vm.serviceDebugStatement(node);
+    for (chunk.debug_local_names, frame.slots) |name, slot| {
+        if (name.len != 0) try call_frame.environment.put(name, slot);
+    }
+    try vm.serviceDebugStatement(node);
+    for (chunk.debug_local_names, frame.slots) |name, *slot| {
+        if (name.len != 0) slot.* = call_frame.environment.getLocal(name) orelse slot.*;
+    }
+}
+
 /// The instruction loop proper. Operates on `exec.stack` directly so the
 /// operand stack is always current when a throw unwinds (and persists across a
 /// generator's yield/resume). Returns the completion value or propagates a throw.
@@ -3771,7 +3784,7 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
     const parallel_sync = bc.ic_seqlock_enabled.load(.monotonic);
 
     while (ip < code.len) {
-        if (debug_execution) if (chunk.debug_nodes[ip]) |node| try vm.serviceDebugStatement(node);
+        if (debug_execution) if (chunk.debug_nodes[ip]) |node| try serviceVmDebugStatement(vm, node, chunk, frame);
         vm.steps += 1;
         if (vm.steps > interp.max_steps) return vm.throwError("RangeError", "evaluation step budget exceeded");
         if ((vm.steps & 1023) == 0) {
@@ -6118,6 +6131,9 @@ const Activation = struct {
     saved_cur_module: []const u8,
     saved_eval_nt: bool,
     saved_pm: ?*const std.StringHashMapUnmanaged([]const u8),
+    saved_debug_call_frame: ?*interp.DebugCallFrame,
+    debug_environment: ?*Environment = null,
+    debug_call_frame: interp.DebugCallFrame = undefined,
 };
 
 /// Return an inactive activation whose frame was never captured. The pool is
@@ -6169,6 +6185,7 @@ fn acquireActivation(vm: *Interpreter, local_count: usize) EvalError!*Activation
         .saved_cur_module = undefined,
         .saved_eval_nt = undefined,
         .saved_pm = undefined,
+        .saved_debug_call_frame = undefined,
     };
     vm.vm_activation_allocations += 1;
     return act;
@@ -6203,6 +6220,7 @@ fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
         .saved_cur_module = vm.cur_module,
         .saved_eval_nt = vm.direct_eval_new_target_allowed,
         .saved_pm = vm.current_private_map,
+        .saved_debug_call_frame = vm.debug_call_frame,
     };
     frame.* = .{
         .slots = slots,
@@ -6224,6 +6242,24 @@ fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
         releaseActivation(vm, act);
         return e;
     };
+    if (vm.debug_statement_hook != null) {
+        const debug_environment = try gc_mod.allocEnv(vm.arena);
+        vm.initEnvironment(debug_environment, func.closure, true);
+        for (fchunk.debug_local_names, frame.slots) |name, slot| {
+            if (name.len != 0) try debug_environment.put(name, slot);
+        }
+        act.debug_environment = debug_environment;
+        act.debug_call_frame = .{
+            .function_name = func.name,
+            .environment = debug_environment,
+            .this_value = vm.this_value,
+            .strict = func.is_strict,
+            .caller = vm.debug_call_frame,
+            .environment_is_vm_activation = true,
+        };
+    } else {
+        act.debug_environment = null;
+    }
     return act;
 }
 
@@ -6239,6 +6275,7 @@ fn popActivation(vm: *Interpreter, act: *Activation) void {
     vm.cur_module = act.saved_cur_module;
     vm.direct_eval_new_target_allowed = act.saved_eval_nt;
     vm.current_private_map = act.saved_pm;
+    vm.debug_call_frame = act.saved_debug_call_frame;
 }
 
 fn inheritCallerState(dst: *Activation, src: *const Activation) void {
@@ -6252,6 +6289,22 @@ fn inheritCallerState(dst: *Activation, src: *const Activation) void {
     dst.saved_cur_module = src.saved_cur_module;
     dst.saved_eval_nt = src.saved_eval_nt;
     dst.saved_pm = src.saved_pm;
+    dst.saved_debug_call_frame = src.saved_debug_call_frame;
+    if (dst.debug_environment != null) dst.debug_call_frame.caller = src.debug_call_frame.caller;
+}
+
+fn syncDebugEnvironmentFromFrame(act: *Activation) EvalError!void {
+    const environment = act.debug_environment orelse return;
+    for (act.chunk.debug_local_names, act.frame.slots) |name, slot| {
+        if (name.len != 0) try environment.put(name, slot);
+    }
+}
+
+fn syncFrameFromDebugEnvironment(act: *Activation) void {
+    const environment = act.debug_environment orelse return;
+    for (act.chunk.debug_local_names, act.frame.slots) |name, *slot| {
+        if (name.len != 0) slot.* = environment.getLocal(name) orelse slot.*;
+    }
 }
 
 /// Execute a shallow ordinary VM call directly, retaining the same activation,
@@ -6264,6 +6317,7 @@ fn runInlineFunction(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []
     vm.depth += 1;
     defer vm.depth -= 1;
     const act = try buildActivation(vm, func, fchunk, args, this_val, new_target);
+    if (act.debug_environment != null) vm.debug_call_frame = &act.debug_call_frame;
     defer {
         popActivation(vm, act);
         releaseActivation(vm, act);
@@ -6355,10 +6409,15 @@ fn runDriver(vm: *Interpreter, initial: *Activation) EvalError!Value {
 
     while (acts.items.len > 0) {
         const cur = acts.items[acts.items.len - 1];
+        if (cur.debug_environment != null) {
+            vm.debug_call_frame = &cur.debug_call_frame;
+            try syncDebugEnvironmentFromFrame(cur);
+        }
         const outcome: EvalError!Value = if (try tryRunNative(vm, &cur.exec, cur.chunk, cur.frame, null)) |native_result|
             native_result
         else
             runChunk(vm, &cur.exec, cur.chunk, cur.frame, null);
+        if (cur.debug_environment != null) syncFrameFromDebugEnvironment(cur);
         const rv = outcome catch |e| {
             const abrupt = if (activationStackHasHandler(&acts)) vm.catchableOutOfMemory(e) else e;
             if (abrupt != error.Throw) {

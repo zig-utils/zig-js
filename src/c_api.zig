@@ -5156,6 +5156,81 @@ test "C-API: debugger preserves script history across late attach and reattach" 
     try std.testing.expect(std.mem.indexOf(u8, second_transcript, "\"scriptId\":1") != null);
 }
 
+test "C-API: debugger enters warmed functions compiled before attachment" {
+    const State = struct {
+        session: ZJSInspectorSessionRef = null,
+        pauses: usize = 0,
+        bytes: [32768]u8 = undefined,
+        len: usize = 0,
+
+        fn receive(message: [*]const u8, message_len: usize, user_data: ?*anyopaque) callconv(.c) void {
+            const self: *@This() = @ptrCast(@alignCast(user_data.?));
+            std.debug.assert(self.len + message_len + 1 <= self.bytes.len);
+            @memcpy(self.bytes[self.len .. self.len + message_len], message[0..message_len]);
+            self.len += message_len;
+            self.bytes[self.len] = '\n';
+            self.len += 1;
+            if (std.mem.indexOf(u8, message[0..message_len], "Debugger.paused") == null) return;
+            self.pauses += 1;
+            if (self.pauses == 1) {
+                const evaluate =
+                    "{\"id\":89,\"method\":\"Debugger.evaluateOnCallFrame\",\"params\":{\"callFrameId\":0,\"expression\":\"local = 100\"}}";
+                std.debug.assert(ZJSInspectorSessionDispatch(self.session, evaluate, evaluate.len));
+            }
+            const command = if (self.pauses == 1)
+                "{\"id\":90,\"method\":\"Debugger.stepOver\"}"
+            else
+                "{\"id\":91,\"method\":\"Debugger.resume\"}";
+            std.debug.assert(ZJSInspectorSessionDispatch(self.session, command, command.len));
+        }
+    };
+
+    const ctx = JSGlobalContextCreate(null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(ctx);
+    const context = ctxRawFrom(ctx) orelse return error.ContextCreateFailed;
+    const source = JSStringCreateWithUTF8CString(
+        "function warmed(value) {\n var local = value + 1;\n local += 1;\n return local;\n}\nfor (var i = 0; i < 10000; i++) warmed(i);",
+    ) orelse return error.StringInitFailed;
+    defer JSStringRelease(source);
+    const url = JSStringCreateWithUTF8CString("warmed-before-attach.js") orelse return error.StringInitFailed;
+    defer JSStringRelease(url);
+    var exception: JSValueRef = null;
+    _ = JSEvaluateScript(ctx, source, null, url, 1, &exception) orelse return error.EvalFailed;
+    try std.testing.expect(exception == null);
+
+    const name = JSStringCreateWithUTF8CString("warmed") orelse return error.StringInitFailed;
+    defer JSStringRelease(name);
+    const function_ref = JSObjectGetProperty(ctx, JSContextGetGlobalObject(ctx), name, &exception) orelse return error.PropertyGetFailed;
+    const function_value = valueFromContext(context, function_ref) orelse return error.InvalidValue;
+    const erased = function_value.asObj().jsFunction() orelse return error.NotFunction;
+    const function: *interp.Function = @ptrCast(@alignCast(erased));
+    const historical_chunk = function.chunk orelse return error.ExpectedBytecode;
+    try std.testing.expect(historical_chunk.debug_nodes.len != 0);
+
+    JSGlobalContextSetInspectable(ctx, true);
+    var state: State = .{};
+    state.session = ZJSInspectorSessionCreate(ctx, State.receive, &state) orelse return error.SessionCreateFailed;
+    defer ZJSInspectorSessionRelease(state.session);
+    const enable = "{\"id\":1,\"method\":\"Debugger.enable\"}";
+    try std.testing.expect(ZJSInspectorSessionDispatch(state.session, enable, enable.len));
+    try std.testing.expect(context.interpreter().jit_owner == null);
+    const breakpoint =
+        "{\"id\":2,\"method\":\"Debugger.setBreakpointByUrl\",\"params\":{\"url\":\"warmed-before-attach.js\",\"lineNumber\":2}}";
+    try std.testing.expect(ZJSInspectorSessionDispatch(state.session, breakpoint, breakpoint.len));
+    const call_source = JSStringCreateWithUTF8CString("warmed(40);") orelse return error.StringInitFailed;
+    defer JSStringRelease(call_source);
+    const result = JSEvaluateScript(ctx, call_source, null, null, 1, &exception) orelse return error.EvalFailed;
+    try std.testing.expectEqual(@as(f64, 101), JSValueToNumber(ctx, result, &exception));
+    try std.testing.expectEqual(@as(usize, 2), state.pauses);
+    const transcript = state.bytes[0..state.len];
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "warmed-before-attach.js") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "\"scriptId\":1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "\"functionName\":\"warmed\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "\"reason\":\"breakpoint\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "\"reason\":\"step\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "\"lineNumber\":3") != null);
+}
+
 test "C-API: paused frames expose scopes and live frame evaluation" {
     const State = struct {
         session: ZJSInspectorSessionRef = null,
