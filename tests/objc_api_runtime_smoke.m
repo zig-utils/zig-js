@@ -178,6 +178,60 @@ int main(void)
         if (check(cyclicResult[@"self"] == cyclicResult, 42))
             return 42;
         [cyclicResult removeObjectForKey:@"self"];
+        if (check(JSContext.currentContext == nil && JSContext.currentCallee == nil &&
+                      JSContext.currentThis == nil && JSContext.currentArguments == nil,
+                  43))
+            return 43;
+        __block BOOL callbackStateMatches = NO;
+        __block BOOL nestedStateRestored = NO;
+        __block JSValue *outerThis = nil;
+        JSValue *callbackPromise = [JSValue valueWithNewPromiseInContext:context
+                                                            fromExecutor:^(JSValue *resolve, JSValue *reject) {
+                                                                (void)reject;
+                                                                outerThis = JSContext.currentThis;
+                                                                callbackStateMatches = JSContext.currentContext == context &&
+                                                                    JSContext.currentCallee == nil &&
+                                                                    JSContext.currentArguments.count == 2;
+                                                                [JSValue valueWithNewPromiseInContext:context
+                                                                                         fromExecutor:^(JSValue *innerResolve, JSValue *innerReject) {
+                                                                                             (void)innerResolve;
+                                                                                             (void)innerReject;
+                                                                                         }];
+                                                                nestedStateRestored = JSContext.currentThis == outerThis;
+                                                                [resolve callWithArguments:@[ @42 ]];
+                                                            }];
+        if (check(callbackStateMatches && nestedStateRestored &&
+                      [outerThis isEqualToObject:callbackPromise],
+                  44))
+            return 44;
+        context[@"callbackPromise"] = callbackPromise;
+        [context evaluateScript:@"callbackPromise.then(value => { globalThis.callbackResult = value; })"];
+        [context evaluateScript:@"0"];
+        if (check([context[@"callbackResult"] toInt32] == 42, 45))
+            return 45;
+        context[@"resolvedPromise"] = [JSValue valueWithNewPromiseResolvedWithResult:@7
+                                                                            inContext:context];
+        context[@"rejectedPromise"] = [JSValue valueWithNewPromiseRejectedWithReason:@"no"
+                                                                             inContext:context];
+        [context evaluateScript:@"resolvedPromise.then(value => { globalThis.resolvedResult = value; }); rejectedPromise.catch(value => { globalThis.rejectedResult = value; })"];
+        [context evaluateScript:@"0"];
+        if (check([context[@"resolvedResult"] toInt32] == 7 &&
+                      [[context[@"rejectedResult"] toString] isEqualToString:@"no"],
+                  46))
+            return 46;
+        void (^defaultHandler)(JSContext *, JSValue *) = context.exceptionHandler;
+        __block JSValue *handledException = nil;
+        context.exception = nil;
+        context.exceptionHandler = ^(JSContext *callbackContext, JSValue *exception) {
+            if (callbackContext == context)
+                handledException = exception;
+        };
+        [context evaluateScript:@"throw new Error('custom-handler')"];
+        context.exceptionHandler = defaultHandler;
+        if (check([handledException.toString containsString:@"custom-handler"] &&
+                      context.exception == nil,
+                  47))
+            return 47;
     }
     return 0;
 }

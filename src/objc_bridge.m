@@ -90,6 +90,23 @@ JS_EXPORT NSString *const JSPropertyDescriptorSetKey = @"set";
 
 @end
 
+@interface ZJSCallbackState : NSObject
+@property (nonatomic, strong) JSContext *context;
+@property (nonatomic, strong) JSValue *callee;
+@property (nonatomic, strong) JSValue *thisValue;
+@property (nonatomic, strong) NSArray<JSValue *> *arguments;
+@end
+
+@implementation ZJSCallbackState
+@end
+
+static NSString *const ZJSCallbackStateThreadKey = @"org.zig-utils.zig-js.callback-state";
+
+static ZJSCallbackState *ZJSCurrentCallbackState(void)
+{
+    return NSThread.currentThread.threadDictionary[ZJSCallbackStateThreadKey];
+}
+
 static const void *ZJSVirtualMachineStateKey = &ZJSVirtualMachineStateKey;
 static const void *ZJSContextStateKey = &ZJSContextStateKey;
 static const void *ZJSValueStateKey = &ZJSValueStateKey;
@@ -218,6 +235,11 @@ static JSVirtualMachine *ZJSVirtualMachineForGroup(JSContextGroupRef group)
 
 @implementation JSContext
 
++ (JSContext *)currentContext { return ZJSCurrentCallbackState().context; }
++ (JSValue *)currentCallee { return ZJSCurrentCallbackState().callee; }
++ (JSValue *)currentThis { return ZJSCurrentCallbackState().thisValue; }
++ (NSArray *)currentArguments { return ZJSCurrentCallbackState().arguments; }
+
 - (instancetype)init
 {
     JSVirtualMachine *virtualMachine = [JSVirtualMachine new];
@@ -302,7 +324,6 @@ static JSVirtualMachine *ZJSVirtualMachineForGroup(JSContextGroupRef group)
 {
     JSValue *wrapped = [JSValue valueWithJSValueRef:exception inContext:self];
     ZJSContextState *state = ZJSCtxState(self);
-    state.exception = wrapped;
     if (state.exceptionHandler)
         state.exceptionHandler(self, wrapped);
 }
@@ -443,6 +464,74 @@ static JSVirtualMachine *ZJSVirtualMachineForGroup(JSContextGroupRef group)
         return nil;
     }
     return [self valueWithJSValueRef:value inContext:context];
+}
+
++ (JSValue *)valueWithNewPromiseInContext:(JSContext *)context
+                             fromExecutor:(void (^)(JSValue *, JSValue *))callback
+{
+    if (!context || !callback)
+        return nil;
+    JSObjectRef resolveRef = NULL;
+    JSObjectRef rejectRef = NULL;
+    JSValueRef exception = NULL;
+    JSObjectRef promiseRef = JSObjectMakeDeferredPromise(context.JSGlobalContextRef,
+                                                         &resolveRef, &rejectRef,
+                                                         &exception);
+    if (exception) {
+        [context zjs_recordException:exception];
+        return nil;
+    }
+
+    JSValue *promise = [self valueWithJSValueRef:promiseRef inContext:context];
+    JSValue *resolve = [self valueWithJSValueRef:resolveRef inContext:context];
+    JSValue *reject = [self valueWithJSValueRef:rejectRef inContext:context];
+    NSMutableDictionary *threadDictionary = NSThread.currentThread.threadDictionary;
+    ZJSCallbackState *previousState = threadDictionary[ZJSCallbackStateThreadKey];
+    ZJSCallbackState *callbackState = [ZJSCallbackState new];
+    callbackState.context = context;
+    callbackState.thisValue = promise;
+    callbackState.arguments = @[ resolve, reject ];
+
+    JSValue *previousException = context.exception;
+    context.exception = nil;
+    @try {
+        threadDictionary[ZJSCallbackStateThreadKey] = callbackState;
+        callback(resolve, reject);
+    } @catch (NSException *nativeException) {
+        context.exception = [self valueWithNewErrorFromMessage:nativeException.reason
+                                                     inContext:context];
+    } @finally {
+        if (previousState)
+            threadDictionary[ZJSCallbackStateThreadKey] = previousState;
+        else
+            [threadDictionary removeObjectForKey:ZJSCallbackStateThreadKey];
+    }
+
+    JSValue *callbackException = context.exception;
+    context.exception = previousException;
+    if (callbackException)
+        [reject callWithArguments:@[ callbackException ]];
+    return promise;
+}
+
++ (JSValue *)valueWithNewPromiseResolvedWithResult:(id)result inContext:(JSContext *)context
+{
+    return [self valueWithNewPromiseInContext:context
+                                 fromExecutor:^(JSValue *resolve, JSValue *reject) {
+                                     (void)reject;
+                                     JSValue *converted = [self valueWithObject:result inContext:context];
+                                     [resolve callWithArguments:@[ converted ]];
+                                 }];
+}
+
++ (JSValue *)valueWithNewPromiseRejectedWithReason:(id)reason inContext:(JSContext *)context
+{
+    return [self valueWithNewPromiseInContext:context
+                                 fromExecutor:^(JSValue *resolve, JSValue *reject) {
+                                     (void)resolve;
+                                     JSValue *converted = [self valueWithObject:reason inContext:context];
+                                     [reject callWithArguments:@[ converted ]];
+                                 }];
 }
 
 + (JSValue *)valueWithNewSymbolFromDescription:(NSString *)description inContext:(JSContext *)context
