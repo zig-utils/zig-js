@@ -5039,6 +5039,21 @@ export fn JSC__VM__executionForbidden(vm_ref: ?*anyopaque) callconv(.c) bool {
     return group.execution_forbidden.load(.acquire);
 }
 
+fn privateContextIsEntered(context: *Context) bool {
+    context.lockActiveInterpreters();
+    defer context.unlockActiveInterpreters();
+    return context.active_interpreters.items.len != 0;
+}
+
+export fn JSC__VM__isEntered(vm_ref: ?*anyopaque) callconv(.c) bool {
+    const group = privateGroupFromVM(vm_ref) orelse return false;
+    if (privateContextIsEntered(group.primary)) return true;
+    for (group.contexts.items) |context| {
+        if (context.c_api_ref_count.load(.acquire) != 0 and privateContextIsEntered(context)) return true;
+    }
+    return false;
+}
+
 export fn JSC__VM__setExecutionForbidden(vm_ref: ?*anyopaque, forbidden: bool) callconv(.c) void {
     _ = forbidden; // Pinned JSC binding ignores the argument and only sets true.
     const group = privateGroupFromVM(vm_ref) orelse return;
@@ -15305,6 +15320,42 @@ test "private typeof string projection is exact VM-owned and exception neutral" 
     try std.testing.expectEqual(undefined_cell, try Probe.expect(first, .undefined, "undefined"));
     const preserved = JSGlobalObject__tryTakeException(first);
     try std.testing.expectEqual(EncodedValue.fromInt32(220), JSC__Exception__asJSValue(@ptrFromInt(try preserved.asCellAddress())));
+}
+
+test "private VM entry-state query tracks nested and sibling interpreters" {
+    const group_ref = JSContextGroupCreate() orelse return error.GroupCreateFailed;
+    defer JSContextGroupRelease(group_ref);
+    const first = JSGlobalContextCreateInGroup(group_ref, null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(first);
+    const sibling = JSGlobalContextCreateInGroup(group_ref, null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(sibling);
+    const first_context = ctxForEvaluation(first) orelse return error.ContextCreateFailed;
+    const sibling_context = ctxForEvaluation(sibling) orelse return error.ContextCreateFailed;
+    const vm_ref = JSC__JSGlobalObject__vm(first);
+
+    try std.testing.expect(!JSC__VM__isEntered(null));
+    try std.testing.expect(!JSC__VM__isEntered(vm_ref));
+    var first_machine = first_context.interpreter();
+    var nested_machine = first_context.interpreter();
+    var sibling_machine = sibling_context.interpreter();
+    try first_context.pushActiveInterpreter(&first_machine);
+    try std.testing.expect(JSC__VM__isEntered(vm_ref));
+    try first_context.pushActiveInterpreter(&nested_machine);
+    first_context.popActiveInterpreter(&first_machine);
+    try std.testing.expect(JSC__VM__isEntered(vm_ref));
+    first_context.popActiveInterpreter(&nested_machine);
+    try std.testing.expect(!JSC__VM__isEntered(vm_ref));
+    try sibling_context.pushActiveInterpreter(&sibling_machine);
+    try std.testing.expect(JSC__VM__isEntered(vm_ref));
+    sibling_context.popActiveInterpreter(&sibling_machine);
+
+    const foreign = JSGlobalContextCreate(null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(foreign);
+    try std.testing.expect(!JSC__VM__isEntered(JSC__JSGlobalObject__vm(foreign)));
+    JSC__VM__throwError(vm_ref, first, EncodedValue.fromInt32(221));
+    try std.testing.expect(!JSC__VM__isEntered(vm_ref));
+    const preserved = JSGlobalObject__tryTakeException(first);
+    try std.testing.expectEqual(EncodedValue.fromInt32(221), JSC__Exception__asJSValue(@ptrFromInt(try preserved.asCellAddress())));
 }
 
 test "private rooted native value containers retain and release exact cells" {

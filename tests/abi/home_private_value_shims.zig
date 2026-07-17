@@ -265,6 +265,7 @@ extern "c" fn JSC__JSValue__isAnyError(EncodedValue) bool;
 extern "c" fn JSC__VM__clearHasTerminationRequest(?*anyopaque) void;
 extern "c" fn JSC__VM__executionForbidden(?*anyopaque) bool;
 extern "c" fn JSC__VM__hasTerminationRequest(?*anyopaque) bool;
+extern "c" fn JSC__VM__isEntered(?*anyopaque) bool;
 extern "c" fn JSC__VM__notifyNeedTermination(?*anyopaque) void;
 extern "c" fn JSC__VM__setExecutionForbidden(?*anyopaque, bool) void;
 extern "c" fn JSC__VM__blockBytesAllocated(?*anyopaque) usize;
@@ -467,11 +468,13 @@ const MicrotaskCallbackState = struct {
     global: JSContextRef,
     calls: usize = 0,
     requeue: bool = false,
+    entry_observed: bool = false,
 };
 
 fn microtaskCallback(raw: ?*anyopaque) callconv(.c) void {
     const state: *MicrotaskCallbackState = @ptrCast(@alignCast(raw orelse return));
     state.calls += 1;
+    state.entry_observed = state.entry_observed or JSC__VM__isEntered(JSC__JSGlobalObject__vm(state.global));
     if (state.requeue) {
         state.requeue = false;
         JSC__JSGlobalObject__queueMicrotaskCallback(state.global, state, microtaskCallback);
@@ -1677,6 +1680,8 @@ pub fn main() void {
     const vm = JSC__JSGlobalObject__vm(context) orelse fail("private VM lookup failed");
     const sibling_vm = JSC__JSGlobalObject__vm(sibling_context) orelse fail("sibling VM lookup failed");
     const foreign_vm = JSC__JSGlobalObject__vm(foreign_context) orelse fail("foreign VM lookup failed");
+    if (JSC__VM__isEntered(null) or JSC__VM__isEntered(vm) or JSC__VM__isEntered(sibling_vm) or JSC__VM__isEntered(foreign_vm))
+        fail("private idle VM entry state mismatch");
 
     const sibling_bun_string_array = BunString__createArray(sibling_context, &bun_strings, bun_strings.len);
     exposeCell(sibling_context, "__private_sibling_bun_string_array", sibling_bun_string_array);
@@ -2982,7 +2987,7 @@ pub fn main() void {
         \\(first, second) => { __private_job_calls++; __private_job_first = first; __private_job_second = second; };
     );
     JSC__JSGlobalObject__queueMicrotaskJob(sibling_context, sibling_job, direct_value, .empty);
-    if (JSC__JSGlobalObject__drainMicrotasks(context) != 0 or native_microtask.calls != 2 or
+    if (JSC__JSGlobalObject__drainMicrotasks(context) != 0 or native_microtask.calls != 2 or !native_microtask.entry_observed or
         getNumberProperty(sibling_context, EncodedValue.fromBits(@intFromPtr(JSContextGetGlobalObject(sibling_context).?)), "__private_job_calls") != 0)
         fail("private selected-realm/reentrant microtask drain mismatch");
     JSC__VM__drainMicrotasks(vm);
@@ -3080,5 +3085,5 @@ pub fn main() void {
         TopExceptionScope__exceptionIncludingTraps(&verification_scope) != null)
         fail("private TopExceptionScope destruction mismatch");
 
-    std.debug.print("Home private value shims: 200/200 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 201/201 symbols linked; runtime matrix passed\n", .{});
 }
