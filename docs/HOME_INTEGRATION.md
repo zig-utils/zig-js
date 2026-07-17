@@ -49,7 +49,7 @@ zig build home-private-abi-audit \
 
 This verifies the live revision, every source hash, signature, classification,
 and calling convention. It replaces a vague source-level estimate, but the 431
-private imports are now 80 implemented / 351 pending under #163. The generated
+private imports are now 81 implemented / 350 pending under #163. The generated
 FFI wrapper emits and resolves `JSFunctionCall` inside its own compiled module,
 so zig-js must not provide a duplicate symbol. The implemented
 slices cover JSC64 value identity, cell equality, truthiness, int32 extraction,
@@ -99,13 +99,16 @@ behavior, and VM exception propagation. Ten Promise/InternalPromise shims add
 selected-realm pending and directly settled promises, exact native downcasts,
 callback Promise passthrough, Error/throw rejection, and normal AnyPromise
 resolution with thenable assimilation and self-resolution protection. Their
-78-symbol combined fixture covers sibling realms, foreign VMs, callback
+79-symbol combined fixture covers sibling realms, foreign VMs, callback
 reentrancy, exception clearing, and settled-target no-ops. Seven Home-only
 JSMap shims create selected-realm native maps and directly implement
 SameValueZero get/has/set/remove/clear/size semantics without invoking mutable
 Map prototypes, while preserving insertion order and failure atomicity. These
 slices also include exact signed/unsigned modulo-2^64 FFI slow conversion for
-validated BigInt cells. They do not yet create a usable Home private runtime.
+validated BigInt cells. The shared CommonAbortReason shim creates fresh
+selected-realm DOMExceptions with Bun's exact TimeoutError/AbortError names,
+messages, and legacy codes while preserving an existing VM exception. They do
+not yet create a usable Home private runtime.
 
 The newer Home revisions `5e829ad4`, `38702f9e`, and `4389ddee` changed no files
 in `packages/runtime/src/jsc` relative to `7ed99c02`. Their separate alias
