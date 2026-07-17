@@ -44,7 +44,7 @@ convention. The exact current denominator is:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #163 | 431 (200 implemented, 231 pending) |
+| Private JSC/Bun/WebCore ABI under #163 | 431 (201 implemented, 230 pending) |
 | Overlap with zig-js's completed public C target | 15 |
 | Platform libc import | 1 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
@@ -307,6 +307,15 @@ projection without touching stale bytes. Invalid and foreign cells leave the
 caller output unchanged, and an existing VM exception blocks projection
 without being replaced.
 
+The private `typeof` projection returns the exact JavaScriptCore small-string
+classification for every encoded primitive and cell: `undefined`, `boolean`,
+`number`, `string`, `symbol`, `bigint`, `function`, or `object`. Null remains
+`object`, while callable `[[IsHTMLDDA]]` objects remain `undefined`. Each result
+is one stable JSString cell owned by the context group, so sibling realms share
+identity while separate VMs do not. Invalid and foreign cells return null; the
+operation invokes no user code and neither consumes nor replaces a pending VM
+exception.
+
 The VM exception slice exports the shared `JSGlobalObject`/`VM` pending-state
 boundary plus exception-cell conversion and classification. Sibling realms in
 one context group observe the same VM pointer and pending cell; taking or
@@ -490,7 +499,7 @@ profile contains 437 unique declarations from 54 hashed files:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #164 | 421 (194 implemented, 227 pending) |
+| Private JSC/Bun/WebCore ABI under #164 | 421 (195 implemented, 226 pending) |
 | Public-C overlap | 15 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
 | **Total** | **437** |
