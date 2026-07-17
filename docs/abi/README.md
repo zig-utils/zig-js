@@ -44,7 +44,7 @@ convention. The exact current denominator is:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #163 | 432 (33 implemented, 399 pending) |
+| Private JSC/Bun/WebCore ABI under #163 | 432 (47 implemented, 385 pending) |
 | Overlap with zig-js's completed public C target | 15 |
 | Platform libc import | 1 |
 | **Total** | **448** |
@@ -60,7 +60,7 @@ zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"
 ```
 
 This inventory is the denominator, not a claim that the whole surface works.
-The first thirty-three private entries are implemented; the other 399 remain pending
+The first forty-seven private entries are implemented; the other 385 remain pending
 until #163 provides their type/layout contracts, shims, and consumer evidence.
 
 Home revisions `5e829ad483bb9e5ccb19766997df6462edd8e167` and
@@ -129,7 +129,7 @@ It covers empty/immediate/int32/double/NaN/negative-zero behavior, boxed
 empty/nonempty strings, object identity/truthiness, signed minimum and unsigned
 maximum BigInts, negative modulo extraction, exact number fallbacks, and every
 invalid/non-exact boundary. Public accounting stays unchanged at 117 functions
-and 19 extensions; these thirty-three symbols are reported only as private profile
+and 19 extensions; these forty-seven symbols are reported only as private profile
 exports.
 
 The opaque BigInt cell slice additionally exports `JSC__JSBigInt__fromJS`, the
@@ -181,6 +181,24 @@ infinities, and values outside ±8.64e15 are preserved; the getter returns NaN
 for non-Date cells. String parsing, local/UTC conversion, and buffer-based ISO
 formatting remain pending as separate contracts.
 
+The VM exception slice exports the shared `JSGlobalObject`/`VM` pending-state
+boundary plus exception-cell conversion and classification. Sibling realms in
+one context group observe the same VM pointer and pending cell; taking or
+clearing through either realm clears the shared state. Throws preserve the
+original primitive or Error identity, retain the first pending exception, and
+keep the thrown value rooted until clear/take. Exception cells remain distinct
+from ordinary values and can be safely rethrown.
+
+The array/index slice exports exact-length empty-array construction, direct
+indexed put/push/read, and an observable indexed read. Logical holes are not
+materialized as `undefined`; an explicit `undefined` remains present. Direct
+writes bypass inherited setters, sparse writes advance length, index `2^32-1`
+does not, and push at maximum length publishes a RangeError. Observable reads
+perform ToObject and normal prototype/getter lookup, publishing thrown getter
+values through the VM exception boundary. The 45-symbol combined runtime
+fixture covers these semantics; the two profile-selected JSType exports retain
+their separate Home/Bun runtime fixtures.
+
 ## Profile-selectable JSType layout
 
 [`private-jstype-layouts.json`](private-jstype-layouts.json) pins the complete
@@ -220,7 +238,7 @@ profile contains 437 unique declarations from 54 hashed files:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #164 | 422 (33 implemented, 389 pending) |
+| Private JSC/Bun/WebCore ABI under #164 | 422 (47 implemented, 375 pending) |
 | Public-C overlap | 15 |
 | **Total** | **437** |
 
@@ -236,5 +254,5 @@ zig build bun-private-abi-audit -Dbun-source-root="$HOME/Code/bun"
 
 The audit rejects revision, file hash, declaration digest, classification,
 calling-convention, implementation-status, and Home-comparison drift. It does
-not claim complete Bun runtime compatibility; #164 remains open for the 389
+not claim complete Bun runtime compatibility; #164 remains open for the 375
 pending core entries and later wider/generated profiles.
