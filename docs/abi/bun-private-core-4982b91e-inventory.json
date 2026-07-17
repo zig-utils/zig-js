@@ -83,8 +83,8 @@
     },
     "by_status": {
       "external": 1,
-      "implemented": 238,
-      "pending": 198
+      "implemented": 239,
+      "pending": 197
     }
   },
   "home_comparison": {
@@ -1887,10 +1887,10 @@
       "line": 2198,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSValue__forEach(this: JSValue, globalObject: *JSGlobalObject, ctx: ?*anyopaque, callback: *const fn (vm: *VM, globalObject: *JSGlobalObject, ctx: ?*anyopaque, nextValue: JSValue) callconv(.c) void) void;",
       "declaration_sha256": "107dcbddeea8fb2ea31b63fbe365398280e83663a6a7d2293530068749fac6ad",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSValue__forEachPropertyNonIndexed",
