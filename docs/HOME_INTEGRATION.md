@@ -49,7 +49,7 @@ zig build home-private-abi-audit \
 
 This verifies the live revision, every source hash, signature, classification,
 and calling convention. It replaces a vague source-level estimate, but the 431
-private imports are now 91 implemented / 340 pending under #163. The generated
+private imports are now 95 implemented / 336 pending under #163. The generated
 FFI wrapper emits and resolves `JSFunctionCall` inside its own compiled module,
 so zig-js must not provide a duplicate symbol. The implemented
 slices cover JSC64 value identity, cell equality, truthiness, int32 extraction,
@@ -71,6 +71,11 @@ The ZigString DOMException constructor implements all pinned codes 0 through
 SyntaxError divergence, special RangeError/TypeError/Error/undefined branches,
 Node-style codes, message override, and the unknown-code empty-name fallback.
 It also selects the requested realm and preserves the first pending exception.
+Four shared string constructors copy Latin-1, UTF-8, and UTF-16 ZigStrings,
+validate the raw UTF-8-to-16-bit path, canonicalize atom backing within one VM,
+and concatenate ordered ToString results without losing UTF-16 surrogate
+semantics. They preserve source ownership, accept sibling-realm values, reject
+foreign VMs, and retain the first pending exception.
 The two
 ordinary-object constructors and wrapper-unboxing shim add exact prototype,
 freshness, int32/double, negative-zero, NaN, and primitive-value behavior. Three
@@ -112,7 +117,7 @@ behavior, and VM exception propagation. Ten Promise/InternalPromise shims add
 selected-realm pending and directly settled promises, exact native downcasts,
 callback Promise passthrough, Error/throw rejection, and normal AnyPromise
 resolution with thenable assimilation and self-resolution protection. Their
-89-symbol combined fixture covers sibling realms, foreign VMs, callback
+93-symbol combined fixture covers sibling realms, foreign VMs, callback
 reentrancy, exception clearing, settled-target no-ops, and the complete
 DOMException code matrix. Seven Home-only
 JSMap shims create selected-realm native maps and directly implement
