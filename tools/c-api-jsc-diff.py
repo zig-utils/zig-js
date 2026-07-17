@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compile the value-API fixture against system JSC and compare its output."""
+"""Compile the value/class API fixture against system JSC and compare output."""
 
 from __future__ import annotations
 

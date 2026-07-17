@@ -70,6 +70,7 @@ bool        JSValueIsString(JSContextRef, JSValueRef);
 bool        JSValueIsSymbol(JSContextRef, JSValueRef);
 bool        JSValueIsBigInt(JSContextRef, JSValueRef);
 bool        JSValueIsObject(JSContextRef, JSValueRef);
+bool        JSValueIsObjectOfClass(JSContextRef, JSValueRef, JSClassRef);
 bool        JSValueIsArray(JSContextRef, JSValueRef);
 bool        JSValueIsDate(JSContextRef, JSValueRef);
 JSTypedArrayType JSValueGetTypedArrayType(JSContextRef, JSValueRef, JSValueRef* exception);
@@ -114,6 +115,9 @@ bool        ZJSValueUnprotect(JSContextRef, JSValueRef); // zig-js extension
 ```
 
 ```c [Objects]
+JSClassRef  JSClassCreate(const JSClassDefinition*);
+JSClassRef  JSClassRetain(JSClassRef);
+void        JSClassRelease(JSClassRef);
 JSObjectRef JSObjectMake(JSContextRef, JSClassRef, void* data);
 void*       JSObjectGetPrivate(JSObjectRef);
 bool        JSObjectSetPrivate(JSObjectRef, void* data);
@@ -184,7 +188,7 @@ void        JSWorkerRelease(JSWorkerRef);
 ```
 :::
 
-Native callbacks use the standard `JSObjectCallAsFunctionCallback` calling convention, so functions you expose to JavaScript through this subset are registered exactly as they are with JavaScriptCore. `JSObjectIsConstructor` uses the runtime's constructability check, including native constructors such as `Date` and `Array`. `JSObjectMakeArray` returns a real runtime Array object in the current realm, inheriting from that realm's `Array.prototype`. `JSObjectGetProperty` and `JSObjectGetPropertyAtIndex` perform JavaScript `[[Get]]`, including prototype lookup, accessor/proxy behavior, and exception reporting. `JSObjectSetProperty` maps `ReadOnly`, `DontEnum`, and `DontDelete` attributes to JavaScript `writable`, `enumerable`, and `configurable` descriptor fields. `JSValueIsEqual` performs JavaScript abstract equality (`==`), including object coercion and exception reporting. `JSValueGetType` reports Symbol primitives as `symbol` and BigInt primitives as the zig-js `bigint` extension instead of leaking the engine's object-tagged representation. `JSValueToNumber` performs JavaScript `ToNumber`, including object coercion and exception reporting for throwing coercions or Symbol/BigInt values. `JSValueToStringCopy` performs JavaScript `ToString`, including object coercion and exception reporting for throwing coercions or Symbol values. `JSValueToObject` performs JavaScript `ToObject` conversion, returning real primitive wrapper objects and reporting an exception for `null` / `undefined`. `JSValueIsDate` reports the runtime's Date internal slot, including invalid Date objects. `ZJSGlobalContextCreateThreaded` and `JSWorker*` are zig-js extensions rather than public JSC symbols.
+Native callbacks use the standard `JSObjectCallAsFunctionCallback` calling convention, so functions you expose to JavaScript through this subset are registered exactly as they are with JavaScriptCore. `JSObjectIsConstructor` uses the runtime's constructability check, including native constructors such as `Date` and `Array`. `JSObjectMakeArray` returns a real runtime Array object in the current realm, inheriting from that realm's `Array.prototype`. `JSObjectGetProperty` and `JSObjectGetPropertyAtIndex` perform JavaScript `[[Get]]`, including prototype lookup, accessor/proxy behavior, and exception reporting. `JSObjectSetProperty` maps `ReadOnly`, `DontEnum`, and `DontDelete` attributes to JavaScript `writable`, `enumerable`, and `configurable` descriptor fields. `JSValueIsEqual` performs JavaScript abstract equality (`==`), including object coercion and exception reporting. `JSValueGetType` reports Symbol primitives as `symbol` and BigInt primitives as the zig-js `bigint` extension instead of leaking the engine's object-tagged representation. `JSValueToNumber` matches `Number(value)`, including primitive/boxed BigInt conversion and exception reporting for throwing coercions or Symbols. `JSValueToStringCopy` performs JavaScript `ToString`, including object coercion and exception reporting for throwing coercions or Symbol values. `JSValueToObject` performs JavaScript `ToObject` conversion, returning real primitive wrapper objects and reporting an exception for `null` / `undefined`. `JSValueIsDate` reports the runtime's Date internal slot, including invalid Date objects. `ZJSGlobalContextCreateThreaded` and `JSWorker*` are zig-js extensions rather than public JSC symbols.
 
 `JSGlobalContextRetain` and `JSGlobalContextRelease` maintain a real C-API reference count for contexts created through this C API. Releasing a retained context destroys the underlying runtime only after the final release. `JSGlobalContextRetain` returns null for a null context or if retaining would overflow the context refcount.
 
@@ -206,7 +210,7 @@ When an exception-capable API has produced a successful JavaScript result but ca
 
 For no-exception value inspection APIs, a null or wrong-context value ref is an invalid handle, not JavaScript `undefined`: `JSValueGetType` returns the zig-js extension `invalid`, value predicates and `JSValueIsStrictEqual` return false, and `JSValueToBoolean` returns false.
 
-`JSValueProtect` and `JSValueUnprotect` return `true` when the handle table operation is accepted. They return `false` for invalid/null handles, missing protected entries on GC-enabled contexts, allocation failure, or protection-count overflow; overflow is rejected rather than wrapping the counted root.
+Public `JSValueProtect` and `JSValueUnprotect` have JavaScriptCore's `void` ABI. The `ZJSValueProtect` and `ZJSValueUnprotect` extensions return whether the handle-table operation was accepted; they report false for invalid/null handles, missing protected entries on GC-enabled contexts, allocation failure, or protection-count overflow.
 
 `JSObjectSetProperty` and `JSWorkerPostMessage` reject null value refs by reporting an exception through the out pointer instead of storing or posting JavaScript `undefined`.
 
@@ -226,7 +230,7 @@ Native callbacks installed with `JSObjectMakeFunctionWithCallback` must return a
 
 `JSObjectMakeFunctionWithCallback` returns null when the callback pointer is null.
 
-`JSObjectMake(..., data)` returns an ordinary object in the current realm, inheriting from that realm's `Object.prototype`, and marks the opaque pointer as host-owned private data. `JSObjectGetPrivate` returns only host-owned private data; engine-owned native records are not exposed. `JSObjectSetPrivate` can update host-owned private data and can attach host data to plain objects that do not already carry engine private data.
+`JSClassCreate` deep-copies its definition, static tables, and names, retains its parent, and uses an atomic reference count independent of the caller's definition storage. `JSObjectMake(..., class, data)` retains the class for the object lifetime, runs inherited initializers parent-first, finalizers child-first, and keeps the opaque pointer as host-owned private data. `JSValueIsObjectOfClass` recognizes both the exact class and retained ancestors. Static members and the remaining property/call/conversion callbacks are still pending in issue #137. `JSObjectGetPrivate` returns only host-owned private data; engine-owned native records are not exposed. `JSObjectSetPrivate` can update host-owned private data and can attach host data to plain objects that do not already carry engine private data.
 
 `JSObjectMakeDeferredPromise` returns a pending native Promise and stores callable resolve/reject functions in the required out pointers. Passing a null resolve or reject out pointer is a contract error reported through the exception out pointer. The returned functions settle the promise through the normal Promise job queue; embedder-observable callbacks run at the next microtask checkpoint, such as the one performed after `JSEvaluateScript`.
 
@@ -237,7 +241,7 @@ Native callbacks installed with `JSObjectMakeFunctionWithCallback` must return a
 ## Caveats
 
 > [!WARNING]
-> The implemented subset covers the common evaluation, value, object, string, typed-array/ArrayBuffer, and protected-handle surface plus the zig-js worker extension. Full JavaScriptCore class definitions, Objective-C `JSValue`/`JSContext`, inspector/debugger APIs, and other WebKit internals remain tracked by [the public C API roadmap](https://github.com/zig-utils/zig-js/issues/135) and [the umbrella roadmap](https://github.com/zig-utils/zig-js/issues/134). Non-null `JSClassRef` inputs to `JSGlobalContextCreate` or `JSObjectMake` are rejected rather than silently ignored. The language/runtime scope is whatever the configured conformance runner currently proves — see [Conformance](/conformance).
+> The implemented subset covers the common evaluation, value, object, string, typed-array/ArrayBuffer, protected-handle, and foundational class-ownership surface plus the zig-js worker extension. Remaining JavaScriptCore class callbacks/static members, Objective-C `JSValue`/`JSContext`, inspector/debugger APIs, and other WebKit internals remain tracked by [the public C API roadmap](https://github.com/zig-utils/zig-js/issues/135) and [the umbrella roadmap](https://github.com/zig-utils/zig-js/issues/134). Non-null `JSClassRef` input to `JSGlobalContextCreate` remains pending; `JSObjectMake` accepts classes created by `JSClassCreate`. The language/runtime scope is whatever the configured conformance runner currently proves — see [Conformance](/conformance).
 
 Some functions intentionally keep JavaScriptCore-shaped signatures while zig-js is still pre-stabilization, but the documented parameters now either have real behavior or fail fast when the underlying feature is out of scope. `JSEvaluateScript` honors `thisObject`, uses `sourceURL` / `startingLineNumber` for syntax and runtime Error metadata, and parser-created SyntaxErrors expose non-enumerable line/column diagnostics instead of requiring callers to parse message text. `JSGlobalContextRetain` / `JSGlobalContextRelease` maintain a real C-API reference count, `JSObjectMakeFunctionWithCallback` honors the provided function name, and `JSObjectSetProperty` honors property attributes.
 

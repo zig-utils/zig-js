@@ -4,6 +4,35 @@
 #include <stdlib.h>
 
 static unsigned deallocations;
+static unsigned class_events[4];
+static unsigned class_event_count;
+static int private_token;
+
+static void parent_initialize(JSContextRef context, JSObjectRef object)
+{
+    (void)context;
+    if (JSObjectGetPrivate(object) == &private_token)
+        class_events[class_event_count++] = 1;
+}
+
+static void child_initialize(JSContextRef context, JSObjectRef object)
+{
+    (void)context;
+    (void)object;
+    class_events[class_event_count++] = 2;
+}
+
+static void parent_finalize(JSObjectRef object)
+{
+    (void)object;
+    class_events[class_event_count++] = 4;
+}
+
+static void child_finalize(JSObjectRef object)
+{
+    (void)object;
+    class_events[class_event_count++] = 3;
+}
 
 static void release_bytes(void* bytes, void* context)
 {
@@ -70,6 +99,30 @@ int main(void)
     if (!array_ctor || !array || !JSValueIsInstanceOfConstructor(context, array, array_ctor, &exception))
         return 17;
 
+    JSClassDefinition parent_definition = kJSClassDefinitionEmpty;
+    parent_definition.className = "Parent";
+    parent_definition.initialize = parent_initialize;
+    parent_definition.finalize = parent_finalize;
+    JSClassRef parent_class = JSClassCreate(&parent_definition);
+    JSClassDefinition child_definition = kJSClassDefinitionEmpty;
+    child_definition.className = "Child";
+    child_definition.parentClass = parent_class;
+    child_definition.initialize = child_initialize;
+    child_definition.finalize = child_finalize;
+    JSClassRef child_class = JSClassCreate(&child_definition);
+    if (!parent_class || !child_class || JSClassRetain(child_class) != child_class)
+        return 18;
+    JSClassRelease(child_class);
+    JSClassRelease(parent_class);
+    JSObjectRef class_object = JSObjectMake(context, child_class, &private_token);
+    if (!class_object || class_event_count != 2 || class_events[0] != 1 || class_events[1] != 2)
+        return 19;
+    if (!JSValueIsObjectOfClass(context, class_object, child_class) ||
+        !JSValueIsObjectOfClass(context, class_object, parent_class) ||
+        JSObjectGetPrivate(class_object) != &private_token)
+        return 20;
+    JSClassRelease(child_class);
+
     const JSChar utf16[] = { 'z', 'i', 'g', 0xd83d, 0xde00 };
     JSStringRef wide = JSStringCreateWithCharacters(utf16, 5);
     if (!wide || JSStringGetLength(wide) != 5 ||
@@ -96,5 +149,7 @@ int main(void)
         return 6;
 
     JSGlobalContextRelease(context);
+    if (class_event_count != 4 || class_events[2] != 3 || class_events[3] != 4)
+        return 21;
     return deallocations == 1 ? 0 : 7;
 }

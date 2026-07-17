@@ -120,7 +120,17 @@ pub const JSValueRef = ?*anyopaque;
 pub const JSObjectRef = ?*anyopaque;
 pub const JSContextRef = ?*anyopaque;
 pub const JSStringRef = ?*anyopaque;
+pub const JSClassRef = ?*anyopaque;
+pub const JSPropertyNameAccumulatorRef = ?*anyopaque;
 pub const ExceptionRef = [*c]JSValueRef;
+
+pub const JSObjectInitializeCallback = ?*const fn (JSContextRef, JSObjectRef) callconv(.c) void;
+pub const JSObjectFinalizeCallback = ?*const fn (JSObjectRef) callconv(.c) void;
+pub const JSObjectHasPropertyCallback = ?*const fn (JSContextRef, JSObjectRef, JSStringRef) callconv(.c) bool;
+pub const JSObjectGetPropertyCallback = ?*const fn (JSContextRef, JSObjectRef, JSStringRef, ExceptionRef) callconv(.c) JSValueRef;
+pub const JSObjectSetPropertyCallback = ?*const fn (JSContextRef, JSObjectRef, JSStringRef, JSValueRef, ExceptionRef) callconv(.c) bool;
+pub const JSObjectDeletePropertyCallback = ?*const fn (JSContextRef, JSObjectRef, JSStringRef, ExceptionRef) callconv(.c) bool;
+pub const JSObjectGetPropertyNamesCallback = ?*const fn (JSContextRef, JSObjectRef, JSPropertyNameAccumulatorRef) callconv(.c) void;
 
 pub const JSObjectCallAsFunctionCallback = ?*const fn (
     ctx: JSContextRef,
@@ -131,12 +141,157 @@ pub const JSObjectCallAsFunctionCallback = ?*const fn (
     exception: ExceptionRef,
 ) callconv(.c) JSValueRef;
 
+pub const JSObjectCallAsConstructorCallback = ?*const fn (JSContextRef, JSObjectRef, usize, [*c]const JSValueRef, ExceptionRef) callconv(.c) JSObjectRef;
+pub const JSObjectHasInstanceCallback = ?*const fn (JSContextRef, JSObjectRef, JSValueRef, ExceptionRef) callconv(.c) bool;
+pub const JSObjectConvertToTypeCallback = ?*const fn (JSContextRef, JSObjectRef, JSType, ExceptionRef) callconv(.c) JSValueRef;
+
+pub const JSStaticValue = extern struct {
+    name: ?[*:0]const u8 = null,
+    get_property: JSObjectGetPropertyCallback = null,
+    set_property: JSObjectSetPropertyCallback = null,
+    attributes: c_uint = 0,
+};
+
+pub const JSStaticFunction = extern struct {
+    name: ?[*:0]const u8 = null,
+    call_as_function: JSObjectCallAsFunctionCallback = null,
+    attributes: c_uint = 0,
+};
+
+pub const JSClassDefinition = extern struct {
+    version: c_int = 0,
+    attributes: c_uint = 0,
+    class_name: ?[*:0]const u8 = null,
+    parent_class: JSClassRef = null,
+    static_values: [*c]const JSStaticValue = null,
+    static_functions: [*c]const JSStaticFunction = null,
+    initialize: JSObjectInitializeCallback = null,
+    finalize: JSObjectFinalizeCallback = null,
+    has_property: JSObjectHasPropertyCallback = null,
+    get_property: JSObjectGetPropertyCallback = null,
+    set_property: JSObjectSetPropertyCallback = null,
+    delete_property: JSObjectDeletePropertyCallback = null,
+    get_property_names: JSObjectGetPropertyNamesCallback = null,
+    call_as_function: JSObjectCallAsFunctionCallback = null,
+    call_as_constructor: JSObjectCallAsConstructorCallback = null,
+    has_instance: JSObjectHasInstanceCallback = null,
+    convert_to_type: JSObjectConvertToTypeCallback = null,
+};
+
+pub const kJSClassAttributeNone: c_uint = 0;
+pub const kJSClassAttributeNoAutomaticPrototype: c_uint = 1 << 1;
+export const kJSClassDefinitionEmpty: JSClassDefinition = .{};
+
 pub const JSTypedArrayBytesDeallocator = ?value.ExternalBufferDeallocator;
 
 pub const kJSPropertyAttributeNone: c_uint = 0;
 pub const kJSPropertyAttributeReadOnly: c_uint = 1 << 1;
 pub const kJSPropertyAttributeDontEnum: c_uint = 1 << 2;
 pub const kJSPropertyAttributeDontDelete: c_uint = 1 << 3;
+
+const CClass = struct {
+    ref_count: std.atomic.Value(usize) = .init(1),
+    definition: JSClassDefinition,
+    class_name: ?[:0]u8 = null,
+    static_values: []JSStaticValue = &.{},
+    static_functions: []JSStaticFunction = &.{},
+    parent: ?*CClass = null,
+};
+
+fn classFrom(ref: JSClassRef) ?*CClass {
+    return @ptrCast(@alignCast(ref orelse return null));
+}
+
+fn retainClass(class: *CClass) bool {
+    var current = class.ref_count.load(.acquire);
+    while (true) {
+        if (current == std.math.maxInt(usize)) return false;
+        if (class.ref_count.cmpxchgWeak(current, current + 1, .acq_rel, .acquire)) |actual| {
+            current = actual;
+        } else return true;
+    }
+}
+
+fn destroyClass(class: *CClass) void {
+    for (class.static_values) |entry| if (entry.name) |name| gpa.free(std.mem.span(name));
+    for (class.static_functions) |entry| if (entry.name) |name| gpa.free(std.mem.span(name));
+    if (class.static_values.len > 0) gpa.free(class.static_values);
+    if (class.static_functions.len > 0) gpa.free(class.static_functions);
+    if (class.class_name) |name| gpa.free(name);
+    if (class.parent) |parent| releaseClass(parent);
+    gpa.destroy(class);
+}
+
+fn releaseClass(class: *CClass) void {
+    var current = class.ref_count.load(.acquire);
+    while (true) {
+        std.debug.assert(current > 0);
+        if (class.ref_count.cmpxchgWeak(current, current - 1, .acq_rel, .acquire)) |actual| {
+            current = actual;
+        } else {
+            if (current == 1) destroyClass(class);
+            return;
+        }
+    }
+}
+
+fn dupeCString(bytes: []const u8) ![:0]u8 {
+    const out = try gpa.allocSentinel(u8, bytes.len, 0);
+    @memcpy(out, bytes);
+    return out;
+}
+
+fn copyStaticValues(source: [*c]const JSStaticValue) ![]JSStaticValue {
+    if (source == null) return &.{};
+    var count: usize = 0;
+    while (source[count].name != null) : (count += 1) {}
+    if (count == 0) return &.{};
+    const out = try gpa.alloc(JSStaticValue, count + 1);
+    errdefer gpa.free(out);
+    var copied: usize = 0;
+    errdefer for (out[0..copied]) |entry| if (entry.name) |name| gpa.free(std.mem.span(name));
+    while (copied < count) : (copied += 1) {
+        out[copied] = source[copied];
+        const owned = try dupeCString(std.mem.span(source[copied].name.?));
+        out[copied].name = owned.ptr;
+    }
+    out[count] = .{};
+    return out;
+}
+
+fn copyStaticFunctions(source: [*c]const JSStaticFunction) ![]JSStaticFunction {
+    if (source == null) return &.{};
+    var count: usize = 0;
+    while (source[count].name != null) : (count += 1) {}
+    if (count == 0) return &.{};
+    const out = try gpa.alloc(JSStaticFunction, count + 1);
+    errdefer gpa.free(out);
+    var copied: usize = 0;
+    errdefer for (out[0..copied]) |entry| if (entry.name) |name| gpa.free(std.mem.span(name));
+    while (copied < count) : (copied += 1) {
+        out[copied] = source[copied];
+        const owned = try dupeCString(std.mem.span(source[copied].name.?));
+        out[copied].name = owned.ptr;
+    }
+    out[count] = .{};
+    return out;
+}
+
+fn finishClassObject(owner: *value.CApiObjectOwner) void {
+    const class = classFrom(owner.class_ref).?;
+    if (owner.object_ref) |object_ref| {
+        var current: ?*CClass = class;
+        while (current) |item| : (current = item.parent) {
+            if (item.definition.finalize) |finalize| finalize(object_ref);
+        }
+    }
+    releaseClass(class);
+}
+
+fn initializeClassObject(ctx: JSContextRef, object_ref: JSObjectRef, class: *CClass) void {
+    if (class.parent) |parent| initializeClassObject(ctx, object_ref, parent);
+    if (class.definition.initialize) |initialize| initialize(ctx, object_ref);
+}
 
 // ---- internal helpers --------------------------------------------------
 
@@ -578,6 +733,19 @@ export fn JSValueIsObject(ctx: JSContextRef, v: JSValueRef) callconv(.c) bool {
     const c = ctxForHandleInspection(ctx) orelse return false;
     const uv = valueFromContext(c, v) orelse return false;
     return uv.isObject() and !uv.asObj().is_symbol and !uv.asObj().is_bigint;
+}
+
+export fn JSValueIsObjectOfClass(ctx: JSContextRef, v: JSValueRef, js_class: JSClassRef) callconv(.c) bool {
+    const c = ctxForHandleInspection(ctx) orelse return false;
+    const expected = classFrom(js_class) orelse return false;
+    const uv = valueFromContext(c, v) orelse return false;
+    if (!uv.isObject() or uv.asObj().is_symbol or uv.asObj().is_bigint) return false;
+    const owner = uv.asObj().cApiObjectOwner() orelse return false;
+    var current = classFrom(owner.class_ref);
+    while (current) |item| : (current = item.parent) {
+        if (item == expected) return true;
+    }
+    return false;
 }
 
 export fn JSValueIsArray(ctx: JSContextRef, v: JSValueRef) callconv(.c) bool {
@@ -1098,8 +1266,50 @@ export fn ZJSValueUnprotect(ctx: JSContextRef, v: JSValueRef) callconv(.c) bool 
 
 // ---- JSObject construction & properties --------------------------------
 
-export fn JSObjectMake(ctx: JSContextRef, class: ?*anyopaque, data: ?*anyopaque) callconv(.c) JSObjectRef {
-    if (class != null) return null;
+export fn JSClassCreate(definition: ?*const JSClassDefinition) callconv(.c) JSClassRef {
+    const source = definition orelse return null;
+    if (source.version != 0) return null;
+    const class = gpa.create(CClass) catch return null;
+    class.* = .{ .definition = source.* };
+    errdefer gpa.destroy(class);
+
+    if (source.parent_class) |parent_ref| {
+        const parent = classFrom(parent_ref) orelse return null;
+        if (!retainClass(parent)) return null;
+        class.parent = parent;
+        class.definition.parent_class = @ptrCast(parent);
+    }
+    errdefer if (class.parent) |parent| releaseClass(parent);
+
+    if (source.class_name) |name| {
+        class.class_name = dupeCString(std.mem.span(name)) catch return null;
+        class.definition.class_name = class.class_name.?.ptr;
+    }
+    errdefer if (class.class_name) |name| gpa.free(name);
+
+    class.static_values = copyStaticValues(source.static_values) catch return null;
+    errdefer {
+        for (class.static_values) |entry| if (entry.name) |name| gpa.free(std.mem.span(name));
+        if (class.static_values.len > 0) gpa.free(class.static_values);
+    }
+    class.definition.static_values = if (class.static_values.len == 0) null else class.static_values.ptr;
+
+    class.static_functions = copyStaticFunctions(source.static_functions) catch return null;
+    class.definition.static_functions = if (class.static_functions.len == 0) null else class.static_functions.ptr;
+    return @ptrCast(class);
+}
+
+export fn JSClassRetain(js_class: JSClassRef) callconv(.c) JSClassRef {
+    const class = classFrom(js_class) orelse return null;
+    return if (retainClass(class)) js_class else null;
+}
+
+export fn JSClassRelease(js_class: JSClassRef) callconv(.c) void {
+    const class = classFrom(js_class) orelse return;
+    releaseClass(class);
+}
+
+export fn JSObjectMake(ctx: JSContextRef, js_class: JSClassRef, data: ?*anyopaque) callconv(.c) JSObjectRef {
     const c = ctxFrom(ctx) orelse return null;
     const gc_saved = gc_mod.setActiveHeap(c.gc);
     defer _ = gc_mod.setActiveHeap(gc_saved);
@@ -1112,7 +1322,33 @@ export fn JSObjectMake(ctx: JSContextRef, class: ?*anyopaque, data: ?*anyopaque)
     const obj = value_obj.asObj();
     obj.private_data = data;
     obj.private_data_tag = .host;
-    return box(c, Value.obj(obj));
+    const class = classFrom(js_class);
+    var owner: ?*value.CApiObjectOwner = null;
+    if (class) |item| {
+        if (!retainClass(item)) return null;
+        const created = c.createCApiObjectOwner(@ptrCast(item), finishClassObject) catch {
+            releaseClass(item);
+            return null;
+        };
+        owner = created;
+        obj.setCApiObjectOwner(c.arena(), created) catch {
+            created.finishOnce();
+            return null;
+        };
+    }
+    const object_ref = box(c, Value.obj(obj)) orelse {
+        if (owner) |record| record.finishOnce();
+        return null;
+    };
+    if (owner) |record| {
+        record.object_ref = object_ref;
+        const protected = valueProtect(ctx, object_ref);
+        defer {
+            if (protected) _ = valueUnprotect(ctx, object_ref);
+        }
+        initializeClassObject(ctx, object_ref, class.?);
+    }
+    return object_ref;
 }
 
 export fn JSObjectGetPrivate(object: JSObjectRef) callconv(.c) ?*anyopaque {
@@ -2431,14 +2667,117 @@ test "C-API: JSEvaluateScript rejects null script with exception" {
     try std.testing.expect(std.mem.indexOf(u8, buf[0 .. written - 1], "script is null") != null);
 }
 
-test "C-API: unsupported JSClassRef inputs fail fast" {
+test "C-API: unsupported global JSClassRef input fails fast" {
     var fake_class: u8 = 0;
     const fake: *anyopaque = @ptrCast(&fake_class);
     try std.testing.expect(JSGlobalContextCreate(fake) == null);
+}
 
+test "C-API: JSClassRef copies definitions and owns inherited instance lifecycle" {
+    const State = struct {
+        var events: [4]u8 = undefined;
+        var count: usize = 0;
+
+        fn record(event: u8) void {
+            events[count] = event;
+            count += 1;
+        }
+        fn parentInitialize(_: JSContextRef, object: JSObjectRef) callconv(.c) void {
+            std.debug.assert(JSObjectGetPrivate(object) == @as(?*anyopaque, @ptrFromInt(0x1234)));
+            record(1);
+        }
+        fn childInitialize(_: JSContextRef, _: JSObjectRef) callconv(.c) void {
+            record(2);
+        }
+        fn parentFinalize(_: JSObjectRef) callconv(.c) void {
+            record(4);
+        }
+        fn childFinalize(_: JSObjectRef) callconv(.c) void {
+            record(3);
+        }
+    };
+    State.count = 0;
+
+    var parent_definition: JSClassDefinition = .{
+        .class_name = "Parent",
+        .initialize = State.parentInitialize,
+        .finalize = State.parentFinalize,
+    };
+    const parent = JSClassCreate(&parent_definition) orelse return error.ClassCreateFailed;
+
+    var child_name = [_:0]u8{ 'C', 'h', 'i', 'l', 'd' };
+    var static_name = [_:0]u8{'x'};
+    var static_function_name = [_:0]u8{ 'r', 'u', 'n' };
+    var static_values = [_]JSStaticValue{
+        .{ .name = static_name[0.. :0].ptr },
+        .{},
+    };
+    var static_functions = [_]JSStaticFunction{
+        .{ .name = static_function_name[0.. :0].ptr },
+        .{},
+    };
+    // Use a separate mutable static name to verify the sentinel-terminated
+    // definition table and every entry name are copied, not borrowed.
+    var child_definition: JSClassDefinition = .{
+        .class_name = child_name[0.. :0].ptr,
+        .parent_class = parent,
+        .static_values = &static_values,
+        .static_functions = &static_functions,
+        .initialize = State.childInitialize,
+        .finalize = State.childFinalize,
+    };
+    const child = JSClassCreate(&child_definition) orelse return error.ClassCreateFailed;
+    child_name[0] = 'X';
+    static_name[0] = 'y';
+    static_function_name[0] = 'x';
+    const child_internal = classFrom(child).?;
+    try std.testing.expectEqualStrings("Child", child_internal.class_name.?);
+    try std.testing.expectEqualStrings("x", std.mem.span(child_internal.static_values[0].name.?));
+    try std.testing.expect(child_internal.static_values[1].name == null);
+    try std.testing.expectEqualStrings("run", std.mem.span(child_internal.static_functions[0].name.?));
+    try std.testing.expect(child_internal.static_functions[1].name == null);
+
+    // The child and then the object independently retain their ancestry.
+    JSClassRelease(parent);
     const ctx = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
-    defer JSGlobalContextRelease(ctx);
-    try std.testing.expect(JSObjectMake(ctx, fake, null) == null);
+    const private: *anyopaque = @ptrFromInt(0x1234);
+    const object = JSObjectMake(ctx, child, private) orelse return error.ObjectCreateFailed;
+    try std.testing.expectEqualSlices(u8, &.{ 1, 2 }, State.events[0..State.count]);
+    try std.testing.expect(JSValueIsObjectOfClass(ctx, object, child));
+    try std.testing.expect(JSValueIsObjectOfClass(ctx, object, parent));
+    try std.testing.expectEqual(private, JSObjectGetPrivate(object).?);
+
+    var unrelated_definition: JSClassDefinition = .{ .class_name = "Unrelated" };
+    const unrelated = JSClassCreate(&unrelated_definition) orelse return error.ClassCreateFailed;
+    try std.testing.expect(!JSValueIsObjectOfClass(ctx, object, unrelated));
+    JSClassRelease(unrelated);
+
+    JSClassRelease(child);
+    JSGlobalContextRelease(ctx);
+    try std.testing.expectEqualSlices(u8, &.{ 1, 2, 3, 4 }, State.events[0..State.count]);
+}
+
+test "C-API: GC and context teardown finalize class instances exactly once" {
+    const State = struct {
+        var finalizations: usize = 0;
+        fn finalize(_: JSObjectRef) callconv(.c) void {
+            finalizations += 1;
+        }
+    };
+    State.finalizations = 0;
+
+    var definition: JSClassDefinition = .{ .finalize = State.finalize };
+    const class = JSClassCreate(&definition) orelse return error.ClassCreateFailed;
+    const context = Context.createWith(gpa, .{ .enable_gc = true }) catch return error.JSCInitFailed;
+    context.initCApiRef();
+    const ctx: JSContextRef = @ptrCast(context);
+    _ = JSObjectMake(ctx, class, null) orelse return error.ObjectCreateFailed;
+    JSClassRelease(class);
+
+    JSGarbageCollect(ctx);
+    try std.testing.expectEqual(@as(usize, 1), State.finalizations);
+    JSGlobalContextRelease(ctx);
+    try std.testing.expectEqual(@as(usize, 1), State.finalizations);
 }
 
 test "C-API: owned TypedArrays expose their public type, geometry, buffer, and bytes" {

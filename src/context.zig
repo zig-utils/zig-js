@@ -2272,6 +2272,10 @@ pub const Context = struct {
     /// object finalizers may release a record early; Context teardown releases
     /// any remaining arena-mode records and destroys every record exactly once.
     external_buffer_owners: std.ArrayListUnmanaged(*value.ExternalBufferOwner) = .empty,
+    /// Context-owned records for public C-API class instances. A GC finalizer
+    /// may finish a record early; teardown finishes arena-mode survivors and
+    /// destroys every record after all object cells are gone.
+    c_api_object_owners: std.ArrayListUnmanaged(*value.CApiObjectOwner) = .empty,
     /// Outstanding `Atomics.waitAsync` promises (entries live in the arena;
     /// the list's address is the realm's waiter-table owner token). Settled by
     /// the drain tail in `evaluate`/`evaluateModule`.
@@ -2984,6 +2988,11 @@ pub const Context = struct {
             self.gpa.destroy(state);
             self.gc_state = null;
         }
+        for (self.c_api_object_owners.items) |owner| {
+            owner.finishOnce();
+            self.gpa.destroy(owner);
+        }
+        self.c_api_object_owners.deinit(self.gpa);
         for (self.external_buffer_owners.items) |owner| {
             _ = owner.release();
             self.gpa.destroy(owner);
@@ -3046,6 +3055,18 @@ pub const Context = struct {
             .deallocator_context = deallocator_context,
         };
         try self.external_buffer_owners.append(self.gpa, owner);
+        return owner;
+    }
+
+    pub fn createCApiObjectOwner(
+        self: *Context,
+        class_ref: *anyopaque,
+        finish_fn: *const fn (*value.CApiObjectOwner) void,
+    ) !*value.CApiObjectOwner {
+        const owner = try self.gpa.create(value.CApiObjectOwner);
+        errdefer self.gpa.destroy(owner);
+        owner.* = .{ .class_ref = class_ref, .finish_fn = finish_fn };
+        try self.c_api_object_owners.append(self.gpa, owner);
         return owner;
     }
 

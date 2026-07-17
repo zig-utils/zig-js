@@ -917,6 +917,7 @@ pub const Binding = struct {
         switch (kind) {
             .object => {
                 const o: *Object = @ptrCast(@alignCast(cell));
+                if (o.cApiObjectOwner()) |owner| owner.finishOnce();
                 // Buffer metadata now lives in the cold sidecar. Release it
                 // before finalizeObjectBacking destroys that sidecar.
                 if (o.arrayBuffer()) |ab| {

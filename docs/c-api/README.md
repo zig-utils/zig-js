@@ -19,4 +19,4 @@ inventory. On a machine with the pinned SDK, pass its root to
 `zig build test-c-api` additionally compiles, links, and runs C and C++ hosts.
 On macOS, `zig build c-api-jsc-diff` verifies those hashes, compiles
 `tests/c_api_value_diff.c` against both zig-js and the system JavaScriptCore
-framework, and compares their output byte-for-byte.
+framework, and compares their value/class output byte-for-byte.

@@ -625,6 +625,23 @@ pub const FinalizationRecord = struct {
     ready: bool = false,
 };
 
+/// Context-owned lifetime record for a C-API class instance. The concrete
+/// class definition stays private to `c_api.zig`; core GC and Context teardown
+/// only need one idempotent callback that runs class finalizers and releases
+/// the instance's retained JSClassRef.
+pub const CApiObjectOwner = struct {
+    finalized: std.atomic.Value(bool) = .init(false),
+    object_ref: ?*anyopaque = null,
+    class_ref: ?*anyopaque,
+    finish_fn: *const fn (*CApiObjectOwner) void,
+
+    pub fn finishOnce(self: *CApiObjectOwner) void {
+        if (self.finalized.cmpxchgStrong(false, true, .acq_rel, .acquire) == null) {
+            self.finish_fn(self);
+        }
+    }
+};
+
 /// Rare internal slots kept out of every ordinary object. These states belong
 /// to disjoint exotic object kinds, but a single sidecar keeps access simple
 /// while removing enough default-initialized payload to place Object cells in
@@ -722,6 +739,10 @@ pub const ObjectColdState = struct {
     weak_index: std.AutoHashMapUnmanaged(usize, usize) = .empty,
     finalization_callback: Value = Value.undef(),
     finalization_records: std.ArrayListUnmanaged(FinalizationRecord) = .empty,
+    /// Non-GC metadata for objects created from a public JSClassRef. The owner
+    /// itself is context-owned so this borrowed pointer remains valid until
+    /// after every object finalizer has run.
+    c_api_object_owner: ?*CApiObjectOwner = null,
 
     pub inline fn hasRare(self: *const ObjectColdState, tag: ObjectRareTag) bool {
         return @constCast(&self.rare_tag).load(.acquire) == tag;
@@ -1198,6 +1219,21 @@ pub const Object = struct {
     pub inline fn coldState(self: *const Object) ?*ObjectColdState {
         const storage = self.storageState() orelse return null;
         return storage.cold.load(.acquire);
+    }
+
+    pub inline fn cApiObjectOwner(self: *const Object) ?*CApiObjectOwner {
+        const cold = self.coldState() orelse return null;
+        return cold.c_api_object_owner;
+    }
+
+    pub fn setCApiObjectOwner(
+        self: *Object,
+        fallback: std.mem.Allocator,
+        owner: *CApiObjectOwner,
+    ) std.mem.Allocator.Error!void {
+        const cold = try self.ensureCold(fallback);
+        std.debug.assert(cold.c_api_object_owner == null);
+        cold.c_api_object_owner = owner;
     }
 
     /// Atomic view of the cold key-order pointer. Contents remain protected by

@@ -83,6 +83,22 @@ int main(void)
     JSObjectRef constructor = (JSObjectRef)JSObjectGetPropertyAtIndex(context, (JSObjectRef)pair, 1, &exception);
     printf("instanceof %d\n", JSValueIsInstanceOfConstructor(context, instance, constructor, &exception));
 
+    JSClassDefinition parent_definition = kJSClassDefinitionEmpty;
+    parent_definition.className = "DiffParent";
+    JSClassRef parent_class = JSClassCreate(&parent_definition);
+    JSClassDefinition child_definition = kJSClassDefinitionEmpty;
+    child_definition.className = "DiffChild";
+    child_definition.parentClass = parent_class;
+    JSClassRef child_class = JSClassCreate(&child_definition);
+    JSObjectRef class_object = JSObjectMake(context, child_class, NULL);
+    JSObjectRef plain_object = JSObjectMake(context, NULL, NULL);
+    printf("classes %d %d %d\n",
+        JSValueIsObjectOfClass(context, class_object, child_class),
+        JSValueIsObjectOfClass(context, class_object, parent_class),
+        JSValueIsObjectOfClass(context, plain_object, child_class));
+    JSClassRelease(parent_class);
+    JSClassRelease(child_class);
+
     JSValueProtect(context, json);
     JSValueUnprotect(context, json);
     if (exception)
