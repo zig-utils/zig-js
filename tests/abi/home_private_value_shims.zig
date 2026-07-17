@@ -153,6 +153,7 @@ extern "c" fn JSBuffer__isBuffer(JSContextRef, EncodedValue) bool;
 extern "c" fn JSBuffer__bufferFromLength(JSContextRef, i64) EncodedValue;
 extern "c" fn JSBuffer__bufferFromPointerAndLengthAndDeinit(JSContextRef, [*]u8, usize, ?*anyopaque, ?*const fn (?*anyopaque, ?*anyopaque) callconv(.c) void) EncodedValue;
 extern "c" fn JSBuffer__fromMmap(JSContextRef, *anyopaque, usize) EncodedValue;
+extern "c" fn JSC__JSValue__createUninitializedUint8Array(JSContextRef, usize) EncodedValue;
 extern "c" fn JSObjectGetTypedArrayBytesPtr(JSContextRef, JSObjectRef, [*c]JSValueRef) ?*anyopaque;
 extern "c" fn JSObjectGetTypedArrayLength(JSContextRef, JSObjectRef, [*c]JSValueRef) usize;
 extern "c" fn ZigString__toErrorInstance(*const ZigString, JSContextRef) EncodedValue;
@@ -863,6 +864,20 @@ pub fn main() void {
             @intFromPtr(mmap_buffer_bytes) != @intFromPtr(fixture_mapping.ptr) or @as(*u8, @ptrCast(mmap_buffer_bytes)).* != 0x6b)
             fail("mmap Buffer ownership mismatch");
     }
+
+    const uninitialized_uint8 = JSC__JSValue__createUninitializedUint8Array(context, 7);
+    const uninitialized_bytes_raw = JSObjectGetTypedArrayBytesPtr(context, uninitialized_uint8.cellPointer(), &typed_exception) orelse
+        fail("uninitialized Uint8Array bytes lookup failed");
+    const uninitialized_bytes = @as([*]u8, @ptrCast(uninitialized_bytes_raw))[0..7];
+    @memset(uninitialized_bytes, 0x7c);
+    if (typed_exception != null or JSBuffer__isBuffer(context, uninitialized_uint8) or
+        JSObjectGetTypedArrayLength(context, uninitialized_uint8.cellPointer(), &typed_exception) != 7 or
+        !std.mem.eql(u8, uninitialized_bytes, &[_]u8{ 0x7c, 0x7c, 0x7c, 0x7c, 0x7c, 0x7c, 0x7c }))
+        fail("uninitialized Uint8Array identity/write mismatch");
+    if (JSC__JSValue__createUninitializedUint8Array(context, std.math.maxInt(usize)) != .empty or
+        !JSGlobalObject__hasException(context))
+        fail("oversized uninitialized Uint8Array did not throw");
+    JSGlobalObject__clearException(context);
 
     StringBuilder__init(&string_builder);
     StringBuilder__appendInt(&string_builder, std.math.minInt(i32));
@@ -2908,5 +2923,5 @@ pub fn main() void {
         TopExceptionScope__exceptionIncludingTraps(&verification_scope) != null)
         fail("private TopExceptionScope destruction mismatch");
 
-    std.debug.print("Home private value shims: 195/195 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 196/196 symbols linked; runtime matrix passed\n", .{});
 }

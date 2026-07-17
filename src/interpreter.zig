@@ -11741,8 +11741,20 @@ pub const Interpreter = struct {
     /// 8-byte aligned so every typed-array element is naturally aligned (the
     /// atomic element paths in value.zig rely on this).
     pub fn makeArrayBuffer(self: *Interpreter, len: usize) EvalError!*value.Object {
+        return self.makeArrayBufferWithInitialization(len, true);
+    }
+
+    /// Create an ArrayBuffer whose backing bytes are intentionally left
+    /// uninitialized. This is only for private native boundaries whose callers
+    /// immediately overwrite the full view; ECMAScript constructors continue
+    /// to route through `makeArrayBuffer` and remain zero-filled.
+    fn makeUninitializedArrayBuffer(self: *Interpreter, len: usize) EvalError!*value.Object {
+        return self.makeArrayBufferWithInitialization(len, false);
+    }
+
+    fn makeArrayBufferWithInitialization(self: *Interpreter, len: usize, zero_fill: bool) EvalError!*value.Object {
         const o = (try self.newObject()).asObj();
-        const data = try self.allocArrayBufferBytes(len);
+        const data = try self.allocArrayBufferBytesWithInitialization(len, zero_fill);
         errdefer self.freeArrayBufferBytes(data, self.gc_backing != null);
         const ab = try self.allocArrayBufferData();
         errdefer self.destroyArrayBufferData(ab);
@@ -11793,7 +11805,15 @@ pub const Interpreter = struct {
         return o;
     }
 
+    pub fn makeUninitializedTypedArray(self: *Interpreter, kind: value.TAKind, len: usize) EvalError!*value.Object {
+        return newTypedArrayWithInitialization(self, kind, len, false);
+    }
+
     fn allocArrayBufferBytes(self: *Interpreter, len: usize) EvalError![]u8 {
+        return self.allocArrayBufferBytesWithInitialization(len, true);
+    }
+
+    fn allocArrayBufferBytesWithInitialization(self: *Interpreter, len: usize, zero_fill: bool) EvalError![]u8 {
         if (len == 0) return &.{};
         const data = if (self.gc_backing) |a| blk: {
             const p = a.rawAlloc(len, .@"8", @returnAddress()) orelse retry: {
@@ -11809,7 +11829,7 @@ pub const Interpreter = struct {
             if (self.gc_array_buffer_bytes_live) |live| _ = @atomicRmw(usize, live, .Add, len, .monotonic);
             break :blk p[0..len];
         } else try self.arena.alignedAlloc(u8, .@"8", len);
-        @memset(data, 0);
+        if (zero_fill) @memset(data, 0);
         return data;
     }
 
@@ -20468,12 +20488,23 @@ fn arrayBufferSliceImpl(self: *Interpreter, this: Value, args: []const Value, co
 
 /// Build a fresh typed array of `kind` with `len` zero-initialized elements.
 fn newTypedArray(self: *Interpreter, kind: value.TAKind, len: usize) EvalError!*value.Object {
+    return newTypedArrayWithInitialization(self, kind, len, true);
+}
+
+fn newTypedArrayWithInitialization(self: *Interpreter, kind: value.TAKind, len: usize, zero_fill: bool) EvalError!*value.Object {
+    const element_size = kind.byteSize();
+    if (len > @min(std.math.maxInt(usize) / element_size, max_typed_array_bytes / element_size))
+        return self.throwError("RangeError", "invalid typed array length");
     const o = (try self.newObject()).asObj();
     const ta = try (try o.typedArrayAllocator(self.arena)).create(value.TypedArrayData);
     var ta_installed = false;
     errdefer if (!ta_installed) o.destroyUninstalledTypedArray(self.arena, ta);
 
-    ta.* = .{ .buffer = try self.makeArrayBuffer(len * kind.byteSize()), .byte_offset = 0, .length = len, .kind = kind };
+    const buffer = if (zero_fill)
+        try self.makeArrayBuffer(len * element_size)
+    else
+        try self.makeUninitializedArrayBuffer(len * element_size);
+    ta.* = .{ .buffer = buffer, .byte_offset = 0, .length = len, .kind = kind };
     try o.setTypedArray(self.arena, ta);
     ta_installed = true;
     if (self.env.get(kind.ctorName())) |c| {

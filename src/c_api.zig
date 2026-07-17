@@ -8681,6 +8681,28 @@ export fn JSBuffer__fromMmap(
     );
 }
 
+export fn JSC__JSValue__createUninitializedUint8Array(
+    global: JSContextRef,
+    len: usize,
+) callconv(.c) EncodedValue {
+    const context = ctxForEvaluation(global) orelse return .empty;
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    defer context.popActiveInterpreter(&machine);
+    const object = machine.makeUninitializedTypedArray(.u8, len) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    return privateEncodeResult(context, &machine, Value.obj(object));
+}
+
 fn makeExternalArrayBuffer(
     c: *Context,
     bytes: ?*anyopaque,
@@ -14782,6 +14804,41 @@ test "private JSBuffer constructors preserve ranges external finalizers and mmap
 
     JSGlobalContextRelease(context);
     try std.testing.expectEqual(@as(usize, 2), deallocator_state.calls);
+}
+
+test "private uninitialized Uint8Array stays explicit writable and GC-accounted" {
+    const context = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
+    const internal = ctxForEvaluation(context) orelse return error.JSCInitFailed;
+    const bytes_before = @atomicLoad(usize, &internal.gc_array_buffer_bytes_live, .acquire);
+
+    const first = JSC__JSValue__createUninitializedUint8Array(context, 16);
+    const first_value = privateValueFrom(context, first) orelse return error.Uint8ArrayCreateFailed;
+    const first_typed = first_value.asObj().typedArray() orelse return error.Uint8ArrayCreateFailed;
+    try std.testing.expectEqual(value.TAKind.u8, first_typed.kind);
+    try std.testing.expect(!first_typed.is_buffer);
+    try std.testing.expectEqual(@as(usize, 16), first_typed.currentLength().?);
+    const first_bytes = first_typed.buffer.arrayBuffer().?.bytes();
+    try std.testing.expectEqual(@as(usize, 0), @intFromPtr(first_bytes.ptr) % 8);
+    @memset(first_bytes, 0xa5);
+    var expected_first: [16]u8 = undefined;
+    @memset(&expected_first, 0xa5);
+    try std.testing.expectEqualSlices(u8, &expected_first, first_bytes);
+
+    const second = JSC__JSValue__createUninitializedUint8Array(context, 16);
+    const second_typed = (privateValueFrom(context, second) orelse return error.Uint8ArrayCreateFailed).asObj().typedArray().?;
+    try std.testing.expect(@intFromPtr(first_bytes.ptr) != @intFromPtr(second_typed.buffer.arrayBuffer().?.bytes().ptr));
+    if (internal.gc != null)
+        try std.testing.expectEqual(bytes_before + 32, @atomicLoad(usize, &internal.gc_array_buffer_bytes_live, .acquire));
+
+    const ordinary = try internal.evaluate("new Uint8Array(16).every(value => value === 0)");
+    try std.testing.expect(ordinary.isBoolean() and ordinary.asBool());
+
+    const oversized = JSC__JSValue__createUninitializedUint8Array(context, std.math.maxInt(usize));
+    try std.testing.expectEqual(EncodedValue.empty, oversized);
+    try std.testing.expect(JSGlobalObject__hasException(context));
+    JSGlobalObject__clearException(context);
+
+    JSGlobalContextRelease(context);
 }
 
 test "private rooted native value containers retain and release exact cells" {
