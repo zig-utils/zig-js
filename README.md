@@ -201,10 +201,10 @@ The current exported C surface has 136 functions:
   containers / 108 declarations with byte-for-byte header and selector-level
   drift checks. Runtime coverage is 108/108 declarations across
   `JSVirtualMachine`, `JSContext`, `JSValue`, `JSManagedValue`, `JSExport`, and
-  typed Objective-C blocks. The macOS system-JSC differential matches all 17
-  published Objective-C rows (`189ef5b0eefd1054`), including same-VM
-  cross-context value identity, exported receivers, constructors, prototypes,
-  and target-context wrapper behavior.
+  typed Objective-C blocks. The macOS system-JSC differential matches all 18
+  published Objective-C rows (`360c1ad3ccf51d6b`), including managed-owner
+  behavior, same-VM cross-context value identity, exported receivers,
+  constructors, prototypes, and target-context wrapper behavior.
 
 `ZJSGlobalContextCreateThreaded`, `ZJSValueProtect`/`ZJSValueUnprotect`,
 `ZJSInspectorSession*`, and `JSWorker*` are zig-js extensions, not public JSC symbols. The `ZJSValue*`

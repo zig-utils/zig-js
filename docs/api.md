@@ -49,9 +49,10 @@ numeric/string/geometry/Foundation conversion, comparisons, calls,
 construction, property operations, promise callback state, managed owner/value
 relations, exact wrapper identity, typed Objective-C blocks, `JSExport`
 instances/classes/renamed selectors, and property-descriptor symbols. The
-17-row Objective-C transcript matches system JavaScriptCore exactly
-(`189ef5b0eefd1054`), including same-VM cross-context value identity, exported
-receivers, constructors, prototypes, and target-context wrapper behavior. See
+18-row Objective-C transcript matches system JavaScriptCore exactly
+(`360c1ad3ccf51d6b`), including managed-owner behavior, same-VM cross-context
+value identity, exported receivers, constructors, prototypes, and target-context
+wrapper behavior. See
 the [Objective-C bridge inventory
 guide](objc-api/README.md) for the exact boundary and reproduction details.
 The complete declared inventory does not claim compatibility with private JSC

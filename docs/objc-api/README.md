@@ -60,10 +60,10 @@ The hosts exercise VM/context construction and identity, evaluation and
 exception capture, context naming/inspectability, C-ref round trips, every
 published `JSValue` family, recursive and cyclic Foundation conversion, promise
 callback state, exact wrapper identity, managed ownership, typed Objective-C
-blocks, and `JSExport` instance/class/renamed-selector behavior. The 17-row
-transcript matches system JavaScriptCore exactly (`189ef5b0eefd1054`), including
-same-VM cross-context value identity, exported receivers, constructors,
-prototypes, and target-context wrapper behavior.
+blocks, and `JSExport` instance/class/renamed-selector behavior. The 18-row
+transcript matches system JavaScriptCore exactly (`360c1ad3ccf51d6b`), including
+managed-owner behavior, same-VM cross-context value identity, exported
+receivers, constructors, prototypes, and target-context wrapper behavior.
 `JSManagedValue` and VM owner relations use real weak targets plus weak owners.
 At an explicit `JSGarbageCollect` epoch, an unowned managed value is cleared when
 a cycle-safe walk across every realm finds no strong path to it; WeakRef and
