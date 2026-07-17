@@ -49,6 +49,29 @@ int main(void)
         JSValue *undefined = [JSValue valueWithUndefinedInContext:context];
         row(@"undefined", [NSString stringWithFormat:@"%d:%d", undefined.toObject == nil,
                                                       undefined.toArray == nil]);
+
+        __block BOOL currentContextMatches = NO;
+        __block BOOL currentCalleeIsNil = NO;
+        __block BOOL currentThisIsPromise = NO;
+        __block NSUInteger currentArgumentCount = NSUIntegerMax;
+        __block JSValue *promiseFromCallback = nil;
+        JSValue *promise = [JSValue valueWithNewPromiseInContext:context
+                                                   fromExecutor:^(JSValue *resolve, JSValue *reject) {
+                                                       currentContextMatches = JSContext.currentContext == context;
+                                                       currentCalleeIsNil = JSContext.currentCallee == nil;
+                                                       promiseFromCallback = JSContext.currentThis;
+                                                       currentArgumentCount = JSContext.currentArguments.count;
+                                                       [resolve callWithArguments:@[ @42 ]];
+                                                   }];
+        currentThisIsPromise = [promiseFromCallback isEqualToObject:promise];
+        context[@"promise"] = promise;
+        [context evaluateScript:@"promise.then(value => { globalThis.promiseResult = value; })"];
+        [context evaluateScript:@"0"];
+        row(@"promise", [NSString stringWithFormat:@"%d:%d:%d:%lu:%d",
+                                                    currentContextMatches, currentCalleeIsNil,
+                                                    currentThisIsPromise,
+                                                    (unsigned long)currentArgumentCount,
+                                                    [context[@"promiseResult"] toInt32] == 42]);
     }
     return 0;
 }
