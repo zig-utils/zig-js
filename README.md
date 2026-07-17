@@ -738,7 +738,9 @@ The README intentionally avoids duplicating the detailed thread/GC implementatio
 
 Do not read the green configured runner as "the whole JavaScript universe is finished." Known non-implemented or non-scored areas include:
 
-Completion of every item—and the evidence gate for removing this section—is tracked in [issue #134](https://github.com/zig-utils/zig-js/issues/134).
+Implementation is tracked by [roadmap #134](https://github.com/zig-utils/zig-js/issues/134),
+and the final evidence-backed removal of this section is tracked by
+[issue #246](https://github.com/zig-utils/zig-js/issues/246).
 
 - full JavaScriptCore framework/private internals and Bun/Home private JSC ABI;
 - WebAssembly and JIT shell hooks from the PR-249 reference corpus;
