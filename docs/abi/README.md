@@ -44,7 +44,7 @@ convention. The exact current denominator is:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #163 | 431 (197 implemented, 234 pending) |
+| Private JSC/Bun/WebCore ABI under #163 | 431 (199 implemented, 232 pending) |
 | Overlap with zig-js's completed public C target | 15 |
 | Platform libc import | 1 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
@@ -61,7 +61,7 @@ zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"
 ```
 
 This inventory is the denominator, not a claim that the whole surface works.
-The first 197 private entries are implemented; the other 234 remain pending
+The first 199 private entries are implemented; the other 232 remain pending
 until #163 provides their type/layout contracts, shims, and consumer evidence.
 `JSFunctionCall` remains revision-pinned in the declaration inventory but is
 not part of that denominator: each runtime-generated FFI module defines the
@@ -135,7 +135,7 @@ It covers empty/immediate/int32/double/NaN/negative-zero behavior, boxed
 empty/nonempty strings, object identity/truthiness, signed minimum and unsigned
 maximum BigInts, negative modulo extraction, exact number fallbacks, and every
 invalid/non-exact boundary. Public accounting stays unchanged at 117 functions
-and 19 extensions; these 197 symbols are reported only as private profile
+and 19 extensions; these 199 symbols are reported only as private profile
 exports.
 
 The opaque BigInt cell slice additionally exports `JSC__JSBigInt__fromJS`, the
@@ -287,6 +287,16 @@ callers that overwrite the complete view. JavaScript `new Uint8Array(...)`,
 ArrayBuffer construction, resizing, transfer, and every other allocation path
 continue to use the unchanged zero-filled allocator. Oversized requests fail
 through the private pending RangeError boundary before publishing a view.
+
+The generic no-copy ArrayBuffer and TypedArray adopters cover all 12 pinned
+numeric tags, including Float16 and both BigInt views. They preserve the exact
+external pointer and full backing byte length; typed views use
+`floor(byteLength / elementSize)`, so trailing bytes stay owned by the backing
+ArrayBuffer without making the view invalid. Empty storage remains a live
+zero-length object. Caller callbacks, including null callbacks, use the same
+idempotent owner record and run at most once; invalid tags and non-empty null
+pointers fail atomically and release transferred input before publishing the
+private pending exception.
 
 The VM exception slice exports the shared `JSGlobalObject`/`VM` pending-state
 boundary plus exception-cell conversion and classification. Sibling realms in
@@ -471,7 +481,7 @@ profile contains 437 unique declarations from 54 hashed files:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #164 | 421 (191 implemented, 230 pending) |
+| Private JSC/Bun/WebCore ABI under #164 | 421 (193 implemented, 228 pending) |
 | Public-C overlap | 15 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
 | **Total** | **437** |
@@ -488,5 +498,5 @@ zig build bun-private-abi-audit -Dbun-source-root="$HOME/Code/bun"
 
 The audit rejects revision, file hash, declaration digest, classification,
 calling-convention, implementation-status, and Home-comparison drift. It does
-not claim complete Bun runtime compatibility; #164 remains open for the 230
+not claim complete Bun runtime compatibility; #164 remains open for the 228
 pending core entries and later wider/generated profiles.
