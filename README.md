@@ -236,7 +236,7 @@ claim that Home's or Bun's private `JSC__*`/`Bun__*` ABI is implemented.
 The separately generated
 [Home private inventory](docs/abi/home-private-7ed99c02-inventory.json) makes
 that remaining boundary concrete: **448 unique extern symbols from 58 pinned
-files**, classified as 432 private (**49 implemented / 383 pending**), 15
+files**, classified as 432 private (**50 implemented / 382 pending**), 15
 already-covered public-C overlaps, and one platform import, with zero duplicate
 or unclassified entries.
 Exact Home revisions `7ed99c02`, `5e829ad4`, and `38702f9e` are supported; both
@@ -246,7 +246,7 @@ The first private-ABI foundation is implemented without changing engine values:
 `private_abi.EncodedValue` translates primitives to the pinned eight-byte JSC64
 encoding (including exact int32/double/NaN/cell rules), while rejecting
 string/object conversion until a validated external cell handle exists.
-The first forty-nine private exports—encoded identity/cell equality, truthiness,
+The first fifty private exports—encoded identity/cell equality, truthiness,
 int32 extraction, exact signed/unsigned 64-bit BigInt construction, and
 modulo-2^64 BigInt extraction with pinned number fallbacks, plus exact `===` and
 SameValue equality, two exact cell-type queries, five opaque BigInt cell
@@ -254,7 +254,7 @@ operations, three exact BigInt comparison/arithmetic operations, seven
 JSCell/JSString operations, three ordinary-object foundation operations, and
 two object-coercion/prototype operations, two numeric DateInstance operations,
 nine VM-shared pending-exception operations, five array/index operations, and
-two packed/hole JSArray constructors—now pass focused Zig
+two packed/hole JSArray constructors, and full ECMAScript ToNumber coercion—now pass focused Zig
 compile-link-runtime consumer fixtures. The string boundary covers exact UTF-16
 length for astral and lone-surrogate strings, 8-bit eligibility, value equality,
 ordinary-object access, primitive boxing, and foreign-context rejection. The
@@ -277,7 +277,11 @@ and covers sparse and maximum-u32 length boundaries. The JSArray constructor
 pair validates every input before exposing a result, builds packed elements in
 order with exact owned-cell identity (including sibling realms in the same VM),
 creates hole-only arrays through the maximum u32 length, and publishes
-foreign-item or invalid-length failures atomically. The
+foreign-item or invalid-length failures atomically. The ToNumber boundary
+preserves all primitive conversions, runs ordinary object-to-primitive hooks in
+spec order, distinguishes ordinary NaN from exceptional NaN, throws for
+Symbol/BigInt, accepts same-VM sibling values, and publishes conversion or
+foreign-value failures without replacing an existing exception. The
 BigInt cell gate downcasts only real owned cells, compares arbitrary-size values
 exactly against i64/u64/f64 (including 2^53, subnormal, infinity, and 10^400
 boundaries), and performs signed modulo-2^64 extraction without lossy double
@@ -288,12 +292,12 @@ constructors return real context-owned BigInt cells.
 The [full private `JSType` layout](docs/abi/private-jstype-layouts.json) proves
 that Home has 97 members while Bun has 98: Bun's one inserted tag renumbers 70
 later members. `-Dprivate-abi-consumer=home|bun` selects the exact layout, and
-separately compiled fixtures pass 20 real cell kinds for each. All forty-nine
+separately compiled fixtures pass 20 real cell kinds for each. All fifty
 private exports remain excluded from the 117-function public count and 19
 extensions.
 The separate pinned
 [Bun core inventory](docs/abi/bun-private-core-4982b91e-inventory.json) contains
-437 symbols from 54 `src/jsc` files: 422 private (**49 implemented / 373
+437 symbols from 54 `src/jsc` files: 422 private (**50 implemented / 372
 pending**) and 15 public overlaps. Its exact comparison with Home finds 434
 shared names, 3 Bun-only names, 14 Home-only names, and 28 changed signatures;
 neither private profile is inferred from the other.

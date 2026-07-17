@@ -41,7 +41,7 @@ libc import. See [the exact declaration inventory](abi/home-private-7ed99c02-inv
 and run `zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"`
 to verify the live revision, every source hash, signature, classification, and
 calling convention. This replaces a vague source-level estimate, but the 432
-private entries are now 49 implemented / 383 pending under #163. The implemented
+private entries are now 50 implemented / 382 pending under #163. The implemented
 slices cover JSC64 value identity, cell equality, truthiness, int32 extraction,
 exact signed/unsigned 64-bit BigInt construction, and modulo-2^64 BigInt
 extraction with the pinned number fallbacks, plus exact strict and SameValue
@@ -70,7 +70,10 @@ bypasses inherited setters, observable prototype/getter reads with VM exception
 publication, sparse growth, and the maximum-u32 boundary. Two JSArray
 constructor shims add failure-atomic packed construction, selected-realm
 prototypes, same-VM sibling value identity, and hole-only construction through
-maximum u32 length. These slices do not yet create a usable Home
+maximum u32 length. The ToNumber shim adds primitive and full object coercion,
+spec-ordered user hooks, Symbol/BigInt TypeError behavior, ordinary-versus-
+exceptional NaN distinction, same-VM sibling values, and first-exception
+preservation. These slices do not yet create a usable Home
 private runtime.
 
 The newer Home revisions `5e829ad4` and `38702f9e` changed no files in
