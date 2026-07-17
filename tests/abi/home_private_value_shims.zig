@@ -265,6 +265,9 @@ extern "c" fn Bun__handleUncaughtException(JSContextRef, EncodedValue, c_int) c_
 extern "c" fn Bun__wrapUnhandledRejectionErrorForUncaughtException(JSContextRef, EncodedValue) EncodedValue;
 extern "c" fn Process__dispatchOnBeforeExit(JSContextRef, u8) void;
 extern "c" fn Process__dispatchOnExit(JSContextRef, u8) void;
+extern "c" fn Process__emitMessageEvent(JSContextRef, EncodedValue, EncodedValue) void;
+extern "c" fn Process__emitDisconnectEvent(JSContextRef) void;
+extern "c" fn Process__emitErrorEvent(JSContextRef, EncodedValue) void;
 extern "c" fn JSC__JSValue__forEach(EncodedValue, JSContextRef, ?*anyopaque, IterableCallback) void;
 extern "c" fn ZigString__toJSONObject(*const ZigString, JSContextRef) EncodedValue;
 extern "c" fn JSC__jsTypeStringForValue(JSContextRef, EncodedValue) ?*anyopaque;
@@ -1301,6 +1304,15 @@ pub fn main() void {
     _ = JSC__JSGlobalObject__drainMicrotasks(context);
     if (!JSC__JSValue__toBoolean(evaluate(context, "JSON.stringify(__private_ticks_243) === '[[\"one\",1,true,true],[\"two\",2,true,true,true],[\"outer\"],[\"inner\"],[\"micro\"],[\"tick-from-micro\"]]'")))
         fail("private process nextTick queue ordering/arity mismatch");
+    _ = evaluate(context, "globalThis.__private_ipc_244 = []; globalThis.__private_ipc_value_244 = { value: 244 }; globalThis.__private_ipc_handle_244 = { handle: 244 }; process.on('message', function(value, handle) { __private_ipc_244.push(['message', value === __private_ipc_value_244, handle === __private_ipc_handle_244, this === process, arguments.length]); }); process.on('error', function(value) { __private_ipc_244.push(['error', value === __private_ipc_value_244, this === process, arguments.length]); }); process.once('disconnect', function() { __private_ipc_244.push(['disconnect', this === process, arguments.length]); });");
+    const private_ipc_value_244 = evaluate(context, "__private_ipc_value_244");
+    const private_ipc_handle_244 = evaluate(context, "__private_ipc_handle_244");
+    Process__emitMessageEvent(context, private_ipc_value_244, private_ipc_handle_244);
+    Process__emitErrorEvent(context, private_ipc_value_244);
+    Process__emitDisconnectEvent(context);
+    Process__emitDisconnectEvent(context);
+    if (!JSC__JSValue__toBoolean(evaluate(context, "JSON.stringify(__private_ipc_244) === '[[\"message\",true,true,true,2],[\"error\",true,true,1],[\"disconnect\",true,0]]'")))
+        fail("private IPC process event identity/arity mismatch");
     _ = evaluate(context, "globalThis.__private_lifecycle_242 = []; process.on('beforeExit', code => __private_lifecycle_242.push('before:' + code)); process.on('exit', code => __private_lifecycle_242.push('exit:' + code));");
     Process__dispatchOnBeforeExit(context, 2);
     Process__dispatchOnExit(context, 4);
@@ -3396,5 +3408,5 @@ pub fn main() void {
         TopExceptionScope__exceptionIncludingTraps(&verification_scope) != null)
         fail("private TopExceptionScope destruction mismatch");
 
-    std.debug.print("Home private value shims: 240/240 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 243/243 symbols linked; runtime matrix passed\n", .{});
 }

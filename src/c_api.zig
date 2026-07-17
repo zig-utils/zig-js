@@ -5847,6 +5847,56 @@ export fn Process__dispatchOnExit(global: JSContextRef, code: u8) callconv(.c) v
     privateDispatchProcessCodeEvent(global, "exit", code, true);
 }
 
+fn privateEmitProcessIPCEvent(
+    global: JSContextRef,
+    event: []const u8,
+    encoded_args: []const EncodedValue,
+) void {
+    const context = ctxForEvaluation(global) orelse return;
+    const group = privatePropertyBoundaryGroup(context) orelse return;
+    if (group.pending_exception != null) return;
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return;
+    };
+    defer context.popActiveInterpreter(&machine);
+
+    // Bun checks hasEventListeners before decoding. Besides avoiding work, this
+    // makes absent-listener dispatch a true no-op for empty or foreign handles,
+    // and prevents `error` from taking EventEmitter's unhandled-error branch.
+    if (privateProcessEventCount(&machine, event) == 0) return;
+    var args: [2]Value = undefined;
+    for (encoded_args, 0..) |encoded, i| {
+        args[i] = privateDecodeWarningArgument(context, &machine, global, encoded, "IPC event value") catch |err| {
+            privateSetPendingAbrupt(context, &machine, err);
+            return;
+        };
+    }
+    _ = interp.emitProcessEvent(&machine, event, args[0..encoded_args.len]) catch |err|
+        privateSetPendingAbrupt(context, &machine, err);
+}
+
+export fn Process__emitMessageEvent(
+    global: JSContextRef,
+    encoded_value: EncodedValue,
+    handle: EncodedValue,
+) callconv(.c) void {
+    privateEmitProcessIPCEvent(global, "message", &.{ encoded_value, handle });
+}
+
+export fn Process__emitDisconnectEvent(global: JSContextRef) callconv(.c) void {
+    privateEmitProcessIPCEvent(global, "disconnect", &.{});
+}
+
+export fn Process__emitErrorEvent(global: JSContextRef, encoded_value: EncodedValue) callconv(.c) void {
+    privateEmitProcessIPCEvent(global, "error", &.{encoded_value});
+}
+
 const PrivateIterableCallback = *const fn (
     ?*anyopaque,
     JSContextRef,
@@ -18830,6 +18880,66 @@ test "private process next tick preserves queue ordering and exact arguments" {
     Bun__Process__queueNextTick1(context, tick1, arg1);
     _ = JSC__JSGlobalObject__drainMicrotasks(context);
     try std.testing.expectEqual(@as(f64, 7), (try internal.evaluate("__ticks_243.length")).asNum());
+}
+
+test "private IPC process events preserve listener gates and identity" {
+    const group_ref = JSContextGroupCreate() orelse return error.GroupCreateFailed;
+    defer JSContextGroupRelease(group_ref);
+    const context = JSGlobalContextCreateInGroup(group_ref, null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(context);
+    const sibling = JSGlobalContextCreateInGroup(group_ref, null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(sibling);
+    const foreign = JSGlobalContextCreate(null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(foreign);
+    const internal = ctxForEvaluation(context) orelse return error.ContextCreateFailed;
+    const sibling_internal = ctxForEvaluation(sibling) orelse return error.ContextCreateFailed;
+    const foreign_internal = ctxForEvaluation(foreign) orelse return error.ContextCreateFailed;
+
+    const Probe = struct {
+        fn encoded(context_: *Context, source: []const u8) !EncodedValue {
+            return privateEncodedFromValue(context_, try context_.evaluate(source));
+        }
+    };
+
+    const foreign_value = try Probe.encoded(foreign_internal, "({ foreign: 244 })");
+    Process__emitMessageEvent(context, foreign_value, foreign_value);
+    Process__emitErrorEvent(context, foreign_value);
+    Process__emitDisconnectEvent(context);
+    try std.testing.expect(!JSGlobalObject__hasException(context));
+
+    _ = try internal.evaluate(
+        \\globalThis.__ipc_events_244 = [];
+        \\globalThis.__ipc_value_244 = { value: 244 };
+        \\globalThis.__ipc_handle_244 = { handle: 244 };
+        \\process.on("message", function (value, handle) { __ipc_events_244.push(["message", value === __ipc_value_244, handle === __ipc_handle_244, this === process, arguments.length]); });
+        \\process.on("error", function (value) { __ipc_events_244.push(["error", value === __ipc_value_244, this === process, arguments.length]); });
+        \\process.once("disconnect", function () { __ipc_events_244.push(["disconnect", this === process, arguments.length]); });
+    );
+    const value_244 = try Probe.encoded(internal, "__ipc_value_244");
+    const handle_244 = try Probe.encoded(internal, "__ipc_handle_244");
+    Process__emitMessageEvent(context, value_244, handle_244);
+    Process__emitErrorEvent(context, value_244);
+    Process__emitDisconnectEvent(context);
+    Process__emitDisconnectEvent(context);
+    try std.testing.expect((try internal.evaluate(
+        \\JSON.stringify(__ipc_events_244) === '[["message",true,true,true,2],["error",true,true,1],["disconnect",true,0]]'
+    )).asBool());
+
+    try sibling_internal.env.put("__ipc_shared_244", privateValueFrom(sibling, value_244) orelse return error.ValueInitFailed);
+    _ = try sibling_internal.evaluate("globalThis.__ipc_sibling_244 = 0; process.on('message', function (value) { if (value === __ipc_shared_244) __ipc_sibling_244++; });");
+    Process__emitMessageEvent(sibling, value_244, handle_244);
+    try std.testing.expect(!JSGlobalObject__hasException(sibling));
+    try std.testing.expectEqual(@as(f64, 1), (try sibling_internal.evaluate("__ipc_sibling_244")).asNum());
+
+    Process__emitMessageEvent(context, foreign_value, foreign_value);
+    try std.testing.expect(JSGlobalObject__hasException(context));
+    JSGlobalObject__clearException(context);
+
+    _ = try internal.evaluate("globalThis.__ipc_throw_244 = function () { throw 244; }; process.on('error', __ipc_throw_244);");
+    Process__emitErrorEvent(context, value_244);
+    try std.testing.expect(JSGlobalObject__hasException(context));
+    const pending = JSGlobalObject__tryTakeException(context);
+    try std.testing.expectEqual(EncodedValue.fromInt32(244), JSC__Exception__asJSValue(@ptrFromInt(try pending.asCellAddress())));
 }
 
 test "private iterable callback traversal preserves protocol and abrupt completion" {
