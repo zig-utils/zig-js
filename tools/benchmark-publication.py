@@ -233,6 +233,10 @@ def readme_scorecard(rows, metadata: dict[str, str], report_link: str, raw_link:
         shared_max = median_ns(grouped, ("zig-js", "shared", workload, max_lanes, count))
         shared_scaling.append(max_lanes * shared_one / shared_max)
 
+    direct_wins = sum(value > 1 for value in direct_ratios)
+    steady_wins = sum(value > 1 for value in steady_ratios)
+    cold_wins = sum(value > 1 for value in cold_ratios)
+
     zig_revision = metadata["zig-js"].split()[0][:8]
     gc_revision = metadata["zig-gc"].split()[0][:8]
     regex_revision = metadata["zig-regex"].split()[0][:8]
@@ -245,9 +249,9 @@ def readme_scorecard(rows, metadata: dict[str, str], report_link: str, raw_link:
         "",
         "| mode | lanes | wins vs JSC | zig-js / JSC throughput | zig-js scaling | JSC scaling |",
         "| --- | ---: | ---: | ---: | ---: | ---: |",
-        f"| direct warmed context | 1 | {sum(value > 1 for value in direct_ratios)} / {len(workloads)} | **{geometric_mean(direct_ratios):.2f}x** | — | — |",
-        f"| independent steady contexts | {max_lanes} | {sum(value > 1 for value in steady_ratios)} / {len(workloads)} | **{geometric_mean(steady_ratios):.2f}x** | **{geometric_mean(zig_steady_scaling):.2f}x** | {geometric_mean(jsc_steady_scaling):.2f}x |",
-        f"| independent cold lifecycles | {max_lanes} | {sum(value > 1 for value in cold_ratios)} / {len(workloads)} | **{geometric_mean(cold_ratios):.2f}x** | **{geometric_mean(zig_cold_scaling):.2f}x** | {geometric_mean(jsc_cold_scaling):.2f}x |",
+        f"| direct warmed context | 1 | {direct_wins} / {len(workloads)} | **{geometric_mean(direct_ratios):.2f}x** | — | — |",
+        f"| independent steady contexts | {max_lanes} | {steady_wins} / {len(workloads)} | **{geometric_mean(steady_ratios):.2f}x** | **{geometric_mean(zig_steady_scaling):.2f}x** | {geometric_mean(jsc_steady_scaling):.2f}x |",
+        f"| independent cold lifecycles | {max_lanes} | {cold_wins} / {len(workloads)} | **{geometric_mean(cold_ratios):.2f}x** | **{geometric_mean(zig_cold_scaling):.2f}x** | {geometric_mean(jsc_cold_scaling):.2f}x |",
         f"| shared realm, no GIL | {max_lanes} | no public-JSC equivalent | — | **{geometric_mean(shared_scaling):.2f}x** | — |",
         "",
         "Lower time is better. A throughput ratio above 1.00x favors zig-js. Shared-realm threads share one object graph and therefore have no direct public-JSC embedding equivalent.",
@@ -262,7 +266,7 @@ def readme_scorecard(rows, metadata: dict[str, str], report_link: str, raw_link:
         lines.append(f"| `{workload}` | {zig / 1e6:.3f} | {jsc / 1e6:.3f} | {jsc / zig:.2f}x | {scaling:.2f}x |")
     lines.extend([
         "",
-        f"zig-js wins all {len(workloads)} direct rows and all {len(workloads)} maximum-lane rows in both symmetric independent-context modes. The geometric-mean throughput lead is {geometric_mean(direct_ratios):.2f}x direct, {geometric_mean(steady_ratios):.2f}x warmed-independent, and {geometric_mean(cold_ratios):.2f}x cold-lifecycle; shared-realm scaling is {geometric_mean(shared_scaling):.2f}x at {max_lanes} lanes.",
+        f"zig-js wins {direct_wins}/{len(workloads)} direct rows, {steady_wins}/{len(workloads)} maximum-lane warmed-independent rows, and {cold_wins}/{len(workloads)} maximum-lane cold-lifecycle rows. The geometric-mean throughput lead is {geometric_mean(direct_ratios):.2f}x direct, {geometric_mean(steady_ratios):.2f}x warmed-independent, and {geometric_mean(cold_ratios):.2f}x cold-lifecycle; shared-realm scaling is {geometric_mean(shared_scaling):.2f}x at {max_lanes} lanes.",
     ])
     return "\n".join(lines)
 

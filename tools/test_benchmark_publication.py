@@ -96,6 +96,24 @@ class ReadmeTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "exactly one"):
             publication.replace_readme_block("no markers", "generated")
 
+    def test_scorecard_reports_partial_mode_wins(self) -> None:
+        generated_rows = []
+        for index, workload in enumerate(publication.benchmark.WORKLOADS):
+            for engine, elapsed in (("zig-js", 100), ("JavaScriptCore", 200)):
+                generated_rows.append(publication.benchmark.Row(engine, "single", workload, 1, 1, 0, elapsed, 1))
+            for mode in ("independent_steady", "independent_cold"):
+                for lanes in (1, 8):
+                    for engine, elapsed in (("zig-js", 100), ("JavaScriptCore", 200)):
+                        if mode == "independent_steady" and lanes == 8 and index == 0 and engine == "zig-js":
+                            elapsed = 300
+                        generated_rows.append(publication.benchmark.Row(engine, mode, workload, lanes, 1, 0, elapsed, 1))
+            for lanes, elapsed in ((1, 100), (8, 200)):
+                generated_rows.append(publication.benchmark.Row("zig-js", "shared", workload, lanes, 1, 0, elapsed, 1))
+
+        scorecard = publication.readme_scorecard(generated_rows, metadata(), "report.md", "raw.tsv")
+        self.assertIn("zig-js wins 10/10 direct rows, 9/10 maximum-lane warmed-independent rows, and 10/10", scorecard)
+        self.assertNotIn("wins all 10", scorecard)
+
 
 if __name__ == "__main__":
     unittest.main()
