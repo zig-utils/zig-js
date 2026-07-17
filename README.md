@@ -236,7 +236,7 @@ claim that Home's or Bun's private `JSC__*`/`Bun__*` ABI is implemented.
 The separately generated
 [Home private inventory](docs/abi/home-private-7ed99c02-inventory.json) makes
 that remaining boundary concrete: **448 unique extern symbols from 58 pinned
-files**, classified as 431 private (**217 implemented / 214 pending**), 15
+files**, classified as 431 private (**220 implemented / 211 pending**), 15
 already-covered public-C overlaps, one platform import, and one
 consumer-generated `JSFunctionCall` definition, with zero duplicate or
 unclassified entries.
@@ -247,7 +247,7 @@ The first private-ABI foundation is implemented without changing engine values:
 `private_abi.EncodedValue` translates primitives to the pinned eight-byte JSC64
 encoding (including exact int32/double/NaN/cell rules), while rejecting
 string/object conversion until a validated external cell handle exists.
-The first 217 private exports—encoded identity/cell equality, truthiness,
+The first 220 private exports—encoded identity/cell equality, truthiness,
 int32 extraction, exact signed/unsigned 64-bit BigInt construction, and
 modulo-2^64 BigInt extraction with pinned number fallbacks, plus exact `===` and
 SameValue equality, two exact cell-type queries, six opaque BigInt cell
@@ -453,6 +453,13 @@ sparse-hole, property-count, missing/undefined, cause-presence, and
 bitwise-float distinctions. Both boundaries preserve getter/proxy exceptions,
 same-VM sibling values, foreign rejection, bounded recursion, and first-wins
 pending state.
+The three Jest-aware variants add right-first asymmetric dispatch for
+anything/any, string-containing/matching, array/object-containing, close-to,
+settled-promise, negation, and custom `jest.asymmetricMatcher` hooks. Recursive
+deep matching preserves inherited-property lookup, exact array subsets,
+independent cycle sets, nested object-containing exhaustiveness, Symbols, and
+optional direct replacement of matched properties. Non-Jest equality never
+consults those hooks.
 Three fast built-in-name reads pin all 24 byte IDs, including the two Symbol
 keys, and preserve direct-data, own-slot, and pollution-mitigated lookup as
 separate operations. Bun's additional pure `code` VM inquiry walks data slots
@@ -461,7 +468,7 @@ Three Symbol bridges decode every ZigString form into the VM-wide global
 registry and expose stable borrowed description/registry-key views. C-API
 sibling realms now share the registry even before their first `Symbol.for`,
 while local and well-known Symbols remain correctly absent from `keyFor`.
-The 216-symbol combined fixture covers sibling realms,
+The 219-symbol combined fixture covers sibling realms,
 foreign-VM rejection, callback
 reentrancy, exception clearing, and already-settled targets.
 The BigInt cell gate downcasts only real owned cells, compares arbitrary-size
@@ -475,12 +482,12 @@ constructors return real context-owned BigInt cells.
 The [full private `JSType` layout](docs/abi/private-jstype-layouts.json) proves
 that Home has 97 members while Bun has 98: Bun's one inserted tag renumbers 70
 later members. `-Dprivate-abi-consumer=home|bun` selects the exact layout, and
-separately compiled fixtures pass 20 real cell kinds for each. All 217
+separately compiled fixtures pass 20 real cell kinds for each. All 220
 private exports remain excluded from the 117-function public count and 19
 extensions.
 The separate pinned
 [Bun core inventory](docs/abi/bun-private-core-4982b91e-inventory.json) contains
-437 symbols from 54 `src/jsc` files: 421 private (**211 implemented / 210
+437 symbols from 54 `src/jsc` files: 421 private (**214 implemented / 207
 pending**), 15 public overlaps, and one consumer-generated `JSFunctionCall`
 definition. Its exact comparison with Home finds 434
 shared names, 3 Bun-only names, 14 Home-only names, and 28 changed signatures;
