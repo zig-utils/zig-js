@@ -1,0 +1,112 @@
+{
+  "schema_version": 1,
+  "profile_id": "home-public-c-7ed99c02",
+  "kind": "public_c_embedding",
+  "consumer": {
+    "name": "Home",
+    "revision": "7ed99c02e50034f869d0db6d487115bb44332fe4",
+    "sources": {
+      "packages/runtime/src/jsc/extern_fns.zig": "f024528d71401cec78892e397443c39461cbddbbf4b27708624b95b4dee35203",
+      "packages/runtime/src/jsc/opaques.zig": "3c2d43c5fd1608e60ce92b0e1b9477378d5e6fabc06ef1856760de62704e53b1",
+      "packages/runtime/src/jsc/types.zig": "fa0e0a54dab17f52759ff9c12ff7aa67f3a53b0d6a115f19b0c32ea973830416"
+    }
+  },
+  "abi": {
+    "calling_convention": "C",
+    "pointer_width": "target",
+    "usize_width": "target",
+    "opaque_pointer_types": ["JSValue", "JSObject", "JSContextRef", "JSString"],
+    "enums": {
+      "JSType": {
+        "backing": "c_uint",
+        "values": {
+          "kJSTypeUndefined": 0,
+          "kJSTypeNull": 1,
+          "kJSTypeBoolean": 2,
+          "kJSTypeNumber": 3,
+          "kJSTypeString": 4,
+          "kJSTypeObject": 5,
+          "kJSTypeSymbol": 6,
+          "kJSTypeBigInt": 7
+        }
+      },
+      "JSTypedArrayType": {
+        "backing": "c_uint",
+        "values": {
+          "kJSTypedArrayTypeInt8Array": 0,
+          "kJSTypedArrayTypeInt16Array": 1,
+          "kJSTypedArrayTypeInt32Array": 2,
+          "kJSTypedArrayTypeUint8Array": 3,
+          "kJSTypedArrayTypeUint8ClampedArray": 4,
+          "kJSTypedArrayTypeUint16Array": 5,
+          "kJSTypedArrayTypeUint32Array": 6,
+          "kJSTypedArrayTypeFloat32Array": 7,
+          "kJSTypedArrayTypeFloat64Array": 8,
+          "kJSTypedArrayTypeArrayBuffer": 9,
+          "kJSTypedArrayTypeNone": 10,
+          "kJSTypedArrayTypeBigInt64Array": 11,
+          "kJSTypedArrayTypeBigUint64Array": 12
+        }
+      }
+    }
+  },
+  "semantic_assumptions": [
+    "JSValueRef-style exception sinks are nullable pointers to nullable opaque values",
+    "JSGlobalContextRetain preserves context pointer identity and balances one release",
+    "JSStringGetCharactersPtr borrows UTF-16 code units until the JSString is released",
+    "typed-array byte pointers remain valid while the typed-array backing store is alive",
+    "all declared functions use the C calling convention and target-native usize"
+  ],
+  "functions": [
+    "JSGarbageCollect",
+    "JSGlobalContextCreate",
+    "JSGlobalContextRelease",
+    "JSGlobalContextRetain",
+    "JSContextGetGlobalObject",
+    "JSEvaluateScript",
+    "JSValueGetType",
+    "JSValueIsUndefined",
+    "JSValueIsNull",
+    "JSValueIsBoolean",
+    "JSValueIsNumber",
+    "JSValueIsString",
+    "JSValueIsObject",
+    "JSValueIsArray",
+    "JSValueIsDate",
+    "JSValueIsEqual",
+    "JSValueIsStrictEqual",
+    "JSValueMakeUndefined",
+    "JSValueMakeNull",
+    "JSValueMakeBoolean",
+    "JSValueMakeNumber",
+    "JSValueMakeString",
+    "JSValueToBoolean",
+    "JSValueToNumber",
+    "JSValueToStringCopy",
+    "JSValueToObject",
+    "JSValueProtect",
+    "JSValueUnprotect",
+    "JSObjectMake",
+    "JSObjectMakeArray",
+    "JSObjectMakeDeferredPromise",
+    "JSObjectGetProperty",
+    "JSObjectSetProperty",
+    "JSObjectGetPropertyAtIndex",
+    "JSObjectCallAsFunction",
+    "JSObjectMakeFunctionWithCallback",
+    "JSObjectCallAsConstructor",
+    "JSObjectIsFunction",
+    "JSObjectIsConstructor",
+    "JSObjectMakeTypedArray",
+    "JSObjectGetTypedArrayBytesPtr",
+    "JSObjectGetTypedArrayLength",
+    "JSObjectGetTypedArrayByteLength",
+    "JSValueGetTypedArrayType",
+    "JSStringCreateWithUTF8CString",
+    "JSStringRetain",
+    "JSStringRelease",
+    "JSStringGetLength",
+    "JSStringGetUTF8CString",
+    "JSStringGetCharactersPtr"
+  ]
+}

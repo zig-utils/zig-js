@@ -75,6 +75,26 @@ pub fn build(b: *std.Build) void {
     const c_api_audit_step = b.step("c-api-audit", "Verify pinned JSC declarations, inventory, and Zig exports");
     c_api_audit_step.dependOn(&c_api_audit_cmd.step);
 
+    const home_public_abi_profile = b.option(
+        []const u8,
+        "home-public-abi-profile",
+        "Exact supported Home public C ABI profile ID",
+    ) orelse "home-public-c-7ed99c02";
+    const home_public_abi_audit_cmd = b.addSystemCommand(&.{
+        "python3",
+        "tools/verify-abi-profile.py",
+        "--profile",
+        home_public_abi_profile,
+    });
+    if (b.option([]const u8, "home-source-root", "Optional pinned Home checkout to verify")) |root| {
+        home_public_abi_audit_cmd.addArgs(&.{ "--home-root", root });
+    }
+    const home_public_abi_audit_step = b.step(
+        "home-public-abi-audit",
+        "Verify the revision-pinned Home public C consumer profile",
+    );
+    home_public_abi_audit_step.dependOn(&home_public_abi_audit_cmd.step);
+
     const objc_api_audit_cmd = b.addSystemCommand(&.{
         "python3",
         "tools/verify-objc-api.py",
@@ -226,6 +246,24 @@ pub fn build(b: *std.Build) void {
     c_api_test_step.dependOn(&run_c_api_c_smoke.step);
     c_api_test_step.dependOn(&run_c_api_cpp_smoke.step);
     c_api_test_step.dependOn(&run_c_api_inspector_smoke.step);
+
+    const home_public_abi_fixture = b.addExecutable(.{
+        .name = "home-public-abi-7ed99c02",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/abi/home_public_c_7ed99c02.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    home_public_abi_fixture.root_module.linkLibrary(lib);
+    const run_home_public_abi_fixture = b.addRunArtifact(home_public_abi_fixture);
+    run_home_public_abi_fixture.step.dependOn(&home_public_abi_audit_cmd.step);
+    const home_public_abi_test_step = b.step(
+        "test-home-public-abi",
+        "Compile, link, and run the pinned Home Zig C-ABI consumer",
+    );
+    home_public_abi_test_step.dependOn(&run_home_public_abi_fixture.step);
 
     const c_api_value_diff = b.addExecutable(.{
         .name = "c-api-value-diff-zig-js",
