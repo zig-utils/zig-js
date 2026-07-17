@@ -165,13 +165,13 @@ pub fn traceObject(o: *Object, v: anytype) void {
     }
 
     // Type-erased side-cells.
-    if (cold.js_function) |p| v.mark(p); // *Function (kind .function)
-    if (cold.bound_function) |p| v.mark(p); // *Interpreter.BoundFn (kind .bound_fn)
-    if (cold.promise_data) |p| v.mark(p); // *promise.Promise (kind .promise)
-    if (cold.generator) |p| v.mark(p); // *vm.Generator (kind .generator)
-    if (cold.iterator_helper) |p| v.mark(p); // (kind .iter_helper)
-    if (cold.module_ns) |p| v.mark(p); // *ModuleNs (kind .module_ns)
-    if (cold.arg_map_env) |p| v.mark(p); // *Environment (kind .environment)
+    if (cold.js_function) |p| v.mark(@as(*interp.Function, @ptrCast(@alignCast(p))));
+    if (cold.bound_function) |p| v.mark(@as(*interp.Interpreter.BoundFn, @ptrCast(@alignCast(p))));
+    if (cold.promise_data) |p| v.mark(@as(*promise.Promise, @ptrCast(@alignCast(p))));
+    if (cold.generator) |p| v.mark(@as(*vm.Generator, @ptrCast(@alignCast(p))));
+    if (cold.iterator_helper) |p| v.mark(@as(*value.IterHelper, @ptrCast(@alignCast(p))));
+    if (cold.module_ns) |p| v.mark(@as(*interp.ModuleNs, @ptrCast(@alignCast(p))));
+    if (cold.arg_map_env) |p| v.mark(@as(*interp.Environment, @ptrCast(@alignCast(p))));
     promise.traceNativePrivateData(o, v);
     interp.traceNativePrivateData(o, v);
     jsthread.traceNativePrivateData(o, v);

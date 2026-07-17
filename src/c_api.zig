@@ -35,6 +35,7 @@ const ContextMod = @import("context.zig");
 const interp = @import("interpreter.zig");
 const builtins = @import("builtins.zig");
 const promise = @import("promise.zig");
+const vm = @import("vm.zig");
 const strcell = @import("strcell.zig");
 const WorkerMod = @import("worker.zig");
 const JsString = @import("jsstring.zig").JsString;
@@ -55,6 +56,100 @@ const Boxed = struct {
     /// a `*Value` when tracing C-API handles.
     value: Value,
     owner: *Context,
+};
+
+const ReachabilityCell = struct {
+    pointer: *anyopaque,
+    kind: gc_mod.CellKind,
+};
+
+const ReachabilityVisitor = struct {
+    allocator: std.mem.Allocator,
+    seen: std.AutoHashMapUnmanaged(usize, void) = .empty,
+    queue: std.ArrayListUnmanaged(ReachabilityCell) = .empty,
+    objects: std.ArrayListUnmanaged(*Object) = .empty,
+
+    fn deinit(self: *ReachabilityVisitor) void {
+        self.seen.deinit(self.allocator);
+        self.queue.deinit(self.allocator);
+        self.objects.deinit(self.allocator);
+    }
+
+    pub fn concurrent(_: *ReachabilityVisitor) bool { return false; }
+    pub fn markWeak(_: *ReachabilityVisitor, _: *?*anyopaque) void {}
+    pub fn deferToFinish(_: *ReachabilityVisitor, _: *anyopaque) void {}
+    pub fn isManaged(_: *ReachabilityVisitor, cell: ?*anyopaque) bool { return cell != null; }
+    pub fn markConservativeWord(_: *ReachabilityVisitor, _: usize) void {}
+    pub fn markConservativeWords(_: *ReachabilityVisitor, _: [*]const usize, _: usize) void {}
+
+    pub fn isMarked(self: *ReachabilityVisitor, cell: ?*anyopaque) bool {
+        return if (cell) |pointer| self.seen.contains(@intFromPtr(pointer)) else false;
+    }
+
+    pub fn mark(self: *ReachabilityVisitor, maybe_cell: anytype) void {
+        const cell = switch (@typeInfo(@TypeOf(maybe_cell))) {
+            .optional => maybe_cell orelse return,
+            .pointer => maybe_cell,
+            else => @compileError("reachability mark expects a cell pointer"),
+        };
+        const Pointer = @TypeOf(cell);
+        const kind: gc_mod.CellKind = if (Pointer == *Object)
+            .object
+        else if (Pointer == *interp.Environment)
+            .environment
+        else if (Pointer == *interp.Function)
+            .function
+        else if (Pointer == *interp.Interpreter.BoundFn)
+            .bound_fn
+        else if (Pointer == *promise.Promise)
+            .promise
+        else if (Pointer == *vm.Generator)
+            .generator
+        else if (Pointer == *value.IterHelper)
+            .iter_helper
+        else if (Pointer == *interp.ModuleNs)
+            .module_ns
+        else
+            @compileError("unclassified reachability cell " ++ @typeName(Pointer));
+        const pointer: *anyopaque = @ptrCast(cell);
+        const result = self.seen.getOrPut(self.allocator, @intFromPtr(pointer)) catch return;
+        if (result.found_existing) return;
+        self.queue.append(self.allocator, .{ .pointer = pointer, .kind = kind }) catch return;
+        if (kind == .object)
+            self.objects.append(self.allocator, @ptrCast(@alignCast(pointer))) catch return;
+    }
+
+    fn drain(self: *ReachabilityVisitor) void {
+        var index: usize = 0;
+        while (index < self.queue.items.len) : (index += 1) {
+            const cell = self.queue.items[index];
+            switch (cell.kind) {
+                .function => {
+                    const function: *interp.Function = @ptrCast(@alignCast(cell.pointer));
+                    self.mark(function.closure);
+                    self.mark(function.realm_global);
+                    gc_mod.traceFunction(function, self);
+                },
+                .environment => {
+                    const environment: *interp.Environment = @ptrCast(@alignCast(cell.pointer));
+                    self.mark(environment.parent);
+                    var aliases = environment.aliases.valueIterator();
+                    while (aliases.next()) |alias| self.mark(alias.env);
+                    gc_mod.traceEnv(environment, self);
+                },
+                else => gc_mod.Binding.trace(cell.pointer, cell.kind, self),
+            }
+        }
+    }
+
+    fn finishEphemerons(self: *ReachabilityVisitor) void {
+        while (true) {
+            const before = self.queue.items.len;
+            for (self.objects.items) |object| gc_mod.traceObjectEphemeron(object, self);
+            self.drain();
+            if (self.queue.items.len == before) return;
+        }
+    }
 };
 
 /// One public JavaScriptCore VM lifetime. The hidden primary Context owns the
@@ -1383,6 +1478,31 @@ export fn ZJSContextGetCollectionEpoch(ctx: JSContextRef) callconv(.c) u64 {
     const opaque_group = c.c_api_group orelse return 0;
     const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
     return group.collection_epoch;
+}
+
+/// zig-js extension: semantic reachability from every strong realm root in the
+/// value's context group. WeakRef and weak-collection edges do not retain it.
+export fn ZJSValueIsReachable(ctx: JSContextRef, value_ref: JSValueRef) callconv(.c) bool {
+    const c = ctxFrom(ctx) orelse return false;
+    const value_to_find = valueFromContext(c, value_ref) orelse return false;
+    if (!value_to_find.isObject()) return true;
+    var visitor = ReachabilityVisitor{ .allocator = gpa };
+    defer visitor.deinit();
+    if (c.c_api_group) |opaque_group| {
+        const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+        var primary_binding = gc_mod.Binding{ .context = group.primary };
+        primary_binding.traceRoots(&visitor);
+        for (group.contexts.items) |realm| {
+            var binding = gc_mod.Binding{ .context = realm };
+            binding.traceRoots(&visitor);
+        }
+    } else {
+        var binding = gc_mod.Binding{ .context = c };
+        binding.traceRoots(&visitor);
+    }
+    visitor.drain();
+    visitor.finishEphemerons();
+    return visitor.isMarked(value_to_find.asObj());
 }
 
 export fn JSGlobalContextCreate(global_class: ?*anyopaque) callconv(.c) JSContextRef {
@@ -4960,6 +5080,7 @@ test "C-API: context groups share values while preserving distinct realms and li
     var exception: JSValueRef = null;
     const shared = JSEvaluateScript(first, make_object, null, null, 1, &exception) orelse return error.EvalFailed;
     try std.testing.expect(exception == null);
+    try std.testing.expect(!ZJSValueIsReachable(first, shared));
     try std.testing.expectEqual(@as(u64, 0), ZJSContextGetCollectionEpoch(first));
     JSGarbageCollect(first);
     try std.testing.expectEqual(@as(u64, 1), ZJSContextGetCollectionEpoch(first));
@@ -4968,6 +5089,8 @@ test "C-API: context groups share values while preserving distinct realms and li
     defer JSStringRelease(shared_name);
     JSObjectSetProperty(second, second_global, shared_name, shared, 0, &exception);
     try std.testing.expect(exception == null);
+    try std.testing.expect(ZJSValueIsReachable(first, shared));
+    try std.testing.expect(ZJSValueIsReachable(second, shared));
     const read_shared = JSStringCreateWithUTF8CString("sharedFromFirst.answer") orelse return error.StringInitFailed;
     defer JSStringRelease(read_shared);
     const answer = JSEvaluateScript(second, read_shared, null, null, 1, &exception) orelse return error.EvalFailed;
@@ -4985,6 +5108,23 @@ test "C-API: context groups share values while preserving distinct realms and li
     const second_array_proto = JSEvaluateScript(second, second_array_proto_source, null, null, 1, &exception) orelse return error.EvalFailed;
     try std.testing.expect(!JSValueIsStrictEqual(second, first_array_proto, second_array_proto));
 
+    const closure_source = JSStringCreateWithUTF8CString(
+        "globalThis.hold = (() => { const target = { closure: true }; globalThis.read = () => target; return target; })(); hold",
+    ) orelse return error.StringInitFailed;
+    defer JSStringRelease(closure_source);
+    const closure_target = JSEvaluateScript(first, closure_source, null, null, 1, &exception) orelse return error.EvalFailed;
+    const clear_direct_root = JSStringCreateWithUTF8CString("globalThis.hold = undefined") orelse return error.StringInitFailed;
+    defer JSStringRelease(clear_direct_root);
+    _ = JSEvaluateScript(first, clear_direct_root, null, null, 1, &exception);
+    try std.testing.expect(ZJSValueIsReachable(second, closure_target));
+
+    const weak_source = JSStringCreateWithUTF8CString(
+        "(() => { const target = { weak: true }; globalThis.onlyWeak = new WeakRef(target); return target; })()",
+    ) orelse return error.StringInitFailed;
+    defer JSStringRelease(weak_source);
+    const weak_target = JSEvaluateScript(second, weak_source, null, null, 1, &exception) orelse return error.EvalFailed;
+    try std.testing.expect(!ZJSValueIsReachable(first, weak_target));
+
     // Releasing a realm handle does not invalidate values retained by another
     // realm in the VM; the group keeps every realm allocation alive to teardown.
     JSGlobalContextRelease(first);
@@ -4999,6 +5139,7 @@ test "C-API: context groups share values while preserving distinct realms and li
     try std.testing.expect(exception != null);
     try std.testing.expect(!ZJSValueProtect(foreign, shared));
     try std.testing.expect(!ZJSValueUnprotect(foreign, shared));
+    try std.testing.expect(!ZJSValueIsReachable(foreign, shared));
     JSGlobalContextRelease(foreign);
 
     // Drop the caller's group retain before its final realm: the realm retain is

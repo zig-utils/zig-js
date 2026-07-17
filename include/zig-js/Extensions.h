@@ -13,6 +13,7 @@ JS_EXPORT bool ZJSValueUnprotect(JSContextRef ctx, JSValueRef value);
 
 /* Monotonic explicit-collection epoch shared by every realm in a context group. */
 JS_EXPORT uint64_t ZJSContextGetCollectionEpoch(JSContextRef ctx);
+JS_EXPORT bool ZJSValueIsReachable(JSContextRef ctx, JSValueRef value);
 
 typedef void (*ZJSInspectorMessageCallback)(
     const char* message, size_t messageLength, void* userData);

@@ -20,6 +20,10 @@ APIs against the hash-pinned system JavaScriptCore headers and framework.
 `JSGarbageCollect` calls for a context group. Every realm in the group observes
 the same epoch; arena-backed groups use it as a semantic weak-processing
 boundary even though physical storage remains allocated until VM teardown.
+`ZJSValueIsReachable` performs a quiescent, cycle-safe walk from every strong
+root in the group, including sibling realms, closures, environments, promises,
+and microtasks; WeakRef and weak-collection edges do not retain the queried
+value. It reports semantic reachability and does not reclaim storage.
 
 ## Objective-C bridge target
 
