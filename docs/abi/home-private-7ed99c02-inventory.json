@@ -88,8 +88,8 @@
     },
     "by_status": {
       "external": 2,
-      "implemented": 208,
-      "pending": 238
+      "implemented": 211,
+      "pending": 235
     }
   },
   "declarations": [
@@ -1001,10 +1001,10 @@
       "line": 584,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSBuffer__bufferFromLength(*JSGlobalObject, i64) JSValue;",
       "declaration_sha256": "3b575afa2f73a301738aa7a4b74cb6da7b77f49a7d992d698e1c80694bafb345",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSBuffer__bufferFromPointerAndLengthAndDeinit",
@@ -1012,10 +1012,10 @@
       "line": 612,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSBuffer__bufferFromPointerAndLengthAndDeinit(*JSGlobalObject, [*]u8, usize, ?*anyopaque, jsc.C.JSTypedArrayBytesDeallocator) JSValue;",
       "declaration_sha256": "c1dba9b26876412b0c01eb5b4b5141edb5ffd3251f65f7b090a7289167988638",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSBuffer__fromMmap",
@@ -1023,10 +1023,10 @@
       "line": 20,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSBuffer__fromMmap(*jsc.JSGlobalObject, addr: *anyopaque, len: usize) jsc.JSValue;",
       "declaration_sha256": "edd10c0b354a54bcbc14d0f44958a621b8d5363cb32d9d46d1788b1966b733e7",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSBuffer__isBuffer",

@@ -44,7 +44,7 @@ convention. The exact current denominator is:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #163 | 431 (193 implemented, 238 pending) |
+| Private JSC/Bun/WebCore ABI under #163 | 431 (196 implemented, 235 pending) |
 | Overlap with zig-js's completed public C target | 15 |
 | Platform libc import | 1 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
@@ -61,7 +61,7 @@ zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"
 ```
 
 This inventory is the denominator, not a claim that the whole surface works.
-The first 193 private entries are implemented; the other 238 remain pending
+The first 196 private entries are implemented; the other 235 remain pending
 until #163 provides their type/layout contracts, shims, and consumer evidence.
 `JSFunctionCall` remains revision-pinned in the declaration inventory but is
 not part of that denominator: each runtime-generated FFI module defines the
@@ -135,7 +135,7 @@ It covers empty/immediate/int32/double/NaN/negative-zero behavior, boxed
 empty/nonempty strings, object identity/truthiness, signed minimum and unsigned
 maximum BigInts, negative modulo extraction, exact number fallbacks, and every
 invalid/non-exact boundary. Public accounting stays unchanged at 117 functions
-and 19 extensions; these 193 symbols are reported only as private profile
+and 19 extensions; these 196 symbols are reported only as private profile
 exports.
 
 The opaque BigInt cell slice additionally exports `JSC__JSBigInt__fromJS`, the
@@ -267,6 +267,17 @@ owner, so GC or realm teardown invokes `mi_free` exactly once. A weak libc
 fallback keeps standalone builds linkable; Home/Bun's strong mimalloc export
 replaces it in consumer builds. Allocation failures use the normal private
 pending-exception boundary rather than returning a half-created view.
+
+The remaining three JSBuffer constructors complete the same ownership model.
+Signed lengths reject negative and engine-oversized requests as pending
+RangeErrors while valid lengths return zero-filled Buffer-identified views.
+External pointers retain their exact address and caller-supplied finalizer
+context; non-empty storage releases exactly once from GC or realm teardown,
+while zero-length transferred allocations invoke the finalizer immediately as
+required by the pinned Bun leak fix. Mmap-backed Buffers similarly keep the
+mapping live without a copy and call `munmap`/`UnmapViewOfFile` exactly once.
+Invalid non-empty pointer/deallocator pairs fail explicitly rather than
+publishing a dangling view.
 
 The VM exception slice exports the shared `JSGlobalObject`/`VM` pending-state
 boundary plus exception-cell conversion and classification. Sibling realms in
@@ -451,7 +462,7 @@ profile contains 437 unique declarations from 54 hashed files:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #164 | 421 (187 implemented, 234 pending) |
+| Private JSC/Bun/WebCore ABI under #164 | 421 (190 implemented, 231 pending) |
 | Public-C overlap | 15 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
 | **Total** | **437** |
@@ -468,5 +479,5 @@ zig build bun-private-abi-audit -Dbun-source-root="$HOME/Code/bun"
 
 The audit rejects revision, file hash, declaration digest, classification,
 calling-convention, implementation-status, and Home-comparison drift. It does
-not claim complete Bun runtime compatibility; #164 remains open for the 234
+not claim complete Bun runtime compatibility; #164 remains open for the 231
 pending core entries and later wider/generated profiles.
