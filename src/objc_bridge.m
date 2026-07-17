@@ -52,6 +52,44 @@ JS_EXPORT NSString *const JSPropertyDescriptorSetKey = @"set";
 }
 @end
 
+@interface ZJSObjectConversionState : NSObject
+@property (nonatomic, strong) NSMutableArray<JSValue *> *values;
+@property (nonatomic, strong) NSMutableArray *objects;
+- (id)objectForValue:(JSValue *)value;
+- (void)recordValue:(JSValue *)value object:(id)object;
+@end
+
+@implementation ZJSObjectConversionState
+
+- (instancetype)init
+{
+    self = [super init];
+    if (self) {
+        _values = [NSMutableArray array];
+        _objects = [NSMutableArray array];
+    }
+    return self;
+}
+
+- (id)objectForValue:(JSValue *)value
+{
+    for (NSUInteger index = 0; index < _values.count; ++index) {
+        JSValue *candidate = _values[index];
+        if (JSValueIsStrictEqual(value.context.JSGlobalContextRef,
+                                 value.JSValueRef, candidate.JSValueRef))
+            return _objects[index];
+    }
+    return nil;
+}
+
+- (void)recordValue:(JSValue *)value object:(id)object
+{
+    [_values addObject:value];
+    [_objects addObject:object];
+}
+
+@end
+
 static const void *ZJSVirtualMachineStateKey = &ZJSVirtualMachineStateKey;
 static const void *ZJSContextStateKey = &ZJSContextStateKey;
 static const void *ZJSValueStateKey = &ZJSValueStateKey;
@@ -136,6 +174,8 @@ static NSString *ZJSStringCopy(JSStringRef string)
 - (instancetype)zjs_initWithValue:(JSValueRef)value context:(JSContext *)context
     __attribute__((objc_method_family(init)));
 @end
+
+static JSObjectRef ZJSObjectForValue(JSValue *value);
 
 @implementation JSVirtualMachine
 
@@ -463,7 +503,13 @@ static JSVirtualMachine *ZJSVirtualMachineForGroup(JSContextGroupRef group)
     return [self valueWithJSValueRef:result inContext:context];
 }
 
-+ (JSValue *)valueWithObject:(id)object inContext:(JSContext *)context
+static NSValue *ZJSObjectiveCIdentityKey(id object)
+{
+    return [NSValue valueWithPointer:(__bridge const void *)object];
+}
+
+static JSValue *ZJSValueFromObject(id object, JSContext *context,
+                                   NSMutableDictionary<NSValue *, JSValue *> *seen)
 {
     if ([object isKindOfClass:[JSValue class]]) {
         JSValue *value = object;
@@ -472,13 +518,13 @@ static JSVirtualMachine *ZJSVirtualMachineForGroup(JSContextGroupRef group)
         return value;
     }
     if (!object)
-        return [self valueWithUndefinedInContext:context];
+        return [JSValue valueWithUndefinedInContext:context];
     if (object == [NSNull null])
-        return [self valueWithNullInContext:context];
+        return [JSValue valueWithNullInContext:context];
     if ([object isKindOfClass:[NSString class]]) {
         JSStringRef string = ZJSStringCreate(object);
-        JSValue *value = [self valueWithJSValueRef:JSValueMakeString(context.JSGlobalContextRef, string)
-                                         inContext:context];
+        JSValue *value = [JSValue valueWithJSValueRef:JSValueMakeString(context.JSGlobalContextRef, string)
+                                            inContext:context];
         if (string)
             JSStringRelease(string);
         return value;
@@ -486,12 +532,83 @@ static JSVirtualMachine *ZJSVirtualMachineForGroup(JSContextGroupRef group)
     if ([object isKindOfClass:[NSNumber class]]) {
         const char *type = [object objCType];
         if (!strcmp(type, @encode(BOOL)))
-            return [self valueWithBool:[object boolValue] inContext:context];
-        return [self valueWithDouble:[object doubleValue] inContext:context];
+            return [JSValue valueWithBool:[object boolValue] inContext:context];
+        return [JSValue valueWithDouble:[object doubleValue] inContext:context];
+    }
+    if ([object isKindOfClass:[NSDate class]]) {
+        JSValueRef argument = JSValueMakeNumber(context.JSGlobalContextRef,
+                                                [object timeIntervalSince1970] * 1000.0);
+        JSValueRef exception = NULL;
+        JSObjectRef date = JSObjectMakeDate(context.JSGlobalContextRef, 1, &argument, &exception);
+        if (exception) {
+            [context zjs_recordException:exception];
+            return nil;
+        }
+        return [JSValue valueWithJSValueRef:date inContext:context];
+    }
+    if ([object isKindOfClass:[NSArray class]]) {
+        NSValue *key = ZJSObjectiveCIdentityKey(object);
+        JSValue *existing = seen[key];
+        if (existing)
+            return existing;
+        JSValueRef exception = NULL;
+        JSObjectRef array = JSObjectMakeArray(context.JSGlobalContextRef, 0, NULL, &exception);
+        if (exception) {
+            [context zjs_recordException:exception];
+            return nil;
+        }
+        JSValue *result = [JSValue valueWithJSValueRef:array inContext:context];
+        seen[key] = result;
+        NSUInteger count = [object count];
+        for (NSUInteger index = 0; index < count; ++index) {
+            JSValue *item = ZJSValueFromObject(object[index], context, seen);
+            if (!item)
+                return nil;
+            JSObjectSetPropertyAtIndex(context.JSGlobalContextRef, array, (unsigned)index,
+                                       item.JSValueRef, &exception);
+            if (exception) {
+                [context zjs_recordException:exception];
+                return nil;
+            }
+        }
+        return result;
+    }
+    if ([object isKindOfClass:[NSDictionary class]]) {
+        NSValue *key = ZJSObjectiveCIdentityKey(object);
+        JSValue *existing = seen[key];
+        if (existing)
+            return existing;
+        JSObjectRef dictionary = JSObjectMake(context.JSGlobalContextRef, NULL, NULL);
+        JSValue *result = [JSValue valueWithJSValueRef:dictionary inContext:context];
+        seen[key] = result;
+        for (id property in object) {
+            if (![property isKindOfClass:[NSString class]])
+                continue;
+            JSValue *item = ZJSValueFromObject(object[property], context, seen);
+            if (!item)
+                return nil;
+            JSStringRef name = ZJSStringCreate(property);
+            if (!name)
+                return nil;
+            JSValueRef exception = NULL;
+            JSObjectSetProperty(context.JSGlobalContextRef, dictionary, name,
+                                item.JSValueRef, kJSPropertyAttributeNone, &exception);
+            JSStringRelease(name);
+            if (exception) {
+                [context zjs_recordException:exception];
+                return nil;
+            }
+        }
+        return result;
     }
     [NSException raise:NSInvalidArgumentException
                 format:@"Unsupported Objective-C value class %@", [object class]];
     return nil;
+}
+
++ (JSValue *)valueWithObject:(id)object inContext:(JSContext *)context
+{
+    return ZJSValueFromObject(object, context, [NSMutableDictionary dictionary]);
 }
 
 - (BOOL)isUndefined { return JSValueIsUndefined(self.context.JSGlobalContextRef, self.JSValueRef); }
@@ -595,17 +712,113 @@ static JSVirtualMachine *ZJSVirtualMachineForGroup(JSContextGroupRef group)
     }
     return @(result);
 }
+static id ZJSObjectFromValue(JSValue *value, ZJSObjectConversionState *state);
+
+static NSArray *ZJSArrayFromValue(JSValue *value,
+                                  ZJSObjectConversionState *state)
+{
+    if (value.isUndefined || value.isNull)
+        return nil;
+    if (!value.isObject) {
+        JSValue *error = [JSValue valueWithNewErrorFromMessage:@"Cannot convert a non-object to NSArray"
+                                                     inContext:value.context];
+        [value.context zjs_recordException:error.JSValueRef];
+        return nil;
+    }
+    id existing = [state objectForValue:value];
+    if (existing)
+        return existing;
+    NSUInteger count = [[value valueForProperty:@"length"] toUInt32];
+    NSMutableArray *result = [NSMutableArray arrayWithCapacity:count];
+    [state recordValue:value object:result];
+    for (NSUInteger index = 0; index < count; ++index) {
+        id item = ZJSObjectFromValue([value valueAtIndex:index], state);
+        [result addObject:item ?: NSNull.null];
+    }
+    return result;
+}
+
+static NSDictionary *ZJSDictionaryFromValue(JSValue *value,
+                                             ZJSObjectConversionState *state)
+{
+    if (value.isUndefined || value.isNull)
+        return nil;
+    JSObjectRef object = ZJSObjectForValue(value);
+    if (!object)
+        return nil;
+    id existing = [state objectForValue:value];
+    if (existing)
+        return existing;
+    NSMutableDictionary *result = [NSMutableDictionary dictionary];
+    [state recordValue:value object:result];
+    JSPropertyNameArrayRef names = JSObjectCopyPropertyNames(value.context.JSGlobalContextRef,
+                                                            object);
+    size_t count = JSPropertyNameArrayGetCount(names);
+    for (size_t index = 0; index < count; ++index) {
+        JSStringRef name = JSPropertyNameArrayGetNameAtIndex(names, index);
+        JSValueRef exception = NULL;
+        JSValueRef property = JSObjectGetProperty(value.context.JSGlobalContextRef,
+                                                  object, name, &exception);
+        if (exception) {
+            JSPropertyNameArrayRelease(names);
+            [value.context zjs_recordException:exception];
+            return nil;
+        }
+        NSString *propertyName = ZJSStringCopy(name);
+        id item = ZJSObjectFromValue([JSValue valueWithJSValueRef:property
+                                                        inContext:value.context],
+                                     state);
+        result[propertyName] = item ?: NSNull.null;
+    }
+    JSPropertyNameArrayRelease(names);
+    return result;
+}
+
+static id ZJSObjectFromValue(JSValue *value, ZJSObjectConversionState *state)
+{
+    if (value.isUndefined)
+        return nil;
+    if (value.isNull)
+        return NSNull.null;
+    if (value.isBoolean)
+        return @([value toBool]);
+    if (value.isNumber)
+        return [value toNumber];
+    if (value.isString)
+        return [value toString];
+    if (value.isDate)
+        return [value toDate];
+    if (value.isArray)
+        return ZJSArrayFromValue(value, state);
+    if (value.isObject)
+        return ZJSDictionaryFromValue(value, state);
+    return value;
+}
+
 - (id)toObject
 {
-    if (self.isUndefined || self.isNull)
-        return nil;
-    if (self.isBoolean)
-        return @([self toBool]);
-    if (self.isNumber)
-        return [self toNumber];
-    if (self.isString)
-        return [self toString];
-    return self;
+    return ZJSObjectFromValue(self, [ZJSObjectConversionState new]);
+}
+
+- (id)toObjectOfClass:(Class)expectedClass
+{
+    id result = self.toObject;
+    return [result isKindOfClass:expectedClass] ? result : nil;
+}
+
+- (NSDate *)toDate
+{
+    return [NSDate dateWithTimeIntervalSince1970:self.toDouble / 1000.0];
+}
+
+- (NSArray *)toArray
+{
+    return ZJSArrayFromValue(self, [ZJSObjectConversionState new]);
+}
+
+- (NSDictionary *)toDictionary
+{
+    return ZJSDictionaryFromValue(self, [ZJSObjectConversionState new]);
 }
 
 - (BOOL)isEqualToObject:(id)object

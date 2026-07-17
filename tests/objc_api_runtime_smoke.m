@@ -147,6 +147,37 @@ int main(void)
         CGSize sizeResult = [JSValue valueWithSize:size inContext:context].toSize;
         if (check(sizeResult.width == size.width && sizeResult.height == size.height, 38))
             return 38;
+        NSDictionary *foundation = @{
+            @"name" : @"zig-js",
+            @"values" : @[ @1, @2, NSNull.null ],
+        };
+        JSValue *foundationValue = [JSValue valueWithObject:foundation inContext:context];
+        NSDictionary *foundationResult = foundationValue.toDictionary;
+        if (check([foundationResult[@"name"] isEqualToString:@"zig-js"] &&
+                      [foundationResult[@"values"] count] == 3 &&
+                      [foundationResult[@"values"][2] isEqual:NSNull.null] &&
+                      [foundationValue toObjectOfClass:NSDictionary.class] != nil,
+                  39))
+            return 39;
+        NSMutableArray *cycle = [NSMutableArray array];
+        [cycle addObject:cycle];
+        JSValue *cycleValue = [JSValue valueWithObject:cycle inContext:context];
+        if (check([[cycleValue valueAtIndex:0] isEqualToObject:cycleValue], 40))
+            return 40;
+        JSValue *descriptorTarget = [JSValue valueWithNewObjectInContext:context];
+        [descriptorTarget defineProperty:@"fixed"
+                              descriptor:@{
+                                  JSPropertyDescriptorValueKey : @7,
+                                  JSPropertyDescriptorWritableKey : @NO,
+                              }];
+        [descriptorTarget setValue:@9 forProperty:@"fixed"];
+        if (check([[descriptorTarget valueForProperty:@"fixed"] toInt32] == 7, 41))
+            return 41;
+        JSValue *cyclicObject = [context evaluateScript:@"(() => { const o = {}; o.self = o; return o; })()"];
+        NSMutableDictionary *cyclicResult = (NSMutableDictionary *)cyclicObject.toDictionary;
+        if (check(cyclicResult[@"self"] == cyclicResult, 42))
+            return 42;
+        [cyclicResult removeObjectForKey:@"self"];
     }
     return 0;
 }
