@@ -134,6 +134,14 @@ extern "c" fn StringBuilder__appendUsize(*anyopaque, usize) void;
 extern "c" fn StringBuilder__appendDouble(*anyopaque, f64) void;
 extern "c" fn StringBuilder__appendQuotedJsonString(*anyopaque, BunString) void;
 extern "c" fn StringBuilder__toString(*anyopaque, JSContextRef) EncodedValue;
+extern "c" fn Yarr__RegularExpression__init(BunString, u16) ?*anyopaque;
+extern "c" fn Yarr__RegularExpression__deinit(?*anyopaque) void;
+extern "c" fn Yarr__RegularExpression__isValid(?*anyopaque) bool;
+extern "c" fn Yarr__RegularExpression__matchedLength(?*anyopaque) i32;
+// This is the real C++/Rust executable ABI. The pinned Zig declaration's
+// missing BunString parameter is tracked as source drift in issue #213.
+extern "c" fn Yarr__RegularExpression__searchRev(?*anyopaque, BunString) i32;
+extern "c" fn Yarr__RegularExpression__matches(?*anyopaque, BunString) i32;
 extern "c" fn ZigString__toErrorInstance(*const ZigString, JSContextRef) EncodedValue;
 extern "c" fn ZigString__toTypeErrorInstance(*const ZigString, JSContextRef) EncodedValue;
 extern "c" fn ZigString__toRangeErrorInstance(*const ZigString, JSContextRef) EncodedValue;
@@ -701,6 +709,37 @@ pub fn main() void {
         huge_impl.ref_count != 2)
         fail("private StringBuilder text/repeated conversion mismatch");
     StringBuilder__deinit(&string_builder);
+
+    const regex_pattern_bytes = "a+";
+    const regex_pattern = BunString{
+        .tag = .static_zig_string,
+        .value = .{ .zig_string = .{ .tagged_ptr = @intFromPtr(regex_pattern_bytes.ptr), .len = regex_pattern_bytes.len } },
+    };
+    const regex_input_bytes = "xxaaayaaa";
+    const regex_input = BunString{
+        .tag = .static_zig_string,
+        .value = .{ .zig_string = .{ .tagged_ptr = @intFromPtr(regex_input_bytes.ptr), .len = regex_input_bytes.len } },
+    };
+    const regular_expression = Yarr__RegularExpression__init(regex_pattern, 0) orelse
+        fail("RegularExpression allocation failed");
+    if (!Yarr__RegularExpression__isValid(regular_expression) or
+        Yarr__RegularExpression__matches(regular_expression, regex_input) != 2 or
+        Yarr__RegularExpression__matchedLength(regular_expression) != 3 or
+        Yarr__RegularExpression__searchRev(regular_expression, regex_input) != 6 or
+        Yarr__RegularExpression__matchedLength(regular_expression) != 3)
+        fail("RegularExpression forward/reverse state mismatch");
+    Yarr__RegularExpression__deinit(regular_expression);
+
+    const invalid_regex_bytes = "[";
+    const invalid_regular_expression = Yarr__RegularExpression__init(.{
+        .tag = .static_zig_string,
+        .value = .{ .zig_string = .{ .tagged_ptr = @intFromPtr(invalid_regex_bytes.ptr), .len = invalid_regex_bytes.len } },
+    }, 0) orelse fail("invalid RegularExpression allocation failed");
+    if (Yarr__RegularExpression__isValid(invalid_regular_expression) or
+        Yarr__RegularExpression__matches(invalid_regular_expression, regex_input) != -1 or
+        Yarr__RegularExpression__matchedLength(invalid_regular_expression) != -1)
+        fail("invalid RegularExpression state mismatch");
+    Yarr__RegularExpression__deinit(invalid_regular_expression);
 
     StringBuilder__init(&string_builder);
     StringBuilder__appendInt(&string_builder, std.math.minInt(i32));
@@ -2746,5 +2785,5 @@ pub fn main() void {
         TopExceptionScope__exceptionIncludingTraps(&verification_scope) != null)
         fail("private TopExceptionScope destruction mismatch");
 
-    std.debug.print("Home private value shims: 178/178 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 184/184 symbols linked; runtime matrix passed\n", .{});
 }

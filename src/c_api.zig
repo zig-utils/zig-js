@@ -28,6 +28,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const regex_mod = @import("regex");
 const ast = @import("ast.zig");
 const gc_mod = @import("gc.zig");
 const value = @import("value.zig");
@@ -114,6 +115,15 @@ const private_string_builder_magic: usize = 0x5a4a_5342_0000_0000; // "ZJSB"
 const private_string_builder_overflow: usize = 0x8000_0000;
 const private_string_builder_capacity_mask: usize = 0x7fff_ffff;
 const private_string_builder_max_length: usize = std.math.maxInt(i32);
+
+const PrivateRegularExpression = struct {
+    magic: u64 = private_regular_expression_magic,
+    compiled: ?regex_mod.Regex = null,
+    last_match_length: i32 = -1,
+    sticky: bool = false,
+};
+
+const private_regular_expression_magic: u64 = 0x5a4a_5352_4547_4558; // "ZJSREGEX"
 
 /// Prefix-compatible with WTF::StringImpl's pinned 64-bit data layout. The
 /// trailing fields are private allocator metadata and are never exposed to the
@@ -2780,6 +2790,194 @@ fn privateStringBuilderBunStringUnits(
             return units;
         },
     }
+}
+
+/// Yarr operates on UTF-16 code units. Encoding every unit independently as
+/// WTF-8 (including each half of a valid surrogate pair) lets zig-regex retain
+/// non-Unicode JavaScript matching semantics; its Unicode mode deliberately
+/// combines adjacent surrogate encodings into one ECMAScript code point.
+fn privateRegularExpressionWTF8(
+    allocator: std.mem.Allocator,
+    units: []align(1) const u16,
+) error{OutOfMemory}![]u8 {
+    const capacity = std.math.mul(usize, units.len, 3) catch return error.OutOfMemory;
+    const out = try allocator.alloc(u8, capacity);
+    var used: usize = 0;
+    for (units) |unit| privateAppendWTF8CodeUnit(out, &used, unit);
+    return allocator.realloc(out, used) catch out[0..used];
+}
+
+fn privateRegularExpressionByteOffset(units: []const u16, unit_offset: usize) usize {
+    var result: usize = 0;
+    for (units[0..@min(unit_offset, units.len)]) |unit| {
+        result += if (unit < 0x80) 1 else if (unit < 0x800) 2 else 3;
+    }
+    return result;
+}
+
+fn privateRegularExpressionUnitOffset(bytes: []const u8, byte_offset: usize) usize {
+    var input: usize = 0;
+    var units: usize = 0;
+    const end = @min(byte_offset, bytes.len);
+    while (input < end) : (units += 1) {
+        const decoded = regex_mod.unicode.decodeUtf8Lenient(bytes[input..]) orelse {
+            input += 1;
+            continue;
+        };
+        input += decoded.len;
+    }
+    return units;
+}
+
+const PrivateRegularExpressionInput = struct {
+    units: []u16,
+    bytes: []u8,
+
+    fn deinit(self: PrivateRegularExpressionInput) void {
+        private_string_allocator.free(self.bytes);
+        private_string_allocator.free(self.units);
+    }
+};
+
+fn privateRegularExpressionInput(
+    string: *const PrivateBunString,
+) PrivateBunStringError!?PrivateRegularExpressionInput {
+    // BunString::toWTFString(ZeroCopy) yields a null WTF::String for Dead,
+    // Empty, and all zero-length ZigStrings. RegularExpression::match rejects
+    // null strings before executing even a zero-width pattern.
+    if (string.tag == .dead or string.tag == .empty) return null;
+    switch (string.tag) {
+        .wtf_string_impl => if (string.value.wtf_string_impl == null) return null,
+        .zig_string, .static_zig_string => if (string.value.zig_string.len == 0) return null,
+        else => unreachable,
+    }
+
+    const units = try privateStringBuilderBunStringUnits(private_string_allocator, string);
+    errdefer private_string_allocator.free(units);
+    if (units.len == 0) return null;
+    const bytes = try privateRegularExpressionWTF8(private_string_allocator, units);
+    return .{ .units = units, .bytes = bytes };
+}
+
+fn privateRegularExpressionFromOpaque(raw: ?*anyopaque) ?*PrivateRegularExpression {
+    const pointer = raw orelse return null;
+    if (@intFromPtr(pointer) % @alignOf(PrivateRegularExpression) != 0) return null;
+    const expression: *PrivateRegularExpression = @ptrCast(@alignCast(pointer));
+    if (expression.magic != private_regular_expression_magic) return null;
+    return expression;
+}
+
+const PrivateRegularExpressionMatch = struct {
+    position: usize,
+    length: usize,
+};
+
+fn privateRegularExpressionFind(
+    expression: *PrivateRegularExpression,
+    input: *const PrivateRegularExpressionInput,
+    start_units: usize,
+) ?PrivateRegularExpressionMatch {
+    const compiled = if (expression.compiled) |*compiled_regex| compiled_regex else return null;
+    if (start_units > input.units.len) return null;
+    const start_byte = privateRegularExpressionByteOffset(input.units, start_units);
+    var found = (compiled.findFrom(input.bytes, start_byte) catch return null) orelse return null;
+    defer found.deinit(private_string_allocator);
+    if (expression.sticky and found.start != start_byte) return null;
+    const position = privateRegularExpressionUnitOffset(input.bytes, found.start);
+    const end = privateRegularExpressionUnitOffset(input.bytes, found.end);
+    return .{ .position = position, .length = end - position };
+}
+
+export fn Yarr__RegularExpression__init(
+    pattern: PrivateBunString,
+    raw_flags: u16,
+) callconv(.c) ?*anyopaque {
+    const expression = private_string_allocator.create(PrivateRegularExpression) catch return null;
+    expression.* = .{ .sticky = raw_flags & (@as(u16, 1) << 7) != 0 };
+
+    const units = privateStringBuilderBunStringUnits(private_string_allocator, &pattern) catch |err| {
+        if (err == error.OutOfMemory) {
+            private_string_allocator.destroy(expression);
+            return null;
+        }
+        return expression;
+    };
+    defer private_string_allocator.free(units);
+    const bytes = privateRegularExpressionWTF8(private_string_allocator, units) catch {
+        private_string_allocator.destroy(expression);
+        return null;
+    };
+    defer private_string_allocator.free(bytes);
+
+    const unicode_sets = raw_flags & (@as(u16, 1) << 6) != 0;
+    expression.compiled = regex_mod.Regex.compileWithFlags(private_string_allocator, bytes, .{
+        .case_insensitive = raw_flags & (@as(u16, 1) << 2) != 0,
+        .multiline = raw_flags & (@as(u16, 1) << 3) != 0,
+        .dot_all = raw_flags & (@as(u16, 1) << 4) != 0,
+        .unicode = raw_flags & (@as(u16, 1) << 5) != 0 or unicode_sets,
+        .unicode_sets = unicode_sets,
+        .ecmascript = true,
+    }) catch |err| {
+        if (err == error.OutOfMemory) {
+            private_string_allocator.destroy(expression);
+            return null;
+        }
+        return expression;
+    };
+    return expression;
+}
+
+export fn Yarr__RegularExpression__deinit(raw: ?*anyopaque) callconv(.c) void {
+    const expression = privateRegularExpressionFromOpaque(raw) orelse return;
+    if (expression.compiled) |*compiled| compiled.deinit();
+    expression.magic = 0;
+    private_string_allocator.destroy(expression);
+}
+
+export fn Yarr__RegularExpression__isValid(raw: ?*anyopaque) callconv(.c) bool {
+    const expression = privateRegularExpressionFromOpaque(raw) orelse return false;
+    return expression.compiled != null;
+}
+
+export fn Yarr__RegularExpression__matchedLength(raw: ?*anyopaque) callconv(.c) i32 {
+    const expression = privateRegularExpressionFromOpaque(raw) orelse return -1;
+    return expression.last_match_length;
+}
+
+export fn Yarr__RegularExpression__matches(
+    raw: ?*anyopaque,
+    string: PrivateBunString,
+) callconv(.c) i32 {
+    const expression = privateRegularExpressionFromOpaque(raw) orelse return -1;
+    expression.last_match_length = -1;
+    const input = (privateRegularExpressionInput(&string) catch return -1) orelse return -1;
+    defer input.deinit();
+    const found = privateRegularExpressionFind(expression, &input, 0) orelse return -1;
+    expression.last_match_length = @intCast(found.length);
+    return @intCast(found.position);
+}
+
+/// The pinned Zig declaration accidentally omits `string`; Bun's C++ and Rust
+/// bindings expose this real two-argument executable ABI.
+export fn Yarr__RegularExpression__searchRev(
+    raw: ?*anyopaque,
+    string: PrivateBunString,
+) callconv(.c) i32 {
+    const expression = privateRegularExpressionFromOpaque(raw) orelse return -1;
+    expression.last_match_length = -1;
+    const input = (privateRegularExpressionInput(&string) catch return -1) orelse return -1;
+    defer input.deinit();
+
+    var start: usize = 0;
+    var last: ?PrivateRegularExpressionMatch = null;
+    while (privateRegularExpressionFind(expression, &input, start)) |found| {
+        if (last == null or found.position + found.length > last.?.position + last.?.length)
+            last = found;
+        start = found.position + 1;
+    }
+    const result = last orelse return -1;
+    expression.last_match_length = @intCast(result.length);
+    return @intCast(result.position);
 }
 
 fn privateStringBuilderAppendBunString(builder: *PrivateStringBuilder, string: *const PrivateBunString) void {
@@ -13873,6 +14071,106 @@ test "private StringBuilder preserves UTF-16 formatting quoting and overflow" {
     JSGlobalObject__clearException(global);
     StringBuilder__init(null);
     StringBuilder__deinit(null);
+}
+
+test "private Yarr RegularExpression preserves UTF-16 match state and reverse search" {
+    const Strings = struct {
+        fn latin1(bytes: []const u8) PrivateBunString {
+            return .{
+                .tag = .static_zig_string,
+                .value = .{ .zig_string = .{ .tagged_ptr = @intFromPtr(bytes.ptr), .len = bytes.len } },
+            };
+        }
+
+        fn utf16(units: []const u16) PrivateBunString {
+            return .{
+                .tag = .static_zig_string,
+                .value = .{ .zig_string = .{
+                    .tagged_ptr = @intFromPtr(units.ptr) | (@as(usize, 1) << 63),
+                    .len = units.len,
+                } },
+            };
+        }
+    };
+    const expectMatch = struct {
+        fn run(pattern: []const u8, flags: u16, input: []const u8, position: i32, length: i32) !void {
+            const expression = Yarr__RegularExpression__init(Strings.latin1(pattern), flags) orelse
+                return error.RegularExpressionInitFailed;
+            defer Yarr__RegularExpression__deinit(expression);
+            try std.testing.expect(Yarr__RegularExpression__isValid(expression));
+            try std.testing.expectEqual(position, Yarr__RegularExpression__matches(expression, Strings.latin1(input)));
+            try std.testing.expectEqual(length, Yarr__RegularExpression__matchedLength(expression));
+        }
+    }.run;
+
+    try expectMatch("a+", 0, "xxaaay", 2, 3);
+    try expectMatch("hello", @as(u16, 1) << 2, "say HELLO", 4, 5);
+    try expectMatch("^b", @as(u16, 1) << 3, "a\nb", 2, 1);
+    try expectMatch("a.b", @as(u16, 1) << 4, "a\nb", 0, 3);
+    try expectMatch("a", @as(u16, 1) << 7, "abc", 0, 1);
+    try expectMatch("a", @as(u16, 1) << 7, "za", -1, -1);
+
+    const invalid = Yarr__RegularExpression__init(Strings.latin1("["), 0) orelse
+        return error.RegularExpressionInitFailed;
+    defer Yarr__RegularExpression__deinit(invalid);
+    try std.testing.expect(!Yarr__RegularExpression__isValid(invalid));
+    try std.testing.expectEqual(@as(i32, -1), Yarr__RegularExpression__matches(invalid, Strings.latin1("[")));
+    try std.testing.expectEqual(@as(i32, -1), Yarr__RegularExpression__matchedLength(invalid));
+
+    const stateful = Yarr__RegularExpression__init(Strings.latin1("a+"), 0) orelse
+        return error.RegularExpressionInitFailed;
+    defer Yarr__RegularExpression__deinit(stateful);
+    try std.testing.expectEqual(@as(i32, 0), Yarr__RegularExpression__matches(stateful, Strings.latin1("aaa")));
+    try std.testing.expectEqual(@as(i32, 3), Yarr__RegularExpression__matchedLength(stateful));
+    try std.testing.expectEqual(@as(i32, -1), Yarr__RegularExpression__matches(stateful, Strings.latin1("bbb")));
+    try std.testing.expectEqual(@as(i32, -1), Yarr__RegularExpression__matchedLength(stateful));
+    try std.testing.expectEqual(@as(i32, -1), Yarr__RegularExpression__matches(stateful, PrivateBunString.empty()));
+
+    const astral_input = [_]u16{ 0xd83d, 0xde00, 'Z' };
+    const z = Yarr__RegularExpression__init(Strings.latin1("Z"), 0) orelse
+        return error.RegularExpressionInitFailed;
+    defer Yarr__RegularExpression__deinit(z);
+    try std.testing.expectEqual(@as(i32, 2), Yarr__RegularExpression__matches(z, Strings.utf16(&astral_input)));
+    try std.testing.expectEqual(@as(i32, 1), Yarr__RegularExpression__matchedLength(z));
+
+    const dot_non_unicode = Yarr__RegularExpression__init(Strings.latin1("."), 0) orelse
+        return error.RegularExpressionInitFailed;
+    defer Yarr__RegularExpression__deinit(dot_non_unicode);
+    try std.testing.expectEqual(@as(i32, 0), Yarr__RegularExpression__matches(dot_non_unicode, Strings.utf16(&astral_input)));
+    try std.testing.expectEqual(@as(i32, 1), Yarr__RegularExpression__matchedLength(dot_non_unicode));
+    const dot_unicode = Yarr__RegularExpression__init(Strings.latin1("."), @as(u16, 1) << 5) orelse
+        return error.RegularExpressionInitFailed;
+    defer Yarr__RegularExpression__deinit(dot_unicode);
+    try std.testing.expectEqual(@as(i32, 0), Yarr__RegularExpression__matches(dot_unicode, Strings.utf16(&astral_input)));
+    try std.testing.expectEqual(@as(i32, 2), Yarr__RegularExpression__matchedLength(dot_unicode));
+    const dot_unicode_sets = Yarr__RegularExpression__init(Strings.latin1("."), @as(u16, 1) << 6) orelse
+        return error.RegularExpressionInitFailed;
+    defer Yarr__RegularExpression__deinit(dot_unicode_sets);
+    try std.testing.expectEqual(@as(i32, 0), Yarr__RegularExpression__matches(dot_unicode_sets, Strings.utf16(&astral_input)));
+    try std.testing.expectEqual(@as(i32, 2), Yarr__RegularExpression__matchedLength(dot_unicode_sets));
+
+    const overlapping = Yarr__RegularExpression__init(Strings.latin1("aba"), 0) orelse
+        return error.RegularExpressionInitFailed;
+    defer Yarr__RegularExpression__deinit(overlapping);
+    try std.testing.expectEqual(@as(i32, 2), Yarr__RegularExpression__searchRev(overlapping, Strings.latin1("ababa")));
+    try std.testing.expectEqual(@as(i32, 3), Yarr__RegularExpression__matchedLength(overlapping));
+
+    const subset = Yarr__RegularExpression__init(Strings.latin1("a.*|b"), 0) orelse
+        return error.RegularExpressionInitFailed;
+    defer Yarr__RegularExpression__deinit(subset);
+    try std.testing.expectEqual(@as(i32, 0), Yarr__RegularExpression__searchRev(subset, Strings.latin1("ab")));
+    try std.testing.expectEqual(@as(i32, 2), Yarr__RegularExpression__matchedLength(subset));
+
+    const empty = Yarr__RegularExpression__init(PrivateBunString.empty(), 0) orelse
+        return error.RegularExpressionInitFailed;
+    defer Yarr__RegularExpression__deinit(empty);
+    try std.testing.expect(Yarr__RegularExpression__isValid(empty));
+    try std.testing.expectEqual(@as(i32, 3), Yarr__RegularExpression__searchRev(empty, Strings.latin1("abc")));
+    try std.testing.expectEqual(@as(i32, 0), Yarr__RegularExpression__matchedLength(empty));
+
+    try std.testing.expect(!Yarr__RegularExpression__isValid(null));
+    try std.testing.expectEqual(@as(i32, -1), Yarr__RegularExpression__matchedLength(null));
+    Yarr__RegularExpression__deinit(null);
 }
 
 test "private rooted native value containers retain and release exact cells" {
