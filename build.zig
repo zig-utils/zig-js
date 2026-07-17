@@ -109,6 +109,19 @@ pub fn build(b: *std.Build) void {
     );
     home_private_abi_audit_step.dependOn(&home_private_abi_audit_cmd.step);
 
+    const bun_private_abi_audit_cmd = b.addSystemCommand(&.{
+        "python3",
+        "tools/bun-private-abi.py",
+    });
+    if (b.option([]const u8, "bun-source-root", "Optional pinned Bun checkout to verify")) |root| {
+        bun_private_abi_audit_cmd.addArgs(&.{ "--bun-root", root });
+    }
+    const bun_private_abi_audit_step = b.step(
+        "bun-private-abi-audit",
+        "Verify the pinned Bun core private extern-fn inventory",
+    );
+    bun_private_abi_audit_step.dependOn(&bun_private_abi_audit_cmd.step);
+
     const objc_api_audit_cmd = b.addSystemCommand(&.{
         "python3",
         "tools/verify-objc-api.py",
