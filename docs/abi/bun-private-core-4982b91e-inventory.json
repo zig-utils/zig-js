@@ -83,8 +83,8 @@
     },
     "by_status": {
       "external": 1,
-      "implemented": 248,
-      "pending": 188
+      "implemented": 250,
+      "pending": 186
     }
   },
   "home_comparison": {
@@ -468,10 +468,10 @@
       "line": 272,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn Bun__Process__queueNextTick1(*JSGlobalObject, func: JSValue, JSValue) void;",
       "declaration_sha256": "89c15b06e9329ed3bc473cf5fe4cf4050c4361a466c63a857c4d7fcc9dec7730",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Bun__Process__queueNextTick2",
@@ -479,10 +479,10 @@
       "line": 273,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn Bun__Process__queueNextTick2(*JSGlobalObject, func: JSValue, JSValue, JSValue) void;",
       "declaration_sha256": "86db9c98738609a03a3bb96f8a3756d0611c07d01de8afdc28d2fd72c2abd3e2",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Bun__ProxyObject__getInternalField",
