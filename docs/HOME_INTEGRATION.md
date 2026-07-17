@@ -69,7 +69,9 @@ tests):
 3. **Inspector integration** — the complete public C inventory, inspectability
    toggles, versioned in-process protocol transport, C/C++ hosts, the JSC
    differential gate, and real shared-VM context groups are in place. Runtime
-   evaluation is usable today; pause/breakpoint/stepping/stack/scope work remains
+   evaluation, statement pause/resume, resolved breakpoints, logical-depth
+   stepping, exception policy, and suspendable-function checkpoints are usable
+   today. Call-frame, scope, remote-object, and worker-target work remains
    tracked in #139 before Home debugger integration is complete.
 4. **Prototype & structure control** — `JSObjectGetPrototype`/`SetPrototype`
    and richer private/internal slot modeling. `JSObjectGetPrivate` /

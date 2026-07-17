@@ -56,7 +56,11 @@ a debugger statement pauses with reason debuggerStatement. An explicit
 Debugger.pause request pauses at the next statement boundary. Debug-enabled
 execution deliberately uses the tree walker, including ordinary synchronous
 functions parsed from that script, so bytecode/baseline compilation cannot skip
-these boundaries.
+these boundaries. Suspendable generator and async-function chunks retain the
+same statement map inside the VM; stepping survives yield/await suspension and
+VM quick paths are disabled for those debug chunks. The optimizing JIT does not
+exist yet and therefore cannot be claimed as an inspected tier (tracked by
+[issue #146](https://github.com/zig-utils/zig-js/issues/146)).
 
 Script breakpoints identify a scriptId; URL breakpoints apply to every matching
 present or future script. A requested location resolves deterministically to the
@@ -90,6 +94,11 @@ style result or error objects. Evaluation exceptions include an
 exceptionDetails object. Malformed requests receive deterministic protocol
 errors.
 
+The machine-readable [0.1 command/event inventory](inspector-protocol-0.1.json)
+names all 16 commands and 8 events with transcript evidence. Every listed
+command is implemented; an unlisted method receives -32601 and is never silently
+accepted.
+
 ## Current debugger boundary
 
 Version 0.1 establishes real attachment, lifecycle, concurrent sessions, live
@@ -98,5 +107,3 @@ breakpoints, ordinary-call stepping, and exception-pause policy. Call frames,
 remote objects, and scopes remain tracked by
 [issue #154](https://github.com/zig-utils/zig-js/issues/154). Unsupported
 commands return -32601; there are no silently accepted debugger stubs.
-Suspendable generator/async execution still uses its VM and does not yet expose
-statement pause points; that tier-coherence work remains in #153.

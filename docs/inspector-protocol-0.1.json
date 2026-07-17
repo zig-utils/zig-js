@@ -1,0 +1,32 @@
+{
+  "protocolVersion": "zig-js-inspector/0.1",
+  "unsupportedCommandBehavior": { "code": -32601, "silentAcceptance": false },
+  "commands": [
+    { "method": "Schema.getDomains", "status": "implemented", "evidence": "C-API: inspectability gates concurrent in-process protocol sessions" },
+    { "method": "Runtime.enable", "status": "implemented", "evidence": "C-API: inspectability gates concurrent in-process protocol sessions" },
+    { "method": "Runtime.disable", "status": "implemented", "evidence": "C-API: inspector protocol inventory has no hidden commands" },
+    { "method": "Runtime.evaluate", "status": "implemented", "evidence": "C-API: inspectability gates concurrent in-process protocol sessions" },
+    { "method": "Debugger.enable", "status": "implemented", "evidence": "C-API: debugger publishes scripts and synchronously pauses at source locations" },
+    { "method": "Debugger.disable", "status": "implemented", "evidence": "C-API: inspector protocol inventory has no hidden commands" },
+    { "method": "Debugger.pause", "status": "implemented", "evidence": "C-API: debugger publishes scripts and synchronously pauses at source locations" },
+    { "method": "Debugger.resume", "status": "implemented", "evidence": "C-API: debugger publishes scripts and synchronously pauses at source locations" },
+    { "method": "Debugger.stepInto", "status": "implemented", "evidence": "C-API: debugger stepping observes logical call depth" },
+    { "method": "Debugger.stepOver", "status": "implemented", "evidence": "C-API: debugger stepping observes logical call depth" },
+    { "method": "Debugger.stepOut", "status": "implemented", "evidence": "C-API: debugger stepping observes logical call depth" },
+    { "method": "Debugger.setPauseOnExceptions", "status": "implemented", "evidence": "C-API: debugger exception policy distinguishes caught and uncaught throws" },
+    { "method": "Debugger.getScriptSource", "status": "implemented", "evidence": "C-API: debugger publishes scripts and synchronously pauses at source locations" },
+    { "method": "Debugger.setBreakpoint", "status": "implemented", "evidence": "C-API: debugger publishes scripts and synchronously pauses at source locations" },
+    { "method": "Debugger.setBreakpointByUrl", "status": "implemented", "evidence": "C-API: debugger publishes scripts and synchronously pauses at source locations" },
+    { "method": "Debugger.removeBreakpoint", "status": "implemented", "evidence": "C-API: debugger publishes scripts and synchronously pauses at source locations" }
+  ],
+  "events": [
+    { "method": "Inspector.attached", "status": "implemented" },
+    { "method": "Inspector.detached", "status": "implemented" },
+    { "method": "Runtime.executionContextCreated", "status": "implemented" },
+    { "method": "Debugger.scriptParsed", "status": "implemented" },
+    { "method": "Debugger.breakpointResolved", "status": "implemented" },
+    { "method": "Debugger.paused", "status": "implemented" },
+    { "method": "Debugger.resumed", "status": "implemented" },
+    { "method": "Debugger.exceptionThrown", "status": "implemented" }
+  ]
+}

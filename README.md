@@ -220,9 +220,11 @@ The pinned public C inventory has no pending declarations. Inspector sessions
 now publish stable scripts and exact statement locations, and provide real
 `debugger;`, explicit pause/resume control, and deterministically resolved
 script/URL breakpoints with removal. Logical-depth step-into, step-over, and
-step-out are implemented for ordinary synchronous calls, alongside none/all/
-uncaught exception pause policy and thrown-exception events. Call frames,
-remote objects, and scopes continue under
+step-out cover ordinary calls plus suspendable generator/async VM execution,
+alongside none/all/uncaught exception pause policy and thrown-exception events.
+The [machine-readable protocol inventory](docs/inspector-protocol-0.1.json)
+contains 16 implemented commands and 8 events with no hidden accepted stubs.
+Call frames, remote objects, and scopes continue under
 [#154](https://github.com/zig-utils/zig-js/issues/154); see
 [docs/inspector.md](docs/inspector.md).
 

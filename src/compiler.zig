@@ -550,6 +550,8 @@ pub const Compiler = struct {
     /// stack like any call and eventually throw RangeError (matching the
     /// tree-walker) rather than looping forever on `function f(){ return f(); }`.
     is_strict: bool = false,
+    /// Emit per-statement VM checkpoints for debugger-enabled suspendable code.
+    debug_checkpoints: bool = false,
 
     /// Compile a whole program into a fresh chunk. The chunk ends with `halt`;
     /// the VM returns its completion accumulator. Program scope is null, so all
@@ -574,7 +576,7 @@ pub const Compiler = struct {
     /// operand stack. Returns `error.Unsupported` for bodies (or parameter forms)
     /// outside the VM's lowered subset, so the generator is reported unsupported
     /// rather than run incorrectly.
-    pub fn compileGenerator(arena: std.mem.Allocator, fnode: *const ast.FunctionNode) CompileError!*Chunk {
+    pub fn compileGenerator(arena: std.mem.Allocator, fnode: *const ast.FunctionNode, debug_checkpoints: bool) CompileError!*Chunk {
         // Parameters (including default/rest/destructuring) are bound at runtime
         // by `makeGenerator` into the generator's environment — env-mode name
         // resolution means the body's references resolve there — so the param
@@ -583,7 +585,7 @@ pub const Compiler = struct {
         const chunk = try arena.create(Chunk);
         chunk.* = Chunk.init(arena);
         // An async generator body may also `await` (in_async enables await_op).
-        var c = Compiler{ .arena = arena, .chunk = chunk, .mode = .function, .scope = null, .in_generator = true, .in_async = fnode.is_async };
+        var c = Compiler{ .arena = arena, .chunk = chunk, .mode = .function, .scope = null, .in_generator = true, .in_async = fnode.is_async, .debug_checkpoints = debug_checkpoints };
         try c.compileStmt(fnode.body); // body is a block
         _ = try chunk.emit(.ret_undef, 0);
         try chunk.finalize();
@@ -594,11 +596,11 @@ pub const Compiler = struct {
     /// like a generator). `await` lowers to a suspend (`gen_yield`); the async
     /// driver promisifies the suspended value, resumes on settlement, and
     /// settles the function's result promise on completion.
-    pub fn compileAsync(arena: std.mem.Allocator, fnode: *const ast.FunctionNode) CompileError!*Chunk {
+    pub fn compileAsync(arena: std.mem.Allocator, fnode: *const ast.FunctionNode, debug_checkpoints: bool) CompileError!*Chunk {
         if (fnode.is_generator) return error.Unsupported; // async generators not lowered yet
         const chunk = try arena.create(Chunk);
         chunk.* = Chunk.init(arena);
-        var c = Compiler{ .arena = arena, .chunk = chunk, .mode = .function, .scope = null, .in_async = true };
+        var c = Compiler{ .arena = arena, .chunk = chunk, .mode = .function, .scope = null, .in_async = true, .debug_checkpoints = debug_checkpoints };
         if (fnode.is_expr_body) {
             try c.compileExpr(fnode.body);
             _ = try chunk.emit(.ret, 0);
@@ -962,6 +964,7 @@ pub const Compiler = struct {
     }
 
     fn compileStmt(self: *Compiler, node: *Node) CompileError!void {
+        if (self.debug_checkpoints) try self.chunk.markDebugStatement(node);
         switch (node.*) {
             .var_decl => |d| {
                 if (d.init) |init_node| {
@@ -2585,7 +2588,7 @@ pub const Compiler = struct {
         scope.* = .{ .parent = self.scope };
 
         const sub: ?*Chunk = if (fnode.is_generator) blk: {
-            break :blk try Compiler.compileGenerator(self.arena, fnode);
+            break :blk try Compiler.compileGenerator(self.arena, fnode, self.debug_checkpoints);
         } else blk: {
             const compiled = try self.arena.create(Chunk);
             compiled.* = Chunk.init(self.arena);
@@ -2607,7 +2610,7 @@ pub const Compiler = struct {
             compiled.param_count = @intCast(fnode.params.len);
             compiled.local_count = scope.count;
 
-            var sub_c = Compiler{ .arena = self.arena, .chunk = compiled, .mode = .function, .scope = scope, .is_strict = fnode.is_strict };
+            var sub_c = Compiler{ .arena = self.arena, .chunk = compiled, .mode = .function, .scope = scope, .is_strict = fnode.is_strict, .debug_checkpoints = self.debug_checkpoints };
             if (fnode.is_expr_body) {
                 sub_c.compileExpr(fnode.body) catch |e| switch (e) {
                     error.Unsupported => {

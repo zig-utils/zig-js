@@ -2357,14 +2357,7 @@ pub const Interpreter = struct {
     }
 
     pub fn eval(self: *Interpreter, node: *const Node) EvalError!Value {
-        if (self.debug_statement_hook) |hook| {
-            if (self.debug_statement_locations) |locations| {
-                if (locations.get(node)) |location| {
-                    self.debug_current_location = location;
-                    try hook(self.debug_statement_ctx.?, self, location);
-                }
-            }
-        }
+        try self.serviceDebugStatement(node);
         self.steps += 1;
         if (self.steps > max_steps) return self.throwError("RangeError", "evaluation step budget exceeded");
         if ((self.steps & 1023) == 0) {
@@ -3192,6 +3185,17 @@ pub const Interpreter = struct {
             .switch_stmt => |s| try self.evalSwitch(s.disc, s.cases),
             .for_in => |f| try self.evalForInOf(f.decl_kind, f.target, f.var_init, f.iterable, f.body, f.is_of, f.is_await, f.dispose),
         };
+    }
+
+    pub fn serviceDebugStatement(self: *Interpreter, node: *const Node) EvalError!void {
+        if (self.debug_statement_hook) |hook| {
+            if (self.debug_statement_locations) |locations| {
+                if (locations.get(node)) |location| {
+                    self.debug_current_location = location;
+                    try hook(self.debug_statement_ctx.?, self, location);
+                }
+            }
+        }
     }
 
     /// `for-of` (values of arrays/strings) and `for-in` (own keys of objects /
@@ -4331,14 +4335,14 @@ pub const Interpreter = struct {
         // outside the VM's lowered subset leave `gen_chunk` null, so calling the
         // generator throws a clear TypeError rather than running incorrectly.
         if (fnode.is_generator) {
-            func.gen_chunk = Compiler.compileGenerator(self.arena, fnode) catch |e| switch (e) {
+            func.gen_chunk = Compiler.compileGenerator(self.arena, fnode, self.debug_statement_hook != null) catch |e| switch (e) {
                 error.Unsupported => null,
                 error.OutOfMemory => return error.OutOfMemory,
             };
         } else if (fnode.is_async) {
             // A plain async function compiles to a suspendable body (await is a
             // suspend point); null on unsupported syntax → tree-walk fallback.
-            func.async_chunk = Compiler.compileAsync(self.arena, fnode) catch |e| switch (e) {
+            func.async_chunk = Compiler.compileAsync(self.arena, fnode, self.debug_statement_hook != null) catch |e| switch (e) {
                 error.Unsupported => null,
                 error.OutOfMemory => return error.OutOfMemory,
             };

@@ -4344,6 +4344,67 @@ test "C-API: inspectability gates concurrent in-process protocol sessions" {
     JSGlobalContextRelease(ctx);
 }
 
+test "C-API: inspector protocol inventory has no hidden commands" {
+    const inventory_source = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "docs/inspector-protocol-0.1.json", std.testing.allocator, .limited(1024 * 1024));
+    defer std.testing.allocator.free(inventory_source);
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, inventory_source, .{});
+    defer parsed.deinit();
+    try std.testing.expect(parsed.value == .object);
+    const root = parsed.value.object;
+    try std.testing.expectEqualStrings("zig-js-inspector/0.1", root.get("protocolVersion").?.string);
+    const unsupported = root.get("unsupportedCommandBehavior").?.object;
+    try std.testing.expectEqual(@as(i64, -32601), unsupported.get("code").?.integer);
+    try std.testing.expect(!unsupported.get("silentAcceptance").?.bool);
+    const commands = root.get("commands").?.array.items;
+    const events = root.get("events").?.array.items;
+    try std.testing.expectEqual(@as(usize, 16), commands.len);
+    try std.testing.expectEqual(@as(usize, 8), events.len);
+    var methods: std.StringHashMapUnmanaged(void) = .empty;
+    defer methods.deinit(std.testing.allocator);
+    for (commands) |command_value| {
+        const command = command_value.object;
+        const method = command.get("method").?.string;
+        try std.testing.expectEqualStrings("implemented", command.get("status").?.string);
+        try std.testing.expect(command.get("evidence").?.string.len > 0);
+        const entry = try methods.getOrPut(std.testing.allocator, method);
+        try std.testing.expect(!entry.found_existing);
+    }
+    for (events) |event_value| {
+        const event = event_value.object;
+        try std.testing.expectEqualStrings("implemented", event.get("status").?.string);
+        const entry = try methods.getOrPut(std.testing.allocator, event.get("method").?.string);
+        try std.testing.expect(!entry.found_existing);
+    }
+
+    const State = struct {
+        bytes: [8192]u8 = undefined,
+        len: usize = 0,
+        fn receive(message: [*]const u8, message_len: usize, user_data: ?*anyopaque) callconv(.c) void {
+            const self: *@This() = @ptrCast(@alignCast(user_data.?));
+            std.debug.assert(self.len + message_len <= self.bytes.len);
+            @memcpy(self.bytes[self.len .. self.len + message_len], message[0..message_len]);
+            self.len += message_len;
+        }
+    };
+    const ctx = JSGlobalContextCreate(null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(ctx);
+    JSGlobalContextSetInspectable(ctx, true);
+    var state: State = .{};
+    const session = ZJSInspectorSessionCreate(ctx, State.receive, &state) orelse return error.SessionCreateFailed;
+    defer ZJSInspectorSessionRelease(session);
+    const runtime_enable = "{\"id\":1,\"method\":\"Runtime.enable\"}";
+    const runtime_disable = "{\"id\":2,\"method\":\"Runtime.disable\"}";
+    const debugger_enable = "{\"id\":3,\"method\":\"Debugger.enable\"}";
+    const debugger_disable = "{\"id\":4,\"method\":\"Debugger.disable\"}";
+    const unsupported_request = "{\"id\":5,\"method\":\"Debugger.silentlyPretend\"}";
+    try std.testing.expect(ZJSInspectorSessionDispatch(session, runtime_enable, runtime_enable.len));
+    try std.testing.expect(ZJSInspectorSessionDispatch(session, runtime_disable, runtime_disable.len));
+    try std.testing.expect(ZJSInspectorSessionDispatch(session, debugger_enable, debugger_enable.len));
+    try std.testing.expect(ZJSInspectorSessionDispatch(session, debugger_disable, debugger_disable.len));
+    try std.testing.expect(ZJSInspectorSessionDispatch(session, unsupported_request, unsupported_request.len));
+    try std.testing.expect(std.mem.indexOf(u8, state.bytes[0..state.len], "-32601") != null);
+}
+
 test "C-API: inspector session retains its context until deterministic release" {
     const State = struct {
         fn receive(_: [*]const u8, _: usize, user_data: ?*anyopaque) callconv(.c) void {
@@ -4642,6 +4703,92 @@ test "C-API: debugger exception policy distinguishes caught and uncaught throws"
     try std.testing.expect(std.mem.indexOf(u8, transcript, "\"uncaught\":false") != null);
     try std.testing.expect(std.mem.indexOf(u8, transcript, "\"uncaught\":true") != null);
     try std.testing.expect(std.mem.indexOf(u8, transcript, "\"lineNumber\":10") != null);
+}
+
+test "C-API: debugger checkpoints survive generator yield and async await" {
+    const State = struct {
+        session: ZJSInspectorSessionRef = null,
+        step_next: bool = true,
+        used_step: bool = false,
+        pauses: usize = 0,
+        bytes: [32768]u8 = undefined,
+        len: usize = 0,
+
+        fn receive(message: [*]const u8, message_len: usize, user_data: ?*anyopaque) callconv(.c) void {
+            const self: *@This() = @ptrCast(@alignCast(user_data.?));
+            std.debug.assert(self.len + message_len + 1 <= self.bytes.len);
+            @memcpy(self.bytes[self.len .. self.len + message_len], message[0..message_len]);
+            self.len += message_len;
+            self.bytes[self.len] = '\n';
+            self.len += 1;
+            if (std.mem.indexOf(u8, message[0..message_len], "Debugger.paused") == null) return;
+            self.pauses += 1;
+            const command = if (self.step_next and !self.used_step)
+                "{\"id\":80,\"method\":\"Debugger.stepInto\"}"
+            else
+                "{\"id\":89,\"method\":\"Debugger.resume\"}";
+            self.used_step = true;
+            std.debug.assert(ZJSInspectorSessionDispatch(self.session, command, command.len));
+        }
+    };
+
+    const ctx = JSGlobalContextCreate(null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(ctx);
+    JSGlobalContextSetInspectable(ctx, true);
+    var state: State = .{};
+    state.session = ZJSInspectorSessionCreate(ctx, State.receive, &state) orelse return error.SessionCreateFailed;
+    defer ZJSInspectorSessionRelease(state.session);
+    const enable = "{\"id\":1,\"method\":\"Debugger.enable\"}";
+    try std.testing.expect(ZJSInspectorSessionDispatch(state.session, enable, enable.len));
+
+    const generator_breakpoint =
+        "{\"id\":2,\"method\":\"Debugger.setBreakpointByUrl\",\"params\":{\"url\":\"generator-debug.js\",\"lineNumber\":2}}";
+    try std.testing.expect(ZJSInspectorSessionDispatch(state.session, generator_breakpoint, generator_breakpoint.len));
+    const generator_source = JSStringCreateWithUTF8CString(
+        "function* debugGenerator() {\n var value = 1;\n yield value;\n value += 1;\n return value;\n}\nvar debugIterator = debugGenerator();\nvar generatorPair = String(debugIterator.next().value) + ',' + String(debugIterator.next().value);\ngeneratorPair;",
+    ) orelse return error.StringInitFailed;
+    defer JSStringRelease(generator_source);
+    const generator_url = JSStringCreateWithUTF8CString("generator-debug.js") orelse return error.StringInitFailed;
+    defer JSStringRelease(generator_url);
+    var exception: JSValueRef = null;
+    const generator_result = JSEvaluateScript(ctx, generator_source, null, generator_url, 1, &exception) orelse return error.EvalFailed;
+    const generator_description = inspectorDescription(ctx, generator_result) orelse return error.DescriptionFailed;
+    defer generator_description.deinit();
+    try std.testing.expectEqualStrings("1,2", generator_description.bytes);
+    try std.testing.expectEqual(@as(usize, 2), state.pauses);
+
+    state.used_step = false;
+    const async_breakpoint =
+        "{\"id\":3,\"method\":\"Debugger.setBreakpointByUrl\",\"params\":{\"url\":\"async-debug.js\",\"lineNumber\":2}}";
+    try std.testing.expect(ZJSInspectorSessionDispatch(state.session, async_breakpoint, async_breakpoint.len));
+    const async_source = JSStringCreateWithUTF8CString(
+        "async function debugAsync() {\n var value = 3;\n await 0;\n value += 1;\n return value;\n}\nvar asyncDebugResult = 0;\ndebugAsync().then(function(value) { asyncDebugResult = value; });\n'scheduled';",
+    ) orelse return error.StringInitFailed;
+    defer JSStringRelease(async_source);
+    const async_url = JSStringCreateWithUTF8CString("async-debug.js") orelse return error.StringInitFailed;
+    defer JSStringRelease(async_url);
+    _ = JSEvaluateScript(ctx, async_source, null, async_url, 1, &exception) orelse return error.EvalFailed;
+    const async_result_source = JSStringCreateWithUTF8CString("asyncDebugResult;") orelse return error.StringInitFailed;
+    defer JSStringRelease(async_result_source);
+    const async_result = JSEvaluateScript(ctx, async_result_source, null, null, 1, &exception) orelse return error.EvalFailed;
+    try std.testing.expectEqual(@as(f64, 4), JSValueToNumber(ctx, async_result, &exception));
+    try std.testing.expectEqual(@as(usize, 4), state.pauses);
+
+    state.step_next = false;
+    state.used_step = false;
+    const pause_all = "{\"id\":4,\"method\":\"Debugger.setPauseOnExceptions\",\"params\":{\"state\":\"all\"}}";
+    try std.testing.expect(ZJSInspectorSessionDispatch(state.session, pause_all, pause_all.len));
+    const generator_throw_source = JSStringCreateWithUTF8CString(
+        "function* throwingGenerator() { try { throw 'vm'; } catch (value) { yield 5; } } throwingGenerator().next().value;",
+    ) orelse return error.StringInitFailed;
+    defer JSStringRelease(generator_throw_source);
+    _ = JSEvaluateScript(ctx, generator_throw_source, null, null, 1, &exception) orelse return error.EvalFailed;
+    try std.testing.expectEqual(@as(usize, 5), state.pauses);
+
+    const transcript = state.bytes[0..state.len];
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "\"reason\":\"step\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "\"lineNumber\":3") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "Debugger.exceptionThrown") != null);
 }
 
 test "C-API: ordinary constructors keep intrinsic identity and function source metadata" {

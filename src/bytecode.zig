@@ -479,6 +479,8 @@ pub const FnTemplate = struct {
 /// A unit of compiled code: the instruction stream plus its constant, name,
 /// and function-template pools. All slices live in the owning arena.
 pub const Chunk = struct {
+    const DebugSite = struct { instruction: usize, node: *const ast.Node };
+
     arena: std.mem.Allocator,
     /// Frame layout owned by this chunk. Program and environment-mode chunks
     /// leave both at zero; plain function chunks record parameters first,
@@ -491,6 +493,10 @@ pub const Chunk = struct {
     consts: std.ArrayListUnmanaged(Value) = .empty,
     names: std.ArrayListUnmanaged([]const u8) = .empty,
     fns: std.ArrayListUnmanaged(*FnTemplate) = .empty,
+    /// Optional statement-boundary metadata for debugger-enabled suspendable
+    /// chunks. Ordinary chunks leave this empty and pay no dispatch cost.
+    debug_sites: std.ArrayListUnmanaged(DebugSite) = .empty,
+    debug_nodes: []?*const ast.Node = &.{},
     /// Destructuring-pattern AST nodes referenced by `bind_pattern` (the VM
     /// reuses the tree-walker's `bindPattern` over the live environment).
     patterns: std.ArrayListUnmanaged(*ast.Node) = .empty,
@@ -563,6 +569,17 @@ pub const Chunk = struct {
             if (mayStartQuickArrayLoop(self.code.items, instruction)) mask |= quick_array_loop_candidate;
             candidate.* = mask;
         }
+        if (self.debug_sites.items.len > 0) {
+            self.debug_nodes = try self.arena.alloc(?*const ast.Node, self.code.items.len);
+            @memset(self.debug_nodes, null);
+            // Later/nested statements at the same first instruction are the
+            // more precise boundary (e.g. a block and its first child).
+            for (self.debug_sites.items) |site| self.debug_nodes[site.instruction] = site.node;
+        }
+    }
+
+    pub fn markDebugStatement(self: *Chunk, node: *const ast.Node) std.mem.Allocator.Error!void {
+        try self.debug_sites.append(self.arena, .{ .instruction = self.code.items.len, .node = node });
     }
 
     /// Emit an instruction, returning its index (for later jump back-patching).

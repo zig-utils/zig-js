@@ -3746,6 +3746,7 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
     var acc: Value = exec.acc;
     var ip: usize = exec.ip;
     const code = chunk.code.items;
+    const debug_execution = chunk.debug_nodes.len != 0 and vm.debug_statement_hook != null;
     // Parallel-mode flag hoisted out of the hot loop: in the default engine this
     // is false, so frame slots and monomorphic property IC hits avoid locks and
     // repeated atomic mode loads. Shared/concurrent-GC contexts enable the flag
@@ -3753,6 +3754,7 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
     const parallel_sync = bc.ic_seqlock_enabled.load(.monotonic);
 
     while (ip < code.len) {
+        if (debug_execution) if (chunk.debug_nodes[ip]) |node| try vm.serviceDebugStatement(node);
         vm.steps += 1;
         if (vm.steps > interp.max_steps) return vm.throwError("RangeError", "evaluation step budget exceeded");
         if ((vm.steps & 1023) == 0) {
@@ -3850,7 +3852,7 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                     chunk.quick_loop_candidates[start]
                 else
                     0;
-                if (stack.items.len == 0 and (quick_loop_candidates & bc.quick_call_loop_candidate) != 0) {
+                if (!debug_execution and stack.items.len == 0 and (quick_loop_candidates & bc.quick_call_loop_candidate) != 0) {
                     if (quickCallLoopPlan(chunk, start, parallel_sync)) |plan| {
                         const steps_until_checkpoint = 1024 - (vm.steps & 1023);
                         const steps_until_budget = interp.max_steps - vm.steps;
@@ -3862,7 +3864,7 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                         }
                     }
                 }
-                if (stack.items.len == 0 and (quick_loop_candidates & bc.quick_array_loop_candidate) != 0) {
+                if (!debug_execution and stack.items.len == 0 and (quick_loop_candidates & bc.quick_array_loop_candidate) != 0) {
                     if (quickArrayPlan(chunk, start, parallel_sync)) |plan| {
                         const steps_until_checkpoint = 1024 - (vm.steps & 1023);
                         const steps_until_budget = interp.max_steps - vm.steps;
@@ -3936,7 +3938,7 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 // base and then a numeric RHS load. Keep the recognizer call off
                 // ordinary numeric locals (including the arithmetic JIT side
                 // exits), and off the inner `load_local; get_prop` read pair.
-                const may_start_quick_property = ip < code.len and quickPropertySiteMayApply(chunk, start, parallel_sync) and
+                const may_start_quick_property = !debug_execution and ip < code.len and quickPropertySiteMayApply(chunk, start, parallel_sync) and
                     switch (code[ip].op) {
                         .load_const, .load_local => true,
                         else => false,
@@ -4432,32 +4434,36 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 const argc = inst.a;
                 const base = stack.items.len - argc;
                 const callee = stack.items[base - 1];
-                if (jsPlainFunction(callee)) |function| {
-                    if (try tryQuickArgumentsCall(vm, function, stack.items[base..])) |result| {
-                        stack.shrinkRetainingCapacity(base - 1);
-                        try stack.append(stack_alloc, result);
-                        continue;
+                if (!debug_execution) {
+                    if (jsPlainFunction(callee)) |function| {
+                        if (try tryQuickArgumentsCall(vm, function, stack.items[base..])) |result| {
+                            stack.shrinkRetainingCapacity(base - 1);
+                            try stack.append(stack_alloc, result);
+                            continue;
+                        }
                     }
                 }
-                if (jsChunkFn(callee)) |func| {
-                    if (try tryQuickNumericRecurrence(vm, func, stack.items[base..], parallel_sync)) |result| {
-                        stack.shrinkRetainingCapacity(base - 1);
-                        try stack.append(stack_alloc, result);
-                        continue;
-                    }
-                    if (try tryRunNativeDirectCall(vm, func, stack.items[base..])) |result| {
-                        stack.shrinkRetainingCapacity(base - 1);
-                        try stack.append(stack_alloc, result);
-                        continue;
-                    }
-                    if (!parallel_sync and func.vm_inline_calls_safe and !vm.vm_inline_calls_disabled) {
-                        const result = if (vm.vm_inline_call_depth < inline_call_depth_limit)
-                            try runInlineFunction(vm, func, func.chunk.?, stack.items[base..], Value.undef(), Value.undef())
-                        else
-                            try callValueWithInlineCallsDisabled(vm, callee, stack.items[base..], Value.undef());
-                        stack.shrinkRetainingCapacity(base - 1);
-                        try stack.append(stack_alloc, result);
-                        continue;
+                if (!debug_execution) {
+                    if (jsChunkFn(callee)) |func| {
+                        if (try tryQuickNumericRecurrence(vm, func, stack.items[base..], parallel_sync)) |result| {
+                            stack.shrinkRetainingCapacity(base - 1);
+                            try stack.append(stack_alloc, result);
+                            continue;
+                        }
+                        if (try tryRunNativeDirectCall(vm, func, stack.items[base..])) |result| {
+                            stack.shrinkRetainingCapacity(base - 1);
+                            try stack.append(stack_alloc, result);
+                            continue;
+                        }
+                        if (!parallel_sync and func.vm_inline_calls_safe and !vm.vm_inline_calls_disabled) {
+                            const result = if (vm.vm_inline_call_depth < inline_call_depth_limit)
+                                try runInlineFunction(vm, func, func.chunk.?, stack.items[base..], Value.undef(), Value.undef())
+                            else
+                                try callValueWithInlineCallsDisabled(vm, callee, stack.items[base..], Value.undef());
+                            stack.shrinkRetainingCapacity(base - 1);
+                            try stack.append(stack_alloc, result);
+                            continue;
+                        }
                     }
                 }
                 // Trampoline plain JS→JS calls under the driver: build the callee
@@ -4772,6 +4778,7 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
             },
             .throw_op => {
                 vm.exception = stack.pop().?;
+                try vm.notifyDebuggerException(false);
                 return error.Throw;
             },
             .push_handler => try exec.handlers.append(handlers_alloc, .{
