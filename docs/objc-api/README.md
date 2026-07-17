@@ -47,6 +47,15 @@ Compare the completed Foundation conversion rows with system JavaScriptCore:
 zig build objc-api-jsc-diff
 ```
 
+Run the lifetime and completion evidence separately or as one matrix:
+
+```sh
+zig build test-objc-api-lifetime # 200 VM/context/autorelease teardown cycles
+zig build test-objc-api-sanitize # ASan + UBSan
+zig build test-objc-api-leaks    # Apple leaks: must report 0 leaked bytes
+zig build test-objc-api-evidence # headers, runtime, diff, stress, sanitizers, leaks
+```
+
 The hosts exercise VM/context construction and identity, evaluation and
 exception capture, context naming/inspectability, C-ref round trips, every
 published `JSValue` family, recursive and cyclic Foundation conversion, promise
@@ -58,8 +67,13 @@ prototypes, and target-context wrapper behavior.
 `JSManagedValue` and VM owner relations use real weak targets plus weak owners;
 because current context groups use the VM-lifetime arena policy, unreachable
 targets remain available until VM teardown rather than being reclaimed mid-VM.
-Issues #159 and #160 continue tracking stronger lifetime/stress and completion
-evidence beyond the now-complete declared inventory.
+Issue #159 continues tracking conditional mid-VM clearing and allocation fault
+injection; #160 remains linked to the parent bridge closure gate. The checked-in
+lifetime gate covers duplicate managed add/remove operations, owner and context
+death, cross-context exported wrappers, typed blocks, cyclic conversion, and
+200 full VM teardowns; it currently passes ASan, UBSan, and Apple's leak checker
+with 0 leaked bytes. Conditional mid-VM clearing still follows the documented
+arena boundary.
 
 Compare the pin against an installed SDK explicitly:
 

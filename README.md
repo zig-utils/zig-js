@@ -327,6 +327,10 @@ zig build objc-api-audit         # pinned Objective-C header/inventory drift gat
 zig build test-objc-api-headers  # macOS ARC/blocks header compilation gate
 zig build test-objc-api          # macOS Objective-C compile-link-runtime gate
 zig build objc-api-jsc-diff      # Objective-C Foundation conversion vs system JSC
+zig build test-objc-api-lifetime # 200-cycle VM/wrapper/autorelease teardown stress
+zig build test-objc-api-sanitize # lifetime stress under ASan + UBSan
+zig build test-objc-api-leaks    # lifetime stress under Apple's leak checker
+zig build test-objc-api-evidence # complete Objective-C bridge evidence matrix
 zig build c-api-jsc-diff         # completed value APIs vs pinned system JSC (macOS)
 zig build threads-test            # WebKit PR-249 thread allowlist
 zig build threads-reference-audit # classify non-promoted PR-249 files
