@@ -88,8 +88,8 @@
     },
     "by_status": {
       "external": 2,
-      "implemented": 219,
-      "pending": 227
+      "implemented": 220,
+      "pending": 226
     }
   },
   "declarations": [
@@ -2057,10 +2057,10 @@
       "line": 2186,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSValue__getLengthIfPropertyExistsInternal(this: JSValue, globalThis: *JSGlobalObject) f64;",
       "declaration_sha256": "4caac255bf843390cca4594b18754c39be9d93ca1450b0489980dacc9f3faa8a",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSValue__getName",

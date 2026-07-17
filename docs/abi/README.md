@@ -44,7 +44,7 @@ convention. The exact current denominator is:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #163 | 431 (204 implemented, 227 pending) |
+| Private JSC/Bun/WebCore ABI under #163 | 431 (205 implemented, 226 pending) |
 | Overlap with zig-js's completed public C target | 15 |
 | Platform libc import | 1 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
@@ -333,6 +333,16 @@ next invocation claims native-tier consideration, while the request itself
 does no allocation or code generation. Tree-walk functions and already
 settled tiers remain unchanged, as do pending VM exceptions.
 
+The internal length projection follows the pinned type switch instead of
+blindly reading `.length`. Strings use UTF-16 code units; Arrays use logical
+length; numeric TypedArrays and ArrayBuffers use live view/byte lengths; and
+Map, Set, and WeakMap report internal entry counts even when user code spoofs a
+`length` property. Detached storage reports zero. Other objects perform one
+ordinary `length` lookup followed by ToNumber, so inherited values, accessors,
+proxies, conversion hooks, and abrupt completion remain observable. Missing or
+unsupported cells return positive Infinity, while primitive/invalid/foreign
+inputs return zero and an existing VM exception remains first.
+
 The VM exception slice exports the shared `JSGlobalObject`/`VM` pending-state
 boundary plus exception-cell conversion and classification. Sibling realms in
 one context group observe the same VM pointer and pending cell; taking or
@@ -516,7 +526,7 @@ profile contains 437 unique declarations from 54 hashed files:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #164 | 421 (198 implemented, 223 pending) |
+| Private JSC/Bun/WebCore ABI under #164 | 421 (199 implemented, 222 pending) |
 | Public-C overlap | 15 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
 | **Total** | **437** |
