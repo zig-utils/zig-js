@@ -26,10 +26,10 @@ compile-link-runtime fixture. It remains deliberately separate from private
 Home/Bun ABI work.
 
 Private-profile exports are audited independently and never inflate the public
-or extension totals. The pinned Home inventory currently reports 249
-private exports and 182 pending private symbols; `zig build test-home-private-abi` and
+or extension totals. The pinned Home inventory currently reports 250
+private exports and 181 pending private symbols; `zig build test-home-private-abi` and
 `zig build test-private-jstype` are their focused compile-link-runtime gates.
-The 249 cover JSC64 identity, cell equality,
+The 250 cover JSC64 identity, cell equality,
 truthiness, int32 extraction, exact signed/unsigned 64-bit BigInt construction,
 modulo-2^64 BigInt extraction with the pinned int32/Int52 fallbacks, and exact
 JavaScript strict/SameValue equality across primitives and owned cells, plus
@@ -271,12 +271,14 @@ JSString backing iterator adds exact Latin-1/UTF-16 callback delivery with
 caller-owned stop and lifetime semantics. `JSFunction__createFromZig` adds
 owned function metadata and exact JSC64 `CallFrame` delivery for call and
 construct callbacks, including pending-exception and foreign-return rejection.
-The combined 248-symbol fixture also
+The structured exception export retains creation-time frames separately from
+`.stack` and fills caller-owned Home/Bun buffers through the exact 48-byte trace,
+72-byte frame, and 12-byte position layouts. The combined 249-symbol fixture also
 covers sibling realms, foreign-VM failures, exception clearing, callback
 reentrancy, and already-settled targets.
 
 Bun's separately pinned core `src/jsc` inventory reports 421 private symbols,
-of which 243 shims are implemented and 178 remain pending. Its
+of which 244 shims are implemented and 177 remain pending. Its
 source/signature audit is `zig build bun-private-abi-audit`; broader Bun runtime
 and generated bindings are outside that first core profile. The inventoried
 `JSFunctionCall` declaration is consumer-provided because each runtime-compiled

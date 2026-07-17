@@ -44,7 +44,7 @@ convention. The exact current denominator is:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #163 | 431 (249 implemented, 182 pending) |
+| Private JSC/Bun/WebCore ABI under #163 | 431 (250 implemented, 181 pending) |
 | Overlap with zig-js's completed public C target | 15 |
 | Platform libc import | 1 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
@@ -61,7 +61,7 @@ zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"
 ```
 
 This inventory is the denominator, not a claim that the whole surface works.
-The first 249 private entries are implemented; the other 182 remain pending
+The first 250 private entries are implemented; the other 181 remain pending
 until #163 provides their type/layout contracts, shims, and consumer evidence.
 `JSFunctionCall` remains revision-pinned in the declaration inventory but is
 not part of that denominator: each runtime-generated FFI module defines the
@@ -480,6 +480,19 @@ original primitive or Error identity, retain the first pending exception, and
 keep the thrown value rooted until clear/take. Exception cells remain distinct
 from ordinary values and can be safely rethrown.
 
+The structured exception-stack slice retains frames when an Error or
+DOMException is created, independently of the public formatted stack string.
+Tree-walker, bytecode, generator/async, constructor, global, and module paths
+maintain a lightweight activation chain without allocating inspector scope
+mirrors. `JSC__Exception__getStackTrace` truncates to the caller's `u8`
+capacity and fills owned function/source BunStrings, zero-based line/column,
+line-start bytes, code type, async state, and stable indices through
+compile-pinned 48-byte `ZigStackTrace`, 72-byte `ZigStackFrame`, and 12-byte
+position layouts. Matching upstream's `OnlyPosition` call, source-line arrays
+remain empty and no source provider is retained. The consumer fixture covers a
+line-41 named script, nested function/global frames, same-VM sibling access,
+foreign rejection, capacity truncation, and explicit string release.
+
 The top-exception/termination slice adds all six pinned scope operations in the
 caller-provided 8-byte release or 56-byte verification buffer, both 8-aligned.
 Pure reads never process a termination request; trap-aware reads materialize one
@@ -617,7 +630,11 @@ resolution, cache/namespace identity, exact Promise and exception channels,
 top-level-await settlement, and complete module-graph tracing. The JSString
 backing iterator adds pinned callback-layout validation and exact Latin-1 or
 UTF-16 unit delivery. `JSFunction__createFromZig` creates native functions with
-owned names and exact call/construct `CallFrame` delivery. The 248-symbol
+owned names and exact call/construct `CallFrame` delivery.
+`JSC__Exception__getStackTrace` fills the caller-owned exact-layout frame buffer
+from retained creation-time metadata rather than parsing `.stack`; the
+position-only path owns its function/URL BunStrings and returns no source-line
+provider. The 249-symbol
 combined runtime fixture covers these semantics; the two
 profile-selected JSType exports retain
 their separate Home/Bun runtime fixtures.
@@ -661,7 +678,7 @@ profile contains 437 unique declarations from 54 hashed files:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #164 | 421 (243 implemented, 178 pending) |
+| Private JSC/Bun/WebCore ABI under #164 | 421 (244 implemented, 177 pending) |
 | Public-C overlap | 15 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
 | **Total** | **437** |
