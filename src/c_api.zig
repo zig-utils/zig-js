@@ -3242,9 +3242,13 @@ export fn JSValueToObject(ctx: JSContextRef, v: JSValueRef, exception: Exception
 fn valueProtect(ctx: JSContextRef, v: JSValueRef) bool {
     const c = ctxFrom(ctx) orelse return false;
     const boxed = boxedFrom(v) orelse return false;
-    if (boxed.owner != c) return false;
+    if (valueFromContext(c, v) == null) return false;
     const raw = v.?;
+    // Shared JSC realms use one VM-lifetime arena, so a handle created by a
+    // sibling context is already stable for the entire group lifetime. Precise
+    // GC contexts are currently single-realm and retain per-context root tables.
     if (c.gc == null) return true; // arena contexts keep values for the context lifetime.
+    if (boxed.owner != c) return false;
     // `c_api_handles` is read by the mid-script parallel collector; guard it
     // under `realm_lock` (a no-op outside parallel_js).
     c.realmLock();
@@ -3263,9 +3267,10 @@ fn valueProtect(ctx: JSContextRef, v: JSValueRef) bool {
 fn valueUnprotect(ctx: JSContextRef, v: JSValueRef) bool {
     const c = ctxFrom(ctx) orelse return false;
     const boxed = boxedFrom(v) orelse return false;
-    if (boxed.owner != c) return false;
+    if (valueFromContext(c, v) == null) return false;
     const raw = v.?;
     if (c.gc == null) return true;
+    if (boxed.owner != c) return false;
     c.realmLock();
     defer c.realmUnlock();
     for (c.c_api_handles.items, 0..) |*h, i| {
@@ -4949,6 +4954,8 @@ test "C-API: context groups share values while preserving distinct realms and li
     try std.testing.expectEqual(@as(f64, 42), JSValueToNumber(second, answer, &exception));
     const fetched = JSObjectGetProperty(second, second_global, shared_name, &exception) orelse return error.PropertyGetFailed;
     try std.testing.expect(JSValueIsStrictEqual(second, shared, fetched));
+    try std.testing.expect(ZJSValueProtect(second, shared));
+    try std.testing.expect(ZJSValueUnprotect(second, shared));
 
     const first_array_proto_source = JSStringCreateWithUTF8CString("Array.prototype") orelse return error.StringInitFailed;
     defer JSStringRelease(first_array_proto_source);
@@ -4970,6 +4977,8 @@ test "C-API: context groups share values while preserving distinct realms and li
     exception = null;
     JSObjectSetProperty(foreign, JSContextGetGlobalObject(foreign), foreign_name, shared, 0, &exception);
     try std.testing.expect(exception != null);
+    try std.testing.expect(!ZJSValueProtect(foreign, shared));
+    try std.testing.expect(!ZJSValueUnprotect(foreign, shared));
     JSGlobalContextRelease(foreign);
 
     // Drop the caller's group retain before its final realm: the realm retain is

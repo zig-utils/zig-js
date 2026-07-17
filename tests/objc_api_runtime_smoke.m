@@ -370,6 +370,21 @@ int main(void)
         }
         if (check(crossVMValueRejected && crossVMManagedRejected, 59))
             return 59;
+        JSContext *siblingContext = [[JSContext alloc]
+            initWithVirtualMachine:context.virtualMachine];
+        JSValue *siblingNativeWrapper = [JSValue valueWithObject:nativeObject
+                                                       inContext:siblingContext];
+        JSValue *sharedObject = [context evaluateScript:@"({ marker: 42 })"];
+        siblingContext[@"sharedObject"] = sharedObject;
+        JSValue *rewrappedObject = [JSValue valueWithObject:sharedObject
+                                                  inContext:siblingContext];
+        if (check(siblingNativeWrapper.toObject == nativeObject &&
+                      [siblingContext[@"sharedObject"][@"marker"] toInt32] == 42 &&
+                      rewrappedObject != sharedObject &&
+                      rewrappedObject.context == siblingContext &&
+                      [rewrappedObject isEqualToObject:sharedObject],
+                  81))
+            return 81;
         __block BOOL blockStateMatches = NO;
         int32_t (^adder)(int32_t, int32_t) = ^int32_t(int32_t left, int32_t right) {
             blockStateMatches = JSContext.currentContext == context &&

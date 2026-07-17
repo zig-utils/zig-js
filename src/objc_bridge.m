@@ -1644,7 +1644,9 @@ static JSValue *ZJSValueFromObject(id object, JSContext *context,
         JSValue *value = object;
         if (value.context.virtualMachine != context.virtualMachine)
             [NSException raise:NSInvalidArgumentException format:@"JSValue belongs to a different JSVirtualMachine"];
-        return value;
+        if (value.context == context)
+            return value;
+        return [JSValue valueWithJSValueRef:value.JSValueRef inContext:context];
     }
     if (!object)
         return [JSValue valueWithUndefinedInContext:context];

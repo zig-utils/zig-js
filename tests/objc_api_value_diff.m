@@ -119,6 +119,22 @@ int main(void)
                                                      nativeA.toObject == nativeObject,
                                                      holder[@"child"] == holder[@"child"]]);
 
+        JSVirtualMachine *sharedVM = [JSVirtualMachine new];
+        JSContext *sharedA = [[JSContext alloc] initWithVirtualMachine:sharedVM];
+        JSContext *sharedB = [[JSContext alloc] initWithVirtualMachine:sharedVM];
+        NSObject *sharedNative = [NSObject new];
+        JSValue *sharedNativeA = [JSValue valueWithObject:sharedNative inContext:sharedA];
+        JSValue *sharedNativeB = [JSValue valueWithObject:sharedNative inContext:sharedB];
+        JSValue *sharedObject = [sharedA evaluateScript:@"({ marker: 42 })"];
+        sharedB[@"sharedObject"] = sharedObject;
+        JSValue *rewrappedObject = [JSValue valueWithObject:sharedObject inContext:sharedB];
+        row(@"cross-context", [NSString stringWithFormat:@"%d:%d:%d:%d:%d",
+                                                          sharedNativeA == sharedNativeB,
+                                                          sharedNativeA.toObject == sharedNative,
+                                                          sharedNativeB.toObject == sharedNative,
+                                                          [sharedB[@"sharedObject"][@"marker"] toInt32] == 42,
+                                                          rewrappedObject == sharedObject]);
+
         __block BOOL blockStateMatches = NO;
         int32_t (^adder)(int32_t, int32_t) = ^int32_t(int32_t left, int32_t right) {
             blockStateMatches = JSContext.currentContext == context &&
