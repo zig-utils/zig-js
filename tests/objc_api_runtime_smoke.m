@@ -62,6 +62,44 @@ int main(void)
                       [[context evaluateScript:@"1n"] isBigInt],
                   19))
             return 19;
+        if (check([JSValue valueWithNewObjectInContext:context].isObject &&
+                      [JSValue valueWithNewArrayInContext:context].isArray,
+                  20))
+            return 20;
+        JSValue *regexp = [JSValue valueWithNewRegularExpressionFromPattern:@"a+"
+                                                                      flags:@"gi"
+                                                                  inContext:context];
+        if (check([regexp.toString isEqualToString:@"/a+/gi"], 21))
+            return 21;
+        JSValue *error = [JSValue valueWithNewErrorFromMessage:@"failure" inContext:context];
+        if (check([error.toString containsString:@"failure"], 22))
+            return 22;
+        if (check([JSValue valueWithNewSymbolFromDescription:@"key" inContext:context].isSymbol, 23))
+            return 23;
+        if (check([JSValue valueWithNewBigIntFromString:@"9007199254740993" inContext:context].isBigInt &&
+                      [JSValue valueWithNewBigIntFromInt64:-42 inContext:context].isBigInt &&
+                      [JSValue valueWithNewBigIntFromUInt64:42 inContext:context].isBigInt &&
+                      [JSValue valueWithNewBigIntFromDouble:42 inContext:context].isBigInt,
+                  24))
+            return 24;
+        if (check([JSValue valueWithNewBigIntFromDouble:1.5 inContext:context] == nil &&
+                      context.exception != nil,
+                  25))
+            return 25;
+        JSValue *three = [JSValue valueWithInt32:3 inContext:context];
+        if (check([three compareInt64:4] == kJSRelationConditionLessThan &&
+                      [three compareUInt64:3] == kJSRelationConditionEqual &&
+                      [three compareDouble:2] == kJSRelationConditionGreaterThan &&
+                      [three compareJSValue:[JSValue valueWithDouble:3 inContext:context]] ==
+                          kJSRelationConditionEqual,
+                  26))
+            return 26;
+        JSValue *wide = [context evaluateScript:@"4294967297"];
+        if (check(wide.toInt32 == 1 && wide.toUInt32 == 1 &&
+                      wide.toInt64 == 4294967297LL && wide.toUInt64 == 4294967297ULL &&
+                      wide.toNumber.longLongValue == 4294967297LL,
+                  27))
+            return 27;
     }
     return 0;
 }

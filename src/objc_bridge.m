@@ -352,6 +352,110 @@ static JSVirtualMachine *ZJSVirtualMachineForGroup(JSContextGroupRef group)
 + (JSValue *)valueWithInt32:(int32_t)value inContext:(JSContext *)context { return [self valueWithDouble:value inContext:context]; }
 + (JSValue *)valueWithUInt32:(uint32_t)value inContext:(JSContext *)context { return [self valueWithDouble:value inContext:context]; }
 
++ (JSValue *)valueWithNewObjectInContext:(JSContext *)context
+{
+    return [self valueWithJSValueRef:JSObjectMake(context.JSGlobalContextRef, NULL, NULL)
+                             inContext:context];
+}
+
++ (JSValue *)valueWithNewArrayInContext:(JSContext *)context
+{
+    JSValueRef exception = NULL;
+    JSObjectRef value = JSObjectMakeArray(context.JSGlobalContextRef, 0, NULL, &exception);
+    if (exception) {
+        [context zjs_recordException:exception];
+        return nil;
+    }
+    return [self valueWithJSValueRef:value inContext:context];
+}
+
++ (JSValue *)valueWithNewRegularExpressionFromPattern:(NSString *)pattern
+                                                flags:(NSString *)flags
+                                            inContext:(JSContext *)context
+{
+    JSValue *patternValue = [self valueWithObject:pattern inContext:context];
+    JSValue *flagsValue = [self valueWithObject:flags inContext:context];
+    JSValueRef arguments[] = { patternValue.JSValueRef, flagsValue.JSValueRef };
+    JSValueRef exception = NULL;
+    JSObjectRef value = JSObjectMakeRegExp(context.JSGlobalContextRef, 2, arguments, &exception);
+    if (exception) {
+        [context zjs_recordException:exception];
+        return nil;
+    }
+    return [self valueWithJSValueRef:value inContext:context];
+}
+
++ (JSValue *)valueWithNewErrorFromMessage:(NSString *)message inContext:(JSContext *)context
+{
+    JSValue *messageValue = [self valueWithObject:message inContext:context];
+    JSValueRef argument = messageValue.JSValueRef;
+    JSValueRef exception = NULL;
+    JSObjectRef value = JSObjectMakeError(context.JSGlobalContextRef, 1, &argument, &exception);
+    if (exception) {
+        [context zjs_recordException:exception];
+        return nil;
+    }
+    return [self valueWithJSValueRef:value inContext:context];
+}
+
++ (JSValue *)valueWithNewSymbolFromDescription:(NSString *)description inContext:(JSContext *)context
+{
+    JSStringRef string = ZJSStringCreate(description);
+    if (!string)
+        return nil;
+    JSValueRef value = JSValueMakeSymbol(context.JSGlobalContextRef, string);
+    JSStringRelease(string);
+    return [self valueWithJSValueRef:value inContext:context];
+}
+
++ (JSValue *)valueWithNewBigIntFromString:(NSString *)string inContext:(JSContext *)context
+{
+    JSStringRef characters = ZJSStringCreate(string);
+    if (!characters)
+        return nil;
+    JSValueRef exception = NULL;
+    JSValueRef value = JSBigIntCreateWithString(context.JSGlobalContextRef, characters, &exception);
+    JSStringRelease(characters);
+    if (exception) {
+        [context zjs_recordException:exception];
+        return nil;
+    }
+    return [self valueWithJSValueRef:value inContext:context];
+}
+
++ (JSValue *)valueWithNewBigIntFromInt64:(int64_t)value inContext:(JSContext *)context
+{
+    JSValueRef exception = NULL;
+    JSValueRef result = JSBigIntCreateWithInt64(context.JSGlobalContextRef, value, &exception);
+    if (exception) {
+        [context zjs_recordException:exception];
+        return nil;
+    }
+    return [self valueWithJSValueRef:result inContext:context];
+}
+
++ (JSValue *)valueWithNewBigIntFromUInt64:(uint64_t)value inContext:(JSContext *)context
+{
+    JSValueRef exception = NULL;
+    JSValueRef result = JSBigIntCreateWithUInt64(context.JSGlobalContextRef, value, &exception);
+    if (exception) {
+        [context zjs_recordException:exception];
+        return nil;
+    }
+    return [self valueWithJSValueRef:result inContext:context];
+}
+
++ (JSValue *)valueWithNewBigIntFromDouble:(double)value inContext:(JSContext *)context
+{
+    JSValueRef exception = NULL;
+    JSValueRef result = JSBigIntCreateWithDouble(context.JSGlobalContextRef, value, &exception);
+    if (exception) {
+        [context zjs_recordException:exception];
+        return nil;
+    }
+    return [self valueWithJSValueRef:result inContext:context];
+}
+
 + (JSValue *)valueWithObject:(id)object inContext:(JSContext *)context
 {
     if ([object isKindOfClass:[JSValue class]]) {
@@ -394,11 +498,51 @@ static JSVirtualMachine *ZJSVirtualMachineForGroup(JSContextGroupRef group)
 - (BOOL)isSymbol { return JSValueIsSymbol(self.context.JSGlobalContextRef, self.JSValueRef); }
 - (BOOL)isBigInt { return JSValueIsBigInt(self.context.JSGlobalContextRef, self.JSValueRef); }
 - (BOOL)toBool { return JSValueToBoolean(self.context.JSGlobalContextRef, self.JSValueRef); }
-- (double)toDouble { return JSValueToNumber(self.context.JSGlobalContextRef, self.JSValueRef, NULL); }
-- (int32_t)toInt32 { return JSValueToInt32(self.context.JSGlobalContextRef, self.JSValueRef, NULL); }
-- (uint32_t)toUInt32 { return JSValueToUInt32(self.context.JSGlobalContextRef, self.JSValueRef, NULL); }
-- (int64_t)toInt64 { return JSValueToInt64(self.context.JSGlobalContextRef, self.JSValueRef, NULL); }
-- (uint64_t)toUInt64 { return JSValueToUInt64(self.context.JSGlobalContextRef, self.JSValueRef, NULL); }
+
+- (double)toDouble
+{
+    JSValueRef exception = NULL;
+    double result = JSValueToNumber(self.context.JSGlobalContextRef, self.JSValueRef, &exception);
+    if (exception)
+        [self.context zjs_recordException:exception];
+    return result;
+}
+
+- (int32_t)toInt32
+{
+    JSValueRef exception = NULL;
+    int32_t result = JSValueToInt32(self.context.JSGlobalContextRef, self.JSValueRef, &exception);
+    if (exception)
+        [self.context zjs_recordException:exception];
+    return result;
+}
+
+- (uint32_t)toUInt32
+{
+    JSValueRef exception = NULL;
+    uint32_t result = JSValueToUInt32(self.context.JSGlobalContextRef, self.JSValueRef, &exception);
+    if (exception)
+        [self.context zjs_recordException:exception];
+    return result;
+}
+
+- (int64_t)toInt64
+{
+    JSValueRef exception = NULL;
+    int64_t result = JSValueToInt64(self.context.JSGlobalContextRef, self.JSValueRef, &exception);
+    if (exception)
+        [self.context zjs_recordException:exception];
+    return result;
+}
+
+- (uint64_t)toUInt64
+{
+    JSValueRef exception = NULL;
+    uint64_t result = JSValueToUInt64(self.context.JSGlobalContextRef, self.JSValueRef, &exception);
+    if (exception)
+        [self.context zjs_recordException:exception];
+    return result;
+}
 
 - (NSString *)toString
 {
@@ -414,7 +558,18 @@ static JSVirtualMachine *ZJSVirtualMachineForGroup(JSContextGroupRef group)
     return result;
 }
 
-- (NSNumber *)toNumber { return @([self toDouble]); }
+- (NSNumber *)toNumber
+{
+    if (self.isBoolean)
+        return @([self toBool]);
+    JSValueRef exception = NULL;
+    double result = JSValueToNumber(self.context.JSGlobalContextRef, self.JSValueRef, &exception);
+    if (exception) {
+        [self.context zjs_recordException:exception];
+        return nil;
+    }
+    return @(result);
+}
 - (id)toObject
 {
     if (self.isUndefined || self.isNull)
@@ -437,7 +592,55 @@ static JSVirtualMachine *ZJSVirtualMachineForGroup(JSContextGroupRef group)
 - (BOOL)isEqualWithTypeCoercionToObject:(id)object
 {
     JSValue *other = [JSValue valueWithObject:object inContext:self.context];
-    return JSValueIsEqual(self.context.JSGlobalContextRef, self.JSValueRef, other.JSValueRef, NULL);
+    JSValueRef exception = NULL;
+    BOOL result = JSValueIsEqual(self.context.JSGlobalContextRef, self.JSValueRef,
+                                 other.JSValueRef, &exception);
+    if (exception)
+        [self.context zjs_recordException:exception];
+    return result;
+}
+
+- (JSRelationCondition)compareJSValue:(JSValue *)other
+{
+    if (other.context.virtualMachine != self.context.virtualMachine)
+        [NSException raise:NSInvalidArgumentException format:@"JSValue belongs to a different JSVirtualMachine"];
+    JSValueRef exception = NULL;
+    JSRelationCondition result = JSValueCompare(self.context.JSGlobalContextRef,
+                                                 self.JSValueRef, other.JSValueRef,
+                                                 &exception);
+    if (exception)
+        [self.context zjs_recordException:exception];
+    return result;
+}
+
+- (JSRelationCondition)compareInt64:(int64_t)other
+{
+    JSValueRef exception = NULL;
+    JSRelationCondition result = JSValueCompareInt64(self.context.JSGlobalContextRef,
+                                                      self.JSValueRef, other, &exception);
+    if (exception)
+        [self.context zjs_recordException:exception];
+    return result;
+}
+
+- (JSRelationCondition)compareUInt64:(uint64_t)other
+{
+    JSValueRef exception = NULL;
+    JSRelationCondition result = JSValueCompareUInt64(self.context.JSGlobalContextRef,
+                                                       self.JSValueRef, other, &exception);
+    if (exception)
+        [self.context zjs_recordException:exception];
+    return result;
+}
+
+- (JSRelationCondition)compareDouble:(double)other
+{
+    JSValueRef exception = NULL;
+    JSRelationCondition result = JSValueCompareDouble(self.context.JSGlobalContextRef,
+                                                       self.JSValueRef, other, &exception);
+    if (exception)
+        [self.context zjs_recordException:exception];
+    return result;
 }
 
 @end
