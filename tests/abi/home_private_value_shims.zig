@@ -71,6 +71,7 @@ const WTFStringImpl = extern struct {
 };
 
 const ZigString = extern struct { tagged_ptr: usize, len: usize };
+const IterableCallback = *const fn (?*anyopaque, JSContextRef, ?*anyopaque, EncodedValue) callconv(.c) void;
 
 const BunStringImpl = extern union {
     zig_string: ZigString,
@@ -254,6 +255,7 @@ extern "c" fn JSRemoteInspectorSetInspectionEnabledByDefault(bool) void;
 extern "c" fn ScriptExecutionContextIdentifier__forGlobalObject(JSContextRef) u32;
 extern "c" fn Bun__noSideEffectsToString(?*anyopaque, JSContextRef, EncodedValue) EncodedValue;
 extern "c" fn Bun__promises__isErrorLike(JSContextRef, EncodedValue) bool;
+extern "c" fn JSC__JSValue__forEach(EncodedValue, JSContextRef, ?*anyopaque, IterableCallback) void;
 extern "c" fn JSC__jsTypeStringForValue(JSContextRef, EncodedValue) ?*anyopaque;
 extern "c" fn JSC__JSString__eql(?*anyopaque, JSContextRef, ?*anyopaque) bool;
 extern "c" fn JSC__JSString__is8Bit(?*anyopaque) bool;
@@ -404,6 +406,21 @@ fn markedArgumentFixtureCallback(raw: ?*anyopaque, buffer: ?*anyopaque) callconv
     MarkedArgumentBuffer__append(buffer, state.value);
     MarkedArgumentBuffer__append(buffer, state.foreign);
     _ = JSC__VM__runGC(state.vm, true);
+}
+
+const IterableFixtureState = struct {
+    vm: ?*anyopaque,
+    global: JSContextRef,
+    values: [2]EncodedValue = @splat(.empty),
+    calls: usize = 0,
+};
+
+fn iterableFixtureCallback(vm: ?*anyopaque, global: JSContextRef, raw: ?*anyopaque, item: EncodedValue) callconv(.c) void {
+    const state: *IterableFixtureState = @ptrCast(@alignCast(raw.?));
+    if (vm != state.vm or global != state.global or state.calls == state.values.len)
+        fail("private iterable callback metadata mismatch");
+    state.values[state.calls] = item;
+    state.calls += 1;
 }
 
 fn fail(message: []const u8) noreturn {
@@ -1211,6 +1228,11 @@ pub fn main() void {
         Bun__promises__isErrorLike(context, EncodedValue.fromInt32(236)) or
         Bun__JSValue__toNumber(evaluate(context, "__private_error_like_gets"), context) != 0)
         fail("private rejection error-like classification mismatch");
+    var iterable_state = IterableFixtureState{ .vm = JSC__JSGlobalObject__vm(context), .global = context };
+    JSC__JSValue__forEach(evaluate(context, "[237, 'iterable']"), context, &iterable_state, iterableFixtureCallback);
+    if (iterable_state.calls != 2 or iterable_state.values[0] != EncodedValue.fromInt32(237) or
+        !JSC__JSValue__isStrictEqual(iterable_state.values[1], evaluate(context, "'iterable'"), context))
+        fail("private iterable callback traversal mismatch");
     json_output = .{ .tag = .dead, .value = .{ .zig_string = .{ .tagged_ptr = 0, .len = 0 } } };
     JSC__JSValue__jsonStringifyFast(json_target, context, &json_output);
     if (json_output.tag != .wtf_string_impl or
@@ -3290,5 +3312,5 @@ pub fn main() void {
         TopExceptionScope__exceptionIncludingTraps(&verification_scope) != null)
         fail("private TopExceptionScope destruction mismatch");
 
-    std.debug.print("Home private value shims: 228/228 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 229/229 symbols linked; runtime matrix passed\n", .{});
 }

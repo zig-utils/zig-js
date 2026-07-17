@@ -5408,6 +5408,106 @@ export fn Bun__promises__isErrorLike(
     };
 }
 
+const PrivateIterableCallback = *const fn (
+    ?*anyopaque,
+    JSContextRef,
+    ?*anyopaque,
+    EncodedValue,
+) callconv(.c) void;
+
+/// Drain a JavaScript iterable through the pinned native callback boundary.
+/// Iterator acquisition and `next` are each cached once; a callback-published
+/// exception closes the still-open iterator while preserving that first error.
+export fn JSC__JSValue__forEach(
+    encoded: EncodedValue,
+    global: JSContextRef,
+    callback_context: ?*anyopaque,
+    callback: ?PrivateIterableCallback,
+) callconv(.c) void {
+    const emit = callback orelse return;
+    const context = ctxForEvaluation(global) orelse return;
+    const group = privatePropertyBoundaryGroup(context) orelse return;
+    if (group.pending_exception != null) return;
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return;
+    };
+    defer context.popActiveInterpreter(&machine);
+    const iterable = privateValueFrom(global, encoded) orelse {
+        const err = machine.throwError("TypeError", "iterable belongs to another VM");
+        privateSetPendingAbrupt(context, &machine, err);
+        return;
+    };
+    const iterator_key = machine.wellKnownSymbolKey("iterator") orelse {
+        const err = machine.throwError("TypeError", "Symbol.iterator is unavailable");
+        privateSetPendingAbrupt(context, &machine, err);
+        return;
+    };
+    const iterator_method = machine.getProperty(iterable, iterator_key) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return;
+    };
+    if (!iterator_method.isCallable()) {
+        const err = machine.throwError("TypeError", "value is not iterable");
+        privateSetPendingAbrupt(context, &machine, err);
+        return;
+    }
+    const iterator = machine.callValueWithThis(iterator_method, &.{}, iterable) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return;
+    };
+    if (!iterator.isObject() or iterator.asObj().is_symbol or iterator.asObj().is_bigint) {
+        const err = machine.throwError("TypeError", "iterator is not an object");
+        privateSetPendingAbrupt(context, &machine, err);
+        return;
+    }
+    const next = machine.getProperty(iterator, "next") catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return;
+    };
+    if (!next.isCallable()) {
+        const err = machine.throwError("TypeError", "iterator next method is not callable");
+        privateSetPendingAbrupt(context, &machine, err);
+        return;
+    }
+    while (true) {
+        const result = machine.callValueWithThis(next, &.{}, iterator) catch |err| {
+            privateSetPendingAbrupt(context, &machine, err);
+            return;
+        };
+        if (!result.isObject() or result.asObj().is_symbol or result.asObj().is_bigint) {
+            const err = machine.throwError("TypeError", "iterator result is not an object");
+            privateSetPendingAbrupt(context, &machine, err);
+            return;
+        }
+        const done = machine.getProperty(result, "done") catch |err| {
+            privateSetPendingAbrupt(context, &machine, err);
+            return;
+        };
+        if (done.toBoolean()) return;
+        const item = machine.getProperty(result, "value") catch |err| {
+            privateSetPendingAbrupt(context, &machine, err);
+            return;
+        };
+        const item_encoded = privateEncodedFromValue(context, item);
+        if (item_encoded == .empty) {
+            privateSetPendingAbrupt(context, &machine, error.OutOfMemory);
+            machine.iteratorClose(iterator) catch {};
+            return;
+        }
+        emit(@ptrCast(group), global, callback_context, item_encoded);
+        if (group.pending_exception != null) {
+            machine.iteratorClose(iterator) catch {};
+            return;
+        }
+    }
+}
+
 /// Pure projection of JSC::ProxyObject's two write-barrier fields. This is an
 /// inspector primitive: it never performs an ordinary property read or invokes
 /// a proxy trap. Revocation clears both fields to JavaScript null.
@@ -17883,6 +17983,109 @@ test "private rejection error-like classification uses exact own descriptors" {
     pending = JSGlobalObject__tryTakeException(context);
     try std.testing.expectEqual(EncodedValue.fromInt32(236), JSC__Exception__asJSValue(@ptrFromInt(try pending.asCellAddress())));
     try std.testing.expectEqual(@as(f64, 3), (try internal.evaluate("__error_like_traps_236")).asNum());
+}
+
+test "private iterable callback traversal preserves protocol and abrupt completion" {
+    const group_ref = JSContextGroupCreate() orelse return error.GroupCreateFailed;
+    defer JSContextGroupRelease(group_ref);
+    const context = JSGlobalContextCreateInGroup(group_ref, null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(context);
+    const sibling = JSGlobalContextCreateInGroup(group_ref, null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(sibling);
+    const internal = ctxForEvaluation(context) orelse return error.ContextCreateFailed;
+
+    const State = struct {
+        expected_global: JSContextRef,
+        expected_vm: ?*anyopaque,
+        values: [8]EncodedValue = @splat(.empty),
+        count: usize = 0,
+        throw_after: usize = 0,
+
+        fn collect(vm_ref: ?*anyopaque, global: JSContextRef, raw: ?*anyopaque, item: EncodedValue) callconv(.c) void {
+            const self: *@This() = @ptrCast(@alignCast(raw orelse return));
+            if (vm_ref != self.expected_vm or global != self.expected_global or self.count == self.values.len) return;
+            self.values[self.count] = item;
+            self.count += 1;
+            if (self.throw_after != 0 and self.count == self.throw_after)
+                JSC__VM__throwError(vm_ref, global, EncodedValue.fromInt32(237));
+        }
+    };
+    const Probe = struct {
+        fn encoded(context_: *Context, source: []const u8) !EncodedValue {
+            return privateEncodedFromValue(context_, try context_.evaluate(source));
+        }
+    };
+
+    const identity = try Probe.encoded(internal, "globalThis.__foreach_identity_237 = { issue: 237 }; __foreach_identity_237");
+    var state = State{ .expected_global = context, .expected_vm = JSC__JSGlobalObject__vm(context) };
+    JSC__JSValue__forEach(try Probe.encoded(internal, "[237, __foreach_identity_237, 'tail']"), context, &state, State.collect);
+    try std.testing.expectEqual(@as(usize, 3), state.count);
+    try std.testing.expectEqual(EncodedValue.fromInt32(237), state.values[0]);
+    try std.testing.expectEqual(identity, state.values[1]);
+    try std.testing.expect(value.strictEquals(privateValueFrom(context, state.values[2]) orelse return error.ValueInitFailed, Value.str("tail")));
+
+    state = .{ .expected_global = sibling, .expected_vm = JSC__JSGlobalObject__vm(sibling) };
+    JSC__JSValue__forEach(try Probe.encoded(internal, "new Set([1, 2])"), sibling, &state, State.collect);
+    try std.testing.expectEqual(@as(usize, 2), state.count);
+    try std.testing.expectEqual(EncodedValue.fromInt32(1), state.values[0]);
+    try std.testing.expectEqual(EncodedValue.fromInt32(2), state.values[1]);
+
+    state = .{ .expected_global = context, .expected_vm = JSC__JSGlobalObject__vm(context) };
+    JSC__JSValue__forEach(try Probe.encoded(internal, "'A😀'"), context, &state, State.collect);
+    try std.testing.expectEqual(@as(usize, 2), state.count);
+    try std.testing.expectEqualStrings("A", (privateValueFrom(context, state.values[0]) orelse return error.ValueInitFailed).asStr());
+    try std.testing.expectEqualStrings("😀", (privateValueFrom(context, state.values[1]) orelse return error.ValueInitFailed).asStr());
+
+    state = .{ .expected_global = context, .expected_vm = JSC__JSGlobalObject__vm(context) };
+    JSC__JSValue__forEach(try Probe.encoded(internal, "new Map([[3, 4]])"), context, &state, State.collect);
+    try std.testing.expectEqual(@as(usize, 1), state.count);
+    try std.testing.expect((privateValueFrom(context, state.values[0]) orelse return error.ValueInitFailed).asObj().is_array);
+
+    state = .{ .expected_global = context, .expected_vm = JSC__JSGlobalObject__vm(context) };
+    JSC__JSValue__forEach(try Probe.encoded(internal, "(function* () { yield 5; yield 6; })()"), context, &state, State.collect);
+    try std.testing.expectEqual(@as(usize, 2), state.count);
+    try std.testing.expectEqual(EncodedValue.fromInt32(5), state.values[0]);
+    try std.testing.expectEqual(EncodedValue.fromInt32(6), state.values[1]);
+
+    state = .{ .expected_global = context, .expected_vm = JSC__JSGlobalObject__vm(context) };
+    const observable = try Probe.encoded(
+        internal,
+        "globalThis.__foreach_log_237 = []; ({ get [Symbol.iterator]() { __foreach_log_237.push('iterator-get'); return function() { __foreach_log_237.push('iterator-call'); let i = 0; return { get next() { __foreach_log_237.push('next-get'); return function() { __foreach_log_237.push('next-call'); return i++ ? { done: true } : { done: false, get value() { __foreach_log_237.push('value-get'); return 'once'; } }; }; } }; }; } })",
+    );
+    JSC__JSValue__forEach(observable, context, &state, State.collect);
+    try std.testing.expectEqual(@as(usize, 1), state.count);
+    try std.testing.expectEqualStrings("iterator-get,iterator-call,next-get,next-call,value-get,next-call", (try internal.evaluate("__foreach_log_237.join(',')")).asStr());
+
+    state = .{ .expected_global = context, .expected_vm = JSC__JSGlobalObject__vm(context), .throw_after = 1 };
+    const closable = try Probe.encoded(
+        internal,
+        "globalThis.__foreach_closes_237 = 0; ({ [Symbol.iterator]() { return { next() { return { done: false, value: 1 }; }, return() { __foreach_closes_237++; throw 2371; } }; } })",
+    );
+    JSC__JSValue__forEach(closable, context, &state, State.collect);
+    try std.testing.expectEqual(@as(f64, 1), (try internal.evaluate("__foreach_closes_237")).asNum());
+    var pending = JSGlobalObject__tryTakeException(context);
+    try std.testing.expectEqual(EncodedValue.fromInt32(237), JSC__Exception__asJSValue(@ptrFromInt(try pending.asCellAddress())));
+
+    const throwing = try Probe.encoded(internal, "({ get [Symbol.iterator]() { throw 2372; } })");
+    state = .{ .expected_global = context, .expected_vm = JSC__JSGlobalObject__vm(context) };
+    JSC__JSValue__forEach(throwing, context, &state, State.collect);
+    pending = JSGlobalObject__tryTakeException(context);
+    try std.testing.expectEqual(EncodedValue.fromInt32(2372), JSC__Exception__asJSValue(@ptrFromInt(try pending.asCellAddress())));
+    try std.testing.expectEqual(@as(usize, 0), state.count);
+
+    const foreign = JSGlobalContextCreate(null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(foreign);
+    const foreign_internal = ctxForEvaluation(foreign) orelse return error.ContextCreateFailed;
+    const foreign_iterable = privateEncodedFromValue(foreign_internal, try foreign_internal.evaluate("[1]"));
+    JSC__JSValue__forEach(foreign_iterable, context, &state, State.collect);
+    try std.testing.expect(JSGlobalObject__hasException(context));
+    JSGlobalObject__clearException(context);
+
+    JSC__VM__throwError(JSC__JSGlobalObject__vm(context), context, EncodedValue.fromInt32(2373));
+    JSC__JSValue__forEach(observable, context, &state, State.collect);
+    pending = JSGlobalObject__tryTakeException(context);
+    try std.testing.expectEqual(EncodedValue.fromInt32(2373), JSC__Exception__asJSValue(@ptrFromInt(try pending.asCellAddress())));
+    try std.testing.expectEqual(@as(usize, 0), state.count);
 }
 
 test "private proxy internal-field projection is pure and identity preserving" {
