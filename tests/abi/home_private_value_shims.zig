@@ -256,6 +256,7 @@ extern "c" fn ScriptExecutionContextIdentifier__forGlobalObject(JSContextRef) u3
 extern "c" fn Bun__noSideEffectsToString(?*anyopaque, JSContextRef, EncodedValue) EncodedValue;
 extern "c" fn Bun__promises__isErrorLike(JSContextRef, EncodedValue) bool;
 extern "c" fn JSC__JSValue__forEach(EncodedValue, JSContextRef, ?*anyopaque, IterableCallback) void;
+extern "c" fn ZigString__toJSONObject(*const ZigString, JSContextRef) EncodedValue;
 extern "c" fn JSC__jsTypeStringForValue(JSContextRef, EncodedValue) ?*anyopaque;
 extern "c" fn JSC__JSString__eql(?*anyopaque, JSContextRef, ?*anyopaque) bool;
 extern "c" fn JSC__JSString__is8Bit(?*anyopaque) bool;
@@ -1233,6 +1234,11 @@ pub fn main() void {
     if (iterable_state.calls != 2 or iterable_state.values[0] != EncodedValue.fromInt32(237) or
         !JSC__JSValue__isStrictEqual(iterable_state.values[1], evaluate(context, "'iterable'"), context))
         fail("private iterable callback traversal mismatch");
+    const json_bytes = "{\"issue\":238}";
+    const json_input = ZigString{ .tagged_ptr = @intFromPtr(json_bytes.ptr), .len = json_bytes.len };
+    const parsed_json = ZigString__toJSONObject(&json_input, context);
+    if (Bun__JSValue__toNumber(getProperty(context, parsed_json, "issue"), context) != 238)
+        fail("private ZigString JSON parsing mismatch");
     json_output = .{ .tag = .dead, .value = .{ .zig_string = .{ .tagged_ptr = 0, .len = 0 } } };
     JSC__JSValue__jsonStringifyFast(json_target, context, &json_output);
     if (json_output.tag != .wtf_string_impl or
@@ -3312,5 +3318,5 @@ pub fn main() void {
         TopExceptionScope__exceptionIncludingTraps(&verification_scope) != null)
         fail("private TopExceptionScope destruction mismatch");
 
-    std.debug.print("Home private value shims: 229/229 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 230/230 symbols linked; runtime matrix passed\n", .{});
 }

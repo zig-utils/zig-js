@@ -3635,6 +3635,56 @@ export fn ZigString__toSyntaxErrorInstance(string: *const PrivateZigString, glob
     return privateZigStringErrorInstance(string, global, "SyntaxError");
 }
 
+/// Bun's pinned JSON bridge returns a parse exception as an ordinary value and
+/// clears the transient VM throw. This differs deliberately from both
+/// `JSON.parse` and the public `JSValueMakeFromJSONString` failure contracts.
+export fn ZigString__toJSONObject(
+    string: *const PrivateZigString,
+    global: JSContextRef,
+) callconv(.c) EncodedValue {
+    const context = ctxForEvaluation(global) orelse return .empty;
+    const group = privatePropertyBoundaryGroup(context) orelse return .empty;
+    if (group.pending_exception != null) return .empty;
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    defer context.popActiveInterpreter(&machine);
+
+    if (string.len > std.math.maxInt(u32)) {
+        const too_long = machine.makeError("Error", "Cannot parse a JSON string longer than 2^32-1 characters") catch |err| {
+            privateSetPendingAbrupt(context, &machine, err);
+            return .empty;
+        };
+        privateSetErrorCodeWithAttributes(&machine, too_long, "ERR_STRING_TOO_LONG", true) catch |err| {
+            privateSetPendingAbrupt(context, &machine, err);
+            return .empty;
+        };
+        return privateEncodeResult(context, &machine, too_long);
+    }
+    const input = privateZigStringValue(context, string) catch |err| {
+        privatePublishBunStringError(context, err);
+        return .empty;
+    };
+    const parsed = builtins.jsonParse(&machine, Value.undef(), &.{input}) catch |err| {
+        const thrown = if (err == error.Throw)
+            machine.exception
+        else
+            machine.makeError("OutOfMemoryError", "Out of memory") catch {
+                privateSetPendingAbrupt(context, &machine, err);
+                return .empty;
+            };
+        machine.exception = Value.undef();
+        return privateEncodeResult(context, &machine, thrown);
+    };
+    return privateEncodeResult(context, &machine, parsed);
+}
+
 fn privateZigStringErrorWithCode(
     message: *const PrivateZigString,
     code: *const PrivateZigString,
@@ -18086,6 +18136,45 @@ test "private iterable callback traversal preserves protocol and abrupt completi
     pending = JSGlobalObject__tryTakeException(context);
     try std.testing.expectEqual(EncodedValue.fromInt32(2373), JSC__Exception__asJSValue(@ptrFromInt(try pending.asCellAddress())));
     try std.testing.expectEqual(@as(usize, 0), state.count);
+}
+
+test "private ZigString JSON parsing returns syntax errors as values" {
+    const group_ref = JSContextGroupCreate() orelse return error.GroupCreateFailed;
+    defer JSContextGroupRelease(group_ref);
+    const context = JSGlobalContextCreateInGroup(group_ref, null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(context);
+    const sibling = JSGlobalContextCreateInGroup(group_ref, null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(sibling);
+    const sibling_internal = ctxForEvaluation(sibling) orelse return error.ContextCreateFailed;
+
+    const json = "{\"issue\":238,\"text\":\"😀\"}";
+    const input = PrivateZigString{ .tagged_ptr = @intFromPtr(json.ptr) | (@as(usize, 1) << 61), .len = json.len };
+    const parsed_encoded = ZigString__toJSONObject(&input, sibling);
+    const parsed = privateValueFrom(sibling, parsed_encoded) orelse return error.ValueInitFailed;
+    try std.testing.expect(parsed.isObject());
+    try std.testing.expectEqual(EncodedValue.fromInt32(238), privateEncodedFromValue(sibling_internal, parsed.asObj().getOwn("issue") orelse return error.ValueInitFailed));
+    try std.testing.expectEqualStrings("😀", (parsed.asObj().getOwn("text") orelse return error.ValueInitFailed).asStr());
+    try std.testing.expect(parsed.asObj().protoAtomic() == (try sibling_internal.evaluate("Object.prototype")).asObj());
+
+    const invalid_bytes = "{]";
+    const invalid = PrivateZigString{ .tagged_ptr = @intFromPtr(invalid_bytes.ptr), .len = invalid_bytes.len };
+    const syntax_encoded = ZigString__toJSONObject(&invalid, context);
+    const syntax = privateValueFrom(context, syntax_encoded) orelse return error.ValueInitFailed;
+    try std.testing.expect(syntax.isObject() and syntax.asObj().behavior.is_error);
+    try std.testing.expectEqualStrings("SyntaxError", syntax.asObj().errorName());
+    try std.testing.expect(!JSGlobalObject__hasException(context));
+
+    const oversized = PrivateZigString{ .tagged_ptr = 1, .len = @as(usize, std.math.maxInt(u32)) + 1 };
+    const oversized_encoded = ZigString__toJSONObject(&oversized, context);
+    const oversized_error = privateValueFrom(context, oversized_encoded) orelse return error.ValueInitFailed;
+    try std.testing.expect(oversized_error.isObject() and oversized_error.asObj().behavior.is_error);
+    try std.testing.expectEqualStrings("ERR_STRING_TOO_LONG", (oversized_error.asObj().getOwn("code") orelse return error.ValueInitFailed).asStr());
+    try std.testing.expect(!JSGlobalObject__hasException(context));
+
+    JSC__VM__throwError(JSC__JSGlobalObject__vm(context), context, EncodedValue.fromInt32(238));
+    try std.testing.expectEqual(EncodedValue.empty, ZigString__toJSONObject(&input, context));
+    const pending = JSGlobalObject__tryTakeException(context);
+    try std.testing.expectEqual(EncodedValue.fromInt32(238), JSC__Exception__asJSValue(@ptrFromInt(try pending.asCellAddress())));
 }
 
 test "private proxy internal-field projection is pure and identity preserving" {
