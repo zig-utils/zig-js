@@ -5375,6 +5375,39 @@ export fn Bun__noSideEffectsToString(
     };
 }
 
+/// Pinned Bun unhandled-rejection classifier. JSC's implementation performs
+/// the equivalent of `Object.prototype.hasOwnProperty.call(reason, "stack")`:
+/// accessors count without being invoked, while Proxy [[GetOwnProperty]] traps
+/// remain observable and may publish an abrupt completion.
+export fn Bun__promises__isErrorLike(
+    global: JSContextRef,
+    encoded: EncodedValue,
+) callconv(.c) bool {
+    const context = ctxForEvaluation(global) orelse return false;
+    const group = privatePropertyBoundaryGroup(context) orelse return false;
+    if (group.pending_exception != null) return false;
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return false;
+    };
+    defer context.popActiveInterpreter(&machine);
+    const reason = privateValueFrom(global, encoded) orelse {
+        const err = machine.throwError("TypeError", "rejection reason belongs to another VM");
+        privateSetPendingAbrupt(context, &machine, err);
+        return false;
+    };
+    if (!reason.isObject() or reason.asObj().is_symbol or reason.asObj().is_bigint) return false;
+    return machine.hasOwnPropertyResult(reason.asObj(), "stack") catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return false;
+    };
+}
+
 /// Pure projection of JSC::ProxyObject's two write-barrier fields. This is an
 /// inspector primitive: it never performs an ordinary property read or invokes
 /// a proxy trap. Revocation clears both fields to JavaScript null.
@@ -17786,6 +17819,70 @@ test "private no-side-effects stringification is exact and non-observable" {
     const foreign = JSGlobalContextCreate(null) orelse return error.ContextCreateFailed;
     defer JSGlobalContextRelease(foreign);
     try std.testing.expectEqual(EncodedValue.empty, Bun__noSideEffectsToString(JSC__JSGlobalObject__vm(foreign), context, .true));
+}
+
+test "private rejection error-like classification uses exact own descriptors" {
+    const group_ref = JSContextGroupCreate() orelse return error.GroupCreateFailed;
+    defer JSContextGroupRelease(group_ref);
+    const context = JSGlobalContextCreateInGroup(group_ref, null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(context);
+    const sibling = JSGlobalContextCreateInGroup(group_ref, null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(sibling);
+    const internal = ctxForEvaluation(context) orelse return error.ContextCreateFailed;
+
+    const Probe = struct {
+        fn encoded(context_: *Context, source: []const u8) !EncodedValue {
+            return privateEncodedFromValue(context_, try context_.evaluate(source));
+        }
+    };
+
+    try std.testing.expect(Bun__promises__isErrorLike(context, try Probe.encoded(internal, "({ stack: 'trace' })")));
+    try std.testing.expect(!Bun__promises__isErrorLike(context, try Probe.encoded(internal, "Object.create({ stack: 'inherited' })")));
+    for ([_][]const u8{ "undefined", "null", "false", "236", "'stack'", "Symbol('stack')", "236n" }) |source|
+        try std.testing.expect(!Bun__promises__isErrorLike(context, try Probe.encoded(internal, source)));
+
+    const accessor = try Probe.encoded(
+        internal,
+        "globalThis.__error_like_gets_236 = 0; ({ get stack() { __error_like_gets_236++; throw 236; } })",
+    );
+    try std.testing.expect(Bun__promises__isErrorLike(context, accessor));
+    try std.testing.expectEqual(@as(f64, 0), (try internal.evaluate("__error_like_gets_236")).asNum());
+
+    const proxy = try Probe.encoded(
+        internal,
+        "globalThis.__error_like_traps_236 = 0; new Proxy({ stack: 1 }, { getOwnPropertyDescriptor(target, key) { __error_like_traps_236++; return Reflect.getOwnPropertyDescriptor(target, key); } })",
+    );
+    try std.testing.expect(Bun__promises__isErrorLike(context, proxy));
+    try std.testing.expectEqual(@as(f64, 1), (try internal.evaluate("__error_like_traps_236")).asNum());
+    try std.testing.expect(Bun__promises__isErrorLike(sibling, proxy));
+    try std.testing.expectEqual(@as(f64, 2), (try internal.evaluate("__error_like_traps_236")).asNum());
+
+    const absent_proxy = try Probe.encoded(
+        internal,
+        "new Proxy({}, { getOwnPropertyDescriptor(target, key) { __error_like_traps_236++; return Reflect.getOwnPropertyDescriptor(target, key); } })",
+    );
+    try std.testing.expect(!Bun__promises__isErrorLike(context, absent_proxy));
+    try std.testing.expectEqual(@as(f64, 3), (try internal.evaluate("__error_like_traps_236")).asNum());
+
+    const revoked = try Probe.encoded(internal, "(() => { const pair = Proxy.revocable({ stack: 1 }, {}); pair.revoke(); return pair.proxy; })()");
+    try std.testing.expect(!Bun__promises__isErrorLike(context, revoked));
+    var pending = JSGlobalObject__tryTakeException(context);
+    const revoked_error = JSC__Exception__asJSValue(@ptrFromInt(try pending.asCellAddress()));
+    try std.testing.expect((privateValueFrom(context, revoked_error) orelse return error.ValueInitFailed).isObject());
+
+    const foreign = JSGlobalContextCreate(null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(foreign);
+    const foreign_internal = ctxForEvaluation(foreign) orelse return error.ContextCreateFailed;
+    const foreign_reason = privateEncodedFromValue(foreign_internal, try foreign_internal.evaluate("({ stack: 1 })"));
+    try std.testing.expect(!Bun__promises__isErrorLike(context, foreign_reason));
+    try std.testing.expect(JSGlobalObject__hasException(context));
+    JSGlobalObject__clearException(context);
+
+    JSC__VM__throwError(JSC__JSGlobalObject__vm(context), context, EncodedValue.fromInt32(236));
+    try std.testing.expect(!Bun__promises__isErrorLike(context, proxy));
+    pending = JSGlobalObject__tryTakeException(context);
+    try std.testing.expectEqual(EncodedValue.fromInt32(236), JSC__Exception__asJSValue(@ptrFromInt(try pending.asCellAddress())));
+    try std.testing.expectEqual(@as(f64, 3), (try internal.evaluate("__error_like_traps_236")).asNum());
 }
 
 test "private proxy internal-field projection is pure and identity preserving" {
