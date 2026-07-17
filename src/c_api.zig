@@ -297,6 +297,129 @@ fn finishClassPrototype(owner: *value.CApiClassPrototypeOwner) void {
     releaseClass(classFrom(owner.class_ref).?);
 }
 
+const ClassCallbackTarget = struct {
+    context: *Context,
+    object_ref: JSObjectRef,
+    class: *CClass,
+};
+
+fn classCallbackTarget(machine: *interp.Interpreter, object: *Object) value.HostError!ClassCallbackTarget {
+    const owner = object.cApiObjectOwner() orelse {
+        machine.exception = Value.str("TypeError: class callback missing instance owner");
+        return error.Throw;
+    };
+    const object_ref = owner.object_ref orelse {
+        machine.exception = Value.str("TypeError: class callback missing object handle");
+        return error.Throw;
+    };
+    const boxed = boxedFrom(object_ref) orelse {
+        machine.exception = Value.str("TypeError: class callback has invalid object handle");
+        return error.Throw;
+    };
+    return .{
+        .context = boxed.owner,
+        .object_ref = object_ref,
+        .class = classFrom(owner.class_ref).?,
+    };
+}
+
+fn callbackPropertyName(key: []const u8) value.HostError!JSStringRef {
+    const string = JsString.create(gpa, key) catch return error.OutOfMemory;
+    return @ptrCast(string);
+}
+
+fn applyCallbackException(
+    machine: *interp.Interpreter,
+    context: *Context,
+    exception: JSValueRef,
+) value.HostError!void {
+    if (exception == null) return;
+    machine.exception = valueFromContext(context, exception) orelse
+        Value.str("TypeError: class callback set an invalid exception");
+    return error.Throw;
+}
+
+fn staticValueGet(
+    raw_machine: *anyopaque,
+    object: *Object,
+    key: []const u8,
+) value.HostError!value.HostClassGetResult {
+    const machine: *interp.Interpreter = @ptrCast(@alignCast(raw_machine));
+    const target = try classCallbackTarget(machine, object);
+    var class: ?*CClass = target.class;
+    while (class) |item| : (class = item.parent) {
+        for (item.static_values) |entry| {
+            const name = entry.name orelse continue;
+            if (!std.mem.eql(u8, std.mem.span(name), key)) continue;
+            const getter = entry.get_property orelse return .unhandled;
+            const property_name = try callbackPropertyName(key);
+            defer JSStringRelease(property_name);
+            var exception: JSValueRef = null;
+            const result = getter(@ptrCast(target.context), target.object_ref, property_name, &exception);
+            try applyCallbackException(machine, target.context, exception);
+            const result_ref = result orelse continue;
+            const result_value = valueFromContext(target.context, result_ref) orelse {
+                machine.exception = Value.str("TypeError: class getter returned an invalid value");
+                return error.Throw;
+            };
+            return .{ .value = result_value };
+        }
+    }
+    return .unhandled;
+}
+
+fn staticValueSet(
+    raw_machine: *anyopaque,
+    object: *Object,
+    key: []const u8,
+    new_value: Value,
+) value.HostError!value.HostClassSetResult {
+    const machine: *interp.Interpreter = @ptrCast(@alignCast(raw_machine));
+    const target = try classCallbackTarget(machine, object);
+    var class: ?*CClass = target.class;
+    while (class) |item| : (class = item.parent) {
+        for (item.static_values) |entry| {
+            const name = entry.name orelse continue;
+            if (!std.mem.eql(u8, std.mem.span(name), key)) continue;
+            const setter = entry.set_property orelse return if ((entry.attributes & kJSPropertyAttributeReadOnly) != 0)
+                .{ .accepted = false }
+            else
+                .unhandled;
+            const property_name = try callbackPropertyName(key);
+            defer JSStringRelease(property_name);
+            var exception: JSValueRef = null;
+            const value_ref = box(target.context, new_value) orelse return error.OutOfMemory;
+            const handled = setter(
+                @ptrCast(target.context),
+                target.object_ref,
+                property_name,
+                value_ref,
+                &exception,
+            );
+            try applyCallbackException(machine, target.context, exception);
+            return if (handled) .{ .accepted = true } else .declined;
+        }
+    }
+    return .unhandled;
+}
+
+fn staticValueHas(
+    raw_machine: *anyopaque,
+    object: *Object,
+    key: []const u8,
+) value.HostError!bool {
+    return switch (try staticValueGet(raw_machine, object, key)) {
+        .unhandled => false,
+        .value => true,
+    };
+}
+
+const c_api_class_hooks: value.HostClassHooks = .{
+    .get = staticValueGet,
+    .set = staticValueSet,
+    .has = staticValueHas,
+};
+
 // ---- internal helpers --------------------------------------------------
 
 fn ctxRawFrom(ref: JSContextRef) ?*Context {
@@ -1345,6 +1468,10 @@ export fn JSObjectMake(ctx: JSContextRef, js_class: JSClassRef, data: ?*anyopaqu
             created.finishOnce();
             return null;
         };
+        obj.setHostClassHooks(c.arena(), &c_api_class_hooks) catch {
+            created.finishOnce();
+            return null;
+        };
     }
     const object_ref = box(c, Value.obj(obj)) orelse {
         if (owner) |record| record.finishOnce();
@@ -1905,24 +2032,43 @@ export fn JSObjectSetProperty(ctx: JSContextRef, object: JSObjectRef, name: JSSt
     defer _ = gc_mod.setActiveHeap(gc_saved);
     const sa_saved = strcell.setActiveArena(c.arena());
     defer _ = strcell.setActiveArena(sa_saved);
-    switch (obj.deleteAccessorOwn(c.arena(), key.bytes) catch {
+    var machine = c.interpreter();
+    c.pushActiveInterpreter(&machine) catch {
         setException(c, exception, "OutOfMemory");
         return;
-    }) {
-        .absent, .removed_continue, .deleted => {},
-        .blocked => {
-            setException(c, exception, "TypeError: cannot redefine non-configurable accessor");
+    };
+    defer c.popActiveInterpreter(&machine);
+    const had_own = interp.objectHasOwn(obj, key.bytes);
+    if (!had_own) if (obj.hostClassHooks()) |hooks| if (hooks.set) |set| {
+        switch (set(@ptrCast(&machine), obj, key.bytes, property_value) catch |err| {
+            if (err == error.Throw) {
+                if (exception != null) exception[0] = box(c, machine.exception);
+            } else setException(c, exception, @errorName(err));
             return;
-        },
+        }) {
+            .unhandled => {},
+            .declined => return,
+            .accepted => |accepted| {
+                if (!accepted) setException(c, exception, "TypeError: property assignment was rejected");
+                return;
+            },
+        }
+    };
+    const accepted = machine.setMemberResult(Value.obj(obj), key.bytes, property_value, Value.obj(obj)) catch |err| {
+        if (err == error.Throw) {
+            if (exception != null) exception[0] = box(c, machine.exception);
+        } else setException(c, exception, @errorName(err));
+        return;
+    };
+    if (!accepted) {
+        setException(c, exception, "TypeError: property assignment was rejected");
+        return;
     }
-    obj.setOwn(c.arena(), c.root_shape, key.bytes, property_value) catch {
-        setException(c, exception, "OutOfMemory");
-        return;
-    };
-    obj.setAttr(c.arena(), key.bytes, propAttrFromC(attrs)) catch {
-        setException(c, exception, "OutOfMemory");
-        return;
-    };
+    if (!had_own and interp.objectHasOwn(obj, key.bytes)) {
+        obj.setAttr(c.arena(), key.bytes, propAttrFromC(attrs)) catch {
+            setException(c, exception, "OutOfMemory");
+        };
+    }
 }
 
 export fn JSObjectDeleteProperty(ctx: JSContextRef, object: JSObjectRef, name: JSStringRef, exception: ExceptionRef) callconv(.c) bool {

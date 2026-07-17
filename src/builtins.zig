@@ -843,7 +843,7 @@ pub fn objectHasOwn(ctx: *anyopaque, this: Value, args: []const Value) HostError
     const self = interp(ctx);
     const o = try self.toObject(arg(args, 0));
     const key = try self.keyOf(arg(args, 1));
-    return Value.boolVal(interpreter.objectHasOwn(o, key));
+    return Value.boolVal(try self.hasOwnPropertyResult(o, key));
 }
 
 pub fn objectAssign(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {

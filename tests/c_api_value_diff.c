@@ -24,6 +24,40 @@ static JSValueRef static_function(JSContextRef context, JSObjectRef function,
     return JSValueMakeNumber(context, 17);
 }
 
+static double static_value_storage = 1;
+static JSValueRef static_get_seven(JSContextRef context, JSObjectRef object,
+    JSStringRef property_name, JSValueRef* exception)
+{
+    (void)object; (void)property_name; (void)exception;
+    return JSValueMakeNumber(context, 7);
+}
+static JSValueRef static_get_stored(JSContextRef context, JSObjectRef object,
+    JSStringRef property_name, JSValueRef* exception)
+{
+    (void)object; (void)property_name; (void)exception;
+    return JSValueMakeNumber(context, static_value_storage);
+}
+static JSValueRef static_get_null(JSContextRef context, JSObjectRef object,
+    JSStringRef property_name, JSValueRef* exception)
+{
+    (void)context; (void)object; (void)property_name; (void)exception;
+    return NULL;
+}
+static bool static_set_false(JSContextRef context, JSObjectRef object,
+    JSStringRef property_name, JSValueRef value, JSValueRef* exception)
+{
+    (void)object; (void)property_name;
+    static_value_storage = JSValueToNumber(context, value, exception);
+    return false;
+}
+static bool static_set_true(JSContextRef context, JSObjectRef object,
+    JSStringRef property_name, JSValueRef value, JSValueRef* exception)
+{
+    (void)object; (void)property_name;
+    static_value_storage = JSValueToNumber(context, value, exception);
+    return true;
+}
+
 static int print_json_string(JSStringRef string)
 {
     char bytes[512];
@@ -136,6 +170,47 @@ int main(void)
     JSStringRelease(run_name);
     JSClassRelease(static_class);
     JSClassRelease(direct_class);
+
+    JSStaticValue static_values[] = {
+        { "x", static_get_seven, static_set_false, kJSPropertyAttributeNone },
+        { "y", static_get_stored, static_set_true, kJSPropertyAttributeNone },
+        { "z", static_get_null, NULL, kJSPropertyAttributeNone },
+        { NULL, NULL, NULL, 0 }
+    };
+    JSClassDefinition value_definition = kJSClassDefinitionEmpty;
+    value_definition.staticValues = static_values;
+    JSClassRef value_class = JSClassCreate(&value_definition);
+    JSObjectRef value_object = JSObjectMake(context, value_class, NULL);
+    JSStringRef x_name = JSStringCreateWithUTF8CString("x");
+    JSStringRef y_name = JSStringCreateWithUTF8CString("y");
+    JSStringRef z_name = JSStringCreateWithUTF8CString("z");
+    printf("static-values %.0f %.0f %d %d ",
+        JSValueToNumber(context, JSObjectGetProperty(context, value_object, x_name, &exception), &exception),
+        JSValueToNumber(context, JSObjectGetProperty(context, value_object, y_name, &exception), &exception),
+        JSObjectHasProperty(context, value_object, x_name),
+        JSObjectHasProperty(context, value_object, z_name));
+    JSObjectSetProperty(context, value_object, x_name,
+        JSValueMakeNumber(context, 12), kJSPropertyAttributeNone, &exception);
+    JSObjectSetProperty(context, value_object, y_name,
+        JSValueMakeNumber(context, 15), kJSPropertyAttributeNone, &exception);
+    printf("%.0f %.0f\n",
+        JSValueToNumber(context, JSObjectGetProperty(context, value_object, x_name, &exception), &exception),
+        JSValueToNumber(context, JSObjectGetProperty(context, value_object, y_name, &exception), &exception));
+    JSObjectRef js_value_object = JSObjectMake(context, value_class, NULL);
+    JSStringRef js_value_name = JSStringCreateWithUTF8CString("valueObject");
+    JSObjectSetProperty(context, JSContextGetGlobalObject(context), js_value_name,
+        js_value_object, kJSPropertyAttributeNone, &exception);
+    JSStringRelease(js_value_name);
+    JSValueRef js_static_result = evaluate(context,
+        "valueObject.x=22; valueObject.y=25; JSON.stringify([valueObject.x,valueObject.y,Object.hasOwn(valueObject,'x'),Object.hasOwn(valueObject,'y'),Object.hasOwn(valueObject,'z')])");
+    JSStringRef js_static_string = JSValueToStringCopy(context, js_static_result, &exception);
+    fputs("static-js ", stdout);
+    if (!js_static_string || !print_json_string(js_static_string))
+        return 4;
+    fputc('\n', stdout);
+    JSStringRelease(js_static_string);
+    JSStringRelease(x_name); JSStringRelease(y_name); JSStringRelease(z_name);
+    JSClassRelease(value_class);
 
     JSObjectRef prototype = JSObjectMake(context, NULL, NULL);
     JSObjectRef object = JSObjectMake(context, NULL, NULL);

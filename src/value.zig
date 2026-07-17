@@ -40,6 +40,26 @@ pub const HostError = error{ OutOfMemory, Throw, OptShortCircuit };
 /// engine builtins and the conformance harness's `assert`.
 pub const NativeFn = *const fn (ctx: *anyopaque, this: Value, args: []const Value) HostError!Value;
 
+pub const HostClassGetResult = union(enum) {
+    unhandled,
+    value: Value,
+};
+
+pub const HostClassSetResult = union(enum) {
+    unhandled,
+    declined,
+    accepted: bool,
+};
+
+/// Type-erased essential-internal-method bridge for embedding-defined classes.
+/// The Interpreter pointer is opaque here to avoid a value/interpreter import
+/// cycle; C-API implementations cast it back at the boundary.
+pub const HostClassHooks = struct {
+    get: ?*const fn (*anyopaque, *Object, []const u8) HostError!HostClassGetResult = null,
+    set: ?*const fn (*anyopaque, *Object, []const u8, Value) HostError!HostClassSetResult = null,
+    has: ?*const fn (*anyopaque, *Object, []const u8) HostError!bool = null,
+};
+
 /// The element type of a typed array (no BigInt variants — those need a BigInt
 /// value type). Each carries its byte width and how to read/write a value.
 pub const TAKind = enum {
@@ -756,6 +776,7 @@ pub const ObjectColdState = struct {
     /// itself is context-owned so this borrowed pointer remains valid until
     /// after every object finalizer has run.
     c_api_object_owner: ?*CApiObjectOwner = null,
+    host_class_hooks: ?*const HostClassHooks = null,
 
     pub inline fn hasRare(self: *const ObjectColdState, tag: ObjectRareTag) bool {
         return @constCast(&self.rare_tag).load(.acquire) == tag;
@@ -1247,6 +1268,20 @@ pub const Object = struct {
         const cold = try self.ensureCold(fallback);
         std.debug.assert(cold.c_api_object_owner == null);
         cold.c_api_object_owner = owner;
+    }
+
+    pub inline fn hostClassHooks(self: *const Object) ?*const HostClassHooks {
+        const cold = self.coldState() orelse return null;
+        return cold.host_class_hooks;
+    }
+
+    pub fn setHostClassHooks(
+        self: *Object,
+        fallback: std.mem.Allocator,
+        hooks: *const HostClassHooks,
+    ) std.mem.Allocator.Error!void {
+        const cold = try self.ensureCold(fallback);
+        cold.host_class_hooks = hooks;
     }
 
     /// Atomic view of the cold key-order pointer. Contents remain protected by

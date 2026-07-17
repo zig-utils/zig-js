@@ -10009,6 +10009,12 @@ pub const Interpreter = struct {
                         }
                     }
                     if (c.getOwn(key)) |v| return v;
+                    if (c.hostClassHooks()) |hooks| if (hooks.get) |get| {
+                        switch (try get(@ptrCast(self), c, key)) {
+                            .unhandled => {},
+                            .value => |v| return v,
+                        }
+                    };
                     cur = self.effectiveProto(c);
                 }
                 // On the global object, an absent own property falls back to the
@@ -10825,6 +10831,13 @@ pub const Interpreter = struct {
                 if (!c.getAttr(key).writable) return false;
                 break;
             }
+            if (c.hostClassHooks()) |hooks| if (hooks.set) |set| {
+                switch (try set(@ptrCast(self), c, key, v)) {
+                    .unhandled => {},
+                    .declined => return true,
+                    .accepted => |accepted| return accepted,
+                }
+            };
             cur = self.effectiveProto(c);
         }
         // [[Set]] attribute checks.
@@ -11811,7 +11824,15 @@ pub const Interpreter = struct {
             const desc = try builtins.objectGetOwnPropertyDescriptor(@ptrCast(self), Value.undef(), &.{ Value.obj(o), try self.keyToValue(key) });
             return !desc.isUndefined();
         }
-        return objectHasOwn(o, key);
+        if (objectHasOwn(o, key)) return true;
+        if (o.hostClassHooks()) |hooks| if (hooks.has) |has| {
+            return try has(@ptrCast(self), o, key);
+        };
+        return false;
+    }
+
+    pub fn hasOwnPropertyResult(self: *Interpreter, o: *value.Object, key: []const u8) EvalError!bool {
+        return self.objectProtoHasOwn(o, key);
     }
 
     fn objectProtoPropertyIsEnumerable(self: *Interpreter, o: *value.Object, key: []const u8) EvalError!bool {
@@ -14732,6 +14753,9 @@ pub const Interpreter = struct {
                 return moduleNsHas(ns, key);
             }
             if (objectHasOwn(c, key)) return true;
+            if (c.hostClassHooks()) |hooks| if (hooks.has) |has| {
+                if (try has(@ptrCast(self), c, key)) return true;
+            };
             cur = self.effectiveProto(c);
         }
         return false;

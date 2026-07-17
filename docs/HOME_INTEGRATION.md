@@ -54,7 +54,8 @@ tests):
 
 1. **Complete custom native classes** — class ownership, inheritance,
    initialize/finalize, class identity, shared prototypes, and static functions
-   are implemented; static value accessors with getter/setter,
+   and tri-state static value get/set/has dispatch are implemented; static-value
+   descriptors/enumeration,
    `hasInstance`, `callAsConstructor`, parent class). Home defines ~100+
    JS-exposed classes (Subprocess, Glob, Server, Crypto hashers, FSWatcher,
    Stats, …) via the generated-class machinery. This is the single biggest gap.
