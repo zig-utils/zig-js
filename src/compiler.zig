@@ -229,7 +229,7 @@ fn nameRefInClosure(node: *const ast.Node, name: []const u8, in_fn: bool) bool {
     return switch (node.*) {
         .identifier => |id| in_fn and std.mem.eql(u8, id, name),
 
-        .number, .bigint_lit, .string, .boolean, .null_lit, .undefined_lit, .elision, .this_expr, .new_target_expr, .regex_literal, .import_meta, .import_decl, .break_stmt, .continue_stmt => false,
+        .number, .bigint_lit, .string, .boolean, .null_lit, .undefined_lit, .elision, .this_expr, .new_target_expr, .regex_literal, .import_meta, .import_decl, .break_stmt, .continue_stmt, .debugger_stmt => false,
 
         // A nested function/arrow (expression or declaration): everything it (and
         // any deeper closure) references is captured — descend with `in_fn = true`.
@@ -1047,6 +1047,7 @@ pub const Compiler = struct {
                 try self.compileExpr(e);
                 _ = try self.chunk.emit(if (self.mode == .program) .set_acc else .pop, 0);
             },
+            .debugger_stmt => _ = try self.chunk.emit(.nop, 0),
             .block => |stmts| {
                 const disposable_scope = self.scope == null and stmtListHasDisposableDecl(stmts);
                 if (disposable_scope) {
@@ -2772,4 +2773,21 @@ fn collectLocals(arena: std.mem.Allocator, scope: *FnScope, node: *Node) Compile
         // the function scope, matching the tree-walker's hoistVarsIn.
         else => {},
     }
+}
+
+test "compiler preserves a first-statement debugger checkpoint" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var diagnostic: ?@import("parser.zig").SourceLocation = null;
+    var parser = try @import("parser.zig").Parser.initWithDiagnostic(
+        arena.allocator(),
+        "debugger; 1;",
+        &diagnostic,
+    );
+    const program = try parser.parseProgram();
+    const chunk = try Compiler.compileProgram(arena.allocator(), program);
+    try std.testing.expect(chunk.code.items.len >= 2);
+    try std.testing.expectEqual(bc.Op.nop, chunk.code.items[0].op);
+    try std.testing.expect(chunk.debug_nodes[0] != null);
+    try std.testing.expect(chunk.debug_nodes[0].?.* == .debugger_stmt);
 }

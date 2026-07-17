@@ -1293,7 +1293,7 @@ pub const Parser = struct {
             if (std.mem.eql(u8, t.text, "debugger")) {
                 _ = self.advance();
                 try self.consumeStatementTerminator();
-                return self.alloc(.{ .block = &[_]*Node{} });
+                return self.alloc(.debugger_stmt);
             }
             if (std.mem.eql(u8, t.text, "class")) {
                 // `class C {...}` declaration binds C; anonymous class is an expr.

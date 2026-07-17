@@ -3805,6 +3805,7 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
         const inst = code[ip];
         ip += 1;
         switch (inst.op) {
+            .nop => {},
             .load_const => try stack.append(stack_alloc, chunk.consts.items[inst.a]),
             .load_bigint => try stack.append(stack_alloc, try vm.makeBigIntText(chunk.names.items[inst.a])),
             .load_undefined => try stack.append(stack_alloc, Value.undef()),

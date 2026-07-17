@@ -3174,6 +3174,7 @@ pub const Interpreter = struct {
             },
 
             .expr_stmt => |e| try self.eval(e),
+            .debugger_stmt => Value.undef(),
 
             // A `{…}` block is its own lexical scope: `let`/`const`/`class` and
             // block function declarations live here, `var` hoists past it; any
@@ -4403,7 +4404,7 @@ pub const Interpreter = struct {
 
     fn stmtCompletionEmpty(self: *Interpreter, s: *Node) bool {
         return switch (s.*) {
-            .var_decl, .decl_group, .destructure_decl => true,
+            .var_decl, .decl_group, .destructure_decl, .debugger_stmt => true,
             .class_expr => true, // a class *declaration* statement
             .block => self.completion_empty,
             else => false,
@@ -4870,7 +4871,7 @@ pub const Interpreter = struct {
                 try self.rewritePrivateNamesInNode(ic.specifier, map);
                 if (ic.options) |o| try self.rewritePrivateNamesInNode(o, map);
             },
-            .number, .bigint_lit, .string, .boolean, .null_lit, .undefined_lit, .elision, .this_expr, .new_target_expr, .regex_literal, .break_stmt, .continue_stmt, .import_decl, .import_meta => {},
+            .number, .bigint_lit, .string, .boolean, .null_lit, .undefined_lit, .elision, .this_expr, .new_target_expr, .regex_literal, .break_stmt, .continue_stmt, .debugger_stmt, .import_decl, .import_meta => {},
         }
     }
 
@@ -4978,6 +4979,7 @@ pub const Interpreter = struct {
             .labeled_stmt => |l| .{ .labeled_stmt = .{ .label = l.label, .body = try self.deepCopyNode(l.body) } },
             .expr_stmt => |x| .{ .expr_stmt = try self.deepCopyNode(x) },
             .block => |stmts| .{ .block = try self.deepCopyNodes(stmts) },
+            .debugger_stmt => .debugger_stmt,
             .decl_group => |stmts| .{ .decl_group = try self.deepCopyNodes(stmts) },
             .if_stmt => |i| .{ .if_stmt = .{ .cond = try self.deepCopyNode(i.cond), .consequent = try self.deepCopyNode(i.consequent), .alternate = try self.deepCopyOpt(i.alternate) } },
             .while_stmt => |w| .{ .while_stmt = .{ .cond = try self.deepCopyNode(w.cond), .body = try self.deepCopyNode(w.body) } },

@@ -218,6 +218,7 @@ pub const Op = enum(u8) {
     load_null,
     load_true,
     load_false,
+    nop, // explicit statement boundary with no stack effect (`debugger;`)
     pop, // discard top of stack
     dup, // duplicate top of stack
     swap, // swap the top two stack values

@@ -279,6 +279,9 @@ pub const Node = union(enum) {
     continue_stmt: ?[]const u8,
     labeled_stmt: struct { label: []const u8, body: *Node },
     expr_stmt: *Node,
+    /// `debugger;` is a distinct no-op statement so bytecode can retain a real
+    /// instruction boundary even when it is the first/only statement in a body.
+    debugger_stmt,
     block: []*Node,
     /// A transparent group of statements that does NOT open a new scope — used
     /// for multi-declarator declarations (`let a = 1, b = 2`), unlike `block`.
