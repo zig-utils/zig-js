@@ -49,7 +49,7 @@ zig build home-private-abi-audit \
 
 This verifies the live revision, every source hash, signature, classification,
 and calling convention. It replaces a vague source-level estimate, but the 431
-private imports are now 86 implemented / 345 pending under #163. The generated
+private imports are now 90 implemented / 341 pending under #163. The generated
 FFI wrapper emits and resolves `JSFunctionCall` inside its own compiled module,
 so zig-js must not provide a duplicate symbol. The implemented
 slices cover JSC64 value identity, cell equality, truthiness, int32 extraction,
@@ -63,6 +63,9 @@ semantics, value equality, object identity, and primitive boxing. The two
 non-URL BunString conversion shims plus transfer and array construction decode
 all pinned string representations, preserve lone surrogates and UTF-16-unit
 prefixes, and publish selected-realm strings/arrays without partial transfer.
+Four ZigString error constructors create fresh intrinsic Error, TypeError,
+RangeError, and SyntaxError instances in the selected realm without consulting
+mutable globals or replacing a pending VM exception.
 The two
 ordinary-object constructors and wrapper-unboxing shim add exact prototype,
 freshness, int32/double, negative-zero, NaN, and primitive-value behavior. Three
@@ -104,7 +107,7 @@ behavior, and VM exception propagation. Ten Promise/InternalPromise shims add
 selected-realm pending and directly settled promises, exact native downcasts,
 callback Promise passthrough, Error/throw rejection, and normal AnyPromise
 resolution with thenable assimilation and self-resolution protection. Their
-84-symbol combined fixture covers sibling realms, foreign VMs, callback
+88-symbol combined fixture covers sibling realms, foreign VMs, callback
 reentrancy, exception clearing, and settled-target no-ops. Seven Home-only
 JSMap shims create selected-realm native maps and directly implement
 SameValueZero get/has/set/remove/clear/size semantics without invoking mutable
