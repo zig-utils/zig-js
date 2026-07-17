@@ -72,6 +72,13 @@ protocol uses `direct-eval` or `indirect-eval`. Repeated evaluation of the
 same bytes intentionally creates a fresh monotonically increasing scriptId, so
 each execution has an unambiguous breakpoint/location history. URL breakpoints
 apply to every matching eval instance.
+`Function`, `GeneratorFunction`, `AsyncFunction`, and
+`AsyncGeneratorFunction` constructor parses likewise publish their canonical
+generated source before creating the function object. An inline sourceURL wins
+for JavaScript constructors; otherwise their kind name is the URL.
+`JSObjectMakeFunction` uses its explicit sourceURL and starting-line arguments,
+so C embedders receive adjusted generated-body locations and retrievable source
+without relying on a comment directive.
 Statement locations retain byte offsets plus adjusted line/column coordinates;
 a debugger statement pauses with reason debuggerStatement. An explicit
 Debugger.pause request pauses at the next statement boundary. Debug-enabled
@@ -180,5 +187,5 @@ lexical/global scope chains, frame evaluation, and expandable remote objects
 with deterministic GC-safe lifetime. Worker targets remain tracked by
 [issue #156](https://github.com/zig-utils/zig-js/issues/156). Unsupported
 commands return -32601; there are no silently accepted debugger stubs.
-Module and generated-function origins remain explicit work in
+Module origins remain explicit work in
 [issue #155](https://github.com/zig-utils/zig-js/issues/155).

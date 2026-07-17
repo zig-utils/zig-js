@@ -154,6 +154,7 @@ pub fn functionConstructor(ctx: *anyopaque, this: Value, args: []const Value) Ho
         return self.throwParserSyntaxErrorAt("Function body", lex_diagnostic orelse parser_mod.sourceLocationAt(source, 0), err);
     const prog = parser.parseProgram() catch |err|
         return self.throwParserSyntaxError("Function body", source, &parser, err);
+    try self.registerParsedDynamicDebugScript(source, "Function", 1, &parser);
     // Create the function in the Function constructor's own realm (so its
     // closure — and thus [[Realm]] — is that realm).
     const fn_v = try self.eval(prog);

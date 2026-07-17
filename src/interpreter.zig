@@ -1007,6 +1007,8 @@ pub const Interpreter = struct {
     debug_statement_locations: ?*std.AutoHashMapUnmanaged(*const Node, DebugStatementLocation) = null,
     debug_script_ctx: ?*anyopaque = null,
     debug_script_hook: ?DebugScriptHook = null,
+    debug_dynamic_url_override: ?[]const u8 = null,
+    debug_dynamic_start_line: usize = 1,
     debug_exception_ctx: ?*anyopaque = null,
     debug_exception_hook: ?DebugExceptionHook = null,
     debug_current_location: ?DebugStatementLocation = null,
@@ -3240,9 +3242,9 @@ pub const Interpreter = struct {
         }
     }
 
-    fn registerParsedDebugScript(self: *Interpreter, source: []const u8, url: []const u8, parser: *const Parser) EvalError!void {
+    pub fn registerParsedDebugScript(self: *Interpreter, source: []const u8, url: []const u8, start_line: usize, parser: *const Parser) EvalError!void {
         const hook = self.debug_script_hook orelse return;
-        const registration = try hook(self.debug_script_ctx.?, source, url, 1);
+        const registration = try hook(self.debug_script_ctx.?, source, url, start_line);
         const locations = self.debug_statement_locations orelse return;
         for (parser.statement_locations.items) |entry| try locations.put(self.arena, entry.node, .{
             .script_id = registration.id,
@@ -3253,6 +3255,15 @@ pub const Interpreter = struct {
             },
             .debugger_statement = entry.debugger_statement,
         });
+    }
+
+    pub fn registerParsedDynamicDebugScript(self: *Interpreter, source: []const u8, fallback_url: []const u8, start_line: usize, parser: *const Parser) EvalError!void {
+        return self.registerParsedDebugScript(
+            source,
+            self.debug_dynamic_url_override orelse dynamicDebugSourceUrl(source, fallback_url),
+            if (self.debug_dynamic_url_override != null) self.debug_dynamic_start_line else start_line,
+            parser,
+        );
     }
 
     /// Evaluate debugger-authored source in a paused frame's live lexical
@@ -15134,9 +15145,10 @@ fn evalFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Val
         parser.eval_private_allowed = true;
     }
     const prog = parser.parseProgram() catch |err| return self.throwParserSyntaxError("eval", src, &parser, err);
-    try self.registerParsedDebugScript(
+    try self.registerParsedDynamicDebugScript(
         src,
-        dynamicDebugSourceUrl(src, if (self.direct_eval_call) "direct-eval" else "indirect-eval"),
+        if (self.direct_eval_call) "direct-eval" else "indirect-eval",
+        1,
         &parser,
     );
     if (self.direct_eval_call) if (self.current_private_map) |pm|
@@ -19527,6 +19539,12 @@ fn dynamicFunctionFn(comptime kind: DynFnKind) value.NativeFn {
                 return self.throwParserSyntaxErrorAt("Function body", lex_diagnostic orelse parser_mod.sourceLocationAt(source, 0), err);
             const prog = parser.parseProgram() catch |err|
                 return self.throwParserSyntaxError("Function body", source, &parser, err);
+            const fallback_url = switch (kind) {
+                .generator => "GeneratorFunction",
+                .async_fn => "AsyncFunction",
+                .async_generator => "AsyncGeneratorFunction",
+            };
+            try self.registerParsedDynamicDebugScript(source, fallback_url, 1, &parser);
             const fnval = try self.eval(prog);
             // GetPrototypeFromConstructor: a real new.target subclass overrides
             // the function object's [[Prototype]] (the default kind-prototype is

@@ -3505,6 +3505,8 @@ fn makeBuiltinObject(
     constructor_kind: CApiBuiltinConstructor,
     args: []const Value,
     exception: ExceptionRef,
+    debug_source_url: ?[]const u8,
+    debug_start_line: usize,
 ) JSObjectRef {
     const gc_saved = gc_mod.setActiveHeap(c.gc);
     defer _ = gc_mod.setActiveHeap(gc_saved);
@@ -3516,6 +3518,8 @@ fn makeBuiltinObject(
         return null;
     };
     defer c.popActiveInterpreter(&machine);
+    machine.debug_dynamic_url_override = debug_source_url;
+    machine.debug_dynamic_start_line = debug_start_line;
     const constructor = c.c_api_builtin_constructors[@intFromEnum(constructor_kind)];
     const result = machine.construct(constructor, args) catch |err| {
         if (err == error.Throw) {
@@ -3543,7 +3547,7 @@ fn makeBuiltinObjectFromRefs(
         return null;
     }
     const args = collectArgs(c, argc, argv, exception) orelse return null;
-    return makeBuiltinObject(c, constructor_kind, args, exception);
+    return makeBuiltinObject(c, constructor_kind, args, exception, null, 1);
 }
 
 export fn JSObjectMakeDate(ctx: JSContextRef, argc: usize, argv: [*c]const JSValueRef, exception: ExceptionRef) callconv(.c) JSObjectRef {
@@ -3592,7 +3596,14 @@ export fn JSObjectMakeFunction(
         setException(c, exception, "OutOfMemory");
         return null;
     };
-    const function_ref = makeBuiltinObject(c, .function, args, exception) orelse {
+    const function_ref = makeBuiltinObject(
+        c,
+        .function,
+        args,
+        exception,
+        evaluationSourceName(source_url),
+        if (starting_line_number > 0) @intCast(starting_line_number) else 1,
+    ) orelse {
         if (exception != null) {
             if (valueFromContext(c, exception[0])) |thrown| {
                 attachEvaluationRuntimeSourceMetadata(c, thrown, source_url, starting_line_number) catch {};
@@ -5307,6 +5318,143 @@ test "C-API: debugger registers direct and indirect eval sources independently" 
     try std.testing.expect(std.mem.indexOf(u8, transcript, "indirect-eval.js") != null);
     try std.testing.expect(std.mem.indexOf(u8, transcript, "Debugger.breakpointResolved") != null);
     try std.testing.expect(std.mem.indexOf(u8, transcript, "\"reason\":\"breakpoint\"") != null);
+}
+
+test "C-API: debugger registers generated function constructors" {
+    const State = struct {
+        session: ZJSInspectorSessionRef = null,
+        pauses: usize = 0,
+        bytes: [65536]u8 = undefined,
+        len: usize = 0,
+
+        fn receive(message: [*]const u8, message_len: usize, user_data: ?*anyopaque) callconv(.c) void {
+            const self: *@This() = @ptrCast(@alignCast(user_data.?));
+            std.debug.assert(self.len + message_len + 1 <= self.bytes.len);
+            @memcpy(self.bytes[self.len .. self.len + message_len], message[0..message_len]);
+            self.len += message_len;
+            self.bytes[self.len] = '\n';
+            self.len += 1;
+            if (std.mem.indexOf(u8, message[0..message_len], "Debugger.paused") == null) return;
+            self.pauses += 1;
+            const resume_request = "{\"id\":90,\"method\":\"Debugger.resume\"}";
+            std.debug.assert(ZJSInspectorSessionDispatch(self.session, resume_request, resume_request.len));
+        }
+    };
+
+    const ctx = JSGlobalContextCreate(null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(ctx);
+    JSGlobalContextSetInspectable(ctx, true);
+    var state: State = .{};
+    state.session = ZJSInspectorSessionCreate(ctx, State.receive, &state) orelse return error.SessionCreateFailed;
+    defer ZJSInspectorSessionRelease(state.session);
+    const enable = "{\"id\":1,\"method\":\"Debugger.enable\"}";
+    try std.testing.expect(ZJSInspectorSessionDispatch(state.session, enable, enable.len));
+    const ordinary_breakpoint =
+        "{\"id\":2,\"method\":\"Debugger.setBreakpointByUrl\",\"params\":{\"url\":\"generated-function.js\",\"lineNumber\":3}}";
+    const generator_breakpoint =
+        "{\"id\":3,\"method\":\"Debugger.setBreakpointByUrl\",\"params\":{\"url\":\"generated-generator.js\",\"lineNumber\":2}}";
+    const async_breakpoint =
+        "{\"id\":4,\"method\":\"Debugger.setBreakpointByUrl\",\"params\":{\"url\":\"generated-async.js\",\"lineNumber\":2}}";
+    try std.testing.expect(ZJSInspectorSessionDispatch(state.session, ordinary_breakpoint, ordinary_breakpoint.len));
+    try std.testing.expect(ZJSInspectorSessionDispatch(state.session, generator_breakpoint, generator_breakpoint.len));
+    try std.testing.expect(ZJSInspectorSessionDispatch(state.session, async_breakpoint, async_breakpoint.len));
+
+    const constructors_source = JSStringCreateWithUTF8CString(
+        "var GeneratorFunction = Object.getPrototypeOf(function*(){}).constructor;\n" ++
+            "var AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;\n" ++
+            "var AsyncGeneratorFunction = Object.getPrototypeOf(async function*(){}).constructor;\n" ++
+            "var generatedOrdinary = Function('value', 'var local = value + 1;\\nlocal += 1;\\nreturn local;\\n//# sourceURL=generated-function.js');\n" ++
+            "var generatedGenerator = GeneratorFunction('value', 'yield value;\\nreturn value + 1;\\n//# sourceURL=generated-generator.js');\n" ++
+            "var generatedAsync = AsyncFunction('value', 'return value + 2;\\n//# sourceURL=generated-async.js');\n" ++
+            "var generatedAsyncGenerator = AsyncGeneratorFunction('value', 'yield value;\\n//# sourceURL=generated-async-generator.js');\n" ++
+            "generatedOrdinary(40);",
+    ) orelse return error.StringInitFailed;
+    defer JSStringRelease(constructors_source);
+    var exception: JSValueRef = null;
+    const ordinary_result = JSEvaluateScript(ctx, constructors_source, null, null, 1, &exception) orelse return error.EvalFailed;
+    try std.testing.expectEqual(@as(f64, 42), JSValueToNumber(ctx, ordinary_result, &exception));
+
+    const generator_call = JSStringCreateWithUTF8CString("generatedGenerator(7).next().value;") orelse return error.StringInitFailed;
+    defer JSStringRelease(generator_call);
+    const generator_result = JSEvaluateScript(ctx, generator_call, null, null, 1, &exception) orelse return error.EvalFailed;
+    try std.testing.expectEqual(@as(f64, 7), JSValueToNumber(ctx, generator_result, &exception));
+    const async_call = JSStringCreateWithUTF8CString(
+        "var generatedAsyncValue = 0; generatedAsync(8).then(function(value) { generatedAsyncValue = value; }); 'scheduled';",
+    ) orelse return error.StringInitFailed;
+    defer JSStringRelease(async_call);
+    _ = JSEvaluateScript(ctx, async_call, null, null, 1, &exception) orelse return error.EvalFailed;
+    const async_value_source = JSStringCreateWithUTF8CString("generatedAsyncValue;") orelse return error.StringInitFailed;
+    defer JSStringRelease(async_value_source);
+    const async_result = JSEvaluateScript(ctx, async_value_source, null, null, 1, &exception) orelse return error.EvalFailed;
+    try std.testing.expectEqual(@as(f64, 10), JSValueToNumber(ctx, async_result, &exception));
+    try std.testing.expectEqual(@as(usize, 3), state.pauses);
+
+    const transcript = state.bytes[0..state.len];
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "generated-function.js") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "generated-generator.js") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "generated-async.js") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "generated-async-generator.js") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "\"scriptId\":2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "\"scriptId\":5") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "\"reason\":\"breakpoint\"") != null);
+}
+
+test "C-API: JSObjectMakeFunction preserves inspector URL and starting line" {
+    const State = struct {
+        session: ZJSInspectorSessionRef = null,
+        pauses: usize = 0,
+        bytes: [16384]u8 = undefined,
+        len: usize = 0,
+
+        fn receive(message: [*]const u8, message_len: usize, user_data: ?*anyopaque) callconv(.c) void {
+            const self: *@This() = @ptrCast(@alignCast(user_data.?));
+            std.debug.assert(self.len + message_len + 1 <= self.bytes.len);
+            @memcpy(self.bytes[self.len .. self.len + message_len], message[0..message_len]);
+            self.len += message_len;
+            self.bytes[self.len] = '\n';
+            self.len += 1;
+            if (std.mem.indexOf(u8, message[0..message_len], "Debugger.paused") == null) return;
+            self.pauses += 1;
+            const resume_request = "{\"id\":90,\"method\":\"Debugger.resume\"}";
+            std.debug.assert(ZJSInspectorSessionDispatch(self.session, resume_request, resume_request.len));
+        }
+    };
+
+    const ctx = JSGlobalContextCreate(null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(ctx);
+    JSGlobalContextSetInspectable(ctx, true);
+    var state: State = .{};
+    state.session = ZJSInspectorSessionCreate(ctx, State.receive, &state) orelse return error.SessionCreateFailed;
+    defer ZJSInspectorSessionRelease(state.session);
+    const enable = "{\"id\":1,\"method\":\"Debugger.enable\"}";
+    try std.testing.expect(ZJSInspectorSessionDispatch(state.session, enable, enable.len));
+    const breakpoint =
+        "{\"id\":2,\"method\":\"Debugger.setBreakpointByUrl\",\"params\":{\"url\":\"c-generated.js\",\"lineNumber\":19}}";
+    try std.testing.expect(ZJSInspectorSessionDispatch(state.session, breakpoint, breakpoint.len));
+
+    const name = JSStringCreateWithUTF8CString("cGenerated") orelse return error.StringInitFailed;
+    defer JSStringRelease(name);
+    const parameter = JSStringCreateWithUTF8CString("value") orelse return error.StringInitFailed;
+    defer JSStringRelease(parameter);
+    const parameters = [_]JSStringRef{parameter};
+    const body = JSStringCreateWithUTF8CString("var local = value + 1;\nlocal += 1;\nreturn local;") orelse return error.StringInitFailed;
+    defer JSStringRelease(body);
+    const url = JSStringCreateWithUTF8CString("c-generated.js") orelse return error.StringInitFailed;
+    defer JSStringRelease(url);
+    var exception: JSValueRef = null;
+    const function = JSObjectMakeFunction(ctx, name, parameters.len, &parameters, body, url, 17, &exception) orelse return error.FunctionCreateFailed;
+    const argument = JSValueMakeNumber(ctx, 40) orelse return error.ValueCreateFailed;
+    const result = JSObjectCallAsFunction(ctx, function, null, 1, @ptrCast(&argument), &exception) orelse return error.FunctionCallFailed;
+    try std.testing.expectEqual(@as(f64, 42), JSValueToNumber(ctx, result, &exception));
+    try std.testing.expectEqual(@as(usize, 1), state.pauses);
+
+    const get_source = "{\"id\":3,\"method\":\"Debugger.getScriptSource\",\"params\":{\"scriptId\":1}}";
+    try std.testing.expect(ZJSInspectorSessionDispatch(state.session, get_source, get_source.len));
+    const transcript = state.bytes[0..state.len];
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "c-generated.js") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "\"startLine\":16") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "\"lineNumber\":19") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "var local = value + 1") != null);
 }
 
 test "C-API: paused frames expose scopes and live frame evaluation" {
