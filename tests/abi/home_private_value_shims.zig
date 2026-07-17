@@ -132,6 +132,7 @@ extern "c" fn JSC__JSMap__has(?*anyopaque, JSContextRef, EncodedValue) bool;
 extern "c" fn JSC__JSMap__remove(?*anyopaque, JSContextRef, EncodedValue) bool;
 extern "c" fn JSC__JSMap__clear(?*anyopaque, JSContextRef) void;
 extern "c" fn JSC__JSMap__size(?*anyopaque, JSContextRef) usize;
+extern "c" fn WebCore__CommonAbortReason__toJS(JSContextRef, u8) EncodedValue;
 
 const PromiseWrapCallback = *const fn (*anyopaque, JSContextRef) callconv(.c) EncodedValue;
 
@@ -586,6 +587,37 @@ pub fn main() void {
     const vm = JSC__JSGlobalObject__vm(context) orelse fail("private VM lookup failed");
     const sibling_vm = JSC__JSGlobalObject__vm(sibling_context) orelse fail("sibling VM lookup failed");
     const foreign_vm = JSC__JSGlobalObject__vm(foreign_context) orelse fail("foreign VM lookup failed");
+
+    const timeout_reason = WebCore__CommonAbortReason__toJS(sibling_context, 1);
+    const timeout_reason_second = WebCore__CommonAbortReason__toJS(sibling_context, 1);
+    const user_abort_reason = WebCore__CommonAbortReason__toJS(context, 2);
+    const closed_reason = WebCore__CommonAbortReason__toJS(context, 3);
+    if (timeout_reason == .empty or timeout_reason_second == .empty or
+        user_abort_reason == .empty or closed_reason == .empty or
+        !JSC__JSValue__isAnyError(timeout_reason) or
+        JSC__JSValue__isStrictEqual(timeout_reason, timeout_reason_second, sibling_context))
+        fail("private CommonAbortReason construction/freshness mismatch");
+    exposeCell(sibling_context, "__private_timeout_reason", timeout_reason);
+    exposeCell(context, "__private_user_abort_reason", user_abort_reason);
+    exposeCell(context, "__private_closed_reason", closed_reason);
+    if (!JSC__JSValue__toBoolean(evaluate(sibling_context, "Object.getPrototypeOf(__private_timeout_reason) === DOMException.prototype")))
+        fail("private CommonAbortReason selected-realm prototype mismatch");
+    if (!JSC__JSValue__toBoolean(evaluate(sibling_context, "__private_timeout_reason instanceof DOMException")))
+        fail("private CommonAbortReason DOMException classification mismatch");
+    if (!JSC__JSValue__toBoolean(evaluate(sibling_context, "__private_timeout_reason instanceof Error")))
+        fail("private CommonAbortReason Error classification mismatch");
+    if (!JSC__JSValue__toBoolean(evaluate(sibling_context, "__private_timeout_reason.name === 'TimeoutError' && __private_timeout_reason.message === 'The operation timed out.' && __private_timeout_reason.code === 23")))
+        fail("private CommonAbortReason timeout metadata mismatch");
+    if (!JSC__JSValue__toBoolean(evaluate(context, "__private_user_abort_reason instanceof DOMException && __private_user_abort_reason.name === 'AbortError' && __private_user_abort_reason.message === 'The operation was aborted.' && __private_user_abort_reason.code === 20")))
+        fail("private CommonAbortReason user-abort metadata mismatch");
+    if (!JSC__JSValue__toBoolean(evaluate(context, "__private_closed_reason instanceof DOMException && __private_closed_reason.name === 'AbortError' && __private_closed_reason.message === 'The connection was closed.' && __private_closed_reason.code === 20")))
+        fail("private CommonAbortReason connection-closed metadata mismatch");
+    JSC__VM__throwError(vm, context, EncodedValue.fromInt32(445));
+    if (WebCore__CommonAbortReason__toJS(sibling_context, 2) != .empty)
+        fail("private CommonAbortReason ignored pending exception");
+    const preserved_abort_exception = JSGlobalObject__tryTakeException(context);
+    if (JSC__Exception__asJSValue(preserved_abort_exception.cellPointer()) != EncodedValue.fromInt32(445))
+        fail("private CommonAbortReason replaced pending exception");
     if (vm != sibling_vm or vm == foreign_vm or JSGlobalObject__hasException(context) or
         JSGlobalObject__tryTakeException(context) != .empty)
         fail("private VM identity mismatch");
@@ -1231,5 +1263,5 @@ pub fn main() void {
         JSC__JSMap__get(map_cell, context, evaluate(context, "'direct'")) != .undefined)
         fail("private JSMap clear mismatch");
 
-    std.debug.print("Home private value shims: 78/78 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 79/79 symbols linked; runtime matrix passed\n", .{});
 }

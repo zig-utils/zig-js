@@ -48,6 +48,13 @@ const Object = value.Object;
 const EncodedValue = private_encoded_value.EncodedValue;
 const PrivatePromiseWrapCallback = *const fn (*anyopaque, JSContextRef) callconv(.c) EncodedValue;
 
+const PrivateCommonAbortReason = enum(u8) {
+    timeout = 1,
+    user_abort = 2,
+    connection_closed = 3,
+    _,
+};
+
 /// Global allocator for C-API-created contexts and strings. `page_allocator`
 /// needs no libc and is always available; a tuned allocator can replace it.
 const gpa = std.heap.page_allocator;
@@ -1536,6 +1543,38 @@ fn privateCreateNativePromise(
     return privateEncodeNativePromise(context, &machine, state, stored_value);
 }
 
+fn privateCommonAbortReasonToJS(
+    global: JSContextRef,
+    reason: PrivateCommonAbortReason,
+) EncodedValue {
+    const context = ctxForEvaluation(global) orelse return .empty;
+    const opaque_group = context.c_api_group orelse return .empty;
+    const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+    if (group.pending_exception != null) return .empty;
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    defer context.popActiveInterpreter(&machine);
+
+    const contract = switch (reason) {
+        .timeout => .{ "TimeoutError", "The operation timed out." },
+        .user_abort => .{ "AbortError", "The operation was aborted." },
+        .connection_closed => .{ "AbortError", "The connection was closed." },
+        else => @panic("invalid CommonAbortReason"),
+    };
+    const result = machine.makeDOMException(contract[0], contract[1]) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    return privateEncodeResult(context, &machine, result);
+}
+
 fn privateBigIntObjectFrom(global: JSContextRef, encoded: EncodedValue) ?*Object {
     const internal = privateValueFrom(global, encoded) orelse return null;
     if (!internal.isObject() or !internal.asObj().is_bigint) return null;
@@ -2575,6 +2614,13 @@ export fn JSC__AnyPromise__wrap(
     }
     promise.resolve(&machine, target, internal) catch |err|
         privateSetPendingAbrupt(context, &machine, err);
+}
+
+export fn WebCore__CommonAbortReason__toJS(
+    global: JSContextRef,
+    reason: PrivateCommonAbortReason,
+) callconv(.c) EncodedValue {
+    return privateCommonAbortReasonToJS(global, reason);
 }
 
 export fn JSC__JSMap__create(global: JSContextRef) callconv(.c) ?*anyopaque {

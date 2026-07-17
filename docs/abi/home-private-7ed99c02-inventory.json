@@ -88,8 +88,8 @@
     },
     "by_status": {
       "external": 2,
-      "implemented": 95,
-      "pending": 351
+      "implemented": 96,
+      "pending": 350
     }
   },
   "declarations": [
@@ -4164,10 +4164,10 @@
       "line": 16,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn WebCore__CommonAbortReason__toJS(*JSGlobalObject, CommonAbortReason) JSValue;",
       "declaration_sha256": "3cb8c1dde017ea5b013295dbeadfc44f43170c40d86404a8f5655b5e3fb6df92",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "WebCore__DOMFormData__append",
