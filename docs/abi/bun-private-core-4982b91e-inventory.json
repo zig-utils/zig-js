@@ -81,8 +81,8 @@
       "public_c_api": 15
     },
     "by_status": {
-      "implemented": 86,
-      "pending": 351
+      "implemented": 88,
+      "pending": 349
     }
   },
   "home_comparison": {
@@ -3271,10 +3271,10 @@
       "line": 60,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "pub extern fn JSVALUE_TO_INT64_SLOW(value: EncodedJSValue) i64;",
       "declaration_sha256": "80028a2361d5be50bc28f49990ddfc732a638e490c13050818dfa5b6ca9f48b3",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSVALUE_TO_UINT64_SLOW",
@@ -3282,10 +3282,10 @@
       "line": 59,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "pub extern fn JSVALUE_TO_UINT64_SLOW(value: EncodedJSValue) u64;",
       "declaration_sha256": "9c2bf27b65428cc0d63cc11416eef12eda19277f84e82541a32473441d290df2",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSValueGetType",

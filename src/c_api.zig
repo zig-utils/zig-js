@@ -1733,6 +1733,28 @@ export fn JSC__JSValue__toUInt64NoTruncate(encoded: EncodedValue) callconv(.c) u
     return privateBigIntModuloU64(boxed.value.asObj());
 }
 
+export fn JSVALUE_TO_UINT64_SLOW(encoded: EncodedValue) callconv(.c) u64 {
+    return JSC__JSValue__toUInt64NoTruncate(encoded);
+}
+
+export fn JSVALUE_TO_INT64_SLOW(encoded: EncodedValue) callconv(.c) i64 {
+    if (encoded.isInt32()) return encoded.asInt32();
+    if (encoded.isDouble()) {
+        const number = encoded.asDouble();
+        const minimum: f64 = @floatFromInt(std.math.minInt(i64));
+        const maximum_exclusive: f64 = 9223372036854775808.0;
+        if (!std.math.isFinite(number) or @trunc(number) != number or
+            number < minimum or number >= maximum_exclusive)
+            return 0;
+        return @intFromFloat(number);
+    }
+    const boxed = privateBoxedFrom(encoded) orelse return 0;
+    if (boxed.private_kind != .value or !boxed.value.isObject() or
+        !boxed.value.asObj().is_bigint)
+        return 0;
+    return @bitCast(privateBigIntModuloU64(boxed.value.asObj()));
+}
+
 export fn Bun__JSValue__toNumber(encoded: EncodedValue, global: JSContextRef) callconv(.c) f64 {
     const context = ctxForEvaluation(global) orelse return std.math.nan(f64);
     const opaque_group = context.c_api_group orelse return std.math.nan(f64);

@@ -63,6 +63,8 @@ extern "c" fn JSC__JSValue__asBigIntCompare(EncodedValue, JSContextRef, EncodedV
 extern "c" fn JSC__JSValue__bigIntSum(JSContextRef, EncodedValue, EncodedValue) EncodedValue;
 extern "c" fn JSC__JSValue__fromTimevalNoTruncate(JSContextRef, i64, i64) EncodedValue;
 extern "c" fn JSC__JSValue__toUInt64NoTruncate(EncodedValue) u64;
+extern "c" fn JSVALUE_TO_INT64_SLOW(EncodedValue) i64;
+extern "c" fn JSVALUE_TO_UINT64_SLOW(EncodedValue) u64;
 extern "c" fn JSC__JSValue__isStrictEqual(EncodedValue, EncodedValue, JSContextRef) bool;
 extern "c" fn JSC__JSValue__isSameValue(EncodedValue, EncodedValue, JSContextRef) bool;
 extern "c" fn JSC__JSBigInt__fromJS(EncodedValue) ?*anyopaque;
@@ -281,6 +283,25 @@ pub fn main() void {
         JSC__JSValue__toUInt64NoTruncate(EncodedValue.fromDouble(@floatFromInt(@as(u64, 1) << 51))) != 0 or
         JSC__JSValue__toUInt64NoTruncate(.true) != 0)
         fail("number fallback extraction mismatch");
+
+    const wrapped_large = evaluate(context, "(1n << 130n) + 5n");
+    const wrapped_negative = evaluate(context, "-((1n << 130n) + 5n)");
+    if (JSVALUE_TO_INT64_SLOW(signed_min) != std.math.minInt(i64) or
+        JSVALUE_TO_UINT64_SLOW(signed_min) != (@as(u64, 1) << 63) or
+        JSVALUE_TO_INT64_SLOW(signed_negative) != -1 or
+        JSVALUE_TO_UINT64_SLOW(signed_negative) != std.math.maxInt(u64) or
+        JSVALUE_TO_INT64_SLOW(unsigned_max) != -1 or
+        JSVALUE_TO_UINT64_SLOW(unsigned_max) != std.math.maxInt(u64) or
+        JSVALUE_TO_INT64_SLOW(wrapped_large) != 5 or
+        JSVALUE_TO_UINT64_SLOW(wrapped_large) != 5 or
+        JSVALUE_TO_INT64_SLOW(wrapped_negative) != -5 or
+        JSVALUE_TO_UINT64_SLOW(wrapped_negative) != 0xffff_ffff_ffff_fffb or
+        JSVALUE_TO_INT64_SLOW(EncodedValue.fromInt32(-42)) != -42 or
+        JSVALUE_TO_UINT64_SLOW(EncodedValue.fromInt32(-42)) != @as(u64, @bitCast(@as(i64, -42))) or
+        JSVALUE_TO_INT64_SLOW(EncodedValue.fromDouble(42.0)) != 42 or
+        JSVALUE_TO_INT64_SLOW(.undefined) != 0 or
+        JSVALUE_TO_UINT64_SLOW(encoded_object) != 0)
+        fail("FFI 64-bit slow conversion mismatch");
 
     if (!JSC__JSValue__isStrictEqual(.null, .null, context) or
         JSC__JSValue__isStrictEqual(.null, .undefined, context) or
@@ -1210,5 +1231,5 @@ pub fn main() void {
         JSC__JSMap__get(map_cell, context, evaluate(context, "'direct'")) != .undefined)
         fail("private JSMap clear mismatch");
 
-    std.debug.print("Home private value shims: 76/76 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 78/78 symbols linked; runtime matrix passed\n", .{});
 }
