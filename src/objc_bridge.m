@@ -5,6 +5,44 @@
 #include <stdlib.h>
 #include <string.h>
 
+#if defined(ZJS_OBJC_BRIDGE_FAULT_INJECTION)
+static NSInteger ZJSBridgeFailureCountdown = -1;
+
+JS_EXPORT void ZJSObjectiveCBridgeSetFailureCountdown(NSInteger countdown)
+{
+    ZJSBridgeFailureCountdown = countdown;
+}
+
+static BOOL ZJSBridgeShouldFail(void)
+{
+    if (ZJSBridgeFailureCountdown < 0)
+        return NO;
+    if (ZJSBridgeFailureCountdown == 0) {
+        ZJSBridgeFailureCountdown = -1;
+        return YES;
+    }
+    --ZJSBridgeFailureCountdown;
+    return NO;
+}
+#else
+static BOOL ZJSBridgeShouldFail(void) { return NO; }
+#endif
+
+static void *ZJSBridgeMalloc(size_t size)
+{
+    return ZJSBridgeShouldFail() ? NULL : malloc(size);
+}
+
+static void *ZJSBridgeCalloc(size_t count, size_t size)
+{
+    return ZJSBridgeShouldFail() ? NULL : calloc(count, size);
+}
+
+static char *ZJSBridgeStringDuplicate(const char *source, size_t length)
+{
+    return ZJSBridgeShouldFail() ? NULL : strndup(source, length);
+}
+
 JS_EXPORT NSString *const JSPropertyDescriptorWritableKey = @"writable";
 JS_EXPORT NSString *const JSPropertyDescriptorEnumerableKey = @"enumerable";
 JS_EXPORT NSString *const JSPropertyDescriptorConfigurableKey = @"configurable";
@@ -430,9 +468,9 @@ static JSValueRef ZJSBlockCall(JSContextRef contextRef, JSObjectRef functionRef,
 
     NSMethodSignature *signature = [NSMethodSignature signatureWithObjCTypes:signatureText];
     NSUInteger nativeCount = signature.numberOfArguments;
-    ffi_type **argumentTypes = calloc(nativeCount, sizeof(ffi_type *));
-    void **argumentPointers = calloc(nativeCount, sizeof(void *));
-    ZJSFFIStorage *argumentStorage = calloc(nativeCount, sizeof(ZJSFFIStorage));
+    ffi_type **argumentTypes = ZJSBridgeCalloc(nativeCount, sizeof(ffi_type *));
+    void **argumentPointers = ZJSBridgeCalloc(nativeCount, sizeof(void *));
+    ZJSFFIStorage *argumentStorage = ZJSBridgeCalloc(nativeCount, sizeof(ZJSFFIStorage));
     if (!argumentTypes || !argumentPointers || !argumentStorage) {
         free(argumentTypes);
         free(argumentPointers);
@@ -643,7 +681,9 @@ static SEL ZJSPropertyGetter(objc_property_t property)
     custom += 2;
     const char *end = strchr(custom, ',');
     size_t length = end ? (size_t)(end - custom) : strlen(custom);
-    char *name = strndup(custom, length);
+    char *name = ZJSBridgeStringDuplicate(custom, length);
+    if (!name)
+        return NULL;
     SEL selector = sel_registerName(name);
     free(name);
     return selector;
@@ -659,7 +699,9 @@ static SEL ZJSPropertySetter(objc_property_t property)
         custom += 2;
         const char *end = strchr(custom, ',');
         size_t length = end ? (size_t)(end - custom) : strlen(custom);
-        char *name = strndup(custom, length);
+        char *name = ZJSBridgeStringDuplicate(custom, length);
+        if (!name)
+            return NULL;
         SEL selector = sel_registerName(name);
         free(name);
         return selector;
@@ -730,9 +772,9 @@ static JSValue *ZJSInvokeSelector(JSContext *context, id target, SEL selector,
     if (!signature)
         return nil;
     NSUInteger nativeCount = signature.numberOfArguments;
-    ffi_type **argumentTypes = calloc(nativeCount, sizeof(ffi_type *));
-    void **argumentPointers = calloc(nativeCount, sizeof(void *));
-    ZJSFFIStorage *argumentStorage = calloc(nativeCount, sizeof(ZJSFFIStorage));
+    ffi_type **argumentTypes = ZJSBridgeCalloc(nativeCount, sizeof(ffi_type *));
+    void **argumentPointers = ZJSBridgeCalloc(nativeCount, sizeof(void *));
+    ZJSFFIStorage *argumentStorage = ZJSBridgeCalloc(nativeCount, sizeof(ZJSFFIStorage));
     if (!argumentTypes || !argumentPointers || !argumentStorage) {
         free(argumentTypes);
         free(argumentPointers);
@@ -854,6 +896,10 @@ static JSValue *ZJSMethodValue(JSContext *context, ZJSHostObjectRecord *hostReco
     record.object = hostRecord.object;
     record.selector = selector;
     void *privateData = (void *)CFBridgingRetain(record);
+    if (ZJSBridgeShouldFail()) {
+        CFBridgingRelease(privateData);
+        return nil;
+    }
     JSObjectRef functionRef = JSObjectMake(context.JSGlobalContextRef,
                                            ZJSMethodObjectClass(), privateData);
     if (!functionRef) {
@@ -959,6 +1005,8 @@ static void ZJSExportGetPropertyNames(JSContextRef contextRef,
     }
     for (NSString *name in published) {
         JSStringRef string = ZJSStringCreate(name);
+        if (!string)
+            continue;
         JSPropertyNameAccumulatorAddName(names, string);
         JSStringRelease(string);
     }
@@ -1100,7 +1148,7 @@ static JSStringRef ZJSStringCreate(NSString *string)
     if (!string)
         return NULL;
     NSUInteger length = string.length;
-    JSChar *characters = length ? malloc(length * sizeof(JSChar)) : NULL;
+    JSChar *characters = length ? ZJSBridgeMalloc(length * sizeof(JSChar)) : NULL;
     if (length && !characters)
         return NULL;
     if (length)
@@ -1424,9 +1472,10 @@ static JSVirtualMachine *ZJSVirtualMachineForGroup(JSContextGroupRef group)
 - (void)setName:(NSString *)name
 {
     JSStringRef string = ZJSStringCreate(name);
+    if (!string)
+        return;
     JSGlobalContextSetName(self.JSGlobalContextRef, string);
-    if (string)
-        JSStringRelease(string);
+    JSStringRelease(string);
 }
 
 - (BOOL)isInspectable { return JSGlobalContextIsInspectable(self.JSGlobalContextRef); }
@@ -1435,6 +1484,8 @@ static JSVirtualMachine *ZJSVirtualMachineForGroup(JSContextGroupRef group)
 - (JSValue *)objectForKeyedSubscript:(id)key
 {
     JSValue *keyValue = [JSValue valueWithObject:key inContext:self];
+    if (!keyValue)
+        return nil;
     JSValueRef exception = NULL;
     JSValueRef value = JSObjectGetPropertyForKey(self.JSGlobalContextRef,
                                                  JSContextGetGlobalObject(self.JSGlobalContextRef),
@@ -1450,6 +1501,8 @@ static JSVirtualMachine *ZJSVirtualMachineForGroup(JSContextGroupRef group)
 {
     JSValue *keyValue = [JSValue valueWithObject:key inContext:self];
     JSValue *objectValue = [JSValue valueWithObject:object inContext:self];
+    if (!keyValue || !objectValue)
+        return;
     JSValueRef exception = NULL;
     JSObjectSetPropertyForKey(self.JSGlobalContextRef,
                               JSContextGetGlobalObject(self.JSGlobalContextRef),
@@ -1702,10 +1755,11 @@ static JSValue *ZJSValueFromObject(id object, JSContext *context,
         return [JSValue valueWithNullInContext:context];
     if ([object isKindOfClass:[NSString class]]) {
         JSStringRef string = ZJSStringCreate(object);
+        if (!string)
+            return nil;
         JSValue *value = [JSValue valueWithJSValueRef:JSValueMakeString(context.JSGlobalContextRef, string)
                                             inContext:context];
-        if (string)
-            JSStringRelease(string);
+        JSStringRelease(string);
         return value;
     }
     if ([object isKindOfClass:[NSNumber class]]) {
@@ -1787,6 +1841,10 @@ static JSValue *ZJSValueFromObject(id object, JSContext *context,
     ZJSHostObjectRecord *record = [ZJSHostObjectRecord new];
     record.object = object;
     void *privateData = (void *)CFBridgingRetain(record);
+    if (ZJSBridgeShouldFail()) {
+        CFBridgingRelease(privateData);
+        return nil;
+    }
     BOOL isBlock = ZJSIsBlock(object);
     BOOL isClass = object_isClass(object);
     JSClassRef wrapperClass = isBlock
@@ -2068,7 +2126,7 @@ static JSValueRef *ZJSCreateArguments(NSArray *arguments, JSContext *context,
     *count = arguments ? arguments.count : 0;
     if (!*count)
         return NULL;
-    JSValueRef *values = calloc(*count, sizeof(JSValueRef));
+    JSValueRef *values = ZJSBridgeCalloc(*count, sizeof(JSValueRef));
     if (!values)
         [NSException raise:NSMallocException format:@"Unable to allocate Objective-C bridge arguments"];
     @try {

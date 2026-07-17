@@ -162,6 +162,21 @@ pub fn build(b: *std.Build) void {
         const objc_leak_step = b.step("test-objc-api-leaks", "Run Objective-C lifetime stress under the macOS leak checker");
         objc_leak_step.dependOn(&objc_leak_stress.step);
 
+        const objc_fault_injection = b.addSystemCommand(&.{
+            "xcrun", "--sdk", "macosx", "clang", "-fobjc-arc", "-fblocks",
+            "-Wno-incomplete-implementation", "-DZJS_OBJC_BRIDGE_FAULT_INJECTION=1",
+        });
+        objc_fault_injection.addPrefixedDirectoryArg("-I", b.path("include"));
+        objc_fault_injection.addFileArg(b.path("tests/objc_api_fault_injection.m"));
+        objc_fault_injection.addFileArg(b.path("src/objc_bridge.m"));
+        objc_fault_injection.addArtifactArg(lib);
+        objc_fault_injection.addArgs(&.{ "-lffi", "-framework", "Foundation", "-o" });
+        const objc_fault_executable = objc_fault_injection.addOutputFileArg("objc-api-fault-injection");
+        const run_objc_fault_injection = b.addSystemCommand(&.{ "env" });
+        run_objc_fault_injection.addFileArg(objc_fault_executable);
+        const objc_fault_step = b.step("test-objc-api-faults", "Inject Objective-C bridge allocation and registration failures");
+        objc_fault_step.dependOn(&run_objc_fault_injection.step);
+
         const objc_jsc_diff_cmd = b.addSystemCommand(&.{ "python3", "tools/objc-api-jsc-diff.py" });
         objc_jsc_diff_cmd.addFileArg(installed_library.?);
         const objc_jsc_diff_step = b.step("objc-api-jsc-diff", "Compare Objective-C bridge behavior with pinned system JSC");
@@ -174,6 +189,7 @@ pub fn build(b: *std.Build) void {
         objc_evidence_step.dependOn(&run_objc_lifetime_stress.step);
         objc_evidence_step.dependOn(&run_objc_sanitized_stress.step);
         objc_evidence_step.dependOn(&objc_leak_stress.step);
+        objc_evidence_step.dependOn(&run_objc_fault_injection.step);
     }
 
     const c_api_c_smoke = b.addExecutable(.{
