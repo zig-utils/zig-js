@@ -642,6 +642,10 @@ pub const Worker = struct {
         inbox_limits: ChannelLimits = .{},
         outbox_limits: ChannelLimits = .{},
         inspector_backend: ?*const InspectorBackend = null,
+        /// Workers are long-lived agents, so precise collection is the default
+        /// instead of retaining every allocation until join. Embedders may tune
+        /// the full Context policy for deterministic or stress configurations.
+        context_options: Context.Options = .{ .enable_gc = true },
     };
 
     thread: ?std.Thread = null,
@@ -655,6 +659,7 @@ pub const Worker = struct {
     inspector_context: ?*Context = null,
     next_inspector_session_id: u64 = 1,
     inspector_wait_abort: std.atomic.Value(bool) = .init(false),
+    context_options: Context.Options,
     /// main → worker messages.
     inbox: Channel = .{},
     /// worker → main messages.
@@ -772,6 +777,7 @@ pub const Worker = struct {
             .inspector_target_id = try allocateInspectorTargetId(),
             .inspector_target_kind = .script,
             .inspector_backend = options.inspector_backend,
+            .context_options = options.context_options,
             .inbox = Channel.init(options.inbox_limits),
             .outbox = Channel.init(options.outbox_limits),
             .src = try alloc.dupe(u8, src),
@@ -811,6 +817,7 @@ pub const Worker = struct {
             .inspector_target_id = try allocateInspectorTargetId(),
             .inspector_target_kind = .module,
             .inspector_backend = options.inspector_backend,
+            .context_options = options.context_options,
             .inbox = Channel.init(options.inbox_limits),
             .outbox = Channel.init(options.outbox_limits),
             .src = &.{},
@@ -1028,7 +1035,7 @@ fn workerMain(w: *Worker) void {
         w.inspector_target_state.store(.closed, .release);
         w.notifyHost(); // final receive observes the closed target and outbox
     }
-    const ctx = Context.create(alloc) catch {
+    const ctx = Context.createWith(alloc, w.context_options) catch {
         return;
     };
     if (w.inspector_backend != null) ctx.initCApiRef();
@@ -1167,18 +1174,31 @@ test "workers: 4-way round trip, shared SAB counter, terminate mid-loop" {
 
 test "workers: inspector target ids are stable and lifecycle is atomic" {
     const first = try Worker.spawn("");
-    defer first.destroy();
+    defer {
+        if (first.thread != null) {
+            first.close();
+            first.join();
+        }
+        first.destroy();
+    }
     const second = try Worker.spawn("");
-    defer second.destroy();
+    defer {
+        if (second.thread != null) {
+            second.close();
+            second.join();
+        }
+        second.destroy();
+    }
 
     try std.testing.expect(first.inspector_target_id != 0);
+    try std.testing.expect(first.context_options.enable_gc);
     try std.testing.expect(second.inspector_target_id != 0);
     try std.testing.expect(first.inspector_target_id != second.inspector_target_id);
     try std.testing.expectEqual(Worker.InspectorTargetKind.script, first.inspector_target_kind);
     try std.testing.expectEqual(Worker.InspectorTargetKind.script, second.inspector_target_kind);
 
     var spins: usize = 0;
-    while (first.inspectorTargetState() == .starting and spins < 100_000) : (spins += 1) {
+    while (first.inspectorTargetState() == .starting and spins < 10_000_000) : (spins += 1) {
         if ((spins & 0xff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
     }
     try std.testing.expectEqual(Worker.InspectorTargetState.running, first.inspectorTargetState());

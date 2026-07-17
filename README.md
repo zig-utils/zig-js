@@ -353,7 +353,7 @@ const parallel = try js.Context.createWith(gpa, .{ .enable_threads = true });
 const serialized = try js.Context.createWith(gpa, .{ .enable_threads = true, .gil = true });
 ```
 
-The isolated `Worker` implementation lives in [src/worker.zig](src/worker.zig) and is exposed to C embedders through the `JSWorker*` extension functions. `ZJSWorkerGetInspectorTargetInfo` and `ZJSWorkerInspectorSession*` provide stable target metadata plus cross-thread debugging without exposing the worker Context.
+The isolated `Worker` implementation lives in [src/worker.zig](src/worker.zig) and is exposed to C embedders through the `JSWorker*` extension functions. Workers use their own precise GC heap by default rather than retaining every allocation until join. `ZJSWorkerGetInspectorTargetInfo` and `ZJSWorkerInspectorSession*` provide stable target metadata plus cross-thread debugging without exposing the worker Context.
 
 Current thread status is tracked in:
 

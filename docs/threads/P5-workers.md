@@ -9,8 +9,11 @@ engine-global `std.Io.Threaded`, real OS threads, blocking/wake) and Phase 4
 
 ## Model
 
-A `Worker` owns one OS thread and one `Context` (own arena, realm, shapes,
-microtask queue — the Phase-0 affinity model holds per worker). The only
+A `Worker` owns one OS thread and one Context (own precise GC heap, realm,
+shapes, microtask queue—the Phase-0 affinity model holds per worker). Precise
+collection is the default because workers are long-lived agents;
+`Worker.Options.context_options` exposes the complete Context policy for
+deterministic and stress configurations. The only
 things that cross a worker boundary are **serialized bytes** (process-
 allocator-owned, produced by `structured_clone.serialize`) and **retained SAB
 storage** (the refcounted `SharedBufferStorage` from Phase 1). Each framed
@@ -19,7 +22,7 @@ pointers; the clone payload names them by canonical index. A locked registry
 atomically consumes each token on deserialize or queue cleanup, and manifest
 cleanup does not depend on recursively parsing a valid payload. Forged,
 out-of-order, duplicate, and replayed token references fail closed. Nothing that
-lives in a worker arena ever escapes it — same lifetime rule as agents.
+lives in a worker heap ever escapes it—same lifetime rule as agents.
 Serialization, structural preflight, and deserialization share a 256-level
 wire-nesting ceiling; an over-depth graph or payload produces a catchable clone
 error while its frame manifest still releases retained SAB references.
