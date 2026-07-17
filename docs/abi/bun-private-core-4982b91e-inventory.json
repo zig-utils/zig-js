@@ -83,8 +83,8 @@
     },
     "by_status": {
       "external": 1,
-      "implemented": 223,
-      "pending": 213
+      "implemented": 224,
+      "pending": 212
     }
   },
   "home_comparison": {
@@ -2195,10 +2195,10 @@
       "line": 55,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSValue__isJSXElement(JSValue, *JSGlobalObject) bool;",
       "declaration_sha256": "cb4d0f0af45b668716a4c404c60719e6a984f3118161814335621d7d35be8bd6",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSValue__isSameValue",

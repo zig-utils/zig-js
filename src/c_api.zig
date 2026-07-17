@@ -5205,6 +5205,48 @@ export fn JSC__JSValue__jsonStringifyFast(
     privateJSONStringify(encoded, global, null, output);
 }
 
+export fn JSC__JSValue__isJSXElement(
+    encoded: EncodedValue,
+    global: JSContextRef,
+) callconv(.c) bool {
+    const context = ctxForEvaluation(global) orelse return false;
+    const group = privatePropertyBoundaryGroup(context) orelse return false;
+    if (group.pending_exception != null) return false;
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return false;
+    };
+    defer context.popActiveInterpreter(&machine);
+    const target = privateValueFrom(global, encoded) orelse {
+        const err = machine.throwError("TypeError", "JSX element value belongs to another VM");
+        privateSetPendingAbrupt(context, &machine, err);
+        return false;
+    };
+    // JSC's isObject excludes its Symbol/BigInt cells even though zig-js keeps
+    // those GC-managed primitives in Object storage internally.
+    if (!target.isObject() or target.asObj().is_symbol or target.asObj().is_bigint) return false;
+    const type_value = machine.getProperty(target, "$$typeof") catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return false;
+    };
+    if (!type_value.isObject() or !type_value.asObj().is_symbol) return false;
+    const legacy = interp.symbolForKey(&machine, "react.element") catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return false;
+    };
+    if (value.strictEquals(type_value, legacy)) return true;
+    const transitional = interp.symbolForKey(&machine, "react.transitional.element") catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return false;
+    };
+    return value.strictEquals(type_value, transitional);
+}
+
 export fn JSC__JSString__eql(
     left_cell: ?*anyopaque,
     global: JSContextRef,
@@ -16606,6 +16648,68 @@ test "private JSON stringification preserves normal and undefined-space semantic
     try std.testing.expectEqual(PrivateBunStringTag.dead, abrupt.tag);
     pending = JSGlobalObject__tryTakeException(context);
     try std.testing.expectEqual(EncodedValue.fromInt32(226), JSC__Exception__asJSValue(@ptrFromInt(try pending.asCellAddress())));
+}
+
+test "private JSX element predicate preserves registry identity and ordinary get" {
+    const group_ref = JSContextGroupCreate() orelse return error.GroupCreateFailed;
+    defer JSContextGroupRelease(group_ref);
+    const context = JSGlobalContextCreateInGroup(group_ref, null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(context);
+    const sibling = JSGlobalContextCreateInGroup(group_ref, null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(sibling);
+    const internal = ctxForEvaluation(context) orelse return error.ContextCreateFailed;
+    const Probe = struct {
+        fn encoded(context_: *Context, source: []const u8) !EncodedValue {
+            return privateEncodedFromValue(context_, try context_.evaluate(source));
+        }
+    };
+
+    try std.testing.expect(JSC__JSValue__isJSXElement(try Probe.encoded(internal, "({ $$typeof: Symbol.for('react.element') })"), context));
+    try std.testing.expect(JSC__JSValue__isJSXElement(try Probe.encoded(internal, "({ $$typeof: Symbol.for('react.transitional.element') })"), context));
+    try std.testing.expect(!JSC__JSValue__isJSXElement(try Probe.encoded(internal, "({ $$typeof: Symbol('react.element') })"), context));
+    try std.testing.expect(!JSC__JSValue__isJSXElement(try Probe.encoded(internal, "({ $$typeof: 'react.element' })"), context));
+    try std.testing.expect(!JSC__JSValue__isJSXElement(EncodedValue.fromInt32(228), context));
+    try std.testing.expect(!JSC__JSValue__isJSXElement(try Probe.encoded(internal, "Symbol.for('react.element')"), context));
+    try std.testing.expect(JSC__JSValue__isJSXElement(try Probe.encoded(internal, "Object.create({ $$typeof: Symbol.for('react.element') })"), context));
+
+    const getter = try Probe.encoded(
+        internal,
+        "globalThis.__jsx_gets_228 = 0; ({ get $$typeof() { __jsx_gets_228++; return Symbol.for('react.element'); } })",
+    );
+    try std.testing.expect(JSC__JSValue__isJSXElement(getter, context));
+    try std.testing.expectEqual(@as(f64, 1), (try internal.evaluate("__jsx_gets_228")).asNum());
+    const proxy = try Probe.encoded(
+        internal,
+        "globalThis.__jsx_proxy_gets_228 = 0; new Proxy({ $$typeof: Symbol.for('react.transitional.element') }, { get(target, key, receiver) { __jsx_proxy_gets_228++; return Reflect.get(target, key, receiver); } })",
+    );
+    try std.testing.expect(JSC__JSValue__isJSXElement(proxy, context));
+    try std.testing.expectEqual(@as(f64, 1), (try internal.evaluate("__jsx_proxy_gets_228")).asNum());
+
+    const shared = try Probe.encoded(internal, "({ $$typeof: Symbol.for('react.element') })");
+    try std.testing.expect(JSC__JSValue__isJSXElement(shared, sibling));
+
+    const throwing = try Probe.encoded(internal, "({ get $$typeof() { throw 2281; } })");
+    try std.testing.expect(!JSC__JSValue__isJSXElement(throwing, context));
+    var pending = JSGlobalObject__tryTakeException(context);
+    try std.testing.expectEqual(EncodedValue.fromInt32(2281), JSC__Exception__asJSValue(@ptrFromInt(try pending.asCellAddress())));
+
+    const foreign = JSGlobalContextCreate(null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(foreign);
+    const foreign_internal = ctxForEvaluation(foreign) orelse return error.ContextCreateFailed;
+    const foreign_value = privateEncodedFromValue(foreign_internal, try foreign_internal.evaluate("({ $$typeof: Symbol.for('react.element') })"));
+    try std.testing.expect(!JSC__JSValue__isJSXElement(foreign_value, context));
+    try std.testing.expect(JSGlobalObject__hasException(context));
+    JSGlobalObject__clearException(context);
+
+    const blocked = try Probe.encoded(
+        internal,
+        "globalThis.__jsx_blocked_gets_228 = 0; ({ get $$typeof() { __jsx_blocked_gets_228++; return Symbol.for('react.element'); } })",
+    );
+    JSC__VM__throwError(JSC__JSGlobalObject__vm(context), context, EncodedValue.fromInt32(228));
+    try std.testing.expect(!JSC__JSValue__isJSXElement(blocked, context));
+    pending = JSGlobalObject__tryTakeException(context);
+    try std.testing.expectEqual(EncodedValue.fromInt32(228), JSC__Exception__asJSValue(@ptrFromInt(try pending.asCellAddress())));
+    try std.testing.expectEqual(@as(f64, 0), (try internal.evaluate("__jsx_blocked_gets_228")).asNum());
 }
 
 test "private VM entry-state query tracks nested and sibling interpreters" {

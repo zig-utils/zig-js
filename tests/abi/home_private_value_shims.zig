@@ -239,6 +239,7 @@ extern "c" fn JSC__JSValue__getNameProperty(EncodedValue, JSContextRef, *ZigStri
 extern "c" fn JSC__JSValue__getName(EncodedValue, JSContextRef, *BunString) void;
 extern "c" fn JSC__JSValue__jsonStringify(EncodedValue, JSContextRef, u32, *BunString) void;
 extern "c" fn JSC__JSValue__jsonStringifyFast(EncodedValue, JSContextRef, *BunString) void;
+extern "c" fn JSC__JSValue__isJSXElement(EncodedValue, JSContextRef) bool;
 extern "c" fn JSC__jsTypeStringForValue(JSContextRef, EncodedValue) ?*anyopaque;
 extern "c" fn JSC__JSString__eql(?*anyopaque, JSContextRef, ?*anyopaque) bool;
 extern "c" fn JSC__JSString__is8Bit(?*anyopaque) bool;
@@ -1145,6 +1146,11 @@ pub fn main() void {
         !JSC__JSValue__isStrictEqual(BunString__toJS(context, &json_output), evaluate(context, "'{\\n  \\\"z\\\": 1,\\n  \\\"a\\\": [\\n    true,\\n    null\\n  ]\\n}'"), context))
         fail("private indented JSON stringification mismatch");
     Bun__WTFStringImpl__deref(json_output.value.wtf_string_impl);
+
+    if (!JSC__JSValue__isJSXElement(evaluate(context, "({ $$typeof: Symbol.for('react.element') })"), context) or
+        !JSC__JSValue__isJSXElement(evaluate(context, "({ $$typeof: Symbol.for('react.transitional.element') })"), context) or
+        JSC__JSValue__isJSXElement(evaluate(context, "({ $$typeof: Symbol('react.element') })"), context))
+        fail("private JSX element registry predicate mismatch");
     json_output = .{ .tag = .dead, .value = .{ .zig_string = .{ .tagged_ptr = 0, .len = 0 } } };
     JSC__JSValue__jsonStringifyFast(json_target, context, &json_output);
     if (json_output.tag != .wtf_string_impl or
@@ -3224,5 +3230,5 @@ pub fn main() void {
         TopExceptionScope__exceptionIncludingTraps(&verification_scope) != null)
         fail("private TopExceptionScope destruction mismatch");
 
-    std.debug.print("Home private value shims: 213/213 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 214/214 symbols linked; runtime matrix passed\n", .{});
 }
