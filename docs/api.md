@@ -26,10 +26,10 @@ compile-link-runtime fixture. It remains deliberately separate from private
 Home/Bun ABI work.
 
 Private-profile exports are audited independently and never inflate the public
-or extension totals. The pinned Home inventory currently reports 153
-private exports and 278 pending private symbols; `zig build test-home-private-abi` and
+or extension totals. The pinned Home inventory currently reports 161
+private exports and 270 pending private symbols; `zig build test-home-private-abi` and
 `zig build test-private-jstype` are their focused compile-link-runtime gates.
-The 153 cover JSC64 identity, cell equality,
+The 161 cover JSC64 identity, cell equality,
 truthiness, int32 extraction, exact signed/unsigned 64-bit BigInt construction,
 modulo-2^64 BigInt extraction with the pinned int32/Int52 fallbacks, and exact
 JavaScript strict/SameValue equality across primitives and owned cells, plus
@@ -123,8 +123,14 @@ payloads execute once, encoded values must belong to the selected VM, reentrant
 jobs drain to quiescence, and a throwing job retains the untouched FIFO tail.
 Code deletion clears selected-realm module/source caches and blocks until every
 native execution or compilation lease retires before resetting tiers and
-unmapping pages; subsequent calls fall back safely and may recompile. The
-array/index slice supplies exact
+unmapping pages; subsequent calls fall back safely and may recompile. Eight
+strong/weak reference exports retain the consumer-visible EncodedJSValue
+slot at offset zero, root exact same-VM values across collection, accept sibling
+realms, and reject foreign-VM replacement. Weak object targets use zig-gc atomic
+external slots, clear without retention, and deliver the FetchResponse owner
+callback once after GC clearing but never after explicit clear/delete. Wrappers
+retain their VM through deletion, and root-list mutation is synchronized with
+concurrent tracing. The array/index slice supplies exact
 logical-length and hole behavior, direct put/push/read operations that bypass
 inherited setters, ordinary indexed reads that observe prototypes and getters,
 VM exception publication for abrupt completion, sparse growth, and the u32
@@ -161,12 +167,12 @@ exact identity, insertion order, live size, sibling values, and failure-atomic
 foreign-VM rejection. The shared FFI slow paths perform exact signed/unsigned
 modulo-2^64 conversion for validated heap BigInts. CommonAbortReason conversion
 creates fresh selected-realm TimeoutError/AbortError DOMExceptions with the
-pinned messages and legacy codes. The combined 152-symbol fixture also
+pinned messages and legacy codes. The combined 160-symbol fixture also
 covers sibling realms, foreign-VM failures, exception clearing, callback
 reentrancy, and already-settled targets.
 
 Bun's separately pinned core `src/jsc` inventory reports 421 private symbols,
-of which 147 shims are implemented and 274 remain pending. Its
+of which 155 shims are implemented and 266 remain pending. Its
 source/signature audit is `zig build bun-private-abi-audit`; broader Bun runtime
 and generated bindings are outside that first core profile. The inventoried
 `JSFunctionCall` declaration is consumer-provided because each runtime-compiled

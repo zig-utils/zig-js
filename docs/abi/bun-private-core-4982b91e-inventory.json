@@ -83,8 +83,8 @@
     },
     "by_status": {
       "external": 1,
-      "implemented": 162,
-      "pending": 274
+      "implemented": 170,
+      "pending": 266
     }
   },
   "home_comparison": {
@@ -545,10 +545,10 @@
       "line": 147,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn Bun__StrongRef__clear(this: *Impl) void;",
       "declaration_sha256": "77934a3c782e0fd772368736b19ed6fe549a652d59b3a10a41c123ce5a132518",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Bun__StrongRef__delete",
@@ -556,10 +556,10 @@
       "line": 144,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn Bun__StrongRef__delete(this: *Impl) void;",
       "declaration_sha256": "80122bf4ec6fa4d0470b80699ea8b4f0165fa0203be86a28767a072aac42ba8f",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Bun__StrongRef__new",
@@ -567,10 +567,10 @@
       "line": 145,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn Bun__StrongRef__new(*jsc.JSGlobalObject, jsc.JSValue) *Impl;",
       "declaration_sha256": "12f4d0aead80f01197678ea1ec1ba316fa85f2857aec3fd5c3192e31b3a76362",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Bun__StrongRef__set",
@@ -578,10 +578,10 @@
       "line": 146,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn Bun__StrongRef__set(this: *Impl, *jsc.JSGlobalObject, jsc.JSValue) void;",
       "declaration_sha256": "865967982beb0474efda78ee3d86a2433a79bda7a53adc2bb67de4f3af9ebd36",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Bun__WeakRef__clear",
@@ -589,10 +589,10 @@
       "line": 32,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn Bun__WeakRef__clear(this: *WeakImpl) void;",
       "declaration_sha256": "4b22602e7ac4ee7a5cfde6b229931777533a771847f64189a59f3fa80511aae7",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Bun__WeakRef__delete",
@@ -600,10 +600,10 @@
       "line": 29,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn Bun__WeakRef__delete(this: *WeakImpl) void;",
       "declaration_sha256": "94f9eb63940a02b969d53b7be69fca4cb6f301e10e616723febe791ad713e2fd",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Bun__WeakRef__get",
@@ -611,10 +611,10 @@
       "line": 31,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn Bun__WeakRef__get(this: *WeakImpl) jsc.JSValue;",
       "declaration_sha256": "107e455578f76dee6ce854da4dabbeee8f7e26398a3b64e5c0405fbe2a2df30d",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Bun__WeakRef__new",
@@ -622,10 +622,10 @@
       "line": 30,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn Bun__WeakRef__new(*jsc.JSGlobalObject, jsc.JSValue, refType: WeakRefType, ctx: ?*anyopaque) *WeakImpl;",
       "declaration_sha256": "8a5e84667bc6771a1bbec83e3f8c7f4ce392639686afd2f786962b0eb43ba160",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Bun__WebView__closeAllForTermination",
