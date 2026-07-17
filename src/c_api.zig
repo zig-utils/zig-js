@@ -37,12 +37,14 @@ const builtins = @import("builtins.zig");
 const promise = @import("promise.zig");
 const vm = @import("vm.zig");
 const strcell = @import("strcell.zig");
+const private_encoded_value = @import("private_abi/encoded_value.zig");
 const WorkerMod = @import("worker.zig");
 const JsString = @import("jsstring.zig").JsString;
 
 const Context = ContextMod.Context;
 const Value = value.Value;
 const Object = value.Object;
+const EncodedValue = private_encoded_value.EncodedValue;
 
 /// Global allocator for C-API-created contexts and strings. `page_allocator`
 /// needs no libc and is always available; a tuned allocator can replace it.
@@ -1216,6 +1218,44 @@ fn box(ctx: *Context, v: Value) JSValueRef {
 
 fn boxedFrom(ref: JSValueRef) ?*Boxed {
     return @ptrCast(@alignCast(ref orelse return null));
+}
+
+fn privateBoxedFrom(encoded: EncodedValue) ?*Boxed {
+    const address = encoded.asCellAddress() catch return null;
+    const boxed: *Boxed = @ptrFromInt(address);
+    if (boxed.owner.c_api_group == null or boxed.owner.c_api_ref_count.load(.acquire) == 0)
+        return null;
+    boxed.owner.assertOwnerThread();
+    return boxed;
+}
+
+/// First revision-pinned Home private-ABI slice. These symbols consume JSC64
+/// words, not zig-js's internal NaN-box representation.
+export fn JSC__JSValue__eqlCell(encoded: EncodedValue, cell: ?*anyopaque) callconv(.c) bool {
+    const address = encoded.asCellAddress() catch return false;
+    return cell != null and address == @intFromPtr(cell.?);
+}
+
+export fn JSC__JSValue__eqlValue(left: EncodedValue, right: EncodedValue) callconv(.c) bool {
+    return left.rawBits() == right.rawBits();
+}
+
+export fn JSC__JSValue__toInt32(encoded: EncodedValue) callconv(.c) i32 {
+    return if (encoded.isInt32()) encoded.asInt32() else 0;
+}
+
+export fn JSC__JSValue__toBoolean(encoded: EncodedValue) callconv(.c) bool {
+    const decoded = encoded.toInternalPrimitive(Value) catch |conversion_error| switch (conversion_error) {
+        error.CellRequiresHandle => {
+            const boxed = privateBoxedFrom(encoded) orelse return false;
+            // Bun's pinned shim uses pureToBoolean() and deliberately counts
+            // masquerades-as-undefined objects as true at this boundary.
+            if (boxed.value.isObject() and boxed.value.asObj().behavior.is_htmldda) return true;
+            return boxed.value.toBoolean();
+        },
+        else => return false,
+    };
+    return decoded.toBoolean();
 }
 
 fn valueFromContext(ctx: *Context, ref: JSValueRef) ?Value {

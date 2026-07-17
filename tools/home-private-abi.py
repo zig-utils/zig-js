@@ -15,11 +15,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 OUTPUT = ROOT / "docs/abi/home-private-7ed99c02-inventory.json"
 PUBLIC_INVENTORY = ROOT / "docs/c-api/jsc-public-api-macos-27.0.json"
+EXPORT_SOURCE = ROOT / "src/c_api.zig"
 PROFILE_ID = "home-private-7ed99c02"
 REVISION = "7ed99c02e50034f869d0db6d487115bb44332fe4"
 SOURCE_ROOT = Path("packages/runtime/src/jsc")
 EXTERN_RE = re.compile(r"\b(?:pub\s+)?extern\s+fn\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(")
 PLATFORM_IMPORTS = {"gnu_get_libc_version"}
+EXPORT_RE = re.compile(r"^export fn ([A-Za-z_][A-Za-z0-9_]*)\s*\(", re.M)
 
 
 def fail(message: str) -> None:
@@ -242,6 +244,23 @@ def generate(home_root: Path) -> dict[str, object]:
     }
 
 
+def refresh_implementation_status(data: dict[str, object]) -> None:
+    zig_js_exports = set(EXPORT_RE.findall(EXPORT_SOURCE.read_text()))
+    for entry in data["declarations"]:
+        if entry["classification"] != "private_jsc":
+            continue
+        if entry["name"] in zig_js_exports:
+            entry["status"] = "implemented"
+            entry.pop("issue", None)
+            entry["implementation"] = "src/c_api.zig"
+        else:
+            entry["status"] = "pending"
+            entry["issue"] = 163
+            entry.pop("implementation", None)
+    statuses = Counter(str(entry["status"]) for entry in data["declarations"])
+    data["totals"]["by_status"] = dict(sorted(statuses.items()))
+
+
 def validate_stored(data: dict[str, object]) -> None:
     if data.get("schema_version") != 1 or data.get("profile_id") != PROFILE_ID:
         fail("stored inventory schema or profile identity mismatch")
@@ -253,6 +272,7 @@ def validate_stored(data: dict[str, object]) -> None:
     public_data = json.loads(PUBLIC_INVENTORY.read_text())
     public_names = {entry["name"] for entry in public_data["functions"]}
     conventions = set(data.get("calling_conventions", {}))
+    zig_js_exports = set(EXPORT_RE.findall(EXPORT_SOURCE.read_text()))
     for entry in entries:
         name = entry.get("name")
         declaration = entry.get("declaration")
@@ -265,8 +285,14 @@ def validate_stored(data: dict[str, object]) -> None:
             fail(f"{name} is unclassified")
         if entry.get("declaration_sha256") != sha256_bytes(declaration.encode()):
             fail(f"{name} declaration digest drift")
-        if classification == "private_jsc" and (entry.get("status") != "pending" or entry.get("issue") != 163):
-            fail(f"{name} private status is not linked to #163")
+        if classification == "private_jsc":
+            expected_status = "implemented" if name in zig_js_exports else "pending"
+            if entry.get("status") != expected_status:
+                fail(f"{name} private implementation status drift")
+            if expected_status == "pending" and entry.get("issue") != 163:
+                fail(f"{name} pending status is not linked to #163")
+            if expected_status == "implemented" and entry.get("implementation") != "src/c_api.zig":
+                fail(f"{name} implementation location drift")
         expected_classification = (
             "public_c_api" if name in public_names
             else "platform_import" if name in PLATFORM_IMPORTS
@@ -281,6 +307,9 @@ def validate_stored(data: dict[str, object]) -> None:
     totals = data.get("totals", {})
     if totals.get("symbols") != len(entries) or totals.get("by_classification") != dict(sorted(counts.items())):
         fail("stored inventory totals drift")
+    statuses = Counter(str(entry["status"]) for entry in entries)
+    if totals.get("by_status") != dict(sorted(statuses.items())):
+        fail("stored implementation-status totals drift")
     source_files = data.get("consumer", {}).get("source_files", {})
     if totals.get("source_files") != len(source_files):
         fail("stored source-file total drift")
@@ -290,12 +319,16 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--home-root", type=Path)
     parser.add_argument("--write", action="store_true")
+    parser.add_argument("--refresh-implementation-status", action="store_true")
     args = parser.parse_args()
     if args.write and not args.home_root:
         fail("--write requires --home-root")
+    if args.write and args.refresh_implementation_status:
+        fail("--write and --refresh-implementation-status are mutually exclusive")
 
     if args.home_root:
         generated = generate(args.home_root.resolve())
+        refresh_implementation_status(generated)
         if args.write:
             OUTPUT.write_text(json.dumps(generated, indent=2) + "\n")
         elif not OUTPUT.is_file() or generated != json.loads(OUTPUT.read_text()):
@@ -303,13 +336,19 @@ def main() -> None:
     if not OUTPUT.is_file():
         fail(f"missing checked-in inventory {OUTPUT}")
     stored = json.loads(OUTPUT.read_text())
+    if args.refresh_implementation_status:
+        refresh_implementation_status(stored)
+        OUTPUT.write_text(json.dumps(stored, indent=2) + "\n")
     validate_stored(stored)
     totals = stored["totals"]
     classes = totals["by_classification"]
+    statuses = totals["by_status"]
     print(
         f"Home private ABI audit: {totals['symbols']} symbols from {totals['source_files']} files; "
         f"private={classes.get('private_jsc', 0)}, public={classes.get('public_c_api', 0)}, "
-        f"platform={classes.get('platform_import', 0)}, unclassified=0"
+        f"platform={classes.get('platform_import', 0)}, "
+        f"implemented-private={statuses.get('implemented', 0) - classes.get('public_c_api', 0)}, "
+        f"pending-private={statuses.get('pending', 0)}, unclassified=0"
     )
 
 

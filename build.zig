@@ -302,6 +302,23 @@ pub fn build(b: *std.Build) void {
     private_encoded_value_step.dependOn(&run_private_encoded_value_fixture.step);
     private_encoded_value_step.dependOn(&run_private_encoded_value_tests.step);
 
+    const home_private_value_fixture = b.addExecutable(.{
+        .name = "home-private-value-shims",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/abi/home_private_value_shims.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    home_private_value_fixture.root_module.linkLibrary(lib);
+    const run_home_private_value_fixture = b.addRunArtifact(home_private_value_fixture);
+    run_home_private_value_fixture.step.dependOn(&home_private_abi_audit_cmd.step);
+    const home_private_abi_test_step = b.step(
+        "test-home-private-abi",
+        "Compile, link, and run implemented Home private-ABI slices",
+    );
+    home_private_abi_test_step.dependOn(&run_home_private_value_fixture.step);
+
     const c_api_value_diff = b.addExecutable(.{
         .name = "c-api-value-diff-zig-js",
         .root_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true }),

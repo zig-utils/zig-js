@@ -12,6 +12,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 INVENTORY = ROOT / "docs/c-api/jsc-public-api-macos-27.0.json"
+PRIVATE_INVENTORY = ROOT / "docs/abi/home-private-7ed99c02-inventory.json"
 INCLUDE = ROOT / "include/JavaScriptCore"
 SOURCE = ROOT / "src/c_api.zig"
 
@@ -94,7 +95,12 @@ def main() -> None:
         fail(f"implemented functions missing Zig exports: {missing_exports}")
 
     extensions = set(data["zig_js_extensions"])
-    unexpected_exports = sorted(exports - inventory_names - extensions)
+    private_data = json.loads(PRIVATE_INVENTORY.read_text())
+    private_exports = {
+        entry["name"] for entry in private_data["declarations"]
+        if entry["classification"] == "private_jsc" and entry["status"] == "implemented"
+    }
+    unexpected_exports = sorted(exports - inventory_names - extensions - private_exports)
     missing_extensions = sorted(extensions - exports)
     if unexpected_exports or missing_extensions:
         fail(
@@ -117,7 +123,7 @@ def main() -> None:
     print(
         f"c-api audit: 117 declarations, {len(implemented)} complete, "
         f"{pending} pending, {existing} public symbols present, "
-        f"{len(extensions)} zig-js extensions"
+        f"{len(extensions)} zig-js extensions, {len(private_exports)} private profile exports"
     )
 
 

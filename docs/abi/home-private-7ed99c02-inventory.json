@@ -84,6 +84,11 @@
       "platform_import": 1,
       "private_jsc": 432,
       "public_c_api": 15
+    },
+    "by_status": {
+      "external": 1,
+      "implemented": 19,
+      "pending": 428
     }
   },
   "declarations": [
@@ -1864,10 +1869,10 @@
       "line": 1365,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSValue__eqlCell(this: JSValue, other: *JSCell) bool;",
       "declaration_sha256": "c25834171d30799f509903b4ad8467a53e13ec5b04a0f05c8bdb9916dd98a032",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSValue__eqlValue",
@@ -1875,10 +1880,10 @@
       "line": 1360,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSValue__eqlValue(this: JSValue, other: JSValue) bool;",
       "declaration_sha256": "0a844347bdbf39232199bce6714bf9111b9e677bcf48bd73ab85cef45ab9eb3d",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSValue__fastGet",
@@ -2447,10 +2452,10 @@
       "line": 2103,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSValue__toBoolean(this: JSValue) bool;",
       "declaration_sha256": "f95a2c684c79e0b75d4b2ad087c87c3f58afea24cc3f0b9f362a2f6bb1b39d34",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSValue__toError_",
@@ -2480,10 +2485,10 @@
       "line": 2125,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSValue__toInt32(this: JSValue) i32;",
       "declaration_sha256": "c8d658c6e0c31d0b3b032ddd4a5bd17c69f0db2651da4c72d743614969177262",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSValue__toObject",
