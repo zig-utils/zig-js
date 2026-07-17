@@ -53,7 +53,8 @@ Run the lifetime and completion evidence separately or as one matrix:
 zig build test-objc-api-lifetime # 200 VM/context/autorelease teardown cycles
 zig build test-objc-api-sanitize # ASan + UBSan
 zig build test-objc-api-leaks    # Apple leaks: must report 0 leaked bytes
-zig build test-objc-api-evidence # headers, runtime, diff, stress, sanitizers, leaks
+zig build test-objc-api-faults   # deterministic allocation/registration rollback
+zig build test-objc-api-evidence # headers, runtime, diff, stress, faults, sanitizers, leaks
 ```
 
 The hosts exercise VM/context construction and identity, evaluation and
@@ -68,12 +69,11 @@ receivers, constructors, prototypes, and target-context wrapper behavior.
 At an explicit `JSGarbageCollect` epoch, an unowned managed value is cleared when
 a cycle-safe walk across every realm finds no strong path to it; WeakRef and
 weak-collection edges do not retain the target. This is semantic weak clearing:
-the arena still reclaims physical storage at VM teardown. Issue #159 continues
-tracking allocation fault injection; #160 remains linked to the parent bridge
-closure gate. The checked-in
-lifetime gate covers duplicate managed add/remove operations, owner and context
-death, cross-context exported wrappers, typed blocks, cyclic conversion, and
-200 full VM teardowns; it currently passes ASan, UBSan, and Apple's leak checker
+the arena still reclaims physical storage at VM teardown. The checked-in
+lifetime and fault gates cover duplicate managed add/remove operations, owner
+and context death, cross-context exported wrappers, typed blocks, cyclic
+conversion, and every C allocation/host-registration rollback position. The
+200-cycle teardown run currently passes ASan, UBSan, and Apple's leak checker
 with 0 leaked bytes.
 
 Compare the pin against an installed SDK explicitly:

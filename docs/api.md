@@ -57,9 +57,11 @@ the [Objective-C bridge inventory
 guide](objc-api/README.md) for the exact boundary and reproduction details.
 The complete declared inventory does not claim compatibility with private JSC
 framework internals. Managed values clear semantically at explicit collection
-epochs while arena storage remains VM-lifetime. `zig build test-objc-api-evidence` batches header,
-runtime, system-JSC differential, 200-cycle lifetime/autorelease, ASan/UBSan,
-and Apple leak-checker gates; the current leak result is 0 leaked bytes.
+epochs while arena storage remains VM-lifetime.
+`zig build test-objc-api-evidence` batches header, runtime, system-JSC
+differential, 200-cycle lifetime/autorelease, ASan/UBSan,
+deterministic allocation/registration fault injection, and Apple leak-checker
+gates; the current leak result is 0 leaked bytes.
 
 The project is still pre-stabilization. Compatibility-shaped entry points are an embedder convenience, not a promise to preserve inert arguments or incomplete JavaScriptCore behavior. When a compatibility shim conflicts with clear zig-js semantics, the shim should either grow real behavior or be redesigned before the API is declared stable.
 

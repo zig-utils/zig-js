@@ -330,6 +330,7 @@ zig build objc-api-jsc-diff      # Objective-C Foundation conversion vs system J
 zig build test-objc-api-lifetime # 200-cycle VM/wrapper/autorelease teardown stress
 zig build test-objc-api-sanitize # lifetime stress under ASan + UBSan
 zig build test-objc-api-leaks    # lifetime stress under Apple's leak checker
+zig build test-objc-api-faults   # deterministic allocation/registration rollback
 zig build test-objc-api-evidence # complete Objective-C bridge evidence matrix
 zig build c-api-jsc-diff         # completed value APIs vs pinned system JSC (macOS)
 zig build threads-test            # WebKit PR-249 thread allowlist
@@ -392,7 +393,7 @@ Do not read the green configured runner as "the whole JavaScript universe is fin
 
 Completion of every item—and the evidence gate for removing this section—is tracked in [issue #134](https://github.com/zig-utils/zig-js/issues/134).
 
-- Objective-C bridge allocation fault-injection evidence, full JavaScriptCore framework/private internals, and Bun/Home private JSC ABI;
+- full JavaScriptCore framework/private internals and Bun/Home private JSC ABI;
 - WebAssembly and JIT shell hooks from the PR-249 reference corpus;
 - moving or multi-age generational GC, parallel mid-script minor collection, and any optimizing JIT.
 
