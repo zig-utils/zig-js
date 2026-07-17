@@ -49,7 +49,7 @@ zig build home-private-abi-audit \
 
 This verifies the live revision, every source hash, signature, classification,
 and calling convention. It replaces a vague source-level estimate, but the 431
-private imports are now 97 implemented / 334 pending under #163. The generated
+private imports are now 102 implemented / 329 pending under #163. The generated
 FFI wrapper emits and resolves `JSFunctionCall` inside its own compiled module,
 so zig-js must not provide a duplicate symbol. The implemented
 slices cover JSC64 value identity, cell equality, truthiness, int32 extraction,
@@ -80,6 +80,11 @@ The two borrowed-output bridges return group-lifetime-stable Latin-1 or tagged
 UTF-16 views from exact JSString cells and full JSValue ToString coercion. Their
 cache is shared by sibling realms, isolated across VMs, and released with the
 context group; invalid cells and abrupt completion zero the output safely.
+Five private error factories consume ZigString message/code pairs or every
+BunString representation and create fresh selected-realm Error, TypeError, and
+RangeError objects. TypeError codes are writable, RangeError codes are
+read-only, empty codes are omitted, and dead input or a pending exception fails
+without exposing a partial result.
 Two ordinary-object constructors and the wrapper-unboxing shim add exact prototype,
 freshness, int32/double, negative-zero, NaN, and primitive-value behavior. Three
 value-level BigInt shims add four-way BigInt/Number comparison,
@@ -120,7 +125,7 @@ behavior, and VM exception propagation. Ten Promise/InternalPromise shims add
 selected-realm pending and directly settled promises, exact native downcasts,
 callback Promise passthrough, Error/throw rejection, and normal AnyPromise
 resolution with thenable assimilation and self-resolution protection. Their
-95-symbol combined fixture covers sibling realms, foreign VMs, callback
+100-symbol combined fixture covers sibling realms, foreign VMs, callback
 reentrancy, exception clearing, settled-target no-ops, and the complete
 DOMException code matrix. Seven Home-only
 JSMap shims create selected-realm native maps and directly implement
