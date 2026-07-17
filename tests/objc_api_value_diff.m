@@ -72,6 +72,15 @@ int main(void)
                                                     currentThisIsPromise,
                                                     (unsigned long)currentArgumentCount,
                                                     [context[@"promiseResult"] toInt32] == 42]);
+
+        NSObject *nativeObject = [NSObject new];
+        JSValue *nativeA = [JSValue valueWithObject:nativeObject inContext:context];
+        JSValue *nativeB = [JSValue valueWithObject:nativeObject inContext:context];
+        JSValue *holder = [context evaluateScript:@"(() => { const child = {}; return { child }; })()"];
+        row(@"identity", [NSString stringWithFormat:@"%d:%d:%d",
+                                                     nativeA == nativeB,
+                                                     nativeA.toObject == nativeObject,
+                                                     holder[@"child"] == holder[@"child"]]);
     }
     return 0;
 }
