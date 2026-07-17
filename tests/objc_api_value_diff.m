@@ -112,6 +112,15 @@ int main(void)
                                                     (unsigned long)currentArgumentCount,
                                                     [context[@"promiseResult"] toInt32] == 42]);
 
+        NSObject *managedOwner = [NSObject new];
+        JSManagedValue *managed = [JSManagedValue managedValueWithValue:
+            [context evaluateScript:@"({ tag: 'managed' })"] andOwner:managedOwner];
+        BOOL managedOwned = [managed.value[@"tag"].toString isEqualToString:@"managed"];
+        [context.virtualMachine removeManagedReference:managed withOwner:managedOwner];
+        row(@"managed", [NSString stringWithFormat:@"%d:%d",
+                                                    managedOwned,
+                                                    [managed.value[@"tag"].toString isEqualToString:@"managed"]]);
+
         NSObject *nativeObject = [NSObject new];
         JSValue *nativeA = [JSValue valueWithObject:nativeObject inContext:context];
         JSValue *nativeB = [JSValue valueWithObject:nativeObject inContext:context];

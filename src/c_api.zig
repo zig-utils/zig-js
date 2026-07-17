@@ -5125,6 +5125,17 @@ test "C-API: context groups share values while preserving distinct realms and li
     const weak_target = JSEvaluateScript(second, weak_source, null, null, 1, &exception) orelse return error.EvalFailed;
     try std.testing.expect(!ZJSValueIsReachable(first, weak_target));
 
+    const promise_source = JSStringCreateWithUTF8CString(
+        "(() => { const target = { promise: true }; globalThis.pendingTarget = Promise.resolve(target); return target; })()",
+    ) orelse return error.StringInitFailed;
+    defer JSStringRelease(promise_source);
+    const promise_target = JSEvaluateScript(second, promise_source, null, null, 1, &exception) orelse return error.EvalFailed;
+    try std.testing.expect(ZJSValueIsReachable(first, promise_target));
+    const clear_promise = JSStringCreateWithUTF8CString("globalThis.pendingTarget = undefined") orelse return error.StringInitFailed;
+    defer JSStringRelease(clear_promise);
+    _ = JSEvaluateScript(second, clear_promise, null, null, 1, &exception);
+    try std.testing.expect(!ZJSValueIsReachable(first, promise_target));
+
     // Releasing a realm handle does not invalidate values retained by another
     // realm in the VM; the group keeps every realm allocation alive to teardown.
     JSGlobalContextRelease(first);
