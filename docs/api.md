@@ -26,10 +26,10 @@ compile-link-runtime fixture. It remains deliberately separate from private
 Home/Bun ABI work.
 
 Private-profile exports are audited independently and never inflate the public
-or extension totals. The pinned Home inventory currently reports 215
-private exports and 216 pending private symbols; `zig build test-home-private-abi` and
+or extension totals. The pinned Home inventory currently reports 217
+private exports and 214 pending private symbols; `zig build test-home-private-abi` and
 `zig build test-private-jstype` are their focused compile-link-runtime gates.
-The 215 cover JSC64 identity, cell equality,
+The 217 cover JSC64 identity, cell equality,
 truthiness, int32 extraction, exact signed/unsigned 64-bit BigInt construction,
 modulo-2^64 BigInt extraction with the pinned int32/Int52 fallbacks, and exact
 JavaScript strict/SameValue equality across primitives and owned cells, plus
@@ -89,6 +89,13 @@ only `Symbol.for('react.element')` or
 `Symbol.for('react.transitional.element')` from the VM-wide registry. It keeps
 inherited/getter/proxy observability and sibling-realm identity while rejecting
 local symbols, same-description values, primitives, and foreign VMs.
+The two core deep-equality exports provide Bun-pinned SameValue and cyclic
+structural comparison for enumerable strings/Symbols, arrays, Map/Set,
+buffers/views, numeric TypedArrays, boxed strings, Date, RegExp, and
+Error/cause state. Strict mode additionally distinguishes calculated classes,
+sparse holes, property counts, missing versus undefined, cause presence, and
+raw float bits. Getter/proxy failures, sibling realms, foreign cells, bounded
+recursion, and pending exceptions preserve the native boundary contract.
 Three fast built-in reads pin every byte-table entry and distinguish direct
 data, own-slot, and Object.prototype-cutoff lookup. Bun's fourth core-only
 `code` inquiry is deliberately pure: inherited data is visible, while
@@ -204,12 +211,12 @@ exact identity, insertion order, live size, sibling values, and failure-atomic
 foreign-VM rejection. The shared FFI slow paths perform exact signed/unsigned
 modulo-2^64 conversion for validated heap BigInts. CommonAbortReason conversion
 creates fresh selected-realm TimeoutError/AbortError DOMExceptions with the
-pinned messages and legacy codes. The combined 214-symbol fixture also
+pinned messages and legacy codes. The combined 216-symbol fixture also
 covers sibling realms, foreign-VM failures, exception clearing, callback
 reentrancy, and already-settled targets.
 
 Bun's separately pinned core `src/jsc` inventory reports 421 private symbols,
-of which 209 shims are implemented and 212 remain pending. Its
+of which 211 shims are implemented and 210 remain pending. Its
 source/signature audit is `zig build bun-private-abi-audit`; broader Bun runtime
 and generated bindings are outside that first core profile. The inventoried
 `JSFunctionCall` declaration is consumer-provided because each runtime-compiled

@@ -49,7 +49,7 @@ zig build home-private-abi-audit \
 
 This verifies the live revision, every source hash, signature, classification,
 and calling convention. It replaces a vague source-level estimate, but the 431
-private imports are now 215 implemented / 216 pending under #163. The generated
+private imports are now 217 implemented / 214 pending under #163. The generated
 FFI wrapper emits and resolves `JSFunctionCall` inside its own compiled module,
 so zig-js must not provide a duplicate symbol. The implemented
 slices cover JSC64 value identity, cell equality, truthiness, int32 extraction,
@@ -122,6 +122,13 @@ recognizes only the legacy and transitional React symbols from the shared VM
 registry. Inherited/accessor/proxy reads and sibling realms work normally;
 local symbols, impostors, primitives, foreign cells, and exception paths retain
 the pinned false-or-abrupt result without replacing pending state.
+The paired deep-equality shims implement pinned SameValue and cyclic structural
+comparison across ordinary properties, arrays, Map/Set, buffers/views, typed
+arrays, boxed strings, Date, RegExp, and Error/cause state. Strict comparison
+adds calculated-class, hole, property-count, missing/undefined,
+cause-presence, and raw-float distinctions. Both retain observable getter/proxy
+errors, same-VM sibling support, foreign rejection, bounded recursion, and
+first-exception preservation.
 Three fast built-in-name reads cover all 24 pinned byte IDs and keep direct
 data, own-slot, and Object.prototype-cutoff lookup observably distinct. The
 Bun-only pure `code` VM inquiry is tracked solely in the Bun denominator.
@@ -187,7 +194,7 @@ behavior, and VM exception propagation. Ten Promise/InternalPromise shims add
 selected-realm pending and directly settled promises, exact native downcasts,
 callback Promise passthrough, Error/throw rejection, and normal AnyPromise
 resolution with thenable assimilation and self-resolution protection. Their
-214-symbol combined fixture covers sibling realms, foreign VMs, callback
+216-symbol combined fixture covers sibling realms, foreign VMs, callback
 reentrancy, exception clearing, settled-target no-ops, and the complete
 DOMException code matrix. Seven Home-only
 JSMap shims create selected-realm native maps and directly implement
