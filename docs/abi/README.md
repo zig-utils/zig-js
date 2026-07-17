@@ -44,7 +44,7 @@ convention. The exact current denominator is:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #163 | 431 (233 implemented, 198 pending) |
+| Private JSC/Bun/WebCore ABI under #163 | 431 (239 implemented, 192 pending) |
 | Overlap with zig-js's completed public C target | 15 |
 | Platform libc import | 1 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
@@ -61,7 +61,7 @@ zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"
 ```
 
 This inventory is the denominator, not a claim that the whole surface works.
-The first 233 private entries are implemented; the other 198 remain pending
+The first 239 private entries are implemented; the other 192 remain pending
 until #163 provides their type/layout contracts, shims, and consumer evidence.
 `JSFunctionCall` remains revision-pinned in the declaration inventory but is
 not part of that denominator: each runtime-generated FFI module defines the
@@ -437,6 +437,15 @@ rejection warnings deliver the projected reason first and the exact Bun warning
 Error second; throwing stack reads, pure fallback formatting, exception
 clearing, and listener failures are covered.
 
+The process rejection and fatal-dispatch boundary preserves exact reason and
+Promise identity, orders `uncaughtExceptionMonitor` before capture or ordinary
+handlers, gives the capture callback precedence, and returns the pinned handled
+status. The rejection wrapper has the exact `UnhandledPromiseRejection` name,
+code, and message. Promise checkpoints cover early-handler suppression, one
+unhandled notification, one identity-preserving late-handled notification, and
+duplicate-checkpoint suppression. The same realm-local store backs repeatable
+`beforeExit` and one-shot `exit` dispatch.
+
 The native iterable callback boundary executes the pinned `@@iterator` method,
 caches the returned iterator's `next` function, and observes IteratorStep and
 IteratorValue in order. Every yielded value retains stable encoded identity and
@@ -588,7 +597,7 @@ layout, exact UTF-16 and BunString decoding, shortest numeric formatting,
 WebKit JSON escaping, sticky overflow/OOM, and non-destructive conversion.
 The five rooted native-container entry points add callback-scoped marked
 arguments and per-realm CommonJS function registries with precise-GC rooting,
-cross-VM rejection, and exact append/set/swap-remove behavior. The 232-symbol
+cross-VM rejection, and exact append/set/swap-remove behavior. The 238-symbol
 combined runtime fixture covers these semantics; the two
 profile-selected JSType exports retain
 their separate Home/Bun runtime fixtures.
@@ -632,7 +641,7 @@ profile contains 437 unique declarations from 54 hashed files:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #164 | 421 (227 implemented, 194 pending) |
+| Private JSC/Bun/WebCore ABI under #164 | 421 (233 implemented, 188 pending) |
 | Public-C overlap | 15 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
 | **Total** | **437** |

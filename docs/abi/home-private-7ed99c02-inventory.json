@@ -88,8 +88,8 @@
     },
     "by_status": {
       "external": 2,
-      "implemented": 248,
-      "pending": 198
+      "implemented": 254,
+      "pending": 192
     }
   },
   "declarations": [
@@ -660,10 +660,10 @@
       "line": 566,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn Bun__emitHandledPromiseEvent(*JSGlobalObject, promise: JSValue) bool;",
       "declaration_sha256": "fe61aa7cc31ece08452cbb1768f6d5c2adcf1f825329fd0d0c520c236e29d6bc",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Bun__generateHeapProfile",
@@ -704,10 +704,10 @@
       "line": 563,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn Bun__handleUncaughtException(*JSGlobalObject, err: JSValue, is_rejection: c_int) c_int;",
       "declaration_sha256": "858253377a2dc64d5cfdfd3a93b68a3e890f281c9595e6b53ef89fad0b925726",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Bun__handleUnhandledRejection",
@@ -715,10 +715,10 @@
       "line": 564,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn Bun__handleUnhandledRejection(*JSGlobalObject, reason: JSValue, promise: JSValue) c_int;",
       "declaration_sha256": "241d4dad9ad0d9789d0260a55f1639eecf2b0ad6962b0e881e32089e14b1aa02",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Bun__isEncodingSupported",
@@ -891,10 +891,10 @@
       "line": 565,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn Bun__wrapUnhandledRejectionErrorForUncaughtException(*JSGlobalObject, reason: JSValue) JSValue;",
       "declaration_sha256": "4a53958503941546c5e646491aebe029789dc9741d075bc45fbb0631a08824b5",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Bun__writeHTTPDate",
@@ -3416,10 +3416,10 @@
       "line": 4140,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn Process__dispatchOnBeforeExit(*JSGlobalObject, code: u8) void;",
       "declaration_sha256": "b1ecb24cc0c1aa5183ef53225b74c2ca74c78d6f0a652af81e266f3723b7b8cf",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Process__dispatchOnExit",
@@ -3427,10 +3427,10 @@
       "line": 4141,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn Process__dispatchOnExit(*JSGlobalObject, code: u8) void;",
       "declaration_sha256": "45a13e884369f2d8187c5f04d0f91f5309aaad339487b8e372b0a243ab5bc563",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Process__emitDisconnectEvent",
