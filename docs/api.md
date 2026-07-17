@@ -33,16 +33,19 @@ python3 tools/verify-objc-api.py \
   --sdk-root "$(xcrun --sdk macosx --show-sdk-path)"
 ```
 
-The inventory currently records **79 implemented / 29 pending** declarations.
-The implemented slice covers VM/context construction, evaluation, C-ref wrapper
-identity, context metadata, primitive and native object factories, type
-predicates, numeric/string and geometry conversion, exact comparisons, indexed
-reads, recursive array/dictionary/date conversion, promise executor callback
-state, managed owner/value relations, exact wrapper identity, and
-property-descriptor symbols. The eight-row Objective-C transcript matches
-system JavaScriptCore exactly (`bc1860c0e6e8d919`). See the [Objective-C bridge inventory
-guide](objc-api/README.md) for the exact boundary and reproduction details;
-header availability alone does not imply implemented runtime behavior.
+The inventory records **108 implemented / 0 pending** declarations. Coverage
+includes VM/context construction, evaluation, C-ref wrapper identity, context
+metadata, primitive and native object factories, type predicates,
+numeric/string/geometry/Foundation conversion, comparisons, calls,
+construction, property operations, promise callback state, managed owner/value
+relations, exact wrapper identity, typed Objective-C blocks, `JSExport`
+instances/classes/renamed selectors, and property-descriptor symbols. The
+15-row Objective-C transcript matches system JavaScriptCore exactly
+(`73e8bff0363ae6c5`). See the [Objective-C bridge inventory
+guide](objc-api/README.md) for the exact boundary and reproduction details.
+The complete declared inventory does not claim compatibility with private JSC
+framework internals or stronger collection behavior than zig-js's documented
+VM-lifetime arena policy.
 
 The project is still pre-stabilization. Compatibility-shaped entry points are an embedder convenience, not a promise to preserve inert arguments or incomplete JavaScriptCore behavior. When a compatibility shim conflicts with clear zig-js semantics, the shim should either grow real behavior or be redesigned before the API is declared stable.
 

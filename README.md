@@ -199,10 +199,10 @@ The current exported C surface has 134 functions:
 - **Extensions** - resource-bounded `JSWorker*`, stable worker inspector target metadata and owner-pumped cross-thread sessions, observable `ZJSValueProtect`/`ZJSValueUnprotect`, threaded contexts, and authenticated-transport-neutral `ZJSInspectorSession*`.
 - **Objective-C inventory** - macOS SDK 27.0 build 26A5368g is pinned at 11
   containers / 108 declarations with byte-for-byte header and selector-level
-  drift checks. Runtime coverage is 79/108 declarations for `JSVirtualMachine`,
-  `JSContext`, and native factory/conversion/comparison `JSValue` behavior; the
-  remaining 29 stay explicit under #158–#160. The macOS system-JSC
-  differential matches all 8 published Objective-C rows (`bc1860c0e6e8d919`).
+  drift checks. Runtime coverage is 108/108 declarations across
+  `JSVirtualMachine`, `JSContext`, `JSValue`, `JSManagedValue`, `JSExport`, and
+  typed Objective-C blocks. The macOS system-JSC differential matches all 15
+  published Objective-C rows (`73e8bff0363ae6c5`).
 
 `ZJSGlobalContextCreateThreaded`, `ZJSValueProtect`/`ZJSValueUnprotect`,
 `ZJSInspectorSession*`, and `JSWorker*` are zig-js extensions, not public JSC symbols. The `ZJSValue*`
@@ -386,7 +386,7 @@ Do not read the green configured runner as "the whole JavaScript universe is fin
 
 Completion of every item—and the evidence gate for removing this section—is tracked in [issue #134](https://github.com/zig-utils/zig-js/issues/134).
 
-- remaining Objective-C bridge declarations, full JavaScriptCore framework/private internals, and Bun/Home private JSC ABI;
+- Objective-C bridge lifetime/stress completion evidence, full JavaScriptCore framework/private internals, and Bun/Home private JSC ABI;
 - WebAssembly and JIT shell hooks from the PR-249 reference corpus;
 - moving or multi-age generational GC, parallel mid-script minor collection, and any optimizing JIT.
 

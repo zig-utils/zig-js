@@ -128,7 +128,7 @@
       "kind": "class_method",
       "name": "currentArguments",
       "declaration": "+ (NSArray *) currentArguments",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -137,7 +137,7 @@
       "kind": "class_method",
       "name": "currentCallee",
       "declaration": "+ (JSValue *) currentCallee API_AVAILABLE(macos(10.10), ios(8.0))",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -146,7 +146,7 @@
       "kind": "class_method",
       "name": "currentContext",
       "declaration": "+ (JSContext *) currentContext",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -155,7 +155,7 @@
       "kind": "class_method",
       "name": "currentThis",
       "declaration": "+ (JSValue *) currentThis",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -200,7 +200,7 @@
       "kind": "property",
       "name": "exception",
       "declaration": "@property (strong) JSValue *exception",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -209,7 +209,7 @@
       "kind": "property",
       "name": "exceptionHandler",
       "declaration": "@property (copy) void(^exceptionHandler)(JSContext *context, JSValue *exception)",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -272,7 +272,7 @@
       "kind": "instance_method",
       "name": "objectForKeyedSubscript:",
       "declaration": "- (JSValue *) objectForKeyedSubscript:(id)key",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -281,7 +281,7 @@
       "kind": "instance_method",
       "name": "setObject:forKeyedSubscript:",
       "declaration": "- (void) setObject:(id)object forKeyedSubscript:(NSObject <NSCopying> *)key",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -290,7 +290,7 @@
       "kind": "macro",
       "name": "JSExportAs",
       "declaration": "#define JSExportAs(PropertyName, Selector)",
-      "status": "pending",
+      "status": "implemented",
       "issue": 160
     },
     {
@@ -434,7 +434,7 @@
       "kind": "class_method",
       "name": "valueWithNewPromiseRejectedWithReason:inContext:",
       "declaration": "+ (JSValue * _Null_unspecified) valueWithNewPromiseRejectedWithReason:(id _Null_unspecified)reason inContext:(JSContext * _Null_unspecified)context API_AVAILABLE(macos(10.15), ios(13.0))",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -443,7 +443,7 @@
       "kind": "class_method",
       "name": "valueWithNewPromiseResolvedWithResult:inContext:",
       "declaration": "+ (JSValue * _Null_unspecified) valueWithNewPromiseResolvedWithResult:(id _Null_unspecified)result inContext:(JSContext * _Null_unspecified)context API_AVAILABLE(macos(10.15), ios(13.0))",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -479,7 +479,7 @@
       "kind": "class_method",
       "name": "valueWithObject:inContext:",
       "declaration": "+ (JSValue * _Null_unspecified) valueWithObject:(id _Null_unspecified)value inContext:(JSContext * _Null_unspecified)context",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -506,7 +506,7 @@
       "kind": "instance_method",
       "name": "callWithArguments:",
       "declaration": "- (JSValue * _Null_unspecified) callWithArguments:(NSArray * _Null_unspecified)arguments",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -551,7 +551,7 @@
       "kind": "instance_method",
       "name": "constructWithArguments:",
       "declaration": "- (JSValue * _Null_unspecified) constructWithArguments:(NSArray * _Null_unspecified)arguments",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -560,7 +560,7 @@
       "kind": "instance_method",
       "name": "invokeMethod:withArguments:",
       "declaration": "- (JSValue * _Null_unspecified) invokeMethod:(NSString * _Null_unspecified)method withArguments:(NSArray * _Null_unspecified)arguments",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -569,7 +569,7 @@
       "kind": "instance_method",
       "name": "isEqualToObject:",
       "declaration": "- (BOOL) isEqualToObject:(id _Null_unspecified)value",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -578,7 +578,7 @@
       "kind": "instance_method",
       "name": "isEqualWithTypeCoercionToObject:",
       "declaration": "- (BOOL) isEqualWithTypeCoercionToObject:(id _Null_unspecified)value",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -587,7 +587,7 @@
       "kind": "instance_method",
       "name": "isInstanceOf:",
       "declaration": "- (BOOL) isInstanceOf:(id _Null_unspecified)value",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -668,7 +668,7 @@
       "kind": "instance_method",
       "name": "toObject",
       "declaration": "- (id _Null_unspecified) toObject",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -677,7 +677,7 @@
       "kind": "instance_method",
       "name": "toObjectOfClass:",
       "declaration": "- (id _Null_unspecified) toObjectOfClass:(Class _Null_unspecified)expectedClass",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -830,7 +830,7 @@
       "kind": "instance_method",
       "name": "defineProperty:descriptor:",
       "declaration": "- (void) defineProperty:(JSValueProperty)property descriptor:(id _Null_unspecified)descriptor",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -839,7 +839,7 @@
       "kind": "instance_method",
       "name": "deleteProperty:",
       "declaration": "- (BOOL) deleteProperty:(JSValueProperty)property",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -848,7 +848,7 @@
       "kind": "instance_method",
       "name": "hasProperty:",
       "declaration": "- (BOOL) hasProperty:(JSValueProperty)property",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -857,7 +857,7 @@
       "kind": "instance_method",
       "name": "setValue:atIndex:",
       "declaration": "- (void) setValue:(id _Null_unspecified)value atIndex:(NSUInteger)index",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -866,7 +866,7 @@
       "kind": "instance_method",
       "name": "setValue:forProperty:",
       "declaration": "- (void) setValue:(id _Null_unspecified)value forProperty:(JSValueProperty)property",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -884,7 +884,7 @@
       "kind": "instance_method",
       "name": "valueForProperty:",
       "declaration": "- (JSValue * _Null_unspecified) valueForProperty:(JSValueProperty)property",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -974,7 +974,7 @@
       "kind": "instance_method",
       "name": "objectForKeyedSubscript:",
       "declaration": "- (JSValue * _Null_unspecified) objectForKeyedSubscript:(id _Null_unspecified)key",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -983,7 +983,7 @@
       "kind": "instance_method",
       "name": "setObject:atIndexedSubscript:",
       "declaration": "- (void) setObject:(id _Null_unspecified)object atIndexedSubscript:(NSUInteger)index",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -992,7 +992,7 @@
       "kind": "instance_method",
       "name": "setObject:forKeyedSubscript:",
       "declaration": "- (void) setObject:(id _Null_unspecified)object forKeyedSubscript:(id _Null_unspecified)key",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {

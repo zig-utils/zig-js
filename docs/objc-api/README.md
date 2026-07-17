@@ -8,10 +8,10 @@ the SHA-256 of `JSContext.h`, `JSValue.h`, `JSVirtualMachine.h`,
 method, property, typedef, data symbol, macro, signature, and availability
 annotation parsed from those headers.
 
-The inventory contains 11 containers and 108 declarations. It currently records
-**79 implemented / 29 pending** under issues #158–#160. An `implemented` entry
-has runtime behavior exercised by the compile-link-runtime host; a `pending`
-entry may be declared in the headers but must not be treated as usable.
+The inventory contains 11 containers and 108 declarations and records
+**108 implemented / 0 pending**. An `implemented` entry has runtime behavior
+exercised by the compile-link-runtime host; representative semantic families
+are also compared with system JavaScriptCore.
 
 Run the checked-in drift gate on every host:
 
@@ -31,29 +31,33 @@ Compile, link, and execute the implemented runtime slice on macOS:
 zig build test-objc-api
 ```
 
+The installed static archive includes the Objective-C bridge. A manual
+Objective-C host link therefore needs both Foundation and the system `libffi`
+used for typed block calls:
+
+```sh
+xcrun clang -fobjc-arc -fblocks host.m \
+  -I zig-out/include -L zig-out/lib -lzig-js -lffi \
+  -framework Foundation -o host
+```
+
 Compare the completed Foundation conversion rows with system JavaScriptCore:
 
 ```sh
 zig build objc-api-jsc-diff
 ```
 
-That host exercises VM/context construction and identity, evaluation and
-exception capture, context naming/inspectability, C-ref round trips, primitive
-and native object `JSValue` factories, every published type predicate,
-exception-aware numeric/string conversion, and exact comparisons.
-Indexed reads, geometry structs, and the property-descriptor constants are also
-covered. Recursive array/dictionary/date conversion matches all six rows in the
-pinned system-JSC transcript and handles cyclic graphs by strict JavaScript
-identity. Promise executors preserve nested callback state and match system JSC's
-context/callee/this/two-argument contract. Arbitrary Objective-C wrappers,
-general exported callbacks, general property helpers, and JSExport remain
-pending until their corresponding runtime and evidence land. Opaque
-Objective-C objects preserve bidirectional identity, JS object wrappers are
-canonical by strict identity, and all 8 differential rows match system JSC
-(`bc1860c0e6e8d919`). `JSManagedValue` and VM owner relations are implemented with
-real weak targets plus weak owners; because current context groups use the
-VM-lifetime arena policy, unreachable targets remain available until VM teardown
-rather than being reclaimed mid-VM.
+The hosts exercise VM/context construction and identity, evaluation and
+exception capture, context naming/inspectability, C-ref round trips, every
+published `JSValue` family, recursive and cyclic Foundation conversion, promise
+callback state, exact wrapper identity, managed ownership, typed Objective-C
+blocks, and `JSExport` instance/class/renamed-selector behavior. The 15-row
+transcript matches system JavaScriptCore exactly (`73e8bff0363ae6c5`).
+`JSManagedValue` and VM owner relations use real weak targets plus weak owners;
+because current context groups use the VM-lifetime arena policy, unreachable
+targets remain available until VM teardown rather than being reclaimed mid-VM.
+Issues #159 and #160 continue tracking stronger lifetime/stress and completion
+evidence beyond the now-complete declared inventory.
 
 Compare the pin against an installed SDK explicitly:
 
