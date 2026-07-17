@@ -88,8 +88,8 @@
     },
     "by_status": {
       "external": 2,
-      "implemented": 217,
-      "pending": 229
+      "implemented": 219,
+      "pending": 227
     }
   },
   "declarations": [
@@ -1254,10 +1254,10 @@
       "line": 64,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSFunction__getSourceCode(value: JSValue, out: *ZigString) bool;",
       "declaration_sha256": "ffa8db3b84d219ee45025cfd9a423ddbd066f5fa3002e3c4f3027f747db8a6e1",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSFunction__optimizeSoon",
@@ -1265,10 +1265,10 @@
       "line": 59,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "pub extern fn JSC__JSFunction__optimizeSoon(value: JSValue) void;",
       "declaration_sha256": "9884e0af3cbee358810d60ad4dbf3ff5fb4e1e79cde3214601197d88ee64f046",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSGlobalObject__bunVM",

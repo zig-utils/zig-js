@@ -44,7 +44,7 @@ convention. The exact current denominator is:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #163 | 431 (202 implemented, 229 pending) |
+| Private JSC/Bun/WebCore ABI under #163 | 431 (204 implemented, 227 pending) |
 | Overlap with zig-js's completed public C target | 15 |
 | Platform libc import | 1 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
@@ -323,6 +323,16 @@ leaves. The read takes each realm's existing active-interpreter registry lock,
 keeps separate VMs isolated, returns false for null handles, and never changes
 exception or termination state.
 
+The private JSFunction boundary exposes the parser-captured source span rather
+than reconstructing text through `Function.prototype.toString`. Ordinary,
+arrow, method, generator, async, and class-constructor functions return stable
+group-lifetime Latin-1 or UTF-16 ZigString views; native, bound, non-function,
+invalid, and exception cells fail without modifying the output. Its tier-up
+control is scheduling-only: an eligible cold bytecode chunk is primed so the
+next invocation claims native-tier consideration, while the request itself
+does no allocation or code generation. Tree-walk functions and already
+settled tiers remain unchanged, as do pending VM exceptions.
+
 The VM exception slice exports the shared `JSGlobalObject`/`VM` pending-state
 boundary plus exception-cell conversion and classification. Sibling realms in
 one context group observe the same VM pointer and pending cell; taking or
@@ -506,7 +516,7 @@ profile contains 437 unique declarations from 54 hashed files:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #164 | 421 (196 implemented, 225 pending) |
+| Private JSC/Bun/WebCore ABI under #164 | 421 (198 implemented, 223 pending) |
 | Public-C overlap | 15 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
 | **Total** | **437** |
