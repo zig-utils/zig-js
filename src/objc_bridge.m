@@ -14,7 +14,6 @@ JS_EXPORT NSString *const JSPropertyDescriptorSetKey = @"set";
 
 @interface ZJSVirtualMachineState : NSObject
 @property (nonatomic) JSContextGroupRef group;
-@property (nonatomic, strong) NSMapTable<id, NSMutableDictionary<NSValue *, JSValue *> *> *managedReferences;
 @end
 
 @implementation ZJSVirtualMachineState
@@ -58,8 +57,8 @@ JS_EXPORT NSString *const JSPropertyDescriptorSetKey = @"set";
 
 @interface ZJSHostObjectRecord : NSObject
 @property (nonatomic, strong) id object;
-@property (nonatomic, strong) NSMutableDictionary<NSString *, JSValue *> *methods;
-@property (nonatomic, strong) JSValue *prototype;
+@property (nonatomic, strong) NSMutableDictionary<NSString *, NSValue *> *methods;
+@property (nonatomic) JSValueRef prototype;
 @end
 
 @implementation ZJSHostObjectRecord
@@ -139,6 +138,7 @@ static const void *ZJSVirtualMachineStateKey = &ZJSVirtualMachineStateKey;
 static const void *ZJSContextStateKey = &ZJSContextStateKey;
 static const void *ZJSValueStateKey = &ZJSValueStateKey;
 static const void *ZJSManagedValueStateKey = &ZJSManagedValueStateKey;
+static const void *ZJSManagedOwnerRelationsKey = &ZJSManagedOwnerRelationsKey;
 
 static ZJSVirtualMachineState *ZJSVMState(JSVirtualMachine *virtualMachine)
 {
@@ -161,6 +161,7 @@ static ZJSManagedValueState *ZJSManagedState(JSManagedValue *value)
 }
 
 static NSValue *ZJSObjectiveCIdentityKey(id object);
+static NSValue *ZJSPointerKey(const void *pointer);
 static JSStringRef ZJSStringCreate(NSString *string);
 static NSString *ZJSStringCopy(JSStringRef string);
 static JSClassRef ZJSBlockObjectClass(void);
@@ -842,9 +843,10 @@ static JSClassRef ZJSMethodObjectClass(void)
 static JSValue *ZJSMethodValue(JSContext *context, ZJSHostObjectRecord *hostRecord,
                                NSString *name, SEL selector)
 {
-    JSValue *existing = hostRecord.methods[name];
+    NSValue *existing = hostRecord.methods[name];
     if (existing)
-        return existing;
+        return [JSValue valueWithJSValueRef:(JSValueRef)existing.pointerValue
+                                  inContext:context];
     ZJSHostMethodRecord *record = [ZJSHostMethodRecord new];
     record.object = hostRecord.object;
     record.selector = selector;
@@ -862,7 +864,7 @@ static JSValue *ZJSMethodValue(JSContext *context, ZJSHostObjectRecord *hostReco
     JSValue *result = [JSValue valueWithJSValueRef:functionRef inContext:context];
     if (!hostRecord.methods)
         hostRecord.methods = [NSMutableDictionary dictionary];
-    hostRecord.methods[name] = result;
+    hostRecord.methods[name] = ZJSPointerKey(result.JSValueRef);
     return result;
 }
 
@@ -1023,7 +1025,7 @@ static JSObjectRef ZJSClassConstruct(JSContextRef contextRef,
         return NULL;
     JSObjectRef object = JSValueToObject(contextRef, result.JSValueRef, exception);
     if (object && record.prototype)
-        JSObjectSetPrototype(contextRef, object, record.prototype.JSValueRef);
+        JSObjectSetPrototype(contextRef, object, record.prototype);
     return object;
 }
 
@@ -1150,7 +1152,6 @@ static JSObjectRef ZJSObjectForValue(JSValue *value);
         return nil;
     ZJSVirtualMachineState *state = [ZJSVirtualMachineState new];
     state.group = retain ? JSContextGroupRetain(group) : group;
-    state.managedReferences = [NSMapTable weakToStrongObjectsMapTable];
     if (!state.group)
         return nil;
     objc_setAssociatedObject(self, ZJSVirtualMachineStateKey, state,
@@ -1174,12 +1175,19 @@ static JSObjectRef ZJSObjectForValue(JSValue *value);
         return;
     if (value.context.virtualMachine != self)
         [NSException raise:NSInvalidArgumentException format:@"Managed JSValue belongs to a different JSVirtualMachine"];
-    @synchronized(self) {
-        ZJSVirtualMachineState *state = ZJSVMState(self);
-        NSMutableDictionary *references = [state.managedReferences objectForKey:owner];
+    @synchronized(owner) {
+        NSMutableDictionary *relations = objc_getAssociatedObject(
+            owner, ZJSManagedOwnerRelationsKey);
+        if (!relations) {
+            relations = [NSMutableDictionary dictionary];
+            objc_setAssociatedObject(owner, ZJSManagedOwnerRelationsKey, relations,
+                                     OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        NSValue *virtualMachineKey = ZJSObjectiveCIdentityKey(self);
+        NSMutableDictionary *references = relations[virtualMachineKey];
         if (!references) {
             references = [NSMutableDictionary dictionary];
-            [state.managedReferences setObject:references forKey:owner];
+            relations[virtualMachineKey] = references;
         }
         references[ZJSObjectiveCIdentityKey(object)] = value;
     }
@@ -1189,12 +1197,18 @@ static JSObjectRef ZJSObjectForValue(JSValue *value);
 {
     if (!object || !owner)
         return;
-    @synchronized(self) {
-        ZJSVirtualMachineState *state = ZJSVMState(self);
-        NSMutableDictionary *references = [state.managedReferences objectForKey:owner];
+    @synchronized(owner) {
+        NSMutableDictionary *relations = objc_getAssociatedObject(
+            owner, ZJSManagedOwnerRelationsKey);
+        NSValue *virtualMachineKey = ZJSObjectiveCIdentityKey(self);
+        NSMutableDictionary *references = relations[virtualMachineKey];
         [references removeObjectForKey:ZJSObjectiveCIdentityKey(object)];
-        if (references.count == 0)
-            [state.managedReferences removeObjectForKey:owner];
+        if (references.count == 0) {
+            [relations removeObjectForKey:virtualMachineKey];
+            if (relations.count == 0)
+                objc_setAssociatedObject(owner, ZJSManagedOwnerRelationsKey, nil,
+                                         OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
     }
 }
 
@@ -1758,9 +1772,10 @@ static JSValue *ZJSValueFromObject(id object, JSContext *context,
     }
     JSValue *result = [JSValue valueWithJSValueRef:wrapped inContext:context];
     if (isClass) {
-        record.prototype = [JSValue valueWithNewObjectInContext:context];
-        [result setValue:record.prototype forProperty:@"prototype"];
-        [record.prototype setValue:result forProperty:@"constructor"];
+        JSValue *prototype = [JSValue valueWithNewObjectInContext:context];
+        record.prototype = prototype.JSValueRef;
+        [result setValue:prototype forProperty:@"prototype"];
+        [prototype setValue:result forProperty:@"constructor"];
     }
     [contextState.objectiveCValues setObject:result forKey:object];
     return result;
