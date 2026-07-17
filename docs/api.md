@@ -255,6 +255,9 @@ explicit release/session teardown; scope handles also expire on resume. Worker
 targets remain tracked by inspector issue #154. When several debugger sessions
 are enabled, observers receive the paused state first and only the deterministic
 owner may resume or step; explicit pause/step requests retain that ownership.
+`ZJSInspectorSessionRelease` is safe from within a protocol callback: physical
+teardown is deferred until the enclosing dispatch/pause/detach operation has
+unwound, and releasing the pause owner acts as a deterministic resume.
 
 `JSGlobalContextRetain` and `JSGlobalContextRelease` maintain a real C-API reference count for contexts created through this C API. Releasing a retained context destroys the underlying runtime only after the final release. `JSGlobalContextRetain` returns null for a null context or if retaining would overflow the context refcount.
 

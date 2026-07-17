@@ -74,8 +74,8 @@ tests):
    today. Paused events also expose live call frames and lexical/global scope
    chains plus live evaluate-on-frame and GC-rooted, session-owned remote-object
    inspection. Concurrent sessions use deterministic pause ownership with
-   observer-first snapshots. Worker-target work remains tracked in #139 before
-   Home debugger integration is complete.
+   observer-first snapshots and callback-safe deferred teardown. Worker-target
+   work remains tracked in #139 before Home debugger integration is complete.
 4. **Prototype & structure control** — `JSObjectGetPrototype`/`SetPrototype`
    and richer private/internal slot modeling. `JSObjectGetPrivate` /
    `JSObjectSetPrivate` now cover host-owned opaque pointers, but Home also

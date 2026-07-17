@@ -22,6 +22,10 @@ pending pause/step) owns continuation. Observer sessions receive and may inspect
 the paused snapshot before the owner callback runs, but their resume/step
 commands receive a deterministic error. The owner receives the pause last and
 must continue synchronously; step ownership carries into the resulting stop.
+Releasing the owner from inside its callback is an explicit detach-and-resume;
+remaining observers receive Debugger.resumed. Session release from any pause,
+response, or Inspector.detached callback is lifetime-guarded and physical
+teardown waits until the enclosing inspector operation unwinds.
 Because transport callbacks are synchronous and contexts are thread-affine, a
 client that receives Debugger.paused must dispatch Debugger.resume from that
 callback. If it returns without a continuation command, zig-js aborts that

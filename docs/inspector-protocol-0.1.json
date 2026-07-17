@@ -25,7 +25,7 @@
   ],
   "events": [
     { "method": "Inspector.attached", "status": "implemented" },
-    { "method": "Inspector.detached", "status": "implemented" },
+    { "method": "Inspector.detached", "status": "implemented", "evidence": "C-API: inspector release is safe inside pause response and detach callbacks" },
     { "method": "Runtime.executionContextCreated", "status": "implemented" },
     { "method": "Debugger.scriptParsed", "status": "implemented" },
     { "method": "Debugger.breakpointResolved", "status": "implemented" },

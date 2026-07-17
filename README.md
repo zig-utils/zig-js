@@ -233,7 +233,9 @@ Session-owned remote values and scope handles support non-invoking own-property
 inspection plus explicit object/group release; values are protected across GC,
 while pause-only scope handles expire on resume. With multiple sessions, one
 deterministic owner controls continuation after observers receive the pause
-snapshot; observer resume attempts are rejected. Worker targets continue under
+snapshot; observer resume attempts are rejected. Releasing a session from its
+own synchronous callback is lifetime-guarded, including pause, response, and
+detach callbacks. Worker targets continue under
 [#154](https://github.com/zig-utils/zig-js/issues/154); see
 [docs/inspector.md](docs/inspector.md).
 

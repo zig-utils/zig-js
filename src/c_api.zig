@@ -128,6 +128,9 @@ const CInspectorState = struct {
     next_exception_id: u64 = 1,
     remote_objects: std.ArrayListUnmanaged(CInspectorRemoteObject) = .empty,
     next_remote_object_id: u64 = 1,
+    callback_depth: usize = 0,
+    operation_depth: usize = 0,
+    detached_resume_pending: bool = false,
 };
 
 const CInspectorStepMode = enum { none, into, over, out };
@@ -209,6 +212,7 @@ const CInspectorSession = struct {
     attached: bool = true,
     runtime_enabled: bool = false,
     debugger_enabled: bool = false,
+    release_requested: bool = false,
 };
 
 const CInspectorRemoteKind = union(enum) {
@@ -1488,6 +1492,8 @@ fn inspectorSession(ref: ZJSInspectorSessionRef) ?*CInspectorSession {
 fn sendInspectorJson(session: *CInspectorSession, payload: anytype) bool {
     const message = std.json.Stringify.valueAlloc(gpa, payload, .{}) catch return false;
     defer gpa.free(message);
+    session.state.callback_depth += 1;
+    defer session.state.callback_depth -= 1;
     session.callback(message.ptr, message.len, session.user_data);
     return true;
 }
@@ -1528,6 +1534,12 @@ fn refreshInspectorDebuggerHook(state: *CInspectorState) void {
         context.debug_statement_hook = inspectorStatementBoundary;
         context.debug_exception_hook = inspectorExceptionBoundary;
     } else {
+        if (state.paused_machine) |machine| {
+            machine.debug_statement_ctx = null;
+            machine.debug_statement_hook = null;
+            machine.debug_exception_ctx = null;
+            machine.debug_exception_hook = null;
+        }
         context.debug_statement_ctx = null;
         context.debug_statement_hook = null;
         context.debug_exception_hook = null;
@@ -1918,6 +1930,8 @@ fn inspectorStatementBoundary(
     location: interp.DebugStatementLocation,
 ) interp.EvalError!void {
     const state: *CInspectorState = @ptrCast(@alignCast(hook_context));
+    state.operation_depth += 1;
+    defer finishInspectorOperation(state);
     resolveInspectorBreakpointsForScript(state, location.script_id);
     var hits: std.ArrayListUnmanaged(u64) = .empty;
     defer hits.deinit(gpa);
@@ -1968,6 +1982,15 @@ fn inspectorStatementBoundary(
         }
         if (owner_pass) break;
     }
+    if (state.detached_resume_pending) {
+        state.detached_resume_pending = false;
+        for (state.sessions.items) |session| {
+            if (inspectorSessionCanOwnPause(session)) _ = sendInspectorJson(session, .{
+                .method = "Debugger.resumed",
+                .params = .{},
+            });
+        }
+    }
     // The transport is synchronous and the Context is thread-affine: a client
     // resumes from its paused-event callback. Returning to JS while still marked
     // paused would silently violate the protocol, so abort deterministically.
@@ -2013,6 +2036,8 @@ fn inspectorExceptionBoundary(
     uncaught: bool,
 ) interp.EvalError!void {
     const state: *CInspectorState = @ptrCast(@alignCast(hook_context));
+    state.operation_depth += 1;
+    defer finishInspectorOperation(state);
     const should_pause = switch (state.exception_mode) {
         .none => false,
         .all => !uncaught,
@@ -2079,6 +2104,15 @@ fn inspectorExceptionBoundary(
             });
         }
         if (owner_pass) break;
+    }
+    if (state.detached_resume_pending) {
+        state.detached_resume_pending = false;
+        for (state.sessions.items) |session| {
+            if (inspectorSessionCanOwnPause(session)) _ = sendInspectorJson(session, .{
+                .method = "Debugger.resumed",
+                .params = .{},
+            });
+        }
     }
     if (state.paused) {
         state.paused = false;
@@ -2151,15 +2185,19 @@ export fn JSGlobalContextSetInspectable(ctx: JSContextRef, inspectable: bool) ca
     if (c.c_api_inspectable == inspectable) return;
     c.c_api_inspectable = inspectable;
     if (!inspectable) {
-        if (inspectorState(c)) |state| for (state.sessions.items) |session| {
-            if (!session.attached) continue;
-            session.attached = false;
-            _ = sendInspectorJson(session, .{
-                .method = "Inspector.detached",
-                .params = .{ .reason = "context is no longer inspectable" },
-            });
-        };
-        if (inspectorState(c)) |state| refreshInspectorDebuggerHook(state);
+        if (inspectorState(c)) |state| {
+            state.operation_depth += 1;
+            defer finishInspectorOperation(state);
+            for (state.sessions.items) |session| {
+                if (!session.attached) continue;
+                session.attached = false;
+                _ = sendInspectorJson(session, .{
+                    .method = "Inspector.detached",
+                    .params = .{ .reason = "context is no longer inspectable" },
+                });
+            }
+            refreshInspectorDebuggerHook(state);
+        }
     }
 }
 
@@ -2198,11 +2236,9 @@ export fn ZJSInspectorSessionCreate(
     return @ptrCast(session);
 }
 
-export fn ZJSInspectorSessionRelease(session_ref: ZJSInspectorSessionRef) callconv(.c) void {
-    const session = inspectorSession(session_ref) orelse return;
+fn releaseInspectorSessionNow(session: *CInspectorSession) bool {
     const state = session.state;
     const ctx: JSContextRef = @ptrCast(state.context);
-    _ = ctxFrom(ctx) orelse return;
     if (state.next_pause_owner == session) state.next_pause_owner = null;
     releaseInspectorRemotes(state, session, null, false);
     for (state.sessions.items, 0..) |candidate, index| {
@@ -2220,8 +2256,58 @@ export fn ZJSInspectorSessionRelease(session_ref: ZJSInspectorSessionRef) callco
         state.resolved_breakpoints.deinit(gpa);
         state.remote_objects.deinit(gpa);
         gpa.destroy(state);
+        JSGlobalContextRelease(ctx);
+        return true;
     }
     JSGlobalContextRelease(ctx);
+    return false;
+}
+
+fn drainDeferredInspectorReleases(state: *CInspectorState) void {
+    var index: usize = state.sessions.items.len;
+    while (index > 0) {
+        index -= 1;
+        const session = state.sessions.items[index];
+        if (!session.release_requested) continue;
+        if (releaseInspectorSessionNow(session)) return;
+        index = @min(index, state.sessions.items.len);
+    }
+}
+
+fn finishInspectorOperation(state: *CInspectorState) void {
+    std.debug.assert(state.operation_depth > 0);
+    state.operation_depth -= 1;
+    if (state.operation_depth == 0 and state.callback_depth == 0) drainDeferredInspectorReleases(state);
+}
+
+export fn ZJSInspectorSessionRelease(session_ref: ZJSInspectorSessionRef) callconv(.c) void {
+    const session = inspectorSession(session_ref) orelse return;
+    const state = session.state;
+    const ctx: JSContextRef = @ptrCast(state.context);
+    _ = ctxFrom(ctx) orelse return;
+    if (session.release_requested) return;
+    if (state.operation_depth > 0 or state.callback_depth > 0) {
+        session.release_requested = true;
+        session.attached = false;
+        session.debugger_enabled = false;
+        if (state.next_pause_owner == session) state.next_pause_owner = null;
+        if (state.pause_owner == session) {
+            if (state.paused_machine) |machine| {
+                machine.debug_statement_ctx = null;
+                machine.debug_statement_hook = null;
+                machine.debug_exception_ctx = null;
+                machine.debug_exception_hook = null;
+            }
+            state.pause_owner = null;
+            state.paused = false;
+            state.paused_machine = null;
+            state.detached_resume_pending = true;
+            releaseInspectorRemotes(state, null, null, true);
+        }
+        refreshInspectorDebuggerHook(state);
+        return;
+    }
+    _ = releaseInspectorSessionNow(session);
 }
 
 export fn ZJSInspectorSessionDispatch(
@@ -2230,9 +2316,12 @@ export fn ZJSInspectorSessionDispatch(
     message_length: usize,
 ) callconv(.c) bool {
     const session = inspectorSession(session_ref) orelse return false;
-    const ctx: JSContextRef = @ptrCast(session.state.context);
+    const state = session.state;
+    const ctx: JSContextRef = @ptrCast(state.context);
     _ = ctxFrom(ctx) orelse return false;
     if (!session.attached or message == null or message_length == 0) return false;
+    state.operation_depth += 1;
+    defer finishInspectorOperation(state);
     const parsed = std.json.parseFromSlice(std.json.Value, gpa, message[0..message_length], .{}) catch {
         return sendInspectorError(session, 0, -32700, "invalid JSON");
     };
@@ -5177,6 +5266,63 @@ test "C-API: concurrent inspector sessions have deterministic pause ownership" {
     try std.testing.expect(std.mem.indexOf(u8, observer_state.bytes[0..observer_state.len], "session does not own continuation for this pause") != null);
     try std.testing.expect(std.mem.indexOf(u8, owner_state.bytes[0..owner_state.len], "Debugger.resumed") != null);
     try std.testing.expect(std.mem.indexOf(u8, observer_state.bytes[0..observer_state.len], "Debugger.resumed") != null);
+}
+
+test "C-API: inspector release is safe inside pause response and detach callbacks" {
+    const State = struct {
+        const Trigger = enum { pause, response, detach };
+        session: ZJSInspectorSessionRef = null,
+        trigger: Trigger,
+        released: bool = false,
+
+        fn receive(message: [*]const u8, message_len: usize, user_data: ?*anyopaque) callconv(.c) void {
+            const self: *@This() = @ptrCast(@alignCast(user_data.?));
+            const bytes = message[0..message_len];
+            const should_release = switch (self.trigger) {
+                .pause => std.mem.indexOf(u8, bytes, "Debugger.paused") != null,
+                .response => std.mem.indexOf(u8, bytes, "\"id\":7") != null,
+                .detach => std.mem.indexOf(u8, bytes, "Inspector.detached") != null,
+            };
+            if (!should_release or self.released) return;
+            const session = self.session;
+            self.session = null;
+            self.released = true;
+            ZJSInspectorSessionRelease(session);
+        }
+    };
+
+    const paused_ctx = JSGlobalContextCreate(null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(paused_ctx);
+    JSGlobalContextSetInspectable(paused_ctx, true);
+    var paused_state = State{ .trigger = .pause };
+    paused_state.session = ZJSInspectorSessionCreate(paused_ctx, State.receive, &paused_state) orelse return error.SessionCreateFailed;
+    const enable = "{\"id\":1,\"method\":\"Debugger.enable\"}";
+    try std.testing.expect(ZJSInspectorSessionDispatch(paused_state.session, enable, enable.len));
+    const paused_source = JSStringCreateWithUTF8CString("debugger; 42;") orelse return error.StringInitFailed;
+    defer JSStringRelease(paused_source);
+    const paused_result = JSEvaluateScript(paused_ctx, paused_source, null, null, 1, null) orelse return error.EvalFailed;
+    try std.testing.expectEqual(@as(f64, 42), JSValueToNumber(paused_ctx, paused_result, null));
+    try std.testing.expect(paused_state.released);
+    try std.testing.expect(inspectorState(ctxRawFrom(paused_ctx).?) == null);
+
+    const response_ctx = JSGlobalContextCreate(null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(response_ctx);
+    JSGlobalContextSetInspectable(response_ctx, true);
+    var response_state = State{ .trigger = .response };
+    response_state.session = ZJSInspectorSessionCreate(response_ctx, State.receive, &response_state) orelse return error.SessionCreateFailed;
+    const evaluate = "{\"id\":7,\"method\":\"Runtime.evaluate\",\"params\":{\"expression\":\"6 * 7\"}}";
+    try std.testing.expect(ZJSInspectorSessionDispatch(response_state.session, evaluate, evaluate.len));
+    try std.testing.expect(response_state.released);
+    try std.testing.expect(inspectorState(ctxRawFrom(response_ctx).?) == null);
+
+    const detach_ctx = JSGlobalContextCreate(null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(detach_ctx);
+    JSGlobalContextSetInspectable(detach_ctx, true);
+    var detach_state = State{ .trigger = .detach };
+    detach_state.session = ZJSInspectorSessionCreate(detach_ctx, State.receive, &detach_state) orelse return error.SessionCreateFailed;
+    JSGlobalContextSetInspectable(detach_ctx, false);
+    try std.testing.expect(detach_state.released);
+    try std.testing.expect(inspectorState(ctxRawFrom(detach_ctx).?) == null);
 }
 
 test "C-API: inspector remote objects stay rooted until deterministic release" {
