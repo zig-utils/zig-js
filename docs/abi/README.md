@@ -44,7 +44,7 @@ convention. The exact current denominator is:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #163 | 431 (146 implemented, 285 pending) |
+| Private JSC/Bun/WebCore ABI under #163 | 431 (153 implemented, 278 pending) |
 | Overlap with zig-js's completed public C target | 15 |
 | Platform libc import | 1 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
@@ -61,7 +61,7 @@ zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"
 ```
 
 This inventory is the denominator, not a claim that the whole surface works.
-The first 146 private entries are implemented; the other 285 remain pending
+The first 153 private entries are implemented; the other 278 remain pending
 until #163 provides their type/layout contracts, shims, and consumer evidence.
 `JSFunctionCall` remains revision-pinned in the declaration inventory but is
 not part of that denominator: each runtime-generated FFI module defines the
@@ -135,7 +135,7 @@ It covers empty/immediate/int32/double/NaN/negative-zero behavior, boxed
 empty/nonempty strings, object identity/truthiness, signed minimum and unsigned
 maximum BigInts, negative modulo extraction, exact number fallbacks, and every
 invalid/non-exact boundary. Public accounting stays unchanged at 117 functions
-and 19 extensions; these 146 symbols are reported only as private profile
+and 19 extensions; these 153 symbols are reported only as private profile
 exports.
 
 The opaque BigInt cell slice additionally exports `JSC__JSBigInt__fromJS`, the
@@ -255,6 +255,19 @@ report committed arena capacity. Sibling/foreign isolation, null boundaries,
 counter saturation, deferred job execution, and first-exception preservation
 are covered.
 
+Seven shared job/registry imports implement selected-realm native callbacks and
+encoded jobs, selected-realm and VM-wide microtask checkpoints, explicit
+rejected-promise notification, exact ZigString module-entry deletion, and
+delete-all-code. Native callback context/function bits remain queued until one
+execution; encoded callables and arguments retain same-VM identity, empty
+arguments normalize to `undefined`, and reentrant jobs drain to quiescence.
+Throws publish the first VM exception and restore the untouched FIFO tail for a
+later checkpoint. The persistent module registry is realm-local and traced
+under the same lock used for deletion. Code deletion drains jobs, clears the
+chosen realm's module/source caches, waits for every native execution and
+compilation lease, resets all published tiers before unmapping pages, and
+permits safe bytecode fallback or later recompilation.
+
 The array/index slice exports exact-length empty-array construction, direct
 indexed put/push/read, and an observable indexed read. Logical holes are not
 materialized as `undefined`; an explicit `undefined` remains present. Direct
@@ -336,7 +349,7 @@ proxies without executing them.
 Three Symbol bridges share one registry across C-API sibling realms and expose
 stable description/registry-key views for exact Latin-1 and UTF-16 content;
 local and well-known Symbols correctly fail registry-key lookup. The
-145-symbol combined runtime
+152-symbol combined runtime
 fixture covers these semantics; the two profile-selected JSType exports retain
 their separate Home/Bun runtime fixtures.
 
@@ -379,7 +392,7 @@ profile contains 437 unique declarations from 54 hashed files:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #164 | 421 (140 implemented, 281 pending) |
+| Private JSC/Bun/WebCore ABI under #164 | 421 (147 implemented, 274 pending) |
 | Public-C overlap | 15 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
 | **Total** | **437** |
