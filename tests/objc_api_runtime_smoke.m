@@ -100,6 +100,36 @@ int main(void)
                       wide.toNumber.longLongValue == 4294967297LL,
                   27))
             return 27;
+        JSValue *properties = [JSValue valueWithNewObjectInContext:context];
+        properties[@"answer"] = @42;
+        if (check([properties hasProperty:@"answer"] && [properties[@"answer"] toInt32] == 42, 28))
+            return 28;
+        if (check([properties deleteProperty:@"answer"] && ![properties hasProperty:@"answer"], 29))
+            return 29;
+        JSValue *indexed = [JSValue valueWithNewArrayInContext:context];
+        indexed[0] = @"first";
+        if (check([[indexed[0] toString] isEqualToString:@"first"], 30))
+            return 30;
+        JSValue *function = [context evaluateScript:@"(a, b) => a + b"];
+        if (check([[function callWithArguments:@[ @20, @22 ]] toInt32] == 42, 31))
+            return 31;
+        JSValue *constructor = [context evaluateScript:@"(class Box { constructor(value) { this.value = value; } })"];
+        JSValue *box = [constructor constructWithArguments:@[ @42 ]];
+        if (check([box[@"value"] toInt32] == 42 && [box isInstanceOf:constructor], 32))
+            return 32;
+        JSValue *words = [context evaluateScript:@"['zig', 'js']"];
+        if (check([[[words invokeMethod:@"join" withArguments:@[ @"-" ]] toString]
+                      isEqualToString:@"zig-js"],
+                  33))
+            return 33;
+        if (check([JSPropertyDescriptorWritableKey isEqualToString:@"writable"] &&
+                      [JSPropertyDescriptorEnumerableKey isEqualToString:@"enumerable"] &&
+                      [JSPropertyDescriptorConfigurableKey isEqualToString:@"configurable"] &&
+                      [JSPropertyDescriptorValueKey isEqualToString:@"value"] &&
+                      [JSPropertyDescriptorGetKey isEqualToString:@"get"] &&
+                      [JSPropertyDescriptorSetKey isEqualToString:@"set"],
+                  34))
+            return 34;
     }
     return 0;
 }

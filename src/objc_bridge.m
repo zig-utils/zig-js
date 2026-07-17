@@ -4,6 +4,13 @@
 #include <stdlib.h>
 #include <string.h>
 
+JS_EXPORT NSString *const JSPropertyDescriptorWritableKey = @"writable";
+JS_EXPORT NSString *const JSPropertyDescriptorEnumerableKey = @"enumerable";
+JS_EXPORT NSString *const JSPropertyDescriptorConfigurableKey = @"configurable";
+JS_EXPORT NSString *const JSPropertyDescriptorValueKey = @"value";
+JS_EXPORT NSString *const JSPropertyDescriptorGetKey = @"get";
+JS_EXPORT NSString *const JSPropertyDescriptorSetKey = @"set";
+
 @interface ZJSVirtualMachineState : NSObject
 @property (nonatomic) JSContextGroupRef group;
 @end
@@ -497,6 +504,24 @@ static JSVirtualMachine *ZJSVirtualMachineForGroup(JSContextGroupRef group)
 - (BOOL)isDate { return JSValueIsDate(self.context.JSGlobalContextRef, self.JSValueRef); }
 - (BOOL)isSymbol { return JSValueIsSymbol(self.context.JSGlobalContextRef, self.JSValueRef); }
 - (BOOL)isBigInt { return JSValueIsBigInt(self.context.JSGlobalContextRef, self.JSValueRef); }
+
+- (BOOL)isInstanceOf:(id)object
+{
+    JSValue *constructor = [JSValue valueWithObject:object inContext:self.context];
+    JSValueRef exception = NULL;
+    JSObjectRef constructorObject = JSValueToObject(self.context.JSGlobalContextRef,
+                                                     constructor.JSValueRef, &exception);
+    if (!exception) {
+        BOOL result = JSValueIsInstanceOfConstructor(self.context.JSGlobalContextRef,
+                                                     self.JSValueRef, constructorObject,
+                                                     &exception);
+        if (!exception)
+            return result;
+    }
+    [self.context zjs_recordException:exception];
+    return NO;
+}
+
 - (BOOL)toBool { return JSValueToBoolean(self.context.JSGlobalContextRef, self.JSValueRef); }
 
 - (double)toDouble
@@ -599,6 +624,208 @@ static JSVirtualMachine *ZJSVirtualMachineForGroup(JSContextGroupRef group)
         [self.context zjs_recordException:exception];
     return result;
 }
+
+static JSObjectRef ZJSObjectForValue(JSValue *value)
+{
+    JSValueRef exception = NULL;
+    JSObjectRef object = JSValueToObject(value.context.JSGlobalContextRef,
+                                         value.JSValueRef, &exception);
+    if (exception) {
+        [value.context zjs_recordException:exception];
+        return NULL;
+    }
+    return object;
+}
+
+static JSValueRef *ZJSCreateArguments(NSArray *arguments, JSContext *context,
+                                      size_t *count)
+{
+    *count = arguments ? arguments.count : 0;
+    if (!*count)
+        return NULL;
+    JSValueRef *values = calloc(*count, sizeof(JSValueRef));
+    if (!values)
+        [NSException raise:NSMallocException format:@"Unable to allocate Objective-C bridge arguments"];
+    @try {
+        for (size_t index = 0; index < *count; ++index)
+            values[index] = [JSValue valueWithObject:arguments[index] inContext:context].JSValueRef;
+    } @catch (id exception) {
+        free(values);
+        @throw exception;
+    }
+    return values;
+}
+
+- (JSValue *)callWithArguments:(NSArray *)arguments
+{
+    JSObjectRef function = ZJSObjectForValue(self);
+    if (!function)
+        return nil;
+    size_t count = 0;
+    JSValueRef *values = NULL;
+    @try {
+        values = ZJSCreateArguments(arguments, self.context, &count);
+        JSValueRef exception = NULL;
+        JSValueRef result = JSObjectCallAsFunction(self.context.JSGlobalContextRef,
+                                                   function, NULL, count, values,
+                                                   &exception);
+        if (exception) {
+            [self.context zjs_recordException:exception];
+            return nil;
+        }
+        return [JSValue valueWithJSValueRef:result inContext:self.context];
+    } @finally {
+        free(values);
+    }
+}
+
+- (JSValue *)constructWithArguments:(NSArray *)arguments
+{
+    JSObjectRef constructor = ZJSObjectForValue(self);
+    if (!constructor)
+        return nil;
+    size_t count = 0;
+    JSValueRef *values = NULL;
+    @try {
+        values = ZJSCreateArguments(arguments, self.context, &count);
+        JSValueRef exception = NULL;
+        JSObjectRef result = JSObjectCallAsConstructor(self.context.JSGlobalContextRef,
+                                                       constructor, count, values,
+                                                       &exception);
+        if (exception) {
+            [self.context zjs_recordException:exception];
+            return nil;
+        }
+        return [JSValue valueWithJSValueRef:result inContext:self.context];
+    } @finally {
+        free(values);
+    }
+}
+
+- (JSValue *)invokeMethod:(NSString *)method withArguments:(NSArray *)arguments
+{
+    JSValue *functionValue = [self valueForProperty:method];
+    JSObjectRef function = ZJSObjectForValue(functionValue);
+    JSObjectRef thisObject = ZJSObjectForValue(self);
+    if (!function || !thisObject)
+        return nil;
+    size_t count = 0;
+    JSValueRef *values = NULL;
+    @try {
+        values = ZJSCreateArguments(arguments, self.context, &count);
+        JSValueRef exception = NULL;
+        JSValueRef result = JSObjectCallAsFunction(self.context.JSGlobalContextRef,
+                                                   function, thisObject, count, values,
+                                                   &exception);
+        if (exception) {
+            [self.context zjs_recordException:exception];
+            return nil;
+        }
+        return [JSValue valueWithJSValueRef:result inContext:self.context];
+    } @finally {
+        free(values);
+    }
+}
+
+- (JSValue *)valueForProperty:(JSValueProperty)property
+{
+    JSObjectRef object = ZJSObjectForValue(self);
+    if (!object)
+        return nil;
+    JSValue *key = [JSValue valueWithObject:property inContext:self.context];
+    JSValueRef exception = NULL;
+    JSValueRef result = JSObjectGetPropertyForKey(self.context.JSGlobalContextRef,
+                                                  object, key.JSValueRef, &exception);
+    if (exception) {
+        [self.context zjs_recordException:exception];
+        return nil;
+    }
+    return [JSValue valueWithJSValueRef:result inContext:self.context];
+}
+
+- (void)setValue:(id)value forProperty:(JSValueProperty)property
+{
+    JSObjectRef object = ZJSObjectForValue(self);
+    if (!object)
+        return;
+    JSValue *key = [JSValue valueWithObject:property inContext:self.context];
+    JSValue *converted = [JSValue valueWithObject:value inContext:self.context];
+    JSValueRef exception = NULL;
+    JSObjectSetPropertyForKey(self.context.JSGlobalContextRef, object,
+                              key.JSValueRef, converted.JSValueRef,
+                              kJSPropertyAttributeNone, &exception);
+    if (exception)
+        [self.context zjs_recordException:exception];
+}
+
+- (BOOL)deleteProperty:(JSValueProperty)property
+{
+    JSObjectRef object = ZJSObjectForValue(self);
+    if (!object)
+        return NO;
+    JSValue *key = [JSValue valueWithObject:property inContext:self.context];
+    JSValueRef exception = NULL;
+    BOOL result = JSObjectDeletePropertyForKey(self.context.JSGlobalContextRef,
+                                               object, key.JSValueRef, &exception);
+    if (exception)
+        [self.context zjs_recordException:exception];
+    return result;
+}
+
+- (BOOL)hasProperty:(JSValueProperty)property
+{
+    JSObjectRef object = ZJSObjectForValue(self);
+    if (!object)
+        return NO;
+    JSValue *key = [JSValue valueWithObject:property inContext:self.context];
+    JSValueRef exception = NULL;
+    BOOL result = JSObjectHasPropertyForKey(self.context.JSGlobalContextRef,
+                                            object, key.JSValueRef, &exception);
+    if (exception)
+        [self.context zjs_recordException:exception];
+    return result;
+}
+
+- (void)defineProperty:(JSValueProperty)property descriptor:(id)descriptor
+{
+    JSValue *object = self.context.globalObject;
+    JSValue *objectConstructor = [object valueForProperty:@"Object"];
+    JSValue *defineProperty = [objectConstructor valueForProperty:@"defineProperty"];
+    [defineProperty callWithArguments:@[ self, property, descriptor ]];
+}
+
+- (JSValue *)valueAtIndex:(NSUInteger)index
+{
+    JSObjectRef object = ZJSObjectForValue(self);
+    if (!object)
+        return nil;
+    JSValueRef exception = NULL;
+    JSValueRef result = JSObjectGetPropertyAtIndex(self.context.JSGlobalContextRef,
+                                                   object, (unsigned)index, &exception);
+    if (exception) {
+        [self.context zjs_recordException:exception];
+        return nil;
+    }
+    return [JSValue valueWithJSValueRef:result inContext:self.context];
+}
+
+- (void)setValue:(id)value atIndex:(NSUInteger)index
+{
+    JSObjectRef object = ZJSObjectForValue(self);
+    if (!object)
+        return;
+    JSValue *converted = [JSValue valueWithObject:value inContext:self.context];
+    JSValueRef exception = NULL;
+    JSObjectSetPropertyAtIndex(self.context.JSGlobalContextRef, object,
+                               (unsigned)index, converted.JSValueRef, &exception);
+    if (exception)
+        [self.context zjs_recordException:exception];
+}
+
+- (JSValue *)objectForKeyedSubscript:(id)key { return [self valueForProperty:key]; }
+- (JSValue *)objectAtIndexedSubscript:(NSUInteger)index { return [self valueAtIndex:index]; }
+- (void)setObject:(id)object forKeyedSubscript:(id)key { [self setValue:object forProperty:key]; }
+- (void)setObject:(id)object atIndexedSubscript:(NSUInteger)index { [self setValue:object atIndex:index]; }
 
 - (JSRelationCondition)compareJSValue:(JSValue *)other
 {
