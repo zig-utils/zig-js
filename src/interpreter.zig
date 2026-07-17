@@ -43557,6 +43557,13 @@ fn symbolForFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostErro
     // `key` is ToString(arg) — honoring a `{toString}`/`{valueOf}` object and
     // throwing for a Symbol — not the raw default stringification.
     const key = if (args.len > 0) try self.toStringV(args[0]) else "undefined";
+    return symbolForKey(self, key);
+}
+
+/// Internal SymbolRegistry lookup for VM facilities that name a registered
+/// symbol without performing user-observable ToString (for example Bun's
+/// builtin-name table entry for `nodejs.util.inspect.custom`).
+pub fn symbolForKey(self: *Interpreter, key: []const u8) EvalError!Value {
     // The whole lookup-or-register must be atomic vs. peer `Symbol.for(key)`
     // calls, or two threads could both miss `getOwn(key)` and register distinct
     // symbols for the same key — breaking `Symbol.for(k) === Symbol.for(k)`.

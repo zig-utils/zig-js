@@ -142,6 +142,10 @@ extern "c" fn JSC__JSValue__getIfPropertyExistsImpl(EncodedValue, JSContextRef, 
 extern "c" fn JSC__JSValue__getPropertyValue(EncodedValue, JSContextRef, [*]const u8, u32) EncodedValue;
 extern "c" fn JSC__JSValue__getOwn(EncodedValue, JSContextRef, *const BunString) EncodedValue;
 extern "c" fn JSC__JSValue__getOwnByValue(EncodedValue, JSContextRef, EncodedValue) EncodedValue;
+extern "c" fn JSC__JSValue__fastGetDirect_(EncodedValue, JSContextRef, u8) EncodedValue;
+extern "c" fn JSC__JSValue__fastGet(EncodedValue, JSContextRef, u8) EncodedValue;
+extern "c" fn JSC__JSValue__fastGetOwn(EncodedValue, JSContextRef, u8) EncodedValue;
+extern "c" fn Bun__JSObject__getCodePropertyVMInquiry(JSContextRef, ?*anyopaque) EncodedValue;
 extern "c" fn JSC__JSValue__asString(EncodedValue) ?*anyopaque;
 extern "c" fn JSC__JSString__eql(?*anyopaque, JSContextRef, ?*anyopaque) bool;
 extern "c" fn JSC__JSString__is8Bit(?*anyopaque) bool;
@@ -1414,6 +1418,69 @@ pub fn main() void {
         !JSC__JSValue__toBoolean(evaluate(context, "__private_direct_target.direct === __private_aggregate_identity && !Object.hasOwn(__private_property_key_target, 'value')")))
         fail("private property boundary replaced pending exception or mutated state");
 
+    const fast_names = [_][]const u8{
+        "method",   "headers",       "status",        "statusText", "url",       "body",          "data",   "toString",
+        "redirect", "inspectCustom", "highWaterMark", "path",       "stream",    "asyncIterator", "name",   "message",
+        "error",    "default",       "encoding",      "fatal",      "ignoreBOM", "type",          "signal", "cmd",
+    };
+    const fast_target = evaluate(sibling_context, "globalThis.__private_fast_target = {}; ['method','headers','status','statusText','url','body','data','toString','redirect','highWaterMark','path','stream','name','message','error','default','encoding','fatal','ignoreBOM','type','signal','cmd'].forEach((key, i) => __private_fast_target[key] = 100 + (i < 9 ? i : i + (i < 12 ? 1 : 2))); __private_fast_target[Symbol.for('nodejs.util.inspect.custom')] = 109; __private_fast_target[Symbol.asyncIterator] = 113; __private_fast_target");
+    for (fast_names, 0..) |_, index| {
+        const expected = EncodedValue.fromInt32(@intCast(100 + index));
+        if (JSC__JSValue__fastGetDirect_(fast_target, sibling_context, @intCast(index)) != expected or
+            JSC__JSValue__fastGetOwn(fast_target, sibling_context, @intCast(index)) != expected or
+            JSC__JSValue__fastGet(fast_target, sibling_context, @intCast(index)) != expected)
+            fail("private fast built-in name table mismatch");
+    }
+    const fast_accessor = evaluate(context, "globalThis.__private_fast_gets = 0; Object.defineProperty({}, 'name', { get() { __private_fast_gets++; return 81; }, configurable: true })");
+    if (JSC__JSValue__fastGetDirect_(fast_accessor, context, 14) != .empty or
+        JSC__JSValue__fastGetOwn(fast_accessor, context, 14) != EncodedValue.fromInt32(81) or
+        JSC__JSValue__fastGet(fast_accessor, context, 14) != EncodedValue.fromInt32(81) or
+        !JSC__JSValue__toBoolean(evaluate(context, "__private_fast_gets === 2")))
+        fail("private fast direct/own accessor distinction mismatch");
+    const fast_inherited = evaluate(context, "Object.create({ name: 82 })");
+    if (JSC__JSValue__fastGetDirect_(fast_inherited, context, 14) != .empty or
+        JSC__JSValue__fastGetOwn(fast_inherited, context, 14) != .empty or
+        JSC__JSValue__fastGet(fast_inherited, context, 14) != EncodedValue.fromInt32(82))
+        fail("private fast inherited lookup distinction mismatch");
+    const fast_proxy = evaluate(context, "globalThis.__private_fast_proxy_gets = 0; globalThis.__private_fast_proxy_descs = 0; new Proxy({}, { get() { __private_fast_proxy_gets++; return 83; }, getOwnPropertyDescriptor() { __private_fast_proxy_descs++; return { value: 84, writable: true, enumerable: true, configurable: true }; } })");
+    if (JSC__JSValue__fastGetDirect_(fast_proxy, context, 14) != .empty or
+        JSC__JSValue__fastGetOwn(fast_proxy, context, 14) != EncodedValue.fromInt32(84) or
+        JSC__JSValue__fastGet(fast_proxy, context, 14) != EncodedValue.fromInt32(83) or
+        !JSC__JSValue__toBoolean(evaluate(context, "__private_fast_proxy_gets === 1 && __private_fast_proxy_descs === 1")))
+        fail("private fast Proxy observability mismatch");
+    const fast_undefined = evaluate(context, "({ name: undefined })");
+    _ = evaluate(context, "Object.defineProperty(Object.prototype, 'name', { value: 85, configurable: true })");
+    if (JSC__JSValue__fastGet(fast_undefined, context, 14) != .undefined or
+        JSC__JSValue__fastGet(evaluate(context, "({})"), context, 14) != .deleted or
+        JSC__JSValue__fastGetDirect_(fast_target, context, 24) != .empty or
+        JSC__JSValue__fastGetOwn(fast_target, context, 255) != .empty or
+        JSC__JSValue__fastGet(fast_target, context, 255) != .deleted)
+        fail("private fast undefined/cutoff/invalid-id sentinel mismatch");
+    _ = evaluate(context, "delete Object.prototype.name");
+
+    const code_target = evaluate(context, "Object.create({ code: 91 })");
+    const code_own = evaluate(context, "({ code: 92 })");
+    const code_accessor = evaluate(context, "globalThis.__private_code_gets = 0; Object.defineProperty({}, 'code', { get() { __private_code_gets++; return 93; } })");
+    const code_proxy = evaluate(context, "new Proxy({ code: 94 }, {})");
+    if (Bun__JSObject__getCodePropertyVMInquiry(context, code_target.cellPointer()) != EncodedValue.fromInt32(91) or
+        Bun__JSObject__getCodePropertyVMInquiry(sibling_context, code_own.cellPointer()) != EncodedValue.fromInt32(92) or
+        Bun__JSObject__getCodePropertyVMInquiry(context, code_accessor.cellPointer()) != .empty or
+        Bun__JSObject__getCodePropertyVMInquiry(context, code_proxy.cellPointer()) != .empty or
+        Bun__JSObject__getCodePropertyVMInquiry(context, null) != .empty or
+        Bun__JSObject__getCodePropertyVMInquiry(context, foreign_object) != .empty or
+        !JSC__JSValue__toBoolean(evaluate(context, "__private_code_gets === 0")))
+        fail("private code VM inquiry purity/ownership mismatch");
+
+    JSC__VM__throwError(vm, context, EncodedValue.fromInt32(204));
+    if (JSC__JSValue__fastGetDirect_(fast_target, context, 14) != .empty or
+        JSC__JSValue__fastGetOwn(fast_target, context, 14) != .empty or
+        JSC__JSValue__fastGet(fast_target, context, 14) != .empty or
+        Bun__JSObject__getCodePropertyVMInquiry(context, code_own.cellPointer()) != .empty)
+        fail("private fast property reads ignored pending exception");
+    const preserved_fast_exception = JSGlobalObject__tryTakeException(context);
+    if (JSC__Exception__asJSValue(preserved_fast_exception.cellPointer()) != EncodedValue.fromInt32(204))
+        fail("private fast property reads replaced pending exception");
+
     const sibling_dom_exception = ZigString__toDOMExceptionInstance(&empty_zig_string, sibling_context, 16);
     exposeCell(sibling_context, "__private_sibling_dom_exception", sibling_dom_exception);
     if (!JSC__JSValue__toBoolean(evaluate(sibling_context, "Object.getPrototypeOf(__private_sibling_dom_exception) === DOMException.prototype && __private_sibling_dom_exception.name === 'AbortError'")))
@@ -2132,5 +2199,5 @@ pub fn main() void {
         JSC__JSMap__get(map_cell, context, evaluate(context, "'direct'")) != .undefined)
         fail("private JSMap clear mismatch");
 
-    std.debug.print("Home private value shims: 111/111 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 115/115 symbols linked; runtime matrix passed\n", .{});
 }

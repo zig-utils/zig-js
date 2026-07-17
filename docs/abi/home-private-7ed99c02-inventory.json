@@ -88,8 +88,8 @@
     },
     "by_status": {
       "external": 2,
-      "implemented": 128,
-      "pending": 318
+      "implemented": 131,
+      "pending": 315
     }
   },
   "declarations": [
@@ -1892,10 +1892,10 @@
       "line": 1441,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSValue__fastGet(value: JSValue, global: *JSGlobalObject, builtin_id: u8) JSValue;",
       "declaration_sha256": "bfe01ab51cabe03269e0927d7df578df4d2e19bfd7e83900cfe962571360ca92",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSValue__fastGetDirect_",
@@ -1903,10 +1903,10 @@
       "line": 1452,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSValue__fastGetDirect_(this: JSValue, global: *JSGlobalObject, builtin_name: u8) JSValue;",
       "declaration_sha256": "1da0463fc4ad3e023d495b76507b8b2a0711fe24ce6f782532d1db0914d80c5d",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSValue__fastGetOwn",
@@ -1914,10 +1914,10 @@
       "line": 1442,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSValue__fastGetOwn(value: JSValue, globalObject: *JSGlobalObject, property: BuiltinName) JSValue;",
       "declaration_sha256": "896e045632731a8736a285b2a2fe576c799f837eac4a2ebd5b30894ad95699e9",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSValue__forEach",

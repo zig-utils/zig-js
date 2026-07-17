@@ -3245,6 +3245,110 @@ export fn JSC__JSValue__getOwnByValue(
     return privateEncodeResult(context, &machine, result);
 }
 
+fn privateBuiltinProperty(machine: *interp.Interpreter, id: u8) !?[]const u8 {
+    const names = [_][]const u8{
+        "method",   "headers",  "status",    "statusText", "url",           "body",
+        "data",     "toString", "redirect",  "",           "highWaterMark", "path",
+        "stream",   "",         "name",      "message",    "error",         "default",
+        "encoding", "fatal",    "ignoreBOM", "type",       "signal",        "cmd",
+    };
+    if (id >= names.len) return null;
+    if (id == 13) return machine.wellKnownSymbolKey("asyncIterator");
+    if (id == 9) {
+        const symbol = try interp.symbolForKey(machine, "nodejs.util.inspect.custom");
+        return try machine.keyOf(symbol);
+    }
+    return names[id];
+}
+
+fn privateFastBuiltinGet(
+    target_encoded: EncodedValue,
+    global: JSContextRef,
+    builtin_id: u8,
+    comptime mode: enum { direct, own, mitigated },
+) EncodedValue {
+    const context = ctxForEvaluation(global) orelse return .empty;
+    const group = privatePropertyBoundaryGroup(context) orelse return .empty;
+    if (group.pending_exception != null) return .empty;
+    const target = privateValueFrom(global, target_encoded) orelse return .empty;
+    if (!target.isObject() or target.asObj().is_symbol or target.asObj().is_bigint) return .empty;
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    defer context.popActiveInterpreter(&machine);
+    const property = (privateBuiltinProperty(&machine, builtin_id) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    }) orelse return if (mode == .mitigated) .deleted else .empty;
+    const result: ?Value = switch (mode) {
+        .direct => target.asObj().getOwn(property),
+        .own => machine.getOwnPropertyValue(target.asObj(), property, target) catch |err| {
+            privateSetPendingAbrupt(context, &machine, err);
+            return .empty;
+        },
+        .mitigated => privateGetBeforeObjectPrototype(&machine, target.asObj(), property) catch |err| {
+            privateSetPendingAbrupt(context, &machine, err);
+            return .empty;
+        },
+    };
+    const value_ = result orelse return if (mode == .mitigated) .deleted else .empty;
+    return privateEncodeResult(context, &machine, value_);
+}
+
+export fn JSC__JSValue__fastGetDirect_(
+    target: EncodedValue,
+    global: JSContextRef,
+    builtin_id: u8,
+) callconv(.c) EncodedValue {
+    return privateFastBuiltinGet(target, global, builtin_id, .direct);
+}
+
+export fn JSC__JSValue__fastGet(
+    target: EncodedValue,
+    global: JSContextRef,
+    builtin_id: u8,
+) callconv(.c) EncodedValue {
+    return privateFastBuiltinGet(target, global, builtin_id, .mitigated);
+}
+
+export fn JSC__JSValue__fastGetOwn(
+    target: EncodedValue,
+    global: JSContextRef,
+    builtin_id: u8,
+) callconv(.c) EncodedValue {
+    return privateFastBuiltinGet(target, global, builtin_id, .own);
+}
+
+export fn Bun__JSObject__getCodePropertyVMInquiry(
+    global: JSContextRef,
+    cell: ?*anyopaque,
+) callconv(.c) EncodedValue {
+    const context = ctxForHandleInspection(global) orelse return .empty;
+    const group = privatePropertyBoundaryGroup(context) orelse return .empty;
+    if (group.pending_exception != null) return .empty;
+    const boxed = privateBoxFromCell(cell) orelse return .empty;
+    if (boxed.private_kind != .value or boxed.owner.c_api_group != context.c_api_group or
+        !boxed.value.isObject() or boxed.value.asObj().is_symbol or boxed.value.asObj().is_bigint)
+        return .empty;
+    var current: ?*Object = boxed.value.asObj();
+    while (current) |object| {
+        // VMInquiry is intentionally pure: an opaque Proxy, accessor, or custom
+        // host slot is not inspected and cannot execute user code.
+        if (object.proxyHandler() != null or object.proxy_revoked) return .empty;
+        if (object.getAccessor("code") != null) return .empty;
+        if (object.getOwn("code")) |result| return privateEncodedFromValue(context, result);
+        if (object.hostClassHooks() != null) return .empty;
+        current = object.protoAtomic();
+    }
+    return .empty;
+}
+
 const PrivateDOMExceptionDescription = struct {
     name: []const u8,
     message: []const u8,
