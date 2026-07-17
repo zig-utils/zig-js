@@ -44,7 +44,7 @@ convention. The exact current denominator is:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #163 | 431 (95 implemented, 336 pending) |
+| Private JSC/Bun/WebCore ABI under #163 | 431 (97 implemented, 334 pending) |
 | Overlap with zig-js's completed public C target | 15 |
 | Platform libc import | 1 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
@@ -61,7 +61,7 @@ zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"
 ```
 
 This inventory is the denominator, not a claim that the whole surface works.
-The first 95 private entries are implemented; the other 336 remain pending
+The first 97 private entries are implemented; the other 334 remain pending
 until #163 provides their type/layout contracts, shims, and consumer evidence.
 `JSFunctionCall` remains revision-pinned in the declaration inventory but is
 not part of that denominator: each runtime-generated FFI module defines the
@@ -135,7 +135,7 @@ It covers empty/immediate/int32/double/NaN/negative-zero behavior, boxed
 empty/nonempty strings, object identity/truthiness, signed minimum and unsigned
 maximum BigInts, negative modulo extraction, exact number fallbacks, and every
 invalid/non-exact boundary. Public accounting stays unchanged at 117 functions
-and 19 extensions; these 95 symbols are reported only as private profile
+and 19 extensions; these 97 symbols are reported only as private profile
 exports.
 
 The opaque BigInt cell slice additionally exports `JSC__JSBigInt__fromJS`, the
@@ -288,9 +288,14 @@ selected realm and never replaces an existing exception. Four shared string
 constructors copy every tagged ZigString representation, validate the pinned raw
 UTF-8 path, intern atom backing per VM, and concatenate ordered ToString results
 as exact UTF-16 sequences. Their tests cover source mutation, sibling realms,
-foreign VMs, abrupt completion, and first-exception preservation. The 93-symbol combined
-runtime fixture covers these semantics; the two profile-selected JSType exports retain
-their separate Home/Bun runtime fixtures.
+foreign VMs, abrupt completion, and first-exception preservation. Two output
+bridges cache stable group-lifetime borrowed views, using untagged
+Latin-1 for 8-bit strings and tagged UTF-16 for all other strings. Direct
+JSString output validates the cell/VM; JSValue output performs full ToString and
+publishes Symbols, thrown values, and foreign-VM failures through the shared
+exception slot. The 95-symbol combined runtime fixture covers these semantics;
+the two profile-selected JSType exports retain their separate Home/Bun runtime
+fixtures.
 
 ## Profile-selectable JSType layout
 
@@ -331,7 +336,7 @@ profile contains 437 unique declarations from 54 hashed files:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #164 | 421 (88 implemented, 333 pending) |
+| Private JSC/Bun/WebCore ABI under #164 | 421 (90 implemented, 331 pending) |
 | Public-C overlap | 15 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
 | **Total** | **437** |
@@ -348,5 +353,5 @@ zig build bun-private-abi-audit -Dbun-source-root="$HOME/Code/bun"
 
 The audit rejects revision, file hash, declaration digest, classification,
 calling-convention, implementation-status, and Home-comparison drift. It does
-not claim complete Bun runtime compatibility; #164 remains open for the 333
+not claim complete Bun runtime compatibility; #164 remains open for the 331
 pending core entries and later wider/generated profiles.
