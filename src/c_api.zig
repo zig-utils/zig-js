@@ -4528,6 +4528,143 @@ export fn JSC__JSValue__getLengthIfPropertyExistsInternal(
     };
 }
 
+fn privatePathSeparator(unit: u16) bool {
+    return unit == '[' or unit == ']' or unit == '.';
+}
+
+fn privateGetPathProperty(machine: *interp.Interpreter, current: Value, property: []const u8) !?Value {
+    const object = try machine.toObject(current);
+    return machine.getPropertyIfExists(Value.obj(object), property);
+}
+
+fn privateTraverseStringPath(
+    machine: *interp.Interpreter,
+    allocator: std.mem.Allocator,
+    initial: Value,
+    path: []const u8,
+) !?Value {
+    const units = try privateWTF8ToUTF16(allocator, path);
+    if (units.len == 0) return privateGetPathProperty(machine, initial, "");
+
+    // This deliberately mirrors Bun's permissive Jest path parser. Brackets,
+    // dots, and their combinations are separators rather than validated
+    // syntax. Dots at either edge (and consecutive dots) request an empty key.
+    var current = initial;
+    var i: usize = 0;
+    var j: usize = 0;
+    if (units[0] == '.')
+        current = (try privateGetPathProperty(machine, current, "")) orelse return null;
+
+    while (i < units.len) {
+        var current_unit = units[i];
+        while (privatePathSeparator(current_unit)) {
+            i += 1;
+            if (i == units.len) {
+                if (current_unit == '.')
+                    return privateGetPathProperty(machine, current, "");
+                if (j == 0) return null;
+                return current;
+            }
+
+            const previous = current_unit;
+            current_unit = units[i];
+            if (previous == '.' and current_unit == '.') {
+                current = (try privateGetPathProperty(machine, current, "")) orelse return null;
+                continue;
+            }
+        }
+
+        j = i;
+        while (j < units.len and !privatePathSeparator(units[j])) : (j += 1) {}
+        const property = try privateUTF16ToWTF8(allocator, units[i..j]);
+        current = (try privateGetPathProperty(machine, current, property)) orelse return null;
+        i = j;
+    }
+    return current;
+}
+
+fn privateToLength(machine: *interp.Interpreter, value_: Value) !usize {
+    const number = try machine.toNumberV(value_);
+    if (std.math.isNan(number) or number <= 0) return 0;
+    return @intFromFloat(@min(@trunc(number), 9007199254740991.0));
+}
+
+fn privateTraverseArrayPath(
+    machine: *interp.Interpreter,
+    initial: Value,
+    path: *Object,
+) !?Value {
+    // JSC's forEachInArrayLike reads length once with ToLength, then performs
+    // ordinary indexed Get for every entry. A hole is therefore `undefined`
+    // unless the prototype supplies it, which fails the string/number check.
+    const length = try privateToLength(machine, try machine.getProperty(Value.obj(path), "length"));
+    var current = initial;
+    var index: usize = 0;
+    while (index < length) : (index += 1) {
+        const index_key = try std.fmt.allocPrint(machine.arena, "{d}", .{index});
+        const item = try machine.getProperty(Value.obj(path), index_key);
+        if (!item.isString() and !item.isNumber()) return null;
+        const property = try machine.toStringV(item);
+        current = (try privateGetPathProperty(machine, current, property)) orelse return null;
+    }
+    return current;
+}
+
+export fn JSC__JSValue__getIfPropertyExistsFromPath(
+    target_encoded: EncodedValue,
+    global: JSContextRef,
+    path_encoded: EncodedValue,
+) callconv(.c) EncodedValue {
+    const context = ctxForEvaluation(global) orelse return .empty;
+    const group = privatePropertyBoundaryGroup(context) orelse return .empty;
+    if (group.pending_exception != null) return .empty;
+
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    defer context.popActiveInterpreter(&machine);
+
+    const target = privateValueFrom(global, target_encoded) orelse {
+        const err = machine.throwError("TypeError", "Property-path target belongs to another VM");
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    const path = privateValueFrom(global, path_encoded) orelse {
+        const err = machine.throwError("TypeError", "Property path belongs to another VM");
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+
+    const result: ?Value = if (path.isString())
+        privateTraverseStringPath(&machine, context.arena(), target, path.asStr()) catch |err| {
+            if (err == error.InvalidString) {
+                const abrupt = machine.throwError("TypeError", "Invalid property path string");
+                privateSetPendingAbrupt(context, &machine, abrupt);
+            } else {
+                privateSetPendingAbrupt(context, &machine, err);
+            }
+            return .empty;
+        }
+    else if (path.isObject() and !path.asObj().is_symbol and !path.asObj().is_bigint and
+        (interp.objectToStringIsArray(&machine, path.asObj()) catch |err| {
+            privateSetPendingAbrupt(context, &machine, err);
+            return .empty;
+        }))
+        privateTraverseArrayPath(&machine, target, path.asObj()) catch |err| {
+            privateSetPendingAbrupt(context, &machine, err);
+            return .empty;
+        }
+    else
+        null;
+    return privateEncodeResult(context, &machine, result orelse return .empty);
+}
+
 export fn JSC__JSString__eql(
     left_cell: ?*anyopaque,
     global: JSContextRef,
@@ -15524,6 +15661,94 @@ test "private internal length projection preserves direct kinds and observable f
     try std.testing.expectEqual(@as(f64, 0), JSC__JSValue__getLengthIfPropertyExistsInternal(try Probe.value(internal, "[1, 2, 3]"), context));
     pending = JSGlobalObject__tryTakeException(context);
     try std.testing.expectEqual(EncodedValue.fromInt32(223), JSC__Exception__asJSValue(@ptrFromInt(try pending.asCellAddress())));
+}
+
+test "private property path traversal preserves pinned string and array semantics" {
+    const context = JSGlobalContextCreate(null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(context);
+    const internal = ctxForEvaluation(context) orelse return error.ContextCreateFailed;
+    const Probe = struct {
+        fn encoded(context_: *Context, source: []const u8) !EncodedValue {
+            return privateEncodedFromValue(context_, try context_.evaluate(source));
+        }
+
+        fn call(context_: *Context, global: JSContextRef, target_source: []const u8, path_source: []const u8) !EncodedValue {
+            return JSC__JSValue__getIfPropertyExistsFromPath(
+                try encoded(context_, target_source),
+                global,
+                try encoded(context_, path_source),
+            );
+        }
+
+        fn expect(context_: *Context, global: JSContextRef, target_source: []const u8, path_source: []const u8, expected_source: []const u8) !void {
+            const actual = try call(context_, global, target_source, path_source);
+            try std.testing.expect(actual != .empty);
+            const actual_value = privateValueFrom(global, actual) orelse return error.ValueInitFailed;
+            try std.testing.expect(value.strictEquals(actual_value, try context_.evaluate(expected_source)));
+        }
+    };
+
+    try Probe.expect(internal, context, "({ a: { b: 41 } })", "'a.b'", "41");
+    try Probe.expect(internal, context, "({ a: { b: 42 } })", "'a[b]'", "42");
+    try Probe.expect(internal, context, "({ 'A😀': { '𐐀': 43 } })", "'A😀.𐐀'", "43");
+    try Probe.expect(internal, context, "({ '': 44 })", "''", "44");
+    try Probe.expect(internal, context, "({ '': { '': 45 } })", "'.'", "45");
+    try Probe.expect(internal, context, "({ '': { a: 46 } })", "'.a'", "46");
+    try Probe.expect(internal, context, "({ a: { '': { b: 47 } } })", "'a..b'", "47");
+    try Probe.expect(internal, context, "({ a: { '': 48 } })", "'a.'", "48");
+    try Probe.expect(internal, context, "({ a: 49 })", "'a[]'", "49");
+    try std.testing.expectEqual(EncodedValue.empty, try Probe.call(internal, context, "({ '': 1 })", "'[]'"));
+    try std.testing.expectEqual(EncodedValue.undefined, try Probe.call(internal, context, "({ a: undefined })", "'a'"));
+    try std.testing.expectEqual(EncodedValue.empty, try Probe.call(internal, context, "({ a: 1 })", "'missing'"));
+
+    try Probe.expect(internal, context, "({ a: { '0': { b: 50 } } })", "['a', 0, 'b']", "50");
+    try Probe.expect(internal, context, "({ '0': 51 })", "[-0]", "51");
+    try Probe.expect(internal, context, "({ '1e+21': 52 })", "[1e21]", "52");
+    try Probe.expect(internal, context, "'abc'", "['length']", "3");
+    try Probe.expect(internal, context, "({ a: { inherited: 53 } })", "(() => { const p = ['a', ,]; Object.setPrototypeOf(p, { 1: 'inherited' }); return p; })()", "53");
+    try std.testing.expectEqual(EncodedValue.empty, try Probe.call(internal, context, "({ a: 1 })", "['a', , 'ignored']"));
+    try std.testing.expectEqual(EncodedValue.empty, try Probe.call(internal, context, "({ a: 1 })", "['a', true]"));
+
+    const observable_target = try Probe.encoded(internal, "globalThis.__path_gets_224 = 0; globalThis.__path_has_224 = 0; " ++
+        "new Proxy({ a: { b: 54 } }, { get(t, k, r) { __path_gets_224++; return Reflect.get(t, k, r); }, has() { __path_has_224++; return true; } })");
+    const observable_result = JSC__JSValue__getIfPropertyExistsFromPath(observable_target, context, try Probe.encoded(internal, "'a.b'"));
+    try std.testing.expect(value.strictEquals(privateValueFrom(context, observable_result) orelse return error.ValueInitFailed, try internal.evaluate("54")));
+    try std.testing.expectEqual(@as(f64, 1), (try internal.evaluate("__path_gets_224")).asNum());
+    try std.testing.expectEqual(@as(f64, 0), (try internal.evaluate("__path_has_224")).asNum());
+
+    const observable_path = try Probe.encoded(internal, "globalThis.__path_length_gets_224 = 0; globalThis.__path_index_gets_224 = 0; " ++
+        "new Proxy(['a', 0, 'b'], { get(t, k, r) { if (k === 'length') __path_length_gets_224++; else if (String(+k) === k) __path_index_gets_224++; return Reflect.get(t, k, r); } })");
+    const array_result = JSC__JSValue__getIfPropertyExistsFromPath(try Probe.encoded(internal, "({ a: { '0': { b: 55 } } })"), context, observable_path);
+    try std.testing.expect(value.strictEquals(privateValueFrom(context, array_result) orelse return error.ValueInitFailed, try internal.evaluate("55")));
+    try std.testing.expectEqual(@as(f64, 1), (try internal.evaluate("__path_length_gets_224")).asNum());
+    try std.testing.expectEqual(@as(f64, 3), (try internal.evaluate("__path_index_gets_224")).asNum());
+
+    try std.testing.expectEqual(EncodedValue.empty, try Probe.call(internal, context, "({ get a() { throw 2241; } })", "'a'"));
+    var pending = JSGlobalObject__tryTakeException(context);
+    try std.testing.expectEqual(EncodedValue.fromInt32(2241), JSC__Exception__asJSValue(@ptrFromInt(try pending.asCellAddress())));
+    try std.testing.expectEqual(EncodedValue.empty, try Probe.call(internal, context, "null", "'a'"));
+    pending = JSGlobalObject__tryTakeException(context);
+    const null_error = privateValueFrom(context, JSC__Exception__asJSValue(@ptrFromInt(try pending.asCellAddress()))) orelse return error.MissingException;
+    try std.testing.expect(null_error.isObject() and null_error.asObj().behavior.is_error);
+    try std.testing.expectEqual(EncodedValue.empty, try Probe.call(internal, context, "({ a: 1 })", "(() => { const r = Proxy.revocable([], {}); r.revoke(); return r.proxy; })()"));
+    pending = JSGlobalObject__tryTakeException(context);
+    const revoked_error = privateValueFrom(context, JSC__Exception__asJSValue(@ptrFromInt(try pending.asCellAddress()))) orelse return error.MissingException;
+    try std.testing.expect(revoked_error.isObject() and revoked_error.asObj().behavior.is_error);
+
+    const foreign = JSGlobalContextCreate(null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(foreign);
+    const foreign_internal = ctxForEvaluation(foreign) orelse return error.ContextCreateFailed;
+    const foreign_target = privateEncodedFromValue(foreign_internal, try foreign_internal.evaluate("({ a: 1 })"));
+    try std.testing.expectEqual(EncodedValue.empty, JSC__JSValue__getIfPropertyExistsFromPath(foreign_target, context, try Probe.encoded(internal, "'a'")));
+    try std.testing.expect(JSGlobalObject__hasException(context));
+    JSGlobalObject__clearException(context);
+
+    const blocked_target = try Probe.encoded(internal, "({ a: 56 })");
+    const blocked_path = try Probe.encoded(internal, "'a'");
+    JSC__VM__throwError(JSC__JSGlobalObject__vm(context), context, EncodedValue.fromInt32(224));
+    try std.testing.expectEqual(EncodedValue.empty, JSC__JSValue__getIfPropertyExistsFromPath(blocked_target, context, blocked_path));
+    pending = JSGlobalObject__tryTakeException(context);
+    try std.testing.expectEqual(EncodedValue.fromInt32(224), JSC__Exception__asJSValue(@ptrFromInt(try pending.asCellAddress())));
 }
 
 test "private VM entry-state query tracks nested and sibling interpreters" {

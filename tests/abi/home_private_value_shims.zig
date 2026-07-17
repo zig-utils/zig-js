@@ -230,6 +230,7 @@ extern "c" fn JSC__JSValue__asString(EncodedValue) ?*anyopaque;
 extern "c" fn JSC__JSFunction__getSourceCode(EncodedValue, *ZigString) bool;
 extern "c" fn JSC__JSFunction__optimizeSoon(EncodedValue) void;
 extern "c" fn JSC__JSValue__getLengthIfPropertyExistsInternal(EncodedValue, JSContextRef) f64;
+extern "c" fn JSC__JSValue__getIfPropertyExistsFromPath(EncodedValue, JSContextRef, EncodedValue) EncodedValue;
 extern "c" fn JSC__jsTypeStringForValue(JSContextRef, EncodedValue) ?*anyopaque;
 extern "c" fn JSC__JSString__eql(?*anyopaque, JSContextRef, ?*anyopaque) bool;
 extern "c" fn JSC__JSString__is8Bit(?*anyopaque) bool;
@@ -1079,6 +1080,32 @@ pub fn main() void {
     const length_exception = JSGlobalObject__tryTakeException(context);
     if (JSC__Exception__asJSValue(length_exception.cellPointer()) != EncodedValue.fromInt32(223))
         fail("private internal length projection changed thrown identity");
+
+    const path_target = evaluate(context, "({ a: { '0': { b: 224 } }, present: undefined, '': { '': 225 } })");
+    if (!JSC__JSValue__isStrictEqual(
+        JSC__JSValue__getIfPropertyExistsFromPath(path_target, context, evaluate(context, "'a[0].b'")),
+        EncodedValue.fromInt32(224),
+        context,
+    ) or !JSC__JSValue__isStrictEqual(
+        JSC__JSValue__getIfPropertyExistsFromPath(path_target, context, evaluate(context, "['a', 0, 'b']")),
+        EncodedValue.fromInt32(224),
+        context,
+    ) or !JSC__JSValue__isStrictEqual(
+        JSC__JSValue__getIfPropertyExistsFromPath(path_target, context, evaluate(context, "'.'")),
+        EncodedValue.fromInt32(225),
+        context,
+    ) or JSC__JSValue__getIfPropertyExistsFromPath(path_target, context, evaluate(context, "'present'")) != .undefined or
+        JSC__JSValue__getIfPropertyExistsFromPath(path_target, context, evaluate(context, "'missing'")) != .empty)
+        fail("private property-path traversal mismatch");
+    if (JSC__JSValue__getIfPropertyExistsFromPath(
+        evaluate(context, "({ get a() { throw 224; } })"),
+        context,
+        evaluate(context, "'a'"),
+    ) != .empty or !JSGlobalObject__hasException(context))
+        fail("private property-path traversal missed abrupt completion");
+    const path_exception = JSGlobalObject__tryTakeException(context);
+    if (JSC__Exception__asJSValue(path_exception.cellPointer()) != EncodedValue.fromInt32(224))
+        fail("private property-path traversal changed thrown identity");
 
     StringBuilder__init(&string_builder);
     StringBuilder__appendInt(&string_builder, std.math.minInt(i32));
@@ -3126,5 +3153,5 @@ pub fn main() void {
         TopExceptionScope__exceptionIncludingTraps(&verification_scope) != null)
         fail("private TopExceptionScope destruction mismatch");
 
-    std.debug.print("Home private value shims: 204/204 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 205/205 symbols linked; runtime matrix passed\n", .{});
 }

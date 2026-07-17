@@ -88,8 +88,8 @@
     },
     "by_status": {
       "external": 2,
-      "implemented": 220,
-      "pending": 226
+      "implemented": 221,
+      "pending": 225
     }
   },
   "declarations": [
@@ -2035,10 +2035,10 @@
       "line": 1459,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSValue__getIfPropertyExistsFromPath(this: JSValue, global: *JSGlobalObject, path: JSValue) JSValue;",
       "declaration_sha256": "c30cac06a6a2e3e468863afc45ceb2f4c47d70ea76a567bc7d52f861f70026a3",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSValue__getIfPropertyExistsImpl",
