@@ -253,7 +253,7 @@ every successful parse, including repeated identical evaluations. All supported
 generated-function constructors do the same, and `JSObjectMakeFunction` preserves
 its explicit URL/starting line. JavaScript module graphs publish canonical
 entry/dependency paths and exact sources, with graph-local deduplication and
-working module breakpoints. The final origin/teardown matrix remains
+working module breakpoints. The completed origin/teardown matrix is recorded in
 [#155](https://github.com/zig-utils/zig-js/issues/155).
 
 See [docs/api.md](docs/api.md) and [docs/HOME_INTEGRATION.md](docs/HOME_INTEGRATION.md) for the fuller embedding story and the important warning that zig-js is not a drop-in replacement for Bun/Home's private JSC internals.
@@ -366,7 +366,7 @@ Do not read the green configured runner as "the whole JavaScript universe is fin
 
 Completion of every item—and the evidence gate for removing this section—is tracked in [issue #134](https://github.com/zig-utils/zig-js/issues/134).
 
-- full JavaScriptCore framework/private internals, Objective-C bridge, remaining debugger execution/paused-state APIs, and Bun/Home private JSC ABI;
+- full JavaScriptCore framework/private internals, Objective-C bridge, worker-target inspector discovery/cross-thread transport, and Bun/Home private JSC ABI;
 - WebAssembly and JIT shell hooks from the PR-249 reference corpus;
 - moving or multi-age generational GC, parallel mid-script minor collection, and any optimizing JIT.
 

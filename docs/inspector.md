@@ -193,7 +193,7 @@ lexical/global scope chains, frame evaluation, and expandable remote objects
 with deterministic GC-safe lifetime. Worker targets remain tracked by
 [issue #156](https://github.com/zig-utils/zig-js/issues/156). Unsupported
 commands return -32601; there are no silently accepted debugger stubs.
-The remaining completion/teardown matrix for these origins is tracked by
+The completed origin/teardown matrix is recorded in
 [issue #155](https://github.com/zig-utils/zig-js/issues/155).
 Context-owned history and dynamic registration are shared across sessions. Every
 enabled session receives the same scriptParsed identity; destroying the last
