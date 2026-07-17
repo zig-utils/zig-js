@@ -44,7 +44,7 @@ convention. The exact current denominator is:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #163 | 432 (23 implemented, 409 pending) |
+| Private JSC/Bun/WebCore ABI under #163 | 432 (26 implemented, 406 pending) |
 | Overlap with zig-js's completed public C target | 15 |
 | Platform libc import | 1 |
 | **Total** | **448** |
@@ -60,7 +60,7 @@ zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"
 ```
 
 This inventory is the denominator, not a claim that the whole surface works.
-The first twenty-three private entries are implemented; the other 409 remain pending
+The first twenty-six private entries are implemented; the other 406 remain pending
 until #163 provides their type/layout contracts, shims, and consumer evidence.
 
 Home revisions `5e829ad483bb9e5ccb19766997df6462edd8e167` and
@@ -129,7 +129,7 @@ It covers empty/immediate/int32/double/NaN/negative-zero behavior, boxed
 empty/nonempty strings, object identity/truthiness, signed minimum and unsigned
 maximum BigInts, negative modulo extraction, exact number fallbacks, and every
 invalid/non-exact boundary. Public accounting stays unchanged at 117 functions
-and 19 extensions; these twenty-three symbols are reported only as private profile
+and 19 extensions; these twenty-six symbols are reported only as private profile
 exports.
 
 The opaque BigInt cell slice additionally exports `JSC__JSBigInt__fromJS`, the
@@ -147,6 +147,14 @@ ASCII and Latin-1 8-bit strings, BMP and astral strings, lone-surrogate WTF-8,
 equal content in distinct cells, non-string rejection, ordinary-object identity,
 and String/Symbol/BigInt boxing. Foreign-context coercion is rejected rather
 than accepting a handle from another VM.
+
+The ordinary-object foundation exports fresh Object.prototype-backed and true
+null-prototype constructors plus boxed-primitive unwrapping. The capacity input
+remains an allocation hint with no observable semantic effect. Unwrapping
+canonicalizes the complete int32 range, preserves out-of-range doubles,
+negative zero and NaN, returns exact String/Boolean/BigInt primitives, leaves
+ordinary objects and existing primitives unchanged, and rejects foreign-context
+wrapper cells.
 
 ## Profile-selectable JSType layout
 
@@ -187,7 +195,7 @@ profile contains 437 unique declarations from 54 hashed files:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #164 | 422 (23 implemented, 399 pending) |
+| Private JSC/Bun/WebCore ABI under #164 | 422 (26 implemented, 396 pending) |
 | Public-C overlap | 15 |
 | **Total** | **437** |
 
@@ -203,5 +211,5 @@ zig build bun-private-abi-audit -Dbun-source-root="$HOME/Code/bun"
 
 The audit rejects revision, file hash, declaration digest, classification,
 calling-convention, implementation-status, and Home-comparison drift. It does
-not claim complete Bun runtime compatibility; #164 remains open for the 399
+not claim complete Bun runtime compatibility; #164 remains open for the 396
 pending core entries and later wider/generated profiles.
