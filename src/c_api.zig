@@ -128,6 +128,44 @@ const PrivateJSStringIterator = extern struct {
 const PrivateJSHostFn = fn (JSContextRef, *PrivateCallFrame) callconv(.c) EncodedValue;
 const PrivateCallFrame = opaque {};
 
+const PrivateZigStackFrameCode = enum(u8) {
+    none = 0,
+    eval = 1,
+    module = 2,
+    function = 3,
+    global = 4,
+    wasm = 5,
+    constructor = 6,
+    _,
+};
+
+const PrivateZigStackFramePosition = extern struct {
+    line: c_int,
+    column: c_int,
+    line_start_byte: c_int,
+};
+
+const PrivateZigStackFrame = extern struct {
+    function_name: PrivateBunString,
+    source_url: PrivateBunString,
+    position: PrivateZigStackFramePosition,
+    code_type: PrivateZigStackFrameCode,
+    is_async: bool,
+    remapped: bool = false,
+    jsc_stack_frame_index: i32 = -1,
+};
+
+const PrivateZigStackTrace = extern struct {
+    source_lines_ptr: [*c]PrivateBunString,
+    source_lines_numbers: [*c]i32,
+    source_lines_len: u8,
+    source_lines_to_collect: u8,
+    frames_ptr: [*c]PrivateZigStackFrame,
+    frames_len: u8,
+    frames_cap: u8,
+    referenced_source_provider: ?*anyopaque = null,
+};
+
 const PrivateImplementationVisibility = enum(u8) {
     public = 0,
     private = 1,
@@ -192,6 +230,16 @@ comptime {
         @compileError("private JSString iterator layout drifted from the pinned ABI");
     if (@sizeOf(*const PrivateJSHostFn) != 8 or @alignOf(*const PrivateJSHostFn) != 8)
         @compileError("private JSHostFn pointer must retain the pinned 64-bit ABI");
+    if (@sizeOf(PrivateZigStackFramePosition) != 12 or @alignOf(PrivateZigStackFramePosition) != 4 or
+        @sizeOf(PrivateZigStackFrame) != 72 or @alignOf(PrivateZigStackFrame) != 8 or
+        @offsetOf(PrivateZigStackFrame, "source_url") != 24 or
+        @offsetOf(PrivateZigStackFrame, "position") != 48 or
+        @offsetOf(PrivateZigStackFrame, "jsc_stack_frame_index") != 64)
+        @compileError("private ZigStackFrame layout drifted from the pinned ABI");
+    if (@sizeOf(PrivateZigStackTrace) != 48 or @alignOf(PrivateZigStackTrace) != 8 or
+        @offsetOf(PrivateZigStackTrace, "frames_ptr") != 24 or
+        @offsetOf(PrivateZigStackTrace, "referenced_source_provider") != 40)
+        @compileError("private ZigStackTrace layout drifted from the pinned ABI");
     if (@offsetOf(PrivateWTFStringImpl, "m_ref_count") != 0 or
         @offsetOf(PrivateWTFStringImpl, "m_length") != 4 or
         @offsetOf(PrivateWTFStringImpl, "m_ptr") != 8 or
@@ -8365,6 +8413,54 @@ export fn JSC__Exception__asJSValue(exception: ?*anyopaque) callconv(.c) Encoded
     const boxed = privateBoxFromCell(exception) orelse return .empty;
     if (boxed.private_kind != .exception) return .empty;
     return boxed.exception_encoded;
+}
+
+fn privateDerefBunString(string: PrivateBunString) void {
+    if (string.tag == .wtf_string_impl) Bun__WTFStringImpl__deref(string.value.wtf_string_impl);
+}
+
+/// Project the Error's creation-time structured stack into Bun/Home's exact
+/// `ZigStackTrace` storage. Like upstream's `OnlyPosition` path, the caller owns
+/// the frame buffer and receives no source-line payload/provider reference.
+export fn JSC__Exception__getStackTrace(
+    exception: ?*anyopaque,
+    global: JSContextRef,
+    trace: ?*PrivateZigStackTrace,
+) callconv(.c) void {
+    const output = trace orelse return;
+    output.frames_len = 0;
+    output.source_lines_len = 0;
+    output.referenced_source_provider = null;
+    if (output.frames_cap == 0 or output.frames_ptr == null) return;
+
+    const context = ctxForHandleInspection(global) orelse return;
+    const boxed = privateBoxFromCell(exception) orelse return;
+    if (boxed.private_kind != .exception or boxed.owner.c_api_group != context.c_api_group) return;
+    if (!boxed.value.isObject() or !boxed.value.asObj().behavior.is_error) return;
+
+    const retained = boxed.value.asObj().errorStackFrames();
+    const count = @min(retained.len, @as(usize, output.frames_cap));
+    for (retained[0..count], output.frames_ptr[0..count]) |source, *destination| {
+        const function_name = privateOwnedWTF8String(source.function_name) catch break;
+        const source_url = privateOwnedWTF8String(source.source_url) catch {
+            privateDerefBunString(function_name);
+            break;
+        };
+        destination.* = .{
+            .function_name = function_name,
+            .source_url = source_url,
+            .position = .{
+                .line = source.line_zero_based,
+                .column = source.column_zero_based,
+                .line_start_byte = source.line_start_byte,
+            },
+            .code_type = @enumFromInt(@intFromEnum(source.code_type)),
+            .is_async = source.is_async,
+            .remapped = false,
+            .jsc_stack_frame_index = source.jsc_stack_frame_index,
+        };
+        output.frames_len += 1;
+    }
 }
 
 export fn JSC__JSValue__isException(encoded: EncodedValue, vm_ref: ?*anyopaque) callconv(.c) bool {

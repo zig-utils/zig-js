@@ -83,6 +83,38 @@ const BunString = extern struct {
     value: BunStringImpl,
 };
 
+const ZigStackFrameCode = enum(u8) {
+    None = 0,
+    Eval = 1,
+    Module = 2,
+    Function = 3,
+    Global = 4,
+    Wasm = 5,
+    Constructor = 6,
+    _,
+};
+
+const ZigStackFramePosition = extern struct { line: c_int, column: c_int, line_start_byte: c_int };
+const ZigStackFrame = extern struct {
+    function_name: BunString,
+    source_url: BunString,
+    position: ZigStackFramePosition,
+    code_type: ZigStackFrameCode,
+    is_async: bool,
+    remapped: bool = false,
+    jsc_stack_frame_index: i32 = -1,
+};
+const ZigStackTrace = extern struct {
+    source_lines_ptr: [*c]BunString,
+    source_lines_numbers: [*c]i32,
+    source_lines_len: u8,
+    source_lines_to_collect: u8,
+    frames_ptr: [*c]ZigStackFrame,
+    frames_len: u8,
+    frames_cap: u8,
+    referenced_source_provider: ?*anyopaque = null,
+};
+
 const StringBuilder = extern struct {
     bytes: [24]u8 align(8),
 };
@@ -324,6 +356,7 @@ extern "c" fn JSGlobalObject__throwOutOfMemoryError(JSContextRef) void;
 extern "c" fn JSGlobalObject__throwStackOverflow(JSContextRef) void;
 extern "c" fn JSGlobalObject__tryTakeException(JSContextRef) EncodedValue;
 extern "c" fn JSC__Exception__asJSValue(?*anyopaque) EncodedValue;
+extern "c" fn JSC__Exception__getStackTrace(?*anyopaque, JSContextRef, *ZigStackTrace) void;
 extern "c" fn JSC__JSValue__isException(EncodedValue, ?*anyopaque) bool;
 extern "c" fn JSC__JSValue__isTerminationException(EncodedValue) bool;
 extern "c" fn JSC__JSValue__toError_(EncodedValue) EncodedValue;
@@ -2919,6 +2952,52 @@ pub fn main() void {
         JSC__JSValue__toError_(error_exception) != error_value)
         fail("ErrorInstance exception unwrapping mismatch");
 
+    const traced_script = JSStringCreateWithUTF8CString("(function outer249(){ return (function inner249(){ return new Error('stack-249'); })(); })()") orelse fail("trace script creation failed");
+    defer JSStringRelease(traced_script);
+    const traced_url = JSStringCreateWithUTF8CString("trace-249.js") orelse fail("trace URL creation failed");
+    defer JSStringRelease(traced_url);
+    var traced_eval_exception: JSValueRef = null;
+    const traced_error_ref = JSEvaluateScript(context, traced_script, null, traced_url, 41, &traced_eval_exception) orelse fail("trace evaluation failed");
+    if (traced_eval_exception != null) fail("trace evaluation threw");
+    const traced_error = EncodedValue.fromRef(traced_error_ref);
+    JSC__VM__throwError(vm, context, traced_error);
+    const traced_exception = JSGlobalObject__tryTakeException(context);
+    var trace_frames: [4]ZigStackFrame = undefined;
+    var trace = ZigStackTrace{
+        .source_lines_ptr = null,
+        .source_lines_numbers = null,
+        .source_lines_len = 99,
+        .source_lines_to_collect = 0,
+        .frames_ptr = &trace_frames,
+        .frames_len = 99,
+        .frames_cap = trace_frames.len,
+    };
+    JSC__Exception__getStackTrace(traced_exception.cellPointer(), sibling_context, &trace);
+    if (trace.frames_len != 3 or trace.source_lines_len != 0 or trace.referenced_source_provider != null or
+        trace_frames[0].code_type != .Function or trace_frames[1].code_type != .Function or
+        trace_frames[2].code_type != .Global or trace_frames[0].position.line != 40 or
+        trace_frames[0].position.column < 0 or trace_frames[0].jsc_stack_frame_index != 0 or
+        trace_frames[1].jsc_stack_frame_index != 1 or trace_frames[2].jsc_stack_frame_index != 2 or
+        trace_frames[0].function_name.tag != .wtf_string_impl or
+        trace_frames[1].function_name.tag != .wtf_string_impl)
+        fail("structured exception stack mismatch");
+    if (!JSC__JSValue__isStrictEqual(BunString__toJS(context, &trace_frames[0].source_url), evaluate(context, "'trace-249.js'"), context))
+        fail("structured exception stack source URL mismatch");
+    for (trace_frames[0..trace.frames_len]) |frame| {
+        if (frame.function_name.tag == .wtf_string_impl) Bun__WTFStringImpl__deref(frame.function_name.value.wtf_string_impl);
+        if (frame.source_url.tag == .wtf_string_impl) Bun__WTFStringImpl__deref(frame.source_url.value.wtf_string_impl);
+    }
+    trace.frames_len = 99;
+    trace.frames_cap = 1;
+    JSC__Exception__getStackTrace(traced_exception.cellPointer(), context, &trace);
+    if (trace.frames_len != 1 or trace_frames[0].jsc_stack_frame_index != 0)
+        fail("structured exception stack capacity mismatch");
+    if (trace_frames[0].function_name.tag == .wtf_string_impl) Bun__WTFStringImpl__deref(trace_frames[0].function_name.value.wtf_string_impl);
+    if (trace_frames[0].source_url.tag == .wtf_string_impl) Bun__WTFStringImpl__deref(trace_frames[0].source_url.value.wtf_string_impl);
+    trace.frames_len = 99;
+    JSC__Exception__getStackTrace(traced_exception.cellPointer(), foreign_context, &trace);
+    if (trace.frames_len != 0) fail("structured exception stack accepted foreign VM");
+
     JSC__VM__throwError(vm, context, EncodedValue.fromInt32(1));
     JSC__VM__throwError(vm, context, EncodedValue.fromInt32(2));
     const first_exception = JSGlobalObject__tryTakeException(context);
@@ -3783,5 +3862,5 @@ pub fn main() void {
         TopExceptionScope__exceptionIncludingTraps(&verification_scope) != null)
         fail("private TopExceptionScope destruction mismatch");
 
-    std.debug.print("Home private value shims: 248/248 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 249/249 symbols linked; runtime matrix passed\n", .{});
 }

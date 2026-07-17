@@ -88,8 +88,8 @@
     },
     "by_status": {
       "external": 2,
-      "implemented": 264,
-      "pending": 182
+      "implemented": 265,
+      "pending": 181
     }
   },
   "declarations": [
@@ -1122,10 +1122,10 @@
       "line": 18,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__Exception__getStackTrace(this: *Exception, global: *JSGlobalObject, stack: *ZigStackTrace) void;",
       "declaration_sha256": "9edbb858cda42ebf0ad7c469979f9bec1a31ecfc5be41dc56298f841f62384fd",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__GetterSetter__isGetterNull",

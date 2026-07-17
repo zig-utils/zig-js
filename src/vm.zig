@@ -3714,8 +3714,17 @@ fn tryRunNativeDirectCall(vm: *Interpreter, func: *Function, args: []const Value
 /// `gen_yield` never appears (the compiler emits it only into generator chunks).
 fn execLoop(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?*Generator) EvalError!Value {
     const saved_debug_call_frame = vm.debug_call_frame;
+    const saved_stack_trace_call_frame = vm.stack_trace_call_frame;
     var debug_call_frame: interp.DebugCallFrame = undefined;
+    var stack_trace_call_frame: interp.StackTraceCallFrame = undefined;
     if (gen) |activation| {
+        stack_trace_call_frame = .{
+            .function_name = activation.function_name,
+            .code_type = .function,
+            .is_async = activation.is_async or activation.is_async_gen,
+            .caller = saved_stack_trace_call_frame,
+        };
+        vm.stack_trace_call_frame = &stack_trace_call_frame;
         if (vm.debug_statement_hook != null or vm.host_statement_hook != null) {
             debug_call_frame = .{
                 .function_name = activation.function_name,
@@ -3728,6 +3737,7 @@ fn execLoop(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
         }
     }
     defer vm.debug_call_frame = saved_debug_call_frame;
+    defer vm.stack_trace_call_frame = saved_stack_trace_call_frame;
     // The trampoline is off inside `execLoop`: the top-level program and
     // generator/async bodies keep native `.call` dispatch (the `.call` opcode
     // only pushes activations when `driver_active`). A JS call made here still
@@ -3784,6 +3794,13 @@ fn serviceVmDebugStatement(vm: *Interpreter, node: *const ast.Node, chunk: *Chun
     }
 }
 
+fn serviceVmStackStatement(vm: *Interpreter, node: *const ast.Node) void {
+    const locations = vm.debug_statement_locations orelse return;
+    const location = locations.get(node) orelse return;
+    vm.debug_current_location = location;
+    if (vm.stack_trace_call_frame) |frame| frame.location = location;
+}
+
 /// The instruction loop proper. Operates on `exec.stack` directly so the
 /// operand stack is always current when a throw unwinds (and persists across a
 /// generator's yield/resume). Returns the completion value or propagates a throw.
@@ -3794,7 +3811,8 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
     var acc: Value = exec.acc;
     var ip: usize = exec.ip;
     const code = chunk.code.items;
-    const debug_execution = chunk.debug_nodes.len != 0 and
+    const location_execution = chunk.debug_nodes.len != 0;
+    const debug_execution = location_execution and
         (vm.debug_statement_hook != null or vm.host_statement_hook != null);
     // Parallel-mode flag hoisted out of the hot loop: in the default engine this
     // is false, so frame slots and monomorphic property IC hits avoid locks and
@@ -3803,7 +3821,12 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
     const parallel_sync = bc.ic_seqlock_enabled.load(.monotonic);
 
     while (ip < code.len) {
-        if (debug_execution) if (chunk.debug_nodes[ip]) |node| try serviceVmDebugStatement(vm, node, chunk, frame);
+        if (location_execution) if (chunk.debug_nodes[ip]) |node| {
+            if (debug_execution)
+                try serviceVmDebugStatement(vm, node, chunk, frame)
+            else
+                serviceVmStackStatement(vm, node);
+        };
         vm.steps += 1;
         if (vm.steps > interp.max_steps) return vm.throwError("RangeError", "evaluation step budget exceeded");
         if ((vm.steps & 1023) == 0) {
@@ -6152,8 +6175,10 @@ const Activation = struct {
     saved_eval_nt: bool,
     saved_pm: ?*const std.StringHashMapUnmanaged([]const u8),
     saved_debug_call_frame: ?*interp.DebugCallFrame,
+    saved_stack_trace_call_frame: ?*interp.StackTraceCallFrame,
     debug_environment: ?*Environment = null,
     debug_call_frame: interp.DebugCallFrame = undefined,
+    stack_trace_call_frame: interp.StackTraceCallFrame = undefined,
 };
 
 /// Return an inactive activation whose frame was never captured. The pool is
@@ -6206,6 +6231,7 @@ fn acquireActivation(vm: *Interpreter, local_count: usize) EvalError!*Activation
         .saved_eval_nt = undefined,
         .saved_pm = undefined,
         .saved_debug_call_frame = undefined,
+        .saved_stack_trace_call_frame = undefined,
     };
     vm.vm_activation_allocations += 1;
     return act;
@@ -6241,6 +6267,7 @@ fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
         .saved_eval_nt = vm.direct_eval_new_target_allowed,
         .saved_pm = vm.current_private_map,
         .saved_debug_call_frame = vm.debug_call_frame,
+        .saved_stack_trace_call_frame = vm.stack_trace_call_frame,
     };
     frame.* = .{
         .slots = slots,
@@ -6280,6 +6307,12 @@ fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
     } else {
         act.debug_environment = null;
     }
+    act.stack_trace_call_frame = .{
+        .function_name = func.name,
+        .code_type = if (!new_target.isUndefined() or func.is_class_constructor) .constructor else .function,
+        .is_async = func.is_async,
+        .caller = vm.stack_trace_call_frame,
+    };
     return act;
 }
 
@@ -6296,6 +6329,7 @@ fn popActivation(vm: *Interpreter, act: *Activation) void {
     vm.direct_eval_new_target_allowed = act.saved_eval_nt;
     vm.current_private_map = act.saved_pm;
     vm.debug_call_frame = act.saved_debug_call_frame;
+    vm.stack_trace_call_frame = act.saved_stack_trace_call_frame;
 }
 
 fn inheritCallerState(dst: *Activation, src: *const Activation) void {
@@ -6310,7 +6344,9 @@ fn inheritCallerState(dst: *Activation, src: *const Activation) void {
     dst.saved_eval_nt = src.saved_eval_nt;
     dst.saved_pm = src.saved_pm;
     dst.saved_debug_call_frame = src.saved_debug_call_frame;
+    dst.saved_stack_trace_call_frame = src.saved_stack_trace_call_frame;
     if (dst.debug_environment != null) dst.debug_call_frame.caller = src.debug_call_frame.caller;
+    dst.stack_trace_call_frame.caller = src.stack_trace_call_frame.caller;
 }
 
 fn syncDebugEnvironmentFromFrame(act: *Activation) EvalError!void {
@@ -6337,6 +6373,7 @@ fn runInlineFunction(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []
     vm.depth += 1;
     defer vm.depth -= 1;
     const act = try buildActivation(vm, func, fchunk, args, this_val, new_target);
+    vm.stack_trace_call_frame = &act.stack_trace_call_frame;
     if (act.debug_environment != null) vm.debug_call_frame = &act.debug_call_frame;
     defer {
         popActivation(vm, act);
@@ -6429,6 +6466,7 @@ fn runDriver(vm: *Interpreter, initial: *Activation) EvalError!Value {
 
     while (acts.items.len > 0) {
         const cur = acts.items[acts.items.len - 1];
+        vm.stack_trace_call_frame = &cur.stack_trace_call_frame;
         if (cur.debug_environment != null) {
             vm.debug_call_frame = &cur.debug_call_frame;
             try syncDebugEnvironmentFromFrame(cur);

@@ -3143,6 +3143,11 @@ pub const Context = struct {
         return .{ .id = script.id, .start_line = script.start_line };
     }
 
+    fn debugScriptById(self: *const Context, id: u64) ?DebugScript {
+        for (self.debug_scripts.items) |script| if (script.id == id) return script;
+        return null;
+    }
+
     /// Request cooperative termination of the current evaluation and any
     /// shared-realm JavaScript threads owned by this context. This operation is
     /// thread-safe and allocation-free, so a host watchdog may call it from a
@@ -4393,15 +4398,20 @@ pub const Context = struct {
             self.last_evaluation_diagnostic = parser.errorLocation();
             return err;
         };
-        if (self.debug_script_id != 0) {
+        const evaluation_script = if (self.debug_script_id != 0)
+            self.debugScriptById(self.debug_script_id).?
+        else
+            try self.registerDebugScript(owned_source, "", 1);
+        {
             for (parser.statement_locations.items) |entry| {
                 try self.debug_statement_locations.put(a, entry.node, .{
-                    .script_id = self.debug_script_id,
+                    .script_id = evaluation_script.id,
                     .location = .{
                         .byte_offset = entry.location.byte_offset,
-                        .line = entry.location.line + self.debug_script_start_line - 1,
+                        .line = entry.location.line + evaluation_script.start_line - 1,
                         .column = entry.location.column,
                     },
+                    .source_url = evaluation_script.url,
                     .debugger_statement = entry.debugger_statement,
                 });
             }
@@ -4424,6 +4434,8 @@ pub const Context = struct {
         // Top-level strictness from the program's directive prologue (the parser
         // leaves `strict` set if it saw a leading `"use strict"`).
         machine.strict = parser.strict;
+        var stack_trace_frame = interp.StackTraceCallFrame{ .code_type = .global };
+        machine.stack_trace_call_frame = &stack_trace_frame;
         self.exception = null;
         // Top-level-script dynamic `import()`: when a module host is installed,
         // resolve specifiers relative to the script's referrer path.
@@ -4868,6 +4880,7 @@ pub const Context = struct {
         for (parser.statement_locations.items) |entry| try self.debug_statement_locations.put(a, entry.node, .{
             .script_id = debug_script.id,
             .location = entry.location,
+            .source_url = debug_script.url,
             .debugger_statement = entry.debugger_statement,
         });
         const items = prog.program;
@@ -5479,17 +5492,24 @@ pub const Context = struct {
         const saved_mod = machine.cur_module;
         const saved_import_meta_slot = machine.import_meta_slot;
         const saved_import_meta_obj = machine.import_meta_obj;
+        const saved_stack_trace_call_frame = machine.stack_trace_call_frame;
+        var stack_trace_call_frame = interp.StackTraceCallFrame{
+            .code_type = .module,
+            .caller = saved_stack_trace_call_frame,
+        };
         machine.env = m.env;
         machine.this_value = Value.undef(); // module top-level `this` is undefined
         machine.cur_module = m.path; // referrer for runtime import()
         machine.import_meta_slot = &m.import_meta_slot;
         machine.import_meta_obj = m.import_meta_slot.obj;
+        machine.stack_trace_call_frame = &stack_trace_call_frame;
         defer {
             machine.env = saved_env;
             machine.this_value = saved_this;
             machine.cur_module = saved_mod;
             machine.import_meta_slot = saved_import_meta_slot;
             machine.import_meta_obj = saved_import_meta_obj;
+            machine.stack_trace_call_frame = saved_stack_trace_call_frame;
         }
         if (!m.body_hoisted) {
             try machine.hoistVarNames(m.items);

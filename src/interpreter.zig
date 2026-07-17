@@ -370,6 +370,7 @@ pub const EvalError = error{ OutOfMemory, Throw, OptShortCircuit };
 pub const DebugStatementLocation = struct {
     script_id: u64,
     location: parser_mod.SourceLocation,
+    source_url: []const u8 = "",
     debugger_statement: bool = false,
 };
 
@@ -417,6 +418,17 @@ pub const DebugCallFrame = struct {
     location: ?DebugStatementLocation = null,
     caller: ?*DebugCallFrame = null,
     environment_is_vm_activation: bool = false,
+};
+
+/// Always-on, allocation-free activation metadata used to snapshot Error
+/// stacks. This is deliberately separate from DebugCallFrame: normal VM calls
+/// must not allocate inspector Environment mirrors just to retain a trace.
+pub const StackTraceCallFrame = struct {
+    function_name: []const u8 = "",
+    code_type: value.ErrorStackFrameCode = .function,
+    is_async: bool = false,
+    location: ?DebugStatementLocation = null,
+    caller: ?*StackTraceCallFrame = null,
 };
 
 /// A lexical scope with a parent chain. Function calls push a fresh scope whose
@@ -1024,6 +1036,7 @@ pub const Interpreter = struct {
     debug_exception_hook: ?DebugExceptionHook = null,
     debug_current_location: ?DebugStatementLocation = null,
     debug_call_frame: ?*DebugCallFrame = null,
+    stack_trace_call_frame: ?*StackTraceCallFrame = null,
     debug_top_level_location: ?DebugStatementLocation = null,
     debug_top_level_environment: ?*Environment = null,
     debug_top_level_strict: bool = false,
@@ -2302,6 +2315,7 @@ pub const Interpreter = struct {
         const obj = try gc_mod.allocObj(self.arena);
         obj.* = .{ .behavior = .{ .is_error = true } };
         try obj.setErrorName(self.arena, name);
+        try self.captureErrorStack(obj);
         // Link to `<name>.prototype` so `name` (and `toString`) are inherited and
         // `instanceof` / `Object.getPrototypeOf` see a real chain.
         if (proto) |p| {
@@ -2322,6 +2336,49 @@ pub const Interpreter = struct {
         return Value.obj(obj);
     }
 
+    fn appendErrorStackFrame(self: *Interpreter, frames: *std.ArrayListUnmanaged(value.ErrorStackFrame), frame: *const StackTraceCallFrame) EvalError!void {
+        const location = frame.location;
+        const line: i32 = if (location) |loc|
+            std.math.cast(i32, loc.location.line -| 1) orelse std.math.maxInt(i32)
+        else
+            -1;
+        const column: i32 = if (location) |loc|
+            std.math.cast(i32, loc.location.column -| 1) orelse std.math.maxInt(i32)
+        else
+            -1;
+        const line_start: i32 = if (location) |loc| blk: {
+            const start = loc.location.byte_offset -| (loc.location.column -| 1);
+            break :blk std.math.cast(i32, start) orelse -1;
+        } else -1;
+        try frames.append(self.arena, .{
+            .function_name = frame.function_name,
+            .source_url = if (location) |loc| loc.source_url else "",
+            .line_zero_based = line,
+            .column_zero_based = column,
+            .line_start_byte = line_start,
+            .code_type = frame.code_type,
+            .is_async = frame.is_async,
+            .jsc_stack_frame_index = @intCast(frames.items.len),
+        });
+    }
+
+    fn captureErrorStack(self: *Interpreter, obj: *value.Object) EvalError!void {
+        var frames: std.ArrayListUnmanaged(value.ErrorStackFrame) = .empty;
+        var current = self.stack_trace_call_frame;
+        while (current) |frame| : (current = frame.caller) {
+            try self.appendErrorStackFrame(&frames, frame);
+            if (frames.items.len == std.math.maxInt(u8)) break;
+        }
+        if (frames.items.len == 0) {
+            var global_frame = StackTraceCallFrame{
+                .code_type = if (self.cur_module.len > 0) .module else .global,
+                .location = self.debug_current_location,
+            };
+            try self.appendErrorStackFrame(&frames, &global_frame);
+        }
+        try obj.setErrorStackFrames(self.arena, try frames.toOwnedSlice(self.arena));
+    }
+
     pub fn makeError(self: *Interpreter, name: []const u8, message: []const u8) EvalError!Value {
         return self.makeErrorWithProto(name, message, null);
     }
@@ -2335,6 +2392,7 @@ pub const Interpreter = struct {
         const obj = try gc_mod.allocObj(self.arena);
         obj.* = .{ .behavior = .{ .is_error = true } };
         try obj.setErrorName(self.arena, try self.arena.dupe(u8, name));
+        try self.captureErrorStack(obj);
         if (self.env.get("DOMException")) |ctor_v| if (ctor_v.isObject()) {
             if (ctor_v.asObj().getOwn("prototype")) |p| if (p.isObject()) obj.setProtoAtomic(p.asObj());
         };
@@ -3247,10 +3305,11 @@ pub const Interpreter = struct {
 
     pub fn serviceDebugStatement(self: *Interpreter, node: *const Node) EvalError!void {
         if (self.host_statement_hook) |hook| hook(self.host_statement_ctx.?, self);
-        if (self.debug_statement_hook) |hook| {
-            if (self.debug_statement_locations) |locations| {
-                if (locations.get(node)) |location| {
-                    self.debug_current_location = location;
+        if (self.debug_statement_locations) |locations| {
+            if (locations.get(node)) |location| {
+                self.debug_current_location = location;
+                if (self.stack_trace_call_frame) |frame| frame.location = location;
+                if (self.debug_statement_hook) |hook| {
                     if (self.debug_call_frame) |frame| {
                         if (!frame.environment_is_vm_activation) frame.environment = self.env;
                         frame.this_value = self.this_value;
@@ -3277,6 +3336,7 @@ pub const Interpreter = struct {
                 .line = entry.location.line + registration.start_line - 1,
                 .column = entry.location.column,
             },
+            .source_url = url,
             .debugger_statement = entry.debugger_statement,
         });
     }
@@ -6010,6 +6070,7 @@ pub const Interpreter = struct {
         const saved_pm = self.current_private_map;
         const saved_call_frame = self.active_call_frame;
         const saved_debug_call_frame = self.debug_call_frame;
+        const saved_stack_trace_call_frame = self.stack_trace_call_frame;
         const saved_tree_tail_allowed = self.tree_tail_allowed;
         var call_frame: LegacyCallFrame = undefined;
         var debug_call_frame = DebugCallFrame{
@@ -6019,6 +6080,13 @@ pub const Interpreter = struct {
             .strict = func.is_strict,
             .caller = saved_debug_call_frame,
         };
+        var stack_trace_call_frame = StackTraceCallFrame{
+            .function_name = func.name,
+            .code_type = if (!new_target.isUndefined() or func.is_class_constructor) .constructor else .function,
+            .is_async = func.is_async,
+            .caller = saved_stack_trace_call_frame,
+        };
+        self.stack_trace_call_frame = &stack_trace_call_frame;
         if (self.debug_statement_hook != null or self.host_statement_hook != null) self.debug_call_frame = &debug_call_frame;
         if (!func.is_arrow) self.current_private_map = func.private_map; // arrows inherit the enclosing class's map
         if (!func.is_arrow) {
@@ -6128,6 +6196,7 @@ pub const Interpreter = struct {
             self.active_function = saved_active_function;
             self.active_call_frame = saved_call_frame;
             self.debug_call_frame = saved_debug_call_frame;
+            self.stack_trace_call_frame = saved_stack_trace_call_frame;
             self.tree_tail_allowed = saved_tree_tail_allowed;
             // Re-sync the ambient this-state from the (restored) enclosing derived
             // ctor's shared cell: a `super()` that ran during this call — possibly

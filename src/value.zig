@@ -725,12 +725,37 @@ pub const ObjectRareTag = enum(u8) {
     regex,
 };
 
+/// Structured JavaScript stack metadata retained when an Error is created.
+/// The numeric code values intentionally match Bun's `ZigStackFrameCode` ABI.
+pub const ErrorStackFrameCode = enum(u8) {
+    none = 0,
+    eval = 1,
+    module = 2,
+    function = 3,
+    global = 4,
+    wasm = 5,
+    constructor = 6,
+    _,
+};
+
+pub const ErrorStackFrame = struct {
+    function_name: []const u8 = "",
+    source_url: []const u8 = "",
+    line_zero_based: i32 = -1,
+    column_zero_based: i32 = -1,
+    line_start_byte: i32 = -1,
+    code_type: ErrorStackFrameCode = .none,
+    is_async: bool = false,
+    jsc_stack_frame_index: i32 = -1,
+};
+
 pub const ObjectRareState = union(ObjectRareTag) {
     none: void,
     primitive: ObjectPrimitiveState,
     error_state: struct {
         name: []const u8 = "",
         ctor: ?[]const u8 = null,
+        stack_frames: []const ErrorStackFrame = &.{},
     },
     date: struct {},
     module_ns: struct { ptr: ?*anyopaque = null },
@@ -1444,6 +1469,12 @@ pub const Object = struct {
         return cold.rare.error_state.ctor;
     }
 
+    pub inline fn errorStackFrames(self: *const Object) []const ErrorStackFrame {
+        const cold = self.coldState() orelse return &.{};
+        if (!cold.hasRare(.error_state)) return &.{};
+        return cold.rare.error_state.stack_frames;
+    }
+
     pub inline fn moduleNs(self: *const Object) ?*anyopaque {
         const cold = self.coldState() orelse return null;
         if (!cold.hasRare(.module_ns)) return null;
@@ -1700,6 +1731,11 @@ pub const Object = struct {
     pub fn setErrorCtor(self: *Object, fallback: std.mem.Allocator, name: []const u8) std.mem.Allocator.Error!void {
         const state = try self.ensureRare(fallback, .error_state, .{});
         state.ctor = name;
+    }
+
+    pub fn setErrorStackFrames(self: *Object, fallback: std.mem.Allocator, frames: []const ErrorStackFrame) std.mem.Allocator.Error!void {
+        const state = try self.ensureRare(fallback, .error_state, .{});
+        state.stack_frames = frames;
     }
 
     pub inline fn regexSource(self: *const Object) []const u8 {
