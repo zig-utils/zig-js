@@ -44,7 +44,7 @@ convention. The exact current denominator is:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #163 | 432 (11 implemented, 421 pending) |
+| Private JSC/Bun/WebCore ABI under #163 | 432 (16 implemented, 416 pending) |
 | Overlap with zig-js's completed public C target | 15 |
 | Platform libc import | 1 |
 | **Total** | **448** |
@@ -60,7 +60,7 @@ zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"
 ```
 
 This inventory is the denominator, not a claim that the whole surface works.
-The first eleven private entries are implemented; the other 421 remain pending
+The first sixteen private entries are implemented; the other 416 remain pending
 until #163 provides their type/layout contracts, shims, and consumer evidence.
 
 Home revisions `5e829ad483bb9e5ccb19766997df6462edd8e167` and
@@ -129,8 +129,17 @@ It covers empty/immediate/int32/double/NaN/negative-zero behavior, boxed
 empty/nonempty strings, object identity/truthiness, signed minimum and unsigned
 maximum BigInts, negative modulo extraction, exact number fallbacks, and every
 invalid/non-exact boundary. Public accounting stays unchanged at 117 functions
-and 19 extensions; these eleven symbols are reported only as private profile
+and 19 extensions; these sixteen symbols are reported only as private profile
 exports.
+
+The opaque BigInt cell slice additionally exports `JSC__JSBigInt__fromJS`, the
+three signed/unsigned/double ordering functions, and `JSC__JSBigInt__toInt64`.
+It reuses zig-js's arbitrary-precision integer comparison rather than narrowing
+through `f64`: the runtime matrix covers values beyond i128, the 2^53 rounding
+boundary, positive and negative fractional comparisons, the minimum positive
+subnormal, infinities, a 10^400 BigInt against `floatMax`, and signed
+modulo-2^64 extraction. `JSC__JSBigInt__toString` remains pending until its
+separate Bun/Home string-return layout is pinned.
 
 ## Profile-selectable JSType layout
 
@@ -171,7 +180,7 @@ profile contains 437 unique declarations from 54 hashed files:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #164 | 422 (11 implemented, 411 pending) |
+| Private JSC/Bun/WebCore ABI under #164 | 422 (16 implemented, 406 pending) |
 | Public-C overlap | 15 |
 | **Total** | **437** |
 
@@ -187,5 +196,5 @@ zig build bun-private-abi-audit -Dbun-source-root="$HOME/Code/bun"
 
 The audit rejects revision, file hash, declaration digest, classification,
 calling-convention, implementation-status, and Home-comparison drift. It does
-not claim complete Bun runtime compatibility; #164 remains open for the 411
+not claim complete Bun runtime compatibility; #164 remains open for the 406
 pending core entries and later wider/generated profiles.
