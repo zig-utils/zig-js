@@ -45,6 +45,8 @@ extern "c" fn JSC__JSValue__toInt32(EncodedValue) i32;
 extern "c" fn JSC__JSValue__fromInt64NoTruncate(JSContextRef, i64) EncodedValue;
 extern "c" fn JSC__JSValue__fromUInt64NoTruncate(JSContextRef, u64) EncodedValue;
 extern "c" fn JSC__JSValue__toUInt64NoTruncate(EncodedValue) u64;
+extern "c" fn JSC__JSValue__isStrictEqual(EncodedValue, EncodedValue, JSContextRef) bool;
+extern "c" fn JSC__JSValue__isSameValue(EncodedValue, EncodedValue, JSContextRef) bool;
 
 fn fail(message: []const u8) noreturn {
     std.debug.print("Home private value shims: {s}\n", .{message});
@@ -112,5 +114,41 @@ pub fn main() void {
         JSC__JSValue__toUInt64NoTruncate(.true) != 0)
         fail("number fallback extraction mismatch");
 
-    std.debug.print("Home private value shims: 7/7 symbols linked; runtime matrix passed\n", .{});
+    if (!JSC__JSValue__isStrictEqual(.null, .null, context) or
+        JSC__JSValue__isStrictEqual(.null, .undefined, context) or
+        !JSC__JSValue__isStrictEqual(EncodedValue.fromInt32(42), EncodedValue.fromDouble(42.0), context) or
+        !JSC__JSValue__isStrictEqual(EncodedValue.fromDouble(0.0), EncodedValue.fromDouble(-0.0), context) or
+        JSC__JSValue__isStrictEqual(EncodedValue.fromDouble(std.math.nan(f64)), EncodedValue.fromDouble(std.math.nan(f64)), context) or
+        JSC__JSValue__isStrictEqual(.empty, .empty, context) or
+        JSC__JSValue__isStrictEqual(.deleted, .deleted, context))
+        fail("strict primitive equality mismatch");
+    if (!JSC__JSValue__isSameValue(EncodedValue.fromDouble(std.math.nan(f64)), EncodedValue.fromDouble(std.math.nan(f64)), context) or
+        JSC__JSValue__isSameValue(EncodedValue.fromDouble(0.0), EncodedValue.fromDouble(-0.0), context) or
+        !JSC__JSValue__isSameValue(EncodedValue.fromInt32(42), EncodedValue.fromDouble(42.0), context))
+        fail("SameValue number mismatch");
+
+    const same_text_string = JSStringCreateWithUTF8CString("value") orelse fail("same text creation failed");
+    defer JSStringRelease(same_text_string);
+    const same_text_value = JSValueMakeString(context, same_text_string) orelse fail("same text value creation failed");
+    const other_object = JSObjectMake(context, null, null) orelse fail("other object creation failed");
+    if (!JSC__JSValue__isStrictEqual(encoded_text, EncodedValue.fromRef(same_text_value), context) or
+        !JSC__JSValue__isSameValue(encoded_text, EncodedValue.fromRef(same_text_value), context) or
+        !JSC__JSValue__isStrictEqual(encoded_object, encoded_object, context) or
+        JSC__JSValue__isStrictEqual(encoded_object, EncodedValue.fromRef(other_object), context))
+        fail("cell equality mismatch");
+
+    const signed_negative_copy = JSC__JSValue__fromInt64NoTruncate(context, -1);
+    if (!JSC__JSValue__isStrictEqual(signed_negative, signed_negative_copy, context) or
+        JSC__JSValue__isStrictEqual(signed_negative, unsigned_max, context) or
+        !JSC__JSValue__isSameValue(signed_negative, signed_negative_copy, context))
+        fail("BigInt value equality mismatch");
+
+    const foreign_context = JSGlobalContextCreate(null) orelse fail("foreign context creation failed");
+    defer JSGlobalContextRelease(foreign_context);
+    const foreign_object = JSObjectMake(foreign_context, null, null) orelse fail("foreign object creation failed");
+    if (JSC__JSValue__isStrictEqual(EncodedValue.fromRef(foreign_object), EncodedValue.fromRef(foreign_object), context) or
+        JSC__JSValue__isSameValue(EncodedValue.fromRef(foreign_object), EncodedValue.fromRef(foreign_object), context))
+        fail("foreign context cell accepted");
+
+    std.debug.print("Home private value shims: 9/9 symbols linked; runtime matrix passed\n", .{});
 }

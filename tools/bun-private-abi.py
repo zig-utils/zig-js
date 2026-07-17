@@ -74,6 +74,12 @@ def apply_status(entries: list[dict[str, object]]) -> None:
             entry.pop("implementation", None)
 
 
+def refresh_implementation_status(data: dict[str, object]) -> None:
+    apply_status(data["declarations"])
+    statuses = Counter(str(entry["status"]) for entry in data["declarations"])
+    data["totals"]["by_status"] = dict(sorted(statuses.items()))
+
+
 def home_comparison(entries: list[dict[str, object]]) -> dict[str, object]:
     home = json.loads(HOME_INVENTORY.read_text())["declarations"]
     home_by_name = {entry["name"]: entry for entry in home}
@@ -196,9 +202,12 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--bun-root", type=Path)
     parser.add_argument("--write", action="store_true")
+    parser.add_argument("--refresh-implementation-status", action="store_true")
     args = parser.parse_args()
     if args.write and not args.bun_root:
         fail("--write requires --bun-root")
+    if args.write and args.refresh_implementation_status:
+        fail("--write and --refresh-implementation-status are mutually exclusive")
     if args.bun_root:
         generated = generate(args.bun_root.resolve())
         if args.write:
@@ -208,6 +217,9 @@ def main() -> None:
     if not OUTPUT.is_file():
         fail(f"missing checked-in inventory {OUTPUT}")
     stored = json.loads(OUTPUT.read_text())
+    if args.refresh_implementation_status:
+        refresh_implementation_status(stored)
+        OUTPUT.write_text(json.dumps(stored, indent=2) + "\n")
     validate(stored)
     totals = stored["totals"]
     classes = totals["by_classification"]

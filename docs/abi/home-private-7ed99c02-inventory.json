@@ -87,8 +87,8 @@
     },
     "by_status": {
       "external": 1,
-      "implemented": 22,
-      "pending": 425
+      "implemented": 24,
+      "pending": 423
     }
   },
   "declarations": [
@@ -2243,10 +2243,10 @@
       "line": 1942,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSValue__isSameValue(this: JSValue, other: JSValue, global: *JSGlobalObject) bool;",
       "declaration_sha256": "81ec58e7c1d431ddc4974a27698b4c99331ddbc973561570d27d8e9148485517",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSValue__isStrictEqual",
@@ -2254,10 +2254,10 @@
       "line": 1937,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSValue__isStrictEqual(JSValue, JSValue, *JSGlobalObject) bool;",
       "declaration_sha256": "5e98f92ce80106ff1125b65325a4c2c8b1539f58ab06674f8cd3bded2d6e8976",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSValue__isTerminationException",

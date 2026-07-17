@@ -1234,6 +1234,21 @@ fn privateEncodedFromRef(ref: JSValueRef) EncodedValue {
     return EncodedValue.fromCellAddress(@intFromPtr(pointer)) catch .empty;
 }
 
+fn privateValueFrom(global: JSContextRef, encoded: EncodedValue) ?Value {
+    const context = ctxForHandleInspection(global) orelse return null;
+    return encoded.toInternalPrimitive(Value) catch |err| switch (err) {
+        error.CellRequiresHandle => {
+            const boxed = privateBoxedFrom(encoded) orelse return null;
+            if (boxed.owner != context) {
+                const group = context.c_api_group orelse return null;
+                if (boxed.owner.c_api_group != group) return null;
+            }
+            return boxed.value;
+        },
+        else => null,
+    };
+}
+
 fn privateBigIntModuloU64(object: *Object) u64 {
     if (object.bigIntText()) |text| {
         const negative = text.len > 0 and text[0] == '-';
@@ -1297,6 +1312,26 @@ export fn JSC__JSValue__toUInt64NoTruncate(encoded: EncodedValue) callconv(.c) u
     const boxed = privateBoxedFrom(encoded) orelse return 0;
     if (!boxed.value.isObject() or !boxed.value.asObj().is_bigint) return 0;
     return privateBigIntModuloU64(boxed.value.asObj());
+}
+
+export fn JSC__JSValue__isStrictEqual(
+    left: EncodedValue,
+    right: EncodedValue,
+    global: JSContextRef,
+) callconv(.c) bool {
+    const lhs = privateValueFrom(global, left) orelse return false;
+    const rhs = privateValueFrom(global, right) orelse return false;
+    return value.strictEquals(lhs, rhs);
+}
+
+export fn JSC__JSValue__isSameValue(
+    left: EncodedValue,
+    right: EncodedValue,
+    global: JSContextRef,
+) callconv(.c) bool {
+    const lhs = privateValueFrom(global, left) orelse return false;
+    const rhs = privateValueFrom(global, right) orelse return false;
+    return value.sameValue(lhs, rhs);
 }
 
 fn valueFromContext(ctx: *Context, ref: JSValueRef) ?Value {
