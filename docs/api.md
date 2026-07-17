@@ -119,6 +119,9 @@ JSClassRef  JSClassCreate(const JSClassDefinition*);
 JSClassRef  JSClassRetain(JSClassRef);
 void        JSClassRelease(JSClassRef);
 JSObjectRef JSObjectMake(JSContextRef, JSClassRef, void* data);
+JSValueRef  JSObjectGetPrototype(JSContextRef, JSObjectRef);
+void        JSObjectSetPrototype(JSContextRef, JSObjectRef, JSValueRef);
+bool        JSObjectHasProperty(JSContextRef, JSObjectRef, JSStringRef);
 void*       JSObjectGetPrivate(JSObjectRef);
 bool        JSObjectSetPrivate(JSObjectRef, void* data);
 JSObjectRef JSObjectMakeArray(JSContextRef, size_t argc, const JSValueRef args[], JSValueRef* exception);
@@ -129,6 +132,10 @@ void        JSObjectSetProperty(JSContextRef, JSObjectRef, JSStringRef name,
                                 JSValueRef value, JSPropertyAttributes, JSValueRef* exception);
 JSValueRef  JSObjectGetPropertyAtIndex(JSContextRef, JSObjectRef, unsigned index,
                                        JSValueRef* exception);
+void        JSObjectSetPropertyAtIndex(JSContextRef, JSObjectRef, unsigned index,
+                                       JSValueRef value, JSValueRef* exception);
+bool        JSObjectDeleteProperty(JSContextRef, JSObjectRef, JSStringRef,
+                                   JSValueRef* exception);
 JSValueRef  JSObjectCallAsFunction(JSContextRef, JSObjectRef, JSObjectRef thisObject,
                                    size_t argc, const JSValueRef args[], JSValueRef* exception);
 JSObjectRef JSObjectMakeFunctionWithCallback(JSContextRef, JSStringRef name,
@@ -231,6 +238,8 @@ Native callbacks installed with `JSObjectMakeFunctionWithCallback` must return a
 `JSObjectMakeFunctionWithCallback` returns null when the callback pointer is null.
 
 `JSClassCreate` deep-copies its definition, static tables, and names, retains its parent, and uses an atomic reference count independent of the caller's definition storage. `JSObjectMake(..., class, data)` retains the class for the object lifetime, runs inherited initializers parent-first, finalizers child-first, and keeps the opaque pointer as host-owned private data. `JSValueIsObjectOfClass` recognizes both the exact class and retained ancestors. Static members and the remaining property/call/conversion callbacks are still pending in issue #137. `JSObjectGetPrivate` returns only host-owned private data; engine-owned native records are not exposed. `JSObjectSetPrivate` can update host-owned private data and can attach host data to plain objects that do not already carry engine private data.
+
+`JSObjectGetPrototype` and `JSObjectSetPrototype` use the runtime's real `[[GetPrototypeOf]]`/`[[SetPrototypeOf]]` paths, including Proxy traps, invariants, cycle prevention, and null prototypes. Their pinned JSC signatures have no exception out pointer, so rejected/throwing mutations leave the object unchanged. `JSObjectHasProperty`, `JSObjectDeleteProperty`, and indexed writes likewise use the engine's internal-method funnels rather than bypassing proxies, accessors, typed-array rules, or property attributes.
 
 `JSObjectMakeDeferredPromise` returns a pending native Promise and stores callable resolve/reject functions in the required out pointers. Passing a null resolve or reject out pointer is a contract error reported through the exception out pointer. The returned functions settle the promise through the normal Promise job queue; embedder-observable callbacks run at the next microtask checkpoint, such as the one performed after `JSEvaluateScript`.
 

@@ -9370,6 +9370,13 @@ pub const Interpreter = struct {
         return self.ordinarySetPrototypeOf(o, new_proto);
     }
 
+    /// Public embedding funnel for [[GetPrototypeOf]], including Proxy traps
+    /// and the engine's implicit Function.prototype fallback.
+    pub fn getPrototypeOfObject(self: *Interpreter, o: *value.Object) EvalError!Value {
+        try self.checkRestricted(o);
+        return self.ordinaryProtoValue(o);
+    }
+
     /// [[GetPrototypeOf]] for a Proxy (9.5.1): invoke the trap, require an Object
     /// or null result, and enforce the non-extensible-target invariant.
     pub fn proxyGetProto(self: *Interpreter, o: *value.Object) EvalError!Value {

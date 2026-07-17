@@ -123,6 +123,31 @@ int main(void)
         return 20;
     JSClassRelease(child_class);
 
+    JSObjectRef prototype = JSObjectMake(context, NULL, NULL);
+    JSObjectRef prototyped = JSObjectMake(context, NULL, NULL);
+    JSStringRef inherited_name = JSStringCreateWithUTF8CString("inherited");
+    JSObjectSetProperty(context, prototype, inherited_name, answer, kJSPropertyAttributeNone, &exception);
+    JSObjectSetPrototype(context, prototyped, prototype);
+    if (!prototype || !prototyped || !JSValueIsStrictEqual(context, JSObjectGetPrototype(context, prototyped), prototype) ||
+        !JSObjectHasProperty(context, prototyped, inherited_name))
+        return 22;
+    JSStringRelease(inherited_name);
+    JSObjectSetPropertyAtIndex(context, prototyped, 3, answer, &exception);
+    if (exception || JSValueToNumber(context,
+            JSObjectGetPropertyAtIndex(context, prototyped, 3, &exception), &exception) != 42.0)
+        return 23;
+    JSStringRef temporary_name = JSStringCreateWithUTF8CString("temporary");
+    JSObjectSetProperty(context, prototyped, temporary_name, answer, kJSPropertyAttributeNone, &exception);
+    if (!JSObjectDeleteProperty(context, prototyped, temporary_name, &exception) ||
+        JSObjectHasProperty(context, prototyped, temporary_name))
+        return 24;
+    JSStringRelease(temporary_name);
+    JSStringRef locked_name = JSStringCreateWithUTF8CString("locked");
+    JSObjectSetProperty(context, prototyped, locked_name, answer, kJSPropertyAttributeDontDelete, &exception);
+    if (JSObjectDeleteProperty(context, prototyped, locked_name, &exception) || exception)
+        return 25;
+    JSStringRelease(locked_name);
+
     const JSChar utf16[] = { 'z', 'i', 'g', 0xd83d, 0xde00 };
     JSStringRef wide = JSStringCreateWithCharacters(utf16, 5);
     if (!wide || JSStringGetLength(wide) != 5 ||

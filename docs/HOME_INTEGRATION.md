@@ -17,7 +17,7 @@ Home (`~/Code/Home/lang`) is the Bun-parity runtime. Its `home` binary does
 | Generated-class C++ bindings (`*Prototype__*`, `*Class__*`, `__construct`, `__finalize`) | **~4,325** |
 | **Public JSC C API** (what zig-js exposes today) | **only ~17** |
 
-zig-js's `src/c_api.zig` exports 66 C-API functions
+zig-js's `src/c_api.zig` exports 104 C-API functions
 (`JSGlobalContextCreate`, `JSEvaluateScript`, `JSObjectMake`,
 `JSObjectMakeFunctionWithCallback`, `JSValueMakeNumber`, …). The overlap with
 what Home actually links is ~17 symbols. **zig-js is therefore not a drop-in for
@@ -52,8 +52,9 @@ surface (including no-copy lifetime callbacks), and the `JSWorker*` extension.
 Missing primitives Home depends on heavily (each blocks a large class of corpus
 tests):
 
-1. **Custom native classes** — `JSClassCreate` / `JSClassDefinition` (static
-   functions, static value accessors with getter/setter, `finalize`,
+1. **Complete custom native classes** — class ownership, inheritance,
+   initialize/finalize, and class identity are implemented; static functions,
+   static value accessors with getter/setter,
    `hasInstance`, `callAsConstructor`, parent class). Home defines ~100+
    JS-exposed classes (Subprocess, Glob, Server, Crypto hashers, FSWatcher,
    Stats, …) via the generated-class machinery. This is the single biggest gap.
@@ -62,10 +63,9 @@ tests):
    construction; the `JSValueRef* exception` out-parameter convention on every
    call/get/set. Home's invariant: a host call returns the empty value **iff**
    an exception is pending (see Home's `host_fn.zig` / `assertExceptionPresenceMatches`).
-3. **Public headers and ABI conformance** — the TypedArray/ArrayBuffer symbols
-   are implemented in `src/c_api.zig`, but #135/#136 still need the checked-in
-   JSC header inventory plus C compile-link-runtime gates before Home can consume
-   them without maintaining local declarations.
+3. **Remaining public property/enumeration APIs** — checked-in macOS 27.0
+   headers, inventory verification, C/C++ hosts, and the JSC differential gate
+   are in place; property-key variants and name snapshots remain.
 4. **Prototype & structure control** — `JSObjectGetPrototype`/`SetPrototype`
    and richer private/internal slot modeling. `JSObjectGetPrivate` /
    `JSObjectSetPrivate` now cover host-owned opaque pointers, but Home also

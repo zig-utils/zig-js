@@ -13,6 +13,9 @@ The matrix deliberately separates declarations from completion:
   the linked GitHub issue still owns missing behavior, a missing symbol, or an
   ABI mismatch. Pending calls must not be used by hosts yet.
 
+Current result: 94 of 117 functions are implemented, 23 remain linked to open
+issues, and the library exports 95 public functions plus 9 zig-js extensions.
+
 Run `zig build c-api-audit` after changing `src/c_api.zig`, the headers, or the
 inventory. On a machine with the pinned SDK, pass its root to
 `tools/verify-c-api.py --sdk-root <path>` to detect upstream header drift.

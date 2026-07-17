@@ -99,6 +99,25 @@ int main(void)
     JSClassRelease(parent_class);
     JSClassRelease(child_class);
 
+    JSObjectRef prototype = JSObjectMake(context, NULL, NULL);
+    JSObjectRef object = JSObjectMake(context, NULL, NULL);
+    JSStringRef inherited_name = JSStringCreateWithUTF8CString("inherited");
+    JSObjectSetProperty(context, prototype, inherited_name,
+        JSValueMakeNumber(context, 11), kJSPropertyAttributeNone, &exception);
+    JSObjectSetPrototype(context, object, prototype);
+    JSObjectSetPropertyAtIndex(context, object, 4, JSValueMakeNumber(context, 42), &exception);
+    JSStringRef temporary_name = JSStringCreateWithUTF8CString("temporary");
+    JSObjectSetProperty(context, object, temporary_name,
+        JSValueMakeBoolean(context, true), kJSPropertyAttributeNone, &exception);
+    int deleted = JSObjectDeleteProperty(context, object, temporary_name, &exception);
+    printf("objects %d %d %.0f %d %d\n",
+        JSValueIsStrictEqual(context, JSObjectGetPrototype(context, object), prototype),
+        JSObjectHasProperty(context, object, inherited_name),
+        JSValueToNumber(context, JSObjectGetPropertyAtIndex(context, object, 4, &exception), &exception),
+        deleted, JSObjectHasProperty(context, object, temporary_name));
+    JSStringRelease(inherited_name);
+    JSStringRelease(temporary_name);
+
     JSValueProtect(context, json);
     JSValueUnprotect(context, json);
     if (exception)

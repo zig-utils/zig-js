@@ -1749,6 +1749,53 @@ export fn JSObjectGetArrayBufferByteLength(ctx: JSContextRef, object: JSObjectRe
     return buffer_data.bytes().len;
 }
 
+export fn JSObjectGetPrototype(ctx: JSContextRef, object: JSObjectRef) callconv(.c) JSValueRef {
+    const c = ctxFrom(ctx) orelse return null;
+    const obj = objectArgFrom(c, object, null) orelse return null;
+    const gc_saved = gc_mod.setActiveHeap(c.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(c.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = c.interpreter();
+    c.pushActiveInterpreter(&machine) catch return null;
+    defer c.popActiveInterpreter(&machine);
+    const result = machine.getPrototypeOfObject(obj) catch return null;
+    return box(c, result);
+}
+
+export fn JSObjectSetPrototype(ctx: JSContextRef, object: JSObjectRef, prototype: JSValueRef) callconv(.c) void {
+    const c = ctxFrom(ctx) orelse return;
+    const obj = objectArgFrom(c, object, null) orelse return;
+    const proto_value = valueFromContext(c, prototype) orelse return;
+    const new_proto: ?*Object = if (proto_value.isNull()) null else if (proto_value.isObject() and
+        !proto_value.asObj().is_symbol and !proto_value.asObj().is_bigint)
+        proto_value.asObj()
+    else
+        return;
+    const gc_saved = gc_mod.setActiveHeap(c.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(c.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = c.interpreter();
+    c.pushActiveInterpreter(&machine) catch return;
+    defer c.popActiveInterpreter(&machine);
+    _ = machine.setPrototypeOfObject(obj, new_proto) catch return;
+}
+
+export fn JSObjectHasProperty(ctx: JSContextRef, object: JSObjectRef, name: JSStringRef) callconv(.c) bool {
+    const c = ctxFrom(ctx) orelse return false;
+    const obj = objectArgFrom(c, object, null) orelse return false;
+    const key = strFrom(name) orelse return false;
+    const gc_saved = gc_mod.setActiveHeap(c.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(c.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = c.interpreter();
+    c.pushActiveInterpreter(&machine) catch return false;
+    defer c.popActiveInterpreter(&machine);
+    return machine.hasPropertyResult(obj, key.bytes) catch false;
+}
+
 export fn JSObjectGetProperty(ctx: JSContextRef, object: JSObjectRef, name: JSStringRef, exception: ExceptionRef) callconv(.c) JSValueRef {
     const c = ctxFrom(ctx) orelse return null;
     const obj = objectArgFrom(c, object, exception) orelse return null;
@@ -1809,6 +1856,31 @@ export fn JSObjectSetProperty(ctx: JSContextRef, object: JSObjectRef, name: JSSt
     };
 }
 
+export fn JSObjectDeleteProperty(ctx: JSContextRef, object: JSObjectRef, name: JSStringRef, exception: ExceptionRef) callconv(.c) bool {
+    const c = ctxFrom(ctx) orelse return false;
+    const obj = objectArgFrom(c, object, exception) orelse return false;
+    const key = strFrom(name) orelse {
+        setException(c, exception, "TypeError: property name is null");
+        return false;
+    };
+    const gc_saved = gc_mod.setActiveHeap(c.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(c.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = c.interpreter();
+    c.pushActiveInterpreter(&machine) catch {
+        setException(c, exception, "OutOfMemory");
+        return false;
+    };
+    defer c.popActiveInterpreter(&machine);
+    return machine.deleteOwn(obj, key.bytes) catch |err| {
+        if (err == error.Throw) {
+            if (exception != null) exception[0] = box(c, machine.exception);
+        } else setException(c, exception, @errorName(err));
+        return false;
+    };
+}
+
 export fn JSObjectGetPropertyAtIndex(ctx: JSContextRef, object: JSObjectRef, index: c_uint, exception: ExceptionRef) callconv(.c) JSValueRef {
     const c = ctxFrom(ctx) orelse return null;
     const obj = objectArgFrom(c, object, exception) orelse return null;
@@ -1835,6 +1907,33 @@ export fn JSObjectGetPropertyAtIndex(ctx: JSContextRef, object: JSObjectRef, ind
         return null;
     };
     return boxResult(c, exception, result);
+}
+
+export fn JSObjectSetPropertyAtIndex(ctx: JSContextRef, object: JSObjectRef, index: c_uint, val: JSValueRef, exception: ExceptionRef) callconv(.c) void {
+    const c = ctxFrom(ctx) orelse return;
+    const obj = objectArgFrom(c, object, exception) orelse return;
+    const property_value = valueArgFrom(c, val, exception) orelse return;
+    const key = std.fmt.allocPrint(c.arena(), "{d}", .{index}) catch {
+        setException(c, exception, "OutOfMemory");
+        return;
+    };
+    const gc_saved = gc_mod.setActiveHeap(c.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(c.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = c.interpreter();
+    c.pushActiveInterpreter(&machine) catch {
+        setException(c, exception, "OutOfMemory");
+        return;
+    };
+    defer c.popActiveInterpreter(&machine);
+    const accepted = machine.setMemberResult(Value.obj(obj), key, property_value, Value.obj(obj)) catch |err| {
+        if (err == error.Throw) {
+            if (exception != null) exception[0] = box(c, machine.exception);
+        } else setException(c, exception, @errorName(err));
+        return;
+    };
+    if (!accepted) setException(c, exception, "TypeError: property assignment was rejected");
 }
 
 export fn JSObjectCallAsFunction(ctx: JSContextRef, function: JSObjectRef, this_object: JSObjectRef, argc: usize, argv: [*c]const JSValueRef, exception: ExceptionRef) callconv(.c) JSValueRef {
