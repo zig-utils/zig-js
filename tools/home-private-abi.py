@@ -14,10 +14,12 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 OUTPUT = ROOT / "docs/abi/home-private-7ed99c02-inventory.json"
+ALIAS_PROFILE = ROOT / "docs/abi/home-private-5e829ad4.json"
 PUBLIC_INVENTORY = ROOT / "docs/c-api/jsc-public-api-macos-27.0.json"
 EXPORT_SOURCE = ROOT / "src/c_api.zig"
 PROFILE_ID = "home-private-7ed99c02"
 REVISION = "7ed99c02e50034f869d0db6d487115bb44332fe4"
+ALIAS_PROFILE_ID = "home-private-5e829ad4"
 SOURCE_ROOT = Path("packages/runtime/src/jsc")
 EXTERN_RE = re.compile(r"\b(?:pub\s+)?extern\s+fn\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(")
 PLATFORM_IMPORTS = {"gnu_get_libc_version"}
@@ -261,6 +263,51 @@ def refresh_implementation_status(data: dict[str, object]) -> None:
     data["totals"]["by_status"] = dict(sorted(statuses.items()))
 
 
+def verify_alias(home_root: Path, stored: dict[str, object]) -> None:
+    alias = json.loads(ALIAS_PROFILE.read_text())
+    if alias.get("schema_version") != 1 or alias.get("profile_id") != ALIAS_PROFILE_ID:
+        fail("alias profile schema or identity mismatch")
+    if alias.get("base_profile") != PROFILE_ID or alias.get("base_revision") != REVISION:
+        fail("alias base-profile identity mismatch")
+    actual_revision = revision(home_root)
+    expected_revision = alias["consumer"]["revision"]
+    if actual_revision != expected_revision:
+        fail(f"Home revision mismatch: {actual_revision} != {expected_revision}")
+
+    source_files = stored["consumer"]["source_files"]
+    canonical_manifest = json.dumps(source_files, sort_keys=True, separators=(",", ":")).encode()
+    if sha256_bytes(canonical_manifest) != alias.get("source_manifest_sha256"):
+        fail("alias source-manifest digest mismatch")
+    for relative, expected_digest in source_files.items():
+        path = home_root / relative
+        if not path.is_file() or sha256(path) != expected_digest:
+            fail(f"alias source hash mismatch for {relative}")
+
+    public_data = json.loads(PUBLIC_INVENTORY.read_text())
+    public_names = {entry["name"] for entry in public_data["functions"]}
+    absolute_source_root = home_root / SOURCE_ROOT
+    current: list[dict[str, object]] = []
+    current_source_files: set[str] = set()
+    for path in sorted(absolute_source_root.rglob("*.zig")):
+        found = declarations(path, absolute_source_root, public_names)
+        if found:
+            current.extend(found)
+            current_source_files.add(path.relative_to(home_root).as_posix())
+    current.sort(key=lambda entry: (str(entry["name"]), str(entry["source"]), int(entry["line"])))
+    if current_source_files != set(source_files):
+        fail("alias extern source-file set differs from the base profile")
+    contract_keys = (
+        "name", "source", "line", "calling_convention", "classification",
+        "declaration", "declaration_sha256",
+    )
+    base_contract = [{key: entry[key] for key in contract_keys} for entry in stored["declarations"]]
+    current_contract = [{key: entry[key] for key in contract_keys} for entry in current]
+    if current_contract != base_contract:
+        fail("alias declaration/signature/calling-convention contract differs from the base profile")
+    if any(value != 0 for value in alias.get("comparison", {}).values()):
+        fail("byte-identical alias must report a zero declaration diff")
+
+
 def validate_stored(data: dict[str, object]) -> None:
     if data.get("schema_version") != 1 or data.get("profile_id") != PROFILE_ID:
         fail("stored inventory schema or profile identity mismatch")
@@ -317,16 +364,19 @@ def validate_stored(data: dict[str, object]) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--profile", choices=(PROFILE_ID, ALIAS_PROFILE_ID), default=PROFILE_ID)
     parser.add_argument("--home-root", type=Path)
     parser.add_argument("--write", action="store_true")
     parser.add_argument("--refresh-implementation-status", action="store_true")
     args = parser.parse_args()
     if args.write and not args.home_root:
         fail("--write requires --home-root")
+    if args.write and args.profile != PROFILE_ID:
+        fail("the alias profile reuses the immutable base inventory and cannot be generated separately")
     if args.write and args.refresh_implementation_status:
         fail("--write and --refresh-implementation-status are mutually exclusive")
 
-    if args.home_root:
+    if args.home_root and args.profile == PROFILE_ID:
         generated = generate(args.home_root.resolve())
         refresh_implementation_status(generated)
         if args.write:
@@ -340,11 +390,13 @@ def main() -> None:
         refresh_implementation_status(stored)
         OUTPUT.write_text(json.dumps(stored, indent=2) + "\n")
     validate_stored(stored)
+    if args.home_root and args.profile == ALIAS_PROFILE_ID:
+        verify_alias(args.home_root.resolve(), stored)
     totals = stored["totals"]
     classes = totals["by_classification"]
     statuses = totals["by_status"]
     print(
-        f"Home private ABI audit: {totals['symbols']} symbols from {totals['source_files']} files; "
+        f"Home private ABI audit: {args.profile}: {totals['symbols']} symbols from {totals['source_files']} files; "
         f"private={classes.get('private_jsc', 0)}, public={classes.get('public_c_api', 0)}, "
         f"platform={classes.get('platform_import', 0)}, "
         f"implemented-private={statuses.get('implemented', 0) - classes.get('public_c_api', 0)}, "

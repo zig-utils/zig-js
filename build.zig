@@ -99,6 +99,8 @@ pub fn build(b: *std.Build) void {
     const home_private_abi_audit_cmd = b.addSystemCommand(&.{
         "python3",
         "tools/home-private-abi.py",
+        "--profile",
+        b.option([]const u8, "home-private-abi-profile", "Exact supported Home private ABI profile ID") orelse "home-private-7ed99c02",
     });
     if (home_source_root) |root| home_private_abi_audit_cmd.addArgs(&.{ "--home-root", root });
     const home_private_abi_audit_step = b.step(
