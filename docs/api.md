@@ -1,20 +1,29 @@
 ---
-title: zig-js C API subset
-description: Embed zig-js through its implemented JavaScriptCore-shaped C API subset.
+title: zig-js public C API
+description: Embed zig-js through its complete pinned JavaScriptCore-shaped public C target.
 ---
 
-# zig-js C API subset
+# zig-js public C API
 
-zig-js exports an implemented JavaScriptCore-shaped C API subset from `c_api.zig`. `zig build` installs the static library under `zig-out/lib` and compatible headers under `zig-out/include/JavaScriptCore`. Hosts that only use the completed subset can link `libzig-js.a` in place of the system `JavaScriptCore.framework` and keep those documented calls unchanged.
+zig-js exports the complete checked-in JavaScriptCore-shaped public C target
+from `c_api.zig`. `zig build` installs the static library under `zig-out/lib`
+and compatible headers under `zig-out/include/JavaScriptCore`. Hosts that stay
+within the pinned target can link `libzig-js.a` in place of the system
+`JavaScriptCore.framework` and keep those documented calls unchanged.
 
 The machine-readable [macOS 27.0 inventory](c-api/jsc-public-api-macos-27.0.json)
-is the completion authority for the full checked-in declaration surface. A
-`pending` declaration is available so hosts can compile against one header
-layout, but it must not be called until its linked implementation issue closes.
+is the completion authority for the full checked-in declaration surface.
+The inventory currently has 117 implemented functions and zero pending entries.
 Use `zig build c-api-audit` for the fast drift gate or `zig build test-c-api` to
 compile, link, and execute both C and C++ embedding fixtures.
 `zig build c-api-jsc-diff` is the macOS-only semantic gate for completed value
 APIs against the hash-pinned system JavaScriptCore headers and framework.
+
+The [versioned consumer profiles](abi/README.md) apply a narrower second gate to
+real downstream source revisions. Home profile `home-public-c-7ed99c02` pins 50
+Zig C-ABI declarations and reports 50/50 exports with a real Zig
+compile-link-runtime fixture. It remains deliberately separate from private
+Home/Bun ABI work.
 
 `ZJSContextGetCollectionEpoch` returns the monotonic count of explicit
 `JSGarbageCollect` calls for a context group. Every realm in the group observes

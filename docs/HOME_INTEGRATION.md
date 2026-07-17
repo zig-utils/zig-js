@@ -1,27 +1,35 @@
 # Replacing JSC/WebKit in Home with zig-js
 
-> Status: **scoping doc** (2026-06-10). Home currently links vendored
-> JavaScriptCore; this describes what zig-js must provide before it can replace
-> JSC/WebKit as Home's JS engine. No migration has started.
+> Status: **public profile verified; private migration not started**
+> (2026-07-17). Home currently links vendored JavaScriptCore. zig-js now proves
+> the exact 50-function public M1 consumer at Home revision `7ed99c02`, while
+> the private Bun/JSC runtime surface remains separate work.
 
 ## Why this is not a link-swap
 
-Home (`~/Code/Home/lang`) is the Bun-parity runtime. Its `home` binary does
-**not** consume the JSC *public embedding* C API — it is coupled to JSC
-**internals** through Bun's C++ binding layer. Measured from the built binary:
+Home (`~/Code/Home/lang`) is the Bun-parity runtime. Its production runtime is
+coupled to JSC **internals** through Bun's C++ binding layer. A prior built-binary
+inventory measured:
 
 | Surface | Symbols Home references |
 |---|---:|
 | JSC LowLevelInterpreter (`_jsc_llint_*`) — the bytecode engine | thousands |
 | `Bun__*` / `JSC__*` binding entry points (C++) | **804 distinct** |
 | Generated-class C++ bindings (`*Prototype__*`, `*Class__*`, `__construct`, `__finalize`) | **~4,325** |
-| **Public JSC C API** (what zig-js exposes today) | **only ~17** |
+| Public JSC C API references in that binary | **~17** |
 
-zig-js's `src/c_api.zig` exports 104 C-API functions
-(`JSGlobalContextCreate`, `JSEvaluateScript`, `JSObjectMake`,
-`JSObjectMakeFunctionWithCallback`, `JSValueMakeNumber`, …). The overlap with
-what Home actually links is ~17 symbols. **zig-js is therefore not a drop-in for
-the JSC that Home links** — the two surfaces barely intersect.
+Separately, Home revision `7ed99c02e50034f869d0db6d487115bb44332fe4`
+contains a newer public-C M1 pathway with 50 Zig `extern "c"` declarations.
+zig-js exports all 50 and runs its pinned compile-link-runtime fixture. The
+[machine-readable profile](abi/home-public-c-7ed99c02.json) records exact source
+hashes, calling convention, layouts, enum values, and semantic assumptions;
+`zig build test-home-public-abi -Dhome-source-root="$HOME/Code/Home/lang"`
+checks the live checkout too.
+
+zig-js's complete public target is now 117 functions plus 19 extensions.
+Nevertheless, **zig-js is not yet a drop-in for the JSC that Home's production
+runtime links**: success of the 50-function public profile says nothing about
+the thousands of LLInt and private/generated binding symbols above.
 
 ## Two migration paths
 

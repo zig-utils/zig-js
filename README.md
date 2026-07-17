@@ -224,6 +224,15 @@ every class callback family, inherited call and
 conversion behavior, ordinary and callback-backed constructors, property-name
 snapshots, coerced and Symbol keys, fallback behavior, reflection, attributes,
 and callback throws.
+
+The first downstream consumer profile is also pinned and green:
+[Home public C profile `home-public-c-7ed99c02`](docs/abi/README.md) records the
+exact Home revision and source hashes, all **50 C-calling-convention Zig
+externs**, opaque-pointer and enum layouts, and lifetime assumptions. Its audit
+reports **50/50 zig-js exports with zero missing**, and its Zig fixture forces
+every symbol through the linker before running context, evaluation, retain, GC,
+and typed-array checks. This is explicitly a public embedding profile—not a
+claim that Home's or Bun's private `JSC__*`/`Bun__*` ABI is implemented.
 The pinned public C inventory has no pending declarations. Inspector sessions
 now publish stable scripts and exact statement locations, and provide real
 `debugger;`, explicit pause/resume control, and deterministically resolved
@@ -323,6 +332,9 @@ zig build benchmark-comparison -Dbenchmark-comparison-quick=true
 zig build benchmark-comparison-test
 zig build c-api-audit            # pinned headers/inventory/export drift
 zig build test-c-api             # C and C++ compile-link-runtime ABI gate
+zig build home-public-abi-audit  # pinned Home revision-independent profile gate
+zig build test-home-public-abi   # Home Zig consumer compile-link-runtime gate
+zig build home-public-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"
 zig build objc-api-audit         # pinned Objective-C header/inventory drift gate
 zig build test-objc-api-headers  # macOS ARC/blocks header compilation gate
 zig build test-objc-api          # macOS Objective-C compile-link-runtime gate
