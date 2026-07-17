@@ -534,7 +534,14 @@ pub fn traceModuleGraph(cache: *std.StringHashMapUnmanaged(*ContextMod.Context.M
         const m = mp.*;
         v.mark(m.env);
         if (m.ns) |ns| v.mark(ns);
+        if (m.deferred_ns) |ns| v.mark(ns);
         if (m.import_meta_slot.obj) |o| v.mark(o);
+        if (m.eval_error) |err| markValue(v, err);
+        if (m.completion_promise) |completion| markManaged(v, completion);
+        for (m.dynamic_waiters.items) |waiter| {
+            markManaged(v, waiter.capability);
+            v.mark(waiter.namespace);
+        }
     }
 }
 

@@ -323,6 +323,9 @@ extern "c" fn JSC__VM__shrinkFootprint(?*anyopaque) void;
 extern "c" fn JSC__JSGlobalObject__deleteModuleRegistryEntry(JSContextRef, *const ZigString) void;
 extern "c" fn JSC__JSGlobalObject__drainMicrotasks(JSContextRef) u8;
 extern "c" fn JSC__JSGlobalObject__handleRejectedPromises(JSContextRef) void;
+extern "c" fn JSC__JSModuleLoader__evaluate(JSContextRef, [*c]const u8, usize, [*c]const u8, usize, [*c]const u8, usize, EncodedValue, *EncodedValue) EncodedValue;
+extern "c" fn JSC__JSModuleLoader__loadAndEvaluateModule(JSContextRef, ?*const BunString) ?*anyopaque;
+extern "c" fn JSModuleLoader__import(JSContextRef, ?*const BunString) ?*anyopaque;
 extern "c" fn JSC__JSGlobalObject__queueMicrotaskCallback(JSContextRef, ?*anyopaque, *const fn (?*anyopaque) callconv(.c) void) void;
 extern "c" fn JSC__JSGlobalObject__queueMicrotaskJob(JSContextRef, EncodedValue, EncodedValue, EncodedValue) void;
 extern "c" fn JSC__VM__deleteAllCode(?*anyopaque, JSContextRef) void;
@@ -1313,6 +1316,112 @@ pub fn main() void {
     Process__emitDisconnectEvent(context);
     if (!JSC__JSValue__toBoolean(evaluate(context, "JSON.stringify(__private_ipc_244) === '[[\"message\",true,true,true,2],[\"error\",true,true,1],[\"disconnect\",true,0]]'")))
         fail("private IPC process event identity/arity mismatch");
+
+    const module_dep_source = "globalThis.__private_module_dep_runs = (globalThis.__private_module_dep_runs || 0) + 1; export const dep = 244;";
+    const module_dep_origin = "/virtual/private-245-dep.js";
+    var module_exception = EncodedValue.empty;
+    const module_dep_namespace = JSC__JSModuleLoader__evaluate(
+        context,
+        module_dep_source.ptr,
+        module_dep_source.len,
+        module_dep_origin.ptr,
+        module_dep_origin.len,
+        null,
+        0,
+        .undefined,
+        &module_exception,
+    );
+    if (module_dep_namespace == .empty or module_dep_namespace == .undefined or module_exception != .empty or
+        Bun__JSValue__toNumber(getProperty(context, module_dep_namespace, "dep"), context) != 244)
+        fail("private module loader supplied dependency mismatch");
+
+    const module_entry_source = "globalThis.__private_module_entry_runs = (globalThis.__private_module_entry_runs || 0) + 1; import { dep } from './private-245-dep.js'; export const value = dep + 1; export const token = globalThis.__private_module_token_245;";
+    const module_entry_origin = "/virtual/private-245-entry.js";
+    _ = evaluate(context, "globalThis.__private_module_token_245 = { issue: 245 };");
+    module_exception = .empty;
+    const module_namespace = JSC__JSModuleLoader__evaluate(
+        context,
+        module_entry_source.ptr,
+        module_entry_source.len,
+        module_entry_origin.ptr,
+        module_entry_origin.len,
+        module_dep_origin.ptr,
+        module_dep_origin.len,
+        .undefined,
+        &module_exception,
+    );
+    if (module_namespace == .empty or module_namespace == .undefined or module_exception != .empty or
+        Bun__JSValue__toNumber(getProperty(context, module_namespace, "value"), context) != 245 or
+        !JSC__JSValue__isStrictEqual(getProperty(context, module_namespace, "token"), evaluate(context, "__private_module_token_245"), context) or
+        Bun__JSValue__toNumber(evaluate(context, "__private_module_dep_runs"), context) != 1 or
+        Bun__JSValue__toNumber(evaluate(context, "__private_module_entry_runs"), context) != 1)
+        fail("private module loader link/evaluation/namespace mismatch");
+
+    const module_entry_name = BunString{
+        .tag = .zig_string,
+        .value = .{ .zig_string = .{ .tagged_ptr = @intFromPtr(module_entry_origin.ptr), .len = module_entry_origin.len } },
+    };
+    const loaded_module_cell = JSC__JSModuleLoader__loadAndEvaluateModule(context, &module_entry_name) orelse
+        fail("private loadAndEvaluateModule did not return a Promise");
+    const loaded_module = EncodedValue.fromBits(@intFromPtr(loaded_module_cell));
+    expectPromise(context, loaded_module, .fulfilled, module_namespace);
+    const imported_module_cell = JSModuleLoader__import(context, &module_entry_name) orelse
+        fail("private JSModuleLoader import did not return a Promise");
+    const imported_module = EncodedValue.fromBits(@intFromPtr(imported_module_cell));
+    expectPromise(context, imported_module, .fulfilled, module_namespace);
+    if (Bun__JSValue__toNumber(evaluate(context, "__private_module_entry_runs"), context) != 1)
+        fail("private module loader cache re-evaluated an instantiated module");
+
+    const module_tla_source = "export const awaited = await Promise.resolve(246);";
+    const module_tla_origin = "/virtual/private-245-tla.js";
+    module_exception = .empty;
+    const pending_module = JSC__JSModuleLoader__evaluate(
+        context,
+        module_tla_source.ptr,
+        module_tla_source.len,
+        module_tla_origin.ptr,
+        module_tla_origin.len,
+        null,
+        0,
+        .undefined,
+        &module_exception,
+    );
+    if (pending_module == .empty or module_exception != .empty or JSC__JSValue__asPromise(pending_module) == null)
+        fail("private top-level-await module did not return a pending Promise");
+    exposeCell(context, "__private_module_tla_promise_245", pending_module);
+    _ = JSC__VM__runGC(JSC__JSGlobalObject__vm(context), true);
+    _ = JSC__JSGlobalObject__drainMicrotasks(context);
+    _ = evaluate(context, "globalThis.__private_module_tla_value_245 = 0; __private_module_tla_promise_245.then(ns => { __private_module_tla_value_245 = ns.awaited; });");
+    if (Bun__JSValue__toNumber(evaluate(context, "__private_module_tla_value_245"), context) != 246)
+        fail("private top-level-await module settlement/rooting mismatch");
+
+    const invalid_module_source = "export const = ;";
+    const invalid_module_origin = "/virtual/private-245-invalid.js";
+    module_exception = .empty;
+    if (JSC__JSModuleLoader__evaluate(
+        context,
+        invalid_module_source.ptr,
+        invalid_module_source.len,
+        invalid_module_origin.ptr,
+        invalid_module_origin.len,
+        null,
+        0,
+        .undefined,
+        &module_exception,
+    ) != .undefined or module_exception == .empty or !JSC__JSValue__isAnyError(module_exception))
+        fail("private module parse rejection/out-parameter mismatch");
+    module_exception = .empty;
+    if (JSC__JSModuleLoader__evaluate(context, null, 1, null, 0, null, 0, .undefined, &module_exception) != .undefined or
+        module_exception == .empty or !JSC__JSValue__isAnyError(module_exception))
+        fail("private module invalid-span safety mismatch");
+
+    const foreign_module_cell = JSModuleLoader__import(foreign_context, &module_entry_name) orelse
+        fail("private foreign module import did not return a rejection Promise");
+    expectPromise(foreign_context, EncodedValue.fromBits(@intFromPtr(foreign_module_cell)), .rejected, null);
+    if (JSC__JSModuleLoader__loadAndEvaluateModule(context, null) != null or !JSGlobalObject__hasException(context))
+        fail("private module loader accepted a null BunString");
+    JSGlobalObject__clearException(context);
+
     _ = evaluate(context, "globalThis.__private_lifecycle_242 = []; process.on('beforeExit', code => __private_lifecycle_242.push('before:' + code)); process.on('exit', code => __private_lifecycle_242.push('exit:' + code));");
     Process__dispatchOnBeforeExit(context, 2);
     Process__dispatchOnExit(context, 4);
@@ -3408,5 +3517,5 @@ pub fn main() void {
         TopExceptionScope__exceptionIncludingTraps(&verification_scope) != null)
         fail("private TopExceptionScope destruction mismatch");
 
-    std.debug.print("Home private value shims: 243/243 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 246/246 symbols linked; runtime matrix passed\n", .{});
 }

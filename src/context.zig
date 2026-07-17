@@ -2569,6 +2569,10 @@ pub const Context = struct {
     /// Persistent per-realm module-loader registry. Repeated evaluations reuse
     /// entries until the private JSC deletion boundary removes an exact key.
     module_registry: std.StringHashMapUnmanaged(*Module) = .empty,
+    /// Source text explicitly supplied through the private JSC loader. These
+    /// entries outlive individual import calls and take precedence over the
+    /// loader's filesystem fallback.
+    module_loader_sources: std.StringHashMapUnmanaged([]const u8) = .empty,
     module_dependency_depth: usize = 0,
     deferred_async_queue: std.ArrayListUnmanaged(*Module) = .empty,
     deferred_async_started: std.ArrayListUnmanaged(*Module) = .empty,
@@ -3110,6 +3114,10 @@ pub const Context = struct {
             .gc_safepoint_fn = if (self.gc != null) collectMidScript else null,
             .parallel_worker_count = if (self.parallel_js) &self.parallel_worker_count else null,
             .private_name_serial = &self.private_name_serial,
+            .dyn_import = if (self.mod_host != null) dynImportHook else null,
+            .dyn_import_ctx = if (self.mod_host != null) self else null,
+            .defer_trigger = if (self.mod_host != null) deferTriggerHook else null,
+            .defer_trigger_ctx = if (self.mod_host != null) self else null,
         };
     }
 
@@ -3233,6 +3241,7 @@ pub const Context = struct {
         }
         self.external_buffer_owners.deinit(self.gpa);
         self.module_registry.deinit(self.arena());
+        self.module_loader_sources.deinit(self.arena());
         self.unhandled_rejections.deinit(self.arena());
         self.handled_rejections.deinit(self.arena());
         if (self.locked_arena) |la| {
@@ -3282,6 +3291,7 @@ pub const Context = struct {
         }
         self.external_buffer_owners.deinit(self.gpa);
         self.module_registry.deinit(self.arena());
+        self.module_loader_sources.deinit(self.arena());
         self.unhandled_rejections.deinit(self.arena());
         self.handled_rejections.deinit(self.arena());
         self.sab_retains.deinit();
@@ -4580,6 +4590,7 @@ pub const Context = struct {
 
     pub const Module = struct {
         path: []const u8,
+        source: []const u8 = "",
         items: []*ast.Node,
         env: *interp.Environment,
         deps: std.StringHashMapUnmanaged(*Module) = .{}, // specifier -> module
@@ -4621,10 +4632,6 @@ pub const Context = struct {
         ctx: *Context,
         module: *Module,
         rejected: bool,
-    };
-
-    const ModuleNamespaceResume = struct {
-        namespace: *value.Object,
     };
 
     const ModuleNamespaceWaiter = struct {
@@ -4671,11 +4678,13 @@ pub const Context = struct {
         defer _ = gc_mod.setActiveInterpreter(ai_saved);
         machine.strict = true;
         // Expose the graph to runtime dynamic `import()`.
+        const previous_host = self.mod_host;
+        const previous_cache = self.mod_cache;
         self.mod_host = host;
         self.mod_cache = &self.module_registry;
         defer {
-            self.mod_cache = null;
-            self.mod_host = null;
+            self.mod_cache = previous_cache;
+            self.mod_host = previous_host;
             self.deferred_async_queue.clearRetainingCapacity();
             self.deferred_async_started.clearRetainingCapacity();
             self.clearCompletedParentQueue();
@@ -4702,12 +4711,125 @@ pub const Context = struct {
         return Value.undef();
     }
 
+    fn moduleLoaderResolve(self: *Context, referrer: []const u8, specifier: []const u8) ![]const u8 {
+        if (specifier.len == 0) return self.arena().dupe(u8, specifier);
+        if (std.fs.path.isAbsolute(specifier))
+            return std.fs.path.resolve(self.arena(), &.{specifier});
+        if (specifier[0] != '.') return self.arena().dupe(u8, specifier);
+        const base = std.fs.path.dirname(referrer) orelse "";
+        return std.fs.path.resolve(self.arena(), &.{ base, specifier });
+    }
+
+    fn moduleLoaderHostLoad(
+        opaque_ctx: *anyopaque,
+        referrer: []const u8,
+        specifier: []const u8,
+        out_path: *[]const u8,
+    ) ?[]const u8 {
+        const self: *Context = @ptrCast(@alignCast(opaque_ctx));
+        const path = self.moduleLoaderResolve(referrer, specifier) catch return null;
+        out_path.* = path;
+        self.realmLock();
+        const supplied = self.module_loader_sources.get(path);
+        const cached = self.module_registry.get(path);
+        self.realmUnlock();
+        if (supplied) |source| return source;
+        if (cached) |module| return module.source;
+        return std.Io.Dir.cwd().readFileAlloc(agent.engineIo(), path, self.arena(), .unlimited) catch null;
+    }
+
+    fn installPrivateModuleLoader(self: *Context) void {
+        self.mod_host = .{ .ctx = self, .load = moduleLoaderHostLoad };
+        self.mod_cache = &self.module_registry;
+    }
+
+    /// Register source text under the same canonical loader key used by private
+    /// JSC imports. Registration does not invalidate an already-instantiated
+    /// module: the module registry remains the identity/cache boundary.
+    pub fn provideModuleLoaderSource(self: *Context, origin: []const u8, source: []const u8) ![]const u8 {
+        const path = try self.moduleLoaderResolve("", origin);
+        const owned_source = try self.arena().dupe(u8, source);
+        try self.module_loader_sources.ensureUnusedCapacity(self.arena(), 1);
+        self.realmLock();
+        self.module_loader_sources.putAssumeCapacity(path, owned_source);
+        self.realmUnlock();
+        self.installPrivateModuleLoader();
+        return path;
+    }
+
+    fn rejectedModuleLoaderPromise(self: *Context, machine: *interp.Interpreter, err: anyerror) RunError!Value {
+        const reason = if (err == error.Throw and self.exception != null)
+            self.exception.?
+        else if (err == error.Throw and !machine.exception.isUndefined())
+            machine.exception
+        else
+            try machine.makeError("SyntaxError", "Cannot load or evaluate module");
+        self.exception = null;
+        machine.exception = Value.undef();
+        return Value.obj(try promise.newRejectedPromise(machine, reason));
+    }
+
+    /// Resolve, link, and begin evaluating a module through the persistent
+    /// private loader. The returned value is always an intrinsic Promise whose
+    /// fulfillment value is the cached module namespace. Top-level await stays
+    /// pending until a later host microtask checkpoint.
+    pub fn loadAndEvaluateModule(self: *Context, specifier: []const u8, referrer: []const u8) RunError!Value {
+        if (self.gil) |g| if (!self.parallel_js) g.acquire();
+        defer if (self.gil) |g| if (!self.parallel_js) g.release();
+        self.assertOwnerThread();
+        const gc_saved = gc_mod.setActiveHeap(self.gc);
+        defer _ = gc_mod.setActiveHeap(gc_saved);
+        const sa_saved = strcell.setActiveArena(self.arena());
+        defer _ = strcell.setActiveArena(sa_saved);
+        const ss_saved = stack_scan.enter(@frameAddress());
+        defer stack_scan.leave(ss_saved);
+        defer self.finishConcurrentGCIfActive();
+        self.collectQuiescentGarbage();
+        self.collectRequestedGarbage();
+        self.installPrivateModuleLoader();
+        self.exception = null;
+
+        var machine = self.interpreter();
+        try self.pushActiveInterpreter(&machine);
+        defer self.popActiveInterpreter(&machine);
+        const ai_saved = gc_mod.setActiveInterpreter(&machine);
+        defer _ = gc_mod.setActiveInterpreter(ai_saved);
+        machine.strict = true;
+
+        var path: []const u8 = "";
+        const host = self.mod_host.?;
+        const source = host.load(host.ctx, referrer, specifier, &path) orelse {
+            machine.throwError("TypeError", "Cannot resolve module specifier") catch {};
+            self.exception = machine.exception;
+            return self.rejectedModuleLoaderPromise(&machine, error.Throw);
+        };
+        const root = self.loadModule(path, source, host, &self.module_registry) catch |err|
+            return self.rejectedModuleLoaderPromise(&machine, err);
+        self.linkModule(root) catch |err|
+            return self.rejectedModuleLoaderPromise(&machine, err);
+        self.evalModule(&machine, root) catch |err|
+            return self.rejectedModuleLoaderPromise(&machine, err);
+
+        const namespace = self.namespaceObject(root) catch |err|
+            return self.rejectedModuleLoaderPromise(&machine, err);
+        if (!root.evaluated)
+            return self.moduleNamespaceAfterCompletion(&machine, root, namespace) catch |err|
+                return self.rejectedModuleLoaderPromise(&machine, err);
+        if (root.eval_error) |reason|
+            return Value.obj(try promise.newRejectedPromise(&machine, reason));
+        try self.fillNamespace(&machine, root, namespace);
+        const result = try promise.newPromise(&machine);
+        try promise.resolve(&machine, promise.promiseOf(Value.obj(result)).?, Value.obj(namespace));
+        return Value.obj(result);
+    }
+
     /// Remove one exact loader key from this realm. Module graph tracing takes
     /// the same realm lock under parallel collection, matching JSC's cellLock
     /// synchronization without serializing the ordinary single-thread path.
     pub fn deleteModuleRegistryEntry(self: *Context, key: []const u8) bool {
         self.realmLock();
         defer self.realmUnlock();
+        _ = self.module_loader_sources.remove(key);
         return self.module_registry.remove(key);
     }
 
@@ -4717,6 +4839,7 @@ pub const Context = struct {
         self.realmLock();
         defer self.realmUnlock();
         self.module_registry.clearRetainingCapacity();
+        self.module_loader_sources.clearRetainingCapacity();
         self.module_source_object = null;
     }
 
@@ -4762,7 +4885,13 @@ pub const Context = struct {
         };
 
         const m = try a.create(Module);
-        m.* = .{ .path = try a.dupe(u8, path), .items = items, .env = env, .has_tla = moduleItemsHaveTopLevelAwait(items) };
+        m.* = .{
+            .path = try a.dupe(u8, path),
+            .source = owned_source,
+            .items = items,
+            .env = env,
+            .has_tla = moduleItemsHaveTopLevelAwait(items),
+        };
         try self.putModuleCache(cache, m.path, m);
 
         // Load every dependency and record this module's export map.
@@ -5673,27 +5802,24 @@ pub const Context = struct {
         _ = args;
         const machine: *interp.Interpreter = @ptrCast(@alignCast(ctx));
         const fnobj = machine.active_native orelse return Value.undef();
-        const data: *ModuleNamespaceResume = @ptrCast(@alignCast(fnobj.private_data.?));
-        return Value.obj(data.namespace);
+        return fnobj.getOwn("\x00moduleNamespace") orelse Value.undef();
     }
 
     fn moduleNamespaceAfterCompletion(self: *Context, machine: *interp.Interpreter, m: *Module, ns: *value.Object) interp.EvalError!Value {
         const p = try self.ensureModuleCompletionPromise(machine, m);
         const onf = try gc_mod.allocObj(self.arena());
-        const data = try self.arena().create(ModuleNamespaceResume);
-        data.* = .{ .namespace = ns };
-        onf.* = .{ .native = moduleNamespaceResume, .private_data = @ptrCast(data) };
+        onf.* = .{ .native = moduleNamespaceResume };
         try interp.installNativeProps(self.arena(), machine.root_shape, onf, "", 0);
+        try onf.setOwn(self.arena(), machine.root_shape, "\x00moduleNamespace", Value.obj(ns));
         return try promise.then(machine, p, Value.obj(onf), Value.undef());
     }
 
     fn resolveModuleNamespaceAfterCompletion(self: *Context, machine: *interp.Interpreter, m: *Module, ns: *value.Object, capability: *promise.Promise) interp.EvalError!void {
         const p = try self.ensureModuleCompletionPromise(machine, m);
         const onf = try gc_mod.allocObj(self.arena());
-        const data = try self.arena().create(ModuleNamespaceResume);
-        data.* = .{ .namespace = ns };
-        onf.* = .{ .native = moduleNamespaceResume, .private_data = @ptrCast(data) };
+        onf.* = .{ .native = moduleNamespaceResume };
         try interp.installNativeProps(self.arena(), machine.root_shape, onf, "", 0);
+        try onf.setOwn(self.arena(), machine.root_shape, "\x00moduleNamespace", Value.obj(ns));
         try promise.performThenResult(machine, p, Value.obj(onf), Value.undef(), capability);
     }
 
@@ -16083,6 +16209,41 @@ test "module registry reuses an evaluation until deletion then reloads" {
     try std.testing.expectEqual(@as(f64, 2), (try ctx.evaluate("__module_registry_runs")).asNum());
 }
 
+test "private module loader reads relative filesystem cycles and caches namespace identity" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "entry.js",
+        .data = "import './dep.js'; export const value = 245;",
+    });
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "dep.js",
+        .data = "import './entry.js'; export const dependency = 244;",
+    });
+    const entry_path = try std.fmt.allocPrint(
+        std.testing.allocator,
+        ".zig-cache/tmp/{s}/entry.js",
+        .{tmp.sub_path},
+    );
+    defer std.testing.allocator.free(entry_path);
+
+    const ctx = try Context.create(std.testing.allocator);
+    defer ctx.destroy();
+    const first = try ctx.loadAndEvaluateModule(entry_path, "");
+    const first_promise = promise.promiseOf(first) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(promise.State.fulfilled, first_promise.state);
+    const first_namespace = first_promise.value;
+    var machine = ctx.interpreter();
+    const exported = try machine.getProperty(first_namespace, "value");
+    try std.testing.expectEqual(@as(f64, 245), exported.asNum());
+
+    const second = try ctx.loadAndEvaluateModule(entry_path, "");
+    const second_promise = promise.promiseOf(second) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(promise.State.fulfilled, second_promise.state);
+    try std.testing.expect(first_namespace.isObject() and second_promise.value.isObject());
+    try std.testing.expect(first_namespace.asObj() == second_promise.value.asObj());
+}
+
 test "enable_gc: active module interpreter roots import.meta during requested microtask GC" {
     const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
     defer ctx.destroy();
@@ -16109,6 +16270,9 @@ test "enable_gc: active module interpreter roots import.meta during requested mi
     const alive = try ctx.evaluate("globalThis.aliveAfterGc === true");
     try std.testing.expectEqual(true, alive.asBool());
 
+    // The persistent loader registry intentionally roots instantiated module
+    // state. Drop its exact key before checking post-evaluation weak liveness.
+    try std.testing.expect(ctx.deleteModuleRegistryEntry("entry.js"));
     ctx.collectGarbage();
     const cleared = try ctx.evaluate("globalThis.ref.deref() === undefined");
     try std.testing.expectEqual(true, cleared.asBool());

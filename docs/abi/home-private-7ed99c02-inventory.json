@@ -88,8 +88,8 @@
     },
     "by_status": {
       "external": 2,
-      "implemented": 259,
-      "pending": 187
+      "implemented": 262,
+      "pending": 184
     }
   },
   "declarations": [
@@ -1463,10 +1463,10 @@
       "line": 18,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSModuleLoader__evaluate( globalObject: *JSGlobalObject, sourceCodePtr: [*]const u8, sourceCodeLen: usize, originUrlPtr: [*]const u8, originUrlLen: usize, referrerUrlPtr: [*]const u8, referrerUrlLen: usize, thisValue: JSValue, exception: [*]JSValue, ) JSValue;",
       "declaration_sha256": "4fbcad51aade500873f55b435945e620e5e42b39dea5aa62fb8db962cf4efb99",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSModuleLoader__loadAndEvaluateModule",
@@ -1474,10 +1474,10 @@
       "line": 53,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSModuleLoader__loadAndEvaluateModule(arg0: *JSGlobalObject, arg1: ?*const String) ?*JSInternalPromise;",
       "declaration_sha256": "bc7b8addf8eb30accbacc7cef311609ef24d9344dceb0670d15975ce21288761",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSObject__getIndex",
@@ -3144,10 +3144,10 @@
       "line": 58,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSModuleLoader__import(*JSGlobalObject, *const String) ?*JSInternalPromise;",
       "declaration_sha256": "9f4bc1dc2a7abe171ff9427e25ad97a7b3190650b068c566873bbc3e98a6345f",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSObjectGetArrayBufferByteLength",

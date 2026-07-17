@@ -7618,6 +7618,129 @@ export fn JSC__JSGlobalObject__handleRejectedPromises(global: JSContextRef) call
     }
 }
 
+fn privateModuleLoaderPromiseFromBunString(
+    global: JSContextRef,
+    module_name: ?*const PrivateBunString,
+) EncodedValue {
+    const context = ctxForEvaluation(global) orelse return .empty;
+    const group = privatePropertyBoundaryGroup(context) orelse return .empty;
+    if (group.pending_exception != null) return .empty;
+    const name = module_name orelse {
+        privatePublishBunStringError(context, error.InvalidString);
+        return .empty;
+    };
+    const decoded = privateBunStringValue(context, name, null) catch |err| {
+        privatePublishBunStringError(context, err);
+        return .empty;
+    };
+    const promise_value = context.loadAndEvaluateModule(decoded.asStr(), "") catch {
+        privateSetPendingValue(context, context.reserved_thread_oom_error orelse Value.staticStr("OutOfMemory"));
+        return .empty;
+    };
+    const encoded = privateEncodedFromValue(context, promise_value);
+    if (encoded == .empty)
+        privateSetPendingValue(context, context.reserved_thread_oom_error orelse Value.staticStr("OutOfMemory"));
+    return encoded;
+}
+
+/// Bun's pinned wrapper around `loadAndEvaluateModule`: the opaque return cell
+/// is the same rooted Boxed Promise handle used by the rest of this private ABI.
+export fn JSC__JSModuleLoader__loadAndEvaluateModule(
+    global: JSContextRef,
+    module_name: ?*const PrivateBunString,
+) callconv(.c) ?*anyopaque {
+    return privatePromiseCellFromEncoded(privateModuleLoaderPromiseFromBunString(global, module_name));
+}
+
+export fn JSModuleLoader__import(
+    global: JSContextRef,
+    module_name: ?*const PrivateBunString,
+) callconv(.c) ?*anyopaque {
+    return privatePromiseCellFromEncoded(privateModuleLoaderPromiseFromBunString(global, module_name));
+}
+
+fn privateModuleLoaderEvaluateError(
+    context: *Context,
+    exception_out: ?*EncodedValue,
+    kind: []const u8,
+    message: []const u8,
+) EncodedValue {
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    const reason = machine.makeError(kind, message) catch {
+        privateSetPendingValue(context, context.reserved_thread_oom_error orelse Value.staticStr("OutOfMemory"));
+        return .empty;
+    };
+    const encoded = privateEncodedFromValue(context, reason);
+    if (encoded == .empty) {
+        privateSetPendingValue(context, context.reserved_thread_oom_error orelse Value.staticStr("OutOfMemory"));
+        return .empty;
+    }
+    if (exception_out) |out| out.* = encoded else privateSetPendingValue(context, reason);
+    return .undefined;
+}
+
+fn privateEncodeModuleLoaderValue(context: *Context, result: Value) EncodedValue {
+    const encoded = privateEncodedFromValue(context, result);
+    if (encoded == .empty)
+        privateSetPendingValue(context, context.reserved_thread_oom_error orelse Value.staticStr("OutOfMemory"));
+    return encoded;
+}
+
+/// Match the pinned JSC tri-state result: an already-fulfilled import returns
+/// its namespace, an already-rejected import writes the reason and returns
+/// undefined, and a top-level-await import returns its still-pending Promise.
+export fn JSC__JSModuleLoader__evaluate(
+    global: JSContextRef,
+    source_ptr: [*c]const u8,
+    source_len: usize,
+    origin_ptr: [*c]const u8,
+    origin_len: usize,
+    referrer_ptr: [*c]const u8,
+    referrer_len: usize,
+    this_value: EncodedValue,
+    exception_out: ?*EncodedValue,
+) callconv(.c) EncodedValue {
+    _ = this_value; // The pinned implementation receives but does not inspect it.
+    const context = ctxForEvaluation(global) orelse return .empty;
+    const group = privatePropertyBoundaryGroup(context) orelse return .empty;
+    if (group.pending_exception != null) return .empty;
+    if ((source_ptr == null and source_len != 0) or
+        (origin_ptr == null and origin_len != 0) or
+        (referrer_ptr == null and referrer_len != 0))
+        return privateModuleLoaderEvaluateError(context, exception_out, "TypeError", "Invalid module source span");
+
+    const source = if (source_len == 0) "" else source_ptr[0..source_len];
+    const origin = if (origin_len == 0) "" else origin_ptr[0..origin_len];
+    const referrer = if (referrer_len == 0) "" else referrer_ptr[0..referrer_len];
+    const path = context.provideModuleLoaderSource(origin, source) catch
+        return privateModuleLoaderEvaluateError(context, exception_out, "OutOfMemoryError", "Cannot retain module source");
+    const promise_value = context.loadAndEvaluateModule(path, referrer) catch
+        return privateModuleLoaderEvaluateError(context, exception_out, "OutOfMemoryError", "Cannot evaluate module");
+    const internal_promise = promise.promiseOf(promise_value) orelse
+        return privateModuleLoaderEvaluateError(context, exception_out, "TypeError", "Module loader returned a non-Promise");
+    internal_promise.lockState();
+    const state = internal_promise.state;
+    const result = internal_promise.value;
+    // This boundary synchronously consumes a rejected import into its explicit
+    // exception out-channel, so it is not an unhandled host rejection.
+    if (state == .rejected) internal_promise.is_handled = true;
+    internal_promise.unlockState();
+    return switch (state) {
+        .fulfilled => privateEncodeModuleLoaderValue(context, result),
+        .rejected => rejected: {
+            const encoded = privateEncodeModuleLoaderValue(context, result);
+            if (encoded == .empty) break :rejected .empty;
+            if (exception_out) |out| out.* = encoded else privateSetPendingValue(context, result);
+            break :rejected .undefined;
+        },
+        .pending => privateEncodeModuleLoaderValue(context, promise_value),
+    };
+}
+
 export fn JSC__JSGlobalObject__deleteModuleRegistryEntry(
     global: JSContextRef,
     key: *const PrivateZigString,
