@@ -5258,6 +5258,7 @@ test "C-API: debugger registers direct and indirect eval sources independently" 
     const State = struct {
         session: ZJSInspectorSessionRef = null,
         pauses: usize = 0,
+        used_step: bool = false,
         bytes: [32768]u8 = undefined,
         len: usize = 0,
 
@@ -5270,8 +5271,12 @@ test "C-API: debugger registers direct and indirect eval sources independently" 
             self.len += 1;
             if (std.mem.indexOf(u8, message[0..message_len], "Debugger.paused") == null) return;
             self.pauses += 1;
-            const resume_request = "{\"id\":90,\"method\":\"Debugger.resume\"}";
-            std.debug.assert(ZJSInspectorSessionDispatch(self.session, resume_request, resume_request.len));
+            const command = if (!self.used_step)
+                "{\"id\":89,\"method\":\"Debugger.stepOver\"}"
+            else
+                "{\"id\":90,\"method\":\"Debugger.resume\"}";
+            self.used_step = true;
+            std.debug.assert(ZJSInspectorSessionDispatch(self.session, command, command.len));
         }
     };
 
@@ -5305,7 +5310,16 @@ test "C-API: debugger registers direct and indirect eval sources independently" 
     defer JSStringRelease(indirect_source);
     const indirect = JSEvaluateScript(ctx, indirect_source, null, null, 1, &exception) orelse return error.EvalFailed;
     try std.testing.expectEqual(@as(f64, 7), JSValueToNumber(ctx, indirect, &exception));
-    try std.testing.expectEqual(@as(usize, 3), state.pauses);
+    try std.testing.expectEqual(@as(usize, 4), state.pauses);
+
+    const pause_all = "{\"id\":5,\"method\":\"Debugger.setPauseOnExceptions\",\"params\":{\"state\":\"all\"}}";
+    try std.testing.expect(ZJSInspectorSessionDispatch(state.session, pause_all, pause_all.len));
+    const throwing_source = JSStringCreateWithUTF8CString(
+        "try { eval(\"throw new Error('dynamic');\\n//# sourceURL=eval-throw.js\"); } catch (error) { 9; }",
+    ) orelse return error.StringInitFailed;
+    defer JSStringRelease(throwing_source);
+    _ = JSEvaluateScript(ctx, throwing_source, null, null, 1, &exception) orelse return error.EvalFailed;
+    try std.testing.expectEqual(@as(usize, 5), state.pauses);
 
     const get_source = "{\"id\":3,\"method\":\"Debugger.getScriptSource\",\"params\":{\"scriptId\":2}}";
     try std.testing.expect(ZJSInspectorSessionDispatch(state.session, get_source, get_source.len));
@@ -5314,10 +5328,63 @@ test "C-API: debugger registers direct and indirect eval sources independently" 
     try std.testing.expect(std.mem.indexOf(u8, transcript, "\"scriptId\":2") != null);
     try std.testing.expect(std.mem.indexOf(u8, transcript, "\"scriptId\":4") != null);
     try std.testing.expect(std.mem.indexOf(u8, transcript, "\"scriptId\":6") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "\"scriptId\":8") != null);
     try std.testing.expect(std.mem.indexOf(u8, transcript, "var evalLocal = 40") != null);
     try std.testing.expect(std.mem.indexOf(u8, transcript, "indirect-eval.js") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "eval-throw.js") != null);
     try std.testing.expect(std.mem.indexOf(u8, transcript, "Debugger.breakpointResolved") != null);
     try std.testing.expect(std.mem.indexOf(u8, transcript, "\"reason\":\"breakpoint\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "\"reason\":\"step\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "Debugger.exceptionThrown") != null);
+}
+
+test "C-API: dynamic script history survives multi-session detach and reattach" {
+    const State = struct {
+        bytes: [16384]u8 = undefined,
+        len: usize = 0,
+
+        fn receive(message: [*]const u8, message_len: usize, user_data: ?*anyopaque) callconv(.c) void {
+            const self: *@This() = @ptrCast(@alignCast(user_data.?));
+            std.debug.assert(self.len + message_len + 1 <= self.bytes.len);
+            @memcpy(self.bytes[self.len .. self.len + message_len], message[0..message_len]);
+            self.len += message_len;
+            self.bytes[self.len] = '\n';
+            self.len += 1;
+        }
+    };
+
+    const ctx = JSGlobalContextCreate(null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(ctx);
+    JSGlobalContextSetInspectable(ctx, true);
+    var first_state: State = .{};
+    var second_state: State = .{};
+    const first = ZJSInspectorSessionCreate(ctx, State.receive, &first_state) orelse return error.SessionCreateFailed;
+    const second = ZJSInspectorSessionCreate(ctx, State.receive, &second_state) orelse return error.SessionCreateFailed;
+    const enable = "{\"id\":1,\"method\":\"Debugger.enable\"}";
+    try std.testing.expect(ZJSInspectorSessionDispatch(first, enable, enable.len));
+    try std.testing.expect(ZJSInspectorSessionDispatch(second, enable, enable.len));
+    const source = JSStringCreateWithUTF8CString(
+        "eval(\"40 + 2;\\n//# sourceURL=multi-eval.js\");",
+    ) orelse return error.StringInitFailed;
+    defer JSStringRelease(source);
+    var exception: JSValueRef = null;
+    const result = JSEvaluateScript(ctx, source, null, null, 1, &exception) orelse return error.EvalFailed;
+    try std.testing.expectEqual(@as(f64, 42), JSValueToNumber(ctx, result, &exception));
+    try std.testing.expect(std.mem.indexOf(u8, first_state.bytes[0..first_state.len], "multi-eval.js") != null);
+    try std.testing.expect(std.mem.indexOf(u8, second_state.bytes[0..second_state.len], "multi-eval.js") != null);
+    try std.testing.expect(std.mem.indexOf(u8, first_state.bytes[0..first_state.len], "\"scriptId\":2") != null);
+    ZJSInspectorSessionRelease(first);
+    ZJSInspectorSessionRelease(second);
+
+    var reattached_state: State = .{};
+    const reattached = ZJSInspectorSessionCreate(ctx, State.receive, &reattached_state) orelse return error.SessionCreateFailed;
+    try std.testing.expect(ZJSInspectorSessionDispatch(reattached, enable, enable.len));
+    try std.testing.expect(std.mem.indexOf(u8, reattached_state.bytes[0..reattached_state.len], "multi-eval.js") != null);
+    try std.testing.expect(std.mem.indexOf(u8, reattached_state.bytes[0..reattached_state.len], "\"scriptId\":2") != null);
+    JSGlobalContextSetInspectable(ctx, false);
+    try std.testing.expect(std.mem.indexOf(u8, reattached_state.bytes[0..reattached_state.len], "Inspector.detached") != null);
+    try std.testing.expect(!ZJSInspectorSessionDispatch(reattached, enable, enable.len));
+    ZJSInspectorSessionRelease(reattached);
 }
 
 test "C-API: debugger registers generated function constructors" {

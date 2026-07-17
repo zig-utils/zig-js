@@ -227,7 +227,7 @@ contains 20 implemented commands and 8 events with no hidden accepted stubs.
 Every paused event now includes the live JavaScript call stack with stable
 pause-local frame IDs, function/source locations, `this`, and lexical, block,
 closure, and summarized global scope chains across tree-walker and suspendable
-VM execution. `Debugger.evaluateOnCallFrame` reads and mutates those live
+VM execution, plus warmed ordinary VM activations. `Debugger.evaluateOnCallFrame` reads and mutates those live
 lexical bindings while preserving the paused program's control/exception state.
 Session-owned remote values and scope handles support non-invoking own-property
 inspection plus explicit object/group release; values are protected across GC,

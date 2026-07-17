@@ -195,3 +195,8 @@ with deterministic GC-safe lifetime. Worker targets remain tracked by
 commands return -32601; there are no silently accepted debugger stubs.
 The remaining completion/teardown matrix for these origins is tracked by
 [issue #155](https://github.com/zig-utils/zig-js/issues/155).
+Context-owned history and dynamic registration are shared across sessions. Every
+enabled session receives the same scriptParsed identity; destroying the last
+session keeps that history, reattachment republishes it unchanged, and disabling
+inspectability detaches sessions without leaving the registration callback
+pointing at released protocol state.

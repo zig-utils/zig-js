@@ -233,21 +233,21 @@ static members and initialize/finalize lifetime callbacks.
 The zig-js extension header exposes `ZJSInspectorSessionCreate`,
 `ZJSInspectorSessionDispatch`, and `ZJSInspectorSessionRelease` for the
 versioned in-process JSON transport documented in [Inspector protocol](/inspector).
-Debugger-enabled C-API evaluations publish stable script IDs and exact adjusted
-statement locations. `debugger;` and explicit pause requests stop at those
+All successful C-API, eval, generated-function, and JavaScript-module parses
+publish stable script IDs and exact adjusted statement locations. `debugger;`
+and explicit pause requests stop at those
 boundaries; URL/script breakpoints resolve to the nearest following statement
 and may be removed deterministically. Step-into, step-over, and step-out use
 ordinary-function logical call depth. The synchronous callback must issue a
 continuation before returning. Exception policy distinguishes caught-origin
 pauses from throws that actually escape `JSEvaluateScript`. Suspendable
 generator/async VM chunks carry the same statement checkpoints across
-yield/await. While
-the debugger is enabled, execution is routed through the tree walker so the VM
-and baseline tier cannot bypass a pause point for scripts and ordinary
-synchronous functions; suspendable functions use instruction-indexed VM
-checkpoints and disable checkpoint-skipping quick paths. Paused events expose
-live call frames, function/source locations, `this`, and lexical through global
-scope chains. `Debugger.evaluateOnCallFrame` evaluates against a selected live
+yield/await. Debug-parsed ordinary functions use the tree walker; historical
+bytecode retains latent checkpoints, and attachment withholds native entry so a
+warmed function cannot bypass a pause. Ordinary VM frame slots are exposed as a
+live named scope and synchronized after debugger evaluation. Paused events
+expose live call frames, function/source locations, `this`, and lexical through
+global scope chains. `Debugger.evaluateOnCallFrame` evaluates against a selected live
 environment and may update its bindings before resume. Expandable remote-object
 handles expose own data/accessor descriptors without invoking getters. Handles
 are session-owned, group-releasable, protected across GC, and invalidated on

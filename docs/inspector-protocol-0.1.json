@@ -18,19 +18,19 @@
     { "method": "Debugger.stepOut", "status": "implemented", "evidence": "C-API: debugger stepping observes logical call depth" },
     { "method": "Debugger.evaluateOnCallFrame", "status": "implemented", "evidence": "C-API: paused frames expose scopes and live frame evaluation" },
     { "method": "Debugger.setPauseOnExceptions", "status": "implemented", "evidence": "C-API: debugger exception policy distinguishes caught and uncaught throws" },
-    { "method": "Debugger.getScriptSource", "status": "implemented", "evidence": "C-API: debugger publishes scripts and synchronously pauses at source locations" },
+    { "method": "Debugger.getScriptSource", "status": "implemented", "evidence": "C-API: debugger registers and pauses across a module graph" },
     { "method": "Debugger.setBreakpoint", "status": "implemented", "evidence": "C-API: debugger publishes scripts and synchronously pauses at source locations" },
-    { "method": "Debugger.setBreakpointByUrl", "status": "implemented", "evidence": "C-API: debugger publishes scripts and synchronously pauses at source locations" },
+    { "method": "Debugger.setBreakpointByUrl", "status": "implemented", "evidence": "C-API: debugger registers generated function constructors" },
     { "method": "Debugger.removeBreakpoint", "status": "implemented", "evidence": "C-API: debugger publishes scripts and synchronously pauses at source locations" }
   ],
   "events": [
     { "method": "Inspector.attached", "status": "implemented" },
     { "method": "Inspector.detached", "status": "implemented", "evidence": "C-API: inspector release is safe inside pause response and detach callbacks" },
     { "method": "Runtime.executionContextCreated", "status": "implemented" },
-    { "method": "Debugger.scriptParsed", "status": "implemented" },
-    { "method": "Debugger.breakpointResolved", "status": "implemented" },
+    { "method": "Debugger.scriptParsed", "status": "implemented", "evidence": "C-API: dynamic script history survives multi-session detach and reattach" },
+    { "method": "Debugger.breakpointResolved", "status": "implemented", "evidence": "C-API: debugger registers direct and indirect eval sources independently" },
     { "method": "Debugger.paused", "status": "implemented", "evidence": "C-API: concurrent inspector sessions have deterministic pause ownership" },
     { "method": "Debugger.resumed", "status": "implemented" },
-    { "method": "Debugger.exceptionThrown", "status": "implemented" }
+    { "method": "Debugger.exceptionThrown", "status": "implemented", "evidence": "C-API: debugger registers direct and indirect eval sources independently" }
   ]
 }
