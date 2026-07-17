@@ -59,6 +59,9 @@ int main(void)
     if (JSValueToInt32(context, JSValueMakeNumber(context, 4294967297.0), &exception) != 1 ||
         JSValueToUInt64(context, bigint, &exception) != UINT64_MAX)
         return 15;
+    if (JSValueCompareInt64(context, answer, 42, &exception) != kJSRelationConditionEqual ||
+        JSValueCompareDouble(context, answer, 41.5, &exception) != kJSRelationConditionGreaterThan)
+        return 16;
 
     const JSChar utf16[] = { 'z', 'i', 'g', 0xd83d, 0xde00 };
     JSStringRef wide = JSStringCreateWithCharacters(utf16, 5);

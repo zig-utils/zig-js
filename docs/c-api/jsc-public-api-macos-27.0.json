@@ -107,10 +107,10 @@
     {"name":"JSValueIsEqual","header":"JSValueRef.h","status":"implemented"},
     {"name":"JSValueIsStrictEqual","header":"JSValueRef.h","status":"implemented"},
     {"name":"JSValueIsInstanceOfConstructor","header":"JSValueRef.h","status":"pending","issue":150},
-    {"name":"JSValueCompare","header":"JSValueRef.h","status":"pending","issue":150},
-    {"name":"JSValueCompareInt64","header":"JSValueRef.h","status":"pending","issue":150},
-    {"name":"JSValueCompareUInt64","header":"JSValueRef.h","status":"pending","issue":150},
-    {"name":"JSValueCompareDouble","header":"JSValueRef.h","status":"pending","issue":150},
+    {"name":"JSValueCompare","header":"JSValueRef.h","status":"implemented"},
+    {"name":"JSValueCompareInt64","header":"JSValueRef.h","status":"implemented"},
+    {"name":"JSValueCompareUInt64","header":"JSValueRef.h","status":"implemented"},
+    {"name":"JSValueCompareDouble","header":"JSValueRef.h","status":"implemented"},
     {"name":"JSValueMakeUndefined","header":"JSValueRef.h","status":"implemented"},
     {"name":"JSValueMakeNull","header":"JSValueRef.h","status":"implemented"},
     {"name":"JSValueMakeBoolean","header":"JSValueRef.h","status":"implemented"},
@@ -154,7 +154,7 @@
   ],
   "enums": [
     {"name":"JSType","status":"implemented"}, {"name":"JSTypedArrayType","status":"implemented"},
-    {"name":"JSRelationCondition","status":"pending","issue":150}, {"name":"JSPropertyAttributes","status":"implemented"},
+    {"name":"JSRelationCondition","status":"implemented"}, {"name":"JSPropertyAttributes","status":"implemented"},
     {"name":"JSClassAttributes","status":"pending","issue":137}
   ],
   "data_symbols": [

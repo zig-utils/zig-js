@@ -30,6 +30,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const ast = @import("ast.zig");
 const gc_mod = @import("gc.zig");
 const value = @import("value.zig");
 const ContextMod = @import("context.zig");
@@ -92,6 +93,13 @@ pub const JSTypedArrayType = enum(c_uint) {
     bigint64_array = 11,
     biguint64_array = 12,
     _,
+};
+
+pub const JSRelationCondition = enum(c_uint) {
+    undefined = 0,
+    equal = 1,
+    greater_than = 2,
+    less_than = 3,
 };
 
 pub const kJSTypedArrayTypeInt8Array = JSTypedArrayType.int8_array;
@@ -625,6 +633,58 @@ export fn JSValueIsStrictEqual(ctx: JSContextRef, a: JSValueRef, b: JSValueRef) 
     return value.strictEquals(lhs, rhs);
 }
 
+export fn JSValueCompare(
+    ctx: JSContextRef,
+    left_ref: JSValueRef,
+    right_ref: JSValueRef,
+    exception: ExceptionRef,
+) callconv(.c) JSRelationCondition {
+    const c = ctxFrom(ctx) orelse return .undefined;
+    const left = valueArgFrom(c, left_ref, exception) orelse return .undefined;
+    const right = valueArgFrom(c, right_ref, exception) orelse return .undefined;
+    const gc_saved = gc_mod.setActiveHeap(c.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(c.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = c.interpreter();
+    c.pushActiveInterpreter(&machine) catch {
+        setException(c, exception, "OutOfMemory");
+        return .undefined;
+    };
+    defer c.popActiveInterpreter(&machine);
+    inline for (.{
+        .{ .op = ast.BinaryOp.eq, .condition = JSRelationCondition.equal },
+        .{ .op = ast.BinaryOp.lt, .condition = JSRelationCondition.less_than },
+        .{ .op = ast.BinaryOp.gt, .condition = JSRelationCondition.greater_than },
+    }) |comparison| {
+        const result = machine.applyBinary(comparison.op, left, right) catch |err| {
+            if (err == error.Throw) {
+                if (exception != null) exception[0] = box(c, machine.exception);
+            } else {
+                setException(c, exception, @errorName(err));
+            }
+            return .undefined;
+        };
+        if (result.toBoolean()) return comparison.condition;
+    }
+    return .undefined;
+}
+
+export fn JSValueCompareInt64(ctx: JSContextRef, left: JSValueRef, right: i64, exception: ExceptionRef) callconv(.c) JSRelationCondition {
+    const right_ref = JSBigIntCreateWithInt64(ctx, right, exception) orelse return .undefined;
+    return JSValueCompare(ctx, left, right_ref, exception);
+}
+
+export fn JSValueCompareUInt64(ctx: JSContextRef, left: JSValueRef, right: u64, exception: ExceptionRef) callconv(.c) JSRelationCondition {
+    const right_ref = JSBigIntCreateWithUInt64(ctx, right, exception) orelse return .undefined;
+    return JSValueCompare(ctx, left, right_ref, exception);
+}
+
+export fn JSValueCompareDouble(ctx: JSContextRef, left: JSValueRef, right: f64, exception: ExceptionRef) callconv(.c) JSRelationCondition {
+    const right_ref = JSValueMakeNumber(ctx, right) orelse return .undefined;
+    return JSValueCompare(ctx, left, right_ref, exception);
+}
+
 // ---- JSValue constructors ---------------------------------------------
 
 export fn JSValueMakeUndefined(ctx: JSContextRef) callconv(.c) JSValueRef {
@@ -808,7 +868,7 @@ export fn JSValueToNumber(ctx: JSContextRef, v: JSValueRef, exception: Exception
         return std.math.nan(f64);
     };
     defer c.popActiveInterpreter(&machine);
-    return machine.toNumberV(val) catch |err| {
+    return numberConstructorConversion(&machine, val) catch |err| {
         if (err == error.Throw) {
             if (exception != null) exception[0] = box(c, machine.exception);
         } else {
@@ -816,6 +876,15 @@ export fn JSValueToNumber(ctx: JSContextRef, v: JSValueRef, exception: Exception
         }
         return std.math.nan(f64);
     };
+}
+
+fn numberConstructorConversion(machine: *interp.Interpreter, input: Value) interp.EvalError!f64 {
+    var primitive = input;
+    if (primitive.isObject() and !primitive.asObj().is_bigint and !primitive.asObj().is_symbol)
+        primitive = try machine.toPrimitive(primitive, .number);
+    if (primitive.isObject() and primitive.asObj().is_symbol)
+        return machine.throwError("TypeError", "Cannot convert a Symbol value to a number");
+    return primitive.toNumber();
 }
 
 fn bigIntLow64(object: *Object) u64 {
@@ -2151,6 +2220,48 @@ test "C-API: integer conversions match JSC modulo and exception semantics" {
     const symbol = JSValueMakeSymbol(ctx, null) orelse return error.SymbolCreateFailed;
     exception = null;
     try std.testing.expectEqual(@as(i64, 0), JSValueToInt64(ctx, symbol, &exception));
+    try std.testing.expect(exception != null);
+}
+
+test "C-API: relation conditions and Number conversion match JSC" {
+    const ctx = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
+    defer JSGlobalContextRelease(ctx);
+    var exception: JSValueRef = null;
+    const one = JSValueMakeNumber(ctx, 1) orelse return error.ValueCreateFailed;
+    const two = JSValueMakeNumber(ctx, 2) orelse return error.ValueCreateFailed;
+    try std.testing.expectEqual(JSRelationCondition.less_than, JSValueCompare(ctx, one, two, &exception));
+    try std.testing.expectEqual(JSRelationCondition.greater_than, JSValueCompare(ctx, two, one, &exception));
+    try std.testing.expectEqual(JSRelationCondition.equal, JSValueCompare(ctx, one, one, &exception));
+    try std.testing.expectEqual(JSRelationCondition.undefined, JSValueCompare(ctx, JSValueMakeNumber(ctx, std.math.nan(f64)), one, &exception));
+    try std.testing.expect(exception == null);
+
+    const two_string = JSStringCreateWithUTF8CString("2") orelse return error.StringInitFailed;
+    defer JSStringRelease(two_string);
+    const string_two = JSValueMakeString(ctx, two_string) orelse return error.ValueCreateFailed;
+    try std.testing.expectEqual(JSRelationCondition.equal, JSValueCompare(ctx, string_two, two, &exception));
+    try std.testing.expectEqual(JSRelationCondition.greater_than, JSValueCompareInt64(ctx, JSValueMakeNumber(ctx, 1.5), 1, &exception));
+    try std.testing.expectEqual(JSRelationCondition.greater_than, JSValueCompareDouble(ctx, JSValueMakeNumber(ctx, std.math.inf(f64)), 0, &exception));
+
+    const huge_text = JSStringCreateWithUTF8CString("18446744073709551617") orelse return error.StringInitFailed;
+    defer JSStringRelease(huge_text);
+    const huge = JSBigIntCreateWithString(ctx, huge_text, &exception) orelse return error.BigIntCreateFailed;
+    try std.testing.expectEqual(JSRelationCondition.greater_than, JSValueCompareUInt64(ctx, huge, 1, &exception));
+    try std.testing.expectEqual(@as(f64, 18446744073709551616.0), JSValueToNumber(ctx, huge, &exception));
+
+    const boxed_source = JSStringCreateWithUTF8CString("Object(42n)") orelse return error.StringInitFailed;
+    defer JSStringRelease(boxed_source);
+    const boxed = JSEvaluateScript(ctx, boxed_source, null, null, 1, &exception) orelse return error.EvalFailed;
+    try std.testing.expectEqual(@as(f64, 42), JSValueToNumber(ctx, boxed, &exception));
+
+    const same_object_source = JSStringCreateWithUTF8CString("({ valueOf() { return NaN; } })") orelse return error.StringInitFailed;
+    defer JSStringRelease(same_object_source);
+    const same_object = JSEvaluateScript(ctx, same_object_source, null, null, 1, &exception) orelse return error.EvalFailed;
+    try std.testing.expectEqual(JSRelationCondition.equal, JSValueCompare(ctx, same_object, same_object, &exception));
+    try std.testing.expectEqual(JSRelationCondition.undefined, JSValueCompare(ctx, same_object, one, &exception));
+
+    const symbol = JSValueMakeSymbol(ctx, null) orelse return error.SymbolCreateFailed;
+    exception = null;
+    try std.testing.expectEqual(JSRelationCondition.undefined, JSValueCompareInt64(ctx, symbol, 0, &exception));
     try std.testing.expect(exception != null);
 }
 
