@@ -13,6 +13,7 @@
     { "method": "Debugger.stepInto", "status": "implemented", "evidence": "C-API: debugger stepping observes logical call depth" },
     { "method": "Debugger.stepOver", "status": "implemented", "evidence": "C-API: debugger stepping observes logical call depth" },
     { "method": "Debugger.stepOut", "status": "implemented", "evidence": "C-API: debugger stepping observes logical call depth" },
+    { "method": "Debugger.evaluateOnCallFrame", "status": "implemented", "evidence": "C-API: paused frames expose scopes and live frame evaluation" },
     { "method": "Debugger.setPauseOnExceptions", "status": "implemented", "evidence": "C-API: debugger exception policy distinguishes caught and uncaught throws" },
     { "method": "Debugger.getScriptSource", "status": "implemented", "evidence": "C-API: debugger publishes scripts and synchronously pauses at source locations" },
     { "method": "Debugger.setBreakpoint", "status": "implemented", "evidence": "C-API: debugger publishes scripts and synchronously pauses at source locations" },
@@ -25,7 +26,7 @@
     { "method": "Runtime.executionContextCreated", "status": "implemented" },
     { "method": "Debugger.scriptParsed", "status": "implemented" },
     { "method": "Debugger.breakpointResolved", "status": "implemented" },
-    { "method": "Debugger.paused", "status": "implemented", "evidence": "C-API: paused events publish live call frames and lexical scopes" },
+    { "method": "Debugger.paused", "status": "implemented", "evidence": "C-API: paused frames expose scopes and live frame evaluation" },
     { "method": "Debugger.resumed", "status": "implemented" },
     { "method": "Debugger.exceptionThrown", "status": "implemented" }
   ]

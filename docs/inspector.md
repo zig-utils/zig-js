@@ -41,12 +41,13 @@ while claiming to be paused.
 - Runtime.enable, Runtime.disable, and Runtime.evaluate
 - Debugger.enable, Debugger.disable, Debugger.pause, Debugger.resume,
   Debugger.stepInto, Debugger.stepOver, Debugger.stepOut,
+  Debugger.evaluateOnCallFrame,
   Debugger.setPauseOnExceptions,
   Debugger.getScriptSource, Debugger.setBreakpoint,
   Debugger.setBreakpointByUrl, and Debugger.removeBreakpoint
 - Inspector.attached, Inspector.detached, Runtime.executionContextCreated,
   Debugger.scriptParsed, Debugger.breakpointResolved, Debugger.paused, and
-  Debugger.resumed events
+  Debugger.resumed, and Debugger.exceptionThrown events
 
 Every evaluated C-API script receives a monotonically increasing unsigned
 integer scriptId. Debugger.scriptParsed publishes its URL, zero-based starting
@@ -87,6 +88,14 @@ generator/async VM frames use the same representation. These frames reference
 the actual activation environments, and the collector traces every paused
 caller environment and `this` value until execution continues.
 
+Debugger.evaluateOnCallFrame accepts a callFrameId from the current pause and
+an expression. It evaluates synchronously against that frame's real lexical
+environment, `this`, and strictness, so assignments are visible when execution
+resumes. Debugger-authored evaluation cannot recursively pause; the runtime
+restores the suspended program's control state and any pre-existing exception
+after returning a structured result or exceptionDetails response. Frame IDs
+expire as soon as the pause resumes.
+
 setPauseOnExceptions accepts none, uncaught, or all. all pauses at the original
 throwing statement even when a surrounding catch handles the value; uncaught
 pauses only after propagation reaches the C-API evaluation boundary. Origin
@@ -105,7 +114,7 @@ exceptionDetails object. Malformed requests receive deterministic protocol
 errors.
 
 The machine-readable [0.1 command/event inventory](inspector-protocol-0.1.json)
-names all 16 commands and 8 events with transcript evidence. Every listed
+names all 17 commands and 8 events with transcript evidence. Every listed
 command is implemented; an unlisted method receives -32601 and is never silently
 accepted.
 
@@ -114,7 +123,7 @@ accepted.
 Version 0.1 establishes real attachment, lifecycle, concurrent sessions, live
 runtime evaluation, stable scripts, statement-boundary pause/resume,
 breakpoints, ordinary-call stepping, exception-pause policy, live call frames,
-and lexical/global scope chains. Evaluate-on-frame, expandable remote objects,
+lexical/global scope chains, and frame evaluation. Expandable remote objects
 and worker targets remain tracked by
 [issue #154](https://github.com/zig-utils/zig-js/issues/154). Unsupported
 commands return -32601; there are no silently accepted debugger stubs.

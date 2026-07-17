@@ -244,6 +244,7 @@ pub const Generator = struct {
     backing_lock: std.atomic.Mutex = .unlocked,
     chunk: *Chunk,
     function_name: []const u8 = "",
+    strict: bool = false,
     exec: Exec = .{},
     env: *Environment,
     this_value: Value = Value.undef(),
@@ -3702,6 +3703,7 @@ fn execLoop(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 .function_name = activation.function_name,
                 .environment = activation.env,
                 .this_value = activation.this_value,
+                .strict = activation.strict,
                 .caller = saved_debug_call_frame,
             };
             vm.debug_call_frame = &debug_call_frame;
@@ -4958,6 +4960,7 @@ pub fn makeGenerator(vm: *Interpreter, func: *Function, args: []const Value, thi
     g.* = .{
         .chunk = chunk,
         .function_name = func.name,
+        .strict = func.is_strict,
         .env = lexical_env,
         .this_value = bound_this,
         .home_object = func.home_object,
@@ -5258,6 +5261,7 @@ pub fn runAsync(vm: *Interpreter, func: *Function, args: []const Value, this_val
     g.* = .{
         .chunk = chunk,
         .function_name = func.name,
+        .strict = func.is_strict,
         .env = lexical_env,
         .this_value = bound_this,
         .home_object = func.home_object,

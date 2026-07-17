@@ -396,6 +396,7 @@ pub const DebugCallFrame = struct {
     function_name: []const u8,
     environment: *Environment,
     this_value: Value,
+    strict: bool,
     location: ?DebugStatementLocation = null,
     caller: ?*DebugCallFrame = null,
 };
@@ -997,6 +998,7 @@ pub const Interpreter = struct {
     debug_call_frame: ?*DebugCallFrame = null,
     debug_top_level_location: ?DebugStatementLocation = null,
     debug_top_level_environment: ?*Environment = null,
+    debug_top_level_strict: bool = false,
     debug_exception_origin_notified: bool = false,
     /// The Context-owned microtask queue (Promise reactions). Drained after the
     /// main script in `Context.evaluate` and inline by `await`.
@@ -3215,11 +3217,54 @@ pub const Interpreter = struct {
                     } else {
                         self.debug_top_level_location = location;
                         self.debug_top_level_environment = self.env;
+                        self.debug_top_level_strict = self.strict;
                     }
                     try hook(self.debug_statement_ctx.?, self, location);
                 }
             }
         }
+    }
+
+    /// Evaluate debugger-authored source in a paused frame's live lexical
+    /// environment. The caller preserves/restores the pending exception because
+    /// exception pauses may already have one; this helper isolates evaluator
+    /// control state and suppresses recursive debugger stops while the command
+    /// itself runs.
+    pub fn evaluateForDebugger(self: *Interpreter, source: []const u8, environment: *Environment, this_value: Value, strict: bool) EvalError!Value {
+        var lex_diagnostic: ?parser_mod.SourceLocation = null;
+        var parser = Parser.initWithDiagnostic(self.arena, source, &lex_diagnostic) catch |err|
+            return self.throwParserSyntaxErrorAt("debugger evaluation", lex_diagnostic orelse parser_mod.sourceLocationAt(source, 0), err);
+        parser.strict = strict;
+        const program = parser.parseProgram() catch |err| return self.throwParserSyntaxError("debugger evaluation", source, &parser, err);
+
+        const saved_env = self.env;
+        const saved_this = self.this_value;
+        const saved_strict = self.strict;
+        const saved_signal = self.signal;
+        const saved_signal_label = self.signal_label;
+        const saved_ret = self.ret_value;
+        const saved_statement_hook = self.debug_statement_hook;
+        const saved_exception_hook = self.debug_exception_hook;
+        self.env = environment;
+        self.this_value = this_value;
+        self.strict = strict;
+        self.signal = .none;
+        self.signal_label = null;
+        self.ret_value = Value.undef();
+        self.debug_statement_hook = null;
+        self.debug_exception_hook = null;
+        defer {
+            self.env = saved_env;
+            self.this_value = saved_this;
+            self.strict = saved_strict;
+            self.signal = saved_signal;
+            self.signal_label = saved_signal_label;
+            self.ret_value = saved_ret;
+            self.debug_statement_hook = saved_statement_hook;
+            self.debug_exception_hook = saved_exception_hook;
+        }
+        if (program.* == .program) try self.hoistVarNames(program.program);
+        return self.eval(program);
     }
 
     /// `for-of` (values of arrays/strings) and `for-in` (own keys of objects /
@@ -5905,6 +5950,7 @@ pub const Interpreter = struct {
             .function_name = func.name,
             .environment = call_env,
             .this_value = this_val,
+            .strict = func.is_strict,
             .caller = saved_debug_call_frame,
         };
         if (self.debug_statement_hook != null) self.debug_call_frame = &debug_call_frame;

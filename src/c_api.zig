@@ -121,6 +121,7 @@ const CInspectorState = struct {
     step_depth: u32 = 0,
     paused_depth: u32 = 0,
     paused_at_uncaught_boundary: bool = false,
+    paused_machine: ?*interp.Interpreter = null,
     exception_mode: CInspectorExceptionMode = .none,
     next_exception_id: u64 = 1,
 };
@@ -1487,6 +1488,7 @@ fn refreshInspectorDebuggerHook(state: *CInspectorState) void {
         context.debug_exception_hook = null;
         state.pause_requested = false;
         state.paused = false;
+        state.paused_machine = null;
         state.paused_at_uncaught_boundary = false;
         state.step_mode = .none;
     }
@@ -1681,6 +1683,31 @@ fn inspectorCallFrames(arena: std.mem.Allocator, machine: *interp.Interpreter, c
     return frames.items;
 }
 
+const InspectorEvaluationFrame = struct {
+    environment: *interp.Environment,
+    this_value: Value,
+    strict: bool,
+};
+
+fn inspectorEvaluationFrame(machine: *interp.Interpreter, requested_id: u64) ?InspectorEvaluationFrame {
+    var frame_id: u64 = 0;
+    var current = machine.debug_call_frame;
+    while (current) |frame| : (current = frame.caller) {
+        if (frame_id == requested_id) return .{
+            .environment = frame.environment,
+            .this_value = frame.this_value,
+            .strict = frame.strict,
+        };
+        frame_id += 1;
+    }
+    if (frame_id != requested_id) return null;
+    return .{
+        .environment = machine.debug_top_level_environment orelse machine.env,
+        .this_value = if (machine.global_object) |global| Value.obj(global) else machine.this_value,
+        .strict = machine.debug_top_level_strict,
+    };
+}
+
 fn beginInspectorScript(
     state: *CInspectorState,
     source: []const u8,
@@ -1737,6 +1764,7 @@ fn inspectorStatementBoundary(
     state.paused = true;
     state.paused_depth = machine.depth;
     state.paused_at_uncaught_boundary = false;
+    state.paused_machine = machine;
     var pause_arena = std.heap.ArenaAllocator.init(gpa);
     defer pause_arena.deinit();
     const call_frames = try inspectorCallFrames(pause_arena.allocator(), machine, location);
@@ -1762,6 +1790,7 @@ fn inspectorStatementBoundary(
     // paused would silently violate the protocol, so abort deterministically.
     if (state.paused) {
         state.paused = false;
+        state.paused_machine = null;
         machine.exception = try machine.makeError("Error", "debugger pause requires a synchronous resume command");
         return error.Throw;
     }
@@ -1773,6 +1802,7 @@ fn continueInspectorExecution(session: *CInspectorSession, id: i64, mode: CInspe
     if (state.paused_at_uncaught_boundary and mode != .none) return sendInspectorError(session, id, -32000, "cannot step after an uncaught exception left the runtime");
     if (mode == .out and state.paused_depth == 0) return sendInspectorError(session, id, -32000, "cannot step out of top-level execution");
     state.paused = false;
+    state.paused_machine = null;
     state.step_mode = mode;
     state.step_depth = state.paused_depth;
     state.paused_at_uncaught_boundary = false;
@@ -1824,6 +1854,7 @@ fn inspectorExceptionBoundary(
     state.paused = true;
     state.paused_depth = machine.depth;
     state.paused_at_uncaught_boundary = uncaught;
+    state.paused_machine = machine;
     state.pause_requested = false;
     state.step_mode = .none;
     var pause_arena = std.heap.ArenaAllocator.init(gpa);
@@ -1857,6 +1888,7 @@ fn inspectorExceptionBoundary(
     }
     if (state.paused) {
         state.paused = false;
+        state.paused_machine = null;
         state.paused_at_uncaught_boundary = false;
         machine.exception = try machine.makeError("Error", "debugger exception pause requires a synchronous resume command");
         return error.Throw;
@@ -2095,6 +2127,41 @@ export fn ZJSInspectorSessionDispatch(
     }
     if (std.mem.eql(u8, method, "Debugger.stepOut")) {
         return continueInspectorExecution(session, id, .out);
+    }
+    if (std.mem.eql(u8, method, "Debugger.evaluateOnCallFrame")) {
+        if (!session.debugger_enabled) return sendInspectorError(session, id, -32000, "Debugger domain is not enabled");
+        if (!session.state.paused) return sendInspectorError(session, id, -32000, "runtime is not paused");
+        const machine = session.state.paused_machine orelse return sendInspectorError(session, id, -32000, "paused execution has no live interpreter");
+        const params_value = request.get("params") orelse return sendInspectorError(session, id, -32602, "params are required");
+        if (params_value != .object) return sendInspectorError(session, id, -32602, "params must be an object");
+        const params = params_value.object;
+        const frame_id_value = params.get("callFrameId") orelse return sendInspectorError(session, id, -32602, "callFrameId is required");
+        const frame_id: u64 = switch (frame_id_value) {
+            .integer => |integer| if (integer >= 0) @intCast(integer) else return sendInspectorError(session, id, -32602, "callFrameId must be non-negative"),
+            else => return sendInspectorError(session, id, -32602, "callFrameId must be an integer"),
+        };
+        const expression_value = params.get("expression") orelse return sendInspectorError(session, id, -32602, "expression is required");
+        const expression = switch (expression_value) {
+            .string => |string| string,
+            else => return sendInspectorError(session, id, -32602, "expression must be a string"),
+        };
+        const frame = inspectorEvaluationFrame(machine, frame_id) orelse return sendInspectorError(session, id, -32000, "unknown callFrameId for this pause");
+        const saved_exception = machine.exception;
+        machine.exception = Value.undef();
+        const outcome = machine.evaluateForDebugger(expression, frame.environment, frame.this_value, frame.strict);
+        if (outcome) |result| {
+            const result_ref = box(session.state.context, result);
+            machine.exception = saved_exception;
+            return sendInspectorRemoteObject(session, id, result_ref, null);
+        } else |err| {
+            if (err != error.Throw) {
+                machine.exception = saved_exception;
+                return sendInspectorError(session, id, -32000, @errorName(err));
+            }
+            const exception_ref = box(session.state.context, machine.exception);
+            machine.exception = saved_exception;
+            return sendInspectorRemoteObject(session, id, null, exception_ref);
+        }
     }
     if (std.mem.eql(u8, method, "Debugger.setPauseOnExceptions")) {
         if (!session.debugger_enabled) return sendInspectorError(session, id, -32000, "Debugger domain is not enabled");
@@ -4500,7 +4567,7 @@ test "C-API: inspector protocol inventory has no hidden commands" {
     try std.testing.expect(!unsupported.get("silentAcceptance").?.bool);
     const commands = root.get("commands").?.array.items;
     const events = root.get("events").?.array.items;
-    try std.testing.expectEqual(@as(usize, 16), commands.len);
+    try std.testing.expectEqual(@as(usize, 17), commands.len);
     try std.testing.expectEqual(@as(usize, 8), events.len);
     var methods: std.StringHashMapUnmanaged(void) = .empty;
     defer methods.deinit(std.testing.allocator);
@@ -4667,7 +4734,7 @@ test "C-API: debugger publishes scripts and synchronously pauses at source locat
     try std.testing.expect(std.mem.indexOf(u8, transcript, "\"hitBreakpoints\":[2]") != null);
 }
 
-test "C-API: paused events publish live call frames and lexical scopes" {
+test "C-API: paused frames expose scopes and live frame evaluation" {
     const State = struct {
         session: ZJSInspectorSessionRef = null,
         bytes: [65536]u8 = undefined,
@@ -4681,6 +4748,18 @@ test "C-API: paused events publish live call frames and lexical scopes" {
             self.bytes[self.len] = '\n';
             self.len += 1;
             if (std.mem.indexOf(u8, message[0..message_len], "Debugger.paused") == null) return;
+            const evaluate_inner =
+                "{\"id\":91,\"method\":\"Debugger.evaluateOnCallFrame\",\"params\":{\"callFrameId\":0,\"expression\":\"innerLocal = 8; innerLocal + outerLocal\"}}";
+            const evaluate_outer =
+                "{\"id\":92,\"method\":\"Debugger.evaluateOnCallFrame\",\"params\":{\"callFrameId\":1,\"expression\":\"outerLocal\"}}";
+            const invalid_frame =
+                "{\"id\":93,\"method\":\"Debugger.evaluateOnCallFrame\",\"params\":{\"callFrameId\":99,\"expression\":\"1\"}}";
+            const throwing_evaluation =
+                "{\"id\":94,\"method\":\"Debugger.evaluateOnCallFrame\",\"params\":{\"callFrameId\":0,\"expression\":\"throw \'debug-eval\';\"}}";
+            std.debug.assert(ZJSInspectorSessionDispatch(self.session, evaluate_inner, evaluate_inner.len));
+            std.debug.assert(ZJSInspectorSessionDispatch(self.session, evaluate_outer, evaluate_outer.len));
+            std.debug.assert(ZJSInspectorSessionDispatch(self.session, invalid_frame, invalid_frame.len));
+            std.debug.assert(ZJSInspectorSessionDispatch(self.session, throwing_evaluation, throwing_evaluation.len));
             const resume_request = "{\"id\":90,\"method\":\"Debugger.resume\"}";
             std.debug.assert(ZJSInspectorSessionDispatch(self.session, resume_request, resume_request.len));
         }
@@ -4703,7 +4782,10 @@ test "C-API: paused events publish live call frames and lexical scopes" {
     defer JSStringRelease(url);
     var exception: JSValueRef = null;
     const result = JSEvaluateScript(ctx, source, null, url, 1, &exception) orelse return error.EvalFailed;
-    try std.testing.expectEqual(@as(f64, 10), JSValueToNumber(ctx, result, &exception));
+    try std.testing.expectEqual(@as(f64, 13), JSValueToNumber(ctx, result, &exception));
+    const expired_frame =
+        "{\"id\":95,\"method\":\"Debugger.evaluateOnCallFrame\",\"params\":{\"callFrameId\":0,\"expression\":\"1\"}}";
+    try std.testing.expect(ZJSInspectorSessionDispatch(state.session, expired_frame, expired_frame.len));
 
     const transcript = state.bytes[0..state.len];
     try std.testing.expect(std.mem.indexOf(u8, transcript, "\"callFrames\"") != null);
@@ -4714,6 +4796,14 @@ test "C-API: paused events publish live call frames and lexical scopes" {
     try std.testing.expect(std.mem.indexOf(u8, transcript, "\"name\":\"innerLocal\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, transcript, "\"name\":\"outerLocal\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, transcript, "\"type\":\"global\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "\"id\":91") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "\"value\":13") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "\"id\":92") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "\"value\":5") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "unknown callFrameId for this pause") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "debug-eval") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "exceptionDetails") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "runtime is not paused") != null);
 }
 
 test "C-API: debugger stepping observes logical call depth" {
