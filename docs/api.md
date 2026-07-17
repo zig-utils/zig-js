@@ -26,10 +26,10 @@ compile-link-runtime fixture. It remains deliberately separate from private
 Home/Bun ABI work.
 
 Private-profile exports are audited independently and never inflate the public
-or extension totals. The pinned Home inventory currently reports fifty-five private
-exports and 377 pending private symbols; `zig build test-home-private-abi` and
+or extension totals. The pinned Home inventory currently reports fifty-nine private
+exports and 373 pending private symbols; `zig build test-home-private-abi` and
 `zig build test-private-jstype` are their focused compile-link-runtime gates.
-The fifty-five cover JSC64 identity, cell equality,
+The fifty-nine cover JSC64 identity, cell equality,
 truthiness, int32 extraction, exact signed/unsigned 64-bit BigInt construction,
 modulo-2^64 BigInt extraction with the pinned int32/Int52 fallbacks, and exact
 JavaScript strict/SameValue equality across primitives and owned cells, plus
@@ -45,6 +45,12 @@ prototypes, and reject nullish or foreign inputs.
 The numeric DateInstance pair creates fresh selected-realm Date cells without
 TimeClip and reads their raw internal doubles, including `-0`, NaN, infinities,
 and values outside the JavaScript Date-constructor range.
+Four Date parsing/ISO exports create fresh Date cells from NUL-terminated input,
+extract same-VM UTC epoch milliseconds, and write exact ordinary or extended
+UTC ISO text failure-atomically into 28-byte buffers. The Date-now writer shares
+the real Unix wall clock with `Date.now()`, `Date()`, and `new Date()`; its ABI
+follows Bun's executable wrapper/C++ contract because the pinned Zig declaration
+has an incompatible stale signature.
 The VM exception slice supplies one pending exception per shared context group,
 stable exception-cell identity, exact primitive/Error unwrapping, and
 has/clear/take/rethrow classification. The array/index slice supplies exact
@@ -71,7 +77,7 @@ constructability and immutable error metadata, not mutable names or prototypes.
 Sibling C-API realms share well-known Symbols and the Symbol registry.
 
 Bun's separately pinned core `src/jsc` inventory reports 422 private symbols,
-of which the same fifty-five shims are implemented and 367 remain pending. Its
+of which the same fifty-nine shims are implemented and 363 remain pending. Its
 source/signature audit is `zig build bun-private-abi-audit`; broader Bun runtime
 and generated bindings are outside that first core profile. Bun JSType numbering
 is selected with `-Dprivate-abi-consumer=bun` and verified by
