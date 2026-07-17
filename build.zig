@@ -75,9 +75,20 @@ pub fn build(b: *std.Build) void {
     const run_c_api_cpp_smoke = b.addRunArtifact(c_api_cpp_smoke);
     run_c_api_cpp_smoke.step.dependOn(&c_api_audit_cmd.step);
 
+    const c_api_inspector_smoke = b.addExecutable(.{
+        .name = "c-api-inspector-smoke",
+        .root_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true }),
+    });
+    c_api_inspector_smoke.root_module.addCSourceFile(.{ .file = b.path("tests/c_api_inspector_smoke.c") });
+    c_api_inspector_smoke.root_module.addIncludePath(b.path("include"));
+    c_api_inspector_smoke.root_module.linkLibrary(lib);
+    const run_c_api_inspector_smoke = b.addRunArtifact(c_api_inspector_smoke);
+    run_c_api_inspector_smoke.step.dependOn(&c_api_audit_cmd.step);
+
     const c_api_test_step = b.step("test-c-api", "Compile, link, and run C and C++ public-ABI hosts");
     c_api_test_step.dependOn(&run_c_api_c_smoke.step);
     c_api_test_step.dependOn(&run_c_api_cpp_smoke.step);
+    c_api_test_step.dependOn(&run_c_api_inspector_smoke.step);
 
     const c_api_value_diff = b.addExecutable(.{
         .name = "c-api-value-diff-zig-js",

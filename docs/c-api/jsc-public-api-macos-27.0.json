@@ -31,8 +31,8 @@
     {"name":"JSContextGetGlobalContext","header":"JSContextRef.h","status":"implemented"},
     {"name":"JSGlobalContextCopyName","header":"JSContextRef.h","status":"implemented"},
     {"name":"JSGlobalContextSetName","header":"JSContextRef.h","status":"implemented"},
-    {"name":"JSGlobalContextIsInspectable","header":"JSContextRef.h","status":"pending","issue":139},
-    {"name":"JSGlobalContextSetInspectable","header":"JSContextRef.h","status":"pending","issue":139},
+    {"name":"JSGlobalContextIsInspectable","header":"JSContextRef.h","status":"implemented"},
+    {"name":"JSGlobalContextSetInspectable","header":"JSContextRef.h","status":"implemented"},
     {"name":"JSClassCreate","header":"JSObjectRef.h","status":"implemented"},
     {"name":"JSClassRetain","header":"JSObjectRef.h","status":"implemented"},
     {"name":"JSClassRelease","header":"JSObjectRef.h","status":"implemented"},
@@ -162,6 +162,7 @@
   ],
   "zig_js_extensions": [
     "ZJSGlobalContextCreateThreaded", "ZJSValueProtect", "ZJSValueUnprotect",
+    "ZJSInspectorSessionCreate", "ZJSInspectorSessionDispatch", "ZJSInspectorSessionRelease",
     "JSWorkerCreate", "JSWorkerCreateWithLimits",
     "JSWorkerPostMessage", "JSWorkerReceive", "JSWorkerTerminate", "JSWorkerRelease"
   ]

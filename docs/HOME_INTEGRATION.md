@@ -66,10 +66,11 @@ tests):
    construction; the `JSValueRef* exception` out-parameter convention on every
    call/get/set. Home's invariant: a host call returns the empty value **iff**
    an exception is pending (see Home's `host_fn.zig` / `assertExceptionPresenceMatches`).
-3. **Remaining public inspector controls** — checked-in macOS 27.0 headers,
-   inventory verification, C/C++ hosts, the JSC differential gate, and real
-   shared-VM context groups are in place. All public object/property/name and
-   context-group APIs are complete; inspectability remains tracked in #139.
+3. **Inspector integration** — the complete public C inventory, inspectability
+   toggles, versioned in-process protocol transport, C/C++ hosts, the JSC
+   differential gate, and real shared-VM context groups are in place. Runtime
+   evaluation is usable today; pause/breakpoint/stepping/stack/scope work remains
+   tracked in #139 before Home debugger integration is complete.
 4. **Prototype & structure control** — `JSObjectGetPrototype`/`SetPrototype`
    and richer private/internal slot modeling. `JSObjectGetPrivate` /
    `JSObjectSetPrivate` now cover host-owned opaque pointers, but Home also

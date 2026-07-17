@@ -86,5 +86,14 @@ int main(void)
     JSStringRelease(value_name);
     JSGlobalContextRelease(custom);
     printf("global-class %d %.0f %d\n", initialized, number, finalized);
+
+    JSGlobalContextRef inspectable_context = JSGlobalContextCreate(NULL);
+    int inspectable_default = JSGlobalContextIsInspectable(inspectable_context);
+    JSGlobalContextSetInspectable(inspectable_context, true);
+    int inspectable_enabled = JSGlobalContextIsInspectable(inspectable_context);
+    JSGlobalContextSetInspectable(inspectable_context, false);
+    printf("inspectability %d %d %d\n", inspectable_default,
+        inspectable_enabled, JSGlobalContextIsInspectable(inspectable_context));
+    JSGlobalContextRelease(inspectable_context);
     return exception ? 2 : 0;
 }

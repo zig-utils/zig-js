@@ -189,35 +189,36 @@ JSValueRef result = JSEvaluateScript(ctx, script, NULL, NULL, 0, NULL);
 double n = JSValueToNumber(ctx, result, NULL); // 2.0
 ```
 
-The current exported C surface has 124 functions:
+The current exported C surface has 129 functions:
 
-- **Context lifecycle** - real shared-VM context groups with distinct realms and cross-realm values, global classes, create/retain/release, global object/context lookup, owned context names, syntax-only checking, evaluation, collection, and the threaded-context extension.
+- **Context lifecycle** - real shared-VM context groups with distinct realms and cross-realm values, global classes, inspectability with versioned in-process inspector sessions, create/retain/release, global object/context lookup, owned context names, syntax-only checking, evaluation, collection, and the threaded-context extension.
 - **Values** - type and Symbol/BigInt predicates, equality/relations/`instanceof`, public-class identity, primitive/fresh-Symbol/exact-BigInt construction, JSON parse/stringify, exact 32/64-bit conversions, coercions, and protected handles.
 - **Objects and classes** - complete `JSClassRef` ownership and inheritance, parent-first initialization/child-first finalization, GC-rooted shared prototypes, static functions and values, deterministic enumeration, every dynamic callback family, retained property-name snapshots, `JSObjectMake`, and `JSObjectMakeConstructor`. Foreign-context and invalid callback returns fail deterministically. Private data, prototype get/set, string/Symbol/coerced-key property operations, indexed reads/writes, real Date/Error/RegExp/dynamic-Function/Array/deferred-Promise construction, and function call/construct helpers are also implemented.
 - **Typed arrays and buffers** - `JSValueGetTypedArrayType`, the four public `JSObjectMakeTypedArray*` construction paths, typed-array type/bytes/length/offset/buffer queries, and no-copy `ArrayBuffer` construction/bytes/length with exactly-once embedder deallocation.
 - **Strings** - UTF-8 and UTF-16 construction, retain/release, UTF-16 length and stable borrowed characters, maximum UTF-8 sizing and conversion, and code-unit/UTF-8 equality.
-- **Worker extension** - `JSWorkerCreate`, resource-bounded `JSWorkerCreateWithLimits`, `JSWorkerPostMessage`, `JSWorkerReceive`, `JSWorkerTerminate`, `JSWorkerRelease`.
+- **Extensions** - resource-bounded `JSWorker*`, observable `ZJSValueProtect`/`ZJSValueUnprotect`, threaded contexts, and authenticated-transport-neutral `ZJSInspectorSession*`.
 
-`ZJSGlobalContextCreateThreaded`, `ZJSValueProtect`/`ZJSValueUnprotect`, and
-`JSWorker*` are zig-js extensions, not public JSC symbols. The `ZJSValue*`
+`ZJSGlobalContextCreateThreaded`, `ZJSValueProtect`/`ZJSValueUnprotect`,
+`ZJSInspectorSession*`, and `JSWorker*` are zig-js extensions, not public JSC symbols. The `ZJSValue*`
 variants report invalid handles, refcount overflow, and unmatched unprotects;
 the public JSC-compatible calls correctly return `void`. `JSObjectMakeDeferredPromise` returns a pending native Promise plus paired resolving functions; callers observe settlement at the next microtask checkpoint (for example, after `JSEvaluateScript` returns).
 
 The [macOS 27.0 public API inventory](docs/c-api/jsc-public-api-macos-27.0.json)
 tracks all 117 pinned C functions and links every unfinished declaration to its
-implementation issue. The current audit is **115 implemented / 2 pending**, with
-**115 public functions + 9 zig-js extensions** exported. `zig build c-api-audit` checks declaration/export drift;
+implementation issue. The current audit is **117 implemented / 0 pending**, with
+**117 public functions + 12 zig-js extensions** exported. `zig build c-api-audit` checks declaration/export drift;
 `zig build test-c-api` additionally compiles, links, and runs real C and C++ hosts.
 On macOS, `zig build c-api-jsc-diff` verifies the pinned SDK hashes, compiles the
 same value/class and context-group fixtures against zig-js and system JavaScriptCore,
-and requires byte-for-byte identical results. The current fixtures match all **33 rows**
-(`9d5d5c191aa34063`), including shared-VM realm identity/lifetime, global classes,
+and requires byte-for-byte identical results. The current fixtures match all **34 rows**
+(`a8ecd5e83f9f35ca`), including inspectability toggles, shared-VM realm identity/lifetime, global classes,
 every class callback family, inherited call and
 conversion behavior, ordinary and callback-backed constructors, property-name
 snapshots, coerced and Symbol keys, fallback behavior, reflection, attributes,
 and callback throws.
-Declarations marked `pending` are present for source compatibility but are not
-safe to call until their linked issue is complete.
+The pinned public C inventory has no pending declarations. Full pause,
+breakpoint, stepping, stack, and scope support in the zig-js inspector protocol
+continues under #139; see [docs/inspector.md](docs/inspector.md).
 
 See [docs/api.md](docs/api.md) and [docs/HOME_INTEGRATION.md](docs/HOME_INTEGRATION.md) for the fuller embedding story and the important warning that zig-js is not a drop-in replacement for Bun/Home's private JSC internals.
 

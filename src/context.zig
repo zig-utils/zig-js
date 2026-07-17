@@ -2245,6 +2245,11 @@ pub const Context = struct {
     /// Opaque owner installed by the C API for grouped contexts. Kept opaque so
     /// the engine core does not depend on the public ABI wrapper type.
     c_api_group: ?*anyopaque = null,
+    /// Public inspectability is opt-in. The opaque session list is owned by the
+    /// C API; each live session retains this Context, so it is necessarily null
+    /// before engine teardown.
+    c_api_inspectable: bool = false,
+    c_api_inspector_state: ?*anyopaque = null,
     /// Embedder metadata set through JSGlobalContextSetName. Store exact UTF-16
     /// code units in the arena; the C boundary returns a fresh JSStringRef copy.
     c_api_name_utf16: ?[]const u16 = null,
@@ -3016,6 +3021,7 @@ pub const Context = struct {
     }
 
     pub fn destroy(self: *Context) void {
+        std.debug.assert(self.c_api_inspector_state == null);
         const host_gpa = self.host_gpa;
         const context_gpa = self.gpa;
         const budget_allocator = self.budget_allocator;
@@ -3120,6 +3126,7 @@ pub const Context = struct {
         self.assertOwnerThread();
         std.debug.assert(self.gc == null and self.locked_arena == null and self.gil == null);
         std.debug.assert(self.shared_jit_owner != null);
+        std.debug.assert(self.c_api_inspector_state == null);
         self.js_threads.deinit(self.gpa);
         self.active_interpreters.deinit(self.gpa);
         self.finalization_cleanup_jobs.deinit(self.gpa);

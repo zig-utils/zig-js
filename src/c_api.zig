@@ -104,6 +104,23 @@ const CContextGroup = struct {
     }
 };
 
+pub const ZJSInspectorMessageCallback = ?*const fn ([*]const u8, usize, ?*anyopaque) callconv(.c) void;
+pub const ZJSInspectorSessionRef = ?*anyopaque;
+
+const CInspectorState = struct {
+    context: *Context,
+    sessions: std.ArrayListUnmanaged(*CInspectorSession) = .empty,
+};
+
+const CInspectorSession = struct {
+    state: *CInspectorState,
+    callback: *const fn ([*]const u8, usize, ?*anyopaque) callconv(.c) void,
+    user_data: ?*anyopaque,
+    attached: bool = true,
+    runtime_enabled: bool = false,
+    debugger_enabled: bool = false,
+};
+
 /// JSC-shaped `JSType`. Values 0..6 match Apple's public enum; `bigint` and
 /// `invalid` are zig-js extensions so the C boundary does not misreport BigInt
 /// primitives or null handles as generic/undefined values.
@@ -1355,6 +1372,250 @@ export fn JSGlobalContextSetName(ctx: JSContextRef, name: JSStringRef) callconv(
     }
     const string = strFrom(name) orelse return;
     c.c_api_name_utf16 = c.arena().dupe(u16, string.utf16) catch return;
+}
+
+fn inspectorState(c: *Context) ?*CInspectorState {
+    return @ptrCast(@alignCast(c.c_api_inspector_state orelse return null));
+}
+
+fn inspectorSession(ref: ZJSInspectorSessionRef) ?*CInspectorSession {
+    return @ptrCast(@alignCast(ref orelse return null));
+}
+
+fn sendInspectorJson(session: *CInspectorSession, payload: anytype) bool {
+    const message = std.json.Stringify.valueAlloc(gpa, payload, .{}) catch return false;
+    defer gpa.free(message);
+    session.callback(message.ptr, message.len, session.user_data);
+    return true;
+}
+
+fn sendInspectorError(session: *CInspectorSession, id: i64, code: i64, message: []const u8) bool {
+    return sendInspectorJson(session, .{
+        .id = id,
+        .@"error" = .{ .code = code, .message = message },
+    });
+}
+
+const InspectorDescription = struct {
+    allocation: []u8,
+    bytes: []const u8,
+
+    fn deinit(self: InspectorDescription) void {
+        gpa.free(self.allocation);
+    }
+};
+
+fn inspectorDescription(ctx: JSContextRef, value_ref: JSValueRef) ?InspectorDescription {
+    const string = JSValueToStringCopy(ctx, value_ref, null) orelse return null;
+    defer JSStringRelease(string);
+    const capacity = JSStringGetMaximumUTF8CStringSize(string);
+    const allocation = gpa.alloc(u8, capacity) catch return null;
+    const written = JSStringGetUTF8CString(string, allocation.ptr, allocation.len);
+    if (written == 0) {
+        gpa.free(allocation);
+        return null;
+    }
+    return .{ .allocation = allocation, .bytes = allocation[0 .. written - 1] };
+}
+
+fn sendInspectorRemoteObject(session: *CInspectorSession, id: i64, value_ref: JSValueRef, exception_ref: JSValueRef) bool {
+    const ctx: JSContextRef = @ptrCast(session.state.context);
+    const target = if (value_ref != null) value_ref else exception_ref;
+    const description = inspectorDescription(ctx, target) orelse
+        return sendInspectorError(session, id, -32000, "could not describe evaluation result");
+    defer description.deinit();
+    const value_type = JSValueGetType(ctx, target);
+    const protocol_type: []const u8 = switch (value_type) {
+        .undefined => "undefined",
+        .null => "object",
+        .boolean => "boolean",
+        .number => "number",
+        .string => "string",
+        .symbol => "symbol",
+        .bigint => "bigint",
+        .object => if (JSObjectIsFunction(ctx, target)) "function" else "object",
+        .invalid => "undefined",
+    };
+    const primitive_value: ?std.json.Value = switch (value_type) {
+        .null => .null,
+        .boolean => .{ .bool = JSValueToBoolean(ctx, target) },
+        .number => blk: {
+            const number = JSValueToNumber(ctx, target, null);
+            break :blk if (std.math.isFinite(number)) .{ .float = number } else null;
+        },
+        .string => .{ .string = @constCast(description.bytes) },
+        else => null,
+    };
+    if (exception_ref != null) {
+        return sendInspectorJson(session, .{
+            .id = id,
+            .result = .{
+                .result = .{ .type = protocol_type, .value = primitive_value, .description = description.bytes },
+                .exceptionDetails = .{ .text = description.bytes },
+            },
+        });
+    }
+    return sendInspectorJson(session, .{
+        .id = id,
+        .result = .{
+            .result = .{ .type = protocol_type, .value = primitive_value, .description = description.bytes },
+        },
+    });
+}
+
+export fn JSGlobalContextIsInspectable(ctx: JSContextRef) callconv(.c) bool {
+    const c = ctxFrom(ctx) orelse return false;
+    return c.c_api_inspectable;
+}
+
+export fn JSGlobalContextSetInspectable(ctx: JSContextRef, inspectable: bool) callconv(.c) void {
+    const c = ctxFrom(ctx) orelse return;
+    if (c.c_api_inspectable == inspectable) return;
+    c.c_api_inspectable = inspectable;
+    if (!inspectable) {
+        if (inspectorState(c)) |state| for (state.sessions.items) |session| {
+            if (!session.attached) continue;
+            session.attached = false;
+            _ = sendInspectorJson(session, .{
+                .method = "Inspector.detached",
+                .params = .{ .reason = "context is no longer inspectable" },
+            });
+        };
+    }
+}
+
+export fn ZJSInspectorSessionCreate(
+    ctx: JSContextRef,
+    callback: ZJSInspectorMessageCallback,
+    user_data: ?*anyopaque,
+) callconv(.c) ZJSInspectorSessionRef {
+    const c = ctxFrom(ctx) orelse return null;
+    const cb = callback orelse return null;
+    if (!c.c_api_inspectable) return null;
+    _ = JSGlobalContextRetain(ctx) orelse return null;
+    errdefer JSGlobalContextRelease(ctx);
+
+    var state = inspectorState(c);
+    var created_state = false;
+    if (state == null) {
+        const new_state = gpa.create(CInspectorState) catch return null;
+        new_state.* = .{ .context = c };
+        c.c_api_inspector_state = @ptrCast(new_state);
+        state = new_state;
+        created_state = true;
+    }
+    errdefer if (created_state) {
+        c.c_api_inspector_state = null;
+        gpa.destroy(state.?);
+    };
+    const session = gpa.create(CInspectorSession) catch return null;
+    errdefer gpa.destroy(session);
+    session.* = .{ .state = state.?, .callback = cb, .user_data = user_data };
+    state.?.sessions.append(gpa, session) catch return null;
+    _ = sendInspectorJson(session, .{
+        .method = "Inspector.attached",
+        .params = .{ .protocolVersion = "zig-js-inspector/0.1" },
+    });
+    return @ptrCast(session);
+}
+
+export fn ZJSInspectorSessionRelease(session_ref: ZJSInspectorSessionRef) callconv(.c) void {
+    const session = inspectorSession(session_ref) orelse return;
+    const state = session.state;
+    const ctx: JSContextRef = @ptrCast(state.context);
+    _ = ctxFrom(ctx) orelse return;
+    for (state.sessions.items, 0..) |candidate, index| {
+        if (candidate != session) continue;
+        _ = state.sessions.swapRemove(index);
+        break;
+    }
+    gpa.destroy(session);
+    if (state.sessions.items.len == 0) {
+        state.context.c_api_inspector_state = null;
+        state.sessions.deinit(gpa);
+        gpa.destroy(state);
+    }
+    JSGlobalContextRelease(ctx);
+}
+
+export fn ZJSInspectorSessionDispatch(
+    session_ref: ZJSInspectorSessionRef,
+    message: [*c]const u8,
+    message_length: usize,
+) callconv(.c) bool {
+    const session = inspectorSession(session_ref) orelse return false;
+    const ctx: JSContextRef = @ptrCast(session.state.context);
+    _ = ctxFrom(ctx) orelse return false;
+    if (!session.attached or message == null or message_length == 0) return false;
+    const parsed = std.json.parseFromSlice(std.json.Value, gpa, message[0..message_length], .{}) catch {
+        return sendInspectorError(session, 0, -32700, "invalid JSON");
+    };
+    defer parsed.deinit();
+    if (parsed.value != .object) return sendInspectorError(session, 0, -32600, "request must be an object");
+    const request = parsed.value.object;
+    const id_value = request.get("id") orelse return sendInspectorError(session, 0, -32600, "request id is required");
+    const id: i64 = switch (id_value) {
+        .integer => |integer| integer,
+        else => return sendInspectorError(session, 0, -32600, "request id must be an integer"),
+    };
+    const method_value = request.get("method") orelse return sendInspectorError(session, id, -32600, "request method is required");
+    const method = switch (method_value) {
+        .string => |string| string,
+        else => return sendInspectorError(session, id, -32600, "request method must be a string"),
+    };
+
+    if (std.mem.eql(u8, method, "Schema.getDomains")) {
+        return sendInspectorJson(session, .{
+            .id = id,
+            .result = .{ .domains = &[_]struct { name: []const u8, version: []const u8 }{
+                .{ .name = "Runtime", .version = "1.0" },
+                .{ .name = "Debugger", .version = "0.1" },
+                .{ .name = "Schema", .version = "1.0" },
+            } },
+        });
+    }
+    if (std.mem.eql(u8, method, "Runtime.enable")) {
+        session.runtime_enabled = true;
+        if (!sendInspectorJson(session, .{ .id = id, .result = .{} })) return false;
+        return sendInspectorJson(session, .{
+            .method = "Runtime.executionContextCreated",
+            .params = .{ .context = .{
+                .id = @as(u64, @intCast(@intFromPtr(session.state.context))),
+                .origin = "zig-js://local",
+                .name = "zig-js",
+            } },
+        });
+    }
+    if (std.mem.eql(u8, method, "Runtime.disable")) {
+        session.runtime_enabled = false;
+        return sendInspectorJson(session, .{ .id = id, .result = .{} });
+    }
+    if (std.mem.eql(u8, method, "Debugger.enable")) {
+        session.debugger_enabled = true;
+        return sendInspectorJson(session, .{
+            .id = id,
+            .result = .{ .debuggerId = "zig-js-debugger-0.1" },
+        });
+    }
+    if (std.mem.eql(u8, method, "Debugger.disable")) {
+        session.debugger_enabled = false;
+        return sendInspectorJson(session, .{ .id = id, .result = .{} });
+    }
+    if (std.mem.eql(u8, method, "Runtime.evaluate")) {
+        const params_value = request.get("params") orelse return sendInspectorError(session, id, -32602, "params are required");
+        if (params_value != .object) return sendInspectorError(session, id, -32602, "params must be an object");
+        const expression_value = params_value.object.get("expression") orelse return sendInspectorError(session, id, -32602, "expression is required");
+        const expression = switch (expression_value) {
+            .string => |string| string,
+            else => return sendInspectorError(session, id, -32602, "expression must be a string"),
+        };
+        const script = JsString.create(gpa, expression) catch return sendInspectorError(session, id, -32000, "out of memory");
+        defer script.release();
+        var exception: JSValueRef = null;
+        const result = JSEvaluateScript(ctx, @ptrCast(script), null, null, 1, &exception);
+        return sendInspectorRemoteObject(session, id, result, exception);
+    }
+    return sendInspectorError(session, id, -32601, "method is not implemented by this protocol version");
 }
 
 export fn JSCheckScriptSyntax(
@@ -3546,6 +3807,80 @@ test "C-API: context groups share values while preserving distinct realms and li
     // sufficient, and its release performs the one shared-VM teardown.
     JSContextGroupRelease(group);
     JSGlobalContextRelease(second);
+}
+
+test "C-API: inspectability gates concurrent in-process protocol sessions" {
+    const State = struct {
+        bytes: [8192]u8 = undefined,
+        len: usize = 0,
+
+        fn receive(message: [*]const u8, message_len: usize, user_data: ?*anyopaque) callconv(.c) void {
+            const self: *@This() = @ptrCast(@alignCast(user_data.?));
+            std.debug.assert(self.len + message_len + 1 <= self.bytes.len);
+            @memcpy(self.bytes[self.len .. self.len + message_len], message[0..message_len]);
+            self.len += message_len;
+            self.bytes[self.len] = '\n';
+            self.len += 1;
+        }
+    };
+
+    const ctx = JSGlobalContextCreate(null) orelse return error.ContextCreateFailed;
+    try std.testing.expect(!JSGlobalContextIsInspectable(ctx));
+    var first_state: State = .{};
+    var second_state: State = .{};
+    try std.testing.expect(ZJSInspectorSessionCreate(ctx, State.receive, &first_state) == null);
+    JSGlobalContextSetInspectable(ctx, true);
+    try std.testing.expect(JSGlobalContextIsInspectable(ctx));
+    const first = ZJSInspectorSessionCreate(ctx, State.receive, &first_state) orelse return error.SessionCreateFailed;
+    const second = ZJSInspectorSessionCreate(ctx, State.receive, &second_state) orelse return error.SessionCreateFailed;
+    try std.testing.expect(std.mem.indexOf(u8, first_state.bytes[0..first_state.len], "zig-js-inspector/0.1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, second_state.bytes[0..second_state.len], "Inspector.attached") != null);
+
+    const schema = "{\"id\":1,\"method\":\"Schema.getDomains\"}";
+    try std.testing.expect(ZJSInspectorSessionDispatch(first, schema, schema.len));
+    const runtime_enable = "{\"id\":2,\"method\":\"Runtime.enable\"}";
+    try std.testing.expect(ZJSInspectorSessionDispatch(first, runtime_enable, runtime_enable.len));
+    const evaluate_request = "{\"id\":3,\"method\":\"Runtime.evaluate\",\"params\":{\"expression\":\"6 * 7\"}}";
+    try std.testing.expect(ZJSInspectorSessionDispatch(first, evaluate_request, evaluate_request.len));
+    const debugger_enable = "{\"id\":4,\"method\":\"Debugger.enable\"}";
+    try std.testing.expect(ZJSInspectorSessionDispatch(second, debugger_enable, debugger_enable.len));
+    const malformed = "{";
+    try std.testing.expect(ZJSInspectorSessionDispatch(second, malformed, malformed.len));
+
+    const first_messages = first_state.bytes[0..first_state.len];
+    try std.testing.expect(std.mem.indexOf(u8, first_messages, "\"Runtime\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, first_messages, "Runtime.executionContextCreated") != null);
+    try std.testing.expect(std.mem.indexOf(u8, first_messages, "\"description\":\"42\"") != null);
+    const second_messages = second_state.bytes[0..second_state.len];
+    try std.testing.expect(std.mem.indexOf(u8, second_messages, "zig-js-debugger-0.1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, second_messages, "-32700") != null);
+
+    JSGlobalContextSetInspectable(ctx, false);
+    try std.testing.expect(!JSGlobalContextIsInspectable(ctx));
+    try std.testing.expect(!ZJSInspectorSessionDispatch(first, schema, schema.len));
+    try std.testing.expect(std.mem.indexOf(u8, first_state.bytes[0..first_state.len], "Inspector.detached") != null);
+    try std.testing.expect(std.mem.indexOf(u8, second_state.bytes[0..second_state.len], "Inspector.detached") != null);
+    ZJSInspectorSessionRelease(first);
+    ZJSInspectorSessionRelease(second);
+    JSGlobalContextRelease(ctx);
+}
+
+test "C-API: inspector session retains its context until deterministic release" {
+    const State = struct {
+        fn receive(_: [*]const u8, _: usize, user_data: ?*anyopaque) callconv(.c) void {
+            const count: *usize = @ptrCast(@alignCast(user_data.?));
+            count.* += 1;
+        }
+    };
+    var received: usize = 0;
+    const ctx = JSGlobalContextCreate(null) orelse return error.ContextCreateFailed;
+    JSGlobalContextSetInspectable(ctx, true);
+    const session = ZJSInspectorSessionCreate(ctx, State.receive, &received) orelse return error.SessionCreateFailed;
+    JSGlobalContextRelease(ctx);
+    const request = "{\"id\":1,\"method\":\"Runtime.evaluate\",\"params\":{\"expression\":\"21 + 21\"}}";
+    try std.testing.expect(ZJSInspectorSessionDispatch(session, request, request.len));
+    try std.testing.expect(received >= 2);
+    ZJSInspectorSessionRelease(session);
 }
 
 test "C-API: ordinary constructors keep intrinsic identity and function source metadata" {

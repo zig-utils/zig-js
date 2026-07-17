@@ -13,14 +13,14 @@ The matrix deliberately separates declarations from completion:
   the linked GitHub issue still owns missing behavior, a missing symbol, or an
   ABI mismatch. Pending calls must not be used by hosts yet.
 
-Current result: 115 of 117 functions are implemented, 2 remain linked to open
-issues, and the library exports 115 public functions plus 9 zig-js extensions.
+Current result: all 117 functions are implemented, none remain pending, and the
+library exports 117 public functions plus 12 zig-js extensions.
 
 Run `zig build c-api-audit` after changing `src/c_api.zig`, the headers, or the
 inventory. On a machine with the pinned SDK, pass its root to
 `tools/verify-c-api.py --sdk-root <path>` to detect upstream header drift.
 `zig build test-c-api` additionally compiles, links, and runs C and C++ hosts.
 On macOS, `zig build c-api-jsc-diff` verifies those hashes, compiles
-`tests/c_api_value_diff.c` against both zig-js and the system JavaScriptCore
-framework, and compares their value/class output byte-for-byte.
-The current 33-row fixture digest is `9d5d5c191aa34063`.
+the value/class and context-group fixtures against both zig-js and the system
+JavaScriptCore framework, and compares their output byte-for-byte.
+The current 34-row fixture digest is `a8ecd5e83f9f35ca`.

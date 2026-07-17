@@ -56,6 +56,8 @@ JSContextGroupRef  JSContextGetGroup(JSContextRef);
 JSGlobalContextRef JSContextGetGlobalContext(JSContextRef);
 JSStringRef        JSGlobalContextCopyName(JSGlobalContextRef);
 void               JSGlobalContextSetName(JSGlobalContextRef, JSStringRef);
+bool               JSGlobalContextIsInspectable(JSGlobalContextRef);
+void               JSGlobalContextSetInspectable(JSGlobalContextRef, bool);
 bool               JSCheckScriptSyntax(JSContextRef, JSStringRef source,
                                        JSStringRef sourceURL,
                                        int startingLineNumber, JSValueRef* exception);
@@ -228,6 +230,10 @@ realm. The final group/context release tears down every realm and the shared VM
 once. A non-null `JSClassRef` is attached to the actual global object, including
 static members and initialize/finalize lifetime callbacks.
 
+The zig-js extension header exposes `ZJSInspectorSessionCreate`,
+`ZJSInspectorSessionDispatch`, and `ZJSInspectorSessionRelease` for the
+versioned in-process JSON transport documented in [Inspector protocol](/inspector).
+
 `JSGlobalContextRetain` and `JSGlobalContextRelease` maintain a real C-API reference count for contexts created through this C API. Releasing a retained context destroys the underlying runtime only after the final release. `JSGlobalContextRetain` returns null for a null context or if retaining would overflow the context refcount.
 
 The typed-array API uses the public JavaScriptCore enum layout through `BigUint64Array`. JavaScript `Float16Array` remains available inside the engine, but the pinned public JSC enum has no Float16 entry, so `JSValueGetTypedArrayType` reports `kJSTypedArrayTypeNone` for that runtime-only kind. ArrayBuffer-backed constructors preserve the original buffer and requested view geometry; invalid types return null, while detached, out-of-bounds, misaligned, overflowing, wrong-context, and non-ArrayBuffer inputs report through the exception out pointer.
@@ -290,8 +296,18 @@ exceptions, and applies JSC property attributes to newly created own properties.
 ## Caveats
 
 > [!WARNING]
-> The implemented subset covers the common evaluation, value, object, string, typed-array/ArrayBuffer, protected-handle, and foundational class-ownership surface plus the zig-js worker extension. Remaining JavaScriptCore class callbacks/static members, Objective-C `JSValue`/`JSContext`, inspector/debugger APIs, and other WebKit internals remain tracked by [the public C API roadmap](https://github.com/zig-utils/zig-js/issues/135) and [the umbrella roadmap](https://github.com/zig-utils/zig-js/issues/134). Non-null `JSClassRef` input to `JSGlobalContextCreate` remains pending; `JSObjectMake` accepts classes created by `JSClassCreate`. The language/runtime scope is whatever the configured conformance runner currently proves — see [Conformance](/conformance).
+> The complete pinned macOS 27.0 public C inventory is implemented. This does
+> not imply compatibility with Objective-C `JSValue`/`JSContext`, WebKit private
+> internals, or the still-growing pause/breakpoint/stepping portion of the zig-js
+> inspector protocol; those remain tracked by [the umbrella roadmap](https://github.com/zig-utils/zig-js/issues/134)
+> and [inspector issue](https://github.com/zig-utils/zig-js/issues/139). The
+> language/runtime scope is whatever the configured conformance runner currently
+> proves — see [Conformance](/conformance).
 
 Some functions intentionally keep JavaScriptCore-shaped signatures while zig-js is still pre-stabilization, but the documented parameters now either have real behavior or fail fast when the underlying feature is out of scope. `JSEvaluateScript` honors `thisObject`, uses `sourceURL` / `startingLineNumber` for syntax and runtime Error metadata, and parser-created SyntaxErrors expose non-enumerable line/column diagnostics instead of requiring callers to parse message text. `JSGlobalContextRetain` / `JSGlobalContextRelease` maintain a real C-API reference count, `JSObjectMakeFunctionWithCallback` honors the provided function name, and `JSObjectSetProperty` honors property attributes.
 
-**Threading.** Handles are affine to the thread that owns their context: a context and its `JSValueRef` / `JSObjectRef` handles must be created and used on one thread (one context per thread — the C surface asserts this). `JSWorkerRef` handles are also owner-thread-affine; use worker messages, not worker handles, as the cross-thread boundary. For cross-context / cross-thread work use the `JSWorker*` extension (isolated worker contexts that exchange messages); see the [threading docs](/threads/) for what may cross a thread boundary.
+**Threading.** Handles are affine to the thread that owns their context group.
+Values may cross global contexts in the same group while retaining identity;
+different groups are rejected. `JSWorkerRef` and inspector-session handles are
+also owner-thread-affine. Use worker messages, not worker handles, as the
+cross-thread boundary; see the [threading docs](/threads/).
