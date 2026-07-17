@@ -144,20 +144,19 @@ pub const Owner = struct {
 
     pub const AdoptError = std.mem.Allocator.Error || error{Invalidated};
 
-    pub const Lease = struct {
+    pub const Compilation = struct {
         owner: *Owner,
-        code: *const CompiledCode,
 
-        pub fn release(self: *Lease) void {
+        pub fn release(self: *Compilation) void {
             _ = self.owner.active_leases.fetchSub(1, .release);
             self.* = undefined;
         }
     };
 
-    pub const Compilation = struct {
+    pub const Execution = struct {
         owner: *Owner,
 
-        pub fn release(self: *Compilation) void {
+        pub fn release(self: *Execution) void {
             _ = self.owner.active_leases.fetchSub(1, .release);
             self.* = undefined;
         }
@@ -187,20 +186,17 @@ pub const Owner = struct {
         return owned;
     }
 
-    /// Acquire a stable native mapping. Code deletion first blocks new leases,
-    /// then waits for this count to reach zero before touching tiers or pages.
-    pub fn acquire(self: *Owner, tier: *const Tier) ?Lease {
+    /// Protect one outer VM execution, amortizing invalidation synchronization
+    /// across every native entry it performs. Nested VM calls inherit the same
+    /// lease through `Interpreter.jit_execution_depth`.
+    pub fn enterExecution(self: *Owner) ?Execution {
         if (self.invalidating.load(.acquire)) return null;
         _ = self.active_leases.fetchAdd(1, .acquire);
         if (self.invalidating.load(.acquire)) {
             _ = self.active_leases.fetchSub(1, .release);
             return null;
         }
-        const code = tier.loadCode() orelse {
-            _ = self.active_leases.fetchSub(1, .release);
-            return null;
-        };
-        return .{ .owner = self, .code = code };
+        return .{ .owner = self };
     }
 
     /// Claim compilation as an owner operation so invalidation cannot finish
@@ -413,10 +409,11 @@ test "Owner releases adopted executable mappings" {
     var compilation = owner.claimCompilation(&tier, 1) orelse return error.TestUnexpectedResult;
     _ = try owner.adoptAndPublish(&tier, try compileConstantEntry(0x1234));
     compilation.release();
-    var lease = owner.acquire(&tier) orelse return error.TestUnexpectedResult;
-    defer lease.release();
+    var execution = owner.enterExecution() orelse return error.TestUnexpectedResult;
+    defer execution.release();
+    const code = tier.loadCode() orelse return error.TestUnexpectedResult;
     var frame = NativeFrame{};
-    try std.testing.expectEqual(ExitStatus.complete, lease.code.run(&frame));
+    try std.testing.expectEqual(ExitStatus.complete, code.run(&frame));
     try std.testing.expectEqual(@as(u64, 0x1234), frame.result_bits);
 }
 
@@ -429,9 +426,10 @@ test "Owner invalidates tiers only after active native leases retire" {
     var compilation = owner.claimCompilation(&tier, 1) orelse return error.TestUnexpectedResult;
     _ = try owner.adoptAndPublish(&tier, try compileConstantEntry(0x5678));
     compilation.release();
-    var lease = owner.acquire(&tier) orelse return error.TestUnexpectedResult;
+    var execution = owner.enterExecution() orelse return error.TestUnexpectedResult;
+    const code = tier.loadCode() orelse return error.TestUnexpectedResult;
     var frame = NativeFrame{};
-    try std.testing.expectEqual(ExitStatus.complete, lease.code.run(&frame));
+    try std.testing.expectEqual(ExitStatus.complete, code.run(&frame));
     try std.testing.expectEqual(@as(u64, 0x5678), frame.result_bits);
 
     const Shared = struct {
@@ -450,7 +448,7 @@ test "Owner invalidates tiers only after active native leases retire" {
     while (!shared.started.load(.acquire)) std.atomic.spinLoopHint();
     for (0..32) |_| std.Thread.yield() catch {};
     try std.testing.expect(!shared.finished.load(.acquire));
-    lease.release();
+    execution.release();
     thread.join();
 
     try std.testing.expect(shared.finished.load(.acquire));

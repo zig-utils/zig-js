@@ -1004,6 +1004,10 @@ pub const Interpreter = struct {
     /// Context-owned registry for immutable native code. Null in standalone
     /// interpreter helpers and agent realms, which remain bytecode-only.
     jit_owner: ?*jit.Owner = null,
+    /// Outermost `vm.run` holds one executable-owner lease; nested calls reuse
+    /// it so hot native calls do not pay an atomic pair per invocation.
+    jit_execution_depth: usize = 0,
+    jit_execution_allowed: bool = false,
     /// Optional statement-boundary debugger hook. When installed by a Context,
     /// execution is deliberately kept on the tree walker so every tier observes
     /// the same source locations and pause semantics.
