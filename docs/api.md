@@ -26,10 +26,10 @@ compile-link-runtime fixture. It remains deliberately separate from private
 Home/Bun ABI work.
 
 Private-profile exports are audited independently and never inflate the public
-or extension totals. The pinned Home inventory currently reports twenty-nine private
-exports and 403 pending private symbols; `zig build test-home-private-abi` and
+or extension totals. The pinned Home inventory currently reports thirty-one private
+exports and 401 pending private symbols; `zig build test-home-private-abi` and
 `zig build test-private-jstype` are their focused compile-link-runtime gates.
-The twenty-nine cover JSC64 identity, cell equality,
+The thirty-one cover JSC64 identity, cell equality,
 truthiness, int32 extraction, exact signed/unsigned 64-bit BigInt construction,
 modulo-2^64 BigInt extraction with the pinned int32/Int52 fallbacks, and exact
 JavaScript strict/SameValue equality across primitives and owned cells, plus
@@ -39,9 +39,12 @@ UTF-16 length, 8-bit eligibility, equality, object access, and boxing.
 They also cover fresh ordinary/null-prototype construction and exact boxed
 Number/String/Boolean/BigInt unwrapping, plus four-way BigInt/Number comparison,
 arbitrary-precision BigInt addition, and the pinned timeval-to-BigInt formula.
+Private ToObject/prototype queries preserve object identity, box every
+object-capable primitive kind in the selected realm, observe proxy/null
+prototypes, and reject nullish or foreign inputs.
 
 Bun's separately pinned core `src/jsc` inventory reports 422 private symbols,
-of which the same twenty-nine shims are implemented and 393 remain pending. Its
+of which the same thirty-one shims are implemented and 391 remain pending. Its
 source/signature audit is `zig build bun-private-abi-audit`; broader Bun runtime
 and generated bindings are outside that first core profile. Bun JSType numbering
 is selected with `-Dprivate-abi-consumer=bun` and verified by
