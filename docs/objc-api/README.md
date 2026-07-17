@@ -9,7 +9,7 @@ method, property, typedef, data symbol, macro, signature, and availability
 annotation parsed from those headers.
 
 The inventory contains 11 containers and 108 declarations. It currently records
-**72 implemented / 36 pending** under issues #158–#160. An `implemented` entry
+**73 implemented / 35 pending** under issues #158–#160. An `implemented` entry
 has runtime behavior exercised by the compile-link-runtime host; a `pending`
 entry may be declared in the headers but must not be treated as usable.
 
@@ -44,7 +44,9 @@ exception-aware numeric/string conversion, and exact comparisons.
 Indexed reads, geometry structs, and the property-descriptor constants are also
 covered. Recursive array/dictionary/date conversion matches all six rows in the
 pinned system-JSC transcript and handles cyclic graphs by strict JavaScript
-identity. Arbitrary Objective-C wrappers, callbacks, general property helpers, managed
+identity. Promise executors preserve nested callback state and match system JSC's
+context/callee/this/two-argument contract. Arbitrary Objective-C wrappers,
+general exported callbacks, general property helpers, managed
 references, and JSExport remain pending until their corresponding runtime and
 evidence land.
 

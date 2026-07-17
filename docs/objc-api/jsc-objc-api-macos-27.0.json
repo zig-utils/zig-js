@@ -425,7 +425,7 @@
       "kind": "class_method",
       "name": "valueWithNewPromiseInContext:fromExecutor:",
       "declaration": "+ (JSValue * _Null_unspecified) valueWithNewPromiseInContext:(JSContext * _Null_unspecified)context fromExecutor:(void (^ _Null_unspecified)(JSValue * _Null_unspecified resolve, JSValue * _Null_unspecified reject))callback API_AVAILABLE(macos(10.15), ios(13.0))",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
