@@ -40,11 +40,12 @@ libc import. See [the exact declaration inventory](abi/home-private-7ed99c02-inv
 and run `zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"`
 to verify the live revision, every source hash, signature, classification, and
 calling convention. This replaces a vague source-level estimate, but the 432
-private entries are now 7 implemented / 425 pending under #163. The implemented
+private entries are now 9 implemented / 423 pending under #163. The implemented
 slices cover JSC64 value identity, cell equality, truthiness, int32 extraction,
 exact signed/unsigned 64-bit BigInt construction, and modulo-2^64 BigInt
-extraction with the pinned number fallbacks; they do not yet create a usable
-Home private runtime.
+extraction with the pinned number fallbacks, plus exact strict and SameValue
+equality for primitives and context-owned cells; they do not yet create a
+usable Home private runtime.
 
 The newer local Home revision `5e829ad4` changed no files in
 `packages/runtime/src/jsc` relative to `7ed99c02`. Its separate alias manifest

@@ -26,14 +26,15 @@ compile-link-runtime fixture. It remains deliberately separate from private
 Home/Bun ABI work.
 
 Private-profile exports are audited independently and never inflate the public
-or extension totals. The pinned Home inventory currently reports seven private
-exports and 425 pending private symbols; `zig build test-home-private-abi` is
-their compile-link-runtime gate. The seven cover JSC64 identity, cell equality,
+or extension totals. The pinned Home inventory currently reports nine private
+exports and 423 pending private symbols; `zig build test-home-private-abi` is
+their compile-link-runtime gate. The nine cover JSC64 identity, cell equality,
 truthiness, int32 extraction, exact signed/unsigned 64-bit BigInt construction,
-and modulo-2^64 BigInt extraction with the pinned int32/Int52 fallbacks.
+modulo-2^64 BigInt extraction with the pinned int32/Int52 fallbacks, and exact
+JavaScript strict/SameValue equality across primitives and owned cells.
 
 Bun's separately pinned core `src/jsc` inventory reports 422 private symbols,
-of which the same seven value shims are implemented and 415 remain pending. Its
+of which the same nine value shims are implemented and 413 remain pending. Its
 source/signature audit is `zig build bun-private-abi-audit`; broader Bun runtime
 and generated bindings are outside that first core profile.
 

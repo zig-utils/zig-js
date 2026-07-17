@@ -44,7 +44,7 @@ convention. The exact current denominator is:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #163 | 432 (7 implemented, 425 pending) |
+| Private JSC/Bun/WebCore ABI under #163 | 432 (9 implemented, 423 pending) |
 | Overlap with zig-js's completed public C target | 15 |
 | Platform libc import | 1 |
 | **Total** | **448** |
@@ -60,7 +60,7 @@ zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"
 ```
 
 This inventory is the denominator, not a claim that the whole surface works.
-The first seven private entries are implemented; the other 425 remain pending
+The first nine private entries are implemented; the other 423 remain pending
 until #163 provides their type/layout contracts, shims, and consumer evidence.
 
 Home revision `5e829ad483bb9e5ccb19766997df6462edd8e167` is supported as
@@ -108,11 +108,16 @@ The first completed shim slices export the pinned signatures for
 `JSC__JSValue__toBoolean`, `JSC__JSValue__toInt32`,
 `JSC__JSValue__fromInt64NoTruncate`,
 `JSC__JSValue__fromUInt64NoTruncate`, and
-`JSC__JSValue__toUInt64NoTruncate`. Raw primitive words use the codec directly;
-cell words resolve through context-owned public C-API boxes without exposing
-the internal NaN-box layout. The two constructors produce real context-owned
-BigInt cells. Extraction returns the BigInt modulo 2^64 and preserves the
-pinned int32 and exact non-negative Int52 number fallbacks. The
+`JSC__JSValue__toUInt64NoTruncate`, plus
+`JSC__JSValue__isStrictEqual` and `JSC__JSValue__isSameValue`. Raw primitive
+words use the codec directly; cell words resolve through context-owned public
+C-API boxes without exposing the internal NaN-box layout. The two constructors
+produce real context-owned BigInt cells. Extraction returns the BigInt modulo
+2^64 and preserves the pinned int32 and exact non-negative Int52 number
+fallbacks. The equality pair implements JavaScript `===` and SameValue,
+including string and BigInt value equality, object identity, NaN equivalence
+only for SameValue, signed-zero distinction only for SameValue, and safe
+rejection of foreign-context cells. The
 compile-link-runtime gate is:
 
 ```sh
@@ -123,7 +128,7 @@ It covers empty/immediate/int32/double/NaN/negative-zero behavior, boxed
 empty/nonempty strings, object identity/truthiness, signed minimum and unsigned
 maximum BigInts, negative modulo extraction, exact number fallbacks, and every
 invalid/non-exact boundary. Public accounting stays unchanged at 117 functions
-and 19 extensions; these seven symbols are reported only as private profile
+and 19 extensions; these nine symbols are reported only as private profile
 exports.
 
 ## Bun core private inventory
@@ -136,7 +141,7 @@ profile contains 437 unique declarations from 54 hashed files:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #164 | 422 (7 implemented, 415 pending) |
+| Private JSC/Bun/WebCore ABI under #164 | 422 (9 implemented, 413 pending) |
 | Public-C overlap | 15 |
 | **Total** | **437** |
 
@@ -152,5 +157,5 @@ zig build bun-private-abi-audit -Dbun-source-root="$HOME/Code/bun"
 
 The audit rejects revision, file hash, declaration digest, classification,
 calling-convention, implementation-status, and Home-comparison drift. It does
-not claim complete Bun runtime compatibility; #164 remains open for the 415
+not claim complete Bun runtime compatibility; #164 remains open for the 413
 pending core entries and later wider/generated profiles.

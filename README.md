@@ -236,7 +236,7 @@ claim that Home's or Bun's private `JSC__*`/`Bun__*` ABI is implemented.
 The separately generated
 [Home private inventory](docs/abi/home-private-7ed99c02-inventory.json) makes
 that remaining boundary concrete: **448 unique extern symbols from 58 pinned
-files**, classified as 432 private (**7 implemented / 425 pending**), 15
+files**, classified as 432 private (**9 implemented / 423 pending**), 15
 already-covered public-C overlaps, and one platform import, with zero duplicate
 or unclassified entries.
 Both exact Home revisions `7ed99c02` and `5e829ad4` are supported; the latter is
@@ -246,15 +246,17 @@ The first private-ABI foundation is implemented without changing engine values:
 `private_abi.EncodedValue` translates primitives to the pinned eight-byte JSC64
 encoding (including exact int32/double/NaN/cell rules), while rejecting
 string/object conversion until a validated external cell handle exists.
-The first seven private exports—encoded identity/cell equality, truthiness,
+The first nine private exports—encoded identity/cell equality, truthiness,
 int32 extraction, exact signed/unsigned 64-bit BigInt construction, and
-modulo-2^64 BigInt extraction with pinned number fallbacks—now pass an exact
-Zig compile-link-runtime consumer fixture. The constructors return real
-context-owned BigInt cells, and all seven remain excluded from the 117-function
+modulo-2^64 BigInt extraction with pinned number fallbacks, plus exact `===` and
+SameValue equality—now pass an exact Zig compile-link-runtime consumer fixture.
+The equality gate covers strings and BigInts by value, objects by identity, NaN,
+signed zero, and foreign-context rejection. The constructors return real
+context-owned BigInt cells, and all nine remain excluded from the 117-function
 public count and 19 extensions.
 The separate pinned
 [Bun core inventory](docs/abi/bun-private-core-4982b91e-inventory.json) contains
-437 symbols from 54 `src/jsc` files: 422 private (**7 implemented / 415
+437 symbols from 54 `src/jsc` files: 422 private (**9 implemented / 413
 pending**) and 15 public overlaps. Its exact comparison with Home finds 434
 shared names, 3 Bun-only names, 14 Home-only names, and 28 changed signatures;
 neither private profile is inferred from the other.
