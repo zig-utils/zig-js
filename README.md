@@ -197,6 +197,9 @@ The current exported C surface has 134 functions:
 - **Typed arrays and buffers** - `JSValueGetTypedArrayType`, the four public `JSObjectMakeTypedArray*` construction paths, typed-array type/bytes/length/offset/buffer queries, and no-copy `ArrayBuffer` construction/bytes/length with exactly-once embedder deallocation.
 - **Strings** - UTF-8 and UTF-16 construction, retain/release, UTF-16 length and stable borrowed characters, maximum UTF-8 sizing and conversion, and code-unit/UTF-8 equality.
 - **Extensions** - resource-bounded `JSWorker*`, stable worker inspector target metadata and owner-pumped cross-thread sessions, observable `ZJSValueProtect`/`ZJSValueUnprotect`, threaded contexts, and authenticated-transport-neutral `ZJSInspectorSession*`.
+- **Objective-C inventory** - macOS SDK 27.0 build 26A5368g is pinned at 11
+  containers / 108 declarations with byte-for-byte header and selector-level
+  drift checks; runtime implementation remains explicitly 0/108 under #158–#160.
 
 `ZJSGlobalContextCreateThreaded`, `ZJSValueProtect`/`ZJSValueUnprotect`,
 `ZJSInspectorSession*`, and `JSWorker*` are zig-js extensions, not public JSC symbols. The `ZJSValue*`
@@ -315,6 +318,8 @@ zig build benchmark-comparison -Dbenchmark-comparison-quick=true
 zig build benchmark-comparison-test
 zig build c-api-audit            # pinned headers/inventory/export drift
 zig build test-c-api             # C and C++ compile-link-runtime ABI gate
+zig build objc-api-audit         # pinned Objective-C header/inventory drift gate
+zig build test-objc-api-headers  # macOS ARC/blocks header compilation gate
 zig build c-api-jsc-diff         # completed value APIs vs pinned system JSC (macOS)
 zig build threads-test            # WebKit PR-249 thread allowlist
 zig build threads-reference-audit # classify non-promoted PR-249 files

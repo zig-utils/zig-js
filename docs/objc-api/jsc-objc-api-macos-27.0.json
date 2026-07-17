@@ -1,0 +1,1098 @@
+{
+  "schema_version": 1,
+  "target": {
+    "platform": "macOS",
+    "sdk_version": "27.0",
+    "sdk_build": "26A5368g",
+    "captured_at": "2026-07-16"
+  },
+  "source_headers": {
+    "JSContext.h": "b7f81d143bccd510217054c197dfe0b332466f35df9e1557eb28c6fdc06e5225",
+    "JSValue.h": "d2ada7f5d1063953491854fda795c8682b61437a675c417c91eb76a063e76e2d",
+    "JSVirtualMachine.h": "34cebf379462025c147b0dde97f2d148ef6408d973b0d6b9f2ba5c72829c239c",
+    "JSManagedValue.h": "25635bdcdb092cdf33bf834036cc33092bd73cdcf1c0fe7ec9b9ef7089c959ec",
+    "JSExport.h": "7e39c540052b875dadf978aab8a074e373fd6db324bb4095b5e2ed193c54d893"
+  },
+  "checked_header_hashes": {
+    "JSContext.h": "8c5e6a19371b25fe4be7076314a253abfb8ba4199410542921192377f255235a",
+    "JSValue.h": "498f4dd16022d4a371ced0962d0b39c7534b097e62d87c336eebe7f47877fca7",
+    "JSVirtualMachine.h": "0562978affa1e862fb12ad9057a0fa46d69843b7385322cdf5badc2cdc8573d2",
+    "JSManagedValue.h": "32f1b8c522db85ab73d4778053ce089c709ea08d0fecf9982e7e87c9cd3fd2c5",
+    "JSExport.h": "614b8b7bf21374b6b417839646f11959323c4800c778ce87e1b8422c5ec6341a"
+  },
+  "containers": [
+    {
+      "header": "JSContext.h",
+      "kind": "interface",
+      "name": "JSContext",
+      "category": "JSContextRefSupport",
+      "superclass": null,
+      "adopted_protocols": [],
+      "availability": null
+    },
+    {
+      "header": "JSContext.h",
+      "kind": "interface",
+      "name": "JSContext",
+      "category": null,
+      "superclass": "NSObject",
+      "adopted_protocols": [],
+      "availability": "API_AVAILABLE(macos(10.9), ios(7.0))"
+    },
+    {
+      "header": "JSContext.h",
+      "kind": "interface",
+      "name": "JSContext",
+      "category": "SubscriptSupport",
+      "superclass": null,
+      "adopted_protocols": [],
+      "availability": "API_AVAILABLE(macos(13.3), ios(16.4)) NS_SWIFT_NAME(isInspectable)"
+    },
+    {
+      "header": "JSExport.h",
+      "kind": "protocol",
+      "name": "JSExport",
+      "category": null,
+      "superclass": null,
+      "adopted_protocols": [],
+      "availability": null
+    },
+    {
+      "header": "JSManagedValue.h",
+      "kind": "interface",
+      "name": "JSManagedValue",
+      "category": null,
+      "superclass": "NSObject",
+      "adopted_protocols": [],
+      "availability": "NS_CLASS_AVAILABLE(10_9, 7_0)"
+    },
+    {
+      "header": "JSValue.h",
+      "kind": "interface",
+      "name": "JSValue",
+      "category": "JSValueRefSupport",
+      "superclass": null,
+      "adopted_protocols": [],
+      "availability": null
+    },
+    {
+      "header": "JSValue.h",
+      "kind": "interface",
+      "name": "JSValue",
+      "category": null,
+      "superclass": "NSObject",
+      "adopted_protocols": [],
+      "availability": "NS_CLASS_AVAILABLE(10_9, 7_0)"
+    },
+    {
+      "header": "JSValue.h",
+      "kind": "interface",
+      "name": "JSValue",
+      "category": "PropertyAccess",
+      "superclass": null,
+      "adopted_protocols": [],
+      "availability": null
+    },
+    {
+      "header": "JSValue.h",
+      "kind": "interface",
+      "name": "JSValue",
+      "category": "StructSupport",
+      "superclass": null,
+      "adopted_protocols": [],
+      "availability": null
+    },
+    {
+      "header": "JSValue.h",
+      "kind": "interface",
+      "name": "JSValue",
+      "category": "SubscriptSupport",
+      "superclass": null,
+      "adopted_protocols": [],
+      "availability": null
+    },
+    {
+      "header": "JSVirtualMachine.h",
+      "kind": "interface",
+      "name": "JSVirtualMachine",
+      "category": null,
+      "superclass": "NSObject",
+      "adopted_protocols": [],
+      "availability": "NS_CLASS_AVAILABLE(10_9, 7_0)"
+    }
+  ],
+  "declarations": [
+    {
+      "header": "JSContext.h",
+      "container": "JSContext",
+      "kind": "class_method",
+      "name": "currentArguments",
+      "declaration": "+ (NSArray *) currentArguments",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSContext.h",
+      "container": "JSContext",
+      "kind": "class_method",
+      "name": "currentCallee",
+      "declaration": "+ (JSValue *) currentCallee API_AVAILABLE(macos(10.10), ios(8.0))",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSContext.h",
+      "container": "JSContext",
+      "kind": "class_method",
+      "name": "currentContext",
+      "declaration": "+ (JSContext *) currentContext",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSContext.h",
+      "container": "JSContext",
+      "kind": "class_method",
+      "name": "currentThis",
+      "declaration": "+ (JSValue *) currentThis",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSContext.h",
+      "container": "JSContext",
+      "kind": "instance_method",
+      "name": "evaluateScript:",
+      "declaration": "- (JSValue *) evaluateScript:(NSString *)script",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSContext.h",
+      "container": "JSContext",
+      "kind": "instance_method",
+      "name": "evaluateScript:withSourceURL:",
+      "declaration": "- (JSValue *) evaluateScript:(NSString *)script withSourceURL:(NSURL *)sourceURL API_AVAILABLE(macos(10.10), ios(8.0))",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSContext.h",
+      "container": "JSContext",
+      "kind": "instance_method",
+      "name": "init",
+      "declaration": "- (instancetype) init",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSContext.h",
+      "container": "JSContext",
+      "kind": "instance_method",
+      "name": "initWithVirtualMachine:",
+      "declaration": "- (instancetype) initWithVirtualMachine:(JSVirtualMachine *)virtualMachine",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSContext.h",
+      "container": "JSContext",
+      "kind": "property",
+      "name": "exception",
+      "declaration": "@property (strong) JSValue *exception",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSContext.h",
+      "container": "JSContext",
+      "kind": "property",
+      "name": "exceptionHandler",
+      "declaration": "@property (copy) void(^exceptionHandler)(JSContext *context, JSValue *exception)",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSContext.h",
+      "container": "JSContext",
+      "kind": "property",
+      "name": "globalObject",
+      "declaration": "@property (readonly, strong) JSValue *globalObject",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSContext.h",
+      "container": "JSContext",
+      "kind": "property",
+      "name": "inspectable",
+      "declaration": "@property (nonatomic, getter=isInspectable) BOOL inspectable API_AVAILABLE(macos(13.3), ios(16.4)) NS_SWIFT_NAME(isInspectable)",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSContext.h",
+      "container": "JSContext",
+      "kind": "property",
+      "name": "name",
+      "declaration": "@property (copy) NSString *name API_AVAILABLE(macos(10.10), ios(8.0))",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSContext.h",
+      "container": "JSContext",
+      "kind": "property",
+      "name": "virtualMachine",
+      "declaration": "@property (readonly, strong) JSVirtualMachine *virtualMachine",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSContext.h",
+      "container": "JSContext(JSContextRefSupport)",
+      "kind": "class_method",
+      "name": "contextWithJSGlobalContextRef:",
+      "declaration": "+ (JSContext *) contextWithJSGlobalContextRef:(JSGlobalContextRef)jsGlobalContextRef",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSContext.h",
+      "container": "JSContext(JSContextRefSupport)",
+      "kind": "property",
+      "name": "JSGlobalContextRef",
+      "declaration": "@property (readonly) JSGlobalContextRef JSGlobalContextRef",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSContext.h",
+      "container": "JSContext(SubscriptSupport)",
+      "kind": "instance_method",
+      "name": "objectForKeyedSubscript:",
+      "declaration": "- (JSValue *) objectForKeyedSubscript:(id)key",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSContext.h",
+      "container": "JSContext(SubscriptSupport)",
+      "kind": "instance_method",
+      "name": "setObject:forKeyedSubscript:",
+      "declaration": "- (void) setObject:(id)object forKeyedSubscript:(NSObject <NSCopying> *)key",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSExport.h",
+      "container": "global",
+      "kind": "macro",
+      "name": "JSExportAs",
+      "declaration": "#define JSExportAs(PropertyName, Selector)",
+      "status": "pending",
+      "issue": 160
+    },
+    {
+      "header": "JSManagedValue.h",
+      "container": "JSManagedValue",
+      "kind": "class_method",
+      "name": "managedValueWithValue:",
+      "declaration": "+ (JSManagedValue *) managedValueWithValue:(JSValue *)value",
+      "status": "pending",
+      "issue": 159
+    },
+    {
+      "header": "JSManagedValue.h",
+      "container": "JSManagedValue",
+      "kind": "class_method",
+      "name": "managedValueWithValue:andOwner:",
+      "declaration": "+ (JSManagedValue *) managedValueWithValue:(JSValue *)value andOwner:(id)owner API_AVAILABLE(macos(10.10), ios(8.0))",
+      "status": "pending",
+      "issue": 159
+    },
+    {
+      "header": "JSManagedValue.h",
+      "container": "JSManagedValue",
+      "kind": "instance_method",
+      "name": "initWithValue:",
+      "declaration": "- (instancetype) initWithValue:(JSValue *)value",
+      "status": "pending",
+      "issue": 159
+    },
+    {
+      "header": "JSManagedValue.h",
+      "container": "JSManagedValue",
+      "kind": "property",
+      "name": "value",
+      "declaration": "@property (readonly, strong) JSValue *value",
+      "status": "pending",
+      "issue": 159
+    },
+    {
+      "header": "JSValue.h",
+      "container": "JSValue",
+      "kind": "class_method",
+      "name": "valueWithBool:inContext:",
+      "declaration": "+ (JSValue * _Null_unspecified) valueWithBool:(BOOL)value inContext:(JSContext * _Null_unspecified)context",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSValue.h",
+      "container": "JSValue",
+      "kind": "class_method",
+      "name": "valueWithDouble:inContext:",
+      "declaration": "+ (JSValue * _Null_unspecified) valueWithDouble:(double)value inContext:(JSContext * _Null_unspecified)context",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSValue.h",
+      "container": "JSValue",
+      "kind": "class_method",
+      "name": "valueWithInt32:inContext:",
+      "declaration": "+ (JSValue * _Null_unspecified) valueWithInt32:(int32_t)value inContext:(JSContext * _Null_unspecified)context",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSValue.h",
+      "container": "JSValue",
+      "kind": "class_method",
+      "name": "valueWithNewArrayInContext:",
+      "declaration": "+ (JSValue * _Null_unspecified) valueWithNewArrayInContext:(JSContext * _Null_unspecified)context",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSValue.h",
+      "container": "JSValue",
+      "kind": "class_method",
+      "name": "valueWithNewBigIntFromDouble:inContext:",
+      "declaration": "+ (nullable JSValue *) valueWithNewBigIntFromDouble:(double)value inContext:(nonnull JSContext *)context API_AVAILABLE(macos(15.0), ios(18.0))",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSValue.h",
+      "container": "JSValue",
+      "kind": "class_method",
+      "name": "valueWithNewBigIntFromInt64:inContext:",
+      "declaration": "+ (nullable JSValue *) valueWithNewBigIntFromInt64:(int64_t)int64 inContext:(nonnull JSContext *)context API_AVAILABLE(macos(15.0), ios(18.0))",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSValue.h",
+      "container": "JSValue",
+      "kind": "class_method",
+      "name": "valueWithNewBigIntFromString:inContext:",
+      "declaration": "+ (nullable JSValue *) valueWithNewBigIntFromString:(nonnull NSString *)string inContext:(nonnull JSContext *)context API_AVAILABLE(macos(15.0), ios(18.0))",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSValue.h",
+      "container": "JSValue",
+      "kind": "class_method",
+      "name": "valueWithNewBigIntFromUInt64:inContext:",
+      "declaration": "+ (nullable JSValue *) valueWithNewBigIntFromUInt64:(uint64_t)uint64 inContext:(nonnull JSContext *)context API_AVAILABLE(macos(15.0), ios(18.0))",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSValue.h",
+      "container": "JSValue",
+      "kind": "class_method",
+      "name": "valueWithNewErrorFromMessage:inContext:",
+      "declaration": "+ (JSValue * _Null_unspecified) valueWithNewErrorFromMessage:(NSString * _Null_unspecified)message inContext:(JSContext * _Null_unspecified)context",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSValue.h",
+      "container": "JSValue",
+      "kind": "class_method",
+      "name": "valueWithNewObjectInContext:",
+      "declaration": "+ (JSValue * _Null_unspecified) valueWithNewObjectInContext:(JSContext * _Null_unspecified)context",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSValue.h",
+      "container": "JSValue",
+      "kind": "class_method",
+      "name": "valueWithNewPromiseInContext:fromExecutor:",
+      "declaration": "+ (JSValue * _Null_unspecified) valueWithNewPromiseInContext:(JSContext * _Null_unspecified)context fromExecutor:(void (^ _Null_unspecified)(JSValue * _Null_unspecified resolve, JSValue * _Null_unspecified reject))callback API_AVAILABLE(macos(10.15), ios(13.0))",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSValue.h",
+      "container": "JSValue",
+      "kind": "class_method",
+      "name": "valueWithNewPromiseRejectedWithReason:inContext:",
+      "declaration": "+ (JSValue * _Null_unspecified) valueWithNewPromiseRejectedWithReason:(id _Null_unspecified)reason inContext:(JSContext * _Null_unspecified)context API_AVAILABLE(macos(10.15), ios(13.0))",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSValue.h",
+      "container": "JSValue",
+      "kind": "class_method",
+      "name": "valueWithNewPromiseResolvedWithResult:inContext:",
+      "declaration": "+ (JSValue * _Null_unspecified) valueWithNewPromiseResolvedWithResult:(id _Null_unspecified)result inContext:(JSContext * _Null_unspecified)context API_AVAILABLE(macos(10.15), ios(13.0))",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSValue.h",
+      "container": "JSValue",
+      "kind": "class_method",
+      "name": "valueWithNewRegularExpressionFromPattern:flags:inContext:",
+      "declaration": "+ (JSValue * _Null_unspecified) valueWithNewRegularExpressionFromPattern:(NSString * _Null_unspecified)pattern flags:(NSString * _Null_unspecified)flags inContext:(JSContext * _Null_unspecified)context",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSValue.h",
+      "container": "JSValue",
+      "kind": "class_method",
+      "name": "valueWithNewSymbolFromDescription:inContext:",
+      "declaration": "+ (JSValue * _Null_unspecified) valueWithNewSymbolFromDescription:(NSString * _Null_unspecified)description inContext:(JSContext * _Null_unspecified)context API_AVAILABLE(macos(10.15), ios(13.0))",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSValue.h",
+      "container": "JSValue",
+      "kind": "class_method",
+      "name": "valueWithNullInContext:",
+      "declaration": "+ (JSValue * _Null_unspecified) valueWithNullInContext:(JSContext * _Null_unspecified)context",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSValue.h",
+      "container": "JSValue",
+      "kind": "class_method",
+      "name": "valueWithObject:inContext:",
+      "declaration": "+ (JSValue * _Null_unspecified) valueWithObject:(id _Null_unspecified)value inContext:(JSContext * _Null_unspecified)context",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSValue.h",
+      "container": "JSValue",
+      "kind": "class_method",
+      "name": "valueWithUInt32:inContext:",
+      "declaration": "+ (JSValue * _Null_unspecified) valueWithUInt32:(uint32_t)value inContext:(JSContext * _Null_unspecified)context",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSValue.h",
+      "container": "JSValue",
+      "kind": "class_method",
+      "name": "valueWithUndefinedInContext:",
+      "declaration": "+ (JSValue * _Null_unspecified) valueWithUndefinedInContext:(JSContext * _Null_unspecified)context",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSValue.h",
+      "container": "JSValue",
+      "kind": "instance_method",
+      "name": "callWithArguments:",
+      "declaration": "- (JSValue * _Null_unspecified) callWithArguments:(NSArray * _Null_unspecified)arguments",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSValue.h",
+      "container": "JSValue",
+      "kind": "instance_method",
+      "name": "compareDouble:",
+      "declaration": "- (JSRelationCondition) compareDouble:(double)other API_AVAILABLE(macos(15.0), ios(18.0))",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSValue.h",
+      "container": "JSValue",
+      "kind": "instance_method",
+      "name": "compareInt64:",
+      "declaration": "- (JSRelationCondition) compareInt64:(int64_t)other API_AVAILABLE(macos(15.0), ios(18.0))",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSValue.h",
+      "container": "JSValue",
+      "kind": "instance_method",
+      "name": "compareJSValue:",
+      "declaration": "- (JSRelationCondition) compareJSValue:(nonnull JSValue *)other API_AVAILABLE(macos(15.0), ios(18.0))",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSValue.h",
+      "container": "JSValue",
+      "kind": "instance_method",
+      "name": "compareUInt64:",
+      "declaration": "- (JSRelationCondition) compareUInt64:(uint64_t)other API_AVAILABLE(macos(15.0), ios(18.0))",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSValue.h",
+      "container": "JSValue",
+      "kind": "instance_method",
+      "name": "constructWithArguments:",
+      "declaration": "- (JSValue * _Null_unspecified) constructWithArguments:(NSArray * _Null_unspecified)arguments",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSValue.h",
+      "container": "JSValue",
+      "kind": "instance_method",
+      "name": "invokeMethod:withArguments:",
+      "declaration": "- (JSValue * _Null_unspecified) invokeMethod:(NSString * _Null_unspecified)method withArguments:(NSArray * _Null_unspecified)arguments",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSValue.h",
+      "container": "JSValue",
+      "kind": "instance_method",
+      "name": "isEqualToObject:",
+      "declaration": "- (BOOL) isEqualToObject:(id _Null_unspecified)value",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSValue.h",
+      "container": "JSValue",
+      "kind": "instance_method",
+      "name": "isEqualWithTypeCoercionToObject:",
+      "declaration": "- (BOOL) isEqualWithTypeCoercionToObject:(id _Null_unspecified)value",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSValue.h",
+      "container": "JSValue",
+      "kind": "instance_method",
+      "name": "isInstanceOf:",
+      "declaration": "- (BOOL) isInstanceOf:(id _Null_unspecified)value",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSValue.h",
+      "container": "JSValue",
+      "kind": "instance_method",
+      "name": "toArray",
+      "declaration": "- (NSArray * _Null_unspecified) toArray",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSValue.h",
+      "container": "JSValue",
+      "kind": "instance_method",
+      "name": "toBool",
+      "declaration": "- (BOOL) toBool",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSValue.h",
+      "container": "JSValue",
+      "kind": "instance_method",
+      "name": "toDate",
+      "declaration": "- (NSDate * _Null_unspecified) toDate",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSValue.h",
+      "container": "JSValue",
+      "kind": "instance_method",
+      "name": "toDictionary",
+      "declaration": "- (NSDictionary * _Null_unspecified) toDictionary",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSValue.h",
+      "container": "JSValue",
+      "kind": "instance_method",
+      "name": "toDouble",
+      "declaration": "- (double) toDouble",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSValue.h",
+      "container": "JSValue",
+      "kind": "instance_method",
+      "name": "toInt32",
+      "declaration": "- (int32_t) toInt32",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSValue.h",
+      "container": "JSValue",
+      "kind": "instance_method",
+      "name": "toInt64",
+      "declaration": "- (int64_t) toInt64 API_AVAILABLE(macos(15.0), ios(18.0))",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSValue.h",
+      "container": "JSValue",
+      "kind": "instance_method",
+      "name": "toNumber",
+      "declaration": "- (NSNumber * _Null_unspecified) toNumber",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSValue.h",
+      "container": "JSValue",
+      "kind": "instance_method",
+      "name": "toObject",
+      "declaration": "- (id _Null_unspecified) toObject",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSValue.h",
+      "container": "JSValue",
+      "kind": "instance_method",
+      "name": "toObjectOfClass:",
+      "declaration": "- (id _Null_unspecified) toObjectOfClass:(Class _Null_unspecified)expectedClass",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSValue.h",
+      "container": "JSValue",
+      "kind": "instance_method",
+      "name": "toString",
+      "declaration": "- (NSString * _Null_unspecified) toString",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSValue.h",
+      "container": "JSValue",
+      "kind": "instance_method",
+      "name": "toUInt32",
+      "declaration": "- (uint32_t) toUInt32",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSValue.h",
+      "container": "JSValue",
+      "kind": "instance_method",
+      "name": "toUInt64",
+      "declaration": "- (uint64_t) toUInt64 API_AVAILABLE(macos(15.0), ios(18.0))",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSValue.h",
+      "container": "JSValue",
+      "kind": "property",
+      "name": "context",
+      "declaration": "@property (readonly, strong) JSContext * _Null_unspecified context",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSValue.h",
+      "container": "JSValue",
+      "kind": "property",
+      "name": "isArray",
+      "declaration": "@property (readonly) BOOL isArray API_AVAILABLE(macos(10.11), ios(9.0))",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSValue.h",
+      "container": "JSValue",
+      "kind": "property",
+      "name": "isBigInt",
+      "declaration": "@property (readonly) BOOL isBigInt API_AVAILABLE(macos(15.0), ios(18.0))",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSValue.h",
+      "container": "JSValue",
+      "kind": "property",
+      "name": "isBoolean",
+      "declaration": "@property (readonly) BOOL isBoolean",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSValue.h",
+      "container": "JSValue",
+      "kind": "property",
+      "name": "isDate",
+      "declaration": "@property (readonly) BOOL isDate API_AVAILABLE(macos(10.11), ios(9.0))",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSValue.h",
+      "container": "JSValue",
+      "kind": "property",
+      "name": "isNull",
+      "declaration": "@property (readonly) BOOL isNull",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSValue.h",
+      "container": "JSValue",
+      "kind": "property",
+      "name": "isNumber",
+      "declaration": "@property (readonly) BOOL isNumber",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSValue.h",
+      "container": "JSValue",
+      "kind": "property",
+      "name": "isObject",
+      "declaration": "@property (readonly) BOOL isObject",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSValue.h",
+      "container": "JSValue",
+      "kind": "property",
+      "name": "isString",
+      "declaration": "@property (readonly) BOOL isString",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSValue.h",
+      "container": "JSValue",
+      "kind": "property",
+      "name": "isSymbol",
+      "declaration": "@property (readonly) BOOL isSymbol API_AVAILABLE(macos(10.15), ios(13.0))",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSValue.h",
+      "container": "JSValue",
+      "kind": "property",
+      "name": "isUndefined",
+      "declaration": "@property (readonly) BOOL isUndefined",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSValue.h",
+      "container": "JSValue(JSValueRefSupport)",
+      "kind": "class_method",
+      "name": "valueWithJSValueRef:inContext:",
+      "declaration": "+ (JSValue * _Null_unspecified) valueWithJSValueRef:(JSValueRef _Null_unspecified)value inContext:(JSContext * _Null_unspecified)context",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSValue.h",
+      "container": "JSValue(JSValueRefSupport)",
+      "kind": "property",
+      "name": "JSValueRef",
+      "declaration": "@property (readonly) JSValueRef _Null_unspecified JSValueRef",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSValue.h",
+      "container": "JSValue(PropertyAccess)",
+      "kind": "instance_method",
+      "name": "defineProperty:descriptor:",
+      "declaration": "- (void) defineProperty:(JSValueProperty)property descriptor:(id _Null_unspecified)descriptor",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSValue.h",
+      "container": "JSValue(PropertyAccess)",
+      "kind": "instance_method",
+      "name": "deleteProperty:",
+      "declaration": "- (BOOL) deleteProperty:(JSValueProperty)property",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSValue.h",
+      "container": "JSValue(PropertyAccess)",
+      "kind": "instance_method",
+      "name": "hasProperty:",
+      "declaration": "- (BOOL) hasProperty:(JSValueProperty)property",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSValue.h",
+      "container": "JSValue(PropertyAccess)",
+      "kind": "instance_method",
+      "name": "setValue:atIndex:",
+      "declaration": "- (void) setValue:(id _Null_unspecified)value atIndex:(NSUInteger)index",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSValue.h",
+      "container": "JSValue(PropertyAccess)",
+      "kind": "instance_method",
+      "name": "setValue:forProperty:",
+      "declaration": "- (void) setValue:(id _Null_unspecified)value forProperty:(JSValueProperty)property",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSValue.h",
+      "container": "JSValue(PropertyAccess)",
+      "kind": "instance_method",
+      "name": "valueAtIndex:",
+      "declaration": "- (JSValue * _Null_unspecified) valueAtIndex:(NSUInteger)index",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSValue.h",
+      "container": "JSValue(PropertyAccess)",
+      "kind": "instance_method",
+      "name": "valueForProperty:",
+      "declaration": "- (JSValue * _Null_unspecified) valueForProperty:(JSValueProperty)property",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSValue.h",
+      "container": "JSValue(StructSupport)",
+      "kind": "class_method",
+      "name": "valueWithPoint:inContext:",
+      "declaration": "+ (JSValue * _Null_unspecified) valueWithPoint:(CGPoint)point inContext:(JSContext * _Null_unspecified)context",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSValue.h",
+      "container": "JSValue(StructSupport)",
+      "kind": "class_method",
+      "name": "valueWithRange:inContext:",
+      "declaration": "+ (JSValue * _Null_unspecified) valueWithRange:(NSRange)range inContext:(JSContext * _Null_unspecified)context",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSValue.h",
+      "container": "JSValue(StructSupport)",
+      "kind": "class_method",
+      "name": "valueWithRect:inContext:",
+      "declaration": "+ (JSValue * _Null_unspecified) valueWithRect:(CGRect)rect inContext:(JSContext * _Null_unspecified)context",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSValue.h",
+      "container": "JSValue(StructSupport)",
+      "kind": "class_method",
+      "name": "valueWithSize:inContext:",
+      "declaration": "+ (JSValue * _Null_unspecified) valueWithSize:(CGSize)size inContext:(JSContext * _Null_unspecified)context",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSValue.h",
+      "container": "JSValue(StructSupport)",
+      "kind": "instance_method",
+      "name": "toPoint",
+      "declaration": "- (CGPoint) toPoint",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSValue.h",
+      "container": "JSValue(StructSupport)",
+      "kind": "instance_method",
+      "name": "toRange",
+      "declaration": "- (NSRange) toRange",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSValue.h",
+      "container": "JSValue(StructSupport)",
+      "kind": "instance_method",
+      "name": "toRect",
+      "declaration": "- (CGRect) toRect",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSValue.h",
+      "container": "JSValue(StructSupport)",
+      "kind": "instance_method",
+      "name": "toSize",
+      "declaration": "- (CGSize) toSize",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSValue.h",
+      "container": "JSValue(SubscriptSupport)",
+      "kind": "instance_method",
+      "name": "objectAtIndexedSubscript:",
+      "declaration": "- (JSValue * _Null_unspecified) objectAtIndexedSubscript:(NSUInteger)index",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSValue.h",
+      "container": "JSValue(SubscriptSupport)",
+      "kind": "instance_method",
+      "name": "objectForKeyedSubscript:",
+      "declaration": "- (JSValue * _Null_unspecified) objectForKeyedSubscript:(id _Null_unspecified)key",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSValue.h",
+      "container": "JSValue(SubscriptSupport)",
+      "kind": "instance_method",
+      "name": "setObject:atIndexedSubscript:",
+      "declaration": "- (void) setObject:(id _Null_unspecified)object atIndexedSubscript:(NSUInteger)index",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSValue.h",
+      "container": "JSValue(SubscriptSupport)",
+      "kind": "instance_method",
+      "name": "setObject:forKeyedSubscript:",
+      "declaration": "- (void) setObject:(id _Null_unspecified)object forKeyedSubscript:(id _Null_unspecified)key",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSValue.h",
+      "container": "global",
+      "kind": "data_symbol",
+      "name": "JSPropertyDescriptorConfigurableKey",
+      "declaration": "JS_EXPORT extern NSString * _Null_unspecified const JSPropertyDescriptorConfigurableKey",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSValue.h",
+      "container": "global",
+      "kind": "data_symbol",
+      "name": "JSPropertyDescriptorEnumerableKey",
+      "declaration": "JS_EXPORT extern NSString * _Null_unspecified const JSPropertyDescriptorEnumerableKey",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSValue.h",
+      "container": "global",
+      "kind": "data_symbol",
+      "name": "JSPropertyDescriptorGetKey",
+      "declaration": "JS_EXPORT extern NSString * _Null_unspecified const JSPropertyDescriptorGetKey",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSValue.h",
+      "container": "global",
+      "kind": "data_symbol",
+      "name": "JSPropertyDescriptorSetKey",
+      "declaration": "JS_EXPORT extern NSString * _Null_unspecified const JSPropertyDescriptorSetKey",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSValue.h",
+      "container": "global",
+      "kind": "data_symbol",
+      "name": "JSPropertyDescriptorValueKey",
+      "declaration": "JS_EXPORT extern NSString * _Null_unspecified const JSPropertyDescriptorValueKey",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSValue.h",
+      "container": "global",
+      "kind": "data_symbol",
+      "name": "JSPropertyDescriptorWritableKey",
+      "declaration": "JS_EXPORT extern NSString * _Null_unspecified const JSPropertyDescriptorWritableKey",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSValue.h",
+      "container": "global",
+      "kind": "typedef",
+      "name": "JSValueProperty",
+      "declaration": "typedef NSString * _Null_unspecified JSValueProperty",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSValue.h",
+      "container": "global",
+      "kind": "typedef",
+      "name": "JSValueProperty",
+      "declaration": "typedef id _Null_unspecified JSValueProperty",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSVirtualMachine.h",
+      "container": "JSVirtualMachine",
+      "kind": "instance_method",
+      "name": "addManagedReference:withOwner:",
+      "declaration": "- (void) addManagedReference:(id)object withOwner:(id)owner",
+      "status": "pending",
+      "issue": 159
+    },
+    {
+      "header": "JSVirtualMachine.h",
+      "container": "JSVirtualMachine",
+      "kind": "instance_method",
+      "name": "init",
+      "declaration": "- (instancetype) init",
+      "status": "pending",
+      "issue": 158
+    },
+    {
+      "header": "JSVirtualMachine.h",
+      "container": "JSVirtualMachine",
+      "kind": "instance_method",
+      "name": "removeManagedReference:withOwner:",
+      "declaration": "- (void) removeManagedReference:(id)object withOwner:(id)owner",
+      "status": "pending",
+      "issue": 159
+    }
+  ]
+}

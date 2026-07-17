@@ -16,6 +16,26 @@ compile, link, and execute both C and C++ embedding fixtures.
 `zig build c-api-jsc-diff` is the macOS-only semantic gate for completed value
 APIs against the hash-pinned system JavaScriptCore headers and framework.
 
+## Objective-C bridge target
+
+The Objective-C compatibility target is separately pinned to macOS SDK 27.0
+build 26A5368g. Its machine-readable inventory covers 11 interfaces, categories,
+and protocols plus 108 methods, properties, typedefs, data symbols, and macros
+from `JSContext.h`, `JSValue.h`, `JSVirtualMachine.h`, `JSManagedValue.h`, and
+`JSExport.h`. `zig build objc-api-audit` verifies the checked-in copies and
+inventory on every host; `zig build test-objc-api-headers` compiles the umbrella
+under the real macOS Objective-C ARC/blocks frontend. A live SDK comparison is:
+
+```sh
+python3 tools/verify-objc-api.py \
+  --sdk-root "$(xcrun --sdk macosx --show-sdk-path)"
+```
+
+All 108 declarations currently remain explicitly pending under #158–#160. See
+the [Objective-C bridge inventory guide](objc-api/README.md) for the declared
+boundary and reproduction details; header availability alone does not imply
+implemented runtime classes.
+
 The project is still pre-stabilization. Compatibility-shaped entry points are an embedder convenience, not a promise to preserve inert arguments or incomplete JavaScriptCore behavior. When a compatibility shim conflicts with clear zig-js semantics, the shim should either grow real behavior or be redesigned before the API is declared stable.
 
 ## Minimal embedding
