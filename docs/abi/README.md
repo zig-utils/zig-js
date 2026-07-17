@@ -44,7 +44,7 @@ convention. The exact current denominator is:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #163 | 431 (137 implemented, 294 pending) |
+| Private JSC/Bun/WebCore ABI under #163 | 431 (146 implemented, 285 pending) |
 | Overlap with zig-js's completed public C target | 15 |
 | Platform libc import | 1 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
@@ -61,7 +61,7 @@ zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"
 ```
 
 This inventory is the denominator, not a claim that the whole surface works.
-The first 137 private entries are implemented; the other 294 remain pending
+The first 146 private entries are implemented; the other 285 remain pending
 until #163 provides their type/layout contracts, shims, and consumer evidence.
 `JSFunctionCall` remains revision-pinned in the declaration inventory but is
 not part of that denominator: each runtime-generated FFI module defines the
@@ -135,7 +135,7 @@ It covers empty/immediate/int32/double/NaN/negative-zero behavior, boxed
 empty/nonempty strings, object identity/truthiness, signed minimum and unsigned
 maximum BigInts, negative modulo extraction, exact number fallbacks, and every
 invalid/non-exact boundary. Public accounting stays unchanged at 117 functions
-and 19 extensions; these 137 symbols are reported only as private profile
+and 19 extensions; these 146 symbols are reported only as private profile
 exports.
 
 The opaque BigInt cell slice additionally exports `JSC__JSBigInt__fromJS`, the
@@ -244,6 +244,17 @@ termination until explicit termination clear. OOM creation returns a fresh
 selected-realm OutOfMemoryError without throwing; OOM and stack-overflow throw
 helpers publish exact error kinds without replacing an existing exception.
 
+The VM heap-control slice reports one context-group view of live heap bytes,
+GC-owned external backing, and saturating embedder-reported extra memory.
+`collectAsync` defers work to a runtime checkpoint; both pinned `runGC` paths
+complete a full collection and return its post-sweep size. Weak-release and
+footprint-shrink operations run real collection checkpoints, and opportunistic
+work drains deferred GC plus live-realm microtasks only for a positive duration.
+Precise heaps use zig-gc's race-safe live/last-full accounting API; arena VMs
+report committed arena capacity. Sibling/foreign isolation, null boundaries,
+counter saturation, deferred job execution, and first-exception preservation
+are covered.
+
 The array/index slice exports exact-length empty-array construction, direct
 indexed put/push/read, and an observable indexed read. Logical holes are not
 materialized as `undefined`; an explicit `undefined` remains present. Direct
@@ -325,7 +336,7 @@ proxies without executing them.
 Three Symbol bridges share one registry across C-API sibling realms and expose
 stable description/registry-key views for exact Latin-1 and UTF-16 content;
 local and well-known Symbols correctly fail registry-key lookup. The
-136-symbol combined runtime
+145-symbol combined runtime
 fixture covers these semantics; the two profile-selected JSType exports retain
 their separate Home/Bun runtime fixtures.
 
@@ -368,7 +379,7 @@ profile contains 437 unique declarations from 54 hashed files:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #164 | 421 (131 implemented, 290 pending) |
+| Private JSC/Bun/WebCore ABI under #164 | 421 (140 implemented, 281 pending) |
 | Public-C overlap | 15 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
 | **Total** | **437** |
@@ -385,5 +396,5 @@ zig build bun-private-abi-audit -Dbun-source-root="$HOME/Code/bun"
 
 The audit rejects revision, file hash, declaration digest, classification,
 calling-convention, implementation-status, and Home-comparison drift. It does
-not claim complete Bun runtime compatibility; #164 remains open for the 290
+not claim complete Bun runtime compatibility; #164 remains open for the 281
 pending core entries and later wider/generated profiles.
