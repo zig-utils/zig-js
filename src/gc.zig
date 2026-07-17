@@ -772,6 +772,7 @@ pub const Binding = struct {
         // insertion barrier (see `Context.driveParallelCollection`).
         v.mark(ctx.global_object);
         v.mark(ctx.tdz_marker);
+        for (ctx.c_api_builtin_constructors) |constructor| markValue(v, constructor);
         if (ctx.reserved_thread_oom_error) |err| markValue(v, err);
         traceEnv(&ctx.env, v); // the global environment is embedded by value (binding_lock)
 

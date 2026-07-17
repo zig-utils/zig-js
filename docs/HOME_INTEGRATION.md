@@ -59,15 +59,17 @@ tests):
    calls, construction, `hasInstance`, and conversion, is implemented, including
    deterministic rejection of foreign-context and invalid callback returns. Home defines ~100+
    JS-exposed classes (Subprocess, Glob, Server, Crypto hashers, FSWatcher,
-   Stats, …) via the generated-class machinery. This is the single biggest gap.
+   Stats, …) via the generated-class machinery; this public C-API layer is now
+   available, while Home's private generated-class ABI remains separate work.
 2. **Exception model** — set/get/clear a pending exception on the context;
    `JSObjectMakeError` plus distinct `TypeError`/`RangeError`/`SyntaxError`
    construction; the `JSValueRef* exception` out-parameter convention on every
    call/get/set. Home's invariant: a host call returns the empty value **iff**
    an exception is pending (see Home's `host_fn.zig` / `assertExceptionPresenceMatches`).
-3. **Remaining public property/name APIs** — checked-in macOS 27.0
-   headers, inventory verification, C/C++ hosts, and the JSC differential gate
-   are in place; the remaining property-key variant stays tracked in #151.
+3. **Remaining public context APIs** — checked-in macOS 27.0 headers, inventory
+   verification, C/C++ hosts, and the JSC differential gate are in place. All
+   public object/property/name APIs are complete; context groups and inspector
+   controls remain tracked in #148 and #139.
 4. **Prototype & structure control** — `JSObjectGetPrototype`/`SetPrototype`
    and richer private/internal slot modeling. `JSObjectGetPrivate` /
    `JSObjectSetPrivate` now cover host-owned opaque pointers, but Home also

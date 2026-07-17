@@ -658,6 +658,54 @@ int main(void)
     JSStringRelease(constructed_name);
     JSClassRelease(instance_class);
 
+    JSValueRef date_argument = JSValueMakeNumber(context, 0);
+    JSObjectRef made_date = JSObjectMakeDate(context, 1, &date_argument, &exception);
+    JSStringRef boom_text = JSStringCreateWithUTF8CString("boom");
+    JSValueRef error_argument = JSValueMakeString(context, boom_text);
+    JSObjectRef made_error = JSObjectMakeError(context, 1, &error_argument, &exception);
+    JSStringRef regexp_source_text = JSStringCreateWithUTF8CString("a+");
+    JSStringRef regexp_flags_text = JSStringCreateWithUTF8CString("i");
+    JSValueRef regexp_arguments[] = {
+        JSValueMakeString(context, regexp_source_text),
+        JSValueMakeString(context, regexp_flags_text)
+    };
+    JSObjectRef made_regexp = JSObjectMakeRegExp(context, 2, regexp_arguments, &exception);
+    JSStringRef function_name = JSStringCreateWithUTF8CString("sum");
+    JSStringRef parameter_a = JSStringCreateWithUTF8CString("a");
+    JSStringRef parameter_b = JSStringCreateWithUTF8CString("b");
+    JSStringRef parameter_names[] = { parameter_a, parameter_b };
+    JSStringRef function_body = JSStringCreateWithUTF8CString("return a + b;");
+    JSStringRef function_source = JSStringCreateWithUTF8CString("dynamic.js");
+    JSObjectRef made_function = JSObjectMakeFunction(context, function_name, 2,
+        parameter_names, function_body, function_source, 1, &exception);
+    JSStringRef date_name = JSStringCreateWithUTF8CString("madeDate");
+    JSStringRef error_name = JSStringCreateWithUTF8CString("madeError");
+    JSStringRef regexp_name = JSStringCreateWithUTF8CString("madeRegExp");
+    JSStringRef function_binding_name = JSStringCreateWithUTF8CString("madeFunction");
+    JSObjectSetProperty(context, JSContextGetGlobalObject(context), date_name,
+        made_date, kJSPropertyAttributeNone, &exception);
+    JSObjectSetProperty(context, JSContextGetGlobalObject(context), error_name,
+        made_error, kJSPropertyAttributeNone, &exception);
+    JSObjectSetProperty(context, JSContextGetGlobalObject(context), regexp_name,
+        made_regexp, kJSPropertyAttributeNone, &exception);
+    JSObjectSetProperty(context, JSContextGetGlobalObject(context), function_binding_name,
+        made_function, kJSPropertyAttributeNone, &exception);
+    JSValueRef constructor_reflection = evaluate(context,
+        "JSON.stringify([madeDate.getTime(),madeError.message,madeRegExp.source,madeRegExp.flags,madeRegExp.test('AAA'),madeFunction(2,3)])");
+    JSStringRef constructor_reflection_string = JSValueToStringCopy(context,
+        constructor_reflection, &exception);
+    fputs("ordinary-constructors ", stdout);
+    if (!constructor_reflection_string || !print_json_string(constructor_reflection_string))
+        return 12;
+    fputc('\n', stdout);
+    JSStringRelease(constructor_reflection_string);
+    JSStringRelease(boom_text); JSStringRelease(regexp_source_text);
+    JSStringRelease(regexp_flags_text); JSStringRelease(function_name);
+    JSStringRelease(parameter_a); JSStringRelease(parameter_b);
+    JSStringRelease(function_body); JSStringRelease(function_source);
+    JSStringRelease(date_name); JSStringRelease(error_name);
+    JSStringRelease(regexp_name); JSStringRelease(function_binding_name);
+
     JSObjectRef prototype = JSObjectMake(context, NULL, NULL);
     JSObjectRef object = JSObjectMake(context, NULL, NULL);
     JSStringRef inherited_name = JSStringCreateWithUTF8CString("inherited");
@@ -678,18 +726,23 @@ int main(void)
     JSStringRelease(temporary_name);
 
     JSValueRef symbol_pair = evaluate(context,
-        "(() => { const key = Symbol('key'); return [{ [key]: 13 }, key]; })()");
+        "(() => { const key = Symbol('key'); return [{}, key]; })()");
     JSObjectRef symbol_object = (JSObjectRef)JSObjectGetPropertyAtIndex(
         context, (JSObjectRef)symbol_pair, 0, &exception);
     JSValueRef symbol_key = JSObjectGetPropertyAtIndex(
         context, (JSObjectRef)symbol_pair, 1, &exception);
+    JSObjectSetPropertyForKey(context, symbol_object, symbol_key,
+        JSValueMakeNumber(context, 13), kJSPropertyAttributeDontDelete, &exception);
     int symbol_has = JSObjectHasPropertyForKey(context, symbol_object, symbol_key, &exception);
     double symbol_value = JSValueToNumber(context,
         JSObjectGetPropertyForKey(context, symbol_object, symbol_key, &exception), &exception);
     int symbol_deleted = JSObjectDeletePropertyForKey(
         context, symbol_object, symbol_key, &exception);
-    printf("property-keys %d %.0f %d %d\n", symbol_has, symbol_value,
-        symbol_deleted, JSObjectHasPropertyForKey(context, symbol_object, symbol_key, &exception));
+    JSPropertyNameArrayRef symbol_names = JSObjectCopyPropertyNames(context, symbol_object);
+    printf("property-keys %d %.0f %d %d %zu\n", symbol_has, symbol_value,
+        symbol_deleted, JSObjectHasPropertyForKey(context, symbol_object, symbol_key, &exception),
+        JSPropertyNameArrayGetCount(symbol_names));
+    JSPropertyNameArrayRelease(symbol_names);
 
     JSValueProtect(context, json);
     JSValueUnprotect(context, json);

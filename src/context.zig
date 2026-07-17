@@ -2248,6 +2248,16 @@ pub const Context = struct {
     last_evaluation_diagnostic: ?parser_mod.SourceLocation = null,
     env: interp.Environment,
     global_object: *value.Object,
+    /// Intrinsic constructors used by the public C convenience APIs. JavaScriptCore
+    /// does not route JSObjectMakeDate/Error/RegExp/Function through mutable
+    /// global bindings, so retain the bootstrap values independently of any
+    /// later assignment to globalThis.
+    c_api_builtin_constructors: [4]value.Value = .{
+        value.Value.undef(),
+        value.Value.undef(),
+        value.Value.undef(),
+        value.Value.undef(),
+    },
     /// The empty root shape every object in this context transitions from.
     root_shape: *Shape,
     exception: ?value.Value = null,
@@ -2796,6 +2806,9 @@ pub const Context = struct {
         self.tdz_marker = tdz;
 
         try interp.installGlobals(&self.env, self.root_shape);
+        inline for (.{ "Date", "Error", "RegExp", "Function" }, 0..) |name, index| {
+            self.c_api_builtin_constructors[index] = self.env.get(name) orelse Value.undef();
+        }
         if (!options.enable_shared_array_buffer) {
             _ = self.env.removeVar("SharedArrayBuffer");
         }

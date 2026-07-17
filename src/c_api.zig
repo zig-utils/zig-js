@@ -2032,6 +2032,172 @@ export fn JSObjectMakeArray(ctx: JSContextRef, argc: usize, argv: [*c]const JSVa
     return boxResult(c, exception, arr);
 }
 
+const CApiBuiltinConstructor = enum(u2) {
+    date,
+    error_object,
+    regexp,
+    function,
+};
+
+fn makeBuiltinObject(
+    c: *Context,
+    constructor_kind: CApiBuiltinConstructor,
+    args: []const Value,
+    exception: ExceptionRef,
+) JSObjectRef {
+    const gc_saved = gc_mod.setActiveHeap(c.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(c.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = c.interpreter();
+    c.pushActiveInterpreter(&machine) catch {
+        setException(c, exception, "OutOfMemory");
+        return null;
+    };
+    defer c.popActiveInterpreter(&machine);
+    const constructor = c.c_api_builtin_constructors[@intFromEnum(constructor_kind)];
+    const result = machine.construct(constructor, args) catch |err| {
+        if (err == error.Throw) {
+            if (exception != null) exception[0] = box(c, machine.exception);
+        } else setException(c, exception, @errorName(err));
+        return null;
+    };
+    if (!result.isObject() or result.asObj().is_symbol or result.asObj().is_bigint) {
+        setException(c, exception, "TypeError: constructor returned a non-object");
+        return null;
+    }
+    return boxResult(c, exception, result);
+}
+
+fn makeBuiltinObjectFromRefs(
+    ctx: JSContextRef,
+    constructor_kind: CApiBuiltinConstructor,
+    argc: usize,
+    argv: [*c]const JSValueRef,
+    exception: ExceptionRef,
+) JSObjectRef {
+    const c = ctxFrom(ctx) orelse return null;
+    if (argc > 0 and argv == null) {
+        setException(c, exception, "TypeError: argc > 0 requires non-null argv");
+        return null;
+    }
+    const args = collectArgs(c, argc, argv, exception) orelse return null;
+    return makeBuiltinObject(c, constructor_kind, args, exception);
+}
+
+export fn JSObjectMakeDate(ctx: JSContextRef, argc: usize, argv: [*c]const JSValueRef, exception: ExceptionRef) callconv(.c) JSObjectRef {
+    return makeBuiltinObjectFromRefs(ctx, .date, argc, argv, exception);
+}
+
+export fn JSObjectMakeError(ctx: JSContextRef, argc: usize, argv: [*c]const JSValueRef, exception: ExceptionRef) callconv(.c) JSObjectRef {
+    return makeBuiltinObjectFromRefs(ctx, .error_object, argc, argv, exception);
+}
+
+export fn JSObjectMakeRegExp(ctx: JSContextRef, argc: usize, argv: [*c]const JSValueRef, exception: ExceptionRef) callconv(.c) JSObjectRef {
+    return makeBuiltinObjectFromRefs(ctx, .regexp, argc, argv, exception);
+}
+
+export fn JSObjectMakeFunction(
+    ctx: JSContextRef,
+    name: JSStringRef,
+    parameter_count: c_uint,
+    parameter_names: [*c]const JSStringRef,
+    body: JSStringRef,
+    source_url: JSStringRef,
+    starting_line_number: c_int,
+    exception: ExceptionRef,
+) callconv(.c) JSObjectRef {
+    const c = ctxFrom(ctx) orelse return null;
+    if (parameter_count > 0 and parameter_names == null) {
+        setException(c, exception, "TypeError: parameterCount > 0 requires parameterNames");
+        return null;
+    }
+    var args = c.arena().alloc(Value, @as(usize, parameter_count) + 1) catch {
+        setException(c, exception, "OutOfMemory");
+        return null;
+    };
+    for (0..parameter_count) |index| {
+        const parameter = strFrom(parameter_names[index]) orelse {
+            setException(c, exception, "TypeError: parameter name is null");
+            return null;
+        };
+        args[index] = Value.strAlloc(c.arena(), parameter.bytes) catch {
+            setException(c, exception, "OutOfMemory");
+            return null;
+        };
+    }
+    const body_bytes = if (strFrom(body)) |string| string.bytes else "";
+    args[parameter_count] = Value.strAlloc(c.arena(), body_bytes) catch {
+        setException(c, exception, "OutOfMemory");
+        return null;
+    };
+    const function_ref = makeBuiltinObject(c, .function, args, exception) orelse {
+        if (exception != null) {
+            if (valueFromContext(c, exception[0])) |thrown| {
+                attachEvaluationRuntimeSourceMetadata(c, thrown, source_url, starting_line_number) catch {};
+            }
+        }
+        return null;
+    };
+    const function_object = objectArgFrom(c, function_ref, exception) orelse return null;
+    const display_name = if (strFrom(name)) |string| string.bytes else "";
+    const name_value = Value.strAlloc(c.arena(), display_name) catch {
+        setException(c, exception, "OutOfMemory");
+        return null;
+    };
+    function_object.setOwn(c.arena(), c.root_shape, "name", name_value) catch {
+        setException(c, exception, "OutOfMemory");
+        return null;
+    };
+    function_object.setAttr(c.arena(), "name", .{ .writable = false, .enumerable = false, .configurable = true }) catch {
+        setException(c, exception, "OutOfMemory");
+        return null;
+    };
+    if (interp.Interpreter.funcOf(Value.obj(function_object))) |function| {
+        function.name = c.arena().dupe(u8, display_name) catch {
+            setException(c, exception, "OutOfMemory");
+            return null;
+        };
+        var source = std.ArrayListUnmanaged(u8).empty;
+        source.appendSlice(c.arena(), "function ") catch {
+            setException(c, exception, "OutOfMemory");
+            return null;
+        };
+        source.appendSlice(c.arena(), display_name) catch {
+            setException(c, exception, "OutOfMemory");
+            return null;
+        };
+        source.append(c.arena(), '(') catch {
+            setException(c, exception, "OutOfMemory");
+            return null;
+        };
+        for (0..parameter_count) |index| {
+            if (index != 0) source.append(c.arena(), ',') catch {
+                setException(c, exception, "OutOfMemory");
+                return null;
+            };
+            source.appendSlice(c.arena(), strFrom(parameter_names[index]).?.bytes) catch {
+                setException(c, exception, "OutOfMemory");
+                return null;
+            };
+        }
+        source.appendSlice(c.arena(), "\n) {\n") catch {
+            setException(c, exception, "OutOfMemory");
+            return null;
+        };
+        source.appendSlice(c.arena(), body_bytes) catch {
+            setException(c, exception, "OutOfMemory");
+            return null;
+        };
+        source.appendSlice(c.arena(), "\n}") catch {
+            setException(c, exception, "OutOfMemory");
+            return null;
+        };
+        function.source = source.items;
+    }
+    return function_ref;
+}
+
 export fn JSObjectMakeDeferredPromise(ctx: JSContextRef, resolve: [*c]JSObjectRef, reject: [*c]JSObjectRef, exception: ExceptionRef) callconv(.c) JSObjectRef {
     const c = ctxFrom(ctx) orelse return null;
     if (resolve == null or reject == null) {
@@ -2420,8 +2586,10 @@ fn propertyKeyBytes(c: *Context, machine: *interp.Interpreter, key_ref: JSValueR
     };
     if (key.isString()) return key.asStr();
     if (key.isObject() and key.asObj().is_symbol) return key.asObj().symbolKey();
-    setException(c, exception, "TypeError: value cannot be converted to a property key");
-    return null;
+    return key.toString(c.arena()) catch {
+        setException(c, exception, "OutOfMemory");
+        return null;
+    };
 }
 
 export fn JSObjectHasPropertyForKey(ctx: JSContextRef, object: JSObjectRef, property_key: JSValueRef, exception: ExceptionRef) callconv(.c) bool {
@@ -2556,6 +2724,46 @@ export fn JSObjectDeleteProperty(ctx: JSContextRef, object: JSObjectRef, name: J
         } else setException(c, exception, @errorName(err));
         return false;
     };
+}
+
+export fn JSObjectSetPropertyForKey(
+    ctx: JSContextRef,
+    object: JSObjectRef,
+    property_key: JSValueRef,
+    val: JSValueRef,
+    attrs: c_uint,
+    exception: ExceptionRef,
+) callconv(.c) void {
+    const c = ctxFrom(ctx) orelse return;
+    const obj = objectArgFrom(c, object, exception) orelse return;
+    const property_value = valueArgFrom(c, val, exception) orelse return;
+    const gc_saved = gc_mod.setActiveHeap(c.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(c.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = c.interpreter();
+    c.pushActiveInterpreter(&machine) catch {
+        setException(c, exception, "OutOfMemory");
+        return;
+    };
+    defer c.popActiveInterpreter(&machine);
+    const key = propertyKeyBytes(c, &machine, property_key, exception) orelse return;
+    const had_own = interp.objectHasOwn(obj, key);
+    const accepted = machine.setMemberResult(Value.obj(obj), key, property_value, Value.obj(obj)) catch |err| {
+        if (err == error.Throw) {
+            if (exception != null) exception[0] = box(c, machine.exception);
+        } else setException(c, exception, @errorName(err));
+        return;
+    };
+    if (!accepted) {
+        setException(c, exception, "TypeError: property assignment was rejected");
+        return;
+    }
+    if (!had_own and interp.objectHasOwn(obj, key)) {
+        obj.setAttr(c.arena(), key, propAttrFromC(attrs)) catch {
+            setException(c, exception, "OutOfMemory");
+        };
+    }
 }
 
 export fn JSObjectDeletePropertyForKey(ctx: JSContextRef, object: JSObjectRef, property_key: JSValueRef, exception: ExceptionRef) callconv(.c) bool {
@@ -3104,6 +3312,117 @@ test "C-API: create + release context, round-trip a number" {
     const num = JSValueMakeNumber(ctx, 42.5) orelse return error.JSValueMakeFailed;
     try std.testing.expect(JSValueIsNumber(ctx, num));
     try std.testing.expectEqual(@as(f64, 42.5), JSValueToNumber(ctx, num, null));
+}
+
+test "C-API: ordinary constructors keep intrinsic identity and function source metadata" {
+    const ctx = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
+    defer JSGlobalContextRelease(ctx);
+
+    const override_source = JSStringCreateWithUTF8CString(
+        "Date = Error = RegExp = Function = function Replaced(){ throw 99; };",
+    ) orelse return error.StringInitFailed;
+    defer JSStringRelease(override_source);
+    var exception: JSValueRef = null;
+    _ = JSEvaluateScript(ctx, override_source, null, null, 1, &exception) orelse return error.EvalFailed;
+    try std.testing.expect(exception == null);
+
+    const zero = JSValueMakeNumber(ctx, 0) orelse return error.ValueCreateFailed;
+    const date = JSObjectMakeDate(ctx, 1, @ptrCast(&zero), &exception) orelse return error.DateCreateFailed;
+    try std.testing.expect(exception == null);
+    const get_time_key = JSStringCreateWithUTF8CString("getTime") orelse return error.StringInitFailed;
+    defer JSStringRelease(get_time_key);
+    const get_time = JSObjectGetProperty(ctx, date, get_time_key, &exception) orelse return error.PropertyGetFailed;
+    const epoch = JSObjectCallAsFunction(ctx, get_time, date, 0, null, &exception) orelse return error.FunctionCallFailed;
+    try std.testing.expectEqual(@as(f64, 0), JSValueToNumber(ctx, epoch, &exception));
+
+    const function_name = JSStringCreateWithUTF8CString("sum") orelse return error.StringInitFailed;
+    defer JSStringRelease(function_name);
+    const param_a = JSStringCreateWithUTF8CString("a") orelse return error.StringInitFailed;
+    defer JSStringRelease(param_a);
+    const param_b = JSStringCreateWithUTF8CString("b") orelse return error.StringInitFailed;
+    defer JSStringRelease(param_b);
+    const params = [_]JSStringRef{ param_a, param_b };
+    const function_body = JSStringCreateWithUTF8CString("return a + b;") orelse return error.StringInitFailed;
+    defer JSStringRelease(function_body);
+    const source_url = JSStringCreateWithUTF8CString("dynamic.js") orelse return error.StringInitFailed;
+    defer JSStringRelease(source_url);
+    const function = JSObjectMakeFunction(ctx, function_name, params.len, &params, function_body, source_url, 17, &exception) orelse return error.FunctionCreateFailed;
+    try std.testing.expect(exception == null);
+
+    const arguments = [_]JSValueRef{
+        JSValueMakeNumber(ctx, 2) orelse return error.ValueCreateFailed,
+        JSValueMakeNumber(ctx, 3) orelse return error.ValueCreateFailed,
+    };
+    const result = JSObjectCallAsFunction(ctx, function, null, arguments.len, &arguments, &exception) orelse return error.FunctionCallFailed;
+    try std.testing.expect(exception == null);
+    try std.testing.expectEqual(@as(f64, 5), JSValueToNumber(ctx, result, &exception));
+
+    const name_key = JSStringCreateWithUTF8CString("name") orelse return error.StringInitFailed;
+    defer JSStringRelease(name_key);
+    const name_value = JSObjectGetProperty(ctx, function, name_key, &exception) orelse return error.PropertyGetFailed;
+    const actual_name = JSValueToStringCopy(ctx, name_value, &exception) orelse return error.StringConvertFailed;
+    defer JSStringRelease(actual_name);
+    try std.testing.expect(JSStringIsEqual(actual_name, function_name));
+
+    const to_string_source = JSStringCreateWithUTF8CString("globalThis.createdFunction.toString()") orelse return error.StringInitFailed;
+    defer JSStringRelease(to_string_source);
+    const binding = JSStringCreateWithUTF8CString("createdFunction") orelse return error.StringInitFailed;
+    defer JSStringRelease(binding);
+    JSObjectSetProperty(ctx, JSContextGetGlobalObject(ctx), binding, function, 0, &exception);
+    const rendered = JSEvaluateScript(ctx, to_string_source, null, null, 1, &exception) orelse return error.EvalFailed;
+    const rendered_string = JSValueToStringCopy(ctx, rendered, &exception) orelse return error.StringConvertFailed;
+    defer JSStringRelease(rendered_string);
+    try std.testing.expect(JSStringIsEqualToUTF8CString(rendered_string, "function sum(a,b\n) {\nreturn a + b;\n}"));
+
+    const invalid_body = JSStringCreateWithUTF8CString("return )") orelse return error.StringInitFailed;
+    defer JSStringRelease(invalid_body);
+    exception = null;
+    try std.testing.expect(JSObjectMakeFunction(ctx, function_name, 0, null, invalid_body, source_url, 41, &exception) == null);
+    try std.testing.expect(exception != null);
+    const source_key = JSStringCreateWithUTF8CString("sourceURL") orelse return error.StringInitFailed;
+    defer JSStringRelease(source_key);
+    const line_key = JSStringCreateWithUTF8CString("startingLineNumber") orelse return error.StringInitFailed;
+    defer JSStringRelease(line_key);
+    const exception_source = JSObjectGetProperty(ctx, exception, source_key, null) orelse return error.PropertyGetFailed;
+    const exception_source_string = JSValueToStringCopy(ctx, exception_source, null) orelse return error.StringConvertFailed;
+    defer JSStringRelease(exception_source_string);
+    try std.testing.expect(JSStringIsEqual(exception_source_string, source_url));
+    const exception_line = JSObjectGetProperty(ctx, exception, line_key, null) orelse return error.PropertyGetFailed;
+    try std.testing.expectEqual(@as(f64, 41), JSValueToNumber(ctx, exception_line, null));
+}
+
+test "C-API: JSObjectSetPropertyForKey preserves key coercion and attributes" {
+    const ctx = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
+    defer JSGlobalContextRelease(ctx);
+
+    const pair_source = JSStringCreateWithUTF8CString("(() => { const key = Symbol('key'); return [{}, key]; })()") orelse return error.StringInitFailed;
+    defer JSStringRelease(pair_source);
+    var exception: JSValueRef = null;
+    const pair = JSEvaluateScript(ctx, pair_source, null, null, 1, &exception) orelse return error.EvalFailed;
+    const object = JSObjectGetPropertyAtIndex(ctx, pair, 0, &exception) orelse return error.PropertyGetFailed;
+    const symbol = JSObjectGetPropertyAtIndex(ctx, pair, 1, &exception) orelse return error.PropertyGetFailed;
+    const value_ref = JSValueMakeNumber(ctx, 13) orelse return error.ValueCreateFailed;
+    JSObjectSetPropertyForKey(ctx, object, symbol, value_ref, kJSPropertyAttributeDontDelete, &exception);
+    try std.testing.expect(exception == null);
+    try std.testing.expect(JSObjectHasPropertyForKey(ctx, object, symbol, &exception));
+    const stored = JSObjectGetPropertyForKey(ctx, object, symbol, &exception) orelse return error.PropertyGetFailed;
+    try std.testing.expectEqual(@as(f64, 13), JSValueToNumber(ctx, stored, &exception));
+    try std.testing.expect(!JSObjectDeletePropertyForKey(ctx, object, symbol, &exception));
+    try std.testing.expect(JSObjectHasPropertyForKey(ctx, object, symbol, &exception));
+
+    const number_key = JSValueMakeNumber(ctx, 5) orelse return error.ValueCreateFailed;
+    JSObjectSetPropertyForKey(ctx, object, number_key, JSValueMakeBoolean(ctx, true), 0, &exception);
+    const five = JSStringCreateWithUTF8CString("5") orelse return error.StringInitFailed;
+    defer JSStringRelease(five);
+    try std.testing.expect(JSValueToBoolean(ctx, JSObjectGetProperty(ctx, object, five, &exception)));
+
+    const throwing_key_source = JSStringCreateWithUTF8CString("({ [Symbol.toPrimitive]() { throw 44; } })") orelse return error.StringInitFailed;
+    defer JSStringRelease(throwing_key_source);
+    const throwing_key = JSEvaluateScript(ctx, throwing_key_source, null, null, 1, &exception) orelse return error.EvalFailed;
+    exception = null;
+    JSObjectSetPropertyForKey(ctx, object, throwing_key, value_ref, 0, &exception);
+    try std.testing.expect(exception != null);
+    try std.testing.expectEqual(@as(f64, 44), JSValueToNumber(ctx, exception, null));
 }
 
 test "C-API: JSGlobalContextRetain keeps context alive until final release" {

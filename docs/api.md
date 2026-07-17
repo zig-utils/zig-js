@@ -129,11 +129,21 @@ JSValueRef  JSObjectGetPropertyForKey(JSContextRef, JSObjectRef, JSValueRef key,
 void*       JSObjectGetPrivate(JSObjectRef);
 bool        JSObjectSetPrivate(JSObjectRef, void* data);
 JSObjectRef JSObjectMakeArray(JSContextRef, size_t argc, const JSValueRef args[], JSValueRef* exception);
+JSObjectRef JSObjectMakeDate(JSContextRef, size_t argc, const JSValueRef args[], JSValueRef* exception);
+JSObjectRef JSObjectMakeError(JSContextRef, size_t argc, const JSValueRef args[], JSValueRef* exception);
+JSObjectRef JSObjectMakeRegExp(JSContextRef, size_t argc, const JSValueRef args[], JSValueRef* exception);
+JSObjectRef JSObjectMakeFunction(JSContextRef, JSStringRef name, unsigned parameterCount,
+                                 const JSStringRef parameterNames[], JSStringRef body,
+                                 JSStringRef sourceURL, int startingLineNumber,
+                                 JSValueRef* exception);
 JSObjectRef JSObjectMakeDeferredPromise(JSContextRef, JSObjectRef* resolve,
                                         JSObjectRef* reject, JSValueRef* exception);
 JSValueRef  JSObjectGetProperty(JSContextRef, JSObjectRef, JSStringRef name, JSValueRef* exception);
 void        JSObjectSetProperty(JSContextRef, JSObjectRef, JSStringRef name,
                                 JSValueRef value, JSPropertyAttributes, JSValueRef* exception);
+void        JSObjectSetPropertyForKey(JSContextRef, JSObjectRef, JSValueRef key,
+                                      JSValueRef value, JSPropertyAttributes,
+                                      JSValueRef* exception);
 JSValueRef  JSObjectGetPropertyAtIndex(JSContextRef, JSObjectRef, unsigned index,
                                        JSValueRef* exception);
 void        JSObjectSetPropertyAtIndex(JSContextRef, JSObjectRef, unsigned index,
@@ -242,6 +252,15 @@ Native callbacks installed with `JSObjectMakeFunctionWithCallback` must return a
 `JSObjectCallAsConstructor` performs the runtime `[[Construct]]` path and reports constructor throws through the exception out pointer.
 
 `JSObjectMakeFunctionWithCallback` returns null when the callback pointer is null.
+
+`JSObjectMakeDate`, `JSObjectMakeError`, and `JSObjectMakeRegExp` invoke the
+realm's retained intrinsic constructors, so replacing the corresponding global
+binding does not change their behavior. `JSObjectMakeFunction` likewise uses the
+intrinsic Function constructor, preserves the requested name and source text,
+and annotates syntax exceptions with the supplied source URL and starting line.
+`JSObjectSetPropertyForKey` performs `ToPropertyKey` exactly once, supports
+Symbols and coerced primitive/object keys, propagates coercion/internal-method
+exceptions, and applies JSC property attributes to newly created own properties.
 
 `JSClassCreate` deep-copies its definition, static tables, and names, retains its parent, and uses an atomic reference count independent of the caller's definition storage. `JSObjectMake(..., class, data)` retains the class for the object lifetime, runs inherited initializers parent-first, finalizers child-first, and keeps the opaque pointer as host-owned private data. Automatic classes share a per-context, GC-rooted prototype carrying their static functions; `NoAutomaticPrototype` classes receive distinct own function objects, matching JSC. Static values use a tri-state internal-method bridge: null getter results remain absent, handled setters consume a write, declined setters do not accidentally create a data property, and `DontDelete` controls the delete result while class-defined values remain virtual. Reflection exposes JSC-compatible static-value descriptors and key membership; zig-js deliberately returns declared static names in deterministic child-first definition order instead of exposing JSC's internal hash-table iteration order. Every `JSClassDefinition` callback family runs through the interpreter: inherited dynamic properties and property names, call/construction, `hasInstance`, and number/string conversion all use JSC's handled/fallback and exception rules. `JSObjectCopyPropertyNames` returns a retained, deduplicated snapshot of enumerable names across the prototype chain; callback-added names participate in `Object.keys` and `Reflect.ownKeys` exactly as in JSC. `JSObjectMakeConstructor` creates JSC-compatible construct-only objects, retains the instance class through GC, and either invokes its explicit constructor callback or creates a class instance by default. Callback results and exceptions are realm-validated: foreign-context handles, null required results, non-object constructor results, and object-valued primitive conversions become deterministic local exceptions. `JSValueIsObjectOfClass` recognizes both the exact class and retained ancestors. `JSObjectGetPrivate` returns only host-owned private data; engine-owned native records are not exposed. `JSObjectSetPrivate` can update host-owned private data and can attach host data to plain objects that do not already carry engine private data.
 
