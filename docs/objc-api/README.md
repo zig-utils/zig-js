@@ -51,9 +51,10 @@ The hosts exercise VM/context construction and identity, evaluation and
 exception capture, context naming/inspectability, C-ref round trips, every
 published `JSValue` family, recursive and cyclic Foundation conversion, promise
 callback state, exact wrapper identity, managed ownership, typed Objective-C
-blocks, and `JSExport` instance/class/renamed-selector behavior. The 16-row
-transcript matches system JavaScriptCore exactly (`0e971dec6ec2caaf`), including
-same-VM cross-context value identity and target-context wrapper behavior.
+blocks, and `JSExport` instance/class/renamed-selector behavior. The 17-row
+transcript matches system JavaScriptCore exactly (`189ef5b0eefd1054`), including
+same-VM cross-context value identity, exported receivers, constructors,
+prototypes, and target-context wrapper behavior.
 `JSManagedValue` and VM owner relations use real weak targets plus weak owners;
 because current context groups use the VM-lifetime arena policy, unreachable
 targets remain available until VM teardown rather than being reclaimed mid-VM.
