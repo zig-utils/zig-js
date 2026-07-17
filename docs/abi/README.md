@@ -44,7 +44,7 @@ convention. The exact current denominator is:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #163 | 432 (61 implemented, 371 pending) |
+| Private JSC/Bun/WebCore ABI under #163 | 432 (71 implemented, 361 pending) |
 | Overlap with zig-js's completed public C target | 15 |
 | Platform libc import | 1 |
 | **Total** | **448** |
@@ -60,7 +60,7 @@ zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"
 ```
 
 This inventory is the denominator, not a claim that the whole surface works.
-The first sixty-one private entries are implemented; the other 371 remain pending
+The first seventy-one private entries are implemented; the other 361 remain pending
 until #163 provides their type/layout contracts, shims, and consumer evidence.
 
 Home revisions `5e829ad483bb9e5ccb19766997df6462edd8e167` and
@@ -129,7 +129,7 @@ It covers empty/immediate/int32/double/NaN/negative-zero behavior, boxed
 empty/nonempty strings, object identity/truthiness, signed minimum and unsigned
 maximum BigInts, negative modulo extraction, exact number fallbacks, and every
 invalid/non-exact boundary. Public accounting stays unchanged at 117 functions
-and 19 extensions; these sixty-one symbols are reported only as private profile
+and 19 extensions; these seventy-one symbols are reported only as private profile
 exports.
 
 The opaque BigInt cell slice additionally exports `JSC__JSBigInt__fromJS`, the
@@ -235,8 +235,17 @@ keys/values create fresh selected-realm arrays of
 own enumerable string properties in ECMAScript order; keys never read values,
 while values re-check enumerability and perform Get in order. Proxy traps,
 getters, abrupt completion, same-VM siblings, foreign VMs, and UTF-16 string
-wrapper indices are covered. The 59-symbol combined runtime fixture covers
-these semantics; the two profile-selected JSType exports retain
+wrapper indices are covered. The native Promise slice adds the ten pinned
+creation, direct-settlement, downcast, and callback-wrap symbols shared by Home
+and Bun. InternalPromise is the pinned alias of JSPromise; constructors select
+the requested realm and preserve exact value/reason identity without thenable
+assimilation. `JSPromise__wrap` passes native promises through and converts
+returned Errors or pending callback exceptions into rejections, whereas
+`AnyPromise__wrap` settles an existing Promise through normal resolution and
+therefore assimilates thenables and rejects self-resolution. Invalid or
+foreign-VM inputs fail safely, callback exceptions are cleared exactly once,
+and already-settled targets remain unchanged. The 69-symbol combined runtime
+fixture covers these semantics; the two profile-selected JSType exports retain
 their separate Home/Bun runtime fixtures.
 
 ## Profile-selectable JSType layout
@@ -278,7 +287,7 @@ profile contains 437 unique declarations from 54 hashed files:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #164 | 422 (61 implemented, 361 pending) |
+| Private JSC/Bun/WebCore ABI under #164 | 422 (71 implemented, 351 pending) |
 | Public-C overlap | 15 |
 | **Total** | **437** |
 
@@ -294,5 +303,5 @@ zig build bun-private-abi-audit -Dbun-source-root="$HOME/Code/bun"
 
 The audit rejects revision, file hash, declaration digest, classification,
 calling-convention, implementation-status, and Home-comparison drift. It does
-not claim complete Bun runtime compatibility; #164 remains open for the 361
+not claim complete Bun runtime compatibility; #164 remains open for the 351
 pending core entries and later wider/generated profiles.

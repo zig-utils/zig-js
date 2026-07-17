@@ -41,7 +41,7 @@ libc import. See [the exact declaration inventory](abi/home-private-7ed99c02-inv
 and run `zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"`
 to verify the live revision, every source hash, signature, classification, and
 calling convention. This replaces a vague source-level estimate, but the 432
-private entries are now 61 implemented / 371 pending under #163. The implemented
+private entries are now 71 implemented / 361 pending under #163. The implemented
 slices cover JSC64 value identity, cell equality, truthiness, int32 extraction,
 exact signed/unsigned 64-bit BigInt construction, and modulo-2^64 BigInt
 extraction with the pinned number fallbacks, plus exact strict and SameValue
@@ -85,7 +85,12 @@ AggregateError classification now follows executable/native and immutable error
 metadata, while sibling C-API realms share VM well-known Symbols and the Symbol
 registry. Two Object reflection shims return fresh selected-realm keys/values
 arrays with exact enumerable ordering, UTF-16 string indices, proxy/getter
-behavior, and VM exception propagation. These slices do not
+behavior, and VM exception propagation. Ten Promise/InternalPromise shims add
+selected-realm pending and directly settled promises, exact native downcasts,
+callback Promise passthrough, Error/throw rejection, and normal AnyPromise
+resolution with thenable assimilation and self-resolution protection. Their
+69-symbol combined fixture covers sibling realms, foreign VMs, callback
+reentrancy, exception clearing, and settled-target no-ops. These slices do not
 yet create a usable Home private runtime.
 
 The newer Home revisions `5e829ad4` and `38702f9e` changed no files in
