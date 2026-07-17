@@ -81,8 +81,8 @@
       "public_c_api": 15
     },
     "by_status": {
-      "implemented": 65,
-      "pending": 372
+      "implemented": 67,
+      "pending": 370
     }
   },
   "home_comparison": {
@@ -2171,10 +2171,10 @@
       "line": 229,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSValue__isInstanceOf(this: JSValue, global: *JSGlobalObject, constructor: JSValue) bool;",
       "declaration_sha256": "726b6b797bcfba796b543e8598318f7f0f9bdb9ef163788c867e19f8ab998777",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSValue__isIterable",
@@ -2182,10 +2182,10 @@
       "line": 2219,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSValue__isIterable(this: JSValue, globalObject: *JSGlobalObject) bool;",
       "declaration_sha256": "d2e28cdd9a9e4041930bb2a23f0ca7b849f1457a70c8a7083cb6b02a71fe6f69",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSValue__isJSXElement",

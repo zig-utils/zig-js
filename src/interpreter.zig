@@ -11442,6 +11442,20 @@ pub const Interpreter = struct {
         }
     }
 
+    /// JavaScriptCore's private `hasIteratorMethod` boundary. Unlike the
+    /// language iterator path, this helper deliberately rejects primitives
+    /// without boxing. Object lookup is ordinary GetMethod: accessors run,
+    /// null/undefined mean absent, and a present non-callable value throws.
+    pub fn hasIteratorMethod(self: *Interpreter, v: Value) EvalError!bool {
+        if (!v.isObject() or v.asObj().is_symbol or v.asObj().is_bigint) return false;
+        const key = self.symbolIteratorKey() orelse return false;
+        const method = try self.getProperty(v, key);
+        if (method.isUndefined() or method.isNull()) return false;
+        if (!method.isCallable())
+            return self.throwError("TypeError", "Symbol.iterator property should be callable");
+        return true;
+    }
+
     /// The internal key of the well-known `Symbol.iterator`, for resolving
     /// `obj[Symbol.iterator]`.
     fn symbolIteratorKey(self: *Interpreter) ?[]const u8 {

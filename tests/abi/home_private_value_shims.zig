@@ -99,6 +99,8 @@ extern "c" fn JSC__JSObject__getIndex(EncodedValue, JSContextRef, u32) EncodedVa
 extern "c" fn JSArray__constructArray(JSContextRef, [*]const EncodedValue, usize) EncodedValue;
 extern "c" fn JSArray__constructEmptyArray(JSContextRef, usize) EncodedValue;
 extern "c" fn Bun__JSValue__toNumber(EncodedValue, JSContextRef) f64;
+extern "c" fn JSC__JSValue__isInstanceOf(EncodedValue, JSContextRef, EncodedValue) bool;
+extern "c" fn JSC__JSValue__isIterable(EncodedValue, JSContextRef) bool;
 
 fn fail(message: []const u8) noreturn {
     std.debug.print("Home private value shims: {s}\n", .{message});
@@ -632,5 +634,74 @@ pub fn main() void {
     if (JSC__Exception__asJSValue(preserved_number_exception.cellPointer()) != EncodedValue.fromInt32(77))
         fail("private ToNumber replaced existing exception");
 
-    std.debug.print("Home private value shims: 48/48 symbols linked; runtime matrix passed\n", .{});
+    const ordinary_constructor = evaluate(context, "globalThis.__private_ctor = function PrivateCtor() {}; __private_ctor");
+    const ordinary_instance = evaluate(context, "new __private_ctor()");
+    if (!JSC__JSValue__isInstanceOf(ordinary_instance, context, ordinary_constructor) or
+        JSC__JSValue__isInstanceOf(encoded_object, context, ordinary_constructor) or
+        JSC__JSValue__isInstanceOf(ordinary_instance, context, EncodedValue.fromInt32(1)) or
+        JSC__JSValue__isInstanceOf(EncodedValue.fromInt32(1), context, ordinary_constructor) or
+        JSGlobalObject__hasException(context))
+        fail("private ordinary instanceof mismatch");
+    const custom_constructor = evaluate(context, "globalThis.__private_has_instance_hits = 0; Object.defineProperty(function CustomCtor() {}, Symbol.hasInstance, { value(v) { __private_has_instance_hits++; return v === 42; } })");
+    if (!JSC__JSValue__isInstanceOf(EncodedValue.fromInt32(42), context, custom_constructor) or
+        JSC__JSValue__isInstanceOf(EncodedValue.fromInt32(41), context, custom_constructor) or
+        JSC__JSValue__toInt32(evaluate(context, "__private_has_instance_hits")) != 2)
+        fail("private Symbol.hasInstance mismatch");
+    const inert_has_instance = evaluate(context, "({ [Symbol.hasInstance]() { __private_has_instance_hits += 100; return true; } })");
+    if (JSC__JSValue__isInstanceOf(encoded_object, context, inert_has_instance) or
+        JSC__JSValue__toInt32(evaluate(context, "__private_has_instance_hits")) != 2 or
+        JSGlobalObject__hasException(context))
+        fail("private non-has-instance object precheck mismatch");
+    const proxy_constructor = evaluate(context, "new Proxy(function ProxyCtor() {}, { get(target, key, receiver) { if (key === Symbol.hasInstance) return () => true; return Reflect.get(target, key, receiver); } })");
+    if (!JSC__JSValue__isInstanceOf(encoded_object, sibling_context, proxy_constructor))
+        fail("private proxy hasInstance mismatch");
+    const throwing_constructor = evaluate(context, "Object.defineProperty(function ThrowCtor() {}, Symbol.hasInstance, { value() { throw 456; } })");
+    if (JSC__JSValue__isInstanceOf(encoded_object, context, throwing_constructor) or
+        !JSGlobalObject__hasException(context))
+        fail("private hasInstance throw did not publish exception");
+    const instance_exception = JSGlobalObject__tryTakeException(context);
+    if (JSC__Exception__asJSValue(instance_exception.cellPointer()) != EncodedValue.fromInt32(456))
+        fail("private hasInstance thrown value mismatch");
+    const invalid_prototype_constructor = evaluate(context, "globalThis.__private_bad_ctor = function BadCtor() {}; __private_bad_ctor.prototype = 1; __private_bad_ctor");
+    if (JSC__JSValue__isInstanceOf(encoded_object, context, invalid_prototype_constructor) or
+        !JSGlobalObject__hasException(context))
+        fail("private instanceof invalid prototype did not throw");
+    JSGlobalObject__clearException(context);
+
+    const explicit_iterable = evaluate(context, "globalThis.__private_iterator_gets = 0; ({ get [Symbol.iterator]() { __private_iterator_gets++; return function* () {}; } })");
+    if (!JSC__JSValue__isIterable(evaluate(context, "[]"), context) or
+        !JSC__JSValue__isIterable(explicit_iterable, sibling_context) or
+        JSC__JSValue__toInt32(evaluate(context, "__private_iterator_gets")) != 1 or
+        JSC__JSValue__isIterable(encoded_text, context) or
+        JSC__JSValue__isIterable(.null, context) or
+        JSC__JSValue__isIterable(evaluate(context, "({ [Symbol.iterator]: null })"), context) or
+        JSGlobalObject__hasException(context))
+        fail("private iterator-method predicate mismatch");
+    if (JSC__JSValue__isIterable(evaluate(context, "({ [Symbol.iterator]: 1 })"), context) or
+        !JSGlobalObject__hasException(context))
+        fail("private non-callable iterator did not throw");
+    const iterator_type_exception = JSGlobalObject__tryTakeException(context);
+    const iterator_type_error = JSC__Exception__asJSValue(iterator_type_exception.cellPointer());
+    if (!JSC__JSValue__isStrictEqual(getProperty(context, iterator_type_error, "name"), evaluate(context, "'TypeError'"), context))
+        fail("private non-callable iterator error type mismatch");
+    const throwing_iterable = evaluate(context, "({ get [Symbol.iterator]() { throw 321; } })");
+    if (JSC__JSValue__isIterable(throwing_iterable, sibling_context) or
+        !JSGlobalObject__hasException(context))
+        fail("private iterator getter throw did not publish exception");
+    const iterator_exception = JSGlobalObject__tryTakeException(context);
+    if (JSC__Exception__asJSValue(iterator_exception.cellPointer()) != EncodedValue.fromInt32(321))
+        fail("private iterator getter thrown value mismatch");
+    if (JSC__JSValue__isIterable(EncodedValue.fromRef(foreign_object), context) or
+        !JSGlobalObject__hasException(context))
+        fail("private iterator foreign value did not throw");
+    JSGlobalObject__clearException(context);
+    const pending_iterable = evaluate(context, "[]");
+    JSC__VM__throwError(vm, context, EncodedValue.fromInt32(88));
+    if (JSC__JSValue__isIterable(pending_iterable, context))
+        fail("private iterator predicate ignored existing exception");
+    const preserved_predicate_exception = JSGlobalObject__tryTakeException(context);
+    if (JSC__Exception__asJSValue(preserved_predicate_exception.cellPointer()) != EncodedValue.fromInt32(88))
+        fail("private iterator predicate replaced existing exception");
+
+    std.debug.print("Home private value shims: 50/50 symbols linked; runtime matrix passed\n", .{});
 }

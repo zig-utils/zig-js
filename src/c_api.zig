@@ -1577,6 +1577,72 @@ export fn Bun__JSValue__toNumber(encoded: EncodedValue, global: JSContextRef) ca
     };
 }
 
+export fn JSC__JSValue__isInstanceOf(
+    encoded: EncodedValue,
+    global: JSContextRef,
+    constructor_encoded: EncodedValue,
+) callconv(.c) bool {
+    const context = ctxForEvaluation(global) orelse return false;
+    const opaque_group = context.c_api_group orelse return false;
+    const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+    if (group.pending_exception != null) return false;
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return false;
+    };
+    defer context.popActiveInterpreter(&machine);
+    const candidate = privateValueFrom(global, encoded) orelse {
+        const err = machine.throwError("TypeError", "Value belongs to another VM");
+        privateSetPendingAbrupt(context, &machine, err);
+        return false;
+    };
+    const constructor = privateValueFrom(global, constructor_encoded) orelse {
+        const err = machine.throwError("TypeError", "Constructor belongs to another VM");
+        privateSetPendingAbrupt(context, &machine, err);
+        return false;
+    };
+    if (!constructor.isObject() or constructor.asObj().is_symbol or constructor.asObj().is_bigint)
+        return false;
+    const object = constructor.asObj();
+    const custom_has_instance = if (object.hostClassHooks()) |hooks| hooks.has_instance != null else false;
+    if (!object.isCallableObject() and !custom_has_instance) return false;
+    return machine.instanceOf(candidate, constructor) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return false;
+    };
+}
+
+export fn JSC__JSValue__isIterable(encoded: EncodedValue, global: JSContextRef) callconv(.c) bool {
+    const context = ctxForEvaluation(global) orelse return false;
+    const opaque_group = context.c_api_group orelse return false;
+    const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+    if (group.pending_exception != null) return false;
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return false;
+    };
+    defer context.popActiveInterpreter(&machine);
+    const internal = privateValueFrom(global, encoded) orelse {
+        const err = machine.throwError("TypeError", "Value belongs to another VM");
+        privateSetPendingAbrupt(context, &machine, err);
+        return false;
+    };
+    return machine.hasIteratorMethod(internal) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return false;
+    };
+}
+
 export fn JSC__JSValue__isStrictEqual(
     left: EncodedValue,
     right: EncodedValue,
