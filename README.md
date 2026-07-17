@@ -236,9 +236,10 @@ claim that Home's or Bun's private `JSC__*`/`Bun__*` ABI is implemented.
 The separately generated
 [Home private inventory](docs/abi/home-private-7ed99c02-inventory.json) makes
 that remaining boundary concrete: **448 unique extern symbols from 58 pinned
-files**, classified as 432 private (**80 implemented / 352 pending**), 15
-already-covered public-C overlaps, and one platform import, with zero duplicate
-or unclassified entries.
+files**, classified as 431 private (**80 implemented / 351 pending**), 15
+already-covered public-C overlaps, one platform import, and one
+consumer-generated `JSFunctionCall` definition, with zero duplicate or
+unclassified entries.
 Exact Home revisions `7ed99c02`, `5e829ad4`, `38702f9e`, and `4389ddee` are
 supported; all three newer revisions are verified byte-identical JSC-source
 aliases with zero added/removed/changed declarations, not unreviewed moving targets.
@@ -336,8 +337,9 @@ private exports remain excluded from the 117-function public count and 19
 extensions.
 The separate pinned
 [Bun core inventory](docs/abi/bun-private-core-4982b91e-inventory.json) contains
-437 symbols from 54 `src/jsc` files: 422 private (**73 implemented / 349
-pending**) and 15 public overlaps. Its exact comparison with Home finds 434
+437 symbols from 54 `src/jsc` files: 421 private (**73 implemented / 348
+pending**), 15 public overlaps, and one consumer-generated `JSFunctionCall`
+definition. Its exact comparison with Home finds 434
 shared names, 3 Bun-only names, 14 Home-only names, and 28 changed signatures;
 neither private profile is inferred from the other.
 The pinned public C inventory has no pending declarations. Inspector sessions

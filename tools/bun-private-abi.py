@@ -56,13 +56,24 @@ def expected_classification(name: str, public_names: set[str]) -> str:
         return "public_c_api"
     if name in PLATFORM_IMPORTS:
         return "platform_import"
+    if name in scanner.CONSUMER_PROVIDED:
+        return "consumer_provided"
     return "private_jsc"
 
 
 def apply_status(entries: list[dict[str, object]]) -> None:
     exports = set(EXPORT_RE.findall(EXPORT_SOURCE.read_text()))
+    public_data = json.loads(PUBLIC_INVENTORY.read_text())
+    public_names = {entry["name"] for entry in public_data["functions"]}
     for entry in entries:
+        entry["classification"] = expected_classification(str(entry["name"]), public_names)
         if entry["classification"] != "private_jsc":
+            if entry["classification"] == "public_c_api":
+                entry["status"] = "implemented"
+            else:
+                entry["status"] = "external"
+            entry.pop("issue", None)
+            entry.pop("implementation", None)
             continue
         if entry["name"] in exports:
             entry["status"] = "implemented"
@@ -77,7 +88,9 @@ def apply_status(entries: list[dict[str, object]]) -> None:
 def refresh_implementation_status(data: dict[str, object]) -> None:
     apply_status(data["declarations"])
     statuses = Counter(str(entry["status"]) for entry in data["declarations"])
+    classifications = Counter(str(entry["classification"]) for entry in data["declarations"])
     data["totals"]["by_status"] = dict(sorted(statuses.items()))
+    data["totals"]["by_classification"] = dict(sorted(classifications.items()))
 
 
 def home_comparison(entries: list[dict[str, object]]) -> dict[str, object]:
@@ -139,7 +152,7 @@ def generate(bun_root: Path) -> dict[str, object]:
         },
         "boundary": {
             "included": "legacy/private extern fn declarations under Bun src/jsc",
-            "excluded": "explicit public extern-c profile, bundled C libraries, runtime/webcore, N-API, and generated bindings",
+            "excluded": "explicit public extern-c profile, bundled C libraries, runtime/webcore, N-API, and generated bindings; consumer-generated definitions such as JSFunctionCall remain inventoried as consumer_provided",
             "implementation_issue": 164,
         },
         "calling_conventions": {
@@ -228,6 +241,7 @@ def main() -> None:
     print(
         f"Bun private ABI audit: {totals['symbols']} symbols from {totals['source_files']} files; "
         f"private={classes.get('private_jsc', 0)}, public={classes.get('public_c_api', 0)}, "
+        f"consumer-provided={classes.get('consumer_provided', 0)}, "
         f"implemented-private={statuses.get('implemented', 0) - classes.get('public_c_api', 0)}, "
         f"pending-private={statuses.get('pending', 0)}, unclassified=0; "
         f"Home shared={comparison['shared_symbols']}, Bun-only={len(comparison['bun_only_symbols'])}, "

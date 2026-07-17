@@ -44,9 +44,10 @@ convention. The exact current denominator is:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #163 | 432 (80 implemented, 352 pending) |
+| Private JSC/Bun/WebCore ABI under #163 | 431 (80 implemented, 351 pending) |
 | Overlap with zig-js's completed public C target | 15 |
 | Platform libc import | 1 |
+| Consumer-generated definition (`JSFunctionCall`) | 1 |
 | **Total** | **448** |
 
 The 448 declarations come from 58 pinned source files, with zero duplicate or
@@ -60,8 +61,11 @@ zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"
 ```
 
 This inventory is the denominator, not a claim that the whole surface works.
-The first eighty private entries are implemented; the other 352 remain pending
+The first eighty private entries are implemented; the other 351 remain pending
 until #163 provides their type/layout contracts, shims, and consumer evidence.
+`JSFunctionCall` remains revision-pinned in the declaration inventory but is
+not part of that denominator: each runtime-generated FFI module defines the
+function and resolves it locally after relocation.
 
 Home revisions `5e829ad483bb9e5ccb19766997df6462edd8e167`,
 `38702f9e43b3aecbee7d5b7aa48cc66d41cabde7`, and
@@ -295,8 +299,9 @@ profile contains 437 unique declarations from 54 hashed files:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #164 | 422 (73 implemented, 349 pending) |
+| Private JSC/Bun/WebCore ABI under #164 | 421 (73 implemented, 348 pending) |
 | Public-C overlap | 15 |
+| Consumer-generated definition (`JSFunctionCall`) | 1 |
 | **Total** | **437** |
 
 The checked-in comparison proves that Home cannot stand in for Bun: 434 symbol
@@ -311,5 +316,5 @@ zig build bun-private-abi-audit -Dbun-source-root="$HOME/Code/bun"
 
 The audit rejects revision, file hash, declaration digest, classification,
 calling-convention, implementation-status, and Home-comparison drift. It does
-not claim complete Bun runtime compatibility; #164 remains open for the 349
+not claim complete Bun runtime compatibility; #164 remains open for the 348
 pending core entries and later wider/generated profiles.

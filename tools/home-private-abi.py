@@ -26,6 +26,10 @@ ALIAS_PROFILES = {
 SOURCE_ROOT = Path("packages/runtime/src/jsc")
 EXTERN_RE = re.compile(r"\b(?:pub\s+)?extern\s+fn\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(")
 PLATFORM_IMPORTS = {"gnu_get_libc_version"}
+# Symbols declared in the pinned Zig sources but defined by the consumer rather
+# than imported from JavaScriptCore. Keep them in the revision-pinned inventory
+# for provenance, but never require zig-js to export a duplicate definition.
+CONSUMER_PROVIDED = {"JSFunctionCall"}
 EXPORT_RE = re.compile(r"^export fn ([A-Za-z_][A-Za-z0-9_]*)\s*\(", re.M)
 
 
@@ -133,6 +137,16 @@ def normalize(declaration: str) -> str:
     return re.sub(r"\s+", " ", declaration.strip())
 
 
+def expected_classification(name: str, public_names: set[str]) -> str:
+    if name in public_names:
+        return "public_c_api"
+    if name in PLATFORM_IMPORTS:
+        return "platform_import"
+    if name in CONSUMER_PROVIDED:
+        return "consumer_provided"
+    return "private_jsc"
+
+
 def declarations(path: Path, source_root: Path, public_names: set[str]) -> list[dict[str, object]]:
     source = path.read_text()
     masked = mask_non_code(source)
@@ -160,12 +174,11 @@ def declarations(path: Path, source_root: Path, public_names: set[str]) -> list[
         declaration = normalize(source[match.start():semicolon + 1])
         convention_match = re.search(r"callconv\(([^)]+)\)", source[close_paren + 1:semicolon])
         calling_convention = convention_match.group(1).strip() if convention_match else "C"
-        if name in public_names:
-            classification = "public_c_api"
+        classification = expected_classification(name, public_names)
+        if classification == "public_c_api":
             status = "implemented"
             issue = None
-        elif name in PLATFORM_IMPORTS:
-            classification = "platform_import"
+        elif classification in {"platform_import", "consumer_provided"}:
             status = "external"
             issue = None
         else:
@@ -232,7 +245,7 @@ def generate(home_root: Path) -> dict[str, object]:
         },
         "boundary": {
             "included": "Zig extern fn declarations under packages/runtime/src/jsc",
-            "excluded": "explicit extern \"c\" public profile declarations tracked by home-public-c-7ed99c02",
+            "excluded": "explicit extern \"c\" public profile declarations tracked by home-public-c-7ed99c02; consumer-generated definitions such as JSFunctionCall remain inventoried as consumer_provided",
             "implementation_issue": 163,
         },
         "calling_conventions": {
@@ -251,8 +264,17 @@ def generate(home_root: Path) -> dict[str, object]:
 
 def refresh_implementation_status(data: dict[str, object]) -> None:
     zig_js_exports = set(EXPORT_RE.findall(EXPORT_SOURCE.read_text()))
+    public_data = json.loads(PUBLIC_INVENTORY.read_text())
+    public_names = {entry["name"] for entry in public_data["functions"]}
     for entry in data["declarations"]:
+        entry["classification"] = expected_classification(str(entry["name"]), public_names)
         if entry["classification"] != "private_jsc":
+            if entry["classification"] == "public_c_api":
+                entry["status"] = "implemented"
+            else:
+                entry["status"] = "external"
+            entry.pop("issue", None)
+            entry.pop("implementation", None)
             continue
         if entry["name"] in zig_js_exports:
             entry["status"] = "implemented"
@@ -263,7 +285,9 @@ def refresh_implementation_status(data: dict[str, object]) -> None:
             entry["issue"] = 163
             entry.pop("implementation", None)
     statuses = Counter(str(entry["status"]) for entry in data["declarations"])
+    classifications = Counter(str(entry["classification"]) for entry in data["declarations"])
     data["totals"]["by_status"] = dict(sorted(statuses.items()))
+    data["totals"]["by_classification"] = dict(sorted(classifications.items()))
 
 
 def verify_alias(home_root: Path, stored: dict[str, object], profile_id: str) -> None:
@@ -331,7 +355,7 @@ def validate_stored(data: dict[str, object]) -> None:
             fail("stored declaration is missing a name or signature")
         if entry.get("calling_convention") not in conventions:
             fail(f"{name} has an unsupported calling convention")
-        if classification not in {"public_c_api", "platform_import", "private_jsc"}:
+        if classification not in {"public_c_api", "platform_import", "consumer_provided", "private_jsc"}:
             fail(f"{name} is unclassified")
         if entry.get("declaration_sha256") != sha256_bytes(declaration.encode()):
             fail(f"{name} declaration digest drift")
@@ -343,13 +367,9 @@ def validate_stored(data: dict[str, object]) -> None:
                 fail(f"{name} pending status is not linked to #163")
             if expected_status == "implemented" and entry.get("implementation") != "src/c_api.zig":
                 fail(f"{name} implementation location drift")
-        expected_classification = (
-            "public_c_api" if name in public_names
-            else "platform_import" if name in PLATFORM_IMPORTS
-            else "private_jsc"
-        )
-        if classification != expected_classification:
-            fail(f"{name} classification drift: {classification} != {expected_classification}")
+        expected = expected_classification(name, public_names)
+        if classification != expected:
+            fail(f"{name} classification drift: {classification} != {expected}")
         names.append(name)
         counts[str(classification)] += 1
     if len(names) != len(set(names)):
@@ -402,6 +422,7 @@ def main() -> None:
         f"Home private ABI audit: {args.profile}: {totals['symbols']} symbols from {totals['source_files']} files; "
         f"private={classes.get('private_jsc', 0)}, public={classes.get('public_c_api', 0)}, "
         f"platform={classes.get('platform_import', 0)}, "
+        f"consumer-provided={classes.get('consumer_provided', 0)}, "
         f"implemented-private={statuses.get('implemented', 0) - classes.get('public_c_api', 0)}, "
         f"pending-private={statuses.get('pending', 0)}, unclassified=0"
     )

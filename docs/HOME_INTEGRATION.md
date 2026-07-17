@@ -35,9 +35,10 @@ the thousands of LLInt and private/generated binding symbols above.
 
 The first source-level private inventory is now reproducible too. At the same
 pinned Home revision, the 58 JSC source files containing legacy/private
-`extern fn` declarations require 448 unique symbols: 432 private JSC/Bun/WebCore
-entries, 15 public-C overlaps already implemented by zig-js, and one platform
-libc import. See [the exact declaration inventory](abi/home-private-7ed99c02-inventory.json)
+`extern fn` declarations contain 448 unique symbols: 431 private
+JSC/Bun/WebCore imports, 15 public-C overlaps already implemented by zig-js,
+one platform libc import, and one consumer-generated `JSFunctionCall`
+definition. See [the exact declaration inventory](abi/home-private-7ed99c02-inventory.json)
 and run:
 
 ```sh
@@ -47,8 +48,10 @@ zig build home-private-abi-audit \
 ```
 
 This verifies the live revision, every source hash, signature, classification,
-and calling convention. It replaces a vague source-level estimate, but the 432
-private entries are now 80 implemented / 352 pending under #163. The implemented
+and calling convention. It replaces a vague source-level estimate, but the 431
+private imports are now 80 implemented / 351 pending under #163. The generated
+FFI wrapper emits and resolves `JSFunctionCall` inside its own compiled module,
+so zig-js must not provide a duplicate symbol. The implemented
 slices cover JSC64 value identity, cell equality, truthiness, int32 extraction,
 exact signed/unsigned 64-bit BigInt construction, and modulo-2^64 BigInt
 extraction with the pinned number fallbacks, plus exact strict and SameValue

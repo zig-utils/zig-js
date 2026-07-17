@@ -81,14 +81,15 @@
     "symbols": 448,
     "source_files": 58,
     "by_classification": {
+      "consumer_provided": 1,
       "platform_import": 1,
-      "private_jsc": 432,
+      "private_jsc": 431,
       "public_c_api": 15
     },
     "by_status": {
-      "external": 1,
+      "external": 2,
       "implemented": 95,
-      "pending": 352
+      "pending": 351
     }
   },
   "declarations": [
@@ -3001,11 +3002,10 @@
       "source": "FFI.zig",
       "line": 120,
       "calling_convention": "C",
-      "classification": "private_jsc",
-      "status": "pending",
+      "classification": "consumer_provided",
+      "status": "external",
       "declaration": "pub extern fn JSFunctionCall(globalObject: ?*anyopaque, callFrame: ?*anyopaque) ?*anyopaque;",
-      "declaration_sha256": "331f7696a7573c62c0063ec1db2ba021806d0e0b24cbcf95d85839eb137e8c1e",
-      "issue": 163
+      "declaration_sha256": "331f7696a7573c62c0063ec1db2ba021806d0e0b24cbcf95d85839eb137e8c1e"
     },
     {
       "name": "JSFunction__createFromZig",

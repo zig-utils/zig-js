@@ -27,7 +27,7 @@ Home/Bun ABI work.
 
 Private-profile exports are audited independently and never inflate the public
 or extension totals. The pinned Home inventory currently reports eighty
-private exports and 352 pending private symbols; `zig build test-home-private-abi` and
+private exports and 351 pending private symbols; `zig build test-home-private-abi` and
 `zig build test-private-jstype` are their focused compile-link-runtime gates.
 The eighty cover JSC64 identity, cell equality,
 truthiness, int32 extraction, exact signed/unsigned 64-bit BigInt construction,
@@ -92,10 +92,12 @@ modulo-2^64 conversion for validated heap BigInts. The combined 78-symbol fixtur
 covers sibling realms, foreign-VM failures, exception clearing, callback
 reentrancy, and already-settled targets.
 
-Bun's separately pinned core `src/jsc` inventory reports 422 private symbols,
-of which the same seventy-three shims are implemented and 349 remain pending. Its
+Bun's separately pinned core `src/jsc` inventory reports 421 private symbols,
+of which the same seventy-three shims are implemented and 348 remain pending. Its
 source/signature audit is `zig build bun-private-abi-audit`; broader Bun runtime
-and generated bindings are outside that first core profile. Bun JSType numbering
+and generated bindings are outside that first core profile. The inventoried
+`JSFunctionCall` declaration is consumer-provided because each runtime-compiled
+FFI module emits and resolves its own definition. Bun JSType numbering
 is selected with `-Dprivate-abi-consumer=bun` and verified by
 `zig build test-private-jstype -Dprivate-abi-consumer=bun`.
 
