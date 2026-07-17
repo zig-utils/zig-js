@@ -88,8 +88,8 @@
     },
     "by_status": {
       "external": 2,
-      "implemented": 263,
-      "pending": 183
+      "implemented": 264,
+      "pending": 182
     }
   },
   "declarations": [
@@ -3013,10 +3013,10 @@
       "line": 24,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSFunction__createFromZig( global: *JSGlobalObject, fn_name: bun.String, implementation: *const JSHostFn, arg_count: u32, implementation_visibility: ImplementationVisibility, intrinsic: Intrinsic, constructor: ?*const JSHostFn, ) JSValue;",
       "declaration_sha256": "c28f8a7804a74c8b58b262f8fcd6312c08c01fcd2ec412de462afe6d72cdbeb0",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSGarbageCollect",

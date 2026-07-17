@@ -96,6 +96,16 @@ const JSStringIterator = extern struct {
     write16: ?*const fn (*JSStringIterator, [*]const u16, u32, u32) callconv(.c) void,
 };
 
+const PrivateCallFrame = opaque {};
+const JSHostFn = fn (JSContextRef, *PrivateCallFrame) callconv(.c) EncodedValue;
+const ImplementationVisibility = enum(u8) {
+    public = 0,
+    private = 1,
+    private_recursive = 2,
+    _,
+};
+const Intrinsic = enum(u8) { none = 0, _ };
+
 const PrivateBunArrayBuffer = extern struct {
     ptr: ?[*]u8 = null,
     len: usize = 0,
@@ -164,6 +174,7 @@ extern "c" fn BunString__toJSWithLength(JSContextRef, *const BunString, usize) E
 extern "c" fn BunString__transferToJS(*BunString, JSContextRef) EncodedValue;
 extern "c" fn BunString__createArray(JSContextRef, [*c]const BunString, usize) EncodedValue;
 extern "c" fn JSC__JSString__iterator(?*anyopaque, JSContextRef, ?*anyopaque) void;
+extern "c" fn JSFunction__createFromZig(JSContextRef, BunString, ?*const JSHostFn, u32, ImplementationVisibility, Intrinsic, ?*const JSHostFn) EncodedValue;
 extern "c" fn StringBuilder__init(*anyopaque) void;
 extern "c" fn StringBuilder__deinit(*anyopaque) void;
 extern "c" fn StringBuilder__ensureUnusedCapacity(*anyopaque, usize) void;
@@ -450,6 +461,74 @@ fn iterableFixtureCallback(vm: ?*anyopaque, global: JSContextRef, raw: ?*anyopaq
         fail("private iterable callback metadata mismatch");
     state.values[state.calls] = item;
     state.calls += 1;
+}
+
+const HostFunctionFixtureState = struct {
+    global: JSContextRef = null,
+    callee: EncodedValue = .empty,
+    this_value: EncodedValue = .empty,
+    args: [2]EncodedValue = @splat(.undefined),
+    calls: usize = 0,
+    constructs: usize = 0,
+};
+
+var host_function_fixture = HostFunctionFixtureState{};
+var host_function_foreign_result: EncodedValue = .empty;
+
+fn callFrameSlots(frame: *PrivateCallFrame) [*]const EncodedValue {
+    return @ptrCast(@alignCast(frame));
+}
+
+fn callFrameArgumentCount(slots: [*]const EncodedValue) u32 {
+    const bits: u64 = @bitCast(@intFromEnum(slots[4]));
+    return @truncate(bits);
+}
+
+fn hostFunctionAdd(global: JSContextRef, frame: *PrivateCallFrame) callconv(.c) EncodedValue {
+    const slots = callFrameSlots(frame);
+    if (global != host_function_fixture.global or
+        !JSC__JSValue__isStrictEqual(slots[3], host_function_fixture.callee, global) or
+        callFrameArgumentCount(slots) != 3 or
+        !JSC__JSValue__isStrictEqual(slots[5], host_function_fixture.this_value, global) or
+        slots[6] != host_function_fixture.args[0] or
+        slots[7] != host_function_fixture.args[1])
+        fail("private JSHostFn CallFrame call layout mismatch");
+    host_function_fixture.calls += 1;
+    return EncodedValue.fromInt32(JSC__JSValue__toInt32(slots[6]) + JSC__JSValue__toInt32(slots[7]));
+}
+
+fn hostFunctionConstruct(global: JSContextRef, frame: *PrivateCallFrame) callconv(.c) EncodedValue {
+    const slots = callFrameSlots(frame);
+    if (global != host_function_fixture.global or
+        !JSC__JSValue__isStrictEqual(slots[3], host_function_fixture.callee, global) or
+        callFrameArgumentCount(slots) != 2 or
+        !JSC__JSValue__isStrictEqual(slots[5], slots[3], global) or
+        slots[6] != host_function_fixture.args[0])
+        fail("private JSHostFn CallFrame construct layout mismatch");
+    host_function_fixture.constructs += 1;
+    const instance = JSC__JSValue__createEmptyObject(global, 1);
+    const answer_bytes = "answer";
+    const answer = ZigString{ .tagged_ptr = @intFromPtr(answer_bytes.ptr), .len = answer_bytes.len };
+    JSC__JSValue__put(instance, global, &answer, slots[6]);
+    return instance;
+}
+
+fn hostFunctionThrow(global: JSContextRef, frame: *PrivateCallFrame) callconv(.c) EncodedValue {
+    _ = frame;
+    JSC__VM__throwError(JSC__JSGlobalObject__vm(global), global, EncodedValue.fromInt32(2481));
+    return .empty;
+}
+
+fn hostFunctionEmpty(global: JSContextRef, frame: *PrivateCallFrame) callconv(.c) EncodedValue {
+    _ = global;
+    _ = frame;
+    return .empty;
+}
+
+fn hostFunctionForeign(global: JSContextRef, frame: *PrivateCallFrame) callconv(.c) EncodedValue {
+    _ = global;
+    _ = frame;
+    return host_function_foreign_result;
 }
 
 fn fail(message: []const u8) noreturn {
@@ -2172,6 +2251,116 @@ pub fn main() void {
         !JSC__JSValue__toBoolean(evaluate(sibling_context, "Object.getPrototypeOf(__private_sibling_bun_string_array) === Array.prototype")))
         fail("BunString selected-realm conversion mismatch");
 
+    var host_name_bytes = [_]u8{ 'n', 'a', 't', 'i', 'v', 'e', 'A', 'd', 'd' };
+    const host_name = BunString{
+        .tag = .static_zig_string,
+        .value = .{ .zig_string = .{ .tagged_ptr = @intFromPtr(&host_name_bytes), .len = host_name_bytes.len } },
+    };
+    const host_function = JSFunction__createFromZig(
+        context,
+        host_name,
+        hostFunctionAdd,
+        2,
+        .private_recursive,
+        .none,
+        hostFunctionConstruct,
+    );
+    if (host_function == .empty or JSGlobalObject__hasException(context))
+        fail("private JSFunction creation failed");
+    host_name_bytes[0] = 'X';
+    exposeCell(context, "__private_host_function_248", host_function);
+    if (!JSC__JSValue__toBoolean(evaluate(context, "typeof __private_host_function_248 === 'function' && __private_host_function_248.name === 'nativeAdd' && __private_host_function_248.length === 2 && Object.getPrototypeOf(__private_host_function_248) === Function.prototype && Object.getOwnPropertyDescriptor(__private_host_function_248, 'name').configurable === true && Object.getOwnPropertyDescriptor(__private_host_function_248, 'length').writable === false")))
+        fail("private JSFunction metadata/name ownership mismatch");
+
+    const host_receiver = evaluate(context, "({ receiver: 248 })");
+    exposeCell(context, "__private_host_receiver_248", host_receiver);
+    host_function_fixture = .{
+        .global = context,
+        .callee = host_function,
+        .this_value = host_receiver,
+        .args = .{ EncodedValue.fromInt32(11), EncodedValue.fromInt32(22) },
+    };
+    if (!JSC__JSValue__isStrictEqual(
+        evaluate(context, "__private_host_function_248.call(__private_host_receiver_248, 11, 22)"),
+        EncodedValue.fromInt32(33),
+        context,
+    ) or host_function_fixture.calls != 1)
+        fail("private JSFunction call result mismatch");
+
+    host_function_fixture.args[0] = EncodedValue.fromInt32(41);
+    if (!JSC__JSValue__toBoolean(evaluate(context, "new __private_host_function_248(41).answer === 41")) or
+        host_function_fixture.constructs != 1)
+        fail("private JSFunction explicit constructor mismatch");
+
+    _ = JSC__VM__runGC(vm, true);
+    host_function_fixture.this_value = host_receiver;
+    host_function_fixture.args = .{ EncodedValue.fromInt32(2), EncodedValue.fromInt32(3) };
+    if (!JSC__JSValue__isStrictEqual(
+        evaluate(context, "__private_host_function_248.call(__private_host_receiver_248, 2, 3)"),
+        EncodedValue.fromInt32(5),
+        context,
+    )) fail("private JSFunction GC rooting mismatch");
+
+    exposeCell(sibling_context, "__private_sibling_host_function_248", host_function);
+    const sibling_host_receiver = evaluate(sibling_context, "({ siblingReceiver: 248 })");
+    exposeCell(sibling_context, "__private_sibling_host_receiver_248", sibling_host_receiver);
+    host_function_fixture.this_value = sibling_host_receiver;
+    host_function_fixture.args = .{ EncodedValue.fromInt32(7), EncodedValue.fromInt32(8) };
+    if (!JSC__JSValue__isStrictEqual(
+        evaluate(sibling_context, "__private_sibling_host_function_248.call(__private_sibling_host_receiver_248, 7, 8)"),
+        EncodedValue.fromInt32(15),
+        sibling_context,
+    )) fail("private JSFunction sibling-realm call mismatch");
+
+    const default_constructor = JSFunction__createFromZig(context, empty_bun_string, hostFunctionAdd, 0, .public, .none, null);
+    exposeCell(context, "__private_default_constructor_248", default_constructor);
+    if (!JSC__JSValue__toBoolean(evaluate(
+        context,
+        "try { new __private_default_constructor_248(); false } catch (error) { error instanceof TypeError }",
+    ))) fail("private JSFunction default constructor did not throw");
+
+    const throwing_host = JSFunction__createFromZig(context, empty_bun_string, hostFunctionThrow, 0, .private, .none, null);
+    exposeCell(context, "__private_throwing_host_248", throwing_host);
+    if (!JSC__JSValue__toBoolean(evaluate(
+        context,
+        "try { __private_throwing_host_248(); false } catch (error) { error === 2481 }",
+    ))) fail("private JSFunction pending exception translation mismatch");
+
+    const empty_host = JSFunction__createFromZig(context, empty_bun_string, hostFunctionEmpty, 0, .public, .none, null);
+    exposeCell(context, "__private_empty_host_248", empty_host);
+    if (!JSC__JSValue__toBoolean(evaluate(
+        context,
+        "try { __private_empty_host_248(); false } catch (error) { error instanceof TypeError }",
+    ))) fail("private JSFunction empty return was accepted");
+
+    host_function_foreign_result = evaluate(foreign_context, "({ foreign: 248 })");
+    const foreign_host = JSFunction__createFromZig(context, empty_bun_string, hostFunctionForeign, 0, .public, .none, null);
+    exposeCell(context, "__private_foreign_host_248", foreign_host);
+    if (!JSC__JSValue__toBoolean(evaluate(
+        context,
+        "try { __private_foreign_host_248(); false } catch (error) { error instanceof TypeError }",
+    ))) fail("private JSFunction foreign return was accepted");
+
+    if (JSFunction__createFromZig(context, empty_bun_string, null, 0, .public, .none, null) != .empty or
+        !JSGlobalObject__hasException(context))
+        fail("private JSFunction null implementation was accepted");
+    const null_implementation_exception = JSGlobalObject__tryTakeException(context);
+    if (!JSC__JSValue__isAnyError(JSC__Exception__asJSValue(null_implementation_exception.cellPointer())))
+        fail("private JSFunction null implementation exception mismatch");
+
+    const dead_host_name = BunString{ .tag = .dead, .value = .{ .zig_string = .{ .tagged_ptr = 0, .len = 0 } } };
+    if (JSFunction__createFromZig(context, dead_host_name, hostFunctionAdd, 0, .public, .none, null) != .empty or
+        !JSGlobalObject__hasException(context))
+        fail("private JSFunction dead name was accepted");
+    JSGlobalObject__clearException(context);
+
+    JSC__VM__throwError(vm, context, EncodedValue.fromInt32(2482));
+    if (JSFunction__createFromZig(context, empty_bun_string, hostFunctionAdd, 0, .public, .none, null) != .empty)
+        fail("private JSFunction ignored a pending exception");
+    const preserved_host_exception = JSGlobalObject__tryTakeException(context);
+    if (JSC__Exception__asJSValue(preserved_host_exception.cellPointer()) != EncodedValue.fromInt32(2482))
+        fail("private JSFunction replaced a pending exception");
+
     const sibling_type_error = ZigString__toTypeErrorInstance(&latin1_string.value.zig_string, sibling_context);
     exposeCell(sibling_context, "__private_sibling_type_error", sibling_type_error);
     if (!JSC__JSValue__toBoolean(evaluate(sibling_context, "Object.getPrototypeOf(__private_sibling_type_error) === TypeError.prototype && __private_sibling_type_error.message === 'café'")))
@@ -3594,5 +3783,5 @@ pub fn main() void {
         TopExceptionScope__exceptionIncludingTraps(&verification_scope) != null)
         fail("private TopExceptionScope destruction mismatch");
 
-    std.debug.print("Home private value shims: 247/247 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 248/248 symbols linked; runtime matrix passed\n", .{});
 }

@@ -120,6 +120,35 @@ const PrivateJSStringIterator = extern struct {
     write16: ?*const fn (*PrivateJSStringIterator, [*]const u16, u32, u32) callconv(.c) void,
 };
 
+/// JSC host functions receive a pointer to the first register of the pinned
+/// CallFrame layout and return one JSC64 EncodedJSValue word. Home declares the
+/// function type itself and passes `*const JSHostFn`; spelling it this way keeps
+/// the pointer ABI identical while letting us reject a null implementation at
+/// the external boundary.
+const PrivateJSHostFn = fn (JSContextRef, *PrivateCallFrame) callconv(.c) EncodedValue;
+const PrivateCallFrame = opaque {};
+
+const PrivateImplementationVisibility = enum(u8) {
+    public = 0,
+    private = 1,
+    private_recursive = 2,
+    _,
+};
+
+const PrivateIntrinsic = enum(u8) {
+    none = 0,
+    _,
+};
+
+const PrivateHostFunctionRecord = struct {
+    context: *Context,
+    implementation: *const PrivateJSHostFn,
+    constructor: ?*const PrivateJSHostFn,
+    name: []const u8,
+    implementation_visibility: PrivateImplementationVisibility,
+    intrinsic: PrivateIntrinsic,
+};
+
 const private_string_builder_magic: usize = 0x5a4a_5342_0000_0000; // "ZJSB"
 const private_string_builder_overflow: usize = 0x8000_0000;
 const private_string_builder_capacity_mask: usize = 0x7fff_ffff;
@@ -161,6 +190,8 @@ comptime {
     if (@sizeOf(PrivateJSStringIterator) != 48 or @alignOf(PrivateJSStringIterator) != 8 or
         @offsetOf(PrivateJSStringIterator, "stop") != 8 or @offsetOf(PrivateJSStringIterator, "append8") != 16)
         @compileError("private JSString iterator layout drifted from the pinned ABI");
+    if (@sizeOf(*const PrivateJSHostFn) != 8 or @alignOf(*const PrivateJSHostFn) != 8)
+        @compileError("private JSHostFn pointer must retain the pinned 64-bit ABI");
     if (@offsetOf(PrivateWTFStringImpl, "m_ref_count") != 0 or
         @offsetOf(PrivateWTFStringImpl, "m_length") != 4 or
         @offsetOf(PrivateWTFStringImpl, "m_ptr") != 8 or
@@ -1581,6 +1612,153 @@ fn privateEncodeResult(context: *Context, machine: *interp.Interpreter, result: 
     if (encoded == .empty)
         privateSetPendingAbrupt(context, machine, error.OutOfMemory);
     return encoded;
+}
+
+/// Invoke a Home/Bun `JSHostFn` using JavaScriptCore's 64-bit CallFrame register
+/// layout. The consumer's opaque `CallFrame` methods index these words directly:
+/// 0 caller, 1 return PC, 2 code block, 3 callee, 4 argc including `this`, 5
+/// receiver/new.target, then the ordinary arguments.
+fn privateJSHostFunctionNative(
+    opaque_machine: *anyopaque,
+    this_value: Value,
+    args: []const Value,
+) value.HostError!Value {
+    const machine: *interp.Interpreter = @ptrCast(@alignCast(opaque_machine));
+    const function = machine.active_native orelse
+        return machine.throwError("TypeError", "Zig host function is missing its callee");
+    const record: *const PrivateHostFunctionRecord = @ptrCast(@alignCast(function.private_data orelse
+        return machine.throwError("TypeError", "Zig host function is missing its implementation")));
+    const constructing = !machine.new_target.isUndefined();
+    const callback = if (constructing)
+        record.constructor orelse return machine.throwError("TypeError", "Zig host function is not a constructor")
+    else
+        record.implementation;
+
+    const register_count = std.math.add(usize, args.len, 6) catch
+        return machine.throwError("RangeError", "Too many host function arguments");
+    if (args.len >= std.math.maxInt(i32))
+        return machine.throwError("RangeError", "Too many host function arguments");
+    const registers = try machine.arena.alloc(EncodedValue, register_count);
+    @memset(registers, .empty);
+    registers[3] = privateEncodedFromValue(record.context, Value.obj(function));
+    registers[4] = EncodedValue.fromInt32(@intCast(args.len + 1));
+    registers[5] = privateEncodedFromValue(
+        record.context,
+        if (constructing) machine.new_target else this_value,
+    );
+    if (registers[3] == .empty or registers[5] == .empty) return error.OutOfMemory;
+    for (args, registers[6..]) |arg, *slot| {
+        slot.* = privateEncodedFromValue(record.context, arg);
+        if (slot.* == .empty) return error.OutOfMemory;
+    }
+
+    const result = callback(
+        @ptrCast(record.context),
+        @ptrCast(@alignCast(registers.ptr)),
+    );
+    if (privateTakePendingExceptionValue(record.context)) |thrown| {
+        machine.exception = thrown;
+        return error.Throw;
+    }
+    if (result == .empty)
+        return machine.throwError("TypeError", "Zig host function returned an empty value without an exception");
+    const internal = privateValueFrom(@ptrCast(record.context), result) orelse
+        return machine.throwError("TypeError", "Zig host function returned an invalid or foreign value");
+    if (constructing and !internal.isObject())
+        return machine.throwError("TypeError", "Zig host constructor must return an object");
+    return internal;
+}
+
+/// Create the pinned private-JSC host-function object. Visibility and intrinsic
+/// are execution-tier hints in JSC; zig-js stores their exact ABI values for
+/// future tiers while preserving the observable call/construct semantics now.
+export fn JSFunction__createFromZig(
+    global: JSContextRef,
+    fn_name: PrivateBunString,
+    implementation: ?*const PrivateJSHostFn,
+    arg_count: u32,
+    implementation_visibility: PrivateImplementationVisibility,
+    intrinsic: PrivateIntrinsic,
+    constructor: ?*const PrivateJSHostFn,
+) callconv(.c) EncodedValue {
+    const context = ctxForEvaluation(global) orelse return .empty;
+    const group = privatePropertyBoundaryGroup(context) orelse return .empty;
+    if (group.pending_exception != null) return .empty;
+
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    defer context.popActiveInterpreter(&machine);
+
+    const implementation_fn = implementation orelse {
+        const abrupt = machine.throwError("TypeError", "JSFunction implementation must not be null");
+        privateSetPendingAbrupt(context, &machine, abrupt);
+        return .empty;
+    };
+    const name_value = privateBunStringValue(context, &fn_name, null) catch |err| {
+        privatePublishBunStringError(context, err);
+        return .empty;
+    };
+    const name = name_value.asStr();
+    const name_copy = context.arena().dupe(u8, name) catch {
+        privateSetPendingAbrupt(context, &machine, error.OutOfMemory);
+        return .empty;
+    };
+    const record = context.arena().create(PrivateHostFunctionRecord) catch {
+        privateSetPendingAbrupt(context, &machine, error.OutOfMemory);
+        return .empty;
+    };
+    record.* = .{
+        .context = context,
+        .implementation = implementation_fn,
+        .constructor = constructor,
+        .name = name_copy,
+        .implementation_visibility = implementation_visibility,
+        .intrinsic = intrinsic,
+    };
+    const object = gc_mod.allocObject(context.gc, context.arena()) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    object.* = .{
+        .native = privateJSHostFunctionNative,
+        // JSC installs `callHostFunctionAsConstructor` when no explicit
+        // constructor is supplied. It still has a construct entry, which throws.
+        .native_ctor = true,
+        .proto = machine.functionProto(),
+        .private_data = @ptrCast(record),
+    };
+    const function_attr: value.PropAttr = .{
+        .writable = false,
+        .enumerable = false,
+        .configurable = true,
+    };
+    object.setOwn(context.arena(), context.root_shape, "length", Value.num(@floatFromInt(arg_count))) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    object.setAttr(context.arena(), "length", function_attr) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    object.setOwn(context.arena(), context.root_shape, "name", Value.strAlloc(context.arena(), name_copy) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    }) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    object.setAttr(context.arena(), "name", function_attr) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    return privateEncodeResult(context, &machine, Value.obj(object));
 }
 
 fn privateBigIntModuloU64(object: *Object) u64 {
