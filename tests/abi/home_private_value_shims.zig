@@ -240,6 +240,7 @@ extern "c" fn JSC__JSValue__getName(EncodedValue, JSContextRef, *BunString) void
 extern "c" fn JSC__JSValue__jsonStringify(EncodedValue, JSContextRef, u32, *BunString) void;
 extern "c" fn JSC__JSValue__jsonStringifyFast(EncodedValue, JSContextRef, *BunString) void;
 extern "c" fn JSC__JSValue__isJSXElement(EncodedValue, JSContextRef) bool;
+extern "c" fn Bun__ProxyObject__getInternalField(EncodedValue, u32) EncodedValue;
 extern "c" fn JSC__JSValue__deepEquals(EncodedValue, EncodedValue, JSContextRef) bool;
 extern "c" fn JSC__JSValue__strictDeepEquals(EncodedValue, EncodedValue, JSContextRef) bool;
 extern "c" fn JSC__JSValue__jestDeepEquals(EncodedValue, EncodedValue, JSContextRef) bool;
@@ -1161,6 +1162,13 @@ pub fn main() void {
         !JSC__JSValue__isJSXElement(evaluate(context, "({ $$typeof: Symbol.for('react.transitional.element') })"), context) or
         JSC__JSValue__isJSXElement(evaluate(context, "({ $$typeof: Symbol('react.element') })"), context))
         fail("private JSX element registry predicate mismatch");
+    const proxy_value = evaluate(context, "globalThis.__proxy_target_233 = { target: 233 }; globalThis.__proxy_handler_233 = {}; new Proxy(__proxy_target_233, __proxy_handler_233)");
+    if (!JSC__JSValue__isStrictEqual(Bun__ProxyObject__getInternalField(proxy_value, 0), evaluate(context, "__proxy_target_233"), context) or
+        !JSC__JSValue__isStrictEqual(Bun__ProxyObject__getInternalField(proxy_value, 1), evaluate(context, "__proxy_handler_233"), context) or
+        Bun__ProxyObject__getInternalField(evaluate(context, "({})"), 0) != .empty or
+        Bun__ProxyObject__getInternalField(proxy_value, 2) != .empty or
+        Bun__ProxyObject__getInternalField(evaluate(context, "(() => { const value = Proxy.revocable({}, {}); value.revoke(); return value.proxy; })()"), 0) != .null)
+        fail("private proxy internal-field projection mismatch");
     const cyclic_left = evaluate(context, "(() => { const value = { key: [1, undefined] }; value.self = value; return value; })()");
     const cyclic_right = evaluate(context, "(() => { const value = { key: [1, undefined] }; value.self = value; return value; })()");
     if (!JSC__JSValue__deepEquals(cyclic_left, cyclic_right, context) or
@@ -3263,5 +3271,5 @@ pub fn main() void {
         TopExceptionScope__exceptionIncludingTraps(&verification_scope) != null)
         fail("private TopExceptionScope destruction mismatch");
 
-    std.debug.print("Home private value shims: 224/224 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 225/225 symbols linked; runtime matrix passed\n", .{});
 }

@@ -88,8 +88,8 @@
     },
     "by_status": {
       "external": 2,
-      "implemented": 240,
-      "pending": 206
+      "implemented": 241,
+      "pending": 205
     }
   },
   "declarations": [
@@ -429,10 +429,10 @@
       "line": 2320,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn Bun__ProxyObject__getInternalField(this: JSValue, field: ProxyInternalField) JSValue;",
       "declaration_sha256": "81844c7ebf6fafd3c3d0de30f3522894c8bdc00ac9fdad830836ff49cef6f23f",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Bun__ScriptExecutionContext__removeFromContextsMapByIdentifier",

@@ -293,6 +293,10 @@ const CContextGroup = struct {
     owner_thread: std.Thread.Id,
     primary: *Context,
     contexts: std.ArrayListUnmanaged(*Context) = .empty,
+    /// Private EncodedJSValue boundaries expose the engine cell address, so
+    /// publishing the same object twice must return the same encoded handle.
+    /// Keep one canonical Boxed cell per VM-owned object across sibling realms.
+    private_object_boxes: std.AutoHashMapUnmanaged(*Object, *Boxed) = .empty,
     /// VM-owned atom strings. Equal `ZigString__toAtomicValue` inputs share
     /// one immutable backing cell inside this context group, never across VMs.
     atom_strings: strcell.InternTable,
@@ -345,6 +349,7 @@ const CContextGroup = struct {
             self.contexts.items[index].destroySharedArenaRealm();
         }
         self.contexts.deinit(gpa);
+        self.private_object_boxes.deinit(gpa);
         self.primary.c_api_group = null;
         self.primary.destroy();
         self.atom_strings.deinit();
@@ -1478,7 +1483,18 @@ fn privateEncodedFromValue(context: *Context, internal: Value) EncodedValue {
             }
             break :number EncodedValue.fromDouble(value_);
         },
-        .string, .object => privateEncodedFromRef(box(context, internal)),
+        .string => privateEncodedFromRef(box(context, internal)),
+        .object => object: {
+            const opaque_group = context.c_api_group orelse
+                break :object privateEncodedFromRef(box(context, internal));
+            const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+            const object_ptr = internal.asObj();
+            if (group.private_object_boxes.get(object_ptr)) |existing|
+                break :object privateEncodedFromRef(@ptrCast(existing));
+            const created: *Boxed = @ptrCast(@alignCast(box(context, internal) orelse break :object .empty));
+            group.private_object_boxes.put(gpa, object_ptr, created) catch break :object .empty;
+            break :object privateEncodedFromRef(@ptrCast(created));
+        },
     };
 }
 
@@ -5258,6 +5274,34 @@ export fn JSC__JSValue__isJSXElement(
         return false;
     };
     return value.strictEquals(type_value, transitional);
+}
+
+const PrivateProxyInternalField = enum(u32) {
+    target = 0,
+    handler = 1,
+    _,
+};
+
+/// Pure projection of JSC::ProxyObject's two write-barrier fields. This is an
+/// inspector primitive: it never performs an ordinary property read or invokes
+/// a proxy trap. Revocation clears both fields to JavaScript null.
+export fn Bun__ProxyObject__getInternalField(
+    encoded: EncodedValue,
+    field: PrivateProxyInternalField,
+) callconv(.c) EncodedValue {
+    const boxed = privateBoxedFrom(encoded) orelse return .empty;
+    if (boxed.private_kind != .value or !boxed.value.isObject()) return .empty;
+    const proxy = boxed.value.asObj();
+    if (proxy.proxy_revoked) return switch (field) {
+        .target, .handler => .null,
+        else => .empty,
+    };
+    const selected = switch (field) {
+        .target => proxy.proxyTarget() orelse return .empty,
+        .handler => proxy.proxyHandler() orelse return .empty,
+        else => return .empty,
+    };
+    return privateEncodedFromValue(boxed.owner, Value.obj(selected));
 }
 
 const PrivateDeepPair = struct {
@@ -17548,6 +17592,47 @@ test "private JSX element predicate preserves registry identity and ordinary get
     pending = JSGlobalObject__tryTakeException(context);
     try std.testing.expectEqual(EncodedValue.fromInt32(228), JSC__Exception__asJSValue(@ptrFromInt(try pending.asCellAddress())));
     try std.testing.expectEqual(@as(f64, 0), (try internal.evaluate("__jsx_blocked_gets_228")).asNum());
+}
+
+test "private proxy internal-field projection is pure and identity preserving" {
+    const group_ref = JSContextGroupCreate() orelse return error.GroupCreateFailed;
+    defer JSContextGroupRelease(group_ref);
+    const context = JSGlobalContextCreateInGroup(group_ref, null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(context);
+    const sibling = JSGlobalContextCreateInGroup(group_ref, null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(sibling);
+    const internal = ctxForEvaluation(context) orelse return error.ContextCreateFailed;
+
+    const target = privateEncodedFromValue(internal, try internal.evaluate("globalThis.__proxy_target_233 = { value: 233 }; __proxy_target_233"));
+    const handler = privateEncodedFromValue(internal, try internal.evaluate("globalThis.__proxy_traps_233 = 0; globalThis.__proxy_handler_233 = { get(target, key, receiver) { __proxy_traps_233++; return Reflect.get(target, key, receiver); } }; __proxy_handler_233"));
+    const proxy = privateEncodedFromValue(internal, try internal.evaluate("new Proxy(__proxy_target_233, __proxy_handler_233)"));
+
+    const projected_target = Bun__ProxyObject__getInternalField(proxy, .target);
+    const projected_handler = Bun__ProxyObject__getInternalField(proxy, .handler);
+    try std.testing.expectEqual(target, projected_target);
+    try std.testing.expectEqual(handler, projected_handler);
+    try std.testing.expectEqual(@as(f64, 0), (try internal.evaluate("__proxy_traps_233")).asNum());
+    try std.testing.expect(value.strictEquals(privateValueFrom(sibling, projected_target) orelse return error.ValueInitFailed, try internal.evaluate("__proxy_target_233")));
+
+    const revoked = privateEncodedFromValue(internal, try internal.evaluate("(() => { const pair = Proxy.revocable({}, {}); pair.revoke(); return pair.proxy; })()"));
+    try std.testing.expectEqual(EncodedValue.null, Bun__ProxyObject__getInternalField(revoked, .target));
+    try std.testing.expectEqual(EncodedValue.null, Bun__ProxyObject__getInternalField(revoked, .handler));
+    try std.testing.expectEqual(EncodedValue.empty, Bun__ProxyObject__getInternalField(EncodedValue.fromInt32(233), .target));
+    try std.testing.expectEqual(EncodedValue.empty, Bun__ProxyObject__getInternalField(target, .target));
+    try std.testing.expectEqual(EncodedValue.empty, Bun__ProxyObject__getInternalField(proxy, @enumFromInt(233)));
+
+    JSC__VM__throwError(JSC__JSGlobalObject__vm(context), context, EncodedValue.fromInt32(233));
+    try std.testing.expectEqual(target, Bun__ProxyObject__getInternalField(proxy, .target));
+    const pending = JSGlobalObject__tryTakeException(context);
+    try std.testing.expectEqual(EncodedValue.fromInt32(233), JSC__Exception__asJSValue(@ptrFromInt(try pending.asCellAddress())));
+
+    const foreign = JSGlobalContextCreate(null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(foreign);
+    const foreign_internal = ctxForEvaluation(foreign) orelse return error.ContextCreateFailed;
+    const foreign_proxy = privateEncodedFromValue(foreign_internal, try foreign_internal.evaluate("globalThis.__foreign_target_233 = {}; new Proxy(__foreign_target_233, {})"));
+    const foreign_target = Bun__ProxyObject__getInternalField(foreign_proxy, .target);
+    try std.testing.expect(value.strictEquals(privateValueFrom(foreign, foreign_target) orelse return error.ValueInitFailed, try foreign_internal.evaluate("__foreign_target_233")));
+    try std.testing.expect(privateValueFrom(context, foreign_target) == null);
 }
 
 test "private deep equality preserves pinned structural semantics and boundaries" {
