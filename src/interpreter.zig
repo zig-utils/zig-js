@@ -10190,6 +10190,50 @@ pub const Interpreter = struct {
     /// lookup starts. Reflect.get and Proxy forwarding rely on this when an
     /// inherited accessor observes `this`.
     pub fn getPropertyWithReceiver(self: *Interpreter, recv: Value, key: []const u8, receiver: Value) EvalError!Value {
+        return self.getPropertyWithReceiverFound(recv, key, receiver, null);
+    }
+
+    /// Ordinary [[Get]] while retaining the PropertySlot-style distinction
+    /// between an absent property and a present property whose value is
+    /// `undefined`.  This must be one lookup: probing with [[HasProperty]] first
+    /// would add an observable `has` trap before a Proxy's `get` trap.
+    pub fn getPropertyIfExists(self: *Interpreter, recv: Value, key: []const u8) EvalError!?Value {
+        var found = true;
+        const result = try self.getPropertyWithReceiverFound(recv, key, recv, &found);
+        return if (found) result else null;
+    }
+
+    /// `GetOwnProperty` followed by PropertySlot value resolution.  A Proxy is
+    /// queried exactly once through its `getOwnPropertyDescriptor` trap; an own
+    /// accessor is then invoked with `receiver` as `this`.  Null means absent,
+    /// while a present property may legitimately return `undefined`.
+    pub fn getOwnPropertyValue(
+        self: *Interpreter,
+        object: *value.Object,
+        key: []const u8,
+        receiver: Value,
+    ) EvalError!?Value {
+        const descriptor = try builtins.objectGetOwnPropertyDescriptor(
+            @ptrCast(self),
+            Value.undef(),
+            &.{ Value.obj(object), try self.keyToValue(key) },
+        );
+        if (!descriptor.isObject()) return null;
+        const desc = descriptor.asObj();
+        if (desc.getOwn("value")) |result| return result;
+        const getter = desc.getOwn("get") orelse Value.undef();
+        if (getter.isUndefined()) return Value.undef();
+        return try self.callValueWithThis(getter, &.{}, receiver);
+    }
+
+    fn getPropertyWithReceiverFound(
+        self: *Interpreter,
+        recv: Value,
+        key: []const u8,
+        receiver: Value,
+        found: ?*bool,
+    ) EvalError!Value {
+        if (found) |slot| slot.* = true;
         // PrivateGet is not OrdinaryGet: it resolves the PrivateElement directly
         // (a setter-only accessor read is a TypeError; an absent brand is a
         // TypeError, never `undefined`).
@@ -10201,6 +10245,9 @@ pub const Interpreter = struct {
                 if (o.proxyHandler() != null or o.proxy_revoked) return self.proxyGet(o, key, receiver);
                 if (moduleNsOf(o)) |ns| {
                     try triggerDeferIfString(self, ns, key); // `import defer`: a string [[Get]] evaluates first
+                    if (!moduleNsHas(ns, key)) {
+                        if (found) |slot| slot.* = false;
+                    }
                     return moduleNsGet(self, ns, key);
                 }
                 // Annex B legacy `caller`/`arguments`: sloppy ordinary functions
@@ -10261,14 +10308,20 @@ pub const Interpreter = struct {
                     if (std.mem.eql(u8, key, "buffer") and o.getOwn(key) == null and o.getAccessor(key) == null) return Value.obj(ta.buffer);
                     if (std.mem.eql(u8, key, "BYTES_PER_ELEMENT") and o.getOwn(key) == null and o.getAccessor(key) == null) return Value.num(@floatFromInt(ta.kind.byteSize()));
                     if (arrayIndex(key)) |i| {
-                        if (i >= (cur orelse 0)) return Value.undef();
+                        if (i >= (cur orelse 0)) {
+                            if (found) |slot| slot.* = false;
+                            return Value.undef();
+                        }
                         if (ta.kind.isBigInt()) return self.makeBigInt(value.taReadBig(ta, i));
                         return value.taRead(ta, i);
                     }
                     // A canonical numeric key that isn't a plain in-range index
                     // ("-0", "-1", "1.5", out-of-bounds, …) reads as undefined and
                     // never consults the prototype (Integer-Indexed [[Get]]).
-                    if (canonicalNumericIndexString(key) != null) return Value.undef();
+                    if (canonicalNumericIndexString(key) != null) {
+                        if (found) |slot| slot.* = false;
+                        return Value.undef();
+                    }
                     // other keys (methods, constructor, @@toStringTag) fall through.
                 }
                 if (o.is_array) {
@@ -10329,6 +10382,9 @@ pub const Interpreter = struct {
                     // reads the export (its [[Prototype]] is null, so it ends here).
                     if (moduleNsOf(c)) |ns| {
                         try triggerDeferIfString(self, ns, key);
+                        if (!moduleNsHas(ns, key)) {
+                            if (found) |slot| slot.* = false;
+                        }
                         return moduleNsGet(self, ns, key);
                     }
                     if (c.is_array and std.mem.eql(u8, key, "length")) {
@@ -10388,6 +10444,7 @@ pub const Interpreter = struct {
                 if (std.mem.eql(u8, key, "constructor")) {
                     if (self.constructorOf(recv)) |ctor| return ctor;
                 }
+                if (found) |slot| slot.* = false;
                 return Value.undef();
             },
             .string, .number, .boolean => return self.getPrimitiveMember(recv, key),

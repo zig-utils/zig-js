@@ -134,6 +134,14 @@ extern "c" fn JSC__createRangeError(JSContextRef, *const BunString) EncodedValue
 extern "c" fn JSC__JSGlobalObject__createAggregateError(JSContextRef, [*c]const EncodedValue, usize, *const ZigString) EncodedValue;
 extern "c" fn JSC__JSGlobalObject__createAggregateErrorWithArray(JSContextRef, EncodedValue, BunString, EncodedValue) EncodedValue;
 extern "c" fn JSC__JSValue__getErrorsProperty(EncodedValue, JSContextRef) EncodedValue;
+extern "c" fn JSC__JSValue__createObject2(JSContextRef, *const ZigString, *const ZigString, EncodedValue, EncodedValue) EncodedValue;
+extern "c" fn JSC__JSValue__put(EncodedValue, JSContextRef, *const ZigString, EncodedValue) void;
+extern "c" fn JSC__JSValue__putToPropertyKey(EncodedValue, JSContextRef, EncodedValue, EncodedValue) void;
+extern "c" fn JSC__JSValue__deleteProperty(EncodedValue, JSContextRef, *const ZigString) bool;
+extern "c" fn JSC__JSValue__getIfPropertyExistsImpl(EncodedValue, JSContextRef, [*]const u8, u32) EncodedValue;
+extern "c" fn JSC__JSValue__getPropertyValue(EncodedValue, JSContextRef, [*]const u8, u32) EncodedValue;
+extern "c" fn JSC__JSValue__getOwn(EncodedValue, JSContextRef, *const BunString) EncodedValue;
+extern "c" fn JSC__JSValue__getOwnByValue(EncodedValue, JSContextRef, EncodedValue) EncodedValue;
 extern "c" fn JSC__JSValue__asString(EncodedValue) ?*anyopaque;
 extern "c" fn JSC__JSString__eql(?*anyopaque, JSContextRef, ?*anyopaque) bool;
 extern "c" fn JSC__JSString__is8Bit(?*anyopaque) bool;
@@ -1214,6 +1222,198 @@ pub fn main() void {
         !JSC__JSValue__isStrictEqual(JSC__JSValue__getErrorsProperty(sibling_existing_aggregate, sibling_context), existing_errors, sibling_context))
         fail("private AggregateError sibling realm/identity mismatch");
 
+    const first_key_bytes = "first";
+    const second_key_bytes = "second";
+    const first_key = ZigString{ .tagged_ptr = @intFromPtr(first_key_bytes.ptr), .len = first_key_bytes.len };
+    const second_key = ZigString{ .tagged_ptr = @intFromPtr(second_key_bytes.ptr), .len = second_key_bytes.len };
+    const created_pair = JSC__JSValue__createObject2(
+        sibling_context,
+        &first_key,
+        &second_key,
+        encoded_object,
+        EncodedValue.fromInt32(22),
+    );
+    const duplicate_pair = JSC__JSValue__createObject2(
+        context,
+        &first_key,
+        &first_key,
+        EncodedValue.fromInt32(11),
+        EncodedValue.fromInt32(22),
+    );
+    exposeCell(sibling_context, "__private_created_pair", created_pair);
+    exposeCell(sibling_context, "__private_created_pair_identity", encoded_object);
+    exposeCell(context, "__private_duplicate_pair", duplicate_pair);
+    if (!JSC__JSValue__toBoolean(evaluate(sibling_context,
+        \\Object.getPrototypeOf(__private_created_pair) === Object.prototype &&
+        \\Object.keys(__private_created_pair).join(',') === 'second,first' &&
+        \\__private_created_pair.first === __private_created_pair_identity &&
+        \\__private_created_pair.second === 22 &&
+        \\['first', 'second'].every(key => {
+        \\  const d = Object.getOwnPropertyDescriptor(__private_created_pair, key);
+        \\  return d.writable && d.enumerable && d.configurable;
+        \\})
+    )) or !JSC__JSValue__toBoolean(evaluate(context, "Object.keys(__private_duplicate_pair).join(',') === 'first' && __private_duplicate_pair.first === 11")))
+        fail("private createObject2 order/descriptor/realm mismatch");
+
+    const direct_target = evaluate(context,
+        \\globalThis.__private_direct_setter_hits = 0;
+        \\globalThis.__private_direct_target = Object.create({ set direct(value) { __private_direct_setter_hits++; } });
+        \\__private_direct_target;
+    );
+    const direct_key_bytes = "direct";
+    const direct_key = ZigString{ .tagged_ptr = @intFromPtr(direct_key_bytes.ptr), .len = direct_key_bytes.len };
+    JSC__JSValue__put(direct_target, context, &direct_key, encoded_object);
+    if (!JSC__JSValue__toBoolean(evaluate(context, "__private_direct_setter_hits === 0 && Object.hasOwn(__private_direct_target, 'direct') && __private_direct_target.direct === __private_aggregate_identity")))
+        fail("private direct put invoked prototype setter or lost identity");
+
+    const property_key_target = evaluate(context, "globalThis.__private_property_key_target = []; __private_property_key_target");
+    const coercing_key = evaluate(context,
+        \\globalThis.__private_property_key_hits = 0;
+        \\globalThis.__private_coercing_key = { [Symbol.toPrimitive]() { __private_property_key_hits++; return 'coerced'; } };
+        \\__private_coercing_key;
+    );
+    const symbol_key = evaluate(context, "globalThis.__private_property_symbol = Symbol('private-property'); __private_property_symbol");
+    JSC__JSValue__putToPropertyKey(property_key_target, context, EncodedValue.fromInt32(2), EncodedValue.fromInt32(32));
+    JSC__JSValue__putToPropertyKey(property_key_target, context, coercing_key, EncodedValue.fromInt32(33));
+    JSC__JSValue__putToPropertyKey(property_key_target, context, symbol_key, encoded_object);
+    if (!JSC__JSValue__toBoolean(evaluate(context, "__private_property_key_target.length === 3 && __private_property_key_target[2] === 32 && __private_property_key_target.coerced === 33 && __private_property_key_hits === 1 && __private_property_key_target[__private_property_symbol] === __private_aggregate_identity")))
+        fail("private property-key put coercion/index/symbol mismatch");
+    const throwing_property_key = evaluate(context, "({ [Symbol.toPrimitive]() { throw 2031; } })");
+    JSC__JSValue__putToPropertyKey(property_key_target, context, throwing_property_key, .true);
+    if (!JSGlobalObject__hasException(context) or JSC__JSValue__getPropertyValue(property_key_target, context, "true".ptr, 4) != .empty)
+        fail("private property-key put did not publish coercion exception");
+    const property_key_exception = JSGlobalObject__tryTakeException(context);
+    if (JSC__Exception__asJSValue(property_key_exception.cellPointer()) != EncodedValue.fromInt32(2031))
+        fail("private property-key put exception identity mismatch");
+
+    const delete_target = evaluate(context,
+        \\globalThis.__private_delete_target = {};
+        \\Object.defineProperty(__private_delete_target, 'fixed', { value: 1, configurable: false });
+        \\__private_delete_target.open = 2;
+        \\__private_delete_target;
+    );
+    const open_key_bytes = "open";
+    const fixed_key_bytes = "fixed";
+    const open_key = ZigString{ .tagged_ptr = @intFromPtr(open_key_bytes.ptr), .len = open_key_bytes.len };
+    const fixed_key = ZigString{ .tagged_ptr = @intFromPtr(fixed_key_bytes.ptr), .len = fixed_key_bytes.len };
+    if (!JSC__JSValue__deleteProperty(delete_target, context, &open_key) or
+        JSC__JSValue__deleteProperty(delete_target, context, &fixed_key) or
+        JSC__JSValue__deleteProperty(.true, context, &open_key))
+        fail("private ordinary delete configurability/non-object mismatch");
+    const delete_proxy = evaluate(context,
+        \\globalThis.__private_delete_traps = 0;
+        \\globalThis.__private_delete_proxy = new Proxy({ open: 1 }, { deleteProperty(target, key) { __private_delete_traps++; return Reflect.deleteProperty(target, key); } });
+        \\__private_delete_proxy;
+    );
+    if (!JSC__JSValue__deleteProperty(delete_proxy, context, &open_key) or
+        !JSC__JSValue__toBoolean(evaluate(context, "__private_delete_traps === 1 && !Object.hasOwn(__private_delete_proxy, 'open')")))
+        fail("private ordinary delete proxy mismatch");
+    const throwing_delete_proxy = evaluate(context, "new Proxy({}, { deleteProperty() { throw 2032; } })");
+    if (JSC__JSValue__deleteProperty(throwing_delete_proxy, context, &open_key) or !JSGlobalObject__hasException(context))
+        fail("private ordinary delete swallowed proxy exception");
+    JSGlobalObject__clearException(context);
+
+    const property_read_target = evaluate(context,
+        \\globalThis.__private_property_gets = 0;
+        \\globalThis.__private_property_read_target = Object.create({ get inherited() { __private_property_gets++; return 41; } });
+        \\Object.defineProperty(__private_property_read_target, 'presentUndefined', { value: undefined, configurable: true });
+        \\__private_property_read_target[3] = 43;
+        \\__private_property_read_target['café'] = 44;
+        \\__private_property_read_target;
+    );
+    if (JSC__JSValue__getPropertyValue(property_read_target, context, "inherited".ptr, 9) != EncodedValue.fromInt32(41) or
+        JSC__JSValue__getPropertyValue(property_read_target, context, "presentUndefined".ptr, 16) != .undefined or
+        JSC__JSValue__getPropertyValue(property_read_target, context, "missing".ptr, 7) != .deleted or
+        JSC__JSValue__getPropertyValue(property_read_target, context, "3".ptr, 1) != EncodedValue.fromInt32(43) or
+        JSC__JSValue__getPropertyValue(property_read_target, context, latin1_bytes.ptr, @intCast(latin1_bytes.len)) != EncodedValue.fromInt32(44) or
+        !JSC__JSValue__toBoolean(evaluate(context, "__private_property_gets === 1")))
+        fail("private ordinary property read/sentinel/Latin-1 mismatch");
+    const read_proxy = evaluate(context,
+        \\globalThis.__private_read_gets = 0;
+        \\globalThis.__private_read_has = 0;
+        \\globalThis.__private_read_proxy = new Proxy({}, { get() { __private_read_gets++; return undefined; }, has() { __private_read_has++; return true; } });
+        \\__private_read_proxy;
+    );
+    if (JSC__JSValue__getPropertyValue(read_proxy, context, "anything".ptr, 8) != .undefined or
+        !JSC__JSValue__toBoolean(evaluate(context, "__private_read_gets === 1 && __private_read_has === 0")))
+        fail("private ordinary property read added a has trap or lost present undefined");
+    const throwing_read = evaluate(context, "Object.defineProperty({}, 'boom', { get() { throw 2033; } })");
+    if (JSC__JSValue__getPropertyValue(throwing_read, context, "boom".ptr, 4) != .empty or !JSGlobalObject__hasException(context))
+        fail("private ordinary property read swallowed getter exception");
+    JSGlobalObject__clearException(context);
+
+    const mitigated_target = evaluate(context,
+        \\globalThis.__private_mitigated_gets = 0;
+        \\Object.defineProperty(Object.prototype, 'polluted', { get() { __private_mitigated_gets++; return 50; }, configurable: true });
+        \\const middle = Object.create(Object.prototype, { inheritedSafe: { get() { __private_mitigated_gets++; return 51; }, configurable: true } });
+        \\globalThis.__private_mitigated_target = Object.create(middle);
+        \\__private_mitigated_target;
+    );
+    if (JSC__JSValue__getIfPropertyExistsImpl(mitigated_target, context, "inheritedSafe".ptr, 13) != EncodedValue.fromInt32(51) or
+        JSC__JSValue__getIfPropertyExistsImpl(mitigated_target, context, "polluted".ptr, 8) != .deleted or
+        !JSC__JSValue__toBoolean(evaluate(context, "__private_mitigated_gets === 1")))
+        fail("private mitigated lookup crossed Object.prototype cutoff");
+    _ = evaluate(context, "delete Object.prototype.polluted");
+
+    const own_target = evaluate(context,
+        \\globalThis.__private_own_gets = 0;
+        \\globalThis.__private_own_target = Object.create({ inheritedOwn: 61 });
+        \\Object.defineProperty(__private_own_target, 'own', { get() { __private_own_gets++; return 62; }, configurable: true });
+        \\__private_own_target[''] = 63;
+        \\__private_own_target[4] = 64;
+        \\__private_own_target;
+    );
+    const own_key_bytes = "own";
+    const inherited_own_key_bytes = "inheritedOwn";
+    var own_bun_key = BunString{ .tag = .zig_string, .value = .{ .zig_string = .{ .tagged_ptr = @intFromPtr(own_key_bytes.ptr), .len = own_key_bytes.len } } };
+    var inherited_own_bun_key = BunString{ .tag = .zig_string, .value = .{ .zig_string = .{ .tagged_ptr = @intFromPtr(inherited_own_key_bytes.ptr), .len = inherited_own_key_bytes.len } } };
+    if (JSC__JSValue__getOwn(own_target, context, &own_bun_key) != EncodedValue.fromInt32(62) or
+        JSC__JSValue__getOwn(own_target, context, &inherited_own_bun_key) != .empty or
+        JSC__JSValue__getOwn(own_target, context, &empty_bun_string) != EncodedValue.fromInt32(63) or
+        JSC__JSValue__getOwnByValue(own_target, context, EncodedValue.fromInt32(4)) != EncodedValue.fromInt32(64) or
+        JSC__JSValue__getOwnByValue(own_target, context, symbol_key) != .empty or
+        !JSC__JSValue__toBoolean(evaluate(context, "__private_own_gets === 1")))
+        fail("private own-property read/BunString/index sentinel mismatch");
+    const own_coercion_key = evaluate(context,
+        \\globalThis.__private_own_key_hits = 0;
+        \\({ [Symbol.toPrimitive]() { __private_own_key_hits++; return 'own'; } })
+    );
+    if (JSC__JSValue__getOwnByValue(own_target, context, own_coercion_key) != EncodedValue.fromInt32(62) or
+        !JSC__JSValue__toBoolean(evaluate(context, "__private_own_key_hits === 1 && __private_own_gets === 2")))
+        fail("private own-property key coercion mismatch");
+    const own_proxy = evaluate(context,
+        \\globalThis.__private_own_descriptors = 0;
+        \\new Proxy({}, { getOwnPropertyDescriptor(target, key) { __private_own_descriptors++; return { value: 65, writable: true, enumerable: true, configurable: true }; } })
+    );
+    if (JSC__JSValue__getOwnByValue(own_proxy, context, evaluate(context, "'proxyOwn'")) != EncodedValue.fromInt32(65) or
+        !JSC__JSValue__toBoolean(evaluate(context, "__private_own_descriptors === 1")))
+        fail("private own-property proxy slot mismatch");
+
+    if (JSC__JSValue__getPropertyValue(.true, context, "x".ptr, 1) != .deleted or
+        JSC__JSValue__getIfPropertyExistsImpl(.true, context, "x".ptr, 1) != .deleted or
+        JSC__JSValue__getOwn(.true, context, &own_bun_key) != .empty or
+        JSC__JSValue__getOwnByValue(.true, context, encoded_text) != .empty)
+        fail("private property non-object sentinel mismatch");
+    if (JSC__JSValue__createObject2(context, &first_key, &second_key, EncodedValue.fromRef(foreign_object), .true) != .empty or
+        !JSGlobalObject__hasException(context))
+        fail("private createObject2 accepted foreign-VM value");
+    JSGlobalObject__clearException(context);
+
+    JSC__VM__throwError(vm, context, EncodedValue.fromInt32(203));
+    JSC__JSValue__put(direct_target, context, &direct_key, .false);
+    JSC__JSValue__putToPropertyKey(property_key_target, context, encoded_text, .false);
+    if (JSC__JSValue__createObject2(context, &first_key, &second_key, .true, .false) != .empty or
+        JSC__JSValue__deleteProperty(delete_target, context, &fixed_key) or
+        JSC__JSValue__getPropertyValue(property_read_target, context, "inherited".ptr, 9) != .empty or
+        JSC__JSValue__getIfPropertyExistsImpl(mitigated_target, context, "inheritedSafe".ptr, 13) != .empty or
+        JSC__JSValue__getOwn(own_target, context, &own_bun_key) != .empty or
+        JSC__JSValue__getOwnByValue(own_target, context, encoded_text) != .empty)
+        fail("private property boundary ignored pending exception");
+    const preserved_property_exception = JSGlobalObject__tryTakeException(context);
+    if (JSC__Exception__asJSValue(preserved_property_exception.cellPointer()) != EncodedValue.fromInt32(203) or
+        !JSC__JSValue__toBoolean(evaluate(context, "__private_direct_target.direct === __private_aggregate_identity && !Object.hasOwn(__private_property_key_target, 'value')")))
+        fail("private property boundary replaced pending exception or mutated state");
+
     const sibling_dom_exception = ZigString__toDOMExceptionInstance(&empty_zig_string, sibling_context, 16);
     exposeCell(sibling_context, "__private_sibling_dom_exception", sibling_dom_exception);
     if (!JSC__JSValue__toBoolean(evaluate(sibling_context, "Object.getPrototypeOf(__private_sibling_dom_exception) === DOMException.prototype && __private_sibling_dom_exception.name === 'AbortError'")))
@@ -1932,5 +2132,5 @@ pub fn main() void {
         JSC__JSMap__get(map_cell, context, evaluate(context, "'direct'")) != .undefined)
         fail("private JSMap clear mismatch");
 
-    std.debug.print("Home private value shims: 103/103 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 111/111 symbols linked; runtime matrix passed\n", .{});
 }

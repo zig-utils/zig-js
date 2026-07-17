@@ -83,8 +83,8 @@
     },
     "by_status": {
       "external": 1,
-      "implemented": 113,
-      "pending": 323
+      "implemented": 121,
+      "pending": 315
     }
   },
   "home_comparison": {
@@ -1733,10 +1733,10 @@
       "line": 536,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSValue__createObject2(global: *JSGlobalObject, key1: *const ZigString, key2: *const ZigString, value1: JSValue, value2: JSValue) JSValue;",
       "declaration_sha256": "9f1b29469a0709ed5917ea3c75fe60ebfa308dd6b3da54db523f4674119584c8",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSValue__createRangeError",
@@ -1821,10 +1821,10 @@
       "line": 332,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSValue__deleteProperty(target: JSValue, global: *JSGlobalObject, key: *const ZigString) bool;",
       "declaration_sha256": "70e51b0f5016c47258879043ce186b66e12eef3c585a856d2c3721731784a02b",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSValue__eqlCell",
@@ -2008,10 +2008,10 @@
       "line": 1455,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSValue__getIfPropertyExistsImpl(target: JSValue, global: *JSGlobalObject, ptr: [*]const u8, len: u32) JSValue;",
       "declaration_sha256": "1e3a2bafdc7875e76ac1f9a646a8cbeb4cf7802de64d1f0d8f6074ebd6bda96b",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSValue__getLengthIfPropertyExistsInternal",
@@ -2052,10 +2052,10 @@
       "line": 1575,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSValue__getOwn(value: JSValue, globalObject: *JSGlobalObject, propertyName: *const bun.String) JSValue;",
       "declaration_sha256": "3166b24bffc9b041c1247968e2c24265ef190c2d73143d9cbdb2aeeac3bd6141",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSValue__getOwnByValue",
@@ -2063,10 +2063,10 @@
       "line": 1591,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSValue__getOwnByValue(value: JSValue, globalObject: *JSGlobalObject, propertyValue: JSValue) JSValue;",
       "declaration_sha256": "e26e5372c471dbfe9e17c32f607d42f23a19722e1cc8701c8b4f03fb1e71f987",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSValue__getPropertyValue",
@@ -2074,10 +2074,10 @@
       "line": 1456,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSValue__getPropertyValue(target: JSValue, global: *JSGlobalObject, ptr: [*]const u8, len: u32) JSValue;",
       "declaration_sha256": "34a2b637aa9ba0ec066c818a4f5549a17edbd515afa9d060a1452f4a4af88b7d",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSValue__getPrototype",
@@ -2327,10 +2327,10 @@
       "line": 327,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSValue__put(value: JSValue, global: *JSGlobalObject, key: *const ZigString, result: jsc.JSValue) void;",
       "declaration_sha256": "a482d681a5e16b5901bc8c92096a917774c8fc00e9e4be6abdbf0e3ff2cd78ba",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSValue__putIndex",
@@ -2360,10 +2360,10 @@
       "line": 393,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSValue__putToPropertyKey(target: JSValue, globalObject: *JSGlobalObject, key: jsc.JSValue, value: jsc.JSValue) void;",
       "declaration_sha256": "bc934b0fd766dc20b9f024efeeb43bd628ea7572c9b1ae29bfc2ef67db2cd94a",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSValue__strictDeepEquals",

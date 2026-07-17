@@ -2932,6 +2932,319 @@ export fn JSC__JSValue__getErrorsProperty(encoded: EncodedValue, global: JSConte
     return privateEncodedFromValue(context, internal.asObj().getOwn("errors") orelse Value.undef());
 }
 
+fn privatePropertyBoundaryGroup(context: *Context) ?*CContextGroup {
+    const erased_group = context.c_api_group orelse return null;
+    return @ptrCast(@alignCast(erased_group));
+}
+
+fn privateZigStringPropertyKey(context: *Context, key: *const PrivateZigString) ?[]const u8 {
+    const string = privateZigStringValue(context, key) catch |err| {
+        privatePublishBunStringError(context, err);
+        return null;
+    };
+    return string.asStr();
+}
+
+fn privateBunStringPropertyKey(context: *Context, key: *const PrivateBunString) ?[]const u8 {
+    const string = privateBunStringValue(context, key, null) catch |err| {
+        privatePublishBunStringError(context, err);
+        return null;
+    };
+    return string.asStr();
+}
+
+fn privateLatin1PropertyKey(context: *Context, bytes: [*]const u8, len: u32) ?[]const u8 {
+    if (len == 0) return "";
+    return privateLatin1ToWTF8(context.arena(), bytes[0..len]) catch {
+        privateSetPendingValue(context, context.reserved_thread_oom_error orelse Value.staticStr("OutOfMemory"));
+        return null;
+    };
+}
+
+fn privateGetBeforeObjectPrototype(
+    machine: *interp.Interpreter,
+    target: *Object,
+    key: []const u8,
+) !?Value {
+    const receiver = Value.obj(target);
+    const cutoff = machine.objectProto();
+    var current: ?*Object = target;
+    while (current) |object| {
+        // JSC's Proxy getOwnPropertySlot with a Get slot resolves through the
+        // proxy's ordinary [[Get]] path.  Treat even `undefined` as a produced
+        // slot, and let a missing trap forward through the target normally.
+        if (object.proxyHandler() != null or object.proxy_revoked)
+            return try machine.getProperty(Value.obj(object), key);
+        if (try machine.getOwnPropertyValue(object, key, receiver)) |result| return result;
+        const next = machine.effectiveProto(object);
+        if (next != null and next.? == cutoff) return null;
+        current = next;
+    }
+    return null;
+}
+
+export fn JSC__JSValue__createObject2(
+    global: JSContextRef,
+    key1: *const PrivateZigString,
+    key2: *const PrivateZigString,
+    value1_encoded: EncodedValue,
+    value2_encoded: EncodedValue,
+) callconv(.c) EncodedValue {
+    const context = ctxForEvaluation(global) orelse return .empty;
+    const group = privatePropertyBoundaryGroup(context) orelse return .empty;
+    if (group.pending_exception != null) return .empty;
+    const first_key = privateZigStringPropertyKey(context, key1) orelse return .empty;
+    const second_key = privateZigStringPropertyKey(context, key2) orelse return .empty;
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    defer context.popActiveInterpreter(&machine);
+    const first_value = privateValueFrom(global, value1_encoded) orelse {
+        const err = machine.throwError("TypeError", "Property value belongs to another VM");
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    const second_value = privateValueFrom(global, value2_encoded) orelse {
+        const err = machine.throwError("TypeError", "Property value belongs to another VM");
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    const result = machine.newObject() catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    // The pinned C++ boundary intentionally defines key 2 first.  For duplicate
+    // keys that preserves key 2's insertion position while key 1 wins the value.
+    machine.setProp(result.asObj(), second_key, second_value) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    machine.setProp(result.asObj(), first_key, first_value) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    return privateEncodeResult(context, &machine, result);
+}
+
+export fn JSC__JSValue__put(
+    target_encoded: EncodedValue,
+    global: JSContextRef,
+    key: *const PrivateZigString,
+    value_encoded: EncodedValue,
+) callconv(.c) void {
+    const context = ctxForEvaluation(global) orelse return;
+    const group = privatePropertyBoundaryGroup(context) orelse return;
+    if (group.pending_exception != null) return;
+    const property = privateZigStringPropertyKey(context, key) orelse return;
+    const target = privateValueFrom(global, target_encoded) orelse return;
+    const stored = privateValueFrom(global, value_encoded) orelse return;
+    if (!target.isObject() or target.asObj().is_symbol or target.asObj().is_bigint) return;
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return;
+    };
+    defer context.popActiveInterpreter(&machine);
+    // putDirect: an own raw write, not OrdinarySet (prototype setters are not run).
+    machine.setProp(target.asObj(), property, stored) catch |err|
+        privateSetPendingAbrupt(context, &machine, err);
+}
+
+export fn JSC__JSValue__putToPropertyKey(
+    target_encoded: EncodedValue,
+    global: JSContextRef,
+    key_encoded: EncodedValue,
+    value_encoded: EncodedValue,
+) callconv(.c) void {
+    const context = ctxForEvaluation(global) orelse return;
+    const group = privatePropertyBoundaryGroup(context) orelse return;
+    if (group.pending_exception != null) return;
+    const target = privateValueFrom(global, target_encoded) orelse return;
+    const key_value = privateValueFrom(global, key_encoded) orelse return;
+    const stored = privateValueFrom(global, value_encoded) orelse return;
+    if (!target.isObject() or target.asObj().is_symbol or target.asObj().is_bigint) return;
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return;
+    };
+    defer context.popActiveInterpreter(&machine);
+    const property = machine.keyOf(key_value) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return;
+    };
+    if (target.asObj().is_array) {
+        if (interp.Interpreter.arrayIndex(property)) |index| {
+            if (index < std.math.maxInt(u32)) {
+                machine.putArrayDirectIndex(target.asObj(), @intCast(index), stored) catch |err|
+                    privateSetPendingAbrupt(context, &machine, err);
+                return;
+            }
+        }
+    }
+    machine.setProp(target.asObj(), property, stored) catch |err|
+        privateSetPendingAbrupt(context, &machine, err);
+}
+
+export fn JSC__JSValue__deleteProperty(
+    target_encoded: EncodedValue,
+    global: JSContextRef,
+    key: *const PrivateZigString,
+) callconv(.c) bool {
+    const context = ctxForEvaluation(global) orelse return false;
+    const group = privatePropertyBoundaryGroup(context) orelse return false;
+    if (group.pending_exception != null) return false;
+    const property = privateZigStringPropertyKey(context, key) orelse return false;
+    const target = privateValueFrom(global, target_encoded) orelse return false;
+    if (!target.isObject() or target.asObj().is_symbol or target.asObj().is_bigint) return false;
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return false;
+    };
+    defer context.popActiveInterpreter(&machine);
+    return machine.deleteOwn(target.asObj(), property) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return false;
+    };
+}
+
+export fn JSC__JSValue__getPropertyValue(
+    target_encoded: EncodedValue,
+    global: JSContextRef,
+    bytes: [*]const u8,
+    len: u32,
+) callconv(.c) EncodedValue {
+    const context = ctxForEvaluation(global) orelse return .empty;
+    const group = privatePropertyBoundaryGroup(context) orelse return .empty;
+    if (group.pending_exception != null) return .empty;
+    const property = privateLatin1PropertyKey(context, bytes, len) orelse return .empty;
+    const target = privateValueFrom(global, target_encoded) orelse return .deleted;
+    if (!target.isObject() or target.asObj().is_symbol or target.asObj().is_bigint) return .deleted;
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    defer context.popActiveInterpreter(&machine);
+    const result = machine.getPropertyIfExists(target, property) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    } orelse return .deleted;
+    return privateEncodeResult(context, &machine, result);
+}
+
+export fn JSC__JSValue__getIfPropertyExistsImpl(
+    target_encoded: EncodedValue,
+    global: JSContextRef,
+    bytes: [*]const u8,
+    len: u32,
+) callconv(.c) EncodedValue {
+    const context = ctxForEvaluation(global) orelse return .empty;
+    const group = privatePropertyBoundaryGroup(context) orelse return .empty;
+    if (group.pending_exception != null) return .empty;
+    const property = privateLatin1PropertyKey(context, bytes, len) orelse return .empty;
+    const target = privateValueFrom(global, target_encoded) orelse return .deleted;
+    if (!target.isObject() or target.asObj().is_symbol or target.asObj().is_bigint) return .deleted;
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    defer context.popActiveInterpreter(&machine);
+    const result = privateGetBeforeObjectPrototype(&machine, target.asObj(), property) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    } orelse return .deleted;
+    return privateEncodeResult(context, &machine, result);
+}
+
+export fn JSC__JSValue__getOwn(
+    target_encoded: EncodedValue,
+    global: JSContextRef,
+    key: *const PrivateBunString,
+) callconv(.c) EncodedValue {
+    const context = ctxForEvaluation(global) orelse return .empty;
+    const group = privatePropertyBoundaryGroup(context) orelse return .empty;
+    if (group.pending_exception != null) return .empty;
+    const property = privateBunStringPropertyKey(context, key) orelse return .empty;
+    const target = privateValueFrom(global, target_encoded) orelse return .empty;
+    if (!target.isObject() or target.asObj().is_symbol or target.asObj().is_bigint) return .empty;
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    defer context.popActiveInterpreter(&machine);
+    const result = machine.getOwnPropertyValue(target.asObj(), property, target) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    } orelse return .empty;
+    return privateEncodeResult(context, &machine, result);
+}
+
+export fn JSC__JSValue__getOwnByValue(
+    target_encoded: EncodedValue,
+    global: JSContextRef,
+    key_encoded: EncodedValue,
+) callconv(.c) EncodedValue {
+    const context = ctxForEvaluation(global) orelse return .empty;
+    const group = privatePropertyBoundaryGroup(context) orelse return .empty;
+    if (group.pending_exception != null) return .empty;
+    const target = privateValueFrom(global, target_encoded) orelse return .empty;
+    const key_value = privateValueFrom(global, key_encoded) orelse return .empty;
+    if (!target.isObject() or target.asObj().is_symbol or target.asObj().is_bigint) return .empty;
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    defer context.popActiveInterpreter(&machine);
+    const property = machine.keyOf(key_value) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    const result = machine.getOwnPropertyValue(target.asObj(), property, target) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    } orelse return .empty;
+    return privateEncodeResult(context, &machine, result);
+}
+
 const PrivateDOMExceptionDescription = struct {
     name: []const u8,
     message: []const u8,
