@@ -130,9 +130,12 @@ context's handles are ever touched.
 import round-trip, exact host-hook wakes for multi-message replies plus
 graceful final outbox close, terminate final outbox close, and FIFO channel
 drain / zero-timeout poll behavior.
-`src/c_api.zig` test: `JSWorkerCreate` → post a number → receive the doubled
-reply. All TSan-clean. `worker.zig` and the C-API are not exercised by the
-test262 shards, so the conformance total is unaffected.
+`src/c_api.zig` tests cover create/post/receive, owner-thread target metadata,
+script and module inspector graphs, active-handler pauses, owner-pumped resume,
+observer continuation rejection, callback detach, and termination while paused.
+The real C++ host covers attach/schema dispatch/pump/release. All worker tests
+are TSan-clean. `worker.zig` and the C-API are not exercised by the test262
+shards, so the conformance total is unaffected.
 
 ## Deferred
 

@@ -235,11 +235,14 @@ while pause-only scope handles expire on resume. With multiple sessions, one
 deterministic owner controls continuation after observers receive the pause
 snapshot; observer resume attempts are rejected. Releasing a session from its
 own synchronous callback is lifetime-guarded, including pause, response, and
-detach callbacks. Independently-created `JSWorkerRef` runtimes are not falsely
-reported as children of an unrelated context session; they continue processing
-messages while that context is paused. Explicit cross-thread worker target
-discovery and transport continue under
-[#156](https://github.com/zig-utils/zig-js/issues/156); see
+detach callbacks. Independently-created `JSWorkerRef` runtimes have stable
+process-wide target IDs and explicit owner-pumped inspector sessions; commands
+run only on the worker runtime thread, including while paused, while callbacks
+run only on the worker-handle owner thread. Script and module targets publish
+their source graphs, first-statement `debugger;` pauses are retained in bytecode,
+multiple sessions preserve deterministic continuation ownership, and detach or
+termination unblocks a paused target. The remaining parity/GC/concurrency matrix
+continues under [#156](https://github.com/zig-utils/zig-js/issues/156); see
 [docs/inspector.md](docs/inspector.md).
 For scripts registered while debugging, ordinary bytecode/native entry is
 disabled and asserted by both focused Zig tests and the real C host; debug-aware
@@ -349,7 +352,7 @@ const parallel = try js.Context.createWith(gpa, .{ .enable_threads = true });
 const serialized = try js.Context.createWith(gpa, .{ .enable_threads = true, .gil = true });
 ```
 
-The isolated `Worker` implementation lives in [src/worker.zig](src/worker.zig) and is exposed to C embedders through the `JSWorker*` extension functions.
+The isolated `Worker` implementation lives in [src/worker.zig](src/worker.zig) and is exposed to C embedders through the `JSWorker*` extension functions. `ZJSWorkerGetInspectorTargetInfo` and `ZJSWorkerInspectorSession*` provide stable target metadata plus cross-thread debugging without exposing the worker Context.
 
 Current thread status is tracked in:
 

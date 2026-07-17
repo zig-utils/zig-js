@@ -168,7 +168,10 @@ copied back and `ZJSWorkerInspectorSessionPump` invokes exactly one callback on
 the `JSWorkerRef` owner thread, returning message, timeout, or closed. A pump
 callback may enqueue the continuation for a paused event. Release detaches and
 waits for the runtime-side session/root cleanup before freeing the owner handle.
-The remaining feature/termination/concurrency evidence is tracked by
+Focused transcripts cover script and module graphs, active message-handler
+pauses (including a first-statement `debugger;`), deterministic continuation
+ownership across two sessions, owner-callback detach, and termination while
+paused. The remaining feature/GC/concurrency evidence is tracked by
 [issue #156](https://github.com/zig-utils/zig-js/issues/156).
 
 setPauseOnExceptions accepts none, uncaught, or all. all pauses at the original
