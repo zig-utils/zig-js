@@ -3320,6 +3320,41 @@ pub const Context = struct {
         return ba.stats();
     }
 
+    pub const RuntimeHeapAccounting = struct {
+        live_bytes: usize,
+        last_full_collection_bytes: usize,
+        collections: usize,
+        full_collections: usize,
+    };
+
+    /// VM-facing heap accounting used by revision-pinned private bindings.
+    /// Precise heaps delegate to zig-gc's race-safe snapshot. Arena heaps report
+    /// committed arena capacity, which is the only reclaimable unit they own.
+    pub fn runtimeHeapAccounting(self: *Context) RuntimeHeapAccounting {
+        if (self.gc) |heap| {
+            const accounting = heap.accounting();
+            return .{
+                .live_bytes = accounting.live_bytes,
+                .last_full_collection_bytes = accounting.last_full_collection_bytes,
+                .collections = accounting.collections,
+                .full_collections = accounting.full_collections,
+            };
+        }
+        if (self.locked_arena) |arena_lock| arena_lock.acquire();
+        defer if (self.locked_arena) |arena_lock| arena_lock.unlock();
+        const capacity = self.arena_state.queryCapacity();
+        return .{
+            .live_bytes = capacity,
+            .last_full_collection_bytes = capacity,
+            .collections = 0,
+            .full_collections = 0,
+        };
+    }
+
+    pub fn requestGarbageCollection(self: *Context) void {
+        if (self.gc != null) self.gc_requested.store(true, .release);
+    }
+
     /// Whether the calling thread is the one that created this context.
     pub fn isOwnerThread(self: *const Context) bool {
         return std.Thread.getCurrentId() == self.owner_thread;
@@ -12258,6 +12293,35 @@ test "Context heap_limit_bytes allocation pressure is catchable inside JS try" {
     try std.testing.expect(result.asBool());
     const stats = ctx.heapBudgetStats().?;
     try std.testing.expect(stats.peak_bytes <= stats.limit_bytes);
+}
+
+test "Context runtime heap accounting tracks precise full collection" {
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{ .enable_gc = true });
+    defer ctx.destroy();
+
+    const before = ctx.runtimeHeapAccounting();
+    const saved_heap = gc_mod.setActiveHeap(ctx.gc);
+    defer _ = gc_mod.setActiveHeap(saved_heap);
+    const saved_arena = strcell.setActiveArena(ctx.arena());
+    defer _ = strcell.setActiveArena(saved_arena);
+
+    var index: usize = 0;
+    while (index < 32) : (index += 1) {
+        const garbage = try gc_mod.allocObj(ctx.arena());
+        garbage.* = .{};
+    }
+    const allocated = ctx.runtimeHeapAccounting();
+    try std.testing.expect(allocated.live_bytes > before.live_bytes);
+    try std.testing.expectEqual(before.full_collections, allocated.full_collections);
+
+    ctx.requestGarbageCollection();
+    try std.testing.expect(ctx.gc_requested.load(.acquire));
+    ctx.collectGarbage();
+    const collected = ctx.runtimeHeapAccounting();
+    try std.testing.expect(collected.live_bytes < allocated.live_bytes);
+    try std.testing.expectEqual(collected.live_bytes, collected.last_full_collection_bytes);
+    try std.testing.expectEqual(before.full_collections + 1, collected.full_collections);
+    try std.testing.expect(!ctx.gc_requested.load(.acquire));
 }
 
 test "Context heap_limit_bytes allocation pressure is catchable with catch binding" {

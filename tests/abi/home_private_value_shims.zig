@@ -189,6 +189,15 @@ extern "c" fn JSC__VM__executionForbidden(?*anyopaque) bool;
 extern "c" fn JSC__VM__hasTerminationRequest(?*anyopaque) bool;
 extern "c" fn JSC__VM__notifyNeedTermination(?*anyopaque) void;
 extern "c" fn JSC__VM__setExecutionForbidden(?*anyopaque, bool) void;
+extern "c" fn JSC__VM__blockBytesAllocated(?*anyopaque) usize;
+extern "c" fn JSC__VM__collectAsync(?*anyopaque) void;
+extern "c" fn JSC__VM__externalMemorySize(?*anyopaque) usize;
+extern "c" fn JSC__VM__heapSize(?*anyopaque) usize;
+extern "c" fn JSC__VM__performOpportunisticallyScheduledTasks(?*anyopaque, f64) void;
+extern "c" fn JSC__VM__releaseWeakRefs(?*anyopaque) void;
+extern "c" fn JSC__VM__reportExtraMemory(?*anyopaque, usize) void;
+extern "c" fn JSC__VM__runGC(?*anyopaque, bool) usize;
+extern "c" fn JSC__VM__shrinkFootprint(?*anyopaque) void;
 extern "c" fn TopExceptionScope__construct(?*anyopaque, JSContextRef, [*:0]const u8, [*:0]const u8, c_uint, usize, usize) void;
 extern "c" fn TopExceptionScope__pureException(?*anyopaque) ?*anyopaque;
 extern "c" fn TopExceptionScope__exceptionIncludingTraps(?*anyopaque) ?*anyopaque;
@@ -2395,6 +2404,67 @@ pub fn main() void {
     JSGlobalObject__clearTerminationException(foreign_context);
     TopExceptionScope__assertNoException(&foreign_scope);
 
+    const heap_before = JSC__VM__heapSize(vm);
+    const block_before = JSC__VM__blockBytesAllocated(vm);
+    if (heap_before == 0 or block_before != heap_before or
+        JSC__VM__heapSize(sibling_vm) != heap_before or
+        JSC__VM__externalMemorySize(vm) != 0 or
+        JSC__VM__heapSize(null) != 0 or
+        JSC__VM__blockBytesAllocated(null) != 0 or
+        JSC__VM__externalMemorySize(null) != 0)
+        fail("private VM initial heap accounting mismatch");
+
+    JSC__VM__reportExtraMemory(sibling_vm, 4096);
+    if (JSC__VM__heapSize(vm) != heap_before or
+        JSC__VM__blockBytesAllocated(vm) != heap_before + 4096 or
+        JSC__VM__externalMemorySize(vm) != 0 or
+        JSC__VM__blockBytesAllocated(foreign_vm) == std.math.maxInt(usize))
+        fail("private VM extra/external memory accounting mismatch");
+    JSC__VM__reportExtraMemory(foreign_vm, std.math.maxInt(usize));
+    JSC__VM__reportExtraMemory(foreign_vm, 1);
+    if (JSC__VM__blockBytesAllocated(foreign_vm) != std.math.maxInt(usize) or
+        JSC__VM__blockBytesAllocated(vm) != heap_before + 4096)
+        fail("private VM saturating/foreign memory accounting mismatch");
+
+    const idle_promise = JSC__JSValue__createInternalPromise(context);
+    exposeCell(context, "__private_idle_promise", idle_promise);
+    _ = evaluate(context, "globalThis.__private_idle_done = 0; __private_idle_promise.then(() => { __private_idle_done = 1; });");
+    var idle_state = PromiseCallbackState{ .value = .undefined };
+    JSC__AnyPromise__wrap(context, idle_promise, &idle_state, promiseCallback);
+    const global_value = EncodedValue.fromBits(@intFromPtr(JSContextGetGlobalObject(context) orelse fail("private VM global lookup failed")));
+    if (getNumberProperty(context, global_value, "__private_idle_done") != 0)
+        fail("private VM idle work ran before checkpoint");
+    JSC__VM__performOpportunisticallyScheduledTasks(vm, 0);
+    if (getNumberProperty(context, global_value, "__private_idle_done") != 0)
+        fail("private VM zero-duration checkpoint ran work");
+    JSC__VM__collectAsync(sibling_vm);
+    JSC__VM__performOpportunisticallyScheduledTasks(vm, 1);
+    if (getNumberProperty(context, global_value, "__private_idle_done") != 1 or idle_state.calls != 1)
+        fail("private VM opportunistic checkpoint mismatch");
+
+    const heap_after_checkpoint = JSC__VM__heapSize(vm);
+    if (JSC__VM__runGC(vm, false) != heap_after_checkpoint or
+        JSC__VM__runGC(sibling_vm, true) != JSC__VM__heapSize(vm))
+        fail("private VM full collection result mismatch");
+    JSC__VM__releaseWeakRefs(vm);
+    JSC__VM__shrinkFootprint(sibling_vm);
+    JSC__VM__collectAsync(null);
+    JSC__VM__performOpportunisticallyScheduledTasks(null, 1);
+    JSC__VM__releaseWeakRefs(null);
+    JSC__VM__reportExtraMemory(null, 1);
+    JSC__VM__shrinkFootprint(null);
+    if (JSC__VM__runGC(null, true) != 0)
+        fail("private VM null collection mismatch");
+
+    JSC__VM__throwError(vm, context, EncodedValue.fromInt32(207));
+    JSC__VM__collectAsync(vm);
+    JSC__VM__performOpportunisticallyScheduledTasks(vm, 1);
+    JSC__VM__releaseWeakRefs(vm);
+    JSC__VM__shrinkFootprint(vm);
+    const preserved_gc_exception = JSGlobalObject__tryTakeException(context);
+    if (JSC__Exception__asJSValue(preserved_gc_exception.cellPointer()) != EncodedValue.fromInt32(207))
+        fail("private VM collection replaced pending exception");
+
     TopExceptionScope__clearException(null);
     TopExceptionScope__assertNoException(null);
     TopExceptionScope__destruct(null);
@@ -2405,5 +2475,5 @@ pub fn main() void {
         TopExceptionScope__exceptionIncludingTraps(&verification_scope) != null)
         fail("private TopExceptionScope destruction mismatch");
 
-    std.debug.print("Home private value shims: 136/136 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 145/145 symbols linked; runtime matrix passed\n", .{});
 }

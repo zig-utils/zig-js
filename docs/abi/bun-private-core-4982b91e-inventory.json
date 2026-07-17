@@ -83,8 +83,8 @@
     },
     "by_status": {
       "external": 1,
-      "implemented": 146,
-      "pending": 290
+      "implemented": 155,
+      "pending": 281
     }
   },
   "home_comparison": {
@@ -2514,10 +2514,10 @@
       "line": 192,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__VM__blockBytesAllocated(vm: *VM) usize;",
       "declaration_sha256": "e587123f52e537d4c399e3126c443c66eba63b6c700d8bf7bcdefb8cabcde5fc",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__VM__clearExecutionTimeLimit",
@@ -2547,10 +2547,10 @@
       "line": 89,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__VM__collectAsync(vm: *VM) void;",
       "declaration_sha256": "b2364d48db4b8d91b1686d84b47f9f54835037cd945f6846208dd04875df6109",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__VM__create",
@@ -2624,10 +2624,10 @@
       "line": 187,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__VM__externalMemorySize(vm: *VM) usize;",
       "declaration_sha256": "662f341eaa7ef4ca2182151f3cf2f7eaa095972c3101e58ddeba0d2caa2f49bd",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__VM__getAPILock",
@@ -2668,10 +2668,10 @@
       "line": 84,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__VM__heapSize(vm: *VM) usize;",
       "declaration_sha256": "3664550befdb5dfebf99dce6c54cf01b2fd90efa2614ee91bad95036b7c0ec9e",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__VM__holdAPILock",
@@ -2745,10 +2745,10 @@
       "line": 200,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__VM__performOpportunisticallyScheduledTasks(vm: *VM, until: f64) void;",
       "declaration_sha256": "c2c1c6732a9406097f7ecbf454efa2cf96b05000771661ba597d1b603f70c790",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__VM__releaseAPILock",
@@ -2767,10 +2767,10 @@
       "line": 175,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__VM__releaseWeakRefs(vm: *VM) void;",
       "declaration_sha256": "5db757c3a9baa47bd10e0d9bfe7c03227f53d8838c760a74aede25033f6daff6",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__VM__reportExtraMemory",
@@ -2778,10 +2778,10 @@
       "line": 58,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__VM__reportExtraMemory(*VM, usize) void;",
       "declaration_sha256": "ced3df728ff95fa20ae0134f81f607106bbd953b2c30cba2c61c83ba4b66a665",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__VM__runGC",
@@ -2789,10 +2789,10 @@
       "line": 79,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__VM__runGC(vm: *VM, sync: bool) usize;",
       "declaration_sha256": "21353e337f351bc5da2ff10ed927d0cd54ff2fdf096d5b0418dd8c78be6c0ad4",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__VM__setControlFlowProfiler",
@@ -2833,10 +2833,10 @@
       "line": 72,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__VM__shrinkFootprint(vm: *VM) void;",
       "declaration_sha256": "b412af6c38e7e2b12388b173228b9198fd80804cf6254557a51cbde531a1eb30",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__VM__throwError",

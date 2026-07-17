@@ -263,6 +263,8 @@ const CContextGroup = struct {
     termination_exception: ?*Boxed = null,
     termination_requested: std.atomic.Value(bool) = .init(false),
     execution_forbidden: std.atomic.Value(bool) = .init(false),
+    reported_extra_memory: std.atomic.Value(usize) = .init(0),
+    async_gc_requested: std.atomic.Value(bool) = .init(false),
 
     fn retain(self: *CContextGroup) bool {
         var current = self.ref_count.load(.monotonic);
@@ -4158,6 +4160,103 @@ export fn JSC__VM__setExecutionForbidden(vm_ref: ?*anyopaque, forbidden: bool) c
     _ = forbidden; // Pinned JSC binding ignores the argument and only sets true.
     const group = privateGroupFromVM(vm_ref) orelse return;
     group.execution_forbidden.store(true, .release);
+}
+
+fn privateSaturatingAddAtomic(value_: *std.atomic.Value(usize), amount: usize) void {
+    var current = value_.load(.monotonic);
+    while (true) {
+        const next = std.math.add(usize, current, amount) catch std.math.maxInt(usize);
+        if (value_.cmpxchgWeak(current, next, .acq_rel, .monotonic)) |observed| {
+            current = observed;
+        } else return;
+    }
+}
+
+fn privateSaturatingAdd(left: usize, right: usize) usize {
+    return std.math.add(usize, left, right) catch std.math.maxInt(usize);
+}
+
+fn privateVMExternalMemory(group: *CContextGroup) usize {
+    var total = @atomicLoad(usize, &group.primary.gc_array_buffer_bytes_live, .acquire);
+    for (group.contexts.items) |context| {
+        total = privateSaturatingAdd(
+            total,
+            @atomicLoad(usize, &context.gc_array_buffer_bytes_live, .acquire),
+        );
+    }
+    return total;
+}
+
+fn privateDrainMicrotasks(context: *Context) void {
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch return;
+    defer context.popActiveInterpreter(&machine);
+    machine.drainMicrotasks() catch |err| privateSetPendingAbrupt(context, &machine, err);
+}
+
+fn privateRunFullCollection(group: *CContextGroup) usize {
+    group.async_gc_requested.store(false, .release);
+    group.primary.collectGarbage();
+    if (group.collection_epoch != std.math.maxInt(u64)) group.collection_epoch += 1;
+    const accounting = group.primary.runtimeHeapAccounting();
+    return accounting.last_full_collection_bytes;
+}
+
+export fn JSC__VM__blockBytesAllocated(vm_ref: ?*anyopaque) callconv(.c) usize {
+    const group = privateGroupFromVM(vm_ref) orelse return 0;
+    const heap_bytes = group.primary.runtimeHeapAccounting().live_bytes;
+    return privateSaturatingAdd(heap_bytes, group.reported_extra_memory.load(.acquire));
+}
+
+export fn JSC__VM__collectAsync(vm_ref: ?*anyopaque) callconv(.c) void {
+    const group = privateGroupFromVM(vm_ref) orelse return;
+    group.async_gc_requested.store(true, .release);
+    group.primary.requestGarbageCollection();
+}
+
+export fn JSC__VM__externalMemorySize(vm_ref: ?*anyopaque) callconv(.c) usize {
+    const group = privateGroupFromVM(vm_ref) orelse return 0;
+    return privateVMExternalMemory(group);
+}
+
+export fn JSC__VM__heapSize(vm_ref: ?*anyopaque) callconv(.c) usize {
+    const group = privateGroupFromVM(vm_ref) orelse return 0;
+    return group.primary.runtimeHeapAccounting().live_bytes;
+}
+
+export fn JSC__VM__performOpportunisticallyScheduledTasks(vm_ref: ?*anyopaque, until: f64) callconv(.c) void {
+    const group = privateGroupFromVM(vm_ref) orelse return;
+    if (std.math.isNan(until) or until <= 0) return;
+    if (group.async_gc_requested.load(.acquire)) _ = privateRunFullCollection(group);
+    privateDrainMicrotasks(group.primary);
+    for (group.contexts.items) |context| {
+        if (context.c_api_ref_count.load(.acquire) != 0) privateDrainMicrotasks(context);
+    }
+}
+
+export fn JSC__VM__releaseWeakRefs(vm_ref: ?*anyopaque) callconv(.c) void {
+    const group = privateGroupFromVM(vm_ref) orelse return;
+    _ = privateRunFullCollection(group);
+}
+
+export fn JSC__VM__reportExtraMemory(vm_ref: ?*anyopaque, bytes: usize) callconv(.c) void {
+    const group = privateGroupFromVM(vm_ref) orelse return;
+    privateSaturatingAddAtomic(&group.reported_extra_memory, bytes);
+}
+
+export fn JSC__VM__runGC(vm_ref: ?*anyopaque, sync: bool) callconv(.c) usize {
+    _ = sync; // Both pinned paths complete one full collection before returning.
+    const group = privateGroupFromVM(vm_ref) orelse return 0;
+    return privateRunFullCollection(group);
+}
+
+export fn JSC__VM__shrinkFootprint(vm_ref: ?*anyopaque) callconv(.c) void {
+    const group = privateGroupFromVM(vm_ref) orelse return;
+    _ = privateRunFullCollection(group);
 }
 
 export fn JSGlobalObject__tryTakeException(global: JSContextRef) callconv(.c) EncodedValue {
