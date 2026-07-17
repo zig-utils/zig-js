@@ -26,10 +26,10 @@ compile-link-runtime fixture. It remains deliberately separate from private
 Home/Bun ABI work.
 
 Private-profile exports are audited independently and never inflate the public
-or extension totals. The pinned Home inventory currently reports 226
-private exports and 205 pending private symbols; `zig build test-home-private-abi` and
+or extension totals. The pinned Home inventory currently reports 227
+private exports and 204 pending private symbols; `zig build test-home-private-abi` and
 `zig build test-private-jstype` are their focused compile-link-runtime gates.
-The 226 cover JSC64 identity, cell equality,
+The 227 cover JSC64 identity, cell equality,
 truthiness, int32 extraction, exact signed/unsigned 64-bit BigInt construction,
 modulo-2^64 BigInt extraction with the pinned int32/Int52 fallbacks, and exact
 JavaScript strict/SameValue equality across primitives and owned cells, plus
@@ -110,6 +110,10 @@ The proxy internal-field export reads the target/handler slots without invoking
 traps, produces `null` for both after revocation, and rejects invalid field or
 non-proxy inputs. VM-wide canonical private object handles preserve exact raw
 EncodedJSValue identity when an existing object is projected again.
+Script execution contexts receive lazy, process-unique nonzero `u32` IDs from
+an atomic allocator. IDs remain stable for a context, distinguish sibling
+realms, tolerate parallel independent creation, and leave pending exceptions
+untouched.
 Three fast built-in reads pin every byte-table entry and distinguish direct
 data, own-slot, and Object.prototype-cutoff lookup. Bun's fourth core-only
 `code` inquiry is deliberately pure: inherited data is visible, while
@@ -225,7 +229,7 @@ exact identity, insertion order, live size, sibling values, and failure-atomic
 foreign-VM rejection. The shared FFI slow paths perform exact signed/unsigned
 modulo-2^64 conversion for validated heap BigInts. CommonAbortReason conversion
 creates fresh selected-realm TimeoutError/AbortError DOMExceptions with the
-pinned messages and legacy codes. The combined 225-symbol fixture also
+pinned messages and legacy codes. The combined 226-symbol fixture also
 covers sibling realms, foreign-VM failures, exception clearing, callback
 reentrancy, and already-settled targets.
 
