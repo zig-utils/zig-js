@@ -311,6 +311,22 @@ int main(void)
                       releasedNativeObject == nil,
                   58))
             return 58;
+        JSContext *foreignContext = [JSContext new];
+        BOOL crossVMValueRejected = NO;
+        @try {
+            [JSValue valueWithObject:nativeWrapper inContext:foreignContext];
+        } @catch (NSException *exception) {
+            crossVMValueRejected = [exception.name isEqualToString:NSInvalidArgumentException];
+        }
+        BOOL crossVMManagedRejected = NO;
+        @try {
+            [foreignContext.virtualMachine addManagedReference:managedPrimitive
+                                                     withOwner:owner];
+        } @catch (NSException *exception) {
+            crossVMManagedRejected = [exception.name isEqualToString:NSInvalidArgumentException];
+        }
+        if (check(crossVMValueRejected && crossVMManagedRejected, 59))
+            return 59;
     }
     return 0;
 }
