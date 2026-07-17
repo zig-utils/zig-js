@@ -44,7 +44,7 @@ convention. The exact current denominator is:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #163 | 432 (71 implemented, 361 pending) |
+| Private JSC/Bun/WebCore ABI under #163 | 432 (78 implemented, 354 pending) |
 | Overlap with zig-js's completed public C target | 15 |
 | Platform libc import | 1 |
 | **Total** | **448** |
@@ -60,7 +60,7 @@ zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"
 ```
 
 This inventory is the denominator, not a claim that the whole surface works.
-The first seventy-one private entries are implemented; the other 361 remain pending
+The first seventy-eight private entries are implemented; the other 354 remain pending
 until #163 provides their type/layout contracts, shims, and consumer evidence.
 
 Home revisions `5e829ad483bb9e5ccb19766997df6462edd8e167`,
@@ -131,7 +131,7 @@ It covers empty/immediate/int32/double/NaN/negative-zero behavior, boxed
 empty/nonempty strings, object identity/truthiness, signed minimum and unsigned
 maximum BigInts, negative modulo extraction, exact number fallbacks, and every
 invalid/non-exact boundary. Public accounting stays unchanged at 117 functions
-and 19 extensions; these seventy-one symbols are reported only as private profile
+and 19 extensions; these seventy-eight symbols are reported only as private profile
 exports.
 
 The opaque BigInt cell slice additionally exports `JSC__JSBigInt__fromJS`, the
@@ -246,7 +246,11 @@ returned Errors or pending callback exceptions into rejections, whereas
 `AnyPromise__wrap` settles an existing Promise through normal resolution and
 therefore assimilates thenables and rejects self-resolution. Invalid or
 foreign-VM inputs fail safely, callback exceptions are cleared exactly once,
-and already-settled targets remain unchanged. The 69-symbol combined runtime
+and already-settled targets remain unchanged. The Home-only JSMap slice adds all
+seven direct native operations. It creates selected-realm Map cells and bypasses
+mutable userland prototypes while preserving SameValueZero keys, exact stored
+identity, insertion/reinsertion order, live size, sibling values, foreign-VM
+failure atomicity, and first-exception behavior. The 76-symbol combined runtime
 fixture covers these semantics; the two profile-selected JSType exports retain
 their separate Home/Bun runtime fixtures.
 
