@@ -10994,6 +10994,12 @@ pub const Interpreter = struct {
                 if (arrayIndex(key)) |i| if (i < utf16LenOfString(p.asStr())) return false;
             }
         }
+        if (o.hostClassHooks()) |hooks| if (hooks.delete) |delete| {
+            switch (try delete(@ptrCast(self), o, key)) {
+                .unhandled => {},
+                .accepted => |accepted| return accepted,
+            }
+        };
         // Accessor property.
         switch (try o.deleteAccessorOwn(self.arena, key)) {
             .absent => {},

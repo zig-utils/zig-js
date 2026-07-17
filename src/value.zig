@@ -51,6 +51,11 @@ pub const HostClassSetResult = union(enum) {
     accepted: bool,
 };
 
+pub const HostClassDeleteResult = union(enum) {
+    unhandled,
+    accepted: bool,
+};
+
 /// Type-erased essential-internal-method bridge for embedding-defined classes.
 /// The Interpreter pointer is opaque here to avoid a value/interpreter import
 /// cycle; C-API implementations cast it back at the boundary.
@@ -58,6 +63,7 @@ pub const HostClassHooks = struct {
     get: ?*const fn (*anyopaque, *Object, []const u8) HostError!HostClassGetResult = null,
     set: ?*const fn (*anyopaque, *Object, []const u8, Value) HostError!HostClassSetResult = null,
     has: ?*const fn (*anyopaque, *Object, []const u8) HostError!bool = null,
+    delete: ?*const fn (*anyopaque, *Object, []const u8) HostError!HostClassDeleteResult = null,
     attributes: ?*const fn (*anyopaque, *Object, []const u8) HostError!?PropAttr = null,
     own_keys: ?*const fn (*anyopaque, *Object) HostError![]const []const u8 = null,
 };

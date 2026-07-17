@@ -414,6 +414,37 @@ fn staticValueHas(
     };
 }
 
+fn classDelete(
+    raw_machine: *anyopaque,
+    object: *Object,
+    key: []const u8,
+) value.HostError!value.HostClassDeleteResult {
+    const machine: *interp.Interpreter = @ptrCast(@alignCast(raw_machine));
+    const target = try classCallbackTarget(machine, object);
+    var class: ?*CClass = target.class;
+    while (class) |item| : (class = item.parent) {
+        if (item.definition.delete_property) |callback| {
+            const property_name = try callbackPropertyName(key);
+            defer JSStringRelease(property_name);
+            var exception: JSValueRef = null;
+            const handled = callback(
+                @ptrCast(target.context),
+                target.object_ref,
+                property_name,
+                &exception,
+            );
+            try applyCallbackException(machine, target.context, exception);
+            if (handled) return .{ .accepted = true };
+        }
+        for (item.static_values) |entry| {
+            const name = entry.name orelse continue;
+            if (!std.mem.eql(u8, std.mem.span(name), key)) continue;
+            return .{ .accepted = (entry.attributes & kJSPropertyAttributeDontDelete) == 0 };
+        }
+    }
+    return .unhandled;
+}
+
 fn staticValueAttributes(
     raw_machine: *anyopaque,
     object: *Object,
@@ -456,6 +487,7 @@ const c_api_class_hooks: value.HostClassHooks = .{
     .get = staticValueGet,
     .set = staticValueSet,
     .has = staticValueHas,
+    .delete = classDelete,
     .attributes = staticValueAttributes,
     .own_keys = staticValueOwnKeys,
 };

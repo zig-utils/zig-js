@@ -58,6 +58,27 @@ static bool static_set_true(JSContextRef context, JSObjectRef object,
     return true;
 }
 
+static int delete_callback_calls;
+static int parent_delete_callback_calls;
+static bool class_delete(JSContextRef context, JSObjectRef object,
+    JSStringRef property_name, JSValueRef* exception)
+{
+    (void)object;
+    ++delete_callback_calls;
+    if (JSStringIsEqualToUTF8CString(property_name, "throw")) {
+        *exception = JSValueMakeNumber(context, 99);
+        return false;
+    }
+    return JSStringIsEqualToUTF8CString(property_name, "handled");
+}
+static bool parent_class_delete(JSContextRef context, JSObjectRef object,
+    JSStringRef property_name, JSValueRef* exception)
+{
+    (void)context; (void)object; (void)exception;
+    ++parent_delete_callback_calls;
+    return JSStringIsEqualToUTF8CString(property_name, "parent");
+}
+
 static int print_json_string(JSStringRef string)
 {
     char bytes[512];
@@ -176,10 +197,12 @@ int main(void)
         { "y", static_get_stored, static_set_true, kJSPropertyAttributeNone },
         { "z", static_get_null, NULL, kJSPropertyAttributeNone },
         { "hidden", static_get_seven, NULL, kJSPropertyAttributeDontEnum },
+        { "locked", static_get_seven, NULL, kJSPropertyAttributeDontDelete },
         { NULL, NULL, NULL, 0 }
     };
     JSClassDefinition value_definition = kJSClassDefinitionEmpty;
     value_definition.staticValues = static_values;
+    value_definition.deleteProperty = class_delete;
     JSClassRef value_class = JSClassCreate(&value_definition);
     JSObjectRef value_object = JSObjectMake(context, value_class, NULL);
     JSStringRef x_name = JSStringCreateWithUTF8CString("x");
@@ -211,7 +234,7 @@ int main(void)
     fputc('\n', stdout);
     JSStringRelease(js_static_string);
     JSValueRef js_static_keys = evaluate(context,
-        "JSON.stringify([Object.keys(valueObject),valueObject.propertyIsEnumerable('x'),valueObject.propertyIsEnumerable('hidden'),valueObject.propertyIsEnumerable('z')])");
+        "JSON.stringify([Object.keys(valueObject).sort(),valueObject.propertyIsEnumerable('x'),valueObject.propertyIsEnumerable('hidden'),valueObject.propertyIsEnumerable('z')])");
     JSStringRef js_static_keys_string = JSValueToStringCopy(context, js_static_keys, &exception);
     fputs("static-keys ", stdout);
     if (!js_static_keys_string || !print_json_string(js_static_keys_string))
@@ -226,8 +249,58 @@ int main(void)
         return 6;
     fputc('\n', stdout);
     JSStringRelease(js_static_descriptors_string);
+    JSValueRef js_static_delete = evaluate(context,
+        "JSON.stringify([delete valueObject.x,valueObject.x,Object.hasOwn(valueObject,'x'),delete valueObject.locked,valueObject.locked,Object.hasOwn(valueObject,'locked'),delete valueObject.z,Object.hasOwn(valueObject,'z'),Reflect.ownKeys(valueObject).sort()])");
+    JSStringRef js_static_delete_string = JSValueToStringCopy(context, js_static_delete, &exception);
+    fputs("static-delete ", stdout);
+    if (!js_static_delete_string || !print_json_string(js_static_delete_string))
+        return 7;
+    fputc('\n', stdout);
+    JSStringRelease(js_static_delete_string);
+    printf("static-delete-callbacks %d\n", delete_callback_calls);
     JSStringRelease(x_name); JSStringRelease(y_name); JSStringRelease(z_name);
     JSClassRelease(value_class);
+
+    JSClassDefinition delete_parent_definition = kJSClassDefinitionEmpty;
+    delete_parent_definition.deleteProperty = parent_class_delete;
+    JSClassRef delete_parent_class = JSClassCreate(&delete_parent_definition);
+    JSClassDefinition delete_definition = kJSClassDefinitionEmpty;
+    delete_definition.parentClass = delete_parent_class;
+    delete_definition.deleteProperty = class_delete;
+    delete_callback_calls = 0;
+    parent_delete_callback_calls = 0;
+    JSClassRef delete_class = JSClassCreate(&delete_definition);
+    JSClassRelease(delete_parent_class);
+    JSObjectRef delete_object = JSObjectMake(context, delete_class, NULL);
+    JSStringRef handled_name = JSStringCreateWithUTF8CString("handled");
+    JSStringRef fallback_name = JSStringCreateWithUTF8CString("fallback");
+    JSStringRef parent_name = JSStringCreateWithUTF8CString("parent");
+    JSStringRef throw_name = JSStringCreateWithUTF8CString("throw");
+    JSObjectSetProperty(context, delete_object, handled_name,
+        JSValueMakeNumber(context, 1), kJSPropertyAttributeNone, &exception);
+    JSObjectSetProperty(context, delete_object, fallback_name,
+        JSValueMakeNumber(context, 2), kJSPropertyAttributeNone, &exception);
+    JSObjectSetProperty(context, delete_object, parent_name,
+        JSValueMakeNumber(context, 3), kJSPropertyAttributeNone, &exception);
+    JSObjectSetProperty(context, delete_object, throw_name,
+        JSValueMakeNumber(context, 4), kJSPropertyAttributeNone, &exception);
+    int handled_deleted = JSObjectDeleteProperty(context, delete_object, handled_name, &exception);
+    int fallback_deleted = JSObjectDeleteProperty(context, delete_object, fallback_name, &exception);
+    int parent_deleted = JSObjectDeleteProperty(context, delete_object, parent_name, &exception);
+    exception = NULL;
+    int throw_deleted = JSObjectDeleteProperty(context, delete_object, throw_name, &exception);
+    printf("class-delete %d %d %d %d %d %d %d %d %d %d %.0f\n",
+        handled_deleted, fallback_deleted, parent_deleted, throw_deleted,
+        JSObjectHasProperty(context, delete_object, handled_name),
+        JSObjectHasProperty(context, delete_object, fallback_name),
+        JSObjectHasProperty(context, delete_object, parent_name),
+        JSObjectHasProperty(context, delete_object, throw_name),
+        delete_callback_calls, parent_delete_callback_calls,
+        JSValueToNumber(context, exception, NULL));
+    exception = NULL;
+    JSStringRelease(handled_name); JSStringRelease(fallback_name);
+    JSStringRelease(parent_name); JSStringRelease(throw_name);
+    JSClassRelease(delete_class);
 
     JSObjectRef prototype = JSObjectMake(context, NULL, NULL);
     JSObjectRef object = JSObjectMake(context, NULL, NULL);
